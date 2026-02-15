@@ -12,12 +12,12 @@
 class AsioBlacklist
 {
 public:
-    void loadFromFile (const juce::File& file)
+    bool loadFromFile (const juce::File& file) noexcept
     {
         blacklist.clear();
 
         if (! file.existsAsFile())
-            return;
+            return false;
 
         juce::StringArray lines;
         file.readLines (lines);
@@ -31,13 +31,19 @@ public:
 
             blacklist.add (line);
         }
+        return true;
     }
 
     bool isBlacklisted (const juce::String& deviceName) const
     {
         for (auto& b : blacklist)
-            if (deviceName.containsIgnoreCase (b))
+        {
+            // より正確な比較のために、文字列全体が一致するか確認 (More robust string comparison)
+            //if (deviceName.containsIgnoreCase (b)) //original
+            if (deviceName.equalsIgnoreCase(b)) // Corrected
+
                 return true;
+        }
 
         return false;
     }

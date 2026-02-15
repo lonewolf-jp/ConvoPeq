@@ -9,6 +9,7 @@
 #include <complex>
 #include <utility>
 #include <cstring>
+#include <limits>
 
 // Forward declaration
 static juce::AudioBuffer<float> convertToMinimumPhase(const juce::AudioBuffer<float>& linearIR, juce::Thread* thread = nullptr, bool* wasCancelled = nullptr);
@@ -37,8 +38,9 @@ public:
 
     void run() override
     {
-        juce::AudioBuffer<float> loadedIR;
-        double loadedSR = 0.0;
+        // IRデータ
+        juce::AudioBuffer<float> loadedIR; // IRデータ
+        double loadedSR = 0.0;             // サンプルレート
 
         // 1. IRデータの取得 (ファイル読み込み or メモリコピー)
         if (isRebuild)
@@ -56,9 +58,26 @@ public:
 
             if (!reader) return;
 
-            loadedIR.setSize(static_cast<int>(reader->numChannels), static_cast<int>(reader->lengthInSamples));
-            reader->read(&loadedIR, 0, static_cast<int>(reader->lengthInSamples), 0, true, true);
-            loadedSR = reader->sampleRate;
+             // ✅ 修正: サイズの妥当性チェック (lengthInSamples が int の範囲を超える場合への対策)
+            const int64 fileLength = reader->lengthInSamples;
+            const int numChannels = static_cast<int>(reader->numChannels);
+            static constexpr int64 MAX_FILE_LENGTH = 2147483647;  // int の最大値
+
+            if (fileLength > MAX_FILE_LENGTH) {
+                DBG("LoaderThread: ファイルサイズが大きすぎます。");
+                return;
+            }
+
+           // ✅ try-catch でメモリ確保エラーをハンドリング
+            try
+            {
+                loadedIR.setSize(numChannels, static_cast<int>(fileLength));
+                reader->read(&loadedIR, 0, static_cast<int>(fileLength), 0, true, true);
+                loadedSR = reader->sampleRate;
+            }
+            catch (const std::bad_alloc&) {
+                DBG("LoaderThread: IRファイル読み込み中のメモリ確保に失敗しました。");
+            }
         }
 
         if (threadShouldExit() || loadedIR.getNumSamples() == 0) return;
@@ -66,21 +85,39 @@ public:
         // 1.5. リサンプリング (SR不一致の場合)
         // IRのサンプルレートがターゲットと異なる場合、ピッチズレを防ぐためにリサンプリングする
         if (loadedSR > 0.0 && sampleRate > 0.0 && std::abs(loadedSR - sampleRate) > 1.0)
-        {
+{
             const double ratio = loadedSR / sampleRate;
-            const int newLength = static_cast<int>(std::ceil(loadedIR.getNumSamples() * (sampleRate / loadedSR)));
-            juce::AudioBuffer<float> resampled(loadedIR.getNumChannels(), newLength);
 
-            juce::LagrangeInterpolator interpolator;
-            for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
-            {
-                resampled.clear(ch, 0, newLength); // processは加算するためクリア必須
-                interpolator.reset();
-                interpolator.process(ratio, loadedIR.getReadPointer(ch), resampled.getWritePointer(ch), newLength);
+            // ✅ オーバーフローチェック
+            const int64 newLength64 = static_cast<int64>(std::ceil(loadedIR.getNumSamples() * (sampleRate / loadedSR)));
+            static constexpr int64 MAX_RESAMPLED_LENGTH = 3840000;
+
+            if (newLength64 > MAX_RESAMPLED_LENGTH || newLength64 > std::numeric_limits<int>::max()) {
+                DBG("LoaderThread: リサンプル後の長さが大きすぎます (" << newLength64 << ")");
+                return;
             }
 
-            loadedIR = std::move(resampled); // Move semantics to avoid copy
-            loadedSR = sampleRate;
+             const int newLength = static_cast<int>(newLength64);
+
+            try
+            {
+                juce::AudioBuffer<float> resampled(loadedIR.getNumChannels(), newLength);
+
+                juce::LagrangeInterpolator interpolator;
+                for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
+                {
+                    resampled.clear(ch, 0, newLength); // processは加算するためクリア必須
+                    interpolator.reset();
+                    interpolator.process(ratio, loadedIR.getReadPointer(ch), resampled.getWritePointer(ch), newLength);
+                }
+                loadedIR = std::move(resampled); // Move semantics to avoid copy
+                loadedSR = sampleRate;
+            }
+            catch (const std::bad_alloc&)
+            {
+                DBG("LoaderThread: Memory allocation failed during resampling");
+                return;
+            }
         }
 
         // 2. ピーク正規化 (ファイル読み込み時のみ)
@@ -672,6 +709,7 @@ std::shared_ptr<juce::dsp::Convolution> ConvolverProcessor::createConfiguredConv
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = sampleRate;
     spec.maximumBlockSize = static_cast<juce::uint32>(maxBlockSize);
+
     spec.numChannels = 2;
     conv->prepare(spec);
 
@@ -943,7 +981,7 @@ void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
         {
             const juce::ScopedLock sl(irFileLock);
             fileToLoad = currentIrFile;
-        }
+    }
         if (fileToLoad.existsAsFile())
         {
             loadImpulseResponse(fileToLoad);

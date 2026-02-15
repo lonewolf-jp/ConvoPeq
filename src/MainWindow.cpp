@@ -233,9 +233,9 @@ void MainWindow::toggleDeviceSelector()
 
         auto newSettingsWindow = std::make_unique<SettingsWindow> ("Audio Settings", background, DocumentWindow::allButtons);
         newSettingsWindow->setResizable (true, false);
-        newSettingsWindow->setResizeLimits (400, 400, 800, 600);
+        newSettingsWindow->setResizeLimits (400, 400, 800, 1000); // 最大高さを拡張
         newSettingsWindow->setContentNonOwned (deviceSettings.get(), false);
-        newSettingsWindow->centreWithSize (500, 400);
+        newSettingsWindow->centreWithSize (500, 520);
 
         newSettingsWindow->onClose = [this]
         {

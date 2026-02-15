@@ -202,7 +202,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     rebuild(sampleRate, safeBufferSize);
 
     currentSampleRate.store(static_cast<int>(sampleRate));
-
+    uiConvolverProcessor.setBypass(convBypassActive.load (std::memory_order_relaxed));
     audioFifo.reset();
 
     // ===== bypass 状態の初期化 =====

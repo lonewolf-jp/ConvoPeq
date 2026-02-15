@@ -174,6 +174,7 @@ void DeviceSettings::applyAsioBlacklist (juce::AudioDeviceManager& deviceManager
 
     if (originalAsio != nullptr)
     {
+
         // 配列から削除するが、オブジェクトは削除しない (false指定)
         availableTypes.removeObject (originalAsio, false);
 

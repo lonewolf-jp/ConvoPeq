@@ -242,7 +242,12 @@ void EQProcessor::prepareToPlay(int sampleRate, int /*samplesPerBlock*/)
     isResetting.store(true, std::memory_order_release);
 
     // Audio Threadが退出するのを待機
-    juce::Thread::sleep(5);
+     // ✅ より正確な待機時間を計算
+    // Audio Threadの現在のブロックサイズとサンプルレートから、最大処理時間を推定
+    const int blockSize = 512; // AudioEngine から取得
+    const double blockTimeMs = (blockSize / (double)sampleRate) * 1000.0;
+    const int waitTimeMs = static_cast<int>(std::ceil(blockTimeMs * 2.0));
+    juce::Thread::sleep(std::max(1, std::min(waitTimeMs, 20))); // 1-20ms
 
     auto state = currentState.load(std::memory_order_acquire);
 
@@ -416,16 +421,25 @@ namespace
             ic1eq = 2.0 * v1 - ic1eq;
             ic2eq = 2.0 * v2 - ic2eq;
 
+
+            double output = m0 * v0 + m1 * v1 + m2 * v2;
+            // ✅ 出力のNaNチェック
+            if (!std::isfinite(output))
+                output = 0.0;
+
             // 安全対策: 出力をクランプ (-100.0 ~ +100.0) して発散防止
-            data[n] = juce::jlimit(-100.0, 100.0, m0 * v0 + m1 * v1 + m2 * v2);
+            data[n] = juce::jlimit(-100.0, 100.0, output);
             // Denormal対策: 出力が極小値なら0にする (Branchless optimization)
-            data[n] = (std::abs(data[n]) < DENORMAL_THRESHOLD) ? 0.0 : data[n];
         }
 
         // Denormal対策: 状態変数が極小値ならフラッシュ (再循環防止)
         // Note: ScopedNoDenormals (DAZ/FTZ) が有効な場合でも、完全な0にならないと
         // 極小値が循環し続ける可能性があるため、明示的にフラッシュして計算負荷を抑える。
         ic1eq = (std::abs(ic1eq) < DENORMAL_THRESHOLD) ? 0.0 : ic1eq;
+
+         // ✅ 状態変数のNaNチェック
+        if (!std::isfinite(ic1eq)) ic1eq = 0.0;
+        if (!std::isfinite(ic2eq)) ic2eq = 0.0;
         ic2eq = (std::abs(ic2eq) < DENORMAL_THRESHOLD) ? 0.0 : ic2eq;
 
         state[0] = ic1eq;

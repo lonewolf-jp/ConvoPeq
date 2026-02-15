@@ -88,7 +88,12 @@ void SpectrumAnalyzerComponent::timerCallback()
     }
 
     // ── FFTデータの取得とスムーシング ──
-    if (engine.getFifoNumReady() >= OVERLAP_SAMPLES)
+     // ✅ FIFOの利用可能データ数をチェック
+    const int available = engine.getFifoNumReady();
+    const int required = OVERLAP_SAMPLES;
+
+    // データ不足 → スキップ (データ不足の場合は何もしない)
+    if (available >= required)
     {
         // 1. 既存データを左にシフト (古いデータを破棄)
         std::memmove(fftTimeDomainBuffer.data(),
