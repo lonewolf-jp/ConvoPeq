@@ -1,0 +1,108 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Kill Previous Instance",
+            "type": "shell",
+            "command": "cmd",
+            "args": [
+               "/C",
+                "taskkill /F /IM \"ConvoPeq.exe\" >nul 2>&1 || exit 0"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: Configure",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-B",
+                "${workspaceFolder}/build",
+                "-G",
+                "Visual Studio 17 2022",
+                "-A",
+                "x64"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: Build (Release)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build",
+                "--config",
+                "Release"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$msCompile"],
+            "dependsOn": ["Kill Previous Instance"]
+        },
+        {
+            "label": "CMake: Build (Debug)",
+            "type": "shell",
+            "command": "cmd",
+            "args": [
+                "/C",
+                "if not exist build (cmake -B build -G \\\"Visual Studio 17 2022\\\" -A x64) & cmake --build build --config Debug"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": ["$msCompile"],
+            "dependsOn": ["Kill Previous Instance"]
+        },
+        {
+            "label": "CMake: Clean",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build",
+                "--target",
+                "clean"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Application",
+            "type": "shell",
+            "command": "\"${workspaceFolder}/build/ConvoPeq_artefacts/Release/ConvoPeq.exe\"",
+            "options": {
+                "cwd": "${workspaceFolder}/build/ConvoPeq_artefacts/Release"
+            },
+            "dependsOn": ["CMake: Build (Release)"],
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: Clean Rebuild (Debug)",
+            "type": "shell",
+            "command": "cmd",
+            "args": [
+                "/C",
+                "if exist build (rmdir /s /q build) & cmake -B build -G \\\"Visual Studio 17 2022\\\" -A x64 && cmake --build build --config Debug"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": ["$msCompile"],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        }
+    ]
+}

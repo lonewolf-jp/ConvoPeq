@@ -1,0 +1,34 @@
+# Build directories
+build/
+
+# Visual Studio / MSVC
+.vs/
+out/
+*.user
+*.suo
+*.ipch
+*.aps
+*.sdf
+*.opensdf
+
+# VS Code (Optional: commit settings if you want to share tasks/launch config)
+# .vscode/
+
+# Binary output
+*.exe
+*.dll
+*.lib
+*.pdb
+*.obj
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# JUCE (If you want users to provide their own JUCE)
+JUCE/
+
+# OS Files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,358 @@
+//============================================================================
+// MainWindow.cpp  ── v0.1 (JUCE 8.0.12対応)
+//
+// メインウィンドウの実装
+// UIコンポーネントの配置とオーディオデバイス管理を行う
+//============================================================================
+#include "MainWindow.h"
+
+namespace
+{
+    class SettingsWindow : public juce::DocumentWindow
+    {
+    public:
+
+        SettingsWindow (const juce::String& name, juce::Colour backgroundColour, int buttons)
+            : DocumentWindow (name, backgroundColour, buttons)
+        {
+            setUsingNativeTitleBar (true);
+        }
+
+        void closeButtonPressed() override
+        {
+            if (onClose)
+                onClose();
+
+            setVisible (false);
+        }
+
+        std::function<void()> onClose;
+    };
+
+    // バージョン情報を表示するコンポーネント
+    class AboutComponent : public juce::Component
+    {
+    public:
+        AboutComponent()
+        {
+            setSize (400, 200);
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (juce::Colours::darkgrey);
+
+            auto area = getLocalBounds().reduced (20);
+
+            g.setColour (juce::Colours::white);
+            g.setFont (juce::FontOptions (24.0f, juce::Font::bold));
+            g.drawText (juce::String(ProjectInfo::projectName), area.removeFromTop (40), juce::Justification::centred);
+            g.setFont (juce::FontOptions (16.0f));
+            g.drawText ("Version " + juce::String(ProjectInfo::versionString), area.removeFromTop (30), juce::Justification::centred);
+            g.setColour (juce::Colours::lightgrey);
+            g.setFont (juce::FontOptions (14.0f));
+            g.drawText (juce::String(ProjectInfo::companyName), area.removeFromTop (20), juce::Justification::centred);
+            g.drawText ("Made with JUCE", area.removeFromBottom (20), juce::Justification::centredBottom);
+        }
+    };
+}
+
+//==============================================================================
+MainWindow::MainWindow (const juce::String& name)
+    : DocumentWindow (name,
+                      juce::Desktop::getInstance().getDefaultLookAndFeel()
+                          .findColour (juce::ResizableWindow::backgroundColourId),
+                      DocumentWindow::allButtons)
+{
+    setUsingNativeTitleBar (true);
+    setResizable (true, true);
+    setResizeLimits (720, 700, 10000, 10000);
+    setSize (960, 920);
+
+    // ── ASIO Blacklist 初期化 ──
+    auto exeDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
+    auto blacklistFile = exeDir.getChildFile ("asio_blacklist.txt");
+
+    // デフォルトのブラックリストファイルを作成（存在しない場合）
+    // シングルクライアントASIOや不安定なドライバをデフォルトで除外
+    if (! blacklistFile.existsAsFile())
+    {
+        blacklistFile.replaceWithText ("# ASIO Driver Blacklist\n"
+                                       "# Add partial driver names to exclude them from the list.\n"
+                                       "BRAVO-HD\n"
+                                       "ASIO4ALL\n"
+                                       "FlexASIO\n");
+    }
+
+    asioBlacklist.loadFromFile (blacklistFile);
+    DeviceSettings::applyAsioBlacklist (audioDeviceManager, asioBlacklist);
+
+    // 設定読み込み（ブラックリスト適用後に実行することで、除外されたデバイスの自動ロードを防ぐ）
+    loadSettings();
+
+    audioEngine.initialize();
+    audioSourcePlayer.setSource (&audioEngine);
+    audioEngine.addChangeListener (this);
+    audioDeviceManager.addAudioCallback (&audioSourcePlayer);
+
+    // Create UI Components
+    createUIComponents();
+
+    startTimer (5000);
+    setVisible (true);
+}
+
+MainWindow::~MainWindow()
+{
+    stopTimer();
+
+    DeviceSettings::saveSettings (audioDeviceManager);
+
+    audioEngine.removeChangeListener (this);
+    audioDeviceManager.removeAudioCallback (&audioSourcePlayer);
+    audioSourcePlayer.setSource (nullptr);
+
+    // アプリ終了時にASIOドライバを確実に閉じるための安全手順
+    audioDeviceManager.closeAudioDevice();
+
+    settingsWindow.reset();
+    deviceSettings.reset();
+    specAnalyzer.reset();
+    eqPanel.reset();
+    convolverPanel.reset();
+}
+
+void MainWindow::closeButtonPressed()
+{
+    juce::JUCEApplication::getInstance()->systemRequestedQuit();
+}
+
+void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
+{
+    if (source == &audioEngine)
+    {
+        if (eqPanel != nullptr)
+            eqPanel->updateAllControls();
+        if (convolverPanel != nullptr)
+            convolverPanel->updateIRInfo();
+    }
+}
+
+void MainWindow::createUIComponents()
+{
+    convolverPanel = std::make_unique<ConvolverControlPanel> (audioEngine);
+    eqPanel        = std::make_unique<EQControlPanel> (audioEngine);
+    specAnalyzer   = std::make_unique<SpectrumAnalyzerComponent> (audioEngine);
+
+    addAndMakeVisible (convolverPanel.get());
+    addAndMakeVisible (eqPanel.get());
+    addAndMakeVisible (specAnalyzer.get());
+
+    deviceSettings = std::make_unique<DeviceSettings> (audioDeviceManager);
+
+    showDeviceSelectorButton.setButtonText ("Audio Settings");
+    showDeviceSelectorButton.setColour (juce::TextButton::buttonColourId,
+                                      juce::Colours::darkslategrey.withAlpha (0.8f));
+    showDeviceSelectorButton.setColour (juce::TextButton::textColourOffId,
+                                      juce::Colours::white);
+    showDeviceSelectorButton.onClick = [this] { toggleDeviceSelector(); };
+    addAndMakeVisible (showDeviceSelectorButton);
+
+    // EQ On/Off Button
+    eqBypassButton.setButtonText ("EQ On");
+    eqBypassButton.setToggleState (true, juce::dontSendNotification);
+    eqBypassButton.onClick = [this]
+    {
+        const bool isOn = eqBypassButton.getToggleState();
+        audioEngine.setEqBypassRequested (!isOn);
+        eqBypassButton.setButtonText (isOn ? "EQ On" : "EQ Off");
+    };
+    addAndMakeVisible (eqBypassButton);
+
+    // Convolver On/Off Button
+    convolverBypassButton.setButtonText ("Conv On");
+    convolverBypassButton.setToggleState (true, juce::dontSendNotification);
+    convolverBypassButton.onClick = [this]
+    {
+        const bool isOn = convolverBypassButton.getToggleState();
+        audioEngine.setConvolverBypassRequested (!isOn);
+        convolverBypassButton.setButtonText (isOn ? "Conv On" : "Conv Off");
+    };
+    addAndMakeVisible (convolverBypassButton);
+
+    // Processing Order Button
+    orderButton.setButtonText ("Order: Conv -> EQ");
+    orderButton.onClick = [this]
+    {
+        if (audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::ConvolverThenEQ)
+        {
+            audioEngine.setProcessingOrder (AudioEngine::ProcessingOrder::EQThenConvolver);
+            orderButton.setButtonText ("Order: EQ -> Conv");
+        }
+        else
+        {
+            audioEngine.setProcessingOrder (AudioEngine::ProcessingOrder::ConvolverThenEQ);
+            orderButton.setButtonText ("Order: Conv -> EQ");
+        }
+    };
+    addAndMakeVisible (orderButton);
+
+    // Save/Load Buttons
+    saveButton.setButtonText ("Save");
+    saveButton.onClick = [this] { savePreset(); };
+    addAndMakeVisible (saveButton);
+
+    loadButton.setButtonText ("Load");
+    loadButton.onClick = [this] { loadPreset(); };
+    addAndMakeVisible (loadButton);
+
+    // CPU Usage Label
+    cpuUsageLabel.setText ("CPU: --%", juce::dontSendNotification);
+    cpuUsageLabel.setJustificationType (juce::Justification::centredRight);
+    cpuUsageLabel.setColour (juce::Label::textColourId, juce::Colours::white);
+    addAndMakeVisible (cpuUsageLabel);
+
+    // About Button
+    aboutButton.setButtonText ("?");
+    aboutButton.setTooltip ("About this application");
+    aboutButton.onClick = [this] { showAboutDialog(); };
+    addAndMakeVisible (aboutButton);
+}
+
+void MainWindow::loadSettings()
+{
+    DeviceSettings::loadSettings (audioDeviceManager);
+}
+
+void MainWindow::toggleDeviceSelector()
+{
+    if (settingsWindow == nullptr)
+    {
+        auto background = juce::Desktop::getInstance().getDefaultLookAndFeel()
+                              .findColour (juce::ResizableWindow::backgroundColourId);
+
+        auto newSettingsWindow = std::make_unique<SettingsWindow> ("Audio Settings", background, DocumentWindow::allButtons);
+        newSettingsWindow->setResizable (true, false);
+        newSettingsWindow->setResizeLimits (400, 300, 800, 600);
+        newSettingsWindow->setContentNonOwned (deviceSettings.get(), false);
+        newSettingsWindow->centreWithSize (500, 400);
+
+        newSettingsWindow->onClose = [this]
+        {
+            showDeviceSelectorButton.setButtonText ("Audio Settings");
+        };
+
+        settingsWindow = std::move (newSettingsWindow);
+    }
+
+    if (settingsWindow->isVisible())
+    {
+        settingsWindow->userTriedToCloseWindow();
+    }
+    else
+    {
+        settingsWindow->setVisible (true);
+        settingsWindow->toFront (true);
+        showDeviceSelectorButton.setButtonText ("Hide Settings");
+    }
+}
+
+void MainWindow::resized()
+{
+    auto bounds = getLocalBounds();
+
+    auto buttonRow = bounds.removeFromTop (28);
+    aboutButton.setBounds (buttonRow.removeFromRight (30).reduced (2, 2));
+    showDeviceSelectorButton.setBounds (buttonRow.removeFromRight (140).reduced (2, 2));
+    orderButton.setBounds (buttonRow.removeFromRight (160).reduced (2, 2));
+    loadButton.setBounds (buttonRow.removeFromRight (50).reduced (2, 2));
+    saveButton.setBounds (buttonRow.removeFromRight (50).reduced (2, 2));
+    convolverBypassButton.setBounds (buttonRow.removeFromRight (80).reduced (2, 2));
+    eqBypassButton.setBounds (buttonRow.removeFromRight (80).reduced (2, 2));
+    cpuUsageLabel.setBounds (buttonRow.removeFromRight (80).reduced (2, 2));
+
+    if (convolverPanel)
+        convolverPanel->setBounds (bounds.removeFromTop (160));
+
+    const int eqH = static_cast<int> (bounds.getHeight() * 0.45f);
+    if (eqPanel)
+        eqPanel->setBounds (bounds.removeFromTop (eqH));
+
+    if (specAnalyzer)
+        specAnalyzer->setBounds (bounds);
+}
+
+void MainWindow::timerCallback()
+{
+    double cpu = audioDeviceManager.getCpuUsage() * 100.0;
+    cpuUsageLabel.setText ("CPU: " + juce::String (cpu, 1) + "%", juce::dontSendNotification);
+}
+
+void MainWindow::savePreset()
+{
+    launchFileChooser(true);
+}
+
+void MainWindow::loadPreset()
+{
+    launchFileChooser(false);
+}
+
+void MainWindow::launchFileChooser(bool isSaving)
+{
+    const juce::String title = isSaving ? "Save Preset" : "Load Preset";
+    const juce::String wildcards = isSaving ? "*.xml" : "*.xml;*.txt";
+    const int chooserFlags = isSaving ? (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles)
+                                      : (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles);
+
+    auto fileChooser = std::make_shared<juce::FileChooser>(title,
+                                                           juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                                                           wildcards);
+
+    fileChooser->launchAsync(chooserFlags, [this, isSaving, fileChooser](const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        if (file == juce::File())
+            return;
+
+        if (isSaving)
+        {
+            auto state = audioEngine.getCurrentState();
+            if (auto xml = state.createXml())
+            {
+                xml->writeTo(file);
+            }
+        }
+        else // isLoading
+        {
+            if (file.existsAsFile())
+            {
+                if (file.hasFileExtension(".xml"))
+                {
+                    if (auto xml = juce::XmlDocument::parse(file))
+                    {
+                        auto state = juce::ValueTree::fromXml(*xml);
+                        if (state.isValid())
+                            audioEngine.requestLoadState(state);
+                    }
+                }
+                else if (file.hasFileExtension(".txt"))
+                {
+                    audioEngine.requestEqPresetFromText(file);
+                }
+            }
+        }
+    });
+}
+
+void MainWindow::showAboutDialog()
+{
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned (new AboutComponent());
+    options.dialogTitle = "About " + juce::String(ProjectInfo::projectName);
+    options.dialogBackgroundColour = juce::Colours::darkgrey;
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    options.launchAsync();
+}

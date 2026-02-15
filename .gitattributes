@@ -1,0 +1,64 @@
+# Git Attributes for ConvoPeq
+# UTF-8エンコーディング保持設定
+
+# Windows バッチファイル (UTF-8 BOM保持)
+*.bat text eol=crlf working-tree-encoding=UTF-8
+
+# ビルドスクリプト
+build.bat text eol=crlf working-tree-encoding=UTF-8
+
+# シェルスクリプト (LF改行)
+*.sh text eol=lf
+
+# ソースコード (UTF-8, 改行コード自動)
+*.cpp text
+*.h text
+*.c text
+*.hpp text
+
+# CMake
+CMakeLists.txt text
+*.cmake text
+
+# ドキュメント
+*.md text
+*.txt text
+
+# バイナリファイル
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.a binary
+*.lib binary
+
+# オーディオファイル
+*.wav binary
+*.aif binary
+*.aiff binary
+*.flac binary
+*.mp3 binary
+
+# 画像ファイル
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+
+# アーカイブ
+*.zip binary
+*.tar.gz binary
+*.tgz binary
+
+# VS Code設定 (UTF-8)
+.vscode/*.json text eol=crlf
+
+# Visual Studio設定
+*.vcxproj text eol=crlf
+*.vcxproj.filters text eol=crlf
+*.sln text eol=crlf
+
+# 改行コード統一（プラットフォーム依存）
+# Windows: CRLF, Linux/Mac: LF
+* text=auto

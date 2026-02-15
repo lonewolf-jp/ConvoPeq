@@ -1,0 +1,29 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(Windows) Launch (Debug)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Debug",
+            "environment": [],
+            "console": "internalConsole",
+            "preLaunchTask": "CMake: Build (Debug)"
+        },
+        {
+            "name": "(Windows) Launch (Release)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Release",
+            "environment": [],
+            "console": "internalConsole",
+            "preLaunchTask": "CMake: Build (Release)"
+        }
+    ]
+}
