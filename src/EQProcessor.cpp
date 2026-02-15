@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <complex>
 #include <numeric>
+#include <cstring>
 
 //--------------------------------------------------------------
 // コンストラクタ
@@ -232,20 +233,24 @@ void EQProcessor::setState (const juce::ValueTree& v)
 //--------------------------------------------------------------
 void EQProcessor::prepareToPlay(int sampleRate, int /*samplesPerBlock*/)
 {
+    if (currentSampleRate == sampleRate)
+        return;
+
     currentSampleRate = sampleRate;
+
+    // ✅ 修正: Atomic フラグでガード
+    isResetting.store(true, std::memory_order_release);
+
+    // Audio Threadが退出するのを待機
+    juce::Thread::sleep(5);
 
     auto state = currentState.load(std::memory_order_acquire);
 
     smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
     smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(state->totalGainDb));
 
-    // フィルタ状態を全てゼロにリセット
-    // (古いサンプルレートで計算された遅延要素を使い続けると
-    //  音が不安定になる)
-    for (int ch = 0; ch < MAX_CHANNELS; ++ch)
-        for (int band = 0; band < NUM_BANDS; ++band)
-            for (int z = 0; z < 2; ++z)
-                filterState[ch][band][z] = 0.0;
+    // フィルタ状態をリセット
+    std::memset(filterState, 0, sizeof(filterState));
 
     agcCurrentGain = 1.0f;
     agcEnvInput    = 0.0f;
@@ -254,6 +259,8 @@ void EQProcessor::prepareToPlay(int sampleRate, int /*samplesPerBlock*/)
     // 係数を即座に再計算
     for (int i = 0; i < NUM_BANDS; ++i)
         updateBandNode(i);
+
+    isResetting.store(false, std::memory_order_release);
 }
 
 //--------------------------------------------------------------
@@ -409,8 +416,8 @@ namespace
             ic1eq = 2.0 * v1 - ic1eq;
             ic2eq = 2.0 * v2 - ic2eq;
 
-            // 安全対策: 出力をクランプ (-10.0 ~ +10.0) して発散防止
-            data[n] = juce::jlimit(-10.0, 10.0, m0 * v0 + m1 * v1 + m2 * v2);
+            // 安全対策: 出力をクランプ (-100.0 ~ +100.0) して発散防止
+            data[n] = juce::jlimit(-100.0, 100.0, m0 * v0 + m1 * v1 + m2 * v2);
             // Denormal対策: 出力が極小値なら0にする (Branchless optimization)
             data[n] = (std::abs(data[n]) < DENORMAL_THRESHOLD) ? 0.0 : data[n];
         }
@@ -523,6 +530,10 @@ bool EQProcessor::isBufferSilent(const juce::AudioBuffer<double>& buffer, int nu
 void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
 {
     juce::ScopedNoDenormals noDenormals;
+
+    // ✅ リセット中はスキップ
+    if (isResetting.load(std::memory_order_acquire))
+        return;
 
     // サイレンス最適化
     // 入力が無音の場合は処理をスキップし、CPU負荷を低減する

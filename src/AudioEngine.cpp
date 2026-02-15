@@ -224,7 +224,7 @@ void AudioEngine::rebuild(double sampleRate, int samplesPerBlock)
 
     // UIプロセッサから状態をコピー
     newDSP->eq.setState(uiEqProcessor.getState());
-    newDSP->convolver.setState(uiConvolverProcessor.getState());
+    newDSP->convolver.syncStateFrom(uiConvolverProcessor);
 
     // 準備
     newDSP->prepare(sampleRate, samplesPerBlock);
@@ -256,12 +256,8 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
     }
     else if (source == &uiConvolverProcessor)
     {
-        // Convolverの場合は内部でRCUを使用しているため、DSP全体のrebuildは不要
-        // 現在のDSPに新しい状態を同期させる
-        if (auto dsp = currentDSP.load())
-        {
-            dsp->convolver.syncStateFrom(uiConvolverProcessor);
-        }
+        // ✅ 修正: EQと同様にrebuildを使用
+        rebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
         sendChangeMessage();
     }
 }
@@ -569,13 +565,24 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             {
                 auto& dither = (ch == 0) ? ditherL : ditherR;
                 for (int i = 0; i < numSamples; ++i)
-                    dst[i] = dither.process(std::tanh(static_cast<float>(src[i])));
+                {
+                    float sample = static_cast<float>(src[i]);
+                    // ✅ 閾値ベースのソフトクリッピング (Option 1)
+                    if (std::abs(sample) > 0.8f)
+                        sample = std::tanh(sample);
+                    dst[i] = dither.process(sample);
+                }
             }
             else
             {
                 // その他のチャンネルは単純変換
                 for (int i = 0; i < numSamples; ++i)
-                    dst[i] = std::tanh(static_cast<float>(src[i]));
+                {
+                    float sample = static_cast<float>(src[i]);
+                    if (std::abs(sample) > 0.8f)
+                        sample = std::tanh(sample);
+                    dst[i] = sample;
+                }
             }
         }
         else

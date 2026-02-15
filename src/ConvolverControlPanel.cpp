@@ -234,6 +234,10 @@ void ConvolverControlPanel::updateIRInfo()
 {
     auto& convolver = engine.getConvolverProcessor();
 
+    // UIコントロールをプロセッサの状態と同期
+    mixSlider.setValue(convolver.getMix(), juce::dontSendNotification);
+    minPhaseButton.setToggleState(convolver.getUseMinPhase(), juce::dontSendNotification);
+
     if (convolver.isIRLoaded())
     {
         juce::String info = convolver.getIRName();

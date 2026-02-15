@@ -11,7 +11,7 @@
 #include <cstring>
 
 // Forward declaration
-static juce::AudioBuffer<float> convertToMinimumPhase(const juce::AudioBuffer<float>& linearIR, juce::Thread* thread = nullptr);
+static juce::AudioBuffer<float> convertToMinimumPhase(const juce::AudioBuffer<float>& linearIR, juce::Thread* thread = nullptr, bool* wasCancelled = nullptr);
 
 //--------------------------------------------------------------
 // LoaderThread クラス定義
@@ -118,16 +118,15 @@ public:
         // 4. MinPhase変換 (オプション)
         if (useMinPhase)
         {
-            auto minPhaseIR = convertToMinimumPhase(trimmed, this);
+            bool wasCancelled = false;
+            auto minPhaseIR = convertToMinimumPhase(trimmed, this, &wasCancelled);
+
+            if (wasCancelled) return;
 
             // 変換成功チェック: キャンセルされておらず、かつ無音でない場合のみ適用
             if (minPhaseIR.getNumSamples() > 0 && minPhaseIR.getMagnitude(0, 0, minPhaseIR.getNumSamples()) > 1.0e-5f)
             {
                 trimmed = minPhaseIR;
-            }
-            else if (threadShouldExit())
-            {
-                return;
             }
             // 変換に失敗または無音になった場合は、元のtrimmed(Linear Phase)を使用する
         }
@@ -157,11 +156,15 @@ public:
         // WeakReferenceを使って、Processorが削除されていたら実行しないようにする
         juce::WeakReference<ConvolverProcessor> weakOwner(&owner);
 
-        juce::MessageManager::callAsync([weakOwner, newConv, loadedIR = std::move(loadedIR), loadedSR, targetLength, isRebuild = this->isRebuild, file = this->file, displayIR = std::move(displayIR)]() mutable
+        // ✅ shared_ptrで管理 (Lambdaコピー時のAudioBufferディープコピー回避 & メモリ寿命管理)
+        auto loadedIRPtr = std::make_shared<juce::AudioBuffer<float>>(std::move(loadedIR));
+        auto displayIRPtr = std::make_shared<juce::AudioBuffer<float>>(std::move(displayIR));
+
+        juce::MessageManager::callAsync([weakOwner, newConv, loadedIRPtr, loadedSR, targetLength, isRebuild = this->isRebuild, file = this->file, displayIRPtr]()
         {
             if (weakOwner)
             {
-                weakOwner->applyNewState(newConv, loadedIR, loadedSR, targetLength, isRebuild, file, displayIR);
+                weakOwner->applyNewState(newConv, *loadedIRPtr, loadedSR, targetLength, isRebuild, file, *displayIRPtr);
             }
         });
     }
@@ -205,6 +208,9 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     currentBufferSize = samplesPerBlock;
 
+    // ✅ 最初にサンプルレートを更新（oldValueを保存）
+    double oldSampleRate = currentSampleRate.exchange(sampleRate, std::memory_order_acq_rel);
+
     // ProcessSpec設定
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = sampleRate;
@@ -214,10 +220,9 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     currentSpec = spec;
 
     // サンプルレート変更検知とState再構築ロジック
-    bool needReload = false;
     if (isIRLoaded())
     {
-        if (std::abs(currentSampleRate.load() - sampleRate) > 1.0)
+        if (std::abs(oldSampleRate - sampleRate) > 1.0)
         {
             // サンプルレート変更時: 現在のStateは維持しつつ、裏で再構築をリクエストする
             // (音切れを防ぐため、再構築完了まで古いSRのまま動作させるか、あるいはクロスフェードさせるのが理想だが、
@@ -246,10 +251,6 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 conv->reset();
             }
         }
-    }
-    else
-    {
-        needReload = true;
     }
 
     // DelayLine準備
@@ -288,8 +289,10 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 //   計算誤差（特にexp時の発散や微小値の消失）を抑制します。
 //--------------------------------------------------------------
 // Note: この関数は LoaderThread (バックグラウンド) で実行されるため、FFTのメモリ確保や計算負荷はAudio Threadに影響しません。
-static juce::AudioBuffer<float> convertToMinimumPhase(const juce::AudioBuffer<float>& linearIR, juce::Thread* thread)
+static juce::AudioBuffer<float> convertToMinimumPhase(const juce::AudioBuffer<float>& linearIR, juce::Thread* thread, bool* wasCancelled)
 {
+    if (wasCancelled) *wasCancelled = false;
+
     const int numSamples = linearIR.getNumSamples();
     // ゼロパディングを含めて十分なサイズを確保 (4倍程度が安全)
     const int fftSize = juce::nextPowerOfTwo(numSamples * 4);
@@ -314,7 +317,11 @@ static juce::AudioBuffer<float> convertToMinimumPhase(const juce::AudioBuffer<fl
     for (int ch = 0; ch < linearIR.getNumChannels(); ++ch)
     {
         // キャンセルチェック
-        if (thread != nullptr && thread->threadShouldExit()) return {};
+        if (thread != nullptr && thread->threadShouldExit())
+        {
+            if (wasCancelled) *wasCancelled = true;
+            return {};
+        }
 
         // 1. IRをコピー (Realパート)
         const float* src = linearIR.getReadPointer(ch);
@@ -325,7 +332,11 @@ static juce::AudioBuffer<float> convertToMinimumPhase(const juce::AudioBuffer<fl
 
         // 2. FFT (Time -> Freq)
         fft.perform(fftDataFloat, fftDataFloat, false);
-        if (thread != nullptr && thread->threadShouldExit()) return {};
+        if (thread != nullptr && thread->threadShouldExit())
+        {
+            if (wasCancelled) *wasCancelled = true;
+            return {};
+        }
 
         // Doubleへ変換
         for (int i = 0; i < fftSize; ++i)
@@ -348,7 +359,11 @@ static juce::AudioBuffer<float> convertToMinimumPhase(const juce::AudioBuffer<fl
 
         // 4. IFFT (Freq -> Time) => 実ケプストラム (Real Cepstrum)
         fft.perform(fftDataFloat, fftDataFloat, true);
-        if (thread != nullptr && thread->threadShouldExit()) return {};
+        if (thread != nullptr && thread->threadShouldExit())
+        {
+            if (wasCancelled) *wasCancelled = true;
+            return {};
+        }
 
         // Doubleへ変換 & スケーリング
         for (int i = 0; i < fftSize; ++i)
@@ -372,7 +387,11 @@ static juce::AudioBuffer<float> convertToMinimumPhase(const juce::AudioBuffer<fl
 
         // 6. FFT (Time -> Freq) => 解析信号の対数スペクトル (実部が対数振幅、虚部が最小位相)
         fft.perform(fftDataFloat, fftDataFloat, false);
-        if (thread != nullptr && thread->threadShouldExit()) return {};
+        if (thread != nullptr && thread->threadShouldExit())
+        {
+            if (wasCancelled) *wasCancelled = true;
+            return {};
+        }
 
         // Doubleへ変換
         for (int i = 0; i < fftSize; ++i)
@@ -395,7 +414,11 @@ static juce::AudioBuffer<float> convertToMinimumPhase(const juce::AudioBuffer<fl
 
         // 8. IFFT (Freq -> Time) => 時間領域の最小位相IR
         fft.perform(fftDataFloat, fftDataFloat, true);
-        if (thread != nullptr && thread->threadShouldExit()) return {};
+        if (thread != nullptr && thread->threadShouldExit())
+        {
+            if (wasCancelled) *wasCancelled = true;
+            return {};
+        }
 
         // 9. 結果をコピー
         float* dst = minPhaseIR.getWritePointer(ch);
@@ -463,14 +486,18 @@ void ConvolverProcessor::applyNewState(std::shared_ptr<juce::dsp::Convolution> n
     {
         originalIR = loadedIR;
         originalIRSampleRate = loadedSR;
-        currentIrFile = file;
+        {
+            const juce::ScopedLock sl(irFileLock);
+            currentIrFile = file;
+        }
         irName = file.getFileNameWithoutExtension();
     }
 
     // スナップショット更新 (表示用)
     // LoaderThreadで計算済みの displayIR (trimmed & min-phased) を使用
     createWaveformSnapshot(displayIR);
-    createFrequencyResponseSnapshot(displayIR, originalIRSampleRate);
+    // ✅ 修正: 表示用には現在のサンプルレートを使用 (loadedSRはリサンプリング後のレート)
+    createFrequencyResponseSnapshot(displayIR, loadedSR);
 
     // 安全に差し替え (Atomic Swap)
     auto oldConv = convolution.exchange(newConv);
@@ -606,18 +633,23 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     if (fftSize < 512) fftSize = 512;
 
     juce::dsp::FFT fft(static_cast<int>(std::log2(fftSize)));
-    std::vector<float> fftData(fftSize * 2, 0.0f);
+
+    // ✅ キャッシュされたバッファを再利用 (メモリ確保のオーバーヘッド削減)
+    if (cachedFFTBuffer.size() < static_cast<size_t>(fftSize * 2))
+        cachedFFTBuffer.resize(static_cast<size_t>(fftSize * 2));
+
+    std::fill(cachedFFTBuffer.begin(), cachedFFTBuffer.end(), 0.0f);
 
     // チャンネル0 (Lch) の特性を使用する
     const float* src = irBuffer.getReadPointer(0);
     const int copyLen = std::min(numSamples, fftSize);
-    std::memcpy(fftData.data(), src, copyLen * sizeof(float));
+    std::memcpy(cachedFFTBuffer.data(), src, copyLen * sizeof(float));
 
-    fft.performFrequencyOnlyForwardTransform(fftData.data());
+    fft.performFrequencyOnlyForwardTransform(cachedFFTBuffer.data());
 
     // スムーシング適用 (Linear Magnitudeに対して行う)
     const int numBins = fftSize / 2 + 1;
-    std::vector<float> linearMags(fftData.begin(), fftData.begin() + numBins);
+    std::vector<float> linearMags(cachedFFTBuffer.begin(), cachedFFTBuffer.begin() + numBins);
     applySmoothing(linearMags, fftSize);
 
     // マグニチュード(dB)に変換して格納
@@ -662,7 +694,11 @@ juce::ValueTree ConvolverProcessor::getState() const
     juce::ValueTree v ("Convolver");
     v.setProperty ("mix", mixTarget.load(), nullptr);
     v.setProperty ("bypassed", bypassed.load(), nullptr);
-    v.setProperty ("irPath", currentIrFile.getFullPathName(), nullptr);
+    v.setProperty ("useMinPhase", useMinPhase.load(), nullptr);
+    {
+        const juce::ScopedLock sl(irFileLock);
+        v.setProperty ("irPath", currentIrFile.getFullPathName(), nullptr);
+    }
     return v;
 }
 
@@ -670,6 +706,7 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
 {
     if (v.hasProperty ("mix")) setMix (v.getProperty ("mix"));
     if (v.hasProperty ("bypassed")) setBypass (v.getProperty ("bypassed"));
+    if (v.hasProperty ("useMinPhase")) setUseMinPhase (v.getProperty ("useMinPhase"));
 
     // IRパスの自動復元はここでは行いません。
     // AudioEngine::rebuild時にsetStateが呼ばれた際の無限ループや二重読み込みを防ぐため、
@@ -690,16 +727,21 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
 void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
 {
     // パラメータの同期
-    mixTarget.store(other.mixTarget.load());
-    bypassed.store(other.bypassed.load());
-    useMinPhase.store(other.useMinPhase.load());
+    mixTarget.store(other.mixTarget.load(), std::memory_order_release);
+    bypassed.store(other.bypassed.load(), std::memory_order_release);
+    useMinPhase.store(other.useMinPhase.load(), std::memory_order_release);
 
     // Convolutionオブジェクトの同期 (Atomic)
-    auto otherConv = other.convolution.load();
-    auto currentConv = convolution.load();
+    auto otherConv = other.convolution.load(std::memory_order_acquire);
+    auto expectedConv = convolution.load(std::memory_order_acquire);
 
-    if (otherConv != currentConv)
-        convolution.store(otherConv);
+    if (otherConv != expectedConv)
+    {
+        // Compare-and-swap で安全に更新
+        convolution.compare_exchange_strong(expectedConv, otherConv,
+                                           std::memory_order_acq_rel,
+                                           std::memory_order_acquire);
+    }
 }
 
 //--------------------------------------------------------------
@@ -746,10 +788,11 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
         return;
     }
 
-    const int numChannels = buffer.getNumChannels();
+    // ✅ 修正: processBufferのチャンネル数を使用 (最大2ch)
+    const int procChannels = std::min(buffer.getNumChannels(), 2);
 
     // ── Step 3: バッファサイズ安全対策 (Bounds Check) ──
-    if (numSamples <= 0 || numChannels == 0 || numSamples > dryBuffer.getNumSamples() || numSamples > convolutionBuffer.getNumSamples())
+    if (numSamples <= 0 || procChannels == 0 || numSamples > dryBuffer.getNumSamples() || numSamples > convolutionBuffer.getNumSamples())
         return;
 
     // ── Step 4: パラメータ更新と最適化 ──
@@ -766,8 +809,8 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
     if (needsDrySignal)
     {
         // Dry信号をdryBufferにコピーし、レイテンシー分遅延
-        juce::dsp::AudioBlock<const double> inputBlock(buffer.getArrayOfReadPointers(), std::min(numChannels, 2), numSamples);
-        juce::dsp::AudioBlock<double> outputBlock(dryBuffer.getArrayOfWritePointers(), std::min(numChannels, 2), numSamples);
+        juce::dsp::AudioBlock<const double> inputBlock(buffer.getArrayOfReadPointers(), procChannels, numSamples);
+        juce::dsp::AudioBlock<double> outputBlock(dryBuffer.getArrayOfWritePointers(), procChannels, numSamples);
         juce::dsp::ProcessContextNonReplacing<double> delayContext(inputBlock, outputBlock);
         delayLine.process(delayContext);
     }
@@ -776,7 +819,7 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
     if (needsConvolution)
     {
         // Convolutionはfloatのみ対応のため、double -> float変換
-        for (int ch = 0; ch < std::min(numChannels, 2); ++ch)
+        for (int ch = 0; ch < procChannels; ++ch)
         {
             const double* src = buffer.getReadPointer(ch);
             float* dst = convolutionBuffer.getWritePointer(ch);
@@ -784,7 +827,8 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
                 dst[i] = static_cast<float>(src[i]);
         }
 
-        juce::dsp::AudioBlock<float> block(convolutionBuffer.getArrayOfWritePointers(), std::min(numChannels, 2), numSamples);
+        // convolutionBufferの実際のチャンネル数（2）を使用
+        juce::dsp::AudioBlock<float> block(convolutionBuffer.getArrayOfWritePointers(), 2, numSamples);
         juce::dsp::ProcessContextReplacing<float> context(block);
 
         conv->process(context);
@@ -796,12 +840,12 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
     // ── Step 7: Dry/Wet Mix ──
     if (!needsConvolution) // 100% Dry
     {
-        for (int ch = 0; ch < std::min(numChannels, 2); ++ch)
+        for (int ch = 0; ch < procChannels; ++ch)
             buffer.copyFrom(ch, 0, dryBuffer, ch, 0, numSamples);
     }
     else if (!needsDrySignal) // 100% Wet
     {
-        for (int ch = 0; ch < std::min(numChannels, 2); ++ch)
+        for (int ch = 0; ch < procChannels; ++ch)
         {
             const float* wetSrc = convolutionBuffer.getReadPointer(ch);
             double* dst = buffer.getWritePointer(ch);
@@ -812,24 +856,29 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
     else
     {
         // 0% < Mix < 100% または スムージング中
-        const float* wetL = convolutionBuffer.getReadPointer(0);
-        const double* dryL = dryBuffer.getReadPointer(0);
-        double* dstL = buffer.getWritePointer(0);
-
-        const float* wetR = (numChannels > 1) ? convolutionBuffer.getReadPointer(1) : nullptr;
-        const double* dryR = (numChannels > 1) ? dryBuffer.getReadPointer(1) : nullptr;
-        double* dstR = (numChannels > 1) ? buffer.getWritePointer(1) : nullptr;
-
         if (mixSmoother.isSmoothing())
         {
+            const float* wetPtrs[2] = { nullptr };
+            const double* dryPtrs[2] = { nullptr };
+            double* dstPtrs[2] = { nullptr };
+
+            for (int ch = 0; ch < procChannels; ++ch)
+            {
+                wetPtrs[ch] = convolutionBuffer.getReadPointer(ch);
+                dryPtrs[ch] = dryBuffer.getReadPointer(ch);
+                dstPtrs[ch] = buffer.getWritePointer(ch);
+            }
+
             for (int i = 0; i < numSamples; ++i)
             {
                 const double mixValue = static_cast<double>(mixSmoother.getNextValue());
                 const double wetGain = std::sin(mixValue * juce::MathConstants<double>::halfPi);
                 const double dryGain = std::cos(mixValue * juce::MathConstants<double>::halfPi);
 
-                dstL[i] = static_cast<double>(wetL[i]) * wetGain + dryL[i] * dryGain;
-                if (dstR) dstR[i] = static_cast<double>(wetR[i]) * wetGain + dryR[i] * dryGain;
+                for (int ch = 0; ch < procChannels; ++ch)
+                {
+                    dstPtrs[ch][i] = static_cast<double>(wetPtrs[ch][i]) * wetGain + dryPtrs[ch][i] * dryGain;
+                }
             }
         }
         else
@@ -838,10 +887,14 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
             const double wetGain = std::sin(mixValue * juce::MathConstants<double>::halfPi);
             const double dryGain = std::cos(mixValue * juce::MathConstants<double>::halfPi);
 
-            for (int i = 0; i < numSamples; ++i)
+            for (int ch = 0; ch < procChannels; ++ch)
             {
-                dstL[i] = static_cast<double>(wetL[i]) * wetGain + dryL[i] * dryGain;
-                if (dstR) dstR[i] = static_cast<double>(wetR[i]) * wetGain + dryR[i] * dryGain;
+                const float* wet = convolutionBuffer.getReadPointer(ch);
+                const double* dry = dryBuffer.getReadPointer(ch);
+                double* dst = buffer.getWritePointer(ch);
+
+                for (int i = 0; i < numSamples; ++i)
+                    dst[i] = static_cast<double>(wet[i]) * wetGain + dry[i] * dryGain;
             }
         }
     }
@@ -865,7 +918,12 @@ void ConvolverProcessor::rebuild(double sampleRate, int maxBlockSize, double irS
 void ConvolverProcessor::setMix(float mixAmount)
 {
     // 0.0 ~ 1.0 にクランプ
-    mixTarget.store(juce::jlimit(0.0f, 1.0f, mixAmount));
+    float newVal = juce::jlimit(0.0f, 1.0f, mixAmount);
+    if (std::abs(mixTarget.load() - newVal) > 1.0e-5f)
+    {
+        mixTarget.store(newVal);
+        sendChangeMessage();
+    }
 }
 
 float ConvolverProcessor::getMix() const
@@ -878,10 +936,17 @@ void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
     if (useMinPhase.load() != shouldUseMinPhase)
     {
         useMinPhase.store(shouldUseMinPhase);
+        sendChangeMessage();
+
         // 設定変更時にIRがロード済みなら再ロードして変換を適用
-        if (currentIrFile.existsAsFile())
+        juce::File fileToLoad;
         {
-            loadImpulseResponse(currentIrFile);
+            const juce::ScopedLock sl(irFileLock);
+            fileToLoad = currentIrFile;
+        }
+        if (fileToLoad.existsAsFile())
+        {
+            loadImpulseResponse(fileToLoad);
         }
     }
 }

@@ -142,9 +142,11 @@ private:
     std::vector<float> irMagnitudeSpectrum;
     double irSpectrumSampleRate = 0.0;
     juce::File currentIrFile;
+    juce::CriticalSection irFileLock;
     std::atomic<bool> currentIrOptimized { false };
     juce::AudioBuffer<float> originalIR; // 元IR保持 (リサンプリング/トリミング用)
     double originalIRSampleRate = 0.0;
+    std::vector<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     std::atomic<double> currentSampleRate { 48000.0 };
 
     //----------------------------------------------------------

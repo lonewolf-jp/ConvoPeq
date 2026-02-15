@@ -250,7 +250,10 @@ private:
 
     // ── 現在のサンプルレート ──
     // prepareToPlay で更新。Audio Thread で係数再計算に使用。
-    int currentSampleRate{ 48000 };
+    int currentSampleRate{ 0 };
+
+    // ── リセットフラグ ──
+    std::atomic<bool> isResetting { false };
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
     void processAGC(juce::AudioBuffer<double>& buffer, int numSamples, const EQState& state);
