@@ -281,7 +281,7 @@ build\ConvoPeq_artefacts\Release\ConvoPeq.exe
 ## 📄 ライセンス
 
 JUCE フレームワークのライセンスに従います。
-詳細: <https://juce.com/juce-7-licence/>
+詳細: <https://juce.com/legal/juce-8-licence/>
 
 ### 本番環境使用不可
 
@@ -310,12 +310,12 @@ JUCE フレームワークのライセンスに従います。
 ### このプロジェクトでの実践
 
 - **全コードがAI生成**: C++のボイラープレート、JUCEの定型文、複雑なDSP計算式（Biquad/SVF係数計算など）などすべてAIが生成しました。
-- **人間は「監督」**: アプリケーションの稼働試験に集中しました。発現したしたバグや潜在的バグの原因特定はClaude for Windows、ChatGPT Desktopに自然言語で行い、結果をVS CodeのGemini Code Assistに読み込ませてソースコードの修正を行っています。
+- **人間は「監督」**: アプリケーションの稼働試験に集中しました。発現したバグや潜在的バグの原因特定はClaude for Windows、ChatGPT Desktopに自然言語で行い、結果をVS CodeのGemini Code Assistに読み込ませてソースコードの修正を行っています。
 - **高速なイテレーション**: 従来の数倍のスピードで機能実装とバグ修正を行っています。
 
 ### AIへの指示方法
 
-- **役割分担**: 複雑なロジックの考案やデバッグのヒントはClaude 3.5 SonnetやGPT-4oに依頼し、具体的なコーディングと実装はVS Code上のGemini Code Assistに任せるのが効率的です。
+- **役割分担**: 複雑なロジックの考案やデバッグのヒントはClaude 4.5 SonnetやChatGPTに依頼し、具体的なコーディングと実装はVS Code上のGemini Code Assistに任せるのが効率的です。
 - **コンテキストの重要性**: Gemini Code Assistを使用する際は、関連するソースファイルをタブで開いておくことで、AIがプロジェクトの構造を理解しやすくなります。
 - **エラー修正**: ビルドエラーが発生した場合、エラーメッセージをコピーして「このエラーを修正して」と指示するだけで、多くの場合正しい修正案が提示されます。
 
