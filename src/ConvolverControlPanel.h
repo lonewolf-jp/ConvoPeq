@@ -39,7 +39,7 @@ private:
     // UIコンポーネント
     //----------------------------------------------------------
     juce::TextButton loadIRButton{"Load IR..."};
-    juce::ToggleButton minPhaseButton{"Min Phase"};
+    juce::ComboBox phaseChoiceBox;
 
     juce::Slider mixSlider;
     juce::Label mixLabel;

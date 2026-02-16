@@ -39,9 +39,7 @@ public:
         for (auto& b : blacklist)
         {
             // より正確な比較のために、文字列全体が一致するか確認 (More robust string comparison)
-            //if (deviceName.containsIgnoreCase (b)) //original
-            if (deviceName.equalsIgnoreCase(b)) // Corrected
-
+            if (deviceName.equalsIgnoreCase(b))
                 return true;
         }
 

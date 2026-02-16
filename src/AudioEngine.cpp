@@ -227,7 +227,7 @@ void AudioEngine::rebuild(double sampleRate, int samplesPerBlock)
     newDSP->convolver.syncStateFrom(uiConvolverProcessor);
 
     // 準備
-    newDSP->prepare(sampleRate, samplesPerBlock);
+    newDSP->prepare(sampleRate, samplesPerBlock, ditherBitDepth.load());
 
     // Atomic Swap
     auto oldDSP = currentDSP.exchange(newDSP);
@@ -249,14 +249,14 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
     // UIプロセッサからの変更を現在のDSPに反映
     if (source == &uiEqProcessor)
     {
-        // EQの場合は構造変更の可能性があるため、安全にリビルドを行う (RCUパターン)
+        // EQの場合は構造変更の可能性があるため、安全にリビルドを行う
         rebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
         // DSPが有効な場合のみ変更通知を送る (デストラクタ競合回避)
         sendChangeMessage();
     }
     else if (source == &uiConvolverProcessor)
     {
-        // ✅ 修正: EQと同様にrebuildを使用
+        // EQと同様にrebuildを使用し、安全に状態を更新する
         rebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
         sendChangeMessage();
     }
@@ -341,7 +341,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 //--------------------------------------------------------------
 AudioEngine::DSPCore::DSPCore() = default;
 
-void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock)
+void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int bitDepth)
 {
     maxSamplesPerBlock = samplesPerBlock;
 
@@ -351,6 +351,10 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock)
 
     dcBlockerL.prepare(sampleRate);
     dcBlockerR.prepare(sampleRate);
+
+    // ディザの準備
+    ditherL.prepare(sampleRate, bitDepth);
+    ditherR.prepare(sampleRate, bitDepth);
 
     // バッファ確保 (Message Threadで実行されるため安全)
     processBuffer.setSize(2, samplesPerBlock);
@@ -545,6 +549,41 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     const int startSample = bufferToFill.startSample;
     const int procChannels = processBuffer.getNumChannels();
 
+    // クリッピングパラメータ定義 (一貫性のため)
+    constexpr double CLIP_THRESHOLD = 0.8;
+    constexpr double CLIP_KNEE = 0.1;
+    constexpr double CLIP_ASYMMETRY = 0.03; // わずかに非対称（偶数次倍音）
+    constexpr double CLIP_START = CLIP_THRESHOLD - CLIP_KNEE;
+
+    // 音楽的ソフトクリッピング関数
+    auto musicalSoftClip = [=](double x) noexcept -> double
+    {
+        const double abs_x = std::abs(x);
+
+        // 閾値以下はリニア
+        if (abs_x < CLIP_START)
+            return x;
+
+        const double sign = (x > 0.0) ? 1.0 : -1.0;
+
+        // ソフトニー領域 (ブレンド率計算)
+        double knee_shape = 1.0;
+        if (abs_x < CLIP_THRESHOLD + CLIP_KNEE)
+        {
+            // 3次多項式でスムーズなニー
+            const double t = (abs_x - CLIP_START) / (2.0 * CLIP_KNEE);
+            knee_shape = t * t * (3.0 - 2.0 * t); // Smoothstep
+        }
+
+        const double linear = abs_x;
+        // tanhによるソフトクリッピングカーブ
+        const double clipped = CLIP_THRESHOLD + CLIP_KNEE * std::tanh((abs_x - CLIP_THRESHOLD) / CLIP_KNEE);
+
+        // 非対称性の追加（真空管風）
+        const double asymmetric_factor = 1.0 + CLIP_ASYMMETRY * sign * knee_shape;
+        return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_factor;
+    };
+
     //----------------------------------------------------------
     // 出力バッファへコピー & ディザリング (Output & TPDF Dither)
     // 目的: double -> float/int 変換時の量子化歪みを低減。
@@ -555,7 +594,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         if (ch < procChannels)
         {
             // double (DSP) -> float (I/O) conversion
-            // ディザリング適用 (TPDF)
+            // ディザリング適用 (Psychoacoustic Noise Shaping)
             const double* src = processBuffer.getReadPointer(ch);
             float* dst = buffer->getWritePointer(ch, startSample);
 
@@ -566,22 +605,22 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                 auto& dither = (ch == 0) ? ditherL : ditherR;
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    float sample = static_cast<float>(src[i]);
-                    // ✅ 閾値ベースのソフトクリッピング (Option 1)
-                    if (std::abs(sample) > 0.8f)
-                        sample = std::tanh(sample);
-                    dst[i] = dither.process(sample);
+                    double sample = src[i];
+                    // 音楽的ソフトクリッピング
+                    if (std::abs(sample) > CLIP_START) // 閾値より少し手前から処理開始
+                        sample = musicalSoftClip(sample);
+                    // ノイズシェーピング適用 (内部で24bit量子化も行われる)
+                    dst[i] = static_cast<float>(dither.process(sample));
                 }
             }
             else
             {
-                // その他のチャンネルは単純変換
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    float sample = static_cast<float>(src[i]);
-                    if (std::abs(sample) > 0.8f)
-                        sample = std::tanh(sample);
-                    dst[i] = sample;
+                    double sample = src[i];
+                    if (std::abs(sample) > CLIP_START)
+                        sample = musicalSoftClip(sample);
+                    dst[i] = static_cast<float>(sample);
                 }
             }
         }
@@ -648,4 +687,18 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.addChild (uiEqProcessor.getState(), -1, nullptr);
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
     return state;
+}
+
+void AudioEngine::setDitherBitDepth(int bitDepth)
+{
+    if (ditherBitDepth.load() != bitDepth)
+    {
+        ditherBitDepth.store(bitDepth);
+        rebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
+    }
+}
+
+int AudioEngine::getDitherBitDepth() const
+{
+    return ditherBitDepth.load();
 }

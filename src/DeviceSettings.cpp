@@ -89,8 +89,9 @@ private:
 };
 
 //==============================================================================
-DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm)
-    : audioDeviceManager (adm)
+DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engine)
+    : audioDeviceManager (adm),
+      audioEngine (engine)
 {
     selector.reset (new juce::AudioDeviceSelectorComponent (
         audioDeviceManager,
@@ -103,12 +104,37 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm)
     ));
 
     addAndMakeVisible (*selector);
+
+    // Dither Bit Depth Controls
+    addAndMakeVisible(bitDepthLabel);
+    bitDepthLabel.setText("Dither Bit Depth:", juce::dontSendNotification);
+    bitDepthLabel.setJustificationType(juce::Justification::centredLeft);
+
+    addAndMakeVisible(bitDepthComboBox);
+    bitDepthComboBox.addItem("16-bit", 1);
+    bitDepthComboBox.addItem("24-bit", 2);
+
+    // 初期値設定
+    int currentDepth = audioEngine.getDitherBitDepth();
+    bitDepthComboBox.setSelectedId(currentDepth == 16 ? 1 : 2, juce::dontSendNotification);
+
+    bitDepthComboBox.onChange = [this] {
+        int id = bitDepthComboBox.getSelectedId();
+        if (id == 1) audioEngine.setDitherBitDepth(16);
+        else if (id == 2) audioEngine.setDitherBitDepth(24);
+    };
 }
 
 void DeviceSettings::resized()
 {
+    auto bounds = getLocalBounds();
+    auto topRow = bounds.removeFromTop(30);
+
+    bitDepthLabel.setBounds(topRow.removeFromLeft(100).reduced(5));
+    bitDepthComboBox.setBounds(topRow.removeFromLeft(100).reduced(2));
+
     if (selector != nullptr)
-        selector->setBounds (getLocalBounds());
+        selector->setBounds (bounds);
 }
 
 juce::File DeviceSettings::getSettingsFile()
@@ -122,13 +148,17 @@ juce::File DeviceSettings::getSettingsFile()
     return appDataDir.getChildFile ("device_settings.xml");
 }
 
-void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager)
+void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager, const AudioEngine& engine)
 {
     if (auto xml = deviceManager.createStateXml())
+    {
+        // ビット深度設定を追加属性として保存
+        xml->setAttribute("ditherBitDepth", engine.getDitherBitDepth());
         xml->writeTo (getSettingsFile());
+    }
 }
 
-void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager)
+void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, AudioEngine& engine)
 {
     // ASIOフリーズ防止のため、初期化前にデバイスを閉じる
     deviceManager.closeAudioDevice();
@@ -142,6 +172,10 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager)
             // 保存された設定でデバイスを初期化する。
             // 入力は2チャンネル、出力は2チャンネルを要求する。
             deviceManager.initialise (2, 2, xml.get(), true);
+
+            // ビット深度設定の読み込み (デフォルト24bit)
+            int bitDepth = xml->getIntAttribute("ditherBitDepth", 24);
+            engine.setDitherBitDepth(bitDepth);
             return;
         }
     }
@@ -149,6 +183,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager)
     // 設定ファイルが存在しない、または読み込みに失敗した場合は、
     // デフォルトのデバイスで初期化する。
     deviceManager.initialiseWithDefaultDevices (2, 2);
+    engine.setDitherBitDepth(24);
 }
 
 void DeviceSettings::applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist)

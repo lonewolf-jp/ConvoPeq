@@ -12,7 +12,8 @@
 // ■ フィルタ実装:
 //   - TPT (Topology-Preserving Transform) SVF を使用
 //   - 時間変化に強く、係数変調時のノイズが少ない
-//   - Audio EQ Cookbook (RBJ) の式で係数を計算
+//   - SVF係数: Vadim Zavalishin "The Art of VA Filter Design" の式を元に計算
+//   - Biquad係数(UI描画用): Audio EQ Cookbook (RBJ) の式で計算
 //
 // ■ サンプルレート変更時:
 //   - prepareToPlay() で検知し、フィルタ状態をリセットする
@@ -231,12 +232,12 @@ private:
     // スムージング処理
     std::atomic<std::shared_ptr<EQState>> currentState;
 
-    float agcCurrentGain = 1.0f;
-    float agcEnvInput    = 0.0f;
-    float agcEnvOutput   = 0.0f;
+    double agcCurrentGain = 1.0;
+    double agcEnvInput    = 0.0;
+    double agcEnvOutput   = 0.0;
 
     // ── パラメータ補間 (Smoothing) ──
-    juce::SmoothedValue<float> smoothTotalGain;
+    juce::SmoothedValue<double> smoothTotalGain;
     static constexpr double SMOOTHING_TIME_SEC = 0.05; // 50ms
 
     // ── 係数管理 (Atomic Swap) ──
@@ -257,7 +258,7 @@ private:
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
     void processAGC(juce::AudioBuffer<double>& buffer, int numSamples, const EQState& state);
-    float calculateAGCGain(float inputEnv, float outputEnv) const noexcept;
+    double calculateAGCGain(double inputEnv, double outputEnv) const noexcept;
 
     // ── SVF係数計算 (Private Helpers) ──
     static EQCoeffsSVF calcLowShelfSVF (double freq, double gainDb, double q, double sr) noexcept;

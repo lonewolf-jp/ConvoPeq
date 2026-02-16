@@ -106,7 +106,7 @@ MainWindow::~MainWindow()
 {
     stopTimer();
 
-    DeviceSettings::saveSettings (audioDeviceManager);
+    DeviceSettings::saveSettings (audioDeviceManager, audioEngine);
 
     audioEngine.removeChangeListener (this);
     audioDeviceManager.removeAudioCallback (&audioSourcePlayer);
@@ -148,7 +148,7 @@ void MainWindow::createUIComponents()
     addAndMakeVisible (eqPanel.get());
     addAndMakeVisible (specAnalyzer.get());
 
-    deviceSettings = std::make_unique<DeviceSettings> (audioDeviceManager);
+    deviceSettings = std::make_unique<DeviceSettings> (audioDeviceManager, audioEngine);
 
     showDeviceSelectorButton.setButtonText ("Audio Settings");
     showDeviceSelectorButton.setColour (juce::TextButton::buttonColourId,
@@ -221,7 +221,7 @@ void MainWindow::createUIComponents()
 
 void MainWindow::loadSettings()
 {
-    DeviceSettings::loadSettings (audioDeviceManager);
+    DeviceSettings::loadSettings (audioDeviceManager, audioEngine);
 }
 
 void MainWindow::toggleDeviceSelector()

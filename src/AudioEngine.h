@@ -20,9 +20,11 @@
 #include <JuceHeader.h>
 #include <atomic>
 #include <cstring>
+#include <array>
 
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
+#include "PsychoacousticDither.h"
 
 class AudioEngine : public juce::AudioSource,
                   public juce::ChangeBroadcaster,
@@ -110,78 +112,68 @@ public:
     void setAnalyzerSource(AnalyzerSource source) { currentAnalyzerSource.store(source); }
     AnalyzerSource getAnalyzerSource() const { return currentAnalyzerSource.load(); }
 
+    void setDitherBitDepth(int bitDepth);
+    int getDitherBitDepth() const;
+
 private:
     //==============================================================================
     // 内部クラス定義
     //----------------------------------------------------------
-    // DC除去フィルタ (1次ハイパスフィルタ)
+    // DC除去フィルタ (4次バターワースハイパスフィルタ)
     // 目的: EQやConvolver処理で発生しうるDCオフセットを除去し、スピーカー保護とヘッドルーム確保を行う。
-    // 特徴: カットオフ周波数 ~5Hz。可聴域(20Hz~)での位相歪みは無視できるレベル。
-    // 実装: シンプルな1次IIRフィルタ (y[n] = alpha * (y[n-1] + x[n] - x[n-1]))
+    // 特徴: カットオフ周波数 3Hz。20Hz帯域の位相歪みを低減 (-24dB/oct)。
+    // 実装: JUCE IIR Filter (2次x2段)
     //----------------------------------------------------------
     class DCBlocker
     {
     public:
         void prepare(double sampleRate) noexcept
         {
-            // 1次ハイパスフィルタ (カットオフ ~5Hz)
-            // ref: https://www.dsprelated.com/showarticle/58.php
-            static constexpr double CUTOFF_FREQ = 5.0;
-            const double rc = 1.0 / (2.0 * juce::MathConstants<double>::pi * CUTOFF_FREQ);
-            alpha = rc / (rc + 1.0 / sampleRate);
-            reset();
+            // 4次バターワースハイパスフィルタ（3Hz、-24dB/oct）
+            // 20Hz帯域の位相歪みを低減
+            spec.sampleRate = sampleRate;
+            spec.maximumBlockSize = SAFE_MAX_BLOCK_SIZE;
+            spec.numChannels = 1;
+
+            // 2次バターワース × 2段 = 4次フィルタ
+            auto coeffs = juce::dsp::IIR::Coefficients<double>::makeHighPass(
+                sampleRate,
+                3.0,    // カットオフ周波数: 3Hz
+                0.707   // Q値（バターワース）
+            );
+
+            for (auto& filter : filters)
+            {
+                filter.coefficients = coeffs;
+                filter.prepare(spec);
+                filter.reset();
+            }
         }
 
-        void reset() noexcept { x1 = y1 = 0.0; }
+        void reset() noexcept
+        {
+            for (auto& filter : filters)
+                filter.reset();
+        }
 
         double process(double input) noexcept
         {
-            // y[n] = alpha * (y[n-1] + x[n] - x[n-1])
-            const double output = alpha * (y1 + input - x1);
-            x1 = input;
-            y1 = output;
+            double output = input;
 
-            // Denormal対策: 状態変数が極小値になったら0にする
+            // 2段縦続接続で4次特性を実現
+            for (auto& filter : filters)
+                output = filter.processSample(output);
+
+            // Denormal対策
             static constexpr double DENORMAL_THRESHOLD = 1.0e-15;
-            y1 = (std::abs(y1) < DENORMAL_THRESHOLD) ? 0.0 : y1;
-            x1 = (std::abs(x1) < DENORMAL_THRESHOLD) ? 0.0 : x1;
+            if (std::abs(output) < DENORMAL_THRESHOLD)
+                output = 0.0;
 
-            return y1;
+            return output;
         }
     private:
-        double alpha = 0.0, x1 = 0.0, y1 = 0.0;
-    };
-
-    //----------------------------------------------------------
-    // ディザリング (TPDF: Triangular Probability Density Function)
-    // 目的: 浮動小数点数(32/64bit)から整数フォーマット(16/24bit)へ変換する際の量子化歪みを低減する。
-    // 特徴: 三角分布の確率密度関数を持つノイズを加えることで、量子化誤差を信号に依存しないホワイトノイズに変調する。
-    // 効果: リバーブのテールなど、微小レベルの信号の消失を防ぎ、聴感上のS/N比を改善する。
-    //----------------------------------------------------------
-    class TPDFDither
-    {
-    public:
-        static constexpr int DEFAULT_BIT_DEPTH = 24;
-
-        TPDFDither() = default;
-
-        void setTargetBitDepth(int bits) noexcept
-        {
-            // LSB (Least Significant Bit) のレベル
-            ditherAmount = 1.0f / static_cast<float>(std::pow(2.0f, bits - 1));
-        }
-
-        float process(float input) noexcept
-        {
-            // 2つの独立した乱数の差 = 三角分布 (TPDF)
-            const float r1 = random.nextFloat() * 2.0f - 1.0f;
-            const float r2 = random.nextFloat() * 2.0f - 1.0f;
-            const float dither = (r1 - r2) * ditherAmount;
-            return input + dither;
-        }
-    private:
-        juce::Random random;
-        float ditherAmount = 1.0f / 8388608.0f; // Default 24-bit
+        juce::dsp::ProcessSpec spec;
+        std::array<juce::dsp::IIR::Filter<double>, 2> filters;
     };
 
     //----------------------------------------------------------
@@ -191,7 +183,7 @@ private:
     {
         DSPCore();
 
-        void prepare(double sampleRate, int samplesPerBlock);
+        void prepare(double sampleRate, int samplesPerBlock, int bitDepth);
         void process(const juce::AudioSourceChannelInfo& bufferToFill,
                      juce::AbstractFifo& audioFifo,
                      juce::AudioBuffer<float>& audioFifoBuffer,
@@ -205,7 +197,7 @@ private:
         ConvolverProcessor convolver;
         EQProcessor eq;
         DCBlocker dcBlockerL, dcBlockerR;
-        TPDFDither ditherL, ditherR;
+        PsychoacousticDither ditherL, ditherR;
 
         juce::AudioBuffer<SampleType> processBuffer;
         int maxSamplesPerBlock = 0;
@@ -248,6 +240,7 @@ private:
     std::atomic<bool> convBypassActive { false };
     std::atomic<ProcessingOrder> currentProcessingOrder{ProcessingOrder::ConvolverThenEQ};
     std::atomic<AnalyzerSource> currentAnalyzerSource { AnalyzerSource::Output };
+    std::atomic<int> ditherBitDepth { 24 };
 
     // dB変換時の下限値
     static constexpr float LEVEL_METER_MIN_DB = -120.0f;

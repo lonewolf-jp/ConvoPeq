@@ -54,9 +54,9 @@ void EQProcessor::resetToDefaults()
 
     currentState.store(newState, std::memory_order_release);
 
-    agcCurrentGain = 1.0f;
-    agcEnvInput    = 0.0f;
-    agcEnvOutput   = 0.0f;
+    agcCurrentGain = 1.0;
+    agcEnvInput    = 0.0;
+    agcEnvOutput   = 0.0;
 
     // 全バンドの係数を更新
     for (int i = 0; i < NUM_BANDS; ++i)
@@ -238,11 +238,11 @@ void EQProcessor::prepareToPlay(int sampleRate, int /*samplesPerBlock*/)
 
     currentSampleRate = sampleRate;
 
-    // ✅ 修正: Atomic フラグでガード
+    // Atomic フラグでガード
     isResetting.store(true, std::memory_order_release);
 
     // Audio Threadが退出するのを待機
-     // ✅ より正確な待機時間を計算
+    // より正確な待機時間を計算
     // Audio Threadの現在のブロックサイズとサンプルレートから、最大処理時間を推定
     const int blockSize = 512; // AudioEngine から取得
     const double blockTimeMs = (blockSize / (double)sampleRate) * 1000.0;
@@ -252,14 +252,14 @@ void EQProcessor::prepareToPlay(int sampleRate, int /*samplesPerBlock*/)
     auto state = currentState.load(std::memory_order_acquire);
 
     smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
-    smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(state->totalGainDb));
+    smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
 
     // フィルタ状態をリセット
     std::memset(filterState, 0, sizeof(filterState));
 
-    agcCurrentGain = 1.0f;
-    agcEnvInput    = 0.0f;
-    agcEnvOutput   = 0.0f;
+    agcCurrentGain = 1.0;
+    agcEnvInput    = 0.0;
+    agcEnvOutput   = 0.0;
 
     // 係数を即座に再計算
     for (int i = 0; i < NUM_BANDS; ++i)
@@ -409,7 +409,7 @@ namespace
         const double m1 = c.m1;
         const double m2 = c.m2;
 
-        static constexpr double DENORMAL_THRESHOLD = 1.0e-15;
+        constexpr double DENORMAL_THRESHOLD = 1.0e-15;
 
         for (int n = 0; n < numSamples; ++n)
         {
@@ -423,7 +423,7 @@ namespace
 
 
             double output = m0 * v0 + m1 * v1 + m2 * v2;
-            // ✅ 出力のNaNチェック
+            // 出力のNaNチェック (数値安定性のため)
             if (!std::isfinite(output))
                 output = 0.0;
 
@@ -437,7 +437,7 @@ namespace
         // 極小値が循環し続ける可能性があるため、明示的にフラッシュして計算負荷を抑える。
         ic1eq = (std::abs(ic1eq) < DENORMAL_THRESHOLD) ? 0.0 : ic1eq;
 
-         // ✅ 状態変数のNaNチェック
+        // 状態変数のNaNチェック
         if (!std::isfinite(ic1eq)) ic1eq = 0.0;
         if (!std::isfinite(ic2eq)) ic2eq = 0.0;
         ic2eq = (std::abs(ic2eq) < DENORMAL_THRESHOLD) ? 0.0 : ic2eq;
@@ -450,21 +450,21 @@ namespace
 //--------------------------------------------------------------
 // AGCゲイン計算 (Private)
 //--------------------------------------------------------------
-float EQProcessor::calculateAGCGain(float inputEnv, float outputEnv) const noexcept
+double EQProcessor::calculateAGCGain(double inputEnv, double outputEnv) const noexcept
 {
-    static constexpr float MIN_ENV = 0.0001f;
+    static constexpr double MIN_ENV = 0.0001;
 
-    float targetGain = 1.0f;
+    double targetGain = 1.0;
     if (outputEnv > MIN_ENV)
     {
         targetGain = inputEnv / outputEnv;
     }
     else if (inputEnv > MIN_ENV)
     {
-        targetGain = 1.0f;
+        targetGain = 1.0;
     }
 
-    return juce::jlimit(AGC_MIN_GAIN, AGC_MAX_GAIN, targetGain);
+    return juce::jlimit(static_cast<double>(AGC_MIN_GAIN), static_cast<double>(AGC_MAX_GAIN), targetGain);
 }
 
 //--------------------------------------------------------------
@@ -497,25 +497,25 @@ void EQProcessor::processAGC(juce::AudioBuffer<double>& buffer, int numSamples, 
     if (!std::isfinite(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
     if (!std::isfinite(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
 
-    if (!std::isfinite(agcEnvInput))  agcEnvInput = 0.0f;
-    if (!std::isfinite(agcEnvOutput)) agcEnvOutput = 0.0f;
-    if (!std::isfinite(agcCurrentGain)) agcCurrentGain = 1.0f;
+    if (!std::isfinite(agcEnvInput))  agcEnvInput = 0.0;
+    if (!std::isfinite(agcEnvOutput)) agcEnvOutput = 0.0;
+    if (!std::isfinite(agcCurrentGain)) agcCurrentGain = 1.0;
 
     // 指数移動平均 (EMA) によるエンベロープ検波
-    agcEnvInput  = agcEnvInput  * (1.0f - AGC_ALPHA) + static_cast<float>(inputRMS)  * AGC_ALPHA;
-    agcEnvOutput = agcEnvOutput * (1.0f - AGC_ALPHA) + static_cast<float>(outputRMS) * AGC_ALPHA;
+    agcEnvInput  = agcEnvInput  * (1.0 - AGC_ALPHA) + inputRMS  * AGC_ALPHA;
+    agcEnvOutput = agcEnvOutput * (1.0 - AGC_ALPHA) + outputRMS * AGC_ALPHA;
 
     // ターゲットゲイン計算
-    float targetGain = calculateAGCGain(agcEnvInput, agcEnvOutput);
+    double targetGain = calculateAGCGain(agcEnvInput, agcEnvOutput);
 
     // ゲイン変化のスムーシング
-    agcCurrentGain = agcCurrentGain * (1.0f - AGC_GAIN_SMOOTH) + targetGain * AGC_GAIN_SMOOTH;
+    agcCurrentGain = agcCurrentGain * (1.0 - AGC_GAIN_SMOOTH) + targetGain * AGC_GAIN_SMOOTH;
 
     // ゲイン適用
     // 各チャンネルに対して明示的に適用
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        buffer.applyGain(ch, 0, numSamples, static_cast<double>(agcCurrentGain));
+        buffer.applyGain(ch, 0, numSamples, agcCurrentGain);
     }
 }
 
@@ -545,7 +545,7 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
 {
     juce::ScopedNoDenormals noDenormals;
 
-    // ✅ リセット中はスキップ
+    // リセット中はスキップ
     if (isResetting.load(std::memory_order_acquire))
         return;
 
@@ -586,15 +586,15 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
     }
     else
     {
-        const float startGain = smoothTotalGain.getCurrentValue();
+        const double startGain = smoothTotalGain.getCurrentValue();
         smoothTotalGain.skip(numSamples);
-        const float endGain = smoothTotalGain.getCurrentValue();
+        const double endGain = smoothTotalGain.getCurrentValue();
 
         for (int ch = 0; ch < numChannels; ++ch)
         {
             buffer.applyGainRamp(ch, 0, numSamples,
-                                 static_cast<double>(startGain),
-                                 static_cast<double>(endGain));
+                                 startGain,
+                                 endGain);
         }
     }
 }

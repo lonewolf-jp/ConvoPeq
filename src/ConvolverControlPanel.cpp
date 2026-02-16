@@ -19,14 +19,16 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     loadIRButton.addListener(this);
     addAndMakeVisible(loadIRButton);
 
-    // Min Phase Toggle
-    minPhaseButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
-    minPhaseButton.setToggleState(engine.getConvolverUseMinPhase(), juce::dontSendNotification);
-    minPhaseButton.setTooltip("Convert IR to Minimum Phase (Reduces latency and pre-ringing)");
-    minPhaseButton.onClick = [this] {
-        engine.setConvolverUseMinPhase(minPhaseButton.getToggleState());
+    // Phase Choice ComboBox
+    phaseChoiceBox.addItem("Linear Phase", 1);
+    phaseChoiceBox.addItem("Minimum Phase", 2);
+    phaseChoiceBox.setSelectedId(engine.getConvolverUseMinPhase() ? 2 : 1, juce::dontSendNotification);
+    phaseChoiceBox.setTooltip("Select IR Phase Type");
+    phaseChoiceBox.setJustificationType(juce::Justification::centred);
+    phaseChoiceBox.onChange = [this] {
+        engine.setConvolverUseMinPhase(phaseChoiceBox.getSelectedId() == 2);
     };
-    addAndMakeVisible(minPhaseButton);
+    addAndMakeVisible(phaseChoiceBox);
 
     // Dry/Wet Mixスライダー
     mixSlider.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -169,8 +171,8 @@ void ConvolverControlPanel::resized()
     loadIRButton.setBounds(controlRow.removeFromLeft(90));
     controlRow.removeFromLeft(10);
 
-    // Min Phase
-    minPhaseButton.setBounds(controlRow.removeFromLeft(90));
+    // Phase Choice
+    phaseChoiceBox.setBounds(controlRow.removeFromLeft(120));
     controlRow.removeFromLeft(5);
 
     // Dry/Wet Mix
@@ -236,7 +238,7 @@ void ConvolverControlPanel::updateIRInfo()
 
     // UIコントロールをプロセッサの状態と同期
     mixSlider.setValue(convolver.getMix(), juce::dontSendNotification);
-    minPhaseButton.setToggleState(convolver.getUseMinPhase(), juce::dontSendNotification);
+    phaseChoiceBox.setSelectedId(convolver.getUseMinPhase() ? 2 : 1, juce::dontSendNotification);
 
     if (convolver.isIRLoaded())
     {

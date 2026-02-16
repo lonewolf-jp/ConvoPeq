@@ -77,6 +77,37 @@ endif()
 add_subdirectory(JUCE)
 
 #------------------------------------------------------------
+# FFTConvolver ライブラリの追加
+#------------------------------------------------------------
+add_library(FFTConvolver STATIC
+    FFTConvolver/FFTConvolver.cpp
+    FFTConvolver/AudioFFT.cpp
+    FFTConvolver/Utilities.cpp
+)
+
+target_include_directories(FFTConvolver PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/FFTConvolver
+)
+
+# ✅ double精度を有効化
+target_compile_definitions(FFTConvolver PUBLIC
+    FFTCONVOLVER_USE_DOUBLE
+)
+
+target_compile_features(FFTConvolver PUBLIC cxx_std_17)
+
+# MSVC最適化
+if(MSVC)
+    target_compile_options(FFTConvolver PRIVATE
+        /O2           # 最大速度最適化
+        /Ob3          # 積極的なインライン展開
+        /fp:fast      # 高速浮動小数点モデル
+        /arch:AVX2    # AVX2命令セット有効化
+        /GL           # プログラム全体の最適化 (LTCG)
+    )
+endif()
+
+#------------------------------------------------------------
 # GUIアプリケーション定義
 #------------------------------------------------------------
 juce_add_gui_app(ConvoPeq
@@ -101,6 +132,7 @@ target_sources(ConvoPeq PRIVATE
     src/SpectrumAnalyzerComponent.cpp
     src/DeviceSettings.cpp
     src/AsioBlacklist.h
+    src/PsychoacousticDither.h
 )
 
 #------------------------------------------------------------
@@ -142,6 +174,7 @@ target_link_libraries(ConvoPeq PRIVATE
     juce::juce_audio_processors
     juce::juce_audio_utils
     juce::juce_dsp              # Convolution用
+    FFTConvolver                # FFTConvolver
 )
 
 #------------------------------------------------------------

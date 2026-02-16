@@ -88,7 +88,7 @@ void SpectrumAnalyzerComponent::timerCallback()
     }
 
     // ── FFTデータの取得とスムーシング ──
-     // ✅ FIFOの利用可能データ数をチェック
+    // FIFOの利用可能データ数をチェック
     const int available = engine.getFifoNumReady();
     const int required = OVERLAP_SAMPLES;
 

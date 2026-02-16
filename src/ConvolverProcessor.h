@@ -14,7 +14,7 @@
 //
 // ■ スレッド安全設計:
 //   - loadImpulseResponse(): Message Thread で実行。バックグラウンドスレッドで読み込みを行い、完了後に atomic に差し替えます (RCU)。ロード中も音切れなく古いIRで処理を継続します。
-//   - process(): Audio Thread で実行。juce::dsp::Convolution を使用してゼロレイテンシー（に近い）畳み込みを行います。
+//   - process(): Audio Thread で実行。FFTConvolver を使用してパーティション分割畳み込みを行います。レイテンシーはブロックサイズに依存します。
 //   - パラメータ: std::atomic でスレッドセーフ。Audio Thread内でのメモリ確保やIR再ロードは行いません。
 //============================================================================
 
@@ -22,6 +22,9 @@
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <array>
+
+#include "FFTConvolver.h"
 
 class ConvolverProcessor : public juce::ChangeBroadcaster
 {
@@ -108,11 +111,29 @@ private:
     class LoaderThread;
 
     //----------------------------------------------------------
-    // JUCE DSP Convolution Engine
+    // FFTConvolver Engine
     //----------------------------------------------------------
+    // ステレオ処理用ラッパー (FFTConvolverはモノラルのため)
+    struct StereoConvolver
+    {
+        std::array<fftconvolver::FFTConvolver, 2> convolvers;
+        int latency = 0;
+        int irLatency = 0; // IR由来の遅延 (ピーク位置)
+
+        void init(size_t blockSize, const fftconvolver::Sample* irL, const fftconvolver::Sample* irR, size_t irLen, int peakDelay)
+        {
+            convolvers[0].init(blockSize, irL, irLen);
+            convolvers[1].init(blockSize, irR, irLen);
+            latency = static_cast<int>(blockSize);
+            irLatency = peakDelay;
+        }
+
+        void reset() { convolvers[0].reset(); convolvers[1].reset(); }
+    };
+
     // Note: trashBin is used to keep old Convolution objects alive while Audio Thread might still be using them.
-    std::atomic<std::shared_ptr<juce::dsp::Convolution>> convolution;
-    std::vector<std::shared_ptr<juce::dsp::Convolution>> trashBin;
+    std::atomic<std::shared_ptr<StereoConvolver>> convolution;
+    std::vector<std::shared_ptr<StereoConvolver>> trashBin;
     juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
     std::unique_ptr<LoaderThread> activeLoader;
@@ -130,7 +151,7 @@ private:
     //----------------------------------------------------------
     std::atomic<bool> bypassed{false};
     std::atomic<float> mixTarget{1.0f}; // UIからのターゲット値 (0.0-1.0)
-    juce::SmoothedValue<float> mixSmoother; // オーディオスレッドでの平滑化用
+    juce::SmoothedValue<double> mixSmoother; // オーディオスレッドでの平滑化用
     std::atomic<bool> useMinPhase{false};
 
     //----------------------------------------------------------
@@ -144,7 +165,7 @@ private:
     juce::File currentIrFile;
     juce::CriticalSection irFileLock;
     std::atomic<bool> currentIrOptimized { false };
-    juce::AudioBuffer<float> originalIR; // 元IR保持 (リサンプリング/トリミング用)
+    juce::AudioBuffer<double> originalIR; // 元IR保持 (リサンプリング/トリミング用)
     double originalIRSampleRate = 0.0;
     std::vector<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     std::atomic<double> currentSampleRate { 48000.0 };
@@ -153,7 +174,7 @@ private:
     // Dry信号バッファ（Mix用）
     //----------------------------------------------------------
     juce::AudioBuffer<double> dryBuffer;
-    juce::AudioBuffer<float> convolutionBuffer; // Convolution用 (float)
+    juce::AudioBuffer<double> convolutionBuffer; // Convolution用 (double)
 
     //----------------------------------------------------------
     // 準備完了フラグ
@@ -161,19 +182,18 @@ private:
     std::atomic<bool> isPrepared { false };
     int currentBufferSize = 512; // prepareToPlayで更新される
 
-    void createWaveformSnapshot (const juce::AudioBuffer<float>& irBuffer);
-    void createFrequencyResponseSnapshot (const juce::AudioBuffer<float>& irBuffer, double sampleRate);
+    void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
+    void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
     static int computeTargetIRLength(double sampleRate, int originalLength);
-    void applyNewState(std::shared_ptr<juce::dsp::Convolution> newConv,
-                      const juce::AudioBuffer<float>& loadedIR,
+    void applyNewState(std::shared_ptr<StereoConvolver> newConv,
+                      const juce::AudioBuffer<double>& loadedIR,
                       double loadedSR,
                       int targetLength,
                       bool isRebuild,
                       const juce::File& file,
-                      juce::AudioBuffer<float> displayIR);
+                      const juce::AudioBuffer<double>& displayIR);
 
     void rebuild(double sampleRate, int maxBlockSize, double irSeconds);
-    std::shared_ptr<juce::dsp::Convolution> createConfiguredConvolution(double sampleRate, int maxBlockSize, double irSeconds);
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)
