@@ -137,7 +137,7 @@ public:
     // process: オーディオスレッドから呼ばれる
     // ロック・new・I/O・待機（IR再ロード等）禁止
     //----------------------------------------------------------
-    void process(juce::AudioBuffer<double>& buffer, int numSamples);
+    void process(juce::dsp::AudioBlock<double>& block);
 
     //----------------------------------------------------------
     // パラメータ変更 (UIスレッドから呼ぶ)
@@ -266,7 +266,7 @@ private:
     int currentSampleRate{ 0 };
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
-    void processAGC(juce::AudioBuffer<double>& buffer, int numSamples, const EQState& state);
+    void processAGC(juce::dsp::AudioBlock<double>& block, const EQState& state);
     double calculateAGCGain(double inputEnv, double outputEnv) const noexcept;
 
     // ── SVF係数計算 (Private Helpers) ──

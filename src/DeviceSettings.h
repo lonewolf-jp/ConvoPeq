@@ -27,11 +27,12 @@
 #include "AsioBlacklist.h"
 #include "AudioEngine.h"
 
-class DeviceSettings : public juce::Component
+class DeviceSettings : public juce::Component,
+                       private juce::ChangeListener
 {
 public:
     DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engine);
-    ~DeviceSettings() override = default;
+    ~DeviceSettings() override;
 
     void resized() override;
 
@@ -41,9 +42,17 @@ public:
     static void applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist);
 
 private:
+    void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void updateBitDepthList();
+
     juce::AudioDeviceManager& audioDeviceManager;
     AudioEngine& audioEngine;
     std::unique_ptr<juce::AudioDeviceSelectorComponent> selector;
+
+    juce::ComboBox oversamplingComboBox;
+    juce::Label oversamplingLabel;
+    juce::TabbedComponent filterTypeTabs;
+
     juce::ComboBox bitDepthComboBox;
     juce::Label bitDepthLabel;
 

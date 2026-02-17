@@ -30,10 +30,10 @@ class EQControlPanel : public juce::Component,
 private:
     // ── バンド名（20バンド）──
     static constexpr const char* BAND_NAMES[EQProcessor::NUM_BANDS] = {
-        "Rule 1", "Rule 2", "Rule 3", "Rule 4", "Rule 5",
-        "Rule 6", "Rule 7", "Rule 8", "Rule 9", "Rule 10",
-        "Rule 11", "Rule 12", "Rule 13", "Rule 14", "Rule 15",
-        "Rule 16", "Rule 17", "Rule 18", "Rule 19", "Rule 20"
+        "Band 1", "Band 2", "Band 3", "Band 4", "Band 5",
+        "Band 6", "Band 7", "Band 8", "Band 9", "Band 10",
+        "Band 11", "Band 12", "Band 13", "Band 14", "Band 15",
+        "Band 16", "Band 17", "Band 18", "Band 19", "Band 20"
     };
 
     // ── UIコントロールとバンドインデックスのマッピング用 ──

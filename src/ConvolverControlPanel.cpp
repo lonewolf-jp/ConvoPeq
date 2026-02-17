@@ -216,19 +216,16 @@ void ConvolverControlPanel::resized()
     controlRow1.removeFromLeft(5);
     mixSlider.setBounds(controlRow1);
 
-    // 右側のコントロールの開始X座標を計算
-    const int rightControlsX = 90 + 10 + 120 + 5;
-
     // Smoothing Time (Mixスライダーの下に配置)
     auto smoothingRow = controlRow2;
-    smoothingRow.removeFromLeft(rightControlsX);
+    smoothingRow.removeFromLeft(phaseChoiceBox.getRight() + 5);
     smoothingTimeLabel.setBounds(smoothingRow.removeFromLeft(65));
     smoothingRow.removeFromLeft(5);
     smoothingTimeSlider.setBounds(smoothingRow);
 
     // IR Length (Smoothing Timeの下に配置)
     auto lengthRow = controlRow3;
-    lengthRow.removeFromLeft(rightControlsX);
+    lengthRow.removeFromLeft(phaseChoiceBox.getRight() + 5);
     irLengthLabel.setBounds(lengthRow.removeFromLeft(65));
     lengthRow.removeFromLeft(5);
     irLengthSlider.setBounds(lengthRow);

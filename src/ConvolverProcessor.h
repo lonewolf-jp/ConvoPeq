@@ -52,6 +52,7 @@ public:
     static constexpr int MAX_IR_LATENCY = 1048576;
     static constexpr int MAX_BLOCK_SIZE = 8192;   // AudioEngineのSAFE_MAX_BLOCK_SIZEと一致
     static constexpr int MAX_TOTAL_DELAY = MAX_IR_LATENCY + MAX_BLOCK_SIZE;
+    static constexpr double CONVOLUTION_HEADROOM_GAIN = 0.5; // -6.02 dB
 
     ConvolverProcessor();
     ~ConvolverProcessor();
@@ -72,9 +73,8 @@ public:
     //----------------------------------------------------------
     // メイン処理（Audio Thread）
     //
-    // buffer: インプレース処理（入力と出力が同じバッファ）
     //----------------------------------------------------------
-    void process(juce::AudioBuffer<double>& buffer, int numSamples);
+    void process(juce::dsp::AudioBlock<double>& block);
 
     //----------------------------------------------------------
     // バイパス制御

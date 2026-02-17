@@ -142,17 +142,12 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
             setBandEnabled(currentFilterIndex, enabled);
 
             // フィルタータイプ
-            auto typeStr = tokens[3];
-            if (typeStr.equalsIgnoreCase("LSC"))
-                setBandType(currentFilterIndex, EQBandType::LowShelf);
-            else if (typeStr.equalsIgnoreCase("PK"))
-                setBandType(currentFilterIndex, EQBandType::Peaking);
-            else if (typeStr.equalsIgnoreCase("HSC"))
-                setBandType(currentFilterIndex, EQBandType::HighShelf);
-            else if (typeStr.equalsIgnoreCase("LP"))
-                setBandType(currentFilterIndex, EQBandType::LowPass);
-            else if (typeStr.equalsIgnoreCase("HP"))
-                setBandType(currentFilterIndex, EQBandType::HighPass);
+            juce::String typeStr = tokens[3];
+            if (typeStr.equalsIgnoreCase("LSC"))      setBandType(currentFilterIndex, EQBandType::LowShelf);
+            else if (typeStr.equalsIgnoreCase("PK"))  setBandType(currentFilterIndex, EQBandType::Peaking);
+            else if (typeStr.equalsIgnoreCase("HSC")) setBandType(currentFilterIndex, EQBandType::HighShelf);
+            else if (typeStr.equalsIgnoreCase("LP"))  setBandType(currentFilterIndex, EQBandType::LowPass);
+            else if (typeStr.equalsIgnoreCase("HP"))  setBandType(currentFilterIndex, EQBandType::HighPass);
 
             // パラメータを順番に解析
             float freq = 0.0f, gain = 0.0f, q = 0.0f;
@@ -491,9 +486,10 @@ double EQProcessor::calculateAGCGain(double inputEnv, double outputEnv) const no
 //--------------------------------------------------------------
 // AGC処理 (Private)
 //--------------------------------------------------------------
-void EQProcessor::processAGC(juce::AudioBuffer<double>& buffer, int numSamples, const EQState& state)
+void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block, const EQState& state)
 {
-    const int numChannels = std::min(buffer.getNumChannels(), MAX_CHANNELS);
+    const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
+    const int numSamples = (int)block.getNumSamples();
 
     // ✅ 事前にキャッシュされた入力レベルを使用
     double inputRMS = cachedInputRMS;
@@ -502,7 +498,13 @@ void EQProcessor::processAGC(juce::AudioBuffer<double>& buffer, int numSamples, 
     double outputRMS = 0.0;
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        double rms = buffer.getRMSLevel(ch, 0, numSamples);
+        // Manual RMS calculation for AudioBlock
+        double sumSq = 0.0;
+        const double* data = block.getChannelPointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+            sumSq += data[i] * data[i];
+        double rms = std::sqrt(sumSq / static_cast<double>(numSamples));
+
         if (rms > outputRMS) outputRMS = rms;
     }
 
@@ -541,7 +543,8 @@ void EQProcessor::processAGC(juce::AudioBuffer<double>& buffer, int numSamples, 
     // 各チャンネルに対して明示的に適用
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        buffer.applyGain(ch, 0, numSamples, currentGain);
+        juce::FloatVectorOperations::multiply(block.getChannelPointer(ch),
+                                              currentGain, numSamples);
     }
 }
 
@@ -567,13 +570,14 @@ bool EQProcessor::isBufferSilent(const juce::AudioBuffer<double>& buffer, int nu
 //    - 待機なし (No Wait): 処理落ちの原因となるため (Audio Threadでの待機は厳禁)
 //    - RCU (Read-Copy-Update) パターンにより、ロックフリーで安全に係数を更新
 //--------------------------------------------------------------
-void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
+void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
     juce::ScopedNoDenormals noDenormals;
 
     auto state = currentState.load(std::memory_order_acquire); // RCU Load (Lock-free)
 
-    const int numChannels = std::min(buffer.getNumChannels(), MAX_CHANNELS);
+    const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
+    const int numSamples = (int)block.getNumSamples();
 
     // ✅ フィルタ処理前に入力レベルをキャッシュ (AGCが有効な場合のみ)
     if (state->agcEnabled)
@@ -581,8 +585,11 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
         cachedInputRMS = 0.0;
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            // getRMSLevelはAudio Threadで安全
-            double rms = buffer.getRMSLevel(ch, 0, numSamples);
+            double sumSq = 0.0;
+            const double* data = block.getChannelPointer(ch);
+            for (int i = 0; i < numSamples; ++i)
+                sumSq += data[i] * data[i];
+            double rms = std::sqrt(sumSq / static_cast<double>(numSamples));
             if (rms > cachedInputRMS)
                 cachedInputRMS = rms;
         }
@@ -615,7 +622,7 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
     // フィルタバンク適用
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        double* data = buffer.getWritePointer(ch);
+        double* data = block.getChannelPointer(ch);
         if (data == nullptr) continue;
 
         for (int i = 0; i < numActiveBands; ++i)
@@ -635,7 +642,7 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
     // トータルゲイン / AGC 適用
     if (state->agcEnabled)
     {
-        processAGC(buffer, numSamples, *state);
+        processAGC(block, *state);
     }
     else
     {
@@ -654,7 +661,16 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
 
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            buffer.applyGainRamp(ch, 0, numSamples, startGain, endGain);
+            // Manual Gain Ramp
+            double* data = block.getChannelPointer(ch);
+            double gain = startGain;
+            const double increment = (endGain - startGain) / static_cast<double>(numSamples);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                data[i] *= gain;
+                gain += increment;
+            }
         }
     }
 }
@@ -699,13 +715,8 @@ void EQProcessor::updateBandNode(int band)
 
     // ゴミ箱の掃除 (Garbage Collection)
     // Audio Threadが参照していない(use_count == 1)オブジェクトのみを削除する。
-    for (auto it = trashBin.begin(); it != trashBin.end(); )
-    {
-        if ((*it).use_count() == 1)
-            it = trashBin.erase(it);
-        else
-            ++it;
-    }
+    trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(),
+                                   [](const auto& p) { return p.use_count() == 1; }), trashBin.end()); // ラムダ構文修正
 }
 
 //--------------------------------------------------------------

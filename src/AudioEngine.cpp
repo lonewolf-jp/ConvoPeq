@@ -161,7 +161,7 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
             const auto& band = activeBands[b];
             float magSq = EQProcessor::getMagnitudeSquared(band.coeffs, z);
 
-            // BUG #6 Fix: NaN/Inf check to prevent propagation
+            // 数値安定性のため、NaN/Infの伝播を防止
             if (!std::isfinite(magSq))
                 magSq = 1.0f;
 
@@ -171,7 +171,7 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
                 totalMagSqR *= magSq;
         }
 
-        // BUG #6 Fix: Final NaN check
+        // 最終的なNaNチェック
         if (outMagnitudesL)
         {
             float val = std::sqrt(totalMagSqL);
@@ -243,7 +243,7 @@ void AudioEngine::rebuild(double sampleRate, int samplesPerBlock)
     newDSP->convolver.syncStateFrom(uiConvolverProcessor);
 
     // 準備
-    newDSP->prepare(sampleRate, samplesPerBlock, ditherBitDepth.load());
+    newDSP->prepare(sampleRate, samplesPerBlock, ditherBitDepth.load(), manualOversamplingFactor.load(), oversamplingType.load());
 
     // Atomic Swap
     auto oldDSP = currentDSP.exchange(newDSP);
@@ -257,14 +257,7 @@ void AudioEngine::rebuild(double sampleRate, int samplesPerBlock)
         // ゴミ箱の掃除 (Garbage Collection)
         // Audio Threadが参照していない(use_count == 1)オブジェクトのみを削除する。
         // これにより、Audio Thread内でのデストラクタ実行(ロックやメモリ解放)を確実に防ぐ。
-        for (auto it = trashBin.begin(); it != trashBin.end(); )
-        {
-            // trashBinのみが参照を持っている場合、安全に削除できる
-            if ((*it).use_count() == 1)
-                it = trashBin.erase(it);
-            else
-                ++it;
-        }
+        trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(), [](const auto& p) { return p.use_count() == 1; }), trashBin.end());
     }
 }
 
@@ -354,7 +347,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
         // 処理委譲
-        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb, eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt);
+        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb, {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt});
     }
     else
     {
@@ -367,20 +360,58 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 //--------------------------------------------------------------
 AudioEngine::DSPCore::DSPCore() = default;
 
-void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int bitDepth)
+void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType)
 {
     maxSamplesPerBlock = samplesPerBlock;
 
+    size_t factorLog2 = 0;
+    if (manualOversamplingFactor > 0)
+    {
+        // Manual override
+        if (manualOversamplingFactor == 8)      factorLog2 = 3;
+        else if (manualOversamplingFactor == 4) factorLog2 = 2;
+        else if (manualOversamplingFactor == 2) factorLog2 = 1;
+        else                                    factorLog2 = 0; // 1x
+    }
+    else
+    {
+        // Auto mode (default)
+        // 44.1k, 48k -> 4x
+        // 88.2k, 96k -> 2x
+        // >= 176.4k  -> 1x (None)
+        if (sampleRate < 80000.0)      factorLog2 = 2; // 4x
+        else if (sampleRate < 160000.0) factorLog2 = 1; // 2x
+        else                            factorLog2 = 0; // 1x
+    }
+
+    oversamplingFactor = (size_t)1 << factorLog2;
+
+    if (factorLog2 > 0)
+    {
+        auto filterType = (oversamplingType == OversamplingType::LinearPhase)
+                          ? juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple
+                          : juce::dsp::Oversampling<double>::filterHalfBandPolyphaseIIR;
+        oversampling = std::make_unique<juce::dsp::Oversampling<double>>(2, factorLog2, filterType);
+        oversampling->initProcessing(samplesPerBlock);
+    }
+    else
+    {
+        oversampling.reset();
+    }
+
+    const double processingRate = sampleRate * static_cast<double>(oversamplingFactor);
+    const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
+
     // プロセッサの準備
-    convolver.prepareToPlay(sampleRate, samplesPerBlock);
-    eq.prepareToPlay(static_cast<int>(sampleRate), samplesPerBlock);
+    convolver.prepareToPlay(processingRate, processingBlockSize);
+    eq.prepareToPlay(static_cast<int>(processingRate), processingBlockSize);
+    dcBlockerL.prepare(processingRate);
+    dcBlockerR.prepare(processingRate);
 
-    dcBlockerL.prepare(sampleRate);
-    dcBlockerR.prepare(sampleRate);
-
-    // ディザの準備
+    // ディザの準備 (出力段で行うため元のサンプルレート)
     ditherL.prepare(sampleRate, bitDepth);
     ditherR.prepare(sampleRate, bitDepth);
+    this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
     // バッファ確保 (Message Threadで実行されるため安全)
     processBuffer.setSize(2, samplesPerBlock);
@@ -394,6 +425,8 @@ void AudioEngine::DSPCore::reset()
     dcBlockerR.reset();
     ditherL.reset();
     ditherR.reset();
+    if (oversampling)
+        oversampling->reset();
     processBuffer.clear();
 }
 
@@ -402,12 +435,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
                                   juce::AudioBuffer<float>& audioFifoBuffer,
                                   std::atomic<float>& inputLevelDb,
                                   std::atomic<float>& outputLevelDb,
-                                  bool eqBypassed,
-                                  bool convBypassed,
-                                  ProcessingOrder order,
-                                  AnalyzerSource analyzerSource,
-                                  bool softClipEnabled,
-                                  float saturationAmount)
+                                  const ProcessingState& state) // ProcessingState構造体でパラメータを受け取る
 {
     const int numSamples = bufferToFill.numSamples;
 
@@ -428,48 +456,93 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     inputLevelDb.store(inputDb);
 
     // ── Analyzer Input Tap (Pre-DSP) ──
-    if (analyzerSource == AnalyzerSource::Input)
+    if (state.analyzerSource == AnalyzerSource::Input)
     {
         pushToFifo(processBuffer, numSamples, audioFifo, audioFifoBuffer);
     }
 
     //----------------------------------------------------------
+    // オーバーサンプリング処理ブロック
+    //----------------------------------------------------------
+    // バッファ全体ではなく、有効なサンプル数のみをラップする (重要)
+    juce::dsp::AudioBlock<double> block = juce::dsp::AudioBlock<double>(processBuffer).getSubBlock(0, numSamples);
+    juce::dsp::AudioBlock<double> processBlock = block;
+
+    // アップサンプリング
+    if (oversampling)
+    {
+        processBlock = oversampling->processSamplesUp(block);
+    }
+
+    int numProcSamples = (int)processBlock.getNumSamples();
+    int numProcChannels = (int)processBlock.getNumChannels(); // 通常は2
+
+    //----------------------------------------------------------
     // DSP処理チェーン (Dynamic Processing Order)
     //----------------------------------------------------------
-    if (order == ProcessingOrder::ConvolverThenEQ)
+    // プロセッサには AudioBlock を直接渡す (AudioBuffer作成によるmalloc回避)
+    if (state.order == ProcessingOrder::ConvolverThenEQ) // stateから読み出し
     {
         // 1. Convolver
-        if (!convBypassed)
-            convolver.process(processBuffer, numSamples);
+        if (!state.convBypassed) // stateから読み出し
+            convolver.process(processBlock);
         // 2. EQ
-        if (!eqBypassed)
-            eq.process(processBuffer, numSamples);
+        if (!state.eqBypassed) // stateから読み出し
+            eq.process(processBlock);
     }
     else
     {
         // 1. EQ
-        if (!eqBypassed)
-            eq.process(processBuffer, numSamples);
+        if (!state.eqBypassed) // stateから読み出し
+            eq.process(processBlock);
         // 2. Convolver
-        if (!convBypassed)
-            convolver.process(processBuffer, numSamples);
+        if (!state.convBypassed) // stateから読み出し
+            convolver.process(processBlock);
+    }
+
+    //----------------------------------------------------------
+    // ソフトクリッピング (Soft Clipping)
+    // 配置: ダウンサンプリング前に行うことで、倍音成分の折り返しノイズ(エイリアシング)を低減する。
+    //----------------------------------------------------------
+    if (state.softClipEnabled) // stateから読み出し
+    {
+        const double sat = static_cast<double>(state.saturationAmount); // stateから読み出し
+        const double CLIP_THRESHOLD = 0.95 - 0.45 * sat;
+        const double CLIP_KNEE      = 0.05 + 0.35 * sat;
+        const double CLIP_ASYMMETRY = 0.10 * sat;
+        const double CLIP_START = CLIP_THRESHOLD - CLIP_KNEE;
+
+        for (int ch = 0; ch < numProcChannels; ++ch)
+        {
+            double* data = processBlock.getChannelPointer(ch);
+            for (int i = 0; i < numProcSamples; ++i)
+            {
+                if (std::abs(data[i]) > CLIP_START)
+                    data[i] = musicalSoftClip(data[i], CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
+            }
+        }
     }
 
     //----------------------------------------------------------
     // DCオフセット除去 (DC Offset Removal)
     // 目的: フィルタ処理後のDC成分を除去し、スピーカー保護とヘッドルーム確保を行う。
-    // 配置: 最終段で行うことで、レベルメーターの正確性を担保する。
+    // 配置: ソフトクリップの後、ダウンサンプリング前に行う。
     //----------------------------------------------------------
-    const int procChannels = processBuffer.getNumChannels();
-    for (int ch = 0; ch < procChannels; ++ch)
+    for (int ch = 0; ch < numProcChannels; ++ch)
     {
         if (ch > 1) break; // DCBlockerは現在ステレオ(L/R)のみ対応
 
-        auto* data = processBuffer.getWritePointer(ch);
+        auto* data = processBlock.getChannelPointer(ch);
         auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
 
-        for (int i = 0; i < numSamples; ++i)
+        for (int i = 0; i < numProcSamples; ++i)
             data[i] = blocker.process(data[i]);
+    }
+
+    // ダウンサンプリング (結果は processBuffer に書き戻される)
+    if (oversampling)
+    {
+        oversampling->processSamplesDown(block);
     }
 
     //----------------------------------------------------------
@@ -479,12 +552,12 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     outputLevelDb.store(outputDb);
 
     // ── Analyzer Output Tap (Post-DSP) ──
-    if (analyzerSource == AnalyzerSource::Output)
+    if (state.analyzerSource == AnalyzerSource::Output)
     {
         pushToFifo(processBuffer, numSamples, audioFifo, audioFifoBuffer);
     }
 
-    processOutput(bufferToFill, numSamples, softClipEnabled, saturationAmount);
+    processOutput(bufferToFill, numSamples);
 }
 
 float AudioEngine::DSPCore::measureLevel (const juce::AudioBuffer<SampleType>& buffer, int numSamples) const noexcept
@@ -612,21 +685,15 @@ double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double 
     return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_factor;
 }
 
-void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, bool softClipEnabled, float saturationAmount)
+void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples)
 {
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
     const int procChannels = processBuffer.getNumChannels();
 
-    // 音楽的なサチュレーションを得るためのソフトクリッピングパラメータ
-    // Saturation Amount (0.0 - 1.0) に基づいてパラメータを動的に計算
-    // 0.0: Threshold=0.95, Knee=0.05, Asym=0.0 (Clean)
-    // 1.0: Threshold=0.50, Knee=0.40, Asym=0.1 (Heavy Saturation)
-    const double sat = static_cast<double>(saturationAmount);
-    const double CLIP_THRESHOLD = 0.95 - 0.45 * sat;
-    const double CLIP_KNEE      = 0.05 + 0.35 * sat;
-    const double CLIP_ASYMMETRY = 0.10 * sat;
-    const double CLIP_START = CLIP_THRESHOLD - CLIP_KNEE;
+    // ビット深度に基づくディザリング判定
+    // 32-bit (float/int) 以上はディザ不要。24-bit/16-bit (int) はディザ必要。
+    const bool applyDither = (ditherBitDepth < 32);
 
     //----------------------------------------------------------
     // 出力バッファへコピー & ディザリング (Output & TPDF Dither)
@@ -644,23 +711,15 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
 
             auto& dither = (ch == 0) ? ditherL : ditherR;
 
-            // 条件分岐をループ外にホイストして最適化
-            if (softClipEnabled)
+            if (applyDither)
             {
                 for (int i = 0; i < numSamples; ++i)
-                {
-                    double sample = src[i];
-                    if (std::abs(sample) > CLIP_START)
-                        sample = musicalSoftClip(sample, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
-                    dst[i] = static_cast<float>(dither.process(sample));
-                }
+                    dst[i] = static_cast<float>(dither.process(src[i]));
             }
             else
             {
                 for (int i = 0; i < numSamples; ++i)
-                {
-                    dst[i] = static_cast<float>(dither.process(src[i]));
-                }
+                    dst[i] = static_cast<float>(src[i]);
             }
         }
         else
@@ -760,4 +819,36 @@ void AudioEngine::setSaturationAmount(float amount)
 float AudioEngine::getSaturationAmount() const
 {
     return saturationAmount.load(std::memory_order_relaxed);
+}
+
+void AudioEngine::setOversamplingFactor(int factor)
+{
+    // 0=Auto, 1, 2, 4, 8
+    int newFactor = 0;
+    if (factor == 1 || factor == 2 || factor == 4 || factor == 8)
+    {
+        newFactor = factor;
+    }
+
+    if (manualOversamplingFactor.load() != newFactor)
+    {
+        manualOversamplingFactor.store(newFactor);
+        rebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
+    }
+}
+
+int AudioEngine::getOversamplingFactor() const
+{
+    return manualOversamplingFactor.load();
+}
+
+void AudioEngine::setOversamplingType(OversamplingType type)
+{
+    oversamplingType.store(type);
+    rebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
+}
+
+AudioEngine::OversamplingType AudioEngine::getOversamplingType() const
+{
+    return oversamplingType.load();
 }

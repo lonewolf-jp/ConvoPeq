@@ -6,7 +6,7 @@
 
 Convolver + 20-Band Parametric EQ Standalone Application
 
-Windows 11 x64用パラメトリックイコライザー兼コンボルバー。
+Windows 11 x64用20バンドパラメトリックイコライザー兼コンボルバー。
 JUCE Framework 8.0.12ベースのリアルタイムオーディオ処理アプリケーションです。
 
 ---
