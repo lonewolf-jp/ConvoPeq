@@ -38,6 +38,20 @@ public:
     static constexpr float IR_SILENCE_THRESHOLD = 1.0e-6f;
     static constexpr float MIX_MIN = 0.0f;
     static constexpr float MIX_MAX = 1.0f;
+    static constexpr float SMOOTHING_TIME_MIN_SEC = 0.01f;   // 10ms
+    static constexpr float SMOOTHING_TIME_MAX_SEC = 0.5f;    // 500ms
+    static constexpr float SMOOTHING_TIME_DEFAULT_SEC = 0.05f; // 50ms
+    static constexpr float IR_LENGTH_MIN_SEC = 0.5f;
+    static constexpr float IR_LENGTH_MAX_SEC = 3.0f;
+    static constexpr float IR_LENGTH_DEFAULT_SEC = 1.0f;
+
+    // DelayLine用定数 (Audio Threadでのメモリ確保防止)
+    // IRの最大長(kMaxIRCap)と最大ブロックサイズをカバーする値を設定
+    // 3s @ 192kHz = 576000 samples. Next power of 2 is 1048576.
+    // static constexpr int MAX_IR_LATENCY = 524288; // IRの最大長 (computeTargetIRLengthのkMaxIRCapと一致)
+    static constexpr int MAX_IR_LATENCY = 1048576;
+    static constexpr int MAX_BLOCK_SIZE = 8192;   // AudioEngineのSAFE_MAX_BLOCK_SIZEと一致
+    static constexpr int MAX_TOTAL_DELAY = MAX_IR_LATENCY + MAX_BLOCK_SIZE;
 
     ConvolverProcessor();
     ~ConvolverProcessor();
@@ -79,6 +93,23 @@ public:
     //----------------------------------------------------------
     void setUseMinPhase(bool useMinPhase);
     bool getUseMinPhase() const { return useMinPhase.load(); }
+
+    //----------------------------------------------------------
+    // Smoothing Time
+    //----------------------------------------------------------
+    void setSmoothingTime(float timeSec);
+    float getSmoothingTime() const;
+
+    //----------------------------------------------------------
+    // IR Length
+    //----------------------------------------------------------
+    void setTargetIRLength(float timeSec);
+    float getTargetIRLength() const;
+
+    //----------------------------------------------------------
+    // 状態リセット
+    //----------------------------------------------------------
+    void reset();
 
     //----------------------------------------------------------
     // 状態取得
@@ -136,6 +167,7 @@ private:
     std::vector<std::shared_ptr<StereoConvolver>> trashBin;
     juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
+    std::atomic<bool> isRebuilding { false }; // ← 追加
     std::unique_ptr<LoaderThread> activeLoader;
 
     juce::dsp::ProcessSpec currentSpec = { 48000.0, 512, 2 };
@@ -153,6 +185,8 @@ private:
     std::atomic<float> mixTarget{1.0f}; // UIからのターゲット値 (0.0-1.0)
     juce::SmoothedValue<double> mixSmoother; // オーディオスレッドでの平滑化用
     std::atomic<bool> useMinPhase{false};
+    std::atomic<float> targetIRLengthSec{IR_LENGTH_DEFAULT_SEC};
+    std::atomic<float> smoothingTimeSec{SMOOTHING_TIME_DEFAULT_SEC};
 
     //----------------------------------------------------------
     // IR情報
@@ -181,10 +215,11 @@ private:
     //----------------------------------------------------------
     std::atomic<bool> isPrepared { false };
     int currentBufferSize = 512; // prepareToPlayで更新される
+    double currentSmoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC; // mixSmootherに設定されている現在の時間
 
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
-    static int computeTargetIRLength(double sampleRate, int originalLength);
+    int computeTargetIRLength(double sampleRate, int originalLength) const;
     void applyNewState(std::shared_ptr<StereoConvolver> newConv,
                       const juce::AudioBuffer<double>& loadedIR,
                       double loadedSR,
@@ -192,8 +227,6 @@ private:
                       bool isRebuild,
                       const juce::File& file,
                       const juce::AudioBuffer<double>& displayIR);
-
-    void rebuild(double sampleRate, int maxBlockSize, double irSeconds);
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)

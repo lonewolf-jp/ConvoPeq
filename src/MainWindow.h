@@ -55,6 +55,9 @@ private:
     juce::TextButton saveButton;
     juce::TextButton loadButton;
     juce::TextButton aboutButton;
+    juce::ToggleButton softClipButton;
+    juce::Slider saturationSlider;
+    juce::Label saturationLabel;
     juce::Label cpuUsageLabel;
     std::unique_ptr<juce::DocumentWindow> settingsWindow;
 

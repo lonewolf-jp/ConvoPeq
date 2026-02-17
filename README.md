@@ -2,7 +2,7 @@
 
 ![Platform](https://img.shields.io/badge/Platform-Windows_11_x64-blue)
 ![Framework](https://img.shields.io/badge/Framework-JUCE_8.0.12-green)
-![License](https://img.shields.io/badge/License-JUCE_7-orange)
+![License](https://img.shields.io/badge/License-JUCE_8-orange)
 
 Convolver + 20-Band Parametric EQ Standalone Application
 
@@ -42,8 +42,9 @@ Convolver（畳み込み演算）とパラメトリックEQを組み合わせた
 
 **オーディオエンジン**:
 
-- **DCオフセット除去**: 5HzハイパスフィルタによるDC成分カット
-- **TPDFディザリング**: 量子化ノイズ低減による高音質化
+- **DCオフセット除去**: 3Hzハイパスフィルタ（4次バターワース）によるDC成分カット
+- **Psychoacoustic Dither**: POW-r Type 1 近似アルゴリズムによるノイズシェーピング・ディザリング
+- **Musical Soft Clip**: 真空管ライクな特性を持つソフトクリッパーによる出力保護
 - **アナライザーソース切替**: Input / Output の表示切り替えに対応
 
 ---
@@ -163,8 +164,9 @@ ConvolverとEQの接続順序をリアルタイムに変更可能です。
   - デフォルトで除外: BRAVO-HD, ASIO4ALL, FlexASIO
   - `asio_blacklist.txt`で設定可能
 - **信号処理**:
-  - **DC Blocker**: DCオフセット除去
-  - **TPDF Dither**: 三角確率密度関数によるディザリング
+  - **DC Blocker**: DCオフセット除去 (3Hz HPF)
+  - **Psychoacoustic Dither**: 聴覚特性を考慮したノイズシェーピング
+  - **Soft Clipper**: 音楽的な出力リミッター
 
 ### スペクトラムアナライザー
 

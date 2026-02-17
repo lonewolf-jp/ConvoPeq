@@ -167,9 +167,38 @@ public:
     EQBandParams getBandParams(int band) const;
 
     //----------------------------------------------------------
+    // 状態リセット
+    //----------------------------------------------------------
+    void reset();
+
+    //----------------------------------------------------------
     // デフォルト値リセット
     //----------------------------------------------------------
     void resetToDefaults();
+
+    //----------------------------------------------------------
+    // State Structs
+    //----------------------------------------------------------
+    struct BandNode
+    {
+        EQCoeffsSVF coeffs;
+        bool active;
+        EQChannelMode mode;
+    };
+
+    struct EQState
+    {
+        std::array<EQBandParams, NUM_BANDS> bands;
+        std::array<EQBandType, NUM_BANDS> bandTypes;
+        std::array<EQChannelMode, NUM_BANDS> bandChannelModes;
+        float totalGainDb = 0.0f;
+        bool agcEnabled = false;
+    };
+
+    //----------------------------------------------------------
+    // 状態スナップショット取得 (AudioEngine用)
+    //----------------------------------------------------------
+    std::shared_ptr<EQState> getEQState() const { return currentState.load(std::memory_order_acquire); }
 
     //----------------------------------------------------------
     // プリセット読み込み (AudioEngine::prepareToPlayから呼ばれる)
@@ -198,29 +227,10 @@ public:
     static float getMagnitudeSquared(const EQCoeffsBiquad& coeffs, float freq, float sampleRate) noexcept;
     static float getMagnitudeSquared(const EQCoeffsBiquad& coeffs, const std::complex<double>& z) noexcept;
 
-    struct BandNode
-    {
-        EQCoeffsSVF coeffs;
-        bool active;
-        EQChannelMode mode;
-    };
-
-    struct EQState
-    {
-        std::array<EQBandParams, NUM_BANDS> bands;
-        std::array<EQBandType, NUM_BANDS> bandTypes;
-        std::array<EQChannelMode, NUM_BANDS> bandChannelModes;
-        float totalGainDb = 0.0f;
-        bool agcEnabled = false;
-    };
-
 private:
     //----------------------------------------------------------
     // プライベートヘルパー関数
     //----------------------------------------------------------
-
-    // 係数更新処理
-    void updateCoefficientsIfNeeded(const EQState& state);
 
     // サイレンス検出
     bool isBufferSilent(const juce::AudioBuffer<double>& buffer, int numSamples) const noexcept;
@@ -232,29 +242,28 @@ private:
     // スムージング処理
     std::atomic<std::shared_ptr<EQState>> currentState;
 
-    double agcCurrentGain = 1.0;
-    double agcEnvInput    = 0.0;
-    double agcEnvOutput   = 0.0;
+    std::atomic<double> agcCurrentGain { 1.0 };
+    std::atomic<double> agcEnvInput    { 0.0 };
+    std::atomic<double> agcEnvOutput   { 0.0 };
+    double cachedInputRMS = 0.0; // AGC用の入力レベルキャッシュ
 
     // ── パラメータ補間 (Smoothing) ──
+    std::atomic<float> totalGainDbTarget { 0.0f };
     juce::SmoothedValue<double> smoothTotalGain;
     static constexpr double SMOOTHING_TIME_SEC = 0.05; // 50ms
 
     // ── 係数管理 (Atomic Swap) ──
-    std::atomic<std::shared_ptr<BandNode>> bandNodes[NUM_BANDS];
+    std::array<std::atomic<std::shared_ptr<BandNode>>, NUM_BANDS> bandNodes;
     std::vector<std::shared_ptr<BandNode>> trashBin;
     juce::CriticalSection trashBinLock;
 
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──
     // SVFの2つの積分器状態 (ic1eq, ic2eq)
-    double filterState[MAX_CHANNELS][NUM_BANDS][2] = {};
+    std::array<std::array<std::array<double, 2>, NUM_BANDS>, MAX_CHANNELS> filterState{};
 
     // ── 現在のサンプルレート ──
     // prepareToPlay で更新。Audio Thread で係数再計算に使用。
     int currentSampleRate{ 0 };
-
-    // ── リセットフラグ ──
-    std::atomic<bool> isResetting { false };
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
     void processAGC(juce::AudioBuffer<double>& buffer, int numSamples, const EQState& state);

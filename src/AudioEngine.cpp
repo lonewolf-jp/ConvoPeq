@@ -108,12 +108,15 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
     ActiveBand activeBands[EQProcessor::NUM_BANDS];
     int numActiveBands = 0;
 
+    // 状態スナップショットを取得して一貫性を確保
+    auto eqState = uiEqProcessor.getEQState();
+
     for (int band = 0; band < EQProcessor::NUM_BANDS; ++band)
     {
-        auto params = uiEqProcessor.getBandParams(band);
+        const auto& params = eqState->bands[band];
         if (!params.enabled) continue;
 
-        EQBandType type = uiEqProcessor.getBandType(band);
+        EQBandType type = eqState->bandTypes[band];
 
         // LowPass/HighPass以外でゲインがほぼ0の場合はスキップ
         if (type != EQBandType::LowPass && type != EQBandType::HighPass &&
@@ -122,14 +125,14 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
 
         activeBands[numActiveBands++] = {
             EQProcessor::calcBiquadCoeffs(type, params.frequency, params.gain, params.q, sr),
-            uiEqProcessor.getBandChannelMode(band)
+            eqState->bandChannelModes[band]
         };
     }
 
     float totalGainLinear = 1.0f;
-    if (!uiEqProcessor.getAGCEnabled())
+    if (!eqState->agcEnabled)
     {
-        totalGainLinear = juce::Decibels::decibelsToGain(uiEqProcessor.getTotalGain());
+        totalGainLinear = juce::Decibels::decibelsToGain(eqState->totalGainDb);
     }
 
     // ── 最適化: 有効なバンドがない、かつトータルゲインが0dBの場合は計算をスキップ ──
@@ -158,14 +161,27 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
             const auto& band = activeBands[b];
             float magSq = EQProcessor::getMagnitudeSquared(band.coeffs, z);
 
+            // BUG #6 Fix: NaN/Inf check to prevent propagation
+            if (!std::isfinite(magSq))
+                magSq = 1.0f;
+
             if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Left)
                 totalMagSqL *= magSq;
             if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Right)
                 totalMagSqR *= magSq;
         }
 
-        if (outMagnitudesL) outMagnitudesL[i] = std::sqrt(totalMagSqL);
-        if (outMagnitudesR) outMagnitudesR[i] = std::sqrt(totalMagSqR);
+        // BUG #6 Fix: Final NaN check
+        if (outMagnitudesL)
+        {
+            float val = std::sqrt(totalMagSqL);
+            outMagnitudesL[i] = std::isfinite(val) ? val : 1.0f;
+        }
+        if (outMagnitudesR)
+        {
+            float val = std::sqrt(totalMagSqR);
+            outMagnitudesR[i] = std::isfinite(val) ? val : 1.0f;
+        }
     }
 }
 
@@ -238,9 +254,17 @@ void AudioEngine::rebuild(double sampleRate, int samplesPerBlock)
         const juce::ScopedLock sl(trashBinLock);
         trashBin.push_back(oldDSP);
 
-        // ゴミ箱の掃除 (古いものから削除してメモリ肥大化を防止)
-        if (trashBin.size() > 5)
-            trashBin.erase(trashBin.begin());
+        // ゴミ箱の掃除 (Garbage Collection)
+        // Audio Threadが参照していない(use_count == 1)オブジェクトのみを削除する。
+        // これにより、Audio Thread内でのデストラクタ実行(ロックやメモリ解放)を確実に防ぐ。
+        for (auto it = trashBin.begin(); it != trashBin.end(); )
+        {
+            // trashBinのみが参照を持っている場合、安全に削除できる
+            if ((*it).use_count() == 1)
+                it = trashBin.erase(it);
+            else
+                ++it;
+        }
     }
 }
 
@@ -322,13 +346,15 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
         const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
         const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
+        const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
+        const float satAmt = saturationAmount.load(std::memory_order_relaxed);
 
         // UI表示用の状態更新
         eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
         convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
         // 処理委譲
-        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb, eqBypassed, convBypassed, order, analyzerSource);
+        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb, eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt);
     }
     else
     {
@@ -360,6 +386,17 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int b
     processBuffer.setSize(2, samplesPerBlock);
 }
 
+void AudioEngine::DSPCore::reset()
+{
+    convolver.reset();
+    eq.reset();
+    dcBlockerL.reset();
+    dcBlockerR.reset();
+    ditherL.reset();
+    ditherR.reset();
+    processBuffer.clear();
+}
+
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
                                   juce::AbstractFifo& audioFifo,
                                   juce::AudioBuffer<float>& audioFifoBuffer,
@@ -368,7 +405,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
                                   bool eqBypassed,
                                   bool convBypassed,
                                   ProcessingOrder order,
-                                  AnalyzerSource analyzerSource)
+                                  AnalyzerSource analyzerSource,
+                                  bool softClipEnabled,
+                                  float saturationAmount)
 {
     const int numSamples = bufferToFill.numSamples;
 
@@ -445,7 +484,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         pushToFifo(processBuffer, numSamples, audioFifo, audioFifoBuffer);
     }
 
-    processOutput(bufferToFill, numSamples);
+    processOutput(bufferToFill, numSamples, softClipEnabled, saturationAmount);
 }
 
 float AudioEngine::DSPCore::measureLevel (const juce::AudioBuffer<SampleType>& buffer, int numSamples) const noexcept
@@ -516,21 +555,20 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     //----------------------------------------------------------
     // 入力データを processBuffer (double) にコピー
     //----------------------------------------------------------
-    for (int ch = 0; ch < procChannels; ++ch)
+    // ループ分割による分岐排除と最適化
+    for (int ch = 0; ch < effectiveInputChannels; ++ch)
     {
-        if (ch < effectiveInputChannels)
-        {
-            // float (I/O) -> double (DSP) conversion
-            const float* src = buffer->getReadPointer(ch, startSample);
-            double* dst = processBuffer.getWritePointer(ch);
-            for (int i = 0; i < numSamples; ++i)
-                dst[i] = static_cast<double>(src[i]);
-        }
-        else
-        {
-            // 入力がないチャンネル、または余剰チャンネルはクリア
-            processBuffer.clear(ch, 0, numSamples);
-        }
+        // float (I/O) -> double (DSP) conversion
+        const float* src = buffer->getReadPointer(ch, startSample);
+        double* dst = processBuffer.getWritePointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+            dst[i] = static_cast<double>(src[i]);
+    }
+
+    // 入力がないチャンネル、または余剰チャンネルはクリア
+    for (int ch = effectiveInputChannels; ch < procChannels; ++ch)
+    {
+        processBuffer.clear(ch, 0, numSamples);
     }
 
     // ── Mono -> Stereo 展開 ──
@@ -539,50 +577,56 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     // 後段のステレオエフェクト（Convolver等）での片側無音を防ぐ。
     if (effectiveInputChannels == 1 && procChannels > 1)
     {
-        processBuffer.copyFrom(1, 0, processBuffer, 0, 0, numSamples);
+        const double* src = processBuffer.getReadPointer(0);
+        double* dst = processBuffer.getWritePointer(1);
+        std::memcpy(dst, src, numSamples * sizeof(double));
     }
 }
 
-void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples)
+double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept
+{
+    const double abs_x = std::abs(x);
+    const double clip_start = threshold - knee;
+
+    // 閾値以下はリニア
+    if (abs_x < clip_start)
+        return x;
+
+    const double sign = (x > 0.0) ? 1.0 : -1.0;
+
+    // ソフトニー領域 (ブレンド率計算)
+    double knee_shape = 1.0;
+    if (abs_x < threshold + knee)
+    {
+        // 3次多項式でスムーズなニー
+        const double t = (abs_x - clip_start) / (2.0 * knee);
+        knee_shape = t * t * (3.0 - 2.0 * t); // Smoothstep
+    }
+
+    const double linear = abs_x;
+    // tanhによるソフトクリッピングカーブ
+    const double clipped = threshold + knee * std::tanh((abs_x - threshold) / knee);
+
+    // 非対称性の追加（真空管風）
+    const double asymmetric_factor = 1.0 + asymmetry * sign * knee_shape;
+    return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_factor;
+}
+
+void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, bool softClipEnabled, float saturationAmount)
 {
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
     const int procChannels = processBuffer.getNumChannels();
 
-    // クリッピングパラメータ定義 (一貫性のため)
-    constexpr double CLIP_THRESHOLD = 0.8;
-    constexpr double CLIP_KNEE = 0.1;
-    constexpr double CLIP_ASYMMETRY = 0.03; // わずかに非対称（偶数次倍音）
-    constexpr double CLIP_START = CLIP_THRESHOLD - CLIP_KNEE;
-
-    // 音楽的ソフトクリッピング関数
-    auto musicalSoftClip = [=](double x) noexcept -> double
-    {
-        const double abs_x = std::abs(x);
-
-        // 閾値以下はリニア
-        if (abs_x < CLIP_START)
-            return x;
-
-        const double sign = (x > 0.0) ? 1.0 : -1.0;
-
-        // ソフトニー領域 (ブレンド率計算)
-        double knee_shape = 1.0;
-        if (abs_x < CLIP_THRESHOLD + CLIP_KNEE)
-        {
-            // 3次多項式でスムーズなニー
-            const double t = (abs_x - CLIP_START) / (2.0 * CLIP_KNEE);
-            knee_shape = t * t * (3.0 - 2.0 * t); // Smoothstep
-        }
-
-        const double linear = abs_x;
-        // tanhによるソフトクリッピングカーブ
-        const double clipped = CLIP_THRESHOLD + CLIP_KNEE * std::tanh((abs_x - CLIP_THRESHOLD) / CLIP_KNEE);
-
-        // 非対称性の追加（真空管風）
-        const double asymmetric_factor = 1.0 + CLIP_ASYMMETRY * sign * knee_shape;
-        return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_factor;
-    };
+    // 音楽的なサチュレーションを得るためのソフトクリッピングパラメータ
+    // Saturation Amount (0.0 - 1.0) に基づいてパラメータを動的に計算
+    // 0.0: Threshold=0.95, Knee=0.05, Asym=0.0 (Clean)
+    // 1.0: Threshold=0.50, Knee=0.40, Asym=0.1 (Heavy Saturation)
+    const double sat = static_cast<double>(saturationAmount);
+    const double CLIP_THRESHOLD = 0.95 - 0.45 * sat;
+    const double CLIP_KNEE      = 0.05 + 0.35 * sat;
+    const double CLIP_ASYMMETRY = 0.10 * sat;
+    const double CLIP_START = CLIP_THRESHOLD - CLIP_KNEE;
 
     //----------------------------------------------------------
     // 出力バッファへコピー & ディザリング (Output & TPDF Dither)
@@ -598,18 +642,16 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             const double* src = processBuffer.getReadPointer(ch);
             float* dst = buffer->getWritePointer(ch, startSample);
 
-            // ソフトクリッピング (tanh) による安全リミッターと、24bitターゲットのTPDFディザを適用
-            // 過大入力時のデジタルクリップを防ぎつつ、量子化ノイズを低減してS/N比を改善する
-            if (ch == 0 || ch == 1)
+            auto& dither = (ch == 0) ? ditherL : ditherR;
+
+            // 条件分岐をループ外にホイストして最適化
+            if (softClipEnabled)
             {
-                auto& dither = (ch == 0) ? ditherL : ditherR;
                 for (int i = 0; i < numSamples; ++i)
                 {
                     double sample = src[i];
-                    // 音楽的ソフトクリッピング
-                    if (std::abs(sample) > CLIP_START) // 閾値より少し手前から処理開始
-                        sample = musicalSoftClip(sample);
-                    // ノイズシェーピング適用 (内部で24bit量子化も行われる)
+                    if (std::abs(sample) > CLIP_START)
+                        sample = musicalSoftClip(sample, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
                     dst[i] = static_cast<float>(dither.process(sample));
                 }
             }
@@ -617,10 +659,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             {
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    double sample = src[i];
-                    if (std::abs(sample) > CLIP_START)
-                        sample = musicalSoftClip(sample);
-                    dst[i] = static_cast<float>(sample);
+                    dst[i] = static_cast<float>(dither.process(src[i]));
                 }
             }
         }
@@ -701,4 +740,24 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
 int AudioEngine::getDitherBitDepth() const
 {
     return ditherBitDepth.load();
+}
+
+void AudioEngine::setSoftClipEnabled(bool enabled)
+{
+    softClipEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool AudioEngine::isSoftClipEnabled() const
+{
+    return softClipEnabled.load(std::memory_order_relaxed);
+}
+
+void AudioEngine::setSaturationAmount(float amount)
+{
+    saturationAmount.store(juce::jlimit(0.0f, 1.0f, amount), std::memory_order_relaxed);
+}
+
+float AudioEngine::getSaturationAmount() const
+{
+    return saturationAmount.load(std::memory_order_relaxed);
 }

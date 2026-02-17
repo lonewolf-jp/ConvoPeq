@@ -45,6 +45,38 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     mixLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible(mixLabel);
 
+    // Smoothing Time スライダー
+    smoothingTimeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    smoothingTimeSlider.setRange(ConvolverProcessor::SMOOTHING_TIME_MIN_SEC * 1000.0,
+                                 ConvolverProcessor::SMOOTHING_TIME_MAX_SEC * 1000.0, 1.0);
+    smoothingTimeSlider.setSkewFactorFromMidPoint(100.0); // 対数的な操作感
+    smoothingTimeSlider.setTextValueSuffix(" ms");
+    smoothingTimeSlider.setNumDecimalPlacesToDisplay(0);
+    smoothingTimeSlider.addListener(this);
+    addAndMakeVisible(smoothingTimeSlider);
+
+    // Smoothing Time ラベル
+    smoothingTimeLabel.setText("Smoothing:", juce::dontSendNotification);
+    smoothingTimeLabel.setJustificationType(juce::Justification::centredRight);
+    smoothingTimeLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    addAndMakeVisible(smoothingTimeLabel);
+
+    // IR Length スライダー
+    irLengthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC,
+                            ConvolverProcessor::IR_LENGTH_MAX_SEC, 0.1);
+    irLengthSlider.setSkewFactorFromMidPoint(1.5); // やや対数的な操作感
+    irLengthSlider.setTextValueSuffix(" s");
+    irLengthSlider.setNumDecimalPlacesToDisplay(1);
+    irLengthSlider.addListener(this);
+    addAndMakeVisible(irLengthSlider);
+
+    // IR Length ラベル
+    irLengthLabel.setText("IR Length:", juce::dontSendNotification);
+    irLengthLabel.setJustificationType(juce::Justification::centredRight);
+    irLengthLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    addAndMakeVisible(irLengthLabel);
+
     // IR情報ラベル
     irInfoLabel.setText("No IR loaded", juce::dontSendNotification);
     irInfoLabel.setJustificationType(juce::Justification::centred);
@@ -164,22 +196,42 @@ void ConvolverControlPanel::resized()
     irInfoLabel.setBounds(waveformArea); // 波形エリアに重ねる
     bounds.removeFromTop(8);
 
-    // コントロール行
-    auto controlRow = bounds.removeFromTop(28);
+    // コントロール行1
+    auto controlRow1 = bounds.removeFromTop(28);
+    // コントロール行2
+    auto controlRow2 = bounds.removeFromTop(28);
+    // コントロール行3
+    auto controlRow3 = bounds.removeFromTop(28);
 
     // Load IRボタン
-    loadIRButton.setBounds(controlRow.removeFromLeft(90));
-    controlRow.removeFromLeft(10);
+    loadIRButton.setBounds(controlRow1.removeFromLeft(90));
+    controlRow1.removeFromLeft(10);
 
     // Phase Choice
-    phaseChoiceBox.setBounds(controlRow.removeFromLeft(120));
-    controlRow.removeFromLeft(5);
+    phaseChoiceBox.setBounds(controlRow1.removeFromLeft(120));
+    controlRow1.removeFromLeft(5);
 
     // Dry/Wet Mix
-    mixLabel.setBounds(controlRow.removeFromLeft(65));
-    controlRow.removeFromLeft(5);
-    mixSlider.setBounds(controlRow);
+    mixLabel.setBounds(controlRow1.removeFromLeft(65));
+    controlRow1.removeFromLeft(5);
+    mixSlider.setBounds(controlRow1);
 
+    // 右側のコントロールの開始X座標を計算
+    const int rightControlsX = 90 + 10 + 120 + 5;
+
+    // Smoothing Time (Mixスライダーの下に配置)
+    auto smoothingRow = controlRow2;
+    smoothingRow.removeFromLeft(rightControlsX);
+    smoothingTimeLabel.setBounds(smoothingRow.removeFromLeft(65));
+    smoothingRow.removeFromLeft(5);
+    smoothingTimeSlider.setBounds(smoothingRow);
+
+    // IR Length (Smoothing Timeの下に配置)
+    auto lengthRow = controlRow3;
+    lengthRow.removeFromLeft(rightControlsX);
+    irLengthLabel.setBounds(lengthRow.removeFromLeft(65));
+    lengthRow.removeFromLeft(5);
+    irLengthSlider.setBounds(lengthRow);
     updateWaveformPath();
 }
 
@@ -222,6 +274,18 @@ void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
             static_cast<float>(slider->getValue())
         );
     }
+    else if (slider == &smoothingTimeSlider)
+    {
+        engine.getConvolverProcessor().setSmoothingTime(
+            static_cast<float>(slider->getValue()) / 1000.0f
+        );
+    }
+    else if (slider == &irLengthSlider)
+    {
+        engine.getConvolverProcessor().setTargetIRLength(
+            static_cast<float>(slider->getValue())
+        );
+    }
 }
 
 void ConvolverControlPanel::changeListenerCallback(juce::ChangeBroadcaster*)
@@ -239,6 +303,8 @@ void ConvolverControlPanel::updateIRInfo()
     // UIコントロールをプロセッサの状態と同期
     mixSlider.setValue(convolver.getMix(), juce::dontSendNotification);
     phaseChoiceBox.setSelectedId(convolver.getUseMinPhase() ? 2 : 1, juce::dontSendNotification);
+    smoothingTimeSlider.setValue(convolver.getSmoothingTime() * 1000.0, juce::dontSendNotification);
+    irLengthSlider.setValue(convolver.getTargetIRLength(), juce::dontSendNotification);
 
     if (convolver.isIRLoaded())
     {

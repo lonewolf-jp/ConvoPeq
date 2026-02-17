@@ -115,6 +115,12 @@ public:
     void setDitherBitDepth(int bitDepth);
     int getDitherBitDepth() const;
 
+    void setSoftClipEnabled(bool enabled);
+    bool isSoftClipEnabled() const;
+
+    void setSaturationAmount(float amount);
+    float getSaturationAmount() const;
+
 private:
     //==============================================================================
     // 内部クラス定義
@@ -184,6 +190,7 @@ private:
         DSPCore();
 
         void prepare(double sampleRate, int samplesPerBlock, int bitDepth);
+        void reset();
         void process(const juce::AudioSourceChannelInfo& bufferToFill,
                      juce::AbstractFifo& audioFifo,
                      juce::AudioBuffer<float>& audioFifoBuffer,
@@ -192,7 +199,9 @@ private:
                      bool eqBypassed,
                      bool convBypassed,
                      ProcessingOrder order,
-                     AnalyzerSource analyzerSource);
+                     AnalyzerSource analyzerSource,
+                     bool softClipEnabled,
+                     float saturationAmount);
 
         ConvolverProcessor convolver;
         EQProcessor eq;
@@ -209,7 +218,9 @@ private:
                         juce::AbstractFifo& audioFifo,
                         juce::AudioBuffer<float>& audioFifoBuffer) const;
         void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples);
-        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples);
+        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, bool softClipEnabled, float saturationAmount);
+    private:
+        static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
     };
 
     //----------------------------------------------------------
@@ -241,6 +252,8 @@ private:
     std::atomic<ProcessingOrder> currentProcessingOrder{ProcessingOrder::ConvolverThenEQ};
     std::atomic<AnalyzerSource> currentAnalyzerSource { AnalyzerSource::Output };
     std::atomic<int> ditherBitDepth { 24 };
+    std::atomic<bool> softClipEnabled { true };
+    std::atomic<float> saturationAmount { 0.5f };
 
     // dB変換時の下限値
     static constexpr float LEVEL_METER_MIN_DB = -120.0f;

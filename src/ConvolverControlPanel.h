@@ -44,6 +44,12 @@ private:
     juce::Slider mixSlider;
     juce::Label mixLabel;
 
+    juce::Slider smoothingTimeSlider;
+    juce::Label smoothingTimeLabel;
+
+    juce::Slider irLengthSlider;
+    juce::Label irLengthLabel;
+
     juce::Label irInfoLabel;
 
     //----------------------------------------------------------

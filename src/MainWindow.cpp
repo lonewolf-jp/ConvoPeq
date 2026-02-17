@@ -217,6 +217,31 @@ void MainWindow::createUIComponents()
     aboutButton.setTooltip ("About this application");
     aboutButton.onClick = [this] { showAboutDialog(); };
     addAndMakeVisible (aboutButton);
+
+    // Soft Clip Button
+    softClipButton.setButtonText("Soft Clip");
+    softClipButton.setToggleState(audioEngine.isSoftClipEnabled(), juce::dontSendNotification);
+    softClipButton.setTooltip("Enable/Disable Output Soft Clipper");
+    softClipButton.onClick = [this] {
+        audioEngine.setSoftClipEnabled(softClipButton.getToggleState());
+    };
+    addAndMakeVisible(softClipButton);
+
+    // Saturation Slider
+    saturationSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    saturationSlider.setRange(0.0, 1.0, 0.01);
+    saturationSlider.setValue(audioEngine.getSaturationAmount(), juce::dontSendNotification);
+    saturationSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+    saturationSlider.setTooltip("Saturation Amount (Threshold & Knee)");
+    saturationSlider.onValueChange = [this] {
+        audioEngine.setSaturationAmount(static_cast<float>(saturationSlider.getValue()));
+    };
+    addAndMakeVisible(saturationSlider);
+
+    saturationLabel.setText("Sat:", juce::dontSendNotification);
+    saturationLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    saturationLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(saturationLabel);
 }
 
 void MainWindow::loadSettings()
@@ -264,15 +289,19 @@ void MainWindow::resized()
     auto buttonRow = bounds.removeFromTop (28);
     aboutButton.setBounds (buttonRow.removeFromRight (30).reduced (2, 2));
     showDeviceSelectorButton.setBounds (buttonRow.removeFromRight (140).reduced (2, 2));
-    orderButton.setBounds (buttonRow.removeFromRight (160).reduced (2, 2));
+    orderButton.setBounds (buttonRow.removeFromRight (140).reduced (2, 2));
     loadButton.setBounds (buttonRow.removeFromRight (50).reduced (2, 2));
     saveButton.setBounds (buttonRow.removeFromRight (50).reduced (2, 2));
     convolverBypassButton.setBounds (buttonRow.removeFromRight (80).reduced (2, 2));
     eqBypassButton.setBounds (buttonRow.removeFromRight (80).reduced (2, 2));
-    cpuUsageLabel.setBounds (buttonRow.removeFromRight (80).reduced (2, 2));
+
+    saturationSlider.setBounds(buttonRow.removeFromRight(80).reduced(2, 2));
+    saturationLabel.setBounds(buttonRow.removeFromRight(30).reduced(2, 2));
+    softClipButton.setBounds(buttonRow.removeFromRight(70).reduced(2, 2));
+    cpuUsageLabel.setBounds (buttonRow.removeFromRight (70).reduced (2, 2));
 
     if (convolverPanel)
-        convolverPanel->setBounds (bounds.removeFromTop (160));
+        convolverPanel->setBounds (bounds.removeFromTop (220));
 
     const int eqH = static_cast<int> (bounds.getHeight() * 0.45f);
     if (eqPanel)

@@ -48,40 +48,30 @@ public:
     //----------------------------------------------------------
     double process(double input) noexcept
     {
-        // 1. TPDF (Triangular Probability Density Function) ディザ生成
-        // r1, r2 は [-1.0, 1.0]
-        // nextFloat() returns [0.0, 1.0)
+        // 1. TPDF (三角確率密度関数) ディザ生成
         const double r1 = random.nextDouble() * 2.0 - 1.0;
         const double r2 = random.nextDouble() * 2.0 - 1.0;
-
-        // TPDFノイズ: (r1 - r2) は [-2.0, 2.0] なので 0.5倍して [-1.0, 1.0] に正規化し、振幅を掛ける
         const double tpdf = (r1 - r2) * 0.5 * ditherAmplitude;
 
-        // 2. Error Feedback Noise Shaping
-        // ノイズ伝達関数 (NTF): H(z) = 1 - 2.033 z^-1 + 1.165 z^-2
-        // 入力に加算する補正項: - (H(z) - 1) * E(z)
-        // Correction = - (-2.033 * e1 + 1.165 * e2) = 2.033 * e1 - 1.165 * e2
+        // 2. 過去の量子化誤差をフィードバック (Error Feedback)
+        //    入力信号から、シェーピングされた過去の誤差を減算する。
+        //    これにより、量子化ノイズの周波数特性が変化する（ノイズシェーピング）。
+        const double shapedError = shaping_a1 * state1 + shaping_a2 * state2;
+        const double signalToQuantize = input - shapedError;
 
-        const double shapedError = shaping_a1 * e1 + shaping_a2 * e2;
+        // 3. ディザを加えて量子化
+        const double ditheredSignal = signalToQuantize + tpdf;
+        double quantized = std::round(ditheredSignal * scale) * invScale;
 
-        // ディザ加算とシェーピング済み誤差の減算
-        double current = input + tpdf - shapedError;
+        // 4. 量子化誤差を計算し、次のサンプルのために状態を更新
+        //    誤差 = (量子化後の値) - (量子化前の値)
+        const double error = quantized - ditheredSignal;
+        state2 = state1;
+        state1 = error;
 
-        // 3. 量子化 (Quantize)
-        // ターゲットビット深度のグリッドに合わせて丸める
-        double quantized = std::round(current * scale) * invScale;
-
-        // 4. 誤差計算 (Error Calculation)
-        // Error = Quantized - Ideal
-        double error = quantized - current;
-
-        // 5. 状態更新
-        e2 = e1;
-        e1 = error;
-
-        // Denormal対策 (極小値の循環防止)
-        if (std::abs(e1) < 1.0e-15) e1 = 0.0;
-        if (std::abs(e2) < 1.0e-15) e2 = 0.0;
+        // 5. Denormal対策
+        if (std::abs(state1) < 1.0e-15) state1 = 0.0;
+        if (std::abs(state2) < 1.0e-15) state2 = 0.0;
 
         return quantized;
     }
@@ -91,8 +81,8 @@ public:
     //----------------------------------------------------------
     void reset() noexcept
     {
-        e1 = 0.0;
-        e2 = 0.0;
+        state1 = 0.0;
+        state2 = 0.0;
     }
 
 private:
@@ -106,7 +96,7 @@ private:
     static constexpr double shaping_a1 = 2.033;
     static constexpr double shaping_a2 = -1.165;
 
-    // 誤差履歴 (Error History)
-    double e1 = 0.0;
-    double e2 = 0.0;
+    // 状態変数 (State Variables)
+    double state1 = 0.0;
+    double state2 = 0.0;
 };

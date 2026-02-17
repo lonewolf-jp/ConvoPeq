@@ -17,8 +17,8 @@
 EQProcessor::EQProcessor()
 {
     // 初期係数ノードの作成
-    for (int i = 0; i < NUM_BANDS; ++i)
-        bandNodes[i].store(nullptr);
+    for (auto& node : bandNodes)
+        node.store(nullptr);
 
     resetToDefaults();
 }
@@ -52,17 +52,39 @@ void EQProcessor::resetToDefaults()
         newState->bandTypes[i] = EQBandType::Peaking;
     newState->bandTypes[19] = EQBandType::HighShelf;
 
+    totalGainDbTarget.store(0.0f, std::memory_order_relaxed);
     currentState.store(newState, std::memory_order_release);
 
-    agcCurrentGain = 1.0;
-    agcEnvInput    = 0.0;
-    agcEnvOutput   = 0.0;
+    agcCurrentGain.store(1.0, std::memory_order_relaxed);
+    agcEnvInput.store(0.0, std::memory_order_relaxed);
+    agcEnvOutput.store(0.0, std::memory_order_relaxed);
 
     // 全バンドの係数を更新
     for (int i = 0; i < NUM_BANDS; ++i)
         updateBandNode(i);
 
     sendChangeMessage();
+}
+
+void EQProcessor::reset()
+{
+    // フィルタ状態をリセット
+    for (auto& channelState : filterState)
+    {
+        for (auto& bandState : channelState)
+            bandState.fill(0.0);
+    }
+
+    agcCurrentGain.store(1.0, std::memory_order_relaxed);
+    agcEnvInput.store(0.0, std::memory_order_relaxed);
+    agcEnvOutput.store(0.0, std::memory_order_relaxed);
+
+    auto state = currentState.load(std::memory_order_acquire);
+    if (state)
+    {
+        smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
+        totalGainDbTarget.store(state->totalGainDb, std::memory_order_relaxed);
+    }
 }
 
 //--------------------------------------------------------------
@@ -235,37 +257,30 @@ void EQProcessor::prepareToPlay(int sampleRate, int /*samplesPerBlock*/)
 {
     if (currentSampleRate == sampleRate)
         return;
-
     currentSampleRate = sampleRate;
-
-    // Atomic フラグでガード
-    isResetting.store(true, std::memory_order_release);
-
-    // Audio Threadが退出するのを待機
-    // より正確な待機時間を計算
-    // Audio Threadの現在のブロックサイズとサンプルレートから、最大処理時間を推定
-    const int blockSize = 512; // AudioEngine から取得
-    const double blockTimeMs = (blockSize / (double)sampleRate) * 1000.0;
-    const int waitTimeMs = static_cast<int>(std::ceil(blockTimeMs * 2.0));
-    juce::Thread::sleep(std::max(1, std::min(waitTimeMs, 20))); // 1-20ms
 
     auto state = currentState.load(std::memory_order_acquire);
 
+    // ✅ reset()だけを呼び、Audio Threadでターゲットが設定されるようにする
     smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
-    smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
+    // ✅ atomic targetも同期させる
+    if (state)
+        totalGainDbTarget.store(state->totalGainDb, std::memory_order_relaxed);
 
     // フィルタ状態をリセット
-    std::memset(filterState, 0, sizeof(filterState));
+    for (auto& channelState : filterState)
+    {
+        for (auto& bandState : channelState)
+            bandState.fill(0.0);
+    }
 
-    agcCurrentGain = 1.0;
-    agcEnvInput    = 0.0;
-    agcEnvOutput   = 0.0;
+    agcCurrentGain.store(1.0, std::memory_order_relaxed);
+    agcEnvInput.store(0.0, std::memory_order_relaxed);
+    agcEnvOutput.store(0.0, std::memory_order_relaxed);
 
     // 係数を即座に再計算
     for (int i = 0; i < NUM_BANDS; ++i)
         updateBandNode(i);
-
-    isResetting.store(false, std::memory_order_release);
 }
 
 //--------------------------------------------------------------
@@ -318,6 +333,12 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
 
 void EQProcessor::setTotalGain(float gainDb)
 {
+    // パラメータを安全な範囲にクランプ
+    gainDb = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, gainDb);
+
+    // ✅ Atomicに保存（Audio Threadで読み取る）
+    totalGainDbTarget.store(gainDb, std::memory_order_relaxed);
+
     auto oldState = currentState.load(std::memory_order_acquire);
     auto newState = std::make_shared<EQState>(*oldState);
     newState->totalGainDb = gainDb;
@@ -474,15 +495,10 @@ void EQProcessor::processAGC(juce::AudioBuffer<double>& buffer, int numSamples, 
 {
     const int numChannels = std::min(buffer.getNumChannels(), MAX_CHANNELS);
 
-    // 入力レベル計測 (RMS)
-    double inputRMS = 0.0;
-    for (int ch = 0; ch < numChannels; ++ch)
-    {
-        double rms = buffer.getRMSLevel(ch, 0, numSamples);
-        if (rms > inputRMS) inputRMS = rms;
-    }
+    // ✅ 事前にキャッシュされた入力レベルを使用
+    double inputRMS = cachedInputRMS;
 
-    // フィルタ処理後の出力レベル計測
+    // ✅ フィルタ処理後の出力レベル計測
     double outputRMS = 0.0;
     for (int ch = 0; ch < numChannels; ++ch)
     {
@@ -497,25 +513,35 @@ void EQProcessor::processAGC(juce::AudioBuffer<double>& buffer, int numSamples, 
     if (!std::isfinite(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
     if (!std::isfinite(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
 
-    if (!std::isfinite(agcEnvInput))  agcEnvInput = 0.0;
-    if (!std::isfinite(agcEnvOutput)) agcEnvOutput = 0.0;
-    if (!std::isfinite(agcCurrentGain)) agcCurrentGain = 1.0;
+    // Load atomics
+    double envIn = agcEnvInput.load(std::memory_order_relaxed);
+    double envOut = agcEnvOutput.load(std::memory_order_relaxed);
+    double currentGain = agcCurrentGain.load(std::memory_order_relaxed);
+
+    if (!std::isfinite(envIn))  envIn = 0.0;
+    if (!std::isfinite(envOut)) envOut = 0.0;
+    if (!std::isfinite(currentGain)) currentGain = 1.0;
 
     // 指数移動平均 (EMA) によるエンベロープ検波
-    agcEnvInput  = agcEnvInput  * (1.0 - AGC_ALPHA) + inputRMS  * AGC_ALPHA;
-    agcEnvOutput = agcEnvOutput * (1.0 - AGC_ALPHA) + outputRMS * AGC_ALPHA;
+    envIn  = envIn  * (1.0 - AGC_ALPHA) + inputRMS  * AGC_ALPHA;
+    envOut = envOut * (1.0 - AGC_ALPHA) + outputRMS * AGC_ALPHA;
 
     // ターゲットゲイン計算
-    double targetGain = calculateAGCGain(agcEnvInput, agcEnvOutput);
+    double targetGain = calculateAGCGain(envIn, envOut);
 
     // ゲイン変化のスムーシング
-    agcCurrentGain = agcCurrentGain * (1.0 - AGC_GAIN_SMOOTH) + targetGain * AGC_GAIN_SMOOTH;
+    currentGain = currentGain * (1.0 - AGC_GAIN_SMOOTH) + targetGain * AGC_GAIN_SMOOTH;
+
+    // Store atomics
+    agcEnvInput.store(envIn, std::memory_order_relaxed);
+    agcEnvOutput.store(envOut, std::memory_order_relaxed);
+    agcCurrentGain.store(currentGain, std::memory_order_relaxed);
 
     // ゲイン適用
     // 各チャンネルに対して明示的に適用
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        buffer.applyGain(ch, 0, numSamples, agcCurrentGain);
+        buffer.applyGain(ch, 0, numSamples, currentGain);
     }
 }
 
@@ -545,19 +571,46 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
 {
     juce::ScopedNoDenormals noDenormals;
 
-    // リセット中はスキップ
-    if (isResetting.load(std::memory_order_acquire))
-        return;
-
-    // サイレンス最適化
-    // 入力が無音の場合は処理をスキップし、CPU負荷を低減する
-    // (IIRフィルタのテールはカットされるが、EQ用途では許容範囲とする)
-    if (isBufferSilent(buffer, numSamples))
-        return;
-
     auto state = currentState.load(std::memory_order_acquire); // RCU Load (Lock-free)
 
     const int numChannels = std::min(buffer.getNumChannels(), MAX_CHANNELS);
+
+    // ✅ フィルタ処理前に入力レベルをキャッシュ (AGCが有効な場合のみ)
+    if (state->agcEnabled)
+    {
+        cachedInputRMS = 0.0;
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            // getRMSLevelはAudio Threadで安全
+            double rms = buffer.getRMSLevel(ch, 0, numSamples);
+            if (rms > cachedInputRMS)
+                cachedInputRMS = rms;
+        }
+    }
+
+    // ── 最適化: アクティブなバンドノードを事前にスタックへロード ──
+    // チャンネルごとのループ内で atomic load を繰り返すと負荷が高いため、
+    // 処理開始時に一度だけロードし、shared_ptr で寿命を確保する。
+    struct ActiveBandNode {
+        const BandNode* node;
+        int index;
+    };
+    std::array<ActiveBandNode, NUM_BANDS> activeBands;
+    int numActiveBands = 0;
+
+    // 処理中にノードが削除されないよう shared_ptr で保持
+    std::array<std::shared_ptr<BandNode>, NUM_BANDS> keptAliveNodes;
+
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        auto node = bandNodes[i].load(std::memory_order_acquire);
+        if (node && node->active)
+        {
+            keptAliveNodes[numActiveBands] = node;
+            activeBands[numActiveBands] = { node.get(), i };
+            numActiveBands++;
+        }
+    }
 
     // フィルタバンク適用
     for (int ch = 0; ch < numChannels; ++ch)
@@ -565,17 +618,17 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
         double* data = buffer.getWritePointer(ch);
         if (data == nullptr) continue;
 
-        for (int bandIndex = 0; bandIndex < NUM_BANDS; ++bandIndex)
+        for (int i = 0; i < numActiveBands; ++i)
         {
-            // Atomic load: 係数ポインタを安全に取得
-            auto node = bandNodes[bandIndex].load(std::memory_order_acquire);
-            if (!node || !node->active) continue;
+            const auto& band = activeBands[i];
+            const EQChannelMode mode = band.node->mode;
 
-            const EQChannelMode mode = node->mode;
-            if (mode == EQChannelMode::Left && ch != 0) continue;
-            if (mode == EQChannelMode::Right && ch != 1) continue;
-
-            processBand(data, numSamples, node->coeffs, filterState[ch][bandIndex]);
+            if (mode == EQChannelMode::Stereo ||
+               (mode == EQChannelMode::Left && ch == 0) ||
+               (mode == EQChannelMode::Right && ch == 1))
+            {
+                processBand(data, numSamples, band.node->coeffs, filterState[ch][band.index].data());
+            }
         }
     }
 
@@ -586,15 +639,22 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
     }
     else
     {
+        // ✅ Audio Threadでのみ setTargetValue() を呼ぶ
+        const float targetDb = totalGainDbTarget.load(std::memory_order_relaxed);
+        const double targetGain = juce::Decibels::decibelsToGain<double>(static_cast<double>(targetDb));
+
+        if (std::abs(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
+        {
+            smoothTotalGain.setTargetValue(targetGain);
+        }
+
         const double startGain = smoothTotalGain.getCurrentValue();
         smoothTotalGain.skip(numSamples);
         const double endGain = smoothTotalGain.getCurrentValue();
 
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            buffer.applyGainRamp(ch, 0, numSamples,
-                                 startGain,
-                                 endGain);
+            buffer.applyGainRamp(ch, 0, numSamples, startGain, endGain);
         }
     }
 }
@@ -637,11 +697,14 @@ void EQProcessor::updateBandNode(int band)
     if (oldNode)
         trashBin.push_back(oldNode);
 
-    // ゴミ箱のサイズ制限 (メモリ肥大化防止)
-    // 古いノードから削除する。十分なサイズを確保しておけば、Audio Threadが参照している可能性は極めて低い。
-    if (trashBin.size() > 100)
+    // ゴミ箱の掃除 (Garbage Collection)
+    // Audio Threadが参照していない(use_count == 1)オブジェクトのみを削除する。
+    for (auto it = trashBin.begin(); it != trashBin.end(); )
     {
-        trashBin.erase(trashBin.begin());
+        if ((*it).use_count() == 1)
+            it = trashBin.erase(it);
+        else
+            ++it;
     }
 }
 

@@ -169,7 +169,7 @@ public:
 
         // 3. ターゲット長計算とトリミング
         // 表示用に常に1000ms(1.0s)分のバッファを確保するため、loadedSRではなく現在のsampleRateを使用する
-        int targetLength = ConvolverProcessor::computeTargetIRLength(sampleRate, loadedIR.getNumSamples());
+        int targetLength = owner.computeTargetIRLength(sampleRate, loadedIR.getNumSamples());
         juce::AudioBuffer<double> trimmed(loadedIR.getNumChannels(), targetLength);
         trimmed.clear();
 
@@ -236,10 +236,12 @@ public:
         const double* srcL = trimmed.getReadPointer(0);
         const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
 
-        // メモリコピーによる高速化 (double -> double)
-        // FFTConvolver::Sample は double (FFTCONVOLVER_USE_DOUBLE定義済み)
-        std::memcpy(irL.data(), srcL, targetLength * sizeof(double));
-        std::memcpy(irR.data(), srcR, targetLength * sizeof(double));
+        // 型安全なコピー（Sample型が何であれ動作する）
+        for (int i = 0; i < targetLength; ++i)
+        {
+            irL[i] = static_cast<fftconvolver::Sample>(srcL[i]);
+            irR[i] = static_cast<fftconvolver::Sample>(srcR[i]);
+        }
 
         // 初期化 (blockSizeをセグメントサイズとして使用)
         newConv->init(blockSize, irL.data(), irR.data(), targetLength, irPeakLatency);
@@ -351,20 +353,38 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     // DelayLine準備
     // 最大レイテンシーを多めに確保 (e.g., 2秒)
+    // JUCEの仕様上、prepare()の前にsetMaximumDelayInSamples()を呼ぶ必要がある。
+    // これにより、prepare()が十分なメモリを事前に確保する。
+    delayLine.setMaximumDelayInSamples(MAX_TOTAL_DELAY);
     delayLine.prepare(spec);
-    delayLine.setMaximumDelayInSamples(static_cast<int>(sampleRate * 2.0));
+    delayLine.setDelay(0.0f);
 
     // Dryバッファ確保
     dryBuffer.setSize(2, samplesPerBlock);
     dryBuffer.clear();
 
-    mixSmoother.reset(sampleRate, 0.05); // 50msでスムージング
-    mixSmoother.setCurrentAndTargetValue(mixTarget.load());
+    // スムージング時間の設定
+    currentSmoothingTimeSec = smoothingTimeSec.load();
+    mixSmoother.reset(sampleRate, currentSmoothingTimeSec);
 
     convolutionBuffer.setSize(2, samplesPerBlock);
     convolutionBuffer.clear();
 
     isPrepared.store(true, std::memory_order_release);
+}
+
+void ConvolverProcessor::reset()
+{
+    auto conv = convolution.load();
+    if (conv)
+    {
+        conv->convolvers[0].resetInput();
+        conv->convolvers[1].resetInput();
+    }
+    delayLine.reset();
+    dryBuffer.clear();
+    convolutionBuffer.clear();
+    mixSmoother.setCurrentAndTargetValue(static_cast<double>(mixTarget.load()));
 }
 
 //--------------------------------------------------------------
@@ -515,12 +535,21 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     // ファイル指定なし: 現在のデータでリビルド (SR変更時など)
     bool isRebuild = (irFile == juce::File());
 
-    if (!isRebuild && !irFile.existsAsFile())
+    if (isRebuild)
     {
-        return false;
+        if (isRebuilding.exchange(true, std::memory_order_acquire))
+        {
+            DBG("ConvolverProcessor::rebuild (via loadImpulseResponse) already in progress, skipping");
+            return true;
+        }
+        if (originalIR.getNumSamples() == 0 || originalIRSampleRate <= 0.0)
+        {
+            isRebuilding.store(false, std::memory_order_release);
+            return false;
+        }
     }
 
-    if (isRebuild && originalIR.getNumSamples() == 0)
+    if (!isRebuild && !irFile.existsAsFile())
     {
         return false;
     }
@@ -585,9 +614,14 @@ void ConvolverProcessor::applyNewState(std::shared_ptr<StereoConvolver> newConv,
         trashBin.push_back(oldConv);
 
         // ゴミ箱のサイズ制限 (メモリ肥大化防止)
-        if (trashBin.size() > 5)
+        // Audio Threadが参照していないオブジェクトのみを削除し、
+        // Audio Threadでのメモリ解放(free)を防ぐ。
+        for (auto it = trashBin.begin(); it != trashBin.end(); )
         {
-            trashBin.erase(trashBin.begin());
+            if ((*it).use_count() == 1)
+                it = trashBin.erase(it);
+            else
+                ++it;
         }
     }
 
@@ -596,6 +630,7 @@ void ConvolverProcessor::applyNewState(std::shared_ptr<StereoConvolver> newConv,
     currentSampleRate.store(currentSpec.sampleRate);
 
     isLoading.store(false);
+    isRebuilding.store(false, std::memory_order_release); // Reset rebuild flag
     sendChangeMessage();
 }
 
@@ -603,12 +638,12 @@ void ConvolverProcessor::applyNewState(std::shared_ptr<StereoConvolver> newConv,
 // computeTargetIRLength
 // 1.0秒固定長を計算し、最大長で制限する
 //--------------------------------------------------------------
-int ConvolverProcessor::computeTargetIRLength(double sampleRate, int originalLength)
+int ConvolverProcessor::computeTargetIRLength(double sampleRate, int /*originalLength*/) const
 {
-    static constexpr double kTargetIRTimeSec = 1.0;
-    static constexpr int kMaxIRCap = 524288;
+    const double targetIRTimeSec = targetIRLengthSec.load();
+    static constexpr int kMaxIRCap = MAX_IR_LATENCY;
 
-    int target = static_cast<int>(sampleRate * kTargetIRTimeSec);
+    int target = static_cast<int>(sampleRate * targetIRTimeSec);
 
     target = std::min(target, kMaxIRCap);
 
@@ -751,6 +786,8 @@ juce::ValueTree ConvolverProcessor::getState() const
     v.setProperty ("mix", mixTarget.load(), nullptr);
     v.setProperty ("bypassed", bypassed.load(), nullptr);
     v.setProperty ("useMinPhase", useMinPhase.load(), nullptr);
+    v.setProperty ("smoothingTime", smoothingTimeSec.load(), nullptr);
+    v.setProperty ("irLength", targetIRLengthSec.load(), nullptr);
     {
         const juce::ScopedLock sl(irFileLock);
         v.setProperty ("irPath", currentIrFile.getFullPathName(), nullptr);
@@ -763,6 +800,8 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
     if (v.hasProperty ("mix")) setMix (v.getProperty ("mix"));
     if (v.hasProperty ("bypassed")) setBypass (v.getProperty ("bypassed"));
     if (v.hasProperty ("useMinPhase")) setUseMinPhase (v.getProperty ("useMinPhase"));
+    if (v.hasProperty ("smoothingTime")) setSmoothingTime (v.getProperty ("smoothingTime"));
+    if (v.hasProperty ("irLength")) setTargetIRLength (v.getProperty ("irLength"));
 
     // IRパスの自動復元はここでは行いません。
     // AudioEngine::rebuild時にsetStateが呼ばれた際の無限ループや二重読み込みを防ぐため、
@@ -786,6 +825,8 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     mixTarget.store(other.mixTarget.load(), std::memory_order_release);
     bypassed.store(other.bypassed.load(), std::memory_order_release);
     useMinPhase.store(other.useMinPhase.load(), std::memory_order_release);
+    smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
+    targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
 
     // Convolutionオブジェクトの同期 (Atomic)
     auto otherConv = other.convolution.load(std::memory_order_acquire);
@@ -814,26 +855,13 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
     // (A) Denormal対策 (重要)
     juce::ScopedNoDenormals noDenormals;
 
-    // ── (B) 無音ブロック最適化 ──
-    // 入力が無音の場合は処理をスキップ
-    bool isSilent = true;
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-    {
-        if (buffer.getMagnitude(ch, 0, numSamples) > 1.0e-8)
-        {
-            isSilent = false;
-            break;
-        }
-    }
-    if (isSilent) return;
-
     // ── Step 1: RCU State Load (Lock-free / Wait-free) ──
     auto conv = convolution.load(std::memory_order_acquire);
 
     if (conv)
     {
         // 処理遅延(ブロックサイズ) + IR遅延(ピーク位置)
-        const int totalLatency = conv->latency + conv->irLatency;
+        const int totalLatency = std::min(conv->latency + conv->irLatency, MAX_TOTAL_DELAY);
         delayLine.setDelay(static_cast<float>(totalLatency));
         currentLatency.store(totalLatency);
     }
@@ -853,14 +881,35 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
         return;
 
     // ── Step 4: パラメータ更新と最適化 ──
-    mixSmoother.setTargetValue(static_cast<double>(mixTarget.load(std::memory_order_relaxed)));
+    // Audio Threadでのみ setTargetValue() を呼ぶことでスレッドセーフティを確保
+    const double targetMixValue = static_cast<double>(mixTarget.load(std::memory_order_relaxed));
+    if (std::abs(mixSmoother.getTargetValue() - targetMixValue) > 0.001)
+    {
+        mixSmoother.setTargetValue(targetMixValue);
+    }
 
-    const double currentMix = mixSmoother.getTargetValue();
+    // Smoothing Timeの更新 (Audio Thread-safe)
+    // UIスレッドで変更された値を検出し、SmoothedValueのランプタイムを再設定する。
+    // reset()は内部係数を再計算するだけで、メモリ確保やロックは行わないため安全。
+    // Smoothing Timeの更新
+    const double newSmoothingTime = smoothingTimeSec.load(std::memory_order_relaxed);
+    if (std::abs(currentSmoothingTimeSec - newSmoothingTime) > 0.0001)
+    {
+        // reset()を呼ぶと現在値がリセットされる可能性があるため、
+        // 現在値とターゲット値を保持したままランプ時間のみ更新する手順を踏む
+        double currentVal = mixSmoother.getCurrentValue();
+        double targetVal = mixSmoother.getTargetValue();
+        mixSmoother.reset(currentSpec.sampleRate, newSmoothingTime);
+        mixSmoother.setCurrentAndTargetValue(currentVal);
+        mixSmoother.setTargetValue(targetVal);
+        currentSmoothingTimeSec = newSmoothingTime;
+    }
+
     const bool isSmoothing = mixSmoother.isSmoothing();
 
     // ── 最適化: 処理内容をミックス比率に応じて決定 ──
-    const bool needsConvolution = isSmoothing || currentMix > 0.001f;
-    const bool needsDrySignal   = isSmoothing || currentMix < 0.999f;
+    const bool needsConvolution = isSmoothing || targetMixValue > 0.001;
+    const bool needsDrySignal   = isSmoothing || targetMixValue < 0.999;
 
     // ── Step 5: Dry信号生成 ──
     // DelayLineの内部状態（履歴）を維持するため、Dry信号が不要な場合(100% Wet)でも常に処理を実行する。
@@ -873,26 +922,29 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
         delayLine.process(delayContext);
     }
 
-    // ── Step 6: Wet信号生成 (必要な場合のみ) ──
-    if (needsConvolution)
+    // ── Step 6: Wet信号生成 ──
+    // 常にコンボリューションを実行し、FFTConvolverの内部状態(オーバーラップバッファ)を維持する。
+    // これにより、Mixを0%から上げた際のグリッチを防ぐ。
+    // FFTConvolverを使用 (double精度)
+    for (int ch = 0; ch < procChannels; ++ch)
     {
-        // FFTConvolverを使用 (double精度)
-        for (int ch = 0; ch < procChannels; ++ch)
-        {
-            const double* input = buffer.getReadPointer(ch);
-            double* dst = convolutionBuffer.getWritePointer(ch);
-            conv->convolvers[ch].process(input, dst, numSamples);
-        }
-
-        // Wet信号に-6dBのヘッドルームを確保 (より保守的なクリッピング防止)
-        convolutionBuffer.applyGain(0.5f);
+        const double* input = buffer.getReadPointer(ch);
+        double* dst = convolutionBuffer.getWritePointer(ch);
+        conv->convolvers[ch].process(input, dst, numSamples);
     }
+
+    // Wet信号に-6dBのヘッドルームを確保 (より保守的なクリッピング防止)
+    convolutionBuffer.applyGain(0.5f);
 
     // ── Step 7: Dry/Wet Mix ──
     if (!needsConvolution) // 100% Dry
     {
         for (int ch = 0; ch < procChannels; ++ch)
-            buffer.copyFrom(ch, 0, dryBuffer, ch, 0, numSamples);
+        {
+            const double* src = dryBuffer.getReadPointer(ch);
+            double* dst = buffer.getWritePointer(ch);
+            std::memcpy(dst, src, numSamples * sizeof(double));
+        }
     }
     else if (!needsDrySignal) // 100% Wet
     {
@@ -934,7 +986,7 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
         }
         else
         {
-            const double mixValue = mixSmoother.getTargetValue();
+            const double mixValue = targetMixValue;
             const double wetGain = std::sin(mixValue * juce::MathConstants<double>::halfPi);
             const double dryGain = std::cos(mixValue * juce::MathConstants<double>::halfPi);
 
@@ -949,18 +1001,6 @@ void ConvolverProcessor::process(juce::AudioBuffer<double>& buffer, int numSampl
             }
         }
     }
-}
-
-//--------------------------------------------------------------
-// rebuild (Message Thread / Helper)
-//--------------------------------------------------------------
-void ConvolverProcessor::rebuild(double sampleRate, int maxBlockSize, double irSeconds)
-{
-    // この関数はLoaderThreadから呼び出されることを想定しているが、
-    // 実際にはLoaderThread内でcreateConfiguredConvolutionを使用しているため、
-    // ここではインターフェースとしての実装を提供する。
-    // 必要に応じて、同期的なリビルド処理を実装することも可能。
-    (void)sampleRate; (void)maxBlockSize; (void)irSeconds;
 }
 
 //--------------------------------------------------------------
@@ -982,6 +1022,42 @@ float ConvolverProcessor::getMix() const
     return mixTarget.load();
 }
 
+void ConvolverProcessor::setTargetIRLength(float timeSec)
+{
+    float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, IR_LENGTH_MAX_SEC, timeSec);
+    if (std::abs(targetIRLengthSec.load() - clampedTime) > 1e-5f)
+    {
+        targetIRLengthSec.store(clampedTime);
+        sendChangeMessage();
+
+        // IRがロードされている場合、メモリ上のデータを使ってリビルドする (Disk I/O回避)
+        if (isIRLoaded())
+        {
+            loadImpulseResponse(juce::File()); // 空のファイルを渡すとリビルドモードになる
+        }
+    }
+}
+
+void ConvolverProcessor::setSmoothingTime(float timeSec)
+{
+    float clampedTime = juce::jlimit(SMOOTHING_TIME_MIN_SEC, SMOOTHING_TIME_MAX_SEC, timeSec);
+    if (std::abs(smoothingTimeSec.load() - clampedTime) > 1e-5f)
+    {
+        smoothingTimeSec.store(clampedTime);
+        sendChangeMessage();
+    }
+}
+
+float ConvolverProcessor::getTargetIRLength() const
+{
+    return targetIRLengthSec.load();
+}
+
+float ConvolverProcessor::getSmoothingTime() const
+{
+    return smoothingTimeSec.load();
+}
+
 void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
 {
     if (useMinPhase.load() != shouldUseMinPhase)
@@ -990,14 +1066,9 @@ void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
         sendChangeMessage();
 
         // 設定変更時にIRがロード済みなら再ロードして変換を適用
-        juce::File fileToLoad;
+        if (isIRLoaded())
         {
-            const juce::ScopedLock sl(irFileLock);
-            fileToLoad = currentIrFile;
-    }
-        if (fileToLoad.existsAsFile())
-        {
-            loadImpulseResponse(fileToLoad);
+            loadImpulseResponse(juce::File()); // リビルドモード
         }
     }
 }
