@@ -84,13 +84,10 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
                          juce::Colours::orange.withAlpha(0.8f));
     irInfoLabel.setFont(juce::FontOptions(13.0f, juce::Font::bold));
     addAndMakeVisible(irInfoLabel);
-
-    engine.getConvolverProcessor().addChangeListener(this);
 }
 
 ConvolverControlPanel::~ConvolverControlPanel()
 {
-    engine.getConvolverProcessor().removeChangeListener(this);
 }
 
 //--------------------------------------------------------------
@@ -196,39 +193,36 @@ void ConvolverControlPanel::resized()
     irInfoLabel.setBounds(waveformArea); // 波形エリアに重ねる
     bounds.removeFromTop(8);
 
-    // コントロール行1
+    // 3つのコントロール行を定義
     auto controlRow1 = bounds.removeFromTop(28);
-    // コントロール行2
     auto controlRow2 = bounds.removeFromTop(28);
-    // コントロール行3
     auto controlRow3 = bounds.removeFromTop(28);
 
-    // Load IRボタン
+    // --- 1行目 ---
     loadIRButton.setBounds(controlRow1.removeFromLeft(90));
     controlRow1.removeFromLeft(10);
 
-    // Phase Choice
+    // 位相選択
     phaseChoiceBox.setBounds(controlRow1.removeFromLeft(120));
     controlRow1.removeFromLeft(5);
 
-    // Dry/Wet Mix
+    // Dry/Wetミックス
     mixLabel.setBounds(controlRow1.removeFromLeft(65));
     controlRow1.removeFromLeft(5);
     mixSlider.setBounds(controlRow1);
 
-    // 右側のコントロールの開始X座標を計算
-    const int rightControlsX = 90 + 10 + 120 + 5;
-
-    // Smoothing Time (Mixスライダーの下に配置)
+    // --- 2行目 ---
+    // スムージング時間 (Mixスライダーの下に配置)
     auto smoothingRow = controlRow2;
-    smoothingRow.removeFromLeft(rightControlsX);
+    smoothingRow.removeFromLeft(phaseChoiceBox.getRight() + 5);
     smoothingTimeLabel.setBounds(smoothingRow.removeFromLeft(65));
     smoothingRow.removeFromLeft(5);
     smoothingTimeSlider.setBounds(smoothingRow);
 
-    // IR Length (Smoothing Timeの下に配置)
+    // --- 3行目 ---
+    // IR長 (Smoothing Timeの下に配置)
     auto lengthRow = controlRow3;
-    lengthRow.removeFromLeft(rightControlsX);
+    lengthRow.removeFromLeft(phaseChoiceBox.getRight() + 5);
     irLengthLabel.setBounds(lengthRow.removeFromLeft(65));
     lengthRow.removeFromLeft(5);
     irLengthSlider.setBounds(lengthRow);
@@ -286,11 +280,6 @@ void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
             static_cast<float>(slider->getValue())
         );
     }
-}
-
-void ConvolverControlPanel::changeListenerCallback(juce::ChangeBroadcaster*)
-{
-    updateIRInfo();
 }
 
 //--------------------------------------------------------------

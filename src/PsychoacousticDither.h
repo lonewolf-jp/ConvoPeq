@@ -14,16 +14,17 @@
 
 #include <JuceHeader.h>
 #include <cmath>
+#include <optional>
 
 class PsychoacousticDither
 {
 public:
     static constexpr int DEFAULT_BIT_DEPTH = 24;
 
-    PsychoacousticDither()
+    explicit PsychoacousticDither(std::optional<uint64_t> seed = std::nullopt)
     {
-        // ステレオチャンネル間で相関を持たないようにランダムシードを設定
-        random.setSeedRandomly();
+        // シードの初期化 (SplitMix64による非相関化)
+        initialiseSeeds(seed);
     }
 
     //----------------------------------------------------------
@@ -46,17 +47,20 @@ public:
     //----------------------------------------------------------
     // 処理: ノイズシェーピングディザを適用して量子化
     //----------------------------------------------------------
-    double process(double input) noexcept
+    double process(double input, int channel) noexcept
     {
+        // チャンネルに応じた乱数生成器と状態変数を選択
+        juce::Random& random = (channel == 0) ? randomL : randomR;
+        double& s1 = (channel == 0) ? state1L : state1R;
+        double& s2 = (channel == 0) ? state2L : state2R;
+
         // 1. TPDF (三角確率密度関数) ディザ生成
         const double r1 = random.nextDouble() * 2.0 - 1.0;
         const double r2 = random.nextDouble() * 2.0 - 1.0;
         const double tpdf = (r1 - r2) * 0.5 * ditherAmplitude;
 
         // 2. 過去の量子化誤差をフィードバック (Error Feedback)
-        //    入力信号から、シェーピングされた過去の誤差を減算する。
-        //    これにより、量子化ノイズの周波数特性が変化する（ノイズシェーピング）。
-        const double shapedError = shaping_a1 * state1 + shaping_a2 * state2;
+        const double shapedError = shaping_a1 * s1 + shaping_a2 * s2;
         const double signalToQuantize = input - shapedError;
 
         // 3. ディザを加えて量子化
@@ -66,12 +70,12 @@ public:
         // 4. 量子化誤差を計算し、次のサンプルのために状態を更新
         //    誤差 = (量子化後の値) - (量子化前の値)
         const double error = quantized - ditheredSignal;
-        state2 = state1;
-        state1 = error;
+        s2 = s1;
+        s1 = error;
 
         // 5. Denormal対策
-        if (std::abs(state1) < 1.0e-15) state1 = 0.0;
-        if (std::abs(state2) < 1.0e-15) state2 = 0.0;
+        if (std::abs(s1) < 1.0e-15) s1 = 0.0;
+        if (std::abs(s2) < 1.0e-15) s2 = 0.0;
 
         return quantized;
     }
@@ -81,12 +85,15 @@ public:
     //----------------------------------------------------------
     void reset() noexcept
     {
-        state1 = 0.0;
-        state2 = 0.0;
+        state1L = 0.0;
+        state2L = 0.0;
+        state1R = 0.0;
+        state2R = 0.0;
     }
 
 private:
-    juce::Random random;
+    juce::Random randomL;
+    juce::Random randomR;
     double scale = 8388608.0;
     double invScale = 1.0 / 8388608.0;
     double ditherAmplitude = 1.0 / 8388608.0;
@@ -97,6 +104,37 @@ private:
     static constexpr double shaping_a2 = -1.165;
 
     // 状態変数 (State Variables)
-    double state1 = 0.0;
-    double state2 = 0.0;
+    double state1L = 0.0;
+    double state2L = 0.0;
+    double state1R = 0.0;
+    double state2R = 0.0;
+
+    // SplitMix64 PRNG (シード生成用)
+    static uint64_t splitmix64(uint64_t& x)
+    {
+        x += 0x9E3779B97F4A7C15ULL;
+        uint64_t z = x;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return z ^ (z >> 31);
+    }
+
+    // シード初期化
+    void initialiseSeeds(std::optional<uint64_t> seed)
+    {
+        uint64_t baseSeed;
+
+        if (seed.has_value())
+            baseSeed = seed.value();
+        else
+            baseSeed = (uint64_t)juce::Random::getSystemRandom().nextInt64();
+
+        uint64_t s = baseSeed;
+
+        uint64_t seedL = splitmix64(s);
+        uint64_t seedR = splitmix64(s);
+
+        randomL.setSeed(seedL);
+        randomR.setSeed(seedR);
+    }
 };

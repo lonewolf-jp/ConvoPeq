@@ -98,6 +98,16 @@ struct EQCoeffsBiquad
 class EQProcessor : public juce::ChangeBroadcaster
 {
 public:
+    class Listener
+    {
+    public:
+        virtual ~Listener() = default;
+        virtual void eqParamsChanged(EQProcessor* processor) = 0;
+    };
+
+    void addListener(Listener* listener) { listeners.add(listener); }
+    void removeListener(Listener* listener) { listeners.remove(listener); }
+
     static constexpr int NUM_BANDS        = 20;  // 20バンドパラメトリックEQ
     static constexpr int MAX_CHANNELS     = 2;   // ステレーオ対応
 
@@ -137,7 +147,11 @@ public:
     // process: オーディオスレッドから呼ばれる
     // ロック・new・I/O・待機（IR再ロード等）禁止
     //----------------------------------------------------------
-    void process(juce::AudioBuffer<double>& buffer, int numSamples);
+    void process(juce::dsp::AudioBlock<double>& block);
+
+    // バイパス制御
+    void setBypass(bool shouldBypass) { bypassed.store(shouldBypass); }
+    bool isBypassed() const { return bypassed.load(); }
 
     //----------------------------------------------------------
     // パラメータ変更 (UIスレッドから呼ぶ)
@@ -192,13 +206,15 @@ public:
         std::array<EQBandType, NUM_BANDS> bandTypes;
         std::array<EQChannelMode, NUM_BANDS> bandChannelModes;
         float totalGainDb = 0.0f;
-        bool agcEnabled = false;
     };
 
     //----------------------------------------------------------
     // 状態スナップショット取得 (AudioEngine用)
     //----------------------------------------------------------
     std::shared_ptr<EQState> getEQState() const { return currentState.load(std::memory_order_acquire); }
+
+    // 他のインスタンスから状態を同期 (AudioEngine用)
+    void syncStateFrom(const EQProcessor& other);
 
     //----------------------------------------------------------
     // プリセット読み込み (AudioEngine::prepareToPlayから呼ばれる)
@@ -242,6 +258,9 @@ private:
     // スムージング処理
     std::atomic<std::shared_ptr<EQState>> currentState;
 
+    juce::ListenerList<Listener> listeners;
+
+    std::atomic<bool> agcEnabled { false };
     std::atomic<double> agcCurrentGain { 1.0 };
     std::atomic<double> agcEnvInput    { 0.0 };
     std::atomic<double> agcEnvOutput   { 0.0 };
@@ -260,13 +279,14 @@ private:
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──
     // SVFの2つの積分器状態 (ic1eq, ic2eq)
     std::array<std::array<std::array<double, 2>, NUM_BANDS>, MAX_CHANNELS> filterState{};
+    std::atomic<bool> bypassed { false };
 
     // ── 現在のサンプルレート ──
     // prepareToPlay で更新。Audio Thread で係数再計算に使用。
     int currentSampleRate{ 0 };
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
-    void processAGC(juce::AudioBuffer<double>& buffer, int numSamples, const EQState& state);
+    void processAGC(juce::dsp::AudioBlock<double>& block);
     double calculateAGCGain(double inputEnv, double outputEnv) const noexcept;
 
     // ── SVF係数計算 (Private Helpers) ──

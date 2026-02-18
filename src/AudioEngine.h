@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cstring>
 #include <array>
+#include <juce_dsp/juce_dsp.h>
 
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
@@ -28,7 +29,9 @@
 
 class AudioEngine : public juce::AudioSource,
                   public juce::ChangeBroadcaster,
-                  private juce::ChangeListener
+                  private juce::ChangeListener,
+                  private EQProcessor::Listener,
+                  private ConvolverProcessor::Listener
 {
 public:
     using SampleType = double; // 内部DSP精度 (JUCE Best Practice)
@@ -45,6 +48,12 @@ public:
         Output
     };
 
+    enum class OversamplingType
+    {
+        IIR,
+        LinearPhase
+    };
+
     class Listener
     {
     public:
@@ -53,7 +62,7 @@ public:
     };
 
     // FIFO設定
-    static constexpr int FIFO_SIZE = 16384;  // Lock-free FIFO サイズ
+    static constexpr int FIFO_SIZE = 32768;  // Lock-free FIFO サイズ (推奨: FFTサイズ * 8)
 
     // ── 安全性制限 ──
     static constexpr double SAFE_MIN_SAMPLE_RATE = 8000.0;
@@ -74,6 +83,8 @@ public:
     void releaseResources() override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
+    void eqParamsChanged(EQProcessor* processor) override;
+    void convolverParamsChanged(ConvolverProcessor* processor) override;
 
     //----------------------------------------------------------
     // 外部インターフェース (Message Thread)
@@ -120,6 +131,12 @@ public:
 
     void setSaturationAmount(float amount);
     float getSaturationAmount() const;
+
+    void setOversamplingFactor(int factor);
+    int getOversamplingFactor() const;
+
+    void setOversamplingType(OversamplingType type);
+    OversamplingType getOversamplingType() const;
 
 private:
     //==============================================================================
@@ -187,26 +204,32 @@ private:
     //----------------------------------------------------------
     struct DSPCore
     {
+        struct ProcessingState
+        {
+            bool eqBypassed;
+            bool convBypassed;
+            ProcessingOrder order;
+            AnalyzerSource analyzerSource;
+            bool softClipEnabled;
+            float saturationAmount;
+        };
+
         DSPCore();
 
-        void prepare(double sampleRate, int samplesPerBlock, int bitDepth);
+        void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType);
         void reset();
-        void process(const juce::AudioSourceChannelInfo& bufferToFill,
-                     juce::AbstractFifo& audioFifo,
-                     juce::AudioBuffer<float>& audioFifoBuffer,
-                     std::atomic<float>& inputLevelDb,
-                     std::atomic<float>& outputLevelDb,
-                     bool eqBypassed,
-                     bool convBypassed,
-                     ProcessingOrder order,
-                     AnalyzerSource analyzerSource,
-                     bool softClipEnabled,
-                     float saturationAmount);
+        void process(const juce::AudioSourceChannelInfo& bufferToFill, juce::AbstractFifo& audioFifo,
+                     juce::AudioBuffer<float>& audioFifoBuffer, std::atomic<float>& inputLevelDb,
+                     std::atomic<float>& outputLevelDb, const ProcessingState& state);
 
         ConvolverProcessor convolver;
         EQProcessor eq;
         DCBlocker dcBlockerL, dcBlockerR;
-        PsychoacousticDither ditherL, ditherR;
+        PsychoacousticDither dither;
+
+        std::unique_ptr<juce::dsp::Oversampling<double>> oversampling;
+        size_t oversamplingFactor = 1;
+        int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
 
         juce::AudioBuffer<SampleType> processBuffer;
         int maxSamplesPerBlock = 0;
@@ -218,7 +241,7 @@ private:
                         juce::AbstractFifo& audioFifo,
                         juce::AudioBuffer<float>& audioFifoBuffer) const;
         void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples);
-        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, bool softClipEnabled, float saturationAmount);
+        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples);
     private:
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
     };
@@ -251,9 +274,11 @@ private:
     std::atomic<bool> convBypassActive { false };
     std::atomic<ProcessingOrder> currentProcessingOrder{ProcessingOrder::ConvolverThenEQ};
     std::atomic<AnalyzerSource> currentAnalyzerSource { AnalyzerSource::Output };
-    std::atomic<int> ditherBitDepth { 24 };
+    std::atomic<int> ditherBitDepth { 0 }; // 0 = 未初期化 (DeviceSettingsで最大値に設定される)
     std::atomic<bool> softClipEnabled { true };
     std::atomic<float> saturationAmount { 0.5f };
+    std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
+    std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
 
     // dB変換時の下限値
     static constexpr float LEVEL_METER_MIN_DB = -120.0f;

@@ -38,8 +38,8 @@ public:
     {
         for (auto& b : blacklist)
         {
-            // より正確な比較のために、文字列全体が一致するか確認 (More robust string comparison)
-            if (deviceName.equalsIgnoreCase(b))
+            // バージョン番号や接尾辞（"v2"など）に対応するため、部分一致を使用
+            if (deviceName.containsIgnoreCase(b))
                 return true;
         }
 

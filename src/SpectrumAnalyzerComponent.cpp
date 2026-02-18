@@ -56,9 +56,10 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     engine.addChangeListener(this);
     engine.getEQProcessor().addChangeListener(this);
+    engine.getEQProcessor().addListener(this);
     updateEQData(); // 初期状態のEQカーブを計算
 
-    startTimerHz(30); // 30fps for smoother UI and stable FIFO consumption
+    startTimerHz(60); // 60fps for smoother UI and stable FIFO consumption
 }
 
 //--------------------------------------------------------------
@@ -69,6 +70,7 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
     stopTimer();
     engine.removeChangeListener(this);
     engine.getEQProcessor().removeChangeListener(this);
+    engine.getEQProcessor().removeListener(this);
 }
 
 //--------------------------------------------------------------
@@ -91,21 +93,48 @@ void SpectrumAnalyzerComponent::timerCallback()
     // FIFOの利用可能データ数をチェック
     const int available = engine.getFifoNumReady();
     // BUG #7 Fix: Ensure enough data is available (wait for full FFT size to prevent underrun glitches)
-    const int required = NUM_FFT_POINTS;
+    const int required = OVERLAP_SAMPLES;
 
     // データ不足 → スキップ (データ不足の場合は何もしない)
-    if (available >= required)
+    if (available < required)
     {
-        // 1. 既存データを左にシフト (古いデータを破棄)
-        std::memmove(fftTimeDomainBuffer.data(),
-                     fftTimeDomainBuffer.data() + OVERLAP_SAMPLES,
-                     (NUM_FFT_POINTS - OVERLAP_SAMPLES) * sizeof(float));
+        underflowCount++;
 
-        // 2. FIFOから新しいデータを読み込み
-        engine.readFromFifo(fftTimeDomainBuffer.data() + (NUM_FFT_POINTS - OVERLAP_SAMPLES), OVERLAP_SAMPLES);
+        // アンダーラン時は「減衰保持」 (Decay Hold)
+        // 視覚的に自然にフェードアウトさせる
+        for (size_t i = 0; i < smoothedBuffer.size(); ++i)
+        {
+            smoothedBuffer[i] -= UNDERRUN_DECAY_DB;
+            if (smoothedBuffer[i] < MIN_DB) smoothedBuffer[i] = MIN_DB;
 
-        // 3. 窓関数適用とFFT実行
-        std::memcpy(fftWorkBuffer.data(), fftTimeDomainBuffer.data(), NUM_FFT_POINTS * sizeof(float));
+            // ピーク保持の更新 (減衰時もピークロジックを継続)
+            if (peakHoldCounter[i] > 0)
+            {
+                --peakHoldCounter[i];
+            }
+            else
+            {
+                peakBuffer[i] = std::max(smoothedBuffer[i], peakBuffer[i] - 0.5f);
+            }
+            if (peakBuffer[i] < MIN_DB) peakBuffer[i] = MIN_DB;
+        }
+
+        repaint();
+        return;
+    }
+
+    underflowCount = 0;
+
+    // 1. 既存データを左にシフト (古いデータを破棄)
+    std::memmove(fftTimeDomainBuffer.data(),
+                 fftTimeDomainBuffer.data() + OVERLAP_SAMPLES,
+                 (NUM_FFT_POINTS - OVERLAP_SAMPLES) * sizeof(float));
+
+    // 2. FIFOから新しいデータを読み込み
+    engine.readFromFifo(fftTimeDomainBuffer.data() + (NUM_FFT_POINTS - OVERLAP_SAMPLES), OVERLAP_SAMPLES);
+
+    // 3. 窓関数適用とFFT実行
+    std::memcpy(fftWorkBuffer.data(), fftTimeDomainBuffer.data(), NUM_FFT_POINTS * sizeof(float));
         std::fill(fftWorkBuffer.data() + NUM_FFT_POINTS, fftWorkBuffer.data() + NUM_FFT_POINTS * 2, 0.0f);
         window.multiplyWithWindowingTable(fftWorkBuffer.data(), NUM_FFT_POINTS);
         // Note: この処理は Message Thread (Timer) で実行されるため、FFT実行（performFrequencyOnlyForwardTransform）に伴う負荷や一時的なメモリ確保はAudio Threadに影響せず安全です。
@@ -148,7 +177,6 @@ void SpectrumAnalyzerComponent::timerCallback()
                 }
             }
         }
-    }
 
     repaint();
 }
@@ -157,6 +185,14 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
 {
     // AudioEngine (EQProcessor, ConvolverProcessor) からの変更通知
     if (source == &engine || source == &engine.getEQProcessor())
+    {
+        updateEQData();
+    }
+}
+
+void SpectrumAnalyzerComponent::eqParamsChanged(EQProcessor* processor)
+{
+    if (processor == &engine.getEQProcessor())
     {
         updateEQData();
     }

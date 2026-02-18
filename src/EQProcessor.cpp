@@ -10,6 +10,7 @@
 #include <complex>
 #include <numeric>
 #include <cstring>
+#include <regex>
 
 //--------------------------------------------------------------
 // コンストラクタ
@@ -53,6 +54,7 @@ void EQProcessor::resetToDefaults()
     newState->bandTypes[19] = EQBandType::HighShelf;
 
     totalGainDbTarget.store(0.0f, std::memory_order_relaxed);
+    agcEnabled.store(false, std::memory_order_relaxed);
     currentState.store(newState, std::memory_order_release);
 
     agcCurrentGain.store(1.0, std::memory_order_relaxed);
@@ -113,66 +115,118 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
     file.readLines(lines);
 
     int currentFilterIndex = 0;
+    bool maxBandsWarningShown = false;
 
-    for (const auto& line : lines)
+    for (auto line : lines)
     {
-        auto trimmedLine = line.trim();
-        if (trimmedLine.isEmpty())
+        // コメント除去 (# と ;)
+        line = line.upToFirstOccurrenceOf("#", false, false);
+        line = line.upToFirstOccurrenceOf(";", false, false);
+        line = line.trim();
+
+        if (line.isEmpty())
             continue;
 
-        // Preamp行の解析
-        if (trimmedLine.startsWithIgnoreCase("Preamp:"))
+        // 正規表現でトークン分割 (空白区切り)
+        // std::regex(R"(\S+)") は空白以外の文字の並び（トークン）にマッチします
+        std::regex tokenRegex(R"(\S+)");
+        auto tokensBegin = std::sregex_iterator(line.toStdString().begin(), line.toStdString().end(), tokenRegex);
+        auto tokensEnd = std::sregex_iterator();
+
+        juce::StringArray tokens;
+        for (auto i = tokensBegin; i != tokensEnd; ++i)
+            tokens.add(i->str());
+
+        if (tokens.isEmpty()) continue;
+
+        // Preamp行の解析 (例: "Preamp: -6.0 dB")
+        if (tokens[0].startsWithIgnoreCase("Preamp"))
         {
-            auto valueStr = trimmedLine.fromFirstOccurrenceOf(":", false, false).trim();
-            valueStr = valueStr.upToFirstOccurrenceOf("dB", false, true).trim();
-            setTotalGain(valueStr.getFloatValue());
+            for (int i = 1; i < tokens.size(); ++i)
+            {
+                // 数値を含むトークンを探す
+                if (tokens[i].containsAnyOf("0123456789-."))
+                {
+                    float val = tokens[i].getFloatValue();
+                    setTotalGain(val);
+                    break;
+                }
+            }
         }
-        // Filter行の解析
-        else if (trimmedLine.startsWithIgnoreCase("Filter"))
+        // Filter行の解析 (例: "Filter 1: ON PK Fc 100 Hz Gain -3.0 dB Q 2.0")
+        else if (tokens[0].startsWithIgnoreCase("Filter"))
         {
             if (currentFilterIndex >= NUM_BANDS)
-                continue; // 最大バンド数を超えたら無視
-
-            auto tokens = juce::StringArray::fromTokens(trimmedLine, " ", "");
-            if (tokens.size() < 8) // "Filter", "1:", "ON", "TYPE", "Fc", "X", "Hz", ...
+            {
+                if (!maxBandsWarningShown)
+                {
+                    maxBandsWarningShown = true;
+                    // ユーザーへの警告 (Message Threadなので安全)
+                    juce::MessageManager::callAsync([] {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon,
+                            "Load Preset Warning",
+                            "The preset contains more bands than supported (Max 20). Extra bands were ignored."
+                        );
+                    });
+                }
+                DBG("Skipping extra band: " + line);
                 continue;
+            }
 
-            // "ON" or "OFF"
-            bool enabled = tokens[2].equalsIgnoreCase("ON");
+            // ON/OFF を探す (位置が固定でない場合に対応)
+            int onOffIndex = -1;
+            bool enabled = true;
+            for (int i = 1; i < tokens.size(); ++i)
+            {
+                if (tokens[i].equalsIgnoreCase("ON")) {
+                    onOffIndex = i;
+                    enabled = true;
+                    break;
+                }
+                if (tokens[i].equalsIgnoreCase("OFF")) {
+                    onOffIndex = i;
+                    enabled = false;
+                    break;
+                }
+            }
+
+            if (onOffIndex == -1)
+            {
+                DBG("Invalid Filter line (No ON/OFF found): " + line);
+                continue;
+            }
+
             setBandEnabled(currentFilterIndex, enabled);
 
-            // フィルタータイプ
-            auto typeStr = tokens[3];
-            if (typeStr.equalsIgnoreCase("LSC"))
-                setBandType(currentFilterIndex, EQBandType::LowShelf);
-            else if (typeStr.equalsIgnoreCase("PK"))
-                setBandType(currentFilterIndex, EQBandType::Peaking);
-            else if (typeStr.equalsIgnoreCase("HSC"))
-                setBandType(currentFilterIndex, EQBandType::HighShelf);
-            else if (typeStr.equalsIgnoreCase("LP"))
-                setBandType(currentFilterIndex, EQBandType::LowPass);
-            else if (typeStr.equalsIgnoreCase("HP"))
-                setBandType(currentFilterIndex, EQBandType::HighPass);
+            // フィルタータイプ (ON/OFFの次のトークンと仮定)
+            if (onOffIndex + 1 < tokens.size())
+            {
+                juce::String typeStr = tokens[onOffIndex + 1];
+                if (typeStr.equalsIgnoreCase("LSC"))      setBandType(currentFilterIndex, EQBandType::LowShelf);
+                else if (typeStr.equalsIgnoreCase("PK"))  setBandType(currentFilterIndex, EQBandType::Peaking);
+                else if (typeStr.equalsIgnoreCase("HSC")) setBandType(currentFilterIndex, EQBandType::HighShelf);
+                else if (typeStr.equalsIgnoreCase("LP"))  setBandType(currentFilterIndex, EQBandType::LowPass);
+                else if (typeStr.equalsIgnoreCase("HP"))  setBandType(currentFilterIndex, EQBandType::HighPass);
+            }
 
-            // パラメータを順番に解析
+            // パラメータ解析 (Fc, Gain, Q)
             float freq = 0.0f, gain = 0.0f, q = 0.0f;
 
-            for (int i = 4; i < tokens.size() - 1; ++i)
+            for (int i = onOffIndex + 2; i < tokens.size(); ++i)
             {
-                if (tokens[i].equalsIgnoreCase("Fc"))
+                // キーワードの次のトークンを値として取得
+                if (tokens[i].equalsIgnoreCase("Fc") && i + 1 < tokens.size())
                 {
                     freq = tokens[i + 1].getFloatValue();
-                    i++;
                 }
-                else if (tokens[i].equalsIgnoreCase("Gain"))
+                else if (tokens[i].equalsIgnoreCase("Gain") && i + 1 < tokens.size())
                 {
                     gain = tokens[i + 1].getFloatValue();
-                    i++;
                 }
-                else if (tokens[i].equalsIgnoreCase("Q"))
+                else if (tokens[i].equalsIgnoreCase("Q") && i + 1 < tokens.size())
                 {
                     q = tokens[i + 1].getFloatValue();
-                    i++;
                 }
             }
 
@@ -207,7 +261,6 @@ juce::ValueTree EQProcessor::getState() const
 
     juce::ValueTree v ("EQ");
     v.setProperty ("totalGain", state->totalGainDb, nullptr);
-    v.setProperty ("agcEnabled", state->agcEnabled, nullptr);
 
     for (int i = 0; i < NUM_BANDS; ++i)
     {
@@ -227,7 +280,7 @@ juce::ValueTree EQProcessor::getState() const
 void EQProcessor::setState (const juce::ValueTree& v)
 {
     if (v.hasProperty ("totalGain")) setTotalGain (v.getProperty ("totalGain"));
-    if (v.hasProperty ("agcEnabled")) setAGCEnabled (v.getProperty ("agcEnabled"));
+    setAGCEnabled(v.getProperty("agcEnabled", false));
 
     for (const auto& band : v)
     {
@@ -248,6 +301,24 @@ void EQProcessor::setState (const juce::ValueTree& v)
     sendChangeMessage();
 }
 
+void EQProcessor::syncStateFrom(const EQProcessor& other)
+{
+    // Copy atomics
+    totalGainDbTarget.store(other.totalGainDbTarget.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+    // Copy shared state
+    currentState.store(other.currentState.load(std::memory_order_acquire), std::memory_order_release);
+
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        auto node = other.bandNodes[i].load(std::memory_order_acquire);
+        bandNodes[i].store(node, std::memory_order_release);
+    }
+    agcEnabled.store(other.agcEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+    // Note: smoothTotalGain target is updated in process() based on totalGainDbTarget
+}
+
 //--------------------------------------------------------------
 // prepareToPlay
 // サンプルレート変更時にフィルタ状態を全リセットする
@@ -255,17 +326,22 @@ void EQProcessor::setState (const juce::ValueTree& v)
 //--------------------------------------------------------------
 void EQProcessor::prepareToPlay(int sampleRate, int /*samplesPerBlock*/)
 {
-    if (currentSampleRate == sampleRate)
-        return;
-    currentSampleRate = sampleRate;
+    const bool rateChanged = (currentSampleRate != sampleRate);
+    if (rateChanged)
+        currentSampleRate = sampleRate;
 
     auto state = currentState.load(std::memory_order_acquire);
 
-    // ✅ reset()だけを呼び、Audio Threadでターゲットが設定されるようにする
+    // reset()を呼び、スムーシングの状態を初期化（現在値は0.0になる）
     smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
-    // ✅ atomic targetも同期させる
+
+    // 初期化直後のフェードイン（0.0 -> Target）を防ぐため、
+    // 現在値をターゲット値に即座に設定する。
     if (state)
+    {
         totalGainDbTarget.store(state->totalGainDb, std::memory_order_relaxed);
+        smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
+    }
 
     // フィルタ状態をリセット
     for (auto& channelState : filterState)
@@ -278,9 +354,12 @@ void EQProcessor::prepareToPlay(int sampleRate, int /*samplesPerBlock*/)
     agcEnvInput.store(0.0, std::memory_order_relaxed);
     agcEnvOutput.store(0.0, std::memory_order_relaxed);
 
-    // 係数を即座に再計算
-    for (int i = 0; i < NUM_BANDS; ++i)
-        updateBandNode(i);
+    // 係数を即座に再計算 (レート変更時のみ)
+    if (rateChanged)
+    {
+        for (int i = 0; i < NUM_BANDS; ++i)
+            updateBandNode(i);
+    }
 }
 
 //--------------------------------------------------------------
@@ -295,7 +374,7 @@ void EQProcessor::setBandFrequency(int band, float freq)
     newState->bands[band].frequency = freq;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    sendChangeMessage();
+    listeners.call(&Listener::eqParamsChanged, this);
 }
 
 void EQProcessor::setBandGain(int band, float gainDb)
@@ -306,7 +385,7 @@ void EQProcessor::setBandGain(int band, float gainDb)
     newState->bands[band].gain = gainDb;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    sendChangeMessage();
+    listeners.call(&Listener::eqParamsChanged, this);
 }
 
 void EQProcessor::setBandQ(int band, float q)
@@ -317,7 +396,7 @@ void EQProcessor::setBandQ(int band, float q)
     newState->bands[band].q = q;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    sendChangeMessage();
+    listeners.call(&Listener::eqParamsChanged, this);
 }
 
 void EQProcessor::setBandEnabled(int band, bool enabled)
@@ -328,7 +407,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
     newState->bands[band].enabled = enabled;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    sendChangeMessage();
+    listeners.call(&Listener::eqParamsChanged, this);
 }
 
 void EQProcessor::setTotalGain(float gainDb)
@@ -343,7 +422,7 @@ void EQProcessor::setTotalGain(float gainDb)
     auto newState = std::make_shared<EQState>(*oldState);
     newState->totalGainDb = gainDb;
     currentState.store(newState, std::memory_order_release);
-    sendChangeMessage();
+    listeners.call(&Listener::eqParamsChanged, this);
 }
 
 float EQProcessor::getTotalGain() const
@@ -353,27 +432,25 @@ float EQProcessor::getTotalGain() const
 
 void EQProcessor::setAGCEnabled(bool enabled)
 {
-    auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = std::make_shared<EQState>(*oldState);
-    newState->agcEnabled = enabled;
-    currentState.store(newState, std::memory_order_release);
-    sendChangeMessage();
+    agcEnabled.store(enabled, std::memory_order_relaxed);
+    listeners.call(&Listener::eqParamsChanged, this);
 }
 
 bool EQProcessor::getAGCEnabled() const
 {
-    return currentState.load(std::memory_order_acquire)->agcEnabled;
+    return agcEnabled.load(std::memory_order_relaxed);
 }
 
 void EQProcessor::setBandType(int band, EQBandType type)
 {
     if (band < 0 || band >= NUM_BANDS) return;
+
     auto oldState = currentState.load(std::memory_order_acquire);
     auto newState = std::make_shared<EQState>(*oldState);
     newState->bandTypes[band] = type;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    sendChangeMessage();
+    listeners.call(&Listener::eqParamsChanged, this);
 }
 
 EQBandType EQProcessor::getBandType(int band) const
@@ -390,7 +467,7 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
     newState->bandChannelModes[band] = mode;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    sendChangeMessage();
+    listeners.call(&Listener::eqParamsChanged, this);
 }
 
 EQChannelMode EQProcessor::getBandChannelMode(int band) const
@@ -491,9 +568,10 @@ double EQProcessor::calculateAGCGain(double inputEnv, double outputEnv) const no
 //--------------------------------------------------------------
 // AGC処理 (Private)
 //--------------------------------------------------------------
-void EQProcessor::processAGC(juce::AudioBuffer<double>& buffer, int numSamples, const EQState& state)
+void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
 {
-    const int numChannels = std::min(buffer.getNumChannels(), MAX_CHANNELS);
+    const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
+    const int numSamples = (int)block.getNumSamples();
 
     // ✅ 事前にキャッシュされた入力レベルを使用
     double inputRMS = cachedInputRMS;
@@ -502,7 +580,13 @@ void EQProcessor::processAGC(juce::AudioBuffer<double>& buffer, int numSamples, 
     double outputRMS = 0.0;
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        double rms = buffer.getRMSLevel(ch, 0, numSamples);
+        // Manual RMS calculation for AudioBlock
+        double sumSq = 0.0;
+        const double* data = block.getChannelPointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+            sumSq += data[i] * data[i];
+        double rms = std::sqrt(sumSq / static_cast<double>(numSamples));
+
         if (rms > outputRMS) outputRMS = rms;
     }
 
@@ -541,7 +625,8 @@ void EQProcessor::processAGC(juce::AudioBuffer<double>& buffer, int numSamples, 
     // 各チャンネルに対して明示的に適用
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        buffer.applyGain(ch, 0, numSamples, currentGain);
+        juce::FloatVectorOperations::multiply(block.getChannelPointer(ch),
+                                              currentGain, numSamples);
     }
 }
 
@@ -567,22 +652,29 @@ bool EQProcessor::isBufferSilent(const juce::AudioBuffer<double>& buffer, int nu
 //    - 待機なし (No Wait): 処理落ちの原因となるため (Audio Threadでの待機は厳禁)
 //    - RCU (Read-Copy-Update) パターンにより、ロックフリーで安全に係数を更新
 //--------------------------------------------------------------
-void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
+void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
     juce::ScopedNoDenormals noDenormals;
+    if (bypassed.load(std::memory_order_relaxed))
+        return;
 
-    auto state = currentState.load(std::memory_order_acquire); // RCU Load (Lock-free)
+    const int numSamples = (int)block.getNumSamples();
+    if (numSamples <= 0) return; // BUG #22: Guard against zero samples
 
-    const int numChannels = std::min(buffer.getNumChannels(), MAX_CHANNELS);
+    const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
 
+    const bool isAgcEnabled = agcEnabled.load(std::memory_order_relaxed);
     // ✅ フィルタ処理前に入力レベルをキャッシュ (AGCが有効な場合のみ)
-    if (state->agcEnabled)
+    if (isAgcEnabled)
     {
         cachedInputRMS = 0.0;
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            // getRMSLevelはAudio Threadで安全
-            double rms = buffer.getRMSLevel(ch, 0, numSamples);
+            double sumSq = 0.0;
+            const double* data = block.getChannelPointer(ch);
+            for (int i = 0; i < numSamples; ++i)
+                sumSq += data[i] * data[i];
+            double rms = std::sqrt(sumSq / static_cast<double>(numSamples));
             if (rms > cachedInputRMS)
                 cachedInputRMS = rms;
         }
@@ -615,7 +707,7 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
     // フィルタバンク適用
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        double* data = buffer.getWritePointer(ch);
+        double* data = block.getChannelPointer(ch);
         if (data == nullptr) continue;
 
         for (int i = 0; i < numActiveBands; ++i)
@@ -633,9 +725,9 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
     }
 
     // トータルゲイン / AGC 適用
-    if (state->agcEnabled)
+    if (isAgcEnabled)
     {
-        processAGC(buffer, numSamples, *state);
+        processAGC(block);
     }
     else
     {
@@ -654,7 +746,16 @@ void EQProcessor::process(juce::AudioBuffer<double>& buffer, int numSamples)
 
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            buffer.applyGainRamp(ch, 0, numSamples, startGain, endGain);
+            // Manual Gain Ramp
+            double* data = block.getChannelPointer(ch);
+            double gain = startGain;
+            const double increment = (endGain - startGain) / static_cast<double>(numSamples);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                data[i] *= gain;
+                gain += increment;
+            }
         }
     }
 }
@@ -699,13 +800,8 @@ void EQProcessor::updateBandNode(int band)
 
     // ゴミ箱の掃除 (Garbage Collection)
     // Audio Threadが参照していない(use_count == 1)オブジェクトのみを削除する。
-    for (auto it = trashBin.begin(); it != trashBin.end(); )
-    {
-        if ((*it).use_count() == 1)
-            it = trashBin.erase(it);
-        else
-            ++it;
-    }
+    trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(),
+                                   [](const auto& p) { return p.use_count() == 1; }), trashBin.end()); // ラムダ構文修正
 }
 
 //--------------------------------------------------------------

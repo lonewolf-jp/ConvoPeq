@@ -313,11 +313,7 @@ void EQControlPanel::buttonClicked(juce::Button* button)
     // ── Reset All ボタン ──
     if (button == &resetButton)
     {
-        // EQProcessor側のパラメータをデフォルト値に戻す
         engine.getEQProcessor().resetToDefaults();
-
-        // UI全体を更新
-        updateAllControls();
         return;
     }
 }
@@ -357,13 +353,12 @@ void EQControlPanel::comboBoxChanged(juce::ComboBox* comboBox)
 
 const EQControlPanel::ControlID* EQControlPanel::findControlId(const juce::Component* control) const
 {
-    for (const auto& entry : controlMap)
-    {
-        if (entry.control == control)
-        {
-            return &entry;
-        }
-    }
+    auto it = std::find_if(controlMap.begin(), controlMap.end(),
+                           [control](const ControlID& entry) { return entry.control == control; });
+
+    if (it != controlMap.end())
+        return &(*it);
+
     return nullptr;
 }
 
