@@ -29,7 +29,9 @@
 
 class AudioEngine : public juce::AudioSource,
                   public juce::ChangeBroadcaster,
-                  private juce::ChangeListener
+                  private juce::ChangeListener,
+                  private EQProcessor::Listener,
+                  private ConvolverProcessor::Listener
 {
 public:
     using SampleType = double; // 内部DSP精度 (JUCE Best Practice)
@@ -60,7 +62,7 @@ public:
     };
 
     // FIFO設定
-    static constexpr int FIFO_SIZE = 16384;  // Lock-free FIFO サイズ
+    static constexpr int FIFO_SIZE = 32768;  // Lock-free FIFO サイズ (推奨: FFTサイズ * 8)
 
     // ── 安全性制限 ──
     static constexpr double SAFE_MIN_SAMPLE_RATE = 8000.0;
@@ -81,6 +83,8 @@ public:
     void releaseResources() override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
+    void eqParamsChanged(EQProcessor* processor) override;
+    void convolverParamsChanged(ConvolverProcessor* processor) override;
 
     //----------------------------------------------------------
     // 外部インターフェース (Message Thread)
@@ -221,7 +225,7 @@ private:
         ConvolverProcessor convolver;
         EQProcessor eq;
         DCBlocker dcBlockerL, dcBlockerR;
-        PsychoacousticDither ditherL, ditherR;
+        PsychoacousticDither dither;
 
         std::unique_ptr<juce::dsp::Oversampling<double>> oversampling;
         size_t oversamplingFactor = 1;

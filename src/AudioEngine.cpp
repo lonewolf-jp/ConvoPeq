@@ -32,12 +32,16 @@ void AudioEngine::initialize()
 
     uiConvolverProcessor.addChangeListener(this);
     uiEqProcessor.addChangeListener(this);
+    uiConvolverProcessor.addListener(this);
+    uiEqProcessor.addListener(this);
 }
 
 AudioEngine::~AudioEngine()
 {
     uiConvolverProcessor.removeChangeListener(this);
     uiEqProcessor.removeChangeListener(this);
+    uiConvolverProcessor.removeListener(this);
+    uiEqProcessor.removeListener(this);
 
     // 進行中のコールバックが完了するのを待つため、DSPを無効化
     // これにより、changeListenerCallback内でdsp->...へのアクセスを防ぐ
@@ -130,7 +134,7 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
     }
 
     float totalGainLinear = 1.0f;
-    if (!eqState->agcEnabled)
+    if (!uiEqProcessor.getAGCEnabled())
     {
         totalGainLinear = juce::Decibels::decibelsToGain(eqState->totalGainDb);
     }
@@ -239,7 +243,7 @@ void AudioEngine::rebuild(double sampleRate, int samplesPerBlock)
     auto newDSP = std::make_shared<DSPCore>();
 
     // UIプロセッサから状態をコピー
-    newDSP->eq.setState(uiEqProcessor.getState());
+    newDSP->eq.syncStateFrom(uiEqProcessor); // 最適化: ValueTreeを経由せず直接同期
     newDSP->convolver.syncStateFrom(uiConvolverProcessor);
 
     // 準備
@@ -263,19 +267,34 @@ void AudioEngine::rebuild(double sampleRate, int samplesPerBlock)
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
-    // UIプロセッサからの変更を現在のDSPに反映
-    if (source == &uiEqProcessor)
+    // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
+    if (source == &uiEqProcessor || source == &uiConvolverProcessor)
     {
-        // EQの場合は構造変更の可能性があるため、安全にリビルドを行う
+        // DSPグラフを安全に再構築
         rebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
-        // DSPが有効な場合のみ変更通知を送る (デストラクタ競合回避)
+
+        // UIに更新を通知 (MainWindowが受け取る)
         sendChangeMessage();
     }
-    else if (source == &uiConvolverProcessor)
+}
+
+void AudioEngine::eqParamsChanged(EQProcessor* processor)
+{
+    if (processor == &uiEqProcessor)
     {
-        // EQと同様にrebuildを使用し、安全に状態を更新する
-        rebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
-        sendChangeMessage();
+        auto dsp = currentDSP.load();
+        if (dsp)
+            dsp->eq.syncStateFrom(uiEqProcessor);
+    }
+}
+
+void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
+{
+    if (processor == &uiConvolverProcessor)
+    {
+        auto dsp = currentDSP.load();
+        if (dsp)
+            dsp->convolver.syncStateFrom(uiConvolverProcessor);
     }
 }
 
@@ -409,8 +428,7 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int b
     dcBlockerR.prepare(processingRate);
 
     // ディザの準備 (出力段で行うため元のサンプルレート)
-    ditherL.prepare(sampleRate, bitDepth);
-    ditherR.prepare(sampleRate, bitDepth);
+    dither.prepare(sampleRate, bitDepth);
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
     // バッファ確保 (Message Threadで実行されるため安全)
@@ -423,8 +441,7 @@ void AudioEngine::DSPCore::reset()
     eq.reset();
     dcBlockerL.reset();
     dcBlockerR.reset();
-    ditherL.reset();
-    ditherR.reset();
+    dither.reset();
     if (oversampling)
         oversampling->reset();
     processBuffer.clear();
@@ -709,12 +726,10 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             const double* src = processBuffer.getReadPointer(ch);
             float* dst = buffer->getWritePointer(ch, startSample);
 
-            auto& dither = (ch == 0) ? ditherL : ditherR;
-
             if (applyDither)
             {
                 for (int i = 0; i < numSamples; ++i)
-                    dst[i] = static_cast<float>(dither.process(src[i]));
+                    dst[i] = static_cast<float>(dither.process(src[i], ch));
             }
             else
             {

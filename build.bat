@@ -63,10 +63,29 @@ if not exist "FFTConvolver" (
 echo [CHECK] FFTConvolver Directory: OK
 echo.
 
+REM r8brain-free-srcディレクトリの確認
+if not exist "r8brain-free-src" (
+    echo [ERROR] r8brain-free-src directory not found!
+    echo.
+    echo Please place r8brain-free-src using one of the following methods:
+    echo   1. Symbolic link: mklink /J r8brain-free-src C:\path\to\r8brain-free-src
+    echo   2. Junction: mklink /J r8brain-free-src C:\path\to\r8brain-free-src
+    echo   3. Copy: xcopy /E /I C:\path\to\r8brain-free-src r8brain-free-src
+    echo.
+    echo r8brain-free-src Download:
+    echo   https://github.com/avaneev/r8brain-free-src
+    echo.
+    pause
+    exit /b 1
+)
+
+echo [CHECK] r8brain-free-src Directory: OK
+echo.
+
 REM Intel oneAPI 環境変数の設定 (存在する場合)
-if exist ""C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat"" (
+if exist "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat" (
     echo [INFO] Found Intel oneAPI setvars.bat. Executing...
-    call ""C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat""
+    call "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat"
 )
 
 REM ビルドディレクトリ作成

@@ -16,8 +16,7 @@
 
 class ConvolverControlPanel : public juce::Component,
                               private juce::Button::Listener,
-                              private juce::Slider::Listener,
-                              private juce::ChangeListener
+                              private juce::Slider::Listener
 {
 public:
     explicit ConvolverControlPanel(AudioEngine& audioEngine);
@@ -30,7 +29,6 @@ public:
     // UI更新
     //----------------------------------------------------------
     void updateIRInfo();
-    void changeListenerCallback(juce::ChangeBroadcaster* source) override;
 
 private:
     AudioEngine& engine;

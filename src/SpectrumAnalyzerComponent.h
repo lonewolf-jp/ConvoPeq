@@ -29,7 +29,8 @@
 
 class SpectrumAnalyzerComponent : public juce::Component,
                                   private juce::Timer,
-                                  private juce::ChangeListener
+                                  private juce::ChangeListener,
+                                  private EQProcessor::Listener
 {
 public:
     explicit SpectrumAnalyzerComponent(AudioEngine& audioEngine);
@@ -120,6 +121,7 @@ private:
 
     // ── Timer コールバック (~30fps) ──
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
+    void eqParamsChanged(EQProcessor* processor) override;
     void timerCallback() override;
 
     // ── 描画ヘルパー ──
@@ -142,4 +144,8 @@ private:
 
     juce::TextButton sourceButton;
     void updateSourceButtonText();
+
+    // ── アンダーラン対策 ──
+    int underflowCount = 0;
+    static constexpr float UNDERRUN_DECAY_DB = 3.0f; // データ不足時の減衰量 (dB/frame)
 };

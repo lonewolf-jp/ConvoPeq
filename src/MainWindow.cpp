@@ -87,10 +87,13 @@ MainWindow::MainWindow (const juce::String& name)
     asioBlacklist.loadFromFile (blacklistFile);
     DeviceSettings::applyAsioBlacklist (audioDeviceManager, asioBlacklist);
 
+    // BUG #17: エンジンを先に初期化してデフォルトのサンプルレート(48kHz)を設定
+    audioEngine.initialize();
+
     // 設定読み込み（ブラックリスト適用後に実行することで、除外されたデバイスの自動ロードを防ぐ）
+    // この時点でrebuildが呼ばれても、有効なサンプルレートが設定されている
     loadSettings();
 
-    audioEngine.initialize();
     audioSourcePlayer.setSource (&audioEngine);
     audioEngine.addChangeListener (this);
     audioDeviceManager.addAudioCallback (&audioSourcePlayer);
@@ -98,7 +101,7 @@ MainWindow::MainWindow (const juce::String& name)
     // Create UI Components
     createUIComponents();
 
-    startTimer (5000);
+    startTimer (500); // CPU使用率の更新頻度を上げる (500ms)
     setVisible (true);
 }
 
@@ -160,41 +163,19 @@ void MainWindow::createUIComponents()
 
     // EQ On/Off Button
     eqBypassButton.setButtonText ("EQ On");
-    eqBypassButton.setToggleState (true, juce::dontSendNotification);
-    eqBypassButton.onClick = [this]
-    {
-        const bool isOn = eqBypassButton.getToggleState();
-        audioEngine.setEqBypassRequested (!isOn);
-        eqBypassButton.setButtonText (isOn ? "EQ On" : "EQ Off");
-    };
+    eqBypassButton.setToggleState (!audioEngine.getEQProcessor().isBypassed(), juce::dontSendNotification);
+    eqBypassButton.onClick = [this] { eqBypassButtonClicked(); };
     addAndMakeVisible (eqBypassButton);
 
     // Convolver On/Off Button
     convolverBypassButton.setButtonText ("Conv On");
-    convolverBypassButton.setToggleState (true, juce::dontSendNotification);
-    convolverBypassButton.onClick = [this]
-    {
-        const bool isOn = convolverBypassButton.getToggleState();
-        audioEngine.setConvolverBypassRequested (!isOn);
-        convolverBypassButton.setButtonText (isOn ? "Conv On" : "Conv Off");
-    };
+    convolverBypassButton.setToggleState (!audioEngine.getConvolverProcessor().isBypassed(), juce::dontSendNotification);
+    convolverBypassButton.onClick = [this] { convolverBypassButtonClicked(); };
     addAndMakeVisible (convolverBypassButton);
 
     // Processing Order Button
     orderButton.setButtonText ("Order: Conv -> EQ");
-    orderButton.onClick = [this]
-    {
-        if (audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::ConvolverThenEQ)
-        {
-            audioEngine.setProcessingOrder (AudioEngine::ProcessingOrder::EQThenConvolver);
-            orderButton.setButtonText ("Order: EQ -> Conv");
-        }
-        else
-        {
-            audioEngine.setProcessingOrder (AudioEngine::ProcessingOrder::ConvolverThenEQ);
-            orderButton.setButtonText ("Order: Conv -> EQ");
-        }
-    };
+    orderButton.onClick = [this] { orderButtonClicked(); };
     addAndMakeVisible (orderButton);
 
     // Save/Load Buttons
@@ -242,6 +223,38 @@ void MainWindow::createUIComponents()
     saturationLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     saturationLabel.setJustificationType(juce::Justification::centredRight);
     addAndMakeVisible(saturationLabel);
+}
+
+void MainWindow::eqBypassButtonClicked()
+{
+    const bool isBypassed = !eqBypassButton.getToggleState();
+    audioEngine.setEqBypassRequested(isBypassed);
+    eqBypassButton.setButtonText(isBypassed ? "EQ Off" : "EQ On");
+    // Also update the UI processor state for consistency
+    audioEngine.getEQProcessor().setBypass(isBypassed);
+}
+
+void MainWindow::convolverBypassButtonClicked()
+{
+    const bool isBypassed = !convolverBypassButton.getToggleState();
+    audioEngine.setConvolverBypassRequested(isBypassed);
+    convolverBypassButton.setButtonText(isBypassed ? "Conv Off" : "Conv On");
+    // Also update the UI processor state for consistency
+    audioEngine.getConvolverProcessor().setBypass(isBypassed);
+}
+
+void MainWindow::orderButtonClicked()
+{
+    if (audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::ConvolverThenEQ)
+    {
+        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::EQThenConvolver);
+        orderButton.setButtonText("Order: EQ -> Conv");
+    }
+    else
+    {
+        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::ConvolverThenEQ);
+        orderButton.setButtonText("Order: Conv -> EQ");
+    }
 }
 
 void MainWindow::loadSettings()

@@ -42,7 +42,7 @@ public:
     static void applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist);
 
 private:
-    void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void changeListenerCallback (juce::ChangeBroadcaster* source) override;
     void updateBitDepthList();
 
     juce::AudioDeviceManager& audioDeviceManager;

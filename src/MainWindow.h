@@ -30,6 +30,10 @@ private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
 
+    void eqBypassButtonClicked();
+    void convolverBypassButtonClicked();
+    void orderButtonClicked();
+
     void createUIComponents();
     void loadSettings();
     void toggleDeviceSelector();

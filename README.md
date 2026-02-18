@@ -1,4 +1,4 @@
-# ConvoPeq v0.1
+# ConvoPeq v0.1.3
 
 ![Platform](https://img.shields.io/badge/Platform-Windows_11_x64-blue)
 ![Framework](https://img.shields.io/badge/Framework-JUCE_8.0.12-green)

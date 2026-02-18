@@ -26,6 +26,9 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 
+# r8brain-free-src (If you want users to provide their own r8brain-free-src)
+r8brain-free-src/
+
 # JUCE (If you want users to provide their own JUCE)
 JUCE/
 

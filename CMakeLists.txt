@@ -97,6 +97,10 @@ target_compile_definitions(FFTConvolver PUBLIC
 target_compile_features(FFTConvolver PUBLIC cxx_std_17)
 
 #------------------------------------------------------------
+# r8brain-free-src ライブラリの追加
+#------------------------------------------------------------
+
+#------------------------------------------------------------
 # GUIアプリケーション定義
 #------------------------------------------------------------
 juce_add_gui_app(ConvoPeq
@@ -131,6 +135,7 @@ target_compile_definitions(ConvoPeq PRIVATE
     # JUCE設定
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:ConvoPeq,PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:ConvoPeq,JUCE_VERSION>"
     JUCE_USE_SSE_INTRINSICS=1
@@ -144,9 +149,30 @@ target_compile_definitions(ConvoPeq PRIVATE
     $<$<PLATFORM_ID:Windows>:
         _UNICODE
         UNICODE
+        NOMINMAX
         JUCE_ASIO=1
     >
 )
+
+#------------------------------------------------------------
+# r8brain-free-src (Header-only) のインクルードパス設定
+#------------------------------------------------------------
+# r8brain-free-src v7.0以降はヘッダーオンリーライブラリです。
+# r8bbase.h を検索して、r8brain-free-src のルートディレクトリを特定します。
+find_file(R8B_HEADER_PATH
+    NAMES r8bbase.h
+    PATHS
+        "${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src/r8brain-free-src" # ネストしたディレクトリを処理
+    NO_DEFAULT_PATH
+)
+
+if(NOT R8B_HEADER_PATH)
+    message(FATAL_ERROR "r8bbase.h not found. Please ensure the r8brain-free-src directory is correctly placed in the project root.")
+else()
+    get_filename_component(R8B_INCLUDE_DIR ${R8B_HEADER_PATH} DIRECTORY)
+    target_include_directories(ConvoPeq PRIVATE ${R8B_INCLUDE_DIR})
+endif()
 
 #------------------------------------------------------------
 # JUCEモジュール

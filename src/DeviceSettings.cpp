@@ -162,13 +162,15 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     audioDeviceManager.addChangeListener(this);
 
     // 初期値設定
-    int currentOversamplingFactor = audioEngine.getOversamplingFactor();
-    int selectedId = 1; // Auto
-    if (currentOversamplingFactor == 1)      selectedId = 2;
-    else if (currentOversamplingFactor == 2) selectedId = 3;
-    else if (currentOversamplingFactor == 4) selectedId = 4;
-    else if (currentOversamplingFactor == 8) selectedId = 5;
-    oversamplingComboBox.setSelectedId(selectedId, juce::dontSendNotification);
+    const std::map<int, int> factorToId = {{0, 1}, {1, 2}, {2, 3}, {4, 4}, {8, 5}};
+    int currentFactor = audioEngine.getOversamplingFactor();
+    if (auto it = factorToId.find(currentFactor); it != factorToId.end())
+    {
+        oversamplingComboBox.setSelectedId(it->second, juce::dontSendNotification);
+    }
+    else {
+        oversamplingComboBox.setSelectedId(1, juce::dontSendNotification); // Default to Auto
+    }
 
     updateBitDepthList();
 }
@@ -199,17 +201,20 @@ void DeviceSettings::resized()
         selector->setBounds(bounds);
 }
 
-void DeviceSettings::changeListenerCallback (juce::ChangeBroadcaster*)
+void DeviceSettings::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
     // ソースを判定して処理を分岐
-    if (filterTypeTabs.getTabbedButtonBar().hasKeyboardFocus(false) || true) // 簡易チェック
+    if (source == &filterTypeTabs.getTabbedButtonBar())
     {
         // タブの変更チェック
         auto type = (filterTypeTabs.getCurrentTabIndex() == 1) ? AudioEngine::OversamplingType::LinearPhase : AudioEngine::OversamplingType::IIR;
         if (type != audioEngine.getOversamplingType())
             audioEngine.setOversamplingType(type);
     }
-    updateBitDepthList();
+    else if (source == &audioDeviceManager)
+    {
+        updateBitDepthList();
+    }
 }
 
 void DeviceSettings::updateBitDepthList()
@@ -354,24 +359,26 @@ void DeviceSettings::applyAsioBlacklist (juce::AudioDeviceManager& deviceManager
     //       この方法はJUCEの将来のバージョンで互換性がなくなる可能性があります。
 
     auto& availableTypes = const_cast<juce::OwnedArray<juce::AudioIODeviceType>&>(deviceManager.getAvailableDeviceTypes());
-    juce::AudioIODeviceType* originalAsio = nullptr;
+    int asioIndex = -1;
 
-    for (auto* type : availableTypes)
+    for (int i = 0; i < availableTypes.size(); ++i)
     {
-        if (type->getTypeName() == "ASIO")
+        if (availableTypes[i] != nullptr && availableTypes[i]->getTypeName() == "ASIO")
         {
-            originalAsio = type;
+            asioIndex = i;
             break;
         }
     }
 
-    if (originalAsio != nullptr)
+    if (asioIndex != -1)
     {
+        // remove() の第2引数に false を指定し、OwnedArrayによる自動削除を防ぎます。
+        // これにより、オブジェクトの所有権を unique_ptr に安全に移行できます。
+        auto* rawPtr = availableTypes[asioIndex];
+        availableTypes.remove(asioIndex, false);
+        auto originalAsio = std::unique_ptr<juce::AudioIODeviceType>(rawPtr);
 
-        // 配列から削除するが、オブジェクトは削除しない (false指定)
-        availableTypes.removeObject (originalAsio, false);
-
-        // ラッパーで包んで再登録 (所有権を委譲)
-        deviceManager.addAudioDeviceType (std::make_unique<BlacklistedASIODeviceType> (std::unique_ptr<juce::AudioIODeviceType>(originalAsio), blacklist));
+        // ラッパーで包んで再登録します。addAudioDeviceType() が所有権を引き継ぎます。
+        deviceManager.addAudioDeviceType (std::make_unique<BlacklistedASIODeviceType> (std::move(originalAsio), blacklist));
     }
 }
