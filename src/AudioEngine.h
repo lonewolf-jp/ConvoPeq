@@ -237,7 +237,6 @@ private:
 
         // Helpers
         float measureLevel (const juce::AudioBuffer<SampleType>& buffer, int numSamples) const noexcept;
-        void writeSampleToFifo(float* dest, int index, const double* l, const double* r) const noexcept;
         void pushToFifo(const juce::AudioBuffer<SampleType>& buffer, int numSamples,
                         juce::AbstractFifo& audioFifo,
                         juce::AudioBuffer<float>& audioFifoBuffer) const;
@@ -292,7 +291,8 @@ private:
     //----------------------------------------------------------
     // ヘルパー関数
     //----------------------------------------------------------
-    void rebuild(double sampleRate, int samplesPerBlock);
+    void requestRebuild(double sampleRate, int samplesPerBlock);
+    void commitNewDSP(std::shared_ptr<DSPCore> newDSP);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

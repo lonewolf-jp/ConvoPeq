@@ -13,12 +13,23 @@
 #include "MainApplication.h"
 #include "MainWindow.h"
 
+#if JUCE_INTEL
+ #include <xmmintrin.h>
+ #include <pmmintrin.h>
+#endif
+
 #if JUCE_DSP_USE_INTEL_MKL
  #include <mkl.h>
 #endif
 
 void MainApplication::initialise(const juce::String& /*commandLine*/)
 {
+#if JUCE_INTEL
+    // Denormal対策: メインスレッドでのFTZ/DAZ有効化
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+
 #if JUCE_DSP_USE_INTEL_MKL
     // Intel MKL Configuration for Real-time Audio
     mkl_set_num_threads(1);                    // 1スレッド固定（必須）

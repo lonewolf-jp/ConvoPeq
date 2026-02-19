@@ -60,7 +60,7 @@ public:
     // 3s @ 192kHz = 576000 samples. Next power of 2 is 1048576.
     // static constexpr int MAX_IR_LATENCY = 524288; // IRの最大長 (computeTargetIRLengthのkMaxIRCapと一致)
     static constexpr int MAX_IR_LATENCY = 1048576;
-    static constexpr int MAX_BLOCK_SIZE = 8192;   // AudioEngineのSAFE_MAX_BLOCK_SIZEと一致
+    static constexpr int MAX_BLOCK_SIZE = 65536;  // 8x Oversampling (8192 * 8) を考慮して拡張
     static constexpr int MAX_TOTAL_DELAY = MAX_IR_LATENCY + MAX_BLOCK_SIZE;
     static constexpr double CONVOLUTION_HEADROOM_GAIN = 0.5; // -6.02 dB
 
@@ -168,12 +168,29 @@ private:
         int latency = 0;
         int irLatency = 0; // IR由来の遅延 (ピーク位置)
 
-        void init(size_t blockSize, const fftconvolver::Sample* irL, const fftconvolver::Sample* irR, size_t irLen, int peakDelay)
+        // 再初期化用キャッシュ
+        size_t blockSize = 0;
+        std::vector<fftconvolver::Sample> irL;
+        std::vector<fftconvolver::Sample> irR;
+
+        StereoConvolver() = default;
+
+        // コピーコンストラクタ (Deep Copy)
+        StereoConvolver(const StereoConvolver& other);
+
+        // 代入演算子は禁止 (使用しないため)
+        StereoConvolver& operator=(const StereoConvolver&) = delete;
+
+        void init(size_t newBlockSize, const fftconvolver::Sample* newIrL, const fftconvolver::Sample* newIrR, size_t irLen, int peakDelay)
         {
-            convolvers[0].init(blockSize, irL, irLen);
-            convolvers[1].init(blockSize, irR, irLen);
-            latency = static_cast<int>(blockSize);
-            irLatency = peakDelay;
+            this->blockSize = newBlockSize;
+            this->irL.assign(newIrL, newIrL + irLen);
+            this->irR.assign(newIrR, newIrR + irLen);
+            this->irLatency = peakDelay;
+
+            convolvers[0].init(newBlockSize, newIrL, irLen);
+            convolvers[1].init(newBlockSize, newIrR, irLen);
+            latency = static_cast<int>(newBlockSize);
         }
 
         void reset() { convolvers[0].reset(); convolvers[1].reset(); }

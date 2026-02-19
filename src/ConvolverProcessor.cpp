@@ -21,7 +21,7 @@
 static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR, juce::Thread* thread = nullptr, bool* wasCancelled = nullptr);
 
 // Helper function to check for thread cancellation
-static bool checkCancellation(juce::Thread* thread, bool* wasCancelled)
+static bool checkCancellation(juce::Thread* thread, bool* wasCancelled) noexcept
 {
     if (thread != nullptr && thread->threadShouldExit())
     {
@@ -49,6 +49,7 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
     constexpr double stopBandAtten = 140.0;
     constexpr r8b::EDSPFilterPhaseResponse phase = r8b::fprLinearPhase;
 
+    int finalLength = 0;
     for (int ch = 0; ch < inputIR.getNumChannels(); ++ch)
     {
         if (checkCancellation(thread, nullptr)) return {};
@@ -72,8 +73,9 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
             std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
             done += toCopy;
         }
-        resampled.setSize(inputIR.getNumChannels(), done, true, true, true);
+        finalLength = done;
     }
+    resampled.setSize(inputIR.getNumChannels(), finalLength, true, true, true);
     return resampled;
 }
 
@@ -101,6 +103,8 @@ public:
 
     void run() override
     {
+        juce::ScopedNoDenormals noDenormals; // バックグラウンド処理でのDenormal対策
+
         // BUG #16: Wrap in try-catch to prevent std::terminate() on std::bad_alloc
         // BUG FIX: Ensure isLoading/isRebuilding are reset on early exit (unless thread is stopping)
         struct FlagResetter {
@@ -180,6 +184,33 @@ public:
 
             loadedIR = std::move(resampled);
             loadedSR = sampleRate;
+        }
+
+        // 1.6. 末尾の無音カット (Denormal対策 & 効率化)
+        // IR末尾の極小値(Denormal領域)をカットすることで、畳み込み負荷とDenormal発生リスクを低減
+        if (loadedIR.getNumSamples() > 0)
+        {
+            int newLength = loadedIR.getNumSamples();
+            const int channels = loadedIR.getNumChannels();
+            const double threshold = 1.0e-15; // -300dB (double精度における実質的な無音)
+
+            while (newLength > 0)
+            {
+                bool isSilent = true;
+                for (int ch = 0; ch < channels; ++ch)
+                {
+                    if (std::abs(loadedIR.getSample(ch, newLength - 1)) > threshold)
+                    {
+                        isSilent = false;
+                        break;
+                    }
+                }
+                if (!isSilent) break;
+                newLength--;
+            }
+
+            if (newLength < loadedIR.getNumSamples())
+                loadedIR.setSize(channels, std::max(1, newLength), true);
         }
 
         // 2. ピーク正規化 (ファイル読み込み時のみ)
@@ -407,6 +438,15 @@ void ConvolverProcessor::rebuildAllIRs()
 }
 
 //--------------------------------------------------------------
+// StereoConvolver Copy Constructor
+//--------------------------------------------------------------
+ConvolverProcessor::StereoConvolver::StereoConvolver(const StereoConvolver& other)
+{
+    // キャッシュされたIRデータを使って初期化 (Deep Copy)
+    init(other.blockSize, other.irL.data(), other.irR.data(), other.irL.size(), other.irLatency);
+}
+
+//--------------------------------------------------------------
 // Minimum Phase 変換ヘルパー
 // ケプストラム法 (Homomorphic Filtering) による最小位相復元
 // 目的: 振幅特性（周波数応答の絶対値）を保ったまま、エネルギーを時間軸の前方に集中させ、レイテンシーとプリリンギングを低減する。
@@ -612,7 +652,7 @@ void ConvolverProcessor::applyNewState(std::shared_ptr<StereoConvolver> newConv,
     createFrequencyResponseSnapshot(displayIR, loadedSR);
 
     // 安全に差し替え (Atomic Swap)
-    auto oldConv = convolution.exchange(newConv);
+    auto oldConv = convolution.exchange(newConv, std::memory_order_acq_rel);
 
     if (oldConv)
     {
@@ -840,16 +880,19 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     irName = other.irName;
     irLength = other.irLength;
 
-    // Convolutionオブジェクトの同期 (Atomic)
+    // Convolutionオブジェクトの同期 (Deep Copy)
+    // rebuild時は新しいDSPCoreが作られるため、既存のStereoConvolverを共有すると
+    // prepareToPlayでのreset()が稼働中のDSPに影響してしまう。
+    // そのため、ディープコピーを作成して独立させる。
     auto otherConv = other.convolution.load(std::memory_order_acquire);
-    auto expectedConv = convolution.load(std::memory_order_acquire);
-
-    if (otherConv != expectedConv)
+    if (otherConv)
     {
-        // Compare-and-swap で安全に更新
-        convolution.compare_exchange_strong(expectedConv, otherConv,
-                                           std::memory_order_acq_rel,
-                                           std::memory_order_acquire);
+        auto newConv = std::make_shared<StereoConvolver>(*otherConv);
+        convolution.store(newConv, std::memory_order_release);
+    }
+    else
+    {
+        convolution.store(nullptr, std::memory_order_release);
     }
 }
 
