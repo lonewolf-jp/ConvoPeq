@@ -213,9 +213,17 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // ホストが通知より大きなバッファを渡してくる場合に備え、最低でも SAFE_MAX_BLOCK_SIZE を確保する
     const int safeBufferSize = std::max(samplesPerBlockExpected, SAFE_MAX_BLOCK_SIZE);
 
+    // サンプルレート変更検知
+    const bool rateChanged = (std::abs(currentSampleRate.load() - sampleRate) > 1.0);
+
     // UI用プロセッサのサンプルレートも更新 (IR表示やパラメータ管理のため)
     uiConvolverProcessor.prepareToPlay(sampleRate, safeBufferSize);
     uiEqProcessor.prepareToPlay(static_cast<int>(sampleRate), safeBufferSize);
+
+    if (rateChanged)
+    {
+        uiConvolverProcessor.rebuildAllIRs();
+    }
 
     maxSamplesPerBlock.store(safeBufferSize);
     // DSP再構築 (RT安全化: 新しいDSPを作成してスワップ)
@@ -256,7 +264,7 @@ void AudioEngine::rebuild(double sampleRate, int samplesPerBlock)
     {
         // 古いDSPをゴミ箱へ (Audio Threadが使用中の可能性があるため即削除しない)
         const juce::ScopedLock sl(trashBinLock);
-        trashBin.push_back(oldDSP);
+        trashBin.push_back(std::move(oldDSP));
 
         // ゴミ箱の掃除 (Garbage Collection)
         // Audio Threadが参照していない(use_count == 1)オブジェクトのみを削除する。
@@ -278,13 +286,23 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
     }
 }
 
-void AudioEngine::eqParamsChanged(EQProcessor* processor)
+void AudioEngine::eqBandChanged(EQProcessor* processor, int bandIndex)
 {
     if (processor == &uiEqProcessor)
     {
         auto dsp = currentDSP.load();
         if (dsp)
-            dsp->eq.syncStateFrom(uiEqProcessor);
+            dsp->eq.syncBandNodeFrom(uiEqProcessor, bandIndex);
+    }
+}
+
+void AudioEngine::eqGlobalChanged(EQProcessor* processor)
+{
+    if (processor == &uiEqProcessor)
+    {
+        auto dsp = currentDSP.load();
+        if (dsp)
+            dsp->eq.syncGlobalStateFrom(uiEqProcessor);
     }
 }
 
@@ -294,7 +312,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
     {
         auto dsp = currentDSP.load();
         if (dsp)
-            dsp->convolver.syncStateFrom(uiConvolverProcessor);
+            dsp->convolver.syncParametersFrom(uiConvolverProcessor);
     }
 }
 

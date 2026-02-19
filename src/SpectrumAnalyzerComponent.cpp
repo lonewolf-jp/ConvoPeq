@@ -190,7 +190,15 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
     }
 }
 
-void SpectrumAnalyzerComponent::eqParamsChanged(EQProcessor* processor)
+void SpectrumAnalyzerComponent::eqBandChanged(EQProcessor* processor, int /*bandIndex*/)
+{
+    if (processor == &engine.getEQProcessor())
+    {
+        updateEQData();
+    }
+}
+
+void SpectrumAnalyzerComponent::eqGlobalChanged(EQProcessor* processor)
 {
     if (processor == &engine.getEQProcessor())
     {

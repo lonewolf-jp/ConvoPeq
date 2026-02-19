@@ -13,8 +13,19 @@
 #include "MainApplication.h"
 #include "MainWindow.h"
 
+#if JUCE_DSP_USE_INTEL_MKL
+ #include <mkl.h>
+#endif
+
 void MainApplication::initialise(const juce::String& /*commandLine*/)
 {
+#if JUCE_DSP_USE_INTEL_MKL
+    // Intel MKL Configuration for Real-time Audio
+    mkl_set_num_threads(1);                    // 1スレッド固定（必須）
+    // mkl_set_threading_layer(MKL_THREADING_SEQUENTIAL); // リンクエラー回避のため無効化 (CMakeでsequential指定済み)
+    mkl_set_dynamic(0);                        // 動的調整無効
+#endif
+
     // メインウィンドウを生成する
     mainWindow = std::make_unique<MainWindow>(getApplicationName());
 }

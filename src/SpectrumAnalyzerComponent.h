@@ -121,7 +121,8 @@ private:
 
     // ── Timer コールバック (~30fps) ──
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
-    void eqParamsChanged(EQProcessor* processor) override;
+    void eqBandChanged(EQProcessor* processor, int bandIndex) override;
+    void eqGlobalChanged(EQProcessor* processor) override;
     void timerCallback() override;
 
     // ── 描画ヘルパー ──

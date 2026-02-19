@@ -89,7 +89,7 @@ public:
     //----------------------------------------------------------
     // バイパス制御
     //----------------------------------------------------------
-    void setBypass(bool shouldBypass) { bypassed.store(shouldBypass); }
+    void setBypass(bool shouldBypass);
     bool isBypassed() const { return bypassed.load(); }
 
     //----------------------------------------------------------
@@ -146,8 +146,14 @@ public:
     juce::ValueTree getState() const;
     void setState (const juce::ValueTree& state);
 
+    //----------------------------------------------------------
+    // リビルド (サンプルレート変更時など)
+    //----------------------------------------------------------
+    void rebuildAllIRs();
+
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const ConvolverProcessor& other);
+    void syncParametersFrom(const ConvolverProcessor& other);
 
 private:
     class LoaderThread;

@@ -83,7 +83,8 @@ public:
     void releaseResources() override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
-    void eqParamsChanged(EQProcessor* processor) override;
+    void eqBandChanged(EQProcessor* processor, int bandIndex) override;
+    void eqGlobalChanged(EQProcessor* processor) override;
     void convolverParamsChanged(ConvolverProcessor* processor) override;
 
     //----------------------------------------------------------

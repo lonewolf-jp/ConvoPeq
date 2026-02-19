@@ -102,7 +102,8 @@ public:
     {
     public:
         virtual ~Listener() = default;
-        virtual void eqParamsChanged(EQProcessor* processor) = 0;
+        virtual void eqBandChanged(EQProcessor* processor, int bandIndex) = 0;
+        virtual void eqGlobalChanged(EQProcessor* processor) = 0;
     };
 
     void addListener(Listener* listener) { listeners.add(listener); }
@@ -215,6 +216,9 @@ public:
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const EQProcessor& other);
+    // 個別パラメータの同期 (最適化)
+    void syncBandNodeFrom(const EQProcessor& other, int bandIndex);
+    void syncGlobalStateFrom(const EQProcessor& other);
 
     //----------------------------------------------------------
     // プリセット読み込み (AudioEngine::prepareToPlayから呼ばれる)
