@@ -54,7 +54,7 @@ void EQProcessor::resetToDefaults()
     newState->bandTypes[19] = EQBandType::HighShelf;
 
     totalGainDbTarget.store(0.0f, std::memory_order_relaxed);
-    agcEnabled.store(false, std::memory_order_relaxed);
+    agcEnabled.store(false, std::memory_order_release);
     currentState.store(newState, std::memory_order_release);
 
     agcCurrentGain.store(1.0, std::memory_order_relaxed);
@@ -314,9 +314,34 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
         auto node = other.bandNodes[i].load(std::memory_order_acquire);
         bandNodes[i].store(node, std::memory_order_release);
     }
-    agcEnabled.store(other.agcEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
 
     // Note: smoothTotalGain target is updated in process() based on totalGainDbTarget
+}
+
+void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
+{
+    if (bandIndex < 0 || bandIndex >= NUM_BANDS) return;
+
+    auto node = other.bandNodes[bandIndex].load(std::memory_order_acquire);
+
+    // Atomic Exchange: 古いノードを取得し、新しいノードをセット
+    auto oldNode = bandNodes[bandIndex].exchange(node, std::memory_order_acq_rel);
+
+    // 古いノードをゴミ箱へ (Audio Threadでの削除防止)
+    if (oldNode)
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        trashBin.push_back(std::move(oldNode));
+        // ゴミ箱の掃除
+        trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(), [](const auto& p) { return p.use_count() == 1; }), trashBin.end());
+    }
+}
+
+void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
+{
+    totalGainDbTarget.store(other.totalGainDbTarget.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
 }
 
 //--------------------------------------------------------------
@@ -374,7 +399,7 @@ void EQProcessor::setBandFrequency(int band, float freq)
     newState->bands[band].frequency = freq;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    listeners.call(&Listener::eqParamsChanged, this);
+    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 void EQProcessor::setBandGain(int band, float gainDb)
@@ -385,7 +410,7 @@ void EQProcessor::setBandGain(int band, float gainDb)
     newState->bands[band].gain = gainDb;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    listeners.call(&Listener::eqParamsChanged, this);
+    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 void EQProcessor::setBandQ(int band, float q)
@@ -396,7 +421,7 @@ void EQProcessor::setBandQ(int band, float q)
     newState->bands[band].q = q;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    listeners.call(&Listener::eqParamsChanged, this);
+    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 void EQProcessor::setBandEnabled(int band, bool enabled)
@@ -407,7 +432,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
     newState->bands[band].enabled = enabled;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    listeners.call(&Listener::eqParamsChanged, this);
+    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 void EQProcessor::setTotalGain(float gainDb)
@@ -422,7 +447,7 @@ void EQProcessor::setTotalGain(float gainDb)
     auto newState = std::make_shared<EQState>(*oldState);
     newState->totalGainDb = gainDb;
     currentState.store(newState, std::memory_order_release);
-    listeners.call(&Listener::eqParamsChanged, this);
+    listeners.call(&Listener::eqGlobalChanged, this);
 }
 
 float EQProcessor::getTotalGain() const
@@ -432,13 +457,13 @@ float EQProcessor::getTotalGain() const
 
 void EQProcessor::setAGCEnabled(bool enabled)
 {
-    agcEnabled.store(enabled, std::memory_order_relaxed);
-    listeners.call(&Listener::eqParamsChanged, this);
+    agcEnabled.store(enabled, std::memory_order_release);
+    listeners.call(&Listener::eqGlobalChanged, this);
 }
 
 bool EQProcessor::getAGCEnabled() const
 {
-    return agcEnabled.load(std::memory_order_relaxed);
+    return agcEnabled.load(std::memory_order_acquire);
 }
 
 void EQProcessor::setBandType(int band, EQBandType type)
@@ -450,7 +475,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
     newState->bandTypes[band] = type;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    listeners.call(&Listener::eqParamsChanged, this);
+    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 EQBandType EQProcessor::getBandType(int band) const
@@ -467,7 +492,7 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
     newState->bandChannelModes[band] = mode;
     currentState.store(newState, std::memory_order_release);
     updateBandNode(band);
-    listeners.call(&Listener::eqParamsChanged, this);
+    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 EQChannelMode EQProcessor::getBandChannelMode(int band) const
@@ -610,6 +635,10 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     envIn  = envIn  * (1.0 - AGC_ALPHA) + inputRMS  * AGC_ALPHA;
     envOut = envOut * (1.0 - AGC_ALPHA) + outputRMS * AGC_ALPHA;
 
+    // Denormal対策: 極小値をゼロにクランプ (無音時のCPU負荷対策)
+    if (envIn < 1.0e-20) envIn = 0.0;
+    if (envOut < 1.0e-20) envOut = 0.0;
+
     // ターゲットゲイン計算
     double targetGain = calculateAGCGain(envIn, envOut);
 
@@ -663,7 +692,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
 
-    const bool isAgcEnabled = agcEnabled.load(std::memory_order_relaxed);
+    const bool isAgcEnabled = agcEnabled.load(std::memory_order_acquire);
     // ✅ フィルタ処理前に入力レベルをキャッシュ (AGCが有効な場合のみ)
     if (isAgcEnabled)
     {
@@ -796,7 +825,7 @@ void EQProcessor::updateBandNode(int band)
     // 古いノードをゴミ箱へ (Audio Threadが使用中の可能性があるため即削除しない)
     const juce::ScopedLock sl(trashBinLock);
     if (oldNode)
-        trashBin.push_back(oldNode);
+        trashBin.push_back(std::move(oldNode));
 
     // ゴミ箱の掃除 (Garbage Collection)
     // Audio Threadが参照していない(use_count == 1)オブジェクトのみを削除する。

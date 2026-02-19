@@ -44,6 +44,7 @@ if(MSVC)
         /utf-8      # ソースコードと実行時の文字セットをUTF-8に設定
         /W4         # 警告レベル4 (高)
         /wd4100     # C4100: 参照されないパラメーター (JUCE内部の警告を抑制)
+        /wd4189     # C4189: ローカル変数が初期化されましたが、参照されていません (r8brain対策)
         /MP         # マルチプロセッサコンパイル有効化
         /EHsc       # 標準C++例外処理のみ有効化 (SEH無効 - 構造化例外処理は使用しない)
     )
@@ -99,6 +100,17 @@ target_compile_features(FFTConvolver PUBLIC cxx_std_17)
 #------------------------------------------------------------
 # r8brain-free-src ライブラリの追加
 #------------------------------------------------------------
+add_library(r8brain INTERFACE)
+
+target_include_directories(r8brain INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+)
+
+target_compile_features(r8brain INTERFACE cxx_std_17)
+target_compile_definitions(r8brain INTERFACE
+    R8B_FASTTIMING=1          # 高速モード（推奨）
+    R8B_EXTFILTERS=0
+)
 
 #------------------------------------------------------------
 # GUIアプリケーション定義
@@ -129,23 +141,30 @@ target_sources(ConvoPeq PRIVATE
 )
 
 #------------------------------------------------------------
-# コンパイル定義
+# リンクとコンパイル定義
 #------------------------------------------------------------
+target_link_libraries(ConvoPeq PRIVATE
+    juce::juce_audio_utils
+    juce::juce_audio_devices
+    juce::juce_audio_basics
+    juce::juce_dsp
+    juce::juce_gui_extra
+    juce::juce_core
+    FFTConvolver
+    r8brain
+)
+
 target_compile_definitions(ConvoPeq PRIVATE
-    # JUCE設定
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
-    JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:ConvoPeq,PRODUCT_NAME>"
-    JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:ConvoPeq,JUCE_VERSION>"
+    JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
+    JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}"
+    JUCE_STANDALONE_APPLICATION=1
+    FFTCONVOLVER_USE_DOUBLE=1
+    # Windows/ASIO/SIMD settings preserved for functionality
     JUCE_USE_SSE_INTRINSICS=1
     JUCE_USE_SIMD=1
-    JUCE_DSP_USE_SHARED_FFTW=0
-    JUCE_COMPANY_COPYRIGHT="${APP_COPYRIGHT}"
-    # デバッグログ有効化 (Debugビルドのみ)
-    $<$<CONFIG:Debug>:JUCE_LOG_ASSERTIONS=1>
-
-    # Windows固有
     $<$<PLATFORM_ID:Windows>:
         _UNICODE
         UNICODE
@@ -154,43 +173,11 @@ target_compile_definitions(ConvoPeq PRIVATE
     >
 )
 
-#------------------------------------------------------------
-# r8brain-free-src (Header-only) のインクルードパス設定
-#------------------------------------------------------------
-# r8brain-free-src v7.0以降はヘッダーオンリーライブラリです。
-# r8bbase.h を検索して、r8brain-free-src のルートディレクトリを特定します。
-find_file(R8B_HEADER_PATH
-    NAMES r8bbase.h
-    PATHS
-        "${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src"
-        "${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src/r8brain-free-src" # ネストしたディレクトリを処理
-    NO_DEFAULT_PATH
-)
-
-if(NOT R8B_HEADER_PATH)
-    message(FATAL_ERROR "r8bbase.h not found. Please ensure the r8brain-free-src directory is correctly placed in the project root.")
-else()
-    get_filename_component(R8B_INCLUDE_DIR ${R8B_HEADER_PATH} DIRECTORY)
-    target_include_directories(ConvoPeq PRIVATE ${R8B_INCLUDE_DIR})
+# ReleaseでLTCG有効化（MSVC用）
+if(MSVC)
+    target_compile_options(ConvoPeq PRIVATE /GL)
+    target_link_options(ConvoPeq PRIVATE /LTCG)
 endif()
-
-#------------------------------------------------------------
-# JUCEモジュール
-#------------------------------------------------------------
-target_link_libraries(ConvoPeq PRIVATE
-    juce::juce_core
-    juce::juce_events
-    juce::juce_data_structures
-    juce::juce_graphics
-    juce::juce_gui_basics
-    juce::juce_audio_basics
-    juce::juce_audio_devices
-    juce::juce_audio_formats
-    juce::juce_audio_processors
-    juce::juce_audio_utils
-    juce::juce_dsp              # Convolution用
-    FFTConvolver                # FFTConvolver
-)
 
 #------------------------------------------------------------
 # Intel MKL Configuration

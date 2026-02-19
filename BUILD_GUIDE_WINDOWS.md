@@ -11,7 +11,7 @@
 - **JUCE**: 8.0.12（厳密）
 - **C++標準**: C++20
 - **Intel oneAPI**: Base Toolkit、HPC Toolkit (任意, FFT最適化用)
-  - **VS Code必要コンポーネント**: Extension Pack for Intel Software Developer Tools、Extension Pack for Intel Software Developer Tools、Analysis Configurator for Intel Software Developer Tools、Analysis Configurator for Intel Software Developer Tools
+  - **VS Code必要コンポーネント**: Extension Pack for Intel Software Developer Tools、Analysis Configurator for Intel Software Developer Tools
 
 **重要**: 本アプリケーションはWindows 11 x64専用のスタンドアローンアプリケーションです。macOSやLinuxではビルドできません。
 
@@ -85,22 +85,24 @@ FFT処理の高速化のためにIntel MKLを使用する場合:
 1. Intel oneAPI Base Toolkit、Intel oneAPI HPC Toolkit からダウンロード
 2. インストールする
 3. デフォルトのインストールパス (`C:\Program Files (x86)\Intel\oneAPI`) を推奨 (`build.bat`が自動検出します)
-4. VS Codeを起動し、拡張機能「Extension Pack for Intel Software Developer Tools」、「Extension Pack for Intel Software Developer Tools」、「Analysis Configurator for Intel Software Developer Tools」、「Analysis Configurator for Intel Software Developer Tools」をインストール
+4. VS Codeを起動し、拡張機能「Extension Pack for Intel Software Developer Tools」、「Analysis Configurator for Intel Software Developer Tools」をインストール
 
-### 2. JUCEの準備
+### 2. 依存ライブラリの準備
 
-#### 2.1 JUCEをダウンロード
+#### 2.1 ライブラリのダウンロード
 
 ```powershell
 # プロジェクトディレクトリに移動 (例)
 cd C:\path\to\ConvoPeq
 
-# Git経由でJUCE 8.0.12をクローン
+# 1. JUCE 8.0.12 (必須)
 git clone --branch 8.0.12 --depth 1 https://github.com/juce-framework/JUCE.git
 
-# または手動でダウンロード
-# https://github.com/juce-framework/JUCE/releases/tag/8.0.12
-# → ダウンロードしてプロジェクトルートに展開
+# 2. FFTConvolver (本プロジェクト用一部改修版を同梱済み)
+# プロジェクトルートに同梱されているため、ダウンロード不要です。
+
+# 3. r8brain-free-src (同梱済み)
+# プロジェクトルートに同梱されているため、ダウンロード不要です。
 ```
 
 #### 2.2 ディレクトリ構成確認
@@ -109,6 +111,8 @@ git clone --branch 8.0.12 --depth 1 https://github.com/juce-framework/JUCE.git
 ConvoPeq/
 ├── .vscode/           # VS Code設定
 ├── JUCE/              # JUCEフレームワーク（JUCE framework V8.0.12をダウンロードし自分で作成）
+├── FFTConvolver/      # FFTConvolverライブラリ
+├── r8brain-free-src/  # r8brainライブラリ
 ├── src/               # ソースコード
 ├── resources/         # リソースファイル (アイコン)
 ├── sample_setting/    # インポート用サンプル設定ファイル

@@ -351,15 +351,21 @@ void MainWindow::launchFileChooser(bool isSaving)
                                                            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
                                                            wildcards);
 
-    fileChooser->launchAsync(chooserFlags, [this, isSaving, fileChooser](const juce::FileChooser& fc)
+    // Use SafePointer for safety consistency
+    juce::Component::SafePointer<MainWindow> safeThis(this);
+
+    fileChooser->launchAsync(chooserFlags, [safeThis, isSaving, fileChooser](const juce::FileChooser& fc)
     {
+        if (safeThis == nullptr)
+            return;
+
         auto file = fc.getResult();
         if (file == juce::File())
             return;
 
         if (isSaving)
         {
-            auto state = audioEngine.getCurrentState();
+            auto state = safeThis->audioEngine.getCurrentState();
             if (auto xml = state.createXml())
             {
                 xml->writeTo(file);
@@ -375,12 +381,12 @@ void MainWindow::launchFileChooser(bool isSaving)
                     {
                         auto state = juce::ValueTree::fromXml(*xml);
                         if (state.isValid())
-                            audioEngine.requestLoadState(state);
+                            safeThis->audioEngine.requestLoadState(state);
                     }
                 }
                 else if (file.hasFileExtension(".txt"))
                 {
-                    audioEngine.requestEqPresetFromText(file);
+                    safeThis->audioEngine.requestEqPresetFromText(file);
                 }
             }
         }

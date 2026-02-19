@@ -237,22 +237,28 @@ void ConvolverControlPanel::buttonClicked(juce::Button* button)
     if (button == &loadIRButton)
     {
         // ファイル選択ダイアログ
-        fileChooser = std::make_unique<juce::FileChooser>("Select Impulse Response (IR) File",
+        // JUCE v8.0.12 Recommended Pattern: Use local shared_ptr and capture it in lambda
+        auto fileChooser = std::make_shared<juce::FileChooser>("Select Impulse Response (IR) File",
                                   juce::File::getSpecialLocation(
                                       juce::File::userDocumentsDirectory),
                                   "*.wav;*.aif;*.aiff;*.flac");
 
         const auto chooserFlags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
 
-        fileChooser->launchAsync(chooserFlags, [this](const juce::FileChooser& fc)
+        juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
+
+        fileChooser->launchAsync(chooserFlags, [safeThis, fileChooser](const juce::FileChooser& fc)
         {
+            if (safeThis == nullptr)
+                return;
+
             if (fc.getResults().isEmpty())
                 return;
 
             juce::File irFile = fc.getResult();
 
             // 安全なリクエスト経由でロード
-            engine.requestConvolverPreset(irFile);
+            safeThis->engine.requestConvolverPreset(irFile);
         });
     }
 }
