@@ -217,12 +217,14 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // サンプルレート変更検知
     const bool rateChanged = (std::abs(currentSampleRate.load() - sampleRate) > 1.0);
+    // ブロックサイズ変更検知 (FFTConvolverのパーティションサイズ最適化のため)
+    const bool blockSizeChanged = (maxSamplesPerBlock.load() != bufferSize);
 
     // UI用プロセッサのサンプルレートも更新 (IR表示やパラメータ管理のため)
     uiConvolverProcessor.prepareToPlay(sampleRate, bufferSize);
     uiEqProcessor.prepareToPlay(static_cast<int>(sampleRate), bufferSize);
 
-    if (rateChanged)
+    if (rateChanged || blockSizeChanged)
     {
         uiConvolverProcessor.rebuildAllIRs();
     }
@@ -234,6 +236,10 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     currentSampleRate.store(static_cast<int>(sampleRate));
     uiConvolverProcessor.setBypass(convBypassActive.load (std::memory_order_relaxed));
     audioFifo.reset();
+
+    // レベルメーターのリセット
+    inputLevelDb.store(LEVEL_METER_MIN_DB);
+    outputLevelDb.store(LEVEL_METER_MIN_DB);
 
     // ===== bypass 状態の初期化 =====
     // 再生中のリアルタイムな更新は getNextAudioBlock() で行われる
@@ -449,8 +455,8 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int b
     // プロセッサの準備
     convolver.prepareToPlay(processingRate, processingBlockSize);
     eq.prepareToPlay(static_cast<int>(processingRate), processingBlockSize);
-    dcBlockerL.prepare(processingRate);
-    dcBlockerR.prepare(processingRate);
+    dcBlockerL.prepare(processingRate, processingBlockSize);
+    dcBlockerR.prepare(processingRate, processingBlockSize);
 
     // ディザの準備 (出力段で行うため元のサンプルレート)
     dither.prepare(sampleRate, bitDepth);

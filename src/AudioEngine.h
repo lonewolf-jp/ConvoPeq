@@ -67,7 +67,7 @@ public:
     // ── 安全性制限 ──
     static constexpr double SAFE_MIN_SAMPLE_RATE = 8000.0;
     static constexpr double SAFE_MAX_SAMPLE_RATE = 384000.0;
-    static constexpr int    SAFE_MAX_BLOCK_SIZE  = 8192;
+    static constexpr int    SAFE_MAX_BLOCK_SIZE  = 65536; // 8x Oversampling対応のため拡張
 
     //----------------------------------------------------------
     // コンストラクタ
@@ -151,12 +151,12 @@ private:
     class DCBlocker
     {
     public:
-        void prepare(double sampleRate) noexcept
+        void prepare(double sampleRate, int blockSize) noexcept
         {
             // 4次バターワースハイパスフィルタ（3Hz、-24dB/oct）
             // 20Hz帯域の位相歪みを低減
             spec.sampleRate = sampleRate;
-            spec.maximumBlockSize = SAFE_MAX_BLOCK_SIZE;
+            spec.maximumBlockSize = static_cast<juce::uint32>(blockSize);
             spec.numChannels = 1;
 
             // 2次バターワース × 2段 = 4次フィルタ

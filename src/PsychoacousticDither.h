@@ -16,6 +16,52 @@
 #include <cmath>
 #include <optional>
 
+//--------------------------------------------------------------
+// Xoshiro256** PRNG Implementation
+// 高速かつ高品質な乱数生成器 (周期 2^256 - 1)
+// オーディオディザリングに最適
+//--------------------------------------------------------------
+struct Xoshiro256
+{
+    uint64_t s[4];
+
+    static inline uint64_t rotl(const uint64_t x, int k)
+    {
+        return (x << k) | (x >> (64 - k));
+    }
+
+    void seed(uint64_t seed)
+    {
+        // SplitMix64で初期状態を生成
+        for (int i = 0; i < 4; ++i)
+        {
+            seed += 0x9E3779B97F4A7C15ULL;
+            uint64_t z = seed;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            s[i] = z ^ (z >> 31);
+        }
+    }
+
+    // [0, 1) のdouble乱数を生成
+    double nextDouble()
+    {
+        const uint64_t result = rotl(s[1] * 5, 7) * 9;
+        const uint64_t t = s[1] << 17;
+
+        s[2] ^= s[0];
+        s[3] ^= s[1];
+        s[1] ^= s[2];
+        s[0] ^= s[3];
+
+        s[2] ^= t;
+        s[3] = rotl(s[3], 45);
+
+        // 53-bit precision double
+        return (result >> 11) * (1.0 / (1ULL << 53));
+    }
+};
+
 class PsychoacousticDither
 {
 public:
@@ -50,7 +96,7 @@ public:
     double process(double input, int channel) noexcept
     {
         // チャンネルに応じた乱数生成器と状態変数を選択
-        juce::Random& random = (channel == 0) ? randomL : randomR;
+        Xoshiro256& random = (channel == 0) ? randomL : randomR;
         double& s1 = (channel == 0) ? state1L : state1R;
         double& s2 = (channel == 0) ? state2L : state2R;
 
@@ -69,7 +115,7 @@ public:
 
         // 4. 量子化誤差を計算し、次のサンプルのために状態を更新
         //    誤差 = (量子化後の値) - (量子化前の値)
-        const double error = quantized - ditheredSignal;
+        const double error = quantized - signalToQuantize;
         s2 = s1;
         s1 = error;
 
@@ -92,8 +138,8 @@ public:
     }
 
 private:
-    juce::Random randomL;
-    juce::Random randomR;
+    Xoshiro256 randomL;
+    Xoshiro256 randomR;
     double scale = 8388608.0;
     double invScale = 1.0 / 8388608.0;
     double ditherAmplitude = 1.0 / 8388608.0;
@@ -134,7 +180,7 @@ private:
         uint64_t seedL = splitmix64(s);
         uint64_t seedR = splitmix64(s);
 
-        randomL.setSeed(seedL);
-        randomR.setSeed(seedR);
+        randomL.seed(seedL);
+        randomR.seed(seedR);
     }
 };

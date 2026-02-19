@@ -61,7 +61,5 @@ private:
     juce::Path waveformPath;
     juce::Rectangle<int> waveformArea;
 
-    std::unique_ptr<juce::FileChooser> fileChooser;
-
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverControlPanel)
 };
