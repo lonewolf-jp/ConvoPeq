@@ -189,6 +189,8 @@ if(DEFINED ENV{MKLROOT})
 endif()
 
 # スタティックリンクとシーケンシャル実行を指定してDLL依存を排除
+# MKL_THREADING=sequential: OpenMPなどのスレッドライブラリに依存しない、シングルスレッド版のMKLをリンクします。
+#                           リアルタイムオーディオ処理の安定性確保に不可欠です。
 set(MKL_LINK static)
 set(MKL_THREADING sequential)
 

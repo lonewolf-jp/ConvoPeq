@@ -1,5 +1,5 @@
 //============================================================================
-// DeviceSettings.cpp  ── デバイス設定の永続化実装 (JUCE 8.0.12対応)
+// DeviceSettings.cpp  ── v0.2 (JUCE 8.0.12対応)
 //============================================================================
 #include "DeviceSettings.h"
 
@@ -15,7 +15,6 @@
 // このクラスは、JUCEの内部実装（`AudioDeviceManager`が`OwnedArray`で`AudioIODeviceType`を管理していること）に依存しています。
 // `const_cast`を用いて内部の読み取り専用配列を書き換えるという危険な操作を行っているため、
 // 将来のJUCEバージョンで互換性が失われる可能性があります。
-// デバイスリストから除外するためのラッパークラス。シングルクライアントASIO（BRAVO-HD, ASIO4ALL等）の問題を回避します。
 //==============================================================================
 class BlacklistedASIODeviceType : public juce::AudioIODeviceType
 {
@@ -221,7 +220,6 @@ void DeviceSettings::updateBitDepthList()
 {
     // 現在のデバイスを取得
     juce::Array<int> supportedBitDepths; // device変数は未使用のため削除
-
     // AudioIODeviceにはビット深度を取得する標準的なAPIがないため、一般的な値をリストアップ
 
     // デバイスがビット深度を報告しない場合、またはデバイスがない場合のフォールバック

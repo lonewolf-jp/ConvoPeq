@@ -44,25 +44,6 @@ if not exist "JUCE" (
 echo [CHECK] JUCE Directory: OK
 echo.
 
-REM FFTConvolverディレクトリの確認
-if not exist "FFTConvolver" (
-    echo [ERROR] FFTConvolver directory not found!
-    echo.
-    echo Please place FFTConvolver using one of the following methods:
-    echo   1. Symbolic link: mklink /J FFTConvolver C:\path\to\FFTConvolver
-    echo   2. Junction: mklink /J FFTConvolver C:\path\to\FFTConvolver
-    echo   3. Copy: xcopy /E /I C:\path\to\FFTConvolver FFTConvolver
-    echo.
-    echo FFTConvolver non-uniform Download:
-    echo   https://github.com/ouroboros-audio/FFTConvolver
-    echo.
-    pause
-    exit /b 1
-)
-
-echo [CHECK] FFTConvolver Directory: OK
-echo.
-
 REM r8brain-free-srcディレクトリの確認
 if not exist "r8brain-free-src" (
     echo [ERROR] r8brain-free-src directory not found!

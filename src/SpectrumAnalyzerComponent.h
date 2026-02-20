@@ -1,7 +1,6 @@
 //============================================================================
 #pragma once
-// SpectrumAnalyzerComponent.h  ── v0.1 (JUCE 8.0.12対応)
-//
+// SpectrumAnalyzerComponent.h ── v0.2 (JUCE 8.0.12対応)
 // スペクトラムアナライザー＋EQ応答曲線＋レベルメーター
 //
 // ■ 描画パイプライン設計:
@@ -66,8 +65,8 @@ private:
     std::vector<int>   peakHoldCounter;  // 各バンドのピーク保持残フレーム数
 
     // ── EQ応答曲線データ ──
-    std::vector<float> eqResponseBufferL; // NUM_DISPLAY_BARS 要素
-    std::vector<float> eqResponseBufferR; // NUM_DISPLAY_BARS 要素
+    std::vector<float> eqResponseBufferL; // 要素数: NUM_DISPLAY_BARS
+    std::vector<float> eqResponseBufferR; // 要素数: NUM_DISPLAY_BARS
 
     // 個別バンドの応答曲線データ (timerで計算、paintで描画)
     std::vector<std::vector<float>> individualBandCurvesL;

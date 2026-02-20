@@ -19,6 +19,11 @@
     "editor.insertSpaces": true,
     "files.trimTrailingWhitespace": true,
 
+    "files.readonlyInclude": {
+        "JUCE/**": true,
+        "r8brain-free-src/**": true
+    },
+
     "[cpp]": {
         "editor.defaultFormatter": "ms-vscode.cpptools"
     }

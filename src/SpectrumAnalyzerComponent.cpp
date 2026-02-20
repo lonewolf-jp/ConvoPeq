@@ -1,5 +1,5 @@
 //============================================================================
-// SpectrumAnalyzerComponent.cpp  ── v0.1 (JUCE 8.0.12対応)
+// SpectrumAnalyzerComponent.cpp ── v0.2 (JUCE 8.0.12対応)
 //
 // スペクトラムアナライザー＋EQ応答曲線＋レベルメーター・ピーク保持
 //============================================================================
@@ -59,7 +59,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     engine.getEQProcessor().addListener(this);
     updateEQData(); // 初期状態のEQカーブを計算
 
-    startTimerHz(60); // 60fps for smoother UI and stable FIFO consumption
+    startTimerHz(60); // 60fps: UIの滑らかさとFIFO消費の安定化のため
 }
 
 //--------------------------------------------------------------
@@ -92,13 +92,21 @@ void SpectrumAnalyzerComponent::timerCallback()
     // ── FFTデータの取得とスムーシング ──
     // FIFOの利用可能データ数をチェック
     const int available = engine.getFifoNumReady();
-    // BUG #7 Fix: Ensure enough data is available (wait for full FFT size to prevent underrun glitches)
+    // 十分なデータがあるか確認 (FFTサイズ分のデータが揃うまで待つことでアンダーラングリッチを防ぐ)
     const int required = OVERLAP_SAMPLES;
 
     // データ不足 → スキップ (データ不足の場合は何もしない)
     if (available < required)
     {
         underflowCount++;
+
+        // 30フレーム連続でアンダーランした場合 (60fpsで0.5秒)、
+        // エンジンが停止したとみなし、CPU消費を防ぐためにタイマーを停止する
+        if (underflowCount > 30)
+        {
+            stopTimer();
+            return;
+        }
 
         // アンダーラン時は「減衰保持」 (Decay Hold)
         // 視覚的に自然にフェードアウトさせる
@@ -133,50 +141,58 @@ void SpectrumAnalyzerComponent::timerCallback()
     // 2. FIFOから新しいデータを読み込み
     engine.readFromFifo(fftTimeDomainBuffer.data() + (NUM_FFT_POINTS - OVERLAP_SAMPLES), OVERLAP_SAMPLES);
 
+    // 安全対策: NaN/Infチェック
+    // 万が一DSP処理で不正な値が発生しても、アナライザーでクラッシュさせない
+    for (auto& sample : fftTimeDomainBuffer)
+    {
+        if (!std::isfinite(sample))
+            sample = 0.0f;
+    }
+
     // 3. 窓関数適用とFFT実行
     std::memcpy(fftWorkBuffer.data(), fftTimeDomainBuffer.data(), NUM_FFT_POINTS * sizeof(float));
-        std::fill(fftWorkBuffer.data() + NUM_FFT_POINTS, fftWorkBuffer.data() + NUM_FFT_POINTS * 2, 0.0f);
-        window.multiplyWithWindowingTable(fftWorkBuffer.data(), NUM_FFT_POINTS);
-        // Note: この処理は Message Thread (Timer) で実行されるため、FFT実行（performFrequencyOnlyForwardTransform）に伴う負荷や一時的なメモリ確保はAudio Threadに影響せず安全です。
-        fft.performFrequencyOnlyForwardTransform(fftWorkBuffer.data());
+    std::fill(fftWorkBuffer.data() + NUM_FFT_POINTS, fftWorkBuffer.data() + NUM_FFT_POINTS * 2, 0.0f);
+    window.multiplyWithWindowingTable(fftWorkBuffer.data(), NUM_FFT_POINTS);
+    // Note: この処理は Message Thread (Timer) で実行されるため、FFT実行（performFrequencyOnlyForwardTransform）に伴う負荷や一時的なメモリ確保はAudio Threadに影響せず安全です。
+    fft.performFrequencyOnlyForwardTransform(fftWorkBuffer.data());
 
-        // 4. dB変換して出力
-        const int numBins = std::min(static_cast<int>(rawBuffer.size()), NUM_FFT_BINS);
-        for (int i = 0; i < numBins; ++i)
+    // 4. dB変換して出力
+    const int numBins = std::min(static_cast<int>(rawBuffer.size()), NUM_FFT_BINS);
+    for (int i = 0; i < numBins; ++i)
+    {
+        const float magnitude = fftWorkBuffer[i] * FFT_MAGNITUDE_SCALE;
+        rawBuffer[i] = (magnitude > FFT_DISPLAY_MIN_MAG)
+                        ? juce::Decibels::gainToDecibels(magnitude)
+                        : FFT_DISPLAY_MIN_DB;
+    }
+
+    for (size_t i = 0; i < smoothedBuffer.size(); ++i)
+    {
+        smoothedBuffer[i] = SMOOTHING_ALPHA * smoothedBuffer[i]
+                            + (1.0f - SMOOTHING_ALPHA) * rawBuffer[i];
+
+        // ── ピーク保持の更新 ──
+        if (smoothedBuffer[i] >= peakBuffer[i])
         {
-            const float magnitude = fftWorkBuffer[i] * FFT_MAGNITUDE_SCALE;
-            rawBuffer[i] = (magnitude > FFT_DISPLAY_MIN_MAG)
-                         ? juce::Decibels::gainToDecibels(magnitude)
-                         : FFT_DISPLAY_MIN_DB;
+            // 現在値がピーク以上なら更新し、保持カウンタをリセット
+            peakBuffer[i]      = smoothedBuffer[i];
+            peakHoldCounter[i] = PEAK_HOLD_FRAMES;
         }
-
-        for (size_t i = 0; i < smoothedBuffer.size(); ++i)
+        else
         {
-            smoothedBuffer[i] = SMOOTHING_ALPHA * smoothedBuffer[i]
-                              + (1.0f - SMOOTHING_ALPHA) * rawBuffer[i];
-
-            // ── ピーク保持の更新 ──
-            if (smoothedBuffer[i] >= peakBuffer[i])
+            // カウンタを減らし、0になったらピークを現在値に落とす
+            if (peakHoldCounter[i] > 0)
             {
-                // 現在値がピーク以上なら更新し、保持カウンタをリセット
-                peakBuffer[i]      = smoothedBuffer[i];
-                peakHoldCounter[i] = PEAK_HOLD_FRAMES;
+                --peakHoldCounter[i];
             }
             else
             {
-                // カウンタを減らし、0になったらピークを現在値に落とす
-                if (peakHoldCounter[i] > 0)
-                {
-                    --peakHoldCounter[i];
-                }
-                else
-                {
-                    // ピークも少しずつ落とす（急な落ち込みを緩和）
-                    peakBuffer[i] = std::max(smoothedBuffer[i],
-                                             peakBuffer[i] - 0.5f); // 0.5dB/frame
-                }
+                // ピークも少しずつ落とす（急な落ち込みを緩和）
+                peakBuffer[i] = std::max(smoothedBuffer[i],
+                                            peakBuffer[i] - 0.5f); // 0.5dB/frame
             }
         }
+    }
 
     repaint();
 }
@@ -186,6 +202,11 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
     // AudioEngine (EQProcessor, ConvolverProcessor) からの変更通知
     if (source == &engine || source == &engine.getEQProcessor())
     {
+        // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
+        if (!isTimerRunning())
+        {
+            startTimerHz(60);
+        }
         updateEQData();
     }
 }
@@ -194,6 +215,11 @@ void SpectrumAnalyzerComponent::eqBandChanged(EQProcessor* processor, int /*band
 {
     if (processor == &engine.getEQProcessor())
     {
+        // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
+        if (!isTimerRunning())
+        {
+            startTimerHz(60);
+        }
         updateEQData();
     }
 }
@@ -202,6 +228,11 @@ void SpectrumAnalyzerComponent::eqGlobalChanged(EQProcessor* processor)
 {
     if (processor == &engine.getEQProcessor())
     {
+        // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
+        if (!isTimerRunning())
+        {
+            startTimerHz(60);
+        }
         updateEQData();
     }
 }
@@ -370,12 +401,14 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
     const int   halfFFT    = NUM_FFT_BINS;
     const float barWidth   = plotW / static_cast<float>(NUM_DISPLAY_BARS);
 
-    const float binFactor  = NUM_FFT_POINTS / static_cast<float>(sampleRate);
+    const float binFactor = NUM_FFT_POINTS / static_cast<float>(sampleRate);
+    const float nyquist = static_cast<float>(sampleRate) / 2.0f;
 
     for (int bar = 0; bar < NUM_DISPLAY_BARS; ++bar)
     {
         // 事前計算された周波数を使用 (pow/log計算を回避)
-        const float freq = displayFrequencies[bar];
+        // ナイキスト周波数でクランプし、FFTの有効範囲外のビンを参照しないようにする
+        const float freq = std::min(displayFrequencies[bar], nyquist);
 
         // 周波数 → FFTビンインデックス (補間用にfloatで計算)
         float binIdx = freq * binFactor;

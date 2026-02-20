@@ -1,6 +1,6 @@
 //============================================================================
 #pragma once
-// ConvolverProcessor.h  ── v0.1 (JUCE 8.0.12対応)
+// ConvolverProcessor.h  ── v0.2 (JUCE 8.0.12対応)
 //
 // FFTベースコンボリューションプロセッサー
 //
@@ -58,8 +58,7 @@ public:
     // DelayLine用定数 (Audio Threadでのメモリ確保防止)
     // IRの最大長(kMaxIRCap)と最大ブロックサイズをカバーする値を設定
     // 3s @ 192kHz = 576000 samples. Next power of 2 is 1048576.
-    // static constexpr int MAX_IR_LATENCY = 524288; // IRの最大長 (computeTargetIRLengthのkMaxIRCapと一致)
-    static constexpr int MAX_IR_LATENCY = 1048576;
+    static constexpr int MAX_IR_LATENCY = 2097152; // 2^21 (3.0s @ 384kHz = ~1.15M samples をカバー)
     static constexpr int MAX_BLOCK_SIZE = 65536;  // 8x Oversampling (8192 * 8) を考慮して拡張
     static constexpr int MAX_TOTAL_DELAY = MAX_IR_LATENCY + MAX_BLOCK_SIZE;
     static constexpr double CONVOLUTION_HEADROOM_GAIN = 0.5; // -6.02 dB
@@ -196,12 +195,12 @@ private:
         void reset() { convolvers[0].reset(); convolvers[1].reset(); }
     };
 
-    // Note: trashBin is used to keep old Convolution objects alive while Audio Thread might still be using them.
+    // Note: trashBin は、Audio Thread がまだ使用している可能性のある古い Convolution オブジェクトを保持するために使用されます。
     std::atomic<std::shared_ptr<StereoConvolver>> convolution;
     std::vector<std::shared_ptr<StereoConvolver>> trashBin;
     juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
-    std::atomic<bool> isRebuilding { false }; // ← 追加
+    std::atomic<bool> isRebuilding { false };
     std::unique_ptr<LoaderThread> activeLoader;
     std::atomic<float> loadProgress { 0.0f };
     void setLoadingProgress(float p) { loadProgress.store(p); }

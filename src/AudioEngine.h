@@ -1,6 +1,6 @@
 //============================================================================
 #pragma once
-// AudioEngine.h  ── v0.1 (JUCE 8.0.12対応)
+// AudioEngine.h  ── v0.2 (JUCE 8.0.12対応)
 //
 // オーディオエンジン - AudioSource実装
 //
@@ -31,10 +31,11 @@ class AudioEngine : public juce::AudioSource,
                   public juce::ChangeBroadcaster,
                   private juce::ChangeListener,
                   private EQProcessor::Listener,
-                  private ConvolverProcessor::Listener
+                  private ConvolverProcessor::Listener,
+                  private juce::Timer
 {
 public:
-    using SampleType = double; // 内部DSP精度 (JUCE Best Practice)
+    using SampleType = double; // 内部DSP精度 (JUCE推奨)
 
     enum class ProcessingOrder
     {
@@ -86,6 +87,7 @@ public:
     void eqBandChanged(EQProcessor* processor, int bandIndex) override;
     void eqGlobalChanged(EQProcessor* processor) override;
     void convolverParamsChanged(ConvolverProcessor* processor) override;
+    void timerCallback() override;
 
     //----------------------------------------------------------
     // 外部インターフェース (Message Thread)
@@ -226,7 +228,7 @@ private:
         ConvolverProcessor convolver;
         EQProcessor eq;
         DCBlocker dcBlockerL, dcBlockerR;
-        PsychoacousticDither dither;
+        ::dsp::PsychoacousticDither dither;
 
         std::unique_ptr<juce::dsp::Oversampling<double>> oversampling;
         size_t oversamplingFactor = 1;

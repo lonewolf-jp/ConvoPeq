@@ -1,5 +1,5 @@
 //============================================================================
-// ConvolverProcessor.cpp  ── v0.1 (JUCE 8.0.12対応)
+// ConvolverProcessor.cpp  ── v0.2 (JUCE 8.0.12対応)
 //
 // コンボリューションプロセッサーの実装
 //============================================================================
@@ -11,8 +11,6 @@
 #include <cstring>
 #include <limits>
 #include <new>
-
-#include <juce_dsp/juce_dsp.h>
 
 #include "AudioFFT.h" // Double precision FFT
 #include "CDSPResampler.h"
@@ -49,7 +47,7 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
     constexpr double stopBandAtten = 140.0;
     constexpr r8b::EDSPFilterPhaseResponse phase = r8b::fprLinearPhase;
 
-    int finalLength = 0;
+    int maxLength = 0;
     for (int ch = 0; ch < inputIR.getNumChannels(); ++ch)
     {
         if (checkCancellation(thread, nullptr)) return {};
@@ -60,22 +58,27 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
         double* outPtr = resampled.getWritePointer(ch);
 
         int done = 0;
-        while (done < maxOutLen)
+        int iterations = 0;
+        constexpr int maxIterations = 1000; // 無限ループ防止のための安全カウンター
+
+        while (done < maxOutLen && ++iterations < maxIterations)
         {
             if (checkCancellation(thread, nullptr)) return {};
             double* r8bOutput = nullptr;
             const int generated = resampler.process(const_cast<double*>(inPtr),
                                                     done == 0 ? inLength : 0, r8bOutput);
 
-            if (generated == 0) break;
+            // generatedが0以下の場合、処理が完了したかエラーが発生したとみなしループを抜ける
+            if (generated <= 0)
+                break;
 
             const int toCopy = std::min(generated, maxOutLen - done);
             std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
             done += toCopy;
         }
-        finalLength = done;
+        maxLength = std::max(maxLength, done);
     }
-    resampled.setSize(inputIR.getNumChannels(), finalLength, true, true, true);
+    resampled.setSize(inputIR.getNumChannels(), maxLength, true, true, true);
     return resampled;
 }
 
@@ -105,15 +108,15 @@ public:
     {
         juce::ScopedNoDenormals noDenormals; // バックグラウンド処理でのDenormal対策
 
-        // BUG #16: Wrap in try-catch to prevent std::terminate() on std::bad_alloc
-        // BUG FIX: Ensure isLoading/isRebuilding are reset on early exit (unless thread is stopping)
+        // メモリ確保失敗時の例外処理: std::terminate() を防ぐために try-catch で囲む
+        // 早期終了時にフラグを確実にリセットするためのRAIIヘルパー
         struct FlagResetter {
             ConvolverProcessor& p;
             const juce::Thread& t;
             bool success = false;
             ~FlagResetter() {
                 if (!success && !t.threadShouldExit()) {
-                    juce::WeakReference<ConvolverProcessor> weakOwner(&p);
+                juce::WeakReference<ConvolverProcessor> weakOwner(&p);
                     juce::MessageManager::callAsync([weakOwner] {
                         if (auto* o = weakOwner.get()) {
                             o->isLoading.store(false);
@@ -126,207 +129,209 @@ public:
 
         try
         {
+            owner.setLoadingProgress(0.0f);
+            // IRデータ
+            juce::AudioBuffer<double> loadedIR; // IRデータ
+            double loadedSR = 0.0;             // サンプルレート
 
-        owner.setLoadingProgress(0.0f);
-        // IRデータ
-        juce::AudioBuffer<double> loadedIR; // IRデータ
-        double loadedSR = 0.0;             // サンプルレート
-
-        // 1. IRデータの取得 (ファイル読み込み or メモリコピー)
-        if (isRebuild)
-        {
-            loadedIR = sourceIR;
-            loadedSR = sourceSampleRate;
-        }
-        else
-        {
-            if (!file.existsAsFile()) return;
-
-            juce::AudioFormatManager formatManager;
-            formatManager.registerBasicFormats();
-            std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
-
-            if (!reader) return;
-
-            // サイズの妥当性チェック (lengthInSamples が int の範囲を超える場合への対策)
-            const int64 fileLength = reader->lengthInSamples;
-            const int numChannels = static_cast<int>(reader->numChannels);
-            static constexpr int64 MAX_FILE_LENGTH = 2147483647;  // int の最大値
-
-            if (fileLength > MAX_FILE_LENGTH) {
-                DBG("LoaderThread: ファイルサイズが大きすぎます。");
-                return;
-            }
-
-            // AudioFormatReader::read は float のみ対応のため、一時バッファを使用
-            juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
-            reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true);
-
-            loadedIR.setSize(numChannels, static_cast<int>(fileLength));
-            for (int ch = 0; ch < numChannels; ++ch)
+            // 1. IRデータの取得 (ファイル読み込み or メモリコピー)
+            if (isRebuild)
             {
-                const float* src = tempFloatBuffer.getReadPointer(ch);
-                double* dst = loadedIR.getWritePointer(ch);
-                for (int i = 0; i < static_cast<int>(fileLength); ++i)
-                    dst[i] = static_cast<double>(src[i]);
+                loadedIR = sourceIR;
+                loadedSR = sourceSampleRate;
             }
-            loadedSR = reader->sampleRate;
-        }
-
-        if (threadShouldExit() || loadedIR.getNumSamples() == 0) return;
-
-        // 1.5. リサンプリング (SR不一致の場合)
-        // IRのサンプルレートがターゲットと異なる場合、ピッチズレを防ぐためにリサンプリングする
-        if (loadedSR > 0.0 && sampleRate > 0.0 && std::abs(loadedSR - sampleRate) > 1.0)
-        {
-            auto resampled = resampleIR(loadedIR, loadedSR, sampleRate, this);
-            if (resampled.getNumSamples() == 0) return; // Cancelled
-
-            loadedIR = std::move(resampled);
-            loadedSR = sampleRate;
-        }
-
-        // 1.6. 末尾の無音カット (Denormal対策 & 効率化)
-        // IR末尾の極小値(Denormal領域)をカットすることで、畳み込み負荷とDenormal発生リスクを低減
-        if (loadedIR.getNumSamples() > 0)
-        {
-            int newLength = loadedIR.getNumSamples();
-            const int channels = loadedIR.getNumChannels();
-            const double threshold = 1.0e-15; // -300dB (double精度における実質的な無音)
-
-            while (newLength > 0)
+            else
             {
-                bool isSilent = true;
-                for (int ch = 0; ch < channels; ++ch)
-                {
-                    if (std::abs(loadedIR.getSample(ch, newLength - 1)) > threshold)
-                    {
-                        isSilent = false;
-                        break;
-                    }
+                if (!file.existsAsFile()) return;
+
+                juce::AudioFormatManager formatManager;
+                formatManager.registerBasicFormats();
+                std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+
+                if (!reader) return;
+
+                // サイズの妥当性チェック (lengthInSamples が int の範囲を超える場合への対策)
+                const int64 fileLength = reader->lengthInSamples;
+                const int numChannels = static_cast<int>(reader->numChannels);
+                static constexpr int64 MAX_FILE_LENGTH = 2147483647;  // int の最大値
+
+                if (fileLength > MAX_FILE_LENGTH) {
+                    DBG("LoaderThread: ファイルサイズが大きすぎます。");
+                    return;
                 }
-                if (!isSilent) break;
-                newLength--;
+
+                // AudioFormatReader::read は float のみ対応のため、一時バッファを使用
+                juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
+                reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true);
+
+                loadedIR.setSize(numChannels, static_cast<int>(fileLength));
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    const float* src = tempFloatBuffer.getReadPointer(ch);
+                    double* dst = loadedIR.getWritePointer(ch);
+                    for (int i = 0; i < static_cast<int>(fileLength); ++i)
+                        dst[i] = static_cast<double>(src[i]);
+                }
+                loadedSR = reader->sampleRate;
             }
 
-            if (newLength < loadedIR.getNumSamples())
-                loadedIR.setSize(channels, std::max(1, newLength), true);
-        }
+            if (threadShouldExit() || loadedIR.getNumSamples() == 0) return;
 
-        // 2. ピーク正規化 (ファイル読み込み時のみ)
-        // リビルド時は既に正規化されていると仮定するためスキップします。
-        if (!isRebuild)
-        {
-            double maxMagnitude = 0.0;
+            // 1.5. リサンプリング (SR不一致の場合)
+            // IRのサンプルレートがターゲットと異なる場合、ピッチズレを防ぐためにリサンプリングする
+            if (loadedSR > 0.0 && sampleRate > 0.0 && std::abs(loadedSR - sampleRate) > 1.0)
+            {
+                auto resampled = resampleIR(loadedIR, loadedSR, sampleRate, this);
+                if (resampled.getNumSamples() == 0) return; // Cancelled
+
+                loadedIR = std::move(resampled);
+                loadedSR = sampleRate;
+            }
+
+            // 1.6. 末尾の無音カット (Denormal対策 & 効率化)
+            // IR末尾の極小値(Denormal領域)をカットすることで、畳み込み負荷とDenormal発生リスクを低減
+            if (loadedIR.getNumSamples() > 0)
+            {
+                int newLength = loadedIR.getNumSamples();
+                const int channels = loadedIR.getNumChannels();
+                const double threshold = 1.0e-15; // -300dB (double精度における実質的な無音)
+
+                while (newLength > 0)
+                {
+                    bool isSilent = true;
+                    for (int ch = 0; ch < channels; ++ch)
+                    {
+                        if (std::abs(loadedIR.getSample(ch, newLength - 1)) > threshold)
+                        {
+                            isSilent = false;
+                            break;
+                        }
+                    }
+                    if (!isSilent) break;
+                    newLength--;
+                }
+
+                if (newLength < loadedIR.getNumSamples())
+                    loadedIR.setSize(channels, std::max(1, newLength), true);
+            }
+
+            // 2. ピーク正規化 (ファイル読み込み時のみ)
+            // リビルド時は既に正規化されていると仮定するためスキップします。
+            if (!isRebuild)
+            {
+                double maxMagnitude = 0.0;
+                for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
+                    maxMagnitude = (std::max)(maxMagnitude, loadedIR.getMagnitude(ch, 0, loadedIR.getNumSamples()));
+
+                if (maxMagnitude > 0.0)
+                    loadedIR.applyGain(1.0 / maxMagnitude);
+            }
+
+            if (threadShouldExit()) return;
+
+            // 3. ターゲット長計算とトリミング
+            int targetLength = owner.computeTargetIRLength(sampleRate, loadedIR.getNumSamples());
+            juce::AudioBuffer<double> trimmed(loadedIR.getNumChannels(), targetLength);
+            trimmed.clear();
+
+            int copySamples = (std::min)(targetLength, loadedIR.getNumSamples());
             for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
-                maxMagnitude = (std::max)(maxMagnitude, loadedIR.getMagnitude(ch, 0, loadedIR.getNumSamples()));
-
-            if (maxMagnitude > 0.0)
-                loadedIR.applyGain(1.0 / maxMagnitude);
-        }
-
-        if (threadShouldExit()) return;
-
-        // 3. ターゲット長計算とトリミング
-        int targetLength = owner.computeTargetIRLength(sampleRate, loadedIR.getNumSamples());
-        juce::AudioBuffer<double> trimmed(loadedIR.getNumChannels(), targetLength);
-        trimmed.clear();
-
-        int copySamples = (std::min)(targetLength, loadedIR.getNumSamples());
-        for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
-        {
-            trimmed.copyFrom(ch, 0, loadedIR, ch, 0, copySamples);
-            // フェードアウト
-            int fade = 256;
-            if (copySamples > fade)
-                trimmed.applyGainRamp(ch, copySamples - fade, fade, 1.0, 0.0);
-        }
-
-        if (threadShouldExit()) return;
-
-        // 4. MinPhase変換 (オプション)
-        if (useMinPhase)
-        {
-            bool wasCancelled = false;
-            auto minPhaseIR = convertToMinimumPhase(trimmed, this, &wasCancelled);
-
-            if (wasCancelled) return;
-
-            // 変換成功チェック: キャンセルされておらず、かつ無音でない場合のみ適用
-            if (minPhaseIR.getNumSamples() > 0 && minPhaseIR.getMagnitude(0, 0, minPhaseIR.getNumSamples()) > 1.0e-5)
             {
-                trimmed = minPhaseIR;
+                trimmed.copyFrom(ch, 0, loadedIR, ch, 0, copySamples);
+                // フェードアウト
+                int fade = 256;
+                if (copySamples > fade)
+                    trimmed.applyGainRamp(ch, copySamples - fade, fade, 1.0, 0.0);
             }
-            // 変換に失敗または無音になった場合は、元のtrimmed(Linear Phase)を使用する
-        }
 
-        if (threadShouldExit()) return;
+            if (threadShouldExit()) return;
 
-        // ピーク位置検出 (レイテンシー補正用)
-        // Linear Phaseの場合、ピークが遅れてやってくるため、その分Dryを遅らせる必要がある
-        int irPeakLatency = 0;
-        if (!useMinPhase)
-        {
-            // 全チャンネルの中で最大振幅を持つサンプルの位置を探す
-            double maxMag = -1.0;
-            for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
+            // 4. MinPhase変換 (オプション)
+            bool conversionSuccessful = false;
+            if (useMinPhase)
             {
-                const double* data = trimmed.getReadPointer(ch);
-                for (int i = 0; i < targetLength; ++i)
+                bool wasCancelled = false;
+                auto minPhaseIR = convertToMinimumPhase(trimmed, this, &wasCancelled);
+
+                if (wasCancelled) return;
+
+                // 変換成功チェック: キャンセルされておらず、かつ無音でない場合のみ適用
+                if (minPhaseIR.getNumSamples() > 0 && minPhaseIR.getMagnitude(0, 0, minPhaseIR.getNumSamples()) > 1.0e-5)
                 {
-                    double mag = std::abs(data[i]);
-                    if (mag > maxMag)
+                    trimmed = minPhaseIR;
+                    conversionSuccessful = true;
+                }
+                // 変換に失敗または無音になった場合は、元のtrimmed(Linear Phase)を使用する
+            }
+
+            if (threadShouldExit()) return;
+
+            // ピーク位置検出 (レイテンシー補正用)
+            // Linear Phaseの場合、ピークが遅れてやってくるため、その分Dryを遅らせる必要がある
+            // MinPhase変換に失敗した場合も、Linear Phaseとして扱う必要があるためピーク検出を行う
+            int irPeakLatency = 0;
+            if (!useMinPhase || (useMinPhase && !conversionSuccessful))
+            {
+                // 全チャンネルの中で最大振幅を持つサンプルの位置を探す
+                double maxMag = 0.0;
+                for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
+                {
+                    const double* data = trimmed.getReadPointer(ch);
+                    for (int i = 0; i < targetLength; ++i)
                     {
-                        maxMag = mag;
-                        irPeakLatency = i;
+                        double mag = std::abs(data[i]);
+                        if (mag > maxMag)
+                        {
+                            maxMag = mag;
+                            irPeakLatency = i;
+                        }
                     }
                 }
             }
-        }
 
-        // 5. 新しいConvolutionの構築 (Non-Uniform Partitioning)
-        auto newConv = std::make_shared<StereoConvolver>();
+            // 5. 新しいConvolutionの構築 (Non-Uniform Partitioning)
+            auto newConv = std::make_shared<StereoConvolver>();
 
-        // FFTConvolver用にIRデータを準備
-        // FFTConvolver::init は Sample* (double*) を要求するため、trimmedバッファ (double) からコピーする。
-        std::vector<fftconvolver::Sample> irL(targetLength);
-        std::vector<fftconvolver::Sample> irR(targetLength);
+            // FFTConvolver用にIRデータを準備
+            // FFTConvolver::init は Sample* (double*) を要求するため、trimmedバッファ (double) からコピーする。
+            std::vector<fftconvolver::Sample> irL(targetLength);
+            std::vector<fftconvolver::Sample> irR(targetLength);
 
-        const double* srcL = trimmed.getReadPointer(0);
-        const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
+            const double* srcL = trimmed.getReadPointer(0);
+            const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
 
-        // 型安全なコピー（Sample型が何であれ動作する）
-        for (int i = 0; i < targetLength; ++i)
-        {
-            irL[i] = static_cast<fftconvolver::Sample>(srcL[i]);
-            irR[i] = static_cast<fftconvolver::Sample>(srcR[i]);
-        }
-
-        // 初期化 (blockSizeをセグメントサイズとして使用)
-        newConv->init(blockSize, irL.data(), irR.data(), targetLength, irPeakLatency);
-
-        // Display用コピーを作成 (move前に)
-        juce::AudioBuffer<double> displayIR = trimmed;
-
-        if (threadShouldExit()) return;
-
-        // 6. メインスレッドで適用
-        // WeakReferenceを使って、Processorが削除されていたら実行しないようにする
-        juce::WeakReference<ConvolverProcessor> weakOwner(&owner);
-
-        // shared_ptrで管理 (Lambdaコピー時のAudioBufferディープコピー回避 & メモリ寿命管理)
-        auto loadedIRPtr = std::make_shared<juce::AudioBuffer<double>>(std::move(loadedIR));
-        auto displayIRPtr = std::make_shared<juce::AudioBuffer<double>>(std::move(displayIR));
-
-        juce::MessageManager::callAsync([weakOwner, newConv, loadedIRPtr, loadedSR, targetLength, isRebuild = this->isRebuild, file = this->file, displayIRPtr]()
-        {
-            if (weakOwner)
+            // 型安全なコピー（Sample型が何であれ動作する）
+            for (int i = 0; i < targetLength; ++i)
             {
-                weakOwner->applyNewState(newConv, *loadedIRPtr, loadedSR, targetLength, isRebuild, file, *displayIRPtr);
+                irL[i] = static_cast<fftconvolver::Sample>(srcL[i]);
+                irR[i] = static_cast<fftconvolver::Sample>(srcR[i]);
             }
-        });
 
-        resetter.success = true;
+            // 初期化 (blockSizeをセグメントサイズとして使用)
+            newConv->init(blockSize, irL.data(), irR.data(), targetLength, irPeakLatency);
+
+            // Display用コピーを作成 (move前に)
+            juce::AudioBuffer<double> displayIR = trimmed;
+
+            if (threadShouldExit()) return;
+
+            // 6. メインスレッドで適用
+            // WeakReferenceを使って、Processorが削除されていたら実行しないようにする
+            juce::WeakReference<ConvolverProcessor> weakOwner(&owner);
+
+            // shared_ptrで管理 (Lambdaコピー時のAudioBufferディープコピー回避 & メモリ寿命管理)
+            auto loadedIRPtr = std::make_shared<juce::AudioBuffer<double>>(std::move(loadedIR));
+            auto displayIRPtr = std::make_shared<juce::AudioBuffer<double>>(std::move(displayIR));
+
+            juce::MessageManager::callAsync([weakOwner, newConv, loadedIRPtr, loadedSR, targetLength, isRebuild = this->isRebuild, file = this->file, displayIRPtr]()
+            {
+                if (weakOwner)
+                {
+                    weakOwner->applyNewState(newConv, *loadedIRPtr, loadedSR, targetLength, isRebuild, file, *displayIRPtr);
+                }
+            });
+
+            resetter.success = true;
 
         }
         catch (const std::bad_alloc&)
@@ -406,6 +411,10 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // スムージング時間の設定
     currentSmoothingTimeSec = smoothingTimeSec.load();
     mixSmoother.reset(sampleRate, currentSmoothingTimeSec);
+    // 初期化: 現在のターゲット値を設定し、不要なフェードインや未初期化状態を防ぐ
+    mixSmoother.setCurrentAndTargetValue(static_cast<double>(mixTarget.load()));
+    // ダミー呼び出し: 内部状態の確実な初期化 (メモリ確保リスクの排除)
+    (void)mixSmoother.getNextValue();
 
     convolutionBuffer.setSize(2, samplesPerBlock);
     convolutionBuffer.clear();
@@ -472,12 +481,12 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     // ゼロパディングを含めて十分なサイズを確保 (4倍程度が安全)
     const int fftSize = juce::nextPowerOfTwo(numSamples * 4);
 
-    // BUG #16: Add fftSize cap to prevent excessive memory allocation
+    // メモリ使用量過多を防ぐためのFFTサイズ制限
     static constexpr int MAX_MINPHASE_FFT_SIZE = 2097152; // 2^21
     if (fftSize > MAX_MINPHASE_FFT_SIZE)
     {
         DBG("convertToMinimumPhase: fftSize (" << fftSize << ") exceeds limit. Skipping min-phase conversion to prevent excessive memory usage.");
-        return {}; // Return empty buffer to signal failure/skip
+        return {}; // 失敗/スキップを通知するために空のバッファを返す
     }
 
     // Double精度FFTを使用 (audiofft::AudioFFT)
@@ -869,8 +878,8 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
     targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
 
-    // BUG #15: サンプルレート変更時にリビルドできるよう、元のIR情報をコピーする
-    // This ensures the new DSP core has the source material to resample the IR.
+    // サンプルレート変更時にリビルドできるよう、元のIR情報をコピーする
+    // これにより、新しいDSPコアがIRをリサンプリングするためのソース素材を持つことが保証されます。
     originalIR = other.originalIR;
     originalIRSampleRate = other.originalIRSampleRate;
     {
@@ -905,13 +914,18 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
     targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
 
-    // Convolutionオブジェクトのポインタ同期 (Atomic shared_ptr copy is cheap)
-    auto otherConv = other.convolution.load(std::memory_order_acquire);
-    auto expectedConv = convolution.load(std::memory_order_acquire);
-
-    if (otherConv != expectedConv)
+    // サンプルレートが一致する場合のみ Convolution オブジェクトを同期する。
+    // オーバーサンプリング中は DSP側のレート(Nx) != UI側のレート(1x) となるため、
+    // UI側のオブジェクトをコピーするとピッチズレやレイテンシー不整合が発生する。
+    if (std::abs(currentSampleRate.load() - other.currentSampleRate.load()) < 1.0)
     {
-        convolution.compare_exchange_strong(expectedConv, otherConv, std::memory_order_acq_rel, std::memory_order_acquire);
+        auto otherConv = other.convolution.load(std::memory_order_acquire);
+        auto expectedConv = convolution.load(std::memory_order_acquire);
+
+        if (otherConv != expectedConv)
+        {
+            convolution.compare_exchange_strong(expectedConv, otherConv, std::memory_order_acq_rel, std::memory_order_acquire);
+        }
     }
 }
 
@@ -935,7 +949,13 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (conv)
     {
         // 処理遅延(ブロックサイズ) + IR遅延(ピーク位置)
-        const int totalLatency = (std::min)(conv->latency + conv->irLatency, MAX_TOTAL_DELAY);
+        const int calculatedLatency = conv->latency + conv->irLatency;
+
+        // 安全対策: 要求される遅延が最大許容値を超えていないかデバッグ時にチェック
+        // これを超えるとDry/Wetの位相がズレてコムフィルタ効果が発生する
+        jassert(calculatedLatency <= MAX_TOTAL_DELAY);
+
+        const int totalLatency = juce::jmin(calculatedLatency, MAX_TOTAL_DELAY);
         delayLine.setDelay(static_cast<float>(totalLatency));
         currentLatency.store(totalLatency);
     }
@@ -958,7 +978,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // ── Step 4: パラメータ更新と最適化 ──
     // Audio Threadでのみ setTargetValue() を呼ぶことでスレッドセーフティを確保
     const double targetMixValue = static_cast<double>(mixTarget.load(std::memory_order_relaxed));
-    if (std::abs(mixSmoother.getTargetValue() - targetMixValue) > 0.001)
+    if (std::abs(mixSmoother.getTargetValue() - targetMixValue) > 1.0e-5)
     {
         mixSmoother.setTargetValue(targetMixValue);
     }
@@ -972,10 +992,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     {
         // reset()を呼ぶと現在値がリセットされる可能性があるため、
         // 現在値とターゲット値を保持したままランプ時間のみ更新する手順を踏む
+        // これにより、スムージング時間の変更時に音量が飛ぶのを防ぐ
         double currentVal = mixSmoother.getCurrentValue();
         double targetVal = mixSmoother.getTargetValue();
         mixSmoother.reset(currentSpec.sampleRate, newSmoothingTime);
-        mixSmoother.setCurrentAndTargetValue(currentVal);
+        mixSmoother.setCurrentAndTargetValue(currentVal); // Restore current value
         mixSmoother.setTargetValue(targetVal);
         currentSmoothingTimeSec = newSmoothingTime;
     }
@@ -1009,7 +1030,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
 
     // Wet信号に-6dBのヘッドルームを確保 (より保守的なクリッピング防止)
-    // BUG #20: double精度で、かつ必要な範囲にのみゲインを適用
+    // double精度で、かつ必要な範囲にのみゲインを適用
     if (needsConvolution)
         convolutionBuffer.applyGain(0, numSamples, CONVOLUTION_HEADROOM_GAIN);
 
@@ -1029,8 +1050,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         {
             const double* wetSrc = convolutionBuffer.getReadPointer(ch);
             double* dst = block.getChannelPointer(ch);
-            for (int i = 0; i < numSamples; ++i)
-                dst[i] = wetSrc[i];
+            std::memcpy(dst, wetSrc, numSamples * sizeof(double));
         }
     }
     else
