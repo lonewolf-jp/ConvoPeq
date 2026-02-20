@@ -79,6 +79,14 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
         maxLength = std::max(maxLength, done);
     }
     resampled.setSize(inputIR.getNumChannels(), maxLength, true, true, true);
+
+    // コンボリューション用のIRリサンプリングでは、サンプルレート比率の逆数をゲインとして適用する。
+    // Upsampling (ratio > 1.0) -> Gain < 1.0 (減衰)
+    // Downsampling (ratio < 1.0) -> Gain > 1.0 (増幅)
+    // これにより、畳み込み積分のDCゲイン（総エネルギー）がサンプルレート変更前後で維持される。
+    if (ratio > 0.0)
+        resampled.applyGain(1.0 / ratio);
+
     return resampled;
 }
 
