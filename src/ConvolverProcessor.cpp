@@ -1072,8 +1072,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             for (int i = 0; i < numSamples; ++i)
             {
                 const double mixValue = mixSmoother.getNextValue();
-                const double wetGain = std::sin(mixValue * juce::MathConstants<double>::halfPi);
-                const double dryGain = std::cos(mixValue * juce::MathConstants<double>::halfPi);
+                const double wetGain = mixValue;
+                const double dryGain = 1.0 - mixValue;
 
                 for (int ch = 0; ch < procChannels; ++ch)
                 {
@@ -1084,8 +1084,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         else
         {
             const double mixValue = targetMixValue;
-            const double wetGain = std::sin(mixValue * juce::MathConstants<double>::halfPi);
-            const double dryGain = std::cos(mixValue * juce::MathConstants<double>::halfPi);
+            const double wetGain = mixValue;
+            const double dryGain = 1.0 - mixValue;
 
             for (int ch = 0; ch < procChannels; ++ch)
             {
