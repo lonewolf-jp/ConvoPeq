@@ -1072,6 +1072,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             for (int i = 0; i < numSamples; ++i)
             {
                 const double mixValue = mixSmoother.getNextValue();
+                // 線形補間 (Linear Interpolation)
+                // Dry + Wet = 1.0 を保証し、インプットレベルとアウトプットレベルの整合性を保ちます。
                 const double wetGain = mixValue;
                 const double dryGain = 1.0 - mixValue;
 
@@ -1084,6 +1086,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         else
         {
             const double mixValue = targetMixValue;
+            // 線形補間 (Linear Interpolation)
             const double wetGain = mixValue;
             const double dryGain = 1.0 - mixValue;
 
