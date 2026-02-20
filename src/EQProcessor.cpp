@@ -1,8 +1,9 @@
 //============================================================================
-// EQProcessor.cpp  ── v0.1 (JUCE 8.0.12対応)
+// EQProcessor.cpp  ── v0.2 (JUCE 8.0.12対応)
 //
 // 20バンドパラメトリックイコライザー処理実装
-// 参照: https://www.w3.org/2011/audio/audio-eq-cookbook.html
+// 参照: Vadim Zavalishin "The Art of VA Filter Design" (TPT SVF)
+//       https://www.w3.org/2011/audio/audio-eq-cookbook.html (Biquad Coeffs)
 //============================================================================
 #include "EQProcessor.h"
 #include <cmath>
@@ -90,7 +91,7 @@ void EQProcessor::reset()
 }
 
 //--------------------------------------------------------------
-// loadPreset
+// プリセット読み込み
 //--------------------------------------------------------------
 void EQProcessor::loadPreset(int /*index*/)
 {
@@ -253,7 +254,7 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
 }
 
 //--------------------------------------------------------------
-// State Management
+// 状態管理
 //--------------------------------------------------------------
 juce::ValueTree EQProcessor::getState() const
 {
@@ -349,9 +350,9 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 // サンプルレート変更時にフィルタ状態を全リセットする
 // この関数は Audio Thread 開始前、または停止後に呼ばれる
 //--------------------------------------------------------------
-void EQProcessor::prepareToPlay(int sampleRate, int /*samplesPerBlock*/)
+void EQProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*/)
 {
-    const bool rateChanged = (currentSampleRate != sampleRate);
+    const bool rateChanged = (std::abs(currentSampleRate - sampleRate) > 1.0);
     if (rateChanged)
         currentSampleRate = sampleRate;
 
@@ -366,6 +367,8 @@ void EQProcessor::prepareToPlay(int sampleRate, int /*samplesPerBlock*/)
     {
         totalGainDbTarget.store(state->totalGainDb, std::memory_order_relaxed);
         smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
+        // ダミー呼び出し: 内部状態の確実な初期化 (メモリ確保リスクの排除)
+        (void)smoothTotalGain.getNextValue();
     }
 
     // フィルタ状態をリセット
@@ -555,15 +558,11 @@ namespace
             // Denormal対策: 出力が極小値なら0にする (Branchless optimization)
         }
 
-        // Denormal対策: 状態変数が極小値ならフラッシュ (再循環防止)
+        // Denormal対策 & NaNチェック
         // Note: ScopedNoDenormals (DAZ/FTZ) が有効な場合でも、完全な0にならないと
         // 極小値が循環し続ける可能性があるため、明示的にフラッシュして計算負荷を抑える。
-        ic1eq = (std::abs(ic1eq) < DENORMAL_THRESHOLD) ? 0.0 : ic1eq;
-
-        // 状態変数のNaNチェック
-        if (!std::isfinite(ic1eq)) ic1eq = 0.0;
-        if (!std::isfinite(ic2eq)) ic2eq = 0.0;
-        ic2eq = (std::abs(ic2eq) < DENORMAL_THRESHOLD) ? 0.0 : ic2eq;
+        if (!std::isfinite(ic1eq) || std::abs(ic1eq) < DENORMAL_THRESHOLD) ic1eq = 0.0;
+        if (!std::isfinite(ic2eq) || std::abs(ic2eq) < DENORMAL_THRESHOLD) ic2eq = 0.0;
 
         state[0] = ic1eq;
         state[1] = ic2eq;
@@ -688,7 +687,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         return;
 
     const int numSamples = (int)block.getNumSamples();
-    if (numSamples <= 0) return; // BUG #22: Guard against zero samples
+    if (numSamples <= 0) return; // ゼロサンプルガード: 処理対象がない場合は即座に戻る
 
     const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
 
@@ -836,10 +835,10 @@ void EQProcessor::updateBandNode(int band)
 //--------------------------------------------------------------
 // パラメータ検証とクランプ (Helper)
 //--------------------------------------------------------------
-void EQProcessor::validateAndClampParameters(float& freq, float& gainDb, float& q, int sr) noexcept
+void EQProcessor::validateAndClampParameters(float& freq, float& gainDb, float& q, double sr) noexcept
 {
     // 周波数をナイキスト周波数以下にクランプ
-    const float nyquist = static_cast<float>(sr) * 0.5f;
+    const float nyquist = static_cast<float>(sr * 0.5);
     freq = juce::jlimit(DSP_MIN_FREQ, nyquist * DSP_MAX_FREQ_NYQUIST_RATIO, freq);
 
     // Qを安全な範囲にクランプ
@@ -852,22 +851,25 @@ void EQProcessor::validateAndClampParameters(float& freq, float& gainDb, float& 
 //--------------------------------------------------------------
 // SVF係数計算 (Audio Thread用)
 //--------------------------------------------------------------
-EQCoeffsSVF EQProcessor::calcSVFCoeffs(EQBandType type, float freq, float gainDb, float q, int sr) noexcept
+EQCoeffsSVF EQProcessor::calcSVFCoeffs(EQBandType type, float freq, float gainDb, float q, double sr) noexcept
 {
     // パラメータ検証 (Parameter Validation)
     // 不正な値から保護し、安全な範囲にクランプ
-    if (sr <= 0 || sr > 384000)
+    if (sr <= 0.0)
     {
         jassertfalse;
-        sr = 48000; // デフォルト値
+        // 不正なサンプルレートでは計算不能なため、バイパス係数を返す
+        EQCoeffsSVF c;
+        c.a1 = 1.0; c.a2 = 0.0; c.a3 = 0.0;
+        c.m0 = 1.0; c.m1 = 0.0; c.m2 = 0.0;
+        return c;
     }
-
     validateAndClampParameters(freq, gainDb, q, sr);
 
     const double f = static_cast<double>(freq);
     const double g = static_cast<double>(gainDb);
     const double Q = static_cast<double>(q);
-    const double s = static_cast<double>(sr);
+    const double s = sr;
 
     switch (type)
     {
@@ -883,13 +885,13 @@ EQCoeffsSVF EQProcessor::calcSVFCoeffs(EQBandType type, float freq, float gainDb
 //--------------------------------------------------------------
 // Biquad係数計算 (UI Thread用)
 //--------------------------------------------------------------
-EQCoeffsBiquad EQProcessor::calcBiquadCoeffs(EQBandType type, float freq, float gainDb, float q, int sr) noexcept
+EQCoeffsBiquad EQProcessor::calcBiquadCoeffs(EQBandType type, float freq, float gainDb, float q, double sr) noexcept
 {
     // パラメータ検証 (Parameter Validation)
-    if (sr <= 0 || sr > 384000)
+    if (sr <= 0.0 || sr > 384000.0)
     {
         jassertfalse;
-        sr = 48000;
+        sr = 48000.0;
     }
 
     validateAndClampParameters(freq, gainDb, q, sr);
@@ -897,7 +899,7 @@ EQCoeffsBiquad EQProcessor::calcBiquadCoeffs(EQBandType type, float freq, float 
     const double f = static_cast<double>(freq);
     const double g = static_cast<double>(gainDb);
     const double Q = static_cast<double>(q);
-    const double s = static_cast<double>(sr);
+    const double s = sr;
 
     switch (type)
     {
@@ -934,7 +936,7 @@ float EQProcessor::getMagnitudeSquared(const EQCoeffsBiquad& c, const std::compl
 }
 
 //--------------------------------------------------------------
-// SVF Implementations
+// SVF実装
 //--------------------------------------------------------------
 EQCoeffsSVF EQProcessor::calcLowShelfSVF(double freq, double gainDb, double q, double sr) noexcept
 {
@@ -942,6 +944,15 @@ EQCoeffsSVF EQProcessor::calcLowShelfSVF(double freq, double gainDb, double q, d
     const double A = std::pow(10.0, gainDb / 40.0);
     const double g = std::tan(juce::MathConstants<double>::pi * freq / sr) / std::sqrt(A);
     const double k = 1.0 / q;
+
+    // NaN/Infチェック: tan()が発散した場合など
+    if (!std::isfinite(g) || !std::isfinite(k))
+    {
+        // デフォルト係数（バイパス状態）を返す
+        c.a1 = 1.0; c.a2 = 0.0; c.a3 = 0.0;
+        c.m0 = 1.0; c.m1 = 0.0; c.m2 = 0.0;
+        return c;
+    }
 
     // 除算ゼロ保護 (Division by Zero Protection)
     const double denominator = 1.0 + g * (g + k);
@@ -973,6 +984,15 @@ EQCoeffsSVF EQProcessor::calcPeakingSVF(double freq, double gainDb, double q, do
     const double g = std::tan(juce::MathConstants<double>::pi * freq / sr);
     const double k = 1.0 / (q * A);
 
+    // NaN/Infチェック
+    if (!std::isfinite(g) || !std::isfinite(k))
+    {
+        // デフォルト係数（バイパス状態）を返す
+        c.a1 = 1.0; c.a2 = 0.0; c.a3 = 0.0;
+        c.m0 = 1.0; c.m1 = 0.0; c.m2 = 0.0;
+        return c;
+    }
+
     // 除算ゼロ保護
     const double denominator = 1.0 + g * (g + k);
     if (std::abs(denominator) < 1.0e-15)
@@ -1002,6 +1022,15 @@ EQCoeffsSVF EQProcessor::calcHighShelfSVF(double freq, double gainDb, double q, 
     const double g = std::tan(juce::MathConstants<double>::pi * freq / sr) * std::sqrt(A);
     const double k = 1.0 / q;
 
+    // NaN/Infチェック
+    if (!std::isfinite(g) || !std::isfinite(k))
+    {
+        // デフォルト係数（バイパス状態）を返す
+        c.a1 = 1.0; c.a2 = 0.0; c.a3 = 0.0;
+        c.m0 = 1.0; c.m1 = 0.0; c.m2 = 0.0;
+        return c;
+    }
+
     // 除算ゼロ保護
     const double denominator = 1.0 + g * (g + k);
     if (std::abs(denominator) < 1.0e-15)
@@ -1030,6 +1059,15 @@ EQCoeffsSVF EQProcessor::calcLowPassSVF(double freq, double q, double sr) noexce
     const double g = std::tan(juce::MathConstants<double>::pi * freq / sr);
     const double k = 1.0 / q;
 
+    // NaN/Infチェック
+    if (!std::isfinite(g) || !std::isfinite(k))
+    {
+        // デフォルト係数（バイパス状態）を返す
+        c.a1 = 1.0; c.a2 = 0.0; c.a3 = 0.0;
+        c.m0 = 1.0; c.m1 = 0.0; c.m2 = 0.0;
+        return c;
+    }
+
     // 除算ゼロ保護
     const double denominator = 1.0 + g * (g + k);
     if (std::abs(denominator) < 1.0e-15)
@@ -1037,9 +1075,9 @@ EQCoeffsSVF EQProcessor::calcLowPassSVF(double freq, double q, double sr) noexce
         c.a1 = 1.0;
         c.a2 = 0.0;
         c.a3 = 0.0;
-        c.m0 = 0.0;
+        c.m0 = 1.0; // バイパス
         c.m1 = 0.0;
-        c.m2 = 1.0;
+        c.m2 = 0.0;
         return c;
     }
 
@@ -1057,6 +1095,15 @@ EQCoeffsSVF EQProcessor::calcHighPassSVF(double freq, double q, double sr) noexc
     EQCoeffsSVF c;
     const double g = std::tan(juce::MathConstants<double>::pi * freq / sr);
     const double k = 1.0 / q;
+
+    // NaN/Infチェック
+    if (!std::isfinite(g) || !std::isfinite(k))
+    {
+        // デフォルト係数（バイパス状態）を返す
+        c.a1 = 1.0; c.a2 = 0.0; c.a3 = 0.0;
+        c.m0 = 1.0; c.m1 = 0.0; c.m2 = 0.0;
+        return c;
+    }
 
     // 除算ゼロ保護
     const double denominator = 1.0 + g * (g + k);
@@ -1081,7 +1128,7 @@ EQCoeffsSVF EQProcessor::calcHighPassSVF(double freq, double q, double sr) noexc
 }
 
 //--------------------------------------------------------------
-// Biquad Implementations (Audio EQ Cookbook)
+// Biquad実装 (Audio EQ Cookbook)
 //--------------------------------------------------------------
 EQCoeffsBiquad EQProcessor::calcLowShelfBiquad(double freq, double gainDb, double q, double sr) noexcept
 {

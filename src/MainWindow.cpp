@@ -1,5 +1,5 @@
 //============================================================================
-// MainWindow.cpp  ── v0.1 (JUCE 8.0.12対応)
+// MainWindow.cpp ── v0.2 (JUCE 8.0.12対応)
 //
 // メインウィンドウの実装
 // UIコンポーネントの配置とオーディオデバイス管理を行う
@@ -80,14 +80,13 @@ MainWindow::MainWindow (const juce::String& name)
         blacklistFile.replaceWithText ("# ASIO Driver Blacklist\n"
                                        "# Add partial driver names to exclude them from the list.\n"
                                        "BRAVO-HD\n"
-                                       "ASIO4ALL\n"
-                                       "FlexASIO\n");
+                                       "ASIO4ALL\n");
     }
 
     asioBlacklist.loadFromFile (blacklistFile);
     DeviceSettings::applyAsioBlacklist (audioDeviceManager, asioBlacklist);
 
-    // BUG #17: エンジンを先に初期化してデフォルトのサンプルレート(48kHz)を設定
+    // エンジンを先に初期化してデフォルトのサンプルレート(48kHz)を設定
     audioEngine.initialize();
 
     // 設定読み込み（ブラックリスト適用後に実行することで、除外されたデバイスの自動ロードを防ぐ）
@@ -105,6 +104,9 @@ MainWindow::MainWindow (const juce::String& name)
     setVisible (true);
 }
 
+//--------------------------------------------------------------
+// デストラクタ
+//--------------------------------------------------------------
 MainWindow::~MainWindow()
 {
     stopTimer();
@@ -125,11 +127,17 @@ MainWindow::~MainWindow()
     convolverPanel.reset();
 }
 
+//--------------------------------------------------------------
+// 閉じるボタン押下時
+//--------------------------------------------------------------
 void MainWindow::closeButtonPressed()
 {
     juce::JUCEApplication::getInstance()->systemRequestedQuit();
 }
 
+//--------------------------------------------------------------
+// 変更通知コールバック
+//--------------------------------------------------------------
 void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
     if (source == &audioEngine)
@@ -141,6 +149,9 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
     }
 }
 
+//--------------------------------------------------------------
+// UIコンポーネント作成
+//--------------------------------------------------------------
 void MainWindow::createUIComponents()
 {
     convolverPanel = std::make_unique<ConvolverControlPanel> (audioEngine);
@@ -225,6 +236,9 @@ void MainWindow::createUIComponents()
     addAndMakeVisible(saturationLabel);
 }
 
+//--------------------------------------------------------------
+// EQバイパスボタン
+//--------------------------------------------------------------
 void MainWindow::eqBypassButtonClicked()
 {
     const bool isBypassed = !eqBypassButton.getToggleState();
@@ -234,6 +248,9 @@ void MainWindow::eqBypassButtonClicked()
     audioEngine.getEQProcessor().setBypass(isBypassed);
 }
 
+//--------------------------------------------------------------
+// Convolverバイパスボタン
+//--------------------------------------------------------------
 void MainWindow::convolverBypassButtonClicked()
 {
     const bool isBypassed = !convolverBypassButton.getToggleState();
@@ -243,6 +260,9 @@ void MainWindow::convolverBypassButtonClicked()
     audioEngine.getConvolverProcessor().setBypass(isBypassed);
 }
 
+//--------------------------------------------------------------
+// 処理順序ボタン
+//--------------------------------------------------------------
 void MainWindow::orderButtonClicked()
 {
     if (audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::ConvolverThenEQ)
@@ -257,11 +277,17 @@ void MainWindow::orderButtonClicked()
     }
 }
 
+//--------------------------------------------------------------
+// 設定読み込み
+//--------------------------------------------------------------
 void MainWindow::loadSettings()
 {
     DeviceSettings::loadSettings (audioDeviceManager, audioEngine);
 }
 
+//--------------------------------------------------------------
+// デバイス設定画面の表示切り替え
+//--------------------------------------------------------------
 void MainWindow::toggleDeviceSelector()
 {
     if (settingsWindow == nullptr)
@@ -295,6 +321,9 @@ void MainWindow::toggleDeviceSelector()
     }
 }
 
+//--------------------------------------------------------------
+// リサイズ
+//--------------------------------------------------------------
 void MainWindow::resized()
 {
     auto bounds = getLocalBounds();
@@ -324,22 +353,34 @@ void MainWindow::resized()
         specAnalyzer->setBounds (bounds);
 }
 
+//--------------------------------------------------------------
+// タイマーコールバック
+//--------------------------------------------------------------
 void MainWindow::timerCallback()
 {
     double cpu = audioDeviceManager.getCpuUsage() * 100.0;
     cpuUsageLabel.setText ("CPU: " + juce::String (cpu, 1) + "%", juce::dontSendNotification);
 }
 
+//--------------------------------------------------------------
+// プリセット保存
+//--------------------------------------------------------------
 void MainWindow::savePreset()
 {
     launchFileChooser(true);
 }
 
+//--------------------------------------------------------------
+// プリセット読み込み
+//--------------------------------------------------------------
 void MainWindow::loadPreset()
 {
     launchFileChooser(false);
 }
 
+//--------------------------------------------------------------
+// ファイル選択ダイアログ
+//--------------------------------------------------------------
 void MainWindow::launchFileChooser(bool isSaving)
 {
     const juce::String title = isSaving ? "Save Preset" : "Load Preset";
@@ -393,6 +434,9 @@ void MainWindow::launchFileChooser(bool isSaving)
     });
 }
 
+//--------------------------------------------------------------
+// バージョン情報ダイアログ
+//--------------------------------------------------------------
 void MainWindow::showAboutDialog()
 {
     juce::DialogWindow::LaunchOptions options;

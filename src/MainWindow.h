@@ -1,9 +1,9 @@
 //============================================================================
 #pragma once
-// MainWindow.h  ── v0.1 (JUCE 8.0.12対応)
+// MainWindow.h ── v0.2 (JUCE 8.0.12対応)
 //
-// Main application window - JUCE standard implementation
-// Follows AudioPluginHost and ZLEqualizer patterns
+// メインアプリケーションウィンドウ - JUCE標準実装
+// AudioPluginHostおよびZLEqualizerのパターンに準拠
 //============================================================================
 
 #include <JuceHeader.h>

@@ -1,6 +1,6 @@
 //============================================================================
 #pragma once
-// ConvolverControlPanel.h (JUCE 8.0.12対応)
+// ConvolverControlPanel.h  ── v0.2 (JUCE 8.0.12対応)
 //
 // Convolverコントロールパネル
 //

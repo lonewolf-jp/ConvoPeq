@@ -1,5 +1,5 @@
 //============================================================================
-// ConvolverControlPanel.cpp (JUCE 8.0.12対応)
+// ConvolverControlPanel.cpp  ── v0.2 (JUCE 8.0.12対応)
 //
 // Convolverコントロールパネルの実装
 //============================================================================
@@ -237,7 +237,7 @@ void ConvolverControlPanel::buttonClicked(juce::Button* button)
     if (button == &loadIRButton)
     {
         // ファイル選択ダイアログ
-        // JUCE v8.0.12 Recommended Pattern: Use local shared_ptr and capture it in lambda
+        // JUCE v8.0.12 推奨パターン: ローカル shared_ptr を使用し、ラムダでキャプチャする
         auto fileChooser = std::make_shared<juce::FileChooser>("Select Impulse Response (IR) File",
                                   juce::File::getSpecialLocation(
                                       juce::File::userDocumentsDirectory),

@@ -1,6 +1,6 @@
 //============================================================================
 #pragma once
-// AsioBlacklist.h (JUCE 8.0.12対応)
+// AsioBlacklist.h  ── v0.2 (JUCE 8.0.12対応)
 //
 // ASIOドライバのブラックリスト管理クラス
 // シングルクライアントASIO（BRAVO-HD, ASIO4ALL等）や
@@ -12,7 +12,7 @@
 class AsioBlacklist
 {
 public:
-    bool loadFromFile (const juce::File& file) noexcept
+    bool loadFromFile(const juce::File& file) noexcept
     {
         blacklist.clear();
 
@@ -20,23 +20,23 @@ public:
             return false;
 
         juce::StringArray lines;
-        file.readLines (lines);
+        file.readLines(lines);
 
-        for (auto& line : lines)
+        for (const auto& line : lines)
         {
-            line = line.trim();
+            juce::String trimmedLine = line.trim();
 
-            if (line.isEmpty() || line.startsWithChar ('#'))
+            if (trimmedLine.isEmpty() || trimmedLine.startsWithChar ('#'))
                 continue;
 
-            blacklist.add (line);
+            blacklist.add (trimmedLine);
         }
         return true;
     }
 
-    bool isBlacklisted (const juce::String& deviceName) const
+    bool isBlacklisted(const juce::String& deviceName) const noexcept
     {
-        for (auto& b : blacklist)
+        for (const auto& b : blacklist)
         {
             // バージョン番号や接尾辞（"v2"など）に対応するため、部分一致を使用
             if (deviceName.containsIgnoreCase(b))

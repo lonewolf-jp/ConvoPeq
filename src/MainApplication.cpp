@@ -1,5 +1,5 @@
 //============================================================================
-// MainApplication.cpp  ── v0.1 (JUCE 8.0.12対応)
+// MainApplication.cpp ── v0.2 (JUCE 8.0.12対応)
 //
 // アプリケーション起動・終了実装
 // JUCE_CREATE_APPLICATION マクロが main() を自動生成する
@@ -31,10 +31,13 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
 #endif
 
 #if JUCE_DSP_USE_INTEL_MKL
-    // Intel MKL Configuration for Real-time Audio
-    mkl_set_num_threads(1);                    // 1スレッド固定（必須）
-    // mkl_set_threading_layer(MKL_THREADING_SEQUENTIAL); // リンクエラー回避のため無効化 (CMakeでsequential指定済み)
-    mkl_set_dynamic(0);                        // 動的調整無効
+    // リアルタイムオーディオ用 Intel MKL 設定
+    // リアルタイムオーディオ処理において、MKL内部のスレッド管理による
+    // 予測不可能なレイテンシ（ジッター）の発生は致命的です。
+    // そのため、MKLの並列処理を完全に無効化し、シングルスレッドで動作させることが
+    // 安定性確保のために不可欠です。
+    mkl_set_num_threads(1); // 1スレッドに固定
+    mkl_set_dynamic(0);     // 動的なスレッド数調整を無効化
 #endif
 
     // メインウィンドウを生成する

@@ -1,6 +1,6 @@
 //============================================================================
 #pragma once
-// EQProcessor.h  ── v0.1 (JUCE 8.0.12対応)
+// EQProcessor.h ── v0.2 (JUCE 8.0.12対応)
 //
 // 20バンドパラメトリックイコライザー処理クラス
 //
@@ -142,7 +142,7 @@ public:
     // prepareToPlay: サンプルレート・バッファサイズ変更時に呼ぶ
     // フィルタ状態をリセットし、係数再計算を強制する
     //----------------------------------------------------------
-    void prepareToPlay(int sampleRate, int /*samplesPerBlock*/);
+    void prepareToPlay(double sampleRate, int /*samplesPerBlock*/);
 
     //----------------------------------------------------------
     // process: オーディオスレッドから呼ばれる
@@ -192,7 +192,7 @@ public:
     void resetToDefaults();
 
     //----------------------------------------------------------
-    // State Structs
+    // 状態構造体
     //----------------------------------------------------------
     struct BandNode
     {
@@ -231,7 +231,7 @@ public:
     bool loadFromTextFile(const juce::File& file);
 
     //----------------------------------------------------------
-    // State Management (ZLEqualizer style)
+    // 状態管理 (ZLEqualizerスタイル)
     //----------------------------------------------------------
     juce::ValueTree getState() const;
     void setState (const juce::ValueTree& state);
@@ -240,10 +240,10 @@ public:
     // 係数計算ヘルパー (static public)
     // 外部からの応答曲線計算などに使用
     //----------------------------------------------------------
-    static EQCoeffsSVF    calcSVFCoeffs   (EQBandType type, float freq, float gainDb, float q, int sr) noexcept;
-    static EQCoeffsBiquad calcBiquadCoeffs(EQBandType type, float freq, float gainDb, float q, int sr) noexcept;
+    static EQCoeffsSVF    calcSVFCoeffs   (EQBandType type, float freq, float gainDb, float q, double sr) noexcept;
+    static EQCoeffsBiquad calcBiquadCoeffs(EQBandType type, float freq, float gainDb, float q, double sr) noexcept;
 
-    static void validateAndClampParameters(float& freq, float& gainDb, float& q, int sr) noexcept;
+    static void validateAndClampParameters(float& freq, float& gainDb, float& q, double sr) noexcept;
     static float getMagnitudeSquared(const EQCoeffsBiquad& coeffs, float freq, float sampleRate) noexcept;
     static float getMagnitudeSquared(const EQCoeffsBiquad& coeffs, const std::complex<double>& z) noexcept;
 
@@ -287,7 +287,7 @@ private:
 
     // ── 現在のサンプルレート ──
     // prepareToPlay で更新。Audio Thread で係数再計算に使用。
-    int currentSampleRate{ 0 };
+    double currentSampleRate{ 0.0 };
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
     void processAGC(juce::dsp::AudioBlock<double>& block);
