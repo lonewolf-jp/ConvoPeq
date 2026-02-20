@@ -79,6 +79,13 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
         maxLength = std::max(maxLength, done);
     }
     resampled.setSize(inputIR.getNumChannels(), maxLength, true, true, true);
+
+    // コンボリューション用のIRリサンプリングでは、サンプルレート比率の逆数をゲインとして適用する。
+    // Upsampling (ratio > 1.0) -> Gain < 1.0 (減衰)
+    // Downsampling (ratio < 1.0) -> Gain > 1.0 (増幅)
+    // これにより、畳み込み積分のDCゲイン（総エネルギー）がサンプルレート変更前後で維持される。
+    resampled.applyGain(1.0 / ratio);
+
     return resampled;
 }
 
@@ -1072,8 +1079,10 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             for (int i = 0; i < numSamples; ++i)
             {
                 const double mixValue = mixSmoother.getNextValue();
-                const double wetGain = std::sin(mixValue * juce::MathConstants<double>::halfPi);
-                const double dryGain = std::cos(mixValue * juce::MathConstants<double>::halfPi);
+                // 線形補間 (Linear Interpolation)
+                // Dry + Wet = 1.0 を保証し、インプットレベルとアウトプットレベルの整合性を保ちます。
+                const double wetGain = mixValue;
+                const double dryGain = 1.0 - mixValue;
 
                 for (int ch = 0; ch < procChannels; ++ch)
                 {
@@ -1084,8 +1093,9 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         else
         {
             const double mixValue = targetMixValue;
-            const double wetGain = std::sin(mixValue * juce::MathConstants<double>::halfPi);
-            const double dryGain = std::cos(mixValue * juce::MathConstants<double>::halfPi);
+            // 線形補間 (Linear Interpolation)
+            const double wetGain = mixValue;
+            const double dryGain = 1.0 - mixValue;
 
             for (int ch = 0; ch < procChannels; ++ch)
             {
