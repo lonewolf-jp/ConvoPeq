@@ -95,7 +95,7 @@ public:
     ConvolverProcessor& getConvolverProcessor() { return uiConvolverProcessor; }
     EQProcessor& getEQProcessor() { return uiEqProcessor; }
 
-    int getSampleRate() const { return currentSampleRate.load(); }
+    double getSampleRate() const { return currentSampleRate.load(); }
 
     float getInputLevel()  const { return inputLevelDb.load(); }
     float getOutputLevel() const { return outputLevelDb.load(); }
@@ -205,7 +205,7 @@ private:
     //----------------------------------------------------------
     // DSPコア (Audio Threadで実行される処理のコンテナ)
     //----------------------------------------------------------
-    struct DSPCore
+    struct DSPCore : public juce::ReferenceCountedObject
     {
         struct ProcessingState
         {
@@ -216,6 +216,8 @@ private:
             bool softClipEnabled;
             float saturationAmount;
         };
+
+        using Ptr = juce::ReferenceCountedObjectPtr<DSPCore>;
 
         DSPCore();
 
@@ -261,11 +263,12 @@ private:
     //----------------------------------------------------------
     // 状態管理
     //----------------------------------------------------------
-    std::atomic<std::shared_ptr<DSPCore>> currentDSP;
-    std::vector<std::shared_ptr<DSPCore>> trashBin; // 古いDSPの保持用 (Audio Threadでの削除防止)
+    std::atomic<DSPCore*> currentDSP { nullptr };
+    std::vector<DSPCore::Ptr> trashBin; // 古いDSPの保持用 (Audio Threadでの削除防止)
+    std::vector<DSPCore::Ptr> trashBinPending; // 新しく追加されたゴミ (次回のタイマーコールバックまで保持)
     juce::CriticalSection trashBinLock;
 
-    std::atomic<int>   currentSampleRate{48000};
+    std::atomic<double> currentSampleRate{48000.0};
     std::atomic<float> inputLevelDb{-120.0f};
     std::atomic<float> outputLevelDb{-120.0f};
     std::atomic<int>   maxSamplesPerBlock{4096};
@@ -294,7 +297,7 @@ private:
     // ヘルパー関数
     //----------------------------------------------------------
     void requestRebuild(double sampleRate, int samplesPerBlock);
-    void commitNewDSP(std::shared_ptr<DSPCore> newDSP);
+    void commitNewDSP(DSPCore::Ptr newDSP);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

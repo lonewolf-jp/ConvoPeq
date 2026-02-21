@@ -58,6 +58,11 @@ public:
                 return getDeviceNames (forInput).indexOf (defaultName);
         }
 
+        // フォールバック: デフォルトが無効またはブラックリスト入りの場合、最初の有効なデバイスを返す
+        auto filteredNames = getDeviceNames(forInput);
+        if (!filteredNames.isEmpty())
+            return 0;
+
         return -1;
     }
 

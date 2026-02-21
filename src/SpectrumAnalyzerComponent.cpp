@@ -82,11 +82,11 @@ void SpectrumAnalyzerComponent::timerCallback()
 
     // ── サンプルレート変更検知 ──
     // 起動直後など、AudioEngineの準備が整ったタイミングでEQカーブを更新する
-    const int currentSampleRate = engine.getSampleRate();
+    const double currentSampleRate = engine.getSampleRate();
     if (currentSampleRate != cachedSampleRate)
     {
         updateEQData();
-        if (currentSampleRate <= 0) cachedSampleRate = 0;
+        cachedSampleRate = currentSampleRate;
     }
 
     // ── FFTデータの取得とスムーシング ──
@@ -396,8 +396,8 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
     const float plotW = static_cast<float>(area.getWidth());
     const float plotH = static_cast<float>(area.getHeight());
 
-    const int   sampleRate = engine.getSampleRate();
-    if (sampleRate <= 0) return;
+    const double sampleRate = engine.getSampleRate();
+    if (sampleRate <= 0.0) return;
     const int   halfFFT    = NUM_FFT_BINS;
     const float barWidth   = plotW / static_cast<float>(NUM_DISPLAY_BARS);
 
@@ -456,8 +456,8 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
 //--------------------------------------------------------------
 void SpectrumAnalyzerComponent::updateEQData()
 {
-    const int sr = engine.getSampleRate();
-    if (sr > 0)
+    const double sr = engine.getSampleRate();
+    if (sr > 0.0)
     {
         // サンプルレートが変更された場合のみ zCache (z = e^jw) を再計算
         if (sr != cachedSampleRate)
@@ -565,7 +565,7 @@ void SpectrumAnalyzerComponent::paintEQCurve(juce::Graphics& g, const juce::Rect
 {
     // デバイス未接続時や初期化中はサンプルレートが0になるため、
     // 周波数応答計算（除算）が不正になるのを防ぐ
-    if (engine.getSampleRate() <= 0) return;
+    if (engine.getSampleRate() <= 0.0) return;
 
     const float plotX = static_cast<float>(area.getX());
     const float plotY = static_cast<float>(area.getY());

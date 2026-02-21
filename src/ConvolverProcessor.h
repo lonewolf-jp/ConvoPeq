@@ -154,6 +154,9 @@ public:
     void syncStateFrom(const ConvolverProcessor& other);
     void syncParametersFrom(const ConvolverProcessor& other);
 
+    // ガベージコレクション (Message Threadから定期的に呼ぶ)
+    void cleanup();
+
 private:
     class LoaderThread;
 
@@ -161,7 +164,7 @@ private:
     // FFTConvolver Engine
     //----------------------------------------------------------
     // ステレオ処理用ラッパー (FFTConvolverはモノラルのため)
-    struct StereoConvolver
+    struct StereoConvolver : public juce::ReferenceCountedObject
     {
         std::array<fftconvolver::FFTConvolver, 2> convolvers;
         int latency = 0;
@@ -171,6 +174,8 @@ private:
         size_t blockSize = 0;
         std::vector<fftconvolver::Sample> irL;
         std::vector<fftconvolver::Sample> irR;
+
+        using Ptr = juce::ReferenceCountedObjectPtr<StereoConvolver>;
 
         StereoConvolver() = default;
 
@@ -196,8 +201,9 @@ private:
     };
 
     // Note: trashBin は、Audio Thread がまだ使用している可能性のある古い Convolution オブジェクトを保持するために使用されます。
-    std::atomic<std::shared_ptr<StereoConvolver>> convolution;
-    std::vector<std::shared_ptr<StereoConvolver>> trashBin;
+    std::atomic<StereoConvolver*> convolution { nullptr };
+    std::vector<StereoConvolver::Ptr> trashBin;
+    std::vector<StereoConvolver::Ptr> trashBinPending;
     juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
@@ -257,7 +263,7 @@ private:
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
     int computeTargetIRLength(double sampleRate, int originalLength) const;
-    void applyNewState(std::shared_ptr<StereoConvolver> newConv,
+    void applyNewState(StereoConvolver::Ptr newConv,
                       const juce::AudioBuffer<double>& loadedIR,
                       double loadedSR,
                       int targetLength,

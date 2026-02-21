@@ -194,31 +194,36 @@ public:
     //----------------------------------------------------------
     // 状態構造体
     //----------------------------------------------------------
-    struct BandNode
+    struct BandNode : public juce::ReferenceCountedObject
     {
         EQCoeffsSVF coeffs;
         bool active;
         EQChannelMode mode;
+        using Ptr = juce::ReferenceCountedObjectPtr<BandNode>;
     };
 
-    struct EQState
+    struct EQState : public juce::ReferenceCountedObject
     {
         std::array<EQBandParams, NUM_BANDS> bands;
         std::array<EQBandType, NUM_BANDS> bandTypes;
         std::array<EQChannelMode, NUM_BANDS> bandChannelModes;
         float totalGainDb = 0.0f;
+        using Ptr = juce::ReferenceCountedObjectPtr<EQState>;
     };
 
     //----------------------------------------------------------
     // 状態スナップショット取得 (AudioEngine用)
     //----------------------------------------------------------
-    std::shared_ptr<EQState> getEQState() const { return currentState.load(std::memory_order_acquire); }
+    EQState::Ptr getEQState() const;
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const EQProcessor& other);
     // 個別パラメータの同期 (最適化)
     void syncBandNodeFrom(const EQProcessor& other, int bandIndex);
     void syncGlobalStateFrom(const EQProcessor& other);
+
+    // ガベージコレクション
+    void cleanup();
 
     //----------------------------------------------------------
     // プリセット読み込み (AudioEngine::prepareToPlayから呼ばれる)
@@ -256,11 +261,11 @@ private:
     bool isBufferSilent(const juce::AudioBuffer<double>& buffer, int numSamples) const noexcept;
 
     // 係数計算
-    std::shared_ptr<BandNode> createBandNode(int bandIndex, const EQState& state) const;
+    BandNode::Ptr createBandNode(int bandIndex, const EQState& state) const;
     void updateBandNode(int bandIndex);
 
     // スムージング処理
-    std::atomic<std::shared_ptr<EQState>> currentState;
+    std::atomic<EQState*> currentState { nullptr };
 
     juce::ListenerList<Listener> listeners;
 
@@ -276,8 +281,11 @@ private:
     static constexpr double SMOOTHING_TIME_SEC = 0.05; // 50ms
 
     // ── 係数管理 (Atomic Swap) ──
-    std::array<std::atomic<std::shared_ptr<BandNode>>, NUM_BANDS> bandNodes;
-    std::vector<std::shared_ptr<BandNode>> trashBin;
+    std::array<std::atomic<BandNode*>, NUM_BANDS> bandNodes;
+    std::vector<BandNode::Ptr> bandNodeTrashBin;
+    std::vector<BandNode::Ptr> bandNodeTrashBinPending;
+    std::vector<EQState::Ptr> stateTrashBin;
+    std::vector<EQState::Ptr> stateTrashBinPending;
     juce::CriticalSection trashBinLock;
 
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──

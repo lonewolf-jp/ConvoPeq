@@ -75,7 +75,7 @@ private:
 
     // ── 計算用キャッシュ ──
     std::vector<std::complex<double>> zCache; // 周波数応答計算用の複素数キャッシュ (z = e^jw)
-    int cachedSampleRate = 0;                 // zCache計算時のサンプルレート
+    double cachedSampleRate = 0.0;            // zCache計算時のサンプルレート
 
     // ── 描画用パスキャッシュ ──
     juce::Path totalCurvePathL, totalCurvePathR;

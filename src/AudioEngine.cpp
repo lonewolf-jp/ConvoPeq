@@ -13,7 +13,7 @@
 AudioEngine::AudioEngine()
 {
     // デフォルトサンプルレート (0 = 未初期化/デバイスなし)
-    currentSampleRate.store(0);
+    currentSampleRate.store(0.0);
 
     // バッファ初期化
     audioFifoBuffer.setSize (2, FIFO_SIZE);
@@ -28,7 +28,7 @@ void AudioEngine::initialize()
     // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
     requestRebuild(48000.0, SAFE_MAX_BLOCK_SIZE);
     maxSamplesPerBlock.store(SAFE_MAX_BLOCK_SIZE);
-    currentSampleRate.store(48000);
+    currentSampleRate.store(48000.0);
 
     uiConvolverProcessor.addChangeListener(this);
     uiEqProcessor.addChangeListener(this);
@@ -50,7 +50,9 @@ AudioEngine::~AudioEngine()
 
     // 進行中のコールバックが完了するのを待つため、DSPを無効化
     // これにより、changeListenerCallback内でdsp->...へのアクセスを防ぐ
-    currentDSP.store(nullptr);
+    auto oldDSP = currentDSP.exchange(nullptr);
+    if (oldDSP)
+        oldDSP->decReferenceCount();
 }
 
 //--------------------------------------------------------------
@@ -99,8 +101,8 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
                                      const std::complex<double>* zArray,
                                      int numPoints)
 {
-    const int sr = currentSampleRate.load();
-    if (sr <= 0)
+    const double sr = currentSampleRate.load();
+    if (sr <= 0.0)
     {
         for (int i = 0; i < numPoints; ++i)
         {
@@ -227,7 +229,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // UI用プロセッサのサンプルレートも更新 (IR表示やパラメータ管理のため)
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
-    uiEqProcessor.prepareToPlay(static_cast<int>(safeSampleRate), bufferSize);
+    uiEqProcessor.prepareToPlay(safeSampleRate, bufferSize);
 
     if (rateChanged || blockSizeChanged)
     {
@@ -235,10 +237,10 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     }
 
     maxSamplesPerBlock.store(bufferSize);
+    currentSampleRate.store(safeSampleRate);
+
     // DSP再構築 (RT安全化: 新しいDSPを作成してスワップ)
     requestRebuild(safeSampleRate, bufferSize);
-
-    currentSampleRate.store(static_cast<int>(safeSampleRate));
     uiConvolverProcessor.setBypass(convBypassActive.load (std::memory_order_relaxed));
     audioFifo.reset();
 
@@ -259,29 +261,12 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 }
 
 //--------------------------------------------------------------
-// timerCallback - 定期的なガベージコレクション
-//--------------------------------------------------------------
-void AudioEngine::timerCallback()
-{
-    const juce::ScopedLock sl(trashBinLock);
-
-    // Audio Threadが参照していない(use_count == 1)オブジェクトのみを削除する
-    trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(),
-                                  [](const auto& p) { return p.use_count() == 1; }), trashBin.end());
-
-    if (trashBin.size() > 10)
-    {
-        DBG("AudioEngine::trashBin warning: " << trashBin.size() << " items pending deletion.");
-    }
-}
-
-//--------------------------------------------------------------
 // requestRebuild - DSPグラフの再構築 (Message Thread)
 //--------------------------------------------------------------
 void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 {
     // 新しいDSPコアを作成
-    auto newDSP = std::make_shared<DSPCore>();
+    auto newDSP = new DSPCore();
 
     // UIプロセッサから状態をコピー
     newDSP->eq.syncStateFrom(uiEqProcessor); // 最適化: ValueTreeを経由せず直接同期
@@ -304,27 +289,54 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     commitNewDSP(newDSP);
 }
 
-void AudioEngine::commitNewDSP(std::shared_ptr<DSPCore> newDSP)
+void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP)
 {
     // Atomic Swap
-    auto oldDSP = currentDSP.exchange(newDSP, std::memory_order_acq_rel);
+    // 新しいポインタの参照カウントをインクリメント (Atomic保持用)
+    newDSP->incReferenceCount();
+    auto oldDSP = currentDSP.exchange(newDSP.get(), std::memory_order_acq_rel);
 
     if (oldDSP)
     {
-        // 古いDSPをゴミ箱へ (Audio Threadが使用中の可能性があるため即削除しない)
+        // 古いDSPをゴミ箱へ
         const juce::ScopedLock sl(trashBinLock);
-        trashBin.push_back(std::move(oldDSP));
-
-        // ゴミ箱の掃除 (Garbage Collection)
-        // Audio Threadが参照していない(use_count == 1)オブジェクトのみを削除する。
-        // これにより、Audio Thread内でのデストラクタ実行(ロックやメモリ解放)を確実に防ぐ。
-        trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(), [](const auto& p) { return p.use_count() == 1; }), trashBin.end());
-
-        if (trashBin.size() > 10)
-        {
-            DBG("AudioEngine::trashBin warning: " << trashBin.size() << " items pending deletion.");
-        }
+        // ReferenceCountedObjectPtrでラップして保持 (参照カウント+1)
+        // Atomic保持分の参照カウントをデクリメント (-1)
+        trashBinPending.push_back(DSPCore::Ptr(oldDSP));
+        oldDSP->decReferenceCount();
     }
+}
+
+void AudioEngine::timerCallback()
+{
+    const juce::ScopedLock sl(trashBinLock);
+
+    // 1. ゴミ箱の掃除 (参照カウントが1 = trashBinのみが保持しているオブジェクトを削除)
+    trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(),
+                                  [](const auto& p) { return p->getReferenceCount() == 1; }), trashBin.end());
+
+    // 2. Pending状態のゴミをメインのゴミ箱へ移動 (ダブルバッファリング的な遅延削除)
+    // これにより、Audio Threadが参照している間に削除されるリスクを排除
+    trashBin.insert(trashBin.end(), trashBinPending.begin(), trashBinPending.end());
+    trashBinPending.clear();
+
+    if (trashBin.size() > 20)
+    {
+        DBG("AudioEngine::trashBin warning: " << trashBin.size() << " items pending deletion.");
+    }
+
+    // 3. 内部プロセッサのクリーンアップを実行
+    // 現在アクティブなDSPの内部ゴミ箱も掃除する
+    auto dsp = currentDSP.load(std::memory_order_acquire);
+    if (dsp)
+    {
+        dsp->eq.cleanup();
+        dsp->convolver.cleanup();
+    }
+
+    // UI用プロセッサのクリーンアップ
+    uiEqProcessor.cleanup();
+    uiConvolverProcessor.cleanup();
 }
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
@@ -332,8 +344,11 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
     // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
     if (source == &uiEqProcessor || source == &uiConvolverProcessor)
     {
+        const double sr = currentSampleRate.load();
+        if (sr <= 0.0) return;
+
         // DSPグラフを安全に再構築
-        requestRebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
+        requestRebuild(sr, maxSamplesPerBlock.load());
 
         // UIに更新を通知 (MainWindowが受け取る)
         sendChangeMessage();
@@ -344,7 +359,7 @@ void AudioEngine::eqBandChanged(EQProcessor* processor, int bandIndex)
 {
     if (processor == &uiEqProcessor)
     {
-        auto dsp = currentDSP.load();
+        auto dsp = currentDSP.load(std::memory_order_acquire);
         if (dsp)
             dsp->eq.syncBandNodeFrom(uiEqProcessor, bandIndex);
     }
@@ -354,7 +369,7 @@ void AudioEngine::eqGlobalChanged(EQProcessor* processor)
 {
     if (processor == &uiEqProcessor)
     {
-        auto dsp = currentDSP.load();
+        auto dsp = currentDSP.load(std::memory_order_acquire);
         if (dsp)
             dsp->eq.syncGlobalStateFrom(uiEqProcessor);
     }
@@ -364,7 +379,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 {
     if (processor == &uiConvolverProcessor)
     {
-        auto dsp = currentDSP.load();
+        auto dsp = currentDSP.load(std::memory_order_acquire);
         if (dsp)
             dsp->convolver.syncParametersFrom(uiConvolverProcessor);
     }
@@ -376,7 +391,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 void AudioEngine::releaseResources()
 {
     // サンプルレートをリセット (描画停止用)
-    currentSampleRate.store(0);
+    currentSampleRate.store(0.0);
 
     // レベルをリセット
     inputLevelDb.store(-120.0f);
@@ -421,7 +436,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
     // DSPコアの取得 (Atomic Load)
-    auto dsp = currentDSP.load(std::memory_order_acquire);
+    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
 
     if (dsp)
     {
@@ -756,6 +771,9 @@ double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double 
     const double abs_x = std::abs(x);
     const double clip_start = threshold - knee;
 
+    // 安全対策: kneeが極端に小さい場合のゼロ除算防止
+    if (knee < 1.0e-9) return (x > threshold) ? threshold : ((x < -threshold) ? -threshold : x);
+
     // 閾値以下はリニア
     if (abs_x < clip_start)
         return x;
@@ -885,7 +903,9 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
     if (ditherBitDepth.load() != bitDepth)
     {
         ditherBitDepth.store(bitDepth);
-        requestRebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
+        const double sr = currentSampleRate.load();
+        if (sr > 0.0)
+            requestRebuild(sr, maxSamplesPerBlock.load());
     }
 }
 
@@ -926,7 +946,9 @@ void AudioEngine::setOversamplingFactor(int factor)
     if (manualOversamplingFactor.load() != newFactor)
     {
         manualOversamplingFactor.store(newFactor);
-        requestRebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
+        const double sr = currentSampleRate.load();
+        if (sr > 0.0)
+            requestRebuild(sr, maxSamplesPerBlock.load());
     }
 }
 
@@ -938,7 +960,9 @@ int AudioEngine::getOversamplingFactor() const
 void AudioEngine::setOversamplingType(OversamplingType type)
 {
     oversamplingType.store(type);
-    requestRebuild(currentSampleRate.load(), maxSamplesPerBlock.load());
+    const double sr = currentSampleRate.load();
+    if (sr > 0.0)
+        requestRebuild(sr, maxSamplesPerBlock.load());
 }
 
 AudioEngine::OversamplingType AudioEngine::getOversamplingType() const

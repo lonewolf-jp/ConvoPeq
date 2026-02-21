@@ -20,7 +20,7 @@ EQProcessor::EQProcessor()
 {
     // 初期係数ノードの作成
     for (auto& node : bandNodes)
-        node.store(nullptr);
+        node.store(nullptr, std::memory_order_relaxed);
 
     resetToDefaults();
 }
@@ -30,6 +30,12 @@ EQProcessor::~EQProcessor()
 {
     // メモリ解放
     // shared_ptr により自動的に解放されるため、明示的な delete は不要
+    auto s = currentState.exchange(nullptr);
+    if (s) s->decReferenceCount();
+    for (auto& node : bandNodes) {
+        auto n = node.exchange(nullptr);
+        if (n) n->decReferenceCount();
+    }
 }
 
 //--------------------------------------------------------------
@@ -37,7 +43,7 @@ EQProcessor::~EQProcessor()
 //--------------------------------------------------------------
 void EQProcessor::resetToDefaults()
 {
-    auto newState = std::make_shared<EQState>();
+    auto newState = new EQState();
 
     for (int i = 0; i < NUM_BANDS; ++i)
     {
@@ -56,7 +62,13 @@ void EQProcessor::resetToDefaults()
 
     totalGainDbTarget.store(0.0f, std::memory_order_relaxed);
     agcEnabled.store(false, std::memory_order_release);
-    currentState.store(newState, std::memory_order_release);
+    newState->incReferenceCount();
+    auto oldState = currentState.exchange(newState, std::memory_order_release);
+    if (oldState) {
+        const juce::ScopedLock sl(trashBinLock);
+        stateTrashBinPending.push_back(EQState::Ptr(oldState));
+        oldState->decReferenceCount();
+    }
 
     agcCurrentGain.store(1.0, std::memory_order_relaxed);
     agcEnvInput.store(0.0, std::memory_order_relaxed);
@@ -131,7 +143,8 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
         // 正規表現でトークン分割 (空白区切り)
         // std::regex(R"(\S+)") は空白以外の文字の並び（トークン）にマッチします
         std::regex tokenRegex(R"(\S+)");
-        auto tokensBegin = std::sregex_iterator(line.toStdString().begin(), line.toStdString().end(), tokenRegex);
+        auto stdLine = line.toStdString();
+        auto tokensBegin = std::sregex_iterator(stdLine.begin(), stdLine.end(), tokenRegex);
         auto tokensEnd = std::sregex_iterator();
 
         juce::StringArray tokens;
@@ -308,12 +321,17 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     totalGainDbTarget.store(other.totalGainDbTarget.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
     // Copy shared state
-    currentState.store(other.currentState.load(std::memory_order_acquire), std::memory_order_release);
+    auto otherState = other.currentState.load(std::memory_order_acquire);
+    if (otherState) otherState->incReferenceCount();
+    auto oldState = currentState.exchange(otherState, std::memory_order_release);
+    if (oldState) oldState->decReferenceCount(); // Simple dec here as we are in sync (usually init)
 
     for (int i = 0; i < NUM_BANDS; ++i)
     {
         auto node = other.bandNodes[i].load(std::memory_order_acquire);
-        bandNodes[i].store(node, std::memory_order_release);
+        if (node) node->incReferenceCount();
+        auto oldNode = bandNodes[i].exchange(node, std::memory_order_release);
+        if (oldNode) oldNode->decReferenceCount();
     }
     agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
 
@@ -325,6 +343,7 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     if (bandIndex < 0 || bandIndex >= NUM_BANDS) return;
 
     auto node = other.bandNodes[bandIndex].load(std::memory_order_acquire);
+    if (node) node->incReferenceCount();
 
     // Atomic Exchange: 古いノードを取得し、新しいノードをセット
     auto oldNode = bandNodes[bandIndex].exchange(node, std::memory_order_acq_rel);
@@ -333,9 +352,8 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     if (oldNode)
     {
         const juce::ScopedLock sl(trashBinLock);
-        trashBin.push_back(std::move(oldNode));
-        // ゴミ箱の掃除
-        trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(), [](const auto& p) { return p.use_count() == 1; }), trashBin.end());
+        bandNodeTrashBinPending.push_back(BandNode::Ptr(oldNode));
+        oldNode->decReferenceCount();
     }
 }
 
@@ -398,9 +416,16 @@ void EQProcessor::setBandFrequency(int band, float freq)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = std::make_shared<EQState>(*oldState);
+    auto newState = new EQState(*oldState);
     newState->bands[band].frequency = freq;
-    currentState.store(newState, std::memory_order_release);
+
+    newState->incReferenceCount();
+    auto prev = currentState.exchange(newState, std::memory_order_release);
+    if (prev) {
+        const juce::ScopedLock sl(trashBinLock);
+        stateTrashBinPending.push_back(EQState::Ptr(prev));
+        prev->decReferenceCount();
+    }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
 }
@@ -409,9 +434,16 @@ void EQProcessor::setBandGain(int band, float gainDb)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = std::make_shared<EQState>(*oldState);
+    auto newState = new EQState(*oldState);
     newState->bands[band].gain = gainDb;
-    currentState.store(newState, std::memory_order_release);
+
+    newState->incReferenceCount();
+    auto prev = currentState.exchange(newState, std::memory_order_release);
+    if (prev) {
+        const juce::ScopedLock sl(trashBinLock);
+        stateTrashBinPending.push_back(EQState::Ptr(prev));
+        prev->decReferenceCount();
+    }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
 }
@@ -420,9 +452,16 @@ void EQProcessor::setBandQ(int band, float q)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = std::make_shared<EQState>(*oldState);
+    auto newState = new EQState(*oldState);
     newState->bands[band].q = q;
-    currentState.store(newState, std::memory_order_release);
+
+    newState->incReferenceCount();
+    auto prev = currentState.exchange(newState, std::memory_order_release);
+    if (prev) {
+        const juce::ScopedLock sl(trashBinLock);
+        stateTrashBinPending.push_back(EQState::Ptr(prev));
+        prev->decReferenceCount();
+    }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
 }
@@ -431,9 +470,16 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = std::make_shared<EQState>(*oldState);
+    auto newState = new EQState(*oldState);
     newState->bands[band].enabled = enabled;
-    currentState.store(newState, std::memory_order_release);
+
+    newState->incReferenceCount();
+    auto prev = currentState.exchange(newState, std::memory_order_release);
+    if (prev) {
+        const juce::ScopedLock sl(trashBinLock);
+        stateTrashBinPending.push_back(EQState::Ptr(prev));
+        prev->decReferenceCount();
+    }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
 }
@@ -447,9 +493,16 @@ void EQProcessor::setTotalGain(float gainDb)
     totalGainDbTarget.store(gainDb, std::memory_order_relaxed);
 
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = std::make_shared<EQState>(*oldState);
+    auto newState = new EQState(*oldState);
     newState->totalGainDb = gainDb;
-    currentState.store(newState, std::memory_order_release);
+
+    newState->incReferenceCount();
+    auto prev = currentState.exchange(newState, std::memory_order_release);
+    if (prev) {
+        const juce::ScopedLock sl(trashBinLock);
+        stateTrashBinPending.push_back(EQState::Ptr(prev));
+        prev->decReferenceCount();
+    }
     listeners.call(&Listener::eqGlobalChanged, this);
 }
 
@@ -474,9 +527,16 @@ void EQProcessor::setBandType(int band, EQBandType type)
     if (band < 0 || band >= NUM_BANDS) return;
 
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = std::make_shared<EQState>(*oldState);
+    auto newState = new EQState(*oldState);
     newState->bandTypes[band] = type;
-    currentState.store(newState, std::memory_order_release);
+
+    newState->incReferenceCount();
+    auto prev = currentState.exchange(newState, std::memory_order_release);
+    if (prev) {
+        const juce::ScopedLock sl(trashBinLock);
+        stateTrashBinPending.push_back(EQState::Ptr(prev));
+        prev->decReferenceCount();
+    }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
 }
@@ -491,9 +551,16 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = std::make_shared<EQState>(*oldState);
+    auto newState = new EQState(*oldState);
     newState->bandChannelModes[band] = mode;
-    currentState.store(newState, std::memory_order_release);
+
+    newState->incReferenceCount();
+    auto prev = currentState.exchange(newState, std::memory_order_release);
+    if (prev) {
+        const juce::ScopedLock sl(trashBinLock);
+        stateTrashBinPending.push_back(EQState::Ptr(prev));
+        prev->decReferenceCount();
+    }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
 }
@@ -502,6 +569,12 @@ EQChannelMode EQProcessor::getBandChannelMode(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQChannelMode::Stereo;
     return currentState.load(std::memory_order_acquire)->bandChannelModes[band];
+}
+
+EQProcessor::EQState::Ptr EQProcessor::getEQState() const
+{
+    // Ptrコンストラクタが参照カウントをインクリメントしてくれる
+    return EQState::Ptr(currentState.load(std::memory_order_acquire));
 }
 
 //--------------------------------------------------------------
@@ -719,15 +792,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     int numActiveBands = 0;
 
     // 処理中にノードが削除されないよう shared_ptr で保持
-    std::array<std::shared_ptr<BandNode>, NUM_BANDS> keptAliveNodes;
+    // std::array<std::shared_ptr<BandNode>, NUM_BANDS> keptAliveNodes; // No longer needed with deferred deletion
 
     for (int i = 0; i < NUM_BANDS; ++i)
     {
         auto node = bandNodes[i].load(std::memory_order_acquire);
         if (node && node->active)
         {
-            keptAliveNodes[numActiveBands] = node;
-            activeBands[numActiveBands] = { node.get(), i };
+            activeBands[numActiveBands] = { node, i };
             numActiveBands++;
         }
     }
@@ -791,9 +863,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 //--------------------------------------------------------------
 // BandNode作成 (Message Thread)
 //--------------------------------------------------------------
-std::shared_ptr<EQProcessor::BandNode> EQProcessor::createBandNode(int band, const EQState& state) const
+EQProcessor::BandNode::Ptr EQProcessor::createBandNode(int band, const EQState& state) const
 {
-    auto node = std::make_shared<BandNode>();
+    auto node = new BandNode();
     const auto& params = state.bands[band];
 
     node->active = params.enabled;
@@ -819,17 +891,30 @@ void EQProcessor::updateBandNode(int band)
     auto newNode = createBandNode(band, *state);
 
     // Atomic Exchange: 古いノードを取得し、新しいノードをセット
-    auto oldNode = bandNodes[band].exchange(newNode, std::memory_order_acq_rel);
+    newNode->incReferenceCount();
+    auto oldNode = bandNodes[band].exchange(newNode.get(), std::memory_order_acq_rel);
 
     // 古いノードをゴミ箱へ (Audio Threadが使用中の可能性があるため即削除しない)
     const juce::ScopedLock sl(trashBinLock);
     if (oldNode)
-        trashBin.push_back(std::move(oldNode));
+    {
+        bandNodeTrashBinPending.push_back(BandNode::Ptr(oldNode));
+        oldNode->decReferenceCount();
+    }
+}
 
-    // ゴミ箱の掃除 (Garbage Collection)
-    // Audio Threadが参照していない(use_count == 1)オブジェクトのみを削除する。
-    trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(),
-                                   [](const auto& p) { return p.use_count() == 1; }), trashBin.end()); // ラムダ構文修正
+void EQProcessor::cleanup()
+{
+    const juce::ScopedLock sl(trashBinLock);
+    // Clean BandNodes
+    bandNodeTrashBin.erase(std::remove_if(bandNodeTrashBin.begin(), bandNodeTrashBin.end(), [](const auto& p) { return p->getReferenceCount() == 1; }), bandNodeTrashBin.end());
+    bandNodeTrashBin.insert(bandNodeTrashBin.end(), bandNodeTrashBinPending.begin(), bandNodeTrashBinPending.end());
+    bandNodeTrashBinPending.clear();
+
+    // Clean States
+    stateTrashBin.erase(std::remove_if(stateTrashBin.begin(), stateTrashBin.end(), [](const auto& p) { return p->getReferenceCount() == 1; }), stateTrashBin.end());
+    stateTrashBin.insert(stateTrashBin.end(), stateTrashBinPending.begin(), stateTrashBinPending.end());
+    stateTrashBinPending.clear();
 }
 
 //--------------------------------------------------------------
