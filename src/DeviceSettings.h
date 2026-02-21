@@ -6,7 +6,7 @@
 // アプリケーション終了時に設定を保存し、次回起動時に復元する。
 //
 // ■ 保存される設定:
-//   - デバイスタイプ（WASAPI/ASIO/DirectSound等）
+//   - デバイスタイプ (WASAPI/ASIO/DirectSound等)
 //   - 入力デバイス名
 //   - 出力デバイス名
 //   - サンプルレート
@@ -15,7 +15,7 @@
 //   - 有効な出力チャンネル (Bitmask)
 //
 // ■ 保存先:
-//   - Windows: %APPDATA%/ConvoPeq/device_settings.xml
+//   - Windows: %APPDATA%/ConvoPeq/device_settings.xml (ローミングプロファイル)
  //   - (注意: 本アプリケーションはWindows専用です)
 //
 // ■ 安全性:
@@ -48,6 +48,7 @@ private:
     juce::AudioDeviceManager& audioDeviceManager;
     AudioEngine& audioEngine;
     std::unique_ptr<juce::AudioDeviceSelectorComponent> selector;
+
 
     juce::ComboBox oversamplingComboBox;
     juce::Label oversamplingLabel;

@@ -1,343 +1,59 @@
-# ConvoPeq v0.2.1
+# ConvoPeq
 
-![Platform](https://img.shields.io/badge/Platform-Windows_11_x64-blue)
-![Framework](https://img.shields.io/badge/Framework-JUCE_8.0.12-green)
-![License](https://img.shields.io/badge/License-JUCE_8-orange)
+ConvoPeq is a high-performance, standalone audio application that combines convolution reverb and a parametric equalizer. It is built using the JUCE framework and designed for real-time audio processing.
 
-Convolver + 20-Band Parametric EQ Standalone Application (Vibe Coding Project)
+## Features
 
-Windows 11 x64用20バンドパラメトリックイコライザー兼コンボルバー。
-JUCE Framework 8.0.12ベースのリアルタイムオーディオ処理アプリケーションです。
+* **Convolution Reverb:** Utilizes FFT-based convolution for realistic reverb effects. Supports loading impulse responses (IR) in WAV, AIFF, and FLAC formats.
+* **Parametric Equalizer:** A 20-band parametric EQ for detailed audio shaping.
+* **Real-time Audio Processing:** Designed with a focus on low-latency, real-time performance.
+* **User Interface:** A modern and intuitive user interface built with JUCE.
+* **Multi-format IR Support:** Supports WAV, AIFF, and FLAC impulse response files.
+* **ASIO Blacklisting**: Allows excluding problematic ASIO drivers.
+* **Preset Management:** Save and load EQ and Convolver settings.
+* **Spectrum Analyzer**: Visual feedback of audio output.
+* **Adjustable Oversampling:** Allows users to select different oversampling factors for quality/performance trade-offs.
+* **Dither**: Includes psychoacoustic dither for high-quality output, especially at lower bit depths.
 
----
+## Dependencies
 
-## ✨ 機能概要
+* [JUCE Framework](https://github.com/juce-framework/JUCE) (V8.0.12)
+* [FFTConvolver](https://github.com/ouroboros-audio/FFTConvolver)
+* [r8brain-free-src](https://github.com/avaneev/r8brain-free-src)
 
-本アプリケーションは、**Vibe Coding**（AIコーディングアシスタントによる完全自動生成）によって開発されたプロトタイプです。
-従来の開発手法とは異なり、自然言語による指示のみで設計・実装・リファクタリングが行われています。
-詳細は「🤖 バイブコーディングの方法」セクションを参照してください。
+## Building ConvoPeq
 
-### 🎚️ ハイブリッド・プロセッシング・チェーン
+These instructions will guide you through building ConvoPeq from source on Windows using Visual Studio Code and CMake.
 
-Convolver（畳み込み演算）とパラメトリックEQを組み合わせた強力なオーディオ処理パイプラインを提供します。処理順序は用途に合わせて柔軟に変更可能です。
+### Prerequisites
 
-```text
-[Input] -> [Convolver] <==> [20-Band EQ] -> [Output]
-         (順序切替可能)
-```
+* [Visual Studio Code](https://code.visualstudio.com/)
+* [CMake](https://cmake.org/) (3.22 or higher)
+* [JUCE Framework](https://github.com/juce-framework/JUCE) (V8.0.12)
+* [r8brain-free-src](https://github.com/avaneev/r8brain-free-src)
 
-**Convolver機能**:
+### Build Steps
 
-- FFTベース高速コンボリューション
-- インパルス応答（IR）ファイル読み込み（WAV, AIFF, FLAC対応、自動リサンプリング）
-- ルームリバーブ/スピーカーシミュレーション
-- Dry/Wet Mix制御（0% ~ 100%）
-- バイパス切り替え
-- ステレオIR対応（True Stereo）
-- **Minimum Phase（最小位相）変換**: ケプストラム法（Double精度FFT）によりIRを最小位相化し、レイテンシーとプリリンギングを低減
+1. Clone the repository.
+2. Ensure that the JUCE framework and r8brain-free-src are placed either as submodules or as sibling directories to the project.
+3. Open the project in Visual Studio Code.
+4. Configure the project using CMake: `cmake .. -G "Visual Studio 17 2022" -A x64`
+5. Build the project using CMake: `cmake --build . --config Release` (or Debug)
 
-**20バンドEQ**:
+### Build Artifacts
 
-- ISO準拠 1/3オクターブバンド
-- 周波数: 20Hz ~ 20kHz
-- 各バンド独立調整
-- **拡張フィルタタイプ**: LowPass / HighPass を追加
-- **チャンネルモード**: Stereo / Left / Right 独立制御に対応
+The executable will be located in `build\ConvoPeq_artefacts\[Configuration]\ConvoPeq.exe`, where `[Configuration]` is either `Debug` or `Release`.
 
-**オーディオエンジン**:
+## Architecture
 
-- **オーバーサンプリング**: 最大8倍 (Auto/1x/2x/4x/8x)。フィルタタイプ選択可能 (Linear Phase / Low Latency IIR)。内部処理は最大65536サンプルブロックまで対応。
-- **DCオフセット除去**: 3Hzハイパスフィルタ（4次バターワース）によるDC成分カット
-- **Psychoacoustic Dither**: 聴覚特性に最適化された5次ノイズシェーパー + **Xoshiro256\*\*** PRNG による高精度ディザリング (Bit Depth選択可能)
-- **Musical Soft Clip**: 真空管ライクな特性を持つソフトクリッパーによる出力保護
-- **アナライザーソース切替**: Input / Output の表示切り替えに対応
+The application is structured as follows:
 
----
+* **AudioEngine**: Manages the audio processing graph, including the convolver and EQ. Uses a lock-free RCU pattern for thread-safe parameter updates.
+* **ConvolverProcessor**: Implements the convolution reverb.
+* **EQProcessor**: Implements the parametric equalizer.
+* **SpectrumAnalyzerComponent**: Provides a visual representation of the audio spectrum and EQ curve.
+* **DeviceSettings**: Handles audio device selection and settings.
 
-## ✅ 安全性と堅牢化
+## License
 
-本アプリケーションは、プロフェッショナルなオーディオ環境での安定動作を保証するため、厳格な設計原則に基づいて実装されています。
-
-### 🛡️ リアルタイム・スレッド安全性 (Real-time Safety)
-
-Audio Thread（音声処理スレッド）における処理落ち（ドロップアウト）やノイズを防ぐため、以下の制約を徹底しています。
-
-1. **Lock-free / Wait-free 設計**:
-    - Audio Thread内での `Mutex` や `CriticalSection` の使用を禁止し、スレッドのブロッキングを回避しています。
-    - データの受け渡しには `std::atomic` と Lock-free FIFO (`juce::AbstractFifo`) を使用しています。
-
-2. **動的メモリ確保の排除**:
-    - `malloc`, `new`, `std::vector::resize` などのメモリ確保操作を Audio Thread から完全に排除しています。
-    - 必要なバッファは `prepareToPlay` 時に最大サイズ（`SAFE_MAX_BLOCK_SIZE` = 65536, 8xオーバーサンプリング対応）で事前確保し、処理中はそれを再利用します。
-
-3. **RCU (Read-Copy-Update) パターン**:
-    - DSPパラメータやIRデータの更新には RCU パターンを採用しています。
-    - Message Thread で新しい状態（State）を作成し、`std::atomic<std::shared_ptr<T>>` を介してアトミックに差し替えます。
-    - これにより、Audio Thread は常に整合性の取れた最新の状態をロックなしで参照できます。
-
-### 🔌 デバイスとドライバの安定化
-
-Windows環境特有のオーディオドライバの問題に対処しています。
-
-1. **ASIOブラックリスト機能**:
-    - シングルクライアント専用や動作が不安定なASIOドライバ（BRAVO-HD, ASIO4ALL等）を検出し、デバイスリストから自動的に除外または警告します。
-    - これにより、排他制御の競合によるアプリケーションのクラッシュを防ぎます。
-
-2. **堅牢なデバイス初期化**:
-    - サンプルレートやバッファサイズの妥当性を検証し、異常値（例: 0Hz, 極端なバッファサイズ）が報告された場合は安全なデフォルト値にフォールバックします。
-    - 設定ファイル破損時やデバイス未接続時の自動復旧機能を備えています。
-
-### 🎛️ DSP処理の数値安定性
-
-デジタル信号処理における数値的な破綻を防ぎます。
-
-1. **Denormal（非正規化数）対策**:
-    - `juce::ScopedNoDenormals` を使用し、CPU負荷が急増する非正規化数の発生を抑制しています。
-    - IIRフィルタの内部状態変数に対して、極小値をゼロにフラッシュする手動チェックも併用しています。
-
-2. **NaN / Inf 保護**:
-    - 発振や不正な入力により `NaN` (Not a Number) や `Inf` (無限大) が発生した場合、それを検出し、後段の処理に伝播しないようクランプまたはリセットします。
-    - EQのゲインやQ値は安全な範囲に制限（Clamp）されています。
-
-3. **TPT (Topology-Preserving Transform) フィルタ**:
-    - EQには TPT SVF (State Variable Filter) を採用しており、高速なパラメータ変調時でもフィルタが破綻せず、ノイズの発生を最小限に抑えます。
-
-4. **高品質乱数生成 (Xoshiro256\*\*)**:
-    - ディザリングには `Xoshiro256**` アルゴリズムを使用し、ステレオチャンネル間の相関を排除した高品質なTPDFディザを生成します。
-
-### 🧵 非同期処理とリソース管理
-
-1. **バックグラウンドIRロード**:
-    - IRファイルの読み込み、リサンプリング、FFT計算、Minimum Phase変換などの重い処理は、専用のバックグラウンドスレッド（`LoaderThread`）で実行されます。
-    - ロード中もAudio Threadは古いIRを使って処理を継続するため、音切れが発生しません。
-    - `r8brain` ライブラリによる高品質リサンプリングをバックグラウンドで実行します。
-
-2. **安全なオブジェクト破棄 (Trash Bin)**:
-    - Audio Thread が参照している可能性のある古いDSPオブジェクトは、即座に削除せず `trashBin` リストに一時保管されます。
-    - 安全なタイミング（Message Thread）で破棄することで、Use-after-free バグを防ぎます。
-
----
-
-## 主な機能
-
-### 🎛️ 信号処理チェーン
-
-**柔軟なルーティング**:
-ConvolverとEQの接続順序をリアルタイムに変更可能です。
-
-```text
-[Input] -> [Convolver] <==> [20-Band EQ] -> [Output]
-```
-
-### Convolver機能
-
-- **FFTベース高速コンボリューション** (juce::dsp::Convolution使用)
-- **インパルス応答（IR）ファイル読み込み**: WAV, AIFF, FLAC対応（自動リサンプリング）
-- **用途**: ルームリバーブ、スピーカーシミュレーション、位相補正
-- **Dry/Wet Mix制御**: 0% ~ 100%
-- **バイパス切り替え**: On/Off
-- **True Stereoサポート**: 2チャンネルIR対応
-- **Minimum Phase変換**: IRのエネルギーを前方に集中させ、レイテンシーを削減
-- **レイテンシー補正**: DelayLineによる自動補正
-
-### 🎚️ 20バンドパラメトリックEQ
-
-アナログライクな質感とデジタルの精密さを兼ね備えた、マスタリンググレードのイコライザーです。
-
-- **コア・アルゴリズム**: **TPT (Topology-Preserving Transform) SVF**
-  - 従来のデジタルEQ（Biquad Direct Form）で発生しがちな高域の歪み（周波数ワーピング）を抑制し、アナログフィルタに近い挙動を実現。
-  - 係数変更時のノイズが極めて少なく、再生中のパラメータ操作も滑らかです。
-- **バンド構成**: 20バンド（完全パラメトリック）
-  - **デフォルト**: ISO準拠 1/3オクターブ中心周波数 (25Hz ~ 19.5kHz)
-  - **調整範囲**: 全バンドで周波数 (20Hz~20kHz)、ゲイン (±12dB)、Q (0.1~10.0) を自由に調整可能。
-- **多彩なフィルタタイプ**:
-  - Peaking (Bell), LowShelf, HighShelf, LowPass, HighPass を各バンドで選択可能。
-- **L/R独立処理**:
-  - 各バンドごとに **Stereo / Left / Right** の適用チャンネルを選択可能。
-  - 左右で異なるEQカーブを作成し、音場補正やM/S処理的なアプローチが可能。
-- **ダイナミクス制御**:
-  - **トータルゲイン**: ±24dB のマスター出力調整。
-  - **AGC (Automatic Gain Control)**: 入出力のRMSレベル差を計測し、EQによる音量変化を自動補正。
-- **プリセット互換性**:
-  - **Equalizer APO** 形式のテキストファイル読み込みに対応（`Filter: ON PK Fc ...`）。
-  - XML形式でのフルステート保存・復元。
-
-### オーディオバックエンド
-
-- **Windows専用**: WASAPI (Shared/Exclusive), DirectSound, ASIO
-  - **WASAPI Exclusive**: 低レイテンシー、ビットパーフェクト（推奨）
-  - **WASAPI Shared**: 他のアプリと共有可能
-  - **DirectSound**: 最高の互換性（レガシー）
-  - **ASIO**: 最低レイテンシー（専用ドライバー必要）
-- **ASIOブラックリスト機能**: 不安定なドライバーの自動除外
-  - デフォルトで除外: BRAVO-HD, ASIO4ALL
-  - `asio_blacklist.txt`で設定可能
-- **信号処理**:
-  - **DC Blocker**: DCオフセット除去 (3Hz HPF)
-  - **Psychoacoustic Dither**: 聴覚特性を考慮したノイズシェーピング
-  - **Soft Clipper**: 音楽的な出力リミッター
-
-### スペクトラムアナライザー
-
-- **リアルタイムFFT**: 4096ポイント（50%オーバーラップ）
-- **周波数範囲**: 20Hz ~ 20kHz（可視範囲）
-- **表示機能**:
-  - ピーク保持機能（1秒）
-  - EQ応答曲線オーバーレイ（L/Rチャンネル別）
-  - 入出力レベルメーター（dBFS表示）
-  - **ソース切り替え**: Input (Pre-DSP) / Output (Post-DSP)
-- **最適化**: Lock-free FIFO、UI Threadでのみ計算
-
-### その他の機能
-
-- **処理順序切り替え**: Conv→EQ / EQ→Conv
-- **CPU使用率表示**: リアルタイム監視
-- **デバイス設定の永続化**: XML形式で自動保存・復元
-- **バイパス機能**: EQ/Convolver個別にOn/Off可能
-
----
-
-## 🚀 クイックスタート
-
-### 1. 前提条件
-
-- **OS**: Windows 11 x64
-- **Visual Studio 2022**: ワークロード「C++によるデスクトップ開発」
-- **CMake**: v3.22 以上
-- **Git**: バージョン管理ツール
-- **VS Code** (推奨): C/C++ Extension Pack, CMake Tools
-
-### 2. セットアップ
-
-ソースコードを取得し、JUCEフレームワークを配置します。
-
-```powershell
-# 1. リポジトリのクローン
-git clone https://github.com/lonewolf-jp/ConvoPeq.git
-cd ConvoPeq
-
-# 2. 依存ライブラリの配置 (必須)
-# プロジェクトルート直下に以下のフォルダとして配置します
-
-# JUCE 8.0.12
-git clone --branch 8.0.12 --depth 1 https://github.com/juce-framework/JUCE.git
-
-# FFTConvolver
-git clone https://github.com/ouroboros-audio/FFTConvolver.git
-
-# r8brain-free-src
-git clone https://github.com/avaneev/r8brain-free-src.git
-```
-
-### 3. ビルド
-
-付属のスクリプトを使用すると、CMakeの設定からコンパイルまで自動で行われます。
-
-```powershell
-# Releaseビルド (推奨)
-build.bat Release
-```
-
-### 4. 実行
-
-ビルドが完了すると、以下のパスに実行ファイルが生成されます。
-
-```powershell
-build\ConvoPeq_artefacts\Release\ConvoPeq.exe
-```
-
-詳細は `BUILD_GUIDE_WINDOWS.md` を参照してください。
-
----
-
-## 📖 基本的な使い方
-
-### 1. オーディオ設定 (Audio Settings)
-
-起動後、まずはオーディオデバイスの設定を行います。
-
-1. 右上の **[Audio Settings]** ボタンをクリックします。
-2. **Audio Device Type**:
-   - **WASAPI Exclusive** (推奨): 低レイテンシーで高音質ですが、他のアプリの音は出なくなります。
-   - **WASAPI Shared**: 他のアプリと同時使用可能ですが、レイテンシーが少し増えます。
-   - **ASIO**: 対応デバイスを持っている場合、最低レイテンシーで使用可能です（不安定なドライバはブラックリスト設定で除外できます）。
-3. **Output / Input**: 使用するスピーカーとマイクを選択します。
-4. **Sample Rate**: `48000 Hz` (推奨) または `44100 Hz`。
-5. **Audio Buffer Size**:
-   - `512` samples (推奨): バランス型。
-   - `256` samples: 低レイテンシー（ノイズが出る場合は上げてください）。
-   - `1024` samples: 安定性重視。
-
-### 2. Convolver (IR Loader) の操作
-
-インパルス応答（IR）ファイルを読み込んで、リバーブやキャビネットシミュレーションを適用します。
-
-- **Load IR...**: WAV, AIFF, FLAC形式のIRファイルを読み込みます（サンプルレートは自動変換されます）。
-- **Min Phase**: IRを最小位相（Minimum Phase）に変換し、レイテンシーを削減します。
-- **Dry/Wet**: 原音（Dry）とエフェクト音（Wet）のバランスを調整します。
-- **Smoothing**: パラメータ変更時のクロスフェード時間を調整します。
-- **IR Length**: 使用するIRの長さを調整します（トリミング）。
-- **Conv On/Off**: Convolverのバイパス切り替え（メイン画面上部）。
-
-### 3. 20バンドEQの操作
-
-各バンドのパラメータを調整して音質を補正します。
-
-- **パラメータ変更**: 数値（Gain, Freq, Q）をクリックして直接入力します。
-- **ON/OFF**: 各バンドごとの有効/無効切り替え。
-- **Filter Type**: `Peaking`, `LowShelf`, `HighShelf`, `LowPass`, `HighPass` から選択。
-- **Channel**: `Stereo`, `Left`, `Right` を選択して、左右独立したEQ設定が可能。
-- **Total Gain**: 全体の音量を調整（±24dB）。
-- **AGC**: 自動ゲインコントロール。EQによる音量変化を自動補正します。
-- **Reset**: 全バンドを初期状態に戻します。
-
-### 4. その他の機能
-
-- **Order**: 処理順序を切り替えます（`Conv -> EQ` または `EQ -> Conv`）。
-- **Analyzer Source**: スペクトラムアナライザーの表示ソースを `Input`（処理前）と `Output`（処理後）で切り替えます（アナライザー右上のボタン）。
-- **Save / Load**: 現在の設定（EQ + Convolver）をXMLファイルとして保存・読み込みします。Equalizer APO形式のテキストファイル読み込みにも対応しています。
-
----
-
-## 📄 ライセンス
-
-JUCE フレームワークのライセンスに従います。
-詳細: <https://juce.com/legal/juce-8-licence/>
-
-### 本番環境使用不可
-
-本ソフトウェアは開発初期段階（v0.2.1）のプロトタイプであり、以下の理由からライブパフォーマンスや業務用途などのクリティカルな本番環境での使用は推奨されません。
-
-1. **AI生成コード**: 本プロジェクトの主要なコードベースはAIアシスタントによって生成されており、人間の開発者による完全なコードレビューや長期的な安定性検証を経ていません。予期せぬバグや未定義の動作が含まれている可能性があります。
-2. **オーディオ出力のリスク**: 開発中のDSP処理により、予期せぬ大音量ノイズやフィードバックが発生し、聴覚やスピーカー機器に損害を与えるリスクがあります。必ず外部リミッターを使用するか、音量を絞ってテストしてください。
-3. **安定性**: 特定のオーディオドライバやハードウェア構成において、クラッシュやオーディオドロップアウトが発生する可能性があります。
-4. **サポート体制**: 開発者はAIアシスタントを利用してコーディングを行っており、複雑なバグ修正や機能追加の要望には迅速に対応できない場合があります。
-
-使用にあたっては、これらを理解した上で自己責任で行ってください。
-
----
-
-## 🤖 バイブコーディングの方法 (Vibe Coding)
-
-本プロジェクトは、**Vibe Coding**（バイブコーディング）と呼ばれる開発スタイルで構築されています。本プロジェクトでは、AIコーディングアシスタント（Gemini Code Assist / Claude 3.5 Sonnet / ChatGPT）にコーディングをすべて任せて制作しています。
-
-### 基本的なワークフロー
-
-1. **自然言語で指示**: 「20バンドのEQを追加して」「ASIOドライバのブラックリスト機能を作って」といった自然言語で機能を定義します。
-2. **AIによる生成**: AIがソースコード、CMake設定、ドキュメントを生成します。
-3. **ビルド & テスト**: VS Codeでビルドし、エラーが出ればエラーメッセージをそのままAIにフィードバックして修正させます。
-4. **リファクタリング**: 「Audio Threadの安全性を確保して」「可読性を上げて」といった指示で、コード品質を高めます。
-
-### このプロジェクトでの実践
-
-- **全コードがAI生成**: C++のボイラープレート、JUCEの定型文、複雑なDSP計算式（Biquad/SVF係数計算など）などすべてAIが生成しました。
-- **人間は「監督」**: アプリケーションの稼働試験に集中しました。発現したバグや潜在的バグの原因特定はClaude 3.5 Sonnet、ChatGPT (o1/4o) に自然言語で行い、結果をVS CodeのGemini Code Assistに読み込ませてソースコードの修正を行っています。
-- **高速なイテレーション**: 従来の数倍のスピードで機能実装とバグ修正を行っています。
-
-### AIへの指示方法
-
-- **役割分担**: 複雑なロジックの考案やデバッグのヒントはClaude 3.5 SonnetやChatGPTに依頼し、具体的なコーディングと実装はVS Code上のGemini Code Assistに任せるのが効率的です。
-- **コンテキストの重要性**: Gemini Code Assistを使用する際は、関連するソースファイルをタブで開いておくことで、AIがプロジェクトの構造を理解しやすくなります。
-- **エラー修正**: ビルドエラーが発生した場合、エラーメッセージをコピーして「このエラーを修正して」と指示するだけで、多くの場合正しい修正案が提示されます。
-
-もしこのコードをフォークして開発する場合も、AIアシスタントを活用することで、C++やJUCEの深い知識がなくても機能拡張が可能です。
+This project is licensed under the AGPLv3 License.

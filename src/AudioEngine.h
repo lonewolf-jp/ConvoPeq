@@ -9,12 +9,12 @@
 //   - prepareToPlay(...) : 再生準備（バッファ確保など）
 //   - releaseResources() : リソース解放（再生停止時）
 //
-// ■ スレッド安全性とリアルタイム制約:
-//   - getNextAudioBlock: Audio Thread で実行されます。
+// ■ Thread safety and real-time limitations:
+//   - getNextAudioBlock: Executed in the Audio Thread.
 //     - リアルタイム制約があります（ブロック不可、ロック不可、メモリ割り当て不可、IR再ロード不可）。
 //   - prepareToPlay / releaseResources: Audio Thread の開始前/終了後に Message Thread から呼ばれます。
-//   - パラメータ設定: Message Thread から呼ばれます。std::atomic を使用して Audio Thread と安全に同期します。
-//   - readFromFifo: Message Thread (Timer) から呼ばれます。Lock-free FIFO を介してデータを取得します。
+//   - パラメータ設定: Message Thread から呼ばれます。std::atomic を使用して Audio Thread と安全に同期します (RCUパターン)。
+//   - readFromFifo: Message Thread (Timer) から呼ばれます。FIFOバッファからデータを取得します。
 //============================================================================
 
 #include <JuceHeader.h>
@@ -95,12 +95,14 @@ public:
     ConvolverProcessor& getConvolverProcessor() { return uiConvolverProcessor; }
     EQProcessor& getEQProcessor() { return uiEqProcessor; }
 
-    int getSampleRate() const { return currentSampleRate.load(); }
+    double getSampleRate() const { return currentSampleRate.load(); }
 
     float getInputLevel()  const { return inputLevelDb.load(); }
     float getOutputLevel() const { return outputLevelDb.load(); }
 
-    // UIスレッドから呼び出し。FIFOからデータを取得する。
+    // UIスレッドから呼び出し、FIFOからデータを取得します。
+	//
+    // 内部で fifoReadLock を使用し、複数のUIコンポーネントからの同時読み出しを防ぐ。
     int getFifoNumReady() const { return audioFifo.getNumReady(); }
     void readFromFifo(float* dest, int numSamples);
 
@@ -205,7 +207,7 @@ private:
     //----------------------------------------------------------
     // DSPコア (Audio Threadで実行される処理のコンテナ)
     //----------------------------------------------------------
-    struct DSPCore
+    struct DSPCore : public juce::ReferenceCountedObject
     {
         struct ProcessingState
         {
@@ -216,6 +218,8 @@ private:
             bool softClipEnabled;
             float saturationAmount;
         };
+
+        using Ptr = juce::ReferenceCountedObjectPtr<DSPCore>;
 
         DSPCore();
 
@@ -241,9 +245,9 @@ private:
         float measureLevel (const juce::AudioBuffer<SampleType>& buffer, int numSamples) const noexcept;
         void pushToFifo(const juce::AudioBuffer<SampleType>& buffer, int numSamples,
                         juce::AbstractFifo& audioFifo,
-                        juce::AudioBuffer<float>& audioFifoBuffer) const;
-        void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples);
-        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples);
+                        juce::AudioBuffer<float>& audioFifoBuffer) const noexcept;
+        void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
+        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
     private:
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
     };
@@ -257,15 +261,17 @@ private:
 
     juce::AbstractFifo audioFifo { FIFO_SIZE };
     juce::AudioBuffer<float> audioFifoBuffer;
+    juce::CriticalSection fifoReadLock;
 
     //----------------------------------------------------------
     // 状態管理
     //----------------------------------------------------------
-    std::atomic<std::shared_ptr<DSPCore>> currentDSP;
-    std::vector<std::shared_ptr<DSPCore>> trashBin; // 古いDSPの保持用 (Audio Threadでの削除防止)
+    std::atomic<DSPCore*> currentDSP { nullptr };
+    std::vector<DSPCore::Ptr> trashBin; // 古いDSPの保持用 (Audio Threadでの削除防止)
+    std::vector<DSPCore::Ptr> trashBinPending; // 新しく追加されたゴミ (次回のタイマーコールバックまで保持)
     juce::CriticalSection trashBinLock;
 
-    std::atomic<int>   currentSampleRate{48000};
+    std::atomic<double> currentSampleRate{48000.0};
     std::atomic<float> inputLevelDb{-120.0f};
     std::atomic<float> outputLevelDb{-120.0f};
     std::atomic<int>   maxSamplesPerBlock{4096};
@@ -294,7 +300,7 @@ private:
     // ヘルパー関数
     //----------------------------------------------------------
     void requestRebuild(double sampleRate, int samplesPerBlock);
-    void commitNewDSP(std::shared_ptr<DSPCore> newDSP);
+    void commitNewDSP(DSPCore::Ptr newDSP);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

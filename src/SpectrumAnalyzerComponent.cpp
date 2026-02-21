@@ -56,7 +56,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     engine.addChangeListener(this);
     engine.getEQProcessor().addChangeListener(this);
-    engine.getEQProcessor().addListener(this);
+
     updateEQData(); // 初期状態のEQカーブを計算
 
     startTimerHz(60); // 60fps: UIの滑らかさとFIFO消費の安定化のため
@@ -70,7 +70,6 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
     stopTimer();
     engine.removeChangeListener(this);
     engine.getEQProcessor().removeChangeListener(this);
-    engine.getEQProcessor().removeListener(this);
 }
 
 //--------------------------------------------------------------
@@ -80,13 +79,12 @@ void SpectrumAnalyzerComponent::timerCallback()
 {
     if (!isShowing()) return;
 
-    // ── サンプルレート変更検知 ──
-    // 起動直後など、AudioEngineの準備が整ったタイミングでEQカーブを更新する
-    const int currentSampleRate = engine.getSampleRate();
-    if (currentSampleRate != cachedSampleRate)
+    // ── サンプルレート変更検知 (タイマー駆動) ──
+    // デバイス変更などでサンプルレートが変わった場合に追従する
+    const double currentSampleRate = engine.getSampleRate();
+    if (currentSampleRate > 0.0 && std::abs(currentSampleRate - cachedSampleRate) > 1.0)
     {
         updateEQData();
-        if (currentSampleRate <= 0) cachedSampleRate = 0;
     }
 
     // ── FFTデータの取得とスムーシング ──
@@ -208,6 +206,10 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
             startTimerHz(60);
         }
         updateEQData();
+
+        // ソース選択ボタンの表示更新 (プリセットロード時など)
+        if (source == &engine)
+            updateSourceButtonText();
     }
 }
 
@@ -396,8 +398,8 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
     const float plotW = static_cast<float>(area.getWidth());
     const float plotH = static_cast<float>(area.getHeight());
 
-    const int   sampleRate = engine.getSampleRate();
-    if (sampleRate <= 0) return;
+    const double sampleRate = engine.getSampleRate();
+    if (sampleRate <= 0.0) return;
     const int   halfFFT    = NUM_FFT_BINS;
     const float barWidth   = plotW / static_cast<float>(NUM_DISPLAY_BARS);
 
@@ -456,8 +458,8 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
 //--------------------------------------------------------------
 void SpectrumAnalyzerComponent::updateEQData()
 {
-    const int sr = engine.getSampleRate();
-    if (sr > 0)
+    const double sr = engine.getSampleRate();
+    if (sr > 0.0)
     {
         // サンプルレートが変更された場合のみ zCache (z = e^jw) を再計算
         if (sr != cachedSampleRate)
@@ -565,7 +567,7 @@ void SpectrumAnalyzerComponent::paintEQCurve(juce::Graphics& g, const juce::Rect
 {
     // デバイス未接続時や初期化中はサンプルレートが0になるため、
     // 周波数応答計算（除算）が不正になるのを防ぐ
-    if (engine.getSampleRate() <= 0) return;
+    if (engine.getSampleRate() <= 0.0) return;
 
     const float plotX = static_cast<float>(area.getX());
     const float plotY = static_cast<float>(area.getY());

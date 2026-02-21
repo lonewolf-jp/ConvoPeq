@@ -4,9 +4,9 @@
 //
 // Ultra Mastering Dither Engine
 // 64bit Double専用 Psychoacoustic Dither RNG
-// 構成 (Architecture):
+// 構成:
 //
-//   1. Xoshiro256** (L/R独立 jump)
+// 1. Xoshiro256** (L/R独立 jump)
 //   2. True TPDF Dither
 //   3. 5次 Noise Shaper (聴覚特性最適化係数)
 //   6. Soft Limiting
@@ -137,7 +137,7 @@ static inline uint64_t whiten64(uint64_t x) noexcept
 class PsychoacousticDither
 {
 public:
-    static constexpr int MAX_CHANNELS = 2;
+    static constexpr int MAX_CHANNELS = 8; // 将来の多チャンネル拡張に備えて余裕を持たせる
     static constexpr int DEFAULT_BIT_DEPTH = 24;
 
     explicit PsychoacousticDither(std::optional<uint64_t> seed = std::nullopt)
@@ -153,9 +153,17 @@ public:
     void prepare(double /*sampleRate*/, int bitDepth = DEFAULT_BIT_DEPTH) noexcept
     {
         if (bitDepth > 0)
-            scale = 1.0 / std::pow(2.0, bitDepth);
+        {
+            // N-bit signed PCM quantization step is 2 / 2^N = 1 / 2^(N-1)
+            scale = 1.0 / std::pow(2.0, bitDepth - 1);
+            invScale = std::pow(2.0, bitDepth - 1);
+        }
         else
-            scale = 1.0 / 16777216.0; // Default 24-bit
+        {
+            // Default 24-bit (2^23 for signed PCM)
+            scale = 1.0 / 8388608.0;
+            invScale = 8388608.0;
+        }
 
         reset();
     }
@@ -182,25 +190,31 @@ private:
         // TPDF Dither generation
         double d = nextTPDF(r) * scale;
 
-        // 5th order Noise Shaper
-        double v =
-            d
-          + 1.8  * st.z[0]
+        // 5th order Noise Shaper (Feedback Error)
+        double shapedError =
+            1.8  * st.z[0]
           - 1.2  * st.z[1]
           + 0.7  * st.z[2]
           - 0.3  * st.z[3]
           + 0.12 * st.z[4];
 
-        // Shift
+        // Apply dither and noise shaping
+        double tmp = x + d + shapedError;
+
+        // Quantize
+        double quantized = std::round(tmp * invScale) * scale;
+
+        // Calculate Quantization Error
+        double error = tmp - quantized;
+
+        // Update State (Shift)
         st.z[4]=st.z[3];
         st.z[3]=st.z[2];
         st.z[2]=st.z[1];
         st.z[1]=st.z[0];
-        st.z[0]=v;
+        st.z[0]=killDenormal(error);
 
-        double y = x + v;
-
-        return killDenormal(y);
+        return quantized;
     }
 
     inline double nextTPDF(Xoshiro256ss& r) noexcept
@@ -223,6 +237,7 @@ private:
     Xoshiro256ss rng[MAX_CHANNELS];
     ShaperState state[MAX_CHANNELS];
     double scale = 1.0 / 16777216.0;
+    double invScale = 16777216.0;
 };
 
 } // namespace dsp

@@ -4,15 +4,17 @@
 //
 // Convolverコントロールパネル
 //
-// ■ UI要素:
+// UI elements:
 //   - Load IR ボタン
 //   - Dry/Wet Mix スライダー
+//   - 位相選択 (Linear/Minimum)
 //   - IR波形表示
 //   - IR情報表示
 //============================================================================
 
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "AudioEngine.h" // AudioEngineへの参照を提供
 
 class ConvolverControlPanel : public juce::Component,
                               private juce::Button::Listener,

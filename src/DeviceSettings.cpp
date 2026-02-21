@@ -13,7 +13,7 @@
 //
 // ■ 実装に関する注意:
 // このクラスは、JUCEの内部実装（`AudioDeviceManager`が`OwnedArray`で`AudioIODeviceType`を管理していること）に依存しています。
-// `const_cast`を用いて内部の読み取り専用配列を書き換えるという危険な操作を行っているため、
+// `const_cast`を用いて内部の読み取り専用配列を書き換えるというハックを行っているため、ASIOデバイスのブラックリスト適用を実現しています。
 // 将来のJUCEバージョンで互換性が失われる可能性があります。
 //==============================================================================
 class BlacklistedASIODeviceType : public juce::AudioIODeviceType
@@ -57,6 +57,11 @@ public:
             if (! blacklist.isBlacklisted (defaultName))
                 return getDeviceNames (forInput).indexOf (defaultName);
         }
+
+        // フォールバック: デフォルトが無効またはブラックリスト入りの場合、最初の有効なデバイスを返す
+        auto filteredNames = getDeviceNames(forInput);
+        if (!filteredNames.isEmpty())
+            return 0;
 
         return -1;
     }
@@ -289,7 +294,7 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
 
 void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, AudioEngine& engine)
 {
-    // ASIOフリーズ防止のため、初期化前にデバイスを閉じる
+    // ASIOドライバの切り替え時に発生しうるフリーズを防ぐため、初期化前に一度デバイスを閉じる
     deviceManager.closeAudioDevice();
 
     auto file = getSettingsFile();
@@ -300,7 +305,19 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
         {
             // 保存された設定でデバイスを初期化する。
             // 入力は2チャンネル、出力は2チャンネルを要求する。
-            deviceManager.initialise (2, 2, xml.get(), true);
+            // selectDefaultDeviceOnFailure = true なので、失敗時は自動的にデフォルトへフォールバックする
+            juce::String error = deviceManager.initialise (2, 2, xml.get(), true);
+
+            if (error.isNotEmpty())
+            {
+                juce::NativeMessageBox::showAsync(
+                    juce::MessageBoxOptions()
+                        .withIconType(juce::MessageBoxIconType::WarningIcon)
+                        .withTitle("Audio Device Settings")
+                        .withMessage("Could not restore the saved audio device settings.\nError: " + error + "\n\nFalling back to default device.")
+                        .withButton("OK"),
+                    nullptr);
+            }
 
             // ビット深度設定の読み込み (デフォルト0 = 自動/最大)
             int bitDepth = xml->getIntAttribute("ditherBitDepth", 0);

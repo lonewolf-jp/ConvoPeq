@@ -59,7 +59,7 @@ public:
     // IRの最大長(kMaxIRCap)と最大ブロックサイズをカバーする値を設定
     // 3s @ 192kHz = 576000 samples. Next power of 2 is 1048576.
     static constexpr int MAX_IR_LATENCY = 2097152; // 2^21 (3.0s @ 384kHz = ~1.15M samples をカバー)
-    static constexpr int MAX_BLOCK_SIZE = 65536;  // 8x Oversampling (8192 * 8) を考慮して拡張
+    static constexpr int MAX_BLOCK_SIZE = 524288;  // 65536 * 8 (Safe for 8x oversampling of max input block)
     static constexpr int MAX_TOTAL_DELAY = MAX_IR_LATENCY + MAX_BLOCK_SIZE;
     static constexpr double CONVOLUTION_HEADROOM_GAIN = 0.5; // -6.02 dB
 
@@ -154,6 +154,9 @@ public:
     void syncStateFrom(const ConvolverProcessor& other);
     void syncParametersFrom(const ConvolverProcessor& other);
 
+    // ガベージコレクション (Message Threadから定期的に呼ぶ)
+    void cleanup();
+
 private:
     class LoaderThread;
 
@@ -161,7 +164,7 @@ private:
     // FFTConvolver Engine
     //----------------------------------------------------------
     // ステレオ処理用ラッパー (FFTConvolverはモノラルのため)
-    struct StereoConvolver
+    struct StereoConvolver : public juce::ReferenceCountedObject
     {
         std::array<fftconvolver::FFTConvolver, 2> convolvers;
         int latency = 0;
@@ -171,6 +174,8 @@ private:
         size_t blockSize = 0;
         std::vector<fftconvolver::Sample> irL;
         std::vector<fftconvolver::Sample> irR;
+
+        using Ptr = juce::ReferenceCountedObjectPtr<StereoConvolver>;
 
         StereoConvolver() = default;
 
@@ -183,7 +188,7 @@ private:
         void init(size_t newBlockSize, const fftconvolver::Sample* newIrL, const fftconvolver::Sample* newIrR, size_t irLen, int peakDelay)
         {
             this->blockSize = newBlockSize;
-            this->irL.assign(newIrL, newIrL + irLen);
+            this->irL.assign(newIrL, newIrL + irLen); // IRデータを内部にコピー
             this->irR.assign(newIrR, newIrR + irLen);
             this->irLatency = peakDelay;
 
@@ -196,8 +201,9 @@ private:
     };
 
     // Note: trashBin は、Audio Thread がまだ使用している可能性のある古い Convolution オブジェクトを保持するために使用されます。
-    std::atomic<std::shared_ptr<StereoConvolver>> convolution;
-    std::vector<std::shared_ptr<StereoConvolver>> trashBin;
+    std::atomic<StereoConvolver*> convolution { nullptr };
+    std::vector<StereoConvolver::Ptr> trashBin;
+    std::vector<StereoConvolver::Ptr> trashBinPending;
     juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
@@ -257,7 +263,7 @@ private:
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
     int computeTargetIRLength(double sampleRate, int originalLength) const;
-    void applyNewState(std::shared_ptr<StereoConvolver> newConv,
+    void applyNewState(StereoConvolver::Ptr newConv,
                       const juce::AudioBuffer<double>& loadedIR,
                       double loadedSR,
                       int targetLength,

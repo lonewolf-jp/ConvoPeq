@@ -42,7 +42,7 @@ namespace
         {
             g.fillAll (juce::Colours::darkgrey);
 
-            auto area = getLocalBounds().reduced (20);
+			auto area = getLocalBounds().reduced(20);
 
             g.setColour (juce::Colours::white);
             g.setFont (juce::FontOptions (24.0f, juce::Font::bold));
@@ -146,6 +146,24 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
             eqPanel->updateAllControls();
         if (convolverPanel != nullptr)
             convolverPanel->updateIRInfo();
+
+        // メインウィンドウ上のコントロールを更新 (プリセットロード時など)
+        // Processing Order
+        if (audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::ConvolverThenEQ)
+            orderButton.setButtonText("Order: Conv -> EQ");
+        else
+            orderButton.setButtonText("Order: EQ -> Conv");
+
+        // Bypass Buttons
+        eqBypassButton.setToggleState(!audioEngine.getEQProcessor().isBypassed(), juce::dontSendNotification);
+        eqBypassButton.setButtonText(audioEngine.getEQProcessor().isBypassed() ? "EQ Off" : "EQ On");
+
+        convolverBypassButton.setToggleState(!audioEngine.getConvolverProcessor().isBypassed(), juce::dontSendNotification);
+        convolverBypassButton.setButtonText(audioEngine.getConvolverProcessor().isBypassed() ? "Conv Off" : "Conv On");
+
+        // Soft Clip & Saturation
+        softClipButton.setToggleState(audioEngine.isSoftClipEnabled(), juce::dontSendNotification);
+        saturationSlider.setValue(audioEngine.getSaturationAmount(), juce::dontSendNotification);
     }
 }
 
@@ -299,7 +317,7 @@ void MainWindow::toggleDeviceSelector()
         newSettingsWindow->setResizable (true, false);
         newSettingsWindow->setResizeLimits (400, 400, 800, 1000); // 最大高さを拡張
         newSettingsWindow->setContentNonOwned (deviceSettings.get(), false);
-        newSettingsWindow->centreWithSize (500, 520);
+        newSettingsWindow->centreWithSize (500, 624);
 
         newSettingsWindow->onClose = [this]
         {
