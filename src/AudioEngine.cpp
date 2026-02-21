@@ -8,6 +8,7 @@
 #include <complex>
 #include <algorithm>
 
+#include "EQProcessor.h"
 // コンストラクタ
 //--------------------------------------------------------------
 AudioEngine::AudioEngine()
@@ -332,7 +333,7 @@ void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP)
 
     if (oldDSP)
     {
-        // 古いDSPをゴミ箱へ
+        // Enqueue the old DSP to trash bin for deferred deletion
         const juce::ScopedLock sl(trashBinLock);
         // ReferenceCountedObjectPtrでラップして保持 (参照カウント+1)
         // Atomic保持分の参照カウントをデクリメント (-1)
@@ -346,11 +347,12 @@ void AudioEngine::timerCallback()
 
     const juce::ScopedLock sl(trashBinLock);
 
-    // 1. ゴミ箱の掃除 (参照カウントが1 = trashBinのみが保持しているオブジェクトを削除)
+    // 1. Perform actual deletion: Remove objects with ref count 1 (only held by trashBin)
     trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(),
                                   [](const auto& p) { return p->getReferenceCount() == 1; }), trashBin.end());
+    juce::Logger::writeToLog ("AudioEngine: trashBin size after erase " + juce::String(trashBin.size()));
 
-    // 2. Pending状態のゴミをメインのゴミ箱へ移動 (ダブルバッファリング的な遅延削除)
+    // 2. Move pending items from pending to main trash bin (double buffering)
     // これにより、Audio Threadが参照している間に削除されるリスクを排除
     trashBin.insert(trashBin.end(), trashBinPending.begin(), trashBinPending.end());
     trashBinPending.clear();
@@ -553,12 +555,15 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int b
     dcBlockerR.prepare(processingRate, maxProcessingBlockSize);
 
     // ディザの準備 (出力段で行うため元のサンプルレート)
+    dither.prepare(sampleRate, bitDepth);
     dither.prepare(sampleRate, bitDepth);    //MessageThread
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
     // バッファ確保 (Message Threadで実行されるため安全)
-    processBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE);
-    processBuffer.clear();
+    alignedL.allocate(SAFE_MAX_BLOCK_SIZE);
+    alignedR.allocate(SAFE_MAX_BLOCK_SIZE);
+    juce::FloatVectorOperations::clear(alignedL.get(), SAFE_MAX_BLOCK_SIZE);
+    juce::FloatVectorOperations::clear(alignedR.get(), SAFE_MAX_BLOCK_SIZE);
 }
 
 void AudioEngine::DSPCore::reset()
@@ -570,7 +575,8 @@ void AudioEngine::DSPCore::reset()
     dither.reset();
     if (oversampling)
         oversampling->reset();
-    processBuffer.clear();
+    if (alignedL.get()) juce::FloatVectorOperations::clear(alignedL.get(), SAFE_MAX_BLOCK_SIZE);
+    if (alignedR.get()) juce::FloatVectorOperations::clear(alignedR.get(), SAFE_MAX_BLOCK_SIZE);
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
@@ -593,23 +599,28 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     processInput(bufferToFill, numSamples);
 
     //----------------------------------------------------------
+    // AudioBlockの構築 (AlignedBufferを使用)
+    //----------------------------------------------------------
+    double* channels[2] = { alignedL.get(), alignedR.get() };
+    juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
+
+    //----------------------------------------------------------
     // 入力レベル計算
     //----------------------------------------------------------
-    const float inputDb = measureLevel(processBuffer, numSamples);
+    const float inputDb = measureLevel(processBlock);
     inputLevelDb.store(inputDb, std::memory_order_relaxed);
 
     // ── Analyzer Input Tap (Pre-DSP) ──
     if (state.analyzerSource == AnalyzerSource::Input)
     {
-        pushToFifo(processBuffer, numSamples, audioFifo, audioFifoBuffer);
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
     }
 
     //----------------------------------------------------------
     // オーバーサンプリング処理ブロック
     //----------------------------------------------------------
     // バッファ全体ではなく、有効なサンプル数のみをラップする (重要)
-    juce::dsp::AudioBlock<double> block = juce::dsp::AudioBlock<double>(processBuffer).getSubBlock(0, numSamples);
-    juce::dsp::AudioBlock<double> processBlock = block;
+    juce::dsp::AudioBlock<double> block = processBlock; // Alias for clarity in oversampling logic
 
     // アップサンプリング
     if (oversampling)
@@ -677,40 +688,44 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     //----------------------------------------------------------
     // 出力レベル計算 (DC除去後のクリーンな信号で計測)
     //----------------------------------------------------------
-    const float outputDb = measureLevel(processBuffer, numSamples);
+    // オーバーサンプリング有効時は、ダウンサンプリング後の信号(block)を使用する
+    const float outputDb = measureLevel(block);
     outputLevelDb.store(outputDb, std::memory_order_relaxed);
 
     // ── Analyzer Output Tap (Post-DSP) ──
     if (state.analyzerSource == AnalyzerSource::Output)
     {
-        pushToFifo(processBuffer, numSamples, audioFifo, audioFifoBuffer);
+        pushToFifo(block, audioFifo, audioFifoBuffer);
     }
 
     processOutput(bufferToFill, numSamples);
 }
 
-float AudioEngine::DSPCore::measureLevel (const juce::AudioBuffer<SampleType>& buffer, int numSamples) const noexcept
+float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept
 {
     double maxLevel = 0.0;
-    const int numChannels = buffer.getNumChannels();
+    const int numChannels = (int)block.getNumChannels();
+    const int numSamples = (int)block.getNumSamples();
 
     for (int ch = 0; ch < numChannels; ++ch)
     {
         // getMagnitudeは内部でSIMD化されたfindMinAndMaxを使用するため高速
-        const double level = buffer.getMagnitude(ch, 0, numSamples);
+        auto range = juce::FloatVectorOperations::findMinAndMax(block.getChannelPointer(ch), numSamples);
+        const double level = std::max(std::abs(range.getStart()), std::abs(range.getEnd()));
         if (level > maxLevel) maxLevel = level;
     }
 
     return (maxLevel > static_cast<double>(LEVEL_METER_MIN_MAG)) ? static_cast<float>(juce::Decibels::gainToDecibels(maxLevel)) : LEVEL_METER_MIN_DB;
 }
 
-void AudioEngine::DSPCore::pushToFifo(const juce::AudioBuffer<SampleType>& buffer, int numSamples,
+void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>& block,
                                       juce::AbstractFifo& audioFifo,
                                       juce::AudioBuffer<float>& audioFifoBuffer) const noexcept
 {
-    const int procChannels = buffer.getNumChannels();
-    const double* l = buffer.getReadPointer(0);
-    const double* r = (procChannels > 1) ? buffer.getReadPointer(1) : nullptr;
+    const int numSamples = (int)block.getNumSamples();
+    const int procChannels = (int)block.getNumChannels();
+    const double* l = block.getChannelPointer(0);
+    const double* r = (procChannels > 1) ? block.getChannelPointer(1) : nullptr;
 
     // FIFO空き容量チェック (Overflow Protection)
     // Note: Readerスレッドとの競合(Race Condition)を避けるため、空きがない場合は書き込みをスキップする
@@ -758,7 +773,6 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
     const int effectiveInputChannels = std::min(buffer->getNumChannels(), 2);
-    const int procChannels = processBuffer.getNumChannels();
 
     //----------------------------------------------------------
     // 入力データを processBuffer (double) にコピー
@@ -768,7 +782,7 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     {
         // float (I/O) -> double (DSP) 変換
         const float* src = buffer->getReadPointer(ch, startSample);
-        double* dst = processBuffer.getWritePointer(ch);
+        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
         for (int i = 0; i < numSamples; ++i)
         {
             float v = src[i];
@@ -785,12 +799,14 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     // ロジック整理:
     // 1. 入力が1chで出力が2ch以上の場合 -> Ch 1 (R) はコピーされるのでクリア不要。Ch 2以降をクリア。
     // 2. それ以外 -> 入力チャンネル数以降をすべてクリア。
-    const bool expandMono = (effectiveInputChannels == 1 && procChannels > 1);
+    // AlignedBufferは常に2ch分 (L/R) 用意されていると仮定
+    const bool expandMono = (effectiveInputChannels == 1);
     const int clearStartCh = expandMono ? 2 : effectiveInputChannels;
 
-    for (int ch = clearStartCh; ch < procChannels; ++ch)
+    for (int ch = clearStartCh; ch < 2; ++ch)
     {
-        processBuffer.clear(ch, 0, numSamples);
+        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
+        juce::FloatVectorOperations::clear(dst, numSamples);
     }
 
     // ── Mono -> Stereo 展開 ──
@@ -799,8 +815,8 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     // 後段のステレオエフェクト（Convolver等）での片側無音を防ぐ。
     if (expandMono)
     {
-        const double* src = processBuffer.getReadPointer(0);
-        double* dst = processBuffer.getWritePointer(1);
+        const double* src = alignedL.get();
+        double* dst = alignedR.get();
         // 高速なメモリコピー (double配列)
         std::memcpy(dst, src, numSamples * sizeof(double));
     }
@@ -869,7 +885,6 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
 {
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
-    const int procChannels = processBuffer.getNumChannels();
 
     // ビット深度に基づくディザリング判定
     // 32-bit (float/int) 以上はディザ不要。24-bit/16-bit (int) はディザ必要。
@@ -882,11 +897,11 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     //----------------------------------------------------------
     for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
     {
-        if (ch < procChannels)
+        if (ch < 2)
         {
             // double (DSP) -> float (I/O) 変換
             // ディザリング適用 (Psychoacoustic Noise Shaping)
-            const double* src = processBuffer.getReadPointer(ch);
+            const double* src = (ch == 0) ? alignedL.get() : alignedR.get();
             float* dst = buffer->getWritePointer(ch, startSample);
 
             if (applyDither)

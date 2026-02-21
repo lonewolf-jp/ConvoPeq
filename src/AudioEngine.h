@@ -23,6 +23,8 @@
 #include <array>
 #include <juce_dsp/juce_dsp.h>
 
+#include "AlignedAllocation.h"
+
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
 #include "PsychoacousticDither.h"
@@ -205,6 +207,39 @@ private:
     };
 
     //----------------------------------------------------------
+    // アラインメントされたバッファ管理用クラス
+    //----------------------------------------------------------
+    class AlignedBuffer
+    {
+    public:
+        AlignedBuffer() : buffer(nullptr), sizeInBytes(0) {}
+
+        ~AlignedBuffer() { freeBuffer(); }
+
+        void allocate(size_t numElements)
+        {
+            freeBuffer();
+            sizeInBytes = numElements * sizeof(double);
+            buffer = static_cast<double*>(::dsp::aligned_malloc(sizeInBytes, 64)); // 64-byte alignment
+        }
+
+        double* get() const { return buffer; }
+
+        void freeBuffer()
+        {
+            if (buffer != nullptr) {
+                ::dsp::aligned_free(buffer);
+                buffer = nullptr;
+                sizeInBytes = 0;
+            }
+        }
+
+    private:
+        double* buffer;
+        size_t sizeInBytes;
+    };
+
+    //----------------------------------------------------------
     // DSPコア (Audio Threadで実行される処理のコンテナ)
     //----------------------------------------------------------
     struct DSPCore : public juce::ReferenceCountedObject
@@ -238,12 +273,12 @@ private:
         size_t oversamplingFactor = 1;
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
 
-        juce::AudioBuffer<SampleType> processBuffer;
+        AlignedBuffer alignedL, alignedR;
         int maxSamplesPerBlock = 0;
 
         // Helpers
-        float measureLevel (const juce::AudioBuffer<SampleType>& buffer, int numSamples) const noexcept;
-        void pushToFifo(const juce::AudioBuffer<SampleType>& buffer, int numSamples,
+        float measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept;
+        void pushToFifo(const juce::dsp::AudioBlock<const double>& block,
                         juce::AbstractFifo& audioFifo,
                         juce::AudioBuffer<float>& audioFifoBuffer) const noexcept;
         void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
@@ -289,7 +324,7 @@ private:
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
 
     // dB変換時の下限値
-    static constexpr float LEVEL_METER_MIN_DB = -120.0f;
+    static constexpr float LEVEL_METER_MIN_DB  = -120.0f;
     static constexpr float LEVEL_METER_MIN_MAG = 1e-6f;
 
     // EQ応答曲線計算用の定数

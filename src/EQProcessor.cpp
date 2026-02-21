@@ -13,6 +13,10 @@
 #include <cstring>
 #include <regex>
 
+#if JUCE_DSP_USE_INTEL_MKL
+#include <mkl.h>
+#endif
+
 //--------------------------------------------------------------
 // コンストラクタ
 //--------------------------------------------------------------
@@ -676,12 +680,19 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     double outputRMS = 0.0;
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        // Manual RMS calculation for AudioBlock
-        double sumSq = 0.0;
         const double* data = block.getChannelPointer(ch);
+        double rms = 0.0;
+
+#if JUCE_DSP_USE_INTEL_MKL
+        // MKL optimized RMS calculation (Norm / sqrt(N))
+        double norm = cblas_dnrm2(numSamples, data, 1);
+        rms = norm / std::sqrt(static_cast<double>(numSamples));
+#else
+        double sumSq = 0.0;
         for (int i = 0; i < numSamples; ++i)
             sumSq += data[i] * data[i];
-        double rms = std::sqrt(sumSq / static_cast<double>(numSamples));
+        rms = std::sqrt(sumSq / static_cast<double>(numSamples));
+#endif
 
         if (rms > outputRMS) outputRMS = rms;
     }
@@ -725,8 +736,13 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     // 各チャンネルに対して明示的に適用
     for (int ch = 0; ch < numChannels; ++ch)
     {
+#if JUCE_DSP_USE_INTEL_MKL
+        // MKL optimized scaling: x = a * x
+        cblas_dscal(numSamples, currentGain, block.getChannelPointer(ch), 1);
+#else
         juce::FloatVectorOperations::multiply(block.getChannelPointer(ch),
                                               currentGain, numSamples);
+#endif
     }
 }
 
@@ -770,11 +786,20 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         cachedInputRMS = 0.0;
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            double sumSq = 0.0;
             const double* data = block.getChannelPointer(ch);
+            double rms = 0.0;
+
+#if JUCE_DSP_USE_INTEL_MKL
+            // MKL optimized RMS calculation
+            double norm = cblas_dnrm2(numSamples, data, 1);
+            rms = norm / std::sqrt(static_cast<double>(numSamples));
+#else
+            double sumSq = 0.0;
             for (int i = 0; i < numSamples; ++i)
                 sumSq += data[i] * data[i];
-            double rms = std::sqrt(sumSq / static_cast<double>(numSamples));
+            rms = std::sqrt(sumSq / static_cast<double>(numSamples));
+#endif
+
             if (rms > cachedInputRMS)
                 cachedInputRMS = rms;
         }
@@ -859,6 +884,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
 }
 
+
 //--------------------------------------------------------------
 // BandNode作成 (Message Thread)
 //--------------------------------------------------------------
@@ -869,7 +895,7 @@ EQProcessor::BandNode::Ptr EQProcessor::createBandNode(int band, const EQState& 
 
     node->active = params.enabled;
     node->mode = state.bandChannelModes[band];
-    node->coeffs = calcSVFCoeffs(state.bandTypes[band], params.frequency, params.gain, params.q, currentSampleRate);
+   node->coeffs = calcSVFCoeffs(state.bandTypes[band], params.frequency, params.gain, params.q, currentSampleRate);
 
     // 最適化: ゲインが0dB付近ならスキップ
     if (node->active) {
