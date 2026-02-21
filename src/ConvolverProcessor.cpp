@@ -711,7 +711,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
 void ConvolverProcessor::cleanup()
 {
     const juce::ScopedLock sl(trashBinLock);
-    // 1. Clean old trash
+   // 1. Clean old trash
     trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(),
                                   [](const auto& p) { return p->getReferenceCount() == 1; }), trashBin.end());
     // 2. Move pending to trash
@@ -890,13 +890,16 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
 
     if (v.hasProperty ("irPath"))
     {
+
+        juce::File fileToLoad;
         juce::String path = v.getProperty ("irPath").toString();
         if (path.isNotEmpty())
         {
             juce::File f (path);
             if (f.existsAsFile())
             {
-                const juce::ScopedLock sl(irFileLock);
+                // ロック内では判定のみ
+               const juce::ScopedLock sl(irFileLock);
                 if (f != currentIrFile)
                     loadImpulseResponse (f);
             }
@@ -912,6 +915,10 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
                     nullptr);
             }
         }
+
+    // ← irFileLock 解放後に loadImpulseResponse() 呼び出し
+    if (fileToLoad != juce::File())
+        loadImpulseResponse(fileToLoad);
     }
 }
 

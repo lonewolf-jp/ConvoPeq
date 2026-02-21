@@ -1,6 +1,6 @@
 # ConvoPeq
 
-ConvoPeq is a high-performance, standalone audio application that combines convolution reverb and a parametric equalizer. It is built using the JUCE framework and designed for real-time audio processing.
+ConvoPeq is a high-performance, standalone audio application that combines convolution reverb and a parametric equalizer. It is built using the JUCE framework and designed for real-time audio processing.This project is programmed by vibe-coding.
 
 ## Features
 

@@ -49,8 +49,8 @@ AudioEngine::~AudioEngine()
     stopTimer();
 
     // 進行中のコールバックが完了するのを待つため、DSPを無効化
-    // これにより、changeListenerCallback内でdsp->...へのアクセスを防ぐ
-    auto oldDSP = currentDSP.exchange(nullptr);
+    // これにより、changeListenerCallback内でdsp->へのアクセスを防ぐ
+   AudioEngine::DSPCore::Ptr oldDSP = currentDSP.exchange(nullptr);
     if (oldDSP)
         oldDSP->decReferenceCount();
 }
@@ -343,6 +343,7 @@ void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP)
 
 void AudioEngine::timerCallback()
 {
+
     const juce::ScopedLock sl(trashBinLock);
 
     // 1. ゴミ箱の掃除 (参照カウントが1 = trashBinのみが保持しているオブジェクトを削除)
@@ -469,10 +470,11 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         return;
     }
 
-    // DSPコアの取得 (Atomic Load)
-    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
 
-    if (dsp)
+    // DSPコアの取得 (Atomic Load)
+    DSPCore::Ptr dsp = currentDSP.load(std::memory_order_acquire);
+
+    if (dsp != nullptr)
     {
         // パラメータのロード
         const bool eqBypassed = eqBypassRequested.load(std::memory_order_relaxed);
@@ -487,7 +489,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
         // 処理委譲
-        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb, {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt});
+        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb, {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt}); // call DSP with smart pointer
     }
     else
     {
@@ -551,7 +553,7 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int b
     dcBlockerR.prepare(processingRate, maxProcessingBlockSize);
 
     // ディザの準備 (出力段で行うため元のサンプルレート)
-    dither.prepare(sampleRate, bitDepth);
+    dither.prepare(sampleRate, bitDepth);    //MessageThread
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
     // バッファ確保 (Message Threadで実行されるため安全)
@@ -665,20 +667,6 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     }
 
     //----------------------------------------------------------
-    // DCオフセット除去 (DC Offset Removal)
-    // 目的: フィルタ処理後のDC成分を除去し、スピーカー保護とヘッドルーム確保を行う。
-    // 配置: ソフトクリップの後、ダウンサンプリング前に行う。
-    //----------------------------------------------------------
-    for (int ch = 0; ch < numProcChannels; ++ch)
-    {
-        if (ch > 1) break; // DCBlockerは現在ステレオ(L/R)のみ対応
-
-        auto* data = processBlock.getChannelPointer(ch);
-        auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
-
-        for (int i = 0; i < numProcSamples; ++i)
-            data[i] = blocker.process(data[i]);
-    }
 
     // ダウンサンプリング (結果は processBuffer に書き戻される)
     if (oversampling)
@@ -819,7 +807,7 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
 }
 
 // 音楽的なソフトクリッピング関数です。
-// 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加えます。
+    // 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加える
 // @param x 入力信号
 // @param threshold クリッピングが開始される閾値
 // @param knee 閾値周辺のカーブの滑らかさ（ニー）
@@ -925,6 +913,20 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             buffer->clear (ch, startSample, numSamples);
         }
     }
+        //----------------------------------------------------------
+        // DCオフセット除去 (DC Offset Removal)
+        // 目的: フィルタ処理後のDC成分を除去し、スピーカー保護とヘッドルーム確保を行う。
+        // 配置: ASIO出力直前
+        //----------------------------------------------------------
+        for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
+        {
+            if (ch > 1) break; // DCBlockerは現在ステレオ(L/R)のみ対応
+
+            float* data = buffer->getWritePointer(ch, startSample);
+            auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR; //L/R
+            for (int i = 0; i < numSamples; ++i)
+                data[i] = static_cast<float>(blocker.process(static_cast<double>(data[i])));
+        }
 }
 
 void AudioEngine::setEqBypassRequested (bool shouldBypass) noexcept

@@ -379,14 +379,13 @@ void EQProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*/)
     // reset()を呼び、スムーシングの状態を初期化（現在値は0.0になる）
     smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
 
-    // 初期化直後のフェードイン（0.0 -> Target）を防ぐため、
+   // 初期化直後のフェードイン（0.0 -> Target）を防ぐため、
     // 現在値をターゲット値に即座に設定する。
     if (state)
     {
         totalGainDbTarget.store(state->totalGainDb, std::memory_order_relaxed);
         smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
         // ダミー呼び出し: 内部状態の確実な初期化 (メモリ確保リスクの排除)
-        (void)smoothTotalGain.getNextValue();
     }
 
     // フィルタ状態をリセット
@@ -906,7 +905,7 @@ void EQProcessor::updateBandNode(int band)
 void EQProcessor::cleanup()
 {
     const juce::ScopedLock sl(trashBinLock);
-    // Clean BandNodes
+   // Clean BandNodes
     bandNodeTrashBin.erase(std::remove_if(bandNodeTrashBin.begin(), bandNodeTrashBin.end(), [](const auto& p) { return p->getReferenceCount() == 1; }), bandNodeTrashBin.end());
     bandNodeTrashBin.insert(bandNodeTrashBin.end(), bandNodeTrashBinPending.begin(), bandNodeTrashBinPending.end());
     bandNodeTrashBinPending.clear();
