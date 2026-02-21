@@ -59,7 +59,7 @@ public:
     // IRの最大長(kMaxIRCap)と最大ブロックサイズをカバーする値を設定
     // 3s @ 192kHz = 576000 samples. Next power of 2 is 1048576.
     static constexpr int MAX_IR_LATENCY = 2097152; // 2^21 (3.0s @ 384kHz = ~1.15M samples をカバー)
-    static constexpr int MAX_BLOCK_SIZE = 65536;  // 8x Oversampling (8192 * 8) を考慮して拡張
+    static constexpr int MAX_BLOCK_SIZE = 524288;  // 65536 * 8 (Safe for 8x oversampling of max input block)
     static constexpr int MAX_TOTAL_DELAY = MAX_IR_LATENCY + MAX_BLOCK_SIZE;
     static constexpr double CONVOLUTION_HEADROOM_GAIN = 0.5; // -6.02 dB
 
@@ -188,7 +188,7 @@ private:
         void init(size_t newBlockSize, const fftconvolver::Sample* newIrL, const fftconvolver::Sample* newIrR, size_t irLen, int peakDelay)
         {
             this->blockSize = newBlockSize;
-            this->irL.assign(newIrL, newIrL + irLen);
+            this->irL.assign(newIrL, newIrL + irLen); // IRデータを内部にコピー
             this->irR.assign(newIrR, newIrR + irLen);
             this->irLatency = peakDelay;
 

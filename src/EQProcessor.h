@@ -128,9 +128,10 @@ public:
     static constexpr float AGC_MAX_GAIN    = 16.0f; // 最大ゲイン制限 (~ +24dB)
 
     // ── DSPパラメータ制限 ──
-    static constexpr float DSP_MIN_FREQ = 10.0f;
+    static constexpr float DSP_MIN_FREQ = 20.0f;
+    static constexpr float DSP_MAX_FREQ = 20000.0f;
     static constexpr float DSP_MAX_FREQ_NYQUIST_RATIO = 0.95f;
-    static constexpr float DSP_MIN_Q = 0.1f;
+    static constexpr float DSP_MIN_Q = 0.01f;
     static constexpr float DSP_MAX_Q = 20.0f;
     static constexpr float DSP_MIN_GAIN_DB = -48.0f;
     static constexpr float DSP_MAX_GAIN_DB = 48.0f;

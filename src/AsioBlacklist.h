@@ -38,7 +38,9 @@ public:
     {
         for (const auto& b : blacklist)
         {
-            // バージョン番号や接尾辞（"v2"など）に対応するため、部分一致を使用
+            // Check if any string from the blacklist is present in the device name.
+			//
+            // これにより、"ASIO4ALL" と登録すれば "ASIO4ALL v2" などもまとめて除外できる。
             if (deviceName.containsIgnoreCase(b))
                 return true;
         }

@@ -43,7 +43,7 @@ EQProcessor::~EQProcessor()
 //--------------------------------------------------------------
 void EQProcessor::resetToDefaults()
 {
-    auto newState = new EQState();
+    EQState::Ptr newState = new EQState();
 
     for (int i = 0; i < NUM_BANDS; ++i)
     {
@@ -63,7 +63,7 @@ void EQProcessor::resetToDefaults()
     totalGainDbTarget.store(0.0f, std::memory_order_relaxed);
     agcEnabled.store(false, std::memory_order_release);
     newState->incReferenceCount();
-    auto oldState = currentState.exchange(newState, std::memory_order_release);
+    auto oldState = currentState.exchange(newState.get(), std::memory_order_release);
     if (oldState) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(EQState::Ptr(oldState));
@@ -416,11 +416,11 @@ void EQProcessor::setBandFrequency(int band, float freq)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = new EQState(*oldState);
+    EQState::Ptr newState = new EQState(*oldState);
     newState->bands[band].frequency = freq;
 
     newState->incReferenceCount();
-    auto prev = currentState.exchange(newState, std::memory_order_release);
+    auto prev = currentState.exchange(newState.get(), std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(EQState::Ptr(prev));
@@ -434,11 +434,11 @@ void EQProcessor::setBandGain(int band, float gainDb)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = new EQState(*oldState);
+    EQState::Ptr newState = new EQState(*oldState);
     newState->bands[band].gain = gainDb;
 
     newState->incReferenceCount();
-    auto prev = currentState.exchange(newState, std::memory_order_release);
+    auto prev = currentState.exchange(newState.get(), std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(EQState::Ptr(prev));
@@ -452,11 +452,11 @@ void EQProcessor::setBandQ(int band, float q)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = new EQState(*oldState);
+    EQState::Ptr newState = new EQState(*oldState);
     newState->bands[band].q = q;
 
     newState->incReferenceCount();
-    auto prev = currentState.exchange(newState, std::memory_order_release);
+    auto prev = currentState.exchange(newState.get(), std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(EQState::Ptr(prev));
@@ -470,11 +470,11 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = new EQState(*oldState);
+    EQState::Ptr newState = new EQState(*oldState);
     newState->bands[band].enabled = enabled;
 
     newState->incReferenceCount();
-    auto prev = currentState.exchange(newState, std::memory_order_release);
+    auto prev = currentState.exchange(newState.get(), std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(EQState::Ptr(prev));
@@ -493,11 +493,11 @@ void EQProcessor::setTotalGain(float gainDb)
     totalGainDbTarget.store(gainDb, std::memory_order_relaxed);
 
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = new EQState(*oldState);
+    EQState::Ptr newState = new EQState(*oldState);
     newState->totalGainDb = gainDb;
 
     newState->incReferenceCount();
-    auto prev = currentState.exchange(newState, std::memory_order_release);
+    auto prev = currentState.exchange(newState.get(), std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(EQState::Ptr(prev));
@@ -527,11 +527,11 @@ void EQProcessor::setBandType(int band, EQBandType type)
     if (band < 0 || band >= NUM_BANDS) return;
 
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = new EQState(*oldState);
+    EQState::Ptr newState = new EQState(*oldState);
     newState->bandTypes[band] = type;
 
     newState->incReferenceCount();
-    auto prev = currentState.exchange(newState, std::memory_order_release);
+    auto prev = currentState.exchange(newState.get(), std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(EQState::Ptr(prev));
@@ -551,11 +551,11 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
-    auto newState = new EQState(*oldState);
+    EQState::Ptr newState = new EQState(*oldState);
     newState->bandChannelModes[band] = mode;
 
     newState->incReferenceCount();
-    auto prev = currentState.exchange(newState, std::memory_order_release);
+    auto prev = currentState.exchange(newState.get(), std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(EQState::Ptr(prev));
@@ -865,7 +865,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 //--------------------------------------------------------------
 EQProcessor::BandNode::Ptr EQProcessor::createBandNode(int band, const EQState& state) const
 {
-    auto node = new BandNode();
+    BandNode::Ptr node = new BandNode();
     const auto& params = state.bands[band];
 
     node->active = params.enabled;
@@ -917,14 +917,15 @@ void EQProcessor::cleanup()
     stateTrashBinPending.clear();
 }
 
-//--------------------------------------------------------------
+// --------------------------------------------------------------
 // パラメータ検証とクランプ (Helper)
 //--------------------------------------------------------------
 void EQProcessor::validateAndClampParameters(float& freq, float& gainDb, float& q, double sr) noexcept
 {
     // 周波数をナイキスト周波数以下にクランプ
     const float nyquist = static_cast<float>(sr * 0.5);
-    freq = juce::jlimit(DSP_MIN_FREQ, nyquist * DSP_MAX_FREQ_NYQUIST_RATIO, freq);
+    const float maxFreq = std::min(DSP_MAX_FREQ, nyquist * DSP_MAX_FREQ_NYQUIST_RATIO);
+    freq = juce::jlimit(DSP_MIN_FREQ, maxFreq, freq);
 
     // Qを安全な範囲にクランプ
     q = juce::jlimit(DSP_MIN_Q, DSP_MAX_Q, q);
@@ -1212,7 +1213,7 @@ EQCoeffsSVF EQProcessor::calcHighPassSVF(double freq, double q, double sr) noexc
     return c;
 }
 
-//--------------------------------------------------------------
+// --------------------------------------------------------------
 // Biquad実装 (Audio EQ Cookbook)
 //--------------------------------------------------------------
 EQCoeffsBiquad EQProcessor::calcLowShelfBiquad(double freq, double gainDb, double q, double sr) noexcept

@@ -56,7 +56,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     engine.addChangeListener(this);
     engine.getEQProcessor().addChangeListener(this);
-    engine.getEQProcessor().addListener(this);
+
     updateEQData(); // 初期状態のEQカーブを計算
 
     startTimerHz(60); // 60fps: UIの滑らかさとFIFO消費の安定化のため
@@ -70,7 +70,6 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
     stopTimer();
     engine.removeChangeListener(this);
     engine.getEQProcessor().removeChangeListener(this);
-    engine.getEQProcessor().removeListener(this);
 }
 
 //--------------------------------------------------------------
@@ -80,13 +79,12 @@ void SpectrumAnalyzerComponent::timerCallback()
 {
     if (!isShowing()) return;
 
-    // ── サンプルレート変更検知 ──
-    // 起動直後など、AudioEngineの準備が整ったタイミングでEQカーブを更新する
+    // ── サンプルレート変更検知 (タイマー駆動) ──
+    // デバイス変更などでサンプルレートが変わった場合に追従する
     const double currentSampleRate = engine.getSampleRate();
-    if (currentSampleRate != cachedSampleRate)
+    if (currentSampleRate > 0.0 && std::abs(currentSampleRate - cachedSampleRate) > 1.0)
     {
         updateEQData();
-        cachedSampleRate = currentSampleRate;
     }
 
     // ── FFTデータの取得とスムーシング ──
@@ -208,6 +206,10 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
             startTimerHz(60);
         }
         updateEQData();
+
+        // ソース選択ボタンの表示更新 (プリセットロード時など)
+        if (source == &engine)
+            updateSourceButtonText();
     }
 }
 

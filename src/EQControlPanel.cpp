@@ -45,7 +45,7 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
 
         //----------------------------------------------------
         // ── 周波数入力ラベル ──
-        //----------------------------------------------------
+        // 20Hz～20kHzの範囲で周波数を設定します。
         freqLabels[i].setJustificationType(juce::Justification::centred);
         freqLabels[i].setColour(juce::Label::textColourId, juce::Colours::cyan);
         freqLabels[i].setEditable(true);
@@ -56,7 +56,7 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
 
         //----------------------------------------------------
         // ── Q値入力ラベル ──
-        //----------------------------------------------------
+        // Q値を設定します。Q値は、フィルタの帯域幅または共振の度合いを制御します。
         qLabels[i].setJustificationType(juce::Justification::centred);
         qLabels[i].setColour(juce::Label::textColourId, juce::Colours::orange);
         qLabels[i].setEditable(true);
@@ -68,6 +68,7 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
 
         //----------------------------------------------------
         // ── 有効/無効ボタン ──
+        // フィルタバンドの有効/無効を切り替えます。
         //----------------------------------------------------
         enableButtons[i].setButtonText("ON");
         enableButtons[i].setToggleState(true, juce::dontSendNotification);
@@ -77,6 +78,7 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
 
         //----------------------------------------------------
         // ── バンド名ラベル ──
+        // フィルタバンドの名前を表示します。
         //----------------------------------------------------
         bandLabels[i].setJustificationType(juce::Justification::centred);
         bandLabels[i].setColour(juce::Label::textColourId,
@@ -87,6 +89,7 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
 
         //----------------------------------------------------
         // ── フィルタータイプ選択 ──
+        // 各バンドのフィルタタイプを選択するためのコンボボックスを設定します。
         //----------------------------------------------------
         typeBoxes[i].addItem("Low Shelf",  1);
         typeBoxes[i].addItem("Peaking",    2);
@@ -101,6 +104,7 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
 
         //----------------------------------------------------
         // ── チャンネル選択 ──
+        // フィルタが適用されるチャンネルを選択するためのコンボボックスを設定します。
         //----------------------------------------------------
         channelBoxes[i].addItem("Stereo", 1);
         channelBoxes[i].addItem("Left",   2);
@@ -114,6 +118,7 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
 
     //------------------------------------------------------
     // ── トータルゲイン・AGC ──
+    // トータルゲインコントロールとAGC（自動ゲインコントロール）の設定を行います。
     //------------------------------------------------------
     totalGainLabel.setText("Total Gain:", juce::dontSendNotification);
     totalGainLabel.setColour(juce::Label::textColourId, juce::Colours::white);
@@ -141,7 +146,7 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
 
     //------------------------------------------------------
     // ── Reset All ボタン ──
-    //   タイトル行の右側に配置。全バンドのゲイン・周波数・Q・有効を初期値に戻す。
+    // 全バンドのゲイン、周波数、Q値、および有効状態を初期値にリセットします。
     //------------------------------------------------------
     resetButton.setButtonText("Reset");
     resetButton.setColour(juce::TextButton::buttonColourId,
@@ -153,6 +158,7 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
 
     //------------------------------------------------------
     // ── Preset Selector ──
+    // プリセットを選択するためのコンボボックスを設定します。
     //------------------------------------------------------
     presetSelector.addItem("Default", 1);
     presetSelector.addItem("Flat", 2);

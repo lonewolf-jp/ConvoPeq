@@ -4,9 +4,9 @@
 //
 // Ultra Mastering Dither Engine
 // 64bit Double専用 Psychoacoustic Dither RNG
-// 構成 (Architecture):
+// 構成:
 //
-//   1. Xoshiro256** (L/R独立 jump)
+// 1. Xoshiro256** (L/R独立 jump)
 //   2. True TPDF Dither
 //   3. 5次 Noise Shaper (聴覚特性最適化係数)
 //   6. Soft Limiting
@@ -137,7 +137,7 @@ static inline uint64_t whiten64(uint64_t x) noexcept
 class PsychoacousticDither
 {
 public:
-    static constexpr int MAX_CHANNELS = 2;
+    static constexpr int MAX_CHANNELS = 8; // 将来の多チャンネル拡張に備えて余裕を持たせる
     static constexpr int DEFAULT_BIT_DEPTH = 24;
 
     explicit PsychoacousticDither(std::optional<uint64_t> seed = std::nullopt)

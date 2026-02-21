@@ -4,7 +4,7 @@
 //
 // EQのUIコントロールパネル
 //
-// ■ 機能:
+// 機能:
 //   - 各バンドのゲイン/周波数/Q値の数値入力
 //   - 各バンドの有効/無効 ToggleButton
 //   - バンド名ラベル
@@ -12,7 +12,7 @@
 //   - チャンネルモード選択 (ComboBox)
 //   - トータルゲイン / AGC 設定
 //   - プリセット選択
-//   - Reset All ボタン（全バンドデフォルト復元）
+//   - Reset All ボタン (全バンドデフォルト復元)
 //
 // ■ スレッド安全:
 //   - labelTextChanged(), comboBoxChanged(), buttonClicked() は UI Thread
@@ -20,7 +20,7 @@
 //============================================================================
 
 #include <JuceHeader.h>
-#include "AudioEngine.h"
+#include "AudioEngine.h" // AudioEngineへの参照を提供
 
 class EQControlPanel : public juce::Component,
                        private juce::Label::Listener,
@@ -28,7 +28,7 @@ class EQControlPanel : public juce::Component,
                        private juce::ComboBox::Listener
 {
 private:
-    // ── バンド名（20バンド）──
+    // バンド名 (20バンド)
     static constexpr const char* BAND_NAMES[EQProcessor::NUM_BANDS] = {
         "Band 1", "Band 2", "Band 3", "Band 4", "Band 5",
         "Band 6", "Band 7", "Band 8", "Band 9", "Band 10",
@@ -36,7 +36,7 @@ private:
         "Band 16", "Band 17", "Band 18", "Band 19", "Band 20"
     };
 
-    // ── UIコントロールとバンドインデックスのマッピング用 ──
+    // UIコントロールとバンドインデックスのマッピング用
     enum class ControlType { Gain, Freq, Q, Enable, Type, Channel };
 
     struct ControlID
@@ -54,14 +54,14 @@ public:
     void paint  (juce::Graphics& g) override;
     void resized() override;
 
-    // ── ラベル更新ヘルパー ──
+    // ラベル更新ヘルパー
     void updateBandValues(int band);
     void updateAllControls();
 
 private:
     AudioEngine& engine;
 
-    // ── コントロール配列 ──
+    // コントロール配列
     juce::Label        gainLabels[EQProcessor::NUM_BANDS];
     juce::Label        freqLabels[EQProcessor::NUM_BANDS];
     juce::Label        qLabels[EQProcessor::NUM_BANDS];
@@ -69,13 +69,13 @@ private:
     juce::Label        bandLabels[EQProcessor::NUM_BANDS];
     juce::ComboBox     typeBoxes[EQProcessor::NUM_BANDS];
     juce::ComboBox     channelBoxes[EQProcessor::NUM_BANDS];
-    juce::Label        totalGainLabel;                           // "Total Gain:"
-    juce::Label        totalGainValueLabel;                      // 数値入力
-    juce::ToggleButton agcButton;                                // AGC Checkbox
-    juce::TextButton   resetButton;                              // 全バンドリセット
-    juce::ComboBox     presetSelector;                           // プリセット選択
+    juce::Label        totalGainLabel;          // "Total Gain:"
+    juce::Label        totalGainValueLabel;     // 数値入力
+    juce::ToggleButton agcButton;              // AGC Checkbox
+    juce::TextButton   resetButton;             // 全バンドリセット
+    juce::ComboBox     presetSelector;          // プリセット選択
 
-    // ── 周波数範囲の定数（20バンド）──
+    // 周波数範囲の定数 (20バンド)
     struct FreqRange { float minHz; float maxHz; };
     static constexpr FreqRange FREQ_RANGES[EQProcessor::NUM_BANDS] = {
         { 20.0f, 20000.0f },   // Band 0
@@ -100,22 +100,22 @@ private:
         { 20.0f, 20000.0f }    // Band 19
     };
 
-    // ── Q値の対数スケール範囲 ──
-    static constexpr float Q_MIN = 0.1f;
-    static constexpr float Q_MAX = 10.0f;
+    // Q値の範囲
+    static constexpr float Q_MIN = 0.01f;
+    static constexpr float Q_MAX = 20.0f;
 
-    // ── ゲイン範囲 ──
-    static constexpr float MIN_BAND_GAIN = -12.0f;
-    static constexpr float MAX_BAND_GAIN = 12.0f;
+    // ゲイン範囲
+    static constexpr float MIN_BAND_GAIN = -15.0f;
+    static constexpr float MAX_BAND_GAIN = 15.0f;
     static constexpr float MIN_TOTAL_GAIN = -24.0f;
     static constexpr float MAX_TOTAL_GAIN = 24.0f;
 
-    // ── Listener コールバック ──
+    // Listener コールバック
     void labelTextChanged(juce::Label* label) override;
     void buttonClicked(juce::Button* button) override;
     void comboBoxChanged(juce::ComboBox* comboBox) override;
     void editorShown(juce::Label* label, juce::TextEditor& editor) override;
 
-    // ── コントロール検索ヘルパー ──
+    // コントロール検索ヘルパー
     const ControlID* findControlId(const juce::Component* control) const;
 };

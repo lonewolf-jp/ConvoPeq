@@ -9,12 +9,12 @@
 //   - prepareToPlay(...) : 再生準備（バッファ確保など）
 //   - releaseResources() : リソース解放（再生停止時）
 //
-// ■ スレッド安全性とリアルタイム制約:
-//   - getNextAudioBlock: Audio Thread で実行されます。
+// ■ Thread safety and real-time limitations:
+//   - getNextAudioBlock: Executed in the Audio Thread.
 //     - リアルタイム制約があります（ブロック不可、ロック不可、メモリ割り当て不可、IR再ロード不可）。
 //   - prepareToPlay / releaseResources: Audio Thread の開始前/終了後に Message Thread から呼ばれます。
-//   - パラメータ設定: Message Thread から呼ばれます。std::atomic を使用して Audio Thread と安全に同期します。
-//   - readFromFifo: Message Thread (Timer) から呼ばれます。Lock-free FIFO を介してデータを取得します。
+//   - パラメータ設定: Message Thread から呼ばれます。std::atomic を使用して Audio Thread と安全に同期します (RCUパターン)。
+//   - readFromFifo: Message Thread (Timer) から呼ばれます。FIFOバッファからデータを取得します。
 //============================================================================
 
 #include <JuceHeader.h>
@@ -100,7 +100,9 @@ public:
     float getInputLevel()  const { return inputLevelDb.load(); }
     float getOutputLevel() const { return outputLevelDb.load(); }
 
-    // UIスレッドから呼び出し。FIFOからデータを取得する。
+    // UIスレッドから呼び出し、FIFOからデータを取得します。
+	//
+    // 内部で fifoReadLock を使用し、複数のUIコンポーネントからの同時読み出しを防ぐ。
     int getFifoNumReady() const { return audioFifo.getNumReady(); }
     void readFromFifo(float* dest, int numSamples);
 
@@ -243,9 +245,9 @@ private:
         float measureLevel (const juce::AudioBuffer<SampleType>& buffer, int numSamples) const noexcept;
         void pushToFifo(const juce::AudioBuffer<SampleType>& buffer, int numSamples,
                         juce::AbstractFifo& audioFifo,
-                        juce::AudioBuffer<float>& audioFifoBuffer) const;
-        void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples);
-        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples);
+                        juce::AudioBuffer<float>& audioFifoBuffer) const noexcept;
+        void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
+        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
     private:
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
     };
@@ -259,6 +261,7 @@ private:
 
     juce::AbstractFifo audioFifo { FIFO_SIZE };
     juce::AudioBuffer<float> audioFifoBuffer;
+    juce::CriticalSection fifoReadLock;
 
     //----------------------------------------------------------
     // 状態管理

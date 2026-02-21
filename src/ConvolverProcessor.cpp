@@ -118,11 +118,12 @@ public:
         // メモリ確保失敗時の例外処理: std::terminate() を防ぐために try-catch で囲む
         // 早期終了時にフラグを確実にリセットするためのRAIIヘルパー
         struct FlagResetter {
-            ConvolverProcessor& p;
+			ConvolverProcessor& p;
+            // 早期終了時にフラグを確実にリセットするためのRAIIヘルパー。
             const juce::Thread& t;
             bool success = false;
             ~FlagResetter() {
-                if (!success && !t.threadShouldExit()) {
+                if (!success && !t.threadShouldExit()) { // 正常終了またはスレッド中断以外の場合
                 juce::WeakReference<ConvolverProcessor> weakOwner(&p);
                     juce::MessageManager::callAsync([weakOwner] {
                         if (auto* o = weakOwner.get()) {
@@ -400,7 +401,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // ProcessSpec設定
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = sampleRate;
-    spec.maximumBlockSize = static_cast<juce::uint32>(samplesPerBlock);
+    spec.maximumBlockSize = static_cast<juce::uint32>(MAX_BLOCK_SIZE);
     spec.numChannels = 2;  // ステレオ
 
     currentSpec = spec;
@@ -412,13 +413,13 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         // 新しいコピーを作成して初期化する (オーバーラップは消失する)
         if (conv->blockSize != static_cast<size_t>(samplesPerBlock))
         {
-            auto newConv = new StereoConvolver(*conv);
+            StereoConvolver::Ptr newConv = new StereoConvolver(*conv);
             // 新しいブロックサイズで再初期化
             newConv->init(samplesPerBlock, newConv->irL.data(), newConv->irR.data(), newConv->irL.size(), newConv->irLatency);
 
-            newConv->incReferenceCount();
-            auto oldConv = convolution.exchange(newConv, std::memory_order_acq_rel);
-            if (oldConv) oldConv->decReferenceCount();
+            newConv->incReferenceCount(); // Atomicポインタで保持するための参照カウント
+            auto oldConv = convolution.exchange(newConv.get(), std::memory_order_acq_rel);
+            if (oldConv) oldConv->decReferenceCount(); // Atomicポインタの参照を解放
         }
         // ブロックサイズが一致する場合は reset() を呼ばない (オーバーラップ維持)
     }
@@ -432,7 +433,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     delayLine.setDelay(0.0f);
 
     // Dryバッファ確保
-    dryBuffer.setSize(2, samplesPerBlock);
+    dryBuffer.setSize(2, MAX_BLOCK_SIZE);
     dryBuffer.clear();
 
     // スムージング時間の設定
@@ -443,7 +444,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // ダミー呼び出し: 内部状態の確実な初期化 (メモリ確保リスクの排除)
     (void)mixSmoother.getNextValue();
 
-    convolutionBuffer.setSize(2, samplesPerBlock);
+    convolutionBuffer.setSize(2, MAX_BLOCK_SIZE);
     convolutionBuffer.clear();
 
     isPrepared.store(true, std::memory_order_release);
@@ -644,11 +645,11 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     // 新しいローダーを作成して開始
     if (isRebuild)
     {
-        activeLoader = std::make_unique<LoaderThread>(*this, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentSpec.maximumBlockSize, useMinPhase.load());
+        activeLoader = std::make_unique<LoaderThread>(*this, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load());
     }
     else
     {
-        activeLoader = std::make_unique<LoaderThread>(*this, irFile, currentSpec.sampleRate, currentSpec.maximumBlockSize, useMinPhase.load());
+        activeLoader = std::make_unique<LoaderThread>(*this, irFile, currentSpec.sampleRate, currentBufferSize, useMinPhase.load());
         currentIrOptimized.store(optimizeForRealTime);
     }
 
@@ -688,13 +689,13 @@ void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
     createFrequencyResponseSnapshot(displayIR, loadedSR);
 
     // 安全に差し替え (Atomic Swap)
-    newConv->incReferenceCount(); // Atomic用
+    newConv->incReferenceCount(); // Atomicポインタで保持するための参照カウント
     auto oldConv = convolution.exchange(newConv.get(), std::memory_order_acq_rel);
 
     if (oldConv)
     {
         const juce::ScopedLock sl(trashBinLock);
-        trashBinPending.push_back(StereoConvolver::Ptr(oldConv));
+        trashBinPending.push_back(StereoConvolver::Ptr(oldConv)); // 古いオブジェクトをゴミ箱へ
         oldConv->decReferenceCount();
     }
 
@@ -887,17 +888,31 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
     if (v.hasProperty ("smoothingTime")) setSmoothingTime (v.getProperty ("smoothingTime"));
     if (v.hasProperty ("irLength")) setTargetIRLength (v.getProperty ("irLength"));
 
-    // IRパスの自動復元はここでは行いません。
-    // AudioEngine::rebuild時にsetStateが呼ばれた際の無限ループや二重読み込みを防ぐため、
-    // IRの読み込みはユーザーアクションまたは明示的なプリセットロード処理でのみ行います。
-    /*
     if (v.hasProperty ("irPath"))
     {
-        juce::File f (v.getProperty ("irPath").toString());
-        if (f.existsAsFile() && f != currentIrFile)
-            loadImpulseResponse (f);
+        juce::String path = v.getProperty ("irPath").toString();
+        if (path.isNotEmpty())
+        {
+            juce::File f (path);
+            if (f.existsAsFile())
+            {
+                const juce::ScopedLock sl(irFileLock);
+                if (f != currentIrFile)
+                    loadImpulseResponse (f);
+            }
+            else
+            {
+                // IRファイルが見つからない場合のエラーハンドリング
+                juce::NativeMessageBox::showAsync(
+                    juce::MessageBoxOptions()
+                        .withIconType(juce::MessageBoxIconType::WarningIcon)
+                        .withTitle("IR File Not Found")
+                        .withMessage("The Impulse Response file specified in the preset could not be found:\n" + path + "\n\nThe previous IR will be kept.")
+                        .withButton("OK"),
+                    nullptr);
+            }
+        }
     }
-    */
 }
 
 //--------------------------------------------------------------

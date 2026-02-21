@@ -89,7 +89,7 @@ private:
     static constexpr float MIN_FREQ_HZ = 20.0f;
     static constexpr float MAX_FREQ_HZ = 20000.0f;
     static constexpr float MIN_DB       = -80.0f;
-    static constexpr float MAX_DB       = 6.0f;
+    static constexpr float MAX_DB       = 20.0f;
 
     // ── 表示バンド数 ──
     static constexpr int NUM_DISPLAY_BARS = 128;

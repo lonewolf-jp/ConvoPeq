@@ -19,16 +19,16 @@
 #endif
 
 #if JUCE_DSP_USE_INTEL_MKL
- #include <mkl.h>
+#include <mkl.h>
 #endif
 
 void MainApplication::initialise(const juce::String& /*commandLine*/)
 {
 #if JUCE_INTEL
-    // Denormal対策: メインスレッドでのFTZ/DAZ有効化
-    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#pragma warning(push)
+#pragma warning(disable: 6815)
 #endif
+
 
 #if JUCE_DSP_USE_INTEL_MKL
     // リアルタイムオーディオ用 Intel MKL 設定
@@ -38,6 +38,10 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
     // 安定性確保のために不可欠です。
     mkl_set_num_threads(1); // 1スレッドに固定
     mkl_set_dynamic(0);     // 動的なスレッド数調整を無効化
+#endif
+
+#if JUCE_INTEL
+#pragma warning(pop)
 #endif
 
     // メインウィンドウを生成する
