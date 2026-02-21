@@ -200,9 +200,13 @@ if(MKL_FOUND)
     message(STATUS "Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.")
     target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
     target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
+    # FFTConvolverにもMKL設定を適用
+    target_link_libraries(FFTConvolver PRIVATE MKL::MKL)
+    target_compile_definitions(FFTConvolver PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
 else()
     message(STATUS "Intel MKL not found. Using JUCE internal FFT (JUCE_DSP_USE_INTEL_MKL=0).")
     target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=0)
+    target_compile_definitions(FFTConvolver PRIVATE JUCE_DSP_USE_INTEL_MKL=0)
 endif()
 
 #------------------------------------------------------------

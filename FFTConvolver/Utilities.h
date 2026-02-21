@@ -28,6 +28,9 @@
 #include <cstring>
 #include <new>
 
+#if defined(_WIN32)
+  #include <malloc.h>
+#endif
 
 namespace fftconvolver
 {
@@ -159,7 +162,9 @@ private:
   T* allocate(size_t size)
   {
 #if defined(FFTCONVOLVER_USE_SSE)
-    return static_cast<T*>(_mm_malloc(size * sizeof(T), 16));
+    return static_cast<T*>(_mm_malloc(size * sizeof(T), 64));
+#elif defined(_WIN32)
+    return static_cast<T*>(_aligned_malloc(size * sizeof(T), 64));
 #else
     return new T[size];
 #endif
@@ -169,6 +174,8 @@ private:
   {
 #if defined(FFTCONVOLVER_USE_SSE)
     _mm_free(ptr);
+#elif defined(_WIN32)
+    _aligned_free(ptr);
 #else
     delete [] ptr;
 #endif

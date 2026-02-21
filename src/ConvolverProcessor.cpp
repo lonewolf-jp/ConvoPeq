@@ -15,6 +15,10 @@
 #include "AudioFFT.h" // Double precision FFT
 #include "CDSPResampler.h"
 
+#if JUCE_DSP_USE_INTEL_MKL
+#include <mkl.h>
+#endif
+
 // Forward declaration
 static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR, juce::Thread* thread = nullptr, bool* wasCancelled = nullptr);
 
@@ -195,6 +199,12 @@ public:
 
                 loadedIR = std::move(resampled);
                 loadedSR = sampleRate;
+            }
+
+            // Check the length after resampling
+            if (loadedIR.getNumSamples() == 0) {
+                DBG("LoaderThread: Resampled IR has zero length. Aborting.");
+                return;
             }
 
             // 1.6. 末尾の無音カット (Denormal対策 & 効率化)
@@ -529,6 +539,9 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     std::vector<double> re(fftSize);
     std::vector<double> im(fftSize);
     std::vector<double> data(fftSize); // 作業用
+#if JUCE_DSP_USE_INTEL_MKL
+    std::vector<double> temp(fftSize); // MKL用作業バッファ
+#endif
 
     // audiofft の IFFT は 2/N スケーリングが必要 (Oouraの場合)
     // ただし AudioFFT::ifft 内部でスケーリングされる実装になっているか確認が必要
@@ -549,6 +562,22 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         if (checkCancellation(thread, wasCancelled)) return {};
 
         // 3. 対数マグニチュードスペクトル計算 (Real=Log|H|, Imag=0) [Double]
+#if JUCE_DSP_USE_INTEL_MKL
+        // MKL VML Optimization
+        // Calculate magnitude: sqrt(re^2 + im^2) -> vdHypot
+        // data = magnitude
+        vdHypot(fftSize, re.data(), im.data(), data.data());
+
+        // ゼロ除算防止 (Clamp)
+        for (int i = 0; i < fftSize; ++i)
+            data[i] = (std::max)(data[i], 1.0e-100);
+
+        // Logarithm: re = ln(data)
+        vdLn(fftSize, data.data(), re.data());
+
+        // Clear Imaginary
+        std::fill(im.begin(), im.end(), 0.0);
+#else
         for (int i = 0; i < fftSize; ++i)
         {
             double mag = std::sqrt(re[i] * re[i] + im[i] * im[i]);
@@ -558,6 +587,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
             re[i] = logMag;
             im[i] = 0.0;
         }
+#endif
 
         // 4. IFFT (Freq -> Time) => 実ケプストラム (Real Cepstrum)
         fft.ifft(data.data(), re.data(), im.data());
@@ -582,6 +612,27 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         if (checkCancellation(thread, wasCancelled)) return {};
 
         // 7. 複素指数変換 (exp) => 最小位相スペクトル [Double]
+#if JUCE_DSP_USE_INTEL_MKL
+        // MKL VML Optimization: exp(real + i*imag) = exp(real) * (cos(imag) + i*sin(imag))
+
+        // Clamp values first (safety)
+        for (int i = 0; i < fftSize; ++i)
+        {
+            re[i] = juce::jlimit(-50.0, 50.0, re[i]);
+            im[i] = juce::jlimit(-50.0, 50.0, im[i]);
+        }
+
+        // 1. data = exp(real)
+        vdExp(fftSize, re.data(), data.data());
+
+        // 2. temp = sin(imag), re = cos(imag)
+        // Note: re is overwritten here, but we already used it for exp calculation
+        vdSinCos(fftSize, im.data(), temp.data(), re.data());
+
+        // 3. re = data * re (exp * cos), im = data * temp (exp * sin)
+        vdMul(fftSize, data.data(), re.data(), re.data());
+        vdMul(fftSize, data.data(), temp.data(), im.data());
+#else
         for (int i = 0; i < fftSize; ++i)
         {
             double real = re[i];
@@ -595,6 +646,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
             re[i] = ex.real();
             im[i] = ex.imag();
         }
+#endif
 
         // 8. IFFT (Freq -> Time) => 時間領域の最小位相IR
         fft.ifft(data.data(), re.data(), im.data());
@@ -695,6 +747,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
 
     if (oldConv)
     {
+        juce::Logger::writeToLog ("ConvolverProcessor: Enqueueing old StereoConvolver to trash bin.");
         const juce::ScopedLock sl(trashBinLock);
         trashBinPending.push_back(StereoConvolver::Ptr(oldConv)); // 古いオブジェクトをゴミ箱へ
         oldConv->decReferenceCount();
@@ -712,7 +765,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
 void ConvolverProcessor::cleanup()
 {
     const juce::ScopedLock sl(trashBinLock);
-    // 1. Clean old trash
+   // 1. Clean old trash
     trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(),
                                   [](const auto& p) { return p->getReferenceCount() == 1; }), trashBin.end());
     // 2. Move pending to trash
@@ -891,13 +944,16 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
 
     if (v.hasProperty ("irPath"))
     {
+
+        juce::File fileToLoad;
         juce::String path = v.getProperty ("irPath").toString();
         if (path.isNotEmpty())
         {
             juce::File f (path);
             if (f.existsAsFile())
             {
-                const juce::ScopedLock sl(irFileLock);
+                // ロック内では判定のみ
+               const juce::ScopedLock sl(irFileLock);
                 if (f != currentIrFile)
                     loadImpulseResponse (f);
             }
@@ -913,6 +969,10 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
                     nullptr);
             }
         }
+
+    // ← irFileLock 解放後に loadImpulseResponse() 呼び出し
+    if (fileToLoad != juce::File())
+        loadImpulseResponse(fileToLoad);
     }
 }
 

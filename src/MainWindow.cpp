@@ -109,13 +109,14 @@ MainWindow::MainWindow (const juce::String& name)
 //--------------------------------------------------------------
 MainWindow::~MainWindow()
 {
+    audioSourcePlayer.setSource (nullptr);
     stopTimer();
 
     DeviceSettings::saveSettings (audioDeviceManager, audioEngine);
-
-    audioEngine.removeChangeListener (this);
-    audioDeviceManager.removeAudioCallback (&audioSourcePlayer);
     audioSourcePlayer.setSource (nullptr);
+
+    // Unregister the AudioEngine as a callback before it is destroyed
+    audioDeviceManager.removeAudioCallback (&audioSourcePlayer);
 
     // アプリ終了時にASIOドライバを確実に閉じるための安全手順
     audioDeviceManager.closeAudioDevice();

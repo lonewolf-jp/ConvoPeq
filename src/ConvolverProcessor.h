@@ -59,6 +59,9 @@ public:
     // IRの最大長(kMaxIRCap)と最大ブロックサイズをカバーする値を設定
     // 3s @ 192kHz = 576000 samples. Next power of 2 is 1048576.
     static constexpr int MAX_IR_LATENCY = 2097152; // 2^21 (3.0s @ 384kHz = ~1.15M samples をカバー)
+    // This value should be power of 2 for optimal FFTConvolver performance.
+    // And also it should be no less than MIN_PARTITION_SIZE
+    // MAX_PARTITION_SIZE should be also no less than maxBlockSize * oversamplingFactor
     static constexpr int MAX_BLOCK_SIZE = 524288;  // 65536 * 8 (Safe for 8x oversampling of max input block)
     static constexpr int MAX_TOTAL_DELAY = MAX_IR_LATENCY + MAX_BLOCK_SIZE;
     static constexpr double CONVOLUTION_HEADROOM_GAIN = 0.5; // -6.02 dB
@@ -259,6 +262,7 @@ private:
     std::atomic<bool> isPrepared { false };
     int currentBufferSize = 512; // prepareToPlayで更新される
     double currentSmoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC; // mixSmootherに設定されている現在の時間
+    size_t partitionSize = 1024;
 
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);

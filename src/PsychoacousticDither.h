@@ -6,7 +6,7 @@
 // 64bit Double専用 Psychoacoustic Dither RNG
 // 構成:
 //
-// 1. Xoshiro256** (L/R独立 jump)
+//   1. Xoshiro256** (L/R独立 jump)
 //   2. True TPDF Dither
 //   3. 5次 Noise Shaper (聴覚特性最適化係数)
 //   6. Soft Limiting
@@ -170,13 +170,13 @@ public:
 
     void reset() noexcept
     {
-        for (auto& st : state) st = {0};
+        for (auto& st : shaperState) st = {0};
     }
 
     inline double process(double input, int channel) noexcept
     {
         if (channel < 0 || channel >= MAX_CHANNELS) return input;
-        return processChannel(input, rng[channel], state[channel]);
+        return processChannel(input, rng[channel], shaperState[channel]);
     }
 
 private:
@@ -234,8 +234,8 @@ private:
         return (std::fabs(x)<1e-300)?0.0:x;
     }
 
-    Xoshiro256ss rng[MAX_CHANNELS];
-    ShaperState state[MAX_CHANNELS];
+    Xoshiro256ss  rng[MAX_CHANNELS];
+    ShaperState   shaperState[MAX_CHANNELS];
     double scale = 1.0 / 16777216.0;
     double invScale = 16777216.0;
 };

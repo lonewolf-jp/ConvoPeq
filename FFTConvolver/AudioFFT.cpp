@@ -25,6 +25,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <new>
 #include <vector>
 
 #if ATHANOR_USE_HIGHWAY
@@ -32,7 +33,10 @@
 #endif
 
 
-#if defined(AUDIOFFT_APPLE_ACCELERATE)
+#if defined(JUCE_DSP_USE_INTEL_MKL) && JUCE_DSP_USE_INTEL_MKL
+  #define AUDIOFFT_MKL_USED
+  #include <mkl.h>
+#elif defined(AUDIOFFT_APPLE_ACCELERATE)
   #define AUDIOFFT_APPLE_ACCELERATE_USED
   #include <Accelerate/Accelerate.h>
   #include <vector>
@@ -100,6 +104,89 @@ namespace audiofft
     }
 
   } // End of namespace detail
+
+
+  // ================================================================
+
+
+#ifdef AUDIOFFT_MKL_USED
+
+  /**
+   * @internal
+   * @class MklFFT
+   * @brief FFT implementation using Intel MKL
+   */
+  class MklFFT : public detail::AudioFFTImpl
+  {
+  public:
+    MklFFT() :
+      detail::AudioFFTImpl(),
+      _size(0),
+      _handle(nullptr),
+      _buffer(nullptr)
+    {
+    }
+
+    virtual ~MklFFT()
+    {
+      if (_buffer) mkl_free(_buffer);
+      if (_handle) DftiFreeDescriptor(&_handle);
+    }
+
+    virtual void init(size_t size) override
+    {
+      if (_size != size)
+      {
+        if (_buffer) mkl_free(_buffer);
+        if (_handle) DftiFreeDescriptor(&_handle);
+
+        _size = size;
+        _buffer = static_cast<Sample*>(mkl_malloc((_size + 2) * sizeof(Sample), 64));
+        if (!_buffer) throw std::bad_alloc();
+
+        DFTI_CONFIG_VALUE precision = (sizeof(Sample) == 8) ? DFTI_DOUBLE : DFTI_SINGLE;
+        DftiCreateDescriptor(&_handle, precision, DFTI_REAL, 1, _size);
+        DftiSetValue(_handle, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
+        DftiCommitDescriptor(_handle);
+      }
+    }
+
+    virtual void fft(const Sample* data, Sample* re, Sample* im) override
+    {
+      DftiComputeForward(_handle, const_cast<void*>(static_cast<const void*>(data)), _buffer);
+
+      const size_t complexSize = _size / 2 + 1;
+      for (size_t i = 0; i < complexSize; ++i)
+      {
+        re[i] = _buffer[2 * i];
+        im[i] = _buffer[2 * i + 1];
+      }
+    }
+
+    virtual void ifft(Sample* data, const Sample* re, const Sample* im) override
+    {
+      const size_t complexSize = _size / 2 + 1;
+      for (size_t i = 0; i < complexSize; ++i)
+      {
+        _buffer[2 * i] = re[i];
+        _buffer[2 * i + 1] = im[i];
+      }
+
+      DftiComputeBackward(_handle, _buffer, data);
+
+      const Sample factor = static_cast<Sample>(1.0) / static_cast<Sample>(_size);
+      detail::ScaleBuffer(data, data, factor, _size);
+    }
+
+  private:
+    size_t _size;
+    DFTI_DESCRIPTOR_HANDLE _handle;
+    Sample* _buffer;
+  };
+
+  typedef MklFFT AudioFFTImplementation;
+
+#endif // AUDIOFFT_MKL_USED
 
 
   // ================================================================
