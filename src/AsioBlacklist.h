@@ -39,7 +39,7 @@ public:
         for (const auto& b : blacklist)
         {
             // Check if any string from the blacklist is present in the device name.
-			//
+            //
             // これにより、"ASIO4ALL" と登録すれば "ASIO4ALL v2" などもまとめて除外できる。
             if (deviceName.containsIgnoreCase(b))
                 return true;

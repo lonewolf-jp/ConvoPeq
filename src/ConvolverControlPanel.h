@@ -14,7 +14,6 @@
 
 #include <JuceHeader.h>
 #include "AudioEngine.h"
-#include "AudioEngine.h" // AudioEngineへの参照を提供
 
 class ConvolverControlPanel : public juce::Component,
                               private juce::Button::Listener,

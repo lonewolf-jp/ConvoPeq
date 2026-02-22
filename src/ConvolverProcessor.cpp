@@ -101,13 +101,13 @@ class ConvolverProcessor::LoaderThread : public juce::Thread
 {
 public:
     // ファイルからロードする場合のコンストラクタ
-    LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, bool minPhase)
-        : Thread("IRLoader"), owner(p), file(f), sampleRate(sr), blockSize(bs), useMinPhase(minPhase), isRebuild(false)
+    LoaderThread(ConvolverProcessor& p, juce::WeakReference<ConvolverProcessor> wp, const juce::File& f, double sr, int bs, bool minPhase)
+        : Thread("IRLoader"), owner(p), weakOwner(wp), file(f), sampleRate(sr), blockSize(bs), useMinPhase(minPhase), isRebuild(false)
     {}
 
     // メモリからリビルドする場合のコンストラクタ
-    LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, bool minPhase)
-        : Thread("IRRebuilder"), owner(p), sourceIR(src), sourceSampleRate(srcSR), sampleRate(sr), blockSize(bs), useMinPhase(minPhase), isRebuild(true)
+    LoaderThread(ConvolverProcessor& p, juce::WeakReference<ConvolverProcessor> wp, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, bool minPhase)
+        : Thread("IRRebuilder"), owner(p), weakOwner(wp), sourceIR(src), sourceSampleRate(srcSR), sampleRate(sr), blockSize(bs), useMinPhase(minPhase), isRebuild(true)
     {}
 
     ~LoaderThread() override
@@ -132,13 +132,12 @@ public:
         // メモリ確保失敗時の例外処理: std::terminate() を防ぐために try-catch で囲む
         // 早期終了時にフラグを確実にリセットするためのRAIIヘルパー
         struct FlagResetter {
-			ConvolverProcessor& p;
-            // 早期終了時にフラグを確実にリセットするためのRAIIヘルパー。
+            juce::WeakReference<ConvolverProcessor> wp;
             const juce::Thread& t;
             bool success = false;
             ~FlagResetter() {
                 if (!success && !t.threadShouldExit()) { // 正常終了またはスレッド中断以外の場合
-                juce::WeakReference<ConvolverProcessor> weakOwner(&p);
+                    auto weakOwner = wp;
                     juce::MessageManager::callAsync([weakOwner] {
                         if (auto* o = weakOwner.get()) {
                             o->isLoading.store(false);
@@ -147,25 +146,25 @@ public:
                     });
                 }
             }
-        } resetter { owner, *this };
+        } resetter { weakOwner, *this };
 
         LoadResult result = performLoad(this);
 
         if (result.success && !threadShouldExit())
         {
             // 6. メインスレッドで適用
-            juce::WeakReference<ConvolverProcessor> weakOwner(&owner);
+            auto wp = weakOwner;
 
             // shared_ptrで管理 (Lambdaコピー時のAudioBufferディープコピー回避)
             auto loadedIRPtr = std::make_shared<juce::AudioBuffer<double>>(std::move(result.loadedIR));
             auto displayIRPtr = std::make_shared<juce::AudioBuffer<double>>(std::move(result.displayIR));
             StereoConvolver::Ptr newConvPtr = result.newConv;
 
-            juce::MessageManager::callAsync([weakOwner, newConvPtr, loadedIRPtr, loadedSR = result.loadedSR, targetLength = result.targetLength, isRebuild = this->isRebuild, file = this->file, displayIRPtr]()
+            juce::MessageManager::callAsync([wp, newConvPtr, loadedIRPtr, loadedSR = result.loadedSR, targetLength = result.targetLength, isRebuild = this->isRebuild, file = this->file, displayIRPtr]()
             {
-                if (weakOwner)
+                if (auto* o = wp.get())
                 {
-                    weakOwner->applyNewState(newConvPtr, *loadedIRPtr, loadedSR, targetLength, isRebuild, file, *displayIRPtr);
+                    o->applyNewState(newConvPtr, *loadedIRPtr, loadedSR, targetLength, isRebuild, file, *displayIRPtr);
                 }
             });
 
@@ -392,6 +391,7 @@ public:
 
 private:
     ConvolverProcessor& owner;
+    juce::WeakReference<ConvolverProcessor> weakOwner;
     juce::File file;
     juce::AudioBuffer<double> sourceIR;
     double sourceSampleRate = 0.0;
@@ -449,9 +449,9 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         // 新しいコピーを作成して初期化する (オーバーラップは消失する)
         if (conv->blockSize != static_cast<size_t>(samplesPerBlock))
         {
-            StereoConvolver::Ptr newConv = new StereoConvolver(*conv);
-            // 新しいブロックサイズで再初期化
-            newConv->init(samplesPerBlock, newConv->irL.data(), newConv->irR.data(), newConv->irL.size(), newConv->irLatency);
+            // Bug fix: Avoid self-assignment by creating a new instance and initializing it from the old one
+            StereoConvolver::Ptr newConv = new StereoConvolver();
+            newConv->init(samplesPerBlock, conv->irL.data(), conv->irR.data(), conv->irL.size(), conv->irLatency);
 
             newConv->incReferenceCount(); // Atomicポインタで保持するための参照カウント
             auto oldConv = convolution.exchange(newConv.get(), std::memory_order_acq_rel);
@@ -730,14 +730,16 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     // 既存のローダーを停止して破棄
     activeLoader.reset();
 
+    juce::WeakReference<ConvolverProcessor> weakThis(this);
+
     // 新しいローダーを作成して開始
     if (isRebuild)
     {
-        activeLoader = std::make_unique<LoaderThread>(*this, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load());
+        activeLoader = std::make_unique<LoaderThread>(*this, weakThis, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load());
     }
     else
     {
-        activeLoader = std::make_unique<LoaderThread>(*this, irFile, currentSpec.sampleRate, currentBufferSize, useMinPhase.load());
+        activeLoader = std::make_unique<LoaderThread>(*this, weakThis, irFile, currentSpec.sampleRate, currentBufferSize, useMinPhase.load());
         currentIrOptimized.store(optimizeForRealTime);
     }
 

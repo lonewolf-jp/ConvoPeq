@@ -104,7 +104,7 @@ public:
     float getOutputLevel() const { return outputLevelDb.load(); }
 
     // UIスレッドから呼び出し、FIFOからデータを取得します。
-	//
+    //
     // 内部で fifoReadLock を使用し、複数のUIコンポーネントからの同時読み出しを防ぐ。
     int getFifoNumReady() const { return audioFifo.getNumReady(); }
     void readFromFifo(float* dest, int numSamples);

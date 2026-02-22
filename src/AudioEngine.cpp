@@ -112,10 +112,9 @@ void AudioEngine::readFromFifo(float* dest, int numSamples)
 void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
                                      float* outMagnitudesR,
                                      const std::complex<double>* zArray,
-                                     int numPoints,
-                                     double sampleRate)
+                                     int numPoints)
 {
-    const double sr = sampleRate;
+    const double sr = currentSampleRate.load();
     if (sr <= 0.0)
     {
         for (int i = 0; i < numPoints; ++i)
@@ -1041,21 +1040,6 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.addChild (uiEqProcessor.getState(), -1, nullptr);
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
     return state;
-}
-
-double AudioEngine::getProcessingSampleRate() const
-{
-    const double sr = currentSampleRate.load();
-    if (sr <= 0.0) return 0.0;
-
-    int factor = manualOversamplingFactor.load();
-    if (factor == 0) // Auto
-    {
-        if (sr < 80000.0) factor = 4;
-        else if (sr < 160000.0) factor = 2;
-        else factor = 1;
-    }
-    return sr * static_cast<double>(factor);
 }
 
 void AudioEngine::setDitherBitDepth(int bitDepth)

@@ -9,8 +9,7 @@
 //   1. Xoshiro256** (L/R独立 jump)
 //   2. True TPDF Dither
 //   3. 5次 Noise Shaper (聴覚特性最適化係数)
-//   6. Soft Limiting
-//   7. Quantization
+//   4. Quantization
 // 商用最高峰ディザ（POW-r #3 / MBIT+ クラス）を理論的に上回る構造（目標）
 //============================================================================
 

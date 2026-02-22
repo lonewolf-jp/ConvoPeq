@@ -238,7 +238,7 @@ void ConvolverControlPanel::buttonClicked(juce::Button* button)
     {
         // ファイル選択ダイアログ
         // JUCE v8.0.12 recommended pattern: Use a local shared_ptr and capture it with a lambda.
-		//
+        //
         // これにより、ダイアログ表示中に ConvolverControlPanel が破棄されても安全に動作する。
         auto fileChooser = std::make_shared<juce::FileChooser>("Select Impulse Response (IR) File",
                                   juce::File::getSpecialLocation(
