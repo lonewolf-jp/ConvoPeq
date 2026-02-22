@@ -396,7 +396,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*/)
     // reset()を呼び、スムーシングの状態を初期化（現在値は0.0になる）
     smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
 
-   // 初期化直後のフェードイン（0.0 -> Target）を防ぐため、
+    // 初期化直後のフェードイン（0.0 -> Target）を防ぐため、
     // 現在値をターゲット値に即座に設定する。
     if (state)
     {
@@ -927,7 +927,7 @@ EQProcessor::BandNode::Ptr EQProcessor::createBandNode(int band, const EQState& 
 
     node->active = params.enabled;
     node->mode = state.bandChannelModes[band];
-   node->coeffs = calcSVFCoeffs(state.bandTypes[band], params.frequency, params.gain, params.q, currentSampleRate);
+    node->coeffs = calcSVFCoeffs(state.bandTypes[band], params.frequency, params.gain, params.q, currentSampleRate);
 
     // 最適化: ゲインが0dB付近ならスキップ
     if (node->active) {

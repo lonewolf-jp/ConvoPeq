@@ -104,7 +104,7 @@ public:
     float getOutputLevel() const { return outputLevelDb.load(); }
 
     // UIスレッドから呼び出し、FIFOからデータを取得します。
-	//
+    //
     // 内部で fifoReadLock を使用し、複数のUIコンポーネントからの同時読み出しを防ぐ。
     int getFifoNumReady() const { return audioFifo.getNumReady(); }
     void readFromFifo(float* dest, int numSamples);
@@ -166,11 +166,15 @@ private:
             spec.maximumBlockSize = static_cast<juce::uint32>(blockSize);
             spec.numChannels = 1;
 
-            // 2次バターワース × 2段 = 4次フィルタ
+            // 4次 Linkwitz-Riley ハイパスフィルタ (2次バターワース x 2段)
+            // 特徴:
+            // 1. カットオフ周波数(3Hz)で-6dBの減衰 (Butterworthは-3dB)
+            // 2. ストップバンド(DC付近)での減衰量がButterworthより大きく、DCブロック性能が高い
+            // 3. Q=0.707の段を重ねるため、過渡応答のリンギングが少ない
             auto coeffs = juce::dsp::IIR::Coefficients<double>::makeHighPass(
                 sampleRate,
                 3.0,    // カットオフ周波数: 3Hz
-                0.707   // Q値（バターワース）
+                0.7071067811865476 // Q = 1/sqrt(2)
             );
 
             for (auto& filter : filters)

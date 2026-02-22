@@ -75,7 +75,7 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 }
 
 //--------------------------------------------------------------
-// timerCallback  ──  ~30fps で呼ばれる (UI Thread)
+// timerCallback  ──  ~60fps で呼ばれる (UI Thread)
 //--------------------------------------------------------------
 void SpectrumAnalyzerComponent::timerCallback()
 {
@@ -100,34 +100,38 @@ void SpectrumAnalyzerComponent::timerCallback()
     {
         underflowCount++;
 
-        // 30フレーム連続でアンダーランした場合 (60fpsで0.5秒)、
+        // 60フレーム連続でアンダーランした場合 (60fpsで1.0秒)、
         // エンジンが停止したとみなし、CPU消費を防ぐためにタイマーを停止する
-        if (underflowCount > 30)
+        if (underflowCount > 60)
         {
             stopTimer();
             return;
         }
 
-        // アンダーラン時は「減衰保持」 (Decay Hold)
-        // 視覚的に自然にフェードアウトさせる
-        for (size_t i = 0; i < smoothedBuffer.size(); ++i)
+        // 短期間のデータ不足（バッファ待ちなど）では減衰させず、表示を維持する (Flicker防止)
+        if (underflowCount > 3)
         {
-            smoothedBuffer[i] -= UNDERRUN_DECAY_DB;
-            if (smoothedBuffer[i] < MIN_DB) smoothedBuffer[i] = MIN_DB;
+            // アンダーラン時は「減衰保持」 (Decay Hold)
+            // 視覚的に自然にフェードアウトさせる
+            for (size_t i = 0; i < smoothedBuffer.size(); ++i)
+            {
+                smoothedBuffer[i] -= UNDERRUN_DECAY_DB;
+                if (smoothedBuffer[i] < MIN_DB) smoothedBuffer[i] = MIN_DB;
 
-            // ピーク保持の更新 (減衰時もピークロジックを継続)
-            if (peakHoldCounter[i] > 0)
-            {
-                --peakHoldCounter[i];
+                // ピーク保持の更新 (減衰時もピークロジックを継続)
+                if (peakHoldCounter[i] > 0)
+                {
+                    --peakHoldCounter[i];
+                }
+                else
+                {
+                    peakBuffer[i] = std::max(smoothedBuffer[i], peakBuffer[i] - 0.25f); // 0.25dB/frame @ 60fps -> 15dB/s
+                }
+                if (peakBuffer[i] < MIN_DB) peakBuffer[i] = MIN_DB;
             }
-            else
-            {
-                peakBuffer[i] = std::max(smoothedBuffer[i], peakBuffer[i] - 0.5f);
-            }
-            if (peakBuffer[i] < MIN_DB) peakBuffer[i] = MIN_DB;
+            repaint();
         }
 
-        repaint();
         return;
     }
 
@@ -189,7 +193,7 @@ void SpectrumAnalyzerComponent::timerCallback()
             {
                 // ピークも少しずつ落とす（急な落ち込みを緩和）
                 peakBuffer[i] = std::max(smoothedBuffer[i],
-                                            peakBuffer[i] - 0.5f); // 0.5dB/frame
+                                            peakBuffer[i] - 0.25f); // 0.25dB/frame @ 60fps -> 15dB/s
             }
         }
     }

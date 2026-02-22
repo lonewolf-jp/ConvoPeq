@@ -220,6 +220,33 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
 }
 
 //--------------------------------------------------------------
+// getProcessingSampleRate
+//--------------------------------------------------------------
+double AudioEngine::getProcessingSampleRate() const
+{
+    const double sr = currentSampleRate.load();
+    if (sr <= 0.0) return 0.0;
+
+    int factor = manualOversamplingFactor.load();
+    int actualFactor = 1;
+
+    if (factor > 0)
+    {
+        if (factor == 1 || factor == 2 || factor == 4 || factor == 8)
+            actualFactor = factor;
+    }
+    else
+    {
+        // Auto
+        if (sr < 80000.0)      actualFactor = 4;
+        else if (sr < 160000.0) actualFactor = 2;
+        else                    actualFactor = 1;
+    }
+
+    return sr * static_cast<double>(actualFactor);
+}
+
+//--------------------------------------------------------------
 // prepareToPlay
 //--------------------------------------------------------------
 void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
@@ -572,8 +599,9 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int b
     eq.prepareToPlay(processingRate, processingBlockSize);
 
     // DCBlocker (JUCE IIR) には最大ブロックサイズを渡してProcessSpecを初期化する
-    dcBlockerL.prepare(processingRate, maxProcessingBlockSize);
-    dcBlockerR.prepare(processingRate, maxProcessingBlockSize);
+    // 出力段(processOutput)で実行されるため、オーバーサンプリング前のレートとサイズを使用する
+    dcBlockerL.prepare(sampleRate, SAFE_MAX_BLOCK_SIZE);
+    dcBlockerR.prepare(sampleRate, SAFE_MAX_BLOCK_SIZE);
 
     // ディザの準備 (出力段で行うため元のサンプルレート)
     dither.prepare(sampleRate, bitDepth);
@@ -886,28 +914,36 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     const int startSample = bufferToFill.startSample;
 
     // ビット深度に基づくディザリング判定
-    // 32-bit (float/int) 以上はディザ不要。24-bit/16-bit (int) はディザ必要。
-    const bool applyDither = (ditherBitDepth < 32);
+    // ユーザー設定に従い、32-bit (float/int) でもディザリングを適用する。
+    const bool applyDither = (ditherBitDepth > 0);
 
     //----------------------------------------------------------
-    // 出力バッファへコピー & ディザリング (Output & TPDF Dither)
-    // 目的: double -> float/int 変換時の量子化歪みを低減。
-    //       リバーブテール等の微小信号の消失を防ぎ、聴感上のS/N比を改善。
+    // 統合処理ループ: DC除去 -> ディザリング -> 出力
+    // メモリ読み書きの回数を減らし、キャッシュ効率を向上させる
     //----------------------------------------------------------
     for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
     {
         if (ch < 2)
         {
-            // double (DSP) -> float (I/O) 変換
-            // ディザリング適用 (Psychoacoustic Noise Shaping)
-            const double* src = (ch == 0) ? alignedL.get() : alignedR.get();
+            double* data = (ch == 0) ? alignedL.get() : alignedR.get();
+            auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
             float* dst = buffer->getWritePointer(ch, startSample);
 
             if (applyDither)
             {
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    double val = dither.process(src[i], ch);
+                    // 1. DC Offset Removal
+                    // 構造: Input -> [DC Blocker (4th Order)] -> Signal
+                    double processed = blocker.process(data[i]);
+                    data[i] = processed; // 次回処理のために状態更新として書き戻す（必要であれば）
+
+                    // 2. Dither & Quantize
+                    // 構造: Signal -> [Noise Shaped Quantizer] -> Output
+                    //      (Error Feedback Topology: Output = Quantize(Signal + FilteredError))
+                    double val = dither.process(processed, ch);
+
+                    // 3. Safety & Store
                     if (!std::isfinite(val)) val = 0.0;
                     dst[i] = juce::jlimit(-1.0f, 1.0f, static_cast<float>(val));
                 }
@@ -916,9 +952,13 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             {
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    double val = src[i];
-                    if (!std::isfinite(val)) val = 0.0;
-                    dst[i] = juce::jlimit(-1.0f, 1.0f, static_cast<float>(val));
+                    // 1. DC Offset Removal
+                    double processed = blocker.process(data[i]);
+                    data[i] = processed;
+
+                    // 2. Store
+                    if (!std::isfinite(processed)) processed = 0.0;
+                    dst[i] = juce::jlimit(-1.0f, 1.0f, static_cast<float>(processed));
                 }
             }
         }
@@ -926,21 +966,6 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         {
             buffer->clear (ch, startSample, numSamples);
         }
-    }
-
-    //----------------------------------------------------------
-    // DCオフセット除去 (DC Offset Removal)
-    // 目的: フィルタ処理後のDC成分を除去し、スピーカー保護とヘッドルーム確保を行う。
-    // 配置: ASIO出力直前
-    //----------------------------------------------------------
-    for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
-    {
-        if (ch > 1) break; // DCBlockerは現在ステレオ(L/R)のみ対応
-
-        float* data = buffer->getWritePointer(ch, startSample);
-        auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR; //L/R
-        for (int i = 0; i < numSamples; ++i)
-            data[i] = static_cast<float>(blocker.process(static_cast<double>(data[i])));
     }
 }
 
@@ -1041,21 +1066,6 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.addChild (uiEqProcessor.getState(), -1, nullptr);
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
     return state;
-}
-
-double AudioEngine::getProcessingSampleRate() const
-{
-    const double sr = currentSampleRate.load();
-    if (sr <= 0.0) return 0.0;
-
-    int factor = manualOversamplingFactor.load();
-    if (factor == 0) // Auto
-    {
-        if (sr < 80000.0) factor = 4;
-        else if (sr < 160000.0) factor = 2;
-        else factor = 1;
-    }
-    return sr * static_cast<double>(factor);
 }
 
 void AudioEngine::setDitherBitDepth(int bitDepth)

@@ -42,7 +42,7 @@ namespace
         {
             g.fillAll (juce::Colours::darkgrey);
 
-			auto area = getLocalBounds().reduced(20);
+            auto area = getLocalBounds().reduced(20);
 
             g.setColour (juce::Colours::white);
             g.setFont (juce::FontOptions (24.0f, juce::Font::bold));

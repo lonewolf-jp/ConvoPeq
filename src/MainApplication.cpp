@@ -14,8 +14,8 @@
 #include "MainWindow.h"
 
 #if JUCE_INTEL
- #include <xmmintrin.h>
- #include <pmmintrin.h>
+#include <xmmintrin.h>
+#include <pmmintrin.h>
 #endif
 
 #if JUCE_DSP_USE_INTEL_MKL

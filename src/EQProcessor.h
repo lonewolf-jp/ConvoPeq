@@ -110,7 +110,7 @@ public:
     void removeListener(Listener* listener) { listeners.remove(listener); }
 
     static constexpr int NUM_BANDS        = 20;  // 20バンドパラメトリックEQ
-    static constexpr int MAX_CHANNELS     = 2;   // ステレーオ対応
+    static constexpr int MAX_CHANNELS     = 2;   // ステレオ対応
 
     // ── デフォルト値 ──
     static constexpr float DEFAULT_FREQS[NUM_BANDS] = {

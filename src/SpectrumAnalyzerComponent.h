@@ -4,7 +4,7 @@
 // スペクトラムアナライザー＋EQ応答曲線＋レベルメーター
 //
 // ■ 描画パイプライン設計:
-//   - Timer で定期的に (~30fps) FFTデータを取得し、表示を更新する
+//   - Timer で定期的に (~60fps) FFTデータを取得し、表示を更新する
 //   - スムーシング（指数移動平均）で急激な変化を緩和
 //   - 対数スケールの周波数軸で、人間の聴覚特性に合わせた表示
 //   - ピーク保持: 最大値を記録し、PEAK_HOLD_FRAMES フレーム間保持
@@ -83,7 +83,7 @@ private:
     std::vector<juce::Path> individualCurvePathsR;
 
     // ── スムーシング係数 ──
-    static constexpr float SMOOTHING_ALPHA = 0.75f;
+    static constexpr float SMOOTHING_ALPHA = 0.85f; // 60fpsに合わせて調整 (0.75 -> 0.85)
 
     // ── 表示範囲 ──
     static constexpr float MIN_FREQ_HZ = 20.0f;
@@ -95,7 +95,7 @@ private:
     static constexpr int NUM_DISPLAY_BARS = 128;
 
     // ── ピーク保持フレーム数 ──
-    // 30fps で約2秒間保持
+    // 60fps で約1秒間保持
     static constexpr int PEAK_HOLD_FRAMES = 60;
 
     // ── レベルメーターの幅 ──
@@ -118,7 +118,7 @@ private:
     static constexpr float MAP_COEFF_C = 51.0f;
     static constexpr float MAP_COEFF_D = 2499.0f; // sqrt内部係数
 
-    // ── Timer コールバック (~30fps) ──
+    // ── Timer コールバック (~60fps) ──
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
     void eqBandChanged(EQProcessor* processor, int bandIndex) override;
     void eqGlobalChanged(EQProcessor* processor) override;
@@ -147,5 +147,5 @@ private:
 
     // ── アンダーラン対策 ──
     int underflowCount = 0;
-    static constexpr float UNDERRUN_DECAY_DB = 3.0f; // データ不足時の減衰量 (dB/frame)
+    static constexpr float UNDERRUN_DECAY_DB = 1.5f; // データ不足時の減衰量 (dB/frame) @ 60fps -> 90dB/s
 };

@@ -8,9 +8,8 @@
 //
 //   1. Xoshiro256** (L/R独立 jump)
 //   2. True TPDF Dither
-//   3. 5次 Noise Shaper (聴覚特性最適化係数)
-//   6. Soft Limiting
-//   7. Quantization
+//   3. 5次 Noise Shaper (Error Feedback Topology)
+//   4. Quantization
 // 商用最高峰ディザ（POW-r #3 / MBIT+ クラス）を理論的に上回る構造（目標）
 //============================================================================
 
@@ -18,6 +17,7 @@
 #include <cmath>
 #include <array>
 #include <chrono>
+#include <atomic>
 #include <random>
 #include <optional>
 
@@ -142,7 +142,19 @@ public:
 
     explicit PsychoacousticDither(std::optional<uint64_t> seed = std::nullopt)
     {
-        uint64_t baseSeed = seed.value_or(static_cast<uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
+        uint64_t baseSeed;
+        if (seed.has_value())
+        {
+            baseSeed = seed.value();
+        }
+        else
+        {
+            // 時間 + 静的カウンタでユニーク性を確保 (複数インスタンス同時生成時のシード衝突防止)
+            static std::atomic<uint64_t> instanceCounter { 0 };
+            baseSeed = static_cast<uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count())
+                     ^ (instanceCounter.fetch_add(1) * 0x9e3779b97f4a7c15ULL);
+        }
+
         for (int i = 0; i < MAX_CHANNELS; ++i)
         {
             rng[i] = Xoshiro256ss(baseSeed + i * 1000);
@@ -150,7 +162,7 @@ public:
         }
     }
 
-    void prepare(double /*sampleRate*/, int bitDepth = DEFAULT_BIT_DEPTH) noexcept
+    void prepare(double sampleRate, int bitDepth = DEFAULT_BIT_DEPTH) noexcept
     {
         if (bitDepth > 0)
         {
@@ -163,6 +175,25 @@ public:
             // Default 24-bit (2^23 for signed PCM)
             scale = 1.0 / 8388608.0;
             invScale = 8388608.0;
+        }
+
+        // 5次 Noise Shaper 係数設定 (Lipshitz / Wannamaker系最適化)
+        //
+        // 1. 標準セット (Standard):
+        //    2.033, -2.165, 1.959, -1.590, 0.6149
+        //    44.1kHz〜384kHzまで幅広く対応し、可聴域のノイズを強力に低減します。
+        //
+        // 2. アグレッシブ版 (Aggressive):
+        //    2.45, -2.68, 2.35, -1.85, 0.72
+        //    176.4kHz以上のハイレゾかつ16bit出力時に、ノイズを超音波域へさらに強く追いやります。
+
+        if (sampleRate >= 176000.0 && bitDepth <= 16)
+        {
+            coeffs = { 2.45, -2.68, 2.35, -1.85, 0.72 };
+        }
+        else
+        {
+            coeffs = { 2.033, -2.165, 1.959, -1.590, 0.6149 };
         }
 
         reset();
@@ -192,11 +223,11 @@ private:
 
         // 5th order Noise Shaper (Feedback Error)
         double shapedError =
-            1.8  * st.z[0]
-          - 1.2  * st.z[1]
-          + 0.7  * st.z[2]
-          - 0.3  * st.z[3]
-          + 0.12 * st.z[4];
+            coeffs[0] * st.z[0]
+          + coeffs[1] * st.z[1]
+          + coeffs[2] * st.z[2]
+          + coeffs[3] * st.z[3]
+          + coeffs[4] * st.z[4];
 
         // Apply dither and noise shaping
         double tmp = x + d + shapedError;
@@ -204,7 +235,10 @@ private:
         // Quantize
         double quantized = std::round(tmp * invScale) * scale;
 
-        // Calculate Quantization Error
+        // Calculate Quantization Error (Input - Output)
+        // Note: This is equivalent to -(Output - Input).
+        // Since shapedError adds positive coefficients of previous errors,
+        // this effectively subtracts the quantization noise (1 - H(z) topology).
         double error = tmp - quantized;
 
         // Update State (Shift)
@@ -238,6 +272,7 @@ private:
     ShaperState   shaperState[MAX_CHANNELS];
     double scale = 1.0 / 16777216.0;
     double invScale = 16777216.0;
+    std::array<double, 5> coeffs { 2.033, -2.165, 1.959, -1.590, 0.6149 };
 };
 
 } // namespace dsp

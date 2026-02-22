@@ -133,8 +133,7 @@ public:
         // メモリ確保失敗時の例外処理: std::terminate() を防ぐために try-catch で囲む
         // 早期終了時にフラグを確実にリセットするためのRAIIヘルパー
         struct FlagResetter {
-			ConvolverProcessor& p;
-            // 早期終了時にフラグを確実にリセットするためのRAIIヘルパー。
+            ConvolverProcessor& p;
             const juce::Thread& t;
             bool success = false;
             ~FlagResetter() {
