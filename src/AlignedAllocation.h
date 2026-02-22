@@ -14,7 +14,7 @@ namespace dsp {
 static void* aligned_malloc(size_t size, size_t alignment) {
     void* ptr = mkl_malloc(size, (int)alignment);
     if (ptr == nullptr) {
-        juce::Logger::writeToLog ("Memory allocation failed in aligned_malloc (MKL)");
+        DBG("Memory allocation failed in aligned_malloc (MKL)");
         throw std::bad_alloc();
     }
     return ptr;
@@ -38,7 +38,7 @@ static void* aligned_malloc(size_t size, size_t alignment) {
 #endif
 
     if (ptr == nullptr) {
-        juce::Logger::writeToLog("Memory allocation failed in aligned_malloc (non-MKL)");
+        DBG("Memory allocation failed in aligned_malloc (non-MKL)");
         throw std::bad_alloc();
     }
     return ptr;

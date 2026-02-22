@@ -113,7 +113,6 @@ MainWindow::~MainWindow()
     stopTimer();
 
     DeviceSettings::saveSettings (audioDeviceManager, audioEngine);
-    audioSourcePlayer.setSource (nullptr);
 
     // Unregister the AudioEngine as a callback before it is destroyed
     audioDeviceManager.removeAudioCallback (&audioSourcePlayer);

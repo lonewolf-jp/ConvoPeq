@@ -8,7 +8,6 @@
 #include <complex>
 #include <algorithm>
 
-#include "EQProcessor.h"
 // コンストラクタ
 //--------------------------------------------------------------
 AudioEngine::AudioEngine()
@@ -51,7 +50,7 @@ AudioEngine::~AudioEngine()
 
     // 進行中のコールバックが完了するのを待つため、DSPを無効化
     // これにより、changeListenerCallback内でdsp->へのアクセスを防ぐ
-   AudioEngine::DSPCore::Ptr oldDSP = currentDSP.exchange(nullptr);
+    AudioEngine::DSPCore::Ptr oldDSP = currentDSP.exchange(nullptr);
     if (oldDSP)
         oldDSP->decReferenceCount();
 }
@@ -113,9 +112,10 @@ void AudioEngine::readFromFifo(float* dest, int numSamples)
 void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
                                      float* outMagnitudesR,
                                      const std::complex<double>* zArray,
-                                     int numPoints)
+                                     int numPoints,
+                                     double sampleRate)
 {
-    const double sr = currentSampleRate.load();
+    const double sr = sampleRate;
     if (sr <= 0.0)
     {
         for (int i = 0; i < numPoints; ++i)
@@ -137,6 +137,13 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
 
     // 状態スナップショットを取得して一貫性を確保
     auto eqState = uiEqProcessor.getEQState();
+
+    if (eqState == nullptr)
+    {
+        if (outMagnitudesL) std::fill_n(outMagnitudesL, numPoints, 1.0f);
+        if (outMagnitudesR) std::fill_n(outMagnitudesR, numPoints, 1.0f);
+        return;
+    }
 
     for (int band = 0; band < EQProcessor::NUM_BANDS; ++band)
     {
@@ -315,10 +322,8 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     // これを行わないと、IRのピッチが変わり、レイテンシー補正も誤った値になります。
     if (!irReused && newDSP->oversamplingFactor > 1 && newDSP->convolver.isIRLoaded())
     {
-        // 不正なレートのIRをクリア (再生中のピッチズレ/グリッチ防止)
-        newDSP->convolver.reset();
-        // 非同期でリビルドを開始 (LoaderThreadが適切なレートでリサンプリングを行う)
-        newDSP->convolver.rebuildAllIRs();
+        // 同期的にリビルドを実行 (再生中の音切れやピッチズレを防ぐため、準備完了まで待機)
+        newDSP->convolver.rebuildAllIRsSynchronous();
     }
 
     commitNewDSP(newDSP);
@@ -344,23 +349,34 @@ void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP)
 
 void AudioEngine::timerCallback()
 {
+    std::vector<DSPCore::Ptr> toDelete;
 
-    const juce::ScopedLock sl(trashBinLock);
-
-    // 1. Perform actual deletion: Remove objects with ref count 1 (only held by trashBin)
-    trashBin.erase(std::remove_if(trashBin.begin(), trashBin.end(),
-                                  [](const auto& p) { return p->getReferenceCount() == 1; }), trashBin.end());
-    juce::Logger::writeToLog ("AudioEngine: trashBin size after erase " + juce::String(trashBin.size()));
-
-    // 2. Move pending items from pending to main trash bin (double buffering)
-    // これにより、Audio Threadが参照している間に削除されるリスクを排除
-    trashBin.insert(trashBin.end(), trashBinPending.begin(), trashBinPending.end());
-    trashBinPending.clear();
-
-    if (trashBin.size() > 20)
     {
-        DBG("AudioEngine::trashBin warning: " << trashBin.size() << " items pending deletion.");
+        const juce::ScopedLock sl(trashBinLock);
+
+        // 1. Perform actual deletion: Remove objects with ref count 1 (only held by trashBin)
+        auto it = std::remove_if(trashBin.begin(), trashBin.end(),
+                                 [](const auto& p) { return p->getReferenceCount() == 1; });
+
+        toDelete.insert(toDelete.end(),
+                        std::make_move_iterator(it),
+                        std::make_move_iterator(trashBin.end()));
+
+        trashBin.erase(it, trashBin.end());
+
+        // 2. Move pending items from pending to main trash bin (double buffering)
+        // これにより、Audio Threadが参照している間に削除されるリスクを排除
+        trashBin.insert(trashBin.end(), trashBinPending.begin(), trashBinPending.end());
+        trashBinPending.clear();
+
+        if (trashBin.size() > 20)
+        {
+            DBG("AudioEngine::trashBin warning: " << trashBin.size() << " items pending deletion.");
+        }
     }
+
+    // Lock解放後にデストラクタを実行 (stopThread等の重い処理をロック外で行う)
+    toDelete.clear();
 
     // 3. 内部プロセッサのクリーンアップを実行
     // 現在アクティブなDSPの内部ゴミ箱も掃除する
@@ -547,16 +563,20 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int b
     const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
 
     // プロセッサの準備
+    // Convolverには実際のブロックサイズを渡す (パーティションサイズ決定やLoaderThreadで使用)
     convolver.prepareToPlay(processingRate, processingBlockSize);
 
     const int maxProcessingBlockSize = SAFE_MAX_BLOCK_SIZE * static_cast<int>(oversamplingFactor);
-    eq.prepareToPlay(processingRate, maxProcessingBlockSize);
+
+    // EQは内部でブロックサイズを使用しないが、一貫性のため実際のサイズを渡す
+    eq.prepareToPlay(processingRate, processingBlockSize);
+
+    // DCBlocker (JUCE IIR) には最大ブロックサイズを渡してProcessSpecを初期化する
     dcBlockerL.prepare(processingRate, maxProcessingBlockSize);
     dcBlockerR.prepare(processingRate, maxProcessingBlockSize);
 
     // ディザの準備 (出力段で行うため元のサンプルレート)
     dither.prepare(sampleRate, bitDepth);
-    dither.prepare(sampleRate, bitDepth);    //MessageThread
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
     // バッファ確保 (Message Threadで実行されるため安全)
@@ -822,27 +842,6 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     }
 }
 
-// 音楽的なソフトクリッピング関数です。
-    // 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加える
-// @param x 入力信号
-// @param threshold クリッピングが開始される閾値
-// @param knee 閾値周辺のカーブの滑らかさ（ニー）
-// @param asymmetry 非対称性の量。正の値で正の波形がより強くクリップされ、偶数次倍音を生成します。負の値では負の波形がそのようにクリップされます。負の値では負の波形がそのようにクリップされます。
-//
-// 音楽的なソフトクリッピング関数です。
-// 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加えます。
-// @param x 入力信号
-// @param threshold クリッピングが開始される閾値
-// @param knee 閾値周辺のカーブの滑らかさ（ニー）
-// @param asymmetry 非対称性の量。正の値で正の波形がより強くクリップされ、偶数次倍音を生成します。負の値では負の波形がそのようにクリップされます。負の値では負の波形がそのようにクリップされます。
-//
-// 音楽的なソフトクリッピング関数です。
-// 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加えます。
-// @param x 入力信号
-// @param threshold クリッピングが開始される閾値
-// @param knee 閾値周辺のカーブの滑らかさ（ニー）
-// @param asymmetry 非対称性の量。正の値で正の波形がより強くクリップされ、偶数次倍音を生成します。負の値では負の波形がそのようにクリップされます。
-//
 // 音楽的なソフトクリッピング関数
 // 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加える。
 // @param x 入力信号
@@ -928,20 +927,21 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             buffer->clear (ch, startSample, numSamples);
         }
     }
-        //----------------------------------------------------------
-        // DCオフセット除去 (DC Offset Removal)
-        // 目的: フィルタ処理後のDC成分を除去し、スピーカー保護とヘッドルーム確保を行う。
-        // 配置: ASIO出力直前
-        //----------------------------------------------------------
-        for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
-        {
-            if (ch > 1) break; // DCBlockerは現在ステレオ(L/R)のみ対応
 
-            float* data = buffer->getWritePointer(ch, startSample);
-            auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR; //L/R
-            for (int i = 0; i < numSamples; ++i)
-                data[i] = static_cast<float>(blocker.process(static_cast<double>(data[i])));
-        }
+    //----------------------------------------------------------
+    // DCオフセット除去 (DC Offset Removal)
+    // 目的: フィルタ処理後のDC成分を除去し、スピーカー保護とヘッドルーム確保を行う。
+    // 配置: ASIO出力直前
+    //----------------------------------------------------------
+    for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
+    {
+        if (ch > 1) break; // DCBlockerは現在ステレオ(L/R)のみ対応
+
+        float* data = buffer->getWritePointer(ch, startSample);
+        auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR; //L/R
+        for (int i = 0; i < numSamples; ++i)
+            data[i] = static_cast<float>(blocker.process(static_cast<double>(data[i])));
+    }
 }
 
 void AudioEngine::setEqBypassRequested (bool shouldBypass) noexcept
@@ -1041,6 +1041,21 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.addChild (uiEqProcessor.getState(), -1, nullptr);
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
     return state;
+}
+
+double AudioEngine::getProcessingSampleRate() const
+{
+    const double sr = currentSampleRate.load();
+    if (sr <= 0.0) return 0.0;
+
+    int factor = manualOversamplingFactor.load();
+    if (factor == 0) // Auto
+    {
+        if (sr < 80000.0) factor = 4;
+        else if (sr < 160000.0) factor = 2;
+        else factor = 1;
+    }
+    return sr * static_cast<double>(factor);
 }
 
 void AudioEngine::setDitherBitDepth(int bitDepth)
