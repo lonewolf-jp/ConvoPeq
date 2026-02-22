@@ -275,7 +275,8 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
 //--------------------------------------------------------------
 juce::ValueTree EQProcessor::getState() const
 {
-    auto state = currentState.load();
+    auto state = currentState.load(std::memory_order_acquire);
+    if (state == nullptr) return juce::ValueTree("EQ");
 
     juce::ValueTree v ("EQ");
     v.setProperty ("totalGain", state->totalGainDb, nullptr);
@@ -328,14 +329,26 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     auto otherState = other.currentState.load(std::memory_order_acquire);
     if (otherState) otherState->incReferenceCount();
     auto oldState = currentState.exchange(otherState, std::memory_order_release);
-    if (oldState) oldState->decReferenceCount(); // Simple dec here as we are in sync (usually init)
+
+    // Use trashBin for safety consistency
+    const juce::ScopedLock sl(trashBinLock);
+
+    if (oldState)
+    {
+        stateTrashBinPending.push_back(EQState::Ptr(oldState));
+        oldState->decReferenceCount();
+    }
 
     for (int i = 0; i < NUM_BANDS; ++i)
     {
         auto node = other.bandNodes[i].load(std::memory_order_acquire);
         if (node) node->incReferenceCount();
         auto oldNode = bandNodes[i].exchange(node, std::memory_order_release);
-        if (oldNode) oldNode->decReferenceCount();
+        if (oldNode)
+        {
+            bandNodeTrashBinPending.push_back(BandNode::Ptr(oldNode));
+            oldNode->decReferenceCount();
+        }
     }
     agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
 
@@ -419,6 +432,7 @@ void EQProcessor::setBandFrequency(int band, float freq)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
+    if (oldState == nullptr) return;
     EQState::Ptr newState = new EQState(*oldState);
     newState->bands[band].frequency = freq;
 
@@ -437,6 +451,7 @@ void EQProcessor::setBandGain(int band, float gainDb)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
+    if (oldState == nullptr) return;
     EQState::Ptr newState = new EQState(*oldState);
     newState->bands[band].gain = gainDb;
 
@@ -455,6 +470,7 @@ void EQProcessor::setBandQ(int band, float q)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
+    if (oldState == nullptr) return;
     EQState::Ptr newState = new EQState(*oldState);
     newState->bands[band].q = q;
 
@@ -473,6 +489,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
+    if (oldState == nullptr) return;
     EQState::Ptr newState = new EQState(*oldState);
     newState->bands[band].enabled = enabled;
 
@@ -496,6 +513,7 @@ void EQProcessor::setTotalGain(float gainDb)
     totalGainDbTarget.store(gainDb, std::memory_order_relaxed);
 
     auto oldState = currentState.load(std::memory_order_acquire);
+    if (oldState == nullptr) return;
     EQState::Ptr newState = new EQState(*oldState);
     newState->totalGainDb = gainDb;
 
@@ -511,7 +529,9 @@ void EQProcessor::setTotalGain(float gainDb)
 
 float EQProcessor::getTotalGain() const
 {
-    return currentState.load(std::memory_order_acquire)->totalGainDb;
+    auto state = currentState.load(std::memory_order_acquire);
+    if (state == nullptr) return 0.0f;
+    return state->totalGainDb;
 }
 
 void EQProcessor::setAGCEnabled(bool enabled)
@@ -530,6 +550,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
     if (band < 0 || band >= NUM_BANDS) return;
 
     auto oldState = currentState.load(std::memory_order_acquire);
+    if (oldState == nullptr) return;
     EQState::Ptr newState = new EQState(*oldState);
     newState->bandTypes[band] = type;
 
@@ -547,13 +568,16 @@ void EQProcessor::setBandType(int band, EQBandType type)
 EQBandType EQProcessor::getBandType(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQBandType::Peaking;
-    return currentState.load(std::memory_order_acquire)->bandTypes[band];
+    auto state = currentState.load(std::memory_order_acquire);
+    if (state == nullptr) return EQBandType::Peaking;
+    return state->bandTypes[band];
 }
 
 void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 {
     if (band < 0 || band >= NUM_BANDS) return;
     auto oldState = currentState.load(std::memory_order_acquire);
+    if (oldState == nullptr) return;
     EQState::Ptr newState = new EQState(*oldState);
     newState->bandChannelModes[band] = mode;
 
@@ -571,7 +595,9 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 EQChannelMode EQProcessor::getBandChannelMode(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQChannelMode::Stereo;
-    return currentState.load(std::memory_order_acquire)->bandChannelModes[band];
+    auto state = currentState.load(std::memory_order_acquire);
+    if (state == nullptr) return EQChannelMode::Stereo;
+    return state->bandChannelModes[band];
 }
 
 EQProcessor::EQState::Ptr EQProcessor::getEQState() const
@@ -587,7 +613,9 @@ EQBandParams EQProcessor::getBandParams(int band) const
 {
     // band が範囲外の場合はデフォルト値を返す
     if (band < 0 || band >= NUM_BANDS) return {};
-    return currentState.load(std::memory_order_acquire)->bands[band];
+    auto state = currentState.load(std::memory_order_acquire);
+    if (state == nullptr) return {};
+    return state->bands[band];
 }
 
 namespace
@@ -725,24 +753,27 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     double targetGain = calculateAGCGain(envIn, envOut);
 
     // ゲイン変化のスムーシング
-    currentGain = currentGain * (1.0 - AGC_GAIN_SMOOTH) + targetGain * AGC_GAIN_SMOOTH;
+    double nextGain = currentGain * (1.0 - AGC_GAIN_SMOOTH) + targetGain * AGC_GAIN_SMOOTH;
 
     // Store atomics
     agcEnvInput.store(envIn, std::memory_order_relaxed);
     agcEnvOutput.store(envOut, std::memory_order_relaxed);
-    agcCurrentGain.store(currentGain, std::memory_order_relaxed);
+    agcCurrentGain.store(nextGain, std::memory_order_relaxed);
 
-    // ゲイン適用
-    // 各チャンネルに対して明示的に適用
+    // ゲイン適用 (Ramp: currentGain -> nextGain)
+    // ブロック境界での不連続性を防ぐため、サンプル単位で補間する
+    const double gainIncrement = (nextGain - currentGain) / static_cast<double>(numSamples);
+
     for (int ch = 0; ch < numChannels; ++ch)
     {
-#if JUCE_DSP_USE_INTEL_MKL
-        // MKL optimized scaling: x = a * x
-        cblas_dscal(numSamples, currentGain, block.getChannelPointer(ch), 1);
-#else
-        juce::FloatVectorOperations::multiply(block.getChannelPointer(ch),
-                                              currentGain, numSamples);
-#endif
+        double* data = block.getChannelPointer(ch);
+        double g = currentGain;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            data[i] *= g;
+            g += gainIncrement;
+        }
     }
 }
 
@@ -815,14 +846,15 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     std::array<ActiveBandNode, NUM_BANDS> activeBands;
     int numActiveBands = 0;
 
-    // 処理中にノードが削除されないよう shared_ptr で保持
-    // std::array<std::shared_ptr<BandNode>, NUM_BANDS> keptAliveNodes; // No longer needed with deferred deletion
+    // 処理中にノードが削除されないよう Ptr で保持 (Audio Thread内での参照カウント操作はlock-freeなので安全)
+    std::array<BandNode::Ptr, NUM_BANDS> keptAliveNodes;
 
     for (int i = 0; i < NUM_BANDS; ++i)
     {
-        auto node = bandNodes[i].load(std::memory_order_acquire);
+        auto* node = bandNodes[i].load(std::memory_order_acquire);
         if (node && node->active)
         {
+            keptAliveNodes[numActiveBands] = node; // incReferenceCount
             activeBands[numActiveBands] = { node, i };
             numActiveBands++;
         }
@@ -913,6 +945,7 @@ EQProcessor::BandNode::Ptr EQProcessor::createBandNode(int band, const EQState& 
 void EQProcessor::updateBandNode(int band)
 {
     auto state = currentState.load(std::memory_order_acquire);
+    if (state == nullptr) return;
     auto newNode = createBandNode(band, *state);
 
     // Atomic Exchange: 古いノードを取得し、新しいノードをセット
@@ -930,16 +963,30 @@ void EQProcessor::updateBandNode(int band)
 
 void EQProcessor::cleanup()
 {
-    const juce::ScopedLock sl(trashBinLock);
-   // Clean BandNodes
-    bandNodeTrashBin.erase(std::remove_if(bandNodeTrashBin.begin(), bandNodeTrashBin.end(), [](const auto& p) { return p->getReferenceCount() == 1; }), bandNodeTrashBin.end());
-    bandNodeTrashBin.insert(bandNodeTrashBin.end(), bandNodeTrashBinPending.begin(), bandNodeTrashBinPending.end());
-    bandNodeTrashBinPending.clear();
+    std::vector<BandNode::Ptr> nodesToDelete;
+    std::vector<EQState::Ptr> statesToDelete;
 
-    // Clean States
-    stateTrashBin.erase(std::remove_if(stateTrashBin.begin(), stateTrashBin.end(), [](const auto& p) { return p->getReferenceCount() == 1; }), stateTrashBin.end());
-    stateTrashBin.insert(stateTrashBin.end(), stateTrashBinPending.begin(), stateTrashBinPending.end());
-    stateTrashBinPending.clear();
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        // Clean BandNodes
+        auto nodeIt = std::remove_if(bandNodeTrashBin.begin(), bandNodeTrashBin.end(), [](const auto& p) { return p->getReferenceCount() == 1; });
+        nodesToDelete.insert(nodesToDelete.end(), std::make_move_iterator(nodeIt), std::make_move_iterator(bandNodeTrashBin.end()));
+        bandNodeTrashBin.erase(nodeIt, bandNodeTrashBin.end());
+
+        bandNodeTrashBin.insert(bandNodeTrashBin.end(), bandNodeTrashBinPending.begin(), bandNodeTrashBinPending.end());
+        bandNodeTrashBinPending.clear();
+
+        // Clean States
+        auto stateIt = std::remove_if(stateTrashBin.begin(), stateTrashBin.end(), [](const auto& p) { return p->getReferenceCount() == 1; });
+        statesToDelete.insert(statesToDelete.end(), std::make_move_iterator(stateIt), std::make_move_iterator(stateTrashBin.end()));
+        stateTrashBin.erase(stateIt, stateTrashBin.end());
+
+        stateTrashBin.insert(stateTrashBin.end(), stateTrashBinPending.begin(), stateTrashBinPending.end());
+        stateTrashBinPending.clear();
+    }
+
+    nodesToDelete.clear();
+    statesToDelete.clear();
 }
 
 // --------------------------------------------------------------

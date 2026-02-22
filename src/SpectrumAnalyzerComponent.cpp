@@ -56,6 +56,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     engine.addChangeListener(this);
     engine.getEQProcessor().addChangeListener(this);
+    engine.getEQProcessor().addListener(this);
 
     updateEQData(); // 初期状態のEQカーブを計算
 
@@ -70,6 +71,7 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
     stopTimer();
     engine.removeChangeListener(this);
     engine.getEQProcessor().removeChangeListener(this);
+    engine.getEQProcessor().removeListener(this);
 }
 
 //--------------------------------------------------------------
@@ -81,7 +83,7 @@ void SpectrumAnalyzerComponent::timerCallback()
 
     // ── サンプルレート変更検知 (タイマー駆動) ──
     // デバイス変更などでサンプルレートが変わった場合に追従する
-    const double currentSampleRate = engine.getSampleRate();
+    const double currentSampleRate = engine.getProcessingSampleRate();
     if (currentSampleRate > 0.0 && std::abs(currentSampleRate - cachedSampleRate) > 1.0)
     {
         updateEQData();
@@ -458,7 +460,7 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
 //--------------------------------------------------------------
 void SpectrumAnalyzerComponent::updateEQData()
 {
-    const double sr = engine.getSampleRate();
+    const double sr = engine.getProcessingSampleRate();
     if (sr > 0.0)
     {
         // サンプルレートが変更された場合のみ zCache (z = e^jw) を再計算
@@ -475,7 +477,7 @@ void SpectrumAnalyzerComponent::updateEQData()
 
         // ── 総合EQ応答曲線の計算 ──
         // キャッシュされた zCache (複素平面上の単位円) を使用して高速化
-        engine.calcEQResponseCurve(eqResponseBufferL.data(), eqResponseBufferR.data(), zCache.data(), NUM_DISPLAY_BARS);
+        engine.calcEQResponseCurve(eqResponseBufferL.data(), eqResponseBufferR.data(), zCache.data(), NUM_DISPLAY_BARS, sr);
 
         // 線形マグニチュードをdBに変換
         for (int i = 0; i < NUM_DISPLAY_BARS; ++i)

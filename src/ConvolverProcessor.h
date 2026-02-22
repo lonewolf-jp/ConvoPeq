@@ -152,6 +152,7 @@ public:
     // リビルド (サンプルレート変更時など)
     //----------------------------------------------------------
     void rebuildAllIRs();
+    void rebuildAllIRsSynchronous();
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const ConvolverProcessor& other);

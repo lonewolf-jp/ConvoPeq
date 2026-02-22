@@ -98,6 +98,7 @@ public:
     EQProcessor& getEQProcessor() { return uiEqProcessor; }
 
     double getSampleRate() const { return currentSampleRate.load(); }
+    double getProcessingSampleRate() const;
 
     float getInputLevel()  const { return inputLevelDb.load(); }
     float getOutputLevel() const { return outputLevelDb.load(); }
@@ -108,7 +109,7 @@ public:
     int getFifoNumReady() const { return audioFifo.getNumReady(); }
     void readFromFifo(float* dest, int numSamples);
 
-    void calcEQResponseCurve(float* outMagnitudesL, float* outMagnitudesR, const std::complex<double>* zArray, int numPoints);
+    void calcEQResponseCurve(float* outMagnitudesL, float* outMagnitudesR, const std::complex<double>* zArray, int numPoints, double sampleRate);
 
     // パラメータ設定 (Thread-safe)
     void setEqBypassRequested (bool shouldBypass) noexcept;
