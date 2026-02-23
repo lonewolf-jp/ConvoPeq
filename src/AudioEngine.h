@@ -9,14 +9,25 @@
 //   - prepareToPlay(...) : 再生準備（バッファ確保など）
 //   - releaseResources() : リソース解放（再生停止時）
 //
-// ■ Thread safety and real-time limitations:
-//   - getNextAudioBlock: Executed in the Audio Thread.
+// ■ スレッド安全性とリアルタイム制約:
+//   - getNextAudioBlock: Audio Threadで実行されます。
 //     - リアルタイム制約があります（ブロック不可、ロック不可、メモリ割り当て不可、IR再ロード不可）。
 //   - prepareToPlay / releaseResources: Audio Thread の開始前/終了後に Message Thread から呼ばれます。
 //   - パラメータ設定: Message Thread から呼ばれます。std::atomic を使用して Audio Thread と安全に同期します (RCUパターン)。
 //   - readFromFifo: Message Thread (Timer) から呼ばれます。FIFOバッファからデータを取得します。
 //============================================================================
 
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>  // 基本型 (HANDLE, DWORD等)
+#include <objbase.h>  // COM/Property関連の型 (REFPROPERTYKEY等)
+#include <avrt.h>     // MMCSS
+#pragma comment(lib, "avrt.lib")
+#ifndef AVRT_PRIORITY_MAX
+// For older Windows SDKs that might not have this defined.
+// The AVRT_PRIORITY enum was extended in later SDKs.
+#define AVRT_PRIORITY_MAX 3
+#endif
+#pragma comment(lib, "winmm.lib")
 #include <JuceHeader.h>
 #include <atomic>
 #include <cstring>
@@ -24,7 +35,6 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "AlignedAllocation.h"
-
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
 #include "PsychoacousticDither.h"
@@ -34,12 +44,12 @@ class AudioEngine : public juce::AudioSource,
                   private juce::ChangeListener,
                   private EQProcessor::Listener,
                   private ConvolverProcessor::Listener,
-                  private juce::Timer
+                   private juce::Timer
 {
 public:
     using SampleType = double; // 内部DSP精度 (JUCE推奨)
 
-    enum class ProcessingOrder
+     enum class ProcessingOrder
     {
         ConvolverThenEQ,
         EQThenConvolver
@@ -59,8 +69,8 @@ public:
 
     class Listener
     {
-    public:
-        virtual ~Listener() = default;
+     public:
+         virtual ~Listener() = default;
         virtual void eqSettingsChanged() = 0;
     };
 
@@ -185,7 +195,7 @@ private:
             }
         }
 
-        void reset() noexcept
+         void reset() noexcept
         {
             for (auto& filter : filters)
                 filter.reset();
@@ -193,7 +203,7 @@ private:
 
         double process(double input) noexcept
         {
-            double output = input;
+             double output = input;
 
             // 2段縦続接続で4次特性を実現
             for (auto& filter : filters)
@@ -207,51 +217,63 @@ private:
             return output;
         }
     private:
-        juce::dsp::ProcessSpec spec;
+         juce::dsp::ProcessSpec spec;
         std::array<juce::dsp::IIR::Filter<double>, 2> filters;
     };
 
     //----------------------------------------------------------
-    // アラインメントされたバッファ管理用クラス
+    // 高精度型 DC Blocker (1次IIR)
+    // 超高サンプリングレート（OSR）対応
     //----------------------------------------------------------
-    class AlignedBuffer
-    {
-    public:
-        AlignedBuffer() : buffer(nullptr), sizeInBytes(0) {}
-
-        ~AlignedBuffer() { freeBuffer(); }
-
-        void allocate(size_t numElements)
-        {
-            freeBuffer();
-            sizeInBytes = numElements * sizeof(double);
-            buffer = static_cast<double*>(::dsp::aligned_malloc(sizeInBytes, 64)); // 64-byte alignment
-        }
-
-        double* get() const { return buffer; }
-
-        void freeBuffer()
-        {
-            if (buffer != nullptr) {
-                ::dsp::aligned_free(buffer);
-                buffer = nullptr;
-                sizeInBytes = 0;
-            }
-        }
-
+    class UltraHighRateDCBlocker {
     private:
-        double* buffer;
-        size_t sizeInBytes;
+        double m_prev_x = 0.0;
+        double m_prev_y = 0.0;
+        double m_R = 0.999999; // デフォルト値
+
+    public:
+        // サンプリングレートに合わせて R を計算
+        void init(double sampleRate, double cutoffHz) {
+            // R = exp(-2 * PI * cutoff / sampleRate)
+            m_R = std::exp(-2.0 * juce::MathConstants<double>::pi * cutoffHz / sampleRate);
+            reset();
+        }
+
+        void reset() {
+            m_prev_x = 0.0;
+            m_prev_y = 0.0;
+        }
+
+         // 64byteアライメントされたバッファを高速処理
+        void process(double* data, int numSamples) {
+            double px = m_prev_x;
+            double py = m_prev_y;
+            double r = m_R;
+
+            for (int i = 0; i < numSamples; ++i) {
+                double curr_x = data[i];
+                // 高精度演算 (64bit double)
+                double curr_y = curr_x - px + r * py;
+
+                px = curr_x;
+                py = curr_y;
+
+            if (std::abs(curr_y) < 1.0e-20) curr_y = 0.0; // Anti-Denormal Trick
+                data[i] = curr_y;
+            }
+            m_prev_x = px;
+             m_prev_y = py;
+        }
     };
 
     //----------------------------------------------------------
-    // DSPコア (Audio Threadで実行される処理のコンテナ)
+     // DSPコア (Audio Threadで実行される処理のコンテナ)
     //----------------------------------------------------------
     struct DSPCore : public juce::ReferenceCountedObject
     {
         struct ProcessingState
         {
-            bool eqBypassed;
+             bool eqBypassed;
             bool convBypassed;
             ProcessingOrder order;
             AnalyzerSource analyzerSource;
@@ -272,13 +294,16 @@ private:
         ConvolverProcessor convolver;
         EQProcessor eq;
         DCBlocker dcBlockerL, dcBlockerR;
-        ::dsp::PsychoacousticDither dither;
+        DCBlocker inputDCBlockerL, inputDCBlockerR;
+         UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
+        ::convo::PsychoacousticDither dither;
 
         std::unique_ptr<juce::dsp::Oversampling<double>> oversampling;
         size_t oversamplingFactor = 1;
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
+        double sampleRate = 0.0;
 
-        AlignedBuffer alignedL, alignedR;
+        ::convo::AlignedBuffer alignedL, alignedR;
         int maxSamplesPerBlock = 0;
 
         // Helpers
@@ -295,8 +320,8 @@ private:
     //----------------------------------------------------------
     // 処理チェーンコンポーネント
     //----------------------------------------------------------
-    // UI/State管理用のインスタンス (Audio Threadでは使用しない)
-    ConvolverProcessor uiConvolverProcessor;
+     // UI/State管理用のインスタンス (Audio Threadでは使用しない)
+    ConvolverProcessor  uiConvolverProcessor;
     EQProcessor uiEqProcessor;
 
     juce::AbstractFifo audioFifo { FIFO_SIZE };
@@ -328,6 +353,19 @@ private:
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
 
+    std::atomic<bool> rebuildRequested { false };
+    std::atomic<double> pendingSampleRate { 0.0 };
+    std::atomic<int> pendingBlockSize { 0 };
+    juce::WaitableEvent rebuildCompleteEvent;
+
+
+
+ #if JUCE_WINDOWS
+    // MMCSS (Multimedia Class Scheduler Service) handle
+    HANDLE mmcssHandle { nullptr };
+    DWORD mmcssTaskIndex { 0 };
+#endif
+
     // dB変換時の下限値
     static constexpr float LEVEL_METER_MIN_DB  = -120.0f;
     static constexpr float LEVEL_METER_MIN_MAG = 1e-6f;
@@ -337,7 +375,7 @@ private:
     static constexpr float EQ_UNITY_GAIN_EPSILON = 1.0e-5f;  // 1.0との比較用
 
     //----------------------------------------------------------
-    // ヘルパー関数
+     // ヘルパー関数
     //----------------------------------------------------------
     void requestRebuild(double sampleRate, int samplesPerBlock);
     void commitNewDSP(DSPCore::Ptr newDSP);

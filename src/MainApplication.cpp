@@ -22,11 +22,69 @@
 #include <mkl.h>
 #endif
 
+#ifdef _WIN32
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")
+#include <processthreadsapi.h> // For disabling efficiency mode
+
+// Windows 11 Efficiency Mode (EcoQoS) API definitions for older SDKs
+#ifndef PROCESS_POWER_THROTTLING_CURRENT_VERSION
+ #define PROCESS_POWER_THROTTLING_CURRENT_VERSION 1
+ #define PROCESS_POWER_THROTTLING_EXECUTION_SPEED 0x1
+ typedef struct _PROCESS_POWER_THROTTLING_STATE {
+    ULONG Version;
+    ULONG ControlMask;
+    ULONG StateMask;
+ } PROCESS_POWER_THROTTLING_STATE, *PPROCESS_POWER_THROTTLING_STATE;
+ // ProcessPowerThrottling = 4
+ #define ProcessPowerThrottling (static_cast<PROCESS_INFORMATION_CLASS>(4))
+#endif
+#endif
+
 void MainApplication::initialise(const juce::String& /*commandLine*/)
 {
 #if JUCE_INTEL
 #pragma warning(push)
 #pragma warning(disable: 6815)
+#endif
+
+#ifdef _WIN32
+    // システム全体のタイマー精度を 1ms に上げる
+    // 48kHz以下の環境で高負荷時のオーディオドロップアウトを防ぐ
+    // 高解像度タイマーは、消費電力増加やシステム全体のパフォーマンスに影響を与える可能性があるため、注意が必要です。
+    // 参照: FlexASIO/src/audio/InternalWasapiAudioClient.cpp
+    //       https://github.com/dechamps/FlexASIO/blob/15314925a9434aeb95d5419c033d376240568e20/src/audio/InternalWasapiAudioClient.cpp#L329
+
+    timeBeginPeriod(1);
+
+    // --- Windows 11 効率モードの無効化 ---
+    // アプリが最小化されたり、フォーカスを失ったりした際に
+    // OSが自動的にプロセスを「効率モード」に設定し、CPUリソースを制限することがあります。
+    // これがオーディオの音切れ（ドロップアウト）の主な原因となるため、プロセス単位で無効化します。
+    // このAPIはWindows 11 (build 22000) 以降で有効です (Windows 8以降で関数自体は存在)。
+    // Windows 7等との互換性を保つため、動的にロードして呼び出します。
+    typedef BOOL (WINAPI *PSETPROCESSINFORMATION)(HANDLE, PROCESS_INFORMATION_CLASS, LPVOID, DWORD);
+    auto pSetProcessInformation = (PSETPROCESSINFORMATION) GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "SetProcessInformation");
+
+    if (pSetProcessInformation != nullptr)
+    {
+        PROCESS_POWER_THROTTLING_STATE PowerThrottling;
+        juce::zerostruct(PowerThrottling);
+        PowerThrottling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        PowerThrottling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        PowerThrottling.StateMask = 0; // スロットリングを無効化
+
+        pSetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &PowerThrottling, sizeof(PowerThrottling));
+    }
+
+    // --- プロセス優先度の設定 (High Priority) ---
+    // 最小化時でもOSから優先的にCPUリソースを割り当てられるようにする。
+    // REALTIME_PRIORITY_CLASS は入力ブロックのリスクがあるため、HIGH_PRIORITY_CLASS を使用。
+    // MMCSS (スレッド優先度) と併用することで、オーディオ処理の安定性を最大化する。
+    if (SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS))
+        juce::Logger::writeToLog("Process priority set to HIGH_PRIORITY_CLASS.");
+    else
+        juce::Logger::writeToLog("Failed to set process priority to HIGH_PRIORITY_CLASS.");
 #endif
 
 
@@ -57,6 +115,10 @@ void MainApplication::shutdown()
     //   3) AudioEngine 破棄
     // の順で安全にシャットダウンされる
     mainWindow.reset();
+
+#ifdef _WIN32
+    timeEndPeriod(1);
+#endif
 }
 
 // ── JUCEエントリポイント生成マクロ ──

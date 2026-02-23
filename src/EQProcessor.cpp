@@ -322,15 +322,15 @@ void EQProcessor::setState (const juce::ValueTree& v)
 
 void EQProcessor::syncStateFrom(const EQProcessor& other)
 {
-    // Copy atomics
+    // アトミック変数のコピー
     totalGainDbTarget.store(other.totalGainDbTarget.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
-    // Copy shared state
+    // 共有状態のコピー
     auto otherState = other.currentState.load(std::memory_order_acquire);
     if (otherState) otherState->incReferenceCount();
     auto oldState = currentState.exchange(otherState, std::memory_order_release);
 
-    // Use trashBin for safety consistency
+    // 安全性と整合性のためにtrashBinを使用
     const juce::ScopedLock sl(trashBinLock);
 
     if (oldState)
@@ -352,7 +352,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     }
     agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
 
-    // Note: smoothTotalGain target is updated in process() based on totalGainDbTarget
+    // 注意: smoothTotalGainのターゲットは、totalGainDbTargetに基づいてprocess()内で更新されます
 }
 
 void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
@@ -385,11 +385,14 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 // サンプルレート変更時にフィルタ状態を全リセットする
 // この関数は Audio Thread 開始前、または停止後に呼ばれる
 //--------------------------------------------------------------
-void EQProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*/)
+void EQProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     const bool rateChanged = (std::abs(currentSampleRate - sampleRate) > 1.0);
     if (rateChanged)
         currentSampleRate = sampleRate;
+
+    // MKL用スクラッチバッファの確保 (64byte alignment)
+    scratchBuffer.allocate(static_cast<size_t>(samplesPerBlock));
 
     auto state = currentState.load(std::memory_order_acquire);
 
@@ -420,7 +423,20 @@ void EQProcessor::prepareToPlay(double sampleRate, int /*samplesPerBlock*/)
     if (rateChanged)
     {
         for (int i = 0; i < NUM_BANDS; ++i)
-            updateBandNode(i);
+        {
+            // updateBandNode(i) は trashBin を使用するため、ベクトルのリサイズや割り当てが発生する可能性があります。
+            // prepareToPlay 内では、同期的に更新し、古いノードを即座に削除できます。
+            auto loopState = currentState.load(std::memory_order_acquire);
+            if (loopState)
+            {
+                auto newNode = createBandNode(i, *loopState);
+                newNode->incReferenceCount(); // アトミック保存用にインクリメント
+                auto oldNode = bandNodes[i].exchange(newNode.get(), std::memory_order_acq_rel);
+
+                // prepareToPlay 内では、即座に削除しても安全であると仮定します
+                if (oldNode) oldNode->decReferenceCount();
+            }
+        }
     }
 }
 
@@ -712,8 +728,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
         double rms = 0.0;
 
 #if JUCE_DSP_USE_INTEL_MKL
-        // MKL optimized RMS calculation (Norm / sqrt(N))
-        double norm = cblas_dnrm2(numSamples, data, 1);
+            // MKL最適化されたRMS計算 (Norm / sqrt(N))
+        std::memcpy(scratchBuffer.get(), data, static_cast<size_t>(numSamples) * sizeof(double));
+        double norm = cblas_dnrm2(numSamples, scratchBuffer.get(), 1);
         rms = norm / std::sqrt(static_cast<double>(numSamples));
 #else
         double sumSq = 0.0;
@@ -732,7 +749,7 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     if (!std::isfinite(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
     if (!std::isfinite(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
 
-    // Load atomics
+    // アトミック変数のロード
     double envIn = agcEnvInput.load(std::memory_order_relaxed);
     double envOut = agcEnvOutput.load(std::memory_order_relaxed);
     double currentGain = agcCurrentGain.load(std::memory_order_relaxed);
@@ -755,12 +772,12 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     // ゲイン変化のスムーシング
     double nextGain = currentGain * (1.0 - AGC_GAIN_SMOOTH) + targetGain * AGC_GAIN_SMOOTH;
 
-    // Store atomics
+    // アトミック変数のストア
     agcEnvInput.store(envIn, std::memory_order_relaxed);
     agcEnvOutput.store(envOut, std::memory_order_relaxed);
     agcCurrentGain.store(nextGain, std::memory_order_relaxed);
 
-    // ゲイン適用 (Ramp: currentGain -> nextGain)
+    // ゲイン適用 (ランプ: currentGain -> nextGain)
     // ブロック境界での不連続性を防ぐため、サンプル単位で補間する
     const double gainIncrement = (nextGain - currentGain) / static_cast<double>(numSamples);
 
@@ -821,8 +838,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             double rms = 0.0;
 
 #if JUCE_DSP_USE_INTEL_MKL
-            // MKL optimized RMS calculation
-            double norm = cblas_dnrm2(numSamples, data, 1);
+            // MKL最適化されたRMS計算
+            std::memcpy(scratchBuffer.get(), data, static_cast<size_t>(numSamples) * sizeof(double));
+            double norm = cblas_dnrm2(numSamples, scratchBuffer.get(), 1);
             rms = norm / std::sqrt(static_cast<double>(numSamples));
 #else
             double sumSq = 0.0;
@@ -1087,7 +1105,7 @@ float EQProcessor::getMagnitudeSquared(const EQCoeffsBiquad& c, const std::compl
     std::complex<double> num = c.b0 * z2 + c.b1 * z + c.b2;
     std::complex<double> den = c.a0 * z2 + c.a1 * z + c.a2;
 
-    double denNorm = std::norm(den); // norm returns magnitude squared
+    double denNorm = std::norm(den); // normはマグニチュードの二乗を返す
     if (denNorm < 1e-18) return 0.0f;
 
     return static_cast<float>(std::norm(num) / denNorm);

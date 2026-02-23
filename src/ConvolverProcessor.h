@@ -14,7 +14,7 @@
 //
 // ■ スレッド安全設計:
 //   - loadImpulseResponse(): Message Thread で実行。バックグラウンドスレッドで読み込みを行い、完了後に atomic に差し替えます (RCU)。ロード中も音切れなく古いIRで処理を継続します。
-//   - process(): Audio Thread で実行。FFTConvolver を使用してパーティション分割畳み込みを行います。レイテンシーはブロックサイズに依存します。
+//   - process(): Audio Thread で実行。WDL_ConvolutionEngine を使用してパーティション分割畳み込みを行います。
 //   - パラメータ: std::atomic でスレッドセーフ。Audio Thread内でのメモリ確保やIR再ロードは行いません。
 //============================================================================
 
@@ -23,8 +23,8 @@
 #include <memory>
 #include <vector>
 #include <array>
-
-#include "FFTConvolver.h"
+#include "WDL/convoengine.h"
+#include "AlignedAllocation.h"
 
 class ConvolverProcessor : public juce::ChangeBroadcaster
 {
@@ -59,11 +59,14 @@ public:
     // IRの最大長(kMaxIRCap)と最大ブロックサイズをカバーする値を設定
     // 3s @ 192kHz = 576000 samples. Next power of 2 is 1048576.
     static constexpr int MAX_IR_LATENCY = 2097152; // 2^21 (3.0s @ 384kHz = ~1.15M samples をカバー)
-    // This value should be power of 2 for optimal FFTConvolver performance.
-    // And also it should be no less than MIN_PARTITION_SIZE
-    // MAX_PARTITION_SIZE should be also no less than maxBlockSize * oversamplingFactor
+    // 最適なFFTパフォーマンスのために、この値は2の累乗である必要があります。
+    // また、MIN_PARTITION_SIZE以上である必要があります。
+    // MAX_PARTITION_SIZEもまた、maxBlockSize * oversamplingFactor以上である必要があります。
     static constexpr int MAX_BLOCK_SIZE = 524288;  // 65536 * 8 (Safe for 8x oversampling of max input block)
     static constexpr int MAX_TOTAL_DELAY = MAX_IR_LATENCY + MAX_BLOCK_SIZE;
+    // リングバッファのラップアラウンドをビットマスクで高速化するため、2の累乗サイズを使用
+    static constexpr int DELAY_BUFFER_SIZE = 4194304; // 2^22 (approx 4M samples > MAX_TOTAL_DELAY)
+    static constexpr int DELAY_BUFFER_MASK = DELAY_BUFFER_SIZE - 1;
     static constexpr double CONVOLUTION_HEADROOM_GAIN = 0.5; // -6.02 dB
 
     ConvolverProcessor();
@@ -165,43 +168,57 @@ private:
     class LoaderThread;
 
     //----------------------------------------------------------
-    // FFTConvolver Engine
+    // WDL Convolution Engine
     //----------------------------------------------------------
-    // ステレオ処理用ラッパー (FFTConvolverはモノラルのため)
+    // ステレオ処理用ラッパー
     struct StereoConvolver : public juce::ReferenceCountedObject
     {
-        std::array<fftconvolver::FFTConvolver, 2> convolvers;
+        // WDL_ConvolutionEngine_Div は Non-uniform partitioned convolution を提供し、
+        // 低レイテンシー動作が可能です。
+        std::array<WDL_ConvolutionEngine_Div, 2> convolvers;
+        std::array<WDL_ImpulseBuffer, 2> impulses;
+
         int latency = 0;
         int irLatency = 0; // IR由来の遅延 (ピーク位置)
-
-        // 再初期化用キャッシュ
-        size_t blockSize = 0;
-        std::vector<fftconvolver::Sample> irL;
-        std::vector<fftconvolver::Sample> irR;
 
         using Ptr = juce::ReferenceCountedObjectPtr<StereoConvolver>;
 
         StereoConvolver() = default;
 
-        // コピーコンストラクタ (Deep Copy)
-        StereoConvolver(const StereoConvolver& other);
+        // コピーコンストラクタは禁止 (WDLエンジンは複製コストが高く、状態を持つため)
+        StereoConvolver(const StereoConvolver& other) = delete;
 
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        void init(size_t newBlockSize, const fftconvolver::Sample* newIrL, const fftconvolver::Sample* newIrR, size_t irLen, int peakDelay)
+        void init(const WDL_ImpulseBuffer& newIrL, const WDL_ImpulseBuffer& newIrR, int peakDelay, int maxFFTSize, int knownBlockSize)
         {
-            this->blockSize = newBlockSize;
-            this->irL.assign(newIrL, newIrL + irLen); // IRデータを内部にコピー
-            this->irR.assign(newIrR, newIrR + irLen);
+            // IRデータをコピー (WDL_ImpulseBufferにはコピーメソッドがないため手動で行う)
+            auto copyImpulse = [](WDL_ImpulseBuffer& dst, const WDL_ImpulseBuffer& src) {
+                dst.SetNumChannels(src.impulses.list.GetSize());
+                dst.samplerate = src.samplerate;
+                for (int i = 0; i < dst.GetNumChannels(); ++i) {
+                    int len = src.impulses[i].GetSize();
+                    dst.impulses[i].Resize(len);
+                    memcpy(dst.impulses[i].Get(), src.impulses[i].Get(), len * sizeof(double));
+                }
+            };
+
+            copyImpulse(this->impulses[0], newIrL);
+            copyImpulse(this->impulses[1], newIrR);
             this->irLatency = peakDelay;
 
-            convolvers[0].init(newBlockSize, newIrL, irLen);
-            convolvers[1].init(newBlockSize, newIrR, irLen);
-            latency = static_cast<int>(newBlockSize);
+            // WDL_ConvolutionEngine_Div の初期化
+            // latency_allowed=0 で低レイテンシーモードを有効化
+            convolvers[0].SetImpulse(&impulses[0], maxFFTSize, knownBlockSize, 0, 0, 0);
+            convolvers[1].SetImpulse(&impulses[1], maxFFTSize, knownBlockSize, 0, 0, 0);
+
+            // WDLエンジンのレイテンシーを取得 (通常は0またはパーティションサイズ依存)
+            // WDL_ConvolutionEngine::GetLatency() はサンプル数を返す
+            latency = convolvers[0].GetLatency();
         }
 
-        void reset() { convolvers[0].reset(); convolvers[1].reset(); }
+        void reset() { convolvers[0].Reset(); convolvers[1].Reset(); }
     };
 
     // Note: trashBin は、Audio Thread がまだ使用している可能性のある古い Convolution オブジェクトを保持するために使用されます。
@@ -222,8 +239,10 @@ private:
     //----------------------------------------------------------
     // レイテンシー補正用ディレイ
     //----------------------------------------------------------
-    juce::dsp::DelayLine<double> delayLine;
-    std::atomic<int> currentLatency {0};
+    // juce::dsp::DelayLine<double> delayLine; // Replaced with custom AVX2 ring buffer
+    convo::AlignedBuffer delayBuffer[2]; // L/R separate buffers
+    int delayWritePos = 0;
+    juce::SmoothedValue<double> latencySmoother;
 
     //----------------------------------------------------------
     // パラメータ（atomic）
@@ -255,7 +274,9 @@ private:
     // Dry信号バッファ（Mix用）
     //----------------------------------------------------------
     juce::AudioBuffer<double> dryBuffer;
-    juce::AudioBuffer<double> convolutionBuffer; // Convolution用 (double)
+    convo::AlignedBuffer dryBufferStorage[2]; // Aligned storage for dryBuffer
+    juce::AudioBuffer<double> smoothingBuffer; // スムーシングゲイン計算用 (Audio Threadでのメモリ確保回避)
+    convo::AlignedBuffer smoothingBufferStorage[2]; // Aligned storage for smoothingBuffer
 
     //----------------------------------------------------------
     // 準備完了フラグ
@@ -263,7 +284,6 @@ private:
     std::atomic<bool> isPrepared { false };
     int currentBufferSize = 512; // prepareToPlayで更新される
     double currentSmoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC; // mixSmootherに設定されている現在の時間
-    size_t partitionSize = 1024;
 
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);

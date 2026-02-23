@@ -45,6 +45,9 @@ if(MSVC)
         /W4         # 警告レベル4 (高)
         /wd4100     # C4100: 参照されないパラメーター (JUCE内部の警告を抑制)
         /wd4189     # C4189: ローカル変数が初期化されましたが、参照されていません (r8brain対策)
+        /wd4456     # C4456: 宣言が前のローカル宣言を隠します (WDL対策)
+        /wd4505     # C4505: 参照されていないローカル関数は削除されました (WDL対策)
+        /wd4996     # C4996: 非推奨の関数 (WDLの_vsnprintf等)
         /MP         # マルチプロセッサコンパイル有効化
         /EHsc       # 標準C++例外処理のみ有効化 (SEH無効 - 構造化例外処理は使用しない)
     )
@@ -62,7 +65,8 @@ if(MSVC)
     # /fp:fast:   高速浮動小数点演算 (厳密性より速度優先)
     # /Gw:        グローバルデータの最適化 (バイナリサイズ削減)
     # /Gy:        関数レベルリンク有効化 (未使用関数の削除を促進)
-    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
+    set(CMAKE_C_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
 
     # リンカー最適化
     # /LTCG:      リンク時コード生成
@@ -75,27 +79,28 @@ endif()
 # JUCEを追加
 # プロジェクトルートに JUCE/ ディレクトリが必要
 #------------------------------------------------------------
-add_subdirectory(JUCE)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/JUCE/extras/Build/CMake/JUCEModuleSupport.cmake")
+    add_subdirectory(JUCE)
+else()
+    message(STATUS "Local JUCE installation is incomplete (missing 'extras'). Fetching from GitHub...")
+    include(FetchContent)
+    FetchContent_Declare(
+        JUCE
+        GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
+        GIT_TAG        8.0.12
+    )
+    FetchContent_MakeAvailable(JUCE)
+endif()
 
 #------------------------------------------------------------
-# FFTConvolver ライブラリの追加
+# WDL ライブラリの追加 (Convolution Engine)
 #------------------------------------------------------------
-add_library(FFTConvolver STATIC
-    FFTConvolver/FFTConvolver.cpp
-    FFTConvolver/AudioFFT.cpp
-    FFTConvolver/Utilities.cpp
+# WDLはヘッダーオンリーではなく実装ファイルを含むため、ソースとして追加します。
+# WDL_FFT_REALSIZE=8 を定義して double 精度で動作させます。
+set(WDL_SOURCES
+    WDL/WDL/convoengine.cpp
+    WDL/WDL/fft.c
 )
-
-target_include_directories(FFTConvolver PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/FFTConvolver
-)
-
-# ✅ double精度を有効化
-target_compile_definitions(FFTConvolver PUBLIC
-    FFTCONVOLVER_USE_DOUBLE
-)
-
-target_compile_features(FFTConvolver PUBLIC cxx_std_17)
 
 #------------------------------------------------------------
 # r8brain-free-src ライブラリの追加
@@ -138,6 +143,7 @@ target_sources(ConvoPeq PRIVATE
     src/DeviceSettings.cpp
     src/AsioBlacklist.h
     src/PsychoacousticDither.h
+    ${WDL_SOURCES}
 )
 
 #------------------------------------------------------------
@@ -150,7 +156,6 @@ target_link_libraries(ConvoPeq PRIVATE
     juce::juce_dsp
     juce::juce_gui_extra
     juce::juce_core
-    FFTConvolver
     r8brain
 )
 
@@ -161,7 +166,9 @@ target_compile_definitions(ConvoPeq PRIVATE
     JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}"
     JUCE_STANDALONE_APPLICATION=1
-    FFTCONVOLVER_USE_DOUBLE=1
+    WDL_FFT_REALSIZE=8
+    WDL_FFT_SSE=1
+    WDL_DENORMAL_FIX_DOUBLE
     # Windows/ASIO/SIMD settings preserved for functionality
     JUCE_USE_SSE_INTRINSICS=1
     JUCE_USE_SIMD=1
@@ -170,7 +177,12 @@ target_compile_definitions(ConvoPeq PRIVATE
         UNICODE
         NOMINMAX
         JUCE_ASIO=1
+        _CRT_SECURE_NO_WARNINGS
     >
+)
+
+target_include_directories(ConvoPeq PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/WDL
 )
 
 # ReleaseでLTCG有効化（MSVC用）
@@ -200,13 +212,9 @@ if(MKL_FOUND)
     message(STATUS "Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.")
     target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
     target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
-    # FFTConvolverにもMKL設定を適用
-    target_link_libraries(FFTConvolver PRIVATE MKL::MKL)
-    target_compile_definitions(FFTConvolver PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
 else()
     message(STATUS "Intel MKL not found. Using JUCE internal FFT (JUCE_DSP_USE_INTEL_MKL=0).")
     target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=0)
-    target_compile_definitions(FFTConvolver PRIVATE JUCE_DSP_USE_INTEL_MKL=0)
 endif()
 
 #------------------------------------------------------------
@@ -220,7 +228,7 @@ juce_generate_juce_header(ConvoPeq)
 if(WIN32)
     # Windows: COM初期化ライブラリ (WASAPI/ASIO等で必要)
     target_link_libraries(ConvoPeq PRIVATE
-        ole32
+        ole32 avrt
     )
 
     # Visual Studio用設定

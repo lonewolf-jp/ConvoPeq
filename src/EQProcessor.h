@@ -27,6 +27,7 @@
 #include <complex>
 #include <array>
 #include <vector>
+#include "AlignedAllocation.h"
 
 //--------------------------------------------------------------
 // バンドタイプ列挙型
@@ -83,7 +84,7 @@ struct EQCoeffsSVF
 };
 
 //--------------------------------------------------------------
-// EQフィルタ係数 (Biquad: Analysis / Plotting)
+// EQフィルタ係数 (Biquad: 解析/描画用)
 //--------------------------------------------------------------
 struct EQCoeffsBiquad
 {
@@ -297,6 +298,9 @@ private:
     // ── 現在のサンプルレート ──
     // prepareToPlay で更新。Audio Thread で係数再計算に使用。
     double currentSampleRate{ 0.0 };
+
+    // ── MKL用スクラッチバッファ ──
+    ::convo::AlignedBuffer scratchBuffer;
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
     void processAGC(juce::dsp::AudioBlock<double>& block);

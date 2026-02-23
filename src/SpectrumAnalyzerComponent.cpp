@@ -41,7 +41,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
         displayFrequencies[i] = std::pow(10.0f, logMinFreq + logT * (logMaxFreq - logMinFreq));
     }
 
-    // Source Select Button
+    // ソース選択ボタン
     sourceButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey.withAlpha(0.6f));
     sourceButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.9f));
     sourceButton.onClick = [this] {

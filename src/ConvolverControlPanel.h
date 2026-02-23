@@ -15,7 +15,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 
-class ConvolverControlPanel : public juce::Component,
+class ConvolverControlPanel  : public juce::Component,
                               private juce::Button::Listener,
                               private juce::Slider::Listener
 {

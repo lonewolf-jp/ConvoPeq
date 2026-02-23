@@ -7,6 +7,14 @@
 #include <cmath>
 #include <complex>
 #include <algorithm>
+#include <mutex>
+#include <Functiondiscoverykeys.h>
+#include <Mmdeviceapi.h>
+
+#if JUCE_INTEL
+ #include <xmmintrin.h>
+ #include <pmmintrin.h>
+#endif
 
 // コンストラクタ
 //--------------------------------------------------------------
@@ -23,6 +31,10 @@ AudioEngine::AudioEngine()
 
 void AudioEngine::initialize()
 {
+    // WDL FFTテーブルをメインスレッドで安全に初期化
+    static std::once_flag fftInitFlag;
+    std::call_once(fftInitFlag, [] { WDL_fft_init(); });
+
     // 初期DSP構築 (デフォルト設定)
     // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
     // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
@@ -60,7 +72,7 @@ AudioEngine::~AudioEngine()
 //--------------------------------------------------------------
 void AudioEngine::readFromFifo(float* dest, int numSamples)
 {
-    // Guarantee a single reader: Prevents simultaneous reads from multiple UI components (e.g. analyzers).
+    // 単一のリーダーを保証: 複数のUIコンポーネント（アナライザーなど）からの同時読み出しを防ぐ。
 	//
     // Note: 書き込み側 (DSPCore::pushToFifo / Audio Thread) はこのロックを使用しないため、ロックフリーです。
     //       したがって、ここでロックを取得してもオーディオスレッドをブロックする恐れはありません (Deadlock Free)。
@@ -254,7 +266,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // パラメータ検証 (Parameter Validation)
     // 不正なパラメータから保護
     double safeSampleRate = sampleRate;
-    if (safeSampleRate <= 0.0 || safeSampleRate > SAFE_MAX_SAMPLE_RATE)
+    if (safeSampleRate <= 0.0 || safeSampleRate > SAFE_MAX_SAMPLE_RATE || !std::isfinite(safeSampleRate))
     {
         jassertfalse; // デバッグビルドで警告
         safeSampleRate = 48000.0; // デフォルト値
@@ -279,16 +291,35 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
     uiEqProcessor.prepareToPlay(safeSampleRate, bufferSize);
 
-    if (rateChanged || blockSizeChanged)
-    {
-        uiConvolverProcessor.rebuildAllIRs();
-    }
-
     maxSamplesPerBlock.store(bufferSize);
     currentSampleRate.store(safeSampleRate);
 
     // DSP再構築 (RT安全化: 新しいDSPを作成してスワップ)
-    requestRebuild(safeSampleRate, bufferSize);
+    // MKLのメモリ確保をAudio Threadから分離するため、requestRebuildはMessage Threadで実行する。
+    // prepareToPlayはMessage Threadからの完了を待つ。
+    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        requestRebuild(safeSampleRate, bufferSize);
+    }
+    else
+    {
+        pendingSampleRate.store(safeSampleRate);
+        pendingBlockSize.store(bufferSize);
+        rebuildRequested.store(true);
+
+        juce::MessageManager::callAsync([this] {
+            if (rebuildRequested.load())
+            {
+                requestRebuild(pendingSampleRate.load(), pendingBlockSize.load());
+                rebuildRequested.store(false);
+                rebuildCompleteEvent.signal();
+            }
+        });
+
+        // Message Threadでの再構築が完了するまで同期的に待機
+        rebuildCompleteEvent.wait();
+    }
+
     uiConvolverProcessor.setBypass(convBypassActive.load (std::memory_order_relaxed));
     audioFifo.reset();
 
@@ -305,6 +336,44 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     uiConvolverProcessor.setBypass(convBypassActive.load (std::memory_order_relaxed));
 
     // UIコンポーネント（アナライザー等）に状態変更を通知し、タイマーの再開などを促す
+
+#if JUCE_WINDOWS
+    if (mmcssHandle == nullptr) {
+        // MMCSS (Multimedia Class Scheduler Service) を使用して、オーディオ処理の優先度を上げる
+        // "Audio" タスクは、一般的なオーディオ再生に最適化されている
+        // "Pro Audio" タスクは、低遅延オーディオ処理に最適化されている
+        typedef HANDLE (WINAPI *pAvSetMmThreadCharacteristics)(LPCSTR, PDWORD);
+
+        // Function pointer to AvSetMmThreadCharacteristicsA
+        pAvSetMmThreadCharacteristics pAvSetMmThreadCharacteristicsPtr = nullptr;
+
+        // Dynamically load the function
+        HMODULE avrtDll = GetModuleHandle(TEXT("avrt.dll"));
+        if (avrtDll != nullptr)
+        {
+            pAvSetMmThreadCharacteristicsPtr = (pAvSetMmThreadCharacteristics)GetProcAddress(avrtDll, "AvSetMmThreadCharacteristicsA");
+        }
+
+        if (pAvSetMmThreadCharacteristicsPtr != nullptr)
+        {
+            mmcssHandle = pAvSetMmThreadCharacteristicsPtr("Pro Audio", &mmcssTaskIndex); // No cast needed
+            if (mmcssHandle == nullptr)
+            {
+                juce::Logger::writeToLog("MMCSS: Failed to set thread characteristics.");
+            }
+            else
+            {
+				typedef BOOL (WINAPI *pAvSetMmThreadPriority)(HANDLE, AVRT_PRIORITY);
+				auto AvSetMmThreadPriorityPtr = (pAvSetMmThreadPriority)GetProcAddress(avrtDll, "AvSetMmThreadPriority");
+                // タスクの優先度を最大に設定 (省略可能)
+                if(AvSetMmThreadPriorityPtr != nullptr) AvSetMmThreadPriorityPtr(mmcssHandle, static_cast<AVRT_PRIORITY>(AVRT_PRIORITY_MAX));
+                juce::Logger::writeToLog("MMCSS: Pro Audio thread characteristics set.");
+            }
+        }
+        else
+            juce::Logger::writeToLog("MMCSS: AvSetMmThreadCharacteristicsA function not found.");
+    }
+#endif
     sendChangeMessage();
 }
 
@@ -328,7 +397,8 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     bool irReused = false;
     DSPCore* current = currentDSP.load(std::memory_order_acquire);
 
-    if (current && current->oversamplingFactor == newDSP->oversamplingFactor && newDSP->oversamplingFactor > 1)
+    if (current && std::abs(current->sampleRate - sampleRate) < 1.0 &&
+        current->oversamplingFactor == newDSP->oversamplingFactor && newDSP->oversamplingFactor > 1)
     {
         // IRの生成条件（ファイル、位相設定、長さ）が一致しているか確認
         if (newDSP->convolver.getIRName() == current->convolver.getIRName() &&
@@ -352,6 +422,14 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
         // 同期的にリビルドを実行 (再生中の音切れやピッチズレを防ぐため、準備完了まで待機)
         newDSP->convolver.rebuildAllIRsSynchronous();
     }
+
+    // Fix: Refresh Convolver latency
+    // IRのロードやリビルド、あるいは状態コピーによってレイテンシーが確定した後、
+    // 再度prepareToPlayを呼び出してlatencySmootherの初期値を正しいレイテンシーに合わせる。
+    // これにより、DSP切り替え時にレイテンシーが0からランプすることによるグリッチ（ピッチ揺れ）を防ぐ。
+    const double processingRate = sampleRate * static_cast<double>(newDSP->oversamplingFactor);
+    const int processingBlockSize = samplesPerBlock * static_cast<int>(newDSP->oversamplingFactor);
+    newDSP->convolver.prepareToPlay(processingRate, processingBlockSize);
 
     commitNewDSP(newDSP);
 }
@@ -476,6 +554,28 @@ void AudioEngine::releaseResources()
     // レベルをリセット
     inputLevelDb.store(-120.0f);
     outputLevelDb.store(-120.0f);
+
+
+#if JUCE_WINDOWS
+    if (mmcssHandle != nullptr)
+     {
+        // Define the function pointer type
+        typedef DWORD (WINAPI *pAvRevertMmThreadCharacteristics)(HANDLE);
+
+        // Dynamically load the function
+        pAvRevertMmThreadCharacteristics pAvRevertMmThreadCharacteristicsPtr = (pAvRevertMmThreadCharacteristics)
+            GetProcAddress(GetModuleHandle(TEXT("avrt.dll")), "AvRevertMmThreadCharacteristics");
+
+        // Check if the function was loaded successfully before calling it
+        if (pAvRevertMmThreadCharacteristicsPtr != nullptr)
+        {
+            pAvRevertMmThreadCharacteristicsPtr(mmcssHandle);
+        }
+
+        mmcssHandle = nullptr;
+
+    }
+#endif
 }
 
 //--------------------------------------------------------------
@@ -534,7 +634,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
         // 処理委譲
-        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb, {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt}); // call DSP with smart pointer
+        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb, {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt}); // スマートポインタでDSPを呼び出し
     }
     else
     {
@@ -547,8 +647,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 //--------------------------------------------------------------
 AudioEngine::DSPCore::DSPCore() = default;
 
-void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType)
+void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType)
 {
+    this->sampleRate = newSampleRate;
     maxSamplesPerBlock = SAFE_MAX_BLOCK_SIZE;
 
     size_t factorLog2 = 0;
@@ -566,8 +667,8 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int b
         // 44.1k, 48k -> 4x
         // 88.2k, 96k -> 2x
         // >= 176.4k  -> 1x (None)
-        if (sampleRate < 80000.0)      factorLog2 = 2; // 4x
-        else if (sampleRate < 160000.0) factorLog2 = 1; // 2x
+        if (newSampleRate < 80000.0)      factorLog2 = 2; // 4x
+        else if (newSampleRate < 160000.0) factorLog2 = 1; // 2x
         else                            factorLog2 = 0; // 1x
     }
 
@@ -586,7 +687,7 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int b
         oversampling.reset();
     }
 
-    const double processingRate = sampleRate * static_cast<double>(oversamplingFactor);
+    const double processingRate = newSampleRate * static_cast<double>(oversamplingFactor);
     const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
 
     // プロセッサの準備
@@ -600,11 +701,19 @@ void AudioEngine::DSPCore::prepare(double sampleRate, int samplesPerBlock, int b
 
     // DCBlocker (JUCE IIR) には最大ブロックサイズを渡してProcessSpecを初期化する
     // 出力段(processOutput)で実行されるため、オーバーサンプリング前のレートとサイズを使用する
-    dcBlockerL.prepare(sampleRate, SAFE_MAX_BLOCK_SIZE);
-    dcBlockerR.prepare(sampleRate, SAFE_MAX_BLOCK_SIZE);
+    dcBlockerL.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
+    dcBlockerR.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
+
+    // 入力段用DCBlockerの準備
+    inputDCBlockerL.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
+    inputDCBlockerR.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
+
+    // オーバーサンプリング後のDC除去用 (1Hzカットオフ)
+    osDCBlockerL.init(processingRate, 1.0);
+    osDCBlockerR.init(processingRate, 1.0);
 
     // ディザの準備 (出力段で行うため元のサンプルレート)
-    dither.prepare(sampleRate, bitDepth);
+    dither.prepare(newSampleRate, bitDepth);
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
     // バッファ確保 (Message Threadで実行されるため安全)
@@ -620,6 +729,10 @@ void AudioEngine::DSPCore::reset()
     eq.reset();
     dcBlockerL.reset();
     dcBlockerR.reset();
+    inputDCBlockerL.reset();
+    inputDCBlockerR.reset();
+    osDCBlockerL.reset();
+    osDCBlockerR.reset();
     dither.reset();
     if (oversampling)
         oversampling->reset();
@@ -668,12 +781,20 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     // オーバーサンプリング処理ブロック
     //----------------------------------------------------------
     // バッファ全体ではなく、有効なサンプル数のみをラップする (重要)
-    juce::dsp::AudioBlock<double> block = processBlock; // Alias for clarity in oversampling logic
+    juce::dsp::AudioBlock<double> block = processBlock; // オーバーサンプリングロジックを明確にするためのエイリアス
 
     // アップサンプリング
     if (oversampling)
     {
         processBlock = oversampling->processSamplesUp(block);
+
+        // オーバーサンプリング直後に高精度DC除去を適用
+        // これにより、後段のDSP処理（Convolver/EQ）にクリーンな信号を渡す
+        const int numOSSamples = (int)processBlock.getNumSamples();
+        if (processBlock.getNumChannels() > 0)
+            osDCBlockerL.process(processBlock.getChannelPointer(0), numOSSamples);
+        if (processBlock.getNumChannels() > 1)
+            osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
     }
 
     int numProcSamples = (int)processBlock.getNumSamples();
@@ -776,12 +897,13 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
     const double* r = (procChannels > 1) ? block.getChannelPointer(1) : nullptr;
 
     // FIFO空き容量チェック (Overflow Protection)
-    // Note: Readerスレッドとの競合(Race Condition)を避けるため、空きがない場合は書き込みをスキップする
-    if (audioFifo.getFreeSpace() < numSamples)
+    // 部分書き込み対応: 空き容量分だけ書き込む (完全ドロップによる時間軸ジャンプを軽減)
+    const int numToWrite = std::min(numSamples, audioFifo.getFreeSpace());
+    if (numToWrite <= 0)
         return;
 
     int start1, size1, start2, size2;
-    audioFifo.prepareToWrite(numSamples, start1, size1, start2, size2);
+    audioFifo.prepareToWrite(numToWrite, start1, size1, start2, size2);
 
     const bool hasRightChannel = (audioFifoBuffer.getNumChannels() > 1);
 
@@ -831,6 +953,8 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
         // float (I/O) -> double (DSP) 変換
         const float* src = buffer->getReadPointer(ch, startSample);
         double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
+        auto& blocker = (ch == 0) ? inputDCBlockerL : inputDCBlockerR;
+
         for (int i = 0; i < numSamples; ++i)
         {
             float v = src[i];
@@ -838,7 +962,8 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
             if (!std::isfinite(v)) v = 0.0f;
             // 入力信号のサニタイズ: 極端な値をクランプしてフィルタ発散や矩形波ノイズを防ぐ
             // ドライバによっては未初期化バッファ等で巨大な値を返すことがあるため
-            dst[i] = static_cast<double>(juce::jlimit(-2.0f, 2.0f, v));
+            double val = static_cast<double>(juce::jlimit(-2.0f, 2.0f, v));
+            dst[i] = blocker.process(val);
         }
     }
 

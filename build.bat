@@ -63,6 +63,25 @@ if not exist "r8brain-free-src" (
 echo [CHECK] r8brain-free-src Directory: OK
 echo.
 
+REM WDLディレクトリの確認
+if not exist "WDL" (
+    echo [ERROR] WDL directory not found!
+    echo.
+    echo Please place WDL using one of the following methods:
+    echo   1. Symbolic link: mklink /J WDL C:\path\to\WDL
+    echo   2. Junction: mklink /J WDL C:\path\to\WDL
+    echo   3. Copy: xcopy /E /I C:\path\to\WDL WDL
+    echo.
+    echo WDL Download:
+    echo   https://github.com/justinfrankel/WDL
+    echo.
+    pause
+    exit /b 1
+)
+
+echo [CHECK] WDL Directory: OK
+echo.
+
 REM Intel oneAPI 環境変数の設定 (存在する場合)
 if exist "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat" (
     echo [INFO] Found Intel oneAPI setvars.bat. Executing...

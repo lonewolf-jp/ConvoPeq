@@ -6,7 +6,7 @@
 #include <mkl.h>
 #endif
 
-namespace dsp {
+namespace convo {
 
 
 #if JUCE_DSP_USE_INTEL_MKL
@@ -34,7 +34,10 @@ static void* aligned_malloc(size_t size, size_t alignment) {
 #if defined(_WIN32)
     ptr = _aligned_malloc(size, alignment);
 #else
-    errno = posix_memalign(&ptr, alignment, size);
+    if (posix_memalign(&ptr, alignment, size) != 0)
+    {
+        ptr = nullptr;
+    }
 #endif
 
     if (ptr == nullptr) {
@@ -56,4 +59,40 @@ static void aligned_free(void* ptr) {
 
 #endif
 
-} // namespace dsp
+//----------------------------------------------------------
+// アラインメントされたバッファ管理用クラス
+//----------------------------------------------------------
+class AlignedBuffer
+{
+public:
+    AlignedBuffer() : buffer(nullptr), sizeInBytes(0) {}
+
+    ~AlignedBuffer() { freeBuffer(); }
+
+    void allocate(size_t numElements)
+    {
+        freeBuffer();
+        if (numElements > 0)
+        {
+            sizeInBytes = numElements * sizeof(double);
+            buffer = static_cast<double*>(aligned_malloc(sizeInBytes, 64)); // 64-byte alignment
+        }
+    }
+
+    double* get() const { return buffer; }
+
+    void freeBuffer()
+    {
+        if (buffer != nullptr) {
+            aligned_free(buffer);
+            buffer = nullptr;
+            sizeInBytes = 0;
+        }
+    }
+
+private:
+    double* buffer;
+    size_t sizeInBytes;
+};
+
+} // namespace convo

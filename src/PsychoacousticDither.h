@@ -23,7 +23,7 @@
 
 
 
-namespace dsp
+namespace convo
 {
 
 //============================================================
@@ -155,10 +155,11 @@ public:
                      ^ (instanceCounter.fetch_add(1) * 0x9e3779b97f4a7c15ULL);
         }
 
+        Xoshiro256ss master(baseSeed);
         for (int i = 0; i < MAX_CHANNELS; ++i)
         {
-            rng[i] = Xoshiro256ss(baseSeed + i * 1000);
-            if (i > 0) rng[i].jump(); // L/R独立
+            rng[i] = master;
+            master.jump(); // Ensure non-overlapping sequences for each channel
         }
     }
 
@@ -166,7 +167,7 @@ public:
     {
         if (bitDepth > 0)
         {
-            // N-bit signed PCM quantization step is 2 / 2^N = 1 / 2^(N-1)
+            // Nビット符号付きPCMの量子化ステップは 2 / 2^N = 1 / 2^(N-1)
             scale = 1.0 / std::pow(2.0, bitDepth - 1);
             invScale = std::pow(2.0, bitDepth - 1);
         }
@@ -218,10 +219,10 @@ private:
 
     inline double processChannel(double x, Xoshiro256ss& r, ShaperState& st) noexcept
     {
-        // TPDF Dither generation
+        // TPDFディザ生成
         double d = nextTPDF(r) * scale;
 
-        // 5th order Noise Shaper (Feedback Error)
+        // 5次ノイズシェーパー (フィードバック誤差)
         double shapedError =
             coeffs[0] * st.z[0]
           + coeffs[1] * st.z[1]
@@ -229,19 +230,19 @@ private:
           + coeffs[3] * st.z[3]
           + coeffs[4] * st.z[4];
 
-        // Apply dither and noise shaping
+        // ディザとノイズシェーピングの適用
         double tmp = x + d + shapedError;
 
-        // Quantize
+        // 量子化
         double quantized = std::round(tmp * invScale) * scale;
 
-        // Calculate Quantization Error (Input - Output)
-        // Note: This is equivalent to -(Output - Input).
-        // Since shapedError adds positive coefficients of previous errors,
-        // this effectively subtracts the quantization noise (1 - H(z) topology).
+        // 量子化誤差の計算 (Input - Output)
+        // 注意: これは -(Output - Input) と等価です。
+        // shapedError は過去の誤差に正の係数を掛けて加算しているため、
+        // これは実質的に量子化ノイズを減算することになります (1 - H(z) トポロジー)。
         double error = tmp - quantized;
 
-        // Update State (Shift)
+        // 状態の更新 (シフト)
         st.z[4]=st.z[3];
         st.z[3]=st.z[2];
         st.z[2]=st.z[1];
@@ -275,4 +276,4 @@ private:
     std::array<double, 5> coeffs { 2.033, -2.165, 1.959, -1.590, 0.6149 };
 };
 
-} // namespace dsp
+} // namespace convo

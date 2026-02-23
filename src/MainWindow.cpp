@@ -97,7 +97,7 @@ MainWindow::MainWindow (const juce::String& name)
     audioEngine.addChangeListener (this);
     audioDeviceManager.addAudioCallback (&audioSourcePlayer);
 
-    // Create UI Components
+    // UIコンポーネントの作成
     createUIComponents();
 
     startTimer (500); // CPU使用率の更新頻度を上げる (500ms)
@@ -114,7 +114,7 @@ MainWindow::~MainWindow()
 
     DeviceSettings::saveSettings (audioDeviceManager, audioEngine);
 
-    // Unregister the AudioEngine as a callback before it is destroyed
+    // 破棄される前にコールバックとしてAudioEngineの登録を解除
     audioDeviceManager.removeAudioCallback (&audioSourcePlayer);
 
     // アプリ終了時にASIOドライバを確実に閉じるための安全手順
@@ -148,20 +148,20 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
             convolverPanel->updateIRInfo();
 
         // メインウィンドウ上のコントロールを更新 (プリセットロード時など)
-        // Processing Order
+        // 処理順序
         if (audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::ConvolverThenEQ)
             orderButton.setButtonText("Order: Conv -> EQ");
         else
             orderButton.setButtonText("Order: EQ -> Conv");
 
-        // Bypass Buttons
+        // バイパスボタン
         eqBypassButton.setToggleState(!audioEngine.getEQProcessor().isBypassed(), juce::dontSendNotification);
         eqBypassButton.setButtonText(audioEngine.getEQProcessor().isBypassed() ? "EQ Off" : "EQ On");
 
         convolverBypassButton.setToggleState(!audioEngine.getConvolverProcessor().isBypassed(), juce::dontSendNotification);
         convolverBypassButton.setButtonText(audioEngine.getConvolverProcessor().isBypassed() ? "Conv Off" : "Conv On");
 
-        // Soft Clip & Saturation
+        // ソフトクリップとサチュレーション
         softClipButton.setToggleState(audioEngine.isSoftClipEnabled(), juce::dontSendNotification);
         saturationSlider.setValue(audioEngine.getSaturationAmount(), juce::dontSendNotification);
     }
@@ -190,24 +190,24 @@ void MainWindow::createUIComponents()
     showDeviceSelectorButton.onClick = [this] { toggleDeviceSelector(); };
     addAndMakeVisible (showDeviceSelectorButton);
 
-    // EQ On/Off Button
+    // EQ オン/オフ ボタン
     eqBypassButton.setButtonText ("EQ On");
     eqBypassButton.setToggleState (!audioEngine.getEQProcessor().isBypassed(), juce::dontSendNotification);
     eqBypassButton.onClick = [this] { eqBypassButtonClicked(); };
     addAndMakeVisible (eqBypassButton);
 
-    // Convolver On/Off Button
+    // Convolver オン/オフ ボタン
     convolverBypassButton.setButtonText ("Conv On");
     convolverBypassButton.setToggleState (!audioEngine.getConvolverProcessor().isBypassed(), juce::dontSendNotification);
     convolverBypassButton.onClick = [this] { convolverBypassButtonClicked(); };
     addAndMakeVisible (convolverBypassButton);
 
-    // Processing Order Button
+    // 処理順序ボタン
     orderButton.setButtonText ("Order: Conv -> EQ");
     orderButton.onClick = [this] { orderButtonClicked(); };
     addAndMakeVisible (orderButton);
 
-    // Save/Load Buttons
+    // 保存/読み込みボタン
     saveButton.setButtonText ("Save");
     saveButton.onClick = [this] { savePreset(); };
     addAndMakeVisible (saveButton);
@@ -216,19 +216,19 @@ void MainWindow::createUIComponents()
     loadButton.onClick = [this] { loadPreset(); };
     addAndMakeVisible (loadButton);
 
-    // CPU Usage Label
+    // CPU使用率ラベル
     cpuUsageLabel.setText ("CPU: --%", juce::dontSendNotification);
     cpuUsageLabel.setJustificationType (juce::Justification::centredRight);
     cpuUsageLabel.setColour (juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible (cpuUsageLabel);
 
-    // About Button
+    // Aboutボタン
     aboutButton.setButtonText ("?");
     aboutButton.setTooltip ("About this application");
     aboutButton.onClick = [this] { showAboutDialog(); };
     addAndMakeVisible (aboutButton);
 
-    // Soft Clip Button
+    // ソフトクリップボタン
     softClipButton.setButtonText("Soft Clip");
     softClipButton.setToggleState(audioEngine.isSoftClipEnabled(), juce::dontSendNotification);
     softClipButton.setTooltip("Enable/Disable Output Soft Clipper");
@@ -237,7 +237,7 @@ void MainWindow::createUIComponents()
     };
     addAndMakeVisible(softClipButton);
 
-    // Saturation Slider
+    // サチュレーションスライダー
     saturationSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     saturationSlider.setRange(0.0, 1.0, 0.01);
     saturationSlider.setValue(audioEngine.getSaturationAmount(), juce::dontSendNotification);
@@ -262,7 +262,7 @@ void MainWindow::eqBypassButtonClicked()
     const bool isBypassed = !eqBypassButton.getToggleState();
     audioEngine.setEqBypassRequested(isBypassed);
     eqBypassButton.setButtonText(isBypassed ? "EQ Off" : "EQ On");
-    // Also update the UI processor state for consistency
+    // 整合性のためにUIプロセッサの状態も更新
     audioEngine.getEQProcessor().setBypass(isBypassed);
 }
 
@@ -274,7 +274,7 @@ void MainWindow::convolverBypassButtonClicked()
     const bool isBypassed = !convolverBypassButton.getToggleState();
     audioEngine.setConvolverBypassRequested(isBypassed);
     convolverBypassButton.setButtonText(isBypassed ? "Conv Off" : "Conv On");
-    // Also update the UI processor state for consistency
+    // 整合性のためにUIプロセッサの状態も更新
     audioEngine.getConvolverProcessor().setBypass(isBypassed);
 }
 
@@ -410,7 +410,7 @@ void MainWindow::launchFileChooser(bool isSaving)
                                                            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
                                                            wildcards);
 
-    // Use SafePointer for safety consistency
+    // 安全性と整合性のためにSafePointerを使用
     juce::Component::SafePointer<MainWindow> safeThis(this);
 
     fileChooser->launchAsync(chooserFlags, [safeThis, isSaving, fileChooser](const juce::FileChooser& fc)
@@ -430,7 +430,7 @@ void MainWindow::launchFileChooser(bool isSaving)
                 xml->writeTo(file);
             }
         }
-        else // isLoading
+        else // 読み込み中
         {
             if (file.existsAsFile())
             {

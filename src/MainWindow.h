@@ -42,10 +42,10 @@ private:
     void launchFileChooser(bool isSaving);
     void showAboutDialog();
 
-    juce::AudioDeviceManager audioDeviceManager;
-    juce::AudioSourcePlayer audioSourcePlayer;
-    AudioEngine audioEngine;
     AsioBlacklist asioBlacklist;
+    AudioEngine audioEngine;
+    juce::AudioSourcePlayer audioSourcePlayer;
+    juce::AudioDeviceManager audioDeviceManager;
 
     std::unique_ptr<ConvolverControlPanel> convolverPanel;
     std::unique_ptr<EQControlPanel> eqPanel;
