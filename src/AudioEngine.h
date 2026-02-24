@@ -269,7 +269,7 @@ private:
     //----------------------------------------------------------
      // DSPコア (Audio Threadで実行される処理のコンテナ)
     //----------------------------------------------------------
-    struct DSPCore : public juce::ReferenceCountedObject
+    struct DSPCore
     {
         struct ProcessingState
         {
@@ -281,7 +281,7 @@ private:
             float saturationAmount;
         };
 
-        using Ptr = juce::ReferenceCountedObjectPtr<DSPCore>;
+        using Ptr = std::shared_ptr<DSPCore>;
 
         DSPCore();
 
@@ -331,7 +331,7 @@ private:
     //----------------------------------------------------------
     // 状態管理
     //----------------------------------------------------------
-    std::atomic<DSPCore*> currentDSP { nullptr };
+    std::atomic<DSPCore::Ptr> currentDSP; // C++20 std::atomic<std::shared_ptr>
     std::vector<DSPCore::Ptr> trashBin; // 古いDSPの保持用 (Audio Threadでの削除防止)
     std::vector<DSPCore::Ptr> trashBinPending; // 新しく追加されたゴミ (次回のタイマーコールバックまで保持)
     juce::CriticalSection trashBinLock;
@@ -353,13 +353,6 @@ private:
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
 
-    std::atomic<bool> rebuildRequested { false };
-    std::atomic<double> pendingSampleRate { 0.0 };
-    std::atomic<int> pendingBlockSize { 0 };
-    juce::WaitableEvent rebuildCompleteEvent;
-
-
-
  #if JUCE_WINDOWS
     // MMCSS (Multimedia Class Scheduler Service) handle
     HANDLE mmcssHandle { nullptr };
@@ -375,10 +368,14 @@ private:
     static constexpr float EQ_UNITY_GAIN_EPSILON = 1.0e-5f;  // 1.0との比較用
 
     //----------------------------------------------------------
-     // ヘルパー関数
+    // ヘルパー関数
     //----------------------------------------------------------
+    // Note: This function performs memory allocation (including MKL) and other blocking operations
+    // such as IR resampling. It MUST only be called from the message thread.
+    // The prepareToPlay() method ensures this by using MessageManager::callAsync if necessary.
     void requestRebuild(double sampleRate, int samplesPerBlock);
     void commitNewDSP(DSPCore::Ptr newDSP);
 
+    JUCE_DECLARE_WEAK_REFERENCEABLE(AudioEngine)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

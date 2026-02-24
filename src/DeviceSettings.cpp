@@ -351,7 +351,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
                     maxRate = rate;
 
             auto setup = deviceManager.getAudioDeviceSetup();
-            if (std::abs(setup.sampleRate - maxRate) > 1.0 && maxRate > 0.0)
+            if (std::abs(setup.sampleRate - maxRate) > 1e-6 && maxRate > 0.0)
             {
                 setup.sampleRate = maxRate;
                 deviceManager.setAudioDeviceSetup(setup, true);

@@ -44,7 +44,7 @@ static bool checkCancellation(juce::Thread* thread, bool* wasCancelled) noexcept
 // リサンプリング用ヘルパー
 static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inputIR, double inputSR, double targetSR, juce::Thread* thread)
 {
-    if (inputSR <= 0.0 || targetSR <= 0.0 || std::abs(inputSR - targetSR) <= 1.0)
+    if (inputSR <= 0.0 || targetSR <= 0.0 || std::abs(inputSR - targetSR) <= 1e-6)
         return inputIR;
 
     const double ratio = targetSR / inputSR;
@@ -75,19 +75,38 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
         double* outPtr = resampled.getWritePointer(ch);
 
         int done = 0;
+        int inputProcessed = 0;
         int iterations = 0;
         constexpr int maxIterations = 1000000; // 無限ループ防止のための安全カウンター
+        constexpr int CHUNK_SIZE = 4096; // キャンセル応答性を高めるためのチャンクサイズ
 
+        // 入力をチャンク分割して処理 (キャンセルチェックを頻繁に行うため)
+        while (inputProcessed < inLength && done < maxOutLen && ++iterations < maxIterations)
+        {
+            if (checkCancellation(thread, nullptr)) return {};
+
+            int chunk = std::min(CHUNK_SIZE, inLength - inputProcessed);
+            double* r8bOutput = nullptr;
+
+            const int generated = resampler.process(const_cast<double*>(inPtr + inputProcessed), chunk, r8bOutput);
+            inputProcessed += chunk;
+
+            if (generated > 0)
+            {
+                const int toCopy = std::min(generated, maxOutLen - done);
+                std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
+                done += toCopy;
+            }
+        }
+
+        // 残りの出力をフラッシュ (r8brainのレイテンシー分など)
         while (done < maxOutLen && ++iterations < maxIterations)
         {
             if (checkCancellation(thread, nullptr)) return {};
             double* r8bOutput = nullptr;
-            const int generated = resampler.process(const_cast<double*>(inPtr),
-                                                    done == 0 ? inLength : 0, r8bOutput);
+            const int generated = resampler.process(nullptr, 0, r8bOutput);
 
-            // generatedが0以下の場合、処理が完了したかエラーが発生したとみなしループを抜ける
-            if (generated <= 0)
-                break;
+            if (generated <= 0) break;
 
             const int toCopy = std::min(generated, maxOutLen - done);
             std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
@@ -392,7 +411,7 @@ public:
             // 4. リサンプリング (SR不一致の場合)
             // IRのサンプルレートがターゲットと異なる場合、ピッチズレを防ぐためにリサンプリングする
             if (result.loadedSR > 0.0 && sampleRate > 0.0 &&
-                std::abs(result.loadedSR - sampleRate) > 1.0)
+                std::abs(result.loadedSR - sampleRate) > 1e-6)
             {
                 auto resampled = resampleIR(result.loadedIR, result.loadedSR, sampleRate, thread);
 
@@ -505,7 +524,7 @@ public:
             }
 
             // 10. 新しいConvolutionの構築 (Non-uniform Partitioned Convolution)
-            result.newConv = new StereoConvolver();
+            result.newConv = std::make_shared<StereoConvolver>();
 
             // WDL_ImpulseBuffer用にIRデータを準備
             WDL_ImpulseBuffer impL, impR;
@@ -530,6 +549,21 @@ public:
 
             // 初期化
             result.newConv->init(impL, impR, irPeakLatency, maxFFTSize, blockSize);
+
+            // 11. WDLエンジンのプリウォーミング (Audio Threadでのメモリ確保回避)
+            // WDL_ConvolutionEngineは、最初のAdd呼び出し時に内部バッファ(ProcChannelInfo)を確保します。
+            // これをAudio Threadで行うとリアルタイム性を損なうため、ここでダミー処理を行って確保を済ませます。
+            {
+                // ダミーバッファ (1サンプル)
+                double dummySample = 0.0;
+                WDL_FFT_REAL* inputs[1] = { &dummySample };
+
+                // L/R両方のチャンネルに対してAddを呼び出し、内部構造を確定させる
+                // 1サンプルだけ処理し、Resetで状態をクリアする
+                result.newConv->convolvers[0].Add(inputs, 1, 1);
+                result.newConv->convolvers[1].Add(inputs, 1, 1);
+                result.newConv->reset(); // 内部状態（履歴）をクリアして初期状態に戻す
+            }
 
             // Display用コピーを作成 (move前に)
             result.displayIR = trimmed;
@@ -568,7 +602,6 @@ public:
             owner.applyNewState(result.newConv, result.loadedIR, result.loadedSR, result.targetLength, isRebuild, file, result.displayIR);
         }
     }
-
 private:
     ConvolverProcessor& owner;
     juce::WeakReference<ConvolverProcessor> weakOwner;
@@ -585,7 +618,7 @@ private:
 // コンストラクタ
 //--------------------------------------------------------------
 ConvolverProcessor::ConvolverProcessor()
-    : mixSmoother(1.0f) // 初期値
+    : mixSmoother(1.0f)
 {
 }
 
@@ -596,12 +629,9 @@ ConvolverProcessor::~ConvolverProcessor()
 {
     // スレッドを停止
     activeLoader.reset();
-
-    // shared_ptrが自動的に解放されるため、明示的なdeleteは不要
-    // ただし、trashBinのクリアは行う
     trashBin.clear();
-    auto c = convolution.exchange(nullptr);
-    if (c) c->decReferenceCount();
+    trashBinPending.clear();
+    convolution.store(nullptr);
 }
 
 //--------------------------------------------------------------
@@ -800,20 +830,73 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
 #if JUCE_DSP_USE_INTEL_MKL
         // MKL VML 最適化
         // マグニチュード計算: sqrt(re^2 + im^2) -> vdHypot
-        // MKL用に複素数を分割
+        // MKL用に複素数を分割 (AVX2 Deinterleave)
+#if defined(__AVX2__)
+        {
+            int i = 0;
+            const int vEnd = fftSize / 4 * 4;
+            for (; i < vEnd; i += 4)
+            {
+                // 4 複素数 = 8 doubles をロード (2 つの __m256d)
+                __m256d ab = _mm256_loadu_pd(reinterpret_cast<double*>(fftBuffer + i));     // [re0,im0,re1,im1]
+                __m256d cd = _mm256_loadu_pd(reinterpret_cast<double*>(fftBuffer + i + 2)); // [re2,im2,re3,im3]
+                // unpacklo: [re0, re2 | re1, re3], permute -> [re0,re1,re2,re3]
+                __m256d re = _mm256_permute4x64_pd(_mm256_unpacklo_pd(ab, cd), 0xD8);
+                __m256d im = _mm256_permute4x64_pd(_mm256_unpackhi_pd(ab, cd), 0xD8);
+                _mm256_storeu_pd(data + i, re);
+                _mm256_storeu_pd(temp + i, im);
+            }
+            for (; i < fftSize; ++i) { data[i] = fftBuffer[i].re; temp[i] = fftBuffer[i].im; }
+        }
+#else
         for (int i = 0; i < fftSize; ++i) { data[i] = fftBuffer[i].re; temp[i] = fftBuffer[i].im; }
+#endif
 
         vdHypot(fftSize, data, temp, data); // data = magnitude
 
         // ゼロ除算防止 (Clamp)
+#if defined(__AVX2__)
+        {
+            const __m256d vMin = _mm256_set1_pd(1.0e-100);
+            int i = 0;
+            const int vEnd = fftSize / 4 * 4;
+            for (; i < vEnd; i += 4)
+            {
+                __m256d v = _mm256_loadu_pd(data + i);
+                _mm256_storeu_pd(data + i, _mm256_max_pd(v, vMin));
+            }
+            for (; i < fftSize; ++i) data[i] = (std::max)(data[i], 1.0e-100);
+        }
+#else
         for (int i = 0; i < fftSize; ++i)
             data[i] = (std::max)(data[i], 1.0e-100);
+#endif
 
         // 対数: re = ln(data)
         vdLn(fftSize, data, data);
 
-        // fftBufferに書き戻し (虚部は0)
+        // fftBufferに書き戻し (虚部は0) (AVX2 Reinterleave)
+#if defined(__AVX2__)
+        {
+            const __m256d zeros = _mm256_setzero_pd();
+            int i = 0;
+            const int vEnd = fftSize / 4 * 4;
+            for (; i < vEnd; i += 4)
+            {
+                __m256d re = _mm256_loadu_pd(data + i); // [re0,re1,re2,re3]
+                // unpacklo/hi + permute2f128 で (re,0) ペアに展開
+                __m256d lo12 = _mm256_unpacklo_pd(re, zeros); // [re0,0 | re2,0]
+                __m256d hi12 = _mm256_unpackhi_pd(re, zeros); // [re1,0 | re3,0]
+                __m256d first  = _mm256_permute2f128_pd(lo12, hi12, 0x20); // [re0,0,re1,0]
+                __m256d second = _mm256_permute2f128_pd(lo12, hi12, 0x31); // [re2,0,re3,0]
+                _mm256_storeu_pd(reinterpret_cast<double*>(fftBuffer + i),     first);
+                _mm256_storeu_pd(reinterpret_cast<double*>(fftBuffer + i + 2), second);
+            }
+            for (; i < fftSize; ++i) { fftBuffer[i].re = data[i]; fftBuffer[i].im = 0.0; }
+        }
+#else
         for (int i = 0; i < fftSize; ++i) { fftBuffer[i].re = data[i]; fftBuffer[i].im = 0.0; }
+#endif
 #else
         for (int i = 0; i < fftSize; ++i)
         {
@@ -972,15 +1055,13 @@ void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
     createFrequencyResponseSnapshot(displayIR, loadedSR);
 
     // 安全に差し替え (Atomic Swap)
-    newConv->incReferenceCount(); // Atomicポインタで保持するための参照カウント
-    auto oldConv = convolution.exchange(newConv.get(), std::memory_order_acq_rel);
+    auto oldConv = convolution.exchange(newConv, std::memory_order_acq_rel);
 
     if (oldConv)
     {
         DBG("ConvolverProcessor: Enqueueing old StereoConvolver to trash bin.");
         const juce::ScopedLock sl(trashBinLock);
-        trashBinPending.push_back(StereoConvolver::Ptr(oldConv)); // 古いオブジェクトをゴミ箱へ
-        oldConv->decReferenceCount();
+        trashBinPending.push_back(oldConv); // 古いオブジェクトをゴミ箱へ
     }
 
     // 現在の有効なIR長を更新
@@ -998,8 +1079,7 @@ void ConvolverProcessor::cleanup()
     {
         const juce::ScopedLock sl(trashBinLock);
         // 1. Clean old trash
-        auto it = std::remove_if(trashBin.begin(), trashBin.end(),
-                                 [](const auto& p) { return p->getReferenceCount() == 1; });
+        auto it = std::remove_if(trashBin.begin(), trashBin.end(), [](const auto& p) { return p.use_count() == 1; });
 
         toDelete.insert(toDelete.end(),
                         std::make_move_iterator(it),
@@ -1187,8 +1267,7 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
 
     if (v.hasProperty ("irPath"))
     {
-
-        juce::File fileToLoad;
+        juce::File fileToLoad; // ロード対象のファイルを保持
         juce::String path = v.getProperty ("irPath").toString();
         if (path.isNotEmpty())
         {
@@ -1213,8 +1292,8 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
             }
         }
 
-        // ← irFileLock 解放後に loadImpulseResponse() 呼び出し
-        if (fileToLoad != juce::File())
+        // ロックの外でロードを実行
+        if (fileToLoad.existsAsFile())
             loadImpulseResponse(fileToLoad);
     }
 }
@@ -1224,6 +1303,8 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
 //--------------------------------------------------------------
 void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
 {
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+
     // パラメータの同期
     mixTarget.store(other.mixTarget.load(), std::memory_order_release);
     bypassed.store(other.bypassed.load(), std::memory_order_release);
@@ -1247,25 +1328,22 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     // prepareToPlayでのreset()が稼働中のDSPに影響してしまう。
     // そのため、ディープコピーを作成して独立させる。
     auto otherConv = other.convolution.load(std::memory_order_acquire);
-    if (otherConv)
+    auto oldConv = convolution.exchange(otherConv, std::memory_order_release);
+    if (oldConv)
     {
-        // Shallow Copy (共有) に変更
-        // prepareToPlayで必要に応じてDeep Copyを行うことで、通常時のオーバーラップ維持を実現
-        otherConv->incReferenceCount();
-        auto oldConv = convolution.exchange(otherConv, std::memory_order_release);
-        if (oldConv)
-            oldConv->decReferenceCount();
-    }
-    else
-    {
-        auto oldConv = convolution.exchange(nullptr, std::memory_order_release);
-        if (oldConv)
-            oldConv->decReferenceCount();
+        // This sync is complex. For now, just trash the old one.
+        // A more robust solution might involve cloning if the state is truly independent.
+        // Since this is part of a full state sync for a new DSP core,
+        // simply replacing and trashing is the intended RCU pattern.
+        const juce::ScopedLock sl(trashBinLock);
+        trashBinPending.push_back(oldConv);
     }
 }
 
 void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
 {
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+
     // 軽量なパラメータのみ同期 (AudioBufferのコピーを避ける)
     mixTarget.store(other.mixTarget.load(), std::memory_order_release);
     bypassed.store(other.bypassed.load(), std::memory_order_release);
@@ -1276,7 +1354,7 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
     // サンプルレートが一致する場合のみ Convolution オブジェクトを同期する。
     // オーバーサンプリング中は DSP側のレート(Nx) != UI側のレート(1x) となるため、
     // UI側のオブジェクトをコピーするとピッチズレやレイテンシー不整合が発生する。
-    if (std::abs(currentSampleRate.load() - other.currentSampleRate.load()) < 1.0)
+    if (std::abs(currentSampleRate.load() - other.currentSampleRate.load()) < 1e-6)
     {
         auto otherConv = other.convolution.load(std::memory_order_acquire);
         auto expectedConv = convolution.load(std::memory_order_acquire);
@@ -1309,12 +1387,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // ── Step 1: RCU State Load (Lock-free / Wait-free) ──
     // 参照カウントをインクリメントして、処理中の削除を防ぐ
-    StereoConvolver::Ptr convPtr = convolution.load(std::memory_order_acquire);
-    StereoConvolver* conv = convPtr.get();
+    auto conv = convolution.load(std::memory_order_acquire);
 
     // ── Step 2: 処理実行可能かチェック ──
     // バイパス、未準備、IR未ロードの場合はスルー
-    if (!isPrepared.load(std::memory_order_acquire) || bypassed.load() || !conv)
+    if (!isPrepared.load(std::memory_order_acquire) || bypassed.load(std::memory_order_relaxed) || !conv)
     {
         return;
     }

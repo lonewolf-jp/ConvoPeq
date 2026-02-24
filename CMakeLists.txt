@@ -98,8 +98,8 @@ endif()
 # WDLはヘッダーオンリーではなく実装ファイルを含むため、ソースとして追加します。
 # WDL_FFT_REALSIZE=8 を定義して double 精度で動作させます。
 set(WDL_SOURCES
-    WDL/WDL/convoengine.cpp
-    WDL/WDL/fft.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/WDL/WDL/convoengine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/WDL/WDL/fft.c
 )
 
 #------------------------------------------------------------
@@ -182,6 +182,7 @@ target_compile_definitions(ConvoPeq PRIVATE
 )
 
 target_include_directories(ConvoPeq PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/WDL
 )
 

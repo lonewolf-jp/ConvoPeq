@@ -8,12 +8,11 @@
 #include <complex>
 #include <algorithm>
 #include <mutex>
-#include <Functiondiscoverykeys.h>
-#include <Mmdeviceapi.h>
 
 #if JUCE_INTEL
  #include <xmmintrin.h>
  #include <pmmintrin.h>
+ #include <immintrin.h>
 #endif
 
 // コンストラクタ
@@ -62,9 +61,7 @@ AudioEngine::~AudioEngine()
 
     // 進行中のコールバックが完了するのを待つため、DSPを無効化
     // これにより、changeListenerCallback内でdsp->へのアクセスを防ぐ
-    AudioEngine::DSPCore::Ptr oldDSP = currentDSP.exchange(nullptr);
-    if (oldDSP)
-        oldDSP->decReferenceCount();
+    currentDSP.store(nullptr, std::memory_order_release);
 }
 
 //--------------------------------------------------------------
@@ -86,26 +83,38 @@ void AudioEngine::readFromFifo(float* dest, int numSamples)
     const int actualRead = size1 + size2;
     const bool hasRightChannel = (audioFifoBuffer.getNumChannels() > 1);
 
+    // AVX2 L+R 平均化ヘルパー
+    auto mixToMono = [](const float* srcL, const float* srcR, float* dst, int n) noexcept
+    {
+#if defined(__AVX2__)
+        const __m256 half = _mm256_set1_ps(0.5f);
+        int i = 0;
+        const int vEnd = n / 8 * 8;
+        for (; i < vEnd; i += 8)
+        {
+            __m256 vL  = _mm256_loadu_ps(srcL + i);
+            __m256 vR  = _mm256_loadu_ps(srcR + i);
+            __m256 avg = _mm256_mul_ps(_mm256_add_ps(vL, vR), half);
+            _mm256_storeu_ps(dst + i, avg);
+        }
+        for (; i < n; ++i) dst[i] = (srcL[i] + srcR[i]) * 0.5f;
+#else
+        for (int i = 0; i < n; ++i) dst[i] = (srcL[i] + srcR[i]) * 0.5f;
+#endif
+    };
+
     if (size1 > 0)
     {
         const float* srcL = audioFifoBuffer.getReadPointer(0, start1);
-        const float* srcR = hasRightChannel ? audioFifoBuffer.getReadPointer(1, start1) : nullptr;
-        for (int i = 0; i < size1; ++i)
-        {
-            float valR = (srcR != nullptr) ? srcR[i] : srcL[i];
-            dest[i] = (srcL[i] + valR) * 0.5f;
-        }
+        const float* srcR = hasRightChannel ? audioFifoBuffer.getReadPointer(1, start1) : srcL;
+        mixToMono(srcL, srcR, dest, size1);
     }
 
     if (size2 > 0)
     {
         const float* srcL = audioFifoBuffer.getReadPointer(0, start2);
-        const float* srcR = hasRightChannel ? audioFifoBuffer.getReadPointer(1, start2) : nullptr;
-        for (int i = 0; i < size2; ++i)
-        {
-            float valR = (srcR != nullptr) ? srcR[i] : srcL[i];
-            dest[size1 + i] = (srcL[i] + valR) * 0.5f;
-        }
+        const float* srcR = hasRightChannel ? audioFifoBuffer.getReadPointer(1, start2) : srcL;
+        mixToMono(srcL, srcR, dest + size1, size2);
     }
 
     // 実際に読み取った分だけFIFOを進める
@@ -283,44 +292,64 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     const int bufferSize = samplesPerBlockExpected;
 
     // サンプルレート変更検知
-    const bool rateChanged = (std::abs(currentSampleRate.load() - safeSampleRate) > 1.0);
+    const bool rateChanged = (std::abs(currentSampleRate.load() - safeSampleRate) > 1e-6);
     // ブロックサイズ変更検知 (FFTConvolverのパーティションサイズ最適化のため)
     const bool blockSizeChanged = (maxSamplesPerBlock.load() != bufferSize);
-
-    // UI用プロセッサのサンプルレートも更新 (IR表示やパラメータ管理のため)
-    uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
-    uiEqProcessor.prepareToPlay(safeSampleRate, bufferSize);
 
     maxSamplesPerBlock.store(bufferSize);
     currentSampleRate.store(safeSampleRate);
 
     // DSP再構築 (RT安全化: 新しいDSPを作成してスワップ)
     // MKLのメモリ確保をAudio Threadから分離するため、requestRebuildはMessage Threadで実行する。
-    // prepareToPlayはMessage Threadからの完了を待つ。
+    // Audio Threadから呼ばれた場合は非同期リクエストを投げ、完了を待たずにリターンする。
     if (juce::MessageManager::getInstance()->isThisTheMessageThread())
     {
+        // UI用プロセッサのサンプルレートも更新 (IR表示やパラメータ管理のため)
+        uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
+        uiEqProcessor.prepareToPlay(safeSampleRate, bufferSize);
+
+        // Bypass状態の同期
+        uiConvolverProcessor.setBypass(convBypassRequested.load(std::memory_order_relaxed));
+
         requestRebuild(safeSampleRate, bufferSize);
     }
     else
     {
-        pendingSampleRate.store(safeSampleRate);
-        pendingBlockSize.store(bufferSize);
-        rebuildRequested.store(true);
+        // 非同期リクエスト (ブロッキング回避)
+        // Audio ThreadやDriver Threadから呼ばれた場合、待機せずにリクエストのみ投げる。
 
-        juce::MessageManager::callAsync([this] {
-            if (rebuildRequested.load())
+        DSPCore::Ptr oldDSPPtr;
+
+        // サンプルレートが変更された場合、不整合を防ぐために一時的に出力を停止する
+        if (rateChanged)
+        {
+            auto oldDSP = currentDSP.exchange(nullptr, std::memory_order_acq_rel);
+            if (oldDSP)
             {
-                requestRebuild(pendingSampleRate.load(), pendingBlockSize.load());
-                rebuildRequested.store(false);
-                rebuildCompleteEvent.signal();
+                // Audio Threadでのロック/メモリ確保を避けるため、
+                // スマートポインタに所有権を移譲してMessage Threadへ渡す (Lambdaキャプチャ)
+                oldDSPPtr = oldDSP;
             }
-        });
+        }
 
-        // Message Threadでの再構築が完了するまで同期的に待機
-        rebuildCompleteEvent.wait();
+        juce::WeakReference<AudioEngine> weakThis(this);
+        // oldDSPPtr をキャプチャすることで、Message Thread での破棄を保証する
+        juce::MessageManager::callAsync([weakThis, safeSampleRate, bufferSize, oldDSPPtr] {
+            if (auto* engine = weakThis.get()) {
+                // UI用プロセッサの更新もMessage Threadで行う (メモリ確保回避)
+                engine->uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
+                engine->uiEqProcessor.prepareToPlay(safeSampleRate, bufferSize);
+
+                // Bypass状態の同期
+                engine->uiConvolverProcessor.setBypass(engine->convBypassRequested.load(std::memory_order_relaxed));
+
+                engine->requestRebuild(safeSampleRate, bufferSize);
+                engine->sendChangeMessage();
+            }
+            // oldDSPPtr はここでスコープを抜け、Message Thread 上でデストラクタが呼ばれる
+        });
     }
 
-    uiConvolverProcessor.setBypass(convBypassActive.load (std::memory_order_relaxed));
     audioFifo.reset();
 
     // レベルメーターのリセット
@@ -331,9 +360,6 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // 再生中のリアルタイムな更新は getNextAudioBlock() で行われる
     eqBypassActive.store (eqBypassRequested.load (std::memory_order_relaxed), std::memory_order_relaxed);
     convBypassActive.store (convBypassRequested.load (std::memory_order_relaxed), std::memory_order_relaxed);
-
-    // ConvolverProcessorの状態も同期させておく（念のため）
-    uiConvolverProcessor.setBypass(convBypassActive.load (std::memory_order_relaxed));
 
     // UIコンポーネント（アナライザー等）に状態変更を通知し、タイマーの再開などを促す
 
@@ -359,7 +385,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             mmcssHandle = pAvSetMmThreadCharacteristicsPtr("Pro Audio", &mmcssTaskIndex); // No cast needed
             if (mmcssHandle == nullptr)
             {
-                juce::Logger::writeToLog("MMCSS: Failed to set thread characteristics.");
+                DBG("MMCSS: Failed to set thread characteristics.");
             }
             else
             {
@@ -367,14 +393,15 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 				auto AvSetMmThreadPriorityPtr = (pAvSetMmThreadPriority)GetProcAddress(avrtDll, "AvSetMmThreadPriority");
                 // タスクの優先度を最大に設定 (省略可能)
                 if(AvSetMmThreadPriorityPtr != nullptr) AvSetMmThreadPriorityPtr(mmcssHandle, static_cast<AVRT_PRIORITY>(AVRT_PRIORITY_MAX));
-                juce::Logger::writeToLog("MMCSS: Pro Audio thread characteristics set.");
+                DBG("MMCSS: Pro Audio thread characteristics set.");
             }
         }
         else
-            juce::Logger::writeToLog("MMCSS: AvSetMmThreadCharacteristicsA function not found.");
+            DBG("MMCSS: AvSetMmThreadCharacteristicsA function not found.");
     }
 #endif
-    sendChangeMessage();
+    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+        sendChangeMessage();
 }
 
 //--------------------------------------------------------------
@@ -383,7 +410,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 {
     // 新しいDSPコアを作成
-    DSPCore::Ptr newDSP = new DSPCore();
+    DSPCore::Ptr newDSP = std::make_shared<DSPCore>();
 
     // UIプロセッサから状態をコピー
     newDSP->eq.syncStateFrom(uiEqProcessor); // 最適化: ValueTreeを経由せず直接同期
@@ -395,9 +422,9 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     // 最適化: 現在のDSPから有効なオーバーサンプリング済みIRを再利用する
     // これにより、EQ変更などのたびにIRリビルド（音切れ）が発生するのを防ぐ
     bool irReused = false;
-    DSPCore* current = currentDSP.load(std::memory_order_acquire);
+    DSPCore::Ptr current = currentDSP.load(std::memory_order_acquire);
 
-    if (current && std::abs(current->sampleRate - sampleRate) < 1.0 &&
+    if (current && std::abs(current->sampleRate - sampleRate) < 1e-6 &&
         current->oversamplingFactor == newDSP->oversamplingFactor && newDSP->oversamplingFactor > 1)
     {
         // IRの生成条件（ファイル、位相設定、長さ）が一致しているか確認
@@ -437,18 +464,13 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP)
 {
     // Atomic Swap
-    // 新しいポインタの参照カウントをインクリメント (Atomic保持用)
-    newDSP->incReferenceCount();
-    auto oldDSP = currentDSP.exchange(newDSP.get(), std::memory_order_acq_rel);
+    auto oldDSP = currentDSP.exchange(newDSP, std::memory_order_release);
 
     if (oldDSP)
     {
         // Enqueue the old DSP to trash bin for deferred deletion
         const juce::ScopedLock sl(trashBinLock);
-        // ReferenceCountedObjectPtrでラップして保持 (参照カウント+1)
-        // Atomic保持分の参照カウントをデクリメント (-1)
-        trashBinPending.push_back(DSPCore::Ptr(oldDSP));
-        oldDSP->decReferenceCount();
+        trashBinPending.push_back(oldDSP);
     }
 }
 
@@ -461,7 +483,7 @@ void AudioEngine::timerCallback()
 
         // 1. Perform actual deletion: Remove objects with ref count 1 (only held by trashBin)
         auto it = std::remove_if(trashBin.begin(), trashBin.end(),
-                                 [](const auto& p) { return p->getReferenceCount() == 1; });
+                                 [](const auto& p) { return p.use_count() == 1; });
 
         toDelete.insert(toDelete.end(),
                         std::make_move_iterator(it),
@@ -697,7 +719,8 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     const int maxProcessingBlockSize = SAFE_MAX_BLOCK_SIZE * static_cast<int>(oversamplingFactor);
 
     // EQは内部でブロックサイズを使用しないが、一貫性のため実際のサイズを渡す
-    eq.prepareToPlay(processingRate, processingBlockSize);
+    // MKLスクラッチバッファのオーバーフローを防ぐため、最大サイズで確保する
+    eq.prepareToPlay(processingRate, maxProcessingBlockSize);
 
     // DCBlocker (JUCE IIR) には最大ブロックサイズを渡してProcessSpecを初期化する
     // 出力段(processOutput)で実行されるため、オーバーサンプリング前のレートとサイズを使用する
@@ -892,10 +915,6 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
                                       juce::AudioBuffer<float>& audioFifoBuffer) const noexcept
 {
     const int numSamples = (int)block.getNumSamples();
-    const int procChannels = (int)block.getNumChannels();
-    const double* l = block.getChannelPointer(0);
-    const double* r = (procChannels > 1) ? block.getChannelPointer(1) : nullptr;
-
     // FIFO空き容量チェック (Overflow Protection)
     // 部分書き込み対応: 空き容量分だけ書き込む (完全ドロップによる時間軸ジャンプを軽減)
     const int numToWrite = std::min(numSamples, audioFifo.getFreeSpace());
@@ -905,34 +924,62 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
     int start1, size1, start2, size2;
     audioFifo.prepareToWrite(numToWrite, start1, size1, start2, size2);
 
+    const double* l = block.getChannelPointer(0);
+    const double* r = (block.getNumChannels() > 1) ? block.getChannelPointer(1) : nullptr;
     const bool hasRightChannel = (audioFifoBuffer.getNumChannels() > 1);
 
-    // 第1セグメント書き込み
+    // AVX2 double→float 変換ヘルパー (4 doubles → 4 floats)
+    auto convertBlock = [&](const double* srcL, const double* srcR,
+                             float* dstL, float* dstR, int n) noexcept
+    {
+#if defined(__AVX2__)
+        int i = 0;
+        const int vEnd = n / 4 * 4;
+        for (; i < vEnd; i += 4)
+        {
+            __m256d vL = _mm256_loadu_pd(srcL + i);
+            __m128  fL = _mm256_cvtpd_ps(vL);
+            _mm_storeu_ps(dstL + i, fL);
+            if (dstR && srcR)
+            {
+                __m256d vR = _mm256_loadu_pd(srcR + i);
+                _mm_storeu_ps(dstR + i, _mm256_cvtpd_ps(vR));
+            }
+            else if (dstR)
+            {
+                _mm_storeu_ps(dstR + i, fL); // モノ → ステレオ
+            }
+        }
+        for (; i < n; ++i)
+        {
+            dstL[i] = static_cast<float>(srcL[i]);
+            if (dstR) dstR[i] = srcR ? static_cast<float>(srcR[i]) : dstL[i];
+        }
+#else
+        for (int i = 0; i < n; ++i)
+        {
+            dstL[i] = static_cast<float>(srcL[i]);
+            if (dstR) dstR[i] = srcR ? static_cast<float>(srcR[i]) : dstL[i];
+        }
+#endif
+    };
+
     if (size1 > 0)
     {
-        float* destL = audioFifoBuffer.getWritePointer(0, start1);
-        float* destR = hasRightChannel ? audioFifoBuffer.getWritePointer(1, start1) : nullptr;
-        for (int i = 0; i < size1; ++i)
-        {
-            destL[i] = static_cast<float>(l[i]);
-            if (destR)
-                destR[i] = (r != nullptr) ? static_cast<float>(r[i]) : destL[i];
-        }
+        convertBlock(l, r,
+                     audioFifoBuffer.getWritePointer(0, start1),
+                     hasRightChannel ? audioFifoBuffer.getWritePointer(1, start1) : nullptr,
+                     size1);
         l += size1;
         if (r != nullptr) r += size1;
     }
 
-    // 第2セグメント書き込み
     if (size2 > 0)
     {
-        float* destL = audioFifoBuffer.getWritePointer(0, start2);
-        float* destR = hasRightChannel ? audioFifoBuffer.getWritePointer(1, start2) : nullptr;
-        for (int i = 0; i < size2; ++i)
-        {
-            destL[i] = static_cast<float>(l[i]);
-            if (destR)
-                destR[i] = (r != nullptr) ? static_cast<float>(r[i]) : destL[i];
-        }
+        convertBlock(l, r,
+                     audioFifoBuffer.getWritePointer(0, start2),
+                     hasRightChannel ? audioFifoBuffer.getWritePointer(1, start2) : nullptr,
+                     size2);
     }
 
     audioFifo.finishedWrite(size1 + size2);
@@ -1054,42 +1101,56 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
             float* dst = buffer->getWritePointer(ch, startSample);
 
+            // ── フェーズ1: DCブロッカー (IIR 逐次依存, スカラー) ──
             if (applyDither)
             {
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    // 1. DC Offset Removal
-                    // 構造: Input -> [DC Blocker (4th Order)] -> Signal
                     double processed = blocker.process(data[i]);
-                    data[i] = processed; // 次回処理のために状態更新として書き戻す（必要であれば）
-
-                    // 2. Dither & Quantize
-                    // 構造: Signal -> [Noise Shaped Quantizer] -> Output
-                    //      (Error Feedback Topology: Output = Quantize(Signal + FilteredError))
-                    double val = dither.process(processed, ch);
-
-                    // 3. Safety & Store
-                    if (!std::isfinite(val)) val = 0.0;
-                    dst[i] = juce::jlimit(-1.0f, 1.0f, static_cast<float>(val));
+                    data[i] = dither.process(processed, ch); // ディザ後も data[] に保存
                 }
             }
             else
             {
                 for (int i = 0; i < numSamples; ++i)
-                {
-                    // 1. DC Offset Removal
-                    double processed = blocker.process(data[i]);
-                    data[i] = processed;
+                    data[i] = blocker.process(data[i]);
+            }
 
-                    // 2. Store
-                    if (!std::isfinite(processed)) processed = 0.0;
-                    dst[i] = juce::jlimit(-1.0f, 1.0f, static_cast<float>(processed));
+            // ── フェーズ2: double→float 変換 + NaN除去 + クランプ (AVX2 一括) ──
+#if defined(__AVX2__)
+            {
+                const __m256d vMax  = _mm256_set1_pd(1.0);
+                const __m256d vMin  = _mm256_set1_pd(-1.0);
+                const __m256d vZero = _mm256_setzero_pd();
+
+                int i = 0;
+                const int vEnd = numSamples / 4 * 4;
+                for (; i < vEnd; i += 4)
+                {
+                    __m256d v = _mm256_loadu_pd(data + i);
+                    // NaN → 0: ordered compare (NaN は false になる)
+                    __m256d mask = _mm256_cmp_pd(v, v, _CMP_ORD_Q);
+                    v = _mm256_blendv_pd(vZero, v, mask);
+                    // clamp [-1, 1]
+                    v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);
+                    // double → float (4 doubles → 4 floats)
+                    _mm_storeu_ps(dst + i, _mm256_cvtpd_ps(v));
+                }
+                for (; i < numSamples; ++i)
+                {
+                    double val = data[i];
+                    if (!std::isfinite(val)) val = 0.0;
+                    dst[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, val));
                 }
             }
-        }
-        else
-        {
-            buffer->clear (ch, startSample, numSamples);
+#else
+            for (int i = 0; i < numSamples; ++i)
+            {
+                double val = data[i];
+                if (!std::isfinite(val)) val = 0.0;
+                dst[i] = juce::jlimit(-1.0f, 1.0f, static_cast<float>(val));
+            }
+#endif
         }
     }
 }

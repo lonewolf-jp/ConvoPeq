@@ -196,21 +196,21 @@ public:
     //----------------------------------------------------------
     // 状態構造体
     //----------------------------------------------------------
-    struct BandNode : public juce::ReferenceCountedObject
+    struct BandNode
     {
         EQCoeffsSVF coeffs;
         bool active;
         EQChannelMode mode;
-        using Ptr = juce::ReferenceCountedObjectPtr<BandNode>;
+        using Ptr = std::shared_ptr<BandNode>;
     };
 
-    struct EQState : public juce::ReferenceCountedObject
+    struct EQState
     {
         std::array<EQBandParams, NUM_BANDS> bands;
         std::array<EQBandType, NUM_BANDS> bandTypes;
         std::array<EQChannelMode, NUM_BANDS> bandChannelModes;
         float totalGainDb = 0.0f;
-        using Ptr = juce::ReferenceCountedObjectPtr<EQState>;
+        using Ptr = std::shared_ptr<EQState>;
     };
 
     //----------------------------------------------------------
@@ -267,7 +267,7 @@ private:
     void updateBandNode(int bandIndex);
 
     // スムージング処理
-    std::atomic<EQState*> currentState { nullptr };
+    std::atomic<EQState::Ptr> currentState { nullptr };
 
     juce::ListenerList<Listener> listeners;
 
@@ -283,7 +283,7 @@ private:
     static constexpr double SMOOTHING_TIME_SEC = 0.05; // 50ms
 
     // ── 係数管理 (Atomic Swap) ──
-    std::array<std::atomic<BandNode*>, NUM_BANDS> bandNodes;
+    std::array<std::atomic<BandNode::Ptr>, NUM_BANDS> bandNodes;
     std::vector<BandNode::Ptr> bandNodeTrashBin;
     std::vector<BandNode::Ptr> bandNodeTrashBinPending;
     std::vector<EQState::Ptr> stateTrashBin;

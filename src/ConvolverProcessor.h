@@ -170,8 +170,8 @@ private:
     //----------------------------------------------------------
     // WDL Convolution Engine
     //----------------------------------------------------------
-    // ステレオ処理用ラッパー
-    struct StereoConvolver : public juce::ReferenceCountedObject
+    // Stereo processing wrapper
+    struct StereoConvolver
     {
         // WDL_ConvolutionEngine_Div は Non-uniform partitioned convolution を提供し、
         // 低レイテンシー動作が可能です。
@@ -181,7 +181,7 @@ private:
         int latency = 0;
         int irLatency = 0; // IR由来の遅延 (ピーク位置)
 
-        using Ptr = juce::ReferenceCountedObjectPtr<StereoConvolver>;
+        using Ptr = std::shared_ptr<StereoConvolver>;
 
         StereoConvolver() = default;
 
@@ -222,9 +222,8 @@ private:
     };
 
     // Note: trashBin は、Audio Thread がまだ使用している可能性のある古い Convolution オブジェクトを保持するために使用されます。
-    std::atomic<StereoConvolver*> convolution { nullptr };
-    std::vector<StereoConvolver::Ptr> trashBin;
-    std::vector<StereoConvolver::Ptr> trashBinPending;
+    std::atomic<StereoConvolver::Ptr> convolution;
+    std::vector<StereoConvolver::Ptr> trashBin, trashBinPending;
     juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
