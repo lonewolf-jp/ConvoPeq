@@ -224,8 +224,12 @@ void DeviceSettings::changeListenerCallback (juce::ChangeBroadcaster* source)
 void DeviceSettings::updateBitDepthList()
 {
     // 現在のデバイスを取得
-    juce::Array<int> supportedBitDepths; // device変数は未使用のため削除
-    // AudioIODeviceにはビット深度を取得する標準的なAPIがないため、一般的な値をリストアップ
+    juce::Array<int> supportedBitDepths;
+
+    if (auto* device = audioDeviceManager.getCurrentAudioDevice())
+    {
+        supportedBitDepths = device->getAvailableBitDepths();
+    }
 
     // デバイスがビット深度を報告しない場合、またはデバイスがない場合のフォールバック
     if (supportedBitDepths.isEmpty())

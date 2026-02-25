@@ -331,8 +331,9 @@ private:
     //----------------------------------------------------------
     // 状態管理
     //----------------------------------------------------------
-    std::atomic<DSPCore::Ptr> currentDSP; // C++20 std::atomic<std::shared_ptr>
-    std::vector<DSPCore::Ptr> trashBin; // 古いDSPの保持用 (Audio Threadでの削除防止)
+    std::atomic<DSPCore*> currentDSP { nullptr }; // Raw pointer for Audio Thread (Lock-free)
+    DSPCore::Ptr activeDSP; // Ownership holder for Message Thread
+    std::vector<std::pair<DSPCore::Ptr, uint32>> trashBin; // Time-based garbage collection
     std::vector<DSPCore::Ptr> trashBinPending; // 新しく追加されたゴミ (次回のタイマーコールバックまで保持)
     juce::CriticalSection trashBinLock;
 
@@ -345,6 +346,7 @@ private:
     std::atomic<bool> convBypassRequested { false };
     std::atomic<bool> eqBypassActive   { false };
     std::atomic<bool> convBypassActive { false };
+    std::atomic<bool> rebuildRequested { false };
     std::atomic<ProcessingOrder> currentProcessingOrder{ProcessingOrder::ConvolverThenEQ};
     std::atomic<AnalyzerSource> currentAnalyzerSource { AnalyzerSource::Output };
     std::atomic<int> ditherBitDepth { 0 }; // 0 = 未初期化 (DeviceSettingsで最大値に設定される)
@@ -357,6 +359,15 @@ private:
     // MMCSS (Multimedia Class Scheduler Service) handle
     HANDLE mmcssHandle { nullptr };
     DWORD mmcssTaskIndex { 0 };
+
+    // Function pointers for MMCSS
+    typedef HANDLE (WINAPI *pAvSetMmThreadCharacteristics)(LPCSTR, PDWORD);
+    typedef BOOL (WINAPI *pAvSetMmThreadPriority)(HANDLE, AVRT_PRIORITY);
+    typedef BOOL (WINAPI *pAvRevertMmThreadCharacteristics)(HANDLE);
+
+    pAvSetMmThreadCharacteristics pAvSetMmThreadCharacteristicsPtr = nullptr;
+    pAvSetMmThreadPriority pAvSetMmThreadPriorityPtr = nullptr;
+    pAvRevertMmThreadCharacteristics pAvRevertMmThreadCharacteristicsPtr = nullptr;
 #endif
 
     // dB変換時の下限値

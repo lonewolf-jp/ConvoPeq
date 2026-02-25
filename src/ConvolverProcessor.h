@@ -176,7 +176,8 @@ private:
         // WDL_ConvolutionEngine_Div は Non-uniform partitioned convolution を提供し、
         // 低レイテンシー動作が可能です。
         std::array<WDL_ConvolutionEngine_Div, 2> convolvers;
-        std::array<WDL_ImpulseBuffer, 2> impulses;
+        std::array<convo::AlignedBuffer, 2> irData;
+        int irDataLength = 0;
 
         int latency = 0;
         int irLatency = 0; // IR由来の遅延 (ピーク位置)
@@ -191,27 +192,27 @@ private:
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        void init(const WDL_ImpulseBuffer& newIrL, const WDL_ImpulseBuffer& newIrR, int peakDelay, int maxFFTSize, int knownBlockSize)
+        void init(convo::AlignedBuffer irL, convo::AlignedBuffer irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize)
         {
-            // IRデータをコピー (WDL_ImpulseBufferにはコピーメソッドがないため手動で行う)
-            auto copyImpulse = [](WDL_ImpulseBuffer& dst, const WDL_ImpulseBuffer& src) {
-                dst.SetNumChannels(src.impulses.list.GetSize());
-                dst.samplerate = src.samplerate;
-                for (int i = 0; i < dst.GetNumChannels(); ++i) {
-                    int len = src.impulses[i].GetSize();
-                    dst.impulses[i].Resize(len);
-                    memcpy(dst.impulses[i].Get(), src.impulses[i].Get(), len * sizeof(double));
-                }
-            };
-
-            copyImpulse(this->impulses[0], newIrL);
-            copyImpulse(this->impulses[1], newIrR);
+            irData[0] = std::move(irL);
+            irData[1] = std::move(irR);
+            irDataLength = length;
             this->irLatency = peakDelay;
+
+            WDL_ImpulseBuffer impL_stack, impR_stack;
+            impL_stack.samplerate = sr;
+            impR_stack.samplerate = sr;
+            impL_stack.SetNumChannels(1);
+            impR_stack.SetNumChannels(1);
+
+            // 事前確保したメモリを指すように設定 (WDL内部でのmallocを回避)
+            impL_stack.impulses.Get(0)->Set(irData[0].get(), irDataLength);
+            impR_stack.impulses.Get(0)->Set(irData[1].get(), irDataLength);
 
             // WDL_ConvolutionEngine_Div の初期化
             // latency_allowed=0 で低レイテンシーモードを有効化
-            convolvers[0].SetImpulse(&impulses[0], maxFFTSize, knownBlockSize, 0, 0, 0);
-            convolvers[1].SetImpulse(&impulses[1], maxFFTSize, knownBlockSize, 0, 0, 0);
+            convolvers[0].SetImpulse(&impL_stack, maxFFTSize, knownBlockSize, 0, 0, 0);
+            convolvers[1].SetImpulse(&impR_stack, maxFFTSize, knownBlockSize, 0, 0, 0);
 
             // WDLエンジンのレイテンシーを取得 (通常は0またはパーティションサイズ依存)
             // WDL_ConvolutionEngine::GetLatency() はサンプル数を返す
@@ -222,8 +223,10 @@ private:
     };
 
     // Note: trashBin は、Audio Thread がまだ使用している可能性のある古い Convolution オブジェクトを保持するために使用されます。
-    std::atomic<StereoConvolver::Ptr> convolution;
-    std::vector<StereoConvolver::Ptr> trashBin, trashBinPending;
+    std::atomic<StereoConvolver*> convolution { nullptr }; // Raw pointer for Audio Thread (Lock-free)
+    StereoConvolver::Ptr activeConvolution; // Ownership holder for Message Thread
+    std::vector<std::pair<StereoConvolver::Ptr, uint32>> trashBin; // Time-based GC
+    std::vector<StereoConvolver::Ptr> trashBinPending;
     juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
@@ -266,7 +269,8 @@ private:
     std::atomic<bool> currentIrOptimized { false };
     juce::AudioBuffer<double> originalIR; // 元IR保持 (リサンプリング/トリミング用)
     double originalIRSampleRate = 0.0;
-    std::vector<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
+    // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
+    std::vector<float, convo::MKLAllocator<float>> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     std::atomic<double> currentSampleRate { 48000.0 };
 
     //----------------------------------------------------------

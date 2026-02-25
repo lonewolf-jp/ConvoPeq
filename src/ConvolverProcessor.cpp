@@ -274,6 +274,19 @@ public:
     {
         juce::ScopedNoDenormals noDenormals; // バックグラウンド処理でのDenormal対策
 
+#if JUCE_INTEL
+        // MKL/AVX最適化のためにFTZ/DAZフラグを明示的に設定
+        // ScopedNoDenormalsでも設定されるが、MKLの要件として明示しておく
+        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+
+#if JUCE_DSP_USE_INTEL_MKL
+        // VML (Vector Math Library) のDenormal扱いをゼロに設定
+        // vdHypot, vdLn 等のパフォーマンス低下を防ぐ
+        vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
+#endif
+
         // メモリ確保失敗時の例外処理: std::terminate() を防ぐために try-catch で囲む
         // 早期終了時にフラグを確実にリセットするためのRAIIヘルパー
         struct FlagResetter {
@@ -526,29 +539,53 @@ public:
             // 10. 新しいConvolutionの構築 (Non-uniform Partitioned Convolution)
             result.newConv = std::make_shared<StereoConvolver>();
 
-            // WDL_ImpulseBuffer用にIRデータを準備
+            // IRデータを格納するアラインされたバッファを準備 (Rebuild用に保持)
+            convo::AlignedBuffer irL, irR;
+            irL.allocate(result.targetLength);
+            irR.allocate(result.targetLength);
+
+            const double* srcL = trimmed.getReadPointer(0);
+            const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
+
+            // データを一度だけコピー
+            std::memcpy(irL.get(), srcL, result.targetLength * sizeof(double));
+            std::memcpy(irR.get(), srcR, result.targetLength * sizeof(double));
+
+            result.newConv->irData[0] = std::move(irL);
+            result.newConv->irData[1] = std::move(irR);
+            result.newConv->irDataLength = result.targetLength;
+            result.newConv->irLatency = irPeakLatency;
+
+            // === 最も安全なIRトリミング（WDL推奨）===
+            // 新規WDLエンジン作成 + 即座にtargetLengthで初期化
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                // 完全に新規作成（内部状態を100%クリア）
+                result.newConv->convolvers[ch].SetImpulse(nullptr, 0, 0);  // 強制リセット
+            }
+
             WDL_ImpulseBuffer impL, impR;
             impL.SetNumChannels(1);
             impR.SetNumChannels(1);
             impL.samplerate = sampleRate;
             impR.samplerate = sampleRate;
 
-            // WDL_ImpulseBuffer::samples は WDL_TypedBuf<WDL_FFT_REAL>
-            // WDL_FFT_REALSIZE=8 なので double
-            impL.impulses[0].Resize(result.targetLength);
-            impR.impulses[0].Resize(result.targetLength);
+            // targetLengthで正確にResize（これが重要）
+            impL.impulses.Get(0)->Resize(result.targetLength);
+            impR.impulses.Get(0)->Resize(result.targetLength);
 
-            const double* srcL = trimmed.getReadPointer(0);
-            const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
+            // WDL用バッファにデータをコピー
+            std::memcpy(impL.impulses.Get(0)->Get(), result.newConv->irData[0].get(), result.targetLength * sizeof(double));
+            std::memcpy(impR.impulses.Get(0)->Get(), result.newConv->irData[1].get(), result.targetLength * sizeof(double));
 
-            std::memcpy(impL.impulses[0].Get(), srcL, result.targetLength * sizeof(double));
-            std::memcpy(impR.impulses[0].Get(), srcR, result.targetLength * sizeof(double));
+            // WDLに渡す（これで内部レイテンシ計算が完全にtargetLength基準になる）
+            // Note: known_blocksize には実際のブロックサイズ(blockSize)を渡すことで、
+            // リアルタイム処理に適したパーティション分割を促し、低レイテンシーを実現する。
+            result.newConv->convolvers[0].SetImpulse(&impL, result.targetLength, blockSize, 0, 0, 0);
+            result.newConv->convolvers[1].SetImpulse(&impR, result.targetLength, blockSize, 0, 0, 0);
 
-            // サンプルレートに基づいて最大FFTサイズを計算
-            int maxFFTSize = calculateMaxFFTSize(sampleRate);
-
-            // 初期化
-            result.newConv->init(impL, impR, irPeakLatency, maxFFTSize, blockSize);
+            // レイテンシー取得
+            result.newConv->latency = result.newConv->convolvers[0].GetLatency();
 
             // 11. WDLエンジンのプリウォーミング (Audio Threadでのメモリ確保回避)
             // WDL_ConvolutionEngineは、最初のAdd呼び出し時に内部バッファ(ProcChannelInfo)を確保します。
@@ -620,6 +657,13 @@ private:
 ConvolverProcessor::ConvolverProcessor()
     : mixSmoother(1.0f)
 {
+    // Audio Threadでのメモリ確保を避けるため、バッファはコンストラクタで確保する
+    delayBuffer[0].allocate(DELAY_BUFFER_SIZE);
+    delayBuffer[1].allocate(DELAY_BUFFER_SIZE);
+    dryBufferStorage[0].allocate(MAX_BLOCK_SIZE);
+    dryBufferStorage[1].allocate(MAX_BLOCK_SIZE);
+    smoothingBufferStorage[0].allocate(MAX_BLOCK_SIZE);
+    smoothingBufferStorage[1].allocate(MAX_BLOCK_SIZE);
 }
 
 //--------------------------------------------------------------
@@ -632,6 +676,7 @@ ConvolverProcessor::~ConvolverProcessor()
     trashBin.clear();
     trashBinPending.clear();
     convolution.store(nullptr);
+    activeConvolution.reset();
 }
 
 //--------------------------------------------------------------
@@ -653,36 +698,53 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     currentSpec = spec;
 
     // 既存のコンボリューション状態の確認
-    auto conv = convolution.load(std::memory_order_acquire);
+    auto* conv = convolution.load(std::memory_order_acquire);
     if (conv) {
-        // WDL_ConvolutionEngine_Div は初期化時に known_blocksize を使用して最適化されるため、
-        // ブロックサイズが大幅に変更された場合はリビルドが望ましいですが、
-        // AudioEngine側で rebuildAllIRsSynchronous() が呼ばれるため、ここでは何もしません。
-        // ただし、内部状態の不整合を防ぐためにリセットを行うことは安全です。
+        // FIX: Oversampling x8時のblockSize/partitionSize不整合対策
+        // WDL_ConvolutionEngine_Div に正しい knownBlockSize を渡すために、エンジンを再構築する。
+        // 既存のエンジンは他スレッドで共有されている可能性があるため、複製して差し替える。
+        const int internalBlockSize = juce::nextPowerOfTwo(samplesPerBlock);
 
-        // Note: AudioEngine::requestRebuild が呼ばれると、新しい ConvolverProcessor (または再利用されたもの) に対して
-        // rebuildAllIRsSynchronous() が呼ばれ、そこで新しいブロックサイズで init() が実行されます。
-        // したがって、ここでの特別な処理は不要です。
+        if (conv->irDataLength > 0)
+        {
+            auto newConv = std::make_shared<StereoConvolver>();
+
+            // バッファ確保とコピー
+            convo::AlignedBuffer irL, irR;
+            irL.allocate(conv->irDataLength);
+            irR.allocate(conv->irDataLength);
+            std::memcpy(irL.get(), conv->irData[0].get(), conv->irDataLength * sizeof(double));
+            std::memcpy(irR.get(), conv->irData[1].get(), conv->irDataLength * sizeof(double));
+
+            int maxFFTSize = calculateMaxFFTSize(sampleRate);
+
+            // 新しいブロックサイズで初期化
+            newConv->init(std::move(irL), std::move(irR),
+                          conv->irDataLength, sampleRate, conv->irLatency, maxFFTSize, internalBlockSize);
+
+            // 差し替え
+            convolution.store(newConv.get(), std::memory_order_release);
+
+            if (activeConvolution)
+            {
+                const juce::ScopedLock sl(trashBinLock);
+                trashBinPending.push_back(activeConvolution);
+            }
+            activeConvolution = newConv;
+        }
     }
 
     // DelayLine準備
-    // カスタムリングバッファの確保 (2の累乗サイズ)
-    delayBuffer[0].allocate(DELAY_BUFFER_SIZE);
-    delayBuffer[1].allocate(DELAY_BUFFER_SIZE);
     // バッファクリア
     juce::FloatVectorOperations::clear(delayBuffer[0].get(), DELAY_BUFFER_SIZE);
     juce::FloatVectorOperations::clear(delayBuffer[1].get(), DELAY_BUFFER_SIZE);
     delayWritePos = 0;
 
     // Dryバッファ確保
-    dryBufferStorage[0].allocate(MAX_BLOCK_SIZE);
-    dryBufferStorage[1].allocate(MAX_BLOCK_SIZE);
     double* dryChs[2] = { dryBufferStorage[0].get(), dryBufferStorage[1].get() };
     dryBuffer.setDataToReferTo(dryChs, 2, MAX_BLOCK_SIZE);
     dryBuffer.clear();
 
-    smoothingBufferStorage[0].allocate(MAX_BLOCK_SIZE);
-    smoothingBufferStorage[1].allocate(MAX_BLOCK_SIZE);
     double* smoothChs[2] = { smoothingBufferStorage[0].get(), smoothingBufferStorage[1].get() };
     smoothingBuffer.setDataToReferTo(smoothChs, 2, MAX_BLOCK_SIZE);
     smoothingBuffer.clear();
@@ -715,7 +777,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void ConvolverProcessor::reset()
 {
-    auto conv = convolution.load(std::memory_order_acquire);
+    auto* conv = convolution.load(std::memory_order_acquire);
     if (conv)
     {
         conv->reset();
@@ -1055,14 +1117,15 @@ void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
     createFrequencyResponseSnapshot(displayIR, loadedSR);
 
     // 安全に差し替え (Atomic Swap)
-    auto oldConv = convolution.exchange(newConv, std::memory_order_acq_rel);
+    convolution.store(newConv.get(), std::memory_order_release);
 
-    if (oldConv)
+    if (activeConvolution)
     {
         DBG("ConvolverProcessor: Enqueueing old StereoConvolver to trash bin.");
         const juce::ScopedLock sl(trashBinLock);
-        trashBinPending.push_back(oldConv); // 古いオブジェクトをゴミ箱へ
+        trashBinPending.push_back(activeConvolution); // 古いオブジェクトをゴミ箱へ
     }
+    activeConvolution = newConv;
 
     // 現在の有効なIR長を更新
     irLength = targetLength;
@@ -1078,21 +1141,25 @@ void ConvolverProcessor::cleanup()
     std::vector<StereoConvolver::Ptr> toDelete;
     {
         const juce::ScopedLock sl(trashBinLock);
-        // 1. Clean old trash
-        auto it = std::remove_if(trashBin.begin(), trashBin.end(), [](const auto& p) { return p.use_count() == 1; });
+        const uint32 now = juce::Time::getMillisecondCounter();
 
-        toDelete.insert(toDelete.end(),
-                        std::make_move_iterator(it),
-                        std::make_move_iterator(trashBin.end()));
+        // 1. Clean old trash (Time-based)
+        auto it = std::remove_if(trashBin.begin(), trashBin.end(),
+            [now](const auto& entry) {
+                return (now >= entry.second) ? (now - entry.second > 2000)
+                                             : (now + (std::numeric_limits<uint32>::max() - entry.second) > 2000);
+            });
+
+        for (auto i = it; i != trashBin.end(); ++i)
+            toDelete.push_back(i->first);
 
         trashBin.erase(it, trashBin.end());
 
-        // 2. Move pending to trash
-        trashBin.insert(trashBin.end(), trashBinPending.begin(), trashBinPending.end());
+        // 2. Move pending to trash with timestamp
+        for (const auto& ptr : trashBinPending)
+            trashBin.push_back({ptr, now});
         trashBinPending.clear();
     }
-    // ロック解放後にデストラクタを実行
-    toDelete.clear();
 }
 
 //--------------------------------------------------------------
@@ -1327,17 +1394,15 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     // rebuild時は新しいDSPCoreが作られるため、既存のStereoConvolverを共有すると
     // prepareToPlayでのreset()が稼働中のDSPに影響してしまう。
     // そのため、ディープコピーを作成して独立させる。
-    auto otherConv = other.convolution.load(std::memory_order_acquire);
-    auto oldConv = convolution.exchange(otherConv, std::memory_order_release);
-    if (oldConv)
+    auto otherConv = other.activeConvolution;
+    convolution.store(otherConv.get(), std::memory_order_release);
+
+    if (activeConvolution)
     {
-        // This sync is complex. For now, just trash the old one.
-        // A more robust solution might involve cloning if the state is truly independent.
-        // Since this is part of a full state sync for a new DSP core,
-        // simply replacing and trashing is the intended RCU pattern.
         const juce::ScopedLock sl(trashBinLock);
-        trashBinPending.push_back(oldConv);
+        trashBinPending.push_back(activeConvolution);
     }
+    activeConvolution = otherConv;
 }
 
 void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
@@ -1356,10 +1421,10 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
     // UI側のオブジェクトをコピーするとピッチズレやレイテンシー不整合が発生する。
     if (std::abs(currentSampleRate.load() - other.currentSampleRate.load()) < 1e-6)
     {
-        auto otherConv = other.convolution.load(std::memory_order_acquire);
-        auto expectedConv = convolution.load(std::memory_order_acquire);
+        auto* otherConv = other.convolution.load(std::memory_order_acquire);
+        auto* expectedConv = convolution.load(std::memory_order_acquire);
 
-        if (otherConv != expectedConv)
+        if (otherConv != expectedConv && otherConv != nullptr)
         {
             // Note: This is a simplified sync. In a real scenario, we should handle ref counting carefully.
             // Since this is called from UI thread (timer) usually, we can just do a swap if needed.
@@ -1386,8 +1451,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     juce::ScopedNoDenormals noDenormals;
 
     // ── Step 1: RCU State Load (Lock-free / Wait-free) ──
-    // 参照カウントをインクリメントして、処理中の削除を防ぐ
-    auto conv = convolution.load(std::memory_order_acquire);
+    // Raw pointer load (No ref counting)
+    auto* conv = convolution.load(std::memory_order_acquire);
 
     // ── Step 2: 処理実行可能かチェック ──
     // バイパス、未準備、IR未ロードの場合はスルー
@@ -1491,14 +1556,29 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
                 int readPosInt = static_cast<int>(readPosFloat);
                 double frac = readPosFloat - readPosInt;
-                int readPosNext = (readPosInt + 1) & DELAY_BUFFER_MASK;
-                readPosInt &= DELAY_BUFFER_MASK; // 安全のため
 
                 for (int ch = 0; ch < procChannels; ++ch)
                 {
                     double* buf = delayBuffer[ch].get();
-                    // 線形補間
-                    double val = buf[readPosInt] + frac * (buf[readPosNext] - buf[readPosInt]);
+
+                    // 4-point, 3rd-order Catmull-Rom interpolation for higher quality variable delay.
+                    // This provides a good balance between quality and performance.
+                    const int idx0 = (readPosInt - 1) & DELAY_BUFFER_MASK;
+                    const int idx1 = readPosInt & DELAY_BUFFER_MASK;
+                    const int idx2 = (readPosInt + 1) & DELAY_BUFFER_MASK;
+                    const int idx3 = (readPosInt + 2) & DELAY_BUFFER_MASK;
+
+                    const double p0 = buf[idx0];
+                    const double p1 = buf[idx1];
+                    const double p2 = buf[idx2];
+                    const double p3 = buf[idx3];
+
+                    const double c0 = p1;
+                    const double c1 = 0.5 * (p2 - p0);
+                    const double c2 = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+                    const double c3 = 0.5 * (p3 - p0) + 1.5 * (p1 - p2);
+
+                    double val = ((c3 * frac + c2) * frac + c1) * frac + c0;
                     dryBuffer.setSample(ch, i, val);
                 }
             }

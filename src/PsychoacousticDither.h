@@ -20,6 +20,8 @@
 #include <atomic>
 #include <random>
 #include <optional>
+#include <algorithm>
+#include "AlignedAllocation.h"
 
 
 
@@ -161,6 +163,9 @@ public:
             rng[i] = master;
             master.jump(); // Ensure non-overlapping sequences for each channel
         }
+
+        shaperStateBuffer.allocate(MAX_CHANNELS * 5);
+        reset();
     }
 
     void prepare(double sampleRate, int bitDepth = DEFAULT_BIT_DEPTH) noexcept
@@ -202,33 +207,29 @@ public:
 
     void reset() noexcept
     {
-        for (auto& st : shaperState) st = {0};
+        if (shaperStateBuffer.get() != nullptr)
+            std::fill_n(shaperStateBuffer.get(), MAX_CHANNELS * 5, 0.0);
     }
 
     inline double process(double input, int channel) noexcept
     {
         if (channel < 0 || channel >= MAX_CHANNELS) return input;
-        return processChannel(input, rng[channel], shaperState[channel]);
+        return processChannel(input, rng[channel], shaperStateBuffer.get() + (channel * 5));
     }
 
 private:
-    struct ShaperState
-    {
-        double z[5]{0,0,0,0,0};
-    };
-
-    inline double processChannel(double x, Xoshiro256ss& r, ShaperState& st) noexcept
+    inline double processChannel(double x, Xoshiro256ss& r, double* z) noexcept
     {
         // TPDFディザ生成
         double d = nextTPDF(r) * scale;
 
         // 5次ノイズシェーパー (フィードバック誤差)
         double shapedError =
-            coeffs[0] * st.z[0]
-          + coeffs[1] * st.z[1]
-          + coeffs[2] * st.z[2]
-          + coeffs[3] * st.z[3]
-          + coeffs[4] * st.z[4];
+            coeffs[0] * z[0]
+          + coeffs[1] * z[1]
+          + coeffs[2] * z[2]
+          + coeffs[3] * z[3]
+          + coeffs[4] * z[4];
 
         // ディザとノイズシェーピングの適用
         double tmp = x + d + shapedError;
@@ -243,11 +244,11 @@ private:
         double error = tmp - quantized;
 
         // 状態の更新 (シフト)
-        st.z[4]=st.z[3];
-        st.z[3]=st.z[2];
-        st.z[2]=st.z[1];
-        st.z[1]=st.z[0];
-        st.z[0]=killDenormal(error);
+        z[4]=z[3];
+        z[3]=z[2];
+        z[2]=z[1];
+        z[1]=z[0];
+        z[0]=killDenormal(error);
 
         return quantized;
     }
@@ -270,7 +271,7 @@ private:
     }
 
     Xoshiro256ss  rng[MAX_CHANNELS];
-    ShaperState   shaperState[MAX_CHANNELS];
+    AlignedBuffer shaperStateBuffer;
     double scale = 1.0 / 16777216.0;
     double invScale = 16777216.0;
     std::array<double, 5> coeffs { 2.033, -2.165, 1.959, -1.590, 0.6149 };

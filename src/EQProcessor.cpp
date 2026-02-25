@@ -35,8 +35,10 @@ EQProcessor::~EQProcessor()
 {
     // shared_ptrが自動的にリソースを管理するため、デストラクタは空で良い
     currentState.store(nullptr, std::memory_order_release);
-    for (auto& node : bandNodes)
+    for (auto& node : bandNodes) {
         node.store(nullptr, std::memory_order_release);
+    }
+    // activeBandNodes will be cleared automatically
 }
 
 //--------------------------------------------------------------
@@ -317,6 +319,9 @@ void EQProcessor::setState (const juce::ValueTree& v)
 
 void EQProcessor::syncStateFrom(const EQProcessor& other)
 {
+    // UIコンポーネント(other)からの同期はMessage Threadで行う必要がある
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+
     // アトミック変数のコピー
     totalGainDbTarget.store(other.totalGainDbTarget.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
@@ -334,12 +339,12 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
 
     for (int i = 0; i < NUM_BANDS; ++i)
     {
-        auto node = other.bandNodes[i].load(std::memory_order_acquire);
-        auto oldNode = bandNodes[i].exchange(node, std::memory_order_release);
-        if (oldNode)
-        {
-            bandNodeTrashBinPending.push_back(oldNode);
+        auto node = other.activeBandNodes[i];
+        bandNodes[i].store(node.get(), std::memory_order_release);
+        if (activeBandNodes[i]) {
+            bandNodeTrashBinPending.push_back(activeBandNodes[i]);
         }
+        activeBandNodes[i] = node;
     }
     agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
 
@@ -352,17 +357,16 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
 
     if (bandIndex < 0 || bandIndex >= NUM_BANDS) return;
 
-    auto node = other.bandNodes[bandIndex].load(std::memory_order_acquire);
+    auto node = other.activeBandNodes[bandIndex];
 
-    // Atomic Exchange: 古いノードを取得し、新しいノードをセット
-    auto oldNode = bandNodes[bandIndex].exchange(node, std::memory_order_acq_rel);
+    bandNodes[bandIndex].store(node.get(), std::memory_order_release);
 
-    // 古いノードをゴミ箱へ (Audio Threadでの削除防止)
-    if (oldNode)
+    if (activeBandNodes[bandIndex])
     {
         const juce::ScopedLock sl(trashBinLock);
-        bandNodeTrashBinPending.push_back(oldNode);
+        bandNodeTrashBinPending.push_back(activeBandNodes[bandIndex]);
     }
+    activeBandNodes[bandIndex] = node;
 }
 
 void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
@@ -423,8 +427,8 @@ void EQProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
             if (loopState)
             {
                 auto newNode = createBandNode(i, *loopState);
-                auto oldNode = bandNodes[i].exchange(newNode, std::memory_order_acq_rel);
-
+                bandNodes[i].store(newNode.get(), std::memory_order_release);
+                activeBandNodes[i] = newNode;
                 // prepareToPlay 内では、即座に削除しても安全であると仮定します
             }
         }
@@ -722,16 +726,19 @@ namespace
             // クランプ (-100, +100) で発散防止
             output = _mm_min_pd(_mm_max_pd(output, cLow), cHigh);
 
-            // L: lower element, R: upper element
+            // L: lower element, R: upper element（修正：unpackhi_pdの第2引数を正しく）
             dataL[n] = _mm_cvtsd_f64(output);
-            dataR[n] = _mm_cvtsd_f64(_mm_unpackhi_pd(output, output));
+            __m128d hi = _mm_unpackhi_pd(output, output);
+            dataR[n] = _mm_cvtsd_f64(hi);
         }
 
         // Denormal フラッシュ & NaN チェック (状態変数のみ)
         double s1L = _mm_cvtsd_f64(ic1eq);
         double s2L = _mm_cvtsd_f64(ic2eq);
-        double s1R = _mm_cvtsd_f64(_mm_unpackhi_pd(ic1eq, ic1eq));
-        double s2R = _mm_cvtsd_f64(_mm_unpackhi_pd(ic2eq, ic2eq));
+        __m128d hi1 = _mm_unpackhi_pd(ic1eq, ic1eq);
+        __m128d hi2 = _mm_unpackhi_pd(ic2eq, ic2eq);
+        double s1R = _mm_cvtsd_f64(hi1);
+        double s2R = _mm_cvtsd_f64(hi2);
 
         if (!std::isfinite(s1L) || std::abs(s1L) < DENORMAL_THRESHOLD) s1L = 0.0;
         if (!std::isfinite(s2L) || std::abs(s2L) < DENORMAL_THRESHOLD) s2L = 0.0;
@@ -941,7 +948,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // ── 最適化: アクティブなバンドノードを事前にスタックへロード ──
     // チャンネルごとのループ内で atomic load を繰り返すと負荷が高いため、
-    // 処理開始時に一度だけロードし、shared_ptr で寿命を確保する。
+    // 処理開始時に一度だけロードする。
+    // Note: 寿命管理は Message Thread 側の trashBin (時間差削除) により保証されるため、
+    // ここでは Raw Pointer を安全に使用できる。
     struct ActiveBandNode {
         const BandNode* node;
         int index;
@@ -949,16 +958,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     std::array<ActiveBandNode, NUM_BANDS> activeBands;
     int numActiveBands = 0;
 
-    // 処理中にノードが削除されないよう Ptr で保持 (Audio Thread内での参照カウント操作はlock-freeなので安全)
-    std::array<BandNode::Ptr, NUM_BANDS> keptAliveNodes;
-
+    // Note: bandNodes[] contains raw pointers. We assume they are valid during this block
+    // because deletion is deferred by trashBin in Message Thread.
     for (int i = 0; i < NUM_BANDS; ++i)
     {
-        auto node = bandNodes[i].load(std::memory_order_acquire);
+        auto* node = bandNodes[i].load(std::memory_order_acquire);
         if (node && node->active)
         {
-            keptAliveNodes[numActiveBands] = node; // incReferenceCount
-            activeBands[numActiveBands] = { node.get(), i };
+            activeBands[numActiveBands] = { node, i };
             numActiveBands++;
         }
     }
@@ -1073,15 +1080,15 @@ void EQProcessor::updateBandNode(int band)
     if (state == nullptr) return;
     auto newNode = createBandNode(band, *state);
 
-    // Atomic Exchange: 古いノードを取得し、新しいノードをセット
-    auto oldNode = bandNodes[band].exchange(newNode, std::memory_order_acq_rel);
+    bandNodes[band].store(newNode.get(), std::memory_order_release);
 
     // 古いノードをゴミ箱へ (Audio Threadが使用中の可能性があるため即削除しない)
     const juce::ScopedLock sl(trashBinLock);
-    if (oldNode)
+    if (activeBandNodes[band])
     {
-        bandNodeTrashBinPending.push_back(oldNode);
+        bandNodeTrashBinPending.push_back(activeBandNodes[band]);
     }
+    activeBandNodes[band] = newNode;
 }
 
 void EQProcessor::cleanup()
@@ -1091,12 +1098,23 @@ void EQProcessor::cleanup()
 
     {
         const juce::ScopedLock sl(trashBinLock);
-        // Clean BandNodes
-        auto nodeIt = std::remove_if(bandNodeTrashBin.begin(), bandNodeTrashBin.end(), [](const auto& p) { return p.use_count() == 1; });
-        nodesToDelete.insert(nodesToDelete.end(), std::make_move_iterator(nodeIt), std::make_move_iterator(bandNodeTrashBin.end()));
+        const uint32 now = juce::Time::getMillisecondCounter();
+
+        // Clean BandNodes (Time-based)
+        // Audio ThreadがRaw Pointerを参照している可能性があるため、即時削除せず一定時間(2000ms)待つ
+        auto nodeIt = std::remove_if(bandNodeTrashBin.begin(), bandNodeTrashBin.end(),
+            [now](const auto& entry) {
+                return (now >= entry.second) ? (now - entry.second > 2000)
+                                             : (now + (std::numeric_limits<uint32>::max() - entry.second) > 2000);
+            });
+
+        for (auto it = nodeIt; it != bandNodeTrashBin.end(); ++it)
+            nodesToDelete.push_back(it->first);
         bandNodeTrashBin.erase(nodeIt, bandNodeTrashBin.end());
 
-        bandNodeTrashBin.insert(bandNodeTrashBin.end(), bandNodeTrashBinPending.begin(), bandNodeTrashBinPending.end());
+        // Move pending to main trash with timestamp
+        for (const auto& ptr : bandNodeTrashBinPending)
+            bandNodeTrashBin.push_back({ptr, now});
         bandNodeTrashBinPending.clear();
 
         // Clean States

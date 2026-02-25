@@ -24,6 +24,7 @@ AudioEngine::AudioEngine()
 
     // バッファ初期化
     audioFifoBuffer.setSize (2, FIFO_SIZE);
+    currentDSP.store(nullptr);
 }
 
 
@@ -33,6 +34,20 @@ void AudioEngine::initialize()
     // WDL FFTテーブルをメインスレッドで安全に初期化
     static std::once_flag fftInitFlag;
     std::call_once(fftInitFlag, [] { WDL_fft_init(); });
+
+#if JUCE_WINDOWS
+    // MMCSS関数ポインタのロード (Message Thread - Safe)
+    if (pAvSetMmThreadCharacteristicsPtr == nullptr)
+    {
+        HMODULE avrtDll = GetModuleHandle(TEXT("avrt.dll"));
+        if (avrtDll != nullptr)
+        {
+            pAvSetMmThreadCharacteristicsPtr = (pAvSetMmThreadCharacteristics)GetProcAddress(avrtDll, "AvSetMmThreadCharacteristicsA");
+            pAvSetMmThreadPriorityPtr = (pAvSetMmThreadPriority)GetProcAddress(avrtDll, "AvSetMmThreadPriority");
+            pAvRevertMmThreadCharacteristicsPtr = (pAvRevertMmThreadCharacteristics)GetProcAddress(avrtDll, "AvRevertMmThreadCharacteristics");
+        }
+    }
+#endif
 
     // 初期DSP構築 (デフォルト設定)
     // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
@@ -46,8 +61,10 @@ void AudioEngine::initialize()
     uiConvolverProcessor.addListener(this);
     uiEqProcessor.addListener(this);
 
-    // ガベージコレクション用タイマー開始 (2秒ごとにチェック)
-    startTimer(2000);
+    // タイマー開始 (50ms間隔)
+    // - DSP再構築リクエストのポーリング (Audio Threadからの依頼を処理)
+    // - ガベージコレクション
+    startTimer(50);
 }
 
 AudioEngine::~AudioEngine()
@@ -62,6 +79,7 @@ AudioEngine::~AudioEngine()
     // 進行中のコールバックが完了するのを待つため、DSPを無効化
     // これにより、changeListenerCallback内でdsp->へのアクセスを防ぐ
     currentDSP.store(nullptr, std::memory_order_release);
+    activeDSP.reset();
 }
 
 //--------------------------------------------------------------
@@ -259,8 +277,8 @@ double AudioEngine::getProcessingSampleRate() const
     else
     {
         // Auto
-        if (sr < 80000.0)      actualFactor = 4;
-        else if (sr < 160000.0) actualFactor = 2;
+        if (sr <= 48000.0)      actualFactor = 4;
+        else if (sr <= 96000.0) actualFactor = 2;
         else                    actualFactor = 1;
     }
 
@@ -299,56 +317,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     maxSamplesPerBlock.store(bufferSize);
     currentSampleRate.store(safeSampleRate);
 
-    // DSP再構築 (RT安全化: 新しいDSPを作成してスワップ)
-    // MKLのメモリ確保をAudio Threadから分離するため、requestRebuildはMessage Threadで実行する。
-    // Audio Threadから呼ばれた場合は非同期リクエストを投げ、完了を待たずにリターンする。
-    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
-    {
-        // UI用プロセッサのサンプルレートも更新 (IR表示やパラメータ管理のため)
-        uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
-        uiEqProcessor.prepareToPlay(safeSampleRate, bufferSize);
-
-        // Bypass状態の同期
-        uiConvolverProcessor.setBypass(convBypassRequested.load(std::memory_order_relaxed));
-
-        requestRebuild(safeSampleRate, bufferSize);
-    }
-    else
-    {
-        // 非同期リクエスト (ブロッキング回避)
-        // Audio ThreadやDriver Threadから呼ばれた場合、待機せずにリクエストのみ投げる。
-
-        DSPCore::Ptr oldDSPPtr;
-
-        // サンプルレートが変更された場合、不整合を防ぐために一時的に出力を停止する
-        if (rateChanged)
-        {
-            auto oldDSP = currentDSP.exchange(nullptr, std::memory_order_acq_rel);
-            if (oldDSP)
-            {
-                // Audio Threadでのロック/メモリ確保を避けるため、
-                // スマートポインタに所有権を移譲してMessage Threadへ渡す (Lambdaキャプチャ)
-                oldDSPPtr = oldDSP;
-            }
-        }
-
-        juce::WeakReference<AudioEngine> weakThis(this);
-        // oldDSPPtr をキャプチャすることで、Message Thread での破棄を保証する
-        juce::MessageManager::callAsync([weakThis, safeSampleRate, bufferSize, oldDSPPtr] {
-            if (auto* engine = weakThis.get()) {
-                // UI用プロセッサの更新もMessage Threadで行う (メモリ確保回避)
-                engine->uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
-                engine->uiEqProcessor.prepareToPlay(safeSampleRate, bufferSize);
-
-                // Bypass状態の同期
-                engine->uiConvolverProcessor.setBypass(engine->convBypassRequested.load(std::memory_order_relaxed));
-
-                engine->requestRebuild(safeSampleRate, bufferSize);
-                engine->sendChangeMessage();
-            }
-            // oldDSPPtr はここでスコープを抜け、Message Thread 上でデストラクタが呼ばれる
-        });
-    }
+    // DSP再構築リクエスト (Audio Thread Safe)
+    // MessageManagerへのアクセスやメモリ確保を避けるため、フラグを立ててTimerで処理する
+    rebuildRequested.store(true, std::memory_order_release);
 
     audioFifo.reset();
 
@@ -361,47 +332,6 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     eqBypassActive.store (eqBypassRequested.load (std::memory_order_relaxed), std::memory_order_relaxed);
     convBypassActive.store (convBypassRequested.load (std::memory_order_relaxed), std::memory_order_relaxed);
 
-    // UIコンポーネント（アナライザー等）に状態変更を通知し、タイマーの再開などを促す
-
-#if JUCE_WINDOWS
-    if (mmcssHandle == nullptr) {
-        // MMCSS (Multimedia Class Scheduler Service) を使用して、オーディオ処理の優先度を上げる
-        // "Audio" タスクは、一般的なオーディオ再生に最適化されている
-        // "Pro Audio" タスクは、低遅延オーディオ処理に最適化されている
-        typedef HANDLE (WINAPI *pAvSetMmThreadCharacteristics)(LPCSTR, PDWORD);
-
-        // Function pointer to AvSetMmThreadCharacteristicsA
-        pAvSetMmThreadCharacteristics pAvSetMmThreadCharacteristicsPtr = nullptr;
-
-        // Dynamically load the function
-        HMODULE avrtDll = GetModuleHandle(TEXT("avrt.dll"));
-        if (avrtDll != nullptr)
-        {
-            pAvSetMmThreadCharacteristicsPtr = (pAvSetMmThreadCharacteristics)GetProcAddress(avrtDll, "AvSetMmThreadCharacteristicsA");
-        }
-
-        if (pAvSetMmThreadCharacteristicsPtr != nullptr)
-        {
-            mmcssHandle = pAvSetMmThreadCharacteristicsPtr("Pro Audio", &mmcssTaskIndex); // No cast needed
-            if (mmcssHandle == nullptr)
-            {
-                DBG("MMCSS: Failed to set thread characteristics.");
-            }
-            else
-            {
-				typedef BOOL (WINAPI *pAvSetMmThreadPriority)(HANDLE, AVRT_PRIORITY);
-				auto AvSetMmThreadPriorityPtr = (pAvSetMmThreadPriority)GetProcAddress(avrtDll, "AvSetMmThreadPriority");
-                // タスクの優先度を最大に設定 (省略可能)
-                if(AvSetMmThreadPriorityPtr != nullptr) AvSetMmThreadPriorityPtr(mmcssHandle, static_cast<AVRT_PRIORITY>(AVRT_PRIORITY_MAX));
-                DBG("MMCSS: Pro Audio thread characteristics set.");
-            }
-        }
-        else
-            DBG("MMCSS: AvSetMmThreadCharacteristicsA function not found.");
-    }
-#endif
-    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
-        sendChangeMessage();
 }
 
 //--------------------------------------------------------------
@@ -409,6 +339,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 //--------------------------------------------------------------
 void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 {
+    // UIコンポーネント(uiEqProcessor等)へのアクセスやMKLメモリ確保を行うため、必ずMessage Threadで実行すること
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+
     // 新しいDSPコアを作成
     DSPCore::Ptr newDSP = std::make_shared<DSPCore>();
 
@@ -422,7 +355,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     // 最適化: 現在のDSPから有効なオーバーサンプリング済みIRを再利用する
     // これにより、EQ変更などのたびにIRリビルド（音切れ）が発生するのを防ぐ
     bool irReused = false;
-    DSPCore::Ptr current = currentDSP.load(std::memory_order_acquire);
+    DSPCore::Ptr current = activeDSP;
 
     if (current && std::abs(current->sampleRate - sampleRate) < 1e-6 &&
         current->oversamplingFactor == newDSP->oversamplingFactor && newDSP->oversamplingFactor > 1)
@@ -444,6 +377,9 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     // オーバーサンプリング有効時、UIからコピーされたIR(1xレート)はDSP(Nxレート)にとって不適切です。
     // そのため、正しいサンプルレートでIRを再構築(リサンプリング)する必要があります。
     // これを行わないと、IRのピッチが変わり、レイテンシー補正も誤った値になります。
+    //
+    // 重要: ここで newDSP (ローカル変数) に対してリビルドを行うため、
+    // Audio Thread で稼働中の currentDSP とは完全に独立しており、競合は発生しない。
     if (!irReused && newDSP->oversamplingFactor > 1 && newDSP->convolver.isIRLoaded())
     {
         // 同期的にリビルドを実行 (再生中の音切れやピッチズレを防ぐため、準備完了まで待機)
@@ -463,43 +399,63 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 
 void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP)
 {
-    // Atomic Swap
-    auto oldDSP = currentDSP.exchange(newDSP, std::memory_order_release);
+    // 1. Update the atomic raw pointer for the Audio Thread (Wait-free)
+    currentDSP.store(newDSP.get(), std::memory_order_release);
 
-    if (oldDSP)
+    // 2. Move the previous active DSP to the trash bin
+    if (activeDSP)
     {
-        // Enqueue the old DSP to trash bin for deferred deletion
         const juce::ScopedLock sl(trashBinLock);
-        trashBinPending.push_back(oldDSP);
+        trashBinPending.push_back(activeDSP);
     }
+
+    // 3. Take ownership of the new DSP
+    activeDSP = newDSP;
 }
 
 void AudioEngine::timerCallback()
 {
+    // ── DSP再構築リクエストの処理 ──
+    // Audio Thread (prepareToPlay) からのリクエストを Message Thread で処理する
+    if (rebuildRequested.exchange(false, std::memory_order_acquire))
+    {
+        const double sr = currentSampleRate.load();
+        const int bs = maxSamplesPerBlock.load();
+        if (sr > 0.0 && bs > 0)
+        {
+            uiConvolverProcessor.prepareToPlay(sr, bs);
+            uiEqProcessor.prepareToPlay(sr, bs);
+            uiConvolverProcessor.setBypass(convBypassRequested.load(std::memory_order_relaxed));
+            requestRebuild(sr, bs);
+            sendChangeMessage();
+        }
+    }
+
     std::vector<DSPCore::Ptr> toDelete;
 
     {
         const juce::ScopedLock sl(trashBinLock);
+        const uint32 now = juce::Time::getMillisecondCounter();
 
-        // 1. Perform actual deletion: Remove objects with ref count 1 (only held by trashBin)
-        auto it = std::remove_if(trashBin.begin(), trashBin.end(),
-                                 [](const auto& p) { return p.use_count() == 1; });
-
-        toDelete.insert(toDelete.end(),
-                        std::make_move_iterator(it),
-                        std::make_move_iterator(trashBin.end()));
-
-        trashBin.erase(it, trashBin.end());
-
-        // 2. Move pending items from pending to main trash bin (double buffering)
-        // これにより、Audio Threadが参照している間に削除されるリスクを排除
-        trashBin.insert(trashBin.end(), trashBinPending.begin(), trashBinPending.end());
+        // 1. Move pending items to main trash bin with timestamp
+        for (const auto& p : trashBinPending)
+            trashBin.push_back({p, now});
         trashBinPending.clear();
 
-        if (trashBin.size() > 20)
-        {
-            DBG("AudioEngine::trashBin warning: " << trashBin.size() << " items pending deletion.");
-        }
+        // 2. Identify items to delete (older than 2000ms)
+        // This ensures that any Audio Thread processing cycle (typically <100ms)
+        // that might have started using the pointer has finished.
+        auto it = std::remove_if(trashBin.begin(), trashBin.end(),
+                                 [now](const auto& entry) {
+                                     // Handle wrap-around of uint32 roughly
+                                     return (now >= entry.second) ? (now - entry.second > 2000)
+                                                                  : (now + (std::numeric_limits<uint32>::max() - entry.second) > 2000);
+                                 });
+
+        for (auto i = it; i != trashBin.end(); ++i)
+            toDelete.push_back(i->first);
+
+        trashBin.erase(it, trashBin.end());
     }
 
     // Lock解放後にデストラクタを実行 (stopThread等の重い処理をロック外で行う)
@@ -507,11 +463,11 @@ void AudioEngine::timerCallback()
 
     // 3. 内部プロセッサのクリーンアップを実行
     // 現在アクティブなDSPの内部ゴミ箱も掃除する
-    auto dsp = currentDSP.load(std::memory_order_acquire);
-    if (dsp)
+    // Note: activeDSP is safe to access here (Message Thread)
+    if (activeDSP)
     {
-        dsp->eq.cleanup();
-        dsp->convolver.cleanup();
+        activeDSP->eq.cleanup();
+        activeDSP->convolver.cleanup();
     }
 
     // UI用プロセッサのクリーンアップ
@@ -539,9 +495,8 @@ void AudioEngine::eqBandChanged(EQProcessor* processor, int bandIndex)
 {
     if (processor == &uiEqProcessor)
     {
-        auto dsp = currentDSP.load(std::memory_order_acquire);
-        if (dsp)
-            dsp->eq.syncBandNodeFrom(uiEqProcessor, bandIndex);
+        if (activeDSP)
+            activeDSP->eq.syncBandNodeFrom(uiEqProcessor, bandIndex);
     }
 }
 
@@ -549,9 +504,8 @@ void AudioEngine::eqGlobalChanged(EQProcessor* processor)
 {
     if (processor == &uiEqProcessor)
     {
-        auto dsp = currentDSP.load(std::memory_order_acquire);
-        if (dsp)
-            dsp->eq.syncGlobalStateFrom(uiEqProcessor);
+        if (activeDSP)
+            activeDSP->eq.syncGlobalStateFrom(uiEqProcessor);
     }
 }
 
@@ -559,9 +513,8 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 {
     if (processor == &uiConvolverProcessor)
     {
-        auto dsp = currentDSP.load(std::memory_order_acquire);
-        if (dsp)
-            dsp->convolver.syncParametersFrom(uiConvolverProcessor);
+        if (activeDSP)
+            activeDSP->convolver.syncParametersFrom(uiConvolverProcessor);
     }
 }
 
@@ -579,24 +532,10 @@ void AudioEngine::releaseResources()
 
 
 #if JUCE_WINDOWS
-    if (mmcssHandle != nullptr)
-     {
-        // Define the function pointer type
-        typedef DWORD (WINAPI *pAvRevertMmThreadCharacteristics)(HANDLE);
-
-        // Dynamically load the function
-        pAvRevertMmThreadCharacteristics pAvRevertMmThreadCharacteristicsPtr = (pAvRevertMmThreadCharacteristics)
-            GetProcAddress(GetModuleHandle(TEXT("avrt.dll")), "AvRevertMmThreadCharacteristics");
-
-        // Check if the function was loaded successfully before calling it
-        if (pAvRevertMmThreadCharacteristicsPtr != nullptr)
-        {
-            pAvRevertMmThreadCharacteristicsPtr(mmcssHandle);
-        }
-
-        mmcssHandle = nullptr;
-
-    }
+    // Message ThreadからAudio ThreadのMMCSSを解除することはできないため、
+    // ハンドルをリセットして次回の再生開始時に再設定できるようにする。
+    // (スレッド終了時にOSが自動的にクリーンアップする)
+    mmcssHandle = nullptr;
 #endif
 }
 
@@ -615,6 +554,26 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // (A) Denormal対策 (重要: CPU負荷スパイク防止)
     juce::ScopedNoDenormals noDenormals;
 
+#if JUCE_INTEL
+    // MKL/AVX最適化のためにFTZ/DAZフラグを明示的に設定
+    // ScopedNoDenormalsでも設定されるが、MKLの要件として明示しておく
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+
+#if JUCE_WINDOWS
+    // MMCSS設定 (Audio Thread - RT Critical)
+    // 最初のコールバックでのみ実行し、システムコール(GetModuleHandle等)やDBGを含まないようにする
+    if (mmcssHandle == nullptr && pAvSetMmThreadCharacteristicsPtr != nullptr)
+    {
+        mmcssHandle = pAvSetMmThreadCharacteristicsPtr("Pro Audio", &mmcssTaskIndex);
+        if (mmcssHandle != nullptr && pAvSetMmThreadPriorityPtr != nullptr)
+        {
+            pAvSetMmThreadPriorityPtr(mmcssHandle, static_cast<AVRT_PRIORITY>(AVRT_PRIORITY_MAX));
+        }
+    }
+#endif
+
     // 入力検証 (Input Validation)
     if (bufferToFill.buffer == nullptr)
         return;
@@ -624,7 +583,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     auto* buffer = bufferToFill.buffer;
 
     // サンプル数の妥当性チェック
-    if (numSamples <= 0 || numSamples > maxSamplesPerBlock.load())
+    // maxSamplesPerBlock.load() (Atomic) の代わりに定数 SAFE_MAX_BLOCK_SIZE を使用する。
+    // これにより、Message Threadでの更新との競合を回避し、DSPCoreのバッファ確保サイズ(SAFE_MAX_BLOCK_SIZE)に基づく安全なチェックを行う。
+    if (numSamples <= 0 || numSamples > SAFE_MAX_BLOCK_SIZE)
     {
         bufferToFill.clearActiveBufferRegion();
         return;
@@ -638,22 +599,38 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
 
-    // DSPコアの取得 (Atomic Load)
-    DSPCore::Ptr dsp = currentDSP.load(std::memory_order_acquire);
+    // DSPコアの取得 (Atomic Load - Raw Pointer)
+    // shared_ptrの参照カウント操作(atomic RMW)を回避し、完全なWait-freeを実現
+    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
 
     if (dsp != nullptr)
     {
+        // 安全対策: サンプルレート不整合チェック
+        // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
+        // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
+        const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
+        if (std::abs(dsp->sampleRate - engineSampleRate) > 1e-6)
+        {
+            // 不整合時はレベルメーターもリセットして誤表示を防ぐ
+            inputLevelDb.store(LEVEL_METER_MIN_DB);
+            outputLevelDb.store(LEVEL_METER_MIN_DB);
+            bufferToFill.clearActiveBufferRegion();
+            return;
+        }
+
         // パラメータのロード
-        const bool eqBypassed = eqBypassRequested.load(std::memory_order_relaxed);
-        const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
+        const bool eqBypassed = eqBypassRequested.load(std::memory_order_acquire);
+        const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
         const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
         const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
         const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
         const float satAmt = saturationAmount.load(std::memory_order_relaxed);
 
         // UI表示用の状態更新
-        eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
-        convBypassActive.store(convBypassed, std::memory_order_relaxed);
+        if (eqBypassActive.load(std::memory_order_relaxed) != eqBypassed)
+            eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
+        if (convBypassActive.load(std::memory_order_relaxed) != convBypassed)
+            convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
         // 処理委譲
         dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb, {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt}); // スマートポインタでDSPを呼び出し
@@ -689,9 +666,9 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
         // 44.1k, 48k -> 4x
         // 88.2k, 96k -> 2x
         // >= 176.4k  -> 1x (None)
-        if (newSampleRate < 80000.0)      factorLog2 = 2; // 4x
-        else if (newSampleRate < 160000.0) factorLog2 = 1; // 2x
-        else                            factorLog2 = 0; // 1x
+        if (newSampleRate <= 48000.0)      factorLog2 = 2; // 4x
+        else if (newSampleRate <= 96000.0) factorLog2 = 1; // 2x
+        else                               factorLog2 = 0; // 1x
     }
 
     oversamplingFactor = (size_t)1 << factorLog2;
@@ -915,14 +892,17 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
                                       juce::AudioBuffer<float>& audioFifoBuffer) const noexcept
 {
     const int numSamples = (int)block.getNumSamples();
+
+    // 安全性確認: FIFOバッファのサイズが初期化時から変更されていないことを保証
+    jassert (audioFifoBuffer.getNumSamples() == audioFifo.getTotalSize());
+
     // FIFO空き容量チェック (Overflow Protection)
     // 部分書き込み対応: 空き容量分だけ書き込む (完全ドロップによる時間軸ジャンプを軽減)
-    const int numToWrite = std::min(numSamples, audioFifo.getFreeSpace());
-    if (numToWrite <= 0)
-        return;
-
     int start1, size1, start2, size2;
-    audioFifo.prepareToWrite(numToWrite, start1, size1, start2, size2);
+    audioFifo.prepareToWrite(numSamples, start1, size1, start2, size2);
+
+    if (size1 + size2 <= 0)
+        return;
 
     const double* l = block.getChannelPointer(0);
     const double* r = (block.getNumChannels() > 1) ? block.getChannelPointer(1) : nullptr;
@@ -1148,7 +1128,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             {
                 double val = data[i];
                 if (!std::isfinite(val)) val = 0.0;
-                dst[i] = juce::jlimit(-1.0f, 1.0f, static_cast<float>(val));
+                dst[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, val));
             }
 #endif
         }
@@ -1157,12 +1137,12 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
 
 void AudioEngine::setEqBypassRequested (bool shouldBypass) noexcept
 {
-    eqBypassRequested.store (shouldBypass, std::memory_order_relaxed);
+    eqBypassRequested.store (shouldBypass, std::memory_order_release);
 }
 
 void AudioEngine::setConvolverBypassRequested (bool shouldBypass) noexcept
 {
-    convBypassRequested.store (shouldBypass, std::memory_order_relaxed);
+    convBypassRequested.store (shouldBypass, std::memory_order_release);
 }
 
 void AudioEngine::setConvolverUseMinPhase(bool useMinPhase)

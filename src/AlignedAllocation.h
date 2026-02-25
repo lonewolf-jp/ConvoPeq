@@ -1,6 +1,9 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <vector>
+#include <limits>
+#include <new>
 
 #if JUCE_DSP_USE_INTEL_MKL
 #include <mkl.h>
@@ -67,6 +70,27 @@ class AlignedBuffer
 public:
     AlignedBuffer() : buffer(nullptr), sizeInBytes(0) {}
 
+    // ムーブコンストラクタ
+    AlignedBuffer(AlignedBuffer&& other) noexcept
+        : buffer(other.buffer), sizeInBytes(other.sizeInBytes)
+    {
+        other.buffer = nullptr;
+        other.sizeInBytes = 0;
+    }
+
+    // ムーブ代入演算子
+    AlignedBuffer& operator=(AlignedBuffer&& other) noexcept
+    {
+        if (this != &other) {
+            freeBuffer();
+            buffer = other.buffer;
+            sizeInBytes = other.sizeInBytes;
+            other.buffer = nullptr;
+            other.sizeInBytes = 0;
+        }
+        return *this;
+    }
+
     ~AlignedBuffer() { freeBuffer(); }
 
     void allocate(size_t numElements)
@@ -91,8 +115,40 @@ public:
     }
 
 private:
+    // コピー禁止
+    AlignedBuffer(const AlignedBuffer&) = delete;
+    AlignedBuffer& operator=(const AlignedBuffer&) = delete;
+
     double* buffer;
     size_t sizeInBytes;
+};
+
+//-----------------------------------------------------------------------------
+// STL Allocator for MKL/AVX512 (64-byte alignment)
+// std::vector 等で使用するためのカスタムアロケータ
+//-----------------------------------------------------------------------------
+template <typename T, size_t Alignment = 64>
+struct MKLAllocator {
+    using value_type = T;
+
+    MKLAllocator() noexcept {}
+    template <typename U> MKLAllocator(const MKLAllocator<U, Alignment>&) noexcept {}
+
+    T* allocate(std::size_t n) {
+        if (n > std::numeric_limits<std::size_t>::max() / sizeof(T))
+            throw std::bad_alloc();
+
+        void* ptr = aligned_malloc(n * sizeof(T), Alignment);
+        if (!ptr) throw std::bad_alloc();
+        return static_cast<T*>(ptr);
+    }
+
+    void deallocate(T* p, std::size_t) noexcept {
+        aligned_free(p);
+    }
+
+    bool operator==(const MKLAllocator&) const noexcept { return true; }
+    bool operator!=(const MKLAllocator&) const noexcept { return false; }
 };
 
 } // namespace convo

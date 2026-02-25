@@ -55,8 +55,9 @@ private:
 
     juce::dsp::FFT fft { static_cast<int>(std::log2(NUM_FFT_POINTS)) };
     juce::dsp::WindowingFunction<float> window { NUM_FFT_POINTS, juce::dsp::WindowingFunction<float>::hann };
-    std::vector<float> fftTimeDomainBuffer;
-    std::vector<float> fftWorkBuffer;
+    // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
+    std::vector<float, convo::MKLAllocator<float>> fftTimeDomainBuffer;
+    std::vector<float, convo::MKLAllocator<float>> fftWorkBuffer;
 
     // ── 表示用データバッファ ──
     std::vector<float> rawBuffer;        // readFromFifo で取得したデータから計算

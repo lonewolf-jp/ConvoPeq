@@ -283,8 +283,9 @@ private:
     static constexpr double SMOOTHING_TIME_SEC = 0.05; // 50ms
 
     // ── 係数管理 (Atomic Swap) ──
-    std::array<std::atomic<BandNode::Ptr>, NUM_BANDS> bandNodes;
-    std::vector<BandNode::Ptr> bandNodeTrashBin;
+    std::array<std::atomic<BandNode*>, NUM_BANDS> bandNodes; // Raw pointer for Audio Thread
+    std::array<BandNode::Ptr, NUM_BANDS> activeBandNodes; // Ownership for Message Thread
+    std::vector<std::pair<BandNode::Ptr, uint32>> bandNodeTrashBin; // Time-based GC
     std::vector<BandNode::Ptr> bandNodeTrashBinPending;
     std::vector<EQState::Ptr> stateTrashBin;
     std::vector<EQState::Ptr> stateTrashBinPending;
