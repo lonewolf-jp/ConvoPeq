@@ -14,7 +14,7 @@
 
 #include "WDL/fft.h" // WDL Double precision FFT
 #include "CDSPResampler.h"
-#include "AlignedAllocation.h" // For convo::AlignedBuffer
+#include "AlignedAllocation.h" // For convo::MKLAllocator
 
 #if JUCE_DSP_USE_INTEL_MKL
 #include <mkl.h>
@@ -540,67 +540,21 @@ public:
             result.newConv = std::make_shared<StereoConvolver>();
 
             // IRデータを格納するアラインされたバッファを準備 (Rebuild用に保持)
-            convo::AlignedBuffer irL, irR;
-            irL.allocate(result.targetLength);
-            irR.allocate(result.targetLength);
+            std::vector<double, convo::MKLAllocator<double>> irL(result.targetLength), irR(result.targetLength);
 
             const double* srcL = trimmed.getReadPointer(0);
             const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
 
             // データを一度だけコピー
-            std::memcpy(irL.get(), srcL, result.targetLength * sizeof(double));
-            std::memcpy(irR.get(), srcR, result.targetLength * sizeof(double));
+            std::memcpy(irL.data(), srcL, result.targetLength * sizeof(double));
+            std::memcpy(irR.data(), srcR, result.targetLength * sizeof(double));
 
-            result.newConv->irData[0] = std::move(irL);
-            result.newConv->irData[1] = std::move(irR);
-            result.newConv->irDataLength = result.targetLength;
-            result.newConv->irLatency = irPeakLatency;
+            // 10. 新しいConvolutionの構築 (initメソッドを使用して安全に初期化)
+            // prepareToPlayとロジックを統一し、WDLエンジンのプリウォーミングも行う
+            int maxFFTSize = calculateMaxFFTSize(sampleRate);
+            int internalBlockSize = juce::nextPowerOfTwo(blockSize);
 
-            // === 最も安全なIRトリミング（WDL推奨）===
-            // 新規WDLエンジン作成 + 即座にtargetLengthで初期化
-            for (int ch = 0; ch < 2; ++ch)
-            {
-                // 完全に新規作成（内部状態を100%クリア）
-                result.newConv->convolvers[ch].SetImpulse(nullptr, 0, 0);  // 強制リセット
-            }
-
-            WDL_ImpulseBuffer impL, impR;
-            impL.SetNumChannels(1);
-            impR.SetNumChannels(1);
-            impL.samplerate = sampleRate;
-            impR.samplerate = sampleRate;
-
-            // targetLengthで正確にResize（これが重要）
-            impL.impulses.Get(0)->Resize(result.targetLength);
-            impR.impulses.Get(0)->Resize(result.targetLength);
-
-            // WDL用バッファにデータをコピー
-            std::memcpy(impL.impulses.Get(0)->Get(), result.newConv->irData[0].get(), result.targetLength * sizeof(double));
-            std::memcpy(impR.impulses.Get(0)->Get(), result.newConv->irData[1].get(), result.targetLength * sizeof(double));
-
-            // WDLに渡す（これで内部レイテンシ計算が完全にtargetLength基準になる）
-            // Note: known_blocksize には実際のブロックサイズ(blockSize)を渡すことで、
-            // リアルタイム処理に適したパーティション分割を促し、低レイテンシーを実現する。
-            result.newConv->convolvers[0].SetImpulse(&impL, result.targetLength, blockSize, 0, 0, 0);
-            result.newConv->convolvers[1].SetImpulse(&impR, result.targetLength, blockSize, 0, 0, 0);
-
-            // レイテンシー取得
-            result.newConv->latency = result.newConv->convolvers[0].GetLatency();
-
-            // 11. WDLエンジンのプリウォーミング (Audio Threadでのメモリ確保回避)
-            // WDL_ConvolutionEngineは、最初のAdd呼び出し時に内部バッファ(ProcChannelInfo)を確保します。
-            // これをAudio Threadで行うとリアルタイム性を損なうため、ここでダミー処理を行って確保を済ませます。
-            {
-                // ダミーバッファ (1サンプル)
-                double dummySample = 0.0;
-                WDL_FFT_REAL* inputs[1] = { &dummySample };
-
-                // L/R両方のチャンネルに対してAddを呼び出し、内部構造を確定させる
-                // 1サンプルだけ処理し、Resetで状態をクリアする
-                result.newConv->convolvers[0].Add(inputs, 1, 1);
-                result.newConv->convolvers[1].Add(inputs, 1, 1);
-                result.newConv->reset(); // 内部状態（履歴）をクリアして初期状態に戻す
-            }
+            result.newConv->init(std::move(irL), std::move(irR), result.targetLength, sampleRate, irPeakLatency, maxFFTSize, internalBlockSize);
 
             // Display用コピーを作成 (move前に)
             result.displayIR = trimmed;
@@ -658,12 +612,12 @@ ConvolverProcessor::ConvolverProcessor()
     : mixSmoother(1.0f)
 {
     // Audio Threadでのメモリ確保を避けるため、バッファはコンストラクタで確保する
-    delayBuffer[0].allocate(DELAY_BUFFER_SIZE);
-    delayBuffer[1].allocate(DELAY_BUFFER_SIZE);
-    dryBufferStorage[0].allocate(MAX_BLOCK_SIZE);
-    dryBufferStorage[1].allocate(MAX_BLOCK_SIZE);
-    smoothingBufferStorage[0].allocate(MAX_BLOCK_SIZE);
-    smoothingBufferStorage[1].allocate(MAX_BLOCK_SIZE);
+    delayBuffer[0].resize(DELAY_BUFFER_SIZE);
+    delayBuffer[1].resize(DELAY_BUFFER_SIZE);
+    dryBufferStorage[0].resize(MAX_BLOCK_SIZE);
+    dryBufferStorage[1].resize(MAX_BLOCK_SIZE);
+    smoothingBufferStorage[0].resize(MAX_BLOCK_SIZE);
+    smoothingBufferStorage[1].resize(MAX_BLOCK_SIZE);
 }
 
 //--------------------------------------------------------------
@@ -710,11 +664,9 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
             auto newConv = std::make_shared<StereoConvolver>();
 
             // バッファ確保とコピー
-            convo::AlignedBuffer irL, irR;
-            irL.allocate(conv->irDataLength);
-            irR.allocate(conv->irDataLength);
-            std::memcpy(irL.get(), conv->irData[0].get(), conv->irDataLength * sizeof(double));
-            std::memcpy(irR.get(), conv->irData[1].get(), conv->irDataLength * sizeof(double));
+            std::vector<double, convo::MKLAllocator<double>> irL(conv->irDataLength), irR(conv->irDataLength);
+            std::memcpy(irL.data(), conv->irData[0].data(), conv->irDataLength * sizeof(double));
+            std::memcpy(irR.data(), conv->irData[1].data(), conv->irDataLength * sizeof(double));
 
             int maxFFTSize = calculateMaxFFTSize(sampleRate);
 
@@ -736,16 +688,16 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     // DelayLine準備
     // バッファクリア
-    juce::FloatVectorOperations::clear(delayBuffer[0].get(), DELAY_BUFFER_SIZE);
-    juce::FloatVectorOperations::clear(delayBuffer[1].get(), DELAY_BUFFER_SIZE);
+    juce::FloatVectorOperations::clear(delayBuffer[0].data(), DELAY_BUFFER_SIZE);
+    juce::FloatVectorOperations::clear(delayBuffer[1].data(), DELAY_BUFFER_SIZE);
     delayWritePos = 0;
 
     // Dryバッファ確保
-    double* dryChs[2] = { dryBufferStorage[0].get(), dryBufferStorage[1].get() };
+    double* dryChs[2] = { dryBufferStorage[0].data(), dryBufferStorage[1].data() };
     dryBuffer.setDataToReferTo(dryChs, 2, MAX_BLOCK_SIZE);
     dryBuffer.clear();
 
-    double* smoothChs[2] = { smoothingBufferStorage[0].get(), smoothingBufferStorage[1].get() };
+    double* smoothChs[2] = { smoothingBufferStorage[0].data(), smoothingBufferStorage[1].data() };
     smoothingBuffer.setDataToReferTo(smoothChs, 2, MAX_BLOCK_SIZE);
     smoothingBuffer.clear();
 
@@ -783,8 +735,8 @@ void ConvolverProcessor::reset()
         conv->reset();
     }
     // リングバッファのクリア
-    if (delayBuffer[0].get()) juce::FloatVectorOperations::clear(delayBuffer[0].get(), DELAY_BUFFER_SIZE);
-    if (delayBuffer[1].get()) juce::FloatVectorOperations::clear(delayBuffer[1].get(), DELAY_BUFFER_SIZE);
+    if (!delayBuffer[0].empty()) juce::FloatVectorOperations::clear(delayBuffer[0].data(), DELAY_BUFFER_SIZE);
+    if (!delayBuffer[1].empty()) juce::FloatVectorOperations::clear(delayBuffer[1].data(), DELAY_BUFFER_SIZE);
     delayWritePos = 0;
 
     dryBuffer.clear();
@@ -854,31 +806,28 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
 
     // WDL FFTはインターリーブされた複素数バッファ(re, im)を使用します。
     // SIMD用のアライメントを確保 (AVXは32バイトアライメントが必要)。
-    // convo::AlignedBufferは64バイトアライメントで確保します。
-    convo::AlignedBuffer fftBufferAligned;
-    fftBufferAligned.allocate(fftSize * 2); // 2 doubles per complex
-    WDL_FFT_COMPLEX* fftBuffer = reinterpret_cast<WDL_FFT_COMPLEX*>(fftBufferAligned.get());
+    // convo::MKLAllocatorは64バイトアライメントで確保します。
+    std::vector<double, convo::MKLAllocator<double>> fftBufferAligned(fftSize * 2); // 2 doubles per complex
+    WDL_FFT_COMPLEX* fftBuffer = reinterpret_cast<WDL_FFT_COMPLEX*>(fftBufferAligned.data());
 
-    convo::AlignedBuffer dataAligned;
-    dataAligned.allocate(fftSize);
-    double* data = dataAligned.get(); // 作業用
+    std::vector<double, convo::MKLAllocator<double>> dataAligned(fftSize);
+    double* data = dataAligned.data(); // 作業用
 #if JUCE_DSP_USE_INTEL_MKL
-    convo::AlignedBuffer tempAligned;
-    tempAligned.allocate(fftSize);
-    double* temp = tempAligned.get(); // MKL用作業バッファ
+    std::vector<double, convo::MKLAllocator<double>> tempAligned(fftSize);
+    double* temp = tempAligned.data(); // MKL用作業バッファ
 #endif
 
     for (int ch = 0; ch < linearIR.getNumChannels(); ++ch)
     {
         if (checkCancellation(thread, wasCancelled)) return {};
 
-        // 1. IRをコピー & スケーリング (WDL FFT順変換は 1/N スケーリングを要求)
+        // 1. IRをFFTバッファにコピー
+        // Note: WDL_fftの逆変換(isInverse=1)は1/Nスケーリングを行うため、順変換前の手動スケーリングは不要。
+        // FFT/IFFTペアで元のスケールが復元される。
         const double* src = linearIR.getReadPointer(ch);
-        const double scale = 1.0 / fftSize;
-
         for (int i = 0; i < fftSize; ++i)
         {
-            fftBuffer[i].re = (i < numSamples) ? (src[i] * scale) : 0.0;
+            fftBuffer[i].re = (i < numSamples) ? src[i] : 0.0;
             fftBuffer[i].im = 0.0;
         }
 
@@ -999,9 +948,6 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         }
 
         // 6. FFT (時間 -> 周波数) => 解析信号の対数スペクトル (実部が対数振幅、虚部が最小位相)
-        // 順変換用に再スケーリング
-        for (int i = 0; i < fftSize; ++i) fftBuffer[i].re *= scale;
-
         WDL_fft(fftBuffer, fftSize, 0);
 
         if (checkCancellation(thread, wasCancelled)) return {};
@@ -1526,7 +1472,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         for (int ch = 0; ch < procChannels; ++ch)
         {
             const double* src = block.getChannelPointer(ch);
-            double* buf = delayBuffer[ch].get();
+            double* buf = delayBuffer[ch].data();
 
             // リングバッファの境界処理 (2分割コピー)
             int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - wPos);
@@ -1552,14 +1498,16 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 // 読み出し位置の計算 (整数部と小数部)
                 double readPosFloat = static_cast<double>(currentWPos) - currentDelay;
                 // 負の値のラップアラウンド処理
-                while (readPosFloat < 0.0) readPosFloat += DELAY_BUFFER_SIZE;
+                // DELAY_BUFFER_SIZE > MAX_TOTAL_DELAY が保証されているため最大1回
+                if (readPosFloat < 0.0) readPosFloat += DELAY_BUFFER_SIZE;
+                jassert(readPosFloat >= 0.0); // 設計保証のアサーション
 
                 int readPosInt = static_cast<int>(readPosFloat);
                 double frac = readPosFloat - readPosInt;
 
                 for (int ch = 0; ch < procChannels; ++ch)
                 {
-                    double* buf = delayBuffer[ch].get();
+                    double* buf = delayBuffer[ch].data();
 
                     // 4-point, 3rd-order Catmull-Rom interpolation for higher quality variable delay.
                     // This provides a good balance between quality and performance.
@@ -1596,7 +1544,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
             for (int ch = 0; ch < procChannels; ++ch)
             {
-                double* srcBuf = delayBuffer[ch].get();
+                double* srcBuf = delayBuffer[ch].data();
                 double* dstBuf = dryBuffer.getWritePointer(ch);
 
                 // リングバッファからの読み出し (2分割コピー)

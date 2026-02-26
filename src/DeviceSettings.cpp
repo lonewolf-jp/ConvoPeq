@@ -223,22 +223,23 @@ void DeviceSettings::changeListenerCallback (juce::ChangeBroadcaster* source)
 
 void DeviceSettings::updateBitDepthList()
 {
-    // 現在のデバイスを取得
     juce::Array<int> supportedBitDepths;
 
+    // 標準的なビット深度を常に表示（JUCEのほとんどのアプリと同じ）
+    supportedBitDepths.add(16);
+    supportedBitDepths.add(24);
+    supportedBitDepths.add(32);
+
+    // 現在開いているデバイスがあれば、その実際のビット深度を追加（重複除去）
     if (auto* device = audioDeviceManager.getCurrentAudioDevice())
     {
-        supportedBitDepths = device->getAvailableBitDepths();
+        // getAvailableBitDepths()は存在しないので、getCurrentBitDepth()を使う
+        int current = device->getCurrentBitDepth();
+        if (current > 0 && !supportedBitDepths.contains(current))
+            supportedBitDepths.add(current);
     }
 
-    // デバイスがビット深度を報告しない場合、またはデバイスがない場合のフォールバック
-    if (supportedBitDepths.isEmpty())
-    {
-        supportedBitDepths.add(16);
-        supportedBitDepths.add(24);
-        supportedBitDepths.add(32);
-    }
-
+    supportedBitDepths.sort();
     // UI更新
     bitDepthComboBox.clear();
     int maxBitDepth = 0;

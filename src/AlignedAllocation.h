@@ -62,67 +62,6 @@ static void aligned_free(void* ptr) {
 
 #endif
 
-//----------------------------------------------------------
-// アラインメントされたバッファ管理用クラス
-//----------------------------------------------------------
-class AlignedBuffer
-{
-public:
-    AlignedBuffer() : buffer(nullptr), sizeInBytes(0) {}
-
-    // ムーブコンストラクタ
-    AlignedBuffer(AlignedBuffer&& other) noexcept
-        : buffer(other.buffer), sizeInBytes(other.sizeInBytes)
-    {
-        other.buffer = nullptr;
-        other.sizeInBytes = 0;
-    }
-
-    // ムーブ代入演算子
-    AlignedBuffer& operator=(AlignedBuffer&& other) noexcept
-    {
-        if (this != &other) {
-            freeBuffer();
-            buffer = other.buffer;
-            sizeInBytes = other.sizeInBytes;
-            other.buffer = nullptr;
-            other.sizeInBytes = 0;
-        }
-        return *this;
-    }
-
-    ~AlignedBuffer() { freeBuffer(); }
-
-    void allocate(size_t numElements)
-    {
-        freeBuffer();
-        if (numElements > 0)
-        {
-            sizeInBytes = numElements * sizeof(double);
-            buffer = static_cast<double*>(aligned_malloc(sizeInBytes, 64)); // 64-byte alignment
-        }
-    }
-
-    double* get() const { return buffer; }
-
-    void freeBuffer()
-    {
-        if (buffer != nullptr) {
-            aligned_free(buffer);
-            buffer = nullptr;
-            sizeInBytes = 0;
-        }
-    }
-
-private:
-    // コピー禁止
-    AlignedBuffer(const AlignedBuffer&) = delete;
-    AlignedBuffer& operator=(const AlignedBuffer&) = delete;
-
-    double* buffer;
-    size_t sizeInBytes;
-};
-
 //-----------------------------------------------------------------------------
 // STL Allocator for MKL/AVX512 (64-byte alignment)
 // std::vector 等で使用するためのカスタムアロケータ
@@ -130,6 +69,11 @@ private:
 template <typename T, size_t Alignment = 64>
 struct MKLAllocator {
     using value_type = T;
+
+    template <typename U>
+    struct rebind {
+        using other = MKLAllocator<U, Alignment>;
+    };
 
     MKLAllocator() noexcept {}
     template <typename U> MKLAllocator(const MKLAllocator<U, Alignment>&) noexcept {}

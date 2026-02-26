@@ -31,24 +31,6 @@ AudioEngine::AudioEngine()
 
 void AudioEngine::initialize()
 {
-    // WDL FFTテーブルをメインスレッドで安全に初期化
-    static std::once_flag fftInitFlag;
-    std::call_once(fftInitFlag, [] { WDL_fft_init(); });
-
-#if JUCE_WINDOWS
-    // MMCSS関数ポインタのロード (Message Thread - Safe)
-    if (pAvSetMmThreadCharacteristicsPtr == nullptr)
-    {
-        HMODULE avrtDll = GetModuleHandle(TEXT("avrt.dll"));
-        if (avrtDll != nullptr)
-        {
-            pAvSetMmThreadCharacteristicsPtr = (pAvSetMmThreadCharacteristics)GetProcAddress(avrtDll, "AvSetMmThreadCharacteristicsA");
-            pAvSetMmThreadPriorityPtr = (pAvSetMmThreadPriority)GetProcAddress(avrtDll, "AvSetMmThreadPriority");
-            pAvRevertMmThreadCharacteristicsPtr = (pAvRevertMmThreadCharacteristics)GetProcAddress(avrtDll, "AvRevertMmThreadCharacteristics");
-        }
-    }
-#endif
-
     // 初期DSP構築 (デフォルト設定)
     // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
     // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
@@ -357,6 +339,12 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     bool irReused = false;
     DSPCore::Ptr current = activeDSP;
 
+    if (current)
+    {
+        // 既存のDSPからAGCの状態を引き継ぎ、ゲインの急変を防ぐ
+        newDSP->eq.syncGlobalStateFrom(current->eq);
+    }
+
     if (current && std::abs(current->sampleRate - sampleRate) < 1e-6 &&
         current->oversamplingFactor == newDSP->oversamplingFactor && newDSP->oversamplingFactor > 1)
     {
@@ -504,8 +492,13 @@ void AudioEngine::eqGlobalChanged(EQProcessor* processor)
 {
     if (processor == &uiEqProcessor)
     {
-        if (activeDSP)
-            activeDSP->eq.syncGlobalStateFrom(uiEqProcessor);
+        if (activeDSP) {
+            // syncGlobalStateFrom は AGC の実行状態も上書きしてしまうため、
+            // UIからの変更通知では、UIが管理するパラメータのみを個別に設定する。
+            // これにより、アクティブなDSPのAGC状態がリセットされるのを防ぐ。
+            activeDSP->eq.setTotalGain(uiEqProcessor.getTotalGain());
+            activeDSP->eq.setAGCEnabled(uiEqProcessor.getAGCEnabled());
+        }
     }
 }
 
@@ -530,13 +523,6 @@ void AudioEngine::releaseResources()
     inputLevelDb.store(-120.0f);
     outputLevelDb.store(-120.0f);
 
-
-#if JUCE_WINDOWS
-    // Message ThreadからAudio ThreadのMMCSSを解除することはできないため、
-    // ハンドルをリセットして次回の再生開始時に再設定できるようにする。
-    // (スレッド終了時にOSが自動的にクリーンアップする)
-    mmcssHandle = nullptr;
-#endif
 }
 
 //--------------------------------------------------------------
@@ -559,19 +545,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // ScopedNoDenormalsでも設定されるが、MKLの要件として明示しておく
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-#endif
-
-#if JUCE_WINDOWS
-    // MMCSS設定 (Audio Thread - RT Critical)
-    // 最初のコールバックでのみ実行し、システムコール(GetModuleHandle等)やDBGを含まないようにする
-    if (mmcssHandle == nullptr && pAvSetMmThreadCharacteristicsPtr != nullptr)
-    {
-        mmcssHandle = pAvSetMmThreadCharacteristicsPtr("Pro Audio", &mmcssTaskIndex);
-        if (mmcssHandle != nullptr && pAvSetMmThreadPriorityPtr != nullptr)
-        {
-            pAvSetMmThreadPriorityPtr(mmcssHandle, static_cast<AVRT_PRIORITY>(AVRT_PRIORITY_MAX));
-        }
-    }
 #endif
 
     // 入力検証 (Input Validation)
@@ -717,10 +690,10 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
     // バッファ確保 (Message Threadで実行されるため安全)
-    alignedL.allocate(SAFE_MAX_BLOCK_SIZE);
-    alignedR.allocate(SAFE_MAX_BLOCK_SIZE);
-    juce::FloatVectorOperations::clear(alignedL.get(), SAFE_MAX_BLOCK_SIZE);
-    juce::FloatVectorOperations::clear(alignedR.get(), SAFE_MAX_BLOCK_SIZE);
+    alignedL.resize(SAFE_MAX_BLOCK_SIZE);
+    alignedR.resize(SAFE_MAX_BLOCK_SIZE);
+    juce::FloatVectorOperations::clear(alignedL.data(), SAFE_MAX_BLOCK_SIZE);
+    juce::FloatVectorOperations::clear(alignedR.data(), SAFE_MAX_BLOCK_SIZE);
 }
 
 void AudioEngine::DSPCore::reset()
@@ -736,8 +709,8 @@ void AudioEngine::DSPCore::reset()
     dither.reset();
     if (oversampling)
         oversampling->reset();
-    if (alignedL.get()) juce::FloatVectorOperations::clear(alignedL.get(), SAFE_MAX_BLOCK_SIZE);
-    if (alignedR.get()) juce::FloatVectorOperations::clear(alignedR.get(), SAFE_MAX_BLOCK_SIZE);
+    if (!alignedL.empty()) juce::FloatVectorOperations::clear(alignedL.data(), alignedL.size());
+    if (!alignedR.empty()) juce::FloatVectorOperations::clear(alignedR.data(), alignedR.size());
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
@@ -762,7 +735,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     //----------------------------------------------------------
     // AudioBlockの構築 (AlignedBufferを使用)
     //----------------------------------------------------------
-    double* channels[2] = { alignedL.get(), alignedR.get() };
+    double* channels[2] = { alignedL.data(), alignedR.data() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
 
     //----------------------------------------------------------
@@ -979,7 +952,7 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     {
         // float (I/O) -> double (DSP) 変換
         const float* src = buffer->getReadPointer(ch, startSample);
-        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
+        double* dst = (ch == 0) ? alignedL.data() : alignedR.data();
         auto& blocker = (ch == 0) ? inputDCBlockerL : inputDCBlockerR;
 
         for (int i = 0; i < numSamples; ++i)
@@ -1005,7 +978,7 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
 
     for (int ch = clearStartCh; ch < 2; ++ch)
     {
-        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
+        double* dst = (ch == 0) ? alignedL.data() : alignedR.data();
         juce::FloatVectorOperations::clear(dst, numSamples);
     }
 
@@ -1015,8 +988,8 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     // 後段のステレオエフェクト（Convolver等）での片側無音を防ぐ。
     if (expandMono)
     {
-        const double* src = alignedL.get();
-        double* dst = alignedR.get();
+        const double* src = alignedL.data();
+        double* dst = alignedR.data();
         // 高速なメモリコピー (double配列)
         std::memcpy(dst, src, numSamples * sizeof(double));
     }
@@ -1077,7 +1050,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     {
         if (ch < 2)
         {
-            double* data = (ch == 0) ? alignedL.get() : alignedR.get();
+            double* data = (ch == 0) ? alignedL.data() : alignedR.data();
             auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
             float* dst = buffer->getWritePointer(ch, startSample);
 
@@ -1099,12 +1072,12 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             // ── フェーズ2: double→float 変換 + NaN除去 + クランプ (AVX2 一括) ──
 #if defined(__AVX2__)
             {
+                int i = 0;
+                const int vEnd = numSamples / 4 * 4;
                 const __m256d vMax  = _mm256_set1_pd(1.0);
                 const __m256d vMin  = _mm256_set1_pd(-1.0);
                 const __m256d vZero = _mm256_setzero_pd();
 
-                int i = 0;
-                const int vEnd = numSamples / 4 * 4;
                 for (; i < vEnd; i += 4)
                 {
                     __m256d v = _mm256_loadu_pd(data + i);
@@ -1131,6 +1104,11 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                 dst[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, val));
             }
 #endif
+        }
+        else
+        {
+            // 3ch以降は使用しないためクリア (ゴミデータ出力防止)
+            buffer->clear(ch, startSample, numSamples);
         }
     }
 }

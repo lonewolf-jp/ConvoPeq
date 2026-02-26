@@ -17,21 +17,11 @@
 //   - readFromFifo: Message Thread (Timer) から呼ばれます。FIFOバッファからデータを取得します。
 //============================================================================
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>  // 基本型 (HANDLE, DWORD等)
-#include <objbase.h>  // COM/Property関連の型 (REFPROPERTYKEY等)
-#include <avrt.h>     // MMCSS
-#pragma comment(lib, "avrt.lib")
-#ifndef AVRT_PRIORITY_MAX
-// For older Windows SDKs that might not have this defined.
-// The AVRT_PRIORITY enum was extended in later SDKs.
-#define AVRT_PRIORITY_MAX 3
-#endif
-#pragma comment(lib, "winmm.lib")
 #include <JuceHeader.h>
 #include <atomic>
 #include <cstring>
 #include <array>
+#include <vector>
 #include <juce_dsp/juce_dsp.h>
 
 #include "AlignedAllocation.h"
@@ -303,7 +293,7 @@ private:
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
         double sampleRate = 0.0;
 
-        ::convo::AlignedBuffer alignedL, alignedR;
+        std::vector<double, convo::MKLAllocator<double>> alignedL, alignedR;
         int maxSamplesPerBlock = 0;
 
         // Helpers
@@ -354,21 +344,6 @@ private:
     std::atomic<float> saturationAmount { 0.5f };
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
-
- #if JUCE_WINDOWS
-    // MMCSS (Multimedia Class Scheduler Service) handle
-    HANDLE mmcssHandle { nullptr };
-    DWORD mmcssTaskIndex { 0 };
-
-    // Function pointers for MMCSS
-    typedef HANDLE (WINAPI *pAvSetMmThreadCharacteristics)(LPCSTR, PDWORD);
-    typedef BOOL (WINAPI *pAvSetMmThreadPriority)(HANDLE, AVRT_PRIORITY);
-    typedef BOOL (WINAPI *pAvRevertMmThreadCharacteristics)(HANDLE);
-
-    pAvSetMmThreadCharacteristics pAvSetMmThreadCharacteristicsPtr = nullptr;
-    pAvSetMmThreadPriority pAvSetMmThreadPriorityPtr = nullptr;
-    pAvRevertMmThreadCharacteristics pAvRevertMmThreadCharacteristicsPtr = nullptr;
-#endif
 
     // dB変換時の下限値
     static constexpr float LEVEL_METER_MIN_DB  = -120.0f;

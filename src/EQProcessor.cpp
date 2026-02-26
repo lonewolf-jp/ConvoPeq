@@ -347,6 +347,9 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
         activeBandNodes[i] = node;
     }
     agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
+    agcCurrentGain.store(other.agcCurrentGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    agcEnvInput.store(other.agcEnvInput.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    agcEnvOutput.store(other.agcEnvOutput.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
     // 注意: smoothTotalGainのターゲットは、totalGainDbTargetに基づいてprocess()内で更新されます
 }
@@ -375,6 +378,10 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 
     totalGainDbTarget.store(other.totalGainDbTarget.load(std::memory_order_relaxed), std::memory_order_relaxed);
     agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
+    // AGC状態の同期
+    agcCurrentGain.store(other.agcCurrentGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    agcEnvInput.store(other.agcEnvInput.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    agcEnvOutput.store(other.agcEnvOutput.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 //--------------------------------------------------------------
@@ -389,7 +396,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         currentSampleRate = sampleRate;
 
     // MKL用スクラッチバッファの確保 (64byte alignment)
-    scratchBuffer.allocate(static_cast<size_t>(samplesPerBlock));
+    scratchBuffer.resize(static_cast<size_t>(samplesPerBlock));
 
     auto state = currentState.load(std::memory_order_acquire);
 
@@ -702,7 +709,7 @@ namespace
             const __m128d v0 = _mm_set_pd(dataR[n], dataL[n]);
 
             const __m128d v3 = _mm_sub_pd(v0, ic2eq);
-#if defined(__FMA__)
+#if defined(__AVX2__)
             // FMA: a1*ic1eq + a2*v3
             const __m128d v1 = _mm_fmadd_pd(a1, ic1eq, _mm_mul_pd(a2, v3));
             // FMA: ic2eq + a2*ic1eq + a3*v3
@@ -723,6 +730,11 @@ namespace
             __m128d output = _mm_add_pd(_mm_mul_pd(m0, v0), _mm_add_pd(_mm_mul_pd(m1, v1), _mm_mul_pd(m2, v2)));
 #endif
 
+            // NaN/Infチェック (isfinite): (x - x) は xがInf/NaNの時NaNになる
+            const __m128d diff = _mm_sub_pd(output, output);
+            const __m128d mask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+            output = _mm_and_pd(output, mask);
+
             // クランプ (-100, +100) で発散防止
             output = _mm_min_pd(_mm_max_pd(output, cLow), cHigh);
 
@@ -732,21 +744,27 @@ namespace
             dataR[n] = _mm_cvtsd_f64(hi);
         }
 
-        // Denormal フラッシュ & NaN チェック (状態変数のみ)
-        double s1L = _mm_cvtsd_f64(ic1eq);
-        double s2L = _mm_cvtsd_f64(ic2eq);
-        __m128d hi1 = _mm_unpackhi_pd(ic1eq, ic1eq);
-        __m128d hi2 = _mm_unpackhi_pd(ic2eq, ic2eq);
-        double s1R = _mm_cvtsd_f64(hi1);
-        double s2R = _mm_cvtsd_f64(hi2);
+        // Denormal フラッシュ & NaN チェック (状態変数のみ) - SIMD最適化
+        const __m128d denormal_threshold = _mm_set1_pd(DENORMAL_THRESHOLD);
+        const __m128d sign_mask = _mm_set1_pd(-0.0);
 
-        if (!std::isfinite(s1L) || std::abs(s1L) < DENORMAL_THRESHOLD) s1L = 0.0;
-        if (!std::isfinite(s2L) || std::abs(s2L) < DENORMAL_THRESHOLD) s2L = 0.0;
-        if (!std::isfinite(s1R) || std::abs(s1R) < DENORMAL_THRESHOLD) s1R = 0.0;
-        if (!std::isfinite(s2R) || std::abs(s2R) < DENORMAL_THRESHOLD) s2R = 0.0;
+        // --- ic1eq ---
+        __m128d nan_mask1 = _mm_cmpeq_pd(ic1eq, ic1eq);
+        __m128d abs_ic1eq = _mm_andnot_pd(sign_mask, ic1eq);
+        __m128d denormal_mask1 = _mm_cmplt_pd(abs_ic1eq, denormal_threshold);
+        __m128d valid_mask1 = _mm_andnot_pd(denormal_mask1, nan_mask1);
+        ic1eq = _mm_and_pd(ic1eq, valid_mask1);
 
-        stateL[0] = s1L;  stateL[1] = s2L;
-        stateR[0] = s1R;  stateR[1] = s2R;
+        // --- ic2eq ---
+        __m128d nan_mask2 = _mm_cmpeq_pd(ic2eq, ic2eq);
+        __m128d abs_ic2eq = _mm_andnot_pd(sign_mask, ic2eq);
+        __m128d denormal_mask2 = _mm_cmplt_pd(abs_ic2eq, denormal_threshold);
+        __m128d valid_mask2 = _mm_andnot_pd(denormal_mask2, nan_mask2);
+        ic2eq = _mm_and_pd(ic2eq, valid_mask2);
+
+        // 状態を書き戻す (L/Rチャンネルに分離)
+        _mm_storeu_pd(stateL, _mm_unpacklo_pd(ic1eq, ic2eq)); // [ic1eq_L, ic2eq_L]
+        _mm_storeu_pd(stateR, _mm_unpackhi_pd(ic1eq, ic2eq)); // [ic1eq_R, ic2eq_R]
     }
 #endif
 
@@ -821,8 +839,8 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
 
 #if JUCE_DSP_USE_INTEL_MKL
             // MKL最適化されたRMS計算 (Norm / sqrt(N))
-        std::memcpy(scratchBuffer.get(), data, static_cast<size_t>(numSamples) * sizeof(double));
-        double norm = cblas_dnrm2(numSamples, scratchBuffer.get(), 1);
+        std::memcpy(scratchBuffer.data(), data, static_cast<size_t>(numSamples) * sizeof(double));
+        double norm = cblas_dnrm2(numSamples, scratchBuffer.data(), 1);
         rms = norm / std::sqrt(static_cast<double>(numSamples));
 #else
         double sumSq = 0.0;
@@ -931,8 +949,8 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
 #if JUCE_DSP_USE_INTEL_MKL
             // MKL最適化されたRMS計算
-            std::memcpy(scratchBuffer.get(), data, static_cast<size_t>(numSamples) * sizeof(double));
-            double norm = cblas_dnrm2(numSamples, scratchBuffer.get(), 1);
+            std::memcpy(scratchBuffer.data(), data, static_cast<size_t>(numSamples) * sizeof(double));
+            double norm = cblas_dnrm2(numSamples, scratchBuffer.data(), 1);
             rms = norm / std::sqrt(static_cast<double>(numSamples));
 #else
             double sumSq = 0.0;

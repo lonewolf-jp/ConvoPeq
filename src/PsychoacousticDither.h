@@ -141,6 +141,7 @@ class PsychoacousticDither
 public:
     static constexpr int MAX_CHANNELS = 8; // 将来の多チャンネル拡張に備えて余裕を持たせる
     static constexpr int DEFAULT_BIT_DEPTH = 24;
+    static constexpr int STATE_STRIDE = 8; // 64 bytes alignment (8 * sizeof(double))
 
     explicit PsychoacousticDither(std::optional<uint64_t> seed = std::nullopt)
     {
@@ -164,7 +165,7 @@ public:
             master.jump(); // Ensure non-overlapping sequences for each channel
         }
 
-        shaperStateBuffer.allocate(MAX_CHANNELS * 5);
+        shaperStateBuffer.resize(MAX_CHANNELS * STATE_STRIDE);
         reset();
     }
 
@@ -207,14 +208,13 @@ public:
 
     void reset() noexcept
     {
-        if (shaperStateBuffer.get() != nullptr)
-            std::fill_n(shaperStateBuffer.get(), MAX_CHANNELS * 5, 0.0);
+        std::fill(shaperStateBuffer.begin(), shaperStateBuffer.end(), 0.0);
     }
 
     inline double process(double input, int channel) noexcept
     {
         if (channel < 0 || channel >= MAX_CHANNELS) return input;
-        return processChannel(input, rng[channel], shaperStateBuffer.get() + (channel * 5));
+        return processChannel(input, rng[channel], shaperStateBuffer.data() + (channel * STATE_STRIDE));
     }
 
 private:
@@ -271,7 +271,7 @@ private:
     }
 
     Xoshiro256ss  rng[MAX_CHANNELS];
-    AlignedBuffer shaperStateBuffer;
+    std::vector<double, convo::MKLAllocator<double>> shaperStateBuffer;
     double scale = 1.0 / 16777216.0;
     double invScale = 16777216.0;
     std::array<double, 5> coeffs { 2.033, -2.165, 1.959, -1.590, 0.6149 };

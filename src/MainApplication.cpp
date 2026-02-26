@@ -22,6 +22,10 @@
 #include <mkl.h>
 #endif
 
+#include "WDL/fft.h" // WDL Double precision FFT
+
+static std::once_flag fftInitFlag;
+
 #ifdef _WIN32
 #include <timeapi.h>
 #pragma comment(lib, "winmm.lib")
@@ -101,6 +105,9 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
 #if JUCE_INTEL
 #pragma warning(pop)
 #endif
+
+    // WDL FFTテーブルをメインスレッドで安全に初期化
+    std::call_once(fftInitFlag, [] { WDL_fft_init(); });
 
     // メインウィンドウを生成する
     mainWindow = std::make_unique<MainWindow>(getApplicationName());

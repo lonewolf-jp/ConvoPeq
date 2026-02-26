@@ -301,7 +301,7 @@ private:
     double currentSampleRate{ 0.0 };
 
     // ── MKL用スクラッチバッファ ──
-    ::convo::AlignedBuffer scratchBuffer;
+    std::vector<double, convo::MKLAllocator<double>> scratchBuffer;
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
     void processAGC(juce::dsp::AudioBlock<double>& block);

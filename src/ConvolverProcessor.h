@@ -176,7 +176,7 @@ private:
         // WDL_ConvolutionEngine_Div は Non-uniform partitioned convolution を提供し、
         // 低レイテンシー動作が可能です。
         std::array<WDL_ConvolutionEngine_Div, 2> convolvers;
-        std::array<convo::AlignedBuffer, 2> irData;
+        std::array<std::vector<double, convo::MKLAllocator<double>>, 2> irData;
         int irDataLength = 0;
 
         int latency = 0;
@@ -192,7 +192,7 @@ private:
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        void init(convo::AlignedBuffer irL, convo::AlignedBuffer irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize)
+        void init(std::vector<double, convo::MKLAllocator<double>> irL, std::vector<double, convo::MKLAllocator<double>> irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize)
         {
             irData[0] = std::move(irL);
             irData[1] = std::move(irR);
@@ -205,9 +205,13 @@ private:
             impL_stack.SetNumChannels(1);
             impR_stack.SetNumChannels(1);
 
-            // 事前確保したメモリを指すように設定 (WDL内部でのmallocを回避)
-            impL_stack.impulses.Get(0)->Set(irData[0].get(), irDataLength);
-            impR_stack.impulses.Get(0)->Set(irData[1].get(), irDataLength);
+            // LoaderThreadと同様に、Resize + memcpy パターンを使用して安全に初期化
+            // これにより、WDL内部でのバッファ管理が確実になり、targetLength基準での動作が保証される
+            impL_stack.impulses[0].Resize(irDataLength);
+            impR_stack.impulses[0].Resize(irDataLength);
+
+            std::memcpy(impL_stack.impulses[0].Get(), irData[0].data(), irDataLength * sizeof(double));
+            std::memcpy(impR_stack.impulses[0].Get(), irData[1].data(), irDataLength * sizeof(double));
 
             // WDL_ConvolutionEngine_Div の初期化
             // latency_allowed=0 で低レイテンシーモードを有効化
@@ -217,6 +221,17 @@ private:
             // WDLエンジンのレイテンシーを取得 (通常は0またはパーティションサイズ依存)
             // WDL_ConvolutionEngine::GetLatency() はサンプル数を返す
             latency = convolvers[0].GetLatency();
+
+            // プリウォーミング (Audio Threadでのメモリ確保回避)
+            // 最初のAdd呼び出し時に内部バッファが確保されるため、ここでダミー処理を行っておく
+            {
+                double dummySample = 0.0;
+                WDL_FFT_REAL* inputs[1] = { &dummySample };
+                convolvers[0].Add(inputs, 1, 1);
+                convolvers[1].Add(inputs, 1, 1);
+                convolvers[0].Reset();
+                convolvers[1].Reset();
+            }
         }
 
         void reset() { convolvers[0].Reset(); convolvers[1].Reset(); }
@@ -242,7 +257,7 @@ private:
     // レイテンシー補正用ディレイ
     //----------------------------------------------------------
     // juce::dsp::DelayLine<double> delayLine; // Replaced with custom AVX2 ring buffer
-    convo::AlignedBuffer delayBuffer[2]; // L/R separate buffers
+    std::vector<double, convo::MKLAllocator<double>> delayBuffer[2]; // L/R separate buffers
     int delayWritePos = 0;
     juce::SmoothedValue<double> latencySmoother;
 
@@ -277,9 +292,9 @@ private:
     // Dry信号バッファ（Mix用）
     //----------------------------------------------------------
     juce::AudioBuffer<double> dryBuffer;
-    convo::AlignedBuffer dryBufferStorage[2]; // Aligned storage for dryBuffer
+    std::vector<double, convo::MKLAllocator<double>> dryBufferStorage[2]; // Aligned storage for dryBuffer
     juce::AudioBuffer<double> smoothingBuffer; // スムーシングゲイン計算用 (Audio Threadでのメモリ確保回避)
-    convo::AlignedBuffer smoothingBufferStorage[2]; // Aligned storage for smoothingBuffer
+    std::vector<double, convo::MKLAllocator<double>> smoothingBufferStorage[2]; // Aligned storage for smoothingBuffer
 
     //----------------------------------------------------------
     // 準備完了フラグ
