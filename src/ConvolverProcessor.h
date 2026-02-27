@@ -132,6 +132,7 @@ public:
     bool isIRLoaded() const { return convolution.load() != nullptr; }
     juce::String getIRName() const { return irName; }
     int getIRLength() const { return irLength; }
+    juce::String getLastError() const { return lastError; }
     float getLoadProgress() const { return loadProgress.load(); }
 
     //----------------------------------------------------------
@@ -192,7 +193,7 @@ private:
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        void init(std::vector<double, convo::MKLAllocator<double>> irL, std::vector<double, convo::MKLAllocator<double>> irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize)
+        void init(std::vector<double, convo::MKLAllocator<double>> irL, std::vector<double, convo::MKLAllocator<double>> irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition)
         {
             irData[0] = std::move(irL);
             irData[1] = std::move(irR);
@@ -215,8 +216,8 @@ private:
 
             // WDL_ConvolutionEngine_Div の初期化
             // latency_allowed=0 で低レイテンシーモードを有効化
-            convolvers[0].SetImpulse(&impL_stack, maxFFTSize, knownBlockSize, 0, 0, 0);
-            convolvers[1].SetImpulse(&impR_stack, maxFFTSize, knownBlockSize, 0, 0, 0);
+            convolvers[0].SetImpulse(&impL_stack, maxFFTSize, knownBlockSize, 0, 0, firstPartition);
+            convolvers[1].SetImpulse(&impR_stack, maxFFTSize, knownBlockSize, 0, 0, firstPartition);
 
             // WDLエンジンのレイテンシーを取得 (通常は0またはパーティションサイズ依存)
             // WDL_ConvolutionEngine::GetLatency() はサンプル数を返す
@@ -247,6 +248,7 @@ private:
     std::atomic<bool> isRebuilding { false };
     std::unique_ptr<LoaderThread> activeLoader;
     std::atomic<float> loadProgress { 0.0f };
+    juce::String lastError;
     void setLoadingProgress(float p) { loadProgress.store(p); }
 
     juce::ListenerList<Listener> listeners;
@@ -286,7 +288,7 @@ private:
     double originalIRSampleRate = 0.0;
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
     std::vector<float, convo::MKLAllocator<float>> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
-    std::atomic<double> currentSampleRate { 48000.0 };
+    std::atomic<double> currentSampleRate { 0.0 };
 
     //----------------------------------------------------------
     // Dry信号バッファ（Mix用）
@@ -300,7 +302,7 @@ private:
     // 準備完了フラグ
     //----------------------------------------------------------
     std::atomic<bool> isPrepared { false };
-    int currentBufferSize = 512; // prepareToPlayで更新される
+    int currentBufferSize = 0; // prepareToPlayで更新される
     double currentSmoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC; // mixSmootherに設定されている現在の時間
 
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
@@ -313,6 +315,7 @@ private:
                       bool isRebuild,
                       const juce::File& file,
                       const juce::AudioBuffer<double>& displayIR);
+    void handleLoadError(const juce::String& error);
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)

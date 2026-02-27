@@ -53,7 +53,11 @@ private:
     static constexpr float FFT_DISPLAY_MIN_DB = -100.0f;
     static constexpr float FFT_DISPLAY_MIN_MAG = 1e-9f;
 
+#if JUCE_DSP_USE_INTEL_MKL
+    DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
+#else
     juce::dsp::FFT fft { static_cast<int>(std::log2(NUM_FFT_POINTS)) };
+#endif
     juce::dsp::WindowingFunction<float> window { NUM_FFT_POINTS, juce::dsp::WindowingFunction<float>::hann };
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
     std::vector<float, convo::MKLAllocator<float>> fftTimeDomainBuffer;
@@ -138,6 +142,9 @@ private:
     void paintEQCurve    (juce::Graphics& g, const juce::Rectangle<int>& area);
     void paintLevelMeter (juce::Graphics& g, const juce::Rectangle<int>& area);
     void paintGrid       (juce::Graphics& g, const juce::Rectangle<int>& area);
+
+    void prepareFFT();
+    void releaseFFT();
 
     // ── パス生成ヘルパー ──
     void updateEQData();

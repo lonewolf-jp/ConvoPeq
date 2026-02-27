@@ -60,6 +60,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     updateEQData(); // 初期状態のEQカーブを計算
 
+    prepareFFT();
     startTimerHz(60); // 60fps: UIの滑らかさとFIFO消費の安定化のため
 }
 
@@ -69,9 +70,33 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 {
     stopTimer();
+    releaseFFT();
     engine.removeChangeListener(this);
     engine.getEQProcessor().removeChangeListener(this);
     engine.getEQProcessor().removeListener(this);
+}
+
+void SpectrumAnalyzerComponent::prepareFFT()
+{
+#if JUCE_DSP_USE_INTEL_MKL
+    if (fftHandle) return;
+    // Complex 1D FFT, Single Precision
+    // リアルタイム性を考慮し、事前にDescriptorを作成・コミットしておく
+    DftiCreateDescriptor(&fftHandle, DFTI_SINGLE, DFTI_COMPLEX, 1, NUM_FFT_POINTS);
+    DftiSetValue(fftHandle, DFTI_PLACEMENT, DFTI_INPLACE);
+    DftiCommitDescriptor(fftHandle);
+#endif
+}
+
+void SpectrumAnalyzerComponent::releaseFFT()
+{
+#if JUCE_DSP_USE_INTEL_MKL
+    if (fftHandle)
+    {
+        DftiFreeDescriptor(&fftHandle);
+        fftHandle = nullptr;
+    }
+#endif
 }
 
 //--------------------------------------------------------------
@@ -154,10 +179,44 @@ void SpectrumAnalyzerComponent::timerCallback()
     }
 
     // 3. 窓関数適用とFFT実行
+#if JUCE_DSP_USE_INTEL_MKL
+    // MKL: Real -> Complex conversion + Windowing
+    // fftWorkBuffer is float array of size NUM_FFT_POINTS * 2
+    // We treat it as interleaved complex: re, im, re, im...
+    {
+        const float* src = fftTimeDomainBuffer.data();
+        float* dst = fftWorkBuffer.data();
+
+        // Step 3a: Copy and Window (Real)
+        std::memcpy(dst, src, NUM_FFT_POINTS * sizeof(float));
+        window.multiplyWithWindowingTable(dst, NUM_FFT_POINTS);
+
+        // Step 3b: Expand to Complex (Interleaved)
+        // Expand in-place backwards to avoid overwriting
+        for (int i = NUM_FFT_POINTS - 1; i >= 0; --i)
+        {
+            dst[2 * i] = dst[i];     // Real
+            dst[2 * i + 1] = 0.0f;   // Imag
+        }
+
+        // Step 3c: FFT (Forward)
+        DftiComputeForward(fftHandle, dst);
+
+        // Step 4: Magnitude (dB)
+        const int numBins = std::min(static_cast<int>(rawBuffer.size()), NUM_FFT_BINS);
+        for (int i = 0; i < numBins; ++i)
+        {
+            float re = dst[2 * i];
+            float im = dst[2 * i + 1];
+            float magnitude = std::sqrt(re * re + im * im) * FFT_MAGNITUDE_SCALE;
+
+            rawBuffer[i] = (magnitude > FFT_DISPLAY_MIN_MAG) ? juce::Decibels::gainToDecibels(magnitude) : FFT_DISPLAY_MIN_DB;
+        }
+    }
+#else
     std::memcpy(fftWorkBuffer.data(), fftTimeDomainBuffer.data(), NUM_FFT_POINTS * sizeof(float));
     std::fill(fftWorkBuffer.data() + NUM_FFT_POINTS, fftWorkBuffer.data() + NUM_FFT_POINTS * 2, 0.0f);
     window.multiplyWithWindowingTable(fftWorkBuffer.data(), NUM_FFT_POINTS);
-    // Note: この処理は Message Thread (Timer) で実行されるため、FFT実行（performFrequencyOnlyForwardTransform）に伴う負荷や一時的なメモリ確保はAudio Threadに影響せず安全です。
     fft.performFrequencyOnlyForwardTransform(fftWorkBuffer.data());
 
     // 4. dB変換して出力
@@ -169,6 +228,7 @@ void SpectrumAnalyzerComponent::timerCallback()
                         ? juce::Decibels::gainToDecibels(magnitude)
                         : FFT_DISPLAY_MIN_DB;
     }
+#endif
 
     for (size_t i = 0; i < smoothedBuffer.size(); ++i)
     {

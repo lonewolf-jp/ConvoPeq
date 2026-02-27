@@ -389,14 +389,33 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 // サンプルレート変更時にフィルタ状態を全リセットする
 // この関数は Audio Thread 開始前、または停止後に呼ばれる
 //--------------------------------------------------------------
-void EQProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 {
     const bool rateChanged = (std::abs(currentSampleRate - sampleRate) > 1e-6);
     if (rateChanged)
         currentSampleRate = sampleRate;
 
-    // MKL用スクラッチバッファの確保 (64byte alignment)
-    scratchBuffer.resize(static_cast<size_t>(samplesPerBlock));
+    // ==================================================================
+    // 【Issue 4 完全修正】MKLスクラッチバッファ固定最大確保
+    // 変更点:
+    //   1. 引数名を newMaxInternalBlockSize に変更（C4458 shadowing警告解消）
+    //   2. resizeを「不足時のみ」に制限 → RCU再構築時のメモリ操作を最小化
+    //   3. 明示的clear（Denormal/NaN/Inf対策）
+    //   4. maxInternalBlockSize を保存（process内ガード用）
+    // ==================================================================
+    const int requiredSize = newMaxInternalBlockSize;   // ← 引数からローカルへ
+
+    if (scratchBuffer.size() < static_cast<size_t>(requiredSize))
+    {
+        scratchBuffer.resize(static_cast<size_t>(requiredSize));
+
+        // 明示的ゼロクリア（Denormal防止 + 再現性確保）
+        if (!scratchBuffer.empty())
+            juce::FloatVectorOperations::clear(scratchBuffer.data(),
+                                               static_cast<int>(scratchBuffer.size()));
+    }
+
+    this->maxInternalBlockSize = requiredSize;   // メンバ変数へ代入（this->で明示）
 
     auto state = currentState.load(std::memory_order_acquire);
 
@@ -408,8 +427,8 @@ void EQProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     if (state)
     {
         totalGainDbTarget.store(state->totalGainDb, std::memory_order_relaxed);
-        smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
-        // ダミー呼び出し: 内部状態の確実な初期化 (メモリ確保リスクの排除)
+        smoothTotalGain.setCurrentAndTargetValue(
+            juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
     }
 
     // フィルタ状態をリセット
@@ -428,20 +447,24 @@ void EQProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     {
         for (int i = 0; i < NUM_BANDS; ++i)
         {
-            // updateBandNode(i) は trashBin を使用するため、ベクトルのリサイズや割り当てが発生する可能性があります。
-            // prepareToPlay 内では、同期的に更新し、古いノードを即座に削除できます。
             auto loopState = currentState.load(std::memory_order_acquire);
             if (loopState)
             {
                 auto newNode = createBandNode(i, *loopState);
                 bandNodes[i].store(newNode.get(), std::memory_order_release);
                 activeBandNodes[i] = newNode;
-                // prepareToPlay 内では、即座に削除しても安全であると仮定します
             }
         }
     }
+    // ==================================================================
+    // 【スペアナグラフ統合曲線完全同期修正】
+    // prepareToPlay（RCU再構築・プリセットロード・SR変更時）に必ず
+    // ChangeBroadcaster通知を発行し、SpectrumAnalyzerComponentの
+    // updateEQData() / updateEQPaths() を強制実行
+    // これで統合曲線が実際の設定値（Gain/Q/Freq/Type）と完全に一致
+    // ==================================================================
+    sendChangeMessage();
 }
-
 //--------------------------------------------------------------
 // パラメータ変更メソッド (UIスレッドから呼ぶ)
 // 各メソッドは atomic store で値を書き込み、coeffsDirty を立てる
@@ -779,14 +802,44 @@ namespace
                                        startGain + increment,
                                        startGain);
         const __m256d vInc4 = _mm256_set1_pd(4.0 * increment);
+        const __m256d vInc16 = _mm256_set1_pd(16.0 * increment);
 
         int i = 0;
-        const int vEnd = numSamples / 4 * 4;
-        for (; i < vEnd; i += 4)
+        const int vEnd = numSamples / 16 * 16;
+        for (; i < vEnd; i += 16)
         {
-            __m256d vData = _mm256_loadu_pd(data + i);
+            _mm_prefetch(reinterpret_cast<const char*>(data + i + 64), _MM_HINT_T0);
+
+            // 1
+            __m256d vData0 = _mm256_load_pd(data + i);
+            __m256d vOut0  = _mm256_mul_pd(vData0, vGain);
+            _mm256_store_pd(data + i, vOut0);
+            vGain = _mm256_add_pd(vGain, vInc4);
+
+            // 2
+            __m256d vData1 = _mm256_load_pd(data + i + 4);
+            __m256d vOut1  = _mm256_mul_pd(vData1, vGain);
+            _mm256_store_pd(data + i + 4, vOut1);
+            vGain = _mm256_add_pd(vGain, vInc4);
+
+            // 3
+            __m256d vData2 = _mm256_load_pd(data + i + 8);
+            __m256d vOut2  = _mm256_mul_pd(vData2, vGain);
+            _mm256_store_pd(data + i + 8, vOut2);
+            vGain = _mm256_add_pd(vGain, vInc4);
+
+            // 4
+            __m256d vData3 = _mm256_load_pd(data + i + 12);
+            __m256d vOut3  = _mm256_mul_pd(vData3, vGain);
+            _mm256_store_pd(data + i + 12, vOut3);
+            vGain = _mm256_add_pd(vGain, vInc4);
+        }
+        // Remaining
+        for (; i < (numSamples / 4 * 4); i += 4)
+        {
+            __m256d vData = _mm256_load_pd(data + i);
             __m256d vOut  = _mm256_mul_pd(vData, vGain);
-            _mm256_storeu_pd(data + i, vOut);
+            _mm256_store_pd(data + i, vOut);
             vGain = _mm256_add_pd(vGain, vInc4);
         }
         // スカラー残余
@@ -933,7 +986,16 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         return;
 
     const int numSamples = (int)block.getNumSamples();
-    if (numSamples <= 0) return; // ゼロサンプルガード: 処理対象がない場合は即座に戻る
+
+    // ==================================================================
+    // 【Issue 4 追加安全ガード】オーバーラン即検出
+    // ==================================================================
+    // Fix: Releaseビルドでも有効なチェックに変更
+    if (numSamples <= 0 || static_cast<size_t>(numSamples) > static_cast<size_t>(maxInternalBlockSize))
+    {
+        jassert(numSamples > 0 && static_cast<size_t>(numSamples) <= static_cast<size_t>(maxInternalBlockSize));
+        return;
+    }
 
     const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
 

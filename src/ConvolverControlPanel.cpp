@@ -314,9 +314,18 @@ void ConvolverControlPanel::updateIRInfo()
     }
     else
     {
-        irInfoLabel.setText("No IR loaded", juce::dontSendNotification);
-        irInfoLabel.setColour(juce::Label::textColourId,
-                             juce::Colours::orange.withAlpha(0.8f));
+        // エラーがある場合は赤字で表示
+        if (convolver.getLastError().isNotEmpty())
+        {
+            irInfoLabel.setText(convolver.getLastError(), juce::dontSendNotification);
+            irInfoLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+        }
+        else
+        {
+            irInfoLabel.setText("No IR loaded", juce::dontSendNotification);
+            irInfoLabel.setColour(juce::Label::textColourId,
+                                 juce::Colours::orange.withAlpha(0.8f));
+        }
     }
 
     updateWaveformPath();

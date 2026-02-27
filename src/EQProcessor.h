@@ -144,7 +144,7 @@ public:
     // prepareToPlay: サンプルレート・バッファサイズ変更時に呼ぶ
     // フィルタ状態をリセットし、係数再計算を強制する
     //----------------------------------------------------------
-    void prepareToPlay(double sampleRate, int /*samplesPerBlock*/);
+    void prepareToPlay(double sampleRate, int newMaxInternalBlockSize);
 
     //----------------------------------------------------------
     // process: オーディオスレッドから呼ばれる
@@ -299,6 +299,16 @@ private:
     // ── 現在のサンプルレート ──
     // prepareToPlay で更新。Audio Thread で係数再計算に使用。
     double currentSampleRate{ 0.0 };
+
+    // ==================================================================
+    // 【Issue 4 修正】MKLスクラッチバッファの内部最大サイズ
+    // 用途: process() / processAGC() でOSアップサンプリング後の
+    //      ブロック（最大 SAFE_MAX × 8 = 524288 サンプル）に対して
+    //      memcpy + cblas_dnrm2 を安全に行うため。
+    // 理由: Issue 3のmaxInternalBlockSizeと完全に同期。
+    //      固定確保によりRCU時のresizeを排除し、予測可能性を最大化。
+    // ==================================================================
+    int maxInternalBlockSize = 0;
 
     // ── MKL用スクラッチバッファ ──
     std::vector<double, convo::MKLAllocator<double>> scratchBuffer;

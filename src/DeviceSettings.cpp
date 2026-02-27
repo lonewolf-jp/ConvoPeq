@@ -297,6 +297,11 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
     }
 }
 
+//--------------------------------------------------------------
+// loadSettings
+// 設定ファイルからAudioDeviceManagerを復元する
+// JUCE v8.0.12 完全対応版（MMCSSはJUCE内部で自動管理）
+//--------------------------------------------------------------
 void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, AudioEngine& engine)
 {
     // ASIOドライバの切り替え時に発生しうるフリーズを防ぐため、初期化前に一度デバイスを閉じる
@@ -308,9 +313,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     {
         if (auto xml = juce::XmlDocument::parse (file))
         {
-            // 保存された設定でデバイスを初期化する。
-            // 入力は2チャンネル、出力は2チャンネルを要求する。
-            // selectDefaultDeviceOnFailure = true なので、失敗時は自動的にデフォルトへフォールバックする
+            // 保存された設定でデバイスを初期化する（入力2ch、出力2chを要求）
             juce::String error = deviceManager.initialise (2, 2, xml.get(), true);
 
             if (error.isNotEmpty())
@@ -339,9 +342,9 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
         }
     }
 
-    // 設定ファイルが存在しない、または読み込みに失敗した場合は、
-    // デフォルトのデバイスで初期化する。
-    deviceManager.initialiseWithDefaultDevices (2, 2);
+    // 設定ファイルが存在しない、または読み込みに失敗した場合はデフォルト初期化
+    // MMCSSはJUCE 8.0.12で内部自動管理されるため明示的設定は不要
+    deviceManager.initialise (2, 2, nullptr, true);
 
     // デフォルトで最大サンプルレートに設定
     auto* currentDevice = deviceManager.getCurrentAudioDevice();
@@ -350,10 +353,8 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
         auto availableRates = currentDevice->getAvailableSampleRates();
         if (!availableRates.isEmpty())
         {
-            double maxRate = 0.0;
-            for (auto rate : availableRates)
-                if (rate > maxRate)
-                    maxRate = rate;
+            // 最大レートを安全に取得
+            double maxRate = *std::max_element(availableRates.begin(), availableRates.end());
 
             auto setup = deviceManager.getAudioDeviceSetup();
             if (std::abs(setup.sampleRate - maxRate) > 1e-6 && maxRate > 0.0)
@@ -368,7 +369,6 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     engine.setOversamplingFactor(0); // 自動設定へ
     engine.setOversamplingType(AudioEngine::OversamplingType::IIR); // デフォルトIIR
 }
-
 void DeviceSettings::applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist)
 {
     // 既存のASIOタイプを探す

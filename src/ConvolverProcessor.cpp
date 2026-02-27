@@ -189,16 +189,49 @@ static void applyAsymmetricTukey(double* data, int numSamples)
     }
 }
 
-// サンプルレートに基づいて最大FFTサイズを計算するヘルパー
-static int calculateMaxFFTSize(double sampleRate)
+// 2の累乗へ切り上げ (Helper)
+static inline int nextPow2(int x)
 {
-    if (sampleRate <= 96000.0 + 1.0) return 4096;
-    if (sampleRate <= 192000.0 + 1.0) return 8192;
-    if (sampleRate <= 384000.0 + 1.0) return 16384;
-    if (sampleRate <= 768000.0 + 1.0) return 32768;
-    if (sampleRate <= 1540000.0 + 1.0) return 65536;
-    if (sampleRate <= 3080000.0 + 1.0) return 131072;
-    return 262144;
+    if (x <= 0) return 1;
+    --x;
+    x |= x >> 1;
+    x |= x >> 2;
+    x |= x >> 4;
+    x |= x >> 8;
+    x |= x >> 16;
+    return x + 1;
+}
+
+struct ConvolverSizing
+{
+    int firstPartition;
+    int maxFFTSize;
+};
+
+// マスターリング専用 sizing 計算
+static inline ConvolverSizing computeMasteringSizing(int internalBlockSize, int irLength)
+{
+    ConvolverSizing s{};
+
+    // FP = nextPow2(internalBlock * 4)
+    // FPは 4096〜16384 に制限（キャッシュ最適帯域）
+    int fp = nextPow2(internalBlockSize * 4);
+    fp = std::clamp(fp, 4096, 16384);
+    s.firstPartition = fp;
+
+    // MFS = nextPow2(clamp(irInternal / 4, FP, 131072))
+    int mfsBase = irLength / 4;
+    constexpr int kMFSUpper = 131072;
+    mfsBase = std::clamp(mfsBase, s.firstPartition, kMFSUpper);
+    s.maxFFTSize = nextPow2(mfsBase);
+
+    // WDL安全制約
+    if (s.maxFFTSize < s.firstPartition)
+        s.maxFFTSize = s.firstPartition;
+    if (s.maxFFTSize < internalBlockSize)
+        s.maxFFTSize = nextPow2(internalBlockSize);
+
+    return s;
 }
 
 //--------------------------------------------------------------
@@ -268,6 +301,7 @@ public:
         juce::AudioBuffer<double> displayIR;
         StereoConvolver::Ptr newConv;
         bool success = false;
+        juce::String errorMessage;
     };
 
     void run() override
@@ -329,6 +363,19 @@ public:
 
             resetter.success = true;
         }
+        else if (!result.success && result.errorMessage.isNotEmpty() && !threadShouldExit())
+        {
+            // エラー発生時: メインスレッドでエラー処理を行う
+            auto wp = weakOwner;
+            const juce::String error = result.errorMessage;
+            juce::MessageManager::callAsync([wp, error]()
+            {
+                if (auto* o = wp.get())
+                {
+                    o->handleLoadError(error);
+                }
+            });
+        }
     }
 
     LoadResult performLoad(juce::Thread* thread)
@@ -364,6 +411,10 @@ public:
                     DBG("LoaderThread: ファイルサイズが大きすぎます。");
                     return result;
                 }
+                if (numChannels <= 0) {
+                    DBG("LoaderThread: チャンネル数が不正です。");
+                    return result;
+                }
 
                 // AudioFormatReader::read は float のみ対応のため、一時バッファを使用
                 juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
@@ -380,7 +431,7 @@ public:
                 result.loadedSR = reader->sampleRate;
             }
 
-            if (checkCancellation(thread, nullptr) || result.loadedIR.getNumSamples() == 0) return result;
+            if (checkCancellation(thread, nullptr) || result.loadedIR.getNumSamples() == 0 || result.loadedIR.getNumChannels() == 0) return result;
 
             // 2. ピーク正規化 (ファイル読み込み時のみ)
             // リビルド時は既に正規化されていると仮定するためスキップします。
@@ -503,7 +554,7 @@ public:
                 if (wasCancelled) return result;
 
                 // 変換成功チェック: キャンセルされておらず、かつ無音でない場合のみ適用
-                if (minPhaseIR.getNumSamples() > 0 && minPhaseIR.getMagnitude(0, 0, minPhaseIR.getNumSamples()) > 1.0e-5)
+                if (minPhaseIR.getNumSamples() > 0 && minPhaseIR.getNumChannels() > 0 && minPhaseIR.getMagnitude(0, 0, minPhaseIR.getNumSamples()) > 1.0e-5)
                 {
                     trimmed = minPhaseIR;
                     conversionSuccessful = true;
@@ -517,20 +568,23 @@ public:
             // Linear Phaseの場合、ピークが遅れてやってくるため、その分Dryを遅らせる必要がある
             // MinPhase変換に失敗した場合も、Linear Phaseとして扱う必要があるためピーク検出を行う
             int irPeakLatency = 0;
-            if (!useMinPhase || (useMinPhase && !conversionSuccessful))
+            if (trimmed.getNumChannels() > 0)
             {
-                // 全チャンネルの中で最大振幅を持つサンプルの位置を探す
-                double maxMag = 0.0;
-                for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
+                if (!useMinPhase || (useMinPhase && !conversionSuccessful))
                 {
-                    const double* data = trimmed.getReadPointer(ch);
-                    for (int i = 0; i < result.targetLength; ++i)
+                    // 全チャンネルの中で最大振幅を持つサンプルの位置を探す
+                    double maxMag = 0.0;
+                    for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
                     {
-                        double mag = std::abs(data[i]);
-                        if (mag > maxMag)
+                        const double* data = trimmed.getReadPointer(ch);
+                        for (int i = 0; i < result.targetLength; ++i)
                         {
-                            maxMag = mag;
-                            irPeakLatency = i;
+                            double mag = std::abs(data[i]);
+                            if (mag > maxMag)
+                            {
+                                maxMag = mag;
+                                irPeakLatency = i;
+                            }
                         }
                     }
                 }
@@ -542,6 +596,9 @@ public:
             // IRデータを格納するアラインされたバッファを準備 (Rebuild用に保持)
             std::vector<double, convo::MKLAllocator<double>> irL(result.targetLength), irR(result.targetLength);
 
+            // 安全対策: チャンネル数チェック
+            if (trimmed.getNumChannels() == 0) return result;
+
             const double* srcL = trimmed.getReadPointer(0);
             const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
 
@@ -551,10 +608,10 @@ public:
 
             // 10. 新しいConvolutionの構築 (initメソッドを使用して安全に初期化)
             // prepareToPlayとロジックを統一し、WDLエンジンのプリウォーミングも行う
-            int maxFFTSize = calculateMaxFFTSize(sampleRate);
             int internalBlockSize = juce::nextPowerOfTwo(blockSize);
+            auto sizing = computeMasteringSizing(internalBlockSize, result.targetLength);
 
-            result.newConv->init(std::move(irL), std::move(irR), result.targetLength, sampleRate, irPeakLatency, maxFFTSize, internalBlockSize);
+            result.newConv->init(std::move(irL), std::move(irR), result.targetLength, sampleRate, irPeakLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition);
 
             // Display用コピーを作成 (move前に)
             result.displayIR = trimmed;
@@ -566,18 +623,20 @@ public:
         }
         catch (const std::bad_alloc&)
         {
-            DBG("LoaderThread: Memory allocation failed. Aborting IR load.");
+            result.errorMessage = "IR too large (Out of Memory)";
+            DBG("LoaderThread: " << result.errorMessage);
             return result;
         }
         catch (const std::exception& e)
         {
-            juce::ignoreUnused(e);
-            DBG("LoaderThread: Exception occurred during IR loading: " << e.what());
+            result.errorMessage = "Error loading IR: " + juce::String(e.what());
+            DBG("LoaderThread: " << result.errorMessage);
             return result;
         }
         catch (...)
         {
-            DBG("LoaderThread: Unknown exception occurred during IR loading.");
+            result.errorMessage = "Unknown error loading IR";
+            DBG("LoaderThread: " << result.errorMessage);
             return result;
         }
     }
@@ -638,6 +697,9 @@ ConvolverProcessor::~ConvolverProcessor()
 //--------------------------------------------------------------
 void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    const bool rateChanged = (std::abs(currentSampleRate.load() - sampleRate) > 1e-6);
+    const bool blockChanged = (currentBufferSize != samplesPerBlock);
+
     currentBufferSize = samplesPerBlock;
 
     // 最初にサンプルレートを更新（oldValueを保存）
@@ -659,7 +721,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         // 既存のエンジンは他スレッドで共有されている可能性があるため、複製して差し替える。
         const int internalBlockSize = juce::nextPowerOfTwo(samplesPerBlock);
 
-        if (conv->irDataLength > 0)
+        if ((rateChanged || blockChanged) && conv->irDataLength > 0)
         {
             auto newConv = std::make_shared<StereoConvolver>();
 
@@ -668,11 +730,11 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
             std::memcpy(irL.data(), conv->irData[0].data(), conv->irDataLength * sizeof(double));
             std::memcpy(irR.data(), conv->irData[1].data(), conv->irDataLength * sizeof(double));
 
-            int maxFFTSize = calculateMaxFFTSize(sampleRate);
+            auto sizing = computeMasteringSizing(internalBlockSize, conv->irDataLength);
 
             // 新しいブロックサイズで初期化
             newConv->init(std::move(irL), std::move(irR),
-                          conv->irDataLength, sampleRate, conv->irLatency, maxFFTSize, internalBlockSize);
+                          conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition);
 
             // 差し替え
             convolution.store(newConv.get(), std::memory_order_release);
@@ -791,6 +853,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     if (wasCancelled) *wasCancelled = false;
 
     const int numSamples = linearIR.getNumSamples();
+    if (numSamples <= 0 || linearIR.getNumChannels() < 1) return {};
     // ゼロパディングを含めて十分なサイズを確保 (4倍程度が安全)
     const int fftSize = juce::nextPowerOfTwo(numSamples * 4);
 
@@ -849,13 +912,13 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
             for (; i < vEnd; i += 4)
             {
                 // 4 複素数 = 8 doubles をロード (2 つの __m256d)
-                __m256d ab = _mm256_loadu_pd(reinterpret_cast<double*>(fftBuffer + i));     // [re0,im0,re1,im1]
-                __m256d cd = _mm256_loadu_pd(reinterpret_cast<double*>(fftBuffer + i + 2)); // [re2,im2,re3,im3]
+                __m256d ab = _mm256_load_pd(reinterpret_cast<double*>(fftBuffer + i));     // [re0,im0,re1,im1]
+                __m256d cd = _mm256_load_pd(reinterpret_cast<double*>(fftBuffer + i + 2)); // [re2,im2,re3,im3]
                 // unpacklo: [re0, re2 | re1, re3], permute -> [re0,re1,re2,re3]
                 __m256d re = _mm256_permute4x64_pd(_mm256_unpacklo_pd(ab, cd), 0xD8);
                 __m256d im = _mm256_permute4x64_pd(_mm256_unpackhi_pd(ab, cd), 0xD8);
-                _mm256_storeu_pd(data + i, re);
-                _mm256_storeu_pd(temp + i, im);
+                _mm256_store_pd(data + i, re);
+                _mm256_store_pd(temp + i, im);
             }
             for (; i < fftSize; ++i) { data[i] = fftBuffer[i].re; temp[i] = fftBuffer[i].im; }
         }
@@ -873,8 +936,8 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
             const int vEnd = fftSize / 4 * 4;
             for (; i < vEnd; i += 4)
             {
-                __m256d v = _mm256_loadu_pd(data + i);
-                _mm256_storeu_pd(data + i, _mm256_max_pd(v, vMin));
+                __m256d v = _mm256_load_pd(data + i);
+                _mm256_store_pd(data + i, _mm256_max_pd(v, vMin));
             }
             for (; i < fftSize; ++i) data[i] = (std::max)(data[i], 1.0e-100);
         }
@@ -894,14 +957,14 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
             const int vEnd = fftSize / 4 * 4;
             for (; i < vEnd; i += 4)
             {
-                __m256d re = _mm256_loadu_pd(data + i); // [re0,re1,re2,re3]
+                __m256d re = _mm256_load_pd(data + i); // [re0,re1,re2,re3]
                 // unpacklo/hi + permute2f128 で (re,0) ペアに展開
                 __m256d lo12 = _mm256_unpacklo_pd(re, zeros); // [re0,0 | re2,0]
                 __m256d hi12 = _mm256_unpackhi_pd(re, zeros); // [re1,0 | re3,0]
                 __m256d first  = _mm256_permute2f128_pd(lo12, hi12, 0x20); // [re0,0,re1,0]
                 __m256d second = _mm256_permute2f128_pd(lo12, hi12, 0x31); // [re2,0,re3,0]
-                _mm256_storeu_pd(reinterpret_cast<double*>(fftBuffer + i),     first);
-                _mm256_storeu_pd(reinterpret_cast<double*>(fftBuffer + i + 2), second);
+                _mm256_store_pd(reinterpret_cast<double*>(fftBuffer + i),     first);
+                _mm256_store_pd(reinterpret_cast<double*>(fftBuffer + i + 2), second);
             }
             for (; i < fftSize; ++i) { fftBuffer[i].re = data[i]; fftBuffer[i].im = 0.0; }
         }
@@ -1012,6 +1075,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     }
 
     isLoading.store(true);
+    lastError.clear(); // 新しいロード開始時にエラーをクリア
 
     // 既存のローダーを停止して破棄
     activeLoader.reset();
@@ -1079,6 +1143,15 @@ void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
 
     isLoading.store(false);
     isRebuilding.store(false, std::memory_order_release); // Reset rebuild flag
+    sendChangeMessage();
+}
+
+void ConvolverProcessor::handleLoadError(const juce::String& error)
+{
+    lastError = error;
+    isLoading.store(false);
+    isRebuilding.store(false, std::memory_order_release);
+    // UIに通知してエラーメッセージを表示させる
     sendChangeMessage();
 }
 
@@ -1210,7 +1283,7 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     irMagnitudeSpectrum.clear();
 
     const int numSamples = irBuffer.getNumSamples();
-    if (numSamples <= 0) return;
+    if (numSamples <= 0 || irBuffer.getNumChannels() < 1) return;
 
     // IRの長さに応じてFFTサイズを決定 (固定サイズではなく適応させる)
     // ただし、極端に巨大なIRの場合はパフォーマンスを考慮して上限を設ける (例: 65536)
@@ -1218,8 +1291,6 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     const int maxFFTSize = 65536;
     if (fftSize > maxFFTSize) fftSize = maxFFTSize;
     if (fftSize < 512) fftSize = 512;
-
-    juce::dsp::FFT fft(static_cast<int>(std::log2(fftSize)));
 
     // キャッシュされたバッファを再利用 (メモリ確保のオーバーヘッド削減)
     if (cachedFFTBuffer.size() < static_cast<size_t>(fftSize * 2))
@@ -1230,15 +1301,47 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     // チャンネル0 (Lch) の特性を使用する
     const double* src = irBuffer.getReadPointer(0);
     const int copyLen = (std::min)(numSamples, fftSize);
-    // Double -> Float conversion for display FFT
     float* dst = cachedFFTBuffer.data();
+
+#if JUCE_DSP_USE_INTEL_MKL
+    // MKL FFT (One-shot)
+    DFTI_DESCRIPTOR_HANDLE h = nullptr;
+    DftiCreateDescriptor(&h, DFTI_SINGLE, DFTI_COMPLEX, 1, fftSize);
+    DftiSetValue(h, DFTI_PLACEMENT, DFTI_INPLACE);
+    DftiCommitDescriptor(h);
+
+    // Double -> Complex Float conversion
+    for (int i = 0; i < copyLen; ++i) {
+        dst[2 * i] = static_cast<float>(src[i]);
+        dst[2 * i + 1] = 0.0f;
+    }
+    // Zero pad
+    for (int i = copyLen; i < fftSize; ++i) {
+        dst[2 * i] = 0.0f;
+        dst[2 * i + 1] = 0.0f;
+    }
+
+    DftiComputeForward(h, dst);
+    DftiFreeDescriptor(&h);
+
+    // Calculate magnitude in-place (compacting to start of buffer)
+    const int numBins = fftSize / 2 + 1;
+    for (int i = 0; i < numBins; ++i) {
+        float re = dst[2 * i];
+        float im = dst[2 * i + 1];
+        dst[i] = std::sqrt(re * re + im * im);
+    }
+#else
+    juce::dsp::FFT fft(static_cast<int>(std::log2(fftSize)));
+    // Double -> Float conversion for display FFT
     for (int i = 0; i < copyLen; ++i)
         dst[i] = static_cast<float>(src[i]);
 
     fft.performFrequencyOnlyForwardTransform(cachedFFTBuffer.data());
+    const int numBins = fftSize / 2 + 1;
+#endif
 
     // スムーシング適用 (Linear Magnitudeに対して行う)
-    const int numBins = fftSize / 2 + 1;
     std::vector<float> linearMags(cachedFFTBuffer.begin(), cachedFFTBuffer.begin() + numBins);
     applySmoothing(linearMags, fftSize);
 
@@ -1591,6 +1694,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     for (int ch = 0; ch < procChannels; ++ch)
     {
+		const double wetG = needsConvolution ? (targetMixValue * headroom) : 0.0;
+		const double dryG = needsDrySignal ? (1.0 - targetMixValue) : 0.0;
         // 1. 全チャンネルに入力を供給 (Add)
         const double* input = block.getChannelPointer(ch);
         WDL_FFT_REAL* inputs[1] = { const_cast<WDL_FFT_REAL*>(input) };
@@ -1614,18 +1719,58 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             // スムーシング時 (AVX2 Optimized)
             int i = 0;
 #if defined(__AVX2__)
-            const int vLoop = validWetSamples / 4 * 4;
+            const int vLoop = validWetSamples / 16 * 16; // Unroll 4x (16 doubles)
             if (vLoop > 0)
             {
-                for (; i < vLoop; i += 4)
+                for (; i < vLoop; i += 16)
                 {
-                    __m256d vWet = _mm256_loadu_pd(wdlOut + i);
-                    __m256d vDry = _mm256_loadu_pd(dry + i);
-                    __m256d vWetG = _mm256_loadu_pd(wetGains + i);
-                    __m256d vDryG = _mm256_loadu_pd(dryGains + i);
-                    __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vWet, vWetG), _mm256_mul_pd(vDry, vDryG));
-                    _mm256_storeu_pd(dst + i, vOut);
+                    _mm_prefetch(reinterpret_cast<const char*>(wdlOut + i + 64), _MM_HINT_T0);
+                    _mm_prefetch(reinterpret_cast<const char*>(dry + i + 64), _MM_HINT_T0);
+                    _mm_prefetch(reinterpret_cast<const char*>(wetGains + i + 64), _MM_HINT_T0);
+                    _mm_prefetch(reinterpret_cast<const char*>(dryGains + i + 64), _MM_HINT_T0);
+
+                    // 1
+                    __m256d vWet0 = _mm256_loadu_pd(wdlOut + i);
+                    __m256d vDry0 = _mm256_load_pd(dry + i);
+                    __m256d vWetG0 = _mm256_load_pd(wetGains + i);
+                    __m256d vDryG0 = _mm256_load_pd(dryGains + i);
+                    __m256d vOut0 = _mm256_fmadd_pd(vWet0, vWetG0, _mm256_mul_pd(vDry0, vDryG0));
+                    _mm256_store_pd(dst + i, vOut0);
+
+                    // 2
+                    __m256d vWet1 = _mm256_loadu_pd(wdlOut + i + 4);
+                    __m256d vDry1 = _mm256_load_pd(dry + i + 4);
+                    __m256d vWetG1 = _mm256_load_pd(wetGains + i + 4);
+                    __m256d vDryG1 = _mm256_load_pd(dryGains + i + 4);
+                    __m256d vOut1 = _mm256_fmadd_pd(vWet1, vWetG1, _mm256_mul_pd(vDry1, vDryG1));
+                    _mm256_store_pd(dst + i + 4, vOut1);
+
+                    // 3
+                    __m256d vWet2 = _mm256_loadu_pd(wdlOut + i + 8);
+                    __m256d vDry2 = _mm256_load_pd(dry + i + 8);
+                    __m256d vWetG2 = _mm256_load_pd(wetGains + i + 8);
+                    __m256d vDryG2 = _mm256_load_pd(dryGains + i + 8);
+                    __m256d vOut2 = _mm256_fmadd_pd(vWet2, vWetG2, _mm256_mul_pd(vDry2, vDryG2));
+                    _mm256_store_pd(dst + i + 8, vOut2);
+
+                    // 4
+                    __m256d vWet3 = _mm256_loadu_pd(wdlOut + i + 12);
+                    __m256d vDry3 = _mm256_load_pd(dry + i + 12);
+                    __m256d vWetG3 = _mm256_load_pd(wetGains + i + 12);
+                    __m256d vDryG3 = _mm256_load_pd(dryGains + i + 12);
+                    __m256d vOut3 = _mm256_fmadd_pd(vWet3, vWetG3, _mm256_mul_pd(vDry3, vDryG3));
+                    _mm256_store_pd(dst + i + 12, vOut3);
                 }
+            }
+            // Handle remaining multiples of 4
+            for (; i < (validWetSamples / 4 * 4); i += 4)
+            {
+                __m256d vWet = _mm256_loadu_pd(wdlOut + i);
+                __m256d vDry = _mm256_load_pd(dry + i);
+                __m256d vWetG = _mm256_load_pd(wetGains + i);
+                __m256d vDryG = _mm256_load_pd(dryGains + i);
+                __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG));
+                _mm256_store_pd(dst + i, vOut);
             }
 #endif
             for (; i < validWetSamples; ++i)
@@ -1642,30 +1787,55 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         else
         {
             // 定常状態 (99%のケース) -> AVX2最適化
-            const double wetG = needsConvolution ? (targetMixValue * headroom) : 0.0;
-            const double dryG = needsDrySignal   ? (1.0 - targetMixValue)      : 0.0;
-
             int i = 0;
 
 #if defined(__AVX2__)
-            // AVX2 (256-bit) = 4 doubles
-            const int vLoop = validWetSamples / 4 * 4;
+            // ==================================================================
+            // 【修正】vWetG / vDryG の宣言を if(vLoop > 0) の外側に移動
+            // 理由: 後続の 4サンプル展開ループとスカラー残余ループからも参照するため
+            // ==================================================================
+            const __m256d vWetG = _mm256_set1_pd(wetG);
+            const __m256d vDryG = _mm256_set1_pd(dryG);
+
+            const int vLoop = validWetSamples / 16 * 16; // Unroll 4x
             if (vLoop > 0)
             {
-                const __m256d vWetG = _mm256_set1_pd(wetG);
-                const __m256d vDryG = _mm256_set1_pd(dryG);
-
-                for (; i < vLoop; i += 4)
+                for (; i < vLoop; i += 16)
                 {
-                    // Unaligned load is fine on modern CPUs
-                    __m256d vWet = _mm256_loadu_pd(wdlOut + i);
-                    __m256d vDry = _mm256_loadu_pd(dry + i);
+                    _mm_prefetch(reinterpret_cast<const char*>(wdlOut + i + 64), _MM_HINT_T0);
+                    _mm_prefetch(reinterpret_cast<const char*>(dry + i + 64), _MM_HINT_T0);
 
-                    // dst = wet * wetG + dry * dryG
-                    __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vWet, vWetG), _mm256_mul_pd(vDry, vDryG));
+                    // 1
+                    __m256d vWet0 = _mm256_loadu_pd(wdlOut + i);
+                    __m256d vDry0 = _mm256_load_pd(dry + i);
+                    __m256d vOut0 = _mm256_fmadd_pd(vWet0, vWetG, _mm256_mul_pd(vDry0, vDryG));
+                    _mm256_store_pd(dst + i, vOut0);
 
-                    _mm256_storeu_pd(dst + i, vOut);
+                    // 2
+                    __m256d vWet1 = _mm256_loadu_pd(wdlOut + i + 4);
+                    __m256d vDry1 = _mm256_load_pd(dry + i + 4);
+                    __m256d vOut1 = _mm256_fmadd_pd(vWet1, vWetG, _mm256_mul_pd(vDry1, vDryG));
+                    _mm256_store_pd(dst + i + 4, vOut1);
+
+                    // 3
+                    __m256d vWet2 = _mm256_loadu_pd(wdlOut + i + 8);
+                    __m256d vDry2 = _mm256_load_pd(dry + i + 8);
+                    __m256d vOut2 = _mm256_fmadd_pd(vWet2, vWetG, _mm256_mul_pd(vDry2, vDryG));
+                    _mm256_store_pd(dst + i + 8, vOut2);
+
+                    // 4
+                    __m256d vWet3 = _mm256_loadu_pd(wdlOut + i + 12);
+                    __m256d vDry3 = _mm256_load_pd(dry + i + 12);
+                    __m256d vOut3 = _mm256_fmadd_pd(vWet3, vWetG, _mm256_mul_pd(vDry3, vDryG));
+                    _mm256_store_pd(dst + i + 12, vOut3);
                 }
+            }
+            for (; i < (validWetSamples / 4 * 4); i += 4)
+            {
+                __m256d vWet = _mm256_loadu_pd(wdlOut + i);
+                __m256d vDry = _mm256_load_pd(dry + i);
+                __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG));
+                _mm256_store_pd(dst + i, vOut);
             }
 #endif
             // 残りの有効なWetサンプル (Scalar)

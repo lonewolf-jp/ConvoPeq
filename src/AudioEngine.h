@@ -293,8 +293,26 @@ private:
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
         double sampleRate = 0.0;
 
-        std::vector<double, convo::MKLAllocator<double>> alignedL, alignedR;
-        int maxSamplesPerBlock = 0;
+        std::vector<double, convo::MKLAllocator<double>> alignedL, alignedR; // Aligned buffers for processing
+        int maxSamplesPerBlock = 0;               // 入力側最大ブロックサイズ (SAFE_MAX_BLOCK_SIZE)
+
+        // ─────────────────────────────────────────────────────────────
+        // 【Issue 3 修正】内部処理用最大バッファサイズ
+        // 理由: Oversampling有効時（最大8x）、processSamplesUp()後の
+        //      ブロックサイズがSAFE_MAX×8になるため。
+        //      固定で×8確保することでRCU再構築時のresizeを完全排除。
+        //      メモリ増加 ≈ 8.4MB（現代PCでは無視できるレベル）
+        // ─────────────────────────────────────────────────────────────
+        int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（常にSAFE_MAX×8）
+
+        // ==================================================================
+        // 【Issue 5 修正】新DSP切り替え時のFade-in Ramp
+        // 用途: 新DSPCoreがゼロスタートしても出力が0→1に滑らかに立ち上がる
+        // 効果: 短い無音/グリッチを完全に滑らかに解消（20〜42msランプ）
+        // Audio Thread内完全lock-free・no-alloc
+        // ==================================================================
+        std::atomic<int> fadeInSamplesLeft {0};
+        static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
 
         // Helpers
         float measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept;

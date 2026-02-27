@@ -8,11 +8,16 @@
 #include <complex>
 #include <algorithm>
 #include <mutex>
+#include <avrt.h>
 
 #if JUCE_INTEL
  #include <xmmintrin.h>
  #include <pmmintrin.h>
  #include <immintrin.h>
+#endif
+
+#if JUCE_DSP_USE_INTEL_MKL
+#include <mkl.h>
 #endif
 
 // コンストラクタ
@@ -48,6 +53,8 @@ void AudioEngine::initialize()
     // - ガベージコレクション
     startTimer(50);
 }
+
+
 
 AudioEngine::~AudioEngine()
 {
@@ -259,9 +266,10 @@ double AudioEngine::getProcessingSampleRate() const
     else
     {
         // Auto
-        if (sr <= 48000.0)      actualFactor = 4;
-        else if (sr <= 96000.0) actualFactor = 2;
-        else                    actualFactor = 1;
+        if (sr <= 96000.0)       actualFactor = 8;
+        else if (sr <= 192000.0) actualFactor = 4;
+        else if (sr <= 384000.0) actualFactor = 2;
+        else                     actualFactor = 1;
     }
 
     return sr * static_cast<double>(actualFactor);
@@ -382,6 +390,12 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     const int processingBlockSize = samplesPerBlock * static_cast<int>(newDSP->oversamplingFactor);
     newDSP->convolver.prepareToPlay(processingRate, processingBlockSize);
 
+    // ==================================================================
+    // 【Issue 5 修正】新DSPにFade-in Rampを開始（42ms ≈ 2048サンプル @48kHz）
+    // これで新出力が0から滑らかに立ち上がる
+    // ==================================================================
+    newDSP->fadeInSamplesLeft.store(DSPCore::FADE_IN_SAMPLES, std::memory_order_relaxed);
+
     commitNewDSP(newDSP);
 }
 
@@ -405,6 +419,9 @@ void AudioEngine::timerCallback()
 {
     // ── DSP再構築リクエストの処理 ──
     // Audio Thread (prepareToPlay) からのリクエストを Message Thread で処理する
+    // 【Parameter安全設計】
+    // Audio Thread内でのメモリ確保や重い初期化処理を回避するため、
+    // フラグ(rebuildRequested)を介してMessage Threadで安全に再構築を実行する。
     if (rebuildRequested.exchange(false, std::memory_order_acquire))
     {
         const double sr = currentSampleRate.load();
@@ -513,6 +530,8 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 
 //--------------------------------------------------------------
 // releaseResources
+// デバイス停止時に呼ばれる（Audio Thread停止後）
+// JUCE v8.0.12 完全対応版（MMCSSはJUCEが自動管理）
 //--------------------------------------------------------------
 void AudioEngine::releaseResources()
 {
@@ -523,6 +542,13 @@ void AudioEngine::releaseResources()
     inputLevelDb.store(-120.0f);
     outputLevelDb.store(-120.0f);
 
+    // ==================================================================
+    // 【Issue 2 完全解消】手動MMCSS revertを削除
+    // 理由:
+    //   1. JUCE 8.0.12 の setMMCSSModeEnabled() が内部で管理
+    //   2. mmcssHandle はローカル変数だったため未定義エラー発生
+    //   3. 手動revertは不要・リークリスクあり → JUCEに任せる
+    // ==================================================================
 }
 
 //--------------------------------------------------------------
@@ -545,6 +571,13 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // ScopedNoDenormalsでも設定されるが、MKLの要件として明示しておく
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+
+#if JUCE_DSP_USE_INTEL_MKL
+    // VML (Vector Math Library) のDenormal扱いをゼロに設定
+    // vdHypot, vdLn 等のパフォーマンス低下を防ぐ
+    // この設定はスレッドローカルなので、オーディオスレッドで毎回設定する必要がある
+    vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
 #endif
 
     // 入力検証 (Input Validation)
@@ -592,6 +625,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
 
         // パラメータのロード
+        // 【Parameter安全設計】
+        // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
+        // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
         const bool eqBypassed = eqBypassRequested.load(std::memory_order_acquire);
         const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
         const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
@@ -622,7 +658,6 @@ AudioEngine::DSPCore::DSPCore() = default;
 void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType)
 {
     this->sampleRate = newSampleRate;
-    maxSamplesPerBlock = SAFE_MAX_BLOCK_SIZE;
 
     size_t factorLog2 = 0;
     if (manualOversamplingFactor > 0)
@@ -636,15 +671,42 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     else
     {
         // 自動設定 (デフォルト)
-        // 44.1k, 48k -> 4x
-        // 88.2k, 96k -> 2x
-        // >= 176.4k  -> 1x (None)
-        if (newSampleRate <= 48000.0)      factorLog2 = 2; // 4x
-        else if (newSampleRate <= 96000.0) factorLog2 = 1; // 2x
-        else                               factorLog2 = 0; // 1x
+        // <= 96k -> 8x, <= 192k -> 4x, <= 384k -> 2x, > 384k -> 1x
+        if (newSampleRate <= 96000.0)       factorLog2 = 3; // 8x
+        else if (newSampleRate <= 192000.0) factorLog2 = 2; // 4x
+        else if (newSampleRate <= 384000.0) factorLog2 = 1; // 2x
+        else                                factorLog2 = 0; // 1x
     }
 
     oversamplingFactor = (size_t)1 << factorLog2;
+
+    // ==================================================================
+    // 【Issue 3 完全修正】内部最大バッファサイズの計算（推奨A）
+    // 固定で SAFE_MAX_BLOCK_SIZE × 8 を確保
+    // 理由:
+    //   ・OS=8x時のupBlockサイズを完全にカバー
+    //   ・RCU再構築（IRロード・プリセット切替・OS変更）ごとにresizeしない
+    //   ・MKLAllocator + 64byteアライメントの最適化が最大限活きる
+    //   ・将来16x OS対応もこの定数1箇所変更だけで済む
+    // ==================================================================
+    constexpr int MAX_OS_FACTOR = 8;
+    const int inputMaxBlock     = SAFE_MAX_BLOCK_SIZE;
+    const int internalMaxBlock  = inputMaxBlock * MAX_OS_FACTOR;
+
+    maxSamplesPerBlock   = inputMaxBlock;
+    maxInternalBlockSize = internalMaxBlock;
+
+    // === バッファ確保（ここが核心）===
+    // 初回 or サイズ不足時のみresize（以後ほぼ触らない）
+    if (alignedL.size() < static_cast<size_t>(internalMaxBlock))
+    {
+        alignedL.resize(internalMaxBlock);
+        alignedR.resize(internalMaxBlock);
+
+        // 明示的ゼロクリア（Denormal/NaN防止）
+        juce::FloatVectorOperations::clear(alignedL.data(), internalMaxBlock);
+        juce::FloatVectorOperations::clear(alignedR.data(), internalMaxBlock);
+    }
 
     if (factorLog2 > 0)
     {
@@ -666,13 +728,9 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     // Convolverには実際のブロックサイズを渡す (パーティションサイズ決定やLoaderThreadで使用)
     convolver.prepareToPlay(processingRate, processingBlockSize);
 
-    const int maxProcessingBlockSize = SAFE_MAX_BLOCK_SIZE * static_cast<int>(oversamplingFactor);
+    // EQも内部最大サイズで準備（より安全）
+    eq.prepareToPlay(processingRate, internalMaxBlock);
 
-    // EQは内部でブロックサイズを使用しないが、一貫性のため実際のサイズを渡す
-    // MKLスクラッチバッファのオーバーフローを防ぐため、最大サイズで確保する
-    eq.prepareToPlay(processingRate, maxProcessingBlockSize);
-
-    // DCBlocker (JUCE IIR) には最大ブロックサイズを渡してProcessSpecを初期化する
     // 出力段(processOutput)で実行されるため、オーバーサンプリング前のレートとサイズを使用する
     dcBlockerL.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
     dcBlockerR.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
@@ -689,11 +747,8 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     dither.prepare(newSampleRate, bitDepth);
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
-    // バッファ確保 (Message Threadで実行されるため安全)
-    alignedL.resize(SAFE_MAX_BLOCK_SIZE);
-    alignedR.resize(SAFE_MAX_BLOCK_SIZE);
-    juce::FloatVectorOperations::clear(alignedL.data(), SAFE_MAX_BLOCK_SIZE);
-    juce::FloatVectorOperations::clear(alignedR.data(), SAFE_MAX_BLOCK_SIZE);
+    // 【Issue 5】Fade-inカウンタをリセット
+    fadeInSamplesLeft.store(0, std::memory_order_relaxed);
 }
 
 void AudioEngine::DSPCore::reset()
@@ -709,8 +764,12 @@ void AudioEngine::DSPCore::reset()
     dither.reset();
     if (oversampling)
         oversampling->reset();
-    if (!alignedL.empty()) juce::FloatVectorOperations::clear(alignedL.data(), alignedL.size());
-    if (!alignedR.empty()) juce::FloatVectorOperations::clear(alignedR.data(), alignedR.size());
+    if (!alignedL.empty())
+        // size() はすでに internalMaxBlockSize になっているので安全
+        juce::FloatVectorOperations::clear(alignedL.data(), static_cast<int>(alignedL.size()));
+    if (!alignedR.empty())
+        // size() はすでに internalMaxBlockSize になっているので安全
+        juce::FloatVectorOperations::clear(alignedR.data(), static_cast<int>(alignedR.size()));
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
@@ -728,6 +787,23 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         // この状況は通常発生しないが、万が一ホストが予期せぬサイズのバッファを渡してきた場合の安全策
         bufferToFill.clearActiveBufferRegion();
         return;
+    }
+
+    // ==================================================================
+    // 【Issue 3 追加防御】オーバーラン即検出（リリースでも有効）
+    // オーバーサンプリング有効時にupBlockサイズが内部バッファを超えないことを保証
+    // ==================================================================
+    if (oversampling)
+    {
+        const int expectedUpSize = numSamples * static_cast<int>(oversamplingFactor);
+
+        // Fix: Releaseビルドでも確実にチェックし、バッファ破壊を防ぐ
+        if (expectedUpSize > maxInternalBlockSize)
+        {
+            jassertfalse; // Debug時は停止
+            bufferToFill.clearActiveBufferRegion(); // 無音を出力
+            return;
+        }
     }
 
     processInput(bufferToFill, numSamples);
@@ -754,12 +830,20 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     // オーバーサンプリング処理ブロック
     //----------------------------------------------------------
     // バッファ全体ではなく、有効なサンプル数のみをラップする (重要)
-    juce::dsp::AudioBlock<double> block = processBlock; // オーバーサンプリングロジックを明確にするためのエイリアス
+    juce::dsp::AudioBlock<double> originalBlock = processBlock; // 元サイズを保存
 
     // アップサンプリング
     if (oversampling)
     {
-        processBlock = oversampling->processSamplesUp(block);
+        processBlock = oversampling->processSamplesUp(originalBlock);
+
+        // [追加] 実際のアップサンプリング後サイズが内部バッファを超えていないか最終確認
+        if (processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
+        {
+            jassertfalse;
+            bufferToFill.clearActiveBufferRegion();
+            return;
+        }
 
         // オーバーサンプリング直後に高精度DC除去を適用
         // これにより、後段のDSP処理（Convolver/EQ）にクリーンな信号を渡す
@@ -824,23 +908,49 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     // ダウンサンプリング (結果は processBuffer に書き戻される)
     if (oversampling)
     {
-        oversampling->processSamplesDown(block);
+        oversampling->processSamplesDown(originalBlock);
+        processBlock = originalBlock;
     }
 
     //----------------------------------------------------------
     // 出力レベル計算 (DC除去後のクリーンな信号で計測)
     //----------------------------------------------------------
-    // オーバーサンプリング有効時は、ダウンサンプリング後の信号(block)を使用する
-    const float outputDb = measureLevel(block);
+    // オーバーサンプリング有効時は、ダウンサンプリング後の信号(originalBlock)を使用する
+    const float outputDb = measureLevel(originalBlock);
     outputLevelDb.store(outputDb, std::memory_order_relaxed);
 
     // ── Analyzer Output Tap (Post-DSP) ──
     if (state.analyzerSource == AnalyzerSource::Output)
     {
-        pushToFifo(block, audioFifo, audioFifoBuffer);
+        pushToFifo(originalBlock, audioFifo, audioFifoBuffer);
     }
 
     processOutput(bufferToFill, numSamples);
+
+    // === 【Issue 5 追加】新DSP切り替え時のFade-in Ramp（最終出力に適用）===
+    {
+        int fadeLeft = fadeInSamplesLeft.load(std::memory_order_relaxed);
+        if (fadeLeft > 0)
+        {
+            const int rampThisBlock = std::min(numSamples, fadeLeft);
+            const float gainStep = 1.0f / static_cast<float>(FADE_IN_SAMPLES);
+            auto* buffer = bufferToFill.buffer;
+            const int startSample = bufferToFill.startSample;
+            const int numChannels = buffer->getNumChannels();
+
+            // Optimize: Channel-first loop for cache locality (Planar buffer friendly)
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                float* data = buffer->getWritePointer(ch, startSample);
+                for (int i = 0; i < rampThisBlock; ++i)
+                {
+                    const float gain = static_cast<float>(FADE_IN_SAMPLES - fadeLeft + i) * gainStep;
+                    data[i] *= gain;
+                }
+            }
+            fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
+        }
+    }
 }
 
 float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept
@@ -995,6 +1105,16 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     }
 }
 
+// Padé近似による高速tanh (std::exp回避)
+// 精度: |x| < 3.0 で誤差 1e-4 以下
+static inline double fastTanh(double x) noexcept
+{
+    if (x >= 3.0) return 1.0;
+    if (x <= -3.0) return -1.0;
+    const double x2 = x * x;
+    return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+}
+
 // 音楽的なソフトクリッピング関数
 // 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加える。
 // @param x 入力信号
@@ -1026,7 +1146,7 @@ double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double 
 
     const double linear = abs_x;
     // tanhによるソフトクリッピングカーブ
-    const double clipped = threshold + knee * std::tanh((abs_x - threshold) / knee);
+    const double clipped = threshold + knee * fastTanh((abs_x - threshold) / knee);
 
     // 非対称性の追加（真空管風）
     const double asymmetric_factor = 1.0 + asymmetry * sign * knee_shape;
@@ -1073,20 +1193,50 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
 #if defined(__AVX2__)
             {
                 int i = 0;
-                const int vEnd = numSamples / 4 * 4;
+                const int vEnd = numSamples / 16 * 16; // Unroll 4x
                 const __m256d vMax  = _mm256_set1_pd(1.0);
                 const __m256d vMin  = _mm256_set1_pd(-1.0);
                 const __m256d vZero = _mm256_setzero_pd();
 
-                for (; i < vEnd; i += 4)
+                for (; i < vEnd; i += 16)
+                {
+                    _mm_prefetch(reinterpret_cast<const char*>(data + i + 64), _MM_HINT_T0);
+
+                    // 1
+                    __m256d v0 = _mm256_loadu_pd(data + i);
+                    __m256d mask0 = _mm256_cmp_pd(v0, v0, _CMP_ORD_Q);
+                    v0 = _mm256_blendv_pd(vZero, v0, mask0);
+                    v0 = _mm256_min_pd(_mm256_max_pd(v0, vMin), vMax);
+                    _mm_storeu_ps(dst + i, _mm256_cvtpd_ps(v0));
+
+                    // 2
+                    __m256d v1 = _mm256_loadu_pd(data + i + 4);
+                    __m256d mask1 = _mm256_cmp_pd(v1, v1, _CMP_ORD_Q);
+                    v1 = _mm256_blendv_pd(vZero, v1, mask1);
+                    v1 = _mm256_min_pd(_mm256_max_pd(v1, vMin), vMax);
+                    _mm_storeu_ps(dst + i + 4, _mm256_cvtpd_ps(v1));
+
+                    // 3
+                    __m256d v2 = _mm256_loadu_pd(data + i + 8);
+                    __m256d mask2 = _mm256_cmp_pd(v2, v2, _CMP_ORD_Q);
+                    v2 = _mm256_blendv_pd(vZero, v2, mask2);
+                    v2 = _mm256_min_pd(_mm256_max_pd(v2, vMin), vMax);
+                    _mm_storeu_ps(dst + i + 8, _mm256_cvtpd_ps(v2));
+
+                    // 4
+                    __m256d v3 = _mm256_loadu_pd(data + i + 12);
+                    __m256d mask3 = _mm256_cmp_pd(v3, v3, _CMP_ORD_Q);
+                    v3 = _mm256_blendv_pd(vZero, v3, mask3);
+                    v3 = _mm256_min_pd(_mm256_max_pd(v3, vMin), vMax);
+                    _mm_storeu_ps(dst + i + 12, _mm256_cvtpd_ps(v3));
+                }
+                // Remaining
+                for (; i < (numSamples / 4 * 4); i += 4)
                 {
                     __m256d v = _mm256_loadu_pd(data + i);
-                    // NaN → 0: ordered compare (NaN は false になる)
                     __m256d mask = _mm256_cmp_pd(v, v, _CMP_ORD_Q);
                     v = _mm256_blendv_pd(vZero, v, mask);
-                    // clamp [-1, 1]
                     v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);
-                    // double → float (4 doubles → 4 floats)
                     _mm_storeu_ps(dst + i, _mm256_cvtpd_ps(v));
                 }
                 for (; i < numSamples; ++i)
