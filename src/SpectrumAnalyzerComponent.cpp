@@ -601,20 +601,27 @@ void SpectrumAnalyzerComponent::updateEQPaths()
     const float plotH = static_cast<float>(plotArea.getHeight());
 
     auto createPath = [&](juce::Path& path, const std::vector<float>& buffer)
-    {
-        path.clear();
-        for (int i = 0; i < NUM_DISPLAY_BARS; ++i)
-        {
-            const float t = static_cast<float>(i) / static_cast<float>(NUM_DISPLAY_BARS - 1);
-            const float x = plotX + t * plotW;
-            float db = buffer[i];
-            db = std::max(MIN_DB, std::min(MAX_DB, db));
-            const float y = plotY + dbToY(db, plotH);
+{
+    path.clear();
 
-            if (i == 0) path.startNewSubPath(x, y);
-            else        path.lineTo(x, y);
-        }
-    };
+    for (int i = 0; i < NUM_DISPLAY_BARS; ++i)
+    {
+        // displayFrequenciesは対数配置済み
+        const float freq = displayFrequencies[i];
+
+        // freqToX() を使用して正しい対数＋Low-end補正マッピングを適用
+        const float x = plotX + freqToX(freq, plotW);
+
+        float db = buffer[i];
+        db = std::max(MIN_DB, std::min(MAX_DB, db));
+        const float y = plotY + dbToY(db, plotH);
+
+        if (i == 0)
+            path.startNewSubPath(x, y);
+        else
+            path.lineTo(x, y);
+    }
+};
 
     createPath(totalCurvePathL, eqResponseBufferL);
     createPath(totalCurvePathR, eqResponseBufferR);

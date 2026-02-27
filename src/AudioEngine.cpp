@@ -272,6 +272,14 @@ double AudioEngine::getProcessingSampleRate() const
         else                     actualFactor = 1;
     }
 
+    // 制限: サンプルレートに応じた最大倍率を適用
+    int maxFactor = 1;
+    if (sr <= 96000.0)       maxFactor = 8;
+    else if (sr <= 192000.0) maxFactor = 4;
+    else if (sr <= 384000.0) maxFactor = 2;
+
+    actualFactor = std::min(actualFactor, maxFactor);
+
     return sr * static_cast<double>(actualFactor);
 }
 
@@ -659,24 +667,37 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
 {
     this->sampleRate = newSampleRate;
 
-    size_t factorLog2 = 0;
+    int targetFactor = 1;
     if (manualOversamplingFactor > 0)
     {
         // 手動設定
-        if (manualOversamplingFactor == 8)      factorLog2 = 3;
-        else if (manualOversamplingFactor == 4) factorLog2 = 2;
-        else if (manualOversamplingFactor == 2) factorLog2 = 1;
-        else                                    factorLog2 = 0; // 1x
+        if (manualOversamplingFactor == 8)      targetFactor = 8;
+        else if (manualOversamplingFactor == 4) targetFactor = 4;
+        else if (manualOversamplingFactor == 2) targetFactor = 2;
+        else                                    targetFactor = 1;
     }
     else
     {
         // 自動設定 (デフォルト)
-        // <= 96k -> 8x, <= 192k -> 4x, <= 384k -> 2x, > 384k -> 1x
-        if (newSampleRate <= 96000.0)       factorLog2 = 3; // 8x
-        else if (newSampleRate <= 192000.0) factorLog2 = 2; // 4x
-        else if (newSampleRate <= 384000.0) factorLog2 = 1; // 2x
-        else                                factorLog2 = 0; // 1x
+        if (newSampleRate <= 96000.0)       targetFactor = 8;
+        else if (newSampleRate <= 192000.0) targetFactor = 4;
+        else if (newSampleRate <= 384000.0) targetFactor = 2;
+        else                                targetFactor = 1;
     }
+
+    // 制限: サンプルレートに応じた最大倍率を適用
+    int maxFactor = 1;
+    if (newSampleRate <= 96000.0)       maxFactor = 8;
+    else if (newSampleRate <= 192000.0) maxFactor = 4;
+    else if (newSampleRate <= 384000.0) maxFactor = 2;
+
+    targetFactor = std::min(targetFactor, maxFactor);
+
+    size_t factorLog2 = 0;
+    if (targetFactor >= 8)      factorLog2 = 3;
+    else if (targetFactor >= 4) factorLog2 = 2;
+    else if (targetFactor >= 2) factorLog2 = 1;
+    else                        factorLog2 = 0;
 
     oversamplingFactor = (size_t)1 << factorLog2;
 
