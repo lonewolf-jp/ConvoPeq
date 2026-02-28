@@ -330,6 +330,23 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     eqBypassActive.store (eqBypassRequested.load (std::memory_order_relaxed), std::memory_order_relaxed);
     convBypassActive.store (convBypassRequested.load (std::memory_order_relaxed), std::memory_order_relaxed);
 
+    // [FIX] サンプルレートまたはブロックサイズが変わった場合、あるいはDSPが未初期化の場合、
+    // ここでDSPを再ビルドする。
+    // 以前はtimerCallback()が毎50msに再ビルドしていたが、それは誤りだった。
+    // prepareToPlayはMessageThreadから呼ばれるため、requestRebuild()を直接呼べる。
+    if (rateChanged || blockSizeChanged || currentDSP.load(std::memory_order_acquire) == nullptr)
+    {
+        if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+        {
+            requestRebuild(safeSampleRate, bufferSize);
+        }
+        else
+        {
+            // フォールバック: メッセージスレッド以外から呼ばれた場合は
+            // フラグを立てtimerCallbackに委ねる (通常は到達しない)
+            rebuildRequested.store(true, std::memory_order_release);
+        }
+    }
 }
 
 //--------------------------------------------------------------
@@ -577,11 +594,14 @@ void AudioEngine::timerCallback()
     const double sr = currentSampleRate.load();
     const int bs = maxSamplesPerBlock.load();
 
-    if (sr > 0.0)
+    // [FIX] rebuildRequestedフラグが立っているときだけ再ビルドを実行する。
+    // 以前は毎50ms無条件でrequestRebuild()を呼んでいたため、
+    // 新DSPのfadeInSamplesLeft(2048サンプル≈42ms)によるフェードが
+    // 50ms周期でリセットされ続け、プチプチノイズの原因となっていた。
+    if (sr > 0.0 && rebuildRequested.exchange(false, std::memory_order_acq_rel))
     {
-            uiConvolverProcessor.setBypass(convBypassRequested.load(std::memory_order_relaxed));
-            requestRebuild(sr, bs);
-             sendChangeMessage();
+        requestRebuild(sr, bs);
+        sendChangeMessage();
     }
 
     std::vector<DSPCore::Ptr> toDelete;
