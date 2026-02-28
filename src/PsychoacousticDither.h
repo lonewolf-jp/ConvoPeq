@@ -143,6 +143,13 @@ public:
     static constexpr int DEFAULT_BIT_DEPTH = 24;
     static constexpr int STATE_STRIDE = 8; // 64 bytes alignment (8 * sizeof(double))
 
+    ~PsychoacousticDither() {
+        if (shaperStateBuffer) convo::aligned_free(shaperStateBuffer);
+    }
+
+    PsychoacousticDither(const PsychoacousticDither&) = delete;
+    PsychoacousticDither& operator=(const PsychoacousticDither&) = delete;
+
     explicit PsychoacousticDither(std::optional<uint64_t> seed = std::nullopt)
     {
         uint64_t baseSeed;
@@ -165,7 +172,7 @@ public:
             master.jump(); // Ensure non-overlapping sequences for each channel
         }
 
-        shaperStateBuffer.resize(MAX_CHANNELS * STATE_STRIDE);
+        shaperStateBuffer = static_cast<double*>(convo::aligned_malloc(MAX_CHANNELS * STATE_STRIDE * sizeof(double), 64));
         reset();
     }
 
@@ -208,13 +215,14 @@ public:
 
     void reset() noexcept
     {
-        std::fill(shaperStateBuffer.begin(), shaperStateBuffer.end(), 0.0);
+        if (shaperStateBuffer)
+            std::fill_n(shaperStateBuffer, MAX_CHANNELS * STATE_STRIDE, 0.0);
     }
 
     inline double process(double input, int channel) noexcept
     {
         if (channel < 0 || channel >= MAX_CHANNELS) return input;
-        return processChannel(input, rng[channel], shaperStateBuffer.data() + (channel * STATE_STRIDE));
+        return processChannel(input, rng[channel], shaperStateBuffer + (channel * STATE_STRIDE));
     }
 
 private:
@@ -271,7 +279,7 @@ private:
     }
 
     Xoshiro256ss  rng[MAX_CHANNELS];
-    std::vector<double, convo::MKLAllocator<double>> shaperStateBuffer;
+    double* shaperStateBuffer = nullptr;
         double scale    = 1.0 / 8388608.0;    // 2^23（24bit signed PCM デフォルト）
         double invScale = 8388608.0;           // 2^23（24bit signed PCM デフォルト）
     std::array<double, 5> coeffs { 2.033, -2.165, 1.959, -1.590, 0.6149 };

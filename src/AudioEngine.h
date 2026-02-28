@@ -255,7 +255,6 @@ private:
              m_prev_y = py;
         }
     };
-
     //----------------------------------------------------------
      // DSPコア (Audio Threadで実行される処理のコンテナ)
     //----------------------------------------------------------
@@ -273,14 +272,15 @@ private:
 
         using Ptr = std::shared_ptr<DSPCore>;
 
-        DSPCore();
+DSPCore();
 
-        void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType);
-        void reset();
-        void process(const juce::AudioSourceChannelInfo& bufferToFill, juce::AbstractFifo& audioFifo,
-                     juce::AudioBuffer<float>& audioFifoBuffer, std::atomic<float>& inputLevelDb,
-                     std::atomic<float>& outputLevelDb, const ProcessingState& state);
+    ~DSPCore();  // 【パッチ3】rawバッファ解放用デストラクタ（メモリリーク防止）
 
+    void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType);
+    void reset();
+    void process(const juce::AudioSourceChannelInfo& bufferToFill, juce::AbstractFifo& audioFifo,
+                 juce::AudioBuffer<float>& audioFifoBuffer, std::atomic<float>& inputLevelDb,
+                 std::atomic<float>& outputLevelDb, const ProcessingState& state);
         ConvolverProcessor convolver;
         EQProcessor eq;
         DCBlocker dcBlockerL, dcBlockerR;
@@ -293,7 +293,11 @@ private:
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
         double sampleRate = 0.0;
 
-        std::vector<double, convo::MKLAllocator<double>> alignedL, alignedR; // Aligned buffers for processing
+    // 【パッチ3】MKL用rawアライメントバッファ（vector完全排除・ガイドライン厳守）
+        double* alignedL = nullptr;
+        double* alignedR = nullptr;
+        int alignedCapacity = 0;                  // 現在確保済み容量（再確保判定用）
+
         int maxSamplesPerBlock = 0;               // 入力側最大ブロックサイズ (SAFE_MAX_BLOCK_SIZE)
 
         // ─────────────────────────────────────────────────────────────
@@ -304,13 +308,6 @@ private:
         //      メモリ増加 ≈ 8.4MB（現代PCでは無視できるレベル）
         // ─────────────────────────────────────────────────────────────
         int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（常にSAFE_MAX×8）
-
-        // ==================================================================
-        // 【Issue 5 修正】新DSP切り替え時のFade-in Ramp
-        // 用途: 新DSPCoreがゼロスタートしても出力が0→1に滑らかに立ち上がる
-        // 効果: 短い無音/グリッチを完全に滑らかに解消（20〜42msランプ）
-        // Audio Thread内完全lock-free・no-alloc
-        // ==================================================================
         std::atomic<int> fadeInSamplesLeft {0};
         static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
 
@@ -362,6 +359,7 @@ private:
     std::atomic<float> saturationAmount { 0.5f };
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
+    std::atomic<bool> audioThreadModesSet { false };
 
     // dB変換時の下限値
     static constexpr float LEVEL_METER_MIN_DB  = -120.0f;

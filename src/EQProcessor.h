@@ -314,7 +314,8 @@ private:
     int maxInternalBlockSize = 0;
 
     // ── MKL用スクラッチバッファ ──
-    std::vector<double, convo::MKLAllocator<double>> scratchBuffer;
+    double* scratchBuffer = nullptr;
+    int scratchCapacity = 0;
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
     void processAGC(juce::dsp::AudioBlock<double>& block);

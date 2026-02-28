@@ -177,7 +177,7 @@ private:
         // WDL_ConvolutionEngine_Div は Non-uniform partitioned convolution を提供し、
         // 低レイテンシー動作が可能です。
         std::array<WDL_ConvolutionEngine_Div, 2> convolvers;
-        std::array<std::vector<double, convo::MKLAllocator<double>>, 2> irData;
+        double* irData[2] = { nullptr, nullptr };
         int irDataLength = 0;
 
         int latency = 0;
@@ -187,16 +187,22 @@ private:
 
         StereoConvolver() = default;
 
+        ~StereoConvolver() {
+            if (irData[0]) convo::aligned_free(irData[0]);
+            if (irData[1]) convo::aligned_free(irData[1]);
+        }
+
         // コピーコンストラクタは禁止 (WDLエンジンは複製コストが高く、状態を持つため)
         StereoConvolver(const StereoConvolver& other) = delete;
 
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        void init(std::vector<double, convo::MKLAllocator<double>> irL, std::vector<double, convo::MKLAllocator<double>> irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition)
+        void init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition)
         {
-            irData[0] = std::move(irL);
-            irData[1] = std::move(irR);
+            // Ownership transfer
+            irData[0] = irL;
+            irData[1] = irR;
             irDataLength = length;
             this->irLatency = peakDelay;
 
@@ -211,8 +217,8 @@ private:
             impL_stack.impulses[0].Resize(irDataLength);
             impR_stack.impulses[0].Resize(irDataLength);
 
-            std::memcpy(impL_stack.impulses[0].Get(), irData[0].data(), irDataLength * sizeof(double));
-            std::memcpy(impR_stack.impulses[0].Get(), irData[1].data(), irDataLength * sizeof(double));
+            std::memcpy(impL_stack.impulses[0].Get(), irData[0], irDataLength * sizeof(double));
+            std::memcpy(impR_stack.impulses[0].Get(), irData[1], irDataLength * sizeof(double));
 
             // WDL_ConvolutionEngine_Div の初期化
             // latency_allowed=0 で低レイテンシーモードを有効化
@@ -259,7 +265,8 @@ private:
     // レイテンシー補正用ディレイ
     //----------------------------------------------------------
     // juce::dsp::DelayLine<double> delayLine; // Replaced with custom AVX2 ring buffer
-    std::vector<double, convo::MKLAllocator<double>> delayBuffer[2]; // L/R separate buffers
+    double* delayBuffer[2] = { nullptr, nullptr }; // L/R separate buffers
+    int delayBufferCapacity = 0;
     int delayWritePos = 0;
     juce::SmoothedValue<double> latencySmoother;
 
@@ -287,16 +294,19 @@ private:
     juce::AudioBuffer<double> originalIR; // 元IR保持 (リサンプリング/トリミング用)
     double originalIRSampleRate = 0.0;
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
-    std::vector<float, convo::MKLAllocator<float>> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
+    float* cachedFFTBuffer = nullptr; // FFT計算用キャッシュ (Message Thread)
+    int cachedFFTBufferCapacity = 0;
     std::atomic<double> currentSampleRate { 0.0 };
 
     //----------------------------------------------------------
     // Dry信号バッファ（Mix用）
     //----------------------------------------------------------
     juce::AudioBuffer<double> dryBuffer;
-    std::vector<double, convo::MKLAllocator<double>> dryBufferStorage[2]; // Aligned storage for dryBuffer
+    double* dryBufferStorage[2] = { nullptr, nullptr }; // Aligned storage for dryBuffer
+    int dryBufferCapacity = 0;
     juce::AudioBuffer<double> smoothingBuffer; // スムーシングゲイン計算用 (Audio Threadでのメモリ確保回避)
-    std::vector<double, convo::MKLAllocator<double>> smoothingBufferStorage[2]; // Aligned storage for smoothingBuffer
+    double* smoothingBufferStorage[2] = { nullptr, nullptr }; // Aligned storage for smoothingBuffer
+    int smoothingBufferCapacity = 0;
 
     //----------------------------------------------------------
     // 準備完了フラグ

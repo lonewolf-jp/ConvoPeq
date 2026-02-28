@@ -14,8 +14,10 @@
 SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     : engine(audioEngine)
 {
-    fftTimeDomainBuffer.resize (NUM_FFT_POINTS, 0.0f);
-    fftWorkBuffer.resize (NUM_FFT_POINTS * 2, 0.0f);
+    fftTimeDomainBuffer = static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * sizeof(float), 64));
+    fftWorkBuffer = static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * 2 * sizeof(float), 64));
+    juce::FloatVectorOperations::clear(fftTimeDomainBuffer, NUM_FFT_POINTS);
+    juce::FloatVectorOperations::clear(fftWorkBuffer, NUM_FFT_POINTS * 2);
     rawBuffer.assign       (NUM_FFT_BINS, MIN_DB);
     smoothedBuffer.assign  (NUM_FFT_BINS, MIN_DB);
     peakBuffer.assign      (NUM_FFT_BINS, MIN_DB);
@@ -79,6 +81,8 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 {
     stopTimer();
     releaseFFT();
+    if (fftTimeDomainBuffer) convo::aligned_free(fftTimeDomainBuffer);
+    if (fftWorkBuffer) convo::aligned_free(fftWorkBuffer);
     engine.removeChangeListener(this);
     engine.getEQProcessor().removeChangeListener(this);
     engine.getEQProcessor().removeListener(this);
@@ -86,15 +90,16 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 
 void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
 {
+    // レベルメーター更新のためにタイマーは常に稼働させる
+    if (!isTimerRunning())
+        startTimerHz(60);
+
     if (enabled)
     {
-        startTimerHz(60);
         analyzerEnableButton.setButtonText("Analyzer: ON");
-
     }
     else
     {
-        stopTimer();
         analyzerEnableButton.setButtonText("Analyzer: OFF");
     }
 
@@ -198,8 +203,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     underflowCount = 0;
 
     // 1. 既存データを左にシフト (古いデータを破棄)
-    std::memmove(fftTimeDomainBuffer.data(),
-                 fftTimeDomainBuffer.data() + OVERLAP_SAMPLES,
+    std::memmove(fftTimeDomainBuffer,
+                 fftTimeDomainBuffer + OVERLAP_SAMPLES,
                  (NUM_FFT_POINTS - OVERLAP_SAMPLES) * sizeof(float));
 
         //アンダーフローカウンタをリセット
@@ -207,14 +212,14 @@ void SpectrumAnalyzerComponent::timerCallback()
 
     // 2. FIFOから新しいデータを読み込み
 
-    engine.readFromFifo(fftTimeDomainBuffer.data() + (NUM_FFT_POINTS - OVERLAP_SAMPLES), OVERLAP_SAMPLES);
+    engine.readFromFifo(fftTimeDomainBuffer + (NUM_FFT_POINTS - OVERLAP_SAMPLES), OVERLAP_SAMPLES);
 
       // 安全対策: NaN/Infチェック
     // 万が一DSP処理で不正な値が発生しても、アナライザーでクラッシュさせない
-    for (auto& sample : fftTimeDomainBuffer)
+    for (int i = 0; i < NUM_FFT_POINTS; ++i)
     {
-        if (!std::isfinite(sample))
-            sample = 0.0f;
+        if (!std::isfinite(fftTimeDomainBuffer[i]))
+            fftTimeDomainBuffer[i] = 0.0f;
     }
 
 
@@ -223,8 +228,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     // MKL: Real -> Complex conversion + Windowing
     // fftWorkBuffer is float array of size NUM_FFT_POINTS * 2
     // We treat it as interleaved complex: re, im, re, im...
-   { const float* src = fftTimeDomainBuffer.data();
-        float* dst = fftWorkBuffer.data();
+   { const float* src = fftTimeDomainBuffer;
+        float* dst = fftWorkBuffer;
 
         // Step 3a: Copy and Window (Real)
         std::memcpy(dst, src, NUM_FFT_POINTS * sizeof(float));
@@ -254,11 +259,11 @@ void SpectrumAnalyzerComponent::timerCallback()
 
     }
 #else
-      std::memcpy(fftWorkBuffer.data(), fftTimeDomainBuffer.data(), NUM_FFT_POINTS * sizeof(float));
+      std::memcpy(fftWorkBuffer, fftTimeDomainBuffer, NUM_FFT_POINTS * sizeof(float));
 
-    std::fill(fftWorkBuffer.data() + NUM_FFT_POINTS, fftWorkBuffer.data() + NUM_FFT_POINTS * 2, 0.0f);
-    window.multiplyWithWindowingTable(fftWorkBuffer.data(), NUM_FFT_POINTS);
-    fft.performFrequencyOnlyForwardTransform(fftWorkBuffer.data());
+    std::fill(fftWorkBuffer + NUM_FFT_POINTS, fftWorkBuffer + NUM_FFT_POINTS * 2, 0.0f);
+    window.multiplyWithWindowingTable(fftWorkBuffer, NUM_FFT_POINTS);
+    fft.performFrequencyOnlyForwardTransform(fftWorkBuffer);
 
     // 4. dB変換して出力
     const int numBins = std::min(static_cast<int>(rawBuffer.size()), NUM_FFT_BINS);
@@ -434,8 +439,10 @@ void SpectrumAnalyzerComponent::resized()
                        .withTrimmedBottom(marginB);
 
     // ボタン配置 (右上の余白)
-    sourceButton.setBounds(specArea.getRight() - 110, marginT, 100, 18);
-    analyzerEnableButton.setBounds(specArea.getX(), marginT, 100, 18);
+    const int btnW = 100;
+    const int btnGap = 10;
+    sourceButton.setBounds(specArea.getRight() - btnW - 10, marginT, btnW, 18);
+    analyzerEnableButton.setBounds(sourceButton.getX() - btnW - btnGap, marginT, btnW, 18);
 
     updateEQPaths();
 }
@@ -503,11 +510,24 @@ void SpectrumAnalyzerComponent::paintGrid(juce::Graphics& g, const juce::Rectang
                     label = juce::String(static_cast<int>(f));
 
                 g.setColour(juce::Colours::white.withAlpha(0.6f));
-                g.drawText(label,
-                           static_cast<int>(x) - 14,
-                           static_cast<int>(plotY + plotH) + 3,
-                           28, 20,
-                           juce::Justification::centred);
+
+                // 右端（最大値）の場合は右寄せして表示エリア内に収める
+                if (x >= plotX + plotW - 2.0f)
+                {
+                    g.drawText(label,
+                               static_cast<int>(x) - 30,
+                               static_cast<int>(plotY + plotH) + 3,
+                               30, 20,
+                               juce::Justification::centredRight);
+                }
+                else
+                {
+                    g.drawText(label,
+                               static_cast<int>(x) - 14,
+                               static_cast<int>(plotY + plotH) + 3,
+                               28, 20,
+                               juce::Justification::centred);
+                }
             }
             else
             {

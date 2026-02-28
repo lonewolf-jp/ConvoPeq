@@ -62,8 +62,8 @@ private:
 #endif
     juce::dsp::WindowingFunction<float> window { NUM_FFT_POINTS, juce::dsp::WindowingFunction<float>::hann };
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
-    std::vector<float, convo::MKLAllocator<float>> fftTimeDomainBuffer;
-    std::vector<float, convo::MKLAllocator<float>> fftWorkBuffer;
+    float* fftTimeDomainBuffer = nullptr;
+    float* fftWorkBuffer = nullptr;
 
     // ── 表示用データバッファ ──
     std::vector<float> rawBuffer;        // readFromFifo で取得したデータから計算

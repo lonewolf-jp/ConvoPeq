@@ -9,16 +9,8 @@
 #include <algorithm>
 #include <mutex>
 #include <avrt.h>
-
-#if JUCE_INTEL
- #include <xmmintrin.h>
- #include <pmmintrin.h>
- #include <immintrin.h>
-#endif
-
-#if JUCE_DSP_USE_INTEL_MKL
-#include <mkl.h>
-#endif
+#include <xmmintrin.h>
+#include <immintrin.h>
 
 struct AudioEngine::DSPCore; // Forward declaration
 
@@ -325,6 +317,10 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     inputLevelDb.store(LEVEL_METER_MIN_DB);
     outputLevelDb.store(LEVEL_METER_MIN_DB);
 
+    // Audio Threadが新しくなる可能性があるため、モード設定フラグをリセットして
+    // 次回のgetNextAudioBlockで確実に設定が行われるようにする。
+    audioThreadModesSet.store(false, std::memory_order_release);
+
     // ===== bypass 状態の初期化 =====
     // 再生中のリアルタイムな更新は getNextAudioBlock() で行われる
     eqBypassActive.store (eqBypassRequested.load (std::memory_order_relaxed), std::memory_order_relaxed);
@@ -425,16 +421,22 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     maxSamplesPerBlock   = inputMaxBlock;
     maxInternalBlockSize = internalMaxBlock;
 
-    // === バッファ確保（ここが核心）===
-    // 初回 or サイズ不足時のみresize（以後ほぼ触らない）
-    if (alignedL.size() < static_cast<size_t>(internalMaxBlock))
+// === 【パッチ3】raw aligned_malloc確保（message threadのみ・64byte保証）===
+    if (alignedCapacity < internalMaxBlock)
     {
-        alignedL.resize(internalMaxBlock);
-        alignedR.resize(internalMaxBlock);
+        if (alignedL) convo::aligned_free(alignedL);
+        if (alignedR) convo::aligned_free(alignedR);
+
+        alignedL = static_cast<double*>(convo::aligned_malloc(
+            static_cast<size_t>(internalMaxBlock) * sizeof(double), 64));
+        alignedR = static_cast<double*>(convo::aligned_malloc(
+            static_cast<size_t>(internalMaxBlock) * sizeof(double), 64));
+
+        alignedCapacity = internalMaxBlock;
 
         // 明示的ゼロクリア（Denormal/NaN防止）
-        juce::FloatVectorOperations::clear(alignedL.data(), internalMaxBlock);
-        juce::FloatVectorOperations::clear(alignedR.data(), internalMaxBlock);
+        juce::FloatVectorOperations::clear(alignedL, internalMaxBlock);
+        juce::FloatVectorOperations::clear(alignedR, internalMaxBlock);
     }
 
     if (factorLog2 > 0)
@@ -493,6 +495,21 @@ void AudioEngine::DSPCore::reset()
     dither.reset();
     if (oversampling)
         oversampling->reset();
+
+    // 【パッチ3】rawバッファクリア（alignedCapacity使用）
+    if (alignedL && alignedCapacity > 0)
+        juce::FloatVectorOperations::clear(alignedL, alignedCapacity);
+    if (alignedR && alignedCapacity > 0)
+        juce::FloatVectorOperations::clear(alignedR, alignedCapacity);
+}
+
+// 【パッチ3】rawバッファ解放用デストラクタ（vector削除に伴い追加）
+AudioEngine::DSPCore::~DSPCore()
+{
+    if (alignedL) convo::aligned_free(alignedL);
+    if (alignedR) convo::aligned_free(alignedR);
+    alignedL = alignedR = nullptr;
+    alignedCapacity = 0;
 }
 
 //--------------------------------------------------------------
@@ -734,19 +751,19 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // (A) Denormal対策 (重要: CPU負荷スパイク防止)
     juce::ScopedNoDenormals noDenormals;
 
+    // === パッチ1: モード設定をAudio Thread開始時に1回だけ実行 ===
+    if (!audioThreadModesSet.load(std::memory_order_relaxed)) {
+        if (audioThreadModesSet.exchange(true, std::memory_order_acq_rel) == false) {
 #if JUCE_INTEL
-    // MKL/AVX最適化のためにFTZ/DAZフラグを明示的に設定
-    // ScopedNoDenormalsでも設定されるが、MKLの要件として明示しておく
-    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+            _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+            _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 #endif
-
 #if JUCE_DSP_USE_INTEL_MKL
-    // VML (Vector Math Library) のDenormal扱いをゼロに設定
-    // vdHypot, vdLn 等のパフォーマンス低下を防ぐ
-    // この設定はスレッドローカルなので、オーディオスレッドで毎回設定する必要がある
-    vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
+            vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
 #endif
+        }
+    }
+    // ========================================================
 
     // 入力検証 (Input Validation)
     if (bufferToFill.buffer == nullptr)
@@ -857,7 +874,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     //----------------------------------------------------------
     // AudioBlockの構築 (AlignedBufferを使用)
     //----------------------------------------------------------
-    double* channels[2] = { alignedL.data(), alignedR.data() };
+    double* channels[2] = { alignedL, alignedR };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
 
     //----------------------------------------------------------
@@ -1108,7 +1125,7 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     {
         // float (I/O) -> double (DSP) 変換
         const float* src = buffer->getReadPointer(ch, startSample);
-        double* dst = (ch == 0) ? alignedL.data() : alignedR.data();
+        double* dst = (ch == 0) ? alignedL : alignedR;
         auto& blocker = (ch == 0) ? inputDCBlockerL : inputDCBlockerR;
 
         for (int i = 0; i < numSamples; ++i)
@@ -1134,7 +1151,7 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
 
     for (int ch = clearStartCh; ch < 2; ++ch)
     {
-        double* dst = (ch == 0) ? alignedL.data() : alignedR.data();
+        double* dst = (ch == 0) ? alignedL : alignedR;
         juce::FloatVectorOperations::clear(dst, numSamples);
     }
 
@@ -1144,8 +1161,8 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     // 後段のステレオエフェクト（Convolver等）での片側無音を防ぐ。
     if (expandMono)
     {
-        const double* src = alignedL.data();
-        double* dst = alignedR.data();
+        const double* src = alignedL;
+        double* dst = alignedR;
         // 高速なメモリコピー (double配列)
         std::memcpy(dst, src, numSamples * sizeof(double));
     }
@@ -1216,7 +1233,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     {
         if (ch < 2)
         {
-            double* data = (ch == 0) ? alignedL.data() : alignedR.data();
+            double* data = (ch == 0) ? alignedL : alignedR;
             auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
             float* dst = buffer->getWritePointer(ch, startSample);
 

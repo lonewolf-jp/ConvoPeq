@@ -29,6 +29,12 @@
 // 前方宣言
 static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR, juce::Thread* thread = nullptr, bool* wasCancelled = nullptr);
 
+// Helper for RAII aligned memory
+struct AlignedDeleter {
+    void operator()(void* ptr) const { convo::aligned_free(ptr); }
+};
+template<typename T> using ScopedAlignedPtr = std::unique_ptr<T, AlignedDeleter>;
+
 // スレッドキャンセル確認用ヘルパー関数
 static bool checkCancellation(juce::Thread* thread, bool* wasCancelled) noexcept
 {
@@ -594,7 +600,8 @@ public:
             result.newConv = std::make_shared<StereoConvolver>();
 
             // IRデータを格納するアラインされたバッファを準備 (Rebuild用に保持)
-            std::vector<double, convo::MKLAllocator<double>> irL(result.targetLength), irR(result.targetLength);
+            ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
+            ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
 
             // 安全対策: チャンネル数チェック
             if (trimmed.getNumChannels() == 0) return result;
@@ -603,15 +610,15 @@ public:
             const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
 
             // データを一度だけコピー
-            std::memcpy(irL.data(), srcL, result.targetLength * sizeof(double));
-            std::memcpy(irR.data(), srcR, result.targetLength * sizeof(double));
+            std::memcpy(irL.get(), srcL, result.targetLength * sizeof(double));
+            std::memcpy(irR.get(), srcR, result.targetLength * sizeof(double));
 
             // 10. 新しいConvolutionの構築 (initメソッドを使用して安全に初期化)
             // prepareToPlayとロジックを統一し、WDLエンジンのプリウォーミングも行う
             int internalBlockSize = juce::nextPowerOfTwo(blockSize);
             auto sizing = computeMasteringSizing(internalBlockSize, result.targetLength);
 
-            result.newConv->init(std::move(irL), std::move(irR), result.targetLength, sampleRate, irPeakLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition);
+            result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition);
 
             // Display用コピーを作成 (move前に)
             result.displayIR = trimmed;
@@ -670,13 +677,6 @@ private:
 ConvolverProcessor::ConvolverProcessor()
     : mixSmoother(1.0f)
 {
-    // Audio Threadでのメモリ確保を避けるため、バッファはコンストラクタで確保する
-    delayBuffer[0].resize(DELAY_BUFFER_SIZE);
-    delayBuffer[1].resize(DELAY_BUFFER_SIZE);
-    dryBufferStorage[0].resize(MAX_BLOCK_SIZE);
-    dryBufferStorage[1].resize(MAX_BLOCK_SIZE);
-    smoothingBufferStorage[0].resize(MAX_BLOCK_SIZE);
-    smoothingBufferStorage[1].resize(MAX_BLOCK_SIZE);
 }
 
 //--------------------------------------------------------------
@@ -690,6 +690,19 @@ ConvolverProcessor::~ConvolverProcessor()
     trashBinPending.clear();
     convolution.store(nullptr);
     activeConvolution.reset();
+
+    if (delayBuffer[0]) convo::aligned_free(delayBuffer[0]);
+    if (delayBuffer[1]) convo::aligned_free(delayBuffer[1]);
+    if (dryBufferStorage[0]) convo::aligned_free(dryBufferStorage[0]);
+    if (dryBufferStorage[1]) convo::aligned_free(dryBufferStorage[1]);
+    if (smoothingBufferStorage[0]) convo::aligned_free(smoothingBufferStorage[0]);
+    if (smoothingBufferStorage[1]) convo::aligned_free(smoothingBufferStorage[1]);
+    if (cachedFFTBuffer) convo::aligned_free(cachedFFTBuffer);
+
+    delayBuffer[0] = delayBuffer[1] = nullptr;
+    dryBufferStorage[0] = dryBufferStorage[1] = nullptr;
+    smoothingBufferStorage[0] = smoothingBufferStorage[1] = nullptr;
+    cachedFFTBuffer = nullptr;
 }
 
 //--------------------------------------------------------------
@@ -726,14 +739,15 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
             auto newConv = std::make_shared<StereoConvolver>();
 
             // バッファ確保とコピー
-            std::vector<double, convo::MKLAllocator<double>> irL(conv->irDataLength), irR(conv->irDataLength);
-            std::memcpy(irL.data(), conv->irData[0].data(), conv->irDataLength * sizeof(double));
-            std::memcpy(irR.data(), conv->irData[1].data(), conv->irDataLength * sizeof(double));
+            ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
+            ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
+            std::memcpy(irL.get(), conv->irData[0], conv->irDataLength * sizeof(double));
+            std::memcpy(irR.get(), conv->irData[1], conv->irDataLength * sizeof(double));
 
             auto sizing = computeMasteringSizing(internalBlockSize, conv->irDataLength);
 
             // 新しいブロックサイズで初期化
-            newConv->init(std::move(irL), std::move(irR),
+            newConv->init(irL.release(), irR.release(),
                           conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition);
 
             // 差し替え
@@ -749,17 +763,41 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     }
 
     // DelayLine準備
+    if (delayBufferCapacity < DELAY_BUFFER_SIZE)
+    {
+        if (delayBuffer[0]) convo::aligned_free(delayBuffer[0]);
+        if (delayBuffer[1]) convo::aligned_free(delayBuffer[1]);
+        delayBuffer[0] = static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64));
+        delayBuffer[1] = static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64));
+        delayBufferCapacity = DELAY_BUFFER_SIZE;
+    }
     // バッファクリア
-    juce::FloatVectorOperations::clear(delayBuffer[0].data(), DELAY_BUFFER_SIZE);
-    juce::FloatVectorOperations::clear(delayBuffer[1].data(), DELAY_BUFFER_SIZE);
+    juce::FloatVectorOperations::clear(delayBuffer[0], DELAY_BUFFER_SIZE);
+    juce::FloatVectorOperations::clear(delayBuffer[1], DELAY_BUFFER_SIZE);
     delayWritePos = 0;
 
     // Dryバッファ確保
-    double* dryChs[2] = { dryBufferStorage[0].data(), dryBufferStorage[1].data() };
+    if (dryBufferCapacity < MAX_BLOCK_SIZE)
+    {
+        if (dryBufferStorage[0]) convo::aligned_free(dryBufferStorage[0]);
+        if (dryBufferStorage[1]) convo::aligned_free(dryBufferStorage[1]);
+        dryBufferStorage[0] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        dryBufferStorage[1] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        dryBufferCapacity = MAX_BLOCK_SIZE;
+    }
+    double* dryChs[2] = { dryBufferStorage[0], dryBufferStorage[1] };
     dryBuffer.setDataToReferTo(dryChs, 2, MAX_BLOCK_SIZE);
     dryBuffer.clear();
 
-    double* smoothChs[2] = { smoothingBufferStorage[0].data(), smoothingBufferStorage[1].data() };
+    if (smoothingBufferCapacity < MAX_BLOCK_SIZE)
+    {
+        if (smoothingBufferStorage[0]) convo::aligned_free(smoothingBufferStorage[0]);
+        if (smoothingBufferStorage[1]) convo::aligned_free(smoothingBufferStorage[1]);
+        smoothingBufferStorage[0] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        smoothingBufferStorage[1] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        smoothingBufferCapacity = MAX_BLOCK_SIZE;
+    }
+    double* smoothChs[2] = { smoothingBufferStorage[0], smoothingBufferStorage[1] };
     smoothingBuffer.setDataToReferTo(smoothChs, 2, MAX_BLOCK_SIZE);
     smoothingBuffer.clear();
 
@@ -797,8 +835,8 @@ void ConvolverProcessor::reset()
         conv->reset();
     }
     // リングバッファのクリア
-    if (!delayBuffer[0].empty()) juce::FloatVectorOperations::clear(delayBuffer[0].data(), DELAY_BUFFER_SIZE);
-    if (!delayBuffer[1].empty()) juce::FloatVectorOperations::clear(delayBuffer[1].data(), DELAY_BUFFER_SIZE);
+    if (delayBuffer[0]) juce::FloatVectorOperations::clear(delayBuffer[0], DELAY_BUFFER_SIZE);
+    if (delayBuffer[1]) juce::FloatVectorOperations::clear(delayBuffer[1], DELAY_BUFFER_SIZE);
     delayWritePos = 0;
 
     dryBuffer.clear();
@@ -870,14 +908,14 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     // WDL FFTはインターリーブされた複素数バッファ(re, im)を使用します。
     // SIMD用のアライメントを確保 (AVXは32バイトアライメントが必要)。
     // convo::MKLAllocatorは64バイトアライメントで確保します。
-    std::vector<double, convo::MKLAllocator<double>> fftBufferAligned(fftSize * 2); // 2 doubles per complex
-    WDL_FFT_COMPLEX* fftBuffer = reinterpret_cast<WDL_FFT_COMPLEX*>(fftBufferAligned.data());
+    ScopedAlignedPtr<double> fftBufferAligned(static_cast<double*>(convo::aligned_malloc(fftSize * 2 * sizeof(double), 64)));
+    WDL_FFT_COMPLEX* fftBuffer = reinterpret_cast<WDL_FFT_COMPLEX*>(fftBufferAligned.get());
 
-    std::vector<double, convo::MKLAllocator<double>> dataAligned(fftSize);
-    double* data = dataAligned.data(); // 作業用
+    ScopedAlignedPtr<double> dataAligned(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
+    double* data = dataAligned.get(); // 作業用
 #if JUCE_DSP_USE_INTEL_MKL
-    std::vector<double, convo::MKLAllocator<double>> tempAligned(fftSize);
-    double* temp = tempAligned.data(); // MKL用作業バッファ
+    ScopedAlignedPtr<double> tempAligned(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
+    double* temp = tempAligned.get(); // MKL用作業バッファ
 #endif
 
     for (int ch = 0; ch < linearIR.getNumChannels(); ++ch)
@@ -1293,15 +1331,19 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     if (fftSize < 512) fftSize = 512;
 
     // キャッシュされたバッファを再利用 (メモリ確保のオーバーヘッド削減)
-    if (cachedFFTBuffer.size() < static_cast<size_t>(fftSize * 2))
-        cachedFFTBuffer.resize(static_cast<size_t>(fftSize * 2));
+    if (cachedFFTBufferCapacity < fftSize * 2)
+    {
+        if (cachedFFTBuffer) convo::aligned_free(cachedFFTBuffer);
+        cachedFFTBuffer = static_cast<float*>(convo::aligned_malloc(fftSize * 2 * sizeof(float), 64));
+        cachedFFTBufferCapacity = fftSize * 2;
+    }
 
-    std::fill(cachedFFTBuffer.begin(), cachedFFTBuffer.end(), 0.0f);
+    juce::FloatVectorOperations::clear(cachedFFTBuffer, fftSize * 2);
 
     // チャンネル0 (Lch) の特性を使用する
     const double* src = irBuffer.getReadPointer(0);
     const int copyLen = (std::min)(numSamples, fftSize);
-    float* dst = cachedFFTBuffer.data();
+    float* dst = cachedFFTBuffer;
 
 #if JUCE_DSP_USE_INTEL_MKL
     // MKL FFT (One-shot)
@@ -1337,12 +1379,12 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     for (int i = 0; i < copyLen; ++i)
         dst[i] = static_cast<float>(src[i]);
 
-    fft.performFrequencyOnlyForwardTransform(cachedFFTBuffer.data());
+    fft.performFrequencyOnlyForwardTransform(cachedFFTBuffer);
     const int numBins = fftSize / 2 + 1;
 #endif
 
     // スムーシング適用 (Linear Magnitudeに対して行う)
-    std::vector<float> linearMags(cachedFFTBuffer.begin(), cachedFFTBuffer.begin() + numBins);
+    std::vector<float> linearMags(cachedFFTBuffer, cachedFFTBuffer + numBins);
     applySmoothing(linearMags, fftSize);
 
     // マグニチュード(dB)に変換して格納
@@ -1575,7 +1617,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         for (int ch = 0; ch < procChannels; ++ch)
         {
             const double* src = block.getChannelPointer(ch);
-            double* buf = delayBuffer[ch].data();
+            double* buf = delayBuffer[ch];
 
             // リングバッファの境界処理 (2分割コピー)
             int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - wPos);
@@ -1613,7 +1655,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
                 for (int ch = 0; ch < procChannels; ++ch)
                 {
-                    double* buf = delayBuffer[ch].data();
+                    double* buf = delayBuffer[ch];
 
                     // 4-point, 3rd-order Catmull-Rom interpolation for higher quality variable delay.
                    // 【安全化】読み出しインデックスを書き込み済み範囲にクランプ
@@ -1652,7 +1694,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
             for (int ch = 0; ch < procChannels; ++ch)
             {
-                double* srcBuf = delayBuffer[ch].data();
+                double* srcBuf = delayBuffer[ch];
                 double* dstBuf = dryBuffer.getWritePointer(ch);
 
                 // リングバッファからの読み出し (2分割コピー)

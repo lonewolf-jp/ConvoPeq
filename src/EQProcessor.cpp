@@ -38,6 +38,7 @@ EQProcessor::~EQProcessor()
     for (auto& node : bandNodes) {
         node.store(nullptr, std::memory_order_release);
     }
+    if (scratchBuffer) convo::aligned_free(scratchBuffer);
     // activeBandNodes will be cleared automatically
 }
 
@@ -405,14 +406,15 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     // ==================================================================
     const int requiredSize = newMaxInternalBlockSize;   // ← 引数からローカルへ
 
-    if (scratchBuffer.size() < static_cast<size_t>(requiredSize))
+    if (scratchCapacity < requiredSize)
     {
-        scratchBuffer.resize(static_cast<size_t>(requiredSize));
+        if (scratchBuffer) convo::aligned_free(scratchBuffer);
+        scratchBuffer = static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(requiredSize) * sizeof(double), 64));
+        scratchCapacity = requiredSize;
 
         // 明示的ゼロクリア（Denormal防止 + 再現性確保）
-        if (!scratchBuffer.empty())
-            juce::FloatVectorOperations::clear(scratchBuffer.data(),
-                                               static_cast<int>(scratchBuffer.size()));
+        if (scratchBuffer)
+            juce::FloatVectorOperations::clear(scratchBuffer, scratchCapacity);
     }
 
     this->maxInternalBlockSize = requiredSize;   // メンバ変数へ代入（this->で明示）
@@ -893,9 +895,12 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
 
 #if JUCE_DSP_USE_INTEL_MKL
             // MKL最適化されたRMS計算 (Norm / sqrt(N))
-        std::memcpy(scratchBuffer.data(), data, static_cast<size_t>(numSamples) * sizeof(double));
-        double norm = cblas_dnrm2(numSamples, scratchBuffer.data(), 1);
-        rms = norm / std::sqrt(static_cast<double>(numSamples));
+        if (scratchBuffer != nullptr)
+        {
+            std::memcpy(scratchBuffer, data, static_cast<size_t>(numSamples) * sizeof(double));
+            double norm = cblas_dnrm2(numSamples, scratchBuffer, 1);
+            rms = norm / std::sqrt(static_cast<double>(numSamples));
+        }
 #else
         double sumSq = 0.0;
         for (int i = 0; i < numSamples; ++i)
@@ -989,12 +994,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     const int numSamples = (int)block.getNumSamples();
 
     // ==================================================================
-    // 【Issue 4 追加安全ガード】オーバーラン即検出
+    // 【Issue 4 追加安全ガード】オーバーラン即検出（Audio Thread安全版）
     // ==================================================================
-    // Fix: Releaseビルドでも有効なチェックに変更
+    // パッチ2: jassert削除 + 安全クリア（ガイドライン厳守）
     if (numSamples <= 0 || static_cast<size_t>(numSamples) > static_cast<size_t>(maxInternalBlockSize))
     {
-        jassert(numSamples > 0 && static_cast<size_t>(numSamples) <= static_cast<size_t>(maxInternalBlockSize));
+        // バッファオーバーラン時は安全にゼロクリアして早期リターン
+        for (int ch = 0; ch < (int)block.getNumChannels(); ++ch)
+            juce::FloatVectorOperations::clear(block.getChannelPointer(ch), numSamples);
         return;
     }
 
@@ -1012,9 +1019,12 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
 #if JUCE_DSP_USE_INTEL_MKL
             // MKL最適化されたRMS計算
-            std::memcpy(scratchBuffer.data(), data, static_cast<size_t>(numSamples) * sizeof(double));
-            double norm = cblas_dnrm2(numSamples, scratchBuffer.data(), 1);
-            rms = norm / std::sqrt(static_cast<double>(numSamples));
+            if (scratchBuffer != nullptr)
+            {
+                std::memcpy(scratchBuffer, data, static_cast<size_t>(numSamples) * sizeof(double));
+                double norm = cblas_dnrm2(numSamples, scratchBuffer, 1);
+                rms = norm / std::sqrt(static_cast<double>(numSamples));
+            }
 #else
             double sumSq = 0.0;
             for (int i = 0; i < numSamples; ++i)
@@ -1268,7 +1278,13 @@ EQCoeffsSVF EQProcessor::calcSVFCoeffs(EQBandType type, float freq, float gainDb
 EQCoeffsBiquad EQProcessor::calcBiquadCoeffs(EQBandType type, float freq, float gainDb, float q, double sr) noexcept
 {
     // パラメータ検証 (Parameter Validation)
-    if (sr <= 0.0 || sr > 384000.0)
+    // [FIX] 上限チェックを削除: 以前の sr > 384000.0 は誤り。
+    // オーバーサンプリング使用時 (例: 96kHz × 8 = 768kHz) にsr=48000へフォールバックし、
+    // zCache (処理srベース) とbiquad係数 (48kHzベース) が不整合になり、
+    // 表示曲線のピーク周波数が最大16倍ずれる不具合を引き起こしていた。
+    // (例: 100Hz設定 → 1600Hz表示、ユーザー報告: 25-100Hzブーストが800Hz付近に表示)
+    // Biquad計算式はsr > 0.0であれば任意のサンプルレートで数学的に正確に動作する。
+    if (sr <= 0.0 || !std::isfinite(sr))
     {
         jassertfalse;
         sr = 48000.0;
