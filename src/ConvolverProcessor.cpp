@@ -1600,7 +1600,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
                 // 読み出し位置の計算 (整数部と小数部)
                 double readPosFloat = static_cast<double>(currentWPos) - currentDelay;
-                // 負の値のラップアラウンド処理
+
 
                 const int safeMaxIdx = (delayWritePos + numSamples - 1) & DELAY_BUFFER_MASK;
 
@@ -1622,9 +1622,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     const int idx2 = (readPosInt + 1) & DELAY_BUFFER_MASK;
                     const int idx3 = (readPosInt + 2) & DELAY_BUFFER_MASK;
 
+                    const int safeMaxIdx = (delayWritePos + numSamples - 1) & DELAY_BUFFER_MASK;
+
                     const double p0 = buf[idx0];
                     const double p1 = buf[idx1];
-                    const double p2 = buf[idx2];
+                    const double p2 = buf[(idx2 <= safeMaxIdx ? idx2 : safeMaxIdx)];
                     const double p3 = buf[idx3];
 
                     const double c0 = p1;
