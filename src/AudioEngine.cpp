@@ -796,10 +796,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     {
         bufferToFill.clearActiveBufferRegion();
     }
-
-    if (!alignedR.empty())
-        // size() はすでに internalMaxBlockSize になっているので安全
-        juce::FloatVectorOperations::clear(alignedR.data(), static_cast<int>(alignedR.size()));
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
