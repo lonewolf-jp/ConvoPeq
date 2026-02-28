@@ -54,6 +54,14 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     updateSourceButtonText();
     addAndMakeVisible(sourceButton);
 
+   analyzerEnableButton.setButtonText("Analyzer: ON");
+    analyzerEnableButton.setToggleState(true, juce::dontSendNotification);
+    analyzerEnableButton.onClick = [this] {
+        setAnalyzerEnabled(analyzerEnableButton.getToggleState());
+    };
+    addAndMakeVisible(analyzerEnableButton);
+
+
     engine.addChangeListener(this);
     engine.getEQProcessor().addChangeListener(this);
     engine.getEQProcessor().addListener(this);
@@ -74,6 +82,22 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
     engine.removeChangeListener(this);
     engine.getEQProcessor().removeChangeListener(this);
     engine.getEQProcessor().removeListener(this);
+}
+
+void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
+{
+    if (enabled)
+    {
+        startTimerHz(60);
+        analyzerEnableButton.setButtonText("Analyzer: ON");
+
+    }
+    else
+    {
+        stopTimer();
+        analyzerEnableButton.setButtonText("Analyzer: OFF");
+    }
+
 }
 
 void SpectrumAnalyzerComponent::prepareFFT()
@@ -104,7 +128,7 @@ void SpectrumAnalyzerComponent::releaseFFT()
 //--------------------------------------------------------------
 void SpectrumAnalyzerComponent::timerCallback()
 {
-    if (!isShowing()) return;
+    if (!isShowing() || !analyzerEnableButton.getToggleState()) return;
 
     // ── サンプルレート変更検知 (タイマー駆動) ──
     // デバイス変更などでサンプルレートが変わった場合に追従する
@@ -371,6 +395,7 @@ void SpectrumAnalyzerComponent::resized()
 
     // ボタン配置 (右上の余白)
     sourceButton.setBounds(specArea.getRight() - 110, marginT, 100, 18);
+    analyzerEnableButton.setBounds(specArea.getX(), marginT, 100, 18);
 
     updateEQPaths();
 }
@@ -564,7 +589,8 @@ void SpectrumAnalyzerComponent::updateEQData()
             // グラフ描画用にBiquad係数を計算
             // 音声処理にはSVFを使用しているが、周波数応答の計算には
             // 等価な特性を持つBiquad係数を使用することで、標準的な計算式(getMagnitudeSquared)を流用している。
-            EQCoeffsBiquad c = EQProcessor::calcBiquadCoeffs(type, params.frequency, params.gain, params.q, sr);
+            EQCoeffsSVF svf = EQProcessor::calcSVFCoeffs(type, params.frequency, params.gain, params.q, sr);
+            EQCoeffsBiquad c = EQProcessor::svfToDisplayBiquad(svf);
             EQChannelMode mode = engine.getEQProcessor().getBandChannelMode(b);
 
             for (int i = 0; i < NUM_DISPLAY_BARS; ++i)

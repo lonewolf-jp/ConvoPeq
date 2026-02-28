@@ -35,6 +35,8 @@ public:
     explicit SpectrumAnalyzerComponent(AudioEngine& audioEngine);
     ~SpectrumAnalyzerComponent() override;
 
+    void setAnalyzerEnabled(bool enabled);
+
     void paint(juce::Graphics& g) override;
     void resized() override;
 
@@ -74,6 +76,7 @@ private:
     std::vector<float> eqResponseBufferR; // 要素数: NUM_DISPLAY_BARS
 
     // 個別バンドの応答曲線データ (timerで計算、paintで描画)
+
     std::vector<std::vector<float>> individualBandCurvesL;
     std::vector<std::vector<float>> individualBandCurvesR;
     std::vector<float> displayFrequencies; // 表示バーに対応する周波数
@@ -152,6 +155,7 @@ private:
 
     juce::TextButton sourceButton;
     void updateSourceButtonText();
+    juce::ToggleButton analyzerEnableButton;
 
     // ── アンダーラン対策 ──
     int underflowCount = 0;

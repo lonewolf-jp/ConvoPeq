@@ -1601,6 +1601,9 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 // 読み出し位置の計算 (整数部と小数部)
                 double readPosFloat = static_cast<double>(currentWPos) - currentDelay;
                 // 負の値のラップアラウンド処理
+
+                const int safeMaxIdx = (delayWritePos + numSamples - 1) & DELAY_BUFFER_MASK;
+
                 // DELAY_BUFFER_SIZE > MAX_TOTAL_DELAY が保証されているため最大1回
                 if (readPosFloat < 0.0) readPosFloat += DELAY_BUFFER_SIZE;
                 jassert(readPosFloat >= 0.0); // 設計保証のアサーション
@@ -1613,7 +1616,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     double* buf = delayBuffer[ch].data();
 
                     // 4-point, 3rd-order Catmull-Rom interpolation for higher quality variable delay.
-                    // This provides a good balance between quality and performance.
+                   // 【安全化】読み出しインデックスを書き込み済み範囲にクランプ
                     const int idx0 = (readPosInt - 1) & DELAY_BUFFER_MASK;
                     const int idx1 = readPosInt & DELAY_BUFFER_MASK;
                     const int idx2 = (readPosInt + 1) & DELAY_BUFFER_MASK;

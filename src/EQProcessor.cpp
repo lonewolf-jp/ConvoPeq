@@ -1315,6 +1315,31 @@ float EQProcessor::getMagnitudeSquared(const EQCoeffsBiquad& c, const std::compl
 }
 
 //--------------------------------------------------------------
+// SVF係数から等価 Biquad 係数を計算 (UI表示用)
+//--------------------------------------------------------------
+EQCoeffsBiquad EQProcessor::svfToDisplayBiquad(const EQCoeffsSVF& svf) noexcept
+{
+    EQCoeffsBiquad bq;
+    const double a1 = svf.a1, a2 = svf.a2, a3 = svf.a3;
+    const double m0 = svf.m0, m1 = svf.m1, m2 = svf.m2;
+
+    if (a1 < 1e-15) { bq.b0 = 1.0; bq.a0 = 1.0; return bq; }
+
+    const double g2  = a3 / a1;
+    const double g   = a2 / a1;
+    const double gk  = (1.0 - a1 - a3) / a1;
+
+    bq.a0 =  1.0 + gk + g2;
+    bq.a1 = -2.0 + 2.0 * g2;
+    bq.a2 =  1.0 - gk + g2;
+
+    bq.b0 = m0 * (1.0 + gk + g2) + m1 * g + m2 * g2;
+    bq.b1 = -2.0 * m0 + 2.0 * (m0 + m2) * g2;
+    bq.b2 = m0 * (1.0 - gk + g2) - m1 * g + m2 * g2;
+
+    return bq;
+}
+//--------------------------------------------------------------
 // SVF実装
 //--------------------------------------------------------------
 EQCoeffsSVF EQProcessor::calcLowShelfSVF(double freq, double gainDb, double q, double sr) noexcept

@@ -223,7 +223,8 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
             const auto& band = activeBands[b];
             float magSq = EQProcessor::getMagnitudeSquared(band.coeffs, z);
 
-            // 数値安定性のため、NaN/Infの伝播を防止
+
+           // 数値安定性のため、NaN/Infの伝播を防止
             if (!std::isfinite(magSq))
                 magSq = 1.0f;
 
