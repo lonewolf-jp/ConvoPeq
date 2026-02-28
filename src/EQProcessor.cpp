@@ -881,6 +881,7 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     const int numSamples = (int)block.getNumSamples();
 
     // ✅ 事前にキャッシュされた入力レベルを使用
+
     double inputRMS = cachedInputRMS;
 
     // ✅ フィルタ処理後の出力レベル計測

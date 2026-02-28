@@ -316,9 +316,6 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     maxSamplesPerBlock.store(bufferSize);
     currentSampleRate.store(safeSampleRate);
 
-    // DSP再構築リクエスト (Audio Thread Safe)
-    // MessageManagerへのアクセスやメモリ確保を避けるため、フラグを立ててTimerで処理する
-    rebuildRequested.store(true, std::memory_order_release);
 
     audioFifo.reset();
 
@@ -426,19 +423,6 @@ void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP)
 
 void AudioEngine::timerCallback()
 {
-    // ── DSP再構築リクエストの処理 ──
-    // Audio Thread (prepareToPlay) からのリクエストを Message Thread で処理する
-    // 【Parameter安全設計】
-    // Audio Thread内でのメモリ確保や重い初期化処理を回避するため、
-    // フラグ(rebuildRequested)を介してMessage Threadで安全に再構築を実行する。
-    if (rebuildRequested.exchange(false, std::memory_order_acquire))
-    {
-        const double sr = currentSampleRate.load();
-        const int bs = maxSamplesPerBlock.load();
-        if (sr > 0.0 && bs > 0)
-        {
-            uiConvolverProcessor.prepareToPlay(sr, bs);
-            uiEqProcessor.prepareToPlay(sr, bs);
             uiConvolverProcessor.setBypass(convBypassRequested.load(std::memory_order_relaxed));
             requestRebuild(sr, bs);
             sendChangeMessage();
@@ -672,6 +656,22 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     if (manualOversamplingFactor > 0)
     {
         // 手動設定
+        // 44.1khz/48khz x1、x2、x4、x8
+        // 88.2khz/96khz x1、x2、x4、x8
+        // 176.4khz/192khz x1、x2、x4
+        // 352.8khz/384khz x1、x2
+        // 705.6khz以上 x1
+
+        if (newSampleRate >= 705600)
+            targetFactor = 1;
+        else if (newSampleRate >= 352800)
+            targetFactor = (manualOversamplingFactor <= 2) ? manualOversamplingFactor : 2;
+        else if (newSampleRate >= 176400)
+            targetFactor = (manualOversamplingFactor <= 4) ? manualOversamplingFactor : 4;
+        else if (newSampleRate >= 88200)
+            targetFactor = (manualOversamplingFactor <= 8) ? manualOversamplingFactor : manualOversamplingFactor;
+        else
+            targetFactor = (manualOversamplingFactor <= 8) ? manualOversamplingFactor : 8;
         if (manualOversamplingFactor == 8)      targetFactor = 8;
         else if (manualOversamplingFactor == 4) targetFactor = 4;
         else if (manualOversamplingFactor == 2) targetFactor = 2;
@@ -680,10 +680,16 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     else
     {
         // 自動設定 (デフォルト)
-        if (newSampleRate <= 96000.0)       targetFactor = 8;
-        else if (newSampleRate <= 192000.0) targetFactor = 4;
-        else if (newSampleRate <= 384000.0) targetFactor = 2;
-        else                                targetFactor = 1;
+        if (newSampleRate >= 705600)
+            targetFactor = 1;
+        else if (newSampleRate >= 352800)
+            targetFactor =  2;
+        else if (newSampleRate >= 176400)
+            targetFactor =  4;
+        else if (newSampleRate >= 88200)
+            targetFactor = 8;
+         else
+             targetFactor = 8;
     }
 
     // 制限: サンプルレートに応じた最大倍率を適用
@@ -1311,13 +1317,13 @@ void AudioEngine::requestEqPreset (int presetIndex) noexcept
     sendChangeMessage();
 }
 
-void AudioEngine::requestEqPresetFromText(const juce::File& file) noexcept
+void AudioEngine::requestEqPresetFromText(const juce::File& file)
 {
     if (uiEqProcessor.loadFromTextFile(file))
         sendChangeMessage();
 }
 
-void AudioEngine::requestConvolverPreset (const juce::File& irFile) noexcept
+void AudioEngine::requestConvolverPreset(const juce::File& irFile)
 {
     uiConvolverProcessor.loadImpulseResponse (irFile);
 }
@@ -1391,7 +1397,9 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
         ditherBitDepth.store(bitDepth);
         const double sr = currentSampleRate.load();
         if (sr > 0.0)
+        {
             requestRebuild(sr, maxSamplesPerBlock.load());
+        }
     }
 }
 
@@ -1434,7 +1442,9 @@ void AudioEngine::setOversamplingFactor(int factor)
         manualOversamplingFactor.store(newFactor);
         const double sr = currentSampleRate.load();
         if (sr > 0.0)
+        {
             requestRebuild(sr, maxSamplesPerBlock.load());
+        }
     }
 }
 
@@ -1448,7 +1458,9 @@ void AudioEngine::setOversamplingType(OversamplingType type)
     oversamplingType.store(type);
     const double sr = currentSampleRate.load();
     if (sr > 0.0)
+    {
         requestRebuild(sr, maxSamplesPerBlock.load());
+    }
 }
 
 AudioEngine::OversamplingType AudioEngine::getOversamplingType() const

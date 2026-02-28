@@ -50,7 +50,7 @@ private:
     // ── FFT設定 ──
     static constexpr int NUM_FFT_POINTS  = 4096;
     static constexpr int NUM_FFT_BINS    = NUM_FFT_POINTS / 2 + 1;
-    static constexpr int OVERLAP_SAMPLES = NUM_FFT_POINTS / 4;
+   static constexpr int OVERLAP_SAMPLES = NUM_FFT_POINTS / 4;
     static constexpr float FFT_MAGNITUDE_SCALE = 4.0f / NUM_FFT_POINTS;
     static constexpr float FFT_DISPLAY_MIN_DB = -100.0f;
     static constexpr float FFT_DISPLAY_MIN_MAG = 1e-9f;

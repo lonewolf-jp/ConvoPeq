@@ -272,8 +272,8 @@ private:
 
     Xoshiro256ss  rng[MAX_CHANNELS];
     std::vector<double, convo::MKLAllocator<double>> shaperStateBuffer;
-    double scale = 1.0 / 16777216.0;
-    double invScale = 16777216.0;
+        double scale    = 1.0 / 8388608.0;    // 2^23（24bit signed PCM デフォルト）
+        double invScale = 8388608.0;           // 2^23（24bit signed PCM デフォルト）
     std::array<double, 5> coeffs { 2.033, -2.165, 1.959, -1.590, 0.6149 };
 };
 

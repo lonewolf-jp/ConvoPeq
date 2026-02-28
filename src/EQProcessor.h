@@ -254,6 +254,9 @@ public:
     static float getMagnitudeSquared(const EQCoeffsBiquad& coeffs, float freq, float sampleRate) noexcept;
     static float getMagnitudeSquared(const EQCoeffsBiquad& coeffs, const std::complex<double>& z) noexcept;
 
+
+    EQCoeffsBiquad svfToDisplayBiquad(const EQCoeffsSVF& svf) noexcept;
+
 private:
     //----------------------------------------------------------
     // プライベートヘルパー関数

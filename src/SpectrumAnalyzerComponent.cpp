@@ -128,6 +128,18 @@ void SpectrumAnalyzerComponent::releaseFFT()
 //--------------------------------------------------------------
 void SpectrumAnalyzerComponent::timerCallback()
 {
+
+    // スペアナがOFFの場合、スペアナグラフをクリア
+    if (!analyzerEnableButton.getToggleState())
+    {
+        std::fill(smoothedBuffer.begin(), smoothedBuffer.end(), MIN_DB);
+        std::fill(peakBuffer.begin(), peakBuffer.end(), MIN_DB);
+        repaint();
+    }
+
+
+
+    }
     if (!isShowing() || !analyzerEnableButton.getToggleState()) return;
 
     // ── サンプルレート変更検知 (タイマー駆動) ──
@@ -138,7 +150,9 @@ void SpectrumAnalyzerComponent::timerCallback()
         updateEQData();
     }
 
+
     // ── FFTデータの取得とスムーシング ──
+
     // FIFOの利用可能データ数をチェック
     const int available = engine.getFifoNumReady();
     // 十分なデータがあるか確認 (FFTサイズ分のデータが揃うまで待つことでアンダーラングリッチを防ぐ)
@@ -160,6 +174,7 @@ void SpectrumAnalyzerComponent::timerCallback()
         // 短期間のデータ不足（バッファ待ちなど）では減衰させず、表示を維持する (Flicker防止)
         if (underflowCount > 3)
         {
+
             // アンダーラン時は「減衰保持」 (Decay Hold)
             // 視覚的に自然にフェードアウトさせる
             for (size_t i = 0; i < smoothedBuffer.size(); ++i)
@@ -170,7 +185,6 @@ void SpectrumAnalyzerComponent::timerCallback()
                 // ピーク保持の更新 (減衰時もピークロジックを継続)
                 if (peakHoldCounter[i] > 0)
                 {
-                    --peakHoldCounter[i];
                 }
                 else
                 {
@@ -186,15 +200,21 @@ void SpectrumAnalyzerComponent::timerCallback()
 
     underflowCount = 0;
 
+    }
+
     // 1. 既存データを左にシフト (古いデータを破棄)
     std::memmove(fftTimeDomainBuffer.data(),
                  fftTimeDomainBuffer.data() + OVERLAP_SAMPLES,
                  (NUM_FFT_POINTS - OVERLAP_SAMPLES) * sizeof(float));
 
+        //アンダーフローカウンタをリセット
+        // 2. FIFOから新しいデータを読み込み
+
     // 2. FIFOから新しいデータを読み込み
+
     engine.readFromFifo(fftTimeDomainBuffer.data() + (NUM_FFT_POINTS - OVERLAP_SAMPLES), OVERLAP_SAMPLES);
 
-    // 安全対策: NaN/Infチェック
+      // 安全対策: NaN/Infチェック
     // 万が一DSP処理で不正な値が発生しても、アナライザーでクラッシュさせない
     for (auto& sample : fftTimeDomainBuffer)
     {
@@ -202,13 +222,13 @@ void SpectrumAnalyzerComponent::timerCallback()
             sample = 0.0f;
     }
 
+
     // 3. 窓関数適用とFFT実行
 #if JUCE_DSP_USE_INTEL_MKL
     // MKL: Real -> Complex conversion + Windowing
     // fftWorkBuffer is float array of size NUM_FFT_POINTS * 2
     // We treat it as interleaved complex: re, im, re, im...
-    {
-        const float* src = fftTimeDomainBuffer.data();
+   { const float* src = fftTimeDomainBuffer.data();
         float* dst = fftWorkBuffer.data();
 
         // Step 3a: Copy and Window (Real)
@@ -236,9 +256,11 @@ void SpectrumAnalyzerComponent::timerCallback()
 
             rawBuffer[i] = (magnitude > FFT_DISPLAY_MIN_MAG) ? juce::Decibels::gainToDecibels(magnitude) : FFT_DISPLAY_MIN_DB;
         }
+
     }
 #else
-    std::memcpy(fftWorkBuffer.data(), fftTimeDomainBuffer.data(), NUM_FFT_POINTS * sizeof(float));
+      std::memcpy(fftWorkBuffer.data(), fftTimeDomainBuffer.data(), NUM_FFT_POINTS * sizeof(float));
+
     std::fill(fftWorkBuffer.data() + NUM_FFT_POINTS, fftWorkBuffer.data() + NUM_FFT_POINTS * 2, 0.0f);
     window.multiplyWithWindowingTable(fftWorkBuffer.data(), NUM_FFT_POINTS);
     fft.performFrequencyOnlyForwardTransform(fftWorkBuffer.data());
@@ -252,7 +274,9 @@ void SpectrumAnalyzerComponent::timerCallback()
                         ? juce::Decibels::gainToDecibels(magnitude)
                         : FFT_DISPLAY_MIN_DB;
     }
+
 #endif
+
 
     for (size_t i = 0; i < smoothedBuffer.size(); ++i)
     {
@@ -262,6 +286,7 @@ void SpectrumAnalyzerComponent::timerCallback()
         // ── ピーク保持の更新 ──
         if (smoothedBuffer[i] >= peakBuffer[i])
         {
+
             // 現在値がピーク以上なら更新し、保持カウンタをリセット
             peakBuffer[i]      = smoothedBuffer[i];
             peakHoldCounter[i] = PEAK_HOLD_FRAMES;
@@ -269,8 +294,10 @@ void SpectrumAnalyzerComponent::timerCallback()
         else
         {
             // カウンタを減らし、0になったらピークを現在値に落とす
+
             if (peakHoldCounter[i] > 0)
             {
+
                 --peakHoldCounter[i];
             }
             else
@@ -282,11 +309,21 @@ void SpectrumAnalyzerComponent::timerCallback()
         }
     }
 
+
+
+
+
+
+
     repaint();
 }
 
 void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
+
+
+
+
     // AudioEngine (EQProcessor, ConvolverProcessor) からの変更通知
     if (source == &engine || source == &engine.getEQProcessor())
     {
@@ -305,7 +342,8 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
 
 void SpectrumAnalyzerComponent::eqBandChanged(EQProcessor* processor, int /*bandIndex*/)
 {
-    if (processor == &engine.getEQProcessor())
+
+   if (processor == &engine.getEQProcessor())
     {
         // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
         if (!isTimerRunning())
@@ -318,6 +356,7 @@ void SpectrumAnalyzerComponent::eqBandChanged(EQProcessor* processor, int /*band
 
 void SpectrumAnalyzerComponent::eqGlobalChanged(EQProcessor* processor)
 {
+
     if (processor == &engine.getEQProcessor())
     {
         // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
@@ -336,7 +375,12 @@ void SpectrumAnalyzerComponent::paint(juce::Graphics& g)
 {
     // Note: Direct2D (Windows) / CoreGraphics (macOS) によりハードウェアアクセラレーションが効きます。
     //----------------------------------------------------------
+
+
+
+
     // レイアウト分割:
+
     //   [左側: スペクトラム + EQ曲線 + グリッド]
     //   [右側: レベルメーター (入/出 2バー)]
     //----------------------------------------------------------
@@ -351,6 +395,7 @@ void SpectrumAnalyzerComponent::paint(juce::Graphics& g)
     //----------------------------------------------------------
     g.setColour(juce::Colours::black.withAlpha(0.9f));
     g.fillRoundedRectangle(getLocalBounds().toFloat(), 5.0f);
+
 
     if (plotArea.getWidth() <= 0 || plotArea.getHeight() <= 0) return;
 
@@ -589,9 +634,10 @@ void SpectrumAnalyzerComponent::updateEQData()
             // グラフ描画用にBiquad係数を計算
             // 音声処理にはSVFを使用しているが、周波数応答の計算には
             // 等価な特性を持つBiquad係数を使用することで、標準的な計算式(getMagnitudeSquared)を流用している。
-            EQCoeffsSVF svf = EQProcessor::calcSVFCoeffs(type, params.frequency, params.gain, params.q, sr);
-            EQCoeffsBiquad c = EQProcessor::svfToDisplayBiquad(svf);
-            EQChannelMode mode = engine.getEQProcessor().getBandChannelMode(b);
+            EQProcessor eqProc;
+           EQCoeffsSVF svf = EQProcessor::calcSVFCoeffs(type, params.frequency, params.gain, params.q, sr);
+            EQCoeffsBiquad c = eqProc.svfToDisplayBiquad(svf);
+           EQChannelMode mode = engine.getEQProcessor().getBandChannelMode(b);
 
             for (int i = 0; i < NUM_DISPLAY_BARS; ++i)
             {
@@ -927,4 +973,5 @@ void SpectrumAnalyzerComponent::updateSourceButtonText()
         sourceButton.setButtonText("Analyzer: Input");
     else
         sourceButton.setButtonText("Analyzer: Output");
+
 }

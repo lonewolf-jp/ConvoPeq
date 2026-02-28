@@ -103,9 +103,9 @@ public:
     float getInputLevel()  const { return inputLevelDb.load(); }
     float getOutputLevel() const { return outputLevelDb.load(); }
 
-    // UIスレッドから呼び出し、FIFOからデータを取得します。
-    //
-    // 内部で fifoReadLock を使用し、複数のUIコンポーネントからの同時読み出しを防ぐ。
+
+
+
     int getFifoNumReady() const { return audioFifo.getNumReady(); }
     void readFromFifo(float* dest, int numSamples);
 
@@ -118,9 +118,9 @@ public:
     void setConvolverUseMinPhase(bool useMinPhase);
     bool getConvolverUseMinPhase() const;
 
-    void requestEqPreset (int presetIndex) noexcept;
-    void requestEqPresetFromText(const juce::File& file) noexcept;
-    void requestConvolverPreset (const juce::File& irFile) noexcept;
+    void requestEqPreset (int presetIndex);
+    void requestEqPresetFromText(const juce::File& file);
+    void requestConvolverPreset (const juce::File& irFile);
 
     void requestLoadState (const juce::ValueTree& state);
     juce::ValueTree getCurrentState() const;

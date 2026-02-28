@@ -262,8 +262,6 @@ void MainWindow::eqBypassButtonClicked()
     const bool isBypassed = !eqBypassButton.getToggleState();
     audioEngine.setEqBypassRequested(isBypassed);
     eqBypassButton.setButtonText(isBypassed ? "EQ Off" : "EQ On");
-    // 整合性のためにUIプロセッサの状態も更新
-    audioEngine.getEQProcessor().setBypass(isBypassed);
 }
 
 //--------------------------------------------------------------
@@ -274,8 +272,6 @@ void MainWindow::convolverBypassButtonClicked()
     const bool isBypassed = !convolverBypassButton.getToggleState();
     audioEngine.setConvolverBypassRequested(isBypassed);
     convolverBypassButton.setButtonText(isBypassed ? "Conv Off" : "Conv On");
-    // 整合性のためにUIプロセッサの状態も更新
-    audioEngine.getConvolverProcessor().setBypass(isBypassed);
 }
 
 //--------------------------------------------------------------

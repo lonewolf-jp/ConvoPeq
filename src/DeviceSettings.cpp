@@ -133,13 +133,37 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
 
     addAndMakeVisible(oversamplingComboBox);
     oversamplingComboBox.addItem("Auto", 1);
-    oversamplingComboBox.addItem("1x (None)", 2);
-    oversamplingComboBox.addItem("2x", 3);
-    oversamplingComboBox.addItem("4x", 4);
-    oversamplingComboBox.addItem("8x", 5);
+
+    const double sr = audioEngine.getSampleRate();
+
+    oversamplingComboBox.addItem("1x (None)", 2); // Always available
+    oversamplingComboBox.addItem("2x", 3);         // Always available
+
+    //Conditionally add 4x and 8x options based on sample rate
+    if (sr <= 192000)
+        oversamplingComboBox.addItem("4x", 4);
+
+    if (sr <= 96000)
+        oversamplingComboBox.addItem("8x", 5);
+
     oversamplingComboBox.onChange = [this] {
-        int id = oversamplingComboBox.getSelectedId();
-        int factor = 0; // Auto
+
+        // Based on the selected ID, determine the oversampling factor to be used.
+        // A map is used to translate the selected ID to a factor value.
+        std::map<int, int> idToFactor = {
+            {1, 0},  // Auto
+            {2, 1},  // 1x
+            {3, 2},  // 2x
+            {4, 4},  // 4x
+            {5, 8}    // 8x
+        };
+
+        int selectedId = oversamplingComboBox.getSelectedId();
+        int factor = idToFactor.count(selectedId) > 0 ? idToFactor[selectedId] : 0;
+        audioEngine.setOversamplingFactor(factor);
+
+      int id = oversamplingComboBox.getSelectedId();
+        factor = 0; // Auto
         if (id == 2) factor = 1;
         else if (id == 3) factor = 2;
         else if (id == 4) factor = 4;
@@ -153,12 +177,12 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     bitDepthLabel.setJustificationType(juce::Justification::centredLeft);
 
     addAndMakeVisible(bitDepthComboBox);
-    bitDepthComboBox.onChange = [this] {
+   bitDepthComboBox.onChange = [this] {
         int id = bitDepthComboBox.getSelectedId();
-        if (id > 0)
-        {
-            // IDにはビット深度そのものを使用する (例: 16, 24, 32)
-            audioEngine.setDitherBitDepth(id);
+        if (id == 999)
+            audioEngine.setDitherBitDepth(0);   // Off
+        else if (id > 0)
+        {    audioEngine.setDitherBitDepth(id);  // 16/24/32
         }
     };
 
