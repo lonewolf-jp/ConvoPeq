@@ -1,10 +1,6 @@
 {
 	"folders": [
 		{
-			"uri": "vscode-vfs://github/lonewolf-jp/ConvoPeq"
-		},
-		{
-			"name": "ConvoPeq",
 			"path": "."
 		}
 	],
@@ -12,7 +8,6 @@
 		"files.associations": {
 			"*.h": "cpp",
 			"*.cpp": "cpp"
-		},
-		"editor.defaultFormatter": "ms-vscode.cpptools-extension-pack"
+		}
 	}
 }
