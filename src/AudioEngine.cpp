@@ -20,6 +20,8 @@
 #include <mkl.h>
 #endif
 
+struct AudioEngine::DSPCore; // Forward declaration
+
 // コンストラクタ
 //--------------------------------------------------------------
 AudioEngine::AudioEngine()
@@ -331,6 +333,152 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 }
 
 //--------------------------------------------------------------
+// DSPCore Implementation
+//--------------------------------------------------------------
+AudioEngine::DSPCore::DSPCore() = default;
+
+void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType)
+{
+    this->sampleRate = newSampleRate;
+
+    int targetFactor = 1;
+    if (manualOversamplingFactor > 0)
+    {
+
+
+        if (newSampleRate >= 705600)
+            targetFactor = 1;
+        else if (newSampleRate >= 352800)
+            targetFactor = (manualOversamplingFactor <= 2) ? manualOversamplingFactor : 2;
+        else if (newSampleRate >= 176400)
+            targetFactor = (manualOversamplingFactor <= 4) ? manualOversamplingFactor : 4;
+        else if (newSampleRate >= 88200)
+            targetFactor = (manualOversamplingFactor <= 8) ? manualOversamplingFactor : manualOversamplingFactor;
+        else
+            targetFactor = (manualOversamplingFactor <= 8) ? manualOversamplingFactor : 8;
+        if (manualOversamplingFactor == 8)      targetFactor = 8;
+        else if (manualOversamplingFactor == 4) targetFactor = 4;
+        else if (manualOversamplingFactor == 2) targetFactor = 2;
+        else                                    targetFactor = 1;
+    }
+    else
+    {
+        // 自動設定 (デフォルト)
+        if (newSampleRate >= 705600)
+            targetFactor = 1;
+        else if (newSampleRate >= 352800)
+            targetFactor =  2;
+        else if (newSampleRate >= 176400)
+            targetFactor =  4;
+        else if (newSampleRate >= 88200)
+            targetFactor = 8;
+         else
+             targetFactor = 8;
+    }
+
+    // 制限: サンプルレートに応じた最大倍率を適用
+    int maxFactor = 1;
+    if (newSampleRate <= 96000.0)       maxFactor = 8;
+    else if (newSampleRate <= 192000.0) maxFactor = 4;
+    else if (newSampleRate <= 384000.0) maxFactor = 2;
+
+    targetFactor = std::min(targetFactor, maxFactor);
+
+    size_t factorLog2 = 0;
+    if (targetFactor >= 8)      factorLog2 = 3;
+    else if (targetFactor >= 4) factorLog2 = 2;
+    else if (targetFactor >= 2) factorLog2 = 1;
+    else                        factorLog2 = 0;
+
+    oversamplingFactor = (size_t)1 << factorLog2;
+
+    // ==================================================================
+    // 【Issue 3 完全修正】内部最大バッファサイズの計算（推奨A）
+    // 固定で SAFE_MAX_BLOCK_SIZE × 8 を確保
+    // 理由:
+    //   ・OS=8x時のupBlockサイズを完全にカバー
+    //   ・RCU再構築（IRロード・プリセット切替・OS変更）ごとにresizeしない
+    //   ・MKLAllocator + 64byteアライメントの最適化が最大限活きる
+    //   ・将来16x OS対応もこの定数1箇所変更だけで済む
+    // ==================================================================
+    constexpr int MAX_OS_FACTOR = 8;
+    const int inputMaxBlock     = SAFE_MAX_BLOCK_SIZE;
+    const int internalMaxBlock  = inputMaxBlock * MAX_OS_FACTOR;
+
+    maxSamplesPerBlock   = inputMaxBlock;
+    maxInternalBlockSize = internalMaxBlock;
+
+    // === バッファ確保（ここが核心）===
+    // 初回 or サイズ不足時のみresize（以後ほぼ触らない）
+    if (alignedL.size() < static_cast<size_t>(internalMaxBlock))
+    {
+        alignedL.resize(internalMaxBlock);
+        alignedR.resize(internalMaxBlock);
+
+        // 明示的ゼロクリア（Denormal/NaN防止）
+        juce::FloatVectorOperations::clear(alignedL.data(), internalMaxBlock);
+        juce::FloatVectorOperations::clear(alignedR.data(), internalMaxBlock);
+    }
+
+    if (factorLog2 > 0)
+    {
+        auto filterType = (oversamplingType == OversamplingType::LinearPhase)
+                          ? juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple
+                          : juce::dsp::Oversampling<double>::filterHalfBandPolyphaseIIR;
+        oversampling = std::make_unique<juce::dsp::Oversampling<double>>(2, factorLog2, filterType);
+        oversampling->initProcessing(SAFE_MAX_BLOCK_SIZE);
+    }
+    else
+    {
+        oversampling.reset();
+    }
+
+    const double processingRate = newSampleRate * static_cast<double>(oversamplingFactor);
+    const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
+
+    // プロセッサの準備
+    // Convolverには実際のブロックサイズを渡す (パーティションサイズ決定やLoaderThreadで使用)
+    convolver.prepareToPlay(processingRate, processingBlockSize);
+
+    // EQも内部最大サイズで準備（より安全）
+    eq.prepareToPlay(processingRate, internalMaxBlock);
+
+    // 出力段(processOutput)で実行されるため、オーバーサンプリング前のレートとサイズを使用する
+    dcBlockerL.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
+    dcBlockerR.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
+
+    // 入力段用DCBlockerの準備
+    inputDCBlockerL.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
+    inputDCBlockerR.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
+
+    // オーバーサンプリング後のDC除去用 (1Hzカットオフ)
+    osDCBlockerL.init(processingRate, 1.0);
+    osDCBlockerR.init(processingRate, 1.0);
+
+    // ディザの準備 (出力段で行うため元のサンプルレート)
+    dither.prepare(newSampleRate, bitDepth);
+    this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
+
+    // 【Issue 5】Fade-inカウンタをリセット
+    fadeInSamplesLeft.store(0, std::memory_order_relaxed);
+}
+
+void AudioEngine::DSPCore::reset()
+{
+    convolver.reset();
+    eq.reset();
+    dcBlockerL.reset();
+    dcBlockerR.reset();
+    inputDCBlockerL.reset();
+    inputDCBlockerR.reset();
+    osDCBlockerL.reset();
+    osDCBlockerR.reset();
+    dither.reset();
+    if (oversampling)
+        oversampling->reset();
+}
+
+//--------------------------------------------------------------
 // requestRebuild - DSPグラフの再構築 (Message Thread)
 //--------------------------------------------------------------
 void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
@@ -423,10 +571,17 @@ void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP)
 
 void AudioEngine::timerCallback()
 {
+    // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
+    // タイマーコールバック内では、UIの状態を直接使用せずに、
+    // Atomic変数から安全に読み取る
+    const double sr = currentSampleRate.load();
+    const int bs = maxSamplesPerBlock.load();
+
+    if (sr > 0.0)
+    {
             uiConvolverProcessor.setBypass(convBypassRequested.load(std::memory_order_relaxed));
             requestRebuild(sr, bs);
-            sendChangeMessage();
-        }
+             sendChangeMessage();
     }
 
     std::vector<DSPCore::Ptr> toDelete;
@@ -641,160 +796,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     {
         bufferToFill.clearActiveBufferRegion();
     }
-}
 
-//--------------------------------------------------------------
-// DSPCore Implementation
-//--------------------------------------------------------------
-AudioEngine::DSPCore::DSPCore() = default;
-
-void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType)
-{
-    this->sampleRate = newSampleRate;
-
-    int targetFactor = 1;
-    if (manualOversamplingFactor > 0)
-    {
-        // 手動設定
-        // 44.1khz/48khz x1、x2、x4、x8
-        // 88.2khz/96khz x1、x2、x4、x8
-        // 176.4khz/192khz x1、x2、x4
-        // 352.8khz/384khz x1、x2
-        // 705.6khz以上 x1
-
-        if (newSampleRate >= 705600)
-            targetFactor = 1;
-        else if (newSampleRate >= 352800)
-            targetFactor = (manualOversamplingFactor <= 2) ? manualOversamplingFactor : 2;
-        else if (newSampleRate >= 176400)
-            targetFactor = (manualOversamplingFactor <= 4) ? manualOversamplingFactor : 4;
-        else if (newSampleRate >= 88200)
-            targetFactor = (manualOversamplingFactor <= 8) ? manualOversamplingFactor : manualOversamplingFactor;
-        else
-            targetFactor = (manualOversamplingFactor <= 8) ? manualOversamplingFactor : 8;
-        if (manualOversamplingFactor == 8)      targetFactor = 8;
-        else if (manualOversamplingFactor == 4) targetFactor = 4;
-        else if (manualOversamplingFactor == 2) targetFactor = 2;
-        else                                    targetFactor = 1;
-    }
-    else
-    {
-        // 自動設定 (デフォルト)
-        if (newSampleRate >= 705600)
-            targetFactor = 1;
-        else if (newSampleRate >= 352800)
-            targetFactor =  2;
-        else if (newSampleRate >= 176400)
-            targetFactor =  4;
-        else if (newSampleRate >= 88200)
-            targetFactor = 8;
-         else
-             targetFactor = 8;
-    }
-
-    // 制限: サンプルレートに応じた最大倍率を適用
-    int maxFactor = 1;
-    if (newSampleRate <= 96000.0)       maxFactor = 8;
-    else if (newSampleRate <= 192000.0) maxFactor = 4;
-    else if (newSampleRate <= 384000.0) maxFactor = 2;
-
-    targetFactor = std::min(targetFactor, maxFactor);
-
-    size_t factorLog2 = 0;
-    if (targetFactor >= 8)      factorLog2 = 3;
-    else if (targetFactor >= 4) factorLog2 = 2;
-    else if (targetFactor >= 2) factorLog2 = 1;
-    else                        factorLog2 = 0;
-
-    oversamplingFactor = (size_t)1 << factorLog2;
-
-    // ==================================================================
-    // 【Issue 3 完全修正】内部最大バッファサイズの計算（推奨A）
-    // 固定で SAFE_MAX_BLOCK_SIZE × 8 を確保
-    // 理由:
-    //   ・OS=8x時のupBlockサイズを完全にカバー
-    //   ・RCU再構築（IRロード・プリセット切替・OS変更）ごとにresizeしない
-    //   ・MKLAllocator + 64byteアライメントの最適化が最大限活きる
-    //   ・将来16x OS対応もこの定数1箇所変更だけで済む
-    // ==================================================================
-    constexpr int MAX_OS_FACTOR = 8;
-    const int inputMaxBlock     = SAFE_MAX_BLOCK_SIZE;
-    const int internalMaxBlock  = inputMaxBlock * MAX_OS_FACTOR;
-
-    maxSamplesPerBlock   = inputMaxBlock;
-    maxInternalBlockSize = internalMaxBlock;
-
-    // === バッファ確保（ここが核心）===
-    // 初回 or サイズ不足時のみresize（以後ほぼ触らない）
-    if (alignedL.size() < static_cast<size_t>(internalMaxBlock))
-    {
-        alignedL.resize(internalMaxBlock);
-        alignedR.resize(internalMaxBlock);
-
-        // 明示的ゼロクリア（Denormal/NaN防止）
-        juce::FloatVectorOperations::clear(alignedL.data(), internalMaxBlock);
-        juce::FloatVectorOperations::clear(alignedR.data(), internalMaxBlock);
-    }
-
-    if (factorLog2 > 0)
-    {
-        auto filterType = (oversamplingType == OversamplingType::LinearPhase)
-                          ? juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple
-                          : juce::dsp::Oversampling<double>::filterHalfBandPolyphaseIIR;
-        oversampling = std::make_unique<juce::dsp::Oversampling<double>>(2, factorLog2, filterType);
-        oversampling->initProcessing(SAFE_MAX_BLOCK_SIZE);
-    }
-    else
-    {
-        oversampling.reset();
-    }
-
-    const double processingRate = newSampleRate * static_cast<double>(oversamplingFactor);
-    const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
-
-    // プロセッサの準備
-    // Convolverには実際のブロックサイズを渡す (パーティションサイズ決定やLoaderThreadで使用)
-    convolver.prepareToPlay(processingRate, processingBlockSize);
-
-    // EQも内部最大サイズで準備（より安全）
-    eq.prepareToPlay(processingRate, internalMaxBlock);
-
-    // 出力段(processOutput)で実行されるため、オーバーサンプリング前のレートとサイズを使用する
-    dcBlockerL.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
-    dcBlockerR.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
-
-    // 入力段用DCBlockerの準備
-    inputDCBlockerL.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
-    inputDCBlockerR.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
-
-    // オーバーサンプリング後のDC除去用 (1Hzカットオフ)
-    osDCBlockerL.init(processingRate, 1.0);
-    osDCBlockerR.init(processingRate, 1.0);
-
-    // ディザの準備 (出力段で行うため元のサンプルレート)
-    dither.prepare(newSampleRate, bitDepth);
-    this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
-
-    // 【Issue 5】Fade-inカウンタをリセット
-    fadeInSamplesLeft.store(0, std::memory_order_relaxed);
-}
-
-void AudioEngine::DSPCore::reset()
-{
-    convolver.reset();
-    eq.reset();
-    dcBlockerL.reset();
-    dcBlockerR.reset();
-    inputDCBlockerL.reset();
-    inputDCBlockerR.reset();
-    osDCBlockerL.reset();
-    osDCBlockerR.reset();
-    dither.reset();
-    if (oversampling)
-        oversampling->reset();
-    if (!alignedL.empty())
-        // size() はすでに internalMaxBlockSize になっているので安全
-        juce::FloatVectorOperations::clear(alignedL.data(), static_cast<int>(alignedL.size()));
     if (!alignedR.empty())
         // size() はすでに internalMaxBlockSize になっているので安全
         juce::FloatVectorOperations::clear(alignedR.data(), static_cast<int>(alignedR.size()));
@@ -1311,7 +1313,7 @@ bool AudioEngine::getConvolverUseMinPhase() const
     return uiConvolverProcessor.getUseMinPhase();
 }
 
-void AudioEngine::requestEqPreset (int presetIndex) noexcept
+void AudioEngine::requestEqPreset (int presetIndex)
 {
     uiEqProcessor.loadPreset (presetIndex);
     sendChangeMessage();

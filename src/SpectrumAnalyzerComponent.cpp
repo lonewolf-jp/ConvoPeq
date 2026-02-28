@@ -137,9 +137,6 @@ void SpectrumAnalyzerComponent::timerCallback()
         repaint();
     }
 
-
-
-    }
     if (!isShowing() || !analyzerEnableButton.getToggleState()) return;
 
     // ── サンプルレート変更検知 (タイマー駆動) ──
@@ -199,8 +196,6 @@ void SpectrumAnalyzerComponent::timerCallback()
     }
 
     underflowCount = 0;
-
-    }
 
     // 1. 既存データを左にシフト (古いデータを破棄)
     std::memmove(fftTimeDomainBuffer.data(),
@@ -970,7 +965,7 @@ juce::Colour SpectrumAnalyzerComponent::getLevelColour(float normalizedLevel) co
 void SpectrumAnalyzerComponent::updateSourceButtonText()
 {
     if (engine.getAnalyzerSource() == AudioEngine::AnalyzerSource::Input)
-        sourceButton.setButtonText("Analyzer: Input");
+         sourceButton.setButtonText("Analyzer: Input");
     else
         sourceButton.setButtonText("Analyzer: Output");
 
