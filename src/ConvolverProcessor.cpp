@@ -765,8 +765,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // DelayLine準備
     if (delayBufferCapacity < DELAY_BUFFER_SIZE)
     {
-        if (delayBuffer[0]) convo::aligned_free(delayBuffer[0]);
-        if (delayBuffer[1]) convo::aligned_free(delayBuffer[1]);
+        if (delayBuffer[0]) { convo::aligned_free(delayBuffer[0]); delayBuffer[0] = nullptr; }
+        if (delayBuffer[1]) { convo::aligned_free(delayBuffer[1]); delayBuffer[1] = nullptr; }
         delayBuffer[0] = static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64));
         delayBuffer[1] = static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64));
         delayBufferCapacity = DELAY_BUFFER_SIZE;
@@ -779,8 +779,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // Dryバッファ確保
     if (dryBufferCapacity < MAX_BLOCK_SIZE)
     {
-        if (dryBufferStorage[0]) convo::aligned_free(dryBufferStorage[0]);
-        if (dryBufferStorage[1]) convo::aligned_free(dryBufferStorage[1]);
+        if (dryBufferStorage[0]) { convo::aligned_free(dryBufferStorage[0]); dryBufferStorage[0] = nullptr; }
+        if (dryBufferStorage[1]) { convo::aligned_free(dryBufferStorage[1]); dryBufferStorage[1] = nullptr; }
         dryBufferStorage[0] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
         dryBufferStorage[1] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
         dryBufferCapacity = MAX_BLOCK_SIZE;
@@ -791,8 +791,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     if (smoothingBufferCapacity < MAX_BLOCK_SIZE)
     {
-        if (smoothingBufferStorage[0]) convo::aligned_free(smoothingBufferStorage[0]);
-        if (smoothingBufferStorage[1]) convo::aligned_free(smoothingBufferStorage[1]);
+        if (smoothingBufferStorage[0]) { convo::aligned_free(smoothingBufferStorage[0]); smoothingBufferStorage[0] = nullptr; }
+        if (smoothingBufferStorage[1]) { convo::aligned_free(smoothingBufferStorage[1]); smoothingBufferStorage[1] = nullptr; }
         smoothingBufferStorage[0] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
         smoothingBufferStorage[1] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
         smoothingBufferCapacity = MAX_BLOCK_SIZE;
@@ -1333,7 +1333,7 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     // キャッシュされたバッファを再利用 (メモリ確保のオーバーヘッド削減)
     if (cachedFFTBufferCapacity < fftSize * 2)
     {
-        if (cachedFFTBuffer) convo::aligned_free(cachedFFTBuffer);
+        if (cachedFFTBuffer) { convo::aligned_free(cachedFFTBuffer); cachedFFTBuffer = nullptr; }
         cachedFFTBuffer = static_cast<float*>(convo::aligned_malloc(fftSize * 2 * sizeof(float), 64));
         cachedFFTBufferCapacity = fftSize * 2;
     }

@@ -14,8 +14,20 @@
 SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     : engine(audioEngine)
 {
-    fftTimeDomainBuffer = static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * sizeof(float), 64));
-    fftWorkBuffer = static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * 2 * sizeof(float), 64));
+    // Rawポインタの例外安全性確保 (Constructor Exception Safety)
+    // 1つ目の確保は成功しても、2つ目が失敗するとデストラクタが呼ばれずリークするため、try-catchで保護する。
+    try
+    {
+        fftTimeDomainBuffer = static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * sizeof(float), 64));
+        fftWorkBuffer = static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * 2 * sizeof(float), 64));
+    }
+    catch (...)
+    {
+        if (fftTimeDomainBuffer) convo::aligned_free(fftTimeDomainBuffer);
+        if (fftWorkBuffer) convo::aligned_free(fftWorkBuffer);
+        throw;
+    }
+
     juce::FloatVectorOperations::clear(fftTimeDomainBuffer, NUM_FFT_POINTS);
     juce::FloatVectorOperations::clear(fftWorkBuffer, NUM_FFT_POINTS * 2);
     rawBuffer.assign       (NUM_FFT_BINS, MIN_DB);

@@ -273,6 +273,8 @@ private:
         using Ptr = std::shared_ptr<DSPCore>;
 
 DSPCore();
+        DSPCore(const DSPCore&) = delete;
+        DSPCore& operator=(const DSPCore&) = delete;
 
     ~DSPCore();  // 【パッチ3】rawバッファ解放用デストラクタ（メモリリーク防止）
 

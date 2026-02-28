@@ -424,8 +424,8 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
 // === 【パッチ3】raw aligned_malloc確保（message threadのみ・64byte保証）===
     if (alignedCapacity < internalMaxBlock)
     {
-        if (alignedL) convo::aligned_free(alignedL);
-        if (alignedR) convo::aligned_free(alignedR);
+        if (alignedL) { convo::aligned_free(alignedL); alignedL = nullptr; }
+        if (alignedR) { convo::aligned_free(alignedR); alignedR = nullptr; }
 
         alignedL = static_cast<double*>(convo::aligned_malloc(
             static_cast<size_t>(internalMaxBlock) * sizeof(double), 64));
