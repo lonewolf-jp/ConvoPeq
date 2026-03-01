@@ -17,6 +17,9 @@ echo ConvoPeq - Build Script
 echo ==========================================
 echo.
 
+REM 64-bitツールチェーンを強制
+set PreferredToolArchitecture=x64
+
 set BUILD_CONFIG=Release
 if /i "%1"=="Debug" set BUILD_CONFIG=Debug
 
@@ -85,7 +88,7 @@ echo.
 REM Intel oneAPI 環境変数の設定 (存在する場合)
 if exist "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat" (
     echo [INFO] Found Intel oneAPI setvars.bat. Executing...
-    call "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat"
+    call "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat" intel64
 )
 
 REM ビルドディレクトリ作成
@@ -95,7 +98,7 @@ cd build
 
 REM CMake設定
 echo [2/4] Configuring CMake...
-cmake .. -G "Visual Studio 17 2022" -A x64
+cmake .. -G "Visual Studio 17 2022" -A x64 -T host=x64
 if errorlevel 1 (
     echo [ERROR] CMake configuration failed
     cd ..

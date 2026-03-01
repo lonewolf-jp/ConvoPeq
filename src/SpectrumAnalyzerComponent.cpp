@@ -12,24 +12,13 @@
 // コンストラクタ
 //--------------------------------------------------------------
 SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
-    : engine(audioEngine)
+    : engine(audioEngine),
+      fftTimeDomainBuffer(static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * sizeof(float), 64))),
+      fftWorkBuffer(static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * 2 * sizeof(float), 64)))
 {
-    // Rawポインタの例外安全性確保 (Constructor Exception Safety)
-    // 1つ目の確保は成功しても、2つ目が失敗するとデストラクタが呼ばれずリークするため、try-catchで保護する。
-    try
-    {
-        fftTimeDomainBuffer = static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * sizeof(float), 64));
-        fftWorkBuffer = static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * 2 * sizeof(float), 64));
-    }
-    catch (...)
-    {
-        if (fftTimeDomainBuffer) convo::aligned_free(fftTimeDomainBuffer);
-        if (fftWorkBuffer) convo::aligned_free(fftWorkBuffer);
-        throw;
-    }
-
-    juce::FloatVectorOperations::clear(fftTimeDomainBuffer, NUM_FFT_POINTS);
-    juce::FloatVectorOperations::clear(fftWorkBuffer, NUM_FFT_POINTS * 2);
+    // ScopedAlignedPtr handles memory management and exception safety automatically.
+    juce::FloatVectorOperations::clear(fftTimeDomainBuffer.get(), NUM_FFT_POINTS);
+    juce::FloatVectorOperations::clear(fftWorkBuffer.get(), NUM_FFT_POINTS * 2);
     rawBuffer.assign       (NUM_FFT_BINS, MIN_DB);
     smoothedBuffer.assign  (NUM_FFT_BINS, MIN_DB);
     peakBuffer.assign      (NUM_FFT_BINS, MIN_DB);
@@ -93,8 +82,6 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 {
     stopTimer();
     releaseFFT();
-    if (fftTimeDomainBuffer) convo::aligned_free(fftTimeDomainBuffer);
-    if (fftWorkBuffer) convo::aligned_free(fftWorkBuffer);
     engine.removeChangeListener(this);
     engine.getEQProcessor().removeChangeListener(this);
     engine.getEQProcessor().removeListener(this);
@@ -123,9 +110,15 @@ void SpectrumAnalyzerComponent::prepareFFT()
     if (fftHandle) return;
     // Complex 1D FFT, Single Precision
     // リアルタイム性を考慮し、事前にDescriptorを作成・コミットしておく
-    DftiCreateDescriptor(&fftHandle, DFTI_SINGLE, DFTI_COMPLEX, 1, NUM_FFT_POINTS);
-    DftiSetValue(fftHandle, DFTI_PLACEMENT, DFTI_INPLACE);
-    DftiCommitDescriptor(fftHandle);
+    if (DftiCreateDescriptor(&fftHandle, DFTI_SINGLE, DFTI_COMPLEX, 1, NUM_FFT_POINTS) != DFTI_NO_ERROR) {
+        fftHandle = nullptr; return;
+    }
+    if (DftiSetValue(fftHandle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR) {
+        DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; return;
+    }
+    if (DftiCommitDescriptor(fftHandle) != DFTI_NO_ERROR) {
+        DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; return;
+    }
 #endif
 }
 
@@ -215,8 +208,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     underflowCount = 0;
 
     // 1. 既存データを左にシフト (古いデータを破棄)
-    std::memmove(fftTimeDomainBuffer,
-                 fftTimeDomainBuffer + OVERLAP_SAMPLES,
+    std::memmove(fftTimeDomainBuffer.get(),
+                 fftTimeDomainBuffer.get() + OVERLAP_SAMPLES,
                  (NUM_FFT_POINTS - OVERLAP_SAMPLES) * sizeof(float));
 
         //アンダーフローカウンタをリセット
@@ -224,14 +217,14 @@ void SpectrumAnalyzerComponent::timerCallback()
 
     // 2. FIFOから新しいデータを読み込み
 
-    engine.readFromFifo(fftTimeDomainBuffer + (NUM_FFT_POINTS - OVERLAP_SAMPLES), OVERLAP_SAMPLES);
+    engine.readFromFifo(fftTimeDomainBuffer.get() + (NUM_FFT_POINTS - OVERLAP_SAMPLES), OVERLAP_SAMPLES);
 
       // 安全対策: NaN/Infチェック
     // 万が一DSP処理で不正な値が発生しても、アナライザーでクラッシュさせない
     for (int i = 0; i < NUM_FFT_POINTS; ++i)
     {
-        if (!std::isfinite(fftTimeDomainBuffer[i]))
-            fftTimeDomainBuffer[i] = 0.0f;
+        if (!std::isfinite(fftTimeDomainBuffer.get()[i]))
+            fftTimeDomainBuffer.get()[i] = 0.0f;
     }
 
 
@@ -240,8 +233,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     // MKL: Real -> Complex conversion + Windowing
     // fftWorkBuffer is float array of size NUM_FFT_POINTS * 2
     // We treat it as interleaved complex: re, im, re, im...
-   { const float* src = fftTimeDomainBuffer;
-        float* dst = fftWorkBuffer;
+   { const float* src = fftTimeDomainBuffer.get();
+        float* dst = fftWorkBuffer.get();
 
         // Step 3a: Copy and Window (Real)
         std::memcpy(dst, src, NUM_FFT_POINTS * sizeof(float));
@@ -271,17 +264,17 @@ void SpectrumAnalyzerComponent::timerCallback()
 
     }
 #else
-      std::memcpy(fftWorkBuffer, fftTimeDomainBuffer, NUM_FFT_POINTS * sizeof(float));
+      std::memcpy(fftWorkBuffer.get(), fftTimeDomainBuffer.get(), NUM_FFT_POINTS * sizeof(float));
 
-    std::fill(fftWorkBuffer + NUM_FFT_POINTS, fftWorkBuffer + NUM_FFT_POINTS * 2, 0.0f);
-    window.multiplyWithWindowingTable(fftWorkBuffer, NUM_FFT_POINTS);
-    fft.performFrequencyOnlyForwardTransform(fftWorkBuffer);
+    std::fill(fftWorkBuffer.get() + NUM_FFT_POINTS, fftWorkBuffer.get() + NUM_FFT_POINTS * 2, 0.0f);
+    window.multiplyWithWindowingTable(fftWorkBuffer.get(), NUM_FFT_POINTS);
+    fft.performFrequencyOnlyForwardTransform(fftWorkBuffer.get());
 
     // 4. dB変換して出力
     const int numBins = std::min(static_cast<int>(rawBuffer.size()), NUM_FFT_BINS);
     for (int i = 0; i < numBins; ++i)
     {
-        const float magnitude = fftWorkBuffer[i] * FFT_MAGNITUDE_SCALE;
+        const float magnitude = fftWorkBuffer.get()[i] * FFT_MAGNITUDE_SCALE;
         rawBuffer[i] = (magnitude > FFT_DISPLAY_MIN_MAG)
                         ? juce::Decibels::gainToDecibels(magnitude)
                         : FFT_DISPLAY_MIN_DB;
@@ -661,9 +654,8 @@ void SpectrumAnalyzerComponent::updateEQData()
             // グラフ描画用にBiquad係数を計算
             // 音声処理にはSVFを使用しているが、周波数応答の計算には
             // 等価な特性を持つBiquad係数を使用することで、標準的な計算式(getMagnitudeSquared)を流用している。
-            EQProcessor eqProc;
            EQCoeffsSVF svf = EQProcessor::calcSVFCoeffs(type, params.frequency, params.gain, params.q, sr);
-            EQCoeffsBiquad c = eqProc.svfToDisplayBiquad(svf);
+            EQCoeffsBiquad c = EQProcessor::svfToDisplayBiquad(svf);
            EQChannelMode mode = engine.getEQProcessor().getBandChannelMode(b);
 
             for (int i = 0; i < NUM_DISPLAY_BARS; ++i)

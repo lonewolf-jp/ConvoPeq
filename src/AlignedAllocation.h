@@ -4,6 +4,7 @@
 #include <vector>
 #include <limits>
 #include <new>
+#include <memory>
 
 #if JUCE_DSP_USE_INTEL_MKL
 #include <mkl.h>
@@ -61,6 +62,16 @@ static void aligned_free(void* ptr) {
 }
 
 #endif
+
+//-----------------------------------------------------------------------------
+// RAII Helper for aligned memory
+//-----------------------------------------------------------------------------
+struct AlignedDeleter {
+    void operator()(void* ptr) const { aligned_free(ptr); }
+};
+
+template <typename T>
+using ScopedAlignedPtr = std::unique_ptr<T, AlignedDeleter>;
 
 //-----------------------------------------------------------------------------
 // STL Allocator for MKL/AVX512 (64-byte alignment)

@@ -205,11 +205,13 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
                     maxBandsWarningShown = true;
                     // ユーザーへの警告 (Message Threadなので安全)
                     juce::MessageManager::callAsync([] {
-                        juce::AlertWindow::showMessageBoxAsync(
-                            juce::AlertWindow::WarningIcon,
-                            "Load Preset Warning",
-                            "The preset contains more bands than supported (Max 20). Extra bands were ignored."
-                        );
+                        juce::NativeMessageBox::showAsync(
+                            juce::MessageBoxOptions()
+                                .withIconType(juce::MessageBoxIconType::WarningIcon)
+                                .withTitle("Load Preset Warning")
+                                .withMessage("The preset contains more bands than supported (Max 20). Extra bands were ignored.")
+                                .withButton("OK"),
+                            nullptr);
                     });
                 }
                 DBG("Skipping extra band: " + line);
@@ -820,35 +822,35 @@ namespace
             _mm_prefetch(reinterpret_cast<const char*>(data + i + 64), _MM_HINT_T0);
 
             // 1
-            __m256d vData0 = _mm256_load_pd(data + i);
+            __m256d vData0 = _mm256_loadu_pd(data + i);
             __m256d vOut0  = _mm256_mul_pd(vData0, vGain);
-            _mm256_store_pd(data + i, vOut0);
+            _mm256_storeu_pd(data + i, vOut0);
             vGain = _mm256_add_pd(vGain, vInc4);
 
             // 2
-            __m256d vData1 = _mm256_load_pd(data + i + 4);
+            __m256d vData1 = _mm256_loadu_pd(data + i + 4);
             __m256d vOut1  = _mm256_mul_pd(vData1, vGain);
-            _mm256_store_pd(data + i + 4, vOut1);
+            _mm256_storeu_pd(data + i + 4, vOut1);
             vGain = _mm256_add_pd(vGain, vInc4);
 
             // 3
-            __m256d vData2 = _mm256_load_pd(data + i + 8);
+            __m256d vData2 = _mm256_loadu_pd(data + i + 8);
             __m256d vOut2  = _mm256_mul_pd(vData2, vGain);
-            _mm256_store_pd(data + i + 8, vOut2);
+            _mm256_storeu_pd(data + i + 8, vOut2);
             vGain = _mm256_add_pd(vGain, vInc4);
 
             // 4
-            __m256d vData3 = _mm256_load_pd(data + i + 12);
+            __m256d vData3 = _mm256_loadu_pd(data + i + 12);
             __m256d vOut3  = _mm256_mul_pd(vData3, vGain);
-            _mm256_store_pd(data + i + 12, vOut3);
+            _mm256_storeu_pd(data + i + 12, vOut3);
             vGain = _mm256_add_pd(vGain, vInc4);
         }
         // Remaining
         for (; i < (numSamples / 4 * 4); i += 4)
         {
-            __m256d vData = _mm256_load_pd(data + i);
+            __m256d vData = _mm256_loadu_pd(data + i);
             __m256d vOut  = _mm256_mul_pd(vData, vGain);
-            _mm256_store_pd(data + i, vOut);
+            _mm256_storeu_pd(data + i, vOut);
             vGain = _mm256_add_pd(vGain, vInc4);
         }
         // スカラー残余

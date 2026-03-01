@@ -23,6 +23,7 @@
 #include <array>
 #include <vector>
 #include <juce_dsp/juce_dsp.h>
+#include <thread>
 
 #include "AlignedAllocation.h"
 #include "CustomInputOversampler.h"
@@ -305,8 +306,8 @@ DSPCore();
         double sampleRate = 0.0;
 
     // 【パッチ3】MKL用rawアライメントバッファ（vector完全排除・ガイドライン厳守）
-        double* alignedL = nullptr;
-        double* alignedR = nullptr;
+        convo::ScopedAlignedPtr<double> alignedL;
+        convo::ScopedAlignedPtr<double> alignedR;
         int alignedCapacity = 0;                  // 現在確保済み容量（再確保判定用）
 
         int maxSamplesPerBlock = 0;               // 入力側最大ブロックサイズ (SAFE_MAX_BLOCK_SIZE)
@@ -373,6 +374,7 @@ DSPCore();
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
     std::atomic<bool> audioThreadModesSet { false };
+    std::atomic<int> rebuildGeneration { 0 }; // 非同期リビルドの競合防止用
 
     // dB変換時の下限値
     static constexpr float LEVEL_METER_MIN_DB  = -120.0f;
@@ -389,7 +391,8 @@ DSPCore();
     // such as IR resampling. It MUST only be called from the message thread.
     // The prepareToPlay() method ensures this by using MessageManager::callAsync if necessary.
     void requestRebuild(double sampleRate, int samplesPerBlock);
-    void commitNewDSP(DSPCore::Ptr newDSP);
+    void commitNewDSP(DSPCore::Ptr newDSP, int generation);
+    bool isRebuildObsolete(int generation) const { return generation != rebuildGeneration.load(); }
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AudioEngine)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)

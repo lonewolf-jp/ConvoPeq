@@ -23,6 +23,7 @@
 #include <memory>
 #include <vector>
 #include <array>
+#include <functional>
 #include "WDL/convoengine.h"
 #include "AlignedAllocation.h"
 
@@ -67,7 +68,7 @@ public:
     // リングバッファのラップアラウンドをビットマスクで高速化するため、2の累乗サイズを使用
     static constexpr int DELAY_BUFFER_SIZE = 4194304; // 2^22 (approx 4M samples > MAX_TOTAL_DELAY)
     static constexpr int DELAY_BUFFER_MASK = DELAY_BUFFER_SIZE - 1;
-    static constexpr double CONVOLUTION_HEADROOM_GAIN = 0.5; // -6.02 dB
+    static constexpr double CONVOLUTION_HEADROOM_GAIN = 1.0; // 0.0 dB (Unity Gain - Headroom is baked into IR)
 
     ConvolverProcessor();
     ~ConvolverProcessor();
@@ -156,11 +157,16 @@ public:
     // リビルド (サンプルレート変更時など)
     //----------------------------------------------------------
     void rebuildAllIRs();
-    void rebuildAllIRsSynchronous();
+    void rebuildAllIRsSynchronous(std::function<bool()> shouldCancel = nullptr);
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const ConvolverProcessor& other);
     void syncParametersFrom(const ConvolverProcessor& other);
+    void copyConvolutionEngineFrom(const ConvolverProcessor& other);
+
+    // 可視化データ生成の制御 (DSP用インスタンスでは無効化してメモリを節約)
+    void setVisualizationEnabled(bool enabled) { visualizationEnabled = enabled; }
+    bool isVisualizationEnabled() const { return visualizationEnabled; }
 
     // ガベージコレクション (Message Threadから定期的に呼ぶ)
     void cleanup();
@@ -185,6 +191,12 @@ private:
         int callQuantumSamples = 0;    // Audio Thread でのWDL呼び出し量子
         int prewarmedMaxSamples = 0;   // Message Thread でプリウォーム済みの最大呼び出し長
 
+        // Clone用に初期化パラメータを保存
+        double storedSampleRate = 0.0;
+        int storedMaxFFTSize = 0;
+        int storedKnownBlockSize = 0;
+        int storedFirstPartition = 0;
+
         using Ptr = std::shared_ptr<StereoConvolver>;
 
         StereoConvolver() = default;
@@ -202,6 +214,10 @@ private:
 
         void init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize)
         {
+            // Safety: Free existing data if init is called multiple times (Leak prevention)
+            if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
+            if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
+
             // Ownership transfer
             irData[0] = irL;
             irData[1] = irR;
@@ -209,6 +225,10 @@ private:
             this->irLatency = peakDelay;
             callQuantumSamples = juce::jmax(1, preferredCallSize);
             prewarmedMaxSamples = callQuantumSamples;
+            storedSampleRate = sr;
+            storedMaxFFTSize = maxFFTSize;
+            storedKnownBlockSize = knownBlockSize;
+            storedFirstPartition = firstPartition;
 
             WDL_ImpulseBuffer impL_stack, impR_stack;
             impL_stack.samplerate = sr;
@@ -292,6 +312,27 @@ private:
             convolvers[1].Reset();
         }
 
+        // Deep Copyを作成する
+        std::shared_ptr<StereoConvolver> clone() const
+        {
+            auto newConv = std::make_shared<StereoConvolver>();
+            if (irDataLength > 0 && irData[0] && irData[1])
+            {
+                // メモリを新規確保してコピー (RAIIによる例外安全性確保)
+                // init() に所有権を渡すまでは unique_ptr で管理し、途中で例外が発生してもリークしないようにする
+                convo::ScopedAlignedPtr<double> l(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
+                convo::ScopedAlignedPtr<double> r(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
+
+                if (l && r)
+                {
+                    std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
+                    std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
+                    newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples);
+                }
+            }
+            return newConv;
+        }
+
         void reset() { convolvers[0].Reset(); convolvers[1].Reset(); }
     };
 
@@ -316,7 +357,7 @@ private:
     // レイテンシー補正用ディレイ
     //----------------------------------------------------------
     // juce::dsp::DelayLine<double> delayLine; // Replaced with custom AVX2 ring buffer
-    double* delayBuffer[2] = { nullptr, nullptr }; // L/R separate buffers
+    convo::ScopedAlignedPtr<double> delayBuffer[2]; // L/R separate buffers
     int delayBufferCapacity = 0;
     int delayWritePos = 0;
     juce::SmoothedValue<double> latencySmoother;
@@ -345,7 +386,7 @@ private:
     juce::AudioBuffer<double> originalIR; // 元IR保持 (リサンプリング/トリミング用)
     double originalIRSampleRate = 0.0;
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
-    float* cachedFFTBuffer = nullptr; // FFT計算用キャッシュ (Message Thread)
+    convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     int cachedFFTBufferCapacity = 0;
     std::atomic<double> currentSampleRate { 0.0 };
 
@@ -353,16 +394,17 @@ private:
     // Dry信号バッファ（Mix用）
     //----------------------------------------------------------
     juce::AudioBuffer<double> dryBuffer;
-    double* dryBufferStorage[2] = { nullptr, nullptr }; // Aligned storage for dryBuffer
+    convo::ScopedAlignedPtr<double> dryBufferStorage[2]; // Aligned storage for dryBuffer
     int dryBufferCapacity = 0;
     juce::AudioBuffer<double> smoothingBuffer; // スムーシングゲイン計算用 (Audio Threadでのメモリ確保回避)
-    double* smoothingBufferStorage[2] = { nullptr, nullptr }; // Aligned storage for smoothingBuffer
+    convo::ScopedAlignedPtr<double> smoothingBufferStorage[2]; // Aligned storage for smoothingBuffer
     int smoothingBufferCapacity = 0;
 
     //----------------------------------------------------------
     // 準備完了フラグ
     //----------------------------------------------------------
     std::atomic<bool> isPrepared { false };
+    bool visualizationEnabled = true; // Default true (for UI instance)
     int currentBufferSize = 0; // prepareToPlayで更新される
     double currentSmoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC; // mixSmootherに設定されている現在の時間
 

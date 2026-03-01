@@ -27,19 +27,28 @@
  #include <immintrin.h> // For AVX2
 #endif
 
-// 前方宣言
-static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR, juce::Thread* thread = nullptr, bool* wasCancelled = nullptr);
+#if JUCE_DSP_USE_INTEL_MKL
+namespace
+{
+    struct DftiGuard
+    {
+        DFTI_DESCRIPTOR_HANDLE* handle = nullptr;
+        ~DftiGuard()
+        {
+            if (handle != nullptr && *handle != nullptr)
+                DftiFreeDescriptor(handle);
+        }
+    };
+}
+#endif
 
-// Helper for RAII aligned memory
-struct AlignedDeleter {
-    void operator()(void* ptr) const { convo::aligned_free(ptr); }
-};
-template<typename T> using ScopedAlignedPtr = std::unique_ptr<T, AlignedDeleter>;
+// 前方宣言
+static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR, const std::function<bool()>& shouldExit = nullptr, bool* wasCancelled = nullptr);
 
 // スレッドキャンセル確認用ヘルパー関数
-static bool checkCancellation(juce::Thread* thread, bool* wasCancelled) noexcept
+static bool checkCancellation(const std::function<bool()>& shouldExit, bool* wasCancelled) noexcept
 {
-    if (thread != nullptr && thread->threadShouldExit())
+    if (shouldExit && shouldExit())
     {
         if (wasCancelled)
             *wasCancelled = true;
@@ -49,7 +58,7 @@ static bool checkCancellation(juce::Thread* thread, bool* wasCancelled) noexcept
 }
 
 // リサンプリング用ヘルパー
-static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inputIR, double inputSR, double targetSR, juce::Thread* thread)
+static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inputIR, double inputSR, double targetSR, const std::function<bool()>& shouldExit)
 {
     if (inputSR <= 0.0 || targetSR <= 0.0 || std::abs(inputSR - targetSR) <= 1e-6)
         return inputIR;
@@ -74,7 +83,7 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
     int maxLength = 0;
     for (int ch = 0; ch < inputIR.getNumChannels(); ++ch)
     {
-        if (checkCancellation(thread, nullptr)) return {};
+        if (checkCancellation(shouldExit, nullptr)) return {};
 
         r8b::CDSPResampler resampler(inputSR, targetSR, inLength, transBand, stopBandAtten, phase);
 
@@ -90,7 +99,7 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
         // 入力をチャンク分割して処理 (キャンセルチェックを頻繁に行うため)
         while (inputProcessed < inLength && done < maxOutLen && ++iterations < maxIterations)
         {
-            if (checkCancellation(thread, nullptr)) return {};
+            if (checkCancellation(shouldExit, nullptr)) return {};
 
             int chunk = std::min(CHUNK_SIZE, inLength - inputProcessed);
             double* r8bOutput = nullptr;
@@ -109,7 +118,7 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
         // 残りの出力をフラッシュ (r8brainのレイテンシー分など)
         while (done < maxOutLen && ++iterations < maxIterations)
         {
-            if (checkCancellation(thread, nullptr)) return {};
+            if (checkCancellation(shouldExit, nullptr)) return {};
             double* r8bOutput = nullptr;
             const int generated = resampler.process(nullptr, 0, r8bOutput);
 
@@ -303,6 +312,8 @@ public:
         stopThread(4000);
     }
 
+    std::function<bool()> externalCancellationCheck;
+
     struct LoadResult
     {
         juce::AudioBuffer<double> loadedIR;
@@ -392,6 +403,13 @@ public:
     {
         LoadResult result;
 
+        // キャンセル判定用ラムダ: スレッド自身の終了フラグ または 外部コールバックをチェック
+        auto shouldStop = [thread, this]() -> bool {
+            if (thread && thread->threadShouldExit()) return true;
+            if (externalCancellationCheck && externalCancellationCheck()) return true;
+            return false;
+        };
+
         try
         {
             owner.setLoadingProgress(0.0f);
@@ -440,18 +458,34 @@ public:
                 result.loadedSR = reader->sampleRate;
             }
 
-            if (checkCancellation(thread, nullptr) || result.loadedIR.getNumSamples() == 0 || result.loadedIR.getNumChannels() == 0) return result;
+            if (checkCancellation(shouldStop, nullptr) || result.loadedIR.getNumSamples() == 0 || result.loadedIR.getNumChannels() == 0) return result;
 
-            // 2. ピーク正規化 (ファイル読み込み時のみ)
+            // 2. Auto Makeup (Energy Normalization)
+            // IRのエネルギー(RMS)を測定し、入力信号と出力信号の音量感が一致するようにゲインを自動補正する。
+            // その後、-6dBの安全マージンを適用する。
             // リビルド時は既に正規化されていると仮定するためスキップします。
             if (!isRebuild)
             {
-                double maxMagnitude = 0.0;
+                double maxChannelEnergy = 0.0;
                 for (int ch = 0; ch < result.loadedIR.getNumChannels(); ++ch)
-                    maxMagnitude = (std::max)(maxMagnitude, result.loadedIR.getMagnitude(ch, 0, result.loadedIR.getNumSamples()));
+                {
+                    const double* data = result.loadedIR.getReadPointer(ch);
+                    double energy = 0.0;
+                    for (int i = 0; i < result.loadedIR.getNumSamples(); ++i)
+                        energy += data[i] * data[i];
 
-                if (maxMagnitude > 0.0)
-                    result.loadedIR.applyGain(1.0 / maxMagnitude);
+                    if (energy > maxChannelEnergy)
+                        maxChannelEnergy = energy;
+                }
+
+                if (maxChannelEnergy > 1.0e-18)
+                {
+                    // Makeup Gain = 1.0 / RMS_IR
+                    // Safety Margin = 0.501187 (-6.0dB)
+                    const double makeup = 1.0 / std::sqrt(maxChannelEnergy);
+                    const double safetyMargin = 0.5011872336272722;
+                    result.loadedIR.applyGain(makeup * safetyMargin);
+                }
             }
 
             // 3. 末尾の無音カット (Denormal対策 & 効率化)
@@ -486,12 +520,12 @@ public:
             if (result.loadedSR > 0.0 && sampleRate > 0.0 &&
                 std::abs(result.loadedSR - sampleRate) > 1e-6)
             {
-                auto resampled = resampleIR(result.loadedIR, result.loadedSR, sampleRate, thread);
+                auto resampled = resampleIR(result.loadedIR, result.loadedSR, sampleRate, shouldStop);
 
                 if (resampled.getNumSamples() == 0)
                 {
                     // キャンセルされたか、エラーで0長になった場合
-                    if (!checkCancellation(thread, nullptr))
+                    if (!checkCancellation(shouldStop, nullptr))
                     {
                         DBG("LoaderThread: Resampling failed (produced 0 samples or overflow).");
                     }
@@ -519,7 +553,7 @@ public:
                 }
             }
 
-            if (checkCancellation(thread, nullptr)) return result;
+            if (checkCancellation(shouldStop, nullptr)) return result;
 
             // 6. Asymmetric Tukey Window (Peak-based)
             // IRデータの先頭と末尾を滑らかにする「ピーク位置基準の非対称tukey窓」を適用
@@ -532,9 +566,9 @@ public:
                 }
             }
 
-            if (checkCancellation(thread, nullptr)) return result;
+            if (checkCancellation(shouldStop, nullptr)) return result;
 
-            if (checkCancellation(thread, nullptr)) return result;
+            if (checkCancellation(shouldStop, nullptr)) return result;
 
             // 7. ターゲット長計算とトリミング
             result.targetLength = owner.computeTargetIRLength(sampleRate, result.loadedIR.getNumSamples());
@@ -551,14 +585,14 @@ public:
                     trimmed.applyGainRamp(ch, copySamples - fade, fade, 1.0, 0.0);
             }
 
-            if (checkCancellation(thread, nullptr)) return result;
+            if (checkCancellation(shouldStop, nullptr)) return result;
 
             // 8. MinPhase変換 (オプション)
             bool conversionSuccessful = false;
             if (useMinPhase)
             {
                 bool wasCancelled = false;
-                auto minPhaseIR = convertToMinimumPhase(trimmed, thread, &wasCancelled);
+                auto minPhaseIR = convertToMinimumPhase(trimmed, shouldStop, &wasCancelled);
 
                 if (wasCancelled) return result;
 
@@ -591,7 +625,7 @@ public:
                 // 変換に失敗または無音になった場合は、元のtrimmed(Linear Phase)を使用する
             }
 
-            if (checkCancellation(thread, nullptr)) return result;
+            if (checkCancellation(shouldStop, nullptr)) return result;
 
             // 9.ピーク位置検出 (レイテンシー補正用)
             // Linear Phaseの場合、ピークが遅れてやってくるため、その分Dryを遅らせる必要がある
@@ -623,8 +657,8 @@ public:
             result.newConv = std::make_shared<StereoConvolver>();
 
             // IRデータを格納するアラインされたバッファを準備 (Rebuild用に保持)
-            ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
-            ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
+            convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
+            convo::ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
 
             // 安全対策: チャンネル数チェック
             if (trimmed.getNumChannels() == 0) return result;
@@ -644,9 +678,10 @@ public:
             result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize);
 
             // Display用コピーを作成 (move前に)
-            result.displayIR = trimmed;
+            if (owner.isVisualizationEnabled())
+                result.displayIR = trimmed;
 
-            if (checkCancellation(thread, nullptr)) return result;
+            if (checkCancellation(shouldStop, nullptr)) return result;
 
             result.success = true;
             return result;
@@ -713,19 +748,6 @@ ConvolverProcessor::~ConvolverProcessor()
     trashBinPending.clear();
     convolution.store(nullptr);
     activeConvolution.reset();
-
-    if (delayBuffer[0]) convo::aligned_free(delayBuffer[0]);
-    if (delayBuffer[1]) convo::aligned_free(delayBuffer[1]);
-    if (dryBufferStorage[0]) convo::aligned_free(dryBufferStorage[0]);
-    if (dryBufferStorage[1]) convo::aligned_free(dryBufferStorage[1]);
-    if (smoothingBufferStorage[0]) convo::aligned_free(smoothingBufferStorage[0]);
-    if (smoothingBufferStorage[1]) convo::aligned_free(smoothingBufferStorage[1]);
-    if (cachedFFTBuffer) convo::aligned_free(cachedFFTBuffer);
-
-    delayBuffer[0] = delayBuffer[1] = nullptr;
-    dryBufferStorage[0] = dryBufferStorage[1] = nullptr;
-    smoothingBufferStorage[0] = smoothingBufferStorage[1] = nullptr;
-    cachedFFTBuffer = nullptr;
 }
 
 //--------------------------------------------------------------
@@ -762,8 +784,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
             auto newConv = std::make_shared<StereoConvolver>();
 
             // バッファ確保とコピー
-            ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
-            ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
+            convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
+            convo::ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
             std::memcpy(irL.get(), conv->irData[0], conv->irDataLength * sizeof(double));
             std::memcpy(irR.get(), conv->irData[1], conv->irDataLength * sizeof(double));
 
@@ -788,39 +810,33 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // DelayLine準備
     if (delayBufferCapacity < DELAY_BUFFER_SIZE)
     {
-        if (delayBuffer[0]) { convo::aligned_free(delayBuffer[0]); delayBuffer[0] = nullptr; }
-        if (delayBuffer[1]) { convo::aligned_free(delayBuffer[1]); delayBuffer[1] = nullptr; }
-        delayBuffer[0] = static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64));
-        delayBuffer[1] = static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64));
+        delayBuffer[0].reset(static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64)));
+        delayBuffer[1].reset(static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64)));
         delayBufferCapacity = DELAY_BUFFER_SIZE;
     }
     // バッファクリア
-    juce::FloatVectorOperations::clear(delayBuffer[0], DELAY_BUFFER_SIZE);
-    juce::FloatVectorOperations::clear(delayBuffer[1], DELAY_BUFFER_SIZE);
+    juce::FloatVectorOperations::clear(delayBuffer[0].get(), DELAY_BUFFER_SIZE);
+    juce::FloatVectorOperations::clear(delayBuffer[1].get(), DELAY_BUFFER_SIZE);
     delayWritePos = 0;
 
     // Dryバッファ確保
     if (dryBufferCapacity < MAX_BLOCK_SIZE)
     {
-        if (dryBufferStorage[0]) { convo::aligned_free(dryBufferStorage[0]); dryBufferStorage[0] = nullptr; }
-        if (dryBufferStorage[1]) { convo::aligned_free(dryBufferStorage[1]); dryBufferStorage[1] = nullptr; }
-        dryBufferStorage[0] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
-        dryBufferStorage[1] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        dryBufferStorage[0].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        dryBufferStorage[1].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
         dryBufferCapacity = MAX_BLOCK_SIZE;
     }
-    double* dryChs[2] = { dryBufferStorage[0], dryBufferStorage[1] };
+    double* dryChs[2] = { dryBufferStorage[0].get(), dryBufferStorage[1].get() };
     dryBuffer.setDataToReferTo(dryChs, 2, MAX_BLOCK_SIZE);
     dryBuffer.clear();
 
     if (smoothingBufferCapacity < MAX_BLOCK_SIZE)
     {
-        if (smoothingBufferStorage[0]) { convo::aligned_free(smoothingBufferStorage[0]); smoothingBufferStorage[0] = nullptr; }
-        if (smoothingBufferStorage[1]) { convo::aligned_free(smoothingBufferStorage[1]); smoothingBufferStorage[1] = nullptr; }
-        smoothingBufferStorage[0] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
-        smoothingBufferStorage[1] = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        smoothingBufferStorage[0].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        smoothingBufferStorage[1].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
         smoothingBufferCapacity = MAX_BLOCK_SIZE;
     }
-    double* smoothChs[2] = { smoothingBufferStorage[0], smoothingBufferStorage[1] };
+    double* smoothChs[2] = { smoothingBufferStorage[0].get(), smoothingBufferStorage[1].get() };
     smoothingBuffer.setDataToReferTo(smoothChs, 2, MAX_BLOCK_SIZE);
     smoothingBuffer.clear();
 
@@ -858,8 +874,8 @@ void ConvolverProcessor::reset()
         conv->reset();
     }
     // リングバッファのクリア
-    if (delayBuffer[0]) juce::FloatVectorOperations::clear(delayBuffer[0], DELAY_BUFFER_SIZE);
-    if (delayBuffer[1]) juce::FloatVectorOperations::clear(delayBuffer[1], DELAY_BUFFER_SIZE);
+    if (delayBuffer[0]) juce::FloatVectorOperations::clear(delayBuffer[0].get(), DELAY_BUFFER_SIZE);
+    if (delayBuffer[1]) juce::FloatVectorOperations::clear(delayBuffer[1].get(), DELAY_BUFFER_SIZE);
     delayWritePos = 0;
 
     dryBuffer.clear();
@@ -878,12 +894,13 @@ void ConvolverProcessor::rebuildAllIRs()
     }
 }
 
-void ConvolverProcessor::rebuildAllIRsSynchronous()
+void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
 {
     if (originalIR.getNumSamples() > 0 && originalIRSampleRate > 0.0)
     {
         // リビルドモードでローダーを作成し、同期的に実行
         LoaderThread loader(*this, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load());
+        loader.externalCancellationCheck = shouldCancel;
         loader.runSynchronously();
     }
 }
@@ -909,7 +926,7 @@ void ConvolverProcessor::rebuildAllIRsSynchronous()
 //   計算誤差（特にexp時の発散や微小値の消失）を抑制します。
 //--------------------------------------------------------------
 // Note: この関数は LoaderThread (バックグラウンド) で実行されるため、FFTのメモリ確保や計算負荷はAudio Threadに影響しません。
-static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR, juce::Thread* thread, bool* wasCancelled)
+static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR, const std::function<bool()>& shouldExit, bool* wasCancelled)
 {
     if (wasCancelled) *wasCancelled = false;
 
@@ -931,15 +948,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
 #if JUCE_DSP_USE_INTEL_MKL
     // MKL DFTI は自然順序で扱えるため、WDL_fft の permute 順序問題を回避できる。
     DFTI_DESCRIPTOR_HANDLE dfti = nullptr;
-    struct DftiGuard
-    {
-        DFTI_DESCRIPTOR_HANDLE* handle = nullptr;
-        ~DftiGuard()
-        {
-            if (handle != nullptr && *handle != nullptr)
-                DftiFreeDescriptor(handle);
-        }
-    } dftiGuard { &dfti };
+    DftiGuard dftiGuard { &dfti };
 
     const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
     if (DftiCreateDescriptor(&dfti, DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
@@ -951,14 +960,14 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     if (DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
         return {};
 
-    ScopedAlignedPtr<MKL_Complex16> spectrum(static_cast<MKL_Complex16*>(convo::aligned_malloc(
+    convo::ScopedAlignedPtr<MKL_Complex16> spectrum(static_cast<MKL_Complex16*>(convo::aligned_malloc(
         static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
     if (!spectrum)
         return {};
 
     for (int ch = 0; ch < linearIR.getNumChannels(); ++ch)
     {
-        if (checkCancellation(thread, wasCancelled))
+        if (checkCancellation(shouldExit, wasCancelled))
             return {};
 
         const double* src = linearIR.getReadPointer(ch);
@@ -1043,7 +1052,6 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     return minPhaseIR;
 #else
     // 非MKLビルドでは最小位相変換を無効化 (Linear Phaseへフォールバック)。
-    juce::ignoreUnused(thread);
     return {};
 #endif
 }
@@ -1124,9 +1132,12 @@ void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
 
     // スナップショット更新 (表示用)
     // LoaderThreadで計算済みの displayIR (trimmed & min-phased) を使用
-    createWaveformSnapshot(displayIR);
-    // 表示用には現在のサンプルレートを使用 (loadedSRはリサンプリング後のレート)
-    createFrequencyResponseSnapshot(displayIR, loadedSR);
+    if (visualizationEnabled)
+    {
+        createWaveformSnapshot(displayIR);
+        // 表示用には現在のサンプルレートを使用 (loadedSRはリサンプリング後のレート)
+        createFrequencyResponseSnapshot(displayIR, loadedSR);
+    }
 
     // 安全に差し替え (Atomic Swap)
     convolution.store(newConv.get(), std::memory_order_release);
@@ -1167,8 +1178,8 @@ void ConvolverProcessor::cleanup()
         // 1. Clean old trash (Time-based)
         auto it = std::remove_if(trashBin.begin(), trashBin.end(),
             [now](const auto& entry) {
-                return (now >= entry.second) ? (now - entry.second > 2000)
-                                             : (now + (std::numeric_limits<uint32>::max() - entry.second) > 2000);
+                return (now >= entry.second) ? (now - entry.second > 500)
+                                             : (now + (std::numeric_limits<uint32>::max() - entry.second) > 500);
             });
 
         for (auto i = it; i != trashBin.end(); ++i)
@@ -1180,6 +1191,15 @@ void ConvolverProcessor::cleanup()
         for (const auto& ptr : trashBinPending)
             trashBin.push_back({ptr, now});
         trashBinPending.clear();
+
+        // 3. Size limit (Max 5 items) - メモリ爆発防止
+        if (trashBin.size() > 5)
+        {
+            size_t removeCount = trashBin.size() - 5;
+            for (size_t i = 0; i < removeCount; ++i)
+                toDelete.push_back(trashBin[i].first);
+            trashBin.erase(trashBin.begin(), trashBin.begin() + removeCount);
+        }
     }
 }
 
@@ -1297,24 +1317,25 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     // キャッシュされたバッファを再利用 (メモリ確保のオーバーヘッド削減)
     if (cachedFFTBufferCapacity < fftSize * 2)
     {
-        if (cachedFFTBuffer) { convo::aligned_free(cachedFFTBuffer); cachedFFTBuffer = nullptr; }
-        cachedFFTBuffer = static_cast<float*>(convo::aligned_malloc(fftSize * 2 * sizeof(float), 64));
+        cachedFFTBuffer.reset(static_cast<float*>(convo::aligned_malloc(fftSize * 2 * sizeof(float), 64)));
         cachedFFTBufferCapacity = fftSize * 2;
     }
 
-    juce::FloatVectorOperations::clear(cachedFFTBuffer, fftSize * 2);
+    juce::FloatVectorOperations::clear(cachedFFTBuffer.get(), fftSize * 2);
 
     // チャンネル0 (Lch) の特性を使用する
     const double* src = irBuffer.getReadPointer(0);
     const int copyLen = (std::min)(numSamples, fftSize);
-    float* dst = cachedFFTBuffer;
+    float* dst = cachedFFTBuffer.get();
 
 #if JUCE_DSP_USE_INTEL_MKL
     // MKL FFT (One-shot)
     DFTI_DESCRIPTOR_HANDLE h = nullptr;
-    DftiCreateDescriptor(&h, DFTI_SINGLE, DFTI_COMPLEX, 1, fftSize);
-    DftiSetValue(h, DFTI_PLACEMENT, DFTI_INPLACE);
-    DftiCommitDescriptor(h);
+    DftiGuard dftiGuard { &h };
+
+    if (DftiCreateDescriptor(&h, DFTI_SINGLE, DFTI_COMPLEX, 1, fftSize) != DFTI_NO_ERROR) return;
+    if (DftiSetValue(h, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR) return;
+    if (DftiCommitDescriptor(h) != DFTI_NO_ERROR) return;
 
     // Double -> Complex Float conversion
     for (int i = 0; i < copyLen; ++i) {
@@ -1327,8 +1348,7 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
         dst[2 * i + 1] = 0.0f;
     }
 
-    DftiComputeForward(h, dst);
-    DftiFreeDescriptor(&h);
+    if (DftiComputeForward(h, dst) != DFTI_NO_ERROR) return;
 
     // Calculate magnitude in-place (compacting to start of buffer)
     const int numBins = fftSize / 2 + 1;
@@ -1348,7 +1368,7 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
 #endif
 
     // スムーシング適用 (Linear Magnitudeに対して行う)
-    std::vector<float> linearMags(cachedFFTBuffer, cachedFFTBuffer + numBins);
+    std::vector<float> linearMags(cachedFFTBuffer.get(), cachedFFTBuffer.get() + numBins);
     applySmoothing(linearMags, fftSize);
 
     // マグニチュード(dB)に変換して格納
@@ -1450,14 +1470,16 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     // prepareToPlayでのreset()が稼働中のDSPに影響してしまう。
     // そのため、ディープコピーを作成して独立させる。
     auto otherConv = other.activeConvolution;
-    convolution.store(otherConv.get(), std::memory_order_release);
+
+    StereoConvolver::Ptr newConv = (otherConv != nullptr) ? otherConv->clone() : nullptr;
+    convolution.store(newConv.get(), std::memory_order_release);
 
     if (activeConvolution)
     {
         const juce::ScopedLock sl(trashBinLock);
         trashBinPending.push_back(activeConvolution);
     }
-    activeConvolution = otherConv;
+    activeConvolution = newConv;
 }
 
 void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
@@ -1493,6 +1515,23 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
             // Ideally, we should clone or increment ref count.
         }
     }
+}
+
+void ConvolverProcessor::copyConvolutionEngineFrom(const ConvolverProcessor& other)
+{
+    // Only copy the heavy engine part and related IR metadata
+    auto otherConv = other.activeConvolution;
+    StereoConvolver::Ptr newConv = (otherConv != nullptr) ? otherConv->clone() : nullptr;
+    convolution.store(newConv.get(), std::memory_order_release);
+
+    if (activeConvolution)
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        trashBinPending.push_back(activeConvolution);
+    }
+    activeConvolution = newConv;
+
+    irLength = other.irLength;
 }
 
 //--------------------------------------------------------------
@@ -1585,7 +1624,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         for (int ch = 0; ch < procChannels; ++ch)
         {
             const double* src = block.getChannelPointer(ch);
-            double* buf = delayBuffer[ch];
+            double* buf = delayBuffer[ch].get();
 
             // リングバッファの境界処理 (2分割コピー)
             int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - wPos);
@@ -1611,9 +1650,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 // 読み出し位置の計算 (整数部と小数部)
                 double readPosFloat = static_cast<double>(currentWPos) - currentDelay;
 
-
-                const int safeMaxIdx = (delayWritePos + numSamples - 1) & DELAY_BUFFER_MASK;
-
                 // DELAY_BUFFER_SIZE > MAX_TOTAL_DELAY が保証されているため最大1回
                 if (readPosFloat < 0.0) readPosFloat += DELAY_BUFFER_SIZE;
                 jassert(readPosFloat >= 0.0); // 設計保証のアサーション
@@ -1623,7 +1659,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
                 for (int ch = 0; ch < procChannels; ++ch)
                 {
-                    double* buf = delayBuffer[ch];
+                    double* buf = delayBuffer[ch].get();
 
                     // 4-point, 3rd-order Catmull-Rom interpolation for higher quality variable delay.
                    // 【安全化】読み出しインデックスを書き込み済み範囲にクランプ
@@ -1632,12 +1668,18 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     const int idx2 = (readPosInt + 1) & DELAY_BUFFER_MASK;
                     const int idx3 = (readPosInt + 2) & DELAY_BUFFER_MASK;
 
-                    const int safeMaxIdx = (delayWritePos + numSamples - 1) & DELAY_BUFFER_MASK;
-
                     const double p0 = buf[idx0];
                     const double p1 = buf[idx1];
-                    const double p2 = buf[(idx2 <= safeMaxIdx ? idx2 : safeMaxIdx)];
-                    const double p3 = buf[idx3];
+
+                    // 書き込み済みかどうかをリングバッファ距離で判定 (currentWPos基準)
+                    // dist < SIZE/2 ならば過去(Safe)、そうでなければ未来(Unsafe)
+                    const int distToWrite2 = (currentWPos - idx2) & DELAY_BUFFER_MASK;
+                    const int distToWrite3 = (currentWPos - idx3) & DELAY_BUFFER_MASK;
+                    const bool p2Safe = (distToWrite2 < static_cast<int>(DELAY_BUFFER_SIZE / 2));
+                    const bool p3Safe = (distToWrite3 < static_cast<int>(DELAY_BUFFER_SIZE / 2));
+
+                    const double p2 = p2Safe ? buf[idx2] : p1;
+                    const double p3 = p3Safe ? buf[idx3] : p2;
 
                     const double c0 = p1;
                     const double c1 = 0.5 * (p2 - p0);
@@ -1662,7 +1704,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
             for (int ch = 0; ch < procChannels; ++ch)
             {
-                double* srcBuf = delayBuffer[ch];
+                double* srcBuf = delayBuffer[ch].get();
                 double* dstBuf = dryBuffer.getWritePointer(ch);
 
                 // リングバッファからの読み出し (2分割コピー)
@@ -1733,7 +1775,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             conv->convolvers[ch].Add(inputs, callLen, 1);
 
             // 2. 出力を取得 (Get) - ポインタのみ取得し、コピーはMixループで行う
-            int avail = conv->convolvers[ch].Avail(callLen);
+            int avail = conv->convolvers[ch].Avail(std::numeric_limits<int>::max());
             int validWetSamples = std::min(callLen, avail);
 
             WDL_FFT_REAL** outputs = conv->convolvers[ch].Get();
@@ -1881,8 +1923,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             }
 
             // 4. Advance (読み取った分だけ進める)
-            if (validWetSamples > 0)
-                conv->convolvers[ch].Advance(validWetSamples);
+            if (avail > 0)
+                conv->convolvers[ch].Advance(avail);
 
             processed += callLen;
         }

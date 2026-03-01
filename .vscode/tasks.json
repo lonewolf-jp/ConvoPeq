@@ -21,7 +21,9 @@
                 "-G",
                 "Visual Studio 17 2022",
                 "-A",
-                "x64"
+                "x64",
+                "-T",
+                "host=x64"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -39,7 +41,10 @@
                 "Release"
             ],
             "options": {
-                "cwd": "${workspaceFolder}"
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "PreferredToolArchitecture": "x64"
+                }
             },
             "group": {
                 "kind": "build",
@@ -54,10 +59,13 @@
             "command": "cmd",
             "args": [
                 "/C",
-                "if not exist build (cmake -B build -G \\\"Visual Studio 17 2022\\\" -A x64) & cmake --build build --config Debug"
+                "if not exist build (cmake -B build -G \\\"Visual Studio 17 2022\\\" -A x64 -T host=x64) & cmake --build build --config Debug"
             ],
             "options": {
-                "cwd": "${workspaceFolder}"
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "PreferredToolArchitecture": "x64"
+                }
             },
             "problemMatcher": ["$msCompile"],
             "dependsOn": ["Kill Previous Instance"]
@@ -93,10 +101,13 @@
             "command": "cmd",
             "args": [
                 "/C",
-                "if exist build (rmdir /s /q build) & cmake -B build -G \\\"Visual Studio 17 2022\\\" -A x64 && cmake --build build --config Debug"
+                "if exist build (rmdir /s /q build) & cmake -B build -G \\\"Visual Studio 17 2022\\\" -A x64 -T host=x64 && cmake --build build --config Debug"
             ],
             "options": {
-                "cwd": "${workspaceFolder}"
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "PreferredToolArchitecture": "x64"
+                }
             },
             "problemMatcher": ["$msCompile"],
             "group": {

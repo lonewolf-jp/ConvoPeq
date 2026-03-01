@@ -358,22 +358,7 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     int targetFactor = 1;
     if (manualOversamplingFactor > 0)
     {
-
-
-        if (newSampleRate >= 705600)
-            targetFactor = 1;
-        else if (newSampleRate >= 352800)
-            targetFactor = (manualOversamplingFactor <= 2) ? manualOversamplingFactor : 2;
-        else if (newSampleRate >= 176400)
-            targetFactor = (manualOversamplingFactor <= 4) ? manualOversamplingFactor : 4;
-        else if (newSampleRate >= 88200)
-            targetFactor = (manualOversamplingFactor <= 8) ? manualOversamplingFactor : manualOversamplingFactor;
-        else
-            targetFactor = (manualOversamplingFactor <= 8) ? manualOversamplingFactor : 8;
-        if (manualOversamplingFactor == 8)      targetFactor = 8;
-        else if (manualOversamplingFactor == 4) targetFactor = 4;
-        else if (manualOversamplingFactor == 2) targetFactor = 2;
-        else                                    targetFactor = 1;
+        targetFactor = manualOversamplingFactor;
     }
     else
     {
@@ -425,19 +410,20 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
 // === 【パッチ3】raw aligned_malloc確保（message threadのみ・64byte保証）===
     if (alignedCapacity < internalMaxBlock)
     {
-        if (alignedL) { convo::aligned_free(alignedL); alignedL = nullptr; }
-        if (alignedR) { convo::aligned_free(alignedR); alignedR = nullptr; }
-
-        alignedL = static_cast<double*>(convo::aligned_malloc(
-            static_cast<size_t>(internalMaxBlock) * sizeof(double), 64));
-        alignedR = static_cast<double*>(convo::aligned_malloc(
-            static_cast<size_t>(internalMaxBlock) * sizeof(double), 64));
-
-        alignedCapacity = internalMaxBlock;
+        // Exception-safe allocation using local ScopedAlignedPtr
+        auto newL = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
+            static_cast<size_t>(internalMaxBlock) * sizeof(double), 64)));
+        auto newR = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
+            static_cast<size_t>(internalMaxBlock) * sizeof(double), 64)));
 
         // 明示的ゼロクリア（Denormal/NaN防止）
-        juce::FloatVectorOperations::clear(alignedL, internalMaxBlock);
-        juce::FloatVectorOperations::clear(alignedR, internalMaxBlock);
+        juce::FloatVectorOperations::clear(newL.get(), internalMaxBlock);
+        juce::FloatVectorOperations::clear(newR.get(), internalMaxBlock);
+
+        // Commit (noexcept move)
+        alignedL = std::move(newL);
+        alignedR = std::move(newR);
+        alignedCapacity = internalMaxBlock;
     }
 
     const auto osPreset = (oversamplingType == OversamplingType::LinearPhase)
@@ -490,18 +476,15 @@ void AudioEngine::DSPCore::reset()
 
     // 【パッチ3】rawバッファクリア（alignedCapacity使用）
     if (alignedL && alignedCapacity > 0)
-        juce::FloatVectorOperations::clear(alignedL, alignedCapacity);
+        juce::FloatVectorOperations::clear(alignedL.get(), alignedCapacity);
     if (alignedR && alignedCapacity > 0)
-        juce::FloatVectorOperations::clear(alignedR, alignedCapacity);
+        juce::FloatVectorOperations::clear(alignedR.get(), alignedCapacity);
 }
 
 // 【パッチ3】rawバッファ解放用デストラクタ（vector削除に伴い追加）
 AudioEngine::DSPCore::~DSPCore()
 {
-    if (alignedL) convo::aligned_free(alignedL);
-    if (alignedR) convo::aligned_free(alignedR);
-    alignedL = alignedR = nullptr;
-    alignedCapacity = 0;
+    // ScopedAlignedPtr handles cleanup automatically
 }
 
 //--------------------------------------------------------------
@@ -512,75 +495,96 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     // UIコンポーネント(uiEqProcessor等)へのアクセスやMKLメモリ確保を行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
+    // リビルド世代を更新 (古いリビルドタスクの結果を破棄するため)
+    const int generation = ++rebuildGeneration;
+
     // 新しいDSPコアを作成
     DSPCore::Ptr newDSP = std::make_shared<DSPCore>();
+    newDSP->convolver.setVisualizationEnabled(false); // DSP用は可視化データ不要
 
     // UIプロセッサから状態をコピー
     newDSP->eq.syncStateFrom(uiEqProcessor); // 最適化: ValueTreeを経由せず直接同期
     newDSP->convolver.syncStateFrom(uiConvolverProcessor);
 
-    // 準備
-    newDSP->prepare(sampleRate, samplesPerBlock, ditherBitDepth.load(), manualOversamplingFactor.load(), oversamplingType.load());
+    // キャプチャ用変数
+    int ditherDepth = ditherBitDepth.load();
+    int osFactor = manualOversamplingFactor.load();
+    OversamplingType osType = oversamplingType.load();
+    DSPCore::Ptr current = activeDSP; // 現在のアクティブDSPをキャプチャ
 
-    // 最適化: 現在のDSPから有効なオーバーサンプリング済みIRを再利用する
-    // これにより、EQ変更などのたびにIRリビルド（音切れ）が発生するのを防ぐ
-    bool irReused = false;
-    DSPCore::Ptr current = activeDSP;
+    juce::WeakReference<AudioEngine> weakSelf(this);
 
-    if (current)
-    {
-        // 既存のDSPからAGCの状態を引き継ぎ、ゲインの急変を防ぐ
-        newDSP->eq.syncGlobalStateFrom(current->eq);
-    }
+    // 非同期スレッドで重い処理（IRリサンプリング等）を実行
+    std::thread([weakSelf, newDSP, current, sampleRate, samplesPerBlock, ditherDepth, osFactor, osType, generation]() {
+        // Helper to check obsolescence
+        const auto isObsolete = [&]() {
+            if (auto* self = weakSelf.get())
+                return self->isRebuildObsolete(generation);
+            return true;
+        };
 
-    if (current && std::abs(current->sampleRate - sampleRate) < 1e-6 &&
-        current->oversamplingFactor == newDSP->oversamplingFactor && newDSP->oversamplingFactor > 1)
-    {
-        // IRの生成条件（ファイル、位相設定、長さ）が一致しているか確認
-        if (newDSP->convolver.getIRName() == current->convolver.getIRName() &&
-            newDSP->convolver.getUseMinPhase() == current->convolver.getUseMinPhase() &&
-            std::abs(newDSP->convolver.getTargetIRLength() - current->convolver.getTargetIRLength()) < 0.001f)
+        if (isObsolete()) return;
+
+        // 1. Prepare (メモリ確保)
+        newDSP->prepare(sampleRate, samplesPerBlock, ditherDepth, osFactor, osType);
+
+        if (isObsolete()) return;
+
+        // 2. Reuse Logic
+        bool irReused = false;
+        if (current)
         {
-            // 既存のConvolutionオブジェクト（計算済みIRデータ）を再利用
-            newDSP->convolver.syncStateFrom(current->convolver);
+            // 既存のDSPからAGCの状態を引き継ぐ
+            newDSP->eq.syncGlobalStateFrom(current->eq);
 
-            // UIで変更された可能性のあるパラメータ（Mix, Bypass等）を再適用
-            newDSP->convolver.syncParametersFrom(uiConvolverProcessor);
-            irReused = true;
+            if (std::abs(current->sampleRate - sampleRate) < 1e-6 &&
+                current->oversamplingFactor == newDSP->oversamplingFactor && newDSP->oversamplingFactor > 1)
+            {
+                // IRの生成条件が一致しているか確認
+                if (newDSP->convolver.getIRName() == current->convolver.getIRName() &&
+                    newDSP->convolver.getUseMinPhase() == current->convolver.getUseMinPhase() &&
+                    std::abs(newDSP->convolver.getTargetIRLength() - current->convolver.getTargetIRLength()) < 0.001f)
+                {
+                    // 既存のConvolutionエンジンのみをコピー（パラメータはUIからの最新値を維持）
+                    newDSP->convolver.copyConvolutionEngineFrom(current->convolver);
+                    irReused = true;
+                }
+            }
         }
-    }
 
-    // オーバーサンプリング有効時、UIからコピーされたIR(1xレート)はDSP(Nxレート)にとって不適切です。
-    // そのため、正しいサンプルレートでIRを再構築(リサンプリング)する必要があります。
-    // これを行わないと、IRのピッチが変わり、レイテンシー補正も誤った値になります。
-    //
-    // 重要: ここで newDSP (ローカル変数) に対してリビルドを行うため、
-    // Audio Thread で稼働中の currentDSP とは完全に独立しており、競合は発生しない。
-    if (!irReused && newDSP->oversamplingFactor > 1 && newDSP->convolver.isIRLoaded())
-    {
-        // 同期的にリビルドを実行 (再生中の音切れやピッチズレを防ぐため、準備完了まで待機)
-        newDSP->convolver.rebuildAllIRsSynchronous();
-    }
+        // 3. Rebuild IR if needed (Heavy operation)
+        if (!irReused && newDSP->oversamplingFactor > 1 && newDSP->convolver.isIRLoaded())
+        {
+            if (isObsolete()) return;
+            newDSP->convolver.rebuildAllIRsSynchronous(isObsolete);
+        }
 
-    // Fix: Refresh Convolver latency
-    // IRのロードやリビルド、あるいは状態コピーによってレイテンシーが確定した後、
-    // 再度prepareToPlayを呼び出してlatencySmootherの初期値を正しいレイテンシーに合わせる。
-    // これにより、DSP切り替え時にレイテンシーが0からランプすることによるグリッチ（ピッチ揺れ）を防ぐ。
-    const double processingRate = sampleRate * static_cast<double>(newDSP->oversamplingFactor);
-    const int processingBlockSize = samplesPerBlock * static_cast<int>(newDSP->oversamplingFactor);
-    newDSP->convolver.prepareToPlay(processingRate, processingBlockSize);
+        if (isObsolete()) return;
 
-    // ==================================================================
-    // 【Issue 5 修正】新DSPにFade-in Rampを開始（42ms ≈ 2048サンプル @48kHz）
-    // これで新出力が0から滑らかに立ち上がる
-    // ==================================================================
-    newDSP->fadeInSamplesLeft.store(DSPCore::FADE_IN_SAMPLES, std::memory_order_relaxed);
+        // 4. Refresh Latency
+        const double processingRate = sampleRate * static_cast<double>(newDSP->oversamplingFactor);
+        const int processingBlockSize = samplesPerBlock * static_cast<int>(newDSP->oversamplingFactor);
+        newDSP->convolver.prepareToPlay(processingRate, processingBlockSize);
 
-    commitNewDSP(newDSP);
+        // 5. Fade In
+        newDSP->fadeInSamplesLeft.store(DSPCore::FADE_IN_SAMPLES, std::memory_order_relaxed);
+
+        // 6. Commit on Message Thread
+        juce::MessageManager::callAsync([weakSelf, newDSP, generation]() {
+            if (auto* self = weakSelf.get())
+            {
+                self->commitNewDSP(newDSP, generation);
+            }
+        });
+    }).detach();
 }
 
-void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP)
+void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP, int generation)
 {
+    // 古いリクエストの結果であれば破棄 (Race condition対策)
+    if (generation != rebuildGeneration.load())
+        return;
+
     // 1. Update the atomic raw pointer for the Audio Thread (Wait-free)
     currentDSP.store(newDSP.get(), std::memory_order_release);
 
@@ -630,14 +634,23 @@ void AudioEngine::timerCallback()
         auto it = std::remove_if(trashBin.begin(), trashBin.end(),
                                  [now](const auto& entry) {
                                      // Handle wrap-around of uint32 roughly
-                                     return (now >= entry.second) ? (now - entry.second > 2000)
-                                                                  : (now + (std::numeric_limits<uint32>::max() - entry.second) > 2000);
+                                     return (now >= entry.second) ? (now - entry.second > 500)
+                                                                  : (now + (std::numeric_limits<uint32>::max() - entry.second) > 500);
                                  });
 
         for (auto i = it; i != trashBin.end(); ++i)
             toDelete.push_back(i->first);
 
         trashBin.erase(it, trashBin.end());
+
+        // 3. Size limit (Max 5 items) - メモリ爆発防止
+        if (trashBin.size() > 5)
+        {
+            size_t removeCount = trashBin.size() - 5;
+            for (size_t i = 0; i < removeCount; ++i)
+                toDelete.push_back(trashBin[i].first);
+            trashBin.erase(trashBin.begin(), trashBin.begin() + removeCount);
+        }
     }
 
     // Lock解放後にデストラクタを実行 (stopThread等の重い処理をロック外で行う)
@@ -917,7 +930,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     //----------------------------------------------------------
     // AudioBlockの構築 (AlignedBufferを使用)
     //----------------------------------------------------------
-    double* channels[2] = { alignedL, alignedR };
+    double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
 
     //----------------------------------------------------------
@@ -1087,7 +1100,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 
     processInputDouble(buffer, numSamples);
 
-    double* channels[2] = { alignedL, alignedR };
+    double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
 
     const float inputDb = measureLevel(processBlock);
@@ -1195,7 +1208,6 @@ float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const doub
 
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        // getMagnitudeは内部でSIMD化されたfindMinAndMaxを使用するため高速
         auto range = juce::FloatVectorOperations::findMinAndMax(block.getChannelPointer(ch), numSamples);
         const double level = std::max(std::abs(range.getStart()), std::abs(range.getEnd()));
         if (level > maxLevel) maxLevel = level;
@@ -1291,7 +1303,7 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     for (int ch = 0; ch < effectiveInputChannels; ++ch)
     {
         const float* src = buffer->getReadPointer(ch, startSample);
-        double* dst = (ch == 0) ? alignedL : alignedR;
+        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
         convo::input_transform::convertFloatToDoubleHighQuality(src, dst, numSamples);
     }
 
@@ -1306,7 +1318,7 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
 
     for (int ch = clearStartCh; ch < 2; ++ch)
     {
-        double* dst = (ch == 0) ? alignedL : alignedR;
+        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
         juce::FloatVectorOperations::clear(dst, numSamples);
     }
 
@@ -1316,8 +1328,8 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     // 後段のステレオエフェクト（Convolver等）での片側無音を防ぐ。
     if (expandMono)
     {
-        const double* src = alignedL;
-        double* dst = alignedR;
+        const double* src = alignedL.get();
+        double* dst = alignedR.get();
         // 高速なメモリコピー (double配列)
         std::memcpy(dst, src, numSamples * sizeof(double));
     }
@@ -1330,7 +1342,7 @@ void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& b
     for (int ch = 0; ch < effectiveInputChannels; ++ch)
     {
         const double* src = buffer.getReadPointer(ch);
-        double* dst = (ch == 0) ? alignedL : alignedR;
+        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
         convo::input_transform::convertDoubleToDoubleHighQuality(src, dst, numSamples);
     }
 
@@ -1339,12 +1351,12 @@ void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& b
 
     for (int ch = clearStartCh; ch < 2; ++ch)
     {
-        double* dst = (ch == 0) ? alignedL : alignedR;
+        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
         juce::FloatVectorOperations::clear(dst, numSamples);
     }
 
     if (expandMono)
-        std::memcpy(alignedR, alignedL, numSamples * sizeof(double));
+        std::memcpy(alignedR.get(), alignedL.get(), numSamples * sizeof(double));
 }
 
 // Padé近似による高速tanh (std::exp回避)
@@ -1413,7 +1425,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     {
         if (ch < 2)
         {
-            double* data = (ch == 0) ? alignedL : alignedR;
+            double* data = (ch == 0) ? alignedL.get() : alignedR.get();
             auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
             float* dst = buffer->getWritePointer(ch, startSample);
 
@@ -1513,7 +1525,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     {
         if (ch < 2)
         {
-            double* data = (ch == 0) ? alignedL : alignedR;
+            double* data = (ch == 0) ? alignedL.get() : alignedR.get();
             auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
             double* dst = buffer.getWritePointer(ch);
 
