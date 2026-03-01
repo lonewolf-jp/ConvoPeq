@@ -93,9 +93,11 @@ MainWindow::MainWindow (const juce::String& name)
     // この時点でrebuildが呼ばれても、有効なサンプルレートが設定されている
     loadSettings();
 
-    audioSourcePlayer.setSource (&audioEngine);
+    audioEngineProcessor = std::make_unique<AudioEngineProcessor>(audioEngine);
+    audioProcessorPlayer.setDoublePrecisionProcessing(true);
+    audioProcessorPlayer.setProcessor(audioEngineProcessor.get());
     audioEngine.addChangeListener (this);
-    audioDeviceManager.addAudioCallback (&audioSourcePlayer);
+    audioDeviceManager.addAudioCallback (&audioProcessorPlayer);
 
     // UIコンポーネントの作成
     createUIComponents();
@@ -109,16 +111,17 @@ MainWindow::MainWindow (const juce::String& name)
 //--------------------------------------------------------------
 MainWindow::~MainWindow()
 {
-    audioSourcePlayer.setSource (nullptr);
+    audioProcessorPlayer.setProcessor (nullptr);
     stopTimer();
 
     DeviceSettings::saveSettings (audioDeviceManager, audioEngine);
 
     // 破棄される前にコールバックとしてAudioEngineの登録を解除
-    audioDeviceManager.removeAudioCallback (&audioSourcePlayer);
+    audioDeviceManager.removeAudioCallback (&audioProcessorPlayer);
 
     // アプリ終了時にASIOドライバを確実に閉じるための安全手順
     audioDeviceManager.closeAudioDevice();
+    audioEngineProcessor.reset();
 
     settingsWindow.reset();
     deviceSettings.reset();

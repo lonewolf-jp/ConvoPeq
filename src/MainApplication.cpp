@@ -100,6 +100,8 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
     // 安定性確保のために不可欠です。
     mkl_set_num_threads(1); // 1スレッドに固定
     mkl_set_dynamic(0);     // 動的なスレッド数調整を無効化
+    // Audio Thread内でのVMLモード変更を避けるため、起動時に1回だけ設定する。
+    vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
 #endif
 
 #if JUCE_INTEL

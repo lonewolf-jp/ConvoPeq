@@ -25,6 +25,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "AlignedAllocation.h"
+#include "CustomInputOversampler.h"
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
 #include "PsychoacousticDither.h"
@@ -85,6 +86,7 @@ public:
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
     void releaseResources() override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
+    void processBlockDouble (juce::AudioBuffer<double>& buffer);
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void eqBandChanged(EQProcessor* processor, int bandIndex) override;
     void eqGlobalChanged(EQProcessor* processor) override;
@@ -239,20 +241,21 @@ private:
             double px = m_prev_x;
             double py = m_prev_y;
             double r = m_R;
+            constexpr double kDenormalThreshold = 1.0e-20;
 
             for (int i = 0; i < numSamples; ++i) {
                 double curr_x = data[i];
                 // 高精度演算 (64bit double)
                 double curr_y = curr_x - px + r * py;
 
+                if (std::abs(curr_y) < kDenormalThreshold) curr_y = 0.0; // Anti-Denormal Trick
+
                 px = curr_x;
                 py = curr_y;
-
-            if (std::abs(curr_y) < 1.0e-20) curr_y = 0.0; // Anti-Denormal Trick
                 data[i] = curr_y;
             }
             m_prev_x = px;
-             m_prev_y = py;
+            m_prev_y = py;
         }
     };
     //----------------------------------------------------------
@@ -283,6 +286,12 @@ DSPCore();
     void process(const juce::AudioSourceChannelInfo& bufferToFill, juce::AbstractFifo& audioFifo,
                  juce::AudioBuffer<float>& audioFifoBuffer, std::atomic<float>& inputLevelDb,
                  std::atomic<float>& outputLevelDb, const ProcessingState& state);
+    void processDouble(juce::AudioBuffer<double>& buffer,
+                       juce::AbstractFifo& audioFifo,
+                       juce::AudioBuffer<float>& audioFifoBuffer,
+                       std::atomic<float>& inputLevelDb,
+                       std::atomic<float>& outputLevelDb,
+                       const ProcessingState& state);
         ConvolverProcessor convolver;
         EQProcessor eq;
         DCBlocker dcBlockerL, dcBlockerR;
@@ -290,7 +299,7 @@ DSPCore();
          UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
         ::convo::PsychoacousticDither dither;
 
-        std::unique_ptr<juce::dsp::Oversampling<double>> oversampling;
+        CustomInputOversampler oversampling;
         size_t oversamplingFactor = 1;
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
         double sampleRate = 0.0;
@@ -320,6 +329,8 @@ DSPCore();
                         juce::AudioBuffer<float>& audioFifoBuffer) const noexcept;
         void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
         void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
+        void processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples) noexcept;
+        void processOutputDouble(juce::AudioBuffer<double>& buffer, int numSamples) noexcept;
     private:
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
     };

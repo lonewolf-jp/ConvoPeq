@@ -1,0 +1,149 @@
+実装の具体化
+この Non-uniform 構造を完成させるために、以下のどちらを詳しく掘り下げますか？
+A: バックグラウンドスレッドとのデータ受け渡し（Lock-free FIFO）
+（Tail部の計算をオーディオスレッドを止めずに並列実行する仕組み）
+B: Direct Form（AVX2）と FFT（MKL）のシームレスな結合方法
+（非常に短い Head 部をどう効率的に繋ぐか）
+「非常に長いリバーブ（数秒以上）」を想定している場合は、Aの並列化設計が必須になります。
+Intel oneMKL Partitioned Convolution | JUCE ThreadPool
+
+
+
+A：
+768kHzという極限の環境で、Tail部（長大なリバーブ成分）を処理するには、オーディオスレッドを止めないLock-free FIFO（非ブロッキング・キュー）を用いた並列演算設計が不可欠です。
+MKLの重いFFT計算をワーカースレッドへ委譲し、結果を遅延なく回収するシステム設計図を提示します。
+1. 非同期アーキテクチャの概要
+オーディオスレッド (高優先度): 入力サンプルをバッファリングし、満杯になったら「計算リクエスト」をキューに投げ、過去の計算済み結果を回収して出力に足す。
+ワーカースレッド (中優先度): キューからリクエストを取り出し、MKLのFFT/vzMul/IFFTを実行。完了したデータを「完了キュー」へ戻す。
+2. Lock-free FIFO によるタスク通知
+JUCEの AbstractFifo や std::atomic を使用して、ポインタの受け渡しのみを行います。データのコピーは行いません。
+cpp
+// 計算タスクの定義
+struct ConvolutionTask {
+    int partitionIndex;     // どのセグメントの計算か
+    double* inputFreqData;  // 入力の周波数ドメインデータ
+    double* outputBuffer;   // 結果を書き戻す場所
+    std::atomic<bool> isReady { false }; // 計算完了フラグ
+};
+
+// ワーカースレッドのループ
+void ConvolutionWorker::run()
+{
+    while (!threadShouldExit())
+    {
+        if (auto task = taskQueue.pop()) // Lock-freeポインタ取得
+        {
+            // --- MKL重負荷演算セクション ---
+            // 1. vzMul (複素数乗算)
+            vzMul(fftSize, task->inputFreqData, irFreqData[task->partitionIndex], task->outputBuffer);
+            
+            // 2. IFFT (逆変換)
+            DftiComputeBackward(mklHandle, task->outputBuffer);
+
+            // 完了通知
+            task->isReady.store(true, std::memory_order_release);
+        }
+        else {
+            wait(1); // タスクがなければ待機
+        }
+    }
+}
+コードは注意してご使用ください。
+
+3. オーディオスレッドでの「結果回収」と「合成」
+Non-uniform方式では、Tail部の結果は「数ブロック後」に必要になります。
+cpp
+void processBlock(double* buffer, int numSamples)
+{
+    // 1. 直近のHead部（低レイテンシ）を即時計算（MKLまたはAVX2）
+    processHeadImmediate(buffer, numSamples);
+
+    // 2. 過去にワーカースレッドが計算し終えたTail部を回収
+    for (auto& task : activeTasks)
+    {
+        if (task->isReady.load(std::memory_order_acquire))
+        {
+            // AVX2で現在の出力バッファに足し合わせる (Overlap-Add)
+            // 64byteアライメントされた領域で _mm256_add_pd を使用
+            accumulateResultAVX2(buffer, task->outputBuffer, numSamples);
+            
+            task->isReady.store(false); // 再利用可能に
+        }
+    }
+}
+コードは注意してご使用ください。
+
+4. 768kHzでの設計上の重要ポイント
+スレッド優先度の厳密な管理:
+ワーカースレッドの優先度は、オーディオスレッドより低く、かつGUIスレッドより高く設定します。
+juce::Thread::setPriority(8); // 中間より少し上
+MKLメモリのダブルバッファリング:
+ワーカースレッドが計算している最中に、オーディオスレッドが次の入力を上書きしないよう、FFT用の作業バッファは必ず2セット以上（ダブルバッファ）用意し、交互に使用します。
+L3キャッシュ共有の活用:
+最近のCPU（AMD Ryzen 9やIntel Core i9）では、同じCCX内のスレッド間でL3キャッシュを共有できます。ワーカースレッドをオーディオスレッドと同じ物理コア（または隣接コア）にアフィニティ（固定）設定すると、メモリ転送レイテンシが劇的に下がります。
+
+
+B: Direct Form（AVX2）と FFT（MKL）のシームレスな結合方法
+768kHzという極限のサンプリングレートにおいて、「低レイテンシ（Direct Form）」と「高効率（FFT）」をシームレスに結合する設計は、音質とCPU負荷のトレードオフを解決する鍵となります。
+これを実現する「ハイブリッド・パーティション・コンボルバー」の結合戦略を提示します。
+1. 結合の構造：時間軸の分割
+インパルス応答（IR）を以下の2つの領域に分割し、並列で計算して最後に足し合わせます。
+領域 A: Direct Form (AVX2)
+範囲: 最初の 0 〜 128 サンプル（約 0.16ms @ 768kHz）。
+役割: 究極のゼロレイテンシ応答。
+領域 B: FFT (MKL DFTI)
+範囲: 129 サンプル 〜 終端。
+単位: 512 または 1024 サンプルのブロック単位で処理。
+役割: 残響成分の効率的な一括演算。
+2. シームレスな結合を実現する「共通入力バッファ」
+Direct Form と FFT が同じ入力信号の「異なる時間軸」を正しく参照できるよう、64byteアライメントされた共有ヒストリバッファを用意します。
+cpp
+// 共有ヒストリバッファ (64byte align)
+// [ 過去のサンプル (Max IR Length) | 現在のサンプル (BlockSize) ]
+alignas(64) double* sharedInputHistory;
+
+void processHybrid(const double* input, double* output, int n) {
+    // 1. ヒストリ更新 (vdCopyを使用)
+    updateHistory(input, n);
+
+    // 2. Direct Form (AVX2) - 即時出力
+    // 最初の 128 タップ分を AVX2 FMA で計算
+    applyDirectFormAVX2(sharedInputHistory, irDirectPart, output, n);
+
+    // 3. FFT Part (MKL) - 前回の計算結果を足し合わせ
+    // FFTは「ブロック単位」で遅延が発生するため、
+    // ここで足すのは「1ブロック前に投入した計算の結果」
+    accumulateFftResult(output, fftOutputBuffer, n);
+
+    // 4. 次のFFT用の計算トリガー
+    if (isBlockFull()) {
+        triggerMKLFft(sharedInputHistory); // ワーカースレッドへ
+    }
+}
+コードは注意してご使用ください。
+
+3. AVX2 Direct Form の最適化 (64bit Double)
+768kHzでは、たとえ128タップでも Direct Form は重負荷です。ここでも AVX2 / FMA をフル活用します。
+cpp
+// 128タップの Direct Form 畳み込みコア
+void applyDirectFormAVX2(const double* history, const double* coeffs, double* out, int n) {
+    for (int i = 0; i < n; ++i) {
+        __m256d acc = _mm256_setzero_pd();
+        for (int j = 0; j < 128 / 4; ++j) {
+            __m256d dat = _mm256_loadu_pd(&history[currentPos + i - j * 4]);
+            __m256d coe = _mm256_load_pd(&coeffs[j * 4]);
+            acc = _mm256_fmadd_pd(dat, coe, acc); // 高精度・高速積和
+        }
+        // 水平加算して出力に加算
+        out[i] += horizontalSum(acc);
+    }
+}
+コードは注意してご使用ください。
+
+4. 結合時の注意点：クロスフェードは不要
+Direct Form と FFT を繋ぐ際、デジタル信号処理的には「時間軸を完全に分割」しているため、オーバーラップが正しく管理されていれば、クロスフェード（滑らかな繋ぎ）は理論上不要です。
+位相の整合性: Direct Form で処理した「最後のサンプル」の直後のサンプルから、FFT の第1ブロックが始まるようにインデックスを厳密に管理します。
+レイテンシの相殺: FFT 側の結果を output に足す際、FFT の計算サイズ分（例えば 512サンプル）だけ遅れて出てくるため、その「待ち時間」の間は Direct Form 側が全ての出力を担う形になります。
+5. 究極の仕上げ：MKL vzMul との同期
+FFT 側の Body 部を計算する際、MKL VML の vzMul を使って複素数乗算を行いますが、その結果を IFFT して時間領域に戻した際、「最初の数サンプル（Direct Form と重複する部分）」を 0 クリア しておく設計にすると、結合部のロジックが極めてシンプルになります。
+これで、「立ち上がりのキレ（Direct Form）」と「豊かな残響（FFT）」を 768kHz で両立する準備が整いました。

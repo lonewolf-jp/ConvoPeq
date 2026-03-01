@@ -4,6 +4,7 @@
 // AudioEngineの実装
 //============================================================================
 #include "AudioEngine.h"
+#include "InputBitDepthTransform.h"
 #include <cmath>
 #include <complex>
 #include <algorithm>
@@ -439,18 +440,10 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
         juce::FloatVectorOperations::clear(alignedR, internalMaxBlock);
     }
 
-    if (factorLog2 > 0)
-    {
-        auto filterType = (oversamplingType == OversamplingType::LinearPhase)
-                          ? juce::dsp::Oversampling<double>::filterHalfBandFIREquiripple
-                          : juce::dsp::Oversampling<double>::filterHalfBandPolyphaseIIR;
-        oversampling = std::make_unique<juce::dsp::Oversampling<double>>(2, factorLog2, filterType);
-        oversampling->initProcessing(SAFE_MAX_BLOCK_SIZE);
-    }
-    else
-    {
-        oversampling.reset();
-    }
+    const auto osPreset = (oversamplingType == OversamplingType::LinearPhase)
+                        ? CustomInputOversampler::Preset::LinearPhase
+                        : CustomInputOversampler::Preset::IIRLike;
+    oversampling.prepare(SAFE_MAX_BLOCK_SIZE, static_cast<int>(oversamplingFactor), osPreset);
 
     const double processingRate = newSampleRate * static_cast<double>(oversamplingFactor);
     const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
@@ -493,8 +486,7 @@ void AudioEngine::DSPCore::reset()
     osDCBlockerL.reset();
     osDCBlockerR.reset();
     dither.reset();
-    if (oversampling)
-        oversampling->reset();
+    oversampling.reset();
 
     // 【パッチ3】rawバッファクリア（alignedCapacity使用）
     if (alignedL && alignedCapacity > 0)
@@ -758,9 +750,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
             _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 #endif
-#if JUCE_DSP_USE_INTEL_MKL
-            vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
-#endif
         }
     }
     // ========================================================
@@ -835,6 +824,60 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 }
 
+void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
+{
+    juce::ScopedNoDenormals noDenormals;
+
+    if (!audioThreadModesSet.load(std::memory_order_relaxed))
+    {
+        if (audioThreadModesSet.exchange(true, std::memory_order_acq_rel) == false)
+        {
+#if JUCE_INTEL
+            _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+            _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+        }
+    }
+
+    const int numSamples = buffer.getNumSamples();
+    if (numSamples <= 0 || numSamples > SAFE_MAX_BLOCK_SIZE)
+    {
+        buffer.clear();
+        return;
+    }
+
+    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
+    if (dsp == nullptr)
+    {
+        buffer.clear();
+        return;
+    }
+
+    const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
+    if (std::abs(dsp->sampleRate - engineSampleRate) > 1e-6)
+    {
+        inputLevelDb.store(LEVEL_METER_MIN_DB);
+        outputLevelDb.store(LEVEL_METER_MIN_DB);
+        buffer.clear();
+        return;
+    }
+
+    const bool eqBypassed = eqBypassRequested.load(std::memory_order_acquire);
+    const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
+    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
+    const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
+    const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
+    const float satAmt = saturationAmount.load(std::memory_order_relaxed);
+
+    if (eqBypassActive.load(std::memory_order_relaxed) != eqBypassed)
+        eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
+    if (convBypassActive.load(std::memory_order_relaxed) != convBypassed)
+        convBypassActive.store(convBypassed, std::memory_order_relaxed);
+
+    dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb,
+                       {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt});
+}
+
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
                                   juce::AbstractFifo& audioFifo,
                                   juce::AudioBuffer<float>& audioFifoBuffer,
@@ -856,7 +899,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     // 【Issue 3 追加防御】オーバーラン即検出（リリースでも有効）
     // オーバーサンプリング有効時にupBlockサイズが内部バッファを超えないことを保証
     // ==================================================================
-    if (oversampling)
+    if (oversamplingFactor > 1)
     {
         const int expectedUpSize = numSamples * static_cast<int>(oversamplingFactor);
 
@@ -896,9 +939,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     juce::dsp::AudioBlock<double> originalBlock = processBlock; // 元サイズを保存
 
     // アップサンプリング
-    if (oversampling)
+    if (oversamplingFactor > 1)
     {
-        processBlock = oversampling->processSamplesUp(originalBlock);
+        processBlock = oversampling.processUp(originalBlock, static_cast<int>(originalBlock.getNumChannels()));
 
         // [追加] 実際のアップサンプリング後サイズが内部バッファを超えていないか最終確認
         if (processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
@@ -969,9 +1012,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     //----------------------------------------------------------
 
     // ダウンサンプリング (結果は processBuffer に書き戻される)
-    if (oversampling)
+    if (oversamplingFactor > 1)
     {
-        oversampling->processSamplesDown(originalBlock);
+        oversampling.processDown(processBlock, originalBlock, static_cast<int>(originalBlock.getNumChannels()));
         processBlock = originalBlock;
     }
 
@@ -1013,6 +1056,134 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
             }
             fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
         }
+    }
+}
+
+void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
+                                         juce::AbstractFifo& audioFifo,
+                                         juce::AudioBuffer<float>& audioFifoBuffer,
+                                         std::atomic<float>& inputLevelDb,
+                                         std::atomic<float>& outputLevelDb,
+                                         const ProcessingState& state)
+{
+    const int numSamples = buffer.getNumSamples();
+
+    if (numSamples > maxSamplesPerBlock)
+    {
+        buffer.clear();
+        return;
+    }
+
+    if (oversamplingFactor > 1)
+    {
+        const int expectedUpSize = numSamples * static_cast<int>(oversamplingFactor);
+        if (expectedUpSize > maxInternalBlockSize)
+        {
+            jassertfalse;
+            buffer.clear();
+            return;
+        }
+    }
+
+    processInputDouble(buffer, numSamples);
+
+    double* channels[2] = { alignedL, alignedR };
+    juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
+
+    const float inputDb = measureLevel(processBlock);
+    inputLevelDb.store(inputDb, std::memory_order_relaxed);
+
+    if (state.analyzerSource == AnalyzerSource::Input)
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
+
+    juce::dsp::AudioBlock<double> originalBlock = processBlock;
+
+    if (oversamplingFactor > 1)
+    {
+        processBlock = oversampling.processUp(originalBlock, static_cast<int>(originalBlock.getNumChannels()));
+
+        if (processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
+        {
+            jassertfalse;
+            buffer.clear();
+            return;
+        }
+
+        const int numOSSamples = static_cast<int>(processBlock.getNumSamples());
+        if (processBlock.getNumChannels() > 0)
+            osDCBlockerL.process(processBlock.getChannelPointer(0), numOSSamples);
+        if (processBlock.getNumChannels() > 1)
+            osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
+    }
+
+    const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
+    const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
+
+    if (state.order == ProcessingOrder::ConvolverThenEQ)
+    {
+        if (!state.convBypassed)
+            convolver.process(processBlock);
+        if (!state.eqBypassed)
+            eq.process(processBlock);
+    }
+    else
+    {
+        if (!state.eqBypassed)
+            eq.process(processBlock);
+        if (!state.convBypassed)
+            convolver.process(processBlock);
+    }
+
+    if (state.softClipEnabled)
+    {
+        const double sat = static_cast<double>(state.saturationAmount);
+        const double CLIP_THRESHOLD = 0.95 - 0.45 * sat;
+        const double CLIP_KNEE      = 0.05 + 0.35 * sat;
+        const double CLIP_ASYMMETRY = 0.10 * sat;
+        const double CLIP_START = CLIP_THRESHOLD - CLIP_KNEE;
+
+        for (int ch = 0; ch < numProcChannels; ++ch)
+        {
+            double* data = processBlock.getChannelPointer(ch);
+            for (int i = 0; i < numProcSamples; ++i)
+            {
+                if (std::abs(data[i]) > CLIP_START)
+                    data[i] = musicalSoftClip(data[i], CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
+            }
+        }
+    }
+
+    if (oversamplingFactor > 1)
+    {
+        oversampling.processDown(processBlock, originalBlock, static_cast<int>(originalBlock.getNumChannels()));
+        processBlock = originalBlock;
+    }
+
+    const float outputDb = measureLevel(originalBlock);
+    outputLevelDb.store(outputDb, std::memory_order_relaxed);
+
+    if (state.analyzerSource == AnalyzerSource::Output)
+        pushToFifo(originalBlock, audioFifo, audioFifoBuffer);
+
+    processOutputDouble(buffer, numSamples);
+
+    int fadeLeft = fadeInSamplesLeft.load(std::memory_order_relaxed);
+    if (fadeLeft > 0)
+    {
+        const int rampThisBlock = std::min(numSamples, fadeLeft);
+        const double gainStep = 1.0 / static_cast<double>(FADE_IN_SAMPLES);
+        const int numChannels = buffer.getNumChannels();
+
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            double* data = buffer.getWritePointer(ch);
+            for (int i = 0; i < rampThisBlock; ++i)
+            {
+                const double gain = static_cast<double>(FADE_IN_SAMPLES - fadeLeft + i) * gainStep;
+                data[i] *= gain;
+            }
+        }
+        fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
     }
 }
 
@@ -1117,27 +1288,11 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     const int startSample = bufferToFill.startSample;
     const int effectiveInputChannels = std::min(buffer->getNumChannels(), 2);
 
-    //----------------------------------------------------------
-    // 入力データを processBuffer (double) にコピー
-    //----------------------------------------------------------
-    // ループ分割による分岐排除と最適化
     for (int ch = 0; ch < effectiveInputChannels; ++ch)
     {
-        // float (I/O) -> double (DSP) 変換
         const float* src = buffer->getReadPointer(ch, startSample);
         double* dst = (ch == 0) ? alignedL : alignedR;
-        auto& blocker = (ch == 0) ? inputDCBlockerL : inputDCBlockerR;
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            float v = src[i];
-            // 安全対策: NaN/Infチェック (不正な入力値によるノイズ発生を防止)
-            if (!std::isfinite(v)) v = 0.0f;
-            // 入力信号のサニタイズ: 極端な値をクランプしてフィルタ発散や矩形波ノイズを防ぐ
-            // ドライバによっては未初期化バッファ等で巨大な値を返すことがあるため
-            double val = static_cast<double>(juce::jlimit(-2.0f, 2.0f, v));
-            dst[i] = blocker.process(val);
-        }
+        convo::input_transform::convertFloatToDoubleHighQuality(src, dst, numSamples);
     }
 
     // 入力がないチャンネル、または余剰チャンネルはクリア
@@ -1166,6 +1321,30 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
         // 高速なメモリコピー (double配列)
         std::memcpy(dst, src, numSamples * sizeof(double));
     }
+}
+
+void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples) noexcept
+{
+    const int effectiveInputChannels = std::min(buffer.getNumChannels(), 2);
+
+    for (int ch = 0; ch < effectiveInputChannels; ++ch)
+    {
+        const double* src = buffer.getReadPointer(ch);
+        double* dst = (ch == 0) ? alignedL : alignedR;
+        convo::input_transform::convertDoubleToDoubleHighQuality(src, dst, numSamples);
+    }
+
+    const bool expandMono = (effectiveInputChannels == 1);
+    const int clearStartCh = expandMono ? 2 : effectiveInputChannels;
+
+    for (int ch = clearStartCh; ch < 2; ++ch)
+    {
+        double* dst = (ch == 0) ? alignedL : alignedR;
+        juce::FloatVectorOperations::clear(dst, numSamples);
+    }
+
+    if (expandMono)
+        std::memcpy(alignedR, alignedL, numSamples * sizeof(double));
 }
 
 // Padé近似による高速tanh (std::exp回避)
@@ -1220,6 +1399,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
 {
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
+    constexpr double kOutputHeadroom = 0.988553; // 約 -0.1dB
 
     // ビット深度に基づくディザリング判定
     // ユーザー設定に従い、32-bit (float/int) でもディザリングを適用する。
@@ -1242,14 +1422,14 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             {
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    double processed = blocker.process(data[i]);
+                    double processed = blocker.process(data[i]) * kOutputHeadroom;
                     data[i] = dither.process(processed, ch); // ディザ後も data[] に保存
                 }
             }
             else
             {
                 for (int i = 0; i < numSamples; ++i)
-                    data[i] = blocker.process(data[i]);
+                    data[i] = blocker.process(data[i]) * kOutputHeadroom;
             }
 
             // ── フェーズ2: double→float 変換 + NaN除去 + クランプ (AVX2 一括) ──
@@ -1322,6 +1502,88 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         {
             // 3ch以降は使用しないためクリア (ゴミデータ出力防止)
             buffer->clear(ch, startSample, numSamples);
+        }
+    }
+}
+
+void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer, int numSamples) noexcept
+{
+    constexpr double kOutputHeadroom = 0.988553; // 約 -0.1dB
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    {
+        if (ch < 2)
+        {
+            double* data = (ch == 0) ? alignedL : alignedR;
+            auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
+            double* dst = buffer.getWritePointer(ch);
+
+            for (int i = 0; i < numSamples; ++i)
+                data[i] = blocker.process(data[i]) * kOutputHeadroom;
+
+#if defined(__AVX2__)
+            {
+                int i = 0;
+                const int vEnd = numSamples / 16 * 16;
+                const __m256d vMax  = _mm256_set1_pd(1.0);
+                const __m256d vMin  = _mm256_set1_pd(-1.0);
+                const __m256d vZero = _mm256_setzero_pd();
+
+                for (; i < vEnd; i += 16)
+                {
+                    __m256d v0 = _mm256_loadu_pd(data + i);
+                    __m256d v1 = _mm256_loadu_pd(data + i + 4);
+                    __m256d v2 = _mm256_loadu_pd(data + i + 8);
+                    __m256d v3 = _mm256_loadu_pd(data + i + 12);
+
+                    __m256d m0 = _mm256_cmp_pd(v0, v0, _CMP_ORD_Q);
+                    __m256d m1 = _mm256_cmp_pd(v1, v1, _CMP_ORD_Q);
+                    __m256d m2 = _mm256_cmp_pd(v2, v2, _CMP_ORD_Q);
+                    __m256d m3 = _mm256_cmp_pd(v3, v3, _CMP_ORD_Q);
+
+                    v0 = _mm256_blendv_pd(vZero, v0, m0);
+                    v1 = _mm256_blendv_pd(vZero, v1, m1);
+                    v2 = _mm256_blendv_pd(vZero, v2, m2);
+                    v3 = _mm256_blendv_pd(vZero, v3, m3);
+
+                    v0 = _mm256_min_pd(_mm256_max_pd(v0, vMin), vMax);
+                    v1 = _mm256_min_pd(_mm256_max_pd(v1, vMin), vMax);
+                    v2 = _mm256_min_pd(_mm256_max_pd(v2, vMin), vMax);
+                    v3 = _mm256_min_pd(_mm256_max_pd(v3, vMin), vMax);
+
+                    _mm256_storeu_pd(dst + i, v0);
+                    _mm256_storeu_pd(dst + i + 4, v1);
+                    _mm256_storeu_pd(dst + i + 8, v2);
+                    _mm256_storeu_pd(dst + i + 12, v3);
+                }
+
+                for (; i < (numSamples / 4 * 4); i += 4)
+                {
+                    __m256d v = _mm256_loadu_pd(data + i);
+                    __m256d m = _mm256_cmp_pd(v, v, _CMP_ORD_Q);
+                    v = _mm256_blendv_pd(vZero, v, m);
+                    v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);
+                    _mm256_storeu_pd(dst + i, v);
+                }
+
+                for (; i < numSamples; ++i)
+                {
+                    double v = data[i];
+                    if (!std::isfinite(v)) v = 0.0;
+                    dst[i] = juce::jlimit(-1.0, 1.0, v);
+                }
+            }
+#else
+            for (int i = 0; i < numSamples; ++i)
+            {
+                double v = data[i];
+                if (!std::isfinite(v)) v = 0.0;
+                dst[i] = juce::jlimit(-1.0, 1.0, v);
+            }
+#endif
+        }
+        else
+        {
+            buffer.clear(ch, 0, numSamples);
         }
     }
 }

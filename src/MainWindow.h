@@ -9,6 +9,7 @@
 #include <JuceHeader.h>
 
 #include "AudioEngine.h"
+#include "AudioEngineProcessor.h"
 #include "ConvolverControlPanel.h"
 #include "EQControlPanel.h"
 #include "SpectrumAnalyzerComponent.h"
@@ -44,7 +45,8 @@ private:
 
     AsioBlacklist asioBlacklist;
     AudioEngine audioEngine;
-    juce::AudioSourcePlayer audioSourcePlayer;
+    std::unique_ptr<AudioEngineProcessor> audioEngineProcessor;
+    juce::AudioProcessorPlayer audioProcessorPlayer;
     juce::AudioDeviceManager audioDeviceManager;
 
     std::unique_ptr<ConvolverControlPanel> convolverPanel;

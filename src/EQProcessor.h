@@ -304,18 +304,9 @@ private:
     double currentSampleRate{ 0.0 };
 
     // ==================================================================
-    // 【Issue 4 修正】MKLスクラッチバッファの内部最大サイズ
-    // 用途: process() / processAGC() でOSアップサンプリング後の
-    //      ブロック（最大 SAFE_MAX × 8 = 524288 サンプル）に対して
-    //      memcpy + cblas_dnrm2 を安全に行うため。
-    // 理由: Issue 3のmaxInternalBlockSizeと完全に同期。
-    //      固定確保によりRCU時のresizeを排除し、予測可能性を最大化。
+    // 内部最大サイズ (Audio Thread安全ガード用)
     // ==================================================================
     int maxInternalBlockSize = 0;
-
-    // ── MKL用スクラッチバッファ ──
-    double* scratchBuffer = nullptr;
-    int scratchCapacity = 0;
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
     void processAGC(juce::dsp::AudioBlock<double>& block);

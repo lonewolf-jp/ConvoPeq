@@ -1,0 +1,62 @@
+最終段階、「OSの出力」から「MKL FFT（コンボルバー）」への橋渡しを、メモリコピー回数「ゼロ」で実現する究極のゼロコピー・パイプラインを実装します。
+１．768kHzという極限環境では、メモリからCPUレジスタへデータを引き上げる回数（Load/Store）を1回でも減らすことが、音切れを防ぐ決定打となります。
+２．ゼロコピー・パイプライン設計図 (OS → MKL FFT)
+この設計の肝は、「OS最終段の書き込み先」を、最初から「MKL FFTの入力バッファ領域」に直接指定する点にあります。
+
+３．この「究極のゼロコピー」がもたらす3つの恩恵
+L3キャッシュの汚染防止:
+OSの出力を一度メモリに書き込み、それを再び memcpy でコンボルバーへ送ると、CPUのL3キャッシュを無駄に往復します。直接書き込むことで、データは常に「CPUに近い場所」に留まります。
+MKL DFTI のパフォーマンス最大化:
+Intel oneMKL Reference にある通り、DFTI_INPLACE はメモリスループットが限られている高レート処理において、最も推奨されるモードです。
+バス・コンテンションの抑制:
+768kHz 64bit は膨大なデータ量（1秒間に約6MB以上、双方向でその数倍）を消費します。ゼロコピー化により、メモリバスの占有率が下がり、Windows のバックグラウンド処理による音切れのリスクを最小化できます。
+
+/*==============================================================================
+    AudioEngine_FinalPipeline.cpp - v1.0
+    OS出力をMKL FFTバッファへ直接流し込むゼロコピー実装
+==============================================================================*/
+
+void AudioEngine::processBlock (juce::AudioBuffer<float>& buffer) noexcept
+{
+    const int numInputSamples = buffer.getNumSamples();
+    const int upsampledSize = numInputSamples * activeRatio;
+
+    // --- Step 1: MKL FFTバッファの「現在の書き込み位置」を取得 ---
+    // mklFftInputBuffer は 64byte align された DFTI_DOUBLE 領域
+    double* fftTargetPtr = &mklFftInputBuffer[currentBufferOffset];
+
+    // --- Step 2: 多段OSの最終段を直接 FFT バッファへ書き込み ---
+    // 中間ステージ (Stage 1 -> Stage 2) は L2キャッシュ内のワーク領域を使用
+    if (activeRatio == 8) {
+        runStage1x2(inputDoubleBuffer, stage1Work);
+        runStage2x2(stage1Work, stage2Work);
+        // 最終段 (Stage 3) の出力を fftTargetPtr (MKL領域) へ直接 AVX2 で書き込む
+        runFinalStage3x2(stage2Work, fftTargetPtr, numInputSamples * 4);
+    } 
+    else if (activeRatio == 4) {
+        runStage1x2(inputDoubleBuffer, stage1Work);
+        runFinalStage2x2(stage1Work, fftTargetPtr, numInputSamples * 2);
+    }
+    // ... 他の倍率も同様 ...
+
+    // --- Step 3: バッファが満杯（FFTサイズ分）になったらコンボリューション実行 ---
+    currentBufferOffset += upsampledSize;
+
+    if (currentBufferOffset >= fftProcessingSize) 
+    {
+        // 1. Forward FFT (In-place)
+        // [MKL] DFTI_INPLACE 設定により、fftTargetPtr 内でそのまま周波数ドメインへ変換
+        DftiComputeForward(mklDesc, mklFftInputBuffer);
+
+        // 2. 複素数乗算 (MKL VML)
+        // プリコンパイル済みの IR 周波数データと vzMul で一括計算
+        vzMul(fftComplexSize, (MKL_Complex16*)mklFftInputBuffer, 
+              (MKL_Complex16*)precomputedIrFreq, (MKL_Complex16*)mklFftInputBuffer);
+
+        // 3. Backward FFT (In-place)
+        DftiComputeBackward(mklDesc, mklFftInputBuffer);
+
+        // 4. 次のブロックのためにオフセットをリセット（Overlap-Save法なら適切に履歴を維持）
+        prepareNextFftBlock();
+    }
+}

@@ -13,13 +13,40 @@
 #include <cstring>
 #include <regex>
 
-#if JUCE_DSP_USE_INTEL_MKL
-#include <mkl.h>
-#endif
-
 #if defined(__AVX2__) || defined(__FMA__)
  #include <immintrin.h>
 #endif
+
+static inline double calculateRMS_NoMkl(const double* data, int numSamples) noexcept
+{
+    if (data == nullptr || numSamples <= 0)
+        return 0.0;
+
+#if defined(__AVX2__)
+    __m256d sum = _mm256_setzero_pd();
+    int i = 0;
+    const int vEnd = numSamples / 4 * 4;
+
+    for (; i < vEnd; i += 4)
+    {
+        __m256d v = _mm256_loadu_pd(data + i);
+        sum = _mm256_add_pd(sum, _mm256_mul_pd(v, v));
+    }
+
+    alignas(32) double lanes[4];
+    _mm256_store_pd(lanes, sum);
+    double sumSq = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+
+    for (; i < numSamples; ++i)
+        sumSq += data[i] * data[i];
+#else
+    double sumSq = 0.0;
+    for (int i = 0; i < numSamples; ++i)
+        sumSq += data[i] * data[i];
+#endif
+
+    return std::sqrt(sumSq / static_cast<double>(numSamples));
+}
 
 //--------------------------------------------------------------
 // コンストラクタ
@@ -38,7 +65,6 @@ EQProcessor::~EQProcessor()
     for (auto& node : bandNodes) {
         node.store(nullptr, std::memory_order_release);
     }
-    if (scratchBuffer) convo::aligned_free(scratchBuffer);
     // activeBandNodes will be cleared automatically
 }
 
@@ -396,28 +422,9 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     if (rateChanged)
         currentSampleRate = sampleRate;
 
-    // ==================================================================
-    // 【Issue 4 完全修正】MKLスクラッチバッファ固定最大確保
-    // 変更点:
-    //   1. 引数名を newMaxInternalBlockSize に変更（C4458 shadowing警告解消）
-    //   2. resizeを「不足時のみ」に制限 → RCU再構築時のメモリ操作を最小化
-    //   3. 明示的clear（Denormal/NaN/Inf対策）
-    //   4. maxInternalBlockSize を保存（process内ガード用）
-    // ==================================================================
-    const int requiredSize = newMaxInternalBlockSize;   // ← 引数からローカルへ
-
-    if (scratchCapacity < requiredSize)
-    {
-        if (scratchBuffer) convo::aligned_free(scratchBuffer);
-        scratchBuffer = static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(requiredSize) * sizeof(double), 64));
-        scratchCapacity = requiredSize;
-
-        // 明示的ゼロクリア（Denormal防止 + 再現性確保）
-        if (scratchBuffer)
-            juce::FloatVectorOperations::clear(scratchBuffer, scratchCapacity);
-    }
-
-    this->maxInternalBlockSize = requiredSize;   // メンバ変数へ代入（this->で明示）
+    // process() 内のバッファガードに使用
+    const int requiredSize = newMaxInternalBlockSize;
+    this->maxInternalBlockSize = requiredSize;
 
     auto state = currentState.load(std::memory_order_acquire);
 
@@ -891,22 +898,7 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     for (int ch = 0; ch < numChannels; ++ch)
     {
         const double* data = block.getChannelPointer(ch);
-        double rms = 0.0;
-
-#if JUCE_DSP_USE_INTEL_MKL
-            // MKL最適化されたRMS計算 (Norm / sqrt(N))
-        if (scratchBuffer != nullptr)
-        {
-            std::memcpy(scratchBuffer, data, static_cast<size_t>(numSamples) * sizeof(double));
-            double norm = cblas_dnrm2(numSamples, scratchBuffer, 1);
-            rms = norm / std::sqrt(static_cast<double>(numSamples));
-        }
-#else
-        double sumSq = 0.0;
-        for (int i = 0; i < numSamples; ++i)
-            sumSq += data[i] * data[i];
-        rms = std::sqrt(sumSq / static_cast<double>(numSamples));
-#endif
+        const double rms = calculateRMS_NoMkl(data, numSamples);
 
         if (rms > outputRMS) outputRMS = rms;
     }
@@ -1015,22 +1007,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         for (int ch = 0; ch < numChannels; ++ch)
         {
             const double* data = block.getChannelPointer(ch);
-            double rms = 0.0;
-
-#if JUCE_DSP_USE_INTEL_MKL
-            // MKL最適化されたRMS計算
-            if (scratchBuffer != nullptr)
-            {
-                std::memcpy(scratchBuffer, data, static_cast<size_t>(numSamples) * sizeof(double));
-                double norm = cblas_dnrm2(numSamples, scratchBuffer, 1);
-                rms = norm / std::sqrt(static_cast<double>(numSamples));
-            }
-#else
-            double sumSq = 0.0;
-            for (int i = 0; i < numSamples; ++i)
-                sumSq += data[i] * data[i];
-            rms = std::sqrt(sumSq / static_cast<double>(numSamples));
-#endif
+            const double rms = calculateRMS_NoMkl(data, numSamples);
 
             if (rms > cachedInputRMS)
                 cachedInputRMS = rms;

@@ -1,0 +1,44 @@
+「MKL のメモリリークを防ぐための適切な記述子破棄のタイミング」
+Intel MKLのFFT（DFTI）において、メモリリークは「計算ループ内での記述子の生成・変更」によって発生します。768kHzという極限環境で動作させる場合、「起動時に全リソースを固定し、終了時に一括破棄する」というライフサイクル管理を徹底する必要があります。
+適切な破棄のタイミングと実装の作法をまとめます。
+1. 適切な破棄のタイミング：releaseResources
+JUCEフレームワークにおいて、prepareToPlay で作成した MKL 記述子は、必ず releaseResources メソッド内で破棄します。
+理由: releaseResources はオーディオスレッドが完全に停止した後にメインスレッドから呼ばれることが保証されているため、スレッド競合（計算中に破棄される事故）を防げます。
+2. MKL 記述子（Descriptor）の正しい破棄手順
+MKLのハンドル（DFTI_DESCRIPTOR_HANDLE）は不透明なポインタであり、内部で大規模な計算テーブルやワークスペースを保持しています。単にポインタを nullptr にするだけではリークします。
+cpp
+void UltraHighResEngine::releaseResources() override
+{
+    // 1. オーディオスレッドの処理が止まっていることを確認
+    // (JUCEがこのメソッドを呼ぶ時点で停止しているが、念のため)
+
+    // 2. MKL 記述子の破棄
+    if (mklDesc != nullptr)
+    {
+        // 内部で確保された全ワークスペースを解放
+        MKL_LONG status = DftiFreeDescriptor(&mklDesc);
+        
+        if (status != DFTI_NO_ERROR) {
+            // エラーログ出力 (正常に解放できなかった場合)
+            juce::Logger::writeToLog ("MKL DFTI Free Error: " + juce::String (status));
+        }
+        
+        mklDesc = nullptr; // 二重解放防止
+    }
+
+    // 3. 静的メモリプール（AlignedBufferなど）の解放
+    // std::unique_ptr なら自動で _aligned_free が呼ばれる設計にする
+}
+コードは注意してご使用ください。
+
+3. リークを招く「やってはいけない」操作
+以下の操作を processBlock (Audio Thread) 内で行うと、即座にメモリリークや音切れ（スパイク）の原因になります。
+DftiCreateDescriptor / DftiCommitDescriptor の呼び出し:
+これらは内部で malloc を伴います。サンプリングレートやブロックサイズが変わる場合は、一度オーディオを止めてから prepareToPlay でやり直すべきです。
+DftiSetValue による設定変更:
+一部の設定変更は内部テーブルの再計算と再確保を誘発します。
+記述子のコピー:
+mklDesc はポインタなので、単純な代入（handleA = handleB）をすると、一方を Free した際にもう一方が「ぶら下がりポインタ」になり、クラッシュの元になります。
+4. リーク検知のヒント
+Windows環境では、タスクマネージャーの「コミット済みメモリ」を監視するよりも、Intel® Inspector や Visual Studio の 「診断ツール（メモリ使用率）」 を使用してください。
+processBlock が数分間走った後にメモリが数MBでも増えていれば、記述子の破棄漏れか、内部ワークスペースの再生成が発生しています。

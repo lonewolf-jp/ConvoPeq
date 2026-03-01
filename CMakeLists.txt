@@ -135,6 +135,8 @@ target_sources(ConvoPeq PRIVATE
     src/MainApplication.cpp
     src/MainWindow.cpp
     src/AudioEngine.cpp
+    src/CustomInputOversampler.cpp
+    src/AudioEngineProcessor.cpp
     src/ConvolverProcessor.cpp
     src/EQProcessor.cpp
     src/ConvolverControlPanel.cpp
@@ -142,6 +144,8 @@ target_sources(ConvoPeq PRIVATE
     src/SpectrumAnalyzerComponent.cpp
     src/DeviceSettings.cpp
     src/AsioBlacklist.h
+    src/CustomInputOversampler.h
+    src/AudioEngineProcessor.h
     src/PsychoacousticDither.h
     ${WDL_SOURCES}
 )

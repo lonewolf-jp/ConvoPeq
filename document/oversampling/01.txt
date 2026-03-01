@@ -1,0 +1,82 @@
+１．オーディオスレッド外（prepareToPlay 等）で実行し、-160dBスペックの係数をサンプリングレート別にプリコンパイルするための係数テーブル管理クラスの設計図です。
+この設計では、「計算済みの生係数」をそのまま持つのではなく、AVX2での計算効率を最大化するために「非ゼロ係数のみを抽出したSIMD最適化レイアウト」で保持します。
+
+この設計図のポイント
+Stageごとの戦略的タップ数:
+全てのステージを1023タップにすると768kHzでのCPU負荷が非現実的になります。
+第1段のみを極限まで急峻にし、第2・第3段は「既にエイリアシング成分が可聴域から遠ざかっている」ことを利用してタップ数を減らす（B, Cプリセット）ことで、音質と負荷を両立させます。
+ハーフバンド最適化 (Zero-Skipping):
+activeCoeffs には 0.0 の係数を一切含めないため、AVX2ループ内での無駄な乗算が発生しません。
+ディレイ（遅延）の厳密管理:
+totalDelay をステージごとに保持します。多段OS後の信号は、コンボルバー側のIRと合成する際に Stage1_Delay + Stage2_Delay + Stage3_Delay 分だけ位相を合わせる必要があります。
+ベッセル関数の精度:
+-160dB を狙う場合、窓関数の分母となる I0(beta) の計算精度が極めて重要です。1e-18 までの収束を確認することで、64bit Doubleの精度をフルに活用します。
+
+2. 各ステージ用係数の設計値 (64bit double / -160dB用)
+オーディオスレッドで読み込むための、64バイトアライメント済み定数テーブルの構成案です。
+【Preset A】第1段用 (最も急峻)
+用途: fsから2fsへの変換。エイリアシング除去の要。
+タップ数: 1023 タップ（ハーフバンドにつき非ゼロ係数は 512個）
+メモリサイズ: 
+ (L1キャッシュに余裕で収まる)
+【Preset B】第2段用
+用途: 2fsから4fsへの変換。
+タップ数: 127 〜 255 タップ（非ゼロ係数 64〜128個）
+理由: 既にサンプリングレートが高いため、遷移帯域を広げても可聴域に影響せず、計算負荷を下げられます。
+【Preset C】第3段用
+用途: 4fsから8fsへの変換。
+タップ数: 31 〜 63 タップ（非ゼロ係数 16〜32個）
+
+
+
+/*==============================================================================
+    OSCoefficientsManager.h - v1.1 (可変倍率対応版)
+    ユーザー選択に基づき、必要なOSステージのみをアクティブ化する
+==============================================================================*/
+
+class OSCoefficientsManager {
+public:
+    /**
+     * @param inputFs 入力サンプリングレート
+     * @param requestedRatio ユーザーが選択した倍率 (1, 2, 4, 8)
+     */
+    void updateConfiguration(double inputFs, int requestedRatio) {
+        clear();
+        
+        // 1. 入力レートに基づく「最大許容倍率」のチェック
+        int maxAllowed = 1;
+        if (inputFs <= 96000.0)       maxAllowed = 8;
+        else if (inputFs <= 192000.0) maxAllowed = 4;
+        else if (inputFs <= 384000.0) maxAllowed = 2;
+        else                          maxAllowed = 1;
+
+        // 実際の動作倍率を決定 (ユーザー要求と制限の最小値)
+        activeRatio = std::min(requestedRatio, maxAllowed);
+
+        // 2. 必要な段数だけステージを追加
+        // x2 なら 1段, x4 なら 2段, x8 なら 3段
+        if (activeRatio >= 2) {
+            // Stage 1: 常に最高精度 (-160dB / 0.05fs)
+            addStage(1023, 17.7); 
+        }
+        if (activeRatio >= 4) {
+            // Stage 2: 2段目 (計算負荷を考慮し、タップ数を調整)
+            addStage(255, 14.0); 
+        }
+        if (activeRatio >= 8) {
+            // Stage 3: 3段目 (高域のため、さらにコンパクトに)
+            addStage(63, 10.0);
+        }
+    }
+
+    int getActiveRatio() const { return activeRatio; }
+    int getTotalLatencySamples() const {
+        int total = 0;
+        for (const auto& s : stages) total += s->totalDelay;
+        return total;
+    }
+
+private:
+    int activeRatio = 1;
+    // ... 前述の addStage, generateKaiserHalfBand 等のメソッド ...
+};

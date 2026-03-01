@@ -182,6 +182,8 @@ private:
 
         int latency = 0;
         int irLatency = 0; // IR由来の遅延 (ピーク位置)
+        int callQuantumSamples = 0;    // Audio Thread でのWDL呼び出し量子
+        int prewarmedMaxSamples = 0;   // Message Thread でプリウォーム済みの最大呼び出し長
 
         using Ptr = std::shared_ptr<StereoConvolver>;
 
@@ -198,13 +200,15 @@ private:
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        void init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition)
+        void init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize)
         {
             // Ownership transfer
             irData[0] = irL;
             irData[1] = irR;
             irDataLength = length;
             this->irLatency = peakDelay;
+            callQuantumSamples = juce::jmax(1, preferredCallSize);
+            prewarmedMaxSamples = callQuantumSamples;
 
             WDL_ImpulseBuffer impL_stack, impR_stack;
             impL_stack.samplerate = sr;
@@ -229,16 +233,63 @@ private:
             // WDL_ConvolutionEngine::GetLatency() はサンプル数を返す
             latency = convolvers[0].GetLatency();
 
-            // プリウォーミング (Audio Threadでのメモリ確保回避)
-            // 最初のAdd呼び出し時に内部バッファが確保されるため、ここでダミー処理を行っておく
+            // プリウォーミング (Audio Threadでの後追い確保回避)
+            // WDL_ConvolutionEngine_Div::Add/Avail/Get は内部キューの拡張を伴う場合があるため、
+            // Message Thread側で実運用に近い呼び出しを行って必要なバッファを先に確保しておく。
+            auto prewarmConvolver = [](WDL_ConvolutionEngine_Div& engine, int callSamples)
             {
-                double dummySample = 0.0;
-                WDL_FFT_REAL* inputs[1] = { &dummySample };
-                convolvers[0].Add(inputs, 1, 1);
-                convolvers[1].Add(inputs, 1, 1);
-                convolvers[0].Reset();
-                convolvers[1].Reset();
-            }
+                const int warmupSamples = juce::jmax(1, callSamples);
+                const int latencySamples = juce::jmax(engine.GetLatency(), warmupSamples);
+                const int warmupBlocks = juce::jlimit(32, 2048,
+                                                      (latencySamples + warmupSamples - 1) / warmupSamples + 64);
+
+                for (int i = 0; i < warmupBlocks; ++i)
+                {
+                    engine.Add(nullptr, warmupSamples, 1);
+                    const int avail = engine.Avail(warmupSamples);
+                    if (avail > 0)
+                    {
+                        (void)engine.Get();
+                        engine.Advance(avail);
+                    }
+                }
+
+                // 高水位プリウォーム:
+                // Avail/Get を Advance せずに回し、内部出力キューの容量を先に拡張させる。
+                const int queuePrimeBlocks = juce::jlimit(8, 512, warmupBlocks / 2);
+                for (int i = 0; i < queuePrimeBlocks; ++i)
+                {
+                    engine.Add(nullptr, warmupSamples, 1);
+                    if (engine.Avail(warmupSamples) > 0)
+                        (void)engine.Get();
+                }
+
+                // 末尾の残留分を完全にドレインして初期状態へ戻す
+                const int maxDrainIterations = warmupBlocks + queuePrimeBlocks + 64;
+                for (int i = 0; i < maxDrainIterations; ++i)
+                {
+                    const int avail = engine.Avail(warmupSamples);
+                    if (avail <= 0)
+                        break;
+                    (void)engine.Get();
+                    engine.Advance(avail);
+                }
+
+                // 末尾の残留分を軽くフラッシュ
+                for (int i = 0; i < 8; ++i)
+                {
+                    const int avail = engine.Avail(warmupSamples);
+                    if (avail <= 0)
+                        break;
+                    (void)engine.Get();
+                    engine.Advance(avail);
+                }
+            };
+
+            prewarmConvolver(convolvers[0], callQuantumSamples);
+            prewarmConvolver(convolvers[1], callQuantumSamples);
+            convolvers[0].Reset();
+            convolvers[1].Reset();
         }
 
         void reset() { convolvers[0].Reset(); convolvers[1].Reset(); }

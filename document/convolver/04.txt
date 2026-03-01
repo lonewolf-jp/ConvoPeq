@@ -1,0 +1,67 @@
+「768kHzで発生する大量のメモリ確保を避けるための、静的メモリプール管理」
+768kHzという極限のサンプリングレートでは、オーディオスレッド内での new や malloc はもちろん、std::vector のリサイズですら「死（音切れ）」を意味します。
+これを回避するための、「起動時に全メモリを確保し、実行時はポインタを回すだけ」の静的メモリプール設計図を提示します。
+1. 静的メモリプールの構造設計
+768kHzの1ブロック（例：1024サンプル）はわずか 1.33ms です。OSのメモリマネージャーがロックをかけている間に、この時間は過ぎ去ります。そのため、以下の3層構造でメモリを管理します。
+Primary Pool (固定長配列): 入力、中間出力、デシメーション用。
+FFT Workspace (MKL専用): Dfti が内部で使用するワークエリア。
+Partition Buffers (Non-uniform用): Head/Body/Tailの各階層が使用する履歴バッファ。
+2. メモリプール・マネージャーの実装 (C++ / 64bit Double)
+cpp
+/*==============================================================================
+    StaticMemoryPool.h - v1.0
+    768kHz / 64bit / AVX2 最適化済み静的メモリ管理
+==============================================================================*/
+
+class StaticMemoryPool {
+public:
+    // 起動時 (prepareToPlay) に一括確保
+    void allocate(int maxSamplesPerBlock, int maxIrLength, int numPartitions) {
+        // 1. 基本計算バッファ (L2キャッシュに入りやすいよう連続領域で確保)
+        // 64byte align を守り、AVX2のロード効率を最大化
+        inputPool.reset(new AlignedBuffer<double>(maxSamplesPerBlock * 2));
+        outputPool.reset(new AlignedBuffer<double>(maxSamplesPerBlock * 8)); // x8 OS用
+
+        // 2. Non-uniform FFT用の「ダブルバッファ」
+        // ワーカースレッドが計算中に、オーディオスレッドが次を書き込めるようにする
+        for (int i = 0; i < numPartitions; ++i) {
+            auto& p = partitions[i];
+            p.fftInput.reset(new AlignedBuffer<double>(fftSizes[i] * 2)); // ダブルバッファ
+            p.fftOutput.reset(new AlignedBuffer<double>(fftSizes[i] * 2));
+        }
+
+        // 3. MKL DFTI 内部ワークスペースの「事前コミット」
+        // DftiCommitDescriptor を呼ぶことで、内部メモリ確保をこの時点で済ませる
+        commitMklDescriptors();
+    }
+
+    // 実行時 (processBlock) はポインタを取得するだけ (O(1) / Lock-free)
+    double* getNextInputBuffer() { return inputPool->data; }
+
+private:
+    std::unique_ptr<AlignedBuffer<double>> inputPool;
+    std::unique_ptr<AlignedBuffer<double>> outputPool;
+    
+    struct PartitionBuffers {
+        std::unique_ptr<AlignedBuffer<double>> fftInput;
+        std::unique_ptr<AlignedBuffer<double>> fftOutput;
+    };
+    std::vector<PartitionBuffers> partitions;
+};
+コードは注意してご使用ください。
+
+3. 768kHz での「メモリ・リサイクル」戦略
+単に確保するだけでなく、「キャッシュの色（Cache Coloring）」を意識した配置が重要です。
+ゼロコピー・ポインタ・スワップ:
+データの memcpy を行うのではなく、バッファ A と B のポインタを入れ替えることで「移動」を表現します。
+cpp
+// オーディオスレッド
+std::swap(currentFftInput, prevFftInput); 
+// これだけで 768kHz の数千サンプルの「移動」が 1 クロックで終わる
+コードは注意してご使用ください。
+
+MKL DFTI_INPLACE の徹底:
+入力バッファと出力バッファを同一に設定することで、メモリ消費量を半分にし、L3キャッシュのヒット率を劇的に高めます。
+4. 静的確保の注意点：DftiCommitDescriptor
+MKLのFFTにおいて、最も見落としがちな「隠れたメモリ確保」が DftiComputeForward の初回呼び出し時です。
+対策: prepareToPlay 内で必ず DftiCommitDescriptor を呼び出してください。これにより、FFTに必要な計算テーブルや内部ワークスペースがすべて確保・初期化されます。オーディオスレッド内でこれを呼ぶと、確実に音切れします。
