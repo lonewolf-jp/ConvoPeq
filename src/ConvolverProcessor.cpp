@@ -33,11 +33,20 @@ namespace
     struct DftiGuard
     {
         DFTI_DESCRIPTOR_HANDLE* handle = nullptr;
+
+        explicit DftiGuard(DFTI_DESCRIPTOR_HANDLE* h) noexcept : handle(h) {}
+
         ~DftiGuard()
         {
             if (handle != nullptr && *handle != nullptr)
+            {
                 DftiFreeDescriptor(handle);
+                *handle = nullptr;
+            }
         }
+
+        DftiGuard(const DftiGuard&) = delete;
+        DftiGuard& operator=(const DftiGuard&) = delete;
     };
 }
 #endif
@@ -55,6 +64,20 @@ static bool checkCancellation(const std::function<bool()>& shouldExit, bool* was
         return true;
     }
     return false;
+}
+
+// AudioBufferの容量を現在のサイズに合わせて縮小するヘルパー
+// JUCEのsetSize()は容量を縮小しないため、メモリ使用量を最適化するために使用する
+static void shrinkToFit(juce::AudioBuffer<double>& buffer)
+{
+    if (buffer.getNumSamples() == 0 || buffer.getNumChannels() == 0)
+        return;
+
+    juce::AudioBuffer<double> newBuffer(buffer.getNumChannels(), buffer.getNumSamples());
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        newBuffer.copyFrom(ch, 0, buffer, ch, 0, buffer.getNumSamples());
+
+    buffer = std::move(newBuffer);
 }
 
 // リサンプリング用ヘルパー
@@ -85,7 +108,7 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
     {
         if (checkCancellation(shouldExit, nullptr)) return {};
 
-        r8b::CDSPResampler resampler(inputSR, targetSR, inLength, transBand, stopBandAtten, phase);
+        auto resampler = std::make_unique<r8b::CDSPResampler>(inputSR, targetSR, inLength, transBand, stopBandAtten, phase);
 
         const double* inPtr = inputIR.getReadPointer(ch);
         double* outPtr = resampled.getWritePointer(ch);
@@ -104,7 +127,7 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
             int chunk = std::min(CHUNK_SIZE, inLength - inputProcessed);
             double* r8bOutput = nullptr;
 
-            const int generated = resampler.process(const_cast<double*>(inPtr + inputProcessed), chunk, r8bOutput);
+            const int generated = resampler->process(const_cast<double*>(inPtr + inputProcessed), chunk, r8bOutput);
             inputProcessed += chunk;
 
             if (generated > 0)
@@ -120,7 +143,7 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
         {
             if (checkCancellation(shouldExit, nullptr)) return {};
             double* r8bOutput = nullptr;
-            const int generated = resampler.process(nullptr, 0, r8bOutput);
+            const int generated = resampler->process(nullptr, 0, r8bOutput);
 
             if (generated <= 0) break;
 
@@ -131,6 +154,7 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
         maxLength = std::max(maxLength, done);
     }
     resampled.setSize(inputIR.getNumChannels(), maxLength, true, true, true);
+    shrinkToFit(resampled); // 余分なキャパシティを解放
 
     // コンボリューション用のIRリサンプリングでは、サンプルレート比率の逆数をゲインとして適用する。
     // Upsampling (ratio > 1.0) -> Gain < 1.0 (減衰)
@@ -512,7 +536,10 @@ public:
                 }
 
                 if (newLength < result.loadedIR.getNumSamples())
+                {
                     result.loadedIR.setSize(channels, std::max(1, newLength), true);
+                    shrinkToFit(result.loadedIR); // 末尾カット後の余分なメモリを解放
+                }
             }
 
             // 4. リサンプリング (SR不一致の場合)
@@ -745,7 +772,6 @@ ConvolverProcessor::~ConvolverProcessor()
     // スレッドを停止
     activeLoader.reset();
     trashBin.clear();
-    trashBinPending.clear();
     convolution.store(nullptr);
     activeConvolution.reset();
 }
@@ -801,7 +827,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
             if (activeConvolution)
             {
                 const juce::ScopedLock sl(trashBinLock);
-                trashBinPending.push_back(activeConvolution);
+                trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
             }
             activeConvolution = newConv;
         }
@@ -864,6 +890,39 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     }
 
     isPrepared.store(true, std::memory_order_release);
+}
+
+void ConvolverProcessor::releaseResources()
+{
+    // バッファの解放
+    delayBuffer[0].reset();
+    delayBuffer[1].reset();
+    delayBufferCapacity = 0;
+
+    dryBufferStorage[0].reset();
+    dryBufferStorage[1].reset();
+    dryBufferCapacity = 0;
+
+    smoothingBufferStorage[0].reset();
+    smoothingBufferStorage[1].reset();
+    smoothingBufferCapacity = 0;
+
+    cachedFFTBuffer.reset();
+    cachedFFTBufferCapacity = 0;
+
+    dryBuffer.setSize(0, 0);
+    smoothingBuffer.setSize(0, 0);
+
+    // Release active convolution engine
+    convolution.store(nullptr, std::memory_order_release);
+    activeConvolution.reset();
+
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        trashBin.clear();
+    }
+
+    isPrepared.store(false, std::memory_order_release);
 }
 
 void ConvolverProcessor::reset()
@@ -951,14 +1010,31 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     DftiGuard dftiGuard { &dfti };
 
     const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
+    // --- Descriptor Creation and Configuration ---
+    // Each step is checked to prevent using an invalid handle.
     if (DftiCreateDescriptor(&dfti, DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
+    {
+        DBG("convertToMinimumPhase: DftiCreateDescriptor failed.");
         return {};
+    }
+
     if (DftiSetValue(dfti, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR)
+    {
+        DBG("convertToMinimumPhase: DftiSetValue(DFTI_PLACEMENT) failed.");
         return {};
+    }
+
     if (DftiSetValue(dfti, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR)
+    {
+        DBG("convertToMinimumPhase: DftiSetValue(DFTI_BACKWARD_SCALE) failed.");
         return {};
+    }
+
     if (DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
+    {
+        DBG("convertToMinimumPhase: DftiCommitDescriptor failed.");
         return {};
+    }
 
     convo::ScopedAlignedPtr<MKL_Complex16> spectrum(static_cast<MKL_Complex16*>(convo::aligned_malloc(
         static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
@@ -978,8 +1054,10 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         }
 
         // 1) FFT
-        if (DftiComputeForward(dfti, spectrum.get()) != DFTI_NO_ERROR)
+        if (DftiComputeForward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
+            DBG("convertToMinimumPhase: DftiComputeForward (1) failed.");
             return {};
+        }
 
         // 2) log|H(w)|
         for (int i = 0; i < fftSize; ++i)
@@ -995,8 +1073,10 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         }
 
         // 3) IFFT -> real cepstrum
-        if (DftiComputeBackward(dfti, spectrum.get()) != DFTI_NO_ERROR)
+        if (DftiComputeBackward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
+            DBG("convertToMinimumPhase: DftiComputeBackward (1) failed.");
             return {};
+        }
 
         // 4) causal lifter
         const int half = fftSize / 2;
@@ -1014,8 +1094,10 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         }
 
         // 5) FFT
-        if (DftiComputeForward(dfti, spectrum.get()) != DFTI_NO_ERROR)
+        if (DftiComputeForward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
+            DBG("convertToMinimumPhase: DftiComputeForward (2) failed.");
             return {};
+        }
 
         // 6) complex exp
         for (int i = 0; i < fftSize; ++i)
@@ -1034,8 +1116,10 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         }
 
         // 7) IFFT -> minimum-phase IR
-        if (DftiComputeBackward(dfti, spectrum.get()) != DFTI_NO_ERROR)
+        if (DftiComputeBackward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
+            DBG("convertToMinimumPhase: DftiComputeBackward (2) failed.");
             return {};
+        }
 
         double* dst = minPhaseIR.getWritePointer(ch);
         for (int i = 0; i < numSamples; ++i)
@@ -1146,7 +1230,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
     {
         DBG("ConvolverProcessor: Enqueueing old StereoConvolver to trash bin.");
         const juce::ScopedLock sl(trashBinLock);
-        trashBinPending.push_back(activeConvolution); // 古いオブジェクトをゴミ箱へ
+        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()}); // 古いオブジェクトをゴミ箱へ
     }
     activeConvolution = newConv;
 
@@ -1187,12 +1271,7 @@ void ConvolverProcessor::cleanup()
 
         trashBin.erase(it, trashBin.end());
 
-        // 2. Move pending to trash with timestamp
-        for (const auto& ptr : trashBinPending)
-            trashBin.push_back({ptr, now});
-        trashBinPending.clear();
-
-        // 3. Size limit (Max 5 items) - メモリ爆発防止
+        // 2. Size limit (Max 5 items) - メモリ爆発防止
         if (trashBin.size() > 5)
         {
             size_t removeCount = trashBin.size() - 5;
@@ -1465,21 +1544,12 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     irName = other.irName;
     irLength = other.irLength;
 
-    // Convolutionオブジェクトの同期 (Deep Copy)
-    // rebuild時は新しいDSPCoreが作られるため、既存のStereoConvolverを共有すると
-    // prepareToPlayでのreset()が稼働中のDSPに影響してしまう。
-    // そのため、ディープコピーを作成して独立させる。
-    auto otherConv = other.activeConvolution;
-
-    StereoConvolver::Ptr newConv = (otherConv != nullptr) ? otherConv->clone() : nullptr;
-    convolution.store(newConv.get(), std::memory_order_release);
-
-    if (activeConvolution)
-    {
-        const juce::ScopedLock sl(trashBinLock);
-        trashBinPending.push_back(activeConvolution);
-    }
-    activeConvolution = newConv;
+    // ▼ クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
+    // 現在の実装では毎回クローンを作成し即廃棄している（LEAK 1）
+    // SCはDSPCore::prepare()内のprepareToPlay、またはrebuildAllIRsSynchronousで生成する
+    // activeConvolution / convolution はnullptrのままにする
+    convolution.store(nullptr, std::memory_order_release);
+    activeConvolution.reset();
 }
 
 void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
@@ -1507,12 +1577,7 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
 
         if (otherConv != expectedConv && otherConv != nullptr)
         {
-            // Note: This is a simplified sync. In a real scenario, we should handle ref counting carefully.
-            // Since this is called from UI thread (timer) usually, we can just do a swap if needed.
-            // But syncing raw pointers between processors is tricky.
-            // For now, we assume syncStateFrom (full sync) is preferred.
-            // Leaving this as is might be unsafe if otherConv is deleted.
-            // Ideally, we should clone or increment ref count.
+            shareConvolutionEngineFrom(other);
         }
     }
 }
@@ -1527,11 +1592,41 @@ void ConvolverProcessor::copyConvolutionEngineFrom(const ConvolverProcessor& oth
     if (activeConvolution)
     {
         const juce::ScopedLock sl(trashBinLock);
-        trashBinPending.push_back(activeConvolution);
+        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
     }
     activeConvolution = newConv;
 
     irLength = other.irLength;
+}
+
+void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& other)
+{
+    // Share the active convolution engine (Shared Pointer copy)
+    auto otherConv = other.activeConvolution;
+    convolution.store(otherConv.get(), std::memory_order_release);
+
+    if (activeConvolution)
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
+    }
+    activeConvolution = otherConv;
+
+    irLength = other.irLength;
+}
+
+void ConvolverProcessor::refreshLatency()
+{
+    auto* conv = convolution.load(std::memory_order_acquire);
+    if (conv)
+    {
+        const int totalLatency = juce::jmin(conv->latency + conv->irLatency, MAX_TOTAL_DELAY);
+        latencySmoother.setCurrentAndTargetValue(static_cast<double>(totalLatency));
+    }
+    else
+    {
+        latencySmoother.setCurrentAndTargetValue(0.0);
+    }
 }
 
 //--------------------------------------------------------------

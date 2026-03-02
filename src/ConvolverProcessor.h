@@ -77,6 +77,7 @@ public:
     // 準備（Audio Thread開始前）
     //----------------------------------------------------------
     void prepareToPlay(double sampleRate, int samplesPerBlock);
+    void releaseResources();
 
     //----------------------------------------------------------
     // インパルス応答読み込み（Message Thread）
@@ -163,6 +164,8 @@ public:
     void syncStateFrom(const ConvolverProcessor& other);
     void syncParametersFrom(const ConvolverProcessor& other);
     void copyConvolutionEngineFrom(const ConvolverProcessor& other);
+    void shareConvolutionEngineFrom(const ConvolverProcessor& other);
+    void refreshLatency();
 
     // 可視化データ生成の制御 (DSP用インスタンスでは無効化してメモリを節約)
     void setVisualizationEnabled(bool enabled) { visualizationEnabled = enabled; }
@@ -204,6 +207,8 @@ private:
         ~StereoConvolver() {
             if (irData[0]) convo::aligned_free(irData[0]);
             if (irData[1]) convo::aligned_free(irData[1]);
+            convolvers[0].Reset();
+            convolvers[1].Reset();
         }
 
         // コピーコンストラクタは禁止 (WDLエンジンは複製コストが高く、状態を持つため)
@@ -340,7 +345,6 @@ private:
     std::atomic<StereoConvolver*> convolution { nullptr }; // Raw pointer for Audio Thread (Lock-free)
     StereoConvolver::Ptr activeConvolution; // Ownership holder for Message Thread
     std::vector<std::pair<StereoConvolver::Ptr, uint32>> trashBin; // Time-based GC
-    std::vector<StereoConvolver::Ptr> trashBinPending;
     juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };

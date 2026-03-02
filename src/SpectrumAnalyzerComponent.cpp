@@ -19,17 +19,16 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     // ScopedAlignedPtr handles memory management and exception safety automatically.
     juce::FloatVectorOperations::clear(fftTimeDomainBuffer.get(), NUM_FFT_POINTS);
     juce::FloatVectorOperations::clear(fftWorkBuffer.get(), NUM_FFT_POINTS * 2);
-    rawBuffer.assign       (NUM_FFT_BINS, MIN_DB);
-    smoothedBuffer.assign  (NUM_FFT_BINS, MIN_DB);
-    peakBuffer.assign      (NUM_FFT_BINS, MIN_DB);
-    peakHoldCounter.assign (NUM_FFT_BINS, 0);
-    eqResponseBufferL.assign(NUM_DISPLAY_BARS, 0.0f);
-    eqResponseBufferR.assign(NUM_DISPLAY_BARS, 0.0f);
+    rawBuffer.fill(MIN_DB);
+    smoothedBuffer.fill(MIN_DB);
+    peakBuffer.fill(MIN_DB);
+    peakHoldCounter.fill(0);
+    eqResponseBufferL.fill(0.0f);
+    eqResponseBufferR.fill(0.0f);
 
-    individualBandCurvesL.assign(EQProcessor::NUM_BANDS, std::vector<float>(NUM_DISPLAY_BARS, MIN_DB));
-    individualBandCurvesR.assign(EQProcessor::NUM_BANDS, std::vector<float>(NUM_DISPLAY_BARS, MIN_DB));
-    displayFrequencies.resize(NUM_DISPLAY_BARS);
-    zCache.resize(NUM_DISPLAY_BARS);
+    for (auto& band : individualBandCurvesL) band.fill(MIN_DB);
+    for (auto& band : individualBandCurvesR) band.fill(MIN_DB);
+    // displayFrequencies and zCache are std::array, so no resize needed.
 
     individualCurvePathsL.resize(EQProcessor::NUM_BANDS);
     individualCurvePathsR.resize(EQProcessor::NUM_BANDS);
@@ -107,7 +106,11 @@ void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
 void SpectrumAnalyzerComponent::prepareFFT()
 {
 #if JUCE_DSP_USE_INTEL_MKL
-    if (fftHandle) return;
+    if (fftHandle)
+    {
+        DftiFreeDescriptor(&fftHandle);
+        fftHandle = nullptr;
+    }
     // Complex 1D FFT, Single Precision
     // リアルタイム性を考慮し、事前にDescriptorを作成・コミットしておく
     if (DftiCreateDescriptor(&fftHandle, DFTI_SINGLE, DFTI_COMPLEX, 1, NUM_FFT_POINTS) != DFTI_NO_ERROR) {
@@ -142,8 +145,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     // スペアナがOFFの場合、スペアナグラフをクリア
     if (!analyzerEnableButton.getToggleState())
     {
-        std::fill(smoothedBuffer.begin(), smoothedBuffer.end(), MIN_DB);
-        std::fill(peakBuffer.begin(), peakBuffer.end(), MIN_DB);
+        smoothedBuffer.fill(MIN_DB);
+        peakBuffer.fill(MIN_DB);
         repaint();
     }
 
@@ -233,6 +236,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     // MKL: Real -> Complex conversion + Windowing
     // fftWorkBuffer is float array of size NUM_FFT_POINTS * 2
     // We treat it as interleaved complex: re, im, re, im...
+    if (fftHandle == nullptr) return;
+
    { const float* src = fftTimeDomainBuffer.get();
         float* dst = fftWorkBuffer.get();
 
@@ -249,7 +254,8 @@ void SpectrumAnalyzerComponent::timerCallback()
         }
 
         // Step 3c: FFT (Forward)
-        DftiComputeForward(fftHandle, dst);
+        if (DftiComputeForward(fftHandle, dst) != DFTI_NO_ERROR)
+            return;
 
         // Step 4: Magnitude (dB)
         const int numBins = std::min(static_cast<int>(rawBuffer.size()), NUM_FFT_BINS);
@@ -645,8 +651,8 @@ void SpectrumAnalyzerComponent::updateEQData()
             const auto params = engine.getEQProcessor().getBandParams(b);
             if (!params.enabled)
             {
-                std::fill(individualBandCurvesL[b].begin(), individualBandCurvesL[b].end(), 0.0f);
-                std::fill(individualBandCurvesR[b].begin(), individualBandCurvesR[b].end(), 0.0f);
+                individualBandCurvesL[b].fill(0.0f);
+                individualBandCurvesR[b].fill(0.0f);
                 continue;
             }
 
@@ -671,8 +677,8 @@ void SpectrumAnalyzerComponent::updateEQData()
     else
     {
         // サンプルレートが無効な場合はクリア
-        std::fill(eqResponseBufferL.begin(), eqResponseBufferL.end(), 0.0f);
-        std::fill(eqResponseBufferR.begin(), eqResponseBufferR.end(), 0.0f);
+        eqResponseBufferL.fill(0.0f);
+        eqResponseBufferR.fill(0.0f);
     }
 
     updateEQPaths();
@@ -691,7 +697,7 @@ void SpectrumAnalyzerComponent::updateEQPaths()
     const float plotW = static_cast<float>(plotArea.getWidth());
     const float plotH = static_cast<float>(plotArea.getHeight());
 
-    auto createPath = [&](juce::Path& path, const std::vector<float>& buffer)
+    auto createPath = [&](juce::Path& path, const auto& buffer)
 {
     path.clear();
 

@@ -3,10 +3,7 @@
 
 #include <cmath>
 #include <cstring>
-
-#if JUCE_DSP_USE_INTEL_MKL
-#include <mkl.h>
-#endif
+#include <immintrin.h>
 
 namespace
 {
@@ -52,18 +49,13 @@ double CustomInputOversampler::attenuationForStage(int stageIndex, Preset preset
 
 void CustomInputOversampler::clearStage(Stage& stage) noexcept
 {
-    if (stage.convCoeffs) convo::aligned_free(stage.convCoeffs);
-    if (stage.convCoeffsReversed) convo::aligned_free(stage.convCoeffsReversed);
+    stage.convCoeffs.reset();
+    stage.convCoeffsReversed.reset();
     for (int ch = 0; ch < kMaxChannels; ++ch)
     {
-        if (stage.upHistory[ch]) convo::aligned_free(stage.upHistory[ch]);
-        if (stage.downHistory[ch]) convo::aligned_free(stage.downHistory[ch]);
-        stage.upHistory[ch] = nullptr;
-        stage.downHistory[ch] = nullptr;
+        stage.upHistory[ch].reset();
+        stage.downHistory[ch].reset();
     }
-
-    stage.convCoeffs = nullptr;
-    stage.convCoeffsReversed = nullptr;
     stage.upHistorySize = 0;
     stage.downHistorySize = 0;
 }
@@ -75,10 +67,8 @@ void CustomInputOversampler::release() noexcept
 
     for (int ch = 0; ch < kMaxChannels; ++ch)
     {
-        if (workA[ch]) convo::aligned_free(workA[ch]);
-        if (workB[ch]) convo::aligned_free(workB[ch]);
-        workA[ch] = nullptr;
-        workB[ch] = nullptr;
+        workA[ch].reset();
+        workB[ch].reset();
         blockChannels[ch] = nullptr;
     }
 
@@ -142,10 +132,7 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     stage.maxInputSamples = stageInputMax;
     stage.maxOutputSamples = stageInputMax * 2;
 
-    double* rawCoeffs = static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.taps) * sizeof(double), 64));
-    jassert(rawCoeffs != nullptr);
-    if (rawCoeffs == nullptr)
-        return;
+    convo::ScopedAlignedPtr<double> rawCoeffs(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.taps) * sizeof(double), 64)));
 
     const double beta = (attenuationDb > 50.0)
                       ? (0.1102 * (attenuationDb - 8.7))
@@ -197,12 +184,11 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     rawCoeffs[stage.centerTap] = 0.5;
 
     stage.convCount = (stage.taps - stage.convParity + 1) / 2;
-    stage.convCoeffs = static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.convCount) * sizeof(double), 64));
-    stage.convCoeffsReversed = static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.convCount) * sizeof(double), 64));
-    jassert(stage.convCoeffs != nullptr && stage.convCoeffsReversed != nullptr);
-    if (stage.convCoeffs == nullptr || stage.convCoeffsReversed == nullptr)
+    stage.convCoeffs.reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.convCount) * sizeof(double), 64)));
+    stage.convCoeffsReversed.reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.convCount) * sizeof(double), 64)));
+
+    if (!stage.convCoeffs || !stage.convCoeffsReversed)
     {
-        convo::aligned_free(rawCoeffs);
         clearStage(stage);
         return;
     }
@@ -224,14 +210,11 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
 
     for (int ch = 0; ch < kMaxChannels; ++ch)
     {
-        stage.upHistory[ch] = static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.upHistorySize) * sizeof(double), 64));
-        stage.downHistory[ch] = static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.downHistorySize) * sizeof(double), 64));
-        jassert(stage.upHistory[ch] != nullptr && stage.downHistory[ch] != nullptr);
-        if (stage.upHistory[ch]) juce::FloatVectorOperations::clear(stage.upHistory[ch], stage.upHistorySize);
-        if (stage.downHistory[ch]) juce::FloatVectorOperations::clear(stage.downHistory[ch], stage.downHistorySize);
+        stage.upHistory[ch].reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.upHistorySize) * sizeof(double), 64)));
+        stage.downHistory[ch].reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.downHistorySize) * sizeof(double), 64)));
+        if (stage.upHistory[ch]) juce::FloatVectorOperations::clear(stage.upHistory[ch].get(), stage.upHistorySize);
+        if (stage.downHistory[ch]) juce::FloatVectorOperations::clear(stage.downHistory[ch].get(), stage.downHistorySize);
     }
-
-    convo::aligned_free(rawCoeffs);
 }
 
 void CustomInputOversampler::prepare(int newMaxInputBlockSize, int ratio, Preset preset)
@@ -254,12 +237,11 @@ void CustomInputOversampler::prepare(int newMaxInputBlockSize, int ratio, Preset
     workCapacity = juce::jmax(1, maxUpsampledBlockSize);
     for (int ch = 0; ch < kMaxChannels; ++ch)
     {
-        workA[ch] = static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(workCapacity) * sizeof(double), 64));
-        workB[ch] = static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(workCapacity) * sizeof(double), 64));
-        jassert(workA[ch] != nullptr && workB[ch] != nullptr);
-        if (workA[ch]) juce::FloatVectorOperations::clear(workA[ch], workCapacity);
-        if (workB[ch]) juce::FloatVectorOperations::clear(workB[ch], workCapacity);
-        blockChannels[ch] = workA[ch];
+        workA[ch].reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(workCapacity) * sizeof(double), 64)));
+        workB[ch].reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(workCapacity) * sizeof(double), 64)));
+        if (workA[ch]) juce::FloatVectorOperations::clear(workA[ch].get(), workCapacity);
+        if (workB[ch]) juce::FloatVectorOperations::clear(workB[ch].get(), workCapacity);
+        blockChannels[ch] = workA[ch].get();
     }
 }
 
@@ -270,8 +252,8 @@ void CustomInputOversampler::reset() noexcept
         auto& stage = stages[i];
         for (int ch = 0; ch < kMaxChannels; ++ch)
         {
-            if (stage.upHistory[ch]) juce::FloatVectorOperations::clear(stage.upHistory[ch], stage.upHistorySize);
-            if (stage.downHistory[ch]) juce::FloatVectorOperations::clear(stage.downHistory[ch], stage.downHistorySize);
+            if (stage.upHistory[ch]) juce::FloatVectorOperations::clear(stage.upHistory[ch].get(), stage.upHistorySize);
+            if (stage.downHistory[ch]) juce::FloatVectorOperations::clear(stage.downHistory[ch].get(), stage.downHistorySize);
         }
     }
 }
@@ -282,7 +264,7 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
                                               double* output,
                                               int channel) noexcept
 {
-    double* history = stage.upHistory[channel];
+    double* history = stage.upHistory[channel].get();
     if (history == nullptr || input == nullptr || output == nullptr)
         return;
 
@@ -293,7 +275,7 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
     {
         const int idx = keep + n;
         const double* xWindow = history + idx - (stage.convCount - 1);
-        const double convValue = 2.0 * dotProductAvx2(xWindow, stage.convCoeffsReversed, stage.convCount);
+        const double convValue = 2.0 * dotProductAvx2(xWindow, stage.convCoeffsReversed.get(), stage.convCount);
         const double centerValue = 2.0 * stage.centerCoeff * history[idx - stage.centerDelayInput];
         const int outBase = n << 1;
 
@@ -310,7 +292,7 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
                                            double* output,
                                            int channel) noexcept
 {
-    double* history = stage.downHistory[channel];
+    double* history = stage.downHistory[channel].get();
     if (history == nullptr || input == nullptr || output == nullptr)
         return;
 
@@ -326,7 +308,7 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
         for (int r = 0; r < stage.convCount; ++r)
         {
             const int sampleIndex = base - stage.convParity - (r << 1);
-            acc += stage.convCoeffs[r] * history[sampleIndex];
+            acc += stage.convCoeffs.get()[r] * history[sampleIndex];
         }
 
         output[n] = acc;
@@ -355,8 +337,8 @@ juce::dsp::AudioBlock<double> CustomInputOversampler::processUp(const juce::dsp:
     for (int stageIndex = 0; stageIndex < numStages; ++stageIndex)
     {
         const bool writeToA = ((stageIndex & 1) == 0);
-        double* stageOut[2] = { writeToA ? workA[0] : workB[0],
-                                writeToA ? workA[1] : workB[1] };
+        double* stageOut[2] = { writeToA ? workA[0].get() : workB[0].get(),
+                                writeToA ? workA[1].get() : workB[1].get() };
 
         for (int ch = 0; ch < channels; ++ch)
             interpolateStage(stages[stageIndex], currIn[ch], currSamples, stageOut[ch], ch);
@@ -396,8 +378,8 @@ void CustomInputOversampler::processDown(const juce::dsp::AudioBlock<double>& up
     for (int stageIndex = numStages - 1; stageIndex >= 0; --stageIndex)
     {
         const bool writeToA = (((numStages - 1 - stageIndex) & 1) == 0);
-        double* stageOut[2] = { writeToA ? workA[0] : workB[0],
-                                writeToA ? workA[1] : workB[1] };
+        double* stageOut[2] = { writeToA ? workA[0].get() : workB[0].get(),
+                                writeToA ? workA[1].get() : workB[1].get() };
 
         for (int ch = 0; ch < channels; ++ch)
             decimateStage(stages[stageIndex], currIn[ch], currSamples, stageOut[ch], ch);

@@ -9,6 +9,7 @@
 #include <complex>
 #include <algorithm>
 #include <mutex>
+#include <condition_variable>
 #include <avrt.h>
 #include <xmmintrin.h>
 #include <immintrin.h>
@@ -31,6 +32,9 @@ AudioEngine::AudioEngine()
 
 void AudioEngine::initialize()
 {
+    // Start worker thread
+    rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
+
     // 初期DSP構築 (デフォルト設定)
     // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
     // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
@@ -43,10 +47,10 @@ void AudioEngine::initialize()
     uiConvolverProcessor.addListener(this);
     uiEqProcessor.addListener(this);
 
-    // タイマー開始 (50ms間隔)
+    // タイマー開始 (100ms間隔)
     // - DSP再構築リクエストのポーリング (Audio Threadからの依頼を処理)
     // - ガベージコレクション
-    startTimer(50);
+    startTimer(100);
 }
 
 
@@ -63,6 +67,13 @@ AudioEngine::~AudioEngine()
     // 進行中のコールバックが完了するのを待つため、DSPを無効化
     // これにより、changeListenerCallback内でdsp->へのアクセスを防ぐ
     currentDSP.store(nullptr, std::memory_order_release);
+
+    // Stop worker thread
+    rebuildThreadShouldExit.store(true);
+    rebuildCV.notify_one();
+    if (rebuildThread.joinable())
+        rebuildThread.join();
+
     activeDSP.reset();
 }
 
@@ -512,71 +523,96 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     OversamplingType osType = oversamplingType.load();
     DSPCore::Ptr current = activeDSP; // 現在のアクティブDSPをキャプチャ
 
-    juce::WeakReference<AudioEngine> weakSelf(this);
+    RebuildTask task;
+    task.newDSP = newDSP;
+    task.currentDSP = current;
+    task.sampleRate = sampleRate;
+    task.samplesPerBlock = samplesPerBlock;
+    task.ditherDepth = ditherDepth;
+    task.manualOversamplingFactor = osFactor;
+    task.oversamplingType = osType;
+    task.generation = generation;
 
-    // 非同期スレッドで重い処理（IRリサンプリング等）を実行
-    std::thread([weakSelf, newDSP, current, sampleRate, samplesPerBlock, ditherDepth, osFactor, osType, generation]() {
+    {
+        std::lock_guard<std::mutex> lock(rebuildMutex);
+        pendingTask = task;
+        hasPendingTask = true;
+    }
+    rebuildCV.notify_one();
+}
+
+void AudioEngine::rebuildThreadLoop()
+{
+    while (true)
+    {
+        RebuildTask task;
+        {
+            std::unique_lock<std::mutex> lock(rebuildMutex);
+            rebuildCV.wait(lock, [this] { return hasPendingTask || rebuildThreadShouldExit.load(); });
+
+            if (rebuildThreadShouldExit.load()) break;
+
+            task = pendingTask;
+            hasPendingTask = false;
+        }
+
         // Helper to check obsolescence
         const auto isObsolete = [&]() {
-            if (auto* self = weakSelf.get())
-                return self->isRebuildObsolete(generation);
-            return true;
+            return isRebuildObsolete(task.generation) || rebuildThreadShouldExit.load();
         };
 
-        if (isObsolete()) return;
+        if (isObsolete()) continue;
 
         // 1. Prepare (メモリ確保)
-        newDSP->prepare(sampleRate, samplesPerBlock, ditherDepth, osFactor, osType);
+        task.newDSP->prepare(task.sampleRate, task.samplesPerBlock, task.ditherDepth, task.manualOversamplingFactor, task.oversamplingType);
 
-        if (isObsolete()) return;
+        if (isObsolete()) continue;
 
         // 2. Reuse Logic
         bool irReused = false;
-        if (current)
+        if (task.currentDSP)
         {
             // 既存のDSPからAGCの状態を引き継ぐ
-            newDSP->eq.syncGlobalStateFrom(current->eq);
+            task.newDSP->eq.syncGlobalStateFrom(task.currentDSP->eq);
 
-            if (std::abs(current->sampleRate - sampleRate) < 1e-6 &&
-                current->oversamplingFactor == newDSP->oversamplingFactor && newDSP->oversamplingFactor > 1)
+            if (std::abs(task.currentDSP->sampleRate - task.sampleRate) < 1e-6 &&
+                task.currentDSP->oversamplingFactor == task.newDSP->oversamplingFactor && task.newDSP->oversamplingFactor > 1)
             {
                 // IRの生成条件が一致しているか確認
-                if (newDSP->convolver.getIRName() == current->convolver.getIRName() &&
-                    newDSP->convolver.getUseMinPhase() == current->convolver.getUseMinPhase() &&
-                    std::abs(newDSP->convolver.getTargetIRLength() - current->convolver.getTargetIRLength()) < 0.001f)
+                if (task.newDSP->convolver.getIRName() == task.currentDSP->convolver.getIRName() &&
+                    task.newDSP->convolver.getUseMinPhase() == task.currentDSP->convolver.getUseMinPhase() &&
+                    std::abs(task.newDSP->convolver.getTargetIRLength() - task.currentDSP->convolver.getTargetIRLength()) < 0.001f)
                 {
-                    // 既存のConvolutionエンジンのみをコピー（パラメータはUIからの最新値を維持）
-                    newDSP->convolver.copyConvolutionEngineFrom(current->convolver);
+                    // 既存のConvolutionエンジンを共有（クローン回避・グリッチ防止）
+                    task.newDSP->convolver.shareConvolutionEngineFrom(task.currentDSP->convolver);
                     irReused = true;
                 }
             }
         }
 
         // 3. Rebuild IR if needed (Heavy operation)
-        if (!irReused && newDSP->oversamplingFactor > 1 && newDSP->convolver.isIRLoaded())
+        if (!irReused && task.newDSP->convolver.getIRLength() > 0)
         {
-            if (isObsolete()) return;
-            newDSP->convolver.rebuildAllIRsSynchronous(isObsolete);
+            if (isObsolete()) continue;
+            task.newDSP->convolver.rebuildAllIRsSynchronous(isObsolete);
         }
 
-        if (isObsolete()) return;
+        if (isObsolete()) continue;
 
-        // 4. Refresh Latency
-        const double processingRate = sampleRate * static_cast<double>(newDSP->oversamplingFactor);
-        const int processingBlockSize = samplesPerBlock * static_cast<int>(newDSP->oversamplingFactor);
-        newDSP->convolver.prepareToPlay(processingRate, processingBlockSize);
+        // 4. Refresh Latency (Prevent pitch slide during fade-in)
+        task.newDSP->convolver.refreshLatency();
 
         // 5. Fade In
-        newDSP->fadeInSamplesLeft.store(DSPCore::FADE_IN_SAMPLES, std::memory_order_relaxed);
+        task.newDSP->fadeInSamplesLeft.store(DSPCore::FADE_IN_SAMPLES, std::memory_order_relaxed);
 
         // 6. Commit on Message Thread
-        juce::MessageManager::callAsync([weakSelf, newDSP, generation]() {
+        juce::MessageManager::callAsync([weakSelf = juce::WeakReference<AudioEngine>(this), newDSP = task.newDSP, generation = task.generation]() {
             if (auto* self = weakSelf.get())
             {
                 self->commitNewDSP(newDSP, generation);
             }
         });
-    }).detach();
+    }
 }
 
 void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP, int generation)
@@ -739,6 +775,23 @@ void AudioEngine::releaseResources()
     //   2. mmcssHandle はローカル変数だったため未定義エラー発生
     //   3. 手動revertは不要・リークリスクあり → JUCEに任せる
     // ==================================================================
+
+    // 1. Stop Audio Thread access
+    currentDSP.store(nullptr, std::memory_order_release);
+
+    // 2. Release Active DSP (triggers destructors of DSPCore and its members)
+    activeDSP.reset();
+
+    // 3. Clear Trash Bin (release old DSPs)
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        trashBin.clear();
+        trashBinPending.clear();
+    }
+
+    // 4. Release UI Processor Resources
+    uiConvolverProcessor.releaseResources();
+    uiEqProcessor.releaseResources();
 }
 
 //--------------------------------------------------------------

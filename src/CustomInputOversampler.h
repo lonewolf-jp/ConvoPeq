@@ -22,6 +22,7 @@ public:
 
     void prepare(int maxInputBlockSize, int ratio, Preset preset);
     void reset() noexcept;
+    void release() noexcept;
 
     bool isActive() const noexcept { return upsampleRatio > 1; }
     int getRatio() const noexcept { return upsampleRatio; }
@@ -47,15 +48,14 @@ private:
         int maxOutputSamples = 0;
 
         double centerCoeff = 0.5;
-        double* convCoeffs = nullptr;
-        double* convCoeffsReversed = nullptr;
-        double* upHistory[2] = { nullptr, nullptr };
-        double* downHistory[2] = { nullptr, nullptr };
+        convo::ScopedAlignedPtr<double> convCoeffs;
+        convo::ScopedAlignedPtr<double> convCoeffsReversed;
+        convo::ScopedAlignedPtr<double> upHistory[2];
+        convo::ScopedAlignedPtr<double> downHistory[2];
         int upHistorySize = 0;
         int downHistorySize = 0;
     };
 
-    void release() noexcept;
     void clearStage(Stage& stage) noexcept;
     void prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax);
 
@@ -86,8 +86,8 @@ private:
 
     Stage stages[3];
 
-    double* workA[2] = { nullptr, nullptr };
-    double* workB[2] = { nullptr, nullptr };
+    convo::ScopedAlignedPtr<double> workA[2];
+    convo::ScopedAlignedPtr<double> workB[2];
     int workCapacity = 0;
 
     double* blockChannels[2] = { nullptr, nullptr };

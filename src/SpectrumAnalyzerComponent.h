@@ -47,10 +47,16 @@ public:
 private:
     AudioEngine& engine;
 
-    // ── FFT設定 ──
+    // ── 定数定義 (バッファサイズ決定のために先頭に配置) ──
+    static constexpr int NUM_DISPLAY_BARS = 128;
     static constexpr int NUM_FFT_POINTS  = 4096;
     static constexpr int NUM_FFT_BINS    = NUM_FFT_POINTS / 2 + 1;
-   static constexpr int OVERLAP_SAMPLES = NUM_FFT_POINTS / 4;
+    static constexpr int OVERLAP_SAMPLES = NUM_FFT_POINTS / 4;
+
+    // ── 表示範囲 ──
+    static constexpr float MIN_DB       = -80.0f;
+
+    // ── FFT設定 ──
     static constexpr float FFT_MAGNITUDE_SCALE = 4.0f / NUM_FFT_POINTS;
     static constexpr float FFT_DISPLAY_MIN_DB = -100.0f;
     static constexpr float FFT_DISPLAY_MIN_MAG = 1e-9f;
@@ -66,23 +72,23 @@ private:
     convo::ScopedAlignedPtr<float> fftWorkBuffer;
 
     // ── 表示用データバッファ ──
-    std::vector<float> rawBuffer;        // readFromFifo で取得したデータから計算
-    std::vector<float> smoothedBuffer;   // 指数移動平均で更新
-    std::vector<float> peakBuffer;       // ピーク保持バッファ
-    std::vector<int>   peakHoldCounter;  // 各バンドのピーク保持残フレーム数
+    std::array<float, NUM_FFT_BINS> rawBuffer;        // readFromFifo で取得したデータから計算
+    std::array<float, NUM_FFT_BINS> smoothedBuffer;   // 指数移動平均で更新
+    std::array<float, NUM_FFT_BINS> peakBuffer;       // ピーク保持バッファ
+    std::array<int,   NUM_FFT_BINS> peakHoldCounter;  // 各バンドのピーク保持残フレーム数
 
     // ── EQ応答曲線データ ──
-    std::vector<float> eqResponseBufferL; // 要素数: NUM_DISPLAY_BARS
-    std::vector<float> eqResponseBufferR; // 要素数: NUM_DISPLAY_BARS
+    std::array<float, NUM_DISPLAY_BARS> eqResponseBufferL;
+    std::array<float, NUM_DISPLAY_BARS> eqResponseBufferR;
 
     // 個別バンドの応答曲線データ (timerで計算、paintで描画)
 
-    std::vector<std::vector<float>> individualBandCurvesL;
-    std::vector<std::vector<float>> individualBandCurvesR;
-    std::vector<float> displayFrequencies; // 表示バーに対応する周波数
+    std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesL;
+    std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesR;
+    std::array<float, NUM_DISPLAY_BARS> displayFrequencies; // 表示バーに対応する周波数
 
     // ── 計算用キャッシュ ──
-    std::vector<std::complex<double>> zCache; // 周波数応答計算用の複素数キャッシュ (z = e^jw)
+    std::array<std::complex<double>, NUM_DISPLAY_BARS> zCache; // 周波数応答計算用の複素数キャッシュ (z = e^jw)
     double cachedSampleRate = 0.0;            // zCache計算時のサンプルレート
 
     // ── 描画用パスキャッシュ ──
@@ -93,14 +99,9 @@ private:
     // ── スムーシング係数 ──
     static constexpr float SMOOTHING_ALPHA = 0.85f; // 60fpsに合わせて調整 (0.75 -> 0.85)
 
-    // ── 表示範囲 ──
     static constexpr float MIN_FREQ_HZ = 20.0f;
     static constexpr float MAX_FREQ_HZ = 20000.0f;
-    static constexpr float MIN_DB       = -80.0f;
     static constexpr float MAX_DB       = 20.0f;
-
-    // ── 表示バンド数 ──
-    static constexpr int NUM_DISPLAY_BARS = 128;
 
     // ── ピーク保持フレーム数 ──
     // 60fps で約1秒間保持

@@ -23,6 +23,9 @@
 #include <algorithm>
 #include "AlignedAllocation.h"
 
+#if JUCE_DSP_USE_INTEL_MKL
+ #include <mkl_vsl.h>
+#endif
 
 
 namespace convo
@@ -143,6 +146,31 @@ public:
     static constexpr int DEFAULT_BIT_DEPTH = 24;
     static constexpr int STATE_STRIDE = 8; // 64 bytes alignment (8 * sizeof(double))
 
+#if JUCE_DSP_USE_INTEL_MKL
+    // RAII Wrapper for MKL VSL Stream to prevent leaks
+    class VSLStream {
+    public:
+        VSLStream() = default;
+        ~VSLStream() { reset(); }
+
+        void init(uint64_t seed) {
+            reset();
+            // VSL_BRNG_SFMT19937: SIMD-oriented Fast Mersenne Twister (High Quality & Fast)
+            vslNewStream(&stream, VSL_BRNG_SFMT19937, static_cast<unsigned int>(seed));
+        }
+
+        void reset() {
+            if (stream) { vslDeleteStream(&stream); stream = nullptr; }
+        }
+
+        operator VSLStreamStatePtr() const { return stream; }
+    private:
+        VSLStreamStatePtr stream = nullptr;
+        VSLStream(const VSLStream&) = delete;
+        VSLStream& operator=(const VSLStream&) = delete;
+    };
+#endif
+
     ~PsychoacousticDither() {
         if (shaperStateBuffer) convo::aligned_free(shaperStateBuffer);
     }
@@ -165,12 +193,22 @@ public:
                      ^ (instanceCounter.fetch_add(1) * 0x9e3779b97f4a7c15ULL);
         }
 
+#if JUCE_DSP_USE_INTEL_MKL
+        // Initialize MKL VSL Streams
+        // Use SplitMix64 to generate independent seeds for each channel
+        SplitMix64 seeder(baseSeed);
+        for (int i = 0; i < MAX_CHANNELS; ++i) {
+            rng[i].init(seeder.next());
+            rndIndex[i] = RND_BUFFER_SIZE; // Force refill on first use
+        }
+#else
         Xoshiro256ss master(baseSeed);
         for (int i = 0; i < MAX_CHANNELS; ++i)
         {
             rng[i] = master;
             master.jump(); // Ensure non-overlapping sequences for each channel
         }
+#endif
 
         shaperStateBuffer = static_cast<double*>(convo::aligned_malloc(MAX_CHANNELS * STATE_STRIDE * sizeof(double), 64));
         reset();
@@ -222,14 +260,25 @@ public:
     inline double process(double input, int channel) noexcept
     {
         if (channel < 0 || channel >= MAX_CHANNELS) return input;
+#if JUCE_DSP_USE_INTEL_MKL
+        return processChannelMKL(input, channel, shaperStateBuffer + (channel * STATE_STRIDE));
+#else
         return processChannel(input, rng[channel], shaperStateBuffer + (channel * STATE_STRIDE));
+#endif
     }
 
 private:
+#if !JUCE_DSP_USE_INTEL_MKL
     inline double processChannel(double x, Xoshiro256ss& r, double* z) noexcept
     {
         // TPDFディザ生成
         double d = nextTPDF(r) * scale;
+#else
+    inline double processChannelMKL(double x, int channel, double* z) noexcept
+    {
+        // TPDFディザ生成 (MKL)
+        double d = nextTPDF_MKL(channel) * scale;
+#endif
 
         // 5次ノイズシェーパー (フィードバック誤差)
         double shapedError =
@@ -261,6 +310,7 @@ private:
         return quantized;
     }
 
+#if !JUCE_DSP_USE_INTEL_MKL
     inline double nextTPDF(Xoshiro256ss& r) noexcept
     {
         return (uniform53(r)-0.5) + (uniform53(r)-0.5);
@@ -272,13 +322,44 @@ private:
         v >>= 11; // 53bit
         return static_cast<double>(v) * (1.0 / 9007199254740992.0);
     }
+#else
+    // MKL VSL Batch Generation for efficiency
+    static constexpr int RND_BUFFER_SIZE = 256; // Small batch to keep cache hot
+    double rndBuffer[MAX_CHANNELS][RND_BUFFER_SIZE];
+    int rndIndex[MAX_CHANNELS];
+
+    inline double nextTPDF_MKL(int channel) noexcept
+    {
+        // Need 2 uniform numbers for TPDF
+        double u1 = getNextUniformMKL(channel);
+        double u2 = getNextUniformMKL(channel);
+        return (u1 - 0.5) + (u2 - 0.5);
+    }
+
+    inline double getNextUniformMKL(int channel) noexcept
+    {
+        if (rndIndex[channel] >= RND_BUFFER_SIZE)
+        {
+            // Refill buffer
+            // VSL_RNG_METHOD_UNIFORM_STD: Standard method (accurate)
+            vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[channel], RND_BUFFER_SIZE, rndBuffer[channel], 0.0, 1.0);
+            rndIndex[channel] = 0;
+        }
+        return rndBuffer[channel][rndIndex[channel]++];
+    }
+#endif
 
     inline double killDenormal(double x) const noexcept
     {
         return (std::fabs(x)<1e-300)?0.0:x;
     }
 
+#if JUCE_DSP_USE_INTEL_MKL
+    VSLStream rng[MAX_CHANNELS];
+#else
     Xoshiro256ss  rng[MAX_CHANNELS];
+#endif
+
     double* shaperStateBuffer = nullptr;
         double scale    = 1.0 / 8388608.0;    // 2^23（24bit signed PCM デフォルト）
         double invScale = 8388608.0;           // 2^23（24bit signed PCM デフォルト）

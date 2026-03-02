@@ -66,12 +66,43 @@ static void aligned_free(void* ptr) {
 //-----------------------------------------------------------------------------
 // RAII Helper for aligned memory
 //-----------------------------------------------------------------------------
-struct AlignedDeleter {
-    void operator()(void* ptr) const { aligned_free(ptr); }
-};
-
+//==============================================================================
+// RAII wrapper for convo::aligned_malloc / aligned_free (64-byte align)
+// JUCE 8.0.12 + oneMKL 完全対応。reset() で旧メモリ自動解放。
+//==============================================================================
 template <typename T>
-using ScopedAlignedPtr = std::unique_ptr<T, AlignedDeleter>;
+class ScopedAlignedPtr
+{
+public:
+    explicit ScopedAlignedPtr(T* p = nullptr) noexcept : ptr(p) {}
+    ~ScopedAlignedPtr() noexcept { reset(nullptr); }
+
+    ScopedAlignedPtr(const ScopedAlignedPtr&) = delete;
+    ScopedAlignedPtr& operator=(const ScopedAlignedPtr&) = delete;
+
+    ScopedAlignedPtr(ScopedAlignedPtr&& o) noexcept : ptr(o.ptr) { o.ptr = nullptr; }
+    ScopedAlignedPtr& operator=(ScopedAlignedPtr&& o) noexcept
+    {
+        if (this != &o) { reset(o.ptr); o.ptr = nullptr; }
+        return *this;
+    }
+
+    T* get() const noexcept { return ptr; }
+    T* operator->() const noexcept { return ptr; }
+    T& operator*() const noexcept { return *ptr; }
+    T& operator[](std::ptrdiff_t i) const noexcept { return ptr[i]; }
+
+    T* release() noexcept { T* p = ptr; ptr = nullptr; return p; }
+    void reset(T* p = nullptr) noexcept
+    {
+        if (ptr) aligned_free(ptr);
+        ptr = p;
+    }
+    explicit operator bool() const noexcept { return ptr != nullptr; }
+
+private:
+    T* ptr = nullptr;
+};
 
 //-----------------------------------------------------------------------------
 // STL Allocator for MKL/AVX512 (64-byte alignment)

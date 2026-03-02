@@ -66,6 +66,14 @@ EQProcessor::~EQProcessor()
         node.store(nullptr, std::memory_order_release);
     }
     // activeBandNodes will be cleared automatically
+
+    releaseResources();
+}
+
+void EQProcessor::releaseResources()
+{
+    scratchBuffer.reset();
+    scratchCapacity = 0;
 }
 
 //--------------------------------------------------------------
@@ -427,6 +435,14 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     // process() 内のバッファガードに使用
     const int requiredSize = newMaxInternalBlockSize;
     this->maxInternalBlockSize = requiredSize;
+
+    const int required = juce::nextPowerOfTwo(requiredSize) * 8; // MKL/EQ用目安
+    if (scratchCapacity < required)
+    {
+        scratchBuffer.reset(static_cast<double*>(convo::aligned_malloc(required * sizeof(double), 64)));
+        scratchCapacity = required;
+        juce::FloatVectorOperations::clear(scratchBuffer.get(), required); // 念のためゼロクリア
+    }
 
     auto state = currentState.load(std::memory_order_acquire);
 

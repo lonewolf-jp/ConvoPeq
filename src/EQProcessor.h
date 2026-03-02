@@ -151,6 +151,7 @@ public:
     // ロック・new・I/O・待機（IR再ロード等）禁止
     //----------------------------------------------------------
     void process(juce::dsp::AudioBlock<double>& block);
+    void releaseResources();
 
     // バイパス制御
     void setBypass(bool shouldBypass) { bypassed.store(shouldBypass); }
@@ -325,4 +326,7 @@ private:
     static EQCoeffsBiquad calcHighShelfBiquad(double freq, double gainDb, double q, double sr) noexcept;
     static EQCoeffsBiquad calcLowPassBiquad  (double freq, double q, double sr) noexcept;
     static EQCoeffsBiquad calcHighPassBiquad (double freq, double q, double sr) noexcept;
+
+    convo::ScopedAlignedPtr<double> scratchBuffer;
+    int scratchCapacity = 0;
 };

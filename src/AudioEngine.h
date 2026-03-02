@@ -24,6 +24,8 @@
 #include <vector>
 #include <juce_dsp/juce_dsp.h>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #include "AlignedAllocation.h"
 #include "CustomInputOversampler.h"
@@ -393,6 +395,26 @@ DSPCore();
     void requestRebuild(double sampleRate, int samplesPerBlock);
     void commitNewDSP(DSPCore::Ptr newDSP, int generation);
     bool isRebuildObsolete(int generation) const { return generation != rebuildGeneration.load(); }
+
+    // Worker thread for rebuilds
+    void rebuildThreadLoop();
+    std::thread rebuildThread;
+    std::mutex rebuildMutex;
+    std::condition_variable rebuildCV;
+    std::atomic<bool> rebuildThreadShouldExit { false };
+    bool hasPendingTask = false;
+
+    struct RebuildTask {
+        DSPCore::Ptr newDSP;
+        DSPCore::Ptr currentDSP;
+        double sampleRate;
+        int samplesPerBlock;
+        int ditherDepth;
+        int manualOversamplingFactor;
+        OversamplingType oversamplingType;
+        int generation;
+    };
+    RebuildTask pendingTask;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AudioEngine)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
