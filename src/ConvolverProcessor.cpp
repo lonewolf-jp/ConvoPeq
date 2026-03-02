@@ -774,6 +774,13 @@ ConvolverProcessor::~ConvolverProcessor()
     trashBin.clear();
     convolution.store(nullptr);
     activeConvolution.reset();
+
+#if JUCE_DSP_USE_INTEL_MKL
+    if (fftHandle) {
+        DftiFreeDescriptor(&fftHandle);
+        fftHandle = nullptr;
+    }
+#endif
 }
 
 //--------------------------------------------------------------
@@ -781,6 +788,15 @@ ConvolverProcessor::~ConvolverProcessor()
 //--------------------------------------------------------------
 void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+#if JUCE_DSP_USE_INTEL_MKL
+    // 旧descriptor未解放防止
+    if (fftHandle) {
+        DftiFreeDescriptor(&fftHandle);
+        fftHandle = nullptr;
+        fftHandleSize = 0;
+    }
+#endif
+
     const bool rateChanged = (std::abs(currentSampleRate.load() - sampleRate) > 1e-6);
     const bool blockChanged = (currentBufferSize != samplesPerBlock);
 
@@ -912,6 +928,14 @@ void ConvolverProcessor::releaseResources()
 
     dryBuffer.setSize(0, 0);
     smoothingBuffer.setSize(0, 0);
+
+#if JUCE_DSP_USE_INTEL_MKL
+    if (fftHandle) {
+        DftiFreeDescriptor(&fftHandle);
+        fftHandle = nullptr;
+        fftHandleSize = 0;
+    }
+#endif
 
     // Release active convolution engine
     convolution.store(nullptr, std::memory_order_release);
@@ -1409,12 +1433,20 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
 
 #if JUCE_DSP_USE_INTEL_MKL
     // MKL FFT (One-shot)
-    DFTI_DESCRIPTOR_HANDLE h = nullptr;
-    DftiGuard dftiGuard { &h };
+    if (fftHandle && fftHandleSize != fftSize)
+    {
+        DftiFreeDescriptor(&fftHandle);
+        fftHandle = nullptr;
+        fftHandleSize = 0;
+    }
 
-    if (DftiCreateDescriptor(&h, DFTI_SINGLE, DFTI_COMPLEX, 1, fftSize) != DFTI_NO_ERROR) return;
-    if (DftiSetValue(h, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR) return;
-    if (DftiCommitDescriptor(h) != DFTI_NO_ERROR) return;
+    if (!fftHandle)
+    {
+        if (DftiCreateDescriptor(&fftHandle, DFTI_SINGLE, DFTI_COMPLEX, 1, fftSize) != DFTI_NO_ERROR) return;
+        if (DftiSetValue(fftHandle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR) { DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; return; }
+        if (DftiCommitDescriptor(fftHandle) != DFTI_NO_ERROR) { DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; return; }
+        fftHandleSize = fftSize;
+    }
 
     // Double -> Complex Float conversion
     for (int i = 0; i < copyLen; ++i) {
@@ -1427,7 +1459,7 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
         dst[2 * i + 1] = 0.0f;
     }
 
-    if (DftiComputeForward(h, dst) != DFTI_NO_ERROR) return;
+    if (DftiComputeForward(fftHandle, dst) != DFTI_NO_ERROR) return;
 
     // Calculate magnitude in-place (compacting to start of buffer)
     const int numBins = fftSize / 2 + 1;

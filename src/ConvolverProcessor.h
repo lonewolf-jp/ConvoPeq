@@ -394,6 +394,11 @@ private:
     int cachedFFTBufferCapacity = 0;
     std::atomic<double> currentSampleRate { 0.0 };
 
+#if JUCE_DSP_USE_INTEL_MKL
+    DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
+    int fftHandleSize = 0;
+#endif
+
     //----------------------------------------------------------
     // Dry信号バッファ（Mix用）
     //----------------------------------------------------------
