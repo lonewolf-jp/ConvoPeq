@@ -60,6 +60,7 @@ EQProcessor::EQProcessor()
 //--------------------------------------------------------------
 EQProcessor::~EQProcessor()
 {
+    forceCleanup();
     // shared_ptrが自動的にリソースを管理するため、デストラクタは空で良い
     currentState.store(nullptr, std::memory_order_release);
     for (auto& node : bandNodes) {
@@ -72,6 +73,7 @@ EQProcessor::~EQProcessor()
 
 void EQProcessor::releaseResources()
 {
+    forceCleanup();
     scratchBuffer.reset();
     scratchCapacity = 0;
 }
@@ -479,6 +481,11 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
             {
                 auto newNode = createBandNode(i, *loopState);
                 bandNodes[i].store(newNode.get(), std::memory_order_release);
+
+                const juce::ScopedLock sl(trashBinLock);
+                if (activeBandNodes[i])
+                    bandNodeTrashBinPending.push_back(activeBandNodes[i]);
+
                 activeBandNodes[i] = newNode;
             }
         }
@@ -1203,17 +1210,45 @@ void EQProcessor::cleanup()
             bandNodeTrashBin.push_back({ptr, now});
         bandNodeTrashBinPending.clear();
 
-        // Clean States
+        // Clean States (use_count==1 で解放)
         auto stateIt = std::remove_if(stateTrashBin.begin(), stateTrashBin.end(), [](const auto& p) { return p.use_count() == 1; });
         statesToDelete.insert(statesToDelete.end(), std::make_move_iterator(stateIt), std::make_move_iterator(stateTrashBin.end()));
         stateTrashBin.erase(stateIt, stateTrashBin.end());
 
         stateTrashBin.insert(stateTrashBin.end(), stateTrashBinPending.begin(), stateTrashBinPending.end());
         stateTrashBinPending.clear();
+
+        // 【パッチ1】stateTrashBin サイズ上限制御 (無制限成長によるメモリリーク防止)
+        // use_count > 1 の参照が長期保持される場合でも最大10件に制限し強制解放する
+        static constexpr size_t kMaxStateTrashBinSize = 10;
+        if (stateTrashBin.size() > kMaxStateTrashBinSize)
+        {
+            const size_t removeCount = stateTrashBin.size() - kMaxStateTrashBinSize;
+            for (size_t i = 0; i < removeCount; ++i)
+                statesToDelete.push_back(std::move(stateTrashBin[i]));
+            stateTrashBin.erase(stateTrashBin.begin(),
+                                 stateTrashBin.begin() + static_cast<std::ptrdiff_t>(removeCount));
+        }
     }
 
     nodesToDelete.clear();
     statesToDelete.clear();
+}
+
+void EQProcessor::forceCleanup()
+{
+    std::vector<std::pair<BandNode::Ptr, uint32>> nodesToDelete;
+    std::vector<BandNode::Ptr> nodesPendingToDelete;
+    std::vector<EQState::Ptr> statesToDelete;
+    std::vector<EQState::Ptr> statesPendingToDelete;
+
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        nodesToDelete.swap(bandNodeTrashBin);
+        nodesPendingToDelete.swap(bandNodeTrashBinPending);
+        statesToDelete.swap(stateTrashBin);
+        statesPendingToDelete.swap(stateTrashBinPending);
+    }
 }
 
 // --------------------------------------------------------------

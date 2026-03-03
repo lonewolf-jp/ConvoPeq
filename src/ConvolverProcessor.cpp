@@ -769,9 +769,9 @@ ConvolverProcessor::ConvolverProcessor()
 //--------------------------------------------------------------
 ConvolverProcessor::~ConvolverProcessor()
 {
+    forceCleanup();
     // スレッドを停止
     activeLoader.reset();
-    trashBin.clear();
     convolution.store(nullptr);
     activeConvolution.reset();
 
@@ -910,6 +910,13 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void ConvolverProcessor::releaseResources()
 {
+    forceCleanup();
+    // 【パッチ2】LoaderThread を先に停止し、解放後の非同期コールバックを防ぐ
+    // activeLoader.reset() → stopThread(4000) → ~LoaderThread() の順で安全に停止される。
+    // これを省略すると、ローダーが releaseResources() 完了後に callAsync() で
+    // convolution ポインタや isPrepared フラグを書き換え、Use-After-Free の原因になる。
+    activeLoader.reset();
+
     // バッファの解放
     delayBuffer[0].reset();
     delayBuffer[1].reset();
@@ -1195,8 +1202,12 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     isLoading.store(true);
     lastError.clear(); // 新しいロード開始時にエラーをクリア
 
-    // 既存のローダーを停止して破棄
-    activeLoader.reset();
+    // 既存のローダーを停止してゴミ箱へ退避 (即時resetによるブロックを回避)
+    if (activeLoader)
+    {
+        activeLoader->signalThreadShouldExit();
+        loaderTrashBin.push_back(std::move(activeLoader));
+    }
 
     // 新しいローダーを作成して開始
     if (isRebuild)
@@ -1278,31 +1289,59 @@ void ConvolverProcessor::handleLoadError(const juce::String& error)
 
 void ConvolverProcessor::cleanup()
 {
-    std::vector<StereoConvolver::Ptr> toDelete;
+    // LoaderThread のクリーンアップ (Message Thread Only)
+    // 終了したスレッドのみを削除する (waitForThreadToExit(0) はブロックしない)
+    for (auto it = loaderTrashBin.begin(); it != loaderTrashBin.end(); )
     {
-        const juce::ScopedLock sl(trashBinLock);
-        const uint32 now = juce::Time::getMillisecondCounter();
+        if ((*it)->waitForThreadToExit(0))
+            it = loaderTrashBin.erase(it);
+        else
+            ++it;
+    }
 
-        // 1. Clean old trash (Time-based)
-        auto it = std::remove_if(trashBin.begin(), trashBin.end(),
-            [now](const auto& entry) {
-                return (now >= entry.second) ? (now - entry.second > 500)
-                                             : (now + (std::numeric_limits<uint32>::max() - entry.second) > 500);
-            });
+    // 【Leak Fix】LoaderThreadの異常蓄積防止
+    // スレッドが終了しない場合でも、一定数を超えたら強制削除（stopThreadで待機）してメモリを解放する
+    while (loaderTrashBin.size() > 2)
+    {
+        loaderTrashBin.erase(loaderTrashBin.begin());
+    }
 
-        for (auto i = it; i != trashBin.end(); ++i)
-            toDelete.push_back(i->first);
+    // StereoConvolver のクリーンアップ (Worker Threadと競合するためロックが必要)
+    juce::ScopedTryLock lock(trashBinLock);
+    if (!lock.isLocked()) return;
 
-        trashBin.erase(it, trashBin.end());
+    const uint32 now = juce::Time::getMillisecondCounter();
+    std::vector<StereoConvolver::Ptr> toRelease;
 
-        // 2. Size limit (Max 5 items) - メモリ爆発防止
-        if (trashBin.size() > 5)
+    for (auto it = trashBin.begin(); it != trashBin.end(); )
+    {
+        const uint32 age = now - it->second;
+        if (age > 600 || it->first.use_count() <= 1)
         {
-            size_t removeCount = trashBin.size() - 5;
-            for (size_t i = 0; i < removeCount; ++i)
-                toDelete.push_back(trashBin[i].first);
-            trashBin.erase(trashBin.begin(), trashBin.begin() + removeCount);
+            toRelease.push_back(std::move(it->first));
+            it = trashBin.erase(it);
         }
+        else
+        {
+            ++it;
+        }
+    }
+
+    while (trashBin.size() > 3)
+    {
+        toRelease.push_back(std::move(trashBin.back().first));
+        trashBin.pop_back();
+    }
+}
+
+void ConvolverProcessor::forceCleanup()
+{
+    loaderTrashBin.clear(); // 全スレッドの停止を待機して破棄
+
+    std::vector<std::pair<StereoConvolver::Ptr, uint32>> temp;
+    {
+        juce::ScopedLock lock(trashBinLock);
+        temp.swap(trashBin);
     }
 }
 
@@ -1904,6 +1943,16 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             // 2. 出力を取得 (Get) - ポインタのみ取得し、コピーはMixループで行う
             int avail = conv->convolvers[ch].Avail(std::numeric_limits<int>::max());
             int validWetSamples = std::min(callLen, avail);
+
+            // 【Leak Fix】WDLエンジンのバッファ肥大化防止
+            // 入力(Add)に対して出力(Get/Advance)が遅れると内部バッファが無限に成長する可能性があるため、
+            // 異常なサイズになった場合は強制的にドレインする。
+            if (avail > MAX_BLOCK_SIZE * 2)
+            {
+                conv->convolvers[ch].Advance(avail);
+                avail = 0;
+                validWetSamples = 0;
+            }
 
             WDL_FFT_REAL** outputs = conv->convolvers[ch].Get();
             const double* wdlOut = (validWetSamples > 0 && outputs && outputs[0]) ? outputs[0] : nullptr;

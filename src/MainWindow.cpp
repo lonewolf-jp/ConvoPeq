@@ -111,6 +111,15 @@ MainWindow::MainWindow (const juce::String& name)
 //--------------------------------------------------------------
 MainWindow::~MainWindow()
 {
+    // 【パッチ4】audioEngine の ChangeListener を最初に解除する
+    // 理由: audioEngine はメンバ変数であり、このデストラクタ本体が完了した後に
+    //       メンバの逆順破棄が始まる。もし audioEngine が本体完了後~audioEngine()
+    //       呼び出し前に sendChangeMessage() を発火した場合、すでに破棄済みの
+    //       UIコンポーネント (specAnalyzer / eqPanel 等) にアクセスする
+    //       Use-After-Free が発生する。最初に removeChangeListener することで
+    //       このウィンドウへの通知を即座に遮断し、安全にシャットダウンできる。
+    audioEngine.removeChangeListener (this);
+
     audioProcessorPlayer.setProcessor (nullptr);
     stopTimer();
 

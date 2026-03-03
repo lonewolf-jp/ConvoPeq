@@ -227,6 +227,7 @@ public:
 
     // ガベージコレクション
     void cleanup();
+    void forceCleanup();
 
     //----------------------------------------------------------
     // プリセット読み込み (AudioEngine::prepareToPlayから呼ばれる)

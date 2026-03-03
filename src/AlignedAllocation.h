@@ -15,7 +15,7 @@ namespace convo {
 
 #if JUCE_DSP_USE_INTEL_MKL
 
-static void* aligned_malloc(size_t size, size_t alignment) {
+inline void* aligned_malloc(size_t size, size_t alignment) {
     void* ptr = mkl_malloc(size, (int)alignment);
     if (ptr == nullptr) {
         DBG("Memory allocation failed in aligned_malloc (MKL)");
@@ -24,7 +24,7 @@ static void* aligned_malloc(size_t size, size_t alignment) {
     return ptr;
 }
 
-static void aligned_free(void* ptr) {
+inline void aligned_free(void* ptr) {
     if (ptr != nullptr) {
         mkl_free(ptr);
     }
@@ -32,7 +32,7 @@ static void aligned_free(void* ptr) {
 
 #else
 
-static void* aligned_malloc(size_t size, size_t alignment) {
+inline void* aligned_malloc(size_t size, size_t alignment) {
     void* ptr = nullptr;
 
 #if defined(_WIN32)
@@ -51,7 +51,7 @@ static void* aligned_malloc(size_t size, size_t alignment) {
     return ptr;
 }
 
-static void aligned_free(void* ptr) {
+inline void aligned_free(void* ptr) {
     if (ptr != nullptr) {
 #if defined(_WIN32)
         _aligned_free(ptr);

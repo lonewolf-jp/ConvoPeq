@@ -173,6 +173,7 @@ public:
 
     // ガベージコレクション (Message Threadから定期的に呼ぶ)
     void cleanup();
+    void forceCleanup();
 
 private:
     class LoaderThread;
@@ -349,6 +350,7 @@ private:
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
     std::unique_ptr<LoaderThread> activeLoader;
+    std::vector<std::unique_ptr<LoaderThread>> loaderTrashBin;
     std::atomic<float> loadProgress { 0.0f };
     juce::String lastError;
     void setLoadingProgress(float p) { loadProgress.store(p); }

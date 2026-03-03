@@ -57,12 +57,20 @@ void AudioEngine::initialize()
 
 AudioEngine::~AudioEngine()
 {
+    stopTimer();
+    if (auto* dsp = currentDSP.load()) {
+        dsp->convolver.forceCleanup();
+    }
+    {
+        juce::ScopedLock sl(trashBinLock);
+        trashBinPending.clear();
+        trashBin.clear();
+    }
+
     uiConvolverProcessor.removeChangeListener(this);
     uiEqProcessor.removeChangeListener(this);
     uiConvolverProcessor.removeListener(this);
     uiEqProcessor.removeListener(this);
-
-    stopTimer();
 
     // 進行中のコールバックが完了するのを待つため、DSPを無効化
     // これにより、changeListenerCallback内でdsp->へのアクセスを防ぐ
@@ -553,6 +561,23 @@ void AudioEngine::rebuildThreadLoop()
             if (rebuildThreadShouldExit.load()) break;
 
             task = pendingTask;
+
+            // 【パッチ7】pendingTask.currentDSP を即時解放してメモリリークを防ぐ
+            // 問題:
+            //   requestRebuild() は「現在の activeDSP」を pendingTask.currentDSP に
+            //   shared_ptr コピーとして保持する。リビルドスレッドが task = pendingTask で
+            //   ローカルに所有権を移した後も pendingTask.currentDSP が参照を保持し続ける。
+            //   その結果、trashBin の GC が古い DSPCore の参照カウントを 0 に下げられず、
+            //   次の requestRebuild() が来るまで DSPCore（WDL バッファ・MKL メモリ含む、
+            //   数百 MB 規模になりうる）がリークし続ける。
+            // 修正:
+            //   リビルドスレッドがタスクをローカルに取得した直後、かつ rebuildMutex を
+            //   保持したまま pendingTask.currentDSP を reset() する。これにより
+            //   pendingTask からの余分な参照を即座に解放する。
+            //   task.currentDSP は依然として参照を保持しており、リビルド完了まで
+            //   AGC 状態同期・IR 再利用チェックに安全に利用できる。
+            pendingTask.currentDSP.reset();
+
             hasPendingTask = false;
         }
 

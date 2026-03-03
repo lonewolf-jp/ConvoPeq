@@ -147,27 +147,19 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
         oversamplingComboBox.addItem("8x", 5);
 
     oversamplingComboBox.onChange = [this] {
-
-        // Based on the selected ID, determine the oversampling factor to be used.
-        // A map is used to translate the selected ID to a factor value.
-        std::map<int, int> idToFactor = {
-            {1, 0},  // Auto
-            {2, 1},  // 1x
-            {3, 2},  // 2x
-            {4, 4},  // 4x
-            {5, 8}    // 8x
-        };
-
+        // 【パッチ5】重複する setOversamplingFactor 呼び出しを除去
+        // 旧コードは同一ラムダ内で setOversamplingFactor を2回呼んでいた。
+        // 1回目: std::map ルックアップ方式、2回目: if-else チェーン方式。
+        // どちらも同じ値を算出するため2回目は完全なデッドコードだった。
+        // AudioEngine::setOversamplingFactor() の if-guard により実際には
+        // 2度目の rebuild は防がれるが、コードの意図が不明確で誤読を招く。
+        // 正しく整理された単一の変換テーブルに統合する。
         int selectedId = oversamplingComboBox.getSelectedId();
-        int factor = idToFactor.count(selectedId) > 0 ? idToFactor[selectedId] : 0;
-        audioEngine.setOversamplingFactor(factor);
-
-      int id = oversamplingComboBox.getSelectedId();
-        factor = 0; // Auto
-        if (id == 2) factor = 1;
-        else if (id == 3) factor = 2;
-        else if (id == 4) factor = 4;
-        else if (id == 5) factor = 8;
+        int factor = 0; // default = Auto
+        if      (selectedId == 2) factor = 1;
+        else if (selectedId == 3) factor = 2;
+        else if (selectedId == 4) factor = 4;
+        else if (selectedId == 5) factor = 8;
         audioEngine.setOversamplingFactor(factor);
     };
 
