@@ -27,7 +27,8 @@
 #include "WDL/convoengine.h"
 #include "AlignedAllocation.h"
 
-class ConvolverProcessor : public juce::ChangeBroadcaster
+class ConvolverProcessor : public juce::ChangeBroadcaster,
+                           private juce::Timer
 {
 public:
     class Listener
@@ -176,6 +177,7 @@ public:
     void forceCleanup();
 
 private:
+    void timerCallback() override;
     class LoaderThread;
 
     //----------------------------------------------------------
@@ -367,6 +369,9 @@ private:
     int delayBufferCapacity = 0;
     int delayWritePos = 0;
     juce::SmoothedValue<double> latencySmoother;
+    // ドップラー効果対策: クロスフェード用
+    juce::SmoothedValue<double> crossfadeGain;
+    double oldDelay = 0.0;
 
     //----------------------------------------------------------
     // パラメータ（atomic）
@@ -410,6 +415,11 @@ private:
     juce::AudioBuffer<double> smoothingBuffer; // スムーシングゲイン計算用 (Audio Threadでのメモリ確保回避)
     convo::ScopedAlignedPtr<double> smoothingBufferStorage[2]; // Aligned storage for smoothingBuffer
     int smoothingBufferCapacity = 0;
+
+    // クロスフェード用バッファ
+    juce::AudioBuffer<double> oldDryBuffer;
+    convo::ScopedAlignedPtr<double> oldDryBufferStorage[2];
+    int oldDryBufferCapacity = 0;
 
     //----------------------------------------------------------
     // 準備完了フラグ

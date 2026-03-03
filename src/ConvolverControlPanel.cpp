@@ -329,7 +329,6 @@ void ConvolverControlPanel::updateIRInfo()
     }
 
     updateWaveformPath();
-    repaint();
 }
 
 //--------------------------------------------------------------

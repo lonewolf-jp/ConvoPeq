@@ -161,4 +161,6 @@ private:
     // ── アンダーラン対策 ──
     int underflowCount = 0;
     static constexpr float UNDERRUN_DECAY_DB = 1.5f; // データ不足時の減衰量 (dB/frame) @ 60fps -> 90dB/s
+
+    bool eqPathsDirty = true;
 };

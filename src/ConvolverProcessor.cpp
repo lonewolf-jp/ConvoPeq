@@ -762,6 +762,7 @@ private:
 ConvolverProcessor::ConvolverProcessor()
     : mixSmoother(1.0f)
 {
+    startTimer(500);
 }
 
 //--------------------------------------------------------------
@@ -769,6 +770,7 @@ ConvolverProcessor::ConvolverProcessor()
 //--------------------------------------------------------------
 ConvolverProcessor::~ConvolverProcessor()
 {
+    stopTimer();
     forceCleanup();
     // スレッドを停止
     activeLoader.reset();
@@ -781,6 +783,11 @@ ConvolverProcessor::~ConvolverProcessor()
         fftHandle = nullptr;
     }
 #endif
+}
+
+void ConvolverProcessor::timerCallback()
+{
+    cleanup();
 }
 
 //--------------------------------------------------------------
@@ -882,6 +889,16 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     smoothingBuffer.setDataToReferTo(smoothChs, 2, MAX_BLOCK_SIZE);
     smoothingBuffer.clear();
 
+    if (oldDryBufferCapacity < MAX_BLOCK_SIZE)
+    {
+        oldDryBufferStorage[0].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        oldDryBufferStorage[1].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        oldDryBufferCapacity = MAX_BLOCK_SIZE;
+    }
+    double* oldDryChs[2] = { oldDryBufferStorage[0].get(), oldDryBufferStorage[1].get() };
+    oldDryBuffer.setDataToReferTo(oldDryChs, 2, MAX_BLOCK_SIZE);
+    oldDryBuffer.clear();
+
     // スムージング時間の設定
     currentSmoothingTimeSec = smoothingTimeSec.load();
     mixSmoother.reset(sampleRate, currentSmoothingTimeSec);
@@ -893,6 +910,9 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // レイテンシースムーサーの初期化
     // 100msのスムージング時間でクリックノイズを防止
     latencySmoother.reset(sampleRate, 0.1);
+    // ドップラー効果対策のクロスフェード用 (20ms)
+    crossfadeGain.reset(sampleRate, 0.02);
+    crossfadeGain.setCurrentAndTargetValue(1.0);
 
     // 既にIRがロードされている場合は、初期値をそのレイテンシーに合わせる (起動時のスライド防止)
     if (conv)
@@ -904,6 +924,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     {
         latencySmoother.setCurrentAndTargetValue(0.0);
     }
+    oldDelay = latencySmoother.getTargetValue();
 
     isPrepared.store(true, std::memory_order_release);
 }
@@ -925,6 +946,10 @@ void ConvolverProcessor::releaseResources()
     dryBufferStorage[0].reset();
     dryBufferStorage[1].reset();
     dryBufferCapacity = 0;
+
+    oldDryBufferStorage[0].reset();
+    oldDryBufferStorage[1].reset();
+    oldDryBufferCapacity = 0;
 
     smoothingBufferStorage[0].reset();
     smoothingBufferStorage[1].reset();
@@ -1315,8 +1340,11 @@ void ConvolverProcessor::cleanup()
 
     for (auto it = trashBin.begin(); it != trashBin.end(); )
     {
-        const uint32 age = now - it->second;
-        if (age > 600 || it->first.use_count() <= 1)
+        uint32 age = (now >= it->second) ?
+                     (now - it->second) :
+                     (std::numeric_limits<uint32>::max() - it->second + now);
+
+        if (age > 800 || it->first.use_count() <= 1)
         {
             toRelease.push_back(std::move(it->first));
             it = trashBin.erase(it);
@@ -1736,8 +1764,18 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         const int totalLatency = juce::jmin(calculatedLatency, MAX_TOTAL_DELAY);
 
         // ターゲット値が変更された場合のみ更新
-        if (std::abs(latencySmoother.getTargetValue() - static_cast<double>(totalLatency)) > 0.001)
-            latencySmoother.setTargetValue(static_cast<double>(totalLatency));
+        if (std::abs(latencySmoother.getTargetValue() - static_cast<double>(totalLatency)) > 0.5) // 0.5サンプル以上の変化でトリガー
+        {
+            // ドップラー効果対策: クロスフェードを開始
+            // クロスフェード中はターゲット更新を保留し、不連続なジャンプ（クリック）を防ぐ
+            if (!crossfadeGain.isSmoothing())
+            {
+                oldDelay = latencySmoother.getCurrentValue();
+                crossfadeGain.setCurrentAndTargetValue(0.0); // 古いディレイパスのゲインを0に設定
+                crossfadeGain.setTargetValue(1.0);           // 新しいディレイパスのゲインを1に設定
+                latencySmoother.setTargetValue(static_cast<double>(totalLatency));
+            }
+        }
     }
 
     // processBufferのチャンネル数を使用 (最大2ch)
@@ -1803,58 +1841,162 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
         // 書き込み位置の更新は後で行う（読み出しで現在の位置を使うため）
 
-        // レイテンシー変更中はサンプル単位で処理してスムージングを行う
-        if (latencySmoother.isSmoothing())
+        if (crossfadeGain.isSmoothing())
         {
-            // スムーシング時: 線形補間付き読み出し (Variable Delay)
+            // --- クロスフェード処理 ---
+            const double newDelay = latencySmoother.getTargetValue();
+
+            // サブサンプル精度読み出し用ヘルパー (Catmull-Rom Interpolation)
+            auto readInterpolated = [&](double delay, double* dst, int ch)
+            {
+                const double* srcBuf = delayBuffer[ch].get();
+                double rPos = static_cast<double>(delayWritePos) - delay;
+
+                // rPos を [0, DELAY_BUFFER_SIZE) に正規化
+                // floor(rPos) が p1 (t=0) のインデックスとなる
+                rPos -= std::floor(rPos / DELAY_BUFFER_SIZE) * DELAY_BUFFER_SIZE;
+
+                const int iRead = static_cast<int>(rPos);
+                const double frac = rPos - iRead;
+
+                // 最適化: ほぼ整数の場合は高速パス (memcpy)
+                if (std::abs(frac) < 1.0e-6)
+                {
+                    int rPosInt = iRead; // frac ~ 0.0
+                    int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - rPosInt);
+                    std::memcpy(dst, srcBuf + rPosInt, samplesFirst * sizeof(double));
+                    if (numSamples > samplesFirst)
+                        std::memcpy(dst + samplesFirst, srcBuf, (numSamples - samplesFirst) * sizeof(double));
+                    return;
+                }
+                else if (std::abs(frac - 1.0) < 1.0e-6)
+                {
+                    int rPosInt = (iRead + 1) & DELAY_BUFFER_MASK; // frac ~ 1.0
+                    int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - rPosInt);
+                    std::memcpy(dst, srcBuf + rPosInt, samplesFirst * sizeof(double));
+                    if (numSamples > samplesFirst)
+                        std::memcpy(dst + samplesFirst, srcBuf, (numSamples - samplesFirst) * sizeof(double));
+                    return;
+                }
+
+                // Catmull-Rom 係数 (ブロック内で一定)
+                const double t = frac;
+                const double t2 = t * t;
+                const double t3 = t2 * t;
+                const double w0 = -0.5 * t3 + t2 - 0.5 * t;
+                const double w1 =  1.5 * t3 - 2.5 * t2 + 1.0;
+                const double w2 = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
+                const double w3 =  0.5 * t3 - 0.5 * t2;
+
+                int i = 0;
+                // 境界チェック: 読み出し範囲がバッファ境界を跨がない場合のみ高速化
+                if (iRead >= 1 && iRead + numSamples + 2 < DELAY_BUFFER_SIZE)
+                {
+                    const double* s = srcBuf + iRead;
+#if defined(__AVX2__)
+                    const __m256d vw0 = _mm256_set1_pd(w0);
+                    const __m256d vw1 = _mm256_set1_pd(w1);
+                    const __m256d vw2 = _mm256_set1_pd(w2);
+                    const __m256d vw3 = _mm256_set1_pd(w3);
+
+                    // AVX2 最適化ループ
+                    for (; i <= numSamples - 4; i += 4)
+                    {
+                        __m256d p0 = _mm256_loadu_pd(s + i - 1);
+                        __m256d p1 = _mm256_loadu_pd(s + i);
+                        __m256d p2 = _mm256_loadu_pd(s + i + 1);
+                        __m256d p3 = _mm256_loadu_pd(s + i + 2);
+                        __m256d sum = _mm256_mul_pd(p0, vw0);
+                        sum = _mm256_fmadd_pd(p1, vw1, sum);
+                        sum = _mm256_fmadd_pd(p2, vw2, sum);
+                        sum = _mm256_fmadd_pd(p3, vw3, sum);
+                        _mm256_storeu_pd(dst + i, sum);
+                    }
+#endif
+                    // スカラー残余処理 (AVX2ループ後、または非AVX2ビルド時)
+                    for (; i < numSamples; ++i)
+                        dst[i] = w0 * s[i - 1] + w1 * s[i] + w2 * s[i + 1] + w3 * s[i + 2];
+                }
+                else
+                {
+                    // バッファラップアラウンド対応 (低速パス)
+                    for (; i < numSamples; ++i)
+                    {
+                        int idx = iRead + i;
+                        double p0 = srcBuf[(idx - 1) & DELAY_BUFFER_MASK];
+                        double p1 = srcBuf[(idx    ) & DELAY_BUFFER_MASK];
+                        double p2 = srcBuf[(idx + 1) & DELAY_BUFFER_MASK];
+                        double p3 = srcBuf[(idx + 2) & DELAY_BUFFER_MASK];
+                        dst[i] = w0 * p0 + w1 * p1 + w2 * p2 + w3 * p3;
+                    }
+                }
+            };
+
+            // 1. 古いディレイからの信号を oldDryBuffer に読み出す
+            for (int ch = 0; ch < procChannels; ++ch)
+                readInterpolated(oldDelay, oldDryBuffer.getWritePointer(ch), ch);
+
+            // 2. 新しいディレイからの信号を dryBuffer に読み出す
+            for (int ch = 0; ch < procChannels; ++ch)
+                readInterpolated(newDelay, dryBuffer.getWritePointer(ch), ch);
+
+            // 3. 2つの信号をクロスフェードして dryBuffer に書き込む
+#if defined(__AVX2__)
+            const double startFadeInGain = crossfadeGain.getCurrentValue();
+            crossfadeGain.skip(numSamples);
+            const double endFadeInGain = crossfadeGain.getCurrentValue();
+            const double fadeInInc = (endFadeInGain - startFadeInGain) / static_cast<double>(numSamples);
+
+            for (int ch = 0; ch < procChannels; ++ch)
+            {
+                double* newSamples = dryBuffer.getWritePointer(ch);
+                const double* oldSamples = oldDryBuffer.getReadPointer(ch);
+
+                __m256d vGain = _mm256_set_pd(startFadeInGain + 3.0 * fadeInInc,
+                                              startFadeInGain + 2.0 * fadeInInc,
+                                              startFadeInGain + fadeInInc,
+                                              startFadeInGain);
+                const __m256d vInc = _mm256_set1_pd(4.0 * fadeInInc);
+                const __m256d vOne = _mm256_set1_pd(1.0);
+
+                int i = 0;
+                for (; i <= numSamples - 4; i += 4)
+                {
+                    const __m256d vOld = _mm256_loadu_pd(oldSamples + i);
+                    const __m256d vNew = _mm256_loadu_pd(newSamples + i);
+                    const __m256d vFadeOutGain = _mm256_sub_pd(vOne, vGain);
+
+                    // out = new * fadeIn + old * fadeOut
+                    const __m256d vOut = _mm256_fmadd_pd(vNew, vGain, _mm256_mul_pd(vOld, vFadeOutGain));
+                    _mm256_storeu_pd(newSamples + i, vOut);
+
+                    vGain = _mm256_add_pd(vGain, vInc);
+                }
+
+                double currentGain = startFadeInGain + static_cast<double>(i) * fadeInInc;
+                for (; i < numSamples; ++i)
+                {
+                    newSamples[i] = newSamples[i] * currentGain + oldSamples[i] * (1.0 - currentGain);
+                    currentGain += fadeInInc;
+                }
+            }
+#else
+            // Fallback for non-AVX2
             for (int i = 0; i < numSamples; ++i)
             {
-                // 現在の書き込み位置 (サンプル単位で進む)
-                int currentWPos = (delayWritePos + i) & DELAY_BUFFER_MASK;
-                const double currentDelay = latencySmoother.getNextValue();
-
-                // 読み出し位置の計算 (整数部と小数部)
-                double readPosFloat = static_cast<double>(currentWPos) - currentDelay;
-
-                // DELAY_BUFFER_SIZE > MAX_TOTAL_DELAY が保証されているため最大1回
-                if (readPosFloat < 0.0) readPosFloat += DELAY_BUFFER_SIZE;
-                jassert(readPosFloat >= 0.0); // 設計保証のアサーション
-
-                int readPosInt = static_cast<int>(readPosFloat);
-                double frac = readPosFloat - readPosInt;
-
+                const double fadeInGain = crossfadeGain.getNextValue();
+                const double fadeOutGain = 1.0 - fadeInGain;
                 for (int ch = 0; ch < procChannels; ++ch)
                 {
-                    double* buf = delayBuffer[ch].get();
-
-                    // 4-point, 3rd-order Catmull-Rom interpolation for higher quality variable delay.
-                   // 【安全化】読み出しインデックスを書き込み済み範囲にクランプ
-                    const int idx0 = (readPosInt - 1) & DELAY_BUFFER_MASK;
-                    const int idx1 = readPosInt & DELAY_BUFFER_MASK;
-                    const int idx2 = (readPosInt + 1) & DELAY_BUFFER_MASK;
-                    const int idx3 = (readPosInt + 2) & DELAY_BUFFER_MASK;
-
-                    const double p0 = buf[idx0];
-                    const double p1 = buf[idx1];
-
-                    // 書き込み済みかどうかをリングバッファ距離で判定 (currentWPos基準)
-                    // dist < SIZE/2 ならば過去(Safe)、そうでなければ未来(Unsafe)
-                    const int distToWrite2 = (currentWPos - idx2) & DELAY_BUFFER_MASK;
-                    const int distToWrite3 = (currentWPos - idx3) & DELAY_BUFFER_MASK;
-                    const bool p2Safe = (distToWrite2 < static_cast<int>(DELAY_BUFFER_SIZE / 2));
-                    const bool p3Safe = (distToWrite3 < static_cast<int>(DELAY_BUFFER_SIZE / 2));
-
-                    const double p2 = p2Safe ? buf[idx2] : p1;
-                    const double p3 = p3Safe ? buf[idx3] : p2;
-
-                    const double c0 = p1;
-                    const double c1 = 0.5 * (p2 - p0);
-                    const double c2 = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
-                    const double c3 = 0.5 * (p3 - p0) + 1.5 * (p1 - p2);
-
-                    double val = ((c3 * frac + c2) * frac + c1) * frac + c0;
-                    dryBuffer.setSample(ch, i, val);
+                    dryBuffer.setSample(ch, i, dryBuffer.getSample(ch, i) * fadeInGain + oldDryBuffer.getSample(ch, i) * fadeOutGain);
                 }
+            }
+#endif
+
+            if (!crossfadeGain.isSmoothing())
+            {
+                latencySmoother.setCurrentAndTargetValue(latencySmoother.getTargetValue());
+                oldDelay = latencySmoother.getCurrentValue();
             }
         }
         else
@@ -1921,6 +2063,12 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     const int prewarmedMaxSamples = juce::jmax(1, conv->prewarmedMaxSamples);
     const int guardedCallSamples = juce::jmin(quantizedCallSamples, prewarmedMaxSamples);
 
+    // WDLへの呼び出しサイズを固定化 (内部再確保防止)
+    // AudioEngineは、processに渡すnumSamplesがguardedCallSamplesの倍数であることを保証する。
+    // この前提が崩れると、最後のチャンクが小さくなり、WDL内部で再確保が発生する可能性がある。
+    const int callLen = guardedCallSamples;
+    jassert(numSamples % callLen == 0 && "ConvolverProcessor::process: numSamples must be a multiple of the guarded call size.");
+
     for (int ch = 0; ch < procChannels; ++ch)
     {
         const double wetG = needsConvolution ? (targetMixValue * headroom) : 0.0;
@@ -1932,27 +2080,14 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         int processed = 0;
         while (processed < numSamples)
         {
-            const int remaining = numSamples - processed;
-            const int callLen = (remaining >= guardedCallSamples) ? guardedCallSamples : remaining;
-
             // 1. 量子化サイズで入力を供給 (Add)
             const double* input = inputBase + processed;
             WDL_FFT_REAL* inputs[1] = { const_cast<WDL_FFT_REAL*>(input) };
             conv->convolvers[ch].Add(inputs, callLen, 1);
 
             // 2. 出力を取得 (Get) - ポインタのみ取得し、コピーはMixループで行う
-            int avail = conv->convolvers[ch].Avail(std::numeric_limits<int>::max());
+            int avail = conv->convolvers[ch].Avail(callLen);
             int validWetSamples = std::min(callLen, avail);
-
-            // 【Leak Fix】WDLエンジンのバッファ肥大化防止
-            // 入力(Add)に対して出力(Get/Advance)が遅れると内部バッファが無限に成長する可能性があるため、
-            // 異常なサイズになった場合は強制的にドレインする。
-            if (avail > MAX_BLOCK_SIZE * 2)
-            {
-                conv->convolvers[ch].Advance(avail);
-                avail = 0;
-                validWetSamples = 0;
-            }
 
             WDL_FFT_REAL** outputs = conv->convolvers[ch].Get();
             const double* wdlOut = (validWetSamples > 0 && outputs && outputs[0]) ? outputs[0] : nullptr;
@@ -2099,8 +2234,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             }
 
             // 4. Advance (読み取った分だけ進める)
-            if (avail > 0)
-                conv->convolvers[ch].Advance(avail);
+            if (validWetSamples > 0)
+                conv->convolvers[ch].Advance(validWetSamples);
 
             processed += callLen;
         }

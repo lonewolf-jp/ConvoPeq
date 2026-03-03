@@ -729,6 +729,8 @@ void AudioEngine::timerCallback()
     // UI用プロセッサのクリーンアップ
     uiEqProcessor.cleanup();
     uiConvolverProcessor.cleanup();
+    if (auto* dsp = currentDSP.load())
+        dsp->convolver.cleanup();
 }
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)

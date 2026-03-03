@@ -410,6 +410,13 @@ void SpectrumAnalyzerComponent::paint(juce::Graphics& g)
 
     if (plotArea.getWidth() <= 0 || plotArea.getHeight() <= 0) return;
 
+    // 描画負荷軽減: パスの再生成が必要な場合のみ実行
+    if (eqPathsDirty)
+    {
+        updateEQPaths();
+        eqPathsDirty = false;
+    }
+
     // ── グリッド描画 ──
     paintGrid(g, plotArea);
 
@@ -455,7 +462,7 @@ void SpectrumAnalyzerComponent::resized()
     sourceButton.setBounds(specArea.getRight() - btnW - 10, marginT, btnW, 18);
     analyzerEnableButton.setBounds(sourceButton.getX() - btnW - btnGap, marginT, btnW, 18);
 
-    updateEQPaths();
+    eqPathsDirty = true;
 }
 
 //--------------------------------------------------------------
@@ -681,7 +688,7 @@ void SpectrumAnalyzerComponent::updateEQData()
         eqResponseBufferR.fill(0.0f);
     }
 
-    updateEQPaths();
+    eqPathsDirty = true;
     // repaint() は timerCallback で行われるので、ここでは不要
 }
 
