@@ -697,6 +697,14 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // ここでDSPを再ビルドする。
     // 以前はtimerCallback()が毎50msに再ビルドしていたが、それは誤りだった。
     // prepareToPlayはMessageThreadから呼ばれるため、requestRebuild()を直接呼べる。
+
+    // [FIX] uiConvolverProcessor の currentBufferSize を必ず最新の bufferSize に同期する。
+    // この呼び出しが欠けていると currentBufferSize == 0 のまま残り、
+    // IR読み込み時に LoaderThread が blockSize=0 でMKLConvolver::setup(0,...) を呼んで
+    // numPartitions = (irLen - 1) / 0 → ゼロ除算クラッシュが発生する。
+    // prepareToPlay は Message Thread から呼ばれることが保証されているので安全。
+    uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
+
     if (rateChanged || blockSizeChanged || currentDSP.load(std::memory_order_acquire) == nullptr)
     {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread())

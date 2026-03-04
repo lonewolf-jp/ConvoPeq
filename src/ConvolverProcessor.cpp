@@ -59,6 +59,16 @@ namespace
 //--------------------------------------------------------------
 bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int irLen)
 {
+    // [FIX] Guard against zero/negative partition size (causes integer divide-by-zero)
+    // This happens when uiConvolverProcessor.prepareToPlay() was never called,
+    // leaving currentBufferSize = 0, which propagates as partSize = 0.
+    if (partSize <= 0 || irLen <= 0 || ir == nullptr)
+    {
+        DBG("MKLConvolver::setup: invalid parameters (partSize=" << partSize
+            << ", irLen=" << irLen << "). Returning false to fall back to WDL.");
+        return false;
+    }
+
     partitionSize = partSize;
     fftSize = 1;
     while (fftSize < partitionSize * 2) fftSize <<= 1;
@@ -221,12 +231,25 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
             fdlIndex = (fdlIndex + 1) % numPartitions;
         }
 
-        // Read from output buffer
-        int toRead = std::min(numSamples - processed, partitionSize - outputBufferPos);
-        std::memcpy(out + processed, outputBuffer.get() + outputBufferPos, toRead * sizeof(double));
-        outputBufferPos += toRead;
+        // Read from output buffer.
+        // [FIX] toRead is bounded by toWrite, NOT by (numSamples - processed).
+        // Using (numSamples - processed) caused an infinite loop when
+        // outputBufferPos == partitionSize (output exhausted) but
+        // inputBufferPos < partitionSize (input not yet full, so no FFT fired).
+        // In that case toRead == 0 while toWrite > 0, so processed never advanced.
+        // The correct invariant is: input and output advance by the same amount per
+        // iteration (startup latency is absorbed by outputBuffer being pre-zeroed).
+        int toRead = std::min(toWrite, partitionSize - outputBufferPos);
+        if (toRead > 0)
+        {
+            std::memcpy(out + processed, outputBuffer.get() + outputBufferPos, toRead * sizeof(double));
+            outputBufferPos += toRead;
+        }
+        // Zero-fill for any startup latency gap (output buffer exhausted before input fills)
+        if (toRead < toWrite)
+            std::memset(out + processed + toRead, 0, (toWrite - toRead) * sizeof(double));
 
-        processed += toRead;
+        processed += toWrite; // Advance by input consumed, not output produced
     }
 }
 
@@ -1647,10 +1670,18 @@ void ConvolverProcessor::cleanup()
     }
 
     // 【Leak Fix】LoaderThreadの異常蓄積防止
-    // スレッドが終了しない場合でも、一定数を超えたら強制削除（stopThreadで待機）してメモリを解放する
+    // スレッドが終了しない場合でも、一定数を超えたら強制削除してメモリを解放する。
+    // [FIX] ~LoaderThread() は stopThread(4000) をブロック呼出するため、
+    //       メッセージスレッド上で直接 erase() すると最大4秒UIが凍結しクラッシュする。
+    //       超過スレッドは detach されたバックグラウンドスレッドで破棄する。
     while (loaderTrashBin.size() > 2)
     {
+        std::unique_ptr<LoaderThread> staleLoader = std::move(loaderTrashBin.front());
         loaderTrashBin.erase(loaderTrashBin.begin());
+        // ~LoaderThread() の stopThread(4000) をメッセージスレッドの外で実行する
+        std::thread([l = std::move(staleLoader)]() mutable {
+            l.reset(); // blocks in stopThread(4000) on background thread
+        }).detach();
     }
 
     // StereoConvolver のクリーンアップ (Worker Threadと競合するためロックが必要)
