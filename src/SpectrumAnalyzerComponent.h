@@ -75,7 +75,7 @@ private:
     std::array<float, NUM_FFT_BINS> rawBuffer;        // readFromFifo で取得したデータから計算
     std::array<float, NUM_FFT_BINS> smoothedBuffer;   // 指数移動平均で更新
     std::array<float, NUM_FFT_BINS> peakBuffer;       // ピーク保持バッファ
-    std::array<int,   NUM_FFT_BINS> peakHoldCounter;  // 各バンドのピーク保持残フレーム数
+    std::array<double, NUM_FFT_BINS> peakHoldTime;    // 各バンドのピーク保持残り時間 (秒)
 
     // ── EQ応答曲線データ ──
     std::array<float, NUM_DISPLAY_BARS> eqResponseBufferL;
@@ -103,9 +103,9 @@ private:
     static constexpr float MAX_FREQ_HZ = 20000.0f;
     static constexpr float MAX_DB       = 20.0f;
 
-    // ── ピーク保持フレーム数 ──
-    // 60fps で約1秒間保持
-    static constexpr int PEAK_HOLD_FRAMES = 60;
+    // ── ピーク保持設定 ──
+    static constexpr double PEAK_HOLD_SEC = 1.0;
+    static constexpr float PEAK_DECAY_DB_PER_SEC = 15.0f;
 
     // ── レベルメーターの幅 ──
     static constexpr int LEVEL_METER_WIDTH = 24;  // 各バーの幅(px)
@@ -163,4 +163,6 @@ private:
     static constexpr float UNDERRUN_DECAY_DB = 1.5f; // データ不足時の減衰量 (dB/frame) @ 60fps -> 90dB/s
 
     bool eqPathsDirty = true;
+
+    double lastTime = 0.0;
 };

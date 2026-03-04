@@ -16,6 +16,93 @@
 
 struct AudioEngine::DSPCore; // Forward declaration
 
+// Padé近似による高速tanh (std::exp回避)
+// 精度: |x| < 3.0 で誤差 1e-4 以下
+static inline double fastTanh(double x) noexcept
+{
+    if (x >= 3.0) return 1.0;
+    if (x <= -3.0) return -1.0;
+    const double x2 = x * x;
+    return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+}
+
+#if defined(__AVX2__)
+static inline __m256d fastTanh_AVX2(__m256d x) noexcept
+{
+    const __m256d vThree = _mm256_set1_pd(3.0);
+    const __m256d vMinusThree = _mm256_set1_pd(-3.0);
+    const __m256d vOne = _mm256_set1_pd(1.0);
+    const __m256d vMinusOne = _mm256_set1_pd(-1.0);
+    const __m256d v27 = _mm256_set1_pd(27.0);
+    const __m256d v9 = _mm256_set1_pd(9.0);
+
+    __m256d maskPos = _mm256_cmp_pd(x, vThree, _CMP_GE_OQ);
+    __m256d maskNeg = _mm256_cmp_pd(x, vMinusThree, _CMP_LE_OQ);
+
+    __m256d x2 = _mm256_mul_pd(x, x);
+    __m256d num = _mm256_mul_pd(x, _mm256_add_pd(v27, x2));
+    __m256d den = _mm256_add_pd(v27, _mm256_mul_pd(v9, x2));
+    __m256d res = _mm256_div_pd(num, den);
+
+    res = _mm256_blendv_pd(res, vOne, maskPos);
+    res = _mm256_blendv_pd(res, vMinusOne, maskNeg);
+
+    return res;
+}
+
+static inline __m256d musicalSoftClip_AVX2(__m256d x, __m256d threshold, __m256d knee, __m256d asymmetry) noexcept
+{
+    const __m256d vOne = _mm256_set1_pd(1.0);
+    const __m256d vTwo = _mm256_set1_pd(2.0);
+    const __m256d vThree = _mm256_set1_pd(3.0);
+    const __m256d vHalf = _mm256_set1_pd(0.5);
+    const __m256d vZero = _mm256_setzero_pd();
+    const __m256d vAbsMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+
+    __m256d abs_x = _mm256_and_pd(x, vAbsMask);
+    __m256d clip_start = _mm256_sub_pd(threshold, knee);
+
+    // sign = (x > 0.0) ? 1.0 : -1.0
+    __m256d maskSignPos = _mm256_cmp_pd(x, vZero, _CMP_GT_OQ);
+    __m256d sign = _mm256_blendv_pd(_mm256_set1_pd(-1.0), vOne, maskSignPos);
+
+    // knee_shape
+    __m256d threshold_plus_knee = _mm256_add_pd(threshold, knee);
+    __m256d maskKnee = _mm256_cmp_pd(abs_x, threshold_plus_knee, _CMP_LT_OQ);
+
+    // t = (abs_x - clip_start) / (2.0 * knee)
+    __m256d t = _mm256_div_pd(_mm256_sub_pd(abs_x, clip_start), _mm256_mul_pd(vTwo, knee));
+    // smoothstep = t * t * (3.0 - 2.0 * t)
+    __m256d smoothstep = _mm256_mul_pd(_mm256_mul_pd(t, t), _mm256_sub_pd(vThree, _mm256_mul_pd(vTwo, t)));
+
+    __m256d knee_shape = _mm256_blendv_pd(vOne, smoothstep, maskKnee);
+
+    // clipped = threshold + knee * fastTanh((abs_x - threshold) / knee)
+    __m256d tanh_arg = _mm256_div_pd(_mm256_sub_pd(abs_x, threshold), knee);
+    __m256d clipped = _mm256_add_pd(threshold, _mm256_mul_pd(knee, fastTanh_AVX2(tanh_arg)));
+
+    // linear = abs_x
+    // res = sign * (linear * (1.0 - knee_shape) + clipped * knee_shape)
+    __m256d term1 = _mm256_mul_pd(abs_x, _mm256_sub_pd(vOne, knee_shape));
+    __m256d term2 = _mm256_mul_pd(clipped, knee_shape);
+    __m256d res = _mm256_mul_pd(sign, _mm256_add_pd(term1, term2));
+
+    // asymmetric_gain = 1.0 - asymmetry * (1.0 - sign) * 0.5 * knee_shape
+    __m256d factor = _mm256_mul_pd(asymmetry, _mm256_sub_pd(vOne, sign));
+    factor = _mm256_mul_pd(factor, vHalf);
+    factor = _mm256_mul_pd(factor, knee_shape);
+    __m256d asymmetric_gain = _mm256_sub_pd(vOne, factor);
+
+    res = _mm256_mul_pd(res, asymmetric_gain);
+
+    // Blend with original x for values below clip_start
+    __m256d maskLinear = _mm256_cmp_pd(abs_x, clip_start, _CMP_LT_OQ);
+    res = _mm256_blendv_pd(res, x, maskLinear);
+
+    return res;
+}
+#endif
+
 // コンストラクタ
 //--------------------------------------------------------------
 AudioEngine::AudioEngine()
@@ -58,31 +145,42 @@ void AudioEngine::initialize()
 AudioEngine::~AudioEngine()
 {
     stopTimer();
-    if (auto* dsp = currentDSP.load()) {
-        dsp->convolver.forceCleanup();
-    }
-    {
-        juce::ScopedLock sl(trashBinLock);
-        trashBinPending.clear();
-        trashBin.clear();
-    }
 
-    uiConvolverProcessor.removeChangeListener(this);
-    uiEqProcessor.removeChangeListener(this);
-    uiConvolverProcessor.removeListener(this);
-    uiEqProcessor.removeListener(this);
-
-    // 進行中のコールバックが完了するのを待つため、DSPを無効化
-    // これにより、changeListenerCallback内でdsp->へのアクセスを防ぐ
+    // 1. Stop Audio Thread access immediately
+    // Prevent Audio Thread from acquiring new pointer.
     currentDSP.store(nullptr, std::memory_order_release);
 
-    // Stop worker thread
+    // 2. Stop worker thread
+    // Ensure no new DSPs are being built or committed.
     rebuildThreadShouldExit.store(true);
     rebuildCV.notify_one();
     if (rebuildThread.joinable())
         rebuildThread.join();
 
-    activeDSP.reset();
+    // 3. Remove listeners
+    uiConvolverProcessor.removeChangeListener(this);
+    uiEqProcessor.removeChangeListener(this);
+    uiConvolverProcessor.removeListener(this);
+    uiEqProcessor.removeListener(this);
+
+    // 4. Release Active DSP
+    if (activeDSP)
+    {
+        activeDSP->convolver.forceCleanup();
+        delete activeDSP;
+        activeDSP = nullptr;
+    }
+
+    // 5. Explicit Generation Sweep (Trash Bin Cleanup)
+    // Clear all pending and old DSPs.
+    {
+        juce::ScopedLock sl(trashBinLock);
+        for (auto* p : trashBinPending) delete p;
+        trashBinPending.clear();
+
+        for (auto& entry : trashBin) delete entry.first;
+        trashBin.clear();
+    }
 }
 
 //--------------------------------------------------------------
@@ -145,6 +243,19 @@ void AudioEngine::readFromFifo(float* dest, int numSamples)
     // 足りない分はゼロ埋め (グリッチ防止)
     if (actualRead < numSamples)
         juce::FloatVectorOperations::clear(dest + actualRead, numSamples - actualRead);
+}
+
+//--------------------------------------------------------------
+// FIFOからデータをスキップ (Latency対策)
+//--------------------------------------------------------------
+void AudioEngine::skipFifo(int numSamples)
+{
+    const juce::ScopedLock sl(fifoReadLock);
+    int start1, size1, start2, size2;
+    audioFifo.prepareToRead(numSamples, start1, size1, start2, size2);
+    const int total = size1 + size2;
+    if (total > 0)
+        audioFifo.finishedRead(total);
 }
 
 //--------------------------------------------------------------
@@ -420,29 +531,31 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     //   ・将来16x OS対応もこの定数1箇所変更だけで済む
     // ==================================================================
     constexpr int MAX_OS_FACTOR = 8;
-    const int inputMaxBlock     = SAFE_MAX_BLOCK_SIZE;
+    // [FIX] Ensure we cover the requested block size even if it exceeds SAFE_MAX_BLOCK_SIZE
+    const int inputMaxBlock     = std::max(SAFE_MAX_BLOCK_SIZE, samplesPerBlock);
     const int internalMaxBlock  = inputMaxBlock * MAX_OS_FACTOR;
 
     maxSamplesPerBlock   = inputMaxBlock;
     maxInternalBlockSize = internalMaxBlock;
 
 // === 【パッチ3】raw aligned_malloc確保（message threadのみ・64byte保証）===
-    if (alignedCapacity < internalMaxBlock)
+    const int newRequired = internalMaxBlock;
+    if (newRequired > alignedCapacity || !alignedL || !alignedR)
     {
         // Exception-safe allocation using local ScopedAlignedPtr
         auto newL = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
-            static_cast<size_t>(internalMaxBlock) * sizeof(double), 64)));
+            static_cast<size_t>(newRequired) * sizeof(double), 64)));
         auto newR = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
-            static_cast<size_t>(internalMaxBlock) * sizeof(double), 64)));
+            static_cast<size_t>(newRequired) * sizeof(double), 64)));
 
         // 明示的ゼロクリア（Denormal/NaN防止）
-        juce::FloatVectorOperations::clear(newL.get(), internalMaxBlock);
-        juce::FloatVectorOperations::clear(newR.get(), internalMaxBlock);
+        juce::FloatVectorOperations::clear(newL.get(), newRequired);
+        juce::FloatVectorOperations::clear(newR.get(), newRequired);
 
         // Commit (noexcept move)
         alignedL = std::move(newL);
         alignedR = std::move(newR);
-        alignedCapacity = internalMaxBlock;
+        alignedCapacity = newRequired;
     }
 
     const auto osPreset = (oversamplingType == OversamplingType::LinearPhase)
@@ -500,12 +613,6 @@ void AudioEngine::DSPCore::reset()
         juce::FloatVectorOperations::clear(alignedR.get(), alignedCapacity);
 }
 
-// 【パッチ3】rawバッファ解放用デストラクタ（vector削除に伴い追加）
-AudioEngine::DSPCore::~DSPCore()
-{
-    // ScopedAlignedPtr handles cleanup automatically
-}
-
 //--------------------------------------------------------------
 // requestRebuild - DSPグラフの再構築 (Message Thread)
 //--------------------------------------------------------------
@@ -514,11 +621,8 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     // UIコンポーネント(uiEqProcessor等)へのアクセスやMKLメモリ確保を行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
-    // リビルド世代を更新 (古いリビルドタスクの結果を破棄するため)
-    const int generation = ++rebuildGeneration;
-
     // 新しいDSPコアを作成
-    DSPCore::Ptr newDSP = std::make_shared<DSPCore>();
+    DSPCore* newDSP = new DSPCore();
     newDSP->convolver.setVisualizationEnabled(false); // DSP用は可視化データ不要
 
     // UIプロセッサから状態をコピー
@@ -529,7 +633,8 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     int ditherDepth = ditherBitDepth.load();
     int osFactor = manualOversamplingFactor.load();
     OversamplingType osType = oversamplingType.load();
-    DSPCore::Ptr current = activeDSP; // 現在のアクティブDSPをキャプチャ
+    DSPCore* current = activeDSP; // 現在のアクティブDSPをキャプチャ
+    int generation = 0;
 
     RebuildTask task;
     task.newDSP = newDSP;
@@ -539,125 +644,167 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     task.ditherDepth = ditherDepth;
     task.manualOversamplingFactor = osFactor;
     task.oversamplingType = osType;
-    task.generation = generation;
 
+    DSPCore* dspToDestroy = nullptr; // To be destroyed outside the lock
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
+
+        // Increment generation and create task inside the lock to ensure atomicity
+        generation = ++rebuildGeneration;
+        task.generation = generation;
+
+        // If a task is already pending, move it out to be destroyed outside the lock.
+        // This prevents holding the lock during a potentially slow DSPCore destruction.
+        if (hasPendingTask)
+            dspToDestroy = pendingTask.newDSP;
+
         pendingTask = task;
         hasPendingTask = true;
     }
     rebuildCV.notify_one();
+
+    // Destroy the orphaned DSP from the superseded task outside the lock.
+    if (dspToDestroy)
+        delete dspToDestroy;
 }
 
 void AudioEngine::rebuildThreadLoop()
 {
     while (true)
     {
-        RebuildTask task;
+        try
         {
-            std::unique_lock<std::mutex> lock(rebuildMutex);
-            rebuildCV.wait(lock, [this] { return hasPendingTask || rebuildThreadShouldExit.load(); });
-
-            if (rebuildThreadShouldExit.load()) break;
-
-            task = pendingTask;
-
-            // 【パッチ7】pendingTask.currentDSP を即時解放してメモリリークを防ぐ
-            // 問題:
-            //   requestRebuild() は「現在の activeDSP」を pendingTask.currentDSP に
-            //   shared_ptr コピーとして保持する。リビルドスレッドが task = pendingTask で
-            //   ローカルに所有権を移した後も pendingTask.currentDSP が参照を保持し続ける。
-            //   その結果、trashBin の GC が古い DSPCore の参照カウントを 0 に下げられず、
-            //   次の requestRebuild() が来るまで DSPCore（WDL バッファ・MKL メモリ含む、
-            //   数百 MB 規模になりうる）がリークし続ける。
-            // 修正:
-            //   リビルドスレッドがタスクをローカルに取得した直後、かつ rebuildMutex を
-            //   保持したまま pendingTask.currentDSP を reset() する。これにより
-            //   pendingTask からの余分な参照を即座に解放する。
-            //   task.currentDSP は依然として参照を保持しており、リビルド完了まで
-            //   AGC 状態同期・IR 再利用チェックに安全に利用できる。
-            pendingTask.currentDSP.reset();
-
-            hasPendingTask = false;
-        }
-
-        // Helper to check obsolescence
-        const auto isObsolete = [&]() {
-            return isRebuildObsolete(task.generation) || rebuildThreadShouldExit.load();
-        };
-
-        if (isObsolete()) continue;
-
-        // 1. Prepare (メモリ確保)
-        task.newDSP->prepare(task.sampleRate, task.samplesPerBlock, task.ditherDepth, task.manualOversamplingFactor, task.oversamplingType);
-
-        if (isObsolete()) continue;
-
-        // 2. Reuse Logic
-        bool irReused = false;
-        if (task.currentDSP)
-        {
-            // 既存のDSPからAGCの状態を引き継ぐ
-            task.newDSP->eq.syncGlobalStateFrom(task.currentDSP->eq);
-
-            if (std::abs(task.currentDSP->sampleRate - task.sampleRate) < 1e-6 &&
-                task.currentDSP->oversamplingFactor == task.newDSP->oversamplingFactor && task.newDSP->oversamplingFactor > 1)
+            RebuildTask task;
             {
-                // IRの生成条件が一致しているか確認
-                if (task.newDSP->convolver.getIRName() == task.currentDSP->convolver.getIRName() &&
-                    task.newDSP->convolver.getUseMinPhase() == task.currentDSP->convolver.getUseMinPhase() &&
-                    std::abs(task.newDSP->convolver.getTargetIRLength() - task.currentDSP->convolver.getTargetIRLength()) < 0.001f)
+                std::unique_lock<std::mutex> lock(rebuildMutex);
+                rebuildCV.wait(lock, [this] { return hasPendingTask || rebuildThreadShouldExit.load(); });
+
+                if (rebuildThreadShouldExit.load()) break;
+
+                // Copy task and clear pendingTask pointers to transfer ownership
+                task = pendingTask;
+                pendingTask.newDSP = nullptr;
+                pendingTask.currentDSP = nullptr;
+
+                hasPendingTask = false;
+            }
+
+            if (task.newDSP == nullptr)
+            {
+                jassertfalse;
+                continue;
+            }
+
+            // Use unique_ptr to ensure deletion if we continue/break/throw before commit
+            std::unique_ptr<DSPCore> dspGuard(task.newDSP);
+
+            // Helper to check obsolescence
+            const auto isObsolete = [&] {
+                return isRebuildObsolete(task.generation) || rebuildThreadShouldExit.load();
+            };
+
+            if (isObsolete()) continue;
+
+            // 1. Prepare (メモリ確保)
+            task.newDSP->prepare(task.sampleRate, task.samplesPerBlock, task.ditherDepth, task.manualOversamplingFactor, task.oversamplingType);
+
+            if (isObsolete()) continue;
+
+            // 2. Reuse Logic
+            bool irReused = false;
+            if (task.currentDSP)
+            {
+                // 既存のDSPからAGCの状態を引き継ぐ
+                task.newDSP->eq.syncGlobalStateFrom(task.currentDSP->eq);
+
+                if (std::abs(task.currentDSP->sampleRate - task.sampleRate) < 1e-6 &&
+                    task.currentDSP->oversamplingFactor == task.newDSP->oversamplingFactor && task.newDSP->oversamplingFactor > 1)
                 {
-                    // 既存のConvolutionエンジンを共有（クローン回避・グリッチ防止）
-                    task.newDSP->convolver.shareConvolutionEngineFrom(task.currentDSP->convolver);
-                    irReused = true;
+                    // IRの生成条件が一致しているか確認
+                    if (task.newDSP->convolver.getIRName() == task.currentDSP->convolver.getIRName() &&
+                        task.newDSP->convolver.getUseMinPhase() == task.currentDSP->convolver.getUseMinPhase() &&
+                        std::abs(task.newDSP->convolver.getTargetIRLength() - task.currentDSP->convolver.getTargetIRLength()) < 0.001f)
+                    {
+                        // 既存のConvolutionエンジンを共有（クローン回避・グリッチ防止）
+                        task.newDSP->convolver.shareConvolutionEngineFrom(task.currentDSP->convolver);
+                        irReused = true;
+                    }
                 }
             }
-        }
 
-        // 3. Rebuild IR if needed (Heavy operation)
-        if (!irReused && task.newDSP->convolver.getIRLength() > 0)
-        {
-            if (isObsolete()) continue;
-            task.newDSP->convolver.rebuildAllIRsSynchronous(isObsolete);
-        }
-
-        if (isObsolete()) continue;
-
-        // 4. Refresh Latency (Prevent pitch slide during fade-in)
-        task.newDSP->convolver.refreshLatency();
-
-        // 5. Fade In
-        task.newDSP->fadeInSamplesLeft.store(DSPCore::FADE_IN_SAMPLES, std::memory_order_relaxed);
-
-        // 6. Commit on Message Thread
-        juce::MessageManager::callAsync([weakSelf = juce::WeakReference<AudioEngine>(this), newDSP = task.newDSP, generation = task.generation]() {
-            if (auto* self = weakSelf.get())
+            // 3. Rebuild IR if needed (Heavy operation)
+            if (!irReused && task.newDSP->convolver.getIRLength() > 0)
             {
-                self->commitNewDSP(newDSP, generation);
+                if (isObsolete()) continue;
+                task.newDSP->convolver.rebuildAllIRsSynchronous(isObsolete);
             }
-        });
+
+            if (isObsolete()) continue;
+
+            // 4. Refresh Latency (Prevent pitch slide during fade-in)
+            task.newDSP->convolver.refreshLatency();
+
+            // 5. Fade In
+            task.newDSP->fadeInSamplesLeft.store(DSPCore::FADE_IN_SAMPLES, std::memory_order_relaxed);
+
+            // 6. Commit on Message Thread
+            // Release ownership from guard, pass to commitNewDSP
+            DSPCore* dspToCommit = dspGuard.release();
+            juce::MessageManager::callAsync([weakSelf = juce::WeakReference<AudioEngine>(this), newDSP = dspToCommit, generation = task.generation] {
+                if (auto* self = weakSelf.get())
+                {
+                    self->commitNewDSP(newDSP, generation);
+                }
+                else
+                {
+                    // Engine is gone, delete the orphan DSP
+                    delete newDSP;
+                }
+            });
+        }
+        catch (const std::exception& e)
+        {
+            DBG("AudioEngine::rebuildThreadLoop exception: " << e.what());
+            juce::ignoreUnused(e);
+        }
+        catch (...)
+        {
+            DBG("AudioEngine::rebuildThreadLoop unknown exception");
+        }
     }
 }
 
-void AudioEngine::commitNewDSP(DSPCore::Ptr newDSP, int generation)
+void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 {
-    // 古いリクエストの結果であれば破棄 (Race condition対策)
-    if (generation != rebuildGeneration.load())
-        return;
+    DSPCore* dspToTrash = nullptr;
 
-    // 1. Update the atomic raw pointer for the Audio Thread (Wait-free)
-    currentDSP.store(newDSP.get(), std::memory_order_release);
-
-    // 2. Move the previous active DSP to the trash bin
-    if (activeDSP)
+    // Lock to ensure the check and commit are atomic with respect to new rebuild requests.
     {
-        const juce::ScopedLock sl(trashBinLock);
-        trashBinPending.push_back(activeDSP);
+        std::lock_guard<std::mutex> lock(rebuildMutex);
+
+        // 古いリクエストの結果であれば破棄 (Race condition対策)
+        if (generation != rebuildGeneration.load(std::memory_order_relaxed))
+        {
+            delete newDSP;
+            return;
+        }
+
+        // 1. Update the atomic raw pointer for the Audio Thread (Wait-free)
+        currentDSP.store(newDSP, std::memory_order_release);
+
+        // 2. Move the previous active DSP to a temporary variable to be trashed later.
+        dspToTrash = activeDSP;
+
+        // 3. Take ownership of the new DSP
+        activeDSP = newDSP;
     }
 
-    // 3. Take ownership of the new DSP
-    activeDSP = newDSP;
+    // 4. Move the old DSP to the trash bin outside the main lock.
+    if (dspToTrash != nullptr)
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        trashBinPending.push_back(dspToTrash);
+    }
 }
 
 void AudioEngine::timerCallback()
@@ -678,7 +825,7 @@ void AudioEngine::timerCallback()
         sendChangeMessage();
     }
 
-    std::vector<DSPCore::Ptr> toDelete;
+    std::vector<DSPCore*> toDelete;
 
     {
         const juce::ScopedLock sl(trashBinLock);
@@ -694,9 +841,8 @@ void AudioEngine::timerCallback()
         // that might have started using the pointer has finished.
         auto it = std::remove_if(trashBin.begin(), trashBin.end(),
                                  [now](const auto& entry) {
-                                     // Handle wrap-around of uint32 roughly
-                                     return (now >= entry.second) ? (now - entry.second > 500)
-                                                                  : (now + (std::numeric_limits<uint32>::max() - entry.second) > 500);
+                                     // Unsigned arithmetic handles wrap-around correctly
+                                     return (now - entry.second) > 2000;
                                  });
 
         for (auto i = it; i != trashBin.end(); ++i)
@@ -715,6 +861,8 @@ void AudioEngine::timerCallback()
     }
 
     // Lock解放後にデストラクタを実行 (stopThread等の重い処理をロック外で行う)
+    for (auto* p : toDelete)
+        delete p;
     toDelete.clear();
 
     // 3. 内部プロセッサのクリーンアップを実行
@@ -807,12 +955,18 @@ void AudioEngine::releaseResources()
     currentDSP.store(nullptr, std::memory_order_release);
 
     // 2. Release Active DSP (triggers destructors of DSPCore and its members)
-    activeDSP.reset();
+    if (activeDSP)
+    {
+        delete activeDSP;
+        activeDSP = nullptr;
+    }
 
     // 3. Clear Trash Bin (release old DSPs)
     {
         const juce::ScopedLock sl(trashBinLock);
+        for (auto& entry : trashBin) delete entry.first;
         trashBin.clear();
+        for (auto* p : trashBinPending) delete p;
         trashBinPending.clear();
     }
 
@@ -1019,12 +1173,6 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     const float inputDb = measureLevel(processBlock);
     inputLevelDb.store(inputDb, std::memory_order_relaxed);
 
-    // ── Analyzer Input Tap (Pre-DSP) ──
-    if (state.analyzerSource == AnalyzerSource::Input)
-    {
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
-    }
-
     //----------------------------------------------------------
     // オーバーサンプリング処理ブロック
     //----------------------------------------------------------
@@ -1051,6 +1199,12 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
             osDCBlockerL.process(processBlock.getChannelPointer(0), numOSSamples);
         if (processBlock.getNumChannels() > 1)
             osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
+    }
+
+    // ── Analyzer Input Tap (Pre-DSP) ──
+    if (state.analyzerSource == AnalyzerSource::Input)
+    {
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
     }
 
     int numProcSamples = (int)processBlock.getNumSamples();
@@ -1094,7 +1248,29 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         for (int ch = 0; ch < numProcChannels; ++ch)
         {
             double* data = processBlock.getChannelPointer(ch);
-            for (int i = 0; i < numProcSamples; ++i)
+            int i = 0;
+#if defined(__AVX2__)
+            const __m256d vThreshold = _mm256_set1_pd(CLIP_THRESHOLD);
+            const __m256d vKnee = _mm256_set1_pd(CLIP_KNEE);
+            const __m256d vAsymmetry = _mm256_set1_pd(CLIP_ASYMMETRY);
+            const __m256d vClipStart = _mm256_set1_pd(CLIP_START);
+            const __m256d vAbsMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+
+            for (; i <= numProcSamples - 4; i += 4)
+            {
+                __m256d vData = _mm256_loadu_pd(data + i);
+                __m256d vAbs = _mm256_and_pd(vData, vAbsMask);
+
+                // Check if any sample needs clipping
+                __m256d mask = _mm256_cmp_pd(vAbs, vClipStart, _CMP_GT_OQ);
+                if (_mm256_movemask_pd(mask) != 0)
+                {
+                    __m256d vProcessed = musicalSoftClip_AVX2(vData, vThreshold, vKnee, vAsymmetry);
+                    _mm256_storeu_pd(data + i, vProcessed);
+                }
+            }
+#endif
+            for (; i < numProcSamples; ++i)
             {
                 if (std::abs(data[i]) > CLIP_START)
                     data[i] = musicalSoftClip(data[i], CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
@@ -1103,6 +1279,12 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     }
 
     //----------------------------------------------------------
+
+    // ── Analyzer Output Tap (Post-DSP) ──
+    if (state.analyzerSource == AnalyzerSource::Output)
+    {
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
+    }
 
     // ダウンサンプリング (結果は processBuffer に書き戻される)
     if (oversamplingFactor > 1)
@@ -1117,12 +1299,6 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     // オーバーサンプリング有効時は、ダウンサンプリング後の信号(originalBlock)を使用する
     const float outputDb = measureLevel(originalBlock);
     outputLevelDb.store(outputDb, std::memory_order_relaxed);
-
-    // ── Analyzer Output Tap (Post-DSP) ──
-    if (state.analyzerSource == AnalyzerSource::Output)
-    {
-        pushToFifo(originalBlock, audioFifo, audioFifoBuffer);
-    }
 
     processOutput(bufferToFill, numSamples);
 
@@ -1186,9 +1362,6 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     const float inputDb = measureLevel(processBlock);
     inputLevelDb.store(inputDb, std::memory_order_relaxed);
 
-    if (state.analyzerSource == AnalyzerSource::Input)
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
-
     juce::dsp::AudioBlock<double> originalBlock = processBlock;
 
     if (oversamplingFactor > 1)
@@ -1208,6 +1381,9 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         if (processBlock.getNumChannels() > 1)
             osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
     }
+
+    if (state.analyzerSource == AnalyzerSource::Input)
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
 
     const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
     const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
@@ -1238,13 +1414,38 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         for (int ch = 0; ch < numProcChannels; ++ch)
         {
             double* data = processBlock.getChannelPointer(ch);
-            for (int i = 0; i < numProcSamples; ++i)
+            int i = 0;
+#if defined(__AVX2__)
+            const __m256d vThreshold = _mm256_set1_pd(CLIP_THRESHOLD);
+            const __m256d vKnee = _mm256_set1_pd(CLIP_KNEE);
+            const __m256d vAsymmetry = _mm256_set1_pd(CLIP_ASYMMETRY);
+            const __m256d vClipStart = _mm256_set1_pd(CLIP_START);
+            const __m256d vAbsMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+
+            for (; i <= numProcSamples - 4; i += 4)
+            {
+                __m256d vData = _mm256_loadu_pd(data + i);
+                __m256d vAbs = _mm256_and_pd(vData, vAbsMask);
+
+                // Check if any sample needs clipping
+                __m256d mask = _mm256_cmp_pd(vAbs, vClipStart, _CMP_GT_OQ);
+                if (_mm256_movemask_pd(mask) != 0)
+                {
+                    __m256d vProcessed = musicalSoftClip_AVX2(vData, vThreshold, vKnee, vAsymmetry);
+                    _mm256_storeu_pd(data + i, vProcessed);
+                }
+            }
+#endif
+            for (; i < numProcSamples; ++i)
             {
                 if (std::abs(data[i]) > CLIP_START)
                     data[i] = musicalSoftClip(data[i], CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
             }
         }
     }
+
+    if (state.analyzerSource == AnalyzerSource::Output)
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
 
     if (oversamplingFactor > 1)
     {
@@ -1254,9 +1455,6 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 
     const float outputDb = measureLevel(originalBlock);
     outputLevelDb.store(outputDb, std::memory_order_relaxed);
-
-    if (state.analyzerSource == AnalyzerSource::Output)
-        pushToFifo(originalBlock, audioFifo, audioFifoBuffer);
 
     processOutputDouble(buffer, numSamples);
 
@@ -1306,11 +1504,12 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
     jassert (audioFifoBuffer.getNumSamples() == audioFifo.getTotalSize());
 
     // FIFO空き容量チェック (Overflow Protection)
-    // 部分書き込み対応: 空き容量分だけ書き込む (完全ドロップによる時間軸ジャンプを軽減)
+    // 部分書き込みは波形不連続（グリッチ）の原因となるため、
+    // ブロック全体が書き込めない場合は書き込みをスキップする (All or Nothing)
     int start1, size1, start2, size2;
     audioFifo.prepareToWrite(numSamples, start1, size1, start2, size2);
 
-    if (size1 + size2 <= 0)
+    if (size1 + size2 < numSamples)
         return;
 
     const double* l = block.getChannelPointer(0);
@@ -1413,6 +1612,18 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
         // 高速なメモリコピー (double配列)
         std::memcpy(dst, src, numSamples * sizeof(double));
     }
+
+    // ── 入力段DC除去 ──
+    // 後段のEQ/ConvolverにDCオフセットが渡るのを防ぐ
+    // Note: osDCBlockerはオーバーサンプリング時のみ動作するため、
+    //       非オーバーサンプリング時にもDC除去を行うためにここで適用する。
+    double* lPtr = alignedL.get();
+    double* rPtr = alignedR.get();
+    for (int i = 0; i < numSamples; ++i)
+    {
+        lPtr[i] = inputDCBlockerL.process(lPtr[i]);
+        rPtr[i] = inputDCBlockerR.process(rPtr[i]);
+    }
 }
 
 void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples) noexcept
@@ -1437,24 +1648,23 @@ void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& b
 
     if (expandMono)
         std::memcpy(alignedR.get(), alignedL.get(), numSamples * sizeof(double));
-}
 
-// Padé近似による高速tanh (std::exp回避)
-// 精度: |x| < 3.0 で誤差 1e-4 以下
-static inline double fastTanh(double x) noexcept
-{
-    if (x >= 3.0) return 1.0;
-    if (x <= -3.0) return -1.0;
-    const double x2 = x * x;
-    return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+    // ── 入力段DC除去 ──
+    double* lPtr = alignedL.get();
+    double* rPtr = alignedR.get();
+    for (int i = 0; i < numSamples; ++i)
+    {
+        lPtr[i] = inputDCBlockerL.process(lPtr[i]);
+        rPtr[i] = inputDCBlockerR.process(rPtr[i]);
+    }
 }
 
 // 音楽的なソフトクリッピング関数
 // 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加える。
 // @param x 入力信号
-// @param threshold クリッピングが開始される閾値
-// @param knee 閾値周辺のカーブの滑らかさ（ニー）
-// @param asymmetry 非対称性の量。正の値で正の波形が、負の値で負の波形がより強くクリップされ、偶数次倍音を生成する。
+// @param threshold クリッピングが開始される閾値 (正の値)
+// @param knee 閾値周辺のカーブの滑らかさ（ニー） (正の値)
+// @param asymmetry 非対称性の量。負の波形をより強くクリップし、偶数次倍音を生成する。
 double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept
 {
     const double abs_x = std::abs(x);
@@ -1483,8 +1693,11 @@ double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double 
     const double clipped = threshold + knee * fastTanh((abs_x - threshold) / knee);
 
     // 非対称性の追加（真空管風）
-    const double asymmetric_factor = 1.0 + asymmetry * sign * knee_shape;
-    return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_factor;
+    // 元の実装 `1.0 + asymmetry * sign * knee_shape` は正の信号を増幅し、ピークを超える可能性があった。
+    // 修正版では、正の信号はそのまま、負の信号は asymmetry の量に応じてより強くクリップ（減衰）させる。
+    // これにより、出力が 1.0 を超えることを防ぎつつ、安全に偶数次倍音を生成する。
+    const double asymmetric_gain = 1.0 - asymmetry * (1.0 - sign) * 0.5 * knee_shape;
+    return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
 }
 
 void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept
@@ -1532,6 +1745,8 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                 const __m256d vMax  = _mm256_set1_pd(1.0);
                 const __m256d vMin  = _mm256_set1_pd(-1.0);
                 const __m256d vZero = _mm256_setzero_pd();
+                const __m256d vEpsilon = _mm256_set1_pd(1.0e-25);
+                const __m256d vAbsMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
 
                 for (; i < vEnd; i += 16)
                 {
@@ -1539,28 +1754,32 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
 
                     // 1
                     __m256d v0 = _mm256_loadu_pd(data + i);
-                    __m256d mask0 = _mm256_cmp_pd(v0, v0, _CMP_ORD_Q);
+                    __m256d abs0 = _mm256_and_pd(v0, vAbsMask);
+                    __m256d mask0 = _mm256_cmp_pd(abs0, vEpsilon, _CMP_GE_OQ);
                     v0 = _mm256_blendv_pd(vZero, v0, mask0);
                     v0 = _mm256_min_pd(_mm256_max_pd(v0, vMin), vMax);
                     _mm_storeu_ps(dst + i, _mm256_cvtpd_ps(v0));
 
                     // 2
                     __m256d v1 = _mm256_loadu_pd(data + i + 4);
-                    __m256d mask1 = _mm256_cmp_pd(v1, v1, _CMP_ORD_Q);
+                    __m256d abs1 = _mm256_and_pd(v1, vAbsMask);
+                    __m256d mask1 = _mm256_cmp_pd(abs1, vEpsilon, _CMP_GE_OQ);
                     v1 = _mm256_blendv_pd(vZero, v1, mask1);
                     v1 = _mm256_min_pd(_mm256_max_pd(v1, vMin), vMax);
                     _mm_storeu_ps(dst + i + 4, _mm256_cvtpd_ps(v1));
 
                     // 3
                     __m256d v2 = _mm256_loadu_pd(data + i + 8);
-                    __m256d mask2 = _mm256_cmp_pd(v2, v2, _CMP_ORD_Q);
+                    __m256d abs2 = _mm256_and_pd(v2, vAbsMask);
+                    __m256d mask2 = _mm256_cmp_pd(abs2, vEpsilon, _CMP_GE_OQ);
                     v2 = _mm256_blendv_pd(vZero, v2, mask2);
                     v2 = _mm256_min_pd(_mm256_max_pd(v2, vMin), vMax);
                     _mm_storeu_ps(dst + i + 8, _mm256_cvtpd_ps(v2));
 
                     // 4
                     __m256d v3 = _mm256_loadu_pd(data + i + 12);
-                    __m256d mask3 = _mm256_cmp_pd(v3, v3, _CMP_ORD_Q);
+                    __m256d abs3 = _mm256_and_pd(v3, vAbsMask);
+                    __m256d mask3 = _mm256_cmp_pd(abs3, vEpsilon, _CMP_GE_OQ);
                     v3 = _mm256_blendv_pd(vZero, v3, mask3);
                     v3 = _mm256_min_pd(_mm256_max_pd(v3, vMin), vMax);
                     _mm_storeu_ps(dst + i + 12, _mm256_cvtpd_ps(v3));
@@ -1569,7 +1788,8 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                 for (; i < (numSamples / 4 * 4); i += 4)
                 {
                     __m256d v = _mm256_loadu_pd(data + i);
-                    __m256d mask = _mm256_cmp_pd(v, v, _CMP_ORD_Q);
+                    __m256d absv = _mm256_and_pd(v, vAbsMask);
+                    __m256d mask = _mm256_cmp_pd(absv, vEpsilon, _CMP_GE_OQ);
                     v = _mm256_blendv_pd(vZero, v, mask);
                     v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);
                     _mm_storeu_ps(dst + i, _mm256_cvtpd_ps(v));
@@ -1619,6 +1839,8 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                 const __m256d vMax  = _mm256_set1_pd(1.0);
                 const __m256d vMin  = _mm256_set1_pd(-1.0);
                 const __m256d vZero = _mm256_setzero_pd();
+                const __m256d vEpsilon = _mm256_set1_pd(1.0e-25);
+                const __m256d vAbsMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
 
                 for (; i < vEnd; i += 16)
                 {
@@ -1627,10 +1849,10 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                     __m256d v2 = _mm256_loadu_pd(data + i + 8);
                     __m256d v3 = _mm256_loadu_pd(data + i + 12);
 
-                    __m256d m0 = _mm256_cmp_pd(v0, v0, _CMP_ORD_Q);
-                    __m256d m1 = _mm256_cmp_pd(v1, v1, _CMP_ORD_Q);
-                    __m256d m2 = _mm256_cmp_pd(v2, v2, _CMP_ORD_Q);
-                    __m256d m3 = _mm256_cmp_pd(v3, v3, _CMP_ORD_Q);
+                    __m256d m0 = _mm256_cmp_pd(_mm256_and_pd(v0, vAbsMask), vEpsilon, _CMP_GE_OQ);
+                    __m256d m1 = _mm256_cmp_pd(_mm256_and_pd(v1, vAbsMask), vEpsilon, _CMP_GE_OQ);
+                    __m256d m2 = _mm256_cmp_pd(_mm256_and_pd(v2, vAbsMask), vEpsilon, _CMP_GE_OQ);
+                    __m256d m3 = _mm256_cmp_pd(_mm256_and_pd(v3, vAbsMask), vEpsilon, _CMP_GE_OQ);
 
                     v0 = _mm256_blendv_pd(vZero, v0, m0);
                     v1 = _mm256_blendv_pd(vZero, v1, m1);
@@ -1651,7 +1873,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                 for (; i < (numSamples / 4 * 4); i += 4)
                 {
                     __m256d v = _mm256_loadu_pd(data + i);
-                    __m256d m = _mm256_cmp_pd(v, v, _CMP_ORD_Q);
+                    __m256d m = _mm256_cmp_pd(_mm256_and_pd(v, vAbsMask), vEpsilon, _CMP_GE_OQ);
                     v = _mm256_blendv_pd(vZero, v, m);
                     v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);
                     _mm256_storeu_pd(dst + i, v);

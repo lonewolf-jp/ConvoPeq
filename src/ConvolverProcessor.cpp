@@ -1364,13 +1364,15 @@ void ConvolverProcessor::cleanup()
 
 void ConvolverProcessor::forceCleanup()
 {
-    loaderTrashBin.clear(); // 全スレッドの停止を待機して破棄
+    // This method is for eager cleanup of non-blocking resources.
+    // The blocking cleanup of LoaderThreads is handled by the destructor.
 
     std::vector<std::pair<StereoConvolver::Ptr, uint32>> temp;
     {
         juce::ScopedLock lock(trashBinLock);
         temp.swap(trashBin);
     }
+    // temp is destroyed here, releasing any old StereoConvolver instances.
 }
 
 //--------------------------------------------------------------

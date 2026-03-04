@@ -22,7 +22,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     rawBuffer.fill(MIN_DB);
     smoothedBuffer.fill(MIN_DB);
     peakBuffer.fill(MIN_DB);
-    peakHoldCounter.fill(0);
+    peakHoldTime.fill(0.0);
     eqResponseBufferL.fill(0.0f);
     eqResponseBufferR.fill(0.0f);
 
@@ -71,6 +71,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     updateEQData(); // 初期状態のEQカーブを計算
 
     prepareFFT();
+    lastTime = juce::Time::getMillisecondCounterHiRes() * 0.001;
     startTimerHz(60); // 60fps: UIの滑らかさとFIFO消費の安定化のため
 }
 
@@ -141,6 +142,10 @@ void SpectrumAnalyzerComponent::releaseFFT()
 //--------------------------------------------------------------
 void SpectrumAnalyzerComponent::timerCallback()
 {
+    // 時間計測 (フレームレート非依存化)
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    const double dt = std::max(0.0, now - lastTime);
+    lastTime = now;
 
     // スペアナがOFFの場合、スペアナグラフをクリア
     if (!analyzerEnableButton.getToggleState())
@@ -193,12 +198,14 @@ void SpectrumAnalyzerComponent::timerCallback()
                 if (smoothedBuffer[i] < MIN_DB) smoothedBuffer[i] = MIN_DB;
 
                 // ピーク保持の更新 (減衰時もピークロジックを継続)
-                if (peakHoldCounter[i] > 0)
+                if (peakHoldTime[i] > 0.0)
                 {
+                    peakHoldTime[i] = std::max(0.0, peakHoldTime[i] - dt);
                 }
                 else
                 {
-                    peakBuffer[i] = std::max(smoothedBuffer[i], peakBuffer[i] - 0.25f); // 0.25dB/frame @ 60fps -> 15dB/s
+                    const float decay = static_cast<float>(PEAK_DECAY_DB_PER_SEC * dt);
+                    peakBuffer[i] = std::max(smoothedBuffer[i], peakBuffer[i] - decay);
                 }
                 if (peakBuffer[i] < MIN_DB) peakBuffer[i] = MIN_DB;
             }
@@ -206,6 +213,13 @@ void SpectrumAnalyzerComponent::timerCallback()
         }
 
         return;
+    }
+
+    // FIFOオーバーフロー防止 / レイテンシー削減
+    // データが過剰に溜まっている場合、最新のデータのみを取得するために古いデータをスキップする
+    if (available > required * 4)
+    {
+        engine.skipFifo(available - required);
     }
 
     underflowCount = 0;
@@ -297,25 +311,22 @@ void SpectrumAnalyzerComponent::timerCallback()
         // ── ピーク保持の更新 ──
         if (smoothedBuffer[i] >= peakBuffer[i])
         {
-
             // 現在値がピーク以上なら更新し、保持カウンタをリセット
             peakBuffer[i]      = smoothedBuffer[i];
-            peakHoldCounter[i] = PEAK_HOLD_FRAMES;
+            peakHoldTime[i]    = PEAK_HOLD_SEC;
         }
         else
         {
             // カウンタを減らし、0になったらピークを現在値に落とす
-
-            if (peakHoldCounter[i] > 0)
+            if (peakHoldTime[i] > 0.0)
             {
-
-                --peakHoldCounter[i];
+                peakHoldTime[i] = std::max(0.0, peakHoldTime[i] - dt);
             }
             else
             {
                 // ピークも少しずつ落とす（急な落ち込みを緩和）
-                peakBuffer[i] = std::max(smoothedBuffer[i],
-                                            peakBuffer[i] - 0.25f); // 0.25dB/frame @ 60fps -> 15dB/s
+                const float decay = static_cast<float>(PEAK_DECAY_DB_PER_SEC * dt);
+                peakBuffer[i] = std::max(smoothedBuffer[i], peakBuffer[i] - decay);
             }
         }
     }

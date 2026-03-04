@@ -113,6 +113,7 @@ public:
 
     int getFifoNumReady() const { return audioFifo.getNumReady(); }
     void readFromFifo(float* dest, int numSamples);
+    void skipFifo(int numSamples);
 
     void calcEQResponseCurve(float* outMagnitudesL, float* outMagnitudesR, const std::complex<double>* zArray, int numPoints, double sampleRate);
 
@@ -276,13 +277,16 @@ private:
             float saturationAmount;
         };
 
-        using Ptr = std::shared_ptr<DSPCore>;
-
 DSPCore();
         DSPCore(const DSPCore&) = delete;
         DSPCore& operator=(const DSPCore&) = delete;
 
-    ~DSPCore();  // 【パッチ3】rawバッファ解放用デストラクタ（メモリリーク防止）
+    ~DSPCore()
+    {
+        // Explicitly clean up convolver resources to ensure no WDL memory is leaked,
+        // especially for instances that are destroyed from the trash bin.
+        convolver.forceCleanup();
+    }
 
     void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType);
     void reset();
@@ -353,9 +357,9 @@ DSPCore();
     // 状態管理
     //----------------------------------------------------------
     std::atomic<DSPCore*> currentDSP { nullptr }; // Raw pointer for Audio Thread (Lock-free)
-    DSPCore::Ptr activeDSP; // Ownership holder for Message Thread
-    std::vector<std::pair<DSPCore::Ptr, uint32>> trashBin; // Time-based garbage collection
-    std::vector<DSPCore::Ptr> trashBinPending; // 新しく追加されたゴミ (次回のタイマーコールバックまで保持)
+    DSPCore* activeDSP = nullptr; // Ownership holder for Message Thread (Raw pointer)
+    std::vector<std::pair<DSPCore*, uint32>> trashBin; // Time-based garbage collection
+    std::vector<DSPCore*> trashBinPending; // 新しく追加されたゴミ (次回のタイマーコールバックまで保持)
     juce::CriticalSection trashBinLock;
 
     std::atomic<double> currentSampleRate{48000.0};
@@ -393,7 +397,7 @@ DSPCore();
     // such as IR resampling. It MUST only be called from the message thread.
     // The prepareToPlay() method ensures this by using MessageManager::callAsync if necessary.
     void requestRebuild(double sampleRate, int samplesPerBlock);
-    void commitNewDSP(DSPCore::Ptr newDSP, int generation);
+    void commitNewDSP(DSPCore* newDSP, int generation);
     bool isRebuildObsolete(int generation) const { return generation != rebuildGeneration.load(); }
 
     // Worker thread for rebuilds
@@ -405,8 +409,8 @@ DSPCore();
     bool hasPendingTask = false;
 
     struct RebuildTask {
-        DSPCore::Ptr newDSP;
-        DSPCore::Ptr currentDSP;
+        DSPCore* newDSP = nullptr;
+        DSPCore* currentDSP = nullptr;
         double sampleRate;
         int samplesPerBlock;
         int ditherDepth;
