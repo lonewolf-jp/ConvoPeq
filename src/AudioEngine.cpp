@@ -14,6 +14,121 @@
 #include <xmmintrin.h>
 #include <immintrin.h>
 
+namespace
+{
+    inline void applyGainRamp(double* __restrict data, int numSamples,
+                              double startGain, double increment) noexcept
+    {
+#if defined(__AVX2__)
+        __m256d vGain = _mm256_set_pd(startGain + 3.0 * increment,
+                                       startGain + 2.0 * increment,
+                                       startGain + increment,
+                                       startGain);
+        const __m256d vInc4 = _mm256_set1_pd(4.0 * increment);
+
+        int i = 0;
+        const int vEnd = numSamples / 4 * 4;
+        for (; i < vEnd; i += 4)
+        {
+            __m256d vData = _mm256_loadu_pd(data + i);
+            _mm256_storeu_pd(data + i, _mm256_mul_pd(vData, vGain));
+            vGain = _mm256_add_pd(vGain, vInc4);
+        }
+
+        double gain = startGain + static_cast<double>(i) * increment;
+        for (; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
+#else
+        double gain = startGain;
+        for (int i = 0; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
+#endif
+    }
+
+    inline void applyGainRamp(float* __restrict data, int numSamples,
+                              float startGain, float increment) noexcept
+    {
+#if defined(__AVX2__)
+        __m256 vGain = _mm256_set_ps(startGain + 7.0f * increment,
+                                     startGain + 6.0f * increment,
+                                     startGain + 5.0f * increment,
+                                     startGain + 4.0f * increment,
+                                     startGain + 3.0f * increment,
+                                     startGain + 2.0f * increment,
+                                     startGain + increment,
+                                     startGain);
+        const __m256 vInc8 = _mm256_set1_ps(8.0f * increment);
+
+        int i = 0;
+        const int vEnd = numSamples / 8 * 8;
+        for (; i < vEnd; i += 8)
+        {
+            __m256 vData = _mm256_loadu_ps(data + i);
+            _mm256_storeu_ps(data + i, _mm256_mul_ps(vData, vGain));
+            vGain = _mm256_add_ps(vGain, vInc8);
+        }
+
+        float gain = startGain + static_cast<float>(i) * increment;
+        for (; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
+#else
+        float gain = startGain;
+        for (int i = 0; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
+#endif
+    }
+
+#if defined(__AVX2__)
+    // AVX2 helper to calculate magnitude squared for a biquad over an array of complex frequencies
+    static void calcMagnitudesForBand(const EQCoeffsBiquad& c,
+                                      const std::complex<double>* zArr,
+                                      float* outMagSq,
+                                      int numPoints) noexcept
+    {
+        const __m256d vB0 = _mm256_set1_pd(c.b0);
+        const __m256d vB1 = _mm256_set1_pd(c.b1);
+        const __m256d vB2 = _mm256_blend_pd(_mm256_set1_pd(c.b2), _mm256_setzero_pd(), 0b1010); // [b2, 0, b2, 0]
+        const __m256d vA0 = _mm256_set1_pd(c.a0);
+        const __m256d vA1 = _mm256_set1_pd(c.a1);
+        const __m256d vA2 = _mm256_blend_pd(_mm256_set1_pd(c.a2), _mm256_setzero_pd(), 0b1010); // [a2, 0, a2, 0]
+        const __m256d vDenEpsilon = _mm256_set1_pd(1.0e-36);
+
+        int i = 0;
+        for (; i <= numPoints - 2; i += 2)
+        {
+            // z = [re0, im0, re1, im1]
+            __m256d z = _mm256_loadu_pd(reinterpret_cast<const double*>(zArr + i));
+
+            // --- z^2 ---
+            __m256d z_swapped = _mm256_permute_pd(z, 5); // [im0, re0, im1, re1]
+            __m256d z_re_sq_parts = _mm256_mul_pd(z, z); // [re0^2, im0^2, re1^2, im1^2]
+            __m256d z_im_part_parts = _mm256_mul_pd(z, z_swapped); // [re0*im0, im0*re0, re1*im1, im1*re1]
+
+            __m256d z2_re_lanes = _mm256_hsub_pd(z_re_sq_parts, z_re_sq_parts); // [re0^2-im0^2, re0^2-im0^2, re1^2-im1^2, re1^2-im1^2]
+            __m256d z2_im_lanes = _mm256_add_pd(z_im_part_parts, z_im_part_parts); // [2*re0*im0, 2*re0*im0, 2*re1*im1, 2*re1*im1]
+
+            __m256d z2 = _mm256_unpacklo_pd(z2_re_lanes, z2_im_lanes); // [re(z0^2), im(z0^2), re(z1^2), im(z1^2)]
+
+            // --- Polynomial Evaluation ---
+            __m256d numV = _mm256_add_pd(_mm256_fmadd_pd(vB1, z, vB2), _mm256_mul_pd(vB0, z2));
+            __m256d denV = _mm256_add_pd(_mm256_fmadd_pd(vA1, z, vA2), _mm256_mul_pd(vA0, z2));
+
+            // --- Norm Squared: |v|^2 = re^2 + im^2 ---
+            __m256d numSq = _mm256_mul_pd(numV, numV);
+            __m256d denSq = _mm256_mul_pd(denV, denV);
+            __m256d numNorm = _mm256_hadd_pd(numSq, numSq); // [|num0|^2, |num0|^2, |num1|^2, |num1|^2]
+            __m256d denNorm = _mm256_hadd_pd(denSq, denSq);
+
+            denNorm = _mm256_max_pd(denNorm, vDenEpsilon);
+            __m256d magSqV = _mm256_div_pd(numNorm, denNorm);
+
+            // --- Store ---
+            __m128 magSqF = _mm256_cvtpd_ps(_mm256_permute4x64_pd(magSqV, 0xD8)); // Extract lanes 0 and 2 to [magSq0, magSq1, ?, ?]
+            _mm_storel_pi(reinterpret_cast<__m64*>(outMagSq + i), magSqF); // Store 2 floats
+        }
+
+        for (; i < numPoints; ++i)
+            outMagSq[i] = EQProcessor::getMagnitudeSquared(c, zArr[i]);
+    }
+#endif
+}
+
 struct AudioEngine::DSPCore; // Forward declaration
 
 // Padé近似による高速tanh (std::exp回避)
@@ -26,80 +141,128 @@ static inline double fastTanh(double x) noexcept
     return x * (27.0 + x2) / (27.0 + 9.0 * x2);
 }
 
-#if defined(__AVX2__)
-static inline __m256d fastTanh_AVX2(__m256d x) noexcept
+// Helper for soft clipping (Scalar version)
+static inline double musicalSoftClipScalar(double x, double threshold, double knee, double asymmetry) noexcept
 {
-    const __m256d vThree = _mm256_set1_pd(3.0);
-    const __m256d vMinusThree = _mm256_set1_pd(-3.0);
-    const __m256d vOne = _mm256_set1_pd(1.0);
-    const __m256d vMinusOne = _mm256_set1_pd(-1.0);
-    const __m256d v27 = _mm256_set1_pd(27.0);
-    const __m256d v9 = _mm256_set1_pd(9.0);
+    const double abs_x = std::abs(x);
+    const double clip_start = threshold - knee;
 
-    __m256d maskPos = _mm256_cmp_pd(x, vThree, _CMP_GE_OQ);
-    __m256d maskNeg = _mm256_cmp_pd(x, vMinusThree, _CMP_LE_OQ);
+    // 安全対策: kneeが極端に小さい場合のゼロ除算防止
+    if (knee < 1.0e-9) return (x > threshold) ? threshold : ((x < -threshold) ? -threshold : x);
 
-    __m256d x2 = _mm256_mul_pd(x, x);
-    __m256d num = _mm256_mul_pd(x, _mm256_add_pd(v27, x2));
-    __m256d den = _mm256_add_pd(v27, _mm256_mul_pd(v9, x2));
-    __m256d res = _mm256_div_pd(num, den);
+    // 閾値以下はリニア
+    if (abs_x < clip_start)
+        return x;
 
-    res = _mm256_blendv_pd(res, vOne, maskPos);
-    res = _mm256_blendv_pd(res, vMinusOne, maskNeg);
+    const double sign = (x > 0.0) ? 1.0 : -1.0;
 
-    return res;
+    // ソフトニー領域 (ブレンド率計算)
+    double knee_shape = 1.0;
+    if (abs_x < threshold + knee)
+    {
+        // 3次多項式でスムーズなニー
+        const double t = (abs_x - clip_start) / (2.0 * knee);
+        knee_shape = t * t * (3.0 - 2.0 * t); // Smoothstep
+    }
+
+    const double linear = abs_x;
+    // tanhによるソフトクリッピングカーブ
+    const double clipped = threshold + knee * fastTanh((abs_x - threshold) / knee);
+
+    const double asymmetric_gain = 1.0 - asymmetry * (1.0 - sign) * 0.5 * knee_shape;
+    return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
 }
 
-static inline __m256d musicalSoftClip_AVX2(__m256d x, __m256d threshold, __m256d knee, __m256d asymmetry) noexcept
+#if defined(__AVX2__)
+static void softClipBlockAVX2(double* __restrict data, int numSamples,
+                               double threshold, double knee, double asymmetry) noexcept
 {
-    const __m256d vOne = _mm256_set1_pd(1.0);
-    const __m256d vTwo = _mm256_set1_pd(2.0);
-    const __m256d vThree = _mm256_set1_pd(3.0);
-    const __m256d vHalf = _mm256_set1_pd(0.5);
-    const __m256d vZero = _mm256_setzero_pd();
-    const __m256d vAbsMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+    const double clip_start = threshold - knee;
+    jassert(knee > 1.0e-9);
 
-    __m256d abs_x = _mm256_and_pd(x, vAbsMask);
-    __m256d clip_start = _mm256_sub_pd(threshold, knee);
+    const __m256d vClipStart   = _mm256_set1_pd(clip_start);
+    const __m256d vThreshold   = _mm256_set1_pd(threshold);
+    const __m256d vKnee        = _mm256_set1_pd(knee);
+    const __m256d vAsym        = _mm256_set1_pd(asymmetry);
 
-    // sign = (x > 0.0) ? 1.0 : -1.0
-    __m256d maskSignPos = _mm256_cmp_pd(x, vZero, _CMP_GT_OQ);
-    __m256d sign = _mm256_blendv_pd(_mm256_set1_pd(-1.0), vOne, maskSignPos);
+    // Pre-calculate reciprocals for division optimization
+    const __m256d vRecipKnee   = _mm256_set1_pd(1.0 / knee);
+    const __m256d vRecipKnee2  = _mm256_set1_pd(1.0 / (2.0 * knee));
 
-    // knee_shape
-    __m256d threshold_plus_knee = _mm256_add_pd(threshold, knee);
-    __m256d maskKnee = _mm256_cmp_pd(abs_x, threshold_plus_knee, _CMP_LT_OQ);
+    // Constants for fastTanh and smoothstep
+    const __m256d vOne         = _mm256_set1_pd(1.0);
+    const __m256d vMinusOne    = _mm256_set1_pd(-1.0);
+    const __m256d vTwo         = _mm256_set1_pd(2.0);
+    const __m256d vThree       = _mm256_set1_pd(3.0);
+    const __m256d vNegThree    = _mm256_set1_pd(-3.0);
+    const __m256d vHalf        = _mm256_set1_pd(0.5);
+    const __m256d v27          = _mm256_set1_pd(27.0);
+    const __m256d v9           = _mm256_set1_pd(9.0);
+    const __m256d vZero        = _mm256_setzero_pd();
+    const __m256d vSignMask    = _mm256_set1_pd(-0.0);
 
-    // t = (abs_x - clip_start) / (2.0 * knee)
-    __m256d t = _mm256_div_pd(_mm256_sub_pd(abs_x, clip_start), _mm256_mul_pd(vTwo, knee));
-    // smoothstep = t * t * (3.0 - 2.0 * t)
-    __m256d smoothstep = _mm256_mul_pd(_mm256_mul_pd(t, t), _mm256_sub_pd(vThree, _mm256_mul_pd(vTwo, t)));
+    int i = 0;
+    const int vEnd = numSamples / 4 * 4;
+    for (; i < vEnd; i += 4)
+    {
+        __m256d x    = _mm256_load_pd(data + i); // data is 64-byte aligned
+        __m256d absX = _mm256_andnot_pd(vSignMask, x);
 
-    __m256d knee_shape = _mm256_blendv_pd(vOne, smoothstep, maskKnee);
+        // Check if any sample in the vector needs clipping
+        __m256d needClip = _mm256_cmp_pd(absX, vClipStart, _CMP_GT_OQ);
+        int mask = _mm256_movemask_pd(needClip);
+        if (mask == 0)
+        {
+            continue; // No clipping needed for this vector, skip to next
+        }
 
-    // clipped = threshold + knee * fastTanh((abs_x - threshold) / knee)
-    __m256d tanh_arg = _mm256_div_pd(_mm256_sub_pd(abs_x, threshold), knee);
-    __m256d clipped = _mm256_add_pd(threshold, _mm256_mul_pd(knee, fastTanh_AVX2(tanh_arg)));
+        // --- sign ---
+        __m256d maskSignPos = _mm256_cmp_pd(x, vZero, _CMP_GT_OQ);
+        __m256d sign = _mm256_blendv_pd(vMinusOne, vOne, maskSignPos);
 
-    // linear = abs_x
-    // res = sign * (linear * (1.0 - knee_shape) + clipped * knee_shape)
-    __m256d term1 = _mm256_mul_pd(abs_x, _mm256_sub_pd(vOne, knee_shape));
-    __m256d term2 = _mm256_mul_pd(clipped, knee_shape);
-    __m256d res = _mm256_mul_pd(sign, _mm256_add_pd(term1, term2));
+        // --- knee_shape (smoothstep) ---
+        __m256d t = _mm256_mul_pd(_mm256_sub_pd(absX, vClipStart), vRecipKnee2);
+        t = _mm256_min_pd(_mm256_max_pd(t, vZero), vOne); // clamp t to [0,1]
+        __m256d t2 = _mm256_mul_pd(t, t);
+        __m256d ks = _mm256_mul_pd(t2, _mm256_fnmadd_pd(vTwo, t, vThree)); // t2 * (3 - 2*t)
 
-    // asymmetric_gain = 1.0 - asymmetry * (1.0 - sign) * 0.5 * knee_shape
-    __m256d factor = _mm256_mul_pd(asymmetry, _mm256_sub_pd(vOne, sign));
-    factor = _mm256_mul_pd(factor, vHalf);
-    factor = _mm256_mul_pd(factor, knee_shape);
-    __m256d asymmetric_gain = _mm256_sub_pd(vOne, factor);
+        // --- fastTanh ---
+        __m256d arg = _mm256_mul_pd(_mm256_sub_pd(absX, vThreshold), vRecipKnee);
+        __m256d satHi    = _mm256_cmp_pd(arg, vThree,    _CMP_GE_OQ);
+        __m256d satLo    = _mm256_cmp_pd(arg, vNegThree, _CMP_LE_OQ);
+        __m256d arg2     = _mm256_mul_pd(arg, arg);
+        __m256d num      = _mm256_mul_pd(arg, _mm256_add_pd(v27, arg2));
+        __m256d den      = _mm256_add_pd(v27, _mm256_mul_pd(v9, arg2));
+        __m256d tanhVal  = _mm256_div_pd(num, den);
+        tanhVal = _mm256_blendv_pd(tanhVal, vOne,      satHi);
+        tanhVal = _mm256_blendv_pd(tanhVal, vMinusOne, satLo);
 
-    res = _mm256_mul_pd(res, asymmetric_gain);
+        // clipped = threshold + knee * tanh(...)
+        __m256d clipped = _mm256_fmadd_pd(vKnee, tanhVal, vThreshold);
 
-    // Blend with original x for values below clip_start
-    __m256d maskLinear = _mm256_cmp_pd(abs_x, clip_start, _CMP_LT_OQ);
-    res = _mm256_blendv_pd(res, x, maskLinear);
+        // --- blend linear / clipped ---
+        __m256d linear  = absX;
+        __m256d mixed   = _mm256_fmadd_pd(_mm256_sub_pd(clipped, linear), ks, linear);
 
-    return res;
+        // --- asymmetry ---
+        __m256d factor = _mm256_mul_pd(vAsym, _mm256_sub_pd(vOne, sign));
+        factor = _mm256_mul_pd(factor, vHalf);
+        factor = _mm256_mul_pd(factor, ks);
+        __m256d asymmetric_gain = _mm256_sub_pd(vOne, factor);
+
+        __m256d result = _mm256_mul_pd(sign, _mm256_mul_pd(mixed, asymmetric_gain));
+
+        // Blend with original x for samples that didn't need clipping
+        result = _mm256_blendv_pd(x, result, needClip);
+        _mm256_store_pd(data + i, result);
+    }
+
+    // Scalar remainder
+    for (; i < numSamples; ++i)
+    {
+        if (std::abs(data[i]) > clip_start)
+            data[i] = musicalSoftClipScalar(data[i], threshold, knee, asymmetry);
+    }
 }
 #endif
 
@@ -332,15 +495,90 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
 
     const float totalGainSq = totalGainLinear * totalGainLinear;
 
+#if defined(__AVX2__)
+    std::vector<float> totalMagSqL(numPoints);
+    std::vector<float> totalMagSqR(numPoints);
+    std::vector<float> bandMagSq(numPoints);
+
+    const __m256 vTotalGainSq = _mm256_set1_ps(totalGainSq);
+    int i = 0;
+    const int vEnd = numPoints / 8 * 8;
+    for (; i < vEnd; i += 8)
+    {
+        _mm256_storeu_ps(totalMagSqL.data() + i, vTotalGainSq);
+        _mm256_storeu_ps(totalMagSqR.data() + i, vTotalGainSq);
+    }
+    for (; i < numPoints; ++i)
+    {
+        totalMagSqL[i] = totalGainSq;
+        totalMagSqR[i] = totalGainSq;
+    }
+
+    for (int b = 0; b < numActiveBands; ++b)
+    {
+        const auto& band = activeBands[b];
+        calcMagnitudesForBand(band.coeffs, zArray, bandMagSq.data(), numPoints);
+
+        i = 0;
+        if (band.mode == EQChannelMode::Stereo)
+        {
+            for (; i < vEnd; i += 8)
+            {
+                __m256 vBand = _mm256_loadu_ps(bandMagSq.data() + i);
+                __m256 vL = _mm256_loadu_ps(totalMagSqL.data() + i);
+                __m256 vR = _mm256_loadu_ps(totalMagSqR.data() + i);
+                _mm256_storeu_ps(totalMagSqL.data() + i, _mm256_mul_ps(vL, vBand));
+                _mm256_storeu_ps(totalMagSqR.data() + i, _mm256_mul_ps(vR, vBand));
+            }
+        }
+        else if (band.mode == EQChannelMode::Left)
+        {
+            for (; i < vEnd; i += 8)
+            {
+                __m256 vBand = _mm256_loadu_ps(bandMagSq.data() + i);
+                __m256 vL = _mm256_loadu_ps(totalMagSqL.data() + i);
+                _mm256_storeu_ps(totalMagSqL.data() + i, _mm256_mul_ps(vL, vBand));
+            }
+        }
+        else // Right
+        {
+            for (; i < vEnd; i += 8)
+            {
+                __m256 vBand = _mm256_loadu_ps(bandMagSq.data() + i);
+                __m256 vR = _mm256_loadu_ps(totalMagSqR.data() + i);
+                _mm256_storeu_ps(totalMagSqR.data() + i, _mm256_mul_ps(vR, vBand));
+            }
+        }
+
+        for (; i < numPoints; ++i)
+        {
+            float magSq = bandMagSq[i];
+            if (!std::isfinite(magSq)) magSq = 1.0f;
+            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Left)
+                totalMagSqL[i] *= magSq;
+            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Right)
+                totalMagSqR[i] *= magSq;
+        }
+    }
+
+    for (i = 0; i < numPoints; ++i)
+    {
+        if (outMagnitudesL)
+        {
+            float val = std::sqrt(totalMagSqL[i]);
+            outMagnitudesL[i] = std::isfinite(val) ? val : 1.0f;
+        }
+        if (outMagnitudesR)
+        {
+            float val = std::sqrt(totalMagSqR[i]);
+            outMagnitudesR[i] = std::isfinite(val) ? val : 1.0f;
+        }
+    }
+#else
     for (int i = 0; i < numPoints; ++i)
     {
-        // 各バンドの応答を計算
-        // 二乗マグニチュードを積算して最後にsqrtすることで、ループ内のsqrtを回避
         float totalMagSqL = totalGainSq;
         float totalMagSqR = totalGainSq;
-
-        // 事前計算された z (e^jw) を使用
-        // これにより、ここで sin/cos を計算する必要がなくなる
         const std::complex<double> z = zArray[i];
 
         for (int b = 0; b < numActiveBands; ++b)
@@ -348,8 +586,6 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
             const auto& band = activeBands[b];
             float magSq = EQProcessor::getMagnitudeSquared(band.coeffs, z);
 
-
-           // 数値安定性のため、NaN/Infの伝播を防止
             if (!std::isfinite(magSq))
                 magSq = 1.0f;
 
@@ -359,7 +595,6 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
                 totalMagSqR *= magSq;
         }
 
-        // 最終的なNaNチェック
         if (outMagnitudesL)
         {
             float val = std::sqrt(totalMagSqL);
@@ -371,6 +606,7 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
             outMagnitudesR[i] = std::isfinite(val) ? val : 1.0f;
         }
     }
+#endif
 }
 
 //--------------------------------------------------------------
@@ -670,6 +906,17 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 
 void AudioEngine::rebuildThreadLoop()
 {
+    // Set denormal handling modes for this thread. This is crucial for performance
+    // in MKL VML and AVX/SSE operations, which can be significantly slowed down
+    // by subnormal numbers. This setting is thread-local.
+#if JUCE_DSP_USE_INTEL_MKL
+    vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
+#endif
+#if JUCE_INTEL
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+
     while (true)
     {
         try
@@ -1248,33 +1495,17 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         for (int ch = 0; ch < numProcChannels; ++ch)
         {
             double* data = processBlock.getChannelPointer(ch);
-            int i = 0;
 #if defined(__AVX2__)
-            const __m256d vThreshold = _mm256_set1_pd(CLIP_THRESHOLD);
-            const __m256d vKnee = _mm256_set1_pd(CLIP_KNEE);
-            const __m256d vAsymmetry = _mm256_set1_pd(CLIP_ASYMMETRY);
-            const __m256d vClipStart = _mm256_set1_pd(CLIP_START);
-            const __m256d vAbsMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
-
-            for (; i <= numProcSamples - 4; i += 4)
-            {
-                __m256d vData = _mm256_loadu_pd(data + i);
-                __m256d vAbs = _mm256_and_pd(vData, vAbsMask);
-
-                // Check if any sample needs clipping
-                __m256d mask = _mm256_cmp_pd(vAbs, vClipStart, _CMP_GT_OQ);
-                if (_mm256_movemask_pd(mask) != 0)
-                {
-                    __m256d vProcessed = musicalSoftClip_AVX2(vData, vThreshold, vKnee, vAsymmetry);
-                    _mm256_storeu_pd(data + i, vProcessed);
-                }
-            }
+            softClipBlockAVX2(data, numProcSamples, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
 #endif
-            for (; i < numProcSamples; ++i)
+            // The AVX2 function handles the scalar remainder, so this loop is only for non-AVX2 builds.
+#if !defined(__AVX2__)
+            for (int i = 0; i < numProcSamples; ++i)
             {
                 if (std::abs(data[i]) > CLIP_START)
                     data[i] = musicalSoftClip(data[i], CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
             }
+#endif
         }
     }
 
@@ -1309,20 +1540,14 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         {
             const int rampThisBlock = std::min(numSamples, fadeLeft);
             const float gainStep = 1.0f / static_cast<float>(FADE_IN_SAMPLES);
+            const float startGain = static_cast<float>(FADE_IN_SAMPLES - fadeLeft) * gainStep;
             auto* buffer = bufferToFill.buffer;
             const int startSample = bufferToFill.startSample;
             const int numChannels = buffer->getNumChannels();
 
-            // Optimize: Channel-first loop for cache locality (Planar buffer friendly)
             for (int ch = 0; ch < numChannels; ++ch)
-            {
-                float* data = buffer->getWritePointer(ch, startSample);
-                for (int i = 0; i < rampThisBlock; ++i)
-                {
-                    const float gain = static_cast<float>(FADE_IN_SAMPLES - fadeLeft + i) * gainStep;
-                    data[i] *= gain;
-                }
-            }
+                applyGainRamp(buffer->getWritePointer(ch, startSample), rampThisBlock, startGain, gainStep);
+
             fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
         }
     }
@@ -1414,33 +1639,17 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         for (int ch = 0; ch < numProcChannels; ++ch)
         {
             double* data = processBlock.getChannelPointer(ch);
-            int i = 0;
 #if defined(__AVX2__)
-            const __m256d vThreshold = _mm256_set1_pd(CLIP_THRESHOLD);
-            const __m256d vKnee = _mm256_set1_pd(CLIP_KNEE);
-            const __m256d vAsymmetry = _mm256_set1_pd(CLIP_ASYMMETRY);
-            const __m256d vClipStart = _mm256_set1_pd(CLIP_START);
-            const __m256d vAbsMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
-
-            for (; i <= numProcSamples - 4; i += 4)
-            {
-                __m256d vData = _mm256_loadu_pd(data + i);
-                __m256d vAbs = _mm256_and_pd(vData, vAbsMask);
-
-                // Check if any sample needs clipping
-                __m256d mask = _mm256_cmp_pd(vAbs, vClipStart, _CMP_GT_OQ);
-                if (_mm256_movemask_pd(mask) != 0)
-                {
-                    __m256d vProcessed = musicalSoftClip_AVX2(vData, vThreshold, vKnee, vAsymmetry);
-                    _mm256_storeu_pd(data + i, vProcessed);
-                }
-            }
+            softClipBlockAVX2(data, numProcSamples, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
 #endif
-            for (; i < numProcSamples; ++i)
+            // The AVX2 function handles the scalar remainder, so this loop is only for non-AVX2 builds.
+#if !defined(__AVX2__)
+            for (int i = 0; i < numProcSamples; ++i)
             {
                 if (std::abs(data[i]) > CLIP_START)
                     data[i] = musicalSoftClip(data[i], CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
             }
+#endif
         }
     }
 
@@ -1463,17 +1672,12 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     {
         const int rampThisBlock = std::min(numSamples, fadeLeft);
         const double gainStep = 1.0 / static_cast<double>(FADE_IN_SAMPLES);
+        const double startGain = static_cast<double>(FADE_IN_SAMPLES - fadeLeft) * gainStep;
         const int numChannels = buffer.getNumChannels();
 
         for (int ch = 0; ch < numChannels; ++ch)
-        {
-            double* data = buffer.getWritePointer(ch);
-            for (int i = 0; i < rampThisBlock; ++i)
-            {
-                const double gain = static_cast<double>(FADE_IN_SAMPLES - fadeLeft + i) * gainStep;
-                data[i] *= gain;
-            }
-        }
+            applyGainRamp(buffer.getWritePointer(ch), rampThisBlock, startGain, gainStep);
+
         fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
     }
 }
@@ -1667,37 +1871,7 @@ void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& b
 // @param asymmetry 非対称性の量。負の波形をより強くクリップし、偶数次倍音を生成する。
 double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept
 {
-    const double abs_x = std::abs(x);
-    const double clip_start = threshold - knee;
-
-    // 安全対策: kneeが極端に小さい場合のゼロ除算防止
-    if (knee < 1.0e-9) return (x > threshold) ? threshold : ((x < -threshold) ? -threshold : x);
-
-    // 閾値以下はリニア
-    if (abs_x < clip_start)
-        return x;
-
-    const double sign = (x > 0.0) ? 1.0 : -1.0;
-
-    // ソフトニー領域 (ブレンド率計算)
-    double knee_shape = 1.0;
-    if (abs_x < threshold + knee)
-    {
-        // 3次多項式でスムーズなニー
-        const double t = (abs_x - clip_start) / (2.0 * knee);
-        knee_shape = t * t * (3.0 - 2.0 * t); // Smoothstep
-    }
-
-    const double linear = abs_x;
-    // tanhによるソフトクリッピングカーブ
-    const double clipped = threshold + knee * fastTanh((abs_x - threshold) / knee);
-
-    // 非対称性の追加（真空管風）
-    // 元の実装 `1.0 + asymmetry * sign * knee_shape` は正の信号を増幅し、ピークを超える可能性があった。
-    // 修正版では、正の信号はそのまま、負の信号は asymmetry の量に応じてより強くクリップ（減衰）させる。
-    // これにより、出力が 1.0 を超えることを防ぎつつ、安全に偶数次倍音を生成する。
-    const double asymmetric_gain = 1.0 - asymmetry * (1.0 - sign) * 0.5 * knee_shape;
-    return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
+    return musicalSoftClipScalar(x, threshold, knee, asymmetry);
 }
 
 void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept
@@ -1753,7 +1927,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                     _mm_prefetch(reinterpret_cast<const char*>(data + i + 64), _MM_HINT_T0);
 
                     // 1
-                    __m256d v0 = _mm256_loadu_pd(data + i);
+                    __m256d v0 = _mm256_load_pd(data + i);
                     __m256d abs0 = _mm256_and_pd(v0, vAbsMask);
                     __m256d mask0 = _mm256_cmp_pd(abs0, vEpsilon, _CMP_GE_OQ);
                     v0 = _mm256_blendv_pd(vZero, v0, mask0);
@@ -1761,7 +1935,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                     _mm_storeu_ps(dst + i, _mm256_cvtpd_ps(v0));
 
                     // 2
-                    __m256d v1 = _mm256_loadu_pd(data + i + 4);
+                    __m256d v1 = _mm256_load_pd(data + i + 4);
                     __m256d abs1 = _mm256_and_pd(v1, vAbsMask);
                     __m256d mask1 = _mm256_cmp_pd(abs1, vEpsilon, _CMP_GE_OQ);
                     v1 = _mm256_blendv_pd(vZero, v1, mask1);
@@ -1769,7 +1943,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                     _mm_storeu_ps(dst + i + 4, _mm256_cvtpd_ps(v1));
 
                     // 3
-                    __m256d v2 = _mm256_loadu_pd(data + i + 8);
+                    __m256d v2 = _mm256_load_pd(data + i + 8);
                     __m256d abs2 = _mm256_and_pd(v2, vAbsMask);
                     __m256d mask2 = _mm256_cmp_pd(abs2, vEpsilon, _CMP_GE_OQ);
                     v2 = _mm256_blendv_pd(vZero, v2, mask2);
@@ -1777,7 +1951,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                     _mm_storeu_ps(dst + i + 8, _mm256_cvtpd_ps(v2));
 
                     // 4
-                    __m256d v3 = _mm256_loadu_pd(data + i + 12);
+                    __m256d v3 = _mm256_load_pd(data + i + 12);
                     __m256d abs3 = _mm256_and_pd(v3, vAbsMask);
                     __m256d mask3 = _mm256_cmp_pd(abs3, vEpsilon, _CMP_GE_OQ);
                     v3 = _mm256_blendv_pd(vZero, v3, mask3);
@@ -1787,7 +1961,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                 // Remaining
                 for (; i < (numSamples / 4 * 4); i += 4)
                 {
-                    __m256d v = _mm256_loadu_pd(data + i);
+                    __m256d v = _mm256_load_pd(data + i);
                     __m256d absv = _mm256_and_pd(v, vAbsMask);
                     __m256d mask = _mm256_cmp_pd(absv, vEpsilon, _CMP_GE_OQ);
                     v = _mm256_blendv_pd(vZero, v, mask);
@@ -1844,10 +2018,10 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 
                 for (; i < vEnd; i += 16)
                 {
-                    __m256d v0 = _mm256_loadu_pd(data + i);
-                    __m256d v1 = _mm256_loadu_pd(data + i + 4);
-                    __m256d v2 = _mm256_loadu_pd(data + i + 8);
-                    __m256d v3 = _mm256_loadu_pd(data + i + 12);
+                    __m256d v0 = _mm256_load_pd(data + i);
+                    __m256d v1 = _mm256_load_pd(data + i + 4);
+                    __m256d v2 = _mm256_load_pd(data + i + 8);
+                    __m256d v3 = _mm256_load_pd(data + i + 12);
 
                     __m256d m0 = _mm256_cmp_pd(_mm256_and_pd(v0, vAbsMask), vEpsilon, _CMP_GE_OQ);
                     __m256d m1 = _mm256_cmp_pd(_mm256_and_pd(v1, vAbsMask), vEpsilon, _CMP_GE_OQ);
@@ -1872,7 +2046,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 
                 for (; i < (numSamples / 4 * 4); i += 4)
                 {
-                    __m256d v = _mm256_loadu_pd(data + i);
+                    __m256d v = _mm256_load_pd(data + i);
                     __m256d m = _mm256_cmp_pd(_mm256_and_pd(v, vAbsMask), vEpsilon, _CMP_GE_OQ);
                     v = _mm256_blendv_pd(vZero, v, m);
                     v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);

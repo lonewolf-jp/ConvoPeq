@@ -968,16 +968,7 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     const double gainIncrement = (nextGain - currentGain) / static_cast<double>(numSamples);
 
     for (int ch = 0; ch < numChannels; ++ch)
-    {
-        double* data = block.getChannelPointer(ch);
-        double g = currentGain;
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            data[i] *= g;
-            g += gainIncrement;
-        }
-    }
+        applyGainRamp_AVX2(block.getChannelPointer(ch), numSamples, currentGain, gainIncrement);
 }
 
 //--------------------------------------------------------------

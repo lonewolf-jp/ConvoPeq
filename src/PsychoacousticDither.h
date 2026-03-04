@@ -324,7 +324,7 @@ private:
     }
 #else
     // MKL VSL Batch Generation for efficiency
-    static constexpr int RND_BUFFER_SIZE = 256; // Small batch to keep cache hot
+    static constexpr int RND_BUFFER_SIZE = 1024; // Increased batch size to reduce VSL call overhead
     // 【パッチ6】vdRngUniform の出力バッファを 64byte アライメントする
     // 理由: コーディング規約「MKL使用箇所ではメモリは64byteアライメントとする」に従う。
     //       非アライメントバッファへの vdRngUniform 書き込みは機能上は動作するが、

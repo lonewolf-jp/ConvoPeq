@@ -191,8 +191,7 @@ target_include_directories(ConvoPeq PRIVATE
 
 # ReleaseでLTCG有効化（MSVC用）
 if(MSVC)
-    target_compile_options(ConvoPeq PRIVATE /GL)
-    target_link_options(ConvoPeq PRIVATE /LTCG)
+    set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
 #------------------------------------------------------------

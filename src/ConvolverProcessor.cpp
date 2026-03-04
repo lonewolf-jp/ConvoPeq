@@ -19,6 +19,7 @@
 
 #if JUCE_DSP_USE_INTEL_MKL
 #include <mkl.h>
+#include <mkl_vml.h>
 #endif
 
 #if JUCE_INTEL
@@ -50,6 +51,246 @@ namespace
     };
 }
 #endif
+
+#if JUCE_DSP_USE_INTEL_MKL
+//--------------------------------------------------------------
+// MKLConvolver Implementation
+// Uniform Partitioned Convolution using Overlap-Save
+//--------------------------------------------------------------
+bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int irLen)
+{
+    partitionSize = partSize;
+    fftSize = 1;
+    while (fftSize < partitionSize * 2) fftSize <<= 1;
+
+    // Calculate number of partitions
+    numPartitions = (irLen + partitionSize - 1) / partitionSize;
+    if (numPartitions == 0) numPartitions = 1;
+
+    // Latency of UPC is one partition
+    latency = partitionSize;
+
+    // Setup MKL DFTI
+    if (DftiCreateDescriptor(&fftHandle, DFTI_DOUBLE, DFTI_REAL, 1, fftSize) != DFTI_NO_ERROR) return false;
+    DftiSetValue(fftHandle, DFTI_PLACEMENT, DFTI_NOT_INPLACE); // Explicit buffers
+    DftiSetValue(fftHandle, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX); // Ensure standard complex array format
+    DftiSetValue(fftHandle, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize));
+    if (DftiCommitDescriptor(fftHandle) != DFTI_NO_ERROR) return false;
+
+    // Allocate buffers
+    // IR Freq Domain: (fftSize/2 + 1) complex numbers * numPartitions
+    int complexSize = fftSize / 2 + 1;
+    size_t irBufSize = static_cast<size_t>(complexSize) * 2 * numPartitions; // 2 doubles per complex
+    irFreqDomain.reset(static_cast<double*>(convo::aligned_malloc(irBufSize * sizeof(double), 64)));
+    juce::FloatVectorOperations::clear(irFreqDomain.get(), static_cast<int>(irBufSize));
+
+    // FDL Lines
+    fdlLines.reset(static_cast<MKL_Complex16*>(convo::aligned_malloc(irBufSize * sizeof(double), 64)));
+    juce::FloatVectorOperations::clear(reinterpret_cast<double*>(fdlLines.get()), static_cast<int>(irBufSize));
+
+    // Work Buffers
+    fftBuffer.reset(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
+    inputBuffer.reset(static_cast<double*>(convo::aligned_malloc(partitionSize * sizeof(double), 64)));
+    outputBuffer.reset(static_cast<double*>(convo::aligned_malloc(partitionSize * sizeof(double), 64)));
+    prevBlock.reset(static_cast<double*>(convo::aligned_malloc(partitionSize * sizeof(double), 64)));
+    mulTemp.reset(static_cast<MKL_Complex16*>(convo::aligned_malloc(complexSize * sizeof(MKL_Complex16), 64)));
+
+    juce::FloatVectorOperations::clear(inputBuffer.get(), partitionSize);
+    juce::FloatVectorOperations::clear(outputBuffer.get(), partitionSize);
+    juce::FloatVectorOperations::clear(prevBlock.get(), partitionSize);
+
+    // Precompute IR Partitions
+    convo::ScopedAlignedPtr<double> tempTime(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
+    convo::ScopedAlignedPtr<double> tempFreq(static_cast<double*>(convo::aligned_malloc((fftSize + 2) * sizeof(double), 64)));
+
+    for (int p = 0; p < numPartitions; ++p)
+    {
+        juce::FloatVectorOperations::clear(tempTime.get(), fftSize);
+        int copyLen = std::min(partitionSize, irLen - p * partitionSize);
+        if (copyLen > 0)
+            std::memcpy(tempTime.get(), ir + p * partitionSize, copyLen * sizeof(double));
+
+        DftiComputeForward(fftHandle, tempTime.get(), tempFreq.get());
+
+        // Copy to IR buffer (interleaved complex)
+        double* dest = irFreqDomain.get() + p * complexSize * 2;
+        std::memcpy(dest, tempFreq.get(), complexSize * 2 * sizeof(double));
+    }
+
+    inputBufferPos = 0;
+    outputBufferPos = 0;
+    fdlIndex = 0;
+    return true;
+}
+
+void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, int numSamples)
+{
+    int processed = 0;
+    while (processed < numSamples)
+    {
+        // Fill input buffer
+        int toWrite = std::min(numSamples - processed, partitionSize - inputBufferPos);
+        std::memcpy(inputBuffer.get() + inputBufferPos, in + processed, toWrite * sizeof(double));
+        inputBufferPos += toWrite;
+
+        // Process block if full
+        if (inputBufferPos == partitionSize)
+        {
+            // Construct FFT input: [PrevBlock, CurrentBlock]
+            std::memcpy(fftBuffer.get(), prevBlock.get(), partitionSize * sizeof(double));
+            std::memcpy(fftBuffer.get() + partitionSize, inputBuffer.get(), partitionSize * sizeof(double));
+
+            // Save current to prev
+            std::memcpy(prevBlock.get(), inputBuffer.get(), partitionSize * sizeof(double));
+            inputBufferPos = 0;
+
+            // Forward FFT
+            // Note: Output of Real->Complex is packed CCS or Permuted.
+            // DFTI_NOT_INPLACE with CCE format is standard.
+            // We use a temp buffer for frequency domain calculation.
+            // Actually, let's use the fdlLines buffer slot for the current block.
+
+            int complexSize = fftSize / 2 + 1;
+            MKL_Complex16* currentFDL = reinterpret_cast<MKL_Complex16*>(fdlLines.get()) + fdlIndex * complexSize;
+
+            DftiComputeForward(fftHandle, fftBuffer.get(), currentFDL);
+
+            // Convolution (FDL)
+            juce::FloatVectorOperations::clear(reinterpret_cast<double*>(mulTemp.get()), complexSize * 2); // Clear accumulator
+
+            const double* fdlBase = reinterpret_cast<const double*>(fdlLines.get());
+            const double* irBase = reinterpret_cast<const double*>(irFreqDomain.get());
+            double* dstBase = reinterpret_cast<double*>(mulTemp.get());
+
+            for (int p = 0; p < numPartitions; ++p)
+            {
+                int lineIdx = (fdlIndex - p + numPartitions) % numPartitions;
+                const double* srcA = fdlBase + lineIdx * complexSize * 2;
+                const double* srcB = irBase + p * complexSize * 2;
+                double* dst = dstBase;
+
+                int k = 0;
+#if defined(__AVX2__)
+                const int vEnd = (complexSize >> 1) << 1;
+                for (; k < vEnd; k += 2)
+                {
+                    // Load Accumulator (Aligned)
+                    __m256d acc = _mm256_load_pd(dst + 2 * k);
+                    // Load FDL (Unaligned)
+                    __m256d a = _mm256_loadu_pd(srcA + 2 * k);
+                    // Load IR (Unaligned)
+                    __m256d b = _mm256_loadu_pd(srcB + 2 * k);
+
+                    // Complex Multiply Accumulate: Acc += A * B
+                    // Re = Ar*Br - Ai*Bi
+                    // Im = Ar*Bi + Ai*Br
+
+                    __m256d a_re = _mm256_movedup_pd(a);
+                    __m256d a_im = _mm256_permute_pd(a, 0xF);
+
+                    acc = _mm256_fmadd_pd(a_re, b, acc);
+
+                    __m256d b_swap = _mm256_permute_pd(b, 0x5);
+                    __m256d term2 = _mm256_mul_pd(a_im, b_swap);
+
+                    acc = _mm256_addsub_pd(acc, term2);
+
+                    _mm256_store_pd(dst + 2 * k, acc);
+                }
+#endif
+                for (; k < complexSize; ++k)
+                {
+                    double a_re = srcA[2 * k];
+                    double a_im = srcA[2 * k + 1];
+                    double b_re = srcB[2 * k];
+                    double b_im = srcB[2 * k + 1];
+
+                    dst[2 * k]     += a_re * b_re - a_im * b_im;
+                    dst[2 * k + 1] += a_re * b_im + a_im * b_re;
+                }
+            }
+
+            // Backward FFT
+            DftiComputeBackward(fftHandle, mulTemp.get(), fftBuffer.get());
+
+            // Overlap-Save: Output is the last partitionSize samples
+            std::memcpy(outputBuffer.get(), fftBuffer.get() + partitionSize, partitionSize * sizeof(double));
+            outputBufferPos = 0;
+
+            // Advance FDL
+            fdlIndex = (fdlIndex + 1) % numPartitions;
+        }
+
+        // Read from output buffer
+        int toRead = std::min(numSamples - processed, partitionSize - outputBufferPos);
+        std::memcpy(out + processed, outputBuffer.get() + outputBufferPos, toRead * sizeof(double));
+        outputBufferPos += toRead;
+
+        processed += toRead;
+    }
+}
+
+void ConvolverProcessor::MKLConvolver::reset()
+{
+    if (inputBuffer) juce::FloatVectorOperations::clear(inputBuffer.get(), partitionSize);
+    if (outputBuffer) juce::FloatVectorOperations::clear(outputBuffer.get(), partitionSize);
+    if (prevBlock) juce::FloatVectorOperations::clear(prevBlock.get(), partitionSize);
+    if (fdlLines) juce::FloatVectorOperations::clear(reinterpret_cast<double*>(fdlLines.get()), (fftSize / 2 + 1) * 2 * numPartitions);
+    inputBufferPos = 0;
+    outputBufferPos = 0;
+    fdlIndex = 0;
+}
+
+ConvolverProcessor::MKLConvolver::~MKLConvolver()
+{
+    if (fftHandle) DftiFreeDescriptor(&fftHandle);
+}
+#endif
+
+void ConvolverProcessor::StereoConvolver::reset()
+{
+#if JUCE_DSP_USE_INTEL_MKL
+    if (useMKL)
+    {
+        if (mklConvolvers[0]) mklConvolvers[0]->reset();
+        if (mklConvolvers[1]) mklConvolvers[1]->reset();
+        return;
+    }
+#endif
+    convolvers[0].Reset();
+    convolvers[1].Reset();
+}
+
+void ConvolverProcessor::StereoConvolver::process(int channel, const double* in, double* out, int numSamples)
+{
+#if JUCE_DSP_USE_INTEL_MKL
+    if (useMKL && mklConvolvers[channel])
+    {
+        mklConvolvers[channel]->process(in, out, numSamples);
+        return;
+    }
+#endif
+    // WDL Path
+    WDL_FFT_REAL* inputs[1] = { const_cast<WDL_FFT_REAL*>(in) };
+    convolvers[channel].Add(inputs, numSamples, 1);
+    int avail = convolvers[channel].Avail(numSamples);
+    if (avail < numSamples)
+    {
+        // Should not happen if prewarmed correctly, but fill with silence if it does
+        std::memset(out, 0, numSamples * sizeof(double));
+        return;
+    }
+    WDL_FFT_REAL** outputs = convolvers[channel].Get();
+    if (outputs && outputs[0])
+    {
+        std::memcpy(out, outputs[0], numSamples * sizeof(double));
+    }
+    else
+    {
+        std::memset(out, 0, numSamples * sizeof(double));
+    }
+    convolvers[channel].Advance(numSamples);
+}
 
 // 前方宣言
 static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR, const std::function<bool()>& shouldExit = nullptr, bool* wasCancelled = nullptr);
@@ -194,11 +435,61 @@ static void applyAsymmetricTukey(double* data, int numSamples)
     const double alpha_post = calculate_post_alpha(numSamples);
     const double pi = juce::MathConstants<double>::pi;
 
+#if JUCE_DSP_USE_INTEL_MKL
+    convo::ScopedAlignedPtr<double> window_vals(static_cast<double*>(convo::aligned_malloc(numSamples * sizeof(double), 64)));
+
+    // Initialize to 1.0
+    for (int i = 0; i < numSamples; ++i)
+        window_vals[i] = 1.0;
+
+    // Pre-peak part
+    if (peakIndex > 0)
+    {
+        const int pre_taper_len = static_cast<int>(std::floor(peakIndex * alpha_pre));
+        if (pre_taper_len > 0)
+        {
+            convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(pre_taper_len * sizeof(double), 64)));
+            for (int i = 0; i < pre_taper_len; ++i)
+                cos_args[i] = pi * (static_cast<double>(i) / (peakIndex * alpha_pre) - 1.0);
+
+            vdCos(pre_taper_len, cos_args.get(), window_vals.get());
+
+            for (int i = 0; i < pre_taper_len; ++i)
+                window_vals[i] = 0.5 * (1.0 + window_vals[i]);
+        }
+    }
+
+    // Post-peak part
+    const double dist_to_end = static_cast<double>(numSamples - 1 - peakIndex);
+    if (dist_to_end > 0)
+    {
+        const int post_taper_start_idx = peakIndex + static_cast<int>(std::ceil(dist_to_end * (1.0 - alpha_post)));
+        const int post_taper_len = numSamples - post_taper_start_idx;
+        if (post_taper_len > 0)
+        {
+            convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(post_taper_len * sizeof(double), 64)));
+            double* post_window_vals = window_vals.get() + post_taper_start_idx;
+
+            for (int i = 0; i < post_taper_len; ++i)
+            {
+                const double x_post = static_cast<double>(post_taper_start_idx + i - peakIndex) / dist_to_end;
+                cos_args[i] = pi * ((x_post - (1.0 - alpha_post)) / alpha_post);
+            }
+
+            vdCos(post_taper_len, cos_args.get(), post_window_vals);
+
+            for (int i = 0; i < post_taper_len; ++i)
+                post_window_vals[i] = 0.5 * (1.0 + post_window_vals[i]);
+        }
+    }
+
+    // Apply window
+    vdMul(numSamples, data, window_vals.get(), data);
+#else
     // 3. 窓関数の適用
     for (int i = 0; i < numSamples; ++i)
     {
         double window_val = 1.0;
-
         if (i < peakIndex)
         {
             // --- 左側 (開始点からピークまで) ---
@@ -214,7 +505,6 @@ static void applyAsymmetricTukey(double* data, int numSamples)
         else
         {
             // --- 右側 (ピークから終了点まで) ---
-            double dist_to_end = static_cast<double>(numSamples - 1 - peakIndex);
             if (dist_to_end > 0)
             {
                 double x_post = static_cast<double>(i - peakIndex) / dist_to_end;
@@ -227,6 +517,7 @@ static void applyAsymmetricTukey(double* data, int numSamples)
         }
         data[i] *= window_val;
     }
+#endif
 }
 
 // 2の累乗へ切り上げ (Helper)
@@ -472,12 +763,27 @@ public:
                 juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
                 reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true);
 
+                // convo::input_transform::convertFloatToDoubleHighQuality はアライメント済みストア命令(_mm256_store_pd)を使用するため、
+                // 出力先バッファは32byteアライメントされている必要がある。
+                // juce::AudioBuffer はアライメントを保証しないため、一時的なアライメント済みバッファに変換後、コピーする。
+                convo::ScopedAlignedPtr<double> tempAlignedBuffer(static_cast<double*>(convo::aligned_malloc(
+                    static_cast<size_t>(fileLength) * sizeof(double), 64)));
+
+                if (!tempAlignedBuffer)
+                {
+                    result.errorMessage = "Failed to allocate temporary buffer for IR loading.";
+                    DBG("LoaderThread: " << result.errorMessage);
+                    return result;
+                }
+
                 result.loadedIR.setSize(numChannels, static_cast<int>(fileLength));
                 for (int ch = 0; ch < numChannels; ++ch)
                 {
                     const float* src = tempFloatBuffer.getReadPointer(ch);
-                    double* dst = result.loadedIR.getWritePointer(ch);
-                    convo::input_transform::convertFloatToDoubleHighQuality(src, dst, static_cast<int>(fileLength));
+                    // アライメント済みの一時バッファに変換
+                    convo::input_transform::convertFloatToDoubleHighQuality(src, tempAlignedBuffer.get(), static_cast<int>(fileLength));
+                    // 結果を juce::AudioBuffer にコピー
+                    result.loadedIR.copyFrom(ch, 0, tempAlignedBuffer.get(), static_cast<int>(fileLength));
                 }
                 result.loadedSR = reader->sampleRate;
             }
@@ -494,9 +800,13 @@ public:
                 for (int ch = 0; ch < result.loadedIR.getNumChannels(); ++ch)
                 {
                     const double* data = result.loadedIR.getReadPointer(ch);
+#if JUCE_DSP_USE_INTEL_MKL
+                    double energy = cblas_ddot(result.loadedIR.getNumSamples(), data, 1, data, 1);
+#else
                     double energy = 0.0;
                     for (int i = 0; i < result.loadedIR.getNumSamples(); ++i)
                         energy += data[i] * data[i];
+#endif
 
                     if (energy > maxChannelEnergy)
                         maxChannelEnergy = energy;
@@ -702,7 +1012,7 @@ public:
             int internalBlockSize = juce::nextPowerOfTwo(blockSize);
             auto sizing = computeMasteringSizing(internalBlockSize, result.targetLength);
 
-            result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize);
+            result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize, owner.isMklEnabled());
 
             // Display用コピーを作成 (move前に)
             if (owner.isVisualizationEnabled())
@@ -842,7 +1152,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
             // 新しいブロックサイズで初期化
             newConv->init(irL.release(), irR.release(),
-                          conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock);
+                          conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, enableMKL.load());
 
             // 差し替え
             convolution.store(newConv.get(), std::memory_order_release);
@@ -898,6 +1208,16 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     double* oldDryChs[2] = { oldDryBufferStorage[0].get(), oldDryBufferStorage[1].get() };
     oldDryBuffer.setDataToReferTo(oldDryChs, 2, MAX_BLOCK_SIZE);
     oldDryBuffer.clear();
+
+    // Wetバッファ確保
+    if (wetBufferCapacity < MAX_BLOCK_SIZE)
+    {
+        wetBufferStorage[0].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        wetBufferStorage[1].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        wetBufferCapacity = MAX_BLOCK_SIZE;
+    }
+    juce::FloatVectorOperations::clear(wetBufferStorage[0].get(), MAX_BLOCK_SIZE);
+    juce::FloatVectorOperations::clear(wetBufferStorage[1].get(), MAX_BLOCK_SIZE);
 
     // スムージング時間の設定
     currentSmoothingTimeSec = smoothingTimeSec.load();
@@ -1116,18 +1436,22 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         }
 
         // 2) log|H(w)|
-        for (int i = 0; i < fftSize; ++i)
         {
-            const double re = spectrum.get()[i].real;
-            const double im = spectrum.get()[i].imag;
-            if (!std::isfinite(re) || !std::isfinite(im))
-                return {};
+            convo::ScopedAlignedPtr<double> mag(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
 
-            const double mag = (std::max)(std::hypot(re, im), 1.0e-300);
-            spectrum.get()[i].real = std::log(mag);
-            spectrum.get()[i].imag = 0.0;
+            // Calculate magnitude: |H(w)|
+            vzAbs(fftSize, spectrum.get(), mag.get());
+
+            // Clamp to avoid log(0)
+            for (int i = 0; i < fftSize; ++i)
+                mag[i] = std::max(mag[i], 1.0e-300);
+
+            // Calculate log magnitude: log|H(w)|
+            vdLn(fftSize, mag.get(), mag.get());
+
+            for (int i = 0; i < fftSize; ++i)
+                { spectrum.get()[i].real = mag[i]; spectrum.get()[i].imag = 0.0; }
         }
-
         // 3) IFFT -> real cepstrum
         if (DftiComputeBackward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
             DBG("convertToMinimumPhase: DftiComputeBackward (1) failed.");
@@ -1156,21 +1480,19 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         }
 
         // 6) complex exp
-        for (int i = 0; i < fftSize; ++i)
         {
-            const double real = juce::jlimit(-50.0, 50.0, spectrum.get()[i].real);
-            const double imag = juce::jlimit(-50.0, 50.0, spectrum.get()[i].imag);
+            // Clamp inputs to prevent overflow/underflow in vzExp
+            for (int i = 0; i < fftSize; ++i)
+            {
+                spectrum.get()[i].real = juce::jlimit(-50.0, 50.0, spectrum.get()[i].real);
+                spectrum.get()[i].imag = juce::jlimit(-50.0, 50.0, spectrum.get()[i].imag);
+            }
 
-            const double e = std::exp(real);
-            const double outRe = e * std::cos(imag);
-            const double outIm = e * std::sin(imag);
-            if (!std::isfinite(outRe) || !std::isfinite(outIm))
-                return {};
+            vzExp(fftSize, spectrum.get(), spectrum.get());
 
-            spectrum.get()[i].real = outRe;
-            spectrum.get()[i].imag = outIm;
+            for (int i = 0; i < fftSize; ++i)
+                if (!std::isfinite(spectrum.get()[i].real) || !std::isfinite(spectrum.get()[i].imag)) return {};
         }
-
         // 7) IFFT -> minimum-phase IR
         if (DftiComputeBackward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
             DBG("convertToMinimumPhase: DftiComputeBackward (2) failed.");
@@ -1532,11 +1854,14 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
 
     // Calculate magnitude in-place (compacting to start of buffer)
     const int numBins = fftSize / 2 + 1;
-    for (int i = 0; i < numBins; ++i) {
-        float re = dst[2 * i];
-        float im = dst[2 * i + 1];
-        dst[i] = std::sqrt(re * re + im * im);
-    }
+    // MKL vcAbs: complex float -> magnitude float
+    // Use the latter part of the buffer as temporary storage to avoid overwriting input before reading.
+    // Ensure 64-byte alignment for MKL output (16 floats)
+    // dst is 64-byte aligned. fftSize is a multiple of 16.
+    // Offset by fftSize + 16 floats ensures alignment and no overlap with input (fftSize + 2 floats).
+    float* magBuf = dst + fftSize + 16;
+    vcAbs(numBins, reinterpret_cast<const MKL_Complex8*>(dst), magBuf);
+    std::memcpy(dst, magBuf, numBins * sizeof(float));
 #else
     juce::dsp::FFT fft(static_cast<int>(std::log2(fftSize)));
     // Double -> Float conversion for display FFT
@@ -2043,6 +2368,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     const double* wetGains = nullptr;
     const double* dryGains = nullptr;
 
+    // スムーシングゲインの計算
     if (isSmoothing)
     {
         // Audio Threadでのメモリ確保を避けるため、事前に確保したメンバ変数のバッファを使用
@@ -2076,25 +2402,22 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         const double wetG = needsConvolution ? (targetMixValue * headroom) : 0.0;
         const double dryG = needsDrySignal ? (1.0 - targetMixValue) : 0.0;
         const double* inputBase = block.getChannelPointer(ch);
+        double* wetBase = wetBufferStorage[ch].get(); // Use temp buffer for wet signal
         const double* dryBase = dryBuffer.getReadPointer(ch);
         double* dstBase = block.getChannelPointer(ch);
 
         int processed = 0;
         while (processed < numSamples)
         {
-            // 1. 量子化サイズで入力を供給 (Add)
+            // 1. Process Convolution (Unified Interface)
             const double* input = inputBase + processed;
-            WDL_FFT_REAL* inputs[1] = { const_cast<WDL_FFT_REAL*>(input) };
-            conv->convolvers[ch].Add(inputs, callLen, 1);
+            double* wetOut = wetBase + processed;
 
-            // 2. 出力を取得 (Get) - ポインタのみ取得し、コピーはMixループで行う
-            int avail = conv->convolvers[ch].Avail(callLen);
-            int validWetSamples = std::min(callLen, avail);
+            conv->process(ch, input, wetOut, callLen);
 
-            WDL_FFT_REAL** outputs = conv->convolvers[ch].Get();
-            const double* wdlOut = (validWetSamples > 0 && outputs && outputs[0]) ? outputs[0] : nullptr;
-
-            if (!wdlOut) validWetSamples = 0;
+            // Note: StereoConvolver::process guarantees output is written to wetOut
+            const double* wdlOut = wetOut;
+            int validWetSamples = callLen; // Assumed valid after process
 
             // 3. Mix (Fused Loop: Copy + Gain + Mix)
             double* dst = dstBase + processed;
@@ -2234,10 +2557,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     dst[i] = dry[i] * dryG;
                 }
             }
-
-            // 4. Advance (読み取った分だけ進める)
-            if (validWetSamples > 0)
-                conv->convolvers[ch].Advance(validWetSamples);
 
             processed += callLen;
         }

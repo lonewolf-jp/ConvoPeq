@@ -95,21 +95,44 @@ double CustomInputOversampler::besselI0(double x) noexcept
     return sum;
 }
 
-double CustomInputOversampler::dotProductAvx2(const double* x, const double* coeffs, int n) noexcept
+double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
+                                              const double* __restrict coeffs,
+                                              int n) noexcept
 {
 #if defined(__AVX2__)
-    __m256d acc = _mm256_setzero_pd();
+    // x: upHistory buffer with offset, not guaranteed to be aligned. Use loadu.
+    // coeffs: convCoeffsReversed buffer, guaranteed to be 64-byte aligned. Use load.
+    __m256d acc0 = _mm256_setzero_pd();
+    __m256d acc1 = _mm256_setzero_pd();
+    __m256d acc2 = _mm256_setzero_pd();
+    __m256d acc3 = _mm256_setzero_pd();
+
     int i = 0;
-    for (; i <= n - 4; i += 4)
+    // Unroll 4x to hide FMA latency (16 elements per main loop)
+    for (; i <= n - 16; i += 16)
     {
-        const __m256d vx = _mm256_loadu_pd(x + i);
-        const __m256d vc = _mm256_loadu_pd(coeffs + i);
-        acc = _mm256_fmadd_pd(vx, vc, acc);
+        _mm_prefetch(reinterpret_cast<const char*>(x + i + 64), _MM_HINT_T0);
+        _mm_prefetch(reinterpret_cast<const char*>(coeffs + i + 64), _MM_HINT_T0);
+
+        acc0 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i),      _mm256_load_pd(coeffs + i),      acc0);
+        acc1 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i + 4),  _mm256_load_pd(coeffs + i + 4),  acc1);
+        acc2 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i + 8),  _mm256_load_pd(coeffs + i + 8),  acc2);
+        acc3 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i + 12), _mm256_load_pd(coeffs + i + 12), acc3);
     }
+    // Handle remaining blocks of 4
+    for (; i <= n - 4; i += 4)
+        acc0 = _mm256_fmadd_pd(_mm256_loadu_pd(x + i), _mm256_load_pd(coeffs + i), acc0);
+
+    // Reduction of the four accumulators
+    acc0 = _mm256_add_pd(acc0, acc1);
+    acc2 = _mm256_add_pd(acc2, acc3);
+    acc0 = _mm256_add_pd(acc0, acc2);
 
     alignas(32) double partial[4];
-    _mm256_store_pd(partial, acc);
+    _mm256_store_pd(partial, acc0);
     double sum = partial[0] + partial[1] + partial[2] + partial[3];
+
+    // Scalar remainder
     for (; i < n; ++i)
         sum += x[i] * coeffs[i];
     return sum;

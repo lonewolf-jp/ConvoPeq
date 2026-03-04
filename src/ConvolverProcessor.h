@@ -176,6 +176,9 @@ public:
     void cleanup();
     void forceCleanup();
 
+    void setMklEnabled(bool enabled) { enableMKL.store(enabled); }
+    bool isMklEnabled() const { return enableMKL.load(); }
+
 private:
     void timerCallback() override;
     class LoaderThread;
@@ -183,6 +186,39 @@ private:
     //----------------------------------------------------------
     // WDL Convolution Engine
     //----------------------------------------------------------
+#if JUCE_DSP_USE_INTEL_MKL
+    // MKL Uniform Partitioned Convolution Engine (Overlap-Save)
+    struct MKLConvolver
+    {
+        int partitionSize = 0;
+        int fftSize = 0;
+        int numPartitions = 0;
+        int latency = 0;
+
+        DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
+
+        // Buffers
+        convo::ScopedAlignedPtr<double> inputBuffer;      // Ring buffer for input
+        int inputBufferPos = 0;
+        convo::ScopedAlignedPtr<double> outputBuffer;     // Ring buffer for output
+        int outputBufferPos = 0;
+
+        convo::ScopedAlignedPtr<double> prevBlock;        // Overlap-Save previous block
+        convo::ScopedAlignedPtr<double> fftBuffer;        // Work buffer for FFT (2 * partitionSize)
+        convo::ScopedAlignedPtr<double> irFreqDomain;     // Partitioned IR (Frequency Domain)
+        convo::ScopedAlignedPtr<MKL_Complex16> fdlLines;  // Frequency Domain Delay Line
+        int fdlIndex = 0;
+
+        // Temp buffer for complex multiplication
+        convo::ScopedAlignedPtr<MKL_Complex16> mulTemp;
+
+        bool setup(int partSize, const double* ir, int irLen);
+        void process(const double* in, double* out, int numSamples);
+        void reset();
+        ~MKLConvolver();
+    };
+#endif
+
     // Stereo processing wrapper
     struct StereoConvolver
     {
@@ -190,6 +226,11 @@ private:
         // 低レイテンシー動作が可能です。
         std::array<WDL_ConvolutionEngine_Div, 2> convolvers;
         double* irData[2] = { nullptr, nullptr };
+
+#if JUCE_DSP_USE_INTEL_MKL
+        std::array<std::unique_ptr<MKLConvolver>, 2> mklConvolvers;
+        bool useMKL = false;
+#endif
         int irDataLength = 0;
 
         int latency = 0;
@@ -220,7 +261,7 @@ private:
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        void init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize)
+        void init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize, bool preferMKL)
         {
             // Safety: Free existing data if init is called multiple times (Leak prevention)
             if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
@@ -237,6 +278,27 @@ private:
             storedMaxFFTSize = maxFFTSize;
             storedKnownBlockSize = knownBlockSize;
             storedFirstPartition = firstPartition;
+
+#if JUCE_DSP_USE_INTEL_MKL
+            if (preferMKL)
+            {
+                useMKL = true;
+                mklConvolvers[0] = std::make_unique<MKLConvolver>();
+                mklConvolvers[1] = std::make_unique<MKLConvolver>();
+
+                // Use knownBlockSize as partition size for MKL UPC
+                if (mklConvolvers[0]->setup(knownBlockSize, irData[0], irDataLength) &&
+                    mklConvolvers[1]->setup(knownBlockSize, irData[1], irDataLength))
+                {
+                    latency = mklConvolvers[0]->latency;
+                    return;
+                }
+                // Fallback to WDL if MKL setup fails
+                mklConvolvers[0].reset();
+                mklConvolvers[1].reset();
+            }
+            useMKL = false;
+#endif
 
             WDL_ImpulseBuffer impL_stack, impR_stack;
             impL_stack.samplerate = sr;
@@ -335,13 +397,18 @@ private:
                 {
                     std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
-                    newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples);
+#if JUCE_DSP_USE_INTEL_MKL
+                    newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, useMKL);
+#else
+                    newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, false);
+#endif
                 }
             }
             return newConv;
         }
 
-        void reset() { convolvers[0].Reset(); convolvers[1].Reset(); }
+        void reset();
+        void process(int channel, const double* in, double* out, int numSamples);
     };
 
     // Note: trashBin は、Audio Thread がまだ使用している可能性のある古い Convolution オブジェクトを保持するために使用されます。
@@ -382,6 +449,7 @@ private:
     std::atomic<bool> useMinPhase{false};
     std::atomic<float> targetIRLengthSec{IR_LENGTH_DEFAULT_SEC};
     std::atomic<float> smoothingTimeSec{SMOOTHING_TIME_DEFAULT_SEC};
+    std::atomic<bool> enableMKL { true };
 
     //----------------------------------------------------------
     // IR情報
@@ -420,6 +488,10 @@ private:
     juce::AudioBuffer<double> oldDryBuffer;
     convo::ScopedAlignedPtr<double> oldDryBufferStorage[2];
     int oldDryBufferCapacity = 0;
+
+    // Wet信号用一時バッファ (StereoConvolver::process用)
+    convo::ScopedAlignedPtr<double> wetBufferStorage[2];
+    int wetBufferCapacity = 0;
 
     //----------------------------------------------------------
     // 準備完了フラグ
