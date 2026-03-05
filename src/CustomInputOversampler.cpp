@@ -298,8 +298,13 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
     {
         const int idx = keep + n;
         const double* xWindow = history + idx - (stage.convCount - 1);
-        const double convValue = 2.0 * dotProductAvx2(xWindow, stage.convCoeffsReversed.get(), stage.convCount);
-        const double centerValue = 2.0 * stage.centerCoeff * history[idx - stage.centerDelayInput];
+        double convValue = 2.0 * dotProductAvx2(xWindow, stage.convCoeffsReversed.get(), stage.convCount);
+        double centerValue = 2.0 * stage.centerCoeff * history[idx - stage.centerDelayInput];
+
+        // Denormal対策: 極小値をゼロに落とす (Explicit Flush-to-Zero)
+        if (std::abs(convValue) < 1.0e-25) convValue = 0.0;
+        if (std::abs(centerValue) < 1.0e-25) centerValue = 0.0;
+
         const int outBase = n << 1;
 
         output[outBase + stage.convParity] = convValue;
@@ -334,6 +339,8 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
             acc += stage.convCoeffs.get()[r] * history[sampleIndex];
         }
 
+        // Denormal対策
+        if (std::abs(acc) < 1.0e-25) acc = 0.0;
         output[n] = acc;
     }
 
