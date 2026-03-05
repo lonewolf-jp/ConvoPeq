@@ -90,7 +90,9 @@ bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int
     // Allocate buffers
     // IR Freq Domain: (fftSize/2 + 1) complex numbers * numPartitions
     int complexSize = fftSize / 2 + 1;
-    size_t irBufSize = static_cast<size_t>(complexSize) * 2 * numPartitions; // 2 doubles per complex
+    // 【最適化】パーティションストライドを64byte(8 doubles)境界にアライメント
+    partitionStride = (complexSize * 2 + 7) & ~7;
+    size_t irBufSize = static_cast<size_t>(partitionStride) * numPartitions;
     irFreqDomain.reset(static_cast<double*>(convo::aligned_malloc(irBufSize * sizeof(double), 64)));
     juce::FloatVectorOperations::clear(irFreqDomain.get(), static_cast<int>(irBufSize));
 
@@ -108,11 +110,6 @@ bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int
     juce::FloatVectorOperations::clear(inputBuffer.get(), partitionSize);
     juce::FloatVectorOperations::clear(outputBuffer.get(), partitionSize);
     juce::FloatVectorOperations::clear(prevBlock.get(), partitionSize);
-    // [FIX] fftBufferも全体をゼロ初期化する。
-    // fftSize = nextPow2(partitionSize*2) であり、[prevBlock|currentBlock|gap] の構成のうち
-    // gap 部分 (fftSize - 2*partitionSize bytes) が未初期化のまま DftiComputeForward に
-    // 渡されるとゴミデータが畳み込まれる。全体をゼロクリアして防止する。
-    juce::FloatVectorOperations::clear(fftBuffer.get(), fftSize);
 
     // Precompute IR Partitions
     convo::ScopedAlignedPtr<double> tempTime(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
@@ -128,7 +125,7 @@ bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int
         DftiComputeForward(fftHandle, tempTime.get(), tempFreq.get());
 
         // Copy to IR buffer (interleaved complex)
-        double* dest = irFreqDomain.get() + p * complexSize * 2;
+        double* dest = irFreqDomain.get() + p * partitionStride;
         std::memcpy(dest, tempFreq.get(), complexSize * 2 * sizeof(double));
     }
 
@@ -151,15 +148,9 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
         // Process block if full
         if (inputBufferPos == partitionSize)
         {
-            // Construct FFT input: [PrevBlock | CurrentBlock | zero-pad gap]
-            // fftSize = nextPow2(partitionSize * 2). When partitionSize is not a power of 2,
-            // fftSize > 2 * partitionSize and the gap region must be zeroed to prevent
-            // stale data from previous iterations from being mixed into the DFT.
+            // Construct FFT input: [PrevBlock, CurrentBlock]
             std::memcpy(fftBuffer.get(), prevBlock.get(), partitionSize * sizeof(double));
             std::memcpy(fftBuffer.get() + partitionSize, inputBuffer.get(), partitionSize * sizeof(double));
-            const int gap = fftSize - 2 * partitionSize;
-            if (gap > 0)
-                juce::FloatVectorOperations::clear(fftBuffer.get() + 2 * partitionSize, gap);
 
             // Save current to prev
             std::memcpy(prevBlock.get(), inputBuffer.get(), partitionSize * sizeof(double));
@@ -172,7 +163,7 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
             // Actually, let's use the fdlLines buffer slot for the current block.
 
             int complexSize = fftSize / 2 + 1;
-            MKL_Complex16* currentFDL = reinterpret_cast<MKL_Complex16*>(fdlLines.get()) + fdlIndex * complexSize;
+            MKL_Complex16* currentFDL = reinterpret_cast<MKL_Complex16*>(reinterpret_cast<double*>(fdlLines.get()) + fdlIndex * partitionStride);
 
             DftiComputeForward(fftHandle, fftBuffer.get(), currentFDL);
 
@@ -186,8 +177,8 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
             for (int p = 0; p < numPartitions; ++p)
             {
                 int lineIdx = (fdlIndex - p + numPartitions) % numPartitions;
-                const double* srcA = fdlBase + lineIdx * complexSize * 2;
-                const double* srcB = irBase + p * complexSize * 2;
+                const double* srcA = fdlBase + lineIdx * partitionStride;
+                const double* srcB = irBase + p * partitionStride;
                 double* dst = dstBase;
 
                 int k = 0;
@@ -197,10 +188,10 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
                 {
                     // Load Accumulator (Aligned)
                     __m256d acc = _mm256_load_pd(dst + 2 * k);
-                    // Load FDL (Unaligned)
-                    __m256d a = _mm256_loadu_pd(srcA + 2 * k);
-                    // Load IR (Unaligned)
-                    __m256d b = _mm256_loadu_pd(srcB + 2 * k);
+                    // Load FDL (Aligned)
+                    __m256d a = _mm256_load_pd(srcA + 2 * k);
+                    // Load IR (Aligned)
+                    __m256d b = _mm256_load_pd(srcB + 2 * k);
 
                     // Complex Multiply Accumulate: Acc += A * B
                     // Re = Ar*Br - Ai*Bi
@@ -235,7 +226,10 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
             DftiComputeBackward(fftHandle, mulTemp.get(), fftBuffer.get());
 
             // Overlap-Save: Output is the last partitionSize samples
-            std::memcpy(outputBuffer.get(), fftBuffer.get() + partitionSize, partitionSize * sizeof(double));
+            // std::memcpy(outputBuffer.get(), fftBuffer.get() + partitionSize, partitionSize * sizeof(double));
+			// Use MKL vdCopy for optimized memory transfer
+			vdCopy(partitionSize, fftBuffer.get() + partitionSize, outputBuffer.get());
+
             outputBufferPos = 0;
 
             // Advance FDL
@@ -269,7 +263,7 @@ void ConvolverProcessor::MKLConvolver::reset()
     if (inputBuffer) juce::FloatVectorOperations::clear(inputBuffer.get(), partitionSize);
     if (outputBuffer) juce::FloatVectorOperations::clear(outputBuffer.get(), partitionSize);
     if (prevBlock) juce::FloatVectorOperations::clear(prevBlock.get(), partitionSize);
-    if (fdlLines) juce::FloatVectorOperations::clear(reinterpret_cast<double*>(fdlLines.get()), (fftSize / 2 + 1) * 2 * numPartitions);
+    if (fdlLines) juce::FloatVectorOperations::clear(reinterpret_cast<double*>(fdlLines.get()), partitionStride * numPartitions);
     inputBufferPos = 0;
     outputBufferPos = 0;
     fdlIndex = 0;
@@ -669,7 +663,7 @@ public:
         double loadedSR = 0.0;
         int targetLength = 0;
         juce::AudioBuffer<double> displayIR;
-        StereoConvolver::Ptr newConv;
+        StereoConvolver* newConv = nullptr;
         bool success = false;
         juce::String errorMessage;
     };
@@ -718,33 +712,43 @@ public:
             // 6. メインスレッドで適用
             auto wp = weakOwner;
 
-            // shared_ptrで管理 (Lambdaコピー時のAudioBufferディープコピー回避)
-            auto loadedIRPtr = std::make_shared<juce::AudioBuffer<double>>(std::move(result.loadedIR));
-            auto displayIRPtr = std::make_shared<juce::AudioBuffer<double>>(std::move(result.displayIR));
-            StereoConvolver::Ptr newConvPtr = result.newConv;
+            // Raw pointerで管理 (Lambdaコピー時のAudioBufferディープコピー回避)
+            auto* loadedIRPtr = new juce::AudioBuffer<double>(std::move(result.loadedIR));
+            auto* displayIRPtr = new juce::AudioBuffer<double>(std::move(result.displayIR));
+            StereoConvolver* newConvPtr = result.newConv;
 
             juce::MessageManager::callAsync([wp, newConvPtr, loadedIRPtr, loadedSR = result.loadedSR, targetLength = result.targetLength, isRebuild = this->isRebuild, file = this->file, displayIRPtr]()
             {
+                std::unique_ptr<juce::AudioBuffer<double>> irOwner(loadedIRPtr);
+                std::unique_ptr<juce::AudioBuffer<double>> displayOwner(displayIRPtr);
                 if (auto* o = wp.get())
                 {
-                    o->applyNewState(newConvPtr, *loadedIRPtr, loadedSR, targetLength, isRebuild, file, *displayIRPtr);
+                    o->applyNewState(newConvPtr, *irOwner, loadedSR, targetLength, isRebuild, file, *displayOwner);
                 }
             });
 
             resetter.success = true;
         }
-        else if (!result.success && result.errorMessage.isNotEmpty() && !threadShouldExit())
+        else
         {
-            // エラー発生時: メインスレッドでエラー処理を行う
-            auto wp = weakOwner;
-            const juce::String error = result.errorMessage;
-            juce::MessageManager::callAsync([wp, error]()
+            // [FIX] Clean up leaked StereoConvolver if load failed or thread cancelled
+            if (result.newConv)
             {
-                if (auto* o = wp.get())
+                result.newConv->release();
+                result.newConv = nullptr;
+            }
+
+            if (!result.success && result.errorMessage.isNotEmpty() && !threadShouldExit())
+            {
+                // エラー発生時: メインスレッドでエラー処理を行う
+                auto wp = weakOwner;
+                const juce::String error = result.errorMessage;
+                juce::MessageManager::callAsync([wp, error]()
                 {
-                    o->handleLoadError(error);
-                }
-            });
+                    if (auto* o = wp.get())
+                        o->handleLoadError(error);
+                });
+            }
         }
     }
 
@@ -1025,7 +1029,8 @@ public:
             }
 
             // 10. 新しいConvolutionの構築 (Non-uniform Partitioned Convolution)
-            result.newConv = std::make_shared<StereoConvolver>();
+            result.newConv = new StereoConvolver();
+            result.newConv->addRef();
 
             // IRデータを格納するアラインされたバッファを準備 (Rebuild用に保持)
             convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
@@ -1119,7 +1124,7 @@ ConvolverProcessor::~ConvolverProcessor()
     // スレッドを停止
     activeLoader.reset();
     convolution.store(nullptr);
-    activeConvolution.reset();
+    if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
 
 #if JUCE_DSP_USE_INTEL_MKL
     if (fftHandle) {
@@ -1174,7 +1179,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
         if ((rateChanged || blockChanged) && conv->irDataLength > 0)
         {
-            auto newConv = std::make_shared<StereoConvolver>();
+            auto newConv = new StereoConvolver();
+            newConv->addRef();
 
             // バッファ確保とコピー
             convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
@@ -1189,7 +1195,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                           conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, enableMKL.load());
 
             // 差し替え
-            convolution.store(newConv.get(), std::memory_order_release);
+            convolution.store(newConv, std::memory_order_release);
 
             if (activeConvolution)
             {
@@ -1325,7 +1331,7 @@ void ConvolverProcessor::releaseResources()
 
     // Release active convolution engine
     convolution.store(nullptr, std::memory_order_release);
-    activeConvolution.reset();
+    if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
 
     {
         const juce::ScopedLock sl(trashBinLock);
@@ -1610,7 +1616,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
 // applyNewState (Message Thread Callback)
 // ローダースレッド完了後に呼ばれる
 //--------------------------------------------------------------
-void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
+void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
                                        const juce::AudioBuffer<double>& loadedIR,
                                        double loadedSR,
                                        int targetLength,
@@ -1640,7 +1646,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver::Ptr newConv,
     }
 
     // 安全に差し替え (Atomic Swap)
-    convolution.store(newConv.get(), std::memory_order_release);
+    convolution.store(newConv, std::memory_order_release);
 
     if (activeConvolution)
     {
@@ -1700,7 +1706,7 @@ void ConvolverProcessor::cleanup()
     if (!lock.isLocked()) return;
 
     const uint32 now = juce::Time::getMillisecondCounter();
-    std::vector<StereoConvolver::Ptr> toRelease;
+    std::vector<StereoConvolver*> toRelease;
 
     for (auto it = trashBin.begin(); it != trashBin.end(); )
     {
@@ -1708,9 +1714,9 @@ void ConvolverProcessor::cleanup()
                      (now - it->second) :
                      (std::numeric_limits<uint32>::max() - it->second + now);
 
-        if (age > 800 || it->first.use_count() <= 1)
+        if (age > 800)
         {
-            toRelease.push_back(std::move(it->first));
+            toRelease.push_back(it->first);
             it = trashBin.erase(it);
         }
         else
@@ -1721,9 +1727,11 @@ void ConvolverProcessor::cleanup()
 
     while (trashBin.size() > 3)
     {
-        toRelease.push_back(std::move(trashBin.back().first));
+        toRelease.push_back(trashBin.back().first);
         trashBin.pop_back();
     }
+
+    for (auto* p : toRelease) p->release();
 }
 
 void ConvolverProcessor::forceCleanup()
@@ -1731,12 +1739,29 @@ void ConvolverProcessor::forceCleanup()
     // This method is for eager cleanup of non-blocking resources.
     // The blocking cleanup of LoaderThreads is handled by the destructor.
 
-    std::vector<std::pair<StereoConvolver::Ptr, uint32>> temp;
+    std::vector<std::pair<StereoConvolver*, uint32>> temp;
     {
         juce::ScopedLock lock(trashBinLock);
         temp.swap(trashBin);
     }
     // temp is destroyed here, releasing any old StereoConvolver instances.
+
+    // 【Fix】LoaderThread のクリーンアップ漏れ防止
+    // DSPCore破棄時やreleaseResources時に、残っているローダースレッドを
+    // メインスレッドをブロックせずに破棄する。
+    std::vector<std::unique_ptr<LoaderThread>> loadersToDelete;
+    loadersToDelete.swap(loaderTrashBin);
+    if (activeLoader)
+        loadersToDelete.push_back(std::move(activeLoader));
+
+    for (auto& loader : loadersToDelete)
+    {
+        std::thread([l = std::move(loader)]() mutable {
+            l.reset(); // blocks in stopThread(4000) on background thread
+        }).detach();
+    }
+
+    for (auto& entry : temp) entry.first->release();
 }
 
 //--------------------------------------------------------------
@@ -2012,12 +2037,11 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     irName = other.irName;
     irLength = other.irLength;
 
-    // ▼ クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
-    // 現在の実装では毎回クローンを作成し即廃棄している（LEAK 1）
+    // クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
     // SCはDSPCore::prepare()内のprepareToPlay、またはrebuildAllIRsSynchronousで生成する
     // activeConvolution / convolution はnullptrのままにする
     convolution.store(nullptr, std::memory_order_release);
-    activeConvolution.reset();
+    if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
 }
 
 void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
@@ -2050,28 +2074,12 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
     }
 }
 
-void ConvolverProcessor::copyConvolutionEngineFrom(const ConvolverProcessor& other)
-{
-    // Only copy the heavy engine part and related IR metadata
-    auto otherConv = other.activeConvolution;
-    StereoConvolver::Ptr newConv = (otherConv != nullptr) ? otherConv->clone() : nullptr;
-    convolution.store(newConv.get(), std::memory_order_release);
-
-    if (activeConvolution)
-    {
-        const juce::ScopedLock sl(trashBinLock);
-        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
-    }
-    activeConvolution = newConv;
-
-    irLength = other.irLength;
-}
-
 void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& other)
 {
     // Share the active convolution engine (Shared Pointer copy)
     auto otherConv = other.activeConvolution;
-    convolution.store(otherConv.get(), std::memory_order_release);
+    if (otherConv) otherConv->addRef();
+    convolution.store(otherConv, std::memory_order_release);
 
     if (activeConvolution)
     {

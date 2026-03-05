@@ -202,7 +202,10 @@ public:
         EQCoeffsSVF coeffs;
         bool active;
         EQChannelMode mode;
-        using Ptr = std::shared_ptr<BandNode>;
+
+        mutable std::atomic<int> refCount { 0 };
+        void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }
+        void release() const { if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this; }
     };
 
     struct EQState
@@ -211,13 +214,33 @@ public:
         std::array<EQBandType, NUM_BANDS> bandTypes;
         std::array<EQChannelMode, NUM_BANDS> bandChannelModes;
         float totalGainDb = 0.0f;
-        using Ptr = std::shared_ptr<EQState>;
+
+        mutable std::atomic<int> refCount { 0 };
+
+        // Explicitly define the copy constructor
+        EQState(const EQState& other)
+            : bands(other.bands),
+              bandTypes(other.bandTypes),
+              bandChannelModes(other.bandChannelModes),
+              totalGainDb(other.totalGainDb),
+              refCount(0) // Initialize refCount to 0 in the copy
+        {
+        }
+
+        //Explicitly define the move constructor
+        EQState(EQState&& other) = default;
+
+        EQState& operator=(const EQState&) = default;
+
+
+        void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }
+        void release() const { if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this; }
     };
 
     //----------------------------------------------------------
     // 状態スナップショット取得 (AudioEngine用)
     //----------------------------------------------------------
-    EQState::Ptr getEQState() const;
+    EQState* getEQState() const;
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const EQProcessor& other);
@@ -268,11 +291,16 @@ private:
     bool isBufferSilent(const juce::AudioBuffer<double>& buffer, int numSamples) const noexcept;
 
     // 係数計算
-    BandNode::Ptr createBandNode(int bandIndex, const EQState& state) const;
+    BandNode* createBandNode(int bandIndex, const EQState& state) const;
     void updateBandNode(int bandIndex);
 
     // スムージング処理
-    std::atomic<EQState::Ptr> currentState { nullptr };
+    std::atomic<EQState*> currentStateRaw { nullptr }; // Raw pointer for Audio Thread (Lock-free)
+    EQState* activeState = nullptr;                    // Ownership for Message Thread
+
+    // ── 状態リセットフラグ (Audio Thread用) ──
+    std::atomic<uint32_t> bandResetMask { 0 };
+    std::atomic<bool> agcResetRequest { false };
 
     juce::ListenerList<Listener> listeners;
 
@@ -289,11 +317,11 @@ private:
 
     // ── 係数管理 (Atomic Swap) ──
     std::array<std::atomic<BandNode*>, NUM_BANDS> bandNodes; // Raw pointer for Audio Thread
-    std::array<BandNode::Ptr, NUM_BANDS> activeBandNodes; // Ownership for Message Thread
-    std::vector<std::pair<BandNode::Ptr, uint32>> bandNodeTrashBin; // Time-based GC
-    std::vector<BandNode::Ptr> bandNodeTrashBinPending;
-    std::vector<EQState::Ptr> stateTrashBin;
-    std::vector<EQState::Ptr> stateTrashBinPending;
+    std::array<BandNode*, NUM_BANDS> activeBandNodes { nullptr }; // Ownership for Message Thread
+    std::vector<std::pair<BandNode*, uint32>> bandNodeTrashBin; // Time-based GC
+    std::vector<BandNode*> bandNodeTrashBinPending;
+    std::vector<EQState*> stateTrashBin;
+    std::vector<EQState*> stateTrashBinPending;
     juce::CriticalSection trashBinLock;
 
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──

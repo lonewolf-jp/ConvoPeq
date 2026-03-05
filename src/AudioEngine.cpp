@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <mutex>
 #include <condition_variable>
-#include <avrt.h>
 #include <xmmintrin.h>
 #include <immintrin.h>
 
@@ -205,7 +204,7 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
     const int vEnd = numSamples / 4 * 4;
     for (; i < vEnd; i += 4)
     {
-        __m256d x    = _mm256_load_pd(data + i); // data is 64-byte aligned
+            __m256d x    = _mm256_loadu_pd(data + i);
         __m256d absX = _mm256_andnot_pd(vSignMask, x);
 
         // Check if any sample in the vector needs clipping
@@ -254,7 +253,7 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 
         // Blend with original x for samples that didn't need clipping
         result = _mm256_blendv_pd(x, result, needClip);
-        _mm256_store_pd(data + i, result);
+            _mm256_storeu_pd(data + i, result);
     }
 
     // Scalar remainder
@@ -671,7 +670,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // サンプルレート変更検知
     const bool rateChanged = (std::abs(currentSampleRate.load() - safeSampleRate) > 1e-6);
-    // ブロックサイズ変更検知 (FFTConvolverのパーティションサイズ最適化のため)
+    // ブロックサイズ変更検知 (コンボルバーのパーティションサイズ最適化のため)
     const bool blockSizeChanged = (maxSamplesPerBlock.load() != bufferSize);
 
     maxSamplesPerBlock.store(bufferSize);
@@ -698,20 +697,12 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // 以前はtimerCallback()が毎50msに再ビルドしていたが、それは誤りだった。
     // prepareToPlayはMessageThreadから呼ばれるため、requestRebuild()を直接呼べる。
 
-    // [FIX] uiConvolverProcessor の currentBufferSize を最新の bufferSize に同期する。
+    // [FIX] uiConvolverProcessor の currentBufferSize を必ず最新の bufferSize に同期する。
     // この呼び出しが欠けていると currentBufferSize == 0 のまま残り、
     // IR読み込み時に LoaderThread が blockSize=0 でMKLConvolver::setup(0,...) を呼んで
     // numPartitions = (irLen - 1) / 0 → ゼロ除算クラッシュが発生する。
-    //
-    // [重要] prepareToPlay() は呼ばない：
-    //   uiConvolverProcessor が処理するのはベースレート(例: 48kHz)のブロックサイズだが、
-    //   DSPコアはオーバーサンプリング後のレート(例: 384kHz, blockSize×8)で動く。
-    //   prepareToPlay(baseSR, baseBlockSize) を呼ぶと内部で StereoConvolver が
-    //   小さい partitionSize（例: 512）で再構築されてしまい、DSP側の大きな
-    //   partitionSize（例: 4096）と不整合になってCPU負荷が大幅に増加する。
-    //   uiConvolverProcessor は可視化・設定保持専用でオーディオ処理には使わないため、
-    //   currentBufferSize だけを更新すれば十分。
-    uiConvolverProcessor.setCurrentBufferSize(bufferSize);
+    // prepareToPlay は Message Thread から呼ばれることが保証されているので安全。
+    uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
 
     if (rateChanged || blockSizeChanged || currentDSP.load(std::memory_order_acquire) == nullptr)
     {
@@ -813,7 +804,7 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     const auto osPreset = (oversamplingType == OversamplingType::LinearPhase)
                         ? CustomInputOversampler::Preset::LinearPhase
                         : CustomInputOversampler::Preset::IIRLike;
-    oversampling.prepare(SAFE_MAX_BLOCK_SIZE, static_cast<int>(oversamplingFactor), osPreset);
+    oversampling.prepare(inputMaxBlock, static_cast<int>(oversamplingFactor), osPreset);
 
     const double processingRate = newSampleRate * static_cast<double>(oversamplingFactor);
     const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
@@ -981,7 +972,8 @@ void AudioEngine::rebuildThreadLoop()
                 task.newDSP->eq.syncGlobalStateFrom(task.currentDSP->eq);
 
                 if (std::abs(task.currentDSP->sampleRate - task.sampleRate) < 1e-6 &&
-                    task.currentDSP->oversamplingFactor == task.newDSP->oversamplingFactor && task.newDSP->oversamplingFactor > 1)
+                    task.currentDSP->oversamplingFactor == task.newDSP->oversamplingFactor &&
+                    task.currentDSP->convolver.getCurrentBufferSize() == task.newDSP->convolver.getCurrentBufferSize())
                 {
                     // IRの生成条件が一致しているか確認
                     if (task.newDSP->convolver.getIRName() == task.currentDSP->convolver.getIRName() &&
@@ -1131,10 +1123,13 @@ void AudioEngine::timerCallback()
     // 3. 内部プロセッサのクリーンアップを実行
     // 現在アクティブなDSPの内部ゴミ箱も掃除する
     // Note: activeDSP is safe to access here (Message Thread)
-    if (activeDSP)
     {
-        activeDSP->eq.cleanup();
-        activeDSP->convolver.cleanup();
+        const juce::ScopedLock sl(trashBinLock);
+        if (activeDSP)
+        {
+            activeDSP->eq.cleanup();
+            activeDSP->convolver.cleanup();
+        }
     }
 
     // UI用プロセッサのクリーンアップ
@@ -1218,15 +1213,15 @@ void AudioEngine::releaseResources()
     currentDSP.store(nullptr, std::memory_order_release);
 
     // 2. Release Active DSP (triggers destructors of DSPCore and its members)
-    if (activeDSP)
-    {
-        delete activeDSP;
-        activeDSP = nullptr;
-    }
-
     // 3. Clear Trash Bin (release old DSPs)
     {
         const juce::ScopedLock sl(trashBinLock);
+        if (activeDSP)
+        {
+            delete activeDSP;
+            activeDSP = nullptr;
+        }
+
         for (auto& entry : trashBin) delete entry.first;
         trashBin.clear();
         for (auto* p : trashBinPending) delete p;
@@ -1247,6 +1242,7 @@ void AudioEngine::releaseResources()
 //    4. 待機禁止 (No waiting): sleep や 重い計算によるストールを避ける。IRの再ロードもNG。
 //    5. 禁止API: AudioBlock::allocate, AudioBlock::copyFrom (確保伴うもの), FFT::performFrequencyOnlyForwardTransform (事前確保なしはNG)
 //    6. std::vector使用時は、必ず AudioBuffer / 生ポインタを wrap する形で使用すること。
+//    7. MMCSS設定禁止: AvSetMmThreadCharacteristics 等の呼び出しは禁止。
 //--------------------------------------------------------------
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
@@ -1447,8 +1443,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     {
         processBlock = oversampling.processUp(originalBlock, static_cast<int>(originalBlock.getNumChannels()));
 
-        // [追加] 実際のアップサンプリング後サイズが内部バッファを超えていないか最終確認
-        if (processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
+        // [Safety Guard] サイズ超過またはエラー(空ブロック)の場合は無音にして中断
+        if (processBlock.getNumSamples() == 0 || processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
         {
             jassertfalse;
             bufferToFill.clearActiveBufferRegion();
@@ -1609,7 +1605,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     {
         processBlock = oversampling.processUp(originalBlock, static_cast<int>(originalBlock.getNumChannels()));
 
-        if (processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
+        if (processBlock.getNumSamples() == 0 || processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
         {
             jassertfalse;
             buffer.clear();
@@ -1943,7 +1939,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                     _mm_prefetch(reinterpret_cast<const char*>(data + i + 64), _MM_HINT_T0);
 
                     // 1
-                    __m256d v0 = _mm256_load_pd(data + i);
+                    __m256d v0 = _mm256_loadu_pd(data + i);
                     __m256d abs0 = _mm256_and_pd(v0, vAbsMask);
                     __m256d mask0 = _mm256_cmp_pd(abs0, vEpsilon, _CMP_GE_OQ);
                     v0 = _mm256_blendv_pd(vZero, v0, mask0);
@@ -1951,7 +1947,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                     _mm_storeu_ps(dst + i, _mm256_cvtpd_ps(v0));
 
                     // 2
-                    __m256d v1 = _mm256_load_pd(data + i + 4);
+                    __m256d v1 = _mm256_loadu_pd(data + i + 4);
                     __m256d abs1 = _mm256_and_pd(v1, vAbsMask);
                     __m256d mask1 = _mm256_cmp_pd(abs1, vEpsilon, _CMP_GE_OQ);
                     v1 = _mm256_blendv_pd(vZero, v1, mask1);
@@ -1959,7 +1955,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                     _mm_storeu_ps(dst + i + 4, _mm256_cvtpd_ps(v1));
 
                     // 3
-                    __m256d v2 = _mm256_load_pd(data + i + 8);
+                    __m256d v2 = _mm256_loadu_pd(data + i + 8);
                     __m256d abs2 = _mm256_and_pd(v2, vAbsMask);
                     __m256d mask2 = _mm256_cmp_pd(abs2, vEpsilon, _CMP_GE_OQ);
                     v2 = _mm256_blendv_pd(vZero, v2, mask2);
@@ -1967,7 +1963,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                     _mm_storeu_ps(dst + i + 8, _mm256_cvtpd_ps(v2));
 
                     // 4
-                    __m256d v3 = _mm256_load_pd(data + i + 12);
+                    __m256d v3 = _mm256_loadu_pd(data + i + 12);
                     __m256d abs3 = _mm256_and_pd(v3, vAbsMask);
                     __m256d mask3 = _mm256_cmp_pd(abs3, vEpsilon, _CMP_GE_OQ);
                     v3 = _mm256_blendv_pd(vZero, v3, mask3);
@@ -1977,7 +1973,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                 // Remaining
                 for (; i < (numSamples / 4 * 4); i += 4)
                 {
-                    __m256d v = _mm256_load_pd(data + i);
+                    __m256d v = _mm256_loadu_pd(data + i);
                     __m256d absv = _mm256_and_pd(v, vAbsMask);
                     __m256d mask = _mm256_cmp_pd(absv, vEpsilon, _CMP_GE_OQ);
                     v = _mm256_blendv_pd(vZero, v, mask);
@@ -2034,10 +2030,10 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 
                 for (; i < vEnd; i += 16)
                 {
-                    __m256d v0 = _mm256_load_pd(data + i);
-                    __m256d v1 = _mm256_load_pd(data + i + 4);
-                    __m256d v2 = _mm256_load_pd(data + i + 8);
-                    __m256d v3 = _mm256_load_pd(data + i + 12);
+                    __m256d v0 = _mm256_loadu_pd(data + i);
+                    __m256d v1 = _mm256_loadu_pd(data + i + 4);
+                    __m256d v2 = _mm256_loadu_pd(data + i + 8);
+                    __m256d v3 = _mm256_loadu_pd(data + i + 12);
 
                     __m256d m0 = _mm256_cmp_pd(_mm256_and_pd(v0, vAbsMask), vEpsilon, _CMP_GE_OQ);
                     __m256d m1 = _mm256_cmp_pd(_mm256_and_pd(v1, vAbsMask), vEpsilon, _CMP_GE_OQ);
@@ -2062,7 +2058,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 
                 for (; i < (numSamples / 4 * 4); i += 4)
                 {
-                    __m256d v = _mm256_load_pd(data + i);
+                    __m256d v = _mm256_loadu_pd(data + i);
                     __m256d m = _mm256_cmp_pd(_mm256_and_pd(v, vAbsMask), vEpsilon, _CMP_GE_OQ);
                     v = _mm256_blendv_pd(vZero, v, m);
                     v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);

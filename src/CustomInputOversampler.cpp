@@ -345,6 +345,13 @@ juce::dsp::AudioBlock<double> CustomInputOversampler::processUp(const juce::dsp:
     const int channels = juce::jlimit(1, kMaxChannels, numChannels);
     const int inSamples = static_cast<int>(inputBlock.getNumSamples());
 
+    // [Safety Guard] 入力サイズが準備された容量を超えている場合は空ブロックを返す
+    if (inSamples > maxInputBlockSize)
+    {
+        jassertfalse;
+        return {};
+    }
+
     if (upsampleRatio <= 1 || numStages == 0)
     {
         blockChannels[0] = const_cast<double*>(inputBlock.getChannelPointer(0));
@@ -382,6 +389,14 @@ void CustomInputOversampler::processDown(const juce::dsp::AudioBlock<double>& up
 {
     const int channels = juce::jlimit(1, kMaxChannels, numChannels);
     const int targetSamples = static_cast<int>(outputBlock.getNumSamples());
+
+    // [Safety Guard] 入力サイズが準備された容量を超えている場合は処理をスキップし、出力をクリアする
+    if (upsampledBlock.getNumSamples() > static_cast<size_t>(maxUpsampledBlockSize))
+    {
+        jassertfalse;
+        outputBlock.clear();
+        return;
+    }
 
     if (upsampleRatio <= 1 || numStages == 0)
     {

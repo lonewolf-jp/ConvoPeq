@@ -325,14 +325,13 @@ private:
 #else
     // MKL VSL Batch Generation for efficiency
     static constexpr int RND_BUFFER_SIZE = 1024; // Increased batch size to reduce VSL call overhead
-    // 【パッチ6】vdRngUniform の出力バッファを 64byte アライメントする
-    // 理由: コーディング規約「MKL使用箇所ではメモリは64byteアライメントとする」に従う。
-    //       非アライメントバッファへの vdRngUniform 書き込みは機能上は動作するが、
-    //       MKL の SIMD 最適化パスが有効にならず AVX-512 等のベクトル幅で
-    //       性能劣化が生じる可能性がある。
-    //       平坦な2次元配列を alignas(64) で宣言することで
-    //       先頭アドレスの 64byte アライメントを保証する。
-    alignas(64) double rndBuffer[MAX_CHANNELS][RND_BUFFER_SIZE];
+    // 【パッチ6】rndBufferをインスタンスメンバー化 (データレース防止)
+    // 理由: static変数は全インスタンスで共有されるため、複数のPsychoacousticDither
+    //       インスタンス（例: RCUによる新旧DSPCore）が同時に存在すると、
+    //       MKLの乱数生成バッファへのアクセスが競合し、RNG状態が破壊される。
+    //       インスタンスメンバーにすることで、各インスタンスが独立したバッファを持つ。
+    //       alignas(64) はMKLのSIMD最適化のために維持する。
+    alignas(64) double rndBuffer[MAX_CHANNELS][RND_BUFFER_SIZE] {};
     int rndIndex[MAX_CHANNELS];
 
     inline double nextTPDF_MKL(int channel) noexcept

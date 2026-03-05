@@ -137,6 +137,7 @@ public:
     int getIRLength() const { return irLength; }
     juce::String getLastError() const { return lastError; }
     float getLoadProgress() const { return loadProgress.load(); }
+    int getCurrentBufferSize() const { return currentBufferSize; }
 
     //----------------------------------------------------------
     // 波形表示用データ取得
@@ -164,7 +165,6 @@ public:
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const ConvolverProcessor& other);
     void syncParametersFrom(const ConvolverProcessor& other);
-    void copyConvolutionEngineFrom(const ConvolverProcessor& other);
     void shareConvolutionEngineFrom(const ConvolverProcessor& other);
     void refreshLatency();
 
@@ -178,12 +178,6 @@ public:
 
     void setMklEnabled(bool enabled) { enableMKL.store(enabled); }
     bool isMklEnabled() const { return enableMKL.load(); }
-
-    // [FIX] 軽量なバッファサイズ更新メソッド
-    // uiConvolverProcessorに対してprepareToPlay()の全副作用なしに
-    // currentBufferSizeだけを更新するために使用する。
-    // IRのStereoConvolver再構築やMKL descriptor再作成は行わない。
-    void setCurrentBufferSize(int bufferSize) noexcept { currentBufferSize = bufferSize; }
 
 private:
     void timerCallback() override;
@@ -200,6 +194,7 @@ private:
         int fftSize = 0;
         int numPartitions = 0;
         int latency = 0;
+        int partitionStride = 0;
 
         DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
 
@@ -234,7 +229,7 @@ private:
         double* irData[2] = { nullptr, nullptr };
 
 #if JUCE_DSP_USE_INTEL_MKL
-        std::array<std::unique_ptr<MKLConvolver>, 2> mklConvolvers;
+        std::array<convo::ScopedAlignedPtr<MKLConvolver>, 2> mklConvolvers;
         bool useMKL = false;
 #endif
         int irDataLength = 0;
@@ -250,8 +245,6 @@ private:
         int storedKnownBlockSize = 0;
         int storedFirstPartition = 0;
 
-        using Ptr = std::shared_ptr<StereoConvolver>;
-
         StereoConvolver() = default;
 
         ~StereoConvolver() {
@@ -260,6 +253,11 @@ private:
             convolvers[0].Reset();
             convolvers[1].Reset();
         }
+
+        // Intrusive Reference Counting
+        mutable std::atomic<int> refCount { 0 };
+        void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }
+        void release() const { if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this; }
 
         // コピーコンストラクタは禁止 (WDLエンジンは複製コストが高く、状態を持つため)
         StereoConvolver(const StereoConvolver& other) = delete;
@@ -289,39 +287,12 @@ private:
             if (preferMKL)
             {
                 useMKL = true;
-                mklConvolvers[0] = std::make_unique<MKLConvolver>();
-                mklConvolvers[1] = std::make_unique<MKLConvolver>();
+                mklConvolvers[0].reset(new (convo::aligned_malloc(sizeof(MKLConvolver), 64)) MKLConvolver());
+                mklConvolvers[1].reset(new (convo::aligned_malloc(sizeof(MKLConvolver), 64)) MKLConvolver());
 
-                // [FIX-CPU] Use storedFirstPartition as the MKL partition size.
-                //
-                // Why NOT callQuantumSamples (= processingBlockSize):
-                //   callQuantumSamples は OS 倍率込みの処理ブロックサイズ（例: 512×8=4096）。
-                //   これを partitionSize に使うと、毎ブロック DFT が走る
-                //   (Uniform Partitioned Convolution の FFT 発火頻度 = ブロック頻度)。
-                //   WDL は firstPartition=16384 で 4 ブロックに 1 回しか DFT を発火しないため、
-                //   MKL(part=4096) は WDL より約 3 倍 CPU 負荷が高くなる。
-                //
-                // Why storedFirstPartition (= sizing.firstPartition):
-                //   firstPartition は computeMasteringSizing() が算出する最適パーティションサイズ
-                //   (= nextPow2(internalBlockSize × 4)、4096〜16384 にクランプ)。
-                //   これを partitionSize に使うと、DFT 発火頻度 =
-                //   firstPartition / callQuantumSamples 回に 1 回になり WDL と同等コストになる。
-                //
-                // Why process() で FFT が発火しない問題が起きないか:
-                //   MKLConvolver::process() の while ループは inputBuffer を partitionSize
-                //   サンプル分蓄積してから DFT を発火する。callLen < partitionSize の場合、
-                //   複数の process() 呼び出しにわたって入力が蓄積され、
-                //   丁度 partitionSize に達した回だけ DFT が走る (正常な UPC の動作)。
-                //   出力が出るまでの間は outputBuffer がゼロパディングするため無音で待機する
-                //   (= latency = firstPartition サンプル、WDL と同等)。
-                //
-                // fftBuffer gap について:
-                //   fftSize = nextPow2(partitionSize * 2)。
-                //   [prevBlock | currentBlock | gap] の構成になるが gap は setup() でゼロ初期化し、
-                //   process() でも毎回ゼロパディングするため DFT にゴミデータは入らない。
-                const int mklPartitionSize = storedFirstPartition; // ≥ callQuantumSamples
-                if (mklConvolvers[0]->setup(mklPartitionSize, irData[0], irDataLength) &&
-                    mklConvolvers[1]->setup(mklPartitionSize, irData[1], irDataLength))
+                // Use knownBlockSize as partition size for MKL UPC
+                if (mklConvolvers[0]->setup(knownBlockSize, irData[0], irDataLength) &&
+                    mklConvolvers[1]->setup(knownBlockSize, irData[1], irDataLength))
                 {
                     latency = mklConvolvers[0]->latency;
                     return;
@@ -416,9 +387,9 @@ private:
         }
 
         // Deep Copyを作成する
-        std::shared_ptr<StereoConvolver> clone() const
+        StereoConvolver* clone() const
         {
-            auto newConv = std::make_shared<StereoConvolver>();
+            auto newConv = new StereoConvolver();
             if (irDataLength > 0 && irData[0] && irData[1])
             {
                 // メモリを新規確保してコピー (RAIIによる例外安全性確保)
@@ -446,8 +417,8 @@ private:
 
     // Note: trashBin は、Audio Thread がまだ使用している可能性のある古い Convolution オブジェクトを保持するために使用されます。
     std::atomic<StereoConvolver*> convolution { nullptr }; // Raw pointer for Audio Thread (Lock-free)
-    StereoConvolver::Ptr activeConvolution; // Ownership holder for Message Thread
-    std::vector<std::pair<StereoConvolver::Ptr, uint32>> trashBin; // Time-based GC
+    StereoConvolver* activeConvolution = nullptr; // Ownership holder for Message Thread
+    std::vector<std::pair<StereoConvolver*, uint32>> trashBin; // Time-based GC
     juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };

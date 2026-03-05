@@ -69,6 +69,10 @@ inline void aligned_free(void* ptr) {
 //==============================================================================
 // RAII wrapper for convo::aligned_malloc / aligned_free (64-byte align)
 // JUCE 8.0.12 + oneMKL 完全対応。reset() で旧メモリ自動解放。
+//
+// Note: This class calls the destructor of a single object (~T()).
+//       It is suitable for managing a single non-POD object or an array of POD types.
+//       It is NOT suitable for managing an array of non-POD objects.
 //==============================================================================
 template <typename T>
 class ScopedAlignedPtr
@@ -95,7 +99,11 @@ public:
     T* release() noexcept { T* p = ptr; ptr = nullptr; return p; }
     void reset(T* p = nullptr) noexcept
     {
-        if (ptr) aligned_free(ptr);
+        if (ptr)
+        {
+            ptr->~T();
+            aligned_free(ptr);
+        }
         ptr = p;
     }
     explicit operator bool() const noexcept { return ptr != nullptr; }
