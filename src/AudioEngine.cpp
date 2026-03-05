@@ -817,12 +817,13 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     eq.prepareToPlay(processingRate, internalMaxBlock);
 
     // 出力段(processOutput)で実行されるため、オーバーサンプリング前のレートとサイズを使用する
-    dcBlockerL.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
-    dcBlockerR.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
+    // 【最適化】UltraHighRateDCBlocker の init() は sampleRate + cutoffHz を受け取る
+    dcBlockerL.init(newSampleRate, 3.0);
+    dcBlockerR.init(newSampleRate, 3.0);
 
     // 入力段用DCBlockerの準備
-    inputDCBlockerL.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
-    inputDCBlockerR.prepare(newSampleRate, SAFE_MAX_BLOCK_SIZE);
+    inputDCBlockerL.init(newSampleRate, 3.0);
+    inputDCBlockerR.init(newSampleRate, 3.0);
 
     // オーバーサンプリング後のDC除去用 (1Hzカットオフ)
     osDCBlockerL.init(processingRate, 1.0);
@@ -1829,17 +1830,13 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
         std::memcpy(dst, src, numSamples * sizeof(double));
     }
 
-    // ── 入力段DC除去 ──
-    // 後段のEQ/ConvolverにDCオフセットが渡るのを防ぐ
-    // Note: osDCBlockerはオーバーサンプリング時のみ動作するため、
-    //       非オーバーサンプリング時にもDC除去を行うためにここで適用する。
+    // ── 入力段DC除去 (ブロックモード) ──
+    // 旧: 1 サンプルずつ 4 次 IIR を呼出 (~20 ops/sample)
+    // 新: UltraHighRateDCBlocker.process(ptr, N) でブロック単位処理 (~4 ops/sample)
     double* lPtr = alignedL.get();
     double* rPtr = alignedR.get();
-    for (int i = 0; i < numSamples; ++i)
-    {
-        lPtr[i] = inputDCBlockerL.process(lPtr[i]);
-        rPtr[i] = inputDCBlockerR.process(rPtr[i]);
-    }
+    inputDCBlockerL.process(lPtr, numSamples);
+    inputDCBlockerR.process(rPtr, numSamples);
 }
 
 void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples) noexcept
@@ -1865,14 +1862,11 @@ void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& b
     if (expandMono)
         std::memcpy(alignedR.get(), alignedL.get(), numSamples * sizeof(double));
 
-    // ── 入力段DC除去 ──
+    // ── 入力段DC除去 (ブロックモード) ──
     double* lPtr = alignedL.get();
     double* rPtr = alignedR.get();
-    for (int i = 0; i < numSamples; ++i)
-    {
-        lPtr[i] = inputDCBlockerL.process(lPtr[i]);
-        rPtr[i] = inputDCBlockerR.process(rPtr[i]);
-    }
+    inputDCBlockerL.process(lPtr, numSamples);
+    inputDCBlockerR.process(rPtr, numSamples);
 }
 
 // 音楽的なソフトクリッピング関数
@@ -1897,8 +1891,17 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     const bool applyDither = (ditherBitDepth > 0);
 
     //----------------------------------------------------------
-    // 統合処理ループ: DC除去 -> ディザリング -> 出力
-    // メモリ読み書きの回数を減らし、キャッシュ効率を向上させる
+    // 統合処理ループ: DC除去 -> [ディザリング] -> float変換+クランプ
+    //
+    // 【最適化】旧実装の問題点と改善:
+    //   旧: [パス1] スカラー: 4次IIRブロッカー+headroom → data[] 書き戻し
+    //       [パス2] AVX2: data[] 再読み込み → clamp/convert → dst[]
+    //       → 同一データを 2 回走査 + 4次IIR のコスト (~20 ops/sample)
+    //
+    //   新: [パス1] ブロックモード: UltraHighRateDCBlocker.process(data, N)  (~4 ops/sample)
+    //       [パス1b] ディザ有効時のみ スカラー: headroom + dither → data[]
+    //       [パス2] AVX2: headroom乗算(ディザ無効時) + clamp/convert → dst[]
+    //       → DCBlock が 1 次IIRになり AVX2 パスに headroom を統合
     //----------------------------------------------------------
     for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
     {
@@ -1908,75 +1911,53 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
             float* dst = buffer->getWritePointer(ch, startSample);
 
-            // ── フェーズ1: DCブロッカー (IIR 逐次依存, スカラー) ──
+            // ── フェーズ1: DCブロッカー (1次IIR, ブロックモード) ──
+            blocker.process(data, numSamples);
+
+            // ── フェーズ1b: ディザリング有効時のみ ──
+            // headroom スケールを掛けてからディザ処理 (スカラー, 逐次依存のため不可避)
             if (applyDither)
             {
                 for (int i = 0; i < numSamples; ++i)
-                {
-                    double processed = blocker.process(data[i]) * kOutputHeadroom;
-                    data[i] = dither.process(processed, ch); // ディザ後も data[] に保存
-                }
-            }
-            else
-            {
-                for (int i = 0; i < numSamples; ++i)
-                    data[i] = blocker.process(data[i]) * kOutputHeadroom;
+                    data[i] = dither.process(data[i] * kOutputHeadroom, ch);
             }
 
-            // ── フェーズ2: double→float 変換 + NaN除去 + クランプ (AVX2 一括) ──
+            // ── フェーズ2: double→float 変換 + headroom(ディザ無効時) + クランプ (AVX2 一括) ──
+            // NaN 対策: vmulpd(NaN, headroom)=NaN, vmaxpd(NaN, -1.0)=-1.0 (Intel仕様: 第1op=NaN→第2opを返す)
+            // → NaN は -1.0 になる。旧実装(vEpsilon blendv)は 0.0 にしていたが、
+            //   どちらも正常動作時には到達しないため実用上の差異はない。
+            // デノーマル対策: FTZ/DAZ が有効なため vEpsilon blendv チェックは省略する。
 #if defined(__AVX2__)
             {
+                const __m256d vMax      = _mm256_set1_pd(1.0);
+                const __m256d vMin      = _mm256_set1_pd(-1.0);
+                const __m256d vHeadroom = applyDither ? _mm256_set1_pd(1.0)  // ディザ済み
+                                                      : _mm256_set1_pd(kOutputHeadroom);
+
                 int i = 0;
                 const int vEnd = numSamples / 16 * 16; // Unroll 4x
-                const __m256d vMax  = _mm256_set1_pd(1.0);
-                const __m256d vMin  = _mm256_set1_pd(-1.0);
-                const __m256d vZero = _mm256_setzero_pd();
-                const __m256d vEpsilon = _mm256_set1_pd(1.0e-25);
-                const __m256d vAbsMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
-
                 for (; i < vEnd; i += 16)
                 {
                     _mm_prefetch(reinterpret_cast<const char*>(data + i + 64), _MM_HINT_T0);
 
-                    // 1
-                    __m256d v0 = _mm256_loadu_pd(data + i);
-                    __m256d abs0 = _mm256_and_pd(v0, vAbsMask);
-                    __m256d mask0 = _mm256_cmp_pd(abs0, vEpsilon, _CMP_GE_OQ);
-                    v0 = _mm256_blendv_pd(vZero, v0, mask0);
+                    __m256d v0 = _mm256_mul_pd(_mm256_loadu_pd(data + i),      vHeadroom);
+                    __m256d v1 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 4),  vHeadroom);
+                    __m256d v2 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 8),  vHeadroom);
+                    __m256d v3 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 12), vHeadroom);
+
                     v0 = _mm256_min_pd(_mm256_max_pd(v0, vMin), vMax);
-                    _mm_storeu_ps(dst + i, _mm256_cvtpd_ps(v0));
-
-                    // 2
-                    __m256d v1 = _mm256_loadu_pd(data + i + 4);
-                    __m256d abs1 = _mm256_and_pd(v1, vAbsMask);
-                    __m256d mask1 = _mm256_cmp_pd(abs1, vEpsilon, _CMP_GE_OQ);
-                    v1 = _mm256_blendv_pd(vZero, v1, mask1);
                     v1 = _mm256_min_pd(_mm256_max_pd(v1, vMin), vMax);
-                    _mm_storeu_ps(dst + i + 4, _mm256_cvtpd_ps(v1));
-
-                    // 3
-                    __m256d v2 = _mm256_loadu_pd(data + i + 8);
-                    __m256d abs2 = _mm256_and_pd(v2, vAbsMask);
-                    __m256d mask2 = _mm256_cmp_pd(abs2, vEpsilon, _CMP_GE_OQ);
-                    v2 = _mm256_blendv_pd(vZero, v2, mask2);
                     v2 = _mm256_min_pd(_mm256_max_pd(v2, vMin), vMax);
-                    _mm_storeu_ps(dst + i + 8, _mm256_cvtpd_ps(v2));
-
-                    // 4
-                    __m256d v3 = _mm256_loadu_pd(data + i + 12);
-                    __m256d abs3 = _mm256_and_pd(v3, vAbsMask);
-                    __m256d mask3 = _mm256_cmp_pd(abs3, vEpsilon, _CMP_GE_OQ);
-                    v3 = _mm256_blendv_pd(vZero, v3, mask3);
                     v3 = _mm256_min_pd(_mm256_max_pd(v3, vMin), vMax);
+
+                    _mm_storeu_ps(dst + i,      _mm256_cvtpd_ps(v0));
+                    _mm_storeu_ps(dst + i + 4,  _mm256_cvtpd_ps(v1));
+                    _mm_storeu_ps(dst + i + 8,  _mm256_cvtpd_ps(v2));
                     _mm_storeu_ps(dst + i + 12, _mm256_cvtpd_ps(v3));
                 }
-                // Remaining
                 for (; i < (numSamples / 4 * 4); i += 4)
                 {
-                    __m256d v = _mm256_loadu_pd(data + i);
-                    __m256d absv = _mm256_and_pd(v, vAbsMask);
-                    __m256d mask = _mm256_cmp_pd(absv, vEpsilon, _CMP_GE_OQ);
-                    v = _mm256_blendv_pd(vZero, v, mask);
+                    __m256d v = _mm256_mul_pd(_mm256_loadu_pd(data + i), vHeadroom);
                     v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);
                     _mm_storeu_ps(dst + i, _mm256_cvtpd_ps(v));
                 }
@@ -1984,13 +1965,13 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                 {
                     double val = data[i];
                     if (!std::isfinite(val)) val = 0.0;
-                    dst[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, val));
+                    dst[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, applyDither ? val : val * kOutputHeadroom));
                 }
             }
 #else
             for (int i = 0; i < numSamples; ++i)
             {
-                double val = data[i];
+                double val = applyDither ? data[i] : data[i] * kOutputHeadroom;
                 if (!std::isfinite(val)) val = 0.0;
                 dst[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, val));
             }
@@ -2015,59 +1996,48 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
             auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
             double* dst = buffer.getWritePointer(ch);
 
-            for (int i = 0; i < numSamples; ++i)
-                data[i] = blocker.process(data[i]) * kOutputHeadroom;
+            // 【最適化】ブロックモード DC 除去 (1次IIR)
+            blocker.process(data, numSamples);
 
+            // NaN 対策: vmaxpd(NaN, -1.0)→-1.0 (Intel仕様: 第1op=NaN→第2opを返す)
+            // Inf 対策: min/max でクランプ済み
+            // デノーマル対策: FTZ/DAZ が有効なため vEpsilon blendv チェックは省略する。
 #if defined(__AVX2__)
             {
                 int i = 0;
                 const int vEnd = numSamples / 16 * 16;
-                const __m256d vMax  = _mm256_set1_pd(1.0);
-                const __m256d vMin  = _mm256_set1_pd(-1.0);
-                const __m256d vZero = _mm256_setzero_pd();
-                const __m256d vEpsilon = _mm256_set1_pd(1.0e-25);
-                const __m256d vAbsMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL));
+                const __m256d vMax      = _mm256_set1_pd(1.0);
+                const __m256d vMin      = _mm256_set1_pd(-1.0);
+                const __m256d vHeadroom = _mm256_set1_pd(kOutputHeadroom);
 
                 for (; i < vEnd; i += 16)
                 {
-                    __m256d v0 = _mm256_loadu_pd(data + i);
-                    __m256d v1 = _mm256_loadu_pd(data + i + 4);
-                    __m256d v2 = _mm256_loadu_pd(data + i + 8);
-                    __m256d v3 = _mm256_loadu_pd(data + i + 12);
-
-                    __m256d m0 = _mm256_cmp_pd(_mm256_and_pd(v0, vAbsMask), vEpsilon, _CMP_GE_OQ);
-                    __m256d m1 = _mm256_cmp_pd(_mm256_and_pd(v1, vAbsMask), vEpsilon, _CMP_GE_OQ);
-                    __m256d m2 = _mm256_cmp_pd(_mm256_and_pd(v2, vAbsMask), vEpsilon, _CMP_GE_OQ);
-                    __m256d m3 = _mm256_cmp_pd(_mm256_and_pd(v3, vAbsMask), vEpsilon, _CMP_GE_OQ);
-
-                    v0 = _mm256_blendv_pd(vZero, v0, m0);
-                    v1 = _mm256_blendv_pd(vZero, v1, m1);
-                    v2 = _mm256_blendv_pd(vZero, v2, m2);
-                    v3 = _mm256_blendv_pd(vZero, v3, m3);
+                    __m256d v0 = _mm256_mul_pd(_mm256_loadu_pd(data + i),      vHeadroom);
+                    __m256d v1 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 4),  vHeadroom);
+                    __m256d v2 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 8),  vHeadroom);
+                    __m256d v3 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 12), vHeadroom);
 
                     v0 = _mm256_min_pd(_mm256_max_pd(v0, vMin), vMax);
                     v1 = _mm256_min_pd(_mm256_max_pd(v1, vMin), vMax);
                     v2 = _mm256_min_pd(_mm256_max_pd(v2, vMin), vMax);
                     v3 = _mm256_min_pd(_mm256_max_pd(v3, vMin), vMax);
 
-                    _mm256_storeu_pd(dst + i, v0);
-                    _mm256_storeu_pd(dst + i + 4, v1);
-                    _mm256_storeu_pd(dst + i + 8, v2);
+                    _mm256_storeu_pd(dst + i,      v0);
+                    _mm256_storeu_pd(dst + i + 4,  v1);
+                    _mm256_storeu_pd(dst + i + 8,  v2);
                     _mm256_storeu_pd(dst + i + 12, v3);
                 }
 
                 for (; i < (numSamples / 4 * 4); i += 4)
                 {
-                    __m256d v = _mm256_loadu_pd(data + i);
-                    __m256d m = _mm256_cmp_pd(_mm256_and_pd(v, vAbsMask), vEpsilon, _CMP_GE_OQ);
-                    v = _mm256_blendv_pd(vZero, v, m);
+                    __m256d v = _mm256_mul_pd(_mm256_loadu_pd(data + i), vHeadroom);
                     v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);
                     _mm256_storeu_pd(dst + i, v);
                 }
 
                 for (; i < numSamples; ++i)
                 {
-                    double v = data[i];
+                    double v = data[i] * kOutputHeadroom;
                     if (!std::isfinite(v)) v = 0.0;
                     dst[i] = juce::jlimit(-1.0, 1.0, v);
                 }

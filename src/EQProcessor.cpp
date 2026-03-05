@@ -789,15 +789,14 @@ namespace
             ic1eq = 2.0 * v1 - ic1eq;
             ic2eq = 2.0 * v2 - ic2eq;
 
+            data[n] = m0 * v0 + m1 * v1 + m2 * v2;
 
-            double output = m0 * v0 + m1 * v1 + m2 * v2;
-            // 出力のNaNチェック (数値安定性のため)
-            if (!std::isfinite(output))
-                output = 0.0;
-
-            // 安全対策: 出力をクランプ (-100.0 ~ +100.0) して発散防止
-            data[n] = juce::jlimit(-100.0, 100.0, output);
-            // Denormal対策: 出力が極小値なら0にする (Branchless optimization)
+            // 状態変数が Inf/NaN に発散した場合は即座にリセットして次サンプルへの伝播を遮断する。
+            // FTZ/DAZ 有効下でも Inf は flush されないため、この防衛は省略できない。
+            // 条件式 !(abs < 閾値) は NaN に対しても true を返すため NaN/Inf を一括で捕捉する。
+            // ループ内で状態変数のみをチェックする (出力データへのクランプより低コスト)。
+            if (! (std::abs(ic1eq) < 1.0e15)) ic1eq = 0.0;
+            if (! (std::abs(ic2eq) < 1.0e15)) ic2eq = 0.0;
         }
 
         // Denormal対策 & NaNチェック

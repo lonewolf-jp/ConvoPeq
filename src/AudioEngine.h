@@ -229,37 +229,48 @@ private:
 
     public:
         // サンプリングレートに合わせて R を計算
-        void init(double sampleRate, double cutoffHz) {
+        // 注意: std::exp() を使用するため Audio Thread から呼んではならない。
+        //       DSPCore::prepare() (rebuildThreadLoop) からのみ呼ぶこと。
+        void init(double sampleRate, double cutoffHz) noexcept
+        {
             // R = exp(-2 * PI * cutoff / sampleRate)
             m_R = std::exp(-2.0 * juce::MathConstants<double>::pi * cutoffHz / sampleRate);
+            // init() 後に R が NaN/Inf になることはないが念のため保護
+            if (! std::isfinite(m_R) || m_R <= 0.0 || m_R >= 1.0)
+                m_R = 0.999999;
             reset();
         }
 
-        void reset() {
+        void reset() noexcept
+        {
             m_prev_x = 0.0;
             m_prev_y = 0.0;
         }
 
-         // 64byteアライメントされたバッファを高速処理
-        void process(double* data, int numSamples) {
+        // 64byteアライメントされたバッファを高速処理 (Audio Thread 安全)
+        void process(double* data, int numSamples) noexcept
+        {
             double px = m_prev_x;
             double py = m_prev_y;
-            double r = m_R;
+            const double r = m_R;
             constexpr double kDenormalThreshold = 1.0e-20;
 
             for (int i = 0; i < numSamples; ++i) {
-                double curr_x = data[i];
-                // 高精度演算 (64bit double)
+                const double curr_x = data[i];
                 double curr_y = curr_x - px + r * py;
 
-                if (std::abs(curr_y) < kDenormalThreshold) curr_y = 0.0; // Anti-Denormal Trick
+                // Anti-Denormal: デノーマル数をゼロに落とす
+                if (std::abs(curr_y) < kDenormalThreshold) curr_y = 0.0;
 
                 px = curr_x;
                 py = curr_y;
                 data[i] = curr_y;
             }
-            m_prev_x = px;
-            m_prev_y = py;
+
+            // NaN/Inf が状態変数に残った場合はリセットして次回呼び出し以降への伝播を遮断する。
+            // !(abs < 閾値) という形式は NaN に対しても true を返すため NaN/Inf を一括で捕捉できる。
+            m_prev_x = (std::abs(px) < 1.0e15) ? px : 0.0;
+            m_prev_y = (std::abs(py) < 1.0e15) ? py : 0.0;
         }
     };
     //----------------------------------------------------------
@@ -301,9 +312,13 @@ DSPCore();
                        const ProcessingState& state);
         ConvolverProcessor convolver;
         EQProcessor eq;
-        DCBlocker dcBlockerL, dcBlockerR;
-        DCBlocker inputDCBlockerL, inputDCBlockerR;
-         UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
+        // 【最適化】出力 / 入力 DC 除去を UltraHighRateDCBlocker (1次IIR, ブロックモード) に統一。
+        // 旧 DCBlocker (4次 Butterworth, サンプル単位) は 1 サンプルあたり ~20 演算を要したが、
+        // 1次 IIR は ~4 演算で済みかつ process(data, N) ブロック呼び出しによりメモリアクセスも効率化。
+        // DC 除去の目的 (3Hz 以下のカット) には 1 次で十分。
+        UltraHighRateDCBlocker dcBlockerL, dcBlockerR;
+        UltraHighRateDCBlocker inputDCBlockerL, inputDCBlockerR;
+        UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
         ::convo::PsychoacousticDither dither;
 
         CustomInputOversampler oversampling;
