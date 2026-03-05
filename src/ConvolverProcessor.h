@@ -508,7 +508,7 @@ private:
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
     int computeTargetIRLength(double sampleRate, int originalLength) const;
-    void applyNewState(StereoConvolver::Ptr newConv,
+    void applyNewState(StereoConvolver* newConv,
                       const juce::AudioBuffer<double>& loadedIR,
                       double loadedSR,
                       int targetLength,

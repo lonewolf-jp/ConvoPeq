@@ -226,9 +226,7 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
             DftiComputeBackward(fftHandle, mulTemp.get(), fftBuffer.get());
 
             // Overlap-Save: Output is the last partitionSize samples
-            // std::memcpy(outputBuffer.get(), fftBuffer.get() + partitionSize, partitionSize * sizeof(double));
-			// Use MKL vdCopy for optimized memory transfer
-			vdCopy(partitionSize, fftBuffer.get() + partitionSize, outputBuffer.get());
+            std::memcpy(outputBuffer.get(), fftBuffer.get() + partitionSize, partitionSize * sizeof(double));
 
             outputBufferPos = 0;
 

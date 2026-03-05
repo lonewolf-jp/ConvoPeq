@@ -218,6 +218,8 @@ public:
         mutable std::atomic<int> refCount { 0 };
 
         // Explicitly define the copy constructor
+        EQState() = default;
+
         EQState(const EQState& other)
             : bands(other.bands),
               bandTypes(other.bandTypes),

@@ -1303,8 +1303,8 @@ void EQProcessor::cleanup()
 
         // Clean States (use_count==1 で解放)
         auto stateIt = stateTrashBin.begin();
-        stateIt = std::remove_if(stateTrashBin.begin(), stateTrashBin.end(),  { return p->refCount.load() == 1; });
-        statesToDelete.insert(statesToDelete.end(), std::make_move_iterator(stateIt), std::make_move_iterator(stateTrashBin.end()));
+        stateIt = std::remove_if(stateTrashBin.begin(), stateTrashBin.end(), [](EQState* p) { return p->refCount.load() == 1; });
+        statesToDelete.insert(statesToDelete.end(), stateIt, stateTrashBin.end());
         stateTrashBin.erase(stateIt, stateTrashBin.end());
 
         stateTrashBin.insert(stateTrashBin.end(), stateTrashBinPending.begin(), stateTrashBinPending.end());
