@@ -1071,7 +1071,6 @@ bool EQProcessor::isBufferSilent(const juce::AudioBuffer<double>& buffer, int nu
 //--------------------------------------------------------------
 void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
-    juce::ScopedNoDenormals noDenormals;
     if (bypassed.load(std::memory_order_relaxed))
         return;
 

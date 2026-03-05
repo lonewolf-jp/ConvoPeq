@@ -81,11 +81,23 @@ bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int
     latency = partitionSize;
 
     // Setup MKL DFTI
+    if (fftHandle) { DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; }
     if (DftiCreateDescriptor(&fftHandle, DFTI_DOUBLE, DFTI_REAL, 1, fftSize) != DFTI_NO_ERROR) return false;
-    DftiSetValue(fftHandle, DFTI_PLACEMENT, DFTI_NOT_INPLACE); // Explicit buffers
-    DftiSetValue(fftHandle, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX); // Ensure standard complex array format
-    DftiSetValue(fftHandle, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize));
-    if (DftiCommitDescriptor(fftHandle) != DFTI_NO_ERROR) return false;
+
+    bool configOk = true;
+    if (DftiSetValue(fftHandle, DFTI_PLACEMENT, DFTI_NOT_INPLACE) != DFTI_NO_ERROR) configOk = false;
+    // Ensure standard complex array format
+    if (configOk && DftiSetValue(fftHandle, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX) != DFTI_NO_ERROR) configOk = false;
+    if (configOk && DftiSetValue(fftHandle, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR) configOk = false;
+
+    if (configOk && DftiCommitDescriptor(fftHandle) != DFTI_NO_ERROR) configOk = false;
+
+    if (!configOk)
+    {
+        DftiFreeDescriptor(&fftHandle);
+        fftHandle = nullptr;
+        return false;
+    }
 
     // Allocate buffers
     // IR Freq Domain: (fftSize/2 + 1) complex numbers * numPartitions
@@ -148,6 +160,10 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
         // Process block if full
         if (inputBufferPos == partitionSize)
         {
+            // [FIX] FFT Tail Uninitialization: Zero out the entire FFT buffer before filling it.
+            // MKL's DftiComputeForward reads the entire fftSize, so any uninitialized
+            // tail (if fftSize > 2 * partitionSize) would introduce garbage.
+            juce::FloatVectorOperations::clear(fftBuffer.get(), fftSize);
             // Construct FFT input: [PrevBlock, CurrentBlock]
             std::memcpy(fftBuffer.get(), prevBlock.get(), partitionSize * sizeof(double));
             std::memcpy(fftBuffer.get() + partitionSize, inputBuffer.get(), partitionSize * sizeof(double));
@@ -2114,9 +2130,6 @@ void ConvolverProcessor::refreshLatency()
 //--------------------------------------------------------------
 void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
-    // (A) Denormal対策 (重要)
-    juce::ScopedNoDenormals noDenormals;
-
     // ── Step 1: RCU State Load (Lock-free / Wait-free) ──
     // Raw pointer load (No ref counting)
     auto* conv = convolution.load(std::memory_order_acquire);

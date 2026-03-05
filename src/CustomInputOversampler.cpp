@@ -348,7 +348,7 @@ juce::dsp::AudioBlock<double> CustomInputOversampler::processUp(const juce::dsp:
     // [Safety Guard] 入力サイズが準備された容量を超えている場合は空ブロックを返す
     if (inSamples > maxInputBlockSize)
     {
-        jassertfalse;
+        // バッファサイズ不足時は無音を返す (AudioEngine側で再構築をリクエストする)
         return {};
     }
 

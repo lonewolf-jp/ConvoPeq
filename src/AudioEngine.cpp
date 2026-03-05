@@ -1247,9 +1247,6 @@ void AudioEngine::releaseResources()
 //--------------------------------------------------------------
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    // (A) Denormal対策 (重要: CPU負荷スパイク防止)
-    juce::ScopedNoDenormals noDenormals;
-
     // === パッチ1: モード設定をAudio Thread開始時に1回だけ実行 ===
     if (!audioThreadModesSet.load(std::memory_order_relaxed)) {
         if (audioThreadModesSet.exchange(true, std::memory_order_acq_rel) == false) {
@@ -1333,8 +1330,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 {
-    juce::ScopedNoDenormals noDenormals;
-
     if (!audioThreadModesSet.load(std::memory_order_relaxed))
     {
         if (audioThreadModesSet.exchange(true, std::memory_order_acq_rel) == false)
@@ -1413,7 +1408,6 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         // Fix: Releaseビルドでも確実にチェックし、バッファ破壊を防ぐ
         if (expectedUpSize > maxInternalBlockSize)
         {
-            jassertfalse; // Debug時は停止
             bufferToFill.clearActiveBufferRegion(); // 無音を出力
             return;
         }
@@ -1586,7 +1580,6 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         const int expectedUpSize = numSamples * static_cast<int>(oversamplingFactor);
         if (expectedUpSize > maxInternalBlockSize)
         {
-            jassertfalse;
             buffer.clear();
             return;
         }
@@ -1723,11 +1716,20 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
     // FIFO空き容量チェック (Overflow Protection)
     // 部分書き込みは波形不連続（グリッチ）の原因となるため、
     // ブロック全体が書き込めない場合は書き込みをスキップする (All or Nothing)
+    if (audioFifo.getFreeSpace() < numSamples)
+        return;
+
     int start1, size1, start2, size2;
     audioFifo.prepareToWrite(numSamples, start1, size1, start2, size2);
 
     if (size1 + size2 < numSamples)
+    {
+        // getFreeSpace() チェックを通過したにもかかわらず、prepareToWrite() が
+        // 要求されたサンプル数より少ない領域しか返さなかった場合の防御的措置。
+        // SPSCキューでは理論上到達しないはずだが、部分書き込みを確実に防ぐためにチェックする。
+        jassertfalse;
         return;
+    }
 
     const double* l = block.getChannelPointer(0);
     const double* r = (block.getNumChannels() > 1) ? block.getChannelPointer(1) : nullptr;
