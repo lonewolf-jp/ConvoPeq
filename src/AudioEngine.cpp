@@ -698,12 +698,20 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // 以前はtimerCallback()が毎50msに再ビルドしていたが、それは誤りだった。
     // prepareToPlayはMessageThreadから呼ばれるため、requestRebuild()を直接呼べる。
 
-    // [FIX] uiConvolverProcessor の currentBufferSize を必ず最新の bufferSize に同期する。
+    // [FIX] uiConvolverProcessor の currentBufferSize を最新の bufferSize に同期する。
     // この呼び出しが欠けていると currentBufferSize == 0 のまま残り、
     // IR読み込み時に LoaderThread が blockSize=0 でMKLConvolver::setup(0,...) を呼んで
     // numPartitions = (irLen - 1) / 0 → ゼロ除算クラッシュが発生する。
-    // prepareToPlay は Message Thread から呼ばれることが保証されているので安全。
-    uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
+    //
+    // [重要] prepareToPlay() は呼ばない：
+    //   uiConvolverProcessor が処理するのはベースレート(例: 48kHz)のブロックサイズだが、
+    //   DSPコアはオーバーサンプリング後のレート(例: 384kHz, blockSize×8)で動く。
+    //   prepareToPlay(baseSR, baseBlockSize) を呼ぶと内部で StereoConvolver が
+    //   小さい partitionSize（例: 512）で再構築されてしまい、DSP側の大きな
+    //   partitionSize（例: 4096）と不整合になってCPU負荷が大幅に増加する。
+    //   uiConvolverProcessor は可視化・設定保持専用でオーディオ処理には使わないため、
+    //   currentBufferSize だけを更新すれば十分。
+    uiConvolverProcessor.setCurrentBufferSize(bufferSize);
 
     if (rateChanged || blockSizeChanged || currentDSP.load(std::memory_order_acquire) == nullptr)
     {

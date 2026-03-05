@@ -179,6 +179,12 @@ public:
     void setMklEnabled(bool enabled) { enableMKL.store(enabled); }
     bool isMklEnabled() const { return enableMKL.load(); }
 
+    // [FIX] 軽量なバッファサイズ更新メソッド
+    // uiConvolverProcessorに対してprepareToPlay()の全副作用なしに
+    // currentBufferSizeだけを更新するために使用する。
+    // IRのStereoConvolver再構築やMKL descriptor再作成は行わない。
+    void setCurrentBufferSize(int bufferSize) noexcept { currentBufferSize = bufferSize; }
+
 private:
     void timerCallback() override;
     class LoaderThread;
@@ -286,9 +292,36 @@ private:
                 mklConvolvers[0] = std::make_unique<MKLConvolver>();
                 mklConvolvers[1] = std::make_unique<MKLConvolver>();
 
-                // Use knownBlockSize as partition size for MKL UPC
-                if (mklConvolvers[0]->setup(knownBlockSize, irData[0], irDataLength) &&
-                    mklConvolvers[1]->setup(knownBlockSize, irData[1], irDataLength))
+                // [FIX-CPU] Use storedFirstPartition as the MKL partition size.
+                //
+                // Why NOT callQuantumSamples (= processingBlockSize):
+                //   callQuantumSamples は OS 倍率込みの処理ブロックサイズ（例: 512×8=4096）。
+                //   これを partitionSize に使うと、毎ブロック DFT が走る
+                //   (Uniform Partitioned Convolution の FFT 発火頻度 = ブロック頻度)。
+                //   WDL は firstPartition=16384 で 4 ブロックに 1 回しか DFT を発火しないため、
+                //   MKL(part=4096) は WDL より約 3 倍 CPU 負荷が高くなる。
+                //
+                // Why storedFirstPartition (= sizing.firstPartition):
+                //   firstPartition は computeMasteringSizing() が算出する最適パーティションサイズ
+                //   (= nextPow2(internalBlockSize × 4)、4096〜16384 にクランプ)。
+                //   これを partitionSize に使うと、DFT 発火頻度 =
+                //   firstPartition / callQuantumSamples 回に 1 回になり WDL と同等コストになる。
+                //
+                // Why process() で FFT が発火しない問題が起きないか:
+                //   MKLConvolver::process() の while ループは inputBuffer を partitionSize
+                //   サンプル分蓄積してから DFT を発火する。callLen < partitionSize の場合、
+                //   複数の process() 呼び出しにわたって入力が蓄積され、
+                //   丁度 partitionSize に達した回だけ DFT が走る (正常な UPC の動作)。
+                //   出力が出るまでの間は outputBuffer がゼロパディングするため無音で待機する
+                //   (= latency = firstPartition サンプル、WDL と同等)。
+                //
+                // fftBuffer gap について:
+                //   fftSize = nextPow2(partitionSize * 2)。
+                //   [prevBlock | currentBlock | gap] の構成になるが gap は setup() でゼロ初期化し、
+                //   process() でも毎回ゼロパディングするため DFT にゴミデータは入らない。
+                const int mklPartitionSize = storedFirstPartition; // ≥ callQuantumSamples
+                if (mklConvolvers[0]->setup(mklPartitionSize, irData[0], irDataLength) &&
+                    mklConvolvers[1]->setup(mklPartitionSize, irData[1], irDataLength))
                 {
                     latency = mklConvolvers[0]->latency;
                     return;

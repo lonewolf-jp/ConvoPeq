@@ -108,6 +108,11 @@ bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int
     juce::FloatVectorOperations::clear(inputBuffer.get(), partitionSize);
     juce::FloatVectorOperations::clear(outputBuffer.get(), partitionSize);
     juce::FloatVectorOperations::clear(prevBlock.get(), partitionSize);
+    // [FIX] fftBufferも全体をゼロ初期化する。
+    // fftSize = nextPow2(partitionSize*2) であり、[prevBlock|currentBlock|gap] の構成のうち
+    // gap 部分 (fftSize - 2*partitionSize bytes) が未初期化のまま DftiComputeForward に
+    // 渡されるとゴミデータが畳み込まれる。全体をゼロクリアして防止する。
+    juce::FloatVectorOperations::clear(fftBuffer.get(), fftSize);
 
     // Precompute IR Partitions
     convo::ScopedAlignedPtr<double> tempTime(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
@@ -146,9 +151,15 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
         // Process block if full
         if (inputBufferPos == partitionSize)
         {
-            // Construct FFT input: [PrevBlock, CurrentBlock]
+            // Construct FFT input: [PrevBlock | CurrentBlock | zero-pad gap]
+            // fftSize = nextPow2(partitionSize * 2). When partitionSize is not a power of 2,
+            // fftSize > 2 * partitionSize and the gap region must be zeroed to prevent
+            // stale data from previous iterations from being mixed into the DFT.
             std::memcpy(fftBuffer.get(), prevBlock.get(), partitionSize * sizeof(double));
             std::memcpy(fftBuffer.get() + partitionSize, inputBuffer.get(), partitionSize * sizeof(double));
+            const int gap = fftSize - 2 * partitionSize;
+            if (gap > 0)
+                juce::FloatVectorOperations::clear(fftBuffer.get() + 2 * partitionSize, gap);
 
             // Save current to prev
             std::memcpy(prevBlock.get(), inputBuffer.get(), partitionSize * sizeof(double));
