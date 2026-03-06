@@ -12,6 +12,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <deque>
 
 #include "WDL/fft.h" // WDL Double precision FFT
 #include "CDSPResampler.h"
@@ -1708,24 +1709,28 @@ void ConvolverProcessor::cleanup()
     for (auto it = loaderTrashBin.begin(); it != loaderTrashBin.end(); )
     {
         if ((*it)->waitForThreadToExit(0))
+        {
+            // スレッドは終了済み。デストラクタ (~LoaderThread) をバックグラウンドで呼ぶ
+            std::thread([l = std::move(*it)]() mutable {
+                l.reset(); // stopThread(4000) を呼ぶが、即時リターンするはず
+            }).detach();
             it = loaderTrashBin.erase(it);
+        }
         else
+        {
             ++it;
+        }
     }
 
     // 【Leak Fix】LoaderThreadの異常蓄積防止
     // スレッドが終了しない場合でも、一定数を超えたら強制削除してメモリを解放する。
-    // [FIX] ~LoaderThread() は stopThread(4000) をブロック呼出するため、
-    //       メッセージスレッド上で直接 erase() すると最大4秒UIが凍結しクラッシュする。
-    //       超過スレッドは detach されたバックグラウンドスレッドで破棄する。
     while (loaderTrashBin.size() > 2)
     {
-        std::unique_ptr<LoaderThread> staleLoader = std::move(loaderTrashBin.front());
-        loaderTrashBin.erase(loaderTrashBin.begin());
         // ~LoaderThread() の stopThread(4000) をメッセージスレッドの外で実行する
-        std::thread([l = std::move(staleLoader)]() mutable {
+        std::thread([l = std::move(loaderTrashBin.front())]() mutable {
             l.reset(); // blocks in stopThread(4000) on background thread
         }).detach();
+        loaderTrashBin.pop_front();
     }
 
     // StereoConvolver のクリーンアップ (Worker Threadと競合するためロックが必要)
@@ -1770,17 +1775,16 @@ void ConvolverProcessor::forceCleanup()
     // This method is for eager cleanup of non-blocking resources.
     // The blocking cleanup of LoaderThreads is handled by the destructor.
 
-    std::vector<std::pair<StereoConvolver*, uint32>> temp;
+    std::vector<std::pair<StereoConvolver*, uint32>> stereoConvolversToDelete;
     {
         juce::ScopedLock lock(trashBinLock);
-        temp.swap(trashBin);
+        stereoConvolversToDelete.swap(trashBin);
     }
-    // temp is destroyed here, releasing any old StereoConvolver instances.
 
     // 【Fix】LoaderThread のクリーンアップ漏れ防止
     // DSPCore破棄時やreleaseResources時に、残っているローダースレッドを
     // メインスレッドをブロックせずに破棄する。
-    std::vector<std::unique_ptr<LoaderThread>> loadersToDelete;
+    std::deque<std::unique_ptr<LoaderThread>> loadersToDelete;
     loadersToDelete.swap(loaderTrashBin);
     if (activeLoader)
         loadersToDelete.push_back(std::move(activeLoader));
@@ -1792,7 +1796,7 @@ void ConvolverProcessor::forceCleanup()
         }).detach();
     }
 
-    for (auto& entry : temp) entry.first->release();
+    for (auto& entry : stereoConvolversToDelete) entry.first->release();
 }
 
 //--------------------------------------------------------------
