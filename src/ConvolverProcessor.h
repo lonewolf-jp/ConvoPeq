@@ -291,12 +291,14 @@ private:
             {
                 useMKL = true;
                 // 【有効バグ修正】new完全禁止 → aligned_malloc + 明示的デストラクタ（規約準拠・リーク/DftiFreeDescriptor防止）
+                // 【バグ修正】reset()はptr->~T()を呼ぶため、placement newの前にreset()してはならない。
+                // メモリ確保→構築→reset()の順で行う（例外安全性も確保）。
                 void* raw0 = convo::aligned_malloc(sizeof(MKLConvolver), 64);
-                void* raw1 = convo::aligned_malloc(sizeof(MKLConvolver), 64);
+                new (raw0) MKLConvolver();   // 先に構築してからScopedAlignedPtrに所有権移譲
                 mklConvolvers[0].reset(static_cast<MKLConvolver*>(raw0));
-                mklConvolvers[1].reset(static_cast<MKLConvolver*>(raw1));
-                new (raw0) MKLConvolver();   // placementは最小限（MKL構造体構築用）
+                void* raw1 = convo::aligned_malloc(sizeof(MKLConvolver), 64);
                 new (raw1) MKLConvolver();
+                mklConvolvers[1].reset(static_cast<MKLConvolver*>(raw1));
 
                 // Use knownBlockSize as partition size for MKL UPC
                 if (mklConvolvers[0]->setup(knownBlockSize, irData[0], irDataLength) &&
@@ -306,9 +308,9 @@ private:
                     return;
                 }
                 // Fallback to WDL if MKL setup fails
-                if (mklConvolvers[0]) mklConvolvers[0]->~MKLConvolver();  // ← 明示的デストラクタ呼び出し
-                if (mklConvolvers[1]) mklConvolvers[1]->~MKLConvolver();
-                mklConvolvers[0].reset();
+                // 【バグ修正】ScopedAlignedPtr::reset()は内部でptr->~T()を呼ぶため、
+                // 明示的デストラクタ呼び出しは不要。reset()のみで正しくデストラクタ+free。
+                mklConvolvers[0].reset();  // ~MKLConvolver() + aligned_free を安全に実行
                 mklConvolvers[1].reset();
             }
             useMKL = false;

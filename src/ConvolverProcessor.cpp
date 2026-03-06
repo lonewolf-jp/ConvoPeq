@@ -109,8 +109,10 @@ bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int
     // 【最適化】パーティションストライドを64byte(8 doubles)境界にアライメント
     partitionStride = (complexSize * 2 + 7) & ~7;
 
-    // IR用: 実効パーティション数分で十分 (processループはoriginalNumPartitionsまで)
-    size_t irAllocSize = static_cast<size_t>(partitionStride) * originalNumPartitions;
+    // 【バグ修正】irFreqDomainはプリコンピュートループがnumPartitions回書き込むため
+    // numPartitions (power-of-two) 分を確保する必要がある。
+    // originalNumPartitions で確保するとp >= originalNumPartitionsのiterでOOB書き込みが発生する。
+    size_t irAllocSize = static_cast<size_t>(partitionStride) * numPartitions;
     irFreqDomain.reset(static_cast<double*>(convo::aligned_malloc(irAllocSize * sizeof(double), 64)));
     juce::FloatVectorOperations::clear(irFreqDomain.get(), static_cast<int>(irAllocSize));
 
