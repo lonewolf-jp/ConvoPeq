@@ -107,13 +107,16 @@ bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int
     int complexSize = fftSize / 2 + 1;
     // 【最適化】パーティションストライドを64byte(8 doubles)境界にアライメント
     partitionStride = (complexSize * 2 + 7) & ~7;
-    size_t irBufSize = static_cast<size_t>(partitionStride) * numPartitions;
-    irFreqDomain.reset(static_cast<double*>(convo::aligned_malloc(irBufSize * sizeof(double), 64)));
-    juce::FloatVectorOperations::clear(irFreqDomain.get(), static_cast<int>(irBufSize));
 
-    // FDL Lines
-    fdlLines.reset(static_cast<MKL_Complex16*>(convo::aligned_malloc(irBufSize * sizeof(double), 64)));
-    juce::FloatVectorOperations::clear(reinterpret_cast<double*>(fdlLines.get()), static_cast<int>(irBufSize));
+    // IR用: 実効パーティション数分で十分 (processループはoriginalNumPartitionsまで)
+    size_t irAllocSize = static_cast<size_t>(partitionStride) * originalNumPartitions;
+    irFreqDomain.reset(static_cast<double*>(convo::aligned_malloc(irAllocSize * sizeof(double), 64)));
+    juce::FloatVectorOperations::clear(irFreqDomain.get(), static_cast<int>(irAllocSize));
+
+    // FDL用: リングバッファのため power-of-two パーティション数分が必要 (fdlMask = numPartitions - 1)
+    size_t fdlAllocSize = static_cast<size_t>(partitionStride) * numPartitions;
+    fdlLines.reset(static_cast<MKL_Complex16*>(convo::aligned_malloc(fdlAllocSize * sizeof(double), 64)));
+    juce::FloatVectorOperations::clear(reinterpret_cast<double*>(fdlLines.get()), static_cast<int>(fdlAllocSize));
 
     // Work Buffers
     fftBuffer.reset(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
@@ -167,10 +170,7 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
         // Process block if full
         if (inputBufferPos == partitionSize)
         {
-            // [FIX] FFT Tail Uninitialization: Zero out the entire FFT buffer before filling it.
-            // MKL's DftiComputeForward reads the entire fftSize, so any uninitialized
-            // tail (if fftSize > 2 * partitionSize) would introduce garbage.
-            juce::FloatVectorOperations::clear(fftBuffer.get(), fftSize);
+            // fftBufferはprevBlock + inputBufferで完全に初期化済み → clear不要（毎ブロック16KB無駄書き込みを排除）
             // Construct FFT input: [PrevBlock, CurrentBlock]
             std::memcpy(fftBuffer.get(), prevBlock.get(), partitionSize * sizeof(double));
             std::memcpy(fftBuffer.get() + partitionSize, inputBuffer.get(), partitionSize * sizeof(double));
@@ -190,12 +190,13 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
 
             DftiComputeForward(fftHandle, fftBuffer.get(), currentFDL);
 
-            // Convolution (FDL)
-            juce::FloatVectorOperations::clear(reinterpret_cast<double*>(mulTemp.get()), complexSize * 2); // Clear accumulator
+            // Convolution (FDL) - mulTempはaccumulatorなので最初のpのみclear（以降は累積）
+            double* dstBase = reinterpret_cast<double*>(mulTemp.get());
+            if (originalNumPartitions > 0)
+                juce::FloatVectorOperations::clear(dstBase, complexSize * 2);
 
             const double* fdlBase = reinterpret_cast<const double*>(fdlLines.get());
             const double* irBase = reinterpret_cast<const double*>(irFreqDomain.get());
-            double* dstBase = reinterpret_cast<double*>(mulTemp.get());
 
             for (int p = 0; p < originalNumPartitions; ++p)   // ← CPU是正：ここだけoriginalに制限
             {
@@ -1112,6 +1113,11 @@ public:
         if (result.success)
         {
             owner.applyNewState(result.newConv, result.loadedIR, result.loadedSR, result.targetLength, isRebuild, file, result.displayIR);
+        }
+        else
+        {
+            // [FIX] Clean up leaked StereoConvolver if load failed or cancelled
+            if (result.newConv) result.newConv->release();
         }
     }
 private:

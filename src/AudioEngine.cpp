@@ -1006,7 +1006,7 @@ void AudioEngine::rebuildThreadLoop()
             // 6. Commit on Message Thread
             // Release ownership from guard, pass to commitNewDSP
             DSPCore* dspToCommit = dspGuard.release();
-            juce::MessageManager::callAsync([weakSelf = juce::WeakReference<AudioEngine>(this), newDSP = dspToCommit, generation = task.generation] {
+            if (! juce::MessageManager::callAsync([weakSelf = juce::WeakReference<AudioEngine>(this), newDSP = dspToCommit, generation = task.generation] {
                 if (auto* self = weakSelf.get())
                 {
                     self->commitNewDSP(newDSP, generation);
@@ -1016,7 +1016,11 @@ void AudioEngine::rebuildThreadLoop()
                     // Engine is gone, delete the orphan DSP
                     delete newDSP;
                 }
-            });
+            }))
+            {
+                // MessageManager failed (e.g. shutting down), prevent leak
+                delete dspToCommit;
+            }
         }
         catch (const std::exception& e)
         {
@@ -1059,7 +1063,16 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     if (dspToTrash != nullptr)
     {
         const juce::ScopedLock sl(trashBinLock);
-        trashBinPending.push_back(dspToTrash);
+        try
+        {
+            trashBinPending.push_back(dspToTrash);
+        }
+        catch (...)
+        {
+            // Fallback: if we can't enqueue for later deletion, delete immediately.
+            // This prevents a memory leak in case of std::bad_alloc.
+            delete dspToTrash;
+        }
     }
 }
 
