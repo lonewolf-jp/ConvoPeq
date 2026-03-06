@@ -193,6 +193,7 @@ private:
         int partitionSize = 0;
         int fftSize = 0;
         int numPartitions = 0;
+        int originalNumPartitions = 0;   // ← 追加：IR実効パーティション数（ループ制限用）
         int fdlMask = 0;          // ← 追加：ビットマスク（Audio thread % 完全排除用）
         int latency = 0;
         int partitionStride = 0;
