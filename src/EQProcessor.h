@@ -289,6 +289,15 @@ private:
     // プライベートヘルパー関数
     //----------------------------------------------------------
 
+    // 【Fix Bug #7】totalGainDbTargetとtotalGainTargetを一括で更新するヘルパー。
+    // Message Thread側でdB→linear変換(std::pow)を行い、Audio Threadは linear値のみ参照する。
+    inline void storeTotalGainDb(float gainDb) noexcept
+    {
+        totalGainDbTarget.store(gainDb, std::memory_order_relaxed);
+        totalGainTarget.store(juce::Decibels::decibelsToGain<double>(static_cast<double>(gainDb)),
+                              std::memory_order_relaxed);
+    }
+
     // サイレンス検出
     bool isBufferSilent(const juce::AudioBuffer<double>& buffer, int numSamples) const noexcept;
 
@@ -313,7 +322,10 @@ private:
     double cachedInputRMS = 0.0; // AGC用の入力レベルキャッシュ
 
     // ── パラメータ補間 (Smoothing) ──
-    std::atomic<float> totalGainDbTarget { 0.0f };
+    std::atomic<float>  totalGainDbTarget { 0.0f };
+    // 【Fix Bug #7】totalGainDbTargetのlinear値をMessage Threadで事前計算してAudio Threadに渡す。
+    // Audio Thread内でのjuce::Decibels::decibelsToGain()(= std::pow/libm)呼び出しを排除する。
+    std::atomic<double> totalGainTarget   { 1.0 }; // linear gain, default 0dB = 1.0
     juce::SmoothedValue<double> smoothTotalGain;
     static constexpr double SMOOTHING_TIME_SEC = 0.05; // 50ms
 

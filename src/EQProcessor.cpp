@@ -103,7 +103,7 @@ void EQProcessor::resetToDefaults()
         newState->bandTypes[i] = EQBandType::Peaking;
     newState->bandTypes[19] = EQBandType::HighShelf;
 
-    totalGainDbTarget.store(0.0f, std::memory_order_relaxed);
+    storeTotalGainDb(0.0f);
     agcEnabled.store(false, std::memory_order_release);
 
     auto oldState = activeState;
@@ -147,7 +147,7 @@ void EQProcessor::reset()
     if (state)
     {
         smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
-        totalGainDbTarget.store(state->totalGainDb, std::memory_order_relaxed);
+        storeTotalGainDb(state->totalGainDb);
     }
 
     bandResetMask.store(0, std::memory_order_relaxed);
@@ -401,7 +401,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
     // アトミック変数のコピー
-    totalGainDbTarget.store(other.totalGainDbTarget.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    storeTotalGainDb(other.totalGainDbTarget.load(std::memory_order_relaxed));
 
     // 共有状態のコピー
     auto otherState = other.activeState;
@@ -433,7 +433,8 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     agcEnvInput.store(other.agcEnvInput.load(std::memory_order_relaxed), std::memory_order_relaxed);
     agcEnvOutput.store(other.agcEnvOutput.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
-    // 注意: smoothTotalGainのターゲットは、totalGainDbTargetに基づいてprocess()内で更新されます
+    // 注意: smoothTotalGainのターゲットは、totalGainTarget(linear値)に基づいてprocess()内で更新されます。
+    // totalGainTargetはtotalGainDbTargetから storeTotalGainDb() を通じて同期されます。
 }
 
 void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
@@ -460,7 +461,7 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
     // Note: This method can be called from the rebuild thread (Worker Thread),
     // so we cannot assert isThisTheMessageThread(). The operations are atomic and thread-safe.
 
-    totalGainDbTarget.store(other.totalGainDbTarget.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    storeTotalGainDb(other.totalGainDbTarget.load(std::memory_order_relaxed));
     agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
     // AGC状態の同期
     agcCurrentGain.store(other.agcCurrentGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -500,7 +501,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     // 現在値をターゲット値に即座に設定する。
     if (state)
     {
-        totalGainDbTarget.store(state->totalGainDb, std::memory_order_relaxed);
+        storeTotalGainDb(state->totalGainDb);
         smoothTotalGain.setCurrentAndTargetValue(
             juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
     }
@@ -642,7 +643,7 @@ void EQProcessor::setTotalGain(float gainDb)
     gainDb = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, gainDb);
 
     // ✅ Atomicに保存（Audio Threadで読み取る）
-    totalGainDbTarget.store(gainDb, std::memory_order_relaxed);
+    storeTotalGainDb(gainDb);
 
     auto oldState = activeState;
     if (oldState == nullptr) return;
@@ -1209,9 +1210,13 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
     else
     {
-        // ✅ Audio Threadでのみ setTargetValue() を呼ぶ
-        const float targetDb = totalGainDbTarget.load(std::memory_order_relaxed);
-        const double targetGain = juce::Decibels::decibelsToGain<double>(static_cast<double>(targetDb));
+        // 【Fix Bug #7】Audio Thread内でのlibm呼び出し禁止。
+        // juce::Decibels::decibelsToGain() は内部で std::pow() (libm) を呼ぶため
+        // Audio Thread 内での使用は規約違反である。
+        // 対策: ゲイン値はMessage Thread側でdBからlinearに変換し、
+        // totalGainTarget (atomic<double>) で事前に渡す。
+        // Audio Threadでは atomic load のみ行う。
+        const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
 
         if (std::abs(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
         {

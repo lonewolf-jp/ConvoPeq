@@ -105,8 +105,23 @@ public:
     double getSampleRate() const { return currentSampleRate.load(); }
     double getProcessingSampleRate() const;
 
-    float getInputLevel()  const { return inputLevelDb.load(); }
-    float getOutputLevel() const { return outputLevelDb.load(); }
+    // 【Fix Bug #8】gainToDecibels (std::log10 / libm) を Audio Thread から排除。
+    // Audio Thread は linear gain を inputLevelLinear / outputLevelLinear に格納し、
+    // getter (UI Thread) で dB 変換する。
+    float getInputLevel() const
+    {
+        const float linear = inputLevelLinear.load(std::memory_order_relaxed);
+        return (linear > LEVEL_METER_MIN_MAG)
+               ? juce::Decibels::gainToDecibels(linear)
+               : LEVEL_METER_MIN_DB;
+    }
+    float getOutputLevel() const
+    {
+        const float linear = outputLevelLinear.load(std::memory_order_relaxed);
+        return (linear > LEVEL_METER_MIN_MAG)
+               ? juce::Decibels::gainToDecibels(linear)
+               : LEVEL_METER_MIN_DB;
+    }
 
 
 
@@ -302,13 +317,13 @@ DSPCore();
     void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType);
     void reset();
     void process(const juce::AudioSourceChannelInfo& bufferToFill, juce::AbstractFifo& audioFifo,
-                 juce::AudioBuffer<float>& audioFifoBuffer, std::atomic<float>& inputLevelDb,
-                 std::atomic<float>& outputLevelDb, const ProcessingState& state);
+                 juce::AudioBuffer<float>& audioFifoBuffer, std::atomic<float>& inputLevelLinear,
+                 std::atomic<float>& outputLevelLinear, const ProcessingState& state);
     void processDouble(juce::AudioBuffer<double>& buffer,
                        juce::AbstractFifo& audioFifo,
                        juce::AudioBuffer<float>& audioFifoBuffer,
-                       std::atomic<float>& inputLevelDb,
-                       std::atomic<float>& outputLevelDb,
+                       std::atomic<float>& inputLevelLinear,
+                       std::atomic<float>& outputLevelLinear,
                        const ProcessingState& state);
         ConvolverProcessor convolver;
         EQProcessor eq;
@@ -378,8 +393,9 @@ DSPCore();
     juce::CriticalSection trashBinLock;
 
     std::atomic<double> currentSampleRate{48000.0};
-    std::atomic<float> inputLevelDb{-120.0f};
-    std::atomic<float> outputLevelDb{-120.0f};
+    // 【Fix Bug #8】linear gain を格納 (dB変換はgetInputLevel/getOutputLevelで行う)
+    std::atomic<float> inputLevelLinear{0.0f};
+    std::atomic<float> outputLevelLinear{0.0f};
     std::atomic<int>   maxSamplesPerBlock{4096};
 
     std::atomic<bool> eqBypassRequested { false };

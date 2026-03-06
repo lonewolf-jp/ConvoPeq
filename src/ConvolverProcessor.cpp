@@ -1739,10 +1739,14 @@ void ConvolverProcessor::cleanup()
         }
     }
 
-    while (trashBin.size() > 3)
+    // 【Fix Bug #1b】サイズ制限超過時のフォールバック削除。
+    // 最も古いアイテム(front)から削除する。back()を使うと最も新しい
+    // StereoConvolverが削除され、Audio Threadがまだそれを使用中の可能性がある
+    // ため、Use-After-Freeを引き起こす危険がある。
+    while (trashBin.size() > 5)
     {
-        toRelease.push_back(trashBin.back().first);
-        trashBin.pop_back();
+        toRelease.push_back(trashBin.front().first);
+        trashBin.erase(trashBin.begin());
     }
 
     for (auto* p : toRelease) p->release();
@@ -2456,7 +2460,16 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // AudioEngineは、processに渡すnumSamplesがguardedCallSamplesの倍数であることを保証する。
     // この前提が崩れると、最後のチャンクが小さくなり、WDL内部で再確保が発生する可能性がある。
     const int callLen = guardedCallSamples;
-    jassert(numSamples % callLen == 0 && "ConvolverProcessor::process: numSamples must be a multiple of the guarded call size.");
+
+    // 【Fix Bug #4】jassertはReleaseビルドで消えるため、バッファオーバーランを
+    // 引き起こす可能性がある。Releaseビルドでも有効なRuntime checkに置き換える。
+    if (numSamples % callLen != 0)
+    {
+        jassertfalse; // Debugビルドでは引き続き発火させる
+        // Releaseビルドではバイパスして無音を出力する (バッファ破壊より安全)
+        block.clear();
+        return;
+    }
 
     for (int ch = 0; ch < procChannels; ++ch)
     {

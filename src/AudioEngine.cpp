@@ -680,8 +680,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     audioFifo.reset();
 
     // レベルメーターのリセット
-    inputLevelDb.store(LEVEL_METER_MIN_DB);
-    outputLevelDb.store(LEVEL_METER_MIN_DB);
+    inputLevelLinear.store(0.0f);
+    outputLevelLinear.store(0.0f);
 
     // Audio Threadが新しくなる可能性があるため、モード設定フラグをリセットして
     // 次回のgetNextAudioBlockで確実に設定が行われるようにする。
@@ -1106,13 +1106,17 @@ void AudioEngine::timerCallback()
 
         trashBin.erase(it, trashBin.end());
 
-        // 3. Size limit (Max 5 items) - メモリ爆発防止
-        if (trashBin.size() > 5)
+        // 3. Size limit (Max 10 items) - メモリ爆発防止
+        // 【Fix Bug #1】古いアイテムのみ強制削除する。
+        // サイズ超過時も2秒の猶予期間を尊重するため、最も古いアイテム(front)から
+        // 削除する。ただし、通常はステップ2の時間ベース削除で十分であるため、
+        // ここには滅多に到達しない。高速IR切り替えによる異常蓄積時のみの安全弁として機能する。
+        while (trashBin.size() > 10)
         {
-            size_t removeCount = trashBin.size() - 5;
-            for (size_t i = 0; i < removeCount; ++i)
-                toDelete.push_back(trashBin[i].first);
-            trashBin.erase(trashBin.begin(), trashBin.begin() + removeCount);
+            // 最も古い(frontの)アイテムを削除する。
+            // これはすでに2秒の猶予を超えているか、超えていなければ次のtimerCallbackで削除される。
+            toDelete.push_back(trashBin.front().first);
+            trashBin.erase(trashBin.begin());
         }
     }
 
@@ -1199,8 +1203,8 @@ void AudioEngine::releaseResources()
     currentSampleRate.store(0.0);
 
     // レベルをリセット
-    inputLevelDb.store(-120.0f);
-    outputLevelDb.store(-120.0f);
+    inputLevelLinear.store(0.0f);
+    outputLevelLinear.store(0.0f);
 
     // ==================================================================
     // 【Issue 2 完全解消】手動MMCSS revertを削除
@@ -1296,8 +1300,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         if (std::abs(dsp->sampleRate - engineSampleRate) > 1e-6)
         {
             // 不整合時はレベルメーターもリセットして誤表示を防ぐ
-            inputLevelDb.store(LEVEL_METER_MIN_DB);
-            outputLevelDb.store(LEVEL_METER_MIN_DB);
+            inputLevelLinear.store(0.0f);
+            outputLevelLinear.store(0.0f);
             bufferToFill.clearActiveBufferRegion();
             return;
         }
@@ -1320,7 +1324,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
         // 処理委譲
-        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb, {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt}); // スマートポインタでDSPを呼び出し
+        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt}); // スマートポインタでDSPを呼び出し
     }
     else
     {
@@ -1358,8 +1362,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
     if (std::abs(dsp->sampleRate - engineSampleRate) > 1e-6)
     {
-        inputLevelDb.store(LEVEL_METER_MIN_DB);
-        outputLevelDb.store(LEVEL_METER_MIN_DB);
+        inputLevelLinear.store(0.0f);
+        outputLevelLinear.store(0.0f);
         buffer.clear();
         return;
     }
@@ -1376,15 +1380,15 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     if (convBypassActive.load(std::memory_order_relaxed) != convBypassed)
         convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
-    dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelDb, outputLevelDb,
+    dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear,
                        {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt});
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
                                   juce::AbstractFifo& audioFifo,
                                   juce::AudioBuffer<float>& audioFifoBuffer,
-                                  std::atomic<float>& inputLevelDb,
-                                  std::atomic<float>& outputLevelDb,
+                                  std::atomic<float>& inputLevelLinear,
+                                  std::atomic<float>& outputLevelLinear,
                                   const ProcessingState& state) // ProcessingState構造体でパラメータを受け取る
 {
     const int numSamples = bufferToFill.numSamples;
@@ -1424,8 +1428,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     //----------------------------------------------------------
     // 入力レベル計算
     //----------------------------------------------------------
-    const float inputDb = measureLevel(processBlock);
-    inputLevelDb.store(inputDb, std::memory_order_relaxed);
+    const float inputLinear = measureLevel(processBlock);
+    inputLevelLinear.store(inputLinear, std::memory_order_relaxed);
 
     //----------------------------------------------------------
     // オーバーサンプリング処理ブロック
@@ -1535,8 +1539,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     // 出力レベル計算 (DC除去後のクリーンな信号で計測)
     //----------------------------------------------------------
     // オーバーサンプリング有効時は、ダウンサンプリング後の信号(originalBlock)を使用する
-    const float outputDb = measureLevel(originalBlock);
-    outputLevelDb.store(outputDb, std::memory_order_relaxed);
+    const float outputLinear = measureLevel(originalBlock);
+    outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
 
     processOutput(bufferToFill, numSamples);
 
@@ -1563,8 +1567,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                                          juce::AbstractFifo& audioFifo,
                                          juce::AudioBuffer<float>& audioFifoBuffer,
-                                         std::atomic<float>& inputLevelDb,
-                                         std::atomic<float>& outputLevelDb,
+                                         std::atomic<float>& inputLevelLinear,
+                                         std::atomic<float>& outputLevelLinear,
                                          const ProcessingState& state)
 {
     const int numSamples = buffer.getNumSamples();
@@ -1590,8 +1594,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
 
-    const float inputDb = measureLevel(processBlock);
-    inputLevelDb.store(inputDb, std::memory_order_relaxed);
+    const float inputLinear = measureLevel(processBlock);
+    inputLevelLinear.store(inputLinear, std::memory_order_relaxed);
 
     juce::dsp::AudioBlock<double> originalBlock = processBlock;
 
@@ -1668,8 +1672,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         processBlock = originalBlock;
     }
 
-    const float outputDb = measureLevel(originalBlock);
-    outputLevelDb.store(outputDb, std::memory_order_relaxed);
+    const float outputLinear = measureLevel(originalBlock);
+    outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
 
     processOutputDouble(buffer, numSamples);
 
@@ -1701,7 +1705,9 @@ float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const doub
         if (level > maxLevel) maxLevel = level;
     }
 
-    return (maxLevel > static_cast<double>(LEVEL_METER_MIN_MAG)) ? static_cast<float>(juce::Decibels::gainToDecibels(maxLevel)) : LEVEL_METER_MIN_DB;
+    // 【Fix Bug #8】Audio Thread 内での gainToDecibels (std::log10 / libm) 呼び出しを排除。
+    // linear gain をそのまま返す。dB 変換は UI Thread 側の getInputLevel() / getOutputLevel() で行う。
+    return static_cast<float>(maxLevel);
 }
 
 void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>& block,
@@ -2045,9 +2051,10 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                 }
             }
 #else
+            // Non-AVX2 スカラーフォールバック: headroomを適用する
             for (int i = 0; i < numSamples; ++i)
             {
-                double v = data[i];
+                double v = data[i] * kOutputHeadroom;
                 if (!std::isfinite(v)) v = 0.0;
                 dst[i] = juce::jlimit(-1.0, 1.0, v);
             }

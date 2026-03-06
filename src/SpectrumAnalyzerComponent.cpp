@@ -578,7 +578,10 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
     const float plotW = static_cast<float>(area.getWidth());
     const float plotH = static_cast<float>(area.getHeight());
 
-    const double sampleRate = engine.getSampleRate();
+    // FIFOに書き込まれるデータはオーバーサンプリング後のレート（処理サンプルレート）で
+    // あるため、binFactor/nyquistの計算にはgetProcessingSampleRate()を使用しなければ
+    // ならない。getSampleRate()（デバイスレート）を使うと、8倍OSの場合に8倍のずれが生じる。
+    const double sampleRate = engine.getProcessingSampleRate();
     if (sampleRate <= 0.0) return;
     const int   halfFFT    = NUM_FFT_BINS;
     const float barWidth   = plotW / static_cast<float>(NUM_DISPLAY_BARS);
