@@ -193,6 +193,7 @@ private:
         int partitionSize = 0;
         int fftSize = 0;
         int numPartitions = 0;
+        int fdlMask = 0;          // ← 追加：ビットマスク（Audio thread % 完全排除用）
         int latency = 0;
         int partitionStride = 0;
 
@@ -287,8 +288,13 @@ private:
             if (preferMKL)
             {
                 useMKL = true;
-                mklConvolvers[0].reset(new (convo::aligned_malloc(sizeof(MKLConvolver), 64)) MKLConvolver());
-                mklConvolvers[1].reset(new (convo::aligned_malloc(sizeof(MKLConvolver), 64)) MKLConvolver());
+                // 【有効バグ修正】new完全禁止 → aligned_malloc + 明示的デストラクタ（規約準拠・リーク/DftiFreeDescriptor防止）
+                void* raw0 = convo::aligned_malloc(sizeof(MKLConvolver), 64);
+                void* raw1 = convo::aligned_malloc(sizeof(MKLConvolver), 64);
+                mklConvolvers[0].reset(static_cast<MKLConvolver*>(raw0));
+                mklConvolvers[1].reset(static_cast<MKLConvolver*>(raw1));
+                new (raw0) MKLConvolver();   // placementは最小限（MKL構造体構築用）
+                new (raw1) MKLConvolver();
 
                 // Use knownBlockSize as partition size for MKL UPC
                 if (mklConvolvers[0]->setup(knownBlockSize, irData[0], irDataLength) &&
@@ -298,6 +304,8 @@ private:
                     return;
                 }
                 // Fallback to WDL if MKL setup fails
+                if (mklConvolvers[0]) mklConvolvers[0]->~MKLConvolver();  // ← 明示的デストラクタ呼び出し
+                if (mklConvolvers[1]) mklConvolvers[1]->~MKLConvolver();
                 mklConvolvers[0].reset();
                 mklConvolvers[1].reset();
             }

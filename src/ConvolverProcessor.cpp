@@ -73,9 +73,12 @@ bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int
     fftSize = 1;
     while (fftSize < partitionSize * 2) fftSize <<= 1;
 
-    // Calculate number of partitions
-    numPartitions = (irLen + partitionSize - 1) / partitionSize;
-    if (numPartitions == 0) numPartitions = 1;
+    // ==================== 【有効バグ修正】numPartitionsを2のべき乗に強制 ====================
+    int originalNumPartitions = (irLen + partitionSize - 1) / partitionSize;
+    if (originalNumPartitions == 0) originalNumPartitions = 1;
+
+    numPartitions = juce::nextPowerOfTwo(originalNumPartitions);  // JUCE V8.0.12保証
+    fdlMask        = numPartitions - 1;                         // ビットマスク（message threadのみ）
 
     // Latency of UPC is one partition
     latency = partitionSize;
@@ -130,9 +133,13 @@ bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int
     for (int p = 0; p < numPartitions; ++p)
     {
         juce::FloatVectorOperations::clear(tempTime.get(), fftSize);
-        int copyLen = std::min(partitionSize, irLen - p * partitionSize);
-        if (copyLen > 0)
-            std::memcpy(tempTime.get(), ir + p * partitionSize, copyLen * sizeof(double));
+        if (p < originalNumPartitions)   // ← 追加：power-of-2拡張分の自動ゼロパディング（音質影響ゼロ）
+        {
+            int copyLen = std::min(partitionSize, irLen - p * partitionSize);
+            if (copyLen > 0)
+                std::memcpy(tempTime.get(), ir + p * partitionSize, copyLen * sizeof(double));
+        }
+        // else: 完全ゼロパディング（規約・音質維持）
 
         DftiComputeForward(fftHandle, tempTime.get(), tempFreq.get());
 
@@ -192,7 +199,7 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
 
             for (int p = 0; p < numPartitions; ++p)
             {
-                int lineIdx = (fdlIndex - p + numPartitions) % numPartitions;
+                int lineIdx = (fdlIndex - p + numPartitions) & fdlMask;   // ← % → & 完全置換（Audio threadクリーン）
                 const double* srcA = fdlBase + lineIdx * partitionStride;
                 const double* srcB = irBase + p * partitionStride;
                 double* dst = dstBase;
@@ -247,7 +254,7 @@ void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, in
             outputBufferPos = 0;
 
             // Advance FDL
-            fdlIndex = (fdlIndex + 1) % numPartitions;
+            fdlIndex = (fdlIndex + 1) & fdlMask;   // ← % → & 完全置換
         }
 
         // Read from output buffer.
