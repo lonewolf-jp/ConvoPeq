@@ -1127,21 +1127,18 @@ void AudioEngine::timerCallback()
 
     // 3. 内部プロセッサのクリーンアップを実行
     // 現在アクティブなDSPの内部ゴミ箱も掃除する
-    // Note: activeDSP is safe to access here (Message Thread)
+    // [Fix Bug C] cleanup() を trashBinLock の外で、currentDSP 経由で一度だけ呼ぶ
+    // activeDSP == currentDSP.load() のため currentDSP 経由で呼べば十分。
+    // trashBinLock は cleanup() と独立しているため、ロックの外での呼び出しが安全。
+    if (auto* dsp = currentDSP.load(std::memory_order_acquire))
     {
-        const juce::ScopedLock sl(trashBinLock);
-        if (activeDSP)
-        {
-            activeDSP->eq.cleanup();
-            activeDSP->convolver.cleanup();
-        }
+        dsp->eq.cleanup();
+        dsp->convolver.cleanup();
     }
 
     // UI用プロセッサのクリーンアップ
     uiEqProcessor.cleanup();
     uiConvolverProcessor.cleanup();
-    if (auto* dsp = currentDSP.load())
-        dsp->convolver.cleanup();
 }
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
@@ -1221,16 +1218,22 @@ void AudioEngine::releaseResources()
     // 3. Clear Trash Bin (release old DSPs)
     {
         const juce::ScopedLock sl(trashBinLock);
-        if (activeDSP)
-        {
-            delete activeDSP;
-            activeDSP = nullptr;
-        }
 
+        // 旧 DSP 群は task.currentDSP ではないため即時削除可能
         for (auto& entry : trashBin) delete entry.first;
         trashBin.clear();
         for (auto* p : trashBinPending) delete p;
         trashBinPending.clear();
+
+        // activeDSP (= task.currentDSP) は即時削除禁止。
+        // Rebuild Thread が task.currentDSP として現在アクセス中の可能性がある。
+        // trashBin に移動し、timerCallback() の 2000ms GC で安全に削除。
+        // 最終的に ~AudioEngine() の rebuildThread.join() 後にも削除される。
+        if (activeDSP)
+        {
+            trashBin.push_back({activeDSP, juce::Time::getMillisecondCounter()});
+            activeDSP = nullptr;
+        }
     }
 
     // 4. Release UI Processor Resources

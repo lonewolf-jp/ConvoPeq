@@ -2095,7 +2095,7 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
 void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& other)
 {
     // Share the active convolution engine (Shared Pointer copy)
-    auto otherConv = other.activeConvolution;
+    auto* otherConv = other.convolution.load(std::memory_order_acquire);
     if (otherConv) otherConv->addRef();
     convolution.store(otherConv, std::memory_order_release);
 
