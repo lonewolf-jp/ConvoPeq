@@ -199,8 +199,10 @@ endif()
 #                           リアルタイムオーディオ処理の安定性確保に不可欠です。
 set(MKL_LINK static)
 set(MKL_THREADING sequential)
+set(MKL_INTERFACE_FULL intel_lp64)
 
-find_package(MKL CONFIG REQUIRED)
+# その上で、LP64（64bit）と Sequential（単一スレッド）のみを要求
+find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
 message(STATUS "Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.")
 target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
 target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
