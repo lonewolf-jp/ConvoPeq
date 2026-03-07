@@ -306,7 +306,11 @@ void ConvolverControlPanel::updateIRInfo()
     if (convolver.isIRLoaded())
     {
         juce::String info = convolver.getIRName();
-        info += " (" + juce::String(convolver.getIRLength()) + " samples)";
+        info += " (" + juce::String(convolver.getIRLength()) + " smp)";
+
+        int lat = convolver.getLatencySamples();
+        if (lat > 0)
+            info += " Lat: " + juce::String(lat);
 
         irInfoLabel.setText(info, juce::dontSendNotification);
         irInfoLabel.setColour(juce::Label::textColourId,

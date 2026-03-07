@@ -303,6 +303,12 @@ ConvolverProcessor::MKLConvolver::~MKLConvolver()
 void ConvolverProcessor::StereoConvolver::reset()
 {
 #if JUCE_DSP_USE_INTEL_MKL
+    if (useMKLNUC)
+    {
+        if (nucConvolvers[0]) nucConvolvers[0]->Reset();
+        if (nucConvolvers[1]) nucConvolvers[1]->Reset();
+        return;
+    }
     if (useMKL)
     {
         if (mklConvolvers[0]) mklConvolvers[0]->reset();
@@ -317,6 +323,15 @@ void ConvolverProcessor::StereoConvolver::reset()
 void ConvolverProcessor::StereoConvolver::process(int channel, const double* in, double* out, int numSamples)
 {
 #if JUCE_DSP_USE_INTEL_MKL
+    if (useMKLNUC && nucConvolvers[channel])
+    {
+        // NUC: Add で畳み込みを実行し、Get で出力を取得する
+        nucConvolvers[channel]->Add(in, numSamples);
+        const int got = nucConvolvers[channel]->Get(out, numSamples);
+        if (got < numSamples)
+            std::memset(out + got, 0, (numSamples - got) * sizeof(double));
+        return;
+    }
     if (useMKL && mklConvolvers[channel])
     {
         mklConvolvers[channel]->process(in, out, numSamples);
@@ -1076,7 +1091,7 @@ public:
             int internalBlockSize = juce::nextPowerOfTwo(blockSize);
             auto sizing = computeMasteringSizing(internalBlockSize, result.targetLength);
 
-            result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize, owner.isMklEnabled());
+            result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize, owner.isMklEnabled(), owner.isNucEnabled());
 
             // Display用コピーを作成 (move前に)
             if (owner.isVisualizationEnabled())
@@ -1222,7 +1237,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
             // 新しいブロックサイズで初期化
             newConv->init(irL.release(), irR.release(),
-                          conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, enableMKL.load());
+                          conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, enableMKL.load(), enableNUC.load());
 
             // 差し替え
             convolution.store(newConv, std::memory_order_release);
@@ -2062,6 +2077,8 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     useMinPhase.store(other.useMinPhase.load(), std::memory_order_release);
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
     targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
+    enableMKL.store(other.enableMKL.load(), std::memory_order_release);
+    enableNUC.store(other.enableNUC.load(), std::memory_order_release);
 
     // サンプルレート変更時にリビルドできるよう、元のIR情報をコピーする
     // これにより、新しいDSPコアがIRをリサンプリングするためのソース素材を持つことが保証されます。
@@ -2095,6 +2112,8 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
     mixTarget.store(other.mixTarget.load(), std::memory_order_release);
     bypassed.store(other.bypassed.load(), std::memory_order_release);
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
+    enableMKL.store(other.enableMKL.load(), std::memory_order_release);
+    enableNUC.store(other.enableNUC.load(), std::memory_order_release);
 
     // サンプルレートが一致する場合のみ Convolution オブジェクトを同期する。
     // オーバーサンプリング中は DSP側のレート(Nx) != UI側のレート(1x) となるため、
@@ -2726,6 +2745,13 @@ float ConvolverProcessor::getTargetIRLength() const
 float ConvolverProcessor::getSmoothingTime() const
 {
     return smoothingTimeSec.load();
+}
+
+int ConvolverProcessor::getLatencySamples() const
+{
+    if (auto* conv = convolution.load(std::memory_order_acquire))
+        return conv->latency;
+    return 0;
 }
 
 void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)

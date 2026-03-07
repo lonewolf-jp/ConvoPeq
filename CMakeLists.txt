@@ -138,6 +138,7 @@ target_sources(ConvoPeq PRIVATE
     src/CustomInputOversampler.cpp
     src/AudioEngineProcessor.cpp
     src/ConvolverProcessor.cpp
+    src/MKLNonUniformConvolver.cpp
     src/EQProcessor.cpp
     src/ConvolverControlPanel.cpp
     src/EQControlPanel.cpp
@@ -147,6 +148,7 @@ target_sources(ConvoPeq PRIVATE
     src/CustomInputOversampler.h
     src/AudioEngineProcessor.h
     src/PsychoacousticDither.h
+    src/MKLNonUniformConvolver.h
     ${WDL_SOURCES}
 )
 

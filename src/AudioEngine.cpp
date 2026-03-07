@@ -284,6 +284,10 @@ void AudioEngine::initialize()
     // Start worker thread
     rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
 
+    // NUCエンジンの有効化
+    uiConvolverProcessor.setMklEnabled(true);
+    uiConvolverProcessor.setNucEnabled(true);
+
     // 初期DSP構築 (デフォルト設定)
     // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
     // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
