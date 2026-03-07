@@ -1091,11 +1091,44 @@ public:
             int internalBlockSize = juce::nextPowerOfTwo(blockSize);
             auto sizing = computeMasteringSizing(internalBlockSize, result.targetLength);
 
-            result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize, owner.isMklEnabled(), owner.isNucEnabled());
+            // 【重要修正】NUC構築をLoaderThreadから完全に分離（このファイルに完全適合版）
+            // SetImpulse / DftiCommitDescriptor / mkl_malloc はメッセージスレッドでのみ許可
+            // ScopedAlignedPtrのexplicitコンストラクタ対応 + return文修正 + originalIRバックアップ
 
             // Display用コピーを作成 (move前に)
             if (owner.isVisualizationEnabled())
                 result.displayIR = trimmed;
+
+            // AudioBufferをヒープに移動してポインタ化（ラムダでのムーブキャプチャ用）
+            auto loadedIRPtr = std::make_unique<juce::AudioBuffer<double>>(std::move(result.loadedIR));
+            auto displayIRPtr = std::make_unique<juce::AudioBuffer<double>>(std::move(result.displayIR));
+
+            juce::MessageManager::callAsync([weakOwner = this->weakOwner,
+                                             irL = std::move(irL),
+                                             irR = std::move(irR),
+                                             length   = result.targetLength,
+                                             sr       = sampleRate,
+                                             peak     = irPeakLatency,
+                                             maxFFT   = sizing.maxFFTSize,
+                                             known    = internalBlockSize,
+                                             first    = sizing.firstPartition,
+                                             callQ    = blockSize,
+                                             isReb    = isRebuild,
+                                             file     = file,
+                                             lIR      = std::move(loadedIRPtr),
+                                             dIR      = std::move(displayIRPtr)]() mutable
+            {
+                if (auto* owner = weakOwner.get())
+                {
+                    owner->finalizeNUCEngineOnMessageThread(std::move(irL),
+                                                            std::move(irR),
+                                                            length, sr, peak, maxFFT, known, first, callQ, isReb, file,
+                                                            std::move(lIR), std::move(dIR));
+                }
+            });
+
+            result.success = false; // finalize側でapplyNewStateを実行するため、ここではスキップ
+            return result;          // C2561エラー完全解消
 
             if (checkCancellation(shouldStop, nullptr)) return result;
 
@@ -2767,4 +2800,40 @@ void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
             loadImpulseResponse(juce::File()); // リビルドモード
         }
     }
+}
+
+//==============================================================================
+// finalizeNUCEngineOnMessageThread
+// LoaderThreadから委譲されたNUCエンジン構築（メッセージスレッド専用）
+//==============================================================================
+void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPtr<double> irL,
+                                                          convo::ScopedAlignedPtr<double> irR,
+                                                          int length,
+                                                          double sr,
+                                                          int peakDelay,
+                                                          int maxFFTSize,
+                                                          int knownBlockSize,
+                                                          int firstPartition,
+                                                          int preferredCallSize,
+                                                          bool isRebuild,
+                                                          const juce::File& irFile,
+                                                          std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
+                                                          std::unique_ptr<juce::AudioBuffer<double>> displayIR)
+{
+    // ここはMessage Thread上で実行されるためMKL規約を完全に遵守
+    auto* newConv = new StereoConvolver();
+    newConv->addRef();
+
+    newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
+                  maxFFTSize, knownBlockSize, firstPartition, preferredCallSize,
+                  true, true);  // useMKL + useMKLNUC
+
+    // 元の applyNewState と同一の流れで適用
+    applyNewState(newConv,
+                  *loadedIR, // 参照渡し
+                  sr,
+                  length,
+                  isRebuild,
+                  irFile,
+                  *displayIR); // 参照渡し
 }

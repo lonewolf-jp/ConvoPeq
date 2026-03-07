@@ -176,6 +176,23 @@ public:
     void shareConvolutionEngineFrom(const ConvolverProcessor& other);
     void refreshLatency();
 
+    // 【NUCエンジン構築専用エントリポイント】
+    // LoaderThreadからIRデータを受け取り、メッセージスレッド上で
+    // SetImpulse / DftiCommitDescriptor / mkl_malloc を安全に実行する
+    void finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPtr<double> irL,
+                                          convo::ScopedAlignedPtr<double> irR,
+                                          int length,
+                                          double sr,
+                                          int peakDelay,
+                                          int maxFFTSize,
+                                          int knownBlockSize,
+                                          int firstPartition,
+                                          int preferredCallSize,
+                                          bool isRebuild,
+                                          const juce::File& irFile,
+                                          std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
+                                          std::unique_ptr<juce::AudioBuffer<double>> displayIR);
+
     // 可視化データ生成の制御 (DSP用インスタンスでは無効化してメモリを節約)
     void setVisualizationEnabled(bool enabled) { visualizationEnabled = enabled; }
     bool isVisualizationEnabled() const { return visualizationEnabled; }
