@@ -10,7 +10,7 @@
 - **CMake**: 3.22以降
 - **JUCE**: 8.0.12（厳密）
 - **C++標準**: C++20
-- **Intel oneAPI**: Base Toolkit、HPC Toolkit (任意, FFT最適化用)
+- **Intel oneAPI**: Base Toolkit、HPC Toolkit (必須, FFT/ベクトル演算用)
   - **VS Code必要コンポーネント**: Extension Pack for Intel Software Developer Tools、Analysis Configurator for Intel Software Developer Tools
 
 **重要**: 本アプリケーションはWindows 11 x64専用のスタンドアローンアプリケーションです。macOSやLinuxではビルドできません。
@@ -78,9 +78,9 @@ VS Codeを起動して以下拡張機能をインストール:
 
 または、VS Code内で `Ctrl+Shift+P` → `Extensions: Show Recommended Extensions` で一括インストール可能
 
-#### 1.5 Intel oneAPI Base Toolkit (任意)
+#### 1.5 Intel oneAPI Base Toolkit (必須)
 
-FFT処理の高速化のためにIntel MKLを使用する場合:
+本アプリケーションのビルドには Intel MKL が必須です:
 
 1. Intel oneAPI Base Toolkit、Intel oneAPI HPC Toolkit からダウンロード
 2. インストールする
@@ -98,10 +98,7 @@ cd C:\path\to\ConvoPeq
 # 1. JUCE 8.0.12 (必須)
 git clone --branch 8.0.12 --depth 1 https://github.com/juce-framework/JUCE.git
 
-# 2. FFTConvolver (本プロジェクト用一部改修版を同梱済み)
-# プロジェクトルートに同梱されているため、ダウンロード不要です。
-
-# 3. r8brain-free-src (同梱済み)
+# 2. r8brain-free-src (同梱済み)
 # プロジェクトルートに同梱されているため、ダウンロード不要です。
 ```
 
@@ -111,11 +108,9 @@ git clone --branch 8.0.12 --depth 1 https://github.com/juce-framework/JUCE.git
 ConvoPeq/
 ├── .vscode/           # VS Code設定
 ├── JUCE/              # JUCEフレームワーク（JUCE framework V8.0.12をダウンロードし自分で作成）
-├── FFTConvolver/      # FFTConvolverライブラリ
 ├── r8brain-free-src/  # r8brainライブラリ
 ├── src/               # ソースコード
 ├── resources/         # リソースファイル (アイコン)
-├── sample_setting/    # インポート用サンプル設定ファイル
 ├── build/             # ビルド出力（自動作成）
 ├── CMakeLists.txt     # CMake設定
 ├── ProjectMetadata.cmake # プロジェクトメタデータ
@@ -355,20 +350,8 @@ add_compile_options(/source-charset:utf-8 /execution-charset:utf-8)
 ## ビルド設定のカスタマイズ
 
 `CMakeLists.txt` を編集することで、最適化レベルやターゲットアーキテクチャを変更できます。
-
-### 1. CPUアーキテクチャの変更 (AVX2 / SSE2)
-
-デフォルトでは `/arch:AVX2` が指定されており、Haswell (2013年) 以降のCPU向けに最適化されています。古いCPUで動作させる必要がある場合は、`CMakeLists.txt` を修正します。
-
-**CMakeLists.txt**:
-
-```cmake
-# 変更前 (デフォルト: 高速)
-set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
-
-# 変更後 (互換性重視: SSE2)
-set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /DNDEBUG /GL /arch:SSE2 /fp:fast /Gw /Gy")
-```
+ただし、本アプリケーションは **AVX2 命令セット** および **Intel MKL** を必須としています。
+`/arch:AVX2` オプションを削除したり、SSE2 にダウングレードすると、ビルドエラーや実行時エラー（不正命令例外）の原因となります。
 
 ### 警告レベル変更
 
@@ -463,8 +446,8 @@ build.bat Release clean
 
 ### Q: Intel MKL は必須ですか？
 
-**A**: 必須ではありません。
-Intel MKLがインストールされていない場合、自動的にJUCE内蔵のFFTエンジン（低速ですが互換性が高い）が使用されます。MKLを使用すると、特にConvolverの処理負荷が軽減されます。
+**A**: はい、必須です。
+本アプリケーションは Intel MKL の高度な FFT およびベクトル演算機能に依存しています。インストールされていない場合、ビルドは失敗します。
 
 ### Q: 設定を完全にリセットしたいです
 

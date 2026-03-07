@@ -7,8 +7,6 @@
 
 #include "MKLNonUniformConvolver.h"
 
-#if JUCE_DSP_USE_INTEL_MKL
-
 #include <mkl.h>
 #include <mkl_dfti.h>
 #include <mkl_vml.h>
@@ -16,9 +14,7 @@
 #include <algorithm>
 #include <cmath>
 
-#if JUCE_INTEL
 #include <immintrin.h>  // AVX2
-#endif
 
 namespace convo
 {
@@ -40,16 +36,13 @@ void MKLNonUniformConvolver::Layer::freeAll() noexcept
 
     fftSize = partSize = numParts = numPartsIR = 0;
     fdlMask = complexSize = partStride = 0;
-    irOffset = 0;
-    fdlIndex = inputPos = 0;
-    processedBlocks = 0;
-    pendingBaseFdlIdx = 0;
-    pendingNextPart = 0;
-    preferredPartsPerCall = 1;
-    pendingBlockStartSample = 0;
-    pendingActive = false;
+    fdlIndex = inputPos = partsPerCallback = nextPart = 0;
     isImmediate = false;
 }
+
+//==============================================================================
+// コンストラクタ / デストラクタ
+//==============================================================================
 MKLNonUniformConvolver::MKLNonUniformConvolver()
 {
     mkl_set_num_threads(1);
@@ -82,61 +75,34 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // 前回のリソースを解放
     releaseAllLayers();
     if (m_ringBuf) { mkl_free(m_ringBuf); m_ringBuf = nullptr; }
-    m_ringSize = m_ringMask = 0;
-    m_outputReadSample = 0;
-    m_inputSampleCursor = 0;
-    m_lastNonSilentInputSample = -(1LL << 60);
-    m_irLength = 0;
-    m_zeroInputFastPathActive = false;
-
-    auto fail = [this]() -> bool
-    {
-        releaseAllLayers();
-        if (m_ringBuf) { mkl_free(m_ringBuf); m_ringBuf = nullptr; }
-        m_ringSize = m_ringMask = 0;
-        m_outputReadSample = 0;
-        m_inputSampleCursor = 0;
-        m_lastNonSilentInputSample = -(1LL << 60);
-        m_irLength = 0;
-        m_zeroInputFastPathActive = false;
-        return false;
-    };
+    m_ringSize = m_ringMask = m_ringWrite = m_ringRead = m_ringAvail = 0;
 
     // VML 高精度モード設定 (Message Thread で一度だけ)
     vmlSetMode(VML_HA | VML_FTZDAZ_ON);
 
     // ────────────────────────────────────────────────
-    // レイヤー構成決定 (時間整合付き 3 層 NUC)
-    //   L0: 即時レイヤー (最小パーティション)
-    //   L1: 中域レイヤー
-    //   L2: 末尾レイヤー
-    // 各レイヤーは元 IR 内の offset を保持し、出力時に時間整合して合成する。
+    // レイヤー構成決定 (品質安定化修正版)
+    // 旧3レイヤー(非即時レイヤー含む)は時間整合されていない出力が混入し、
+    // IRロード後に原音由来のブツ切れ音を発生させるため、現状は単一レイヤーで運用する。
+    // ※ NUC経路自体は維持し、今後は時間整合付き多層合成へ拡張可能。
     // ────────────────────────────────────────────────
     const int l0Part = juce::nextPowerOfTwo(std::max(blockSize, 256));
-    const int l1Part = juce::nextPowerOfTwo(std::max(2048, l0Part * 2));
-    const int l2Part = juce::nextPowerOfTwo(std::max(8192, l1Part * 2));
-
-    const int l0Len = std::min(irLen, l1Part * 2);
-    const int remainAfterL0 = irLen - l0Len;
-    const int l1Len = std::min(remainAfterL0, l2Part);
-    const int l2Len = irLen - l0Len - l1Len;
 
     struct LayerCfg { int offset; int len; int partSize; bool immediate; };
     LayerCfg cfgs[kNumLayers];
 
     cfgs[0].offset    = 0;
-    cfgs[0].len       = l0Len;
+    cfgs[0].len       = irLen;
     cfgs[0].partSize  = l0Part;
     cfgs[0].immediate = true;
 
-    cfgs[1].offset    = l0Len;
-    cfgs[1].len       = l1Len;
-    cfgs[1].partSize  = l1Part;
+    // L1/L2 は無効化 (時間整合付き実装まで)
+    // TODO: 将来的に多層レイヤー化 (Non-Uniform Partitioned Convolution) を再有効化する際は、
+    //       各レイヤーの出力タイミングを整合させるための遅延補正と、リングバッファへの加算合成 (accumulate)
+    //       の実装が必要です。現在は品質安定化のため単一レイヤー (L0) のみを使用しています。
+    cfgs[1].offset = cfgs[1].len = cfgs[1].partSize = 0;
     cfgs[1].immediate = false;
-
-    cfgs[2].offset    = l0Len + l1Len;
-    cfgs[2].len       = l2Len;
-    cfgs[2].partSize  = l2Part;
+    cfgs[2].offset = cfgs[2].len = cfgs[2].partSize = 0;
     cfgs[2].immediate = false;
 
     m_numActiveLayers = 0;
@@ -153,7 +119,6 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         l.partSize    = cfgs[li].partSize;
         l.fftSize     = l.partSize * 2;
-        l.irOffset    = cfgs[li].offset;
         l.isImmediate = cfgs[li].immediate;
 
         // complexSize = fftSize/2 + 1
@@ -169,7 +134,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         // ── DFTI ハンドル生成 (Message Thread で DftiCommitDescriptor) ──
         if (DftiCreateDescriptor(&l.fftHandle, DFTI_DOUBLE, DFTI_REAL, 1, l.fftSize) != DFTI_NO_ERROR)
-            return fail();
+            return false;
 
         bool ok = true;
         ok = ok && (DftiSetValue(l.fftHandle, DFTI_PLACEMENT,             DFTI_NOT_INPLACE)     == DFTI_NO_ERROR);
@@ -178,7 +143,11 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         ok = ok && (DftiCommitDescriptor(l.fftHandle) == DFTI_NO_ERROR);
 
         if (!ok)
-            return fail();
+        {
+            DftiFreeDescriptor(&l.fftHandle);
+            l.fftHandle = nullptr;
+            return false;
+        }
 
         // ── バッファ確保 (すべて mkl_malloc 64byte アライン) ──
         const size_t irBufSize  = static_cast<size_t>(l.numParts)  * l.partStride;
@@ -195,7 +164,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         if (!l.irFreqDomain || !l.fdlBuf || !l.overlapBuf || !l.fftTimeBuf ||
             !l.fftOutBuf || !l.prevInputBuf || !l.accumBuf || !l.inputAccBuf)
-            return fail();
+            return false;
 
         // ゼロ初期化
         memset(l.irFreqDomain, 0, irBufSize  * sizeof(double));
@@ -215,7 +184,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         {
             if (tempTime) mkl_free(tempTime);
             if (tempFreq) mkl_free(tempFreq);
-            return fail();
+            return false;
         }
 
         const double* irSrc   = impulse + cfgs[li].offset;
@@ -232,7 +201,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
                 if (copyLen > 0)
                     memcpy(tempTime, irSrc + copyStart, copyLen * sizeof(double));
             }
-            // p >= numPartsIR のスロットはゼロパディング
+            // p >= numPartsIR のスロットはゼロパディング (音質影響なし)
 
             DftiComputeForward(l.fftHandle, tempTime, tempFreq);
 
@@ -244,98 +213,65 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         mkl_free(tempTime);
         mkl_free(tempFreq);
 
+        // ── 非 Immediate レイヤーのコールバックあたりパーティション数 ──
+        // 1 ブロック (blockSize サンプル) で処理するパーティション数を決定
+        // = ceil(numPartsIR / (partSize / blockSize))
+        // ただし最低 1, 最大 numPartsIR
+        if (!l.isImmediate)
+        {
+            const int blocksPerPart = l.partSize / std::max(blockSize, 1);
+            l.partsPerCallback = std::max(1,
+                (l.numPartsIR + blocksPerPart - 1) / blocksPerPart);
+            l.partsPerCallback = std::min(l.partsPerCallback, l.numPartsIR);
+        }
+
         l.fdlIndex = 0;
         l.inputPos = 0;
-        l.processedBlocks = 0;
-        l.preferredPartsPerCall = std::max(1,
-            static_cast<int>((static_cast<int64_t>(l.numPartsIR) * blockSize + l.partSize - 1) / l.partSize));
-        l.pendingBaseFdlIdx = 0;
-        l.pendingNextPart = 0;
-        l.pendingBlockStartSample = 0;
-        l.pendingActive = false;
+        l.nextPart = 0;
 
         ++m_numActiveLayers;
     }
 
     if (m_numActiveLayers == 0)
-        return fail();
-
-    m_latency = m_layers[0].partSize;  // Layer0 の partSize = 基準レイテンシ
+        return false;
 
     // ────────────────────────────────────────────────
     // 出力リングバッファ確保
-    // 時間整合付き合成のため、IR 長 + 基準遅延 + 余裕分を確保する。
+    // サイズ = 2^ceil(log2(maxPartSize * 4 + blockSize * 4))
+    // ※ 将来多層化する際は、最大パーティションサイズに合わせて調整が必要。
+    //    また、ringWriteは上書き(memcpy)のため、多層化時は加算(accumulate)への変更が必須。
     // ────────────────────────────────────────────────
-    const int maxLookahead = irLen + m_latency + l2Part + blockSize * 4;
-    const int rSize = juce::nextPowerOfTwo(std::max(maxLookahead, blockSize * 8));
-    m_ringBuf  = static_cast<double*>(mkl_malloc(static_cast<size_t>(rSize) * sizeof(double), 64));
+    int maxPartSize = m_layers[0].partSize; // 現在は単一レイヤーなのでL0が最大
+    int rSize = juce::nextPowerOfTwo(maxPartSize * 4 + blockSize * 4);
+    m_ringBuf  = static_cast<double*>(mkl_malloc(rSize * sizeof(double), 64));
     if (!m_ringBuf)
-        return fail();
+        return false;
 
-    memset(m_ringBuf, 0, static_cast<size_t>(rSize) * sizeof(double));
+    memset(m_ringBuf, 0, rSize * sizeof(double));
     m_ringSize  = rSize;
     m_ringMask  = rSize - 1;
-    m_outputReadSample = 0;
-    m_inputSampleCursor = 0;
-    m_lastNonSilentInputSample = -(1LL << 60);
-    m_irLength = irLen;
-    m_zeroInputFastPathActive = false;
+    m_ringWrite = 0;
+    m_ringRead  = 0;
+    m_ringAvail = 0;
+
+    m_latency = m_layers[0].partSize;  // Layer0 の partSize = 最低遅延
 
     m_ready.store(true, std::memory_order_release);
     return true;
 }
-void MKLNonUniformConvolver::accumulateLayerProducts(Layer& l, int baseFdlIdx, int startPart, int endPart) noexcept
-{
-    if (startPart >= endPart)
-        return;
 
-    const double* fdlBase = l.fdlBuf;
-    const double* irBase  = l.irFreqDomain;
-    double*       dst     = l.accumBuf;
-
-    for (int p = startPart; p < endPart; ++p)
-    {
-        const int lineIdx = (baseFdlIdx - p + l.numParts) & l.fdlMask;
-        const double* srcA = fdlBase + lineIdx * l.partStride;
-        const double* srcB = irBase  + p       * l.partStride;
-
-        int k = 0;
-#if defined(__AVX2__)
-        const int vEnd = (l.complexSize / 4) * 4;
-        for (; k < vEnd; k += 4)
-        {
-            __m256d acc0 = _mm256_load_pd(dst + 2 * k);
-            __m256d acc1 = _mm256_load_pd(dst + 2 * k + 4);
-            __m256d a0   = _mm256_load_pd(srcA + 2 * k);
-            __m256d a1   = _mm256_load_pd(srcA + 2 * k + 4);
-            __m256d b0   = _mm256_load_pd(srcB + 2 * k);
-            __m256d b1   = _mm256_load_pd(srcB + 2 * k + 4);
-
-            __m256d a0_re = _mm256_movedup_pd(a0);
-            __m256d a0_im = _mm256_permute_pd(a0, 0xF);
-            acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
-            __m256d b0_sw = _mm256_permute_pd(b0, 0x5);
-            acc0 = _mm256_addsub_pd(acc0, _mm256_mul_pd(a0_im, b0_sw));
-
-            __m256d a1_re = _mm256_movedup_pd(a1);
-            __m256d a1_im = _mm256_permute_pd(a1, 0xF);
-            acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
-            __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
-            acc1 = _mm256_addsub_pd(acc1, _mm256_mul_pd(a1_im, b1_sw));
-
-            _mm256_store_pd(dst + 2 * k,     acc0);
-            _mm256_store_pd(dst + 2 * k + 4, acc1);
-        }
-#endif
-        for (; k < l.complexSize; ++k)
-        {
-            const double ar = srcA[2 * k], ai = srcA[2 * k + 1];
-            const double br = srcB[2 * k], bi = srcB[2 * k + 1];
-            dst[2 * k]     += ar * br - ai * bi;
-            dst[2 * k + 1] += ar * bi + ai * br;
-        }
-    }
-}
+//==============================================================================
+// processLayerBlock  ─ Audio Thread
+// l.inputAccBuf に 1 パーティション分の入力が溜まったタイミングで呼ぶ。
+// (または非即時レイヤーの定期呼び出し)
+//
+// 処理:
+//   1. Overlap-Save 形式で fftTimeBuf を組み立てる
+//   2. Forward FFT → FDL に格納
+//   3. FDL と IR の複素乗算積算 (AVX2 FMA)
+//   4. Backward FFT
+//   5. Overlap-Add して出力リングバッファへ書き込む
+//==============================================================================
 void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 {
     // ── 1. [prevInput | currentInput] を fftTimeBuf に配置 (Overlap-Save) ──
@@ -346,249 +282,263 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     memcpy(l.prevInputBuf, l.inputAccBuf, l.partSize * sizeof(double));
 
     // ── 2. Forward FFT ──
-    const int baseFdlIdx = l.fdlIndex;
-    double* currentFDLSlot = l.fdlBuf + baseFdlIdx * l.partStride;
+    // 出力は FDL の現在スロットへ直接書き込む
+    double* currentFDLSlot = l.fdlBuf + l.fdlIndex * l.partStride;
     DftiComputeForward(l.fftHandle, l.fftTimeBuf, currentFDLSlot);
 
     // ── 3. 複素乗算積算 (FDL × IR) → accumBuf ──
     memset(l.accumBuf, 0, l.partStride * sizeof(double));
-    accumulateLayerProducts(l, baseFdlIdx, 0, l.numPartsIR);
+
+    const double* fdlBase = l.fdlBuf;
+    const double* irBase  = l.irFreqDomain;
+    double*       dst     = l.accumBuf;
+
+    for (int p = 0; p < l.numPartsIR; ++p)
+    {
+        // FDL は巡回インデックス: 現在ブロックから p 個前のスロット
+        const int lineIdx = (l.fdlIndex - p + l.numParts) & l.fdlMask;
+        const double* srcA = fdlBase + lineIdx       * l.partStride;  // FDL[p]
+        const double* srcB = irBase  + p             * l.partStride;  // IR[p]
+
+        int k = 0;
+
+        // 4 複素数 (= 8 double) を 1 ループで処理
+        const int vEnd = (l.complexSize / 4) * 4;
+        for (; k < vEnd; k += 4)
+        {
+            // accumBuf の 8 doubles (4 複素数) を load (アライン保証)
+            __m256d acc0 = _mm256_load_pd(dst + 2 * k);
+            __m256d acc1 = _mm256_load_pd(dst + 2 * k + 4);
+
+            // FDL の 8 doubles をロード
+            __m256d a0 = _mm256_load_pd(srcA + 2 * k);
+            __m256d a1 = _mm256_load_pd(srcA + 2 * k + 4);
+
+            // IR の 8 doubles をロード
+            __m256d b0 = _mm256_load_pd(srcB + 2 * k);
+            __m256d b1 = _mm256_load_pd(srcB + 2 * k + 4);
+
+            // 複素乗算積算: acc += a * b
+            // Re(a*b) = Re(a)*Re(b) - Im(a)*Im(b)
+            // Im(a*b) = Re(a)*Im(b) + Im(a)*Re(b)
+            // AVX2 を使った実装 (movedup / permute で Re/Im を分離)
+
+            // --- 4 複素数ブロック 0 ---
+            __m256d a0_re = _mm256_movedup_pd(a0);          // [Ar0, Ar0, Ar1, Ar1]
+            __m256d a0_im = _mm256_permute_pd(a0, 0xF);     // [Ai0, Ai0, Ai1, Ai1]
+            // acc += a_re * b  (Re の寄与)
+            acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
+            // acc += addsub(a_im * b_swap)  (Im の寄与)
+            __m256d b0_sw = _mm256_permute_pd(b0, 0x5);     // [Bi0, Br0, Bi1, Br1]
+            __m256d t0    = _mm256_mul_pd(a0_im, b0_sw);
+            acc0 = _mm256_addsub_pd(acc0, t0);
+
+            // --- 4 複素数ブロック 1 ---
+            __m256d a1_re = _mm256_movedup_pd(a1);
+            __m256d a1_im = _mm256_permute_pd(a1, 0xF);
+            acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
+            __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
+            __m256d t1    = _mm256_mul_pd(a1_im, b1_sw);
+            acc1 = _mm256_addsub_pd(acc1, t1);
+
+            _mm256_store_pd(dst + 2 * k,     acc0);
+            _mm256_store_pd(dst + 2 * k + 4, acc1);
+        }
+        // スカラーフォールバック (残り要素 / AVX2 非対応環境)
+        for (; k < l.complexSize; ++k)
+        {
+            const double ar = srcA[2 * k],     ai = srcA[2 * k + 1];
+            const double br = srcB[2 * k],     bi = srcB[2 * k + 1];
+            dst[2 * k]     += ar * br - ai * bi;
+            dst[2 * k + 1] += ar * bi + ai * br;
+        }
+    }
 
     // ── 4. Backward FFT ──
     DftiComputeBackward(l.fftHandle, l.accumBuf, l.fftOutBuf);
 
-    // ── 5. Overlap-Save 有効出力を時間整合付きでリングへ加算 ──
+    // ── 5. Overlap-Add → 出力リングバッファ書き込み ──
+    // Overlap-Save の場合、有効出力は後半 partSize サンプル
     const double* validOut = l.fftOutBuf + l.partSize;
-    const int64_t blockStartSample = l.processedBlocks * static_cast<int64_t>(l.partSize);
-    const int64_t writeStartSample = blockStartSample + static_cast<int64_t>(l.irOffset + m_latency);
-    ringAddAt(writeStartSample, validOut, l.partSize);
 
-    // ── 6. 状態更新 ──
+    // overlapBuf との加算 (Overlap-Add)
+    // overlapBuf は前回の IFFT 後半サンプルの "尾" を保持する
+    // 今回は validOut に overlapBuf を加算してからリングへ書き込む
+    // ──→ 実際には Overlap-Save なので overlapBuf は不要。
+    //      ただし将来 Overlap-Add 方式に切り替える際のフックとして残す。
+    //      現状は validOut をそのままリングに書き込む。
+    ringWrite(validOut, l.partSize);
+
+    // ── 6. FDL インデックスを進める ──
     l.fdlIndex = (l.fdlIndex + 1) & l.fdlMask;
-    ++l.processedBlocks;
 }
-void MKLNonUniformConvolver::ringAddAt(int64_t startSample, const double* src, int n) noexcept
+
+//==============================================================================
+// ringWrite  ─ Audio Thread
+//==============================================================================
+void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
 {
-    if (n <= 0 || src == nullptr || m_ringBuf == nullptr || m_ringSize <= 0)
-        return;
+    if (n <= 0 || m_ringBuf == nullptr) return;
 
-    const int64_t readHead = m_outputReadSample;
-    int srcOffset = 0;
-
-    // 既に読み出し済み区間に書こうとした分は破棄
-    if (startSample < readHead)
-    {
-        srcOffset = static_cast<int>(readHead - startSample);
-        if (srcOffset >= n)
-            return;
-
-        startSample = readHead;
-        n -= srcOffset;
-    }
-
-    // リング容量を超える未来位置への書き込みはクリップ
-    const int64_t writableEnd = readHead + static_cast<int64_t>(m_ringSize);
-    if (startSample >= writableEnd)
-        return;
-
-    if (startSample + static_cast<int64_t>(n) > writableEnd)
-        n = static_cast<int>(writableEnd - startSample);
-
-    if (n <= 0)
-        return;
-
-    const int writePos = static_cast<int>(startSample & m_ringMask);
-    const int first = std::min(n, m_ringSize - writePos);
-
-    cblas_daxpy(first, 1.0, src + srcOffset, 1, m_ringBuf + writePos, 1);
-
+    const int first = std::min(n, m_ringSize - m_ringWrite);
+    memcpy(m_ringBuf + m_ringWrite, src, first * sizeof(double));
     if (n > first)
-        cblas_daxpy(n - first, 1.0, src + srcOffset + first, 1, m_ringBuf, 1);
+        memcpy(m_ringBuf, src + first, (n - first) * sizeof(double));
+
+    m_ringWrite  = (m_ringWrite + n) & m_ringMask;
+    m_ringAvail += n;
 }
+
+//==============================================================================
+// ringRead  ─ Audio Thread
+//==============================================================================
 int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
 {
-    if (n <= 0 || dst == nullptr || m_ringBuf == nullptr)
-        return 0;
+    if (n <= 0 || m_ringBuf == nullptr) return 0;
 
-    const int readPos = static_cast<int>(m_outputReadSample & m_ringMask);
-    const int first = std::min(n, m_ringSize - readPos);
-
-    memcpy(dst, m_ringBuf + readPos, first * sizeof(double));
-    memset(m_ringBuf + readPos, 0, first * sizeof(double));
-
-    if (n > first)
+    const int toRead = std::min(n, m_ringAvail);
+    if (toRead == 0)
     {
-        memcpy(dst + first, m_ringBuf, (n - first) * sizeof(double));
-        memset(m_ringBuf, 0, (n - first) * sizeof(double));
+        memset(dst, 0, n * sizeof(double));
+        return 0;
     }
 
-    m_outputReadSample += static_cast<int64_t>(n);
-    return n;
+    const int first = std::min(toRead, m_ringSize - m_ringRead);
+    memcpy(dst, m_ringBuf + m_ringRead, first * sizeof(double));
+    if (toRead > first)
+        memcpy(dst + first, m_ringBuf, (toRead - first) * sizeof(double));
+
+    // 読み取れなかった分をゼロ埋め
+    if (toRead < n)
+        memset(dst + toRead, 0, (n - toRead) * sizeof(double));
+
+    m_ringRead  = (m_ringRead + toRead) & m_ringMask;
+    m_ringAvail -= toRead;
+    return toRead;
 }
+
+//==============================================================================
+// Add  ─ Audio Thread
+//==============================================================================
 void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 {
-    if (!m_ready.load(std::memory_order_acquire) || numSamples <= 0)
+    if (!m_ready.load(std::memory_order_acquire) || input == nullptr || numSamples <= 0)
         return;
 
-    static constexpr double kSilenceThreshold = 1.0e-15;
-
-    bool inputSilent = (input == nullptr);
-    if (!inputSilent)
-    {
-        for (int i = 0; i < numSamples; ++i)
-        {
-            const double v = input[i];
-            if (v > kSilenceThreshold || v < -kSilenceThreshold)
-            {
-                inputSilent = false;
-                break;
-            }
-            inputSilent = true;
-        }
-    }
-
-    const int64_t blockStartCursor = m_inputSampleCursor;
-    if (!inputSilent)
-        m_lastNonSilentInputSample = blockStartCursor + static_cast<int64_t>(numSamples) - 1;
-
-    bool anyPending = false;
-    for (int li = 0; li < m_numActiveLayers; ++li)
-    {
-        if (m_layers[li].pendingActive)
-        {
-            anyPending = true;
-            break;
-        }
-    }
-
-    const int64_t tailEndSample = m_lastNonSilentInputSample + static_cast<int64_t>(m_irLength) + static_cast<int64_t>(m_latency) + 1;
-    const bool tailExpired = (m_outputReadSample >= tailEndSample);
-
-    if (inputSilent && !anyPending && tailExpired)
-    {
-        if (!m_zeroInputFastPathActive)
-        {
-            for (int li = 0; li < m_numActiveLayers; ++li)
-            {
-                Layer& l = m_layers[li];
-                if (!l.fdlBuf) continue;
-
-                const size_t fdlBufSize = static_cast<size_t>(l.numParts) * l.partStride;
-                memset(l.fdlBuf, 0, fdlBufSize * sizeof(double));
-                memset(l.prevInputBuf, 0, l.partSize * sizeof(double));
-                memset(l.inputAccBuf, 0, l.partSize * sizeof(double));
-                memset(l.accumBuf, 0, l.partStride * sizeof(double));
-
-                l.pendingActive = false;
-                l.pendingNextPart = 0;
-                l.pendingBaseFdlIdx = 0;
-            }
-            m_zeroInputFastPathActive = true;
-        }
-
-        // 無音中はFFTを回さず、タイムラインだけ進める
-        for (int li = 0; li < m_numActiveLayers; ++li)
-        {
-            Layer& l = m_layers[li];
-            const int total = l.inputPos + numSamples;
-            const int blocks = total / l.partSize;
-            l.inputPos = total - blocks * l.partSize;
-            if (blocks > 0)
-            {
-                l.fdlIndex = (l.fdlIndex + blocks) & l.fdlMask;
-                l.processedBlocks += static_cast<int64_t>(blocks);
-            }
-        }
-
-        m_inputSampleCursor += static_cast<int64_t>(numSamples);
-        return;
-    }
-
-    m_zeroInputFastPathActive = false;
-
-    auto finalizePendingJob = [this](Layer& l) noexcept
-    {
-        DftiComputeBackward(l.fftHandle, l.accumBuf, l.fftOutBuf);
-        const int64_t writeStartSample = l.pendingBlockStartSample + static_cast<int64_t>(l.irOffset + m_latency);
-        ringAddAt(writeStartSample, l.fftOutBuf + l.partSize, l.partSize);
-        l.pendingActive = false;
-        l.pendingNextPart = 0;
-    };
-
+    // すべてのアクティブレイヤーに対して処理を行う
     for (int li = 0; li < m_numActiveLayers; ++li)
     {
         Layer& l = m_layers[li];
 
+        // ────────────────────────────────────────────
+        // 入力を partSize 単位で蓄積し、溜まったら処理する
+        // ────────────────────────────────────────────
         int consumed = 0;
         while (consumed < numSamples)
         {
             const int toFill = std::min(numSamples - consumed, l.partSize - l.inputPos);
-
-            if (input != nullptr)
-                memcpy(l.inputAccBuf + l.inputPos, input + consumed, toFill * sizeof(double));
-            else
-                memset(l.inputAccBuf + l.inputPos, 0, toFill * sizeof(double));
-
+            memcpy(l.inputAccBuf + l.inputPos, input + consumed, toFill * sizeof(double));
             l.inputPos += toFill;
             consumed   += toFill;
 
-            if (l.inputPos < l.partSize)
-                continue;
-
-            l.inputPos = 0;
-
-            if (l.isImmediate)
+            if (l.inputPos >= l.partSize)
             {
-                processLayerBlock(l);
-                continue;
+                // 1 パーティション分が溜まった
+                l.inputPos = 0;
+
+                if (l.isImmediate)
+                {
+                    // L0: 即時処理 (Audio Thread 内で全パーティション畳み込み)
+                    processLayerBlock(l);
+                }
+                else
+                {
+                    // L1/L2: 遅延処理
+                    // Forward FFT + FDL 更新だけ今すぐ行い、
+                    // 畳み込み計算は次の数コールバックに分散する
+
+                    // Forward FFT → FDL 格納
+                    memcpy(l.fftTimeBuf,              l.prevInputBuf, l.partSize * sizeof(double));
+                    memcpy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize * sizeof(double));
+                    memcpy(l.prevInputBuf, l.inputAccBuf, l.partSize * sizeof(double));
+
+                    double* currentFDLSlot = l.fdlBuf + l.fdlIndex * l.partStride;
+                    DftiComputeForward(l.fftHandle, l.fftTimeBuf, currentFDLSlot);
+                    l.fdlIndex = (l.fdlIndex + 1) & l.fdlMask;
+
+                    // 畳み込み計算を負荷分散: partsPerCallback パーティションずつ処理
+                    const int end = std::min(l.nextPart + l.partsPerCallback, l.numPartsIR);
+
+                    // accumBuf を初期化 (nextPart == 0 のときのみクリア)
+                    if (l.nextPart == 0)
+                        memset(l.accumBuf, 0, l.partStride * sizeof(double));
+
+                    const double* fdlBase = l.fdlBuf;
+                    const double* irBase  = l.irFreqDomain;
+                    double*       dst     = l.accumBuf;
+
+                    // 現在の FDL インデックス基準 (1 つ前: fdlIndex は既に +1 済み)
+                    const int baseFdlIdx = (l.fdlIndex - 1 + l.numParts) & l.fdlMask;
+
+                    for (int p = l.nextPart; p < end; ++p)
+                    {
+                        const int lineIdx = (baseFdlIdx - p + l.numParts) & l.fdlMask;
+                        const double* srcA = fdlBase + lineIdx * l.partStride;
+                        const double* srcB = irBase  + p       * l.partStride;
+
+                        int k = 0;
+                        const int vEnd4 = (l.complexSize / 4) * 4;
+                        for (; k < vEnd4; k += 4)
+                        {
+                            __m256d acc0 = _mm256_load_pd(dst + 2 * k);
+                            __m256d acc1 = _mm256_load_pd(dst + 2 * k + 4);
+                            __m256d a0   = _mm256_load_pd(srcA + 2 * k);
+                            __m256d a1   = _mm256_load_pd(srcA + 2 * k + 4);
+                            __m256d b0   = _mm256_load_pd(srcB + 2 * k);
+                            __m256d b1   = _mm256_load_pd(srcB + 2 * k + 4);
+
+                            __m256d a0_re = _mm256_movedup_pd(a0);
+                            __m256d a0_im = _mm256_permute_pd(a0, 0xF);
+                            acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
+                            __m256d b0_sw = _mm256_permute_pd(b0, 0x5);
+                            acc0 = _mm256_addsub_pd(acc0, _mm256_mul_pd(a0_im, b0_sw));
+
+                            __m256d a1_re = _mm256_movedup_pd(a1);
+                            __m256d a1_im = _mm256_permute_pd(a1, 0xF);
+                            acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
+                            __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
+                            acc1 = _mm256_addsub_pd(acc1, _mm256_mul_pd(a1_im, b1_sw));
+
+                            _mm256_store_pd(dst + 2 * k,     acc0);
+                            _mm256_store_pd(dst + 2 * k + 4, acc1);
+                        }
+                        for (; k < l.complexSize; ++k)
+                        {
+                            const double ar = srcA[2*k], ai = srcA[2*k+1];
+                            const double br = srcB[2*k], bi = srcB[2*k+1];
+                            dst[2*k]   += ar*br - ai*bi;
+                            dst[2*k+1] += ar*bi + ai*br;
+                        }
+                    }
+
+                    l.nextPart = end;
+
+                    // 全パーティションの積算が終わったら IFFT して出力へ
+                    if (l.nextPart >= l.numPartsIR)
+                    {
+                        DftiComputeBackward(l.fftHandle, l.accumBuf, l.fftOutBuf);
+                        ringWrite(l.fftOutBuf + l.partSize, l.partSize);
+                        l.nextPart = 0;
+                    }
+                }
             }
-
-            // 非即時レイヤー: Forward FFT は即時、積算は分割実行
-            memcpy(l.fftTimeBuf,              l.prevInputBuf, l.partSize * sizeof(double));
-            memcpy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize * sizeof(double));
-            memcpy(l.prevInputBuf, l.inputAccBuf, l.partSize * sizeof(double));
-
-            const int baseFdlIdx = l.fdlIndex;
-            double* currentFDLSlot = l.fdlBuf + baseFdlIdx * l.partStride;
-            DftiComputeForward(l.fftHandle, l.fftTimeBuf, currentFDLSlot);
-            l.fdlIndex = (l.fdlIndex + 1) & l.fdlMask;
-
-            // 万一前ジョブが残っていた場合は即時完了して整合を維持
-            if (l.pendingActive)
-            {
-                accumulateLayerProducts(l, l.pendingBaseFdlIdx, l.pendingNextPart, l.numPartsIR);
-                l.pendingNextPart = l.numPartsIR;
-                finalizePendingJob(l);
-            }
-
-            memset(l.accumBuf, 0, l.partStride * sizeof(double));
-            l.pendingBaseFdlIdx = baseFdlIdx;
-            l.pendingNextPart = 0;
-            l.pendingBlockStartSample = l.processedBlocks * static_cast<int64_t>(l.partSize);
-            l.pendingActive = true;
-            ++l.processedBlocks;
-        }
-
-        if (!l.isImmediate && l.pendingActive)
-        {
-            const int dynamicBudget = std::max(1,
-                static_cast<int>((static_cast<int64_t>(l.numPartsIR) * numSamples + l.partSize - 1) / l.partSize));
-            const int partBudget = std::max(l.preferredPartsPerCall, dynamicBudget);
-            const int endPart = std::min(l.pendingNextPart + partBudget, l.numPartsIR);
-
-            if (endPart > l.pendingNextPart)
-            {
-                accumulateLayerProducts(l, l.pendingBaseFdlIdx, l.pendingNextPart, endPart);
-                l.pendingNextPart = endPart;
-            }
-
-            if (l.pendingNextPart >= l.numPartsIR)
-                finalizePendingJob(l);
-        }
-    }
-
-    m_inputSampleCursor += static_cast<int64_t>(numSamples);
+        } // while consumed < numSamples
+    } // for each layer
 }
+
+//==============================================================================
+// Get  ─ Audio Thread
+//==============================================================================
 int MKLNonUniformConvolver::Get(double* output, int numSamples)
 {
     if (!m_ready.load(std::memory_order_acquire) || output == nullptr || numSamples <= 0)
@@ -622,21 +572,14 @@ void MKLNonUniformConvolver::Reset()
 
         l.fdlIndex = 0;
         l.inputPos = 0;
-        l.processedBlocks = 0;
-        l.pendingBaseFdlIdx = 0;
-        l.pendingNextPart = 0;
-        l.pendingBlockStartSample = 0;
-        l.pendingActive = false;
+        l.nextPart = 0;
     }
 
     if (m_ringBuf)
-        memset(m_ringBuf, 0, static_cast<size_t>(m_ringSize) * sizeof(double));
-
-    m_outputReadSample = 0;
-    m_inputSampleCursor = 0;
-    m_lastNonSilentInputSample = -(1LL << 60);
-    m_zeroInputFastPathActive = false;
+        memset(m_ringBuf, 0, m_ringSize * sizeof(double));
+    m_ringWrite = 0;
+    m_ringRead  = 0;
+    m_ringAvail = 0;
 }
-} // namespace convo
 
-#endif // JUCE_DSP_USE_INTEL_MKL
+} // namespace convo

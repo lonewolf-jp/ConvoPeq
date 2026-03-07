@@ -13,19 +13,17 @@
 #include "MainApplication.h"
 #include "MainWindow.h"
 
-#if JUCE_INTEL
 #include <xmmintrin.h>
 #include <pmmintrin.h>
-#endif
 
-#if JUCE_DSP_USE_INTEL_MKL
 #include <mkl.h>
-#endif
-
-
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <Windows.h>
+#include <mmsystem.h>
 #include <timeapi.h>
 #pragma comment(lib, "winmm.lib")
 #include <processthreadsapi.h> // For disabling efficiency mode
@@ -46,26 +44,6 @@
 
 void MainApplication::initialise(const juce::String& /*commandLine*/)
 {
-#if JUCE_INTEL
-#pragma warning(push)
-#pragma warning(disable: 6815)
-#endif
-
-#if !JUCE_DSP_USE_INTEL_MKL
-#error "JUCE_DSP_USE_INTEL_MKL must be enabled for ConvoPeq."
-#endif
-
-    if (!juce::SystemStats::hasAVX2())
-    {
-        juce::NativeMessageBox::showAsync(
-            juce::MessageBoxOptions()
-                .withIconType(juce::MessageBoxIconType::WarningIcon)
-                .withTitle("Unsupported CPU")
-                .withMessage("This build requires AVX2 support.")
-                .withButton("OK"),
-            [this](int) { quit(); });
-        return;
-    }
 
 #ifdef _WIN32
     // システム全体のタイマー精度を 1ms に上げる
@@ -107,7 +85,6 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
 #endif
 
 
-#if JUCE_DSP_USE_INTEL_MKL
     // リアルタイムオーディオ用 Intel MKL 設定
     // リアルタイムオーディオ処理において、MKL内部のスレッド管理による
     // 予測不可能なレイテンシ（ジッター）の発生は致命的です。
@@ -117,12 +94,6 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
     mkl_set_dynamic(0);     // 動的なスレッド数調整を無効化
     // Audio Thread内でのVMLモード変更を避けるため、起動時に1回だけ設定する。
     vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
-#endif
-
-#if JUCE_INTEL
-#pragma warning(pop)
-#endif
-
 
     // メインウィンドウを生成する
     mainWindow = std::make_unique<MainWindow>(getApplicationName());

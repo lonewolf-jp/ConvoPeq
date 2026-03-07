@@ -18,7 +18,6 @@ namespace
     inline void applyGainRamp(double* __restrict data, int numSamples,
                               double startGain, double increment) noexcept
     {
-#if defined(__AVX2__)
         __m256d vGain = _mm256_set_pd(startGain + 3.0 * increment,
                                        startGain + 2.0 * increment,
                                        startGain + increment,
@@ -36,16 +35,11 @@ namespace
 
         double gain = startGain + static_cast<double>(i) * increment;
         for (; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
-#else
-        double gain = startGain;
-        for (int i = 0; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
-#endif
     }
 
     inline void applyGainRamp(float* __restrict data, int numSamples,
                               float startGain, float increment) noexcept
     {
-#if defined(__AVX2__)
         __m256 vGain = _mm256_set_ps(startGain + 7.0f * increment,
                                      startGain + 6.0f * increment,
                                      startGain + 5.0f * increment,
@@ -67,13 +61,8 @@ namespace
 
         float gain = startGain + static_cast<float>(i) * increment;
         for (; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
-#else
-        float gain = startGain;
-        for (int i = 0; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
-#endif
     }
 
-#if defined(__AVX2__)
     // AVX2 helper to calculate magnitude squared for a biquad over an array of complex frequencies
     static void calcMagnitudesForBand(const EQCoeffsBiquad& c,
                                       const std::complex<double>* zArr,
@@ -125,7 +114,6 @@ namespace
         for (; i < numPoints; ++i)
             outMagSq[i] = EQProcessor::getMagnitudeSquared(c, zArr[i]);
     }
-#endif
 }
 
 struct AudioEngine::DSPCore; // Forward declaration
@@ -172,7 +160,6 @@ static inline double musicalSoftClipScalar(double x, double threshold, double kn
     return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
 }
 
-#if defined(__AVX2__)
 static void softClipBlockAVX2(double* __restrict data, int numSamples,
                                double threshold, double knee, double asymmetry) noexcept
 {
@@ -263,7 +250,6 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
             data[i] = musicalSoftClipScalar(data[i], threshold, knee, asymmetry);
     }
 }
-#endif
 
 // コンストラクタ
 //--------------------------------------------------------------
@@ -283,7 +269,6 @@ void AudioEngine::initialize()
 {
     // Start worker thread
     rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
-
 
     // 初期DSP構築 (デフォルト設定)
     // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
@@ -368,7 +353,6 @@ void AudioEngine::readFromFifo(float* dest, int numSamples)
     // AVX2 L+R 平均化ヘルパー
     auto mixToMono = [](const float* srcL, const float* srcR, float* dst, int n) noexcept
     {
-#if defined(__AVX2__)
         const __m256 half = _mm256_set1_ps(0.5f);
         int i = 0;
         const int vEnd = n / 8 * 8;
@@ -380,9 +364,6 @@ void AudioEngine::readFromFifo(float* dest, int numSamples)
             _mm256_storeu_ps(dst + i, avg);
         }
         for (; i < n; ++i) dst[i] = (srcL[i] + srcR[i]) * 0.5f;
-#else
-        for (int i = 0; i < n; ++i) dst[i] = (srcL[i] + srcR[i]) * 0.5f;
-#endif
     };
 
     if (size1 > 0)
@@ -495,7 +476,6 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
 
     const float totalGainSq = totalGainLinear * totalGainLinear;
 
-#if defined(__AVX2__)
     std::vector<float> totalMagSqL(numPoints);
     std::vector<float> totalMagSqR(numPoints);
     std::vector<float> bandMagSq(numPoints);
@@ -574,39 +554,6 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
             outMagnitudesR[i] = std::isfinite(val) ? val : 1.0f;
         }
     }
-#else
-    for (int i = 0; i < numPoints; ++i)
-    {
-        float totalMagSqL = totalGainSq;
-        float totalMagSqR = totalGainSq;
-        const std::complex<double> z = zArray[i];
-
-        for (int b = 0; b < numActiveBands; ++b)
-        {
-            const auto& band = activeBands[b];
-            float magSq = EQProcessor::getMagnitudeSquared(band.coeffs, z);
-
-            if (!std::isfinite(magSq))
-                magSq = 1.0f;
-
-            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Left)
-                totalMagSqL *= magSq;
-            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Right)
-                totalMagSqR *= magSq;
-        }
-
-        if (outMagnitudesL)
-        {
-            float val = std::sqrt(totalMagSqL);
-            outMagnitudesL[i] = std::isfinite(val) ? val : 1.0f;
-        }
-        if (outMagnitudesR)
-        {
-            float val = std::sqrt(totalMagSqR);
-            outMagnitudesR[i] = std::isfinite(val) ? val : 1.0f;
-        }
-    }
-#endif
 }
 
 //--------------------------------------------------------------
@@ -700,7 +647,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // [FIX] uiConvolverProcessor の currentBufferSize を必ず最新の bufferSize に同期する。
     // この呼び出しが欠けていると currentBufferSize == 0 のまま残り、
-    // IR読み込み時に blockSize=0 が渡ると NUC 初期化失敗や無音化の原因になる。
+    // IR読み込み時に LoaderThread が blockSize=0 でMKLConvolver::setup(0,...) を呼んで
+    // numPartitions = (irLen - 1) / 0 → ゼロ除算クラッシュが発生する。
     // prepareToPlay は Message Thread から呼ばれることが保証されているので安全。
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
 
@@ -917,13 +865,9 @@ void AudioEngine::rebuildThreadLoop()
     // Set denormal handling modes for this thread. This is crucial for performance
     // in MKL VML and AVX/SSE operations, which can be significantly slowed down
     // by subnormal numbers. This setting is thread-local.
-#if JUCE_DSP_USE_INTEL_MKL
     vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
-#endif
-#if JUCE_INTEL
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-#endif
 
     while (true)
     {
@@ -1270,10 +1214,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // === パッチ1: モード設定をAudio Thread開始時に1回だけ実行 ===
     if (!audioThreadModesSet.load(std::memory_order_relaxed)) {
         if (audioThreadModesSet.exchange(true, std::memory_order_acq_rel) == false) {
-#if JUCE_INTEL
             _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
             _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-#endif
         }
     }
     // ========================================================
@@ -1330,7 +1272,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
         const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
         const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
-        const bool analyzerOn = analyzerEnabled.load(std::memory_order_acquire);
         const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
         const float satAmt = saturationAmount.load(std::memory_order_relaxed);
 
@@ -1341,7 +1282,13 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
         // 処理委譲
-        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, {eqBypassed, convBypassed, order, analyzerSource, analyzerOn, softClip, satAmt}); // スマートポインタでDSPを呼び出し
+        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear,
+                     { .eqBypassed = eqBypassed,
+                       .convBypassed = convBypassed,
+                       .order = order,
+                       .analyzerSource = analyzerSource,
+                       .softClipEnabled = softClip,
+                       .saturationAmount = satAmt }); // スマートポインタでDSPを呼び出し
     }
     else
     {
@@ -1355,10 +1302,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     {
         if (audioThreadModesSet.exchange(true, std::memory_order_acq_rel) == false)
         {
-#if JUCE_INTEL
             _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
             _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-#endif
         }
     }
 
@@ -1389,7 +1334,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
     const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
     const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
-    const bool analyzerOn = analyzerEnabled.load(std::memory_order_acquire);
     const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
     const float satAmt = saturationAmount.load(std::memory_order_relaxed);
 
@@ -1399,7 +1343,12 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
     dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear,
-                       {eqBypassed, convBypassed, order, analyzerSource, analyzerOn, softClip, satAmt});
+                       { .eqBypassed = eqBypassed,
+                         .convBypassed = convBypassed,
+                         .order = order,
+                         .analyzerSource = analyzerSource,
+                         .softClipEnabled = softClip,
+                         .saturationAmount = satAmt });
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
@@ -1477,10 +1426,10 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
             osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
     }
 
-    // ── Analyzer Input Tap (Pre-DSP / Device Rate) ──
-    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Input)
+    // ── Analyzer Input Tap (Pre-DSP) ──
+    if (state.analyzerSource == AnalyzerSource::Input)
     {
-        pushToFifo(originalBlock, audioFifo, audioFifoBuffer);
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
     }
 
     int numProcSamples = (int)processBlock.getNumSamples();
@@ -1524,21 +1473,17 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         for (int ch = 0; ch < numProcChannels; ++ch)
         {
             double* data = processBlock.getChannelPointer(ch);
-#if defined(__AVX2__)
             softClipBlockAVX2(data, numProcSamples, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
-#endif
-            // The AVX2 function handles the scalar remainder, so this loop is only for non-AVX2 builds.
-#if !defined(__AVX2__)
-            for (int i = 0; i < numProcSamples; ++i)
-            {
-                if (std::abs(data[i]) > CLIP_START)
-                    data[i] = musicalSoftClip(data[i], CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
-            }
-#endif
         }
     }
 
     //----------------------------------------------------------
+
+    // ── Analyzer Output Tap (Post-DSP) ──
+    if (state.analyzerSource == AnalyzerSource::Output)
+    {
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
+    }
 
     // ダウンサンプリング (結果は processBuffer に書き戻される)
     if (oversamplingFactor > 1)
@@ -1547,16 +1492,11 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         processBlock = originalBlock;
     }
 
-    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
-    {
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
-    }
-
     //----------------------------------------------------------
     // 出力レベル計算 (DC除去後のクリーンな信号で計測)
     //----------------------------------------------------------
-    // オーバーサンプリング有効時は、ダウンサンプリング後の信号(processBlock)を使用する
-    const float outputLinear = measureLevel(processBlock);
+    // オーバーサンプリング有効時は、ダウンサンプリング後の信号(originalBlock)を使用する
+    const float outputLinear = measureLevel(originalBlock);
     outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
 
     processOutput(bufferToFill, numSamples);
@@ -1634,8 +1574,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
             osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
     }
 
-    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Input)
-        pushToFifo(originalBlock, audioFifo, audioFifoBuffer);
+    if (state.analyzerSource == AnalyzerSource::Input)
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
 
     const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
     const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
@@ -1666,19 +1606,12 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         for (int ch = 0; ch < numProcChannels; ++ch)
         {
             double* data = processBlock.getChannelPointer(ch);
-#if defined(__AVX2__)
             softClipBlockAVX2(data, numProcSamples, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
-#endif
-            // The AVX2 function handles the scalar remainder, so this loop is only for non-AVX2 builds.
-#if !defined(__AVX2__)
-            for (int i = 0; i < numProcSamples; ++i)
-            {
-                if (std::abs(data[i]) > CLIP_START)
-                    data[i] = musicalSoftClip(data[i], CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
-            }
-#endif
         }
     }
+
+    if (state.analyzerSource == AnalyzerSource::Output)
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
 
     if (oversamplingFactor > 1)
     {
@@ -1686,12 +1619,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         processBlock = originalBlock;
     }
 
-    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
-    {
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
-    }
-
-    const float outputLinear = measureLevel(processBlock);
+    const float outputLinear = measureLevel(originalBlock);
     outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
 
     processOutputDouble(buffer, numSamples);
@@ -1764,7 +1692,6 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
     auto convertBlock = [&](const double* srcL, const double* srcR,
                              float* dstL, float* dstR, int n) noexcept
     {
-#if defined(__AVX2__)
         int i = 0;
         const int vEnd = n / 4 * 4;
         for (; i < vEnd; i += 4)
@@ -1787,13 +1714,6 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
             dstL[i] = static_cast<float>(srcL[i]);
             if (dstR) dstR[i] = srcR ? static_cast<float>(srcR[i]) : dstL[i];
         }
-#else
-        for (int i = 0; i < n; ++i)
-        {
-            dstL[i] = static_cast<float>(srcL[i]);
-            if (dstR) dstR[i] = srcR ? static_cast<float>(srcR[i]) : dstL[i];
-        }
-#endif
     };
 
     if (size1 > 0)
@@ -1954,7 +1874,6 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
             // → NaN は -1.0 になる。旧実装(vEpsilon blendv)は 0.0 にしていたが、
             //   どちらも正常動作時には到達しないため実用上の差異はない。
             // デノーマル対策: FTZ/DAZ が有効なため vEpsilon blendv チェックは省略する。
-#if defined(__AVX2__)
             {
                 const __m256d vMax      = _mm256_set1_pd(1.0);
                 const __m256d vMin      = _mm256_set1_pd(-1.0);
@@ -1995,14 +1914,6 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                     dst[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, applyDither ? val : val * kOutputHeadroom));
                 }
             }
-#else
-            for (int i = 0; i < numSamples; ++i)
-            {
-                double val = applyDither ? data[i] : data[i] * kOutputHeadroom;
-                if (!std::isfinite(val)) val = 0.0;
-                dst[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, val));
-            }
-#endif
         }
         else
         {
@@ -2029,7 +1940,6 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
             // NaN 対策: vmaxpd(NaN, -1.0)→-1.0 (Intel仕様: 第1op=NaN→第2opを返す)
             // Inf 対策: min/max でクランプ済み
             // デノーマル対策: FTZ/DAZ が有効なため vEpsilon blendv チェックは省略する。
-#if defined(__AVX2__)
             {
                 int i = 0;
                 const int vEnd = numSamples / 16 * 16;
@@ -2069,15 +1979,6 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                     dst[i] = juce::jlimit(-1.0, 1.0, v);
                 }
             }
-#else
-            // Non-AVX2 スカラーフォールバック: headroomを適用する
-            for (int i = 0; i < numSamples; ++i)
-            {
-                double v = data[i] * kOutputHeadroom;
-                if (!std::isfinite(v)) v = 0.0;
-                dst[i] = juce::jlimit(-1.0, 1.0, v);
-            }
-#endif
         }
         else
         {

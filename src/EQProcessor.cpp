@@ -22,7 +22,6 @@ static inline double calculateRMS_NoMkl(const double* data, int numSamples) noex
     if (data == nullptr || numSamples <= 0)
         return 0.0;
 
-#if defined(__AVX2__)
     __m256d sum = _mm256_setzero_pd();
     int i = 0;
     const int vEnd = numSamples / 4 * 4;
@@ -39,11 +38,6 @@ static inline double calculateRMS_NoMkl(const double* data, int numSamples) noex
 
     for (; i < numSamples; ++i)
         sumSq += data[i] * data[i];
-#else
-    double sumSq = 0.0;
-    for (int i = 0; i < numSamples; ++i)
-        sumSq += data[i] * data[i];
-#endif
 
     return std::sqrt(sumSq / static_cast<double>(numSamples));
 }
@@ -810,7 +804,6 @@ namespace
         state[1] = ic2eq;
     }
 
-#if defined(__AVX2__) || defined(__FMA__)
     // ── 追加: Stereo 2ch 同時処理 (SSE2 / AVX2 FMA) ──
     // L, R が完全に独立した IIR 状態を持つため、128-bit レジスタに
     // [L_value, R_value] をパックして同時演算し、メモリ帯域を節約する。
@@ -843,7 +836,6 @@ namespace
             const __m128d v0 = _mm_set_pd(dataR[n], dataL[n]);
 
             const __m128d v3 = _mm_sub_pd(v0, ic2eq);
-#if defined(__AVX2__)
             // FMA: a1*ic1eq + a2*v3
             const __m128d v1 = _mm_fmadd_pd(a1, ic1eq, _mm_mul_pd(a2, v3));
             // FMA: ic2eq + a2*ic1eq + a3*v3
@@ -856,13 +848,6 @@ namespace
             __m128d output = _mm_fmadd_pd(m0, v0,
                               _mm_fmadd_pd(m1, v1,
                                _mm_mul_pd(m2, v2)));
-#else
-            const __m128d v1 = _mm_add_pd(_mm_mul_pd(a1, ic1eq), _mm_mul_pd(a2, v3));
-            const __m128d v2 = _mm_add_pd(ic2eq, _mm_add_pd(_mm_mul_pd(a2, ic1eq), _mm_mul_pd(a3, v3)));
-            ic1eq = _mm_sub_pd(_mm_mul_pd(two, v1), ic1eq);
-            ic2eq = _mm_sub_pd(_mm_mul_pd(two, v2), ic2eq);
-            __m128d output = _mm_add_pd(_mm_mul_pd(m0, v0), _mm_add_pd(_mm_mul_pd(m1, v1), _mm_mul_pd(m2, v2)));
-#endif
 
             // NaN/Infチェック (isfinite): (x - x) は xがInf/NaNの時NaNになる
             const __m128d diff = _mm_sub_pd(output, output);
@@ -899,13 +884,11 @@ namespace
         _mm_storeu_pd(stateL, _mm_unpacklo_pd(ic1eq, ic2eq)); // [ic1eq_L, ic2eq_L]
         _mm_storeu_pd(stateR, _mm_unpackhi_pd(ic1eq, ic2eq)); // [ic1eq_R, ic2eq_R]
     }
-#endif
 
     // ── 追加: AVX2 Gain Ramp ──
     inline void applyGainRamp_AVX2(double* __restrict data, int numSamples,
                                      double startGain, double increment) noexcept
     {
-#if defined(__AVX2__)
         // 各レーンの初期ゲイン: [g0, g0+inc, g0+2*inc, g0+3*inc]
         __m256d vGain = _mm256_set_pd(startGain + 3.0 * increment,
                                        startGain + 2.0 * increment,
@@ -956,10 +939,6 @@ namespace
         // スカラー残余
         double gain = startGain + static_cast<double>(i) * increment;
         for (; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
-#else
-        double gain = startGain;
-        for (int i = 0; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
-#endif
     }
 }
 
@@ -1153,7 +1132,6 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
 
     // フィルタバンク適用
-#if defined(__AVX2__) || defined(__FMA__)
     for (int i = 0; i < numActiveBands; ++i)
     {
         const auto& band = activeBands[i];
@@ -1182,26 +1160,6 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                                 band.node->coeffs, filterState[1][band.index].data());
         }
     }
-#else
-    for (int ch = 0; ch < numChannels; ++ch)
-    {
-        double* data = block.getChannelPointer(ch);
-        if (data == nullptr) continue;
-
-        for (int i = 0; i < numActiveBands; ++i)
-        {
-            const auto& band = activeBands[i];
-            const EQChannelMode mode = band.node->mode;
-
-            if (mode == EQChannelMode::Stereo ||
-               (mode == EQChannelMode::Left && ch == 0) ||
-               (mode == EQChannelMode::Right && ch == 1))
-            {
-                processBand(data, numSamples, band.node->coeffs, filterState[ch][band.index].data());
-            }
-        }
-    }
-#endif
 
     // トータルゲイン / AGC 適用
     if (isAgcEnabled)

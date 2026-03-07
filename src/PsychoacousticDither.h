@@ -23,9 +23,7 @@
 #include <algorithm>
 #include "AlignedAllocation.h"
 
-#if JUCE_DSP_USE_INTEL_MKL
  #include <mkl_vsl.h>
-#endif
 
 
 namespace convo
@@ -52,91 +50,6 @@ private:
 };
 
 //============================================================
-// xoshiro256**
-//============================================================
-class Xoshiro256ss
-{
-public:
-    Xoshiro256ss() noexcept : s{1, 2, 3, 4} {}
-
-    explicit Xoshiro256ss(uint64_t seed) noexcept
-    {
-        SplitMix64 sm(seed);
-        s[0]=sm.next(); s[1]=sm.next();
-        s[2]=sm.next(); s[3]=sm.next();
-    }
-
-    inline uint64_t nextUInt64() noexcept
-    {
-        const uint64_t result =
-            rotl(s[1] * 5ULL, 7) * 9ULL;
-
-        const uint64_t t = s[1] << 17;
-
-        s[2] ^= s[0];
-        s[3] ^= s[1];
-        s[1] ^= s[2];
-        s[0] ^= s[3];
-
-        s[2] ^= t;
-        s[3] = rotl(s[3], 45);
-
-        return result;
-    }
-
-    void jump() noexcept
-    {
-        static constexpr uint64_t JUMP[] =
-        {
-            0x180ec6d33cfd0abaULL,
-            0xd5a61266f0c9392cULL,
-            0xa9582618e03fc9aaULL,
-            0x39abdc4529b1661cULL
-        };
-
-        uint64_t t0=0,t1=0,t2=0,t3=0;
-
-        for(int i=0;i<4;++i)
-        {
-            for(int b=0;b<64;++b)
-            {
-                if(JUMP[i] & (1ULL<<b))
-                {
-                    t0^=s[0]; t1^=s[1];
-                    t2^=s[2]; t3^=s[3];
-                }
-                nextUInt64();
-            }
-        }
-        s[0]=t0; s[1]=t1; s[2]=t2; s[3]=t3;
-    }
-
-private:
-    static inline uint64_t rotl(uint64_t x,int k) noexcept
-    {
-        return (x<<k)|(x>>(64-k));
-    }
-
-    uint64_t s[4];
-};
-
-//============================================================
-// SplitMix64 Finalizer（最有力）
-//
-// 統計的に非常に強力で高速。
-// xoshiro系との相性も良好。
-//============================================================
-static inline uint64_t whiten64(uint64_t x) noexcept
-{
-    x ^= x >> 30;
-    x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27;
-    x *= 0x94d049bb133111ebULL;
-    x ^= x >> 31;
-    return x;
-}
-
-//============================================================
 // 超低歪マスタリング用 Dither + Noise Shaper
 //============================================================
 class PsychoacousticDither
@@ -146,7 +59,6 @@ public:
     static constexpr int DEFAULT_BIT_DEPTH = 24;
     static constexpr int STATE_STRIDE = 8; // 64 bytes alignment (8 * sizeof(double))
 
-#if JUCE_DSP_USE_INTEL_MKL
     // RAII Wrapper for MKL VSL Stream to prevent leaks
     class VSLStream {
     public:
@@ -169,7 +81,6 @@ public:
         VSLStream(const VSLStream&) = delete;
         VSLStream& operator=(const VSLStream&) = delete;
     };
-#endif
 
     ~PsychoacousticDither() {
         if (shaperStateBuffer) convo::aligned_free(shaperStateBuffer);
@@ -193,7 +104,6 @@ public:
                      ^ (instanceCounter.fetch_add(1) * 0x9e3779b97f4a7c15ULL);
         }
 
-#if JUCE_DSP_USE_INTEL_MKL
         // Initialize MKL VSL Streams
         // Use SplitMix64 to generate independent seeds for each channel
         SplitMix64 seeder(baseSeed);
@@ -201,14 +111,6 @@ public:
             rng[i].init(seeder.next());
             rndIndex[i] = RND_BUFFER_SIZE; // Force refill on first use
         }
-#else
-        Xoshiro256ss master(baseSeed);
-        for (int i = 0; i < MAX_CHANNELS; ++i)
-        {
-            rng[i] = master;
-            master.jump(); // Ensure non-overlapping sequences for each channel
-        }
-#endif
 
         shaperStateBuffer = static_cast<double*>(convo::aligned_malloc(MAX_CHANNELS * STATE_STRIDE * sizeof(double), 64));
         reset();
@@ -260,25 +162,14 @@ public:
     inline double process(double input, int channel) noexcept
     {
         if (channel < 0 || channel >= MAX_CHANNELS) return input;
-#if JUCE_DSP_USE_INTEL_MKL
         return processChannelMKL(input, channel, shaperStateBuffer + (channel * STATE_STRIDE));
-#else
-        return processChannel(input, rng[channel], shaperStateBuffer + (channel * STATE_STRIDE));
-#endif
     }
 
 private:
-#if !JUCE_DSP_USE_INTEL_MKL
-    inline double processChannel(double x, Xoshiro256ss& r, double* z) noexcept
-    {
-        // TPDFディザ生成
-        double d = nextTPDF(r) * scale;
-#else
     inline double processChannelMKL(double x, int channel, double* z) noexcept
     {
         // TPDFディザ生成 (MKL)
         double d = nextTPDF_MKL(channel) * scale;
-#endif
 
         // 5次ノイズシェーパー (フィードバック誤差)
         double shapedError =
@@ -310,19 +201,6 @@ private:
         return quantized;
     }
 
-#if !JUCE_DSP_USE_INTEL_MKL
-    inline double nextTPDF(Xoshiro256ss& r) noexcept
-    {
-        return (uniform53(r)-0.5) + (uniform53(r)-0.5);
-    }
-
-    inline double uniform53(Xoshiro256ss& r) noexcept
-    {
-        uint64_t v = whiten64(r.nextUInt64()); // Apply whitening
-        v >>= 11; // 53bit
-        return static_cast<double>(v) * (1.0 / 9007199254740992.0);
-    }
-#else
     // MKL VSL Batch Generation for efficiency
     static constexpr int RND_BUFFER_SIZE = 1024; // Increased batch size to reduce VSL call overhead
     // 【パッチ6】rndBufferをインスタンスメンバー化 (データレース防止)
@@ -353,18 +231,13 @@ private:
         }
         return rndBuffer[channel][rndIndex[channel]++];
     }
-#endif
 
     inline double killDenormal(double x) const noexcept
     {
         return (std::fabs(x)<1e-300)?0.0:x;
     }
 
-#if JUCE_DSP_USE_INTEL_MKL
     VSLStream rng[MAX_CHANNELS];
-#else
-    Xoshiro256ss  rng[MAX_CHANNELS];
-#endif
 
     double* shaperStateBuffer = nullptr;
         double scale    = 1.0 / 8388608.0;    // 2^23（24bit signed PCM デフォルト）

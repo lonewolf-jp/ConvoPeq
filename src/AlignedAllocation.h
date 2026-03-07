@@ -6,14 +6,9 @@
 #include <new>
 #include <memory>
 
-#if JUCE_DSP_USE_INTEL_MKL
 #include <mkl.h>
-#endif
 
 namespace convo {
-
-
-#if JUCE_DSP_USE_INTEL_MKL
 
 inline void* aligned_malloc(size_t size, size_t alignment) {
     void* ptr = mkl_malloc(size, (int)alignment);
@@ -29,39 +24,6 @@ inline void aligned_free(void* ptr) {
         mkl_free(ptr);
     }
 }
-
-#else
-
-inline void* aligned_malloc(size_t size, size_t alignment) {
-    void* ptr = nullptr;
-
-#if defined(_WIN32)
-    ptr = _aligned_malloc(size, alignment);
-#else
-    if (posix_memalign(&ptr, alignment, size) != 0)
-    {
-        ptr = nullptr;
-    }
-#endif
-
-    if (ptr == nullptr) {
-        DBG("Memory allocation failed in aligned_malloc (non-MKL)");
-        throw std::bad_alloc();
-    }
-    return ptr;
-}
-
-inline void aligned_free(void* ptr) {
-    if (ptr != nullptr) {
-#if defined(_WIN32)
-        _aligned_free(ptr);
-#else
-        free(ptr);
-#endif
-    }
-}
-
-#endif
 
 //-----------------------------------------------------------------------------
 // RAII Helper for aligned memory

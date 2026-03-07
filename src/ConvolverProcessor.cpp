@@ -17,18 +17,13 @@
 #include "CDSPResampler.h"
 #include "AlignedAllocation.h" // For convo::MKLAllocator
 
-#if JUCE_DSP_USE_INTEL_MKL
 #include <mkl.h>
 #include <mkl_vml.h>
-#endif
 
-#if JUCE_INTEL
  #include <xmmintrin.h>
  #include <pmmintrin.h>
  #include <immintrin.h> // For AVX2
-#endif
 
-#if JUCE_DSP_USE_INTEL_MKL
 namespace
 {
     struct DftiGuard
@@ -49,27 +44,6 @@ namespace
         DftiGuard(const DftiGuard&) = delete;
         DftiGuard& operator=(const DftiGuard&) = delete;
     };
-}
-#endif
-
-void ConvolverProcessor::StereoConvolver::reset()
-{
-    if (nucConvolvers[0]) nucConvolvers[0]->Reset();
-    if (nucConvolvers[1]) nucConvolvers[1]->Reset();
-}
-
-void ConvolverProcessor::StereoConvolver::process(int channel, const double* in, double* out, int numSamples)
-{
-    if (channel < 0 || channel >= 2 || !nucConvolvers[channel])
-    {
-        std::memset(out, 0, numSamples * sizeof(double));
-        return;
-    }
-
-    nucConvolvers[channel]->Add(in, numSamples);
-    const int got = nucConvolvers[channel]->Get(out, numSamples);
-    if (got < numSamples)
-        std::memset(out + got, 0, (numSamples - got) * sizeof(double));
 }
 
 // 前方宣言
@@ -215,7 +189,6 @@ static void applyAsymmetricTukey(double* data, int numSamples)
     const double alpha_post = calculate_post_alpha(numSamples);
     const double pi = juce::MathConstants<double>::pi;
 
-#if JUCE_DSP_USE_INTEL_MKL
     convo::ScopedAlignedPtr<double> window_vals(static_cast<double*>(convo::aligned_malloc(numSamples * sizeof(double), 64)));
 
     // Initialize to 1.0
@@ -265,39 +238,6 @@ static void applyAsymmetricTukey(double* data, int numSamples)
 
     // Apply window
     vdMul(numSamples, data, window_vals.get(), data);
-#else
-    // 3. 窓関数の適用
-    for (int i = 0; i < numSamples; ++i)
-    {
-        double window_val = 1.0;
-        if (i < peakIndex)
-        {
-            // --- 左側 (開始点からピークまで) ---
-            if (peakIndex > 0)
-            {
-                double x_pre = static_cast<double>(i) / static_cast<double>(peakIndex);
-                if (x_pre < alpha_pre)
-                {
-                    window_val = 0.5 * (1.0 + std::cos(pi * (x_pre / alpha_pre - 1.0)));
-                }
-            }
-        }
-        else
-        {
-            // --- 右側 (ピークから終了点まで) ---
-            if (dist_to_end > 0)
-            {
-                double x_post = static_cast<double>(i - peakIndex) / dist_to_end;
-                if (x_post > (1.0 - alpha_post))
-                {
-                    double phase = (x_post - (1.0 - alpha_post)) / alpha_post;
-                    window_val = 0.5 * (1.0 + std::cos(pi * phase));
-                }
-            }
-        }
-        data[i] *= window_val;
-    }
-#endif
 }
 
 // 2の累乗へ切り上げ (Helper)
@@ -424,18 +364,14 @@ public:
     {
         juce::ScopedNoDenormals noDenormals; // バックグラウンド処理でのDenormal対策
 
-#if JUCE_INTEL
         // MKL/AVX最適化のためにFTZ/DAZフラグを明示的に設定
         // ScopedNoDenormalsでも設定されるが、MKLの要件として明示しておく
         _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
         _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-#endif
 
-#if JUCE_DSP_USE_INTEL_MKL
         // VML (Vector Math Library) のDenormal扱いをゼロに設定
         // vdHypot, vdLn 等のパフォーマンス低下を防ぐ
         vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
-#endif
 
         // メモリ確保失敗時の例外処理: std::terminate() を防ぐために try-catch で囲む
         // 早期終了時にフラグを確実にリセットするためのRAIIヘルパー
@@ -527,13 +463,21 @@ public:
             }
             else
             {
-                if (!file.existsAsFile()) return result;
+                if (!file.existsAsFile())
+                {
+                    result.errorMessage = "IR file not found: " + file.getFullPathName();
+                    return result;
+                }
 
                 juce::AudioFormatManager formatManager;
                 formatManager.registerBasicFormats();
                 std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
 
-                if (!reader) return result;
+                if (!reader)
+                {
+                    result.errorMessage = "Unsupported audio format or corrupted file: " + file.getFileName();
+                    return result;
+                }
 
                 // サイズの妥当性チェック (lengthInSamples が int の範囲を超える場合への対策)
                 const int64 fileLength = reader->lengthInSamples;
@@ -541,17 +485,24 @@ public:
                 static constexpr int64 MAX_FILE_LENGTH = 2147483647;  // int の最大値
 
                 if (fileLength > MAX_FILE_LENGTH) {
-                    DBG("LoaderThread: ファイルサイズが大きすぎます。");
+                    result.errorMessage = "IR file is too large (exceeds 2GB samples limit).";
+                    DBG("LoaderThread: " << result.errorMessage);
                     return result;
                 }
                 if (numChannels <= 0) {
-                    DBG("LoaderThread: チャンネル数が不正です。");
+                    result.errorMessage = "Invalid channel count in IR file.";
+                    DBG("LoaderThread: " << result.errorMessage);
                     return result;
                 }
 
                 // AudioFormatReader::read は float のみ対応のため、一時バッファを使用
                 juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
-                reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true);
+                if (!reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true))
+                {
+                    result.errorMessage = "Failed to read audio data from file.";
+                    DBG("LoaderThread: " << result.errorMessage);
+                    return result;
+                }
 
                 // convo::input_transform::convertFloatToDoubleHighQuality はアライメント済みストア命令(_mm256_store_pd)を使用するため、
                 // 出力先バッファは32byteアライメントされている必要がある。
@@ -590,13 +541,7 @@ public:
                 for (int ch = 0; ch < result.loadedIR.getNumChannels(); ++ch)
                 {
                     const double* data = result.loadedIR.getReadPointer(ch);
-#if JUCE_DSP_USE_INTEL_MKL
                     double energy = cblas_ddot(result.loadedIR.getNumSamples(), data, 1, data, 1);
-#else
-                    double energy = 0.0;
-                    for (int i = 0; i < result.loadedIR.getNumSamples(); ++i)
-                        energy += data[i] * data[i];
-#endif
 
                     if (energy > maxChannelEnergy)
                         maxChannelEnergy = energy;
@@ -609,6 +554,10 @@ public:
                     const double makeup = 1.0 / std::sqrt(maxChannelEnergy);
                     const double safetyMargin = 0.5011872336272722;
                     result.loadedIR.applyGain(makeup * safetyMargin);
+                }
+                else
+                {
+                    DBG("LoaderThread: IR energy is too low (near silence), skipping Auto Makeup to prevent zero division.");
                 }
             }
 
@@ -655,6 +604,7 @@ public:
                     if (!checkCancellation(shouldStop, nullptr))
                     {
                         DBG("LoaderThread: Resampling failed (produced 0 samples or overflow).");
+                        result.errorMessage = "Resampling failed (unknown error).";
                     }
                     return result;
                 }
@@ -780,10 +730,6 @@ public:
                 }
             }
 
-            // 10. 新しいConvolutionの構築 (Non-uniform Partitioned Convolution)
-            result.newConv = new StereoConvolver();
-            result.newConv->addRef();
-
             // IRデータを格納するアラインされたバッファを準備 (Rebuild用に保持)
             convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
             convo::ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
@@ -803,44 +749,69 @@ public:
             int internalBlockSize = juce::nextPowerOfTwo(blockSize);
             auto sizing = computeMasteringSizing(internalBlockSize, result.targetLength);
 
-            // 【重要修正】NUC構築をLoaderThreadから完全に分離（このファイルに完全適合版）
-            // SetImpulse / DftiCommitDescriptor / mkl_malloc はメッセージスレッドでのみ許可
-            // ScopedAlignedPtrのexplicitコンストラクタ対応 + return文修正 + originalIRバックアップ
-
             // Display用コピーを作成 (move前に)
             if (owner.isVisualizationEnabled())
                 result.displayIR = trimmed;
 
-            // AudioBufferをヒープに移動してポインタ化（ラムダでのムーブキャプチャ用）
-            auto loadedIRPtr = std::make_unique<juce::AudioBuffer<double>>(std::move(result.loadedIR));
-            auto displayIRPtr = std::make_unique<juce::AudioBuffer<double>>(std::move(result.displayIR));
-
-            juce::MessageManager::callAsync([weakOwner = this->weakOwner,
-                                             irL = std::move(irL),
-                                             irR = std::move(irR),
-                                             length   = result.targetLength,
-                                             sr       = sampleRate,
-                                             peak     = irPeakLatency,
-                                             maxFFT   = sizing.maxFFTSize,
-                                             known    = internalBlockSize,
-                                             first    = sizing.firstPartition,
-                                             callQ    = blockSize,
-                                             isReb    = isRebuild,
-                                             file     = file,
-                                             lIR      = std::move(loadedIRPtr),
-                                             dIR      = std::move(displayIRPtr)]() mutable
+            if (thread == nullptr) // Synchronous mode (Worker Thread)
             {
-                if (auto* owner = weakOwner.get())
-                {
-                    owner->finalizeNUCEngineOnMessageThread(std::move(irL),
-                                                            std::move(irR),
-                                                            length, sr, peak, maxFFT, known, first, callQ, isReb, file,
-                                                            std::move(lIR), std::move(dIR));
-                }
-            });
+                result.newConv = new StereoConvolver();
+                result.newConv->addRef();
 
-            result.success = false; // finalize側でapplyNewStateを実行するため、ここではスキップ
-            return result;          // C2561エラー完全解消
+                if (result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency,
+                                         sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize))
+                {
+                    result.success = true;
+                }
+                else
+                {
+                    result.newConv->release();
+                    result.newConv = nullptr;
+                    result.success = false;
+                    result.errorMessage = "Failed to initialize NUC engine (Memory allocation or MKL setup failed).";
+                }
+                return result;
+            }
+            else // Async mode (Loader Thread)
+            {
+                // std::function (callAsync) requires CopyConstructible, so we cannot capture move-only types directly.
+                // We wrap them in a shared_ptr.
+                struct AsyncState {
+                    convo::ScopedAlignedPtr<double> irL;
+                    convo::ScopedAlignedPtr<double> irR;
+                    std::unique_ptr<juce::AudioBuffer<double>> loadedIR;
+                    std::unique_ptr<juce::AudioBuffer<double>> displayIR;
+                };
+
+                auto state = std::make_shared<AsyncState>();
+                state->irL = std::move(irL);
+                state->irR = std::move(irR);
+                state->loadedIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.loadedIR));
+                state->displayIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.displayIR));
+
+                juce::MessageManager::callAsync([weakOwner = this->weakOwner, state,
+                                                 length   = result.targetLength,
+                                                 sr       = sampleRate,
+                                                 peak     = irPeakLatency,
+                                                 maxFFT   = sizing.maxFFTSize,
+                                                 known    = internalBlockSize,
+                                                 first    = sizing.firstPartition,
+                                                 callQ    = blockSize,
+                                                 isReb    = isRebuild,
+                                                 file     = file]() mutable
+                {
+                    if (auto* owner = weakOwner.get())
+                    {
+                        owner->finalizeNUCEngineOnMessageThread(std::move(state->irL),
+                                                                std::move(state->irR),
+                                                                length, sr, peak, maxFFT, known, first, callQ, isReb, file,
+                                                                std::move(state->loadedIR), std::move(state->displayIR));
+                    }
+                });
+
+                result.success = false; // finalize側でapplyNewStateを実行するため、ここではスキップ
+                return result;
+            }
 
             if (checkCancellation(shouldStop, nullptr)) return result;
 
@@ -916,12 +887,10 @@ ConvolverProcessor::~ConvolverProcessor()
     convolution.store(nullptr);
     if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
 
-#if JUCE_DSP_USE_INTEL_MKL
     if (fftHandle) {
         DftiFreeDescriptor(&fftHandle);
         fftHandle = nullptr;
     }
-#endif
 }
 
 void ConvolverProcessor::timerCallback()
@@ -934,14 +903,12 @@ void ConvolverProcessor::timerCallback()
 //--------------------------------------------------------------
 void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
-#if JUCE_DSP_USE_INTEL_MKL
     // 旧descriptor未解放防止
     if (fftHandle) {
         DftiFreeDescriptor(&fftHandle);
         fftHandle = nullptr;
         fftHandleSize = 0;
     }
-#endif
 
     const bool rateChanged = (std::abs(currentSampleRate.load() - sampleRate) > 1e-6);
     const bool blockChanged = (currentBufferSize != samplesPerBlock);
@@ -1111,13 +1078,11 @@ void ConvolverProcessor::releaseResources()
     dryBuffer.setSize(0, 0);
     smoothingBuffer.setSize(0, 0);
 
-#if JUCE_DSP_USE_INTEL_MKL
     if (fftHandle) {
         DftiFreeDescriptor(&fftHandle);
         fftHandle = nullptr;
         fftHandleSize = 0;
     }
-#endif
 
     // Release active convolution engine
     convolution.store(nullptr, std::memory_order_release);
@@ -1201,7 +1166,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     const int fftSize = juce::nextPowerOfTwo(numSamples * 4);
 
     // メモリ使用量過多を防ぐためのFFTサイズ制限
-    static constexpr int MAX_MINPHASE_FFT_SIZE = 2097152; // 2^21
+    static constexpr int MAX_MINPHASE_FFT_SIZE = 8388608; // 2^23
     if (fftSize > MAX_MINPHASE_FFT_SIZE)
     {
         DBG("convertToMinimumPhase: fftSize (" << fftSize << ") exceeds limit. Skipping min-phase conversion to prevent excessive memory usage.");
@@ -1210,7 +1175,6 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
 
     juce::AudioBuffer<double> minPhaseIR(linearIR.getNumChannels(), numSamples);
 
-#if JUCE_DSP_USE_INTEL_MKL
     // MKL DFTI は自然順序で扱えるため、旧FFT経路の permute 順序問題を回避できる。
     DFTI_DESCRIPTOR_HANDLE dfti = nullptr;
     DftiGuard dftiGuard { &dfti };
@@ -1342,10 +1306,6 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     }
 
     return minPhaseIR;
-#else
-    // 非MKLビルドでは最小位相変換を無効化 (Linear Phaseへフォールバック)。
-    return {};
-#endif
 }
 
 //--------------------------------------------------------------
@@ -1686,7 +1646,6 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     const int copyLen = (std::min)(numSamples, fftSize);
     float* dst = cachedFFTBuffer.get();
 
-#if JUCE_DSP_USE_INTEL_MKL
     // MKL FFT (One-shot)
     if (fftHandle && fftHandleSize != fftSize)
     {
@@ -1726,15 +1685,6 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     float* magBuf = dst + fftSize + 16;
     vcAbs(numBins, reinterpret_cast<const MKL_Complex8*>(dst), magBuf);
     std::memcpy(dst, magBuf, numBins * sizeof(float));
-#else
-    juce::dsp::FFT fft(static_cast<int>(std::log2(fftSize)));
-    // Double -> Float conversion for display FFT
-    for (int i = 0; i < copyLen; ++i)
-        dst[i] = static_cast<float>(src[i]);
-
-    fft.performFrequencyOnlyForwardTransform(cachedFFTBuffer);
-    const int numBins = fftSize / 2 + 1;
-#endif
 
     // スムーシング適用 (Linear Magnitudeに対して行う)
     std::vector<float> linearMags(cachedFFTBuffer.get(), cachedFFTBuffer.get() + numBins);
@@ -2275,7 +2225,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 const double* dryChunkGains = dryGains + processed;
 
                 int i = 0;
-#if defined(__AVX2__)
                 const int vLoop = validWetSamples / 16 * 16; // Unroll 4x (16 doubles)
                 if (vLoop > 0)
                 {
@@ -2329,7 +2278,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG));
                     _mm256_storeu_pd(dst + i, vOut);
                 }
-#endif
                 for (; i < validWetSamples; ++i)
                 {
                     dst[i] = wetSignal[i] * wetChunkGains[i] + dry[i] * dryChunkGains[i];
@@ -2346,7 +2294,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 // 定常状態 (99%のケース) -> AVX2最適化
                 int i = 0;
 
-#if defined(__AVX2__)
                 const __m256d vWetG = _mm256_set1_pd(wetG);
                 const __m256d vDryG = _mm256_set1_pd(dryG);
 
@@ -2390,7 +2337,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG));
                     _mm256_storeu_pd(dst + i, vOut);
                 }
-#endif
                 // 残りの有効なWetサンプル (Scalar)
                 for (; i < validWetSamples; ++i)
                 {
@@ -2525,16 +2471,42 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
     auto* newConv = new StereoConvolver();
     newConv->addRef();
 
+    if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
+                      maxFFTSize, knownBlockSize, firstPartition, preferredCallSize))
+    {
+        // 元の applyNewState と同一の流れで適用
+        applyNewState(newConv,
+                      *loadedIR, // 参照渡し
+                      sr,
+                      length,
+                      isRebuild,
+                      irFile,
+                      *displayIR); // 参照渡し
+    }
+    else
+    {
+        // 初期化失敗時はオブジェクトを破棄し、エラーハンドリングへ
+        newConv->release();
+        handleLoadError("Failed to initialize NUC engine (Memory allocation or MKL setup failed).");
+    }
+}
 
-    newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
-                  maxFFTSize, knownBlockSize, firstPartition, preferredCallSize);
+void ConvolverProcessor::StereoConvolver::reset()
+{
+    if (nucConvolvers[0]) nucConvolvers[0]->Reset();
+    if (nucConvolvers[1]) nucConvolvers[1]->Reset();
+}
 
-    // 元の applyNewState と同一の流れで適用
-    applyNewState(newConv,
-                  *loadedIR, // 参照渡し
-                  sr,
-                  length,
-                  isRebuild,
-                  irFile,
-                  *displayIR); // 参照渡し
+void ConvolverProcessor::StereoConvolver::process(int channel, const double* in, double* out, int numSamples)
+{
+    if (channel < 0 || channel >= 2 || !nucConvolvers[channel])
+    {
+        std::memset(out, 0, numSamples * sizeof(double));
+        return;
+    }
+
+    nucConvolvers[channel]->Add(in, numSamples);
+    const int got = nucConvolvers[channel]->Get(out, numSamples);
+    if (got < numSamples)
+        std::memset(out + got, 0, (numSamples - got) * sizeof(double));
 }

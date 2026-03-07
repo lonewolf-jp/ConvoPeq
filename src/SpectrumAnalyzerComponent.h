@@ -61,11 +61,7 @@ private:
     static constexpr float FFT_DISPLAY_MIN_DB = -100.0f;
     static constexpr float FFT_DISPLAY_MIN_MAG = 1e-9f;
 
-#if JUCE_DSP_USE_INTEL_MKL
     DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
-#else
-    juce::dsp::FFT fft { static_cast<int>(std::log2(NUM_FFT_POINTS)) };
-#endif
     juce::dsp::WindowingFunction<float> window { NUM_FFT_POINTS, juce::dsp::WindowingFunction<float>::hann };
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
     convo::ScopedAlignedPtr<float> fftTimeDomainBuffer;
@@ -159,8 +155,6 @@ private:
     juce::ToggleButton analyzerEnableButton;
 
     // ── アンダーラン対策 ──
-    static constexpr int ANALYZER_TIMER_HZ_ON  = 50;
-    static constexpr int ANALYZER_TIMER_HZ_OFF = 15;
     int underflowCount = 0;
     static constexpr float UNDERRUN_DECAY_DB = 1.5f; // データ不足時の減衰量 (dB/frame) @ 60fps -> 90dB/s
 

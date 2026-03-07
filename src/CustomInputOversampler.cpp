@@ -99,7 +99,6 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
                                               const double* __restrict coeffs,
                                               int n) noexcept
 {
-#if defined(__AVX2__)
     // x: upHistory buffer with offset, not guaranteed to be aligned. Use loadu.
     // coeffs: convCoeffsReversed buffer, guaranteed to be 64-byte aligned. Use load.
     __m256d acc0 = _mm256_setzero_pd();
@@ -136,12 +135,6 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     for (; i < n; ++i)
         sum += x[i] * coeffs[i];
     return sum;
-#else
-    double sum = 0.0;
-    for (int i = 0; i < n; ++i)
-        sum += x[i] * coeffs[i];
-    return sum;
-#endif
 }
 
 void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax)

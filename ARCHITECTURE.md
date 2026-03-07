@@ -18,7 +18,7 @@
 - **コンパイラ**: MSVC 19.44.35222.0 (Visual Studio 2022 v17.11以降)
 - **ターゲットOS**: Windows 11 x64 (Windows SDK 10.0.26100.0 / Target 10.0.26200)
 - **ハードウェア要件**: AVX2命令セット対応CPU (Intel Haswell / AMD Zen以降)
-- **外部ライブラリ (任意)**: Intel oneAPI Math Kernel Library (oneMKL) - FFT処理の高速化に使用
+- **外部ライブラリ (必須)**: Intel oneAPI Math Kernel Library (oneMKL) - FFT処理およびベクトル演算の高速化に使用
 
 ## 設計の核心原則
 

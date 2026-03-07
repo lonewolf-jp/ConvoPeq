@@ -14,8 +14,11 @@
 //
 // ■ スレッド安全設計:
 //   - loadImpulseResponse(): Message Thread で実行。バックグラウンドスレッドで読み込みを行い、完了後に atomic に差し替えます (RCU)。ロード中も音切れなく古いIRで処理を継続します。
-//   - process(): Audio Thread で実行。MKL Non-Uniform Partitioned Convolution (NUC) のみを使用します。
+//   - process(): Audio Thread で実行。MKLNonUniformConvolver を使用してパーティション分割畳み込みを行います。
 //   - パラメータ: std::atomic でスレッドセーフ。Audio Thread内でのメモリ確保やIR再ロードは行いません。
+//
+// ■ エンジン:
+//   Intel MKL Non-Uniform Partitioned Convolution (NUC) エンジンを使用します。
 //============================================================================
 
 #include <JuceHeader.h>
@@ -196,14 +199,11 @@ public:
     void forceCleanup();
 
 
-
 private:
     void timerCallback() override;
     class LoaderThread;
 
-    //----------------------------------------------------------
-    // Stereo processing wrapper (MKL NUC only)
-    //----------------------------------------------------------
+    // Stereo processing wrapper
     struct StereoConvolver
     {
         double* irData[2] = { nullptr, nullptr };
@@ -213,8 +213,8 @@ private:
 
         int latency = 0;
         int irLatency = 0; // IR由来の遅延 (ピーク位置)
-        int callQuantumSamples = 0;
-        int prewarmedMaxSamples = 0;
+        int callQuantumSamples = 0;    // Audio Thread でのNUC呼び出し量子
+        int prewarmedMaxSamples = 0;   // Message Thread でプリウォーム済みの最大呼び出し長
 
         // Clone用に初期化パラメータを保存
         double storedSampleRate = 0.0;
@@ -224,8 +224,7 @@ private:
 
         StereoConvolver() = default;
 
-        ~StereoConvolver()
-        {
+        ~StereoConvolver() {
             if (irData[0]) convo::aligned_free(irData[0]);
             if (irData[1]) convo::aligned_free(irData[1]);
         }
@@ -235,18 +234,23 @@ private:
         void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }
         void release() const { if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this; }
 
-        StereoConvolver(const StereoConvolver&) = delete;
+        // コピーコンストラクタは禁止 (NUCエンジンは複製コストが高く、状態を持つため)
+        StereoConvolver(const StereoConvolver& other) = delete;
+
+        // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        void init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize)
+        bool init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize)
         {
+            // Safety: Free existing data if init is called multiple times (Leak prevention)
             if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
             if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
 
+            // Ownership transfer
             irData[0] = irL;
             irData[1] = irR;
             irDataLength = length;
-            irLatency = peakDelay;
+            this->irLatency = peakDelay;
             callQuantumSamples = juce::jmax(1, preferredCallSize);
             prewarmedMaxSamples = callQuantumSamples;
             storedSampleRate = sr;
@@ -254,44 +258,39 @@ private:
             storedKnownBlockSize = knownBlockSize;
             storedFirstPartition = firstPartition;
 
-            latency = 0;
-
-            void* raw0 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
-            void* raw1 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
-
-            if (raw0 == nullptr || raw1 == nullptr)
             {
-                if (raw0 != nullptr) convo::aligned_free(raw0);
-                if (raw1 != nullptr) convo::aligned_free(raw1);
+                // ── MKL Non-Uniform Partitioned Convolution (NUC) ──
+                // new完全禁止 → aligned_malloc + placement new (規約準拠)
+                void* rn0 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
+                new (rn0) convo::MKLNonUniformConvolver();
+                nucConvolvers[0].reset(static_cast<convo::MKLNonUniformConvolver*>(rn0));
+
+                void* rn1 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
+                new (rn1) convo::MKLNonUniformConvolver();
+                nucConvolvers[1].reset(static_cast<convo::MKLNonUniformConvolver*>(rn1));
+
+                if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize) &&
+                    nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize))
+                {
+                    latency   = nucConvolvers[0]->getLatency();
+                    DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
+                    return true;
+                }
+                // NUC セットアップ失敗
                 nucConvolvers[0].reset();
                 nucConvolvers[1].reset();
-                return;
+                return false;
             }
-
-            new (raw0) convo::MKLNonUniformConvolver();
-            new (raw1) convo::MKLNonUniformConvolver();
-            nucConvolvers[0].reset(static_cast<convo::MKLNonUniformConvolver*>(raw0));
-            nucConvolvers[1].reset(static_cast<convo::MKLNonUniformConvolver*>(raw1));
-
-            if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize)
-                && nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize))
-            {
-                latency = nucConvolvers[0]->getLatency();
-                DBG("Convolver: MKL NUC Engine Active. Latency: " << latency << " samples");
-                return;
-            }
-
-            nucConvolvers[0].reset();
-            nucConvolvers[1].reset();
-            latency = 0;
-            DBG("Convolver: MKL NUC setup failed.");
         }
 
+        // Deep Copyを作成する
         StereoConvolver* clone() const
         {
             auto newConv = new StereoConvolver();
             if (irDataLength > 0 && irData[0] && irData[1])
             {
+                // メモリを新規確保してコピー (RAIIによる例外安全性確保)
+                // init() に所有権を渡すまでは unique_ptr で管理し、途中で例外が発生してもリークしないようにする
                 convo::ScopedAlignedPtr<double> l(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
                 convo::ScopedAlignedPtr<double> r(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
 
@@ -366,10 +365,8 @@ private:
     int cachedFFTBufferCapacity = 0;
     std::atomic<double> currentSampleRate { 0.0 };
 
-#if JUCE_DSP_USE_INTEL_MKL
     DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
     int fftHandleSize = 0;
-#endif
 
     //----------------------------------------------------------
     // Dry信号バッファ（Mix用）

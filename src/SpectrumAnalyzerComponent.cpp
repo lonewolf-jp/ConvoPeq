@@ -62,7 +62,6 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
         setAnalyzerEnabled(analyzerEnableButton.getToggleState());
     };
     addAndMakeVisible(analyzerEnableButton);
-    setAnalyzerEnabled(analyzerEnableButton.getToggleState());
 
 
     engine.addChangeListener(this);
@@ -73,7 +72,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     prepareFFT();
     lastTime = juce::Time::getMillisecondCounterHiRes() * 0.001;
-    startTimerHz(analyzerEnableButton.getToggleState() ? ANALYZER_TIMER_HZ_ON : ANALYZER_TIMER_HZ_OFF);
+    startTimerHz(60); // 60fps: UIの滑らかさとFIFO消費の安定化のため
 }
 
 //--------------------------------------------------------------
@@ -82,7 +81,6 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 {
     stopTimer();
-    engine.setAnalyzerEnabled(false);
     releaseFFT();
     engine.removeChangeListener(this);
     engine.getEQProcessor().removeChangeListener(this);
@@ -91,10 +89,9 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 
 void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
 {
-    // レベルメーター表示のためにタイマーは常時稼働するが、OFF時は低頻度に落とす
-    startTimerHz(enabled ? ANALYZER_TIMER_HZ_ON : ANALYZER_TIMER_HZ_OFF);
-
-    engine.setAnalyzerEnabled(enabled);
+    // レベルメーター更新のためにタイマーは常に稼働させる
+    if (!isTimerRunning())
+        startTimerHz(60);
 
     if (enabled)
     {
@@ -103,17 +100,12 @@ void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
     else
     {
         analyzerEnableButton.setButtonText("Analyzer: OFF");
-        // OFF時はスペクトラム表示を一度だけクリアして以後はメーター更新のみ行う
-        smoothedBuffer.fill(MIN_DB);
-        peakBuffer.fill(MIN_DB);
-        underflowCount = 0;
-        repaint();
     }
+
 }
 
 void SpectrumAnalyzerComponent::prepareFFT()
 {
-#if JUCE_DSP_USE_INTEL_MKL
     if (fftHandle)
     {
         DftiFreeDescriptor(&fftHandle);
@@ -130,18 +122,15 @@ void SpectrumAnalyzerComponent::prepareFFT()
     if (DftiCommitDescriptor(fftHandle) != DFTI_NO_ERROR) {
         DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; return;
     }
-#endif
 }
 
 void SpectrumAnalyzerComponent::releaseFFT()
 {
-#if JUCE_DSP_USE_INTEL_MKL
     if (fftHandle)
     {
         DftiFreeDescriptor(&fftHandle);
         fftHandle = nullptr;
     }
-#endif
 }
 
 //--------------------------------------------------------------
@@ -154,15 +143,15 @@ void SpectrumAnalyzerComponent::timerCallback()
     const double dt = std::max(0.0, now - lastTime);
     lastTime = now;
 
-    if (!isShowing())
-        return;
-
+    // スペアナがOFFの場合、スペアナグラフをクリア
     if (!analyzerEnableButton.getToggleState())
     {
-        // OFF時はFFT処理を完全停止し、低頻度タイマーでレベルメーターのみ更新
+        smoothedBuffer.fill(MIN_DB);
+        peakBuffer.fill(MIN_DB);
         repaint();
-        return;
     }
+
+    if (!isShowing() || !analyzerEnableButton.getToggleState()) return;
 
     // ── サンプルレート変更検知 (タイマー駆動) ──
     // デバイス変更などでサンプルレートが変わった場合に追従する
@@ -253,7 +242,6 @@ void SpectrumAnalyzerComponent::timerCallback()
 
 
     // 3. 窓関数適用とFFT実行
-#if JUCE_DSP_USE_INTEL_MKL
     // MKL: Real -> Complex conversion + Windowing
     // fftWorkBuffer is float array of size NUM_FFT_POINTS * 2
     // We treat it as interleaved complex: re, im, re, im...
@@ -288,26 +276,8 @@ void SpectrumAnalyzerComponent::timerCallback()
 
             rawBuffer[i] = (magnitude > FFT_DISPLAY_MIN_MAG) ? juce::Decibels::gainToDecibels(magnitude) : FFT_DISPLAY_MIN_DB;
         }
-
-    }
-#else
-      std::memcpy(fftWorkBuffer.get(), fftTimeDomainBuffer.get(), NUM_FFT_POINTS * sizeof(float));
-
-    std::fill(fftWorkBuffer.get() + NUM_FFT_POINTS, fftWorkBuffer.get() + NUM_FFT_POINTS * 2, 0.0f);
-    window.multiplyWithWindowingTable(fftWorkBuffer.get(), NUM_FFT_POINTS);
-    fft.performFrequencyOnlyForwardTransform(fftWorkBuffer.get());
-
-    // 4. dB変換して出力
-    const int numBins = std::min(static_cast<int>(rawBuffer.size()), NUM_FFT_BINS);
-    for (int i = 0; i < numBins; ++i)
-    {
-        const float magnitude = fftWorkBuffer.get()[i] * FFT_MAGNITUDE_SCALE;
-        rawBuffer[i] = (magnitude > FFT_DISPLAY_MIN_MAG)
-                        ? juce::Decibels::gainToDecibels(magnitude)
-                        : FFT_DISPLAY_MIN_DB;
     }
 
-#endif
 
 
     for (size_t i = 0; i < smoothedBuffer.size(); ++i)
@@ -359,7 +329,7 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
         // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
         if (!isTimerRunning())
         {
-            startTimerHz(analyzerEnableButton.getToggleState() ? ANALYZER_TIMER_HZ_ON : ANALYZER_TIMER_HZ_OFF);
+            startTimerHz(60);
         }
         updateEQData();
 
@@ -377,7 +347,7 @@ void SpectrumAnalyzerComponent::eqBandChanged(EQProcessor* processor, int /*band
         // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
         if (!isTimerRunning())
         {
-            startTimerHz(analyzerEnableButton.getToggleState() ? ANALYZER_TIMER_HZ_ON : ANALYZER_TIMER_HZ_OFF);
+            startTimerHz(60);
         }
         updateEQData();
     }
@@ -391,7 +361,7 @@ void SpectrumAnalyzerComponent::eqGlobalChanged(EQProcessor* processor)
         // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
         if (!isTimerRunning())
         {
-            startTimerHz(analyzerEnableButton.getToggleState() ? ANALYZER_TIMER_HZ_ON : ANALYZER_TIMER_HZ_OFF);
+            startTimerHz(60);
         }
         updateEQData();
     }
@@ -585,8 +555,10 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
     const float plotW = static_cast<float>(area.getWidth());
     const float plotH = static_cast<float>(area.getHeight());
 
-    // FIFOにはデバイスレートのデータを書き込むため、描画スケールもデバイスレートを使用する。
-    const double sampleRate = engine.getSampleRate();
+    // FIFOに書き込まれるデータはオーバーサンプリング後のレート（処理サンプルレート）で
+    // あるため、binFactor/nyquistの計算にはgetProcessingSampleRate()を使用しなければ
+    // ならない。getSampleRate()（デバイスレート）を使うと、8倍OSの場合に8倍のずれが生じる。
+    const double sampleRate = engine.getProcessingSampleRate();
     if (sampleRate <= 0.0) return;
     const int   halfFFT    = NUM_FFT_BINS;
     const float barWidth   = plotW / static_cast<float>(NUM_DISPLAY_BARS);

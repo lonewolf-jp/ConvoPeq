@@ -5,13 +5,9 @@
 #include <cmath>
 #include <cstring>
 
-#if JUCE_INTEL
  #include <immintrin.h>
-#endif
 
-#if JUCE_DSP_USE_INTEL_MKL
  #include <mkl.h>
-#endif
 
 namespace convo::input_transform
 {
@@ -22,7 +18,6 @@ namespace convo::input_transform
     inline void sanitizeAndLimit(double* __restrict data, int numSamples) noexcept
     {
         // data は ScopedAlignedPtr<double> 由来なので 64byte アライン保証
-#if defined(__AVX2__)
         const __m256d vMax     = _mm256_set1_pd(1.0);
         const __m256d vMin     = _mm256_set1_pd(-1.0);
         const __m256d vZero    = _mm256_setzero_pd();
@@ -56,15 +51,6 @@ namespace convo::input_transform
             if (!std::isfinite(v) || std::abs(v) < kDenormThreshold) v = 0.0;
             data[i] = std::clamp(v, -1.0, 1.0);
         }
-#else
-        for (int i = 0; i < numSamples; ++i)
-        {
-            double v = data[i];
-            if (!std::isfinite(v) || std::abs(v) < kDenormThreshold)
-                v = 0.0;
-            data[i] = std::clamp(v, -1.0, 1.0);
-        }
-#endif
     }
 
     inline void applyHighQuality64BitTransform(double* data, int numSamples) noexcept
@@ -73,12 +59,7 @@ namespace convo::input_transform
             return;
 
         // 1) ヘッドルーム確保 (-0.1dB)
-#if JUCE_DSP_USE_INTEL_MKL
         cblas_dscal(numSamples, kHeadroomScale, data, 1);
-#else
-        for (int i = 0; i < numSamples; ++i)
-            data[i] *= kHeadroomScale;
-#endif
 
         // 2) デノーマル/NaN対策 + 範囲制限
         sanitizeAndLimit(data, numSamples);
@@ -89,7 +70,6 @@ namespace convo::input_transform
         if (src == nullptr || dst == nullptr || numSamples <= 0)
             return;
 
-#if defined(__AVX2__)
         int i = 0;
         const int vEnd = (numSamples / 8) * 8;
         for (; i < vEnd; i += 8)
@@ -102,10 +82,6 @@ namespace convo::input_transform
         }
         for (; i < numSamples; ++i)
             dst[i] = static_cast<double>(src[i]);
-#else
-        for (int i = 0; i < numSamples; ++i)
-            dst[i] = static_cast<double>(src[i]);
-#endif
 
         applyHighQuality64BitTransform(dst, numSamples);
     }
