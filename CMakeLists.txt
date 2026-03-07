@@ -93,16 +93,6 @@ else()
 endif()
 
 #------------------------------------------------------------
-# WDL ライブラリの追加 (Convolution Engine)
-#------------------------------------------------------------
-# WDLはヘッダーオンリーではなく実装ファイルを含むため、ソースとして追加します。
-# WDL_FFT_REALSIZE=8 を定義して double 精度で動作させます。
-set(WDL_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/WDL/WDL/convoengine.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/WDL/WDL/fft.c
-)
-
-#------------------------------------------------------------
 # r8brain-free-src ライブラリの追加
 #------------------------------------------------------------
 add_library(r8brain INTERFACE)
@@ -149,7 +139,6 @@ target_sources(ConvoPeq PRIVATE
     src/AudioEngineProcessor.h
     src/PsychoacousticDither.h
     src/MKLNonUniformConvolver.h
-    ${WDL_SOURCES}
 )
 
 #------------------------------------------------------------
@@ -171,9 +160,6 @@ target_compile_definitions(ConvoPeq PRIVATE
     JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
     JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}"
-    WDL_FFT_REALSIZE=8
-    WDL_FFT_SSE=1
-    WDL_DENORMAL_FIX_DOUBLE
     # Windows/ASIO/SIMD settings preserved for functionality
     JUCE_USE_SSE_INTRINSICS=1
     JUCE_USE_SIMD=1
@@ -188,8 +174,13 @@ target_compile_definitions(ConvoPeq PRIVATE
 
 target_include_directories(ConvoPeq PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/WDL
 )
+
+# AVX2 must be enabled in all configurations for this build.
+if(MSVC)
+    target_compile_options(ConvoPeq PRIVATE /arch:AVX2)
+endif()
+
 
 # ReleaseでLTCG有効化（MSVC用）
 if(MSVC)
@@ -211,16 +202,10 @@ endif()
 set(MKL_LINK static)
 set(MKL_THREADING sequential)
 
-find_package(MKL CONFIG QUIET)
-
-if(MKL_FOUND)
-    message(STATUS "Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.")
-    target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
-    target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
-else()
-    message(STATUS "Intel MKL not found. Using JUCE internal FFT (JUCE_DSP_USE_INTEL_MKL=0).")
-    target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=0)
-endif()
+find_package(MKL CONFIG REQUIRED)
+message(STATUS "Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.")
+target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
 
 #------------------------------------------------------------
 # JUCEヘッダー自動生成 (JuceHeader.h)

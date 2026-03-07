@@ -22,11 +22,10 @@
 #include <mkl.h>
 #endif
 
-#include "WDL/fft.h" // WDL Double precision FFT
 
-static std::once_flag fftInitFlag;
 
 #ifdef _WIN32
+#include <Windows.h>
 #include <timeapi.h>
 #pragma comment(lib, "winmm.lib")
 #include <processthreadsapi.h> // For disabling efficiency mode
@@ -51,6 +50,22 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
 #pragma warning(push)
 #pragma warning(disable: 6815)
 #endif
+
+#if !JUCE_DSP_USE_INTEL_MKL
+#error "JUCE_DSP_USE_INTEL_MKL must be enabled for ConvoPeq."
+#endif
+
+    if (!juce::SystemStats::hasAVX2())
+    {
+        juce::NativeMessageBox::showAsync(
+            juce::MessageBoxOptions()
+                .withIconType(juce::MessageBoxIconType::WarningIcon)
+                .withTitle("Unsupported CPU")
+                .withMessage("This build requires AVX2 support.")
+                .withButton("OK"),
+            [this](int) { quit(); });
+        return;
+    }
 
 #ifdef _WIN32
     // システム全体のタイマー精度を 1ms に上げる
@@ -108,8 +123,6 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
 #pragma warning(pop)
 #endif
 
-    // WDL FFTテーブルをメインスレッドで安全に初期化
-    std::call_once(fftInitFlag, [] { WDL_fft_init(); });
 
     // メインウィンドウを生成する
     mainWindow = std::make_unique<MainWindow>(getApplicationName());

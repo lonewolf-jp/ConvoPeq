@@ -62,6 +62,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
         setAnalyzerEnabled(analyzerEnableButton.getToggleState());
     };
     addAndMakeVisible(analyzerEnableButton);
+    setAnalyzerEnabled(analyzerEnableButton.getToggleState());
 
 
     engine.addChangeListener(this);
@@ -72,7 +73,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     prepareFFT();
     lastTime = juce::Time::getMillisecondCounterHiRes() * 0.001;
-    startTimerHz(60); // 60fps: UIの滑らかさとFIFO消費の安定化のため
+    startTimerHz(analyzerEnableButton.getToggleState() ? ANALYZER_TIMER_HZ_ON : ANALYZER_TIMER_HZ_OFF);
 }
 
 //--------------------------------------------------------------
@@ -81,6 +82,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 {
     stopTimer();
+    engine.setAnalyzerEnabled(false);
     releaseFFT();
     engine.removeChangeListener(this);
     engine.getEQProcessor().removeChangeListener(this);
@@ -89,9 +91,10 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 
 void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
 {
-    // レベルメーター更新のためにタイマーは常に稼働させる
-    if (!isTimerRunning())
-        startTimerHz(60);
+    // レベルメーター表示のためにタイマーは常時稼働するが、OFF時は低頻度に落とす
+    startTimerHz(enabled ? ANALYZER_TIMER_HZ_ON : ANALYZER_TIMER_HZ_OFF);
+
+    engine.setAnalyzerEnabled(enabled);
 
     if (enabled)
     {
@@ -100,8 +103,12 @@ void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
     else
     {
         analyzerEnableButton.setButtonText("Analyzer: OFF");
+        // OFF時はスペクトラム表示を一度だけクリアして以後はメーター更新のみ行う
+        smoothedBuffer.fill(MIN_DB);
+        peakBuffer.fill(MIN_DB);
+        underflowCount = 0;
+        repaint();
     }
-
 }
 
 void SpectrumAnalyzerComponent::prepareFFT()
@@ -147,15 +154,15 @@ void SpectrumAnalyzerComponent::timerCallback()
     const double dt = std::max(0.0, now - lastTime);
     lastTime = now;
 
-    // スペアナがOFFの場合、スペアナグラフをクリア
+    if (!isShowing())
+        return;
+
     if (!analyzerEnableButton.getToggleState())
     {
-        smoothedBuffer.fill(MIN_DB);
-        peakBuffer.fill(MIN_DB);
+        // OFF時はFFT処理を完全停止し、低頻度タイマーでレベルメーターのみ更新
         repaint();
+        return;
     }
-
-    if (!isShowing() || !analyzerEnableButton.getToggleState()) return;
 
     // ── サンプルレート変更検知 (タイマー駆動) ──
     // デバイス変更などでサンプルレートが変わった場合に追従する
@@ -352,7 +359,7 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
         // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
         if (!isTimerRunning())
         {
-            startTimerHz(60);
+            startTimerHz(analyzerEnableButton.getToggleState() ? ANALYZER_TIMER_HZ_ON : ANALYZER_TIMER_HZ_OFF);
         }
         updateEQData();
 
@@ -370,7 +377,7 @@ void SpectrumAnalyzerComponent::eqBandChanged(EQProcessor* processor, int /*band
         // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
         if (!isTimerRunning())
         {
-            startTimerHz(60);
+            startTimerHz(analyzerEnableButton.getToggleState() ? ANALYZER_TIMER_HZ_ON : ANALYZER_TIMER_HZ_OFF);
         }
         updateEQData();
     }
@@ -384,7 +391,7 @@ void SpectrumAnalyzerComponent::eqGlobalChanged(EQProcessor* processor)
         // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
         if (!isTimerRunning())
         {
-            startTimerHz(60);
+            startTimerHz(analyzerEnableButton.getToggleState() ? ANALYZER_TIMER_HZ_ON : ANALYZER_TIMER_HZ_OFF);
         }
         updateEQData();
     }
@@ -578,10 +585,8 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
     const float plotW = static_cast<float>(area.getWidth());
     const float plotH = static_cast<float>(area.getHeight());
 
-    // FIFOに書き込まれるデータはオーバーサンプリング後のレート（処理サンプルレート）で
-    // あるため、binFactor/nyquistの計算にはgetProcessingSampleRate()を使用しなければ
-    // ならない。getSampleRate()（デバイスレート）を使うと、8倍OSの場合に8倍のずれが生じる。
-    const double sampleRate = engine.getProcessingSampleRate();
+    // FIFOにはデバイスレートのデータを書き込むため、描画スケールもデバイスレートを使用する。
+    const double sampleRate = engine.getSampleRate();
     if (sampleRate <= 0.0) return;
     const int   halfFFT    = NUM_FFT_BINS;
     const float barWidth   = plotW / static_cast<float>(NUM_DISPLAY_BARS);

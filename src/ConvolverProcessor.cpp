@@ -14,7 +14,6 @@
 #include <new>
 #include <deque>
 
-#include "WDL/fft.h" // WDL Double precision FFT
 #include "CDSPResampler.h"
 #include "AlignedAllocation.h" // For convo::MKLAllocator
 
@@ -53,311 +52,24 @@ namespace
 }
 #endif
 
-#if JUCE_DSP_USE_INTEL_MKL
-//--------------------------------------------------------------
-// MKLConvolver Implementation
-// Uniform Partitioned Convolution using Overlap-Save
-//--------------------------------------------------------------
-bool ConvolverProcessor::MKLConvolver::setup(int partSize, const double* ir, int irLen)
-{
-    // [FIX] Guard against zero/negative partition size (causes integer divide-by-zero)
-    // This happens when uiConvolverProcessor.prepareToPlay() was never called,
-    // leaving currentBufferSize = 0, which propagates as partSize = 0.
-    if (partSize <= 0 || irLen <= 0 || ir == nullptr)
-    {
-        DBG("MKLConvolver::setup: invalid parameters (partSize=" << partSize
-            << ", irLen=" << irLen << "). Returning false to fall back to WDL.");
-        return false;
-    }
-
-    partitionSize = partSize;
-    fftSize = 1;
-    while (fftSize < partitionSize * 2) fftSize <<= 1;
-
-    // ==================== 【CPU是正】originalNumPartitions + power-of-two ====================
-    originalNumPartitions = (irLen + partitionSize - 1) / partitionSize;
-    if (originalNumPartitions == 0) originalNumPartitions = 1;
-
-    numPartitions = juce::nextPowerOfTwo(originalNumPartitions);  // JUCE V8.0.12保証
-    fdlMask        = numPartitions - 1;                         // ビットマスク（message threadのみ）
-
-    // Latency of UPC is one partition
-    latency = partitionSize;
-
-    // Setup MKL DFTI
-    if (fftHandle) { DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; }
-    if (DftiCreateDescriptor(&fftHandle, DFTI_DOUBLE, DFTI_REAL, 1, fftSize) != DFTI_NO_ERROR) return false;
-
-    bool configOk = true;
-    if (DftiSetValue(fftHandle, DFTI_PLACEMENT, DFTI_NOT_INPLACE) != DFTI_NO_ERROR) configOk = false;
-    // Ensure standard complex array format
-    if (configOk && DftiSetValue(fftHandle, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX) != DFTI_NO_ERROR) configOk = false;
-    if (configOk && DftiSetValue(fftHandle, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR) configOk = false;
-
-    if (configOk && DftiCommitDescriptor(fftHandle) != DFTI_NO_ERROR) configOk = false;
-
-    if (!configOk)
-    {
-        DftiFreeDescriptor(&fftHandle);
-        fftHandle = nullptr;
-        return false;
-    }
-
-    // Allocate buffers
-    // IR Freq Domain: (fftSize/2 + 1) complex numbers * numPartitions
-    int complexSize = fftSize / 2 + 1;
-    // 【最適化】パーティションストライドを64byte(8 doubles)境界にアライメント
-    partitionStride = (complexSize * 2 + 7) & ~7;
-
-    // 【バグ修正】irFreqDomainはプリコンピュートループがnumPartitions回書き込むため
-    // numPartitions (power-of-two) 分を確保する必要がある。
-    // originalNumPartitions で確保するとp >= originalNumPartitionsのiterでOOB書き込みが発生する。
-    size_t irAllocSize = static_cast<size_t>(partitionStride) * numPartitions;
-    irFreqDomain.reset(static_cast<double*>(convo::aligned_malloc(irAllocSize * sizeof(double), 64)));
-    juce::FloatVectorOperations::clear(irFreqDomain.get(), static_cast<int>(irAllocSize));
-
-    // FDL用: リングバッファのため power-of-two パーティション数分が必要 (fdlMask = numPartitions - 1)
-    size_t fdlAllocSize = static_cast<size_t>(partitionStride) * numPartitions;
-    fdlLines.reset(static_cast<MKL_Complex16*>(convo::aligned_malloc(fdlAllocSize * sizeof(double), 64)));
-    juce::FloatVectorOperations::clear(reinterpret_cast<double*>(fdlLines.get()), static_cast<int>(fdlAllocSize));
-
-    // Work Buffers
-    fftBuffer.reset(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
-    inputBuffer.reset(static_cast<double*>(convo::aligned_malloc(partitionSize * sizeof(double), 64)));
-    outputBuffer.reset(static_cast<double*>(convo::aligned_malloc(partitionSize * sizeof(double), 64)));
-    prevBlock.reset(static_cast<double*>(convo::aligned_malloc(partitionSize * sizeof(double), 64)));
-    mulTemp.reset(static_cast<MKL_Complex16*>(convo::aligned_malloc(complexSize * sizeof(MKL_Complex16), 64)));
-
-    juce::FloatVectorOperations::clear(inputBuffer.get(), partitionSize);
-    juce::FloatVectorOperations::clear(outputBuffer.get(), partitionSize);
-    juce::FloatVectorOperations::clear(prevBlock.get(), partitionSize);
-
-    // Precompute IR Partitions
-    convo::ScopedAlignedPtr<double> tempTime(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
-    convo::ScopedAlignedPtr<double> tempFreq(static_cast<double*>(convo::aligned_malloc((fftSize + 2) * sizeof(double), 64)));
-
-    for (int p = 0; p < numPartitions; ++p)
-    {
-        juce::FloatVectorOperations::clear(tempTime.get(), fftSize);
-        if (p < originalNumPartitions)   // ← ゼロパディング（音質影響ゼロ）
-        {
-            int copyLen = std::min(partitionSize, irLen - p * partitionSize);
-            if (copyLen > 0)
-                std::memcpy(tempTime.get(), ir + p * partitionSize, copyLen * sizeof(double));
-        }
-        // else: 拡張分は完全ゼロ
-
-        DftiComputeForward(fftHandle, tempTime.get(), tempFreq.get());
-
-        // Copy to IR buffer (interleaved complex)
-        double* dest = irFreqDomain.get() + p * partitionStride;
-        std::memcpy(dest, tempFreq.get(), complexSize * 2 * sizeof(double));
-    }
-
-    inputBufferPos = 0;
-    outputBufferPos = 0;
-    fdlIndex = 0;
-    return true;
-}
-
-void ConvolverProcessor::MKLConvolver::process(const double* in, double* out, int numSamples)
-{
-    int processed = 0;
-    while (processed < numSamples)
-    {
-        // Fill input buffer
-        int toWrite = std::min(numSamples - processed, partitionSize - inputBufferPos);
-        std::memcpy(inputBuffer.get() + inputBufferPos, in + processed, toWrite * sizeof(double));
-        inputBufferPos += toWrite;
-
-        // Process block if full
-        if (inputBufferPos == partitionSize)
-        {
-            // fftBufferはprevBlock + inputBufferで完全に初期化済み → clear不要（毎ブロック16KB無駄書き込みを排除）
-            // Construct FFT input: [PrevBlock, CurrentBlock]
-            std::memcpy(fftBuffer.get(), prevBlock.get(), partitionSize * sizeof(double));
-            std::memcpy(fftBuffer.get() + partitionSize, inputBuffer.get(), partitionSize * sizeof(double));
-
-            // Save current to prev
-            std::memcpy(prevBlock.get(), inputBuffer.get(), partitionSize * sizeof(double));
-            inputBufferPos = 0;
-
-            // Forward FFT
-            // Note: Output of Real->Complex is packed CCS or Permuted.
-            // DFTI_NOT_INPLACE with CCE format is standard.
-            // We use a temp buffer for frequency domain calculation.
-            // Actually, let's use the fdlLines buffer slot for the current block.
-
-            int complexSize = fftSize / 2 + 1;
-            MKL_Complex16* currentFDL = reinterpret_cast<MKL_Complex16*>(reinterpret_cast<double*>(fdlLines.get()) + fdlIndex * partitionStride);
-
-            DftiComputeForward(fftHandle, fftBuffer.get(), currentFDL);
-
-            // Convolution (FDL) - mulTempはaccumulatorなので最初のpのみclear（以降は累積）
-            double* dstBase = reinterpret_cast<double*>(mulTemp.get());
-            if (originalNumPartitions > 0)
-                juce::FloatVectorOperations::clear(dstBase, complexSize * 2);
-
-            const double* fdlBase = reinterpret_cast<const double*>(fdlLines.get());
-            const double* irBase = reinterpret_cast<const double*>(irFreqDomain.get());
-
-            for (int p = 0; p < originalNumPartitions; ++p)   // ← CPU是正：ここだけoriginalに制限
-            {
-                int lineIdx = (fdlIndex - p + numPartitions) & fdlMask;   // ← % → &（爆速）
-                const double* srcA = fdlBase + lineIdx * partitionStride;
-                const double* srcB = irBase + p * partitionStride;
-                double* dst = dstBase;
-
-                int k = 0;
-#if defined(__AVX2__)
-                const int vEnd = (complexSize >> 1) << 1;
-                for (; k < vEnd; k += 2)
-                {
-                    // Load Accumulator (Aligned)
-                    __m256d acc = _mm256_load_pd(dst + 2 * k);
-                    // Load FDL (Aligned)
-                    __m256d a = _mm256_load_pd(srcA + 2 * k);
-                    // Load IR (Aligned)
-                    __m256d b = _mm256_load_pd(srcB + 2 * k);
-
-                    // Complex Multiply Accumulate: Acc += A * B
-                    // Re = Ar*Br - Ai*Bi
-                    // Im = Ar*Bi + Ai*Br
-
-                    __m256d a_re = _mm256_movedup_pd(a);
-                    __m256d a_im = _mm256_permute_pd(a, 0xF);
-
-                    acc = _mm256_fmadd_pd(a_re, b, acc);
-
-                    __m256d b_swap = _mm256_permute_pd(b, 0x5);
-                    __m256d term2 = _mm256_mul_pd(a_im, b_swap);
-
-                    acc = _mm256_addsub_pd(acc, term2);
-
-                    _mm256_store_pd(dst + 2 * k, acc);
-                }
-#endif
-                for (; k < complexSize; ++k)
-                {
-                    double a_re = srcA[2 * k];
-                    double a_im = srcA[2 * k + 1];
-                    double b_re = srcB[2 * k];
-                    double b_im = srcB[2 * k + 1];
-
-                    dst[2 * k]     += a_re * b_re - a_im * b_im;
-                    dst[2 * k + 1] += a_re * b_im + a_im * b_re;
-                }
-            }
-
-            // Backward FFT
-            DftiComputeBackward(fftHandle, mulTemp.get(), fftBuffer.get());
-
-            // Overlap-Save: Output is the last partitionSize samples
-            std::memcpy(outputBuffer.get(), fftBuffer.get() + partitionSize, partitionSize * sizeof(double));
-
-            outputBufferPos = 0;
-
-            // Advance FDL
-            fdlIndex = (fdlIndex + 1) & fdlMask;   // ← % → &（Audio threadクリーン）
-        }
-
-        // Read from output buffer.
-        // [FIX] toRead is bounded by toWrite, NOT by (numSamples - processed).
-        // Using (numSamples - processed) caused an infinite loop when
-        // outputBufferPos == partitionSize (output exhausted) but
-        // inputBufferPos < partitionSize (input not yet full, so no FFT fired).
-        // In that case toRead == 0 while toWrite > 0, so processed never advanced.
-        // The correct invariant is: input and output advance by the same amount per
-        // iteration (startup latency is absorbed by outputBuffer being pre-zeroed).
-        int toRead = std::min(toWrite, partitionSize - outputBufferPos);
-        if (toRead > 0)
-        {
-            std::memcpy(out + processed, outputBuffer.get() + outputBufferPos, toRead * sizeof(double));
-            outputBufferPos += toRead;
-        }
-        // Zero-fill for any startup latency gap (output buffer exhausted before input fills)
-        if (toRead < toWrite)
-            std::memset(out + processed + toRead, 0, (toWrite - toRead) * sizeof(double));
-
-        processed += toWrite; // Advance by input consumed, not output produced
-    }
-}
-
-void ConvolverProcessor::MKLConvolver::reset()
-{
-    if (inputBuffer) juce::FloatVectorOperations::clear(inputBuffer.get(), partitionSize);
-    if (outputBuffer) juce::FloatVectorOperations::clear(outputBuffer.get(), partitionSize);
-    if (prevBlock) juce::FloatVectorOperations::clear(prevBlock.get(), partitionSize);
-    if (fdlLines) juce::FloatVectorOperations::clear(reinterpret_cast<double*>(fdlLines.get()), partitionStride * numPartitions);
-    inputBufferPos = 0;
-    outputBufferPos = 0;
-    fdlIndex = 0;
-}
-
-ConvolverProcessor::MKLConvolver::~MKLConvolver()
-{
-    if (fftHandle) DftiFreeDescriptor(&fftHandle);
-}
-#endif
-
 void ConvolverProcessor::StereoConvolver::reset()
 {
-#if JUCE_DSP_USE_INTEL_MKL
-    if (useMKLNUC)
-    {
-        if (nucConvolvers[0]) nucConvolvers[0]->Reset();
-        if (nucConvolvers[1]) nucConvolvers[1]->Reset();
-        return;
-    }
-    if (useMKL)
-    {
-        if (mklConvolvers[0]) mklConvolvers[0]->reset();
-        if (mklConvolvers[1]) mklConvolvers[1]->reset();
-        return;
-    }
-#endif
-    convolvers[0].Reset();
-    convolvers[1].Reset();
+    if (nucConvolvers[0]) nucConvolvers[0]->Reset();
+    if (nucConvolvers[1]) nucConvolvers[1]->Reset();
 }
 
 void ConvolverProcessor::StereoConvolver::process(int channel, const double* in, double* out, int numSamples)
 {
-#if JUCE_DSP_USE_INTEL_MKL
-    if (useMKLNUC && nucConvolvers[channel])
-    {
-        // NUC: Add で畳み込みを実行し、Get で出力を取得する
-        nucConvolvers[channel]->Add(in, numSamples);
-        const int got = nucConvolvers[channel]->Get(out, numSamples);
-        if (got < numSamples)
-            std::memset(out + got, 0, (numSamples - got) * sizeof(double));
-        return;
-    }
-    if (useMKL && mklConvolvers[channel])
-    {
-        mklConvolvers[channel]->process(in, out, numSamples);
-        return;
-    }
-#endif
-    // WDL Path
-    WDL_FFT_REAL* inputs[1] = { const_cast<WDL_FFT_REAL*>(in) };
-    convolvers[channel].Add(inputs, numSamples, 1);
-    int avail = convolvers[channel].Avail(numSamples);
-    if (avail < numSamples)
-    {
-        // Should not happen if prewarmed correctly, but fill with silence if it does
-        std::memset(out, 0, numSamples * sizeof(double));
-        return;
-    }
-    WDL_FFT_REAL** outputs = convolvers[channel].Get();
-    if (outputs && outputs[0])
-    {
-        std::memcpy(out, outputs[0], numSamples * sizeof(double));
-    }
-    else
+    if (channel < 0 || channel >= 2 || !nucConvolvers[channel])
     {
         std::memset(out, 0, numSamples * sizeof(double));
+        return;
     }
-    convolvers[channel].Advance(numSamples);
+
+    nucConvolvers[channel]->Add(in, numSamples);
+    const int got = nucConvolvers[channel]->Get(out, numSamples);
+    if (got < numSamples)
+        std::memset(out + got, 0, (numSamples - got) * sizeof(double));
 }
 
 // 前方宣言
@@ -624,7 +336,7 @@ static inline ConvolverSizing computeMasteringSizing(int internalBlockSize, int 
     mfsBase = std::clamp(mfsBase, s.firstPartition, kMFSUpper);
     s.maxFFTSize = nextPow2(mfsBase);
 
-    // WDL安全制約
+    // 畳み込みエンジン安全制約
     if (s.maxFFTSize < s.firstPartition)
         s.maxFFTSize = s.firstPartition;
     if (s.maxFFTSize < internalBlockSize)
@@ -952,7 +664,7 @@ public:
             }
 
             // 5. 高精度型 DC Blocker (1次IIR)
-            // WDLコンボルバー直前に置くため、位相回転を最小限に抑えつつDCを除去する
+            // NUCコンボルバー直前に置くため、位相回転を最小限に抑えつつDCを除去する
             // 超高サンプリングレート（OSR）対応
             if (result.loadedSR > 0.0 && result.loadedIR.getNumSamples() > 0)
             {
@@ -1087,7 +799,7 @@ public:
             std::memcpy(irR.get(), srcR, result.targetLength * sizeof(double));
 
             // 10. 新しいConvolutionの構築 (initメソッドを使用して安全に初期化)
-            // prepareToPlayとロジックを統一し、WDLエンジンのプリウォーミングも行う
+            // prepareToPlayとロジックを統一し、NUCエンジンを同条件で構築する
             int internalBlockSize = juce::nextPowerOfTwo(blockSize);
             auto sizing = computeMasteringSizing(internalBlockSize, result.targetLength);
 
@@ -1251,7 +963,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     auto* conv = convolution.load(std::memory_order_acquire);
     if (conv) {
         // FIX: Oversampling x8時のblockSize/partitionSize不整合対策
-        // WDL_ConvolutionEngine_Div に正しい knownBlockSize を渡すために、エンジンを再構築する。
+        // MKL NUC に正しい knownBlockSize を渡すために、エンジンを再構築する。
         // 既存のエンジンは他スレッドで共有されている可能性があるため、複製して差し替える。
         const int internalBlockSize = juce::nextPowerOfTwo(samplesPerBlock);
 
@@ -1270,7 +982,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
             // 新しいブロックサイズで初期化
             newConv->init(irL.release(), irR.release(),
-                          conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, enableMKL.load(), enableNUC.load());
+                          conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock);
 
             // 差し替え
             convolution.store(newConv, std::memory_order_release);
@@ -1499,7 +1211,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     juce::AudioBuffer<double> minPhaseIR(linearIR.getNumChannels(), numSamples);
 
 #if JUCE_DSP_USE_INTEL_MKL
-    // MKL DFTI は自然順序で扱えるため、WDL_fft の permute 順序問題を回避できる。
+    // MKL DFTI は自然順序で扱えるため、旧FFT経路の permute 順序問題を回避できる。
     DFTI_DESCRIPTOR_HANDLE dfti = nullptr;
     DftiGuard dftiGuard { &dfti };
 
@@ -2110,8 +1822,6 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     useMinPhase.store(other.useMinPhase.load(), std::memory_order_release);
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
     targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
-    enableMKL.store(other.enableMKL.load(), std::memory_order_release);
-    enableNUC.store(other.enableNUC.load(), std::memory_order_release);
 
     // サンプルレート変更時にリビルドできるよう、元のIR情報をコピーする
     // これにより、新しいDSPコアがIRをリサンプリングするためのソース素材を持つことが保証されます。
@@ -2145,8 +1855,6 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
     mixTarget.store(other.mixTarget.load(), std::memory_order_release);
     bypassed.store(other.bypassed.load(), std::memory_order_release);
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
-    enableMKL.store(other.enableMKL.load(), std::memory_order_release);
-    enableNUC.store(other.enableNUC.load(), std::memory_order_release);
 
     // サンプルレートが一致する場合のみ Convolution オブジェクトを同期する。
     // オーバーサンプリング中は DSP側のレート(Nx) != UI側のレート(1x) となるため、
@@ -2497,7 +2205,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // ── Step 6 & 7: Wet信号生成 & Mix (Fused & Optimized) ──
     // 常にコンボリューションを実行し、エンジンの内部状態(オーバーラップバッファ)を維持する。
     // これにより、Mixを0%から上げた際のグリッチを防ぐ。
-    // WDL_ConvolutionEngineを使用
+    // MKL NUC を使用
 
     const double headroom = CONVOLUTION_HEADROOM_GAIN;
 
@@ -2522,12 +2230,12 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
 
     // 追加防御:
-    // WDL呼び出しサイズを量子化し、プリウォーム済みサイズを超える長さは必ず分割する。
+    // NUC呼び出しサイズを量子化し、呼び出し長のばらつきを抑える。
     const int quantizedCallSamples = juce::jmax(1, conv->callQuantumSamples);
     const int prewarmedMaxSamples = juce::jmax(1, conv->prewarmedMaxSamples);
     const int guardedCallSamples = juce::jmin(quantizedCallSamples, prewarmedMaxSamples);
 
-    // WDLへの呼び出しサイズは guardedCallSamples を基準量子として使用する。
+    // NUCへの呼び出しサイズは guardedCallSamples を基準量子として使用する。
     // 実デバイスの可変ブロック長に対応するため、末尾は chunkSamples (< callLen) で安全に処理する。
     // これにより、非倍数ブロックでも無音化せず連続再生を維持する。
     const int callLen = guardedCallSamples;
@@ -2554,7 +2262,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             conv->process(ch, input, wetOut, chunkSamples);
 
             // Note: StereoConvolver::process guarantees output is written to wetOut
-            const double* wdlOut = wetOut;
+            const double* wetSignal = wetOut;
             int validWetSamples = chunkSamples; // Assumed valid after process
 
             // 3. Mix (Fused Loop: Copy + Gain + Mix)
@@ -2573,13 +2281,13 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 {
                     for (; i < vLoop; i += 16)
                     {
-                        _mm_prefetch(reinterpret_cast<const char*>(wdlOut + i + 64), _MM_HINT_T0);
+                        _mm_prefetch(reinterpret_cast<const char*>(wetSignal + i + 64), _MM_HINT_T0);
                         _mm_prefetch(reinterpret_cast<const char*>(dry + i + 64), _MM_HINT_T0);
                         _mm_prefetch(reinterpret_cast<const char*>(wetChunkGains + i + 64), _MM_HINT_T0);
                         _mm_prefetch(reinterpret_cast<const char*>(dryChunkGains + i + 64), _MM_HINT_T0);
 
                         // 1
-                        __m256d vWet0 = _mm256_loadu_pd(wdlOut + i);
+                        __m256d vWet0 = _mm256_loadu_pd(wetSignal + i);
                         __m256d vDry0 = _mm256_loadu_pd(dry + i);
                         __m256d vWetG0 = _mm256_loadu_pd(wetChunkGains + i);
                         __m256d vDryG0 = _mm256_loadu_pd(dryChunkGains + i);
@@ -2587,7 +2295,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         _mm256_storeu_pd(dst + i, vOut0);
 
                         // 2
-                        __m256d vWet1 = _mm256_loadu_pd(wdlOut + i + 4);
+                        __m256d vWet1 = _mm256_loadu_pd(wetSignal + i + 4);
                         __m256d vDry1 = _mm256_loadu_pd(dry + i + 4);
                         __m256d vWetG1 = _mm256_loadu_pd(wetChunkGains + i + 4);
                         __m256d vDryG1 = _mm256_loadu_pd(dryChunkGains + i + 4);
@@ -2595,7 +2303,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         _mm256_storeu_pd(dst + i + 4, vOut1);
 
                         // 3
-                        __m256d vWet2 = _mm256_loadu_pd(wdlOut + i + 8);
+                        __m256d vWet2 = _mm256_loadu_pd(wetSignal + i + 8);
                         __m256d vDry2 = _mm256_loadu_pd(dry + i + 8);
                         __m256d vWetG2 = _mm256_loadu_pd(wetChunkGains + i + 8);
                         __m256d vDryG2 = _mm256_loadu_pd(dryChunkGains + i + 8);
@@ -2603,7 +2311,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         _mm256_storeu_pd(dst + i + 8, vOut2);
 
                         // 4
-                        __m256d vWet3 = _mm256_loadu_pd(wdlOut + i + 12);
+                        __m256d vWet3 = _mm256_loadu_pd(wetSignal + i + 12);
                         __m256d vDry3 = _mm256_loadu_pd(dry + i + 12);
                         __m256d vWetG3 = _mm256_loadu_pd(wetChunkGains + i + 12);
                         __m256d vDryG3 = _mm256_loadu_pd(dryChunkGains + i + 12);
@@ -2614,7 +2322,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 // Handle remaining multiples of 4
                 for (; i < (validWetSamples / 4 * 4); i += 4)
                 {
-                    __m256d vWet = _mm256_loadu_pd(wdlOut + i);
+                    __m256d vWet = _mm256_loadu_pd(wetSignal + i);
                     __m256d vDry = _mm256_loadu_pd(dry + i);
                     __m256d vWetG = _mm256_loadu_pd(wetChunkGains + i);
                     __m256d vDryG = _mm256_loadu_pd(dryChunkGains + i);
@@ -2624,7 +2332,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 #endif
                 for (; i < validWetSamples; ++i)
                 {
-                    dst[i] = wdlOut[i] * wetChunkGains[i] + dry[i] * dryChunkGains[i];
+                    dst[i] = wetSignal[i] * wetChunkGains[i] + dry[i] * dryChunkGains[i];
                 }
 
                 // Wetが無効な区間
@@ -2647,29 +2355,29 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 {
                     for (; i < vLoop; i += 16)
                     {
-                        _mm_prefetch(reinterpret_cast<const char*>(wdlOut + i + 64), _MM_HINT_T0);
+                        _mm_prefetch(reinterpret_cast<const char*>(wetSignal + i + 64), _MM_HINT_T0);
                         _mm_prefetch(reinterpret_cast<const char*>(dry + i + 64), _MM_HINT_T0);
 
                         // 1
-                        __m256d vWet0 = _mm256_loadu_pd(wdlOut + i);
+                        __m256d vWet0 = _mm256_loadu_pd(wetSignal + i);
                         __m256d vDry0 = _mm256_loadu_pd(dry + i);
                         __m256d vOut0 = _mm256_fmadd_pd(vWet0, vWetG, _mm256_mul_pd(vDry0, vDryG));
                         _mm256_storeu_pd(dst + i, vOut0);
 
                         // 2
-                        __m256d vWet1 = _mm256_loadu_pd(wdlOut + i + 4);
+                        __m256d vWet1 = _mm256_loadu_pd(wetSignal + i + 4);
                         __m256d vDry1 = _mm256_loadu_pd(dry + i + 4);
                         __m256d vOut1 = _mm256_fmadd_pd(vWet1, vWetG, _mm256_mul_pd(vDry1, vDryG));
                         _mm256_storeu_pd(dst + i + 4, vOut1);
 
                         // 3
-                        __m256d vWet2 = _mm256_loadu_pd(wdlOut + i + 8);
+                        __m256d vWet2 = _mm256_loadu_pd(wetSignal + i + 8);
                         __m256d vDry2 = _mm256_loadu_pd(dry + i + 8);
                         __m256d vOut2 = _mm256_fmadd_pd(vWet2, vWetG, _mm256_mul_pd(vDry2, vDryG));
                         _mm256_storeu_pd(dst + i + 8, vOut2);
 
                         // 4
-                        __m256d vWet3 = _mm256_loadu_pd(wdlOut + i + 12);
+                        __m256d vWet3 = _mm256_loadu_pd(wetSignal + i + 12);
                         __m256d vDry3 = _mm256_loadu_pd(dry + i + 12);
                         __m256d vOut3 = _mm256_fmadd_pd(vWet3, vWetG, _mm256_mul_pd(vDry3, vDryG));
                         _mm256_storeu_pd(dst + i + 12, vOut3);
@@ -2677,7 +2385,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 }
                 for (; i < (validWetSamples / 4 * 4); i += 4)
                 {
-                    __m256d vWet = _mm256_loadu_pd(wdlOut + i);
+                    __m256d vWet = _mm256_loadu_pd(wetSignal + i);
                     __m256d vDry = _mm256_loadu_pd(dry + i);
                     __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG));
                     _mm256_storeu_pd(dst + i, vOut);
@@ -2686,7 +2394,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 // 残りの有効なWetサンプル (Scalar)
                 for (; i < validWetSamples; ++i)
                 {
-                    dst[i] = wdlOut[i] * wetG + dry[i] * dryG;
+                    dst[i] = wetSignal[i] * wetG + dry[i] * dryG;
                 }
 
                 // Wetが無効な区間 (初期レイテンシー等) -> Dryのみ出力
@@ -2817,12 +2525,9 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
     auto* newConv = new StereoConvolver();
     newConv->addRef();
 
-    const bool useMkl = enableMKL.load(std::memory_order_acquire);
-    const bool useNuc = useMkl && enableNUC.load(std::memory_order_acquire);
 
     newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
-                  maxFFTSize, knownBlockSize, firstPartition, preferredCallSize,
-                  useMkl, useNuc);  // respect current MKL/NUC settings
+                  maxFFTSize, knownBlockSize, firstPartition, preferredCallSize);
 
     // 元の applyNewState と同一の流れで適用
     applyNewState(newConv,

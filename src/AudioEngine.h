@@ -151,6 +151,8 @@ public:
 
     void setAnalyzerSource(AnalyzerSource source) { currentAnalyzerSource.store(source); }
     AnalyzerSource getAnalyzerSource() const { return currentAnalyzerSource.load(); }
+    void setAnalyzerEnabled(bool enabled) noexcept { analyzerEnabled.store(enabled, std::memory_order_release); }
+    bool isAnalyzerEnabled() const noexcept { return analyzerEnabled.load(std::memory_order_acquire); }
 
     void setDitherBitDepth(int bitDepth);
     int getDitherBitDepth() const;
@@ -299,6 +301,7 @@ private:
             bool convBypassed;
             ProcessingOrder order;
             AnalyzerSource analyzerSource;
+            bool analyzerEnabled;
             bool softClipEnabled;
             float saturationAmount;
         };
@@ -405,6 +408,7 @@ DSPCore();
     std::atomic<bool> rebuildRequested { false };
     std::atomic<ProcessingOrder> currentProcessingOrder{ProcessingOrder::ConvolverThenEQ};
     std::atomic<AnalyzerSource> currentAnalyzerSource { AnalyzerSource::Output };
+    std::atomic<bool> analyzerEnabled { false };
     std::atomic<int> ditherBitDepth { 0 }; // 0 = 未初期化 (DeviceSettingsで最大値に設定される)
     std::atomic<bool> softClipEnabled { true };
     std::atomic<float> saturationAmount { 0.5f };

@@ -14,13 +14,8 @@
 //
 // ■ スレッド安全設計:
 //   - loadImpulseResponse(): Message Thread で実行。バックグラウンドスレッドで読み込みを行い、完了後に atomic に差し替えます (RCU)。ロード中も音切れなく古いIRで処理を継続します。
-//   - process(): Audio Thread で実行。WDL_ConvolutionEngine または MKLConvolver を使用してパーティション分割畳み込みを行います。
+//   - process(): Audio Thread で実行。MKL Non-Uniform Partitioned Convolution (NUC) のみを使用します。
 //   - パラメータ: std::atomic でスレッドセーフ。Audio Thread内でのメモリ確保やIR再ロードは行いません。
-//
-// ■ エンジン選択 (JUCE_DSP_USE_INTEL_MKL=1 時):
-//   enableMKL=false                     → WDL Non-Uniform Partitioned (低遅延)
-//   enableMKL=true, enableNUC=false     → MKL Uniform Partitioned (UPC, 従来)
-//   enableMKL=true, enableNUC=true      → MKL Non-Uniform Partitioned (NUC, 新規, 最低遅延)
 //============================================================================
 
 #include <JuceHeader.h>
@@ -30,7 +25,6 @@
 #include <array>
 #include <functional>
 #include <deque>
-#include "WDL/convoengine.h"
 #include "AlignedAllocation.h"
 #include "MKLNonUniformConvolver.h"
 
@@ -201,81 +195,26 @@ public:
     void cleanup();
     void forceCleanup();
 
-    void setMklEnabled(bool enabled) { enableMKL.store(enabled); }
-    bool isMklEnabled() const { return enableMKL.load(); }
 
-    // MKL Non-Uniform Partitioned Convolution (NUC) の有効/無効制御
-    // enableMKL=true かつ enableNUC=true のときのみ NUC エンジンを使用する。
-    // IR リロード後に有効化される (既存の StereoConvolver には影響しない)。
-    void setNucEnabled(bool enabled) { enableNUC.store(enabled); }
-    bool isNucEnabled() const { return enableNUC.load(); }
 
 private:
     void timerCallback() override;
     class LoaderThread;
 
     //----------------------------------------------------------
-    // WDL Convolution Engine
+    // Stereo processing wrapper (MKL NUC only)
     //----------------------------------------------------------
-#if JUCE_DSP_USE_INTEL_MKL
-    // MKL Uniform Partitioned Convolution Engine (Overlap-Save)
-    struct MKLConvolver
-    {
-        int partitionSize = 0;
-        int fftSize = 0;
-        int numPartitions = 0;
-        int originalNumPartitions = 0;   // ← 追加：IR実効パーティション数（ループ制限用）
-        int fdlMask = 0;          // ← 追加：ビットマスク（Audio thread % 完全排除用）
-        int latency = 0;
-        int partitionStride = 0;
-
-        DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
-
-        // Buffers
-        convo::ScopedAlignedPtr<double> inputBuffer;      // Ring buffer for input
-        int inputBufferPos = 0;
-        convo::ScopedAlignedPtr<double> outputBuffer;     // Ring buffer for output
-        int outputBufferPos = 0;
-
-        convo::ScopedAlignedPtr<double> prevBlock;        // Overlap-Save previous block
-        convo::ScopedAlignedPtr<double> fftBuffer;        // Work buffer for FFT (2 * partitionSize)
-        convo::ScopedAlignedPtr<double> irFreqDomain;     // Partitioned IR (Frequency Domain)
-        convo::ScopedAlignedPtr<MKL_Complex16> fdlLines;  // Frequency Domain Delay Line
-        int fdlIndex = 0;
-
-        // Temp buffer for complex multiplication
-        convo::ScopedAlignedPtr<MKL_Complex16> mulTemp;
-
-        bool setup(int partSize, const double* ir, int irLen);
-        void process(const double* in, double* out, int numSamples);
-        void reset();
-        ~MKLConvolver();
-    };
-#endif
-
-    // Stereo processing wrapper
     struct StereoConvolver
     {
-        // WDL_ConvolutionEngine_Div は Non-uniform partitioned convolution を提供し、
-        // 低レイテンシー動作が可能です。
-        std::array<WDL_ConvolutionEngine_Div, 2> convolvers;
         double* irData[2] = { nullptr, nullptr };
 
-#if JUCE_DSP_USE_INTEL_MKL
-        std::array<convo::ScopedAlignedPtr<MKLConvolver>, 2> mklConvolvers;
-        bool useMKL = false;
-
-        // MKL Non-Uniform Partitioned Convolution (NUC) エンジン
-        // useMKL=true かつ useMKLNUC=true のとき、mklConvolvers の代わりに使用される。
         std::array<convo::ScopedAlignedPtr<convo::MKLNonUniformConvolver>, 2> nucConvolvers;
-        bool useMKLNUC = false;
-#endif
         int irDataLength = 0;
 
         int latency = 0;
         int irLatency = 0; // IR由来の遅延 (ピーク位置)
-        int callQuantumSamples = 0;    // Audio Thread でのWDL呼び出し量子
-        int prewarmedMaxSamples = 0;   // Message Thread でプリウォーム済みの最大呼び出し長
+        int callQuantumSamples = 0;
+        int prewarmedMaxSamples = 0;
 
         // Clone用に初期化パラメータを保存
         double storedSampleRate = 0.0;
@@ -285,11 +224,10 @@ private:
 
         StereoConvolver() = default;
 
-        ~StereoConvolver() {
+        ~StereoConvolver()
+        {
             if (irData[0]) convo::aligned_free(irData[0]);
             if (irData[1]) convo::aligned_free(irData[1]);
-            convolvers[0].Reset();
-            convolvers[1].Reset();
         }
 
         // Intrusive Reference Counting
@@ -297,23 +235,18 @@ private:
         void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }
         void release() const { if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this; }
 
-        // コピーコンストラクタは禁止 (WDLエンジンは複製コストが高く、状態を持つため)
-        StereoConvolver(const StereoConvolver& other) = delete;
-
-        // 代入演算子は禁止 (使用しないため)
+        StereoConvolver(const StereoConvolver&) = delete;
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        void init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize, bool preferMKL, bool preferNUC = false)
+        void init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize)
         {
-            // Safety: Free existing data if init is called multiple times (Leak prevention)
             if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
             if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
 
-            // Ownership transfer
             irData[0] = irL;
             irData[1] = irR;
             irDataLength = length;
-            this->irLatency = peakDelay;
+            irLatency = peakDelay;
             callQuantumSamples = juce::jmax(1, preferredCallSize);
             prewarmedMaxSamples = callQuantumSamples;
             storedSampleRate = sr;
@@ -321,155 +254,44 @@ private:
             storedKnownBlockSize = knownBlockSize;
             storedFirstPartition = firstPartition;
 
-#if JUCE_DSP_USE_INTEL_MKL
-            if (preferMKL && preferNUC)
+            latency = 0;
+
+            void* raw0 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
+            void* raw1 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
+
+            if (raw0 == nullptr || raw1 == nullptr)
             {
-                // ── MKL Non-Uniform Partitioned Convolution (NUC) ──
-                // new完全禁止 → aligned_malloc + placement new (規約準拠)
-                void* rn0 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
-                new (rn0) convo::MKLNonUniformConvolver();
-                nucConvolvers[0].reset(static_cast<convo::MKLNonUniformConvolver*>(rn0));
-
-                void* rn1 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
-                new (rn1) convo::MKLNonUniformConvolver();
-                nucConvolvers[1].reset(static_cast<convo::MKLNonUniformConvolver*>(rn1));
-
-                if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize) &&
-                    nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize))
-                {
-                    useMKL    = true;
-                    useMKLNUC = true;
-                    latency   = nucConvolvers[0]->getLatency();
-                    DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
-                    return;
-                }
-                // NUC セットアップ失敗 → UPC へフォールバック
+                if (raw0 != nullptr) convo::aligned_free(raw0);
+                if (raw1 != nullptr) convo::aligned_free(raw1);
                 nucConvolvers[0].reset();
                 nucConvolvers[1].reset();
+                return;
             }
 
-            if (preferMKL)
-            {
-                useMKL = true;
-                // 【有効バグ修正】new完全禁止 → aligned_malloc + 明示的デストラクタ（規約準拠・リーク/DftiFreeDescriptor防止）
-                // 【バグ修正】reset()はptr->~T()を呼ぶため、placement newの前にreset()してはならない。
-                // メモリ確保→構築→reset()の順で行う（例外安全性も確保）。
-                void* raw0 = convo::aligned_malloc(sizeof(MKLConvolver), 64);
-                new (raw0) MKLConvolver();   // 先に構築してからScopedAlignedPtrに所有権移譲
-                mklConvolvers[0].reset(static_cast<MKLConvolver*>(raw0));
-                void* raw1 = convo::aligned_malloc(sizeof(MKLConvolver), 64);
-                new (raw1) MKLConvolver();
-                mklConvolvers[1].reset(static_cast<MKLConvolver*>(raw1));
+            new (raw0) convo::MKLNonUniformConvolver();
+            new (raw1) convo::MKLNonUniformConvolver();
+            nucConvolvers[0].reset(static_cast<convo::MKLNonUniformConvolver*>(raw0));
+            nucConvolvers[1].reset(static_cast<convo::MKLNonUniformConvolver*>(raw1));
 
-                // Use knownBlockSize as partition size for MKL UPC
-                if (mklConvolvers[0]->setup(knownBlockSize, irData[0], irDataLength) &&
-                    mklConvolvers[1]->setup(knownBlockSize, irData[1], irDataLength))
-                {
-                    latency = mklConvolvers[0]->latency;
-                    DBG("Convolver: MKL UPC Engine Active. Latency: " << latency << " samples");
-                    return;
-                }
-                // Fallback to WDL if MKL setup fails
-                // 【バグ修正】ScopedAlignedPtr::reset()は内部でptr->~T()を呼ぶため、
-                // 明示的デストラクタ呼び出しは不要。reset()のみで正しくデストラクタ+free。
-                mklConvolvers[0].reset();  // ~MKLConvolver() + aligned_free を安全に実行
-                mklConvolvers[1].reset();
+            if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize)
+                && nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize))
+            {
+                latency = nucConvolvers[0]->getLatency();
+                DBG("Convolver: MKL NUC Engine Active. Latency: " << latency << " samples");
+                return;
             }
-            useMKL    = false;
-            useMKLNUC = false;
-#endif
 
-            WDL_ImpulseBuffer impL_stack, impR_stack;
-            impL_stack.samplerate = sr;
-            impR_stack.samplerate = sr;
-            impL_stack.SetNumChannels(1);
-            impR_stack.SetNumChannels(1);
-
-            // LoaderThreadと同様に、Resize + memcpy パターンを使用して安全に初期化
-            // これにより、WDL内部でのバッファ管理が確実になり、targetLength基準での動作が保証される
-            impL_stack.impulses[0].Resize(irDataLength);
-            impR_stack.impulses[0].Resize(irDataLength);
-
-            std::memcpy(impL_stack.impulses[0].Get(), irData[0], irDataLength * sizeof(double));
-            std::memcpy(impR_stack.impulses[0].Get(), irData[1], irDataLength * sizeof(double));
-
-            // WDL_ConvolutionEngine_Div の初期化
-            // latency_allowed=0 で低レイテンシーモードを有効化
-            convolvers[0].SetImpulse(&impL_stack, maxFFTSize, knownBlockSize, 0, 0, firstPartition);
-            convolvers[1].SetImpulse(&impR_stack, maxFFTSize, knownBlockSize, 0, 0, firstPartition);
-
-            // WDLエンジンのレイテンシーを取得 (通常は0またはパーティションサイズ依存)
-            // WDL_ConvolutionEngine::GetLatency() はサンプル数を返す
-            latency = convolvers[0].GetLatency();
-            DBG("Convolver: WDL Engine Active. Latency: " << latency << " samples");
-
-            // プリウォーミング (Audio Threadでの後追い確保回避)
-            // WDL_ConvolutionEngine_Div::Add/Avail/Get は内部キューの拡張を伴う場合があるため、
-            // Message Thread側で実運用に近い呼び出しを行って必要なバッファを先に確保しておく。
-            auto prewarmConvolver = [](WDL_ConvolutionEngine_Div& engine, int callSamples)
-            {
-                const int warmupSamples = juce::jmax(1, callSamples);
-                const int latencySamples = juce::jmax(engine.GetLatency(), warmupSamples);
-                const int warmupBlocks = juce::jlimit(32, 2048,
-                                                      (latencySamples + warmupSamples - 1) / warmupSamples + 64);
-
-                for (int i = 0; i < warmupBlocks; ++i)
-                {
-                    engine.Add(nullptr, warmupSamples, 1);
-                    const int avail = engine.Avail(warmupSamples);
-                    if (avail > 0)
-                    {
-                        (void)engine.Get();
-                        engine.Advance(avail);
-                    }
-                }
-
-                // 高水位プリウォーム:
-                // Avail/Get を Advance せずに回し、内部出力キューの容量を先に拡張させる。
-                const int queuePrimeBlocks = juce::jlimit(8, 512, warmupBlocks / 2);
-                for (int i = 0; i < queuePrimeBlocks; ++i)
-                {
-                    engine.Add(nullptr, warmupSamples, 1);
-                    if (engine.Avail(warmupSamples) > 0)
-                        (void)engine.Get();
-                }
-
-                // 末尾の残留分を完全にドレインして初期状態へ戻す
-                const int maxDrainIterations = warmupBlocks + queuePrimeBlocks + 64;
-                for (int i = 0; i < maxDrainIterations; ++i)
-                {
-                    const int avail = engine.Avail(warmupSamples);
-                    if (avail <= 0)
-                        break;
-                    (void)engine.Get();
-                    engine.Advance(avail);
-                }
-
-                // 末尾の残留分を軽くフラッシュ
-                for (int i = 0; i < 8; ++i)
-                {
-                    const int avail = engine.Avail(warmupSamples);
-                    if (avail <= 0)
-                        break;
-                    (void)engine.Get();
-                    engine.Advance(avail);
-                }
-            };
-
-            prewarmConvolver(convolvers[0], callQuantumSamples);
-            prewarmConvolver(convolvers[1], callQuantumSamples);
-            convolvers[0].Reset();
-            convolvers[1].Reset();
+            nucConvolvers[0].reset();
+            nucConvolvers[1].reset();
+            latency = 0;
+            DBG("Convolver: MKL NUC setup failed.");
         }
 
-        // Deep Copyを作成する
         StereoConvolver* clone() const
         {
             auto newConv = new StereoConvolver();
             if (irDataLength > 0 && irData[0] && irData[1])
             {
-                // メモリを新規確保してコピー (RAIIによる例外安全性確保)
-                // init() に所有権を渡すまでは unique_ptr で管理し、途中で例外が発生してもリークしないようにする
                 convo::ScopedAlignedPtr<double> l(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
                 convo::ScopedAlignedPtr<double> r(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
 
@@ -477,11 +299,7 @@ private:
                 {
                     std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
-#if JUCE_DSP_USE_INTEL_MKL
-                    newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, useMKL, useMKLNUC);
-#else
-                    newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, false, false);
-#endif
+                    newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples);
                 }
             }
             return newConv;
@@ -529,8 +347,6 @@ private:
     std::atomic<bool> useMinPhase{false};
     std::atomic<float> targetIRLengthSec{IR_LENGTH_DEFAULT_SEC};
     std::atomic<float> smoothingTimeSec{SMOOTHING_TIME_DEFAULT_SEC};
-    std::atomic<bool> enableMKL { true };
-    std::atomic<bool> enableNUC { false }; // MKL Non-Uniform Partitioned Convolution (NUC)
 
     //----------------------------------------------------------
     // IR情報

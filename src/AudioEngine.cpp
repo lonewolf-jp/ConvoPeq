@@ -284,9 +284,6 @@ void AudioEngine::initialize()
     // Start worker thread
     rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
 
-    // NUCエンジンを有効化（品質安定化済み実装）
-    uiConvolverProcessor.setMklEnabled(true);
-    uiConvolverProcessor.setNucEnabled(true);
 
     // 初期DSP構築 (デフォルト設定)
     // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
@@ -703,8 +700,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // [FIX] uiConvolverProcessor の currentBufferSize を必ず最新の bufferSize に同期する。
     // この呼び出しが欠けていると currentBufferSize == 0 のまま残り、
-    // IR読み込み時に LoaderThread が blockSize=0 でMKLConvolver::setup(0,...) を呼んで
-    // numPartitions = (irLen - 1) / 0 → ゼロ除算クラッシュが発生する。
+    // IR読み込み時に blockSize=0 が渡ると NUC 初期化失敗や無音化の原因になる。
     // prepareToPlay は Message Thread から呼ばれることが保証されているので安全。
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
 
@@ -1334,6 +1330,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
         const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
         const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
+        const bool analyzerOn = analyzerEnabled.load(std::memory_order_acquire);
         const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
         const float satAmt = saturationAmount.load(std::memory_order_relaxed);
 
@@ -1344,7 +1341,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
         // 処理委譲
-        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt}); // スマートポインタでDSPを呼び出し
+        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, {eqBypassed, convBypassed, order, analyzerSource, analyzerOn, softClip, satAmt}); // スマートポインタでDSPを呼び出し
     }
     else
     {
@@ -1392,6 +1389,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
     const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
     const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
+    const bool analyzerOn = analyzerEnabled.load(std::memory_order_acquire);
     const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
     const float satAmt = saturationAmount.load(std::memory_order_relaxed);
 
@@ -1401,7 +1399,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
     dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear,
-                       {eqBypassed, convBypassed, order, analyzerSource, softClip, satAmt});
+                       {eqBypassed, convBypassed, order, analyzerSource, analyzerOn, softClip, satAmt});
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
@@ -1479,10 +1477,10 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
             osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
     }
 
-    // ── Analyzer Input Tap (Pre-DSP) ──
-    if (state.analyzerSource == AnalyzerSource::Input)
+    // ── Analyzer Input Tap (Pre-DSP / Device Rate) ──
+    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Input)
     {
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
+        pushToFifo(originalBlock, audioFifo, audioFifoBuffer);
     }
 
     int numProcSamples = (int)processBlock.getNumSamples();
@@ -1542,12 +1540,6 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 
     //----------------------------------------------------------
 
-    // ── Analyzer Output Tap (Post-DSP) ──
-    if (state.analyzerSource == AnalyzerSource::Output)
-    {
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
-    }
-
     // ダウンサンプリング (結果は processBuffer に書き戻される)
     if (oversamplingFactor > 1)
     {
@@ -1555,11 +1547,16 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         processBlock = originalBlock;
     }
 
+    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
+    {
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
+    }
+
     //----------------------------------------------------------
     // 出力レベル計算 (DC除去後のクリーンな信号で計測)
     //----------------------------------------------------------
-    // オーバーサンプリング有効時は、ダウンサンプリング後の信号(originalBlock)を使用する
-    const float outputLinear = measureLevel(originalBlock);
+    // オーバーサンプリング有効時は、ダウンサンプリング後の信号(processBlock)を使用する
+    const float outputLinear = measureLevel(processBlock);
     outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
 
     processOutput(bufferToFill, numSamples);
@@ -1637,8 +1634,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
             osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
     }
 
-    if (state.analyzerSource == AnalyzerSource::Input)
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
+    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Input)
+        pushToFifo(originalBlock, audioFifo, audioFifoBuffer);
 
     const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
     const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
@@ -1683,16 +1680,18 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         }
     }
 
-    if (state.analyzerSource == AnalyzerSource::Output)
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
-
     if (oversamplingFactor > 1)
     {
         oversampling.processDown(processBlock, originalBlock, static_cast<int>(originalBlock.getNumChannels()));
         processBlock = originalBlock;
     }
 
-    const float outputLinear = measureLevel(originalBlock);
+    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
+    {
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
+    }
+
+    const float outputLinear = measureLevel(processBlock);
     outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
 
     processOutputDouble(buffer, numSamples);
