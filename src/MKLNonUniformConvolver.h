@@ -28,6 +28,7 @@
 #include <mkl.h>
 #include <mkl_dfti.h>
 #include <atomic>
+#include <cstdint>
 #include <JuceHeader.h>  // juce::nextPowerOfTwo, JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR
 
 namespace convo
@@ -102,6 +103,7 @@ private:
         int fdlMask       = 0;   // = numParts - 1 (巡回インデックス用)
         int complexSize   = 0;   // = fftSize / 2 + 1
         int partStride    = 0;   // double 換算 complexSize*2 を 8-double アライン
+        int irOffset      = 0;   // 元 IR 内での開始オフセット (サンプル)
         bool isImmediate  = false; // true = L0 (Add() 内で即時処理)
 
         // ── MKL ──
@@ -127,11 +129,14 @@ private:
         // ── 状態変数 (Audio Thread) ──
         int  fdlIndex   = 0;   // FDL の現在書き込みインデックス
         int  inputPos   = 0;   // 入力蓄積バッファ内の書き込み位置
+        int64_t processedBlocks = 0; // このレイヤーで処理完了したブロック数
+        int  pendingBaseFdlIdx = 0; // 分割積算対象ブロックの基準FDLインデックス
+        int  pendingNextPart   = 0; // 次に積算するIRパーティション番号
+        int  preferredPartsPerCall = 1; // CPU平準化用の目安パーティション数
+        int64_t pendingBlockStartSample = 0; // 分割積算対象ブロックの開始サンプル
+        bool pendingActive = false; // 分割積算中ジョブが存在するか
         double* inputAccBuf = nullptr; // mkl_malloc(partSize * sizeof(double), 64) 入力蓄積
 
-        // ── 遅延処理用 (非 Immediate Layer) ──
-        int  partsPerCallback = 0; // 1 コールバックあたり処理するパーティション数
-        int  nextPart         = 0; // 次に処理すべきパーティション番号
 
         void freeAll() noexcept;
     };
@@ -143,8 +148,11 @@ private:
     // Layer を 1 ブロック分処理 (Forward FFT 済みの currentFDL スロットを使って畳み込み → IFFT → OLA)
     void processLayerBlock(Layer& l) noexcept;
 
-    // リングバッファへの書き込み (2 分割コピー)
-    void ringWrite(const double* src, int n) noexcept;
+    // Layer の複素乗算積算を部分範囲で実行 (CPU平準化用)
+    void accumulateLayerProducts(Layer& l, int baseFdlIdx, int startPart, int endPart) noexcept;
+
+    // 絶対サンプル時刻に対してリングバッファへ加算書き込み (2 分割加算)
+    void ringAddAt(int64_t startSample, const double* src, int n) noexcept;
 
     // リングバッファからの読み出し (2 分割コピー)
     int  ringRead(double* dst, int n) noexcept;
@@ -165,9 +173,11 @@ private:
     double* m_ringBuf     = nullptr;
     int     m_ringSize    = 0;
     int     m_ringMask    = 0;   // = m_ringSize - 1 (power-of-two 前提)
-    int     m_ringWrite   = 0;
-    int     m_ringRead    = 0;
-    int     m_ringAvail   = 0;   // 利用可能サンプル数
+    int64_t m_outputReadSample = 0; // 次に Get() が読み出す絶対サンプル位置
+    int64_t m_inputSampleCursor = 0; // Add() で投入した入力の絶対サンプル位置
+    int64_t m_lastNonSilentInputSample = -(1LL << 60); // 最後に非無音だった入力サンプル位置
+    int     m_irLength = 0; // セット済みIR長 (サンプル)
+    bool    m_zeroInputFastPathActive = false; // 無音高速パスに入っているか
 
     std::atomic<bool> m_ready { false };
 
