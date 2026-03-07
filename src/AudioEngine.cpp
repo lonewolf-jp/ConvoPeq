@@ -284,7 +284,7 @@ void AudioEngine::initialize()
     // Start worker thread
     rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
 
-    // NUCエンジンの有効化
+    // NUCエンジンを有効化（品質安定化済み実装）
     uiConvolverProcessor.setMklEnabled(true);
     uiConvolverProcessor.setNucEnabled(true);
 

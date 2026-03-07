@@ -85,43 +85,25 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     vmlSetMode(VML_HA | VML_FTZDAZ_ON);
 
     // ────────────────────────────────────────────────
-    // レイヤー構成決定
-    //   L0: partSize = max(blockSize, 256) を 2の累乗に
-    //   L1: partSize = L0.partSize * 8
-    //   L2: partSize = L1.partSize * 8  (IR が残る場合のみ)
+    // レイヤー構成決定 (品質安定化修正版)
+    // 旧3レイヤー(非即時レイヤー含む)は時間整合されていない出力が混入し、
+    // IRロード後に原音由来のブツ切れ音を発生させるため、現状は単一レイヤーで運用する。
+    // ※ NUC経路自体は維持し、今後は時間整合付き多層合成へ拡張可能。
     // ────────────────────────────────────────────────
     const int l0Part = juce::nextPowerOfTwo(std::max(blockSize, 256));
-    const int l1Part = l0Part * 8;
-    const int l2Part = l1Part * 8;
 
-    // 各レイヤーが担当する IR 範囲
-    // L0: [0,           l0Part * maxL0Parts)
-    // L1: [l0Part*n0,   l0Part*n0 + l1Part * maxL1Parts)
-    // L2: [残り全部]
-    // maxL0Parts / maxL1Parts はレイテンシー対レスポンスのトレードオフ設定
-    constexpr int kMaxL0Parts = 1;   // L0 は 1 パーティション (即時処理)
-    constexpr int kMaxL1Parts = 16;  // L1 は最大 16 パーティション
-
-    const int l0Samples = l0Part * kMaxL0Parts;
-    const int l1Samples = l1Part * kMaxL1Parts;
-
-    // IR を各レイヤーへ割り当て
     struct LayerCfg { int offset; int len; int partSize; bool immediate; };
     LayerCfg cfgs[kNumLayers];
 
     cfgs[0].offset    = 0;
-    cfgs[0].len       = std::min(irLen, l0Samples);
+    cfgs[0].len       = irLen;
     cfgs[0].partSize  = l0Part;
     cfgs[0].immediate = true;
 
-    cfgs[1].offset    = cfgs[0].len;
-    cfgs[1].len       = std::max(0, std::min(irLen - cfgs[0].len, l1Samples));
-    cfgs[1].partSize  = l1Part;
+    // L1/L2 は無効化 (時間整合付き実装まで)
+    cfgs[1].offset = cfgs[1].len = cfgs[1].partSize = 0;
     cfgs[1].immediate = false;
-
-    cfgs[2].offset    = cfgs[0].len + cfgs[1].len;
-    cfgs[2].len       = std::max(0, irLen - cfgs[2].offset);
-    cfgs[2].partSize  = l2Part;
+    cfgs[2].offset = cfgs[2].len = cfgs[2].partSize = 0;
     cfgs[2].immediate = false;
 
     m_numActiveLayers = 0;

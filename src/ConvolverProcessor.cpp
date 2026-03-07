@@ -2527,20 +2527,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     const int prewarmedMaxSamples = juce::jmax(1, conv->prewarmedMaxSamples);
     const int guardedCallSamples = juce::jmin(quantizedCallSamples, prewarmedMaxSamples);
 
-    // WDLへの呼び出しサイズを固定化 (内部再確保防止)
-    // AudioEngineは、processに渡すnumSamplesがguardedCallSamplesの倍数であることを保証する。
-    // この前提が崩れると、最後のチャンクが小さくなり、WDL内部で再確保が発生する可能性がある。
+    // WDLへの呼び出しサイズは guardedCallSamples を基準量子として使用する。
+    // 実デバイスの可変ブロック長に対応するため、末尾は chunkSamples (< callLen) で安全に処理する。
+    // これにより、非倍数ブロックでも無音化せず連続再生を維持する。
     const int callLen = guardedCallSamples;
 
-    // 【Fix Bug #4】jassertはReleaseビルドで消えるため、バッファオーバーランを
-    // 引き起こす可能性がある。Releaseビルドでも有効なRuntime checkに置き換える。
-    if (numSamples % callLen != 0)
-    {
-        jassertfalse; // Debugビルドでは引き続き発火させる
-        // Releaseビルドではバイパスして無音を出力する (バッファ破壊より安全)
-        block.clear();
-        return;
-    }
 
     for (int ch = 0; ch < procChannels; ++ch)
     {
@@ -2554,15 +2545,17 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         int processed = 0;
         while (processed < numSamples)
         {
+            const int chunkSamples = juce::jmin(callLen, numSamples - processed);
+
             // 1. Process Convolution (Unified Interface)
             const double* input = inputBase + processed;
             double* wetOut = wetBase + processed;
 
-            conv->process(ch, input, wetOut, callLen);
+            conv->process(ch, input, wetOut, chunkSamples);
 
             // Note: StereoConvolver::process guarantees output is written to wetOut
             const double* wdlOut = wetOut;
-            int validWetSamples = callLen; // Assumed valid after process
+            int validWetSamples = chunkSamples; // Assumed valid after process
 
             // 3. Mix (Fused Loop: Copy + Gain + Mix)
             double* dst = dstBase + processed;
@@ -2635,7 +2628,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 }
 
                 // Wetが無効な区間
-                for (; i < callLen; ++i)
+                for (; i < chunkSamples; ++i)
                 {
                     dst[i] = dry[i] * dryChunkGains[i];
                 }
@@ -2697,13 +2690,13 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 }
 
                 // Wetが無効な区間 (初期レイテンシー等) -> Dryのみ出力
-                for (; i < callLen; ++i)
+                for (; i < chunkSamples; ++i)
                 {
                     dst[i] = dry[i] * dryG;
                 }
             }
 
-            processed += callLen;
+            processed += chunkSamples;
         }
     }
 }
@@ -2824,9 +2817,12 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
     auto* newConv = new StereoConvolver();
     newConv->addRef();
 
+    const bool useMkl = enableMKL.load(std::memory_order_acquire);
+    const bool useNuc = useMkl && enableNUC.load(std::memory_order_acquire);
+
     newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
                   maxFFTSize, knownBlockSize, firstPartition, preferredCallSize,
-                  true, true);  // useMKL + useMKLNUC
+                  useMkl, useNuc);  // respect current MKL/NUC settings
 
     // 元の applyNewState と同一の流れで適用
     applyNewState(newConv,
