@@ -1,15 +1,15 @@
 @echo off
 chcp 65001 >nul
 REM ============================================================================
-REM build.bat - Windows用ビルドスクリプト (UTF-8)
+REM build.bat - build script for windows terminal (UTF-8)
 REM
-REM 使い方:
+REM How to use:
 REM   build.bat [Debug|Release] [clean]
 REM
-REM 必要な環境:
-REM   - Visual Studio 2022 (17.11以上推奨)
-REM   - CMake 3.22以上
-REM   - JUCE 8.0.12
+REM Build environment:
+REM   - Visual Studio 2022 (17.11 or later)
+REM   - CMake 3.22 or later
+REM   - JUCE 8.0.12 (if you use other version, build will fail.)
 REM   - Intel oneAPI
 REM ============================================================================
 
@@ -18,7 +18,7 @@ echo ConvoPeq - Build Script
 echo ==========================================
 echo.
 
-REM 64-bitツールチェーンを強制
+REM force to use 64-bit tool chain.
 set PreferredToolArchitecture=x64
 
 set BUILD_CONFIG=Release
@@ -29,7 +29,7 @@ if /i "%2"=="clean" (
     if exist "build" rmdir /s /q "build"
 )
 
-REM JUCEディレクトリの確認
+REM Searching JUCE framework dicectory.
 if not exist "JUCE" (
     echo [ERROR] JUCE directory not found!
     echo.
@@ -48,7 +48,7 @@ if not exist "JUCE" (
 echo [CHECK] JUCE Directory: OK
 echo.
 
-REM Intel oneAPI 環境変数の設定 (存在する場合)
+REM setting up Intel oneAPI environment. (if exist.)
 if exist "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat" (
     echo [INFO] Found Intel oneAPI setvars.bat. Executing...
     call "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat" intel64
@@ -59,12 +59,12 @@ if exist "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat" (
     exit /b 1
 )
 
-REM ビルドディレクトリ作成
+REM making build directory.
 echo [1/4] Creating build directory...
 if not exist "build" mkdir build
 cd build
 
-REM CMake設定
+REM setting up CMake.
 echo [2/4] Configuring CMake...
 cmake .. -G "Visual Studio 17 2022" -A x64 -T host=x64
 if errorlevel 1 (
@@ -74,7 +74,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM ビルド実行
+REM building project.
 echo [3/4] Building %BUILD_CONFIG% configuration...
 echo   (This may take a while...)
 cmake --build . --config %BUILD_CONFIG%
