@@ -1,18 +1,15 @@
----
-
-# ConvoPeq v0.3.5 Build Guide – Windows 11 x64  
-*(Fully translated version — Japanese → English)*
+# ConvoPeq v0.3.5 Build Guide – Windows 11 x64
 
 ## Target Environment
 
-- **OS**: Windows 11 x64  
-- **IDE**: Visual Studio Code  
-  - **VS Code Extensions**: C/C++ Extension Pack, CMake Tools  
-- **Compiler**: MSVC 19.44.35222.0 (Visual Studio 2022 17.11 or later)  
-- **SDK**: Windows SDK 10.0.26100.0 (Target: Windows 10.0.26200)  
-- **CMake**: 3.22 or later  
-- **JUCE**: 8.0.12 (Strict)  
-- **C++ Standard**: C++20  
+- **OS**: Windows 11 x64
+- **IDE**: Visual Studio Code
+  - **VS Code Extensions**: C/C++ Extension Pack, CMake Tools
+- **Compiler**: MSVC 19.44.35222.0 (Visual Studio 2022 17.11 or later)
+- **SDK**: Windows SDK 10.0.26100.0 (Target: Windows 10.0.26200)
+- **CMake**: 3.22 or later
+- **JUCE**: 8.0.12 (Strict)
+- **C++ Standard**: C++20
 - **Intel oneAPI**: Base Toolkit (Required, for MKL library)
 
 **Important**: This application is a standalone application dedicated to Windows 11 x64. It cannot be built on macOS or Linux.
@@ -37,9 +34,9 @@ winget install Microsoft.VisualStudioCode
 
 Install the following extensions in VS Code:
 
-- C/C++ Extension Pack  
-- CMake Tools  
-- CMake syntax highlighting  
+- C/C++ Extension Pack
+- CMake Tools
+- CMake syntax highlighting
 
 #### 1.5 Intel oneAPI Base Toolkit (Required)
 
@@ -57,12 +54,12 @@ JUCE is required. r8brain-free-src is already included.
 
 ### 2.2 Directory Structure
 
-- `.vscode/` — VS Code settings  
-- `JUCE/` — JUCE framework (download JUCE 8.0.12 and place here)  
-- `r8brain-free-src/` — r8brain library  
-- `CMakeLists.txt` — CMake configuration  
-- `ProjectMetadata.cmake` — project metadata  
-- `build.bat` — build script  
+- `.vscode/` — VS Code settings
+- `JUCE/` — JUCE framework (download JUCE 8.0.12 and place here)
+- `r8brain-free-src/` — r8brain library
+- `CMakeLists.txt` — CMake configuration
+- `ProjectMetadata.cmake` — project metadata
+- `build.bat` — build script
 
 ---
 
@@ -110,8 +107,8 @@ Open the Developer Command Prompt for VS 2022 and run CMake manually.
 
 VS Code includes preconfigured debug settings.
 
-- Set breakpoints by clicking next to line numbers.  
-- Press **F5** to start debugging.  
+- Set breakpoints by clicking next to line numbers.
+- Press **F5** to start debugging.
 - Use the debug sidebar for additional options.
 
 ---
@@ -122,12 +119,12 @@ VS Code includes preconfigured debug settings.
 
 #### Error: Could not find JUCE
 
-Cause: The `JUCE` folder is missing or empty.  
+Cause: The `JUCE` folder is missing or empty.
 Solution: Ensure the folder exists and re-clone if necessary.
 
 #### Error: LNK1181: cannot open input file 'ole32.lib'
 
-Cause: Windows SDK is not installed.  
+Cause: Windows SDK is not installed.
 Solution: Install Windows 11 SDK via Visual Studio Installer.
 
 ### Warning: C4819 (file cannot be displayed in current code page)
@@ -140,26 +137,27 @@ add_compile_options(/source-charset:utf-8 /execution-charset:utf-8)
 
 ### Build is slow
 
-Tips:  
-- `/MP` is already enabled  
-- Use SSD  
-- Exclude build folder from antivirus  
-- Use Ninja generator  
+Tips:
+
+- `/MP` is already enabled
+- Use SSD
+- Exclude build folder from antivirus
+- Use Ninja generator
 
 ---
 
 ## VS Code Useful Features
 
-- IntelliSense  
-- Formatting shortcuts  
-- Jump to errors  
-- Quick task execution  
+- IntelliSense
+- Formatting shortcuts
+- Jump to errors
+- Quick task execution
 
 ---
 
 ## Build Configuration Customization
 
-This application **requires AVX2 and Intel MKL**.  
+This application **requires AVX2 and Intel MKL**.
 Removing `/arch:AVX2` may cause build or runtime errors.
 
 ---
@@ -170,14 +168,14 @@ The project is optimized for VS Code.
 
 ### Daily Development
 
-- Edit code  
-- Press **F5** to debug  
-- Incremental build runs automatically  
+- Edit code
+- Press **F5** to debug
+- Incremental build runs automatically
 
 ### Release Build for Performance
 
-- Press **Ctrl+Shift+B**  
-- Run the optimized executable  
+- Press **Ctrl+Shift+B**
+- Run the optimized executable
 
 ### Distribution Build
 
@@ -189,15 +187,15 @@ The project is optimized for VS Code.
 
 ### Q: How long does the build take?
 
-- First build: several minutes  
-- Subsequent builds: seconds  
-- Excluding the build folder from antivirus improves speed  
+- First build: several minutes
+- Subsequent builds: seconds
+- Excluding the build folder from antivirus improves speed
 
 ### Q: Audio drops or noise occurs
 
-- Use Release build  
-- Increase buffer size  
-- Avoid heavy CPU operations  
+- Use Release build
+- Increase buffer size
+- Avoid heavy CPU operations
 
 ### Q: ASIO device does not appear
 
@@ -220,5 +218,3 @@ Delete `%APPDATA%\ConvoPeq`.
 ## Collect Support Information
 
 Run the provided PowerShell commands and share the output when reporting issues.
-
----

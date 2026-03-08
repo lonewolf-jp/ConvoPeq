@@ -1,12 +1,10 @@
----
-
 # ConvoPeq v0.3.5 — Architecture Design Document
 
 ## Project Overview
 
-**Name**: ConvoPeq (Convolution + Parametric EQ)  
-**Version**: v0.3.5  
-**Type**: Standalone audio application for Windows 11 x64 only  
+**Name**: ConvoPeq (Convolution + Parametric EQ)
+**Version**: v0.3.5
+**Type**: Standalone audio application for Windows 11 x64 only
 **Purpose**:
 
 - Provide a mastering-grade audio processing environment that integrates a high-precision 20-band parametric equalizer (TPT SVF) and a zero-latency convolver (MKL NUC).
@@ -14,11 +12,11 @@
 
 **Tech stack**:
 
-- **Language**: C++20  
-- **Framework**: JUCE 8.0.12  
-- **Build system**: CMake 3.22+  
-- **Compiler**: MSVC 19.44+ (Visual Studio 2022)  
-- **Target OS**: Windows 11 x64 (AVX2 required)  
+- **Language**: C++20
+- **Framework**: JUCE 8.0.12
+- **Build system**: CMake 3.22+
+- **Compiler**: MSVC 19.44+ (Visual Studio 2022)
+- **Target OS**: Windows 11 x64 (AVX2 required)
 - **External libraries**: Intel oneAPI Math Kernel Library (oneMKL) — FFT, vector math, RNG
 
 ## Core Design Principles
@@ -104,7 +102,7 @@ Analyzer Input Tap (Pre-DSP) → Lock-free FIFO
 │  Option 1: Conv → EQ                 │
 │    ├─ ConvolverProcessor::process()  │
 │    │    └─ MKLNonUniformConvolver    │ (Dry/Wet Mix, Latency Compensation)
-│    │                                  │
+│    │                                 │
 │    └─ EQProcessor::process()         │
 │         ├─ 20-band TPT SVF processing│
 │         │   (AVX2 stereo optimized)  │
@@ -146,13 +144,13 @@ A container for processing executed on the Audio Thread. Using the RCU pattern, 
 
 Heavy operations such as sample-rate changes, buffer-size changes, oversampling configuration changes, and IR loading are executed in a dedicated `rebuildThreadLoop`.
 
-1. The Message Thread issues `requestRebuild`.  
-2. The Worker Thread constructs a new `DSPCore`, performs memory allocation, IR resampling, and FFT plan creation.  
+1. The Message Thread issues `requestRebuild`.
+2. The Worker Thread constructs a new `DSPCore`, performs memory allocation, IR resampling, and FFT plan creation.
 3. Upon completion, `commitNewDSP` is called via the Message Thread to update the pointer.
 
 ### ConvolverProcessor
 
-**Files**: `src/ConvolverProcessor.cpp`, `src/ConvolverProcessor.h`  
+**Files**: `src/ConvolverProcessor.cpp`, `src/ConvolverProcessor.h`
 **Engine**: `MKLNonUniformConvolver` (custom MKL implementation)
 
 #### ConvolverProcessor features
@@ -179,7 +177,7 @@ Heavy operations such as sample-rate changes, buffer-size changes, oversampling 
 
 ### EQProcessor
 
-**Files**: `src/EQProcessor.cpp`, `src/EQProcessor.h`  
+**Files**: `src/EQProcessor.cpp`, `src/EQProcessor.h`
 **Filter type**: TPT SVF (Topology-Preserving Transform State Variable Filter)
 
 #### EQProcessor features
@@ -237,14 +235,12 @@ A smart pointer defined in `src/AlignedAllocation.h`.
 
 ### DeviceSettings
 
-**File**: `src/DeviceSettings.cpp`  
+**File**: `src/DeviceSettings.cpp`
 **Storage**: `%APPDATA%\ConvoPeq\device_settings.xml`
 
 Stored settings include:
 
-- Device type / ID  
-- Sample rate / buffer size  
-- Dither bit depth  
+- Device type / ID
+- Sample rate / buffer size
+- Dither bit depth
 - Oversampling settings
-
----
