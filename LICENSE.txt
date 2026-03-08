@@ -1,0 +1,40 @@
+Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+
+Copyright (c) 2024-2025 [lonewolf-jp]
+
+-------------------------------------------------------------------------------
+License Summary:
+You are free to share (copy and redistribute) and adapt (remix, transform, 
+and build upon) this material under the following terms:
+
+1. Attribution (BY): 
+   You must give appropriate credit, provide a link to the license, 
+   and indicate if changes were made.
+
+2. Non-Commercial (NC): 
+   You may NOT use this material for commercial purposes. This includes, 
+   but is not limited to, selling the software, using it for advertising 
+   revenue, or incorporating it into commercial services or products.
+
+For full legal code, please visit:
+https://creativecommons.org
+-------------------------------------------------------------------------------
+
+Disclaimer:
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Third-Party Libraries:
+This project may link to or incorporate the following libraries, which are 
+governed by their respective licenses:
+- Intel(R) oneAPI Math Kernel Library (oneMKL)
+  (Licensed under Intel Simplified Software License)
+- JUCE Framework V8.0.12
+  (Licensed under JUCE License)
+- r8brain-free-src
+  (Licensed under MIT License)

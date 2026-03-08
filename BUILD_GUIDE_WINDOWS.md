@@ -1,56 +1,55 @@
-# ビルドガイド - Windows 11 x64 + Visual Studio Code + MSVC
+# ConvoPeq v0.3.5 Build Guide - Windows 11 x64
 
-## 対象環境
+## Target Environment
 
 - **OS**: Windows 11 x64
 - **IDE**: Visual Studio Code
-  - **VS Code拡張機能**: C/C++ Extension Pack, CMake Tools
-- **コンパイラ**: MSVC 19.44.35222.0 (Visual Studio 2022 17.11以降)
+  - **VS Code Extensions**: C/C++ Extension Pack, CMake Tools
+- **Compiler**: MSVC 19.44.35222.0 (Visual Studio 2022 17.11 or later)
 - **SDK**: Windows SDK 10.0.26100.0 (Target: Windows 10.0.26200)
-- **CMake**: 3.22以降
-- **JUCE**: 8.0.12（厳密）
-- **C++標準**: C++20
-- **Intel oneAPI**: Base Toolkit、HPC Toolkit (必須, FFT/ベクトル演算用)
-  - **VS Code必要コンポーネント**: Extension Pack for Intel Software Developer Tools、Analysis Configurator for Intel Software Developer Tools
+- **CMake**: 3.22 or later
+- **JUCE**: 8.0.12 (Strict)
+- **C++ Standard**: C++20
+- **Intel oneAPI**: Base Toolkit (Required, for MKL library)
 
-**重要**: 本アプリケーションはWindows 11 x64専用のスタンドアローンアプリケーションです。macOSやLinuxではビルドできません。
+**Important**: This application is a standalone application dedicated to Windows 11 x64. It cannot be built on macOS or Linux.
 
 ---
 
-## セットアップ手順
+## Setup Instructions
 
-### 1. 必須ソフトウェアのインストール
+### 1. Install Required Software
 
-#### 1.1 Visual Studio 2022（ビルドツールのみでOK）
+#### 1.1 Visual Studio 2022 (Build Tools only is OK)
 
-##### オプション1: Visual Studio 2022 Community（推奨）
+##### Option 1: Visual Studio 2022 Community (Recommended)
 
-1. <https://visualstudio.microsoft.com/ja/downloads/> からダウンロード
-2. インストーラー起動
-3. 「C++によるデスクトップ開発」にチェック
-4. インストール
+1. Download from <https://visualstudio.microsoft.com/downloads/>
+2. Launch installer
+3. Check "Desktop development with C++"
+4. Install
 
-##### オプション2: Build Tools for Visual Studio 2022
+##### Option 2: Build Tools for Visual Studio 2022
 
-1. <https://visualstudio.microsoft.com/ja/downloads/#build-tools-for-visual-studio-2022>
-2. 「C++ Build Tools」にチェック
-3. インストール
+1. <https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022>
+2. Check "C++ Build Tools"
+3. Install
 
 #### 1.2 CMake
 
 ```powershell
-# wingetでインストール（Windows 11推奨）
+# Install via winget (Recommended for Windows 11)
 winget install Kitware.CMake
 
-# または公式サイトからインストーラーをダウンロード
+# Or download installer from official site
 # https://cmake.org/download/
 ```
 
-インストール後、PATH確認:
+After installation, verify that CMake is available in PATH:
 
 ```powershell
 cmake --version
-# CMake version 3.22以降が表示されればOK
+# CMake version 3.22or later should be displayed.
 ```
 
 #### 1.3 Visual Studio Code
@@ -65,94 +64,94 @@ winget install Microsoft.VisualStudioCode
 
 #### 1.4 VS Code拡張機能
 
-VS Codeを起動して以下拡張機能をインストール:
+Launch VS Code and install the following extensions:
 
 1. **C/C++ Extension Pack** (ms-vscode.cpptools-extension-pack)
-   - C/C++ IntelliSense, デバッグ, コード参照
+   - C/C++ IntelliSense, debugging, and code navigation
 
 2. **CMake Tools** (ms-vscode.cmake-tools)
-   - CMakeプロジェクトのビルド・実行
+   - Build and run CMake projects
 
 3. **CMake** (twxs.cmake)
-   - CMakeLists.txtのシンタックスハイライト
+   - Syntax highlighting for CMakeLists.txt
 
-または、VS Code内で `Ctrl+Shift+P` → `Extensions: Show Recommended Extensions` で一括インストール可能
+Alternatively, press `Ctrl+Shift+P` in VS Code and run `Extensions: Show Recommended Extensions` to install them all at once.
 
 #### 1.5 Intel oneAPI Base Toolkit (必須)
 
-本アプリケーションのビルドには Intel MKL が必須です:
+本アプリケーションのビルドには **Intel oneMKL (Math Kernel Library)** が必須です。これは Base Toolkit に含まれています。
 
-1. Intel oneAPI Base Toolkit、Intel oneAPI HPC Toolkit からダウンロード
-2. インストールする
-3. デフォルトのインストールパス (`C:\Program Files (x86)\Intel\oneAPI`) を推奨 (`build.bat`が自動検出します)
-4. VS Codeを起動し、拡張機能「Extension Pack for Intel Software Developer Tools」、「Analysis Configurator for Intel Software Developer Tools」をインストール
+1. [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) Download it
+2. Install it
+3. デフォルトのインストールパス (`C:\Program Files (x86)\Intel\oneAPI`) is recommended (`build.bat` が自動検出します)
+   - Note: The HPC Toolkit is not required because the MSVC compiler is used.
 
 ### 2. 依存ライブラリの準備
 
 #### 2.1 ライブラリのダウンロード
 
 ```powershell
-# プロジェクトディレクトリに移動 (例)
+# Move to the project directory (example)
 cd C:\path\to\ConvoPeq
 
 # 1. JUCE 8.0.12 (必須)
 git clone --branch 8.0.12 --depth 1 https://github.com/juce-framework/JUCE.git
 
-# 2. r8brain-free-src (同梱済み)
-# プロジェクトルートに同梱されているため、ダウンロード不要です。
+# 2. r8brain-free-src (Already bundled)
+# It is already included in the project root, so no download is necessary.
 ```
 
-#### 2.2 ディレクトリ構成確認
+#### 2.2 Verify directory structure
 
 ```text
 ConvoPeq/
 ├── .vscode/           # VS Code設定
-├── JUCE/              # JUCEフレームワーク（JUCE framework V8.0.12をダウンロードし自分で作成）
+├── JUCE/              # JUCEフレームワーク（JUCE framework V8.0.12Download itし自分で作成）
 ├── r8brain-free-src/  # r8brainライブラリ
-├── src/               # ソースコード
-├── resources/         # リソースファイル (アイコン)
-├── build/             # ビルド出力（自動作成）
+├── src/               # source code
+├── resources/         # resource files (icons)
+├── build/             # build output (created automatically)
 ├── CMakeLists.txt     # CMake設定
 ├── ProjectMetadata.cmake # プロジェクトメタデータ
 ├── build.bat          # ビルドスクリプト
-├── README.md          # 説明書
-├── ARCHITECTURE.md    # アーキテクチャ設計書
-└── BUILD_GUIDE_WINDOWS.md # ビルドガイド
+├── README.md          # documentation
+├── ARCHITECTURE.md    # architecture design document
+└── BUILD_GUIDE_WINDOWS.md # build guide
 ```
 
 ---
 
 ## ビルド方法
 
-### 方法1: build.batスクリプト（推奨・最も簡単）
+### Method 1: build.batスクリプト（recommended / easiest）
 
-プロジェクトルートに用意された`build.bat`を使用します。Intel MKL環境変数の設定なども自動で行われます。
+プロジェクトルートに用意された`build.bat`Useします。Intel MKL環境変数の設定なども自動で行われます。
 
 ```powershell
-# プロジェクトディレクトリで実行
+# Run in the project directory
 build.bat Release
 
-# Debugビルドの場合
+# For a Debug build
 build.bat Debug
 
-# クリーンビルド（リビルド）
+# Clean build (rebuild)
 build.bat Release clean
 ```
 
-**ビルド成果物の場所**:
+**Build artifact location**:
 
 ```text
 build\ConvoPeq_artefacts\Release\ConvoPeq.exe
 ```
 
-**実行方法**:
+**How to run**:
 
 ```powershell
 cd build\ConvoPeq_artefacts\Release
 "ConvoPeq.exe"
 ```
 
-### 方法2: VS Code CMake Tools（推奨開発環境）
+### Method 2: VS Code CMake Tools（recommended development environment）
 
 #### Step 1: プロジェクトを開く
 
@@ -169,15 +168,15 @@ code .
 
 #### Step 3: ビルド
 
-##### 方法A: ステータスバー
+##### Method A: ステータスバー
 
 - 下部ステータスバーの「Build」ボタンをクリック
 
-##### 方法B: キーボードショートカット
+##### Method B: キーボードショートカット
 
 - `F7` または `Shift+F7`
 
-##### 方法C: コマンドパレット
+##### Method C: コマンドパレット
 
 - `Ctrl+Shift+P` → `CMake: Build`
 
@@ -185,13 +184,13 @@ code .
 
 - 下部ステータスバーの「▶ Run」ボタンをクリック
 
-### 方法3: VS Code タスクを使用
+### Method 3: VS Code タスクUse
 
 1. `Ctrl+Shift+P` → `Tasks: Run Build Task`
 2. 「CMake: Build (Release)」を選択
 3. または `Ctrl+Shift+B`（デフォルトビルドタスクとして設定済み）
 
-### 方法4: PowerShell/CMD（従来型）
+### Method 4: PowerShell/CMD（traditional method）
 
 ```powershell
 # Developer Command Prompt for VS 2022 を開く
@@ -199,7 +198,7 @@ code .
 # CMake設定
 mkdir build
 cd build
-cmake .. -G "Visual Studio 17 2022" -A x64
+cmake .. -G "Visual Studio 17 2022" -A x64 -T host=x64
 
 # Releaseビルド
 cmake --build . --config Release
@@ -213,102 +212,102 @@ ConvoPeq_artefacts\Release\ConvoPeq.exe
 
 ---
 
-## デバッグ方法
+## Debugging
 
 VS Codeにはあらかじめデバッグ設定（`.vscode/launch.json`）が含まれており、すぐにデバッグを開始できます。
 
-### 1. ブレークポイント設定
+### 1. Setting breakpoints
 
-1. VS Codeでソースファイル（例: `src/MainWindow.cpp`）を開きます。
+1. VS Codeでソースファイル（例: `src/MainApplication.cpp`）を開きます。
 2. 行番号の左側をクリックして、赤い丸（ブレークポイント）を表示させます。
 
-### 2. デバッグ開始
+### 2. Start debugging
 
-#### 方法A: キーボードショートカット (推奨)
+#### Method A: キーボードショートカット (recommended)
 
 - **F5** キーを押すと、自動的にDebugビルドが実行され、デバッガが起動します。
 
-#### 方法B: デバッグサイドバー
+#### Method B: デバッグサイドバー
 
 1. 左サイドバーの「実行とデバッグ」アイコン（`Ctrl+Shift+D`）をクリックします。
 2. 上部のドロップダウンリストから **`(Windows) Launch (Debug)`** を選択します。
 3. 緑色の「▶ (デバッグの開始)」ボタンをクリックします。
 
-> **Note**: `(Windows) Launch (Release)` を選択すると、Releaseビルドでデバッグ実行できます（最適化されているため、変数値が見えない場合があります）。
+> **Note**: `(Windows) Launch (Release)` を選択すると、ReleaseビルドでRun debuggingできます（最適化されているため、変数値が見えない場合があります）。
 
-### 3. デバッグ操作
+### 3. Debug controls
 
-- **F5**: 続行 / 次のブレークポイントまで実行
-- **F10**: ステップオーバー (関数に入らず次の行へ)
-- **F11**: ステップイン (関数の中へ入る)
-- **Shift+F11**: ステップアウト (現在の関数を抜ける)
-- **Shift+F5**: デバッグ停止
+- **F5**: Continue / run until next breakpoint
+- **F10**: Step over (next line without entering function)
+- **F11**: Step into (enter function)
+- **Shift+F11**: Step out (exit current function)
+- **Shift+F5**: Stop debugging
 
 ---
 
-## トラブルシューティング
+## Troubleshooting
 
 ### 🔨 ビルドエラー
 
 #### エラー: CMake Error: Could not find JUCE
 
-**原因**: プロジェクトルートに `JUCE` フォルダが存在しないか、空です。
+**Cause**: プロジェクトルートに `JUCE` フォルダが存在しないか、空です。
 
-**解決方法**:
-`JUCE` フォルダが正しく配置されているか確認してください。
+**Solution**:
+`JUCE` フォルダが正しく配置されているかPlease check.。
 
 ```powershell
-# フォルダの確認
+# Check the folder
 dir JUCE
 
-# 空の場合は再度クローン
+# If empty, clone again
 git clone --branch 8.0.12 --depth 1 https://github.com/juce-framework/JUCE.git
 ```
 
 ### エラー: Could not find JUCE
 
-**原因**: JUCEディレクトリが見つからない
+**Cause**: JUCEディレクトリが見つからない
 
-**解決方法**:
+**Solution**:
 
 ```powershell
 # JUCEディレクトリの存在確認
 dir JUCE
 
-# なければクローン
+# Clone if missing
 git clone --branch 8.0.12 --depth 1 https://github.com/juce-framework/JUCE.git
 ```
 
 ### エラー: LNK1181: cannot open input file 'ole32.lib'
 
-**原因**: Windows SDK未インストール
+**Cause**: Windows SDKnot installed
 
-**解決方法**:
+**Solution**:
 
 1. Visual Studio Installer起動
 2. 「変更」→「個別のコンポーネント」
 3. 「Windows 11 SDK (10.0.22621.0)」にチェック
 4. インストール
 
-### 警告: C4819 ファイルは現在のコードページで表示できない
+### Warning: C4819 ファイルは現在のコードページで表示できない
 
-**解決方法**:
+**Solution**:
 `CMakeLists.txt`に既に `/utf-8` オプションが設定されています。
-それでも警告が出る場合:
+それでもWarningが出る場合:
 
 ```cmake
-# CMakeLists.txtに追加
+# CMakeLists.txtにAdd
 add_compile_options(/source-charset:utf-8 /execution-charset:utf-8)
 ```
 
-### ビルドが遅い
+### Build is slow
 
-**最適化方法**:
+**Optimization tips**:
 
-1. `/MP`オプション確認（CMakeLists.txtに既に設定済み）
-2. SSDを使用
+1. `/MP`Check option（CMakeLists.txtに既に設定済み）
+2. SSDUse
 3. ウイルス対策ソフトでbuildフォルダを除外
-4. Ninja generatorを使用:
+4. Ninja generatorUse:
 
    ```powershell
    cmake .. -G Ninja
@@ -317,29 +316,29 @@ add_compile_options(/source-charset:utf-8 /execution-charset:utf-8)
 
 ---
 
-## VS Code便利機能
+## VS CodeUseful features
 
-### IntelliSense（コード補完）
+### IntelliSense（code completion）
 
 - 自動で表示されます
 - `Ctrl+Space`で手動起動
-- `F12`で定義へジャンプ
-- `Shift+F12`で参照を検索
+- `F12`でGo to definition
+- `Shift+F12`でFind references
 
 ### フォーマット
 
-- `Shift+Alt+F`: ファイル全体をフォーマット
-- `Ctrl+K Ctrl+F`: 選択範囲をフォーマット
+- `Shift+Alt+F`: Format entire file
+- `Ctrl+K Ctrl+F`: Format selection
 
-### ビルドエラーへのジャンプ
+### Jump to build errors
 
-- `F8`: 次のエラー/警告
-- `Shift+F8`: 前のエラー/警告
+- `F8`: 次のエラー/Warning
+- `Shift+F8`: 前のエラー/Warning
 
-### タスククイック実行
+### Quick task execution
 
 - `Ctrl+Shift+P` → `Tasks: Run Task`
-- よく使うタスク:
+- Common tasks:
   - CMake: Configure
   - CMake: Build (Release)
   - CMake: Clean
@@ -347,13 +346,13 @@ add_compile_options(/source-charset:utf-8 /execution-charset:utf-8)
 
 ---
 
-## ビルド設定のカスタマイズ
+## Build configuration customization
 
-`CMakeLists.txt` を編集することで、最適化レベルやターゲットアーキテクチャを変更できます。
+`CMakeLists.txt` をEditすることで、最適化レベルやターゲットアーキテクチャを変更できます。
 ただし、本アプリケーションは **AVX2 命令セット** および **Intel MKL** を必須としています。
-`/arch:AVX2` オプションを削除したり、SSE2 にダウングレードすると、ビルドエラーや実行時エラー（不正命令例外）の原因となります。
+`/arch:AVX2` オプションを削除したり、SSE2 にダウングレードすると、ビルドエラーや実行時エラー（不正命令例外）のCauseとなります。
 
-### 警告レベル変更
+### Warningレベル変更
 
 CMakeLists.txt:
 
@@ -363,7 +362,7 @@ if(MSVC)
 endif()
 ```
 
-### カスタムビルドタスク追加
+### カスタムビルドタスクAdd
 
 .vscode/tasks.json:
 
@@ -378,21 +377,21 @@ endif()
 
 ---
 
-## 推奨ワークフロー
+## recommendedワークフロー
 
 本プロジェクトは VS Code での開発に最適化されています。`.vscode` フォルダ内の設定により、ショートカットキーで効率的に開発できます。
 
-### 1. 日常の開発サイクル (Coding & Debugging)
+### 1. Daily development cycle (Coding & Debugging)
 
 **F5** キーを中心としたワークフローです。
 
-1. **編集**: ソースコードを編集・保存します。
-2. **デバッグ実行**: **`F5`** キーを押します。
+1. **Edit**: source codeをEdit・保存します。
+2. **Run debugging**: **`F5`** キーを押します。
    - 自動的に **Debug構成** でインクリメンタルビルドが行われます (`preLaunchTask` により自動実行)。
    - ビルド完了後、デバッガがアタッチされた状態でアプリが起動します。
    - ブレークポイントでの停止、変数の監視、ステップ実行が可能です。
 
-### 2. パフォーマンス確認 (Release Build)
+### 2. Performance verification (Release Build)
 
 最適化された状態での動作確認や、CPU負荷のチェックを行います。
 
@@ -403,11 +402,11 @@ endif()
    - 生成された `build\ConvoPeq_artefacts\Release\ConvoPeq.exe` を実行します。
    - または、コマンドパレットからタスク `Run Application` を実行します。
 
-### 3. 配布用ビルド (Distribution)
+### 3. Distribution build (Distribution)
 
 配布用の実行ファイルを作成する際は、クリーンビルドを行って確実なバイナリを生成します。
 
-**コマンドライン (推奨)**:
+**Command line (recommended)**:
 
 ```powershell
 # クリーンアップしてReleaseビルド
@@ -416,58 +415,58 @@ build.bat Release clean
 
 ---
 
-## よくある質問
+## FAQ
 
 ### Q: ビルドに何分かかりますか？
 
-**A**: 環境により異なります
+**A**: Depends on the environment
 
-- **初回ビルド**: JUCEフレームワーク全体のコンパイルが必要なため、数分（2〜10分）かかります。
-- **2回目以降**: 変更差分のみのビルドとなるため、数秒〜数十秒で完了します。
-- **高速化のコツ**: ウイルス対策ソフトの除外設定に `build` フォルダを追加すると、リンク速度が向上します。
+- **First build**: JUCEフレームワーク全体のコンパイルが必要なため、several minutes（2〜10分）かかります。
+- **2回目以降**: only changed filesのビルドとなるため、数秒〜数十秒で完了します。
+- **Tips for speeding up**: ウイルス対策ソフトの除外設定に `build` フォルダをAddすると、リンク速度が向上します。
 
-### Q: 音が途切れる / ノイズが乗るのですが？
+### Q: Audio drops or noise occurs
 
-**A**: 以下の点を確認してください。
+**A**: Check the following points:
 
-1. **Releaseビルドを使用していますか？** Debugビルドは最適化が無効化されており、リアルタイムオーディオ処理には不向きです。
+1. **ReleaseビルドUseしていますか？** Debugビルドは最適化が無効化されており、リアルタイムオーディオ処理には不向きです。
 2. **バッファサイズは適切ですか？** Audio Settingsでバッファサイズを大きく（例: 512 → 1024）してください。
-3. **高負荷な処理をしていませんか？** 長いIR（数秒以上）の使用や、192kHzなどの高サンプルレート設定はCPU負荷を高めます。
+3. **high CPU load operationsをしていませんか？** 長いIR（数秒以上）の使用や、192kHzなどの高サンプルレート設定はCPU負荷を高めます。
 
-### Q: 特定のASIOデバイスが表示されません
+### Q: Specific ASIO device does not appear
 
-**A**: 不安定なドライバとしてブラックリストに登録されている可能性があります。
-実行ファイルと同じフォルダにある `asio_blacklist.txt` を確認してください。安定動作が確認できている場合は、リストから削除（またはコメントアウト）することで表示されるようになります。
+**A**: It may be blacklisted as an unstable driver.
+same folder as the executableにある `asio_blacklist.txt` をPlease check.。安定動作が確認できている場合は、リストから削除（またはコメントアウト）することで表示されるようになります。
 
 ### Q: VST3 / AU プラグインとしてビルドできますか？
 
-**A**: 現在のバージョンはスタンドアローンアプリケーション専用です。
-ソースコードはJUCEモジュールを使用しているためプラグイン化は可能ですが、`CMakeLists.txt` の修正（`juce_add_plugin`への変更）とラッパーコードの追加が必要です。
+**A**: The current version is standalone‑application only.
+source codeはJUCEモジュールUseしているためプラグイン化は可能ですが、`CMakeLists.txt` の修正（`juce_add_plugin`への変更）とラッパーコードのAddが必要です。
 
 ### Q: Intel MKL は必須ですか？
 
 **A**: はい、必須です。
 本アプリケーションは Intel MKL の高度な FFT およびベクトル演算機能に依存しています。インストールされていない場合、ビルドは失敗します。
 
-### Q: 設定を完全にリセットしたいです
+### Q: Reset all settings
 
-**A**: 以下のフォルダを削除してください。
+**A**: Delete the following folder.
 `%APPDATA%\ConvoPeq`
 （エクスプローラーのアドレスバーに入力すると移動できます）
-ここにはデバイス設定 (`device_settings.xml`) が保存されています。
+Device settings are stored here. (`device_settings.xml`) が保存されています。
 
 ### Q: "LNK1104: cannot open file 'mkl_...'" というエラーが出ます
 
 **A**: Intel MKLのライブラリパスが見つかりません。
-Intel oneAPIの環境変数設定スクリプト (`vars.bat`) を実行したターミナルから `code .` コマンドでVS Codeを起動してください。または、`build.bat` を使用してコマンドラインからビルドしてください（`build.bat` は自動的に環境変数を設定します）。
+Intel oneAPIの環境変数設定スクリプト (`vars.bat`) を実行したターミナルから `code .` コマンドでVS Codeを起動してください。または、`build.bat` UseしてCommand lineからビルドしてください（`build.bat` は自動的に環境変数を設定します）。
 
 ---
 
-## サポート情報収集
+## Collect support information
 
-問題が解決しない場合、以下の情報を収集して報告してください。
+If the issue is not resolved、Collect and report the following information.
 
-### 1. 基本環境情報
+### 1. Basic environment information
 
 PowerShellで以下のコマンドを実行し、出力を共有してください。
 
