@@ -1,57 +1,59 @@
-# ConvoPeq v0.3.5 - アーキテクチャ設計書
+---
 
-## プロジェクト概要
+# ConvoPeq v0.3.5 — Architecture Design Document
 
-**名称**: ConvoPeq (Convolution + Parametric EQ)
-**バージョン**: v0.3.5
-**種類**: Windows 11 x64 専用スタンドアローン・オーディオアプリケーション
-**目的**:
+## Project Overview
 
-- 高精度な20バンド・パラメトリックイコライザー (TPT SVF) とゼロレイテンシー・コンボルバー (MKL NUC) を統合した、マスタリンググレードのオーディオ処理環境を提供すること。
-- システムオーディオやDAW外でのオーディオ信号に対するリアルタイム補正（ルームアコースティック補正、ヘッドホン補正など）。
+**Name**: ConvoPeq (Convolution + Parametric EQ)  
+**Version**: v0.3.5  
+**Type**: Standalone audio application for Windows 11 x64 only  
+**Purpose**:
 
-**技術スタック**:
+- Provide a mastering-grade audio processing environment that integrates a high-precision 20-band parametric equalizer (TPT SVF) and a zero-latency convolver (MKL NUC).
+- Offer real-time correction for system audio and audio outside the DAW (room acoustic correction, headphone correction, etc.).
 
-- **言語**: C++20
-- **フレームワーク**: JUCE 8.0.12
-- **ビルドシステム**: CMake 3.22+
-- **コンパイラ**: MSVC 19.44+ (Visual Studio 2022)
-- **ターゲットOS**: Windows 11 x64 (AVX2必須)
-- **外部ライブラリ**: Intel oneAPI Math Kernel Library (oneMKL) - FFT, Vector Math, RNG
+**Tech stack**:
 
-## 設計の核心原則
+- **Language**: C++20  
+- **Framework**: JUCE 8.0.12  
+- **Build system**: CMake 3.22+  
+- **Compiler**: MSVC 19.44+ (Visual Studio 2022)  
+- **Target OS**: Windows 11 x64 (AVX2 required)  
+- **External libraries**: Intel oneAPI Math Kernel Library (oneMKL) — FFT, vector math, RNG
 
-### 1. 厳格なリアルタイム制約とスレッド安全性 (Strict Real-time Safety)
+## Core Design Principles
 
-オーディオ処理スレッド（Audio Thread）における処理落ち（グリッチ）を完全に排除するため、以下のルールを徹底しています。
+### 1. Strict real-time constraints and thread safety
 
-- **Wait-free / Lock-free**: Audio Thread内での `Mutex`、`CriticalSection`、`std::promise` などのブロッキング同期プリミティブの使用を禁止。
-- **動的メモリ確保の禁止**: `malloc`, `new`, `std::vector::resize` などのヒープ割り当てを禁止。すべてのバッファは `DSPCore` の構築時（Message Thread / Worker Thread）に `ScopedAlignedPtr` (MKLアロケータ) を用いて事前確保します。
-- **システムコールの禁止**: ファイルI/O、コンソール出力、スレッド生成などを禁止。
-- **MKL設定**: `mkl_set_num_threads(1)` および `mkl_set_dynamic(0)` により、MKL内部のスレッド生成を抑制し、予測不可能なレイテンシを防ぎます。
+To completely eliminate glitches on the audio processing thread (Audio Thread), the following rules are enforced:
 
-### 2. RCU (Read-Copy-Update) パターンによる状態管理
+- **Wait-free / Lock-free**: Blocking synchronization primitives such as `Mutex`, `CriticalSection`, `std::promise`, etc., are forbidden inside the Audio Thread.
+- **No dynamic heap allocation**: Heap allocations such as `malloc`, `new`, `std::vector::resize` are forbidden. All buffers are preallocated during `DSPCore` construction (on the Message Thread / Worker Thread) using `ScopedAlignedPtr` (MKL allocator).
+- **No system calls**: File I/O, console output, thread creation, and similar system calls are forbidden on the Audio Thread.
+- **MKL configuration**: `mkl_set_num_threads(1)` and `mkl_set_dynamic(0)` are used to suppress MKL internal thread creation and prevent unpredictable latency.
 
-UIスレッド/WorkerスレッドとAudio Thread間のパラメータ共有には、ロックフリーな **RCU パターン** を採用しています。
+### 2. State management using the RCU (Read-Copy-Update) pattern
 
-- **更新 (Writer)**: 新しい状態オブジェクト（`DSPCore`, `EQState`, `StereoConvolver`）をヒープ上に作成し、セットアップ完了後に `std::atomic<T*>` を介してアトミックにポインタを差し替えます（`std::memory_order_release`）。
-- **読み取り (Reader/Audio Thread)**: `std::atomic::load` で生ポインタを取得します。Audio Threadの処理サイクル中はポインタが有効であることを、Message Thread側の遅延解放メカニズム（Trash Bin）によって保証します。
-- **遅延解放 (Garbage Collection)**: 参照されなくなった古いオブジェクトは `trashBin` リスト（Message Thread管理）に送られ、タイムスタンプに基づいて一定時間（例: 2000ms）経過後に安全に破棄されます。
+A lock-free **RCU pattern** is used for parameter sharing between the UI/Worker threads and the Audio Thread.
 
-### 3. 数値安定性とDSP品質 (Numerical Stability)
+- **Update (Writer)**: New state objects (`DSPCore`, `EQState`, `StereoConvolver`) are created on the heap and, after setup, the pointer is atomically swapped via `std::atomic<T*>` with `std::memory_order_release`.
+- **Read (Reader / Audio Thread)**: The Audio Thread obtains a raw pointer via `std::atomic::load`. The Message Thread’s delayed-release mechanism (trash bin) guarantees the pointer remains valid during the Audio Thread’s processing cycles.
+- **Delayed release (Garbage Collection)**: Old objects that are no longer referenced are moved to a `trashBin` list (managed by the Message Thread) and are safely destroyed after a configured delay (e.g., 2000 ms) based on timestamps.
 
-- **TPT SVF (Topology-Preserving Transform State Variable Filter)**: EQフィルタには、従来のBiquadで発生する高域の歪みや、高速なパラメータ変調時の不安定さを解消するTPT SVFアルゴリズムを採用しています。
-- **Denormal対策**: `juce::ScopedNoDenormals` の使用に加え、IIRフィルタの状態変数に対して極小値をゼロにフラッシュする処理を手動で実装し、CPU負荷のスパイクを防ぎます。また、MKL VMLモードを `VML_FTZDAZ_ON` に設定しています。
-- **NaN/Inf 保護**: 外部入力や発振による不正な浮動小数点数（NaN/Inf）がDSPチェーン全体に伝播しないよう、検出とクランプ処理、および `UltraHighRateDCBlocker` (1次IIR) による保護を実装しています。
+### 3. Numerical stability and DSP quality
 
-### 4. 堅牢なデバイス管理 (Robust Device Management)
+- **TPT SVF (Topology-Preserving Transform State Variable Filter)**: The EQ filters use the TPT SVF algorithm to eliminate high-frequency distortion and instability that can occur with conventional biquads during fast parameter modulation.
+- **Denormal handling**: In addition to `juce::ScopedNoDenormals`, tiny values in IIR filter state variables are flushed to zero manually to prevent CPU load spikes. MKL VML mode is set to `VML_FTZDAZ_ON`.
+- **NaN/Inf protection**: Detection and clamping are implemented to prevent invalid floating-point values (NaN/Inf) from propagating through the DSP chain, along with protection via an `UltraHighRateDCBlocker` (1st-order IIR).
 
-- **ASIOブラックリスト**: シングルクライアント専用や動作が不安定なASIOドライバ（BRAVO-HD, ASIO4ALL等）を検出し、自動的に除外します。
-- **Windows最適化**: `timeBeginPeriod(1)` によるタイマー精度向上、`SetPriorityClass(HIGH_PRIORITY_CLASS)`、およびWindows 11の効率モード（EcoQoS）無効化を行い、音切れを防ぎます。
+### 4. Robust device management
 
-## コンポーネント設計
+- **ASIO blacklist**: ASIO drivers that are single-client only or otherwise unstable (e.g., BRAVO-HD, ASIO4ALL) are detected and automatically excluded.
+- **Windows optimizations**: Timer precision is improved with `timeBeginPeriod(1)`, process priority is raised with `SetPriorityClass(HIGH_PRIORITY_CLASS)`, and Windows 11 efficiency modes (EcoQoS) are disabled to prevent audio dropouts.
 
-### 全体構成図
+## Component Design
+
+### Overall structure diagram
 
 ```text
 MainApplication
@@ -63,184 +65,186 @@ MainApplication
        │         └─ AudioEngineProcessor (AudioProcessor)
        │              └─ AudioEngine (AudioSource)
        │         │
-       │         ├─ DSPCore (Audio Thread用処理コンテナ: RCU管理)
+       │         ├─ DSPCore (Audio-thread processing container: RCU-managed)
        │         │    ├─ CustomInputOversampler (Polyphase IIR/FIR)
-       │         │    ├─ UltraHighRateDCBlocker (DC除去)
+       │         │    ├─ UltraHighRateDCBlocker (DC removal)
        │         │    ├─ ConvolverProcessor (MKL NUC)
        │         │    ├─ EQProcessor (TPT SVF)
        │         │    ├─ SoftClipper (AVX2)
        │         │    └─ PsychoacousticDither (MKL VSL)
        │         │
        │         ├─ Rebuild Thread (Worker)
-       │         │    └─ DSPCore構築・IRリサンプリング
+       │         │    └─ DSPCore construction and IR resampling
        │         │
-       │         └─ UI State Instances (Message Thread用)
+       │         └─ UI State Instances (for Message Thread)
        │
        └─ UI Components (ConvolverControlPanel, EQControlPanel, SpectrumAnalyzer)
 ```
 
-### 信号フロー詳細
+### Signal flow details
 
 ```text
 Input Device
     ↓ (float) [IoCallback]
 [IoCallback - Audio Thread]
-    ↓ (double変換 + Headroom(-0.1dB) + Sanitize + Input DCBlocker: 3Hz)
-AlignedBuffer (DSPCore内)
+    ↓ (convert to double + Headroom(-0.1dB) + Sanitize + Input DCBlocker: 3Hz)
+AlignedBuffer (inside DSPCore)
     ↓
-入力レベル測定 → inputLevelLinear (atomic)
+Input level measurement → inputLevelLinear (atomic)
     ↓
-オーバーサンプリング (Up: 1x, 2x, 4x, 8x)
+Oversampling (Up: 1x, 2x, 4x, 8x)
     ↓
-OS後段 DCBlocker (1Hz)
+Post-OS DCBlocker (1Hz)
     ↓
 Analyzer Input Tap (Pre-DSP) → Lock-free FIFO
     ↓
 ┌──────────────────────────────────────┐
-│  処理順序可変 (ProcessingOrder)       │
+│  Processing order is configurable    │
 │                                      │
 │  Option 1: Conv → EQ                 │
 │    ├─ ConvolverProcessor::process()  │
-│    │    └─ MKLNonUniformConvolver    │ (Dry/Wet Mix, Latency Comp)
+│    │    └─ MKLNonUniformConvolver    │ (Dry/Wet Mix, Latency Compensation)
 │    │                                  │
 │    └─ EQProcessor::process()         │
-│         ├─ 20バンド TPT SVF処理      │
-│         │   (AVX2 Stereo Optimized)  │
+│         ├─ 20-band TPT SVF processing│
+│         │   (AVX2 stereo optimized)  │
 │         └─ Total Gain / AGC          │
 │                                      │
 │  Option 2: EQ → Conv                 │
-│    (順序逆転)                         │
+│    (reverse order)                   │
 └──────────────────────────────────────┘
     ↓
-Soft Clipper (AVX2 Optimized: Tanh + Poly)
+Soft Clipper (AVX2 optimized: tanh + polynomial)
     ↓
 Analyzer Output Tap (Post-DSP) → Lock-free FIFO
     ↓
-オーバーサンプリング (Down)
+Oversampling (Down)
     ↓
-出力レベル測定 → outputLevelLinear (atomic)
+Output level measurement → outputLevelLinear (atomic)
     ↓
 Output DCBlocker (3Hz)
     ↓
-Headroom(-0.1dB) + Psychoacoustic Dither (Noise Shaping)
+Headroom(-0.1dB) + Psychoacoustic Dither (noise shaping)
     ↓
-Float変換 + クランプ
+Convert to float + clamp
     ↓
 Output Device
 ```
 
 ### AudioEngine & DSPCore
 
-**ファイル**: `src/AudioEngine.cpp`, `src/AudioEngine.h`
+**Files**: `src/AudioEngine.cpp`, `src/AudioEngine.h`
 
 #### DSPCore
 
-Audio Threadで実行される処理のコンテナ。RCUパターンにより、設定変更時は新しい `DSPCore` インスタンスがバックグラウンドで構築され、アトミックに差し替えられます。
+A container for processing executed on the Audio Thread. Using the RCU pattern, when settings change a new `DSPCore` instance is constructed in the background and atomically swapped in.
 
-- **メモリ管理**: `ScopedAlignedPtr` を使用し、MKL/AVX2に最適な64バイトアライメントでメモリを確保します。
-- **バッファサイズ**: `SAFE_MAX_BLOCK_SIZE` (65536) * 8 (最大オーバーサンプリング倍率) を確保し、実行時の再確保を排除します。
+- **Memory management**: Uses `ScopedAlignedPtr` to allocate memory with 64-byte alignment optimized for MKL/AVX2.
+- **Buffer sizing**: Preallocates `SAFE_MAX_BLOCK_SIZE` (65536) * 8 (maximum oversampling factor) to eliminate runtime reallocations.
 
 #### Rebuild Thread
 
-サンプルレート変更、バッファサイズ変更、オーバーサンプリング設定変更、IRロードなどの重い処理は、専用の `rebuildThreadLoop` で実行されます。
+Heavy operations such as sample-rate changes, buffer-size changes, oversampling configuration changes, and IR loading are executed in a dedicated `rebuildThreadLoop`.
 
-1. Message Thread から `requestRebuild` を発行。
-2. Worker Thread で新しい `DSPCore` を構築、メモリ確保、IRリサンプリング、FFT計画作成を実行。
-3. 完了後、Message Thread 経由で `commitNewDSP` を呼び出し、ポインタを更新。
+1. The Message Thread issues `requestRebuild`.  
+2. The Worker Thread constructs a new `DSPCore`, performs memory allocation, IR resampling, and FFT plan creation.  
+3. Upon completion, `commitNewDSP` is called via the Message Thread to update the pointer.
 
 ### ConvolverProcessor
 
-**ファイル**: `src/ConvolverProcessor.cpp`, `src/ConvolverProcessor.h`
-**エンジン**: `MKLNonUniformConvolver` (Custom MKL Implementation)
+**Files**: `src/ConvolverProcessor.cpp`, `src/ConvolverProcessor.h`  
+**Engine**: `MKLNonUniformConvolver` (custom MKL implementation)
 
-#### ConvolverProcessorの機能
+#### ConvolverProcessor features
 
-1. **インパルス応答読み込み**
-   - `LoaderThread` による非同期読み込み。
-   - **前処理**:
-     - Float -> Double 変換 (High Quality)
-     - Auto Makeup Gain (エネルギー正規化)
-     - 無音カット (末尾トリミング)
-     - リサンプリング (r8brain-free-src)
-     - DC除去 (1Hz HighPass)
-     - Asymmetric Tukey Window (ピーク基準の窓関数)
-     - Minimum Phase 変換 (MKL FFT + Cepstrum法, オプション)
+1. **Impulse response loading**
+   - Asynchronous loading via a `LoaderThread`.
+   - **Preprocessing**:
+     - Float → Double conversion (high quality)
+     - Auto makeup gain (energy normalization)
+     - Silence trimming (tail trimming)
+     - Resampling (r8brain-free-src)
+     - DC removal (1 Hz high-pass)
+     - Asymmetric Tukey window (peak-referenced window)
+     - Minimum-phase conversion (MKL FFT + cepstrum method, optional)
 
 2. **MKL Non-Uniform Partitioned Convolution (NUC)**
-   - Intel MKL DFTI を使用した独自の畳み込みエンジン。
-   - **構成**: 現在は安定性重視のため、単一レイヤー（Uniform Partitioned）構成で動作。
-   - **最適化**: AVX2 FMAを使用した複素数積和演算。
+   - Custom convolution engine using Intel MKL DFTI.
+   - **Configuration**: Currently runs as a single-layer (uniform partitioned) configuration prioritizing stability.
+   - **Optimizations**: Complex multiply-accumulate using AVX2 FMA.
 
-3. **レイテンシー補正**
-   - リングバッファによるDry信号遅延。
-   - ドップラー効果を防ぐためのクロスフェード付き遅延時間変更。
+3. **Latency compensation**
+   - Dry-signal delay via ring buffer.
+   - Crossfaded delay-time changes to avoid Doppler artifacts.
 
 ### EQProcessor
 
-**ファイル**: `src/EQProcessor.cpp`, `src/EQProcessor.h`
-**フィルタ方式**: TPT SVF (Topology-Preserving Transform State Variable Filter)
+**Files**: `src/EQProcessor.cpp`, `src/EQProcessor.h`  
+**Filter type**: TPT SVF (Topology-Preserving Transform State Variable Filter)
 
-#### EQProcessorの機能
+#### EQProcessor features
 
-1. **20バンドパラメトリックEQ**
-   - LowShelf, Peaking, HighShelf, LowPass, HighPass。
-   - 各バンド独立調整: 周波数、ゲイン、Q値。
+1. **20-band parametric EQ**
+   - LowShelf, Peaking, HighShelf, LowPass, HighPass.
+   - Each band adjustable independently: frequency, gain, Q.
 
-2. **AVX2最適化**
-   - `processBandStereo`: L/Rチャンネルの係数と状態変数をSIMDレジスタにパックし、同時処理を行います。
+2. **AVX2 optimizations**
+   - `processBandStereo`: Packs L/R channel coefficients and state variables into SIMD registers for simultaneous processing.
 
-3. **係数計算**
-   - **Audio Thread**: TPT SVF係数 (`EQCoeffsSVF`) を使用。時間変化に強く、オートメーション時のノイズが少ない。
-   - **UI Thread**: 表示用にBiquad係数 (`EQCoeffsBiquad`) を使用。
+3. **Coefficient computation**
+   - **Audio Thread**: Uses TPT SVF coefficients (`EQCoeffsSVF`) which are robust to time-varying changes and produce less automation noise.
+   - **UI Thread**: Uses biquad coefficients (`EQCoeffsBiquad`) for display purposes.
 
 4. **AGC (Auto Gain Control)**
-   - 入出力のRMSレベルを追跡し、ラウドネスを維持するようにトータルゲインを自動調整します。
+   - Tracks input/output RMS levels and automatically adjusts total gain to maintain perceived loudness.
 
 ### CustomInputOversampler
 
-**ファイル**: `src/CustomInputOversampler.cpp`
+**File**: `src/CustomInputOversampler.cpp`
 
-- **倍率**: 1x, 2x, 4x, 8x (サンプルレートに応じて自動制限)。
-- **方式**: Polyphase IIR (低遅延) または Linear Phase (位相直線) を選択可能。
-- **実装**: AVX2を使用した高速な畳み込み処理。
+- **Factors**: 1x, 2x, 4x, 8x (automatically limited according to sample rate).
+- **Modes**: Selectable Polyphase IIR (low latency) or Linear Phase (linear-phase) implementations.
+- **Implementation**: High-speed convolution using AVX2.
 
 ### PsychoacousticDither
 
-**ファイル**: `src/PsychoacousticDither.h`
+**File**: `src/PsychoacousticDither.h`
 
-- **RNG**: Intel MKL VSL (`VSL_BRNG_SFMT19937`) + `SplitMix64` シード生成。
-- **Noise Shaping**: 5次 Error Feedback Topology (Lipshitz / Wannamaker系係数)。
-- **処理**: 可聴域の量子化ノイズを低減し、超音波域へシフトさせます。
+- **RNG**: Intel MKL VSL (`VSL_BRNG_SFMT19937`) with `SplitMix64` seed generation.
+- **Noise shaping**: 5th-order error-feedback topology (Lipshitz / Wannamaker style coefficients).
+- **Processing**: Reduces audible quantization noise and shifts residual noise into ultrasonic bands.
 
 ### SpectrumAnalyzerComponent
 
-**ファイル**: `src/SpectrumAnalyzerComponent.cpp`
+**File**: `src/SpectrumAnalyzerComponent.cpp`
 
-- **FFT**: Intel MKL DFTI (4096 points, Single Precision).
-- **表示**: 60fps タイマー駆動。Lock-free FIFO経由でデータを取得。
-- **機能**:
-  - 入力/出力ソース切り替え。
-  - ピークホールド、スムージング。
-  - EQ応答曲線のオーバーレイ表示。
+- **FFT**: Intel MKL DFTI (4096 points, single precision).
+- **Rendering**: 60 fps timer-driven. Data is acquired via a lock-free FIFO.
+- **Features**:
+  - Switchable input/output source.
+  - Peak hold and smoothing.
+  - Overlay display of EQ response curves.
 
-## データ構造とメモリ
+## Data Structures and Memory
 
 ### ScopedAlignedPtr
 
-`src/AlignedAllocation.h` で定義されるスマートポインタ。
+A smart pointer defined in `src/AlignedAllocation.h`.
 
-- `mkl_malloc` / `mkl_free` をラップ。
-- 64バイトアライメントを保証（AVX-512/AVX2対応）。
-- RAIIによる自動解放。
+- Wraps `mkl_malloc` / `mkl_free`.
+- Guarantees 64-byte alignment (AVX-512 / AVX2 compatible).
+- RAII-based automatic release.
 
 ### DeviceSettings
 
-**ファイル**: `src/DeviceSettings.cpp`
-**保存先**: `%APPDATA%\ConvoPeq\device_settings.xml`
+**File**: `src/DeviceSettings.cpp`  
+**Storage**: `%APPDATA%\ConvoPeq\device_settings.xml`
 
-保存される設定:
+Stored settings include:
 
-- デバイスタイプ/ID
-- サンプルレート/バッファサイズ
-- ディザビット深度
-- オーバーサンプリング設定
+- Device type / ID  
+- Sample rate / buffer size  
+- Dither bit depth  
+- Oversampling settings
+
+---
