@@ -201,16 +201,13 @@ public:
 
 private:
     void timerCallback() override;
+    struct StereoConvolver;
     class LoaderThread;
     void applyNewState(StereoConvolver* newConv, const juce::AudioBuffer<double>& loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, const juce::AudioBuffer<double>& displayIR);
     void handleLoadError(const juce::String& error);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
     int computeTargetIRLength(double sampleRate, int originalLength) const;
-
-    JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)
-};
 
     // Stereo processing wrapper
     struct StereoConvolver
@@ -235,8 +232,8 @@ private:
         StereoConvolver() = default;
 
         ~StereoConvolver() {
-            if (irData[0]) convo::aligned_free(irData[0]);
-            if (irData[1]) convo::aligned_free(irData[1]);
+            if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
+            if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
         }
 
         // Intrusive Reference Counting
@@ -319,7 +316,7 @@ private:
         void process(int channel, const double* in, double* out, int numSamples);
     };
 
-    // Note: trashBin は、Audio Thread がまだ使用している可能性のある古い Convolution オブジェクトを保持するために使用されます。
+    // Note: trashBin is used to hold old Convolution objects that the Audio Thread may still be using.
     std::atomic<StereoConvolver*> convolution { nullptr }; // Raw pointer for Audio Thread (Lock-free)
     StereoConvolver* activeConvolution = nullptr; // Ownership holder for Message Thread
     std::vector<std::pair<StereoConvolver*, uint32>> trashBin; // Time-based GC
@@ -332,9 +329,9 @@ private:
     juce::String lastError;
     void setLoadingProgress(float p) { loadProgress.store(p); }
 
-    juce::ListenerList<Listener> listeners;
-
     juce::dsp::ProcessSpec currentSpec = { 48000.0, 512, 2 };
+
+    juce::ListenerList<Listener> listeners;
 
     //----------------------------------------------------------
     // レイテンシー補正用ディレイ
@@ -407,16 +404,7 @@ private:
     int currentBufferSize = 0; // prepareToPlayで更新される
     double currentSmoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC; // mixSmootherに設定されている現在の時間
 
-    void applyNewState(StereoConvolver* newConv,
-                      const juce::AudioBuffer<double>& loadedIR,
-                      double loadedSR,
-                      int targetLength,
-                      bool isRebuild,
-                      const juce::File& file,
-                      const juce::AudioBuffer<double>& displayIR);
-    void applyNewState(StereoConvolver* newConv, const juce::AudioBuffer<double>& loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, const juce::AudioBuffer<double>& displayIR);
-    void handleLoadError(const juce::String& error);
-
     JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)
+
 };

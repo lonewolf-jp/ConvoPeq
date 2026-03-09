@@ -1358,7 +1358,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     // 新しいローダーを作成して開始
     if (isRebuild)
     {
-        activeLoader = std::make_unique<LoaderThread>(*this, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load());
+        activeLoader = std::make_unique<LoaderThread>(*this, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
     }
     else
     {
@@ -2433,13 +2433,6 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                       maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor))
     {
         // 元の applyNewState と同一の流れで適用
-        applyNewState(newConv,
-                      *loadedIR, // 参照渡し
-                      sr,
-                      length,
-                      isRebuild,
-                      irFile,
-                      *displayIR); // 参照渡し
         applyNewState(newConv, *loadedIR, sr, length, isRebuild, irFile, scaleFactor, *displayIR);
     }
     else
