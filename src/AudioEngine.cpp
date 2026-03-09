@@ -1096,7 +1096,7 @@ void AudioEngine::timerCallback()
                 entry.first->eq.cleanup();
                 entry.first->convolver.cleanup();
             }
-        for (const auto* p : trashBinPending)
+        for (auto* p : trashBinPending)
             if (p != nullptr) {
                 p->eq.cleanup();
                 p->convolver.cleanup();
@@ -1475,7 +1475,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     }
 
     // Output Makeup Gain
-    processBlock.applyGain(state.outputMakeupGain);
+    for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
+        cblas_dscal((int)processBlock.getNumSamples(), state.outputMakeupGain, processBlock.getChannelPointer(ch), 1);
 
     //----------------------------------------------------------
     // ソフトクリッピング (Soft Clipping)
@@ -1615,7 +1616,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     }
 
     // Output Makeup Gain
-    processBlock.applyGain(state.outputMakeupGain);
+    for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
+        cblas_dscal((int)processBlock.getNumSamples(), state.outputMakeupGain, processBlock.getChannelPointer(ch), 1);
 
     if (state.softClipEnabled)
     {
