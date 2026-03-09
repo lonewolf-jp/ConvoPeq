@@ -60,6 +60,9 @@ private:
     juce::Slider inputHeadroomSlider;
     juce::Label inputHeadroomLabel;
 
+    juce::Slider outputMakeupSlider;
+    juce::Label outputMakeupLabel;
+
     static juce::File getSettingsFile();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DeviceSettings)

@@ -185,11 +185,25 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
 
     addAndMakeVisible(inputHeadroomSlider);
     inputHeadroomSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    inputHeadroomSlider.setRange(-10.0, 0.0, 0.1);
+    inputHeadroomSlider.setRange(-12.0, -6.0, 0.1);
     inputHeadroomSlider.setTextValueSuffix(" dB");
     inputHeadroomSlider.setNumDecimalPlacesToDisplay(1);
     inputHeadroomSlider.onValueChange = [this] {
         audioEngine.setInputHeadroomDb(static_cast<float>(inputHeadroomSlider.getValue()));
+    };
+
+    // Output Makeup Controls
+    addAndMakeVisible(outputMakeupLabel);
+    outputMakeupLabel.setText("Output Makeup:", juce::dontSendNotification);
+    outputMakeupLabel.setJustificationType(juce::Justification::centredLeft);
+
+    addAndMakeVisible(outputMakeupSlider);
+    outputMakeupSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    outputMakeupSlider.setRange(12.0, 17.0, 0.1);
+    outputMakeupSlider.setTextValueSuffix(" dB");
+    outputMakeupSlider.setNumDecimalPlacesToDisplay(1);
+    outputMakeupSlider.onValueChange = [this] {
+        audioEngine.setOutputMakeupDb(static_cast<float>(outputMakeupSlider.getValue()));
     };
 
     // デバイス変更を監視してビット深度リストを更新
@@ -208,6 +222,7 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     updateBitDepthList();
     // loadSettings()後にUIの値を更新
     inputHeadroomSlider.setValue(audioEngine.getInputHeadroomDb(), juce::dontSendNotification);
+    outputMakeupSlider.setValue(audioEngine.getOutputMakeupDb(), juce::dontSendNotification);
 }
 
 DeviceSettings::~DeviceSettings()
@@ -219,10 +234,11 @@ DeviceSettings::~DeviceSettings()
 void DeviceSettings::resized()
 {
     auto bounds = getLocalBounds();
-    auto controlsArea = bounds.removeFromTop(90);
+    auto controlsArea = bounds.removeFromTop(120);
     auto row1 = controlsArea.removeFromTop(30);
     auto row2 = controlsArea.removeFromTop(30);
     auto row3 = controlsArea.removeFromTop(30);
+    auto row4 = controlsArea.removeFromTop(30);
 
     auto row1_left = row1.removeFromLeft(row1.getWidth() / 2);
     auto row1_right = row1;
@@ -233,10 +249,14 @@ void DeviceSettings::resized()
     inputHeadroomLabel.setBounds(row1_right.removeFromLeft(110).reduced(5));
     inputHeadroomSlider.setBounds(row1_right.reduced(2));
 
-    filterTypeTabs.setBounds(row2.reduced(2));
+    auto row2_left = row2.removeFromLeft(row2.getWidth() / 2);
+    outputMakeupLabel.setBounds(row2_left.removeFromLeft(100).reduced(5));
+    outputMakeupSlider.setBounds(row2_left.reduced(2));
 
-    oversamplingLabel.setBounds(row3.removeFromLeft(100).reduced(5));
-    oversamplingComboBox.setBounds(row3.removeFromLeft(100).reduced(2));
+    filterTypeTabs.setBounds(row3.reduced(2));
+
+    oversamplingLabel.setBounds(row4.removeFromLeft(100).reduced(5));
+    oversamplingComboBox.setBounds(row4.removeFromLeft(100).reduced(2));
 
     if (selector != nullptr)
         selector->setBounds(bounds);
@@ -331,6 +351,7 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
         // フィルタタイプ設定を追加
         xml->setAttribute("oversamplingType", (int)engine.getOversamplingType());
         // 入力ヘッドルーム設定を追加
+        xml->setAttribute("outputMakeupDb", engine.getOutputMakeupDb());
         xml->setAttribute("inputHeadroomDb", engine.getInputHeadroomDb());
         xml->writeTo (getSettingsFile());
     }
@@ -378,6 +399,10 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             float headroom = (float)xml->getDoubleAttribute("inputHeadroomDb", -6.0);
             engine.setInputHeadroomDb(headroom);
 
+            // Output Makeup設定の読み込み (デフォルト +15.0dB)
+            float makeup = (float)xml->getDoubleAttribute("outputMakeupDb", 15.0);
+            engine.setOutputMakeupDb(makeup);
+
             // フィルタタイプ設定の読み込み (デフォルト0 = IIR)
             int type = xml->getIntAttribute("oversamplingType", 0);
             engine.setOversamplingType((AudioEngine::OversamplingType)type);
@@ -411,6 +436,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     engine.setDitherBitDepth(0); // 自動設定へ
     engine.setOversamplingFactor(0); // 自動設定へ
     engine.setInputHeadroomDb(-6.0f); // デフォルト -6dB
+    engine.setOutputMakeupDb(15.0f);
     engine.setOversamplingType(AudioEngine::OversamplingType::IIR); // デフォルトIIR
 }
 void DeviceSettings::applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist)

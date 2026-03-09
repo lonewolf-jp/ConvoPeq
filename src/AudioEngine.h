@@ -158,6 +158,9 @@ public:
     void setInputHeadroomDb(float db);
     float getInputHeadroomDb() const;
 
+    void setOutputMakeupDb(float db);
+    float getOutputMakeupDb() const;
+
     void setDitherBitDepth(int bitDepth);
     int getDitherBitDepth() const;
 
@@ -354,6 +357,7 @@ private:
             bool softClipEnabled;
             float saturationAmount;
         double inputHeadroomGain;
+            double outputMakeupGain;
         };
 
 DSPCore();
@@ -466,6 +470,8 @@ DSPCore();
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
     std::atomic<float> inputHeadroomDb { -6.0f };
     std::atomic<double> inputHeadroomGain { 0.5011872336272722 }; // -6dB
+    std::atomic<float> outputMakeupDb { 15.0f };
+    std::atomic<double> outputMakeupGain { 5.623413251903491 }; // +15dB
     std::atomic<int> rebuildGeneration { 0 }; // 非同期リビルドの競合防止用
 
     // dB変換時の下限値

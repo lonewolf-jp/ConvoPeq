@@ -1078,12 +1078,29 @@ void AudioEngine::timerCallback()
     // 3. 内部プロセッサのクリーンアップを実行
     // 現在アクティブなDSPの内部ゴミ箱も掃除する
     // [Fix Bug C] cleanup() を trashBinLock の外で、currentDSP 経由で一度だけ呼ぶ
-    // activeDSP == currentDSP.load() のため currentDSP 経由で呼べば十分。
-    // trashBinLock は cleanup() と独立しているため、ロックの外での呼び出しが安全。
     if (auto* dsp = currentDSP.load(std::memory_order_acquire))
     {
         dsp->eq.cleanup();
         dsp->convolver.cleanup();
+    }
+
+    // [FIX] trashBin内のDSPCoreに対してもcleanup()を呼び、リソース解放の遅延を防ぐ
+    // DSPCoreがtrashBinに移動されると、currentDSPではなくなるためタイマーからの
+    // cleanup()呼び出しが止まってしまう。最終的にデストラクタでforceCleanup()が
+    // 呼ばれるためリークはしないが、最大10秒間リソースが解放されない期間が発生する。
+    // これを防ぐため、trashBin内のインスタンスも明示的にクリーンアップする。
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        for (const auto& entry : trashBin)
+            if (entry.first != nullptr) {
+                entry.first->eq.cleanup();
+                entry.first->convolver.cleanup();
+            }
+        for (const auto* p : trashBinPending)
+            if (p != nullptr) {
+                p->eq.cleanup();
+                p->convolver.cleanup();
+            }
     }
 
     // UI用プロセッサのクリーンアップ
@@ -1269,6 +1286,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const float satAmt = saturationAmount.load(std::memory_order_relaxed);
         const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
 
+        const double makeupGain = outputMakeupGain.load(std::memory_order_relaxed);
         // UI表示用の状態更新
         if (eqBypassActive.load(std::memory_order_relaxed) != eqBypassed)
             eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
@@ -1283,7 +1301,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                        .analyzerSource = analyzerSource,
                        .softClipEnabled = softClip,
                        .saturationAmount = satAmt,
-                       .inputHeadroomGain = headroomGain }); // スマートポインタでDSPを呼び出し
+                       .inputHeadroomGain = headroomGain,
+                       .outputMakeupGain = makeupGain }); // スマートポインタでDSPを呼び出し
     }
     else
     {
@@ -1330,6 +1349,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
     const float satAmt = saturationAmount.load(std::memory_order_relaxed);
     const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
+    const double makeupGain = outputMakeupGain.load(std::memory_order_relaxed);
 
     if (eqBypassActive.load(std::memory_order_relaxed) != eqBypassed)
         eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
@@ -1343,7 +1363,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                          .analyzerSource = analyzerSource,
                          .softClipEnabled = softClip,
                          .saturationAmount = satAmt,
-                         .inputHeadroomGain = headroomGain });
+                       .inputHeadroomGain = headroomGain,
+                       .outputMakeupGain = makeupGain });
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
@@ -1452,6 +1473,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         if (!state.convBypassed) // stateから読み出し
             convolver.process(processBlock);
     }
+
+    // Output Makeup Gain
+    processBlock.applyGain(state.outputMakeupGain);
 
     //----------------------------------------------------------
     // ソフトクリッピング (Soft Clipping)
@@ -1589,6 +1613,9 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         if (!state.convBypassed)
             convolver.process(processBlock);
     }
+
+    // Output Makeup Gain
+    processBlock.applyGain(state.outputMakeupGain);
 
     if (state.softClipEnabled)
     {
@@ -2016,6 +2043,9 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("inputHeadroomDb"))
         setInputHeadroomDb(state.getProperty("inputHeadroomDb"));
 
+    if (state.hasProperty("outputMakeupDb"))
+        setOutputMakeupDb(state.getProperty("outputMakeupDb"));
+
     if (state.hasProperty("analyzerSource"))
         setAnalyzerSource((AnalyzerSource)(int)state.getProperty("analyzerSource"));
 
@@ -2058,6 +2088,7 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.setProperty("softClipEnabled", softClipEnabled.load(), nullptr);
     state.setProperty("saturationAmount", saturationAmount.load(), nullptr);
     state.setProperty("inputHeadroomDb", inputHeadroomDb.load(), nullptr);
+    state.setProperty("outputMakeupDb", outputMakeupDb.load(), nullptr);
     state.setProperty("analyzerSource", (int)currentAnalyzerSource.load(), nullptr);
     state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);
     state.setProperty("convBypassed", convBypassRequested.load(), nullptr);
@@ -2069,7 +2100,7 @@ juce::ValueTree AudioEngine::getCurrentState() const
 
 void AudioEngine::setInputHeadroomDb(float db)
 {
-    float clampedDb = juce::jlimit(-10.0f, 0.0f, db);
+    float clampedDb = juce::jlimit(-12.0f, -6.0f, db);
     if (std::abs(inputHeadroomDb.load() - clampedDb) > 1e-5f)
     {
         inputHeadroomDb.store(clampedDb);
@@ -2080,6 +2111,21 @@ void AudioEngine::setInputHeadroomDb(float db)
 float AudioEngine::getInputHeadroomDb() const
 {
     return inputHeadroomDb.load();
+}
+
+void AudioEngine::setOutputMakeupDb(float db)
+{
+    float clampedDb = juce::jlimit(12.0f, 17.0f, db);
+    if (std::abs(outputMakeupDb.load() - clampedDb) > 1e-5f)
+    {
+        outputMakeupDb.store(clampedDb);
+        outputMakeupGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
+    }
+}
+
+float AudioEngine::getOutputMakeupDb() const
+{
+    return outputMakeupDb.load();
 }
 
 void AudioEngine::setDitherBitDepth(int bitDepth)

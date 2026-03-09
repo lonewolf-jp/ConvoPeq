@@ -880,7 +880,6 @@ private:
 ConvolverProcessor::ConvolverProcessor()
     : mixSmoother(1.0f)
 {
-    startTimer(500);
 }
 
 //--------------------------------------------------------------
