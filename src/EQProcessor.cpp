@@ -166,15 +166,21 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
     if (!file.existsAsFile())
         return false;
 
-    // 最初に全バンドを無効化
+    // 最初に全バンドをリセット (無効化 + パラメータ初期化)
+    // これにより、ファイルに記述されていないバンドが前の設定(Channel Mode等)を引き継ぐのを防ぐ
     for (int i = 0; i < NUM_BANDS; ++i)
+    {
         setBandEnabled(i, false);
+        setBandChannelMode(i, EQChannelMode::Stereo);
+        setBandGain(i, 0.0f);
+    }
 
     juce::StringArray lines;
     file.readLines(lines);
 
     int currentFilterIndex = 0;
     bool maxBandsWarningShown = false;
+    EQChannelMode currentChannelMode = EQChannelMode::Stereo;
 
     for (auto line : lines)
     {
@@ -212,6 +218,31 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
                     break;
                 }
             }
+        }
+        // Channel行の解析 (例: "Channel: L", "Channel: R", "Channel: L R")
+        else if (tokens[0].startsWithIgnoreCase("Channel"))
+        {
+            bool hasL = false;
+            bool hasR = false;
+
+            for (const auto& token : tokens)
+            {
+                juce::String t = token;
+                if (t.startsWithIgnoreCase("Channel"))
+                    t = t.substring(7); // "Channel" length
+
+                t = t.removeCharacters(":,");
+
+                if (t.equalsIgnoreCase("L") || t.equalsIgnoreCase("Left"))
+                    hasL = true;
+                else if (t.equalsIgnoreCase("R") || t.equalsIgnoreCase("Right"))
+                    hasR = true;
+            }
+
+            if (hasL && hasR)      currentChannelMode = EQChannelMode::Stereo;
+            else if (hasL)         currentChannelMode = EQChannelMode::Left;
+            else if (hasR)         currentChannelMode = EQChannelMode::Right;
+            else                   currentChannelMode = EQChannelMode::Stereo;
         }
         // Filter行の解析 (例: "Filter 1: ON PK Fc 100 Hz Gain -3.0 dB Q 2.0")
         else if (tokens[0].startsWithIgnoreCase("Filter"))
@@ -321,8 +352,8 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
             else
                 setBandQ(currentFilterIndex, DEFAULT_Q);
 
-            // チャンネルモードは常にステレオ
-            setBandChannelMode(currentFilterIndex, EQChannelMode::Stereo);
+            // チャンネルモード設定
+            setBandChannelMode(currentFilterIndex, currentChannelMode);
 
             currentFilterIndex++;
         }
@@ -1000,9 +1031,14 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     if (!std::isfinite(envOut)) envOut = 0.0;
     if (!std::isfinite(currentGain)) currentGain = 1.0;
 
+    // ブロック長とサンプリングレートに基づいて係数を動的に計算
+    // alpha = dt / (dt + tau)  (dt: samples, tau: samples)
+    const double alpha       = (double)numSamples / ((double)numSamples + currentSampleRate * AGC_RESPONSE_TIME_SEC);
+    const double smoothAlpha = (double)numSamples / ((double)numSamples + currentSampleRate * AGC_SMOOTH_TIME_SEC);
+
     // 指数移動平均 (EMA) によるエンベロープ検波
-    envIn  = envIn  * (1.0 - AGC_ALPHA) + inputRMS  * AGC_ALPHA;
-    envOut = envOut * (1.0 - AGC_ALPHA) + outputRMS * AGC_ALPHA;
+    envIn  = envIn  * (1.0 - alpha) + inputRMS  * alpha;
+    envOut = envOut * (1.0 - alpha) + outputRMS * alpha;
 
     // Denormal対策: 極小値をゼロにクランプ (無音時のCPU負荷対策)
     if (envIn < 1.0e-20) envIn = 0.0;
@@ -1012,7 +1048,7 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     double targetGain = calculateAGCGain(envIn, envOut);
 
     // ゲイン変化のスムーシング
-    double nextGain = currentGain * (1.0 - AGC_GAIN_SMOOTH) + targetGain * AGC_GAIN_SMOOTH;
+    double nextGain = currentGain * (1.0 - smoothAlpha) + targetGain * smoothAlpha;
 
     // アトミック変数のストア
     agcEnvInput.store(envIn, std::memory_order_relaxed);
@@ -1246,16 +1282,16 @@ void EQProcessor::cleanup()
         const uint32 now = juce::Time::getMillisecondCounter();
 
         // Clean BandNodes (Time-based)
-        // Audio ThreadがRaw Pointerを参照している可能性があるため、即時削除せず一定時間(2000ms)待つ
-        auto nodeIt = std::remove_if(bandNodeTrashBin.begin(), bandNodeTrashBin.end(),
-            [now](const auto& entry) {
-                return (now >= entry.second) ? (now - entry.second > 2000)
-                                             : (now + (std::numeric_limits<uint32>::max() - entry.second) > 2000);
-            });
-
-        for (auto it = nodeIt; it != bandNodeTrashBin.end(); ++it)
-            nodesToDelete.push_back(it->first);
-        bandNodeTrashBin.erase(nodeIt, bandNodeTrashBin.end());
+        // Audio ThreadがRaw Pointerを参照している可能性があるため、即時削除せず一定時間(10000ms)待つ
+        for (auto it = bandNodeTrashBin.begin(); it != bandNodeTrashBin.end(); )
+        {
+            if ((now - it->second) > 10000)
+            {
+                nodesToDelete.push_back(it->first);
+                it = bandNodeTrashBin.erase(it);
+            }
+            else { ++it; }
+        }
 
         // Move pending to main trash with timestamp
         for (const auto& ptr : bandNodeTrashBinPending)
@@ -1263,17 +1299,22 @@ void EQProcessor::cleanup()
         bandNodeTrashBinPending.clear();
 
         // Clean States (use_count==1 で解放)
-        auto stateIt = stateTrashBin.begin();
-        stateIt = std::remove_if(stateTrashBin.begin(), stateTrashBin.end(), [](EQState* p) { return p->refCount.load() == 1; });
-        statesToDelete.insert(statesToDelete.end(), stateIt, stateTrashBin.end());
-        stateTrashBin.erase(stateIt, stateTrashBin.end());
+        for (auto it = stateTrashBin.begin(); it != stateTrashBin.end(); )
+        {
+            if ((*it)->refCount.load() == 1)
+            {
+                statesToDelete.push_back(*it);
+                it = stateTrashBin.erase(it);
+            }
+            else { ++it; }
+        }
 
         stateTrashBin.insert(stateTrashBin.end(), stateTrashBinPending.begin(), stateTrashBinPending.end());
         stateTrashBinPending.clear();
 
         // 【パッチ1】stateTrashBin サイズ上限制御 (無制限成長によるメモリリーク防止)
         // use_count > 1 の参照が長期保持される場合でも最大10件に制限し強制解放する
-        static constexpr size_t kMaxStateTrashBinSize = 10;
+        static constexpr size_t kMaxStateTrashBinSize = 50;
         if (stateTrashBin.size() > kMaxStateTrashBinSize)
         {
             const size_t removeCount = stateTrashBin.size() - kMaxStateTrashBinSize;

@@ -53,19 +53,21 @@ namespace convo::input_transform
         }
     }
 
-    inline void applyHighQuality64BitTransform(double* data, int numSamples) noexcept
+    inline void applyHighQuality64BitTransform(double* data, int numSamples, double gain = 1.0) noexcept
     {
         if (data == nullptr || numSamples <= 0)
             return;
 
-        // 1) ヘッドルーム確保 (-0.1dB)
-        cblas_dscal(numSamples, kHeadroomScale, data, 1);
+        // 1) ヘッドルーム確保 (Dynamic)
+        // クランプ前に適用することで、>0dBFSの入力を救済する
+        if (std::abs(gain - 1.0) > 1e-9)
+            cblas_dscal(numSamples, gain, data, 1);
 
         // 2) デノーマル/NaN対策 + 範囲制限
         sanitizeAndLimit(data, numSamples);
     }
 
-    inline void convertFloatToDoubleHighQuality(const float* src, double* dst, int numSamples) noexcept
+    inline void convertFloatToDoubleHighQuality(const float* src, double* dst, int numSamples, double gain = 1.0) noexcept
     {
         if (src == nullptr || dst == nullptr || numSamples <= 0)
             return;
@@ -83,10 +85,10 @@ namespace convo::input_transform
         for (; i < numSamples; ++i)
             dst[i] = static_cast<double>(src[i]);
 
-        applyHighQuality64BitTransform(dst, numSamples);
+        applyHighQuality64BitTransform(dst, numSamples, gain);
     }
 
-    inline void convertDoubleToDoubleHighQuality(const double* src, double* dst, int numSamples) noexcept
+    inline void convertDoubleToDoubleHighQuality(const double* src, double* dst, int numSamples, double gain = 1.0) noexcept
     {
         if (src == nullptr || dst == nullptr || numSamples <= 0)
             return;
@@ -94,6 +96,6 @@ namespace convo::input_transform
         if (src != dst)
             std::memcpy(dst, src, static_cast<size_t>(numSamples) * sizeof(double));
 
-        applyHighQuality64BitTransform(dst, numSamples);
+        applyHighQuality64BitTransform(dst, numSamples, gain);
     }
 }

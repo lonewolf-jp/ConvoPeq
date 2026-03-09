@@ -196,11 +196,8 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 
         // Check if any sample in the vector needs clipping
         __m256d needClip = _mm256_cmp_pd(absX, vClipStart, _CMP_GT_OQ);
-        int mask = _mm256_movemask_pd(needClip);
-        if (mask == 0)
-        {
-            continue; // No clipping needed for this vector, skip to next
-        }
+        // Jitter対策: 条件分岐を削除し、常に一定の計算負荷をかける。
+        // データ依存の負荷変動（静かなパートは軽く、大音量で重くなる）を防ぐ。
 
         // --- sign ---
         __m256d maskSignPos = _mm256_cmp_pd(x, vZero, _CMP_GT_OQ);
@@ -631,10 +628,6 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     inputLevelLinear.store(0.0f);
     outputLevelLinear.store(0.0f);
 
-    // Audio Threadが新しくなる可能性があるため、モード設定フラグをリセットして
-    // 次回のgetNextAudioBlockで確実に設定が行われるようにする。
-    audioThreadModesSet.store(false, std::memory_order_release);
-
     // ===== bypass 状態の初期化 =====
     // 再生中のリアルタイムな更新は getNextAudioBlock() で行われる
     eqBypassActive.store (eqBypassRequested.load (std::memory_order_relaxed), std::memory_order_relaxed);
@@ -1049,29 +1042,29 @@ void AudioEngine::timerCallback()
             trashBin.push_back({p, now});
         trashBinPending.clear();
 
-        // 2. Identify items to delete (older than 2000ms)
-        // This ensures that any Audio Thread processing cycle (typically <100ms)
+        // 2. Identify items to delete (older than 10000ms)
+        // This ensures that any Audio Thread processing cycle (worst case: 65536/8000Hz = 8.2s)
         // that might have started using the pointer has finished.
-        auto it = std::remove_if(trashBin.begin(), trashBin.end(),
-                                 [now](const auto& entry) {
-                                     // Unsigned arithmetic handles wrap-around correctly
-                                     return (now - entry.second) > 2000;
-                                 });
-
-        for (auto i = it; i != trashBin.end(); ++i)
-            toDelete.push_back(i->first);
-
-        trashBin.erase(it, trashBin.end());
+        for (auto it = trashBin.begin(); it != trashBin.end(); )
+        {
+            // Unsigned arithmetic handles wrap-around correctly
+            if ((now - it->second) > 10000)
+            {
+                toDelete.push_back(it->first);
+                it = trashBin.erase(it);
+            }
+            else { ++it; }
+        }
 
         // 3. Size limit (Max 10 items) - メモリ爆発防止
         // 【Fix Bug #1】古いアイテムのみ強制削除する。
         // サイズ超過時も2秒の猶予期間を尊重するため、最も古いアイテム(front)から
         // 削除する。ただし、通常はステップ2の時間ベース削除で十分であるため、
         // ここには滅多に到達しない。高速IR切り替えによる異常蓄積時のみの安全弁として機能する。
-        while (trashBin.size() > 10)
+        while (trashBin.size() > 30)
         {
             // 最も古い(frontの)アイテムを削除する。
-            // これはすでに2秒の猶予を超えているか、超えていなければ次のtimerCallbackで削除される。
+            // これはすでに10秒の猶予を超えているか、超えていなければ次のtimerCallbackで削除される。
             toDelete.push_back(trashBin.front().first);
             trashBin.erase(trashBin.begin());
         }
@@ -1212,11 +1205,11 @@ void AudioEngine::releaseResources()
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
     // === パッチ1: モード設定をAudio Thread開始時に1回だけ実行 ===
-    if (!audioThreadModesSet.load(std::memory_order_relaxed)) {
-        if (audioThreadModesSet.exchange(true, std::memory_order_acq_rel) == false) {
-            _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-            _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-        }
+    static thread_local bool threadInitialized = false;
+    if (!threadInitialized) {
+        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+        threadInitialized = true;
     }
     // ========================================================
 
@@ -1274,6 +1267,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
         const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
         const float satAmt = saturationAmount.load(std::memory_order_relaxed);
+        const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
 
         // UI表示用の状態更新
         if (eqBypassActive.load(std::memory_order_relaxed) != eqBypassed)
@@ -1288,7 +1282,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                        .order = order,
                        .analyzerSource = analyzerSource,
                        .softClipEnabled = softClip,
-                       .saturationAmount = satAmt }); // スマートポインタでDSPを呼び出し
+                       .saturationAmount = satAmt,
+                       .inputHeadroomGain = headroomGain }); // スマートポインタでDSPを呼び出し
     }
     else
     {
@@ -1298,13 +1293,11 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 {
-    if (!audioThreadModesSet.load(std::memory_order_relaxed))
-    {
-        if (audioThreadModesSet.exchange(true, std::memory_order_acq_rel) == false)
-        {
-            _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-            _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-        }
+    static thread_local bool threadInitialized = false;
+    if (!threadInitialized) {
+        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+        threadInitialized = true;
     }
 
     const int numSamples = buffer.getNumSamples();
@@ -1336,6 +1329,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
     const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
     const float satAmt = saturationAmount.load(std::memory_order_relaxed);
+    const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
 
     if (eqBypassActive.load(std::memory_order_relaxed) != eqBypassed)
         eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
@@ -1348,7 +1342,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                          .order = order,
                          .analyzerSource = analyzerSource,
                          .softClipEnabled = softClip,
-                         .saturationAmount = satAmt });
+                         .saturationAmount = satAmt,
+                         .inputHeadroomGain = headroomGain });
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
@@ -1384,7 +1379,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         }
     }
 
-    processInput(bufferToFill, numSamples);
+    processInput(bufferToFill, numSamples, state.inputHeadroomGain);
 
     //----------------------------------------------------------
     // AudioBlockの構築 (AlignedBufferを使用)
@@ -1546,7 +1541,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         }
     }
 
-    processInputDouble(buffer, numSamples);
+    processInputDouble(buffer, numSamples, state.inputHeadroomGain);
 
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
@@ -1737,7 +1732,7 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
     audioFifo.finishedWrite(size1 + size2);
 }
 
-void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept
+void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, double headroomGain) noexcept
 {
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
@@ -1747,7 +1742,7 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     {
         const float* src = buffer->getReadPointer(ch, startSample);
         double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
-        convo::input_transform::convertFloatToDoubleHighQuality(src, dst, numSamples);
+        convo::input_transform::convertFloatToDoubleHighQuality(src, dst, numSamples, headroomGain);
     }
 
     // 入力がないチャンネル、または余剰チャンネルはクリア
@@ -1786,7 +1781,7 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     inputDCBlockerR.process(rPtr, numSamples);
 }
 
-void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples) noexcept
+void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples, double headroomGain) noexcept
 {
     const int effectiveInputChannels = std::min(buffer.getNumChannels(), 2);
 
@@ -1794,7 +1789,7 @@ void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& b
     {
         const double* src = buffer.getReadPointer(ch);
         double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
-        convo::input_transform::convertDoubleToDoubleHighQuality(src, dst, numSamples);
+        convo::input_transform::convertDoubleToDoubleHighQuality(src, dst, numSamples, headroomGain);
     }
 
     const bool expandMono = (effectiveInputChannels == 1);
@@ -1836,91 +1831,73 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     // ビット深度に基づくディザリング判定
     // ユーザー設定に従い、32-bit (float/int) でもディザリングを適用する。
     const bool applyDither = (ditherBitDepth > 0);
+    const int numChannels = std::min(2, buffer->getNumChannels());
 
-    //----------------------------------------------------------
-    // 統合処理ループ: DC除去 -> [ディザリング] -> float変換+クランプ
-    //
-    // 【最適化】旧実装の問題点と改善:
-    //   旧: [パス1] スカラー: 4次IIRブロッカー+headroom → data[] 書き戻し
-    //       [パス2] AVX2: data[] 再読み込み → clamp/convert → dst[]
-    //       → 同一データを 2 回走査 + 4次IIR のコスト (~20 ops/sample)
-    //
-    //   新: [パス1] ブロックモード: UltraHighRateDCBlocker.process(data, N)  (~4 ops/sample)
-    //       [パス1b] ディザ有効時のみ スカラー: headroom + dither → data[]
-    //       [パス2] AVX2: headroom乗算(ディザ無効時) + clamp/convert → dst[]
-    //       → DCBlock が 1 次IIRになり AVX2 パスに headroom を統合
-    //----------------------------------------------------------
-    for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
+    // ── ループフュージョンによる最適化 ──
+    // DC除去、ディザリング、変換・クランプを1つのループに統合し、キャッシュ効率を最大化する。
+    // 各処理の結果をレジスタ内で次の処理に渡すことで、メモリへの書き戻しを削減する。
+
+    double* dataL = (numChannels > 0) ? alignedL.get() : nullptr;
+    double* dataR = (numChannels > 1) ? alignedR.get() : nullptr;
+    float* dstL = (numChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
+    float* dstR = (numChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
+
+    // DCブロッカーの状態をロード
+    dcBlockerL.loadState();
+    if (dataR) dcBlockerR.loadState();
+
+    const __m256d vMax = _mm256_set1_pd(1.0);
+    const __m256d vMin = _mm256_set1_pd(-1.0);
+    const __m256d vHeadroom = applyDither ? _mm256_set1_pd(1.0)
+                                          : _mm256_set1_pd(kOutputHeadroom);
+
+    for (int i = 0; i < numSamples; ++i)
     {
-        if (ch < 2)
+        // --- DC除去 ---
+        double sampleL = dataL[i];
+        dcBlockerL.processSample(sampleL);
+
+        double sampleR = 0.0;
+        if (dataR)
         {
-            double* data = (ch == 0) ? alignedL.get() : alignedR.get();
-            auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
-            float* dst = buffer->getWritePointer(ch, startSample);
-
-            // ── フェーズ1: DCブロッカー (1次IIR, ブロックモード) ──
-            blocker.process(data, numSamples);
-
-            // ── フェーズ1b: ディザリング有効時のみ ──
-            // headroom スケールを掛けてからディザ処理 (スカラー, 逐次依存のため不可避)
-            if (applyDither)
-            {
-                for (int i = 0; i < numSamples; ++i)
-                    data[i] = dither.process(data[i] * kOutputHeadroom, ch);
-            }
-
-            // ── フェーズ2: double→float 変換 + headroom(ディザ無効時) + クランプ (AVX2 一括) ──
-            // NaN 対策: vmulpd(NaN, headroom)=NaN, vmaxpd(NaN, -1.0)=-1.0 (Intel仕様: 第1op=NaN→第2opを返す)
-            // → NaN は -1.0 になる。旧実装(vEpsilon blendv)は 0.0 にしていたが、
-            //   どちらも正常動作時には到達しないため実用上の差異はない。
-            // デノーマル対策: FTZ/DAZ が有効なため vEpsilon blendv チェックは省略する。
-            {
-                const __m256d vMax      = _mm256_set1_pd(1.0);
-                const __m256d vMin      = _mm256_set1_pd(-1.0);
-                const __m256d vHeadroom = applyDither ? _mm256_set1_pd(1.0)  // ディザ済み
-                                                      : _mm256_set1_pd(kOutputHeadroom);
-
-                int i = 0;
-                const int vEnd = numSamples / 16 * 16; // Unroll 4x
-                for (; i < vEnd; i += 16)
-                {
-                    _mm_prefetch(reinterpret_cast<const char*>(data + i + 64), _MM_HINT_T0);
-
-                    __m256d v0 = _mm256_mul_pd(_mm256_loadu_pd(data + i),      vHeadroom);
-                    __m256d v1 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 4),  vHeadroom);
-                    __m256d v2 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 8),  vHeadroom);
-                    __m256d v3 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 12), vHeadroom);
-
-                    v0 = _mm256_min_pd(_mm256_max_pd(v0, vMin), vMax);
-                    v1 = _mm256_min_pd(_mm256_max_pd(v1, vMin), vMax);
-                    v2 = _mm256_min_pd(_mm256_max_pd(v2, vMin), vMax);
-                    v3 = _mm256_min_pd(_mm256_max_pd(v3, vMin), vMax);
-
-                    _mm_storeu_ps(dst + i,      _mm256_cvtpd_ps(v0));
-                    _mm_storeu_ps(dst + i + 4,  _mm256_cvtpd_ps(v1));
-                    _mm_storeu_ps(dst + i + 8,  _mm256_cvtpd_ps(v2));
-                    _mm_storeu_ps(dst + i + 12, _mm256_cvtpd_ps(v3));
-                }
-                for (; i < (numSamples / 4 * 4); i += 4)
-                {
-                    __m256d v = _mm256_mul_pd(_mm256_loadu_pd(data + i), vHeadroom);
-                    v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);
-                    _mm_storeu_ps(dst + i, _mm256_cvtpd_ps(v));
-                }
-                for (; i < numSamples; ++i)
-                {
-                    double val = data[i];
-                    if (!std::isfinite(val)) val = 0.0;
-                    dst[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, applyDither ? val : val * kOutputHeadroom));
-                }
-            }
+            sampleR = dataR[i];
+            dcBlockerR.processSample(sampleR);
         }
-        else
+
+        // --- ディザリング ---
+        if (applyDither)
         {
-            // 3ch以降は使用しないためクリア (ゴミデータ出力防止)
-            buffer->clear(ch, startSample, numSamples);
+            sampleL = dither.process(sampleL * kOutputHeadroom, 0);
+            if (dataR)
+                sampleR = dither.process(sampleR * kOutputHeadroom, 1);
         }
+
+        // --- 変換・クランプ ---
+        double finalL = sampleL;
+        double finalR = sampleR;
+
+        if (!applyDither)
+        {
+            finalL *= kOutputHeadroom;
+            if (dataR)
+                finalR *= kOutputHeadroom;
+        }
+
+        if (!std::isfinite(finalL)) finalL = 0.0;
+        if (!std::isfinite(finalR)) finalR = 0.0;
+
+        dstL[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, finalL));
+        if (dstR)
+            dstR[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, finalR));
     }
+
+    // DCブロッカーの状態を保存
+    dcBlockerL.saveState();
+    if (dataR) dcBlockerR.saveState();
+
+    // 3ch以降は使用しないためクリア (ゴミデータ出力防止)
+    for (int ch = numChannels; ch < buffer->getNumChannels(); ++ch)
+        buffer->clear(ch, startSample, numSamples);
 }
 
 void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer, int numSamples) noexcept
@@ -2036,6 +2013,9 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("saturationAmount"))
         setSaturationAmount(state.getProperty("saturationAmount"));
 
+    if (state.hasProperty("inputHeadroomDb"))
+        setInputHeadroomDb(state.getProperty("inputHeadroomDb"));
+
     if (state.hasProperty("analyzerSource"))
         setAnalyzerSource((AnalyzerSource)(int)state.getProperty("analyzerSource"));
 
@@ -2077,6 +2057,7 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.setProperty("processingOrder", (int)currentProcessingOrder.load(), nullptr);
     state.setProperty("softClipEnabled", softClipEnabled.load(), nullptr);
     state.setProperty("saturationAmount", saturationAmount.load(), nullptr);
+    state.setProperty("inputHeadroomDb", inputHeadroomDb.load(), nullptr);
     state.setProperty("analyzerSource", (int)currentAnalyzerSource.load(), nullptr);
     state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);
     state.setProperty("convBypassed", convBypassRequested.load(), nullptr);
@@ -2084,6 +2065,21 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.addChild (uiEqProcessor.getState(), -1, nullptr);
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
     return state;
+}
+
+void AudioEngine::setInputHeadroomDb(float db)
+{
+    float clampedDb = juce::jlimit(-10.0f, 0.0f, db);
+    if (std::abs(inputHeadroomDb.load() - clampedDb) > 1e-5f)
+    {
+        inputHeadroomDb.store(clampedDb);
+        inputHeadroomGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
+    }
+}
+
+float AudioEngine::getInputHeadroomDb() const
+{
+    return inputHeadroomDb.load();
 }
 
 void AudioEngine::setDitherBitDepth(int bitDepth)

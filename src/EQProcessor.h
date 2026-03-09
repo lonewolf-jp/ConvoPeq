@@ -123,8 +123,8 @@ public:
     static constexpr float DEFAULT_Q = 0.707f;
 
     // ── AGC定数 ──
-    static constexpr float AGC_ALPHA       = 0.01f; // エンベロープ追従係数 (Attack/Release)
-    static constexpr float AGC_GAIN_SMOOTH = 0.05f; // ゲイン変化スムーシング
+    static constexpr double AGC_RESPONSE_TIME_SEC = 1.0; // エンベロープ追従時定数 (1.0s)
+    static constexpr double AGC_SMOOTH_TIME_SEC   = 0.2; // ゲイン変化スムーシング時定数 (0.2s)
     static constexpr float AGC_MIN_GAIN    = 0.06f; // 最小ゲイン制限 (~ -24dB)
     static constexpr float AGC_MAX_GAIN    = 16.0f; // 最大ゲイン制限 (~ +24dB)
 

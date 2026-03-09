@@ -95,6 +95,11 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
     // Audio Thread内でのVMLモード変更を避けるため、起動時に1回だけ設定する。
     vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
 
+    // メインスレッドでも Denormal 対策を有効化
+    // UIスレッドで実行されるEQ応答曲線計算 (AVX2) 等のパフォーマンスを向上させる
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+
     // メインウィンドウを生成する
     mainWindow = std::make_unique<MainWindow>(getApplicationName());
 }

@@ -338,8 +338,8 @@ public:
     {}
 
     // メモリからリビルドする場合のコンストラクタ
-    LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, bool minPhase)
-        : Thread("IRRebuilder"), owner(p), weakOwner(&p), sourceIR(src), sourceSampleRate(srcSR), sampleRate(sr), blockSize(bs), useMinPhase(minPhase), isRebuild(true)
+    LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, bool minPhase, double scale)
+        : Thread("IRRebuilder"), owner(p), weakOwner(&p), sourceIR(src), sourceSampleRate(srcSR), sampleRate(sr), blockSize(bs), useMinPhase(minPhase), isRebuild(true), scaleFactor(scale)
     {}
 
     ~LoaderThread() override
@@ -357,6 +357,7 @@ public:
         juce::AudioBuffer<double> displayIR;
         StereoConvolver* newConv = nullptr;
         bool success = false;
+        double scaleFactor = 1.0;
         juce::String errorMessage;
     };
 
@@ -405,13 +406,13 @@ public:
             auto* displayIRPtr = new juce::AudioBuffer<double>(std::move(result.displayIR));
             StereoConvolver* newConvPtr = result.newConv;
 
-            juce::MessageManager::callAsync([wp, newConvPtr, loadedIRPtr, loadedSR = result.loadedSR, targetLength = result.targetLength, isRebuild = this->isRebuild, file = this->file, displayIRPtr]()
+            juce::MessageManager::callAsync([wp, newConvPtr, loadedIRPtr, loadedSR = result.loadedSR, targetLength = result.targetLength, isRebuild = this->isRebuild, file = this->file, displayIRPtr, scale = result.scaleFactor]()
             {
                 std::unique_ptr<juce::AudioBuffer<double>> irOwner(loadedIRPtr);
                 std::unique_ptr<juce::AudioBuffer<double>> displayOwner(displayIRPtr);
                 if (auto* o = wp.get())
                 {
-                    o->applyNewState(newConvPtr, *irOwner, loadedSR, targetLength, isRebuild, file, *displayOwner);
+                    o->applyNewState(newConvPtr, *irOwner, loadedSR, targetLength, isRebuild, file, scale, *displayOwner);
                 }
             });
 
@@ -460,6 +461,7 @@ public:
             {
                 result.loadedIR = std::move(sourceIR); // 最適化: コピーではなくムーブ
                 result.loadedSR = sourceSampleRate;
+                result.scaleFactor = this->scaleFactor;
             }
             else
             {
@@ -553,7 +555,8 @@ public:
                     // Safety Margin = 0.501187 (-6.0dB)
                     const double makeup = 1.0 / std::sqrt(maxChannelEnergy);
                     const double safetyMargin = 0.5011872336272722;
-                    result.loadedIR.applyGain(makeup * safetyMargin);
+                    // result.loadedIR.applyGain(makeup * safetyMargin); // Removed: Scaling moved to SetImpulse
+                    result.scaleFactor = makeup * safetyMargin;
                 }
                 else
                 {
@@ -750,8 +753,11 @@ public:
             auto sizing = computeMasteringSizing(internalBlockSize, result.targetLength);
 
             // Display用コピーを作成 (move前に)
-            if (owner.isVisualizationEnabled())
+            if (owner.isVisualizationEnabled()) {
                 result.displayIR = trimmed;
+                // 表示用にはスケールを適用しておく (処理用IRはSetImpulseでスケールされる)
+                result.displayIR.applyGain(result.scaleFactor);
+            }
 
             if (thread == nullptr) // Synchronous mode (Worker Thread)
             {
@@ -759,7 +765,7 @@ public:
                 result.newConv->addRef();
 
                 if (result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency,
-                                         sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize))
+                                         sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize, result.scaleFactor))
                 {
                     result.success = true;
                 }
@@ -798,14 +804,15 @@ public:
                                                  first    = sizing.firstPartition,
                                                  callQ    = blockSize,
                                                  isReb    = isRebuild,
-                                                 file     = file]() mutable
+                                                 file     = file,
+                                                 scale    = result.scaleFactor]() mutable
                 {
                     if (auto* owner = weakOwner.get())
                     {
                         owner->finalizeNUCEngineOnMessageThread(std::move(state->irL),
                                                                 std::move(state->irR),
                                                                 length, sr, peak, maxFFT, known, first, callQ, isReb, file,
-                                                                std::move(state->loadedIR), std::move(state->displayIR));
+                                                                scale, std::move(state->loadedIR), std::move(state->displayIR));
                     }
                 });
 
@@ -846,7 +853,7 @@ public:
 
         if (result.success)
         {
-            owner.applyNewState(result.newConv, result.loadedIR, result.loadedSR, result.targetLength, isRebuild, file, result.displayIR);
+            owner.applyNewState(result.newConv, result.loadedIR, result.loadedSR, result.targetLength, isRebuild, file, result.scaleFactor, result.displayIR);
         }
         else
         {
@@ -864,6 +871,7 @@ private:
     int blockSize;
     bool useMinPhase;
     bool isRebuild;
+    double scaleFactor = 1.0;
 };
 
 //--------------------------------------------------------------
@@ -933,6 +941,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         // MKL NUC に正しい knownBlockSize を渡すために、エンジンを再構築する。
         // 既存のエンジンは他スレッドで共有されている可能性があるため、複製して差し替える。
         const int internalBlockSize = juce::nextPowerOfTwo(samplesPerBlock);
+        const double scale = conv->storedScale;
 
         if ((rateChanged || blockChanged) && conv->irDataLength > 0)
         {
@@ -949,7 +958,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
             // 新しいブロックサイズで初期化
             newConv->init(irL.release(), irR.release(),
-                          conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock);
+                          conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, scale);
 
             // 差し替え
             convolution.store(newConv, std::memory_order_release);
@@ -1129,7 +1138,7 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
     if (originalIR.getNumSamples() > 0 && originalIRSampleRate > 0.0)
     {
         // リビルドモードでローダーを作成し、同期的に実行
-        LoaderThread loader(*this, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load());
+        LoaderThread loader(*this, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
         loader.externalCancellationCheck = shouldCancel;
         loader.runSynchronously();
     }
@@ -1362,59 +1371,6 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     return true;
 }
 
-//--------------------------------------------------------------
-// applyNewState (Message Thread Callback)
-// ローダースレッド完了後に呼ばれる
-//--------------------------------------------------------------
-void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
-                                       const juce::AudioBuffer<double>& loadedIR,
-                                       double loadedSR,
-                                       int targetLength,
-                                       bool isRebuild,
-                                       const juce::File& file,
-                                       const juce::AudioBuffer<double>& displayIR)
-{
-    // 元データの更新 (新規ロード時のみ)
-    if (!isRebuild)
-    {
-        originalIR = loadedIR;
-        originalIRSampleRate = loadedSR;
-        {
-            const juce::ScopedLock sl(irFileLock);
-            currentIrFile = file;
-        }
-        irName = file.getFileNameWithoutExtension();
-    }
-
-    // スナップショット更新 (表示用)
-    // LoaderThreadで計算済みの displayIR (trimmed & min-phased) を使用
-    if (visualizationEnabled)
-    {
-        createWaveformSnapshot(displayIR);
-        // 表示用には現在のサンプルレートを使用 (loadedSRはリサンプリング後のレート)
-        createFrequencyResponseSnapshot(displayIR, loadedSR);
-    }
-
-    // 安全に差し替え (Atomic Swap)
-    convolution.store(newConv, std::memory_order_release);
-
-    if (activeConvolution)
-    {
-        DBG("ConvolverProcessor: Enqueueing old StereoConvolver to trash bin.");
-        const juce::ScopedLock sl(trashBinLock);
-        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()}); // 古いオブジェクトをゴミ箱へ
-    }
-    activeConvolution = newConv;
-
-    // 現在の有効なIR長を更新
-    irLength = targetLength;
-    currentSampleRate.store(currentSpec.sampleRate);
-
-    isLoading.store(false);
-    isRebuilding.store(false, std::memory_order_release); // Reset rebuild flag
-    sendChangeMessage();
-}
-
 void ConvolverProcessor::handleLoadError(const juce::String& error)
 {
     lastError = error;
@@ -1468,7 +1424,7 @@ void ConvolverProcessor::cleanup()
                      (now - it->second) :
                      (std::numeric_limits<uint32>::max() - it->second + now);
 
-        if (age > 800)
+        if (age > 10000)
         {
             toRelease.push_back(it->first);
             it = trashBin.erase(it);
@@ -1483,7 +1439,7 @@ void ConvolverProcessor::cleanup()
     // 最も古いアイテム(front)から削除する。back()を使うと最も新しい
     // StereoConvolverが削除され、Audio Threadがまだそれを使用中の可能性がある
     // ため、Use-After-Freeを引き起こす危険がある。
-    while (trashBin.size() > 5)
+    while (trashBin.size() > 20)
     {
         toRelease.push_back(trashBin.front().first);
         trashBin.erase(trashBin.begin());
@@ -1783,6 +1739,7 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     }
     irName = other.irName;
     irLength = other.irLength;
+    currentIRScale = other.currentIRScale;
 
     // クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
     // SCはDSPCore::prepare()内のprepareToPlay、またはrebuildAllIRsSynchronousで生成する
@@ -2087,8 +2044,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     const __m256d vNew = _mm256_loadu_pd(newSamples + i);
                     const __m256d vFadeOutGain = _mm256_sub_pd(vOne, vGain);
 
-                    // out = new * fadeIn + old * fadeOut
-                    const __m256d vOut = _mm256_fmadd_pd(vNew, vGain, _mm256_mul_pd(vOld, vFadeOutGain));
+                    // out = new * fadeIn + old * fadeOut (FMA)
+                    const __m256d vOut = _mm256_fmadd_pd(vNew, vGain, _mm256_mul_pd(vOld, vFadeOutGain)); // FMA
                     _mm256_storeu_pd(newSamples + i, vOut);
 
                     vGain = _mm256_add_pd(vGain, vInc);
@@ -2240,7 +2197,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         __m256d vDry0 = _mm256_loadu_pd(dry + i);
                         __m256d vWetG0 = _mm256_loadu_pd(wetChunkGains + i);
                         __m256d vDryG0 = _mm256_loadu_pd(dryChunkGains + i);
-                        __m256d vOut0 = _mm256_fmadd_pd(vWet0, vWetG0, _mm256_mul_pd(vDry0, vDryG0));
+                        __m256d vOut0 = _mm256_fmadd_pd(vWet0, vWetG0, _mm256_mul_pd(vDry0, vDryG0)); // FMA
                         _mm256_storeu_pd(dst + i, vOut0);
 
                         // 2
@@ -2248,7 +2205,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         __m256d vDry1 = _mm256_loadu_pd(dry + i + 4);
                         __m256d vWetG1 = _mm256_loadu_pd(wetChunkGains + i + 4);
                         __m256d vDryG1 = _mm256_loadu_pd(dryChunkGains + i + 4);
-                        __m256d vOut1 = _mm256_fmadd_pd(vWet1, vWetG1, _mm256_mul_pd(vDry1, vDryG1));
+                        __m256d vOut1 = _mm256_fmadd_pd(vWet1, vWetG1, _mm256_mul_pd(vDry1, vDryG1)); // FMA
                         _mm256_storeu_pd(dst + i + 4, vOut1);
 
                         // 3
@@ -2256,7 +2213,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         __m256d vDry2 = _mm256_loadu_pd(dry + i + 8);
                         __m256d vWetG2 = _mm256_loadu_pd(wetChunkGains + i + 8);
                         __m256d vDryG2 = _mm256_loadu_pd(dryChunkGains + i + 8);
-                        __m256d vOut2 = _mm256_fmadd_pd(vWet2, vWetG2, _mm256_mul_pd(vDry2, vDryG2));
+                        __m256d vOut2 = _mm256_fmadd_pd(vWet2, vWetG2, _mm256_mul_pd(vDry2, vDryG2)); // FMA
                         _mm256_storeu_pd(dst + i + 8, vOut2);
 
                         // 4
@@ -2264,7 +2221,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         __m256d vDry3 = _mm256_loadu_pd(dry + i + 12);
                         __m256d vWetG3 = _mm256_loadu_pd(wetChunkGains + i + 12);
                         __m256d vDryG3 = _mm256_loadu_pd(dryChunkGains + i + 12);
-                        __m256d vOut3 = _mm256_fmadd_pd(vWet3, vWetG3, _mm256_mul_pd(vDry3, vDryG3));
+                        __m256d vOut3 = _mm256_fmadd_pd(vWet3, vWetG3, _mm256_mul_pd(vDry3, vDryG3)); // FMA
                         _mm256_storeu_pd(dst + i + 12, vOut3);
                     }
                 }
@@ -2275,7 +2232,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     __m256d vDry = _mm256_loadu_pd(dry + i);
                     __m256d vWetG = _mm256_loadu_pd(wetChunkGains + i);
                     __m256d vDryG = _mm256_loadu_pd(dryChunkGains + i);
-                    __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG));
+                    __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG)); // FMA
                     _mm256_storeu_pd(dst + i, vOut);
                 }
                 for (; i < validWetSamples; ++i)
@@ -2308,25 +2265,25 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         // 1
                         __m256d vWet0 = _mm256_loadu_pd(wetSignal + i);
                         __m256d vDry0 = _mm256_loadu_pd(dry + i);
-                        __m256d vOut0 = _mm256_fmadd_pd(vWet0, vWetG, _mm256_mul_pd(vDry0, vDryG));
+                        __m256d vOut0 = _mm256_fmadd_pd(vWet0, vWetG, _mm256_mul_pd(vDry0, vDryG)); // FMA
                         _mm256_storeu_pd(dst + i, vOut0);
 
                         // 2
                         __m256d vWet1 = _mm256_loadu_pd(wetSignal + i + 4);
                         __m256d vDry1 = _mm256_loadu_pd(dry + i + 4);
-                        __m256d vOut1 = _mm256_fmadd_pd(vWet1, vWetG, _mm256_mul_pd(vDry1, vDryG));
+                        __m256d vOut1 = _mm256_fmadd_pd(vWet1, vWetG, _mm256_mul_pd(vDry1, vDryG)); // FMA
                         _mm256_storeu_pd(dst + i + 4, vOut1);
 
                         // 3
                         __m256d vWet2 = _mm256_loadu_pd(wetSignal + i + 8);
                         __m256d vDry2 = _mm256_loadu_pd(dry + i + 8);
-                        __m256d vOut2 = _mm256_fmadd_pd(vWet2, vWetG, _mm256_mul_pd(vDry2, vDryG));
+                        __m256d vOut2 = _mm256_fmadd_pd(vWet2, vWetG, _mm256_mul_pd(vDry2, vDryG)); // FMA
                         _mm256_storeu_pd(dst + i + 8, vOut2);
 
                         // 4
                         __m256d vWet3 = _mm256_loadu_pd(wetSignal + i + 12);
                         __m256d vDry3 = _mm256_loadu_pd(dry + i + 12);
-                        __m256d vOut3 = _mm256_fmadd_pd(vWet3, vWetG, _mm256_mul_pd(vDry3, vDryG));
+                        __m256d vOut3 = _mm256_fmadd_pd(vWet3, vWetG, _mm256_mul_pd(vDry3, vDryG)); // FMA
                         _mm256_storeu_pd(dst + i + 12, vOut3);
                     }
                 }
@@ -2334,7 +2291,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 {
                     __m256d vWet = _mm256_loadu_pd(wetSignal + i);
                     __m256d vDry = _mm256_loadu_pd(dry + i);
-                    __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG));
+                    __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG)); // FMA
                     _mm256_storeu_pd(dst + i, vOut);
                 }
                 // 残りの有効なWetサンプル (Scalar)
@@ -2464,6 +2421,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                                                           int preferredCallSize,
                                                           bool isRebuild,
                                                           const juce::File& irFile,
+                                                          double scaleFactor,
                                                           std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
                                                           std::unique_ptr<juce::AudioBuffer<double>> displayIR)
 {
@@ -2472,7 +2430,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
     newConv->addRef();
 
     if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
-                      maxFFTSize, knownBlockSize, firstPartition, preferredCallSize))
+                      maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor))
     {
         // 元の applyNewState と同一の流れで適用
         applyNewState(newConv,
@@ -2482,6 +2440,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                       isRebuild,
                       irFile,
                       *displayIR); // 参照渡し
+        applyNewState(newConv, *loadedIR, sr, length, isRebuild, irFile, scaleFactor, *displayIR);
     }
     else
     {
@@ -2489,6 +2448,54 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         newConv->release();
         handleLoadError("Failed to initialize NUC engine (Memory allocation or MKL setup failed).");
     }
+}
+
+void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
+                                       const juce::AudioBuffer<double>& loadedIR,
+                                       double loadedSR,
+                                       int targetLength,
+                                       bool isRebuild,
+                                       const juce::File& file,
+                                       double scaleFactor,
+                                       const juce::AudioBuffer<double>& displayIR)
+{
+    // 元データの更新 (新規ロード時のみ)
+    if (!isRebuild)
+    {
+        originalIR = loadedIR;
+        originalIRSampleRate = loadedSR;
+        {
+            const juce::ScopedLock sl(irFileLock);
+            currentIrFile = file;
+        }
+        irName = file.getFileNameWithoutExtension();
+        currentIRScale = scaleFactor;
+    }
+
+    // スナップショット更新 (表示用)
+    if (visualizationEnabled)
+    {
+        createWaveformSnapshot(displayIR);
+        createFrequencyResponseSnapshot(displayIR, loadedSR);
+    }
+
+    // 安全に差し替え (Atomic Swap)
+    convolution.store(newConv, std::memory_order_release);
+
+    if (activeConvolution)
+    {
+        DBG("ConvolverProcessor: Enqueueing old StereoConvolver to trash bin.");
+        const juce::ScopedLock sl(trashBinLock);
+        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
+    }
+    activeConvolution = newConv;
+
+    irLength = targetLength;
+    currentSampleRate.store(currentSpec.sampleRate);
+
+    isLoading.store(false);
+    isRebuilding.store(false, std::memory_order_release);
+    sendChangeMessage();
 }
 
 void ConvolverProcessor::StereoConvolver::reset()

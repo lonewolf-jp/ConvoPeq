@@ -26,6 +26,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <immintrin.h>
 
 #include "AlignedAllocation.h"
 #include "CustomInputOversampler.h"
@@ -69,7 +70,7 @@ public:
     };
 
     // FIFO設定
-    static constexpr int FIFO_SIZE = 32768;  // Lock-free FIFO サイズ (推奨: FFTサイズ * 8)
+    static constexpr int FIFO_SIZE = 1048576;  // Lock-free FIFO サイズ (2^20, SAFE_MAX_BLOCK_SIZE * 8x OS をカバー)
 
     // ── 安全性制限 ──
     static constexpr double SAFE_MIN_SAMPLE_RATE = 8000.0;
@@ -154,6 +155,9 @@ public:
     void setAnalyzerEnabled(bool enabled) noexcept { analyzerEnabled.store(enabled, std::memory_order_release); }
     bool isAnalyzerEnabled() const noexcept { return analyzerEnabled.load(std::memory_order_acquire); }
 
+    void setInputHeadroomDb(float db);
+    float getInputHeadroomDb() const;
+
     void setDitherBitDepth(int bitDepth);
     int getDitherBitDepth() const;
 
@@ -172,68 +176,6 @@ public:
 private:
     //==============================================================================
     // 内部クラス定義
-    //----------------------------------------------------------
-    // DC除去フィルタ (4次バターワースハイパスフィルタ)
-    // 目的: EQやConvolver処理で発生しうるDCオフセットを除去し、スピーカー保護とヘッドルーム確保を行う。
-    // 特徴: カットオフ周波数 3Hz。20Hz帯域の位相歪みを低減 (-24dB/oct)。
-    // 実装: JUCE IIR Filter (2次x2段)
-    //----------------------------------------------------------
-    class DCBlocker
-    {
-    public:
-        void prepare(double sampleRate, int blockSize) noexcept
-        {
-            // 4次バターワースハイパスフィルタ（3Hz、-24dB/oct）
-            // 20Hz帯域の位相歪みを低減
-            spec.sampleRate = sampleRate;
-            spec.maximumBlockSize = static_cast<juce::uint32>(blockSize);
-            spec.numChannels = 1;
-
-            // 4次 Linkwitz-Riley ハイパスフィルタ (2次バターワース x 2段)
-            // 特徴:
-            // 1. カットオフ周波数(3Hz)で-6dBの減衰 (Butterworthは-3dB)
-            // 2. ストップバンド(DC付近)での減衰量がButterworthより大きく、DCブロック性能が高い
-            // 3. Q=0.707の段を重ねるため、過渡応答のリンギングが少ない
-            auto coeffs = juce::dsp::IIR::Coefficients<double>::makeHighPass(
-                sampleRate,
-                3.0,    // カットオフ周波数: 3Hz
-                0.7071067811865476 // Q = 1/sqrt(2)
-            );
-
-            for (auto& filter : filters)
-            {
-                filter.coefficients = coeffs;
-                filter.prepare(spec);
-                filter.reset();
-            }
-        }
-
-         void reset() noexcept
-        {
-            for (auto& filter : filters)
-                filter.reset();
-        }
-
-        double process(double input) noexcept
-        {
-             double output = input;
-
-            // 2段縦続接続で4次特性を実現
-            for (auto& filter : filters)
-                output = filter.processSample(output);
-
-            // Denormal対策
-            static constexpr double DENORMAL_THRESHOLD = 1.0e-15;
-            if (std::abs(output) < DENORMAL_THRESHOLD)
-                output = 0.0;
-
-            return output;
-        }
-    private:
-         juce::dsp::ProcessSpec spec;
-        std::array<juce::dsp::IIR::Filter<double>, 2> filters;
-    };
-
     //----------------------------------------------------------
     // 高精度型 DC Blocker (1次IIR)
     // 超高サンプリングレート（OSR）対応
@@ -264,6 +206,33 @@ private:
             m_prev_y = 0.0;
         }
 
+        // ループフュージョン最適化用ヘルパー
+        void loadState() noexcept {
+            px_local = m_prev_x;
+            py_local = m_prev_y;
+        }
+
+        void saveState() noexcept {
+            m_prev_x = px_local;
+            m_prev_y = py_local;
+        }
+
+        inline void processSample(double& sample) noexcept
+        {
+            const double r = m_R;
+            constexpr double kDenormalThreshold = 1.0e-20;
+
+            const double curr_x = sample;
+            double curr_y = curr_x - px_local + r * py_local;
+
+            if (!std::isfinite(curr_y) || std::abs(curr_y) < kDenormalThreshold) curr_y = 0.0;
+
+            px_local = curr_x;
+            py_local = curr_y;
+            sample = curr_y;
+        }
+
+
         // 64byteアライメントされたバッファを高速処理 (Audio Thread 安全)
         void process(double* data, int numSamples) noexcept
         {
@@ -272,24 +241,104 @@ private:
             const double r = m_R;
             constexpr double kDenormalThreshold = 1.0e-20;
 
-            for (int i = 0; i < numSamples; ++i) {
+            int i = 0;
+            const int vEnd = numSamples / 4 * 4;
+
+            if (vEnd > 0)
+            {
+                const double r2 = r * r;
+                const double r3 = r2 * r;
+                const double r4 = r3 * r;
+                const __m256d vR = _mm256_set1_pd(r);
+                const __m256d vR2 = _mm256_set1_pd(r2);
+                // vPrevYFactors = [R, R^2, R^3, R^4]
+                const __m256d vPrevYFactors = _mm256_set_pd(r4, r3, r2, r);
+                const __m256d vThresh = _mm256_set1_pd(kDenormalThreshold);
+                const __m256d vInfThresh = _mm256_set1_pd(1.0e100); // Inf判定用閾値
+                const __m256d vSignMask = _mm256_set1_pd(-0.0);
+
+                for (; i < vEnd; i += 4)
+                {
+                    // Load x[i..i+3]
+                    __m256d vx = _mm256_load_pd(data + i);
+
+                    // Prepare x[i-1..i+2]
+                    __m256d v_prev_x;
+                    if (i == 0)
+                    {
+                        // [px, x0, x1, x2]
+                        __m256d t = _mm256_permute4x64_pd(vx, _MM_SHUFFLE(2, 1, 0, 0));
+                        __m256d vpx = _mm256_set1_pd(px);
+                        v_prev_x = _mm256_blend_pd(t, vpx, 1); // mask 1 -> take from vpx at 0
+                    }
+                    else
+                    {
+                        // Load unaligned from data + i - 1
+                        v_prev_x = _mm256_loadu_pd(data + i - 1);
+                    }
+
+                    // U = x - prev_x
+                    __m256d vu = _mm256_sub_pd(vx, v_prev_x);
+
+                    // Parallel Prefix Sum
+                    // S0 = U
+                    // S1 = S0 + R * (S0 << 1)
+                    __m256d v_shift1 = _mm256_permute4x64_pd(vu, _MM_SHUFFLE(2, 1, 0, 0));
+                    v_shift1 = _mm256_blend_pd(v_shift1, _mm256_setzero_pd(), 1);
+                    __m256d vs1 = _mm256_fmadd_pd(vR, v_shift1, vu);
+
+                    // S2 = S1 + R^2 * (S1 << 2)
+                    __m256d v_shift2 = _mm256_permute4x64_pd(vs1, _MM_SHUFFLE(1, 0, 0, 0));
+                    v_shift2 = _mm256_blend_pd(v_shift2, _mm256_setzero_pd(), 3); // mask 0011
+                    __m256d vy = _mm256_fmadd_pd(vR2, v_shift2, vs1);
+
+                    // Add contribution from prev_y
+                    __m256d vpy = _mm256_set1_pd(py);
+                    vy = _mm256_fmadd_pd(vPrevYFactors, vpy, vy);
+
+                    // Anti-Denormal & Inf/NaN Check
+                    __m256d abs_y = _mm256_andnot_pd(vSignMask, vy);
+                    // |y| >= denormal_thresh
+                    __m256d mask = _mm256_cmp_pd(abs_y, vThresh, _CMP_GE_OQ);
+                    // |y| < inf_thresh (NaNはFalseになるためここで除去される)
+                    mask = _mm256_and_pd(mask, _mm256_cmp_pd(abs_y, vInfThresh, _CMP_LT_OQ));
+                    vy = _mm256_and_pd(vy, mask);
+
+                    _mm256_store_pd(data + i, vy);
+
+                    // Update state for next iter
+                    _mm_storeh_pd(&px, _mm256_extractf128_pd(vx, 1));
+                    _mm_storeh_pd(&py, _mm256_extractf128_pd(vy, 1));
+                }
+            }
+
+            for (; i < numSamples; ++i) {
                 const double curr_x = data[i];
                 double curr_y = curr_x - px + r * py;
 
                 // Anti-Denormal: デノーマル数をゼロに落とす
-                if (std::abs(curr_y) < kDenormalThreshold) curr_y = 0.0;
+                // 【堅牢性向上】NaN/Infもチェックしてゼロに丸める
+                if (!std::isfinite(curr_y) || std::abs(curr_y) < kDenormalThreshold) curr_y = 0.0;
 
                 px = curr_x;
                 py = curr_y;
                 data[i] = curr_y;
             }
 
-            // NaN/Inf が状態変数に残った場合はリセットして次回呼び出し以降への伝播を遮断する。
-            // !(abs < 閾値) という形式は NaN に対しても true を返すため NaN/Inf を一括で捕捉できる。
-            m_prev_x = (std::abs(px) < 1.0e15) ? px : 0.0;
+            // 【堅牢性向上】最終的な状態変数を保存する前にサニタイズする
+            // これにより、万が一 px や py が NaN/Inf になっても、次回の process() 呼び出しに
+            // 不正な状態が引き継がれるのを防ぐ。
+            // std::abs(NaN) < limit は false になるため、NaN は 0.0 にリセットされる。
+            m_prev_x = (std::abs(px) < 1.0e15) ? px : 0.0; // 1.0e15 は Inf を捕捉するための巨大な閾値
             m_prev_y = (std::abs(py) < 1.0e15) ? py : 0.0;
         }
+
+    private:
+        // ループフュージョン用ローカル状態変数
+        double px_local = 0.0;
+        double py_local = 0.0;
     };
+
     //----------------------------------------------------------
      // DSPコア (Audio Threadで実行される処理のコンテナ)
     //----------------------------------------------------------
@@ -304,6 +353,7 @@ private:
             bool analyzerEnabled;
             bool softClipEnabled;
             float saturationAmount;
+        double inputHeadroomGain;
         };
 
 DSPCore();
@@ -367,9 +417,9 @@ DSPCore();
         void pushToFifo(const juce::dsp::AudioBlock<const double>& block,
                         juce::AbstractFifo& audioFifo,
                         juce::AudioBuffer<float>& audioFifoBuffer) const noexcept;
-        void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
+        void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, double headroomGain) noexcept;
         void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
-        void processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples) noexcept;
+        void processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples, double headroomGain) noexcept;
         void processOutputDouble(juce::AudioBuffer<double>& buffer, int numSamples) noexcept;
     private:
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
@@ -414,7 +464,8 @@ DSPCore();
     std::atomic<float> saturationAmount { 0.5f };
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
-    std::atomic<bool> audioThreadModesSet { false };
+    std::atomic<float> inputHeadroomDb { -6.0f };
+    std::atomic<double> inputHeadroomGain { 0.5011872336272722 }; // -6dB
     std::atomic<int> rebuildGeneration { 0 }; // 非同期リビルドの競合防止用
 
     // dB変換時の下限値

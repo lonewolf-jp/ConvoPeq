@@ -51,7 +51,7 @@ public:
     // @param blockSize     Audio Thread の呼び出しブロックサイズ
     // @return true=成功, false=パラメータ不正またはMKL初期化失敗
     //----------------------------------------------------------
-    bool SetImpulse(const double* impulse, int irLen, int blockSize);
+    bool SetImpulse(const double* impulse, int irLen, int blockSize, double scale = 1.0);
 
     //----------------------------------------------------------
     // Add  ─ Audio Thread のみ

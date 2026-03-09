@@ -51,7 +51,6 @@ MKLNonUniformConvolver::MKLNonUniformConvolver()
 MKLNonUniformConvolver::~MKLNonUniformConvolver()
 {
     releaseAllLayers();
-    if (m_ringBuf) { mkl_free(m_ringBuf); m_ringBuf = nullptr; }
 }
 
 void MKLNonUniformConvolver::releaseAllLayers() noexcept
@@ -60,12 +59,15 @@ void MKLNonUniformConvolver::releaseAllLayers() noexcept
         m_layers[i].freeAll();
     m_numActiveLayers = 0;
     m_latency         = 0;
+
+    if (m_ringBuf) { mkl_free(m_ringBuf); m_ringBuf = nullptr; }
+    m_ringSize = m_ringMask = m_ringWrite = m_ringRead = m_ringAvail = 0;
 }
 
 //==============================================================================
 // SetImpulse  ─ Message Thread のみ
 //==============================================================================
-bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int blockSize)
+bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int blockSize, double scale)
 {
     m_ready.store(false, std::memory_order_release);
 
@@ -74,8 +76,6 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
     // 前回のリソースを解放
     releaseAllLayers();
-    if (m_ringBuf) { mkl_free(m_ringBuf); m_ringBuf = nullptr; }
-    m_ringSize = m_ringMask = m_ringWrite = m_ringRead = m_ringAvail = 0;
 
     // VML 高精度モード設定 (Message Thread で一度だけ)
     vmlSetMode(VML_HA | VML_FTZDAZ_ON);
@@ -85,8 +85,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // 旧3レイヤー(非即時レイヤー含む)は時間整合されていない出力が混入し、
     // IRロード後に原音由来のブツ切れ音を発生させるため、現状は単一レイヤーで運用する。
     // ※ NUC経路自体は維持し、今後は時間整合付き多層合成へ拡張可能。
+    // Jitter対策: 最小パーティションサイズを256から64へ引き下げ。
+    // 低レイテンシー設定時(64/128 samples)の蓄積→スパイク処理を防ぎ、コールバックごとの負荷を均一化する。
     // ────────────────────────────────────────────────
-    const int l0Part = juce::nextPowerOfTwo(std::max(blockSize, 256));
+    const int l0Part = juce::nextPowerOfTwo(std::max(blockSize, 64));
 
     struct LayerCfg { int offset; int len; int partSize; bool immediate; };
     LayerCfg cfgs[kNumLayers];
@@ -134,7 +136,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         // ── DFTI ハンドル生成 (Message Thread で DftiCommitDescriptor) ──
         if (DftiCreateDescriptor(&l.fftHandle, DFTI_DOUBLE, DFTI_REAL, 1, l.fftSize) != DFTI_NO_ERROR)
+        {
+            releaseAllLayers();
             return false;
+        }
 
         bool ok = true;
         ok = ok && (DftiSetValue(l.fftHandle, DFTI_PLACEMENT,             DFTI_NOT_INPLACE)     == DFTI_NO_ERROR);
@@ -144,8 +149,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         if (!ok)
         {
-            DftiFreeDescriptor(&l.fftHandle);
-            l.fftHandle = nullptr;
+            releaseAllLayers();
             return false;
         }
 
@@ -164,7 +168,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         if (!l.irFreqDomain || !l.fdlBuf || !l.overlapBuf || !l.fftTimeBuf ||
             !l.fftOutBuf || !l.prevInputBuf || !l.accumBuf || !l.inputAccBuf)
+        {
+            releaseAllLayers();
             return false;
+        }
 
         // ゼロ初期化
         memset(l.irFreqDomain, 0, irBufSize  * sizeof(double));
@@ -184,6 +191,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         {
             if (tempTime) mkl_free(tempTime);
             if (tempFreq) mkl_free(tempFreq);
+            releaseAllLayers();
             return false;
         }
 
@@ -208,7 +216,16 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
             // interleaved complex として irFreqDomain に格納
             memcpy(l.irFreqDomain + p * l.partStride, tempFreq,
                    l.complexSize * 2 * sizeof(double));
+
+            // ヘッドルーム確保のためのスケーリング (MKL BLAS)
+            if (scale != 1.0)
+                cblas_dscal(l.complexSize * 2, scale, l.irFreqDomain + p * l.partStride, 1);
         }
+
+        // 【追加】Backward FFT のウォームアップ
+        // Audio Thread での初回実行時の遅延（テーブル生成やメモリ確保）を防ぐために
+        // ここで一度実行しておく。
+        DftiComputeBackward(l.fftHandle, tempFreq, tempTime);
 
         mkl_free(tempTime);
         mkl_free(tempFreq);
@@ -245,7 +262,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     int rSize = juce::nextPowerOfTwo(maxPartSize * 4 + blockSize * 4);
     m_ringBuf  = static_cast<double*>(mkl_malloc(rSize * sizeof(double), 64));
     if (!m_ringBuf)
+    {
+        releaseAllLayers();
         return false;
+    }
 
     memset(m_ringBuf, 0, rSize * sizeof(double));
     m_ringSize  = rSize;
@@ -327,7 +347,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
             __m256d a0_re = _mm256_movedup_pd(a0);          // [Ar0, Ar0, Ar1, Ar1]
             __m256d a0_im = _mm256_permute_pd(a0, 0xF);     // [Ai0, Ai0, Ai1, Ai1]
             // acc += a_re * b  (Re の寄与)
-            acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
+            acc0 = _mm256_fmadd_pd(a0_re, b0, acc0); // FMA
             // acc += addsub(a_im * b_swap)  (Im の寄与)
             __m256d b0_sw = _mm256_permute_pd(b0, 0x5);     // [Bi0, Br0, Bi1, Br1]
             __m256d t0    = _mm256_mul_pd(a0_im, b0_sw);
@@ -336,7 +356,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
             // --- 4 複素数ブロック 1 ---
             __m256d a1_re = _mm256_movedup_pd(a1);
             __m256d a1_im = _mm256_permute_pd(a1, 0xF);
-            acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
+            acc1 = _mm256_fmadd_pd(a1_re, b1, acc1); // FMA
             __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
             __m256d t1    = _mm256_mul_pd(a1_im, b1_sw);
             acc1 = _mm256_addsub_pd(acc1, t1);
@@ -386,7 +406,18 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
         memcpy(m_ringBuf, src + first, (n - first) * sizeof(double));
 
     m_ringWrite  = (m_ringWrite + n) & m_ringMask;
-    m_ringAvail += n;
+
+    const int nextAvail = m_ringAvail + n;
+    if (nextAvail > m_ringSize)
+    {
+        const int overflow = nextAvail - m_ringSize;
+        m_ringRead = (m_ringRead + overflow) & m_ringMask;
+        m_ringAvail = m_ringSize;
+    }
+    else
+    {
+        m_ringAvail = nextAvail;
+    }
 }
 
 //==============================================================================
@@ -399,18 +430,21 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
     const int toRead = std::min(n, m_ringAvail);
     if (toRead == 0)
     {
-        memset(dst, 0, n * sizeof(double));
+        if (dst) memset(dst, 0, n * sizeof(double));
         return 0;
     }
 
-    const int first = std::min(toRead, m_ringSize - m_ringRead);
-    memcpy(dst, m_ringBuf + m_ringRead, first * sizeof(double));
-    if (toRead > first)
-        memcpy(dst + first, m_ringBuf, (toRead - first) * sizeof(double));
+    if (dst)
+    {
+        const int first = std::min(toRead, m_ringSize - m_ringRead);
+        memcpy(dst, m_ringBuf + m_ringRead, first * sizeof(double));
+        if (toRead > first)
+            memcpy(dst + first, m_ringBuf, (toRead - first) * sizeof(double));
 
-    // 読み取れなかった分をゼロ埋め
-    if (toRead < n)
-        memset(dst + toRead, 0, (n - toRead) * sizeof(double));
+        // 読み取れなかった分をゼロ埋め
+        if (toRead < n)
+            memset(dst + toRead, 0, (n - toRead) * sizeof(double));
+    }
 
     m_ringRead  = (m_ringRead + toRead) & m_ringMask;
     m_ringAvail -= toRead;
@@ -422,7 +456,8 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
 //==============================================================================
 void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 {
-    if (!m_ready.load(std::memory_order_acquire) || input == nullptr || numSamples <= 0)
+    // input == nullptr は無音として扱うため、ここでのチェックは削除
+    if (!m_ready.load(std::memory_order_acquire) || numSamples <= 0)
         return;
 
     // すべてのアクティブレイヤーに対して処理を行う
@@ -437,7 +472,10 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
         while (consumed < numSamples)
         {
             const int toFill = std::min(numSamples - consumed, l.partSize - l.inputPos);
-            memcpy(l.inputAccBuf + l.inputPos, input + consumed, toFill * sizeof(double));
+            if (input)
+                memcpy(l.inputAccBuf + l.inputPos, input + consumed, toFill * sizeof(double));
+            else
+                memset(l.inputAccBuf + l.inputPos, 0, toFill * sizeof(double));
             l.inputPos += toFill;
             consumed   += toFill;
 
@@ -499,13 +537,13 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
                             __m256d a0_re = _mm256_movedup_pd(a0);
                             __m256d a0_im = _mm256_permute_pd(a0, 0xF);
-                            acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
+                            acc0 = _mm256_fmadd_pd(a0_re, b0, acc0); // FMA
                             __m256d b0_sw = _mm256_permute_pd(b0, 0x5);
                             acc0 = _mm256_addsub_pd(acc0, _mm256_mul_pd(a0_im, b0_sw));
 
                             __m256d a1_re = _mm256_movedup_pd(a1);
                             __m256d a1_im = _mm256_permute_pd(a1, 0xF);
-                            acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
+                            acc1 = _mm256_fmadd_pd(a1_re, b1, acc1); // FMA
                             __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
                             acc1 = _mm256_addsub_pd(acc1, _mm256_mul_pd(a1_im, b1_sw));
 
@@ -541,7 +579,8 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 //==============================================================================
 int MKLNonUniformConvolver::Get(double* output, int numSamples)
 {
-    if (!m_ready.load(std::memory_order_acquire) || output == nullptr || numSamples <= 0)
+    // output == nullptr の場合もリングバッファを進める(データ破棄)ため、ここでのチェックは削除
+    if (!m_ready.load(std::memory_order_acquire) || numSamples <= 0)
     {
         if (output && numSamples > 0)
             memset(output, 0, numSamples * sizeof(double));

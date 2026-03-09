@@ -23,7 +23,8 @@
 #include <algorithm>
 #include "AlignedAllocation.h"
 
- #include <mkl_vsl.h>
+#include <immintrin.h>
+#include <mkl_vsl.h>
 
 
 namespace convo
@@ -109,7 +110,10 @@ public:
         SplitMix64 seeder(baseSeed);
         for (int i = 0; i < MAX_CHANNELS; ++i) {
             rng[i].init(seeder.next());
-            rndIndex[i] = RND_BUFFER_SIZE; // Force refill on first use
+
+            // 【追加】初回バッファ充填 (Audio Threadでの初回ジッター防止)
+            vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[i], RND_BUFFER_SIZE, rndBuffer[i], 0.0, 1.0);
+            rndIndex[i] = 0;
         }
 
         shaperStateBuffer = static_cast<double*>(convo::aligned_malloc(MAX_CHANNELS * STATE_STRIDE * sizeof(double), 64));
@@ -140,15 +144,17 @@ public:
         // 2. アグレッシブ版 (Aggressive):
         //    2.45, -2.68, 2.35, -1.85, 0.72
         //    176.4kHz以上のハイレゾかつ16bit出力時に、ノイズを超音波域へさらに強く追いやります。
+        //
+        // 【最適化】サンプルレートに応じて係数を動的に補間し、帯域幅を最大限活用する。
+        static constexpr std::array<double, 5> coeffs44k  = { 2.033, -2.165, 1.959, -1.590, 0.6149 };
+        static constexpr std::array<double, 5> coeffs176k = { 2.45,  -2.68,  2.35,  -1.85,  0.72   };
 
-        if (sampleRate >= 176000.0 && bitDepth <= 16)
-        {
-            coeffs = { 2.45, -2.68, 2.35, -1.85, 0.72 };
-        }
-        else
-        {
-            coeffs = { 2.033, -2.165, 1.959, -1.590, 0.6149 };
-        }
+        // 44.1kHz 〜 176.4kHz 間で線形補間 (t=0.0 -> Standard, t=1.0 -> Aggressive)
+        double t = (sampleRate - 44100.0) / (176400.0 - 44100.0);
+        t = std::max(0.0, std::min(1.0, t));
+
+        for (int i = 0; i < 5; ++i)
+            coeffs[i] = coeffs44k[i] * (1.0 - t) + coeffs176k[i] * t;
 
         reset();
     }
@@ -163,6 +169,73 @@ public:
     {
         if (channel < 0 || channel >= MAX_CHANNELS) return input;
         return processChannelMKL(input, channel, shaperStateBuffer + (channel * STATE_STRIDE));
+    }
+
+    // 【最適化】ステレオ/モノラル ブロック処理
+    // ループをインライン化し、関数呼び出しオーバーヘッドを削減。
+    // ステレオ時はL/Rを並列処理し、CPUパイプライン効率(ILP)を向上させる。
+    // 量子化ステップではSSE4.1を使用してL/Rを同時に丸める。
+    inline void processStereoBlock(double* dataL, double* dataR, int numSamples, double headroom) noexcept
+    {
+        double* zL = shaperStateBuffer + (0 * STATE_STRIDE);
+
+        if (dataR != nullptr)
+        {
+            // --- Stereo Path ---
+            double* zR = shaperStateBuffer + (1 * STATE_STRIDE);
+            const __m128d v_scale = _mm_set1_pd(scale);
+            const __m128d v_invScale = _mm_set1_pd(invScale);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                // Shaped Error (Scalar, compiler will optimize with FMA)
+                const double shapedErrorL = coeffs[0] * zL[0] + coeffs[1] * zL[1] + coeffs[2] * zL[2] + coeffs[3] * zL[3] + coeffs[4] * zL[4];
+                const double shapedErrorR = coeffs[0] * zR[0] + coeffs[1] * zR[1] + coeffs[2] * zR[2] + coeffs[3] * zR[3] + coeffs[4] * zR[4];
+
+                // Dither (MKL)
+                const double dL = nextTPDF_MKL(0) * scale;
+                const double dR = nextTPDF_MKL(1) * scale;
+
+                // Combine
+                const double tmpL = (dataL[i] * headroom) + dL + shapedErrorL;
+                const double tmpR = (dataR[i] * headroom) + dR + shapedErrorR;
+
+                // Quantize (SSE4.1/AVX)
+                const __m128d v_tmp = _mm_set_pd(tmpR, tmpL);
+                const __m128d v_scaled = _mm_mul_pd(v_tmp, v_invScale);
+                const __m128d v_rounded = _mm_round_pd(v_scaled, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                const __m128d v_quantized = _mm_mul_pd(v_rounded, v_scale);
+
+                alignas(16) double quantized[2];
+                _mm_store_pd(quantized, v_quantized); // [quantizedL, quantizedR]
+
+                // Error and State Update (Scalar)
+                const double errorL = tmpL - quantized[0];
+                zL[4]=zL[3]; zL[3]=zL[2]; zL[2]=zL[1]; zL[1]=zL[0]; zL[0]=killDenormal(errorL);
+                dataL[i] = quantized[0];
+
+                const double errorR = tmpR - quantized[1];
+                zR[4]=zR[3]; zR[3]=zR[2]; zR[2]=zR[1]; zR[1]=zR[0]; zR[0]=killDenormal(errorR);
+                dataR[i] = quantized[1];
+            }
+        }
+        else
+        {
+            // --- Mono Path ---
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const double d = nextTPDF_MKL(0) * scale;
+                const double shapedError = coeffs[0] * zL[0] + coeffs[1] * zL[1] + coeffs[2] * zL[2] + coeffs[3] * zL[3] + coeffs[4] * zL[4];
+                const double tmp = (dataL[i] * headroom) + d + shapedError;
+                // Quantize (Round to nearest even using SSE4.1)
+                __m128d v = _mm_set_sd(tmp * invScale);
+                v = _mm_round_sd(v, v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                const double quantized = _mm_cvtsd_f64(v) * scale;
+                const double error = tmp - quantized;
+                zL[4]=zL[3]; zL[3]=zL[2]; zL[2]=zL[1]; zL[1]=zL[0]; zL[0]=killDenormal(error);
+                dataL[i] = quantized;
+            }
+        }
     }
 
 private:
@@ -182,8 +255,10 @@ private:
         // ディザとノイズシェーピングの適用
         double tmp = x + d + shapedError;
 
-        // 量子化
-        double quantized = std::round(tmp * invScale) * scale;
+        // 量子化 (Round to nearest even using SSE4.1)
+        __m128d v = _mm_set_sd(tmp * invScale);
+        v = _mm_round_sd(v, v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        double quantized = _mm_cvtsd_f64(v) * scale;
 
         // 量子化誤差の計算 (Input - Output)
         // 注意: これは -(Output - Input) と等価です。
@@ -202,7 +277,7 @@ private:
     }
 
     // MKL VSL Batch Generation for efficiency
-    static constexpr int RND_BUFFER_SIZE = 1024; // Increased batch size to reduce VSL call overhead
+    static constexpr int RND_BUFFER_SIZE = 512; // Reduced batch size to spread load and minimize jitter
     // 【パッチ6】rndBufferをインスタンスメンバー化 (データレース防止)
     // 理由: static変数は全インスタンスで共有されるため、複数のPsychoacousticDither
     //       インスタンス（例: RCUによる新旧DSPCore）が同時に存在すると、

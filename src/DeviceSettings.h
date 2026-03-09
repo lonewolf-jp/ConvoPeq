@@ -57,6 +57,9 @@ private:
     juce::ComboBox bitDepthComboBox;
     juce::Label bitDepthLabel;
 
+    juce::Slider inputHeadroomSlider;
+    juce::Label inputHeadroomLabel;
+
     static juce::File getSettingsFile();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DeviceSettings)

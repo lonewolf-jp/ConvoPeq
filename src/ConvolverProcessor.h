@@ -187,6 +187,7 @@ public:
                                           int preferredCallSize,
                                           bool isRebuild,
                                           const juce::File& irFile,
+                                          double scaleFactor,
                                           std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
                                           std::unique_ptr<juce::AudioBuffer<double>> displayIR);
 
@@ -198,10 +199,18 @@ public:
     void cleanup();
     void forceCleanup();
 
-
 private:
     void timerCallback() override;
     class LoaderThread;
+    void applyNewState(StereoConvolver* newConv, const juce::AudioBuffer<double>& loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, const juce::AudioBuffer<double>& displayIR);
+    void handleLoadError(const juce::String& error);
+    void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
+    void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
+    int computeTargetIRLength(double sampleRate, int originalLength) const;
+
+    JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)
+};
 
     // Stereo processing wrapper
     struct StereoConvolver
@@ -221,6 +230,7 @@ private:
         int storedMaxFFTSize = 0;
         int storedKnownBlockSize = 0;
         int storedFirstPartition = 0;
+        double storedScale = 1.0;
 
         StereoConvolver() = default;
 
@@ -240,7 +250,7 @@ private:
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        bool init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize)
+        bool init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize, double scale = 1.0)
         {
             // Safety: Free existing data if init is called multiple times (Leak prevention)
             if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
@@ -257,6 +267,7 @@ private:
             storedMaxFFTSize = maxFFTSize;
             storedKnownBlockSize = knownBlockSize;
             storedFirstPartition = firstPartition;
+            storedScale = scale;
 
             {
                 // ── MKL Non-Uniform Partitioned Convolution (NUC) ──
@@ -269,8 +280,8 @@ private:
                 new (rn1) convo::MKLNonUniformConvolver();
                 nucConvolvers[1].reset(static_cast<convo::MKLNonUniformConvolver*>(rn1));
 
-                if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize) &&
-                    nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize))
+                if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize, scale) &&
+                    nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize, scale))
                 {
                     latency   = nucConvolvers[0]->getLatency();
                     DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
@@ -298,7 +309,7 @@ private:
                 {
                     std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
-                    newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples);
+                    newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale);
                 }
             }
             return newConv;
@@ -361,6 +372,7 @@ private:
     juce::AudioBuffer<double> originalIR; // 元IR保持 (リサンプリング/トリミング用)
     double originalIRSampleRate = 0.0;
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
+    double currentIRScale = 1.0; // IRのスケールファクター (Auto Makeup + Safety Margin)
     convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     int cachedFFTBufferCapacity = 0;
     std::atomic<double> currentSampleRate { 0.0 };
@@ -395,9 +407,6 @@ private:
     int currentBufferSize = 0; // prepareToPlayで更新される
     double currentSmoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC; // mixSmootherに設定されている現在の時間
 
-    void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
-    void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
-    int computeTargetIRLength(double sampleRate, int originalLength) const;
     void applyNewState(StereoConvolver* newConv,
                       const juce::AudioBuffer<double>& loadedIR,
                       double loadedSR,
@@ -405,6 +414,7 @@ private:
                       bool isRebuild,
                       const juce::File& file,
                       const juce::AudioBuffer<double>& displayIR);
+    void applyNewState(StereoConvolver* newConv, const juce::AudioBuffer<double>& loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, const juce::AudioBuffer<double>& displayIR);
     void handleLoadError(const juce::String& error);
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)

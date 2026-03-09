@@ -175,37 +175,42 @@ void SpectrumAnalyzerComponent::timerCallback()
         underflowCount++;
 
         // 60フレーム連続でアンダーランした場合 (60fpsで1.0秒)、
-        // エンジンが停止したとみなし、CPU消費を防ぐためにタイマーを停止する
+        // エンジンが停止したとみなす。
+        // 以前はタイマーを停止していたが、オーディオ再開時の自動復帰を保証するため
+        // タイマーは継続し、カウンタの上限のみ制限する。
         if (underflowCount > 60)
         {
-            stopTimer();
-            return;
+            underflowCount = 61;
         }
 
         // 短期間のデータ不足（バッファ待ちなど）では減衰させず、表示を維持する (Flicker防止)
         if (underflowCount > 3)
         {
-
+            bool needsRepaint = false;
             // アンダーラン時は「減衰保持」 (Decay Hold)
             // 視覚的に自然にフェードアウトさせる
             for (size_t i = 0; i < smoothedBuffer.size(); ++i)
             {
-                smoothedBuffer[i] -= UNDERRUN_DECAY_DB;
-                if (smoothedBuffer[i] < MIN_DB) smoothedBuffer[i] = MIN_DB;
+                if (smoothedBuffer[i] > MIN_DB || peakBuffer[i] > MIN_DB)
+                {
+                    smoothedBuffer[i] -= UNDERRUN_DECAY_DB;
+                    if (smoothedBuffer[i] < MIN_DB) smoothedBuffer[i] = MIN_DB;
 
-                // ピーク保持の更新 (減衰時もピークロジックを継続)
-                if (peakHoldTime[i] > 0.0)
-                {
-                    peakHoldTime[i] = std::max(0.0, peakHoldTime[i] - dt);
+                    // ピーク保持の更新 (減衰時もピークロジックを継続)
+                    if (peakHoldTime[i] > 0.0)
+                    {
+                        peakHoldTime[i] = std::max(0.0, peakHoldTime[i] - dt);
+                    }
+                    else
+                    {
+                        const float decay = static_cast<float>(PEAK_DECAY_DB_PER_SEC * dt);
+                        peakBuffer[i] = std::max(smoothedBuffer[i], peakBuffer[i] - decay);
+                    }
+                    if (peakBuffer[i] < MIN_DB) peakBuffer[i] = MIN_DB;
+                    needsRepaint = true;
                 }
-                else
-                {
-                    const float decay = static_cast<float>(PEAK_DECAY_DB_PER_SEC * dt);
-                    peakBuffer[i] = std::max(smoothedBuffer[i], peakBuffer[i] - decay);
-                }
-                if (peakBuffer[i] < MIN_DB) peakBuffer[i] = MIN_DB;
             }
-            repaint();
+            if (needsRepaint) repaint();
         }
 
         return;
