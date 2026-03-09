@@ -421,9 +421,9 @@ DSPCore();
         void pushToFifo(const juce::dsp::AudioBlock<const double>& block,
                         juce::AbstractFifo& audioFifo,
                         juce::AudioBuffer<float>& audioFifoBuffer) const noexcept;
-        void processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, double headroomGain) noexcept;
+        float processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, double headroomGain) noexcept;
         void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
-        void processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples, double headroomGain) noexcept;
+        float processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples, double headroomGain) noexcept;
         void processOutputDouble(juce::AudioBuffer<double>& buffer, int numSamples) noexcept;
     private:
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;

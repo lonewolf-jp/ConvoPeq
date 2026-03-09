@@ -1566,14 +1566,12 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         }
     }
 
-    processInputDouble(buffer, numSamples, state.inputHeadroomGain);
+    // 入力処理（変換、レベル測定、ゲイン適用、DC除去）
+    const float inputLinear = processInputDouble(buffer, numSamples, state.inputHeadroomGain);
+    inputLevelLinear.store(inputLinear, std::memory_order_relaxed);
 
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
-
-    const float inputLinear = measureLevel(processBlock);
-    inputLevelLinear.store(inputLinear, std::memory_order_relaxed);
-
     juce::dsp::AudioBlock<double> originalBlock = processBlock;
 
     if (oversamplingFactor > 1)
@@ -1761,7 +1759,7 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
     audioFifo.finishedWrite(size1 + size2);
 }
 
-void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, double headroomGain) noexcept
+float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, double headroomGain) noexcept
 {
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
@@ -1771,7 +1769,8 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     {
         const float* src = buffer->getReadPointer(ch, startSample);
         double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
-        convo::input_transform::convertFloatToDoubleHighQuality(src, dst, numSamples, headroomGain);
+        // Convert without gain (gain=1.0), but with sanitization
+        convo::input_transform::convertFloatToDoubleHighQuality(src, dst, numSamples, 1.0);
     }
 
     // 入力がないチャンネル、または余剰チャンネルはクリア
@@ -1801,6 +1800,18 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
         std::memcpy(dst, src, numSamples * sizeof(double));
     }
 
+    // 2. Measure level before gain
+    double* channels[2] = { alignedL.get(), alignedR.get() };
+    juce::dsp::AudioBlock<double> block(channels, 2, numSamples);
+    const float inputLevel = measureLevel(block);
+
+    // 3. Apply headroom gain
+    if (std::abs(headroomGain - 1.0) > 1e-9)
+    {
+        for (int ch = 0; ch < 2; ++ch)
+            cblas_dscal(numSamples, headroomGain, block.getChannelPointer(ch), 1);
+    }
+
     // ── 入力段DC除去 (ブロックモード) ──
     // 旧: 1 サンプルずつ 4 次 IIR を呼出 (~20 ops/sample)
     // 新: UltraHighRateDCBlocker.process(ptr, N) でブロック単位処理 (~4 ops/sample)
@@ -1808,9 +1819,11 @@ void AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buff
     double* rPtr = alignedR.get();
     inputDCBlockerL.process(lPtr, numSamples);
     inputDCBlockerR.process(rPtr, numSamples);
+
+    return inputLevel;
 }
 
-void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples, double headroomGain) noexcept
+float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples, double headroomGain) noexcept
 {
     const int effectiveInputChannels = std::min(buffer.getNumChannels(), 2);
 
@@ -1818,7 +1831,8 @@ void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& b
     {
         const double* src = buffer.getReadPointer(ch);
         double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
-        convo::input_transform::convertDoubleToDoubleHighQuality(src, dst, numSamples, headroomGain);
+        // Convert without gain (gain=1.0), but with sanitization
+        convo::input_transform::convertDoubleToDoubleHighQuality(src, dst, numSamples, 1.0);
     }
 
     const bool expandMono = (effectiveInputChannels == 1);
@@ -1833,11 +1847,25 @@ void AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& b
     if (expandMono)
         std::memcpy(alignedR.get(), alignedL.get(), numSamples * sizeof(double));
 
+    // 2. Measure level before gain
+    double* channels[2] = { alignedL.get(), alignedR.get() };
+    juce::dsp::AudioBlock<double> block(channels, 2, numSamples);
+    const float inputLevel = measureLevel(block);
+
+    // 3. Apply headroom gain
+    if (std::abs(headroomGain - 1.0) > 1e-9)
+    {
+        for (int ch = 0; ch < 2; ++ch)
+            cblas_dscal(numSamples, headroomGain, block.getChannelPointer(ch), 1);
+    }
+
     // ── 入力段DC除去 (ブロックモード) ──
     double* lPtr = alignedL.get();
     double* rPtr = alignedR.get();
     inputDCBlockerL.process(lPtr, numSamples);
     inputDCBlockerR.process(rPtr, numSamples);
+
+    return inputLevel;
 }
 
 // 音楽的なソフトクリッピング関数

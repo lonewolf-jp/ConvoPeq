@@ -17,29 +17,23 @@
  #include <immintrin.h>
 #endif
 
-static inline double calculateRMS_NoMkl(const double* data, int numSamples) noexcept
+static inline double calculateRMS(const double* data, int numSamples) noexcept
 {
     if (data == nullptr || numSamples <= 0)
         return 0.0;
 
-    __m256d sum = _mm256_setzero_pd();
-    int i = 0;
-    const int vEnd = numSamples / 4 * 4;
+    // cblas_dnrm2 computes the Euclidean norm (L2 norm) of a vector:
+    // sqrt(x[0]^2 + x[1]^2 + ... + x[n-1]^2)
+    const double norm = cblas_dnrm2(numSamples, data, 1);
 
-    for (; i < vEnd; i += 4)
-    {
-        __m256d v = _mm256_loadu_pd(data + i);
-        sum = _mm256_add_pd(sum, _mm256_mul_pd(v, v));
-    }
-
-    alignas(32) double lanes[4];
-    _mm256_store_pd(lanes, sum);
-    double sumSq = lanes[0] + lanes[1] + lanes[2] + lanes[3];
-
-    for (; i < numSamples; ++i)
-        sumSq += data[i] * data[i];
-
-    return std::sqrt(sumSq / static_cast<double>(numSamples));
+    // RMS = sqrt( (x[0]^2 + ... + x[n-1]^2) / n )
+    //     = sqrt(sum_of_squares) / sqrt(n)
+    //     = norm / sqrt(n)
+    // Audio Thread内でのstd::sqrt (libm) 呼び出しを避けるため、MKL VMLを使用する
+    double numSamplesDouble = static_cast<double>(numSamples);
+    double invSqrtN;
+    vdInvSqrt(1, &numSamplesDouble, &invSqrtN); // 1.0 / sqrt(numSamples)
+    return norm * invSqrtN;
 }
 
 //--------------------------------------------------------------
@@ -126,12 +120,8 @@ void EQProcessor::resetToDefaults()
 
 void EQProcessor::reset()
 {
-    // フィルタ状態をリセット
-    for (auto& channelState : filterState)
-    {
-        for (auto& bandState : channelState)
-            bandState.fill(0.0);
-    }
+    // フィルタ状態をリセット (memsetで高速化)
+    std::memset(filterState.data(), 0, sizeof(filterState));
 
     agcCurrentGain.store(1.0, std::memory_order_relaxed);
     agcEnvInput.store(0.0, std::memory_order_relaxed);
@@ -531,12 +521,8 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
             juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
     }
 
-    // フィルタ状態をリセット
-    for (auto& channelState : filterState)
-    {
-        for (auto& bandState : channelState)
-            bandState.fill(0.0);
-    }
+    // フィルタ状態をリセット (memsetで高速化)
+    std::memset(filterState.data(), 0, sizeof(filterState));
 
     agcCurrentGain.store(1.0, std::memory_order_relaxed);
     agcEnvInput.store(0.0, std::memory_order_relaxed);
@@ -1010,7 +996,7 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     for (int ch = 0; ch < numChannels; ++ch)
     {
         const double* data = block.getChannelPointer(ch);
-        const double rms = calculateRMS_NoMkl(data, numSamples);
+        const double rms = calculateRMS(data, numSamples);
 
         if (rms > outputRMS) outputRMS = rms;
     }
@@ -1116,12 +1102,18 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     uint32_t mask = bandResetMask.exchange(0, std::memory_order_relaxed);
     if (mask != 0)
     {
-        for (int i = 0; i < NUM_BANDS; ++i)
+        // 最適化: 全バンドリセットの場合は memset で一括クリア
+        if (mask == 0xFFFFFFFF)
         {
-            if (mask & (1 << i))
+            std::memset(filterState.data(), 0, sizeof(filterState));
+        }
+        else
+        {
+            for (int i = 0; i < NUM_BANDS; ++i)
             {
-                for (int ch = 0; ch < MAX_CHANNELS; ++ch)
-                    filterState[ch][i].fill(0.0);
+                if (mask & (1u << i))
+                    for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+                        std::memset(filterState[ch][i].data(), 0, sizeof(double) * 2);
             }
         }
     }
@@ -1136,7 +1128,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         for (int ch = 0; ch < numChannels; ++ch)
         {
             const double* data = block.getChannelPointer(ch);
-            const double rms = calculateRMS_NoMkl(data, numSamples);
+            const double rms = calculateRMS(data, numSamples);
 
             if (rms > cachedInputRMS)
                 cachedInputRMS = rms;
