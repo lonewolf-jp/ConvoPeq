@@ -17,8 +17,7 @@
 
 class ConvolverControlPanel  : public juce::Component,
                               private juce::Button::Listener,
-                              private juce::Slider::Listener,
-                              private juce::MouseListener
+                              private juce::Slider::Listener
 {
 public:
     explicit ConvolverControlPanel(AudioEngine& audioEngine);
