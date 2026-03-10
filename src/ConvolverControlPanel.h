@@ -17,7 +17,8 @@
 
 class ConvolverControlPanel  : public juce::Component,
                               private juce::Button::Listener,
-                              private juce::Slider::Listener
+                              private juce::Slider::Listener,
+                              private juce::MouseListener
 {
 public:
     explicit ConvolverControlPanel(AudioEngine& audioEngine);
@@ -56,6 +57,7 @@ private:
     //----------------------------------------------------------
     void buttonClicked(juce::Button* button) override;
     void sliderValueChanged(juce::Slider* slider) override;
+    void mouseDown (const juce::MouseEvent& event) override;
 
     void updateWaveformPath();
 

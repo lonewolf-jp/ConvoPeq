@@ -143,6 +143,11 @@ void SpectrumAnalyzerComponent::timerCallback()
     const double dt = std::max(0.0, now - lastTime);
     lastTime = now;
 
+    // ピークホールド用の指数関数的減衰係数。時定数から導出する。
+    // これにより、減衰がフレームレートに依存しなくなり、かつ直線的な減衰よりも滑らかなカーブを描く。
+    const float peakDecayTimeConstant = 0.4f; // 秒単位。値が大きいほどゆっくり減衰する。
+    const float peakDecayFactor = std::exp(-static_cast<float>(dt) / peakDecayTimeConstant);
+
     // スペアナがOFFの場合、スペアナグラフをクリア
     if (!analyzerEnableButton.getToggleState())
     {
@@ -203,8 +208,8 @@ void SpectrumAnalyzerComponent::timerCallback()
                     }
                     else
                     {
-                        const float decay = static_cast<float>(PEAK_DECAY_DB_PER_SEC * dt);
-                        peakBuffer[i] = std::max(smoothedBuffer[i], peakBuffer[i] - decay);
+                        // 指数関数的に現在のスムージング値に向かって減衰
+                        peakBuffer[i] = smoothedBuffer[i] + (peakBuffer[i] - smoothedBuffer[i]) * peakDecayFactor;
                     }
                     if (peakBuffer[i] < MIN_DB) peakBuffer[i] = MIN_DB;
                     needsRepaint = true;
@@ -306,9 +311,10 @@ void SpectrumAnalyzerComponent::timerCallback()
             }
             else
             {
-                // ピークも少しずつ落とす（急な落ち込みを緩和）
-                const float decay = static_cast<float>(PEAK_DECAY_DB_PER_SEC * dt);
-                peakBuffer[i] = std::max(smoothedBuffer[i], peakBuffer[i] - decay);
+                // 指数関数的に現在のスムージング値に向かって減衰させる
+                // これにより、直線的な減衰よりも滑らかなカーブを描き、
+                // スムージング値に近づいた際の「カクン」という不自然な停止を防ぐ
+                peakBuffer[i] = smoothedBuffer[i] + (peakBuffer[i] - smoothedBuffer[i]) * peakDecayFactor;
             }
         }
     }
@@ -456,6 +462,27 @@ void SpectrumAnalyzerComponent::resized()
     analyzerEnableButton.setBounds(sourceButton.getX() - btnW - btnGap, marginT, btnW, 18);
 
     eqPathsDirty = true;
+
+    // ── スペクトラムバーのX座標を事前計算 ──
+    // 描画ループ内の計算を避けるため、resized() で一度だけ計算する
+    const float plotW = static_cast<float>(plotArea.getWidth());
+    if (plotW > 0)
+    {
+        // 各バーの開始X座標を計算する。バーの境界は隣接する表示周波数の中間点（対数軸上）とする。
+        for (int i = 0; i < NUM_DISPLAY_BARS; ++i)
+        {
+            if (i == 0)
+            {
+                barXCoords[i] = 0.0f;
+            }
+            else
+            {
+                barXCoords[i] = freqToX(std::sqrt(displayFrequencies[i - 1] * displayFrequencies[i]), plotW);
+            }
+        }
+        // 最後のバーの終端はプロットエリアの右端
+        barXCoords[NUM_DISPLAY_BARS] = plotW;
+    }
 }
 
 //--------------------------------------------------------------
@@ -561,12 +588,8 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
     const float plotH = static_cast<float>(area.getHeight());
 
     // FIFOに書き込まれるデータはオーバーサンプリング後のレート（処理サンプルレート）で
-    // あるため、binFactor/nyquistの計算にはgetProcessingSampleRate()を使用しなければ
-    // ならない。getSampleRate()（デバイスレート）を使うと、8倍OSの場合に8倍のずれが生じる。
     const double sampleRate = engine.getProcessingSampleRate();
     if (sampleRate <= 0.0) return;
-    const int   halfFFT    = NUM_FFT_BINS;
-    const float barWidth   = plotW / static_cast<float>(NUM_DISPLAY_BARS);
 
     const float binFactor = NUM_FFT_POINTS / static_cast<float>(sampleRate);
     const float nyquist = static_cast<float>(sampleRate) / 2.0f;
@@ -574,18 +597,17 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
     for (int bar = 0; bar < NUM_DISPLAY_BARS; ++bar)
     {
         // 事前計算された周波数を使用 (pow/log計算を回避)
-        // ナイキスト周波数でクランプし、FFTの有効範囲外のビンを参照しないようにする
         const float freq = std::min(displayFrequencies[bar], nyquist);
 
         // 周波数 → FFTビンインデックス (補間用にfloatで計算)
         float binIdx = freq * binFactor;
 
-        int idx0 = static_cast<int>(binIdx);
-        int idx1 = idx0 + 1;
-        float frac = binIdx - idx0;
+        // 範囲外アクセスを防ぐため、binIdxを先に有効な範囲にクランプする
+        binIdx = std::max(0.0f, std::min(binIdx, static_cast<float>(NUM_FFT_BINS - 1)));
 
-        idx0 = std::max(0, std::min(idx0, halfFFT - 1));
-        idx1 = std::max(0, std::min(idx1, halfFFT - 1));
+        int idx0 = static_cast<int>(binIdx);
+        int idx1 = std::min(idx0 + 1, NUM_FFT_BINS - 1); // idx0がNUM_FFT_BINS-1の場合、idx1も同じ値になる
+        float frac = binIdx - idx0;
 
         // スムーシング済みのdB値 (線形補間)
         float db = smoothedBuffer[idx0] * (1.0f - frac) + smoothedBuffer[idx1] * frac;
@@ -595,7 +617,9 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
         const float normalizedLevel = (db - MIN_DB) / (MAX_DB - MIN_DB);
         const float barH = std::max(0.0f, std::min(plotH, normalizedLevel * plotH));
 
-        const float barX = plotX + static_cast<float>(bar) * barWidth;
+        // 事前計算したX座標を使用
+        const float barX = plotX + barXCoords[bar];
+        const float barWidth = barXCoords[bar + 1] - barXCoords[bar];
         const float barY = plotY + plotH - barH;
 
         // ── 色グラデーション ──
@@ -603,18 +627,18 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
 
         // 棒を描画
         g.setColour(barColour);
-        g.fillRect(barX + 0.5f, barY, barWidth - 1.0f, barH);
+        g.fillRect(barX, barY, barWidth, barH);
 
         // ── ピーク保持の描画 ──
         // ピーク値も同様に補間
         float peakDb = peakBuffer[idx0] * (1.0f - frac) + peakBuffer[idx1] * frac;
         peakDb = std::max(MIN_DB, std::min(MAX_DB, peakDb));
         const float peakNorm = (peakDb - MIN_DB) / (MAX_DB - MIN_DB);
-        const float peakY    = plotY + plotH - peakNorm * plotH;
+        const float peakY = plotY + plotH - peakNorm * plotH;
 
         // ピーク線: 明るい色の1px水平線
         g.setColour(barColour.brighter(0.6f).withAlpha(0.9f));
-        g.fillRect(barX + 0.5f, peakY, barWidth - 1.0f, 2.0f);
+        g.fillRect(barX, peakY, barWidth, 2.0f);
     }
 }
 

@@ -179,10 +179,6 @@ public:
 private:
     //==============================================================================
     // 内部クラス定義
-    //----------------------------------------------------------
-    // 高精度型 DC Blocker (1次IIR)
-    // 超高サンプリングレート（OSR）対応
-    //----------------------------------------------------------
     class UltraHighRateDCBlocker {
     private:
         double m_prev_x = 0.0;
@@ -209,36 +205,12 @@ private:
             m_prev_y = 0.0;
         }
 
-        // ────────────────────────────────────────────────────────────────────
-        // 【状態変数の設計】
-        //
-        // 本クラスには 2 つの実行パスがあり、それぞれ異なる状態変数を使用する:
-        //
-        //   (A) process(data, N)  ← processOutputDouble() から呼ばれる。
-        //       m_prev_x / m_prev_y を直接読み書きする。
-        //       ブロック先頭でローカル変数 px/py に読み込み、末尾で書き戻す。
-        //
-        //   (B) loadState() + processSample() × N + saveState()
-        //                       ← processOutput() から呼ばれる。
-        //       px_local / py_local を使って毎サンプル処理する。
-        //       loadState() で m_prev_x/y → px_local/py_local へコピー (ブロック開始)。
-        //       saveState() で px_local/py_local → m_prev_x/y へ書き戻し (ブロック終了)。
-        //
-        // 2 パスは決して同時に呼ばれない (processOutput と processOutputDouble は
-        // 排他的に使用される)。px_local / py_local は processSample() 専用の
-        // "ループフュージョン用ワーキング変数" であり、m_prev_x/y の永続ストアが
-        // saveState() まで遅延されるのは意図的な設計である。
-        // ────────────────────────────────────────────────────────────────────
-
         // ループフュージョン最適化用ヘルパー
-        // 【使い方】loadState() → processSample() × N → saveState() の順で呼ぶこと。
         void loadState() noexcept {
             px_local = m_prev_x;
             py_local = m_prev_y;
         }
 
-        // ループフュージョン最適化用ヘルパー
-        // 【使い方】loadState() → processSample() × N → saveState() の順で呼ぶこと。
         void saveState() noexcept {
             m_prev_x = px_local;
             m_prev_y = py_local;
@@ -465,8 +437,7 @@ DSPCore();
     //----------------------------------------------------------
     std::atomic<DSPCore*> currentDSP { nullptr }; // Raw pointer for Audio Thread (Lock-free)
     DSPCore* activeDSP = nullptr; // Ownership holder for Message Thread (Raw pointer)
-    std::vector<std::pair<DSPCore*, uint32>> trashBin; // Time-based garbage collection
-    std::vector<DSPCore*> trashBinPending; // 新しく追加されたゴミ (次回のタイマーコールバックまで保持)
+    std::vector<std::pair<DSPCore*, uint32>> trashBin; // Time-based garbage collection for old DSPs
     juce::CriticalSection trashBinLock;
 
     std::atomic<double> currentSampleRate{48000.0};

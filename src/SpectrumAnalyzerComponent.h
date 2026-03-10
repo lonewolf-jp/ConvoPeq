@@ -72,6 +72,7 @@ private:
     std::array<float, NUM_FFT_BINS> smoothedBuffer;   // 指数移動平均で更新
     std::array<float, NUM_FFT_BINS> peakBuffer;       // ピーク保持バッファ
     std::array<double, NUM_FFT_BINS> peakHoldTime;    // 各バンドのピーク保持残り時間 (秒)
+    std::array<float, NUM_DISPLAY_BARS + 1> barXCoords; // 各バーのX座標をキャッシュ
 
     // ── EQ応答曲線データ ──
     std::array<float, NUM_DISPLAY_BARS> eqResponseBufferL;
@@ -81,7 +82,8 @@ private:
 
     std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesL;
     std::array<std::array<float, NUM_DISPLAY_BARS>, EQProcessor::NUM_BANDS> individualBandCurvesR;
-    std::array<float, NUM_DISPLAY_BARS> displayFrequencies; // 表示バーに対応する周波数
+    // 表示バーの中心周波数と、EQカーブ計算用の周波数ポイントを兼ねる
+    std::array<float, NUM_DISPLAY_BARS> displayFrequencies;
 
     // ── 計算用キャッシュ ──
     std::array<std::complex<double>, NUM_DISPLAY_BARS> zCache; // 周波数応答計算用の複素数キャッシュ (z = e^jw)

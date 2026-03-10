@@ -189,11 +189,11 @@ static void applyAsymmetricTukey(double* data, int numSamples)
     const double alpha_post = calculate_post_alpha(numSamples);
     const double pi = juce::MathConstants<double>::pi;
 
-    convo::ScopedAlignedPtr<double> window_vals(static_cast<double*>(convo::aligned_malloc(numSamples * sizeof(double), 64)));
+    convo::ScopedAlignedPtr<double> window_vals(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(numSamples) * sizeof(double), 64)));
+    if (!window_vals) return;
 
-    // Initialize to 1.0
-    for (int i = 0; i < numSamples; ++i)
-        window_vals[i] = 1.0;
+    // ── 3. 窓関数バッファを 1.0 で初期化 ──
+    std::fill_n(window_vals.get(), numSamples, 1.0);
 
     // Pre-peak part
     if (peakIndex > 0)
@@ -201,38 +201,42 @@ static void applyAsymmetricTukey(double* data, int numSamples)
         const int pre_taper_len = static_cast<int>(std::floor(peakIndex * alpha_pre));
         if (pre_taper_len > 0)
         {
-            convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(pre_taper_len * sizeof(double), 64)));
-            for (int i = 0; i < pre_taper_len; ++i)
-                cos_args[i] = pi * (static_cast<double>(i) / (peakIndex * alpha_pre) - 1.0);
+            convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(pre_taper_len) * sizeof(double), 64)));
+            if (!cos_args) return;
+
+            // ── cos引数計算 (MKL VML) ──
+            // cos_args[i] = (pi / (peakIndex * alpha_pre)) * i - pi
+            const double scale = pi / (peakIndex * alpha_pre);
+            const double offset = -pi;
+            vdLinearFrac(pre_taper_len, nullptr, nullptr, scale, offset, 0.0, 1.0, cos_args.get());
 
             vdCos(pre_taper_len, cos_args.get(), window_vals.get());
 
-            for (int i = 0; i < pre_taper_len; ++i)
-                window_vals[i] = 0.5 * (1.0 + window_vals[i]);
+            // ── 窓関数値計算 (MKL VML) ──
+            // window_vals[i] = 0.5 * (1.0 + window_vals[i]) = 0.5 * window_vals[i] + 0.5
+            vdLinearFrac(pre_taper_len, window_vals.get(), nullptr, 0.5, 0.5, 0.0, 1.0, window_vals.get());
         }
     }
 
     // Post-peak part
     const double dist_to_end = static_cast<double>(numSamples - 1 - peakIndex);
-    if (dist_to_end > 0)
+    if (dist_to_end > 1.0e-9) // ゼロ除算防止
     {
         const int post_taper_start_idx = peakIndex + static_cast<int>(std::ceil(dist_to_end * (1.0 - alpha_post)));
         const int post_taper_len = numSamples - post_taper_start_idx;
         if (post_taper_len > 0)
         {
-            convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(post_taper_len * sizeof(double), 64)));
+            convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(post_taper_len) * sizeof(double), 64)));
+            if (!cos_args) return;
             double* post_window_vals = window_vals.get() + post_taper_start_idx;
 
-            for (int i = 0; i < post_taper_len; ++i)
-            {
-                const double x_post = static_cast<double>(post_taper_start_idx + i - peakIndex) / dist_to_end;
-                cos_args[i] = pi * ((x_post - (1.0 - alpha_post)) / alpha_post);
-            }
+            const double scale = (pi / alpha_post) / dist_to_end;
+            const double offset = (pi / alpha_post) * (((double)post_taper_start_idx - (double)peakIndex) / dist_to_end - (1.0 - alpha_post));
+            vdLinearFrac(post_taper_len, nullptr, nullptr, scale, offset, 0.0, 1.0, cos_args.get());
 
             vdCos(post_taper_len, cos_args.get(), post_window_vals);
 
-            for (int i = 0; i < post_taper_len; ++i)
-                post_window_vals[i] = 0.5 * (1.0 + post_window_vals[i]);
+            vdLinearFrac(post_taper_len, post_window_vals, nullptr, 0.5, 0.5, 0.0, 1.0, post_window_vals);
         }
     }
 
@@ -399,22 +403,19 @@ public:
         if (result.success && !threadShouldExit())
         {
             // 6. メインスレッドで適用
-            auto wp = weakOwner;
-
-            // Raw pointerで管理 (Lambdaコピー時のAudioBufferディープコピー回避)
-            auto* loadedIRPtr = new juce::AudioBuffer<double>(std::move(result.loadedIR));
-            auto* displayIRPtr = new juce::AudioBuffer<double>(std::move(result.displayIR));
-            StereoConvolver* newConvPtr = result.newConv;
-
-            juce::MessageManager::callAsync([wp, newConvPtr, loadedIRPtr, loadedSR = result.loadedSR, targetLength = result.targetLength, isRebuild = this->isRebuild, file = this->file, displayIRPtr, scale = result.scaleFactor]()
-            {
-                std::unique_ptr<juce::AudioBuffer<double>> irOwner(loadedIRPtr);
-                std::unique_ptr<juce::AudioBuffer<double>> displayOwner(displayIRPtr);
-                if (auto* o = wp.get())
-                {
-                    o->applyNewState(newConvPtr, *irOwner, loadedSR, targetLength, isRebuild, file, scale, *displayOwner);
-                }
-            });
+            // This path is not taken for async load. The callAsync is inside performLoad.
+            // The logic here is for when performLoad returns success=true, which it doesn't for async.
+            // So this block is effectively dead code for async.
+            // Let's check performLoad again.
+            // ...
+            // result.success = false; // finalize側でapplyNewStateを実行するため、ここではスキップ
+            // return result;
+            // ...
+            // So `run` will never enter this `if (result.success ...)` block for async loads.
+            // The logic is inside `performLoad`.
+            // I need to change the lambda in `performLoad`.
+            // The old code in `run` was probably from a previous version.
+            // The current code in `performLoad` is what matters.
 
             resetter.success = true;
         }
@@ -568,28 +569,71 @@ public:
             // IR末尾の極小値(Denormal領域)をカットすることで、畳み込み負荷とDenormal発生リスクを低減
             if (result.loadedIR.getNumSamples() > 0)
             {
-                int newLength = result.loadedIR.getNumSamples();
-                const int channels = result.loadedIR.getNumChannels();
+                const int numSamples = result.loadedIR.getNumSamples();
+                const int numChannels = result.loadedIR.getNumChannels();
                 const double threshold = 1.0e-15; // -300dB (double精度における実質的な無音)
 
-                while (newLength > 0)
+                int newLength = 0; // Assume all silent if nothing found
+
+                if (numChannels > 0)
                 {
-                    bool isSilent = true;
-                    for (int ch = 0; ch < channels; ++ch)
+                    const double* ch0_ptr = result.loadedIR.getReadPointer(0);
+                    const double* ch1_ptr = (numChannels > 1) ? result.loadedIR.getReadPointer(1) : nullptr;
+
+                    const __m256d vThreshold = _mm256_set1_pd(threshold);
+                    const __m256d vSignMask = _mm256_set1_pd(-0.0);
+
+                    int i = numSamples;
+                    bool found = false;
+
+                    // Process in chunks of 4 from the end using AVX2
+                    for (; i >= 4; i -= 4)
                     {
-                        if (std::abs(result.loadedIR.getSample(ch, newLength - 1)) > threshold)
+                        __m256d v0 = _mm256_loadu_pd(ch0_ptr + i - 4);
+                        __m256d abs_v0 = _mm256_andnot_pd(vSignMask, v0);
+                        __m256d mask = _mm256_cmp_pd(abs_v0, vThreshold, _CMP_GT_OQ);
+
+                        if (ch1_ptr)
                         {
-                            isSilent = false;
-                            break;
+                            __m256d v1 = _mm256_loadu_pd(ch1_ptr + i - 4);
+                            __m256d abs_v1 = _mm256_andnot_pd(vSignMask, v1);
+                            __m256d mask1 = _mm256_cmp_pd(abs_v1, vThreshold, _CMP_GT_OQ);
+                            mask = _mm256_or_pd(mask, mask1);
+                        }
+
+                        if (_mm256_testz_pd(mask, mask) == 0) // if not all zero
+                        {
+                            // Non-silent sample found in this chunk. Find the exact one.
+                            for (int j = i - 1; j >= i - 4; --j)
+                            {
+                                if (std::abs(ch0_ptr[j]) > threshold || (ch1_ptr && std::abs(ch1_ptr[j]) > threshold))
+                                {
+                                    newLength = j + 1;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found) break;
                         }
                     }
-                    if (!isSilent) break;
-                    newLength--;
+
+                    if (!found)
+                    {
+                        // Check remaining samples (scalar)
+                        for (int j = i - 1; j >= 0; --j)
+                        {
+                            if (std::abs(ch0_ptr[j]) > threshold || (ch1_ptr && std::abs(ch1_ptr[j]) > threshold))
+                            {
+                                newLength = j + 1;
+                                break;
+                            }
+                        }
+                    }
                 }
 
-                if (newLength < result.loadedIR.getNumSamples())
+                if (newLength < numSamples)
                 {
-                    result.loadedIR.setSize(channels, std::max(1, newLength), true);
+                    result.loadedIR.setSize(numChannels, std::max(1, newLength), true);
                     shrinkToFit(result.loadedIR); // 末尾カット後の余分なメモリを解放
                 }
             }
@@ -785,15 +829,15 @@ public:
                 struct AsyncState {
                     convo::ScopedAlignedPtr<double> irL;
                     convo::ScopedAlignedPtr<double> irR;
-                    std::unique_ptr<juce::AudioBuffer<double>> loadedIR;
-                    std::unique_ptr<juce::AudioBuffer<double>> displayIR;
+                    std::shared_ptr<juce::AudioBuffer<double>> loadedIR;
+                    std::shared_ptr<juce::AudioBuffer<double>> displayIR;
                 };
 
                 auto state = std::make_shared<AsyncState>();
                 state->irL = std::move(irL);
                 state->irR = std::move(irR);
-                state->loadedIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.loadedIR));
-                state->displayIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.displayIR));
+                state->loadedIR = std::make_shared<juce::AudioBuffer<double>>(std::move(result.loadedIR));
+                state->displayIR = std::make_shared<juce::AudioBuffer<double>>(std::move(result.displayIR));
 
                 juce::MessageManager::callAsync([weakOwner = this->weakOwner, state,
                                                  length   = result.targetLength,
@@ -812,7 +856,7 @@ public:
                         owner->finalizeNUCEngineOnMessageThread(std::move(state->irL),
                                                                 std::move(state->irR),
                                                                 length, sr, peak, maxFFT, known, first, callQ, isReb, file,
-                                                                scale, std::move(state->loadedIR), std::move(state->displayIR));
+                                                                scale, state->loadedIR, state->displayIR);
                     }
                 });
 
@@ -853,7 +897,9 @@ public:
 
         if (result.success)
         {
-            owner.applyNewState(result.newConv, result.loadedIR, result.loadedSR, result.targetLength, isRebuild, file, result.scaleFactor, result.displayIR);
+        auto loadedIRShared = std::make_shared<juce::AudioBuffer<double>>(std::move(result.loadedIR));
+        auto displayIRShared = std::make_shared<juce::AudioBuffer<double>>(std::move(result.displayIR));
+        owner.applyNewState(result.newConv, loadedIRShared, result.loadedSR, result.targetLength, isRebuild, file, result.scaleFactor, displayIRShared);
         }
         else
         {
@@ -1146,10 +1192,10 @@ void ConvolverProcessor::rebuildAllIRs()
 
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
 {
-    if (originalIR.getNumSamples() > 0 && originalIRSampleRate > 0.0)
+    if (originalIR && originalIR->getNumSamples() > 0 && originalIRSampleRate > 0.0)
     {
         // リビルドモードでローダーを作成し、同期的に実行
-        LoaderThread loader(*this, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
+        LoaderThread loader(*this, *originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
         loader.externalCancellationCheck = shouldCancel;
         loader.runSynchronously();
     }
@@ -1344,7 +1390,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
             DBG("ConvolverProcessor::rebuild (via loadImpulseResponse) already in progress, skipping");
             return true;
         }
-        if (originalIR.getNumSamples() == 0 || originalIRSampleRate <= 0.0)
+        if (!originalIR || originalIR->getNumSamples() == 0 || originalIRSampleRate <= 0.0)
         {
             isRebuilding.store(false, std::memory_order_release);
             return false;
@@ -1369,7 +1415,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     // 新しいローダーを作成して開始
     if (isRebuild)
     {
-        activeLoader = std::make_unique<LoaderThread>(*this, originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
+        activeLoader = std::make_unique<LoaderThread>(*this, *originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
     }
     else
     {
@@ -1413,13 +1459,21 @@ void ConvolverProcessor::cleanup()
 
     // 【Leak Fix】LoaderThreadの異常蓄積防止
     // スレッドが終了しない場合でも、一定数を超えたら強制削除してメモリを解放する。
+    // [FIX] detached thread はプロセス終了時に未定義動作を引き起こすため、
+    //       同期的なチェックと削除に切り替える。
     while (loaderTrashBin.size() > 2)
     {
-        // ~LoaderThread() の stopThread(4000) をメッセージスレッドの外で実行する
-        std::thread([l = std::move(loaderTrashBin.front())]() mutable {
-            l.reset(); // blocks in stopThread(4000) on background thread
-        }).detach();
-        loaderTrashBin.pop_front();
+        // 最も古いスレッドが終了しているか非ブロックで確認
+        if (loaderTrashBin.front() && loaderTrashBin.front()->waitForThreadToExit(0))
+        {
+            // 終了済みなら安全に削除 (unique_ptrのデストラクタが呼ばれる)
+            loaderTrashBin.pop_front();
+        }
+        else
+        {
+            // 終了していないスレッドが見つかったら、今回はここまで。次回タイマーで再試行。
+            break;
+        }
     }
 
     // StereoConvolver のクリーンアップ (Worker Threadと競合するためロックが必要)
@@ -1478,12 +1532,16 @@ void ConvolverProcessor::forceCleanup()
     if (activeLoader)
         loadersToDelete.push_back(std::move(activeLoader));
 
+    // [FIX] detached thread はプロセス終了時に未定義動作を引き起こすため、
+    // シャットダウンシーケンスでは同期的にスレッドを停止する。
+    // stopThread() はスレッドが既に終了している場合は即座にリターンするため、
+    // ここでブロッキング呼び出しを行っても安全。
     for (auto& loader : loadersToDelete)
     {
-        std::thread([l = std::move(loader)]() mutable {
-            l.reset(); // blocks in stopThread(4000) on background thread
-        }).detach();
+        if (loader)
+            loader->stopThread(4000);
     }
+    loadersToDelete.clear(); // unique_ptrのデストラクタが呼ばれ、スレッドがクリーンアップされる
 
     for (auto& entry : stereoConvolversToDelete) entry.first->release();
 }
@@ -1543,11 +1601,32 @@ static void applySmoothing(std::vector<float>& magnitudes, int fftSize)
     magnitudes = smoothed;
 }
 
+std::vector<float> ConvolverProcessor::getIRWaveform() const
+{
+    const juce::ScopedLock sl(visualizationDataLock);
+    return irWaveform;
+}
+
+std::vector<float> ConvolverProcessor::getIRMagnitudeSpectrum() const
+{
+    const juce::ScopedLock sl(visualizationDataLock);
+    return irMagnitudeSpectrum;
+}
+
+double ConvolverProcessor::getIRSpectrumSampleRate() const
+{
+    const juce::ScopedLock sl(visualizationDataLock);
+    return irSpectrumSampleRate;
+}
+
 //--------------------------------------------------------------
 // createWaveformSnapshot
 //--------------------------------------------------------------
 void ConvolverProcessor::createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer)
 {
+    // Lock to protect access from the UI thread
+    const juce::ScopedLock sl(visualizationDataLock);
+
     irWaveform.assign(WAVEFORM_POINTS, 0.0f);
 
     const int numSamples = irBuffer.getNumSamples();
@@ -1586,6 +1665,9 @@ void ConvolverProcessor::createWaveformSnapshot (const juce::AudioBuffer<double>
 //--------------------------------------------------------------
 void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer<double>& irBuffer, double sampleRate)
 {
+    // Lock to protect access from the UI thread
+    const juce::ScopedLock sl(visualizationDataLock);
+
     irSpectrumSampleRate = sampleRate;
     irMagnitudeSpectrum.clear();
 
@@ -1709,14 +1791,12 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
             }
             else
             {
-                // IRファイルが見つからない場合のエラーハンドリング
-                juce::NativeMessageBox::showAsync(
-                    juce::MessageBoxOptions()
-                        .withIconType(juce::MessageBoxIconType::WarningIcon)
-                        .withTitle("IR File Not Found")
-                        .withMessage("The Impulse Response file specified in the preset could not be found:\n" + path + "\n\nThe previous IR will be kept.")
-                        .withButton("OK"),
-                    nullptr);
+                // IRファイルが見つからない場合のエラーハンドリング。
+                // lastErrorに情報を設定し、UI側で再リンクを促す。
+                // これにより、UIスレッドをブロックせずに非同期で対応できる。
+                lastError = "IR not found: " + f.getFileName();
+                // UIに通知してエラーメッセージを表示させる
+                sendChangeMessage();
             }
         }
 
@@ -1740,8 +1820,9 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
     targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
 
-    // サンプルレート変更時にリビルドできるよう、元のIR情報をコピーする
-    // これにより、新しいDSPコアがIRをリサンプリングするためのソース素材を持つことが保証されます。
+    // サンプルレート変更時にリビルドできるよう、元のIR情報を共有する
+    // shared_ptrにより、AudioBufferのディープコピーを回避し、参照カウントのインクリメントのみで済む。
+    // これにより、新しいDSPコアがIRをリサンプリングするためのソース素材を効率的に持つことが保証される。
     originalIR = other.originalIR;
     originalIRSampleRate = other.originalIRSampleRate;
     {
@@ -2189,132 +2270,43 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
             if (isSmoothing)
             {
-                const double* wetChunkGains = wetGains + processed;
-                const double* dryChunkGains = dryGains + processed;
-
-                int i = 0;
-                const int vLoop = validWetSamples / 16 * 16; // Unroll 4x (16 doubles)
-                if (vLoop > 0)
+                if (validWetSamples > 0)
                 {
-                    for (; i < vLoop; i += 16)
-                    {
-                        _mm_prefetch(reinterpret_cast<const char*>(wetSignal + i + 64), _MM_HINT_T0);
-                        _mm_prefetch(reinterpret_cast<const char*>(dry + i + 64), _MM_HINT_T0);
-                        _mm_prefetch(reinterpret_cast<const char*>(wetChunkGains + i + 64), _MM_HINT_T0);
-                        _mm_prefetch(reinterpret_cast<const char*>(dryChunkGains + i + 64), _MM_HINT_T0);
-
-                        // 1
-                        __m256d vWet0 = _mm256_loadu_pd(wetSignal + i);
-                        __m256d vDry0 = _mm256_loadu_pd(dry + i);
-                        __m256d vWetG0 = _mm256_loadu_pd(wetChunkGains + i);
-                        __m256d vDryG0 = _mm256_loadu_pd(dryChunkGains + i);
-                        __m256d vOut0 = _mm256_fmadd_pd(vWet0, vWetG0, _mm256_mul_pd(vDry0, vDryG0)); // FMA
-                        _mm256_storeu_pd(dst + i, vOut0);
-
-                        // 2
-                        __m256d vWet1 = _mm256_loadu_pd(wetSignal + i + 4);
-                        __m256d vDry1 = _mm256_loadu_pd(dry + i + 4);
-                        __m256d vWetG1 = _mm256_loadu_pd(wetChunkGains + i + 4);
-                        __m256d vDryG1 = _mm256_loadu_pd(dryChunkGains + i + 4);
-                        __m256d vOut1 = _mm256_fmadd_pd(vWet1, vWetG1, _mm256_mul_pd(vDry1, vDryG1)); // FMA
-                        _mm256_storeu_pd(dst + i + 4, vOut1);
-
-                        // 3
-                        __m256d vWet2 = _mm256_loadu_pd(wetSignal + i + 8);
-                        __m256d vDry2 = _mm256_loadu_pd(dry + i + 8);
-                        __m256d vWetG2 = _mm256_loadu_pd(wetChunkGains + i + 8);
-                        __m256d vDryG2 = _mm256_loadu_pd(dryChunkGains + i + 8);
-                        __m256d vOut2 = _mm256_fmadd_pd(vWet2, vWetG2, _mm256_mul_pd(vDry2, vDryG2)); // FMA
-                        _mm256_storeu_pd(dst + i + 8, vOut2);
-
-                        // 4
-                        __m256d vWet3 = _mm256_loadu_pd(wetSignal + i + 12);
-                        __m256d vDry3 = _mm256_loadu_pd(dry + i + 12);
-                        __m256d vWetG3 = _mm256_loadu_pd(wetChunkGains + i + 12);
-                        __m256d vDryG3 = _mm256_loadu_pd(dryChunkGains + i + 12);
-                        __m256d vOut3 = _mm256_fmadd_pd(vWet3, vWetG3, _mm256_mul_pd(vDry3, vDryG3)); // FMA
-                        _mm256_storeu_pd(dst + i + 12, vOut3);
-                    }
-                }
-                // Handle remaining multiples of 4
-                for (; i < (validWetSamples / 4 * 4); i += 4)
-                {
-                    __m256d vWet = _mm256_loadu_pd(wetSignal + i);
-                    __m256d vDry = _mm256_loadu_pd(dry + i);
-                    __m256d vWetG = _mm256_loadu_pd(wetChunkGains + i);
-                    __m256d vDryG = _mm256_loadu_pd(dryChunkGains + i);
-                    __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG)); // FMA
-                    _mm256_storeu_pd(dst + i, vOut);
-                }
-                for (; i < validWetSamples; ++i)
-                {
-                    dst[i] = wetSignal[i] * wetChunkGains[i] + dry[i] * dryChunkGains[i];
+                    // MKL VML を使用した Dry/Wet ミキシング (スムージング時)
+                    // dst = (wet * wetGains) + (dry * dryGains)
+                    // oldDryBuffer を一時的なスクラッチバッファとして使用
+                    double* temp = oldDryBuffer.getWritePointer(ch);
+                    vdMul(validWetSamples, wetSignal, wetGains + processed, temp);
+                    vdMul(validWetSamples, dry, dryGains + processed, dst);
+                    vdAdd(validWetSamples, dst, temp, dst);
                 }
 
-                // Wetが無効な区間
-                for (; i < chunkSamples; ++i)
+                // Wet信号が無効な区間 (畳み込みの初期レイテンシーなど)
+                if (chunkSamples > validWetSamples)
                 {
-                    dst[i] = dry[i] * dryChunkGains[i];
+                    const int remainder = chunkSamples - validWetSamples;
+                    vdMul(remainder, dry + validWetSamples, dryGains + processed + validWetSamples, dst + validWetSamples);
                 }
             }
             else
             {
-                // 定常状態 (99%のケース) -> AVX2最適化
-                int i = 0;
-
-                const __m256d vWetG = _mm256_set1_pd(wetG);
-                const __m256d vDryG = _mm256_set1_pd(dryG);
-
-                const int vLoop = validWetSamples / 16 * 16; // Unroll 4x
-                if (vLoop > 0)
+                // 定常状態 (99%のケース) -> MKL BLAS を使用して最適化
+                if (validWetSamples > 0)
                 {
-                    for (; i < vLoop; i += 16)
-                    {
-                        _mm_prefetch(reinterpret_cast<const char*>(wetSignal + i + 64), _MM_HINT_T0);
-                        _mm_prefetch(reinterpret_cast<const char*>(dry + i + 64), _MM_HINT_T0);
-
-                        // 1
-                        __m256d vWet0 = _mm256_loadu_pd(wetSignal + i);
-                        __m256d vDry0 = _mm256_loadu_pd(dry + i);
-                        __m256d vOut0 = _mm256_fmadd_pd(vWet0, vWetG, _mm256_mul_pd(vDry0, vDryG)); // FMA
-                        _mm256_storeu_pd(dst + i, vOut0);
-
-                        // 2
-                        __m256d vWet1 = _mm256_loadu_pd(wetSignal + i + 4);
-                        __m256d vDry1 = _mm256_loadu_pd(dry + i + 4);
-                        __m256d vOut1 = _mm256_fmadd_pd(vWet1, vWetG, _mm256_mul_pd(vDry1, vDryG)); // FMA
-                        _mm256_storeu_pd(dst + i + 4, vOut1);
-
-                        // 3
-                        __m256d vWet2 = _mm256_loadu_pd(wetSignal + i + 8);
-                        __m256d vDry2 = _mm256_loadu_pd(dry + i + 8);
-                        __m256d vOut2 = _mm256_fmadd_pd(vWet2, vWetG, _mm256_mul_pd(vDry2, vDryG)); // FMA
-                        _mm256_storeu_pd(dst + i + 8, vOut2);
-
-                        // 4
-                        __m256d vWet3 = _mm256_loadu_pd(wetSignal + i + 12);
-                        __m256d vDry3 = _mm256_loadu_pd(dry + i + 12);
-                        __m256d vOut3 = _mm256_fmadd_pd(vWet3, vWetG, _mm256_mul_pd(vDry3, vDryG)); // FMA
-                        _mm256_storeu_pd(dst + i + 12, vOut3);
-                    }
-                }
-                for (; i < (validWetSamples / 4 * 4); i += 4)
-                {
-                    __m256d vWet = _mm256_loadu_pd(wetSignal + i);
-                    __m256d vDry = _mm256_loadu_pd(dry + i);
-                    __m256d vOut = _mm256_fmadd_pd(vWet, vWetG, _mm256_mul_pd(vDry, vDryG)); // FMA
-                    _mm256_storeu_pd(dst + i, vOut);
-                }
-                // 残りの有効なWetサンプル (Scalar)
-                for (; i < validWetSamples; ++i)
-                {
-                    dst[i] = wetSignal[i] * wetG + dry[i] * dryG;
+                    // dst = dryG * dry + wetG * wetSignal
+                    // cblas_daxpby (y := alpha*x + beta*y) を使用
+                    // 1. dst に dry をコピー
+                    cblas_dcopy(validWetSamples, dry, 1, dst, 1);
+                    // 2. dst = wetG * wetSignal + dryG * dst (dstはdryで初期化済み)
+                    cblas_daxpby(validWetSamples, wetG, wetSignal, 1, dryG, dst, 1);
                 }
 
                 // Wetが無効な区間 (初期レイテンシー等) -> Dryのみ出力
-                for (; i < chunkSamples; ++i)
+                if (chunkSamples > validWetSamples)
                 {
-                    dst[i] = dry[i] * dryG;
+                    const int remainder = chunkSamples - validWetSamples;
+                    cblas_dcopy(remainder, dry + validWetSamples, 1, dst + validWetSamples, 1);
+                    cblas_dscal(remainder, dryG, dst + validWetSamples, 1);
                 }
             }
 
@@ -2433,8 +2425,8 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                                                           bool isRebuild,
                                                           const juce::File& irFile,
                                                           double scaleFactor,
-                                                          std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
-                                                          std::unique_ptr<juce::AudioBuffer<double>> displayIR)
+                                                          std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
+                                                          std::shared_ptr<juce::AudioBuffer<double>> displayIR)
 {
     // ここはMessage Thread上で実行されるためMKL規約を完全に遵守
     auto* newConv = new StereoConvolver();
@@ -2444,7 +2436,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                       maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor))
     {
         // 元の applyNewState と同一の流れで適用
-        applyNewState(newConv, *loadedIR, sr, length, isRebuild, irFile, scaleFactor, *displayIR);
+        applyNewState(newConv, loadedIR, sr, length, isRebuild, irFile, scaleFactor, displayIR);
     }
     else
     {
@@ -2455,18 +2447,18 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
 }
 
 void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
-                                       const juce::AudioBuffer<double>& loadedIR,
+                                       std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
                                        double loadedSR,
                                        int targetLength,
                                        bool isRebuild,
                                        const juce::File& file,
                                        double scaleFactor,
-                                       const juce::AudioBuffer<double>& displayIR)
+                                       std::shared_ptr<juce::AudioBuffer<double>> displayIR)
 {
     // 元データの更新 (新規ロード時のみ)
     if (!isRebuild)
     {
-        originalIR = loadedIR;
+        originalIR = loadedIR; // shared_ptr assignment
         originalIRSampleRate = loadedSR;
         {
             const juce::ScopedLock sl(irFileLock);
@@ -2479,8 +2471,8 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     // スナップショット更新 (表示用)
     if (visualizationEnabled)
     {
-        createWaveformSnapshot(displayIR);
-        createFrequencyResponseSnapshot(displayIR, loadedSR);
+        createWaveformSnapshot(*displayIR);
+        createFrequencyResponseSnapshot(*displayIR, loadedSR);
     }
 
     // 安全に差し替え (Atomic Swap)

@@ -83,6 +83,8 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     irInfoLabel.setColour(juce::Label::textColourId,
                          juce::Colours::orange.withAlpha(0.8f));
     irInfoLabel.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+    // マウスクリックイベントを受け取り、IR再リンク機能を実現する
+    irInfoLabel.addMouseListener(this, false);
     addAndMakeVisible(irInfoLabel);
 }
 
@@ -290,6 +292,22 @@ void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
     }
 }
 
+void ConvolverControlPanel::mouseDown(const juce::MouseEvent& event)
+{
+    // IR情報ラベルがクリックされたかチェック
+    if (event.originalComponent == &irInfoLabel)
+    {
+        auto& convolver = engine.getConvolverProcessor();
+        // エラーメッセージが「見つからない」場合のみファイル選択ダイアログを開く
+        if (convolver.getLastError().startsWith("IR not found"))
+        {
+            // 既存のロードボタンのクリックイベントを再利用することで、
+            // ファイル選択ダイアログのロジックを重複させずに済む。
+            loadIRButton.triggerClick();
+        }
+    }
+}
+
 //--------------------------------------------------------------
 // updateIRInfo
 //--------------------------------------------------------------
@@ -321,8 +339,19 @@ void ConvolverControlPanel::updateIRInfo()
         // エラーがある場合は赤字で表示
         if (convolver.getLastError().isNotEmpty())
         {
-            irInfoLabel.setText(convolver.getLastError(), juce::dontSendNotification);
-            irInfoLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+            juce::String errorMessage = convolver.getLastError();
+            if (errorMessage.startsWith("IR not found"))
+            {
+                irInfoLabel.setText(errorMessage + " (Click to locate...)", juce::dontSendNotification);
+                irInfoLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+                irInfoLabel.setTooltip("The IR file for this preset was not found. Click here to find it.");
+            }
+            else
+            {
+                irInfoLabel.setText(errorMessage, juce::dontSendNotification);
+                irInfoLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+                irInfoLabel.setTooltip("");
+            }
         }
         else
         {

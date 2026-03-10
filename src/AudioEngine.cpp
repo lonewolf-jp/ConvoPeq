@@ -320,9 +320,6 @@ AudioEngine::~AudioEngine()
     // Clear all pending and old DSPs.
     {
         juce::ScopedLock sl(trashBinLock);
-        for (auto* p : trashBinPending) delete p;
-        trashBinPending.clear();
-
         for (auto& entry : trashBin) delete entry.first;
         trashBin.clear();
     }
@@ -1026,7 +1023,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         const juce::ScopedLock sl(trashBinLock);
         try
         {
-            trashBinPending.push_back(dspToTrash);
+            trashBin.push_back({dspToTrash, juce::Time::getMillisecondCounter()});
         }
         catch (...)
         {
@@ -1060,12 +1057,6 @@ void AudioEngine::timerCallback()
     {
         const juce::ScopedLock sl(trashBinLock);
         const uint32 now = juce::Time::getMillisecondCounter();
-
-        // 1. Move pending items to main trash bin with timestamp
-        for (const auto& p : trashBinPending)
-            trashBin.push_back({p, now});
-        trashBinPending.clear();
-
         // 2. Identify items to delete (older than 10000ms)
         // This ensures that any Audio Thread processing cycle (worst case: 65536/8000Hz = 8.2s)
         // that might have started using the pointer has finished.
@@ -1108,10 +1099,6 @@ void AudioEngine::timerCallback()
         dsp->convolver.cleanup();
     }
 
-    // trashBin 内の DSPCore に対しても cleanup() を呼び、LoaderThread GC を促進する。
-    // trashBinPending は前半のロックブロックで既に trashBin へ移動済みのため常に空。
-    // Message Thread はシングルスレッドなので timerCallback() 実行中に
-    // commitNewDSP() が trashBinPending へ追加することはない (dead code のため削除)。
     {
         const juce::ScopedLock sl(trashBinLock);
         for (const auto& entry : trashBin)

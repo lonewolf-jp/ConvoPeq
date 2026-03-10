@@ -147,13 +147,13 @@ public:
     //----------------------------------------------------------
     // 波形表示用データ取得
     //----------------------------------------------------------
-    const std::vector<float>& getIRWaveform() const { return irWaveform; }
+    std::vector<float> getIRWaveform() const;
 
     //----------------------------------------------------------
     // 周波数特性表示用データ取得
     //----------------------------------------------------------
-    const std::vector<float>& getIRMagnitudeSpectrum() const { return irMagnitudeSpectrum; }
-    double getIRSpectrumSampleRate() const { return irSpectrumSampleRate; }
+    std::vector<float> getIRMagnitudeSpectrum() const;
+    double getIRSpectrumSampleRate() const;
 
     //----------------------------------------------------------
     // State Management
@@ -176,7 +176,7 @@ public:
     // 【NUCエンジン構築専用エントリポイント】
     // LoaderThreadからIRデータを受け取り、メッセージスレッド上で
     // SetImpulse / DftiCommitDescriptor / mkl_malloc を安全に実行する
-    void finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPtr<double> irL,
+    void finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPtr<double> irL, // This is called from LoaderThread
                                           convo::ScopedAlignedPtr<double> irR,
                                           int length,
                                           double sr,
@@ -187,9 +187,9 @@ public:
                                           int preferredCallSize,
                                           bool isRebuild,
                                           const juce::File& irFile,
-                                          double scaleFactor,
-                                          std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
-                                          std::unique_ptr<juce::AudioBuffer<double>> displayIR);
+                                          double scaleFactor, // This is for newConv->init
+                                          std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
+                                          std::shared_ptr<juce::AudioBuffer<double>> displayIR);
 
     // 可視化データ生成の制御 (DSP用インスタンスでは無効化してメモリを節約)
     void setVisualizationEnabled(bool enabled) { visualizationEnabled = enabled; }
@@ -203,7 +203,7 @@ private:
     void timerCallback() override;
     struct StereoConvolver;
     class LoaderThread;
-    void applyNewState(StereoConvolver* newConv, const juce::AudioBuffer<double>& loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, const juce::AudioBuffer<double>& displayIR);
+    void applyNewState(StereoConvolver* newConv, std::shared_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::shared_ptr<juce::AudioBuffer<double>> displayIR);
     void handleLoadError(const juce::String& error);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
@@ -375,13 +375,16 @@ private:
     //----------------------------------------------------------
     juce::String irName;
     std::atomic<int> irLength { 0 };  // rebuildThread(read) と Message Thread(write) 間のデータレース防止
+    // --- Visualization Data (accessed by worker and message threads) ---
     std::vector<float> irWaveform;
     std::vector<float> irMagnitudeSpectrum;
     double irSpectrumSampleRate = 0.0;
+    mutable juce::CriticalSection visualizationDataLock;
+
     juce::File currentIrFile;
     juce::CriticalSection irFileLock;
     std::atomic<bool> currentIrOptimized { false };
-    juce::AudioBuffer<double> originalIR; // 元IR保持 (リサンプリング/トリミング用)
+    std::shared_ptr<juce::AudioBuffer<double>> originalIR; // 元IR保持 (リサンプリング/トリミング用)
     double originalIRSampleRate = 0.0;
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
     double currentIRScale = 1.0; // IRのスケールファクター (Auto Makeup + Safety Margin)
