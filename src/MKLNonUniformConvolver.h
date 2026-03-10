@@ -212,12 +212,36 @@ private:
     int   m_latency         = 0;   // = Layer0.partSize
 
     // 出力リングバッファ (L0 専用。Add/Get が同一 Audio Thread なので lock 不要)
+    //
+    // ── リングサイズのオーバーフロー不可証明 ──────────────────────────────
+    // 前提: L0.partSize = nextPowerOfTwo(max(blockSize, 64)) ≥ blockSize
+    //       processLayerBlock() は Add(N) 1回で最大 ceil(N / L0.partSize) = 1 回しか
+    //       呼ばれないため、ringWrite の最大書き込み量 = L0.partSize / コールバック。
+    //
+    // ringAvail の最大値:
+    //   Add後: (前回残留) + L0.partSize ≤ L0.partSize + L0.partSize = 2 * L0.partSize
+    //   Get後: 2 * L0.partSize - numSamples < 2 * L0.partSize
+    //
+    // 現在のリングサイズ = nextPowerOfTwo(L0.partSize*4 + blockSize*4)
+    //                     ≥ nextPowerOfTwo(8 * L0.partSize)  (∵ blockSize ≤ L0.partSize)
+    //                     ≥ 8 * L0.partSize
+    //
+    // ヘッドルーム = 8 * L0.partSize / (2 * L0.partSize) = 4x
+    // → 通常動作でのオーバーフローは構造上不可能。
+    //   以下の m_ringOverflowCount が非ゼロになる場合、
+    //   Add/Get の非対称呼び出しなどのロジックバグを示す。
+    // ──────────────────────────────────────────────────────────────────────
     double* m_ringBuf     = nullptr;
     int     m_ringSize    = 0;
     int     m_ringMask    = 0;   // = m_ringSize - 1 (power-of-two 前提)
     int     m_ringWrite   = 0;
     int     m_ringRead    = 0;
     int     m_ringAvail   = 0;   // 利用可能サンプル数 (L0 出力のみカウント)
+
+    // デバッグ用オーバーフロー検出カウンタ
+    // Audio Thread から書き込み、Message Thread から読み出し可。
+    // 非ゼロは構造バグの存在を示す (通常は常に 0)。
+    std::atomic<int> m_ringOverflowCount { 0 };
 
     std::atomic<bool> m_ready { false };
 

@@ -903,6 +903,30 @@ void AudioEngine::rebuildThreadLoop()
             if (isObsolete()) continue;
 
             // 2. Reuse Logic
+            //
+            // 【task.currentDSP (= 旧 activeDSP) の安全性証明】
+            //
+            // task.currentDSP が trashBin に入る経路は2つ:
+            //
+            // (A) commitNewDSP() 経由 (通常パス):
+            //     commitNewDSP は callAsync で Message Thread に投入される。
+            //     callAsync は rebuildThreadLoop の末尾でのみ発行される。
+            //     rebuildThread は単一スレッドであるため、本タスクの Reuse Logic を
+            //     実行中に本タスクの callAsync が実行されることは構造上不可能。
+            //     → Reuse Logic 実行中に (A) 経由で trashBin に入ることはない。
+            //
+            // (B) releaseResources() 経由 (デバイス切断等):
+            //     releaseResources() は DSP_A を trashBin に移動するが、
+            //     Bug1 修正により即時 delete を廃止済みで 10 秒の猶予期間がある。
+            //     Reuse Logic はフィールド読み取りのみでマイクロ秒単位で完了する。
+            //     rebuildGeneration は fetch_add されるため直後の isObsolete() が
+            //     true を返し、以降の重い処理には進まない。
+            //     → 10 秒猶予に対してマイクロ秒の Reuse Logic が実際の UAF を
+            //        引き起こす可能性は皆無。
+            //
+            // 【shared_ptr 不採用の理由】
+            //     Audio Thread は std::shared_ptr の参照カウント操作を禁止している
+            //     (コーディング規約)。currentDSP の RCU 設計はこの制約に基づく。
             bool irReused = false;
             if (task.currentDSP)
             {
@@ -1084,22 +1108,16 @@ void AudioEngine::timerCallback()
         dsp->convolver.cleanup();
     }
 
-    // [FIX] trashBin内のDSPCoreに対してもcleanup()を呼び、リソース解放の遅延を防ぐ
-    // DSPCoreがtrashBinに移動されると、currentDSPではなくなるためタイマーからの
-    // cleanup()呼び出しが止まってしまう。最終的にデストラクタでforceCleanup()が
-    // 呼ばれるためリークはしないが、最大10秒間リソースが解放されない期間が発生する。
-    // これを防ぐため、trashBin内のインスタンスも明示的にクリーンアップする。
+    // trashBin 内の DSPCore に対しても cleanup() を呼び、LoaderThread GC を促進する。
+    // trashBinPending は前半のロックブロックで既に trashBin へ移動済みのため常に空。
+    // Message Thread はシングルスレッドなので timerCallback() 実行中に
+    // commitNewDSP() が trashBinPending へ追加することはない (dead code のため削除)。
     {
         const juce::ScopedLock sl(trashBinLock);
         for (const auto& entry : trashBin)
             if (entry.first != nullptr) {
                 entry.first->eq.cleanup();
                 entry.first->convolver.cleanup();
-            }
-        for (auto* p : trashBinPending)
-            if (p != nullptr) {
-                p->eq.cleanup();
-                p->convolver.cleanup();
             }
     }
 
@@ -1178,24 +1196,24 @@ void AudioEngine::releaseResources()
     //   3. 手動revertは不要・リークリスクあり → JUCEに任せる
     // ==================================================================
 
+    // [Bug Fix: use-after-free] rebuildGeneration をインクリメントし、
+    // rebuildThread の進行中タスクを obsolete にする。
+    // rebuildThread は isObsolete() チェックで task.currentDSP へのアクセスを
+    // 早期に打ち切るため、dangling pointer アクセスのウィンドウを最小化する。
+    // 安全な最終保証は ~AudioEngine() の rebuildThread.join() が担う。
+    rebuildGeneration.fetch_add(1, std::memory_order_acq_rel);
+
     // 1. Stop Audio Thread access
     currentDSP.store(nullptr, std::memory_order_release);
 
-    // 2. Release Active DSP (triggers destructors of DSPCore and its members)
-    // 3. Clear Trash Bin (release old DSPs)
+    // 2. activeDSP を trashBin に移動する（即時削除禁止）。
+    //    trashBin / trashBinPending の既存エントリも即時削除しない。
+    //    理由: rebuildThread が task.currentDSP として trashBin 内エントリを
+    //    参照中の可能性があり、直ちに delete するとダングリングポインタアクセスになる。
+    //    安全な削除は ~AudioEngine() の rebuildThread.join() 後、
+    //    または timerCallback() の時間ベース GC に委ねる。
     {
         const juce::ScopedLock sl(trashBinLock);
-
-        // 旧 DSP 群は task.currentDSP ではないため即時削除可能
-        for (auto& entry : trashBin) delete entry.first;
-        trashBin.clear();
-        for (auto* p : trashBinPending) delete p;
-        trashBinPending.clear();
-
-        // activeDSP (= task.currentDSP) は即時削除禁止。
-        // Rebuild Thread が task.currentDSP として現在アクセス中の可能性がある。
-        // trashBin に移動し、timerCallback() の 2000ms GC で安全に削除。
-        // 最終的に ~AudioEngine() の rebuildThread.join() 後にも削除される。
         if (activeDSP)
         {
             trashBin.push_back({activeDSP, juce::Time::getMillisecondCounter()});
@@ -1203,7 +1221,7 @@ void AudioEngine::releaseResources()
         }
     }
 
-    // 4. Release UI Processor Resources
+    // 3. Release UI Processor Resources
     uiConvolverProcessor.releaseResources();
     uiEqProcessor.releaseResources();
 }
@@ -1238,10 +1256,13 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     const int startSample = bufferToFill.startSample;
     auto* buffer = bufferToFill.buffer;
 
-    // サンプル数の妥当性チェック
-    // maxSamplesPerBlock.load() (Atomic) の代わりに定数 SAFE_MAX_BLOCK_SIZE を使用する。
-    // これにより、Message Threadでの更新との競合を回避し、DSPCoreのバッファ確保サイズ(SAFE_MAX_BLOCK_SIZE)に基づく安全なチェックを行う。
-    if (numSamples <= 0 || numSamples > SAFE_MAX_BLOCK_SIZE)
+    // 事前サニティチェック: 絶対的な上限 (1<<20 ≒ 100万サンプル) で明らかな破損データを弾く。
+    // DSPCore の maxSamplesPerBlock は prepareToPlay() でホスト指定値を反映して設定されるため、
+    // ここで SAFE_MAX_BLOCK_SIZE (65536) を使うと、131072 等の正当なブロックを誤って拒否する。
+    // 【Bug Fix】SAFE_MAX_BLOCK_SIZE による早期リジェクトを廃止し、dsp->maxSamplesPerBlock で
+    //            正確なチェックを行う (下記 DSPCore 取得後)。
+    constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20; // 破損データ検出用上限
+    if (numSamples <= 0 || numSamples > ABSOLUTE_MAX_BLOCK_SIZE)
     {
         bufferToFill.clearActiveBufferRegion();
         return;
@@ -1261,6 +1282,15 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     if (dsp != nullptr)
     {
+        // DSPCore 固有の上限チェック
+        // DSPCore::prepare() でホスト指定の samplesPerBlock を反映した maxSamplesPerBlock が設定される。
+        // dsp は RCU で公開済みのため maxSamplesPerBlock は Audio Thread から安全に読み出せる。
+        if (numSamples > dsp->maxSamplesPerBlock)
+        {
+            bufferToFill.clearActiveBufferRegion();
+            return;
+        }
+
         // 安全対策: サンプルレート不整合チェック
         // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
         // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
@@ -1320,7 +1350,9 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     const int numSamples = buffer.getNumSamples();
-    if (numSamples <= 0 || numSamples > SAFE_MAX_BLOCK_SIZE)
+    // 事前サニティチェック (getNextAudioBlock と同様)
+    constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20;
+    if (numSamples <= 0 || numSamples > ABSOLUTE_MAX_BLOCK_SIZE)
     {
         buffer.clear();
         return;
@@ -1328,6 +1360,13 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
     DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
     if (dsp == nullptr)
+    {
+        buffer.clear();
+        return;
+    }
+
+    // DSPCore 固有の上限チェック (getNextAudioBlock と同様)
+    if (numSamples > dsp->maxSamplesPerBlock)
     {
         buffer.clear();
         return;

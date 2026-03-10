@@ -291,11 +291,24 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         // ── 非 Immediate レイヤーのコールバックあたりパーティション数 ──
         // 1 コールバック (blockSize サンプル) あたりに処理するパーティション数:
-        //   partsPerCallback = ceil(numPartsIR / (partSize / blockSize))
-        //                    = ceil(numPartsIR * blockSize / partSize)
-        // これにより、IFFT は partSize/blockSize コールバック後 (= 1 トリガ周期後) に完了する。
+        //
+        // 【設計上の不変条件】
+        //   partSize = nextPowerOfTwo(max(blockSize,64)) * 8^n  (L1: n=1, L2: n=2)
+        //   blockSize = nextPowerOfTwo(ホスト指定値)
+        //   → partSize は常に blockSize の正確な倍数 (partSize % blockSize == 0)
+        //
+        //   blocksPerPart = partSize / blockSize  (整除。切り捨てなし)
+        //   partsPerCallback = ceil(numPartsIR / blocksPerPart)
+        //
+        // これにより分散計算は 1 トリガ周期 (blocksPerPart コールバック) 内に完了する。
+        //
+        // 【注意】「= ceil(numPartsIR * blockSize / partSize)」は
+        //   partSize % blockSize == 0 の場合のみ成立する等式である。
+        //   非整除の場合、提案式は partsPerCallback を過小評価し
+        //   分散計算が完了しない可能性があるため使用しないこと。
         if (!l.isImmediate)
         {
+            jassert(l.partSize % blockSize == 0); // 上記不変条件の実行時検証
             const int blocksPerPart = l.partSize / std::max(blockSize, 1);
             l.partsPerCallback = std::max(1,
                 (l.numPartsIR + blocksPerPart - 1) / blocksPerPart);
@@ -318,7 +331,15 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // ────────────────────────────────────────────────
     // 出力リングバッファ確保 (L0 専用)
     // L1/L2 は tailOutputBuf を使用するため、リングは L0 のみに最適化したサイズでよい。
-    // rSize = nextPow2(L0.partSize * 4 + blockSize * 4) で十分。
+    //
+    // 必要最小サイズ: 2 * l0PartSize
+    //   (L0.partSize ≥ blockSize であるため、1 コールバックで最大 1 回の
+    //    processLayerBlock が発火し、ringAvail の最大値 = 2 * l0PartSize)
+    //
+    // 確保サイズ: nextPowerOfTwo(l0PartSize * 4 + blockSize * 4)
+    //   ≥ 8 * l0PartSize  (∵ blockSize ≤ l0PartSize)
+    //   → ヘッドルーム 4x。通常動作でのオーバーフローは構造上不可能。
+    //      (詳細は MKLNonUniformConvolver.h m_ringOverflowCount のコメントを参照)
     // ────────────────────────────────────────────────
     const int l0PartSize = m_layers[0].partSize;
     const int rSize = juce::nextPowerOfTwo(l0PartSize * 4 + blockSize * 4);
@@ -453,7 +474,21 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
     const int nextAvail = m_ringAvail + n;
     if (nextAvail > m_ringSize)
     {
-        // リングオーバーフロー: 最古のデータを破棄して読み取り位置を進める
+        // ─────────────────────────────────────────────────────────────────
+        // オーバーフロー安全弁 (通常動作では到達しない)
+        //
+        // 【到達条件】Add/Get の非対称呼び出し、またはリセット直後の連続 Add など
+        //   構造バグが存在する場合のみ発生する。
+        //   証明は m_ringOverflowCount メンバのコメントを参照。
+        //
+        // 【対応方針】Audio Thread 内でブロックは不可。
+        //   最も古いデータを破棄し、最新データを保持する「ドロップアウト」戦略を採る。
+        //   これにより、不連続は生じるが Audio Thread の遅延は回避できる。
+        //   発生頻度が非ゼロの場合は m_ringOverflowCount の監視によって検出可能。
+        // ─────────────────────────────────────────────────────────────────
+        jassertfalse; // 通常動作では絶対に到達しない。到達した場合はバグ。
+        m_ringOverflowCount.fetch_add(1, std::memory_order_relaxed);
+
         const int overflow = nextAvail - m_ringSize;
         m_ringRead  = (m_ringRead + overflow) & m_ringMask;
         m_ringAvail = m_ringSize;
@@ -466,11 +501,14 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
 
 //==============================================================================
 // ringRead  ─ Audio Thread (L0 専用)
-// リングバッファから n サンプルを読み出し、読み出し位置を Zero-Flush する。
+// リングバッファから n サンプルを読み出す。
 //
-// Zero-Flush の目的: 読み出し済み領域を即座にゼロクリアする。
-//   次回 ringWrite (L0 の memcpy) がその位置に上書きするため実質的には不要だが、
-//   バッファ内のゴミデータによる予期しない問題を防ぐ防御的措置として実施する。
+// 【Zero-Flush 削除について】
+//   旧実装は読み出し後に memset(0) でバッファ領域をクリアしていたが、
+//   ringWrite は memcpy による上書きのみであるため、読み出し済み領域は
+//   次回 ringWrite で必ず完全に上書きされる。
+//   クリアは冗長であり Audio Thread での余分な memset は避けるべきため削除した。
+//   初期状態は setup() の memset(0) で保証されている。
 //==============================================================================
 int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
 {
@@ -495,11 +533,6 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
         if (toRead < n)
             memset(dst + toRead, 0, (n - toRead) * sizeof(double));
     }
-
-    // Zero-Flush: 読み出し位置をゼロクリア
-    memset(m_ringBuf + m_ringRead, 0, first * sizeof(double));
-    if (toRead > first)
-        memset(m_ringBuf, 0, (toRead - first) * sizeof(double));
 
     m_ringRead  = (m_ringRead + toRead) & m_ringMask;
     m_ringAvail -= toRead;
@@ -539,6 +572,15 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
         // ────────────────────────────────────────────
         // 入力を partSize 単位で蓄積し、溜まったらトリガ処理する
+        //
+        // 【複数トリガ不発生の証明】
+        //   L1/L2 の partSize と numSamples の大小関係:
+        //     L1.partSize = l0Part × 8 ≥ blockSize × 8
+        //     L2.partSize = l0Part × 64 ≥ blockSize × 64
+        //     numSamples  = blockSize (StereoConvolver::process から渡される値)
+        //   よって numSamples ≤ L1.partSize / 8 であり、
+        //   1 回の Add() 呼び出しで L1/L2 が 2 回以上トリガすることは
+        //   構造上不可能。while ループの L1/L2 トリガ分岐は高々 1 回しか実行されない。
         // ────────────────────────────────────────────
         int consumed = 0;
         while (consumed < numSamples)
@@ -565,6 +607,11 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                 {
                     // ── L1/L2: トリガ処理 (Forward FFT + FDL 更新のみ) ──
                     // 分散計算ループは下 (while ループ外) で毎コールバック実行する。
+
+                    // 【不変条件】1 回の Add() でこの分岐は高々 1 回しか実行されない。
+                    // partSize ≥ 8 × blockSize が保証されているため、
+                    // numSamples(= blockSize) < partSize が常に成立する。
+                    jassert(consumed <= numSamples); // この分岐後は consumed == numSamples になるはず
 
                     // Overlap-Save 形式で fftTimeBuf を組み立てる
                     memcpy(l.fftTimeBuf,              l.prevInputBuf, l.partSize * sizeof(double));

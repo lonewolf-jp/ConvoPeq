@@ -209,12 +209,36 @@ private:
             m_prev_y = 0.0;
         }
 
+        // ────────────────────────────────────────────────────────────────────
+        // 【状態変数の設計】
+        //
+        // 本クラスには 2 つの実行パスがあり、それぞれ異なる状態変数を使用する:
+        //
+        //   (A) process(data, N)  ← processOutputDouble() から呼ばれる。
+        //       m_prev_x / m_prev_y を直接読み書きする。
+        //       ブロック先頭でローカル変数 px/py に読み込み、末尾で書き戻す。
+        //
+        //   (B) loadState() + processSample() × N + saveState()
+        //                       ← processOutput() から呼ばれる。
+        //       px_local / py_local を使って毎サンプル処理する。
+        //       loadState() で m_prev_x/y → px_local/py_local へコピー (ブロック開始)。
+        //       saveState() で px_local/py_local → m_prev_x/y へ書き戻し (ブロック終了)。
+        //
+        // 2 パスは決して同時に呼ばれない (processOutput と processOutputDouble は
+        // 排他的に使用される)。px_local / py_local は processSample() 専用の
+        // "ループフュージョン用ワーキング変数" であり、m_prev_x/y の永続ストアが
+        // saveState() まで遅延されるのは意図的な設計である。
+        // ────────────────────────────────────────────────────────────────────
+
         // ループフュージョン最適化用ヘルパー
+        // 【使い方】loadState() → processSample() × N → saveState() の順で呼ぶこと。
         void loadState() noexcept {
             px_local = m_prev_x;
             py_local = m_prev_y;
         }
 
+        // ループフュージョン最適化用ヘルパー
+        // 【使い方】loadState() → processSample() × N → saveState() の順で呼ぶこと。
         void saveState() noexcept {
             m_prev_x = px_local;
             m_prev_y = py_local;
@@ -265,20 +289,16 @@ private:
                     // Load x[i..i+3]
                     __m256d vx = _mm256_load_pd(data + i);
 
-                    // Prepare x[i-1..i+2]
-                    __m256d v_prev_x;
-                    if (i == 0)
-                    {
-                        // [px, x0, x1, x2]
-                        __m256d t = _mm256_permute4x64_pd(vx, _MM_SHUFFLE(2, 1, 0, 0));
-                        __m256d vpx = _mm256_set1_pd(px);
-                        v_prev_x = _mm256_blend_pd(t, vpx, 1); // mask 1 -> take from vpx at 0
-                    }
-                    else
-                    {
-                        // Load unaligned from data + i - 1
-                        v_prev_x = _mm256_loadu_pd(data + i - 1);
-                    }
+                    // Prepare [x[i-1], x[i], x[i+1], x[i+2]] using px (= x[i-1] for all i).
+                    //
+                    // [Bug Fix] data はインプレースで書き換えられるため、i > 0 での
+                    //   _mm256_loadu_pd(data + i - 1) は data[i-1] = y[i-1] を読んでしまい、
+                    //   差分式 U = x[i] - x[i-1] が U = x[i] - y[i-1] に化ける。
+                    //   px は各反復末尾で x[i+3] に更新されるため、常に正しい x[i-1] を保持する。
+                    //   したがって permute+blend による構築を全反復で使用する。
+                    __m256d t = _mm256_permute4x64_pd(vx, _MM_SHUFFLE(2, 1, 0, 0));
+                    __m256d vpx = _mm256_set1_pd(px);
+                    __m256d v_prev_x = _mm256_blend_pd(t, vpx, 1); // [px, x[i], x[i+1], x[i+2]]
 
                     // U = x - prev_x
                     __m256d vu = _mm256_sub_pd(vx, v_prev_x);

@@ -138,7 +138,7 @@ public:
     //----------------------------------------------------------
     bool isIRLoaded() const { return convolution.load() != nullptr; }
     juce::String getIRName() const { return irName; }
-    int getIRLength() const { return irLength; }
+    int getIRLength() const { return irLength.load(std::memory_order_acquire); }
     juce::String getLastError() const { return lastError; }
     float getLoadProgress() const { return loadProgress.load(); }
     int getCurrentBufferSize() const { return currentBufferSize; }
@@ -291,7 +291,8 @@ private:
             }
         }
 
-        // Deep Copyを作成する
+        // Deep Copyを作成する。
+        // 失敗時 (MKLメモリ確保失敗等) は nullptr を返す。呼び出し元で必ずチェックすること。
         StereoConvolver* clone() const
         {
             auto newConv = new StereoConvolver();
@@ -306,7 +307,21 @@ private:
                 {
                     std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
-                    newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale);
+
+                    // [Bug Fix] 戻り値を確認する。
+                    // init() 失敗時は irData の所有権は newConv に移っているが
+                    // nucConvolvers は nullptr のまま。delete して nullptr を返す。
+                    if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale))
+                    {
+                        delete newConv;
+                        return nullptr;
+                    }
+                }
+                else
+                {
+                    // aligned_malloc 失敗
+                    delete newConv;
+                    return nullptr;
                 }
             }
             return newConv;
@@ -359,7 +374,7 @@ private:
     // IR情報
     //----------------------------------------------------------
     juce::String irName;
-    int irLength = 0;
+    std::atomic<int> irLength { 0 };  // rebuildThread(read) と Message Thread(write) 間のデータレース防止
     std::vector<float> irWaveform;
     std::vector<float> irMagnitudeSpectrum;
     double irSpectrumSampleRate = 0.0;

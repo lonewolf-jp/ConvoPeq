@@ -956,18 +956,30 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
             auto sizing = computeMasteringSizing(internalBlockSize, conv->irDataLength);
 
             // 新しいブロックサイズで初期化
-            newConv->init(irL.release(), irR.release(),
-                          conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, scale);
-
-            // 差し替え
-            convolution.store(newConv, std::memory_order_release);
-
-            if (activeConvolution)
+            // [Bug Fix] 戻り値を確認する。init() 失敗時 (MKLメモリ確保失敗等) は
+            // 壊れた newConv をアクティブにせず破棄して既存エンジンを維持する。
+            // process() の nucConvolvers ヌルチェックにより即座なクラッシュは回避
+            // できるが、無音になる点に気づきにくいため明示的にエラーログを残す。
+            if (newConv->init(irL.release(), irR.release(),
+                              conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, scale))
             {
-                const juce::ScopedLock sl(trashBinLock);
-                trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
+                // 差し替え
+                convolution.store(newConv, std::memory_order_release);
+
+                if (activeConvolution)
+                {
+                    const juce::ScopedLock sl(trashBinLock);
+                    trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
+                }
+                activeConvolution = newConv;
             }
-            activeConvolution = newConv;
+            else
+            {
+                // 初期化失敗: 既存エンジンをそのまま使用し続ける
+                DBG("ConvolverProcessor::prepareToPlay: NUC re-init failed (MKL alloc?). Keeping existing engine.");
+                newConv->release();
+                newConv = nullptr;
+            }
         }
     }
 
@@ -1387,10 +1399,10 @@ void ConvolverProcessor::cleanup()
     {
         if ((*it)->waitForThreadToExit(0))
         {
-            // スレッドは終了済み。デストラクタ (~LoaderThread) をバックグラウンドで呼ぶ
-            std::thread([l = std::move(*it)]() mutable {
-                l.reset(); // stopThread(4000) を呼ぶが、即時リターンするはず
-            }).detach();
+            // [Fix] スレッドは終了済みのため、reset() を直接呼んでブロックしない。
+            // JUCE の stopThread() は isThreadRunning() == false の場合に即リターンするため、
+            // わざわざ detached スレッドで実行する必要はない。
+            it->reset();
             it = loaderTrashBin.erase(it);
         }
         else
@@ -1737,7 +1749,7 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
         currentIrFile = other.currentIrFile;
     }
     irName = other.irName;
-    irLength = other.irLength;
+    irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
     currentIRScale = other.currentIRScale;
 
     // クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
@@ -1791,7 +1803,7 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     }
     activeConvolution = otherConv;
 
-    irLength = other.irLength;
+    irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
 }
 
 void ConvolverProcessor::refreshLatency()
@@ -2482,7 +2494,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     }
     activeConvolution = newConv;
 
-    irLength = targetLength;
+    irLength.store(targetLength, std::memory_order_release);
     currentSampleRate.store(currentSpec.sampleRate);
 
     isLoading.store(false);
