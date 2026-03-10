@@ -805,7 +805,9 @@ public:
 
             if (thread == nullptr) // Synchronous mode (Worker Thread)
             {
-                result.newConv = new StereoConvolver();
+                void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
+                new (mem) StereoConvolver();
+                result.newConv = static_cast<StereoConvolver*>(mem);
                 result.newConv->addRef();
 
                 if (result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency,
@@ -948,6 +950,18 @@ ConvolverProcessor::~ConvolverProcessor()
 
 void ConvolverProcessor::timerCallback()
 {
+    // IR切り替え時のクロスフェードが完了したら、古いコンボルバーを安全に破棄する
+    if (!wetCrossfade.isSmoothing())
+    {
+        auto* doneFading = fadingOutConvolution.exchange(nullptr);
+        if (doneFading != nullptr)
+        {
+            const juce::ScopedLock sl(trashBinLock);
+            // 参照カウントを解放するために release() を呼ぶ
+            trashBin.push_back({doneFading, juce::Time::getMillisecondCounter()});
+        }
+    }
+
     cleanup();
 }
 
@@ -986,45 +1000,47 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         // MKL NUC に正しい knownBlockSize を渡すために、エンジンを再構築する。
         // 既存のエンジンは他スレッドで共有されている可能性があるため、複製して差し替える。
         const int internalBlockSize = juce::nextPowerOfTwo(samplesPerBlock);
-        const double scale = conv->storedScale;
 
         if ((rateChanged || blockChanged) && conv->irDataLength > 0)
         {
-            auto newConv = new StereoConvolver();
-            newConv->addRef();
-
-            // バッファ確保とコピー
-            convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
-            convo::ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
-            std::memcpy(irL.get(), conv->irData[0], conv->irDataLength * sizeof(double));
-            std::memcpy(irR.get(), conv->irData[1], conv->irDataLength * sizeof(double));
-
-            auto sizing = computeMasteringSizing(internalBlockSize, conv->irDataLength);
-
-            // 新しいブロックサイズで初期化
-            // [Bug Fix] 戻り値を確認する。init() 失敗時 (MKLメモリ確保失敗等) は
-            // 壊れた newConv をアクティブにせず破棄して既存エンジンを維持する。
-            // process() の nucConvolvers ヌルチェックにより即座なクラッシュは回避
-            // できるが、無音になる点に気づきにくいため明示的にエラーログを残す。
-            if (newConv->init(irL.release(), irR.release(),
-                              conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, scale))
+            // clone() は古いパラメータで複製するため、ここでは使えない。
+            // 新しい sampleRate/blockSize で再初期化する必要があるため、
+            // MKL規約に準拠した方法で手動で構築する。
+            try
             {
-                // 差し替え
-                convolution.store(newConv, std::memory_order_release);
+                void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
+                new (mem) StereoConvolver();
+                auto* newConv = static_cast<StereoConvolver*>(mem);
+                newConv->addRef();
 
-                if (activeConvolution)
+                convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
+                convo::ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
+                std::memcpy(irL.get(), conv->irData[0], conv->irDataLength * sizeof(double));
+                std::memcpy(irR.get(), conv->irData[1], conv->irDataLength * sizeof(double));
+
+                auto sizing = computeMasteringSizing(internalBlockSize, conv->irDataLength);
+
+                if (newConv->init(irL.release(), irR.release(),
+                                  conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, conv->storedScale))
                 {
-                    const juce::ScopedLock sl(trashBinLock);
-                    trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
+                    convolution.store(newConv, std::memory_order_release);
+
+                    if (activeConvolution)
+                    {
+                        const juce::ScopedLock sl(trashBinLock);
+                        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
+                    }
+                    activeConvolution = newConv;
                 }
-                activeConvolution = newConv;
+                else
+                {
+                    DBG("ConvolverProcessor::prepareToPlay: NUC re-init failed (MKL alloc?). Keeping existing engine.");
+                    newConv->release();
+                }
             }
-            else
+            catch (const std::bad_alloc&)
             {
-                // 初期化失敗: 既存エンジンをそのまま使用し続ける
-                DBG("ConvolverProcessor::prepareToPlay: NUC re-init failed (MKL alloc?). Keeping existing engine.");
-                newConv->release();
-                newConv = nullptr;
+                DBG("ConvolverProcessor::prepareToPlay: NUC re-init failed (std::bad_alloc). Keeping existing engine.");
             }
         }
     }
@@ -1071,6 +1087,25 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     double* oldDryChs[2] = { oldDryBufferStorage[0].get(), oldDryBufferStorage[1].get() };
     oldDryBuffer.setDataToReferTo(oldDryChs, 2, MAX_BLOCK_SIZE);
     oldDryBuffer.clear();
+
+    if (oldWetBufferCapacity < MAX_BLOCK_SIZE)
+    {
+        oldWetBufferStorage[0].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        oldWetBufferStorage[1].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        oldWetBufferCapacity = MAX_BLOCK_SIZE;
+    }
+    double* oldWetChs[2] = { oldWetBufferStorage[0].get(), oldWetBufferStorage[1].get() };
+    oldWetBuffer.setDataToReferTo(oldWetChs, 2, MAX_BLOCK_SIZE);
+    oldWetBuffer.clear();
+
+    if (crossfadeRampBufferCapacity < MAX_BLOCK_SIZE)
+    {
+        crossfadeRampBuffer.reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        crossfadeRampBufferCapacity = MAX_BLOCK_SIZE;
+    }
+
+    wetCrossfade.reset(sampleRate, 0.02); // 20ms crossfade
+    wetCrossfade.setCurrentAndTargetValue(1.0);
 
     // Wetバッファ確保
     if (wetBufferCapacity < MAX_BLOCK_SIZE)
@@ -1134,6 +1169,13 @@ void ConvolverProcessor::releaseResources()
     oldDryBufferStorage[1].reset();
     oldDryBufferCapacity = 0;
 
+    oldWetBufferStorage[0].reset();
+    oldWetBufferStorage[1].reset();
+    oldWetBufferCapacity = 0;
+
+    crossfadeRampBuffer.reset();
+    crossfadeRampBufferCapacity = 0;
+
     smoothingBufferStorage[0].reset();
     smoothingBufferStorage[1].reset();
     smoothingBufferCapacity = 0;
@@ -1153,6 +1195,8 @@ void ConvolverProcessor::releaseResources()
     // Release active convolution engine
     convolution.store(nullptr, std::memory_order_release);
     if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
+    auto* fading = fadingOutConvolution.exchange(nullptr);
+    if (fading) fading->release();
 
     {
         const juce::ScopedLock sl(trashBinLock);
@@ -1915,6 +1959,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // ── Step 1: RCU State Load (Lock-free / Wait-free) ──
     // Raw pointer load (No ref counting)
     auto* conv = convolution.load(std::memory_order_acquire);
+    auto* oldConv = fadingOutConvolution.load(std::memory_order_acquire);
 
     // ── Step 2: 処理実行可能かチェック ──
     // バイパス、未準備、IR未ロードの場合はスルー
@@ -1970,6 +2015,16 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // Smoothing Timeの更新
     const double newSmoothingTime = smoothingTimeSec.load(std::memory_order_relaxed);
     if (std::abs(currentSmoothingTimeSec - newSmoothingTime) > 0.0001)
+
+
+
+
+
+
+
+
+
+
     {
         // reset()を呼ぶと現在値がリセットされる可能性があるため、
         // 現在値とターゲット値を保持したままランプ時間のみ更新する手順を踏む
@@ -1988,6 +2043,15 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     const bool needsConvolution = isSmoothing || targetMixValue > 0.001;
     const bool needsDrySignal   = isSmoothing || targetMixValue < 0.999;
 
+    const bool isCrossfading = (oldConv != nullptr && wetCrossfade.isSmoothing());
+
+    // クロスフェード中の場合、ゲインランプを事前に計算
+    if (isCrossfading)
+    {
+        double* ramp = crossfadeRampBuffer.get();
+        for (int i = 0; i < numSamples; ++i)
+            ramp[i] = wetCrossfade.getNextValue();
+    }
     // ── Step 5: Dry信号生成 ──
     // DelayLineの内部状態（履歴）を維持するため、Dry信号が不要な場合(100% Wet)でも常に処理を実行する。
     // これにより、Mixパラメータ変更時に過去のDry信号が正しく再生されるようにする。
@@ -2260,6 +2324,20 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
             conv->process(ch, input, wetOut, chunkSamples);
 
+            // クロスフェード処理
+            if (isCrossfading)
+            {
+                double* oldWetOut = oldWetBuffer.getWritePointer(ch, processed);
+                oldConv->process(ch, input, oldWetOut, chunkSamples);
+
+                const double* fadeInRamp = crossfadeRampBuffer.get() + processed;
+                for (int i = 0; i < chunkSamples; ++i)
+                {
+                    const double fade = fadeInRamp[i];
+                    wetOut[i] = wetOut[i] * fade + oldWetOut[i] * (1.0 - fade);
+                }
+            }
+
             // Note: StereoConvolver::process guarantees output is written to wetOut
             const double* wetSignal = wetOut;
             int validWetSamples = chunkSamples; // Assumed valid after process
@@ -2428,20 +2506,28 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                                                           std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
                                                           std::shared_ptr<juce::AudioBuffer<double>> displayIR)
 {
-    // ここはMessage Thread上で実行されるためMKL規約を完全に遵守
-    auto* newConv = new StereoConvolver();
-    newConv->addRef();
+    // ここはMessage Thread上で実行されるためMKL規約を完全に遵守する
+    // メモリ確保失敗に備えて try-catch を使用する
+    try
+    {
+        void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
+        new (mem) StereoConvolver();
+        auto* newConv = static_cast<StereoConvolver*>(mem);
+        newConv->addRef();
 
-    if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
-                      maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor))
-    {
-        // 元の applyNewState と同一の流れで適用
-        applyNewState(newConv, loadedIR, sr, length, isRebuild, irFile, scaleFactor, displayIR);
+        if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
+                          maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor))
+        {
+            applyNewState(newConv, loadedIR, sr, length, isRebuild, irFile, scaleFactor, displayIR);
+        }
+        else
+        {
+            newConv->release();
+            handleLoadError("Failed to initialize NUC engine (Memory allocation or MKL setup failed).");
+        }
     }
-    else
+    catch (const std::bad_alloc&)
     {
-        // 初期化失敗時はオブジェクトを破棄し、エラーハンドリングへ
-        newConv->release();
         handleLoadError("Failed to initialize NUC engine (Memory allocation or MKL setup failed).");
     }
 }
@@ -2475,16 +2561,25 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
         createFrequencyResponseSnapshot(*displayIR, loadedSR);
     }
 
-    // 安全に差し替え (Atomic Swap)
+    auto* convToFadeOut = activeConvolution;
+    activeConvolution = newConv;
+
+    // Audio Threadが新しいコンボルバーを参照するようにアトミックに更新
     convolution.store(newConv, std::memory_order_release);
 
-    if (activeConvolution)
+    // 古いコンボルバーがあれば、フェードアウトを開始する
+    if (convToFadeOut != nullptr)
     {
-        DBG("ConvolverProcessor: Enqueueing old StereoConvolver to trash bin.");
-        const juce::ScopedLock sl(trashBinLock);
-        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
+        // 既に別のクロスフェードが進行中だった場合、その古いエンジンは即座に破棄リストへ
+        auto* interruptedFade = fadingOutConvolution.exchange(convToFadeOut);
+        if (interruptedFade != nullptr)
+        {
+            const juce::ScopedLock sl(trashBinLock);
+            trashBin.push_back({interruptedFade, juce::Time::getMillisecondCounter()});
+        }
+        wetCrossfade.setCurrentAndTargetValue(0.0);
+        wetCrossfade.setTargetValue(1.0);
     }
-    activeConvolution = newConv;
 
     irLength.store(targetLength, std::memory_order_release);
     currentSampleRate.store(currentSpec.sampleRate);

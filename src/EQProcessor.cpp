@@ -801,7 +801,14 @@ namespace
             ic1eq = 2.0 * v1 - ic1eq;
             ic2eq = 2.0 * v2 - ic2eq;
 
-            data[n] = m0 * v0 + m1 * v1 + m2 * v2;
+            double output = m0 * v0 + m1 * v1 + m2 * v2;
+
+            // NaN/Infチェックとクランプを追加 (processBandStereoと一貫性を保つ)
+            if (!std::isfinite(output))
+                output = 0.0;
+
+            // 出力もクランプして発散を防ぐ
+            data[n] = std::clamp(output, -100.0, 100.0);
 
             // 状態変数が Inf/NaN に発散した場合は即座にリセットして次サンプルへの伝播を遮断する。
             // FTZ/DAZ 有効下でも Inf は flush されないため、この防衛は省略できない。

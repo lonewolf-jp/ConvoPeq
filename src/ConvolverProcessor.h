@@ -203,6 +203,9 @@ private:
     void timerCallback() override;
     struct StereoConvolver;
     class LoaderThread;
+    // クロスフェード用の新しいメンバー
+    std::atomic<StereoConvolver*> fadingOutConvolution { nullptr };
+
     void applyNewState(StereoConvolver* newConv, std::shared_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::shared_ptr<juce::AudioBuffer<double>> displayIR);
     void handleLoadError(const juce::String& error);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
@@ -239,7 +242,14 @@ private:
         // Intrusive Reference Counting
         mutable std::atomic<int> refCount { 0 };
         void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }
-        void release() const { if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this; }
+        void release() const
+        {
+            if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            {
+                this->~StereoConvolver();
+                convo::aligned_free(const_cast<StereoConvolver*>(this));
+            }
+        }
 
         // コピーコンストラクタは禁止 (NUCエンジンは複製コストが高く、状態を持つため)
         StereoConvolver(const StereoConvolver& other) = delete;
@@ -266,6 +276,7 @@ private:
             storedFirstPartition = firstPartition;
             storedScale = scale;
 
+            try
             {
                 // ── MKL Non-Uniform Partitioned Convolution (NUC) ──
                 // new完全禁止 → aligned_malloc + placement new (規約準拠)
@@ -284,47 +295,49 @@ private:
                     DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
                     return true;
                 }
-                // NUC セットアップ失敗
-                nucConvolvers[0].reset();
-                nucConvolvers[1].reset();
-                return false;
             }
+            catch (const std::bad_alloc&)
+            {
+                // Fall through to cleanup on memory allocation failure
+            }
+
+            // NUC セットアップ失敗 or メモリ確保失敗
+            nucConvolvers[0].reset();
+            nucConvolvers[1].reset();
+            return false;
         }
 
         // Deep Copyを作成する。
         // 失敗時 (MKLメモリ確保失敗等) は nullptr を返す。呼び出し元で必ずチェックすること。
         StereoConvolver* clone() const
         {
-            auto newConv = new StereoConvolver();
-            if (irDataLength > 0 && irData[0] && irData[1])
+            // convo::ScopedAlignedPtr を使用して、例外安全性を確保しつつ、
+            // MKLアライメント規約 (mkl_malloc) を遵守する。
+            convo::ScopedAlignedPtr<StereoConvolver> newConv;
+            try
             {
-                // メモリを新規確保してコピー (RAIIによる例外安全性確保)
-                // init() に所有権を渡すまでは unique_ptr で管理し、途中で例外が発生してもリークしないようにする
-                convo::ScopedAlignedPtr<double> l(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
-                convo::ScopedAlignedPtr<double> r(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
+                void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
+                new (mem) StereoConvolver();
+                newConv.reset(static_cast<StereoConvolver*>(mem));
 
-                if (l && r)
+                if (irDataLength > 0 && irData[0] && irData[1])
                 {
+                    convo::ScopedAlignedPtr<double> l(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
+                    convo::ScopedAlignedPtr<double> r(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
+
                     std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
 
-                    // [Bug Fix] 戻り値を確認する。
-                    // init() 失敗時は irData の所有権は newConv に移っているが
-                    // nucConvolvers は nullptr のまま。delete して nullptr を返す。
                     if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale))
-                    {
-                        delete newConv;
-                        return nullptr;
-                    }
+                        return nullptr; // init失敗時、newConvのデストラクタが呼ばれ安全にクリーンアップされる
                 }
-                else
-                {
-                    // aligned_malloc 失敗
-                    delete newConv;
-                    return nullptr;
-                }
+                return newConv.release();
             }
-            return newConv;
+            catch (const std::bad_alloc&)
+            {
+                // メモリ確保失敗時、ScopedAlignedPtrが自動でクリーンアップする
+                return nullptr;
+            }
         }
 
         void reset();
@@ -366,6 +379,7 @@ private:
     std::atomic<bool> bypassed{false};
     std::atomic<float> mixTarget{1.0f}; // UIからのターゲット値 (0.0-1.0)
     juce::SmoothedValue<double> mixSmoother; // オーディオスレッドでの平滑化用
+    juce::LinearSmoothedValue<double> wetCrossfade; // Wet信号のクロスフェード用
     std::atomic<bool> useMinPhase{false};
     std::atomic<float> targetIRLengthSec{IR_LENGTH_DEFAULT_SEC};
     std::atomic<float> smoothingTimeSec{SMOOTHING_TIME_DEFAULT_SEC};
@@ -410,6 +424,12 @@ private:
     convo::ScopedAlignedPtr<double> oldDryBufferStorage[2];
     int oldDryBufferCapacity = 0;
 
+    // Wet信号クロスフェード用バッファ
+    juce::AudioBuffer<double> oldWetBuffer;
+    convo::ScopedAlignedPtr<double> oldWetBufferStorage[2];
+    int oldWetBufferCapacity = 0;
+    convo::ScopedAlignedPtr<double> crossfadeRampBuffer;
+    int crossfadeRampBufferCapacity = 0;
     // Wet信号用一時バッファ (StereoConvolver::process用)
     convo::ScopedAlignedPtr<double> wetBufferStorage[2];
     int wetBufferCapacity = 0;

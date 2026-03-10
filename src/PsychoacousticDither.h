@@ -301,7 +301,11 @@ private:
         {
             // Refill buffer
             // VSL_RNG_METHOD_UNIFORM_STD: Standard method (accurate)
-            vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[channel], RND_BUFFER_SIZE, rndBuffer[channel], 0.0, 1.0);
+            if (vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[channel], RND_BUFFER_SIZE, rndBuffer[channel], 0.0, 1.0) != VSL_STATUS_OK)
+            {
+                // MKLエラー時はディザを無効化（ゼロで埋める）して安全に継続
+                std::fill_n(rndBuffer[channel], RND_BUFFER_SIZE, 0.5); // 0.5 for uniform [0,1] to produce 0 TPDF
+            }
             rndIndex[channel] = 0;
         }
         return rndBuffer[channel][rndIndex[channel]++];
