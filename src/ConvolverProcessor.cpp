@@ -172,9 +172,9 @@ static double calculate_post_alpha(int n_taps)
     return std::max(0.05, std::min(0.25, alpha));
 }
 
-static void applyAsymmetricTukey(double* data, int numSamples)
+static bool applyAsymmetricTukey(double* data, int numSamples)
 {
-    if (numSamples <= 0) return;
+    if (numSamples <= 0) return true; // no-op: エラーではない
 
     // 1. ピーク位置の検出
     auto* start = data;
@@ -190,7 +190,7 @@ static void applyAsymmetricTukey(double* data, int numSamples)
     const double pi = juce::MathConstants<double>::pi;
 
     convo::ScopedAlignedPtr<double> window_vals(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(numSamples) * sizeof(double), 64)));
-    if (!window_vals) return;
+    if (!window_vals) return false; // メモリ確保失敗: 呼び出し元に伝播
 
     // ── 3. 窓関数バッファを 1.0 で初期化 ──
     std::fill_n(window_vals.get(), numSamples, 1.0);
@@ -202,7 +202,7 @@ static void applyAsymmetricTukey(double* data, int numSamples)
         if (pre_taper_len > 0)
         {
             convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(pre_taper_len) * sizeof(double), 64)));
-            if (!cos_args) return;
+            if (!cos_args) return false; // メモリ確保失敗: 呼び出し元に伝播
 
             // ── cos引数計算: cos_args[i] = scale * i + offset ──
             // [Bug A fix] vdLinearFrac(n, nullptr, nullptr, scale≠0, ...) は
@@ -231,7 +231,7 @@ static void applyAsymmetricTukey(double* data, int numSamples)
         if (post_taper_len > 0)
         {
             convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(post_taper_len) * sizeof(double), 64)));
-            if (!cos_args) return;
+            if (!cos_args) return false; // メモリ確保失敗: 呼び出し元に伝播
             double* post_window_vals = window_vals.get() + post_taper_start_idx;
 
             const double scale = (pi / alpha_post) / dist_to_end;
@@ -248,6 +248,7 @@ static void applyAsymmetricTukey(double* data, int numSamples)
 
     // Apply window
     vdMul(numSamples, data, window_vals.get(), data);
+    return true;
 }
 
 // 2の累乗へ切り上げ (Helper)
@@ -665,7 +666,15 @@ public:
                 const int numSamples = result.loadedIR.getNumSamples();
                 for (int ch = 0; ch < result.loadedIR.getNumChannels(); ++ch)
                 {
-                    applyAsymmetricTukey(result.loadedIR.getWritePointer(ch), numSamples);
+                    // [Bug D fix] メモリ確保失敗時はエラーを伝播してロードを中断する。
+                    // 旧実装はエラーを無視してウィンドウ未適用のIRのままリターンしていたため、
+                    // IR末端の不連続点がクリックノイズを引き起こす可能性があった。
+                    if (!applyAsymmetricTukey(result.loadedIR.getWritePointer(ch), numSamples))
+                    {
+                        result.errorMessage = "Failed to allocate Tukey window buffer (Out of Memory).";
+                        DBG("LoaderThread: " << result.errorMessage);
+                        return result;
+                    }
                 }
             }
 
@@ -1970,6 +1979,21 @@ void ConvolverProcessor::refreshLatency()
 //--------------------------------------------------------------
 void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
+    // ── デノーマル対策 ──
+    // Audio Threadは専用スレッドだが、JUCEの内部実装はgetNextAudioBlock()呼び出し前に
+    // FTZ/DAZを保証しない。ScopedNoDenormalsでMXCSRのFTZ/DAZビットを関数スコープで保護する。
+    juce::ScopedNoDenormals noDenormals;
+    // MKL VMLのデノーマル設定 (thread_localによりスレッドごとに1回のみ呼び出し)
+    // vmlSetModeはスレッド局所設定。メモリ確保なし・ロックなし・wait-free。
+    {
+        thread_local bool vmlDenormalInitialized = false;
+        if (!vmlDenormalInitialized)
+        {
+            vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
+            vmlDenormalInitialized = true;
+        }
+    }
+
     // ── Step 1: RCU State Load (Lock-free / Wait-free) ──
     // Raw pointer load (No ref counting)
     auto* conv = convolution.load(std::memory_order_acquire);

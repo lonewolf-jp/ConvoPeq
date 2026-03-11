@@ -73,6 +73,8 @@ public:
     // リングバッファのラップアラウンドをビットマスクで高速化するため、2の累乗サイズを使用
     static constexpr int DELAY_BUFFER_SIZE = 4194304; // 2^22 (approx 4M samples > MAX_TOTAL_DELAY)
     static constexpr int DELAY_BUFFER_MASK = DELAY_BUFFER_SIZE - 1;
+    static_assert((DELAY_BUFFER_SIZE & (DELAY_BUFFER_SIZE - 1)) == 0,
+                  "DELAY_BUFFER_SIZE must be a power of 2 for bitmask optimization");
     static constexpr double CONVOLUTION_HEADROOM_GAIN = 1.0; // 0.0 dB (Unity Gain - Headroom is baked into IR)
 
     ConvolverProcessor();
