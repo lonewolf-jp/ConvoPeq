@@ -122,18 +122,14 @@ public:
 
     void prepare(double sampleRate, int bitDepth = DEFAULT_BIT_DEPTH) noexcept
     {
-        if (bitDepth > 0)
-        {
-            // Nビット符号付きPCMの量子化ステップは 2 / 2^N = 1 / 2^(N-1)
-            scale = 1.0 / std::pow(2.0, bitDepth - 1);
-            invScale = std::pow(2.0, bitDepth - 1);
-        }
-        else
-        {
-            // Default 24-bit (2^23 for signed PCM)
-            scale = 1.0 / 8388608.0;
-            invScale = 8388608.0;
-        }
+        // bitDepth <= 0 の場合はディザリングが無効化されるため、スケール計算は不要。
+        // AudioEngine::DSPCore::processOutput() の applyDither フラグで処理がスキップされる。
+        if (bitDepth <= 0)
+            return;
+
+        // Nビット符号付きPCMの量子化ステップは 2 / 2^N = 1 / 2^(N-1)
+        scale = 1.0 / std::pow(2.0, bitDepth - 1);
+        invScale = std::pow(2.0, bitDepth - 1);
 
         // 5次 Noise Shaper 係数設定 (Lipshitz / Wannamaker系最適化)
         //

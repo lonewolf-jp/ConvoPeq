@@ -288,32 +288,42 @@ void DeviceSettings::updateBitDepthList()
     supportedBitDepths.add(32);
 
     // 現在開いているデバイスがあれば、その実際のビット深度を追加（重複除去）
+    // Note: JUCEには利用可能なビット深度一覧を取得する標準的な方法はないため、
+    //       一般的な値をリストアップし、現在の設定値を追加する。
     if (auto* device = audioDeviceManager.getCurrentAudioDevice())
     {
-        // getAvailableBitDepths()は存在しないので、getCurrentBitDepth()を使う
         int current = device->getCurrentBitDepth();
         if (current > 0 && !supportedBitDepths.contains(current))
             supportedBitDepths.add(current);
     }
 
     supportedBitDepths.sort();
+
     // UI更新
     bitDepthComboBox.clear();
     int maxBitDepth = 0;
 
     for (int depth : supportedBitDepths)
     {
-        bitDepthComboBox.addItem(juce::String(depth) + "-bit", depth); // ID = depth
+        bitDepthComboBox.addItem(juce::String(depth) + " bit", depth); // ID = depth
         if (depth > maxBitDepth)
             maxBitDepth = depth;
     }
+
+    // "Off" オプションを追加
+    bitDepthComboBox.addSeparator();
+    bitDepthComboBox.addItem("Off", 999);
 
     // 選択状態の決定
     // 1. 現在のエンジンの設定が有効ならそれを維持
     // 2. 未設定(0)または無効なら、最大ビット深度を選択 (デフォルト)
     int currentEngineDepth = audioEngine.getDitherBitDepth();
 
-    if (supportedBitDepths.contains(currentEngineDepth))
+    if (currentEngineDepth == 0)
+    {
+        bitDepthComboBox.setSelectedId(999, juce::dontSendNotification);
+    }
+    else if (supportedBitDepths.contains(currentEngineDepth))
     {
         bitDepthComboBox.setSelectedId(currentEngineDepth, juce::dontSendNotification);
     }
@@ -325,6 +335,11 @@ void DeviceSettings::updateBitDepthList()
             bitDepthComboBox.setSelectedId(maxBitDepth, juce::dontSendNotification);
             // エンジンも更新
             audioEngine.setDitherBitDepth(maxBitDepth);
+        }
+        else // フォールバック
+        {
+            bitDepthComboBox.setSelectedId(999, juce::dontSendNotification);
+            audioEngine.setDitherBitDepth(0);
         }
     }
 }
