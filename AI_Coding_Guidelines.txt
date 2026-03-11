@@ -1,0 +1,22 @@
+<Coding Guidelines>
+This program uses JUCE framework V8.0.12 https://github.com/juce-framework/JUCE/tree/8.0.12.
+Information about the JUCE framework can be found at https://docs.juce.com/master/index.html.
+When using JUCE Framework functions, be sure to confirm that the function is available in the latest JUCE version at the above URL.
+It is important to fully understand the API specifications of JUCE framework V8.0.12, especially the meaning of return values, side effects, thread safety, and prerequisites, before coding.
+This program uses r8brain-free-src https://github.com/avaneev/r8brain-free-src.git.
+This program uses INTEL oneAPI MKL (one MKL) https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html.
+Information about INTEL oneAPI MKL (one MKL) can be found at https://www.intel.com/content/www/us/en/docs/onemkl/developer-guide-windows/2025-2/overview.html.
+Information about the Windows SDK can be found at https://learn.microsoft.com/ja-jp/windows/apps/windows-sdk/.
+Please note that the sample code on the official JUCE framework GitHub site is primarily VST3 and is not a standalone app like this one.
+Do not implement excessive stabilization mechanisms that are not included in the sample code on the official JUCE framework GitHub site.
+Never edit files in the JUCE folder or the r8brain-free-src folder in the project root.
+Never use structured exception handling (SEH).
+Within the audio thread (the thread where getNextAudioBlock() is called), you should never perform operations that have even a 1% chance of waiting (memory allocation (new / malloc / vector::resize / mkl_malloc / mkl_free / _aligned_malloc / vslNewStream), try-catch, DftiCommitDescriptor, mkl_set_interface_layer, IR reload, mutex lock, critical section, condition_variable, file I/O, console output, std::exp(), functions that result in libm calls, MMCSS settings, accessing MessageManager, or using std::shared_ptr).
+Within the audio thread (the thread where getNextAudioBlock() is called), you should never use AudioBlock::allocate, AudioBlock::copyFrom, or FFT::performFrequencyOnlyForwardTransform (without prior allocation).
+Outside the audio thread (the thread where getNextAudioBlock() is called), and when using INTEL oneAPI MKL (one MKL), do not use new, std::vector, or std::make_unique. Instead, use mkl_malloc / mkl_free, _aligned_malloc(64), or std::pmr + a custom allocator.
+All data processing other than external input and output should be done in 64-bit double. However, float is acceptable for spectrum analyzer calculations.
+When using INTEL oneAPI MKL (one MKL), memory should be 64-byte aligned, and if memory allocation is required, call it only from message threads such as prepareToPlay(), not the audio thread.
+Take proper measures to prevent denormals. The FTZ/DAZ flags are only valid within the thread where they are set, so as a general rule, they should be set at the start of any thread that requires denormal protection.
+Be careful not to omit any destructors.
+Be careful to release memory to avoid memory leaks.
+ use context7
