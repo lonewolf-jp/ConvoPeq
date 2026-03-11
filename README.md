@@ -1,10 +1,10 @@
-# ConvoPeq v0.3.5
+# ConvoPeq v0.4.2
 
 High-Fidelity Convolution Reverb & Parametric EQ Application for Windows 11
 
 ## Overview
 
-ConvoPeq is a standalone audio processing application designed for mastering and high-end audio playback. It integrates a zero-latency convolution engine and a high-precision 20-band parametric equalizer into a 64-bit double-precision audio pipeline.
+ConvoPeq is a standalone audio processing application for Windows, designed for mastering and high-fidelity audio playback. It integrates a low-latency convolution engine and a high-precision 20-band parametric equalizer into a robust 64-bit double-precision audio pipeline.
 
 Designed specifically for **Windows 11 x64**, it leverages **AVX2** instructions and **Intel oneAPI MKL** to deliver maximum performance and audio quality.
 
@@ -12,7 +12,7 @@ Designed specifically for **Windows 11 x64**, it leverages **AVX2** instructions
 
 ### 🎛️ 20-Band Parametric Equalizer
 
-* **Algorithms**: TPT (Topology-Preserving Transform) State Variable Filters (SVF) for analog-matched curves without cramping at Nyquist.
+* **Algorithm**: Employs a **Topology-Preserving Transform (TPT) State Variable Filter (SVF)**, ensuring analog-matched curves without high-frequency cramping and superior stability during rapid parameter modulation.
 * **Filter Types**: Low Shelf, Peaking, High Shelf, Low Pass, High Pass.
 * **Channel Modes**: Stereo, Left-only, Right-only processing per band.
 * **Auto Gain Control (AGC)**: Automatically matches output loudness to input.
@@ -21,26 +21,26 @@ Designed specifically for **Windows 11 x64**, it leverages **AVX2** instructions
 
 ### 🔊 Convolution Engine
 
-* **Engine**: Custom **Intel MKL Non-Uniform Partitioned Convolution (NUC)** engine.
-* **Latency**: Zero-latency processing (suitable for real-time monitoring).
+* **Engine**: A custom **low-latency, non-uniform partitioned convolution (NUC)** engine built on Intel MKL, designed for both efficiency and real-time performance.
+* **Latency**: Low-latency processing suitable for real-time monitoring, achieved through a multi-layer partitioning scheme.
 * **IR Support**: WAV, AIFF, FLAC formats.
 * **Processing**:
   * **Phase Modes**: Switchable between Linear Phase and Minimum Phase.
-  * **Auto-makeup gain**: Automatic energy normalization.
+  * **Auto Makeup Gain**: Automatic energy normalization for consistent loudness.
   * **Resampling**: High-quality resampling using **r8brain-free-src**.
   * **Adjustable**: Mix, Smoothing Time, and Target IR Length.
 
 ### 🚀 High-Fidelity Audio Pipeline
 
-* **Precision**: Full **64-bit double-precision** signal path.
+* **Precision**: A full **64-bit double-precision** internal signal path for maximum audio fidelity.
 * **Oversampling**: Up to **8x** oversampling with selectable filters:
   * **Linear Phase**: Perfect phase response.
   * **IIR-Like**: Low latency "Intermediate" phase.
-* **Dithering**: **Psychoacoustic Dither** with 5th-order Noise Shaping (MKL VSL based).
-* **DC Blocking**: High-precision DC removal at input and output stages (UltraHighRateDCBlocker).
-* **Soft Clipper**: "Musical" soft clipper with adjustable saturation to prevent digital overs.
-* **Headroom**: Automatic -0.1dB input headroom to prevent inter-sample peaks.
-* **Mono-to-Stereo**: Automatic expansion of mono inputs to stereo processing.
+* **Dithering**: **Psychoacoustic Dither** with **9th-order** Noise Shaping (MKL VSL based) for transparent quantization.
+* **DC Blocking**: High-precision DC removal at input and output stages.
+* **Soft Clipper**: A "musical" soft clipper with adjustable saturation to prevent digital overs, processed at the oversampled rate to reduce aliasing.
+* **Headroom**: Configurable input headroom (default -6.0 dB) and a fixed -0.1 dB output headroom to prevent inter-sample peaks and clipping.
+* **Mono-to-Stereo**: Automatic expansion of mono inputs for full stereo processing.
 * **Seamless Switching**: Cross-fading on parameter changes to prevent clicks.
 * **Asynchronous Architecture**: Heavy tasks (IR loading, resampling) are offloaded to background threads to ensure glitch-free audio.
 * **Windows Optimization**: Automatic process priority elevation, Efficiency Mode (EcoQoS) disablement, and timer resolution adjustment.
@@ -49,7 +49,7 @@ Designed specifically for **Windows 11 x64**, it leverages **AVX2** instructions
 ### 📊 Visualization & Tools
 
 * **Spectrum Analyzer**: Real-time FFT analyzer (60fps) with peak hold.
-  * Switchable Input / Output source monitoring.
+  * Switchable Input/Output source monitoring.
   * Toggleable to save CPU resources.
 * **Device Management**: ASIO/WASAPI support with an **ASIO Blacklist** feature to exclude unstable drivers (e.g., single-client drivers).
 * **CPU Monitor**: Real-time CPU usage display.
@@ -57,15 +57,15 @@ Designed specifically for **Windows 11 x64**, it leverages **AVX2** instructions
 ## System Requirements
 
 * **OS**: Windows 11 x64 (Strictly required).
-* **CPU**: Intel/AMD processor with **AVX2** instruction set support (Haswell/Zen or later).
+* **CPU**: Intel/AMD processor with **AVX2** instruction set support (Intel Haswell / AMD Zen or later).
 * **Audio Interface**: ASIO compatible device recommended for low latency.
 
 ## Build Instructions
 
 ### Prerequisites
 
-1. **Visual Studio 2022** (v17.11 or later) with C++ Desktop Development workload.
-2. **CMake** 3.22 or later.
+1. **Visual Studio 2022** (v17.11 or later) with the "Desktop development with C++" workload.
+2. **CMake** (v3.22 or later).
 3. **Intel oneAPI Base Toolkit** (specifically Intel MKL).
 4. **JUCE Framework** v8.0.12.
 
@@ -82,7 +82,7 @@ ConvoPeq/
 
 ### Building
 
-Use the provided helper script `build.bat` which automatically sets up the environment (including Intel MKL variables).
+Use the provided helper script `build.bat`, which automatically sets up the environment (including Intel MKL variables).
 
 ```cmd
 :: Build Release version (Recommended)
