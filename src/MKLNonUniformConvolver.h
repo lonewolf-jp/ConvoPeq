@@ -142,7 +142,8 @@ private:
         double* fdlBuf        = nullptr;  // mkl_malloc(...)
 
         // ── 重複保存バッファ (Overlap-Save 用, L0 専用) ──
-        double* overlapBuf    = nullptr;  // mkl_malloc(partSize * sizeof(double), 64)
+        // [Bug F fix] overlapBuf は確保・解放されるのみで処理コードから一切参照されない dead memory。
+        // Overlap-Save の重複領域は prevInputBuf と fftTimeBuf 前半で実装されている。削除。
 
         // ── 作業バッファ (Audio Thread, FFT 入力/出力/複素積算) ──
         double* fftTimeBuf    = nullptr;  // mkl_malloc(fftSize * sizeof(double), 64)  前半=prev, 後半=cur

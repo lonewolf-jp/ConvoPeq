@@ -380,6 +380,9 @@ private:
     std::atomic<float> mixTarget{1.0f}; // UIからのターゲット値 (0.0-1.0)
     juce::SmoothedValue<double> mixSmoother; // オーディオスレッドでの平滑化用
     juce::LinearSmoothedValue<double> wetCrossfade; // Wet信号のクロスフェード用
+    // [Bug G fix] wetCrossfade.isSmoothing() は非スレッドセーフ (Audio Thread が getNextValue() を同時呼び出し)。
+    // このフラグを代替として使う: Message Thread が store(), Audio Thread が完了時に clear()。
+    std::atomic<bool> wetCrossfadeActive { false };
     std::atomic<bool> useMinPhase{false};
     std::atomic<float> targetIRLengthSec{IR_LENGTH_DEFAULT_SEC};
     std::atomic<float> smoothingTimeSec{SMOOTHING_TIME_DEFAULT_SEC};
@@ -398,7 +401,9 @@ private:
     juce::File currentIrFile;
     juce::CriticalSection irFileLock;
     std::atomic<bool> currentIrOptimized { false };
-    std::shared_ptr<juce::AudioBuffer<double>> originalIR; // 元IR保持 (リサンプリング/トリミング用)
+    // [Bug E fix] Message Thread (applyNewState) と rebuildThread (rebuildAllIRsSynchronous) が
+    // 同時に読み書きする可能性があるため std::atomic<std::shared_ptr<T>> (C++20) を使用。
+    std::atomic<std::shared_ptr<juce::AudioBuffer<double>>> originalIR;
     double originalIRSampleRate = 0.0;
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
     double currentIRScale = 1.0; // IRのスケールファクター (Auto Makeup + Safety Margin)

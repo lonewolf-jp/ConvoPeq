@@ -204,11 +204,15 @@ static void applyAsymmetricTukey(double* data, int numSamples)
             convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(pre_taper_len) * sizeof(double), 64)));
             if (!cos_args) return;
 
-            // ── cos引数計算 (MKL VML) ──
-            // cos_args[i] = (pi / (peakIndex * alpha_pre)) * i - pi
+            // ── cos引数計算: cos_args[i] = scale * i + offset ──
+            // [Bug A fix] vdLinearFrac(n, nullptr, nullptr, scale≠0, ...) は
+            // scalea≠0 の場合 a[i] を読みに行き nullptr デリファレンス → Access Violation。
+            // SEH は /EHsc では捕捉されないため LoaderThread が強制終了する。
+            // → スカラーループで等差数列を生成する。
             const double scale = pi / (peakIndex * alpha_pre);
             const double offset = -pi;
-            vdLinearFrac(pre_taper_len, nullptr, nullptr, scale, offset, 0.0, 1.0, cos_args.get());
+            for (int i = 0; i < pre_taper_len; ++i)
+                cos_args.get()[i] = scale * static_cast<double>(i) + offset;
 
             vdCos(pre_taper_len, cos_args.get(), window_vals.get());
 
@@ -232,7 +236,9 @@ static void applyAsymmetricTukey(double* data, int numSamples)
 
             const double scale = (pi / alpha_post) / dist_to_end;
             const double offset = (pi / alpha_post) * (((double)post_taper_start_idx - (double)peakIndex) / dist_to_end - (1.0 - alpha_post));
-            vdLinearFrac(post_taper_len, nullptr, nullptr, scale, offset, 0.0, 1.0, cos_args.get());
+            // [Bug A fix] vdLinearFrac(n, nullptr, nullptr, scale≠0, ...) → スカラーループ
+            for (int i = 0; i < post_taper_len; ++i)
+                cos_args.get()[i] = scale * static_cast<double>(i) + offset;
 
             vdCos(post_taper_len, cos_args.get(), post_window_vals);
 
@@ -534,36 +540,9 @@ public:
 
             if (checkCancellation(shouldStop, nullptr) || result.loadedIR.getNumSamples() == 0 || result.loadedIR.getNumChannels() == 0) return result;
 
-            // 2. Auto Makeup (Energy Normalization)
-            // IRのエネルギー(RMS)を測定し、入力信号と出力信号の音量感が一致するようにゲインを自動補正する。
-            // その後、-6dBの安全マージンを適用する。
-            // リビルド時は既に正規化されていると仮定するためスキップします。
-            if (!isRebuild)
-            {
-                double maxChannelEnergy = 0.0;
-                for (int ch = 0; ch < result.loadedIR.getNumChannels(); ++ch)
-                {
-                    const double* data = result.loadedIR.getReadPointer(ch);
-                    double energy = cblas_ddot(result.loadedIR.getNumSamples(), data, 1, data, 1);
-
-                    if (energy > maxChannelEnergy)
-                        maxChannelEnergy = energy;
-                }
-
-                if (maxChannelEnergy > 1.0e-18)
-                {
-                    // Makeup Gain = 1.0 / RMS_IR
-                    // Safety Margin = 0.501187 (-6.0dB)
-                    const double makeup = 1.0 / std::sqrt(maxChannelEnergy);
-                    const double safetyMargin = 0.5011872336272722;
-                    // result.loadedIR.applyGain(makeup * safetyMargin); // Removed: Scaling moved to SetImpulse
-                    result.scaleFactor = makeup * safetyMargin;
-                }
-                else
-                {
-                    DBG("LoaderThread: IR energy is too low (near silence), skipping Auto Makeup to prevent zero division.");
-                }
-            }
+            // 2. [Bug D fix] scaleFactor の計算をここから Step 2' (trimmed バッファ確定後) に移動。
+            // 旧実装は生 IR (ウィンドウ・トリム・MinPhase 変換前) のエネルギーで計算していたため、
+            // 実際に SetImpulse() に渡すデータのエネルギーと乖離し、ヘッドルームが不正確だった。
 
             // 3. 末尾の無音カット (Denormal対策 & 効率化)
             // IR末尾の極小値(Denormal領域)をカットすることで、畳み込み負荷とDenormal発生リスクを低減
@@ -750,6 +729,35 @@ public:
             }
 
             if (checkCancellation(shouldStop, nullptr)) return result;
+
+            // 2'. Auto Makeup (Energy Normalization) — trimmed バッファ確定後に計算
+            // [Bug D fix] ウィンドウ・トリム・MinPhase 変換がすべて完了した trimmed バッファで
+            // エネルギーを計測することで、SetImpulse() に渡す実データと一致した scaleFactor を得る。
+            // リビルド時は既に正規化済みのためスキップ。
+            if (!isRebuild)
+            {
+                double maxChannelEnergy = 0.0;
+                const int nSamp = trimmed.getNumSamples();
+                for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
+                {
+                    const double* data = trimmed.getReadPointer(ch);
+                    const double energy = cblas_ddot(nSamp, data, 1, data, 1);
+                    if (energy > maxChannelEnergy)
+                        maxChannelEnergy = energy;
+                }
+                if (maxChannelEnergy > 1.0e-18)
+                {
+                    // Makeup Gain = 1.0 / RMS_IR  (Safety Margin = -6dB)
+                    const double makeup = 1.0 / std::sqrt(maxChannelEnergy);
+                    constexpr double safetyMargin = 0.5011872336272722;
+                    result.scaleFactor = makeup * safetyMargin;
+                }
+                else
+                {
+                    DBG("LoaderThread: IR energy is too low (near silence), skipping Auto Makeup.");
+                    result.scaleFactor = 1.0;
+                }
+            }
 
             // 9.ピーク位置検出 (レイテンシー補正用)
             // Linear Phaseの場合、ピークが遅れてやってくるため、その分Dryを遅らせる必要がある
@@ -951,7 +959,9 @@ ConvolverProcessor::~ConvolverProcessor()
 void ConvolverProcessor::timerCallback()
 {
     // IR切り替え時のクロスフェードが完了したら、古いコンボルバーを安全に破棄する
-    if (!wetCrossfade.isSmoothing())
+    // [Bug G fix] wetCrossfade.isSmoothing() は非スレッドセーフ(AudioThread が同時に getNextValue() を呼ぶ)。
+    // wetCrossfadeActive アトミックフラグで代替する。
+    if (!wetCrossfadeActive.load(std::memory_order_acquire))
     {
         auto* doneFading = fadingOutConvolution.exchange(nullptr);
         if (doneFading != nullptr)
@@ -1236,10 +1246,13 @@ void ConvolverProcessor::rebuildAllIRs()
 
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
 {
-    if (originalIR && originalIR->getNumSamples() > 0 && originalIRSampleRate > 0.0)
+    // [Bug E fix] originalIR は std::atomic<std::shared_ptr<T>> なので .load() でスナップショットを取得。
+    // rebuildThread と Message Thread の同時アクセスによるデータレースを防ぐ。
+    auto snap = originalIR.load();
+    if (snap && snap->getNumSamples() > 0 && originalIRSampleRate > 0.0)
     {
         // リビルドモードでローダーを作成し、同期的に実行
-        LoaderThread loader(*this, *originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
+        LoaderThread loader(*this, *snap, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
         loader.externalCancellationCheck = shouldCancel;
         loader.runSynchronously();
     }
@@ -1434,7 +1447,8 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
             DBG("ConvolverProcessor::rebuild (via loadImpulseResponse) already in progress, skipping");
             return true;
         }
-        if (!originalIR || originalIR->getNumSamples() == 0 || originalIRSampleRate <= 0.0)
+        auto snapIR = originalIR.load();
+        if (!snapIR || snapIR->getNumSamples() == 0 || originalIRSampleRate <= 0.0)
         {
             isRebuilding.store(false, std::memory_order_release);
             return false;
@@ -1459,7 +1473,8 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     // 新しいローダーを作成して開始
     if (isRebuild)
     {
-        activeLoader = std::make_unique<LoaderThread>(*this, *originalIR, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
+        auto snapIR2 = originalIR.load(); // [Bug E fix] 最新スナップショットを再取得
+        activeLoader = std::make_unique<LoaderThread>(*this, *snapIR2, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
     }
     else
     {
@@ -1865,9 +1880,8 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
 
     // サンプルレート変更時にリビルドできるよう、元のIR情報を共有する
-    // shared_ptrにより、AudioBufferのディープコピーを回避し、参照カウントのインクリメントのみで済む。
-    // これにより、新しいDSPコアがIRをリサンプリングするためのソース素材を効率的に持つことが保証される。
-    originalIR = other.originalIR;
+    // [Bug E fix] std::atomic<shared_ptr>::store() でアトミックに代入。
+    originalIR.store(other.originalIR.load());
     originalIRSampleRate = other.originalIRSampleRate;
     {
         const juce::ScopedLock sl(irFileLock);
@@ -2051,6 +2065,10 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         double* ramp = crossfadeRampBuffer.get();
         for (int i = 0; i < numSamples; ++i)
             ramp[i] = wetCrossfade.getNextValue();
+        // [Bug G fix] スムージング完了を検出したらアトミックフラグをクリア。
+        // timerCallback の wetCrossfadeActive チェックに通知する。
+        if (!wetCrossfade.isSmoothing())
+            wetCrossfadeActive.store(false, std::memory_order_release);
     }
     // ── Step 5: Dry信号生成 ──
     // DelayLineの内部状態（履歴）を維持するため、Dry信号が不要な場合(100% Wet)でも常に処理を実行する。
@@ -2544,7 +2562,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     // 元データの更新 (新規ロード時のみ)
     if (!isRebuild)
     {
-        originalIR = loadedIR; // shared_ptr assignment
+        originalIR.store(loadedIR); // [Bug E fix] atomic store
         originalIRSampleRate = loadedSR;
         {
             const juce::ScopedLock sl(irFileLock);
@@ -2567,7 +2585,15 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     // Audio Threadが新しいコンボルバーを参照するようにアトミックに更新
     convolution.store(newConv, std::memory_order_release);
 
-    // 古いコンボルバーがあれば、フェードアウトを開始する
+    // [Bug C fix] wet フェードイン (0→1) は初回ロードを含む常に起動する。
+    // 旧実装は convToFadeOut != nullptr のブロック内のみで起動していたため、
+    // 初回ロード時には wetCrossfade が開始されず wet 信号がフルレベルで瞬間出力されていた。
+    // [Bug G fix] wetCrossfadeActive を Message Thread 側の通知フラグとして立てる。
+    wetCrossfade.setCurrentAndTargetValue(0.0);
+    wetCrossfade.setTargetValue(1.0);
+    wetCrossfadeActive.store(true, std::memory_order_release);
+
+    // 古いコンボルバーがあれば、フェードアウトも開始する
     if (convToFadeOut != nullptr)
     {
         // 既に別のクロスフェードが進行中だった場合、その古いエンジンは即座に破棄リストへ
@@ -2577,8 +2603,6 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
             const juce::ScopedLock sl(trashBinLock);
             trashBin.push_back({interruptedFade, juce::Time::getMillisecondCounter()});
         }
-        wetCrossfade.setCurrentAndTargetValue(0.0);
-        wetCrossfade.setTargetValue(1.0);
     }
 
     irLength.store(targetLength, std::memory_order_release);

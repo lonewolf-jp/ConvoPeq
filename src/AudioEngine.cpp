@@ -1514,7 +1514,6 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         const double CLIP_THRESHOLD = 0.95 - 0.45 * sat;
         const double CLIP_KNEE      = 0.05 + 0.35 * sat;
         const double CLIP_ASYMMETRY = 0.10 * sat;
-        const double CLIP_START = CLIP_THRESHOLD - CLIP_KNEE;
 
         for (int ch = 0; ch < numProcChannels; ++ch)
         {
@@ -1649,7 +1648,6 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         const double CLIP_THRESHOLD = 0.95 - 0.45 * sat;
         const double CLIP_KNEE      = 0.05 + 0.35 * sat;
         const double CLIP_ASYMMETRY = 0.10 * sat;
-        const double CLIP_START = CLIP_THRESHOLD - CLIP_KNEE;
 
         for (int ch = 0; ch < numProcChannels; ++ch)
         {
@@ -1928,11 +1926,6 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     // DCブロッカーの状態をロード
     dcBlockerL.loadState();
     if (dataR) dcBlockerR.loadState();
-
-    const __m256d vMax = _mm256_set1_pd(1.0);
-    const __m256d vMin = _mm256_set1_pd(-1.0);
-    const __m256d vHeadroom = applyDither ? _mm256_set1_pd(1.0)
-                                          : _mm256_set1_pd(kOutputHeadroom);
 
     for (int i = 0; i < numSamples; ++i)
     {

@@ -56,7 +56,7 @@ void MKLNonUniformConvolver::Layer::freeAll() noexcept
     if (fftHandle)     { DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; }
     if (irFreqDomain)  { mkl_free(irFreqDomain);  irFreqDomain  = nullptr; }
     if (fdlBuf)        { mkl_free(fdlBuf);         fdlBuf        = nullptr; }
-    if (overlapBuf)    { mkl_free(overlapBuf);     overlapBuf    = nullptr; }
+    // [Bug F fix] overlapBuf 削除済み
     if (fftTimeBuf)    { mkl_free(fftTimeBuf);     fftTimeBuf    = nullptr; }
     if (fftOutBuf)     { mkl_free(fftOutBuf);      fftOutBuf     = nullptr; }
     if (prevInputBuf)  { mkl_free(prevInputBuf);   prevInputBuf  = nullptr; }
@@ -211,7 +211,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         l.irFreqDomain = static_cast<double*>(mkl_malloc(irBufSize  * sizeof(double), 64));
         l.fdlBuf       = static_cast<double*>(mkl_malloc(fdlBufSize * sizeof(double), 64));
-        l.overlapBuf   = static_cast<double*>(mkl_malloc(l.partSize  * sizeof(double), 64));
+        // [Bug F fix] overlapBuf 削除済み
         l.fftTimeBuf   = static_cast<double*>(mkl_malloc(l.fftSize   * sizeof(double), 64));
         l.fftOutBuf    = static_cast<double*>(mkl_malloc(l.fftSize   * sizeof(double), 64));
         l.prevInputBuf = static_cast<double*>(mkl_malloc(l.partSize  * sizeof(double), 64));
@@ -223,7 +223,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         if (!l.isImmediate)
             l.tailOutputBuf = static_cast<double*>(mkl_malloc(l.partSize * sizeof(double), 64));
 
-        if (!l.irFreqDomain || !l.fdlBuf || !l.overlapBuf || !l.fftTimeBuf ||
+        if (!l.irFreqDomain || !l.fdlBuf || !l.fftTimeBuf ||
             !l.fftOutBuf || !l.prevInputBuf || !l.accumBuf || !l.inputAccBuf ||
             (!l.isImmediate && !l.tailOutputBuf))
         {
@@ -234,7 +234,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         // ゼロ初期化
         memset(l.irFreqDomain, 0, irBufSize  * sizeof(double));
         memset(l.fdlBuf,       0, fdlBufSize * sizeof(double));
-        memset(l.overlapBuf,   0, l.partSize  * sizeof(double));
+        // [Bug F fix] overlapBuf memset 削除済み
         memset(l.fftTimeBuf,   0, l.fftSize   * sizeof(double));
         memset(l.fftOutBuf,    0, l.fftSize   * sizeof(double));
         memset(l.prevInputBuf, 0, l.partSize  * sizeof(double));
@@ -787,7 +787,7 @@ void MKLNonUniformConvolver::Reset()
 
         const size_t fdlBufSize = static_cast<size_t>(l.numParts) * l.partStride;
         memset(l.fdlBuf,       0, fdlBufSize   * sizeof(double));
-        memset(l.overlapBuf,   0, l.partSize    * sizeof(double));
+        // [Bug F fix] overlapBuf 削除済み
         memset(l.fftTimeBuf,   0, l.fftSize     * sizeof(double));
         memset(l.fftOutBuf,    0, l.fftSize     * sizeof(double));
         memset(l.prevInputBuf, 0, l.partSize    * sizeof(double));
