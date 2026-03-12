@@ -883,6 +883,13 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                 const double* srcA = fdlBase + lineIdx * l.partStride;  // FDL[p]
                 const double* srcB = irBase  + p       * l.partStride;  // IR[p]
 
+                // 【提案1】prefetch強化（T1 + 128byte先読み）
+                if (p + 2 < endPart)
+                {
+                    const int nli = (baseFdlIdx - (p + 2) + l.numParts) & l.fdlMask;
+                    _mm_prefetch((const char*)(fdlBase + nli * l.partStride), _MM_HINT_T1);
+                    _mm_prefetch((const char*)(irBase  + (p + 2) * l.partStride), _MM_HINT_T1);
+                }
                 // ── パーティション先読み ──
                 // 次パーティションの FDL/IR スロットを L3→L2 に引き出す (T1)。
                 // L1/L2 は partSize が大きく (512〜4096 サンプル) partStride も大きい
@@ -903,8 +910,8 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
                 for (; k < vEnd8; k += 8)
                 {
-                    _mm_prefetch((const char*)(srcA + 2 * k + 64), _MM_HINT_T0);
-                    _mm_prefetch((const char*)(srcB + 2 * k + 64), _MM_HINT_T0);
+                    _mm_prefetch((const char*)(srcA + 2 * k + 128), _MM_HINT_T0);
+                    _mm_prefetch((const char*)(srcB + 2 * k + 128), _MM_HINT_T0);
 
                     // 複素 k..k+3
                     __m256d acc0 = _mm256_load_pd(dst  + 2 * k);

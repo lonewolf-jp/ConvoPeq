@@ -856,6 +856,14 @@ namespace
 
         for (int n = 0; n < numSamples; ++n)
         {
+            // 【提案2強化版】AVX2相当のprefetch + 128byte先読み（L1キャッシュ最適化）
+            // 最新コードのprocessBandStereoに適合した形で追加（__m128dベースを維持しつつ帯域向上）
+            if (n + 8 < numSamples)
+            {
+                _mm_prefetch(reinterpret_cast<const char*>(dataL + n + 8), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(dataR + n + 8), _MM_HINT_T0);
+            }
+
             // L[n] と R[n] を同時ロード
             const __m128d v0 = _mm_set_pd(dataR[n], dataL[n]);
 

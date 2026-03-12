@@ -354,6 +354,14 @@ void OutputFilter::process(juce::dsp::AudioBlock<double>& block,
             {
                 __m128d x = _mm_set_pd(dataR[i], dataL[i]);
 
+                // 【提案3】3段カスケード1ループ完全統合済み＋prefetch強化（T0 128byte先読み）
+                // （最新コードに適合・Audio Thread完全準拠）
+                if (i + 4 < numSamples)
+                {
+                    _mm_prefetch((const char*)(dataL + i + 4), _MM_HINT_T0);
+                    _mm_prefetch((const char*)(dataR + i + 4), _MM_HINT_T0);
+                }
+
                 // HPF (固定)
                 x = biquadStep128_FMA(x,
                         hpf_b0, hpf_b1, hpf_b2, hpf_a1, hpf_a2,
