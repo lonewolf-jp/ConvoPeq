@@ -66,8 +66,8 @@ MainWindow::MainWindow (const juce::String& name)
 {
     setUsingNativeTitleBar (true);
     setResizable (true, true);
-    setResizeLimits (720, 700, 10000, 10000);
-    setSize (960, 920);
+    setResizeLimits (720, 760, 10000, 10000);
+    setSize (960, 980);
 
     // ── ASIO Blacklist 初期化 ──
     auto exeDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
@@ -369,7 +369,7 @@ void MainWindow::resized()
     cpuUsageLabel.setBounds (buttonRow.removeFromRight (70).reduced (2, 2));
 
     if (convolverPanel)
-        convolverPanel->setBounds (bounds.removeFromTop (220));
+        convolverPanel->setBounds (bounds.removeFromTop (280));
 
     const int eqH = static_cast<int> (bounds.getHeight() * 0.45f);
     if (eqPanel)

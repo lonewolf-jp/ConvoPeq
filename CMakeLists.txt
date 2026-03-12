@@ -132,11 +132,13 @@ target_sources(ConvoPeq PRIVATE
     src/EQControlPanel.cpp
     src/SpectrumAnalyzerComponent.cpp
     src/DeviceSettings.cpp
+    src/OutputFilter.cpp
     src/AsioBlacklist.h
     src/CustomInputOversampler.h
     src/AudioEngineProcessor.h
     src/PsychoacousticDither.h
     src/MKLNonUniformConvolver.h
+    src/OutputFilter.h
 )
 
 #------------------------------------------------------------

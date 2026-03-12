@@ -118,6 +118,15 @@ public:
     void setUseMinPhase(bool useMinPhase);
     bool getUseMinPhase() const { return useMinPhase.load(); }
 
+    //------------------------------------------------------------------
+    // NUC 出力周波数フィルターモード設定
+    //
+    // フィルターは SetImpulse() 内で irFreqDomain に焼き込まれる。
+    // モード変更時は内部で rebuildAllIRs() を呼んで NUC を再構築する。
+    // Message Thread からのみ呼ぶこと。
+    //------------------------------------------------------------------
+    void setNUCFilterModes(convo::HCMode hcMode, convo::LCMode lcMode);
+
     //----------------------------------------------------------
     // Smoothing Time
     //----------------------------------------------------------
@@ -259,7 +268,8 @@ private:
         // 代入演算子は禁止 (使用しないため)
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
-        bool init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize, double scale = 1.0)
+        bool init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize, double scale = 1.0,
+                  const convo::FilterSpec* filterSpec = nullptr)
         {
             // Safety: Free existing data if init is called multiple times (Leak prevention)
             if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
@@ -290,8 +300,8 @@ private:
                 new (rn1) convo::MKLNonUniformConvolver();
                 nucConvolvers[1].reset(static_cast<convo::MKLNonUniformConvolver*>(rn1));
 
-                if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize, scale) &&
-                    nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize, scale))
+                if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize, scale, filterSpec) &&
+                    nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize, scale, filterSpec))
                 {
                     latency   = nucConvolvers[0]->getLatency();
                     DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
@@ -390,6 +400,11 @@ private:
     // このフラグを立てるだけにする。Audio Thread が process() 先頭で検出し初期化する。
     std::atomic<bool> wetCrossfadeResetPending { false };
     std::atomic<bool> useMinPhase{false};
+
+    // NUC 出力周波数フィルターモード (Message Thread で更新, finalizeNUC で読む)
+    // int として保存し、使用時に enum へキャスト。
+    std::atomic<int> nucHCMode { static_cast<int>(convo::HCMode::Natural) };
+    std::atomic<int> nucLCMode { static_cast<int>(convo::LCMode::Natural) };
     std::atomic<float> targetIRLengthSec{IR_LENGTH_DEFAULT_SEC};
     std::atomic<float> smoothingTimeSec{SMOOTHING_TIME_DEFAULT_SEC};
 

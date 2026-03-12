@@ -1911,6 +1911,10 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
     currentIRScale.store(other.currentIRScale.load(std::memory_order_acquire), std::memory_order_release);
 
+    // NUC フィルターモードも同期する (rebuildAllIRsSynchronous で使用)
+    nucHCMode.store(other.nucHCMode.load(std::memory_order_acquire), std::memory_order_release);
+    nucLCMode.store(other.nucLCMode.load(std::memory_order_acquire), std::memory_order_release);
+
     // クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
     // SCはDSPCore::prepare()内のprepareToPlay、またはrebuildAllIRsSynchronousで生成する
     // activeConvolution / convolution はnullptrのままにする
@@ -2554,6 +2558,24 @@ void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
 }
 
 //==============================================================================
+// setNUCFilterModes  ─ Message Thread のみ
+//
+// HC/LC モードを atomic に保存し、IR がロード済みなら非同期で NUC を再構築する。
+// 再構築は rebuildAllIRs() 経由でクロスフェード付きで行われる。
+//==============================================================================
+void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode lcMode)
+{
+    const int newHC = static_cast<int>(hcMode);
+    const int newLC = static_cast<int>(lcMode);
+
+    const bool changed = (nucHCMode.exchange(newHC) != newHC) ||
+                         (nucLCMode.exchange(newLC) != newLC);
+
+    if (changed)
+        rebuildAllIRs(); // IR ロード済みかつ非ロード中のみ実際にリビルドする
+}
+
+//==============================================================================
 // finalizeNUCEngineOnMessageThread
 // LoaderThreadから委譲されたNUCエンジン構築（メッセージスレッド専用）
 //==============================================================================
@@ -2582,7 +2604,15 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         newConv->addRef();
 
         if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
-                          maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor))
+                          maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,
+                          [&]() -> const convo::FilterSpec* {
+                              // NUC フィルタースペックを Message Thread 上で構築
+                              static thread_local convo::FilterSpec spec;
+                              spec.sampleRate = sr;
+                              spec.hcMode = static_cast<convo::HCMode>(nucHCMode.load(std::memory_order_acquire));
+                              spec.lcMode = static_cast<convo::LCMode>(nucLCMode.load(std::memory_order_acquire));
+                              return &spec;
+                          }()))
         {
             applyNewState(newConv, loadedIR, sr, length, isRebuild, irFile, scaleFactor, displayIR);
         }

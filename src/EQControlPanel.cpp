@@ -167,6 +167,64 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
     presetSelector.addListener(this);
     addAndMakeVisible(presetSelector);
 
+    //----------------------------------------------------------
+    // 出力ローパスフィルター UI ── ② EQ最終段の場合に使用
+    // (EQ単体 / Convolver→EQ の場合に有効)
+    //----------------------------------------------------------
+    eqLpfLabel.setText("HCF:", juce::dontSendNotification);
+    eqLpfLabel.setJustificationType(juce::Justification::centredRight);
+    eqLpfLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    eqLpfLabel.setTooltip("Output High-Cut Filter (active when EQ is the last stage)\n"
+                           "Also applies a fixed High-Pass (20Hz Butterworth 2nd order) for speaker protection.");
+    addAndMakeVisible(eqLpfLabel);
+
+    constexpr int LPF_GROUP_ID = 5003;
+
+    eqLpfSharpButton.setClickingTogglesState(true);
+    eqLpfSharpButton.setRadioGroupId(LPF_GROUP_ID);
+    eqLpfSharpButton.setColour(juce::TextButton::buttonOnColourId,  juce::Colours::steelblue);
+    eqLpfSharpButton.setColour(juce::TextButton::buttonColourId,    juce::Colours::darkgrey.withAlpha(0.7f));
+    eqLpfSharpButton.setColour(juce::TextButton::textColourOffId,   juce::Colours::white);
+    eqLpfSharpButton.setTooltip("Sharp: Q=1.0 x2 (steep rolloff)");
+    eqLpfSharpButton.onClick = [this] {
+        if (eqLpfSharpButton.getToggleState())
+        {
+            engine.setEqLPFFilterMode(convo::HCMode::Sharp);
+            updateLPFModeButtons();
+        }
+    };
+    addAndMakeVisible(eqLpfSharpButton);
+
+    eqLpfNaturalButton.setClickingTogglesState(true);
+    eqLpfNaturalButton.setRadioGroupId(LPF_GROUP_ID);
+    eqLpfNaturalButton.setColour(juce::TextButton::buttonOnColourId,  juce::Colours::steelblue);
+    eqLpfNaturalButton.setColour(juce::TextButton::buttonColourId,    juce::Colours::darkgrey.withAlpha(0.7f));
+    eqLpfNaturalButton.setColour(juce::TextButton::textColourOffId,   juce::Colours::white);
+    eqLpfNaturalButton.setTooltip("Natural: Linkwitz-Riley Q=0.7071 x2 (default, smooth phase)");
+    eqLpfNaturalButton.onClick = [this] {
+        if (eqLpfNaturalButton.getToggleState())
+        {
+            engine.setEqLPFFilterMode(convo::HCMode::Natural);
+            updateLPFModeButtons();
+        }
+    };
+    addAndMakeVisible(eqLpfNaturalButton);
+
+    eqLpfSoftButton.setClickingTogglesState(true);
+    eqLpfSoftButton.setRadioGroupId(LPF_GROUP_ID);
+    eqLpfSoftButton.setColour(juce::TextButton::buttonOnColourId,  juce::Colours::steelblue);
+    eqLpfSoftButton.setColour(juce::TextButton::buttonColourId,    juce::Colours::darkgrey.withAlpha(0.7f));
+    eqLpfSoftButton.setColour(juce::TextButton::textColourOffId,   juce::Colours::white);
+    eqLpfSoftButton.setTooltip("Soft: Q=0.5 x2 (gentle rolloff)");
+    eqLpfSoftButton.onClick = [this] {
+        if (eqLpfSoftButton.getToggleState())
+        {
+            engine.setEqLPFFilterMode(convo::HCMode::Soft);
+            updateLPFModeButtons();
+        }
+    };
+    addAndMakeVisible(eqLpfSoftButton);
+
     // UI全体をプロセッサの現在の状態で初期化
     updateAllControls();
 }
@@ -208,6 +266,21 @@ void EQControlPanel::updateAllControls()
     const bool agcOn = engine.getEQProcessor().getAGCEnabled();
     agcButton.setToggleState(agcOn, juce::dontSendNotification);
     totalGainValueLabel.setEnabled(!agcOn);
+
+    // 出力LPFフィルターモードボタンの同期
+    updateLPFModeButtons();
+}
+
+//--------------------------------------------------------------
+// updateLPFModeButtons
+// エンジンの現在設定にあわせてLPFモードボタンのトグル状態を同期する
+//--------------------------------------------------------------
+void EQControlPanel::updateLPFModeButtons()
+{
+    const auto lpfMode = engine.getEqLPFFilterMode();
+    eqLpfSharpButton  .setToggleState(lpfMode == convo::HCMode::Sharp,   juce::dontSendNotification);
+    eqLpfNaturalButton.setToggleState(lpfMode == convo::HCMode::Natural, juce::dontSendNotification);
+    eqLpfSoftButton   .setToggleState(lpfMode == convo::HCMode::Soft,    juce::dontSendNotification);
 }
 
 //--------------------------------------------------------------
@@ -418,6 +491,14 @@ void EQControlPanel::resized()
     agcButton.setBounds(controlsArea.removeFromRight(50).reduced(2, 2));
     totalGainValueLabel.setBounds(controlsArea.removeFromRight(60).reduced(2, 2));
     totalGainLabel.setBounds(controlsArea.removeFromRight(70).reduced(2, 2));
+
+    // ── 出力LPFフィルターモード行 (② EQ最終段用) ──────────────────
+    auto lpfRow = bounds.removeFromTop(22);
+    eqLpfLabel.setBounds(lpfRow.removeFromLeft(38).reduced(0, 3));
+    lpfRow.removeFromLeft(4);
+    eqLpfSharpButton  .setBounds(lpfRow.removeFromLeft(52).reduced(2, 2));
+    eqLpfNaturalButton.setBounds(lpfRow.removeFromLeft(60).reduced(2, 2));
+    eqLpfSoftButton   .setBounds(lpfRow.removeFromLeft(48).reduced(2, 2));
 
     // ── 各バンド列 ──
     // 2段表示 (10バンド x 2行)

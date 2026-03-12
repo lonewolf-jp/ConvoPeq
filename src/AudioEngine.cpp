@@ -771,6 +771,10 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     dither.prepare(newSampleRate, bitDepth);
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
+    // 出力周波数フィルターの係数を事前計算 (processingRate: OS後のレート)
+    // filter.txt: ハイカット/ローカット(①) / ローパス/ハイパス(②) の全モード分を一括生成
+    outputFilter.prepare(processingRate);
+
     // 【Issue 5】Fade-inカウンタをリセット
     fadeInSamplesLeft.store(0, std::memory_order_relaxed);
 }
@@ -787,6 +791,7 @@ void AudioEngine::DSPCore::reset()
     osDCBlockerR.reset();
     dither.reset();
     oversampling.reset();
+    outputFilter.reset();
 
     // 【パッチ3】rawバッファクリア（alignedCapacity使用）
     if (alignedL && alignedCapacity > 0)
@@ -1319,7 +1324,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                        .softClipEnabled = softClip,
                        .saturationAmount = satAmt,
                        .inputHeadroomGain = headroomGain,
-                       .outputMakeupGain = makeupGain }); // スマートポインタでDSPを呼び出し
+                       .outputMakeupGain = makeupGain,
+                       .convHCMode = convHCFilterMode.load(std::memory_order_relaxed),
+                       .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
+                       .eqLPFMode  = eqLPFFilterMode.load(std::memory_order_relaxed) }); // スマートポインタでDSPを呼び出し
     }
     else
     {
@@ -1390,7 +1398,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                          .softClipEnabled = softClip,
                          .saturationAmount = satAmt,
                        .inputHeadroomGain = headroomGain,
-                       .outputMakeupGain = makeupGain });
+                       .outputMakeupGain = makeupGain,
+                       .convHCMode = convHCFilterMode.load(std::memory_order_relaxed),
+                       .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
+                       .eqLPFMode  = eqLPFFilterMode.load(std::memory_order_relaxed) });
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
@@ -1426,19 +1437,24 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         }
     }
 
-    processInput(bufferToFill, numSamples, state.inputHeadroomGain);
+    // ── 入力処理 + Raw Input Analyzer Tap ──
+    // processInput() がヘッドルームゲイン適用前の raw レベルを返す。
+    // analyzerInputTap=true の場合、同関数内で pre-gain の FIFO プッシュも行う。
+    const bool inputTap = (state.analyzerSource == AnalyzerSource::Input);
+    const float rawInputLinear = processInput(bufferToFill, numSamples, state.inputHeadroomGain,
+                                              inputTap, audioFifo, audioFifoBuffer);
 
     //----------------------------------------------------------
     // AudioBlockの構築 (AlignedBufferを使用)
+    // ※ この時点では既にヘッドルームゲイン適用済み
     //----------------------------------------------------------
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
 
     //----------------------------------------------------------
-    // 入力レベル計算
+    // 入力レベル記録 (raw: ヘッドルームゲイン適用前の値を使用)
     //----------------------------------------------------------
-    const float inputLinear = measureLevel(processBlock);
-    inputLevelLinear.store(inputLinear, std::memory_order_relaxed);
+    inputLevelLinear.store(rawInputLinear, std::memory_order_relaxed);
 
     //----------------------------------------------------------
     // オーバーサンプリング処理ブロック
@@ -1468,11 +1484,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
             osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
     }
 
-    // ── Analyzer Input Tap (Pre-DSP) ──
-    if (state.analyzerSource == AnalyzerSource::Input)
-    {
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
-    }
+    // ── Analyzer Input Tap は processInput() 内で pre-gain 済みデータをプッシュ済み ──
+    // (oversampling後のここではなく、ゲイン適用前の生データを表示するため移動)
 
     int numProcSamples = (int)processBlock.getNumSamples();
     int numProcChannels = (int)processBlock.getNumChannels(); // 通常は2
@@ -1500,9 +1513,26 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
             convolver.process(processBlock);
     }
 
-    // Output Makeup Gain
-    for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
-        cblas_dscal((int)processBlock.getNumSamples(), state.outputMakeupGain, processBlock.getChannelPointer(ch), 1);
+    // ─── 出力周波数フィルター ──────────────────────────────────────
+    // filter.txt: DSP処理チェーンの直後・出力メイクアップゲイン適用前に挿入
+    // ① コンボルバー最終段: ハイカット(Sharp/Natural/Soft) + ローカット(Natural/Soft)
+    // ② EQ最終段         : ハイパス(固定 20Hz) + ローパス(Sharp/Natural/Soft)
+    // ① コンボルバー最終段: NUC が irFreqDomain に焼き込み済み → IIR 不要
+    {
+        const bool convActive = !state.convBypassed;
+        const bool eqActive   = !state.eqBypassed;
+        if (convActive || eqActive)
+        {
+            const bool convIsLast = convActive &&
+                (!eqActive || state.order == ProcessingOrder::EQThenConvolver);
+            // ① conv-last の場合は NUC 内部で処理済みのため IIR をスキップ
+            if (!convIsLast)
+            {
+                outputFilter.process(processBlock, /*convIsLast=*/false,
+                                     state.convHCMode, state.convLCMode, state.eqLPFMode);
+            }
+        }
+    }
 
     //----------------------------------------------------------
     // ソフトクリッピング (Soft Clipping)
@@ -1591,9 +1621,11 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         }
     }
 
-    // 入力処理（変換、レベル測定、ゲイン適用、DC除去）
-    const float inputLinear = processInputDouble(buffer, numSamples, state.inputHeadroomGain);
-    inputLevelLinear.store(inputLinear, std::memory_order_relaxed);
+    // ── 入力処理 + Raw Input Analyzer Tap ──
+    const bool inputTapD = (state.analyzerSource == AnalyzerSource::Input);
+    const float rawInputLinearD = processInputDouble(buffer, numSamples, state.inputHeadroomGain,
+                                                     inputTapD, audioFifo, audioFifoBuffer);
+    inputLevelLinear.store(rawInputLinearD, std::memory_order_relaxed);
 
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
@@ -1617,8 +1649,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
             osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
     }
 
-    if (state.analyzerSource == AnalyzerSource::Input)
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
+    // ── Analyzer Input Tap は processInputDouble() 内で pre-gain データをプッシュ済み ──
 
     const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
     const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
@@ -1636,6 +1667,24 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
             eq.process(processBlock);
         if (!state.convBypassed)
             convolver.process(processBlock);
+    }
+
+    // ─── 出力周波数フィルター ──────────────────────────────────────
+    // ① conv-last: NUC irFreqDomain 焼き込み済み → IIR スキップ
+    // ② eq-last:   引き続き IIR で処理
+    {
+        const bool convActive = !state.convBypassed;
+        const bool eqActive   = !state.eqBypassed;
+        if (convActive || eqActive)
+        {
+            const bool convIsLast = convActive &&
+                (!eqActive || state.order == ProcessingOrder::EQThenConvolver);
+            if (!convIsLast)
+            {
+                outputFilter.process(processBlock, /*convIsLast=*/false,
+                                     state.convHCMode, state.convLCMode, state.eqLPFMode);
+            }
+        }
     }
 
     // Output Makeup Gain
@@ -1783,7 +1832,11 @@ void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>&
     audioFifo.finishedWrite(size1 + size2);
 }
 
-float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, double headroomGain) noexcept
+float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples,
+                                          double headroomGain,
+                                          bool analyzerInputTap,
+                                          juce::AbstractFifo& audioFifo,
+                                          juce::AudioBuffer<float>& audioFifoBuffer) noexcept
 {
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
@@ -1829,6 +1882,12 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
     juce::dsp::AudioBlock<double> block(channels, 2, numSamples);
     const float inputLevel = measureLevel(block);
 
+    // ── Analyzer Input Tap (Pre-Gain / Raw Input) ──
+    // ヘッドルームゲイン適用前の raw 入力データを FIFO へプッシュ。
+    // インプットスペアナ・レベルメーターが "入力されたデータそのもの" を表示するために必須。
+    if (analyzerInputTap)
+        pushToFifo(block, audioFifo, audioFifoBuffer);
+
     // 3. Apply headroom gain
     if (std::abs(headroomGain - 1.0) > 1e-9)
     {
@@ -1847,7 +1906,11 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
     return inputLevel;
 }
 
-float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples, double headroomGain) noexcept
+float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples,
+                                               double headroomGain,
+                                               bool analyzerInputTap,
+                                               juce::AbstractFifo& audioFifo,
+                                               juce::AudioBuffer<float>& audioFifoBuffer) noexcept
 {
     const int effectiveInputChannels = std::min(buffer.getNumChannels(), 2);
 
@@ -1876,6 +1939,10 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
     juce::dsp::AudioBlock<double> block(channels, 2, numSamples);
     const float inputLevel = measureLevel(block);
 
+    // ── Analyzer Input Tap (Pre-Gain / Raw Input) ──
+    if (analyzerInputTap)
+        pushToFifo(block, audioFifo, audioFifoBuffer);
+
     // 3. Apply headroom gain
     if (std::abs(headroomGain - 1.0) > 1e-9)
     {
@@ -1891,8 +1958,6 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
 
     return inputLevel;
 }
-
-// 音楽的なソフトクリッピング関数
 // 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加える。
 // @param x 入力信号
 // @param threshold クリッピングが開始される閾値 (正の値)
@@ -2098,6 +2163,14 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("analyzerSource"))
         setAnalyzerSource((AnalyzerSource)(int)state.getProperty("analyzerSource"));
 
+    // 出力周波数フィルターモードの読み込み
+    if (state.hasProperty("convHCFilterMode"))
+        setConvHCFilterMode((convo::HCMode)(int)state.getProperty("convHCFilterMode"));
+    if (state.hasProperty("convLCFilterMode"))
+        setConvLCFilterMode((convo::LCMode)(int)state.getProperty("convLCFilterMode"));
+    if (state.hasProperty("eqLPFFilterMode"))
+        setEqLPFFilterMode((convo::HCMode)(int)state.getProperty("eqLPFFilterMode"));
+
     if (state.hasProperty("eqBypassed"))
     {
         bool bypassed = state.getProperty("eqBypassed");
@@ -2141,6 +2214,10 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.setProperty("analyzerSource", (int)currentAnalyzerSource.load(), nullptr);
     state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);
     state.setProperty("convBypassed", convBypassRequested.load(), nullptr);
+    // 出力周波数フィルターモードの保存
+    state.setProperty("convHCFilterMode", (int)convHCFilterMode.load(), nullptr);
+    state.setProperty("convLCFilterMode", (int)convLCFilterMode.load(), nullptr);
+    state.setProperty("eqLPFFilterMode",  (int)eqLPFFilterMode.load(), nullptr);
 
     state.addChild (uiEqProcessor.getState(), -1, nullptr);
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
@@ -2253,4 +2330,46 @@ void AudioEngine::setOversamplingType(OversamplingType type)
 AudioEngine::OversamplingType AudioEngine::getOversamplingType() const
 {
     return oversamplingType.load();
+}
+
+//──────────────────────────────────────────────────────────────────────────
+// 出力周波数フィルターモード Setter / Getter (Message Thread)
+//──────────────────────────────────────────────────────────────────────────
+void AudioEngine::setConvHCFilterMode(convo::HCMode mode) noexcept
+{
+    convHCFilterMode.store(mode, std::memory_order_relaxed);
+    // NUC irFreqDomain を再焼き込みするため、uiConvolverProcessor を再構築する。
+    // DSPCore::convolver は次回 requestRebuild 時に syncStateFrom + rebuildAllIRsSynchronous で追従する。
+    uiConvolverProcessor.setNUCFilterModes(
+        convHCFilterMode.load(std::memory_order_relaxed),
+        convLCFilterMode.load(std::memory_order_relaxed));
+}
+
+convo::HCMode AudioEngine::getConvHCFilterMode() const noexcept
+{
+    return convHCFilterMode.load(std::memory_order_relaxed);
+}
+
+void AudioEngine::setConvLCFilterMode(convo::LCMode mode) noexcept
+{
+    convLCFilterMode.store(mode, std::memory_order_relaxed);
+    // HC と組み合わせて NUC を再構築
+    uiConvolverProcessor.setNUCFilterModes(
+        convHCFilterMode.load(std::memory_order_relaxed),
+        convLCFilterMode.load(std::memory_order_relaxed));
+}
+
+convo::LCMode AudioEngine::getConvLCFilterMode() const noexcept
+{
+    return convLCFilterMode.load(std::memory_order_relaxed);
+}
+
+void AudioEngine::setEqLPFFilterMode(convo::HCMode mode) noexcept
+{
+    eqLPFFilterMode.store(mode, std::memory_order_relaxed);
+}
+
+convo::HCMode AudioEngine::getEqLPFFilterMode() const noexcept
+{
+    return eqLPFFilterMode.load(std::memory_order_relaxed);
 }

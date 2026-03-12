@@ -52,9 +52,36 @@
 #include <mkl_dfti.h>
 #include <atomic>
 #include <JuceHeader.h>  // juce::nextPowerOfTwo, JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR
+#include "OutputFilter.h" // convo::HCMode, convo::LCMode
 
 namespace convo
 {
+
+//==============================================================================
+// FilterSpec  ─ SetImpulse() に渡す出力周波数フィルター仕様
+//
+// NUC は SetImpulse() 内で irFreqDomain に周波数ゲインを乗算して「焼き込む」。
+// Audio Thread の追加コストはゼロ。モード変更時は SetImpulse() を再実行する
+// (rebuildAllIRs() トリガー)。
+//
+// サンプルレートは SetImpulse() 呼び出し元が管理するため、ここには含まない。
+//
+// hcMode = HCMode を参照 (OutputFilter.h):
+//   Sharp   : Butterworth 4次相当の急峻ロールオフ
+//   Natural : コサインクロスフェード (デフォルト)
+//   Soft    : ガウス型緩やかロールオフ
+//   (値なし=Disabled相当として nullptr で SetImpulse() に渡す)
+//
+// lcMode = LCMode を参照 (OutputFilter.h):
+//   Natural : コサインロールオン fc≈18Hz (デフォルト)
+//   Soft    : コサインロールオン fc≈15Hz
+//==============================================================================
+struct FilterSpec
+{
+    double sampleRate = 48000.0; ///< 処理サンプルレート (Hz)
+    HCMode hcMode     = HCMode::Natural; ///< ハイカットモード
+    LCMode lcMode     = LCMode::Natural; ///< ローカットモード
+};
 
 //==============================================================================
 // MKLNonUniformConvolver
@@ -75,9 +102,13 @@ public:
     // @param irLen         IR サンプル数 (> 0)
     // @param blockSize     Audio Thread の呼び出しブロックサイズ
     // @param scale         IRの振幅スケール (ヘッドルーム確保用, デフォルト=1.0)
+    // @param filterSpec    出力周波数フィルター仕様。nullptr の場合フィルターなし。
+    //                      irFreqDomain に周波数ゲインを焼き込む (Audio Thread コストゼロ)。
     // @return true=成功, false=パラメータ不正またはMKL初期化失敗
     //----------------------------------------------------------
-    bool SetImpulse(const double* impulse, int irLen, int blockSize, double scale = 1.0);
+    bool SetImpulse(const double* impulse, int irLen, int blockSize,
+                    double scale = 1.0,
+                    const FilterSpec* filterSpec = nullptr);
 
     //----------------------------------------------------------
     // Add  ─ Audio Thread のみ
@@ -194,6 +225,10 @@ private:
     int  ringRead(double* dst, int n) noexcept;
 
     void releaseAllLayers() noexcept;
+
+    // SetImpulse() の末尾で呼ぶ。全レイヤーの irFreqDomain に
+    // HC/LC ゲインテーブルを乗算して焼き込む (Message Thread のみ)。
+    void applySpectrumFilter(const FilterSpec& spec) noexcept;
 
     //----------------------------------------------------------
     // メンバ変数

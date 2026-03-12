@@ -86,6 +86,154 @@ MKLNonUniformConvolver::~MKLNonUniformConvolver()
     releaseAllLayers();
 }
 
+//==============================================================================
+// applySpectrumFilter  ─ Message Thread のみ
+//
+// SetImpulse() の完了後に呼ばれ、全レイヤーの irFreqDomain に
+// ハイカット (HC) / ローカット (LC) のゲインテーブルを乗算して焼き込む。
+//
+// ■ アルゴリズム:
+//   各レイヤーは fftSize が異なる (L0 < L1 < L2)。
+//   物理周波数 → ビンインデックス変換は k = round(f * fftSize / fs) なので、
+//   各レイヤーに対して独立にゲインテーブルを計算・適用する。
+//
+// ■ HC カットオフ:
+//   fs ≤ 48000 Hz: fc_start=18kHz, fc_end=ナイキスト
+//   fs >  48000 Hz: fc_start=22kHz, fc_end=ナイキスト
+//   (可聴域上限を確保しつつナイキスト直下のエイリアシングを抑圧)
+//
+// ■ LC カットオフ:
+//   Natural: コサインロールオン  end=8Hz, start=18Hz
+//   Soft:    コサインロールオン  end=6Hz, start=15Hz
+//   (DC 直流成分 ～ end までをゼロにし、start まで緩やかに持ち上げる)
+//
+// ■ 使用する MKL 関数: cblas_dscal (各 bin へのスカラー乗算)
+//   std::vector は Message Thread での一時ゲインテーブル用のみ使用。
+//   Audio Thread では本関数を呼ばない。
+//==============================================================================
+void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcept
+{
+    const double fs      = spec.sampleRate;
+    const double nyquist = fs * 0.5;
+
+    // HC カットオフ周波数 (サンプルレート依存)
+    const double hcFcStart = (fs <= 48000.0) ? 18000.0 : 22000.0;
+    const double hcFcEnd   = nyquist; // ナイキストでゲイン=0
+
+    // LC カットオフ周波数
+    const double lcFcEnd   = (spec.lcMode == LCMode::Soft) ?  6.0 :  8.0;
+    const double lcFcStart = (spec.lcMode == LCMode::Soft) ? 15.0 : 18.0;
+
+    for (int li = 0; li < m_numActiveLayers; ++li)
+    {
+        Layer& l = m_layers[li];
+        if (!l.irFreqDomain) continue;
+
+        const int N      = l.fftSize;   // = partSize * 2
+        const int halfN  = N / 2;       // ナイキスト bin
+        const int cSize  = l.complexSize; // = halfN + 1
+        const int stride = l.partStride;
+
+        // ── ゲインテーブル計算 (全 bin 分, Message Thread のみ) ──
+        // std::vector は Audio Thread 外なので規約上問題なし。
+        // サイズは最大でも数千要素 (L2 で大きくなるが Message Thread で許容範囲)。
+        std::vector<double> gain(cSize, 1.0);
+
+        // ── HC ゲイン ──
+        {
+            const int kStart = static_cast<int>(std::round(hcFcStart * N / fs));
+            const int kEnd   = std::min(halfN,
+                                        static_cast<int>(std::round(hcFcEnd * N / fs)));
+
+            for (int k = 0; k < cSize; ++k)
+            {
+                if (k <= kStart)
+                {
+                    // パスバンド: ゲイン 1.0 (初期値のまま)
+                }
+                else if (k <= kEnd)
+                {
+                    // ロールオフ域: [kStart+1, kEnd]
+                    const double denom = static_cast<double>(kEnd - kStart);
+                    const double x     = static_cast<double>(k - kStart) / denom; // [0,1]
+
+                    switch (spec.hcMode)
+                    {
+                    case HCMode::Sharp:
+                        // x^8 に基づくローパス近似 (Butterworth 急峻)
+                        gain[k] = 1.0 / std::sqrt(1.0 + std::pow(x, 8.0));
+                        break;
+                    case HCMode::Natural:
+                        // コサインクロスフェード (Hann 窓片側, 位相特性良好)
+                        gain[k] = 0.5 * (1.0 + std::cos(
+                            juce::MathConstants<double>::pi * x));
+                        break;
+                    case HCMode::Soft:
+                        // ガウス型 (-60dB を kEnd 付近に設定)
+                        gain[k] = std::exp(-4.60517 * x * x);
+                        break;
+                    }
+                }
+                else
+                {
+                    // ストップバンド (kEnd より上): ゲイン 0.0
+                    gain[k] = 0.0;
+                }
+            }
+        }
+
+        // ── LC ゲイン (既存 HC ゲインに乗算) ──
+        {
+            const int kEnd   = static_cast<int>(std::round(lcFcEnd   * N / fs));
+            const int kStart = static_cast<int>(std::round(lcFcStart * N / fs));
+
+            for (int k = 0; k < cSize; ++k)
+            {
+                if (k <= kEnd)
+                {
+                    // DC ～ lcFcEnd: ゲイン 0.0
+                    gain[k] = 0.0;
+                }
+                else if (k < kStart)
+                {
+                    // ロールオン域: [lcFcEnd+1, lcFcStart-1]
+                    const double denom = static_cast<double>(
+                        std::max(1, kStart - kEnd));
+                    const double x     = static_cast<double>(k - kEnd) / denom; // [0,1)
+                    // コサインロールオン (0→1)
+                    const double g_lc  = 0.5 * (1.0 - std::cos(
+                        juce::MathConstants<double>::pi * x));
+                    gain[k] *= g_lc;
+                }
+                // k >= kStart: LC ゲイン 1.0 → 乗算不要 (HC ゲインのみ)
+            }
+        }
+
+        // ── 全パーティションの irFreqDomain に gain[] を適用 ──
+        // MKL VML vdMul を使用してベクトル化乗算 (Message Thread のみ)。
+        //
+        // interleaved complex 形式: [re0, im0, re1, im1, ...]
+        // ビン k に対して gain[k] を re[k] と im[k] の両方へ適用するため、
+        // gainIL[2k] = gainIL[2k+1] = gain[k] とした interleaved ゲイン配列を
+        // 一度構築し、全パーティションに vdMul で一括適用する。
+        //
+        // std::vector は Message Thread での一時バッファ用途として規約上問題なし。
+        // vdMul のインプレース演算 (y == a) は MKL 規約で許可されている。
+        {
+            std::vector<double> gainIL(cSize * 2);
+            for (int k = 0; k < cSize; ++k)
+                gainIL[2 * k] = gainIL[2 * k + 1] = gain[k];
+
+            for (int p = 0; p < l.numParts; ++p)
+            {
+                double* slot = l.irFreqDomain + p * stride;
+                vdMul(cSize * 2, slot, gainIL.data(), slot);
+            }
+        }
+    }
+}
+
+//==============================================================================
 void MKLNonUniformConvolver::releaseAllLayers() noexcept
 {
     for (int i = 0; i < kNumLayers; ++i)
@@ -100,7 +248,8 @@ void MKLNonUniformConvolver::releaseAllLayers() noexcept
 //==============================================================================
 // SetImpulse  ─ Message Thread のみ
 //==============================================================================
-bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int blockSize, double scale)
+bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int blockSize, double scale,
+                                        const FilterSpec* filterSpec)
 {
     m_ready.store(false, std::memory_order_release);
 
@@ -359,6 +508,12 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
     m_latency = m_layers[0].partSize;  // Layer0 の partSize = 最低遅延
 
+    // ── 出力周波数フィルターを irFreqDomain に焼き込む (Message Thread のみ) ──
+    // filterSpec が nullptr の場合はスルー (既存動作と完全互換)。
+    // Audio Thread の追加コストはゼロ (計算済みゲインが irFreqDomain に乗算済み)。
+    if (filterSpec != nullptr)
+        applySpectrumFilter(*filterSpec);
+
     m_ready.store(true, std::memory_order_release);
     return true;
 }
@@ -404,11 +559,79 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
         const double* srcA = fdlBase + lineIdx * l.partStride;  // FDL[p]
         const double* srcB = irBase  + p       * l.partStride;  // IR[p]
 
+        // ── パーティション先読み (次の p のFDL/IR スロットをキャッシュへ引き出す) ──
+        // 次パーティションのデータはこのパーティションの内側ループ実行中に
+        // L3→L2 へ prefetch される (T1: L2キャッシュターゲット)。
+        if (p + 1 < l.numPartsIR)
+        {
+            const int nli = (l.fdlIndex - (p + 1) + l.numParts) & l.fdlMask;
+            _mm_prefetch((const char*)(fdlBase + nli * l.partStride), _MM_HINT_T1);
+            _mm_prefetch((const char*)(irBase  + (p + 1) * l.partStride), _MM_HINT_T1);
+        }
+
         int k = 0;
 
-        // 4 複素数 (= 8 double) を 1 ループで処理 (AVX2)
-        const int vEnd = (l.complexSize / 4) * 4;
-        for (; k < vEnd; k += 4)
+        // ── 8 複素数 (= 16 double) を 1 ループで処理 (AVX2 8-wide unroll) ──
+        // 2 組の acc/a/b ペアをアウトオブオーダー実行で並列投入し
+        // FMA パイプラインのスループットを最大化する。
+        const int vEnd8 = (l.complexSize / 8) * 8;
+        const int vEnd4 = (l.complexSize / 4) * 4;
+
+        for (; k < vEnd8; k += 8)
+        {
+            // 内側ループ先読み (T0: L1キャッシュターゲット, 2 iterations 先)
+            _mm_prefetch((const char*)(srcA + 2 * k + 64), _MM_HINT_T0);
+            _mm_prefetch((const char*)(srcB + 2 * k + 64), _MM_HINT_T0);
+
+            // ── 複素 k..k+3 ──
+            __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
+            __m256d acc1 = _mm256_load_pd(dst  + 2 * k + 4);
+            __m256d a0   = _mm256_load_pd(srcA + 2 * k);
+            __m256d a1   = _mm256_load_pd(srcA + 2 * k + 4);
+            __m256d b0   = _mm256_load_pd(srcB + 2 * k);
+            __m256d b1   = _mm256_load_pd(srcB + 2 * k + 4);
+
+            __m256d a0_re = _mm256_movedup_pd(a0);
+            __m256d a0_im = _mm256_permute_pd(a0, 0xF);
+            acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
+            __m256d b0_sw = _mm256_permute_pd(b0, 0x5);
+            acc0 = _mm256_addsub_pd(acc0, _mm256_mul_pd(a0_im, b0_sw));
+
+            __m256d a1_re = _mm256_movedup_pd(a1);
+            __m256d a1_im = _mm256_permute_pd(a1, 0xF);
+            acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
+            __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
+            acc1 = _mm256_addsub_pd(acc1, _mm256_mul_pd(a1_im, b1_sw));
+
+            _mm256_store_pd(dst + 2 * k,     acc0);
+            _mm256_store_pd(dst + 2 * k + 4, acc1);
+
+            // ── 複素 k+4..k+7 ──
+            __m256d acc2 = _mm256_load_pd(dst  + 2 * k + 8);
+            __m256d acc3 = _mm256_load_pd(dst  + 2 * k + 12);
+            __m256d a2   = _mm256_load_pd(srcA + 2 * k + 8);
+            __m256d a3   = _mm256_load_pd(srcA + 2 * k + 12);
+            __m256d b2   = _mm256_load_pd(srcB + 2 * k + 8);
+            __m256d b3   = _mm256_load_pd(srcB + 2 * k + 12);
+
+            __m256d a2_re = _mm256_movedup_pd(a2);
+            __m256d a2_im = _mm256_permute_pd(a2, 0xF);
+            acc2 = _mm256_fmadd_pd(a2_re, b2, acc2);
+            __m256d b2_sw = _mm256_permute_pd(b2, 0x5);
+            acc2 = _mm256_addsub_pd(acc2, _mm256_mul_pd(a2_im, b2_sw));
+
+            __m256d a3_re = _mm256_movedup_pd(a3);
+            __m256d a3_im = _mm256_permute_pd(a3, 0xF);
+            acc3 = _mm256_fmadd_pd(a3_re, b3, acc3);
+            __m256d b3_sw = _mm256_permute_pd(b3, 0x5);
+            acc3 = _mm256_addsub_pd(acc3, _mm256_mul_pd(a3_im, b3_sw));
+
+            _mm256_store_pd(dst + 2 * k + 8,  acc2);
+            _mm256_store_pd(dst + 2 * k + 12, acc3);
+        }
+
+        // 4-wide 残余 (vEnd8 〜 vEnd4)
+        for (; k < vEnd4; k += 4)
         {
             __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
             __m256d acc1 = _mm256_load_pd(dst  + 2 * k + 4);
@@ -417,13 +640,10 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
             __m256d b0   = _mm256_load_pd(srcB + 2 * k);
             __m256d b1   = _mm256_load_pd(srcB + 2 * k + 4);
 
-            // 複素乗算積算: acc += a * b
-            // Re(a*b) = Re(a)*Re(b) - Im(a)*Im(b)
-            // Im(a*b) = Re(a)*Im(b) + Im(a)*Re(b)
-            __m256d a0_re = _mm256_movedup_pd(a0);      // [Ar0, Ar0, Ar1, Ar1]
-            __m256d a0_im = _mm256_permute_pd(a0, 0xF); // [Ai0, Ai0, Ai1, Ai1]
+            __m256d a0_re = _mm256_movedup_pd(a0);
+            __m256d a0_im = _mm256_permute_pd(a0, 0xF);
             acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
-            __m256d b0_sw = _mm256_permute_pd(b0, 0x5); // [Bi0, Br0, Bi1, Br1]
+            __m256d b0_sw = _mm256_permute_pd(b0, 0x5);
             acc0 = _mm256_addsub_pd(acc0, _mm256_mul_pd(a0_im, b0_sw));
 
             __m256d a1_re = _mm256_movedup_pd(a1);
@@ -435,7 +655,8 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
             _mm256_store_pd(dst + 2 * k,     acc0);
             _mm256_store_pd(dst + 2 * k + 4, acc1);
         }
-        // スカラーフォールバック (残り要素 / AVX2 非対応環境)
+
+        // スカラーフォールバック (残り要素)
         for (; k < l.complexSize; ++k)
         {
             const double ar = srcA[2 * k],     ai = srcA[2 * k + 1];
@@ -662,8 +883,77 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                 const double* srcA = fdlBase + lineIdx * l.partStride;  // FDL[p]
                 const double* srcB = irBase  + p       * l.partStride;  // IR[p]
 
+                // ── パーティション先読み ──
+                // 次パーティションの FDL/IR スロットを L3→L2 に引き出す (T1)。
+                // L1/L2 は partSize が大きく (512〜4096 サンプル) partStride も大きい
+                // ため、ハードウェア prefetcher のストライド学習が困難。
+                // ここで明示的に prefetch することでレイテンシを隠蔽できる。
+                if (p + 1 < endPart)
+                {
+                    const int nli = (baseFdlIdx - (p + 1) + l.numParts) & l.fdlMask;
+                    _mm_prefetch((const char*)(fdlBase + nli * l.partStride), _MM_HINT_T1);
+                    _mm_prefetch((const char*)(irBase  + (p + 1) * l.partStride), _MM_HINT_T1);
+                }
+
                 int k = 0;
+
+                // ── 8 複素数 (= 16 double) 8-wide AVX2 アンロール ──
+                const int vEnd8 = (l.complexSize / 8) * 8;
                 const int vEnd4 = (l.complexSize / 4) * 4;
+
+                for (; k < vEnd8; k += 8)
+                {
+                    _mm_prefetch((const char*)(srcA + 2 * k + 64), _MM_HINT_T0);
+                    _mm_prefetch((const char*)(srcB + 2 * k + 64), _MM_HINT_T0);
+
+                    // 複素 k..k+3
+                    __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
+                    __m256d acc1 = _mm256_load_pd(dst  + 2 * k + 4);
+                    __m256d a0   = _mm256_load_pd(srcA + 2 * k);
+                    __m256d a1   = _mm256_load_pd(srcA + 2 * k + 4);
+                    __m256d b0   = _mm256_load_pd(srcB + 2 * k);
+                    __m256d b1   = _mm256_load_pd(srcB + 2 * k + 4);
+
+                    __m256d a0_re = _mm256_movedup_pd(a0);
+                    __m256d a0_im = _mm256_permute_pd(a0, 0xF);
+                    acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
+                    __m256d b0_sw = _mm256_permute_pd(b0, 0x5);
+                    acc0 = _mm256_addsub_pd(acc0, _mm256_mul_pd(a0_im, b0_sw));
+
+                    __m256d a1_re = _mm256_movedup_pd(a1);
+                    __m256d a1_im = _mm256_permute_pd(a1, 0xF);
+                    acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
+                    __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
+                    acc1 = _mm256_addsub_pd(acc1, _mm256_mul_pd(a1_im, b1_sw));
+
+                    _mm256_store_pd(dst + 2 * k,     acc0);
+                    _mm256_store_pd(dst + 2 * k + 4, acc1);
+
+                    // 複素 k+4..k+7
+                    __m256d acc2 = _mm256_load_pd(dst  + 2 * k + 8);
+                    __m256d acc3 = _mm256_load_pd(dst  + 2 * k + 12);
+                    __m256d a2   = _mm256_load_pd(srcA + 2 * k + 8);
+                    __m256d a3   = _mm256_load_pd(srcA + 2 * k + 12);
+                    __m256d b2   = _mm256_load_pd(srcB + 2 * k + 8);
+                    __m256d b3   = _mm256_load_pd(srcB + 2 * k + 12);
+
+                    __m256d a2_re = _mm256_movedup_pd(a2);
+                    __m256d a2_im = _mm256_permute_pd(a2, 0xF);
+                    acc2 = _mm256_fmadd_pd(a2_re, b2, acc2);
+                    __m256d b2_sw = _mm256_permute_pd(b2, 0x5);
+                    acc2 = _mm256_addsub_pd(acc2, _mm256_mul_pd(a2_im, b2_sw));
+
+                    __m256d a3_re = _mm256_movedup_pd(a3);
+                    __m256d a3_im = _mm256_permute_pd(a3, 0xF);
+                    acc3 = _mm256_fmadd_pd(a3_re, b3, acc3);
+                    __m256d b3_sw = _mm256_permute_pd(b3, 0x5);
+                    acc3 = _mm256_addsub_pd(acc3, _mm256_mul_pd(a3_im, b3_sw));
+
+                    _mm256_store_pd(dst + 2 * k + 8,  acc2);
+                    _mm256_store_pd(dst + 2 * k + 12, acc3);
+                }
+
+                // 4-wide 残余
                 for (; k < vEnd4; k += 4)
                 {
                     __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
@@ -688,6 +978,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     _mm256_store_pd(dst + 2 * k,     acc0);
                     _mm256_store_pd(dst + 2 * k + 4, acc1);
                 }
+
                 // スカラーフォールバック
                 for (; k < l.complexSize; ++k)
                 {

@@ -105,6 +105,18 @@ private:
     static constexpr double PEAK_HOLD_SEC = 1.0;
     static constexpr float PEAK_DECAY_DB_PER_SEC = 15.0f;
 
+    // ── レベルメーターのピークホールド設定 ──
+    static constexpr double LEVEL_PEAK_HOLD_SEC          = 3.0;   // ピーク保持時間 (秒)
+    static constexpr float  LEVEL_PEAK_DECAY_DB_PER_SEC  = 20.0f; // 保持後の減衰速度 (dB/秒)
+
+    // ── レベルメーターピーク値 (UI Thread のみアクセス) ──
+    float  inputPeakDb         = METER_MIN_DB;
+    float  outputPeakDb        = METER_MIN_DB;
+    double inputPeakHoldTimer  = 0.0; // 残り保持時間 (秒)
+    double outputPeakHoldTimer = 0.0;
+
+    void resetLevelPeaks() noexcept;
+
     // ── レベルメーターの幅 ──
     static constexpr int LEVEL_METER_WIDTH = 24;  // 各バーの幅(px)
 
@@ -137,7 +149,7 @@ private:
     float freqToX(float freq, float plotWidth) const;
     float dbToY  (float db,   float plotHeight) const;
     juce::Colour getLevelColour(float normalizedLevel) const;
-    void drawLevelMeterBar(juce::Graphics& g, const juce::Rectangle<int>& barRect, float db, const juce::String& title);
+    void drawLevelMeterBar(juce::Graphics& g, const juce::Rectangle<int>& barRect, float db, float peakDb, const juce::String& title);
 
     // ── サブ描画メソッド ──
     void paintSpectrum   (juce::Graphics& g, const juce::Rectangle<int>& area);

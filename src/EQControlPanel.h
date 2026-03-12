@@ -75,6 +75,15 @@ private:
     juce::TextButton   resetButton;             // 全バンドリセット
     juce::ComboBox     presetSelector;          // プリセット選択
 
+    // ── 出力周波数フィルター UI (② EQ最終段の場合に使用) ──────────
+    juce::Label      eqLpfLabel;                       // "LPF:" ラベル
+    juce::TextButton eqLpfSharpButton   { "Sharp"   }; // Linkwitz-Riley 急峻
+    juce::TextButton eqLpfNaturalButton { "Natural" }; // Linkwitz-Riley 標準
+    juce::TextButton eqLpfSoftButton    { "Soft"    }; // 穏やか Q=0.5
+
+    // ボタン状態更新ヘルパー
+    void updateLPFModeButtons();
+
     // 周波数範囲の定数 (20バンド)
     struct FreqRange { float minHz; float maxHz; };
     static constexpr FreqRange FREQ_RANGES[EQProcessor::NUM_BANDS] = {

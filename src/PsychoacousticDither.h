@@ -307,16 +307,28 @@ public:
                 _mm_store_pd(quantized, v_quantized); // [quantizedL, quantizedR]
 
                 // Error and State Update (9タップ シフトレジスタ)
+                // 【AVX2最適化】逐次代入 (8回) を 256bit ベクトルストア 2 回に置換。
+                // 事前に z[0..3]/z[4..7] を __m256d にロードしてから
+                // z[1..4]/z[5..8] へストアすることで重複領域の競合を回避する。
+                // (ロードが 2 ストアより先に完了するため正しい shift が保証される)
                 const double errorL = tmpL - quantized[0];
-                zL[8]=zL[7]; zL[7]=zL[6]; zL[6]=zL[5]; zL[5]=zL[4];
-                zL[4]=zL[3]; zL[3]=zL[2]; zL[2]=zL[1]; zL[1]=zL[0];
-                zL[0] = killDenormal(errorL);
+                {
+                    __m256d zL_lo = _mm256_loadu_pd(zL);      // zL[0..3]
+                    __m256d zL_hi = _mm256_loadu_pd(zL + 4);  // zL[4..7]
+                    _mm256_storeu_pd(zL + 1, zL_lo);           // zL[1..4] ← zL[0..3]
+                    _mm256_storeu_pd(zL + 5, zL_hi);           // zL[5..8] ← zL[4..7]
+                    zL[0] = killDenormal(errorL);
+                }
                 dataL[i] = quantized[0];
 
                 const double errorR = tmpR - quantized[1];
-                zR[8]=zR[7]; zR[7]=zR[6]; zR[6]=zR[5]; zR[5]=zR[4];
-                zR[4]=zR[3]; zR[3]=zR[2]; zR[2]=zR[1]; zR[1]=zR[0];
-                zR[0] = killDenormal(errorR);
+                {
+                    __m256d zR_lo = _mm256_loadu_pd(zR);
+                    __m256d zR_hi = _mm256_loadu_pd(zR + 4);
+                    _mm256_storeu_pd(zR + 1, zR_lo);
+                    _mm256_storeu_pd(zR + 5, zR_hi);
+                    zR[0] = killDenormal(errorR);
+                }
                 dataR[i] = quantized[1];
             }
         }
@@ -341,9 +353,14 @@ public:
                 const double quantized = _mm_cvtsd_f64(v) * scale;
 
                 const double error = tmp - quantized;
-                zL[8]=zL[7]; zL[7]=zL[6]; zL[6]=zL[5]; zL[5]=zL[4];
-                zL[4]=zL[3]; zL[3]=zL[2]; zL[2]=zL[1]; zL[1]=zL[0];
-                zL[0] = killDenormal(error);
+                // 【AVX2最適化】シフトレジスタ (モノラル)
+                {
+                    __m256d zL_lo = _mm256_loadu_pd(zL);
+                    __m256d zL_hi = _mm256_loadu_pd(zL + 4);
+                    _mm256_storeu_pd(zL + 1, zL_lo);
+                    _mm256_storeu_pd(zL + 5, zL_hi);
+                    zL[0] = killDenormal(error);
+                }
                 dataL[i] = quantized;
             }
         }
@@ -381,10 +398,14 @@ private:
         // これは実質的に量子化ノイズを減算することになります (1 - H(z) トポロジー)。
         const double error = tmp - quantized;
 
-        // 状態の更新 (9タップ シフトレジスタ)
-        z[8]=z[7]; z[7]=z[6]; z[6]=z[5]; z[5]=z[4];
-        z[4]=z[3]; z[3]=z[2]; z[2]=z[1]; z[1]=z[0];
-        z[0] = killDenormal(error);
+        // 状態の更新 (9タップ シフトレジスタ) 【AVX2最適化】
+        {
+            __m256d z_lo = _mm256_loadu_pd(z);
+            __m256d z_hi = _mm256_loadu_pd(z + 4);
+            _mm256_storeu_pd(z + 1, z_lo);
+            _mm256_storeu_pd(z + 5, z_hi);
+            z[0] = killDenormal(error);
+        }
 
         return quantized;
     }

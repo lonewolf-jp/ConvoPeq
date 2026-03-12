@@ -33,6 +33,7 @@
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
 #include "PsychoacousticDither.h"
+#include "OutputFilter.h"
 
 class AudioEngine : public juce::AudioSource,
                   public juce::ChangeBroadcaster,
@@ -175,6 +176,21 @@ public:
 
     void setOversamplingType(OversamplingType type);
     OversamplingType getOversamplingType() const;
+
+    // ────────────────────────────────────────────────────────────────
+    // 出力周波数フィルター設定 (Thread-safe)
+    //
+    // convHCMode / convLCMode: ① コンボルバー最終段の場合に使用
+    // eqLPFMode              : ② EQ最終段の場合に使用
+    // ────────────────────────────────────────────────────────────────
+    void setConvHCFilterMode(convo::HCMode mode) noexcept;
+    convo::HCMode getConvHCFilterMode() const noexcept;
+
+    void setConvLCFilterMode(convo::LCMode mode) noexcept;
+    convo::LCMode getConvLCFilterMode() const noexcept;
+
+    void setEqLPFFilterMode(convo::HCMode mode) noexcept;
+    convo::HCMode getEqLPFFilterMode() const noexcept;
 
 private:
     //==============================================================================
@@ -350,6 +366,10 @@ private:
             float saturationAmount;
         double inputHeadroomGain;
             double outputMakeupGain;
+            // 出力周波数フィルターモード
+            convo::HCMode convHCMode;  // ① ハイカットモード
+            convo::LCMode convLCMode;  // ① ローカットモード
+            convo::HCMode eqLPFMode;   // ② EQローパスモード
         };
 
 DSPCore();
@@ -384,6 +404,8 @@ DSPCore();
         UltraHighRateDCBlocker inputDCBlockerL, inputDCBlockerR;
         UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
         ::convo::PsychoacousticDither dither;
+        // 出力周波数フィルター (① ハイカット/ローカット / ② ローパス/ハイパス)
+        convo::OutputFilter outputFilter;
 
         CustomInputOversampler oversampling;
         size_t oversamplingFactor = 1;
@@ -413,9 +435,21 @@ DSPCore();
         void pushToFifo(const juce::dsp::AudioBlock<const double>& block,
                         juce::AbstractFifo& audioFifo,
                         juce::AudioBuffer<float>& audioFifoBuffer) const noexcept;
-        float processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples, double headroomGain) noexcept;
+        // analyzerInputTap=true の場合、ヘッドルームゲイン適用前の raw 入力を
+        // audioFifo / audioFifoBuffer にプッシュする。
+        // これにより、インプットスペアナ/レベルメーターがヘッドルーム非適用の
+        // "入力されたデータそのもの" を表示できる。
+        float processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples,
+                           double headroomGain,
+                           bool analyzerInputTap,
+                           juce::AbstractFifo& audioFifo,
+                           juce::AudioBuffer<float>& audioFifoBuffer) noexcept;
         void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
-        float processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples, double headroomGain) noexcept;
+        float processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples,
+                                 double headroomGain,
+                                 bool analyzerInputTap,
+                                 juce::AbstractFifo& audioFifo,
+                                 juce::AudioBuffer<float>& audioFifoBuffer) noexcept;
         void processOutputDouble(juce::AudioBuffer<double>& buffer, int numSamples) noexcept;
     private:
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
@@ -464,6 +498,11 @@ DSPCore();
     std::atomic<float> outputMakeupDb { 15.0f };
     std::atomic<double> outputMakeupGain { 5.623413251903491 }; // +15dB
     std::atomic<int> rebuildGeneration { 0 }; // 非同期リビルドの競合防止用
+
+    // 出力周波数フィルターモード (Thread-safe)
+    std::atomic<convo::HCMode> convHCFilterMode { convo::HCMode::Natural }; // ① ハイカット
+    std::atomic<convo::LCMode> convLCFilterMode { convo::LCMode::Natural }; // ① ローカット
+    std::atomic<convo::HCMode> eqLPFFilterMode  { convo::HCMode::Natural }; // ② EQローパス
 
     // dB変換時の下限値
     static constexpr float LEVEL_METER_MIN_DB  = -120.0f;

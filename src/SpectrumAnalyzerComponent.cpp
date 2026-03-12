@@ -319,21 +319,47 @@ void SpectrumAnalyzerComponent::timerCallback()
         }
     }
 
+    // ── レベルメーターのピークホールド更新 ──
+    {
+        const float inDb  = engine.getInputLevel();
+        const float outDb = engine.getOutputLevel();
 
+        if (inDb > inputPeakDb)
+        {
+            inputPeakDb = inDb;
+            inputPeakHoldTimer = LEVEL_PEAK_HOLD_SEC;
+        }
+        else if (inputPeakHoldTimer > 0.0)
+        {
+            inputPeakHoldTimer = std::max(0.0, inputPeakHoldTimer - dt);
+        }
+        else
+        {
+            inputPeakDb -= LEVEL_PEAK_DECAY_DB_PER_SEC * static_cast<float>(dt);
+            if (inputPeakDb < METER_MIN_DB) inputPeakDb = METER_MIN_DB;
+        }
 
-
-
-
+        if (outDb > outputPeakDb)
+        {
+            outputPeakDb = outDb;
+            outputPeakHoldTimer = LEVEL_PEAK_HOLD_SEC;
+        }
+        else if (outputPeakHoldTimer > 0.0)
+        {
+            outputPeakHoldTimer = std::max(0.0, outputPeakHoldTimer - dt);
+        }
+        else
+        {
+            outputPeakDb -= LEVEL_PEAK_DECAY_DB_PER_SEC * static_cast<float>(dt);
+            if (outputPeakDb < METER_MIN_DB) outputPeakDb = METER_MIN_DB;
+        }
+    }
 
     repaint();
 }
 
 void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
-
-
-
-
     // AudioEngine (EQProcessor, ConvolverProcessor) からの変更通知
     if (source == &engine || source == &engine.getEQProcessor())
     {
@@ -347,6 +373,9 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
         // ソース選択ボタンの表示更新 (プリセットロード時など)
         if (source == &engine)
             updateSourceButtonText();
+
+        // 入力データ変更・オーバーサンプリング変更・IRファイル変更時にピークをリセット
+        resetLevelPeaks();
     }
 }
 
@@ -882,14 +911,14 @@ void SpectrumAnalyzerComponent::paintLevelMeter(juce::Graphics& g, const juce::R
     // ── OUT バー ──
     auto outBarArea = meterBounds.withX(meterBounds.getX() + barW + gap).withWidth(barW);
 
-    drawLevelMeterBar(g, inBarArea,  inDb,  "IN");
-    drawLevelMeterBar(g, outBarArea, outDb, "OUT");
+    drawLevelMeterBar(g, inBarArea,  inDb,  inputPeakDb,  "IN");
+    drawLevelMeterBar(g, outBarArea, outDb, outputPeakDb, "OUT");
 }
 
 //--------------------------------------------------------------
 // drawLevelMeterBar  ──  単一のレベルメーターバーを描画
 //--------------------------------------------------------------
-void SpectrumAnalyzerComponent::drawLevelMeterBar(juce::Graphics& g, const juce::Rectangle<int>& barRect, float db, const juce::String& title)
+void SpectrumAnalyzerComponent::drawLevelMeterBar(juce::Graphics& g, const juce::Rectangle<int>& barRect, float db, float peakDb, const juce::String& title)
 {
     const int labelH = 16;
 
@@ -961,13 +990,50 @@ void SpectrumAnalyzerComponent::drawLevelMeterBar(juce::Graphics& g, const juce:
                        static_cast<float>(fillArea.getWidth()), 1.5f);
         }
 
-        // 数値表示（下部）
+        // ── ピークホールド針 ──
+        // 白い水平線でピーク位置を表示。METER_MAX_DB を超える場合は上端付近に赤で表示。
+        if (peakDb > METER_MIN_DB)
+        {
+            const float peakClamped = std::max(METER_MIN_DB, std::min(METER_MAX_DB, peakDb));
+            const float peakNorm    = (peakClamped - METER_MIN_DB) / (METER_MAX_DB - METER_MIN_DB);
+            const float peakY       = static_cast<float>(fillArea.getBottom())
+                                    - peakNorm * static_cast<float>(fillArea.getHeight());
+
+            const bool isClipping   = (peakDb >= 0.0f);
+            g.setColour(isClipping ? juce::Colours::red : juce::Colours::white.withAlpha(0.9f));
+            g.fillRect(static_cast<float>(fillArea.getX()), peakY - 1.0f,
+                       static_cast<float>(fillArea.getWidth()), 2.0f);
+        }
+
+        // 数値表示（下部）: 現在値とピーク値を2行表示
         g.setColour(juce::Colours::white.withAlpha(0.8f));
         g.setFont(juce::FontOptions(9.0f));
-        juce::String dbStr = juce::String(db, 1) + "dB";
+        const juce::String dbStr = juce::String(db, 1) + "dB";
         g.drawText(dbStr, barRect.withTop(barRect.getBottom() - labelH),
                    juce::Justification::centred);
+        // ピーク値を小さく表示（バー上部）
+        if (peakDb > METER_MIN_DB)
+        {
+            g.setColour((peakDb >= 0.0f) ? juce::Colours::red.withAlpha(0.9f)
+                                         : juce::Colours::lightyellow.withAlpha(0.8f));
+            g.setFont(juce::FontOptions(8.0f));
+            const juce::String pkStr = "Pk:" + juce::String(peakDb, 1);
+            g.drawText(pkStr, barRect.withHeight(labelH * 2).withY(barRect.getY() + labelH),
+                       juce::Justification::centred);
+        }
     }
+}
+
+//--------------------------------------------------------------
+// resetLevelPeaks  ──  レベルメーターのピークホールドをリセット
+// 呼び出しタイミング: 入力データ変更, オーバーサンプリング変更, IR変更 (changeListenerCallback)
+//--------------------------------------------------------------
+void SpectrumAnalyzerComponent::resetLevelPeaks() noexcept
+{
+    inputPeakDb         = METER_MIN_DB;
+    outputPeakDb        = METER_MIN_DB;
+    inputPeakHoldTimer  = 0.0;
+    outputPeakHoldTimer = 0.0;
 }
 
 //--------------------------------------------------------------

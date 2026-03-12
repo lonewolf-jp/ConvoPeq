@@ -86,6 +86,108 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     // マウスクリックイベントを受け取り、IR再リンク機能を実現する
     irInfoLabel.addMouseListener(this, false);
     addAndMakeVisible(irInfoLabel);
+
+    //----------------------------------------------------------
+    // 出力周波数フィルター UI ── ① コンボルバー最終段の場合に使用
+    //----------------------------------------------------------
+
+    // ── ハイカットフィルターラベル ──
+    hcfLabel.setText("HCF:", juce::dontSendNotification);
+    hcfLabel.setJustificationType(juce::Justification::centredRight);
+    hcfLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    hcfLabel.setTooltip("High-Cut Filter (active when Convolver is the last stage)");
+    addAndMakeVisible(hcfLabel);
+
+    // ── ハイカット: Sharp / Natural / Soft ラジオグループ ──
+    constexpr int HC_GROUP_ID = 5001;
+
+    hcfSharpButton.setClickingTogglesState(true);
+    hcfSharpButton.setRadioGroupId(HC_GROUP_ID);
+    hcfSharpButton.setColour(juce::TextButton::buttonOnColourId,  juce::Colours::steelblue);
+    hcfSharpButton.setColour(juce::TextButton::buttonColourId,    juce::Colours::darkgrey.withAlpha(0.7f));
+    hcfSharpButton.setColour(juce::TextButton::textColourOffId,   juce::Colours::white);
+    hcfSharpButton.setTooltip("Sharp: Butterworth 4th-order (steep cutoff, preserves signal near 18kHz)");
+    hcfSharpButton.onClick = [this] {
+        if (hcfSharpButton.getToggleState())
+        {
+            engine.setConvHCFilterMode(convo::HCMode::Sharp);
+            updateFilterModeButtons();
+        }
+    };
+    addAndMakeVisible(hcfSharpButton);
+
+    hcfNaturalButton.setClickingTogglesState(true);
+    hcfNaturalButton.setRadioGroupId(HC_GROUP_ID);
+    hcfNaturalButton.setColour(juce::TextButton::buttonOnColourId,  juce::Colours::steelblue);
+    hcfNaturalButton.setColour(juce::TextButton::buttonColourId,    juce::Colours::darkgrey.withAlpha(0.7f));
+    hcfNaturalButton.setColour(juce::TextButton::textColourOffId,   juce::Colours::white);
+    hcfNaturalButton.setTooltip("Natural: Linkwitz-Riley 4th-order (default, excellent phase response)");
+    hcfNaturalButton.onClick = [this] {
+        if (hcfNaturalButton.getToggleState())
+        {
+            engine.setConvHCFilterMode(convo::HCMode::Natural);
+            updateFilterModeButtons();
+        }
+    };
+    addAndMakeVisible(hcfNaturalButton);
+
+    hcfSoftButton.setClickingTogglesState(true);
+    hcfSoftButton.setRadioGroupId(HC_GROUP_ID);
+    hcfSoftButton.setColour(juce::TextButton::buttonOnColourId,  juce::Colours::steelblue);
+    hcfSoftButton.setColour(juce::TextButton::buttonColourId,    juce::Colours::darkgrey.withAlpha(0.7f));
+    hcfSoftButton.setColour(juce::TextButton::textColourOffId,   juce::Colours::white);
+    hcfSoftButton.setTooltip("Soft: 2nd-order Q=0.5 (gentle slope, no time-domain smearing)");
+    hcfSoftButton.onClick = [this] {
+        if (hcfSoftButton.getToggleState())
+        {
+            engine.setConvHCFilterMode(convo::HCMode::Soft);
+            updateFilterModeButtons();
+        }
+    };
+    addAndMakeVisible(hcfSoftButton);
+
+    // ── ローカットフィルターラベル ──
+    lcfLabel.setText("LCF:", juce::dontSendNotification);
+    lcfLabel.setJustificationType(juce::Justification::centredRight);
+    lcfLabel.setColour(juce::Label::textColourId, juce::Colours::lightcoral);
+    lcfLabel.setTooltip("Low-Cut Filter (active when Convolver is the last stage)");
+    addAndMakeVisible(lcfLabel);
+
+    // ── ローカット: Natural / Soft ラジオグループ ──
+    constexpr int LC_GROUP_ID = 5002;
+
+    lcfNaturalButton.setClickingTogglesState(true);
+    lcfNaturalButton.setRadioGroupId(LC_GROUP_ID);
+    lcfNaturalButton.setColour(juce::TextButton::buttonOnColourId,  juce::Colours::indianred);
+    lcfNaturalButton.setColour(juce::TextButton::buttonColourId,    juce::Colours::darkgrey.withAlpha(0.7f));
+    lcfNaturalButton.setColour(juce::TextButton::textColourOffId,   juce::Colours::white);
+    lcfNaturalButton.setTooltip("Natural: Butterworth 2nd-order HPF at 18Hz");
+    lcfNaturalButton.onClick = [this] {
+        if (lcfNaturalButton.getToggleState())
+        {
+            engine.setConvLCFilterMode(convo::LCMode::Natural);
+            updateFilterModeButtons();
+        }
+    };
+    addAndMakeVisible(lcfNaturalButton);
+
+    lcfSoftButton.setClickingTogglesState(true);
+    lcfSoftButton.setRadioGroupId(LC_GROUP_ID);
+    lcfSoftButton.setColour(juce::TextButton::buttonOnColourId,  juce::Colours::indianred);
+    lcfSoftButton.setColour(juce::TextButton::buttonColourId,    juce::Colours::darkgrey.withAlpha(0.7f));
+    lcfSoftButton.setColour(juce::TextButton::textColourOffId,   juce::Colours::white);
+    lcfSoftButton.setTooltip("Soft: 2nd-order HPF Q=0.5 at 15Hz (gentler, sub-sonic removal)");
+    lcfSoftButton.onClick = [this] {
+        if (lcfSoftButton.getToggleState())
+        {
+            engine.setConvLCFilterMode(convo::LCMode::Soft);
+            updateFilterModeButtons();
+        }
+    };
+    addAndMakeVisible(lcfSoftButton);
+
+    // 現在の設定を反映
+    updateFilterModeButtons();
 }
 
 ConvolverControlPanel::~ConvolverControlPanel()
@@ -228,7 +330,39 @@ void ConvolverControlPanel::resized()
     irLengthLabel.setBounds(lengthRow.removeFromLeft(65));
     lengthRow.removeFromLeft(5);
     irLengthSlider.setBounds(lengthRow);
+
+    // --- 4行目: ハイカットフィルターモード ---
+    auto hcfRow = bounds.removeFromTop(26);
+    hcfLabel.setBounds(hcfRow.removeFromLeft(38).reduced(0, 3));
+    hcfRow.removeFromLeft(4);
+    hcfSharpButton.setBounds(hcfRow.removeFromLeft(52).reduced(2, 2));
+    hcfNaturalButton.setBounds(hcfRow.removeFromLeft(60).reduced(2, 2));
+    hcfSoftButton.setBounds(hcfRow.removeFromLeft(48).reduced(2, 2));
+
+    // --- 5行目: ローカットフィルターモード ---
+    auto lcfRow = bounds.removeFromTop(26);
+    lcfLabel.setBounds(lcfRow.removeFromLeft(38).reduced(0, 3));
+    lcfRow.removeFromLeft(4);
+    lcfNaturalButton.setBounds(lcfRow.removeFromLeft(60).reduced(2, 2));
+    lcfSoftButton.setBounds(lcfRow.removeFromLeft(48).reduced(2, 2));
+
     updateWaveformPath();
+}
+
+//--------------------------------------------------------------
+// updateFilterModeButtons
+// エンジンの現在設定にあわせてボタンのトグル状態を同期する
+//--------------------------------------------------------------
+void ConvolverControlPanel::updateFilterModeButtons()
+{
+    const auto hcMode = engine.getConvHCFilterMode();
+    hcfSharpButton  .setToggleState(hcMode == convo::HCMode::Sharp,   juce::dontSendNotification);
+    hcfNaturalButton.setToggleState(hcMode == convo::HCMode::Natural, juce::dontSendNotification);
+    hcfSoftButton   .setToggleState(hcMode == convo::HCMode::Soft,    juce::dontSendNotification);
+
+    const auto lcMode = engine.getConvLCFilterMode();
+    lcfNaturalButton.setToggleState(lcMode == convo::LCMode::Natural, juce::dontSendNotification);
+    lcfSoftButton   .setToggleState(lcMode == convo::LCMode::Soft,    juce::dontSendNotification);
 }
 
 //--------------------------------------------------------------
@@ -320,6 +454,7 @@ void ConvolverControlPanel::updateIRInfo()
     phaseChoiceBox.setSelectedId(convolver.getUseMinPhase() ? 2 : 1, juce::dontSendNotification);
     smoothingTimeSlider.setValue(convolver.getSmoothingTime() * 1000.0, juce::dontSendNotification);
     irLengthSlider.setValue(convolver.getTargetIRLength(), juce::dontSendNotification);
+    updateFilterModeButtons();
 
     if (convolver.isIRLoaded())
     {
