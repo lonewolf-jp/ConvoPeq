@@ -1025,11 +1025,15 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
             // clone() は古いパラメータで複製するため、ここでは使えない。
             // 新しい sampleRate/blockSize で再初期化する必要があるため、
             // MKL規約に準拠した方法で手動で構築する。
+            // [Bug 5 fix] newConv を try ブロック外で宣言し、irL/irR の aligned_malloc が
+            // std::bad_alloc を投げた場合でも catch 節で release() を呼べるようにする。
+            // (try スコープ内で宣言すると catch 節からアクセス不可 → リーク)
+            StereoConvolver* newConv = nullptr;
             try
             {
                 void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
                 new (mem) StereoConvolver();
-                auto* newConv = static_cast<StereoConvolver*>(mem);
+                newConv = static_cast<StereoConvolver*>(mem);
                 newConv->addRef();
 
                 convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
@@ -1055,10 +1059,17 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 {
                     DBG("ConvolverProcessor::prepareToPlay: NUC re-init failed (MKL alloc?). Keeping existing engine.");
                     newConv->release();
+                    newConv = nullptr;
                 }
             }
             catch (const std::bad_alloc&)
             {
+                // [Bug 5 fix] 例外発生時に newConv (refCount=1) を確実に解放する。
+                if (newConv != nullptr)
+                {
+                    newConv->release();
+                    newConv = nullptr;
+                }
                 DBG("ConvolverProcessor::prepareToPlay: NUC re-init failed (std::bad_alloc). Keeping existing engine.");
             }
         }
@@ -1258,10 +1269,10 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
     // [Bug E fix] originalIR は std::atomic<std::shared_ptr<T>> なので .load() でスナップショットを取得。
     // rebuildThread と Message Thread の同時アクセスによるデータレースを防ぐ。
     auto snap = originalIR.load();
-    if (snap && snap->getNumSamples() > 0 && originalIRSampleRate > 0.0)
+    if (snap && snap->getNumSamples() > 0 && originalIRSampleRate.load(std::memory_order_acquire) > 0.0)
     {
         // リビルドモードでローダーを作成し、同期的に実行
-        LoaderThread loader(*this, *snap, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
+        LoaderThread loader(*this, *snap, originalIRSampleRate.load(std::memory_order_acquire), currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale.load(std::memory_order_acquire));
         loader.externalCancellationCheck = shouldCancel;
         loader.runSynchronously();
     }
@@ -1457,7 +1468,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
             return true;
         }
         auto snapIR = originalIR.load();
-        if (!snapIR || snapIR->getNumSamples() == 0 || originalIRSampleRate <= 0.0)
+        if (!snapIR || snapIR->getNumSamples() == 0 || originalIRSampleRate.load(std::memory_order_acquire) <= 0.0)
         {
             isRebuilding.store(false, std::memory_order_release);
             return false;
@@ -1483,7 +1494,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     if (isRebuild)
     {
         auto snapIR2 = originalIR.load(); // [Bug E fix] 最新スナップショットを再取得
-        activeLoader = std::make_unique<LoaderThread>(*this, *snapIR2, originalIRSampleRate, currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale);
+        activeLoader = std::make_unique<LoaderThread>(*this, *snapIR2, originalIRSampleRate.load(std::memory_order_acquire), currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale.load(std::memory_order_acquire));
     }
     else
     {
@@ -1891,14 +1902,14 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     // サンプルレート変更時にリビルドできるよう、元のIR情報を共有する
     // [Bug E fix] std::atomic<shared_ptr>::store() でアトミックに代入。
     originalIR.store(other.originalIR.load());
-    originalIRSampleRate = other.originalIRSampleRate;
+    originalIRSampleRate.store(other.originalIRSampleRate.load(std::memory_order_acquire), std::memory_order_release);
     {
         const juce::ScopedLock sl(irFileLock);
         currentIrFile = other.currentIrFile;
     }
     irName = other.irName;
     irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
-    currentIRScale = other.currentIRScale;
+    currentIRScale.store(other.currentIRScale.load(std::memory_order_acquire), std::memory_order_release);
 
     // クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
     // SCはDSPCore::prepare()内のprepareToPlay、またはrebuildAllIRsSynchronousで生成する
@@ -2081,7 +2092,20 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     const bool needsConvolution = isSmoothing || targetMixValue > 0.001;
     const bool needsDrySignal   = isSmoothing || targetMixValue < 0.999;
 
-    const bool isCrossfading = (oldConv != nullptr && wetCrossfade.isSmoothing());
+    // [Bug 1 fix] wetCrossfade ペンディングリセットの処理。
+    // applyNewState() (Message Thread) は wetCrossfade フィールドへ直接書き込まず、
+    // このフラグを経由して Audio Thread に委譲する。これにより Message Thread との
+    // データ競合 (setCurrentAndTargetValue vs getNextValue/isSmoothing) を解消する。
+    if (wetCrossfadeResetPending.exchange(false, std::memory_order_acq_rel))
+    {
+        wetCrossfade.setCurrentAndTargetValue(0.0);
+        wetCrossfade.setTargetValue(1.0);
+        // wetCrossfadeActive はすでに applyNewState() で store(true) 済み。
+        // 初回ロードで oldConv が null の場合も wetCrossfade を初期化しておくことで、
+        // 次の IR ロード時に正確なフェードイン開始値から始められる。
+    }
+
+    const bool isCrossfading = (oldConv != nullptr && wetCrossfadeActive.load(std::memory_order_acquire));
 
     // クロスフェード中の場合、ゲインランプを事前に計算
     if (isCrossfading)
@@ -2587,13 +2611,13 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     if (!isRebuild)
     {
         originalIR.store(loadedIR); // [Bug E fix] atomic store
-        originalIRSampleRate = loadedSR;
+        originalIRSampleRate.store(loadedSR, std::memory_order_release);  // [Bug 4 fix] atomic store
         {
             const juce::ScopedLock sl(irFileLock);
             currentIrFile = file;
         }
         irName = file.getFileNameWithoutExtension();
-        currentIRScale = scaleFactor;
+        currentIRScale.store(scaleFactor, std::memory_order_release);  // [Bug 4 fix] atomic store
     }
 
     // スナップショット更新 (表示用)
@@ -2613,8 +2637,11 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     // 旧実装は convToFadeOut != nullptr のブロック内のみで起動していたため、
     // 初回ロード時には wetCrossfade が開始されず wet 信号がフルレベルで瞬間出力されていた。
     // [Bug G fix] wetCrossfadeActive を Message Thread 側の通知フラグとして立てる。
-    wetCrossfade.setCurrentAndTargetValue(0.0);
-    wetCrossfade.setTargetValue(1.0);
+    // [Bug 1 fix] wetCrossfade フィールドへの直接書き込みをここで行うと Audio Thread の
+    //             getNextValue()/isSmoothing() と競合 (データ競合) する。
+    //             代わりに wetCrossfadeResetPending を立てて、Audio Thread の process() 先頭で
+    //             初期化させる (Audio Thread のみが wetCrossfade フィールドを操作する設計)。
+    wetCrossfadeResetPending.store(true, std::memory_order_release);
     wetCrossfadeActive.store(true, std::memory_order_release);
 
     // 古いコンボルバーがあれば、フェードアウトも開始する

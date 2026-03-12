@@ -385,6 +385,10 @@ private:
     // [Bug G fix] wetCrossfade.isSmoothing() は非スレッドセーフ (Audio Thread が getNextValue() を同時呼び出し)。
     // このフラグを代替として使う: Message Thread が store(), Audio Thread が完了時に clear()。
     std::atomic<bool> wetCrossfadeActive { false };
+    // [Bug 1 fix] wetCrossfade の初期化を Audio Thread 側に委譲するためのペンディングフラグ。
+    // applyNewState() (Message Thread) は wetCrossfade フィールドへの直接書き込みを行わず、
+    // このフラグを立てるだけにする。Audio Thread が process() 先頭で検出し初期化する。
+    std::atomic<bool> wetCrossfadeResetPending { false };
     std::atomic<bool> useMinPhase{false};
     std::atomic<float> targetIRLengthSec{IR_LENGTH_DEFAULT_SEC};
     std::atomic<float> smoothingTimeSec{SMOOTHING_TIME_DEFAULT_SEC};
@@ -406,9 +410,11 @@ private:
     // [Bug E fix] Message Thread (applyNewState) と rebuildThread (rebuildAllIRsSynchronous) が
     // 同時に読み書きする可能性があるため std::atomic<std::shared_ptr<T>> (C++20) を使用。
     std::atomic<std::shared_ptr<juce::AudioBuffer<double>>> originalIR;
-    double originalIRSampleRate = 0.0;
+    // [Bug 4 fix] Message Thread (applyNewState) と rebuildThread (rebuildAllIRsSynchronous) が
+    // 同時に読み書きする可能性があるため std::atomic<double> を使用。
+    std::atomic<double> originalIRSampleRate { 0.0 };
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
-    double currentIRScale = 1.0; // IRのスケールファクター (Auto Makeup + Safety Margin)
+    std::atomic<double> currentIRScale { 1.0 }; // IRのスケールファクター (Auto Makeup + Safety Margin)
     convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     int cachedFFTBufferCapacity = 0;
     std::atomic<double> currentSampleRate { 0.0 };
