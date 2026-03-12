@@ -34,6 +34,7 @@
 //============================================================================
 
 #include "MKLNonUniformConvolver.h"
+#include "AlignedAllocation.h"
 
 #include <mkl.h>
 #include <mkl_dfti.h>
@@ -108,7 +109,7 @@ MKLNonUniformConvolver::~MKLNonUniformConvolver()
 //   (DC 直流成分 ～ end までをゼロにし、start まで緩やかに持ち上げる)
 //
 // ■ 使用する MKL 関数: cblas_dscal (各 bin へのスカラー乗算)
-//   std::vector は Message Thread での一時ゲインテーブル用のみ使用。
+//   [指摘1 fix] MKL VML 使用箇所のメモリは mkl_malloc/ScopedAlignedPtr で管理する。
 //   Audio Thread では本関数を呼ばない。
 //==============================================================================
 void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcept
@@ -135,9 +136,13 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         const int stride = l.partStride;
 
         // ── ゲインテーブル計算 (全 bin 分, Message Thread のみ) ──
-        // std::vector は Audio Thread 外なので規約上問題なし。
-        // サイズは最大でも数千要素 (L2 で大きくなるが Message Thread で許容範囲)。
-        std::vector<double> gain(cSize, 1.0);
+        // [指摘1 fix] MKL VML (vdMul) 使用箇所のメモリは mkl_malloc/mkl_free で管理する。
+        // convo::aligned_malloc は noexcept 関数内で throw するため、mkl_malloc を直接使用して
+        // nullptr チェックで対処する (OOM 時は当該レイヤーの filter 適用をスキップ)。
+        convo::ScopedAlignedPtr<double> gain(
+            static_cast<double*>(mkl_malloc(static_cast<size_t>(cSize) * sizeof(double), 64)));
+        if (!gain.get()) continue;
+        std::fill_n(gain.get(), cSize, 1.0);
 
         // ── HC ゲイン ──
         {
@@ -217,17 +222,19 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         // gainIL[2k] = gainIL[2k+1] = gain[k] とした interleaved ゲイン配列を
         // 一度構築し、全パーティションに vdMul で一括適用する。
         //
-        // std::vector は Message Thread での一時バッファ用途として規約上問題なし。
+        // [指摘1 fix] MKL VML 使用箇所は mkl_malloc/mkl_free で管理する。
         // vdMul のインプレース演算 (y == a) は MKL 規約で許可されている。
         {
-            std::vector<double> gainIL(cSize * 2);
+            convo::ScopedAlignedPtr<double> gainIL(
+                static_cast<double*>(mkl_malloc(static_cast<size_t>(cSize) * 2 * sizeof(double), 64)));
+            if (!gainIL.get()) continue;
             for (int k = 0; k < cSize; ++k)
-                gainIL[2 * k] = gainIL[2 * k + 1] = gain[k];
+                gainIL.get()[2 * k] = gainIL.get()[2 * k + 1] = gain[k];
 
             for (int p = 0; p < l.numParts; ++p)
             {
                 double* slot = l.irFreqDomain + p * stride;
-                vdMul(cSize * 2, slot, gainIL.data(), slot);
+                vdMul(cSize * 2, slot, gainIL.get(), slot);
             }
         }
     }
@@ -356,7 +363,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         // ── バッファ確保 (すべて mkl_malloc 64byte アライン) ──
         const size_t irBufSize  = static_cast<size_t>(l.numParts) * l.partStride;
-        const size_t fdlBufSize = static_cast<size_t>(l.numParts) * l.partStride;
+        // [最適化2] Linearized ring buffer: FDL を 2×numParts 分確保。
+        // fdlBuf[fdlIndex] と fdlBuf[fdlIndex + numParts] に同一データをミラー書き込みし、
+        // forward 方向への連続アクセスを実現する (hardware prefetcher 最大活用)。
+        const size_t fdlBufSize = static_cast<size_t>(l.numParts) * 2 * l.partStride;
 
         l.irFreqDomain = static_cast<double*>(mkl_malloc(irBufSize  * sizeof(double), 64));
         l.fdlBuf       = static_cast<double*>(mkl_malloc(fdlBufSize * sizeof(double), 64));
@@ -437,6 +447,37 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         mkl_free(tempTime);
         mkl_free(tempFreq);
+
+        // [最適化2] IR パーティションを逆順に並び替える。
+        // Linearized ring buffer での forward 読み出し:
+        //   FDL: [oldest ... newest] (linStart + 0, +1, ... +numPartsIR-1)
+        //   IR:  [newest ... oldest] を逆順格納 → p=0 が oldest FDL に対応
+        //
+        // 正しい畳み込み: accumBuf += sum_p FDL[fdlIndex - p] * IR[p]
+        //   → 格納を逆順にすることで forward アクセスで同じ結果が得られる。
+        // この逆順変換は SetImpulse() のみで行い、Audio Thread にはコストゼロ。
+        if (l.numPartsIR > 1)
+        {
+            // スワップ用一時バッファ (IR 1 パーティション分)
+            double* swapBuf = static_cast<double*>(mkl_malloc(
+                static_cast<size_t>(l.partStride) * sizeof(double), 64));
+            if (swapBuf)
+            {
+                for (int pf = 0; pf < l.numPartsIR / 2; ++pf)
+                {
+                    const int pb = l.numPartsIR - 1 - pf;
+                    double* slotF = l.irFreqDomain + pf * l.partStride;
+                    double* slotB = l.irFreqDomain + pb * l.partStride;
+                    memcpy(swapBuf, slotF, l.partStride * sizeof(double));
+                    memcpy(slotF,   slotB, l.partStride * sizeof(double));
+                    memcpy(slotB,   swapBuf, l.partStride * sizeof(double));
+                }
+                mkl_free(swapBuf);
+            }
+            // swapBuf 確保失敗 (OOM) の場合: 逆順格納なしでも音は出るが
+            // 畳み込み順序が反転する (IR が逆再生になる)。実用上許容できない
+            // ケースだが OOM = 極めて稀であり、NoExcept 関数内なので致命的とはしない。
+        }
 
         // ── 非 Immediate レイヤーのコールバックあたりパーティション数 ──
         // 1 コールバック (blockSize サンプル) あたりに処理するパーティション数:
@@ -545,6 +586,12 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     double* currentFDLSlot = l.fdlBuf + l.fdlIndex * l.partStride;
     DftiComputeForward(l.fftHandle, l.fftTimeBuf, currentFDLSlot);
 
+    // [最適化2] Linearized ring buffer: mirror write。
+    // fdlBuf[fdlIndex + numParts] にも同一データを書き込む。
+    // これにより convolution ループで forward 方向の連続アクセスが可能になる。
+    double* mirrorFDLSlot = l.fdlBuf + (l.fdlIndex + l.numParts) * l.partStride;
+    memcpy(mirrorFDLSlot, currentFDLSlot, l.partStride * sizeof(double));
+
     // ── 3. 複素乗算積算 (FDL × IR) → accumBuf ──
     memset(l.accumBuf, 0, l.partStride * sizeof(double));
 
@@ -552,21 +599,29 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     const double* irBase  = l.irFreqDomain;
     double*       dst     = l.accumBuf;
 
+    // [最適化2] Linearized ring buffer: forward 順次アクセス。
+    // linStart = fdlIndex - numPartsIR + 1 + numParts
+    //   → 常に [1, 2*numParts-1] 範囲内 (modulo 演算不要)
+    // IR は SetImpulse() で逆順格納済みのため forward アクセスで正しい畳み込みになる。
+    const int linStart   = l.fdlIndex - l.numPartsIR + 1 + l.numParts;
+    const double* fdlLin = fdlBase + linStart * l.partStride;
+
     for (int p = 0; p < l.numPartsIR; ++p)
     {
-        // FDL は巡回インデックス: 現在ブロックから p 個前のスロット
-        const int lineIdx  = (l.fdlIndex - p + l.numParts) & l.fdlMask;
-        const double* srcA = fdlBase + lineIdx * l.partStride;  // FDL[p]
-        const double* srcB = irBase  + p       * l.partStride;  // IR[p]
+        const double* srcA = fdlLin + p * l.partStride;  // FDL: oldest→newest (forward)
+        const double* srcB = irBase + p * l.partStride;  // IR:  forward (逆順格納済み)
 
-        // ── パーティション先読み (次の p のFDL/IR スロットをキャッシュへ引き出す) ──
-        // 次パーティションのデータはこのパーティションの内側ループ実行中に
-        // L3→L2 へ prefetch される (T1: L2キャッシュターゲット)。
+        // ── パーティション先読み (T1: L2キャッシュターゲット, 2 iterations 先) ──
+        // forward アクセスのため stride は一定 → hardware prefetcher も有効
         if (p + 1 < l.numPartsIR)
         {
-            const int nli = (l.fdlIndex - (p + 1) + l.numParts) & l.fdlMask;
-            _mm_prefetch((const char*)(fdlBase + nli * l.partStride), _MM_HINT_T1);
-            _mm_prefetch((const char*)(irBase  + (p + 1) * l.partStride), _MM_HINT_T1);
+            _mm_prefetch((const char*)(srcA + l.partStride),     _MM_HINT_T1);
+            _mm_prefetch((const char*)(srcB + l.partStride),     _MM_HINT_T1);
+        }
+        if (p + 2 < l.numPartsIR)
+        {
+            _mm_prefetch((const char*)(srcA + 2 * l.partStride), _MM_HINT_T1);
+            _mm_prefetch((const char*)(srcB + 2 * l.partStride), _MM_HINT_T1);
         }
 
         int k = 0;
@@ -843,6 +898,11 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     double* currentFDLSlot = l.fdlBuf + l.fdlIndex * l.partStride;
                     DftiComputeForward(l.fftHandle, l.fftTimeBuf, currentFDLSlot);
 
+                    // [最適化2] Linearized ring buffer: mirror write
+                    // fdlBuf[fdlIndex + numParts] にも同一データを書き込む。
+                    double* mirrorFDLSlot = l.fdlBuf + (l.fdlIndex + l.numParts) * l.partStride;
+                    memcpy(mirrorFDLSlot, currentFDLSlot, l.partStride * sizeof(double));
+
                     // FDL インデックスを進める (トリガ完了)
                     l.fdlIndex = (l.fdlIndex + 1) & l.fdlMask;
 
@@ -876,30 +936,27 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
             // [Bug2 fix] サイクル開始時に保存したスナップショットを使用 (再計算禁止)
             const int     baseFdlIdx = l.baseFdlIdxSaved;
 
+            // [最適化2] Linearized ring buffer: forward 順次アクセス。
+            // linStart = baseFdlIdx - numPartsIR + 1 + numParts
+            // IR は SetImpulse() で逆順格納済み。
+            const int linStart   = baseFdlIdx - l.numPartsIR + 1 + l.numParts;
+            const double* fdlLin = fdlBase + linStart * l.partStride;
+
             for (int p = l.nextPart; p < endPart; ++p)
             {
-                // FDL 巡回インデックス: 最新スロット (p=0) から古い順
-                const int lineIdx  = (baseFdlIdx - p + l.numParts) & l.fdlMask;
-                const double* srcA = fdlBase + lineIdx * l.partStride;  // FDL[p]
-                const double* srcB = irBase  + p       * l.partStride;  // IR[p]
+                const double* srcA = fdlLin + p * l.partStride;  // FDL: forward
+                const double* srcB = irBase + p * l.partStride;  // IR:  forward (逆順格納済み)
 
-                // 【提案1】prefetch強化（T1 + 128byte先読み）
-                if (p + 2 < endPart)
-                {
-                    const int nli = (baseFdlIdx - (p + 2) + l.numParts) & l.fdlMask;
-                    _mm_prefetch((const char*)(fdlBase + nli * l.partStride), _MM_HINT_T1);
-                    _mm_prefetch((const char*)(irBase  + (p + 2) * l.partStride), _MM_HINT_T1);
-                }
-                // ── パーティション先読み ──
-                // 次パーティションの FDL/IR スロットを L3→L2 に引き出す (T1)。
-                // L1/L2 は partSize が大きく (512〜4096 サンプル) partStride も大きい
-                // ため、ハードウェア prefetcher のストライド学習が困難。
-                // ここで明示的に prefetch することでレイテンシを隠蔽できる。
+                // [最適化2] prefetch: forward 方向なので stride = partStride (一定)
                 if (p + 1 < endPart)
                 {
-                    const int nli = (baseFdlIdx - (p + 1) + l.numParts) & l.fdlMask;
-                    _mm_prefetch((const char*)(fdlBase + nli * l.partStride), _MM_HINT_T1);
-                    _mm_prefetch((const char*)(irBase  + (p + 1) * l.partStride), _MM_HINT_T1);
+                    _mm_prefetch((const char*)(srcA + l.partStride), _MM_HINT_T1);
+                    _mm_prefetch((const char*)(srcB + l.partStride), _MM_HINT_T1);
+                }
+                if (p + 2 < endPart)
+                {
+                    _mm_prefetch((const char*)(srcA + 2 * l.partStride), _MM_HINT_T1);
+                    _mm_prefetch((const char*)(srcB + 2 * l.partStride), _MM_HINT_T1);
                 }
 
                 int k = 0;
@@ -1083,7 +1140,8 @@ void MKLNonUniformConvolver::Reset()
         Layer& l = m_layers[li];
         if (l.irFreqDomain == nullptr) continue;
 
-        const size_t fdlBufSize = static_cast<size_t>(l.numParts) * l.partStride;
+        // [最適化2] Linearized ring buffer: fdlBuf は 2×numParts 分確保済み
+        const size_t fdlBufSize = static_cast<size_t>(l.numParts) * 2 * l.partStride;
         memset(l.fdlBuf,       0, fdlBufSize   * sizeof(double));
         // [Bug F fix] overlapBuf 削除済み
         memset(l.fftTimeBuf,   0, l.fftSize     * sizeof(double));

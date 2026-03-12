@@ -407,45 +407,26 @@ public:
 
         LoadResult result = performLoad(this);
 
-        if (result.success && !threadShouldExit())
+        // [指摘3 fix] デッドコード削除。
+        // performLoad() は非同期パス (callAsync → finalizeNUCEngineOnMessageThread) で
+        // 常に result.success = false を返すため、以前の if (result.success ...) ブロックは
+        // 永遠に実行されなかった。実際の後処理はメッセージスレッド側の callAsync で行われる。
+        if (result.newConv)
         {
-            // 6. メインスレッドで適用
-            // This path is not taken for async load. The callAsync is inside performLoad.
-            // The logic here is for when performLoad returns success=true, which it doesn't for async.
-            // So this block is effectively dead code for async.
-            // Let's check performLoad again.
-            // ...
-            // result.success = false; // finalize側でapplyNewStateを実行するため、ここではスキップ
-            // return result;
-            // ...
-            // So `run` will never enter this `if (result.success ...)` block for async loads.
-            // The logic is inside `performLoad`.
-            // I need to change the lambda in `performLoad`.
-            // The old code in `run` was probably from a previous version.
-            // The current code in `performLoad` is what matters.
-
-            resetter.success = true;
+            result.newConv->release();
+            result.newConv = nullptr;
         }
-        else
-        {
-            // [FIX] Clean up leaked StereoConvolver if load failed or thread cancelled
-            if (result.newConv)
-            {
-                result.newConv->release();
-                result.newConv = nullptr;
-            }
 
-            if (!result.success && result.errorMessage.isNotEmpty() && !threadShouldExit())
+        if (!result.success && result.errorMessage.isNotEmpty() && !threadShouldExit())
+        {
+            // エラー発生時: メインスレッドでエラー処理を行う
+            auto wp = weakOwner;
+            const juce::String error = result.errorMessage;
+            juce::MessageManager::callAsync([wp, error]()
             {
-                // エラー発生時: メインスレッドでエラー処理を行う
-                auto wp = weakOwner;
-                const juce::String error = result.errorMessage;
-                juce::MessageManager::callAsync([wp, error]()
-                {
-                    if (auto* o = wp.get())
-                        o->handleLoadError(error);
-                });
-            }
+                if (auto* o = wp.get())
+                    o->handleLoadError(error);
+            });
         }
     }
 

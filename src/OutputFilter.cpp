@@ -261,6 +261,14 @@ void OutputFilter::process(juce::dsp::AudioBlock<double>& block,
                 // L[i], R[i] をパック: [lower=L, upper=R]
                 __m128d x = _mm_set_pd(dataR[i], dataL[i]);
 
+                // [最適化1] convIsLast ブランチへ prefetch 追加 (EQ 最終段と同構造)
+                // T0: L1 キャッシュターゲット, 4サンプル先読み (double=8bytes × 4 = 32bytes)
+                if (i + 4 < numSamples)
+                {
+                    _mm_prefetch((const char*)(dataL + i + 4), _MM_HINT_T0);
+                    _mm_prefetch((const char*)(dataR + i + 4), _MM_HINT_T0);
+                }
+
                 // LC (ローカット HPF)
                 x = biquadStep128_FMA(x,
                         lc_b0, lc_b1, lc_b2, lc_a1, lc_a2,
