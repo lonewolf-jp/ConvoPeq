@@ -448,8 +448,26 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
             std::abs(params.gain) < EQ_GAIN_EPSILON)
             continue;
 
+        // 【Fix Bug #EQ-Display】 Audio EQ Cookbook (calcBiquadCoeffs) の代わりに
+        // calcSVFCoeffs → svfToDisplayBiquad を使用する。
+        //
+        // 背景:
+        //   実際の音声処理は TPT SVF (calcSVFCoeffs) を使用しており、
+        //   Peaking の場合 k = 1/(Q·A)、LowShelf は g = tan()/√A 等、
+        //   Cookbook とは異なるパラメータ化を採用している。
+        //   その結果、以前の calcBiquadCoeffs (RBJ Cookbook: alpha = sin(w0)/(2Q))
+        //   は実際の SVF フィルタとバンド幅が微妙に異なり、
+        //   総合応答曲線が個別バンド曲線の積と一致しないという表示上の誤りが
+        //   生じていた。
+        //
+        // 修正:
+        //   calcSVFCoeffs → svfToDisplayBiquad のパスは SVF の z 域伝達関数を
+        //   厳密に等価 biquad へ変換する（updateEQData の個別バンド曲線と同一）。
+        //   これにより「総合曲線 = 個別バンド曲線の積 = 実際の DSP 処理」が
+        //   三者完全一致する。
         activeBands[numActiveBands++] = {
-            EQProcessor::calcBiquadCoeffs(type, params.frequency, params.gain, params.q, sr),
+            EQProcessor::svfToDisplayBiquad(
+                EQProcessor::calcSVFCoeffs(type, params.frequency, params.gain, params.q, sr)),
             eqState->bandChannelModes[band]
         };
     }
