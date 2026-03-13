@@ -1,220 +1,121 @@
-# ConvoPeq v0.3.5 Build Guide – Windows 11 x64
+# ConvoPeq v0.4.4 Build Guide – Windows 11 x64
 
 ## Target Environment
 
 - **OS**: Windows 11 x64
-- **IDE**: Visual Studio Code
-  - **VS Code Extensions**: C/C++ Extension Pack, CMake Tools
-- **Compiler**: MSVC 19.44.35222.0 (Visual Studio 2022 17.11 or later)
-- **SDK**: Windows SDK 10.0.26100.0 (Target: Windows 10.0.26200)
-- **CMake**: 3.22 or later
-- **JUCE**: 8.0.12 (Strict)
+- **IDE**: Visual Studio Code (recommended)
+- **Compiler**: MSVC 19.44.35222.0 (Visual Studio 2022 17.11+)
+- **CMake**: 3.22+
+- **JUCE**: 8.0.12 (required)
 - **C++ Standard**: C++20
-- **Intel oneAPI**: Base Toolkit (Required, for MKL library)
+- **Intel oneAPI**: Base Toolkit (MKL required)
 
-**Important**: This application is a standalone application dedicated to Windows 11 x64. It cannot be built on macOS or Linux.
+> This project is a **Windows-only standalone application**.
 
 ---
 
-## Setup Instructions
+## Required Software
 
-### 1. Install Required Software
+1. **Visual Studio 2022** (Desktop development with C++)
+2. **CMake**
+3. **Ninja** (or bundled Ninja via CMake/VS environment)
+4. **Intel oneAPI Base Toolkit**
+5. **JUCE 8.0.12** placed at:
+   - `ConvoPeq/JUCE/...`
 
-#### 1.3 Visual Studio Code
+---
 
-```powershell
-# Install via winget
-winget install Microsoft.VisualStudioCode
+## Project Layout Requirement
 
-# Or from the official website
-# https://code.visualstudio.com/
+The project root must contain:
+
+- `build.bat`
+- `CMakeLists.txt`
+- `JUCE/` (JUCE 8.0.12 source tree)
+
+---
+
+## Quick Build (Recommended)
+
+From project root:
+
+```cmd
+build.bat Release
+build.bat Debug
+build.bat Release clean
 ```
 
-#### 1.4 VS Code Extensions
+### Build Output Paths
 
-Install the following extensions in VS Code:
-
-- C/C++ Extension Pack
-- CMake Tools
-- CMake syntax highlighting
-
-#### 1.5 Intel oneAPI Base Toolkit (Required)
-
-Building this application **requires Intel oneMKL (Math Kernel Library)**, which is included in the Base Toolkit.
-
-- The default installation path (`C:\Program Files (x86)\Intel\oneAPI`) is recommended because `build.bat` auto-detects it.
+- **Debug**:
+  - `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe`
+- **Release**:
+  - `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`
 
 ---
 
-## 2. Preparing Dependencies
+## Manual Build (Equivalent)
 
-### 2.1 Download Libraries
+```cmd
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
 
-JUCE is required. r8brain-free-src is already included.
-
-### 2.2 Directory Structure
-
-- `.vscode/` — VS Code settings
-- `JUCE/` — JUCE framework (download JUCE 8.0.12 and place here)
-- `r8brain-free-src/` — r8brain library
-- `CMakeLists.txt` — CMake configuration
-- `ProjectMetadata.cmake` — project metadata
-- `build.bat` — build script
+cmake -S . -B build -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+cmake --build build --config Release
+cmake --build build --config Debug
+```
 
 ---
 
-## Build Instructions
+## VS Code Task Usage
 
-### Method 1: build.bat Script (recommended / easiest)
+Use:
 
-The provided `build.bat` automatically configures Intel MKL environment variables.
+- **Terminal → Run Task → Release**
+- **Terminal → Run Task → Debug**
+- **Terminal → Run Task → Clean**
 
----
+`tasks.json` should use:
 
-## Method 2: VS Code CMake Tools
-
-### Step 1: Open the Project
-
-Open the project folder in VS Code.
-
-### Step 2: Configure CMake
-
-Select a compiler kit such as “Visual Studio Community 2022 Release – amd64”.
-
-### Step 3: Build
-
-You can build from the status bar, keyboard shortcuts, or command palette.
-
-### Step 4: Run
-
-Click the “Run” button in the status bar.
-
----
-
-## Method 3: VS Code Tasks
-
-You can run the build task via `Ctrl+Shift+P` → “Tasks: Run Build Task”.
-
----
-
-## Method 4: PowerShell / CMD
-
-Open the Developer Command Prompt for VS 2022 and run CMake manually.
-
----
-
-## Debugging
-
-VS Code includes preconfigured debug settings.
-
-- Set breakpoints by clicking next to line numbers.
-- Press **F5** to start debugging.
-- Use the debug sidebar for additional options.
+- `-G "Ninja Multi-Config"`
+- common build directory: `-B "${workspaceFolder}\build"`
+- build switch by `--config Release|Debug`
 
 ---
 
 ## Troubleshooting
 
-### Build Errors
+### 1) `windows.h` / standard headers not found
 
-#### Error: Could not find JUCE
+Environment not initialized for the same shell session.
+Run `vcvarsall.bat` and `setvars.bat` in the same command chain as `cmake`.
 
-Cause: The `JUCE` folder is missing or empty.
-Solution: Ensure the folder exists and re-clone if necessary.
+### 2) Release task builds Debug
 
-#### Error: LNK1181: cannot open input file 'ole32.lib'
+Using single-config Ninja or stale CMake cache.
+Use **Ninja Multi-Config** and `--config Release`.
 
-Cause: Windows SDK is not installed.
-Solution: Install Windows 11 SDK via Visual Studio Installer.
+### 3) `'C:\Program' is not recognized`
 
-### Warning: C4819 (file cannot be displayed in current code page)
+Quote escaping issue (PowerShell -> cmd nesting).
+Force task shell to `cmd.exe` and keep command quoting simple.
 
-If the warning persists, add:
+### 4) `・ｿ@echo off` appears in `build.bat`
 
-```cmake
-add_compile_options(/source-charset:utf-8 /execution-charset:utf-8)
-```
+File saved with BOM/encoding issue.
+Save `build.bat` as **UTF-8 (without BOM)**.
 
-### Build is slow
+### 5) JUCE exists but check fails
 
-Tips:
-
-- `/MP` is already enabled
-- Use SSD
-- Exclude build folder from antivirus
-- Use Ninja generator
+Ensure script runs from project root or use `pushd "%~dp0"` in `build.bat`.
+Validate path: `JUCE\CMakeLists.txt`.
 
 ---
 
-## VS Code Useful Features
+## Notes
 
-- IntelliSense
-- Formatting shortcuts
-- Jump to errors
-- Quick task execution
-
----
-
-## Build Configuration Customization
-
-This application **requires AVX2 and Intel MKL**.
-Removing `/arch:AVX2` may cause build or runtime errors.
-
----
-
-## Recommended Workflow
-
-The project is optimized for VS Code.
-
-### Daily Development
-
-- Edit code
-- Press **F5** to debug
-- Incremental build runs automatically
-
-### Release Build for Performance
-
-- Press **Ctrl+Shift+B**
-- Run the optimized executable
-
-### Distribution Build
-
-- Use `build.bat Release clean`
-
----
-
-## FAQ
-
-### Q: How long does the build take?
-
-- First build: several minutes
-- Subsequent builds: seconds
-- Excluding the build folder from antivirus improves speed
-
-### Q: Audio drops or noise occurs
-
-- Use Release build
-- Increase buffer size
-- Avoid heavy CPU operations
-
-### Q: ASIO device does not appear
-
-Check `asio_blacklist.txt` in the executable folder.
-
-### Q: Can it be built as VST3/AU?
-
-Possible but requires modifying `CMakeLists.txt` and adding wrapper code.
-
-### Q: Is Intel MKL required?
-
-Yes, MKL is required for FFT and vector operations.
-
-### Q: Reset all settings
-
-Delete `%APPDATA%\ConvoPeq`.
-
----
-
-## Collect Support Information
-
-Run the provided PowerShell commands and share the output when reporting issues.
+- Do **not** modify dependency sources directly:
+  - `JUCE/`
+  - `r8brain-free-src/`
+- App target is standalone (not plugin build target).
+- For daily development, VS Code task-based workflow is recommended.

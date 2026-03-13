@@ -1,115 +1,162 @@
 # ConvoPeq Architecture
 
-This document outlines the software architecture of ConvoPeq, a high-performance audio convolution and equalization application.
+This document describes the current software architecture of **ConvoPeq v0.4.4**, a Windows-only standalone audio application built with JUCE 8.0.12.
 
-## 1. Core Principles
+## 1. Design Goals
 
-The architecture is built upon three core principles:
+ConvoPeq is designed around the following goals:
 
-1. **Real-time Safety**: The audio processing thread is designed to be lock-free and wait-free, avoiding operations that could lead to audio dropouts, such as memory allocation, locking, or file I/O.
-2. **High Performance**: The signal processing pipeline is heavily optimized using Intel® oneAPI Math Kernel Library (oneMKL) and AVX2 intrinsics. Memory is managed with 64-byte alignment to maximize SIMD efficiency.
-3. **Modularity and Asynchronicity**: Heavy tasks like loading impulse responses or reconfiguring the DSP chain are offloaded to background threads. A Read-Copy-Update (RCU) pattern is used extensively to update the state of the audio engine without blocking the real-time audio thread.
+1. **Real-time safety**
+   The audio callback path avoids blocking operations (no file I/O, no locks, no dynamic allocation on the audio thread).
 
-## 2. Threading Model
+2. **High performance**
+   The DSP path is optimized for AVX2-capable CPUs and uses Intel oneMKL where appropriate.
+   Performance-critical buffers are 64-byte aligned.
 
-ConvoPeq employs a multi-threaded model to separate concerns and ensure a responsive UI and glitch-free audio playback.
+3. **Modular asynchronous updates**
+   Expensive operations (for example IR load/prepare/rebuild) are handled off the audio thread and swapped into active processing state safely.
 
-* **Message Thread (UI Thread)**: The main application thread, managed by JUCE. It handles all user interface interactions, manages windowing, and dispatches events. When a user changes a parameter that requires a significant DSP reconfiguration (e.g., loading a new IR, changing the oversampling factor), this thread initiates a rebuild request.
+---
 
-* **Audio Thread**: A high-priority, real-time thread managed by the audio device driver (e.g., ASIO, WASAPI).
-  * Its sole responsibility is to execute the `getNextAudioBlock()` callback.
-  * It operates on a "snapshot" of the current DSP configuration by loading an atomic pointer to the active `DSPCore`. This is a wait-free operation.
-  * It is strictly forbidden from performing any blocking operations.
+## 2. High-Level Module Map (`src/`)
 
-* **Rebuild Thread (`AudioEngine::rebuildThreadLoop`)**: A dedicated background worker thread for preparing new DSP configurations.
-  * When a rebuild is requested by the Message Thread, this thread creates and prepares a new `DSPCore` instance.
-  * This is where all "heavy" non-real-time operations occur:
-    * Memory allocation for audio buffers (`mkl_malloc`).
-    * Initialization of DSP components (Convolver, EQ, Oversampler).
-    * Synchronous rebuilding of the convolution engine if needed.
-  * Once the new `DSPCore` is ready, it is handed back to the Message Thread to be atomically swapped into the `currentDSP` pointer.
+- **Application/UI**
+  - `MainApplication.*`
+  - `MainWindow.*`
+  - `EQControlPanel.*`
+  - `ConvolverControlPanel.*`
+  - `SpectrumAnalyzerComponent.*`
 
-* **Loader Thread (`ConvolverProcessor::LoaderThread`)**: A background thread specifically for loading and processing impulse response (IR) files.
-  * Handles file I/O, audio format decoding, resampling, and minimum-phase transformation.
-  * This ensures that loading large IR files does not block the UI or audio threads.
+- **Audio engine / runtime orchestration**
+  - `AudioEngine.*`
+  - `AudioEngineProcessor.*`
+  - `DeviceSettings.*`
+  - `AsioBlacklist.h`
 
-## 3. DSP Architecture
+- **DSP core**
+  - `ConvolverProcessor.*`
+  - `MKLNonUniformConvolver.*`
+  - `EQProcessor.*`
+  - `CustomInputOversampler.*`
+  - `OutputFilter.*`
+  - `PsychoacousticDither.h`
+  - `InputBitDepthTransform.h`
 
-### 3.1. `AudioEngine` and the RCU Pattern
+- **Memory/alignment utilities**
+  - `AlignedAllocation.h`
 
-The `AudioEngine` is the central hub for all audio processing. It implements the `juce::AudioSource` interface and manages the lifecycle of the DSP chain.
+---
 
-The core of its design is a **Read-Copy-Update (RCU)** pattern for managing DSP state changes:
+## 3. Threading and Responsibilities
 
-1. **Read**: The Audio Thread reads an atomic pointer (`currentDSP`) to get the currently active `DSPCore` instance for processing. This is a fast, lock-free operation.
-2. **Copy**: When a setting is changed, the Message Thread requests a rebuild. The Rebuild Thread creates a *new* `DSPCore` instance and copies the state from the UI-facing processors (`uiEqProcessor`, `uiConvolverProcessor`).
-3. **Update**: Once the new `DSPCore` is fully prepared, the Message Thread atomically swaps the `currentDSP` pointer to point to the new instance.
+## 3.1 Message Thread (UI thread)
 
-Old `DSPCore` instances are moved to a "trash bin" and are garbage-collected by a `juce::Timer` on the Message Thread after a safe delay. This ensures that the Audio Thread, which might still be using an old instance, can finish its processing cycle without encountering a dangling pointer.
+- Owns and updates GUI components.
+- Handles user interactions and device changes.
+- Initiates heavy DSP state changes asynchronously (for example IR load requests).
 
-### 3.2. `DSPCore`: The Processing Graph
+## 3.2 Audio Thread (real-time callback)
 
-The `DSPCore` struct encapsulates a complete, self-contained audio processing graph. This includes:
+- Runs the per-block processing path only.
+- Uses prepared DSP state and preallocated buffers.
+- Must remain lock-free/wait-free from an application perspective.
 
-* Aligned memory buffers for audio data (`ScopedAlignedPtr<double>`).
-* An instance of `ConvolverProcessor`.
-* An instance of `EQProcessor`.
-* A `CustomInputOversampler`.
-* A `PsychoacousticDither` engine.
-* Various DC blockers and state variables.
+## 3.3 Background worker paths
 
-The processing order within the `DSPCore` is typically:
-`Input -> DC Blocker -> Oversampling (Up) -> [Convolver <-> EQ] -> Soft Clipper -> Oversampling (Down) -> DC Blocker -> Dither -> Output`
+- Convolution/IR-related preparation is executed outside the audio callback.
+- Prepared state is published back to active processing with safe handoff patterns to avoid glitches.
 
-The order of the Convolver and EQ is user-configurable.
+---
 
-## 4. Key DSP Components
+## 4. Audio Pipeline
 
-### 4.1. `ConvolverProcessor` & `MKLNonUniformConvolver`
+The effective processing chain is organized around `AudioEngine` + DSP components:
 
-Convolution is handled by a highly optimized, custom engine built on Intel MKL.
+`Input -> (optional conditioning / DC handling) -> Oversampling (up) -> Convolver/EQ chain -> Soft clip / output filter -> Oversampling (down) -> Dither / output conditioning -> Output`
 
-* **Non-Uniform Partitioned Convolution**: The engine uses a 3-layer, non-uniform partitioning scheme to balance low latency with the ability to handle very long impulse responses efficiently.
-  * **Layer 0 (Immediate)**: Processes the initial part of the IR with a small partition size for low latency. This is executed in every audio callback.
-  * **Layer 1 & 2 (Delayed)**: Process the longer tail of the IR with progressively larger partition sizes. Their processing is distributed over multiple audio callbacks to prevent CPU spikes.
-* **Optimization**: The core convolution is performed in the frequency domain using MKL's DFTI (FFT) and VML (vector math) functions, with complex multiplication optimized using AVX2 FMA intrinsics.
+Notes:
 
-### 4.2. `EQProcessor`
+- Internal processing is centered on **double precision** for DSP quality.
+- Convolver/EQ ordering is configurable in the UI.
+- Nonlinear stages are protected with oversampling and output filtering to reduce aliasing.
 
-The 20-band parametric equalizer also employs a lock-free RCU pattern for updating its filter coefficients.
+---
 
-* **Filter Topology**: It uses a **Topology-Preserving Transform (TPT) State-Variable Filter (SVF)**. This filter topology is known for its stability and robustness, especially when coefficients are being modulated.
-* **Coefficient Updates**: When a user changes an EQ parameter, a new `BandNode` (containing the filter coefficients) is created on the Message Thread and atomically swapped in. The Audio Thread always reads the latest valid set of coefficients without locking.
-* **Automatic Gain Control (AGC)**: An optional AGC feature is available to automatically compensate for gain changes introduced by the EQ, maintaining a consistent output level.
+## 5. DSP Components
 
-### 4.3. `CustomInputOversampler`
+## 5.1 `ConvolverProcessor` and `MKLNonUniformConvolver`
 
-A custom polyphase FIR oversampler is used to run the core DSP at a higher sample rate, reducing aliasing from non-linear processes like soft clipping. It supports both IIR-like (low latency) and Linear Phase filter presets.
+- Main IR convolution path.
+- Uses partitioned convolution suitable for long IR workloads.
+- Integrates IR loading/preparation logic and runtime-safe state application.
 
-### 4.4. Memory Management
+## 5.2 `EQProcessor`
 
-Performance-critical audio buffers are allocated using `mkl_malloc` to ensure 64-byte alignment, which is optimal for AVX/AVX2/AVX-512 instructions. The `convo::ScopedAlignedPtr` RAII wrapper is used to manage the lifetime of this memory safely.
+- Multi-band parametric EQ processing.
+- Designed for real-time parameter update behavior compatible with live audio use.
 
-## 5. UI Architecture
+## 5.3 `CustomInputOversampler`
 
-The UI is built with standard JUCE components.
+- Provides configurable oversampling around nonlinear stages.
+- Used to improve spectral behavior during soft clipping / saturation-related processing.
 
-* **`MainWindow`**: Owns all top-level UI components and the `AudioDeviceManager`.
-* **Control Panels**: `EQControlPanel` and `ConvolverControlPanel` provide the user interface for manipulating DSP parameters. They communicate with the `AudioEngine` through its public API.
-* **Data Flow for Visualization**:
-  * The `AudioEngine`'s `DSPCore` pushes processed audio samples (either pre- or post-DSP, as selected by the user) into a lock-free, single-producer, single-consumer (SPSC) FIFO queue (`juce::AbstractFifo`).
-  * The `SpectrumAnalyzerComponent`, running on the Message Thread via a `juce::Timer`, reads data from this FIFO to compute the FFT and draw the spectrum. This decouples the real-time audio processing from the UI rendering.
+## 5.4 `OutputFilter` and `PsychoacousticDither`
 
-## 6. Build & Dependencies
+- Output-side cleanup and finalization.
+- Dither/noise-shaping stage is included in final output conditioning.
 
-* **Build System**: CMake
-* **Language Standard**: C++20
-* **Core Dependencies**:
-  * JUCE 8.0.12
-  * Intel® oneAPI Math Kernel Library (oneMKL)
-  * r8brain-free-src (for high-quality IR resampling)
-* **Compiler Optimizations**: The project is configured to build with high levels of optimization, including enabling the **AVX2 instruction set** (`/arch:AVX2` on MSVC) for significant performance gains in DSP code. MKL threading is explicitly disabled (`mkl_set_num_threads(1)`) to ensure predictable, low-latency performance suitable for real-time audio.
+---
 
-## 7. License
+## 6. UI and Data Flow
 
-This project is licensed under the **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)** license. Please see the `LICENSE.txt` file for details. Third-party libraries (JUCE, MKL, r8brain) are subject to their own respective licenses.
+## 6.1 Window and control panels
+
+- `MainWindow` hosts primary controls and status elements.
+- `EQControlPanel` and `ConvolverControlPanel` map UI actions to `AudioEngine` APIs.
+- `DeviceSettings` manages audio-device related configuration flow.
+
+## 6.2 Spectrum analyzer path
+
+- Audio analysis data is passed to `SpectrumAnalyzerComponent` through a decoupled path suitable for UI rendering cadence.
+- UI visualization is isolated from real-time callback responsibilities.
+
+---
+
+## 7. Memory and Real-Time Constraints
+
+- Audio-thread allocations are avoided.
+- Alignment-sensitive buffers use dedicated allocation helpers (`AlignedAllocation.h`).
+- Heavy initialization/reconfiguration occurs before activation or on worker paths, not inside the callback.
+
+---
+
+## 8. Build and Runtime Environment
+
+- **OS**: Windows 11 x64
+- **Framework**: JUCE 8.0.12
+- **Language**: C++20
+- **Build system**: CMake
+- **Generator (recommended)**: Ninja Multi-Config
+- **Math library**: Intel oneMKL
+- **Resampling dependency**: r8brain-free-src
+
+Typical output layout:
+
+- `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe`
+- `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`
+
+---
+
+## 9. Dependency and Source Boundaries
+
+The following third-party source trees are external dependencies and should be treated as read-only project dependencies:
+
+- `JUCE/`
+- `r8brain-free-src/`
+
+---
+
+## 10. License
+
+ConvoPeq project licensing is defined in repository license files.
+Third-party dependencies (JUCE, oneMKL, r8brain-free-src) follow their own licenses.
