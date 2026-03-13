@@ -1,79 +1,95 @@
 # ConvoPeq v0.4.4
 
-High-Fidelity Convolution Reverb & Parametric EQ Application for Windows 11 x64
+High-fidelity standalone audio processor for Windows 11 x64, combining convolution processing and a 20-band parametric EQ.
 
 ## Overview
 
-ConvoPeq is a standalone desktop audio processor for Windows 11, designed for high-fidelity playback and mastering workflows.
-It combines a low-latency convolution engine and a high-precision 20-band parametric EQ in a 64-bit double-precision signal path.
+ConvoPeq is a JUCE 8.0.12 desktop application focused on real-time audio processing quality and stability on Windows.
+The codebase is organized around a modular audio engine, dedicated DSP processors, and separate UI control panels.
 
-This project is **Windows-only** and optimized for **AVX2** CPUs with **Intel oneAPI MKL** acceleration.
-
----
-
-## Core Features
-
-### 20-Band Parametric EQ
-
-- Topology-Preserving Transform (TPT) SVF design
-- Filter types: Low Shelf, Peaking, High Shelf, Low Pass, High Pass
-- Per-band channel mode control (Stereo / Left / Right)
-- Auto Gain Control (AGC)
-- Real-time response visualization
-- Preset loading (XML and Equalizer APO `.txt`)
-
-### Convolution Engine
-
-- Custom low-latency non-uniform partitioned convolution (NUC)
-- IR format support: WAV / AIFF / FLAC
-- Linear phase / minimum phase switching
-- Auto makeup gain normalization
-- High-quality resampling via r8brain-free-src
-- Adjustable mix, smoothing, and target IR length
-
-### Audio Pipeline
-
-- Full internal **64-bit double-precision** processing
-- Oversampling up to 8x
-- Psychoacoustic dither with noise shaping
-- Input/output DC blocking
-- Soft clipper with adjustable saturation
-- Headroom control and anti-clipping safeguards
-- Mono-to-stereo expansion
-- Click-safe crossfades for parameter transitions
-- Heavy operations offloaded asynchronously (e.g., IR loading)
-
-### UI / Runtime Tools
-
-- Real-time spectrum analyzer (with CPU-saving toggle)
-- ASIO / WASAPI device support
-- ASIO blacklist handling for unstable drivers
-- Real-time CPU usage display
-- Processing order switch (EQ -> Convolver / Convolver -> EQ)
+- Platform: **Windows-only**
+- Framework: **JUCE 8.0.12**
+- DSP precision: **64-bit double** (except analyzer-oriented paths where appropriate)
+- Performance targets: **AVX2 + Intel oneMKL**
 
 ---
 
-## System Requirements
+## Source Layout (`src/`)
 
-- **OS**: Windows 11 x64 (required)
-- **CPU**: AVX2-capable Intel/AMD CPU
-- **Audio**: ASIO device recommended for low-latency use
+### Application / UI Layer
+
+- `MainApplication.*`
+  Application bootstrap and JUCE app lifecycle.
+- `MainWindow.*`
+  Main window composition, top-level UI wiring.
+- `EQControlPanel.*`
+  EQ-side parameter controls.
+- `ConvolverControlPanel.*`
+  Convolver-side parameter controls.
+- `SpectrumAnalyzerComponent.*`
+  Real-time spectrum visualization.
+
+### Engine / Runtime Orchestration
+
+- `AudioEngine.*`
+  Central coordinator for DSP modules and runtime state.
+- `AudioEngineProcessor.*`
+  Audio callback-facing processing integration.
+- `DeviceSettings.*`
+  Device configuration and persistence-related handling.
+- `AsioBlacklist.h`
+  ASIO compatibility guard support.
+
+### DSP Layer
+
+- `ConvolverProcessor.*`
+  Convolution processor state, IR loading/transition flow, runtime processing.
+- `MKLNonUniformConvolver.*`
+  oneMKL-accelerated non-uniform partitioned convolution core.
+- `EQProcessor.*`
+  20-band parametric EQ processing core.
+- `CustomInputOversampler.*`
+  Input-side oversampling stage.
+- `OutputFilter.*`
+  Output conditioning/filter stage.
+- `PsychoacousticDither.h`
+  Dither/noise-shaping utilities.
+- `InputBitDepthTransform.h`
+  Input bit-depth transform helpers.
+
+### Memory / Utility
+
+- `AlignedAllocation.h`
+  Alignment-aware allocation helpers for SIMD/MKL-friendly memory usage.
+
+---
+
+## Functional Highlights (Current Codebase)
+
+- 20-band parametric EQ processing (`EQProcessor`)
+- Convolution processing with MKL-based non-uniform partitioning (`ConvolverProcessor`, `MKLNonUniformConvolver`)
+- Configurable processing order support in UI/engine integration
+- Oversampling and output conditioning stages (`CustomInputOversampler`, `OutputFilter`)
+- Psychoacoustic dither support (`PsychoacousticDither`)
+- Real-time analyzer component (`SpectrumAnalyzerComponent`)
+- ASIO/WASAPI-oriented runtime operation and device management
 
 ---
 
 ## Build Requirements
 
-1. **Visual Studio 2022** (17.11+) with C++ desktop workload
-2. **CMake** 3.22+
-3. **Intel oneAPI Base Toolkit** (MKL required)
-4. **JUCE 8.0.12** placed at project root:
+1. **Visual Studio 2022** (17.11+) with Desktop C++ workload
+2. **CMake 3.22+**
+3. **Ninja** (recommended)
+4. **Intel oneAPI Base Toolkit** (oneMKL required)
+5. **JUCE 8.0.12** at:
    - `ConvoPeq/JUCE/...`
 
 ---
 
 ## Quick Build (Recommended)
 
-Use `build.bat` from the project root:
+Use the batch script from project root:
 
 ```cmd
 build.bat Release
@@ -81,33 +97,34 @@ build.bat Debug
 build.bat Release clean
 ```
 
-### Build Output
+### Output
 
-- Debug executable:
+- Debug:
   - `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe`
-- Release executable:
+- Release:
   - `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`
 
 ---
 
-## Manual CMake Build (Equivalent)
+## Manual Build (Equivalent)
 
 ```cmd
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
 
 cmake -S . -B build -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
-cmake --build build --config Release
 cmake --build build --config Debug
+cmake --build build --config Release
 ```
 
 ---
 
 ## Notes
 
-- JUCE and r8brain sources are external dependencies and should not be modified in-place.
-- This application is a standalone app target (not a plugin target).
-- For development in VS Code, task-based build flow is supported.
+- This repository targets a **standalone app**, not a plugin target.
+- Do not modify third-party dependency trees directly:
+  - `JUCE/`
+  - `r8brain-free-src/`
 
 ---
 
