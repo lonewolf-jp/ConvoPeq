@@ -1,0 +1,31 @@
+---
+Checks: '-*,
+          clang-analyzer-*,
+          performance-*,
+          bugprone-*,
+          portability-*,
+          modernize-*,
+          readability-*'
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: '.*/src/.*'
+
+CompileFlags:
+
+# Force clang-tidy to use C++20 standard, to resolve issues with parsing
+
+# modern C++ features from libraries like JUCE
+
+  Add: [-std=c++20, -D_CRT_SECURE_NO_WARNINGS]
+
+CheckOptions:
+
+# Naming conventions based on the project's style
+
+- { key: readability-identifier-naming.ClassCase,           value: CamelCase }
+- { key: readability-identifier-naming.StructCase,          value: CamelCase }
+- { key: readability-identifier-naming.FunctionCase,        value: camelBack }
+- { key: readability-identifier-naming.VariableCase,        value: camelBack }
+- { key: readability-identifier-naming.MemberCase,          value: camelBack }
+- { key: readability-identifier-naming.EnumConstantCase,    value: CamelCase }

@@ -200,45 +200,45 @@ void MainWindow::createUIComponents()
     showDeviceSelectorButton.setColour (juce::TextButton::textColourOffId,
                                       juce::Colours::white);
     showDeviceSelectorButton.onClick = [this] { toggleDeviceSelector(); };
-    addAndMakeVisible (showDeviceSelectorButton);
+    juce::Component::addAndMakeVisible (showDeviceSelectorButton);
 
     // EQ オン/オフ ボタン
     eqBypassButton.setButtonText ("EQ On");
     eqBypassButton.setToggleState (!audioEngine.getEQProcessor().isBypassed(), juce::dontSendNotification);
     eqBypassButton.onClick = [this] { eqBypassButtonClicked(); };
-    addAndMakeVisible (eqBypassButton);
+    juce::Component::addAndMakeVisible (eqBypassButton);
 
     // Convolver オン/オフ ボタン
     convolverBypassButton.setButtonText ("Conv On");
     convolverBypassButton.setToggleState (!audioEngine.getConvolverProcessor().isBypassed(), juce::dontSendNotification);
     convolverBypassButton.onClick = [this] { convolverBypassButtonClicked(); };
-    addAndMakeVisible (convolverBypassButton);
+    juce::Component::addAndMakeVisible (convolverBypassButton);
 
     // 処理順序ボタン
     orderButton.setButtonText ("Order: Conv -> EQ");
     orderButton.onClick = [this] { orderButtonClicked(); };
-    addAndMakeVisible (orderButton);
+    juce::Component::addAndMakeVisible (orderButton);
 
     // 保存/読み込みボタン
     saveButton.setButtonText ("Save");
     saveButton.onClick = [this] { savePreset(); };
-    addAndMakeVisible (saveButton);
+    juce::Component::addAndMakeVisible (saveButton);
 
     loadButton.setButtonText ("Load");
     loadButton.onClick = [this] { loadPreset(); };
-    addAndMakeVisible (loadButton);
+    juce::Component::addAndMakeVisible (loadButton);
 
     // CPU使用率ラベル
     cpuUsageLabel.setText ("CPU: --%", juce::dontSendNotification);
     cpuUsageLabel.setJustificationType (juce::Justification::centredRight);
     cpuUsageLabel.setColour (juce::Label::textColourId, juce::Colours::white);
-    addAndMakeVisible (cpuUsageLabel);
+    juce::Component::addAndMakeVisible (cpuUsageLabel);
 
     // Aboutボタン
     aboutButton.setButtonText ("?");
     aboutButton.setTooltip ("About this application");
     aboutButton.onClick = [this] { showAboutDialog(); };
-    addAndMakeVisible (aboutButton);
+    juce::Component::addAndMakeVisible (aboutButton);
 
     // ソフトクリップボタン
     softClipButton.setButtonText("Soft Clip");
@@ -247,7 +247,7 @@ void MainWindow::createUIComponents()
     softClipButton.onClick = [this] {
         audioEngine.setSoftClipEnabled(softClipButton.getToggleState());
     };
-    addAndMakeVisible(softClipButton);
+    juce::Component::addAndMakeVisible(softClipButton);
 
     // サチュレーションスライダー
     saturationSlider.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -258,12 +258,12 @@ void MainWindow::createUIComponents()
     saturationSlider.onValueChange = [this] {
         audioEngine.setSaturationAmount(static_cast<float>(saturationSlider.getValue()));
     };
-    addAndMakeVisible(saturationSlider);
+    juce::Component::addAndMakeVisible(saturationSlider);
 
     saturationLabel.setText("Sat:", juce::dontSendNotification);
     saturationLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     saturationLabel.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(saturationLabel);
+    juce::Component::addAndMakeVisible(saturationLabel);
 }
 
 //--------------------------------------------------------------

@@ -1,119 +1,48 @@
 {
     "version": "2.0.0",
+    "options": {
+        "shell": {
+            "executable": "C:\\Windows\\System32\\cmd.exe",
+            "args": [
+                "/d",
+                "/c"
+            ]
+        }
+    },
     "tasks": [
         {
             "label": "Kill Previous Instance",
             "type": "shell",
-            "command": "cmd",
-            "args": [
-               "/C",
-                "taskkill /F /IM \"ConvoPeq.exe\" >nul 2>&1 || exit 0"
-            ],
+            "command": "taskkill /F /IM \"ConvoPeq.exe\" >nul 2>&1 || exit 0",
             "problemMatcher": []
         },
         {
-            "label": "CMake: Configure",
+            "label": "Clean",
             "type": "shell",
-            "command": "cmake",
-            "args": [
-                "-B",
-                "${workspaceFolder}/build",
-                "-G",
-                "Visual Studio 17 2022",
-                "-A",
-                "x64",
-                "-T",
-                "host=x64"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
+            "command": "if exist \"${workspaceFolder}\\build\" rmdir /s /q \"${workspaceFolder}\\build\"",
             "problemMatcher": []
         },
         {
-            "label": "CMake: Build (Release)",
+            "label": "Release",
             "type": "shell",
-            "command": "cmake",
-            "args": [
-                "--build",
-                "${workspaceFolder}/build",
-                "--config",
-                "Release"
+            "command": "call \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Release",
+            "dependsOn": [
+                "Kill Previous Instance"
             ],
-            "options": {
-                "cwd": "${workspaceFolder}",
-                "env": {
-                    "PreferredToolArchitecture": "x64"
-                }
-            },
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
-            "problemMatcher": ["$msCompile"],
-            "dependsOn": ["Kill Previous Instance"]
+            "problemMatcher": "$msCompile"
         },
         {
-            "label": "CMake: Build (Debug)",
+            "label": "Debug",
             "type": "shell",
-            "command": "cmd",
-            "args": [
-                "/C",
-                "if not exist build (cmake -B build -G \\\"Visual Studio 17 2022\\\" -A x64 -T host=x64) & cmake --build build --config Debug"
+            "command": "call \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Debug",
+            "dependsOn": [
+                "Kill Previous Instance"
             ],
-            "options": {
-                "cwd": "${workspaceFolder}",
-                "env": {
-                    "PreferredToolArchitecture": "x64"
-                }
-            },
-            "problemMatcher": ["$msCompile"],
-            "dependsOn": ["Kill Previous Instance"]
-        },
-        {
-            "label": "CMake: Clean",
-            "type": "shell",
-            "command": "cmake",
-            "args": [
-                "--build",
-                "${workspaceFolder}/build",
-                "--target",
-                "clean"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": []
-        },
-        {
-            "label": "Run Application",
-            "type": "shell",
-            "command": "\"${workspaceFolder}/build/ConvoPeq_artefacts/Release/ConvoPeq.exe\"",
-            "options": {
-                "cwd": "${workspaceFolder}/build/ConvoPeq_artefacts/Release"
-            },
-            "dependsOn": ["CMake: Build (Release)"],
-            "problemMatcher": []
-        },
-        {
-            "label": "CMake: Clean Rebuild (Debug)",
-            "type": "shell",
-            "command": "cmd",
-            "args": [
-                "/C",
-                "if exist build (rmdir /s /q build) & cmake -B build -G \\\"Visual Studio 17 2022\\\" -A x64 -T host=x64 && cmake --build build --config Debug"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}",
-                "env": {
-                    "PreferredToolArchitecture": "x64"
-                }
-            },
-            "problemMatcher": ["$msCompile"],
-            "group": {
-                "kind": "build",
-                "isDefault": false
-            }
+            "problemMatcher": "$msCompile"
         }
     ]
 }

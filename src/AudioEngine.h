@@ -495,8 +495,8 @@ DSPCore();
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
     std::atomic<float> inputHeadroomDb { -6.0f };
     std::atomic<double> inputHeadroomGain { 0.5011872336272722 }; // -6dB
-    std::atomic<float> outputMakeupDb { 15.0f };
-    std::atomic<double> outputMakeupGain { 5.623413251903491 }; // +15dB
+    std::atomic<float> outputMakeupDb { 12.0f };
+    std::atomic<double> outputMakeupGain { 3.981071705534972 }; // +12dB (unity: -6dB input headroom + -6dB IR safety margin)
     std::atomic<int> rebuildGeneration { 0 }; // 非同期リビルドの競合防止用
 
     // 出力周波数フィルターモード (Thread-safe)

@@ -1,0 +1,6 @@
+# 参照はしてほしいが、提案の対象外にしたい巨大な外部ソースを指定
+/JUCE/
+/r8brain-free-src/
+/build/
+*.bin
+*.wav

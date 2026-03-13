@@ -1,11 +1,7 @@
 {
     "configurations": [
         {
-            "name": "Win32",
-            "includePath": [
-                "${workspaceFolder}/**"
-            ],
-            "cppStandard": "c++20",
+            "name": "Windows x64",
             "configurationProvider": "ms-vscode.cmake-tools"
         }
     ],

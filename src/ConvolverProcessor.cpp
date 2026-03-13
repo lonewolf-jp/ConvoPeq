@@ -864,10 +864,6 @@ public:
                 return result;
             }
 
-            if (checkCancellation(shouldStop, nullptr)) return result;
-
-            result.success = true;
-            return result;
         }
         catch (const std::bad_alloc&)
         {
@@ -1136,7 +1132,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // ダミー呼び出し: 内部状態の確実な初期化 (メモリ確保リスクの排除)
     (void)mixSmoother.getNextValue();
 
-    // レイテンシースムーサーの初期化
+    // レイテンシー補正の初期化
     // 100msのスムージング時間でクリックノイズを防止
     latencySmoother.reset(sampleRate, 0.1);
     // ドップラー効果対策のクロスフェード用 (20ms)
@@ -1795,7 +1791,7 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     vcAbs(numBins, reinterpret_cast<const MKL_Complex8*>(dst), magBuf);
     std::memcpy(dst, magBuf, numBins * sizeof(float));
 
-    // スムーシング適用 (Linear Magnitudeに対して行う)
+    // スムージング適用 (Linear Magnitudeに対して行う)
     std::vector<float> linearMags(cachedFFTBuffer.get(), cachedFFTBuffer.get() + numBins);
     applySmoothing(linearMags, fftSize);
 
@@ -2326,7 +2322,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     const double* wetGains = nullptr;
     const double* dryGains = nullptr;
 
-    // スムーシングゲインの計算
+    // スムージングゲインの計算
     if (isSmoothing)
     {
         // Audio Threadでのメモリ確保を避けるため、事前に確保したメンバ変数のバッファを使用

@@ -1,0 +1,23 @@
+# See https://clang.llvm.org/docs/ClangFormatStyleOptions.html
+Language: Cpp
+BasedOnStyle: LLVM
+
+# ----------------------------------------------------------------------
+# 基本的なフォーマット
+# ----------------------------------------------------------------------
+IndentWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+# ----------------------------------------------------------------------
+# 波括弧のスタイル
+# ----------------------------------------------------------------------
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: None
+
+# ----------------------------------------------------------------------
+# その他
+# ----------------------------------------------------------------------
+PointerAlignment: Right
+AlignTrailingComments: true
+SortIncludes: false

@@ -199,7 +199,8 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
 
     addAndMakeVisible(outputMakeupSlider);
     outputMakeupSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    outputMakeupSlider.setRange(12.0, 17.0, 0.1);
+    // [Fix] 範囲を [+6, +18] dB に拡張 (setOutputMakeupDb のクランプと一致)
+    outputMakeupSlider.setRange(6.0, 18.0, 0.1);
     outputMakeupSlider.setTextValueSuffix(" dB");
     outputMakeupSlider.setNumDecimalPlacesToDisplay(1);
     outputMakeupSlider.onValueChange = [this] {
@@ -415,7 +416,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             engine.setInputHeadroomDb(headroom);
 
             // Output Makeup設定の読み込み (デフォルト +15.0dB)
-            float makeup = (float)xml->getDoubleAttribute("outputMakeupDb", 15.0);
+            float makeup = (float)xml->getDoubleAttribute("outputMakeupDb", 12.0); // [Fix] default 15→12 dB
             engine.setOutputMakeupDb(makeup);
 
             // フィルタタイプ設定の読み込み (デフォルト0 = IIR)
@@ -451,7 +452,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     engine.setDitherBitDepth(0); // 自動設定へ
     engine.setOversamplingFactor(0); // 自動設定へ
     engine.setInputHeadroomDb(-6.0f); // デフォルト -6dB
-    engine.setOutputMakeupDb(15.0f);
+    engine.setOutputMakeupDb(12.0f); // [Fix] default 15→12 dB (unity gain)
     engine.setOversamplingType(AudioEngine::OversamplingType::IIR); // デフォルトIIR
 }
 void DeviceSettings::applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist)

@@ -1553,6 +1553,15 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     }
 
     //----------------------------------------------------------
+    // 出力メイクアップゲイン
+    // [Bug Fix] processDouble() にのみ存在し float path に欠落していたため追加。
+    // 配置: OutputFilter 直後・SoftClipper 直前。processDouble() と同一位置・同一ロジック。
+    //----------------------------------------------------------
+    for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
+        cblas_dscal((int)processBlock.getNumSamples(), state.outputMakeupGain,
+                    processBlock.getChannelPointer(ch), 1);
+
+    //----------------------------------------------------------
     // ソフトクリッピング (Soft Clipping)
     // 配置: ダウンサンプリング前に行うことで、倍音成分の折り返しノイズ(エイリアシング)を低減する。
     //----------------------------------------------------------
@@ -2006,53 +2015,49 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     float* dstL = (numChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
     float* dstR = (numChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
 
-    // DCブロッカーの状態をロード
-    dcBlockerL.loadState();
-    if (dataR) dcBlockerR.loadState();
+    // ── Step 1: DC除去 (ブロックモード・AVX2最適化) ──────────────────────────
+    // process() は内部で m_prev_x/m_prev_y を直接読み書きするため
+    // loadState()/saveState() は不要。NaN/Inf・デノーマルも内部でゼロ化する。
+    dcBlockerL.process(dataL, numSamples);
+    if (dataR) dcBlockerR.process(dataR, numSamples);
 
+    // ── Step 2: NaN/Inf サニタイズ (NSフィルタ状態保護) ─────────────────────
+    // DC除去後に残存する NaN/Inf を事前にゼロ化する。
+    // NSフィルタ (processStereoBlock) に NaN/Inf が入力されると状態変数が汚染され
+    // 以降のディザリングが正常に機能しなくなるため、これを防ぐ。
+    // std::isfinite はx64 MSVC では SSE2 intrinsic にインライン展開されるため Audio Thread 安全。
     for (int i = 0; i < numSamples; ++i)
     {
-        // --- DC除去 ---
-        double sampleL = dataL[i];
-        dcBlockerL.processSample(sampleL);
-
-        double sampleR = 0.0;
-        if (dataR)
-        {
-            sampleR = dataR[i];
-            dcBlockerR.processSample(sampleR);
-        }
-
-        // --- ディザリング ---
-        if (applyDither)
-        {
-            sampleL = dither.process(sampleL * kOutputHeadroom, 0);
-            if (dataR)
-                sampleR = dither.process(sampleR * kOutputHeadroom, 1);
-        }
-
-        // --- 変換・クランプ ---
-        double finalL = sampleL;
-        double finalR = sampleR;
-
-        if (!applyDither)
-        {
-            finalL *= kOutputHeadroom;
-            if (dataR)
-                finalR *= kOutputHeadroom;
-        }
-
-        if (!std::isfinite(finalL)) finalL = 0.0;
-        if (!std::isfinite(finalR)) finalR = 0.0;
-
-        dstL[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, finalL));
-        if (dstR)
-            dstR[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, finalR));
+        if (!std::isfinite(dataL[i])) dataL[i] = 0.0;
+        if (dataR && !std::isfinite(dataR[i])) dataR[i] = 0.0;
     }
 
-    // DCブロッカーの状態を保存
-    dcBlockerL.saveState();
-    if (dataR) dcBlockerR.saveState();
+    // ── Step 3: ディザリング / ヘッドルーム適用 ─────────────────────────────
+    if (applyDither)
+    {
+        // processStereoBlock: AVX2最適化ブロック処理 (per-sample process() より高効率)。
+        // L/R を _mm_round_pd で同時量子化するため、両チャンネルの丸め判定が
+        // 同一サンプル時刻で一致し、ステレオイメージの正確性が向上する。
+        // headroom はブロック内で適用される (dataL[i] * headroom + dither + shaped_error)。
+        // dataR == nullptr の場合は自動的にモノラルパスへ分岐する。
+        dither.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+    }
+    else
+    {
+        // ヘッドルームのみ適用 (コンパイラが AVX2 自動ベクトル化可能な独立ループ)
+        for (int i = 0; i < numSamples; ++i) dataL[i] *= kOutputHeadroom;
+        if (dataR) for (int i = 0; i < numSamples; ++i) dataR[i] *= kOutputHeadroom;
+    }
+
+    // ── Step 4: double→float 変換・クランプ ─────────────────────────────────
+    // juce::jlimit<double>(-1.0, 1.0, x) は JUCE 8.0.12 で存在確認済み (template)。
+    // Step 2 のサニタイズ後は dataL/dataR に NaN/Inf がないため、
+    // ここでの追加 isfinite チェックは不要。
+    for (int i = 0; i < numSamples; ++i)
+        dstL[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, dataL[i]));
+    if (dstR)
+        for (int i = 0; i < numSamples; ++i)
+            dstR[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, dataR[i]));
 
     // 3ch以降は使用しないためクリア (ゴミデータ出力防止)
     for (int ch = numChannels; ch < buffer->getNumChannels(); ++ch)
@@ -2259,7 +2264,11 @@ float AudioEngine::getInputHeadroomDb() const
 
 void AudioEngine::setOutputMakeupDb(float db)
 {
-    float clampedDb = juce::jlimit(12.0f, 17.0f, db);
+    // [Fix] 範囲を [+6, +18] dB に拡張:
+    //   +12 dB = unity (input -6dB + IR safety -6dB 補正)
+    //   +6 dB  = -6dB アンダー (静かな設定)
+    //   +18 dB = +6dB オーバー (倍音成分の多い音源向け)
+    float clampedDb = juce::jlimit(6.0f, 18.0f, db);
     if (std::abs(outputMakeupDb.load() - clampedDb) > 1e-5f)
     {
         outputMakeupDb.store(clampedDb);

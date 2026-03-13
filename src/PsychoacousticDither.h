@@ -78,8 +78,15 @@ public:
         void init(uint64_t seed) {
             reset();
             // VSL_BRNG_SFMT19937: SIMD-oriented Fast Mersenne Twister (High Quality & Fast)
-            vslNewStream(&stream, VSL_BRNG_SFMT19937, static_cast<unsigned int>(seed));
+            // [Fix] vslNewStream() の戻り値を必ず検査する。
+            // 失敗した場合 stream = nullptr のままにして、呼び出し側で isValid() により保護する。
+            const MKL_INT status = vslNewStream(&stream, VSL_BRNG_SFMT19937,
+                                                static_cast<unsigned int>(seed));
+            if (status != VSL_STATUS_OK)
+                stream = nullptr;
         }
+
+        bool isValid() const noexcept { return stream != nullptr; }
 
         void reset() {
             if (stream) { vslDeleteStream(&stream); stream = nullptr; }
@@ -121,7 +128,13 @@ public:
             rng[i].init(seeder.next());
 
             // 【追加】初回バッファ充填 (Audio Threadでの初回ジッター防止)
-            vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[i], RND_BUFFER_SIZE, rndBuffer[i], 0.0, 1.0);
+            // [Fix] vslNewStream() が失敗した場合は rng[i] が null なので vdRngUniform を呼ばない。
+            //       フォールバック: 0.5 で埋めることでディザゼロに相当する安全な初期状態とする。
+            if (rng[i].isValid())
+                vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[i],
+                             RND_BUFFER_SIZE, rndBuffer[i], 0.0, 1.0);
+            else
+                std::fill_n(rndBuffer[i], RND_BUFFER_SIZE, 0.5);
             rndIndex[i] = 0;
         }
 
@@ -427,7 +440,10 @@ private:
     {
         if (rndIndex[channel] >= RND_BUFFER_SIZE)
         {
-            if (vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[channel], RND_BUFFER_SIZE, rndBuffer[channel], 0.0, 1.0) != VSL_STATUS_OK)
+            // [Fix] rng[channel] が null (初期化失敗) の場合は vdRngUniform を呼ばない。
+            if (!rng[channel].isValid() ||
+                vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[channel],
+                             RND_BUFFER_SIZE, rndBuffer[channel], 0.0, 1.0) != VSL_STATUS_OK)
                 std::fill_n(rndBuffer[channel], RND_BUFFER_SIZE, 0.5);
             rndIndex[channel] = 0;
         }

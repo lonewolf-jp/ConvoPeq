@@ -22,7 +22,25 @@ include(ProjectMetadata.cmake)
 
 project(${APP_NAME}
     VERSION ${APP_VERSION_MAJOR}.${APP_VERSION_MINOR}.${APP_VERSION_PATCH}
-    LANGUAGES CXX)
+    LANGUAGES CXX C)
+
+# Tell CMake to generate the compile_commands.json file for clang-tidy.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+#------------------------------------------------------------
+# Clang-Tidy Integration (Build-time analysis)
+#------------------------------------------------------------
+option(CONVOPEQ_ENABLE_CLANG_TIDY "Run clang-tidy during build" OFF)
+find_program(CLANG_TIDY_EXECUTABLE clang-tidy)
+
+# グローバル適用を明示的に無効化（JUCEモジュール巻き込み防止）
+set(CMAKE_CXX_CLANG_TIDY "")
+
+if(CONVOPEQ_ENABLE_CLANG_TIDY AND CLANG_TIDY_EXECUTABLE)
+    message(STATUS "clang-tidy enabled: ${CLANG_TIDY_EXECUTABLE}")
+else()
+    message(STATUS "clang-tidy build-time integration disabled.")
+endif()
 
 # バージョン文字列の分解 (必要に応じて使用)
 # string(REPLACE "." ";" ConvoPeq_VERSION_LIST "${PROJECT_VERSION}")
@@ -38,39 +56,27 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 #------------------------------------------------------------
-# MSVC最適化オプション
+# Windows RC Compiler Fix for Ninja
 #------------------------------------------------------------
-if(MSVC)
-    add_compile_options(
-        /utf-8      # ソースコードと実行時の文字セットをUTF-8に設定
-        /W4         # 警告レベル4 (高)
-        /wd4100     # C4100: 参照されないパラメーター (JUCE内部の警告を抑制)
-        /wd4189     # C4189: ローカル変数が初期化されましたが、参照されていません (r8brain対策)
-        /MP         # マルチプロセッサコンパイル有効化
-        /EHsc       # 標準C++例外処理のみ有効化 (SEH無効 - 構造化例外処理は使用しない)
-    )
+if(WIN32 AND CMAKE_GENERATOR STREQUAL "Ninja")
+    # MSVC環境が未初期化だと windows.h / C++標準ヘッダーが見つからない
+    if(MSVC AND (NOT DEFINED ENV{VCToolsInstallDir} OR NOT DEFINED ENV{WindowsSdkDir}))
+        message(FATAL_ERROR
+            "MSVC/Windows SDK environment is not initialized.\n"
+            "Please build via build.bat or run vcvarsall.bat x64 before CMake."
+        )
+    endif()
 
-    # グローバルな安定性設定 (JUCEモジュール全体に適用)
-    add_compile_definitions(JUCE_DISABLE_ACCESSIBILITY=1)
-    add_compile_definitions(JUCE_WIN_PER_MONITOR_DPI_AWARE=0)
-    # JUCE_DIRECT2D=1 はJUCE 8のデフォルトのため、明示的な設定は不要
-
-    # Release最適化
-    # /O2:        最大速度最適化
-    # /Ob3:       積極的なインライン展開
-    # /GL:        プログラム全体の最適化 (LTCG)
-    # /arch:AVX2: AVX2命令セット使用 (モダンCPU向け)
-    # /fp:fast:   高速浮動小数点演算 (厳密性より速度優先)
-    # /Gw:        グローバルデータの最適化 (バイナリサイズ削減)
-    # /Gy:        関数レベルリンク有効化 (未使用関数の削除を促進)
-    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
-    set(CMAKE_C_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
-
-    # リンカー最適化
-    # /LTCG:      リンク時コード生成
-    # /OPT:REF:   参照されていない関数とデータを削除
-    # /OPT:ICF:   同一のCOMDATを統合 (コードサイズ削減)
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG /OPT:REF /OPT:ICF /OPT:LBR")
+    if(DEFINED ENV{INCLUDE})
+        # rc.exe 向けに INCLUDE を /I へ展開
+        string(REPLACE ";" "|" _include_raw "$ENV{INCLUDE}")
+        string(REPLACE "|" ";" INCLUDE_LIST "${_include_raw}")
+        foreach(p IN LISTS INCLUDE_LIST)
+            if(NOT p STREQUAL "")
+                string(APPEND CMAKE_RC_FLAGS " /I\"${p}\"")
+            endif()
+        endforeach()
+    endif()
 endif()
 
 #------------------------------------------------------------
@@ -95,9 +101,8 @@ endif()
 #------------------------------------------------------------
 add_library(r8brain INTERFACE)
 
-target_include_directories(r8brain INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
-)
+# Mark r8brain includes as SYSTEM to suppress clang-tidy warnings.
+target_include_directories(r8brain SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src")
 
 target_compile_features(r8brain INTERFACE cxx_std_17)
 target_compile_definitions(r8brain INTERFACE
@@ -154,6 +159,12 @@ target_link_libraries(ConvoPeq PRIVATE
     r8brain
 )
 
+# Mark JUCE includes as SYSTEM to suppress clang-tidy warnings.
+target_include_directories(ConvoPeq SYSTEM PRIVATE
+    # This makes all headers under the JUCE modules directory treated as system headers.
+    "${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules"
+)
+
 target_compile_definitions(ConvoPeq PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
@@ -176,17 +187,6 @@ target_include_directories(ConvoPeq PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# AVX2 must be enabled in all configurations for this build.
-if(MSVC)
-    target_compile_options(ConvoPeq PRIVATE /arch:AVX2)
-endif()
-
-
-# ReleaseでLTCG有効化（MSVC用）
-if(MSVC)
-    set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-endif()
-
 #------------------------------------------------------------
 # Intel MKL Configuration
 #------------------------------------------------------------
@@ -194,6 +194,11 @@ endif()
 if(DEFINED ENV{MKLROOT})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{MKLROOT}")
     list(APPEND CMAKE_PREFIX_PATH "$ENV{MKLROOT}/lib/cmake/mkl")
+endif()
+
+# Add MKL include directory as a SYSTEM path to suppress clang-tidy warnings.
+if(DEFINED ENV{MKLROOT})
+    target_include_directories(ConvoPeq SYSTEM PRIVATE "$ENV{MKLROOT}/include")
 endif()
 
 # スタティックリンクとシーケンシャル実行を指定してDLL依存を排除
@@ -236,23 +241,44 @@ if(WIN32)
 endif()
 
 #------------------------------------------------------------
-# MSVCコンパイラ設定
+# MSVC固有設定
 #------------------------------------------------------------
 if(MSVC)
-    # ASanフラグが環境変数やデフォルト設定から混入する場合があるため、強力に削除
-    foreach(flag_var
-        CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
-        CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE)
-        string(REGEX REPLACE "[/-][Ff][Ss]anitize=address" "" ${flag_var} "${${flag_var}}")
-    endforeach()
-
-    # Visual Studioプロジェクト設定でASanを強制的に無効化
-    set_target_properties(ConvoPeq PROPERTIES
-        VS_GLOBAL_EnableAsan "false"
+    target_compile_options(ConvoPeq PRIVATE
+        /utf-8      # ソースコードと実行時の文字セットをUTF-8に設定
+        /W4         # 警告レベル4 (高)
+        /wd4100     # C4100: 参照されないパラメーター (JUCE内部の警告を抑制)
+        /wd4189     # C4189: ローカル変数が初期化されましたが、参照されていません (r8brain対策)
+        /MP4        # マルチプロセッサコンパイル有効化 (4コアに制限してメモリ使用量を抑制)
+        /EHsc       # 標準C++例外処理のみ有効化 (SEH無効 - 構造化例外処理は使用しない)
     )
 
+    target_compile_definitions(ConvoPeq PRIVATE JUCE_DISABLE_ACCESSIBILITY=1)
+    target_compile_definitions(ConvoPeq PRIVATE JUCE_WIN_PER_MONITOR_DPI_AWARE=0)
+
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
+    set(CMAKE_C_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG /OPT:REF /OPT:ICF /OPT:LBR")
+
+    # AVX2を全コンフィグで有効化
+    target_compile_options(ConvoPeq PRIVATE /arch:AVX2)
+
+    # ReleaseビルドでLTCGを有効化
+    set_property(TARGET ConvoPeq PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+
+#    # ASanフラグが環境変数やデフォルト設定から混入する場合があるため、強力に削除
+#    foreach(flag_var
+#        CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
+#        CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE)
+#        string(REGEX REPLACE "[/-][Ff][Ss]anitize=address" "" ${flag_var} "${${flag_var}}")
+#    endforeach()
+
+#    # Visual Studioプロジェクト設定でASanを強制的に無効化
+#    set_target_properties(ConvoPeq PROPERTIES
+#        VS_GLOBAL_EnableAsan "false"
+#    )
+    # Debugビルドでインクリメンタルリンクを無効化
     target_link_options(ConvoPeq PRIVATE
-        # Debugビルドでインクリメンタルリンクを無効化
         $<$<CONFIG:Debug>:/INCREMENTAL:NO>
     )
 endif()
@@ -289,5 +315,29 @@ if(MSVC)
     install(FILES $<TARGET_PDB_FILE:ConvoPeq>
         DESTINATION bin
         OPTIONAL
+    )
+endif()
+
+#------------------------------------------------------------
+# Clang-Tidy Integration (Build-time analysis)
+#------------------------------------------------------------
+# src/*.cpp のみに clang-tidy を適用（JUCE配下は対象外）
+if(CONVOPEQ_ENABLE_CLANG_TIDY AND CLANG_TIDY_EXECUTABLE)
+    file(GLOB_RECURSE CONVOPEQ_APP_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+    )
+
+    set(CLANG_TIDY_CMD
+        "${CLANG_TIDY_EXECUTABLE};
+         -p=${CMAKE_BINARY_DIR};
+         --extra-arg-before=--driver-mode=cl;
+         --extra-arg=/EHsc;
+         --extra-arg=-fexceptions;
+         --extra-arg=-D_HAS_EXCEPTIONS=1;
+         --header-filter=.*/src/.*"
+    )
+
+    set_source_files_properties(${CONVOPEQ_APP_SOURCES}
+        PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_CMD}"
     )
 endif()

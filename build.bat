@@ -1,16 +1,13 @@
 @echo off
+setlocal EnableExtensions
+
 chcp 65001 >nul
+
 REM ============================================================================
-REM build.bat - build script for windows terminal (UTF-8)
+REM build.bat - build script for Windows terminal (UTF-8)
 REM
-REM How to use:
+REM Usage:
 REM   build.bat [Debug|Release] [clean]
-REM
-REM Build environment:
-REM   - Visual Studio 2022 (17.11 or later)
-REM   - CMake 3.22 or later
-REM   - JUCE 8.0.12 (if you use other version, build will fail.)
-REM   - Intel oneAPI
 REM ============================================================================
 
 echo ==========================================
@@ -18,40 +15,81 @@ echo ConvoPeq - Build Script
 echo ==========================================
 echo.
 
-REM force to use 64-bit tool chain.
 set PreferredToolArchitecture=x64
 
-set BUILD_CONFIG=Release
-if /i "%1"=="Debug" set BUILD_CONFIG=Debug
+REM ------------------------------------------------------------
+REM Parse arguments
+set "BUILD_CONFIG=Release"
+if /i "%~1"=="Debug" set "BUILD_CONFIG=Debug"
+if /i "%~1"=="Release" set "BUILD_CONFIG=Release"
 
-if /i "%2"=="clean" (
-    echo [CLEAN] Removing build directory...
-    if exist "build" rmdir /s /q "build"
-)
+set "DO_CLEAN=0"
+if /i "%~2"=="clean" set "DO_CLEAN=1"
 
-REM Searching JUCE framework dicectory.
-if not exist "JUCE" (
-    echo [ERROR] JUCE directory not found!
+REM Release は build\Release、Debug は build\Debug
+set "BUILD_ROOT=build"
+set "BUILD_DIR=%BUILD_ROOT%"
+
+REM ------------------------------------------------------------
+REM Check JUCE directory
+if not exist "JUCE\CMakeLists.txt" (
+    echo [ERROR] JUCE directory not found or invalid!
+    echo Expected: "%~dp0JUCE\CMakeLists.txt"
     echo.
     echo Please place JUCE using one of the following methods:
     echo   1. Symbolic link: mklink /J JUCE C:\path\to\JUCE
-    echo   2. Junction: mklink /J JUCE C:\path\to\JUCE
-    echo   3. Copy: xcopy /E /I C:\path\to\JUCE JUCE
-    echo.
-    echo JUCE 8.0.12 Download:
-    echo   https://github.com/juce-framework/JUCE/releases/tag/8.0.12
+    echo   2. Junction:     mklink /J JUCE C:\path\to\JUCE
+    echo   3. Copy:         xcopy /E /I C:\path\to\JUCE JUCE
     echo.
     pause
+    popd
     exit /b 1
 )
 
 echo [CHECK] JUCE Directory: OK
 echo.
 
-REM setting up Intel oneAPI environment. (if exist.)
-if exist "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat" (
+REM ------------------------------------------------------------
+REM Clean build directory if requested
+if "%DO_CLEAN%"=="1" (
+    echo [CLEAN] Removing "%BUILD_DIR%"...
+    if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
+    echo.
+)
+
+REM ------------------------------------------------------------
+REM Setup MSVC environment
+set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"
+if exist "%VCVARS_PATH%" (
+    echo [INFO] Found vcvarsall.bat. Executing...
+    call "%VCVARS_PATH%" x64
+    @echo off
+    if errorlevel 1 (
+        echo [ERROR] Failed to initialize MSVC environment.
+        pause
+        exit /b 1
+    )
+    echo [INFO] MSVC environment initialized.
+) else (
+    echo [ERROR] vcvarsall.bat not found:
+    echo   %VCVARS_PATH%
+    pause
+    exit /b 1
+)
+
+REM ------------------------------------------------------------
+REM Setup Intel oneAPI environment
+set "ONEAPI_SETVARS=C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
+if exist "%ONEAPI_SETVARS%" (
     echo [INFO] Found Intel oneAPI setvars.bat. Executing...
-    call "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat" intel64
+    call "%ONEAPI_SETVARS%" intel64
+    @echo off
+    if errorlevel 1 (
+        echo [ERROR] Failed to initialize Intel oneAPI environment.
+        pause
+        exit /b 1
+    )
+    echo [INFO] Intel oneAPI environment initialized.
 ) else (
     echo [ERROR] Intel oneAPI MKL not found!
     echo Please install Intel oneAPI Base Toolkit.
@@ -59,55 +97,63 @@ if exist "C:\Program Files (x86)\Intel\oneAPI\mkl\latest\env\vars.bat" (
     exit /b 1
 )
 
-REM making build directory.
+REM ------------------------------------------------------------
+REM Create build directory
 echo [1/4] Creating build directory...
-if not exist "build" mkdir build
-cd build
+if not exist "%BUILD_ROOT%" mkdir "%BUILD_ROOT%"
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+if errorlevel 1 (
+    echo [ERROR] Failed to create build directory.
+    pause
+    exit /b 1
+)
 
-REM setting up CMake.
+REM ------------------------------------------------------------
+REM Configure CMake
 echo [2/4] Configuring CMake...
-cmake .. -G "Visual Studio 17 2022" -A x64 -T host=x64
+cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 if errorlevel 1 (
-    echo [ERROR] CMake configuration failed
-    cd ..
+    echo [ERROR] CMake configuration failed.
     pause
     exit /b 1
 )
 
-REM building project.
+REM ------------------------------------------------------------
+REM Build project
 echo [3/4] Building %BUILD_CONFIG% configuration...
-echo   (This may take a while...)
-cmake --build . --config %BUILD_CONFIG%
+cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG%
 if errorlevel 1 (
-    echo [ERROR] Build failed
-    cd ..
+    echo [ERROR] Build failed.
     pause
     exit /b 1
 )
 
+REM ------------------------------------------------------------
+REM Check build artifacts
 echo [4/4] Checking build artifacts...
-if exist "ConvoPeq_artefacts\%BUILD_CONFIG%\ConvoPeq.exe" (
-    echo [SUCCESS] Executable created successfully
+set "EXE_PATH=%BUILD_DIR%\ConvoPeq_artefacts\%BUILD_CONFIG%\ConvoPeq.exe"
+if exist "%EXE_PATH%" (
+    echo [SUCCESS] Executable created successfully.
 ) else (
-    echo [WARNING] Executable not found
+    echo [WARNING] Executable not found at:
+    echo   %EXE_PATH%
 )
-
-cd ..
 
 echo.
 echo ==========================================
 echo Build Complete!
 echo ==========================================
 echo.
+echo Build configuration:
+echo   %BUILD_CONFIG%
+echo Build directory:
+echo   %BUILD_DIR%
 echo Executable location:
-echo   build\ConvoPeq_artefacts\%BUILD_CONFIG%\ConvoPeq.exe
+echo   %EXE_PATH%
 echo.
 echo To run:
-echo   1. cd build\ConvoPeq_artefacts\%BUILD_CONFIG%
-echo   2. ConvoPeq.exe
-echo.
-echo Or from VS Code:
-echo   - Ctrl+Shift+B to Build
-echo   - F5 to Debug
+echo   "%EXE_PATH%"
 echo.
 pause
+endlocal
+
