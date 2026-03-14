@@ -1372,6 +1372,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                        .saturationAmount = satAmt,
                        .inputHeadroomGain = headroomGain,
                        .outputMakeupGain = makeupGain,
+                       .convolverInputTrimGain = convolverInputTrimGain.load(std::memory_order_relaxed),
                        .convHCMode = convHCFilterMode.load(std::memory_order_relaxed),
                        .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
                        .eqLPFMode  = eqLPFFilterMode.load(std::memory_order_relaxed) }); // スマートポインタでDSPを呼び出し
@@ -1448,6 +1449,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                          .saturationAmount = satAmt,
                        .inputHeadroomGain = headroomGain,
                        .outputMakeupGain = makeupGain,
+                       .convolverInputTrimGain = convolverInputTrimGain.load(std::memory_order_relaxed),
                        .convHCMode = convHCFilterMode.load(std::memory_order_relaxed),
                        .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
                        .eqLPFMode  = eqLPFFilterMode.load(std::memory_order_relaxed) });
@@ -1559,7 +1561,16 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
             eq.process(processBlock);
         // 2. Convolver
         if (!state.convBypassed) // stateから読み出し
+        {
+            // EQ→Conv 時: コンボルバー入力トリムを適用してから畳み込む
+            if (state.convolverInputTrimGain != 1.0)
+            {
+                for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
+                    cblas_dscal((int)processBlock.getNumSamples(), state.convolverInputTrimGain,
+                                processBlock.getChannelPointer(ch), 1);
+            }
             convolver.process(processBlock);
+        }
     }
 
     // ─── 出力周波数フィルター ──────────────────────────────────────
@@ -1724,7 +1735,16 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         if (!state.eqBypassed)
             eq.process(processBlock);
         if (!state.convBypassed)
+        {
+            // EQ→Conv 時: コンボルバー入力トリムを適用してから畳み込む
+            if (state.convolverInputTrimGain != 1.0)
+            {
+                for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
+                    cblas_dscal((int)processBlock.getNumSamples(), state.convolverInputTrimGain,
+                                processBlock.getChannelPointer(ch), 1);
+            }
             convolver.process(processBlock);
+        }
     }
 
     // ─── 出力周波数フィルター ──────────────────────────────────────
@@ -2030,7 +2050,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
 {
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
-    constexpr double kOutputHeadroom = 0.988553; // 約 -0.1dB
+    constexpr double kOutputHeadroom = 0.8912509381337456; // -1.0dB
 
     // ビット深度に基づくディザリング判定
     // ユーザー設定に従い、32-bit (float/int) でもディザリングを適用する。
@@ -2085,10 +2105,10 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     // Step 2 のサニタイズ後は dataL/dataR に NaN/Inf がないため、
     // ここでの追加 isfinite チェックは不要。
     for (int i = 0; i < numSamples; ++i)
-        dstL[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, dataL[i]));
+           dstL[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataL[i]));
     if (dstR)
         for (int i = 0; i < numSamples; ++i)
-            dstR[i] = static_cast<float>(juce::jlimit(-1.0, 1.0, dataR[i]));
+              dstR[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[i]));
 
     // 3ch以降は使用しないためクリア (ゴミデータ出力防止)
     for (int ch = numChannels; ch < buffer->getNumChannels(); ++ch)
@@ -2097,7 +2117,7 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
 
 void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer, int numSamples) noexcept
 {
-    constexpr double kOutputHeadroom = 0.988553; // 約 -0.1dB
+    constexpr double kOutputHeadroom = 0.8912509381337456; // -1.0dB
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
     {
         if (ch < 2)
@@ -2115,8 +2135,8 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
             {
                 int i = 0;
                 const int vEnd = numSamples / 16 * 16;
-                const __m256d vMax      = _mm256_set1_pd(1.0);
-                const __m256d vMin      = _mm256_set1_pd(-1.0);
+                const __m256d vMax      = _mm256_set1_pd(kOutputHeadroom);
+                const __m256d vMin      = _mm256_set1_pd(-kOutputHeadroom);
                 const __m256d vHeadroom = _mm256_set1_pd(kOutputHeadroom);
 
                 for (; i < vEnd; i += 16)
@@ -2148,7 +2168,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                 {
                     double v = data[i] * kOutputHeadroom;
                     if (!std::isfinite(v)) v = 0.0;
-                    dst[i] = juce::jlimit(-1.0, 1.0, v);
+                    dst[i] = juce::jlimit(-kOutputHeadroom, kOutputHeadroom, v);
                 }
             }
         }
@@ -2159,14 +2179,16 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     }
 }
 
-void AudioEngine::setEqBypassRequested (bool shouldBypass) noexcept
+void AudioEngine::setEqBypassRequested (bool shouldBypass)
 {
     eqBypassRequested.store (shouldBypass, std::memory_order_release);
+    applyDefaultsForCurrentMode();
 }
 
-void AudioEngine::setConvolverBypassRequested (bool shouldBypass) noexcept
+void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
 {
     convBypassRequested.store (shouldBypass, std::memory_order_release);
+    applyDefaultsForCurrentMode();
 }
 
 void AudioEngine::setConvolverUseMinPhase(bool useMinPhase)
@@ -2198,21 +2220,46 @@ void AudioEngine::requestConvolverPreset(const juce::File& irFile)
 
 void AudioEngine::requestLoadState (const juce::ValueTree& state)
 {
-    // グローバル設定の読み込み
+    // m_isRestoringState=true の間は applyDefaultsForCurrentMode() を抑制する。
+    // これにより、モード/バイパス設定の変更がゲイン値をデフォルトに上書きするのを防ぐ。
+    m_isRestoringState = true;
+
+    // ─── Step 1: モード・バイパス状態を先に復元 ────────────────────────────
     if (state.hasProperty("processingOrder"))
-        setProcessingOrder((ProcessingOrder)(int)state.getProperty("processingOrder"));
+        currentProcessingOrder.store((ProcessingOrder)(int)state.getProperty("processingOrder"));
 
-    if (state.hasProperty("softClipEnabled"))
-        setSoftClipEnabled(state.getProperty("softClipEnabled"));
+    if (state.hasProperty("eqBypassed"))
+    {
+        bool bypassed = state.getProperty("eqBypassed");
+        eqBypassRequested.store(bypassed, std::memory_order_release);
+        uiEqProcessor.setBypass(bypassed);
+    }
 
-    if (state.hasProperty("saturationAmount"))
-        setSaturationAmount(state.getProperty("saturationAmount"));
+    if (state.hasProperty("convBypassed"))
+    {
+        bool bypassed = state.getProperty("convBypassed");
+        convBypassRequested.store(bypassed, std::memory_order_release);
+        uiConvolverProcessor.setBypass(bypassed);
+    }
+
+    // ─── Step 2: ゲイン値を復元 (モード依存クランプが正しく適用される) ─────
+    m_isRestoringState = false; // クランプはモードに基づいて正しく機能させる
 
     if (state.hasProperty("inputHeadroomDb"))
         setInputHeadroomDb(state.getProperty("inputHeadroomDb"));
 
     if (state.hasProperty("outputMakeupDb"))
         setOutputMakeupDb(state.getProperty("outputMakeupDb"));
+
+    if (state.hasProperty("convolverInputTrimDb"))
+        setConvolverInputTrimDb(state.getProperty("convolverInputTrimDb"));
+
+    // ─── Step 3: その他のグローバル設定 ─────────────────────────────────────
+    if (state.hasProperty("softClipEnabled"))
+        setSoftClipEnabled(state.getProperty("softClipEnabled"));
+
+    if (state.hasProperty("saturationAmount"))
+        setSaturationAmount(state.getProperty("saturationAmount"));
 
     if (state.hasProperty("analyzerSource"))
         setAnalyzerSource((AnalyzerSource)(int)state.getProperty("analyzerSource"));
@@ -2225,28 +2272,11 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("eqLPFFilterMode"))
         setEqLPFFilterMode((convo::HCMode)(int)state.getProperty("eqLPFFilterMode"));
 
-    if (state.hasProperty("eqBypassed"))
-    {
-        bool bypassed = state.getProperty("eqBypassed");
-        setEqBypassRequested(bypassed);
-        uiEqProcessor.setBypass(bypassed);
-    }
-
-    if (state.hasProperty("convBypassed"))
-    {
-        bool bypassed = state.getProperty("convBypassed");
-        setConvolverBypassRequested(bypassed);
-        // ConvolverProcessor::setState でも設定される可能性があるが、
-        // 整合性を保つためにここでも設定する
-        uiConvolverProcessor.setBypass(bypassed);
-    }
-
-    // EQ
+    // ─── Step 4: サブプロセッサ状態の復元 ───────────────────────────────────
     auto eqState = state.getChildWithName ("EQ");
     if (eqState.isValid())
         uiEqProcessor.setState (eqState);
 
-    // Convolver
     auto convState = state.getChildWithName ("Convolver");
     if (convState.isValid())
         uiConvolverProcessor.setState (convState);
@@ -2266,6 +2296,7 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.setProperty("inputHeadroomDb", inputHeadroomDb.load(), nullptr);
     state.setProperty("outputMakeupDb", outputMakeupDb.load(), nullptr);
     state.setProperty("analyzerSource", (int)currentAnalyzerSource.load(), nullptr);
+    state.setProperty("convolverInputTrimDb", convolverInputTrimDb.load(), nullptr);
     state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);
     state.setProperty("convBypassed", convBypassRequested.load(), nullptr);
     // 出力周波数フィルターモードの保存
@@ -2280,7 +2311,14 @@ juce::ValueTree AudioEngine::getCurrentState() const
 
 void AudioEngine::setInputHeadroomDb(float db)
 {
-    float clampedDb = juce::jlimit(-12.0f, -6.0f, db);
+    // コンボルバーが先頭に来る場合 (Conv→PEQ / Conv only) は -6dB 上限で入力保護する。
+    // EQ が先頭またはコンボルバーがバイパスされている場合は 0dB まで許容する。
+    const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
+    const bool eqBypassed   = eqBypassRequested.load(std::memory_order_relaxed);
+    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
+    const bool convIsFirst = !convBypassed && (order == ProcessingOrder::ConvolverThenEQ || eqBypassed);
+    const float maxDb = convIsFirst ? -6.0f : 0.0f;
+    float clampedDb = juce::jlimit(-12.0f, maxDb, db);
     if (std::abs(inputHeadroomDb.load() - clampedDb) > 1e-5f)
     {
         inputHeadroomDb.store(clampedDb);
@@ -2295,11 +2333,20 @@ float AudioEngine::getInputHeadroomDb() const
 
 void AudioEngine::setOutputMakeupDb(float db)
 {
-    // [Fix] 範囲を [+6, +18] dB に拡張:
-    //   +12 dB = unity (input -6dB + IR safety -6dB 補正)
-    //   +6 dB  = -6dB アンダー (静かな設定)
-    //   +18 dB = +6dB オーバー (倍音成分の多い音源向け)
-    float clampedDb = juce::jlimit(6.0f, 18.0f, db);
+    // モード別メイクアップゲイン範囲:
+    //   PEQ only    : -6..  0 dB (コンボルバーなし、ユニティ=0dB)
+    //   PEQ→Conv    : +6..+10 dB
+    //   Conv→PEQ / Conv only : +6..+12 dB (+12dB = unity: -6dB input + -6dB IR safety)
+    const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
+    const bool eqBypassed   = eqBypassRequested.load(std::memory_order_relaxed);
+    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
+    float clampedDb;
+    if (convBypassed && !eqBypassed)
+        clampedDb = juce::jlimit(-6.0f, 0.0f, db);                 // PEQ only
+    else if (!convBypassed && order == ProcessingOrder::EQThenConvolver)
+        clampedDb = juce::jlimit(6.0f, 10.0f, db);                 // PEQ→Conv
+    else
+        clampedDb = juce::jlimit(6.0f, 12.0f, db);                 // Conv→PEQ / Conv only
     if (std::abs(outputMakeupDb.load() - clampedDb) > 1e-5f)
     {
         outputMakeupDb.store(clampedDb);
@@ -2310,6 +2357,68 @@ void AudioEngine::setOutputMakeupDb(float db)
 float AudioEngine::getOutputMakeupDb() const
 {
     return outputMakeupDb.load();
+}
+
+void AudioEngine::setProcessingOrder(ProcessingOrder order)
+{
+    currentProcessingOrder.store(order);
+    applyDefaultsForCurrentMode();
+}
+
+void AudioEngine::setConvolverInputTrimDb(float db)
+{
+    // 範囲: -12..0 dB (0dB = トリムなし / -12dB = 最大保護)
+    float clampedDb = juce::jlimit(-12.0f, 0.0f, db);
+    if (std::abs(convolverInputTrimDb.load() - clampedDb) > 1e-5f)
+    {
+        convolverInputTrimDb.store(clampedDb);
+        convolverInputTrimGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
+    }
+}
+
+float AudioEngine::getConvolverInputTrimDb() const
+{
+    return convolverInputTrimDb.load();
+}
+
+void AudioEngine::applyDefaultsForCurrentMode()
+{
+    if (m_isRestoringState) return; // プリセットロード中はデフォルトリセットを抑制する
+
+    const bool eqBypassed  = eqBypassRequested.load(std::memory_order_relaxed);
+    const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
+    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
+
+    if (convBypassed && !eqBypassed)
+    {
+        // PEQ only
+        setInputHeadroomDb(0.0f);
+        setOutputMakeupDb(0.0f);
+        // convolverInputTrim は未使用のためリセットのみ
+        convolverInputTrimDb.store(0.0f);
+        convolverInputTrimGain.store(1.0);
+    }
+    else if (!convBypassed && order == ProcessingOrder::EQThenConvolver && !eqBypassed)
+    {
+        // PEQ→Conv
+        setInputHeadroomDb(0.0f);
+        setOutputMakeupDb(10.0f);
+        setConvolverInputTrimDb(-6.0f);
+    }
+    else if (eqBypassed && !convBypassed)
+    {
+        // Conv only
+        setInputHeadroomDb(-6.0f);
+        setOutputMakeupDb(12.0f);
+        setConvolverInputTrimDb(0.0f);
+    }
+    else
+    {
+        // Conv→PEQ (ConvolverThenEQ, 両方アクティブ) または両方バイパス
+        setInputHeadroomDb(-6.0f);
+        setOutputMakeupDb(12.0f);
+        setConvolverInputTrimDb(0.0f);
+    }
 }
 
 void AudioEngine::setDitherBitDepth(int bitDepth)

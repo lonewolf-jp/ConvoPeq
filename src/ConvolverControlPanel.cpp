@@ -204,8 +204,25 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     };
     addAndMakeVisible(lcfSoftButton);
 
+    //----------------------------------------------------------
+    // Convolver Input Trim スライダー (EQ→Conv モード時のみ表示)
+    //----------------------------------------------------------
+    convTrimLabel.setText("Conv Trim:", juce::dontSendNotification);
+    convTrimLabel.setJustificationType(juce::Justification::centredRight);
+    convTrimLabel.setColour(juce::Label::textColourId, juce::Colours::lightyellow);
+    convTrimLabel.setTooltip("Pre-Convolver input gain trim (active in EQ->Conv order)");
+    addAndMakeVisible(convTrimLabel);
+
+    convTrimSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    convTrimSlider.setRange(-12.0, 0.0, 0.1);
+    convTrimSlider.setTextValueSuffix(" dB");
+    convTrimSlider.setNumDecimalPlacesToDisplay(1);
+    convTrimSlider.addListener(this);
+    addAndMakeVisible(convTrimSlider);
+
     // 現在の設定を反映
     updateFilterModeButtons();
+    updateTrimSlider();
 }
 
 ConvolverControlPanel::~ConvolverControlPanel()
@@ -374,6 +391,12 @@ void ConvolverControlPanel::resized()
     lcfNaturalButton.setBounds(lcfRow.removeFromLeft(60).reduced(2, 2));
     lcfSoftButton.setBounds(lcfRow.removeFromLeft(48).reduced(2, 2));
 
+    // --- 7行目: Convolver Input Trim (EQ→Conv モード時のみ表示) ---
+    auto trimRow = bounds.removeFromTop(26);
+    convTrimLabel.setBounds(trimRow.removeFromLeft(72).reduced(0, 3));
+    trimRow.removeFromLeft(4);
+    convTrimSlider.setBounds(trimRow);
+
     updateWaveformPath();
 }
 
@@ -391,6 +414,19 @@ void ConvolverControlPanel::updateFilterModeButtons()
     const auto lcMode = engine.getConvLCFilterMode();
     lcfNaturalButton.setToggleState(lcMode == convo::LCMode::Natural, juce::dontSendNotification);
     lcfSoftButton   .setToggleState(lcMode == convo::LCMode::Soft,    juce::dontSendNotification);
+}
+
+void ConvolverControlPanel::updateTrimSlider()
+{
+    const bool eqBypassed = engine.getEQProcessor().isBypassed();
+    const bool convBypassed = engine.getConvolverProcessor().isBypassed();
+    const bool isEqThenConv = (engine.getProcessingOrder() == AudioEngine::ProcessingOrder::EQThenConvolver);
+    const bool shouldShowTrim = !eqBypassed && !convBypassed && isEqThenConv;
+
+    convTrimLabel.setVisible(shouldShowTrim);
+    convTrimSlider.setVisible(shouldShowTrim);
+    convTrimSlider.setEnabled(shouldShowTrim);
+    convTrimSlider.setValue(engine.getConvolverInputTrimDb(), juce::dontSendNotification);
 }
 
 //--------------------------------------------------------------
@@ -455,6 +491,10 @@ void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
     else if (slider == &rebuildDebounceSlider)
     {
         engine.getConvolverProcessor().setRebuildDebounceMs(static_cast<int>(slider->getValue()));
+    }
+    else if (slider == &convTrimSlider)
+    {
+        engine.setConvolverInputTrimDb(static_cast<float>(slider->getValue()));
     }
 }
 
@@ -538,6 +578,7 @@ void ConvolverControlPanel::updateIRInfo()
                             juce::dontSendNotification);
     rebuildDebounceSlider.setValue(static_cast<double>(convolver.getRebuildDebounceMs()), juce::dontSendNotification);
     updateFilterModeButtons();
+    updateTrimSlider();
 
     if (convolver.isIRLoaded())
     {

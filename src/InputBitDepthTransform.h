@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstring>
 
+#include "DspNumericPolicy.h"
+
  #include <immintrin.h>
 
  #include <mkl.h>
@@ -13,7 +15,7 @@ namespace convo::input_transform
 {
     // document/input_bitdepth_transform.txt の仕様に合わせた共通定数
     static constexpr double kHeadroomScale    = 0.988553; // about -0.1 dB
-    static constexpr double kDenormThreshold  = 1.0e-25;
+    static constexpr double kDenormThreshold  = convo::numeric_policy::kDenormThresholdInputSanitize;
 
     inline void sanitizeAndLimit(double* __restrict data, int numSamples) noexcept
     {

@@ -274,6 +274,10 @@ void MainWindow::eqBypassButtonClicked()
     const bool isBypassed = !eqBypassButton.getToggleState();
     audioEngine.setEqBypassRequested(isBypassed);
     eqBypassButton.setButtonText(isBypassed ? "EQ Off" : "EQ On");
+    if (eqPanel != nullptr)
+        eqPanel->updateAllControls();
+    if (convolverPanel != nullptr)
+        convolverPanel->updateIRInfo();
 }
 
 //--------------------------------------------------------------
@@ -284,6 +288,10 @@ void MainWindow::convolverBypassButtonClicked()
     const bool isBypassed = !convolverBypassButton.getToggleState();
     audioEngine.setConvolverBypassRequested(isBypassed);
     convolverBypassButton.setButtonText(isBypassed ? "Conv Off" : "Conv On");
+    if (eqPanel != nullptr)
+        eqPanel->updateAllControls();
+    if (convolverPanel != nullptr)
+        convolverPanel->updateIRInfo();
 }
 
 //--------------------------------------------------------------
@@ -301,6 +309,11 @@ void MainWindow::orderButtonClicked()
         audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::ConvolverThenEQ);
         orderButton.setButtonText("Order: Conv -> EQ");
     }
+
+    if (eqPanel != nullptr)
+        eqPanel->updateAllControls();
+    if (convolverPanel != nullptr)
+        convolverPanel->updateIRInfo();
 }
 
 //--------------------------------------------------------------

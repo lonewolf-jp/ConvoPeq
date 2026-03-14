@@ -6,6 +6,7 @@
 //       https://www.w3.org/2011/audio/audio-eq-cookbook.html (Biquad Coeffs)
 //============================================================================
 #include "EQProcessor.h"
+#include "DspNumericPolicy.h"
 #include <cmath>
 #include <algorithm>
 #include <complex>
@@ -788,7 +789,7 @@ namespace
         const double m1 = c.m1;
         const double m2 = c.m2;
 
-        constexpr double DENORMAL_THRESHOLD = 1.0e-15;
+        constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
 
         for (int n = 0; n < numSamples; ++n)
         {
@@ -851,7 +852,7 @@ namespace
         const __m128d cHigh = _mm_set1_pd(100.0);
         const __m128d cLow  = _mm_set1_pd(-100.0);
 
-        constexpr double DENORMAL_THRESHOLD = 1.0e-15;
+        constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
 
         for (int n = 0; n < numSamples; ++n)
         {
@@ -1041,8 +1042,8 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     envOut = envOut * (1.0 - alpha) + outputRMS * alpha;
 
     // Denormal対策: 極小値をゼロにクランプ (無音時のCPU負荷対策)
-    if (envIn < 1.0e-20) envIn = 0.0;
-    if (envOut < 1.0e-20) envOut = 0.0;
+    if (envIn < convo::numeric_policy::kDenormThresholdAudioState) envIn = 0.0;
+    if (envOut < convo::numeric_policy::kDenormThresholdAudioState) envOut = 0.0;
 
     // ターゲットゲイン計算
     double targetGain = calculateAGCGain(envIn, envOut);
@@ -1087,6 +1088,10 @@ bool EQProcessor::isBufferSilent(const juce::AudioBuffer<double>& buffer, int nu
 //--------------------------------------------------------------
 void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
+    // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
+    // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
+    juce::ScopedNoDenormals noDenormals;
+
     if (bypassed.load(std::memory_order_relaxed))
         return;
 

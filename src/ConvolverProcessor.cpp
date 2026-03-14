@@ -5,6 +5,7 @@
 //============================================================================
 #include "ConvolverProcessor.h"
 #include "InputBitDepthTransform.h"
+#include "DspNumericPolicy.h"
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -318,7 +319,7 @@ public:
         double px = m_prev_x;
         double py = m_prev_y;
         double r = m_R;
-        constexpr double kDenormalThreshold = 1.0e-20;
+        constexpr double kDenormalThreshold = convo::numeric_policy::kDenormThresholdAudioState;
 
         for (int i = 0; i < numSamples; ++i) {
             double curr_x = data[i];

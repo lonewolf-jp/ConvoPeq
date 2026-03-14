@@ -34,6 +34,7 @@
 #include "EQProcessor.h"
 #include "PsychoacousticDither.h"
 #include "OutputFilter.h"
+#include "DspNumericPolicy.h"
 
 class AudioEngine : public juce::AudioSource,
                   public juce::ChangeBroadcaster,
@@ -135,8 +136,8 @@ public:
     void calcEQResponseCurve(float* outMagnitudesL, float* outMagnitudesR, const std::complex<double>* zArray, int numPoints, double sampleRate);
 
     // パラメータ設定 (Thread-safe)
-    void setEqBypassRequested (bool shouldBypass) noexcept;
-    void setConvolverBypassRequested (bool shouldBypass) noexcept;
+    void setEqBypassRequested (bool shouldBypass);
+    void setConvolverBypassRequested (bool shouldBypass);
 
     void setConvolverUseMinPhase(bool useMinPhase);
     bool getConvolverUseMinPhase() const;
@@ -148,7 +149,7 @@ public:
     void requestLoadState (const juce::ValueTree& state);
     juce::ValueTree getCurrentState() const;
 
-    void setProcessingOrder(ProcessingOrder order) { currentProcessingOrder.store(order); }
+    void setProcessingOrder(ProcessingOrder order);
     ProcessingOrder getProcessingOrder() const { return currentProcessingOrder.load(); }
 
     void setAnalyzerSource(AnalyzerSource source) { currentAnalyzerSource.store(source); }
@@ -161,6 +162,9 @@ public:
 
     void setOutputMakeupDb(float db);
     float getOutputMakeupDb() const;
+
+    void setConvolverInputTrimDb(float db);
+    float getConvolverInputTrimDb() const;
 
     void setDitherBitDepth(int bitDepth);
     int getDitherBitDepth() const;
@@ -235,7 +239,7 @@ private:
         inline void processSample(double& sample) noexcept
         {
             const double r = m_R;
-            constexpr double kDenormalThreshold = 1.0e-20;
+            constexpr double kDenormalThreshold = convo::numeric_policy::kDenormThresholdAudioState;
 
             const double curr_x = sample;
             double curr_y = curr_x - px_local + r * py_local;
@@ -254,7 +258,7 @@ private:
             double px = m_prev_x;
             double py = m_prev_y;
             const double r = m_R;
-            constexpr double kDenormalThreshold = 1.0e-20;
+            constexpr double kDenormalThreshold = convo::numeric_policy::kDenormThresholdAudioState;
 
             int i = 0;
             const int vEnd = numSamples / 4 * 4;
@@ -366,6 +370,7 @@ private:
             float saturationAmount;
         double inputHeadroomGain;
             double outputMakeupGain;
+                        double convolverInputTrimGain; // EQThenConvolver 時のコンボルバー入力トリム
             // 出力周波数フィルターモード
             convo::HCMode convHCMode;  // ① ハイカットモード
             convo::LCMode convLCMode;  // ① ローカットモード
@@ -498,6 +503,9 @@ DSPCore();
     std::atomic<float> outputMakeupDb { 12.0f };
     std::atomic<double> outputMakeupGain { 3.981071705534972 }; // +12dB (unity: -6dB input headroom + -6dB IR safety margin)
     std::atomic<int> rebuildGeneration { 0 }; // 非同期リビルドの競合防止用
+    std::atomic<float> convolverInputTrimDb { 0.0f };
+    std::atomic<double> convolverInputTrimGain { 1.0 }; // 0 dB (EQThenConvolver時にコンボルバー入力に適用)
+    bool m_isRestoringState { false }; // requestLoadState 中はデフォルトリセットを抑制 (Message Thread のみ)
 
     // 出力周波数フィルターモード (Thread-safe)
     std::atomic<convo::HCMode> convHCFilterMode { convo::HCMode::Natural }; // ① ハイカット
@@ -516,6 +524,10 @@ DSPCore();
     std::vector<float> eqTotalMagSqLBuffer;
     std::vector<float> eqTotalMagSqRBuffer;
     std::vector<float> eqBandMagSqBuffer;
+    //----------------------------------------------------------
+    // プライベートヘルパー (Message Thread のみ)
+    //----------------------------------------------------------
+    void applyDefaultsForCurrentMode();
 
     //----------------------------------------------------------
     // ヘルパー関数

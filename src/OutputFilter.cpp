@@ -206,7 +206,7 @@ void OutputFilter::process(juce::dsp::AudioBlock<double>& block,
         return;
 
     // デノーマル判定閾値 (各 Biquad のフラッシュ条件と同値)
-    const __m128d kDenThresh = _mm_set1_pd(1.0e-20);
+    const __m128d kDenThresh = _mm_set1_pd(convo::numeric_policy::kDenormThresholdAudioState);
 
     if (convIsLast)
     {

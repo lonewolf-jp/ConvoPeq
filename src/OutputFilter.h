@@ -25,6 +25,7 @@
 #include <JuceHeader.h>
 #include <cmath>
 #include <array>
+#include "DspNumericPolicy.h"
 
 namespace convo {
 
@@ -61,7 +62,7 @@ struct BiquadState
         w1 = c.b1 * x - c.a1 * y + w2;
         w2 = c.b2 * x - c.a2 * y;
         // デノーマル対策
-        constexpr double kDenorm = 1.0e-20;
+        constexpr double kDenorm = convo::numeric_policy::kDenormThresholdAudioState;
         if (w1 > -kDenorm && w1 < kDenorm) w1 = 0.0;
         if (w2 > -kDenorm && w2 < kDenorm) w2 = 0.0;
         return y;

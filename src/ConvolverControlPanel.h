@@ -81,7 +81,17 @@ private:
     void timerCallback() override;
 
     void updateWaveformPath();
+    // Convolver Input Trim スライダーの表示と値をエンジンの現在モードに同期する。
+    // モード変更後 (バイパス切替・処理順序変更・プリセットロード) に呼ぶこと。
+    void updateTrimSlider();
+
     void markConvolverParameterDirty();
+
+        //----------------------------------------------------------
+        // Convolver Input Trim (EQ→Conv 時のみ有効)
+        //----------------------------------------------------------
+        juce::Slider convTrimSlider;
+        juce::Label  convTrimLabel;
     void applyPendingConvolverParameters();
     bool hasPendingConvolverParameters() const noexcept;
 
