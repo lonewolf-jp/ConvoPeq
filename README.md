@@ -191,7 +191,7 @@ For more details, see `BUILD_GUIDE_WINDOWS.md`.
 
 ## License
 
-- **ConvoPeq**: Copyright (c) lonewolf-jp
+- **ConvoPeq**: Copyright (c) lonewolf-jp (CC BY-NC 4.0)
 - **JUCE**: GPLv3 / Commercial
 - **r8brain-free-src**: MIT
 - **Intel oneMKL**: Intel Simplified Software License
