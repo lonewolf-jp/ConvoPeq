@@ -4,9 +4,6 @@
 // Intel MKL を使用した Non-Uniform Partitioned Convolution (NUP) エンジン。
 // WDL_ConvolutionEngine_Div の低遅延特性を維持しつつ、
 // MKL DFTI + AVX2 FMA でスループットを最大化する。
-//
-// ■ パーティション構成 (3 Layer):
-//   Layer 0 (即時): partSize = nextPow2(max(blockSize,64))
 //                   最大 kL0MaxParts 個のパーティション (=IRの先頭約85ms@48kHz)
 //                   毎コールバックで全パーティションを即時処理 → 低レイテンシー
 //   Layer 1 (遅延): partSize = L0.partSize * 8
@@ -108,6 +105,7 @@ public:
     //----------------------------------------------------------
     bool SetImpulse(const double* impulse, int irLen, int blockSize,
                     double scale = 1.0,
+                    bool enableDirectHead = false,
                     const FilterSpec* filterSpec = nullptr);
 
     //----------------------------------------------------------
@@ -224,6 +222,10 @@ private:
     // L0 専用: リングバッファからの読み出し (memcpy + Zero-Flush + m_ringRead/m_ringAvail 更新)
     int  ringRead(double* dst, int n) noexcept;
 
+    // Direct Form 先頭タップ処理 (Audio Thread, AVX2/FMA + MKL)
+    // 先頭IRは時間領域で即時処理し、FFT側IRは同区間をゼロ化して二重加算を回避する。
+    void processDirectBlock(const double* input, int numSamples) noexcept;
+
     void releaseAllLayers() noexcept;
 
     // SetImpulse() の末尾で呼ぶ。全レイヤーの irFreqDomain に
@@ -278,6 +280,17 @@ private:
     // Audio Thread から書き込み、Message Thread から読み出し可。
     // 非ゼロは構造バグの存在を示す (通常は常に 0)。
     std::atomic<int> m_ringOverflowCount { 0 };
+
+    // 先頭 Direct Form 用バッファ (すべて Message Thread で事前確保)
+    int     m_directTapCount = 0;
+    int     m_directHistLen  = 0;
+    int     m_directMaxBlock = 0;
+    int     m_directPendingSamples = 0;
+    bool    m_directEnabled  = false;
+    double* m_directIRRev    = nullptr; // 逆順IR (dot用)
+    double* m_directHistory  = nullptr; // 長さ = m_directHistLen
+    double* m_directWindow   = nullptr; // 長さ = m_directHistLen + m_directMaxBlock
+    double* m_directOutBuf   = nullptr; // 現コールバックのゼロ遅延出力
 
     std::atomic<bool> m_ready { false };
 

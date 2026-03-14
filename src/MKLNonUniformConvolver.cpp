@@ -35,6 +35,7 @@
 
 #include "MKLNonUniformConvolver.h"
 #include "AlignedAllocation.h"
+#include "DspNumericPolicy.h"
 
 #include <mkl.h>
 #include <mkl_dfti.h>
@@ -48,6 +49,18 @@
 
 namespace convo
 {
+
+namespace
+{
+inline double hsum256_pd(__m256d v) noexcept
+{
+    const __m128d hi = _mm256_extractf128_pd(v, 1);
+    const __m128d lo = _mm256_castpd256_pd128(v);
+    const __m128d sum = _mm_add_pd(lo, hi);
+    const __m128d shuf = _mm_shuffle_pd(sum, sum, 0x1);
+    return _mm_cvtsd_f64(_mm_add_sd(sum, shuf));
+}
+} // namespace
 
 //==============================================================================
 // Layer::freeAll
@@ -250,12 +263,24 @@ void MKLNonUniformConvolver::releaseAllLayers() noexcept
 
     if (m_ringBuf) { mkl_free(m_ringBuf); m_ringBuf = nullptr; }
     m_ringSize = m_ringMask = m_ringWrite = m_ringRead = m_ringAvail = 0;
+
+    if (m_directIRRev)   { mkl_free(m_directIRRev);   m_directIRRev = nullptr; }
+    if (m_directHistory) { mkl_free(m_directHistory); m_directHistory = nullptr; }
+    if (m_directWindow)  { mkl_free(m_directWindow);  m_directWindow = nullptr; }
+    if (m_directOutBuf)  { mkl_free(m_directOutBuf);  m_directOutBuf = nullptr; }
+
+    m_directTapCount = 0;
+    m_directHistLen  = 0;
+    m_directMaxBlock = 0;
+    m_directPendingSamples = 0;
+    m_directEnabled  = false;
 }
 
 //==============================================================================
 // SetImpulse  ─ Message Thread のみ
 //==============================================================================
 bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int blockSize, double scale,
+                                        bool enableDirectHead,
                                         const FilterSpec* filterSpec)
 {
     m_ready.store(false, std::memory_order_release);
@@ -265,6 +290,57 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
     // 前回のリソースを解放
     releaseAllLayers();
+
+    // ────────────────────────────────────────────────
+    // 先頭 Direct Form 設定
+    //   - 先頭タップは時間領域で即時処理 (AVX2/FMA + MKL)
+    //   - FFT 側IRは先頭区間をゼロ化して二重加算を回避
+    // ────────────────────────────────────────────────
+    // NOTE:
+    // Direct head path remains behind an experimental flag.
+    // Direct output is kept in a dedicated zero-latency mix buffer and added in Get().
+    constexpr int kMaxDirectTaps = 32;
+    const int directPart = juce::nextPowerOfTwo(std::max(blockSize, 64));
+    m_directTapCount = (enableDirectHead ? std::min(irLen, std::min(directPart, kMaxDirectTaps)) : 0);
+    m_directHistLen  = std::max(0, m_directTapCount - 1);
+    m_directMaxBlock = std::max(blockSize, 1);
+    m_directPendingSamples = 0;
+    m_directEnabled  = (m_directTapCount > 0);
+
+    if (m_directEnabled)
+    {
+        m_directIRRev   = static_cast<double*>(mkl_malloc(static_cast<size_t>(m_directTapCount) * sizeof(double), 64));
+        m_directHistory = (m_directHistLen > 0)
+            ? static_cast<double*>(mkl_malloc(static_cast<size_t>(m_directHistLen) * sizeof(double), 64))
+            : nullptr;
+        m_directWindow  = static_cast<double*>(mkl_malloc(static_cast<size_t>(m_directHistLen + m_directMaxBlock) * sizeof(double), 64));
+        m_directOutBuf  = static_cast<double*>(mkl_malloc(static_cast<size_t>(m_directMaxBlock) * sizeof(double), 64));
+
+        if (!m_directIRRev || !m_directWindow || !m_directOutBuf || (m_directHistLen > 0 && !m_directHistory))
+        {
+            releaseAllLayers();
+            return false;
+        }
+
+        if (m_directHistLen > 0)
+            memset(m_directHistory, 0, static_cast<size_t>(m_directHistLen) * sizeof(double));
+        memset(m_directOutBuf, 0, static_cast<size_t>(m_directMaxBlock) * sizeof(double));
+
+        for (int i = 0; i < m_directTapCount; ++i)
+            m_directIRRev[i] = impulse[m_directTapCount - 1 - i] * scale;
+    }
+
+    convo::ScopedAlignedPtr<double> impulseForFft(
+        static_cast<double*>(mkl_malloc(static_cast<size_t>(irLen) * sizeof(double), 64)));
+    if (!impulseForFft.get())
+    {
+        releaseAllLayers();
+        return false;
+    }
+    memcpy(impulseForFft.get(), impulse, static_cast<size_t>(irLen) * sizeof(double));
+
+    if (m_directEnabled)
+        memset(impulseForFft.get(), 0, static_cast<size_t>(m_directTapCount) * sizeof(double));
 
     // NOTE: vmlSetMode はここでは呼ばない。
     // MainApplication::initialise() で vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE) を
@@ -414,7 +490,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
             return false;
         }
 
-        const double* irSrc    = impulse + cfgs[li].offset;
+        const double* irSrc    = impulseForFft.get() + cfgs[li].offset;
         const int     irRemain = cfgs[li].len;
 
         for (int p = 0; p < l.numParts; ++p)
@@ -557,6 +633,75 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
     m_ready.store(true, std::memory_order_release);
     return true;
+}
+
+//==============================================================================
+// processDirectBlock  ─ Audio Thread
+// 先頭IRを時間領域で即時処理し、結果を専用ミックスバッファへ書き込む。
+//==============================================================================
+void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamples) noexcept
+{
+    if (!m_directEnabled || numSamples <= 0 || m_directOutBuf == nullptr || m_directWindow == nullptr || m_directIRRev == nullptr)
+        return;
+
+    if (numSamples > m_directMaxBlock)
+    {
+        jassertfalse;
+        m_directPendingSamples = 0;
+        return;
+    }
+
+    constexpr double kDenormalThreshold = convo::numeric_policy::kDenormThresholdAudioState;
+    memset(m_directOutBuf, 0, static_cast<size_t>(numSamples) * sizeof(double));
+
+    int processed = 0;
+    while (processed < numSamples)
+    {
+        const int chunk = std::min(numSamples - processed, m_directMaxBlock);
+
+        if (m_directHistLen > 0)
+            memcpy(m_directWindow, m_directHistory, static_cast<size_t>(m_directHistLen) * sizeof(double));
+
+        if (input)
+            memcpy(m_directWindow + m_directHistLen, input + processed, static_cast<size_t>(chunk) * sizeof(double));
+        else
+            memset(m_directWindow + m_directHistLen, 0, static_cast<size_t>(chunk) * sizeof(double));
+
+        for (int n = 0; n < chunk; ++n)
+        {
+            const double* x = m_directWindow + n;
+            __m256d sum0 = _mm256_setzero_pd();
+            __m256d sum1 = _mm256_setzero_pd();
+            int k = 0;
+            const int vEnd8 = (m_directTapCount / 8) * 8;
+
+            for (; k < vEnd8; k += 8)
+            {
+                const __m256d h0 = _mm256_load_pd(m_directIRRev + k);
+                const __m256d x0 = _mm256_loadu_pd(x + k);
+                const __m256d h1 = _mm256_load_pd(m_directIRRev + k + 4);
+                const __m256d x1 = _mm256_loadu_pd(x + k + 4);
+                sum0 = _mm256_fmadd_pd(h0, x0, sum0);
+                sum1 = _mm256_fmadd_pd(h1, x1, sum1);
+            }
+
+            double y = hsum256_pd(_mm256_add_pd(sum0, sum1));
+            for (; k < m_directTapCount; ++k)
+                y += m_directIRRev[k] * x[k];
+
+            if (!std::isfinite(y) || std::abs(y) < kDenormalThreshold)
+                y = 0.0;
+
+            m_directOutBuf[processed + n] = y;
+        }
+
+        if (m_directHistLen > 0)
+            memcpy(m_directHistory, m_directWindow + chunk, static_cast<size_t>(m_directHistLen) * sizeof(double));
+
+        processed += chunk;
+    }
+
+    m_directPendingSamples = numSamples;
 }
 
 //==============================================================================
@@ -842,6 +987,9 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
     if (!m_ready.load(std::memory_order_acquire) || numSamples <= 0)
         return;
 
+    // 先頭Direct区間を即時処理 (AVX2/FMA + MKL dot)
+    processDirectBlock(input, numSamples);
+
     for (int li = 0; li < m_numActiveLayers; ++li)
     {
         Layer& l = m_layers[li];
@@ -1102,6 +1250,22 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
     // ── L0 出力: リングバッファから読み出し ──
     const int got = ringRead(output, numSamples);
 
+    // ── Direct 出力: 専用ゼロ遅延ミックスバッファを加算 ──
+    if (m_directEnabled && m_directOutBuf != nullptr)
+    {
+        const int toAdd = std::min(numSamples, m_directPendingSamples);
+        if (toAdd > 0)
+        {
+            if (output != nullptr)
+            {
+                vdAdd(toAdd, output, m_directOutBuf, output);
+            }
+
+            memset(m_directOutBuf, 0, static_cast<size_t>(toAdd) * sizeof(double));
+            m_directPendingSamples = 0;
+        }
+    }
+
     // ── L1/L2 出力: tailOutputBuf から vdAdd で合算 ──
     // output が nullptr の場合でも tailOutputPos を正しく進める。
     for (int li = 1; li < m_numActiveLayers; ++li)
@@ -1166,6 +1330,12 @@ void MKLNonUniformConvolver::Reset()
     m_ringWrite = 0;
     m_ringRead  = 0;
     m_ringAvail = 0;
+
+    if (m_directHistLen > 0 && m_directHistory)
+        memset(m_directHistory, 0, static_cast<size_t>(m_directHistLen) * sizeof(double));
+    if (m_directOutBuf && m_directMaxBlock > 0)
+        memset(m_directOutBuf, 0, static_cast<size_t>(m_directMaxBlock) * sizeof(double));
+    m_directPendingSamples = 0;
 }
 
 } // namespace convo

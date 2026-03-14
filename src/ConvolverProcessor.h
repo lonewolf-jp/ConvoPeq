@@ -97,7 +97,6 @@ public:
     //----------------------------------------------------------
     bool loadImpulseResponse(const juce::File& irFile, bool optimizeForRealTime = false);
 
-    //----------------------------------------------------------
     // メイン処理（Audio Thread）
     //
     //----------------------------------------------------------
@@ -131,6 +130,13 @@ public:
     void setNUCFilterModes(convo::HCMode hcMode, convo::LCMode lcMode);
 
     //----------------------------------------------------------
+    // Experimental Direct Head Flag
+    // 段階導入用の機能フラグ。変更時はIRを再構築する。
+    //----------------------------------------------------------
+    void setExperimentalDirectHeadEnabled(bool enabled);
+    bool getExperimentalDirectHeadEnabled() const { return experimentalDirectHeadEnabled.load(std::memory_order_acquire); }
+
+    //----------------------------------------------------------
     // Smoothing Time
     //----------------------------------------------------------
     void setSmoothingTime(float timeSec);
@@ -162,7 +168,17 @@ public:
     juce::String getLastError() const { return lastError; }
     float getLoadProgress() const { return loadProgress.load(); }
     int getCurrentBufferSize() const { return currentBufferSize; }
+    struct LatencyBreakdown
+    {
+        int algorithmLatencySamples = 0;
+        int irPeakLatencySamples = 0;
+        int totalLatencySamples = 0;
+        bool directHeadActive = false;
+    };
+
+    LatencyBreakdown getLatencyBreakdown() const;
     int getLatencySamples() const;
+    int getTotalLatencySamples() const;
 
     //----------------------------------------------------------
     // 波形表示用データ取得
@@ -253,6 +269,7 @@ private:
         int storedKnownBlockSize = 0;
         int storedFirstPartition = 0;
         double storedScale = 1.0;
+        bool storedDirectHeadEnabled = false;
 
         StereoConvolver() = default;
 
@@ -280,7 +297,8 @@ private:
         StereoConvolver& operator=(const StereoConvolver&) = delete;
 
         bool init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize, double scale = 1.0,
-                  const convo::FilterSpec* filterSpec = nullptr)
+              bool enableDirectHead = false,
+              const convo::FilterSpec* filterSpec = nullptr)
         {
             // Safety: Free existing data if init is called multiple times (Leak prevention)
             if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
@@ -298,6 +316,7 @@ private:
             storedKnownBlockSize = knownBlockSize;
             storedFirstPartition = firstPartition;
             storedScale = scale;
+            storedDirectHeadEnabled = enableDirectHead;
 
             try
             {
@@ -311,8 +330,8 @@ private:
                 new (rn1) convo::MKLNonUniformConvolver();
                 nucConvolvers[1].reset(static_cast<convo::MKLNonUniformConvolver*>(rn1));
 
-                if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize, scale, filterSpec) &&
-                    nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize, scale, filterSpec))
+                if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec) &&
+                    nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec))
                 {
                     latency   = nucConvolvers[0]->getLatency();
                     DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
@@ -351,7 +370,7 @@ private:
                     std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
 
-                    if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale))
+                    if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale, storedDirectHeadEnabled))
                         return nullptr; // init失敗時、newConvのデストラクタが呼ばれ安全にクリーンアップされる
                 }
                 return newConv.release();
@@ -401,6 +420,7 @@ private:
     //----------------------------------------------------------
     std::atomic<bool> bypassed{false};
     std::atomic<float> mixTarget{1.0f}; // UIからのターゲット値 (0.0-1.0)
+    std::atomic<bool> experimentalDirectHeadEnabled{false};
     juce::SmoothedValue<double> mixSmoother; // オーディオスレッドでの平滑化用
     juce::LinearSmoothedValue<double> wetCrossfade; // Wet信号のクロスフェード用
     // [Bug G fix] wetCrossfade.isSmoothing() は非スレッドセーフ (Audio Thread が getNextValue() を同時呼び出し)。

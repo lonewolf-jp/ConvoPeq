@@ -5,6 +5,7 @@
 // UIコンポーネントの配置とオーディオデバイス管理を行う
 //============================================================================
 #include "MainWindow.h"
+#include <cmath>
 
 namespace
 {
@@ -111,6 +112,8 @@ MainWindow::MainWindow (const juce::String& name)
 //--------------------------------------------------------------
 MainWindow::~MainWindow()
 {
+    orderModeBox.setLookAndFeel (nullptr);
+
     // 【パッチ4】audioEngine の ChangeListener を最初に解除する
     // 理由: audioEngine はメンバ変数であり、このデストラクタ本体が完了した後に
     //       メンバの逆順破棄が始まる。もし audioEngine が本体完了後~audioEngine()
@@ -160,18 +163,17 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
             convolverPanel->updateIRInfo();
 
         // メインウィンドウ上のコントロールを更新 (プリセットロード時など)
-        // 処理順序
-        if (audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::ConvolverThenEQ)
-            orderButton.setButtonText("Order: Conv -> EQ");
-        else
-            orderButton.setButtonText("Order: EQ -> Conv");
-
-        // バイパスボタン
-        eqBypassButton.setToggleState(!audioEngine.getEQProcessor().isBypassed(), juce::dontSendNotification);
-        eqBypassButton.setButtonText(audioEngine.getEQProcessor().isBypassed() ? "EQ Off" : "EQ On");
-
-        convolverBypassButton.setToggleState(!audioEngine.getConvolverProcessor().isBypassed(), juce::dontSendNotification);
-        convolverBypassButton.setButtonText(audioEngine.getConvolverProcessor().isBypassed() ? "Conv Off" : "Conv On");
+        const bool eqBypassed = audioEngine.getEQProcessor().isBypassed();
+        const bool convBypassed = audioEngine.getConvolverProcessor().isBypassed();
+        int modeId = 3; // Conv->Peq
+        if (!eqBypassed && convBypassed)
+            modeId = 2; // Peq
+        else if (eqBypassed && !convBypassed)
+            modeId = 1; // Conv
+        else if (!eqBypassed && !convBypassed
+              && audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::EQThenConvolver)
+            modeId = 4; // Peq->Conv
+        orderModeBox.setSelectedId(modeId, juce::dontSendNotification);
 
         // ソフトクリップとサチュレーション
         softClipButton.setToggleState(audioEngine.isSoftClipEnabled(), juce::dontSendNotification);
@@ -202,22 +204,16 @@ void MainWindow::createUIComponents()
     showDeviceSelectorButton.onClick = [this] { toggleDeviceSelector(); };
     juce::Component::addAndMakeVisible (showDeviceSelectorButton);
 
-    // EQ オン/オフ ボタン
-    eqBypassButton.setButtonText ("EQ On");
-    eqBypassButton.setToggleState (!audioEngine.getEQProcessor().isBypassed(), juce::dontSendNotification);
-    eqBypassButton.onClick = [this] { eqBypassButtonClicked(); };
-    juce::Component::addAndMakeVisible (eqBypassButton);
-
-    // Convolver オン/オフ ボタン
-    convolverBypassButton.setButtonText ("Conv On");
-    convolverBypassButton.setToggleState (!audioEngine.getConvolverProcessor().isBypassed(), juce::dontSendNotification);
-    convolverBypassButton.onClick = [this] { convolverBypassButtonClicked(); };
-    juce::Component::addAndMakeVisible (convolverBypassButton);
-
-    // 処理順序ボタン
-    orderButton.setButtonText ("Order: Conv -> EQ");
-    orderButton.onClick = [this] { orderButtonClicked(); };
-    juce::Component::addAndMakeVisible (orderButton);
+    // 処理モード選択
+    orderModeBox.addItem("Conv", 1);
+    orderModeBox.addItem("Peq", 2);
+    orderModeBox.addItem("Conv->Peq", 3);
+    orderModeBox.addItem("Peq->Conv", 4);
+    orderModeBox.setJustificationType(juce::Justification::centred);
+    orderModeBox.setTooltip("Processing mode");
+    orderModeBox.setLookAndFeel (&orderModeLookAndFeel);
+    orderModeBox.onChange = [this] { orderModeBoxChanged(); };
+    juce::Component::addAndMakeVisible(orderModeBox);
 
     // 保存/読み込みボタン
     saveButton.setButtonText ("Save");
@@ -233,6 +229,11 @@ void MainWindow::createUIComponents()
     cpuUsageLabel.setJustificationType (juce::Justification::centredRight);
     cpuUsageLabel.setColour (juce::Label::textColourId, juce::Colours::white);
     juce::Component::addAndMakeVisible (cpuUsageLabel);
+
+    latencyLabel.setText ("Lat: -- ms", juce::dontSendNotification);
+    latencyLabel.setJustificationType (juce::Justification::centredRight);
+    latencyLabel.setColour (juce::Label::textColourId, juce::Colours::white);
+    juce::Component::addAndMakeVisible (latencyLabel);
 
     // Aboutボタン
     aboutButton.setButtonText ("?");
@@ -264,50 +265,38 @@ void MainWindow::createUIComponents()
     saturationLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     saturationLabel.setJustificationType(juce::Justification::centredRight);
     juce::Component::addAndMakeVisible(saturationLabel);
+
+    // 初期選択をエンジン状態に同期
+    changeListenerCallback(&audioEngine);
 }
 
 //--------------------------------------------------------------
-// EQバイパスボタン
+// 処理モードドロップダウン
 //--------------------------------------------------------------
-void MainWindow::eqBypassButtonClicked()
+void MainWindow::orderModeBoxChanged()
 {
-    const bool isBypassed = !eqBypassButton.getToggleState();
-    audioEngine.setEqBypassRequested(isBypassed);
-    eqBypassButton.setButtonText(isBypassed ? "EQ Off" : "EQ On");
-    if (eqPanel != nullptr)
-        eqPanel->updateAllControls();
-    if (convolverPanel != nullptr)
-        convolverPanel->updateIRInfo();
-}
-
-//--------------------------------------------------------------
-// Convolverバイパスボタン
-//--------------------------------------------------------------
-void MainWindow::convolverBypassButtonClicked()
-{
-    const bool isBypassed = !convolverBypassButton.getToggleState();
-    audioEngine.setConvolverBypassRequested(isBypassed);
-    convolverBypassButton.setButtonText(isBypassed ? "Conv Off" : "Conv On");
-    if (eqPanel != nullptr)
-        eqPanel->updateAllControls();
-    if (convolverPanel != nullptr)
-        convolverPanel->updateIRInfo();
-}
-
-//--------------------------------------------------------------
-// 処理順序ボタン
-//--------------------------------------------------------------
-void MainWindow::orderButtonClicked()
-{
-    if (audioEngine.getProcessingOrder() == AudioEngine::ProcessingOrder::ConvolverThenEQ)
+    const int mode = orderModeBox.getSelectedId();
+    if (mode == 1)
     {
-        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::EQThenConvolver);
-        orderButton.setButtonText("Order: EQ -> Conv");
+        audioEngine.setConvolverBypassRequested(false);
+        audioEngine.setEqBypassRequested(true);
     }
-    else
+    else if (mode == 2)
     {
+        audioEngine.setConvolverBypassRequested(true);
+        audioEngine.setEqBypassRequested(false);
+    }
+    else if (mode == 3)
+    {
+        audioEngine.setConvolverBypassRequested(false);
+        audioEngine.setEqBypassRequested(false);
         audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::ConvolverThenEQ);
-        orderButton.setButtonText("Order: Conv -> EQ");
+    }
+    else if (mode == 4)
+    {
+        audioEngine.setConvolverBypassRequested(false);
+        audioEngine.setEqBypassRequested(false);
+        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::EQThenConvolver);
     }
 
     if (eqPanel != nullptr)
@@ -368,23 +357,29 @@ void MainWindow::resized()
     auto bounds = getLocalBounds();
 
     auto buttonRow = bounds.removeFromTop (28);
-    aboutButton.setBounds (buttonRow.removeFromRight (30).reduced (2, 2));
-    showDeviceSelectorButton.setBounds (buttonRow.removeFromRight (140).reduced (2, 2));
-    orderButton.setBounds (buttonRow.removeFromRight (140).reduced (2, 2));
-    loadButton.setBounds (buttonRow.removeFromRight (50).reduced (2, 2));
-    saveButton.setBounds (buttonRow.removeFromRight (50).reduced (2, 2));
-    convolverBypassButton.setBounds (buttonRow.removeFromRight (80).reduced (2, 2));
-    eqBypassButton.setBounds (buttonRow.removeFromRight (80).reduced (2, 2));
 
-    saturationSlider.setBounds(buttonRow.removeFromRight(80).reduced(2, 2));
-    saturationLabel.setBounds(buttonRow.removeFromRight(30).reduced(2, 2));
-    softClipButton.setBounds(buttonRow.removeFromRight(70).reduced(2, 2));
-    cpuUsageLabel.setBounds (buttonRow.removeFromRight (70).reduced (2, 2));
+    // 右側: About / Audio Settings
+    aboutButton.setBounds (buttonRow.removeFromRight (30).reduced (2, 2));
+    showDeviceSelectorButton.setBounds (buttonRow.removeFromRight (130).reduced (2, 2));
+
+    // 状態表示
+    cpuUsageLabel.setBounds (buttonRow.removeFromRight (95).reduced (2, 2));
+    latencyLabel.setBounds (buttonRow.removeFromRight (170).reduced (2, 2));
+
+    // クリップ制御 (右から: Soft Clip, Sat, スライダー)
+    softClipButton.setBounds(buttonRow.removeFromRight(90).reduced(2, 2));
+    saturationLabel.setBounds(buttonRow.removeFromRight(42).reduced(2, 2));
+    saturationSlider.setBounds(buttonRow.removeFromRight(120).reduced(2, 2));
+
+    // 左側: 保存/読込 + 処理モード
+    orderModeBox.setBounds (buttonRow.removeFromRight (145).reduced (2, 2));
+    loadButton.setBounds (buttonRow.removeFromRight (46).reduced (2, 2));
+    saveButton.setBounds (buttonRow.removeFromRight (46).reduced (2, 2));
 
     if (convolverPanel)
         convolverPanel->setBounds (bounds.removeFromTop (280));
 
-    const int eqH = static_cast<int> (bounds.getHeight() * 0.45f);
+    const int eqH = static_cast<int> (bounds.getHeight() * 0.48f);
     if (eqPanel)
         eqPanel->setBounds (bounds.removeFromTop (eqH));
 
@@ -399,6 +394,40 @@ void MainWindow::timerCallback()
 {
     double cpu = audioDeviceManager.getCpuUsage() * 100.0;
     cpuUsageLabel.setText ("CPU: " + juce::String (cpu, 1) + "%", juce::dontSendNotification);
+
+    const auto breakdown = audioEngine.getCurrentLatencyBreakdown();
+    const int latencySamples = audioEngine.getCurrentLatencySamples();
+    const int latencyMs = juce::roundToInt(audioEngine.getCurrentLatencyMs());
+    latencyLabel.setText ("Lat: " + juce::String (latencyMs) + "ms (" + juce::String(latencySamples) + " smp)",
+                          juce::dontSendNotification);
+
+#if JUCE_DEBUG
+    {
+        static double lastLatencyLogMs = 0.0;
+        const double nowMs = juce::Time::getMillisecondCounterHiRes();
+        if (nowMs - lastLatencyLogMs >= 1000.0)
+        {
+            lastLatencyLogMs = nowMs;
+
+            const double sr = audioEngine.getSampleRate();
+            const int osFactor = juce::jmax(1, audioEngine.getOversamplingFactor());
+            const auto toMsRounded3 = [sr](int samples) -> double
+            {
+                if (sr <= 0.0)
+                    return 0.0;
+                const double ms = (static_cast<double>(samples) * 1000.0) / sr;
+                return std::round(ms * 1000.0) / 1000.0;
+            };
+
+            DBG("lat sr=" << juce::String(sr, 1)
+                << " osFactor=" << osFactor
+                << " os=" << juce::String(toMsRounded3(breakdown.oversamplingLatencyBaseRateSamples), 3)
+                << " convA=" << juce::String(toMsRounded3(breakdown.convolverAlgorithmLatencyBaseRateSamples), 3)
+                << " convPeak=" << juce::String(toMsRounded3(breakdown.convolverIRPeakLatencyBaseRateSamples), 3)
+                << " total=" << latencyMs);
+        }
+    }
+#endif
 }
 
 //--------------------------------------------------------------

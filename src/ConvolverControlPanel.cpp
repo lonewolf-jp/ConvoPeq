@@ -4,6 +4,7 @@
 // Convolverコントロールパネルの実装
 //============================================================================
 #include "ConvolverControlPanel.h"
+#include <cmath>
 
 //--------------------------------------------------------------
 // コンストラクタ
@@ -29,6 +30,12 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
         engine.setConvolverUseMinPhase(phaseChoiceBox.getSelectedId() == 2);
     };
     addAndMakeVisible(phaseChoiceBox);
+
+    experimentalDirectHeadToggle.setButtonText("Exp Direct Head");
+    experimentalDirectHeadToggle.setTooltip("Experimental zero-latency direct head path. Rebuilds the convolver when changed.");
+    experimentalDirectHeadToggle.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+    experimentalDirectHeadToggle.addListener(this);
+    addAndMakeVisible(experimentalDirectHeadToggle);
 
     // Dry/Wet Mixスライダー
     mixSlider.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -339,41 +346,50 @@ void ConvolverControlPanel::resized()
     auto controlRow3 = bounds.removeFromTop(28);
     auto controlRow4 = bounds.removeFromTop(28);
 
+    const int leftGap = 10;
+    const int loadWidth = 120;
+    const int phaseWidth = 130;
+    const int labelWidth = 78;
+    const int inlineGap = 6;
+    const int controlsStartX = loadWidth + leftGap + phaseWidth + leftGap;
+
     // --- 1行目 ---
-    loadIRButton.setBounds(controlRow1.removeFromLeft(90));
-    controlRow1.removeFromLeft(10);
+    loadIRButton.setBounds(controlRow1.removeFromLeft(loadWidth));
+    controlRow1.removeFromLeft(leftGap);
 
     // 位相選択
-    phaseChoiceBox.setBounds(controlRow1.removeFromLeft(120));
-    controlRow1.removeFromLeft(5);
+    phaseChoiceBox.setBounds(controlRow1.removeFromLeft(phaseWidth));
+    controlRow1.removeFromLeft(leftGap);
 
     // Dry/Wetミックス
-    mixLabel.setBounds(controlRow1.removeFromLeft(65));
-    controlRow1.removeFromLeft(5);
+    mixLabel.setBounds(controlRow1.removeFromLeft(labelWidth));
+    controlRow1.removeFromLeft(inlineGap);
     mixSlider.setBounds(controlRow1);
 
     // --- 2行目 ---
+    experimentalDirectHeadToggle.setBounds(controlRow2.removeFromLeft(loadWidth + leftGap + phaseWidth));
+
     // スムージング時間 (Mixスライダーの下に配置)
     auto smoothingRow = controlRow2;
-    smoothingRow.removeFromLeft(phaseChoiceBox.getRight() + 5);
-    smoothingTimeLabel.setBounds(smoothingRow.removeFromLeft(65));
-    smoothingRow.removeFromLeft(5);
+    smoothingRow.removeFromLeft(leftGap);
+    smoothingTimeLabel.setBounds(smoothingRow.removeFromLeft(labelWidth));
+    smoothingRow.removeFromLeft(inlineGap);
     smoothingTimeSlider.setBounds(smoothingRow);
 
     // --- 3行目 ---
     // IR長 (Smoothing Timeの下に配置)
     auto lengthRow = controlRow3;
-    lengthRow.removeFromLeft(phaseChoiceBox.getRight() + 5);
-    irLengthLabel.setBounds(lengthRow.removeFromLeft(65));
-    lengthRow.removeFromLeft(5);
+    lengthRow.removeFromLeft(controlsStartX);
+    irLengthLabel.setBounds(lengthRow.removeFromLeft(labelWidth));
+    lengthRow.removeFromLeft(inlineGap);
     irLengthSlider.setBounds(lengthRow);
 
     // --- 4行目 ---
     // Rebuild Debounce (IR Lengthの下に配置)
     auto debounceRow = controlRow4;
-    debounceRow.removeFromLeft(phaseChoiceBox.getRight() + 5);
-    rebuildDebounceLabel.setBounds(debounceRow.removeFromLeft(65));
-    debounceRow.removeFromLeft(5);
+    debounceRow.removeFromLeft(controlsStartX);
+    rebuildDebounceLabel.setBounds(debounceRow.removeFromLeft(labelWidth));
+    debounceRow.removeFromLeft(inlineGap);
     rebuildDebounceSlider.setBounds(debounceRow);
 
     // --- 5行目: ハイカットフィルターモード ---
@@ -462,6 +478,11 @@ void ConvolverControlPanel::buttonClicked(juce::Button* button)
             // 安全なリクエスト経由でロード
             safeThis->engine.requestConvolverPreset(irFile);
         });
+    }
+    else if (button == &experimentalDirectHeadToggle)
+    {
+        engine.getConvolverProcessor().setExperimentalDirectHeadEnabled(experimentalDirectHeadToggle.getToggleState());
+        updateIRInfo();
     }
 }
 
@@ -572,6 +593,7 @@ void ConvolverControlPanel::updateIRInfo()
     // UIコントロールをプロセッサの状態と同期
     mixSlider.setValue(pendingMixDirty ? pendingMixValue : convolver.getMix(), juce::dontSendNotification);
     phaseChoiceBox.setSelectedId(convolver.getUseMinPhase() ? 2 : 1, juce::dontSendNotification);
+    experimentalDirectHeadToggle.setToggleState(convolver.getExperimentalDirectHeadEnabled(), juce::dontSendNotification);
     smoothingTimeSlider.setValue((pendingSmoothingDirty ? pendingSmoothingTimeSec : convolver.getSmoothingTime()) * 1000.0,
                                  juce::dontSendNotification);
     irLengthSlider.setValue(pendingIrLengthDirty ? pendingIrLengthSec : convolver.getTargetIRLength(),
@@ -585,9 +607,25 @@ void ConvolverControlPanel::updateIRInfo()
         juce::String info = convolver.getIRName();
         info += " (" + juce::String(convolver.getIRLength()) + " smp)";
 
-        int lat = convolver.getLatencySamples();
-        if (lat > 0)
-            info += " Lat: " + juce::String(lat);
+        // A = algorithm latency, T = total latency (= algorithm + IR peak latency)
+        const int algorithmLatencySamples = convolver.getLatencySamples();
+        const int totalLatencySamples = convolver.getTotalLatencySamples();
+        const double processingSampleRate = engine.getProcessingSampleRate();
+
+        const auto toRoundedMsInt = [processingSampleRate](int samples) -> int
+        {
+            if (processingSampleRate <= 0.0)
+                return 0;
+
+            const double ms = (static_cast<double>(samples) * 1000.0) / processingSampleRate;
+            const double msRounded3 = std::round(ms * 1000.0) / 1000.0;
+            return juce::roundToInt(msRounded3);
+        };
+
+        const int algorithmMs = toRoundedMsInt(algorithmLatencySamples);
+        const int totalMs = toRoundedMsInt(totalLatencySamples);
+
+        info += " Lat A: " + juce::String(algorithmMs) + "ms / T: " + juce::String(totalMs) + "ms";
 
         irInfoLabel.setText(info, juce::dontSendNotification);
         irInfoLabel.setColour(juce::Label::textColourId,

@@ -107,6 +107,18 @@ public:
 
     double getSampleRate() const { return currentSampleRate.load(); }
     double getProcessingSampleRate() const;
+    struct LatencyBreakdown
+    {
+        int oversamplingLatencyBaseRateSamples = 0;
+        int convolverAlgorithmLatencyBaseRateSamples = 0;
+        int convolverIRPeakLatencyBaseRateSamples = 0;
+        int convolverTotalLatencyBaseRateSamples = 0;
+        int totalLatencyBaseRateSamples = 0;
+    };
+
+    LatencyBreakdown getCurrentLatencyBreakdown() const;
+    int getCurrentLatencySamples() const;
+    double getCurrentLatencyMs() const;
 
     // 【Fix Bug #8】gainToDecibels (std::log10 / libm) を Audio Thread から排除。
     // Audio Thread は linear gain を inputLevelLinear / outputLevelLinear に格納し、

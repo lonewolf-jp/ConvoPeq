@@ -493,7 +493,8 @@ void EQControlPanel::resized()
     totalGainLabel.setBounds(controlsArea.removeFromRight(70).reduced(2, 2));
 
     // ── 出力LPFフィルターモード行 (② EQ最終段用) ──────────────────
-    auto lpfRow = bounds.removeFromTop(22);
+    auto lpfRow = bounds.removeFromTop(26);
+    lpfRow.removeFromLeft(10);
     eqLpfLabel.setBounds(lpfRow.removeFromLeft(38).reduced(0, 3));
     lpfRow.removeFromLeft(4);
     eqLpfSharpButton  .setBounds(lpfRow.removeFromLeft(52).reduced(2, 2));

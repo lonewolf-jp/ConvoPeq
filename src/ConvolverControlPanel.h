@@ -40,6 +40,7 @@ private:
     //----------------------------------------------------------
     juce::TextButton loadIRButton{"Load IR..."};
     juce::ComboBox phaseChoiceBox;
+    juce::ToggleButton experimentalDirectHeadToggle;
 
     juce::Slider mixSlider;
     juce::Label mixLabel;

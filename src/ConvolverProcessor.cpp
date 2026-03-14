@@ -4,8 +4,6 @@
 // コンボリューションプロセッサーの実装
 //============================================================================
 #include "ConvolverProcessor.h"
-#include "InputBitDepthTransform.h"
-#include "DspNumericPolicy.h"
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -17,6 +15,7 @@
 
 #include "CDSPResampler.h"
 #include "AlignedAllocation.h" // For convo::MKLAllocator
+#include "InputBitDepthTransform.h"
 
 #include <mkl.h>
 #include <mkl_vml.h>
@@ -48,8 +47,6 @@ namespace
 }
 
 // 前方宣言
-static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR, const std::function<bool()>& shouldExit = nullptr, bool* wasCancelled = nullptr);
-
 // スレッドキャンセル確認用ヘルパー関数
 static bool checkCancellation(const std::function<bool()>& shouldExit, bool* wasCancelled) noexcept
 {
@@ -61,6 +58,10 @@ static bool checkCancellation(const std::function<bool()>& shouldExit, bool* was
     }
     return false;
 }
+
+static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR,
+                                                       const std::function<bool()>& shouldExit,
+                                                       bool* wasCancelled);
 
 // AudioBufferの容量を現在のサイズに合わせて縮小するヘルパー
 // JUCEのsetSize()は容量を縮小しないため、メモリ使用量を最適化するために使用する
@@ -217,9 +218,9 @@ static bool applyAsymmetricTukey(double* data, int numSamples)
 
             vdCos(pre_taper_len, cos_args.get(), window_vals.get());
 
-            // ── 窓関数値計算 (MKL VML) ──
-            // window_vals[i] = 0.5 * (1.0 + window_vals[i]) = 0.5 * window_vals[i] + 0.5
-            vdLinearFrac(pre_taper_len, window_vals.get(), nullptr, 0.5, 0.5, 0.0, 1.0, window_vals.get());
+            // window_vals[i] = 0.5 * (1.0 + window_vals[i])
+            for (int i = 0; i < pre_taper_len; ++i)
+                window_vals.get()[i] = 0.5 * (1.0 + window_vals.get()[i]);
         }
     }
 
@@ -243,7 +244,8 @@ static bool applyAsymmetricTukey(double* data, int numSamples)
 
             vdCos(post_taper_len, cos_args.get(), post_window_vals);
 
-            vdLinearFrac(post_taper_len, post_window_vals, nullptr, 0.5, 0.5, 0.0, 1.0, post_window_vals);
+            for (int i = 0; i < post_taper_len; ++i)
+                post_window_vals[i] = 0.5 * (1.0 + post_window_vals[i]);
         }
     }
 
@@ -444,8 +446,6 @@ public:
 
         try
         {
-            owner.setLoadingProgress(0.0f);
-
             // 1. IRデータの取得 (ファイル読み込み or メモリコピー)
             if (isRebuild)
             {
@@ -810,7 +810,8 @@ public:
                 result.newConv->addRef();
 
                 if (result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency,
-                                         sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize, result.scaleFactor))
+                                         sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize, result.scaleFactor,
+                                         owner.experimentalDirectHeadEnabled.load(std::memory_order_acquire)))
                 {
                     result.success = true;
                 }
@@ -864,7 +865,6 @@ public:
                 result.success = false; // finalize側でapplyNewStateを実行するため、ここではスキップ
                 return result;
             }
-
         }
         catch (const std::bad_alloc&)
         {
@@ -1022,7 +1022,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 auto sizing = computeMasteringSizing(internalBlockSize, conv->irDataLength);
 
                 if (newConv->init(irL.release(), irR.release(),
-                                  conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, conv->storedScale))
+                                  conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, conv->storedScale,
+                                  experimentalDirectHeadEnabled.load(std::memory_order_acquire)))
                 {
                     convolution.store(newConv, std::memory_order_release);
 
@@ -1854,6 +1855,7 @@ juce::ValueTree ConvolverProcessor::getState() const
     v.setProperty ("smoothingTime", smoothingTimeSec.load(), nullptr);
     v.setProperty ("irLength", targetIRLengthSec.load(), nullptr);
     v.setProperty ("rebuildDebounceMs", rebuildDebounceMs.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("experimentalDirectHeadEnabled", experimentalDirectHeadEnabled.load(std::memory_order_acquire), nullptr);
     {
         const juce::ScopedLock sl(irFileLock);
         v.setProperty ("irPath", currentIrFile.getFullPathName(), nullptr);
@@ -1869,6 +1871,7 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
     if (v.hasProperty ("smoothingTime")) setSmoothingTime (v.getProperty ("smoothingTime"));
     if (v.hasProperty ("irLength")) setTargetIRLength (v.getProperty ("irLength"));
     if (v.hasProperty ("rebuildDebounceMs")) setRebuildDebounceMs (static_cast<int>(v.getProperty("rebuildDebounceMs")));
+    if (v.hasProperty ("experimentalDirectHeadEnabled")) setExperimentalDirectHeadEnabled (v.getProperty ("experimentalDirectHeadEnabled"));
 
     if (v.hasProperty ("irPath"))
     {
@@ -1915,6 +1918,7 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
     targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
     rebuildDebounceMs.store(other.rebuildDebounceMs.load(std::memory_order_acquire), std::memory_order_release);
+    experimentalDirectHeadEnabled.store(other.experimentalDirectHeadEnabled.load(std::memory_order_acquire), std::memory_order_release);
 
     // サンプルレート変更時にリビルドできるよう、元のIR情報を共有する
     // [Bug E fix] std::atomic<shared_ptr>::store() でアトミックに代入。
@@ -1945,7 +1949,8 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
 
     // 軽量なランタイムパラメータのみ同期 (AudioBufferのコピーを避ける)
     // 注意:
-    //   useMinPhase / targetIRLengthSec はIR再構築を伴う構造変更パラメータのため、
+    //   useMinPhase / targetIRLengthSec / experimentalDirectHeadEnabled は
+    //   IR再構築を伴う構造変更パラメータのため、
     //   ここで同期すると requestRebuild() 側のIR再利用判定が誤って成立し、
     //   古い畳み込み実体が再利用される恐れがある。
     //   これらは UIプロセッサのロード完了通知(sendChangeMessage)経由で
@@ -2043,7 +2048,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // レイテンシー補正の更新 (必要な場合のみ)
     {
-        // 処理遅延(ブロックサイズ) + IR遅延(ピーク位置)
+        // Dry/Wet整合用の補償遅延は内部エンジン遅延で評価する
         const int calculatedLatency = conv->latency + conv->irLatency;
 
         // 安全対策: 要求される遅延が最大許容値を超えていないかデバッグ時にチェック
@@ -2694,6 +2699,19 @@ float ConvolverProcessor::getSmoothingTime() const
     return smoothingTimeSec.load();
 }
 
+void ConvolverProcessor::setExperimentalDirectHeadEnabled(bool enabled)
+{
+    if (experimentalDirectHeadEnabled.exchange(enabled, std::memory_order_acq_rel) != enabled)
+    {
+        listeners.call(&Listener::convolverParamsChanged, this);
+        // Direct head は構造変更パラメータなので、UI側のIR再構築完了を待たずに
+        // AudioEngine 側のDSP再構築も直ちに要求する。
+        // これにより request 値と actual 値の 1 ステップ遅れを防ぐ。
+        postCoalescedChangeNotification();
+        requestDebouncedRebuild();
+    }
+}
+
 void ConvolverProcessor::setRebuildDebounceMs(int ms)
 {
     const int clampedMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS, REBUILD_DEBOUNCE_MAX_MS, ms);
@@ -2705,11 +2723,30 @@ int ConvolverProcessor::getRebuildDebounceMs() const
     return rebuildDebounceMs.load(std::memory_order_acquire);
 }
 
+ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() const
+{
+    LatencyBreakdown breakdown;
+    if (auto* conv = convolution.load(std::memory_order_acquire))
+    {
+        const bool directHeadActive = conv->storedDirectHeadEnabled;
+        breakdown.directHeadActive = directHeadActive;
+        breakdown.algorithmLatencySamples = directHeadActive ? 0 : juce::jmax(0, conv->latency);
+        breakdown.irPeakLatencySamples = juce::jmax(0, conv->irLatency);
+        breakdown.totalLatencySamples = juce::jmax(0,
+            breakdown.algorithmLatencySamples + breakdown.irPeakLatencySamples);
+    }
+
+    return breakdown;
+}
+
 int ConvolverProcessor::getLatencySamples() const
 {
-    if (auto* conv = convolution.load(std::memory_order_acquire))
-        return conv->latency;
-    return 0;
+    return getLatencyBreakdown().algorithmLatencySamples;
+}
+
+int ConvolverProcessor::getTotalLatencySamples() const
+{
+    return getLatencyBreakdown().totalLatencySamples;
 }
 
 void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
@@ -2771,7 +2808,8 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         newConv->addRef();
 
         if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
-                          maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,
+                  maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,
+                  experimentalDirectHeadEnabled.load(std::memory_order_acquire),
                           [&]() -> const convo::FilterSpec* {
                               // NUC フィルタースペックを Message Thread 上で構築
                               static thread_local convo::FilterSpec spec;

@@ -27,13 +27,19 @@ public:
     void closeButtonPressed() override;
 
 private:
+    struct DownwardComboLookAndFeel : public juce::LookAndFeel_V4
+    {
+        juce::PopupMenu::Options getOptionsForComboBoxPopupMenu (juce::ComboBox& box, juce::Label& label) override
+        {
+            return juce::LookAndFeel_V4::getOptionsForComboBoxPopupMenu (box, label)
+                .withPreferredPopupDirection (juce::PopupMenu::Options::PopupDirection::downwards);
+        }
+    };
+
     void resized() override;
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
-
-    void eqBypassButtonClicked();
-    void convolverBypassButtonClicked();
-    void orderButtonClicked();
+    void orderModeBoxChanged();
 
     void createUIComponents();
     void loadSettings();
@@ -55,15 +61,15 @@ private:
     std::unique_ptr<DeviceSettings> deviceSettings;
 
     juce::TextButton showDeviceSelectorButton;
-    juce::ToggleButton eqBypassButton;
-    juce::ToggleButton convolverBypassButton;
-    juce::TextButton orderButton;
+    DownwardComboLookAndFeel orderModeLookAndFeel;
+    juce::ComboBox orderModeBox;
     juce::TextButton saveButton;
     juce::TextButton loadButton;
     juce::TextButton aboutButton;
     juce::ToggleButton softClipButton;
     juce::Slider saturationSlider;
     juce::Label saturationLabel;
+    juce::Label latencyLabel;
     juce::Label cpuUsageLabel;
     std::unique_ptr<juce::DocumentWindow> settingsWindow;
 

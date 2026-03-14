@@ -15,6 +15,31 @@
 
 namespace
 {
+    inline double estimateOversamplingLatencySamples(int oversamplingFactor, AudioEngine::OversamplingType oversamplingType) noexcept
+    {
+        if (oversamplingFactor <= 1)
+            return 0.0;
+
+        const int numStages = (oversamplingFactor == 8) ? 3 : ((oversamplingFactor == 4) ? 2 : ((oversamplingFactor == 2) ? 1 : 0));
+        if (numStages <= 0)
+            return 0.0;
+
+        const int* taps = nullptr;
+        static constexpr int iirLikeTaps[3] = { 511, 127, 31 };
+        static constexpr int linearPhaseTaps[3] = { 1023, 255, 63 };
+        taps = (oversamplingType == AudioEngine::OversamplingType::LinearPhase) ? linearPhaseTaps : iirLikeTaps;
+
+        double latencySamples = 0.0;
+        for (int stage = 0; stage < numStages; ++stage)
+        {
+            const double stageGroupDelay = static_cast<double>(taps[stage] - 1) * 0.5;
+            const double baseRateWeight = 1.0 / static_cast<double>(1 << (stage + 1));
+            latencySamples += stageGroupDelay * baseRateWeight;
+        }
+
+        return latencySamples;
+    }
+
     inline void applyGainRamp(double* __restrict data, int numSamples,
                               double startGain, double increment) noexcept
     {
@@ -641,6 +666,72 @@ double AudioEngine::getProcessingSampleRate() const
     return sr * static_cast<double>(actualFactor);
 }
 
+int AudioEngine::getCurrentLatencySamples() const
+{
+    return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
+}
+
+AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
+{
+    LatencyBreakdown breakdown;
+
+    auto* dsp = currentDSP.load(std::memory_order_acquire);
+    if (dsp == nullptr)
+        return breakdown;
+
+    const int osFactor = static_cast<int>(dsp->oversamplingFactor);
+    const int safeOsFactor = std::max(1, osFactor);
+
+    const auto toBaseRateSamples = [safeOsFactor](int processingRateSamples) -> int
+    {
+        return juce::jmax(0,
+            static_cast<int>(std::lround(static_cast<double>(processingRateSamples)
+                                         / static_cast<double>(safeOsFactor))));
+    };
+
+    breakdown.oversamplingLatencyBaseRateSamples = juce::jmax(0,
+        static_cast<int>(std::lround(estimateOversamplingLatencySamples(
+            safeOsFactor,
+            oversamplingType.load(std::memory_order_acquire)))));
+
+    if (!convBypassActive.load(std::memory_order_relaxed))
+    {
+        const auto convBreakdown = dsp->convolver.getLatencyBreakdown();
+
+        breakdown.convolverAlgorithmLatencyBaseRateSamples = toBaseRateSamples(convBreakdown.algorithmLatencySamples);
+        breakdown.convolverIRPeakLatencyBaseRateSamples = toBaseRateSamples(convBreakdown.irPeakLatencySamples);
+        breakdown.convolverTotalLatencyBaseRateSamples = toBaseRateSamples(convBreakdown.totalLatencySamples);
+    }
+
+    breakdown.totalLatencyBaseRateSamples = juce::jmax(0,
+        breakdown.oversamplingLatencyBaseRateSamples
+      + breakdown.convolverTotalLatencyBaseRateSamples);
+
+    return breakdown;
+}
+
+double AudioEngine::getCurrentLatencyMs() const
+{
+    const double sr = currentSampleRate.load(std::memory_order_acquire);
+    if (sr <= 0.0)
+        return 0.0;
+
+    const auto breakdown = getCurrentLatencyBreakdown();
+
+    const auto toMsRounded3 = [sr](int samples) -> double
+    {
+        const double ms = (static_cast<double>(samples) * 1000.0) / sr;
+        return std::round(ms * 1000.0) / 1000.0;
+    };
+
+    const double osMs = toMsRounded3(breakdown.oversamplingLatencyBaseRateSamples);
+    const double convAlgorithmMs = toMsRounded3(breakdown.convolverAlgorithmLatencyBaseRateSamples);
+    const double convPeakMs = toMsRounded3(breakdown.convolverIRPeakLatencyBaseRateSamples);
+    const double totalMs = osMs + convAlgorithmMs + convPeakMs;
+
+    return static_cast<double>(juce::roundToInt(totalMs));
+}
+
 //--------------------------------------------------------------
 // prepareToPlay
 //--------------------------------------------------------------
@@ -997,6 +1088,7 @@ void AudioEngine::rebuildThreadLoop()
                     // IRの生成条件が一致しているか確認
                     if (task.newDSP->convolver.getIRName() == task.currentDSP->convolver.getIRName() &&
                         task.newDSP->convolver.getUseMinPhase() == task.currentDSP->convolver.getUseMinPhase() &&
+                        task.newDSP->convolver.getExperimentalDirectHeadEnabled() == task.currentDSP->convolver.getExperimentalDirectHeadEnabled() &&
                         std::abs(task.newDSP->convolver.getTargetIRLength() - task.currentDSP->convolver.getTargetIRLength()) < 0.001f)
                     {
                         // 既存のConvolutionエンジンを共有（クローン回避・グリッチ防止）

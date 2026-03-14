@@ -248,7 +248,19 @@ void SpectrumAnalyzerComponent::timerCallback()
 
     const bool meterVisualChanged = updateLevelPeaks(dt);
 
-    if (eqDataDirty && isShowing() && (now - lastEqUpdateTime) >= EQ_UPDATE_INTERVAL_SEC)
+    // ── サンプルレート変更検知 (タイマー駆動) ──
+    // デバイス変更などでサンプルレートが変わった場合に追従する。
+    // アナライザーON/OFF状態に関係なく検知する（OFF時もEQ曲線を正しく表示するために必要）。
+    const double currentSampleRate = engine.getProcessingSampleRate();
+    if (currentSampleRate > 0.0 && std::abs(currentSampleRate - cachedSampleRate) > 1.0)
+    {
+        eqDataDirty = true;
+    }
+
+    // EQデータ更新: アナライザーのON/OFFに関係なく、EQ曲線は常に最新状態を維持する。
+    // サンプルレートが有効な場合のみ実行する（sr=0時にバッファがゼロクリアされるのを防ぐ）。
+    if (eqDataDirty && isShowing() && currentSampleRate > 0.0
+        && (now - lastEqUpdateTime) >= EQ_UPDATE_INTERVAL_SEC)
     {
         updateEQData();
         eqDataDirty = false;
@@ -263,7 +275,7 @@ void SpectrumAnalyzerComponent::timerCallback()
     // スペアナがOFFの場合、スペアナグラフを一度だけクリア
     if (!analyzerEnableButton.getToggleState())
     {
-        bool needsRepaint = meterVisualChanged;
+        bool needsRepaint = meterVisualChanged || eqPathsDirty;
 
         if (!analyzerVisualsCleared)
         {
@@ -280,14 +292,6 @@ void SpectrumAnalyzerComponent::timerCallback()
     analyzerVisualsCleared = false;
 
     if (!isShowing() || !analyzerEnableButton.getToggleState()) return;
-
-    // ── サンプルレート変更検知 (タイマー駆動) ──
-    // デバイス変更などでサンプルレートが変わった場合に追従する
-    const double currentSampleRate = engine.getProcessingSampleRate();
-    if (currentSampleRate > 0.0 && std::abs(currentSampleRate - cachedSampleRate) > 1.0)
-    {
-        eqDataDirty = true;
-    }
 
 
     // ── FFTデータの取得とスムーシング ──
