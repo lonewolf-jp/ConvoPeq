@@ -1,207 +1,276 @@
-# ConvoPeq Architecture (v0.4.4)
+# ConvoPeq Architecture (Current)
 
 This document describes the current architecture of **ConvoPeq**, a Windows-only standalone audio application built with **JUCE 8.0.12**.
 
+Audience:
+
+- Developers working on runtime behavior, DSP, threading, and state transitions
+- Contributors who need implementation-grounded subsystem boundaries
+
+This document intentionally focuses on internal design. For a user-facing overview, feature summary, and quick build entry points, see `README.md`.
+
 ---
 
-## 1. System Goals and Non-Functional Requirements
+## 1. System Goals and Non-Functional Priorities
 
-ConvoPeq is designed around four primary goals:
+ConvoPeq is organized around four priorities:
 
 1. **Real-time safety**
-   - The audio callback must avoid blocking operations.
-   - No file I/O, no UI access, and no heavy reconfiguration in the real-time path.
-   - Processing-critical memory is prepared before use.
+   - The audio callback executes DSP only.
+   - No blocking waits, file I/O, or UI interaction on the audio thread.
+   - Runtime-critical memory is pre-allocated and reused.
 
 2. **Audio quality**
-   - Main DSP path is based on **64-bit double precision**.
-   - High-quality convolution and parametric EQ are central processing elements.
-   - Output conditioning and dither stages are included for final signal quality.
+   - Main processing path uses **64-bit double precision**.
+   - Core processors are high-quality convolution and 20-band parametric EQ.
+   - Output conditioning includes output filtering, soft clipping (optional), and dither.
 
 3. **Performance**
-   - Optimized for Windows x64 and AVX2-capable CPUs.
-   - Uses Intel oneMKL for performance-sensitive numerical workloads.
-   - Alignment-aware allocation is used for SIMD/MKL efficiency.
+   - Optimized for Windows x64 + AVX2-class CPUs.
+   - Uses Intel oneMKL where beneficial (FFT/BLAS/VML paths).
+   - Uses alignment-aware memory allocation for SIMD/MKL efficiency.
 
 4. **Operational robustness**
-   - Clear separation between UI/control logic and audio processing logic.
-   - Heavy tasks (e.g., IR load/preparation) are handled asynchronously.
-   - Device compatibility handling includes ASIO blacklist support.
+   - UI/control logic is decoupled from DSP execution.
+   - Heavy work (IR load/rebuild) is asynchronous.
+   - State transitions are staged to avoid audible artifacts.
 
 ---
 
-## 2. Source-Level Architecture (`src/`)
+## 2. Design View of `src/`
 
-## 2.1 Application / UI Layer
+### 2.1 Application / UI Layer
 
 - `MainApplication.h/.cpp`
-  - JUCE application entry/lifecycle.
-  - Creates and manages top-level window lifetime.
+  - JUCE app entry and lifecycle management.
 
 - `MainWindow.h/.cpp`
   - Main desktop window composition.
-  - Hosts and wires control panels and global controls.
-  - Bridges user actions to `AudioEngine`.
+  - Wires UI controls to `AudioEngine` operations.
 
 - `EQControlPanel.h/.cpp`
-  - EQ-related controls and user parameter editing.
-  - Dispatches control changes to engine/EQ processor.
+  - EQ parameter UI and user interaction.
 
 - `ConvolverControlPanel.h/.cpp`
-  - Convolver-related controls (IR operations, bypass/mix/order dependent controls).
+  - Convolver UI (IR load, phase mode, mix, smoothing, IR length, output filter modes).
+  - Includes UI-side debounce for expensive convolver parameter changes.
 
 - `SpectrumAnalyzerComponent.h/.cpp`
-  - Real-time visualization component.
-  - Reads analyzer-side data path and renders spectrum.
+  - Real-time analyzer and EQ overlay rendering.
+  - Uses lock-free FIFO input, FFT visualization pipeline, smoothing, peak hold, and adaptive update throttling.
 
-## 2.2 Engine / Runtime Coordination Layer
+### 2.2 Engine / Runtime Coordination Layer
 
 - `AudioEngine.h/.cpp`
-  - Primary orchestration layer for audio modules.
-  - Owns/coordinates EQ processor, convolver processor, utility DSP stages, and runtime options.
-  - Exposes user-facing operations to UI (bypass/order/settings/quality toggles).
+  - Main orchestration and runtime control layer.
+  - Owns and coordinates EQ, convolver, utility DSP stages, and analyzer path.
+  - Exposes high-level control API to UI.
 
 - `AudioEngineProcessor.h/.cpp`
-  - Adapter between JUCE audio callback and `AudioEngine`.
-  - Pulls blocks from device callback and executes processing chain.
+  - Adapter from device callback into `AudioEngine` processing.
 
 - `DeviceSettings.h/.cpp`
-  - Device configuration handling and persistence-related behavior.
-  - Sample-rate/block-size driven reconfiguration coordination.
+  - Device configuration and persistence support.
 
 - `AsioBlacklist.h`
-  - Static compatibility guard list for known-problematic ASIO configurations.
+  - Compatibility guard for known problematic ASIO scenarios.
 
-## 2.3 DSP Layer
+### 2.3 DSP Layer
 
 - `EQProcessor.h/.cpp`
   - 20-band parametric EQ core processing.
-  - Handles per-band parameter application and per-block filtering.
+  - Band/channel mode handling and real-time parameter application.
 
 - `ConvolverProcessor.h/.cpp`
-  - Convolution runtime processor.
-  - Manages IR-related state transitions and async load/apply flow.
-  - Contains latency/mix/bypass and transition-safe operational logic.
+  - IR-based convolution runtime.
+  - Async load/rebuild, crossfade-safe transitions, latency/delay management.
+  - Includes rebuild debounce and coalesced notifications.
 
 - `MKLNonUniformConvolver.h/.cpp`
   - oneMKL-backed non-uniform partitioned convolution backend.
-  - Performance-critical convolution implementation.
 
 - `CustomInputOversampler.h/.cpp`
-  - Input-side oversampling stage for nonlinear-friendly processing quality.
+  - Input oversampling stage used by quality/performance modes.
 
 - `OutputFilter.h/.cpp`
-  - Output-stage filtering/conditioning.
+  - Output filtering/conditioning stage.
 
 - `PsychoacousticDither.h`
-  - Dither/noise-shaping utilities for final output stage.
+  - Final-stage dither/noise shaping.
 
 - `InputBitDepthTransform.h`
-  - Input bit-depth/quantization-related transform utilities.
+  - Input bit-depth/quantization utilities.
 
-## 2.4 Utility / Memory
+### 2.4 Utility / Memory
 
 - `AlignedAllocation.h`
-  - Alignment-aware memory allocation helpers.
-  - Intended for SIMD/MKL-friendly aligned buffers.
+  - Alignment-aware allocation helpers (SIMD/MKL-friendly buffers).
 
 ---
 
 ## 3. Runtime Topology and Data Flow
 
-At a high level, processing is coordinated by `AudioEngine` and executed through `AudioEngineProcessor` in the callback.
+At runtime, `AudioEngine` coordinates processing and `AudioEngineProcessor` invokes it from the device callback.
 
 Typical logical chain:
 
-`Audio Input -> (pre-conditioning) -> Oversampling (if enabled) -> [EQ <-> Convolver order selectable] -> Output filter / soft limiting-related stages -> Dither / final conditioning -> Audio Output`
+`Audio Input -> Input conditioning -> Oversampling (optional) -> [EQ <-> Convolver (order selectable)] -> Output filter / soft clipping -> Dither / final conditioning -> Audio Output`
 
-Notes:
+Key points:
 
-- Processing order between EQ and Convolver is configurable at runtime.
-- UI controls modify engine state; engine applies changes in a callback-safe way.
-- Analyzer data path is decoupled from final audio output path.
-
----
-
-## 4. Thread Model
-
-## 4.1 Message Thread (UI Thread)
-
-Responsibilities:
-
-- Window/control rendering and event handling.
-- Device selection/configuration UI operations.
-- Requesting parameter/state changes in engine.
-- Triggering asynchronous heavy operations (e.g., IR load request).
-
-## 4.2 Audio Thread (Real-Time Callback)
-
-Responsibilities:
-
-- Block-by-block DSP execution only.
-- Uses already-prepared state and buffers.
-- Must avoid:
-  - blocking waits,
-  - file I/O,
-  - expensive re-initialization,
-  - UI thread interaction.
-
-## 4.3 Worker/Background Paths
-
-Responsibilities:
-
-- IR file parsing/loading/resampling/preparation.
-- Convolver state build/update staging.
-- Handoff into active state with glitch-safe timing strategy.
+- **EQ/Convolver order is runtime-selectable**.
+- Analyzer source can be input or output path.
+- Analyzer data flow is decoupled from final output and read through FIFO on the UI side.
 
 ---
 
-## 5. State Management Strategy
+## 4. Subsystem Responsibilities
 
-The codebase follows a staged update model:
+### 4.1 AudioEngine
+
+- Owns the high-level runtime state exposed to UI.
+- Bridges UI requests to DSP-safe update paths.
+- Coordinates processing order, bypass states, analyzer routing, device-driven prepare/reset, and rebuild staging.
+
+### 4.2 EQProcessor
+
+- Applies the 20-band parametric EQ in the real-time path.
+- Exposes parameter/state interfaces used by UI and engine.
+- Keeps display-oriented EQ response work outside the callback path.
+
+### 4.3 ConvolverProcessor
+
+- Owns IR runtime state and rebuild lifecycle.
+- Handles asynchronous IR preparation, debounce, crossfade-safe transitions, and notification coalescing.
+- Separates heavy rebuild work from callback-time use.
+
+### 4.4 SpectrumAnalyzerComponent
+
+- Consumes analyzer FIFO data on the UI side.
+- Runs FFT visualization, smoothing, peak hold, and EQ overlay drawing.
+- Uses adaptive update rates to reduce UI/message-thread burst load.
+
+---
+
+## 5. Threading Model
+
+### 5.1 Message Thread (UI Thread)
+
+Responsibilities:
+
+- UI rendering and event handling.
+- User-initiated state updates.
+- Device-setting interactions.
+- Triggering asynchronous operations (e.g., IR load/rebuild requests).
+
+### 5.2 Audio Thread (Real-Time Callback)
+
+Responsibilities:
+
+- Block-based DSP processing only.
+- Uses already-prepared state and pre-allocated buffers.
+
+Constraints:
+
+- No blocking synchronization.
+- No file I/O.
+- No heavy reconfiguration.
+- No UI access.
+
+### 5.3 Worker / Background Paths
+
+Responsibilities:
+
+- Heavy preparation work:
+  - IR parsing/loading,
+  - resampling/phase conversion,
+  - convolver state construction,
+  - engine rebuild staging.
+- Hand-off to active state at real-time-safe boundaries.
+
+---
+
+## 6. State and Transition Strategy
+
+ConvoPeq follows a staged update model:
 
 1. **Request phase (UI/control path)**
-   User or settings change requests a parameter/state update.
+   - User or settings request a change.
 
 2. **Prepare phase (non-real-time path)**
-   Expensive objects/state are prepared asynchronously when needed.
+   - Expensive structures are built asynchronously.
 
 3. **Apply/swap phase (real-time-safe boundary)**
-   Prepared state is made active with minimal callback disruption.
+   - Prepared state is activated with minimal callback disruption.
 
-This pattern is especially relevant to convolution IR operations.
-
----
-
-## 6. Device and Configuration Lifecycle
-
-Device lifecycle is coordinated by `DeviceSettings` + engine:
-
-- Device open/start => engine `prepare` path allocates/initializes processing buffers.
-- Runtime operation => per-block process via `AudioEngineProcessor`.
-- Device stop/restart/sample-rate change => engine reset/reprepare path.
-- ASIO blacklist is used to reduce unstable driver scenarios.
+This is especially important for convolver IR operations and engine rebuilds.
 
 ---
 
-## 7. Precision, Performance, and Memory Discipline
+## 7. Convolver Runtime Design (Current)
 
-- Main DSP processing uses **double precision**.
-- Spectrum visualization paths may use reduced precision where acceptable.
-- Alignment-conscious allocation is used in performance-critical buffers.
-- Real-time code path avoids dynamic growth/reallocation patterns.
+`ConvolverProcessor` combines asynchronous rebuild with click-safe transitions:
+
+- **Async IR loading/rebuilding** through worker paths.
+- **Debounced rebuild scheduling** for bursty UI updates.
+- **Configurable rebuild debounce** (`50..3000 ms`, default `400 ms`), persisted in state.
+- **Coalesced change notifications** to reduce message-thread bursts.
+- **Crossfade-aware processing** so old/new wet/delay paths overlap only where needed.
+- **Latency retarget hysteresis** to reduce frequent retriggering.
+
+UI integration details:
+
+- `ConvolverControlPanel` applies a **3-second idle debounce** for selected expensive controls (mix/smoothing/IR length) to avoid repeated rebuild pressure during active dragging.
 
 ---
 
-## 8. Error Handling and Robustness
+## 8. Analyzer and Visualization Path (Current)
 
-- User operations that can fail (e.g., IR load) are isolated from audio callback.
-- Failures are reported through control/UI path without blocking audio processing.
-- Defensive fallback behavior exists for invalid/unavailable resource conditions.
+`SpectrumAnalyzerComponent` uses a throttled UI pipeline:
+
+- Input source is read from engine FIFO on timer callbacks.
+- FFT path includes windowing, magnitude conversion, smoothing, and peak hold.
+- EQ response overlays are computed and rendered separately from audio processing.
+
+Performance controls:
+
+- **Adaptive timer rates by state**:
+  - active analyzer: `60 Hz`,
+  - analyzer disabled but visible: `15 Hz`,
+  - hidden component: `5 Hz`.
+- **Coalesced EQ update requests** using dirty-flag + interval gating.
+- Analyzer-off path avoids unnecessary repeated full visual updates.
 
 ---
 
-## 9. Build and Execution Context
+## 9. Real-Time Safety and Memory Discipline
+
+Current implementation emphasizes:
+
+- Double-precision DSP in the main path.
+- Pre-allocation / reuse of processing buffers.
+- Alignment-aware allocations for SIMD/MKL paths.
+- No dynamic growth patterns in the audio callback.
+- Denormal handling and stable smoothing/crossfade transitions where relevant.
+
+Lifecycle cleanup is safety-oriented:
+
+- Deferred object retirement patterns avoid early release while old references may still be observed.
+
+---
+
+## 10. Device and Configuration Lifecycle
+
+Device lifecycle is coordinated by `DeviceSettings` + `AudioEngine`:
+
+- Device start/open -> prepare/init processing resources.
+- Runtime -> per-block execution through `AudioEngineProcessor`.
+- Device stop/restart/sample-rate change -> reset/reprepare flow.
+- ASIO blacklist support reduces unstable driver scenarios.
+
+---
+
+## 11. Build and Runtime Context
 
 - OS: **Windows 11 x64**
 - Framework: **JUCE 8.0.12**
@@ -217,26 +286,35 @@ Artifacts:
 
 ---
 
-## 10. Dependency Boundaries
+## 12. Dependency Boundaries
 
-The following directories are external dependencies and should be treated as read-only in normal development flow:
+These directories are external dependencies and should be treated as read-only in normal development:
 
 - `JUCE/`
 - `r8brain-free-src/`
 
 ---
 
-## 11. Current Architectural Summary
+## 13. Development Notes
+
+- Keep callback-time work deterministic and allocation-free.
+- Treat convolver rebuilds and analyzer refresh as separate burst-control problems.
+- Prefer staging, debounce, and handoff over immediate heavy reconfiguration.
+- Preserve the current read-only boundary for external dependencies.
+
+---
+
+## 14. Current Architectural Summary
 
 ConvoPeq uses a layered architecture:
 
 - **UI Layer** for interaction and visualization,
-- **Engine Layer** for lifecycle and orchestration,
+- **Engine Layer** for orchestration and lifecycle,
 - **DSP Layer** for quality/performance-critical audio processing.
 
-The design emphasizes:
+The current design focuses on:
 
 - strict real-time safety,
 - asynchronous heavy-state preparation,
-- modular processing components,
-- and a Windows-optimized standalone runtime.
+- controlled handoff across thread boundaries,
+- and practical burst mitigation on both audio and message/UI paths.

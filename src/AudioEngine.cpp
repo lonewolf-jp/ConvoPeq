@@ -488,17 +488,24 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
 
     const float totalGainSq = totalGainLinear * totalGainLinear;
 
-    std::vector<float> totalMagSqL(numPoints);
-    std::vector<float> totalMagSqR(numPoints);
-    std::vector<float> bandMagSq(numPoints);
+    if (static_cast<int>(eqTotalMagSqLBuffer.size()) < numPoints)
+        eqTotalMagSqLBuffer.resize(static_cast<size_t>(numPoints));
+    if (static_cast<int>(eqTotalMagSqRBuffer.size()) < numPoints)
+        eqTotalMagSqRBuffer.resize(static_cast<size_t>(numPoints));
+    if (static_cast<int>(eqBandMagSqBuffer.size()) < numPoints)
+        eqBandMagSqBuffer.resize(static_cast<size_t>(numPoints));
+
+    float* totalMagSqL = eqTotalMagSqLBuffer.data();
+    float* totalMagSqR = eqTotalMagSqRBuffer.data();
+    float* bandMagSq = eqBandMagSqBuffer.data();
 
     const __m256 vTotalGainSq = _mm256_set1_ps(totalGainSq);
     int i = 0;
     const int vEnd = numPoints / 8 * 8;
     for (; i < vEnd; i += 8)
     {
-        _mm256_storeu_ps(totalMagSqL.data() + i, vTotalGainSq);
-        _mm256_storeu_ps(totalMagSqR.data() + i, vTotalGainSq);
+        _mm256_storeu_ps(totalMagSqL + i, vTotalGainSq);
+        _mm256_storeu_ps(totalMagSqR + i, vTotalGainSq);
     }
     for (; i < numPoints; ++i)
     {
@@ -509,36 +516,36 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
     for (int b = 0; b < numActiveBands; ++b)
     {
         const auto& band = activeBands[b];
-        calcMagnitudesForBand(band.coeffs, zArray, bandMagSq.data(), numPoints);
+        calcMagnitudesForBand(band.coeffs, zArray, bandMagSq, numPoints);
 
         i = 0;
         if (band.mode == EQChannelMode::Stereo)
         {
             for (; i < vEnd; i += 8)
             {
-                __m256 vBand = _mm256_loadu_ps(bandMagSq.data() + i);
-                __m256 vL = _mm256_loadu_ps(totalMagSqL.data() + i);
-                __m256 vR = _mm256_loadu_ps(totalMagSqR.data() + i);
-                _mm256_storeu_ps(totalMagSqL.data() + i, _mm256_mul_ps(vL, vBand));
-                _mm256_storeu_ps(totalMagSqR.data() + i, _mm256_mul_ps(vR, vBand));
+                __m256 vBand = _mm256_loadu_ps(bandMagSq + i);
+                __m256 vL = _mm256_loadu_ps(totalMagSqL + i);
+                __m256 vR = _mm256_loadu_ps(totalMagSqR + i);
+                _mm256_storeu_ps(totalMagSqL + i, _mm256_mul_ps(vL, vBand));
+                _mm256_storeu_ps(totalMagSqR + i, _mm256_mul_ps(vR, vBand));
             }
         }
         else if (band.mode == EQChannelMode::Left)
         {
             for (; i < vEnd; i += 8)
             {
-                __m256 vBand = _mm256_loadu_ps(bandMagSq.data() + i);
-                __m256 vL = _mm256_loadu_ps(totalMagSqL.data() + i);
-                _mm256_storeu_ps(totalMagSqL.data() + i, _mm256_mul_ps(vL, vBand));
+                __m256 vBand = _mm256_loadu_ps(bandMagSq + i);
+                __m256 vL = _mm256_loadu_ps(totalMagSqL + i);
+                _mm256_storeu_ps(totalMagSqL + i, _mm256_mul_ps(vL, vBand));
             }
         }
         else // Right
         {
             for (; i < vEnd; i += 8)
             {
-                __m256 vBand = _mm256_loadu_ps(bandMagSq.data() + i);
-                __m256 vR = _mm256_loadu_ps(totalMagSqR.data() + i);
-                _mm256_storeu_ps(totalMagSqR.data() + i, _mm256_mul_ps(vR, vBand));
+                __m256 vBand = _mm256_loadu_ps(bandMagSq + i);
+                __m256 vR = _mm256_loadu_ps(totalMagSqR + i);
+                _mm256_storeu_ps(totalMagSqR + i, _mm256_mul_ps(vR, vBand));
             }
         }
 
@@ -553,18 +560,48 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
         }
     }
 
-    for (i = 0; i < numPoints; ++i)
+    if (outMagnitudesL)
     {
-        if (outMagnitudesL)
+#if defined(__AVX2__)
+        int j = 0;
+        const int vEndSqrt = numPoints / 8 * 8;
+        const __m256 vZero = _mm256_setzero_ps();
+        for (; j < vEndSqrt; j += 8)
         {
-            float val = std::sqrt(totalMagSqL[i]);
-            outMagnitudesL[i] = std::isfinite(val) ? val : 1.0f;
+            __m256 v = _mm256_loadu_ps(totalMagSqL + j);
+            v = _mm256_max_ps(v, vZero);
+            _mm256_storeu_ps(outMagnitudesL + j, _mm256_sqrt_ps(v));
         }
-        if (outMagnitudesR)
+        for (; j < numPoints; ++j)
+            outMagnitudesL[j] = std::sqrt(std::max(0.0f, totalMagSqL[j]));
+#else
+        for (int j = 0; j < numPoints; ++j)
+            outMagnitudesL[j] = std::sqrt(std::max(0.0f, totalMagSqL[j]));
+#endif
+        for (int k = 0; k < numPoints; ++k)
+            if (!std::isfinite(outMagnitudesL[k])) outMagnitudesL[k] = 1.0f;
+    }
+
+    if (outMagnitudesR)
+    {
+#if defined(__AVX2__)
+        int j = 0;
+        const int vEndSqrt = numPoints / 8 * 8;
+        const __m256 vZero = _mm256_setzero_ps();
+        for (; j < vEndSqrt; j += 8)
         {
-            float val = std::sqrt(totalMagSqR[i]);
-            outMagnitudesR[i] = std::isfinite(val) ? val : 1.0f;
+            __m256 v = _mm256_loadu_ps(totalMagSqR + j);
+            v = _mm256_max_ps(v, vZero);
+            _mm256_storeu_ps(outMagnitudesR + j, _mm256_sqrt_ps(v));
         }
+        for (; j < numPoints; ++j)
+            outMagnitudesR[j] = std::sqrt(std::max(0.0f, totalMagSqR[j]));
+#else
+        for (int j = 0; j < numPoints; ++j)
+            outMagnitudesR[j] = std::sqrt(std::max(0.0f, totalMagSqR[j]));
+#endif
+        for (int k = 0; k < numPoints; ++k)
+            if (!std::isfinite(outMagnitudesR[k])) outMagnitudesR[k] = 1.0f;
     }
 }
 
@@ -1094,18 +1131,8 @@ void AudioEngine::timerCallback()
             else { ++it; }
         }
 
-        // 3. Size limit (Max 10 items) - メモリ爆発防止
-        // 【Fix Bug #1】古いアイテムのみ強制削除する。
-        // サイズ超過時も2秒の猶予期間を尊重するため、最も古いアイテム(front)から
-        // 削除する。ただし、通常はステップ2の時間ベース削除で十分であるため、
-        // ここには滅多に到達しない。高速IR切り替えによる異常蓄積時のみの安全弁として機能する。
-        while (trashBin.size() > 30)
-        {
-            // 最も古い(frontの)アイテムを削除する。
-            // これはすでに10秒の猶予を超えているか、超えていなければ次のtimerCallbackで削除される。
-            toDelete.push_back(trashBin.front().first);
-            trashBin.erase(trashBin.begin());
-        }
+        // 安全性優先: 時間条件((now - ts) > 10000ms)を満たすもののみ回収する。
+        // サイズ超過のみを理由とした強制解放は行わない。
     }
 
     // Lock解放後にデストラクタを実行 (stopThread等の重い処理をロック外で行う)
@@ -1322,6 +1349,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
         const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
         const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
+        const bool analyzerEnabledNow = analyzerEnabled.load(std::memory_order_relaxed);
         const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
         const float satAmt = saturationAmount.load(std::memory_order_relaxed);
         const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
@@ -1339,6 +1367,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                        .convBypassed = convBypassed,
                        .order = order,
                        .analyzerSource = analyzerSource,
+                                             .analyzerEnabled = analyzerEnabledNow,
                        .softClipEnabled = softClip,
                        .saturationAmount = satAmt,
                        .inputHeadroomGain = headroomGain,
@@ -1398,6 +1427,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
     const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
     const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
+    const bool analyzerEnabledNow = analyzerEnabled.load(std::memory_order_relaxed);
     const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
     const float satAmt = saturationAmount.load(std::memory_order_relaxed);
     const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
@@ -1413,6 +1443,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                          .convBypassed = convBypassed,
                          .order = order,
                          .analyzerSource = analyzerSource,
+                                                 .analyzerEnabled = analyzerEnabledNow,
                          .softClipEnabled = softClip,
                          .saturationAmount = satAmt,
                        .inputHeadroomGain = headroomGain,
@@ -1458,7 +1489,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     // ── 入力処理 + Raw Input Analyzer Tap ──
     // processInput() がヘッドルームゲイン適用前の raw レベルを返す。
     // analyzerInputTap=true の場合、同関数内で pre-gain の FIFO プッシュも行う。
-    const bool inputTap = (state.analyzerSource == AnalyzerSource::Input);
+    const bool inputTap = state.analyzerEnabled && (state.analyzerSource == AnalyzerSource::Input);
     const float rawInputLinear = processInput(bufferToFill, numSamples, state.inputHeadroomGain,
                                               inputTap, audioFifo, audioFifoBuffer);
 
@@ -1582,7 +1613,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     //----------------------------------------------------------
 
     // ── Analyzer Output Tap (Post-DSP) ──
-    if (state.analyzerSource == AnalyzerSource::Output)
+    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
     {
         pushToFifo(processBlock, audioFifo, audioFifoBuffer);
     }
@@ -1649,7 +1680,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     }
 
     // ── 入力処理 + Raw Input Analyzer Tap ──
-    const bool inputTapD = (state.analyzerSource == AnalyzerSource::Input);
+    const bool inputTapD = state.analyzerEnabled && (state.analyzerSource == AnalyzerSource::Input);
     const float rawInputLinearD = processInputDouble(buffer, numSamples, state.inputHeadroomGain,
                                                      inputTapD, audioFifo, audioFifoBuffer);
     inputLevelLinear.store(rawInputLinearD, std::memory_order_relaxed);
@@ -1732,7 +1763,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         }
     }
 
-    if (state.analyzerSource == AnalyzerSource::Output)
+    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
         pushToFifo(processBlock, audioFifo, audioFifoBuffer);
 
     if (oversamplingFactor > 1)

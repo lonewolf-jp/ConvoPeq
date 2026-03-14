@@ -1,5 +1,7 @@
 {
-    "cmake.generator": "Ninja",
+    "cmake.generator": "Ninja Multi-Config",
+    "cmake.setBuildTypeOnMultiConfig": true,
+    "cmake.options.statusBarVisibility": "visible",
     "cmake.buildDirectory": "${workspaceFolder}/build",
     "cmake.configureArgs": [
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"

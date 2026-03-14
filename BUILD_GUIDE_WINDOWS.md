@@ -1,43 +1,46 @@
-# ConvoPeq v0.4.4 Build Guide – Windows 11 x64
+# ConvoPeq Build Guide (Windows 11 x64)
 
-## Target Environment
+This guide reflects the **current repository setup** (`build.bat`, `tasks.json`, and CMake configuration).
+
+---
+
+## 1. Supported Environment
 
 - **OS**: Windows 11 x64
-- **IDE**: Visual Studio Code (recommended)
-- **Compiler**: MSVC 19.44.35222.0 (Visual Studio 2022 17.11+)
-- **CMake**: 3.22+
-- **JUCE**: 8.0.12 (required)
-- **C++ Standard**: C++20
-- **Intel oneAPI**: Base Toolkit (MKL required)
+- **Framework**: JUCE 8.0.12
+- **Compiler**: MSVC (Visual Studio 2022)
+- **Build System**: CMake 3.22+ + Ninja Multi-Config
+- **Language Standard**: C++20
+- **Math Backend**: Intel oneMKL (oneAPI Base Toolkit)
 
-> This project is a **Windows-only standalone application**.
-
----
-
-## Required Software
-
-1. **Visual Studio 2022** (Desktop development with C++)
-2. **CMake**
-3. **Ninja** (or bundled Ninja via CMake/VS environment)
-4. **Intel oneAPI Base Toolkit**
-5. **JUCE 8.0.12** placed at:
-   - `ConvoPeq/JUCE/...`
+> ConvoPeq is a **Windows-only standalone application**.
 
 ---
 
-## Project Layout Requirement
+## 2. Required Software
 
-The project root must contain:
+1. **Visual Studio 2022** with *Desktop development with C++*
+2. **CMake** (3.22 or later)
+3. **Ninja** (or Ninja available via your VS/CMake environment)
+4. **Intel oneAPI Base Toolkit** (MKL)
+
+---
+
+## 3. Repository Layout Requirements
+
+At minimum, the project root must contain:
 
 - `build.bat`
 - `CMakeLists.txt`
-- `JUCE/` (JUCE 8.0.12 source tree)
+- `JUCE/`
+
+`build.bat` validates `JUCE\CMakeLists.txt` before configuring.
 
 ---
 
-## Quick Build (Recommended)
+## 4. Recommended Build Method (build.bat)
 
-From project root:
+From the repository root:
 
 ```cmd
 build.bat Release
@@ -45,77 +48,121 @@ build.bat Debug
 build.bat Release clean
 ```
 
-### Build Output Paths
+What the script does:
 
-- **Debug**:
-  - `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe`
-- **Release**:
-  - `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`
+1. Validates local JUCE directory
+2. Initializes MSVC environment via `vcvarsall.bat x64`
+3. Initializes oneAPI via `setvars.bat intel64`
+4. Configures with Ninja Multi-Config
+5. Builds selected config
+
+Output binaries:
+
+- Debug: `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe`
+- Release: `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`
 
 ---
 
-## Manual Build (Equivalent)
+## 5. Manual Build (Equivalent)
+
+Use this when you want full manual control:
 
 ```cmd
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
 
 cmake -S . -B build -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
-cmake --build build --config Release
 cmake --build build --config Debug
+cmake --build build --config Release
 ```
 
 ---
 
-## VS Code Task Usage
+## 6. VS Code Tasks (Current)
 
-Use:
+Current tasks are:
 
-- **Terminal → Run Task → Release**
-- **Terminal → Run Task → Debug**
-- **Terminal → Run Task → Clean**
+- `Kill Previous Instance`
+- `Clean`
+- `Debug`
+- `Release`
 
-`tasks.json` should use:
+Task characteristics:
 
-- `-G "Ninja Multi-Config"`
-- common build directory: `-B "${workspaceFolder}\build"`
-- build switch by `--config Release|Debug`
+- Shell is explicitly `cmd.exe`
+- Generator is `Ninja Multi-Config`
+- Shared build directory is `${workspaceFolder}\build`
+- Config is selected by `--config Debug|Release`
 
----
+Recommended usage:
 
-## Troubleshooting
-
-### 1) `windows.h` / standard headers not found
-
-Environment not initialized for the same shell session.
-Run `vcvarsall.bat` and `setvars.bat` in the same command chain as `cmake`.
-
-### 2) Release task builds Debug
-
-Using single-config Ninja or stale CMake cache.
-Use **Ninja Multi-Config** and `--config Release`.
-
-### 3) `'C:\Program' is not recognized`
-
-Quote escaping issue (PowerShell -> cmd nesting).
-Force task shell to `cmd.exe` and keep command quoting simple.
-
-### 4) `・ｿ@echo off` appears in `build.bat`
-
-File saved with BOM/encoding issue.
-Save `build.bat` as **UTF-8 (without BOM)**.
-
-### 5) JUCE exists but check fails
-
-Ensure script runs from project root or use `pushd "%~dp0"` in `build.bat`.
-Validate path: `JUCE\CMakeLists.txt`.
+- **Terminal -> Run Task -> Debug**
+- **Terminal -> Run Task -> Release**
+- **Terminal -> Run Task -> Clean** (when cache/build directory reset is needed)
 
 ---
 
-## Notes
+## 7. Common Issues and Fixes
 
-- Do **not** modify dependency sources directly:
-  - `JUCE/`
-  - `r8brain-free-src/`
-- App target is standalone (not plugin build target).
-- For daily development, VS Code task-based workflow is recommended.
+### A) `windows.h` or standard headers are not found
+
+Cause: MSVC/SDK environment was not initialized in the same command chain.
+
+Fix:
+
+- Use `build.bat`, or
+- Ensure both `vcvarsall.bat` and `setvars.bat` are called before CMake in the same shell command sequence.
+
+### B) `Release` task does not produce Release artifacts
+
+Cause: Single-config generator/cache mismatch.
+
+Fix:
+
+- Use `Ninja Multi-Config`
+- Build with `--config Release`
+- If needed, run `Clean` and reconfigure.
+
+### C) `'C:\Program' is not recognized`
+
+Cause: Broken quoting or shell mismatch.
+
+Fix:
+
+- Keep task shell as `cmd.exe`
+- Keep quoted paths exactly as in current `tasks.json`.
+
+### D) oneMKL package not found
+
+Cause: oneAPI environment not initialized.
+
+Fix:
+
+- Install Intel oneAPI Base Toolkit
+- Confirm `C:\Program Files (x86)\Intel\oneAPI\setvars.bat` exists
+- Re-run from a clean shell.
+
+### E) JUCE check fails in `build.bat`
+
+Cause: Missing or invalid local `JUCE` folder.
+
+Fix:
+
+- Ensure `JUCE\CMakeLists.txt` exists under repository root.
+
+---
+
+## 8. Dependency Boundaries
+
+Do **not** modify external dependency trees directly:
+
+- `JUCE/`
+- `r8brain-free-src/`
+
+---
+
+## 9. Notes
+
+- The app target is standalone (not a plugin target).
+- The default daily workflow is `build.bat` or VS Code tasks.
+- Use `Clean` when switching toolchain assumptions or after generator/cache conflicts.

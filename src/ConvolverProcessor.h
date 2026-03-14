@@ -60,6 +60,9 @@ public:
     static constexpr float IR_LENGTH_MIN_SEC = 0.5f;
     static constexpr float IR_LENGTH_MAX_SEC = 3.0f;
     static constexpr float IR_LENGTH_DEFAULT_SEC = 1.0f;
+    static constexpr int REBUILD_DEBOUNCE_MIN_MS = 50;
+    static constexpr int REBUILD_DEBOUNCE_MAX_MS = 3000;
+    static constexpr int REBUILD_DEBOUNCE_DEFAULT_MS = 400;
 
     // DelayLine用定数 (Audio Threadでのメモリ確保防止)
     // IRの最大長(kMaxIRCap)と最大ブロックサイズをカバーする値を設定
@@ -132,6 +135,12 @@ public:
     //----------------------------------------------------------
     void setSmoothingTime(float timeSec);
     float getSmoothingTime() const;
+
+    //----------------------------------------------------------
+    // Rebuild Debounce Time (Message/Worker burst control)
+    //----------------------------------------------------------
+    void setRebuildDebounceMs(int ms);
+    int getRebuildDebounceMs() const;
 
     //----------------------------------------------------------
     // IR Length
@@ -212,6 +221,8 @@ public:
 
 private:
     void timerCallback() override;
+    void postCoalescedChangeNotification();
+    void requestDebouncedRebuild();
     struct StereoConvolver;
     class LoaderThread;
     // クロスフェード用の新しいメンバー
@@ -400,6 +411,9 @@ private:
     // このフラグを立てるだけにする。Audio Thread が process() 先頭で検出し初期化する。
     std::atomic<bool> wetCrossfadeResetPending { false };
     std::atomic<bool> useMinPhase{false};
+    std::atomic<int> rebuildDebounceToken { 0 };
+    std::atomic<bool> changeNotificationPending { false };
+    std::atomic<int> rebuildDebounceMs { REBUILD_DEBOUNCE_DEFAULT_MS };
 
     // NUC 出力周波数フィルターモード (Message Thread で更新, finalizeNUC で読む)
     // int として保存し、使用時に enum へキャスト。

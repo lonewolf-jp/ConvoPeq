@@ -35,3 +35,7 @@ cmake_install.cmake
 # OS Files
 .DS_Store
 Thumbs.db
+
+# serena mcp server logs
+.cache/
+.serena/

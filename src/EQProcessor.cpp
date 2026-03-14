@@ -26,14 +26,13 @@ static inline double calculateRMS(const double* data, int numSamples) noexcept
     // sqrt(x[0]^2 + x[1]^2 + ... + x[n-1]^2)
     const double norm = cblas_dnrm2(numSamples, data, 1);
 
-    // RMS = sqrt( (x[0]^2 + ... + x[n-1]^2) / n )
-    //     = sqrt(sum_of_squares) / sqrt(n)
-    //     = norm / sqrt(n)
-    // Audio Thread内でのstd::sqrt (libm) 呼び出しを避けるため、MKL VMLを使用する
-    double numSamplesDouble = static_cast<double>(numSamples);
-    double invSqrtN;
-    vdInvSqrt(1, &numSamplesDouble, &invSqrtN); // 1.0 / sqrt(numSamples)
-    return norm * invSqrtN;
+    // RMS = norm / sqrt(n)
+    // Audio Thread内でのlibm呼び出しを避けるため、SSE2命令で平方根を計算する
+    __m128d n = _mm_set_sd(static_cast<double>(numSamples));
+    __m128d sqrtN = _mm_sqrt_sd(n, n);
+    double denom;
+    _mm_store_sd(&denom, sqrtN);
+    return (denom > 0.0) ? (norm / denom) : 0.0;
 }
 
 //--------------------------------------------------------------
@@ -1319,17 +1318,9 @@ void EQProcessor::cleanup()
         stateTrashBin.insert(stateTrashBin.end(), stateTrashBinPending.begin(), stateTrashBinPending.end());
         stateTrashBinPending.clear();
 
-        // 【パッチ1】stateTrashBin サイズ上限制御 (無制限成長によるメモリリーク防止)
-        // use_count > 1 の参照が長期保持される場合でも最大10件に制限し強制解放する
-        static constexpr size_t kMaxStateTrashBinSize = 50;
-        if (stateTrashBin.size() > kMaxStateTrashBinSize)
-        {
-            const size_t removeCount = stateTrashBin.size() - kMaxStateTrashBinSize;
-            for (size_t i = 0; i < removeCount; ++i)
-                statesToDelete.push_back(stateTrashBin[i]);
-            stateTrashBin.erase(stateTrashBin.begin(),
-                                 stateTrashBin.begin() + static_cast<std::ptrdiff_t>(removeCount));
-        }
+        // 安全性優先: use_count == 1 の条件を満たすもののみ回収する。
+        // サイズ超過のみを理由に強制解放すると、Audio Thread 参照中オブジェクトの
+        // 早期解放リスクがあるため行わない。
     }
 
     for (auto* p : nodesToDelete) p->release();

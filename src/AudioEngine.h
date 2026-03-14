@@ -512,6 +512,11 @@ DSPCore();
     static constexpr float EQ_GAIN_EPSILON = 0.01f;          // ゲインがこれ以下なら無視
     static constexpr float EQ_UNITY_GAIN_EPSILON = 1.0e-5f;  // 1.0との比較用
 
+    // EQ応答曲線計算用ワークバッファ (Message Thread/UI Threadで再利用)
+    std::vector<float> eqTotalMagSqLBuffer;
+    std::vector<float> eqTotalMagSqRBuffer;
+    std::vector<float> eqBandMagSqBuffer;
+
     //----------------------------------------------------------
     // ヘルパー関数
     //----------------------------------------------------------

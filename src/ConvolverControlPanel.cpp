@@ -77,6 +77,24 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     irLengthLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible(irLengthLabel);
 
+    // Rebuild Debounce スライダー
+    rebuildDebounceSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    rebuildDebounceSlider.setRange(ConvolverProcessor::REBUILD_DEBOUNCE_MIN_MS,
+                                   ConvolverProcessor::REBUILD_DEBOUNCE_MAX_MS, 10.0);
+    rebuildDebounceSlider.setSkewFactorFromMidPoint(static_cast<double>(ConvolverProcessor::REBUILD_DEBOUNCE_DEFAULT_MS));
+    rebuildDebounceSlider.setTextValueSuffix(" ms");
+    rebuildDebounceSlider.setNumDecimalPlacesToDisplay(0);
+    rebuildDebounceSlider.setValue(static_cast<double>(engine.getConvolverProcessor().getRebuildDebounceMs()), juce::dontSendNotification);
+    rebuildDebounceSlider.addListener(this);
+    addAndMakeVisible(rebuildDebounceSlider);
+
+    // Rebuild Debounce ラベル
+    rebuildDebounceLabel.setText("Rebuild:", juce::dontSendNotification);
+    rebuildDebounceLabel.setJustificationType(juce::Justification::centredRight);
+    rebuildDebounceLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    rebuildDebounceLabel.setTooltip("IR rebuild debounce time (ms)");
+    addAndMakeVisible(rebuildDebounceLabel);
+
     // IR情報ラベル
     irInfoLabel.setText("No IR loaded", juce::dontSendNotification);
     irInfoLabel.setJustificationType(juce::Justification::centred);
@@ -192,6 +210,7 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
 
 ConvolverControlPanel::~ConvolverControlPanel()
 {
+    stopTimer();
 }
 
 //--------------------------------------------------------------
@@ -297,10 +316,11 @@ void ConvolverControlPanel::resized()
     irInfoLabel.setBounds(waveformArea); // 波形エリアに重ねる
     bounds.removeFromTop(8);
 
-    // 3つのコントロール行を定義
+    // 4つのコントロール行を定義
     auto controlRow1 = bounds.removeFromTop(28);
     auto controlRow2 = bounds.removeFromTop(28);
     auto controlRow3 = bounds.removeFromTop(28);
+    auto controlRow4 = bounds.removeFromTop(28);
 
     // --- 1行目 ---
     loadIRButton.setBounds(controlRow1.removeFromLeft(90));
@@ -331,7 +351,15 @@ void ConvolverControlPanel::resized()
     lengthRow.removeFromLeft(5);
     irLengthSlider.setBounds(lengthRow);
 
-    // --- 4行目: ハイカットフィルターモード ---
+    // --- 4行目 ---
+    // Rebuild Debounce (IR Lengthの下に配置)
+    auto debounceRow = controlRow4;
+    debounceRow.removeFromLeft(phaseChoiceBox.getRight() + 5);
+    rebuildDebounceLabel.setBounds(debounceRow.removeFromLeft(65));
+    debounceRow.removeFromLeft(5);
+    rebuildDebounceSlider.setBounds(debounceRow);
+
+    // --- 5行目: ハイカットフィルターモード ---
     auto hcfRow = bounds.removeFromTop(26);
     hcfLabel.setBounds(hcfRow.removeFromLeft(38).reduced(0, 3));
     hcfRow.removeFromLeft(4);
@@ -339,7 +367,7 @@ void ConvolverControlPanel::resized()
     hcfNaturalButton.setBounds(hcfRow.removeFromLeft(60).reduced(2, 2));
     hcfSoftButton.setBounds(hcfRow.removeFromLeft(48).reduced(2, 2));
 
-    // --- 5行目: ローカットフィルターモード ---
+    // --- 6行目: ローカットフィルターモード ---
     auto lcfRow = bounds.removeFromTop(26);
     lcfLabel.setBounds(lcfRow.removeFromLeft(38).reduced(0, 3));
     lcfRow.removeFromLeft(4);
@@ -408,22 +436,74 @@ void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
 {
     if (slider == &mixSlider)
     {
-        engine.getConvolverProcessor().setMix(
-            static_cast<float>(slider->getValue())
-        );
+        pendingMixValue = static_cast<float>(slider->getValue());
+        pendingMixDirty = true;
+        markConvolverParameterDirty();
     }
     else if (slider == &smoothingTimeSlider)
     {
-        engine.getConvolverProcessor().setSmoothingTime(
-            static_cast<float>(slider->getValue()) / 1000.0f
-        );
+        pendingSmoothingTimeSec = static_cast<float>(slider->getValue()) / 1000.0f;
+        pendingSmoothingDirty = true;
+        markConvolverParameterDirty();
     }
     else if (slider == &irLengthSlider)
     {
-        engine.getConvolverProcessor().setTargetIRLength(
-            static_cast<float>(slider->getValue())
-        );
+        pendingIrLengthSec = static_cast<float>(slider->getValue());
+        pendingIrLengthDirty = true;
+        markConvolverParameterDirty();
     }
+    else if (slider == &rebuildDebounceSlider)
+    {
+        engine.getConvolverProcessor().setRebuildDebounceMs(static_cast<int>(slider->getValue()));
+    }
+}
+
+void ConvolverControlPanel::timerCallback()
+{
+    if (!hasPendingConvolverParameters())
+    {
+        stopTimer();
+        return;
+    }
+
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    if ((nowMs - lastParameterChangeMs) < static_cast<double>(PARAMETER_RECALC_DEBOUNCE_MS))
+        return;
+
+    applyPendingConvolverParameters();
+    stopTimer();
+}
+
+void ConvolverControlPanel::markConvolverParameterDirty()
+{
+    lastParameterChangeMs = juce::Time::getMillisecondCounterHiRes();
+    if (!isTimerRunning())
+        startTimer(100);
+}
+
+bool ConvolverControlPanel::hasPendingConvolverParameters() const noexcept
+{
+    return pendingMixDirty || pendingSmoothingDirty || pendingIrLengthDirty;
+}
+
+void ConvolverControlPanel::applyPendingConvolverParameters()
+{
+    auto& convolver = engine.getConvolverProcessor();
+
+    if (pendingMixDirty)
+        convolver.setMix(pendingMixValue);
+
+    if (pendingSmoothingDirty)
+        convolver.setSmoothingTime(pendingSmoothingTimeSec);
+
+    if (pendingIrLengthDirty)
+        convolver.setTargetIRLength(pendingIrLengthSec);
+
+    pendingMixDirty = false;
+    pendingSmoothingDirty = false;
+    pendingIrLengthDirty = false;
+
+    updateIRInfo();
 }
 
 void ConvolverControlPanel::mouseDown(const juce::MouseEvent& event)
@@ -450,10 +530,13 @@ void ConvolverControlPanel::updateIRInfo()
     auto& convolver = engine.getConvolverProcessor();
 
     // UIコントロールをプロセッサの状態と同期
-    mixSlider.setValue(convolver.getMix(), juce::dontSendNotification);
+    mixSlider.setValue(pendingMixDirty ? pendingMixValue : convolver.getMix(), juce::dontSendNotification);
     phaseChoiceBox.setSelectedId(convolver.getUseMinPhase() ? 2 : 1, juce::dontSendNotification);
-    smoothingTimeSlider.setValue(convolver.getSmoothingTime() * 1000.0, juce::dontSendNotification);
-    irLengthSlider.setValue(convolver.getTargetIRLength(), juce::dontSendNotification);
+    smoothingTimeSlider.setValue((pendingSmoothingDirty ? pendingSmoothingTimeSec : convolver.getSmoothingTime()) * 1000.0,
+                                 juce::dontSendNotification);
+    irLengthSlider.setValue(pendingIrLengthDirty ? pendingIrLengthSec : convolver.getTargetIRLength(),
+                            juce::dontSendNotification);
+    rebuildDebounceSlider.setValue(static_cast<double>(convolver.getRebuildDebounceMs()), juce::dontSendNotification);
     updateFilterModeButtons();
 
     if (convolver.isIRLoaded())

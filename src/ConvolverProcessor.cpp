@@ -1241,6 +1241,49 @@ void ConvolverProcessor::rebuildAllIRs()
     }
 }
 
+void ConvolverProcessor::postCoalescedChangeNotification()
+{
+    if (changeNotificationPending.exchange(true, std::memory_order_acq_rel))
+        return;
+
+    auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
+    juce::MessageManager::callAsync([weakThis]()
+    {
+        if (auto* self = weakThis.get())
+        {
+            self->changeNotificationPending.store(false, std::memory_order_release);
+            self->sendChangeMessage();
+        }
+    });
+}
+
+void ConvolverProcessor::requestDebouncedRebuild()
+{
+    if (!isIRLoaded())
+        return;
+
+    const int token = rebuildDebounceToken.fetch_add(1, std::memory_order_acq_rel) + 1;
+    auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
+
+    const int debounceMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS,
+                                        REBUILD_DEBOUNCE_MAX_MS,
+                                        rebuildDebounceMs.load(std::memory_order_acquire));
+
+    juce::Timer::callAfterDelay(debounceMs, [weakThis, token]()
+    {
+        if (auto* self = weakThis.get())
+        {
+            if (self->rebuildDebounceToken.load(std::memory_order_acquire) != token)
+                return;
+
+            if (!self->isIRLoaded() || self->isLoading.load(std::memory_order_acquire))
+                return;
+
+            self->loadImpulseResponse(juce::File());
+        }
+    });
+}
+
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
 {
     // [Bug E fix] originalIR は std::atomic<std::shared_ptr<T>> なので .load() でスナップショットを取得。
@@ -1490,7 +1533,7 @@ void ConvolverProcessor::handleLoadError(const juce::String& error)
     isLoading.store(false);
     isRebuilding.store(false, std::memory_order_release);
     // UIに通知してエラーメッセージを表示させる
-    sendChangeMessage();
+    postCoalescedChangeNotification();
 }
 
 void ConvolverProcessor::cleanup()
@@ -1556,15 +1599,8 @@ void ConvolverProcessor::cleanup()
         }
     }
 
-    // 【Fix Bug #1b】サイズ制限超過時のフォールバック削除。
-    // 最も古いアイテム(front)から削除する。back()を使うと最も新しい
-    // StereoConvolverが削除され、Audio Threadがまだそれを使用中の可能性がある
-    // ため、Use-After-Freeを引き起こす危険がある。
-    while (trashBin.size() > 20)
-    {
-        toRelease.push_back(trashBin.front().first);
-        trashBin.erase(trashBin.begin());
-    }
+    // 安全性優先: 年齢条件(age > 10000ms)を満たしたもののみ回収する。
+    // サイズ超過のみを理由とした強制解放は行わない。
 
     for (auto* p : toRelease) p->release();
 }
@@ -1816,6 +1852,7 @@ juce::ValueTree ConvolverProcessor::getState() const
     v.setProperty ("useMinPhase", useMinPhase.load(), nullptr);
     v.setProperty ("smoothingTime", smoothingTimeSec.load(), nullptr);
     v.setProperty ("irLength", targetIRLengthSec.load(), nullptr);
+    v.setProperty ("rebuildDebounceMs", rebuildDebounceMs.load(std::memory_order_acquire), nullptr);
     {
         const juce::ScopedLock sl(irFileLock);
         v.setProperty ("irPath", currentIrFile.getFullPathName(), nullptr);
@@ -1830,6 +1867,7 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
     if (v.hasProperty ("useMinPhase")) setUseMinPhase (v.getProperty ("useMinPhase"));
     if (v.hasProperty ("smoothingTime")) setSmoothingTime (v.getProperty ("smoothingTime"));
     if (v.hasProperty ("irLength")) setTargetIRLength (v.getProperty ("irLength"));
+    if (v.hasProperty ("rebuildDebounceMs")) setRebuildDebounceMs (static_cast<int>(v.getProperty("rebuildDebounceMs")));
 
     if (v.hasProperty ("irPath"))
     {
@@ -1852,7 +1890,7 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
                 // これにより、UIスレッドをブロックせずに非同期で対応できる。
                 lastError = "IR not found: " + f.getFileName();
                 // UIに通知してエラーメッセージを表示させる
-                sendChangeMessage();
+                postCoalescedChangeNotification();
             }
         }
 
@@ -1875,6 +1913,7 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     useMinPhase.store(other.useMinPhase.load(), std::memory_order_release);
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
     targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
+    rebuildDebounceMs.store(other.rebuildDebounceMs.load(std::memory_order_acquire), std::memory_order_release);
 
     // サンプルレート変更時にリビルドできるよう、元のIR情報を共有する
     // [Bug E fix] std::atomic<shared_ptr>::store() でアトミックに代入。
@@ -1913,6 +1952,7 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
     mixTarget.store(other.mixTarget.load(), std::memory_order_release);
     bypassed.store(other.bypassed.load(), std::memory_order_release);
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
+    rebuildDebounceMs.store(other.rebuildDebounceMs.load(std::memory_order_acquire), std::memory_order_release);
 
     // サンプルレートが一致する場合のみ Convolution オブジェクトを同期する。
     // オーバーサンプリング中は DSP側のレート(Nx) != UI側のレート(1x) となるため、
@@ -1971,6 +2011,8 @@ void ConvolverProcessor::refreshLatency()
 //--------------------------------------------------------------
 void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
+    static constexpr double kLatencyRetargetThresholdSamples = 2.0;
+
     // ── デノーマル対策 ──
     // Audio Threadは専用スレッドだが、JUCEの内部実装はgetNextAudioBlock()呼び出し前に
     // FTZ/DAZを保証しない。ScopedNoDenormalsでMXCSRのFTZ/DAZビットを関数スコープで保護する。
@@ -2009,7 +2051,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         const int totalLatency = juce::jmin(calculatedLatency, MAX_TOTAL_DELAY);
 
         // ターゲット値が変更された場合のみ更新
-        if (std::abs(latencySmoother.getTargetValue() - static_cast<double>(totalLatency)) > 0.5) // 0.5サンプル以上の変化でトリガー
+        if (std::abs(latencySmoother.getTargetValue() - static_cast<double>(totalLatency)) >= kLatencyRetargetThresholdSamples)
         {
             // ドップラー効果対策: クロスフェードを開始
             // クロスフェード中はターゲット更新を保留し、不連続なジャンプ（クリック）を防ぐ
@@ -2087,18 +2129,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
 
     const bool isCrossfading = (oldConv != nullptr && wetCrossfadeActive.load(std::memory_order_acquire));
-
-    // クロスフェード中の場合、ゲインランプを事前に計算
-    if (isCrossfading)
-    {
-        double* ramp = crossfadeRampBuffer.get();
-        for (int i = 0; i < numSamples; ++i)
-            ramp[i] = wetCrossfade.getNextValue();
-        // [Bug G fix] スムージング完了を検出したらアトミックフラグをクリア。
-        // timerCallback の wetCrossfadeActive チェックに通知する。
-        if (!wetCrossfade.isSmoothing())
-            wetCrossfadeActive.store(false, std::memory_order_release);
-    }
+    int activeWetCrossfadeSamples = 0;
     // ── Step 5: Dry信号生成 ──
     // DelayLineの内部状態（履歴）を維持するため、Dry信号が不要な場合(100% Wet)でも常に処理を実行する。
     // これにより、Mixパラメータ変更時に過去のDry信号が正しく再生されるようにする。
@@ -2126,10 +2157,27 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         {
             // --- クロスフェード処理 ---
             const double newDelay = latencySmoother.getTargetValue();
+            double* delayFadeRamp = crossfadeRampBuffer.get();
+            int activeDelayCrossfadeSamples = 0;
+
+            for (; activeDelayCrossfadeSamples < numSamples; ++activeDelayCrossfadeSamples)
+            {
+                delayFadeRamp[activeDelayCrossfadeSamples] = crossfadeGain.getNextValue();
+                if (!crossfadeGain.isSmoothing())
+                {
+                    ++activeDelayCrossfadeSamples;
+                    break;
+                }
+            }
+            for (int i = activeDelayCrossfadeSamples; i < numSamples; ++i)
+                delayFadeRamp[i] = 1.0;
 
             // サブサンプル精度読み出し用ヘルパー (Catmull-Rom Interpolation)
-            auto readInterpolated = [&](double delay, double* dst, int ch)
+            auto readInterpolated = [&](double delay, double* dst, int ch, int samplesToRead)
             {
+                if (samplesToRead <= 0)
+                    return;
+
                 const double* srcBuf = delayBuffer[ch].get();
                 double rPos = static_cast<double>(delayWritePos) - delay;
 
@@ -2144,19 +2192,19 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 if (std::abs(frac) < 1.0e-6)
                 {
                     int rPosInt = iRead; // frac ~ 0.0
-                    int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - rPosInt);
+                    int samplesFirst = std::min(samplesToRead, DELAY_BUFFER_SIZE - rPosInt);
                     std::memcpy(dst, srcBuf + rPosInt, samplesFirst * sizeof(double));
-                    if (numSamples > samplesFirst)
-                        std::memcpy(dst + samplesFirst, srcBuf, (numSamples - samplesFirst) * sizeof(double));
+                    if (samplesToRead > samplesFirst)
+                        std::memcpy(dst + samplesFirst, srcBuf, (samplesToRead - samplesFirst) * sizeof(double));
                     return;
                 }
                 else if (std::abs(frac - 1.0) < 1.0e-6)
                 {
                     int rPosInt = (iRead + 1) & DELAY_BUFFER_MASK; // frac ~ 1.0
-                    int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - rPosInt);
+                    int samplesFirst = std::min(samplesToRead, DELAY_BUFFER_SIZE - rPosInt);
                     std::memcpy(dst, srcBuf + rPosInt, samplesFirst * sizeof(double));
-                    if (numSamples > samplesFirst)
-                        std::memcpy(dst + samplesFirst, srcBuf, (numSamples - samplesFirst) * sizeof(double));
+                    if (samplesToRead > samplesFirst)
+                        std::memcpy(dst + samplesFirst, srcBuf, (samplesToRead - samplesFirst) * sizeof(double));
                     return;
                 }
 
@@ -2171,7 +2219,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
                 int i = 0;
                 // 境界チェック: 読み出し範囲がバッファ境界を跨がない場合のみ高速化
-                if (iRead >= 1 && iRead + numSamples + 2 < DELAY_BUFFER_SIZE)
+                if (iRead >= 1 && iRead + samplesToRead + 2 < DELAY_BUFFER_SIZE)
                 {
                     const double* s = srcBuf + iRead;
 #if defined(__AVX2__)
@@ -2181,7 +2229,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     const __m256d vw3 = _mm256_set1_pd(w3);
 
                     // AVX2 最適化ループ
-                    for (; i <= numSamples - 4; i += 4)
+                    for (; i <= samplesToRead - 4; i += 4)
                     {
                         __m256d p0 = _mm256_loadu_pd(s + i - 1);
                         __m256d p1 = _mm256_loadu_pd(s + i);
@@ -2195,13 +2243,13 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     }
 #endif
                     // スカラー残余処理 (AVX2ループ後、または非AVX2ビルド時)
-                    for (; i < numSamples; ++i)
+                    for (; i < samplesToRead; ++i)
                         dst[i] = w0 * s[i - 1] + w1 * s[i] + w2 * s[i + 1] + w3 * s[i + 2];
                 }
                 else
                 {
                     // バッファラップアラウンド対応 (低速パス)
-                    for (; i < numSamples; ++i)
+                    for (; i < samplesToRead; ++i)
                     {
                         int idx = iRead + i;
                         double p0 = srcBuf[(idx - 1) & DELAY_BUFFER_MASK];
@@ -2214,65 +2262,45 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             };
 
             // 1. 古いディレイからの信号を oldDryBuffer に読み出す
-            for (int ch = 0; ch < procChannels; ++ch)
-                readInterpolated(oldDelay, oldDryBuffer.getWritePointer(ch), ch);
+            if (activeDelayCrossfadeSamples > 0)
+            {
+                for (int ch = 0; ch < procChannels; ++ch)
+                    readInterpolated(oldDelay, oldDryBuffer.getWritePointer(ch), ch, activeDelayCrossfadeSamples);
+            }
 
             // 2. 新しいディレイからの信号を dryBuffer に読み出す
             for (int ch = 0; ch < procChannels; ++ch)
-                readInterpolated(newDelay, dryBuffer.getWritePointer(ch), ch);
+                readInterpolated(newDelay, dryBuffer.getWritePointer(ch), ch, numSamples);
 
             // 3. 2つの信号をクロスフェードして dryBuffer に書き込む
-#if defined(__AVX2__)
-            const double startFadeInGain = crossfadeGain.getCurrentValue();
-            crossfadeGain.skip(numSamples);
-            const double endFadeInGain = crossfadeGain.getCurrentValue();
-            const double fadeInInc = (endFadeInGain - startFadeInGain) / static_cast<double>(numSamples);
-
-            for (int ch = 0; ch < procChannels; ++ch)
+            if (activeDelayCrossfadeSamples > 0)
             {
-                double* newSamples = dryBuffer.getWritePointer(ch);
-                const double* oldSamples = oldDryBuffer.getReadPointer(ch);
-
-                __m256d vGain = _mm256_set_pd(startFadeInGain + 3.0 * fadeInInc,
-                                              startFadeInGain + 2.0 * fadeInInc,
-                                              startFadeInGain + fadeInInc,
-                                              startFadeInGain);
-                const __m256d vInc = _mm256_set1_pd(4.0 * fadeInInc);
-                const __m256d vOne = _mm256_set1_pd(1.0);
-
-                int i = 0;
-                for (; i <= numSamples - 4; i += 4)
-                {
-                    const __m256d vOld = _mm256_loadu_pd(oldSamples + i);
-                    const __m256d vNew = _mm256_loadu_pd(newSamples + i);
-                    const __m256d vFadeOutGain = _mm256_sub_pd(vOne, vGain);
-
-                    // out = new * fadeIn + old * fadeOut (FMA)
-                    const __m256d vOut = _mm256_fmadd_pd(vNew, vGain, _mm256_mul_pd(vOld, vFadeOutGain)); // FMA
-                    _mm256_storeu_pd(newSamples + i, vOut);
-
-                    vGain = _mm256_add_pd(vGain, vInc);
-                }
-
-                double currentGain = startFadeInGain + static_cast<double>(i) * fadeInInc;
-                for (; i < numSamples; ++i)
-                {
-                    newSamples[i] = newSamples[i] * currentGain + oldSamples[i] * (1.0 - currentGain);
-                    currentGain += fadeInInc;
-                }
-            }
-#else
-            // Fallback for non-AVX2
-            for (int i = 0; i < numSamples; ++i)
-            {
-                const double fadeInGain = crossfadeGain.getNextValue();
-                const double fadeOutGain = 1.0 - fadeInGain;
                 for (int ch = 0; ch < procChannels; ++ch)
                 {
-                    dryBuffer.setSample(ch, i, dryBuffer.getSample(ch, i) * fadeInGain + oldDryBuffer.getSample(ch, i) * fadeOutGain);
+                    double* newSamples = dryBuffer.getWritePointer(ch);
+                    const double* oldSamples = oldDryBuffer.getReadPointer(ch);
+                    const double* fadeInRamp = delayFadeRamp;
+#if defined(__AVX2__)
+                    int i = 0;
+                    const int vEnd = activeDelayCrossfadeSamples / 4 * 4;
+                    const __m256d vOne = _mm256_set1_pd(1.0);
+                    for (; i < vEnd; i += 4)
+                    {
+                        const __m256d vFade = _mm256_loadu_pd(fadeInRamp + i);
+                        const __m256d vNew = _mm256_loadu_pd(newSamples + i);
+                        const __m256d vOld = _mm256_loadu_pd(oldSamples + i);
+                        const __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vNew, vFade),
+                                                           _mm256_mul_pd(vOld, _mm256_sub_pd(vOne, vFade)));
+                        _mm256_storeu_pd(newSamples + i, vOut);
+                    }
+                    for (; i < activeDelayCrossfadeSamples; ++i)
+                        newSamples[i] = newSamples[i] * fadeInRamp[i] + oldSamples[i] * (1.0 - fadeInRamp[i]);
+#else
+                    for (int i = 0; i < activeDelayCrossfadeSamples; ++i)
+                        newSamples[i] = newSamples[i] * fadeInRamp[i] + oldSamples[i] * (1.0 - fadeInRamp[i]);
+#endif
                 }
             }
-#endif
 
             if (!crossfadeGain.isSmoothing())
             {
@@ -2317,6 +2345,25 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // これにより、Mixを0%から上げた際のグリッチを防ぐ。
     // MKL NUC を使用
 
+    if (isCrossfading)
+    {
+        double* ramp = crossfadeRampBuffer.get();
+        for (; activeWetCrossfadeSamples < numSamples; ++activeWetCrossfadeSamples)
+        {
+            ramp[activeWetCrossfadeSamples] = wetCrossfade.getNextValue();
+            if (!wetCrossfade.isSmoothing())
+            {
+                ++activeWetCrossfadeSamples;
+                break;
+            }
+        }
+        for (int i = activeWetCrossfadeSamples; i < numSamples; ++i)
+            ramp[i] = 1.0;
+
+        if (!wetCrossfade.isSmoothing())
+            wetCrossfadeActive.store(false, std::memory_order_release);
+    }
+
     const double headroom = CONVOLUTION_HEADROOM_GAIN;
 
     const double* wetGains = nullptr;
@@ -2350,6 +2397,84 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // これにより、非倍数ブロックでも無音化せず連続再生を維持する。
     const int callLen = guardedCallSamples;
 
+    constexpr int kSmallMixThreshold = 192;
+
+    auto mixSmoothingSmall = [](double* dst,
+                                const double* wet,
+                                const double* dry,
+                                const double* wetGain,
+                                const double* dryGain,
+                                int n) noexcept
+    {
+#if defined(__AVX2__)
+        int i = 0;
+        const int vEnd = n / 4 * 4;
+        for (; i < vEnd; i += 4)
+        {
+            const __m256d vWet = _mm256_loadu_pd(wet + i);
+            const __m256d vDry = _mm256_loadu_pd(dry + i);
+            const __m256d vWG = _mm256_loadu_pd(wetGain + i);
+            const __m256d vDG = _mm256_loadu_pd(dryGain + i);
+            const __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vWet, vWG), _mm256_mul_pd(vDry, vDG));
+            _mm256_storeu_pd(dst + i, vOut);
+        }
+        for (; i < n; ++i)
+            dst[i] = wet[i] * wetGain[i] + dry[i] * dryGain[i];
+#else
+        for (int i = 0; i < n; ++i)
+            dst[i] = wet[i] * wetGain[i] + dry[i] * dryGain[i];
+#endif
+    };
+
+    auto mixSteadySmall = [](double* dst,
+                             const double* wet,
+                             const double* dry,
+                             double wetG,
+                             double dryG,
+                             int n) noexcept
+    {
+#if defined(__AVX2__)
+        int i = 0;
+        const int vEnd = n / 4 * 4;
+        const __m256d vWG = _mm256_set1_pd(wetG);
+        const __m256d vDG = _mm256_set1_pd(dryG);
+        for (; i < vEnd; i += 4)
+        {
+            const __m256d vWet = _mm256_loadu_pd(wet + i);
+            const __m256d vDry = _mm256_loadu_pd(dry + i);
+            const __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vWet, vWG), _mm256_mul_pd(vDry, vDG));
+            _mm256_storeu_pd(dst + i, vOut);
+        }
+        for (; i < n; ++i)
+            dst[i] = wet[i] * wetG + dry[i] * dryG;
+#else
+        for (int i = 0; i < n; ++i)
+            dst[i] = wet[i] * wetG + dry[i] * dryG;
+#endif
+    };
+
+    auto scaleDrySmall = [](double* dst,
+                            const double* dry,
+                            const double* gain,
+                            int n) noexcept
+    {
+#if defined(__AVX2__)
+        int i = 0;
+        const int vEnd = n / 4 * 4;
+        for (; i < vEnd; i += 4)
+        {
+            const __m256d vDry = _mm256_loadu_pd(dry + i);
+            const __m256d vGain = _mm256_loadu_pd(gain + i);
+            _mm256_storeu_pd(dst + i, _mm256_mul_pd(vDry, vGain));
+        }
+        for (; i < n; ++i)
+            dst[i] = dry[i] * gain[i];
+#else
+        for (int i = 0; i < n; ++i)
+            dst[i] = dry[i] * gain[i];
+#endif
+    };
+
 
     for (int ch = 0; ch < procChannels; ++ch)
     {
@@ -2374,14 +2499,38 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             // クロスフェード処理
             if (isCrossfading)
             {
-                double* oldWetOut = oldWetBuffer.getWritePointer(ch, processed);
-                oldConv->process(ch, input, oldWetOut, chunkSamples);
-
-                const double* fadeInRamp = crossfadeRampBuffer.get() + processed;
-                for (int i = 0; i < chunkSamples; ++i)
+                const int crossfadeSamplesThisChunk = juce::jlimit(0, chunkSamples, activeWetCrossfadeSamples - processed);
+                if (crossfadeSamplesThisChunk > 0)
                 {
-                    const double fade = fadeInRamp[i];
-                    wetOut[i] = wetOut[i] * fade + oldWetOut[i] * (1.0 - fade);
+                    double* oldWetOut = oldWetBuffer.getWritePointer(ch, processed);
+                    oldConv->process(ch, input, oldWetOut, crossfadeSamplesThisChunk);
+
+                    const double* fadeInRamp = crossfadeRampBuffer.get() + processed;
+#if defined(__AVX2__)
+                    int i = 0;
+                    const int vEnd = crossfadeSamplesThisChunk / 4 * 4;
+                    const __m256d vOne = _mm256_set1_pd(1.0);
+                    for (; i < vEnd; i += 4)
+                    {
+                        const __m256d vFade = _mm256_loadu_pd(fadeInRamp + i);
+                        const __m256d vNew = _mm256_loadu_pd(wetOut + i);
+                        const __m256d vOld = _mm256_loadu_pd(oldWetOut + i);
+                        const __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vNew, vFade),
+                                                           _mm256_mul_pd(vOld, _mm256_sub_pd(vOne, vFade)));
+                        _mm256_storeu_pd(wetOut + i, vOut);
+                    }
+                    for (; i < crossfadeSamplesThisChunk; ++i)
+                    {
+                        const double fade = fadeInRamp[i];
+                        wetOut[i] = wetOut[i] * fade + oldWetOut[i] * (1.0 - fade);
+                    }
+#else
+                    for (int i = 0; i < crossfadeSamplesThisChunk; ++i)
+                    {
+                        const double fade = fadeInRamp[i];
+                        wetOut[i] = wetOut[i] * fade + oldWetOut[i] * (1.0 - fade);
+                    }
+#endif
                 }
             }
 
@@ -2397,20 +2546,40 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             {
                 if (validWetSamples > 0)
                 {
-                    // MKL VML を使用した Dry/Wet ミキシング (スムージング時)
-                    // dst = (wet * wetGains) + (dry * dryGains)
-                    // oldDryBuffer を一時的なスクラッチバッファとして使用
-                    double* temp = oldDryBuffer.getWritePointer(ch);
-                    vdMul(validWetSamples, wetSignal, wetGains + processed, temp);
-                    vdMul(validWetSamples, dry, dryGains + processed, dst);
-                    vdAdd(validWetSamples, dst, temp, dst);
+                    if (validWetSamples < kSmallMixThreshold)
+                    {
+                        mixSmoothingSmall(dst, wetSignal, dry,
+                                          wetGains + processed,
+                                          dryGains + processed,
+                                          validWetSamples);
+                    }
+                    else
+                    {
+                        // MKL VML を使用した Dry/Wet ミキシング (スムージング時)
+                        // dst = (wet * wetGains) + (dry * dryGains)
+                        // oldDryBuffer を一時的なスクラッチバッファとして使用
+                        double* temp = oldDryBuffer.getWritePointer(ch);
+                        vdMul(validWetSamples, wetSignal, wetGains + processed, temp);
+                        vdMul(validWetSamples, dry, dryGains + processed, dst);
+                        vdAdd(validWetSamples, dst, temp, dst);
+                    }
                 }
 
                 // Wet信号が無効な区間 (畳み込みの初期レイテンシーなど)
                 if (chunkSamples > validWetSamples)
                 {
                     const int remainder = chunkSamples - validWetSamples;
-                    vdMul(remainder, dry + validWetSamples, dryGains + processed + validWetSamples, dst + validWetSamples);
+                    if (remainder < kSmallMixThreshold)
+                    {
+                        scaleDrySmall(dst + validWetSamples,
+                                      dry + validWetSamples,
+                                      dryGains + processed + validWetSamples,
+                                      remainder);
+                    }
+                    else
+                    {
+                        vdMul(remainder, dry + validWetSamples, dryGains + processed + validWetSamples, dst + validWetSamples);
+                    }
                 }
             }
             else
@@ -2418,20 +2587,35 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 // 定常状態 (99%のケース) -> MKL BLAS を使用して最適化
                 if (validWetSamples > 0)
                 {
-                    // dst = dryG * dry + wetG * wetSignal
-                    // cblas_daxpby (y := alpha*x + beta*y) を使用
-                    // 1. dst に dry をコピー
-                    cblas_dcopy(validWetSamples, dry, 1, dst, 1);
-                    // 2. dst = wetG * wetSignal + dryG * dst (dstはdryで初期化済み)
-                    cblas_daxpby(validWetSamples, wetG, wetSignal, 1, dryG, dst, 1);
+                    if (validWetSamples < kSmallMixThreshold)
+                    {
+                        mixSteadySmall(dst, wetSignal, dry, wetG, dryG, validWetSamples);
+                    }
+                    else
+                    {
+                        // dst = dryG * dry + wetG * wetSignal
+                        // cblas_daxpby (y := alpha*x + beta*y) を使用
+                        // 1. dst に dry をコピー
+                        cblas_dcopy(validWetSamples, dry, 1, dst, 1);
+                        // 2. dst = wetG * wetSignal + dryG * dst (dstはdryで初期化済み)
+                        cblas_daxpby(validWetSamples, wetG, wetSignal, 1, dryG, dst, 1);
+                    }
                 }
 
                 // Wetが無効な区間 (初期レイテンシー等) -> Dryのみ出力
                 if (chunkSamples > validWetSamples)
                 {
                     const int remainder = chunkSamples - validWetSamples;
-                    cblas_dcopy(remainder, dry + validWetSamples, 1, dst + validWetSamples, 1);
-                    cblas_dscal(remainder, dryG, dst + validWetSamples, 1);
+                    if (remainder < kSmallMixThreshold)
+                    {
+                        for (int i = 0; i < remainder; ++i)
+                            dst[validWetSamples + i] = dry[validWetSamples + i] * dryG;
+                    }
+                    else
+                    {
+                        cblas_dcopy(remainder, dry + validWetSamples, 1, dst + validWetSamples, 1);
+                        cblas_dscal(remainder, dryG, dst + validWetSamples, 1);
+                    }
                 }
             }
 
@@ -2484,11 +2668,8 @@ void ConvolverProcessor::setTargetIRLength(float timeSec)
         targetIRLengthSec.store(clampedTime);
         listeners.call(&Listener::convolverParamsChanged, this);
 
-        // IRがロードされている場合、メモリ上のデータを使ってリビルドする (Disk I/O回避)
-        if (isIRLoaded())
-        {
-            loadImpulseResponse(juce::File()); // 空のファイルを渡すとリビルドモードになる
-        }
+        // IRがロード済みなら、短時間の連続操作をまとめて1回だけリビルドする
+        requestDebouncedRebuild();
     }
 }
 
@@ -2512,6 +2693,17 @@ float ConvolverProcessor::getSmoothingTime() const
     return smoothingTimeSec.load();
 }
 
+void ConvolverProcessor::setRebuildDebounceMs(int ms)
+{
+    const int clampedMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS, REBUILD_DEBOUNCE_MAX_MS, ms);
+    rebuildDebounceMs.store(clampedMs, std::memory_order_release);
+}
+
+int ConvolverProcessor::getRebuildDebounceMs() const
+{
+    return rebuildDebounceMs.load(std::memory_order_acquire);
+}
+
 int ConvolverProcessor::getLatencySamples() const
 {
     if (auto* conv = convolution.load(std::memory_order_acquire))
@@ -2526,11 +2718,8 @@ void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
         useMinPhase.store(shouldUseMinPhase);
         listeners.call(&Listener::convolverParamsChanged, this);
 
-        // 設定変更時にIRがロード済みなら再ロードして変換を適用
-        if (isIRLoaded())
-        {
-            loadImpulseResponse(juce::File()); // リビルドモード
-        }
+        // 連続切り替えをまとめ、最新状態のみで再構築する
+        requestDebouncedRebuild();
     }
 }
 
@@ -2549,7 +2738,7 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
                          (nucLCMode.exchange(newLC) != newLC);
 
     if (changed)
-        rebuildAllIRs(); // IR ロード済みかつ非ロード中のみ実際にリビルドする
+        requestDebouncedRebuild();
 }
 
 //==============================================================================
@@ -2668,7 +2857,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
 
     isLoading.store(false);
     isRebuilding.store(false, std::memory_order_release);
-    sendChangeMessage();
+    postCoalescedChangeNotification();
 }
 
 void ConvolverProcessor::StereoConvolver::reset()

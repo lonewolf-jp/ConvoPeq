@@ -321,16 +321,43 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
     std::memcpy(history + keep, input, static_cast<size_t>(inputSamples) * sizeof(double));
 
     const int outSamples = inputSamples >> 1;
+    const double* coeffs = stage.convCoeffs.get();
     for (int n = 0; n < outSamples; ++n)
     {
         const int base = keep + (n << 1);
         double acc = stage.centerCoeff * history[base - stage.centerTap];
 
+#if defined(__AVX2__) && defined(__FMA__)
+        __m256d vAcc = _mm256_setzero_pd();
+        int r = 0;
+        for (; r <= stage.convCount - 4; r += 4)
+        {
+            const double s0 = history[base - stage.convParity - ((r + 0) << 1)];
+            const double s1 = history[base - stage.convParity - ((r + 1) << 1)];
+            const double s2 = history[base - stage.convParity - ((r + 2) << 1)];
+            const double s3 = history[base - stage.convParity - ((r + 3) << 1)];
+
+            const __m256d vSamples = _mm256_set_pd(s3, s2, s1, s0);
+            const __m256d vCoeffs  = _mm256_loadu_pd(coeffs + r);
+            vAcc = _mm256_fmadd_pd(vSamples, vCoeffs, vAcc);
+        }
+
+        alignas(32) double partial[4];
+        _mm256_store_pd(partial, vAcc);
+        acc += partial[0] + partial[1] + partial[2] + partial[3];
+
+        for (; r < stage.convCount; ++r)
+        {
+            const int sampleIndex = base - stage.convParity - (r << 1);
+            acc += coeffs[r] * history[sampleIndex];
+        }
+#else
         for (int r = 0; r < stage.convCount; ++r)
         {
             const int sampleIndex = base - stage.convParity - (r << 1);
-            acc += stage.convCoeffs.get()[r] * history[sampleIndex];
+            acc += coeffs[r] * history[sampleIndex];
         }
+#endif
 
         // Denormal対策
         if (std::abs(acc) < 1.0e-25) acc = 0.0;

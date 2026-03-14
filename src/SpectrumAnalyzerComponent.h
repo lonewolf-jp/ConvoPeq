@@ -116,6 +116,8 @@ private:
     double outputPeakHoldTimer = 0.0;
 
     void resetLevelPeaks() noexcept;
+    bool updateLevelPeaks(double dt) noexcept;
+    void updateTimerRate();
 
     // ── レベルメーターの幅 ──
     static constexpr int LEVEL_METER_WIDTH = 24;  // 各バーの幅(px)
@@ -173,6 +175,16 @@ private:
     static constexpr float UNDERRUN_DECAY_DB = 1.5f; // データ不足時の減衰量 (dB/frame) @ 60fps -> 90dB/s
 
     bool eqPathsDirty = true;
+    bool eqDataDirty = false;
+    bool analyzerVisualsCleared = false;
+
+    int currentTimerHz = 0;
+    double lastEqUpdateTime = 0.0;
+
+    static constexpr int TIMER_HZ_ACTIVE = 60;
+    static constexpr int TIMER_HZ_IDLE_VISIBLE = 15;
+    static constexpr int TIMER_HZ_HIDDEN = 5;
+    static constexpr double EQ_UPDATE_INTERVAL_SEC = 0.10;
 
     double lastTime = 0.0;
 };

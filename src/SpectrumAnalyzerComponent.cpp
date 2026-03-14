@@ -7,6 +7,39 @@
 #include <cmath>
 #include <algorithm>
 #include <complex>
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
+namespace
+{
+    static void calcBandMagnitudeSq(const EQCoeffsBiquad& c,
+                                    const std::complex<double>* zArr,
+                                    float* outMagSq,
+                                    int numPoints) noexcept
+    {
+        for (int i = 0; i < numPoints; ++i)
+        {
+            const double zr = zArr[i].real();
+            const double zi = zArr[i].imag();
+
+            const double z2r = zr * zr - zi * zi;
+            const double z2i = 2.0 * zr * zi;
+
+            const double numr = c.b0 * z2r + c.b1 * zr + c.b2;
+            const double numi = c.b0 * z2i + c.b1 * zi;
+            const double denr = c.a0 * z2r + c.a1 * zr + c.a2;
+            const double deni = c.a0 * z2i + c.a1 * zi;
+
+            const double numMag = numr * numr + numi * numi;
+            const double denMag = juce::jmax(denr * denr + deni * deni, 1.0e-36);
+            outMagSq[i] = static_cast<float>(numMag / denMag);
+        }
+
+        for (int i = 0; i < numPoints; ++i)
+            if (!std::isfinite(outMagSq[i]) || outMagSq[i] < 0.0f) outMagSq[i] = 0.0f;
+    }
+}
 
 //--------------------------------------------------------------
 // コンストラクタ
@@ -56,12 +89,13 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     updateSourceButtonText();
     addAndMakeVisible(sourceButton);
 
-   analyzerEnableButton.setButtonText("Analyzer: ON");
-    analyzerEnableButton.setToggleState(true, juce::dontSendNotification);
+    analyzerEnableButton.setButtonText("Analyzer: OFF");
+    analyzerEnableButton.setToggleState(engine.isAnalyzerEnabled(), juce::dontSendNotification);
     analyzerEnableButton.onClick = [this] {
         setAnalyzerEnabled(analyzerEnableButton.getToggleState());
     };
     addAndMakeVisible(analyzerEnableButton);
+    setAnalyzerEnabled(analyzerEnableButton.getToggleState());
 
 
     engine.addChangeListener(this);
@@ -72,7 +106,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     prepareFFT();
     lastTime = juce::Time::getMillisecondCounterHiRes() * 0.001;
-    startTimerHz(60); // 60fps: UIの滑らかさとFIFO消費の安定化のため
+    updateTimerRate();
 }
 
 //--------------------------------------------------------------
@@ -89,9 +123,9 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 
 void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
 {
-    // レベルメーター更新のためにタイマーは常に稼働させる
-    if (!isTimerRunning())
-        startTimerHz(60);
+    engine.setAnalyzerEnabled(enabled);
+    analyzerVisualsCleared = false;
+    updateTimerRate();
 
     if (enabled)
     {
@@ -102,6 +136,73 @@ void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
         analyzerEnableButton.setButtonText("Analyzer: OFF");
     }
 
+}
+
+bool SpectrumAnalyzerComponent::updateLevelPeaks(double dt) noexcept
+{
+    const float prevInputPeakDb = inputPeakDb;
+    const float prevOutputPeakDb = outputPeakDb;
+    const double prevInputPeakHoldTimer = inputPeakHoldTimer;
+    const double prevOutputPeakHoldTimer = outputPeakHoldTimer;
+
+    const float inDb  = engine.getInputLevel();
+    const float outDb = engine.getOutputLevel();
+
+    if (inDb > inputPeakDb)
+    {
+        inputPeakDb = inDb;
+        inputPeakHoldTimer = LEVEL_PEAK_HOLD_SEC;
+    }
+    else if (inputPeakHoldTimer > 0.0)
+    {
+        inputPeakHoldTimer = std::max(0.0, inputPeakHoldTimer - dt);
+    }
+    else
+    {
+        inputPeakDb -= LEVEL_PEAK_DECAY_DB_PER_SEC * static_cast<float>(dt);
+        if (inputPeakDb < METER_MIN_DB) inputPeakDb = METER_MIN_DB;
+    }
+
+    if (outDb > outputPeakDb)
+    {
+        outputPeakDb = outDb;
+        outputPeakHoldTimer = LEVEL_PEAK_HOLD_SEC;
+    }
+    else if (outputPeakHoldTimer > 0.0)
+    {
+        outputPeakHoldTimer = std::max(0.0, outputPeakHoldTimer - dt);
+    }
+    else
+    {
+        outputPeakDb -= LEVEL_PEAK_DECAY_DB_PER_SEC * static_cast<float>(dt);
+        if (outputPeakDb < METER_MIN_DB) outputPeakDb = METER_MIN_DB;
+    }
+
+    constexpr float kEpsilon = 1.0e-4f;
+    const bool peakDbChanged = std::abs(inputPeakDb - prevInputPeakDb) > kEpsilon
+                            || std::abs(outputPeakDb - prevOutputPeakDb) > kEpsilon;
+    const bool holdChanged = std::abs(inputPeakHoldTimer - prevInputPeakHoldTimer) > 1.0e-6
+                          || std::abs(outputPeakHoldTimer - prevOutputPeakHoldTimer) > 1.0e-6;
+    return peakDbChanged || holdChanged;
+}
+
+void SpectrumAnalyzerComponent::updateTimerRate()
+{
+    const bool visible = isShowing();
+    const bool analyzerOn = analyzerEnableButton.getToggleState();
+
+    int targetHz = TIMER_HZ_HIDDEN;
+    if (visible)
+        targetHz = analyzerOn ? TIMER_HZ_ACTIVE : TIMER_HZ_IDLE_VISIBLE;
+
+    if (currentTimerHz == targetHz && isTimerRunning())
+        return;
+
+    currentTimerHz = targetHz;
+    if (currentTimerHz > 0)
+        startTimerHz(currentTimerHz);
+    else
+        stopTimer();
 }
 
 void SpectrumAnalyzerComponent::prepareFFT()
@@ -138,23 +239,45 @@ void SpectrumAnalyzerComponent::releaseFFT()
 //--------------------------------------------------------------
 void SpectrumAnalyzerComponent::timerCallback()
 {
+    updateTimerRate();
+
     // 時間計測 (フレームレート非依存化)
     const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
     const double dt = std::max(0.0, now - lastTime);
     lastTime = now;
+
+    const bool meterVisualChanged = updateLevelPeaks(dt);
+
+    if (eqDataDirty && isShowing() && (now - lastEqUpdateTime) >= EQ_UPDATE_INTERVAL_SEC)
+    {
+        updateEQData();
+        eqDataDirty = false;
+        lastEqUpdateTime = now;
+    }
 
     // ピークホールド用の指数関数的減衰係数。時定数から導出する。
     // これにより、減衰がフレームレートに依存しなくなり、かつ直線的な減衰よりも滑らかなカーブを描く。
     const float peakDecayTimeConstant = 0.4f; // 秒単位。値が大きいほどゆっくり減衰する。
     const float peakDecayFactor = std::exp(-static_cast<float>(dt) / peakDecayTimeConstant);
 
-    // スペアナがOFFの場合、スペアナグラフをクリア
+    // スペアナがOFFの場合、スペアナグラフを一度だけクリア
     if (!analyzerEnableButton.getToggleState())
     {
-        smoothedBuffer.fill(MIN_DB);
-        peakBuffer.fill(MIN_DB);
-        repaint();
+        bool needsRepaint = meterVisualChanged;
+
+        if (!analyzerVisualsCleared)
+        {
+            smoothedBuffer.fill(MIN_DB);
+            peakBuffer.fill(MIN_DB);
+            analyzerVisualsCleared = true;
+            needsRepaint = true;
+        }
+
+        if (needsRepaint && isShowing())
+            repaint();
+        return;
     }
+    analyzerVisualsCleared = false;
 
     if (!isShowing() || !analyzerEnableButton.getToggleState()) return;
 
@@ -163,7 +286,7 @@ void SpectrumAnalyzerComponent::timerCallback()
     const double currentSampleRate = engine.getProcessingSampleRate();
     if (currentSampleRate > 0.0 && std::abs(currentSampleRate - cachedSampleRate) > 1.0)
     {
-        updateEQData();
+        eqDataDirty = true;
     }
 
 
@@ -278,6 +401,43 @@ void SpectrumAnalyzerComponent::timerCallback()
 
         // Step 4: Magnitude (dB)
         const int numBins = std::min(static_cast<int>(rawBuffer.size()), NUM_FFT_BINS);
+#if defined(__AVX2__)
+        int i = 0;
+        const int vEnd = numBins / 8 * 8;
+        const __m256 vScale = _mm256_set1_ps(FFT_MAGNITUDE_SCALE);
+
+        for (; i < vEnd; i += 8)
+        {
+            const float* binPtr = dst + (2 * i);
+
+            __m256 c0 = _mm256_loadu_ps(binPtr + 0);   // re0 im0 re1 im1 ... re3 im3
+            __m256 c1 = _mm256_loadu_ps(binPtr + 8);   // re4 im4 re5 im5 ... re7 im7
+
+            __m256 re = _mm256_shuffle_ps(c0, c1, _MM_SHUFFLE(2, 0, 2, 0));
+            __m256 im = _mm256_shuffle_ps(c0, c1, _MM_SHUFFLE(3, 1, 3, 1));
+
+            __m256 mag2 = _mm256_add_ps(_mm256_mul_ps(re, re), _mm256_mul_ps(im, im));
+            __m256 mag = _mm256_mul_ps(_mm256_sqrt_ps(mag2), vScale);
+
+            alignas(32) float mags[8];
+            _mm256_store_ps(mags, mag);
+
+            for (int k = 0; k < 8; ++k)
+                rawBuffer[i + k] = (mags[k] > FFT_DISPLAY_MIN_MAG)
+                    ? juce::Decibels::gainToDecibels(mags[k])
+                    : FFT_DISPLAY_MIN_DB;
+        }
+
+        for (; i < numBins; ++i)
+        {
+            const float re = dst[2 * i];
+            const float im = dst[2 * i + 1];
+            const float magnitude = std::sqrt(re * re + im * im) * FFT_MAGNITUDE_SCALE;
+            rawBuffer[i] = (magnitude > FFT_DISPLAY_MIN_MAG)
+                ? juce::Decibels::gainToDecibels(magnitude)
+                : FFT_DISPLAY_MIN_DB;
+        }
+#else
         for (int i = 0; i < numBins; ++i)
         {
             float re = dst[2 * i];
@@ -286,6 +446,7 @@ void SpectrumAnalyzerComponent::timerCallback()
 
             rawBuffer[i] = (magnitude > FFT_DISPLAY_MIN_MAG) ? juce::Decibels::gainToDecibels(magnitude) : FFT_DISPLAY_MIN_DB;
         }
+#endif
     }
 
 
@@ -319,42 +480,6 @@ void SpectrumAnalyzerComponent::timerCallback()
         }
     }
 
-    // ── レベルメーターのピークホールド更新 ──
-    {
-        const float inDb  = engine.getInputLevel();
-        const float outDb = engine.getOutputLevel();
-
-        if (inDb > inputPeakDb)
-        {
-            inputPeakDb = inDb;
-            inputPeakHoldTimer = LEVEL_PEAK_HOLD_SEC;
-        }
-        else if (inputPeakHoldTimer > 0.0)
-        {
-            inputPeakHoldTimer = std::max(0.0, inputPeakHoldTimer - dt);
-        }
-        else
-        {
-            inputPeakDb -= LEVEL_PEAK_DECAY_DB_PER_SEC * static_cast<float>(dt);
-            if (inputPeakDb < METER_MIN_DB) inputPeakDb = METER_MIN_DB;
-        }
-
-        if (outDb > outputPeakDb)
-        {
-            outputPeakDb = outDb;
-            outputPeakHoldTimer = LEVEL_PEAK_HOLD_SEC;
-        }
-        else if (outputPeakHoldTimer > 0.0)
-        {
-            outputPeakHoldTimer = std::max(0.0, outputPeakHoldTimer - dt);
-        }
-        else
-        {
-            outputPeakDb -= LEVEL_PEAK_DECAY_DB_PER_SEC * static_cast<float>(dt);
-            if (outputPeakDb < METER_MIN_DB) outputPeakDb = METER_MIN_DB;
-        }
-    }
-
     repaint();
 }
 
@@ -363,12 +488,8 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
     // AudioEngine (EQProcessor, ConvolverProcessor) からの変更通知
     if (source == &engine || source == &engine.getEQProcessor())
     {
-        // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
-        if (!isTimerRunning())
-        {
-            startTimerHz(60);
-        }
-        updateEQData();
+        updateTimerRate();
+        eqDataDirty = true;
 
         // ソース選択ボタンの表示更新 (プリセットロード時など)
         if (source == &engine)
@@ -384,12 +505,8 @@ void SpectrumAnalyzerComponent::eqBandChanged(EQProcessor* processor, int /*band
 
    if (processor == &engine.getEQProcessor())
     {
-        // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
-        if (!isTimerRunning())
-        {
-            startTimerHz(60);
-        }
-        updateEQData();
+        updateTimerRate();
+        eqDataDirty = true;
     }
 }
 
@@ -398,12 +515,8 @@ void SpectrumAnalyzerComponent::eqGlobalChanged(EQProcessor* processor)
 
     if (processor == &engine.getEQProcessor())
     {
-        // エンジン状態が変更された場合、アンダーランで停止していたタイマーを再開する
-        if (!isTimerRunning())
-        {
-            startTimerHz(60);
-        }
-        updateEQData();
+        updateTimerRate();
+        eqDataDirty = true;
     }
 }
 
@@ -720,9 +833,12 @@ void SpectrumAnalyzerComponent::updateEQData()
             EQCoeffsBiquad c = EQProcessor::svfToDisplayBiquad(svf);
            EQChannelMode mode = engine.getEQProcessor().getBandChannelMode(b);
 
+            std::array<float, NUM_DISPLAY_BARS> bandMagSq{};
+            calcBandMagnitudeSq(c, zCache.data(), bandMagSq.data(), NUM_DISPLAY_BARS);
+
             for (int i = 0; i < NUM_DISPLAY_BARS; ++i)
             {
-                float mag = std::sqrt(EQProcessor::getMagnitudeSquared(c, zCache[i]));
+                float mag = std::sqrt(bandMagSq[i]);
                 float db = juce::Decibels::gainToDecibels(mag);
                 if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Left)  individualBandCurvesL[b][i] = db; else individualBandCurvesL[b][i] = 0.0f;
                 if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) individualBandCurvesR[b][i] = db; else individualBandCurvesR[b][i] = 0.0f;
