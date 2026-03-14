@@ -18,6 +18,7 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
 - `README.md`: user-facing overview, features, audio processing summary, and build entry points
 - `ARCHITECTURE.md`: developer-facing architecture, threading, state flow, and subsystem design details
 - `BUILD_GUIDE_WINDOWS.md`: Windows build instructions and troubleshooting
+- `HowtoUse.md`: practical usage guide — room correction via IR convolution with REW, and headphone EQ correction via AutoEq
 
 ---
 
