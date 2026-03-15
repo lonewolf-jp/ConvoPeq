@@ -122,6 +122,10 @@ Key points:
 - **EQ/Convolver order is runtime-selectable**.
 - Analyzer source can be input or output path.
 - Analyzer data flow is decoupled from final output and read through FIFO on the UI side.
+- Gain staging is mode-aware:
+  - input headroom is applied before core DSP,
+  - convolver input trim is applied only in **EQ -> Convolver** when both stages are active,
+  - output makeup is applied before optional soft clipping.
 
 ---
 
@@ -212,7 +216,8 @@ Persistence is split into two paths:
   - Restores device state and a small set of session-like engine settings (`ditherBitDepth`, `oversamplingFactor`, `oversamplingType`, `inputHeadroomDb`, `outputMakeupDb`).
 - `AudioEngine::getCurrentState()/requestLoadState()`
   - Manual preset XML path used by the main window save/load actions.
-  - Restores processing order, bypass state, gain staging, analyzer routing, filter modes, EQ state, and Convolver state.
+  - Restores processing order, bypass state, gain staging, analyzer routing, filter modes, dither, oversampling, EQ state, and Convolver state.
+  - Load order is staged to prevent mode-dependent defaults from overwriting restored gain settings.
 
 ---
 
@@ -232,12 +237,14 @@ Persistence is split into two paths:
 UI integration details:
 
 - `ConvolverControlPanel` applies a **3-second idle debounce** for selected expensive controls (mix/smoothing/IR length) to avoid repeated rebuild pressure during active dragging.
+- Processor-side rebuild debounce (`50..3000 ms`) remains active as a second guard against bursty rebuild requests from any caller.
 - Advanced IR settings are hosted in a separate dialog and include IR length, rebuild debounce, and Mixed-phase tuning controls.
 
 Latency reporting details:
 
 - `AudioEngine::getCurrentLatencyBreakdown()` publishes oversampling latency, convolver algorithm latency, IR peak latency, and total base-rate latency.
 - `MainWindow::timerCallback()` renders latency from the single source `totalLatencyBaseRateSamples` to keep `ms` and `samples` numerically consistent.
+- `AudioEngine::getCurrentLatencyMs()` also derives from total samples (single-source conversion), avoiding per-component rounding drift.
 
 ---
 
@@ -285,6 +292,11 @@ Device lifecycle is coordinated by `DeviceSettings` + `AudioEngine`:
 - Runtime -> per-block execution through `AudioEngineProcessor`.
 - Device stop/restart/sample-rate change -> reset/reprepare flow.
 - ASIO blacklist support reduces unstable driver scenarios.
+
+Configuration lifecycle uses both persistence paths:
+
+- `device_settings.xml` for device-centric auto-restore and a compact runtime subset.
+- Manual preset XML for full processing-state portability (including EQ/Convolver internals).
 
 ---
 

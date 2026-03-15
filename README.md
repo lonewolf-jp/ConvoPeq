@@ -27,6 +27,8 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
 - 20-band parametric EQ (`EQProcessor`)
 - IR convolution with MKL-backed non-uniform partitioning (`ConvolverProcessor`, `MKLNonUniformConvolver`)
 - Runtime-selectable processing order (**EQ -> Convolver** or **Convolver -> EQ**)
+- Convolver phase modes: **As-Is / Mixed / Minimum** with persisted Mixed tuning (`f1`, `f2`, `tau`)
+- IR workflow with **Auto/Manual IR Length** state persistence in manual preset XML
 - Input oversampling and output conditioning (`CustomInputOversampler`, `OutputFilter`)
 - Optional soft clipping and final dither stage
 - Real-time spectrum analyzer with EQ overlay (`SpectrumAnalyzerComponent`)
@@ -80,6 +82,12 @@ Convolution quality notes:
 - IR preparation can include **resampling** and **phase-mode dependent preprocessing**, allowing the runtime path to use already-prepared data.
 - Transition management is designed to keep IR changes smooth rather than abruptly swapping processing state.
 
+Convolver control notes:
+
+- Phase mode supports **As-Is / Mixed / Minimum**.
+- Mixed mode exposes tunable transition controls (`f1`, `f2`, `tau`).
+- IR length supports both Auto and Manual operation; manual preset XML now stores both the target length and Auto/Manual intent.
+
 ### 5) EQ Strategy
 
 `EQProcessor` applies per-band parametric filtering in real time. EQ response visualization is computed on the UI side and does not run as heavy work inside the callback path.
@@ -101,6 +109,12 @@ Additional quality-oriented stages are applied around the core EQ/convolution ch
 
 These stages are part of the overall sound-quality strategy, not just utility add-ons.
 
+Gain-staging notes:
+
+- Input headroom and output makeup are mode-aware and clamped by processing topology.
+- Convolver input trim is applied only when processing order is **EQ -> Convolver** and both processors are active.
+- Output makeup is applied before optional soft clipping.
+
 ### 7) Analyzer Path
 
 Analyzer data is decoupled from output audio:
@@ -111,7 +125,27 @@ Analyzer data is decoupled from output audio:
 
 This separation ensures that visualization quality does not compromise audio-thread safety.
 
-### 8) Real-Time Safety Rules
+### 8) Latency Reporting
+
+Latency display is sourced from a unified breakdown model:
+
+- Oversampling latency (base-rate estimated)
+- Convolver algorithm latency
+- Convolver IR peak latency
+
+The main window renders both `ms` and `samples` from the same `totalLatencyBaseRateSamples` source to keep display values numerically consistent.
+
+### 9) State Persistence (Auto Save vs Manual Preset)
+
+ConvoPeq currently uses two persistence paths:
+
+- **Auto-save (`device_settings.xml`)**
+  - Device state plus a compact set of runtime settings (`ditherBitDepth`, oversampling factor/type, input headroom, output makeup).
+- **Manual preset XML (Save/Load Preset in main window)**
+  - Full `AudioEngine` state plus `EQ` and `Convolver` child states.
+  - Includes convolver phase/mixed parameters and Auto/Manual IR-length state.
+
+### 10) Real-Time Safety Rules
 
 The callback path avoids:
 
