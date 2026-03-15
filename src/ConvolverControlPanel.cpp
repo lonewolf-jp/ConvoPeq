@@ -5,6 +5,198 @@
 //============================================================================
 #include "ConvolverControlPanel.h"
 #include <cmath>
+#include <thread>
+
+namespace
+{
+int phaseModeToComboId(ConvolverProcessor::PhaseMode mode)
+{
+    switch (mode)
+    {
+        case ConvolverProcessor::PhaseMode::AsIs:    return 1;
+        case ConvolverProcessor::PhaseMode::Mixed:   return 2;
+        case ConvolverProcessor::PhaseMode::Minimum: return 3;
+        default:                                      return 1;
+    }
+}
+
+ConvolverProcessor::PhaseMode comboIdToPhaseMode(int id)
+{
+    switch (id)
+    {
+        case 2:  return ConvolverProcessor::PhaseMode::Mixed;
+        case 3:  return ConvolverProcessor::PhaseMode::Minimum;
+        default: return ConvolverProcessor::PhaseMode::AsIs;
+    }
+}
+
+class IRAdvancedSettingsComponent : public juce::Component,
+                                    private juce::Slider::Listener,
+                                    private juce::Timer
+{
+public:
+    explicit IRAdvancedSettingsComponent(AudioEngine& audioEngine)
+        : engine(audioEngine)
+    {
+        auto configureLabel = [](juce::Label& label, const juce::String& text)
+        {
+            label.setText(text, juce::dontSendNotification);
+            label.setJustificationType(juce::Justification::centredRight);
+            label.setColour(juce::Label::textColourId, juce::Colours::white);
+        };
+
+        configureLabel(irLengthLabel, "IR Length:");
+        configureLabel(rebuildLabel, "Rebuild:");
+        configureLabel(mixedF1Label, "Mix Start f:");
+        configureLabel(mixedF2Label, "Mix End f:");
+        configureLabel(mixedTauLabel, "Mix tau:");
+
+        irLengthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC, ConvolverProcessor::IR_LENGTH_MAX_SEC, 0.1);
+        irLengthSlider.setSkewFactorFromMidPoint(1.5);
+        irLengthSlider.setTextValueSuffix(" s");
+        irLengthSlider.setNumDecimalPlacesToDisplay(1);
+        irLengthSlider.addListener(this);
+
+        rebuildSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        rebuildSlider.setRange(ConvolverProcessor::REBUILD_DEBOUNCE_MIN_MS,
+                               ConvolverProcessor::REBUILD_DEBOUNCE_MAX_MS, 10.0);
+        rebuildSlider.setSkewFactorFromMidPoint(static_cast<double>(ConvolverProcessor::REBUILD_DEBOUNCE_DEFAULT_MS));
+        rebuildSlider.setTextValueSuffix(" ms");
+        rebuildSlider.setNumDecimalPlacesToDisplay(0);
+        rebuildSlider.addListener(this);
+
+        mixedF1Slider.setSliderStyle(juce::Slider::LinearHorizontal);
+        mixedF1Slider.setRange(ConvolverProcessor::MIXED_F1_MIN_HZ,
+                               ConvolverProcessor::MIXED_F1_MAX_HZ, 1.0);
+        mixedF1Slider.setSkewFactorFromMidPoint(800.0);
+        mixedF1Slider.setTextValueSuffix(" Hz");
+        mixedF1Slider.setNumDecimalPlacesToDisplay(0);
+        mixedF1Slider.addListener(this);
+
+        mixedF2Slider.setSliderStyle(juce::Slider::LinearHorizontal);
+        mixedF2Slider.setRange(ConvolverProcessor::MIXED_F2_MIN_HZ,
+                               ConvolverProcessor::MIXED_F2_MAX_HZ, 1.0);
+        mixedF2Slider.setSkewFactorFromMidPoint(2500.0);
+        mixedF2Slider.setTextValueSuffix(" Hz");
+        mixedF2Slider.setNumDecimalPlacesToDisplay(0);
+        mixedF2Slider.addListener(this);
+
+        mixedTauSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        mixedTauSlider.setRange(ConvolverProcessor::MIXED_TAU_MIN,
+                                ConvolverProcessor::MIXED_TAU_MAX, 1.0);
+        mixedTauSlider.setSkewFactorFromMidPoint(48.0);
+        mixedTauSlider.setTextValueSuffix(" smp");
+        mixedTauSlider.setNumDecimalPlacesToDisplay(0);
+        mixedTauSlider.addListener(this);
+
+        addAndMakeVisible(irLengthLabel);
+        addAndMakeVisible(irLengthSlider);
+        addAndMakeVisible(rebuildLabel);
+        addAndMakeVisible(rebuildSlider);
+        addAndMakeVisible(mixedF1Label);
+        addAndMakeVisible(mixedF1Slider);
+        addAndMakeVisible(mixedF2Label);
+        addAndMakeVisible(mixedF2Slider);
+        addAndMakeVisible(mixedTauLabel);
+        addAndMakeVisible(mixedTauSlider);
+
+        setSize(560, 230);
+        syncFromProcessor();
+        startTimerHz(8);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced(10);
+        constexpr int rowH = 32;
+        constexpr int labelW = 90;
+        constexpr int gap = 8;
+
+        auto placeRow = [&](juce::Label& label, juce::Slider& slider)
+        {
+            auto row = area.removeFromTop(rowH);
+            label.setBounds(row.removeFromLeft(labelW));
+            row.removeFromLeft(gap);
+            slider.setBounds(row);
+            area.removeFromTop(4);
+        };
+
+        placeRow(irLengthLabel, irLengthSlider);
+        placeRow(mixedF1Label, mixedF1Slider);
+        placeRow(mixedF2Label, mixedF2Slider);
+        placeRow(mixedTauLabel, mixedTauSlider);
+        placeRow(rebuildLabel, rebuildSlider);
+    }
+
+private:
+    AudioEngine& engine;
+    juce::Label irLengthLabel;
+    juce::Slider irLengthSlider;
+    juce::Label rebuildLabel;
+    juce::Slider rebuildSlider;
+    juce::Label mixedF1Label;
+    juce::Slider mixedF1Slider;
+    juce::Label mixedF2Label;
+    juce::Slider mixedF2Slider;
+    juce::Label mixedTauLabel;
+    juce::Slider mixedTauSlider;
+
+    void timerCallback() override
+    {
+        syncFromProcessor();
+    }
+
+    void sliderValueChanged(juce::Slider* slider) override
+    {
+        auto& convolver = engine.getConvolverProcessor();
+        if (slider == &irLengthSlider)
+        {
+            convolver.setIRLengthManualOverride(true);
+            convolver.setTargetIRLength(static_cast<float>(irLengthSlider.getValue()));
+        }
+        else if (slider == &rebuildSlider)
+        {
+            convolver.setRebuildDebounceMs(static_cast<int>(rebuildSlider.getValue()));
+        }
+        else if (slider == &mixedF1Slider)
+        {
+            convolver.setMixedTransitionStartHz(static_cast<float>(mixedF1Slider.getValue()));
+        }
+        else if (slider == &mixedF2Slider)
+        {
+            convolver.setMixedTransitionEndHz(static_cast<float>(mixedF2Slider.getValue()));
+        }
+        else if (slider == &mixedTauSlider)
+        {
+            convolver.setMixedPreRingTau(static_cast<float>(mixedTauSlider.getValue()));
+        }
+    }
+
+    void syncFromProcessor()
+    {
+        auto& convolver = engine.getConvolverProcessor();
+        if (!irLengthSlider.isMouseButtonDown())
+            irLengthSlider.setValue(convolver.getTargetIRLength(), juce::dontSendNotification);
+        if (!rebuildSlider.isMouseButtonDown())
+            rebuildSlider.setValue(static_cast<double>(convolver.getRebuildDebounceMs()), juce::dontSendNotification);
+        if (!mixedF1Slider.isMouseButtonDown())
+            mixedF1Slider.setValue(convolver.getMixedTransitionStartHz(), juce::dontSendNotification);
+        if (!mixedF2Slider.isMouseButtonDown())
+            mixedF2Slider.setValue(convolver.getMixedTransitionEndHz(), juce::dontSendNotification);
+        if (!mixedTauSlider.isMouseButtonDown())
+            mixedTauSlider.setValue(convolver.getMixedPreRingTau(), juce::dontSendNotification);
+
+        const bool mixedEnabled = engine.getConvolverPhaseMode() == ConvolverProcessor::PhaseMode::Mixed;
+        mixedF1Slider.setEnabled(mixedEnabled);
+        mixedF2Slider.setEnabled(mixedEnabled);
+        mixedTauSlider.setEnabled(mixedEnabled);
+        mixedF1Label.setEnabled(mixedEnabled);
+        mixedF2Label.setEnabled(mixedEnabled);
+        mixedTauLabel.setEnabled(mixedEnabled);
+    }
+};
+}
 
 //--------------------------------------------------------------
 // コンストラクタ
@@ -20,14 +212,24 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     loadIRButton.addListener(this);
     addAndMakeVisible(loadIRButton);
 
+    irAdvancedButton.setColour(juce::TextButton::buttonColourId,
+                               juce::Colours::darkslategrey.withAlpha(0.85f));
+    irAdvancedButton.setColour(juce::TextButton::textColourOffId,
+                               juce::Colours::white);
+    irAdvancedButton.setTooltip("Open detailed IR settings");
+    irAdvancedButton.addListener(this);
+    addAndMakeVisible(irAdvancedButton);
+
     // Phase Choice ComboBox
-    phaseChoiceBox.addItem("Linear Phase", 1);
-    phaseChoiceBox.addItem("Minimum Phase", 2);
-    phaseChoiceBox.setSelectedId(engine.getConvolverUseMinPhase() ? 2 : 1, juce::dontSendNotification);
+    phaseChoiceBox.addItem("As-Is", 1);
+    phaseChoiceBox.addItem("Mixed", 2);
+    phaseChoiceBox.addItem("Minimum", 3);
+    phaseChoiceBox.setSelectedId(phaseModeToComboId(engine.getConvolverPhaseMode()), juce::dontSendNotification);
     phaseChoiceBox.setTooltip("Select IR Phase Type");
     phaseChoiceBox.setJustificationType(juce::Justification::centred);
     phaseChoiceBox.onChange = [this] {
-        engine.setConvolverUseMinPhase(phaseChoiceBox.getSelectedId() == 2);
+        engine.setConvolverPhaseMode(comboIdToPhaseMode(phaseChoiceBox.getSelectedId()));
+        updateMixedPhaseControlsEnabled();
     };
     addAndMakeVisible(phaseChoiceBox);
 
@@ -101,6 +303,69 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     rebuildDebounceLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     rebuildDebounceLabel.setTooltip("IR rebuild debounce time (ms)");
     addAndMakeVisible(rebuildDebounceLabel);
+
+    // Mixed F1 スライダー
+    mixedF1Slider.setSliderStyle(juce::Slider::LinearHorizontal);
+    mixedF1Slider.setRange(ConvolverProcessor::MIXED_F1_MIN_HZ,
+                           ConvolverProcessor::MIXED_F1_MAX_HZ, 1.0);
+    mixedF1Slider.setSkewFactorFromMidPoint(800.0);
+    mixedF1Slider.setTextValueSuffix(" Hz");
+    mixedF1Slider.setNumDecimalPlacesToDisplay(0);
+    mixedF1Slider.setValue(engine.getConvolverProcessor().getMixedTransitionStartHz(), juce::dontSendNotification);
+    mixedF1Slider.addListener(this);
+    mixedF1Slider.setTooltip("Mixed phase transition start frequency (f1)");
+    addAndMakeVisible(mixedF1Slider);
+
+    mixedF1Label.setText("Mix Start f:", juce::dontSendNotification);
+    mixedF1Label.setJustificationType(juce::Justification::centredRight);
+    mixedF1Label.setColour(juce::Label::textColourId, juce::Colours::white);
+    addAndMakeVisible(mixedF1Label);
+
+    // Mixed F2 スライダー
+    mixedF2Slider.setSliderStyle(juce::Slider::LinearHorizontal);
+    mixedF2Slider.setRange(ConvolverProcessor::MIXED_F2_MIN_HZ,
+                           ConvolverProcessor::MIXED_F2_MAX_HZ, 1.0);
+    mixedF2Slider.setSkewFactorFromMidPoint(2500.0);
+    mixedF2Slider.setTextValueSuffix(" Hz");
+    mixedF2Slider.setNumDecimalPlacesToDisplay(0);
+    mixedF2Slider.setValue(engine.getConvolverProcessor().getMixedTransitionEndHz(), juce::dontSendNotification);
+    mixedF2Slider.addListener(this);
+    mixedF2Slider.setTooltip("Mixed phase transition end frequency (f2)");
+    addAndMakeVisible(mixedF2Slider);
+
+    mixedF2Label.setText("Mix End f:", juce::dontSendNotification);
+    mixedF2Label.setJustificationType(juce::Justification::centredRight);
+    mixedF2Label.setColour(juce::Label::textColourId, juce::Colours::white);
+    addAndMakeVisible(mixedF2Label);
+
+    // Mixed Tau スライダー
+    mixedTauSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    mixedTauSlider.setRange(ConvolverProcessor::MIXED_TAU_MIN,
+                            ConvolverProcessor::MIXED_TAU_MAX, 1.0);
+    mixedTauSlider.setSkewFactorFromMidPoint(48.0);
+    mixedTauSlider.setTextValueSuffix(" smp");
+    mixedTauSlider.setNumDecimalPlacesToDisplay(0);
+    mixedTauSlider.setValue(engine.getConvolverProcessor().getMixedPreRingTau(), juce::dontSendNotification);
+    mixedTauSlider.addListener(this);
+    mixedTauSlider.setTooltip("Mixed phase pre-ringing attenuation tau");
+    addAndMakeVisible(mixedTauSlider);
+
+    mixedTauLabel.setText("Mix tau:", juce::dontSendNotification);
+    mixedTauLabel.setJustificationType(juce::Justification::centredRight);
+    mixedTauLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    addAndMakeVisible(mixedTauLabel);
+
+    // 詳細設定は別ウインドウへ移動 (メインパネルでは非表示)
+    irLengthSlider.setVisible(false);
+    irLengthLabel.setVisible(false);
+    rebuildDebounceSlider.setVisible(false);
+    rebuildDebounceLabel.setVisible(false);
+    mixedF1Slider.setVisible(false);
+    mixedF1Label.setVisible(false);
+    mixedF2Slider.setVisible(false);
+    mixedF2Label.setVisible(false);
+    mixedTauSlider.setVisible(false);
+    mixedTauLabel.setVisible(false);
 
     // IR情報ラベル
     irInfoLabel.setText("No IR loaded", juce::dontSendNotification);
@@ -230,6 +495,7 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     // 現在の設定を反映
     updateFilterModeButtons();
     updateTrimSlider();
+    updateMixedPhaseControlsEnabled();
 }
 
 ConvolverControlPanel::~ConvolverControlPanel()
@@ -340,18 +606,17 @@ void ConvolverControlPanel::resized()
     irInfoLabel.setBounds(waveformArea); // 波形エリアに重ねる
     bounds.removeFromTop(8);
 
-    // 4つのコントロール行を定義
+    // 2つのメインコントロール行を定義
     auto controlRow1 = bounds.removeFromTop(28);
     auto controlRow2 = bounds.removeFromTop(28);
-    auto controlRow3 = bounds.removeFromTop(28);
-    auto controlRow4 = bounds.removeFromTop(28);
 
     const int leftGap = 10;
     const int loadWidth = 120;
     const int phaseWidth = 130;
+    const int advancedWidth = 110;
     const int labelWidth = 78;
     const int inlineGap = 6;
-    const int controlsStartX = loadWidth + leftGap + phaseWidth + leftGap;
+    const int controlsStartX = loadWidth + leftGap + phaseWidth + leftGap + advancedWidth + leftGap;
 
     // --- 1行目 ---
     loadIRButton.setBounds(controlRow1.removeFromLeft(loadWidth));
@@ -361,13 +626,17 @@ void ConvolverControlPanel::resized()
     phaseChoiceBox.setBounds(controlRow1.removeFromLeft(phaseWidth));
     controlRow1.removeFromLeft(leftGap);
 
+    // 詳細設定ボタン
+    irAdvancedButton.setBounds(controlRow1.removeFromLeft(advancedWidth));
+    controlRow1.removeFromLeft(leftGap);
+
     // Dry/Wetミックス
     mixLabel.setBounds(controlRow1.removeFromLeft(labelWidth));
     controlRow1.removeFromLeft(inlineGap);
     mixSlider.setBounds(controlRow1);
 
     // --- 2行目 ---
-    experimentalDirectHeadToggle.setBounds(controlRow2.removeFromLeft(loadWidth + leftGap + phaseWidth));
+    experimentalDirectHeadToggle.setBounds(controlRow2.removeFromLeft(controlsStartX - leftGap));
 
     // スムージング時間 (Mixスライダーの下に配置)
     auto smoothingRow = controlRow2;
@@ -376,23 +645,9 @@ void ConvolverControlPanel::resized()
     smoothingRow.removeFromLeft(inlineGap);
     smoothingTimeSlider.setBounds(smoothingRow);
 
-    // --- 3行目 ---
-    // IR長 (Smoothing Timeの下に配置)
-    auto lengthRow = controlRow3;
-    lengthRow.removeFromLeft(controlsStartX);
-    irLengthLabel.setBounds(lengthRow.removeFromLeft(labelWidth));
-    lengthRow.removeFromLeft(inlineGap);
-    irLengthSlider.setBounds(lengthRow);
+    bounds.removeFromTop(6);
 
-    // --- 4行目 ---
-    // Rebuild Debounce (IR Lengthの下に配置)
-    auto debounceRow = controlRow4;
-    debounceRow.removeFromLeft(controlsStartX);
-    rebuildDebounceLabel.setBounds(debounceRow.removeFromLeft(labelWidth));
-    debounceRow.removeFromLeft(inlineGap);
-    rebuildDebounceSlider.setBounds(debounceRow);
-
-    // --- 5行目: ハイカットフィルターモード ---
+    // --- 8行目: ハイカットフィルターモード ---
     auto hcfRow = bounds.removeFromTop(26);
     hcfLabel.setBounds(hcfRow.removeFromLeft(38).reduced(0, 3));
     hcfRow.removeFromLeft(4);
@@ -400,14 +655,14 @@ void ConvolverControlPanel::resized()
     hcfNaturalButton.setBounds(hcfRow.removeFromLeft(60).reduced(2, 2));
     hcfSoftButton.setBounds(hcfRow.removeFromLeft(48).reduced(2, 2));
 
-    // --- 6行目: ローカットフィルターモード ---
+    // --- 9行目: ローカットフィルターモード ---
     auto lcfRow = bounds.removeFromTop(26);
     lcfLabel.setBounds(lcfRow.removeFromLeft(38).reduced(0, 3));
     lcfRow.removeFromLeft(4);
     lcfNaturalButton.setBounds(lcfRow.removeFromLeft(60).reduced(2, 2));
     lcfSoftButton.setBounds(lcfRow.removeFromLeft(48).reduced(2, 2));
 
-    // --- 7行目: Convolver Input Trim (EQ→Conv モード時のみ表示) ---
+    // --- 10行目: Convolver Input Trim (EQ→Conv モード時のみ表示) ---
     auto trimRow = bounds.removeFromTop(26);
     convTrimLabel.setBounds(trimRow.removeFromLeft(72).reduced(0, 3));
     trimRow.removeFromLeft(4);
@@ -445,6 +700,39 @@ void ConvolverControlPanel::updateTrimSlider()
     convTrimSlider.setValue(engine.getConvolverInputTrimDb(), juce::dontSendNotification);
 }
 
+void ConvolverControlPanel::updateMixedPhaseControlsEnabled()
+{
+    const auto phaseMode = comboIdToPhaseMode(phaseChoiceBox.getSelectedId());
+    const bool enabled = (phaseMode == ConvolverProcessor::PhaseMode::Mixed);
+
+    mixedF1Slider.setEnabled(enabled);
+    mixedF2Slider.setEnabled(enabled);
+    mixedTauSlider.setEnabled(enabled);
+
+    mixedF1Label.setEnabled(enabled);
+    mixedF2Label.setEnabled(enabled);
+    mixedTauLabel.setEnabled(enabled);
+
+    if (enabled)
+    {
+        mixedF1Slider.setTooltip("Mixed phase transition start frequency (f1)");
+        mixedF2Slider.setTooltip("Mixed phase transition end frequency (f2)");
+        mixedTauSlider.setTooltip("Mixed phase pre-ringing attenuation tau");
+        mixedF1Label.setTooltip({});
+        mixedF2Label.setTooltip({});
+        mixedTauLabel.setTooltip({});
+    }
+    else
+    {
+        mixedF1Slider.setTooltip("Mixedで有効");
+        mixedF2Slider.setTooltip("Mixedで有効");
+        mixedTauSlider.setTooltip("Mixedで有効");
+        mixedF1Label.setTooltip("Mixedで有効");
+        mixedF2Label.setTooltip("Mixedで有効");
+        mixedTauLabel.setTooltip("Mixedで有効");
+    }
+}
+
 //--------------------------------------------------------------
 // buttonClicked
 //--------------------------------------------------------------
@@ -473,17 +761,162 @@ void ConvolverControlPanel::buttonClicked(juce::Button* button)
             if (fc.getResults().isEmpty())
                 return;
 
-            juce::File irFile = fc.getResult();
-
-            // 安全なリクエスト経由でロード
-            safeThis->engine.requestConvolverPreset(irFile);
+            safeThis->startAsyncIRLoadPreview(fc.getResult());
         });
+    }
+    else if (button == &irAdvancedButton)
+    {
+        showIRAdvancedWindow();
     }
     else if (button == &experimentalDirectHeadToggle)
     {
         engine.getConvolverProcessor().setExperimentalDirectHeadEnabled(experimentalDirectHeadToggle.getToggleState());
         updateIRInfo();
     }
+}
+
+void ConvolverControlPanel::showIRAdvancedWindow()
+{
+    if (irAdvancedWindow != nullptr)
+    {
+        irAdvancedWindow->toFront(true);
+        return;
+    }
+
+    juce::DialogWindow::LaunchOptions options;
+    options.dialogTitle = "IR Advanced Settings";
+    options.dialogBackgroundColour = juce::Colours::darkslategrey.withAlpha(0.95f);
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    options.componentToCentreAround = this;
+    options.content.setOwned(new IRAdvancedSettingsComponent(engine));
+
+    auto* window = options.launchAsync();
+    irAdvancedWindow = window;
+    if (window != nullptr)
+        window->setAlwaysOnTop(false);
+}
+
+void ConvolverControlPanel::startAsyncIRLoadPreview(const juce::File& irFile)
+{
+    const int requestId = irPreviewRequestId.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const double analysisSampleRate = engine.getProcessingSampleRate() > 0.0
+                                    ? engine.getProcessingSampleRate()
+                                    : engine.getSampleRate();
+
+    setIRPreviewInProgress(true);
+
+    juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
+    std::thread([safeThis, irFile, requestId, analysisSampleRate]()
+    {
+        const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(irFile, analysisSampleRate);
+
+        juce::MessageManager::callAsync([safeThis, irFile, requestId, preview]()
+        {
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->finishAsyncIRLoadPreview(irFile, preview, requestId);
+        });
+    }).detach();
+}
+
+void ConvolverControlPanel::finishAsyncIRLoadPreview(const juce::File& irFile,
+                                                     const ConvolverProcessor::IRLoadPreview& preview,
+                                                     int requestId)
+{
+    if (requestId != irPreviewRequestId.load(std::memory_order_acquire))
+        return;
+
+    setIRPreviewInProgress(false);
+
+    const auto applyPreviewIRLengthAndLoad = [this, irFile](float targetLengthSec)
+    {
+        auto& panelConvolver = engine.getConvolverProcessor();
+        panelConvolver.applyAutoDetectedIRLength(targetLengthSec);
+        pendingIrLengthSec = targetLengthSec;
+        pendingIrLengthDirty = false;
+        updateIRInfo();
+        engine.requestConvolverPreset(irFile);
+    };
+
+    if (!preview.success)
+    {
+        juce::NativeMessageBox::showAsync(
+            juce::MessageBoxOptions()
+                .withIconType(juce::MessageBoxIconType::WarningIcon)
+                .withTitle("IR Load Error")
+                .withMessage(preview.errorMessage.isNotEmpty() ? preview.errorMessage
+                                                               : "Failed to analyze the selected IR file.")
+                .withButton("OK"),
+            nullptr);
+        updateIRInfo();
+        return;
+    }
+
+    if (preview.exceedsHardLimit)
+    {
+        juce::NativeMessageBox::showAsync(
+            juce::MessageBoxOptions()
+                .withIconType(juce::MessageBoxIconType::WarningIcon)
+                .withTitle("IR Too Long")
+                .withMessage("The processed IR length is " + juce::String(preview.autoDetectedLengthSec, 2)
+                             + " s, which exceeds the current hard limit of "
+                             + juce::String(preview.hardMaxSec, 2)
+                             + " s at this sample rate.\n\nPlease use a shorter IR or lower the sample rate.")
+                .withButton("OK"),
+            nullptr);
+        updateIRInfo();
+        return;
+    }
+
+    if (preview.exceedsRecommended)
+    {
+        juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
+        juce::NativeMessageBox::showAsync(
+            juce::MessageBoxOptions()
+                .withIconType(juce::MessageBoxIconType::WarningIcon)
+                .withTitle("Long IR Warning")
+                .withMessage("The processed IR length is " + juce::String(preview.autoDetectedLengthSec, 2)
+                             + " s.\n\n3.00 s is the recommended limit for room correction IRs. Longer tails may increase rebuild time, CPU load, and phase-processing side effects.\n\nChoose how to continue.")
+                .withButton("Trim to 3 s")
+                .withButton("Load as-is")
+                .withButton("Cancel"),
+            [safeThis, requestId, detectedLengthSec = preview.autoDetectedLengthSec, applyPreviewIRLengthAndLoad](int result)
+            {
+                if (safeThis == nullptr)
+                    return;
+
+                if (requestId != safeThis->irPreviewRequestId.load(std::memory_order_acquire))
+                    return;
+
+                if (result == 0)
+                {
+                    applyPreviewIRLengthAndLoad(ConvolverProcessor::IR_LENGTH_MAX_SEC);
+                }
+                else if (result == 1)
+                {
+                    applyPreviewIRLengthAndLoad(detectedLengthSec);
+                }
+                else
+                {
+                    safeThis->updateIRInfo();
+                }
+            });
+        return;
+    }
+
+    applyPreviewIRLengthAndLoad(preview.autoDetectedLengthSec);
+}
+
+void ConvolverControlPanel::setIRPreviewInProgress(bool isInProgress)
+{
+    irPreviewInProgress = isInProgress;
+    loadIRButton.setEnabled(!isInProgress);
+    irAdvancedButton.setEnabled(!isInProgress);
+    loadIRButton.setButtonText(isInProgress ? "Analyzing..." : "Load IR...");
+    updateIRInfo();
 }
 
 //--------------------------------------------------------------
@@ -505,8 +938,27 @@ void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
     }
     else if (slider == &irLengthSlider)
     {
+        engine.getConvolverProcessor().setIRLengthManualOverride(true);
         pendingIrLengthSec = static_cast<float>(slider->getValue());
         pendingIrLengthDirty = true;
+        markConvolverParameterDirty();
+    }
+    else if (slider == &mixedF1Slider)
+    {
+        pendingMixedF1Hz = static_cast<float>(slider->getValue());
+        pendingMixedF1Dirty = true;
+        markConvolverParameterDirty();
+    }
+    else if (slider == &mixedF2Slider)
+    {
+        pendingMixedF2Hz = static_cast<float>(slider->getValue());
+        pendingMixedF2Dirty = true;
+        markConvolverParameterDirty();
+    }
+    else if (slider == &mixedTauSlider)
+    {
+        pendingMixedTau = static_cast<float>(slider->getValue());
+        pendingMixedTauDirty = true;
         markConvolverParameterDirty();
     }
     else if (slider == &rebuildDebounceSlider)
@@ -544,7 +996,8 @@ void ConvolverControlPanel::markConvolverParameterDirty()
 
 bool ConvolverControlPanel::hasPendingConvolverParameters() const noexcept
 {
-    return pendingMixDirty || pendingSmoothingDirty || pendingIrLengthDirty;
+    return pendingMixDirty || pendingSmoothingDirty || pendingIrLengthDirty
+        || pendingMixedF1Dirty || pendingMixedF2Dirty || pendingMixedTauDirty;
 }
 
 void ConvolverControlPanel::applyPendingConvolverParameters()
@@ -560,9 +1013,21 @@ void ConvolverControlPanel::applyPendingConvolverParameters()
     if (pendingIrLengthDirty)
         convolver.setTargetIRLength(pendingIrLengthSec);
 
+    if (pendingMixedF1Dirty)
+        convolver.setMixedTransitionStartHz(pendingMixedF1Hz);
+
+    if (pendingMixedF2Dirty)
+        convolver.setMixedTransitionEndHz(pendingMixedF2Hz);
+
+    if (pendingMixedTauDirty)
+        convolver.setMixedPreRingTau(pendingMixedTau);
+
     pendingMixDirty = false;
     pendingSmoothingDirty = false;
     pendingIrLengthDirty = false;
+    pendingMixedF1Dirty = false;
+    pendingMixedF2Dirty = false;
+    pendingMixedTauDirty = false;
 
     updateIRInfo();
 }
@@ -592,11 +1057,21 @@ void ConvolverControlPanel::updateIRInfo()
 
     // UIコントロールをプロセッサの状態と同期
     mixSlider.setValue(pendingMixDirty ? pendingMixValue : convolver.getMix(), juce::dontSendNotification);
-    phaseChoiceBox.setSelectedId(convolver.getUseMinPhase() ? 2 : 1, juce::dontSendNotification);
+    phaseChoiceBox.setSelectedId(phaseModeToComboId(convolver.getPhaseMode()), juce::dontSendNotification);
+    updateMixedPhaseControlsEnabled();
     experimentalDirectHeadToggle.setToggleState(convolver.getExperimentalDirectHeadEnabled(), juce::dontSendNotification);
     smoothingTimeSlider.setValue((pendingSmoothingDirty ? pendingSmoothingTimeSec : convolver.getSmoothingTime()) * 1000.0,
                                  juce::dontSendNotification);
+    const double irLengthSliderMax = std::max(static_cast<double>(ConvolverProcessor::IR_LENGTH_MAX_SEC),
+                                              static_cast<double>(pendingIrLengthDirty ? pendingIrLengthSec : convolver.getTargetIRLength()));
+    irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC, irLengthSliderMax, 0.1);
     irLengthSlider.setValue(pendingIrLengthDirty ? pendingIrLengthSec : convolver.getTargetIRLength(),
+                            juce::dontSendNotification);
+    mixedF1Slider.setValue(pendingMixedF1Dirty ? pendingMixedF1Hz : convolver.getMixedTransitionStartHz(),
+                           juce::dontSendNotification);
+    mixedF2Slider.setValue(pendingMixedF2Dirty ? pendingMixedF2Hz : convolver.getMixedTransitionEndHz(),
+                           juce::dontSendNotification);
+    mixedTauSlider.setValue(pendingMixedTauDirty ? pendingMixedTau : convolver.getMixedPreRingTau(),
                             juce::dontSendNotification);
     rebuildDebounceSlider.setValue(static_cast<double>(convolver.getRebuildDebounceMs()), juce::dontSendNotification);
     updateFilterModeButtons();
@@ -606,6 +1081,12 @@ void ConvolverControlPanel::updateIRInfo()
     {
         juce::String info = convolver.getIRName();
         info += " (" + juce::String(convolver.getIRLength()) + " smp)";
+        info += " IR Len: " + juce::String(convolver.getTargetIRLength(), 2) + "s";
+
+        if (convolver.hasManualIRLengthOverride())
+            info += " [Manual, Auto " + juce::String(convolver.getAutoDetectedIRLength(), 2) + "s]";
+        else
+            info += " [Auto]";
 
         // A = algorithm latency, T = total latency (= algorithm + IR peak latency)
         const int algorithmLatencySamples = convolver.getLatencySamples();
@@ -633,6 +1114,16 @@ void ConvolverControlPanel::updateIRInfo()
     }
     else
     {
+        if (irPreviewInProgress)
+        {
+            irInfoLabel.setText("Analyzing IR...", juce::dontSendNotification);
+            irInfoLabel.setColour(juce::Label::textColourId,
+                                 juce::Colours::orange.withAlpha(0.8f));
+            irInfoLabel.setTooltip("Preprocessing the selected IR to estimate the effective length.");
+            updateWaveformPath();
+            return;
+        }
+
         // エラーがある場合は赤字で表示
         if (convolver.getLastError().isNotEmpty())
         {

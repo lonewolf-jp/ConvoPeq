@@ -366,10 +366,10 @@ void MainWindow::resized()
     cpuUsageLabel.setBounds (buttonRow.removeFromRight (95).reduced (2, 2));
     latencyLabel.setBounds (buttonRow.removeFromRight (170).reduced (2, 2));
 
-    // クリップ制御 (右から: Soft Clip, Sat, スライダー)
-    softClipButton.setBounds(buttonRow.removeFromRight(90).reduced(2, 2));
-    saturationLabel.setBounds(buttonRow.removeFromRight(42).reduced(2, 2));
+    // クリップ制御 (左→右: Soft Clip, Sat, スライダー)
     saturationSlider.setBounds(buttonRow.removeFromRight(120).reduced(2, 2));
+    saturationLabel.setBounds(buttonRow.removeFromRight(42).reduced(2, 2));
+    softClipButton.setBounds(buttonRow.removeFromRight(90).reduced(2, 2));
 
     // 左側: 保存/読込 + 処理モード
     orderModeBox.setBounds (buttonRow.removeFromRight (145).reduced (2, 2));
@@ -396,8 +396,11 @@ void MainWindow::timerCallback()
     cpuUsageLabel.setText ("CPU: " + juce::String (cpu, 1) + "%", juce::dontSendNotification);
 
     const auto breakdown = audioEngine.getCurrentLatencyBreakdown();
-    const int latencySamples = audioEngine.getCurrentLatencySamples();
-    const int latencyMs = juce::roundToInt(audioEngine.getCurrentLatencyMs());
+    const int latencySamples = breakdown.totalLatencyBaseRateSamples;
+    const double sr = audioEngine.getSampleRate();
+    const int latencyMs = (sr > 0.0)
+        ? juce::roundToInt((static_cast<double>(latencySamples) * 1000.0) / sr)
+        : 0;
     latencyLabel.setText ("Lat: " + juce::String (latencyMs) + "ms (" + juce::String(latencySamples) + " smp)",
                           juce::dontSendNotification);
 
@@ -409,7 +412,6 @@ void MainWindow::timerCallback()
         {
             lastLatencyLogMs = nowMs;
 
-            const double sr = audioEngine.getSampleRate();
             const int osFactor = juce::jmax(1, audioEngine.getOversamplingFactor());
             const auto toMsRounded3 = [sr](int samples) -> double
             {

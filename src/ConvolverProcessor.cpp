@@ -62,6 +62,14 @@ static bool checkCancellation(const std::function<bool()>& shouldExit, bool* was
 static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR,
                                                        const std::function<bool()>& shouldExit,
                                                        bool* wasCancelled);
+static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<double>& linearIR,
+                                                     const juce::AudioBuffer<double>& minimumIR,
+                                                     double sampleRate,
+                                                     double transitionLoHz,
+                                                     double transitionHiHz,
+                                                     double tau,
+                                                     const std::function<bool()>& shouldExit,
+                                                     bool* wasCancelled);
 
 // AudioBufferの容量を現在のサイズに合わせて縮小するヘルパー
 // JUCEのsetSize()は容量を縮小しないため、メモリ使用量を最適化するために使用する
@@ -254,6 +262,134 @@ static bool applyAsymmetricTukey(double* data, int numSamples)
     return true;
 }
 
+static int estimateEffectiveIRLengthSamples(const juce::AudioBuffer<double>& irBuffer, double sampleRate)
+{
+    const int numSamples = irBuffer.getNumSamples();
+    const int numChannels = irBuffer.getNumChannels();
+    if (numSamples <= 0 || numChannels <= 0 || sampleRate <= 0.0)
+        return 0;
+
+    std::vector<double> envelope(static_cast<size_t>(numSamples), 0.0);
+    double peak = 0.0;
+    int peakIndex = 0;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        double sampleMax = 0.0;
+        for (int ch = 0; ch < numChannels; ++ch)
+            sampleMax = (std::max)(sampleMax, std::abs(irBuffer.getSample(ch, i)));
+
+        envelope[static_cast<size_t>(i)] = sampleMax;
+        if (sampleMax > peak)
+        {
+            peak = sampleMax;
+            peakIndex = i;
+        }
+    }
+
+    if (peak <= 1.0e-12)
+        return juce::jmax(1, juce::jmin(numSamples, static_cast<int>(std::round(sampleRate * ConvolverProcessor::IR_LENGTH_MIN_SEC))));
+
+    const int rmsWindow = juce::jmax(1, static_cast<int>(std::round(sampleRate * 0.010)));
+    const int sustainSamples = juce::jmax(rmsWindow, static_cast<int>(std::round(sampleRate * 0.050)));
+    const int minimumKeepSamples = juce::jmax(0, static_cast<int>(std::round(sampleRate * 0.200)));
+    const int scanStart = juce::jmin(numSamples, peakIndex + minimumKeepSamples);
+    const int scanLimit = juce::jmax(scanStart, numSamples - rmsWindow);
+    const int scanStep = juce::jmax(1, rmsWindow / 8);
+    const double thresholdAmp = peak * std::pow(10.0, -50.0 / 20.0);
+
+    std::vector<double> prefix(static_cast<size_t>(numSamples) + 1u, 0.0);
+    for (int i = 0; i < numSamples; ++i)
+        prefix[static_cast<size_t>(i) + 1u] = prefix[static_cast<size_t>(i)] + envelope[static_cast<size_t>(i)] * envelope[static_cast<size_t>(i)];
+
+    int belowStart = -1;
+    for (int i = scanStart; i <= scanLimit; i += scanStep)
+    {
+        const int windowEnd = juce::jmin(numSamples, i + rmsWindow);
+        const double meanSquare = (prefix[static_cast<size_t>(windowEnd)] - prefix[static_cast<size_t>(i)])
+                                / static_cast<double>(windowEnd - i);
+        const double rms = std::sqrt((std::max)(0.0, meanSquare));
+
+        if (rms <= thresholdAmp)
+        {
+            if (belowStart < 0)
+                belowStart = i;
+
+            if ((i - belowStart) >= sustainSamples)
+                return juce::jlimit(1, numSamples, juce::jmax(peakIndex + minimumKeepSamples, belowStart + rmsWindow));
+        }
+        else
+        {
+            belowStart = -1;
+        }
+    }
+
+    return numSamples;
+}
+
+static bool loadImpulseResponsePreviewFile(const juce::File& file,
+                                           juce::AudioBuffer<double>& loadedIR,
+                                           double& loadedSampleRate,
+                                           juce::String& errorMessage)
+{
+    if (!file.existsAsFile())
+    {
+        errorMessage = "IR file not found: " + file.getFullPathName();
+        return false;
+    }
+
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+    if (!reader)
+    {
+        errorMessage = "Unsupported audio format or corrupted file: " + file.getFileName();
+        return false;
+    }
+
+    const int64 fileLength = reader->lengthInSamples;
+    const int numChannels = static_cast<int>(reader->numChannels);
+    static constexpr int64 maxFileLength = 2147483647;
+
+    if (fileLength > maxFileLength)
+    {
+        errorMessage = "IR file is too large (exceeds 2GB samples limit).";
+        return false;
+    }
+
+    if (numChannels <= 0)
+    {
+        errorMessage = "Invalid channel count in IR file.";
+        return false;
+    }
+
+    juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
+    if (!reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true))
+    {
+        errorMessage = "Failed to read audio data from file.";
+        return false;
+    }
+
+    convo::ScopedAlignedPtr<double> tempAlignedBuffer(static_cast<double*>(convo::aligned_malloc(
+        static_cast<size_t>(fileLength) * sizeof(double), 64)));
+    if (!tempAlignedBuffer)
+    {
+        errorMessage = "Failed to allocate temporary buffer for IR loading.";
+        return false;
+    }
+
+    loadedIR.setSize(numChannels, static_cast<int>(fileLength));
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const float* src = tempFloatBuffer.getReadPointer(ch);
+        convo::input_transform::convertFloatToDoubleHighQuality(src, tempAlignedBuffer.get(), static_cast<int>(fileLength));
+        loadedIR.copyFrom(ch, 0, tempAlignedBuffer.get(), static_cast<int>(fileLength));
+    }
+
+    loadedSampleRate = reader->sampleRate;
+    return true;
+}
+
 // 2の累乗へ切り上げ (Helper)
 static inline int nextPow2(int x)
 {
@@ -347,13 +483,17 @@ class ConvolverProcessor::LoaderThread : public juce::Thread
 {
 public:
     // ファイルからロードする場合のコンストラクタ
-    LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, bool minPhase)
-        : Thread("IRLoader"), owner(p), weakOwner(&p), file(f), sampleRate(sr), blockSize(bs), useMinPhase(minPhase), isRebuild(false)
+    LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
+                 float mixedF1, float mixedF2, float mixedTau)
+        : Thread("IRLoader"), owner(p), weakOwner(&p), file(f), sampleRate(sr), blockSize(bs), phaseMode(phase),
+          mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2), mixedPreRingTau(mixedTau), isRebuild(false)
     {}
 
     // メモリからリビルドする場合のコンストラクタ
-    LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, bool minPhase, double scale)
-        : Thread("IRRebuilder"), owner(p), weakOwner(&p), sourceIR(src), sourceSampleRate(srcSR), sampleRate(sr), blockSize(bs), useMinPhase(minPhase), isRebuild(true), scaleFactor(scale)
+    LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, ConvolverProcessor::PhaseMode phase,
+                 float mixedF1, float mixedF2, float mixedTau, double scale)
+        : Thread("IRRebuilder"), owner(p), weakOwner(&p), sourceIR(src), sourceSampleRate(srcSR), sampleRate(sr), blockSize(bs), phaseMode(phase),
+          mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2), mixedPreRingTau(mixedTau), isRebuild(true), scaleFactor(scale)
     {}
 
     ~LoaderThread() override
@@ -682,42 +822,64 @@ public:
             if (checkCancellation(shouldStop, nullptr)) return result;
 
             // 8. MinPhase変換 (オプション)
-            bool conversionSuccessful = false;
-            if (useMinPhase)
-            {
-                bool wasCancelled = false;
-                auto minPhaseIR = convertToMinimumPhase(trimmed, shouldStop, &wasCancelled);
-
-                if (wasCancelled) return result;
-
-                // 変換成功チェック: 全サンプルが有限値かつ十分なエネルギーがある場合のみ適用
-                bool allFinite = (minPhaseIR.getNumSamples() > 0 && minPhaseIR.getNumChannels() > 0);
-                double maxAbs = 0.0;
-                if (allFinite)
+                bool conversionSuccessful = false;
+                auto validateBuffer = [](const juce::AudioBuffer<double>& buffer) -> bool
                 {
-                    for (int ch = 0; ch < minPhaseIR.getNumChannels() && allFinite; ++ch)
+                    bool allFinite = (buffer.getNumSamples() > 0 && buffer.getNumChannels() > 0);
+                    double maxAbs = 0.0;
+                    if (allFinite)
                     {
-                        const double* ptr = minPhaseIR.getReadPointer(ch);
-                        for (int i = 0; i < minPhaseIR.getNumSamples(); ++i)
+                        for (int ch = 0; ch < buffer.getNumChannels() && allFinite; ++ch)
                         {
-                            const double v = ptr[i];
-                            if (!std::isfinite(v))
+                            const double* ptr = buffer.getReadPointer(ch);
+                            for (int i = 0; i < buffer.getNumSamples(); ++i)
                             {
-                                allFinite = false;
-                                break;
+                                const double v = ptr[i];
+                                if (!std::isfinite(v))
+                                {
+                                    allFinite = false;
+                                    break;
+                                }
+                                maxAbs = (std::max)(maxAbs, std::abs(v));
                             }
-                            maxAbs = (std::max)(maxAbs, std::abs(v));
                         }
                     }
-                }
 
-                if (allFinite && maxAbs > 1.0e-12)
+                    return allFinite && maxAbs > 1.0e-12;
+                };
+
+                if (phaseMode == ConvolverProcessor::PhaseMode::Minimum || phaseMode == ConvolverProcessor::PhaseMode::Mixed)
                 {
-                    trimmed = minPhaseIR;
-                    conversionSuccessful = true;
+                    bool wasCancelled = false;
+                    auto minPhaseIR = convertToMinimumPhase(trimmed, shouldStop, &wasCancelled);
+                    if (wasCancelled) return result;
+
+                    if (validateBuffer(minPhaseIR))
+                    {
+                        if (phaseMode == ConvolverProcessor::PhaseMode::Minimum)
+                        {
+                            trimmed = std::move(minPhaseIR);
+                            conversionSuccessful = true;
+                        }
+                        else
+                        {
+                            bool mixedCancelled = false;
+                            auto mixedIR = convertToMixedPhase(trimmed, minPhaseIR, sampleRate,
+                                                               static_cast<double>(mixedTransitionStartHz),
+                                                               static_cast<double>(mixedTransitionEndHz),
+                                                               static_cast<double>(mixedPreRingTau),
+                                                               shouldStop, &mixedCancelled);
+                            if (mixedCancelled) return result;
+
+                            if (validateBuffer(mixedIR))
+                            {
+                                trimmed = std::move(mixedIR);
+                                conversionSuccessful = true;
+                            }
+                        }
+                    }
+                    // 変換失敗時は trimmed(As-Is) を使用
                 }
-                // 変換に失敗または無音になった場合は、元のtrimmed(Linear Phase)を使用する
-            }
 
             if (checkCancellation(shouldStop, nullptr)) return result;
 
@@ -756,7 +918,7 @@ public:
             int irPeakLatency = 0;
             if (trimmed.getNumChannels() > 0)
             {
-                if (!useMinPhase || (useMinPhase && !conversionSuccessful))
+                if (phaseMode != ConvolverProcessor::PhaseMode::Minimum || !conversionSuccessful)
                 {
                     // 全チャンネルの中で最大振幅を持つサンプルの位置を探す
                     double maxMag = 0.0;
@@ -912,7 +1074,10 @@ private:
     double sourceSampleRate = 0.0;
     double sampleRate;
     int blockSize;
-    bool useMinPhase;
+    ConvolverProcessor::PhaseMode phaseMode;
+    float mixedTransitionStartHz;
+    float mixedTransitionEndHz;
+    float mixedPreRingTau;
     bool isRebuild;
     double scaleFactor = 1.0;
 };
@@ -1262,7 +1427,11 @@ void ConvolverProcessor::postCoalescedChangeNotification()
 void ConvolverProcessor::requestDebouncedRebuild()
 {
     if (!isIRLoaded())
+    {
+        if (isLoading.load(std::memory_order_acquire) || isRebuilding.load(std::memory_order_acquire))
+            rebuildPendingAfterLoad.store(true, std::memory_order_release);
         return;
+    }
 
     const int token = rebuildDebounceToken.fetch_add(1, std::memory_order_acq_rel) + 1;
     auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
@@ -1294,7 +1463,9 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
     if (snap && snap->getNumSamples() > 0 && originalIRSampleRate.load(std::memory_order_acquire) > 0.0)
     {
         // リビルドモードでローダーを作成し、同期的に実行
-        LoaderThread loader(*this, *snap, originalIRSampleRate.load(std::memory_order_acquire), currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale.load(std::memory_order_acquire));
+        LoaderThread loader(*this, *snap, originalIRSampleRate.load(std::memory_order_acquire), currentSpec.sampleRate, currentBufferSize, getPhaseMode(),
+                    mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
+                    mixedPreRingTau.load(std::memory_order_acquire), currentIRScale.load(std::memory_order_acquire));
         loader.externalCancellationCheck = shouldCancel;
         loader.runSynchronously();
     }
@@ -1473,6 +1644,195 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     return minPhaseIR;
 }
 
+static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<double>& linearIR,
+                                                     const juce::AudioBuffer<double>& minimumIR,
+                                                     double sampleRate,
+                                                     double transitionLoHz,
+                                                     double transitionHiHz,
+                                                     double tau,
+                                                     const std::function<bool()>& shouldExit,
+                                                     bool* wasCancelled)
+{
+    if (wasCancelled) *wasCancelled = false;
+
+    const int numSamples = linearIR.getNumSamples();
+    const int numChannels = linearIR.getNumChannels();
+    if (numSamples <= 0 || numChannels <= 0)
+        return {};
+
+    if (minimumIR.getNumSamples() != numSamples || minimumIR.getNumChannels() != numChannels || sampleRate <= 0.0)
+        return {};
+
+    if (transitionHiHz <= transitionLoHz || tau <= 0.0)
+        return {};
+
+    const int fftSize = juce::nextPowerOfTwo(numSamples);
+    static constexpr int MAX_MIXED_FFT_SIZE = 8388608;
+    if (fftSize > MAX_MIXED_FFT_SIZE)
+    {
+        DBG("convertToMixedPhase: fftSize (" << fftSize << ") exceeds limit.");
+        return {};
+    }
+
+    juce::AudioBuffer<double> mixedIR(numChannels, numSamples);
+
+    DFTI_DESCRIPTOR_HANDLE dfti = nullptr;
+    DftiGuard dftiGuard { &dfti };
+    const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
+    if (DftiCreateDescriptor(&dfti, DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
+        return {};
+    if (DftiSetValue(dfti, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR)
+        return {};
+    if (DftiSetValue(dfti, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR)
+        return {};
+    if (DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
+        return {};
+
+    convo::ScopedAlignedPtr<MKL_Complex16> linearSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(
+        static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
+    convo::ScopedAlignedPtr<MKL_Complex16> minimumSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(
+        static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
+    convo::ScopedAlignedPtr<MKL_Complex16> tempSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(
+        static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
+    convo::ScopedAlignedPtr<double> magnitudeRef(static_cast<double*>(convo::aligned_malloc(
+        static_cast<size_t>(fftSize) * sizeof(double), 64)));
+
+    if (!linearSpec || !minimumSpec || !tempSpec || !magnitudeRef)
+        return {};
+
+    static constexpr double epsilon = 1.0e-12;
+
+    const int half = fftSize / 2;
+    const double invSpan = 1.0 / (transitionHiHz - transitionLoHz);
+
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        if (checkCancellation(shouldExit, wasCancelled))
+            return {};
+
+        const double* srcLinear = linearIR.getReadPointer(ch);
+        const double* srcMinimum = minimumIR.getReadPointer(ch);
+
+        int refPeakIndex = 0;
+        double refPeakMag = 0.0;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double mag = std::abs(srcLinear[i]);
+            if (mag > refPeakMag)
+            {
+                refPeakMag = mag;
+                refPeakIndex = i;
+            }
+        }
+
+        for (int i = 0; i < fftSize; ++i)
+        {
+            const double l = (i < numSamples) ? srcLinear[i] : 0.0;
+            const double m = (i < numSamples) ? srcMinimum[i] : 0.0;
+            tempSpec.get()[i].real = l;
+            tempSpec.get()[i].imag = 0.0;
+            minimumSpec.get()[i].real = m;
+            minimumSpec.get()[i].imag = 0.0;
+        }
+
+        if (DftiComputeForward(dfti, tempSpec.get()) != DFTI_NO_ERROR)
+            return {};
+        if (DftiComputeForward(dfti, minimumSpec.get()) != DFTI_NO_ERROR)
+            return {};
+
+        for (int k = 0; k < fftSize; ++k)
+        {
+            const double re = tempSpec.get()[k].real;
+            const double im = tempSpec.get()[k].imag;
+            const double a = std::sqrt(re * re + im * im);
+            magnitudeRef.get()[k] = (std::max)(a, epsilon);
+            linearSpec.get()[k].real = re;
+            linearSpec.get()[k].imag = im;
+        }
+
+        for (int k = 0; k < fftSize; ++k)
+        {
+            const int mirroredBin = (k <= half) ? k : (fftSize - k);
+            const double freq = (static_cast<double>(mirroredBin) * sampleRate) / static_cast<double>(fftSize);
+
+            double wLinear = 1.0;
+            if (freq >= transitionHiHz)
+            {
+                wLinear = 0.0;
+            }
+            else if (freq > transitionLoHz)
+            {
+                const double x = juce::jlimit(0.0, 1.0, (freq - transitionLoHz) * invSpan);
+                wLinear = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
+            }
+            const double wMinimum = 1.0 - wLinear;
+
+            const auto& lin = linearSpec.get()[k];
+            const auto& min = minimumSpec.get()[k];
+
+            linearSpec.get()[k].real = wLinear * lin.real + wMinimum * min.real;
+            linearSpec.get()[k].imag = wLinear * lin.imag + wMinimum * min.imag;
+        }
+
+        if (DftiComputeBackward(dfti, linearSpec.get()) != DFTI_NO_ERROR)
+            return {};
+
+        double* mixedTime = mixedIR.getWritePointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double value = linearSpec.get()[i].real;
+            if (!std::isfinite(value))
+                return {};
+            mixedTime[i] = (std::abs(value) < 1.0e-18) ? 0.0 : value;
+        }
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            if (i < refPeakIndex)
+            {
+                const double wTime = std::exp(-(static_cast<double>(refPeakIndex - i)) / tau);
+                mixedTime[i] *= wTime;
+            }
+        }
+
+        if (checkCancellation(shouldExit, wasCancelled))
+            return {};
+
+        for (int i = 0; i < fftSize; ++i)
+        {
+            const double x = (i < numSamples) ? mixedTime[i] : 0.0;
+            tempSpec.get()[i].real = x;
+            tempSpec.get()[i].imag = 0.0;
+        }
+
+        if (DftiComputeForward(dfti, tempSpec.get()) != DFTI_NO_ERROR)
+            return {};
+
+        for (int k = 0; k < fftSize; ++k)
+        {
+            const double re = tempSpec.get()[k].real;
+            const double im = tempSpec.get()[k].imag;
+            const double mag = std::sqrt(re * re + im * im);
+            const double corr = magnitudeRef.get()[k] / (mag + epsilon);
+            tempSpec.get()[k].real = re * corr;
+            tempSpec.get()[k].imag = im * corr;
+        }
+
+        if (DftiComputeBackward(dfti, tempSpec.get()) != DFTI_NO_ERROR)
+            return {};
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double value = tempSpec.get()[i].real;
+            if (!std::isfinite(value))
+                return {};
+            mixedTime[i] = (std::abs(value) < 1.0e-18) ? 0.0 : value;
+        }
+    }
+
+    return mixedIR;
+}
+
 //--------------------------------------------------------------
 // loadImpulseResponse（Message Thread）
 //--------------------------------------------------------------
@@ -1516,11 +1876,15 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     if (isRebuild)
     {
         auto snapIR2 = originalIR.load(); // [Bug E fix] 最新スナップショットを再取得
-        activeLoader = std::make_unique<LoaderThread>(*this, *snapIR2, originalIRSampleRate.load(std::memory_order_acquire), currentSpec.sampleRate, currentBufferSize, useMinPhase.load(), currentIRScale.load(std::memory_order_acquire));
+        activeLoader = std::make_unique<LoaderThread>(*this, *snapIR2, originalIRSampleRate.load(std::memory_order_acquire), currentSpec.sampleRate, currentBufferSize, getPhaseMode(),
+                                                      mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
+                                                      mixedPreRingTau.load(std::memory_order_acquire), currentIRScale.load(std::memory_order_acquire));
     }
     else
     {
-        activeLoader = std::make_unique<LoaderThread>(*this, irFile, currentSpec.sampleRate, currentBufferSize, useMinPhase.load());
+        activeLoader = std::make_unique<LoaderThread>(*this, irFile, currentSpec.sampleRate, currentBufferSize, getPhaseMode(),
+                                                      mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
+                                                      mixedPreRingTau.load(std::memory_order_acquire));
         currentIrOptimized.store(optimizeForRealTime);
     }
 
@@ -1655,6 +2019,112 @@ int ConvolverProcessor::computeTargetIRLength(double sampleRate, int /*originalL
     target = (std::max)(target, 1); // Ensure at least 1 sample
 
     return target;
+}
+
+float ConvolverProcessor::getMaximumAllowedIRLengthSecForSampleRate(double sampleRate)
+{
+    if (sampleRate <= 0.0)
+        return IR_LENGTH_MAX_SEC;
+
+    return static_cast<float>(static_cast<double>(MAX_IR_LATENCY) / sampleRate);
+}
+
+float ConvolverProcessor::getMaximumAllowedIRLengthSec(double sampleRate) const
+{
+    const double sr = (sampleRate > 0.0)
+                    ? sampleRate
+                    : ((currentSpec.sampleRate > 0.0) ? currentSpec.sampleRate : currentSampleRate.load(std::memory_order_acquire));
+
+    return getMaximumAllowedIRLengthSecForSampleRate(sr);
+}
+
+ConvolverProcessor::IRLoadPreview ConvolverProcessor::analyzeImpulseResponseFile(const juce::File& irFile, double processingSampleRate)
+{
+    IRLoadPreview preview;
+    preview.recommendedMaxSec = IR_LENGTH_MAX_SEC;
+    preview.hardMaxSec = getMaximumAllowedIRLengthSecForSampleRate(processingSampleRate);
+
+    juce::AudioBuffer<double> loadedIR;
+    double loadedSampleRate = 0.0;
+    if (!loadImpulseResponsePreviewFile(irFile, loadedIR, loadedSampleRate, preview.errorMessage))
+        return preview;
+
+    const auto neverCancel = []() { return false; };
+
+    if (loadedIR.getNumSamples() > 0)
+    {
+        const int numSamples = loadedIR.getNumSamples();
+        const int numChannels = loadedIR.getNumChannels();
+        const double threshold = 1.0e-15;
+        int newLength = 0;
+
+        if (numChannels > 0)
+        {
+            const double* ch0Ptr = loadedIR.getReadPointer(0);
+            const double* ch1Ptr = (numChannels > 1) ? loadedIR.getReadPointer(1) : nullptr;
+
+            for (int j = numSamples - 1; j >= 0; --j)
+            {
+                if (std::abs(ch0Ptr[j]) > threshold || (ch1Ptr && std::abs(ch1Ptr[j]) > threshold))
+                {
+                    newLength = j + 1;
+                    break;
+                }
+            }
+        }
+
+        if (newLength < numSamples)
+        {
+            loadedIR.setSize(numChannels, juce::jmax(1, newLength), true);
+            shrinkToFit(loadedIR);
+        }
+    }
+
+    if (loadedSampleRate > 0.0 && processingSampleRate > 0.0 && std::abs(loadedSampleRate - processingSampleRate) > 1e-6)
+    {
+        auto resampled = resampleIR(loadedIR, loadedSampleRate, processingSampleRate, neverCancel);
+        if (resampled.getNumSamples() == 0)
+        {
+            preview.errorMessage = "Resampling failed (unknown error).";
+            return preview;
+        }
+
+        loadedIR = std::move(resampled);
+        loadedSampleRate = processingSampleRate;
+    }
+
+    if (loadedSampleRate > 0.0 && loadedIR.getNumSamples() > 0)
+    {
+        for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
+        {
+            UltraHighRateDCBlocker dcBlocker;
+            dcBlocker.init(loadedSampleRate, 1.0);
+            dcBlocker.process(loadedIR.getWritePointer(ch), loadedIR.getNumSamples());
+        }
+    }
+
+    if (loadedIR.getNumSamples() > 0)
+    {
+        const int numSamples = loadedIR.getNumSamples();
+        for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
+        {
+            if (!applyAsymmetricTukey(loadedIR.getWritePointer(ch), numSamples))
+            {
+                preview.errorMessage = "Failed to allocate Tukey window buffer (Out of Memory).";
+                return preview;
+            }
+        }
+    }
+
+    const int detectedSamples = estimateEffectiveIRLengthSamples(loadedIR, loadedSampleRate);
+    preview.autoDetectedLengthSamples = detectedSamples;
+    preview.autoDetectedLengthSec = (loadedSampleRate > 0.0)
+                                  ? static_cast<float>(static_cast<double>(detectedSamples) / loadedSampleRate)
+                                  : IR_LENGTH_DEFAULT_SEC;
+    preview.exceedsRecommended = preview.autoDetectedLengthSec > preview.recommendedMaxSec;
+    preview.exceedsHardLimit = preview.autoDetectedLengthSec > preview.hardMaxSec;
+    preview.success = true;
+    return preview;
 }
 
 //--------------------------------------------------------------
@@ -1851,9 +2321,15 @@ juce::ValueTree ConvolverProcessor::getState() const
     juce::ValueTree v ("Convolver");
     v.setProperty ("mix", mixTarget.load(), nullptr);
     v.setProperty ("bypassed", bypassed.load(), nullptr);
-    v.setProperty ("useMinPhase", useMinPhase.load(), nullptr);
+    v.setProperty ("phaseMode", static_cast<int>(getPhaseMode()), nullptr);
+    v.setProperty ("useMinPhase", getUseMinPhase(), nullptr);
     v.setProperty ("smoothingTime", smoothingTimeSec.load(), nullptr);
     v.setProperty ("irLength", targetIRLengthSec.load(), nullptr);
+    v.setProperty ("autoDetectedIRLength", autoDetectedIRLengthSec.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("irLengthManualOverride", irLengthManualOverride.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("mixedF1Hz", mixedTransitionStartHz.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("mixedF2Hz", mixedTransitionEndHz.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("mixedTau", mixedPreRingTau.load(std::memory_order_acquire), nullptr);
     v.setProperty ("rebuildDebounceMs", rebuildDebounceMs.load(std::memory_order_acquire), nullptr);
     v.setProperty ("experimentalDirectHeadEnabled", experimentalDirectHeadEnabled.load(std::memory_order_acquire), nullptr);
     {
@@ -1867,9 +2343,59 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
 {
     if (v.hasProperty ("mix")) setMix (v.getProperty ("mix"));
     if (v.hasProperty ("bypassed")) setBypass (v.getProperty ("bypassed"));
-    if (v.hasProperty ("useMinPhase")) setUseMinPhase (v.getProperty ("useMinPhase"));
+    if (v.hasProperty ("phaseMode"))
+    {
+        const int modeRaw = static_cast<int>(v.getProperty("phaseMode"));
+        const int modeClamped = juce::jlimit(static_cast<int>(PhaseMode::AsIs), static_cast<int>(PhaseMode::Minimum), modeRaw);
+        setPhaseMode(static_cast<PhaseMode>(modeClamped));
+    }
+    else if (v.hasProperty ("useMinPhase"))
+    {
+        setUseMinPhase (v.getProperty ("useMinPhase"));
+    }
     if (v.hasProperty ("smoothingTime")) setSmoothingTime (v.getProperty ("smoothingTime"));
-    if (v.hasProperty ("irLength")) setTargetIRLength (v.getProperty ("irLength"));
+
+    const bool hasSavedAutoLength = v.hasProperty ("autoDetectedIRLength");
+    const bool hasSavedManualOverride = v.hasProperty ("irLengthManualOverride");
+
+    if (hasSavedManualOverride)
+    {
+        const bool isManual = static_cast<bool>(v.getProperty ("irLengthManualOverride"));
+
+        if (isManual)
+        {
+            if (hasSavedAutoLength)
+            {
+                const float autoLength = static_cast<float>(v.getProperty ("autoDetectedIRLength"));
+                const float clampedAutoLength = juce::jlimit(IR_LENGTH_MIN_SEC,
+                                                             getMaximumAllowedIRLengthSec(currentSpec.sampleRate),
+                                                             autoLength);
+                autoDetectedIRLengthSec.store(clampedAutoLength, std::memory_order_release);
+            }
+
+            if (v.hasProperty ("irLength"))
+                setTargetIRLength (v.getProperty ("irLength"));
+
+            setIRLengthManualOverride (true);
+        }
+        else
+        {
+            if (hasSavedAutoLength)
+                applyAutoDetectedIRLength (v.getProperty ("autoDetectedIRLength"));
+            else if (v.hasProperty ("irLength"))
+                applyAutoDetectedIRLength (v.getProperty ("irLength"));
+
+            setIRLengthManualOverride (false);
+        }
+    }
+    else if (v.hasProperty ("irLength"))
+    {
+        setTargetIRLength (v.getProperty ("irLength"));
+    }
+
+    if (v.hasProperty ("mixedF1Hz")) setMixedTransitionStartHz (v.getProperty ("mixedF1Hz"));
+    if (v.hasProperty ("mixedF2Hz")) setMixedTransitionEndHz (v.getProperty ("mixedF2Hz"));
+    if (v.hasProperty ("mixedTau")) setMixedPreRingTau (v.getProperty ("mixedTau"));
     if (v.hasProperty ("rebuildDebounceMs")) setRebuildDebounceMs (static_cast<int>(v.getProperty("rebuildDebounceMs")));
     if (v.hasProperty ("experimentalDirectHeadEnabled")) setExperimentalDirectHeadEnabled (v.getProperty ("experimentalDirectHeadEnabled"));
 
@@ -1914,9 +2440,12 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     // パラメータの同期
     mixTarget.store(other.mixTarget.load(), std::memory_order_release);
     bypassed.store(other.bypassed.load(), std::memory_order_release);
-    useMinPhase.store(other.useMinPhase.load(), std::memory_order_release);
+    phaseMode.store(other.phaseMode.load(std::memory_order_acquire), std::memory_order_release);
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
     targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
+    mixedTransitionStartHz.store(other.mixedTransitionStartHz.load(std::memory_order_acquire), std::memory_order_release);
+    mixedTransitionEndHz.store(other.mixedTransitionEndHz.load(std::memory_order_acquire), std::memory_order_release);
+    mixedPreRingTau.store(other.mixedPreRingTau.load(std::memory_order_acquire), std::memory_order_release);
     rebuildDebounceMs.store(other.rebuildDebounceMs.load(std::memory_order_acquire), std::memory_order_release);
     experimentalDirectHeadEnabled.store(other.experimentalDirectHeadEnabled.load(std::memory_order_acquire), std::memory_order_release);
 
@@ -1949,7 +2478,8 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
 
     // 軽量なランタイムパラメータのみ同期 (AudioBufferのコピーを避ける)
     // 注意:
-    //   useMinPhase / targetIRLengthSec / experimentalDirectHeadEnabled は
+    //   phaseMode / targetIRLengthSec / mixedTransitionStartHz / mixedTransitionEndHz /
+    //   mixedPreRingTau / experimentalDirectHeadEnabled は
     //   IR再構築を伴う構造変更パラメータのため、
     //   ここで同期すると requestRebuild() 側のIR再利用判定が誤って成立し、
     //   古い畳み込み実体が再利用される恐れがある。
@@ -1997,7 +2527,9 @@ void ConvolverProcessor::refreshLatency()
     auto* conv = convolution.load(std::memory_order_acquire);
     if (conv)
     {
-        const int totalLatency = juce::jmin(conv->latency + conv->irLatency, MAX_TOTAL_DELAY);
+        const int algorithmLatency = conv->storedDirectHeadEnabled ? 0 : juce::jmax(0, conv->latency);
+        const int irPeakLatency = juce::jmax(0, conv->irLatency);
+        const int totalLatency = juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY);
         latencySmoother.setCurrentAndTargetValue(static_cast<double>(totalLatency));
     }
     else
@@ -2049,7 +2581,9 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // レイテンシー補正の更新 (必要な場合のみ)
     {
         // Dry/Wet整合用の補償遅延は内部エンジン遅延で評価する
-        const int calculatedLatency = conv->latency + conv->irLatency;
+        const int algorithmLatency = conv->storedDirectHeadEnabled ? 0 : juce::jmax(0, conv->latency);
+        const int irPeakLatency = juce::jmax(0, conv->irLatency);
+        const int calculatedLatency = juce::jmax(0, algorithmLatency + irPeakLatency);
 
         // 安全対策: 要求される遅延が最大許容値を超えていないかデバッグ時にチェック
         jassert(calculatedLatency <= MAX_TOTAL_DELAY);
@@ -2668,7 +3202,8 @@ void ConvolverProcessor::setBypass(bool shouldBypass)
 
 void ConvolverProcessor::setTargetIRLength(float timeSec)
 {
-    float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, IR_LENGTH_MAX_SEC, timeSec);
+    const float maxAllowedSec = getMaximumAllowedIRLengthSec(currentSpec.sampleRate);
+    float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
     if (std::abs(targetIRLengthSec.load() - clampedTime) > 1e-5f)
     {
         targetIRLengthSec.store(clampedTime);
@@ -2677,6 +3212,26 @@ void ConvolverProcessor::setTargetIRLength(float timeSec)
         // IRがロード済みなら、短時間の連続操作をまとめて1回だけリビルドする
         requestDebouncedRebuild();
     }
+}
+
+void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
+{
+    const float maxAllowedSec = getMaximumAllowedIRLengthSec(currentSpec.sampleRate);
+    const float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
+
+    autoDetectedIRLengthSec.store(clampedTime, std::memory_order_release);
+    irLengthManualOverride.store(false, std::memory_order_release);
+
+    if (std::abs(targetIRLengthSec.load(std::memory_order_acquire) - clampedTime) > 1e-5f)
+    {
+        targetIRLengthSec.store(clampedTime, std::memory_order_release);
+        listeners.call(&Listener::convolverParamsChanged, this);
+    }
+}
+
+void ConvolverProcessor::setIRLengthManualOverride(bool isManual)
+{
+    irLengthManualOverride.store(isManual, std::memory_order_release);
 }
 
 void ConvolverProcessor::setSmoothingTime(float timeSec)
@@ -2697,6 +3252,63 @@ float ConvolverProcessor::getTargetIRLength() const
 float ConvolverProcessor::getSmoothingTime() const
 {
     return smoothingTimeSec.load();
+}
+
+void ConvolverProcessor::setMixedTransitionStartHz(float hz)
+{
+    const float clamped = juce::jlimit(MIXED_F1_MIN_HZ, MIXED_F1_MAX_HZ, hz);
+    float currentEnd = mixedTransitionEndHz.load(std::memory_order_acquire);
+    if (currentEnd < clamped + 10.0f)
+        currentEnd = juce::jlimit(MIXED_F2_MIN_HZ, MIXED_F2_MAX_HZ, clamped + 10.0f);
+
+    const float prevStart = mixedTransitionStartHz.exchange(clamped, std::memory_order_acq_rel);
+    const float prevEnd = mixedTransitionEndHz.exchange(currentEnd, std::memory_order_acq_rel);
+
+    if (std::abs(prevStart - clamped) > 1.0e-5f || std::abs(prevEnd - currentEnd) > 1.0e-5f)
+    {
+        listeners.call(&Listener::convolverParamsChanged, this);
+        requestDebouncedRebuild();
+    }
+}
+
+float ConvolverProcessor::getMixedTransitionStartHz() const
+{
+    return mixedTransitionStartHz.load(std::memory_order_acquire);
+}
+
+void ConvolverProcessor::setMixedTransitionEndHz(float hz)
+{
+    const float currentStart = mixedTransitionStartHz.load(std::memory_order_acquire);
+    const float minEnd = (std::max)(MIXED_F2_MIN_HZ, currentStart + 10.0f);
+    const float clamped = juce::jlimit(minEnd, MIXED_F2_MAX_HZ, hz);
+
+    const float prev = mixedTransitionEndHz.exchange(clamped, std::memory_order_acq_rel);
+    if (std::abs(prev - clamped) > 1.0e-5f)
+    {
+        listeners.call(&Listener::convolverParamsChanged, this);
+        requestDebouncedRebuild();
+    }
+}
+
+float ConvolverProcessor::getMixedTransitionEndHz() const
+{
+    return mixedTransitionEndHz.load(std::memory_order_acquire);
+}
+
+void ConvolverProcessor::setMixedPreRingTau(float tau)
+{
+    const float clamped = juce::jlimit(MIXED_TAU_MIN, MIXED_TAU_MAX, tau);
+    const float prev = mixedPreRingTau.exchange(clamped, std::memory_order_acq_rel);
+    if (std::abs(prev - clamped) > 1.0e-5f)
+    {
+        listeners.call(&Listener::convolverParamsChanged, this);
+        requestDebouncedRebuild();
+    }
+}
+
+float ConvolverProcessor::getMixedPreRingTau() const
+{
+    return mixedPreRingTau.load(std::memory_order_acquire);
 }
 
 void ConvolverProcessor::setExperimentalDirectHeadEnabled(bool enabled)
@@ -2749,16 +3361,23 @@ int ConvolverProcessor::getTotalLatencySamples() const
     return getLatencyBreakdown().totalLatencySamples;
 }
 
-void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
+void ConvolverProcessor::setPhaseMode(ConvolverProcessor::PhaseMode mode)
 {
-    if (useMinPhase.load() != shouldUseMinPhase)
+    const int newMode = static_cast<int>(mode);
+    const int oldMode = phaseMode.exchange(newMode, std::memory_order_acq_rel);
+    if (oldMode != newMode)
     {
-        useMinPhase.store(shouldUseMinPhase);
         listeners.call(&Listener::convolverParamsChanged, this);
 
         // 連続切り替えをまとめ、最新状態のみで再構築する
         requestDebouncedRebuild();
     }
+}
+
+void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
+{
+    setPhaseMode(shouldUseMinPhase ? ConvolverProcessor::PhaseMode::Minimum
+                                   : ConvolverProcessor::PhaseMode::AsIs);
 }
 
 //==============================================================================
@@ -2896,6 +3515,8 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
 
     isLoading.store(false);
     isRebuilding.store(false, std::memory_order_release);
+    if (rebuildPendingAfterLoad.exchange(false, std::memory_order_acq_rel) && isIRLoaded())
+        requestDebouncedRebuild();
     postCoalescedChangeNotification();
 }
 

@@ -35,6 +35,25 @@ class ConvolverProcessor : public juce::ChangeBroadcaster,
                            private juce::Timer
 {
 public:
+    struct IRLoadPreview
+    {
+        bool success = false;
+        juce::String errorMessage;
+        float autoDetectedLengthSec = 1.0f;
+        int autoDetectedLengthSamples = 0;
+        float recommendedMaxSec = 3.0f;
+        float hardMaxSec = 0.0f;
+        bool exceedsRecommended = false;
+        bool exceedsHardLimit = false;
+    };
+
+    enum class PhaseMode : int
+    {
+        AsIs = 0,
+        Mixed = 1,
+        Minimum = 2
+    };
+
     class Listener
     {
     public:
@@ -56,10 +75,19 @@ public:
     static constexpr float MIX_MAX = 1.0f;
     static constexpr float SMOOTHING_TIME_MIN_SEC = 0.01f;   // 10ms
     static constexpr float SMOOTHING_TIME_MAX_SEC = 0.5f;    // 500ms
-    static constexpr float SMOOTHING_TIME_DEFAULT_SEC = 0.05f; // 50ms
+    static constexpr float SMOOTHING_TIME_DEFAULT_SEC = 0.1f; // 100ms
     static constexpr float IR_LENGTH_MIN_SEC = 0.5f;
     static constexpr float IR_LENGTH_MAX_SEC = 3.0f;
     static constexpr float IR_LENGTH_DEFAULT_SEC = 1.0f;
+    static constexpr float MIXED_F1_MIN_HZ = 100.0f;
+    static constexpr float MIXED_F1_MAX_HZ = 400.0f;
+    static constexpr float MIXED_F1_DEFAULT_HZ = 200.0f;
+    static constexpr float MIXED_F2_MIN_HZ = 700.0f;
+    static constexpr float MIXED_F2_MAX_HZ = 1300.0f;
+    static constexpr float MIXED_F2_DEFAULT_HZ = 1000.0f;
+    static constexpr float MIXED_TAU_MIN = 4.0f;
+    static constexpr float MIXED_TAU_MAX = 256.0f;
+    static constexpr float MIXED_TAU_DEFAULT = 32.0f;
     static constexpr int REBUILD_DEBOUNCE_MIN_MS = 50;
     static constexpr int REBUILD_DEBOUNCE_MAX_MS = 3000;
     static constexpr int REBUILD_DEBOUNCE_DEFAULT_MS = 400;
@@ -115,10 +143,14 @@ public:
     float getMix() const;
 
     //----------------------------------------------------------
-    // Minimum Phase Mode
+    // IR Phase Mode
     //----------------------------------------------------------
+    void setPhaseMode(PhaseMode mode);
+    PhaseMode getPhaseMode() const { return static_cast<PhaseMode>(phaseMode.load(std::memory_order_acquire)); }
+
+    // 後方互換API
     void setUseMinPhase(bool useMinPhase);
-    bool getUseMinPhase() const { return useMinPhase.load(); }
+    bool getUseMinPhase() const { return getPhaseMode() == PhaseMode::Minimum; }
 
     //------------------------------------------------------------------
     // NUC 出力周波数フィルターモード設定
@@ -143,6 +175,16 @@ public:
     float getSmoothingTime() const;
 
     //----------------------------------------------------------
+    // Mixed Phase Parameters (f1/f2/tau)
+    //----------------------------------------------------------
+    void setMixedTransitionStartHz(float hz);
+    float getMixedTransitionStartHz() const;
+    void setMixedTransitionEndHz(float hz);
+    float getMixedTransitionEndHz() const;
+    void setMixedPreRingTau(float tau);
+    float getMixedPreRingTau() const;
+
+    //----------------------------------------------------------
     // Rebuild Debounce Time (Message/Worker burst control)
     //----------------------------------------------------------
     void setRebuildDebounceMs(int ms);
@@ -153,6 +195,13 @@ public:
     //----------------------------------------------------------
     void setTargetIRLength(float timeSec);
     float getTargetIRLength() const;
+    void applyAutoDetectedIRLength(float timeSec);
+    void setIRLengthManualOverride(bool isManual);
+    bool hasManualIRLengthOverride() const { return irLengthManualOverride.load(std::memory_order_acquire); }
+    float getAutoDetectedIRLength() const { return autoDetectedIRLengthSec.load(std::memory_order_acquire); }
+    static float getMaximumAllowedIRLengthSecForSampleRate(double sampleRate);
+    float getMaximumAllowedIRLengthSec(double sampleRate = 0.0) const;
+    static IRLoadPreview analyzeImpulseResponseFile(const juce::File& irFile, double processingSampleRate);
 
     //----------------------------------------------------------
     // 状態リセット
@@ -430,9 +479,10 @@ private:
     // applyNewState() (Message Thread) は wetCrossfade フィールドへの直接書き込みを行わず、
     // このフラグを立てるだけにする。Audio Thread が process() 先頭で検出し初期化する。
     std::atomic<bool> wetCrossfadeResetPending { false };
-    std::atomic<bool> useMinPhase{false};
+    std::atomic<int> phaseMode{static_cast<int>(PhaseMode::Mixed)};
     std::atomic<int> rebuildDebounceToken { 0 };
     std::atomic<bool> changeNotificationPending { false };
+    std::atomic<bool> rebuildPendingAfterLoad { false };
     std::atomic<int> rebuildDebounceMs { REBUILD_DEBOUNCE_DEFAULT_MS };
 
     // NUC 出力周波数フィルターモード (Message Thread で更新, finalizeNUC で読む)
@@ -440,7 +490,12 @@ private:
     std::atomic<int> nucHCMode { static_cast<int>(convo::HCMode::Natural) };
     std::atomic<int> nucLCMode { static_cast<int>(convo::LCMode::Natural) };
     std::atomic<float> targetIRLengthSec{IR_LENGTH_DEFAULT_SEC};
+    std::atomic<float> autoDetectedIRLengthSec{IR_LENGTH_DEFAULT_SEC};
+    std::atomic<bool> irLengthManualOverride{false};
     std::atomic<float> smoothingTimeSec{SMOOTHING_TIME_DEFAULT_SEC};
+    std::atomic<float> mixedTransitionStartHz{MIXED_F1_DEFAULT_HZ};
+    std::atomic<float> mixedTransitionEndHz{MIXED_F2_DEFAULT_HZ};
+    std::atomic<float> mixedPreRingTau{MIXED_TAU_DEFAULT};
 
     //----------------------------------------------------------
     // IR情報

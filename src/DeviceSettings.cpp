@@ -185,11 +185,16 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
 
     addAndMakeVisible(inputHeadroomSlider);
     inputHeadroomSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    inputHeadroomSlider.setRange(-12.0, -6.0, 0.1);
+    // AudioEngine 側クランプの全許容域: -12..0 dB
+    // (モードにより上限は -6 または 0 に制限される)
+    inputHeadroomSlider.setRange(-12.0, 0.0, 0.1);
     inputHeadroomSlider.setTextValueSuffix(" dB");
     inputHeadroomSlider.setNumDecimalPlacesToDisplay(1);
     inputHeadroomSlider.onValueChange = [this] {
         audioEngine.setInputHeadroomDb(static_cast<float>(inputHeadroomSlider.getValue()));
+        const double clamped = static_cast<double>(audioEngine.getInputHeadroomDb());
+        if (std::abs(inputHeadroomSlider.getValue() - clamped) > 1.0e-6)
+            inputHeadroomSlider.setValue(clamped, juce::dontSendNotification);
     };
 
     // Output Makeup Controls
@@ -199,12 +204,16 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
 
     addAndMakeVisible(outputMakeupSlider);
     outputMakeupSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    // [Fix] 範囲を [+6, +18] dB に拡張 (setOutputMakeupDb のクランプと一致)
-    outputMakeupSlider.setRange(6.0, 18.0, 0.1);
+    // AudioEngine 側クランプの全許容域: -6..+12 dB
+    // (モードにより -6..0 / +6..+10 / +6..+12 へ制限される)
+    outputMakeupSlider.setRange(-6.0, 12.0, 0.1);
     outputMakeupSlider.setTextValueSuffix(" dB");
     outputMakeupSlider.setNumDecimalPlacesToDisplay(1);
     outputMakeupSlider.onValueChange = [this] {
         audioEngine.setOutputMakeupDb(static_cast<float>(outputMakeupSlider.getValue()));
+        const double clamped = static_cast<double>(audioEngine.getOutputMakeupDb());
+        if (std::abs(outputMakeupSlider.getValue() - clamped) > 1.0e-6)
+            outputMakeupSlider.setValue(clamped, juce::dontSendNotification);
     };
 
     // デバイス変更を監視してビット深度リストを更新
@@ -224,10 +233,14 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     // loadSettings()後にUIの値を更新
     inputHeadroomSlider.setValue(audioEngine.getInputHeadroomDb(), juce::dontSendNotification);
     outputMakeupSlider.setValue(audioEngine.getOutputMakeupDb(), juce::dontSendNotification);
+
+    updateGainStagingDisplay();
+    startTimerHz(5);
 }
 
 DeviceSettings::~DeviceSettings()
 {
+    stopTimer();
     audioDeviceManager.removeChangeListener(this);
     filterTypeTabs.getTabbedButtonBar().removeChangeListener(this);
 }
@@ -277,6 +290,73 @@ void DeviceSettings::changeListenerCallback (juce::ChangeBroadcaster* source)
     {
         updateBitDepthList();
     }
+}
+
+void DeviceSettings::timerCallback()
+{
+    updateGainStagingDisplay();
+}
+
+void DeviceSettings::updateGainStagingDisplay()
+{
+    const bool eqBypassed = audioEngine.isEqBypassRequested();
+    const bool convBypassed = audioEngine.isConvolverBypassRequested();
+    const auto order = audioEngine.getProcessingOrder();
+
+    float inputMaxDb = 0.0f;
+    float makeupMinDb = 6.0f;
+    float makeupMaxDb = 12.0f;
+    juce::String modeText;
+
+    if (convBypassed && !eqBypassed)
+    {
+        modeText = "PEQ only";
+        inputMaxDb = 0.0f;
+        makeupMinDb = -6.0f;
+        makeupMaxDb = 0.0f;
+    }
+    else if (!convBypassed && !eqBypassed && order == AudioEngine::ProcessingOrder::EQThenConvolver)
+    {
+        modeText = "PEQ -> Conv";
+        inputMaxDb = 0.0f;
+        makeupMinDb = 6.0f;
+        makeupMaxDb = 10.0f;
+    }
+    else if (eqBypassed && !convBypassed)
+    {
+        modeText = "Conv only";
+        inputMaxDb = -6.0f;
+        makeupMinDb = 6.0f;
+        makeupMaxDb = 12.0f;
+    }
+    else
+    {
+        modeText = "Conv -> PEQ";
+        inputMaxDb = -6.0f;
+        makeupMinDb = 6.0f;
+        makeupMaxDb = 12.0f;
+    }
+
+    const juce::String inputText = "Input Headroom (" + juce::String(-12.0f, 1) + ".." + juce::String(inputMaxDb, 1) + " dB):";
+    const juce::String makeupText = "Output Makeup (" + juce::String(makeupMinDb, 1) + ".." + juce::String(makeupMaxDb, 1) + " dB):";
+    const juce::String signature = modeText + "|" + inputText + "|" + makeupText;
+
+    if (signature != gainDisplaySignature)
+    {
+        gainDisplaySignature = signature;
+        inputHeadroomLabel.setText(inputText, juce::dontSendNotification);
+        outputMakeupLabel.setText(makeupText, juce::dontSendNotification);
+        const juce::String modeTip = "Current mode: " + modeText;
+        inputHeadroomLabel.setTooltip(modeTip);
+        outputMakeupLabel.setTooltip(modeTip);
+    }
+
+    const double currentInput = static_cast<double>(audioEngine.getInputHeadroomDb());
+    const double currentMakeup = static_cast<double>(audioEngine.getOutputMakeupDb());
+    if (std::abs(inputHeadroomSlider.getValue() - currentInput) > 1.0e-6)
+        inputHeadroomSlider.setValue(currentInput, juce::dontSendNotification);
+    if (std::abs(outputMakeupSlider.getValue() - currentMakeup) > 1.0e-6)
+        outputMakeupSlider.setValue(currentMakeup, juce::dontSendNotification);
 }
 
 void DeviceSettings::updateBitDepthList()

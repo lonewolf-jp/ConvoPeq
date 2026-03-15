@@ -71,6 +71,7 @@ ConvoPeq is organized around four priorities:
 
 - `DeviceSettings.h/.cpp`
   - Device configuration and persistence support.
+  - Persists `device_settings.xml` under `%APPDATA%/ConvoPeq/` for device state plus dither / oversampling / input headroom / output makeup.
 
 - `AsioBlacklist.h`
   - Compatibility guard for known problematic ASIO scenarios.
@@ -205,6 +206,14 @@ ConvoPeq follows a staged update model:
 
 This is especially important for convolver IR operations and engine rebuilds.
 
+Persistence is split into two paths:
+
+- `DeviceSettings::saveSettings/loadSettings`
+  - Restores device state and a small set of session-like engine settings (`ditherBitDepth`, `oversamplingFactor`, `oversamplingType`, `inputHeadroomDb`, `outputMakeupDb`).
+- `AudioEngine::getCurrentState()/requestLoadState()`
+  - Manual preset XML path used by the main window save/load actions.
+  - Restores processing order, bypass state, gain staging, analyzer routing, filter modes, EQ state, and Convolver state.
+
 ---
 
 ## 7. Convolver Runtime Design (Current)
@@ -217,10 +226,18 @@ This is especially important for convolver IR operations and engine rebuilds.
 - **Coalesced change notifications** to reduce message-thread bursts.
 - **Crossfade-aware processing** so old/new wet/delay paths overlap only where needed.
 - **Latency retarget hysteresis** to reduce frequent retriggering.
+- **Phase state persistence** for `AsIs / Mixed / Minimum` plus `mixedF1Hz / mixedF2Hz / mixedTau`.
+- **IR length persistence** for both target length and auto/manual selection state.
 
 UI integration details:
 
 - `ConvolverControlPanel` applies a **3-second idle debounce** for selected expensive controls (mix/smoothing/IR length) to avoid repeated rebuild pressure during active dragging.
+- Advanced IR settings are hosted in a separate dialog and include IR length, rebuild debounce, and Mixed-phase tuning controls.
+
+Latency reporting details:
+
+- `AudioEngine::getCurrentLatencyBreakdown()` publishes oversampling latency, convolver algorithm latency, IR peak latency, and total base-rate latency.
+- `MainWindow::timerCallback()` renders latency from the single source `totalLatencyBaseRateSamples` to keep `ms` and `samples` numerically consistent.
 
 ---
 
@@ -240,6 +257,7 @@ Performance controls:
   - hidden component: `5 Hz`.
 - **Coalesced EQ update requests** using dirty-flag + interval gating.
 - Analyzer-off path avoids unnecessary repeated full visual updates.
+- Input/output analyzer routing is selected in `AudioEngine`, while the UI consumes data through the engine FIFO without touching callback-time state.
 
 ---
 

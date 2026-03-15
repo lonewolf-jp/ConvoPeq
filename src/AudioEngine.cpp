@@ -716,19 +716,8 @@ double AudioEngine::getCurrentLatencyMs() const
     if (sr <= 0.0)
         return 0.0;
 
-    const auto breakdown = getCurrentLatencyBreakdown();
-
-    const auto toMsRounded3 = [sr](int samples) -> double
-    {
-        const double ms = (static_cast<double>(samples) * 1000.0) / sr;
-        return std::round(ms * 1000.0) / 1000.0;
-    };
-
-    const double osMs = toMsRounded3(breakdown.oversamplingLatencyBaseRateSamples);
-    const double convAlgorithmMs = toMsRounded3(breakdown.convolverAlgorithmLatencyBaseRateSamples);
-    const double convPeakMs = toMsRounded3(breakdown.convolverIRPeakLatencyBaseRateSamples);
-    const double totalMs = osMs + convAlgorithmMs + convPeakMs;
-
+    const int totalSamples = getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
+    const double totalMs = (static_cast<double>(totalSamples) * 1000.0) / sr;
     return static_cast<double>(juce::roundToInt(totalMs));
 }
 
@@ -1087,7 +1076,10 @@ void AudioEngine::rebuildThreadLoop()
                 {
                     // IRの生成条件が一致しているか確認
                     if (task.newDSP->convolver.getIRName() == task.currentDSP->convolver.getIRName() &&
-                        task.newDSP->convolver.getUseMinPhase() == task.currentDSP->convolver.getUseMinPhase() &&
+                        task.newDSP->convolver.getPhaseMode() == task.currentDSP->convolver.getPhaseMode() &&
+                        std::abs(task.newDSP->convolver.getMixedTransitionStartHz() - task.currentDSP->convolver.getMixedTransitionStartHz()) < 0.001f &&
+                        std::abs(task.newDSP->convolver.getMixedTransitionEndHz() - task.currentDSP->convolver.getMixedTransitionEndHz()) < 0.001f &&
+                        std::abs(task.newDSP->convolver.getMixedPreRingTau() - task.currentDSP->convolver.getMixedPreRingTau()) < 0.001f &&
                         task.newDSP->convolver.getExperimentalDirectHeadEnabled() == task.currentDSP->convolver.getExperimentalDirectHeadEnabled() &&
                         std::abs(task.newDSP->convolver.getTargetIRLength() - task.currentDSP->convolver.getTargetIRLength()) < 0.001f)
                     {
@@ -1239,15 +1231,6 @@ void AudioEngine::timerCallback()
     {
         dsp->eq.cleanup();
         dsp->convolver.cleanup();
-    }
-
-    {
-        const juce::ScopedLock sl(trashBinLock);
-        for (const auto& entry : trashBin)
-            if (entry.first != nullptr) {
-                entry.first->eq.cleanup();
-                entry.first->convolver.cleanup();
-            }
     }
 
     // UI用プロセッサのクリーンアップ
@@ -2285,12 +2268,23 @@ void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
 
 void AudioEngine::setConvolverUseMinPhase(bool useMinPhase)
 {
-    uiConvolverProcessor.setUseMinPhase(useMinPhase);
+    setConvolverPhaseMode(useMinPhase ? ConvolverProcessor::PhaseMode::Minimum
+                                      : ConvolverProcessor::PhaseMode::AsIs);
 }
 
 bool AudioEngine::getConvolverUseMinPhase() const
 {
-    return uiConvolverProcessor.getUseMinPhase();
+    return getConvolverPhaseMode() == ConvolverProcessor::PhaseMode::Minimum;
+}
+
+void AudioEngine::setConvolverPhaseMode(ConvolverProcessor::PhaseMode mode)
+{
+    uiConvolverProcessor.setPhaseMode(mode);
+}
+
+ConvolverProcessor::PhaseMode AudioEngine::getConvolverPhaseMode() const
+{
+    return uiConvolverProcessor.getPhaseMode();
 }
 
 void AudioEngine::requestEqPreset (int presetIndex)
@@ -2346,6 +2340,15 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("convolverInputTrimDb"))
         setConvolverInputTrimDb(state.getProperty("convolverInputTrimDb"));
 
+    if (state.hasProperty("ditherBitDepth"))
+        setDitherBitDepth(static_cast<int>(state.getProperty("ditherBitDepth")));
+
+    if (state.hasProperty("oversamplingFactor"))
+        setOversamplingFactor(static_cast<int>(state.getProperty("oversamplingFactor")));
+
+    if (state.hasProperty("oversamplingType"))
+        setOversamplingType((OversamplingType)(int)state.getProperty("oversamplingType"));
+
     // ─── Step 3: その他のグローバル設定 ─────────────────────────────────────
     if (state.hasProperty("softClipEnabled"))
         setSoftClipEnabled(state.getProperty("softClipEnabled"));
@@ -2389,6 +2392,9 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.setProperty("outputMakeupDb", outputMakeupDb.load(), nullptr);
     state.setProperty("analyzerSource", (int)currentAnalyzerSource.load(), nullptr);
     state.setProperty("convolverInputTrimDb", convolverInputTrimDb.load(), nullptr);
+    state.setProperty("ditherBitDepth", ditherBitDepth.load(), nullptr);
+    state.setProperty("oversamplingFactor", manualOversamplingFactor.load(), nullptr);
+    state.setProperty("oversamplingType", (int)oversamplingType.load(), nullptr);
     state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);
     state.setProperty("convBypassed", convBypassRequested.load(), nullptr);
     // 出力周波数フィルターモードの保存

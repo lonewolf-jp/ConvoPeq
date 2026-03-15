@@ -150,6 +150,11 @@ public:
     // パラメータ設定 (Thread-safe)
     void setEqBypassRequested (bool shouldBypass);
     void setConvolverBypassRequested (bool shouldBypass);
+    bool isEqBypassRequested() const noexcept { return eqBypassRequested.load(std::memory_order_relaxed); }
+    bool isConvolverBypassRequested() const noexcept { return convBypassRequested.load(std::memory_order_relaxed); }
+
+    void setConvolverPhaseMode(ConvolverProcessor::PhaseMode mode);
+    ConvolverProcessor::PhaseMode getConvolverPhaseMode() const;
 
     void setConvolverUseMinPhase(bool useMinPhase);
     bool getConvolverUseMinPhase() const;

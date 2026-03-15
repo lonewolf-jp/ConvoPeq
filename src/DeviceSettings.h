@@ -28,7 +28,8 @@
 #include "AudioEngine.h"
 
 class DeviceSettings : public juce::Component,
-                       private juce::ChangeListener
+                       private juce::ChangeListener,
+                       private juce::Timer
 {
 public:
     DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engine);
@@ -43,7 +44,9 @@ public:
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
+    void timerCallback() override;
     void updateBitDepthList();
+    void updateGainStagingDisplay();
 
     juce::AudioDeviceManager& audioDeviceManager;
     AudioEngine& audioEngine;
@@ -62,6 +65,7 @@ private:
 
     juce::Slider outputMakeupSlider;
     juce::Label outputMakeupLabel;
+    juce::String gainDisplaySignature;
 
     static juce::File getSettingsFile();
 

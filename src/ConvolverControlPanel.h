@@ -7,7 +7,7 @@
 // UI elements:
 //   - Load IR ボタン
 //   - Dry/Wet Mix スライダー
-//   - 位相選択 (Linear/Minimum)
+//   - 位相選択 (As-Is/Mixed/Minimum)
 //   - IR波形表示
 //   - IR情報表示
 //============================================================================
@@ -39,6 +39,7 @@ private:
     // UIコンポーネント
     //----------------------------------------------------------
     juce::TextButton loadIRButton{"Load IR..."};
+    juce::TextButton irAdvancedButton{"IR Advanced..."};
     juce::ComboBox phaseChoiceBox;
     juce::ToggleButton experimentalDirectHeadToggle;
 
@@ -53,6 +54,15 @@ private:
 
     juce::Slider rebuildDebounceSlider;
     juce::Label rebuildDebounceLabel;
+
+    juce::Slider mixedF1Slider;
+    juce::Label mixedF1Label;
+
+    juce::Slider mixedF2Slider;
+    juce::Label mixedF2Label;
+
+    juce::Slider mixedTauSlider;
+    juce::Label mixedTauLabel;
 
     juce::Label irInfoLabel;
 
@@ -82,6 +92,13 @@ private:
     void timerCallback() override;
 
     void updateWaveformPath();
+    void updateMixedPhaseControlsEnabled();
+    void startAsyncIRLoadPreview(const juce::File& irFile);
+    void finishAsyncIRLoadPreview(const juce::File& irFile,
+                                  const ConvolverProcessor::IRLoadPreview& preview,
+                                  int requestId);
+    void setIRPreviewInProgress(bool isInProgress);
+    void showIRAdvancedWindow();
     // Convolver Input Trim スライダーの表示と値をエンジンの現在モードに同期する。
     // モード変更後 (バイパス切替・処理順序変更・プリセットロード) に呼ぶこと。
     void updateTrimSlider();
@@ -104,9 +121,18 @@ private:
     bool pendingMixDirty = false;
     bool pendingSmoothingDirty = false;
     bool pendingIrLengthDirty = false;
+    bool pendingMixedF1Dirty = false;
+    bool pendingMixedF2Dirty = false;
+    bool pendingMixedTauDirty = false;
     float pendingMixValue = 1.0f;
     float pendingSmoothingTimeSec = ConvolverProcessor::SMOOTHING_TIME_DEFAULT_SEC;
     float pendingIrLengthSec = ConvolverProcessor::IR_LENGTH_DEFAULT_SEC;
+    float pendingMixedF1Hz = ConvolverProcessor::MIXED_F1_DEFAULT_HZ;
+    float pendingMixedF2Hz = ConvolverProcessor::MIXED_F2_DEFAULT_HZ;
+    float pendingMixedTau = ConvolverProcessor::MIXED_TAU_DEFAULT;
+    std::atomic<int> irPreviewRequestId { 0 };
+    bool irPreviewInProgress = false;
+    juce::Component::SafePointer<juce::DialogWindow> irAdvancedWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverControlPanel)
 };
