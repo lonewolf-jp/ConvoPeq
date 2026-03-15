@@ -196,4 +196,4 @@ For more details, see `BUILD_GUIDE_WINDOWS.md`.
 - **r8brain-free-src**: MIT
 - **Intel oneMKL**: Intel Simplified Software License
 
-![](../image260315_214309.png)
+![ConvoPeq screenshot](../image260315_214309.png)
