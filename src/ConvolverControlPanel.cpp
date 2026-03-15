@@ -69,7 +69,7 @@ public:
         mixedF1Slider.setSliderStyle(juce::Slider::LinearHorizontal);
         mixedF1Slider.setRange(ConvolverProcessor::MIXED_F1_MIN_HZ,
                                ConvolverProcessor::MIXED_F1_MAX_HZ, 1.0);
-        mixedF1Slider.setSkewFactorFromMidPoint(800.0);
+        mixedF1Slider.setSkewFactorFromMidPoint(ConvolverProcessor::MIXED_F1_DEFAULT_HZ);
         mixedF1Slider.setTextValueSuffix(" Hz");
         mixedF1Slider.setNumDecimalPlacesToDisplay(0);
         mixedF1Slider.addListener(this);
@@ -77,7 +77,7 @@ public:
         mixedF2Slider.setSliderStyle(juce::Slider::LinearHorizontal);
         mixedF2Slider.setRange(ConvolverProcessor::MIXED_F2_MIN_HZ,
                                ConvolverProcessor::MIXED_F2_MAX_HZ, 1.0);
-        mixedF2Slider.setSkewFactorFromMidPoint(2500.0);
+        mixedF2Slider.setSkewFactorFromMidPoint(ConvolverProcessor::MIXED_F2_DEFAULT_HZ);
         mixedF2Slider.setTextValueSuffix(" Hz");
         mixedF2Slider.setNumDecimalPlacesToDisplay(0);
         mixedF2Slider.addListener(this);
@@ -308,7 +308,7 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     mixedF1Slider.setSliderStyle(juce::Slider::LinearHorizontal);
     mixedF1Slider.setRange(ConvolverProcessor::MIXED_F1_MIN_HZ,
                            ConvolverProcessor::MIXED_F1_MAX_HZ, 1.0);
-    mixedF1Slider.setSkewFactorFromMidPoint(800.0);
+    mixedF1Slider.setSkewFactorFromMidPoint(ConvolverProcessor::MIXED_F1_DEFAULT_HZ);
     mixedF1Slider.setTextValueSuffix(" Hz");
     mixedF1Slider.setNumDecimalPlacesToDisplay(0);
     mixedF1Slider.setValue(engine.getConvolverProcessor().getMixedTransitionStartHz(), juce::dontSendNotification);
@@ -325,7 +325,7 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     mixedF2Slider.setSliderStyle(juce::Slider::LinearHorizontal);
     mixedF2Slider.setRange(ConvolverProcessor::MIXED_F2_MIN_HZ,
                            ConvolverProcessor::MIXED_F2_MAX_HZ, 1.0);
-    mixedF2Slider.setSkewFactorFromMidPoint(2500.0);
+    mixedF2Slider.setSkewFactorFromMidPoint(ConvolverProcessor::MIXED_F2_DEFAULT_HZ);
     mixedF2Slider.setTextValueSuffix(" Hz");
     mixedF2Slider.setNumDecimalPlacesToDisplay(0);
     mixedF2Slider.setValue(engine.getConvolverProcessor().getMixedTransitionEndHz(), juce::dontSendNotification);
