@@ -123,7 +123,8 @@ public:
     static constexpr float DEFAULT_Q = 0.707f;
 
     // ── AGC定数 ──
-    static constexpr double AGC_RESPONSE_TIME_SEC = 1.0; // エンベロープ追従時定数 (1.0s)
+    static constexpr double AGC_ATTACK_TIME_SEC   = 0.1; // エンベロープ追従アタック時定数 (0.1s) - 速いアタックでトランジェントに即応
+    static constexpr double AGC_RELEASE_TIME_SEC  = 2.0; // エンベロープ追従リリース時定数 (2.0s) - 緩やかなリリースでポンピング抑制
     static constexpr double AGC_SMOOTH_TIME_SEC   = 0.2; // ゲイン変化スムーシング時定数 (0.2s)
     static constexpr float AGC_MIN_GAIN    = 0.06f; // 最小ゲイン制限 (~ -24dB)
     static constexpr float AGC_MAX_GAIN    = 16.0f; // 最大ゲイン制限 (~ +24dB)
@@ -154,8 +155,8 @@ public:
     void releaseResources();
 
     // バイパス制御
-    void setBypass(bool shouldBypass) { bypassed.store(shouldBypass); }
-    bool isBypassed() const { return bypassed.load(); }
+    void setBypass(bool shouldBypass) { bypassRequested.store(shouldBypass, std::memory_order_relaxed); }
+    bool isBypassed() const { return bypassRequested.load(std::memory_order_relaxed); }
 
     //----------------------------------------------------------
     // パラメータ変更 (UIスレッドから呼ぶ)
@@ -328,6 +329,7 @@ private:
     std::atomic<double> totalGainTarget   { 1.0 }; // linear gain, default 0dB = 1.0
     juce::SmoothedValue<double> smoothTotalGain;
     static constexpr double SMOOTHING_TIME_SEC = 0.05; // 50ms
+    static constexpr double BYPASS_FADE_TIME_SEC = 0.005; // 5ms
 
     // ── 係数管理 (Atomic Swap) ──
     std::array<std::atomic<BandNode*>, NUM_BANDS> bandNodes; // Raw pointer for Audio Thread
@@ -341,7 +343,9 @@ private:
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──
     // SVFの2つの積分器状態 (ic1eq, ic2eq)
     std::array<std::array<std::array<double, 2>, NUM_BANDS>, MAX_CHANNELS> filterState{};
-    std::atomic<bool> bypassed { false };
+    std::atomic<bool> bypassRequested { false };
+    std::atomic<bool> bypassed { false }; // 実効バイパス状態（フェード完了後に更新）
+    juce::SmoothedValue<double> bypassFadeGain;
 
     // ── 現在のサンプルレート ──
     // prepareToPlay で更新。Audio Thread で係数再計算に使用。

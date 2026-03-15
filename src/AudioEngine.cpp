@@ -1619,6 +1619,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     //----------------------------------------------------------
     // DSP処理チェーン (Dynamic Processing Order)
     //----------------------------------------------------------
+    // EQバイパス要求を毎ブロック反映（実効バイパスはEQProcessor内の短フェードで切替）
+    eq.setBypass(state.eqBypassed);
+
     // プロセッサには AudioBlock を直接渡す (AudioBuffer作成によるmalloc回避)
     if (state.order == ProcessingOrder::ConvolverThenEQ) // stateから読み出し
     {
@@ -1626,14 +1629,12 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         if (!state.convBypassed) // stateから読み出し
             convolver.process(processBlock);
         // 2. EQ
-        if (!state.eqBypassed) // stateから読み出し
-            eq.process(processBlock);
+        eq.process(processBlock);
     }
     else
     {
         // 1. EQ
-        if (!state.eqBypassed) // stateから読み出し
-            eq.process(processBlock);
+        eq.process(processBlock);
         // 2. Convolver
         if (!state.convBypassed) // stateから読み出し
         {
@@ -1798,17 +1799,17 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
     const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
 
+    eq.setBypass(state.eqBypassed);
+
     if (state.order == ProcessingOrder::ConvolverThenEQ)
     {
         if (!state.convBypassed)
             convolver.process(processBlock);
-        if (!state.eqBypassed)
-            eq.process(processBlock);
+        eq.process(processBlock);
     }
     else
     {
-        if (!state.eqBypassed)
-            eq.process(processBlock);
+        eq.process(processBlock);
         if (!state.convBypassed)
         {
             // EQ→Conv 時: コンボルバー入力トリムを適用してから畳み込む

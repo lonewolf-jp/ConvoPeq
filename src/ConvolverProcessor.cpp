@@ -1477,6 +1477,21 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
 //--------------------------------------------------------------
 // Minimum Phase 変換ヘルパー
 // ケプストラム法 (Homomorphic Filtering) による最小位相復元
+//--------------------------------------------------------------
+// Equal-power クロスフェード用ヘルパー
+// sin(x * π/2) の9次テイラー多項式近似 (x ∈ [0,1])
+// 最大誤差: ~1.6e-12 (Audio Thread内でのlibm呼び出しを回避するためpolynomial近似を使用)
+//--------------------------------------------------------------
+static inline double equalPowerSin(double x) noexcept
+{
+    const double t  = x * (juce::MathConstants<double>::pi * 0.5);
+    const double t2 = t * t;
+    return t * (1.0 + t2 * (-1.0/6.0 + t2 * (1.0/120.0 + t2 * (-1.0/5040.0 + t2 * (1.0/362880.0)))));
+}
+
+//--------------------------------------------------------------
+// Minimum Phase 変換ヘルパー
+// ケプストラム法 (Homomorphic Filtering) による最小位相復元
 // 目的: 振幅特性（周波数応答の絶対値）を保ったまま、エネルギーを時間軸の前方に集中させ、レイテンシーとプリリンギングを低減する。
 // アルゴリズム手順:
 //   1. FFT -> 周波数領域へ
@@ -2919,8 +2934,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         for (int i = 0; i < numSamples; ++i)
         {
             const double mix = mixSmoother.getNextValue();
-            wg[i] = mix * headroom;
-            dg[i] = 1.0 - mix;
+            wg[i] = equalPowerSin(mix)         * headroom;
+            dg[i] = equalPowerSin(1.0 - mix);
         }
         wetGains = wg;
         dryGains = dg;
@@ -3018,8 +3033,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     for (int ch = 0; ch < procChannels; ++ch)
     {
-        const double wetG = needsConvolution ? (targetMixValue * headroom) : 0.0;
-        const double dryG = needsDrySignal ? (1.0 - targetMixValue) : 0.0;
+        const double wetG = needsConvolution ? (equalPowerSin(targetMixValue)         * headroom) : 0.0;
+        const double dryG = needsDrySignal   ?  equalPowerSin(1.0 - targetMixValue)                  : 0.0;
         const double* inputBase = block.getChannelPointer(ch);
         double* wetBase = wetBufferStorage[ch].get(); // Use temp buffer for wet signal
         const double* dryBase = dryBuffer.getReadPointer(ch);

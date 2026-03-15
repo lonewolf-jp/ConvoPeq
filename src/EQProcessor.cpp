@@ -136,6 +136,10 @@ void EQProcessor::reset()
 
     bandResetMask.store(0, std::memory_order_relaxed);
     agcResetRequest.store(false, std::memory_order_relaxed);
+
+    const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
+    bypassed.store(requestedBypass, std::memory_order_relaxed);
+    bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
 }
 
 //--------------------------------------------------------------
@@ -511,6 +515,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 
     // reset()を呼び、スムーシングの状態を初期化（現在値は0.0になる）
     smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
+    bypassFadeGain.reset(sampleRate, BYPASS_FADE_TIME_SEC);
 
     // 初期化直後のフェードイン（0.0 -> Target）を防ぐため、
     // 現在値をターゲット値に即座に設定する。
@@ -531,6 +536,10 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     // フラグもクリア
     bandResetMask.store(0, std::memory_order_relaxed);
     agcResetRequest.store(false, std::memory_order_relaxed);
+
+    const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
+    bypassed.store(requestedBypass, std::memory_order_relaxed);
+    bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
 
     // 係数を即座に再計算 (レート変更時のみ)
     if (rateChanged)
@@ -1034,12 +1043,15 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
 
     // ブロック長とサンプリングレートに基づいて係数を動的に計算
     // alpha = dt / (dt + tau)  (dt: samples, tau: samples)
-    const double alpha       = (double)numSamples / ((double)numSamples + currentSampleRate * AGC_RESPONSE_TIME_SEC);
-    const double smoothAlpha = (double)numSamples / ((double)numSamples + currentSampleRate * AGC_SMOOTH_TIME_SEC);
+    const double alphaAttack  = (double)numSamples / ((double)numSamples + currentSampleRate * AGC_ATTACK_TIME_SEC);
+    const double alphaRelease = (double)numSamples / ((double)numSamples + currentSampleRate * AGC_RELEASE_TIME_SEC);
+    const double smoothAlpha  = (double)numSamples / ((double)numSamples + currentSampleRate * AGC_SMOOTH_TIME_SEC);
 
-    // 指数移動平均 (EMA) によるエンベロープ検波
-    envIn  = envIn  * (1.0 - alpha) + inputRMS  * alpha;
-    envOut = envOut * (1.0 - alpha) + outputRMS * alpha;
+    // 指数移動平均 (EMA) によるエンベロープ検波 (アシンメトリック: アタック速い / リリース遅い)
+    const double inputAlpha  = (inputRMS  > envIn)  ? alphaAttack : alphaRelease;
+    const double outputAlpha = (outputRMS > envOut) ? alphaAttack : alphaRelease;
+    envIn  = envIn  * (1.0 - inputAlpha)  + inputRMS  * inputAlpha;
+    envOut = envOut * (1.0 - outputAlpha) + outputRMS * outputAlpha;
 
     // Denormal対策: 極小値をゼロにクランプ (無音時のCPU負荷対策)
     if (envIn < convo::numeric_policy::kDenormThresholdAudioState) envIn = 0.0;
@@ -1092,7 +1104,20 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
 
-    if (bypassed.load(std::memory_order_relaxed))
+    const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
+    bool effectiveBypass = bypassed.load(std::memory_order_relaxed);
+
+    const double targetBypassFade = requestedBypass ? 0.0 : 1.0;
+    if (std::abs(bypassFadeGain.getTargetValue() - targetBypassFade) > 1.0e-12)
+    {
+        if (!requestedBypass && effectiveBypass)
+            bypassed.store(false, std::memory_order_relaxed);
+        bypassFadeGain.setTargetValue(targetBypassFade);
+        effectiveBypass = bypassed.load(std::memory_order_relaxed);
+    }
+
+    const bool bypassTransitionActive = bypassFadeGain.isSmoothing();
+    if (requestedBypass && effectiveBypass && !bypassTransitionActive)
         return;
 
     const int numSamples = (int)block.getNumSamples();
@@ -1107,6 +1132,22 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         for (int ch = 0; ch < (int)block.getNumChannels(); ++ch)
             juce::FloatVectorOperations::clear(block.getChannelPointer(ch), numSamples);
         return;
+    }
+
+    const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
+
+    double* dryCopyBase = nullptr;
+    if (bypassTransitionActive)
+    {
+        const int requiredDrySamples = numSamples * numChannels;
+        if (scratchBuffer && requiredDrySamples <= scratchCapacity)
+        {
+            dryCopyBase = scratchBuffer.get();
+            for (int ch = 0; ch < numChannels; ++ch)
+                std::memcpy(dryCopyBase + (ch * numSamples),
+                            block.getChannelPointer(ch),
+                            sizeof(double) * static_cast<size_t>(numSamples));
+        }
     }
 
     // ── State Reset Handling ──
@@ -1136,8 +1177,6 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             }
         }
     }
-
-    const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
 
     const bool isAgcEnabled = agcEnabled.load(std::memory_order_acquire);
     // ✅ フィルタ処理前に入力レベルをキャッシュ (AGCが有効な場合のみ)
@@ -1236,6 +1275,36 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         const double increment = (endGain - startGain) / static_cast<double>(numSamples);
         for (int ch = 0; ch < numChannels; ++ch)
             applyGainRamp_AVX2(block.getChannelPointer(ch), numSamples, startGain, increment);
+    }
+
+    if (bypassTransitionActive && dryCopyBase != nullptr)
+    {
+        for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
+        {
+            const double wetGain = bypassFadeGain.getNextValue();
+            const double dryGain = 1.0 - wetGain;
+
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                double* wetPtr = block.getChannelPointer(ch);
+                const double dryValue = dryCopyBase[ch * numSamples + sampleIndex];
+                wetPtr[sampleIndex] = wetPtr[sampleIndex] * wetGain + dryValue * dryGain;
+            }
+        }
+
+        if (!bypassFadeGain.isSmoothing())
+        {
+            if (requestedBypass)
+            {
+                bypassed.store(true, std::memory_order_relaxed);
+                bypassFadeGain.setCurrentAndTargetValue(0.0);
+            }
+            else
+            {
+                bypassed.store(false, std::memory_order_relaxed);
+                bypassFadeGain.setCurrentAndTargetValue(1.0);
+            }
+        }
     }
 }
 
