@@ -16,6 +16,7 @@
 #include "CDSPResampler.h"
 #include "AlignedAllocation.h" // For convo::MKLAllocator
 #include "InputBitDepthTransform.h"
+#include "UltraHighRateDCBlocker.h"
 
 #include <mkl.h>
 #include <mkl_vml.h>
@@ -444,46 +445,6 @@ static inline ConvolverSizing computeMasteringSizing(int internalBlockSize, int 
 }
 
 //--------------------------------------------------------------
-// 高精度型 DC Blocker (1次IIR)
-// 超高サンプリングレート（OSR）対応
-//--------------------------------------------------------------
-class UltraHighRateDCBlocker {
-private:
-    double m_prev_x = 0.0;
-    double m_prev_y = 0.0;
-    double m_R = 0.999999; // デフォルト値
-
-public:
-    // サンプリングレートに合わせて R を計算
-    void init(double sampleRate, double cutoffHz) {
-        // R = exp(-2 * PI * cutoff / sampleRate)
-        m_R = std::exp(-2.0 * juce::MathConstants<double>::pi * cutoffHz / sampleRate);
-    }
-
-    // 64byteアライメントされたバッファを高速処理
-    void process(double* data, int numSamples) {
-        double px = m_prev_x;
-        double py = m_prev_y;
-        double r = m_R;
-        constexpr double kDenormalThreshold = convo::numeric_policy::kDenormThresholdAudioState;
-
-        for (int i = 0; i < numSamples; ++i) {
-            double curr_x = data[i];
-            // 高精度演算 (64bit double)
-            double curr_y = curr_x - px + r * py;
-
-            if (std::abs(curr_y) < kDenormalThreshold) curr_y = 0.0;
-
-            px = curr_x;
-            py = curr_y;
-            data[i] = curr_y;
-        }
-        m_prev_x = px;
-        m_prev_y = py;
-    }
-};
-
-//--------------------------------------------------------------
 // LoaderThread クラス定義
 // IRの読み込み、処理、State作成をバックグラウンドで行う
 //--------------------------------------------------------------
@@ -519,6 +480,7 @@ public:
         juce::AudioBuffer<double> displayIR;
         StereoConvolver* newConv = nullptr;
         bool success = false;
+        bool finalizeQueued = false;
         double scaleFactor = 1.0;
         juce::String errorMessage;
     };
@@ -546,22 +508,33 @@ public:
             ~FlagResetter() {
                 if (!success && !t.threadShouldExit()) { // 正常終了またはスレッド中断以外の場合
                     auto wp = weakP;
-                    juce::MessageManager::callAsync([wp] {
+                    const bool queued = juce::MessageManager::callAsync([wp] {
                         if (auto* o = wp.get()) {
                             o->isLoading.store(false);
                             o->isRebuilding.store(false);
                         }
                     });
+
+                    if (!queued)
+                    {
+                        if (auto* o = wp.get())
+                        {
+                            o->isLoading.store(false);
+                            o->isRebuilding.store(false);
+                        }
+                    }
                 }
             }
         } resetter { owner, weakOwner, *this };
 
         LoadResult result = performLoad(this);
 
-        // [指摘3 fix] デッドコード削除。
-        // performLoad() は非同期パス (callAsync → finalizeNUCEngineOnMessageThread) で
-        // 常に result.success = false を返すため、以前の if (result.success ...) ブロックは
-        // 永遠に実行されなかった。実際の後処理はメッセージスレッド側の callAsync で行われる。
+        // 非同期成功パスでは finalizeNUCEngineOnMessageThread への委譲が完了しているため、
+        // FlagResetter のフォールバック callAsync は不要。
+        resetter.success = (result.success || result.finalizeQueued);
+
+        // performLoad() の後処理は、同期成功時は result.success、
+        // 非同期成功時は result.finalizeQueued で判定する。
         if (result.newConv)
         {
             result.newConv->release();
@@ -573,11 +546,21 @@ public:
             // エラー発生時: メインスレッドでエラー処理を行う
             auto wp = weakOwner;
             const juce::String error = result.errorMessage;
-            juce::MessageManager::callAsync([wp, error]()
+            const bool queued = juce::MessageManager::callAsync([wp, error]()
             {
                 if (auto* o = wp.get())
                     o->handleLoadError(error);
             });
+
+            if (!queued)
+            {
+                juce::MessageManagerLock mmLock;
+                if (mmLock.lockWasGained())
+                {
+                    if (auto* o = wp.get())
+                        o->handleLoadError(error);
+                }
+            }
         }
     }
 
@@ -777,7 +760,7 @@ public:
             {
                 for (int ch = 0; ch < result.loadedIR.getNumChannels(); ++ch)
                 {
-                    UltraHighRateDCBlocker dcBlocker;
+                    convo::UltraHighRateDCBlocker dcBlocker;
                     // カットオフ周波数は 1.0Hz に設定 (超低域ノイズ除去)
                     dcBlocker.init(result.loadedSR, 1.0);
 
@@ -818,13 +801,20 @@ public:
             trimmed.clear();
 
             int copySamples = (std::min)(result.targetLength, result.loadedIR.getNumSamples());
+            constexpr int minFadeSamples = 256;
+            constexpr double fadeRatio = 0.02;
+            const int maxFadeSamples = juce::jmax(minFadeSamples,
+                                                  static_cast<int>(std::round(sampleRate * 0.080)));
+            int fadeSamples = static_cast<int>(std::round(static_cast<double>(copySamples) * fadeRatio));
+            fadeSamples = juce::jlimit(minFadeSamples, maxFadeSamples, fadeSamples);
+            fadeSamples = juce::jmax(0, juce::jmin(fadeSamples, copySamples - 1));
+
             for (int ch = 0; ch < result.loadedIR.getNumChannels(); ++ch)
             {
                 trimmed.copyFrom(ch, 0, result.loadedIR, ch, 0, copySamples);
                 // フェードアウト
-                int fade = 256;
-                if (copySamples > fade)
-                    trimmed.applyGainRamp(ch, copySamples - fade, fade, 1.0, 0.0);
+                if (fadeSamples > 0)
+                    trimmed.applyGainRamp(ch, copySamples - fadeSamples, fadeSamples, 1.0, 0.0);
             }
 
             if (checkCancellation(shouldStop, nullptr)) return result;
@@ -1011,7 +1001,7 @@ public:
                 state->loadedIR = std::make_shared<juce::AudioBuffer<double>>(std::move(result.loadedIR));
                 state->displayIR = std::make_shared<juce::AudioBuffer<double>>(std::move(result.displayIR));
 
-                juce::MessageManager::callAsync([weakOwner = this->weakOwner, state,
+                const bool queued = juce::MessageManager::callAsync([weakOwner = this->weakOwner, state,
                                                  length   = result.targetLength,
                                                  sr       = sampleRate,
                                                  peak     = irPeakLatency,
@@ -1032,7 +1022,25 @@ public:
                     }
                 });
 
-                result.success = false; // finalize側でapplyNewStateを実行するため、ここではスキップ
+                if (!queued)
+                {
+                    juce::MessageManagerLock mmLock;
+                    if (mmLock.lockWasGained())
+                    {
+                        if (auto* ownerPtr = this->weakOwner.get())
+                        {
+                            ownerPtr->finalizeNUCEngineOnMessageThread(std::move(state->irL),
+                                                                       std::move(state->irR),
+                                                                       result.targetLength, sampleRate, irPeakLatency,
+                                                                       sizing.maxFFTSize, internalBlockSize,
+                                                                       sizing.firstPartition, blockSize,
+                                                                       isRebuild, file,
+                                                                       result.scaleFactor, state->loadedIR, state->displayIR);
+                        }
+                    }
+                }
+
+                result.finalizeQueued = true; // run() の FlagResetter フォールバックを抑止
                 return result;
             }
         }
@@ -1422,14 +1430,22 @@ void ConvolverProcessor::postCoalescedChangeNotification()
         return;
 
     auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
-    juce::MessageManager::callAsync([weakThis]()
+    const auto dispatchNotification = [weakThis]()
     {
         if (auto* self = weakThis.get())
         {
             self->changeNotificationPending.store(false, std::memory_order_release);
             self->sendChangeMessage();
         }
-    });
+    };
+
+    const bool queued = juce::MessageManager::callAsync(dispatchNotification);
+    if (!queued)
+    {
+        juce::MessageManagerLock mmLock;
+        if (mmLock.lockWasGained())
+            dispatchNotification();
+    }
 }
 
 void ConvolverProcessor::requestDebouncedRebuild()
@@ -1471,7 +1487,8 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
     if (snap && snap->getNumSamples() > 0 && originalIRSampleRate.load(std::memory_order_acquire) > 0.0)
     {
         // リビルドモードでローダーを作成し、同期的に実行
-        LoaderThread loader(*this, *snap, originalIRSampleRate.load(std::memory_order_acquire), currentSpec.sampleRate, currentBufferSize, getPhaseMode(),
+        const double processingSampleRate = currentSampleRate.load(std::memory_order_acquire);
+        LoaderThread loader(*this, *snap, originalIRSampleRate.load(std::memory_order_acquire), processingSampleRate, currentBufferSize, getPhaseMode(),
                     mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
                     mixedPreRingTau.load(std::memory_order_acquire), currentIRScale.load(std::memory_order_acquire));
         loader.externalCancellationCheck = shouldCancel;
@@ -1896,16 +1913,17 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     }
 
     // 新しいローダーを作成して開始
+    const double processingSampleRate = currentSampleRate.load(std::memory_order_acquire);
     if (isRebuild)
     {
         auto snapIR2 = originalIR.load(); // [Bug E fix] 最新スナップショットを再取得
-        activeLoader = std::make_unique<LoaderThread>(*this, *snapIR2, originalIRSampleRate.load(std::memory_order_acquire), currentSpec.sampleRate, currentBufferSize, getPhaseMode(),
+        activeLoader = std::make_unique<LoaderThread>(*this, *snapIR2, originalIRSampleRate.load(std::memory_order_acquire), processingSampleRate, currentBufferSize, getPhaseMode(),
                                                       mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
                                                       mixedPreRingTau.load(std::memory_order_acquire), currentIRScale.load(std::memory_order_acquire));
     }
     else
     {
-        activeLoader = std::make_unique<LoaderThread>(*this, irFile, currentSpec.sampleRate, currentBufferSize, getPhaseMode(),
+        activeLoader = std::make_unique<LoaderThread>(*this, irFile, processingSampleRate, currentBufferSize, getPhaseMode(),
                                                       mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
                                                       mixedPreRingTau.load(std::memory_order_acquire));
         currentIrOptimized.store(optimizeForRealTime);
@@ -2074,7 +2092,7 @@ float ConvolverProcessor::getMaximumAllowedIRLengthSec(double sampleRate) const
 {
     const double sr = (sampleRate > 0.0)
                     ? sampleRate
-                    : ((currentSpec.sampleRate > 0.0) ? currentSpec.sampleRate : currentSampleRate.load(std::memory_order_acquire));
+                    : currentSampleRate.load(std::memory_order_acquire);
 
     return getMaximumAllowedIRLengthSecForSampleRate(sr);
 }
@@ -2138,7 +2156,7 @@ ConvolverProcessor::IRLoadPreview ConvolverProcessor::analyzeImpulseResponseFile
     {
         for (int ch = 0; ch < loadedIR.getNumChannels(); ++ch)
         {
-            UltraHighRateDCBlocker dcBlocker;
+            convo::UltraHighRateDCBlocker dcBlocker;
             dcBlocker.init(loadedSampleRate, 1.0);
             dcBlocker.process(loadedIR.getWritePointer(ch), loadedIR.getNumSamples());
         }
@@ -2417,7 +2435,7 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
             {
                 const float autoLength = static_cast<float>(v.getProperty ("autoDetectedIRLength"));
                 const float clampedAutoLength = juce::jlimit(IR_LENGTH_MIN_SEC,
-                                                             getMaximumAllowedIRLengthSec(currentSpec.sampleRate),
+                                                             getMaximumAllowedIRLengthSec(currentSampleRate.load(std::memory_order_acquire)),
                                                              autoLength);
                 autoDetectedIRLengthSec.store(clampedAutoLength, std::memory_order_release);
             }
@@ -2690,9 +2708,10 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         // reset()を呼ぶと現在値がリセットされる可能性があるため、
         // 現在値とターゲット値を保持したままランプ時間のみ更新する手順を踏む
         // これにより、スムージング時間の変更時に音量が飛ぶのを防ぐ
+        const double sampleRateForSmoother = juce::jmax(1.0, currentSampleRate.load(std::memory_order_acquire));
         double currentVal = mixSmoother.getCurrentValue();
         double targetVal = mixSmoother.getTargetValue();
-        mixSmoother.reset(currentSpec.sampleRate, newSmoothingTime);
+        mixSmoother.reset(sampleRateForSmoother, newSmoothingTime);
         mixSmoother.setCurrentAndTargetValue(currentVal); // Restore current value
         mixSmoother.setTargetValue(targetVal);
         currentSmoothingTimeSec = newSmoothingTime;
@@ -3251,7 +3270,7 @@ void ConvolverProcessor::setBypass(bool shouldBypass)
 
 void ConvolverProcessor::setTargetIRLength(float timeSec)
 {
-    const float maxAllowedSec = getMaximumAllowedIRLengthSec(currentSpec.sampleRate);
+    const float maxAllowedSec = getMaximumAllowedIRLengthSec(currentSampleRate.load(std::memory_order_acquire));
     float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
     if (std::abs(targetIRLengthSec.load() - clampedTime) > 1e-5f)
     {
@@ -3265,7 +3284,7 @@ void ConvolverProcessor::setTargetIRLength(float timeSec)
 
 void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
 {
-    const float maxAllowedSec = getMaximumAllowedIRLengthSec(currentSpec.sampleRate);
+    const float maxAllowedSec = getMaximumAllowedIRLengthSec(currentSampleRate.load(std::memory_order_acquire));
     const float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
 
     autoDetectedIRLengthSec.store(clampedTime, std::memory_order_release);
@@ -3561,7 +3580,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     }
 
     irLength.store(targetLength, std::memory_order_release);
-    currentSampleRate.store(currentSpec.sampleRate);
+    currentSampleRate.store(loadedSR, std::memory_order_release);
 
     isLoading.store(false);
     isRebuilding.store(false, std::memory_order_release);

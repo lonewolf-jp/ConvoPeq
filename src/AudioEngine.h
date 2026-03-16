@@ -35,6 +35,7 @@
 #include "PsychoacousticDither.h"
 #include "OutputFilter.h"
 #include "DspNumericPolicy.h"
+#include "UltraHighRateDCBlocker.h"
 
 class AudioEngine : public juce::AudioSource,
                   public juce::ChangeBroadcaster,
@@ -214,191 +215,6 @@ public:
     convo::HCMode getEqLPFFilterMode() const noexcept;
 
 private:
-    //==============================================================================
-    // 内部クラス定義
-    class UltraHighRateDCBlocker {
-    private:
-        double m_prev_x = 0.0;
-        double m_prev_y = 0.0;
-        double m_R = 0.999999; // デフォルト値
-
-    public:
-        // サンプリングレートに合わせて R を計算
-        // 注意: std::exp() を使用するため Audio Thread から呼んではならない。
-        //       DSPCore::prepare() (rebuildThreadLoop) からのみ呼ぶこと。
-        void init(double sampleRate, double cutoffHz) noexcept
-        {
-            // R = exp(-2 * PI * cutoff / sampleRate)
-            m_R = std::exp(-2.0 * juce::MathConstants<double>::pi * cutoffHz / sampleRate);
-            // init() 後に R が NaN/Inf になることはないが念のため保護
-            if (! std::isfinite(m_R) || m_R <= 0.0 || m_R >= 1.0)
-                m_R = 0.999999;
-            reset();
-        }
-
-        void reset() noexcept
-        {
-            m_prev_x = 0.0;
-            m_prev_y = 0.0;
-        }
-
-        // ループフュージョン最適化用ヘルパー
-        void loadState() noexcept {
-            px_local = m_prev_x;
-            py_local = m_prev_y;
-        }
-
-        void saveState() noexcept {
-            m_prev_x = px_local;
-            m_prev_y = py_local;
-        }
-
-        inline void processSample(double& sample) noexcept
-        {
-            const double r = m_R;
-            constexpr double kDenormalThreshold = convo::numeric_policy::kDenormThresholdAudioState;
-
-            const double curr_x = sample;
-            double curr_y = curr_x - px_local + r * py_local;
-
-            if (!isFiniteAndAboveThresholdMask(curr_y, kDenormalThreshold)) curr_y = 0.0;
-
-            px_local = curr_x;
-            py_local = curr_y;
-            sample = curr_y;
-        }
-
-
-        // 64byteアライメントされたバッファを高速処理 (Audio Thread 安全)
-        void process(double* data, int numSamples) noexcept
-        {
-            double px = m_prev_x;
-            double py = m_prev_y;
-            const double r = m_R;
-            constexpr double kDenormalThreshold = convo::numeric_policy::kDenormThresholdAudioState;
-
-            int i = 0;
-            const int vEnd = numSamples / 4 * 4;
-
-            if (vEnd > 0)
-            {
-                const double r2 = r * r;
-                const double r3 = r2 * r;
-                const double r4 = r3 * r;
-                const __m256d vR = _mm256_set1_pd(r);
-                const __m256d vR2 = _mm256_set1_pd(r2);
-                // vPrevYFactors = [R, R^2, R^3, R^4]
-                const __m256d vPrevYFactors = _mm256_set_pd(r4, r3, r2, r);
-                const __m256d vThresh = _mm256_set1_pd(kDenormalThreshold);
-                const __m256d vInfThresh = _mm256_set1_pd(1.0e100); // Inf判定用閾値
-                const __m256d vSignMask = _mm256_set1_pd(-0.0);
-
-                for (; i < vEnd; i += 4)
-                {
-                    // Load x[i..i+3]
-                    __m256d vx = _mm256_load_pd(data + i);
-
-                    // Prepare [x[i-1], x[i], x[i+1], x[i+2]] using px (= x[i-1] for all i).
-                    //
-                    // [Bug Fix] data はインプレースで書き換えられるため、i > 0 での
-                    //   _mm256_loadu_pd(data + i - 1) は data[i-1] = y[i-1] を読んでしまい、
-                    //   差分式 U = x[i] - x[i-1] が U = x[i] - y[i-1] に化ける。
-                    //   px は各反復末尾で x[i+3] に更新されるため、常に正しい x[i-1] を保持する。
-                    //   したがって permute+blend による構築を全反復で使用する。
-                    __m256d t = _mm256_permute4x64_pd(vx, _MM_SHUFFLE(2, 1, 0, 0));
-                    __m256d vpx = _mm256_set1_pd(px);
-                    __m256d v_prev_x = _mm256_blend_pd(t, vpx, 1); // [px, x[i], x[i+1], x[i+2]]
-
-                    // U = x - prev_x
-                    __m256d vu = _mm256_sub_pd(vx, v_prev_x);
-
-                    // Parallel Prefix Sum
-                    // S0 = U
-                    // S1 = S0 + R * (S0 << 1)
-                    __m256d v_shift1 = _mm256_permute4x64_pd(vu, _MM_SHUFFLE(2, 1, 0, 0));
-                    v_shift1 = _mm256_blend_pd(v_shift1, _mm256_setzero_pd(), 1);
-                    __m256d vs1 = _mm256_fmadd_pd(vR, v_shift1, vu);
-
-                    // S2 = S1 + R^2 * (S1 << 2)
-                    __m256d v_shift2 = _mm256_permute4x64_pd(vs1, _MM_SHUFFLE(1, 0, 0, 0));
-                    v_shift2 = _mm256_blend_pd(v_shift2, _mm256_setzero_pd(), 3); // mask 0011
-                    __m256d vy = _mm256_fmadd_pd(vR2, v_shift2, vs1);
-
-                    // Add contribution from prev_y
-                    __m256d vpy = _mm256_set1_pd(py);
-                    vy = _mm256_fmadd_pd(vPrevYFactors, vpy, vy);
-
-                    // Anti-Denormal & Inf/NaN Check
-                    __m256d abs_y = _mm256_andnot_pd(vSignMask, vy);
-                    // |y| >= denormal_thresh
-                    __m256d mask = _mm256_cmp_pd(abs_y, vThresh, _CMP_GE_OQ);
-                    // |y| < inf_thresh (NaNはFalseになるためここで除去される)
-                    mask = _mm256_and_pd(mask, _mm256_cmp_pd(abs_y, vInfThresh, _CMP_LT_OQ));
-                    vy = _mm256_and_pd(vy, mask);
-
-                    _mm256_store_pd(data + i, vy);
-
-                    // Update state for next iter
-                    _mm_storeh_pd(&px, _mm256_extractf128_pd(vx, 1));
-                    _mm_storeh_pd(&py, _mm256_extractf128_pd(vy, 1));
-                }
-            }
-
-            for (; i < numSamples; ++i) {
-                const double curr_x = data[i];
-                double curr_y = curr_x - px + r * py;
-
-                if (!isFiniteAndAboveThresholdMask(curr_y, kDenormalThreshold)) curr_y = 0.0;
-
-                px = curr_x;
-                py = curr_y;
-                data[i] = curr_y;
-            }
-
-            // 【堅牢性向上】最終的な状態変数を保存する前にサニタイズする
-            // これにより、万が一 px や py が NaN/Inf になっても、次回の process() 呼び出しに
-            // 不正な状態が引き継がれるのを防ぐ。
-            // std::abs(NaN) < limit は false になるため、NaN は 0.0 にリセットされる。
-            m_prev_x = isFiniteAndBelowThresholdMask(px, 1.0e15) ? px : 0.0; // 1.0e15 は Inf を捕捉するための巨大な閾値
-            m_prev_y = isFiniteAndBelowThresholdMask(py, 1.0e15) ? py : 0.0;
-        }
-
-    private:
-        static inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexcept
-        {
-            const __m128d v = _mm_set1_pd(value);
-            const __m128d diff = _mm_sub_pd(v, v);
-            const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
-
-            const __m128d signMask = _mm_set1_pd(-0.0);
-            const __m128d absV = _mm_andnot_pd(signMask, v);
-            const __m128d thresholdV = _mm_set1_pd(threshold);
-            const __m128d denormalMask = _mm_cmplt_pd(absV, thresholdV);
-
-            const __m128d validMask = _mm_andnot_pd(denormalMask, finiteMask);
-            return _mm_movemask_pd(validMask) == 0x3;
-        }
-
-        static inline bool isFiniteAndBelowThresholdMask(double value, double threshold) noexcept
-        {
-            const __m128d v = _mm_set1_pd(value);
-            const __m128d diff = _mm_sub_pd(v, v);
-            const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
-
-            const __m128d signMask = _mm_set1_pd(-0.0);
-            const __m128d absV = _mm_andnot_pd(signMask, v);
-            const __m128d thresholdV = _mm_set1_pd(threshold);
-            const __m128d belowMask = _mm_cmplt_pd(absV, thresholdV);
-
-            const __m128d validMask = _mm_and_pd(finiteMask, belowMask);
-            return _mm_movemask_pd(validMask) == 0x3;
-        }
-
-        // ループフュージョン用ローカル状態変数
-        double px_local = 0.0;
-        double py_local = 0.0;
-    };
-
     //----------------------------------------------------------
      // DSPコア (Audio Threadで実行される処理のコンテナ)
     //----------------------------------------------------------
@@ -450,9 +266,9 @@ DSPCore();
         // 旧 DCBlocker (4次 Butterworth, サンプル単位) は 1 サンプルあたり ~20 演算を要したが、
         // 1次 IIR は ~4 演算で済みかつ process(data, N) ブロック呼び出しによりメモリアクセスも効率化。
         // DC 除去の目的 (3Hz 以下のカット) には 1 次で十分。
-        UltraHighRateDCBlocker dcBlockerL, dcBlockerR;
-        UltraHighRateDCBlocker inputDCBlockerL, inputDCBlockerR;
-        UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
+        convo::UltraHighRateDCBlocker dcBlockerL, dcBlockerR;
+        convo::UltraHighRateDCBlocker inputDCBlockerL, inputDCBlockerR;
+        convo::UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
         ::convo::PsychoacousticDither dither;
         // 出力周波数フィルター (① ハイカット/ローカット / ② ローパス/ハイパス)
         convo::OutputFilter outputFilter;
@@ -479,6 +295,10 @@ DSPCore();
         int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（常にSAFE_MAX×8）
         std::atomic<int> fadeInSamplesLeft {0};
         static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
+
+        // インターサンプルピーク近似: 前ブロック末尾のクリップ済み出力 (L/R)
+        // softClipBlockAVX2() へブロック間状態を渡すために保持する。
+        double softClipPrevSample[2] = {0.0, 0.0};
 
         // Helpers
         float measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept;
@@ -540,7 +360,7 @@ DSPCore();
     std::atomic<bool> analyzerEnabled { false };
     std::atomic<int> ditherBitDepth { 0 }; // 0 = 未初期化 (DeviceSettingsで最大値に設定される)
     std::atomic<bool> softClipEnabled { true };
-    std::atomic<float> saturationAmount { 0.5f };
+    std::atomic<float> saturationAmount { 0.2f };
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
     std::atomic<float> inputHeadroomDb { -6.0f };

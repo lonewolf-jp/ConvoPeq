@@ -18,7 +18,8 @@
 
 class MainWindow : public juce::DocumentWindow,
                    private juce::Timer,
-                   private juce::ChangeListener
+                   private juce::ChangeListener,
+                   private juce::Label::Listener
 {
 public:
     explicit MainWindow (const juce::String& name);
@@ -39,6 +40,8 @@ private:
     void resized() override;
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
+    void labelTextChanged(juce::Label* label) override;
+    void editorShown(juce::Label* label, juce::TextEditor& editor) override;
     void orderModeBoxChanged();
 
     void createUIComponents();
@@ -67,7 +70,7 @@ private:
     juce::TextButton loadButton;
     juce::TextButton aboutButton;
     juce::ToggleButton softClipButton;
-    juce::Slider saturationSlider;
+    juce::Label saturationValueLabel;
     juce::Label saturationLabel;
     juce::Label latencyLabel;
     juce::Label cpuUsageLabel;

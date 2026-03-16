@@ -209,8 +209,10 @@ static inline double musicalSoftClipScalar(double x, double threshold, double kn
     return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
 }
 
+// prevSampleInOut: 前ブロック末尾のクリップ済み出力サンプル（ブロック間インターサンプルピーク検出用）
 static void softClipBlockAVX2(double* __restrict data, int numSamples,
-                               double threshold, double knee, double asymmetry) noexcept
+                               double threshold, double knee, double asymmetry,
+                               double& prevSampleInOut) noexcept
 {
     const double clip_start = threshold - knee;
     jassert(knee > 1.0e-9);
@@ -236,11 +238,41 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
     const __m256d vZero        = _mm256_setzero_pd();
     const __m256d vSignMask    = _mm256_set1_pd(-0.0);
 
+    // ── インターサンプルピーク用ブロック間状態 ─────────────────────────────
+    // 前ブロック末尾のクリップ済み出力を保持。ブロック先頭の中点チェックに使用。
+    double prevScalar = prevSampleInOut;
+
     int i = 0;
     const int vEnd = numSamples / 4 * 4;
     for (; i < vEnd; i += 4)
     {
             __m256d x    = _mm256_loadu_pd(data + i);
+
+        // ── インターサンプルピーク近似 (線形中点プリゲイン) ──────────────────
+        // 連続する2サンプルの中点 mid = (prev + x[n]) / 2 を推定し、
+        // DACの帯域制限再構成で発生しうる inter-sample ピークを事前に抑制する。
+        // prevVec = [prevScalar, x[0], x[1], x[2]] を構築して vectorize する。
+        // 注: intra-vector の prev には RAW 入力を使用（AVX2 逐次依存を回避）。
+        {
+            const __m128d xLow       = _mm256_castpd256_pd128(x);                         // [x0, x1]
+            const __m128d xHigh      = _mm256_extractf128_pd(x, 1);                       // [x2, x3]
+            const __m128d prevLow128 = _mm_unpacklo_pd(_mm_set_sd(prevScalar), xLow);     // [prevScalar, x0]
+            const __m128d prevHigh128= _mm_shuffle_pd(xLow, xHigh, 0x1);                  // [x1, x2]
+            const __m256d prevVec    = _mm256_set_m128d(prevHigh128, prevLow128);          // [prevScalar, x0, x1, x2]
+
+            const __m256d midVec     = _mm256_mul_pd(_mm256_add_pd(prevVec, x), vHalf);   // (prev+x)/2
+            const __m256d absMidVec  = _mm256_andnot_pd(vSignMask, midVec);               // |mid|
+
+            // mid が threshold を超える箇所にのみプリゲインを適用
+            const __m256d vTiny      = _mm256_set1_pd(1e-15);
+            const __m256d needMidClip= _mm256_cmp_pd(absMidVec, vThreshold, _CMP_GT_OQ);
+            const __m256d safeAbsMid = _mm256_max_pd(absMidVec, vTiny);
+            const __m256d midGainRaw = _mm256_div_pd(vThreshold, safeAbsMid);             // threshold / |mid|
+            const __m256d midGain    = _mm256_blendv_pd(vOne, midGainRaw, needMidClip);   // gain=1 or scaled
+            x = _mm256_mul_pd(x, midGain);  // プリゲイン適用後の x をソフトクリッパーに渡す
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         __m256d absX = _mm256_andnot_pd(vSignMask, x);
 
         // Check if any sample in the vector needs clipping
@@ -287,14 +319,30 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
         // Blend with original x for samples that didn't need clipping
         result = _mm256_blendv_pd(x, result, needClip);
             _mm256_storeu_pd(data + i, result);
+
+        // 次イテレーションに向けてクリップ済み末尾出力を保持
+        prevScalar = data[i + 3];
     }
 
-    // Scalar remainder
+    // Scalar remainder（インターサンプルピークチェック込み）
     for (; i < numSamples; ++i)
     {
-        if (absNoLibm(data[i]) > clip_start)
-            data[i] = musicalSoftClipScalar(data[i], threshold, knee, asymmetry);
+        // 線形中点で inter-sample ピークを推定し、超過時はプリゲインで抑制
+        const double mid    = (prevScalar + data[i]) * 0.5;
+        const double absMid = absNoLibm(mid);
+        double x = data[i];
+        if (absMid > threshold)
+            x *= threshold / absMid;
+
+        if (absNoLibm(x) > clip_start)
+            x = musicalSoftClipScalar(x, threshold, knee, asymmetry);
+
+        data[i] = x;
+        prevScalar = x;  // クリップ済み出力を次サンプルの prev として保持
     }
+
+    // ブロック間状態を更新
+    prevSampleInOut = prevScalar;
 }
 
 // コンストラクタ
@@ -957,6 +1005,10 @@ void AudioEngine::DSPCore::reset()
         juce::FloatVectorOperations::clear(alignedL.get(), alignedCapacity);
     if (alignedR && alignedCapacity > 0)
         juce::FloatVectorOperations::clear(alignedR.get(), alignedCapacity);
+
+    // インターサンプルピーク用ブロック間状態をリセット
+    softClipPrevSample[0] = 0.0;
+    softClipPrevSample[1] = 0.0;
 }
 
 //--------------------------------------------------------------
@@ -1287,6 +1339,7 @@ void AudioEngine::eqBandChanged(EQProcessor* processor, int bandIndex)
 {
     if (processor == &uiEqProcessor)
     {
+        std::lock_guard<std::mutex> lk(rebuildMutex);
         if (activeDSP)
             activeDSP->eq.syncBandNodeFrom(uiEqProcessor, bandIndex);
     }
@@ -1296,6 +1349,7 @@ void AudioEngine::eqGlobalChanged(EQProcessor* processor)
 {
     if (processor == &uiEqProcessor)
     {
+        std::lock_guard<std::mutex> lk(rebuildMutex);
         if (activeDSP) {
             // syncGlobalStateFrom は AGC の実行状態も上書きしてしまうため、
             // UIからの変更通知では、UIが管理するパラメータのみを個別に設定する。
@@ -1310,6 +1364,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 {
     if (processor == &uiConvolverProcessor)
     {
+        std::lock_guard<std::mutex> lk(rebuildMutex);
         if (activeDSP)
             activeDSP->convolver.syncParametersFrom(uiConvolverProcessor);
     }
@@ -1337,26 +1392,35 @@ void AudioEngine::releaseResources()
     //   3. 手動revertは不要・リークリスクあり → JUCEに任せる
     // ==================================================================
 
-    // [Bug Fix: use-after-free] rebuildGeneration をインクリメントし、
-    // rebuildThread の進行中タスクを obsolete にする。
-    // rebuildThread は isObsolete() チェックで task.currentDSP へのアクセスを
-    // 早期に打ち切るため、dangling pointer アクセスのウィンドウを最小化する。
-    // 安全な最終保証は ~AudioEngine() の rebuildThread.join() が担う。
-    rebuildGeneration.fetch_add(1, std::memory_order_acq_rel);
-
-    // 1. Stop Audio Thread access
-    currentDSP.store(nullptr, std::memory_order_release);
-
-    // 2. activeDSP を trashBin に移動する（即時削除禁止）。
-    //    trashBin / trashBinPending の既存エントリも即時削除しない。
-    //    理由: rebuildThread が task.currentDSP として trashBin 内エントリを
-    //    参照中の可能性があり、直ちに delete するとダングリングポインタアクセスになる。
-    //    安全な削除は ~AudioEngine() の rebuildThread.join() 後、
-    //    または timerCallback() の時間ベース GC に委ねる。
+    // [Bug Fix: TOCTOU race condition with commitNewDSP]
+    // rebuildGeneration インクリメント・currentDSP・activeDSP の変更を
+    // rebuildMutex で保護し、commitNewDSP() との race condition を防ぐ。
+    // この critical section 内で：
+    //   1) generation をインクリメント → commitNewDSP() での generation チェック無効化
+    //   2) currentDSP = nullptr → Audio Thread のアクセス停止
+    //   3) activeDSP を trashBin へ移動 → UI/Message Thread メソッドでの null dereference 防止
+    // これにより commitNewDSP() と releaseResources() の interleaving が安全になる。
     {
-        const juce::ScopedLock sl(trashBinLock);
+        std::lock_guard<std::mutex> lk(rebuildMutex);
+
+        // rebuildThread の進行中タスクを obsolete にする。
+        // rebuildThread は isObsolete() チェックで task.currentDSP へのアクセスを
+        // 早期に打ち切るため、dangling pointer アクセスのウィンドウを最小化する。
+        // 安全な最終保証は ~AudioEngine() の rebuildThread.join() が担う。
+        rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
+
+        // 1. Stop Audio Thread access
+        currentDSP.store(nullptr, std::memory_order_release);
+
+        // 2. activeDSP を trashBin に移動する（即時削除禁止）。
+        //    trashBin / trashBinPending の既存エントリも即時削除しない。
+        //    理由: rebuildThread が task.currentDSP として trashBin 内エントリを
+        //    参照中の可能性があり、直ちに delete するとダングリングポインタアクセスになる。
+        //    安全な削除は ~AudioEngine() の rebuildThread.join() 後、
+        //    または timerCallback() の時間ベース GC に委ねる。
         if (activeDSP)
         {
+            const juce::ScopedLock sl(trashBinLock);
             trashBin.push_back({activeDSP, juce::Time::getMillisecondCounter()});
             activeDSP = nullptr;
         }
@@ -1722,7 +1786,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         for (int ch = 0; ch < numProcChannels; ++ch)
         {
             double* data = processBlock.getChannelPointer(ch);
-            softClipBlockAVX2(data, numProcSamples, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
+            // ブロック間インターサンプルピーク状態をチャンネルごとに渡す
+            softClipBlockAVX2(data, numProcSamples, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY,
+                               softClipPrevSample[ch < 2 ? ch : 1]);
         }
     }
 
@@ -1884,7 +1950,9 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         for (int ch = 0; ch < numProcChannels; ++ch)
         {
             double* data = processBlock.getChannelPointer(ch);
-            softClipBlockAVX2(data, numProcSamples, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY);
+            // ブロック間インターサンプルピーク状態をチャンネルごとに渡す
+            softClipBlockAVX2(data, numProcSamples, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY,
+                               softClipPrevSample[ch < 2 ? ch : 1]);
         }
     }
 

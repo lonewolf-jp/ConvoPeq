@@ -201,8 +201,10 @@ public:
     struct BandNode
     {
         EQCoeffsSVF coeffs;
+        EQCoeffsSVF prevCoeffs;  // 前回の係数（クロスフェード用）
         bool active;
         EQChannelMode mode;
+        bool coeffsChanged = false;  // 係数が変更されたかどうかのフラグ
 
         mutable std::atomic<int> refCount { 0 };
         void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }

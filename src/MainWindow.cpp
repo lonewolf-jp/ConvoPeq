@@ -9,6 +9,11 @@
 
 namespace
 {
+    juce::String formatSaturationValue(float value)
+    {
+        return juce::String(value, 2);
+    }
+
     class SettingsWindow : public juce::DocumentWindow
     {
     public:
@@ -177,8 +182,30 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
 
         // ソフトクリップとサチュレーション
         softClipButton.setToggleState(audioEngine.isSoftClipEnabled(), juce::dontSendNotification);
-        saturationSlider.setValue(audioEngine.getSaturationAmount(), juce::dontSendNotification);
+        saturationValueLabel.setText(formatSaturationValue(audioEngine.getSaturationAmount()),
+                                     juce::dontSendNotification);
     }
+}
+
+void MainWindow::labelTextChanged(juce::Label* label)
+{
+    if (label != &saturationValueLabel)
+        return;
+
+    float value = label->getText().retainCharacters("0123456789.").getFloatValue();
+    value = juce::jlimit(0.0f, 1.0f, value);
+    audioEngine.setSaturationAmount(value);
+    saturationValueLabel.setText(formatSaturationValue(audioEngine.getSaturationAmount()),
+                                 juce::dontSendNotification);
+}
+
+void MainWindow::editorShown(juce::Label* label, juce::TextEditor& editor)
+{
+    if (label != &saturationValueLabel)
+        return;
+
+    editor.setInputRestrictions(5, "0123456789.");
+    editor.setText(saturationValueLabel.getText(), false);
 }
 
 //--------------------------------------------------------------
@@ -251,15 +278,14 @@ void MainWindow::createUIComponents()
     juce::Component::addAndMakeVisible(softClipButton);
 
     // サチュレーションスライダー
-    saturationSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    saturationSlider.setRange(0.0, 1.0, 0.01);
-    saturationSlider.setValue(audioEngine.getSaturationAmount(), juce::dontSendNotification);
-    saturationSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-    saturationSlider.setTooltip("Saturation Amount (Threshold & Knee)");
-    saturationSlider.onValueChange = [this] {
-        audioEngine.setSaturationAmount(static_cast<float>(saturationSlider.getValue()));
-    };
-    juce::Component::addAndMakeVisible(saturationSlider);
+    saturationValueLabel.setText(formatSaturationValue(audioEngine.getSaturationAmount()), juce::dontSendNotification);
+    saturationValueLabel.setEditable(true);
+    saturationValueLabel.setJustificationType(juce::Justification::centred);
+    saturationValueLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    saturationValueLabel.setColour(juce::Label::outlineColourId, juce::Colours::grey);
+    saturationValueLabel.setTooltip("Saturation Amount (0.0 - 1.0)");
+    saturationValueLabel.addListener(this);
+    juce::Component::addAndMakeVisible(saturationValueLabel);
 
     saturationLabel.setText("Sat:", juce::dontSendNotification);
     saturationLabel.setColour(juce::Label::textColourId, juce::Colours::white);
@@ -366,8 +392,8 @@ void MainWindow::resized()
     cpuUsageLabel.setBounds (buttonRow.removeFromRight (95).reduced (2, 2));
     latencyLabel.setBounds (buttonRow.removeFromRight (170).reduced (2, 2));
 
-    // クリップ制御 (左→右: Soft Clip, Sat, スライダー)
-    saturationSlider.setBounds(buttonRow.removeFromRight(120).reduced(2, 2));
+    // クリップ制御 (左→右: Soft Clip, Sat, 数値入力)
+    saturationValueLabel.setBounds(buttonRow.removeFromRight(58).reduced(2, 2));
     saturationLabel.setBounds(buttonRow.removeFromRight(42).reduced(2, 2));
     softClipButton.setBounds(buttonRow.removeFromRight(90).reduced(2, 2));
 

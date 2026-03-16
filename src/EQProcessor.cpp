@@ -248,7 +248,7 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
                 {
                     maxBandsWarningShown = true;
                     // ユーザーへの警告 (Message Threadなので安全)
-                    juce::MessageManager::callAsync([] {
+                    const auto showMaxBandsWarning = [] {
                         juce::NativeMessageBox::showAsync(
                             juce::MessageBoxOptions()
                                 .withIconType(juce::MessageBoxIconType::WarningIcon)
@@ -256,7 +256,15 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
                                 .withMessage("The preset contains more bands than supported (Max 20). Extra bands were ignored.")
                                 .withButton("OK"),
                             nullptr);
-                    });
+                    };
+
+                    const bool queued = juce::MessageManager::callAsync(showMaxBandsWarning);
+                    if (!queued)
+                    {
+                        juce::MessageManagerLock mmLock;
+                        if (mmLock.lockWasGained())
+                            showMaxBandsWarning();
+                    }
                 }
                 DBG("Skipping extra band: " + line);
                 continue;
@@ -1251,32 +1259,116 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
 
     // フィルタバンク適用
+    // C-1改善対応: 係数変化時はクロスフェード処理を実施
     for (int i = 0; i < numActiveBands; ++i)
     {
         const auto& band = activeBands[i];
         const EQChannelMode mode = band.node->mode;
 
-        if (mode == EQChannelMode::Stereo && numChannels >= 2)
+        // 【C-1改善】係数が急激に変わった場合のみ 2倍の処理コスト発生
+        //（通常はこのブランチは実行されず、追加コストなし）
+        if (band.node->coeffsChanged && scratchBuffer && scratchCapacity >= numSamples * MAX_CHANNELS)
         {
-            // L と R を SSE2 レジスタで同時処理 (最大2x スループット)
-            processBandStereo(
-                block.getChannelPointer(0),
-                block.getChannelPointer(1),
-                numSamples,
-                band.node->coeffs,
-                filterState[0][band.index].data(),
-                filterState[1][band.index].data());
+            // ── クロスフェード処理 ──
+            if (mode == EQChannelMode::Stereo && numChannels >= 2)
+            {
+                // L/R 両チャンネルのスクラッチ領域を確保
+                double* scratchL = scratchBuffer.get();
+                double* scratchR = scratchBuffer.get() + numSamples;
+
+                // 入力をスクラッチにコピー
+                std::copy(block.getChannelPointer(0), block.getChannelPointer(0) + numSamples, scratchL);
+                std::copy(block.getChannelPointer(1), block.getChannelPointer(1) + numSamples, scratchR);
+
+                // 状態を保存（旧係数用）
+                double prevStateL[2] = { filterState[0][band.index][0], filterState[0][band.index][1] };
+                double prevStateR[2] = { filterState[1][band.index][0], filterState[1][band.index][1] };
+
+                // ① スクラッチに旧係数で処理実行
+                processBandStereo(scratchL, scratchR, numSamples,
+                                 band.node->prevCoeffs,
+                                 prevStateL, prevStateR);
+
+                // ② 元バッファに新係数で処理実行（状態は自動的に更新）
+                processBandStereo(block.getChannelPointer(0), block.getChannelPointer(1), numSamples,
+                                 band.node->coeffs,
+                                 filterState[0][band.index].data(),
+                                 filterState[1][band.index].data());
+
+                // ③ リニアクロスフェード: scratchBuffer (旧) → data (新)
+                const double step = 1.0 / static_cast<double>(numSamples);
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    const double t = (n + 1.0) * step;
+                    const double w_old = 1.0 - t;
+                    const double w_new = t;
+                    block.getChannelPointer(0)[n] = scratchL[n] * w_old + block.getChannelPointer(0)[n] * w_new;
+                    block.getChannelPointer(1)[n] = scratchR[n] * w_old + block.getChannelPointer(1)[n] * w_new;
+                }
+            }
+            else
+            {
+                // モノラル処理（L/R個別）
+                if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Left)
+                    if (numChannels > 0)
+                    {
+                        double* data = block.getChannelPointer(0);
+                        std::copy(data, data + numSamples, scratchBuffer.get());
+
+                        double prevState[2] = { filterState[0][band.index][0], filterState[0][band.index][1] };
+                        processBand(scratchBuffer.get(), numSamples, band.node->prevCoeffs, prevState);
+                        processBand(data, numSamples, band.node->coeffs, filterState[0][band.index].data());
+
+                        const double step = 1.0 / static_cast<double>(numSamples);
+                        for (int n = 0; n < numSamples; ++n)
+                        {
+                            const double t = (n + 1.0) * step;
+                            data[n] = scratchBuffer[n] * (1.0 - t) + data[n] * t;
+                        }
+                    }
+                if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Right)
+                    if (numChannels > 1)
+                    {
+                        double* data = block.getChannelPointer(1);
+                        std::copy(data, data + numSamples, scratchBuffer.get());
+
+                        double prevState[2] = { filterState[1][band.index][0], filterState[1][band.index][1] };
+                        processBand(scratchBuffer.get(), numSamples, band.node->prevCoeffs, prevState);
+                        processBand(data, numSamples, band.node->coeffs, filterState[1][band.index].data());
+
+                        const double step = 1.0 / static_cast<double>(numSamples);
+                        for (int n = 0; n < numSamples; ++n)
+                        {
+                            const double t = (n + 1.0) * step;
+                            data[n] = scratchBuffer[n] * (1.0 - t) + data[n] * t;
+                        }
+                    }
+            }
         }
         else
         {
-            if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Left)
-                if (numChannels > 0)
-                    processBand(block.getChannelPointer(0), numSamples,
-                                band.node->coeffs, filterState[0][band.index].data());
-            if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Right)
-                if (numChannels > 1)
-                    processBand(block.getChannelPointer(1), numSamples,
-                                band.node->coeffs, filterState[1][band.index].data());
+            // 係数が変わらない場合は通常のプロセッシング（無視できるコスト）
+            if (mode == EQChannelMode::Stereo && numChannels >= 2)
+            {
+                processBandStereo(
+                    block.getChannelPointer(0),
+                    block.getChannelPointer(1),
+                    numSamples,
+                    band.node->coeffs,
+                    filterState[0][band.index].data(),
+                    filterState[1][band.index].data());
+            }
+            else
+            {
+                if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Left)
+                    if (numChannels > 0)
+                        processBand(block.getChannelPointer(0), numSamples,
+                                    band.node->coeffs, filterState[0][band.index].data());
+                if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Right)
+                    if (numChannels > 1)
+                        processBand(block.getChannelPointer(1), numSamples,
+                                    band.node->coeffs, filterState[1][band.index].data());
+            }
         }
     }
 
@@ -1366,7 +1458,24 @@ EQProcessor::BandNode* EQProcessor::createBandNode(int band, const EQState& stat
 }
 
 //--------------------------------------------------------------
+// SVF係数比較ヘルパー (Message Thread内での使用)
+//--------------------------------------------------------------
+static inline bool areCoeffsEqual(const EQCoeffsSVF& a, const EQCoeffsSVF& b) noexcept
+{
+    static constexpr double COEFF_EPSILON = 1e-10;
+    return std::abs(a.g - b.g) < COEFF_EPSILON &&
+           std::abs(a.k - b.k) < COEFF_EPSILON &&
+           std::abs(a.a1 - b.a1) < COEFF_EPSILON &&
+           std::abs(a.a2 - b.a2) < COEFF_EPSILON &&
+           std::abs(a.a3 - b.a3) < COEFF_EPSILON &&
+           std::abs(a.m0 - b.m0) < COEFF_EPSILON &&
+           std::abs(a.m1 - b.m1) < COEFF_EPSILON &&
+           std::abs(a.m2 - b.m2) < COEFF_EPSILON;
+}
+
+//--------------------------------------------------------------
 // BandNode更新 (Message Thread)
+// C-1 改善: 係数変化検出とクロスフェード準備
 //--------------------------------------------------------------
 void EQProcessor::updateBandNode(int band)
 {
@@ -1374,13 +1483,28 @@ void EQProcessor::updateBandNode(int band)
     if (state == nullptr) return;
     auto newNode = createBandNode(band, *state);
 
+    // 係数が実際に変更されたかを判定
+    const BandNode* oldNode = activeBandNodes[band];
+    if (oldNode && !areCoeffsEqual(oldNode->coeffs, newNode->coeffs))
+    {
+        // 係数が変わる場合: 前回の係数を保持し、クロスフェードフラグを立てる
+        newNode->prevCoeffs = oldNode->coeffs;
+        newNode->coeffsChanged = true;
+    }
+    else
+    {
+        // 係数が変わらない場合: 前回の係数を新しい係数で初期化（初回時など）
+        newNode->prevCoeffs = newNode->coeffs;
+        newNode->coeffsChanged = false;
+    }
+
     bandNodes[band].store(newNode, std::memory_order_release);
 
     // 古いノードをゴミ箱へ (Audio Threadが使用中の可能性があるため即削除しない)
     const juce::ScopedLock sl(trashBinLock);
-    if (activeBandNodes[band])
+    if (oldNode)
     {
-        bandNodeTrashBinPending.push_back(activeBandNodes[band]);
+        bandNodeTrashBinPending.push_back(const_cast<BandNode*>(oldNode));
     }
     activeBandNodes[band] = newNode;
 }

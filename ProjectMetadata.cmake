@@ -4,7 +4,7 @@ set(APP_BUNDLE_ID "com.lonewolf-jp.convopeq")
 set(APP_VERSION_MAJOR 0)
 set(APP_VERSION_MINOR 4)
 set(APP_VERSION_PATCH 6)
-set(APP_COPYRIGHT "Copyright 2024, lonewolf-jp")
+set(APP_COPYRIGHT "Copyright 2024-2025, lonewolf-jp")
 
-# Construct the full version string""
+# Construct the full version string
 set(PROJECT_VERSION ${APP_VERSION_MAJOR}.${APP_VERSION_MINOR}.${APP_VERSION_PATCH})

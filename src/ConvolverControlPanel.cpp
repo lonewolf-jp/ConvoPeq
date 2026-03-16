@@ -812,13 +812,20 @@ void ConvolverControlPanel::startAsyncIRLoadPreview(const juce::File& irFile)
     {
         const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(irFile, analysisSampleRate);
 
-        juce::MessageManager::callAsync([safeThis, irFile, requestId, preview]()
+        const bool queued = juce::MessageManager::callAsync([safeThis, irFile, requestId, preview]()
         {
             if (safeThis == nullptr)
                 return;
 
             safeThis->finishAsyncIRLoadPreview(irFile, preview, requestId);
         });
+
+        if (!queued)
+        {
+            juce::MessageManagerLock mmLock;
+            if (mmLock.lockWasGained() && safeThis != nullptr)
+                safeThis->finishAsyncIRLoadPreview(irFile, preview, requestId);
+        }
     }).detach();
 }
 
