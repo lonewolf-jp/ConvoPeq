@@ -17,6 +17,21 @@ namespace convo::input_transform
     static constexpr double kHeadroomScale    = 0.988553; // about -0.1 dB
     static constexpr double kDenormThreshold  = convo::numeric_policy::kDenormThresholdInputSanitize;
 
+    inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexcept
+    {
+        const __m128d v = _mm_set1_pd(value);
+        const __m128d diff = _mm_sub_pd(v, v);
+        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+
+        const __m128d signMask = _mm_set1_pd(-0.0);
+        const __m128d absV = _mm_andnot_pd(signMask, v);
+        const __m128d thresholdV = _mm_set1_pd(threshold);
+        const __m128d denormalMask = _mm_cmplt_pd(absV, thresholdV);
+
+        const __m128d validMask = _mm_andnot_pd(denormalMask, finiteMask);
+        return _mm_movemask_pd(validMask) == 0x3;
+    }
+
     inline void sanitizeAndLimit(double* __restrict data, int numSamples) noexcept
     {
         // data は ScopedAlignedPtr<double> 由来なので 64byte アライン保証
@@ -50,7 +65,7 @@ namespace convo::input_transform
         for (; i < numSamples; ++i)
         {
             double v = data[i];
-            if (!std::isfinite(v) || std::abs(v) < kDenormThreshold) v = 0.0;
+            if (!isFiniteAndAboveThresholdMask(v, kDenormThreshold)) v = 0.0;
             data[i] = std::clamp(v, -1.0, 1.0);
         }
     }

@@ -261,7 +261,7 @@ private:
             const double curr_x = sample;
             double curr_y = curr_x - px_local + r * py_local;
 
-            if (!std::isfinite(curr_y) || std::abs(curr_y) < kDenormalThreshold) curr_y = 0.0;
+            if (!isFiniteAndAboveThresholdMask(curr_y, kDenormalThreshold)) curr_y = 0.0;
 
             px_local = curr_x;
             py_local = curr_y;
@@ -348,9 +348,7 @@ private:
                 const double curr_x = data[i];
                 double curr_y = curr_x - px + r * py;
 
-                // Anti-Denormal: デノーマル数をゼロに落とす
-                // 【堅牢性向上】NaN/Infもチェックしてゼロに丸める
-                if (!std::isfinite(curr_y) || std::abs(curr_y) < kDenormalThreshold) curr_y = 0.0;
+                if (!isFiniteAndAboveThresholdMask(curr_y, kDenormalThreshold)) curr_y = 0.0;
 
                 px = curr_x;
                 py = curr_y;
@@ -361,11 +359,41 @@ private:
             // これにより、万が一 px や py が NaN/Inf になっても、次回の process() 呼び出しに
             // 不正な状態が引き継がれるのを防ぐ。
             // std::abs(NaN) < limit は false になるため、NaN は 0.0 にリセットされる。
-            m_prev_x = (std::abs(px) < 1.0e15) ? px : 0.0; // 1.0e15 は Inf を捕捉するための巨大な閾値
-            m_prev_y = (std::abs(py) < 1.0e15) ? py : 0.0;
+            m_prev_x = isFiniteAndBelowThresholdMask(px, 1.0e15) ? px : 0.0; // 1.0e15 は Inf を捕捉するための巨大な閾値
+            m_prev_y = isFiniteAndBelowThresholdMask(py, 1.0e15) ? py : 0.0;
         }
 
     private:
+        static inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexcept
+        {
+            const __m128d v = _mm_set1_pd(value);
+            const __m128d diff = _mm_sub_pd(v, v);
+            const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+
+            const __m128d signMask = _mm_set1_pd(-0.0);
+            const __m128d absV = _mm_andnot_pd(signMask, v);
+            const __m128d thresholdV = _mm_set1_pd(threshold);
+            const __m128d denormalMask = _mm_cmplt_pd(absV, thresholdV);
+
+            const __m128d validMask = _mm_andnot_pd(denormalMask, finiteMask);
+            return _mm_movemask_pd(validMask) == 0x3;
+        }
+
+        static inline bool isFiniteAndBelowThresholdMask(double value, double threshold) noexcept
+        {
+            const __m128d v = _mm_set1_pd(value);
+            const __m128d diff = _mm_sub_pd(v, v);
+            const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+
+            const __m128d signMask = _mm_set1_pd(-0.0);
+            const __m128d absV = _mm_andnot_pd(signMask, v);
+            const __m128d thresholdV = _mm_set1_pd(threshold);
+            const __m128d belowMask = _mm_cmplt_pd(absV, thresholdV);
+
+            const __m128d validMask = _mm_and_pd(finiteMask, belowMask);
+            return _mm_movemask_pd(validMask) == 0x3;
+        }
+
         // ループフュージョン用ローカル状態変数
         double px_local = 0.0;
         double py_local = 0.0;

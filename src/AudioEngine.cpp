@@ -6,6 +6,7 @@
 #include "AudioEngine.h"
 #include "InputBitDepthTransform.h"
 #include <cmath>
+#include <cstdint>
 #include <complex>
 #include <algorithm>
 #include <mutex>
@@ -15,6 +16,29 @@
 
 namespace
 {
+    inline double absNoLibm(double x) noexcept
+    {
+        union { double d; uint64_t u; } v { x };
+        v.u &= 0x7FFFFFFFFFFFFFFFULL;
+        return v.d;
+    }
+
+    inline bool isFiniteNoLibm(double x) noexcept
+    {
+        union { double d; uint64_t u; } v { x };
+        return ((v.u >> 52) & 0x7FFu) != 0x7FFu;
+    }
+
+    inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
+    {
+        return isFiniteNoLibm(x) && (absNoLibm(x) < threshold);
+    }
+
+    inline double absDiffNoLibm(double a, double b) noexcept
+    {
+        return absNoLibm(a - b);
+    }
+
     inline double estimateOversamplingLatencySamples(int oversamplingFactor, AudioEngine::OversamplingType oversamplingType) noexcept
     {
         if (oversamplingFactor <= 1)
@@ -156,7 +180,7 @@ static inline double fastTanh(double x) noexcept
 // Helper for soft clipping (Scalar version)
 static inline double musicalSoftClipScalar(double x, double threshold, double knee, double asymmetry) noexcept
 {
-    const double abs_x = std::abs(x);
+    const double abs_x = absNoLibm(x);
     const double clip_start = threshold - knee;
 
     // 安全対策: kneeが極端に小さい場合のゼロ除算防止
@@ -268,7 +292,7 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
     // Scalar remainder
     for (; i < numSamples; ++i)
     {
-        if (std::abs(data[i]) > clip_start)
+        if (absNoLibm(data[i]) > clip_start)
             data[i] = musicalSoftClipScalar(data[i], threshold, knee, asymmetry);
     }
 }
@@ -1196,10 +1220,16 @@ void AudioEngine::timerCallback()
         sendChangeMessage();
     }
 
-    std::vector<DSPCore*> toDelete;
-
+    convo::ScopedAlignedPtr<DSPCore*> toDelete;
+    size_t toDeleteCount = 0;
     {
         const juce::ScopedLock sl(trashBinLock);
+        const size_t trashSize = trashBin.size();
+        if (trashSize > 0)
+        {
+            toDelete.reset(static_cast<DSPCore**>(convo::aligned_malloc(trashSize * sizeof(DSPCore*), 64)));
+        }
+
         const uint32 now = juce::Time::getMillisecondCounter();
         // 2. Identify items to delete (older than 10000ms)
         // This ensures that any Audio Thread processing cycle (worst case: 65536/8000Hz = 8.2s)
@@ -1209,7 +1239,7 @@ void AudioEngine::timerCallback()
             // Unsigned arithmetic handles wrap-around correctly
             if ((now - it->second) > 10000)
             {
-                toDelete.push_back(it->first);
+                toDelete.get()[toDeleteCount++] = it->first;
                 it = trashBin.erase(it);
             }
             else { ++it; }
@@ -1220,9 +1250,8 @@ void AudioEngine::timerCallback()
     }
 
     // Lock解放後にデストラクタを実行 (stopThread等の重い処理をロック外で行う)
-    for (auto* p : toDelete)
-        delete p;
-    toDelete.clear();
+    for (size_t i = 0; i < toDeleteCount; ++i)
+        delete toDelete.get()[i];
 
     // 3. 内部プロセッサのクリーンアップを実行
     // 現在アクティブなDSPの内部ゴミ箱も掃除する
@@ -1407,7 +1436,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
         // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
         const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
-        if (std::abs(dsp->sampleRate - engineSampleRate) > 1e-6)
+        if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
         {
             // 不整合時はレベルメーターもリセットして誤表示を防ぐ
             inputLevelLinear.store(0.0f);
@@ -1491,7 +1520,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
-    if (std::abs(dsp->sampleRate - engineSampleRate) > 1e-6)
+    if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
     {
         inputLevelLinear.store(0.0f);
         outputLevelLinear.store(0.0f);
@@ -1897,7 +1926,7 @@ float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const doub
     for (int ch = 0; ch < numChannels; ++ch)
     {
         auto range = juce::FloatVectorOperations::findMinAndMax(block.getChannelPointer(ch), numSamples);
-        const double level = std::max(std::abs(range.getStart()), std::abs(range.getEnd()));
+        const double level = std::max(absNoLibm(range.getStart()), absNoLibm(range.getEnd()));
         if (level > maxLevel) maxLevel = level;
     }
 
@@ -2043,7 +2072,7 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
         pushToFifo(block, audioFifo, audioFifoBuffer);
 
     // 3. Apply headroom gain
-    if (std::abs(headroomGain - 1.0) > 1e-9)
+    if (absDiffNoLibm(headroomGain, 1.0) > 1e-9)
     {
         for (int ch = 0; ch < 2; ++ch)
             cblas_dscal(numSamples, headroomGain, block.getChannelPointer(ch), 1);
@@ -2098,7 +2127,7 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
         pushToFifo(block, audioFifo, audioFifoBuffer);
 
     // 3. Apply headroom gain
-    if (std::abs(headroomGain - 1.0) > 1e-9)
+    if (absDiffNoLibm(headroomGain, 1.0) > 1e-9)
     {
         for (int ch = 0; ch < 2; ++ch)
             cblas_dscal(numSamples, headroomGain, block.getChannelPointer(ch), 1);
@@ -2149,14 +2178,42 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     if (dataR) dcBlockerR.process(dataR, numSamples);
 
     // ── Step 2: NaN/Inf サニタイズ (NSフィルタ状態保護) ─────────────────────
-    // DC除去後に残存する NaN/Inf を事前にゼロ化する。
-    // NSフィルタ (processStereoBlock) に NaN/Inf が入力されると状態変数が汚染され
-    // 以降のディザリングが正常に機能しなくなるため、これを防ぐ。
-    // std::isfinite はx64 MSVC では SSE2 intrinsic にインライン展開されるため Audio Thread 安全。
-    for (int i = 0; i < numSamples; ++i)
+    // DC除去後に残存する NaN/Inf をAVX2でゼロ化（libm完全排除）。
     {
-        if (!std::isfinite(dataL[i])) dataL[i] = 0.0;
-        if (dataR && !std::isfinite(dataR[i])) dataR[i] = 0.0;
+        const __m256d vInf = _mm256_set1_pd(1.0e300);
+        int i = 0;
+        const int vEnd = numSamples / 4 * 4;
+        for (; i < vEnd; i += 4)
+        {
+            __m256d vL = _mm256_loadu_pd(dataL + i);
+            __m256d nanMaskL = _mm256_cmp_pd(vL, vL, _CMP_ORD_Q); // NaN以外=true
+            __m256d infMaskL = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vL), vInf, _CMP_LT_OQ);
+            __m256d maskL = _mm256_and_pd(nanMaskL, infMaskL);
+            vL = _mm256_and_pd(vL, maskL); // NaN/Inf → 0
+            _mm256_storeu_pd(dataL + i, vL);
+
+            if (dataR)
+            {
+                __m256d vR = _mm256_loadu_pd(dataR + i);
+                __m256d nanMaskR = _mm256_cmp_pd(vR, vR, _CMP_ORD_Q);
+                __m256d infMaskR = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vR), vInf, _CMP_LT_OQ);
+                __m256d maskR = _mm256_and_pd(nanMaskR, infMaskR);
+                vR = _mm256_and_pd(vR, maskR);
+                _mm256_storeu_pd(dataR + i, vR);
+            }
+        }
+        for (; i < numSamples; ++i)
+        {
+            double v = dataL[i];
+            if (!isFiniteAndAbsBelowNoLibm(v, 1.0e300)) v = 0.0; // 最終fallback（極稀）
+            dataL[i] = v;
+            if (dataR)
+            {
+                v = dataR[i];
+                if (!isFiniteAndAbsBelowNoLibm(v, 1.0e300)) v = 0.0;
+                dataR[i] = v;
+            }
+        }
     }
 
     // ── Step 3: ディザリング / ヘッドルーム適用 ─────────────────────────────
@@ -2243,7 +2300,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                 for (; i < numSamples; ++i)
                 {
                     double v = data[i] * kOutputHeadroom;
-                    if (!std::isfinite(v)) v = 0.0;
+                    if (!isFiniteNoLibm(v)) v = 0.0;
                     dst[i] = juce::jlimit(-kOutputHeadroom, kOutputHeadroom, v);
                 }
             }

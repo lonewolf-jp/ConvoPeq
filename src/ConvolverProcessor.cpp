@@ -269,7 +269,11 @@ static int estimateEffectiveIRLengthSamples(const juce::AudioBuffer<double>& irB
     if (numSamples <= 0 || numChannels <= 0 || sampleRate <= 0.0)
         return 0;
 
-    std::vector<double> envelope(static_cast<size_t>(numSamples), 0.0);
+    convo::ScopedAlignedPtr<double> envelope(
+        static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(numSamples) * sizeof(double), 64)));
+    if (!envelope)
+        return 0;
+    std::fill_n(envelope.get(), numSamples, 0.0);
     double peak = 0.0;
     int peakIndex = 0;
 
@@ -279,7 +283,7 @@ static int estimateEffectiveIRLengthSamples(const juce::AudioBuffer<double>& irB
         for (int ch = 0; ch < numChannels; ++ch)
             sampleMax = (std::max)(sampleMax, std::abs(irBuffer.getSample(ch, i)));
 
-        envelope[static_cast<size_t>(i)] = sampleMax;
+        envelope.get()[i] = sampleMax;
         if (sampleMax > peak)
         {
             peak = sampleMax;
@@ -298,15 +302,19 @@ static int estimateEffectiveIRLengthSamples(const juce::AudioBuffer<double>& irB
     const int scanStep = juce::jmax(1, rmsWindow / 8);
     const double thresholdAmp = peak * std::pow(10.0, -50.0 / 20.0);
 
-    std::vector<double> prefix(static_cast<size_t>(numSamples) + 1u, 0.0);
+    convo::ScopedAlignedPtr<double> prefix(
+        static_cast<double*>(convo::aligned_malloc((static_cast<size_t>(numSamples) + 1u) * sizeof(double), 64)));
+    if (!prefix)
+        return juce::jmax(1, juce::jmin(numSamples, static_cast<int>(std::round(sampleRate * ConvolverProcessor::IR_LENGTH_MIN_SEC))));
+    std::fill_n(prefix.get(), static_cast<size_t>(numSamples) + 1u, 0.0);
     for (int i = 0; i < numSamples; ++i)
-        prefix[static_cast<size_t>(i) + 1u] = prefix[static_cast<size_t>(i)] + envelope[static_cast<size_t>(i)] * envelope[static_cast<size_t>(i)];
+        prefix.get()[static_cast<size_t>(i) + 1u] = prefix.get()[static_cast<size_t>(i)] + envelope.get()[i] * envelope.get()[i];
 
     int belowStart = -1;
     for (int i = scanStart; i <= scanLimit; i += scanStep)
     {
         const int windowEnd = juce::jmin(numSamples, i + rmsWindow);
-        const double meanSquare = (prefix[static_cast<size_t>(windowEnd)] - prefix[static_cast<size_t>(i)])
+        const double meanSquare = (prefix.get()[static_cast<size_t>(windowEnd)] - prefix.get()[static_cast<size_t>(i)])
                                 / static_cast<double>(windowEnd - i);
         const double rms = std::sqrt((std::max)(0.0, meanSquare));
 
@@ -1961,7 +1969,12 @@ void ConvolverProcessor::cleanup()
     if (!lock.isLocked()) return;
 
     const uint32 now = juce::Time::getMillisecondCounter();
-    std::vector<StereoConvolver*> toRelease;
+    const size_t trashSize = trashBin.size();
+    convo::ScopedAlignedPtr<StereoConvolver*> toRelease(
+        (trashSize > 0)
+            ? static_cast<StereoConvolver**>(convo::aligned_malloc(trashSize * sizeof(StereoConvolver*), 64))
+            : nullptr);
+    size_t toReleaseCount = 0;
 
     for (auto it = trashBin.begin(); it != trashBin.end(); )
     {
@@ -1971,7 +1984,7 @@ void ConvolverProcessor::cleanup()
 
         if (age > 10000)
         {
-            toRelease.push_back(it->first);
+            toRelease.get()[toReleaseCount++] = it->first;
             it = trashBin.erase(it);
         }
         else
@@ -1983,7 +1996,8 @@ void ConvolverProcessor::cleanup()
     // 安全性優先: 年齢条件(age > 10000ms)を満たしたもののみ回収する。
     // サイズ超過のみを理由とした強制解放は行わない。
 
-    for (auto* p : toRelease) p->release();
+    for (size_t i = 0; i < toReleaseCount; ++i)
+        toRelease.get()[i]->release();
 }
 
 void ConvolverProcessor::forceCleanup()
@@ -1991,10 +2005,21 @@ void ConvolverProcessor::forceCleanup()
     // This method is for eager cleanup of non-blocking resources.
     // The blocking cleanup of LoaderThreads is handled by the destructor.
 
-    std::vector<std::pair<StereoConvolver*, uint32>> stereoConvolversToDelete;
+    using TrashEntry = std::pair<StereoConvolver*, uint32>;
+    convo::ScopedAlignedPtr<TrashEntry> stereoConvolversToDelete;
+    size_t stereoConvolversToDeleteCount = 0;
     {
         juce::ScopedLock lock(trashBinLock);
-        stereoConvolversToDelete.swap(trashBin);
+        const size_t trashSize = trashBin.size();
+        if (trashSize > 0)
+        {
+            stereoConvolversToDelete.reset(
+                static_cast<TrashEntry*>(convo::aligned_malloc(trashSize * sizeof(TrashEntry), 64)));
+            for (size_t i = 0; i < trashSize; ++i)
+                stereoConvolversToDelete.get()[i] = trashBin[i];
+            stereoConvolversToDeleteCount = trashSize;
+            trashBin.clear();
+        }
     }
 
     // 【Fix】LoaderThread のクリーンアップ漏れ防止
@@ -2016,7 +2041,8 @@ void ConvolverProcessor::forceCleanup()
     }
     loadersToDelete.clear(); // unique_ptrのデストラクタが呼ばれ、スレッドがクリーンアップされる
 
-    for (auto& entry : stereoConvolversToDelete) entry.first->release();
+    for (size_t i = 0; i < stereoConvolversToDeleteCount; ++i)
+        stereoConvolversToDelete.get()[i].first->release();
 }
 
 //--------------------------------------------------------------
@@ -2146,16 +2172,16 @@ ConvolverProcessor::IRLoadPreview ConvolverProcessor::analyzeImpulseResponseFile
 // applySmoothing (Helper)
 // 1/6オクターブスムージングを適用する
 //--------------------------------------------------------------
-static void applySmoothing(std::vector<float>& magnitudes, int fftSize)
+static void applySmoothing(const float* magnitudes, float* smoothed, int numBins)
 {
-    if (magnitudes.empty()) return;
+    if (magnitudes == nullptr || smoothed == nullptr || numBins <= 0) return;
 
-    std::vector<float> smoothed = magnitudes;
+    smoothed[0] = magnitudes[0];
     const float bandwidth = 1.0f / 6.0f; // 1/6 octave
     const float factor = std::pow(2.0f, bandwidth * 0.5f);
 
     // DC(0)はスキップ
-    for (size_t i = 1; i < magnitudes.size(); ++i)
+    for (int i = 1; i < numBins; ++i)
     {
         float sum = 0.0f;
         int count = 0;
@@ -2165,7 +2191,7 @@ static void applySmoothing(std::vector<float>& magnitudes, int fftSize)
         int endBin   = static_cast<int>(static_cast<float>(i) * factor);
 
         startBin = (std::max)(1, startBin); // DCを含めない
-        endBin   = (std::min)(static_cast<int>(magnitudes.size()) - 1, endBin);
+        endBin   = (std::min)(numBins - 1, endBin);
 
         for (int j = startBin; j <= endBin; ++j)
         {
@@ -2175,9 +2201,9 @@ static void applySmoothing(std::vector<float>& magnitudes, int fftSize)
 
         if (count > 0)
             smoothed[i] = sum / static_cast<float>(count);
+        else
+            smoothed[i] = magnitudes[i];
     }
-
-    magnitudes = smoothed;
 }
 
 std::vector<float> ConvolverProcessor::getIRWaveform() const
@@ -2315,15 +2341,23 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     std::memcpy(dst, magBuf, numBins * sizeof(float));
 
     // スムージング適用 (Linear Magnitudeに対して行う)
-    std::vector<float> linearMags(cachedFFTBuffer.get(), cachedFFTBuffer.get() + numBins);
-    applySmoothing(linearMags, fftSize);
+    convo::ScopedAlignedPtr<float> linearMags(
+        static_cast<float*>(convo::aligned_malloc(static_cast<size_t>(numBins) * sizeof(float), 64)));
+    convo::ScopedAlignedPtr<float> smoothedMags(
+        static_cast<float*>(convo::aligned_malloc(static_cast<size_t>(numBins) * sizeof(float), 64)));
+
+    if (!linearMags || !smoothedMags)
+        return;
+
+    std::memcpy(linearMags.get(), cachedFFTBuffer.get(), static_cast<size_t>(numBins) * sizeof(float));
+    applySmoothing(linearMags.get(), smoothedMags.get(), numBins);
 
     // マグニチュード(dB)に変換して格納
     irMagnitudeSpectrum.resize(numBins);
 
     for (int i = 0; i < numBins; ++i)
     {
-        float mag = linearMags[i];
+        float mag = smoothedMags[i];
         irMagnitudeSpectrum[i] = (mag > 1e-9f) ? juce::Decibels::gainToDecibels(mag) : -100.0f;
     }
 }
@@ -3453,6 +3487,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                               return &spec;
                           }()))
         {
+            jassert(newConv->areNUCDescriptorsCommitted());
             applyNewState(newConv, loadedIR, sr, length, isRebuild, irFile, scaleFactor, displayIR);
         }
         else

@@ -431,6 +431,16 @@ private:
             }
         }
 
+        bool areNUCDescriptorsCommitted() const noexcept
+        {
+            for (const auto& conv : nucConvolvers)
+            {
+                if (!conv || !conv->areFftDescriptorsCommitted())
+                    return false;
+            }
+            return true;
+        }
+
         void reset();
         void process(int channel, const double* in, double* out, int numSamples);
     };

@@ -138,6 +138,13 @@ public:
     bool isReady() const noexcept { return m_ready.load(std::memory_order_acquire); }
 
     //----------------------------------------------------------
+    // areFftDescriptorsCommitted  ─ いつでも呼び出し可
+    // Audio Thread で使用する DFTI ハンドルが SetImpulse() で
+    // Commit 済みかを検証する。
+    //----------------------------------------------------------
+    bool areFftDescriptorsCommitted() const noexcept;
+
+    //----------------------------------------------------------
     // getLatency  ─ 出力の先頭レイテンシー (サンプル数)
     // = Layer0 の partitionSize
     //----------------------------------------------------------
@@ -161,6 +168,7 @@ private:
 
         // ── MKL ──
         DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
+        bool descriptorCommitted = false;
 
         // ── IR 周波数領域 (Message Thread で確保・プリコンピュート) ──
         // レイアウト: [numParts][partStride] (double 配列として管理、MKL_Complex16 として解釈)

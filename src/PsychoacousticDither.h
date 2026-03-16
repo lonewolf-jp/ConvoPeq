@@ -23,6 +23,7 @@
 #include <random>
 #include <optional>
 #include <algorithm>
+#include <thread>
 #include "AlignedAllocation.h"
 
 #include <immintrin.h>
@@ -100,6 +101,7 @@ public:
     };
 
     ~PsychoacousticDither() {
+        stopRngProducer();
         if (shaperStateBuffer) convo::aligned_free(shaperStateBuffer);
     }
 
@@ -125,17 +127,11 @@ public:
         // Use SplitMix64 to generate independent seeds for each channel
         SplitMix64 seeder(baseSeed);
         for (int i = 0; i < MAX_CHANNELS; ++i) {
-            rng[i].init(seeder.next());
-
-            // 【追加】初回バッファ充填 (Audio Threadでの初回ジッター防止)
-            // [Fix] vslNewStream() が失敗した場合は rng[i] が null なので vdRngUniform を呼ばない。
-            //       フォールバック: 0.5 で埋めることでディザゼロに相当する安全な初期状態とする。
-            if (rng[i].isValid())
-                vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[i],
-                             RND_BUFFER_SIZE, rndBuffer[i], 0.0, 1.0);
-            else
-                std::fill_n(rndBuffer[i], RND_BUFFER_SIZE, 0.5);
-            rndIndex[i] = 0;
+            const uint64_t seedValue = seeder.next();
+            rng[i].init(seedValue);
+            fallbackState[i] = seedValue ^ 0xd1b54a32d192ed03ULL;
+            rngReadPos[i].store(0u, std::memory_order_relaxed);
+            rngWritePos[i].store(0u, std::memory_order_relaxed);
         }
 
         shaperStateBuffer = static_cast<double*>(convo::aligned_malloc(MAX_CHANNELS * STATE_STRIDE * sizeof(double), 64));
@@ -235,10 +231,15 @@ public:
 
     void prepare(double sampleRate, int bitDepth = DEFAULT_BIT_DEPTH) noexcept
     {
+        stopRngProducer();
+
         // bitDepth <= 0 の場合はディザリングが無効化されるため、スケール計算は不要。
         // AudioEngine::DSPCore::processOutput() の applyDither フラグで処理がスキップされる。
         if (bitDepth <= 0)
+        {
+            clearRandomRing();
             return;
+        }
 
         // Nビット符号付きPCMの量子化ステップは 2 / 2^N = 1 / 2^(N-1)
         scale    = 1.0 / std::pow(2.0, bitDepth - 1);
@@ -269,6 +270,10 @@ public:
         // 係数を実行時バッファにコピー (Audio Threadからはこちらを参照する)
         for (int i = 0; i < NS_ORDER; ++i)
             coeffs[i] = kCoeffTable[srBand][bpIdx][i];
+
+        clearRandomRing();
+        prefillRandomRing();
+        startRngProducer();
 
         reset();
     }
@@ -393,6 +398,147 @@ public:
     }
 
 private:
+    static constexpr uint32_t RNG_RING_SIZE = 1u << 16;
+    static constexpr uint32_t RNG_RING_MASK = RNG_RING_SIZE - 1u;
+    static constexpr uint32_t RNG_REFILL_CHUNK = 2048u;
+
+    static_assert((RNG_RING_SIZE & (RNG_RING_SIZE - 1u)) == 0u, "RNG_RING_SIZE must be power of two");
+
+    inline void clearRandomRing() noexcept
+    {
+        for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+        {
+            rngReadPos[ch].store(0u, std::memory_order_relaxed);
+            rngWritePos[ch].store(0u, std::memory_order_relaxed);
+        }
+    }
+
+    inline void fillChunkForChannel(int channel, uint32_t writePos, uint32_t count) noexcept
+    {
+        const uint32_t start = writePos & RNG_RING_MASK;
+        const uint32_t firstCount = std::min(count, RNG_RING_SIZE - start);
+        const uint32_t secondCount = count - firstCount;
+
+        auto fillWithFallback = [this, channel](uint32_t offset, uint32_t n) noexcept {
+            for (uint32_t i = 0; i < n; ++i)
+            rngRing[channel][offset + i] = 0.5;
+        };
+
+        if (rng[channel].isValid())
+        {
+            const MKL_INT status1 = vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[channel],
+                                                 static_cast<MKL_INT>(firstCount),
+                                                 &rngRing[channel][start], 0.0, 1.0);
+            if (status1 != VSL_STATUS_OK)
+            {
+                fillWithFallback(start, firstCount);
+            }
+
+            if (secondCount > 0u)
+            {
+                const MKL_INT status2 = vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[channel],
+                                                     static_cast<MKL_INT>(secondCount),
+                                                     &rngRing[channel][0], 0.0, 1.0);
+                if (status2 != VSL_STATUS_OK)
+                    fillWithFallback(0u, secondCount);
+            }
+        }
+        else
+        {
+            fillWithFallback(start, firstCount);
+            if (secondCount > 0u)
+                fillWithFallback(0u, secondCount);
+        }
+    }
+
+    void prefillRandomRing() noexcept
+    {
+        for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+        {
+            fillChunkForChannel(ch, 0u, RNG_RING_SIZE);
+            rngWritePos[ch].store(RNG_RING_SIZE, std::memory_order_release);
+        }
+    }
+
+    void startRngProducer() noexcept
+    {
+        rngProducerStopRequested.store(false, std::memory_order_release);
+        try
+        {
+            rngProducerThread = std::thread([this]() { rngProducerLoop(); });
+            rngProducerRunning.store(true, std::memory_order_release);
+        }
+        catch (...)
+        {
+            rngProducerRunning.store(false, std::memory_order_release);
+            rngProducerStopRequested.store(true, std::memory_order_release);
+        }
+    }
+
+    void stopRngProducer() noexcept
+    {
+        const bool wasRunning = rngProducerRunning.exchange(false, std::memory_order_acq_rel);
+        if (!wasRunning)
+            return;
+
+        rngProducerStopRequested.store(true, std::memory_order_release);
+        if (rngProducerThread.joinable())
+            rngProducerThread.join();
+    }
+
+    void rngProducerLoop() noexcept
+    {
+        while (!rngProducerStopRequested.load(std::memory_order_acquire))
+        {
+            bool didWork = false;
+
+            for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+            {
+                const uint32_t readPos = rngReadPos[ch].load(std::memory_order_acquire);
+                const uint32_t writePos = rngWritePos[ch].load(std::memory_order_relaxed);
+                const uint32_t available = writePos - readPos;
+                const uint32_t freeSpace = RNG_RING_SIZE - available;
+
+                if (freeSpace >= RNG_REFILL_CHUNK)
+                {
+                    fillChunkForChannel(ch, writePos, RNG_REFILL_CHUNK);
+                    rngWritePos[ch].store(writePos + RNG_REFILL_CHUNK, std::memory_order_release);
+                    didWork = true;
+                }
+            }
+
+            if (!didWork)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    inline double fallbackUniform(int channel) noexcept
+    {
+        uint64_t x = fallbackState[channel];
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        fallbackState[channel] = x;
+
+        constexpr uint64_t mul = 2685821657736338717ULL;
+        const uint64_t z = x * mul;
+        constexpr double inv53 = 1.0 / 9007199254740992.0;
+        return static_cast<double>(z >> 11) * inv53;
+    }
+
+    inline double popUniformFromRing(int channel) noexcept
+    {
+        const uint32_t readPos = rngReadPos[channel].load(std::memory_order_relaxed);
+        const uint32_t writePos = rngWritePos[channel].load(std::memory_order_acquire);
+
+        if (readPos == writePos)
+            return fallbackUniform(channel);
+
+        const double value = rngRing[channel][readPos & RNG_RING_MASK];
+        rngReadPos[channel].store(readPos + 1u, std::memory_order_release);
+        return value;
+    }
+
     inline double processChannelMKL(double x, int channel, double* z) noexcept
     {
         // TPDFディザ生成 (MKL)
@@ -436,31 +582,20 @@ private:
         return quantized;
     }
 
-    // MKL VSL Batch Generation for efficiency
-    static constexpr int RND_BUFFER_SIZE = 512;
-    // 【パッチ6】rndBufferをインスタンスメンバー化 (データレース防止)
-    alignas(64) double rndBuffer[MAX_CHANNELS][RND_BUFFER_SIZE] {};
-    int rndIndex[MAX_CHANNELS];
+    alignas(64) double rngRing[MAX_CHANNELS][RNG_RING_SIZE] {};
+    std::atomic<uint32_t> rngReadPos[MAX_CHANNELS] {};
+    std::atomic<uint32_t> rngWritePos[MAX_CHANNELS] {};
+    uint64_t fallbackState[MAX_CHANNELS] {};
+
+    std::thread rngProducerThread;
+    std::atomic<bool> rngProducerRunning { false };
+    std::atomic<bool> rngProducerStopRequested { false };
 
     inline double nextTPDF_MKL(int channel) noexcept
     {
-        const double u1 = getNextUniformMKL(channel);
-        const double u2 = getNextUniformMKL(channel);
+        const double u1 = popUniformFromRing(channel);
+        const double u2 = popUniformFromRing(channel);
         return (u1 - 0.5) + (u2 - 0.5);
-    }
-
-    inline double getNextUniformMKL(int channel) noexcept
-    {
-        if (rndIndex[channel] >= RND_BUFFER_SIZE)
-        {
-            // [Fix] rng[channel] が null (初期化失敗) の場合は vdRngUniform を呼ばない。
-            if (!rng[channel].isValid() ||
-                vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rng[channel],
-                             RND_BUFFER_SIZE, rndBuffer[channel], 0.0, 1.0) != VSL_STATUS_OK)
-                std::fill_n(rndBuffer[channel], RND_BUFFER_SIZE, 0.5);
-            rndIndex[channel] = 0;
-        }
-        return rndBuffer[channel][rndIndex[channel]++];
     }
 
     inline double killDenormal(double x) const noexcept

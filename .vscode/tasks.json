@@ -1,48 +1,72 @@
 {
-    "version": "2.0.0",
-    "options": {
-        "shell": {
-            "executable": "C:\\Windows\\System32\\cmd.exe",
-            "args": [
-                "/d",
-                "/c"
-            ]
-        }
-    },
-    "tasks": [
-        {
-            "label": "Kill Previous Instance",
-            "type": "shell",
-            "command": "taskkill /F /IM \"ConvoPeq.exe\" >nul 2>&1 || exit 0",
-            "problemMatcher": []
-        },
-        {
-            "label": "Clean",
-            "type": "shell",
-            "command": "if exist \"${workspaceFolder}\\build\" rmdir /s /q \"${workspaceFolder}\\build\"",
-            "problemMatcher": []
-        },
-        {
-            "label": "Release",
-            "type": "shell",
-            "command": "call \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Release",
-            "dependsOn": [
-                "Kill Previous Instance"
-            ],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": "$msCompile"
-        },
-        {
-            "label": "Debug",
-            "type": "shell",
-            "command": "call \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Debug",
-            "dependsOn": [
-                "Kill Previous Instance"
-            ],
-            "problemMatcher": "$msCompile"
-        }
-    ]
+	"version": "2.0.0",
+	"options": {
+		"shell": {
+			"executable": "C:\\Windows\\System32\\cmd.exe",
+			"args": [
+				"/d",
+				"/c"
+			]
+		}
+	},
+	"tasks": [
+		{
+			"label": "Kill Previous Instance",
+			"type": "shell",
+			"command": "taskkill /F /IM \"ConvoPeq.exe\" >nul 2>&1 || exit 0",
+			"problemMatcher": []
+		},
+		{
+			"label": "Clean",
+			"type": "shell",
+			"command": "if exist \"${workspaceFolder}\\build\" rmdir /s /q \"${workspaceFolder}\\build\"",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release",
+			"type": "shell",
+			"command": "call \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Release",
+			"dependsOn": [
+				"Kill Previous Instance"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": "$msCompile"
+		},
+		{
+			"label": "Debug",
+			"type": "shell",
+			"command": "call \"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Debug",
+			"dependsOn": [
+				"Kill Previous Instance"
+			],
+			"problemMatcher": "$msCompile"
+		},
+		{
+			"label": "Debug Build (cmd env)",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"\"call \\\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\\\" x64 && call \\\"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\\\" intel64 && cmake -S . -B build -G \\\"Ninja Multi-Config\\\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Debug\""
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Debug Build (cmd env retry)",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Debug"
+			],
+			"isBackground": false,
+			"group": "build"
+		}
+	]
 }

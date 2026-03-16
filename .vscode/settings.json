@@ -34,5 +34,15 @@
     "C_Cpp.clang_format_style": "file",
     "C_Cpp.codeAnalysis.clangTidy.checks.enabled": [
         "*"
-    ]
+    ],
+    // MCPサーバーの自動起動を有効化
+    "github.copilot.chat.mcp.enabled": true,
+    // AIによるファイルの自動読み込み範囲を最適化
+    "github.copilot.editor.enableCodeActions": true,
+    // Serenaが作成したインデックス（Memories）を優先的に参照させる
+    "github.copilot.chat.search.semanticScrolling": true,
+    "github.copilot.chat.mcp.allowedServers": [
+        "serena"
+    ],
+    "github.copilot.selectedMode": "agent"
 }

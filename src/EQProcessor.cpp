@@ -8,6 +8,7 @@
 #include "EQProcessor.h"
 #include "DspNumericPolicy.h"
 #include <cmath>
+#include <cstdint>
 #include <algorithm>
 #include <complex>
 #include <numeric>
@@ -779,6 +780,38 @@ EQChannelMode EQProcessor::getBandChannelMode(int band) const
 
 namespace
 {
+    inline double absNoLibm(double value) noexcept
+    {
+        union { double d; uint64_t u; } v { value };
+        v.u &= 0x7FFFFFFFFFFFFFFFULL;
+        return v.d;
+    }
+
+    inline bool isFiniteNoLibm(double value) noexcept
+    {
+        const __m128d v = _mm_set1_pd(value);
+        const __m128d diff = _mm_sub_pd(v, v);
+        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+        return _mm_movemask_pd(finiteMask) == 0x3;
+    }
+
+    inline bool isFiniteAndAbsInRangeMask(double value, double minAbsInclusive, double maxAbsExclusive) noexcept
+    {
+        const __m128d v = _mm_set1_pd(value);
+        const __m128d diff = _mm_sub_pd(v, v);
+        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+
+        const __m128d signMask = _mm_set1_pd(-0.0);
+        const __m128d absV = _mm_andnot_pd(signMask, v);
+        const __m128d minV = _mm_set1_pd(minAbsInclusive);
+        const __m128d maxV = _mm_set1_pd(maxAbsExclusive);
+        const __m128d geMinMask = _mm_cmpge_pd(absV, minV);
+        const __m128d ltMaxMask = _mm_cmplt_pd(absV, maxV);
+
+        const __m128d validMask = _mm_and_pd(finiteMask, _mm_and_pd(geMinMask, ltMaxMask));
+        return _mm_movemask_pd(validMask) == 0x3;
+    }
+
 //--------------------------------------------------------------
 // 単一チャンネル・単一バンドのフィルタ処理 (TPT SVF)
 // Topology-Preserving Transform State Variable Filter
@@ -813,7 +846,7 @@ namespace
             double output = m0 * v0 + m1 * v1 + m2 * v2;
 
             // NaN/Infチェックとクランプを追加 (processBandStereoと一貫性を保つ)
-            if (!std::isfinite(output))
+            if (!isFiniteAndAbsInRangeMask(output, 0.0, 1.0e15))
                 output = 0.0;
 
             // 出力もクランプして発散を防ぐ
@@ -823,15 +856,15 @@ namespace
             // FTZ/DAZ 有効下でも Inf は flush されないため、この防衛は省略できない。
             // 条件式 !(abs < 閾値) は NaN に対しても true を返すため NaN/Inf を一括で捕捉する。
             // ループ内で状態変数のみをチェックする (出力データへのクランプより低コスト)。
-            if (! (std::abs(ic1eq) < 1.0e15)) ic1eq = 0.0;
-            if (! (std::abs(ic2eq) < 1.0e15)) ic2eq = 0.0;
+            if (!isFiniteAndAbsInRangeMask(ic1eq, 0.0, 1.0e15)) ic1eq = 0.0;
+            if (!isFiniteAndAbsInRangeMask(ic2eq, 0.0, 1.0e15)) ic2eq = 0.0;
         }
 
         // Denormal対策 & NaNチェック
         // Note: ScopedNoDenormals (DAZ/FTZ) が有効な場合でも、完全な0にならないと
         // 極小値が循環し続ける可能性があるため、明示的にフラッシュして計算負荷を抑える。
-        if (!std::isfinite(ic1eq) || std::abs(ic1eq) < DENORMAL_THRESHOLD) ic1eq = 0.0;
-        if (!std::isfinite(ic2eq) || std::abs(ic2eq) < DENORMAL_THRESHOLD) ic2eq = 0.0;
+        if (!isFiniteAndAbsInRangeMask(ic1eq, DENORMAL_THRESHOLD, 1.0e15)) ic1eq = 0.0;
+        if (!isFiniteAndAbsInRangeMask(ic2eq, DENORMAL_THRESHOLD, 1.0e15)) ic2eq = 0.0;
 
         state[0] = ic1eq;
         state[1] = ic2eq;
@@ -1029,17 +1062,17 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     // 入力が極端に大きい場合（発振など）、エンベロープが汚染されるのを防ぐ
     static constexpr double MAX_ENV_VALUE = 1000.0; // +60dB
 
-    if (!std::isfinite(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
-    if (!std::isfinite(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
+    if (!isFiniteNoLibm(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
+    if (!isFiniteNoLibm(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
 
     // アトミック変数のロード
     double envIn = agcEnvInput.load(std::memory_order_relaxed);
     double envOut = agcEnvOutput.load(std::memory_order_relaxed);
     double currentGain = agcCurrentGain.load(std::memory_order_relaxed);
 
-    if (!std::isfinite(envIn))  envIn = 0.0;
-    if (!std::isfinite(envOut)) envOut = 0.0;
-    if (!std::isfinite(currentGain)) currentGain = 1.0;
+    if (!isFiniteNoLibm(envIn))  envIn = 0.0;
+    if (!isFiniteNoLibm(envOut)) envOut = 0.0;
+    if (!isFiniteNoLibm(currentGain)) currentGain = 1.0;
 
     // ブロック長とサンプリングレートに基づいて係数を動的に計算
     // alpha = dt / (dt + tau)  (dt: samples, tau: samples)
@@ -1108,7 +1141,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     bool effectiveBypass = bypassed.load(std::memory_order_relaxed);
 
     const double targetBypassFade = requestedBypass ? 0.0 : 1.0;
-    if (std::abs(bypassFadeGain.getTargetValue() - targetBypassFade) > 1.0e-12)
+    if (absNoLibm(bypassFadeGain.getTargetValue() - targetBypassFade) > 1.0e-12)
     {
         if (!requestedBypass && effectiveBypass)
             bypassed.store(false, std::memory_order_relaxed);
@@ -1262,7 +1295,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         // Audio Threadでは atomic load のみ行う。
         const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
 
-        if (std::abs(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
+        if (absNoLibm(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
         {
             smoothTotalGain.setTargetValue(targetGain);
         }

@@ -201,6 +201,8 @@ Output binaries:
 
 ## Manual Build (Equivalent)
 
+**cmd.exe / Developer Command Prompt:**
+
 ```cmd
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
@@ -209,6 +211,14 @@ cmake -S . -B build -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_CO
 cmake --build build --config Debug
 cmake --build build --config Release
 ```
+
+**PowerShell（環境変数を同一プロセスに引き渡すため `cmd.exe /d /c` でまとめて実行）:**
+
+```powershell
+cmd.exe /d /c "call `"%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat`" x64 && call `"%ProgramFiles(x86)%\Intel\oneAPI\setvars.bat`" intel64 && cmake -S . -B build -G `"Ninja Multi-Config`" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Debug"
+```
+
+> **Note**: PowerShell の `&&` は環境変数の伝播を行わないため、`call vcvarsall.bat` と後続コマンドを必ず同一の `cmd.exe /d /c "..."` 内に記述してください。
 
 For more details, see `BUILD_GUIDE_WINDOWS.md`.
 

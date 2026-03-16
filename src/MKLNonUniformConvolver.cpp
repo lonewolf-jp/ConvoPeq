@@ -60,6 +60,21 @@ inline double hsum256_pd(__m256d v) noexcept
     const __m128d shuf = _mm_shuffle_pd(sum, sum, 0x1);
     return _mm_cvtsd_f64(_mm_add_sd(sum, shuf));
 }
+
+inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexcept
+{
+    const __m128d v = _mm_set1_pd(value);
+    const __m128d diff = _mm_sub_pd(v, v);
+    const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+
+    const __m128d signMask = _mm_set1_pd(-0.0);
+    const __m128d absV = _mm_andnot_pd(signMask, v);
+    const __m128d thresholdV = _mm_set1_pd(threshold);
+    const __m128d denormalMask = _mm_cmplt_pd(absV, thresholdV);
+
+    const __m128d validMask = _mm_andnot_pd(denormalMask, finiteMask);
+    return _mm_movemask_pd(validMask) == 0x3;
+}
 } // namespace
 
 //==============================================================================
@@ -68,6 +83,7 @@ inline double hsum256_pd(__m256d v) noexcept
 void MKLNonUniformConvolver::Layer::freeAll() noexcept
 {
     if (fftHandle)     { DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; }
+    descriptorCommitted = false;
     if (irFreqDomain)  { mkl_free(irFreqDomain);  irFreqDomain  = nullptr; }
     if (fdlBuf)        { mkl_free(fdlBuf);         fdlBuf        = nullptr; }
     // [Bug F fix] overlapBuf 削除済み
@@ -402,6 +418,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
             continue;  // このレイヤーは使用しない
 
         Layer& l = m_layers[m_numActiveLayers];
+        l.descriptorCommitted = false;
 
         l.partSize    = cfgs[li].partSize;
         l.fftSize     = l.partSize * 2;
@@ -430,6 +447,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         ok = ok && (DftiSetValue(l.fftHandle, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX) == DFTI_NO_ERROR);
         ok = ok && (DftiSetValue(l.fftHandle, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(l.fftSize)) == DFTI_NO_ERROR);
         ok = ok && (DftiCommitDescriptor(l.fftHandle) == DFTI_NO_ERROR);
+        l.descriptorCommitted = ok;
 
         if (!ok)
         {
@@ -635,6 +653,21 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     return true;
 }
 
+bool MKLNonUniformConvolver::areFftDescriptorsCommitted() const noexcept
+{
+    if (!m_ready.load(std::memory_order_acquire) || m_numActiveLayers <= 0)
+        return false;
+
+    for (int li = 0; li < m_numActiveLayers; ++li)
+    {
+        const Layer& l = m_layers[li];
+        if (l.fftHandle == nullptr || !l.descriptorCommitted)
+            return false;
+    }
+
+    return true;
+}
+
 //==============================================================================
 // processDirectBlock  ─ Audio Thread
 // 先頭IRを時間領域で即時処理し、結果を専用ミックスバッファへ書き込む。
@@ -689,7 +722,7 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
             for (; k < m_directTapCount; ++k)
                 y += m_directIRRev[k] * x[k];
 
-            if (!std::isfinite(y) || std::abs(y) < kDenormalThreshold)
+            if (!isFiniteAndAboveThresholdMask(y, kDenormalThreshold))
                 y = 0.0;
 
             m_directOutBuf[processed + n] = y;
