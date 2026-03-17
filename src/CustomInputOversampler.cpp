@@ -1,5 +1,6 @@
 //============================================================================
 #include "CustomInputOversampler.h"
+#include "DspNumericPolicy.h"
 
 #include <cmath>
 #include <cstring>
@@ -127,7 +128,7 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     acc2 = _mm256_add_pd(acc2, acc3);
     acc0 = _mm256_add_pd(acc0, acc2);
 
-    alignas(32) double partial[4];
+    alignas(64) double partial[4];
     _mm256_store_pd(partial, acc0);
     double sum = partial[0] + partial[1] + partial[2] + partial[3];
 
@@ -280,6 +281,8 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
                                               double* output,
                                               int channel) noexcept
 {
+    constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdAudioState;
+
     double* history = stage.upHistory[channel].get();
     if (history == nullptr || input == nullptr || output == nullptr)
         return;
@@ -295,8 +298,8 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
         double centerValue = 2.0 * stage.centerCoeff * history[idx - stage.centerDelayInput];
 
         // Denormal対策: 極小値をゼロに落とす (Explicit Flush-to-Zero)
-        if (std::abs(convValue) < 1.0e-25) convValue = 0.0;
-        if (std::abs(centerValue) < 1.0e-25) centerValue = 0.0;
+        if (std::abs(convValue) < kDenormThreshold) convValue = 0.0;
+        if (std::abs(centerValue) < kDenormThreshold) centerValue = 0.0;
 
         const int outBase = n << 1;
 
@@ -313,6 +316,8 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
                                            double* output,
                                            int channel) noexcept
 {
+    constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdAudioState;
+
     double* history = stage.downHistory[channel].get();
     if (history == nullptr || input == nullptr || output == nullptr)
         return;
@@ -342,7 +347,7 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
             vAcc = _mm256_fmadd_pd(vSamples, vCoeffs, vAcc);
         }
 
-        alignas(32) double partial[4];
+        alignas(64) double partial[4];
         _mm256_store_pd(partial, vAcc);
         acc += partial[0] + partial[1] + partial[2] + partial[3];
 
@@ -360,7 +365,7 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
 #endif
 
         // Denormal対策
-        if (std::abs(acc) < 1.0e-25) acc = 0.0;
+        if (std::abs(acc) < kDenormThreshold) acc = 0.0;
         output[n] = acc;
     }
 

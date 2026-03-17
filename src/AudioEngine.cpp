@@ -112,6 +112,30 @@ namespace
         for (; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
     }
 
+    inline bool isAligned64(const void* ptr) noexcept
+    {
+        return (reinterpret_cast<std::uintptr_t>(ptr) & static_cast<std::uintptr_t>(63)) == 0;
+    }
+
+    inline void scaleBlockFallback(double* data, int numSamples, double gain) noexcept
+    {
+#if defined(__AVX2__)
+        int i = 0;
+        const int vEnd = numSamples / 4 * 4;
+        const __m256d vGain = _mm256_set1_pd(gain);
+        for (; i < vEnd; i += 4)
+        {
+            __m256d vData = _mm256_loadu_pd(data + i);
+            _mm256_storeu_pd(data + i, _mm256_mul_pd(vData, vGain));
+        }
+        for (; i < numSamples; ++i)
+            data[i] *= gain;
+#else
+        for (int i = 0; i < numSamples; ++i)
+            data[i] *= gain;
+#endif
+    }
+
     // AVX2 helper to calculate magnitude squared for a biquad over an array of complex frequencies
     static void calcMagnitudesForBand(const EQCoeffsBiquad& c,
                                       const std::complex<double>* zArr,
@@ -1740,8 +1764,13 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
             if (state.convolverInputTrimGain != 1.0)
             {
                 for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
-                    cblas_dscal((int)processBlock.getNumSamples(), state.convolverInputTrimGain,
-                                processBlock.getChannelPointer(ch), 1);
+                {
+                    double* ptr = processBlock.getChannelPointer(ch);
+                    if (isAligned64(ptr))
+                        cblas_dscal((int)processBlock.getNumSamples(), state.convolverInputTrimGain, ptr, 1);
+                    else
+                        scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
+                }
             }
             convolver.process(processBlock);
         }
@@ -1774,8 +1803,13 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     // 配置: OutputFilter 直後・SoftClipper 直前。processDouble() と同一位置・同一ロジック。
     //----------------------------------------------------------
     for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
-        cblas_dscal((int)processBlock.getNumSamples(), state.outputMakeupGain,
-                    processBlock.getChannelPointer(ch), 1);
+    {
+        double* ptr = processBlock.getChannelPointer(ch);
+        if (isAligned64(ptr))
+            cblas_dscal((int)processBlock.getNumSamples(), state.outputMakeupGain, ptr, 1);
+        else
+            scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.outputMakeupGain);
+    }
 
     //----------------------------------------------------------
     // ソフトクリッピング (Soft Clipping)
@@ -1916,8 +1950,13 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
             if (state.convolverInputTrimGain != 1.0)
             {
                 for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
-                    cblas_dscal((int)processBlock.getNumSamples(), state.convolverInputTrimGain,
-                                processBlock.getChannelPointer(ch), 1);
+                {
+                    double* ptr = processBlock.getChannelPointer(ch);
+                    if (isAligned64(ptr))
+                        cblas_dscal((int)processBlock.getNumSamples(), state.convolverInputTrimGain, ptr, 1);
+                    else
+                        scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
+                }
             }
             convolver.process(processBlock);
         }
@@ -1943,7 +1982,13 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 
     // Output Makeup Gain
     for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
-        cblas_dscal((int)processBlock.getNumSamples(), state.outputMakeupGain, processBlock.getChannelPointer(ch), 1);
+    {
+        double* ptr = processBlock.getChannelPointer(ch);
+        if (isAligned64(ptr))
+            cblas_dscal((int)processBlock.getNumSamples(), state.outputMakeupGain, ptr, 1);
+        else
+            scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.outputMakeupGain);
+    }
 
     if (state.softClipEnabled)
     {

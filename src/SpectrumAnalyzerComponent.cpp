@@ -423,7 +423,7 @@ void SpectrumAnalyzerComponent::timerCallback()
             __m256 mag2 = _mm256_add_ps(_mm256_mul_ps(re, re), _mm256_mul_ps(im, im));
             __m256 mag = _mm256_mul_ps(_mm256_sqrt_ps(mag2), vScale);
 
-            alignas(32) float mags[8];
+            alignas(64) float mags[8];
             _mm256_store_ps(mags, mag);
 
             for (int k = 0; k < 8; ++k)

@@ -12,6 +12,7 @@
 #include <limits>
 #include <new>
 #include <deque>
+#include <cstdint>
 
 #include "CDSPResampler.h"
 #include "AlignedAllocation.h" // For convo::MKLAllocator
@@ -244,6 +245,8 @@ static bool applyAsymmetricTukey(double* data, int numSamples)
             convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(post_taper_len) * sizeof(double), 64)));
             if (!cos_args) return false; // メモリ確保失敗: 呼び出し元に伝播
             double* post_window_vals = window_vals.get() + post_taper_start_idx;
+            convo::ScopedAlignedPtr<double> post_cos_vals(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(post_taper_len) * sizeof(double), 64)));
+            if (!post_cos_vals) return false; // メモリ確保失敗: 呼び出し元に伝播
 
             const double scale = (pi / alpha_post) / dist_to_end;
             const double offset = (pi / alpha_post) * (((double)post_taper_start_idx - (double)peakIndex) / dist_to_end - (1.0 - alpha_post));
@@ -251,15 +254,19 @@ static bool applyAsymmetricTukey(double* data, int numSamples)
             for (int i = 0; i < post_taper_len; ++i)
                 cos_args.get()[i] = scale * static_cast<double>(i) + offset;
 
-            vdCos(post_taper_len, cos_args.get(), post_window_vals);
+            vdCos(post_taper_len, cos_args.get(), post_cos_vals.get());
 
             for (int i = 0; i < post_taper_len; ++i)
-                post_window_vals[i] = 0.5 * (1.0 + post_window_vals[i]);
+                post_window_vals[i] = 0.5 * (1.0 + post_cos_vals.get()[i]);
         }
     }
 
     // Apply window
-    vdMul(numSamples, data, window_vals.get(), data);
+    convo::ScopedAlignedPtr<double> aligned_data(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(numSamples) * sizeof(double), 64)));
+    if (!aligned_data) return false;
+    std::memcpy(aligned_data.get(), data, static_cast<size_t>(numSamples) * sizeof(double));
+    vdMul(numSamples, aligned_data.get(), window_vals.get(), aligned_data.get());
+    std::memcpy(data, aligned_data.get(), static_cast<size_t>(numSamples) * sizeof(double));
     return true;
 }
 
@@ -3101,6 +3108,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 #endif
     };
 
+    auto isAligned64 = [](const void* ptr) noexcept
+    {
+        return (reinterpret_cast<std::uintptr_t>(ptr) & static_cast<std::uintptr_t>(63)) == 0;
+    };
+
 
     for (int ch = 0; ch < procChannels; ++ch)
     {
@@ -3184,10 +3196,20 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         // MKL VML を使用した Dry/Wet ミキシング (スムージング時)
                         // dst = (wet * wetGains) + (dry * dryGains)
                         // oldDryBuffer を一時的なスクラッチバッファとして使用
-                        double* temp = oldDryBuffer.getWritePointer(ch);
-                        vdMul(validWetSamples, wetSignal, wetGains + processed, temp);
-                        vdMul(validWetSamples, dry, dryGains + processed, dst);
-                        vdAdd(validWetSamples, dst, temp, dst);
+                        const double* wetGainPtr = wetGains + processed;
+                        const double* dryGainPtr = dryGains + processed;
+                        if (isAligned64(wetSignal) && isAligned64(dry) && isAligned64(dst)
+                            && isAligned64(wetGainPtr) && isAligned64(dryGainPtr))
+                        {
+                            double* temp = oldDryBuffer.getWritePointer(ch);
+                            vdMul(validWetSamples, wetSignal, wetGainPtr, temp);
+                            vdMul(validWetSamples, dry, dryGainPtr, dst);
+                            vdAdd(validWetSamples, dst, temp, dst);
+                        }
+                        else
+                        {
+                            mixSmoothingSmall(dst, wetSignal, dry, wetGainPtr, dryGainPtr, validWetSamples);
+                        }
                     }
                 }
 
@@ -3204,7 +3226,13 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     }
                     else
                     {
-                        vdMul(remainder, dry + validWetSamples, dryGains + processed + validWetSamples, dst + validWetSamples);
+                        const double* remDry = dry + validWetSamples;
+                        const double* remGain = dryGains + processed + validWetSamples;
+                        double* remDst = dst + validWetSamples;
+                        if (isAligned64(remDry) && isAligned64(remGain) && isAligned64(remDst))
+                            vdMul(remainder, remDry, remGain, remDst);
+                        else
+                            scaleDrySmall(remDst, remDry, remGain, remainder);
                     }
                 }
             }
@@ -3222,9 +3250,16 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         // dst = dryG * dry + wetG * wetSignal
                         // cblas_daxpby (y := alpha*x + beta*y) を使用
                         // 1. dst に dry をコピー
-                        cblas_dcopy(validWetSamples, dry, 1, dst, 1);
-                        // 2. dst = wetG * wetSignal + dryG * dst (dstはdryで初期化済み)
-                        cblas_daxpby(validWetSamples, wetG, wetSignal, 1, dryG, dst, 1);
+                        if (isAligned64(dry) && isAligned64(dst) && isAligned64(wetSignal))
+                        {
+                            cblas_dcopy(validWetSamples, dry, 1, dst, 1);
+                            // 2. dst = wetG * wetSignal + dryG * dst (dstはdryで初期化済み)
+                            cblas_daxpby(validWetSamples, wetG, wetSignal, 1, dryG, dst, 1);
+                        }
+                        else
+                        {
+                            mixSteadySmall(dst, wetSignal, dry, wetG, dryG, validWetSamples);
+                        }
                     }
                 }
 
@@ -3239,8 +3274,18 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     }
                     else
                     {
-                        cblas_dcopy(remainder, dry + validWetSamples, 1, dst + validWetSamples, 1);
-                        cblas_dscal(remainder, dryG, dst + validWetSamples, 1);
+                        const double* remDry = dry + validWetSamples;
+                        double* remDst = dst + validWetSamples;
+                        if (isAligned64(remDry) && isAligned64(remDst))
+                        {
+                            cblas_dcopy(remainder, remDry, 1, remDst, 1);
+                            cblas_dscal(remainder, dryG, remDst, 1);
+                        }
+                        else
+                        {
+                            for (int i = 0; i < remainder; ++i)
+                                remDst[i] = remDry[i] * dryG;
+                        }
                     }
                 }
             }

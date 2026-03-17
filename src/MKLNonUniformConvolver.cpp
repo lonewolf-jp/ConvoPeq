@@ -44,6 +44,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 #include <immintrin.h>  // AVX2
 
@@ -1283,6 +1284,30 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
     // ── L0 出力: リングバッファから読み出し ──
     const int got = ringRead(output, numSamples);
 
+    auto isAligned64 = [](const void* ptr) noexcept
+    {
+        return (reinterpret_cast<std::uintptr_t>(ptr) & static_cast<std::uintptr_t>(63)) == 0;
+    };
+
+    auto addFallback = [](int n, double* dst, const double* src) noexcept
+    {
+#if defined(__AVX2__)
+        int i = 0;
+        const int vEnd = (n / 4) * 4;
+        for (; i < vEnd; i += 4)
+        {
+            const __m256d a = _mm256_loadu_pd(dst + i);
+            const __m256d b = _mm256_loadu_pd(src + i);
+            _mm256_storeu_pd(dst + i, _mm256_add_pd(a, b));
+        }
+        for (; i < n; ++i)
+            dst[i] += src[i];
+#else
+        for (int i = 0; i < n; ++i)
+            dst[i] += src[i];
+#endif
+    };
+
     // ── Direct 出力: 専用ゼロ遅延ミックスバッファを加算 ──
     if (m_directEnabled && m_directOutBuf != nullptr)
     {
@@ -1291,7 +1316,10 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
         {
             if (output != nullptr)
             {
-                vdAdd(toAdd, output, m_directOutBuf, output);
+                if (isAligned64(output) && isAligned64(m_directOutBuf))
+                    vdAdd(toAdd, output, m_directOutBuf, output);
+                else
+                    addFallback(toAdd, output, m_directOutBuf);
             }
 
             memset(m_directOutBuf, 0, static_cast<size_t>(toAdd) * sizeof(double));
@@ -1314,10 +1342,18 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
         if (output != nullptr)
         {
             // vdAdd: output[0..toAdd-1] += tailOutputBuf[tailOutputPos..tailOutputPos+toAdd-1]
-            vdAdd(toAdd,
-                  output,
-                  l.tailOutputBuf + l.tailOutputPos,
-                  output);
+            const double* tailPtr = l.tailOutputBuf + l.tailOutputPos;
+            if (isAligned64(output) && isAligned64(tailPtr))
+            {
+                vdAdd(toAdd,
+                      output,
+                      tailPtr,
+                      output);
+            }
+            else
+            {
+                addFallback(toAdd, output, tailPtr);
+            }
         }
 
         l.tailOutputPos += toAdd;

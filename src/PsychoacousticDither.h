@@ -596,7 +596,7 @@ private:
 
     inline double killDenormal(double x) const noexcept
     {
-        return (std::fabs(x) < 1e-300) ? 0.0 : x;
+        return (std::fabs(x) < convo::numeric_policy::kDenormThresholdAudioState) ? 0.0 : x;
     }
 
     VSLStream rng[MAX_CHANNELS];
