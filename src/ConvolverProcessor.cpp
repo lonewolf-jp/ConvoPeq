@@ -1156,9 +1156,9 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     }
 
     const bool rateChanged = (std::abs(currentSampleRate.load() - sampleRate) > 1e-6);
-    const bool blockChanged = (currentBufferSize != samplesPerBlock);
+    const bool blockChanged = (currentBufferSize.load(std::memory_order_relaxed) != samplesPerBlock);
 
-    currentBufferSize = samplesPerBlock;
+    currentBufferSize.store(samplesPerBlock, std::memory_order_release);
 
     // 最初にサンプルレートを更新（oldValueを保存）
     currentSampleRate.store(sampleRate, std::memory_order_release);
@@ -1457,7 +1457,7 @@ void ConvolverProcessor::requestDebouncedRebuild()
         return;
     }
 
-    const int token = rebuildDebounceToken.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const std::uint64_t token = rebuildDebounceToken.fetch_add(1, std::memory_order_acq_rel) + 1;
     auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
 
     const int debounceMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS,
@@ -1488,7 +1488,7 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
     {
         // リビルドモードでローダーを作成し、同期的に実行
         const double processingSampleRate = currentSampleRate.load(std::memory_order_acquire);
-        LoaderThread loader(*this, *snap, originalIRSampleRate.load(std::memory_order_acquire), processingSampleRate, currentBufferSize, getPhaseMode(),
+        LoaderThread loader(*this, *snap, originalIRSampleRate.load(std::memory_order_acquire), processingSampleRate, currentBufferSize.load(std::memory_order_acquire), getPhaseMode(),
                     mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
                     mixedPreRingTau.load(std::memory_order_acquire), currentIRScale.load(std::memory_order_acquire));
         loader.externalCancellationCheck = shouldCancel;
@@ -1628,15 +1628,28 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
             return {};
         }
 
-        // 4) causal lifter
+        // 4) causal lifter (real cepstrum -> minimum-phase cepstrum)
+        //
+        // Real cepstrum c[n] (IFFT 後) に対して最小位相化リフタを適用する:
+        //   n = 0       (DC) :       x1 (倍化しない。DC 項は対称・非対称共通の成分)
+        //   1 <= n < N/2     :       x2 (正周波数の片側成分を因果的に保持)
+        //   n = N/2 (Nyquist):       x1 (ナイキスト項は実 FFT の対称軸上の点。倍化しない)
+        //   N/2 < n < N      :       x0 (負周波数側は因果成分の折り返しのためゼロ化)
+        //
+        // IFFT 出力は複素 cepstrum として格納されているが、Step 2 で imag=0 に設定済みの
+        // ため、ここでは real 成分のみが有効。imag のゼロ化は念のための保証。
         const int half = fftSize / 2;
+        // DC (n=0): real を倍化しない。imag はゼロ保証のみ。
         spectrum.get()[0].imag = 0.0;
+        // 正周波数ビン (1 <= n < N/2): real を 2 倍して因果成分に集約。
         for (int i = 1; i < half; ++i)
         {
             spectrum.get()[i].real *= 2.0;
             spectrum.get()[i].imag = 0.0;
         }
+        // Nyquist (n=N/2): real を倍化しない。imag はゼロ保証のみ。
         spectrum.get()[half].imag = 0.0;
+        // 負周波数ビン (N/2 < n < N): 因果成分の冗長な折り返し部分をゼロ化。
         for (int i = half + 1; i < fftSize; ++i)
         {
             spectrum.get()[i].real = 0.0;
@@ -1913,17 +1926,22 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     }
 
     // 新しいローダーを作成して開始
-    const double processingSampleRate = currentSampleRate.load(std::memory_order_acquire);
+    const double rawProcessingSampleRate = currentSampleRate.load(std::memory_order_acquire);
+    const double processingSampleRate = (std::isfinite(rawProcessingSampleRate) && rawProcessingSampleRate > 0.0)
+                                          ? rawProcessingSampleRate
+                                          : 48000.0;
+    const int processingBlockSize = juce::jlimit(1, MAX_BLOCK_SIZE,
+                                                 [&]{ const int bs = currentBufferSize.load(std::memory_order_acquire); return bs > 0 ? bs : 512; }());
     if (isRebuild)
     {
         auto snapIR2 = originalIR.load(); // [Bug E fix] 最新スナップショットを再取得
-        activeLoader = std::make_unique<LoaderThread>(*this, *snapIR2, originalIRSampleRate.load(std::memory_order_acquire), processingSampleRate, currentBufferSize, getPhaseMode(),
+        activeLoader = std::make_unique<LoaderThread>(*this, *snapIR2, originalIRSampleRate.load(std::memory_order_acquire), processingSampleRate, processingBlockSize, getPhaseMode(),
                                                       mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
                                                       mixedPreRingTau.load(std::memory_order_acquire), currentIRScale.load(std::memory_order_acquire));
     }
     else
     {
-        activeLoader = std::make_unique<LoaderThread>(*this, irFile, processingSampleRate, currentBufferSize, getPhaseMode(),
+        activeLoader = std::make_unique<LoaderThread>(*this, irFile, processingSampleRate, processingBlockSize, getPhaseMode(),
                                                       mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
                                                       mixedPreRingTau.load(std::memory_order_acquire));
         currentIrOptimized.store(optimizeForRealTime);
@@ -3498,8 +3516,10 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                   maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,
                   experimentalDirectHeadEnabled.load(std::memory_order_acquire),
                           [&]() -> const convo::FilterSpec* {
-                              // NUC フィルタースペックを Message Thread 上で構築
-                              static thread_local convo::FilterSpec spec;
+                              // NUC フィルタースペックを Message Thread 上で構築。
+                              // init() は渡されたポインタを同期呼び出し内でのみ使用し保持しないため、
+                              // スタックローカルで十分（thread_local は不要）。
+                              convo::FilterSpec spec;
                               spec.sampleRate = sr;
                               spec.hcMode = static_cast<convo::HCMode>(nucHCMode.load(std::memory_order_acquire));
                               spec.lcMode = static_cast<convo::LCMode>(nucLCMode.load(std::memory_order_acquire));

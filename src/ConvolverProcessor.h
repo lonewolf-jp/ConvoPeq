@@ -23,6 +23,7 @@
 
 #include <JuceHeader.h>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <vector>
 #include <array>
@@ -216,7 +217,7 @@ public:
     int getIRLength() const { return irLength.load(std::memory_order_acquire); }
     juce::String getLastError() const { return lastError; }
     float getLoadProgress() const { return loadProgress.load(); }
-    int getCurrentBufferSize() const { return currentBufferSize; }
+    int getCurrentBufferSize() const { return currentBufferSize.load(std::memory_order_acquire); }
     struct LatencyBreakdown
     {
         int algorithmLatencySamples = 0;
@@ -490,7 +491,7 @@ private:
     // このフラグを立てるだけにする。Audio Thread が process() 先頭で検出し初期化する。
     std::atomic<bool> wetCrossfadeResetPending { false };
     std::atomic<int> phaseMode{static_cast<int>(PhaseMode::Mixed)};
-    std::atomic<int> rebuildDebounceToken { 0 };
+    std::atomic<std::uint64_t> rebuildDebounceToken { 0 };
     std::atomic<bool> changeNotificationPending { false };
     std::atomic<bool> rebuildPendingAfterLoad { false };
     std::atomic<int> rebuildDebounceMs { REBUILD_DEBOUNCE_DEFAULT_MS };
@@ -566,7 +567,7 @@ private:
     //----------------------------------------------------------
     std::atomic<bool> isPrepared { false };
     bool visualizationEnabled = true; // Default true (for UI instance)
-    int currentBufferSize = 0; // prepareToPlayで更新される
+    std::atomic<int> currentBufferSize { 0 }; // prepareToPlay (Message Thread) で書き込み、Rebuild Worker Thread から読まれるためアトミック
     double currentSmoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC; // mixSmootherに設定されている現在の時間
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)

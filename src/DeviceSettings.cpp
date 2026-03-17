@@ -3,6 +3,32 @@
 //============================================================================
 #include "DeviceSettings.h"
 
+namespace
+{
+juce::AudioDeviceManager::AudioDeviceSetup makeRelaxedSetupFromXml(const juce::XmlElement& xml)
+{
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+
+    if (xml.getStringAttribute("audioDeviceName").isNotEmpty())
+    {
+        setup.inputDeviceName = setup.outputDeviceName = xml.getStringAttribute("audioDeviceName");
+    }
+    else
+    {
+        setup.inputDeviceName  = xml.getStringAttribute("audioInputDeviceName");
+        setup.outputDeviceName = xml.getStringAttribute("audioOutputDeviceName");
+    }
+
+    setup.sampleRate = 0.0;
+    setup.bufferSize = 0;
+    setup.useDefaultInputChannels = true;
+    setup.useDefaultOutputChannels = true;
+    setup.inputChannels.clear();
+    setup.outputChannels.clear();
+    return setup;
+}
+}
+
 //==============================================================================
 // BlacklistedASIODeviceType - ASIOドライバをラップしてブラックリストフィルタを適用するクラス
 //
@@ -463,6 +489,11 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     // ASIOドライバの切り替え時に発生しうるフリーズを防ぐため、初期化前に一度デバイスを閉じる
     deviceManager.closeAudioDevice();
 
+    const auto initialiseDefaultDevice = [&deviceManager]() -> juce::String
+    {
+        return deviceManager.initialise (2, 2, nullptr, true);
+    };
+
     auto file = getSettingsFile();
 
     if (file.existsAsFile())
@@ -470,17 +501,49 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
         if (auto xml = juce::XmlDocument::parse (file))
         {
             // 保存された設定でデバイスを初期化する（入力2ch、出力2chを要求）
-            juce::String error = deviceManager.initialise (2, 2, xml.get(), true);
+            juce::String error = deviceManager.initialise (2, 2, xml.get(), false);
 
             if (error.isNotEmpty())
             {
-                juce::NativeMessageBox::showAsync(
-                    juce::MessageBoxOptions()
-                        .withIconType(juce::MessageBoxIconType::WarningIcon)
-                        .withTitle("Audio Device Settings")
-                        .withMessage("Could not restore the saved audio device settings.\nError: " + error + "\n\nFalling back to default device.")
-                        .withButton("OK"),
-                    nullptr);
+                juce::String recoveredWithRelaxedSetup;
+                const auto savedDeviceType = xml->getStringAttribute("deviceType");
+
+                if (savedDeviceType.isNotEmpty()
+                    && savedDeviceType != deviceManager.getCurrentAudioDeviceType())
+                {
+                    deviceManager.setCurrentAudioDeviceType(savedDeviceType, false);
+                }
+
+                auto relaxedSetup = makeRelaxedSetupFromXml(*xml);
+                recoveredWithRelaxedSetup = deviceManager.setAudioDeviceSetup(relaxedSetup, false);
+
+                if (recoveredWithRelaxedSetup.isNotEmpty() || deviceManager.getCurrentAudioDevice() == nullptr)
+                {
+                    const juce::String fallbackError = initialiseDefaultDevice();
+
+                    if (fallbackError.isNotEmpty() || deviceManager.getCurrentAudioDevice() == nullptr)
+                    {
+                        juce::NativeMessageBox::showAsync(
+                            juce::MessageBoxOptions()
+                                .withIconType(juce::MessageBoxIconType::WarningIcon)
+                                .withTitle("Audio Device Settings")
+                                .withMessage("Could not restore the saved audio device settings.\nError: " + error
+                                             + "\n\nSafe retry on the saved device also failed.\nError: "
+                                             + (recoveredWithRelaxedSetup.isNotEmpty() ? recoveredWithRelaxedSetup : "The saved device is unavailable.")
+                                             + "\n\nCould not start the fallback device either.\nError: "
+                                             + (fallbackError.isNotEmpty() ? fallbackError : "No audio device available."))
+                                .withButton("OK"),
+                            nullptr);
+                    }
+                    else
+                    {
+                        juce::Logger::writeToLog("Audio device restore failed, using default device instead: " + error);
+                    }
+                }
+                else
+                {
+                    juce::Logger::writeToLog("Audio device restore needed relaxed retry and succeeded: " + error);
+                }
             }
 
             // ビット深度設定の読み込み (デフォルト0 = 自動/最大)
@@ -508,7 +571,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
 
     // 設定ファイルが存在しない、または読み込みに失敗した場合はデフォルト初期化
     // MMCSSはJUCE 8.0.12で内部自動管理されるため明示的設定は不要
-    deviceManager.initialise (2, 2, nullptr, true);
+    initialiseDefaultDevice();
 
     // デフォルトで最大サンプルレートに設定
     auto* currentDevice = deviceManager.getCurrentAudioDevice();

@@ -517,6 +517,12 @@ private:
 
     inline double popUniformFromRing(int channel) noexcept
     {
+        // SPSC (Single Producer / Single Consumer) リングバッファ前提:
+        // - consumer 側 readPos はこのスレッドのみが更新するため relaxed で十分。
+        // - producer が rngWritePos を release store した後のリング書き込み可視性は、
+        //   consumer 側の rngWritePos acquire load で同期される。
+        // - したがってここで readPos を acquire に強めても正しさは変わらず、
+        //   主同期点は writePos (release/acquire) のペアとなる。
         const uint32_t readPos = rngReadPos[channel].load(std::memory_order_relaxed);
         const uint32_t writePos = rngWritePos[channel].load(std::memory_order_acquire);
 

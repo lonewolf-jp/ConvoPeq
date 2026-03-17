@@ -371,6 +371,11 @@ void AudioEngine::initialize()
     maxSamplesPerBlock.store(SAFE_MAX_BLOCK_SIZE);
     currentSampleRate.store(48000.0);
 
+    // オーディオデバイスがまだ開始していない段階でも、IRロード側には実用的な既定値を渡す。
+    // SAFE_MAX_BLOCK_SIZE をそのまま使うと不要に巨大な一時NUCを組んでメモリ使用量が跳ねるため、
+    // ローダー用の暫定値は一般的な 48kHz / 512samples に固定する。
+    uiConvolverProcessor.prepareToPlay(48000.0, 512);
+
     uiConvolverProcessor.addChangeListener(this);
     uiEqProcessor.addChangeListener(this);
     uiConvolverProcessor.addListener(this);

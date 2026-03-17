@@ -232,10 +232,45 @@ public:
         {
         }
 
-        //Explicitly define the move constructor
-        EQState(EQState&& other) = default;
+        // Explicitly define the move constructor
+        // std::atomic はムーブ不可のため = default は暗黙 deleted になる
+        EQState(EQState&& other)
+            : bands(std::move(other.bands)),
+              bandTypes(std::move(other.bandTypes)),
+              bandChannelModes(std::move(other.bandChannelModes)),
+              totalGainDb(other.totalGainDb),
+              refCount(0) // refCount は引き継がない
+        {
+        }
 
-        EQState& operator=(const EQState&) = default;
+        // std::atomic はコピー/ムーブ代入が delete されているため = default は
+        // 暗黙的に deleted として定義される。呼び出し時点でコンパイルエラーになる潜在バグ。
+        // 明示実装し refCount をコピーしないことを明確化する。
+        EQState& operator=(const EQState& other)
+        {
+            if (this != &other)
+            {
+                bands             = other.bands;
+                bandTypes         = other.bandTypes;
+                bandChannelModes  = other.bandChannelModes;
+                totalGainDb       = other.totalGainDb;
+                // refCount はコピーしない（RCU の参照カウントは各インスタンス固有）
+            }
+            return *this;
+        }
+
+        EQState& operator=(EQState&& other)
+        {
+            if (this != &other)
+            {
+                bands             = std::move(other.bands);
+                bandTypes         = std::move(other.bandTypes);
+                bandChannelModes  = std::move(other.bandChannelModes);
+                totalGainDb       = other.totalGainDb;
+                // refCount はコピーしない
+            }
+            return *this;
+        }
 
 
         void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }

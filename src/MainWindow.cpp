@@ -95,15 +95,15 @@ MainWindow::MainWindow (const juce::String& name)
     // エンジンを先に初期化してデフォルトのサンプルレート(48kHz)を設定
     audioEngine.initialize();
 
-    // 設定読み込み（ブラックリスト適用後に実行することで、除外されたデバイスの自動ロードを防ぐ）
-    // この時点でrebuildが呼ばれても、有効なサンプルレートが設定されている
-    loadSettings();
-
     audioEngineProcessor = std::make_unique<AudioEngineProcessor>(audioEngine);
     audioProcessorPlayer.setDoublePrecisionProcessing(true);
     audioProcessorPlayer.setProcessor(audioEngineProcessor.get());
     audioEngine.addChangeListener (this);
     audioDeviceManager.addAudioCallback (&audioProcessorPlayer);
+
+    // 設定読み込み（ブラックリスト適用後に実行することで、除外されたデバイスの自動ロードを防ぐ）
+    // この時点でrebuildが呼ばれても、有効なサンプルレートが設定されている
+    loadSettings();
 
     // UIコンポーネントの作成
     createUIComponents();
