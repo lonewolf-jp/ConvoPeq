@@ -1,7 +1,7 @@
 # Git Attributes for ConvoPeq
 # UTF-8エンコーディング保持設定
 
-# Windows バッチファイル (UTF-8 BOM保持)
+# Windows バッチファイル
 *.bat text eol=crlf working-tree-encoding=UTF-8
 
 # ビルドスクリプト
