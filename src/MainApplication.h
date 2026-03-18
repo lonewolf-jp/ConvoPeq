@@ -38,4 +38,5 @@ public:
 
 private:
     std::unique_ptr<MainWindow> mainWindow;
+    std::unique_ptr<juce::FileLogger> fileLogger;
 };

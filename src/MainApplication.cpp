@@ -44,6 +44,13 @@
 
 void MainApplication::initialise(const juce::String& /*commandLine*/)
 {
+    {
+        const auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+        const auto logFile = exeDir.getChildFile("ConvoPeq.log");
+        fileLogger = std::make_unique<juce::FileLogger>(logFile, "ConvoPeq Log", 0);
+        juce::Logger::setCurrentLogger(fileLogger.get());
+        juce::Logger::writeToLog("Logger initialized: " + logFile.getFullPathName());
+    }
 
 #ifdef _WIN32
     // システム全体のタイマー精度を 1ms に上げる
@@ -113,6 +120,10 @@ void MainApplication::shutdown()
     //   3) AudioEngine 破棄
     // の順で安全にシャットダウンされる
     mainWindow.reset();
+
+    juce::Logger::writeToLog("MainApplication shutting down.");
+    juce::Logger::setCurrentLogger(nullptr);
+    fileLogger.reset();
 
 #ifdef _WIN32
     timeEndPeriod(1);

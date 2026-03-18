@@ -33,6 +33,7 @@
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
 #include "PsychoacousticDither.h"
+#include "FixedNoiseShaper.h"
 #include "OutputFilter.h"
 #include "DspNumericPolicy.h"
 #include "UltraHighRateDCBlocker.h"
@@ -63,6 +64,12 @@ public:
     {
         IIR,
         LinearPhase
+    };
+
+    enum class NoiseShaperType
+    {
+        Psychoacoustic = 0,
+        Fixed4Tap = 1
     };
 
     class Listener
@@ -187,6 +194,13 @@ public:
     void setDitherBitDepth(int bitDepth);
     int getDitherBitDepth() const;
 
+    void setNoiseShaperType(NoiseShaperType type);
+    NoiseShaperType getNoiseShaperType() const;
+    void setFixedNoiseLogIntervalMs(int intervalMs) noexcept;
+    int getFixedNoiseLogIntervalMs() const noexcept;
+    void setFixedNoiseWindowSamples(int windowSamples) noexcept;
+    int getFixedNoiseWindowSamples() const noexcept;
+
     void setSoftClipEnabled(bool enabled);
     bool isSoftClipEnabled() const;
 
@@ -249,7 +263,7 @@ DSPCore();
         convolver.forceCleanup();
     }
 
-    void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType);
+    void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType);
     void reset();
     void process(const juce::AudioSourceChannelInfo& bufferToFill, juce::AbstractFifo& audioFifo,
                  juce::AudioBuffer<float>& audioFifoBuffer, std::atomic<float>& inputLevelLinear,
@@ -270,12 +284,14 @@ DSPCore();
         convo::UltraHighRateDCBlocker inputDCBlockerL, inputDCBlockerR;
         convo::UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
         ::convo::PsychoacousticDither dither;
+        ::convo::FixedNoiseShaper fixedNoiseShaper;
         // 出力周波数フィルター (① ハイカット/ローカット / ② ローパス/ハイパス)
         convo::OutputFilter outputFilter;
 
         CustomInputOversampler oversampling;
         size_t oversamplingFactor = 1;
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
+        NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
         double sampleRate = 0.0;
 
     // 【パッチ3】MKL用rawアライメントバッファ（vector完全排除・ガイドライン厳守）
@@ -359,6 +375,9 @@ DSPCore();
     std::atomic<AnalyzerSource> currentAnalyzerSource { AnalyzerSource::Output };
     std::atomic<bool> analyzerEnabled { false };
     std::atomic<int> ditherBitDepth { 0 }; // 0 = 未初期化 (DeviceSettingsで最大値に設定される)
+    std::atomic<NoiseShaperType> noiseShaperType { NoiseShaperType::Psychoacoustic };
+    std::atomic<int> fixedNoiseLogIntervalMs { 2000 };
+    std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
     std::atomic<float> saturationAmount { 0.2f };
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
@@ -371,6 +390,7 @@ DSPCore();
     std::atomic<float> convolverInputTrimDb { 0.0f };
     std::atomic<double> convolverInputTrimGain { 1.0 }; // 0 dB (EQThenConvolver時にコンボルバー入力に適用)
     bool m_isRestoringState { false }; // requestLoadState 中はデフォルトリセットを抑制 (Message Thread のみ)
+    uint32 fixedNoiseLastLogMs = 0;
 
     // 出力周波数フィルターモード (Thread-safe)
     std::atomic<convo::HCMode> convHCFilterMode { convo::HCMode::Natural }; // ① ハイカット
@@ -420,6 +440,7 @@ DSPCore();
         int ditherDepth;
         int manualOversamplingFactor;
         OversamplingType oversamplingType;
+        NoiseShaperType noiseShaperType;
         int generation;
     };
     RebuildTask pendingTask;

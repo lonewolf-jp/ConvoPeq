@@ -16,6 +16,11 @@
 
 namespace
 {
+    static constexpr std::array<double, convo::FixedNoiseShaper::ORDER> kFixedNoiseShaperTunedCoeffs
+    {
+        0.46, 0.28, 0.17, 0.09
+    };
+
     inline double absNoLibm(double x) noexcept
     {
         union { double d; uint64_t u; } v { x };
@@ -898,9 +903,10 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 //--------------------------------------------------------------
 AudioEngine::DSPCore::DSPCore() = default;
 
-void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType)
+void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType)
 {
     this->sampleRate = newSampleRate;
+    this->noiseShaperType = selectedNoiseShaperType;
 
     int targetFactor = 1;
     if (manualOversamplingFactor > 0)
@@ -1003,8 +1009,14 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     osDCBlockerL.init(processingRate, 1.0);
     osDCBlockerR.init(processingRate, 1.0);
 
-    // ディザの準備 (出力段で行うため元のサンプルレート)
-    dither.prepare(newSampleRate, bitDepth);
+    // ノイズシェーパーの準備 (出力段で行うため元のサンプルレート)
+    if (selectedNoiseShaperType == NoiseShaperType::Psychoacoustic)
+        dither.prepare(newSampleRate, bitDepth);
+    else
+    {
+        fixedNoiseShaper.setCoefficients(kFixedNoiseShaperTunedCoeffs);
+        fixedNoiseShaper.prepare(newSampleRate, bitDepth);
+    }
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
     // 出力周波数フィルターの係数を事前計算 (processingRate: OS後のレート)
@@ -1026,6 +1038,7 @@ void AudioEngine::DSPCore::reset()
     osDCBlockerL.reset();
     osDCBlockerR.reset();
     dither.reset();
+    fixedNoiseShaper.reset();
     oversampling.reset();
     outputFilter.reset();
 
@@ -1060,6 +1073,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     int ditherDepth = ditherBitDepth.load();
     int osFactor = manualOversamplingFactor.load();
     OversamplingType osType = oversamplingType.load();
+    NoiseShaperType nsType = noiseShaperType.load();
     DSPCore* current = activeDSP; // 現在のアクティブDSPをキャプチャ
     int generation = 0;
 
@@ -1071,6 +1085,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     task.ditherDepth = ditherDepth;
     task.manualOversamplingFactor = osFactor;
     task.oversamplingType = osType;
+    task.noiseShaperType = nsType;
 
     DSPCore* dspToDestroy = nullptr; // To be destroyed outside the lock
     {
@@ -1140,7 +1155,7 @@ void AudioEngine::rebuildThreadLoop()
             if (isObsolete()) continue;
 
             // 1. Prepare (メモリ確保)
-            task.newDSP->prepare(task.sampleRate, task.samplesPerBlock, task.ditherDepth, task.manualOversamplingFactor, task.oversamplingType);
+            task.newDSP->prepare(task.sampleRate, task.samplesPerBlock, task.ditherDepth, task.manualOversamplingFactor, task.oversamplingType, task.noiseShaperType);
 
             if (isObsolete()) continue;
 
@@ -1341,6 +1356,41 @@ void AudioEngine::timerCallback()
     {
         dsp->eq.cleanup();
         dsp->convolver.cleanup();
+
+        const bool activeFixed4Tap = (dsp->noiseShaperType == NoiseShaperType::Fixed4Tap);
+        const bool activeDitherEnabled = (dsp->ditherBitDepth > 0);
+
+        if (activeFixed4Tap && activeDitherEnabled)
+        {
+            dsp->fixedNoiseShaper.setDiagnosticsWindowSamples(
+                static_cast<uint32_t>(fixedNoiseWindowSamples.load(std::memory_order_relaxed)));
+
+            const uint32 now = juce::Time::getMillisecondCounter();
+            const uint32 intervalMs = static_cast<uint32>(
+                std::max(250, fixedNoiseLogIntervalMs.load(std::memory_order_relaxed)));
+            if ((now - fixedNoiseLastLogMs) >= intervalMs)
+            {
+                fixedNoiseLastLogMs = now;
+                const auto diag = dsp->fixedNoiseShaper.getDiagnostics();
+                if (diag.windowSamples > 0)
+                {
+                    juce::Logger::writeToLog(
+                        "[Fixed4Tap] bitDepth=" + juce::String(diag.bitDepth)
+                        + " rmsL=" + juce::String(diag.rmsErrorL, 9)
+                        + " rmsR=" + juce::String(diag.rmsErrorR, 9)
+                        + " peak=" + juce::String(diag.peakAbsError, 9)
+                        + " windowSamples=" + juce::String((int)diag.windowSamples));
+                }
+                else
+                {
+                    juce::Logger::writeToLog(
+                        "[Fixed4Tap] waiting for diagnostics window"
+                        " (bitDepth=" + juce::String(dsp->ditherBitDepth)
+                        + ", targetWindow=" + juce::String(fixedNoiseWindowSamples.load(std::memory_order_relaxed))
+                        + ")");
+                }
+            }
+        }
     }
 
     // UI用プロセッサのクリーンアップ
@@ -2337,12 +2387,16 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     // ── Step 3: ディザリング / ヘッドルーム適用 ─────────────────────────────
     if (applyDither)
     {
-        // processStereoBlock: AVX2最適化ブロック処理 (per-sample process() より高効率)。
-        // L/R を _mm_round_pd で同時量子化するため、両チャンネルの丸め判定が
-        // 同一サンプル時刻で一致し、ステレオイメージの正確性が向上する。
-        // headroom はブロック内で適用される (dataL[i] * headroom + dither + shaped_error)。
-        // dataR == nullptr の場合は自動的にモノラルパスへ分岐する。
-        dither.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+        if (noiseShaperType == NoiseShaperType::Fixed4Tap)
+        {
+            // 新方式: 4-tap error-feedback noise shaper (ditherなし)
+            fixedNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+        }
+        else
+        {
+            // 既存方式: Psychoacoustic dither + noise shaper
+            dither.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+        }
     }
     else
     {
@@ -2519,6 +2573,9 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("ditherBitDepth"))
         setDitherBitDepth(static_cast<int>(state.getProperty("ditherBitDepth")));
 
+    if (state.hasProperty("noiseShaperType"))
+        setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"));
+
     if (state.hasProperty("oversamplingFactor"))
         setOversamplingFactor(static_cast<int>(state.getProperty("oversamplingFactor")));
 
@@ -2569,6 +2626,7 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.setProperty("analyzerSource", (int)currentAnalyzerSource.load(), nullptr);
     state.setProperty("convolverInputTrimDb", convolverInputTrimDb.load(), nullptr);
     state.setProperty("ditherBitDepth", ditherBitDepth.load(), nullptr);
+    state.setProperty("noiseShaperType", (int)noiseShaperType.load(), nullptr);
     state.setProperty("oversamplingFactor", manualOversamplingFactor.load(), nullptr);
     state.setProperty("oversamplingType", (int)oversamplingType.load(), nullptr);
     state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);
@@ -2700,6 +2758,7 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
     if (ditherBitDepth.load() != bitDepth)
     {
         ditherBitDepth.store(bitDepth);
+        juce::Logger::writeToLog("Dither Bit Depth changed: " + juce::String(bitDepth));
         const double sr = currentSampleRate.load();
         if (sr > 0.0)
         {
@@ -2711,6 +2770,44 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
 int AudioEngine::getDitherBitDepth() const
 {
     return ditherBitDepth.load();
+}
+
+void AudioEngine::setNoiseShaperType(NoiseShaperType type)
+{
+    if (noiseShaperType.load() != type)
+    {
+        noiseShaperType.store(type);
+        juce::Logger::writeToLog("Noise Shaper changed: "
+            + juce::String(type == NoiseShaperType::Fixed4Tap ? "Fixed4Tap" : "Psychoacoustic"));
+        const double sr = currentSampleRate.load();
+        if (sr > 0.0)
+            requestRebuild(sr, maxSamplesPerBlock.load());
+    }
+}
+
+AudioEngine::NoiseShaperType AudioEngine::getNoiseShaperType() const
+{
+    return noiseShaperType.load();
+}
+
+void AudioEngine::setFixedNoiseLogIntervalMs(int intervalMs) noexcept
+{
+    fixedNoiseLogIntervalMs.store(juce::jlimit(250, 10000, intervalMs), std::memory_order_relaxed);
+}
+
+int AudioEngine::getFixedNoiseLogIntervalMs() const noexcept
+{
+    return fixedNoiseLogIntervalMs.load(std::memory_order_relaxed);
+}
+
+void AudioEngine::setFixedNoiseWindowSamples(int windowSamples) noexcept
+{
+    fixedNoiseWindowSamples.store(juce::jlimit(256, 262144, windowSamples), std::memory_order_relaxed);
+}
+
+int AudioEngine::getFixedNoiseWindowSamples() const noexcept
+{
+    return fixedNoiseWindowSamples.load(std::memory_order_relaxed);
 }
 
 void AudioEngine::setSoftClipEnabled(bool enabled)

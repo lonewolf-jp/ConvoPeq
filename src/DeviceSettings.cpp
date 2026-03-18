@@ -204,6 +204,53 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
         }
     };
 
+    // Noise Shaper Type Controls
+    addAndMakeVisible(noiseShaperLabel);
+    noiseShaperLabel.setText("Noise Shaper:", juce::dontSendNotification);
+    noiseShaperLabel.setJustificationType(juce::Justification::centredLeft);
+
+    addAndMakeVisible(noiseShaperComboBox);
+    noiseShaperComboBox.addItem("Current", 1);
+    noiseShaperComboBox.addItem("New (Fixed 4-tap)", 2);
+    noiseShaperComboBox.onChange = [this] {
+        const int id = noiseShaperComboBox.getSelectedId();
+        if (id == 2)
+            audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Fixed4Tap);
+        else
+            audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Psychoacoustic);
+    };
+
+    addAndMakeVisible(fixedNoiseLogIntervalLabel);
+    fixedNoiseLogIntervalLabel.setText("NS Log Interval:", juce::dontSendNotification);
+    fixedNoiseLogIntervalLabel.setJustificationType(juce::Justification::centredLeft);
+
+    addAndMakeVisible(fixedNoiseLogIntervalComboBox);
+    fixedNoiseLogIntervalComboBox.addItem("500 ms", 500);
+    fixedNoiseLogIntervalComboBox.addItem("1000 ms", 1000);
+    fixedNoiseLogIntervalComboBox.addItem("2000 ms", 2000);
+    fixedNoiseLogIntervalComboBox.addItem("5000 ms", 5000);
+    fixedNoiseLogIntervalComboBox.onChange = [this] {
+        const int intervalMs = fixedNoiseLogIntervalComboBox.getSelectedId();
+        if (intervalMs > 0)
+            audioEngine.setFixedNoiseLogIntervalMs(intervalMs);
+    };
+
+    addAndMakeVisible(fixedNoiseWindowLabel);
+    fixedNoiseWindowLabel.setText("NS Window:", juce::dontSendNotification);
+    fixedNoiseWindowLabel.setJustificationType(juce::Justification::centredLeft);
+
+    addAndMakeVisible(fixedNoiseWindowComboBox);
+    fixedNoiseWindowComboBox.addItem("2048", 2048);
+    fixedNoiseWindowComboBox.addItem("4096", 4096);
+    fixedNoiseWindowComboBox.addItem("8192", 8192);
+    fixedNoiseWindowComboBox.addItem("16384", 16384);
+    fixedNoiseWindowComboBox.addItem("32768", 32768);
+    fixedNoiseWindowComboBox.onChange = [this] {
+        const int samples = fixedNoiseWindowComboBox.getSelectedId();
+        if (samples > 0)
+            audioEngine.setFixedNoiseWindowSamples(samples);
+    };
+
     // Input Headroom Controls
     addAndMakeVisible(inputHeadroomLabel);
     inputHeadroomLabel.setText("Input Headroom:", juce::dontSendNotification);
@@ -255,6 +302,25 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     else {
         oversamplingComboBox.setSelectedId(1, juce::dontSendNotification); // Default to Auto
     }
+
+    noiseShaperComboBox.setSelectedId(
+        audioEngine.getNoiseShaperType() == AudioEngine::NoiseShaperType::Fixed4Tap ? 2 : 1,
+        juce::dontSendNotification);
+
+    {
+        const int intervalMs = audioEngine.getFixedNoiseLogIntervalMs();
+        fixedNoiseLogIntervalComboBox.setSelectedId(intervalMs, juce::dontSendNotification);
+        if (fixedNoiseLogIntervalComboBox.getSelectedId() == 0)
+            fixedNoiseLogIntervalComboBox.setSelectedId(2000, juce::dontSendNotification);
+    }
+
+    {
+        const int windowSamples = audioEngine.getFixedNoiseWindowSamples();
+        fixedNoiseWindowComboBox.setSelectedId(windowSamples, juce::dontSendNotification);
+        if (fixedNoiseWindowComboBox.getSelectedId() == 0)
+            fixedNoiseWindowComboBox.setSelectedId(8192, juce::dontSendNotification);
+    }
+
     updateBitDepthList();
     // loadSettings()後にUIの値を更新
     inputHeadroomSlider.setValue(audioEngine.getInputHeadroomDb(), juce::dontSendNotification);
@@ -274,11 +340,12 @@ DeviceSettings::~DeviceSettings()
 void DeviceSettings::resized()
 {
     auto bounds = getLocalBounds();
-    auto controlsArea = bounds.removeFromTop(120);
+    auto controlsArea = bounds.removeFromTop(150);
     auto row1 = controlsArea.removeFromTop(30);
     auto row2 = controlsArea.removeFromTop(30);
     auto row3 = controlsArea.removeFromTop(30);
     auto row4 = controlsArea.removeFromTop(30);
+    auto row5 = controlsArea.removeFromTop(30);
 
     auto row1_left = row1.removeFromLeft(row1.getWidth() / 2);
     auto row1_right = row1;
@@ -295,8 +362,20 @@ void DeviceSettings::resized()
 
     filterTypeTabs.setBounds(row3.reduced(2));
 
-    oversamplingLabel.setBounds(row4.removeFromLeft(100).reduced(5));
-    oversamplingComboBox.setBounds(row4.removeFromLeft(100).reduced(2));
+    auto row4_left = row4.removeFromLeft(row4.getWidth() / 2);
+    auto row4_right = row4;
+    oversamplingLabel.setBounds(row4_left.removeFromLeft(100).reduced(5));
+    oversamplingComboBox.setBounds(row4_left.removeFromLeft(100).reduced(2));
+
+    noiseShaperLabel.setBounds(row4_right.removeFromLeft(100).reduced(5));
+    noiseShaperComboBox.setBounds(row4_right.removeFromLeft(160).reduced(2));
+
+    auto row5_left = row5.removeFromLeft(row5.getWidth() / 2);
+    auto row5_right = row5;
+    fixedNoiseLogIntervalLabel.setBounds(row5_left.removeFromLeft(100).reduced(5));
+    fixedNoiseLogIntervalComboBox.setBounds(row5_left.removeFromLeft(120).reduced(2));
+    fixedNoiseWindowLabel.setBounds(row5_right.removeFromLeft(80).reduced(5));
+    fixedNoiseWindowComboBox.setBounds(row5_right.removeFromLeft(120).reduced(2));
 
     if (selector != nullptr)
         selector->setBounds(bounds);
@@ -389,14 +468,13 @@ void DeviceSettings::updateBitDepthList()
 {
     juce::Array<int> supportedBitDepths;
 
-    // 標準的なビット深度を常に表示（JUCEのほとんどのアプリと同じ）
+    // 標準的なビット深度を常に表示（送出前量子化ターゲットとして利用可能）。
     supportedBitDepths.add(16);
     supportedBitDepths.add(24);
     supportedBitDepths.add(32);
 
-    // 現在開いているデバイスがあれば、その実際のビット深度を追加（重複除去）
-    // Note: JUCEには利用可能なビット深度一覧を取得する標準的な方法はないため、
-    //       一般的な値をリストアップし、現在の設定値を追加する。
+    // 現在開いているデバイスがあれば、その実デバイスの現在bit depthを追加（重複除去）。
+    // JUCE 8.0.12 では available bit depth 一覧APIがないため current 値のみ参照する。
     if (auto* device = audioDeviceManager.getCurrentAudioDevice())
     {
         int current = device->getCurrentBitDepth();
@@ -468,6 +546,9 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
     {
         // ビット深度設定を追加属性として保存
         xml->setAttribute("ditherBitDepth", engine.getDitherBitDepth());
+        xml->setAttribute("noiseShaperType", (int)engine.getNoiseShaperType());
+        xml->setAttribute("fixedNoiseLogIntervalMs", engine.getFixedNoiseLogIntervalMs());
+        xml->setAttribute("fixedNoiseWindowSamples", engine.getFixedNoiseWindowSamples());
         // オーバーサンプリング設定を追加
         xml->setAttribute("oversamplingFactor", engine.getOversamplingFactor());
         // フィルタタイプ設定を追加
@@ -550,6 +631,16 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             int bitDepth = xml->getIntAttribute("ditherBitDepth", 0);
             engine.setDitherBitDepth(bitDepth);
 
+            // ノイズシェーパー種類の読み込み (デフォルト0 = Current)
+            int shaperType = xml->getIntAttribute("noiseShaperType", 0);
+            engine.setNoiseShaperType((AudioEngine::NoiseShaperType)shaperType);
+
+            // Fixed 4-tap 比較ログ設定
+            int logIntervalMs = xml->getIntAttribute("fixedNoiseLogIntervalMs", 2000);
+            engine.setFixedNoiseLogIntervalMs(logIntervalMs);
+            int windowSamples = xml->getIntAttribute("fixedNoiseWindowSamples", 8192);
+            engine.setFixedNoiseWindowSamples(windowSamples);
+
             // オーバーサンプリング設定の読み込み (デフォルト0 = 自動)
             int oversampling = xml->getIntAttribute("oversamplingFactor", 0);
             engine.setOversamplingFactor(oversampling);
@@ -593,6 +684,9 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     }
 
     engine.setDitherBitDepth(0); // 自動設定へ
+    engine.setNoiseShaperType(AudioEngine::NoiseShaperType::Psychoacoustic);
+    engine.setFixedNoiseLogIntervalMs(2000);
+    engine.setFixedNoiseWindowSamples(8192);
     engine.setOversamplingFactor(0); // 自動設定へ
     engine.setInputHeadroomDb(-6.0f); // デフォルト -6dB
     engine.setOutputMakeupDb(12.0f); // [Fix] default 15→12 dB (unity gain)

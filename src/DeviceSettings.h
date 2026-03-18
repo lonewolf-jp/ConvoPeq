@@ -60,6 +60,14 @@ private:
     juce::ComboBox bitDepthComboBox;
     juce::Label bitDepthLabel;
 
+    juce::ComboBox noiseShaperComboBox;
+    juce::Label noiseShaperLabel;
+
+    juce::ComboBox fixedNoiseLogIntervalComboBox;
+    juce::Label fixedNoiseLogIntervalLabel;
+    juce::ComboBox fixedNoiseWindowComboBox;
+    juce::Label fixedNoiseWindowLabel;
+
     juce::Slider inputHeadroomSlider;
     juce::Label inputHeadroomLabel;
 
