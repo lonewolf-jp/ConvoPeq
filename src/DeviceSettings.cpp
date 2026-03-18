@@ -210,11 +210,11 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     noiseShaperLabel.setJustificationType(juce::Justification::centredLeft);
 
     addAndMakeVisible(noiseShaperComboBox);
-    noiseShaperComboBox.addItem("Current", 1);
-    noiseShaperComboBox.addItem("New (Fixed 4-tap)", 2);
+    noiseShaperComboBox.addItem("4th-order", 1);
+    noiseShaperComboBox.addItem("9th-order", 2);
     noiseShaperComboBox.onChange = [this] {
         const int id = noiseShaperComboBox.getSelectedId();
-        if (id == 2)
+        if (id == 1)
             audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Fixed4Tap);
         else
             audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Psychoacoustic);
