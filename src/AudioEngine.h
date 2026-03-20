@@ -1,5 +1,53 @@
+
 //============================================================================
 #pragma once
+//============================================================================
+
+static constexpr int kAdaptiveNoiseShaperOrder = 9;
+static constexpr int kAdaptiveNoiseShaperSampleRateBankCount = 10;
+
+// ストリーミング信号キャプチャ用 AudioBlock（2ch, 256サンプル）
+struct AudioBlock {
+    double L[256];
+    double R[256];
+    int numSamples = 0;
+    int sampleRateHz = 0;
+    int bitDepth = 0;
+    int adaptiveCoeffBankIndex = 0;
+};
+
+// RT/Worker間ダブルバッファ係数連携（RCU）
+struct CoeffSet {
+    static constexpr int kDim = kAdaptiveNoiseShaperOrder;
+    double k[CoeffSet::kDim] = {};
+};
+
+#include <JuceHeader.h>
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <array>
+#include <functional>
+#include <vector>
+#include <juce_dsp/juce_dsp.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <immintrin.h>
+
+#include "AlignedAllocation.h"
+#include "CustomInputOversampler.h"
+#include "ConvolverProcessor.h"
+#include "EQProcessor.h"
+#include "PsychoacousticDither.h"
+#include "FixedNoiseShaper.h"
+#include "LatticeNoiseShaper.h"
+#include "OutputFilter.h"
+#include "DspNumericPolicy.h"
+#include "UltraHighRateDCBlocker.h"
+#include "LockFreeRingBuffer.h"
+#include "NoiseShaperLearner.h"
+
 // AudioEngine.h  ── v0.2 (JUCE 8.0.12対応)
 //
 // オーディオエンジン - AudioSource実装
@@ -17,33 +65,13 @@
 //   - readFromFifo: Message Thread (Timer) から呼ばれます。FIFOバッファからデータを取得します。
 //============================================================================
 
-#include <JuceHeader.h>
-#include <atomic>
-#include <cstring>
-#include <array>
-#include <vector>
-#include <juce_dsp/juce_dsp.h>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <immintrin.h>
-
-#include "AlignedAllocation.h"
-#include "CustomInputOversampler.h"
-#include "ConvolverProcessor.h"
-#include "EQProcessor.h"
-#include "PsychoacousticDither.h"
-#include "FixedNoiseShaper.h"
-#include "OutputFilter.h"
-#include "DspNumericPolicy.h"
-#include "UltraHighRateDCBlocker.h"
 
 class AudioEngine : public juce::AudioSource,
-                  public juce::ChangeBroadcaster,
-                  private juce::ChangeListener,
-                  private EQProcessor::Listener,
-                  private ConvolverProcessor::Listener,
-                   private juce::Timer
+                                     public juce::ChangeBroadcaster,
+                                     private juce::ChangeListener,
+                                     private EQProcessor::Listener,
+                                     private ConvolverProcessor::Listener,
+                                     private juce::Timer
 {
 public:
     using SampleType = double; // 内部DSP精度 (JUCE推奨)
@@ -69,7 +97,8 @@ public:
     enum class NoiseShaperType
     {
         Psychoacoustic = 0,
-        Fixed4Tap = 1
+        Fixed4Tap = 1,
+        Adaptive9thOrder = 2
     };
 
     class Listener
@@ -84,7 +113,7 @@ public:
 
     // ── 安全性制限 ──
     static constexpr double SAFE_MIN_SAMPLE_RATE = 8000.0;
-    static constexpr double SAFE_MAX_SAMPLE_RATE = 384000.0;
+    static constexpr double SAFE_MAX_SAMPLE_RATE = 768000.0;
     static constexpr int    SAFE_MAX_BLOCK_SIZE  = 65536; // 8x Oversampling対応のため拡張
 
     //----------------------------------------------------------
@@ -228,6 +257,25 @@ public:
     void setEqLPFFilterMode(convo::HCMode mode) noexcept;
     convo::HCMode getEqLPFFilterMode() const noexcept;
 
+    // --- Adaptiveノイズシェイパー学習サポート ---
+    void startNoiseShaperLearning();
+    void stopNoiseShaperLearning();
+    bool isNoiseShaperLearning() const;
+    const NoiseShaperLearner::Progress& getNoiseShaperLearningProgress() const;
+    int copyNoiseShaperLearningHistory(float* outScores, int maxPoints) const noexcept;
+    // 学習ワーカーが記録したエラーメッセージを返す（UI 表示用）。エラーなしは nullptr。
+    const char* getNoiseShaperLearningError() const noexcept;
+    static int getAdaptiveSampleRateBankCount() noexcept;
+    static double getAdaptiveSampleRateBankHz(int bankIndex) noexcept;
+    void getCurrentAdaptiveCoefficients(double* outCoeffs, int maxCoefficients) const noexcept;
+    void setCurrentAdaptiveCoefficients(const double* coeffs, int numCoefficients);
+    void getAdaptiveCoefficientsForSampleRate(double sampleRate, double* outCoeffs, int maxCoefficients) const noexcept;
+    void setAdaptiveCoefficientsForSampleRate(double sampleRate, const double* coeffs, int numCoefficients);
+    void setAdaptiveAutosaveCallback(std::function<void()> callback);
+    void requestAdaptiveAutosave();
+    // NoiseShaperLearner から学習済み係数を受け取るコールバック (Worker Thread)
+    void publishCoeffs(const double* coeffs);
+
 private:
     //----------------------------------------------------------
      // DSPコア (Audio Threadで実行される処理のコンテナ)
@@ -236,20 +284,26 @@ private:
     {
         struct ProcessingState
         {
-             bool eqBypassed;
+            bool eqBypassed;
             bool convBypassed;
             ProcessingOrder order;
             AnalyzerSource analyzerSource;
             bool analyzerEnabled;
             bool softClipEnabled;
             float saturationAmount;
-        double inputHeadroomGain;
+            double inputHeadroomGain;
             double outputMakeupGain;
-                        double convolverInputTrimGain; // EQThenConvolver 時のコンボルバー入力トリム
+            double convolverInputTrimGain; // EQThenConvolver 時のコンボルバー入力トリム
             // 出力周波数フィルターモード
             convo::HCMode convHCMode;  // ① ハイカットモード
             convo::LCMode convLCMode;  // ① ローカットモード
             convo::HCMode eqLPFMode;   // ② EQローパスモード
+            int adaptiveCoeffBankIndex;
+            const CoeffSet* adaptiveCoeffSet;
+            uint32_t adaptiveCoeffGeneration;
+            int adaptiveCaptureSampleRateHz;
+            int adaptiveCaptureBitDepth;
+            LockFreeRingBuffer<AudioBlock, 4096>* adaptiveCaptureQueue;
         };
 
 DSPCore();
@@ -285,6 +339,7 @@ DSPCore();
         convo::UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
         ::convo::PsychoacousticDither dither;
         ::convo::FixedNoiseShaper fixedNoiseShaper;
+        LatticeNoiseShaper adaptiveNoiseShaper;
         // 出力周波数フィルター (① ハイカット/ローカット / ② ローパス/ハイパス)
         convo::OutputFilter outputFilter;
 
@@ -292,6 +347,8 @@ DSPCore();
         size_t oversamplingFactor = 1;
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
         NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
+        uint32_t activeAdaptiveCoeffGeneration = 0;
+        int activeAdaptiveCoeffBankIndex = -1;
         double sampleRate = 0.0;
 
     // 【パッチ3】MKL用rawアライメントバッファ（vector完全排除・ガイドライン厳守）
@@ -330,13 +387,17 @@ DSPCore();
                            bool analyzerInputTap,
                            juce::AbstractFifo& audioFifo,
                            juce::AudioBuffer<float>& audioFifoBuffer) noexcept;
-        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept;
+        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill,
+                           int numSamples,
+                           const ProcessingState& state) noexcept;
         float processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples,
                                  double headroomGain,
                                  bool analyzerInputTap,
                                  juce::AbstractFifo& audioFifo,
                                  juce::AudioBuffer<float>& audioFifoBuffer) noexcept;
-        void processOutputDouble(juce::AudioBuffer<double>& buffer, int numSamples) noexcept;
+        void processOutputDouble(juce::AudioBuffer<double>& buffer,
+                                 int numSamples,
+                                 const ProcessingState& state) noexcept;
     private:
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
     };
@@ -376,6 +437,7 @@ DSPCore();
     std::atomic<bool> analyzerEnabled { false };
     std::atomic<int> ditherBitDepth { 0 }; // 0 = 未初期化 (DeviceSettingsで最大値に設定される)
     std::atomic<NoiseShaperType> noiseShaperType { NoiseShaperType::Psychoacoustic };
+    std::atomic<bool> pendingNoiseShaperLearningStart { false };
     std::atomic<int> fixedNoiseLogIntervalMs { 2000 };
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
@@ -444,6 +506,38 @@ DSPCore();
         int generation;
     };
     RebuildTask pendingTask;
+
+    // --- Adaptiveノイズシェイパー学習用メンバー ---
+    struct AdaptiveCoeffBankSlot
+    {
+        double sampleRateHz = 0.0;
+        CoeffSet coeffSetA {};
+        CoeffSet coeffSetB {};
+        std::atomic<const CoeffSet*> current { nullptr };
+        std::atomic<uint32_t> generation { 1u };
+    };
+
+    std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
+    LockFreeRingBuffer<AudioBlock, 4096> audioCaptureQueue;
+    std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount> adaptiveCoeffBanks {};
+    std::atomic<int> currentAdaptiveCoeffBankIndex { 1 };
+    std::uintptr_t audioThreadAffinityMask = 0;
+    std::uintptr_t noiseLearnerThreadAffinityMask = 0;
+    std::uintptr_t nonAudioThreadAffinityMask = 0;
+    std::mutex adaptiveAutosaveCallbackMutex;
+    std::function<void()> adaptiveAutosaveCallback;
+    void initialiseAdaptiveCoeffBanks() noexcept;
+    static int resolveAdaptiveCoeffBankIndex(double sampleRate) noexcept;
+    AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) noexcept;
+    const AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept;
+    void selectAdaptiveCoeffBankForSampleRate(double sampleRate) noexcept;
+    void initialiseThreadAffinityMasks() noexcept;
+    void pinCurrentThreadToAudioCoreIfNeeded() noexcept;
+    void pinCurrentThreadToNoiseLearnerCoreIfNeeded() const noexcept;
+    void pinCurrentThreadToNonAudioCoresIfNeeded() const noexcept;
+    void publishCoeffsToBank(int bankIndex, const double* coeffs);
+
+    friend class NoiseShaperLearner;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AudioEngine)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)

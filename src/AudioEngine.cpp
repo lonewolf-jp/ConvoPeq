@@ -5,6 +5,7 @@
 //============================================================================
 #include "AudioEngine.h"
 #include "InputBitDepthTransform.h"
+#include <Windows.h>
 #include <cmath>
 #include <cstdint>
 #include <complex>
@@ -19,6 +20,17 @@ namespace
     static constexpr std::array<double, convo::FixedNoiseShaper::ORDER> kFixedNoiseShaperTunedCoeffs
     {
         0.46, 0.28, 0.17, 0.09
+    };
+
+    static constexpr std::array<double, kAdaptiveNoiseShaperOrder> kDefaultAdaptiveNoiseShaperCoeffs
+    {
+        0.82, -0.68, 0.55, -0.43, 0.33, -0.25, 0.18, -0.12, 0.07
+    };
+
+    static constexpr std::array<double, kAdaptiveNoiseShaperSampleRateBankCount> kAdaptiveSupportedSampleRatesHz
+    {
+        44100.0, 48000.0, 88200.0, 96000.0, 176400.0,
+        192000.0, 352800.0, 384000.0, 705600.0, 768000.0
     };
 
     inline double absNoLibm(double x) noexcept
@@ -42,6 +54,52 @@ namespace
     inline double absDiffNoLibm(double a, double b) noexcept
     {
         return absNoLibm(a - b);
+    }
+
+    inline int clampAdaptiveBankIndex(int bankIndex) noexcept
+    {
+        if (bankIndex < 0)
+            return 0;
+
+        if (bankIndex >= kAdaptiveNoiseShaperSampleRateBankCount)
+            return kAdaptiveNoiseShaperSampleRateBankCount - 1;
+
+        return bankIndex;
+    }
+
+    inline juce::String makeAdaptiveCoeffPropertyName(double sampleRate, int coeffIndex)
+    {
+        return "adaptiveCoeff_" + juce::String(static_cast<int>(sampleRate + 0.5)) + "_" + juce::String(coeffIndex);
+    }
+
+    inline void pushAdaptiveCaptureBlocks(LockFreeRingBuffer<AudioBlock, 4096>* captureQueue,
+                                          const double* left,
+                                          const double* right,
+                                          int numSamples,
+                                          int sampleRateHz,
+                                          int bitDepth,
+                                          int adaptiveCoeffBankIndex) noexcept
+    {
+        if (captureQueue == nullptr || left == nullptr || numSamples <= 0)
+            return;
+
+        for (int offset = 0; offset < numSamples; offset += 256)
+        {
+            AudioBlock block {};
+            block.numSamples = std::min(256, numSamples - offset);
+            block.sampleRateHz = sampleRateHz;
+            block.bitDepth = bitDepth;
+            block.adaptiveCoeffBankIndex = adaptiveCoeffBankIndex;
+
+            for (int sample = 0; sample < block.numSamples; ++sample)
+            {
+                const double leftSample = left[offset + sample];
+                block.L[sample] = leftSample;
+                block.R[sample] = (right != nullptr) ? right[offset + sample] : leftSample;
+            }
+
+            captureQueue->push(block);
+        }
     }
 
     inline double estimateOversamplingLatencySamples(int oversamplingFactor, AudioEngine::OversamplingType oversamplingType) noexcept
@@ -378,6 +436,12 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 //--------------------------------------------------------------
 AudioEngine::AudioEngine()
 {
+    initialiseAdaptiveCoeffBanks();
+    selectAdaptiveCoeffBankForSampleRate(48000.0);
+
+    initialiseThreadAffinityMasks();
+    noiseShaperLearner = std::make_unique<NoiseShaperLearner>(*this, audioCaptureQueue);
+
     // デフォルトサンプルレート (0 = 未初期化/デバイスなし)
     currentSampleRate.store(0.0);
 
@@ -387,6 +451,284 @@ AudioEngine::AudioEngine()
 }
 
 
+
+void AudioEngine::startNoiseShaperLearning()
+{
+    if (noiseShaperLearner == nullptr)
+        return;
+
+    pendingNoiseShaperLearningStart.store(true, std::memory_order_release);
+
+    if (noiseShaperType.load(std::memory_order_acquire) != NoiseShaperType::Adaptive9thOrder)
+        setNoiseShaperType(NoiseShaperType::Adaptive9thOrder);
+
+    auto* dsp = currentDSP.load(std::memory_order_acquire);
+    if (dsp != nullptr && dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder)
+    {
+        pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
+        noiseShaperLearner->startLearning();
+        return;
+    }
+
+    const double sr = currentSampleRate.load(std::memory_order_acquire);
+    if (sr > 0.0)
+        requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
+}
+
+void AudioEngine::stopNoiseShaperLearning()
+{
+    pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
+
+    if (noiseShaperLearner)
+        noiseShaperLearner->stopLearning();
+}
+
+bool AudioEngine::isNoiseShaperLearning() const
+{
+    return noiseShaperLearner && noiseShaperLearner->isRunning();
+}
+
+const NoiseShaperLearner::Progress& AudioEngine::getNoiseShaperLearningProgress() const
+{
+    jassert(noiseShaperLearner);
+    return noiseShaperLearner->getProgress();
+}
+
+int AudioEngine::copyNoiseShaperLearningHistory(float* outScores, int maxPoints) const noexcept
+{
+    return noiseShaperLearner ? noiseShaperLearner->copyBestScoreHistory(outScores, maxPoints) : 0;
+}
+
+const char* AudioEngine::getNoiseShaperLearningError() const noexcept
+{
+    if (noiseShaperLearner == nullptr)
+        return nullptr;
+    return noiseShaperLearner->getErrorMessage();
+}
+
+int AudioEngine::getAdaptiveSampleRateBankCount() noexcept
+{
+    return kAdaptiveNoiseShaperSampleRateBankCount;
+}
+
+double AudioEngine::getAdaptiveSampleRateBankHz(int bankIndex) noexcept
+{
+    return kAdaptiveSupportedSampleRatesHz[static_cast<size_t>(clampAdaptiveBankIndex(bankIndex))];
+}
+
+void AudioEngine::initialiseAdaptiveCoeffBanks() noexcept
+{
+    for (int bankIndex = 0; bankIndex < kAdaptiveNoiseShaperSampleRateBankCount; ++bankIndex)
+    {
+        auto& bank = adaptiveCoeffBanks[static_cast<size_t>(bankIndex)];
+        bank.sampleRateHz = getAdaptiveSampleRateBankHz(bankIndex);
+
+        for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+        {
+            const double coefficient = kDefaultAdaptiveNoiseShaperCoeffs[static_cast<size_t>(coeffIndex)];
+            bank.coeffSetA.k[coeffIndex] = coefficient;
+            bank.coeffSetB.k[coeffIndex] = coefficient;
+        }
+
+        bank.current.store(&bank.coeffSetA, std::memory_order_relaxed);
+        bank.generation.store(1u, std::memory_order_relaxed);
+    }
+}
+
+int AudioEngine::resolveAdaptiveCoeffBankIndex(double sampleRate) noexcept
+{
+    int bestIndex = 0;
+    double bestDistance = std::numeric_limits<double>::max();
+
+    for (int bankIndex = 0; bankIndex < kAdaptiveNoiseShaperSampleRateBankCount; ++bankIndex)
+    {
+        const double distance = std::abs(sampleRate - getAdaptiveSampleRateBankHz(bankIndex));
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestIndex = bankIndex;
+        }
+    }
+
+    return bestIndex;
+}
+
+AudioEngine::AdaptiveCoeffBankSlot& AudioEngine::getAdaptiveCoeffBankForIndex(int bankIndex) noexcept
+{
+    return adaptiveCoeffBanks[static_cast<size_t>(clampAdaptiveBankIndex(bankIndex))];
+}
+
+const AudioEngine::AdaptiveCoeffBankSlot& AudioEngine::getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept
+{
+    return adaptiveCoeffBanks[static_cast<size_t>(clampAdaptiveBankIndex(bankIndex))];
+}
+
+void AudioEngine::selectAdaptiveCoeffBankForSampleRate(double sampleRate) noexcept
+{
+    currentAdaptiveCoeffBankIndex.store(resolveAdaptiveCoeffBankIndex(sampleRate), std::memory_order_release);
+}
+
+void AudioEngine::getCurrentAdaptiveCoefficients(double* outCoeffs, int maxCoefficients) const noexcept
+{
+    if (outCoeffs == nullptr || maxCoefficients <= 0)
+        return;
+
+    const auto& bank = getAdaptiveCoeffBankForIndex(currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire));
+    const auto* coeffSet = bank.current.load(std::memory_order_acquire);
+    const int limit = std::min(kAdaptiveNoiseShaperOrder, maxCoefficients);
+
+    for (int i = 0; i < limit; ++i)
+        outCoeffs[i] = coeffSet->k[i];
+}
+
+void AudioEngine::setCurrentAdaptiveCoefficients(const double* coeffs, int numCoefficients)
+{
+    if (coeffs == nullptr || numCoefficients <= 0)
+        return;
+
+    const int bankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
+    double stagedCoefficients[kAdaptiveNoiseShaperOrder] = {};
+    getCurrentAdaptiveCoefficients(stagedCoefficients, kAdaptiveNoiseShaperOrder);
+
+    const int limit = std::min(kAdaptiveNoiseShaperOrder, numCoefficients);
+    for (int i = 0; i < limit; ++i)
+        stagedCoefficients[i] = coeffs[i];
+
+    publishCoeffsToBank(bankIndex, stagedCoefficients);
+}
+
+void AudioEngine::getAdaptiveCoefficientsForSampleRate(double sampleRate, double* outCoeffs, int maxCoefficients) const noexcept
+{
+    if (outCoeffs == nullptr || maxCoefficients <= 0)
+        return;
+
+    const auto& bank = getAdaptiveCoeffBankForIndex(resolveAdaptiveCoeffBankIndex(sampleRate));
+    const auto* coeffSet = bank.current.load(std::memory_order_acquire);
+    const int limit = std::min(kAdaptiveNoiseShaperOrder, maxCoefficients);
+
+    for (int i = 0; i < limit; ++i)
+        outCoeffs[i] = coeffSet->k[i];
+}
+
+void AudioEngine::setAdaptiveCoefficientsForSampleRate(double sampleRate, const double* coeffs, int numCoefficients)
+{
+    if (coeffs == nullptr || numCoefficients <= 0)
+        return;
+
+    const int bankIndex = resolveAdaptiveCoeffBankIndex(sampleRate);
+    double stagedCoefficients[kAdaptiveNoiseShaperOrder] = {};
+    getAdaptiveCoefficientsForSampleRate(sampleRate, stagedCoefficients, kAdaptiveNoiseShaperOrder);
+
+    const int limit = std::min(kAdaptiveNoiseShaperOrder, numCoefficients);
+    for (int i = 0; i < limit; ++i)
+        stagedCoefficients[i] = coeffs[i];
+
+    publishCoeffsToBank(bankIndex, stagedCoefficients);
+}
+
+void AudioEngine::setAdaptiveAutosaveCallback(std::function<void()> callback)
+{
+    const std::scoped_lock lock(adaptiveAutosaveCallbackMutex);
+    adaptiveAutosaveCallback = std::move(callback);
+}
+
+void AudioEngine::requestAdaptiveAutosave()
+{
+    std::function<void()> callbackCopy;
+    {
+        const std::scoped_lock lock(adaptiveAutosaveCallbackMutex);
+        callbackCopy = adaptiveAutosaveCallback;
+    }
+
+    if (callbackCopy)
+        callbackCopy();
+}
+
+void AudioEngine::publishCoeffs(const double* coeffs)
+{
+    publishCoeffsToBank(currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire), coeffs);
+}
+
+void AudioEngine::publishCoeffsToBank(int bankIndex, const double* coeffs)
+{
+    if (coeffs == nullptr)
+        return;
+
+    auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
+    const auto* current = bank.current.load(std::memory_order_acquire);
+    auto* inactive = (current == &bank.coeffSetA) ? &bank.coeffSetB : &bank.coeffSetA;
+
+    for (int i = 0; i < kAdaptiveNoiseShaperOrder; ++i)
+        inactive->k[i] = coeffs[i];
+
+    bank.current.store(inactive, std::memory_order_release);
+    bank.generation.fetch_add(1u, std::memory_order_acq_rel);
+}
+
+void AudioEngine::initialiseThreadAffinityMasks() noexcept
+{
+    DWORD_PTR processAffinityMask = 0;
+    DWORD_PTR systemAffinityMask = 0;
+
+    if (!::GetProcessAffinityMask(::GetCurrentProcess(), &processAffinityMask, &systemAffinityMask))
+        return;
+
+    DWORD_PTR firstMask = 0;
+    DWORD_PTR secondMask = 0;
+
+    for (DWORD_PTR bit = 1; bit != 0; bit <<= 1)
+    {
+        if ((processAffinityMask & bit) == 0)
+            continue;
+
+        if (firstMask == 0)
+            firstMask = bit;
+        else
+        {
+            secondMask = bit;
+            break;
+        }
+    }
+
+    audioThreadAffinityMask = static_cast<std::uintptr_t>(firstMask);
+    noiseLearnerThreadAffinityMask = static_cast<std::uintptr_t>(secondMask != 0 ? secondMask : firstMask);
+    const DWORD_PTR nonAudioMask = processAffinityMask & ~firstMask;
+    nonAudioThreadAffinityMask = static_cast<std::uintptr_t>(nonAudioMask != 0 ? nonAudioMask : (secondMask != 0 ? secondMask : firstMask));
+}
+
+void AudioEngine::pinCurrentThreadToAudioCoreIfNeeded() noexcept
+{
+    static thread_local bool isPinned = false;
+    if (isPinned)
+        return;
+
+    if (audioThreadAffinityMask == 0)
+        return;
+
+    ::SetThreadAffinityMask(::GetCurrentThread(), static_cast<DWORD_PTR>(audioThreadAffinityMask));
+    isPinned = true;
+}
+
+void AudioEngine::pinCurrentThreadToNoiseLearnerCoreIfNeeded() const noexcept
+{
+    if (noiseLearnerThreadAffinityMask == 0)
+        return;
+
+    ::SetThreadAffinityMask(::GetCurrentThread(), static_cast<DWORD_PTR>(noiseLearnerThreadAffinityMask));
+}
+
+void AudioEngine::pinCurrentThreadToNonAudioCoresIfNeeded() const noexcept
+{
+    static thread_local bool isPinned = false;
+    if (isPinned)
+        return;
+
+    if (nonAudioThreadAffinityMask == 0)
+        return;
+
+    ::SetThreadAffinityMask(::GetCurrentThread(), static_cast<DWORD_PTR>(nonAudioThreadAffinityMask));
+    isPinned = true;
+}
 
 void AudioEngine::initialize()
 {
@@ -858,6 +1200,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     maxSamplesPerBlock.store(bufferSize);
     currentSampleRate.store(safeSampleRate);
+    selectAdaptiveCoeffBankForSampleRate(safeSampleRate);
 
 
     audioFifo.reset();
@@ -1012,10 +1355,17 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     // ノイズシェーパーの準備 (出力段で行うため元のサンプルレート)
     if (selectedNoiseShaperType == NoiseShaperType::Psychoacoustic)
         dither.prepare(newSampleRate, bitDepth);
-    else
+    else if (selectedNoiseShaperType == NoiseShaperType::Fixed4Tap)
     {
         fixedNoiseShaper.setCoefficients(kFixedNoiseShaperTunedCoeffs);
         fixedNoiseShaper.prepare(newSampleRate, bitDepth);
+    }
+    else
+    {
+        adaptiveNoiseShaper.prepare(bitDepth);
+        adaptiveNoiseShaper.setCoefficients(kDefaultAdaptiveNoiseShaperCoeffs.data(), kAdaptiveNoiseShaperOrder);
+        activeAdaptiveCoeffGeneration = 0;
+        activeAdaptiveCoeffBankIndex = -1;
     }
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
 
@@ -1039,8 +1389,11 @@ void AudioEngine::DSPCore::reset()
     osDCBlockerR.reset();
     dither.reset();
     fixedNoiseShaper.reset();
+    adaptiveNoiseShaper.reset();
     oversampling.reset();
     outputFilter.reset();
+    activeAdaptiveCoeffGeneration = 0;
+    activeAdaptiveCoeffBankIndex = -1;
 
     // 【パッチ3】rawバッファクリア（alignedCapacity使用）
     if (alignedL && alignedCapacity > 0)
@@ -1259,6 +1612,7 @@ void AudioEngine::rebuildThreadLoop()
 void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 {
     DSPCore* dspToTrash = nullptr;
+    bool startPendingNoiseShaperLearningNow = false;
 
     // Lock to ensure the check and commit are atomic with respect to new rebuild requests.
     {
@@ -1279,6 +1633,10 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
         // 3. Take ownership of the new DSP
         activeDSP = newDSP;
+
+        startPendingNoiseShaperLearningNow = pendingNoiseShaperLearningStart.load(std::memory_order_acquire)
+            && newDSP != nullptr
+            && newDSP->noiseShaperType == NoiseShaperType::Adaptive9thOrder;
     }
 
     // 4. Move the old DSP to the trash bin outside the main lock.
@@ -1295,6 +1653,12 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             // This prevents a memory leak in case of std::bad_alloc.
             delete dspToTrash;
         }
+    }
+
+    if (startPendingNoiseShaperLearningNow && noiseShaperLearner != nullptr)
+    {
+        pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
+        noiseShaperLearner->startLearning();
     }
 }
 
@@ -1530,6 +1894,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
         threadInitialized = true;
     }
+    pinCurrentThreadToAudioCoreIfNeeded();
     // ========================================================
 
     // 入力検証 (Input Validation)
@@ -1600,8 +1965,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
         const float satAmt = saturationAmount.load(std::memory_order_relaxed);
         const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
-
         const double makeupGain = outputMakeupGain.load(std::memory_order_relaxed);
+        const int adaptiveCoeffBankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
+        const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
+        const bool adaptiveCaptureEnabled = noiseShaperLearner && noiseShaperLearner->isRunning();
         // UI表示用の状態更新
         if (eqBypassActive.load(std::memory_order_relaxed) != eqBypassed)
             eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
@@ -1614,15 +1981,21 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                        .convBypassed = convBypassed,
                        .order = order,
                        .analyzerSource = analyzerSource,
-                                             .analyzerEnabled = analyzerEnabledNow,
+                       .analyzerEnabled = analyzerEnabledNow,
                        .softClipEnabled = softClip,
                        .saturationAmount = satAmt,
                        .inputHeadroomGain = headroomGain,
                        .outputMakeupGain = makeupGain,
-                       .convolverInputTrimGain = convolverInputTrimGain.load(std::memory_order_relaxed),
-                       .convHCMode = convHCFilterMode.load(std::memory_order_relaxed),
-                       .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
-                       .eqLPFMode  = eqLPFFilterMode.load(std::memory_order_relaxed) }); // スマートポインタでDSPを呼び出し
+                        .convolverInputTrimGain = convolverInputTrimGain.load(std::memory_order_relaxed),
+                        .convHCMode = convHCFilterMode.load(std::memory_order_relaxed),
+                        .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
+                        .eqLPFMode = eqLPFFilterMode.load(std::memory_order_relaxed),
+                        .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
+                        .adaptiveCoeffSet = adaptiveCoeffBank.current.load(std::memory_order_acquire),
+                        .adaptiveCoeffGeneration = adaptiveCoeffBank.generation.load(std::memory_order_acquire),
+                        .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
+                        .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
+                        .adaptiveCaptureQueue = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr }); // スマートポインタでDSPを呼び出し
     }
     else
     {
@@ -1638,6 +2011,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
         threadInitialized = true;
     }
+    pinCurrentThreadToAudioCoreIfNeeded();
 
     const int numSamples = buffer.getNumSamples();
     // 事前サニティチェック (getNextAudioBlock と同様)
@@ -1680,6 +2054,9 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const float satAmt = saturationAmount.load(std::memory_order_relaxed);
     const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
     const double makeupGain = outputMakeupGain.load(std::memory_order_relaxed);
+    const int adaptiveCoeffBankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
+    const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
+    const bool adaptiveCaptureEnabled = noiseShaperLearner && noiseShaperLearner->isRunning();
 
     if (eqBypassActive.load(std::memory_order_relaxed) != eqBypassed)
         eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
@@ -1691,15 +2068,21 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                          .convBypassed = convBypassed,
                          .order = order,
                          .analyzerSource = analyzerSource,
-                                                 .analyzerEnabled = analyzerEnabledNow,
+                         .analyzerEnabled = analyzerEnabledNow,
                          .softClipEnabled = softClip,
                          .saturationAmount = satAmt,
-                       .inputHeadroomGain = headroomGain,
-                       .outputMakeupGain = makeupGain,
-                       .convolverInputTrimGain = convolverInputTrimGain.load(std::memory_order_relaxed),
-                       .convHCMode = convHCFilterMode.load(std::memory_order_relaxed),
-                       .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
-                       .eqLPFMode  = eqLPFFilterMode.load(std::memory_order_relaxed) });
+                         .inputHeadroomGain = headroomGain,
+                         .outputMakeupGain = makeupGain,
+                          .convolverInputTrimGain = convolverInputTrimGain.load(std::memory_order_relaxed),
+                          .convHCMode = convHCFilterMode.load(std::memory_order_relaxed),
+                          .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
+                          .eqLPFMode = eqLPFFilterMode.load(std::memory_order_relaxed),
+                          .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
+                          .adaptiveCoeffSet = adaptiveCoeffBank.current.load(std::memory_order_acquire),
+                          .adaptiveCoeffGeneration = adaptiveCoeffBank.generation.load(std::memory_order_acquire),
+                          .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
+                          .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
+                          .adaptiveCaptureQueue = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr });
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
@@ -1903,7 +2286,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     const float outputLinear = measureLevel(originalBlock);
     outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
 
-    processOutput(bufferToFill, numSamples);
+    processOutput(bufferToFill, numSamples, state);
 
     // === 【Issue 5 追加】新DSP切り替え時のFade-in Ramp（最終出力に適用）===
     {
@@ -2068,7 +2451,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     const float outputLinear = measureLevel(originalBlock);
     outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
 
-    processOutputDouble(buffer, numSamples);
+    processOutputDouble(buffer, numSamples, state);
 
     int fadeLeft = fadeInSamplesLeft.load(std::memory_order_relaxed);
     if (fadeLeft > 0)
@@ -2319,7 +2702,9 @@ double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double 
     return musicalSoftClipScalar(x, threshold, knee, asymmetry);
 }
 
-void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples) noexcept
+void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& bufferToFill,
+                                         int numSamples,
+                                         const ProcessingState& state) noexcept
 {
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
@@ -2384,17 +2769,37 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         }
     }
 
+    pushAdaptiveCaptureBlocks(state.adaptiveCaptureQueue,
+                              dataL,
+                              dataR,
+                              numSamples,
+                              state.adaptiveCaptureSampleRateHz,
+                              state.adaptiveCaptureBitDepth,
+                              state.adaptiveCoeffBankIndex);
+
     // ── Step 3: ディザリング / ヘッドルーム適用 ─────────────────────────────
+    if (noiseShaperType == NoiseShaperType::Adaptive9thOrder
+        && state.adaptiveCoeffSet != nullptr
+        && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
+            || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
+    {
+        adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
+        activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
+        activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
+    }
+
     if (applyDither)
     {
         if (noiseShaperType == NoiseShaperType::Fixed4Tap)
         {
-            // 新方式: 4-tap error-feedback noise shaper (ditherなし)
             fixedNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+        }
+        else if (noiseShaperType == NoiseShaperType::Adaptive9thOrder)
+        {
+            adaptiveNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
         }
         else
         {
-            // 既存方式: Psychoacoustic dither + noise shaper
             dither.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
         }
     }
@@ -2420,68 +2825,96 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         buffer->clear(ch, startSample, numSamples);
 }
 
-void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer, int numSamples) noexcept
+void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer,
+                                               int numSamples,
+                                               const ProcessingState& state) noexcept
 {
     constexpr double kOutputHeadroom = 0.8912509381337456; // -1.0dB
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    const bool applyDither = (ditherBitDepth > 0);
+    const int numChannels = std::min(2, buffer.getNumChannels());
+    double* dataL = (numChannels > 0) ? alignedL.get() : nullptr;
+    double* dataR = (numChannels > 1) ? alignedR.get() : nullptr;
+
+    dcBlockerL.process(dataL, numSamples);
+    if (dataR != nullptr)
+        dcBlockerR.process(dataR, numSamples);
+
     {
-        if (ch < 2)
+        const __m256d vInf = _mm256_set1_pd(1.0e300);
+        int i = 0;
+        const int vEnd = numSamples / 4 * 4;
+        for (; i < vEnd; i += 4)
         {
-            double* data = (ch == 0) ? alignedL.get() : alignedR.get();
-            auto& blocker = (ch == 0) ? dcBlockerL : dcBlockerR;
-            double* dst = buffer.getWritePointer(ch);
+            __m256d vL = _mm256_loadu_pd(dataL + i);
+            __m256d nanMaskL = _mm256_cmp_pd(vL, vL, _CMP_ORD_Q);
+            __m256d infMaskL = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vL), vInf, _CMP_LT_OQ);
+            _mm256_storeu_pd(dataL + i, _mm256_and_pd(vL, _mm256_and_pd(nanMaskL, infMaskL)));
 
-            // 【最適化】ブロックモード DC 除去 (1次IIR)
-            blocker.process(data, numSamples);
-
-            // NaN 対策: vmaxpd(NaN, -1.0)→-1.0 (Intel仕様: 第1op=NaN→第2opを返す)
-            // Inf 対策: min/max でクランプ済み
-            // デノーマル対策: FTZ/DAZ が有効なため vEpsilon blendv チェックは省略する。
+            if (dataR != nullptr)
             {
-                int i = 0;
-                const int vEnd = numSamples / 16 * 16;
-                const __m256d vMax      = _mm256_set1_pd(kOutputHeadroom);
-                const __m256d vMin      = _mm256_set1_pd(-kOutputHeadroom);
-                const __m256d vHeadroom = _mm256_set1_pd(kOutputHeadroom);
-
-                for (; i < vEnd; i += 16)
-                {
-                    __m256d v0 = _mm256_mul_pd(_mm256_loadu_pd(data + i),      vHeadroom);
-                    __m256d v1 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 4),  vHeadroom);
-                    __m256d v2 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 8),  vHeadroom);
-                    __m256d v3 = _mm256_mul_pd(_mm256_loadu_pd(data + i + 12), vHeadroom);
-
-                    v0 = _mm256_min_pd(_mm256_max_pd(v0, vMin), vMax);
-                    v1 = _mm256_min_pd(_mm256_max_pd(v1, vMin), vMax);
-                    v2 = _mm256_min_pd(_mm256_max_pd(v2, vMin), vMax);
-                    v3 = _mm256_min_pd(_mm256_max_pd(v3, vMin), vMax);
-
-                    _mm256_storeu_pd(dst + i,      v0);
-                    _mm256_storeu_pd(dst + i + 4,  v1);
-                    _mm256_storeu_pd(dst + i + 8,  v2);
-                    _mm256_storeu_pd(dst + i + 12, v3);
-                }
-
-                for (; i < (numSamples / 4 * 4); i += 4)
-                {
-                    __m256d v = _mm256_mul_pd(_mm256_loadu_pd(data + i), vHeadroom);
-                    v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);
-                    _mm256_storeu_pd(dst + i, v);
-                }
-
-                for (; i < numSamples; ++i)
-                {
-                    double v = data[i] * kOutputHeadroom;
-                    if (!isFiniteNoLibm(v)) v = 0.0;
-                    dst[i] = juce::jlimit(-kOutputHeadroom, kOutputHeadroom, v);
-                }
+                __m256d vR = _mm256_loadu_pd(dataR + i);
+                __m256d nanMaskR = _mm256_cmp_pd(vR, vR, _CMP_ORD_Q);
+                __m256d infMaskR = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vR), vInf, _CMP_LT_OQ);
+                _mm256_storeu_pd(dataR + i, _mm256_and_pd(vR, _mm256_and_pd(nanMaskR, infMaskR)));
             }
         }
-        else
+
+        for (; i < numSamples; ++i)
         {
-            buffer.clear(ch, 0, numSamples);
+            if (!isFiniteAndAbsBelowNoLibm(dataL[i], 1.0e300))
+                dataL[i] = 0.0;
+
+            if (dataR != nullptr && !isFiniteAndAbsBelowNoLibm(dataR[i], 1.0e300))
+                dataR[i] = 0.0;
         }
     }
+
+    pushAdaptiveCaptureBlocks(state.adaptiveCaptureQueue,
+                              dataL,
+                              dataR,
+                              numSamples,
+                              state.adaptiveCaptureSampleRateHz,
+                              state.adaptiveCaptureBitDepth,
+                              state.adaptiveCoeffBankIndex);
+
+    if (noiseShaperType == NoiseShaperType::Adaptive9thOrder
+        && state.adaptiveCoeffSet != nullptr
+        && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
+            || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
+    {
+        adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
+        activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
+        activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
+    }
+
+    if (applyDither)
+    {
+        if (noiseShaperType == NoiseShaperType::Fixed4Tap)
+            fixedNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+        else if (noiseShaperType == NoiseShaperType::Adaptive9thOrder)
+            adaptiveNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+        else
+            dither.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+    }
+    else
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            dataL[i] *= kOutputHeadroom;
+            if (dataR != nullptr)
+                dataR[i] *= kOutputHeadroom;
+        }
+    }
+
+    for (int sample = 0; sample < numSamples; ++sample)
+        buffer.setSample(0, sample, juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataL[sample]));
+
+    if (numChannels > 1)
+        for (int sample = 0; sample < numSamples; ++sample)
+            buffer.setSample(1, sample, juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[sample]));
+
+    for (int channel = numChannels; channel < buffer.getNumChannels(); ++channel)
+        buffer.clear(channel, 0, numSamples);
 }
 
 void AudioEngine::setEqBypassRequested (bool shouldBypass)
@@ -2576,6 +3009,56 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("noiseShaperType"))
         setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"));
 
+    {
+        bool hasBankedAdaptiveCoefficients = false;
+
+        for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
+        {
+            const double bankSampleRate = getAdaptiveSampleRateBankHz(bankIndex);
+            double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
+            bool hasBankCoefficients = false;
+
+            getAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
+            for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+            {
+                const auto propertyName = makeAdaptiveCoeffPropertyName(bankSampleRate, coeffIndex);
+                if (state.hasProperty(propertyName))
+                {
+                    adaptiveCoefficients[coeffIndex] = static_cast<double>(state.getProperty(propertyName));
+                    hasBankCoefficients = true;
+                    hasBankedAdaptiveCoefficients = true;
+                }
+            }
+
+            if (hasBankCoefficients)
+                setAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
+        }
+
+        if (!hasBankedAdaptiveCoefficients)
+        {
+            double legacyAdaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
+            bool hasLegacyAdaptiveCoefficients = false;
+
+            for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+            {
+                const auto propertyName = "adaptiveCoeff" + juce::String(coeffIndex);
+                if (state.hasProperty(propertyName))
+                {
+                    legacyAdaptiveCoefficients[coeffIndex] = static_cast<double>(state.getProperty(propertyName));
+                    hasLegacyAdaptiveCoefficients = true;
+                }
+            }
+
+            if (hasLegacyAdaptiveCoefficients)
+            {
+                for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
+                    setAdaptiveCoefficientsForSampleRate(getAdaptiveSampleRateBankHz(bankIndex),
+                                                         legacyAdaptiveCoefficients,
+                                                         kAdaptiveNoiseShaperOrder);
+            }
+        }
+    }
+
     if (state.hasProperty("oversamplingFactor"))
         setOversamplingFactor(static_cast<int>(state.getProperty("oversamplingFactor")));
 
@@ -2635,6 +3118,18 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.setProperty("convHCFilterMode", (int)convHCFilterMode.load(), nullptr);
     state.setProperty("convLCFilterMode", (int)convLCFilterMode.load(), nullptr);
     state.setProperty("eqLPFFilterMode",  (int)eqLPFFilterMode.load(), nullptr);
+
+    for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
+    {
+        const double bankSampleRate = getAdaptiveSampleRateBankHz(bankIndex);
+        double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
+        getAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
+
+        for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+            state.setProperty(makeAdaptiveCoeffPropertyName(bankSampleRate, coeffIndex),
+                              adaptiveCoefficients[coeffIndex],
+                              nullptr);
+    }
 
     state.addChild (uiEqProcessor.getState(), -1, nullptr);
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
@@ -2777,8 +3272,16 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
     if (noiseShaperType.load() != type)
     {
         noiseShaperType.store(type);
-        juce::Logger::writeToLog("Noise Shaper changed: "
-            + juce::String(type == NoiseShaperType::Fixed4Tap ? "Fixed4Tap" : "Psychoacoustic"));
+        if (type != NoiseShaperType::Adaptive9thOrder)
+            stopNoiseShaperLearning();
+
+        juce::String typeName = "Psychoacoustic";
+        if (type == NoiseShaperType::Fixed4Tap)
+            typeName = "Fixed4Tap";
+        else if (type == NoiseShaperType::Adaptive9thOrder)
+            typeName = "Adaptive9thOrder";
+
+        juce::Logger::writeToLog("Noise Shaper changed: " + typeName);
         const double sr = currentSampleRate.load();
         if (sr > 0.0)
             requestRebuild(sr, maxSamplesPerBlock.load());

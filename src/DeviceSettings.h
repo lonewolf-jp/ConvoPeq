@@ -47,6 +47,8 @@ private:
     void timerCallback() override;
     void updateBitDepthList();
     void updateGainStagingDisplay();
+    void showAdaptiveLearningWindow();
+    void updateNoiseShaperControls();
 
     juce::AudioDeviceManager& audioDeviceManager;
     AudioEngine& audioEngine;
@@ -62,6 +64,7 @@ private:
 
     juce::ComboBox noiseShaperComboBox;
     juce::Label noiseShaperLabel;
+    juce::TextButton adaptiveLearningButton { "Adaptive learning..." };
 
     juce::ComboBox fixedNoiseLogIntervalComboBox;
     juce::Label fixedNoiseLogIntervalLabel;
@@ -74,6 +77,7 @@ private:
     juce::Slider outputMakeupSlider;
     juce::Label outputMakeupLabel;
     juce::String gainDisplaySignature;
+    juce::Component::SafePointer<juce::DialogWindow> adaptiveLearningWindow;
 
     static juce::File getSettingsFile();
 

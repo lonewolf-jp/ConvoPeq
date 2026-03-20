@@ -35,9 +35,7 @@ public:
 private:
     AudioEngine& engine;
 
-    //----------------------------------------------------------
-    // UIコンポーネント
-    //----------------------------------------------------------
+    // 既存UIコンポーネント
     juce::TextButton loadIRButton{"Load IR..."};
     juce::TextButton irAdvancedButton{"IR Advanced..."};
     juce::ComboBox phaseChoiceBox;
@@ -66,16 +64,12 @@ private:
 
     juce::Label irInfoLabel;
 
-    //----------------------------------------------------------
     // 出力周波数フィルター UI (① コンボルバー最終段の場合に使用)
-    //----------------------------------------------------------
-    // ハイカットフィルターモード ラベル + ボタン (Sharp / Natural / Soft)
     juce::Label  hcfLabel;
     juce::TextButton hcfSharpButton   { "Sharp"   };
     juce::TextButton hcfNaturalButton { "Natural" };
     juce::TextButton hcfSoftButton    { "Soft"    };
 
-    // ローカットフィルターモード ラベル + ボタン (Natural / Soft)
     juce::Label  lcfLabel;
     juce::TextButton lcfNaturalButton { "Natural" };
     juce::TextButton lcfSoftButton    { "Soft"    };

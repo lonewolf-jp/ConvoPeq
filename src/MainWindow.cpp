@@ -101,6 +101,18 @@ MainWindow::MainWindow (const juce::String& name)
     audioEngine.addChangeListener (this);
     audioDeviceManager.addAudioCallback (&audioProcessorPlayer);
 
+    juce::Component::SafePointer<MainWindow> safeThis(this);
+    audioEngine.setAdaptiveAutosaveCallback([safeThis]
+    {
+        juce::MessageManager::callAsync([safeThis]
+        {
+            if (safeThis == nullptr)
+                return;
+
+            DeviceSettings::saveSettings(safeThis->audioDeviceManager, safeThis->audioEngine);
+        });
+    });
+
     // 設定読み込み（ブラックリスト適用後に実行することで、除外されたデバイスの自動ロードを防ぐ）
     // この時点でrebuildが呼ばれても、有効なサンプルレートが設定されている
     loadSettings();
@@ -127,6 +139,7 @@ MainWindow::~MainWindow()
     //       Use-After-Free が発生する。最初に removeChangeListener することで
     //       このウィンドウへの通知を即座に遮断し、安全にシャットダウンできる。
     audioEngine.removeChangeListener (this);
+    audioEngine.setAdaptiveAutosaveCallback({});
 
     audioProcessorPlayer.setProcessor (nullptr);
     stopTimer();
@@ -351,9 +364,9 @@ void MainWindow::toggleDeviceSelector()
 
         auto newSettingsWindow = std::make_unique<SettingsWindow> ("Audio Settings", background, DocumentWindow::allButtons);
         newSettingsWindow->setResizable (true, false);
-        newSettingsWindow->setResizeLimits (400, 400, 800, 1000); // 最大高さを拡張
+        newSettingsWindow->setResizeLimits (440, 440, 900, 1040);
         newSettingsWindow->setContentNonOwned (deviceSettings.get(), false);
-        newSettingsWindow->centreWithSize (500, 624);
+        newSettingsWindow->centreWithSize (560, 660);
 
         newSettingsWindow->onClose = [this]
         {

@@ -596,24 +596,27 @@ void ConvolverControlPanel::paint(juce::Graphics& g)
 void ConvolverControlPanel::resized()
 {
     auto bounds = getLocalBounds().reduced(10);
-
-    // タイトル行
-    bounds.removeFromTop(22);
+    bounds.removeFromTop(22); // タイトル
     bounds.removeFromTop(5);
 
-    // IR情報
-    waveformArea = bounds.removeFromTop(60);
-    irInfoLabel.setBounds(waveformArea); // 波形エリアに重ねる
-    bounds.removeFromTop(8);
+    // 波形エリア
+    waveformArea = bounds.removeFromTop(38);
+    bounds.removeFromTop(4);
 
-    // 2つのメインコントロール行を定義
-    auto controlRow1 = bounds.removeFromTop(28);
-    auto controlRow2 = bounds.removeFromTop(28);
+    // IR情報ラベル
+    irInfoLabel.setBounds(bounds.removeFromTop(16));
+    bounds.removeFromTop(4);
 
-    const int leftGap = 10;
-    const int loadWidth = 120;
-    const int phaseWidth = 130;
-    const int advancedWidth = 110;
+    constexpr int leftGap = 8;
+    constexpr int loadWidth = 90;
+    constexpr int phaseWidth = 80;
+    constexpr int advancedWidth = 90;
+
+    auto controlRow1 = bounds.removeFromTop(26);
+    bounds.removeFromTop(4);
+    auto controlRow2 = bounds.removeFromTop(26);
+    bounds.removeFromTop(4);
+
     const int labelWidth = 78;
     const int inlineGap = 6;
     const int controlsStartX = loadWidth + leftGap + phaseWidth + leftGap + advancedWidth + leftGap;
@@ -1168,7 +1171,10 @@ void ConvolverControlPanel::updateWaveformPath()
     const auto& waveform = engine.getConvolverProcessor().getIRWaveform();
 
     if (waveform.empty() || waveform.size() < 2 || waveformArea.isEmpty())
+    {
+        repaint();
         return;
+    }
 
     const float w = static_cast<float>(waveformArea.getWidth());
     const float h = static_cast<float>(waveformArea.getHeight());
@@ -1185,4 +1191,6 @@ void ConvolverControlPanel::updateWaveformPath()
     }
     waveformPath.lineTo(x + w, y);
     waveformPath.closeSubPath();
+    
+    repaint();
 }

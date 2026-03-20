@@ -80,21 +80,10 @@ if(WIN32 AND CMAKE_GENERATOR STREQUAL "Ninja")
 endif()
 
 #------------------------------------------------------------
-# JUCEを追加
+# JUCEを追加（JUCE 8.0以降はextras/Build/CMake/JUCEModuleSupport.cmake不要）
 # プロジェクトルートに JUCE/ ディレクトリが必要
 #------------------------------------------------------------
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/JUCE/extras/Build/CMake/JUCEModuleSupport.cmake")
-    add_subdirectory(JUCE)
-else()
-    message(STATUS "Local JUCE installation is incomplete (missing 'extras'). Fetching from GitHub...")
-    include(FetchContent)
-    FetchContent_Declare(
-        JUCE
-        GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-        GIT_TAG        8.0.12
-    )
-    FetchContent_MakeAvailable(JUCE)
-endif()
+add_subdirectory(JUCE)
 
 #------------------------------------------------------------
 # r8brain-free-src ライブラリの追加
@@ -137,7 +126,9 @@ target_sources(ConvoPeq PRIVATE
     src/EQControlPanel.cpp
     src/SpectrumAnalyzerComponent.cpp
     src/DeviceSettings.cpp
+    src/NoiseShaperLearningComponent.cpp
     src/OutputFilter.cpp
+    src/NoiseShaperLearner.cpp
     src/AsioBlacklist.h
     src/CustomInputOversampler.h
     src/AudioEngineProcessor.h

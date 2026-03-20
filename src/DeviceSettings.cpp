@@ -2,6 +2,7 @@
 // DeviceSettings.cpp  ── v0.2 (JUCE 8.0.12対応)
 //============================================================================
 #include "DeviceSettings.h"
+#include "NoiseShaperLearningComponent.h"
 
 namespace
 {
@@ -26,6 +27,11 @@ juce::AudioDeviceManager::AudioDeviceSetup makeRelaxedSetupFromXml(const juce::X
     setup.inputChannels.clear();
     setup.outputChannels.clear();
     return setup;
+}
+
+juce::String makeAdaptiveCoeffPropertyName(double sampleRate, int coeffIndex)
+{
+    return "adaptiveCoeff_" + juce::String(static_cast<int>(sampleRate + 0.5)) + "_" + juce::String(coeffIndex);
 }
 }
 
@@ -212,13 +218,22 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     addAndMakeVisible(noiseShaperComboBox);
     noiseShaperComboBox.addItem("4th-order", 1);
     noiseShaperComboBox.addItem("9th-order", 2);
+    noiseShaperComboBox.addItem("9th-order adaptive", 3);
     noiseShaperComboBox.onChange = [this] {
         const int id = noiseShaperComboBox.getSelectedId();
         if (id == 1)
             audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Fixed4Tap);
-        else
+        else if (id == 2)
             audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Psychoacoustic);
+        else if (id == 3)
+            audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Adaptive9thOrder);
+
+        updateNoiseShaperControls();
     };
+
+    addAndMakeVisible(adaptiveLearningButton);
+    adaptiveLearningButton.setTooltip("Open the adaptive 9th-order learning window");
+    adaptiveLearningButton.onClick = [this] { showAdaptiveLearningWindow(); };
 
     addAndMakeVisible(fixedNoiseLogIntervalLabel);
     fixedNoiseLogIntervalLabel.setText("NS Log Interval:", juce::dontSendNotification);
@@ -303,9 +318,19 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
         oversamplingComboBox.setSelectedId(1, juce::dontSendNotification); // Default to Auto
     }
 
-    noiseShaperComboBox.setSelectedId(
-        audioEngine.getNoiseShaperType() == AudioEngine::NoiseShaperType::Fixed4Tap ? 2 : 1,
-        juce::dontSendNotification);
+    switch (audioEngine.getNoiseShaperType())
+    {
+        case AudioEngine::NoiseShaperType::Fixed4Tap:
+            noiseShaperComboBox.setSelectedId(1, juce::dontSendNotification);
+            break;
+        case AudioEngine::NoiseShaperType::Adaptive9thOrder:
+            noiseShaperComboBox.setSelectedId(3, juce::dontSendNotification);
+            break;
+        case AudioEngine::NoiseShaperType::Psychoacoustic:
+        default:
+            noiseShaperComboBox.setSelectedId(2, juce::dontSendNotification);
+            break;
+    }
 
     {
         const int intervalMs = audioEngine.getFixedNoiseLogIntervalMs();
@@ -322,6 +347,7 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     }
 
     updateBitDepthList();
+    updateNoiseShaperControls();
     // loadSettings()後にUIの値を更新
     inputHeadroomSlider.setValue(audioEngine.getInputHeadroomDb(), juce::dontSendNotification);
     outputMakeupSlider.setValue(audioEngine.getOutputMakeupDb(), juce::dontSendNotification);
@@ -376,6 +402,7 @@ void DeviceSettings::resized()
     fixedNoiseLogIntervalComboBox.setBounds(row5_left.removeFromLeft(120).reduced(2));
     fixedNoiseWindowLabel.setBounds(row5_right.removeFromLeft(80).reduced(5));
     fixedNoiseWindowComboBox.setBounds(row5_right.removeFromLeft(120).reduced(2));
+    adaptiveLearningButton.setBounds(row5_right.removeFromLeft(170).reduced(2));
 
     if (selector != nullptr)
         selector->setBounds(bounds);
@@ -400,6 +427,50 @@ void DeviceSettings::changeListenerCallback (juce::ChangeBroadcaster* source)
 void DeviceSettings::timerCallback()
 {
     updateGainStagingDisplay();
+}
+
+void DeviceSettings::showAdaptiveLearningWindow()
+{
+    audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Adaptive9thOrder);
+    noiseShaperComboBox.setSelectedId(3, juce::dontSendNotification);
+    updateNoiseShaperControls();
+
+    if (adaptiveLearningWindow != nullptr)
+    {
+        adaptiveLearningWindow->setVisible(true);
+        adaptiveLearningWindow->toFront(true);
+        return;
+    }
+
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned(new NoiseShaperLearningComponent(audioEngine));
+    options.dialogTitle = "Adaptive Noise Shaper Learning";
+    options.dialogBackgroundColour = juce::Colour(0xff20252b);
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = true;
+
+    if (auto* window = options.launchAsync())
+    {
+        window->setResizeLimits(480, 280, 900, 700);
+        window->centreWithSize(560, 360);
+        adaptiveLearningWindow = window;
+    }
+}
+
+void DeviceSettings::updateNoiseShaperControls()
+{
+    const bool showFixedControls = noiseShaperComboBox.getSelectedId() == 1;
+    const bool showAdaptiveButton = noiseShaperComboBox.getSelectedId() == 3;
+
+    fixedNoiseLogIntervalLabel.setVisible(showFixedControls);
+    fixedNoiseLogIntervalComboBox.setVisible(showFixedControls);
+    fixedNoiseWindowLabel.setVisible(showFixedControls);
+    fixedNoiseWindowComboBox.setVisible(showFixedControls);
+    adaptiveLearningButton.setVisible(showAdaptiveButton);
+    adaptiveLearningButton.setEnabled(showAdaptiveButton);
+
+    resized();
 }
 
 void DeviceSettings::updateGainStagingDisplay()
@@ -556,6 +627,16 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
         // 入力ヘッドルーム設定を追加
         xml->setAttribute("outputMakeupDb", engine.getOutputMakeupDb());
         xml->setAttribute("inputHeadroomDb", engine.getInputHeadroomDb());
+        for (int bankIndex = 0; bankIndex < AudioEngine::getAdaptiveSampleRateBankCount(); ++bankIndex)
+        {
+            const double bankSampleRate = AudioEngine::getAdaptiveSampleRateBankHz(bankIndex);
+            double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
+            engine.getAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
+
+            for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+                xml->setAttribute(makeAdaptiveCoeffPropertyName(bankSampleRate, coeffIndex), adaptiveCoefficients[coeffIndex]);
+        }
+
         xml->writeTo (getSettingsFile());
     }
 }
@@ -634,6 +715,56 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             // ノイズシェーパー種類の読み込み (デフォルト0 = Current)
             int shaperType = xml->getIntAttribute("noiseShaperType", 0);
             engine.setNoiseShaperType((AudioEngine::NoiseShaperType)shaperType);
+
+            {
+                bool hasBankedAdaptiveCoefficients = false;
+
+                for (int bankIndex = 0; bankIndex < AudioEngine::getAdaptiveSampleRateBankCount(); ++bankIndex)
+                {
+                    const double bankSampleRate = AudioEngine::getAdaptiveSampleRateBankHz(bankIndex);
+                    double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
+                    bool hasBankCoefficients = false;
+
+                    engine.getAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
+                    for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+                    {
+                        const auto attributeName = makeAdaptiveCoeffPropertyName(bankSampleRate, coeffIndex);
+                        if (xml->hasAttribute(attributeName))
+                        {
+                            adaptiveCoefficients[coeffIndex] = xml->getDoubleAttribute(attributeName, adaptiveCoefficients[coeffIndex]);
+                            hasBankCoefficients = true;
+                            hasBankedAdaptiveCoefficients = true;
+                        }
+                    }
+
+                    if (hasBankCoefficients)
+                        engine.setAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
+                }
+
+                if (!hasBankedAdaptiveCoefficients)
+                {
+                    double legacyAdaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
+                    bool hasLegacyAdaptiveCoefficients = false;
+
+                    for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+                    {
+                        const auto attributeName = "adaptiveCoeff" + juce::String(coeffIndex);
+                        if (xml->hasAttribute(attributeName))
+                        {
+                            legacyAdaptiveCoefficients[coeffIndex] = xml->getDoubleAttribute(attributeName, legacyAdaptiveCoefficients[coeffIndex]);
+                            hasLegacyAdaptiveCoefficients = true;
+                        }
+                    }
+
+                    if (hasLegacyAdaptiveCoefficients)
+                    {
+                        for (int bankIndex = 0; bankIndex < AudioEngine::getAdaptiveSampleRateBankCount(); ++bankIndex)
+                            engine.setAdaptiveCoefficientsForSampleRate(AudioEngine::getAdaptiveSampleRateBankHz(bankIndex),
+                                                                       legacyAdaptiveCoefficients,
+                                                                       kAdaptiveNoiseShaperOrder);
+                    }
+                }
+            }
 
             // Fixed 4-tap 比較ログ設定
             int logIntervalMs = xml->getIntAttribute("fixedNoiseLogIntervalMs", 2000);
