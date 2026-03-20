@@ -36,8 +36,6 @@ ConvoPeq v0.5.0 introduces the **Adaptive Noise Shaper Learning** feature. This 
 
 ## Additional Notes
 
-...existing code...
-
 - If an error occurs during learning, a message will be displayed in the panel.
 - Coefficients are saved independently for each sample rate.
 - This feature is only active when "Adaptive 9th-order" noise shaper is selected.
