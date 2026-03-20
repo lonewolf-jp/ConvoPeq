@@ -71,11 +71,11 @@ private:
     juce::ComboBox fixedNoiseWindowComboBox;
     juce::Label fixedNoiseWindowLabel;
 
-    juce::Slider inputHeadroomSlider;
     juce::Label inputHeadroomLabel;
+    juce::TextEditor inputHeadroomEditor;
 
-    juce::Slider outputMakeupSlider;
     juce::Label outputMakeupLabel;
+    juce::TextEditor outputMakeupEditor;
     juce::String gainDisplaySignature;
     juce::Component::SafePointer<juce::DialogWindow> adaptiveLearningWindow;
 

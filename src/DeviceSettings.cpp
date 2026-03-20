@@ -270,39 +270,33 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     addAndMakeVisible(inputHeadroomLabel);
     inputHeadroomLabel.setText("Input Headroom:", juce::dontSendNotification);
     inputHeadroomLabel.setJustificationType(juce::Justification::centredLeft);
-
-    addAndMakeVisible(inputHeadroomSlider);
-    inputHeadroomSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    // AudioEngine 側クランプの全許容域: -12..0 dB
-    // (モードにより上限は -6 または 0 に制限される)
-    inputHeadroomSlider.setRange(-12.0, 0.0, 0.1);
-    inputHeadroomSlider.setTextValueSuffix(" dB");
-    inputHeadroomSlider.setNumDecimalPlacesToDisplay(1);
-    inputHeadroomSlider.onValueChange = [this] {
-        audioEngine.setInputHeadroomDb(static_cast<float>(inputHeadroomSlider.getValue()));
-        const double clamped = static_cast<double>(audioEngine.getInputHeadroomDb());
-        if (std::abs(inputHeadroomSlider.getValue() - clamped) > 1.0e-6)
-            inputHeadroomSlider.setValue(clamped, juce::dontSendNotification);
+    addAndMakeVisible(inputHeadroomEditor);
+    inputHeadroomEditor.setInputRestrictions(0, "-0123456789.");
+    inputHeadroomEditor.setText(juce::String(audioEngine.getInputHeadroomDb(), 1));
+    inputHeadroomEditor.setJustification(juce::Justification::right);
+    inputHeadroomEditor.onTextChange = [this] {
+        double val = inputHeadroomEditor.getText().getDoubleValue();
+        if (val < -12.0) val = -12.0;
+        if (val > 0.0) val = 0.0;
+        audioEngine.setInputHeadroomDb(static_cast<float>(val));
     };
+
 
     // Output Makeup Controls
     addAndMakeVisible(outputMakeupLabel);
     outputMakeupLabel.setText("Output Makeup:", juce::dontSendNotification);
     outputMakeupLabel.setJustificationType(juce::Justification::centredLeft);
-
-    addAndMakeVisible(outputMakeupSlider);
-    outputMakeupSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    // AudioEngine 側クランプの全許容域: -6..+12 dB
-    // (モードにより -6..0 / +6..+10 / +6..+12 へ制限される)
-    outputMakeupSlider.setRange(-6.0, 12.0, 0.1);
-    outputMakeupSlider.setTextValueSuffix(" dB");
-    outputMakeupSlider.setNumDecimalPlacesToDisplay(1);
-    outputMakeupSlider.onValueChange = [this] {
-        audioEngine.setOutputMakeupDb(static_cast<float>(outputMakeupSlider.getValue()));
-        const double clamped = static_cast<double>(audioEngine.getOutputMakeupDb());
-        if (std::abs(outputMakeupSlider.getValue() - clamped) > 1.0e-6)
-            outputMakeupSlider.setValue(clamped, juce::dontSendNotification);
+    addAndMakeVisible(outputMakeupEditor);
+    outputMakeupEditor.setInputRestrictions(0, "-0123456789.");
+    outputMakeupEditor.setText(juce::String(audioEngine.getOutputMakeupDb(), 1));
+    outputMakeupEditor.setJustification(juce::Justification::right);
+    outputMakeupEditor.onTextChange = [this] {
+        double val = outputMakeupEditor.getText().getDoubleValue();
+        if (val < -6.0) val = -6.0;
+        if (val > 12.0) val = 12.0;
+        audioEngine.setOutputMakeupDb(static_cast<float>(val));
     };
+
 
     // デバイス変更を監視してビット深度リストを更新
     audioDeviceManager.addChangeListener(this);
@@ -349,8 +343,6 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     updateBitDepthList();
     updateNoiseShaperControls();
     // loadSettings()後にUIの値を更新
-    inputHeadroomSlider.setValue(audioEngine.getInputHeadroomDb(), juce::dontSendNotification);
-    outputMakeupSlider.setValue(audioEngine.getOutputMakeupDb(), juce::dontSendNotification);
 
     updateGainStagingDisplay();
     startTimerHz(5);
@@ -366,46 +358,57 @@ DeviceSettings::~DeviceSettings()
 void DeviceSettings::resized()
 {
     auto bounds = getLocalBounds();
-    auto controlsArea = bounds.removeFromTop(150);
-    auto row1 = controlsArea.removeFromTop(30);
-    auto row2 = controlsArea.removeFromTop(30);
-    auto row3 = controlsArea.removeFromTop(30);
-    auto row4 = controlsArea.removeFromTop(30);
-    auto row5 = controlsArea.removeFromTop(30);
+    // Adaptive learningボタンの下の余白を詰めるため、controlsAreaの高さを自動計算
+    constexpr int rowHeight = 30;
+    constexpr int numRows = 6; // Dither, Input, Output, Tabs, Over/Noise, Adaptive
+    auto controlsArea = bounds.removeFromTop(rowHeight * numRows); // 必要な分だけ
+    auto row1 = controlsArea.removeFromTop(rowHeight); // Dither Bit Depth
+    auto row2 = controlsArea.removeFromTop(rowHeight); // Input Headroom
+    auto row3 = controlsArea.removeFromTop(rowHeight); // Output Makeup
+    auto row4 = controlsArea.removeFromTop(rowHeight); // FilterTypeTabs
+    auto row5 = controlsArea.removeFromTop(rowHeight); // Oversampling/NoiseShaper
+    auto row6 = controlsArea.removeFromTop(rowHeight); // Adaptive learning
 
-    auto row1_left = row1.removeFromLeft(row1.getWidth() / 2);
-    auto row1_right = row1;
+    // 1行目: Dither Bit Depth
+    bitDepthLabel.setBounds(row1.removeFromLeft(200).reduced(5));
+    bitDepthComboBox.setBounds(row1.removeFromLeft(120).reduced(2));
 
-    bitDepthLabel.setBounds(row1_left.removeFromLeft(100).reduced(5));
-    bitDepthComboBox.setBounds(row1_left.removeFromLeft(100).reduced(2));
+    // 2行目: Input Headroom
+    inputHeadroomLabel.setBounds(row2.removeFromLeft(200).reduced(5));
+    inputHeadroomEditor.setBounds(row2.removeFromLeft(120).reduced(5));
 
-    inputHeadroomLabel.setBounds(row1_right.removeFromLeft(110).reduced(5));
-    inputHeadroomSlider.setBounds(row1_right.reduced(2));
+    // 3行目: Output Makeup
+    outputMakeupLabel.setBounds(row3.removeFromLeft(200).reduced(5));
+    outputMakeupEditor.setBounds(row3.removeFromLeft(120).reduced(5));
 
-    auto row2_left = row2.removeFromLeft(row2.getWidth() / 2);
-    outputMakeupLabel.setBounds(row2_left.removeFromLeft(100).reduced(5));
-    outputMakeupSlider.setBounds(row2_left.reduced(2));
+    // 4行目: FilterTypeTabs
+    filterTypeTabs.setBounds(row4.removeFromLeft(400).reduced(2));
 
-    filterTypeTabs.setBounds(row3.reduced(2));
+    // 5行目: Oversampling/NoiseShaper
+    oversamplingLabel.setBounds(row5.removeFromLeft(120).reduced(5));
+    oversamplingComboBox.setBounds(row5.removeFromLeft(100).reduced(2));
+    noiseShaperLabel.setBounds(row5.removeFromLeft(120).reduced(5));
+    // NoiseShaperの位置・幅を記録
+    auto nsComboX = row5.getX();
+    auto nsComboY = row5.getY();
+    auto nsComboW = 160;
+    auto nsComboH = row5.getHeight();
+    noiseShaperComboBox.setBounds(nsComboX, nsComboY, nsComboW, nsComboH - 2);
 
-    auto row4_left = row4.removeFromLeft(row4.getWidth() / 2);
-    auto row4_right = row4;
-    oversamplingLabel.setBounds(row4_left.removeFromLeft(100).reduced(5));
-    oversamplingComboBox.setBounds(row4_left.removeFromLeft(100).reduced(2));
+    // 6行目: Adaptive learningボタンをNoiseShaperの真下・同じ幅で配置
+    adaptiveLearningButton.setBounds(nsComboX, nsComboY + nsComboH, nsComboW, nsComboH - 2);
 
-    noiseShaperLabel.setBounds(row4_right.removeFromLeft(100).reduced(5));
-    noiseShaperComboBox.setBounds(row4_right.removeFromLeft(160).reduced(2));
+    fixedNoiseLogIntervalLabel.setBounds(0, 0, 0, 0); // 非表示時のダミー配置
+    fixedNoiseLogIntervalComboBox.setBounds(0, 0, 0, 0);
+    fixedNoiseWindowLabel.setBounds(0, 0, 0, 0);
+    fixedNoiseWindowComboBox.setBounds(0, 0, 0, 0);
 
-    auto row5_left = row5.removeFromLeft(row5.getWidth() / 2);
-    auto row5_right = row5;
-    fixedNoiseLogIntervalLabel.setBounds(row5_left.removeFromLeft(100).reduced(5));
-    fixedNoiseLogIntervalComboBox.setBounds(row5_left.removeFromLeft(120).reduced(2));
-    fixedNoiseWindowLabel.setBounds(row5_right.removeFromLeft(80).reduced(5));
-    fixedNoiseWindowComboBox.setBounds(row5_right.removeFromLeft(120).reduced(2));
-    adaptiveLearningButton.setBounds(row5_right.removeFromLeft(170).reduced(2));
-
-    if (selector != nullptr)
-        selector->setBounds(bounds);
+    // Audio device selectorをAdaptive learningボタンの直下に詰めて配置
+    if (selector != nullptr) {
+        auto selectorBounds = bounds;
+        selectorBounds.setY(nsComboY + nsComboH * 2); // Adaptive learningボタンの下端から開始
+        selector->setBounds(selectorBounds);
+    }
 }
 
 void DeviceSettings::changeListenerCallback (juce::ChangeBroadcaster* source)
@@ -529,10 +532,10 @@ void DeviceSettings::updateGainStagingDisplay()
 
     const double currentInput = static_cast<double>(audioEngine.getInputHeadroomDb());
     const double currentMakeup = static_cast<double>(audioEngine.getOutputMakeupDb());
-    if (std::abs(inputHeadroomSlider.getValue() - currentInput) > 1.0e-6)
-        inputHeadroomSlider.setValue(currentInput, juce::dontSendNotification);
-    if (std::abs(outputMakeupSlider.getValue() - currentMakeup) > 1.0e-6)
-        outputMakeupSlider.setValue(currentMakeup, juce::dontSendNotification);
+    if (std::abs(inputHeadroomEditor.getText().getDoubleValue() - currentInput) > 1.0e-6)
+        inputHeadroomEditor.setText(juce::String(currentInput, 1), juce::dontSendNotification);
+    if (std::abs(outputMakeupEditor.getText().getDoubleValue() - currentMakeup) > 1.0e-6)
+        outputMakeupEditor.setText(juce::String(currentMakeup, 1), juce::dontSendNotification);
 }
 
 void DeviceSettings::updateBitDepthList()
