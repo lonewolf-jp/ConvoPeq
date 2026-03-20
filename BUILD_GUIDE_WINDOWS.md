@@ -76,7 +76,7 @@ cmake --build build --config Debug
 cmake --build build --config Release
 ```
 
-PowerShell から 1 行で実行する場合（環境初期化を確実に同一プロセスで連結）:
+To run all initialization and build steps in a single line from PowerShell (ensuring all environment setup occurs in the same process):
 
 ```powershell
 cmd.exe /d /c "call \"%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\Intel\oneAPI\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Debug"
@@ -118,7 +118,7 @@ Fix:
 
 - Use `build.bat`, or
 - Ensure both `vcvarsall.bat` and `setvars.bat` are called before CMake in the same shell command sequence.
-- PowerShell では `cmd.exe /d /c "... && ..."` で 1 つのコマンドチェーンとして実行する。
+- In PowerShell, use `cmd.exe /d /c "... && ..."` to execute all steps as a single command chain.
 
 ### B) `Release` task does not produce Release artifacts
 
@@ -138,7 +138,7 @@ Fix:
 
 - Keep task shell as `cmd.exe`
 - Keep quoted paths exactly as in current `tasks.json`.
-- 変数展開は `%ProgramFiles%` / `%ProgramFiles(x86)%` を使うと引用崩れを避けやすい。
+- For variable expansion, using `%ProgramFiles%` / `%ProgramFiles(x86)%` helps avoid quoting issues.
 
 ### D) oneMKL package not found
 

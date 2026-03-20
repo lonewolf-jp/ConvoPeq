@@ -1,4 +1,48 @@
+
 # ConvoPeq
+
+---
+
+## New in v0.5.0: Adaptive Noise Shaper Learning
+
+ConvoPeq v0.5.0 introduces the **Adaptive Noise Shaper Learning** feature. This function automatically optimizes the coefficients of the 9th-order IIR noise shaping filter at the output stage, based on the actual playback signal, to more effectively suppress quantization noise and maximize perceived S/N.
+
+### Feature Overview
+
+- **Adaptive 9th-order Noise Shaper**: Automatically optimizes noise shaper coefficients based on the statistical characteristics of the output signal.
+- **Real-time learning**: Captures the playback signal and performs background learning. Progress and score history are visualized in the UI.
+- **Multi-sample rate support**: Optimized coefficients are saved and switched automatically for each sample rate.
+- **Safe design**: Real-time processing stability is maintained during learning, and coefficient switching is thread-safe.
+
+### How to Enable & Use
+
+1. **Open the Noise Shaper Learning panel**
+   - Open the dedicated panel from the "Noise Shaper Learning" button in the main window.
+
+2. **Press the Start learning button**
+   - While playing audio, press "Start learning" to begin the learning process.
+   - Sufficient stereo signal length is required (learning will not proceed with silence or single-channel only).
+
+3. **Monitor progress and score**
+   - The panel displays "Generation", "Process count", "Segment count", "Best/Latest score", and a score history graph.
+   - Lower scores indicate better results (lower quantization noise).
+
+4. **Pause with Stop learning**
+   - You can pause learning at any time by pressing "Stop learning".
+
+5. **Saving and auto-applying learned coefficients**
+   - As learning progresses, the optimized coefficients for the current sample rate are automatically saved and applied for subsequent playback.
+   - When the sample rate changes, the optimal coefficients are automatically switched.
+
+## Additional Notes
+
+...existing code...
+
+- If an error occurs during learning, a message will be displayed in the panel.
+- Coefficients are saved independently for each sample rate.
+- This feature is only active when "Adaptive 9th-order" noise shaper is selected.
+
+---
 
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 
@@ -212,13 +256,13 @@ cmake --build build --config Debug
 cmake --build build --config Release
 ```
 
-**PowerShell（環境変数を同一プロセスに引き渡すため `cmd.exe /d /c` でまとめて実行）:**
+**PowerShell (to ensure environment variables are passed in the same process, use `cmd.exe /d /c` to run all commands together):**
 
 ```powershell
 cmd.exe /d /c "call `"%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat`" x64 && call `"%ProgramFiles(x86)%\Intel\oneAPI\setvars.bat`" intel64 && cmake -S . -B build -G `"Ninja Multi-Config`" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Debug"
 ```
 
-> **Note**: PowerShell の `&&` は環境変数の伝播を行わないため、`call vcvarsall.bat` と後続コマンドを必ず同一の `cmd.exe /d /c "..."` 内に記述してください。
+> **Note**: In PowerShell, `&&` does not propagate environment variables between commands. Always include `call vcvarsall.bat` and subsequent commands within the same `cmd.exe /d /c "..."` block.
 
 For more details, see `BUILD_GUIDE_WINDOWS.md`.
 

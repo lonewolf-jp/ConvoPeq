@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <xmmintrin.h>  // _MM_SET_FLUSH_ZERO_MODE
+#include <pmmintrin.h>  // _MM_SET_DENORMALS_ZERO_MODE
 
 namespace
 {
@@ -216,6 +218,12 @@ void NoiseShaperLearner::configureEvaluationContexts(double sampleRateHz) noexce
 
 void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
 {
+    // FTZ/DAZ をスレッド開始時に設定する（スレッドローカルフラグ）。
+    // 評価ワーカーは MKL DFTI および LatticeNoiseShaper を使用するため、
+    // デノーマル数による CPU 速度低下を防ぐために必須。
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+
     engine.pinCurrentThreadToNonAudioCoresIfNeeded();
 
     uint32_t observedDispatchSerial = 0;
@@ -338,6 +346,13 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
 
 void NoiseShaperLearner::workerThreadMain()
 {
+    // FTZ/DAZ をスレッド開始時に設定する。
+    // これらのフラグはスレッドローカルであるため、スレッドごとに設定が必要。
+    // 設定しない場合、LatticeNoiseShaper の状態変数や MKL DFTI の中間バッファで
+    // デノーマル数が発生し、CPU が 100 倍以上の速度低下を起こす可能性がある。
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+
     try
     {
         progress.status.store(Status::WaitingForAudio, std::memory_order_release);

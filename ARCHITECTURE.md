@@ -99,6 +99,13 @@ ConvoPeq is organized around four priorities:
 - `PsychoacousticDither.h`
   - Final-stage dither/noise shaping.
 
+- `NoiseShaperLearner.h/.cpp`
+  - Implements the Adaptive Noise Shaper Learning feature (v0.5.0+).
+  - Runs a background worker thread to optimize 9th-order IIR noise shaper coefficients based on actual audio signal.
+  - Uses lock-free ring buffer (audio-to-learner) for real-time safe data transfer.
+  - Employs RCU-style state handoff and atomic progress reporting for thread safety.
+  - Integrates with `AudioEngine` for control, state, and UI progress reporting.
+
 - `InputBitDepthTransform.h`
   - Input bit-depth/quantization utilities.
 
@@ -111,11 +118,11 @@ ConvoPeq is organized around four priorities:
 
 ## 3. Runtime Topology and Data Flow
 
-At runtime, `AudioEngine` coordinates processing and `AudioEngineProcessor` invokes it from the device callback.
+At runtime, `AudioEngine` coordinates all processing, including adaptive noise shaper learning, and `AudioEngineProcessor` invokes the main DSP chain from the device callback.
 
 Typical logical chain:
 
-`Audio Input -> Input conditioning -> Oversampling (optional) -> [EQ <-> Convolver (order selectable)] -> Output filter / soft clipping -> Dither / final conditioning -> Audio Output`
+`Audio Input -> Input conditioning -> Oversampling (optional) -> [EQ <-> Convolver (order selectable)] -> Output filter / soft clipping -> Dither / final conditioning (with optional Adaptive Noise Shaper) -> Audio Output`
 
 Key points:
 
@@ -126,6 +133,11 @@ Key points:
   - input headroom is applied before core DSP,
   - convolver input trim is applied only in **EQ -> Convolver** when both stages are active,
   - output makeup is applied before optional soft clipping.
+- **Adaptive Noise Shaper Learning**:
+  - When enabled, the audio thread pushes audio blocks to a lock-free ring buffer for the learner.
+  - The learner runs on a dedicated worker thread, asynchronously optimizing noise shaper coefficients using recent audio.
+  - State handoff between audio and learner threads is RCU-style and lock-free for real-time safety.
+  - UI progress and error state are exposed via atomic variables and polled by the engine/UI.
 
 ---
 
@@ -136,6 +148,8 @@ Key points:
 - Owns the high-level runtime state exposed to UI.
 - Bridges UI requests to DSP-safe update paths.
 - Coordinates processing order, bypass states, analyzer routing, device-driven prepare/reset, and rebuild staging.
+
+- Manages the lifecycle and control of the Adaptive Noise Shaper Learner, including starting/stopping learning, progress polling, and error reporting.
 
 ### 4.2 EQProcessor
 
@@ -149,7 +163,15 @@ Key points:
 - Handles asynchronous IR preparation, debounce, crossfade-safe transitions, and notification coalescing.
 - Separates heavy rebuild work from callback-time use.
 
-### 4.4 SpectrumAnalyzerComponent
+### 4.4 NoiseShaperLearner
+
+- Runs as a background worker thread, separate from the audio and UI threads.
+- Receives audio blocks from the audio thread via a lock-free ring buffer.
+- Uses evolutionary optimization (CMA-ES) to adapt 9th-order IIR noise shaper coefficients for the current session.
+- Progress, error, and best coefficients are reported via atomic variables and polled by the engine/UI.
+- All memory handoff and state transitions are real-time safe (no locks or blocking in the audio thread).
+
+### 4.5 SpectrumAnalyzerComponent
 
 - Consumes analyzer FIFO data on the UI side.
 - Runs FFT visualization, smoothing, peak hold, and EQ overlay drawing.
@@ -181,6 +203,7 @@ Constraints:
 - No file I/O.
 - No heavy reconfiguration.
 - No UI access.
+- For Adaptive Noise Shaper Learning: only pushes audio blocks to the learner's ring buffer (non-blocking, lock-free).
 
 ### 5.3 Worker / Background Paths
 
@@ -191,7 +214,8 @@ Responsibilities:
   - resampling/phase conversion,
   - convolver state construction,
   - engine rebuild staging.
-- Hand-off to active state at real-time-safe boundaries.
+  - Adaptive Noise Shaper Learning: optimization and evaluation of noise shaper coefficients using recent audio blocks.
+- Hand-off to active state at real-time-safe boundaries (RCU-style for learner).
 
 ---
 
