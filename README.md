@@ -3,16 +3,31 @@
 
 ---
 
-## New in v0.5.0: Adaptive Noise Shaper Learning
+## New in v0.5.1: Adaptive Noise Shaper Learning
 
-ConvoPeq v0.5.0 introduces the **Adaptive Noise Shaper Learning** feature. This function automatically optimizes the coefficients of the 9th-order IIR noise shaping filter at the output stage, based on the actual playback signal, to more effectively suppress quantization noise and maximize perceived S/N.
+ConvoPeq v0.5.1 introduces major enhancements to the **Adaptive Noise Shaper Learning** feature:
+
+- **Learning Mode Selection (Short / Middle / Long):**
+   The adaptive noise shaper learning now supports three selectable learning modes (Short, Middle, Long). Each mode controls the learning schedule and convergence speed, allowing users to balance between quick adaptation and thorough optimization.
+
+   **Estimated time from learning start until convergence in Phase 3 (fine-tuning):**
+  - Short: ~10–20 minutes (fastest, for quick testing)
+  - Middle: ~20–40 minutes (balanced)
+  - Long: ~40–80 minutes (most thorough, for best quality)
+   (This is the typical time required for the learning process to reach practical convergence in the final fine-tuning phase (Phase 3). Actual time may vary depending on signal and environment.)
+- **Bit Depth-aware Coefficient Saving:**
+   Learned noise shaper coefficients are now saved and recalled per sample rate and bit depth. This ensures optimal noise shaping for each playback scenario, especially when switching between different output bit depths (e.g., 16-bit, 24-bit, 32-bit).
+
+This function automatically optimizes the coefficients of the 9th-order IIR noise shaping filter at the output stage, based on the actual playback signal, to more effectively suppress quantization noise and maximize perceived S/N.
 
 ### Feature Overview
 
 - **Adaptive 9th-order Noise Shaper**: Automatically optimizes noise shaper coefficients based on the statistical characteristics of the output signal.
+- **Learning Mode Selection**: Choose from Short, Middle, or Long learning modes to control the adaptation speed and thoroughness.
+- **Bit Depth-aware Coefficient Saving**: Coefficients are saved and recalled per sample rate and bit depth for optimal results in all playback scenarios.
 - **Real-time learning**: Captures the playback signal and performs background learning. Progress and score history are visualized in the UI.
 - **Multi-sample rate support**: Optimized coefficients are saved and switched automatically for each sample rate.
-- **Safe design**: Real-time processing stability is maintained during learning, and coefficient switching is thread-safe.
+- **Thread-safe and real-time safe**: All learning and coefficient switching are designed to avoid audio dropouts and maintain real-time safety.
 
 ### How to Enable & Use
 

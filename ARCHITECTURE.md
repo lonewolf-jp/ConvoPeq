@@ -1,13 +1,9 @@
-# ConvoPeq Architecture (Current)
 
-This document describes the current architecture of **ConvoPeq**, a Windows-only standalone audio application built with **JUCE 8.0.12**.
+# ConvoPeq Architecture (v0.5.1+)
 
-Audience:
+This document describes the internal architecture of **ConvoPeq**, a Windows-only standalone audio application built with **JUCE 8.0.12** and Intel oneMKL. It is intended for developers and contributors working on DSP, threading, state transitions, and runtime behavior.
 
-- Developers working on runtime behavior, DSP, threading, and state transitions
-- Contributors who need implementation-grounded subsystem boundaries
-
-This document intentionally focuses on internal design. For a user-facing overview, feature summary, and quick build entry points, see `README.md`.
+For user-facing features and usage, see `README.md`.
 
 ---
 
@@ -34,6 +30,17 @@ ConvoPeq is organized around four priorities:
    - UI/control logic is decoupled from DSP execution.
    - Heavy work (IR load/rebuild) is asynchronous.
    - State transitions are staged to avoid audible artifacts.
+
+## Adaptive Noise Shaper Learning (v0.5.1+)
+
+- Implements background optimization of 9th-order IIR noise shaper coefficients using CMA-ES, based on actual playback signal.
+- Supports three learning modes (Short/Middle/Long) with different convergence speeds and stability.
+- Coefficient banks are saved and recalled per sample rate and bit depth for optimal results in all playback scenarios.
+- Typical convergence time from learning start to practical completion in Phase 3:
+  - Short: ~10–20 minutes
+  - Middle: ~20–40 minutes
+  - Long: ~40–80 minutes
+    (See README.md for details.)
 
 ---
 
@@ -100,11 +107,14 @@ ConvoPeq is organized around four priorities:
   - Final-stage dither/noise shaping.
 
 - `NoiseShaperLearner.h/.cpp`
-  - Implements the Adaptive Noise Shaper Learning feature (v0.5.0+).
-  - Runs a background worker thread to optimize 9th-order IIR noise shaper coefficients based on actual audio signal.
-  - Uses lock-free ring buffer (audio-to-learner) for real-time safe data transfer.
-  - Employs RCU-style state handoff and atomic progress reporting for thread safety.
-  - Integrates with `AudioEngine` for control, state, and UI progress reporting.
+  - Implements Adaptive Noise Shaper Learning (v0.5.1+):
+    - Background worker thread runs CMA-ES optimization of 9th-order IIR noise shaper coefficients using recent audio blocks.
+    - Audio thread pushes audio blocks to a lock-free ring buffer (non-blocking, real-time safe).
+    - Coefficient banks are managed per sample rate and bit depth.
+    - Learning progress, error, and best coefficients are reported via atomic variables and polled by engine/UI.
+    - Three learning modes (Short/Middle/Long) control convergence speed and stability.
+    - All memory handoff and state transitions are real-time safe (no locks or blocking in the audio thread).
+    - Typical convergence time: Short 10–20min, Middle 20–40min, Long 40–80min.
 
 - `InputBitDepthTransform.h`
   - Input bit-depth/quantization utilities.
@@ -165,11 +175,14 @@ Key points:
 
 ### 4.4 NoiseShaperLearner
 
-- Runs as a background worker thread, separate from the audio and UI threads.
-- Receives audio blocks from the audio thread via a lock-free ring buffer.
-- Uses evolutionary optimization (CMA-ES) to adapt 9th-order IIR noise shaper coefficients for the current session.
-- Progress, error, and best coefficients are reported via atomic variables and polled by the engine/UI.
+- Dedicated background worker thread for adaptive noise shaper learning.
+- Audio thread pushes audio blocks to a lock-free ring buffer (256-sample blocks, real-time safe).
+- Worker thread runs CMA-ES optimization using the most recent audio (up to 8 segments per generation).
+- Three learning modes (Short/Middle/Long) select convergence speed and stability.
+- Coefficient banks are saved/loaded per sample rate and bit depth.
+- Progress, error, and best coefficients are reported via atomic variables and polled by engine/UI.
 - All memory handoff and state transitions are real-time safe (no locks or blocking in the audio thread).
+- Typical convergence time: Short 10–20min, Middle 20–40min, Long 40–80min.
 
 ### 4.5 SpectrumAnalyzerComponent
 
@@ -370,5 +383,7 @@ The current design focuses on:
 
 - strict real-time safety,
 - asynchronous heavy-state preparation,
-- controlled handoff across thread boundaries,
-- and practical burst mitigation on both audio and message/UI paths.
+
+---
+
+For further details on the learning algorithm, convergence, and bit depth handling, see `README.md` and `NoiseShaperLearner.h/.cpp`.
