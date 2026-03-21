@@ -80,6 +80,10 @@ private:
     juce::Component::SafePointer<juce::DialogWindow> adaptiveLearningWindow;
 
     static juce::File getSettingsFile();
+    static juce::File getNoiseShaperStateFile();
+
+    static void saveNoiseShaperState(const AudioEngine& engine);
+    static void loadNoiseShaperState(AudioEngine& engine);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DeviceSettings)
 };

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <random>
+#include <mkl.h>
 
 class CmaEsOptimizer
 {
@@ -13,19 +14,77 @@ public:
     static constexpr int kPopulation = 18;
     static constexpr int kElite = 6;
 
+    struct Params {
+        double sigmaMin     = 0.03;
+        double sigmaMax     = 0.30;
+        double covRetentionTarget = 0.92;
+        double covRetentionStep   = 0.0;
+    };
+
     CmaEsOptimizer()
     {
+        mean = static_cast<double*>(mkl_malloc(kDim * sizeof(double), 64));
+        covariance = static_cast<double*>(mkl_malloc(kDim * kDim * sizeof(double), 64));
+
         std::random_device device;
         rng.seed(device());
+        
+        for (int i = 0; i < kDim; ++i) mean[i] = 0.0;
         resetIdentityCovariance();
+    }
+
+    ~CmaEsOptimizer()
+    {
+        mkl_free(mean);
+        mkl_free(covariance);
+    }
+
+    void setParams(const Params& p) noexcept
+    {
+        params = p;
+    }
+
+    void serializeCovUpperTriangle(double* out45) const noexcept
+    {
+        int idx = 0;
+        for (int r = 0; r < kDim; ++r)
+            for (int c = r; c < kDim; ++c)
+                out45[idx++] = covariance[r * kDim + c];
+    }
+
+    void deserializeCovUpperTriangle(const double* in45) noexcept
+    {
+        int idx = 0;
+        for (int r = 0; r < kDim; ++r)
+            for (int c = r; c < kDim; ++c)
+            {
+                covariance[r * kDim + c] = in45[idx];
+                covariance[c * kDim + r] = in45[idx];
+                ++idx;
+            }
+    }
+
+    void serializeTo(double* outMean9, double* outCov45, double& outSigma) const noexcept
+    {
+        for (int i = 0; i < kDim; ++i) outMean9[i] = mean[i];
+        serializeCovUpperTriangle(outCov45);
+        outSigma = sigma;
+    }
+
+    void deserializeFrom(const double* inMean9, const double* inCov45, double inSigma) noexcept
+    {
+        for (int i = 0; i < kDim; ++i) mean[i] = inMean9[i];
+        deserializeCovUpperTriangle(inCov45);
+        sigma = inSigma;
     }
 
     void initFromParcor(const double* initialParcor) noexcept
     {
         for (int i = 0; i < kDim; ++i)
-            mean[static_cast<size_t>(i)] = parcorToUnconstrained(initialParcor[i]);
+            mean[i] = parcorToUnconstrained(initialParcor[i]);
 
         sigma = 0.12;
+        covRetentionCurrent = params.covRetentionTarget;
         resetIdentityCovariance();
     }
 
@@ -49,13 +108,16 @@ public:
                 for (int column = 0; column <= dim; ++column)
                     correlated += lowerTriangular[dim][column] * z[column];
 
-                candidates[populationIndex][dim] = mean[static_cast<size_t>(dim)] + sigma * correlated;
+                candidates[populationIndex][dim] = sanitize(mean[dim] + sigma * correlated);
             }
         }
     }
 
     void update(const double candidates[kPopulation][kDim], const double fitness[kPopulation]) noexcept
     {
+        covRetentionCurrent = std::min(params.covRetentionTarget,
+                                       covRetentionCurrent + params.covRetentionStep);
+
         int sortedIndices[kPopulation] = {};
         for (int i = 0; i < kPopulation; ++i)
             sortedIndices[i] = i;
@@ -90,9 +152,9 @@ public:
                     const double yColumn = (candidates[candidateIndex][column] - oldMean[column]) / sigma;
                     eliteCov += yRow * yColumn;
                 }
-                covariance[static_cast<size_t>(row)][static_cast<size_t>(column)]
-                    = (0.92 * covariance[static_cast<size_t>(row)][static_cast<size_t>(column)])
-                    + ((0.08 / static_cast<double>(kElite)) * eliteCov);
+                covariance[row * kDim + column]
+                    = sanitize((covRetentionCurrent * covariance[row * kDim + column])
+                    + (((1.0 - covRetentionCurrent) / static_cast<double>(kElite)) * eliteCov));
             }
         }
 
@@ -108,23 +170,28 @@ public:
         }
 
         for (int dim = 0; dim < kDim; ++dim)
-            mean[static_cast<size_t>(dim)] = newMean[dim];
+            mean[dim] = sanitize(newMean[dim]);
 
-        sigma = std::clamp(std::sqrt(variance / static_cast<double>(kElite * kDim)), 0.03, 0.30);
+        sigma = std::clamp(std::sqrt(variance / static_cast<double>(kElite * kDim)), params.sigmaMin, params.sigmaMax);
     }
 
     static void toParcor(const double* unconstrained, double* parcor) noexcept
     {
         for (int i = 0; i < kDim; ++i)
-            parcor[i] = std::tanh(unconstrained[i]);
+            parcor[i] = sanitize(std::tanh(unconstrained[i]));
     }
 
     void getMeanParcor(double* outParcor) const noexcept
     {
-        toParcor(mean.data(), outParcor);
+        toParcor(mean, outParcor);
     }
 
 private:
+    static inline double sanitize(double x) noexcept
+    {
+        return (std::abs(x) < 1e-15) ? 0.0 : x;
+    }
+
     static double parcorToUnconstrained(double value) noexcept
     {
         constexpr double kLimit = 0.995;
@@ -136,7 +203,7 @@ private:
     {
         for (int row = 0; row < kDim; ++row)
             for (int column = 0; column < kDim; ++column)
-                covariance[static_cast<size_t>(row)][static_cast<size_t>(column)] = (row == column) ? 1.0 : 0.0;
+                covariance[row * kDim + column] = (row == column) ? 1.0 : 0.0;
     }
 
     void computeCholesky(double lowerTriangular[kDim][kDim]) const noexcept
@@ -145,7 +212,7 @@ private:
         {
             for (int column = 0; column <= row; ++column)
             {
-                double sum = covariance[static_cast<size_t>(row)][static_cast<size_t>(column)];
+                double sum = covariance[row * kDim + column];
                 for (int k = 0; k < column; ++k)
                     sum -= lowerTriangular[row][k] * lowerTriangular[column][k];
 
@@ -157,8 +224,10 @@ private:
         }
     }
 
-    std::array<double, kDim> mean {};
-    std::array<std::array<double, kDim>, kDim> covariance {};
+    double* mean = nullptr;
+    double* covariance = nullptr;
     double sigma = 0.12;
+    double covRetentionCurrent = 0.92;
+    Params params;
     std::mt19937 rng;
 };

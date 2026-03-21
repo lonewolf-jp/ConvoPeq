@@ -29,9 +29,10 @@ juce::AudioDeviceManager::AudioDeviceSetup makeRelaxedSetupFromXml(const juce::X
     return setup;
 }
 
-juce::String makeAdaptiveCoeffPropertyName(double sampleRate, int coeffIndex)
+juce::String makeAdaptiveCoeffPropertyName(double sampleRate, int bitDepth, int coeffIndex)
 {
-    return "adaptiveCoeff_" + juce::String(static_cast<int>(sampleRate + 0.5)) + "_" + juce::String(coeffIndex);
+    return "adaptiveCoeff_" + juce::String(static_cast<int>(sampleRate + 0.5)) + "_"
+           + juce::String(bitDepth) + "_" + juce::String(coeffIndex);
 }
 }
 
@@ -614,8 +615,142 @@ juce::File DeviceSettings::getSettingsFile()
     return appDataDir.getChildFile ("device_settings.xml");
 }
 
+juce::File DeviceSettings::getNoiseShaperStateFile()
+{
+    auto appDataDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                          .getChildFile ("ConvoPeq");
+
+    if (! appDataDir.exists())
+        appDataDir.createDirectory();
+
+    return appDataDir.getChildFile ("noise_shaper_learn.xml");
+}
+
+static juce::String doubleArrayToString(const double* arr, int size)
+{
+    juce::StringArray strArr;
+    for (int i = 0; i < size; ++i)
+        strArr.add(juce::String(arr[i], 16));
+    return strArr.joinIntoString(",");
+}
+
+static void stringToDoubleArray(const juce::String& str, double* arr, int size)
+{
+    juce::StringArray strArr;
+    strArr.addTokens(str, ",", "");
+    for (int i = 0; i < std::min(size, strArr.size()); ++i)
+        arr[i] = strArr[i].getDoubleValue();
+}
+
+void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
+{
+    auto file = getNoiseShaperStateFile();
+    
+    // Load existing to preserve other banks/modes
+    std::unique_ptr<juce::XmlElement> root;
+    if (file.existsAsFile())
+        root = juce::XmlDocument::parse(file);
+        
+    if (root == nullptr || !root->hasTagName("NoiseShaperLearningData"))
+    {
+        root = std::make_unique<juce::XmlElement>("NoiseShaperLearningData");
+        root->setAttribute("version", 1);
+    }
+    
+    const int bankCount = AudioEngine::getAdaptiveSampleRateBankCount();
+    for (int srBank = 0; srBank < bankCount; ++srBank)
+    {
+        const double sampleRate = AudioEngine::getAdaptiveSampleRateBankHz(srBank);
+        for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
+        {
+            const int bitDepth = kAdaptiveBitDepthValues[bdIdx];
+            juce::String bankTag = "Bank_" + juce::String(static_cast<int>(sampleRate)) + "_" + juce::String(bitDepth);
+            
+            auto* bankElement = root->getChildByName(bankTag);
+            if (bankElement == nullptr)
+            {
+                bankElement = new juce::XmlElement(bankTag);
+                root->addChildElement(bankElement);
+            }
+            else
+            {
+                bankElement->deleteAllChildElements();
+            }
+            
+            const int bankIndex = srBank * kAdaptiveBitDepthCount + bdIdx;
+            NoiseShaperLearner::State state;
+            if (engine.getAdaptiveNoiseShaperState(bankIndex, state))
+            {
+                auto* stateElement = new juce::XmlElement("State");
+                stateElement->setAttribute("mean", doubleArrayToString(state.mean, 9));
+                stateElement->setAttribute("covarianceUpperTriangle", doubleArrayToString(state.covarianceUpperTriangle, 45));
+                stateElement->setAttribute("sigma", state.sigma);
+                stateElement->setAttribute("bestCoefficients", doubleArrayToString(state.bestCoefficients, 9));
+                stateElement->setAttribute("elapsedPlaybackSeconds", state.elapsedPlaybackSeconds);
+                stateElement->setAttribute("currentPhase", state.currentPhase);
+                stateElement->setAttribute("iteration", state.iteration);
+                stateElement->setAttribute("bestScore", state.bestScore);
+                bankElement->addChildElement(stateElement);
+            }
+        }
+    }
+    
+    if (root->toString().length() < 10 * 1024 * 1024)
+        root->writeTo(file);
+    else
+        juce::Logger::writeToLog("Noise shaper state file too large, skipping save.");
+}
+
+void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
+{
+    auto file = getNoiseShaperStateFile();
+    if (!file.existsAsFile())
+        return;
+        
+    auto root = juce::XmlDocument::parse(file);
+    if (root == nullptr || !root->hasTagName("NoiseShaperLearningData"))
+    {
+        juce::Logger::writeToLog("Failed to parse noise shaper state file.");
+        return;
+    }
+    
+    const int bankCount = AudioEngine::getAdaptiveSampleRateBankCount();
+    for (int srBank = 0; srBank < bankCount; ++srBank)
+    {
+        const double sampleRate = AudioEngine::getAdaptiveSampleRateBankHz(srBank);
+        for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
+        {
+            const int bitDepth = kAdaptiveBitDepthValues[bdIdx];
+            juce::String bankTag = "Bank_" + juce::String(static_cast<int>(sampleRate)) + "_" + juce::String(bitDepth);
+            
+            auto* bankElement = root->getChildByName(bankTag);
+            if (bankElement != nullptr)
+            {
+                auto* stateElement = bankElement->getChildByName("State");
+                if (stateElement != nullptr)
+                {
+                    NoiseShaperLearner::State state;
+                    stringToDoubleArray(stateElement->getStringAttribute("mean"), state.mean, 9);
+                    stringToDoubleArray(stateElement->getStringAttribute("covarianceUpperTriangle"), state.covarianceUpperTriangle, 45);
+                    state.sigma = stateElement->getDoubleAttribute("sigma", 0.12);
+                    stringToDoubleArray(stateElement->getStringAttribute("bestCoefficients"), state.bestCoefficients, 9);
+                    state.elapsedPlaybackSeconds = stateElement->getDoubleAttribute("elapsedPlaybackSeconds", 0.0);
+                    state.currentPhase = stateElement->getIntAttribute("currentPhase", 1);
+                    state.iteration = stateElement->getIntAttribute("iteration", 0);
+                    state.bestScore = (float)stateElement->getDoubleAttribute("bestScore", 0.0);
+                    
+                    const int bankIndex = srBank * kAdaptiveBitDepthCount + bdIdx;
+                    engine.setAdaptiveNoiseShaperState(bankIndex, state);
+                }
+            }
+        }
+    }
+}
+
 void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager, const AudioEngine& engine)
 {
+    saveNoiseShaperState(engine);
+    
     if (auto xml = deviceManager.createStateXml())
     {
         // ビット深度設定を追加属性として保存
@@ -630,14 +765,18 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
         // 入力ヘッドルーム設定を追加
         xml->setAttribute("outputMakeupDb", engine.getOutputMakeupDb());
         xml->setAttribute("inputHeadroomDb", engine.getInputHeadroomDb());
-        for (int bankIndex = 0; bankIndex < AudioEngine::getAdaptiveSampleRateBankCount(); ++bankIndex)
+        for (int srBank = 0; srBank < AudioEngine::getAdaptiveSampleRateBankCount(); ++srBank)
         {
-            const double bankSampleRate = AudioEngine::getAdaptiveSampleRateBankHz(bankIndex);
-            double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
-            engine.getAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
+            const double bankSR = AudioEngine::getAdaptiveSampleRateBankHz(srBank);
+            for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
+            {
+                const int bitD = kAdaptiveBitDepthValues[bdIdx];
+                double coeffs[kAdaptiveNoiseShaperOrder] = {};
+                engine.getAdaptiveCoefficientsForSampleRateAndBitDepth(bankSR, bitD, coeffs, kAdaptiveNoiseShaperOrder);
 
-            for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
-                xml->setAttribute(makeAdaptiveCoeffPropertyName(bankSampleRate, coeffIndex), adaptiveCoefficients[coeffIndex]);
+                for (int c = 0; c < kAdaptiveNoiseShaperOrder; ++c)
+                    xml->setAttribute(makeAdaptiveCoeffPropertyName(bankSR, bitD, c), coeffs[c]);
+            }
         }
 
         xml->writeTo (getSettingsFile());
@@ -651,6 +790,8 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
 //--------------------------------------------------------------
 void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, AudioEngine& engine)
 {
+    loadNoiseShaperState(engine);
+
     // ASIOドライバの切り替え時に発生しうるフリーズを防ぐため、初期化前に一度デバイスを閉じる
     deviceManager.closeAudioDevice();
 
@@ -722,26 +863,66 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             {
                 bool hasBankedAdaptiveCoefficients = false;
 
-                for (int bankIndex = 0; bankIndex < AudioEngine::getAdaptiveSampleRateBankCount(); ++bankIndex)
+                for (int srBank = 0; srBank < AudioEngine::getAdaptiveSampleRateBankCount(); ++srBank)
                 {
-                    const double bankSampleRate = AudioEngine::getAdaptiveSampleRateBankHz(bankIndex);
-                    double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
-                    bool hasBankCoefficients = false;
-
-                    engine.getAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
-                    for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+                    const double bankSR = AudioEngine::getAdaptiveSampleRateBankHz(srBank);
+                    for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
                     {
-                        const auto attributeName = makeAdaptiveCoeffPropertyName(bankSampleRate, coeffIndex);
-                        if (xml->hasAttribute(attributeName))
+                        const int bitD = kAdaptiveBitDepthValues[bdIdx];
+                        double coeffs[kAdaptiveNoiseShaperOrder] = {};
+                        bool hasData = true;
+
+                        for (int c = 0; c < kAdaptiveNoiseShaperOrder; ++c)
                         {
-                            adaptiveCoefficients[coeffIndex] = xml->getDoubleAttribute(attributeName, adaptiveCoefficients[coeffIndex]);
-                            hasBankCoefficients = true;
+                            juce::String key = makeAdaptiveCoeffPropertyName(bankSR, bitD, c);
+                            if (xml->hasAttribute(key))
+                            {
+                                coeffs[c] = xml->getDoubleAttribute(key, coeffs[c]);
+                            }
+                            else
+                            {
+                                hasData = false;
+                                break;
+                            }
+                        }
+
+                        if (hasData)
+                        {
+                            engine.setAdaptiveCoefficientsForSampleRateAndBitDepth(bankSR, bitD, coeffs, kAdaptiveNoiseShaperOrder);
                             hasBankedAdaptiveCoefficients = true;
                         }
                     }
+                }
 
-                    if (hasBankCoefficients)
-                        engine.setAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
+                if (!hasBankedAdaptiveCoefficients)
+                {
+                    // Fallback to legacy SR-only or global coefficients
+                    for (int srBank = 0; srBank < AudioEngine::getAdaptiveSampleRateBankCount(); ++srBank)
+                    {
+                        const double bankSR = AudioEngine::getAdaptiveSampleRateBankHz(srBank);
+                        double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
+                        bool hasBankCoefficients = false;
+
+                        for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+                        {
+                            // Legacy format: adaptiveCoeff_44100_0
+                            const auto attributeName = "adaptiveCoeff_" + juce::String(static_cast<int>(bankSR + 0.5)) + "_" + juce::String(coeffIndex);
+                            if (xml->hasAttribute(attributeName))
+                            {
+                                adaptiveCoefficients[coeffIndex] = xml->getDoubleAttribute(attributeName, adaptiveCoefficients[coeffIndex]);
+                                hasBankCoefficients = true;
+                            }
+                        }
+
+                        if (hasBankCoefficients)
+                        {
+                            for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
+                            {
+                                engine.setAdaptiveCoefficientsForSampleRateAndBitDepth(bankSR, kAdaptiveBitDepthValues[bdIdx], adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
+                            }
+                            hasBankedAdaptiveCoefficients = true;
+                        }
+                    }
                 }
 
                 if (!hasBankedAdaptiveCoefficients)
@@ -761,10 +942,14 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
 
                     if (hasLegacyAdaptiveCoefficients)
                     {
-                        for (int bankIndex = 0; bankIndex < AudioEngine::getAdaptiveSampleRateBankCount(); ++bankIndex)
-                            engine.setAdaptiveCoefficientsForSampleRate(AudioEngine::getAdaptiveSampleRateBankHz(bankIndex),
-                                                                       legacyAdaptiveCoefficients,
-                                                                       kAdaptiveNoiseShaperOrder);
+                        for (int srBank = 0; srBank < AudioEngine::getAdaptiveSampleRateBankCount(); ++srBank)
+                        {
+                            const double bankSR = AudioEngine::getAdaptiveSampleRateBankHz(srBank);
+                            for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
+                            {
+                                engine.setAdaptiveCoefficientsForSampleRateAndBitDepth(bankSR, kAdaptiveBitDepthValues[bdIdx], legacyAdaptiveCoefficients, kAdaptiveNoiseShaperOrder);
+                            }
+                        }
                     }
                 }
             }

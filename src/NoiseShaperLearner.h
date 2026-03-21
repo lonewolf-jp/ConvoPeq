@@ -38,6 +38,8 @@ public:
         Error
     };
 
+    enum class LearningMode { Short, Middle, Long };
+
     struct Progress
     {
         std::atomic<int> iteration { 0 };
@@ -47,6 +49,21 @@ public:
         std::atomic<float> bestScore { 0.0f };
         std::atomic<float> latestScore { 0.0f };
         std::atomic<Status> status { Status::Idle };
+        std::atomic<double> elapsedPlaybackSeconds {0.0};  // UI表示用
+        std::atomic<int>    currentPhase {1};
+        std::atomic<int>    learningMode {0};
+    };
+
+    struct State
+    {
+        double mean[9] = {};
+        double covarianceUpperTriangle[45] = {};
+        double sigma = 0.12;
+        double bestCoefficients[9] = {};
+        double elapsedPlaybackSeconds = 0.0;
+        int currentPhase = 1;
+        int iteration = 0;
+        float bestScore = 0.0f;
     };
 
     static constexpr int kOrder = LatticeNoiseShaper::kOrder;
@@ -61,10 +78,14 @@ public:
     void startLearning();
     void stopLearning();
     bool isRunning() const noexcept;
+    void setLearningMode(LearningMode mode) noexcept;
 
     const Progress& getProgress() const noexcept;
+    void getState(State& outState) const noexcept;
+    void setState(const State& inState) noexcept;
     int copyBestScoreHistory(float* destination, int maxPoints) const noexcept;
     void getLearnedCoefficients(double* outCoeffs, int maxCoefficients) const noexcept;
+    void onCoeffBankChanged(int newBankIndex) noexcept;
 
     // UI 表示用：学習ワーカーが記録したエラーメッセージを返す。
     // エラーがなければ nullptr を返す。
@@ -115,6 +136,10 @@ private:
     void publishGenerationResult(const double* coeffs, double score, int evaluatedCandidates) noexcept;
     void appendHistoryPoint(float score) noexcept;
 
+    int computePhase(LearningMode mode, double playbackSeconds) const noexcept;
+    void applyPhaseParams(LearningMode mode, int phase) noexcept;
+    void handleModeSwitch() noexcept;
+
     AudioEngine& engine;
     LockFreeRingBuffer<AudioBlock, 4096>& captureQueue;
 
@@ -132,6 +157,16 @@ private:
 
     Progress progress;
     std::atomic<const char*> errorMessage { nullptr };
+
+    double accumulatedPlaybackSeconds = 0.0;           // Worker thread専用（非atomic）
+    std::chrono::steady_clock::time_point lastGenerationStart;
+    double generationIntervalSeconds = 0.0;
+    std::atomic<bool> modeSwitchRequested {false};
+    LearningMode pendingMode {LearningMode::Short};
+    LearningMode activeMode {LearningMode::Short};
+    int currentPhase = 1;
+    
+    std::array<State, 3> savedStates {};
 
     AudioSegmentBuffer segmentBuffer;
     CmaEsOptimizer optimizer;

@@ -5,9 +5,37 @@
 NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     : audioEngine(engine)
 {
+    modeComboBox.addItem("Short", 1);
+    modeComboBox.addItem("Middle", 2);
+    modeComboBox.addItem("Long", 3);
+    modeComboBox.setSelectedId(1);
+    addAndMakeVisible(modeComboBox);
+
+    modeLabel.attachToComponent(&modeComboBox, true);
+    addAndMakeVisible(modeLabel);
+
+    modeComboBox.onChange = [this]
+    {
+        NoiseShaperLearner::LearningMode mode = NoiseShaperLearner::LearningMode::Short;
+        switch (modeComboBox.getSelectedId())
+        {
+            case 1: mode = NoiseShaperLearner::LearningMode::Short; break;
+            case 2: mode = NoiseShaperLearner::LearningMode::Middle; break;
+            case 3: mode = NoiseShaperLearner::LearningMode::Long; break;
+        }
+        audioEngine.setNoiseShaperLearningMode(mode);
+    };
+
     startButton.onClick = [this]
     {
-        audioEngine.startNoiseShaperLearning();
+        NoiseShaperLearner::LearningMode mode = NoiseShaperLearner::LearningMode::Short;
+        switch (modeComboBox.getSelectedId())
+        {
+            case 1: mode = NoiseShaperLearner::LearningMode::Short; break;
+            case 2: mode = NoiseShaperLearner::LearningMode::Middle; break;
+            case 3: mode = NoiseShaperLearner::LearningMode::Long; break;
+        }
+        audioEngine.startNoiseShaperLearning(mode);
     };
     addAndMakeVisible(startButton);
 
@@ -18,7 +46,8 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     addAndMakeVisible(stopButton);
 
     for (auto* label : { &statusLabel, &orderLabel, &iterationLabel, &processCountLabel,
-                         &segmentCountLabel, &bestScoreLabel, &latestScoreLabel, &messageLabel })
+                         &segmentCountLabel, &bestScoreLabel, &latestScoreLabel, &messageLabel,
+                         &elapsedLabel, &phaseLabel })
     {
         label->setJustificationType(juce::Justification::centredLeft);
         label->setColour(juce::Label::textColourId, juce::Colours::white);
@@ -48,16 +77,26 @@ void NoiseShaperLearningComponent::resized()
     auto area = getLocalBounds().reduced(12);
     area.removeFromTop(28);
 
+
     auto controlRow = area.removeFromTop(30);
     startButton.setBounds(controlRow.removeFromLeft(130).reduced(2));
     controlRow.removeFromLeft(6);
     stopButton.setBounds(controlRow.removeFromLeft(130).reduced(2));
+    controlRow.removeFromLeft(40); // 余白を調整
+    modeLabel.setBounds(controlRow.removeFromLeft(90).reduced(2));
+    modeComboBox.setBounds(controlRow.removeFromLeft(100).reduced(2));
 
     area.removeFromTop(8);
 
     auto topStatusRow = area.removeFromTop(24);
     statusLabel.setBounds(topStatusRow.removeFromLeft(topStatusRow.getWidth() / 2));
     orderLabel.setBounds(topStatusRow);
+
+    area.removeFromTop(4);
+
+    auto timeRow = area.removeFromTop(24);
+    elapsedLabel.setBounds(timeRow.removeFromLeft(timeRow.getWidth() / 2));
+    phaseLabel.setBounds(timeRow);
 
     area.removeFromTop(4);
 
@@ -208,9 +247,22 @@ void NoiseShaperLearningComponent::refreshFromEngine()
     const int segmentCount = progress.segmentCount.load(std::memory_order_relaxed);
     const float bestScore = progress.bestScore.load(std::memory_order_relaxed);
     const float latestScore = progress.latestScore.load(std::memory_order_relaxed);
+    const double elapsedSec = progress.elapsedPlaybackSeconds.load(std::memory_order_relaxed);
+    const int currentPhase = progress.currentPhase.load(std::memory_order_relaxed);
+    const auto learningMode = static_cast<NoiseShaperLearner::LearningMode>(progress.learningMode.load(std::memory_order_relaxed));
 
     statusLabel.setText("Status: " + statusToText(status), juce::dontSendNotification);
     orderLabel.setText("Filter order: " + juce::String(NoiseShaperLearner::kOrder), juce::dontSendNotification);
+
+    juce::String elapsedStr = juce::String(elapsedSec, 1) + " s";
+    elapsedLabel.setText("Elapsed audio: " + elapsedStr, juce::dontSendNotification);
+
+    juce::String phaseStr = "Phase " + juce::String(currentPhase);
+    juce::String modeStr = "Short";
+    if (learningMode == NoiseShaperLearner::LearningMode::Middle) modeStr = "Middle";
+    else if (learningMode == NoiseShaperLearner::LearningMode::Long) modeStr = "Long";
+    phaseLabel.setText(phaseStr + " (" + modeStr + ")", juce::dontSendNotification);
+
     if (maxIteration > 0)
         iterationLabel.setText("Generation: " + juce::String(iteration) + "/" + juce::String(maxIteration),
                                juce::dontSendNotification);

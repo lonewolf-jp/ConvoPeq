@@ -6,6 +6,10 @@
 static constexpr int kAdaptiveNoiseShaperOrder = 9;
 static constexpr int kAdaptiveNoiseShaperSampleRateBankCount = 10;
 
+// BitDepth も一緒に管理するための拡張（16/24/32 の3段階）
+static constexpr int kAdaptiveBitDepthCount = 3;
+static constexpr int kAdaptiveBitDepthValues[kAdaptiveBitDepthCount] = {16, 24, 32};
+
 // ストリーミング信号キャプチャ用 AudioBlock（2ch, 256サンプル）
 struct AudioBlock {
     double L[256];
@@ -258,8 +262,9 @@ public:
     convo::HCMode getEqLPFFilterMode() const noexcept;
 
     // --- Adaptiveノイズシェイパー学習サポート ---
-    void startNoiseShaperLearning();
+    void startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode);
     void stopNoiseShaperLearning();
+    void setNoiseShaperLearningMode(NoiseShaperLearner::LearningMode mode);
     bool isNoiseShaperLearning() const;
     const NoiseShaperLearner::Progress& getNoiseShaperLearningProgress() const;
     int copyNoiseShaperLearningHistory(float* outScores, int maxPoints) const noexcept;
@@ -271,10 +276,15 @@ public:
     void setCurrentAdaptiveCoefficients(const double* coeffs, int numCoefficients);
     void getAdaptiveCoefficientsForSampleRate(double sampleRate, double* outCoeffs, int maxCoefficients) const noexcept;
     void setAdaptiveCoefficientsForSampleRate(double sampleRate, const double* coeffs, int numCoefficients);
+    void getAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleRate, int bitDepth, double* outCoeffs, int maxCoefficients) const noexcept;
+    void setAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleRate, int bitDepth, const double* coeffs, int numCoefficients);
     void setAdaptiveAutosaveCallback(std::function<void()> callback);
     void requestAdaptiveAutosave();
     // NoiseShaperLearner から学習済み係数を受け取るコールバック (Worker Thread)
     void publishCoeffs(const double* coeffs);
+
+    bool getAdaptiveNoiseShaperState(int bankIndex, NoiseShaperLearner::State& outState) const noexcept;
+    void setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLearner::State& inState) noexcept;
 
 private:
     //----------------------------------------------------------
@@ -438,6 +448,7 @@ DSPCore();
     std::atomic<int> ditherBitDepth { 0 }; // 0 = 未初期化 (DeviceSettingsで最大値に設定される)
     std::atomic<NoiseShaperType> noiseShaperType { NoiseShaperType::Psychoacoustic };
     std::atomic<bool> pendingNoiseShaperLearningStart { false };
+    std::atomic<NoiseShaperLearner::LearningMode> pendingLearningMode { NoiseShaperLearner::LearningMode::Short };
     std::atomic<int> fixedNoiseLogIntervalMs { 2000 };
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
@@ -515,11 +526,13 @@ DSPCore();
         CoeffSet coeffSetB {};
         std::atomic<const CoeffSet*> current { nullptr };
         std::atomic<uint32_t> generation { 1u };
+        NoiseShaperLearner::State state {};
+        std::mutex stateMutex;
     };
 
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
     LockFreeRingBuffer<AudioBlock, 4096> audioCaptureQueue;
-    std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount> adaptiveCoeffBanks {};
+    std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount> adaptiveCoeffBanks {};
     std::atomic<int> currentAdaptiveCoeffBankIndex { 1 };
     std::uintptr_t audioThreadAffinityMask = 0;
     std::uintptr_t noiseLearnerThreadAffinityMask = 0;
@@ -528,9 +541,11 @@ DSPCore();
     std::function<void()> adaptiveAutosaveCallback;
     void initialiseAdaptiveCoeffBanks() noexcept;
     static int resolveAdaptiveCoeffBankIndex(double sampleRate) noexcept;
+    static int getAdaptiveBitDepthIndex(int bitDepth) noexcept;
+    static int getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth) noexcept;
     AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) noexcept;
     const AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept;
-    void selectAdaptiveCoeffBankForSampleRate(double sampleRate) noexcept;
+    void selectAdaptiveCoeffBankForCurrentSettings() noexcept;
     void initialiseThreadAffinityMasks() noexcept;
     void pinCurrentThreadToAudioCoreIfNeeded() noexcept;
     void pinCurrentThreadToNoiseLearnerCoreIfNeeded() const noexcept;

@@ -38,6 +38,8 @@ private:
 
     juce::TextButton startButton { "Start learning" };
     juce::TextButton stopButton { "Stop learning" };
+    juce::ComboBox modeComboBox;
+    juce::Label modeLabel { "Mode", "Learning mode:" };
     juce::Label statusLabel;
     juce::Label orderLabel;
     juce::Label iterationLabel;
@@ -45,6 +47,8 @@ private:
     juce::Label segmentCountLabel;
     juce::Label bestScoreLabel;
     juce::Label latestScoreLabel;
+    juce::Label elapsedLabel;
+    juce::Label phaseLabel;
     juce::Label messageLabel;
 
     std::array<float, NoiseShaperLearner::kMaxHistoryPoints> historyBuffer {};
