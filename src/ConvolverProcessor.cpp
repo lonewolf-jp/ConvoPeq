@@ -3561,14 +3561,12 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                   maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,
                   experimentalDirectHeadEnabled.load(std::memory_order_acquire),
                           [&]() -> const convo::FilterSpec* {
-                              // NUC フィルタースペックを Message Thread 上で構築。
-                              // init() は渡されたポインタを同期呼び出し内でのみ使用し保持しないため、
-                              // スタックローカルで十分（thread_local は不要）。
-                              convo::FilterSpec spec;
-                              spec.sampleRate = sr;
-                              spec.hcMode = static_cast<convo::HCMode>(nucHCMode.load(std::memory_order_acquire));
-                              spec.lcMode = static_cast<convo::LCMode>(nucLCMode.load(std::memory_order_acquire));
-                              return &spec;
+                              // NUC フィルタースペックをヒープ上で構築（CWE-825防止）。
+                              auto* spec = new convo::FilterSpec();
+                              spec->sampleRate = sr;
+                              spec->hcMode = static_cast<convo::HCMode>(nucHCMode.load(std::memory_order_acquire));
+                              spec->lcMode = static_cast<convo::LCMode>(nucLCMode.load(std::memory_order_acquire));
+                              return spec;
                           }()))
         {
             jassert(newConv->areNUCDescriptorsCommitted());
