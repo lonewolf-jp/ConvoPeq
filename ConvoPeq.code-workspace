@@ -8,6 +8,10 @@
 		"files.associations": {
 			"*.h": "cpp",
 			"*.cpp": "cpp"
-		}
+		},
+		"chat.agent.maxRequests": 200,
+		"inlineChat.enableV2": true,
+		"chat.useNestedAgentsMdFiles": true,
+		"chat.agentSessionProjection.enabled": true
 	}
 }
