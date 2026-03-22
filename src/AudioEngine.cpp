@@ -452,12 +452,13 @@ AudioEngine::AudioEngine()
 
 
 
-void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode)
+void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode, bool resume)
 {
     if (noiseShaperLearner == nullptr)
         return;
 
     pendingLearningMode.store(mode, std::memory_order_release);
+    pendingNoiseShaperLearningResume.store(resume, std::memory_order_release);
     pendingNoiseShaperLearningStart.store(true, std::memory_order_release);
 
     if (noiseShaperType.load(std::memory_order_acquire) != NoiseShaperType::Adaptive9thOrder)
@@ -468,7 +469,7 @@ void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode
     {
         pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
         noiseShaperLearner->setLearningMode(mode);
-        noiseShaperLearner->startLearning();
+        noiseShaperLearner->startLearning(resume);
         return;
     }
 
@@ -532,19 +533,22 @@ void AudioEngine::initialiseAdaptiveCoeffBanks() noexcept
         double sr = getAdaptiveSampleRateBankHz(srBank);
         for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
         {
-            int bankIndex = srBank * kAdaptiveBitDepthCount + bdIdx;
-            auto& bank = adaptiveCoeffBanks[static_cast<size_t>(bankIndex)];
-            bank.sampleRateHz = sr;
-
-            for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+            for (int modeIdx = 0; modeIdx < kLearningModeCount; ++modeIdx)
             {
-                const double coefficient = kDefaultAdaptiveNoiseShaperCoeffs[static_cast<size_t>(coeffIndex)];
-                bank.coeffSetA.k[coeffIndex] = coefficient;
-                bank.coeffSetB.k[coeffIndex] = coefficient;
-            }
+                int bankIndex = (srBank * kAdaptiveBitDepthCount + bdIdx) * kLearningModeCount + modeIdx;
+                auto& bank = adaptiveCoeffBanks[static_cast<size_t>(bankIndex)];
+                bank.sampleRateHz = sr;
 
-            bank.current.store(&bank.coeffSetA, std::memory_order_relaxed);
-            bank.generation.store(1u, std::memory_order_relaxed);
+                for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
+                {
+                    const double coefficient = kDefaultAdaptiveNoiseShaperCoeffs[static_cast<size_t>(coeffIndex)];
+                    bank.coeffSetA.k[coeffIndex] = coefficient;
+                    bank.coeffSetB.k[coeffIndex] = coefficient;
+                }
+
+                bank.current.store(&bank.coeffSetA, std::memory_order_relaxed);
+                bank.generation.store(1u, std::memory_order_relaxed);
+            }
         }
     }
 }
@@ -574,24 +578,25 @@ int AudioEngine::getAdaptiveBitDepthIndex(int bitDepth) noexcept
     return 2;
 }
 
-int AudioEngine::getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth) noexcept
+int AudioEngine::getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, NoiseShaperLearner::LearningMode mode) noexcept
 {
     const int srBank = resolveAdaptiveCoeffBankIndex(sampleRate);
     const int bdIdx  = getAdaptiveBitDepthIndex(bitDepth);
-    return srBank * kAdaptiveBitDepthCount + bdIdx;
+    const int modeIdx = static_cast<int>(mode);
+    return (srBank * kAdaptiveBitDepthCount + bdIdx) * kLearningModeCount + modeIdx;
 }
 
 AudioEngine::AdaptiveCoeffBankSlot& AudioEngine::getAdaptiveCoeffBankForIndex(int bankIndex) noexcept
 {
     if (bankIndex < 0) bankIndex = 0;
-    if (bankIndex >= kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount) bankIndex = kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount - 1;
+    if (bankIndex >= kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount) bankIndex = kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount - 1;
     return adaptiveCoeffBanks[static_cast<size_t>(bankIndex)];
 }
 
 const AudioEngine::AdaptiveCoeffBankSlot& AudioEngine::getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept
 {
     if (bankIndex < 0) bankIndex = 0;
-    if (bankIndex >= kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount) bankIndex = kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount - 1;
+    if (bankIndex >= kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount) bankIndex = kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount - 1;
     return adaptiveCoeffBanks[static_cast<size_t>(bankIndex)];
 }
 
@@ -599,8 +604,9 @@ void AudioEngine::selectAdaptiveCoeffBankForCurrentSettings() noexcept
 {
     const double sr = currentSampleRate.load(std::memory_order_acquire);
     const int bd   = ditherBitDepth.load(std::memory_order_acquire);
+    const auto mode = pendingLearningMode.load(std::memory_order_acquire);
 
-    const int newBankIndex = getAdaptiveCoeffBankIndex(sr, bd);
+    const int newBankIndex = getAdaptiveCoeffBankIndex(sr, bd, mode);
 
     if (newBankIndex != currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire))
     {
@@ -681,7 +687,8 @@ void AudioEngine::getAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
     if (outCoeffs == nullptr || maxCoefficients <= 0)
         return;
 
-    const int bank = getAdaptiveCoeffBankIndex(sampleRate, bitDepth);
+    const auto mode = pendingLearningMode.load(std::memory_order_acquire);
+    const int bank = getAdaptiveCoeffBankIndex(sampleRate, bitDepth, mode);
     const auto& slot = getAdaptiveCoeffBankForIndex(bank);
     const CoeffSet* active = slot.current.load(std::memory_order_acquire);
     if (active)
@@ -701,7 +708,8 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
     if (coeffs == nullptr || numCoefficients <= 0)
         return;
 
-    const int bankIndex = getAdaptiveCoeffBankIndex(sampleRate, bitDepth);
+    const auto mode = pendingLearningMode.load(std::memory_order_acquire);
+    const int bankIndex = getAdaptiveCoeffBankIndex(sampleRate, bitDepth, mode);
     double stagedCoefficients[kAdaptiveNoiseShaperOrder] = {};
     getAdaptiveCoefficientsForSampleRateAndBitDepth(sampleRate, bitDepth, stagedCoefficients, kAdaptiveNoiseShaperOrder);
 
@@ -734,7 +742,8 @@ void AudioEngine::publishCoeffs(const double* coeffs)
 {
     const double sr = currentSampleRate.load(std::memory_order_acquire);
     const int bd  = ditherBitDepth.load(std::memory_order_acquire);
-    const int bank = getAdaptiveCoeffBankIndex(sr, bd);
+    const auto mode = pendingLearningMode.load(std::memory_order_acquire);
+    const int bank = getAdaptiveCoeffBankIndex(sr, bd, mode);
 
     publishCoeffsToBank(bank, coeffs);
 }
@@ -1763,8 +1772,9 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     if (startPendingNoiseShaperLearningNow && noiseShaperLearner != nullptr)
     {
         pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
+        bool resume = pendingNoiseShaperLearningResume.exchange(false, std::memory_order_acquire);
         noiseShaperLearner->setLearningMode(pendingLearningMode.load(std::memory_order_acquire));
-        noiseShaperLearner->startLearning();
+        noiseShaperLearner->startLearning(resume);
     }
 }
 

@@ -3,9 +3,9 @@
 
 ---
 
-## New in v0.5.1: Adaptive Noise Shaper Learning
+## New in v0.5.2: Adaptive Noise Shaper Learning
 
-ConvoPeq v0.5.1 introduces major enhancements to the **Adaptive Noise Shaper Learning** feature:
+ConvoPeq v0.5.2 introduces major enhancements to the **Adaptive Noise Shaper Learning** feature:
 
 - **Learning Mode Selection (Short / Middle / Long):**
    The adaptive noise shaper learning now supports three selectable learning modes (Short, Middle, Long). Each mode controls the learning schedule and convergence speed, allowing users to balance between quick adaptation and thorough optimization.

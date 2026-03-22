@@ -16,6 +16,9 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
 
+    // recent scoreグラフ拡張のため推奨サイズをさらに拡大（グラフ2倍分）
+    int getRecommendedHeight() const noexcept { return 920; } // 760→920（+160px）
+
 private:
     class ProgressGraph : public juce::Component
     {
@@ -38,10 +41,12 @@ private:
 
     juce::TextButton startButton { "Start learning" };
     juce::TextButton stopButton { "Stop learning" };
+    juce::TextButton resumeButton { "Resume learning" };
     juce::ComboBox modeComboBox;
     juce::Label modeLabel { "Mode", "Learning mode:" };
     juce::Label statusLabel;
     juce::Label orderLabel;
+    juce::Label sampleRateAndBitDepthLabel;
     juce::Label iterationLabel;
     juce::Label processCountLabel;
     juce::Label segmentCountLabel;
@@ -52,6 +57,20 @@ private:
     juce::Label messageLabel;
 
     std::array<float, NoiseShaperLearner::kMaxHistoryPoints> historyBuffer {};
+
+    class PeriodicSaver : public juce::Timer
+    {
+    public:
+        PeriodicSaver(AudioEngine& engine) : audioEngine(engine) {}
+        void timerCallback() override
+        {
+            if (audioEngine.isNoiseShaperLearning())
+                audioEngine.requestAdaptiveAutosave();
+        }
+    private:
+        AudioEngine& audioEngine;
+    };
+    PeriodicSaver periodicSaver;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NoiseShaperLearningComponent)
 };

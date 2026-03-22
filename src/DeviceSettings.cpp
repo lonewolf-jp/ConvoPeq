@@ -654,8 +654,8 @@ void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
     if (root == nullptr || !root->hasTagName("NoiseShaperLearningData"))
     {
         root = std::make_unique<juce::XmlElement>("NoiseShaperLearningData");
-        root->setAttribute("version", 1);
     }
+    root->setAttribute("version", 2);
     
     const int bankCount = AudioEngine::getAdaptiveSampleRateBankCount();
     for (int srBank = 0; srBank < bankCount; ++srBank)
@@ -664,33 +664,38 @@ void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
         for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
         {
             const int bitDepth = kAdaptiveBitDepthValues[bdIdx];
-            juce::String bankTag = "Bank_" + juce::String(static_cast<int>(sampleRate)) + "_" + juce::String(bitDepth);
-            
-            auto* bankElement = root->getChildByName(bankTag);
-            if (bankElement == nullptr)
+            for (int modeIdx = 0; modeIdx < kLearningModeCount; ++modeIdx)
             {
-                bankElement = new juce::XmlElement(bankTag);
-                root->addChildElement(bankElement);
-            }
-            else
-            {
-                bankElement->deleteAllChildElements();
-            }
-            
-            const int bankIndex = srBank * kAdaptiveBitDepthCount + bdIdx;
-            NoiseShaperLearner::State state;
-            if (engine.getAdaptiveNoiseShaperState(bankIndex, state))
-            {
-                auto* stateElement = new juce::XmlElement("State");
-                stateElement->setAttribute("mean", doubleArrayToString(state.mean, 9));
-                stateElement->setAttribute("covarianceUpperTriangle", doubleArrayToString(state.covarianceUpperTriangle, 45));
-                stateElement->setAttribute("sigma", state.sigma);
-                stateElement->setAttribute("bestCoefficients", doubleArrayToString(state.bestCoefficients, 9));
-                stateElement->setAttribute("elapsedPlaybackSeconds", state.elapsedPlaybackSeconds);
-                stateElement->setAttribute("currentPhase", state.currentPhase);
-                stateElement->setAttribute("iteration", state.iteration);
-                stateElement->setAttribute("bestScore", state.bestScore);
-                bankElement->addChildElement(stateElement);
+                juce::String bankTag = "Bank_" + juce::String(static_cast<int>(sampleRate)) + "_" + juce::String(bitDepth) + "_" + juce::String(modeIdx);
+                
+                auto* bankElement = root->getChildByName(bankTag);
+                if (bankElement == nullptr)
+                {
+                    bankElement = new juce::XmlElement(bankTag);
+                    root->addChildElement(bankElement);
+                }
+                else
+                {
+                    bankElement->deleteAllChildElements();
+                }
+                
+                const int bankIndex = (srBank * kAdaptiveBitDepthCount + bdIdx) * kLearningModeCount + modeIdx;
+                NoiseShaperLearner::State state;
+                if (engine.getAdaptiveNoiseShaperState(bankIndex, state))
+                {
+                    auto* stateElement = new juce::XmlElement("State");
+                    stateElement->setAttribute("mean", doubleArrayToString(state.mean, 9));
+                    stateElement->setAttribute("covarianceUpperTriangle", doubleArrayToString(state.covarianceUpperTriangle, 45));
+                    stateElement->setAttribute("sigma", state.sigma);
+                    stateElement->setAttribute("bestCoefficients", doubleArrayToString(state.bestCoefficients, 9));
+                    stateElement->setAttribute("elapsedPlaybackSeconds", state.elapsedPlaybackSeconds);
+                    stateElement->setAttribute("currentPhase", state.currentPhase);
+                    stateElement->setAttribute("iteration", state.iteration);
+                    stateElement->setAttribute("bestScore", state.bestScore);
+                    stateElement->setAttribute("processCount", state.processCount);
+                    stateElement->setAttribute("totalGenerations", juce::String(static_cast<juce::int64>(state.totalGenerations)));
+                    bankElement->addChildElement(stateElement);
+                }
             }
         }
     }
@@ -714,6 +719,8 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
         return;
     }
     
+    int version = root->getIntAttribute("version", 1);
+    
     const int bankCount = AudioEngine::getAdaptiveSampleRateBankCount();
     for (int srBank = 0; srBank < bankCount; ++srBank)
     {
@@ -721,26 +728,60 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
         for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
         {
             const int bitDepth = kAdaptiveBitDepthValues[bdIdx];
-            juce::String bankTag = "Bank_" + juce::String(static_cast<int>(sampleRate)) + "_" + juce::String(bitDepth);
             
-            auto* bankElement = root->getChildByName(bankTag);
-            if (bankElement != nullptr)
+            if (version == 1)
             {
-                auto* stateElement = bankElement->getChildByName("State");
-                if (stateElement != nullptr)
+                juce::String bankTag = "Bank_" + juce::String(static_cast<int>(sampleRate)) + "_" + juce::String(bitDepth);
+                auto* bankElement = root->getChildByName(bankTag);
+                if (bankElement != nullptr)
                 {
-                    NoiseShaperLearner::State state;
-                    stringToDoubleArray(stateElement->getStringAttribute("mean"), state.mean, 9);
-                    stringToDoubleArray(stateElement->getStringAttribute("covarianceUpperTriangle"), state.covarianceUpperTriangle, 45);
-                    state.sigma = stateElement->getDoubleAttribute("sigma", 0.12);
-                    stringToDoubleArray(stateElement->getStringAttribute("bestCoefficients"), state.bestCoefficients, 9);
-                    state.elapsedPlaybackSeconds = stateElement->getDoubleAttribute("elapsedPlaybackSeconds", 0.0);
-                    state.currentPhase = stateElement->getIntAttribute("currentPhase", 1);
-                    state.iteration = stateElement->getIntAttribute("iteration", 0);
-                    state.bestScore = (float)stateElement->getDoubleAttribute("bestScore", 0.0);
-                    
-                    const int bankIndex = srBank * kAdaptiveBitDepthCount + bdIdx;
-                    engine.setAdaptiveNoiseShaperState(bankIndex, state);
+                    auto* stateElement = bankElement->getChildByName("State");
+                    if (stateElement != nullptr)
+                    {
+                        NoiseShaperLearner::State state;
+                        stringToDoubleArray(stateElement->getStringAttribute("mean"), state.mean, 9);
+                        stringToDoubleArray(stateElement->getStringAttribute("covarianceUpperTriangle"), state.covarianceUpperTriangle, 45);
+                        state.sigma = stateElement->getDoubleAttribute("sigma", 0.12);
+                        stringToDoubleArray(stateElement->getStringAttribute("bestCoefficients"), state.bestCoefficients, 9);
+                        state.elapsedPlaybackSeconds = stateElement->getDoubleAttribute("elapsedPlaybackSeconds", 0.0);
+                        state.currentPhase = stateElement->getIntAttribute("currentPhase", 1);
+                        state.iteration = stateElement->getIntAttribute("iteration", 0);
+                        state.bestScore = (float)stateElement->getDoubleAttribute("bestScore", 0.0);
+                        
+                        // version 1 は mode=1 (Short) として読み込む
+                        const int modeIdx = 1;
+                        const int bankIndex = (srBank * kAdaptiveBitDepthCount + bdIdx) * kLearningModeCount + modeIdx;
+                        engine.setAdaptiveNoiseShaperState(bankIndex, state);
+                    }
+                }
+            }
+            else
+            {
+                for (int modeIdx = 0; modeIdx < kLearningModeCount; ++modeIdx)
+                {
+                    juce::String bankTag = "Bank_" + juce::String(static_cast<int>(sampleRate)) + "_" + juce::String(bitDepth) + "_" + juce::String(modeIdx);
+                    auto* bankElement = root->getChildByName(bankTag);
+                    if (bankElement != nullptr)
+                    {
+                        auto* stateElement = bankElement->getChildByName("State");
+                        if (stateElement != nullptr)
+                        {
+                            NoiseShaperLearner::State state;
+                            stringToDoubleArray(stateElement->getStringAttribute("mean"), state.mean, 9);
+                            stringToDoubleArray(stateElement->getStringAttribute("covarianceUpperTriangle"), state.covarianceUpperTriangle, 45);
+                            state.sigma = stateElement->getDoubleAttribute("sigma", 0.12);
+                            stringToDoubleArray(stateElement->getStringAttribute("bestCoefficients"), state.bestCoefficients, 9);
+                            state.elapsedPlaybackSeconds = stateElement->getDoubleAttribute("elapsedPlaybackSeconds", 0.0);
+                            state.currentPhase = stateElement->getIntAttribute("currentPhase", 1);
+                            state.iteration = stateElement->getIntAttribute("iteration", 0);
+                            state.bestScore = (float)stateElement->getDoubleAttribute("bestScore", 0.0);
+                            state.processCount = stateElement->getIntAttribute("processCount", 0);
+                            state.totalGenerations = static_cast<uint64_t>(stateElement->getStringAttribute("totalGenerations").getLargeIntValue());
+                            
+                            const int bankIndex = (srBank * kAdaptiveBitDepthCount + bdIdx) * kLearningModeCount + modeIdx;
+                            engine.setAdaptiveNoiseShaperState(bankIndex, state);
+                        }
+                    }
                 }
             }
         }

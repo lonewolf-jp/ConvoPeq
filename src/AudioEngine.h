@@ -9,6 +9,7 @@ static constexpr int kAdaptiveNoiseShaperSampleRateBankCount = 10;
 // BitDepth も一緒に管理するための拡張（16/24/32 の3段階）
 static constexpr int kAdaptiveBitDepthCount = 3;
 static constexpr int kAdaptiveBitDepthValues[kAdaptiveBitDepthCount] = {16, 24, 32};
+static constexpr int kLearningModeCount = 6;
 
 // ストリーミング信号キャプチャ用 AudioBlock（2ch, 256サンプル）
 struct AudioBlock {
@@ -262,7 +263,7 @@ public:
     convo::HCMode getEqLPFFilterMode() const noexcept;
 
     // --- Adaptiveノイズシェイパー学習サポート ---
-    void startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode);
+    void startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode, bool resume = false);
     void stopNoiseShaperLearning();
     void setNoiseShaperLearningMode(NoiseShaperLearner::LearningMode mode);
     bool isNoiseShaperLearning() const;
@@ -282,6 +283,9 @@ public:
     void requestAdaptiveAutosave();
     // NoiseShaperLearner から学習済み係数を受け取るコールバック (Worker Thread)
     void publishCoeffs(const double* coeffs);
+
+    // --- Adaptive ノイズシェイパー係数インデックス計算（UI スレッドからアクセス可能） ---
+    static int getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, NoiseShaperLearner::LearningMode mode) noexcept;
 
     bool getAdaptiveNoiseShaperState(int bankIndex, NoiseShaperLearner::State& outState) const noexcept;
     void setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLearner::State& inState) noexcept;
@@ -448,6 +452,7 @@ DSPCore();
     std::atomic<int> ditherBitDepth { 0 }; // 0 = 未初期化 (DeviceSettingsで最大値に設定される)
     std::atomic<NoiseShaperType> noiseShaperType { NoiseShaperType::Psychoacoustic };
     std::atomic<bool> pendingNoiseShaperLearningStart { false };
+    std::atomic<bool> pendingNoiseShaperLearningResume { false };
     std::atomic<NoiseShaperLearner::LearningMode> pendingLearningMode { NoiseShaperLearner::LearningMode::Short };
     std::atomic<int> fixedNoiseLogIntervalMs { 2000 };
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
@@ -532,7 +537,7 @@ DSPCore();
 
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
     LockFreeRingBuffer<AudioBlock, 4096> audioCaptureQueue;
-    std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount> adaptiveCoeffBanks {};
+    std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount> adaptiveCoeffBanks {};
     std::atomic<int> currentAdaptiveCoeffBankIndex { 1 };
     std::uintptr_t audioThreadAffinityMask = 0;
     std::uintptr_t noiseLearnerThreadAffinityMask = 0;
@@ -542,7 +547,6 @@ DSPCore();
     void initialiseAdaptiveCoeffBanks() noexcept;
     static int resolveAdaptiveCoeffBankIndex(double sampleRate) noexcept;
     static int getAdaptiveBitDepthIndex(int bitDepth) noexcept;
-    static int getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth) noexcept;
     AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) noexcept;
     const AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept;
     void selectAdaptiveCoeffBankForCurrentSettings() noexcept;

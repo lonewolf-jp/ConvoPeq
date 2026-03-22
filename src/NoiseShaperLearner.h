@@ -38,12 +38,12 @@ public:
         Error
     };
 
-    enum class LearningMode { Short, Middle, Long, Ultra, Continuous };
+    enum class LearningMode { Shortest, Short, Middle, Long, Ultra, Continuous };
 
     struct Progress
     {
         std::atomic<int> iteration { 0 };
-        std::atomic<int> maxIteration { 0 };
+        std::atomic<uint64_t> totalGenerations { 0 };
         std::atomic<int> processCount { 0 };
         std::atomic<int> segmentCount { 0 };
         std::atomic<float> bestScore { 0.0f };
@@ -64,8 +64,8 @@ public:
         int currentPhase = 1;
         int iteration = 0;
         float bestScore = 0.0f;
-        // 保存状態の強化（前回の続きから再開用）
-        uint64_t totalGenerations = 0;           // これまでの総世代数
+        int processCount = 0;
+        uint64_t totalGenerations = 0;
     };
 
     static constexpr int kOrder = LatticeNoiseShaper::kOrder;
@@ -77,7 +77,7 @@ public:
                        LockFreeRingBuffer<AudioBlock, 4096>& captureQueueRef);
     ~NoiseShaperLearner();
 
-    void startLearning();
+    void startLearning(bool resume = false);
     void stopLearning();
     bool isRunning() const noexcept;
     void setLearningMode(LearningMode mode) noexcept;
@@ -128,7 +128,7 @@ private:
     void runEvaluationJobsForWorker(int workerIndex, int numSegments, int evaluationBitDepth) noexcept;
     int evaluatePopulation(int numSegments, int evaluationBitDepth, int& bestCandidateIndex, double& bestCandidateScore);
     SessionSignature captureSessionSignature() const noexcept;
-    void resetLearningSession(const SessionSignature& session) noexcept;
+    void resetLearningSession(const SessionSignature& session, bool resume) noexcept;
     void drainCaptureQueue(const SessionSignature& session) noexcept;
     int buildTrainingSegments() noexcept;
     double evaluateCandidate(EvaluationContext& context,
@@ -147,6 +147,7 @@ private:
 
     std::thread workerThread;
     std::atomic<bool> stopRequested { false };
+    std::atomic<bool> pendingResume { false };
 
     // workerThread が完全に終了したことを示すフラグ。
     // workerThreadMain() の最後（stopEvaluationWorkers() 完了後）で true にセットされる。
@@ -167,8 +168,8 @@ private:
     LearningMode pendingMode {LearningMode::Short};
     LearningMode activeMode {LearningMode::Short};
     int currentPhase = 1;
-
-    std::array<State, 3> savedStates {};
+    
+    std::array<State, 6> savedStates {};
 
     AudioSegmentBuffer segmentBuffer;
     CmaEsOptimizer optimizer;
@@ -193,8 +194,6 @@ private:
     // bestScoreHistory リングバッファの書き込み先インデックス（historyMutex 保護下で使用）
     int historyHead { 0 };
     mutable std::mutex historyMutex;
-
-    std::atomic<uint64_t> totalGenerations { 0 };
 
     // callAsync ラムダが this の生存を安全に確認するための WeakReference サポート。
     // デストラクタで masterReference が破棄されると WeakReference::get() が nullptr を返すため、
