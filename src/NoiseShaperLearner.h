@@ -64,6 +64,8 @@ public:
         int currentPhase = 1;
         int iteration = 0;
         float bestScore = 0.0f;
+        // 保存状態の強化（前回の続きから再開用）
+        uint64_t totalGenerations = 0;           // これまでの総世代数
     };
 
     static constexpr int kOrder = LatticeNoiseShaper::kOrder;
@@ -191,6 +193,8 @@ private:
     // bestScoreHistory リングバッファの書き込み先インデックス（historyMutex 保護下で使用）
     int historyHead { 0 };
     mutable std::mutex historyMutex;
+
+    std::atomic<uint64_t> totalGenerations { 0 };
 
     // callAsync ラムダが this の生存を安全に確認するための WeakReference サポート。
     // デストラクタで masterReference が破棄されると WeakReference::get() が nullptr を返すため、

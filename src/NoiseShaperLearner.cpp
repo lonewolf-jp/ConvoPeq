@@ -107,6 +107,7 @@ void NoiseShaperLearner::startLearning()
     lastGenerationStart = std::chrono::steady_clock::time_point{};
     currentPhase = 1;
     applyPhaseParams(activeMode, currentPhase);
+    totalGenerations.store(0, std::memory_order_relaxed);
 
     workerThread = std::thread(&NoiseShaperLearner::workerThreadMain, this);
 }
@@ -243,6 +244,7 @@ void NoiseShaperLearner::getState(State& outState) const noexcept
     outState.currentPhase = currentPhase;
     outState.iteration = progress.iteration.load(std::memory_order_relaxed);
     outState.bestScore = progress.bestScore.load(std::memory_order_relaxed);
+    outState.totalGenerations     = totalGenerations.load(std::memory_order_relaxed);
 }
 
 void NoiseShaperLearner::setState(const State& inState) noexcept
@@ -254,6 +256,7 @@ void NoiseShaperLearner::setState(const State& inState) noexcept
     currentPhase = inState.currentPhase;
     progress.iteration.store(inState.iteration, std::memory_order_relaxed);
     progress.bestScore.store(inState.bestScore, std::memory_order_relaxed);
+    totalGenerations.store(inState.totalGenerations, std::memory_order_relaxed);
     progress.elapsedPlaybackSeconds.store(accumulatedPlaybackSeconds, std::memory_order_relaxed);
     progress.currentPhase.store(currentPhase, std::memory_order_relaxed);
 }
@@ -598,6 +601,7 @@ void NoiseShaperLearner::workerThreadMain()
             }
 
             progress.iteration.store(generation + 1, std::memory_order_relaxed);
+            totalGenerations.fetch_add(1, std::memory_order_release);
             ++generation;
 
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
