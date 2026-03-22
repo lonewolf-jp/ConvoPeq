@@ -8,6 +8,8 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     modeComboBox.addItem("Short", 1);
     modeComboBox.addItem("Middle", 2);
     modeComboBox.addItem("Long", 3);
+    modeComboBox.addItem("Ultra", 4);
+    modeComboBox.addItem("Continuous", 5);
     modeComboBox.setSelectedId(1);
     addAndMakeVisible(modeComboBox);
 

@@ -38,7 +38,7 @@ public:
         Error
     };
 
-    enum class LearningMode { Short, Middle, Long };
+    enum class LearningMode { Short, Middle, Long, Ultra, Continuous };
 
     struct Progress
     {
@@ -165,7 +165,7 @@ private:
     LearningMode pendingMode {LearningMode::Short};
     LearningMode activeMode {LearningMode::Short};
     int currentPhase = 1;
-    
+
     std::array<State, 3> savedStates {};
 
     AudioSegmentBuffer segmentBuffer;

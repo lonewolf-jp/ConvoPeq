@@ -143,6 +143,13 @@ int NoiseShaperLearner::computePhase(LearningMode mode, double playbackSeconds) 
             if (playbackSeconds < 60.0) return 1;
             if (playbackSeconds < 120.0) return 2;
             return 3;
+        case LearningMode::Ultra:
+            if (playbackSeconds < 180.0) return 1;      // 3分
+            if (playbackSeconds < 600.0) return 2;      // 10分
+            if (playbackSeconds < 1800.0) return 3;     // 30分
+            return 4;                                   // Phase4以降も継続
+        case LearningMode::Continuous:
+            return 4;                                   // 常に最終Phase（間隔固定）
     }
     return 1;
 }
@@ -169,8 +176,28 @@ void NoiseShaperLearner::applyPhaseParams(LearningMode mode, int phase) noexcept
             optParams.covRetentionTarget = (phase == 1) ? 0.95 : ((phase == 2) ? 0.98 : 0.99);
             optParams.covRetentionStep = 0.002;
             break;
+        case LearningMode::Ultra:
+            generationIntervalSeconds = (phase == 1) ?  8.0 :
+                                        (phase == 2) ? 16.0 :
+                                        (phase == 3) ? 32.0 : 64.0;
+            optParams.covRetentionTarget = (phase == 1) ? 0.96 :
+                                           (phase == 2) ? 0.98 :
+                                           (phase == 3) ? 0.99 : 0.995;
+            optParams.covRetentionStep = (phase <= 2) ? 0.002 : 0.0005;
+            break;
+        case LearningMode::Continuous:
+            generationIntervalSeconds = 60.0;  // 1分ごとに1世代（非常に丁寧）
+            optParams.covRetentionTarget = 0.995;
+            optParams.covRetentionStep   = 0.0002;
+            break;
+        default:
+            // fallback（既存コードと整合）
+            generationIntervalSeconds = 2.0;
+            optParams.covRetentionTarget = 0.95;
+            optParams.covRetentionStep = 0.005;
+            break;
     }
-    
+
     optimizer.setParams(optParams);
 }
 
@@ -178,21 +205,21 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
 {
     if (!modeSwitchRequested.load(std::memory_order_acquire))
         return;
-        
+
     // Save current state
     getState(savedStates[static_cast<size_t>(activeMode)]);
-        
+
     activeMode = pendingMode;
     progress.learningMode.store(static_cast<int>(activeMode), std::memory_order_relaxed);
-    
+
     // Load new state
     setState(savedStates[static_cast<size_t>(activeMode)]);
-    
+
     // 現在の再生時間に基づいてフェーズを再計算し、パラメータを適用
     currentPhase = computePhase(activeMode, accumulatedPlaybackSeconds);
     progress.currentPhase.store(currentPhase, std::memory_order_relaxed);
     applyPhaseParams(activeMode, currentPhase);
-    
+
     modeSwitchRequested.store(false, std::memory_order_release);
 }
 
@@ -756,12 +783,12 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
     // Save current state to AudioEngine so it can be persisted
     State currentState;
     getState(currentState);
-    
+
     // Get the current bank index from the engine
     const double sr = engine.currentSampleRate.load(std::memory_order_acquire);
     const int bd = engine.getDitherBitDepth();
     const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd);
-    
+
     engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
 
     engine.requestAdaptiveAutosave();
