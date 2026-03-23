@@ -11,7 +11,19 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     modeComboBox.addItem("Long", 4);
     modeComboBox.addItem("Ultra", 5);
     modeComboBox.addItem("Continuous", 6);
-    modeComboBox.setSelectedId(2);
+    
+    int initialModeId = 2; // Default to Short
+    switch (audioEngine.getNoiseShaperLearningMode())
+    {
+        case NoiseShaperLearner::LearningMode::Shortest:   initialModeId = 1; break;
+        case NoiseShaperLearner::LearningMode::Short:      initialModeId = 2; break;
+        case NoiseShaperLearner::LearningMode::Middle:     initialModeId = 3; break;
+        case NoiseShaperLearner::LearningMode::Long:       initialModeId = 4; break;
+        case NoiseShaperLearner::LearningMode::Ultra:      initialModeId = 5; break;
+        case NoiseShaperLearner::LearningMode::Continuous: initialModeId = 6; break;
+    }
+    modeComboBox.setSelectedId(initialModeId, juce::dontSendNotification);
+    
     addAndMakeVisible(modeComboBox);
     addAndMakeVisible(modeLabel);
 
@@ -282,21 +294,42 @@ void NoiseShaperLearningComponent::refreshFromEngine()
 {
     const auto& progress = audioEngine.getNoiseShaperLearningProgress();
     const auto status = progress.status.load(std::memory_order_acquire);
-    const int iteration = progress.iteration.load(std::memory_order_relaxed);
-    const uint64_t totalGenerations = progress.totalGenerations.load(std::memory_order_relaxed);
-    const int processCount = progress.processCount.load(std::memory_order_relaxed);
+    int iteration = progress.iteration.load(std::memory_order_relaxed);
+    uint64_t totalGenerations = progress.totalGenerations.load(std::memory_order_relaxed);
+    int processCount = progress.processCount.load(std::memory_order_relaxed);
     const int segmentCount = progress.segmentCount.load(std::memory_order_relaxed);
-    const float bestScore = progress.bestScore.load(std::memory_order_relaxed);
+    float bestScore = progress.bestScore.load(std::memory_order_relaxed);
     const float latestScore = progress.latestScore.load(std::memory_order_relaxed);
-    const double elapsedSec = progress.elapsedPlaybackSeconds.load(std::memory_order_relaxed);
-    const int currentPhase = progress.currentPhase.load(std::memory_order_relaxed);
+    double elapsedSec = progress.elapsedPlaybackSeconds.load(std::memory_order_relaxed);
+    int currentPhase = progress.currentPhase.load(std::memory_order_relaxed);
     const auto learningMode = static_cast<NoiseShaperLearner::LearningMode>(progress.learningMode.load(std::memory_order_relaxed));
+
+    const double sr = audioEngine.getSampleRate();
+    const int bd = audioEngine.getDitherBitDepth();
+
+    bool canStart = true;
+    bool canStop = false;
+    bool canResume = false;
+
+    NoiseShaperLearner::State savedState;
+    const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, static_cast<NoiseShaperLearner::LearningMode>(modeComboBox.getSelectedId() - 1));
+    if (audioEngine.getAdaptiveNoiseShaperState(bankIndex, savedState) && savedState.iteration > 0)
+    {
+        canResume = true;
+        if (status == NoiseShaperLearner::Status::Idle)
+        {
+            iteration = savedState.iteration;
+            totalGenerations = savedState.totalGenerations;
+            processCount = savedState.processCount;
+            bestScore = savedState.bestScore;
+            elapsedSec = savedState.elapsedPlaybackSeconds;
+            currentPhase = savedState.currentPhase;
+        }
+    }
 
     statusLabel.setText("Status: " + statusToText(status), juce::dontSendNotification);
     orderLabel.setText("Filter order: " + juce::String(NoiseShaperLearner::kOrder), juce::dontSendNotification);
 
-    const double sr = audioEngine.getSampleRate();
-    const int bd = audioEngine.getDitherBitDepth();
     sampleRateAndBitDepthLabel.setText("Format: " + juce::String(sr, 0) + " Hz / " + juce::String(bd) + " bit", juce::dontSendNotification);
 
     juce::String elapsedStr = juce::String(elapsedSec, 1) + " s";
@@ -327,16 +360,6 @@ void NoiseShaperLearningComponent::refreshFromEngine()
                              juce::dontSendNotification);
 
     juce::String message = "Press Start learning to begin adaptive optimization.";
-    bool canStart = true;
-    bool canStop = false;
-    bool canResume = false;
-
-    NoiseShaperLearner::State savedState;
-    const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, static_cast<NoiseShaperLearner::LearningMode>(modeComboBox.getSelectedId() - 1));
-    if (audioEngine.getAdaptiveNoiseShaperState(bankIndex, savedState) && savedState.iteration > 0)
-    {
-        canResume = true;
-    }
 
     switch (status)
     {

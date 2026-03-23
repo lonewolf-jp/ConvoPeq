@@ -86,26 +86,36 @@ void NoiseShaperLearner::startLearning(bool resume)
     pendingResume.store(resume, std::memory_order_release);
     workerThreadFinished.store(false, std::memory_order_release);
 
-    progress.iteration.store(0, std::memory_order_relaxed);
-    progress.segmentCount.store(0, std::memory_order_relaxed);
-    progress.bestScore.store(0.0f, std::memory_order_relaxed);
-    progress.latestScore.store(0.0f, std::memory_order_relaxed);
+    if (!resume)
+    {
+        progress.iteration.store(0, std::memory_order_relaxed);
+        progress.segmentCount.store(0, std::memory_order_relaxed);
+        progress.bestScore.store(0.0f, std::memory_order_relaxed);
+        progress.latestScore.store(0.0f, std::memory_order_relaxed);
+        progress.elapsedPlaybackSeconds.store(0.0, std::memory_order_relaxed);
+        progress.currentPhase.store(1, std::memory_order_relaxed);
+        accumulatedPlaybackSeconds = 0.0;
+        currentPhase = 1;
+        historyCount.store(0, std::memory_order_release);
+        {
+            const std::scoped_lock<std::mutex> lock(historyMutex);
+            bestScoreHistory.fill(0.0f);
+            historyHead = 0;
+        }
+    }
+    else
+    {
+        accumulatedPlaybackSeconds = progress.elapsedPlaybackSeconds.load(std::memory_order_relaxed);
+        currentPhase = progress.currentPhase.load(std::memory_order_relaxed);
+    }
+
     progress.status.store(Status::WaitingForAudio, std::memory_order_release);
     errorMessage.store(nullptr, std::memory_order_release);
-    historyCount.store(0, std::memory_order_release);
-    {
-        const std::scoped_lock<std::mutex> lock(historyMutex);
-        bestScoreHistory.fill(0.0f);
-        historyHead = 0;
-    }
     segmentBuffer.clear();
 
-    progress.elapsedPlaybackSeconds.store(0.0, std::memory_order_relaxed);
-    progress.currentPhase.store(1, std::memory_order_relaxed);
+    activeMode = pendingMode;
     progress.learningMode.store(static_cast<int>(activeMode), std::memory_order_relaxed);
-    accumulatedPlaybackSeconds = 0.0;
     lastGenerationStart = std::chrono::steady_clock::time_point{};
-    currentPhase = 1;
     applyPhaseParams(activeMode, currentPhase);
 
     workerThread = std::thread(&NoiseShaperLearner::workerThreadMain, this);
@@ -124,6 +134,12 @@ void NoiseShaperLearner::setLearningMode(LearningMode mode) noexcept
 {
     pendingMode = mode;
     modeSwitchRequested.store(true, std::memory_order_release);
+    
+    if (!isRunning())
+    {
+        activeMode = mode;
+        progress.learningMode.store(static_cast<int>(activeMode), std::memory_order_relaxed);
+    }
 }
 
 int NoiseShaperLearner::computePhase(LearningMode mode, double playbackSeconds) const noexcept
@@ -679,17 +695,22 @@ NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature
 void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, bool resume) noexcept
 {
     segmentBuffer.clear();
-    accumulatedPlaybackSeconds = 0.0;
-    historyCount.store(0, std::memory_order_release);
+    
+    if (!resume)
     {
-        const std::scoped_lock<std::mutex> lock(historyMutex);
-        bestScoreHistory.fill(0.0f);
-        historyHead = 0;
+        accumulatedPlaybackSeconds = 0.0;
+        historyCount.store(0, std::memory_order_release);
+        {
+            const std::scoped_lock<std::mutex> lock(historyMutex);
+            bestScoreHistory.fill(0.0f);
+            historyHead = 0;
+        }
+        progress.iteration.store(0, std::memory_order_relaxed);
+        progress.segmentCount.store(0, std::memory_order_relaxed);
+        progress.bestScore.store(0.0f, std::memory_order_relaxed);
+        progress.latestScore.store(0.0f, std::memory_order_relaxed);
     }
-    progress.iteration.store(0, std::memory_order_relaxed);
-    progress.segmentCount.store(0, std::memory_order_relaxed);
-    progress.bestScore.store(0.0f, std::memory_order_relaxed);
-    progress.latestScore.store(0.0f, std::memory_order_relaxed);
+    
     progress.status.store(Status::WaitingForAudio, std::memory_order_release);
 
     const double sessionSampleRate = session.sampleRateHz > 0

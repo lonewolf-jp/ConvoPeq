@@ -266,6 +266,7 @@ public:
     void startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode, bool resume = false);
     void stopNoiseShaperLearning();
     void setNoiseShaperLearningMode(NoiseShaperLearner::LearningMode mode);
+    NoiseShaperLearner::LearningMode getNoiseShaperLearningMode() const { return pendingLearningMode.load(std::memory_order_acquire); }
     bool isNoiseShaperLearning() const;
     const NoiseShaperLearner::Progress& getNoiseShaperLearningProgress() const;
     int copyNoiseShaperLearningHistory(float* outScores, int maxPoints) const noexcept;

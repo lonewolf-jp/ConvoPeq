@@ -441,6 +441,7 @@ AudioEngine::AudioEngine()
 
     initialiseThreadAffinityMasks();
     noiseShaperLearner = std::make_unique<NoiseShaperLearner>(*this, audioCaptureQueue);
+    noiseShaperLearner->setLearningMode(pendingLearningMode.load(std::memory_order_acquire));
 
     // デフォルトサンプルレート (0 = 未初期化/デバイスなし)
     currentSampleRate.store(0.0);
@@ -458,6 +459,7 @@ void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode
         return;
 
     pendingLearningMode.store(mode, std::memory_order_release);
+    selectAdaptiveCoeffBankForCurrentSettings();
     pendingNoiseShaperLearningResume.store(resume, std::memory_order_release);
     pendingNoiseShaperLearningStart.store(true, std::memory_order_release);
 
@@ -489,6 +491,7 @@ void AudioEngine::stopNoiseShaperLearning()
 void AudioEngine::setNoiseShaperLearningMode(NoiseShaperLearner::LearningMode mode)
 {
     pendingLearningMode.store(mode, std::memory_order_release);
+    selectAdaptiveCoeffBankForCurrentSettings();
     if (noiseShaperLearner)
         noiseShaperLearner->setLearningMode(mode);
 }
