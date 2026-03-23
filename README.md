@@ -3,57 +3,59 @@
 
 ---
 
-## New in v0.5.2: Adaptive Noise Shaper Learning
+## New in v0.5.3: Adaptive Noise Shaper Learning (Major Feature Expansion)
 
-ConvoPeq v0.5.2 introduces major enhancements to the **Adaptive Noise Shaper Learning** feature:
+The Adaptive Noise Shaper Learning system has been significantly expanded and now offers advanced flexibility, control, and robustness for real-world audio workflows.
 
-- **Learning Mode Selection (Short / Middle / Long):**
-   The adaptive noise shaper learning now supports three selectable learning modes (Short, Middle, Long). Each mode controls the learning schedule and convergence speed, allowing users to balance between quick adaptation and thorough optimization.
+### Key Features
 
-   **Estimated time from learning start until convergence in Phase 3 (fine-tuning):**
-  - Short: ~10–20 minutes (fastest, for quick testing)
-  - Middle: ~20–40 minutes (balanced)
-  - Long: ~40–80 minutes (most thorough, for best quality)
-   (This is the typical time required for the learning process to reach practical convergence in the final fine-tuning phase (Phase 3). Actual time may vary depending on signal and environment.)
-- **Bit Depth-aware Coefficient Saving:**
-   Learned noise shaper coefficients are now saved and recalled per sample rate and bit depth. This ensures optimal noise shaping for each playback scenario, especially when switching between different output bit depths (e.g., 16-bit, 24-bit, 32-bit).
+- **Multiple Learning Modes:**
+  - Six selectable modes: Shortest, Short, Middle, Long, Ultra, Continuous
+  - Each mode has its own learning schedule, convergence speed, and phase parameters
+  - Modes can be switched at any time from the UI
 
-This function automatically optimizes the coefficients of the 9th-order IIR noise shaping filter at the output stage, based on the actual playback signal, to more effectively suppress quantization noise and maximize perceived S/N.
+- **Resume, Pause, and Stop:**
+  - Learning can be paused and resumed at any time ("Resume learning" button)
+  - State is safely saved and restored, allowing seamless continuation after interruption
 
-### Feature Overview
+- **Session and State Management:**
+  - Learning sessions are managed per sample rate and bit depth
+  - All session states (coefficients, progress, history, phase, etc.) are saved and restored automatically
+  - Multiple session banks are supported for different playback scenarios
 
-- **Adaptive 9th-order Noise Shaper**: Automatically optimizes noise shaper coefficients based on the statistical characteristics of the output signal.
-- **Learning Mode Selection**: Choose from Short, Middle, or Long learning modes to control the adaptation speed and thoroughness.
-- **Bit Depth-aware Coefficient Saving**: Coefficients are saved and recalled per sample rate and bit depth for optimal results in all playback scenarios.
-- **Real-time learning**: Captures the playback signal and performs background learning. Progress and score history are visualized in the UI.
-- **Multi-sample rate support**: Optimized coefficients are saved and switched automatically for each sample rate.
-- **Thread-safe and real-time safe**: All learning and coefficient switching are designed to avoid audio dropouts and maintain real-time safety.
+- **Progress, History, and Phase Visualization:**
+  - Real-time display of generation, process count, segment count, best/latest score, elapsed time, and current phase (1: Exploration, 2: Convergence, 3: Fine-tuning)
+  - Score history graph (up to 256 points) with expanded UI for detailed tracking
 
-### How to Enable & Use
+- **Enhanced UI/UX:**
+  - Mode selection ComboBox, Start/Stop/Resume buttons, and detailed status labels
+  - Progress graph, error messages, and state indicators
+  - Automatic periodic saving (every 5 minutes)
 
-1. **Open the Noise Shaper Learning panel**
-   - Open the dedicated panel from the "Noise Shaper Learning" button in the main window.
+- **Thread-Safe and Real-Time Safe Design:**
+  - All learning, evaluation, and state transitions are handled by dedicated worker threads
+  - Lock-free ring buffers, atomics, and condition variables ensure real-time safety
+  - UI and worker threads communicate safely via WeakReference and async messaging
 
-2. **Press the Start learning button**
-   - While playing audio, press "Start learning" to begin the learning process.
-   - Sufficient stereo signal length is required (learning will not proceed with silence or single-channel only).
+- **Error Detection and Notification:**
+  - Any error during learning is immediately displayed in the UI
+  - All state transitions are robust against exceptions and errors
 
-3. **Monitor progress and score**
-   - The panel displays "Generation", "Process count", "Segment count", "Best/Latest score", and a score history graph.
-   - Lower scores indicate better results (lower quantization noise).
+- **History Buffering:**
+  - Score history is managed as a mutex-protected ring buffer for efficient and safe access
 
-4. **Pause with Stop learning**
-   - You can pause learning at any time by pressing "Stop learning".
+- **Automatic Session Save/Restore:**
+  - All session states are saved to disk and restored on restart or resume
 
-5. **Saving and auto-applying learned coefficients**
-   - As learning progresses, the optimized coefficients for the current sample rate are automatically saved and applied for subsequent playback.
-   - When the sample rate changes, the optimal coefficients are automatically switched.
+### How to Use
 
-## Additional Notes
+1. **Open the Noise Shaper Learning panel** from the main window.
+2. **Select a learning mode** (Shortest, Short, Middle, Long, Ultra, Continuous) from the ComboBox.
+3. **Press "Start learning"** to begin, or **"Resume learning"** to continue from a previous session.
+4. **Monitor progress, score, and phase** in real time. The UI displays all relevant metrics and a detailed score history graph.
+5. **Pause or stop** learning at any time. State is saved automatically and can be resumed later.
 
-- If an error occurs during learning, a message will be displayed in the panel.
-- Coefficients are saved independently for each sample rate.
-- This feature is only active when "Adaptive 9th-order" noise shaper is selected.
+> All learning and coefficient switching are designed to avoid audio dropouts and maintain real-time safety. Coefficients are saved and recalled per sample rate and bit depth for optimal results in all playback scenarios.
 
 ---
 
