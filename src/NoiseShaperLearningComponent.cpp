@@ -164,8 +164,8 @@ void NoiseShaperLearningComponent::resized()
     messageLabel.setBounds(area.removeFromTop(22));
 
     area.removeFromTop(10);
-    // グラフの高さを現状の2倍（160→320px）に拡張
-    constexpr int kGraphHeight = 320;
+    // グラフの高さを現状の3倍（320→960px）に拡張
+    constexpr int kGraphHeight = 960;
     progressGraph.setBounds(area.removeFromTop(kGraphHeight));
 }
 

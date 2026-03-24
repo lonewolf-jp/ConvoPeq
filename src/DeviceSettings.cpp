@@ -456,8 +456,8 @@ void DeviceSettings::showAdaptiveLearningWindow()
 
     if (auto* window = options.launchAsync())
     {
-        window->setResizeLimits(480, 280, 900, 700);
-        window->centreWithSize(560, 360);
+        window->setResizeLimits(480, 280, 900, 1800); // 最大高さはそのまま
+        window->centreWithSize(560, 500); // デフォルト高さを500pxに修正
         adaptiveLearningWindow = window;
     }
 }
@@ -645,18 +645,18 @@ static void stringToDoubleArray(const juce::String& str, double* arr, int size)
 void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
 {
     auto file = getNoiseShaperStateFile();
-    
+
     // Load existing to preserve other banks/modes
     std::unique_ptr<juce::XmlElement> root;
     if (file.existsAsFile())
         root = juce::XmlDocument::parse(file);
-        
+
     if (root == nullptr || !root->hasTagName("NoiseShaperLearningData"))
     {
         root = std::make_unique<juce::XmlElement>("NoiseShaperLearningData");
     }
     root->setAttribute("version", 2);
-    
+
     const int bankCount = AudioEngine::getAdaptiveSampleRateBankCount();
     for (int srBank = 0; srBank < bankCount; ++srBank)
     {
@@ -667,7 +667,7 @@ void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
             for (int modeIdx = 0; modeIdx < kLearningModeCount; ++modeIdx)
             {
                 juce::String bankTag = "Bank_" + juce::String(static_cast<int>(sampleRate)) + "_" + juce::String(bitDepth) + "_" + juce::String(modeIdx);
-                
+
                 auto* bankElement = root->getChildByName(bankTag);
                 if (bankElement == nullptr)
                 {
@@ -678,7 +678,7 @@ void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
                 {
                     bankElement->deleteAllChildElements();
                 }
-                
+
                 const int bankIndex = (srBank * kAdaptiveBitDepthCount + bdIdx) * kLearningModeCount + modeIdx;
                 NoiseShaperLearner::State state;
                 if (engine.getAdaptiveNoiseShaperState(bankIndex, state))
@@ -699,7 +699,7 @@ void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
             }
         }
     }
-    
+
     if (root->toString().length() < 10 * 1024 * 1024)
         root->writeTo(file);
     else
@@ -711,16 +711,16 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
     auto file = getNoiseShaperStateFile();
     if (!file.existsAsFile())
         return;
-        
+
     auto root = juce::XmlDocument::parse(file);
     if (root == nullptr || !root->hasTagName("NoiseShaperLearningData"))
     {
         juce::Logger::writeToLog("Failed to parse noise shaper state file.");
         return;
     }
-    
+
     int version = root->getIntAttribute("version", 1);
-    
+
     const int bankCount = AudioEngine::getAdaptiveSampleRateBankCount();
     for (int srBank = 0; srBank < bankCount; ++srBank)
     {
@@ -728,7 +728,7 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
         for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
         {
             const int bitDepth = kAdaptiveBitDepthValues[bdIdx];
-            
+
             if (version == 1)
             {
                 juce::String bankTag = "Bank_" + juce::String(static_cast<int>(sampleRate)) + "_" + juce::String(bitDepth);
@@ -747,7 +747,7 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
                         state.currentPhase = stateElement->getIntAttribute("currentPhase", 1);
                         state.iteration = stateElement->getIntAttribute("iteration", 0);
                         state.bestScore = (float)stateElement->getDoubleAttribute("bestScore", 0.0);
-                        
+
                         // version 1 は mode=1 (Short) として読み込む
                         const int modeIdx = 1;
                         const int bankIndex = (srBank * kAdaptiveBitDepthCount + bdIdx) * kLearningModeCount + modeIdx;
@@ -777,7 +777,7 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
                             state.bestScore = (float)stateElement->getDoubleAttribute("bestScore", 0.0);
                             state.processCount = stateElement->getIntAttribute("processCount", 0);
                             state.totalGenerations = static_cast<uint64_t>(stateElement->getStringAttribute("totalGenerations").getLargeIntValue());
-                            
+
                             const int bankIndex = (srBank * kAdaptiveBitDepthCount + bdIdx) * kLearningModeCount + modeIdx;
                             engine.setAdaptiveNoiseShaperState(bankIndex, state);
                         }
@@ -791,7 +791,7 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
 void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager, const AudioEngine& engine)
 {
     saveNoiseShaperState(engine);
-    
+
     if (auto xml = deviceManager.createStateXml())
     {
         // ビット深度設定を追加属性として保存
