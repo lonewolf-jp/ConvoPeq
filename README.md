@@ -3,59 +3,31 @@
 
 ---
 
-## New in v0.5.3: Adaptive Noise Shaper Learning (Major Feature Expansion)
+## New in v0.5.4
 
-The Adaptive Noise Shaper Learning system has been significantly expanded and now offers advanced flexibility, control, and robustness for real-world audio workflows.
+### 1. Robustness and UI/UX Improvements for Adaptive Noise Shaper Learning
 
-### Adaptive Noise Shaper Key Features
+- **Race condition prevention & safety:**
+  - Coefficient updates from the UI are now rejected during learning (added isNoiseShaperLearning() check in AudioEngine).
+  - Introduced RAII lock guards for coefficient bank switching/writing, improving thread safety and exception safety.
+  - Added retry logic and explicit lock release on commit.
+- **UI/UX:**
+  - Default height of the Adaptive Noise Shaper Learning window increased to 500px.
+  - Maximum height limit relaxed to 1800px.
+  - The tab underline in the Audio Settings window now extends to the right edge (DeviceSettings.cpp).
 
-- **Multiple Learning Modes:**
-  - Six selectable modes: Shortest, Short, Middle, Long, Ultra, Continuous
-  - Each mode has its own learning schedule, convergence speed, and phase parameters
-  - Modes can be switched at any time from the UI
+### 2. Core DSP & Bank Management Refactoring/Optimization
 
-- **Resume, Pause, and Stop:**
-  - Learning can be paused and resumed at any time ("Resume learning" button)
-  - State is safely saved and restored, allowing seamless continuation after interruption
+- Major refactoring of AudioEngine, NoiseShaperLearner, ConvolverProcessor, EQProcessor, etc.
+- Revised atomic variables/locking for coefficient bank management.
+- Internal implementation of get/set APIs reorganized, with explicit switching between active/inactive buffers.
+- Improved thread safety and code readability throughout.
+- Deleted obsolete files (e.g., removed src/LearningSession.h after role integration).
 
-- **Session and State Management:**
-  - Learning sessions are managed per sample rate and bit depth
-  - All session states (coefficients, progress, history, phase, etc.) are saved and restored automatically
-  - Multiple session banks are supported for different playback scenarios
+### 3. Other
 
-- **Progress, History, and Phase Visualization:**
-  - Real-time display of generation, process count, segment count, best/latest score, elapsed time, and current phase (1: Exploration, 2: Convergence, 3: Fine-tuning)
-  - Score history graph (up to 256 points) with expanded UI for detailed tracking
-
-- **Enhanced UI/UX:**
-  - Mode selection ComboBox, Start/Stop/Resume buttons, and detailed status labels
-  - Progress graph, error messages, and state indicators
-  - Automatic periodic saving (every 5 minutes)
-
-- **Thread-Safe and Real-Time Safe Design:**
-  - All learning, evaluation, and state transitions are handled by dedicated worker threads
-  - Lock-free ring buffers, atomics, and condition variables ensure real-time safety
-  - UI and worker threads communicate safely via WeakReference and async messaging
-
-- **Error Detection and Notification:**
-  - Any error during learning is immediately displayed in the UI
-  - All state transitions are robust against exceptions and errors
-
-- **History Buffering:**
-  - Score history is managed as a mutex-protected ring buffer for efficient and safe access
-
-- **Automatic Session Save/Restore:**
-  - All session states are saved to disk and restored on restart or resume
-
-### How to Use
-
-1. **Open the Noise Shaper Learning panel** from the main window.
-2. **Select a learning mode** (Shortest, Short, Middle, Long, Ultra, Continuous) from the ComboBox.
-3. **Press "Start learning"** to begin, or **"Resume learning"** to continue from a previous session.
-4. **Monitor progress, score, and phase** in real time. The UI displays all relevant metrics and a detailed score history graph.
-5. **Pause or stop** learning at any time. State is saved automatically and can be resumed later.
-
-> All learning and coefficient switching are designed to avoid audio dropouts and maintain real-time safety. Coefficients are saved and recalled per sample rate and bit depth for optimal results in all playback scenarios.
+- Updated version strings (ProjectMetadata.cmake, README.md, ARCHITECTURE.md, etc.) to v0.5.4.
+- Minor bug fixes and refactoring: small header/cpp tweaks, comment cleanup, and removal of redundant code.
 
 ---
 

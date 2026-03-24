@@ -382,8 +382,8 @@ void DeviceSettings::resized()
     outputMakeupLabel.setBounds(row3.removeFromLeft(200).reduced(5));
     outputMakeupEditor.setBounds(row3.removeFromLeft(120).reduced(5));
 
-    // 4行目: FilterTypeTabs
-    filterTypeTabs.setBounds(row4.removeFromLeft(400).reduced(2));
+    // 4行目: FilterTypeTabs（ウィンドウ全体幅に変更し、横線が右端まで届くようにする）
+    filterTypeTabs.setBounds(row4); // .reduced(2)や幅制限を外す
 
     // 5行目: Oversampling/NoiseShaper
     oversamplingLabel.setBounds(row5.removeFromLeft(120).reduced(5));
