@@ -386,7 +386,8 @@ private:
 
     // ── 現在のサンプルレート ──
     // prepareToPlay で更新。Audio Thread で係数再計算に使用。
-    double currentSampleRate{ 0.0 };
+    // 【修正】スレッド間アクセスのため std::atomic に変更
+    std::atomic<double> currentSampleRate{ 0.0 };
 
     // ==================================================================
     // 内部最大サイズ (Audio Thread安全ガード用)
@@ -394,7 +395,7 @@ private:
     int maxInternalBlockSize = 0;
 
     // ── AGC適用 (Audio Thread 内で呼ばれる) ──
-    void processAGC(juce::dsp::AudioBlock<double>& block);
+    void processAGC(juce::dsp::AudioBlock <double > & block);
     double calculateAGCGain(double inputEnv, double outputEnv) const noexcept;
 
     // ── SVF係数計算 (Private Helpers) ──

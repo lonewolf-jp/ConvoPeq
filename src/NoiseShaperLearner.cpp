@@ -134,7 +134,7 @@ void NoiseShaperLearner::setLearningMode(LearningMode mode) noexcept
 {
     pendingMode = mode;
     modeSwitchRequested.store(true, std::memory_order_release);
-    
+
     if (!isRunning())
     {
         activeMode = mode;
@@ -213,7 +213,7 @@ void NoiseShaperLearner::applyPhaseParams(LearningMode mode, int phase) noexcept
             optParams.covRetentionStep = 0.005;
             break;
     }
-    
+
     optimizer.setParams(optParams);
 }
 
@@ -221,7 +221,7 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
 {
     if (!modeSwitchRequested.load(std::memory_order_acquire))
         return;
-        
+
     // Save current state to AudioEngine
     State currentState;
     getState(currentState);
@@ -229,10 +229,10 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
     const int bd = engine.getDitherBitDepth();
     int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, activeMode);
     engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
-        
+
     activeMode = pendingMode;
     progress.learningMode.store(static_cast<int>(activeMode), std::memory_order_relaxed);
-    
+
     // Load new state from AudioEngine
     bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, activeMode);
     State newState;
@@ -249,7 +249,7 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
 
         for (int i = 0; i < kOrder; ++i)
             bestCoefficients[static_cast<size_t>(i)] = initialCoefficients[i];
-            
+
         accumulatedPlaybackSeconds = 0.0;
         progress.iteration.store(0, std::memory_order_relaxed);
         progress.bestScore.store(0.0f, std::memory_order_relaxed);
@@ -257,12 +257,12 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
         progress.processCount.store(0, std::memory_order_relaxed);
         progress.totalGenerations.store(0, std::memory_order_relaxed);
     }
-    
+
     // 現在の再生時間に基づいてフェーズを再計算し、パラメータを適用
     currentPhase = computePhase(activeMode, accumulatedPlaybackSeconds);
     progress.currentPhase.store(currentPhase, std::memory_order_relaxed);
     applyPhaseParams(activeMode, currentPhase);
-    
+
     modeSwitchRequested.store(false, std::memory_order_release);
 }
 
@@ -331,16 +331,6 @@ int NoiseShaperLearner::copyBestScoreHistory(float* destination, int maxPoints) 
     }
 
     return available;
-}
-
-void NoiseShaperLearner::getLearnedCoefficients(double* outCoeffs, int maxCoefficients) const noexcept
-{
-    if (outCoeffs == nullptr || maxCoefficients <= 0)
-        return;
-
-    const int limit = std::min(kOrder, maxCoefficients);
-    for (int i = 0; i < limit; ++i)
-        outCoeffs[i] = bestCoefficients[static_cast<size_t>(i)];
 }
 
 void NoiseShaperLearner::onCoeffBankChanged(int newBankIndex) noexcept
@@ -695,7 +685,7 @@ NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature
 void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, bool resume) noexcept
 {
     segmentBuffer.clear();
-    
+
     if (!resume)
     {
         accumulatedPlaybackSeconds = 0.0;
@@ -710,7 +700,7 @@ void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, b
         progress.bestScore.store(0.0f, std::memory_order_relaxed);
         progress.latestScore.store(0.0f, std::memory_order_relaxed);
     }
-    
+
     progress.status.store(Status::WaitingForAudio, std::memory_order_release);
 
     const double sessionSampleRate = session.sampleRateHz > 0
@@ -854,13 +844,13 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
     // Save current state to AudioEngine so it can be persisted
     State currentState;
     getState(currentState);
-    
+
     // Get the current bank index from the engine
     const double sr = engine.getSampleRate();
     const int bd = engine.getDitherBitDepth();
     const auto currentMode = static_cast<LearningMode>(engine.getNoiseShaperLearningProgress().learningMode.load(std::memory_order_relaxed));
     const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, currentMode);
-    
+
     engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
 
     engine.requestAdaptiveAutosave();

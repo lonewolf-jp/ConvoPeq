@@ -7,7 +7,7 @@
 
 The Adaptive Noise Shaper Learning system has been significantly expanded and now offers advanced flexibility, control, and robustness for real-world audio workflows.
 
-### Key Features
+### Adaptive Noise Shaper Key Features
 
 - **Multiple Learning Modes:**
   - Six selectable modes: Shortest, Short, Middle, Long, Ultra, Continuous

@@ -504,9 +504,11 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 //--------------------------------------------------------------
 void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 {
-    const bool rateChanged = (std::abs(currentSampleRate - sampleRate) > 1e-6);
+    // 【修正】atomic load して比較
+    const bool rateChanged = (std::abs(currentSampleRate.load(std::memory_order_relaxed) - sampleRate) > 1e-6);
     if (rateChanged)
-        currentSampleRate = sampleRate;
+        // 【修正】atomic store して書き込み
+        currentSampleRate.store(sampleRate, std::memory_order_relaxed);
 
     // process() 内のバッファガードに使用
     const int requiredSize = newMaxInternalBlockSize;
@@ -1054,6 +1056,10 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
 
     // ✅ 事前にキャッシュされた入力レベルを使用
 
+    // 【修正】サンプルレートを一度だけ atomic load してローカル変数に格納
+    // 複数回の load() 呼び出しを回避し、Audio Thread 負荷を最小化
+    const double sr = currentSampleRate.load(std::memory_order_relaxed);
+
     double inputRMS = cachedInputRMS;
 
     // ✅ フィルタ処理後の出力レベル計測
@@ -1084,9 +1090,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
 
     // ブロック長とサンプリングレートに基づいて係数を動的に計算
     // alpha = dt / (dt + tau)  (dt: samples, tau: samples)
-    const double alphaAttack  = (double)numSamples / ((double)numSamples + currentSampleRate * AGC_ATTACK_TIME_SEC);
-    const double alphaRelease = (double)numSamples / ((double)numSamples + currentSampleRate * AGC_RELEASE_TIME_SEC);
-    const double smoothAlpha  = (double)numSamples / ((double)numSamples + currentSampleRate * AGC_SMOOTH_TIME_SEC);
+    const double alphaAttack  = (double)numSamples / ((double)numSamples + sr * AGC_ATTACK_TIME_SEC);
+    const double alphaRelease = (double)numSamples / ((double)numSamples + sr * AGC_RELEASE_TIME_SEC);
+    const double smoothAlpha  = (double)numSamples / ((double)numSamples + sr * AGC_SMOOTH_TIME_SEC);
 
     // 指数移動平均 (EMA) によるエンベロープ検波 (アシンメトリック: アタック速い / リリース遅い)
     const double inputAlpha  = (inputRMS  > envIn)  ? alphaAttack : alphaRelease;
@@ -1445,7 +1451,9 @@ EQProcessor::BandNode* EQProcessor::createBandNode(int band, const EQState& stat
 
     node->active = params.enabled;
     node->mode = state.bandChannelModes[band];
-    node->coeffs = calcSVFCoeffs(state.bandTypes[band], params.frequency, params.gain, params.q, currentSampleRate);
+    // 【修正】atomic load して calcSVFCoeffs に渡す
+    node->coeffs = calcSVFCoeffs(state.bandTypes[band], params.frequency, params.gain, params.q,
+                                 currentSampleRate.load(std::memory_order_relaxed));
 
     // 最適化: ゲインが0dB付近ならスキップ
     if (node->active) {

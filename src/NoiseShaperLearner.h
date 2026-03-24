@@ -86,7 +86,6 @@ public:
     void getState(State& outState) const noexcept;
     void setState(const State& inState) noexcept;
     int copyBestScoreHistory(float* destination, int maxPoints) const noexcept;
-    void getLearnedCoefficients(double* outCoeffs, int maxCoefficients) const noexcept;
     void onCoeffBankChanged(int newBankIndex) noexcept;
 
     // UI 表示用：学習ワーカーが記録したエラーメッセージを返す。
@@ -168,7 +167,7 @@ private:
     LearningMode pendingMode {LearningMode::Short};
     LearningMode activeMode {LearningMode::Short};
     int currentPhase = 1;
-    
+
     std::array<State, 6> savedStates {};
 
     AudioSegmentBuffer segmentBuffer;
