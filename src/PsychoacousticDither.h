@@ -268,7 +268,7 @@ public:
     void reset() noexcept
     {
         if (shaperStateBuffer)
-            std::fill_n(shaperStateBuffer, MAX_CHANNELS * STATE_STRIDE, 0.0);
+            juce::FloatVectorOperations::clear(shaperStateBuffer, MAX_CHANNELS * STATE_STRIDE);
     }
 
     inline double process(double input, int channel) noexcept

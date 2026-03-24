@@ -1,6 +1,7 @@
 //==============================================================================
 #pragma once
 
+#include <JuceHeader.h>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -111,7 +112,7 @@ namespace convo::input_transform
             return;
 
         if (src != dst)
-            std::memcpy(dst, src, static_cast<size_t>(numSamples) * sizeof(double));
+            juce::FloatVectorOperations::copy(dst, src, numSamples);
 
         applyHighQuality64BitTransform(dst, numSamples, gain);
     }

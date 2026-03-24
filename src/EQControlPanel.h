@@ -73,7 +73,6 @@ private:
     juce::Label        totalGainValueLabel;     // 数値入力
     juce::ToggleButton agcButton;              // AGC Checkbox
     juce::TextButton   resetButton;             // 全バンドリセット
-    juce::ComboBox     presetSelector;          // プリセット選択
 
     // ── 出力周波数フィルター UI (② EQ最終段の場合に使用) ──────────
     juce::Label      eqLpfLabel;                       // "LPF:" ラベル

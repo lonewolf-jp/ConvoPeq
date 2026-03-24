@@ -3,6 +3,8 @@
 //
 // AudioEngineの実装
 //============================================================================
+
+#include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "InputBitDepthTransform.h"
 #include <Windows.h>
@@ -549,8 +551,9 @@ void AudioEngine::initialiseAdaptiveCoeffBanks() noexcept
                     bank.coeffSetB.k[coeffIndex] = coefficient;
                 }
 
-                bank.current.store(&bank.coeffSetA, std::memory_order_relaxed);
+                bank.activeIndex.store(0, std::memory_order_relaxed);
                 bank.generation.store(1u, std::memory_order_relaxed);
+                bank.writeLock.store(false, std::memory_order_relaxed);
             }
         }
     }
@@ -632,8 +635,9 @@ void AudioEngine::getCurrentAdaptiveCoefficients(double* outCoeffs, int maxCoeff
     if (outCoeffs == nullptr || maxCoefficients <= 0)
         return;
 
-    const auto& bank = getAdaptiveCoeffBankForIndex(currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire));
-    const auto* coeffSet = bank.current.load(std::memory_order_acquire);
+    const auto& bank = getAdaptiveCoeffBankForIndex(
+        currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire));
+    const auto* coeffSet = AudioEngine::getActiveCoeffSet(bank);
     const int limit = std::min(kAdaptiveNoiseShaperOrder, maxCoefficients);
 
     for (int i = 0; i < limit; ++i)
@@ -644,6 +648,13 @@ void AudioEngine::setCurrentAdaptiveCoefficients(const double* coeffs, int numCo
 {
     if (coeffs == nullptr || numCoefficients <= 0)
         return;
+
+    // 学習中は UI からの係数更新を拒否（競合防止）
+    if (isNoiseShaperLearning())
+    {
+        juce::Logger::writeToLog("[AudioEngine] Coefficient update rejected during learning");
+        return;
+    }
 
     const int bankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
     double stagedCoefficients[kAdaptiveNoiseShaperOrder] = {};
@@ -662,7 +673,7 @@ void AudioEngine::getAdaptiveCoefficientsForSampleRate(double sampleRate, double
         return;
 
     const auto& bank = getAdaptiveCoeffBankForIndex(resolveAdaptiveCoeffBankIndex(sampleRate));
-    const auto* coeffSet = bank.current.load(std::memory_order_acquire);
+    const auto* coeffSet = AudioEngine::getActiveCoeffSet(bank);
     const int limit = std::min(kAdaptiveNoiseShaperOrder, maxCoefficients);
 
     for (int i = 0; i < limit; ++i)
@@ -673,6 +684,13 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRate(double sampleRate, const 
 {
     if (coeffs == nullptr || numCoefficients <= 0)
         return;
+
+    // 学習中は UI からの係数更新を拒否（競合防止）
+    if (isNoiseShaperLearning())
+    {
+        juce::Logger::writeToLog("[AudioEngine] Coefficient update rejected during learning");
+        return;
+    }
 
     const int bankIndex = resolveAdaptiveCoeffBankIndex(sampleRate);
     double stagedCoefficients[kAdaptiveNoiseShaperOrder] = {};
@@ -693,7 +711,7 @@ void AudioEngine::getAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
     const auto mode = pendingLearningMode.load(std::memory_order_acquire);
     const int bank = getAdaptiveCoeffBankIndex(sampleRate, bitDepth, mode);
     const auto& slot = getAdaptiveCoeffBankForIndex(bank);
-    const CoeffSet* active = slot.current.load(std::memory_order_acquire);
+    const CoeffSet* active = AudioEngine::getActiveCoeffSet(slot);
     if (active)
     {
         const int copyCount = std::min(maxCoefficients, kAdaptiveNoiseShaperOrder);
@@ -710,6 +728,13 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
 {
     if (coeffs == nullptr || numCoefficients <= 0)
         return;
+
+    // 学習中は UI からの係数更新を拒否（競合防止）
+    if (isNoiseShaperLearning())
+    {
+        juce::Logger::writeToLog("[AudioEngine] Coefficient update rejected during learning");
+        return;
+    }
 
     const auto mode = pendingLearningMode.load(std::memory_order_acquire);
     const int bankIndex = getAdaptiveCoeffBankIndex(sampleRate, bitDepth, mode);
@@ -756,15 +781,40 @@ void AudioEngine::publishCoeffsToBank(int bankIndex, const double* coeffs)
     if (coeffs == nullptr)
         return;
 
+    // 【安全性向上】Audio Thread からの呼び出しをブロック（デバッグビルド）
+    jassert(!juce::MessageManager::callAsync([]{ return true; }));
+
     auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
-    const auto* current = bank.current.load(std::memory_order_acquire);
-    auto* inactive = (current == &bank.coeffSetA) ? &bank.coeffSetB : &bank.coeffSetA;
+
+    // RAII ガードを使用し、例外発生時もロックが解放されることを保証
+    CoeffSetWriteLockGuard guard(bank);
+
+    // 非アクティブバッファを予約（最大 100 回リトライ）
+    // 学習スレッド/UI スレッドのみなので yield は安全
+    for (int retry = 0; retry < 100; ++retry)
+    {
+        if (guard.acquire())
+            break;
+        std::this_thread::yield();
+    }
+
+    // 予約に失敗した場合は更新をスキップ（稀なケース）
+    if (!guard.isAcquired())
+    {
+        juce::Logger::writeToLog("[AudioEngine] Failed to acquire coeff write lock (bank="
+                                  + juce::String(bankIndex) + ")");
+        return;
+    }
+
+    // 非アクティブバッファに書き込み
+    CoeffSet* inactive = getReservedInactiveCoeffSet(bank);
 
     for (int i = 0; i < kAdaptiveNoiseShaperOrder; ++i)
         inactive->k[i] = coeffs[i];
 
-    bank.current.store(inactive, std::memory_order_release);
-    bank.generation.fetch_add(1u, std::memory_order_acq_rel);
+    // コミット（ロック解放を含む）
+    // commit() を呼ぶことで、デストラクタでの二重解放を回避
+    guard.commit();
 }
 
 bool AudioEngine::getAdaptiveNoiseShaperState(int bankIndex, NoiseShaperLearner::State& outState) const noexcept
@@ -2110,7 +2160,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                         .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
                         .eqLPFMode = eqLPFFilterMode.load(std::memory_order_relaxed),
                         .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
-                        .adaptiveCoeffSet = adaptiveCoeffBank.current.load(std::memory_order_acquire),
+                        .adaptiveCoeffSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank),
                         .adaptiveCoeffGeneration = adaptiveCoeffBank.generation.load(std::memory_order_acquire),
                         .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
                         .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
@@ -2197,7 +2247,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                           .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
                           .eqLPFMode = eqLPFFilterMode.load(std::memory_order_relaxed),
                           .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
-                          .adaptiveCoeffSet = adaptiveCoeffBank.current.load(std::memory_order_acquire),
+                          .adaptiveCoeffSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank),
                           .adaptiveCoeffGeneration = adaptiveCoeffBank.generation.load(std::memory_order_acquire),
                           .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
                           .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
@@ -2727,7 +2777,7 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
         const double* src = alignedL.get();
         double* dst = alignedR.get();
         // 高速なメモリコピー (double配列)
-        std::memcpy(dst, src, numSamples * sizeof(double));
+        juce::FloatVectorOperations::copy(dst, src, numSamples);
     }
 
     // 2. Measure level before gain
@@ -3373,12 +3423,12 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
     {
         ditherBitDepth.store(bitDepth);
         juce::Logger::writeToLog("Dither Bit Depth changed: " + juce::String(bitDepth));
-        
+
         selectAdaptiveCoeffBankForCurrentSettings();
-        
+
         // UI側（学習ウィンドウ）が即座に反映できるように通知
         sendChangeMessage();
-        
+
         const double sr = currentSampleRate.load();
         if (sr > 0.0)
         {

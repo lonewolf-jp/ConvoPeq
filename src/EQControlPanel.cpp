@@ -156,17 +156,6 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
     resetButton.addListener(this);
     addAndMakeVisible(resetButton);
 
-    //------------------------------------------------------
-    // ── Preset Selector ──
-    // プリセットを選択するためのコンボボックスを設定します。
-    //------------------------------------------------------
-    presetSelector.addItem("Default", 1);
-    presetSelector.addItem("Flat", 2);
-    presetSelector.setSelectedId(1, juce::dontSendNotification);
-    presetSelector.setTooltip("Select EQ Preset (Applied on next playback start)");
-    presetSelector.addListener(this);
-    addAndMakeVisible(presetSelector);
-
     //----------------------------------------------------------
     // 出力ローパスフィルター UI ── ② EQ最終段の場合に使用
     // (EQ単体 / Convolver→EQ の場合に有効)
@@ -423,11 +412,6 @@ void EQControlPanel::comboBoxChanged(juce::ComboBox* comboBox)
                 break;
         }
     }
-
-    if (comboBox == &presetSelector)
-    {
-        engine.requestEqPreset(presetSelector.getSelectedItemIndex());
-    }
 }
 
 const EQControlPanel::ControlID* EQControlPanel::findControlId(const juce::Component* control) const
@@ -483,7 +467,6 @@ void EQControlPanel::resized()
     // ── タイトル行とResetボタン ──
     auto titleRow = bounds.removeFromTop(22);
     resetButton.setBounds(titleRow.removeFromRight(64).reduced(2, 2));
-    presetSelector.setBounds(titleRow.removeFromRight(100).reduced(2, 2));
 
     // タイトルの右側に配置 (タイトル幅 約170px確保)
     auto controlsArea = titleRow.withTrimmedLeft(170);

@@ -3,6 +3,7 @@
 //
 // コンボリューションプロセッサーの実装
 //============================================================================
+#include <JuceHeader.h>
 #include "ConvolverProcessor.h"
 #include <algorithm>
 #include <cmath>
@@ -1032,6 +1033,7 @@ public:
                 if (!queued)
                 {
                     juce::MessageManagerLock mmLock;
+                    bool fallbackSucceeded = false;
                     if (mmLock.lockWasGained())
                     {
                         if (auto* ownerPtr = this->weakOwner.get())
@@ -1043,7 +1045,15 @@ public:
                                                                        sizing.firstPartition, blockSize,
                                                                        isRebuild, file,
                                                                        result.scaleFactor, state->loadedIR, state->displayIR);
+                            fallbackSucceeded = true;
                         }
+                    }
+                    // If both callAsync and the fallback lock failed, ensure any allocated
+                    // StereoConvolver is released (defensive cleanup).
+                    if (!fallbackSucceeded && result.newConv != nullptr)
+                    {
+                        result.newConv->release();
+                        result.newConv = nullptr;
                     }
                 }
 
@@ -1145,6 +1155,33 @@ void ConvolverProcessor::timerCallback()
             // 参照カウントを解放するために release() を呼ぶ
             trashBin.push_back({doneFading, juce::Time::getMillisecondCounter()});
         }
+    }
+
+    // 【案 A】Smoothing Time 変更の反映（Message Thread で安全に reset() を実行）
+    if (smoothingTimeChangePending.load(std::memory_order_acquire))
+    {
+        const float newTime = smoothingTimeSec.load(std::memory_order_relaxed);
+        const double sampleRate = currentSampleRate.load(std::memory_order_acquire);
+
+        if (sampleRate > 0.0)
+        {
+            // 現在のスムージング状態を保持
+            const double currentVal = mixSmoother.getCurrentValue();
+            const double targetVal = mixSmoother.getTargetValue();
+
+            // Message Thread で reset() を実行（Audio Thread との競合を回避）
+            mixSmoother.reset(sampleRate, newTime);
+
+            // 状態を復元
+            mixSmoother.setCurrentAndTargetValue(currentVal);
+            mixSmoother.setTargetValue(targetVal);
+
+            // キャッシュを更新
+            currentSmoothingTimeSec = newTime;
+        }
+
+        // フラグをクリア
+        smoothingTimeChangePending.store(false, std::memory_order_release);
     }
 
     cleanup();
@@ -2713,35 +2750,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         mixSmoother.setTargetValue(targetMixValue);
     }
 
-    // Smoothing Timeの更新 (Audio Thread-safe)
-    // UIスレッドで変更された値を検出し、SmoothedValueのランプタイムを再設定する。
-    // reset()は内部係数を再計算するだけで、メモリ確保やロックは行わないため安全。
-    // Smoothing Timeの更新
-    const double newSmoothingTime = smoothingTimeSec.load(std::memory_order_relaxed);
-    if (std::abs(currentSmoothingTimeSec - newSmoothingTime) > 0.0001)
-
-
-
-
-
-
-
-
-
-
-    {
-        // reset()を呼ぶと現在値がリセットされる可能性があるため、
-        // 現在値とターゲット値を保持したままランプ時間のみ更新する手順を踏む
-        // これにより、スムージング時間の変更時に音量が飛ぶのを防ぐ
-        const double sampleRateForSmoother = juce::jmax(1.0, currentSampleRate.load(std::memory_order_acquire));
-        double currentVal = mixSmoother.getCurrentValue();
-        double targetVal = mixSmoother.getTargetValue();
-        mixSmoother.reset(sampleRateForSmoother, newSmoothingTime);
-        mixSmoother.setCurrentAndTargetValue(currentVal); // Restore current value
-        mixSmoother.setTargetValue(targetVal);
-        currentSmoothingTimeSec = newSmoothingTime;
-    }
-
     const bool isSmoothing = mixSmoother.isSmoothing();
 
     // ── 最適化: 処理内容をミックス比率に応じて決定 ──
@@ -2826,18 +2834,18 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 {
                     int rPosInt = iRead; // frac ~ 0.0
                     int samplesFirst = std::min(samplesToRead, DELAY_BUFFER_SIZE - rPosInt);
-                    std::memcpy(dst, srcBuf + rPosInt, samplesFirst * sizeof(double));
+                    juce::FloatVectorOperations::copy(dst, srcBuf + rPosInt, samplesFirst);
                     if (samplesToRead > samplesFirst)
-                        std::memcpy(dst + samplesFirst, srcBuf, (samplesToRead - samplesFirst) * sizeof(double));
+                        juce::FloatVectorOperations::copy(dst + samplesFirst, srcBuf, samplesToRead - samplesFirst);
                     return;
                 }
                 else if (std::abs(frac - 1.0) < 1.0e-6)
                 {
                     int rPosInt = (iRead + 1) & DELAY_BUFFER_MASK; // frac ~ 1.0
                     int samplesFirst = std::min(samplesToRead, DELAY_BUFFER_SIZE - rPosInt);
-                    std::memcpy(dst, srcBuf + rPosInt, samplesFirst * sizeof(double));
+                    juce::FloatVectorOperations::copy(dst, srcBuf + rPosInt, samplesFirst);
                     if (samplesToRead > samplesFirst)
-                        std::memcpy(dst + samplesFirst, srcBuf, (samplesToRead - samplesFirst) * sizeof(double));
+                        juce::FloatVectorOperations::copy(dst + samplesFirst, srcBuf, samplesToRead - samplesFirst);
                     return;
                 }
 
@@ -2963,9 +2971,9 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
                 // AVX2最適化コピー (memcpyは通常最適化されているが、明示的なループ展開も可)
                 // ここではmemcpyを使用 (コンパイラがAVX命令を使用する)
-                std::memcpy(dstBuf, srcBuf + rPos, samplesFirst * sizeof(double));
+                juce::FloatVectorOperations::copy(dstBuf, srcBuf + rPos, samplesFirst);
                 if (samplesSecond > 0)
-                    std::memcpy(dstBuf + samplesFirst, srcBuf, samplesSecond * sizeof(double));
+                    juce::FloatVectorOperations::copy(dstBuf + samplesFirst, srcBuf, samplesSecond);
             }
         }
 
@@ -3371,6 +3379,10 @@ void ConvolverProcessor::setSmoothingTime(float timeSec)
     if (std::abs(smoothingTimeSec.load() - clampedTime) > 1e-5f)
     {
         smoothingTimeSec.store(clampedTime);
+
+        // 【案 A】変更フラグを立て、Message Thread での反映を要求する
+        smoothingTimeChangePending.store(true, std::memory_order_release);
+
         listeners.call(&Listener::convolverParamsChanged, this);
     }
 }

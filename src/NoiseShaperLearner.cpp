@@ -1,6 +1,7 @@
 #include "NoiseShaperLearner.h"
 #include "AudioEngine.h"
 
+#include <JuceHeader.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -809,8 +810,8 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
 
         const auto& segment = trainingSegments[segmentIndex];
         context.shaper.reset();
-        std::memcpy(context.shapedLeft, segment.left, sizeof(context.shapedLeft));
-        std::memcpy(context.shapedRight, segment.right, sizeof(context.shapedRight));
+        juce::FloatVectorOperations::copy(context.shapedLeft, segment.left, AudioSegment::kLength);
+        juce::FloatVectorOperations::copy(context.shapedRight, segment.right, AudioSegment::kLength);
         context.shaper.processStereoBlock(context.shapedLeft,
                                           context.shapedRight,
                                           AudioSegment::kLength,

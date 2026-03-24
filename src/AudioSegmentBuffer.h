@@ -1,5 +1,6 @@
 #pragma once
 
+#include <JuceHeader.h>
 #include <algorithm>
 
 class AudioSegmentBuffer
@@ -20,20 +21,24 @@ public:
         if (left == nullptr || right == nullptr || numSamples <= 0)
             return;
 
-        for (int i = 0; i < numSamples; ++i)
-        {
-            leftSamples[writePosition] = left[i];
-            rightSamples[writePosition] = right[i];
+        int first = std::min(numSamples, kCapacity - writePosition);
+        juce::FloatVectorOperations::copy(leftSamples + writePosition, left, first);
+        juce::FloatVectorOperations::copy(rightSamples + writePosition, right, first);
 
-            ++writePosition;
+        if (first < numSamples)
+        {
+            int second = numSamples - first;
+            juce::FloatVectorOperations::copy(leftSamples, left + first, second);
+            juce::FloatVectorOperations::copy(rightSamples, right + first, second);
+            writePosition = second;
+        }
+        else
+        {
+            writePosition += numSamples;
             if (writePosition >= kCapacity)
                 writePosition = 0;
-
-            // リングバッファが満杯になっても「最新の kCapacity サンプルが利用可能」であることを正しく表現
-            // これにより copyLatest() が常に最新データを返せるようになる（最大の原因解消）
-            // Audio Thread 内で new / vector::resize / mkl_malloc 禁止の規約を厳守
-            totalSamples = std::min(kCapacity, totalSamples + 1);
         }
+        totalSamples = std::min(kCapacity, totalSamples + numSamples);
     }
 
     int copyLatest(double* outLeft, double* outRight, int requestedSamples) const noexcept

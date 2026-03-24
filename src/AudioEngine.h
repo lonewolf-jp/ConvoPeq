@@ -452,22 +452,43 @@ DSPCore();
     std::atomic<bool> analyzerEnabled { false };
     std::atomic<int> ditherBitDepth { 0 }; // 0 = 未初期化 (DeviceSettingsで最大値に設定される)
     std::atomic<NoiseShaperType> noiseShaperType { NoiseShaperType::Psychoacoustic };
-    std::atomic<bool> pendingNoiseShaperLearningStart { false };
-    std::atomic<bool> pendingNoiseShaperLearningResume { false };
-    std::atomic<NoiseShaperLearner::LearningMode> pendingLearningMode { NoiseShaperLearner::LearningMode::Short };
+
+    // 【False Sharing 防止】頻繁な UI 更新変数を独立キャッシュラインへ配置
+    #pragma warning(push)
+    #pragma warning(disable: 4324)
+    alignas(64) std::atomic<bool> pendingNoiseShaperLearningStart { false };
+    alignas(64) std::atomic<bool> pendingNoiseShaperLearningResume { false };
+    alignas(64) std::atomic<NoiseShaperLearner::LearningMode> pendingLearningMode { NoiseShaperLearner::LearningMode::Short };
+    #pragma warning(pop)
+
     std::atomic<int> fixedNoiseLogIntervalMs { 2000 };
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
-    std::atomic<float> saturationAmount { 0.2f };
+
+    #pragma warning(push)
+    #pragma warning(disable: 4324)
+    alignas(64) std::atomic<float> saturationAmount { 0.2f };
+    #pragma warning(pop)
+
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
-    std::atomic<float> inputHeadroomDb { -6.0f };
-    std::atomic<double> inputHeadroomGain { 0.5011872336272722 }; // -6dB
-    std::atomic<float> outputMakeupDb { 12.0f };
-    std::atomic<double> outputMakeupGain { 3.981071705534972 }; // +12dB (unity: -6dB input headroom + -6dB IR safety margin)
+
+    #pragma warning(push)
+    #pragma warning(disable: 4324)
+    alignas(64) std::atomic<float> inputHeadroomDb { -6.0f };
+    alignas(64) std::atomic<double> inputHeadroomGain { 0.5011872336272722 }; // -6dB
+    alignas(64) std::atomic<float> outputMakeupDb { 12.0f };
+    alignas(64) std::atomic<double> outputMakeupGain { 3.981071705534972 }; // +12dB
+    #pragma warning(pop)
+
     std::atomic<int> rebuildGeneration { 0 }; // 非同期リビルドの競合防止用
-    std::atomic<float> convolverInputTrimDb { 0.0f };
-    std::atomic<double> convolverInputTrimGain { 1.0 }; // 0 dB (EQThenConvolver時にコンボルバー入力に適用)
+
+    #pragma warning(push)
+    #pragma warning(disable: 4324)
+    alignas(64) std::atomic<float> convolverInputTrimDb { 0.0f };
+    alignas(64) std::atomic<double> convolverInputTrimGain { 1.0 }; // 0 dB
+    #pragma warning(pop)
+
     bool m_isRestoringState { false }; // requestLoadState 中はデフォルトリセットを抑制 (Message Thread のみ)
     uint32 fixedNoiseLastLogMs = 0;
 
@@ -530,10 +551,11 @@ DSPCore();
         double sampleRateHz = 0.0;
         CoeffSet coeffSetA {};
         CoeffSet coeffSetB {};
-        std::atomic<const CoeffSet*> current { nullptr };
+        std::atomic<int> activeIndex { 0 };   // 0 = A, 1 = B
         std::atomic<uint32_t> generation { 1u };
         NoiseShaperLearner::State state {};
         std::mutex stateMutex;
+        std::atomic<bool> writeLock { false };  // CAS用書き込みロック
     };
 
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
@@ -558,6 +580,84 @@ DSPCore();
     void publishCoeffsToBank(int bankIndex, const double* coeffs);
 
     friend class NoiseShaperLearner;
+
+//==============================================================================
+// インラインヘルパー関数（Adaptive 係数アクセス）
+//==============================================================================
+
+// Audio Thread 用：現在アクティブな係数セットを取得（ロックフリー）
+static inline const CoeffSet* getActiveCoeffSet(const AdaptiveCoeffBankSlot& slot) noexcept
+{
+    return (slot.activeIndex.load(std::memory_order_acquire) == 0)
+           ? &slot.coeffSetA
+           : &slot.coeffSetB;
+}
+
+// 書き込み側用：非アクティブバッファの予約（CAS）
+static inline bool reserveInactiveCoeffSet(AdaptiveCoeffBankSlot& slot) noexcept
+{
+    bool expected = false;
+    return slot.writeLock.compare_exchange_strong(expected, true,
+                                                   std::memory_order_acquire,
+                                                   std::memory_order_relaxed);
+}
+
+// 書き込み側用：予約した非アクティブセットへのポインタ取得
+static inline CoeffSet* getReservedInactiveCoeffSet(AdaptiveCoeffBankSlot& slot) noexcept
+{
+    int active = slot.activeIndex.load(std::memory_order_acquire);
+    return (active == 0) ? &slot.coeffSetB : &slot.coeffSetA;
+}
+
+//==============================================================================
+// RAII ガードクラス（例外安全性確保＋commit() 最適化）
+//==============================================================================
+class CoeffSetWriteLockGuard
+{
+public:
+    explicit CoeffSetWriteLockGuard(AdaptiveCoeffBankSlot& s) noexcept
+        : slot(s), acquired(false), committed(false) {}
+
+    ~CoeffSetWriteLockGuard() noexcept
+    {
+        // commit() が呼ばれていない場合のみ、ロックを解放
+        if (acquired && !committed)
+            slot.writeLock.store(false, std::memory_order_release);
+    }
+
+    bool acquire() noexcept
+    {
+        bool expected = false;
+        acquired = slot.writeLock.compare_exchange_strong(expected, true,
+                                                           std::memory_order_acquire,
+                                                           std::memory_order_relaxed);
+        return acquired;
+    }
+
+    // commit() を呼ぶことで、デストラクタでのロック解放をスキップ
+    void commit() noexcept
+    {
+        if (!acquired || committed)
+            return;
+
+        int oldActive = slot.activeIndex.load(std::memory_order_relaxed);
+        slot.activeIndex.store(1 - oldActive, std::memory_order_release);
+        slot.generation.fetch_add(1u, std::memory_order_acq_rel);
+        slot.writeLock.store(false, std::memory_order_release);
+        committed = true;
+    }
+
+    bool isAcquired() const noexcept { return acquired; }
+    bool isCommitted() const noexcept { return committed; }
+
+    CoeffSetWriteLockGuard(const CoeffSetWriteLockGuard&) = delete;
+    CoeffSetWriteLockGuard& operator=(const CoeffSetWriteLockGuard&) = delete;
+
+private:
+    AdaptiveCoeffBankSlot& slot;
+    bool acquired;
+    bool committed;
+};
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AudioEngine)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)

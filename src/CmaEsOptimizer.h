@@ -28,7 +28,7 @@ public:
 
         std::random_device device;
         rng.seed(device());
-        
+
         for (int i = 0; i < kDim; ++i) mean[i] = 0.0;
         resetIdentityCovariance();
     }
@@ -66,14 +66,14 @@ public:
 
     void serializeTo(double* outMean9, double* outCov45, double& outSigma) const noexcept
     {
-        for (int i = 0; i < kDim; ++i) outMean9[i] = mean[i];
+        std::copy(mean, mean + kDim, outMean9);
         serializeCovUpperTriangle(outCov45);
         outSigma = sigma;
     }
 
     void deserializeFrom(const double* inMean9, const double* inCov45, double inSigma) noexcept
     {
-        for (int i = 0; i < kDim; ++i) mean[i] = inMean9[i];
+        std::copy(inMean9, inMean9 + kDim, mean);
         deserializeCovUpperTriangle(inCov45);
         sigma = inSigma;
     }

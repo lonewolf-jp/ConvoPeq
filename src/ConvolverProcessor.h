@@ -478,11 +478,17 @@ private:
     //----------------------------------------------------------
     // パラメータ（atomic）
     //----------------------------------------------------------
-    std::atomic<bool> bypassed{false};
-    std::atomic<float> mixTarget{1.0f}; // UIからのターゲット値 (0.0-1.0)
-    std::atomic<bool> experimentalDirectHeadEnabled{false};
+    // 【False Sharing 防止】頻繁な UI 更新変数を独立キャッシュラインへ配置
+    #pragma warning(push)
+    #pragma warning(disable: 4324)
+    alignas(64) std::atomic<bool> bypassed{false};
+    alignas(64) std::atomic<float> mixTarget{1.0f}; // UI からのターゲット値 (0.0-1.0)
+    alignas(64) std::atomic<bool> experimentalDirectHeadEnabled{false};
+    #pragma warning(pop)
+
     juce::SmoothedValue<double> mixSmoother; // オーディオスレッドでの平滑化用
     juce::LinearSmoothedValue<double> wetCrossfade; // Wet信号のクロスフェード用
+
     // [Bug G fix] wetCrossfade.isSmoothing() は非スレッドセーフ (Audio Thread が getNextValue() を同時呼び出し)。
     // このフラグを代替として使う: Message Thread が store(), Audio Thread が完了時に clear()。
     std::atomic<bool> wetCrossfadeActive { false };
@@ -490,11 +496,20 @@ private:
     // applyNewState() (Message Thread) は wetCrossfade フィールドへの直接書き込みを行わず、
     // このフラグを立てるだけにする。Audio Thread が process() 先頭で検出し初期化する。
     std::atomic<bool> wetCrossfadeResetPending { false };
-    std::atomic<int> phaseMode{static_cast<int>(PhaseMode::Mixed)};
+
+    #pragma warning(push)
+    #pragma warning(disable: 4324)
+    alignas(64) std::atomic<int> phaseMode{static_cast<int>(PhaseMode::Mixed)};
+    #pragma warning(pop)
+
     std::atomic<std::uint64_t> rebuildDebounceToken { 0 };
     std::atomic<bool> changeNotificationPending { false };
     std::atomic<bool> rebuildPendingAfterLoad { false };
-    std::atomic<int> rebuildDebounceMs { REBUILD_DEBOUNCE_DEFAULT_MS };
+
+    #pragma warning(push)
+    #pragma warning(disable: 4324)
+    alignas(64) std::atomic<int> rebuildDebounceMs { REBUILD_DEBOUNCE_DEFAULT_MS };
+    #pragma warning(pop)
 
     // NUC 出力周波数フィルターモード (Message Thread で更新, finalizeNUC で読む)
     // int として保存し、使用時に enum へキャスト。
@@ -507,6 +522,9 @@ private:
     std::atomic<float> mixedTransitionStartHz{MIXED_F1_DEFAULT_HZ};
     std::atomic<float> mixedTransitionEndHz{MIXED_F2_DEFAULT_HZ};
     std::atomic<float> mixedPreRingTau{MIXED_TAU_DEFAULT};
+
+    // 【案 A】Smoothing Time 変更フラグ（Message Thread 委譲用）
+    std::atomic<bool> smoothingTimeChangePending { false };
 
     //----------------------------------------------------------
     // IR情報

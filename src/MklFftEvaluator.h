@@ -1,5 +1,6 @@
 #pragma once
 
+#include <JuceHeader.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -152,8 +153,8 @@ public:
             currentThreadConfigured = true;
         }
 
-        std::memcpy(inputLeft, errorLeft, sizeof(double) * kFftLength);
-        std::memcpy(inputRight, errorRight, sizeof(double) * kFftLength);
+        juce::FloatVectorOperations::copy(inputLeft, errorLeft, kFftLength);
+        juce::FloatVectorOperations::copy(inputRight, errorRight, kFftLength);
 
         DftiComputeForward(descriptor, inputLeft, spectrumLeft);
         DftiComputeForward(descriptor, inputRight, spectrumRight);

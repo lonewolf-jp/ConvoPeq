@@ -1,4 +1,5 @@
 //============================================================================
+#include <JuceHeader.h>
 #include "CustomInputOversampler.h"
 #include "DspNumericPolicy.h"
 
@@ -288,7 +289,7 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
         return;
 
     const int keep = stage.historyUpKeep;
-    std::memcpy(history + keep, input, static_cast<size_t>(inputSamples) * sizeof(double));
+    juce::FloatVectorOperations::copy(history + keep, input, inputSamples);
 
     for (int n = 0; n < inputSamples; ++n)
     {
@@ -323,7 +324,7 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
         return;
 
     const int keep = stage.historyDownKeep;
-    std::memcpy(history + keep, input, static_cast<size_t>(inputSamples) * sizeof(double));
+    juce::FloatVectorOperations::copy(history + keep, input, inputSamples);
 
     const int outSamples = inputSamples >> 1;
     const double* coeffs = stage.convCoeffs.get();

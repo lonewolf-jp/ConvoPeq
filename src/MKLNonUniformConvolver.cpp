@@ -33,6 +33,7 @@
 //
 //============================================================================
 
+#include <JuceHeader.h>
 #include "MKLNonUniformConvolver.h"
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
@@ -486,16 +487,15 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         }
 
         // ゼロ初期化
-        memset(l.irFreqDomain, 0, irBufSize  * sizeof(double));
-        memset(l.fdlBuf,       0, fdlBufSize * sizeof(double));
-        // [Bug F fix] overlapBuf memset 削除済み
-        memset(l.fftTimeBuf,   0, l.fftSize   * sizeof(double));
-        memset(l.fftOutBuf,    0, l.fftSize   * sizeof(double));
-        memset(l.prevInputBuf, 0, l.partSize  * sizeof(double));
-        memset(l.accumBuf,     0, l.partStride * sizeof(double));
-        memset(l.inputAccBuf,  0, l.partSize  * sizeof(double));
+        juce::FloatVectorOperations::clear(l.irFreqDomain, irBufSize);
+        juce::FloatVectorOperations::clear(l.fdlBuf,       fdlBufSize);
+        juce::FloatVectorOperations::clear(l.fftTimeBuf,   l.fftSize);
+        juce::FloatVectorOperations::clear(l.fftOutBuf,    l.fftSize);
+        juce::FloatVectorOperations::clear(l.prevInputBuf, l.partSize);
+        juce::FloatVectorOperations::clear(l.accumBuf,     l.partStride);
+        juce::FloatVectorOperations::clear(l.inputAccBuf,  l.partSize);
         if (l.tailOutputBuf)
-            memset(l.tailOutputBuf, 0, l.partSize * sizeof(double));
+            juce::FloatVectorOperations::clear(l.tailOutputBuf, l.partSize);
 
         // ── IR プリコンピュート ──
         // 一時バッファ (スタック上では大きすぎるので mkl_malloc)
@@ -686,7 +686,7 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
     }
 
     constexpr double kDenormalThreshold = convo::numeric_policy::kDenormThresholdAudioState;
-    memset(m_directOutBuf, 0, static_cast<size_t>(numSamples) * sizeof(double));
+    juce::FloatVectorOperations::clear(m_directOutBuf, numSamples);
 
     int processed = 0;
     while (processed < numSamples)
@@ -694,10 +694,10 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
         const int chunk = std::min(numSamples - processed, m_directMaxBlock);
 
         if (m_directHistLen > 0)
-            memcpy(m_directWindow, m_directHistory, static_cast<size_t>(m_directHistLen) * sizeof(double));
+            juce::FloatVectorOperations::copy(m_directWindow, m_directHistory, m_directHistLen);
 
         if (input)
-            memcpy(m_directWindow + m_directHistLen, input + processed, static_cast<size_t>(chunk) * sizeof(double));
+            juce::FloatVectorOperations::copy(m_directWindow + m_directHistLen, input + processed, chunk);
         else
             memset(m_directWindow + m_directHistLen, 0, static_cast<size_t>(chunk) * sizeof(double));
 
@@ -730,7 +730,7 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
         }
 
         if (m_directHistLen > 0)
-            memcpy(m_directHistory, m_directWindow + chunk, static_cast<size_t>(m_directHistLen) * sizeof(double));
+            juce::FloatVectorOperations::copy(m_directHistory, m_directWindow + chunk, m_directHistLen);
 
         processed += chunk;
     }
@@ -754,11 +754,11 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
 void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 {
     // ── 1. [prevInput | currentInput] を fftTimeBuf に配置 (Overlap-Save) ──
-    memcpy(l.fftTimeBuf,              l.prevInputBuf, l.partSize * sizeof(double));
-    memcpy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize * sizeof(double));
+    juce::FloatVectorOperations::copy(l.fftTimeBuf,              l.prevInputBuf, l.partSize);
+    juce::FloatVectorOperations::copy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize);
 
     // 現在の入力を次回の "prev" として保存
-    memcpy(l.prevInputBuf, l.inputAccBuf, l.partSize * sizeof(double));
+    juce::FloatVectorOperations::copy(l.prevInputBuf, l.inputAccBuf, l.partSize);
 
     // ── 2. Forward FFT ──
     // 出力は FDL の現在スロットへ直接書き込む
@@ -920,9 +920,9 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
     if (n <= 0 || m_ringBuf == nullptr || src == nullptr) return;
 
     const int first = std::min(n, m_ringSize - m_ringWrite);
-    memcpy(m_ringBuf + m_ringWrite, src, first * sizeof(double));
+    juce::FloatVectorOperations::copy(m_ringBuf + m_ringWrite, src, first);
     if (n > first)
-        memcpy(m_ringBuf, src + first, (n - first) * sizeof(double));
+        juce::FloatVectorOperations::copy(m_ringBuf, src + first, n - first);
 
     m_ringWrite = (m_ringWrite + n) & m_ringMask;
 
@@ -980,9 +980,9 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
 
     if (dst)
     {
-        memcpy(dst, m_ringBuf + m_ringRead, first * sizeof(double));
+        juce::FloatVectorOperations::copy(dst, m_ringBuf + m_ringRead, first);
         if (toRead > first)
-            memcpy(dst + first, m_ringBuf, (toRead - first) * sizeof(double));
+            juce::FloatVectorOperations::copy(dst + first, m_ringBuf, toRead - first);
 
         // 読み取れなかった分をゼロ埋め
         if (toRead < n)
@@ -1072,9 +1072,9 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     jassert(consumed <= numSamples); // この分岐後は consumed == numSamples になるはず
 
                     // Overlap-Save 形式で fftTimeBuf を組み立てる
-                    memcpy(l.fftTimeBuf,              l.prevInputBuf, l.partSize * sizeof(double));
-                    memcpy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize * sizeof(double));
-                    memcpy(l.prevInputBuf, l.inputAccBuf, l.partSize * sizeof(double));
+                    juce::FloatVectorOperations::copy(l.fftTimeBuf,              l.prevInputBuf, l.partSize);
+                    juce::FloatVectorOperations::copy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize);
+                    juce::FloatVectorOperations::copy(l.prevInputBuf, l.inputAccBuf, l.partSize);
 
                     // Forward FFT → FDL の現在スロットへ格納
                     double* currentFDLSlot = l.fdlBuf + l.fdlIndex * l.partStride;
@@ -1083,7 +1083,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     // [最適化2] Linearized ring buffer: mirror write
                     // fdlBuf[fdlIndex + numParts] にも同一データを書き込む。
                     double* mirrorFDLSlot = l.fdlBuf + (l.fdlIndex + l.numParts) * l.partStride;
-                    memcpy(mirrorFDLSlot, currentFDLSlot, l.partStride * sizeof(double));
+                    juce::FloatVectorOperations::copy(mirrorFDLSlot, currentFDLSlot, l.partStride);
 
                     // FDL インデックスを進める (トリガ完了)
                     l.fdlIndex = (l.fdlIndex + 1) & l.fdlMask;
@@ -1375,16 +1375,15 @@ void MKLNonUniformConvolver::Reset()
 
         // [最適化2] Linearized ring buffer: fdlBuf は 2×numParts 分確保済み
         const size_t fdlBufSize = static_cast<size_t>(l.numParts) * 2 * l.partStride;
-        memset(l.fdlBuf,       0, fdlBufSize   * sizeof(double));
-        // [Bug F fix] overlapBuf 削除済み
-        memset(l.fftTimeBuf,   0, l.fftSize     * sizeof(double));
-        memset(l.fftOutBuf,    0, l.fftSize     * sizeof(double));
-        memset(l.prevInputBuf, 0, l.partSize    * sizeof(double));
-        memset(l.accumBuf,     0, l.partStride  * sizeof(double));
-        memset(l.inputAccBuf,  0, l.partSize    * sizeof(double));
+        juce::FloatVectorOperations::clear(l.fdlBuf,       fdlBufSize);
+        juce::FloatVectorOperations::clear(l.fftTimeBuf,   l.fftSize);
+        juce::FloatVectorOperations::clear(l.fftOutBuf,    l.fftSize);
+        juce::FloatVectorOperations::clear(l.prevInputBuf, l.partSize);
+        juce::FloatVectorOperations::clear(l.accumBuf,     l.partStride);
+        juce::FloatVectorOperations::clear(l.inputAccBuf,  l.partSize);
 
         if (l.tailOutputBuf)
-            memset(l.tailOutputBuf, 0, l.partSize * sizeof(double));
+            juce::FloatVectorOperations::clear(l.tailOutputBuf, l.partSize);
 
         l.fdlIndex        = 0;
         l.inputPos        = 0;
@@ -1395,7 +1394,7 @@ void MKLNonUniformConvolver::Reset()
     }
 
     if (m_ringBuf)
-        memset(m_ringBuf, 0, m_ringSize * sizeof(double));
+        juce::FloatVectorOperations::clear(m_ringBuf, m_ringSize);
     m_ringWrite = 0;
     m_ringRead  = 0;
     m_ringAvail = 0;

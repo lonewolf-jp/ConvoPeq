@@ -4,6 +4,7 @@
 // 4-tap error-feedback noise shaper (RT-safe, allocation-free in process)
 //============================================================================
 
+#include <JuceHeader.h>
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -87,7 +88,7 @@ public:
     void reset() noexcept
     {
         for (auto& channelState : errors)
-            channelState.fill(0.0);
+            juce::FloatVectorOperations::clear(channelState.data(), ORDER);
         writePos.fill(0);
         resetDiagnostics();
     }

@@ -11,7 +11,7 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     modeComboBox.addItem("Long", 4);
     modeComboBox.addItem("Ultra", 5);
     modeComboBox.addItem("Continuous", 6);
-    
+
     int initialModeId = 2; // Default to Short
     switch (audioEngine.getNoiseShaperLearningMode())
     {
@@ -23,7 +23,7 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
         case NoiseShaperLearner::LearningMode::Continuous: initialModeId = 6; break;
     }
     modeComboBox.setSelectedId(initialModeId, juce::dontSendNotification);
-    
+
     addAndMakeVisible(modeComboBox);
     addAndMakeVisible(modeLabel);
 
@@ -134,13 +134,12 @@ void NoiseShaperLearningComponent::resized()
     area.removeFromTop(8); // mode行とstatus行の間に余白
 
     auto topStatusRow = area.removeFromTop(24);
-    statusLabel.setBounds(topStatusRow.removeFromLeft(topStatusRow.getWidth() / 2));
-    auto rightStatusRow = topStatusRow;
-    orderLabel.setBounds(rightStatusRow.removeFromLeft(rightStatusRow.getWidth() / 2));
-    sampleRateAndBitDepthLabel.setBounds(rightStatusRow);
+    // Status: Idle | Format: ...
+    auto statusRowLeft = topStatusRow.removeFromLeft(topStatusRow.getWidth() / 2);
+    statusLabel.setBounds(statusRowLeft);
+    sampleRateAndBitDepthLabel.setBounds(topStatusRow); // 右半分にFormat
 
-    area.removeFromTop(4);
-
+    // 空行を削除し、Status/Format行の直後にElapsed/Phase行を配置
     auto timeRow = area.removeFromTop(24);
     elapsedLabel.setBounds(timeRow.removeFromLeft(timeRow.getWidth() / 2));
     phaseLabel.setBounds(timeRow);
@@ -328,9 +327,10 @@ void NoiseShaperLearningComponent::refreshFromEngine()
     }
 
     statusLabel.setText("Status: " + statusToText(status), juce::dontSendNotification);
-    orderLabel.setText("Filter order: " + juce::String(NoiseShaperLearner::kOrder), juce::dontSendNotification);
+    // orderLabel.setText("Filter order: " + juce::String(NoiseShaperLearner::kOrder), juce::dontSendNotification); // 表示だけ消す（内部実装は残す）
 
     sampleRateAndBitDepthLabel.setText("Format: " + juce::String(sr, 0) + " Hz / " + juce::String(bd) + " bit", juce::dontSendNotification);
+    sampleRateAndBitDepthLabel.setFont(phaseLabel.getFont());
 
     juce::String elapsedStr = juce::String(elapsedSec, 1) + " s";
     elapsedLabel.setText("Elapsed audio: " + elapsedStr, juce::dontSendNotification);

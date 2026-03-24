@@ -1,5 +1,6 @@
 #pragma once
 
+#include <JuceHeader.h>
 #include <array>
 #include <algorithm>
 #include <cmath>
@@ -34,7 +35,7 @@ public:
     void reset() noexcept
     {
         for (auto& channelState : states)
-            channelState.fill(0.0);
+            juce::FloatVectorOperations::clear(channelState.data(), kOrder);
     }
 
     void setCoefficients(const double* newCoeffs, int numCoeffs) noexcept
@@ -184,9 +185,9 @@ private:
             const double backward = channelState[static_cast<size_t>(i)];
             const double nextForward = killDenormal(forward + coeffs[static_cast<size_t>(i)] * backward);
             const double nextBackward = killDenormal(coeffs[static_cast<size_t>(i)] * forward + backward);
-            
+
             channelState[static_cast<size_t>(i)] = prev_backward;
-            
+
             forward = nextForward;
             prev_backward = nextBackward;
         }
