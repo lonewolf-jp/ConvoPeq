@@ -24,6 +24,12 @@ namespace
         0.46, 0.28, 0.17, 0.09
     };
 
+    static constexpr std::array<double, convo::Fixed15TapNoiseShaper::ORDER> kFixed15TapNoiseShaperTunedCoeffs
+    {
+        // 15th-order noise shaper coefficients (psychoacoustically optimized)
+        2.033, -2.165, 1.959, -1.590, 1.221, -0.886, 0.604, -0.389, 0.235, -0.132, 0.068, -0.031, 0.012, -0.004, 0.001
+    };
+
     static constexpr std::array<double, kAdaptiveNoiseShaperOrder> kDefaultAdaptiveNoiseShaperCoeffs
     {
         0.82, -0.68, 0.55, -0.43, 0.33, -0.25, 0.18, -0.12, 0.07
@@ -509,7 +515,7 @@ const NoiseShaperLearner::Progress& AudioEngine::getNoiseShaperLearningProgress(
     return noiseShaperLearner->getProgress();
 }
 
-int AudioEngine::copyNoiseShaperLearningHistory(float* outScores, int maxPoints) const noexcept
+int AudioEngine::copyNoiseShaperLearningHistory(double* outScores, int maxPoints) const noexcept
 {
     return noiseShaperLearner ? noiseShaperLearner->copyBestScoreHistory(outScores, maxPoints) : 0;
 }
@@ -782,7 +788,8 @@ void AudioEngine::publishCoeffsToBank(int bankIndex, const double* coeffs)
         return;
 
     // 【安全性向上】Audio Thread からの呼び出しをブロック（デバッグビルド）
-    jassert(!juce::MessageManager::callAsync([]{ return true; }));
+    // Message Thread またはオフラインレンダリング時のみ許可
+    jassert (juce::MessageManager::getInstance()->isCurrentlyOnMessageThread());
 
     auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
 
@@ -1527,6 +1534,11 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
         fixedNoiseShaper.setCoefficients(kFixedNoiseShaperTunedCoeffs);
         fixedNoiseShaper.prepare(newSampleRate, bitDepth);
     }
+    else if (selectedNoiseShaperType == NoiseShaperType::Fixed15Tap)
+    {
+        fixed15TapNoiseShaper.setCoefficients(kFixed15TapNoiseShaperTunedCoeffs);
+        fixed15TapNoiseShaper.prepare(newSampleRate, bitDepth);
+    }
     else
     {
         adaptiveNoiseShaper.prepare(bitDepth);
@@ -1891,6 +1903,7 @@ void AudioEngine::timerCallback()
         dsp->convolver.cleanup();
 
         const bool activeFixed4Tap = (dsp->noiseShaperType == NoiseShaperType::Fixed4Tap);
+        const bool activeFixed15Tap = (dsp->noiseShaperType == NoiseShaperType::Fixed15Tap);
         const bool activeDitherEnabled = (dsp->ditherBitDepth > 0);
 
         if (activeFixed4Tap && activeDitherEnabled)
@@ -1918,6 +1931,37 @@ void AudioEngine::timerCallback()
                 {
                     juce::Logger::writeToLog(
                         "[Fixed4Tap] waiting for diagnostics window"
+                        " (bitDepth=" + juce::String(dsp->ditherBitDepth)
+                        + ", targetWindow=" + juce::String(fixedNoiseWindowSamples.load(std::memory_order_relaxed))
+                        + ")");
+                }
+            }
+        }
+        else if (activeFixed15Tap && activeDitherEnabled)
+        {
+            dsp->fixed15TapNoiseShaper.setDiagnosticsWindowSamples(
+                static_cast<uint32_t>(fixedNoiseWindowSamples.load(std::memory_order_relaxed)));
+
+            const uint32 now = juce::Time::getMillisecondCounter();
+            const uint32 intervalMs = static_cast<uint32>(
+                std::max(250, fixedNoiseLogIntervalMs.load(std::memory_order_relaxed)));
+            if ((now - fixedNoiseLastLogMs) >= intervalMs)
+            {
+                fixedNoiseLastLogMs = now;
+                const auto diag = dsp->fixed15TapNoiseShaper.getDiagnostics();
+                if (diag.windowSamples > 0)
+                {
+                    juce::Logger::writeToLog(
+                        "[Fixed15Tap] bitDepth=" + juce::String(diag.bitDepth)
+                        + " rmsL=" + juce::String(diag.rmsErrorL, 9)
+                        + " rmsR=" + juce::String(diag.rmsErrorR, 9)
+                        + " peak=" + juce::String(diag.peakAbsError, 9)
+                        + " windowSamples=" + juce::String((int)diag.windowSamples));
+                }
+                else
+                {
+                    juce::Logger::writeToLog(
+                        "[Fixed15Tap] waiting for diagnostics window"
                         " (bitDepth=" + juce::String(dsp->ditherBitDepth)
                         + ", targetWindow=" + juce::String(fixedNoiseWindowSamples.load(std::memory_order_relaxed))
                         + ")");
@@ -2963,6 +3007,10 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         {
             fixedNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
         }
+        else if (noiseShaperType == NoiseShaperType::Fixed15Tap)
+        {
+            fixed15TapNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+        }
         else if (noiseShaperType == NoiseShaperType::Adaptive9thOrder)
         {
             adaptiveNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
@@ -3060,6 +3108,8 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     {
         if (noiseShaperType == NoiseShaperType::Fixed4Tap)
             fixedNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+        else if (noiseShaperType == NoiseShaperType::Fixed15Tap)
+            fixed15TapNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
         else if (noiseShaperType == NoiseShaperType::Adaptive9thOrder)
             adaptiveNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
         else

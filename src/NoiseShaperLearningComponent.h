@@ -23,18 +23,18 @@ private:
     class ProgressGraph : public juce::Component
     {
     public:
-        void setHistory(const float* values, int count);
+        void setHistory(const double* values, int count);
         void paint(juce::Graphics& g) override;
 
     private:
-        std::array<float, NoiseShaperLearner::kMaxHistoryPoints> history {};
+        std::array<double, NoiseShaperLearner::kMaxHistoryPoints> history {};
         int historySize = 0;
     };
 
     void timerCallback() override;
     void refreshFromEngine();
     static juce::String statusToText(NoiseShaperLearner::Status status);
-    static juce::String formatScore(float score);
+    static juce::String formatScore(double score);
 
     AudioEngine& audioEngine;
     ProgressGraph progressGraph;
@@ -56,7 +56,7 @@ private:
     juce::Label phaseLabel;
     juce::Label messageLabel;
 
-    std::array<float, NoiseShaperLearner::kMaxHistoryPoints> historyBuffer {};
+    std::array<double, NoiseShaperLearner::kMaxHistoryPoints> historyBuffer {};
 
     class PeriodicSaver : public juce::Timer
     {

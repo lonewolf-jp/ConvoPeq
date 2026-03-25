@@ -220,6 +220,7 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     noiseShaperComboBox.addItem("4th-order", 1);
     noiseShaperComboBox.addItem("9th-order", 2);
     noiseShaperComboBox.addItem("9th-order adaptive", 3);
+    noiseShaperComboBox.addItem("15th-order", 4);
     noiseShaperComboBox.onChange = [this] {
         const int id = noiseShaperComboBox.getSelectedId();
         if (id == 1)
@@ -228,6 +229,8 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
             audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Psychoacoustic);
         else if (id == 3)
             audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Adaptive9thOrder);
+        else if (id == 4)
+            audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Fixed15Tap);
 
         updateNoiseShaperControls();
     };
@@ -317,6 +320,9 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     {
         case AudioEngine::NoiseShaperType::Fixed4Tap:
             noiseShaperComboBox.setSelectedId(1, juce::dontSendNotification);
+            break;
+        case AudioEngine::NoiseShaperType::Fixed15Tap:
+            noiseShaperComboBox.setSelectedId(4, juce::dontSendNotification);
             break;
         case AudioEngine::NoiseShaperType::Adaptive9thOrder:
             noiseShaperComboBox.setSelectedId(3, juce::dontSendNotification);
@@ -464,7 +470,7 @@ void DeviceSettings::showAdaptiveLearningWindow()
 
 void DeviceSettings::updateNoiseShaperControls()
 {
-    const bool showFixedControls = noiseShaperComboBox.getSelectedId() == 1;
+    const bool showFixedControls = noiseShaperComboBox.getSelectedId() == 1 || noiseShaperComboBox.getSelectedId() == 4;
     const bool showAdaptiveButton = noiseShaperComboBox.getSelectedId() == 3;
 
     fixedNoiseLogIntervalLabel.setVisible(showFixedControls);
@@ -746,7 +752,7 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
                         state.elapsedPlaybackSeconds = stateElement->getDoubleAttribute("elapsedPlaybackSeconds", 0.0);
                         state.currentPhase = stateElement->getIntAttribute("currentPhase", 1);
                         state.iteration = stateElement->getIntAttribute("iteration", 0);
-                        state.bestScore = (float)stateElement->getDoubleAttribute("bestScore", 0.0);
+                        state.bestScore = stateElement->getDoubleAttribute("bestScore", 0.0);
 
                         // version 1 は mode=1 (Short) として読み込む
                         const int modeIdx = 1;
@@ -774,7 +780,7 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
                             state.elapsedPlaybackSeconds = stateElement->getDoubleAttribute("elapsedPlaybackSeconds", 0.0);
                             state.currentPhase = stateElement->getIntAttribute("currentPhase", 1);
                             state.iteration = stateElement->getIntAttribute("iteration", 0);
-                            state.bestScore = (float)stateElement->getDoubleAttribute("bestScore", 0.0);
+                            state.bestScore = stateElement->getDoubleAttribute("bestScore", 0.0);
                             state.processCount = stateElement->getIntAttribute("processCount", 0);
                             state.totalGenerations = static_cast<uint64_t>(stateElement->getStringAttribute("totalGenerations").getLargeIntValue());
 

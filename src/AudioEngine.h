@@ -46,6 +46,7 @@ struct CoeffSet {
 #include "EQProcessor.h"
 #include "PsychoacousticDither.h"
 #include "FixedNoiseShaper.h"
+#include "Fixed15TapNoiseShaper.h"
 #include "LatticeNoiseShaper.h"
 #include "OutputFilter.h"
 #include "DspNumericPolicy.h"
@@ -103,7 +104,8 @@ public:
     {
         Psychoacoustic = 0,
         Fixed4Tap = 1,
-        Adaptive9thOrder = 2
+        Adaptive9thOrder = 2,
+        Fixed15Tap = 3
     };
 
     class Listener
@@ -269,7 +271,7 @@ public:
     NoiseShaperLearner::LearningMode getNoiseShaperLearningMode() const { return pendingLearningMode.load(std::memory_order_acquire); }
     bool isNoiseShaperLearning() const;
     const NoiseShaperLearner::Progress& getNoiseShaperLearningProgress() const;
-    int copyNoiseShaperLearningHistory(float* outScores, int maxPoints) const noexcept;
+    int copyNoiseShaperLearningHistory(double* outScores, int maxPoints) const noexcept;
     // 学習ワーカーが記録したエラーメッセージを返す（UI 表示用）。エラーなしは nullptr。
     const char* getNoiseShaperLearningError() const noexcept;
     static int getAdaptiveSampleRateBankCount() noexcept;
@@ -354,6 +356,7 @@ DSPCore();
         convo::UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
         ::convo::PsychoacousticDither dither;
         ::convo::FixedNoiseShaper fixedNoiseShaper;
+        ::convo::Fixed15TapNoiseShaper fixed15TapNoiseShaper;
         LatticeNoiseShaper adaptiveNoiseShaper;
         // 出力周波数フィルター (① ハイカット/ローカット / ② ローパス/ハイパス)
         convo::OutputFilter outputFilter;

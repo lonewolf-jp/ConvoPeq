@@ -20,6 +20,7 @@ public:
         double noisePower = 0.0;
         double spectralFlatnessPenalty = 0.0;
         double hfPenalty = 0.0;
+        double timeDomainRms = 0.0;
         double compositeScore = 0.0;
     };
 
@@ -105,35 +106,28 @@ public:
         const int ultraHighBins = std::max(1, kSpectrumBins - ultraHighStartBin);
         expectedUltraHighShare = static_cast<double>(ultraHighBins) / static_cast<double>(highBandBins);
 
-        auto lerp = [](double a, double b, double t) noexcept
+        auto bandWeightForHz = [nyquistHz](double f) noexcept
         {
-            return a + ((b - a) * std::clamp(t, 0.0, 1.0));
-        };
-
-        auto bandWeightForHz = [&lerp, nyquistHz](double frequencyHz) noexcept
-        {
-            if (frequencyHz <= 250.0)
-                return 5.5;
-
-            if (frequencyHz <= 1000.0)
-                return lerp(5.5, 4.4, (frequencyHz - 250.0) / 750.0);
-
-            if (frequencyHz <= 4000.0)
-                return lerp(4.4, 2.8, (frequencyHz - 1000.0) / 3000.0);
-
-            if (frequencyHz <= 8000.0)
-                return lerp(2.8, 1.8, (frequencyHz - 4000.0) / 4000.0);
-
-            if (frequencyHz <= 12000.0)
-                return lerp(1.8, 1.25, (frequencyHz - 8000.0) / 4000.0);
-
-            if (frequencyHz <= 18000.0)
-                return lerp(1.25, 0.85, (frequencyHz - 12000.0) / 6000.0);
-
-            if (nyquistHz <= 18000.0)
-                return 0.85;
-
-            return lerp(0.85, 0.60, (frequencyHz - 18000.0) / std::max(nyquistHz - 18000.0, 1.0));
+            // ITU-R BS.468-4 weighting approximation
+            // Reference: https://en.wikipedia.org/wiki/ITU-R_BS.468_weighting
+            if (f < 1.0) f = 1.0;
+            
+            const double f2 = f * f;
+            const double h1 = -4.737338981378384e-24 * f2 * f2 * f2 + 2.043828333606125e-15 * f2 * f2 - 1.363894795463638e-7 * f2 + 1.0;
+            const double h2 = 1.306612257402824e-19 * f2 * f2 * f - 2.118150887541247e-11 * f2 * f + 5.559488023498642e-4 * f;
+            const double r_f = (1.246332637532143e-4 * f) / std::sqrt(h1 * h1 + h2 * h2);
+            
+            // Convert to power weight (squared)
+            double w = r_f * r_f;
+            
+            // Add extra high-frequency roll-off if above 18kHz to avoid over-optimizing inaudible range
+            if (f > 18000.0)
+            {
+                const double rollOff = std::pow(10.0, -12.0 * (f - 18000.0) / std::max(1000.0, nyquistHz - 18000.0) / 20.0);
+                w *= rollOff * rollOff;
+            }
+            
+            return std::max(1.0e-6, w);
         };
 
         for (int bin = 0; bin < kSpectrumBins; ++bin)
@@ -144,7 +138,7 @@ public:
         }
     }
 
-    Result evaluate(const double* errorLeft, const double* errorRight) noexcept
+    Result evaluate(const double* errorLeft, const double* errorRight, const std::vector<double>* maskingThresholds = nullptr) noexcept
     {
         static thread_local bool currentThreadConfigured = false;
         if (!currentThreadConfigured)
@@ -152,6 +146,13 @@ public:
             mkl_set_num_threads_local(1);
             currentThreadConfigured = true;
         }
+
+        double sumSq = 0.0;
+        for (int i = 0; i < kFftLength; ++i)
+        {
+            sumSq += 0.5 * (errorLeft[i] * errorLeft[i] + errorRight[i] * errorRight[i]);
+        }
+        const double timeRms = std::sqrt(sumSq / kFftLength);
 
         juce::FloatVectorOperations::copy(inputLeft, errorLeft, kFftLength);
         juce::FloatVectorOperations::copy(inputRight, errorRight, kFftLength);
@@ -164,6 +165,8 @@ public:
         double flatnessPowerSum = 0.0;
         double highBandEnergy = 0.0;
         double ultraHighEnergy = 0.0;
+        double peakEnergy = 0.0;
+        double totalEnergy = 0.0;
         int flatnessBins = 0;
         constexpr double kEpsilon = 1.0e-24;
 
@@ -176,7 +179,14 @@ public:
             const double averageMagSq = 0.5 * (magSqLeft + magSqRight);
             const double safeMagSq = averageMagSq + kEpsilon;
 
-            weightedNoise += weights[static_cast<size_t>(bin)] * averageMagSq;
+            double effectiveNoise = averageMagSq;
+            if (maskingThresholds != nullptr && bin < (int)maskingThresholds->size())
+            {
+                effectiveNoise = std::max(0.0, averageMagSq - (*maskingThresholds)[bin]);
+            }
+
+            weightedNoise += weights[static_cast<size_t>(bin)] * effectiveNoise;
+            totalEnergy += averageMagSq;
 
             if (bin >= flatnessStartBin && bin <= flatnessEndBin)
             {
@@ -190,6 +200,19 @@ public:
 
             if (bin >= ultraHighStartBin)
                 ultraHighEnergy += averageMagSq;
+
+            // Tonal detection: find peaks relative to neighbors
+            if (bin > 0 && bin < kSpectrumBins - 1)
+            {
+                const double prevMagSq = 0.5 * ((spectrumLeft[bin-1].real * spectrumLeft[bin-1].real + spectrumLeft[bin-1].imag * spectrumLeft[bin-1].imag) +
+                                                (spectrumRight[bin-1].real * spectrumRight[bin-1].real + spectrumRight[bin-1].imag * spectrumRight[bin-1].imag));
+                const double nextMagSq = 0.5 * ((spectrumLeft[bin+1].real * spectrumLeft[bin+1].real + spectrumLeft[bin+1].imag * spectrumLeft[bin+1].imag) +
+                                                (spectrumRight[bin+1].real * spectrumRight[bin+1].real + spectrumRight[bin+1].imag * spectrumRight[bin+1].imag));
+                
+                const double localAvg = (prevMagSq + averageMagSq + nextMagSq) / 3.0;
+                if (averageMagSq > 6.0 * localAvg) // 6dB threshold
+                    peakEnergy = std::max(peakEnergy, averageMagSq);
+            }
         }
 
         Result result;
@@ -206,11 +229,38 @@ public:
         const double observedUltraHighShare = ultraHighEnergy / std::max(highBandEnergy + kEpsilon, kEpsilon);
         const double excessUltraHighShare = std::max(0.0, observedUltraHighShare - expectedUltraHighShare);
         result.hfPenalty = excessUltraHighShare / std::max(1.0 - expectedUltraHighShare, kEpsilon);
+        result.timeDomainRms = timeRms;
+
+        // Tonal penalty (idle tone detection)
+        const double tonalRatio = peakEnergy / (totalEnergy + kEpsilon);
+        const double tonalPenalty = std::max(0.0, tonalRatio - 0.05) * 10.0;
+
         result.compositeScore = result.noisePower
                               * (1.0
                                  + (flatnessPenaltyWeight * result.spectralFlatnessPenalty)
-                                 + (hfPenaltyWeight * result.hfPenalty));
+                                 + (hfPenaltyWeight * result.hfPenalty)
+                                 + tonalPenalty);
         return result;
+    }
+
+    double computeMaskingThreshold(double energy, double freq) const noexcept
+    {
+        // Very simplified masking threshold based on Bark scale
+        // Reference: https://en.wikipedia.org/wiki/Bark_scale
+        const double bark = 13.0 * std::atan(0.00076 * freq) + 3.5 * std::atan(std::pow(freq / 7500.0, 2.0));
+        
+        // Spreading function approximation (simplified)
+        // Masking is stronger at higher frequencies
+        const double offset = -15.0 - (bark * 0.5); // dB
+        return energy * std::pow(10.0, offset / 10.0);
+    }
+
+    void computeFft(const double* dataL, const double* dataR, MKL_Complex16* outL, MKL_Complex16* outR) noexcept
+    {
+        juce::FloatVectorOperations::copy(inputLeft, dataL, kFftLength);
+        juce::FloatVectorOperations::copy(inputRight, dataR, kFftLength);
+        DftiComputeForward(descriptor, inputLeft, outL);
+        DftiComputeForward(descriptor, inputRight, outR);
     }
 
 private:

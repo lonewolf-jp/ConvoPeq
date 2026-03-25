@@ -24,6 +24,21 @@ struct AudioSegment
     static constexpr int kLength = MklFftEvaluator::kFftLength;
     double left[kLength] = {};
     double right[kLength] = {};
+    std::vector<double> maskingThresholds; // Added for Phase 3.5
+};
+
+enum class SpectralType {
+    Broadband,
+    Tonal,
+    Transient
+};
+
+struct LeveledSegment
+{
+    AudioSegment segment;
+    double targetRMS = 0.0;
+    double appliedGain = 1.0;
+    SpectralType type = SpectralType::Broadband;
 };
 
 class NoiseShaperLearner
@@ -39,6 +54,8 @@ public:
     };
 
     enum class LearningMode { Shortest, Short, Middle, Long, Ultra, Continuous };
+    
+    static constexpr int kOrder = LatticeNoiseShaper::kOrder;
 
     struct Progress
     {
@@ -46,8 +63,8 @@ public:
         std::atomic<uint64_t> totalGenerations { 0 };
         std::atomic<int> processCount { 0 };
         std::atomic<int> segmentCount { 0 };
-        std::atomic<float> bestScore { 0.0f };
-        std::atomic<float> latestScore { 0.0f };
+        std::atomic<double> bestScore { 0.0 };
+        std::atomic<double> latestScore { 0.0 };
         std::atomic<Status> status { Status::Idle };
         std::atomic<double> elapsedPlaybackSeconds {0.0};  // UI表示用
         std::atomic<int>    currentPhase {1};
@@ -63,15 +80,44 @@ public:
         double elapsedPlaybackSeconds = 0.0;
         int currentPhase = 1;
         int iteration = 0;
-        float bestScore = 0.0f;
+        double bestScore = 0.0;
         int processCount = 0;
         uint64_t totalGenerations = 0;
+        int learningMode = 0;
     };
 
-    static constexpr int kOrder = LatticeNoiseShaper::kOrder;
-    static constexpr int kMaxTrainingSegments = 8;
+    struct LearnedState
+    {
+        std::array<double, kOrder> bestCoefficients;
+        std::vector<double> cmaMean;
+        double bestScore = 0.0;
+        double sampleRate = 0.0;
+        int bitDepth = 0;
+        int currentPhase = 1;
+        double elapsedPlaybackSeconds = 0.0;
+    };
+
     static constexpr int kMaxHistoryPoints = 256;
     static constexpr int kMaxParallelEvaluators = 6;
+
+    // Multi-level normalization constants
+    static constexpr int kNumLevels = 4;
+    static constexpr double kTargetLevelsDB[kNumLevels] = { -40.0, -30.0, -20.0, -10.0 };
+    static constexpr double kMinRMS = 1.0e-5; // -100dB
+    static constexpr double kPeakHeadroom = 0.95;
+    static constexpr int kMaxSegmentsPerLevel = 4;
+    static constexpr int kMaxTrainingSegments = kNumLevels * kMaxSegmentsPerLevel;
+
+    std::array<double, kNumLevels> currentLevelWeights = { 0.4, 0.3, 0.2, 0.1 };
+
+    static constexpr std::array<double, kOrder> kDefaultCoeffs = {
+        0.82, -0.68, 0.55, -0.43, 0.33, -0.25, 0.18, -0.12, 0.07
+    };
+
+    // tanh mapping scale to allow CMA-ES to explore a reasonable range
+    // atanh(0.995) is approx 3.0, so a range of [-4, 4] in CMA-ES space is good.
+    static constexpr double kCmaEsInitialSigma = 0.15;
+    static constexpr double kCmaEsCoordinateScale = 1.0;
 
     NoiseShaperLearner(AudioEngine& engineRef,
                        LockFreeRingBuffer<AudioBlock, 4096>& captureQueueRef);
@@ -85,8 +131,11 @@ public:
     const Progress& getProgress() const noexcept;
     void getState(State& outState) const noexcept;
     void setState(const State& inState) noexcept;
-    int copyBestScoreHistory(float* destination, int maxPoints) const noexcept;
+    int copyBestScoreHistory(double* destination, int maxPoints) const noexcept;
     void onCoeffBankChanged(int newBankIndex) noexcept;
+
+    bool saveLearnedState(const juce::File& file) const;
+    bool loadLearnedState(const juce::File& file);
 
     // UI 表示用：学習ワーカーが記録したエラーメッセージを返す。
     // エラーがなければ nullptr を返す。
@@ -134,8 +183,9 @@ private:
                              const double* candidateCoefficients,
                              int numSegments,
                              int evaluationBitDepth) noexcept;
+    void precomputeMaskingThresholds(LeveledSegment& seg, double sampleRate) noexcept;
     void publishGenerationResult(const double* coeffs, double score, int evaluatedCandidates) noexcept;
-    void appendHistoryPoint(float score) noexcept;
+    void appendHistoryPoint(double score) noexcept;
 
     int computePhase(LearningMode mode, double playbackSeconds) const noexcept;
     void applyPhaseParams(LearningMode mode, int phase) noexcept;
@@ -161,6 +211,8 @@ private:
     std::atomic<const char*> errorMessage { nullptr };
 
     double accumulatedPlaybackSeconds = 0.0;           // Worker thread専用（非atomic）
+    double sessionSampleRate = 0.0;
+    int sessionBitDepth = 0;
     std::chrono::steady_clock::time_point lastGenerationStart;
     double generationIntervalSeconds = 0.0;
     std::atomic<bool> modeSwitchRequested {false};
@@ -186,9 +238,11 @@ private:
     double candidatePopulation[CmaEsOptimizer::kPopulation][CmaEsOptimizer::kDim] = {};
     double candidateFitness[CmaEsOptimizer::kPopulation] = {};
 
-    AudioSegment trainingSegments[kMaxTrainingSegments] = {};
-    std::array<double, kOrder> bestCoefficients {};
-    std::array<float, kMaxHistoryPoints> bestScoreHistory {};
+    std::array<LeveledSegment, kMaxSegmentsPerLevel> levelBuckets[kNumLevels] = {};
+    int levelBucketCounts[kNumLevels] = {};
+
+    std::array<std::atomic<double>, kOrder> bestCoefficients {};
+    std::array<double, kMaxHistoryPoints> bestScoreHistory {};
     std::atomic<int> historyCount { 0 };
     // bestScoreHistory リングバッファの書き込み先インデックス（historyMutex 保護下で使用）
     int historyHead { 0 };

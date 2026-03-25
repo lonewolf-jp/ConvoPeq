@@ -78,6 +78,11 @@ public:
         sigma = inSigma;
     }
 
+    void setMean(const double* inMean) noexcept
+    {
+        std::copy(inMean, inMean + kDim, mean);
+    }
+
     void initFromParcor(const double* initialParcor) noexcept
     {
         for (int i = 0; i < kDim; ++i)

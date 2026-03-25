@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <numeric>
+#include <vector>
 #include <xmmintrin.h>  // _MM_SET_FLUSH_ZERO_MODE
 #include <pmmintrin.h>  // _MM_SET_DENORMALS_ZERO_MODE
 
@@ -21,7 +23,8 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
     : engine(engineRef),
       captureQueue(captureQueueRef)
 {
-    bestCoefficients.fill(0.0);
+    for (auto& c : bestCoefficients)
+        c.store(0.0, std::memory_order_relaxed);
 
     const unsigned int hardwareThreadCount = std::thread::hardware_concurrency();
     const int usableWorkerCount = hardwareThreadCount > 1
@@ -91,8 +94,8 @@ void NoiseShaperLearner::startLearning(bool resume)
     {
         progress.iteration.store(0, std::memory_order_relaxed);
         progress.segmentCount.store(0, std::memory_order_relaxed);
-        progress.bestScore.store(0.0f, std::memory_order_relaxed);
-        progress.latestScore.store(0.0f, std::memory_order_relaxed);
+        progress.bestScore.store(0.0, std::memory_order_relaxed);
+        progress.latestScore.store(0.0, std::memory_order_relaxed);
         progress.elapsedPlaybackSeconds.store(0.0, std::memory_order_relaxed);
         progress.currentPhase.store(1, std::memory_order_relaxed);
         accumulatedPlaybackSeconds = 0.0;
@@ -100,7 +103,7 @@ void NoiseShaperLearner::startLearning(bool resume)
         historyCount.store(0, std::memory_order_release);
         {
             const std::scoped_lock<std::mutex> lock(historyMutex);
-            bestScoreHistory.fill(0.0f);
+            bestScoreHistory.fill(0.0);
             historyHead = 0;
         }
     }
@@ -215,6 +218,23 @@ void NoiseShaperLearner::applyPhaseParams(LearningMode mode, int phase) noexcept
             break;
     }
 
+    // Adjust level weights based on phase
+    if (phase == 1)
+    {
+        // Phase 1: Focus on high-level signals for stability
+        currentLevelWeights = { 0.1, 0.2, 0.3, 0.4 };
+    }
+    else if (phase == 2)
+    {
+        // Phase 2: Balanced evaluation
+        currentLevelWeights = { 0.25, 0.25, 0.25, 0.25 };
+    }
+    else
+    {
+        // Phase 3: Focus on low-level signals for idle tone detection
+        currentLevelWeights = { 0.5, 0.3, 0.1, 0.1 };
+    }
+
     optimizer.setParams(optParams);
 }
 
@@ -249,12 +269,12 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
         optimizer.initFromParcor(initialCoefficients);
 
         for (int i = 0; i < kOrder; ++i)
-            bestCoefficients[static_cast<size_t>(i)] = initialCoefficients[i];
+            bestCoefficients[static_cast<size_t>(i)].store(initialCoefficients[i], std::memory_order_relaxed);
 
         accumulatedPlaybackSeconds = 0.0;
         progress.iteration.store(0, std::memory_order_relaxed);
-        progress.bestScore.store(0.0f, std::memory_order_relaxed);
-        progress.latestScore.store(0.0f, std::memory_order_relaxed);
+        progress.bestScore.store(0.0, std::memory_order_relaxed);
+        progress.latestScore.store(0.0, std::memory_order_relaxed);
         progress.processCount.store(0, std::memory_order_relaxed);
         progress.totalGenerations.store(0, std::memory_order_relaxed);
     }
@@ -282,7 +302,7 @@ void NoiseShaperLearner::getState(State& outState) const noexcept
 {
     optimizer.serializeTo(outState.mean, outState.covarianceUpperTriangle, outState.sigma);
     for (int i = 0; i < kOrder; ++i)
-        outState.bestCoefficients[i] = bestCoefficients[i];
+        outState.bestCoefficients[i] = bestCoefficients[i].load(std::memory_order_relaxed);
     outState.elapsedPlaybackSeconds = accumulatedPlaybackSeconds;
     outState.currentPhase = currentPhase;
     outState.iteration = progress.iteration.load(std::memory_order_relaxed);
@@ -295,7 +315,7 @@ void NoiseShaperLearner::setState(const State& inState) noexcept
 {
     optimizer.deserializeFrom(inState.mean, inState.covarianceUpperTriangle, inState.sigma);
     for (int i = 0; i < kOrder; ++i)
-        bestCoefficients[i] = inState.bestCoefficients[i];
+        bestCoefficients[i].store(inState.bestCoefficients[i], std::memory_order_relaxed);
     accumulatedPlaybackSeconds = inState.elapsedPlaybackSeconds;
     currentPhase = inState.currentPhase;
     progress.iteration.store(inState.iteration, std::memory_order_relaxed);
@@ -306,7 +326,7 @@ void NoiseShaperLearner::setState(const State& inState) noexcept
     progress.totalGenerations.store(inState.totalGenerations, std::memory_order_relaxed);
 }
 
-int NoiseShaperLearner::copyBestScoreHistory(float* destination, int maxPoints) const noexcept
+int NoiseShaperLearner::copyBestScoreHistory(double* destination, int maxPoints) const noexcept
 {
     if (destination == nullptr || maxPoints <= 0)
         return 0;
@@ -510,6 +530,25 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
     bestCandidateIndex = 0;
     bestCandidateScore = std::numeric_limits<double>::max();
 
+    // First pass: find top candidates
+    std::vector<int> sortedIndices(evaluatedCandidates);
+    std::iota(sortedIndices.begin(), sortedIndices.end(), 0);
+    std::sort(sortedIndices.begin(), sortedIndices.end(), [this](int a, int b) {
+        return candidateFitness[a] < candidateFitness[b];
+    });
+
+    // Elite Re-evaluation: Re-evaluate top 3 candidates to reduce noise/variance
+    const int numElitesToReevaluate = std::min(3, evaluatedCandidates);
+    for (int i = 0; i < numElitesToReevaluate; ++i)
+    {
+        const int idx = sortedIndices[i];
+        // Use a different context or just re-run (if segments were randomized, this would be more effective)
+        // For now, we just re-run to ensure stability.
+        const double secondScore = evaluateCandidate(evaluationWorkers[0].context, candidatePopulation[idx], numSegments, evaluationBitDepth);
+        candidateFitness[idx] = (candidateFitness[idx] + secondScore) * 0.5;
+    }
+
+    // Final pass to find the best
     for (int populationIndex = 0; populationIndex < evaluatedCandidates; ++populationIndex)
     {
         const double score = candidateFitness[populationIndex];
@@ -632,8 +671,8 @@ void NoiseShaperLearner::workerThreadMain()
 
             if (bestCandidateScore < std::numeric_limits<double>::max())
             {
-                progress.latestScore.store(static_cast<float>(bestCandidateScore), std::memory_order_relaxed);
-                appendHistoryPoint(static_cast<float>(bestCandidateScore));
+                progress.latestScore.store(bestCandidateScore, std::memory_order_relaxed);
+                appendHistoryPoint(bestCandidateScore);
             }
 
             progress.iteration.store(generation + 1, std::memory_order_relaxed);
@@ -693,39 +732,59 @@ void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, b
         historyCount.store(0, std::memory_order_release);
         {
             const std::scoped_lock<std::mutex> lock(historyMutex);
-            bestScoreHistory.fill(0.0f);
+            bestScoreHistory.fill(0.0);
             historyHead = 0;
         }
         progress.iteration.store(0, std::memory_order_relaxed);
         progress.segmentCount.store(0, std::memory_order_relaxed);
-        progress.bestScore.store(0.0f, std::memory_order_relaxed);
-        progress.latestScore.store(0.0f, std::memory_order_relaxed);
+        progress.bestScore.store(0.0, std::memory_order_relaxed);
+        progress.latestScore.store(0.0, std::memory_order_relaxed);
     }
 
     progress.status.store(Status::WaitingForAudio, std::memory_order_release);
 
-    const double sessionSampleRate = session.sampleRateHz > 0
+    const double sessionSampleRateVal = session.sampleRateHz > 0
         ? static_cast<double>(session.sampleRateHz)
         : AudioEngine::getAdaptiveSampleRateBankHz(session.adaptiveCoeffBankIndex);
-    const int sessionBitDepth = session.bitDepth > 0
+    const int sessionBitDepthVal = session.bitDepth > 0
         ? session.bitDepth
         : kAdaptiveBitDepthValues[0]; // Fallback to 16-bit if not set
 
-    configureEvaluationContexts(sessionSampleRate);
+    this->sessionSampleRate = sessionSampleRateVal;
+    this->sessionBitDepth = sessionBitDepthVal;
 
-    State savedState;
-    if (resume && engine.getAdaptiveNoiseShaperState(session.adaptiveCoeffBankIndex, savedState) && savedState.iteration > 0)
+    configureEvaluationContexts(sessionSampleRateVal);
+
+    // Try to load persistent state first
+    const auto appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("ConvoPeq");
+    const auto stateFile = appDataDir.getChildFile("learned_state.xml");
+    bool loaded = loadLearnedState(stateFile);
+
+    if (loaded)
     {
-        setState(savedState);
+        // State loaded, but we might still want to resume from engine state if it's more recent
+        State engineState;
+        if (resume && engine.getAdaptiveNoiseShaperState(session.adaptiveCoeffBankIndex, engineState) && engineState.iteration > 0)
+        {
+            setState(engineState);
+        }
     }
     else
     {
-        double initialCoefficients[kOrder] = {};
-        engine.getAdaptiveCoefficientsForSampleRateAndBitDepth(sessionSampleRate, sessionBitDepth, initialCoefficients, kOrder);
-        optimizer.initFromParcor(initialCoefficients);
+        State savedState;
+        if (resume && engine.getAdaptiveNoiseShaperState(session.adaptiveCoeffBankIndex, savedState) && savedState.iteration > 0)
+        {
+            setState(savedState);
+        }
+        else
+        {
+            double initialCoefficients[kOrder] = {};
+            engine.getAdaptiveCoefficientsForSampleRateAndBitDepth(this->sessionSampleRate, this->sessionBitDepth, initialCoefficients, kOrder);
+            optimizer.initFromParcor(initialCoefficients);
 
-        for (int i = 0; i < kOrder; ++i)
-            bestCoefficients[static_cast<size_t>(i)] = initialCoefficients[i];
+            for (int i = 0; i < kOrder; ++i)
+                bestCoefficients[static_cast<size_t>(i)].store(initialCoefficients[i], std::memory_order_relaxed);
+        }
     }
 }
 
@@ -747,49 +806,80 @@ void NoiseShaperLearner::drainCaptureQueue(const SessionSignature& session) noex
 
 int NoiseShaperLearner::buildTrainingSegments() noexcept
 {
+    // Reset buckets
+    for (int i = 0; i < kNumLevels; ++i)
+        levelBucketCounts[i] = 0;
+
     double recentLeft[kRecentSampleRequest] = {};
     double recentRight[kRecentSampleRequest] = {};
 
     const int maxRequired = kRecentSampleRequest;
     const int copiedSamples = segmentBuffer.copyLatest(recentLeft, recentRight, maxRequired);
 
-    if (copiedSamples < AudioSegment::kLength / 2)
+    if (copiedSamples < AudioSegment::kLength)
         return 0;
 
-    int segmentCount = 0;
+    int totalSegments = 0;
     const int usableSamples = copiedSamples;
-    const double segmentSec = static_cast<double>(AudioSegment::kLength) / engine.currentSampleRate.load(std::memory_order_acquire);
 
     for (int start = 0;
          start + AudioSegment::kLength <= usableSamples
-         && segmentCount < kMaxTrainingSegments;
+         && totalSegments < kMaxTrainingSegments;
          start += kSegmentHop)
     {
         double sumSquares = 0.0;
+        double maxPeak = 0.0;
         for (int sample = 0; sample < AudioSegment::kLength; ++sample)
         {
-            const double leftSample = recentLeft[start + sample];
-            const double rightSample = recentRight[start + sample];
-            sumSquares += 0.5 * ((leftSample * leftSample) + (rightSample * rightSample));
+            const double l = recentLeft[start + sample];
+            const double r = recentRight[start + sample];
+            sumSquares += 0.5 * (l * l + r * r);
+            maxPeak = std::max(maxPeak, std::max(std::abs(l), std::abs(r)));
         }
 
         const double rms = std::sqrt(sumSquares / static_cast<double>(AudioSegment::kLength));
-        if (rms < 1.0e-4)
+        if (rms < kMinRMS)
             continue;
 
-        // BUG FIX: Normalize to a safe RMS level (0.2) to prevent clipping in the quantizer.
-        // Removed gain normalization to allow the optimizer to adapt to the actual signal level.
-        auto& segment = trainingSegments[segmentCount];
-        for (int sample = 0; sample < AudioSegment::kLength; ++sample)
-        {
-            segment.left[sample] = recentLeft[start + sample];
-            segment.right[sample] = recentRight[start + sample];
-        }
+        // Spectral classification
+        const double crestFactor = (rms > 1e-9) ? (maxPeak / rms) : 1.0;
+        SpectralType type = SpectralType::Broadband;
+        if (crestFactor > 5.0) type = SpectralType::Transient;
+        else if (crestFactor < 1.6) type = SpectralType::Tonal;
 
-        ++segmentCount;
+        // For each target level, if the bucket is not full, add a normalized version
+        for (int i = 0; i < kNumLevels; ++i)
+        {
+            if (levelBucketCounts[i] < kMaxSegmentsPerLevel)
+            {
+                const double targetRMS = std::pow(10.0, kTargetLevelsDB[i] / 20.0);
+                
+                // Calculate gain to reach target RMS, but limit by peak headroom
+                double gain = targetRMS / rms;
+                if (maxPeak * gain > kPeakHeadroom)
+                    gain = kPeakHeadroom / maxPeak;
+
+                auto& leveled = levelBuckets[i][levelBucketCounts[i]];
+                leveled.targetRMS = targetRMS;
+                leveled.appliedGain = gain;
+                leveled.type = type;
+
+                for (int sample = 0; sample < AudioSegment::kLength; ++sample)
+                {
+                    leveled.segment.left[sample] = recentLeft[start + sample] * gain;
+                    leveled.segment.right[sample] = recentRight[start + sample] * gain;
+                }
+
+                // Precompute masking thresholds for this segment
+                precomputeMaskingThresholds(leveled, this->sessionSampleRate);
+
+                levelBucketCounts[i]++;
+                totalSegments++;
+            }
+        }
     }
 
-    return segmentCount;
+    return totalSegments;
 }
 
 double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
@@ -797,67 +887,205 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
                                              int numSegments,
                                              int evaluationBitDepth) noexcept
 {
-    const int safeBitDepth = evaluationBitDepth > 0 ? evaluationBitDepth : 24;
-    context.shaper.prepare(safeBitDepth);
-    context.shaper.setCoefficients(candidateCoefficients, kOrder);
+    juce::ScopedNoDenormals noDenormals;
+    
+    // Map unconstrained CMA-ES parameters to reflection coefficients using tanh
+    std::array<double, kOrder> mappedCoeffs;
+    for (int i = 0; i < kOrder; ++i)
+        mappedCoeffs[static_cast<size_t>(i)] = std::tanh(candidateCoefficients[i]);
 
-    double totalScore = 0.0;
-    int processedSegments = 0;
-    for (int segmentIndex = 0; segmentIndex < numSegments; ++segmentIndex)
+    context.shaper.prepare(evaluationBitDepth);
+    context.shaper.setCoefficients(mappedCoeffs.data(), kOrder);
+
+    double totalWeightedScore = 0.0;
+    double totalWeight = 0.0;
+
+    for (int i = 0; i < kNumLevels; ++i)
     {
-        if (stopRequested.load(std::memory_order_acquire))
-            break;
+        const int count = levelBucketCounts[i];
+        if (count == 0) continue;
 
-        const auto& segment = trainingSegments[segmentIndex];
-        context.shaper.reset();
-        juce::FloatVectorOperations::copy(context.shapedLeft, segment.left, AudioSegment::kLength);
-        juce::FloatVectorOperations::copy(context.shapedRight, segment.right, AudioSegment::kLength);
-        context.shaper.processStereoBlock(context.shapedLeft,
-                                          context.shapedRight,
-                                          AudioSegment::kLength,
-                                          kOutputHeadroom);
-
-        // BUG FIX: The error must be calculated relative to the headroom-scaled input.
-        for (int sample = 0; sample < AudioSegment::kLength; ++sample)
+        double levelScoreSum = 0.0;
+        for (int j = 0; j < count; ++j)
         {
-            context.errorLeft[sample] = context.shapedLeft[sample] - (segment.left[sample] * kOutputHeadroom);
-            context.errorRight[sample] = context.shapedRight[sample] - (segment.right[sample] * kOutputHeadroom);
+            if (stopRequested.load(std::memory_order_acquire))
+                break;
+
+            const auto& leveled = levelBuckets[i][j];
+            
+            context.shaper.reset();
+            juce::FloatVectorOperations::copy(context.shapedLeft, leveled.segment.left, AudioSegment::kLength);
+            juce::FloatVectorOperations::copy(context.shapedRight, leveled.segment.right, AudioSegment::kLength);
+            
+            context.shaper.processStereoBlock(context.shapedLeft,
+                                              context.shapedRight,
+                                              AudioSegment::kLength,
+                                              kOutputHeadroom);
+
+            // Calculate error relative to headroom-scaled input
+            for (int k = 0; k < AudioSegment::kLength; ++k)
+            {
+                context.errorLeft[k] = context.shapedLeft[k] - (leveled.segment.left[k] * kOutputHeadroom);
+                context.errorRight[k] = context.shapedRight[k] - (leveled.segment.right[k] * kOutputHeadroom);
+            }
+
+            const auto result = context.fftEvaluator.evaluate(context.errorLeft, context.errorRight, &leveled.segment.maskingThresholds);
+            
+    // Hybrid score: blend time domain RMS and frequency domain composite score
+            // Low level (-40/-30dBFS) -> more time domain weight (smaller alpha for freqScore)
+            // High level (-20/-10dBFS) -> more freq domain weight (larger alpha for freqScore)
+            double alpha = 0.5;
+            if (kTargetLevelsDB[i] < -30.0) alpha = 0.3;
+            else if (kTargetLevelsDB[i] > -15.0) alpha = 0.7;
+
+            // Normalize scores to a similar scale for blending
+            // result.timeDomainRms is sigma.
+            // result.compositeScore is roughly N * sigma^2 * penalties.
+            // We use a heuristic scaling to bring them into a comparable range (~0.0 to 1.0 for typical noise).
+            const double timeScore = result.timeDomainRms * 1000.0;
+            const double freqScore = std::sqrt(result.compositeScore / MklFftEvaluator::kFftLength) * 1000.0;
+            
+            levelScoreSum += (alpha * freqScore + (1.0 - alpha) * timeScore);
         }
 
-        totalScore += context.fftEvaluator.evaluate(context.errorLeft, context.errorRight).compositeScore;
-        ++processedSegments;
+        const double levelAverageScore = levelScoreSum / count;
+        const double weight = currentLevelWeights[static_cast<size_t>(i)];
+        totalWeightedScore += levelAverageScore * weight;
+        totalWeight += weight;
     }
 
-    if (processedSegments <= 0)
+    if (totalWeight <= 0.0)
         return std::numeric_limits<double>::max();
 
-    return totalScore / static_cast<double>(processedSegments);
+    return totalWeightedScore / totalWeight;
+}
+
+void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, double sampleRate) noexcept
+{
+    auto& evaluator = evaluationWorkers[0].context.fftEvaluator;
+    
+    MKL_Complex16 spectrumL[MklFftEvaluator::kSpectrumBins];
+    MKL_Complex16 spectrumR[MklFftEvaluator::kSpectrumBins];
+    
+    evaluator.computeFft(leveled.segment.left, leveled.segment.right, spectrumL, spectrumR);
+    
+    leveled.segment.maskingThresholds.resize(MklFftEvaluator::kSpectrumBins);
+    
+    const double binWidth = (sampleRate * 0.5) / (MklFftEvaluator::kSpectrumBins - 1);
+    
+    for (int k = 0; k < MklFftEvaluator::kSpectrumBins; ++k)
+    {
+        const double magSqL = spectrumL[k].real * spectrumL[k].real + spectrumL[k].imag * spectrumL[k].imag;
+        const double magSqR = spectrumR[k].real * spectrumR[k].real + spectrumR[k].imag * spectrumR[k].imag;
+        const double avgMagSq = 0.5 * (magSqL + magSqR);
+        const double freq = k * binWidth;
+        
+        leveled.segment.maskingThresholds[k] = evaluator.computeMaskingThreshold(avgMagSq, freq);
+    }
+}
+
+bool NoiseShaperLearner::saveLearnedState(const juce::File& file) const
+{
+    juce::XmlElement xml("ConvoPeqLearnedState");
+    xml.setAttribute("bestScore", progress.bestScore.load());
+    xml.setAttribute("sampleRate", this->sessionSampleRate);
+    xml.setAttribute("bitDepth", this->sessionBitDepth);
+    xml.setAttribute("phase", progress.currentPhase.load());
+    xml.setAttribute("elapsedPlaybackSeconds", progress.elapsedPlaybackSeconds.load());
+
+    auto* coeffsXml = xml.createNewChildElement("BestCoefficients");
+    for (int i = 0; i < kOrder; ++i)
+        coeffsXml->setAttribute("c" + juce::String(i), bestCoefficients[i].load());
+
+    auto* cmaXml = xml.createNewChildElement("CmaMean");
+    State state;
+    getState(state);
+    for (int i = 0; i < kOrder; ++i)
+        cmaXml->setAttribute("m" + juce::String(i), state.mean[i]);
+
+    return xml.writeTo(file);
+}
+
+bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
+{
+    auto xml = juce::XmlDocument::parse(file);
+    if (xml == nullptr || !xml->hasTagName("ConvoPeqLearnedState"))
+        return false;
+
+    const double savedSampleRate = xml->getDoubleAttribute("sampleRate");
+    const int savedBitDepth = xml->getIntAttribute("bitDepth");
+
+    // Only load if sample rate and bit depth match
+    if (std::abs(savedSampleRate - sessionSampleRate) > 0.1 || savedBitDepth != sessionBitDepth)
+        return false;
+
+    progress.bestScore.store(xml->getDoubleAttribute("bestScore"));
+    progress.currentPhase.store(xml->getIntAttribute("phase"));
+    progress.elapsedPlaybackSeconds.store(xml->getDoubleAttribute("elapsedPlaybackSeconds"));
+
+    if (auto* coeffsXml = xml->getChildByName("BestCoefficients"))
+    {
+        for (int i = 0; i < kOrder; ++i)
+            bestCoefficients[i].store(coeffsXml->getDoubleAttribute("c" + juce::String(i)));
+    }
+    
+    if (auto* cmaXml = xml->getChildByName("CmaMean"))
+    {
+        double mean[kOrder] = {};
+        for (int i = 0; i < kOrder; ++i)
+            mean[i] = cmaXml->getDoubleAttribute("m" + juce::String(i));
+        
+        // We only restore the mean, keeping other CMA state as literature defaults or engine state
+        // unless we want full CMA state persistence. For now, mean + bestCoeffs is a good warm start.
+        optimizer.setMean(mean);
+    }
+
+    return true;
 }
 
 void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double score, int evaluatedCandidates) noexcept
 {
+    // coeffs are in unconstrained space, map to reflection coefficients for the engine
+    std::array<double, kOrder> mappedCoeffs;
     for (int i = 0; i < kOrder; ++i)
-        bestCoefficients[static_cast<size_t>(i)] = coeffs[i];
+    {
+        const double k = std::tanh(coeffs[i]);
+        mappedCoeffs[static_cast<size_t>(i)] = k;
+        bestCoefficients[static_cast<size_t>(i)].store(k, std::memory_order_relaxed);
+    }
 
-    progress.bestScore.store(static_cast<float>(score), std::memory_order_relaxed);
-    engine.publishCoeffs(coeffs);
+    progress.bestScore.store(score, std::memory_order_relaxed);
 
-    // Save current state to AudioEngine so it can be persisted
+    // Save state to disk
+    const auto appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("ConvoPeq");
+    if (!appDataDir.exists()) appDataDir.createDirectory();
+    const auto stateFile = appDataDir.getChildFile("learned_state.xml");
+    saveLearnedState(stateFile);
+
+    // Capture state on worker thread
     State currentState;
     getState(currentState);
 
-    // Get the current bank index from the engine
+    // Capture bank info
     const double sr = engine.getSampleRate();
     const int bd = engine.getDitherBitDepth();
-    const auto currentMode = static_cast<LearningMode>(engine.getNoiseShaperLearningProgress().learningMode.load(std::memory_order_relaxed));
+    const auto currentMode = static_cast<LearningMode>(progress.learningMode.load(std::memory_order_relaxed));
     const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, currentMode);
 
-    engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
-
-    engine.requestAdaptiveAutosave();
+    juce::WeakReference<NoiseShaperLearner> weakSelf(this);
+    
+    juce::MessageManager::callAsync([weakSelf, mappedCoeffs, currentState, bankIndex]() mutable
+    {
+        if (auto* self = weakSelf.get())
+        {
+            self->engine.publishCoeffs(mappedCoeffs.data());
+            self->engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
+            self->engine.requestAdaptiveAutosave();
+        }
+    });
 }
 
-void NoiseShaperLearner::appendHistoryPoint(float score) noexcept
+void NoiseShaperLearner::appendHistoryPoint(double score) noexcept
 {
     const std::scoped_lock<std::mutex> lock(historyMutex);
     const int count = historyCount.load(std::memory_order_relaxed);

@@ -3,31 +3,41 @@
 
 ---
 
-## New in v0.5.4
+## New in v0.5.5
 
-### 1. Robustness and UI/UX Improvements for Adaptive Noise Shaper Learning
+### 1. New 15th-Order Fixed Noise Shaper
 
-- **Race condition prevention & safety:**
-  - Coefficient updates from the UI are now rejected during learning (added isNoiseShaperLearning() check in AudioEngine).
-  - Introduced RAII lock guards for coefficient bank switching/writing, improving thread safety and exception safety.
-  - Added retry logic and explicit lock release on commit.
-- **UI/UX:**
-  - Default height of the Adaptive Noise Shaper Learning window increased to 500px.
-  - Maximum height limit relaxed to 1800px.
-  - The tab underline in the Audio Settings window now extends to the right edge (DeviceSettings.cpp).
+- Added a new 15-tap (15th-order) fixed-coefficient noise shaper (Fixed15TapNoiseShaper) for output dithering.
+- Integrated the new shaper into AudioEngine and UI; selectable as "15th-order" in device settings.
+- Includes diagnostics and logging for the new shaper.
 
-### 2. Core DSP & Bank Management Refactoring/Optimization
+### 2. Adaptive Noise Shaper Learning: Precision & Robustness
 
-- Major refactoring of AudioEngine, NoiseShaperLearner, ConvolverProcessor, EQProcessor, etc.
-- Revised atomic variables/locking for coefficient bank management.
-- Internal implementation of get/set APIs reorganized, with explicit switching between active/inactive buffers.
-- Improved thread safety and code readability throughout.
-- Deleted obsolete files (e.g., removed src/LearningSession.h after role integration).
+- All learning progress, score history, and UI graphing upgraded from float to double precision.
+- Multi-level signal normalization for training: segments are bucketed at -40/-30/-20/-10 dBFS for more robust optimization.
+- Spectral classification (Broadband/Tonal/Transient) and masking threshold calculation added for better idle tone suppression.
+- Hybrid scoring: combines time-domain RMS and frequency-domain metrics for improved learning at low levels.
+- Automatic save/load of learned state (XML) for persistent adaptive shaper training.
 
-### 3. Other
+### 3. Lattice & Fixed Noise Shaper Improvements
 
-- Updated version strings (ProjectMetadata.cmake, README.md, ARCHITECTURE.md, etc.) to v0.5.4.
-- Minor bug fixes and refactoring: small header/cpp tweaks, comment cleanup, and removal of redundant code.
+- LatticeNoiseShaper: Added coefficient ramping (smooth transitions), SIMD state clamping, and TPDF dither for stability and sound quality.
+- FixedNoiseShaper: Improved error calculation and state clamping for better robustness.
+
+### 4. DSP Evaluation & CMA-ES Enhancements
+
+- MklFftEvaluator: Added ITU-R BS.468-4 weighting, tonal penalty, and masking threshold support for more perceptual error evaluation.
+- CmaEsOptimizer: Added setMean() for flexible initialization.
+
+### 5. UI/UX & Miscellaneous
+
+- DeviceSettings: UI and state save/load updated for new shaper and double-precision support.
+- Noise shaper selection UI now includes "15th-order" option.
+- Minor bug fixes, code cleanup, and refactoring throughout.
+
+### 6. Version Update
+
+- Updated all version strings to v0.5.5 (README.md, ARCHITECTURE.md, ProjectMetadata.cmake, etc.).
 
 ---
 

@@ -1,7 +1,7 @@
 //============================================================================
 #pragma once
-// FixedNoiseShaper.h
-// 4-tap error-feedback noise shaper (RT-safe, allocation-free in process)
+// Fixed15TapNoiseShaper.h
+// 15-tap error-feedback noise shaper (RT-safe, allocation-free in process)
 //============================================================================
 
 #include <JuceHeader.h>
@@ -15,11 +15,11 @@
 namespace convo
 {
 
-class FixedNoiseShaper
+class Fixed15TapNoiseShaper
 {
 public:
     static constexpr int MAX_CHANNELS = 8;
-    static constexpr int ORDER = 4;
+    static constexpr int ORDER = 15;
 
     struct Diagnostics
     {
@@ -32,10 +32,6 @@ public:
 
     bool setCoefficients(const std::array<double, ORDER>& newCoeffs) noexcept
     {
-        const double sum = newCoeffs[0] + newCoeffs[1] + newCoeffs[2] + newCoeffs[3];
-        if (std::abs(sum - 1.0) > 1.0e-12)
-            return false;
-
         coeffs = newCoeffs;
         return true;
     }
@@ -142,10 +138,11 @@ private:
         auto& channelErrors = errors[static_cast<size_t>(channel)];
         int& idx = writePos[static_cast<size_t>(channel)];
 
-        const double fb = coeffs[0] * get(channelErrors, idx, 0)
-                        + coeffs[1] * get(channelErrors, idx, 1)
-                        + coeffs[2] * get(channelErrors, idx, 2)
-                        + coeffs[3] * get(channelErrors, idx, 3);
+        double fb = 0.0;
+        for (int i = 0; i < ORDER; ++i)
+        {
+            fb += coeffs[i] * get(channelErrors, idx, i);
+        }
 
         const double y = x - fb;
         const double yq = quantize(y);
@@ -230,7 +227,7 @@ private:
         return q * scale;
     }
 
-    std::array<double, ORDER> coeffs { 0.5, 0.3, 0.15, 0.05 };
+    std::array<double, ORDER> coeffs {};
 
     std::array<std::array<double, ORDER>, MAX_CHANNELS> errors {};
     std::array<int, MAX_CHANNELS> writePos {};

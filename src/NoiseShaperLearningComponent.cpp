@@ -169,7 +169,7 @@ void NoiseShaperLearningComponent::resized()
     progressGraph.setBounds(area.removeFromTop(kGraphHeight));
 }
 
-void NoiseShaperLearningComponent::ProgressGraph::setHistory(const float* values, int count)
+void NoiseShaperLearningComponent::ProgressGraph::setHistory(const double* values, int count)
 {
     historySize = juce::jlimit(0, static_cast<int>(history.size()), count);
     for (int i = 0; i < historySize; ++i)
@@ -205,30 +205,30 @@ void NoiseShaperLearningComponent::ProgressGraph::paint(juce::Graphics& g)
 
     // ── 対数スケールで Y 軸を正規化 ──
     // スコアは 1e-17 〜 1e-15 程度の非常に小さな値で、かつ収束後は
-    // float32 精度で min == max になるため線形スケールでは常に 0 になる。
+    // double 精度で min == max になるため線形スケールでは常に 0 になる。
     // 対数スケールを使うことで収束の進行を可視化する。
-    constexpr float kLogEpsilon = 1.0e-38f; // 対数計算のゼロ除算防止
+    constexpr double kLogEpsilon = 1.0e-38; // 対数計算のゼロ除算防止
 
     // 最新の半分のデータでmin/maxを計算して、最近の変動にフォーカスする
     const int focusStart = historySize / 2;
-    float logMin = std::log10(std::max(history[focusStart], kLogEpsilon));
-    float logMax = logMin;
+    double logMin = std::log10(std::max(history[focusStart], kLogEpsilon));
+    double logMax = logMin;
     for (int i = focusStart + 1; i < historySize; ++i)
     {
-        const float logVal = std::log10(std::max(history[static_cast<size_t>(i)], kLogEpsilon));
+        const double logVal = std::log10(std::max(history[static_cast<size_t>(i)], kLogEpsilon));
         logMin = std::min(logMin, logVal);
         logMax = std::max(logMax, logVal);
     }
 
     // 値が 1 点だけ、または全て同じ場合は表示範囲を広げる
-    if ((logMax - logMin) < 0.01f)
+    if ((logMax - logMin) < 0.01)
     {
-        float center = (logMax + logMin) * 0.5f;
-        logMax = center + 0.005f;
-        logMin = center - 0.005f;
+        double center = (logMax + logMin) * 0.5;
+        logMax = center + 0.005;
+        logMin = center - 0.005;
     }
 
-    const float logRange = logMax - logMin;
+    const double logRange = logMax - logMin;
 
     juce::Path linePath;
     const float xStep = (historySize > 1)
@@ -237,11 +237,11 @@ void NoiseShaperLearningComponent::ProgressGraph::paint(juce::Graphics& g)
 
     for (int i = 0; i < historySize; ++i)
     {
-        const float logVal = std::log10(std::max(history[static_cast<size_t>(i)], kLogEpsilon));
-        float yNorm  = (logVal - logMin) / logRange; // 0=底, 1=頂
-        yNorm = juce::jlimit(0.0f, 1.0f, yNorm);
+        const double logVal = std::log10(std::max(history[static_cast<size_t>(i)], kLogEpsilon));
+        double yNorm  = (logVal - logMin) / logRange; // 0=底, 1=頂
+        yNorm = juce::jlimit(0.0, 1.0, yNorm);
         const float x = plotArea.getX() + static_cast<float>(i) * xStep;
-        const float y = plotArea.getBottom() - (yNorm * plotArea.getHeight());
+        const float y = plotArea.getBottom() - (static_cast<float>(yNorm) * plotArea.getHeight());
 
         if (i == 0)
             linePath.startNewSubPath(x, y);
@@ -252,10 +252,10 @@ void NoiseShaperLearningComponent::ProgressGraph::paint(juce::Graphics& g)
     // 単点の場合は点として描画する
     if (historySize == 1)
     {
-        const float logVal = std::log10(std::max(history[0], kLogEpsilon));
-        const float yNorm  = (logVal - logMin) / logRange;
+        const double logVal = std::log10(std::max(history[0], kLogEpsilon));
+        const double yNorm  = (logVal - logMin) / logRange;
         const float x = plotArea.getCentreX();
-        const float y = plotArea.getBottom() - (yNorm * plotArea.getHeight());
+        const float y = plotArea.getBottom() - (static_cast<float>(yNorm) * plotArea.getHeight());
         g.setColour(juce::Colour(0xff69b7ff));
         g.fillEllipse(x - 3.0f, y - 3.0f, 6.0f, 6.0f);
     }
@@ -269,7 +269,7 @@ void NoiseShaperLearningComponent::ProgressGraph::paint(juce::Graphics& g)
     g.setColour(juce::Colours::white.withAlpha(0.45f));
     g.setFont(juce::FontOptions(10.0f));
 
-    auto formatLogLabel = [](float logVal) -> juce::String
+    auto formatLogLabel = [](double logVal) -> juce::String
     {
         // 例: -16.3 → "1e-16"
         const int exponent = static_cast<int>(std::floor(logVal));
@@ -297,8 +297,8 @@ void NoiseShaperLearningComponent::refreshFromEngine()
     uint64_t totalGenerations = progress.totalGenerations.load(std::memory_order_relaxed);
     int processCount = progress.processCount.load(std::memory_order_relaxed);
     const int segmentCount = progress.segmentCount.load(std::memory_order_relaxed);
-    float bestScore = progress.bestScore.load(std::memory_order_relaxed);
-    const float latestScore = progress.latestScore.load(std::memory_order_relaxed);
+    double bestScore = progress.bestScore.load(std::memory_order_relaxed);
+    const double latestScore = progress.latestScore.load(std::memory_order_relaxed);
     double elapsedSec = progress.elapsedPlaybackSeconds.load(std::memory_order_relaxed);
     int currentPhase = progress.currentPhase.load(std::memory_order_relaxed);
     const auto learningMode = static_cast<NoiseShaperLearner::LearningMode>(progress.learningMode.load(std::memory_order_relaxed));
@@ -415,9 +415,9 @@ juce::String NoiseShaperLearningComponent::statusToText(NoiseShaperLearner::Stat
     return "Unknown";
 }
 
-juce::String NoiseShaperLearningComponent::formatScore(float score)
+juce::String NoiseShaperLearningComponent::formatScore(double score)
 {
     char buffer[32] = {};
-    std::snprintf(buffer, sizeof(buffer), "%.6e", static_cast<double>(score));
+    std::snprintf(buffer, sizeof(buffer), "%.6e", score);
     return juce::String(buffer);
 }
