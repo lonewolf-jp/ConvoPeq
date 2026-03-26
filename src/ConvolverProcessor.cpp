@@ -2654,17 +2654,17 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
 void ConvolverProcessor::refreshLatency()
 {
     auto* conv = convolution.load(std::memory_order_acquire);
+    double totalLatency = 0.0;
     if (conv)
     {
         const int algorithmLatency = conv->storedDirectHeadEnabled ? 0 : juce::jmax(0, conv->latency);
         const int irPeakLatency = juce::jmax(0, conv->irLatency);
-        const int totalLatency = juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY);
-        latencySmoother.setCurrentAndTargetValue(static_cast<double>(totalLatency));
+        totalLatency = static_cast<double>(juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY));
     }
-    else
-    {
-        latencySmoother.setCurrentAndTargetValue(0.0);
-    }
+    
+    // [Issue 2 fix] Audio Thread に更新を委譲。
+    pendingLatencyValue.store(totalLatency, std::memory_order_release);
+    latencyResetPending.store(true, std::memory_order_release);
 }
 
 //--------------------------------------------------------------
@@ -2684,17 +2684,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // Audio Threadは専用スレッドだが、JUCEの内部実装はgetNextAudioBlock()呼び出し前に
     // FTZ/DAZを保証しない。ScopedNoDenormalsでMXCSRのFTZ/DAZビットを関数スコープで保護する。
     juce::ScopedNoDenormals noDenormals;
-    // MKL VMLのデノーマル設定 (thread_localによりスレッドごとに1回のみ呼び出し)
-    // vmlSetModeはスレッド局所設定。メモリ確保なし・ロックなし・wait-free。
-    {
-        thread_local bool vmlDenormalInitialized = false;
-        if (!vmlDenormalInitialized)
-        {
-            vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
-            vmlDenormalInitialized = true;
-        }
-    }
-
+ 
     // ── Step 1: RCU State Load (Lock-free / Wait-free) ──
     // Raw pointer load (No ref counting)
     auto* conv = convolution.load(std::memory_order_acquire);
@@ -2757,16 +2747,17 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     const bool needsDrySignal   = isSmoothing || targetMixValue < 0.999;
 
     // [Bug 1 fix] wetCrossfade ペンディングリセットの処理。
-    // applyNewState() (Message Thread) は wetCrossfade フィールドへ直接書き込まず、
-    // このフラグを経由して Audio Thread に委譲する。これにより Message Thread との
-    // データ競合 (setCurrentAndTargetValue vs getNextValue/isSmoothing) を解消する。
     if (wetCrossfadeResetPending.exchange(false, std::memory_order_acq_rel))
     {
         wetCrossfade.setCurrentAndTargetValue(0.0);
         wetCrossfade.setTargetValue(1.0);
-        // wetCrossfadeActive はすでに applyNewState() で store(true) 済み。
-        // 初回ロードで oldConv が null の場合も wetCrossfade を初期化しておくことで、
-        // 次の IR ロード時に正確なフェードイン開始値から始められる。
+    }
+
+    // [Issue 2 fix] latencySmoother ペンディングリセットの処理。
+    if (latencyResetPending.exchange(false, std::memory_order_acq_rel))
+    {
+        const double val = pendingLatencyValue.load(std::memory_order_acquire);
+        latencySmoother.setCurrentAndTargetValue(val);
     }
 
     const bool isCrossfading = (oldConv != nullptr && wetCrossfadeActive.load(std::memory_order_acquire));
@@ -3192,109 +3183,37 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             {
                 if (validWetSamples > 0)
                 {
-                    if (validWetSamples < kSmallMixThreshold)
-                    {
-                        mixSmoothingSmall(dst, wetSignal, dry,
-                                          wetGains + processed,
-                                          dryGains + processed,
-                                          validWetSamples);
-                    }
-                    else
-                    {
-                        // MKL VML を使用した Dry/Wet ミキシング (スムージング時)
-                        // dst = (wet * wetGains) + (dry * dryGains)
-                        // oldDryBuffer を一時的なスクラッチバッファとして使用
-                        const double* wetGainPtr = wetGains + processed;
-                        const double* dryGainPtr = dryGains + processed;
-                        if (isAligned64(wetSignal) && isAligned64(dry) && isAligned64(dst)
-                            && isAligned64(wetGainPtr) && isAligned64(dryGainPtr))
-                        {
-                            double* temp = oldDryBuffer.getWritePointer(ch);
-                            vdMul(validWetSamples, wetSignal, wetGainPtr, temp);
-                            vdMul(validWetSamples, dry, dryGainPtr, dst);
-                            vdAdd(validWetSamples, dst, temp, dst);
-                        }
-                        else
-                        {
-                            mixSmoothingSmall(dst, wetSignal, dry, wetGainPtr, dryGainPtr, validWetSamples);
-                        }
-                    }
+                    const double* wetGainPtr = wetGains + processed;
+                    const double* dryGainPtr = dryGains + processed;
+                    mixSmoothingSmall(dst, wetSignal, dry, wetGainPtr, dryGainPtr, validWetSamples);
                 }
 
                 // Wet信号が無効な区間 (畳み込みの初期レイテンシーなど)
                 if (chunkSamples > validWetSamples)
                 {
                     const int remainder = chunkSamples - validWetSamples;
-                    if (remainder < kSmallMixThreshold)
-                    {
-                        scaleDrySmall(dst + validWetSamples,
-                                      dry + validWetSamples,
-                                      dryGains + processed + validWetSamples,
-                                      remainder);
-                    }
-                    else
-                    {
-                        const double* remDry = dry + validWetSamples;
-                        const double* remGain = dryGains + processed + validWetSamples;
-                        double* remDst = dst + validWetSamples;
-                        if (isAligned64(remDry) && isAligned64(remGain) && isAligned64(remDst))
-                            vdMul(remainder, remDry, remGain, remDst);
-                        else
-                            scaleDrySmall(remDst, remDry, remGain, remainder);
-                    }
+                    const double* remDry = dry + validWetSamples;
+                    const double* remGain = dryGains + processed + validWetSamples;
+                    double* remDst = dst + validWetSamples;
+                    scaleDrySmall(remDst, remDry, remGain, remainder);
                 }
             }
             else
             {
-                // 定常状態 (99%のケース) -> MKL BLAS を使用して最適化
+                // 定常状態 (99%のケース) -> AVX2 を使用して最適化
                 if (validWetSamples > 0)
                 {
-                    if (validWetSamples < kSmallMixThreshold)
-                    {
-                        mixSteadySmall(dst, wetSignal, dry, wetG, dryG, validWetSamples);
-                    }
-                    else
-                    {
-                        // dst = dryG * dry + wetG * wetSignal
-                        // cblas_daxpby (y := alpha*x + beta*y) を使用
-                        // 1. dst に dry をコピー
-                        if (isAligned64(dry) && isAligned64(dst) && isAligned64(wetSignal))
-                        {
-                            cblas_dcopy(validWetSamples, dry, 1, dst, 1);
-                            // 2. dst = wetG * wetSignal + dryG * dst (dstはdryで初期化済み)
-                            cblas_daxpby(validWetSamples, wetG, wetSignal, 1, dryG, dst, 1);
-                        }
-                        else
-                        {
-                            mixSteadySmall(dst, wetSignal, dry, wetG, dryG, validWetSamples);
-                        }
-                    }
+                    mixSteadySmall(dst, wetSignal, dry, wetG, dryG, validWetSamples);
                 }
 
                 // Wetが無効な区間 (初期レイテンシー等) -> Dryのみ出力
                 if (chunkSamples > validWetSamples)
                 {
                     const int remainder = chunkSamples - validWetSamples;
-                    if (remainder < kSmallMixThreshold)
-                    {
-                        for (int i = 0; i < remainder; ++i)
-                            dst[validWetSamples + i] = dry[validWetSamples + i] * dryG;
-                    }
-                    else
-                    {
-                        const double* remDry = dry + validWetSamples;
-                        double* remDst = dst + validWetSamples;
-                        if (isAligned64(remDry) && isAligned64(remDst))
-                        {
-                            cblas_dcopy(remainder, remDry, 1, remDst, 1);
-                            cblas_dscal(remainder, dryG, remDst, 1);
-                        }
-                        else
-                        {
-                            for (int i = 0; i < remainder; ++i)
-                                remDst[i] = remDry[i] * dryG;
-                        }
-                    }
+                    const double* remDry = dry + validWetSamples;
+                    double* remDst = dst + validWetSamples;
+                    // mixSteadySmall を wetG=0 で呼べば dryG * dry と同じ
+                    mixSteadySmall(remDst, remDry, remDry, 0.0, dryG, remainder);
                 }
             }
 
@@ -3569,19 +3488,15 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         auto* newConv = static_cast<StereoConvolver*>(mem);
         newConv->addRef();
 
+        convo::FilterSpec spec;
+        spec.sampleRate = sr;
+        spec.hcMode = static_cast<convo::HCMode>(nucHCMode.load(std::memory_order_acquire));
+        spec.lcMode = static_cast<convo::LCMode>(nucLCMode.load(std::memory_order_acquire));
+
         if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
                   maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,
                   experimentalDirectHeadEnabled.load(std::memory_order_acquire),
-                          [&]() -> const convo::FilterSpec* {
-                              // NUC フィルタースペックを Message Thread 上で構築。
-                              // init() は渡されたポインタを同期呼び出し内でのみ使用し保持しないため、
-                              // スタックローカルで十分（thread_local は不要）。
-                              convo::FilterSpec spec;
-                              spec.sampleRate = sr;
-                              spec.hcMode = static_cast<convo::HCMode>(nucHCMode.load(std::memory_order_acquire));
-                              spec.lcMode = static_cast<convo::LCMode>(nucLCMode.load(std::memory_order_acquire));
-                              return &spec;
-                          }()))
+                  &spec))
         {
             jassert(newConv->areNUCDescriptorsCommitted());
             applyNewState(newConv, loadedIR, sr, length, isRebuild, irFile, scaleFactor, displayIR);

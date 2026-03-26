@@ -24,17 +24,34 @@ static inline double calculateRMS(const double* data, int numSamples) noexcept
     if (data == nullptr || numSamples <= 0)
         return 0.0;
 
-    // cblas_dnrm2 computes the Euclidean norm (L2 norm) of a vector:
-    // sqrt(x[0]^2 + x[1]^2 + ... + x[n-1]^2)
-    const double norm = cblas_dnrm2(numSamples, data, 1);
+    double sumSq = 0.0;
+#if defined(__AVX2__)
+    int i = 0;
+    const int vEnd = numSamples / 4 * 4;
+    __m256d vSumSq = _mm256_setzero_pd();
+    for (; i < vEnd; i += 4)
+    {
+        __m256d vData = _mm256_loadu_pd(data + i);
+        vSumSq = _mm256_fmadd_pd(vData, vData, vSumSq);
+    }
+    alignas(32) double temp[4];
+    _mm256_store_pd(temp, vSumSq);
+    sumSq = temp[0] + temp[1] + temp[2] + temp[3];
+    for (; i < numSamples; ++i)
+        sumSq += data[i] * data[i];
+#else
+    for (int i = 0; i < numSamples; ++i)
+        sumSq += data[i] * data[i];
+#endif
 
-    // RMS = norm / sqrt(n)
+    // RMS = sqrt(sumSq / n)
     // Audio Thread内でのlibm呼び出しを避けるため、SSE2命令で平方根を計算する
     __m128d n = _mm_set_sd(static_cast<double>(numSamples));
-    __m128d sqrtN = _mm_sqrt_sd(n, n);
-    double denom;
-    _mm_store_sd(&denom, sqrtN);
-    return (denom > 0.0) ? (norm / denom) : 0.0;
+    __m128d vSumSqSd = _mm_set_sd(sumSq);
+    __m128d vRms = _mm_sqrt_sd(_mm_setzero_pd(), _mm_div_sd(vSumSqSd, n));
+    double rms;
+    _mm_store_sd(&rms, vRms);
+    return rms;
 }
 
 //--------------------------------------------------------------

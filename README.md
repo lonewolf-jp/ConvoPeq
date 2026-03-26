@@ -3,41 +3,41 @@
 
 ---
 
-## New in v0.5.5
+## New in v0.5.6
 
-### 1. New 15th-Order Fixed Noise Shaper
+### Main Source Code Changes from v0.5.5 to v0.5.6
 
-- Added a new 15-tap (15th-order) fixed-coefficient noise shaper (Fixed15TapNoiseShaper) for output dithering.
-- Integrated the new shaper into AudioEngine and UI; selectable as "15th-order" in device settings.
-- Includes diagnostics and logging for the new shaper.
+- **Versioning**: Unified all version strings to v0.5.6 (README.md, ARCHITECTURE.md, ProjectMetadata.cmake, etc.).
 
-### 2. Adaptive Noise Shaper Learning: Precision & Robustness
+- **AudioEngine/General Optimization & Safety**:
+  - Optimized AudioBlock initialization (avoided zero-initialization, used memcpy for speed).
+  - Changed EQ response curve buffers from std::vector to std::array, unified NUM_DISPLAY_BARS in AudioEngine.
+  - Removed BLAS dependencies (cblas_dscal, etc.), unified to AVX2/SIMD-based scaleBlockFallback for real-time safety.
+  - Removed pinCurrentThreadToAudioCoreIfNeeded() (simplified thread affinity control).
+  - Removed dynamic buffer resizing in EQ response calculation (fixed-length, no runtime allocation).
 
-- All learning progress, score history, and UI graphing upgraded from float to double precision.
-- Multi-level signal normalization for training: segments are bucketed at -40/-30/-20/-10 dBFS for more robust optimization.
-- Spectral classification (Broadband/Tonal/Transient) and masking threshold calculation added for better idle tone suppression.
-- Hybrid scoring: combines time-domain RMS and frequency-domain metrics for improved learning at low levels.
-- Automatic save/load of learned state (XML) for persistent adaptive shaper training.
+- **Noise Shaper (Fixed/Lattice/15Tap) Improvements**:
+  - Unified random number generation to Xoshiro256++ and implemented high-quality TPDF dither in all noise shapers.
+  - quantize() now adds TPDF dither, each channel holds independent RNG state.
+  - LatticeNoiseShaper, FixedNoiseShaper, and Fixed15TapNoiseShaper all use the same RNG/dither logic.
 
-### 3. Lattice & Fixed Noise Shaper Improvements
+- **ConvolverProcessor/MKLNonUniformConvolver Robustness & Bug Fixes**:
+  - Changed latency update to atomic flag delegation to Audio Thread for thread safety.
+  - Optimized wet/dry mix (removed BLAS, unified to AVX2/scalar functions).
+  - Simplified FilterSpec construction in finalizeNUCEngineOnMessageThread.
+  - MKLNonUniformConvolver: Added OOM error handling, fixed block count calculation to use ceiling division.
+  - Expanded addFallback usage (removed BLAS dependency).
 
-- LatticeNoiseShaper: Added coefficient ramping (smooth transitions), SIMD state clamping, and TPDF dither for stability and sound quality.
-- FixedNoiseShaper: Improved error calculation and state clamping for better robustness.
+- **EQProcessor/Spectrum Analyzer/UI**:
+  - EQProcessor: RMS calculation now uses AVX2/SIMD+SSE2 sqrt (no libm/BLAS, real-time safe).
+  - SpectrumAnalyzerComponent: Now gets NUM_DISPLAY_BARS from AudioEngine.
 
-### 4. DSP Evaluation & CMA-ES Enhancements
+- **AudioSegmentBuffer**:
+  - write position and sample count management changed to std::atomic for thread safety.
 
-- MklFftEvaluator: Added ITU-R BS.468-4 weighting, tonal penalty, and masking threshold support for more perceptual error evaluation.
-- CmaEsOptimizer: Added setMean() for flexible initialization.
-
-### 5. UI/UX & Miscellaneous
-
-- DeviceSettings: UI and state save/load updated for new shaper and double-precision support.
-- Noise shaper selection UI now includes "15th-order" option.
-- Minor bug fixes, code cleanup, and refactoring throughout.
-
-### 6. Version Update
-
-- Updated all version strings to v0.5.5 (README.md, ARCHITECTURE.md, ProjectMetadata.cmake, etc.).
+- **Other**:
+  - Removed as much BLAS/MKL dependency as possible, unified to AVX2/SIMD/scalar functions for real-time safety and portability.
+  - Cleaned up comments, variable names, and initialization methods.
 
 ---
 
@@ -209,9 +209,6 @@ In practice, this means ConvoPeq aims for both:
 - Standalone desktop application
 - Windows-only runtime target
 - Real-time audio processing with separate UI/analyzer pipeline
-- No plugin target in the current repository configuration
-
----
 
 ## Build Requirements
 
@@ -225,33 +222,19 @@ In practice, this means ConvoPeq aims for both:
 
 ## Quick Build
 
-From project root:
-
-```cmd
-build.bat Release
-build.bat Debug
-build.bat Release clean
-```
-
-Output binaries:
-
-- Debug: `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe`
-- Release: `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`
-
----
-
-## Manual Build (Equivalent)
-
-**cmd.exe / Developer Command Prompt:**
+From the project root, run the following commands to build:
 
 ```cmd
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
-
 cmake -S . -B build -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 cmake --build build --config Debug
-cmake --build build --config Release
 ```
+
+**Output binaries:**
+
+- Debug: `build\ConvoPeq_artefacts\Debug\ConvoPeq.exe`
+- Release: `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`
 
 **PowerShell (to ensure environment variables are passed in the same process, use `cmd.exe /d /c` to run all commands together):**
 
@@ -259,11 +242,7 @@ cmake --build build --config Release
 cmd.exe /d /c "call `"%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat`" x64 && call `"%ProgramFiles(x86)%\Intel\oneAPI\setvars.bat`" intel64 && cmake -S . -B build -G `"Ninja Multi-Config`" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Debug"
 ```
 
-> **Note**: In PowerShell, `&&` does not propagate environment variables between commands. Always include `call vcvarsall.bat` and subsequent commands within the same `cmd.exe /d /c "..."` block.
-
 For more details, see `BUILD_GUIDE_WINDOWS.md`.
-
----
 
 ## Notes
 
@@ -271,8 +250,6 @@ For more details, see `BUILD_GUIDE_WINDOWS.md`.
 - Do not modify external dependency trees directly:
   - `JUCE/`
   - `r8brain-free-src/`
-
----
 
 ## License
 

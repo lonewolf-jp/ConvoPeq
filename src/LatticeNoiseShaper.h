@@ -177,21 +177,37 @@ private:
         return absNoLibm(x) < 1.0e-24 ? 0.0 : x;
     }
 
-    // Xorshift64* 一様乱数 (周期 2^64-1)
-    static inline uint64_t xorshift64star(uint64_t & state) noexcept
+    struct Xoshiro256State
     {
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        return state * 0x2545F4914F6CDD1DULL;
+        uint64_t s[4];
+    };
+
+    static inline uint64_t rotl(const uint64_t x, int k) noexcept
+    {
+        return (x << k) | (x >> (64 - k));
     }
 
-    inline double uniform(uint64_t & state) const noexcept
+    // Xoshiro256++ 1.0 (周期 2^256-1)
+    static inline uint64_t xoshiro256plusplus(Xoshiro256State& state) noexcept
     {
-        return static_cast<double>(xorshift64star(state)) / 18446744073709551616.0;
+        const uint64_t result = rotl(state.s[0] + state.s[3], 23) + state.s[0];
+        const uint64_t t = state.s[1] << 17;
+        state.s[2] ^= state.s[0];
+        state.s[3] ^= state.s[1];
+        state.s[1] ^= state.s[2];
+        state.s[0] ^= state.s[3];
+        state.s[2] ^= t;
+        state.s[3] = rotl(state.s[3], 45);
+        return result;
     }
 
-    inline double quantize(double value, uint64_t & rng) const noexcept
+    inline double uniform(Xoshiro256State& state) const noexcept
+    {
+        // 64bit 整数を [0, 1) の double に変換 (53bit 精度)
+        return (xoshiro256plusplus(state) >> 11) * (1.0 / 9007199254740992.0);
+    }
+
+    inline double quantize(double value, Xoshiro256State& rng) const noexcept
     {
         const double minValue = -1.0;
         const double maxValue = 1.0 - (1.0 / invScale);
@@ -259,7 +275,10 @@ private:
 
     std::array<double, kOrder> coeffs {};
     std::array<std::array<double, kOrder>, kNumChannels> states {};
-    uint64_t rngState[kNumChannels] = {0x9e3779b97f4a7c15ULL, 0xbf58476d1ce4e5b9ULL};
+    Xoshiro256State rngState[kNumChannels] = {
+        {{ 0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL, 0x0123456789ABCDEFULL, 0xEFCDAB8967452301ULL }},
+        {{ 0x89ABCDEF01234567ULL, 0x76543210FEDCBA98ULL, 0xABCDEF0123456789ULL, 0x67452301EFCDAB89ULL }}
+    };
     CoefficientRamp ramp;
     int currentBitDepth = 0;
     double scale = 1.0;

@@ -12,8 +12,8 @@ public:
 
     void clear() noexcept
     {
-        writePosition = 0;
-        totalSamples = 0;
+        writePosition.store(0, std::memory_order_relaxed);
+        totalSamples.store(0, std::memory_order_relaxed);
     }
 
     void pushBlock(const double* left, const double* right, int numSamples) noexcept
@@ -21,24 +21,28 @@ public:
         if (left == nullptr || right == nullptr || numSamples <= 0)
             return;
 
-        int first = std::min(numSamples, kCapacity - writePosition);
-        juce::FloatVectorOperations::copy(leftSamples + writePosition, left, first);
-        juce::FloatVectorOperations::copy(rightSamples + writePosition, right, first);
+        const int currentWritePos = writePosition.load(std::memory_order_relaxed);
+        int first = std::min(numSamples, kCapacity - currentWritePos);
+        juce::FloatVectorOperations::copy(leftSamples + currentWritePos, left, first);
+        juce::FloatVectorOperations::copy(rightSamples + currentWritePos, right, first);
 
         if (first < numSamples)
         {
             int second = numSamples - first;
             juce::FloatVectorOperations::copy(leftSamples, left + first, second);
             juce::FloatVectorOperations::copy(rightSamples, right + first, second);
-            writePosition = second;
+            writePosition.store(second, std::memory_order_release);
         }
         else
         {
-            writePosition += numSamples;
-            if (writePosition >= kCapacity)
-                writePosition = 0;
+            int nextPos = currentWritePos + numSamples;
+            if (nextPos >= kCapacity)
+                nextPos = 0;
+            writePosition.store(nextPos, std::memory_order_release);
         }
-        totalSamples = std::min(kCapacity, totalSamples + numSamples);
+        
+        const int currentTotal = totalSamples.load(std::memory_order_relaxed);
+        totalSamples.store(std::min(kCapacity, currentTotal + numSamples), std::memory_order_release);
     }
 
     int copyLatest(double* outLeft, double* outRight, int requestedSamples) const noexcept
@@ -46,12 +50,12 @@ public:
         if (outLeft == nullptr || outRight == nullptr || requestedSamples <= 0)
             return 0;
 
-        // 満杯状態（totalSamples >= kCapacity）でも常に最新の requestedSamples 分を返す
-        // これで buildTrainingSegments() が毎回十分なセグメントを取得できる
-        // Audio Thread 安全（ロック・new・I/O・libm なし）
+        const int currentTotal = totalSamples.load(std::memory_order_acquire);
+        const int currentWritePos = writePosition.load(std::memory_order_acquire);
+
         const int availableSamples = std::min(requestedSamples,
-            totalSamples >= kCapacity ? kCapacity : totalSamples);
-        const int start = (writePosition - availableSamples + kCapacity) % kCapacity;
+            currentTotal >= kCapacity ? kCapacity : currentTotal);
+        const int start = (currentWritePos - availableSamples + kCapacity) % kCapacity;
 
         for (int i = 0; i < availableSamples; ++i)
         {
@@ -65,12 +69,12 @@ public:
 
     int getNumAvailableSamples() const noexcept
     {
-        return totalSamples;
+        return totalSamples.load(std::memory_order_acquire);
     }
 
 private:
     double leftSamples[kCapacity] = {};
     double rightSamples[kCapacity] = {};
-    int writePosition = 0;
-    int totalSamples = 0;
+    std::atomic<int> writePosition { 0 };
+    std::atomic<int> totalSamples { 0 };
 };

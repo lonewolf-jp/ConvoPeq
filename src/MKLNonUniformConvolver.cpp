@@ -172,7 +172,13 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         // nullptr チェックで対処する (OOM 時は当該レイヤーの filter 適用をスキップ)。
         convo::ScopedAlignedPtr<double> gain(
             static_cast<double*>(mkl_malloc(static_cast<size_t>(cSize) * sizeof(double), 64)));
-        if (!gain.get()) continue;
+        if (!gain.get())
+        {
+            // [Issue 5 fix] OOM 時はエラーログを出力し、当該レイヤーのフィルタ適用をスキップ。
+            // これによりクラッシュを回避しつつ、異常状態を通知する。
+            std::cerr << "MKLNonUniformConvolver: OOM in applySpectrumFilter for layer " << li << std::endl;
+            continue;
+        }
         std::fill_n(gain.get(), cSize, 1.0);
 
         // ── HC ゲイン ──
@@ -593,8 +599,9 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         //   分散計算が完了しない可能性があるため使用しないこと。
         if (!l.isImmediate)
         {
-            jassert(l.partSize % blockSize == 0); // 上記不変条件の実行時検証
-            const int blocksPerPart = l.partSize / std::max(blockSize, 1);
+            // [Issue 4 fix] partSize が blockSize の倍数でない場合、blocksPerPart を切り上げる。
+            // これにより、分散計算が 1 トリガ周期内に確実に完了するようにする。
+            const int blocksPerPart = (l.partSize + std::max(blockSize, 1) - 1) / std::max(blockSize, 1);
             l.partsPerCallback = std::max(1,
                 (l.numPartsIR + blocksPerPart - 1) / blocksPerPart);
             l.partsPerCallback = std::min(l.partsPerCallback, l.numPartsIR);
@@ -1316,10 +1323,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
         {
             if (output != nullptr)
             {
-                if (isAligned64(output) && isAligned64(m_directOutBuf))
-                    vdAdd(toAdd, output, m_directOutBuf, output);
-                else
-                    addFallback(toAdd, output, m_directOutBuf);
+                addFallback(toAdd, output, m_directOutBuf);
             }
 
             memset(m_directOutBuf, 0, static_cast<size_t>(toAdd) * sizeof(double));
@@ -1341,19 +1345,9 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
 
         if (output != nullptr)
         {
-            // vdAdd: output[0..toAdd-1] += tailOutputBuf[tailOutputPos..tailOutputPos+toAdd-1]
+            // addFallback: output[0..toAdd-1] += tailOutputBuf[tailOutputPos..tailOutputPos+toAdd-1]
             const double* tailPtr = l.tailOutputBuf + l.tailOutputPos;
-            if (isAligned64(output) && isAligned64(tailPtr))
-            {
-                vdAdd(toAdd,
-                      output,
-                      tailPtr,
-                      output);
-            }
-            else
-            {
-                addFallback(toAdd, output, tailPtr);
-            }
+            addFallback(toAdd, output, tailPtr);
         }
 
         l.tailOutputPos += toAdd;

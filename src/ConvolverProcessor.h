@@ -471,6 +471,12 @@ private:
     int delayBufferCapacity = 0;
     int delayWritePos = 0;
     juce::SmoothedValue<double> latencySmoother;
+    // [Issue 2 fix] latencySmoother のスレッドセーフティ向上のためのペンディングフラグ。
+    // refreshLatency() (Message/Rebuild Thread) は直接 SmoothedValue を触らず、
+    // このフラグと値を使用して Audio Thread に更新を委譲する。
+    std::atomic<bool> latencyResetPending { false };
+    std::atomic<double> pendingLatencyValue { 0.0 };
+
     // ドップラー効果対策: クロスフェード用
     juce::SmoothedValue<double> crossfadeGain;
     double oldDelay = 0.0;

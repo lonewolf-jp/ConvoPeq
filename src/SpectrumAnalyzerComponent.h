@@ -48,7 +48,7 @@ private:
     AudioEngine& engine;
 
     // ── 定数定義 (バッファサイズ決定のために先頭に配置) ──
-    static constexpr int NUM_DISPLAY_BARS = 128;
+    static constexpr int NUM_DISPLAY_BARS = AudioEngine::NUM_DISPLAY_BARS;
     static constexpr int NUM_FFT_POINTS  = 4096;
     static constexpr int NUM_FFT_BINS    = NUM_FFT_POINTS / 2 + 1;
     static constexpr int OVERLAP_SAMPLES = NUM_FFT_POINTS / 4;

@@ -148,7 +148,7 @@ private:
                         + coeffs[3] * get(channelErrors, idx, 3);
 
         const double y = x - fb;
-        const double yq = quantize(y);
+        const double yq = quantize(y, rngState[static_cast<size_t>(channel)]);
         const double error = yq - y;
         outError = error;
 
@@ -215,10 +215,46 @@ private:
         return buffer[static_cast<size_t>(i)];
     }
 
-    inline double quantize(double v) const noexcept
+    struct Xoshiro256State
+    {
+        uint64_t s[4];
+    };
+
+    static inline uint64_t rotl(const uint64_t x, int k) noexcept
+    {
+        return (x << k) | (x >> (64 - k));
+    }
+
+    // Xoshiro256++ 1.0 (周期 2^256-1)
+    static inline uint64_t xoshiro256plusplus(Xoshiro256State& state) noexcept
+    {
+        const uint64_t result = rotl(state.s[0] + state.s[3], 23) + state.s[0];
+        const uint64_t t = state.s[1] << 17;
+        state.s[2] ^= state.s[0];
+        state.s[3] ^= state.s[1];
+        state.s[1] ^= state.s[2];
+        state.s[0] ^= state.s[3];
+        state.s[2] ^= t;
+        state.s[3] = rotl(state.s[3], 45);
+        return result;
+    }
+
+    inline double uniform(Xoshiro256State& state) const noexcept
+    {
+        // 64bit 整数を [0, 1) の double に変換 (53bit 精度)
+        return (xoshiro256plusplus(state) >> 11) * (1.0 / 9007199254740992.0);
+    }
+
+    inline double quantize(double v, Xoshiro256State& rng) const noexcept
     {
         const double minV = -1.0;
         const double maxV = 1.0 - (1.0 / invScale);
+
+        // TPDF dither
+        const double u1 = uniform(rng);
+        const double u2 = uniform(rng);
+        v += (u1 + u2 - 1.0) * scale;
+
         if (v < minV)
             v = minV;
         else if (v > maxV)
@@ -234,6 +270,16 @@ private:
 
     std::array<std::array<double, ORDER>, MAX_CHANNELS> errors {};
     std::array<int, MAX_CHANNELS> writePos {};
+    Xoshiro256State rngState[MAX_CHANNELS] = {
+        {{ 0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL, 0x0123456789ABCDEFULL, 0xEFCDAB8967452301ULL }},
+        {{ 0x89ABCDEF01234567ULL, 0x76543210FEDCBA98ULL, 0xABCDEF0123456789ULL, 0x67452301EFCDAB89ULL }},
+        {{ 0x456789ABCDEF0123ULL, 0x3210FEDCBA987654ULL, 0xCDEF0123456789ABULL, 0x2301EFCDAB896745ULL }},
+        {{ 0xCDEF0123456789ABULL, 0x2301EFCDAB896745ULL, 0x456789ABCDEF0123ULL, 0x3210FEDCBA987654ULL }},
+        {{ 0x0123456789ABCDEFULL, 0xEFCDAB8967452301ULL, 0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL }},
+        {{ 0xABCDEF0123456789ULL, 0x67452301EFCDAB89ULL, 0x89ABCDEF01234567ULL, 0x76543210FEDCBA98ULL }},
+        {{ 0x2301EFCDAB896745ULL, 0x456789ABCDEF0123ULL, 0x3210FEDCBA987654ULL, 0xCDEF0123456789ABULL }},
+        {{ 0x67452301EFCDAB89ULL, 0xABCDEF0123456789ULL, 0x76543210FEDCBA98ULL, 0x89ABCDEF01234567ULL }}
+    };
     int currentBitDepth = 0;
     double scale = 1.0;
     double invScale = 1.0;

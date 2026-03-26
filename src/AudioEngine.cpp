@@ -93,18 +93,19 @@ namespace
 
         for (int offset = 0; offset < numSamples; offset += 256)
         {
-            AudioBlock block {};
+            // スタックコピーを最小限にするため、{} によるゼロ初期化を避ける
+            AudioBlock block;
             block.numSamples = std::min(256, numSamples - offset);
             block.sampleRateHz = sampleRateHz;
             block.bitDepth = bitDepth;
             block.adaptiveCoeffBankIndex = adaptiveCoeffBankIndex;
 
-            for (int sample = 0; sample < block.numSamples; ++sample)
-            {
-                const double leftSample = left[offset + sample];
-                block.L[sample] = leftSample;
-                block.R[sample] = (right != nullptr) ? right[offset + sample] : leftSample;
-            }
+            // ループではなく memcpy を使用して高速にコピー
+            std::memcpy(block.L, left + offset, static_cast<size_t>(block.numSamples) * sizeof(double));
+            if (right != nullptr)
+                std::memcpy(block.R, right + offset, static_cast<size_t>(block.numSamples) * sizeof(double));
+            else
+                std::memcpy(block.R, left + offset, static_cast<size_t>(block.numSamples) * sizeof(double));
 
             captureQueue->push(block);
         }
@@ -870,19 +871,6 @@ void AudioEngine::initialiseThreadAffinityMasks() noexcept
     nonAudioThreadAffinityMask = static_cast<std::uintptr_t>(nonAudioMask != 0 ? nonAudioMask : (secondMask != 0 ? secondMask : firstMask));
 }
 
-void AudioEngine::pinCurrentThreadToAudioCoreIfNeeded() noexcept
-{
-    static thread_local bool isPinned = false;
-    if (isPinned)
-        return;
-
-    if (audioThreadAffinityMask == 0)
-        return;
-
-    ::SetThreadAffinityMask(::GetCurrentThread(), static_cast<DWORD_PTR>(audioThreadAffinityMask));
-    isPinned = true;
-}
-
 void AudioEngine::pinCurrentThreadToNoiseLearnerCoreIfNeeded() const noexcept
 {
     if (noiseLearnerThreadAffinityMask == 0)
@@ -1134,13 +1122,6 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
     }
 
     const float totalGainSq = totalGainLinear * totalGainLinear;
-
-    if (static_cast<int>(eqTotalMagSqLBuffer.size()) < numPoints)
-        eqTotalMagSqLBuffer.resize(static_cast<size_t>(numPoints));
-    if (static_cast<int>(eqTotalMagSqRBuffer.size()) < numPoints)
-        eqTotalMagSqRBuffer.resize(static_cast<size_t>(numPoints));
-    if (static_cast<int>(eqBandMagSqBuffer.size()) < numPoints)
-        eqBandMagSqBuffer.resize(static_cast<size_t>(numPoints));
 
     float* totalMagSqL = eqTotalMagSqLBuffer.data();
     float* totalMagSqR = eqTotalMagSqRBuffer.data();
@@ -2107,7 +2088,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
         threadInitialized = true;
     }
-    pinCurrentThreadToAudioCoreIfNeeded();
     // ========================================================
 
     // 入力検証 (Input Validation)
@@ -2224,7 +2204,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
         threadInitialized = true;
     }
-    pinCurrentThreadToAudioCoreIfNeeded();
 
     const int numSamples = buffer.getNumSamples();
     // 事前サニティチェック (getNextAudioBlock と同様)
@@ -2412,10 +2391,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
                 for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
                 {
                     double* ptr = processBlock.getChannelPointer(ch);
-                    if (isAligned64(ptr))
-                        cblas_dscal((int)processBlock.getNumSamples(), state.convolverInputTrimGain, ptr, 1);
-                    else
-                        scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
+                    scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
                 }
             }
             convolver.process(processBlock);
@@ -2451,10 +2427,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
     {
         double* ptr = processBlock.getChannelPointer(ch);
-        if (isAligned64(ptr))
-            cblas_dscal((int)processBlock.getNumSamples(), state.outputMakeupGain, ptr, 1);
-        else
-            scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.outputMakeupGain);
+        scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.outputMakeupGain);
     }
 
     //----------------------------------------------------------
@@ -2598,10 +2571,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                 for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
                 {
                     double* ptr = processBlock.getChannelPointer(ch);
-                    if (isAligned64(ptr))
-                        cblas_dscal((int)processBlock.getNumSamples(), state.convolverInputTrimGain, ptr, 1);
-                    else
-                        scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
+                    scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
                 }
             }
             convolver.process(processBlock);
@@ -2630,10 +2600,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
     {
         double* ptr = processBlock.getChannelPointer(ch);
-        if (isAligned64(ptr))
-            cblas_dscal((int)processBlock.getNumSamples(), state.outputMakeupGain, ptr, 1);
-        else
-            scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.outputMakeupGain);
+        scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.outputMakeupGain);
     }
 
     if (state.softClipEnabled)
@@ -2839,7 +2806,7 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
     if (absDiffNoLibm(headroomGain, 1.0) > 1e-9)
     {
         for (int ch = 0; ch < 2; ++ch)
-            cblas_dscal(numSamples, headroomGain, block.getChannelPointer(ch), 1);
+            scaleBlockFallback(block.getChannelPointer(ch), numSamples, headroomGain);
     }
 
     // ── 入力段DC除去 (ブロックモード) ──
@@ -2894,7 +2861,7 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
     if (absDiffNoLibm(headroomGain, 1.0) > 1e-9)
     {
         for (int ch = 0; ch < 2; ++ch)
-            cblas_dscal(numSamples, headroomGain, block.getChannelPointer(ch), 1);
+            scaleBlockFallback(block.getChannelPointer(ch), numSamples, headroomGain);
     }
 
     // ── 入力段DC除去 (ブロックモード) ──

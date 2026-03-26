@@ -118,6 +118,11 @@ public:
     // FIFO設定
     static constexpr int FIFO_SIZE = 1048576;  // Lock-free FIFO サイズ (2^20, SAFE_MAX_BLOCK_SIZE * 8x OS をカバー)
 
+    // EQ応答曲線計算用の定数
+    static constexpr int   NUM_DISPLAY_BARS = 128;
+    static constexpr float EQ_GAIN_EPSILON = 0.01f;          // ゲインがこれ以下なら無視
+    static constexpr float EQ_UNITY_GAIN_EPSILON = 1.0e-5f;  // 1.0との比較用
+
     // ── 安全性制限 ──
     static constexpr double SAFE_MIN_SAMPLE_RATE = 8000.0;
     static constexpr double SAFE_MAX_SAMPLE_RATE = 768000.0;
@@ -504,14 +509,10 @@ DSPCore();
     static constexpr float LEVEL_METER_MIN_DB  = -120.0f;
     static constexpr float LEVEL_METER_MIN_MAG = 1e-6f;
 
-    // EQ応答曲線計算用の定数
-    static constexpr float EQ_GAIN_EPSILON = 0.01f;          // ゲインがこれ以下なら無視
-    static constexpr float EQ_UNITY_GAIN_EPSILON = 1.0e-5f;  // 1.0との比較用
-
     // EQ応答曲線計算用ワークバッファ (Message Thread/UI Threadで再利用)
-    std::vector<float> eqTotalMagSqLBuffer;
-    std::vector<float> eqTotalMagSqRBuffer;
-    std::vector<float> eqBandMagSqBuffer;
+    std::array<float, NUM_DISPLAY_BARS> eqTotalMagSqLBuffer;
+    std::array<float, NUM_DISPLAY_BARS> eqTotalMagSqRBuffer;
+    std::array<float, NUM_DISPLAY_BARS> eqBandMagSqBuffer;
     //----------------------------------------------------------
     // プライベートヘルパー (Message Thread のみ)
     //----------------------------------------------------------
@@ -561,8 +562,8 @@ DSPCore();
         std::atomic<bool> writeLock { false };  // CAS用書き込みロック
     };
 
-    std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
     LockFreeRingBuffer<AudioBlock, 4096> audioCaptureQueue;
+    std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
     std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount> adaptiveCoeffBanks {};
     std::atomic<int> currentAdaptiveCoeffBankIndex { 1 };
     std::uintptr_t audioThreadAffinityMask = 0;
@@ -577,7 +578,6 @@ DSPCore();
     const AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept;
     void selectAdaptiveCoeffBankForCurrentSettings() noexcept;
     void initialiseThreadAffinityMasks() noexcept;
-    void pinCurrentThreadToAudioCoreIfNeeded() noexcept;
     void pinCurrentThreadToNoiseLearnerCoreIfNeeded() const noexcept;
     void pinCurrentThreadToNonAudioCoresIfNeeded() const noexcept;
     void publishCoeffsToBank(int bankIndex, const double* coeffs);
