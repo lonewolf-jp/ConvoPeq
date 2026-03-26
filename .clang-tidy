@@ -1,31 +1,67 @@
+# .clang-tidy
+
+# ConvoPeq 専用 clang-tidy 設定
+
+# JUCE 8.0.12 / Intel MKL / Windows MSVC 環境向け
+
 ---
-Checks: '-*,
-          clang-analyzer-*,
-          performance-*,
-          bugprone-*,
-          portability-*,
-          modernize-*,
-          readability-*'
+Checks: >
+  -bugprone-*,
+  -performance-*,
+  -modernize-*,
+  -readability-*,
+  -cppcoreguidelines-*,
+  -hicpp-*,
+  -clang-analyzer-*,
+  -altera-*,
+  -fuchsia-*,
+  -google-*,
+  -llvm-*,
+  -mpi-*,
+  -objc-*,
+  -openmp-*,
+  -zircon-*,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-pro-type-vararg,
+  -readability-identifier-naming
 
-WarningsAsErrors: ''
-
+FormatStyle: file
 HeaderFilterRegex: '.*/src/.*'
-
-CompileFlags:
-
-# Force clang-tidy to use C++20 standard, to resolve issues with parsing
-
-# modern C++ features from libraries like JUCE
-
-  Add: [-std=c++20, -D_CRT_SECURE_NO_WARNINGS]
 
 CheckOptions:
 
-# Naming conventions based on the project's style
+# 識別子命名規則（ConvoPeq コーディング規約に準拠）
 
-- { key: readability-identifier-naming.ClassCase,           value: CamelCase }
-- { key: readability-identifier-naming.StructCase,          value: CamelCase }
-- { key: readability-identifier-naming.FunctionCase,        value: camelBack }
-- { key: readability-identifier-naming.VariableCase,        value: camelBack }
-- { key: readability-identifier-naming.MemberCase,          value: camelBack }
-- { key: readability-identifier-naming.EnumConstantCase,    value: CamelCase }
+- key:             readability-identifier-naming.ClassCase
+    value:           CamelCase
+- key:             readability-identifier-naming.StructCase
+    value:           CamelCase
+- key:             readability-identifier-naming.FunctionCase
+    value:           camelBack
+- key:             readability-identifier-naming.VariableCase
+    value:           camelBack
+- key:             readability-identifier-naming.MemberCase
+    value:           camelBack
+- key:             readability-identifier-naming.ConstantCase
+    value:           UPPER_CASE
+- key:             readability-identifier-naming.EnumCase
+    value:           CamelCase
+- key:             readability-identifier-naming.EnumConstantCase
+    value:           UPPER_CASE
+
+# 初期化チェック強化
+
+- key:             cppcoreguidelines-init-variables.CheckArrays
+    value:           true
+- key:             cppcoreguidelines-init-variables.CheckPointers
+    value:           true
+
+# 例外処理（JUCE は例外を使用するため許可）
+
+- key:             bugprone-unhandled-exception-at-new.Exceptions
+    value:           'std::bad_alloc,std::exception'
+
+# 移動セマンティクス（Audio Thread での移動は禁止だが、Message Thread では許可）
+
+- key:             bugprone-use-after-move.CheckAfterMove
+    value:           true

@@ -1,5 +1,5 @@
 #============================================================================
-# CMakeLists.txt  ── v0.5.5 (JUCE 8.0.12 / VS Code + MSVC + Windows 11)
+# CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + Windows 11)
 #
 # ビルド環境:
 #   - JUCE: 8.0.12

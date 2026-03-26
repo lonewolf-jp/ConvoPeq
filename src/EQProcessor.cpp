@@ -557,6 +557,12 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     // フィルタ状態をリセット (memsetで高速化)
     std::memset(filterState.data(), 0, sizeof(filterState));
 
+    // AGC係数の事前計算（Message Thread、libm使用可）
+    const double sr = sampleRate;
+    agcAttackCoeff.store(std::exp(-1.0 / (sr * AGC_ATTACK_TIME_SEC)), std::memory_order_relaxed);
+    agcReleaseCoeff.store(std::exp(-1.0 / (sr * AGC_RELEASE_TIME_SEC)), std::memory_order_relaxed);
+    agcSmoothCoeff.store(std::exp(-1.0 / (sr * AGC_SMOOTH_TIME_SEC)), std::memory_order_relaxed);
+
     agcCurrentGain.store(1.0, std::memory_order_relaxed);
     agcEnvInput.store(0.0, std::memory_order_relaxed);
     agcEnvOutput.store(0.0, std::memory_order_relaxed);
@@ -1048,19 +1054,19 @@ namespace
 //--------------------------------------------------------------
 double EQProcessor::calculateAGCGain(double inputEnv, double outputEnv) const noexcept
 {
-    static constexpr double MIN_ENV = 0.0001;
+    constexpr double MIN_ENV = 1e-6;
+    if (outputEnv < MIN_ENV) return 1.0;
 
-    double targetGain = 1.0;
-    if (outputEnv > MIN_ENV)
-    {
-        targetGain = inputEnv / outputEnv;
-    }
-    else if (inputEnv > MIN_ENV)
-    {
-        targetGain = 1.0;
-    }
+    const double ratio = inputEnv / outputEnv;
 
-    return juce::jlimit(static_cast<double>(AGC_MIN_GAIN), static_cast<double>(AGC_MAX_GAIN), targetGain);
+    // ヒステリシス帯（±0.5dB相当）の導入
+    // 0.5dB ≒ 1.059 の比率（20 * log10(1.059) ≈ 0.5dB）
+    constexpr double DEAD_ZONE_RATIO = 1.059;
+    if (ratio > 1.0 / DEAD_ZONE_RATIO && ratio < DEAD_ZONE_RATIO)
+        return 1.0;  // 微小変動は無視
+
+    // ゲイン制限（線形領域で直接適用）
+    return juce::jlimit(static_cast<double>(AGC_MIN_GAIN), static_cast<double>(AGC_MAX_GAIN), ratio);
 }
 
 //--------------------------------------------------------------
@@ -1071,15 +1077,24 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
     const int numSamples = (int)block.getNumSamples();
 
-    // ✅ 事前にキャッシュされた入力レベルを使用
+    // 係数の事前ロード（atomic、relaxedで十分）
+    const double attackCoeff = agcAttackCoeff.load(std::memory_order_relaxed);
+    const double releaseCoeff = agcReleaseCoeff.load(std::memory_order_relaxed);
+    const double smoothCoeff = agcSmoothCoeff.load(std::memory_order_relaxed);
 
-    // 【修正】サンプルレートを一度だけ atomic load してローカル変数に格納
-    // 複数回の load() 呼び出しを回避し、Audio Thread 負荷を最小化
-    const double sr = currentSampleRate.load(std::memory_order_relaxed);
+    // ブロック長に応じた係数補正（サンプル単位相当の応答に近づける）
+    // テイラー展開1次近似: (1 - ε)^N ≈ 1 - N·ε  (εが小さい場合)
+    const double attackEpsilon = 1.0 - attackCoeff;
+    const double releaseEpsilon = 1.0 - releaseCoeff;
+    const double smoothEpsilon = 1.0 - smoothCoeff;
+
+    const double blockAttackCoeff = std::min(1.0, static_cast<double>(numSamples) * attackEpsilon);
+    const double blockReleaseCoeff = std::min(1.0, static_cast<double>(numSamples) * releaseEpsilon);
+    const double blockSmoothCoeff = std::min(1.0, static_cast<double>(numSamples) * smoothEpsilon);
 
     double inputRMS = cachedInputRMS;
 
-    // ✅ フィルタ処理後の出力レベル計測
+    // 出力レベル計測
     double outputRMS = 0.0;
     for (int ch = 0; ch < numChannels; ++ch)
     {
@@ -1090,7 +1105,6 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     }
 
     // 数値安定性対策: NaN/Infチェックとクランプ
-    // 入力が極端に大きい場合（発振など）、エンベロープが汚染されるのを防ぐ
     static constexpr double MAX_ENV_VALUE = 1000.0; // +60dB
 
     if (!isFiniteNoLibm(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
@@ -1105,27 +1119,23 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     if (!isFiniteNoLibm(envOut)) envOut = 0.0;
     if (!isFiniteNoLibm(currentGain)) currentGain = 1.0;
 
-    // ブロック長とサンプリングレートに基づいて係数を動的に計算
-    // alpha = dt / (dt + tau)  (dt: samples, tau: samples)
-    const double alphaAttack  = (double)numSamples / ((double)numSamples + sr * AGC_ATTACK_TIME_SEC);
-    const double alphaRelease = (double)numSamples / ((double)numSamples + sr * AGC_RELEASE_TIME_SEC);
-    const double smoothAlpha  = (double)numSamples / ((double)numSamples + sr * AGC_SMOOTH_TIME_SEC);
-
     // 指数移動平均 (EMA) によるエンベロープ検波 (アシンメトリック: アタック速い / リリース遅い)
-    const double inputAlpha  = (inputRMS  > envIn)  ? alphaAttack : alphaRelease;
-    const double outputAlpha = (outputRMS > envOut) ? alphaAttack : alphaRelease;
-    envIn  = envIn  * (1.0 - inputAlpha)  + inputRMS  * inputAlpha;
-    envOut = envOut * (1.0 - outputAlpha) + outputRMS * outputAlpha;
+    const double inAlpha = (inputRMS > envIn) ? blockAttackCoeff : blockReleaseCoeff;
+    const double outAlpha = (outputRMS > envOut) ? blockAttackCoeff : blockReleaseCoeff;
 
-    // Denormal対策: 極小値をゼロにクランプ (無音時のCPU負荷対策)
-    if (envIn < convo::numeric_policy::kDenormThresholdAudioState) envIn = 0.0;
-    if (envOut < convo::numeric_policy::kDenormThresholdAudioState) envOut = 0.0;
+    envIn = envIn * (1.0 - inAlpha) + inputRMS * inAlpha;
+    envOut = envOut * (1.0 - outAlpha) + outputRMS * outAlpha;
 
-    // ターゲットゲイン計算
-    double targetGain = calculateAGCGain(envIn, envOut);
+    // Denormal対策: 極小値をゼロにクランプ
+    constexpr double DENORM_THRESH = convo::numeric_policy::kDenormThresholdAudioState;
+    if (envIn < DENORM_THRESH) envIn = 0.0;
+    if (envOut < DENORM_THRESH) envOut = 0.0;
 
-    // ゲイン変化のスムーシング
-    double nextGain = currentGain * (1.0 - smoothAlpha) + targetGain * smoothAlpha;
+    // ターゲットゲイン計算（ヒステリシス帯付き）
+    const double targetGain = calculateAGCGain(envIn, envOut);
+
+    // ゲインスムージング
+    const double nextGain = currentGain * (1.0 - blockSmoothCoeff) + targetGain * blockSmoothCoeff;
 
     // アトミック変数のストア
     agcEnvInput.store(envIn, std::memory_order_relaxed);
@@ -1133,7 +1143,6 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     agcCurrentGain.store(nextGain, std::memory_order_relaxed);
 
     // ゲイン適用 (ランプ: currentGain -> nextGain)
-    // ブロック境界での不連続性を防ぐため、サンプル単位で補間する
     const double gainIncrement = (nextGain - currentGain) / static_cast<double>(numSamples);
 
     for (int ch = 0; ch < numChannels; ++ch)
@@ -1814,7 +1823,7 @@ EQCoeffsSVF EQProcessor::calcPeakingSVF(double freq, double gainDb, double q, do
     c.a2 = g * c.a1;
     c.a3 = g * c.a2;
     c.m0 = 1.0;
-    c.m1 = k * (A * A - 1.0);
+    c.m1 = (A - 1.0 / A) / q;
     c.m2 = 0.0;
     return c;
 }
@@ -1944,10 +1953,26 @@ EQCoeffsBiquad EQProcessor::calcLowShelfBiquad(double freq, double gainDb, doubl
     const double sqrtA = std::sqrt(A);
     const double twoSqrtAAlpha = 2.0 * sqrtA * alpha;
 
+    // NaN/Infチェック
+    if (!std::isfinite(alpha) || !std::isfinite(twoSqrtAAlpha))
+    {
+        c.b0 = 1.0; c.b1 = 0.0; c.b2 = 0.0;
+        c.a0 = 1.0; c.a1 = 0.0; c.a2 = 0.0;
+        return c;
+    }
+
+    const double a0 = (A + 1.0) + (A - 1.0) * cosw0 + twoSqrtAAlpha;
+    if (std::abs(a0) < 1.0e-15)
+    {
+        c.b0 = 1.0; c.b1 = 0.0; c.b2 = 0.0;
+        c.a0 = 1.0; c.a1 = 0.0; c.a2 = 0.0;
+        return c;
+    }
+
     c.b0 =       A * ((A + 1.0) - (A - 1.0) * cosw0 + twoSqrtAAlpha);
     c.b1 =  2.0 * A * ((A - 1.0) - (A + 1.0) * cosw0);
     c.b2 =  A * ((A + 1.0) - (A - 1.0) * cosw0 - twoSqrtAAlpha);
-    c.a0 =           ((A + 1.0) + (A - 1.0) * cosw0 + twoSqrtAAlpha);
+    c.a0 =           a0;
     c.a1 = -2.0     * ((A - 1.0) + (A + 1.0) * cosw0               );
     c.a2 =           ((A + 1.0) + (A - 1.0) * cosw0 - twoSqrtAAlpha);
     return c;
@@ -1961,10 +1986,26 @@ EQCoeffsBiquad EQProcessor::calcPeakingBiquad(double freq, double gainDb, double
     const double cosw0 = std::cos(w0);
     const double alpha = std::sin(w0) / (2.0 * q);
 
+    // NaN/Infチェック
+    if (!std::isfinite(alpha))
+    {
+        c.b0 = 1.0; c.b1 = 0.0; c.b2 = 0.0;
+        c.a0 = 1.0; c.a1 = 0.0; c.a2 = 0.0;
+        return c;
+    }
+
+    const double a0 = 1.0 + alpha / A;
+    if (std::abs(a0) < 1.0e-15)
+    {
+        c.b0 = 1.0; c.b1 = 0.0; c.b2 = 0.0;
+        c.a0 = 1.0; c.a1 = 0.0; c.a2 = 0.0;
+        return c;
+    }
+
     c.b0 =  1.0 + alpha * A;
     c.b1 = -2.0 * cosw0;
     c.b2 =  1.0 - alpha * A;
-    c.a0 =  1.0 + alpha / A;
+    c.a0 =  a0;
     c.a1 = -2.0 * cosw0;
     c.a2 =  1.0 - alpha / A;
     return c;
@@ -1980,10 +2021,26 @@ EQCoeffsBiquad EQProcessor::calcHighShelfBiquad(double freq, double gainDb, doub
     const double sqrtA = std::sqrt(A);
     const double twoSqrtAAlpha = 2.0 * sqrtA * alpha;
 
+    // NaN/Infチェック
+    if (!std::isfinite(alpha) || !std::isfinite(twoSqrtAAlpha))
+    {
+        c.b0 = 1.0; c.b1 = 0.0; c.b2 = 0.0;
+        c.a0 = 1.0; c.a1 = 0.0; c.a2 = 0.0;
+        return c;
+    }
+
+    const double a0 = (A + 1.0) - (A - 1.0) * cosw0 + twoSqrtAAlpha;
+    if (std::abs(a0) < 1.0e-15)
+    {
+        c.b0 = 1.0; c.b1 = 0.0; c.b2 = 0.0;
+        c.a0 = 1.0; c.a1 = 0.0; c.a2 = 0.0;
+        return c;
+    }
+
     c.b0 =       A * ((A + 1.0) + (A - 1.0) * cosw0 + twoSqrtAAlpha);
     c.b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosw0               );
     c.b2 =       A * ((A + 1.0) + (A - 1.0) * cosw0 - twoSqrtAAlpha);
-    c.a0 =           ((A + 1.0) - (A - 1.0) * cosw0 + twoSqrtAAlpha);
+    c.a0 =           a0;
     c.a1 =  2.0     * ((A - 1.0) - (A + 1.0) * cosw0               );
     c.a2 =           ((A + 1.0) - (A - 1.0) * cosw0 - twoSqrtAAlpha);
     return c;
@@ -1996,10 +2053,26 @@ EQCoeffsBiquad EQProcessor::calcLowPassBiquad(double freq, double q, double sr) 
     const double cosw0 = std::cos(w0);
     const double alpha = std::sin(w0) / (2.0 * q);
 
+    // NaN/Infチェック
+    if (!std::isfinite(alpha))
+    {
+        c.b0 = 1.0; c.b1 = 0.0; c.b2 = 0.0;
+        c.a0 = 1.0; c.a1 = 0.0; c.a2 = 0.0;
+        return c;
+    }
+
+    const double a0 = 1.0 + alpha;
+    if (std::abs(a0) < 1.0e-15)
+    {
+        c.b0 = 1.0; c.b1 = 0.0; c.b2 = 0.0;
+        c.a0 = 1.0; c.a1 = 0.0; c.a2 = 0.0;
+        return c;
+    }
+
     c.b0 =  (1.0 - cosw0) / 2.0;
     c.b1 =   1.0 - cosw0;
     c.b2 =  (1.0 - cosw0) / 2.0;
-    c.a0 =   1.0 + alpha;
+    c.a0 =   a0;
     c.a1 =  -2.0 * cosw0;
     c.a2 =   1.0 - alpha;
     return c;
@@ -2012,10 +2085,26 @@ EQCoeffsBiquad EQProcessor::calcHighPassBiquad(double freq, double q, double sr)
     const double cosw0 = std::cos(w0);
     const double alpha = std::sin(w0) / (2.0 * q);
 
+    // NaN/Infチェック
+    if (!std::isfinite(alpha))
+    {
+        c.b0 = 1.0; c.b1 = 0.0; c.b2 = 0.0;
+        c.a0 = 1.0; c.a1 = 0.0; c.a2 = 0.0;
+        return c;
+    }
+
+    const double a0 = 1.0 + alpha;
+    if (std::abs(a0) < 1.0e-15)
+    {
+        c.b0 = 1.0; c.b1 = 0.0; c.b2 = 0.0;
+        c.a0 = 1.0; c.a1 = 0.0; c.a2 = 0.0;
+        return c;
+    }
+
     c.b0 =  (1.0 + cosw0) / 2.0;
     c.b1 = -(1.0 + cosw0);
     c.b2 =  (1.0 + cosw0) / 2.0;
-    c.a0 =   1.0 + alpha;
+    c.a0 =   a0;
     c.a1 =  -2.0 * cosw0;
     c.a2 =   1.0 - alpha;
     return c;

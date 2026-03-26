@@ -357,6 +357,9 @@ private:
     std::atomic<double> agcCurrentGain { 1.0 };
     std::atomic<double> agcEnvInput    { 0.0 };
     std::atomic<double> agcEnvOutput   { 0.0 };
+    std::atomic<double> agcAttackCoeff { 0.0 };
+    std::atomic<double> agcReleaseCoeff { 0.0 };
+    std::atomic<double> agcSmoothCoeff { 0.0 };
     double cachedInputRMS = 0.0; // AGC用の入力レベルキャッシュ
 
     // ── パラメータ補間 (Smoothing) ──

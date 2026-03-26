@@ -64,8 +64,27 @@ public:
         return d;
     }
 
-    void prepare(double /*sampleRate*/, int bitDepth) noexcept
+    void prepare(double sampleRate, int bitDepth) noexcept
     {
+        // プリセット選択と補間
+        int idxLow = 0, idxHigh = 0;
+        double t = 0.0;
+        selectPresetWithInterpolation(sampleRate, idxLow, idxHigh, t);
+
+        std::array<double, ORDER> interpCoeffs;
+        if (t < 1e-12) {
+            interpCoeffs = COEFF_PRESETS[idxLow];
+        } else if (t > 1.0 - 1e-12) {
+            interpCoeffs = COEFF_PRESETS[idxHigh];
+        } else {
+            const auto& cLow = COEFF_PRESETS[idxLow];
+            const auto& cHigh = COEFF_PRESETS[idxHigh];
+            for (int i = 0; i < ORDER; ++i) {
+                interpCoeffs[i] = (1.0 - t) * cLow[i] + t * cHigh[i];
+            }
+        }
+        setCoefficients(interpCoeffs);
+
         currentBitDepth = bitDepth;
         if (bitDepth <= 0)
         {
@@ -266,7 +285,52 @@ private:
         return q * scale;
     }
 
-    std::array<double, ORDER> coeffs { 0.5, 0.3, 0.15, 0.05 };
+    static constexpr std::array<double, 10> PRESET_SAMPLE_RATES = {
+        44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0,
+        352800.0, 384000.0, 705600.0, 768000.0
+    };
+
+    alignas(64) static constexpr std::array<std::array<double, ORDER>, 10> COEFF_PRESETS = {{
+        { 0.394958, 0.319775, 0.145569, 0.139697 },  // 44.1 kHz
+        { 0.460000, 0.280000, 0.170000, 0.090000 },  // 48 kHz   (基準)
+        { 0.727810, 0.189547, 0.125028, -0.042385 }, // 88.2 kHz
+        { 0.742333, 0.185474, 0.106133, -0.033940 }, // 96 kHz
+        { 0.775904, 0.126967, 0.043467, 0.053661 },  // 176.4 kHz
+        { 0.774132, 0.117440, 0.047291, 0.061137 },  // 192 kHz
+        { 0.724647, 0.094403, 0.113208, 0.067743 },  // 352.8 kHz
+        { 0.714605, 0.097798, 0.124553, 0.063045 },  // 384 kHz
+        { 0.635851, 0.161114, 0.194506, 0.008529 },  // 705.6 kHz
+        { 0.624827, 0.174509, 0.201424, -0.000760 }  // 768 kHz
+    }};
+
+    static void selectPresetWithInterpolation(double sampleRate, int& idxLow, int& idxHigh, double& t) noexcept
+    {
+        if (sampleRate <= PRESET_SAMPLE_RATES.front())
+        {
+            idxLow = idxHigh = 0;
+            t = 0.0;
+            return;
+        }
+        if (sampleRate >= PRESET_SAMPLE_RATES.back())
+        {
+            idxLow = idxHigh = static_cast<int>(PRESET_SAMPLE_RATES.size()) - 1;
+            t = 0.0;
+            return;
+        }
+
+        for (size_t i = 0; i < PRESET_SAMPLE_RATES.size() - 1; ++i)
+        {
+            if (sampleRate >= PRESET_SAMPLE_RATES[i] && sampleRate < PRESET_SAMPLE_RATES[i + 1])
+            {
+                idxLow = static_cast<int>(i);
+                idxHigh = static_cast<int>(i + 1);
+                t = (sampleRate - PRESET_SAMPLE_RATES[i]) / (PRESET_SAMPLE_RATES[i + 1] - PRESET_SAMPLE_RATES[i]);
+                return;
+            }
+        }
+    }
+
+    std::array<double, ORDER> coeffs { 0.46, 0.28, 0.17, 0.09 };
 
     std::array<std::array<double, ORDER>, MAX_CHANNELS> errors {};
     std::array<int, MAX_CHANNELS> writePos {};

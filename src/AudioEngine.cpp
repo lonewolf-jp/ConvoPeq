@@ -7,6 +7,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "InputBitDepthTransform.h"
+#include "OutputFilter.h"
 #include <Windows.h>
 #include <cmath>
 #include <cstdint>
@@ -2150,45 +2151,50 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // 【Parameter安全設計】
         // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
         // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
-        const bool eqBypassed = eqBypassRequested.load(std::memory_order_acquire);
-        const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
-        const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
+        // ── Audio Thread 最適化: 全アトミック変数をスナップショット構築（load 回数最小化） ──
+        // すべての読み取りをここに集中させ、process() 内では追加の .load() を一切行わない。
+        const bool eqBypassed               = eqBypassRequested.load(std::memory_order_acquire);
+        const bool convBypassed             = convBypassRequested.load(std::memory_order_acquire);
+        const ProcessingOrder order         = currentProcessingOrder.load(std::memory_order_relaxed);
         const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
-        const bool analyzerEnabledNow = analyzerEnabled.load(std::memory_order_relaxed);
-        const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
-        const float satAmt = saturationAmount.load(std::memory_order_relaxed);
-        const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
-        const double makeupGain = outputMakeupGain.load(std::memory_order_relaxed);
-        const int adaptiveCoeffBankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
-        const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
-        const bool adaptiveCaptureEnabled = noiseShaperLearner && noiseShaperLearner->isRunning();
-        // UI表示用の状態更新
-        if (eqBypassActive.load(std::memory_order_relaxed) != eqBypassed)
-            eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
-        if (convBypassActive.load(std::memory_order_relaxed) != convBypassed)
-            convBypassActive.store(convBypassed, std::memory_order_relaxed);
+        const bool analyzerEnabledNow       = analyzerEnabled.load(std::memory_order_relaxed);
+        const bool softClip                 = softClipEnabled.load(std::memory_order_relaxed);
+        const float satAmt                  = saturationAmount.load(std::memory_order_relaxed);
+        const double headroomGain           = inputHeadroomGain.load(std::memory_order_relaxed);
+        const double makeupGain             = outputMakeupGain.load(std::memory_order_relaxed);
+        const double convInputTrimGain      = convolverInputTrimGain.load(std::memory_order_relaxed);
+        const convo::HCMode hcMode      = convHCFilterMode.load(std::memory_order_relaxed);
+        const convo::LCMode lcMode      = convLCFilterMode.load(std::memory_order_relaxed);
+        const convo::HCMode lpfMode     = eqLPFFilterMode.load(std::memory_order_relaxed);
+        const int adaptiveCoeffBankIndex    = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
+        const auto& adaptiveCoeffBank       = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
+        const bool adaptiveCaptureEnabled   = noiseShaperLearner && noiseShaperLearner->isRunning();
+
+        // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
+        eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
+        convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
         // 処理委譲
         dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear,
-                     { .eqBypassed = eqBypassed,
-                       .convBypassed = convBypassed,
-                       .order = order,
-                       .analyzerSource = analyzerSource,
-                       .analyzerEnabled = analyzerEnabledNow,
-                       .softClipEnabled = softClip,
-                       .saturationAmount = satAmt,
-                       .inputHeadroomGain = headroomGain,
-                       .outputMakeupGain = makeupGain,
-                        .convolverInputTrimGain = convolverInputTrimGain.load(std::memory_order_relaxed),
-                        .convHCMode = convHCFilterMode.load(std::memory_order_relaxed),
-                        .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
-                        .eqLPFMode = eqLPFFilterMode.load(std::memory_order_relaxed),
-                        .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
-                        .adaptiveCoeffSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank),
-                        .adaptiveCoeffGeneration = adaptiveCoeffBank.generation.load(std::memory_order_acquire),
-                        .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
-                        .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
-                        .adaptiveCaptureQueue = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr }); // スマートポインタでDSPを呼び出し
+                     { .eqBypassed             = eqBypassed,
+                       .convBypassed           = convBypassed,
+                       .order                  = order,
+                       .analyzerSource         = analyzerSource,
+                       .analyzerEnabled        = analyzerEnabledNow,
+                       .softClipEnabled        = softClip,
+                       .saturationAmount       = satAmt,
+                       .inputHeadroomGain      = headroomGain,
+                       .outputMakeupGain       = makeupGain,
+                       .convolverInputTrimGain = convInputTrimGain,
+                       .convHCMode             = hcMode,
+                       .convLCMode             = lcMode,
+                       .eqLPFMode              = lpfMode,
+                       .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
+                       .adaptiveCoeffSet       = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank),
+                       .adaptiveCoeffGeneration = adaptiveCoeffBank.generation.load(std::memory_order_acquire),
+                       .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
+                       .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
+                       .adaptiveCaptureQueue   = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr });
     }
     else
     {
@@ -2237,44 +2243,49 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    const bool eqBypassed = eqBypassRequested.load(std::memory_order_acquire);
-    const bool convBypassed = convBypassRequested.load(std::memory_order_acquire);
-    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
+    // ── Audio Thread 最適化: 全アトミック変数をスナップショット構築（load 回数最小化） ──
+    // すべての読み取りをここに集中させ、processDouble() 内では追加の .load() を一切行わない。
+    const bool eqBypassed               = eqBypassRequested.load(std::memory_order_acquire);
+    const bool convBypassed             = convBypassRequested.load(std::memory_order_acquire);
+    const ProcessingOrder order         = currentProcessingOrder.load(std::memory_order_relaxed);
     const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
-    const bool analyzerEnabledNow = analyzerEnabled.load(std::memory_order_relaxed);
-    const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
-    const float satAmt = saturationAmount.load(std::memory_order_relaxed);
-    const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
-    const double makeupGain = outputMakeupGain.load(std::memory_order_relaxed);
-    const int adaptiveCoeffBankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
-    const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
-    const bool adaptiveCaptureEnabled = noiseShaperLearner && noiseShaperLearner->isRunning();
+    const bool analyzerEnabledNow       = analyzerEnabled.load(std::memory_order_relaxed);
+    const bool softClip                 = softClipEnabled.load(std::memory_order_relaxed);
+    const float satAmt                  = saturationAmount.load(std::memory_order_relaxed);
+    const double headroomGain           = inputHeadroomGain.load(std::memory_order_relaxed);
+    const double makeupGain             = outputMakeupGain.load(std::memory_order_relaxed);
+    const double convInputTrimGain      = convolverInputTrimGain.load(std::memory_order_relaxed);
+    const convo::HCMode hcMode      = convHCFilterMode.load(std::memory_order_relaxed);
+    const convo::LCMode lcMode      = convLCFilterMode.load(std::memory_order_relaxed);
+    const convo::HCMode lpfMode     = eqLPFFilterMode.load(std::memory_order_relaxed);
+    const int adaptiveCoeffBankIndex    = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
+    const auto& adaptiveCoeffBank       = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
+    const bool adaptiveCaptureEnabled   = noiseShaperLearner && noiseShaperLearner->isRunning();
 
-    if (eqBypassActive.load(std::memory_order_relaxed) != eqBypassed)
-        eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
-    if (convBypassActive.load(std::memory_order_relaxed) != convBypassed)
-        convBypassActive.store(convBypassed, std::memory_order_relaxed);
+    // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
+    eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
+    convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
     dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear,
-                       { .eqBypassed = eqBypassed,
-                         .convBypassed = convBypassed,
-                         .order = order,
-                         .analyzerSource = analyzerSource,
-                         .analyzerEnabled = analyzerEnabledNow,
-                         .softClipEnabled = softClip,
-                         .saturationAmount = satAmt,
-                         .inputHeadroomGain = headroomGain,
-                         .outputMakeupGain = makeupGain,
-                          .convolverInputTrimGain = convolverInputTrimGain.load(std::memory_order_relaxed),
-                          .convHCMode = convHCFilterMode.load(std::memory_order_relaxed),
-                          .convLCMode = convLCFilterMode.load(std::memory_order_relaxed),
-                          .eqLPFMode = eqLPFFilterMode.load(std::memory_order_relaxed),
-                          .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
-                          .adaptiveCoeffSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank),
-                          .adaptiveCoeffGeneration = adaptiveCoeffBank.generation.load(std::memory_order_acquire),
-                          .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
-                          .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
-                          .adaptiveCaptureQueue = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr });
+                       { .eqBypassed             = eqBypassed,
+                         .convBypassed           = convBypassed,
+                         .order                  = order,
+                         .analyzerSource         = analyzerSource,
+                         .analyzerEnabled        = analyzerEnabledNow,
+                         .softClipEnabled        = softClip,
+                         .saturationAmount       = satAmt,
+                         .inputHeadroomGain      = headroomGain,
+                         .outputMakeupGain       = makeupGain,
+                         .convolverInputTrimGain = convInputTrimGain,
+                         .convHCMode             = hcMode,
+                         .convLCMode             = lcMode,
+                         .eqLPFMode              = lpfMode,
+                         .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
+                         .adaptiveCoeffSet       = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank),
+                         .adaptiveCoeffGeneration = adaptiveCoeffBank.generation.load(std::memory_order_acquire),
+                         .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
+                         .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
+                         .adaptiveCaptureQueue   = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr });
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
