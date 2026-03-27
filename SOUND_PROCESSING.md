@@ -79,7 +79,7 @@ for (int ch = 0; ch < numChannels; ++ch) {
   // Partitioned FFT convolution (MKL NUC)
   mklNUC.process(channelBuffer, currentIR, ...);
 }
-```cpp
+```
 
 ### Mixed (Parallel) IR Mode: Signal Processing Flow
 
@@ -140,7 +140,7 @@ if (processingMode == Mixed) {
       outputBuffer[n] = (1 - alpha) *eqBuffer[n] + alpha* convBuffer[n];
 }
 
-```cpp
+```
 
 #### Summary
 
@@ -205,13 +205,6 @@ where $w[n]$ is a perceptual weighting function (e.g., A-weighting or psychoacou
 - Coefficient banks are saved/loaded per sample rate and bit depth.
 - The system ensures stability by constraining the feedback polynomial roots inside the unit circle.
 - All learning and application is performed in double-precision, SIMD-optimized code paths.
-
----
-   // 3. Set up lock-free FIFOs for analyzer/UI
-   // 4. No allocation in audio thread after this point
-}
-
-```cpp
 
 ### Key Internal Structures
 
@@ -281,7 +274,7 @@ inputDCBlockerR.process(alignedR, numSamples);
 if (analyzerEnabled)
    pushAdaptiveCaptureBlocks(captureQueue, alignedL, alignedR, numSamples, sampleRate, bitDepth, coeffBankIndex);
 
-```cpp
+```
 
 ### Key Internal Structures
 
@@ -365,7 +358,7 @@ if (oversamplingEnabled)
    customOversampler.processDown(upBlock, outputBlock, numChannels);
 }
 
-```cpp
+```
 
 ### Key Internal Structures
 
@@ -390,7 +383,7 @@ for (int ch = 0; ch < numChannels; ++ch) {
   // Partitioned FFT convolution (MKL NUC)
   mklNUC.process(channelBuffer, currentIR, ...);
 }
-```cpp
+```
 
 ### Main DSP Chain Overview
 
@@ -453,7 +446,7 @@ for (int ch = 0; ch < numChannels; ++ch) {
       }
    }
 }
-```cpp
+```
 
 ---
 
@@ -504,7 +497,7 @@ for (int ch = 0; ch < numChannels; ++ch) {
   // Partitioned FFT convolution (MKL NUC)
   mklNUC.process(channelBuffer, currentIR, ...);
 }
-```cpp
+```
 
 ### Mixed (Parallel) IR Mode: Signal Processing Flow
 
@@ -563,7 +556,7 @@ if (processingMode == Mixed) {
    for (int n = 0; n < numSamples; ++n)
       outputBuffer[n] = (1 - alpha) * eqBuffer[n] + alpha * convBuffer[n];
 }
-```cpp
+```
 
 #### Summary
 
@@ -852,7 +845,7 @@ If oversampling was enabled, the processed audio block is downsampled back to th
 // Downsampling after main DSP (in AudioEngine)
 customOversampler.processDown(upsampledBlock, outputBlock, numChannels);
 
-```cpp
+```
 
 ### Summary
 
@@ -928,7 +921,7 @@ customOversampler.processDown(upsampledBlock, outputBlock, numChannels);
    |
    v
 [Audio Output]
-```text
+```
 
 ---
 
