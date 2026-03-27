@@ -56,7 +56,7 @@ This document describes, in as much detail as possible, the entire audio signal 
 
 #### Code Path Example (ConvolverProcessor)
 
-```cpp
+```
 // At block start (audio thread):
 auto* currentIR = irState.load(std::memory_order_acquire);
 for (int ch = 0; ch < numChannels; ++ch) {
