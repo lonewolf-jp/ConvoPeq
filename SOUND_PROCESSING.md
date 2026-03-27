@@ -604,13 +604,13 @@ if (processingMode == Mixed) {
   - All state updates are atomic or lock-free.
 - **Code Path Example**:
 
-  ```cpp
+```cpp
 
    // OutputFilter processing (per channel)
    outputFilterL.processBlock(alignedL, numSamples);
    outputFilterR.processBlock(alignedR, numSamples);
 
-  ```cpp
+```
 
 - **Parameter Management**:
   - Cutoff frequencies, filter order, and enable/disable flags are managed via atomic variables and updated by the UI thread.
@@ -652,13 +652,13 @@ if (processingMode == Mixed) {
   - All parameters (thresholds, ceiling) are atomic and updated by the UI thread.
 - **Code Path Example**:
 
-  ```cpp
+```cpp
 
    // Soft clipping (per channel, after makeup gain)
    softClipBlockAVX2(alignedL, numSamples);
    softClipBlockAVX2(alignedR, numSamples);
 
-   ```
+```
 
 - **Parameter Management**:
   - Enable/disable, thresholds, and ceiling are managed via atomic variables.
