@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <immintrin.h>
+#include "DspNumericPolicy.h"
 
 class LatticeNoiseShaper
 {
@@ -165,18 +166,6 @@ private:
         return value;
     }
 
-    static inline double absNoLibm(double x) noexcept
-    {
-        union { double d; std::uint64_t u; } value { x };
-        value.u &= 0x7fffffffffffffffULL;
-        return value.d;
-    }
-
-    static inline double killDenormal(double x) noexcept
-    {
-        return absNoLibm(x) < 1.0e-24 ? 0.0 : x;
-    }
-
     struct Xoshiro256State
     {
         uint64_t s[4];
@@ -264,10 +253,11 @@ private:
                                 std::array<double, kOrder>& channelState,
                                 double headroom) noexcept
     {
-        const double feedback = computeFeedback(channelState);
+        const double feedback = killDenormal(computeFeedback(channelState));
         const double shapedInput = (inputSample * headroom) + feedback;
-        const double quantized = quantize(shapedInput, rngState[channel]);
-        const double error = killDenormal(quantized - shapedInput);
+        const double shapedInputClean = killDenormal(shapedInput);
+        const double quantized = killDenormal(quantize(shapedInputClean, rngState[channel]));
+        const double error = killDenormal(quantized - shapedInputClean);
         const double clampedError = std::clamp(error, -2.0 * scale, 2.0 * scale);
         advanceState(channelState, clampedError);
         return quantized;

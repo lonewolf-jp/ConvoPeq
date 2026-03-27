@@ -908,6 +908,16 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     }
 
     // ── 4. Backward FFT ──
+#if defined(__AVX2__)
+    for (int k = 0; k < l.partStride; k += 4) {
+        __m256d v = _mm256_load_pd(&l.accumBuf[k]);
+        v = killDenormalV(v);
+        _mm256_store_pd(&l.accumBuf[k], v);
+    }
+#else
+    for (int k = 0; k < l.partStride; ++k)
+        l.accumBuf[k] = killDenormal(l.accumBuf[k]);
+#endif
     DftiComputeBackward(l.fftHandle, l.accumBuf, l.fftOutBuf);
 
     // ── 5. Overlap-Save: 有効出力 (後半 partSize サンプル) をリングへ順次書き込み ──

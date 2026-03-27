@@ -1157,33 +1157,6 @@ void ConvolverProcessor::timerCallback()
         }
     }
 
-    // 【案 A】Smoothing Time 変更の反映（Message Thread で安全に reset() を実行）
-    if (smoothingTimeChangePending.load(std::memory_order_acquire))
-    {
-        const float newTime = smoothingTimeSec.load(std::memory_order_relaxed);
-        const double sampleRate = currentSampleRate.load(std::memory_order_acquire);
-
-        if (sampleRate > 0.0)
-        {
-            // 現在のスムージング状態を保持
-            const double currentVal = mixSmoother.getCurrentValue();
-            const double targetVal = mixSmoother.getTargetValue();
-
-            // Message Thread で reset() を実行（Audio Thread との競合を回避）
-            mixSmoother.reset(sampleRate, newTime);
-
-            // 状態を復元
-            mixSmoother.setCurrentAndTargetValue(currentVal);
-            mixSmoother.setTargetValue(targetVal);
-
-            // キャッシュを更新
-            currentSmoothingTimeSec = newTime;
-        }
-
-        // フラグをクリア
-        smoothingTimeChangePending.store(false, std::memory_order_release);
-    }
-
     cleanup();
 }
 
@@ -1352,8 +1325,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     juce::FloatVectorOperations::clear(wetBufferStorage[1].get(), MAX_BLOCK_SIZE);
 
     // スムージング時間の設定
-    currentSmoothingTimeSec = smoothingTimeSec.load();
-    mixSmoother.reset(sampleRate, currentSmoothingTimeSec);
+    mixSmoother.reset(sampleRate, static_cast<double>(smoothingTimeSec.load()));
     // 初期化: 現在のターゲット値を設定し、不要なフェードインや未初期化状態を防ぐ
     mixSmoother.setCurrentAndTargetValue(static_cast<double>(mixTarget.load()));
     // ダミー呼び出し: 内部状態の確実な初期化 (メモリ確保リスクの排除)
@@ -1454,8 +1426,9 @@ void ConvolverProcessor::reset()
 
     dryBuffer.clear();
     smoothingBuffer.clear();
-    mixSmoother.setCurrentAndTargetValue(static_cast<double>(mixTarget.load()));
-    latencySmoother.setCurrentAndTargetValue(latencySmoother.getTargetValue());
+    mixSmootherResetPending.store(true, std::memory_order_release);
+    pendingLatencyValue.store(latencySmoother.getTargetValue());
+    latencyResetPending.store(true, std::memory_order_release);
 }
 
 void ConvolverProcessor::rebuildAllIRs()
@@ -2733,19 +2706,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         return;
 
     // ── Step 4: パラメータ更新と最適化 ──
-    // Audio Threadでのみ setTargetValue() を呼ぶことでスレッドセーフティを確保
-    const double targetMixValue = static_cast<double>(mixTarget.load(std::memory_order_relaxed));
-    if (std::abs(mixSmoother.getTargetValue() - targetMixValue) > 1.0e-5)
-    {
-        mixSmoother.setTargetValue(targetMixValue);
-    }
-
-    const bool isSmoothing = mixSmoother.isSmoothing();
-
-    // ── 最適化: 処理内容をミックス比率に応じて決定 ──
-    const bool needsConvolution = isSmoothing || targetMixValue > 0.001;
-    const bool needsDrySignal   = isSmoothing || targetMixValue < 0.999;
-
     // [Bug 1 fix] wetCrossfade ペンディングリセットの処理。
     if (wetCrossfadeResetPending.exchange(false, std::memory_order_acq_rel))
     {
@@ -2759,6 +2719,47 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         const double val = pendingLatencyValue.load(std::memory_order_acquire);
         latencySmoother.setCurrentAndTargetValue(val);
     }
+
+    // [Bug 1' fix] mixSmoother ペンディングリセットの処理。
+    if (mixSmootherResetPending.exchange(false, std::memory_order_acq_rel))
+    {
+        mixSmoother.setCurrentAndTargetValue(static_cast<double>(mixTarget.load(std::memory_order_relaxed)));
+    }
+
+    // 【案 B】Smoothing Time 変更の反映（Audio Thread で安全に reset() を実行）
+    if (smoothingTimeChangePending.exchange(false, std::memory_order_acq_rel))
+    {
+        const float newTime = smoothingTimeSec.load(std::memory_order_relaxed);
+        const double sampleRate = currentSampleRate.load(std::memory_order_acquire);
+
+        if (sampleRate > 0.0)
+        {
+            // 現在のスムージング状態を保持
+            const double currentVal = mixSmoother.getCurrentValue();
+            const double targetVal = mixSmoother.getTargetValue();
+
+            // Audio Thread で reset() を実行
+            // LinearSmoothedValue の reset() は除算のみであり、Audio Thread で safe。
+            mixSmoother.reset(sampleRate, static_cast<double>(newTime));
+
+            // 状態を復元
+            mixSmoother.setCurrentAndTargetValue(currentVal);
+            mixSmoother.setTargetValue(targetVal);
+        }
+    }
+
+    // Audio Threadでのみ setTargetValue() を呼ぶことでスレッドセーフティを確保
+    const double targetMixValue = static_cast<double>(mixTarget.load(std::memory_order_relaxed));
+    if (std::abs(mixSmoother.getTargetValue() - targetMixValue) > 1.0e-5)
+    {
+        mixSmoother.setTargetValue(targetMixValue);
+    }
+
+    const bool isSmoothing = mixSmoother.isSmoothing();
+
+    // ── 最適化: 処理内容をミックス比率に応じて決定 ──
+    const bool needsConvolution = isSmoothing || targetMixValue > 0.001;
+    const bool needsDrySignal   = isSmoothing || targetMixValue < 0.999;
 
     const bool isCrossfading = (oldConv != nullptr && wetCrossfadeActive.load(std::memory_order_acquire));
     int activeWetCrossfadeSamples = 0;

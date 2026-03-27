@@ -62,9 +62,8 @@ struct BiquadState
         w1 = c.b1 * x - c.a1 * y + w2;
         w2 = c.b2 * x - c.a2 * y;
         // デノーマル対策
-        constexpr double kDenorm = convo::numeric_policy::kDenormThresholdAudioState;
-        if (w1 > -kDenorm && w1 < kDenorm) w1 = 0.0;
-        if (w2 > -kDenorm && w2 < kDenorm) w2 = 0.0;
+        w1 = killDenormal(w1);
+        w2 = killDenormal(w2);
         return y;
     }
 };

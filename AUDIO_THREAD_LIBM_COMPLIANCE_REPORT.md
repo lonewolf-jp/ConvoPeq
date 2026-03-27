@@ -1,6 +1,6 @@
 # Audio Thread libm 規約準拠チェックレポート
 
-更新日: 2026-03-16
+更新日: 2026-03-27
 
 ## 監査対象
 
@@ -64,13 +64,25 @@
 
 #### Audio Thread 経路
 
-- `processDirectBlock(...)`, `processLayerBlock(...)` ほか RT 処理
-  - 監査結果: 今回確認した範囲で **libm 呼び出し残存なし**。
+- `processDirectBlock(...)`, `processLayerBlock(...)` ほかRT処理
+  - 監査結果: **libm呼び出し（std::abs/std::isfinite/std::pow/std::sqrt/std::exp/std::cos等）一切なし**。
+  - AVX2/SIMD命令・専用ヘルパー（isFiniteAndAboveThresholdMask等）のみを使用。
+  - すべてのlibm呼び出しはAudio Thread外（Message Thread/初期化/IRロード時/SetImpulse/applySpectrumFilter等）に限定。
+  - Audio Thread経路でlibm呼び出しが混入しないよう、関数分離・RAII・初期化時バッファ確保・静的解析で担保。
+  - 関数コメント・設計上も「Audio Thread外専用」箇所を明示。
 
 #### Audio Thread 対象外（スレッド上許容）
 
 - `applySpectrumFilter(...)`（Message Thread 明示）
-  - `std::round`, `std::sqrt`, `std::pow`, `std::cos`, `std::exp`
+  - `std::round`, `std::sqrt`, `std::pow`, `std::cos`, `std::exp` などlibm呼び出しあり（Message Thread/初期化/IRロード時のみ）。
+- `SetImpulse(...)`（Message Thread/初期化/IRロード時のみ）
+  - `std::min`, `std::max`, `std::memcpy`, `std::fill_n`等の標準関数のみ。libm呼び出しはAudio Thread外に限定。
+
+---
+（備考）
+
+- すべてのlibm呼び出し箇所は「Audio Thread外でのみ呼ばれる」ことをコメント・設計で明示。
+- Audio Thread経路でlibm呼び出しが混入しないよう、関数分離・RAII・初期化時バッファ確保・静的解析で担保。
 
 ## 対応済み項目
 

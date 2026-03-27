@@ -143,13 +143,11 @@ public:
             x = x - m_state[i];
 
             // 中間状態のデノーマルフラッシュ（libm 非依存）
-            if (!isFiniteAndAboveThresholdMask(m_state[i], thresh))
-                m_state[i] = 0.0;
+            m_state[i] = killDenormal(m_state[i]);
         }
 
         // 最終出力のデノーマルフラッシュ
-        if (!isFiniteAndAboveThresholdMask(x, thresh))
-            x = 0.0;
+        x = killDenormal(x);
         sample = x;
     }
 
@@ -175,15 +173,15 @@ public:
             // 第 1 セクション
             state0 = state0 + alpha0 * (x - state0);
             x = x - state0;
-            if (!isFiniteAndAboveThresholdMask(state0, thresh)) state0 = 0.0;
+            state0 = killDenormal(state0);
 
             // 第 2 セクション
             state1 = state1 + alpha1 * (x - state1);
             x = x - state1;
-            if (!isFiniteAndAboveThresholdMask(state1, thresh)) state1 = 0.0;
+            state1 = killDenormal(state1);
 
             // 最終出力のデノーマルフラッシュ
-            if (!isFiniteAndAboveThresholdMask(x, thresh)) x = 0.0;
+            x = killDenormal(x);
             data[i] = x;
         }
 

@@ -645,11 +645,22 @@ void AudioEngine::getCurrentAdaptiveCoefficients(double* outCoeffs, int maxCoeff
 
     const auto& bank = getAdaptiveCoeffBankForIndex(
         currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire));
-    const auto* coeffSet = AudioEngine::getActiveCoeffSet(bank);
-    const int limit = std::min(kAdaptiveNoiseShaperOrder, maxCoefficients);
 
-    for (int i = 0; i < limit; ++i)
-        outCoeffs[i] = coeffSet->k[i];
+    // RCU 世代検証（Message Thread なので失敗時はリトライ）
+    for (int retry = 0; retry < 3; ++retry)
+    {
+        const uint32_t genBefore = bank.generation.load(std::memory_order_acquire);
+        const auto* coeffSet = AudioEngine::getActiveCoeffSet(bank);
+        const uint32_t genAfter = bank.generation.load(std::memory_order_acquire);
+
+        if (genBefore == genAfter)
+        {
+            const int limit = std::min(kAdaptiveNoiseShaperOrder, maxCoefficients);
+            for (int i = 0; i < limit; ++i)
+                outCoeffs[i] = coeffSet->k[i];
+            return;
+        }
+    }
 }
 
 void AudioEngine::setCurrentAdaptiveCoefficients(const double* coeffs, int numCoefficients)
@@ -681,11 +692,22 @@ void AudioEngine::getAdaptiveCoefficientsForSampleRate(double sampleRate, double
         return;
 
     const auto& bank = getAdaptiveCoeffBankForIndex(resolveAdaptiveCoeffBankIndex(sampleRate));
-    const auto* coeffSet = AudioEngine::getActiveCoeffSet(bank);
-    const int limit = std::min(kAdaptiveNoiseShaperOrder, maxCoefficients);
 
-    for (int i = 0; i < limit; ++i)
-        outCoeffs[i] = coeffSet->k[i];
+    // RCU 世代検証（Message Thread なので失敗時はリトライ）
+    for (int retry = 0; retry < 3; ++retry)
+    {
+        const uint32_t genBefore = bank.generation.load(std::memory_order_acquire);
+        const auto* coeffSet = AudioEngine::getActiveCoeffSet(bank);
+        const uint32_t genAfter = bank.generation.load(std::memory_order_acquire);
+
+        if (genBefore == genAfter)
+        {
+            const int limit = std::min(kAdaptiveNoiseShaperOrder, maxCoefficients);
+            for (int i = 0; i < limit; ++i)
+                outCoeffs[i] = coeffSet->k[i];
+            return;
+        }
+    }
 }
 
 void AudioEngine::setAdaptiveCoefficientsForSampleRate(double sampleRate, const double* coeffs, int numCoefficients)
@@ -719,16 +741,28 @@ void AudioEngine::getAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
     const auto mode = pendingLearningMode.load(std::memory_order_acquire);
     const int bank = getAdaptiveCoeffBankIndex(sampleRate, bitDepth, mode);
     const auto& slot = getAdaptiveCoeffBankForIndex(bank);
-    const CoeffSet* active = AudioEngine::getActiveCoeffSet(slot);
-    if (active)
+
+    // RCU 世代検証（Message Thread なので失敗時はリトライ）
+    for (int retry = 0; retry < 3; ++retry)
     {
-        const int copyCount = std::min(maxCoefficients, kAdaptiveNoiseShaperOrder);
-        std::memcpy(outCoeffs, active->k, static_cast<size_t>(copyCount) * sizeof(double));
-    }
-    else
-    {
-        // デフォルト（初期値）
-        std::memcpy(outCoeffs, kDefaultAdaptiveNoiseShaperCoeffs.data(), sizeof(kDefaultAdaptiveNoiseShaperCoeffs));
+        const uint32_t genBefore = slot.generation.load(std::memory_order_acquire);
+        const CoeffSet* active = AudioEngine::getActiveCoeffSet(slot);
+        const uint32_t genAfter = slot.generation.load(std::memory_order_acquire);
+
+        if (genBefore == genAfter)
+        {
+            if (active)
+            {
+                const int copyCount = std::min(maxCoefficients, kAdaptiveNoiseShaperOrder);
+                std::memcpy(outCoeffs, active->k, static_cast<size_t>(copyCount) * sizeof(double));
+            }
+            else
+            {
+                // デフォルト（初期値）
+                std::memcpy(outCoeffs, kDefaultAdaptiveNoiseShaperCoeffs.data(), sizeof(kDefaultAdaptiveNoiseShaperCoeffs));
+            }
+            return;
+        }
     }
 }
 
@@ -2082,14 +2116,7 @@ void AudioEngine::releaseResources()
 //--------------------------------------------------------------
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    // === パッチ1: モード設定をAudio Thread開始時に1回だけ実行 ===
-    static thread_local bool threadInitialized = false;
-    if (!threadInitialized) {
-        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-        threadInitialized = true;
-    }
-    // ========================================================
+    const juce::ScopedNoDenormals noDenormals;
 
     // 入力検証 (Input Validation)
     if (bufferToFill.buffer == nullptr)
@@ -2170,6 +2197,18 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const auto& adaptiveCoeffBank       = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
         const bool adaptiveCaptureEnabled   = noiseShaperLearner && noiseShaperLearner->isRunning();
 
+        // [Bug Fix] RCU 世代検証によるデータ競合の完全排除
+        // 1. 取得前の世代をスナップショット
+        const uint32_t adaptiveGenBefore = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+        // 2. ポインタを取得
+        const CoeffSet* adaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
+        // 3. 取得後の世代をスナップショット
+        const uint32_t adaptiveGenAfter = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+
+        // 取得中に世代が変化した場合、ポインタが指すバッファが Writer によって再利用されている可能性がある。
+        // 安全のため、このブロックでは係数更新をスキップする（nullptr を渡す）。
+        const CoeffSet* safeAdaptiveSet = (adaptiveGenBefore == adaptiveGenAfter) ? adaptiveSet : nullptr;
+
         // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
         eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
         convBypassActive.store(convBypassed, std::memory_order_relaxed);
@@ -2190,8 +2229,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                        .convLCMode             = lcMode,
                        .eqLPFMode              = lpfMode,
                        .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
-                       .adaptiveCoeffSet       = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank),
-                       .adaptiveCoeffGeneration = adaptiveCoeffBank.generation.load(std::memory_order_acquire),
+                       .adaptiveCoeffSet       = safeAdaptiveSet,
+                       .adaptiveCoeffGeneration = adaptiveGenAfter,
                        .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
                        .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
                        .adaptiveCaptureQueue   = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr });
@@ -2204,12 +2243,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 {
-    static thread_local bool threadInitialized = false;
-    if (!threadInitialized) {
-        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-        threadInitialized = true;
-    }
+    const juce::ScopedNoDenormals noDenormals;
 
     const int numSamples = buffer.getNumSamples();
     // 事前サニティチェック (getNextAudioBlock と同様)
@@ -2262,6 +2296,18 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const auto& adaptiveCoeffBank       = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
     const bool adaptiveCaptureEnabled   = noiseShaperLearner && noiseShaperLearner->isRunning();
 
+    // [Bug Fix] RCU 世代検証によるデータ競合の完全排除
+    // 1. 取得前の世代をスナップショット
+    const uint32_t adaptiveGenBefore = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+    // 2. ポインタを取得
+    const CoeffSet* adaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
+    // 3. 取得後の世代をスナップショット
+    const uint32_t adaptiveGenAfter = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+
+    // 取得中に世代が変化した場合、ポインタが指すバッファが Writer によって再利用されている可能性がある。
+    // 安全のため、このブロックでは係数更新をスキップする（nullptr を渡す）。
+    const CoeffSet* safeAdaptiveSet = (adaptiveGenBefore == adaptiveGenAfter) ? adaptiveSet : nullptr;
+
     // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
     eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
     convBypassActive.store(convBypassed, std::memory_order_relaxed);
@@ -2281,8 +2327,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                          .convLCMode             = lcMode,
                          .eqLPFMode              = lpfMode,
                          .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
-                         .adaptiveCoeffSet       = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank),
-                         .adaptiveCoeffGeneration = adaptiveCoeffBank.generation.load(std::memory_order_acquire),
+                         .adaptiveCoeffSet       = safeAdaptiveSet,
+                         .adaptiveCoeffGeneration = adaptiveGenAfter,
                          .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
                          .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
                          .adaptiveCaptureQueue   = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr });
@@ -3005,6 +3051,44 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         if (dataR) for (int i = 0; i < numSamples; ++i) dataR[i] *= kOutputHeadroom;
     }
 
+    // ── Step 3.5: ディザリング後・出力直前のNaN/Infサニタイズ ─────────────
+    {
+        const __m256d vInf = _mm256_set1_pd(1.0e300);
+        int i = 0;
+        const int vEnd = numSamples / 4 * 4;
+        for (; i < vEnd; i += 4)
+        {
+            __m256d vL = _mm256_loadu_pd(dataL + i);
+            __m256d nanMaskL = _mm256_cmp_pd(vL, vL, _CMP_ORD_Q);
+            __m256d infMaskL = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vL), vInf, _CMP_LT_OQ);
+            __m256d maskL = _mm256_and_pd(nanMaskL, infMaskL);
+            vL = _mm256_and_pd(vL, maskL);
+            _mm256_storeu_pd(dataL + i, vL);
+
+            if (dataR)
+            {
+                __m256d vR = _mm256_loadu_pd(dataR + i);
+                __m256d nanMaskR = _mm256_cmp_pd(vR, vR, _CMP_ORD_Q);
+                __m256d infMaskR = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vR), vInf, _CMP_LT_OQ);
+                __m256d maskR = _mm256_and_pd(nanMaskR, infMaskR);
+                vR = _mm256_and_pd(vR, maskR);
+                _mm256_storeu_pd(dataR + i, vR);
+            }
+        }
+        for (; i < numSamples; ++i)
+        {
+            double v = dataL[i];
+            if (!isFiniteAndAbsBelowNoLibm(v, 1.0e300)) v = 0.0;
+            dataL[i] = v;
+            if (dataR)
+            {
+                v = dataR[i];
+                if (!isFiniteAndAbsBelowNoLibm(v, 1.0e300)) v = 0.0;
+                dataR[i] = v;
+            }
+        }
+    }
+
     // ── Step 4: double→float 変換・クランプ ─────────────────────────────────
     // juce::jlimit<double>(-1.0, 1.0, x) は JUCE 8.0.12 で存在確認済み (template)。
     // Step 2 のサニタイズ後は dataL/dataR に NaN/Inf がないため、
@@ -3100,6 +3184,37 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
             dataL[i] *= kOutputHeadroom;
             if (dataR != nullptr)
                 dataR[i] *= kOutputHeadroom;
+        }
+    }
+
+    // ── Step 3.5: ディザリング後・出力直前のNaN/Infサニタイズ ─────────────
+    {
+        const __m256d vInf = _mm256_set1_pd(1.0e300);
+        int i = 0;
+        const int vEnd = numSamples / 4 * 4;
+        for (; i < vEnd; i += 4)
+        {
+            __m256d vL = _mm256_loadu_pd(dataL + i);
+            __m256d nanMaskL = _mm256_cmp_pd(vL, vL, _CMP_ORD_Q);
+            __m256d infMaskL = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vL), vInf, _CMP_LT_OQ);
+            _mm256_storeu_pd(dataL + i, _mm256_and_pd(vL, _mm256_and_pd(nanMaskL, infMaskL)));
+
+            if (dataR != nullptr)
+            {
+                __m256d vR = _mm256_loadu_pd(dataR + i);
+                __m256d nanMaskR = _mm256_cmp_pd(vR, vR, _CMP_ORD_Q);
+                __m256d infMaskR = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vR), vInf, _CMP_LT_OQ);
+                _mm256_storeu_pd(dataR + i, _mm256_and_pd(vR, _mm256_and_pd(nanMaskR, infMaskR)));
+            }
+        }
+
+        for (; i < numSamples; ++i)
+        {
+            if (!isFiniteAndAbsBelowNoLibm(dataL[i], 1.0e300))
+                dataL[i] = 0.0;
+
+            if (dataR != nullptr && !isFiniteAndAbsBelowNoLibm(dataR[i], 1.0e300))
+                dataR[i] = 0.0;
         }
     }
 

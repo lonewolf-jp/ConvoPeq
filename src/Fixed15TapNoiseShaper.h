@@ -170,7 +170,7 @@ private:
 
         const double clampedError = std::clamp(error, -2.0 * scale, 2.0 * scale);
         idx = (idx - 1 + ORDER) % ORDER;
-        channelErrors[static_cast<size_t>(idx)] = clampedError;
+        channelErrors[static_cast<size_t>(idx)] = killDenormal(clampedError);
 
         return yq;
     }

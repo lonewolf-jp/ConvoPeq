@@ -529,8 +529,9 @@ private:
     std::atomic<float> mixedTransitionEndHz{MIXED_F2_DEFAULT_HZ};
     std::atomic<float> mixedPreRingTau{MIXED_TAU_DEFAULT};
 
-    // 【案 A】Smoothing Time 変更フラグ（Message Thread 委譲用）
+    // 【案 B】Smoothing Time 変更フラグ（Audio Thread 委譲用）
     std::atomic<bool> smoothingTimeChangePending { false };
+    std::atomic<bool> mixSmootherResetPending { false };
 
     //----------------------------------------------------------
     // IR情報
@@ -592,7 +593,6 @@ private:
     std::atomic<bool> isPrepared { false };
     bool visualizationEnabled = true; // Default true (for UI instance)
     std::atomic<int> currentBufferSize { 0 }; // prepareToPlay (Message Thread) で書き込み、Rebuild Worker Thread から読まれるためアトミック
-    double currentSmoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC; // mixSmootherに設定されている現在の時間
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)

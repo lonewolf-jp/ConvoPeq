@@ -478,6 +478,10 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     agcEnvInput.store(other.agcEnvInput.load(std::memory_order_relaxed), std::memory_order_relaxed);
     agcEnvOutput.store(other.agcEnvOutput.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
+    // 状態リセット要求の同期 (UI側で発生したリセットをAudio Thread側に引き継ぐ)
+    bandResetMask.store(other.bandResetMask.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    agcResetRequest.store(other.agcResetRequest.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
     // 注意: smoothTotalGainのターゲットは、totalGainTarget(linear値)に基づいてprocess()内で更新されます。
     // totalGainTargetはtotalGainDbTargetから storeTotalGainDb() を通じて同期されます。
 }
@@ -512,6 +516,10 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
     agcCurrentGain.store(other.agcCurrentGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
     agcEnvInput.store(other.agcEnvInput.load(std::memory_order_relaxed), std::memory_order_relaxed);
     agcEnvOutput.store(other.agcEnvOutput.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+    // 状態リセット要求の同期
+    bandResetMask.store(other.bandResetMask.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    agcResetRequest.store(other.agcResetRequest.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 //--------------------------------------------------------------
@@ -896,8 +904,8 @@ namespace
         // Denormal対策 & NaNチェック
         // Note: ScopedNoDenormals (DAZ/FTZ) が有効な場合でも、完全な0にならないと
         // 極小値が循環し続ける可能性があるため、明示的にフラッシュして計算負荷を抑える。
-        if (!isFiniteAndAbsInRangeMask(ic1eq, DENORMAL_THRESHOLD, 1.0e15)) ic1eq = 0.0;
-        if (!isFiniteAndAbsInRangeMask(ic2eq, DENORMAL_THRESHOLD, 1.0e15)) ic2eq = 0.0;
+        ic1eq = killDenormal(ic1eq);
+        ic2eq = killDenormal(ic2eq);
 
         state[0] = ic1eq;
         state[1] = ic2eq;
@@ -970,22 +978,8 @@ namespace
         }
 
         // Denormal フラッシュ & NaN チェック (状態変数のみ) - SIMD最適化
-        const __m128d denormal_threshold = _mm_set1_pd(DENORMAL_THRESHOLD);
-        const __m128d sign_mask = _mm_set1_pd(-0.0);
-
-        // --- ic1eq ---
-        __m128d nan_mask1 = _mm_cmpeq_pd(ic1eq, ic1eq);
-        __m128d abs_ic1eq = _mm_andnot_pd(sign_mask, ic1eq);
-        __m128d denormal_mask1 = _mm_cmplt_pd(abs_ic1eq, denormal_threshold);
-        __m128d valid_mask1 = _mm_andnot_pd(denormal_mask1, nan_mask1);
-        ic1eq = _mm_and_pd(ic1eq, valid_mask1);
-
-        // --- ic2eq ---
-        __m128d nan_mask2 = _mm_cmpeq_pd(ic2eq, ic2eq);
-        __m128d abs_ic2eq = _mm_andnot_pd(sign_mask, ic2eq);
-        __m128d denormal_mask2 = _mm_cmplt_pd(abs_ic2eq, denormal_threshold);
-        __m128d valid_mask2 = _mm_andnot_pd(denormal_mask2, nan_mask2);
-        ic2eq = _mm_and_pd(ic2eq, valid_mask2);
+        ic1eq = killDenormalV(ic1eq);
+        ic2eq = killDenormalV(ic2eq);
 
         // 状態を書き戻す (L/Rチャンネルに分離)
         _mm_storeu_pd(stateL, _mm_unpacklo_pd(ic1eq, ic2eq)); // [ic1eq_L, ic2eq_L]
