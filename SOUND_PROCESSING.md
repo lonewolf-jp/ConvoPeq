@@ -70,7 +70,7 @@ The ConvolverProcessor is a high-performance, real-time safe convolution engine 
 3. Dry/wet mixing, latency compensation, and crossfading are handled in real time, with all operations performed on pre-allocated, aligned buffers.
 4. All state changes (e.g., IR switch, parameter update) are applied atomically and safely, with no interruption to audio processing.
 
-#### Code Path Example (ConvolverProcessor)
+### Main DSP Chain: Code Path Example (ConvolverProcessor)
 
 ```cpp
 // At block start (audio thread):
@@ -131,15 +131,16 @@ When the IR mode is set to "Mixed" (parallel), the input signal is split and pro
 #### Code Path Example
 
 ```cpp
+
 // In DSPCore::process() (pseudo-code):
 if (processingMode == Mixed) {
    eq.process(inputBuffer, eqBuffer);
    convolver.process(inputBuffer, convBuffer);
    for (int n = 0; n < numSamples; ++n)
-      outputBuffer[n] = (1 - alpha) * eqBuffer[n] + alpha * convBuffer[n];
+      outputBuffer[n] = (1 - alpha) *eqBuffer[n] + alpha* convBuffer[n];
 }
-```cpp
 
+```cpp
 
 #### Summary
 
@@ -165,6 +166,7 @@ y[n] = x[n] + \sum_{k=1}^{12} a_k \cdot e[n-k]
 $$
 
 where:
+
 - $x[n]$: input sample (pre-quantization)
 - $y[n]$: output sample (post-shaping, pre-quantization)
 - $e[n]$: quantization error at time $n$
@@ -214,7 +216,7 @@ where $w[n]$ is a perceptual weighting function (e.g., A-weighting or psychoacou
 ### Key Internal Structures
 
 - **DSPCore::ProcessingState**: Struct holding all parameters needed for one block, snapshotted from atomics.
-- **ScopedAlignedPtr<double> alignedL/R**: 64-byte aligned input/output buffers for SIMD/MKL.
+- **ScopedAlignedPtr&lt;double&gt; alignedL/R**: 64-byte aligned input/output buffers for SIMD/MKL.
 - **LockFreeRingBuffer**: Used for analyzer tap and inter-thread communication.
 - **RCU/Atomic Generation**: Used for IR and adaptive coefficient handoff.
 
@@ -266,6 +268,7 @@ Input conditioning is the first stage of internal processing after input buffer 
 ### Example (Code Path)
 
 ```cpp
+
 // Headroom Gain (SIMD)
 scaleBlockFallback(alignedL, numSamples, headroomGain);
 scaleBlockFallback(alignedR, numSamples, headroomGain);
@@ -277,6 +280,7 @@ inputDCBlockerR.process(alignedR, numSamples);
 // Analyzer Tap (if enabled)
 if (analyzerEnabled)
    pushAdaptiveCaptureBlocks(captureQueue, alignedL, alignedR, numSamples, sampleRate, bitDepth, coeffBankIndex);
+
 ```cpp
 
 ### Key Internal Structures
@@ -351,6 +355,7 @@ Oversampling increases the internal sample rate (2x, 4x, or 8x) to reduce aliasi
 ### Example (Code Path)
 
 ```cpp
+
 // Oversampling up (in AudioEngine/DSPCore)
 if (oversamplingEnabled)
 {
@@ -359,6 +364,7 @@ if (oversamplingEnabled)
    // ... main DSP processing at high rate ...
    customOversampler.processDown(upBlock, outputBlock, numChannels);
 }
+
 ```cpp
 
 ### Key Internal Structures
@@ -375,7 +381,7 @@ if (oversamplingEnabled)
 
 ## 5. Main DSP Chain
 
-#### Code Path Example (ConvolverProcessor)
+### Code Path Example (ConvolverProcessor)
 
 ```cpp
 // At block start (audio thread):
@@ -598,11 +604,13 @@ if (processingMode == Mixed) {
   - All state updates are atomic or lock-free.
 - **Code Path Example**:
 
-   ```cpp
+  ```cpp
+
    // OutputFilter processing (per channel)
    outputFilterL.processBlock(alignedL, numSamples);
    outputFilterR.processBlock(alignedR, numSamples);
-   ```
+
+  ```cpp
 
 - **Parameter Management**:
   - Cutoff frequencies, filter order, and enable/disable flags are managed via atomic variables and updated by the UI thread.
@@ -644,10 +652,12 @@ if (processingMode == Mixed) {
   - All parameters (thresholds, ceiling) are atomic and updated by the UI thread.
 - **Code Path Example**:
 
-   ```cpp
+  ```cpp
+
    // Soft clipping (per channel, after makeup gain)
    softClipBlockAVX2(alignedL, numSamples);
    softClipBlockAVX2(alignedR, numSamples);
+
    ```
 
 - **Parameter Management**:
@@ -838,8 +848,10 @@ If oversampling was enabled, the processed audio block is downsampled back to th
 ### Code Path Example
 
 ```cpp
+
 // Downsampling after main DSP (in AudioEngine)
 customOversampler.processDown(upsampledBlock, outputBlock, numChannels);
+
 ```cpp
 
 ### Summary
