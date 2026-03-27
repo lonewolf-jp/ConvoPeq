@@ -52,7 +52,23 @@ This document describes, in as much detail as possible, the entire audio signal 
 
 ### FFT Convolver (ConvolverProcessor)
 
-...existing code...
+The ConvolverProcessor is a high-performance, real-time safe convolution engine designed for audio applications requiring long impulse responses (IRs), such as reverb, speaker simulation, and correction filters. It utilizes Intel MKL's Non-Uniform Partitioned Convolution (NUC) for efficient FFT-based processing, supporting stereo operation and seamless IR switching.
+
+**Key architectural features:**
+
+- **Thread Safety:** IR loading and switching are performed asynchronously on the message thread, using RCU (Read-Copy-Update) to ensure glitch-free operation. The audio thread never allocates memory or reloads IRs.
+- **Real-Time Safety:** All buffers are pre-allocated and 64-byte aligned for SIMD/MKL efficiency. No dynamic allocation, locks, or I/O occur in the audio thread.
+- **Stereo Processing:** Internally manages separate convolution engines for left and right channels, each with its own IR data and MKL NUC instance.
+- **Parameter Management:** All parameters (mix, phase mode, smoothing time, IR length, etc.) are managed atomically for lock-free, thread-safe updates.
+- **Visualization:** Generates IR waveform and frequency response snapshots for UI display, without impacting audio thread performance.
+- **Garbage Collection:** Old convolution engines are safely garbage collected after IR switches, ensuring no memory leaks or thread hazards.
+
+**Processing Flow:**
+
+1. At block start, the audio thread atomically loads the current IR state.
+2. For each channel, partitioned FFT convolution is performed using the MKL NUC engine.
+3. Dry/wet mixing, latency compensation, and crossfading are handled in real time, with all operations performed on pre-allocated, aligned buffers.
+4. All state changes (e.g., IR switch, parameter update) are applied atomically and safely, with no interruption to audio processing.
 
 #### Code Path Example (ConvolverProcessor)
 
