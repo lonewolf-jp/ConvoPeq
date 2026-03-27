@@ -82,7 +82,7 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
 
     for (auto* label : { &statusLabel, &orderLabel, &sampleRateAndBitDepthLabel, &iterationLabel, &processCountLabel,
                          &segmentCountLabel, &bestScoreLabel, &latestScoreLabel, &messageLabel,
-                         &elapsedLabel, &phaseLabel })
+                         &elapsedLabel, &phaseLabel, &cmaesRestartsLabel, &coeffSafetyMarginLabel })
     {
         label->setJustificationType(juce::Justification::centredLeft);
         label->setColour(juce::Label::textColourId, juce::Colours::white);
@@ -92,6 +92,34 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     messageLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.72f));
 
     addAndMakeVisible(progressGraph);
+
+    cmaesRestartsSlider.setRange(1, 10, 1);
+    cmaesRestartsSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    cmaesRestartsSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 40, 20);
+    cmaesRestartsSlider.onValueChange = [this] {
+        auto s = audioEngine.getNoiseShaperLearnerSettings();
+        s.cmaesRestarts = static_cast<int>(cmaesRestartsSlider.getValue());
+        audioEngine.setNoiseShaperLearnerSettings(s);
+    };
+    addAndMakeVisible(cmaesRestartsSlider);
+
+    coeffSafetyMarginSlider.setRange(0.3, 0.95, 0.01);
+    coeffSafetyMarginSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    coeffSafetyMarginSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 40, 20);
+    coeffSafetyMarginSlider.onValueChange = [this] {
+        auto s = audioEngine.getNoiseShaperLearnerSettings();
+        s.coeffSafetyMargin = coeffSafetyMarginSlider.getValue();
+        audioEngine.setNoiseShaperLearnerSettings(s);
+    };
+    addAndMakeVisible(coeffSafetyMarginSlider);
+
+    enableStabilityCheckButton.onClick = [this] {
+        auto s = audioEngine.getNoiseShaperLearnerSettings();
+        s.enableStabilityCheck = enableStabilityCheckButton.getToggleState();
+        audioEngine.setNoiseShaperLearnerSettings(s);
+    };
+    enableStabilityCheckButton.setToggleState(true, juce::dontSendNotification);
+    addAndMakeVisible(enableStabilityCheckButton);
 
     refreshFromEngine();
     startTimerHz(8);
@@ -159,6 +187,20 @@ void NoiseShaperLearningComponent::resized()
     area.removeFromTop(4);
 
     latestScoreLabel.setBounds(area.removeFromTop(24));
+
+    area.removeFromTop(8);
+    auto restartsRow = area.removeFromTop(24);
+    cmaesRestartsLabel.setBounds(restartsRow.removeFromLeft(labelWidth).reduced(2, 0));
+    cmaesRestartsSlider.setBounds(restartsRow.reduced(2, 0));
+
+    area.removeFromTop(4);
+    auto marginRow = area.removeFromTop(24);
+    coeffSafetyMarginLabel.setBounds(marginRow.removeFromLeft(labelWidth).reduced(2, 0));
+    coeffSafetyMarginSlider.setBounds(marginRow.reduced(2, 0));
+
+    area.removeFromTop(4);
+    auto stabilityRow = area.removeFromTop(24);
+    enableStabilityCheckButton.setBounds(stabilityRow.reduced(2, 0));
 
     area.removeFromTop(4);
     messageLabel.setBounds(area.removeFromTop(22));
@@ -358,6 +400,18 @@ void NoiseShaperLearningComponent::refreshFromEngine()
                            juce::dontSendNotification);
     latestScoreLabel.setText("Latest score: " + formatScore(latestScore),
                              juce::dontSendNotification);
+
+    if (!cmaesRestartsSlider.isMouseButtonDown())
+        cmaesRestartsSlider.setValue(audioEngine.getNoiseShaperLearnerSettings().cmaesRestarts, juce::dontSendNotification);
+    else
+        cmaesRestartsSlider.setValue(5, juce::dontSendNotification);
+
+    if (!coeffSafetyMarginSlider.isMouseButtonDown())
+        coeffSafetyMarginSlider.setValue(audioEngine.getNoiseShaperLearnerSettings().coeffSafetyMargin, juce::dontSendNotification);
+    else
+        coeffSafetyMarginSlider.setValue(0.85, juce::dontSendNotification);
+
+    enableStabilityCheckButton.setToggleState(audioEngine.getNoiseShaperLearnerSettings().enableStabilityCheck, juce::dontSendNotification);
 
     juce::String message = "Press Start learning to begin adaptive optimization.";
 

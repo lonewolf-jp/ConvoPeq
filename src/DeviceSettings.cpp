@@ -218,9 +218,9 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
 
     addAndMakeVisible(noiseShaperComboBox);
     noiseShaperComboBox.addItem("4th-order", 1);
-    noiseShaperComboBox.addItem("9th-order", 2);
-    noiseShaperComboBox.addItem("9th-order adaptive", 3);
-    noiseShaperComboBox.addItem("15th-order", 4);
+    noiseShaperComboBox.addItem("12th-order", 2);
+    noiseShaperComboBox.addItem("15th-order", 3);
+    noiseShaperComboBox.addItem("9th-order adaptive", 4);
     noiseShaperComboBox.onChange = [this] {
         const int id = noiseShaperComboBox.getSelectedId();
         if (id == 1)
@@ -228,9 +228,9 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
         else if (id == 2)
             audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Psychoacoustic);
         else if (id == 3)
-            audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Adaptive9thOrder);
-        else if (id == 4)
             audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Fixed15Tap);
+        else if (id == 4)
+            audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Adaptive9thOrder);
 
         updateNoiseShaperControls();
     };
@@ -322,10 +322,10 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
             noiseShaperComboBox.setSelectedId(1, juce::dontSendNotification);
             break;
         case AudioEngine::NoiseShaperType::Fixed15Tap:
-            noiseShaperComboBox.setSelectedId(4, juce::dontSendNotification);
+            noiseShaperComboBox.setSelectedId(3, juce::dontSendNotification);
             break;
         case AudioEngine::NoiseShaperType::Adaptive9thOrder:
-            noiseShaperComboBox.setSelectedId(3, juce::dontSendNotification);
+            noiseShaperComboBox.setSelectedId(4, juce::dontSendNotification);
             break;
         case AudioEngine::NoiseShaperType::Psychoacoustic:
         default:
@@ -442,7 +442,7 @@ void DeviceSettings::timerCallback()
 void DeviceSettings::showAdaptiveLearningWindow()
 {
     audioEngine.setNoiseShaperType(AudioEngine::NoiseShaperType::Adaptive9thOrder);
-    noiseShaperComboBox.setSelectedId(3, juce::dontSendNotification);
+    noiseShaperComboBox.setSelectedId(4, juce::dontSendNotification);
     updateNoiseShaperControls();
 
     if (adaptiveLearningWindow != nullptr)
@@ -470,8 +470,8 @@ void DeviceSettings::showAdaptiveLearningWindow()
 
 void DeviceSettings::updateNoiseShaperControls()
 {
-    const bool showFixedControls = noiseShaperComboBox.getSelectedId() == 1 || noiseShaperComboBox.getSelectedId() == 4;
-    const bool showAdaptiveButton = noiseShaperComboBox.getSelectedId() == 3;
+    const bool showFixedControls = noiseShaperComboBox.getSelectedId() == 1 || noiseShaperComboBox.getSelectedId() == 3;
+    const bool showAdaptiveButton = noiseShaperComboBox.getSelectedId() == 4;
 
     fixedNoiseLogIntervalLabel.setVisible(showFixedControls);
     fixedNoiseLogIntervalComboBox.setVisible(showFixedControls);

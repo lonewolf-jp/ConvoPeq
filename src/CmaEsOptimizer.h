@@ -83,6 +83,11 @@ public:
         std::copy(inMean, inMean + kDim, mean);
     }
 
+    void setSeed(uint64_t seed) noexcept
+    {
+        rng.seed(static_cast<std::mt19937::result_type>(seed));
+    }
+
     void initFromParcor(const double* initialParcor) noexcept
     {
         for (int i = 0; i < kDim; ++i)

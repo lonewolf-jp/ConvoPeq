@@ -56,6 +56,12 @@ private:
     juce::Label phaseLabel;
     juce::Label messageLabel;
 
+    juce::Slider cmaesRestartsSlider;
+    juce::Label  cmaesRestartsLabel { "Restarts", "CMA-ES Restarts:" };
+    juce::Slider coeffSafetyMarginSlider;
+    juce::Label  coeffSafetyMarginLabel { "Margin", "Coeff Safety Margin:" };
+    juce::ToggleButton enableStabilityCheckButton { "Enable Stability Check" };
+
     std::array<double, NoiseShaperLearner::kMaxHistoryPoints> historyBuffer {};
 
     class PeriodicSaver : public juce::Timer

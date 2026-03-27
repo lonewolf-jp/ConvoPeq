@@ -517,6 +517,19 @@ const NoiseShaperLearner::Progress& AudioEngine::getNoiseShaperLearningProgress(
     return noiseShaperLearner->getProgress();
 }
 
+NoiseShaperLearner::Settings AudioEngine::getNoiseShaperLearnerSettings() const
+{
+    if (noiseShaperLearner)
+        return noiseShaperLearner->getSettings();
+    return {};
+}
+
+void AudioEngine::setNoiseShaperLearnerSettings(const NoiseShaperLearner::Settings& settings)
+{
+    if (noiseShaperLearner)
+        noiseShaperLearner->setSettings(settings);
+}
+
 int AudioEngine::copyNoiseShaperLearningHistory(double* outScores, int maxPoints) const noexcept
 {
     return noiseShaperLearner ? noiseShaperLearner->copyBestScoreHistory(outScores, maxPoints) : 0;
@@ -1877,38 +1890,49 @@ void AudioEngine::timerCallback()
         sendChangeMessage();
     }
 
-    convo::ScopedAlignedPtr<DSPCore*> toDelete;
+    constexpr size_t MAX_DELETE_BATCH = 64;
+    constexpr size_t MAX_TRASH_BIN_SIZE = 64;
+    DSPCore* toDelete[MAX_DELETE_BATCH] = {};
     size_t toDeleteCount = 0;
     {
         const juce::ScopedLock sl(trashBinLock);
-        const size_t trashSize = trashBin.size();
-        if (trashSize > 0)
-        {
-            toDelete.reset(static_cast<DSPCore**>(convo::aligned_malloc(trashSize * sizeof(DSPCore*), 64)));
-        }
 
         const uint32 now = juce::Time::getMillisecondCounter();
-        // 2. Identify items to delete (older than 10000ms)
-        // This ensures that any Audio Thread processing cycle (worst case: 65536/8000Hz = 8.2s)
-        // that might have started using the pointer has finished.
         for (auto it = trashBin.begin(); it != trashBin.end(); )
         {
-            // Unsigned arithmetic handles wrap-around correctly
             if ((now - it->second) > 10000)
             {
-                toDelete.get()[toDeleteCount++] = it->first;
+                if (toDeleteCount < MAX_DELETE_BATCH)
+                    toDelete[toDeleteCount++] = it->first;
+                else
+                    jassertfalse; // 通常は到達しないが、保険として残りは次回以降に
                 it = trashBin.erase(it);
             }
             else { ++it; }
         }
 
-        // 安全性優先: 時間条件((now - ts) > 10000ms)を満たすもののみ回収する。
-        // サイズ超過のみを理由とした強制解放は行わない。
+        // 保持数上限超過警告（メモリ枯渇リスクの早期検出）
+        if (trashBin.size() > MAX_TRASH_BIN_SIZE)
+        {
+            uint32 minAge = std::numeric_limits<uint32>::max();
+            for (const auto& entry : trashBin)
+            {
+                uint32 age = (now >= entry.second) ? (now - entry.second)
+                                                   : (std::numeric_limits<uint32>::max() - entry.second + now);
+                if (age < minAge) minAge = age;
+            }
+            juce::Logger::writeToLog(
+                "[AudioEngine] trashBin size warning: current=" + juce::String(trashBin.size()) +
+                " limit=" + juce::String(MAX_TRASH_BIN_SIZE) +
+                " min_entry_age_ms=" + juce::String(minAge) +
+                " (entries <10s retained for Audio Thread safety)");
+        }
+
     }
 
-    // Lock解放後にデストラクタを実行 (stopThread等の重い処理をロック外で行う)
+    // ロック解放後に削除
     for (size_t i = 0; i < toDeleteCount; ++i)
-        delete toDelete.get()[i];
+        delete toDelete[i];
 
     // 3. 内部プロセッサのクリーンアップを実行
     // 現在アクティブなDSPの内部ゴミ箱も掃除する
@@ -3377,6 +3401,19 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("oversamplingType"))
         setOversamplingType((OversamplingType)(int)state.getProperty("oversamplingType"));
 
+    // --- NoiseShaperLearner Settings ---
+    if (state.hasProperty("cmaesRestarts") || state.hasProperty("coeffSafetyMargin") || state.hasProperty("enableStabilityCheck"))
+    {
+        auto s = getNoiseShaperLearnerSettings();
+        if (state.hasProperty("cmaesRestarts"))
+            s.cmaesRestarts = static_cast<int>(state.getProperty("cmaesRestarts"));
+        if (state.hasProperty("coeffSafetyMargin"))
+            s.coeffSafetyMargin = static_cast<double>(state.getProperty("coeffSafetyMargin"));
+        if (state.hasProperty("enableStabilityCheck"))
+            s.enableStabilityCheck = static_cast<bool>(state.getProperty("enableStabilityCheck"));
+        setNoiseShaperLearnerSettings(s);
+    }
+
     // ─── Step 3: その他のグローバル設定 ─────────────────────────────────────
     if (state.hasProperty("softClipEnabled"))
         setSoftClipEnabled(state.getProperty("softClipEnabled"));
@@ -3424,6 +3461,15 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.setProperty("noiseShaperType", (int)noiseShaperType.load(), nullptr);
     state.setProperty("oversamplingFactor", manualOversamplingFactor.load(), nullptr);
     state.setProperty("oversamplingType", (int)oversamplingType.load(), nullptr);
+
+    // NoiseShaperLearner Settings
+    {
+        auto s = getNoiseShaperLearnerSettings();
+        state.setProperty("cmaesRestarts", s.cmaesRestarts, nullptr);
+        state.setProperty("coeffSafetyMargin", s.coeffSafetyMargin, nullptr);
+        state.setProperty("enableStabilityCheck", s.enableStabilityCheck, nullptr);
+    }
+
     state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);
     state.setProperty("convBypassed", convBypassRequested.load(), nullptr);
     // 出力周波数フィルターモードの保存

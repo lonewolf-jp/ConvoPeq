@@ -132,6 +132,42 @@ public:
             clampStateSIMD(states[static_cast<size_t>(ch)].data());
     }
 
+    static inline double clampCoeff(double value) noexcept
+    {
+        // 【修正】9th-order の安定性を優先し 0.85 に設定
+        constexpr double kLimit = 0.85;
+        if (std::isnan(value))
+            return 0.0;
+        if (value > kLimit)
+            return kLimit;
+        if (value < -kLimit)
+            return -kLimit;
+        return value;
+    }
+
+    // 安全マージン付き clampCoeff（外部から上限指定可能）
+    static inline double clampCoeff(double value, double margin) noexcept
+    {
+        const double kLimit = margin;
+        if (std::isnan(value))
+            return 0.0;
+        if (value > kLimit) return kLimit;
+        if (value < -kLimit) return -kLimit;
+        return value;
+    }
+
+    // 安定性簡易チェック（格子フィルタ理論に基づく）
+    static bool isStable(const double* parcor, int order) noexcept
+    {
+        // 反射係数の絶対値が全て 1 未満であることを確認
+        for (int i = 0; i < order; ++i)
+        {
+            if (std::abs(parcor[i]) >= 1.0 - 1e-12)
+                return false;
+        }
+        return true;  // 格子フィルタは反射係数が全て |k|<1 であれば安定
+    }
+
 private:
     static constexpr double kStateLimit = 1.0e12;
 
@@ -152,18 +188,6 @@ private:
         _mm256_storeu_pd(state + 4, v1);
 
         state[8] = std::clamp(state[8], -kStateLimit, kStateLimit);
-    }
-    static inline double clampCoeff(double value) noexcept
-    {
-        // 【修正】9th-order の安定性を優先し 0.85 に設定
-        constexpr double kLimit = 0.85;
-        if (std::isnan(value))
-            return 0.0;
-        if (value > kLimit)
-            return kLimit;
-        if (value < -kLimit)
-            return -kLimit;
-        return value;
     }
 
     struct Xoshiro256State

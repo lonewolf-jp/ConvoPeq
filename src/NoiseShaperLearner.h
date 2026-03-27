@@ -54,7 +54,7 @@ public:
     };
 
     enum class LearningMode { Shortest, Short, Middle, Long, Ultra, Continuous };
-    
+
     static constexpr int kOrder = LatticeNoiseShaper::kOrder;
 
     struct Progress
@@ -96,6 +96,26 @@ public:
         int currentPhase = 1;
         double elapsedPlaybackSeconds = 0.0;
     };
+
+    // ============================================================================
+    // 追加: 学習設定（Multi-start / 安全マージン / 極配置チェック）
+    // ============================================================================
+    struct Settings
+    {
+        int cmaesRestarts = 5;               // デフォルト5
+        double coeffSafetyMargin = 0.85;     // デフォルト0.85
+        bool enableStabilityCheck = true;    // デフォルトON
+    };
+
+    void setSettings(const Settings& newSettings) noexcept
+    {
+        settings = newSettings;
+    }
+
+    const Settings& getSettings() const noexcept
+    {
+        return settings;
+    }
 
     static constexpr int kMaxHistoryPoints = 256;
     static constexpr int kMaxParallelEvaluators = 6;
@@ -208,6 +228,7 @@ private:
     std::atomic<bool> pendingRestart { false };
 
     Progress progress;
+    Settings settings;
     std::atomic<const char*> errorMessage { nullptr };
 
     double accumulatedPlaybackSeconds = 0.0;           // Worker thread専用（非atomic）

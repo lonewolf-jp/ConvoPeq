@@ -582,6 +582,64 @@ void NoiseShaperLearner::workerThreadMain()
         bool resume = pendingResume.exchange(false, std::memory_order_acquire);
         resetLearningSession(activeSession, resume);
 
+        // ============================================================================
+        // 【追加】Multi-start ロジック
+        // 初回起動時（resumeでない場合）かつ設定が有効な場合、複数のシードで試行
+        // ============================================================================
+        if (!resume && settings.cmaesRestarts > 1)
+        {
+            progress.status.store(Status::WaitingForAudio, std::memory_order_release);
+
+            // 評価に必要なセグメントが溜まるまで待機
+            while (segmentBuffer.getNumAvailableSamples() < kRecentSampleRequest && !stopRequested.load())
+            {
+                drainCaptureQueue(activeSession);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            if (!stopRequested.load())
+            {
+                const int segmentCount = buildTrainingSegments();
+                if (segmentCount >= 2)
+                {
+                    double bestRestartScore = std::numeric_limits<double>::max();
+                    State bestRestartState;
+                    State initialState;
+                    getState(bestRestartState);
+                    initialState = bestRestartState;   // 初期状態を保存
+
+                    const int evaluationBitDepth = engine.getDitherBitDepth() > 0 ? engine.getDitherBitDepth() : 24;
+
+                    for (int r = 0; r < settings.cmaesRestarts; ++r)
+                    {
+                        if (stopRequested.load()) break;
+
+                        // 初期状態に戻してからシードを変える
+                        setState(initialState);
+                        optimizer.setSeed(static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()) + r);
+
+                        // 数世代だけ回して良し悪しを判断
+                        for (int g = 0; g < 3; ++g)
+                        {
+                            optimizer.sample(candidatePopulation);
+                            int dummyIdx = 0;
+                            double currentBestScore = 0.0;
+                            evaluatePopulation(segmentCount, evaluationBitDepth, dummyIdx, currentBestScore);
+                            optimizer.update(candidatePopulation, candidateFitness);
+
+                            if (currentBestScore < bestRestartScore)
+                            {
+                                bestRestartScore = currentBestScore;
+                                getState(bestRestartState);
+                            }
+                        }
+                    }
+                    // 最も良かった状態に復元
+                    setState(bestRestartState);
+                }
+            }
+        }
+
         double parcor[CmaEsOptimizer::kDim] = {};
         double bestScore = std::numeric_limits<double>::max();
         int generation = 0;
@@ -853,7 +911,7 @@ int NoiseShaperLearner::buildTrainingSegments() noexcept
             if (levelBucketCounts[i] < kMaxSegmentsPerLevel)
             {
                 const double targetRMS = std::pow(10.0, kTargetLevelsDB[i] / 20.0);
-                
+
                 // Calculate gain to reach target RMS, but limit by peak headroom
                 double gain = targetRMS / rms;
                 if (maxPeak * gain > kPeakHeadroom)
@@ -888,11 +946,22 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
                                              int evaluationBitDepth) noexcept
 {
     juce::ScopedNoDenormals noDenormals;
-    
+
     // Map unconstrained CMA-ES parameters to reflection coefficients using tanh
     std::array<double, kOrder> mappedCoeffs;
     for (int i = 0; i < kOrder; ++i)
-        mappedCoeffs[static_cast<size_t>(i)] = std::tanh(candidateCoefficients[i]);
+    {
+        const double k = std::tanh(candidateCoefficients[i]);
+        // 【追加】安全マージンの適用
+        mappedCoeffs[static_cast<size_t>(i)] = LatticeNoiseShaper::clampCoeff(k, settings.coeffSafetyMargin);
+    }
+
+    // 【追加】安定性チェック（有効な場合）
+    if (settings.enableStabilityCheck)
+    {
+        if (!LatticeNoiseShaper::isStable(mappedCoeffs.data(), kOrder))
+            return 1e18; // 不安定な場合は巨大なペナルティを返す
+    }
 
     context.shaper.prepare(evaluationBitDepth);
     context.shaper.setCoefficients(mappedCoeffs.data(), kOrder);
@@ -912,11 +981,11 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
                 break;
 
             const auto& leveled = levelBuckets[i][j];
-            
+
             context.shaper.reset();
             juce::FloatVectorOperations::copy(context.shapedLeft, leveled.segment.left, AudioSegment::kLength);
             juce::FloatVectorOperations::copy(context.shapedRight, leveled.segment.right, AudioSegment::kLength);
-            
+
             context.shaper.processStereoBlock(context.shapedLeft,
                                               context.shapedRight,
                                               AudioSegment::kLength,
@@ -930,7 +999,7 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
             }
 
             const auto result = context.fftEvaluator.evaluate(context.errorLeft, context.errorRight, &leveled.segment.maskingThresholds);
-            
+
     // Hybrid score: blend time domain RMS and frequency domain composite score
             // Low level (-40/-30dBFS) -> more time domain weight (smaller alpha for freqScore)
             // High level (-20/-10dBFS) -> more freq domain weight (larger alpha for freqScore)
@@ -944,7 +1013,7 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
             // We use a heuristic scaling to bring them into a comparable range (~0.0 to 1.0 for typical noise).
             const double timeScore = result.timeDomainRms * 1000.0;
             const double freqScore = std::sqrt(result.compositeScore / MklFftEvaluator::kFftLength) * 1000.0;
-            
+
             levelScoreSum += (alpha * freqScore + (1.0 - alpha) * timeScore);
         }
 
@@ -963,23 +1032,23 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
 void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, double sampleRate) noexcept
 {
     auto& evaluator = evaluationWorkers[0].context.fftEvaluator;
-    
+
     MKL_Complex16 spectrumL[MklFftEvaluator::kSpectrumBins];
     MKL_Complex16 spectrumR[MklFftEvaluator::kSpectrumBins];
-    
+
     evaluator.computeFft(leveled.segment.left, leveled.segment.right, spectrumL, spectrumR);
-    
+
     leveled.segment.maskingThresholds.resize(MklFftEvaluator::kSpectrumBins);
-    
+
     const double binWidth = (sampleRate * 0.5) / (MklFftEvaluator::kSpectrumBins - 1);
-    
+
     for (int k = 0; k < MklFftEvaluator::kSpectrumBins; ++k)
     {
         const double magSqL = spectrumL[k].real * spectrumL[k].real + spectrumL[k].imag * spectrumL[k].imag;
         const double magSqR = spectrumR[k].real * spectrumR[k].real + spectrumR[k].imag * spectrumR[k].imag;
         const double avgMagSq = 0.5 * (magSqL + magSqR);
         const double freq = k * binWidth;
-        
+
         leveled.segment.maskingThresholds[k] = evaluator.computeMaskingThreshold(avgMagSq, freq);
     }
 }
@@ -1028,13 +1097,13 @@ bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
         for (int i = 0; i < kOrder; ++i)
             bestCoefficients[i].store(coeffsXml->getDoubleAttribute("c" + juce::String(i)));
     }
-    
+
     if (auto* cmaXml = xml->getChildByName("CmaMean"))
     {
         double mean[kOrder] = {};
         for (int i = 0; i < kOrder; ++i)
             mean[i] = cmaXml->getDoubleAttribute("m" + juce::String(i));
-        
+
         // We only restore the mean, keeping other CMA state as literature defaults or engine state
         // unless we want full CMA state persistence. For now, mean + bestCoeffs is a good warm start.
         optimizer.setMean(mean);
@@ -1073,7 +1142,7 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
     const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, currentMode);
 
     juce::WeakReference<NoiseShaperLearner> weakSelf(this);
-    
+
     juce::MessageManager::callAsync([weakSelf, mappedCoeffs, currentState, bankIndex]() mutable
     {
         if (auto* self = weakSelf.get())

@@ -1,5 +1,5 @@
 
-# ConvoPeq Architecture (v0.5.6+)
+# ConvoPeq Architecture (v0.5.7+)
 
 This document describes the internal architecture of **ConvoPeq**, a Windows-only standalone audio application built with **JUCE 8.0.12** and Intel oneMKL. It is intended for developers and contributors working on DSP, threading, state transitions, and runtime behavior.
 
@@ -11,27 +11,23 @@ For user-facing features and usage, see `README.md`.
 
 ConvoPeq is organized around four priorities:
 
-1. **Real-time safety**
-   - The audio callback executes DSP only.
-   - No blocking waits, file I/O, or UI interaction on the audio thread.
-   - Runtime-critical memory is pre-allocated and reused.
+- Runtime-critical memory is pre-allocated and reused.
 
-2. **Audio quality**
-   - Main processing path uses **64-bit double precision**.
+1. **Audio quality**
    - Core processors are high-quality convolution and 20-band parametric EQ.
    - Output conditioning includes output filtering, soft clipping (optional), and dither.
 
-3. **Performance**
+2. **Performance**
    - Optimized for Windows x64 + AVX2-class CPUs.
    - Uses Intel oneMKL where beneficial (FFT/BLAS/VML paths).
    - Uses alignment-aware memory allocation for SIMD/MKL efficiency.
 
-4. **Operational robustness**
+3. **Operational robustness**
    - UI/control logic is decoupled from DSP execution.
    - Heavy work (IR load/rebuild) is asynchronous.
    - State transitions are staged to avoid audible artifacts.
 
-## Adaptive Noise Shaper Learning (v0.5.6+)
+## Adaptive Noise Shaper Learning (v0.5.7+)
 
 - `NoiseShaperLearner` receives 256-sample AudioBlocks from the Audio Thread via a LockFreeRingBuffer and performs CMA-ES optimization (9th-order IIR noise shaper coefficients) on a dedicated worker thread.
 - Coefficient banks are managed per sample rate and bit depth; progress, error, and coefficients are reported to the UI/Engine via atomic variables.
@@ -74,11 +70,6 @@ ConvoPeq is organized around four priorities:
 - `AudioEngineProcessor.h/.cpp`
   - Adapter from device callback into `AudioEngine` processing.
 
-- `DeviceSettings.h/.cpp`
-  - Device configuration and persistence support.
-  - Persists `device_settings.xml` under `%APPDATA%/ConvoPeq/` for device state plus dither / oversampling / input headroom / output makeup.
-
-- `AsioBlacklist.h`
   - Compatibility guard for known problematic ASIO scenarios.
 
 ### 2.3 DSP Layer
@@ -126,6 +117,74 @@ At runtime, `AudioEngine` coordinates all processing, including adaptive noise s
 Typical logical chain:
 
 `Audio Input -> Input conditioning -> Oversampling (optional) -> [EQ <-> Convolver (order selectable)] -> Output filter / soft clipping -> Dither / final conditioning (with optional Adaptive Noise Shaper) -> Audio Output`
+
+## Detailed Data Processing Flow
+
+The following describes the precise, step-by-step flow of audio data through ConvoPeq’s processing pipeline, referencing key classes and methods:
+
+1. **Audio Input Reception**
+
+- The audio device callback invokes `AudioEngineProcessor::getNextAudioBlock()`, which delegates to `AudioEngine::getNextAudioBlock()`.
+- Input buffer is received as a `juce::AudioSourceChannelInfo` object.
+
+1. **Oversampling (Optional)**
+
+- If enabled, `CustomInputOversampler::processUp()` is called.
+- Multi-stage FIR/IIR upsampling is performed (factor 2x/4x/8x), using AVX2-optimized routines.
+- Input DC offset is removed by `UltraHighRateDCBlocker`.
+
+1. **Processing Order Selection**
+
+- The processing order is determined by `AudioEngine::ProcessingOrder` (Convolver→EQ or EQ→Convolver).
+- This is set via the UI and stored atomically.
+
+1. **EQ Processing**
+
+- `EQProcessor::process()` is called.
+- 20-band parametric EQ is applied using TPT SVF filters.
+- All parameter/state updates are lock-free (RCU pattern).
+- AGC (automatic gain control) is applied if enabled.
+
+1. **Convolution Processing**
+
+- `ConvolverProcessor::process()` is called.
+- Performs high-performance convolution (linear/minimum phase, IR smoothing, output filter).
+- IR and parameters are updated asynchronously and atomically.
+
+1. **Output Conditioning**
+
+- `OutputFilter::process()` applies high/low cut filtering.
+- `UltraHighRateDCBlocker` removes output DC offset.
+- If enabled, `AudioEngine::DSPCore::softClipBlockAVX2()` applies musical soft clipping (AVX2-optimized).
+
+1. **Dither & Noise Shaping**
+
+- Dither and noise shaping are applied according to user selection:
+  - `PsychoacousticDither`, `FixedNoiseShaper`, `Fixed15TapNoiseShaper`, or `LatticeNoiseShaper` (adaptive, CMA-ES optimized).
+- Adaptive coefficients are managed per sample rate/bit depth/mode and updated atomically.
+
+1. **Downsampling (If Oversampled)**
+
+- `CustomInputOversampler::processDown()` is called.
+- Multi-stage FIR/IIR downsampling is performed, AVX2-optimized, with real-time safety.
+
+1. **Output Buffer Delivery**
+
+- The processed buffer is written back to the output channels in `juce::AudioSourceChannelInfo`.
+- Level meters and spectrum analyzer taps are updated via lock-free FIFO.
+
+1. **UI/Analyzer/Worker Thread Data Transfer**
+
+- Analyzer and learning data are pushed to `LockFreeRingBuffer` for consumption by the UI and `NoiseShaperLearner` worker thread.
+- All inter-thread communication uses atomic/lock-free/RCU patterns for real-time safety.
+
+**See also:**
+
+- `src/AudioEngine.cpp` (`getNextAudioBlock`, `DSPCore::process`)
+- `src/EQProcessor.cpp`, `src/ConvolverProcessor.cpp`, `src/CustomInputOversampler.cpp`, `src/OutputFilter.cpp`
+- `SOUND_PROCESSING.md` for mathematical and code-level details.
+
+---
 
 Key points:
 

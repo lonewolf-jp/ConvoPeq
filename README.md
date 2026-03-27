@@ -3,41 +3,42 @@
 
 ---
 
-## New in v0.5.6
+## New in v0.5.7
 
-### Main Source Code Changes from v0.5.5 to v0.5.6
+### Main Source Code Changes from v0.5.6 to v0.5.7
 
-- **Versioning**: Unified all version strings to v0.5.6 (README.md, ARCHITECTURE.md, ProjectMetadata.cmake, etc.).
+- **Versioning**
+  - Unified all version strings to v0.5.7 (README.md, ARCHITECTURE.md, ProjectMetadata.cmake, etc.)
 
-- **AudioEngine/General Optimization & Safety**:
-  - Optimized AudioBlock initialization (avoided zero-initialization, used memcpy for speed).
-  - Changed EQ response curve buffers from std::vector to std::array, unified NUM_DISPLAY_BARS in AudioEngine.
-  - Removed BLAS dependencies (cblas_dscal, etc.), unified to AVX2/SIMD-based scaleBlockFallback for real-time safety.
-  - Removed pinCurrentThreadToAudioCoreIfNeeded() (simplified thread affinity control).
-  - Removed dynamic buffer resizing in EQ response calculation (fixed-length, no runtime allocation).
+- **AudioEngine / General Optimization & Safety**
+  - Optimized AudioBlock initialization (avoided zero-initialization, used memcpy for speed)
+  - Changed EQ response curve buffers from std::vector to std::array, unified NUM_DISPLAY_BARS in AudioEngine
+  - Removed BLAS dependencies (cblas_dscal, etc.), unified to AVX2/SIMD-based scaleBlockFallback for real-time safety
+  - Removed pinCurrentThreadToAudioCoreIfNeeded() (simplified thread affinity control)
+  - Removed dynamic buffer resizing in EQ response calculation (fixed-length, no runtime allocation)
 
-- **Noise Shaper (Fixed/Lattice/15Tap) Improvements**:
-  - Unified random number generation to Xoshiro256++ and implemented high-quality TPDF dither in all noise shapers.
-  - quantize() now adds TPDF dither, each channel holds independent RNG state.
-  - LatticeNoiseShaper, FixedNoiseShaper, and Fixed15TapNoiseShaper all use the same RNG/dither logic.
+- **Noise Shaper (Fixed/Lattice/15Tap) Improvements**
+  - Unified random number generation to Xoshiro256++ and implemented high-quality TPDF dither in all noise shapers
+  - quantize() now adds TPDF dither, each channel holds independent RNG state
+  - LatticeNoiseShaper, FixedNoiseShaper, and Fixed15TapNoiseShaper all use the same RNG/dither logic
 
-- **ConvolverProcessor/MKLNonUniformConvolver Robustness & Bug Fixes**:
-  - Changed latency update to atomic flag delegation to Audio Thread for thread safety.
-  - Optimized wet/dry mix (removed BLAS, unified to AVX2/scalar functions).
-  - Simplified FilterSpec construction in finalizeNUCEngineOnMessageThread.
-  - MKLNonUniformConvolver: Added OOM error handling, fixed block count calculation to use ceiling division.
-  - Expanded addFallback usage (removed BLAS dependency).
+- **ConvolverProcessor / MKLNonUniformConvolver Robustness & Bug Fixes**
+  - Changed latency update to atomic flag delegation to Audio Thread for thread safety
+  - Optimized wet/dry mix (removed BLAS, unified to AVX2/scalar functions)
+  - Simplified FilterSpec construction in finalizeNUCEngineOnMessageThread
+  - MKLNonUniformConvolver: Added OOM error handling, fixed block count calculation to use ceiling division
+  - Expanded addFallback usage (removed BLAS dependency)
 
-- **EQProcessor/Spectrum Analyzer/UI**:
-  - EQProcessor: RMS calculation now uses AVX2/SIMD+SSE2 sqrt (no libm/BLAS, real-time safe).
-  - SpectrumAnalyzerComponent: Now gets NUM_DISPLAY_BARS from AudioEngine.
+- **EQProcessor / Spectrum Analyzer / UI**
+  - EQProcessor: RMS calculation now uses AVX2/SIMD+SSE2 sqrt (no libm/BLAS, real-time safe)
+  - SpectrumAnalyzerComponent: Now gets NUM_DISPLAY_BARS from AudioEngine
 
-- **AudioSegmentBuffer**:
-  - write position and sample count management changed to std::atomic for thread safety.
+- **AudioSegmentBuffer**
+  - write position and sample count management changed to std::atomic for thread safety
 
-- **Other**:
-  - Removed as much BLAS/MKL dependency as possible, unified to AVX2/SIMD/scalar functions for real-time safety and portability.
-  - Cleaned up comments, variable names, and initialization methods.
+- **Other**
+  - Removed as much BLAS/MKL dependency as possible, unified to AVX2/SIMD/scalar functions for real-time safety and portability
+  - Cleaned up comments, variable names, and initialization methods
 
 ---
 
@@ -56,10 +57,14 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
 
 ## Documentation
 
-- `README.md`: user-facing overview, features, audio processing summary, and build entry points
-- `ARCHITECTURE.md`: developer-facing architecture, threading, state flow, and subsystem design details
+- `README.md`: User-facing overview, features, audio processing summary, and build entry points
+- `ARCHITECTURE.md`: Developer-facing architecture, threading, state flow, and subsystem design details
+- `SOUND_PROCESSING.md`: **In-depth, code-referenced technical documentation of the entire audio signal processing flow.**
+  - Covers all DSP stages (input, conditioning, oversampling, main DSP chain, output, dither, etc.)
+  - Includes mathematical formulas, buffer/parameter management, SIMD/real-time safety, and code path examples
+  - Intended for international contributors and advanced users seeking a rigorous technical reference
 - `BUILD_GUIDE_WINDOWS.md`: Windows build instructions and troubleshooting
-- `HowtoUse.md`: practical usage guide — room correction via IR convolution with REW, and headphone EQ correction via AutoEq
+- `HowtoUse.md`: Practical usage guide — room correction via IR convolution with REW, and headphone EQ correction via AutoEq
 
 ---
 

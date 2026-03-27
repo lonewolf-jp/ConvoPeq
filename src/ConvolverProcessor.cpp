@@ -2019,7 +2019,8 @@ void ConvolverProcessor::cleanup()
 
     // StereoConvolver のクリーンアップ (Worker Threadと競合するためロックが必要)
     juce::ScopedTryLock lock(trashBinLock);
-    if (!lock.isLocked()) return;
+    if (!lock.isLocked())
+        return;
 
     const uint32 now = juce::Time::getMillisecondCounter();
     const size_t trashSize = trashBin.size();
@@ -2046,9 +2047,7 @@ void ConvolverProcessor::cleanup()
         }
     }
 
-    // 安全性優先: 年齢条件(age > 10000ms)を満たしたもののみ回収する。
-    // サイズ超過のみを理由とした強制解放は行わない。
-
+    // ロック解放後、削除対象を release() する
     for (size_t i = 0; i < toReleaseCount; ++i)
         toRelease.get()[i]->release();
 }
@@ -2634,7 +2633,7 @@ void ConvolverProcessor::refreshLatency()
         const int irPeakLatency = juce::jmax(0, conv->irLatency);
         totalLatency = static_cast<double>(juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY));
     }
-    
+
     // [Issue 2 fix] Audio Thread に更新を委譲。
     pendingLatencyValue.store(totalLatency, std::memory_order_release);
     latencyResetPending.store(true, std::memory_order_release);
@@ -2657,7 +2656,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // Audio Threadは専用スレッドだが、JUCEの内部実装はgetNextAudioBlock()呼び出し前に
     // FTZ/DAZを保証しない。ScopedNoDenormalsでMXCSRのFTZ/DAZビットを関数スコープで保護する。
     juce::ScopedNoDenormals noDenormals;
- 
+
     // ── Step 1: RCU State Load (Lock-free / Wait-free) ──
     // Raw pointer load (No ref counting)
     auto* conv = convolution.load(std::memory_order_acquire);

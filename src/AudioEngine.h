@@ -280,6 +280,11 @@ public:
     // 学習ワーカーが記録したエラーメッセージを返す（UI 表示用）。エラーなしは nullptr。
     const char* getNoiseShaperLearningError() const noexcept;
     static int getAdaptiveSampleRateBankCount() noexcept;
+
+    // --- NoiseShaperLearner Settings ---
+    NoiseShaperLearner::Settings getNoiseShaperLearnerSettings() const;
+    void setNoiseShaperLearnerSettings(const NoiseShaperLearner::Settings& settings);
+
     static double getAdaptiveSampleRateBankHz(int bankIndex) noexcept;
     void getCurrentAdaptiveCoefficients(double* outCoeffs, int maxCoefficients) const noexcept;
     void setCurrentAdaptiveCoefficients(const double* coeffs, int numCoefficients);
