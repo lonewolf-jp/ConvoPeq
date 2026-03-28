@@ -3465,9 +3465,9 @@ juce::ValueTree AudioEngine::getCurrentState() const
     // NoiseShaperLearner Settings
     {
         auto s = getNoiseShaperLearnerSettings();
-        state.setProperty("cmaesRestarts", s.cmaesRestarts, nullptr);
-        state.setProperty("coeffSafetyMargin", s.coeffSafetyMargin, nullptr);
-        state.setProperty("enableStabilityCheck", s.enableStabilityCheck, nullptr);
+        state.setProperty("cmaesRestarts", s.cmaesRestarts.load(), nullptr);
+        state.setProperty("coeffSafetyMargin", s.coeffSafetyMargin.load(), nullptr);
+        state.setProperty("enableStabilityCheck", s.enableStabilityCheck.load(), nullptr);
     }
 
     state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);

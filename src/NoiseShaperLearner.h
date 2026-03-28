@@ -102,9 +102,27 @@ public:
     // ============================================================================
     struct Settings
     {
-        int cmaesRestarts = 5;               // デフォルト5
-        double coeffSafetyMargin = 0.85;     // デフォルト0.85
-        bool enableStabilityCheck = true;    // デフォルトON
+        std::atomic<int> cmaesRestarts { 5 };
+        std::atomic<double> coeffSafetyMargin { 0.85 };
+        std::atomic<bool> enableStabilityCheck { true };
+
+        // デフォルトコンストラクタ
+        Settings() = default;
+
+        // コピーコンストラクタ（アトミック値をロード）
+        Settings(const Settings& other)
+            : cmaesRestarts(other.cmaesRestarts.load()),
+              coeffSafetyMargin(other.coeffSafetyMargin.load()),
+              enableStabilityCheck(other.enableStabilityCheck.load()) {}
+
+        // コピー代入演算子（アトミックにストア）
+        Settings& operator=(const Settings& other)
+        {
+            cmaesRestarts = other.cmaesRestarts.load();
+            coeffSafetyMargin = other.coeffSafetyMargin.load();
+            enableStabilityCheck = other.enableStabilityCheck.load();
+            return *this;
+        }
     };
 
     void setSettings(const Settings& newSettings) noexcept
@@ -112,9 +130,13 @@ public:
         settings = newSettings;
     }
 
-    const Settings& getSettings() const noexcept
+    Settings getSettings() const noexcept
     {
-        return settings;
+        Settings s;
+        s.cmaesRestarts = settings.cmaesRestarts.load();
+        s.coeffSafetyMargin = settings.coeffSafetyMargin.load();
+        s.enableStabilityCheck = settings.enableStabilityCheck.load();
+        return s;
     }
 
     static constexpr int kMaxHistoryPoints = 256;
@@ -236,6 +258,8 @@ private:
     int sessionBitDepth = 0;
     std::chrono::steady_clock::time_point lastGenerationStart;
     double generationIntervalSeconds = 0.0;
+    mutable std::chrono::steady_clock::time_point lastSaveTime;
+    static constexpr auto kSaveInterval = std::chrono::seconds(5);
     std::atomic<bool> modeSwitchRequested {false};
     LearningMode pendingMode {LearningMode::Short};
     LearningMode activeMode {LearningMode::Short};
@@ -268,6 +292,8 @@ private:
     // bestScoreHistory リングバッファの書き込み先インデックス（historyMutex 保護下で使用）
     int historyHead { 0 };
     mutable std::mutex historyMutex;
+
+    static juce::ThreadPool saveThreadPool;  // 非同期保存用スレッドプール
 
     // callAsync ラムダが this の生存を安全に確認するための WeakReference サポート。
     // デストラクタで masterReference が破棄されると WeakReference::get() が nullptr を返すため、

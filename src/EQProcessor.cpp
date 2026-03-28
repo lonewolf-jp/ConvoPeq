@@ -796,6 +796,14 @@ EQProcessor::EQState* EQProcessor::getEQState() const
     return activeState;
 }
 
+EQProcessor::EQState* EQProcessor::getEQStateAndAddRef() const
+{
+    auto state = activeState;
+    if (state)
+        state->addRef();
+    return state;
+}
+
 float EQProcessor::getTotalGain() const
 {
     auto state = activeState;

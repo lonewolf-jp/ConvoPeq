@@ -18,15 +18,20 @@ namespace
     constexpr int kRecentSampleRequest = AudioSegment::kLength + (kSegmentHop * (NoiseShaperLearner::kMaxTrainingSegments - 1));
 }
 
+// 静的メンバの定義
+juce::ThreadPool NoiseShaperLearner::saveThreadPool(1);
+
 NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
                                        LockFreeRingBuffer<AudioBlock, 4096>& captureQueueRef)
     : engine(engineRef),
+    // lastSaveTime の初期化（コンストラクタ本体で行う）
       captureQueue(captureQueueRef)
 {
     for (auto& c : bestCoefficients)
         c.store(0.0, std::memory_order_relaxed);
 
     const unsigned int hardwareThreadCount = std::thread::hardware_concurrency();
+    lastSaveTime = std::chrono::steady_clock::now();
     const int usableWorkerCount = hardwareThreadCount > 1
         ? static_cast<int>(hardwareThreadCount) - 1
         : 1;
@@ -586,7 +591,7 @@ void NoiseShaperLearner::workerThreadMain()
         // 【追加】Multi-start ロジック
         // 初回起動時（resumeでない場合）かつ設定が有効な場合、複数のシードで試行
         // ============================================================================
-        if (!resume && settings.cmaesRestarts > 1)
+        if (!resume && settings.cmaesRestarts.load() > 1)
         {
             progress.status.store(Status::WaitingForAudio, std::memory_order_release);
 
@@ -610,13 +615,14 @@ void NoiseShaperLearner::workerThreadMain()
 
                     const int evaluationBitDepth = engine.getDitherBitDepth() > 0 ? engine.getDitherBitDepth() : 24;
 
-                    for (int r = 0; r < settings.cmaesRestarts; ++r)
+                    int restarts = settings.cmaesRestarts.load();
+                    for (int restartIdx = 0; restartIdx < restarts; ++restartIdx)
                     {
                         if (stopRequested.load()) break;
 
                         // 初期状態に戻してからシードを変える
                         setState(initialState);
-                        optimizer.setSeed(static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()) + r);
+                        optimizer.setSeed(static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()) + restartIdx);
 
                         // 数世代だけ回して良し悪しを判断
                         for (int g = 0; g < 3; ++g)
@@ -953,11 +959,11 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
     {
         const double k = std::tanh(candidateCoefficients[i]);
         // 【追加】安全マージンの適用
-        mappedCoeffs[static_cast<size_t>(i)] = LatticeNoiseShaper::clampCoeff(k, settings.coeffSafetyMargin);
+        mappedCoeffs[static_cast<size_t>(i)] = LatticeNoiseShaper::clampCoeff(k, settings.coeffSafetyMargin.load());
     }
 
     // 【追加】安定性チェック（有効な場合）
-    if (settings.enableStabilityCheck)
+    if (settings.enableStabilityCheck.load())
     {
         if (!LatticeNoiseShaper::isStable(mappedCoeffs.data(), kOrder))
             return 1e18; // 不安定な場合は巨大なペナルティを返す
@@ -1125,13 +1131,32 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
 
     progress.bestScore.store(score, std::memory_order_relaxed);
 
-    // Save state to disk
-    const auto appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("ConvoPeq");
-    if (!appDataDir.exists()) appDataDir.createDirectory();
-    const auto stateFile = appDataDir.getChildFile("learned_state.xml");
-    saveLearnedState(stateFile);
+    // 非同期保存（間隔制限付き）
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastSaveTime >= kSaveInterval)
+    {
+        lastSaveTime = now;
+
+        const auto appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("ConvoPeq");
+        if (!appDataDir.exists()) appDataDir.createDirectory();
+        const auto stateFile = appDataDir.getChildFile("learned_state.xml");
+        const auto filePath = stateFile.getFullPathName();
+
+        // スナップショットを取得
+        State snapshot;
+        getState(snapshot);
+
+        juce::WeakReference<NoiseShaperLearner> weakSelf(this);
+        saveThreadPool.addJob([weakSelf, filePath, snapshot]() mutable
+        {
+            if (auto* self = weakSelf.get())
+                if (!self->saveLearnedState(juce::File(filePath)))
+                    self->errorMessage.store("Failed to save learned state", std::memory_order_release);
+        });
+    }
 
     // Capture state on worker thread
+    // 注: 以下の currentState はスナップショットとは別に取得（非同期保存用のスナップショットは上で取得済み）
     State currentState;
     getState(currentState);
 
@@ -1142,7 +1167,6 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
     const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, currentMode);
 
     juce::WeakReference<NoiseShaperLearner> weakSelf(this);
-
     juce::MessageManager::callAsync([weakSelf, mappedCoeffs, currentState, bankIndex]() mutable
     {
         if (auto* self = weakSelf.get())
@@ -1152,6 +1176,7 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
             self->engine.requestAdaptiveAutosave();
         }
     });
+
 }
 
 void NoiseShaperLearner::appendHistoryPoint(double score) noexcept

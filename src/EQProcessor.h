@@ -280,7 +280,7 @@ public:
     //----------------------------------------------------------
     // 状態スナップショット取得 (AudioEngine用)
     //----------------------------------------------------------
-    EQState* getEQState() const;
+    EQState* getEQState() const;  // 生ポインタ (所有権は共有せず、ライフタイムは activeState に依存)
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const EQProcessor& other);
@@ -291,6 +291,9 @@ public:
     // ガベージコレクション
     void cleanup();
     void forceCleanup();
+
+    // 参照カウントを追加した状態ポインタを返す (呼び出し元は release() する責任を持つ)
+    EQState* getEQStateAndAddRef() const;
 
     //----------------------------------------------------------
     // プリセット読み込み (AudioEngine::prepareToPlayから呼ばれる)
