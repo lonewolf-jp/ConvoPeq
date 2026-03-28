@@ -24,7 +24,7 @@ struct AudioSegment
     static constexpr int kLength = MklFftEvaluator::kFftLength;
     double left[kLength] = {};
     double right[kLength] = {};
-    std::vector<double> maskingThresholds; // Added for Phase 3.5
+    std::array<double, MklFftEvaluator::kSpectrumBins> maskingThresholds {};
 };
 
 enum class SpectralType {

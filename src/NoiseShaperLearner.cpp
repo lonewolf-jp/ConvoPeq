@@ -1044,8 +1044,6 @@ void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, do
 
     evaluator.computeFft(leveled.segment.left, leveled.segment.right, spectrumL, spectrumR);
 
-    leveled.segment.maskingThresholds.resize(MklFftEvaluator::kSpectrumBins);
-
     const double binWidth = (sampleRate * 0.5) / (MklFftEvaluator::kSpectrumBins - 1);
 
     for (int k = 0; k < MklFftEvaluator::kSpectrumBins; ++k)
