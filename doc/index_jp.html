@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>ConvoPeq | コンボリューション + パラメトリックEQ</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: #0a0c10;
+            color: #eef2ff;
+            line-height: 1.5;
+            scroll-behavior: smooth;
+        }
+
+        .container {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        header {
+            position: sticky;
+            top: 0;
+            background: rgba(10, 12, 16, 0.85);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid #2a2f3a;
+            z-index: 100;
+        }
+
+        .header-inner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 0;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .logo {
+            font-size: 1.8rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            background: linear-gradient(135deg, #c0f2ff, #a78bfa);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+
+        .logo span {
+            font-size: 1rem;
+            font-weight: 400;
+            color: #8b9bb5;
+            background: none;
+            -webkit-background-clip: unset;
+            background-clip: unset;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 28px;
+            align-items: center;
+        }
+
+        .nav-links a {
+            color: #cbd5e6;
+            text-decoration: none;
+            font-weight: 500;
+            transition: 0.2s;
+        }
+
+        .nav-links a:hover {
+            color: white;
+        }
+
+        .btn-primary {
+            background: #3b82f6;
+            border: none;
+            padding: 8px 24px;
+            border-radius: 40px;
+            font-weight: 600;
+            color: white;
+            cursor: pointer;
+            transition: 0.2s;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .btn-primary:hover {
+            background: #2563eb;
+            transform: scale(1.02);
+        }
+
+        .hero {
+            padding: 80px 0 40px;
+            text-align: center;
+        }
+
+        .hero h1 {
+            font-size: 3.5rem;
+            font-weight: 800;
+            background: linear-gradient(to right, #f0f9ff, #b4c6f0);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            letter-spacing: -0.02em;
+        }
+
+        .hero .tagline {
+            font-size: 1.25rem;
+            color: #9aaec9;
+            max-width: 700px;
+            margin: 20px auto 32px;
+        }
+
+        .badge-group {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 48px;
+        }
+
+        .badge {
+            background: #1e2430;
+            padding: 6px 16px;
+            border-radius: 40px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: #b9d0f0;
+        }
+
+        .gallery {
+            margin: 40px 0 60px;
+        }
+
+        .gallery-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 28px;
+            justify-content: center;
+        }
+
+        .gallery-card {
+            background: #11161f;
+            border-radius: 28px;
+            border: 1px solid #2a3140;
+            overflow: hidden;
+            width: 100%;
+            max-width: 560px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            box-shadow: 0 12px 24px -12px rgba(0,0,0,0.5);
+        }
+
+        .gallery-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 24px 36px -16px rgba(0,0,0,0.6);
+        }
+
+        .gallery-card img {
+            width: 100%;
+            height: auto;
+            display: block;
+            background: #0a0c10;
+        }
+
+        .card-caption {
+            padding: 16px 20px;
+            background: #0e121b;
+            border-top: 1px solid #262e3c;
+            font-weight: 500;
+            font-size: 0.9rem;
+            color: #cbd5f0;
+        }
+
+        .card-caption p {
+            margin-top: 6px;
+            font-size: 0.8rem;
+            color: #8f9eb9;
+            font-weight: normal;
+        }
+
+        .section-title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin: 60px 0 24px;
+            border-left: 4px solid #3b82f6;
+            padding-left: 20px;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 28px;
+            margin: 32px 0;
+        }
+
+        .feature-card {
+            background: #11161f;
+            border-radius: 28px;
+            padding: 24px;
+            border: 1px solid #262e3c;
+            transition: 0.2s;
+        }
+
+        .feature-card h3 {
+            font-size: 1.4rem;
+            margin-bottom: 12px;
+        }
+
+        .feature-icon {
+            font-size: 2rem;
+            margin-bottom: 12px;
+        }
+
+        .specs {
+            background: #0e121b;
+            border-radius: 32px;
+            padding: 32px;
+            margin: 40px 0;
+            border: 1px solid #262e3c;
+        }
+
+        .spec-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+
+        .spec-item {
+            border-bottom: 1px solid #222a36;
+            padding: 12px 0;
+        }
+
+        .spec-label {
+            font-weight: 600;
+            color: #8da3d0;
+        }
+
+        .cta {
+            text-align: center;
+            background: linear-gradient(145deg, #0f172a, #0a0f1a);
+            border-radius: 48px;
+            padding: 56px 24px;
+            margin: 60px 0;
+            border: 1px solid #2d3748;
+        }
+
+        footer {
+            border-top: 1px solid #1f2532;
+            padding: 32px 0;
+            text-align: center;
+            color: #6f7d98;
+            font-size: 0.85rem;
+        }
+
+        @media (max-width: 760px) {
+            .hero h1 { font-size: 2.3rem; }
+            .section-title { font-size: 1.6rem; }
+        }
+    </style>
+</head>
+<body>
+<header>
+    <div class="container header-inner">
+        <div class="logo">ConvoPeq powerd by Vibe Coding<span> — コンボリューション + EQ</span> <span>  Open source and Free   </span></div>
+        <div class="nav-links">
+            <a href="#gallery">スクリーンショット</a>
+            <a href="#features">機能</a>
+            <a href="#specs">詳細仕様</a>
+        </div>
+    </div>
+</header>
+
+<main>
+    <div class="container">
+        <div class="hero">
+            <h1>IRコンボリューションと<br>20バンドEQの融合</h1>
+            <div class="tagline">
+                ConvoPeqは、高品位なコンボリューションリバーブとアナログライクなパラメトリックEQを単一アプリケーションに統合。<br>
+                適応型ノイズシェイパー、最大768kHz、線形位相モードまで。
+            </div>
+            <div class="badge-group">
+                <span class="badge">🔊 超低遅延モード</span>
+                <span class="badge">🧠 適応9次ノイズシェイパー</span>
+                <span class="badge">📊 リアルタイムスペクトラム</span>
+                <span class="badge">⚡ MAX 768kHz / 32bit</span>
+            </div>
+        </div>
+
+        <!-- 画像埋め込みセクション -->
+        <div id="gallery" class="gallery">
+            <div class="section-title">📸 インターフェースギャラリー</div>
+            <div class="gallery-grid">
+                <div class="gallery-card">
+                    <img src="MainWindow.jpg" alt="ConvoPeq メインウィンドウ - コンボリューションと20バンドEQ">
+                    <div class="card-caption">
+                        🎛️ メイン・コンソール — コンボリューション & 20バンドEQ<br>
+                        <p>インパルス応答表示、ドライ/ウェットミックス、スムージング、HCF/LCFフィルター。バンド1～20まで設定可能。</p>
+                    </div>
+                </div>
+                <div class="gallery-card">
+                    <img src="AudioSettinsWindow.jpg" alt="ConvoPeq オーディオ設定ウィンドウ">
+                    <div class="card-caption">
+                        ⚙️ オーディオ設定 — プロフェッショナルな入出力制御<br>
+                        <p>ASIO/WASAPI shared/WASAPI exclusive/DirectSoundデバイス選択、サンプルレート44.1-768kHz(最大)、バッファサイズ、ディザ深度(16/24/32)、IIR/リニアフェーズ切替、オーバーサンプリングx1-x8(最大)など。※MIDI機能は現時点では使用できません。</p>
+                    </div>
+                </div>
+                <div class="gallery-card">
+                    <img src="ApadtiveNoiseShaperLearningWindow.jpg" alt="ConvoPeq 適応型ノイズシェイパー学習">
+                    <div class="card-caption">
+                        🧠 適応型9次ノイズシェイパー — CMA-ES継続学習<br>
+                        <p>リアルタイムで最適なノイズシェイピング係数を探索可能。量子化歪みを自動最適化し軽減します。</p>
+                    </div>
+                </div>
+                <div class="gallery-card">
+                    <img src="IRAdvancedSettingsWindow.jpg" alt="ConvoPeq IRアドバンスド設定">
+                    <div class="card-caption">
+                        🔧 IRアドバンスド設定 — テールコントゥアリング<br>
+                        <p>IR長、ミックススタート/エンド周波数、テールモード(Layer Tail Contouring)、テール強度、リビルド時間などを詳細調整。</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 機能ハイライト -->
+        <div id="features">
+            <div class="section-title">🔥 特徴的なワークフロー</div>
+            <div class="features-grid">
+                <div class="feature-card"><div class="feature-icon">🌀</div><h3>ハイブリッドIR + EQ</h3><p>インパルス応答に加え、20バンドフルパラメトリックEQを直列/並列的に統合。スペクトラムアナライザで瞬時に確認。</p></div>
+                <div class="feature-card"><div class="feature-icon">🧠</div><h3>適応型ノイズシェイパー</h3><p>9次ノイズシェイパーがCMA-ESで係数を連続学習。量子化歪み自動的に低減可能。ダウンサンプリング時も透明感を維持。</p></div>
+                <div class="feature-card"><div class="feature-icon">⚡</div><h3>低遅延＆線形位相</h3><p>IIRモード（超低遅延）とLinear Phase FIRモードを選択。ライブでもミックスでも最適なレイテンシを実現。</p></div>
+                <div class="feature-card"><div class="feature-icon">🎚️</div><h3>アナログライクなフィルター</h3><p>HCF/LCFはSharp・Natural・Softから選択可能。EQバンドはQ値0.1〜12.0、±24dBゲイン。</p></div>
+                <div class="feature-card"><div class="feature-icon">📀</div><h3>プロフェッショナル入出力</h3><p>ASIO / WASAPI / DirectSound対応。最大768kHz / 32bit浮動小数点処理。ヘッドルーム調整、出力メイクアップゲイン。</p></div>
+                <div class="feature-card"><div class="feature-icon">🔬</div><h3>テーラブルIRテーリング</h3><p>「Layer Tail Contouring」で高域のテーリング時間を独立制御。ミックス開始周波数、テール強度でリバーブの質を微調整。</p></div>
+            </div>
+        </div>
+
+        <!-- 詳細仕様 -->
+        <div id="specs" class="specs">
+            <h2 style="margin-bottom: 24px;">⚙️ 詳細仕様 / Audio Settings</h2>
+            <div class="spec-grid">
+                <div class="spec-item"><span class="spec-label">Dither Bit Depth</span><br>32bit / 24bit / 16bit</div>
+                <div class="spec-item"><span class="spec-label">オーバーサンプリング</span><br>x1 / x2 / 4x / 最大x8 (ノイズシェイパー連動)</div>
+                <div class="spec-item"><span class="spec-label">サンプルレート</span><br>最大768,000 Hz(PCスペックに依存)</div>
+                <div class="spec-item"><span class="spec-label">バッファサイズ</span><br>64 ～ 4096 samples</div>
+                <div class="spec-item"><span class="spec-label">IR長</span><br>0.1 ～ 4.0 秒 (可変)</div>
+                <div class="spec-item"><span class="spec-label">ノイズシェイパー次数</span><br>４次、１２次、１５次、9次適応型 (継続学習可能)</div>
+                <div class="spec-item"><span class="spec-label">アプリケーション形式</span><br>スタンドアローンアプリケーション(VST3 / AU / AAXへの対応予定なし)</div>
+                <div class="spec-item"><span class="spec-label">動作条件</span><br>Windows x64必須、AVX2対応CPU必須。※Intel 11700K CPUでOS 192kHz x2条件で安定稼働。</div>
+            </div>
+            <div style="margin-top: 28px; background:#0b0f18; border-radius: 24px; padding: 16px;">
+                <div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px;">
+                    <span>✅ アクティブ入出力チャンネル : 接続先の複数チャンネルのなかから、2chを選択</span>
+                    <span>🔁 コンボルバーリビルド機能 : 頻繁なリビルドによる破綻防止のため400msの禁止期間を設定 テール再構築</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ダウンロードセクション (購入・トライアル削除、シンプルなダウンロードボタン) -->
+        <div id="download" class="cta">
+            <h2>ConvoPeqを今すぐ試す</h2>
+            <div style="margin: 24px 0;">
+                <a href="https://github.com/lonewolf-jp/ConvoPeq" class="btn-primary" style="background:#2563eb; font-size:1.2rem; padding: 12px 36px;">ダウンロード (GitHub)</a>
+            </div>
+            <p style="font-size:0.85rem; color:#9aaec9;">※ 無料のスタンドアローンアプリケーションです。詳細はGitHubリポジトリをご確認ください。</p>
+        </div>
+    </div>
+</main>
+
+<footer>
+    <div class="container">
+        <p>© 2025 ConvoPeq — コンボリューションとイコライザーの新たなる調和</p>
+        <p style="margin-top: 8px;">※ 掲載されているスクリーンショットは実際のアプリケーションUIです。</p>
+    </div>
+</footer>
+</body>
+</html>
