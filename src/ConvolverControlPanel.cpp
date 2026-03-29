@@ -32,7 +32,8 @@ ConvolverProcessor::PhaseMode comboIdToPhaseMode(int id)
 
 class IRAdvancedSettingsComponent : public juce::Component,
                                     private juce::Slider::Listener,
-                                    private juce::Timer
+                                    private juce::Timer,
+                                    private juce::ComboBox::Listener
 {
 public:
     explicit IRAdvancedSettingsComponent(AudioEngine& audioEngine)
@@ -50,6 +51,10 @@ public:
         configureLabel(mixedF1Label, "Mix Start f:");
         configureLabel(mixedF2Label, "Mix End f:");
         configureLabel(mixedTauLabel, "Mix tau:");
+        configureLabel(tailModeLabel, "Tail Mode:");
+        configureLabel(tailRolloffStartLabel, "Tail Start:");
+        configureLabel(tailRolloffStrengthLabel, "Tail Strength:");
+        configureLabel(partitionTailLabel, "L1/L2 Mult:");
 
         irLengthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC, ConvolverProcessor::IR_LENGTH_MAX_SEC, 0.1);
@@ -90,6 +95,31 @@ public:
         mixedTauSlider.setNumDecimalPlacesToDisplay(0);
         mixedTauSlider.addListener(this);
 
+        tailModeCombo.addItem("Air Absorption (All Layers)", 1);
+        tailModeCombo.addItem("Layer Tail Contouring (L1/L2)", 2);
+        tailModeCombo.addListener(this);
+        tailModeCombo.setTooltip("Air Absorption: Applies to all layers. Layer Tail: applies to L1/L2 only.");
+
+        tailRolloffStartSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        tailRolloffStartSlider.setRange(ConvolverProcessor::TAIL_ROLLOFF_START_MIN_HZ,
+                                        ConvolverProcessor::TAIL_ROLLOFF_START_MAX_HZ, 1.0);
+        tailRolloffStartSlider.setSkewFactorFromMidPoint(ConvolverProcessor::TAIL_ROLLOFF_START_DEFAULT_HZ);
+        tailRolloffStartSlider.setTextValueSuffix(" Hz");
+        tailRolloffStartSlider.setNumDecimalPlacesToDisplay(0);
+        tailRolloffStartSlider.addListener(this);
+
+        tailRolloffStrengthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        tailRolloffStrengthSlider.setRange(ConvolverProcessor::TAIL_ROLLOFF_STRENGTH_MIN,
+                                           ConvolverProcessor::TAIL_ROLLOFF_STRENGTH_MAX, 0.01);
+        tailRolloffStrengthSlider.setNumDecimalPlacesToDisplay(2);
+        tailRolloffStrengthSlider.addListener(this);
+
+        partitionTailSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        partitionTailSlider.setRange(ConvolverProcessor::TAIL_PARTITION_STRENGTH_MIN,
+                                     ConvolverProcessor::TAIL_PARTITION_STRENGTH_MAX, 0.01);
+        partitionTailSlider.setNumDecimalPlacesToDisplay(2);
+        partitionTailSlider.addListener(this);
+
         addAndMakeVisible(irLengthLabel);
         addAndMakeVisible(irLengthSlider);
         addAndMakeVisible(rebuildLabel);
@@ -100,10 +130,31 @@ public:
         addAndMakeVisible(mixedF2Slider);
         addAndMakeVisible(mixedTauLabel);
         addAndMakeVisible(mixedTauSlider);
+        addAndMakeVisible(tailModeLabel);
+        addAndMakeVisible(tailModeCombo);
+        addAndMakeVisible(tailRolloffStartLabel);
+        addAndMakeVisible(tailRolloffStartSlider);
+        addAndMakeVisible(tailRolloffStrengthLabel);
+        addAndMakeVisible(tailRolloffStrengthSlider);
+        addAndMakeVisible(partitionTailLabel);
+        addAndMakeVisible(partitionTailSlider);
 
-        setSize(560, 230);
+        setSize(560, 350);
         syncFromProcessor();
         startTimerHz(8);
+    }
+
+    ~IRAdvancedSettingsComponent() override
+    {
+        irLengthSlider.removeListener(this);
+        rebuildSlider.removeListener(this);
+        mixedF1Slider.removeListener(this);
+        mixedF2Slider.removeListener(this);
+        mixedTauSlider.removeListener(this);
+        tailRolloffStartSlider.removeListener(this);
+        tailRolloffStrengthSlider.removeListener(this);
+        partitionTailSlider.removeListener(this);
+        tailModeCombo.removeListener(this);
     }
 
     void resized() override
@@ -122,10 +173,23 @@ public:
             area.removeFromTop(4);
         };
 
+        auto placeComboRow = [&](juce::Label& label, juce::ComboBox& combo)
+        {
+            auto row = area.removeFromTop(rowH);
+            label.setBounds(row.removeFromLeft(labelW));
+            row.removeFromLeft(gap);
+            combo.setBounds(row);
+            area.removeFromTop(4);
+        };
+
         placeRow(irLengthLabel, irLengthSlider);
         placeRow(mixedF1Label, mixedF1Slider);
         placeRow(mixedF2Label, mixedF2Slider);
         placeRow(mixedTauLabel, mixedTauSlider);
+        placeComboRow(tailModeLabel, tailModeCombo);
+        placeRow(tailRolloffStartLabel, tailRolloffStartSlider);
+        placeRow(tailRolloffStrengthLabel, tailRolloffStrengthSlider);
+        placeRow(partitionTailLabel, partitionTailSlider);
         placeRow(rebuildLabel, rebuildSlider);
     }
 
@@ -141,6 +205,14 @@ private:
     juce::Slider mixedF2Slider;
     juce::Label mixedTauLabel;
     juce::Slider mixedTauSlider;
+    juce::Label tailModeLabel;
+    juce::ComboBox tailModeCombo;
+    juce::Label tailRolloffStartLabel;
+    juce::Slider tailRolloffStartSlider;
+    juce::Label tailRolloffStrengthLabel;
+    juce::Slider tailRolloffStrengthSlider;
+    juce::Label partitionTailLabel;
+    juce::Slider partitionTailSlider;
 
     void timerCallback() override
     {
@@ -171,6 +243,40 @@ private:
         {
             convolver.setMixedPreRingTau(static_cast<float>(mixedTauSlider.getValue()));
         }
+        else if (slider == &tailRolloffStartSlider)
+        {
+            convolver.setTailRolloffStartHz(static_cast<float>(tailRolloffStartSlider.getValue()));
+        }
+        else if (slider == &tailRolloffStrengthSlider)
+        {
+            convolver.setTailRolloffStrength(static_cast<float>(tailRolloffStrengthSlider.getValue()));
+        }
+        else if (slider == &partitionTailSlider)
+        {
+            convolver.setPartitionTailStrength(static_cast<float>(partitionTailSlider.getValue()));
+        }
+    }
+
+    void comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged) override
+    {
+        if (comboBoxThatHasChanged != &tailModeCombo)
+            return;
+
+        auto& convolver = engine.getConvolverProcessor();
+        const int mode = juce::jmax(0, tailModeCombo.getSelectedId() - 1);
+        convolver.setTailProcessingMode(mode);
+
+        if (mode == 0)
+        {
+            convolver.setTailRolloffStartHz(ConvolverProcessor::TAIL_AIR_ROLLOFF_START_DEFAULT_HZ);
+            convolver.setTailRolloffStrength(ConvolverProcessor::TAIL_AIR_ROLLOFF_STRENGTH_DEFAULT);
+        }
+        else
+        {
+            convolver.setTailRolloffStartHz(ConvolverProcessor::TAIL_LAYER_ROLLOFF_START_DEFAULT_HZ);
+            convolver.setTailRolloffStrength(ConvolverProcessor::TAIL_LAYER_ROLLOFF_STRENGTH_DEFAULT);
+        }
+        updateTailControlsVisibility();
     }
 
     void syncFromProcessor()
@@ -186,6 +292,14 @@ private:
             mixedF2Slider.setValue(convolver.getMixedTransitionEndHz(), juce::dontSendNotification);
         if (!mixedTauSlider.isMouseButtonDown())
             mixedTauSlider.setValue(convolver.getMixedPreRingTau(), juce::dontSendNotification);
+        if (!tailRolloffStartSlider.isMouseButtonDown())
+            tailRolloffStartSlider.setValue(convolver.getTailRolloffStartHz(), juce::dontSendNotification);
+        if (!tailRolloffStrengthSlider.isMouseButtonDown())
+            tailRolloffStrengthSlider.setValue(convolver.getTailRolloffStrength(), juce::dontSendNotification);
+        if (!partitionTailSlider.isMouseButtonDown())
+            partitionTailSlider.setValue(convolver.getPartitionTailStrength(), juce::dontSendNotification);
+        if (!tailModeCombo.isPopupActive())
+            tailModeCombo.setSelectedId(convolver.getTailProcessingMode() + 1, juce::dontSendNotification);
 
         const bool mixedEnabled = engine.getConvolverPhaseMode() == ConvolverProcessor::PhaseMode::Mixed;
         mixedF1Slider.setEnabled(mixedEnabled);
@@ -194,6 +308,14 @@ private:
         mixedF1Label.setEnabled(mixedEnabled);
         mixedF2Label.setEnabled(mixedEnabled);
         mixedTauLabel.setEnabled(mixedEnabled);
+        updateTailControlsVisibility();
+    }
+
+    void updateTailControlsVisibility()
+    {
+        const bool showPartitionControls = (tailModeCombo.getSelectedId() == 2);
+        partitionTailLabel.setVisible(showPartitionControls);
+        partitionTailSlider.setVisible(showPartitionControls);
     }
 };
 }

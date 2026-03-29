@@ -443,7 +443,7 @@ private:
     int parallelBufferCapacity = 0;
     int structureXfadeBufferCapacity = 0;
 
-    std::atomic<float> nonlinearSaturation { 0.0f };
+    std::atomic<float> nonlinearSaturation { 0.2f };
     std::atomic<FilterStructure> requestedStructure { FilterStructure::Serial };
     std::atomic<FilterStructure> activeStructure { FilterStructure::Serial };
 };

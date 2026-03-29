@@ -77,6 +77,31 @@ inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexce
     const __m128d validMask = _mm_andnot_pd(denormalMask, finiteMask);
     return _mm_movemask_pd(validMask) == 0x3;
 }
+
+inline double computeTailGainForBin(int k,
+                                    int numBins,
+                                    double sampleRate,
+                                    double startHz,
+                                    double strength) noexcept
+{
+    if (strength <= 0.0 || sampleRate <= 0.0 || numBins <= 1)
+        return 1.0;
+
+    const double nyquist = sampleRate * 0.5;
+    if (nyquist <= 1.0)
+        return 1.0;
+
+    // 将来の範囲拡張・異常値混入に備えて、ナイキスト直下へクランプする。
+    const double safeStartHz = std::max(0.0, std::min(startHz, nyquist - 1.0));
+    const double f = static_cast<double>(k) * nyquist / static_cast<double>(numBins - 1);
+
+    if (f <= safeStartHz)
+        return 1.0;
+
+    const double denom = std::max(1.0, nyquist - safeStartHz);
+    const double x = juce::jlimit(0.0, 1.0, (f - safeStartHz) / denom);
+    return std::exp(-strength * x * x);
+}
 } // namespace
 
 //==============================================================================
@@ -147,6 +172,10 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
 {
     const double fs      = spec.sampleRate;
     const double nyquist = fs * 0.5;
+    const int tailMode   = juce::jlimit(0, 1, spec.tailMode);
+    const double tailStartHz = juce::jlimit(20.0, 20000.0, static_cast<double>(spec.tailRolloffStartHz));
+    const double baseTailStrength = juce::jlimit(0.0, 2.0, static_cast<double>(spec.tailRolloffStrength));
+    const double partitionStrength = juce::jlimit(0.0, 2.0, static_cast<double>(spec.partitionTailStrength));
 
     // HC カットオフ周波数 (サンプルレート依存)
     const double hcFcStart = (fs <= 48000.0) ? 18000.0 : 22000.0;
@@ -249,6 +278,18 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
                 }
                 // k >= kStart: LC ゲイン 1.0 → 乗算不要 (HC ゲインのみ)
             }
+        }
+
+        // ── Tail ゲイン (既存 HC/LC ゲインに乗算) ──
+        double layerTailStrength = baseTailStrength;
+        if (tailMode == 1)
+            layerTailStrength = (li == 0) ? 0.0 : juce::jlimit(0.0, 4.0, baseTailStrength * partitionStrength);
+
+        // 強度ゼロなら tail 計算をスキップして無駄な計算を避ける。
+        if (layerTailStrength > 0.0)
+        {
+            for (int k = 0; k < cSize; ++k)
+                gain[k] *= computeTailGainForBin(k, cSize, fs, tailStartHz, layerTailStrength);
         }
 
         // ── 全パーティションの irFreqDomain に gain[] を適用 ──

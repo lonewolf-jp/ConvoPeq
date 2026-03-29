@@ -120,7 +120,7 @@ void EQProcessor::resetToDefaults()
 
     storeTotalGainDb(0.0f);
     agcEnabled.store(false, std::memory_order_release);
-    nonlinearSaturation.store(0.0f, std::memory_order_relaxed);
+    nonlinearSaturation.store(0.2f, std::memory_order_relaxed);
     requestedStructure.store(FilterStructure::Serial, std::memory_order_relaxed);
     activeStructure.store(FilterStructure::Serial, std::memory_order_relaxed);
 

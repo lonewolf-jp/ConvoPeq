@@ -2433,6 +2433,10 @@ juce::ValueTree ConvolverProcessor::getState() const
     v.setProperty ("mixedTau", mixedPreRingTau.load(std::memory_order_acquire), nullptr);
     v.setProperty ("rebuildDebounceMs", rebuildDebounceMs.load(std::memory_order_acquire), nullptr);
     v.setProperty ("experimentalDirectHeadEnabled", experimentalDirectHeadEnabled.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("tailProcessingMode", tailProcessingMode.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("tailRolloffStartHz", tailRolloffStartHz.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("tailRolloffStrength", tailRolloffStrength.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("partitionTailStrength", partitionTailStrength.load(std::memory_order_acquire), nullptr);
     {
         const juce::ScopedLock sl(irFileLock);
         v.setProperty ("irPath", currentIrFile.getFullPathName(), nullptr);
@@ -2500,6 +2504,49 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
     if (v.hasProperty ("rebuildDebounceMs")) setRebuildDebounceMs (static_cast<int>(v.getProperty("rebuildDebounceMs")));
     if (v.hasProperty ("experimentalDirectHeadEnabled")) setExperimentalDirectHeadEnabled (v.getProperty ("experimentalDirectHeadEnabled"));
 
+    const bool hasTailMode = v.hasProperty("tailProcessingMode");
+    const bool hasTailStart = v.hasProperty("tailRolloffStartHz");
+    const bool hasTailStrength = v.hasProperty("tailRolloffStrength");
+    const bool hasPartitionTailStrength = v.hasProperty("partitionTailStrength");
+    const bool hasAnyTailKey = hasTailMode || hasTailStart || hasTailStrength || hasPartitionTailStrength;
+
+    if (hasAnyTailKey)
+    {
+        const int resolvedMode = hasTailMode
+            ? juce::jlimit(0, 1, static_cast<int>(v.getProperty("tailProcessingMode")))
+            : 0;
+
+        if (hasTailMode)
+            setTailProcessingMode(static_cast<int>(v.getProperty("tailProcessingMode")));
+        else
+            setTailProcessingMode(0);
+
+        if (hasTailStart)
+            setTailRolloffStartHz(static_cast<float>(v.getProperty("tailRolloffStartHz")));
+        else
+            setTailRolloffStartHz(resolvedMode == 0 ? TAIL_AIR_ROLLOFF_START_DEFAULT_HZ
+                                                    : TAIL_LAYER_ROLLOFF_START_DEFAULT_HZ);
+
+        if (hasTailStrength)
+            setTailRolloffStrength(static_cast<float>(v.getProperty("tailRolloffStrength")));
+        else
+            setTailRolloffStrength(resolvedMode == 0 ? TAIL_AIR_ROLLOFF_STRENGTH_DEFAULT
+                                                     : TAIL_LAYER_ROLLOFF_STRENGTH_DEFAULT);
+
+        if (hasPartitionTailStrength)
+            setPartitionTailStrength(static_cast<float>(v.getProperty("partitionTailStrength")));
+        else
+            setPartitionTailStrength(TAIL_PARTITION_STRENGTH_DEFAULT);
+    }
+    else
+    {
+        // 旧プリセット互換: 新規キーが一切ない場合はテール処理を無効化して従来音を維持する。
+        setTailProcessingMode(0);
+        setTailRolloffStartHz(TAIL_ROLLOFF_START_DEFAULT_HZ);
+        setTailRolloffStrength(0.0f);
+        setPartitionTailStrength(TAIL_PARTITION_STRENGTH_DEFAULT);
+    }
+
     if (v.hasProperty ("irPath"))
     {
         juce::File fileToLoad; // ロード対象のファイルを保持
@@ -2549,6 +2596,10 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     mixedPreRingTau.store(other.mixedPreRingTau.load(std::memory_order_acquire), std::memory_order_release);
     rebuildDebounceMs.store(other.rebuildDebounceMs.load(std::memory_order_acquire), std::memory_order_release);
     experimentalDirectHeadEnabled.store(other.experimentalDirectHeadEnabled.load(std::memory_order_acquire), std::memory_order_release);
+    tailProcessingMode.store(other.tailProcessingMode.load(std::memory_order_acquire), std::memory_order_release);
+    tailRolloffStartHz.store(other.tailRolloffStartHz.load(std::memory_order_acquire), std::memory_order_release);
+    tailRolloffStrength.store(other.tailRolloffStrength.load(std::memory_order_acquire), std::memory_order_release);
+    partitionTailStrength.store(other.partitionTailStrength.load(std::memory_order_acquire), std::memory_order_release);
 
     // サンプルレート変更時にリビルドできるよう、元のIR情報を共有する
     // [Bug E fix] std::atomic<shared_ptr>::store() でアトミックに代入。
@@ -3460,6 +3511,50 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
         requestDebouncedRebuild();
 }
 
+void ConvolverProcessor::setTailProcessingMode(int mode)
+{
+    const int clamped = juce::jlimit(0, 1, mode);
+    const int prev = tailProcessingMode.exchange(clamped, std::memory_order_acq_rel);
+    if (prev != clamped)
+    {
+        listeners.call(&Listener::convolverParamsChanged, this);
+        requestDebouncedRebuild();
+    }
+}
+
+void ConvolverProcessor::setTailRolloffStartHz(float hz)
+{
+    const float clamped = juce::jlimit(TAIL_ROLLOFF_START_MIN_HZ, TAIL_ROLLOFF_START_MAX_HZ, hz);
+    const float prev = tailRolloffStartHz.exchange(clamped, std::memory_order_acq_rel);
+    if (std::abs(prev - clamped) > 1.0e-5f)
+    {
+        listeners.call(&Listener::convolverParamsChanged, this);
+        requestDebouncedRebuild();
+    }
+}
+
+void ConvolverProcessor::setTailRolloffStrength(float strength)
+{
+    const float clamped = juce::jlimit(TAIL_ROLLOFF_STRENGTH_MIN, TAIL_ROLLOFF_STRENGTH_MAX, strength);
+    const float prev = tailRolloffStrength.exchange(clamped, std::memory_order_acq_rel);
+    if (std::abs(prev - clamped) > 1.0e-5f)
+    {
+        listeners.call(&Listener::convolverParamsChanged, this);
+        requestDebouncedRebuild();
+    }
+}
+
+void ConvolverProcessor::setPartitionTailStrength(float strength)
+{
+    const float clamped = juce::jlimit(TAIL_PARTITION_STRENGTH_MIN, TAIL_PARTITION_STRENGTH_MAX, strength);
+    const float prev = partitionTailStrength.exchange(clamped, std::memory_order_acq_rel);
+    if (std::abs(prev - clamped) > 1.0e-5f)
+    {
+        listeners.call(&Listener::convolverParamsChanged, this);
+        requestDebouncedRebuild();
+    }
+}
+
 //==============================================================================
 // finalizeNUCEngineOnMessageThread
 // LoaderThreadから委譲されたNUCエンジン構築（メッセージスレッド専用）
@@ -3492,6 +3587,10 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         spec.sampleRate = sr;
         spec.hcMode = static_cast<convo::HCMode>(nucHCMode.load(std::memory_order_acquire));
         spec.lcMode = static_cast<convo::LCMode>(nucLCMode.load(std::memory_order_acquire));
+        spec.tailMode = tailProcessingMode.load(std::memory_order_acquire);
+        spec.tailRolloffStartHz = tailRolloffStartHz.load(std::memory_order_acquire);
+        spec.tailRolloffStrength = tailRolloffStrength.load(std::memory_order_acquire);
+        spec.partitionTailStrength = partitionTailStrength.load(std::memory_order_acquire);
 
         if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
                   maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,

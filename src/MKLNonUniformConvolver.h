@@ -78,6 +78,10 @@ struct FilterSpec
     double sampleRate = 48000.0; ///< 処理サンプルレート (Hz)
     HCMode hcMode     = HCMode::Natural; ///< ハイカットモード
     LCMode lcMode     = LCMode::Natural; ///< ローカットモード
+    int tailMode      = 0; ///< 0=Air Absorption(全レイヤー), 1=Layer Tail(L1/L2のみ)
+    float tailRolloffStartHz    = 3500.0f; ///< テール減衰開始周波数
+    float tailRolloffStrength   = 0.3f;    ///< テール減衰強度
+    float partitionTailStrength = 1.0f;    ///< tailMode=1 時の L1/L2 追加係数
 };
 
 //==============================================================================

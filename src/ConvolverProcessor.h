@@ -89,6 +89,19 @@ public:
     static constexpr float MIXED_TAU_MIN = 4.0f;
     static constexpr float MIXED_TAU_MAX = 256.0f;
     static constexpr float MIXED_TAU_DEFAULT = 32.0f;
+    static constexpr float TAIL_ROLLOFF_START_MIN_HZ = 20.0f;
+    static constexpr float TAIL_ROLLOFF_START_MAX_HZ = 20000.0f;
+    static constexpr float TAIL_AIR_ROLLOFF_START_DEFAULT_HZ = 3500.0f;
+    static constexpr float TAIL_LAYER_ROLLOFF_START_DEFAULT_HZ = 2000.0f;
+    static constexpr float TAIL_ROLLOFF_START_DEFAULT_HZ = TAIL_AIR_ROLLOFF_START_DEFAULT_HZ;
+    static constexpr float TAIL_ROLLOFF_STRENGTH_MIN = 0.0f;
+    static constexpr float TAIL_ROLLOFF_STRENGTH_MAX = 2.0f;
+    static constexpr float TAIL_AIR_ROLLOFF_STRENGTH_DEFAULT = 0.3f;
+    static constexpr float TAIL_LAYER_ROLLOFF_STRENGTH_DEFAULT = 0.5f;
+    static constexpr float TAIL_ROLLOFF_STRENGTH_DEFAULT = TAIL_AIR_ROLLOFF_STRENGTH_DEFAULT;
+    static constexpr float TAIL_PARTITION_STRENGTH_MIN = 0.0f;
+    static constexpr float TAIL_PARTITION_STRENGTH_MAX = 2.0f;
+    static constexpr float TAIL_PARTITION_STRENGTH_DEFAULT = 1.0f;
     static constexpr int REBUILD_DEBOUNCE_MIN_MS = 50;
     static constexpr int REBUILD_DEBOUNCE_MAX_MS = 3000;
     static constexpr int REBUILD_DEBOUNCE_DEFAULT_MS = 400;
@@ -161,6 +174,20 @@ public:
     // Message Thread からのみ呼ぶこと。
     //------------------------------------------------------------------
     void setNUCFilterModes(convo::HCMode hcMode, convo::LCMode lcMode);
+
+    //------------------------------------------------------------------
+    // NUC テール処理パラメータ設定
+    // SetImpulse() 時の irFreqDomain 焼き込みに使用する。
+    // 変更時は Debounced rebuild を要求する。
+    //------------------------------------------------------------------
+    void setTailProcessingMode(int mode);
+    int getTailProcessingMode() const noexcept { return tailProcessingMode.load(std::memory_order_acquire); }
+    void setTailRolloffStartHz(float hz);
+    float getTailRolloffStartHz() const noexcept { return tailRolloffStartHz.load(std::memory_order_acquire); }
+    void setTailRolloffStrength(float strength);
+    float getTailRolloffStrength() const noexcept { return tailRolloffStrength.load(std::memory_order_acquire); }
+    void setPartitionTailStrength(float strength);
+    float getPartitionTailStrength() const noexcept { return partitionTailStrength.load(std::memory_order_acquire); }
 
     //----------------------------------------------------------
     // Experimental Direct Head Flag
@@ -521,6 +548,13 @@ private:
     // int として保存し、使用時に enum へキャスト。
     std::atomic<int> nucHCMode { static_cast<int>(convo::HCMode::Natural) };
     std::atomic<int> nucLCMode { static_cast<int>(convo::LCMode::Natural) };
+    #pragma warning(push)
+    #pragma warning(disable: 4324)
+    alignas(64) std::atomic<int> tailProcessingMode { 0 };
+    alignas(64) std::atomic<float> tailRolloffStartHz { TAIL_ROLLOFF_START_DEFAULT_HZ };
+    alignas(64) std::atomic<float> tailRolloffStrength { TAIL_ROLLOFF_STRENGTH_DEFAULT };
+    alignas(64) std::atomic<float> partitionTailStrength { TAIL_PARTITION_STRENGTH_DEFAULT };
+    #pragma warning(pop)
     std::atomic<float> targetIRLengthSec{IR_LENGTH_DEFAULT_SEC};
     std::atomic<float> autoDetectedIRLengthSec{IR_LENGTH_DEFAULT_SEC};
     std::atomic<bool> irLengthManualOverride{false};

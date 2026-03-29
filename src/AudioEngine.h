@@ -480,7 +480,7 @@ DSPCore();
 
     #pragma warning(push)
     #pragma warning(disable: 4324)
-    alignas(64) std::atomic<float> saturationAmount { 0.2f };
+    alignas(64) std::atomic<float> saturationAmount { 0.1f };
     #pragma warning(pop)
 
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
