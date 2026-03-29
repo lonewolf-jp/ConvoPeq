@@ -1,0 +1,84 @@
+<Coding Guidelines>
+* Build using Windows x64, Visual Studio 2022 MSVC (MSVC Toolset version v143) environment.
+* The operating environment assumes an Intel X64 or AMD64 CPU with AVX2 functionality.
+* Use C++20.
+* Obtain information from <Required Information> before coding.
+* Obtain necessary information regarding signal processing algorithms from <References>.
+* When using JUCE Framework functions, be sure to verify that the function exists in the latest JUCE version at the URL mentioned above.
+* It is crucial to **fully understand** the API specifications of JUCE framework V8.0.12. In particular, thoroughly investigate the meaning of return values, side effects, thread safety, and prerequisites before coding.
+* Note that the sample code on the official JUCE framework GitHub is basically VST3, etc., and not a standalone application like this one. * Do not implement excessive stabilization mechanisms not found in the sample code on the official JUCE framework GitHub repository.
+* Never edit files within the JUCE folder in the project root or the r8brain-free-src folder.
+* Never use Structured Exception Handling (SEH).
+* Within the Audio thread (the thread where getNextAudioBlock() is called), absolutely do not perform any operations that have even a 1% chance of waiting (memory allocation (new / malloc / vector::resize / mkl_malloc / mkl_free / _aligned_malloc / vslNewStream), try-catch, DftiCommitDescriptor, mkl_set_interface_layer, IR reloading, mutex lock, critical section, condition_variable, file I/O, console output, std::exp(), functions that call libm, MMCSS settings, access to MessageManager, use of std::shared_ptr). * **Never use AudioBlock::allocate, AudioBlock::copyFrom, or FFT::performFrequencyOnlyForwardTransform (without pre-allocation)** within the Audio thread (the thread calling getNextAudioBlock()).
+* **Outside of the Audio thread (the thread calling getNextAudioBlock()), and where INTEL oneAPI MKL (one MKL) is used, do not use new, std::vector, or std::make_unique. Instead, use mkl_malloc / mkl_free, _aligned_malloc(64), or std::pmr + custom allocator.**
+* **Data exchange and sharing between the Audio thread (the thread calling getNextAudioBlock()) and other threads must be conducted in a way that reliably guarantees the real-time performance and thread safety of the Audio thread.**
+* **All data processing other than external input and output must be performed using 64-bit doubles.** However, floats are acceptable for spectrum analyzer calculations.
+* Where INTEL oneAPI MKL (one MKL) is used, ensure memory is aligned to 64 bytes, and if memory allocation is required, call it only from a message thread such as prepareToPlay(), not from the Audio Thread.
+* Ensure proper denormalization countermeasures are in place.
+* Be careful not to forget to set destructors.
+* Pay attention to memory release to prevent memory leaks.
+
+<Required Information>
+* This program uses JUCE framework V8.0.12 https://github.com/juce-framework/JUCE/tree/8.0.12.
+* Information on the JUCE framework can be found at https://docs.juce.com/master/index.html.
+* The JUCE Framework forum is at the following URL. Reference information for the program can be found there.
+https://forum.juce.com/c/general-juce-discussion/10
+https://forum.juce.com/c/audio-plugins/11
+https://forum.juce.com/c/windows/15
+https://forum.juce.com/c/getting-started/20
+https://forum.juce.com/c/cmake/31
+* This program uses r8brain-free-src https://github.com/avaneev/r8brain-free-src.git.
+* This program uses INTEL oneAPI MKL (one MKL) https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html.
+• Information on Intel oneAPI MKL (one MKL) can be found at https://www.intel.com/content/www/us/en/docs/onemkl/developer-guide-windows/2025-2/overview.html.
+• Information on the Windows SDK can be found at https://learn.microsoft.com/ja-jp/windows/apps/windows-sdk/.
+
+<References>
+〇Programming
+・Real-time audio programming 101 (Ross Bencina)
+http://www.rossbencina.com/code/real-time-audio-programming-101-time-waits-for-nothing
+・Surplus (DSP Library)
+https://github.com/vitalsong/dsplib
+・VCV Rack
+https://github.com/VCVRack/Rack
+〇PEQ
+・The Art of VA Filter Design (Vadim Zavalishin)
+https://www.native-instruments.com/fileadmin/ni_media/downloads/pdf/VAFilterDesign_2.1.2.pdf
+〇Convolution
+・Real-Time Partitioned Convolution for Ambiophonics (Angelo Farina)
+https://www.angelofarina.it/Public/Papers/164-Mohonk2001.PDF
+・FFTW 
+https://www.fftw.org/fftw-paper-ieee.pdf 
+https://www.fftw.org/
+〇Signal Processing
+・The Scientist and Engineer's Guide to Digital Signal Processing (Steven W. Smith) 
+https://img.anfulai.cn/bbs/97312/The%20Scientist%20and%20Engineer%20Guide%20to%20DSP.pdf
+・Introduction to Signal Processing (2nd Edition, 2023) 
+https://rutgers.box.com/s/92is8ajwe2b0liokflkqx1ul2fqqqa7l
+・Solutions Manual 
+https://rutgers.box.com/s/ijyxsvc2muaxa7o45jaujl2hadxqdkk6 
+Solutions Manual errata https://https//rutgers.box.com/s/07ucb1ru83189jxf68mf6yzncc3fw7qg
+・Applied Optimum Signal Processing (2018) 
+https://rutgers.box.com/s/7sqyou4r7pg9wgx0zveexiukj9ca2ih0
+・Optimum Signal Processing (2nd Edition 2007) 
+https://rutgers.box.com/s/m4qylu904kheuuptdt30tbdh1ahsps3h
+・cytomic knowledge and algorithms 
+https://cytomic.com/technical-papers/
+・Audio EQ Cookbook (Robert Bristow-Johnson) https://github.com/WebAudio/Audio-EQ-Cookbook/blob/main/Audio-EQ-Cookbook.txt
+・EarLevel Engineering (Nigel Redmon) 
+https://www.earlevel.com/main/
+・Free DSP Books 
+https://www.dsprelated.com/freebooks/pasp/
+〇CMA-ES
+・The CMA Evolution Strategy: A Tutorial 
+http://www.cmap.polytechnique.fr/~nikolaus.hansen/cmatutorial110628.pdf
+・CMA-ES Source Code Page (Nikolaus Hansen) 
+http://www.cmap.polytechnique.fr/~nikolaus.hansen/cmaes_inmatlab.html
+〇Online Optimization
+・Introduction to Online Convex Optimization (Elad Hazan) https://wuzequn.com/2018/10/16/online-learning-algorithm-background-knowledge-ftrl-provement/online-convext-optimization-book.pdf
+〇CMA-ES / Online Optimization
+・Learning Step-Size Adaptation in CMA-ES 
+https://ml.informatik.uni-freiburg.de/wp-content/uploads/papers/20-PPSN-LTO-CMA.pdf
+・CMAES_Tutorial 
+https://github.com/akimotolab/CMAES_Tutorial
+・CMA-ES with Two-Point Step-Size Adaptation 
+https:

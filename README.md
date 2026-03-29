@@ -64,7 +64,7 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
   - Includes mathematical formulas, buffer/parameter management, SIMD/real-time safety, and code path examples
   - Intended for international contributors and advanced users seeking a rigorous technical reference
 - `BUILD_GUIDE_WINDOWS.md`: Windows build instructions and troubleshooting
-- `HowtoUse.md`: Practical usage guide — room correction via IR convolution with REW, and headphone EQ correction via AutoEq
+- `HOW_TO_USE.md`: Practical usage guide — room correction via IR convolution with REW, and headphone EQ correction via AutoEq
 
 ---
 

@@ -8,12 +8,20 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <immintrin.h>
 
+#include "DspNumericPolicy.h"
+
 namespace convo
 {
+
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4324) // alignment specifier による構造体パディング警告を局所抑制
+#endif
 
 class Fixed15TapNoiseShaper
 {
@@ -60,6 +68,15 @@ public:
         return d;
     }
 
+    bool checkAndRequestReset() noexcept
+    {
+        if (!needsReset.load(std::memory_order_acquire))
+            return false;
+
+        needsReset.store(false, std::memory_order_release);
+        return true;
+    }
+
     void prepare(double sampleRate, int bitDepth) noexcept
     {
         // プリセット選択と補間
@@ -86,7 +103,11 @@ public:
         {
             invScale = 1.0;
             scale = 1.0;
+            initializeRandomStates(sampleRate, 0);
             reset();
+#if JUCE_DEBUG
+            verifyAlignment();
+#endif
             return;
         }
 
@@ -97,7 +118,11 @@ public:
         // 2^(bits-1) を安全に計算する (シフト由来の未定義動作を回避)。
         invScale = std::ldexp(1.0, safeBits - 1);
         scale = 1.0 / invScale;
+        initializeRandomStates(sampleRate, safeBits);
         reset();
+#if JUCE_DEBUG
+        verifyAlignment();
+#endif
     }
 
     void reset() noexcept
@@ -106,12 +131,18 @@ public:
             juce::FloatVectorOperations::clear(channelState.data(), ORDER);
         writePos.fill(0);
         resetDiagnostics();
+        diagnosticsFifo.reset();
+        errorWritePos.store(0u, std::memory_order_relaxed);
+        needsReset.store(false, std::memory_order_relaxed);
     }
 
     inline void processStereoBlock(double* dataL, double* dataR, int numSamples, double headroom) noexcept
     {
         if (dataL == nullptr || numSamples <= 0)
             return;
+
+        if (needsReset.load(std::memory_order_acquire))
+            needsReset.store(false, std::memory_order_release);
 
         if (currentBitDepth <= 0)
         {
@@ -126,6 +157,8 @@ public:
         double sumSqL = 0.0;
         double sumSqR = 0.0;
         double peakAbs = 0.0;
+        double lastErrorL = 0.0;
+        double lastErrorR = 0.0;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -135,6 +168,7 @@ public:
             const double absErr = absNoLibm(error);
             if (absErr > peakAbs)
                 peakAbs = absErr;
+            lastErrorL = error;
         }
 
         if (dataR != nullptr)
@@ -146,8 +180,10 @@ public:
                 const double absErr = absNoLibm(error);
                 if (absErr > peakAbs)
                     peakAbs = absErr;
+                lastErrorR = error;
             }
 
+        pushDiagnosticErrors(lastErrorL, lastErrorR, dataR != nullptr);
         publishDiagnostics(sumSqL, sumSqR, peakAbs, static_cast<uint32_t>(numSamples), dataR != nullptr);
     }
 
@@ -162,15 +198,27 @@ private:
         {
             fb += coeffs[i] * get(channelErrors, idx, i);
         }
+        fb = killDenormal(fb);
 
         const double y = x - fb;
         const double yq = quantize(y, rngState[static_cast<size_t>(channel)]);
         const double error = yq - y;
         outError = error;
 
-        const double clampedError = std::clamp(error, -2.0 * scale, 2.0 * scale);
+        const double clampedError = saturateAVX2(error, -2.0 * scale, 2.0 * scale);
+        const double denormalFreeError = killDenormal(clampedError);
         idx = (idx - 1 + ORDER) % ORDER;
-        channelErrors[static_cast<size_t>(idx)] = killDenormal(clampedError);
+        channelErrors[static_cast<size_t>(idx)] = denormalFreeError;
+
+        double maxAbs = 0.0;
+        for (int i = 0; i < ORDER; ++i)
+        {
+            const double absVal = absNoLibm(channelErrors[static_cast<size_t>(i)]);
+            if (absVal > maxAbs)
+                maxAbs = absVal;
+        }
+        if (maxAbs > kErrorStateThreshold)
+            needsReset.store(true, std::memory_order_release);
 
         return yq;
     }
@@ -218,9 +266,9 @@ private:
 
     inline double absNoLibm(double x) const noexcept
     {
-        union { double d; uint64_t u; } v { x };
-        v.u &= 0x7fffffffffffffffULL;
-        return v.d;
+        uint64_t bits = std::bit_cast<uint64_t>(x);
+        bits &= 0x7fffffffffffffffULL;
+        return std::bit_cast<double>(bits);
     }
 
     inline double get(const std::array<double, ORDER>& buffer, int idx, int k) const noexcept
@@ -337,23 +385,83 @@ private:
         }
     }
 
-    std::array<double, ORDER> coeffs { 2.172009, -2.313034, 2.092949, -1.698718, 1.304487, -0.946581, 0.645299, -0.415598, 0.251068, -0.141026, 0.072650, -0.033120, 0.012821, -0.004274, 0.001068 };
+    static inline uint64_t splitmix64(uint64_t& state) noexcept
+    {
+        uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return z ^ (z >> 31);
+    }
 
-    std::array<std::array<double, ORDER>, MAX_CHANNELS> errors {};
+    void initializeRandomStates(double sampleRate, int bitDepth) noexcept
+    {
+        const double safeRate = (sampleRate > 0.0 && std::isfinite(sampleRate)) ? sampleRate : 48000.0;
+        uint64_t seed = std::bit_cast<uint64_t>(safeRate);
+        seed ^= (static_cast<uint64_t>(bitDepth) << 32);
+        seed ^= 0xD1B54A32D192ED03ULL;
+
+        for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+        {
+            uint64_t stream = seed ^ (0x9E3779B97F4A7C15ULL * static_cast<uint64_t>(ch + 1));
+            auto& state = rngState[static_cast<size_t>(ch)];
+            state.s[0] = splitmix64(stream);
+            state.s[1] = splitmix64(stream);
+            state.s[2] = splitmix64(stream);
+            state.s[3] = splitmix64(stream);
+
+            if ((state.s[0] | state.s[1] | state.s[2] | state.s[3]) == 0ULL)
+                state.s[0] = 1ULL;
+        }
+    }
+
+    inline void pushDiagnosticErrors(double errorL, double errorR, bool hasRight) noexcept
+    {
+        int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+        diagnosticsFifo.prepareToWrite(1, start1, size1, start2, size2);
+
+        if (size1 > 0)
+        {
+            errorBufferL[static_cast<size_t>(start1)] = errorL;
+            errorBufferR[static_cast<size_t>(start1)] = hasRight ? errorR : 0.0;
+        }
+
+        if (size2 > 0)
+        {
+            errorBufferL[static_cast<size_t>(start2)] = errorL;
+            errorBufferR[static_cast<size_t>(start2)] = hasRight ? errorR : 0.0;
+        }
+
+        const int written = size1 + size2;
+        if (written > 0)
+        {
+            diagnosticsFifo.finishedWrite(written);
+            const uint32_t nextPos = (errorWritePos.load(std::memory_order_relaxed) + static_cast<uint32_t>(written)) & (kDiagnosticsCapacity - 1u);
+            errorWritePos.store(nextPos, std::memory_order_relaxed);
+        }
+    }
+
+#if JUCE_DEBUG
+    void verifyAlignment() noexcept
+    {
+        jassert((reinterpret_cast<uintptr_t>(coeffs.data()) % 64u) == 0u);
+        jassert((reinterpret_cast<uintptr_t>(errors.data()) % 64u) == 0u);
+        jassert((reinterpret_cast<uintptr_t>(&rngState[0]) % 64u) == 0u);
+    }
+#endif
+
+    static constexpr uint32_t kDiagnosticsCapacity = 8192u;
+    static constexpr double kErrorStateThreshold = 1.0e6;
+
+    alignas(64) std::array<double, ORDER> coeffs { 2.172009, -2.313034, 2.092949, -1.698718, 1.304487, -0.946581, 0.645299, -0.415598, 0.251068, -0.141026, 0.072650, -0.033120, 0.012821, -0.004274, 0.001068 };
+
+    alignas(64) std::array<std::array<double, ORDER>, MAX_CHANNELS> errors {};
     std::array<int, MAX_CHANNELS> writePos {};
-    Xoshiro256State rngState[MAX_CHANNELS] = {
-        {{ 0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL, 0x0123456789ABCDEFULL, 0xEFCDAB8967452301ULL }},
-        {{ 0x89ABCDEF01234567ULL, 0x76543210FEDCBA98ULL, 0xABCDEF0123456789ULL, 0x67452301EFCDAB89ULL }},
-        {{ 0x456789ABCDEF0123ULL, 0x3210FEDCBA987654ULL, 0xCDEF0123456789ABULL, 0x2301EFCDAB896745ULL }},
-        {{ 0xCDEF0123456789ABULL, 0x2301EFCDAB896745ULL, 0x456789ABCDEF0123ULL, 0x3210FEDCBA987654ULL }},
-        {{ 0x0123456789ABCDEFULL, 0xEFCDAB8967452301ULL, 0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL }},
-        {{ 0xABCDEF0123456789ULL, 0x67452301EFCDAB89ULL, 0x89ABCDEF01234567ULL, 0x76543210FEDCBA98ULL }},
-        {{ 0x2301EFCDAB896745ULL, 0x456789ABCDEF0123ULL, 0x3210FEDCBA987654ULL, 0xCDEF0123456789ABULL }},
-        {{ 0x67452301EFCDAB89ULL, 0xABCDEF0123456789ULL, 0x76543210FEDCBA98ULL, 0x89ABCDEF01234567ULL }}
-    };
+    alignas(64) Xoshiro256State rngState[MAX_CHANNELS];
     int currentBitDepth = 0;
     double scale = 1.0;
     double invScale = 1.0;
+
+    std::atomic<bool> needsReset { false };
 
     double diagSumSqL = 0.0;
     double diagSumSqR = 0.0;
@@ -364,6 +472,15 @@ private:
     std::atomic<float> peakAbsError { 0.0f };
     std::atomic<uint32_t> windowSamples { 0u };
     std::atomic<uint32_t> publishWindowSamples { 8192u };
+
+    juce::AbstractFifo diagnosticsFifo { static_cast<int>(kDiagnosticsCapacity) };
+    alignas(64) std::array<double, kDiagnosticsCapacity> errorBufferL {};
+    alignas(64) std::array<double, kDiagnosticsCapacity> errorBufferR {};
+    std::atomic<uint32_t> errorWritePos { 0u };
 };
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 } // namespace convo

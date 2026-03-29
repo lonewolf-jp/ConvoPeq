@@ -41,22 +41,40 @@ namespace convo::numeric_policy
 
 inline double killDenormal(double x) noexcept
 {
-    constexpr uint64_t kThresholdBits = convo::numeric_policy::denormThresholdBitsDouble();
-    union { double d; uint64_t u; } v { x };
-    constexpr uint64_t kSignMask = 0x8000000000000000ULL;
-    uint64_t absBits = v.u & ~kSignMask;
-    v.u = (absBits < kThresholdBits) ? 0ULL : v.u;
-    return v.d;
+    constexpr uint64_t kExpMask = 0x7FF0000000000000ULL;
+    constexpr uint64_t kFracMask = 0x000FFFFFFFFFFFFFULL;
+
+    const uint64_t bits = std::bit_cast<uint64_t>(x);
+    const bool isSubnormal = ((bits & kExpMask) == 0ULL) && ((bits & kFracMask) != 0ULL);
+    return isSubnormal ? 0.0 : x;
 }
 
 inline float killDenormal(float x) noexcept
 {
-    constexpr uint32_t kThresholdBits = convo::numeric_policy::denormThresholdBitsFloat();
-    union { float f; uint32_t u; } v { x };
-    constexpr uint32_t kSignMask = 0x80000000U;
-    uint32_t absBits = v.u & ~kSignMask;
-    v.u = (absBits < kThresholdBits) ? 0U : v.u;
-    return v.f;
+    constexpr uint32_t kExpMask = 0x7F800000U;
+    constexpr uint32_t kFracMask = 0x007FFFFFU;
+
+    const uint32_t bits = std::bit_cast<uint32_t>(x);
+    const bool isSubnormal = ((bits & kExpMask) == 0U) && ((bits & kFracMask) != 0U);
+    return isSubnormal ? 0.0f : x;
+}
+
+inline double saturateAVX2(double x, double minVal, double maxVal) noexcept
+{
+#if defined(__AVX2__) || defined(_M_AVX2)
+    __m128d vx = _mm_load_sd(&x);
+    __m128d vMin = _mm_load_sd(&minVal);
+    __m128d vMax = _mm_load_sd(&maxVal);
+    vx = _mm_max_sd(vx, vMin);
+    vx = _mm_min_sd(vx, vMax);
+    return _mm_cvtsd_f64(vx);
+#else
+    if (x < minVal)
+        return minVal;
+    if (x > maxVal)
+        return maxVal;
+    return x;
+#endif
 }
 
 #if defined(__AVX2__)

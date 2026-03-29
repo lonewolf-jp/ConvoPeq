@@ -1,0 +1,89 @@
+＜コーディング規約＞
+・WIndows x64版、Visual Studio 2022 MSVC(MSVC ツールセットバージョン v143)環境でビルドします。
+・動作環境は、CPUはINTEL X64系あるいはAMD64とし、AVX2機能を有している前提としてください。
+・C++のバージョンはC++20としてください。
+・コーディングにあたっては、＜必須情報＞から情報を取得してください。
+・信号処理アルゴリズムについては、＜参考文献＞から必要となる情報を取得してください。
+・JUCE Frameworkの関数を使用する場合は、必ず前述のURLで最新のJUCEバージョンで当該関数が存在することを確認してください。
+・JUCE frameworkはV8.0.12のAPIの仕様を**完全に理解**することが重要であり特に、戻り値の意味、副作用、スレッド安全性、前提条件をしっかり調べてからコーディングしてください。
+・JUCE framework公式githubのサンプルコードは基本的にVST3等であり、本アプリのようなスタンドアローンアプリではないことに注意してください。
+・JUCE framework公式githubのサンプルコードにない過剰な安定化機構は導入しないでください。
+・プロジェクトルートにあるJUCEフォルダ内、r8brain-free-srcフォルダ内のファイルは、絶対に編集しないでください。
+・構造化例外処理 (SEH) は、絶対に使用しないでください。
+・Audio thread（getNextAudioBlock() が呼ばれているスレッド）内では、「待つ可能性が1%でもある処理」（メモリ確保(new / malloc / vector::resize / mkl_malloc / mkl_free / _aligned_malloc / vslNewStream)、try-catch、DftiCommitDescriptor、mkl_set_interface_layer、IRの再ロード、mutex lock、critical section、condition_variable、ファイルI/O、コンソール出力、std::exp()、libm呼び出しとなる関数、MMCSS設定、MessageManagerへのアクセス、std::shared_ptrの使用）は絶対にしないでください。
+・Audio thread（getNextAudioBlock() が呼ばれているスレッド）内では、AudioBlock::allocate、AudioBlock::copyFrom、FFT::performFrequencyOnlyForwardTransform（事前確保なし）は絶対にしないでください。
+・Audio thread（getNextAudioBlock() が呼ばれているスレッド）以外で、かつINTEL oneAPI MKL(one MKL)使用箇所では、new、std::vector、std::make_uniqueを使用せず、かわりにmkl_malloc / mkl_free、_aligned_malloc(64)、std::pmr + custom allocatorを使用してください。
+・Audio thread（getNextAudioBlock() が呼ばれているスレッド）とそれ以外のスレッド間のデータ授受・共有は、Audio threadのリアルタイム性およびスレッドセーフを確実に保証できる方法で行ってください。
+・外部からの入力、外部への出力以外のすべてのデータ処理は、64bit doubleで行ってください。ただし、スペアナの演算についてはfloatでかまいません。
+・INTEL oneAPI MKL(one MKL)を使用する箇所はメモリは64byteアライメントとし、メモリ確保が必要になった場合は、Audio Threadではなく、prepareToPlay()などのメッセージスレッドからのみ呼び出すようにしてください。
+・デノーマル対策をしっかり行ってください。
+・デストラクタの設置漏れがないよう注意してください。
+・メモリリークが起きないようメモリ開放に注意してください。
+＜必須情報＞
+・本プログラムはJUCE framework V8.0.12 https://github.com/juce-framework/JUCE/tree/8.0.12 を使用しています。
+・JUCE frameworkは https://docs.juce.com/master/index.html で情報を閲覧できます。
+・JUCE Frameworkのフォーラムでは以下のURLです。プログラムの参考情報が閲覧できます。
+ https://forum.juce.com/c/general-juce-discussion/10
+ https://forum.juce.com/c/audio-plugins/11
+ https://forum.juce.com/c/windows/15
+ https://forum.juce.com/c/getting-started/20
+ https://forum.juce.com/c/cmake/31
+・本プログラムはr8brain-free-src https://github.com/avaneev/r8brain-free-src.git を使用しています。
+・本プログラムは INTEL oneAPI MKL(one MKL) https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html を使用しています。
+・INTEL oneAPI MKL(one MKL)は https://www.intel.com/content/www/us/en/docs/onemkl/developer-guide-windows/2025-2/overview.html で情報を閲覧できます。
+・Windows SDKは https://learn.microsoft.com/ja-jp/windows/apps/windows-sdk/ で情報を閲覧できます。
+＜参考文献＞
+〇プログラミング
+・Real-time audio programming 101 (Ross Bencina)
+ http://www.rossbencina.com/code/real-time-audio-programming-101-time-waits-for-nothing
+・Surplus (DSP Library)
+ https://github.com/vitalsong/dsplib
+・VCV Rack
+ https://github.com/VCVRack/Rack
+〇PEQ
+・The Art of VA Filter Design (Vadim Zavalishin)
+ https://www.native-instruments.com/fileadmin/ni_media/downloads/pdf/VAFilterDesign_2.1.2.pdf
+〇Convolution
+・Real-Time Partitioned Convolution for Ambiophonics (Angelo Farina)
+ https://www.angelofarina.it/Public/Papers/164-Mohonk2001.PDF
+・FFTW
+ https://www.fftw.org/fftw-paper-ieee.pdf
+ https://www.fftw.org/
+〇Signal Processing
+・The Scientist and Engineer's Guide to Digital Signal Processing (Steven W. Smith)
+ https://img.anfulai.cn/bbs/97312/The%20Scientist%20and%20Engineer%20Guide%20to%20DSP.pdf
+・Introduction to Signal Processing (2nd Edition, 2023)
+ https://rutgers.box.com/s/92is8ajwe2b0liokflkqx1ul2fqqqa7l
+・Solutions Manual
+ https://rutgers.box.com/s/ijyxsvc2muaxa7o45jaujl2hadxqdkk6
+ Solutions Manual errata
+ https://https//rutgers.box.com/s/07ucb1ru83189jxf68mf6yzncc3fw7qg
+・Applied Optimum Signal Processing (2018) 
+ https://rutgers.box.com/s/7sqyou4r7pg9wgx0zveexiukj9ca2ih0
+・Optimum Signal Processing (2nd Edition 2007)
+ https://rutgers.box.com/s/m4qylu904kheuuptdt30tbdh1ahsps3h
+・cytomic knowledge and algorithms
+ https://cytomic.com/technical-papers/
+・Audio EQ Cookbook (Robert Bristow-Johnson)
+ https://github.com/WebAudio/Audio-EQ-Cookbook/blob/main/Audio-EQ-Cookbook.txt
+・EarLevel Engineering (Nigel Redmon)
+ https://www.earlevel.com/main/
+・Free DSP Books
+ https://www.dsprelated.com/freebooks/pasp/
+〇CMA-ES
+・The CMA Evolution Strategy: A Tutorial
+ http://www.cmap.polytechnique.fr/~nikolaus.hansen/cmatutorial110628.pdf
+・CMA-ES Source Code Page (Nikolaus Hansen)
+ http://www.cmap.polytechnique.fr/~nikolaus.hansen/cmaes_inmatlab.html
+〇オンライン最適化 (Online Optimization)
+・Introduction to Online Convex Optimization (Elad Hazan)
+ https://wuzequn.com/2018/10/16/online-learning-algorithm-background-knowledge-ftrl-provement/online-convext-optimization-book.pdf
+〇CMA-ES / Online Optimization
+・Learning Step-Size Adaptation in CMA-ES
+ https://ml.informatik.uni-freiburg.de/wp-content/uploads/papers/20-PPSN-LTO-CMA.pdf
+・CMAES_Tutorial
+ https://github.com/akimotolab/CMAES_Tutorial
+・CMA-ES with Two-Point Step-Size Adaptation
+ https://inria.hal.science/inria-00276854v3/document
+・Optuna (Dashboard/Library)
+ https://docs-ja.optuna.org/
