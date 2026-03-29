@@ -134,6 +134,31 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
     totalGainValueLabel.addListener(this);
     addAndMakeVisible(totalGainValueLabel);
 
+    nonlinearLabel.setText("Sat:", juce::dontSendNotification);
+    nonlinearLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    nonlinearLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(nonlinearLabel);
+
+    nonlinearValueLabel.setText("0.00", juce::dontSendNotification);
+    nonlinearValueLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+    nonlinearValueLabel.setJustificationType(juce::Justification::centredLeft);
+    nonlinearValueLabel.setEditable(true);
+    nonlinearValueLabel.setTooltip("SVF Nonlinear Saturation (0.00 to 1.00)");
+    nonlinearValueLabel.addListener(this);
+    addAndMakeVisible(nonlinearValueLabel);
+
+    structureLabel.setText("Structure:", juce::dontSendNotification);
+    structureLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    structureLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(structureLabel);
+
+    structureBox.addItem("Serial", 1);
+    structureBox.addItem("Parallel", 2);
+    structureBox.setTooltip("EQ filter structure. Parallel mode changes phase behavior.");
+    structureBox.setJustificationType(juce::Justification::centred);
+    structureBox.addListener(this);
+    addAndMakeVisible(structureBox);
+
     agcButton.setButtonText("AGC");
     agcButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
     agcButton.setTooltip("Auto Gain Control (Match Output Level to Input Level)");
@@ -252,6 +277,13 @@ void EQControlPanel::updateAllControls()
     const float totalGain = engine.getEQProcessor().getTotalGain();
     totalGainValueLabel.setText(juce::String(totalGain, 1) + " dB", juce::dontSendNotification);
 
+    const float nonlinearSat = engine.getEQProcessor().getNonlinearSaturation();
+    nonlinearValueLabel.setText(juce::String(nonlinearSat, 2), juce::dontSendNotification);
+
+    const auto structure = engine.getEQProcessor().getFilterStructure();
+    const int structureId = (structure == EQProcessor::FilterStructure::Serial) ? 1 : 2;
+    structureBox.setSelectedId(structureId, juce::dontSendNotification);
+
     const bool agcOn = engine.getEQProcessor().getAGCEnabled();
     agcButton.setToggleState(agcOn, juce::dontSendNotification);
     totalGainValueLabel.setEnabled(!agcOn);
@@ -317,6 +349,15 @@ void EQControlPanel::labelTextChanged(juce::Label* label)
         val = juce::jlimit(MIN_TOTAL_GAIN, MAX_TOTAL_GAIN, val);
         engine.getEQProcessor().setTotalGain(val);
         totalGainValueLabel.setText(juce::String(val, 1) + " dB", juce::dontSendNotification);
+        return;
+    }
+
+    if (label == &nonlinearValueLabel)
+    {
+        float val = label->getText().retainCharacters("0123456789.").getFloatValue();
+        val = juce::jlimit(MIN_NONLINEAR_SAT, MAX_NONLINEAR_SAT, val);
+        engine.getEQProcessor().setNonlinearSaturation(val);
+        nonlinearValueLabel.setText(juce::String(val, 2), juce::dontSendNotification);
     }
 }
 
@@ -358,6 +399,12 @@ void EQControlPanel::editorShown(juce::Label* label, juce::TextEditor& editor)
         editor.setText(text);
         return;
     }
+
+    if (label == &nonlinearValueLabel)
+    {
+        editor.setText(label->getText());
+        return;
+    }
 }
 
 //--------------------------------------------------------------
@@ -391,6 +438,16 @@ void EQControlPanel::buttonClicked(juce::Button* button)
 //--------------------------------------------------------------
 void EQControlPanel::comboBoxChanged(juce::ComboBox* comboBox)
 {
+    if (comboBox == &structureBox)
+    {
+        const int selectedId = structureBox.getSelectedId();
+        if (selectedId == 1)
+            engine.getEQProcessor().setFilterStructure(EQProcessor::FilterStructure::Serial);
+        else if (selectedId == 2)
+            engine.getEQProcessor().setFilterStructure(EQProcessor::FilterStructure::Parallel);
+        return;
+    }
+
     if (const auto* id = findControlId(comboBox))
     {
         const int i = id->bandIndex;
@@ -472,6 +529,10 @@ void EQControlPanel::resized()
     auto controlsArea = titleRow.withTrimmedLeft(170);
 
     agcButton.setBounds(controlsArea.removeFromRight(50).reduced(2, 2));
+    structureBox.setBounds(controlsArea.removeFromRight(88).reduced(2, 2));
+    structureLabel.setBounds(controlsArea.removeFromRight(66).reduced(2, 2));
+    nonlinearValueLabel.setBounds(controlsArea.removeFromRight(48).reduced(2, 2));
+    nonlinearLabel.setBounds(controlsArea.removeFromRight(38).reduced(2, 2));
     totalGainValueLabel.setBounds(controlsArea.removeFromRight(60).reduced(2, 2));
     totalGainLabel.setBounds(controlsArea.removeFromRight(70).reduced(2, 2));
 

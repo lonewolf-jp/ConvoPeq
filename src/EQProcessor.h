@@ -99,6 +99,12 @@ struct EQCoeffsBiquad
 class EQProcessor : public juce::ChangeBroadcaster
 {
 public:
+    enum class FilterStructure
+    {
+        Serial,
+        Parallel
+    };
+
     class Listener
     {
     public:
@@ -179,6 +185,12 @@ public:
     // チャンネルモード変更
     void setBandChannelMode(int band, EQChannelMode mode);
     EQChannelMode getBandChannelMode(int band) const;
+
+    // 追加DSP設定
+    void setNonlinearSaturation(float value) noexcept;
+    float getNonlinearSaturation() const noexcept;
+    void setFilterStructure(FilterStructure mode) noexcept;
+    FilterStructure getFilterStructure() const noexcept;
 
     //----------------------------------------------------------
     // パラメータ読み取り (UIスレッドで表示に使用)
@@ -420,4 +432,18 @@ private:
 
     convo::ScopedAlignedPtr<double> scratchBuffer;
     int scratchCapacity = 0;
+    convo::ScopedAlignedPtr<double> dryBypassBuffer;
+    int dryBypassCapacity = 0;
+
+    convo::ScopedAlignedPtr<double> parallelInputBuffer;
+    convo::ScopedAlignedPtr<double> parallelWorkBuffer;
+    convo::ScopedAlignedPtr<double> parallelAccumBuffer;
+    convo::ScopedAlignedPtr<double> structureOldOutBuffer;
+    convo::ScopedAlignedPtr<double> structureNewOutBuffer;
+    int parallelBufferCapacity = 0;
+    int structureXfadeBufferCapacity = 0;
+
+    std::atomic<float> nonlinearSaturation { 0.0f };
+    std::atomic<FilterStructure> requestedStructure { FilterStructure::Serial };
+    std::atomic<FilterStructure> activeStructure { FilterStructure::Serial };
 };

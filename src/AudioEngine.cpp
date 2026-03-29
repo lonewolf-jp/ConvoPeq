@@ -2052,6 +2052,8 @@ void AudioEngine::eqGlobalChanged(EQProcessor* processor)
             // これにより、アクティブなDSPのAGC状態がリセットされるのを防ぐ。
             activeDSP->eq.setTotalGain(uiEqProcessor.getTotalGain());
             activeDSP->eq.setAGCEnabled(uiEqProcessor.getAGCEnabled());
+            activeDSP->eq.setNonlinearSaturation(uiEqProcessor.getNonlinearSaturation());
+            activeDSP->eq.setFilterStructure(uiEqProcessor.getFilterStructure());
         }
     }
 }

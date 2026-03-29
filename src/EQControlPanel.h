@@ -71,6 +71,10 @@ private:
     juce::ComboBox     channelBoxes[EQProcessor::NUM_BANDS];
     juce::Label        totalGainLabel;          // "Total Gain:"
     juce::Label        totalGainValueLabel;     // 数値入力
+    juce::Label        nonlinearLabel;          // "Sat:"
+    juce::Label        nonlinearValueLabel;     // 数値入力
+    juce::Label        structureLabel;          // "Structure:"
+    juce::ComboBox     structureBox;            // Serial / Parallel
     juce::ToggleButton agcButton;              // AGC Checkbox
     juce::TextButton   resetButton;             // 全バンドリセット
 
@@ -117,6 +121,8 @@ private:
     static constexpr float MAX_BAND_GAIN = 15.0f;
     static constexpr float MIN_TOTAL_GAIN = -24.0f;
     static constexpr float MAX_TOTAL_GAIN = 24.0f;
+    static constexpr float MIN_NONLINEAR_SAT = 0.0f;
+    static constexpr float MAX_NONLINEAR_SAT = 1.0f;
 
     // Listener コールバック
     void labelTextChanged(juce::Label* label) override;
