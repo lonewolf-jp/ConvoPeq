@@ -3,70 +3,63 @@
 
 ---
 
-## New in v0.5.8
+## New in v0.5.9
 
-### Main Changes from v0.5.7 to v0.5.8
+### Main Changes from v0.5.8 to v0.5.9
 
-#### Versioning
-
-- Unified all version strings to **v0.5.8** (README.md, ARCHITECTURE.md, ProjectMetadata.cmake, etc.)
-
-#### AudioEngine / General Optimization & Safety
-
-- Optimized AudioBlock initialization (avoided zero-initialization, used memcpy for speed)
-- Changed EQ response curve buffers from std::vector to std::array, unified NUM_DISPLAY_BARS in AudioEngine
-- Removed BLAS dependencies (cblas_dscal, etc.), unified to AVX2/SIMD-based scaleBlockFallback for real-time safety
-- Removed pinCurrentThreadToAudioCoreIfNeeded() (simplified thread affinity control)
-- Removed dynamic buffer resizing in EQ response calculation (fixed-length, no runtime allocation)
-
-#### Noise Shaper (Fixed/Lattice/15Tap) Improvements
-
-- Unified random number generation to Xoshiro256++ and implemented high-quality TPDF dither in all noise shapers
-- quantize() now adds TPDF dither, each channel holds independent RNG state
-- LatticeNoiseShaper, FixedNoiseShaper, and Fixed15TapNoiseShaper all use the same RNG/dither logic
-
-#### ConvolverProcessor / MKLNonUniformConvolver Robustness & Bug Fixes
-
-- Changed latency update to atomic flag delegation to Audio Thread for thread safety
-- Optimized wet/dry mix (removed BLAS, unified to AVX2/scalar functions)
-- Simplified FilterSpec construction in finalizeNUCEngineOnMessageThread
-- MKLNonUniformConvolver: Added OOM error handling, fixed block count calculation to use ceiling division
-- Expanded addFallback usage (removed BLAS dependency)
-
-#### EQProcessor / Spectrum Analyzer / UI
-
-- EQProcessor: RMS calculation now uses AVX2/SIMD+SSE2 sqrt (no libm/BLAS, real-time safe)
-- SpectrumAnalyzerComponent: Now gets NUM_DISPLAY_BARS from AudioEngine
-
-#### AudioSegmentBuffer
-
-- Write position and sample count management changed to std::atomic for thread safety
-
-#### UltraHighRateDCBlocker
-
-- Added a new 2-stage cascade first-order IIR DC Blocker for ultra-high sample rates
-- No libm calls in Audio Thread, 64-byte alignment, SIMD-based denormal/NaN protection
-
-#### Adaptive Noise Shaper Learning (Design Enhancements)
-
-- AudioBlocks are transferred from Audio Thread to Worker Thread via LockFreeRingBuffer, CMA-ES optimization runs on a dedicated thread
-- Coefficient banks are managed per sample rate and bit depth; progress, error, and coefficients are reported to UI/Engine via atomics
-- All inter-thread data transfer is designed for real-time safety using RCU/atomic/lock-free patterns
-- Learning modes (Short/Middle/Long) control convergence speed and stability
-
-#### Bug Fixes, Compatibility, and Other
-
-- Removed as much BLAS/MKL dependency as possible, unified to AVX2/SIMD/scalar functions for real-time safety and portability
-- Cleaned up comments, variable names, and initialization methods
-
-#### Important Design/Spec Changes & Notes
-
-- **All dynamic memory allocation, libm calls, and BLAS dependencies are strictly eliminated from the Audio Thread for real-time safety**
-- Adaptive noise shaper learning is implemented with LockFreeRingBuffer + atomics + RCU for thread safety
-- UltraHighRateDCBlocker is Audio Thread safe, SIMD-optimized, and 64-byte aligned
-- All buffer and state management is strictly enforced with std::atomic/lock-free/RAII patterns
+This section summarizes the main changes between commit 794631b and 37fee3b, focusing on major enhancements and refactoring in Convolver/AudioEngine/EQ/MKL, as well as large-scale EQ/UI improvements.
 
 ---
+
+## 1. Major Updates in Convolver/AudioEngine/MKL
+
+- **Significant expansion of ConvolverProcessor (convolution engine):**
+  - Integrated Intel oneMKL-based Non-Uniform Partitioned Convolution (NUC) engine for fast, high-precision convolution with large IRs and heavy processing loads.
+  - Asynchronous IR (impulse response) loading on the Message Thread, with atomic RCU handoff for seamless, glitch-free operation during background loads.
+  - Thread-safe atomic control of numerous parameters: PhaseMode (AsIs/Mixed/Minimum), Dry/Wet Mix, Smoothing, IR length, tail rolloff, and more.
+  - Added APIs for parameter change notification (Listener/ChangeBroadcaster), state save/restore, and waveform/spectrum retrieval.
+  - Enhanced integration with AudioEngine/EQProcessor (processing order switching, parameter sync).
+
+- **AudioEngine enhancements:**
+  - New APIs for managing multiple ConvolverProcessor/EQProcessor instances, bypass/parameter sync, and preset loading.
+  - Thorough thread-safe state management using atomics and LockFreeRingBuffer.
+
+- **MKL/AlignedAllocation improvements:**
+  - Enforced 64-byte alignment for MKL allocators, strict memory leak prevention, and explicit resource release.
+
+---
+
+## 2. Large-Scale EQ Refactor & UI Enhancements
+
+- **EQProcessor refactor and feature expansion:**
+  - 20-band parametric EQ implemented with lock-free (RCU) pattern. All band parameters (frequency, gain, Q, enable/disable) are managed atomically for instant UI-thread updates.
+  - Adopted TPT SVF (Topology-Preserving Transform State Variable Filter) for high-quality, low-noise coefficient modulation.
+  - Added AGC (auto-gain control), total gain, bypass, state save/restore, and response curve calculation APIs.
+  - Band/global change notification via Listener/ChangeBroadcaster.
+
+- **EQControlPanel UI expansion:**
+  - Dynamic generation of UI controls (gain, frequency, Q, enable/disable) for all 20 bands, with full two-way sync to AudioEngine/EQProcessor.
+  - Enhanced event handling for all labels, sliders, and buttons.
+
+---
+
+## 3. Other
+
+- **Similar UI/DSP control enhancements for ConvolverControlPanel, MKLNonUniformConvolver, etc.**
+- **Strict adherence to JUCE 8.0.12 API and design guidelines**
+- **Coding standards, documentation updates**
+- **Major additions to manuals (Japanese/English)**
+
+---
+
+### Summary
+
+- **Major expansion and refactor for real-time safety, high performance, flexible parameter control, and robust UI integration**
+- **Significant acceleration for large IR/high-load processing via Intel MKL**
+- **Strict separation of UI/logic, thread safety, and extensibility**
+- **Substantial improvements to documentation and manuals**
+
+These changes represent a major evolution in DSP core, UI, and overall design quality during this period.
 
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 
@@ -83,14 +76,30 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
 
 ## Documentation
 
-- `README.md`: User-facing overview, features, audio processing summary, and build entry points
-- `ARCHITECTURE.md`: Developer-facing architecture, threading, state flow, and subsystem design details
-- `SOUND_PROCESSING.md`: **In-depth, code-referenced technical documentation of the entire audio signal processing flow.**
+- [README.md](README.md): User-facing overview, features, audio processing summary, and build entry points
+- [ARCHITECTURE.md](ARCHITECTURE.md): Developer-facing architecture, threading, state flow, and subsystem design details
+- [SOUND_PROCESSING.md](SOUND_PROCESSING.md): **In-depth, code-referenced technical documentation of the entire audio signal processing flow.**
   - Covers all DSP stages (input, conditioning, oversampling, main DSP chain, output, dither, etc.)
   - Includes mathematical formulas, buffer/parameter management, SIMD/real-time safety, and code path examples
   - Intended for international contributors and advanced users seeking a rigorous technical reference
-- `BUILD_GUIDE_WINDOWS.md`: Windows build instructions and troubleshooting
-- `HOW_TO_USE.md`: Practical usage guide — room correction via IR convolution with REW, and headphone EQ correction via AutoEq
+- [BUILD_GUIDE_WINDOWS.md](BUILD_GUIDE_WINDOWS.md): Windows build instructions and troubleshooting
+- [HOW_TO_USE.md](HOW_TO_USE.md): Practical usage guide — room correction via IR convolution with REW, and headphone EQ correction via AutoEq
+
+### Manuals ([manual/](manual/))
+
+**English Manuals:**
+
+- [manual/MAIN_WINDOW_EN.md](manual/MAIN_WINDOW_EN.md): Main window usage (English)
+- [manual/AUDIO_SETTINGS_WINDOW_EN.md](manual/AUDIO_SETTINGS_WINDOW_EN.md): Audio settings window (English)
+- [manual/IR_ADVANCED_WINDOW_EN.md](manual/IR_ADVANCED_WINDOW_EN.md): IR advanced window (English)
+- [manual/ADAPTIVE_NOISE_SHAPER_LEARNING_WINDOW_EN.md](manual/ADAPTIVE_NOISE_SHAPER_LEARNING_WINDOW_EN.md): Adaptive Noise Shaper Learning (English)
+
+**Japanese Manuals (in Japanese):**
+
+- [manual/MAIN_WINDOW_JP.md](manual/MAIN_WINDOW_JP.md): Main window usage (Japanese)
+- [manual/AUDIO_SETTINGS_WINDOW_JP.md](manual/AUDIO_SETTINGS_WINDOW_JP.md): Audio settings window (Japanese)
+- [manual/IR_ADVANCED_WINDOW_JP.md](manual/IR_ADVANCED_WINDOW_JP.md): IR advanced window (Japanese)
+- [manual/ADAPTIVE_NOISE_SHAPER_LEARNING_WINDOW_JP.md](manual/ADAPTIVE_NOISE_SHAPER_LEARNING_WINDOW_JP.md): Adaptive Noise Shaper Learning (Japanese)
 
 ---
 
