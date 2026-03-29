@@ -3,42 +3,68 @@
 
 ---
 
-## New in v0.5.7
+## New in v0.5.8
 
-### Main Source Code Changes from v0.5.6 to v0.5.7
+### Main Changes from v0.5.7 to v0.5.8
 
-- **Versioning**
-  - Unified all version strings to v0.5.7 (README.md, ARCHITECTURE.md, ProjectMetadata.cmake, etc.)
+#### Versioning
 
-- **AudioEngine / General Optimization & Safety**
-  - Optimized AudioBlock initialization (avoided zero-initialization, used memcpy for speed)
-  - Changed EQ response curve buffers from std::vector to std::array, unified NUM_DISPLAY_BARS in AudioEngine
-  - Removed BLAS dependencies (cblas_dscal, etc.), unified to AVX2/SIMD-based scaleBlockFallback for real-time safety
-  - Removed pinCurrentThreadToAudioCoreIfNeeded() (simplified thread affinity control)
-  - Removed dynamic buffer resizing in EQ response calculation (fixed-length, no runtime allocation)
+- Unified all version strings to **v0.5.8** (README.md, ARCHITECTURE.md, ProjectMetadata.cmake, etc.)
 
-- **Noise Shaper (Fixed/Lattice/15Tap) Improvements**
-  - Unified random number generation to Xoshiro256++ and implemented high-quality TPDF dither in all noise shapers
-  - quantize() now adds TPDF dither, each channel holds independent RNG state
-  - LatticeNoiseShaper, FixedNoiseShaper, and Fixed15TapNoiseShaper all use the same RNG/dither logic
+#### AudioEngine / General Optimization & Safety
 
-- **ConvolverProcessor / MKLNonUniformConvolver Robustness & Bug Fixes**
-  - Changed latency update to atomic flag delegation to Audio Thread for thread safety
-  - Optimized wet/dry mix (removed BLAS, unified to AVX2/scalar functions)
-  - Simplified FilterSpec construction in finalizeNUCEngineOnMessageThread
-  - MKLNonUniformConvolver: Added OOM error handling, fixed block count calculation to use ceiling division
-  - Expanded addFallback usage (removed BLAS dependency)
+- Optimized AudioBlock initialization (avoided zero-initialization, used memcpy for speed)
+- Changed EQ response curve buffers from std::vector to std::array, unified NUM_DISPLAY_BARS in AudioEngine
+- Removed BLAS dependencies (cblas_dscal, etc.), unified to AVX2/SIMD-based scaleBlockFallback for real-time safety
+- Removed pinCurrentThreadToAudioCoreIfNeeded() (simplified thread affinity control)
+- Removed dynamic buffer resizing in EQ response calculation (fixed-length, no runtime allocation)
 
-- **EQProcessor / Spectrum Analyzer / UI**
-  - EQProcessor: RMS calculation now uses AVX2/SIMD+SSE2 sqrt (no libm/BLAS, real-time safe)
-  - SpectrumAnalyzerComponent: Now gets NUM_DISPLAY_BARS from AudioEngine
+#### Noise Shaper (Fixed/Lattice/15Tap) Improvements
 
-- **AudioSegmentBuffer**
-  - write position and sample count management changed to std::atomic for thread safety
+- Unified random number generation to Xoshiro256++ and implemented high-quality TPDF dither in all noise shapers
+- quantize() now adds TPDF dither, each channel holds independent RNG state
+- LatticeNoiseShaper, FixedNoiseShaper, and Fixed15TapNoiseShaper all use the same RNG/dither logic
 
-- **Other**
-  - Removed as much BLAS/MKL dependency as possible, unified to AVX2/SIMD/scalar functions for real-time safety and portability
-  - Cleaned up comments, variable names, and initialization methods
+#### ConvolverProcessor / MKLNonUniformConvolver Robustness & Bug Fixes
+
+- Changed latency update to atomic flag delegation to Audio Thread for thread safety
+- Optimized wet/dry mix (removed BLAS, unified to AVX2/scalar functions)
+- Simplified FilterSpec construction in finalizeNUCEngineOnMessageThread
+- MKLNonUniformConvolver: Added OOM error handling, fixed block count calculation to use ceiling division
+- Expanded addFallback usage (removed BLAS dependency)
+
+#### EQProcessor / Spectrum Analyzer / UI
+
+- EQProcessor: RMS calculation now uses AVX2/SIMD+SSE2 sqrt (no libm/BLAS, real-time safe)
+- SpectrumAnalyzerComponent: Now gets NUM_DISPLAY_BARS from AudioEngine
+
+#### AudioSegmentBuffer
+
+- Write position and sample count management changed to std::atomic for thread safety
+
+#### UltraHighRateDCBlocker
+
+- Added a new 2-stage cascade first-order IIR DC Blocker for ultra-high sample rates
+- No libm calls in Audio Thread, 64-byte alignment, SIMD-based denormal/NaN protection
+
+#### Adaptive Noise Shaper Learning (Design Enhancements)
+
+- AudioBlocks are transferred from Audio Thread to Worker Thread via LockFreeRingBuffer, CMA-ES optimization runs on a dedicated thread
+- Coefficient banks are managed per sample rate and bit depth; progress, error, and coefficients are reported to UI/Engine via atomics
+- All inter-thread data transfer is designed for real-time safety using RCU/atomic/lock-free patterns
+- Learning modes (Short/Middle/Long) control convergence speed and stability
+
+#### Bug Fixes, Compatibility, and Other
+
+- Removed as much BLAS/MKL dependency as possible, unified to AVX2/SIMD/scalar functions for real-time safety and portability
+- Cleaned up comments, variable names, and initialization methods
+
+#### Important Design/Spec Changes & Notes
+
+- **All dynamic memory allocation, libm calls, and BLAS dependencies are strictly eliminated from the Audio Thread for real-time safety**
+- Adaptive noise shaper learning is implemented with LockFreeRingBuffer + atomics + RCU for thread safety
+- UltraHighRateDCBlocker is Audio Thread safe, SIMD-optimized, and 64-byte aligned
+- All buffer and state management is strictly enforced with std::atomic/lock-free/RAII patterns
 
 ---
 

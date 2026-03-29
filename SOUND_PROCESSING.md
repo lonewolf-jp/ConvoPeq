@@ -764,14 +764,36 @@ All types apply TPDF dither and error-feedback noise shaping to minimize quantiz
     e_0[n+1] = q[n] - y[n],\ e_{k+1}[n+1] = e_k[n] \ (k=0..7)
     $$
     where $c_k[n]$ are the adaptive coefficients, $e_k$ are the error states.
-  - Coefficient adaptation is performed by a dedicated worker thread (see `NoiseShaperLearner`), which analyzes output error and updates the coefficient bank using lock-free RCU.
-  - All coefficient updates are atomic and thread-safe.
-- **Parameter Management**:
-  - Coefficient banks are managed per sample rate and bit depth.
-  - UI and worker thread communicate via lock-free buffers and atomic generation counters.
-- **Real-Time Safety**:
-  - No dynamic allocation or locks in the audio thread.
-  - All coefficient updates are performed outside the audio thread and swapped in atomically.
+
+- **Learning Mechanism (CMA-ES Optimization)**:
+  - The adaptive coefficients $c_k[n]$ are optimized in real time using a background worker thread running a Covariance Matrix Adaptation Evolution Strategy (CMA-ES) algorithm.
+  - The worker thread receives blocks of audio and error signals from the audio thread via a lock-free ring buffer (see `LockFreeRingBuffer`).
+  - For each learning iteration, the worker evaluates candidate coefficient sets by simulating the noise shaping process and measuring the resulting error (e.g., weighted RMS or psychoacoustic error metrics).
+  - The CMA-ES optimizer updates the population of candidate solutions, converging toward coefficient sets that minimize perceived quantization noise.
+  - The best-performing coefficient set is atomically published to the audio thread using a lock-free RCU (Read-Copy-Update) pattern, ensuring glitch-free handoff.
+
+- **Bank Management and State Handling**:
+  - Coefficient banks are managed per sample rate and bit depth, allowing optimal shaping for each output format.
+  - Each bank stores the current best coefficients, learning history, and progress metrics.
+  - The system supports multiple learning sessions ("banks") in parallel, with each session keyed by a unique StateKey (sample rate, bit depth, mode, etc.).
+  - All state transitions and bank swaps are performed atomically, with no blocking or dynamic allocation in the audio thread.
+
+- **Threading and Real-Time Safety**:
+  - The audio thread never performs learning or heavy computation; it only snapshots the latest coefficients at block start.
+  - All learning, error analysis, and coefficient updates are performed on the worker thread.
+  - Communication between threads uses lock-free ring buffers and atomic generation counters for progress tracking.
+  - No dynamic memory allocation, locks, or blocking calls are ever made in the audio thread.
+  - All buffers and state are pre-allocated and 64-byte aligned for SIMD efficiency.
+
+- **UI Integration and Progress Reporting**:
+  - The UI can display real-time learning progress, best score history, and current coefficient values by polling atomic variables and progress buffers.
+  - Resume, stop, and save/load operations are supported for each learning session, with all state transitions handled safely outside the audio thread.
+  - The system is designed for robust, user-interruptible learning with immediate UI feedback and no risk of audio dropouts.
+
+- **Design Notes**:
+  - The entire adaptive learning system is engineered for maximum real-time safety, extensibility, and audio fidelity.
+  - All parameter/state changes are atomic or lock-free, and all learning logic is isolated from the audio callback.
+  - The architecture supports future extensions such as alternative optimization algorithms, multi-objective learning, or advanced error metrics.
 
 ---
 

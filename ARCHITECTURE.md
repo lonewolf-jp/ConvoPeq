@@ -1,5 +1,5 @@
 
-# ConvoPeq Architecture (v0.5.7+)
+# ConvoPeq Architecture (v0.5.8+)
 
 This document describes the internal architecture of **ConvoPeq**, a Windows-only standalone audio application built with **JUCE 8.0.12** and Intel oneMKL. It is intended for developers and contributors working on DSP, threading, state transitions, and runtime behavior.
 
@@ -27,7 +27,7 @@ ConvoPeq is organized around four priorities:
    - Heavy work (IR load/rebuild) is asynchronous.
    - State transitions are staged to avoid audible artifacts.
 
-## Adaptive Noise Shaper Learning (v0.5.7+)
+## Adaptive Noise Shaper Learning (v0.5.8+)
 
 - `NoiseShaperLearner` receives 256-sample AudioBlocks from the Audio Thread via a LockFreeRingBuffer and performs CMA-ES optimization (9th-order IIR noise shaper coefficients) on a dedicated worker thread.
 - Coefficient banks are managed per sample rate and bit depth; progress, error, and coefficients are reported to the UI/Engine via atomic variables.
