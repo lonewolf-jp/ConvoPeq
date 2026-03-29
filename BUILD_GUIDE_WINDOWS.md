@@ -174,3 +174,43 @@ Do **not** modify external dependency trees directly:
 - The app target is standalone (not a plugin target).
 - The default daily workflow is `build.bat` or VS Code tasks.
 - Use `Clean` when switching toolchain assumptions or after generator/cache conflicts.
+
+---
+
+## 10. Profile-Guided Optimization (PGO) Build
+
+To build ConvoPeq with Profile-Guided Optimization (PGO) using MSVC, follow these steps:
+
+1. **Generate Instrumented Build**
+ ```cmd
+ build.bat Release pgo-gen
+ ```
+
+2. **Navigate to Release Output Folder**
+ ```cmd
+ cd build\ConvoPeq_artefacts\Release
+ ```
+
+3. **Copy `pgort140.dll`**
+ - Copy `pgort140.dll` from your MSVC tools directory (e.g., `C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\<version>\bin\Hostx64\x64\pgort140.dll`) into this folder.
+4. **Run the Instrumented Executable**
+ - Launch `ConvoPeq.exe` and exercise the application. (Note: CPU load will be about 200% of normal; audio dropouts are expected and not a problem.)
+5. **Merge Profile Data**
+ ```cmd
+ "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\pgomgr.exe" /merge *.pgc ConvoPeq.pgd
+ ```
+
+6. **Return to Project Root**
+ ```cmd
+ cd ..\..\..
+ ```
+
+7. **Build with PGO Optimization**
+ ```cmd
+ build.bat Release pgo-use
+ ```
+
+8. **Result**
+ - The PGO-optimized binary will be generated in `build\ConvoPeq_artefacts\Release`.
+
+---

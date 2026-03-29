@@ -211,6 +211,45 @@ target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
 juce_generate_juce_header(ConvoPeq)
 
 #------------------------------------------------------------
+# PGO (Profile-Guided Optimization) Support
+# MSVC専用・Ninja Multi-Config対応・Audio thread制約完全遵守
+# プロファイル収集は build\ConvoPeq_artefacts\Release\ConvoPeq.exe 実行時を前提
+# .pgd も .pgc と同じ artefacts/Release フォルダ内に配置（ユーザーの指摘対応）
+#------------------------------------------------------------
+option(CONVOPEQ_PGO_INSTRUMENT "PGO instrumentation build (1st pass: /GENPROFILE)" OFF)
+option(CONVOPEQ_PGO_USE        "PGO optimized build (2nd pass: /USEPROFILE)" OFF)
+set(CONVOPEQ_PGO_PGD "${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/Release/ConvoPeq.pgd" CACHE FILEPATH "PGO .pgd file path (USE phase)")
+
+if(CONVOPEQ_PGO_INSTRUMENT)
+    message(STATUS "[PGO] Instrumentation mode enabled (/GENPROFILE) ── .pgc/.pgdはartefacts/Release内")
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/GL>           # Whole Program Optimization
+    )
+    target_link_options(ConvoPeq PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/LTCG /GENPROFILE:PGD=${CONVOPEQ_PGO_PGD}>
+    )
+elseif(CONVOPEQ_PGO_USE)
+    message(STATUS "[PGO] Optimization mode enabled (/USEPROFILE with ${CONVOPEQ_PGO_PGD})")
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/GL>
+    )
+    target_link_options(ConvoPeq PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/LTCG /USEPROFILE:PGD=${CONVOPEQ_PGO_PGD}>
+    )
+else()
+    # 通常のRelease（LTCGのみ）
+    if("Release" IN_LIST CMAKE_CONFIGURATION_TYPES OR CMAKE_BUILD_TYPE STREQUAL "Release")
+        message(STATUS "[PGO] Normal Release build with LTCG")
+        target_compile_options(ConvoPeq PRIVATE
+            $<$<CXX_COMPILER_ID:MSVC>:/GL>
+        )
+        target_link_options(ConvoPeq PRIVATE
+            $<$<CXX_COMPILER_ID:MSVC>:/LTCG>
+        )
+    endif()
+endif()
+
+#------------------------------------------------------------
 # プラットフォーム固有設定
 #------------------------------------------------------------
 if(WIN32)
