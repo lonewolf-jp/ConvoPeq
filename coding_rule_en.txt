@@ -80,5 +80,9 @@ http://www.cmap.polytechnique.fr/~nikolaus.hansen/cmaes_inmatlab.html
 https://ml.informatik.uni-freiburg.de/wp-content/uploads/papers/20-PPSN-LTO-CMA.pdf
 ・CMAES_Tutorial 
 https://github.com/akimotolab/CMAES_Tutorial
-・CMA-ES with Two-Point Step-Size Adaptation 
-https:
+・CMA-ES with Two-Point Step-Size Adaptation
+https://inria.hal.science/inria-00276854v3/document
+・Optuna (Dashboard/Library)
+https://docs-ja.optuna.org/
+ 
+  use context7
