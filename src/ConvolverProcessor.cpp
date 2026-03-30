@@ -62,6 +62,22 @@ static bool checkCancellation(const std::function<bool()>& shouldExit, bool* was
     return false;
 }
 
+// 位相差アンラップ（C++20、ポインタベース）
+static void unwrapPhaseRadians(double* phase, int size, double tol = juce::MathConstants<double>::pi)
+{
+    if (size < 2) return;
+    double correction = 0.0;
+    for (int i = 1; i < size; ++i)
+    {
+        double delta = phase[i] - phase[i - 1];
+        if (delta > tol)
+            correction -= 2.0 * juce::MathConstants<double>::pi;
+        else if (delta < -tol)
+            correction += 2.0 * juce::MathConstants<double>::pi;
+        phase[i] += correction;
+    }
+}
+
 static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR,
                                                        const std::function<bool()>& shouldExit,
                                                        bool* wasCancelled);
@@ -1724,6 +1740,13 @@ static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<dou
                                                      bool* wasCancelled)
 {
     if (wasCancelled) *wasCancelled = false;
+    (void)tau; // tau は Phase 1 では無視する
+
+    // MKL/AVX最適化のためにFTZ/DAZフラグを明示的に設定
+    #if defined(__AVX2__)
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+    #endif
 
     const int numSamples = linearIR.getNumSamples();
     const int numChannels = linearIR.getNumChannels();
@@ -1733,7 +1756,7 @@ static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<dou
     if (minimumIR.getNumSamples() != numSamples || minimumIR.getNumChannels() != numChannels || sampleRate <= 0.0)
         return {};
 
-    if (transitionHiHz <= transitionLoHz || tau <= 0.0)
+    if (transitionHiHz <= transitionLoHz)
         return {};
 
     const int fftSize = juce::nextPowerOfTwo(numSamples);
@@ -1758,21 +1781,17 @@ static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<dou
     if (DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
         return {};
 
-    convo::ScopedAlignedPtr<MKL_Complex16> linearSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(
-        static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
-    convo::ScopedAlignedPtr<MKL_Complex16> minimumSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(
-        static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
-    convo::ScopedAlignedPtr<MKL_Complex16> tempSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(
-        static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
-    convo::ScopedAlignedPtr<double> magnitudeRef(static_cast<double*>(convo::aligned_malloc(
-        static_cast<size_t>(fftSize) * sizeof(double), 64)));
+    const int half = fftSize / 2;
+    const int complexSize = half + 1;
 
-    if (!linearSpec || !minimumSpec || !tempSpec || !magnitudeRef)
+    // 規約に従い ScopedAlignedPtr (mkl_malloc) を使用
+    convo::ScopedAlignedPtr<MKL_Complex16> linearSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
+    convo::ScopedAlignedPtr<MKL_Complex16> minimumSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
+    convo::ScopedAlignedPtr<double> deltaPhi(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(complexSize) * sizeof(double), 64)));
+
+    if (!linearSpec || !minimumSpec || !deltaPhi)
         return {};
 
-    static constexpr double epsilon = 1.0e-12;
-
-    const int half = fftSize / 2;
     const double invSpan = 1.0 / (transitionHiHz - transitionLoHz);
 
     for (int ch = 0; ch < numChannels; ++ch)
@@ -1783,67 +1802,80 @@ static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<dou
         const double* srcLinear = linearIR.getReadPointer(ch);
         const double* srcMinimum = minimumIR.getReadPointer(ch);
 
-        int refPeakIndex = 0;
-        double refPeakMag = 0.0;
+        // 線形位相 IR のピーク位置を特定
+        int peakDelay = 0;
+        double maxVal = 0.0;
         for (int i = 0; i < numSamples; ++i)
         {
-            const double mag = std::abs(srcLinear[i]);
-            if (mag > refPeakMag)
+            double val = std::abs(srcLinear[i]);
+            if (val > maxVal)
             {
-                refPeakMag = mag;
-                refPeakIndex = i;
+                maxVal = val;
+                peakDelay = i;
             }
         }
 
-        for (int i = 0; i < fftSize; ++i)
+        // バッファ初期化と FFT
+        std::memset(linearSpec.get(), 0, static_cast<size_t>(fftSize) * sizeof(MKL_Complex16));
+        std::memset(minimumSpec.get(), 0, static_cast<size_t>(fftSize) * sizeof(MKL_Complex16));
+
+        for (int i = 0; i < numSamples; ++i)
         {
-            const double l = (i < numSamples) ? srcLinear[i] : 0.0;
-            const double m = (i < numSamples) ? srcMinimum[i] : 0.0;
-            tempSpec.get()[i].real = l;
-            tempSpec.get()[i].imag = 0.0;
-            minimumSpec.get()[i].real = m;
-            minimumSpec.get()[i].imag = 0.0;
+            linearSpec.get()[i].real = srcLinear[i];
+            minimumSpec.get()[i].real = srcMinimum[i];
         }
 
-        if (DftiComputeForward(dfti, tempSpec.get()) != DFTI_NO_ERROR)
-            return {};
-        if (DftiComputeForward(dfti, minimumSpec.get()) != DFTI_NO_ERROR)
-            return {};
+        if (DftiComputeForward(dfti, linearSpec.get()) != DFTI_NO_ERROR) return {};
+        if (DftiComputeForward(dfti, minimumSpec.get()) != DFTI_NO_ERROR) return {};
 
-        for (int k = 0; k < fftSize; ++k)
+        // 位相差の計算
+        for (int k = 0; k < complexSize; ++k)
         {
-            const double re = tempSpec.get()[k].real;
-            const double im = tempSpec.get()[k].imag;
-            const double a = std::sqrt(re * re + im * im);
-            magnitudeRef.get()[k] = (std::max)(a, epsilon);
-            linearSpec.get()[k].real = re;
-            linearSpec.get()[k].imag = im;
-        }
-
-        for (int k = 0; k < fftSize; ++k)
-        {
-            const int mirroredBin = (k <= half) ? k : (fftSize - k);
-            const double freq = (static_cast<double>(mirroredBin) * sampleRate) / static_cast<double>(fftSize);
+            const double freq = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
 
             double wLinear = 1.0;
             if (freq >= transitionHiHz)
-            {
                 wLinear = 0.0;
-            }
             else if (freq > transitionLoHz)
             {
-                const double x = juce::jlimit(0.0, 1.0, (freq - transitionLoHz) * invSpan);
+                const double x = (freq - transitionLoHz) * invSpan;
                 wLinear = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
             }
             const double wMinimum = 1.0 - wLinear;
 
-            const auto& lin = linearSpec.get()[k];
-            const auto& min = minimumSpec.get()[k];
+            // 理論的線形位相
+            const double omega = 2.0 * juce::MathConstants<double>::pi * k / fftSize;
+            const double phi_lin = -omega * peakDelay;
 
-            linearSpec.get()[k].real = wLinear * lin.real + wMinimum * min.real;
-            linearSpec.get()[k].imag = wLinear * lin.imag + wMinimum * min.imag;
+            // 最小位相
+            const double phi_min = std::atan2(minimumSpec.get()[k].imag, minimumSpec.get()[k].real);
+
+            // 目標位相と位相差
+            const double phi_target = wLinear * phi_lin + wMinimum * phi_min;
+            deltaPhi.get()[k] = phi_target - phi_lin;
         }
 
+        // 位相差のアンラップ
+        unwrapPhaseRadians(deltaPhi.get(), complexSize);
+
+        // 新しいスペクトルの構築: H_mixed = H_linear * exp(j * delta_phi)
+        for (int k = 0; k < fftSize; ++k)
+        {
+            const int mirroredBin = (k <= half) ? k : (fftSize - k);
+            const double dPhi = (k <= half) ? deltaPhi.get()[k] : -deltaPhi.get()[mirroredBin];
+
+            const double re = linearSpec.get()[k].real;
+            const double im = linearSpec.get()[k].imag;
+            
+            // 振幅を維持したまま位相を回転
+            const double cosD = std::cos(dPhi);
+            const double sinD = std::sin(dPhi);
+            
+            linearSpec.get()[k].real = re * cosD - im * sinD;
+            linearSpec.get()[k].imag = re * sinD + im * cosD;
+        }
+
+        // IFFT
         if (DftiComputeBackward(dfti, linearSpec.get()) != DFTI_NO_ERROR)
             return {};
 
@@ -1851,51 +1883,6 @@ static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<dou
         for (int i = 0; i < numSamples; ++i)
         {
             const double value = linearSpec.get()[i].real;
-            if (!std::isfinite(value))
-                return {};
-            mixedTime[i] = (std::abs(value) < 1.0e-18) ? 0.0 : value;
-        }
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            if (i < refPeakIndex)
-            {
-                const double wTime = std::exp(-(static_cast<double>(refPeakIndex - i)) / tau);
-                mixedTime[i] *= wTime;
-            }
-        }
-
-        if (checkCancellation(shouldExit, wasCancelled))
-            return {};
-
-        for (int i = 0; i < fftSize; ++i)
-        {
-            const double x = (i < numSamples) ? mixedTime[i] : 0.0;
-            tempSpec.get()[i].real = x;
-            tempSpec.get()[i].imag = 0.0;
-        }
-
-        if (DftiComputeForward(dfti, tempSpec.get()) != DFTI_NO_ERROR)
-            return {};
-
-        for (int k = 0; k < fftSize; ++k)
-        {
-            const double re = tempSpec.get()[k].real;
-            const double im = tempSpec.get()[k].imag;
-            const double mag = std::sqrt(re * re + im * im);
-            const double corr = magnitudeRef.get()[k] / (mag + epsilon);
-            tempSpec.get()[k].real = re * corr;
-            tempSpec.get()[k].imag = im * corr;
-        }
-
-        if (DftiComputeBackward(dfti, tempSpec.get()) != DFTI_NO_ERROR)
-            return {};
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            const double value = tempSpec.get()[i].real;
-            if (!std::isfinite(value))
-                return {};
             mixedTime[i] = (std::abs(value) < 1.0e-18) ? 0.0 : value;
         }
     }
