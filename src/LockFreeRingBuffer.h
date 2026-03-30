@@ -7,6 +7,7 @@
 #include <type_traits>
 #include <cstring>
 #include <cassert>
+#include <utility>
 
 // T: trivially copyable型のみ
 // Capacity: 2の冪
@@ -32,6 +33,15 @@ public:
         size_t r = readIndex.load(std::memory_order_acquire);
         if ((w - r) >= Capacity) return false; // full
         buffer[w & MASK] = item;
+        writeIndex.store(w + 1, std::memory_order_release);
+        return true;
+    }
+    template<typename Writer>
+    bool pushWithWriter(Writer&& writer) noexcept {
+        size_t w = writeIndex.load(std::memory_order_relaxed);
+        size_t r = readIndex.load(std::memory_order_acquire);
+        if ((w - r) >= Capacity) return false; // full
+        std::forward<Writer>(writer)(buffer[w & MASK]);
         writeIndex.store(w + 1, std::memory_order_release);
         return true;
     }

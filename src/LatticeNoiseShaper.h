@@ -109,27 +109,58 @@ public:
             return;
         }
 
-        for (int i = 0; i < numSamples; ++i)
+        int i = 0;
+        const int rampSamples = std::min(numSamples, ramp.samplesRemaining);
+
+        if (rampSamples > 0)
         {
-            if (ramp.samplesRemaining > 0)
+            if (dataR != nullptr)
             {
-                for (int c = 0; c < kOrder; ++c)
-                    ramp.current[static_cast<size_t>(c)] += ramp.delta[static_cast<size_t>(c)];
-                
-                if (--ramp.samplesRemaining == 0)
-                    ramp.current = ramp.target;
-                
-                coeffs = ramp.current;
+                for (; i < rampSamples; ++i)
+                {
+                    stepRampCurrent();
+                    dataL[i] = processSample(0, dataL[i], states[0], ramp.current, headroom);
+                    dataR[i] = processSample(1, dataR[i], states[1], ramp.current, headroom);
+                }
+            }
+            else
+            {
+                for (; i < rampSamples; ++i)
+                {
+                    stepRampCurrent();
+                    dataL[i] = processSample(0, dataL[i], states[0], ramp.current, headroom);
+                }
             }
 
-            dataL[i] = processSample(0, dataL[i], states[0], headroom);
-            if (dataR != nullptr)
-                dataR[i] = processSample(1, dataR[i], states[1], headroom);
+            ramp.samplesRemaining -= rampSamples;
+            if (ramp.samplesRemaining == 0)
+            {
+                ramp.current = ramp.target;
+                coeffs = ramp.target;
+            }
+            else
+            {
+                coeffs = ramp.current;
+            }
         }
 
-        // 内部状態の飽和保護 (SIMD)
-        for (int ch = 0; ch < kNumChannels; ++ch)
-            clampStateSIMD(states[static_cast<size_t>(ch)].data());
+        if (dataR != nullptr)
+        {
+            for (; i < numSamples; ++i)
+            {
+                dataL[i] = processSample(0, dataL[i], states[0], coeffs, headroom);
+                dataR[i] = processSample(1, dataR[i], states[1], coeffs, headroom);
+            }
+        }
+        else
+        {
+            for (; i < numSamples; ++i)
+                dataL[i] = processSample(0, dataL[i], states[0], coeffs, headroom);
+        }
+
+        clampStateSIMD(states[0].data());
+        if (dataR != nullptr)
+            clampStateSIMD(states[1].data());
     }
 
     static inline double clampCoeff(double value) noexcept
@@ -170,6 +201,27 @@ public:
 
 private:
     static constexpr double kStateLimit = 1.0e12;
+
+    inline void stepRampCurrent() noexcept
+    {
+#if defined(__AVX2__) || defined(_M_AVX2)
+        double* current = ramp.current.data();
+        const double* delta = ramp.delta.data();
+
+        __m256d cur0 = _mm256_loadu_pd(current);
+        __m256d del0 = _mm256_loadu_pd(delta);
+        _mm256_storeu_pd(current, _mm256_add_pd(cur0, del0));
+
+        __m256d cur1 = _mm256_loadu_pd(current + 4);
+        __m256d del1 = _mm256_loadu_pd(delta + 4);
+        _mm256_storeu_pd(current + 4, _mm256_add_pd(cur1, del1));
+
+        current[8] += delta[8];
+#else
+        for (int c = 0; c < kOrder; ++c)
+            ramp.current[static_cast<size_t>(c)] += ramp.delta[static_cast<size_t>(c)];
+#endif
+    }
 
     inline void clampStateSIMD(double* state) noexcept
     {
@@ -240,17 +292,20 @@ private:
         return _mm_cvtsd_f64(rounded) * scale;
     }
 
-    inline double computeFeedback(const std::array<double, kOrder>& channelState) const noexcept
+    inline double computeFeedback(const std::array<double, kOrder>& channelState,
+                                  const std::array<double, kOrder>& activeCoeffs) const noexcept
     {
         double feedback = 0.0;
 
         for (int i = 0; i < kOrder; ++i)
-            feedback = killDenormal(feedback + coeffs[static_cast<size_t>(i)] * channelState[static_cast<size_t>(i)]);
+            feedback = killDenormal(feedback + activeCoeffs[static_cast<size_t>(i)] * channelState[static_cast<size_t>(i)]);
 
         return feedback;
     }
 
-    inline void advanceState(std::array<double, kOrder>& channelState, double error) const noexcept
+    inline void advanceState(std::array<double, kOrder>& channelState,
+                             double error,
+                             const std::array<double, kOrder>& activeCoeffs) const noexcept
     {
         double forward = error;
         double prev_backward = error;
@@ -261,8 +316,8 @@ private:
         for (int i = 0; i < kOrder; ++i)
         {
             const double backward = channelState[static_cast<size_t>(i)];
-            const double nextForward = killDenormal(forward + coeffs[static_cast<size_t>(i)] * backward);
-            const double nextBackward = killDenormal(coeffs[static_cast<size_t>(i)] * forward + backward);
+            const double nextForward = killDenormal(forward + activeCoeffs[static_cast<size_t>(i)] * backward);
+            const double nextBackward = killDenormal(activeCoeffs[static_cast<size_t>(i)] * forward + backward);
 
             // Clamp state to prevent numerical instability
             channelState[static_cast<size_t>(i)] = std::clamp(prev_backward, -kLatticeStateLimit, kLatticeStateLimit);
@@ -275,15 +330,16 @@ private:
     inline double processSample(int channel,
                                 double inputSample,
                                 std::array<double, kOrder>& channelState,
+                                const std::array<double, kOrder>& activeCoeffs,
                                 double headroom) noexcept
     {
-        const double feedback = killDenormal(computeFeedback(channelState));
+        const double feedback = killDenormal(computeFeedback(channelState, activeCoeffs));
         const double shapedInput = (inputSample * headroom) + feedback;
         const double shapedInputClean = killDenormal(shapedInput);
         const double quantized = killDenormal(quantize(shapedInputClean, rngState[channel]));
         const double error = killDenormal(quantized - shapedInputClean);
         const double clampedError = std::clamp(error, -2.0 * scale, 2.0 * scale);
-        advanceState(channelState, clampedError);
+        advanceState(channelState, clampedError, activeCoeffs);
         return quantized;
     }
 

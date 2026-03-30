@@ -92,23 +92,45 @@ namespace
         if (captureQueue == nullptr || left == nullptr || numSamples <= 0)
             return;
 
-        for (int offset = 0; offset < numSamples; offset += 256)
+        static constexpr int kBlockSize = 256;
+        for (int offset = 0; offset < numSamples; offset += kBlockSize)
         {
-            // スタックコピーを最小限にするため、{} によるゼロ初期化を避ける
-            AudioBlock block;
-            block.numSamples = std::min(256, numSamples - offset);
-            block.sampleRateHz = sampleRateHz;
-            block.bitDepth = bitDepth;
-            block.adaptiveCoeffBankIndex = adaptiveCoeffBankIndex;
+            const int currentBlockSize = std::min(kBlockSize, numSamples - offset);
+            const double* srcL = left + offset;
+            const double* srcR = (right != nullptr) ? (right + offset) : srcL;
 
-            // ループではなく memcpy を使用して高速にコピー
-            std::memcpy(block.L, left + offset, static_cast<size_t>(block.numSamples) * sizeof(double));
-            if (right != nullptr)
-                std::memcpy(block.R, right + offset, static_cast<size_t>(block.numSamples) * sizeof(double));
-            else
-                std::memcpy(block.R, left + offset, static_cast<size_t>(block.numSamples) * sizeof(double));
+            captureQueue->pushWithWriter([&](AudioBlock& block) noexcept
+            {
+                block.numSamples = currentBlockSize;
+                block.sampleRateHz = sampleRateHz;
+                block.bitDepth = bitDepth;
+                block.adaptiveCoeffBankIndex = adaptiveCoeffBankIndex;
 
-            captureQueue->push(block);
+#if defined(__AVX2__) || defined(_M_AVX2)
+                const int simdCount = currentBlockSize & ~3;
+                int i = 0;
+
+                for (; i < simdCount; i += 4)
+                {
+                    __m256d v = _mm256_loadu_pd(srcL + i);
+                    _mm256_storeu_pd(block.L + i, v);
+                }
+                for (; i < currentBlockSize; ++i)
+                    block.L[i] = srcL[i];
+
+                i = 0;
+                for (; i < simdCount; i += 4)
+                {
+                    __m256d v = _mm256_loadu_pd(srcR + i);
+                    _mm256_storeu_pd(block.R + i, v);
+                }
+                for (; i < currentBlockSize; ++i)
+                    block.R[i] = srcR[i];
+#else
+                std::memcpy(block.L, srcL, static_cast<size_t>(currentBlockSize) * sizeof(double));
+                std::memcpy(block.R, srcR, static_cast<size_t>(currentBlockSize) * sizeof(double));
+#endif
+            });
         }
     }
 

@@ -1,0 +1,234 @@
+# ConvoPeq 学習時オーディオスレッドCPUバースト除去 改修計画書（実装可能版 / rev2）
+
+## 0. 目的と前提
+
+- 対象: ConvoPeq `117171a`（実機コード確認済み）
+- 目的: NoiseShaper学習時に発生するオーディオスレッド側のCPUバーストを低減し、xrunリスクを下げる。
+- 重要前提:
+  - 実際のリアルタイム経路は `AudioEngine::getNextAudioBlock -> DSPCore::process`。
+  - `processDouble` はオフライン/補助経路であり、検証対象には含めるが主経路ではない。
+  - 既存ランプ挙動（512サンプルで滑らか遷移）は音質要件として維持する。
+
+---
+
+## 1. 現行コード整合チェック（要点）
+
+1. `AudioBlock` は `double L[256], R[256]` の固定長であり、256分割前提は妥当。
+2. `pushAdaptiveCaptureBlocks` は `memcpy` 後に `captureQueue->push(block)` で `AudioBlock` 全体を再コピーしている。
+3. `LatticeNoiseShaper::processStereoBlock` はランプ中に毎サンプル
+   - `ramp.current += ramp.delta`（9係数）
+   - `coeffs = ramp.current`（9係数コピー）
+   を実行している。
+4. デノーマル対策は既に `getNextAudioBlock` / `processBlockDouble` で `juce::ScopedNoDenormals` を使用済み。
+5. Windowsビルド前提のため、性能検証ツールは VTune / ETW(WPR+WPA) を使用し、`perf` は対象外。
+
+---
+
+## 2. 改修方針（rev2）
+
+CPUバースト源を以下の2系統で対処する。
+
+1. キャプチャ経路の余分なコピー削減  
+   `pushAdaptiveCaptureBlocks` のコピー最適化 + リングバッファへの直接書き込みAPI追加
+
+2. ランプ処理の「挙動維持型」最適化  
+   ランプ形状を変えずに分岐と係数コピーを削減（サンプルごとの係数変化は維持）
+
+---
+
+## 3. 改修対象ファイル
+
+- `src/AudioEngine.cpp`
+  - `pushAdaptiveCaptureBlocks` の更新
+  - `DSPCore::process` / `processDouble` で呼ばれる同関数の性能改善
+- `src/LockFreeRingBuffer.h`
+  - 直接書き込み用 API を追加（既存 `push`/`pop` は保持）
+- `src/LatticeNoiseShaper.h`
+  - `processStereoBlock` のランプ処理構造を変更（挙動互換）
+
+変更しない:
+- `JUCE/` 配下
+- `r8brain-free-src/` 配下
+- 学習アルゴリズム本体 (`NoiseShaperLearner.cpp`) のロジック
+
+---
+
+## 4. 詳細改修内容
+
+### 4.1 `LockFreeRingBuffer` に直接書き込みAPIを追加（必須）
+
+#### 目的
+
+- 現行は `AudioBlock block`（スタック）を作り、最後に `buffer[w & MASK] = block` の全体コピーが発生。
+- 直接書き込みで「スタックblock -> リングslot」の追加コピーを削減する。
+
+#### 追加API案（SPSC前提・noexcept）
+
+```cpp
+template <typename Writer>
+bool pushWithWriter(Writer&& writer) noexcept
+{
+    size_t w = writeIndex.load(std::memory_order_relaxed);
+    size_t r = readIndex.load(std::memory_order_acquire);
+    if ((w - r) >= Capacity) return false;
+    writer(buffer[w & MASK]); // consumerから不可視なslotへ直接書き込み
+    writeIndex.store(w + 1, std::memory_order_release);
+    return true;
+}
+```
+
+注意:
+- 既存 `push(const T&)` / `pop(T&)` は温存（互換性維持）。
+- `writer` 内で例外を投げないこと（`noexcept`運用）。
+
+---
+
+### 4.2 `pushAdaptiveCaptureBlocks` の更新（必須）
+
+#### 実装方針
+
+1. `captureQueue->pushWithWriter(...)` を使用し、リングスロットへ直接転送。
+2. コピーは AVX2（4 doubles単位）+ 端数スカラー。
+3. ガードは `#if defined(__AVX2__) || defined(_M_AVX2)` を使用（MSVC考慮）。
+4. `BLOCK_SIZE=256` 固定を維持。
+
+#### 期待効果
+
+- 旧: 入力 -> スタックblock + スタックblock -> リングslot（2段コピー）
+- 新: 入力 -> リングslot（1段コピー）
+
+---
+
+### 4.3 `LatticeNoiseShaper::processStereoBlock` の挙動互換最適化（必須）
+
+#### NGとする変更
+
+- 「1ブロックで1回だけ `ramp.current += delta`」は不可。  
+  512サンプルランプ形状が壊れ、最後に係数ジャンプが発生するため採用しない。
+
+#### 実装方針（挙動維持）
+
+1. ループを2分割する:
+   - A: ランプ適用区間 `rampSamples = min(numSamples, ramp.samplesRemaining)`
+   - B: ランプ終了後の定常区間
+
+2. A区間では「サンプルごとの係数更新」は維持しつつ、以下を最適化:
+   - `if (ramp.samplesRemaining > 0)` の分岐をサンプルループ外へ移動
+   - `coeffs = ramp.current` の全コピーを廃止
+   - `processSample` 系に「使用係数配列」を渡す形へ変更（`ramp.current` を直接参照）
+
+3. B区間では固定 `coeffs` を使用して処理（分岐なし）。
+
+4. `kRampLength = 512` は変更しない。
+
+#### 具体的なコード構造（概要）
+
+```cpp
+// A区間（ランプ中）
+for (i = 0; i < rampSamples; ++i) {
+    updateRampCurrentByDeltaSIMD9();   // 8+1
+    dataL[...] = processSampleWithCoeffs(..., ramp.current, ...);
+    if (dataR) ...
+}
+ramp.samplesRemaining -= rampSamples;
+if (ramp.samplesRemaining == 0) {
+    ramp.current = ramp.target;
+    coeffs = ramp.target; // ランプ完了時のみ反映
+}
+
+// B区間（定常）
+for (; i < numSamples; ++i) {
+    dataL[...] = processSampleWithCoeffs(..., coeffs, ...);
+    if (dataR) ...
+}
+```
+
+これにより、音質要件（連続ランプ）を維持したまま、分岐・不要コピーを削減する。
+
+---
+
+### 4.4 デノーマル対策方針（修正）
+
+- `processStereoBlock` 内で毎回 `_MM_SET_*` を呼ぶ方針は採用しない。
+- 既存の `juce::ScopedNoDenormals` を主経路 (`getNextAudioBlock`) で維持し、追加は不要。
+- 必要であれば「新規スレッド開始時に1回設定」の原則に統一する。
+
+---
+
+## 5. 作業手順（実装順）
+
+1. `src/LockFreeRingBuffer.h`
+   - `pushWithWriter` 追加
+   - 既存APIの挙動不変確認
+
+2. `src/AudioEngine.cpp`
+   - `pushAdaptiveCaptureBlocks` を直接書き込み方式へ更新
+   - AVX2/非AVX2分岐を実装
+
+3. `src/LatticeNoiseShaper.h`
+   - `processStereoBlock` を2区間処理へ変更
+   - `processSampleWithCoeffs`（または同等）を追加し、`coeffs`コピーを削減
+
+4. ビルド確認
+   - VS2022 / x64 / Release / C++20 / `/arch:AVX2`
+
+---
+
+## 6. テスト計画（Windows前提）
+
+### 6.1 機能・回帰
+
+- 学習開始/停止/再開が正常
+- IR切替・EQ操作併用でクラッシュなし
+- 学習係数更新が反映される
+
+### 6.2 性能
+
+- ツール: Intel VTune または ETW (WPR + WPA)
+- 監視対象:
+  - `AudioEngine::DSPCore::process`（主経路）
+  - `pushAdaptiveCaptureBlocks`
+  - `LatticeNoiseShaper::processStereoBlock`
+- 比較条件:
+  - ASIO 64samples / 96kHz / Continuous学習 / 同一素材 / 5分以上
+
+### 6.3 受け入れ基準
+
+- 係数更新直後のCPUピーク（burst）が改修前比で有意低下（目安 20%以上）
+- 長時間（1時間）でxrunなし
+- クリックノイズ増加なし（ランプ512維持）
+
+---
+
+## 7. リスクと回避策
+
+1. **RingBuffer API追加による既存呼び出し影響**
+   - 既存 `push/pop` 非変更、ユニット的に `pushWithWriter` だけ追加で回避
+
+2. **ランプ最適化での音質変化**
+   - 「サンプルごとの係数更新」は維持し、ランプ形状を不変にすることで回避
+
+3. **SIMDガードの不整合（MSVC）**
+   - `__AVX2__ || _M_AVX2` で統一
+
+4. **計測の再現性不足**
+   - バッファ/サンプルレート/素材/学習モードを固定して比較
+
+---
+
+## 8. 非対象（今回やらないこと）
+
+- CMA-ESアルゴリズムの変更
+- JUCE/r8brain配下の修正
+- ランプ長可変化（適応ランプ）導入
+- Audio threadでのロック/確保/例外導入
+
+---
+
+## 9. 期待効果（rev2）
+
+- `pushAdaptiveCaptureBlocks` の実効コピー削減（2段→1段）
+- ランプ中以外のサンプルで分岐ゼロ化
+- ランプ中の不要な `coeffs` 全コピー削減
+- 音質（ランプ滑らかさ）とRT制約を維持したまま、学習時バーストを抑制
+
