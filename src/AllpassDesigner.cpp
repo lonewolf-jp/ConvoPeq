@@ -5,40 +5,210 @@
 
 namespace convo {
 
-double AllpassDesigner::sectionGroupDelay(double f0, double gain, double omega, double sampleRate) {
-    double omega0 = 2.0 * juce::MathConstants<double>::pi * f0 / sampleRate;
-    double rho = gain;
-    double rho2 = rho * rho;
-    
-    // 2次全通過セクションの群遅延公式
-    // H(z) = (rho^2 - 2*rho*cos(omega0)*z^-1 + z^-2) / (1 - 2*rho*cos(omega0)*z^-1 + rho^2*z^-2)
-    // a1 = -2*rho*cos(omega0), a2 = rho^2
-    double a1 = -2.0 * rho * std::cos(omega0);
-    double a2 = rho2;
-    
-    double cos_omega = std::cos(omega);
-    double cos_2omega = std::cos(2.0 * omega);
-    double denominator = 1.0 + a1 * cos_omega + a2 * cos_2omega;
-    double numerator = 1.0 - a2 * a2;
-    
-    if (std::abs(denominator) < 1e-12) return 0.0;
-    return numerator / denominator;
+//==============================================================================
+// 静的ヘルパー：群遅延（(ρ, θ) 版）
+//==============================================================================
+double AllpassDesigner::sectionGroupDelayRhoTheta(double rho, double theta, double omega, double /*sampleRate*/) {
+    const double rho2 = rho * rho;
+    const double term_num = 1.0 - rho2;
+    const double denom1 = 1.0 - 2.0 * rho * std::cos(omega - theta) + rho2;
+    const double denom2 = 1.0 - 2.0 * rho * std::cos(omega + theta) + rho2;
+    const double eps = 1e-12 * (1.0 + rho2);
+    double tau = 0.0;
+    if (denom1 > eps) tau += term_num / denom1;
+    if (denom2 > eps) tau += term_num / denom2;
+    return tau;
 }
 
+//==============================================================================
+// 静的ヘルパー：群遅延（(f0, gain) 版、後方互換）
+//==============================================================================
+double AllpassDesigner::sectionGroupDelay(double f0, double gain, double omega, double sampleRate) {
+    const double rho = std::clamp(std::abs(gain), 0.0, 0.995);
+    const double theta = 2.0 * juce::MathConstants<double>::pi * f0 / sampleRate;
+    return sectionGroupDelayRhoTheta(rho, theta, omega, sampleRate);
+}
+
+//==============================================================================
+// 無制約変数 → 物理パラメータ変換（高Q領域改善版）
+//==============================================================================
+static inline double unconstrainedToRho(double x) {
+    // ρ = 0.995 * (1 - exp(-x²)) : 高Q領域の分解能を確保
+    return 0.995 * (1.0 - std::exp(-x * x));
+}
+
+static inline double unconstrainedToTheta(double x) {
+    // ラップせずそのまま角度として使用（cos, sin は周期関数のため問題ない）
+    return x;
+}
+
+//==============================================================================
+// designWithCMAES（修正版：cost関数は全セクション合計、パラメータ変換改善）
+//==============================================================================
+bool AllpassDesigner::designWithCMAES(
+    double sampleRate,
+    const std::vector<double>& freq_hz,
+    const std::vector<double>& target_group_delay_samples,
+    const Config& config,
+    std::vector<SecondOrderAllpass>& sections)
+{
+    const int D = 2 * config.numSections;   // (x_rho, x_theta) のペア
+    CmaEsOptimizerDynamic optimizer(D);
+    optimizer.setParams(config.cmaesParams);
+    if (config.cmaesInitialSigma > 0.0) {
+        CmaEsOptimizerDynamic::Params p = config.cmaesParams;
+        p.sigmaMin = std::min(p.sigmaMin, config.cmaesInitialSigma);
+        p.sigmaMax = std::max(p.sigmaMax, config.cmaesInitialSigma);
+        optimizer.setParams(p);
+    }
+
+    // 初期平均値（無制約空間）
+    std::vector<double> initialMean(D, 0.0);
+    for (int i = 0; i < config.numSections; ++i) {
+        initialMean[2*i] = 1.0;       // ρ ≈ 0.63
+        initialMean[2*i+1] = 0.0;     // θ = 0
+    }
+    optimizer.initFromParcor(initialMean.data());
+
+    // 周波数重み（対数周波数均等に近い設計、低域重視しすぎない）
+    std::vector<double, convo::MKLAllocator<double>> omega(freq_hz.size());
+    std::vector<double, convo::MKLAllocator<double>> weight(freq_hz.size());
+    double weightSum = 0.0;
+    for (size_t i = 0; i < freq_hz.size(); ++i) {
+        omega[i] = 2.0 * juce::MathConstants<double>::pi * freq_hz[i] / sampleRate;
+        weight[i] = 1.0 / std::sqrt(freq_hz[i] + 1.0);
+        weightSum += weight[i];
+    }
+    for (auto& w : weight) w /= weightSum;
+
+    // 目的関数：全セクションの群遅延を合計してから誤差を計算（致命的欠陥修正）
+    auto costFunc = [&](const std::vector<double>& x) -> double {
+        // 現在の候補から各セクションの (ρ, θ) を計算
+        std::vector<double> rho_list(config.numSections);
+        std::vector<double> theta_list(config.numSections);
+        for (int s = 0; s < config.numSections; ++s) {
+            rho_list[s] = unconstrainedToRho(x[2*s]);
+            theta_list[s] = unconstrainedToTheta(x[2*s+1]);
+        }
+        double error = 0.0;
+        for (size_t i = 0; i < freq_hz.size(); ++i) {
+            double tau_sum = 0.0;
+            for (int s = 0; s < config.numSections; ++s) {
+                tau_sum += sectionGroupDelayRhoTheta(rho_list[s], theta_list[s], omega[i], sampleRate);
+            }
+            const double diff = tau_sum - target_group_delay_samples[i];
+            error += weight[i] * diff * diff;
+        }
+        return error;
+    };
+
+    const int lambda = (config.cmaesPopulationSize > 0) ? config.cmaesPopulationSize : 4 * D;
+    std::vector<std::vector<double>> population(lambda, std::vector<double>(D));
+    std::vector<double> fitness(lambda);
+    double bestFitness = std::numeric_limits<double>::max();
+    std::vector<double> bestParams(D);
+    double prevBestFitness = bestFitness;
+    int stagnationCounter = 0;
+
+    for (int gen = 0; gen < config.cmaesMaxGenerations; ++gen) {
+        optimizer.sample(population);
+        for (int i = 0; i < lambda; ++i) {
+            fitness[i] = costFunc(population[i]);
+            if (fitness[i] < bestFitness) {
+                bestFitness = fitness[i];
+                bestParams = population[i];
+            }
+        }
+        optimizer.update(population, fitness);
+
+        // 進捗コールバック
+        if (config.progressCallback) {
+            float progress = 0.5f + 0.25f * static_cast<float>(gen) / config.cmaesMaxGenerations;
+            config.progressCallback(progress);
+        }
+
+        // 早期終了条件：sigma が十分小さい、または改善停滞
+        double currentSigma;
+        optimizer.serializeTo(nullptr, nullptr, currentSigma);
+        if (currentSigma < 1e-4) break;
+
+        const double improvement = (prevBestFitness - bestFitness) / (prevBestFitness + 1e-12);
+        if (improvement < 1e-6) {
+            stagnationCounter++;
+            if (stagnationCounter > 20) break;
+        } else {
+            stagnationCounter = 0;
+        }
+        prevBestFitness = bestFitness;
+    }
+
+    sections.clear();
+    for (int s = 0; s < config.numSections; ++s) {
+        SecondOrderAllpass section;
+        section.rho = unconstrainedToRho(bestParams[2*s]);
+        section.theta = unconstrainedToTheta(bestParams[2*s+1]);
+        sections.push_back(section);
+    }
+    return true;
+}
+
+//==============================================================================
+// design（従来の Greedy+AdaGrad、分岐追加）
+//==============================================================================
+bool AllpassDesigner::design(double sampleRate,
+                             const std::vector<double>& freq_hz,
+                             const std::vector<double>& target_group_delay_samples,
+                             const Config& config,
+                             std::vector<SecondOrderAllpass>& sections)
+{
+    if (config.method == OptimizationMethod::CMAES) {
+        return designWithCMAES(sampleRate, freq_hz, target_group_delay_samples, config, sections);
+    }
+
+    // ========== 従来の Greedy+AdaGrad（内部で (ρ, θ) を使用） ==========
+    std::vector<double, convo::MKLAllocator<double>> omega(freq_hz.size());
+    for (size_t i = 0; i < freq_hz.size(); ++i)
+        omega[i] = 2.0 * juce::MathConstants<double>::pi * freq_hz[i] / sampleRate;
+
+    std::vector<double, convo::MKLAllocator<double>> residual(target_group_delay_samples.begin(),
+                                                               target_group_delay_samples.end());
+    sections.clear();
+    sections.reserve(config.numSections);
+
+    for (int sec = 0; sec < config.numSections; ++sec) {
+        double best_f0 = 1000.0, best_gain = 0.5;
+        if (!gridSearch2D(omega, residual, sampleRate, best_f0, best_gain))
+            return false;
+        adaptiveGradientDescent(omega, residual, sampleRate, best_f0, best_gain,
+                                config.learningRate, config.maxIterations);
+
+        SecondOrderAllpass section;
+        section.rho = std::clamp(std::abs(best_gain), 0.0, 0.995);
+        section.theta = 2.0 * juce::MathConstants<double>::pi * best_f0 / sampleRate;
+        sections.push_back(section);
+
+        // 残差更新（このセクションの群遅延を減算、負の群遅延はクリップしない）
+        for (size_t i = 0; i < omega.size(); ++i) {
+            residual[i] -= sectionGroupDelayRhoTheta(section.rho, section.theta, omega[i], sampleRate);
+        }
+    }
+    return true;
+}
+
+//==============================================================================
+// 従来の補助関数（実装維持、ただし内部で MKLAllocator を使用）
+//==============================================================================
 bool AllpassDesigner::gridSearch2D(const std::vector<double, convo::MKLAllocator<double>>& omega,
                                    const std::vector<double, convo::MKLAllocator<double>>& residual,
                                    double sampleRate,
                                    double& best_f0, double& best_gain) {
-    // 拡充された候補点（低域・中域・高域をカバー）
     const std::vector<double> f0_candidates = {
-        20.0, 40.0, 80.0, 120.0, 200.0,
-        300.0, 500.0, 800.0, 1000.0, 1500.0, 2000.0,
+        20.0, 40.0, 80.0, 120.0, 200.0, 300.0, 500.0, 800.0, 1000.0, 1500.0, 2000.0,
         3000.0, 5000.0, 8000.0, 10000.0, 12000.0, 15000.0, 20000.0
     };
     const std::vector<double> gain_candidates = { 0.1, 0.3, 0.5, 0.7, 0.9, 0.95, 0.98 };
     
     double best_error = std::numeric_limits<double>::max();
-    
     for (double f0 : f0_candidates) {
         for (double gain : gain_candidates) {
             double error = 0.0;
@@ -73,96 +243,39 @@ bool AllpassDesigner::adaptiveGradientDescent(const std::vector<double, convo::M
             double diff = tau - residual[i];
             error += diff * diff;
         }
-        
         if (error >= prev_error) break;
         prev_error = error;
         
-        // 数値微分（中央差分）
         double err_f0_plus = 0.0, err_f0_minus = 0.0;
         double err_gain_plus = 0.0, err_gain_minus = 0.0;
-        
         for (size_t i = 0; i < omega.size(); ++i) {
-            double tau_f0_plus = sectionGroupDelay(f0 + eps, gain, omega[i], sampleRate);
-            double diff_f0_plus = tau_f0_plus - residual[i];
-            err_f0_plus += diff_f0_plus * diff_f0_plus;
-            
-            double tau_f0_minus = sectionGroupDelay(f0 - eps, gain, omega[i], sampleRate);
-            double diff_f0_minus = tau_f0_minus - residual[i];
-            err_f0_minus += diff_f0_minus * diff_f0_minus;
-            
-            double tau_gain_plus = sectionGroupDelay(f0, gain + eps, omega[i], sampleRate);
-            double diff_gain_plus = tau_gain_plus - residual[i];
-            err_gain_plus += diff_gain_plus * diff_gain_plus;
-            
-            double tau_gain_minus = sectionGroupDelay(f0, gain - eps, omega[i], sampleRate);
-            double diff_gain_minus = tau_gain_minus - residual[i];
-            err_gain_minus += diff_gain_minus * diff_gain_minus;
+            err_f0_plus += std::pow(sectionGroupDelay(f0 + eps, gain, omega[i], sampleRate) - residual[i], 2);
+            err_f0_minus += std::pow(sectionGroupDelay(f0 - eps, gain, omega[i], sampleRate) - residual[i], 2);
+            err_gain_plus += std::pow(sectionGroupDelay(f0, gain + eps, omega[i], sampleRate) - residual[i], 2);
+            err_gain_minus += std::pow(sectionGroupDelay(f0, gain - eps, omega[i], sampleRate) - residual[i], 2);
         }
         
         double grad_f0 = (err_f0_plus - err_f0_minus) / (2.0 * eps);
         double grad_gain = (err_gain_plus - err_gain_minus) / (2.0 * eps);
-        
-        // AdaGrad 更新
         grad_f0_norm += grad_f0 * grad_f0;
         grad_gain_norm += grad_gain * grad_gain;
-        
         f0 -= learningRate * grad_f0 / (std::sqrt(grad_f0_norm) + 1e-8);
         gain -= learningRate * grad_gain / (std::sqrt(grad_gain_norm) + 1e-8);
-        
-        // クリップ
         f0 = std::clamp(f0, 20.0, 20000.0);
-        gain = std::clamp(gain, 0.0, 0.99);
+        gain = std::clamp(gain, 0.0, 0.995);
     }
     return true;
 }
 
-bool AllpassDesigner::design(double sampleRate,
-                             const std::vector<double>& freq_hz,
-                             const std::vector<double>& target_group_delay_samples,
-                             const Config& config,
-                             std::vector<SecondOrderAllpass>& sections) {
-    // 角周波数に変換
-    std::vector<double, convo::MKLAllocator<double>> omega(freq_hz.size());
-    for (size_t i = 0; i < freq_hz.size(); ++i)
-        omega[i] = 2.0 * juce::MathConstants<double>::pi * freq_hz[i] / sampleRate;
-    
-    std::vector<double, convo::MKLAllocator<double>> residual(target_group_delay_samples.begin(), target_group_delay_samples.end());
-    sections.clear();
-    sections.reserve(config.numSections);
-    
-    for (int sec = 0; sec < config.numSections; ++sec) {
-        double best_f0 = 1000.0, best_gain = 0.5;
-        if (!gridSearch2D(omega, residual, sampleRate, best_f0, best_gain))
-            return false;
-        
-        adaptiveGradientDescent(omega, residual, sampleRate, best_f0, best_gain,
-                                config.learningRate, config.maxIterations);
-        
-        // 係数計算
-        double omega0 = 2.0 * juce::MathConstants<double>::pi * best_f0 / sampleRate;
-        double a2 = best_gain * best_gain;
-        double a1 = -2.0 * best_gain * std::cos(omega0);
-        
-        SecondOrderAllpass section;
-        section.a1 = a1;
-        section.a2 = a2;
-        if (!section.isStable()) return false;
-        sections.push_back(section);
-        
-        // 残差更新（このセクションの群遅延を減算）
-        for (size_t i = 0; i < omega.size(); ++i) {
-            residual[i] -= sectionGroupDelay(best_f0, best_gain, omega[i], sampleRate);
-            if (residual[i] < 0.0) residual[i] = 0.0;
-        }
-    }
-    return true;
-}
-
-std::vector<std::complex<double>, convo::MKLAllocator<std::complex<double>>> AllpassDesigner::computeResponse(
-    const std::vector<SecondOrderAllpass>& sections,
-    double sampleRate,
-    const std::vector<double>& freq_hz) {
-    std::vector<std::complex<double>, convo::MKLAllocator<std::complex<double>>> response(freq_hz.size(), std::complex<double>(1.0, 0.0));
+//==============================================================================
+// computeResponse
+//==============================================================================
+std::vector<std::complex<double>, convo::MKLAllocator<std::complex<double>>>
+AllpassDesigner::computeResponse(const std::vector<SecondOrderAllpass>& sections,
+                                 double sampleRate,
+                                 const std::vector<double>& freq_hz)
+{
+    std::vector<std::complex<double>, convo::MKLAllocator<std::complex<double>>> response(freq_hz.size(), 1.0);
     for (size_t i = 0; i < freq_hz.size(); ++i) {
         double omega = 2.0 * juce::MathConstants<double>::pi * freq_hz[i] / sampleRate;
         for (const auto& sec : sections) {

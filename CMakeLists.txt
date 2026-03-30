@@ -130,6 +130,7 @@ target_sources(ConvoPeq PRIVATE
     src/OutputFilter.cpp
     src/NoiseShaperLearner.cpp
     src/AllpassDesigner.cpp
+    src/CmaEsOptimizerDynamic.cpp
     src/AsioBlacklist.h
     src/CustomInputOversampler.h
     src/AudioEngineProcessor.h
