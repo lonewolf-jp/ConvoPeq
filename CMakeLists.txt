@@ -129,12 +129,14 @@ target_sources(ConvoPeq PRIVATE
     src/NoiseShaperLearningComponent.cpp
     src/OutputFilter.cpp
     src/NoiseShaperLearner.cpp
+    src/AllpassDesigner.cpp
     src/AsioBlacklist.h
     src/CustomInputOversampler.h
     src/AudioEngineProcessor.h
     src/PsychoacousticDither.h
     src/MKLNonUniformConvolver.h
     src/OutputFilter.h
+    src/AllpassDesigner.h
 )
 
 #------------------------------------------------------------

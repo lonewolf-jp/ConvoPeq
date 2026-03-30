@@ -19,6 +19,7 @@
 #include "AlignedAllocation.h" // For convo::MKLAllocator
 #include "InputBitDepthTransform.h"
 #include "UltraHighRateDCBlocker.h"
+#include "AllpassDesigner.h"
 
 #include <mkl.h>
 #include <mkl_vml.h>
@@ -81,6 +82,22 @@ static void unwrapPhaseRadians(double* phase, int size, double tol = juce::MathC
 static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR,
                                                        const std::function<bool()>& shouldExit,
                                                        bool* wasCancelled);
+static juce::AudioBuffer<double> convertToMixedPhaseFallback(const juce::AudioBuffer<double>& linearIR,
+                                                             const juce::AudioBuffer<double>& minimumIR,
+                                                             double sampleRate,
+                                                             double transitionLoHz,
+                                                             double transitionHiHz,
+                                                             double tau,
+                                                             const std::function<bool()>& shouldExit,
+                                                             bool* wasCancelled);
+static juce::AudioBuffer<double> convertToMixedPhaseAllpass(const juce::AudioBuffer<double>& linearIR,
+                                                            const juce::AudioBuffer<double>& minimumIR,
+                                                            double sampleRate,
+                                                            double transitionLoHz,
+                                                            double transitionHiHz,
+                                                            double tau,
+                                                            const std::function<bool()>& shouldExit,
+                                                            bool* wasCancelled);
 static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<double>& linearIR,
                                                      const juce::AudioBuffer<double>& minimumIR,
                                                      double sampleRate,
@@ -886,11 +903,13 @@ public:
                         else
                         {
                             bool mixedCancelled = false;
+                            owner.setLoadingProgress(0.5f);
                             auto mixedIR = convertToMixedPhase(trimmed, minPhaseIR, sampleRate,
                                                                static_cast<double>(mixedTransitionStartHz),
                                                                static_cast<double>(mixedTransitionEndHz),
                                                                static_cast<double>(mixedPreRingTau),
                                                                shouldStop, &mixedCancelled);
+                            owner.setLoadingProgress(0.75f);
                             if (mixedCancelled) return result;
 
                             if (validateBuffer(mixedIR))
@@ -1738,6 +1757,220 @@ static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<dou
                                                      double tau,
                                                      const std::function<bool()>& shouldExit,
                                                      bool* wasCancelled)
+{
+    auto result = convertToMixedPhaseAllpass(linearIR, minimumIR, sampleRate,
+                                             transitionLoHz, transitionHiHz,
+                                             tau, shouldExit, wasCancelled);
+    
+    if (result.getNumSamples() == 0 && (wasCancelled == nullptr || !*wasCancelled))
+    {
+        DBG("Allpass design failed, falling back to Phase 1.");
+        return convertToMixedPhaseFallback(linearIR, minimumIR, sampleRate,
+                                           transitionLoHz, transitionHiHz,
+                                           tau, shouldExit, wasCancelled);
+    }
+    return result;
+}
+
+static juce::AudioBuffer<double> convertToMixedPhaseAllpass(const juce::AudioBuffer<double>& linearIR,
+                                                            const juce::AudioBuffer<double>& minimumIR,
+                                                            double sampleRate,
+                                                            double transitionLoHz,
+                                                            double transitionHiHz,
+                                                            double /*tau*/,
+                                                            const std::function<bool()>& shouldExit,
+                                                            bool* wasCancelled)
+{
+    if (wasCancelled) *wasCancelled = false;
+
+    // MKL/AVX最適化のためにFTZ/DAZフラグを明示的に設定
+    #if defined(__AVX2__)
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+    #endif
+
+    const int numSamples = linearIR.getNumSamples();
+    const int numChannels = linearIR.getNumChannels();
+    if (numSamples <= 0 || numChannels <= 0)
+        return {};
+
+    if (minimumIR.getNumSamples() != numSamples || minimumIR.getNumChannels() != numChannels || sampleRate <= 0.0)
+        return {};
+
+    if (transitionHiHz <= transitionLoHz)
+        return {};
+
+    const int fftSize = juce::nextPowerOfTwo(numSamples * 4);
+    static constexpr int MAX_MIXED_FFT_SIZE = 8388608;
+    if (fftSize > MAX_MIXED_FFT_SIZE)
+    {
+        DBG("convertToMixedPhaseAllpass: fftSize (" << fftSize << ") exceeds limit.");
+        return {};
+    }
+
+    DFTI_DESCRIPTOR_HANDLE dfti = nullptr;
+    DftiGuard dftiGuard { &dfti };
+    const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
+    if (DftiCreateDescriptor(&dfti, DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
+        return {};
+    if (DftiSetValue(dfti, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR)
+        return {};
+    if (DftiSetValue(dfti, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR)
+        return {};
+    if (DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
+        return {};
+
+    const int half = fftSize / 2;
+    const int complexSize = half + 1;
+
+    convo::ScopedAlignedPtr<MKL_Complex16> linearSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
+    convo::ScopedAlignedPtr<MKL_Complex16> minimumSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
+    convo::ScopedAlignedPtr<double> targetPhase(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(complexSize) * sizeof(double), 64)));
+
+    if (!linearSpec || !minimumSpec || !targetPhase)
+        return {};
+
+    const double invSpan = 1.0 / (transitionHiHz - transitionLoHz);
+    juce::AudioBuffer<double> mixedIR(numChannels, numSamples);
+
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        if (checkCancellation(shouldExit, wasCancelled))
+            return {};
+
+        const double* srcLinear = linearIR.getReadPointer(ch);
+        const double* srcMinimum = minimumIR.getReadPointer(ch);
+
+        // 線形位相 IR のピーク位置を特定
+        int peakDelay = 0;
+        double maxVal = 0.0;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            double val = std::abs(srcLinear[i]);
+            if (val > maxVal)
+            {
+                maxVal = val;
+                peakDelay = i;
+            }
+        }
+
+        // バッファ初期化と FFT
+        std::memset(linearSpec.get(), 0, static_cast<size_t>(fftSize) * sizeof(MKL_Complex16));
+        std::memset(minimumSpec.get(), 0, static_cast<size_t>(fftSize) * sizeof(MKL_Complex16));
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            linearSpec.get()[i].real = srcLinear[i];
+            minimumSpec.get()[i].real = srcMinimum[i];
+        }
+
+        if (DftiComputeForward(dfti, linearSpec.get()) != DFTI_NO_ERROR) return {};
+        if (DftiComputeForward(dfti, minimumSpec.get()) != DFTI_NO_ERROR) return {};
+
+        // 目標位相の計算
+        for (int k = 0; k < complexSize; ++k)
+        {
+            const double freq = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
+
+            double wLinear = 1.0;
+            if (freq >= transitionHiHz)
+                wLinear = 0.0;
+            else if (freq > transitionLoHz)
+            {
+                const double x = (freq - transitionLoHz) * invSpan;
+                wLinear = 0.5 * (1.0 + std::cos(juce::MathConstants<double>::pi * x));
+            }
+            const double wMinimum = 1.0 - wLinear;
+
+            const double omega = 2.0 * juce::MathConstants<double>::pi * k / fftSize;
+            const double phi_lin = -omega * peakDelay;
+            const double phi_min = std::atan2(minimumSpec.get()[k].imag, minimumSpec.get()[k].real);
+
+            targetPhase.get()[k] = wLinear * phi_lin + wMinimum * phi_min;
+        }
+
+        // 位相のアンラップ
+        unwrapPhaseRadians(targetPhase.get(), complexSize);
+
+        // 目標群遅延の計算 (数値微分: 中央差分)
+        std::vector<double> targetGroupDelay(complexSize, 0.0);
+        const double dOmega = 2.0 * juce::MathConstants<double>::pi / fftSize;
+        
+        for (int k = 0; k < complexSize; ++k)
+        {
+            double dPhi = 0.0;
+            if (k == 0)
+                dPhi = (targetPhase.get()[1] - targetPhase.get()[0]) / dOmega;
+            else if (k == complexSize - 1)
+                dPhi = (targetPhase.get()[k] - targetPhase.get()[k - 1]) / dOmega;
+            else
+                dPhi = (targetPhase.get()[k + 1] - targetPhase.get()[k - 1]) / (2.0 * dOmega);
+            
+            targetGroupDelay[k] = -dPhi;
+            
+            // 線形位相成分 (-peakDelay) を差し引いて、全通過フィルタが補うべき分を抽出
+            targetGroupDelay[k] -= static_cast<double>(peakDelay);
+            
+            // 負の群遅延は物理的に実現不可なのでクリップ
+            if (targetGroupDelay[k] < 0.0) targetGroupDelay[k] = 0.0;
+        }
+
+        // --- AllpassDesigner の呼び出し ---
+        convo::AllpassDesigner::Config designer_config;
+        designer_config.numSections = 8;
+        designer_config.freqPoints = complexSize;
+        designer_config.minFreqHz = 20.0;
+        designer_config.maxFreqHz = sampleRate / 2.0;
+        
+        std::vector<double> freq_hz(complexSize);
+        for (int k = 0; k < complexSize; ++k)
+            freq_hz[k] = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
+        
+        std::vector<convo::SecondOrderAllpass> allpass_sections;
+        convo::AllpassDesigner designer;
+        
+        if (!designer.design(sampleRate, freq_hz, targetGroupDelay, designer_config, allpass_sections))
+            return {}; // 失敗 → フォールバックへ
+
+        // 全通過フィルタの周波数応答を計算
+        auto allpass_response = convo::AllpassDesigner::computeResponse(allpass_sections, sampleRate, freq_hz);
+        
+        // 線形位相 IR のスペクトルに乗算（振幅維持）
+        for (int k = 0; k < fftSize; ++k)
+        {
+            const int mirroredBin = (k <= half) ? k : (fftSize - k);
+            std::complex<double> ap = allpass_response[mirroredBin];
+            if (k > half) ap = std::conj(ap); // 共役対称性
+
+            std::complex<double> h_linear(linearSpec.get()[k].real, linearSpec.get()[k].imag);
+            std::complex<double> h_mixed = h_linear * ap;
+            linearSpec.get()[k].real = h_mixed.real();
+            linearSpec.get()[k].imag = h_mixed.imag();
+        }
+
+        // IFFT
+        if (DftiComputeBackward(dfti, linearSpec.get()) != DFTI_NO_ERROR)
+            return {};
+
+        double* mixedTime = mixedIR.getWritePointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double value = linearSpec.get()[i].real;
+            mixedTime[i] = (std::abs(value) < 1.0e-18) ? 0.0 : value;
+        }
+    }
+
+    return mixedIR;
+}
+
+static juce::AudioBuffer<double> convertToMixedPhaseFallback(const juce::AudioBuffer<double>& linearIR,
+                                                             const juce::AudioBuffer<double>& minimumIR,
+                                                             double sampleRate,
+                                                             double transitionLoHz,
+                                                             double transitionHiHz,
+                                                             double tau,
+                                                             const std::function<bool()>& shouldExit,
+                                                             bool* wasCancelled)
 {
     if (wasCancelled) *wasCancelled = false;
     (void)tau; // tau は Phase 1 では無視する
