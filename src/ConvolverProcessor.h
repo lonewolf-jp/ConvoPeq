@@ -34,13 +34,6 @@
 #include "MKLNonUniformConvolver.h"
 #include "AllpassDesigner.h"
 
-// Phase 0 RCU Infrastructure
-#include "GenerationManager.h"
-#include "ConvolverState.h"
-#include "SafeStateSwapper.h"
-#include "DeferredFreeThread.h"
-#include "StereoConvolver.h"
-
 class ConvolverProcessor : public juce::ChangeBroadcaster,
                            private juce::Timer
 {
@@ -253,7 +246,7 @@ public:
     //----------------------------------------------------------
     // 状態取得
     //----------------------------------------------------------
-    bool isIRLoaded() const { return stateSwapper.getState() != nullptr; }
+    bool isIRLoaded() const { return convolution.load() != nullptr; }
     juce::String getIRName() const { return irName; }
     int getIRLength() const { return irLength.load(std::memory_order_acquire); }
     juce::String getLastError() const { return lastError; }
@@ -288,9 +281,6 @@ public:
     //----------------------------------------------------------
     juce::ValueTree getState() const;
     void setState (const juce::ValueTree& state);
-
-    // Phase 0: RCU State Update
-    void updateConvolverState(std::unique_ptr<ConvolverState> newState);
 
     //----------------------------------------------------------
     // リビルド (サンプルレート変更時など)
@@ -339,20 +329,163 @@ private:
     // クロスフェード用の新しいメンバー
     std::atomic<StereoConvolver*> fadingOutConvolution { nullptr };
 
-    void updateConvolverState(convo::StereoConvolver* newConv, std::shared_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::shared_ptr<juce::AudioBuffer<double>> displayIR);
+    void applyNewState(StereoConvolver* newConv, std::shared_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::shared_ptr<juce::AudioBuffer<double>> displayIR);
     void handleLoadError(const juce::String& error);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
     int computeTargetIRLength(double sampleRate, int originalLength) const;
 
-    // StereoConvolver is now in StereoConvolver.h
+    // Stereo processing wrapper
+    struct StereoConvolver
+    {
+        double* irData[2] = { nullptr, nullptr };
 
-    // Note: RCU Infrastructure (Phase 0)
-    SafeStateSwapper stateSwapper;
-    std::unique_ptr<DeferredFreeThread> freeThread;
-    GenerationManager genManager;
-    int audioThreadReaderIndex = 0; // Audio Thread only
+        std::array<convo::ScopedAlignedPtr<convo::MKLNonUniformConvolver>, 2> nucConvolvers;
+        int irDataLength = 0;
 
+        int latency = 0;
+        int irLatency = 0; // IR由来の遅延 (ピーク位置)
+        int callQuantumSamples = 0;    // Audio Thread でのNUC呼び出し量子
+        int prewarmedMaxSamples = 0;   // Message Thread でプリウォーム済みの最大呼び出し長
+
+        // Clone用に初期化パラメータを保存
+        double storedSampleRate = 0.0;
+        int storedMaxFFTSize = 0;
+        int storedKnownBlockSize = 0;
+        int storedFirstPartition = 0;
+        double storedScale = 1.0;
+        bool storedDirectHeadEnabled = false;
+
+        StereoConvolver() = default;
+
+        ~StereoConvolver() {
+            if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
+            if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
+        }
+
+        // Intrusive Reference Counting
+        mutable std::atomic<int> refCount { 0 };
+        void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }
+        void release() const
+        {
+            if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            {
+                this->~StereoConvolver();
+                convo::aligned_free(const_cast<StereoConvolver*>(this));
+            }
+        }
+
+        // コピーコンストラクタは禁止 (NUCエンジンは複製コストが高く、状態を持つため)
+        StereoConvolver(const StereoConvolver& other) = delete;
+
+        // 代入演算子は禁止 (使用しないため)
+        StereoConvolver& operator=(const StereoConvolver&) = delete;
+
+        bool init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize, double scale = 1.0,
+              bool enableDirectHead = false,
+              const convo::FilterSpec* filterSpec = nullptr)
+        {
+            // Safety: Free existing data if init is called multiple times (Leak prevention)
+            if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
+            if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
+
+            // Ownership transfer
+            irData[0] = irL;
+            irData[1] = irR;
+            irDataLength = length;
+            this->irLatency = peakDelay;
+            callQuantumSamples = juce::jmax(1, preferredCallSize);
+            prewarmedMaxSamples = callQuantumSamples;
+            storedSampleRate = sr;
+            storedMaxFFTSize = maxFFTSize;
+            storedKnownBlockSize = knownBlockSize;
+            storedFirstPartition = firstPartition;
+            storedScale = scale;
+            storedDirectHeadEnabled = enableDirectHead;
+
+            try
+            {
+                // ── MKL Non-Uniform Partitioned Convolution (NUC) ──
+                // new完全禁止 → aligned_malloc + placement new (規約準拠)
+                void* rn0 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
+                new (rn0) convo::MKLNonUniformConvolver();
+                nucConvolvers[0].reset(static_cast<convo::MKLNonUniformConvolver*>(rn0));
+
+                void* rn1 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
+                new (rn1) convo::MKLNonUniformConvolver();
+                nucConvolvers[1].reset(static_cast<convo::MKLNonUniformConvolver*>(rn1));
+
+                if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec) &&
+                    nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec))
+                {
+                    latency   = nucConvolvers[0]->getLatency();
+                    DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
+                    return true;
+                }
+            }
+            catch (const std::bad_alloc&)
+            {
+                // Fall through to cleanup on memory allocation failure
+            }
+
+            // NUC セットアップ失敗 or メモリ確保失敗
+            nucConvolvers[0].reset();
+            nucConvolvers[1].reset();
+            return false;
+        }
+
+        // Deep Copyを作成する。
+        // 失敗時 (MKLメモリ確保失敗等) は nullptr を返す。呼び出し元で必ずチェックすること。
+        StereoConvolver* clone() const
+        {
+            // convo::ScopedAlignedPtr を使用して、例外安全性を確保しつつ、
+            // MKLアライメント規約 (mkl_malloc) を遵守する。
+            convo::ScopedAlignedPtr<StereoConvolver> newConv;
+            try
+            {
+                void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
+                new (mem) StereoConvolver();
+                newConv.reset(static_cast<StereoConvolver*>(mem));
+
+                if (irDataLength > 0 && irData[0] && irData[1])
+                {
+                    convo::ScopedAlignedPtr<double> l(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
+                    convo::ScopedAlignedPtr<double> r(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
+
+                    std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
+                    std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
+
+                    if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale, storedDirectHeadEnabled))
+                        return nullptr; // init失敗時、newConvのデストラクタが呼ばれ安全にクリーンアップされる
+                }
+                return newConv.release();
+            }
+            catch (const std::bad_alloc&)
+            {
+                // メモリ確保失敗時、ScopedAlignedPtrが自動でクリーンアップする
+                return nullptr;
+            }
+        }
+
+        bool areNUCDescriptorsCommitted() const noexcept
+        {
+            for (const auto& conv : nucConvolvers)
+            {
+                if (!conv || !conv->areFftDescriptorsCommitted())
+                    return false;
+            }
+            return true;
+        }
+
+        void reset();
+        void process(int channel, const double* in, double* out, int numSamples);
+    };
+
+    // Note: trashBin is used to hold old Convolution objects that the Audio Thread may still be using.
+    std::atomic<StereoConvolver*> convolution { nullptr }; // Raw pointer for Audio Thread (Lock-free)
+    StereoConvolver* activeConvolution = nullptr; // Ownership holder for Message Thread
+    std::vector<std::pair<StereoConvolver*, uint32>> trashBin; // Time-based GC
+    juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
     std::unique_ptr<LoaderThread> activeLoader;
@@ -500,7 +633,7 @@ private:
     //----------------------------------------------------------
     std::atomic<bool> isPrepared { false };
     bool visualizationEnabled = true; // Default true (for UI instance)
-    std::atomic<int> currentBufferSize { 0 }; // prepareToPlay (Message Thread) で書き込み、Rebuild Worker Thread から読まれるため アトミック
+    std::atomic<int> currentBufferSize { 0 }; // prepareToPlay (Message Thread) で書き込み、Rebuild Worker Thread から読まれるためアトミック
 
     //----------------------------------------------------------
     // Phase 3: IR Cache

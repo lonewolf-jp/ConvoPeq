@@ -1111,7 +1111,7 @@ public:
         {
         auto loadedIRShared = std::make_shared<juce::AudioBuffer<double>>(std::move(result.loadedIR));
         auto displayIRShared = std::make_shared<juce::AudioBuffer<double>>(std::move(result.displayIR));
-        owner.updateConvolverState(result.newConv, loadedIRShared, result.loadedSR, result.targetLength, isRebuild, file, result.scaleFactor, displayIRShared);
+        owner.applyNewState(result.newConv, loadedIRShared, result.loadedSR, result.targetLength, isRebuild, file, result.scaleFactor, displayIRShared);
         }
         else
         {
@@ -1152,16 +1152,8 @@ ConvolverProcessor::~ConvolverProcessor()
     forceCleanup();
     // スレッドを停止
     activeLoader.reset();
-
-    // Phase 0: Cleanup RCU Infrastructure
-    if (freeThread)
-    {
-        freeThread->stopThread(2000);
-        freeThread.reset();
-    }
-
-    uint64_t epoch = stateSwapper.bumpEpoch();
-    stateSwapper.swap(nullptr, epoch);
+    convolution.store(nullptr);
+    if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
 
     if (fftHandle) {
         DftiFreeDescriptor(&fftHandle);
@@ -1176,8 +1168,13 @@ void ConvolverProcessor::timerCallback()
     // wetCrossfadeActive アトミックフラグで代替する。
     if (!wetCrossfadeActive.load(std::memory_order_acquire))
     {
-        // Phase 0: fadingConvolver is now managed by ConvolverState and SafeStateSwapper.
-        // We no longer need to manually manage fadingOutConvolution here.
+        auto* doneFading = fadingOutConvolution.exchange(nullptr);
+        if (doneFading != nullptr)
+        {
+            const juce::ScopedLock sl(trashBinLock);
+            // 参照カウントを解放するために release() を呼ぶ
+            trashBin.push_back({doneFading, juce::Time::getMillisecondCounter()});
+        }
     }
 
     cleanup();
@@ -1189,13 +1186,6 @@ void ConvolverProcessor::timerCallback()
 void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     audioThreadAffinitySet.store(false, std::memory_order_release);
-
-    // Phase 0: Initialize RCU Infrastructure
-    if (!freeThread)
-    {
-        freeThread = std::make_unique<DeferredFreeThread>(stateSwapper);
-        freeThread->startThread();
-    }
 
     // 旧descriptor未解放防止
     if (fftHandle) {
@@ -1371,9 +1361,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     crossfadeGain.setCurrentAndTargetValue(1.0);
 
     // 既にIRがロードされている場合は、初期値をそのレイテンシーに合わせる (起動時のスライド防止)
-    if (auto* state = stateSwapper.getState())
+    if (conv)
     {
-        auto* conv = state->convolver;
         const int initialLatency = juce::jmin(conv->latency + conv->irLatency, MAX_TOTAL_DELAY);
         latencySmoother.setCurrentAndTargetValue(static_cast<double>(initialLatency));
     }
@@ -1388,13 +1377,6 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void ConvolverProcessor::releaseResources()
 {
-    // Phase 0: Stop RCU Infrastructure
-    if (freeThread)
-    {
-        freeThread->stopThread(2000);
-        freeThread.reset();
-    }
-
     forceCleanup();
     // 【パッチ2】LoaderThread を先に停止し、解放後の非同期コールバックを防ぐ
     // activeLoader.reset() → stopThread(4000) → ~LoaderThread() の順で安全に停止される。
@@ -1438,23 +1420,27 @@ void ConvolverProcessor::releaseResources()
         fftHandleSize = 0;
     }
 
-    // Release active convolution engine via RCU
-    uint64_t epoch = stateSwapper.bumpEpoch();
-    stateSwapper.swap(nullptr, epoch);
+    // Release active convolution engine
+    convolution.store(nullptr, std::memory_order_release);
+    if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
+    auto* fading = fadingOutConvolution.exchange(nullptr);
+    if (fading) fading->release();
+
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        trashBin.clear();
+    }
 
     isPrepared.store(false, std::memory_order_release);
 }
 
 void ConvolverProcessor::reset()
 {
-    stateSwapper.enterReader(audioThreadReaderIndex);
-    auto* state = stateSwapper.getState();
-    if (state && state->convolver)
+    auto* conv = convolution.load(std::memory_order_acquire);
+    if (conv)
     {
-        state->convolver->reset();
+        conv->reset();
     }
-    stateSwapper.exitReader(audioThreadReaderIndex);
-
     // リングバッファのクリア
     if (delayBuffer[0]) juce::FloatVectorOperations::clear(delayBuffer[0].get(), DELAY_BUFFER_SIZE);
     if (delayBuffer[1]) juce::FloatVectorOperations::clear(delayBuffer[1].get(), DELAY_BUFFER_SIZE);
@@ -2301,7 +2287,39 @@ void ConvolverProcessor::cleanup()
         }
     }
 
-    // Phase 0: StereoConvolver cleanup is now handled by SafeStateSwapper and DeferredFreeThread.
+    // StereoConvolver のクリーンアップ (Worker Threadと競合するためロックが必要)
+    juce::ScopedTryLock lock(trashBinLock);
+    if (!lock.isLocked())
+        return;
+
+    const uint32 now = juce::Time::getMillisecondCounter();
+    const size_t trashSize = trashBin.size();
+    convo::ScopedAlignedPtr<StereoConvolver*> toRelease(
+        (trashSize > 0)
+            ? static_cast<StereoConvolver**>(convo::aligned_malloc(trashSize * sizeof(StereoConvolver*), 64))
+            : nullptr);
+    size_t toReleaseCount = 0;
+
+    for (auto it = trashBin.begin(); it != trashBin.end(); )
+    {
+        uint32 age = (now >= it->second) ?
+                     (now - it->second) :
+                     (std::numeric_limits<uint32>::max() - it->second + now);
+
+        if (age > 10000)
+        {
+            toRelease.get()[toReleaseCount++] = it->first;
+            it = trashBin.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    // ロック解放後、削除対象を release() する
+    for (size_t i = 0; i < toReleaseCount; ++i)
+        toRelease.get()[i]->release();
 }
 
 void ConvolverProcessor::forceCleanup()
@@ -2309,7 +2327,22 @@ void ConvolverProcessor::forceCleanup()
     // This method is for eager cleanup of non-blocking resources.
     // The blocking cleanup of LoaderThreads is handled by the destructor.
 
-    // Phase 0: StereoConvolver cleanup is now handled by SafeStateSwapper and DeferredFreeThread.
+    using TrashEntry = std::pair<StereoConvolver*, uint32>;
+    convo::ScopedAlignedPtr<TrashEntry> stereoConvolversToDelete;
+    size_t stereoConvolversToDeleteCount = 0;
+    {
+        juce::ScopedLock lock(trashBinLock);
+        const size_t trashSize = trashBin.size();
+        if (trashSize > 0)
+        {
+            stereoConvolversToDelete.reset(
+                static_cast<TrashEntry*>(convo::aligned_malloc(trashSize * sizeof(TrashEntry), 64)));
+            for (size_t i = 0; i < trashSize; ++i)
+                stereoConvolversToDelete.get()[i] = trashBin[i];
+            stereoConvolversToDeleteCount = trashSize;
+            trashBin.clear();
+        }
+    }
 
     // 【Fix】LoaderThread のクリーンアップ漏れ防止
     // DSPCore破棄時やreleaseResources時に、残っているローダースレッドを
@@ -2329,6 +2362,9 @@ void ConvolverProcessor::forceCleanup()
             loader->stopThread(4000);
     }
     loadersToDelete.clear(); // unique_ptrのデストラクタが呼ばれ、スレッドがクリーンアップされる
+
+    for (size_t i = 0; i < stereoConvolversToDeleteCount; ++i)
+        stereoConvolversToDelete.get()[i].first->release();
 }
 
 //--------------------------------------------------------------
@@ -2853,9 +2889,9 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
 
     // クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
     // SCはDSPCore::prepare()内のprepareToPlay、またはrebuildAllIRsSynchronousで生成する
-    // Phase 0: RCU swap to nullptr
-    uint64_t epoch = stateSwapper.bumpEpoch();
-    stateSwapper.swap(nullptr, epoch);
+    // activeConvolution / convolution はnullptrのままにする
+    convolution.store(nullptr, std::memory_order_release);
+    if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
 }
 
 void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
@@ -2863,18 +2899,28 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
     // 軽量なランタイムパラメータのみ同期 (AudioBufferのコピーを避ける)
+    // 注意:
+    //   phaseMode / targetIRLengthSec / mixedTransitionStartHz / mixedTransitionEndHz /
+    //   mixedPreRingTau / experimentalDirectHeadEnabled は
+    //   IR再構築を伴う構造変更パラメータのため、
+    //   ここで同期すると requestRebuild() 側のIR再利用判定が誤って成立し、
+    //   古い畳み込み実体が再利用される恐れがある。
+    //   これらは UIプロセッサのロード完了通知(sendChangeMessage)経由で
+    //   requestRebuild() に反映させる。
     mixTarget.store(other.mixTarget.load(), std::memory_order_release);
     bypassed.store(other.bypassed.load(), std::memory_order_release);
     smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
     rebuildDebounceMs.store(other.rebuildDebounceMs.load(std::memory_order_acquire), std::memory_order_release);
 
     // サンプルレートが一致する場合のみ Convolution オブジェクトを同期する。
+    // オーバーサンプリング中は DSP側のレート(Nx) != UI側のレート(1x) となるため、
+    // UI側のオブジェクトをコピーするとピッチズレやレイテンシー不整合が発生する。
     if (std::abs(currentSampleRate.load() - other.currentSampleRate.load()) < 1e-6)
     {
-        auto* otherState = other.stateSwapper.getState();
-        auto* currentState = stateSwapper.getState();
+        auto* otherConv = other.convolution.load(std::memory_order_acquire);
+        auto* expectedConv = convolution.load(std::memory_order_acquire);
 
-        if (otherState != currentState && otherState != nullptr)
+        if (otherConv != expectedConv && otherConv != nullptr)
         {
             shareConvolutionEngineFrom(other);
         }
@@ -2883,38 +2929,27 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
 
 void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& other)
 {
-    // Phase 0: Share the active convolution state (RCU)
-    auto* otherState = other.stateSwapper.getState();
-    if (otherState)
-    {
-        auto newState = std::make_unique<ConvolverState>();
-        newState->generationId = genManager.getNextGeneration();
-        newState->convolver = otherState->convolver;
-        if (newState->convolver)
-            newState->convolver->addRef();
-            
-        newState->loadedIR = otherState->loadedIR;
-        newState->displayIR = otherState->displayIR;
-        newState->loadedSR = otherState->loadedSR;
-        newState->targetLength = otherState->targetLength;
-        newState->irFile = otherState->irFile;
-        newState->scaleFactor = otherState->scaleFactor;
-        newState->isRebuild = otherState->isRebuild;
+    // Share the active convolution engine (Shared Pointer copy)
+    auto* otherConv = other.convolution.load(std::memory_order_acquire);
+    if (otherConv) otherConv->addRef();
+    convolution.store(otherConv, std::memory_order_release);
 
-        uint64_t epoch = stateSwapper.bumpEpoch();
-        stateSwapper.swap(newState.release(), epoch);
-        
-        irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
+    if (activeConvolution)
+    {
+        const juce::ScopedLock sl(trashBinLock);
+        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
     }
+    activeConvolution = otherConv;
+
+    irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
 }
 
 void ConvolverProcessor::refreshLatency()
 {
-    auto* state = stateSwapper.getState();
+    auto* conv = convolution.load(std::memory_order_acquire);
     double totalLatency = 0.0;
-    if (state && state->convolver)
+    if (conv)
     {
-        auto* conv = state->convolver;
         const int algorithmLatency = conv->storedDirectHeadEnabled ? 0 : juce::jmax(0, conv->latency);
         const int irPeakLatency = juce::jmax(0, conv->irLatency);
         totalLatency = static_cast<double>(juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY));
@@ -2950,19 +2985,16 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     juce::ScopedNoDenormals noDenormals;
 
     // ── Step 1: RCU State Load (Lock-free / Wait-free) ──
-    stateSwapper.enterReader(audioThreadReaderIndex);
-    auto* state = stateSwapper.getState();
+    // Raw pointer load (No ref counting)
+    auto* conv = convolution.load(std::memory_order_acquire);
+    auto* oldConv = fadingOutConvolution.load(std::memory_order_acquire);
 
     // ── Step 2: 処理実行可能かチェック ──
     // バイパス、未準備、IR未ロードの場合はスルー
-    if (!isPrepared.load(std::memory_order_acquire) || bypassed.load(std::memory_order_relaxed) || !state || !state->convolver)
+    if (!isPrepared.load(std::memory_order_acquire) || bypassed.load(std::memory_order_relaxed) || !conv)
     {
-        stateSwapper.exitReader(audioThreadReaderIndex);
         return;
     }
-
-    auto* conv = state->convolver;
-    auto* oldConv = state->fadingConvolver;
 
     // レイテンシー補正の更新 (必要な場合のみ)
     {
@@ -3051,11 +3083,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     const bool isSmoothing = mixSmoother.isSmoothing();
 
-    // ── Step 5: Audio Processing ──
-    // ... (rest of process implementation) ...
-    
-    stateSwapper.exitReader(audioThreadReaderIndex);
-}
+    // ── 最適化: 処理内容をミックス比率に応じて決定 ──
     const bool needsConvolution = isSmoothing || targetMixValue > 0.001;
     const bool needsDrySignal   = isSmoothing || targetMixValue < 0.999;
 
@@ -3586,18 +3614,9 @@ void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
     }
 }
 
-void ConvolverProcessor::updateConvolverState(std::unique_ptr<ConvolverState> newState)
+void ConvolverProcessor::setIRLengthManualOverride(bool isManual)
 {
-    if (!newState) return;
-
-    // 1. 最新の世代 ID を取得し、古いタスクの結果なら破棄
-    if (newState->generationId < genManager.getCurrentGeneration())
-    {
-        return;
-    }
-
-    // 2. 状態をスワップ (RCU)
-    stateSwapper.updateState(std::move(newState));
+    irLengthManualOverride.store(isManual, std::memory_order_release);
 }
 
 void ConvolverProcessor::setSmoothingTime(float timeSec)
@@ -3855,7 +3874,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                   &spec))
         {
             jassert(newConv->areNUCDescriptorsCommitted());
-            updateConvolverState(newConv, loadedIR, sr, length, isRebuild, irFile, scaleFactor, displayIR);
+            applyNewState(newConv, loadedIR, sr, length, isRebuild, irFile, scaleFactor, displayIR);
         }
         else
         {
@@ -3869,14 +3888,14 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
     }
 }
 
-void ConvolverProcessor::updateConvolverState(convo::StereoConvolver* newConv,
-                                               std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
-                                               double loadedSR,
-                                               int targetLength,
-                                               bool isRebuild,
-                                               const juce::File& file,
-                                               double scaleFactor,
-                                               std::shared_ptr<juce::AudioBuffer<double>> displayIR)
+void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
+                                       std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
+                                       double loadedSR,
+                                       int targetLength,
+                                       bool isRebuild,
+                                       const juce::File& file,
+                                       double scaleFactor,
+                                       std::shared_ptr<juce::AudioBuffer<double>> displayIR)
 {
     // 元データの更新 (新規ロード時のみ)
     if (!isRebuild)
@@ -3898,34 +3917,34 @@ void ConvolverProcessor::updateConvolverState(convo::StereoConvolver* newConv,
         createFrequencyResponseSnapshot(*displayIR, loadedSR);
     }
 
-    // Phase 0: Create new ConvolverState and swap via RCU
-    auto newState = std::make_unique<ConvolverState>();
-    newState->generationId = genManager.getNextGeneration();
-    newState->convolver = newConv;
-    newState->loadedIR = loadedIR;
-    newState->displayIR = displayIR;
-    newState->loadedSR = loadedSR;
-    newState->targetLength = targetLength;
-    newState->irFile = file;
-    newState->scaleFactor = scaleFactor;
-    newState->isRebuild = isRebuild;
+    auto* convToFadeOut = activeConvolution;
+    activeConvolution = newConv;
 
-    // Get current state to preserve fading convolver if needed
-    auto* currentState = stateSwapper.getState();
-    if (currentState)
-    {
-        newState->fadingConvolver = currentState->convolver;
-        if (newState->fadingConvolver)
-            newState->fadingConvolver->addRef();
-    }
-
-    // Swap state
-    uint64_t epoch = stateSwapper.bumpEpoch();
-    stateSwapper.swap(newState.release(), epoch);
+    // Audio Threadが新しいコンボルバーを参照するようにアトミックに更新
+    convolution.store(newConv, std::memory_order_release);
 
     // [Bug C fix] wet フェードイン (0→1) は初回ロードを含む常に起動する。
+    // 旧実装は convToFadeOut != nullptr のブロック内のみで起動していたため、
+    // 初回ロード時には wetCrossfade が開始されず wet 信号がフルレベルで瞬間出力されていた。
+    // [Bug G fix] wetCrossfadeActive を Message Thread 側の通知フラグとして立てる。
+    // [Bug 1 fix] wetCrossfade フィールドへの直接書き込みをここで行うと Audio Thread の
+    //             getNextValue()/isSmoothing() と競合 (データ競合) する。
+    //             代わりに wetCrossfadeResetPending を立てて、Audio Thread の process() 先頭で
+    //             初期化させる (Audio Thread のみが wetCrossfade フィールドを操作する設計)。
     wetCrossfadeResetPending.store(true, std::memory_order_release);
     wetCrossfadeActive.store(true, std::memory_order_release);
+
+    // 古いコンボルバーがあれば、フェードアウトも開始する
+    if (convToFadeOut != nullptr)
+    {
+        // 既に別のクロスフェードが進行中だった場合、その古いエンジンは即座に破棄リストへ
+        auto* interruptedFade = fadingOutConvolution.exchange(convToFadeOut);
+        if (interruptedFade != nullptr)
+        {
+            const juce::ScopedLock sl(trashBinLock);
+            trashBin.push_back({interruptedFade, juce::Time::getMillisecondCounter()});
+        }
+    }
 
     irLength.store(targetLength, std::memory_order_release);
     currentSampleRate.store(loadedSR, std::memory_order_release);
