@@ -131,9 +131,17 @@ void CmaEsOptimizerDynamic::serializeTo(double* outMean, double* outCov, double&
         int idx = 0;
         for (int r = 0; r < dim; ++r)
             for (int c = r; c < dim; ++c)
-                outCov[idx++] = covariance[r * dim + c];
+                outCov[idx++] = covariance[static_cast<size_t>(r * dim + c)];
     }
     outSigma = sigma;
+}
+
+void CmaEsOptimizerDynamic::getCovarianceUpperTriangle(std::vector<double>& out) const {
+    out.resize(static_cast<size_t>(dim * (dim + 1) / 2));
+    int idx = 0;
+    for (int r = 0; r < dim; ++r)
+        for (int c = r; c < dim; ++c)
+            out[static_cast<size_t>(idx++)] = covariance[static_cast<size_t>(r * dim + c)];
 }
 
 void CmaEsOptimizerDynamic::deserializeFrom(const double* inMean, const double* inCov, double inSigma) {
@@ -141,9 +149,10 @@ void CmaEsOptimizerDynamic::deserializeFrom(const double* inMean, const double* 
     int idx = 0;
     for (int r = 0; r < dim; ++r)
         for (int c = r; c < dim; ++c) {
-            covariance[r * dim + c] = inCov[idx];
-            covariance[c * dim + r] = inCov[idx];
+            covariance[static_cast<size_t>(r * dim + c)] = inCov[idx];
+            covariance[static_cast<size_t>(c * dim + r)] = inCov[idx];
             ++idx;
         }
     sigma = inSigma;
 }
+

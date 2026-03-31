@@ -82,30 +82,6 @@ static void unwrapPhaseRadians(double* phase, int size, double tol = juce::MathC
 static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>& linearIR,
                                                        const std::function<bool()>& shouldExit,
                                                        bool* wasCancelled);
-static juce::AudioBuffer<double> convertToMixedPhaseFallback(const juce::AudioBuffer<double>& linearIR,
-                                                             const juce::AudioBuffer<double>& minimumIR,
-                                                             double sampleRate,
-                                                             double transitionLoHz,
-                                                             double transitionHiHz,
-                                                             double tau,
-                                                             const std::function<bool()>& shouldExit,
-                                                             bool* wasCancelled);
-static juce::AudioBuffer<double> convertToMixedPhaseAllpass(const juce::AudioBuffer<double>& linearIR,
-                                                            const juce::AudioBuffer<double>& minimumIR,
-                                                            double sampleRate,
-                                                            double transitionLoHz,
-                                                            double transitionHiHz,
-                                                            double tau,
-                                                            const std::function<bool()>& shouldExit,
-                                                            bool* wasCancelled);
-static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<double>& linearIR,
-                                                     const juce::AudioBuffer<double>& minimumIR,
-                                                     double sampleRate,
-                                                     double transitionLoHz,
-                                                     double transitionHiHz,
-                                                     double tau,
-                                                     const std::function<bool()>& shouldExit,
-                                                     bool* wasCancelled);
 
 // AudioBufferの容量を現在のサイズに合わせて縮小するヘルパー
 // JUCEのsetSize()は容量を縮小しないため、メモリ使用量を最適化するために使用する
@@ -528,6 +504,9 @@ public:
 
     void run() override
     {
+        if (owner.onSetThreadAffinity)
+            owner.onSetThreadAffinity(nullptr);
+
         juce::ScopedNoDenormals noDenormals; // バックグラウンド処理でのDenormal対策
 
         // MKL/AVX最適化のためにFTZ/DAZフラグを明示的に設定
@@ -608,6 +587,11 @@ public:
     LoadResult performLoad(juce::Thread* thread)
     {
         LoadResult result;
+
+        // 0. Compute IR Hash for Caching
+        uint64_t fileHash = 0;
+        if (!isRebuild && file.existsAsFile())
+            fileHash = convo::AllpassDesigner::computeIRHash(file);
 
         // キャンセル判定用ラムダ: スレッド自身の終了フラグ または 外部コールバックをチェック
         auto shouldStop = [thread, this]() -> bool {
@@ -904,7 +888,7 @@ public:
                         {
                             bool mixedCancelled = false;
                             owner.setLoadingProgress(0.5f);
-                            auto mixedIR = convertToMixedPhase(trimmed, minPhaseIR, sampleRate,
+                            auto mixedIR = convertToMixedPhase(&owner, fileHash, trimmed, minPhaseIR, sampleRate,
                                                                static_cast<double>(mixedTransitionStartHz),
                                                                static_cast<double>(mixedTransitionEndHz),
                                                                static_cast<double>(mixedPreRingTau),
@@ -1200,6 +1184,8 @@ void ConvolverProcessor::timerCallback()
 //--------------------------------------------------------------
 void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    audioThreadAffinitySet.store(false, std::memory_order_release);
+
     // 旧descriptor未解放防止
     if (fftHandle) {
         DftiFreeDescriptor(&fftHandle);
@@ -1749,16 +1735,18 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     return minPhaseIR;
 }
 
-static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<double>& linearIR,
-                                                     const juce::AudioBuffer<double>& minimumIR,
-                                                     double sampleRate,
-                                                     double transitionLoHz,
-                                                     double transitionHiHz,
-                                                     double tau,
-                                                     const std::function<bool()>& shouldExit,
-                                                     bool* wasCancelled)
+juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhase(ConvolverProcessor* owner,
+                                                               uint64_t fileHash,
+                                                               const juce::AudioBuffer<double>& linearIR,
+                                                               const juce::AudioBuffer<double>& minimumIR,
+                                                               double sampleRate,
+                                                               double transitionLoHz,
+                                                               double transitionHiHz,
+                                                               double tau,
+                                                               const std::function<bool()>& shouldExit,
+                                                               bool* wasCancelled)
 {
-    auto result = convertToMixedPhaseAllpass(linearIR, minimumIR, sampleRate,
+    auto result = convertToMixedPhaseAllpass(owner, fileHash, linearIR, minimumIR, sampleRate,
                                              transitionLoHz, transitionHiHz,
                                              tau, shouldExit, wasCancelled);
     
@@ -1772,16 +1760,40 @@ static juce::AudioBuffer<double> convertToMixedPhase(const juce::AudioBuffer<dou
     return result;
 }
 
-static juce::AudioBuffer<double> convertToMixedPhaseAllpass(const juce::AudioBuffer<double>& linearIR,
-                                                            const juce::AudioBuffer<double>& minimumIR,
-                                                            double sampleRate,
-                                                            double transitionLoHz,
-                                                            double transitionHiHz,
-                                                            double /*tau*/,
-                                                            const std::function<bool()>& shouldExit,
-                                                            bool* wasCancelled)
+juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(ConvolverProcessor* owner,
+                                                               uint64_t fileHash,
+                                                               const juce::AudioBuffer<double>& linearIR,
+                                                               const juce::AudioBuffer<double>& minimumIR,
+                                                               double sampleRate,
+                                                               double transitionLoHz,
+                                                               double transitionHiHz,
+                                                               double tau,
+                                                               const std::function<bool()>& shouldExit,
+                                                               bool* wasCancelled)
 {
     if (wasCancelled) *wasCancelled = false;
+
+    // 0. Cache Check
+    if (owner && fileHash != 0) {
+        ConvolverProcessor::IRCacheKey key;
+        key.fileHash = fileHash;
+        key.sampleRate = sampleRate;
+        key.phaseMode = ConvolverProcessor::PhaseMode::Mixed;
+        key.f1 = static_cast<float>(transitionLoHz);
+        key.f2 = static_cast<float>(transitionHiHz);
+        key.tau = static_cast<float>(tau);
+        key.targetLength = linearIR.getNumSamples();
+
+        const juce::ScopedLock sl(owner->cacheMutex);
+        auto it = owner->irCache.find(key);
+        if (it != owner->irCache.end()) {
+            it->second.lastUsedTime = juce::Time::getMillisecondCounter();
+            if (it->second.ir) {
+                DBG("convertToMixedPhaseAllpass: Cache Hit!");
+                return *(it->second.ir);
+            }
+        }
+    }
 
     // MKL/AVX最適化のためにFTZ/DAZフラグを明示的に設定
     #if defined(__AVX2__)
@@ -1918,6 +1930,7 @@ static juce::AudioBuffer<double> convertToMixedPhaseAllpass(const juce::AudioBuf
         // --- AllpassDesigner の呼び出し ---
         convo::AllpassDesigner::Config designer_config;
         designer_config.numSections = 8;
+        designer_config.method = convo::OptimizationMethod::CMAES; // CMA-ES を有効化
         designer_config.freqPoints = complexSize;
         designer_config.minFreqHz = 20.0;
         designer_config.maxFreqHz = sampleRate / 2.0;
@@ -1929,7 +1942,13 @@ static juce::AudioBuffer<double> convertToMixedPhaseAllpass(const juce::AudioBuf
         std::vector<convo::SecondOrderAllpass> allpass_sections;
         convo::AllpassDesigner designer;
         
-        if (!designer.design(sampleRate, freq_hz, targetGroupDelay, designer_config, allpass_sections))
+        bool designSuccess = false;
+        if (designer_config.method == convo::OptimizationMethod::CMAES)
+            designSuccess = (designer.designWithCMAES(sampleRate, freq_hz, targetGroupDelay, designer_config, allpass_sections) == convo::DesignResult::Success);
+        else
+            designSuccess = designer.design(sampleRate, freq_hz, targetGroupDelay, designer_config, allpass_sections);
+
+        if (!designSuccess)
             return {}; // 失敗 → フォールバックへ
 
         // 全通過フィルタの周波数応答を計算
@@ -1960,10 +1979,29 @@ static juce::AudioBuffer<double> convertToMixedPhaseAllpass(const juce::AudioBuf
         }
     }
 
+    // --- Store in Cache ---
+    if (owner && fileHash != 0) {
+        ConvolverProcessor::IRCacheKey key;
+        key.fileHash = fileHash;
+        key.sampleRate = sampleRate;
+        key.phaseMode = ConvolverProcessor::PhaseMode::Mixed;
+        key.f1 = static_cast<float>(transitionLoHz);
+        key.f2 = static_cast<float>(transitionHiHz);
+        key.tau = static_cast<float>(tau);
+        key.targetLength = linearIR.getNumSamples();
+
+        const juce::ScopedLock sl(owner->cacheMutex);
+        ConvolverProcessor::CacheEntry entry;
+        entry.ir = std::make_unique<juce::AudioBuffer<double>>(mixedIR);
+        entry.lastUsedTime = juce::Time::getMillisecondCounter();
+        owner->irCache[key] = std::move(entry);
+        owner->evictOldestCacheEntry();
+    }
+
     return mixedIR;
 }
 
-static juce::AudioBuffer<double> convertToMixedPhaseFallback(const juce::AudioBuffer<double>& linearIR,
+juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseFallback(const juce::AudioBuffer<double>& linearIR,
                                                              const juce::AudioBuffer<double>& minimumIR,
                                                              double sampleRate,
                                                              double transitionLoHz,
@@ -2921,6 +2959,12 @@ void ConvolverProcessor::refreshLatency()
 //--------------------------------------------------------------
 void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
+    if (!audioThreadAffinitySet.load(std::memory_order_acquire) && onSetThreadAffinity)
+    {
+        onSetThreadAffinity(nullptr);
+        audioThreadAffinitySet.store(true, std::memory_order_release);
+    }
+
     static constexpr double kLatencyRetargetThresholdSamples = 2.0;
 
     // ── デノーマル対策 ──
@@ -3898,6 +3942,27 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     if (rebuildPendingAfterLoad.exchange(false, std::memory_order_acq_rel) && isIRLoaded())
         requestDebouncedRebuild();
     postCoalescedChangeNotification();
+}
+
+void ConvolverProcessor::evictOldestCacheEntry()
+{
+    const juce::ScopedLock sl(cacheMutex);
+    if (irCache.size() <= MAX_CACHE_ENTRIES) return;
+
+    auto oldest = irCache.begin();
+    uint32_t minTime = std::numeric_limits<uint32_t>::max();
+
+    for (auto it = irCache.begin(); it != irCache.end(); ++it)
+    {
+        if (it->second.lastUsedTime < minTime)
+        {
+            minTime = it->second.lastUsedTime;
+            oldest = it;
+        }
+    }
+
+    if (oldest != irCache.end())
+        irCache.erase(oldest);
 }
 
 void ConvolverProcessor::StereoConvolver::reset()

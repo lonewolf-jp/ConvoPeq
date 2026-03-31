@@ -45,13 +45,17 @@ static inline double unconstrainedToTheta(double x) {
 //==============================================================================
 // designWithCMAES（修正版：cost関数は全セクション合計、パラメータ変換改善）
 //==============================================================================
-bool AllpassDesigner::designWithCMAES(
+DesignResult AllpassDesigner::designWithCMAES(
     double sampleRate,
     const std::vector<double>& freq_hz,
     const std::vector<double>& target_group_delay_samples,
     const Config& config,
-    std::vector<SecondOrderAllpass>& sections)
+    std::vector<SecondOrderAllpass>& sections,
+    const std::function<bool()>& shouldExit,
+    std::function<void(float)> progressCallback)
 {
+    if (shouldExit && shouldExit()) return DesignResult::Cancelled;
+
     const int D = 2 * config.numSections;   // (x_rho, x_theta) のペア
     CmaEsOptimizerDynamic optimizer(D);
     optimizer.setParams(config.cmaesParams);
@@ -111,6 +115,8 @@ bool AllpassDesigner::designWithCMAES(
     int stagnationCounter = 0;
 
     for (int gen = 0; gen < config.cmaesMaxGenerations; ++gen) {
+        if (shouldExit && shouldExit()) return DesignResult::Cancelled;
+
         optimizer.sample(population);
         for (int i = 0; i < lambda; ++i) {
             fitness[i] = costFunc(population[i]);
@@ -122,14 +128,13 @@ bool AllpassDesigner::designWithCMAES(
         optimizer.update(population, fitness);
 
         // 進捗コールバック
-        if (config.progressCallback) {
+        if (progressCallback) {
             float progress = 0.5f + 0.25f * static_cast<float>(gen) / config.cmaesMaxGenerations;
-            config.progressCallback(progress);
+            progressCallback(progress);
         }
 
         // 早期終了条件：sigma が十分小さい、または改善停滞
-        double currentSigma;
-        optimizer.serializeTo(nullptr, nullptr, currentSigma);
+        double currentSigma = optimizer.getSigma();
         if (currentSigma < 1e-4) break;
 
         const double improvement = (prevBestFitness - bestFitness) / (prevBestFitness + 1e-12);
@@ -149,7 +154,7 @@ bool AllpassDesigner::designWithCMAES(
         section.theta = unconstrainedToTheta(bestParams[2*s+1]);
         sections.push_back(section);
     }
-    return true;
+    return DesignResult::Success;
 }
 
 //==============================================================================
@@ -159,11 +164,15 @@ bool AllpassDesigner::design(double sampleRate,
                              const std::vector<double>& freq_hz,
                              const std::vector<double>& target_group_delay_samples,
                              const Config& config,
-                             std::vector<SecondOrderAllpass>& sections)
+                             std::vector<SecondOrderAllpass>& sections,
+                             const std::function<bool()>& shouldExit,
+                             std::function<void(float)> progressCallback)
 {
     if (config.method == OptimizationMethod::CMAES) {
-        return designWithCMAES(sampleRate, freq_hz, target_group_delay_samples, config, sections);
+        return designWithCMAES(sampleRate, freq_hz, target_group_delay_samples, config, sections, shouldExit, progressCallback) == DesignResult::Success;
     }
+
+    if (shouldExit && shouldExit()) return false;
 
     // ========== 従来の Greedy+AdaGrad（内部で (ρ, θ) を使用） ==========
     std::vector<double, convo::MKLAllocator<double>> omega(freq_hz.size());
@@ -171,11 +180,13 @@ bool AllpassDesigner::design(double sampleRate,
         omega[i] = 2.0 * juce::MathConstants<double>::pi * freq_hz[i] / sampleRate;
 
     std::vector<double, convo::MKLAllocator<double>> residual(target_group_delay_samples.begin(),
-                                                               target_group_delay_samples.end());
+                                                                target_group_delay_samples.end());
     sections.clear();
     sections.reserve(config.numSections);
 
     for (int sec = 0; sec < config.numSections; ++sec) {
+        if (shouldExit && shouldExit()) return false;
+
         double best_f0 = 1000.0, best_gain = 0.5;
         if (!gridSearch2D(omega, residual, sampleRate, best_f0, best_gain))
             return false;
@@ -190,6 +201,10 @@ bool AllpassDesigner::design(double sampleRate,
         // 残差更新（このセクションの群遅延を減算、負の群遅延はクリップしない）
         for (size_t i = 0; i < omega.size(); ++i) {
             residual[i] -= sectionGroupDelayRhoTheta(section.rho, section.theta, omega[i], sampleRate);
+        }
+
+        if (progressCallback) {
+            progressCallback(0.5f + 0.25f * static_cast<float>(sec + 1) / config.numSections);
         }
     }
     return true;
@@ -283,6 +298,65 @@ AllpassDesigner::computeResponse(const std::vector<SecondOrderAllpass>& sections
         }
     }
     return response;
+}
+
+//==============================================================================
+// applyAllpassToIR
+//==============================================================================
+juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
+    const juce::AudioBuffer<double>& linearIR,
+    const std::vector<SecondOrderAllpass>& sections,
+    double sampleRate,
+    const std::vector<double>& freq_hz,
+    int /*fftSize*/,
+    const std::function<bool()>& shouldExit,
+    std::function<void(float)> progressCallback)
+{
+    if (shouldExit && shouldExit()) return {};
+
+    const int numChannels = linearIR.getNumChannels();
+    const int irLen = linearIR.getNumSamples();
+    juce::AudioBuffer<double> result(numChannels, irLen);
+
+    // 周波数応答の計算
+    auto allpassResponse = computeResponse(sections, sampleRate, freq_hz);
+
+    // 各チャンネルに適用
+    for (int ch = 0; ch < numChannels; ++ch) {
+        if (shouldExit && shouldExit()) return {};
+
+        // 簡易的な実装：FFT -> 乗算 -> IFFT
+        // 実際には MKL を使用して高速化する
+        // ここではプレースホルダーとして線形IRをコピーする（後で修正）
+        result.copyFrom(ch, 0, linearIR, ch, 0, irLen);
+
+        if (progressCallback) {
+            progressCallback(0.75f + 0.25f * static_cast<float>(ch + 1) / numChannels);
+        }
+    }
+
+    return result;
+}
+
+//==============================================================================
+// computeIRHash
+//==============================================================================
+uint64_t AllpassDesigner::computeIRHash(const juce::File& irFile, bool /*useMD5*/) {
+    if (!irFile.existsAsFile()) return 0;
+    
+    uint64_t hash = static_cast<uint64_t>(irFile.getSize());
+    hash ^= static_cast<uint64_t>(irFile.getLastModificationTime().toMilliseconds()) << 1;
+    
+    std::unique_ptr<juce::FileInputStream> stream(irFile.createInputStream());
+    if (stream) {
+        uint8_t buffer[1024];
+        int bytesRead = stream->read(buffer, 1024);
+        for (int i = 0; i < bytesRead; ++i) {
+            hash = (hash * 31) + buffer[i];
+        }
+    }
+    
+    return hash;
 }
 
 } // namespace convo

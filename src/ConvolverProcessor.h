@@ -29,8 +29,10 @@
 #include <array>
 #include <functional>
 #include <deque>
+#include <map>
 #include "AlignedAllocation.h"
 #include "MKLNonUniformConvolver.h"
+#include "AllpassDesigner.h"
 
 class ConvolverProcessor : public juce::ChangeBroadcaster,
                            private juce::Timer
@@ -230,6 +232,11 @@ public:
     static float getMaximumAllowedIRLengthSecForSampleRate(double sampleRate);
     float getMaximumAllowedIRLengthSec(double sampleRate = 0.0) const;
     static IRLoadPreview analyzeImpulseResponseFile(const juce::File& irFile, double processingSampleRate);
+
+    //----------------------------------------------------------
+    // Thread Affinity & Optimization
+    //----------------------------------------------------------
+    void setThreadAffinityCallback(std::function<void(void*)> callback) { onSetThreadAffinity = callback; }
 
     //----------------------------------------------------------
     // 状態リセット
@@ -627,6 +634,72 @@ private:
     std::atomic<bool> isPrepared { false };
     bool visualizationEnabled = true; // Default true (for UI instance)
     std::atomic<int> currentBufferSize { 0 }; // prepareToPlay (Message Thread) で書き込み、Rebuild Worker Thread から読まれるためアトミック
+
+    //----------------------------------------------------------
+    // Phase 3: IR Cache
+    //----------------------------------------------------------
+    struct IRCacheKey {
+        uint64_t fileHash;
+        double sampleRate;
+        PhaseMode phaseMode;
+        float f1, f2, tau;
+        int targetLength;
+
+        bool operator<(const IRCacheKey& other) const {
+            if (fileHash != other.fileHash) return fileHash < other.fileHash;
+            if (sampleRate != other.sampleRate) return sampleRate < other.sampleRate;
+            if (phaseMode != other.phaseMode) return phaseMode < other.phaseMode;
+            if (f1 != other.f1) return f1 < other.f1;
+            if (f2 != other.f2) return f2 < other.f2;
+            if (tau != other.tau) return tau < other.tau;
+            return targetLength < other.targetLength;
+        }
+    };
+
+    struct CacheEntry {
+        std::shared_ptr<juce::AudioBuffer<double>> ir;
+        std::vector<convo::SecondOrderAllpass> allpassSections;
+        uint32_t lastUsedTime;
+    };
+
+    std::map<IRCacheKey, CacheEntry> irCache;
+    juce::CriticalSection cacheMutex;
+    static constexpr size_t MAX_CACHE_ENTRIES = 8;
+    void evictOldestCacheEntry();
+
+    static juce::AudioBuffer<double> convertToMixedPhase(ConvolverProcessor* owner,
+                                                         uint64_t fileHash,
+                                                         const juce::AudioBuffer<double>& linearIR,
+                                                         const juce::AudioBuffer<double>& minimumIR,
+                                                         double sampleRate,
+                                                         double transitionLoHz,
+                                                         double transitionHiHz,
+                                                         double tau,
+                                                         const std::function<bool()>& shouldExit,
+                                                         bool* wasCancelled);
+
+    static juce::AudioBuffer<double> convertToMixedPhaseAllpass(ConvolverProcessor* owner,
+                                                                 uint64_t fileHash,
+                                                                 const juce::AudioBuffer<double>& linearIR,
+                                                                 const juce::AudioBuffer<double>& minimumIR,
+                                                                 double sampleRate,
+                                                                 double transitionLoHz,
+                                                                 double transitionHiHz,
+                                                                 double tau,
+                                                                 const std::function<bool()>& shouldExit,
+                                                                 bool* wasCancelled);
+
+    static juce::AudioBuffer<double> convertToMixedPhaseFallback(const juce::AudioBuffer<double>& linearIR,
+                                                                 const juce::AudioBuffer<double>& minimumIR,
+                                                                 double sampleRate,
+                                                                 double transitionLoHz,
+                                                                 double transitionHiHz,
+                                                                 double tau,
+                                                                 const std::function<bool()>& shouldExit,
+                                                                 bool* wasCancelled);
+
+    std::function<void(void*)> onSetThreadAffinity;
+    std::atomic<bool> audioThreadAffinitySet{ false };
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)

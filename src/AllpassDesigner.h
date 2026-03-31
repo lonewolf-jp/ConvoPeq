@@ -53,6 +53,13 @@ struct SecondOrderAllpass {
 /** 最適化手法の列挙 */
 enum class OptimizationMethod { GreedyAdaGrad, CMAES };
 
+/** 設計結果のステータス */
+enum class DesignResult {
+    Success,
+    Cancelled,
+    Failed
+};
+
 //==============================================================================
 /** AllpassDesigner 設定構造体 */
 struct AllpassDesignerConfig {
@@ -66,10 +73,17 @@ struct AllpassDesignerConfig {
     // Phase 3 追加メンバ
     OptimizationMethod method = OptimizationMethod::GreedyAdaGrad;
     CmaEsOptimizerDynamic::Params cmaesParams;
-    int cmaesMaxGenerations = 150;
-    int cmaesPopulationSize = 0;          // 0 → 自動 (4 * dim)
-    double cmaesInitialSigma = 0.5;
+    int cmaesMaxGenerations = 100;
+    int cmaesPopulationSize = 32;          // 0 → 自動 (4 * dim)
+    double cmaesInitialSigma = 0.3;
     std::function<void(float)> progressCallback;
+
+    AllpassDesignerConfig() {
+        cmaesParams.sigmaMin = 0.01;
+        cmaesParams.sigmaMax = 0.30;
+        cmaesParams.covRetentionTarget = 0.95;
+        cmaesParams.covRetentionStep = 0.005;
+    }
 };
 
 //==============================================================================
@@ -85,14 +99,31 @@ public:
                 const std::vector<double>& freq_hz,
                 const std::vector<double>& target_group_delay_samples,
                 const Config& config,
-                std::vector<SecondOrderAllpass>& sections);
+                std::vector<SecondOrderAllpass>& sections,
+                const std::function<bool()>& shouldExit = nullptr,
+                std::function<void(float)> progressCallback = nullptr);
 
     // CMA-ES による設計メソッド
-    bool designWithCMAES(double sampleRate,
-                         const std::vector<double>& freq_hz,
-                         const std::vector<double>& target_group_delay_samples,
-                         const Config& config,
-                         std::vector<SecondOrderAllpass>& sections);
+    DesignResult designWithCMAES(double sampleRate,
+                                 const std::vector<double>& freq_hz,
+                                 const std::vector<double>& target_group_delay_samples,
+                                 const Config& config,
+                                 std::vector<SecondOrderAllpass>& sections,
+                                 const std::function<bool()>& shouldExit = nullptr,
+                                 std::function<void(float)> progressCallback = nullptr);
+
+    // 設計済みセクションを IR に適用する関数
+    static juce::AudioBuffer<double> applyAllpassToIR(
+        const juce::AudioBuffer<double>& linearIR,
+        const std::vector<SecondOrderAllpass>& sections,
+        double sampleRate,
+        const std::vector<double>& freq_hz,
+        int fftSize,
+        const std::function<bool()>& shouldExit = nullptr,
+        std::function<void(float)> progressCallback = nullptr);
+
+    // ユーティリティ：IR ファイルのハッシュ計算（キャッシュキー用）
+    static uint64_t computeIRHash(const juce::File& irFile, bool useMD5 = false);
 
     // 静的ヘルパー：群遅延計算（(ρ, θ) 版）
     static double sectionGroupDelayRhoTheta(double rho, double theta, double omega, double sampleRate);
