@@ -942,7 +942,7 @@ void ConvolverControlPanel::showOptimizationProgressWindow()
         return;
     }
 
-    auto* window = MixedPhaseOptimizationWindow::show(engine.getConvolverProcessor());
+    auto* window = new convo::MixedPhaseOptimizationWindow("Optimization Progress", engine.getConvolverProcessor());
     optimizationProgressWindow = window;
 }
 
@@ -1336,6 +1336,6 @@ void ConvolverControlPanel::updateWaveformPath()
     }
     waveformPath.lineTo(x + w, y);
     waveformPath.closeSubPath();
-    
+
     repaint();
 }

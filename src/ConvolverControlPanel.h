@@ -129,7 +129,7 @@ private:
     std::atomic<int> irPreviewRequestId { 0 };
     bool irPreviewInProgress = false;
     juce::Component::SafePointer<juce::DialogWindow> irAdvancedWindow;
-    juce::Component::SafePointer<juce::DialogWindow> optimizationProgressWindow;
+    juce::Component::SafePointer<juce::DocumentWindow> optimizationProgressWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverControlPanel)
 };

@@ -152,6 +152,7 @@ public:
     // 外部インターフェース (Message Thread)
     //----------------------------------------------------------
     ConvolverProcessor& getConvolverProcessor() { return uiConvolverProcessor; }
+    const ConvolverProcessor& getConvolverProcessor() const { return uiConvolverProcessor; }
     EQProcessor& getEQProcessor() { return uiEqProcessor; }
 
     double getSampleRate() const { return currentSampleRate.load(); }

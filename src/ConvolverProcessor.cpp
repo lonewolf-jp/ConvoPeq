@@ -1751,7 +1751,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhase(ConvolverProce
     auto result = convertToMixedPhaseAllpass(owner, fileHash, linearIR, minimumIR, sampleRate,
                                              transitionLoHz, transitionHiHz,
                                              tau, shouldExit, wasCancelled, progressCallback);
-    
+
     if (result.getNumSamples() == 0 && (wasCancelled == nullptr || !*wasCancelled))
     {
         DBG("Allpass design failed, falling back to Phase 1.");
@@ -1910,7 +1910,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         // 目標群遅延の計算 (数値微分: 中央差分)
         std::vector<double> targetGroupDelay(complexSize, 0.0);
         const double dOmega = 2.0 * juce::MathConstants<double>::pi / fftSize;
-        
+
         for (int k = 0; k < complexSize; ++k)
         {
             double dPhi = 0.0;
@@ -1920,12 +1920,12 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 dPhi = (targetPhase.get()[k] - targetPhase.get()[k - 1]) / dOmega;
             else
                 dPhi = (targetPhase.get()[k + 1] - targetPhase.get()[k - 1]) / (2.0 * dOmega);
-            
+
             targetGroupDelay[k] = -dPhi;
-            
+
             // 線形位相成分 (-peakDelay) を差し引いて、全通過フィルタが補うべき分を抽出
             targetGroupDelay[k] -= static_cast<double>(peakDelay);
-            
+
             // 負の群遅延は物理的に実現不可なのでクリップ
             if (targetGroupDelay[k] < 0.0) targetGroupDelay[k] = 0.0;
         }
@@ -1937,14 +1937,14 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         designer_config.freqPoints = complexSize;
         designer_config.minFreqHz = 20.0;
         designer_config.maxFreqHz = sampleRate / 2.0;
-        
+
         std::vector<double> freq_hz(complexSize);
         for (int k = 0; k < complexSize; ++k)
             freq_hz[k] = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
-        
+
         std::vector<convo::SecondOrderAllpass> allpass_sections;
         convo::AllpassDesigner designer;
-        
+
         if (progressCallback) progressCallback(0.1f);
 
         bool designSuccess = false;
@@ -1965,7 +1965,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
         // 全通過フィルタの周波数応答を計算
         auto allpass_response = convo::AllpassDesigner::computeResponse(allpass_sections, sampleRate, freq_hz);
-        
+
         // 線形位相 IR のスペクトルに乗算（振幅維持）
         for (int k = 0; k < fftSize; ++k)
         {
@@ -2149,11 +2149,11 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseFallback(const 
 
             const double re = linearSpec.get()[k].real;
             const double im = linearSpec.get()[k].imag;
-            
+
             // 振幅を維持したまま位相を回転
             const double cosD = std::cos(dPhi);
             const double sinD = std::sin(dPhi);
-            
+
             linearSpec.get()[k].real = re * cosD - im * sinD;
             linearSpec.get()[k].imag = re * sinD + im * cosD;
         }

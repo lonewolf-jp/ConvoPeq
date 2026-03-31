@@ -1032,7 +1032,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             engine.setOversamplingType((AudioEngine::OversamplingType)type);
 
             // Convolver state
-            if (auto* convXml = xml->getChildByTagName("Convolver"))
+            if (auto* convXml = xml->getChildByName("Convolver"))
             {
                 engine.getConvolverProcessor().setState(juce::ValueTree::fromXml(*convXml));
             }

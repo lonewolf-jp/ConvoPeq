@@ -12,7 +12,7 @@ MixedPhaseOptimizationComponent::MixedPhaseOptimizationComponent(ConvolverProces
     addAndMakeVisible(closeButton);
 
     statusLabel.setText("Impulse Response Optimization", juce::dontSendNotification);
-    statusLabel.setFont(juce::Font(18.0f, juce::Font::bold));
+    statusLabel.setFont(juce::Font(juce::FontOptions(18.0f, juce::Font::bold)));
     statusLabel.setJustificationType(juce::Justification::centred);
 
     infoLabel.setText("Calculating Mixed Phase Allpass...", juce::dontSendNotification);
@@ -69,7 +69,7 @@ void MixedPhaseOptimizationComponent::updateStatus()
     if (progressValue != lastProgress)
     {
         lastProgress = progressValue;
-        
+
         if (progressValue >= 1.0)
         {
             infoLabel.setText("Optimization Complete", juce::dontSendNotification);

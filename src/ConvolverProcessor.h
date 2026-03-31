@@ -492,7 +492,6 @@ private:
     std::deque<std::unique_ptr<LoaderThread>> loaderTrashBin;
     std::atomic<float> loadProgress { 0.0f };
     juce::String lastError;
-    void setLoadingProgress(float p);
 
     juce::dsp::ProcessSpec currentSpec = { 48000.0, 512, 2 };
 
@@ -677,7 +676,8 @@ private:
                                                          double transitionHiHz,
                                                          double tau,
                                                          const std::function<bool()>& shouldExit,
-                                                         bool* wasCancelled);
+                                                         bool* wasCancelled,
+                                                         std::function<void(float)> progressCallback = nullptr);
 
     static juce::AudioBuffer<double> convertToMixedPhaseAllpass(ConvolverProcessor* owner,
                                                                  uint64_t fileHash,
