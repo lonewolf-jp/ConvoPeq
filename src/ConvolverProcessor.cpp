@@ -887,13 +887,14 @@ public:
                         else
                         {
                             bool mixedCancelled = false;
-                            owner.setLoadingProgress(0.5f);
+                            auto progressCb = [this](float p) {
+                                owner.setLoadingProgress(p);
+                            };
                             auto mixedIR = convertToMixedPhase(&owner, fileHash, trimmed, minPhaseIR, sampleRate,
                                                                static_cast<double>(mixedTransitionStartHz),
                                                                static_cast<double>(mixedTransitionEndHz),
                                                                static_cast<double>(mixedPreRingTau),
-                                                               shouldStop, &mixedCancelled);
-                            owner.setLoadingProgress(0.75f);
+                                                               shouldStop, &mixedCancelled, progressCb);
                             if (mixedCancelled) return result;
 
                             if (validateBuffer(mixedIR))
@@ -1744,11 +1745,12 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhase(ConvolverProce
                                                                double transitionHiHz,
                                                                double tau,
                                                                const std::function<bool()>& shouldExit,
-                                                               bool* wasCancelled)
+                                                               bool* wasCancelled,
+                                                               std::function<void(float)> progressCallback)
 {
     auto result = convertToMixedPhaseAllpass(owner, fileHash, linearIR, minimumIR, sampleRate,
                                              transitionLoHz, transitionHiHz,
-                                             tau, shouldExit, wasCancelled);
+                                             tau, shouldExit, wasCancelled, progressCallback);
     
     if (result.getNumSamples() == 0 && (wasCancelled == nullptr || !*wasCancelled))
     {
@@ -1769,7 +1771,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                                                                double transitionHiHz,
                                                                double tau,
                                                                const std::function<bool()>& shouldExit,
-                                                               bool* wasCancelled)
+                                                               bool* wasCancelled,
+                                                               std::function<void(float)> progressCallback)
 {
     if (wasCancelled) *wasCancelled = false;
 
@@ -1942,11 +1945,20 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         std::vector<convo::SecondOrderAllpass> allpass_sections;
         convo::AllpassDesigner designer;
         
+        if (progressCallback) progressCallback(0.1f);
+
         bool designSuccess = false;
         if (designer_config.method == convo::OptimizationMethod::CMAES)
+        {
+            designer_config.progressCallback = progressCallback;
             designSuccess = (designer.designWithCMAES(sampleRate, freq_hz, targetGroupDelay, designer_config, allpass_sections) == convo::DesignResult::Success);
+        }
         else
+        {
             designSuccess = designer.design(sampleRate, freq_hz, targetGroupDelay, designer_config, allpass_sections);
+        }
+
+        if (progressCallback) progressCallback(0.9f);
 
         if (!designSuccess)
             return {}; // 失敗 → フォールバックへ
@@ -3963,6 +3975,12 @@ void ConvolverProcessor::evictOldestCacheEntry()
 
     if (oldest != irCache.end())
         irCache.erase(oldest);
+}
+
+void ConvolverProcessor::setLoadingProgress(float p)
+{
+    loadProgress.store(p);
+    sendChangeMessage();
 }
 
 void ConvolverProcessor::StereoConvolver::reset()

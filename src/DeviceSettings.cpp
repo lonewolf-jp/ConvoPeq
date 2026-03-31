@@ -812,6 +812,14 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
         // 入力ヘッドルーム設定を追加
         xml->setAttribute("outputMakeupDb", engine.getOutputMakeupDb());
         xml->setAttribute("inputHeadroomDb", engine.getInputHeadroomDb());
+
+        // Convolver state
+        auto convolverState = engine.getConvolverProcessor().getState();
+        if (auto convolverXml = convolverState.createXml())
+        {
+            xml->addChildElement(convolverXml.release());
+        }
+
         for (int srBank = 0; srBank < AudioEngine::getAdaptiveSampleRateBankCount(); ++srBank)
         {
             const double bankSR = AudioEngine::getAdaptiveSampleRateBankHz(srBank);
@@ -1022,6 +1030,13 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             // フィルタタイプ設定の読み込み (デフォルト0 = IIR)
             int type = xml->getIntAttribute("oversamplingType", 0);
             engine.setOversamplingType((AudioEngine::OversamplingType)type);
+
+            // Convolver state
+            if (auto* convXml = xml->getChildByTagName("Convolver"))
+            {
+                engine.getConvolverProcessor().setState(juce::ValueTree::fromXml(*convXml));
+            }
+
             return;
         }
     }

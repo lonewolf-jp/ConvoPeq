@@ -4,6 +4,7 @@
 // Convolverコントロールパネルの実装
 //============================================================================
 #include "ConvolverControlPanel.h"
+#include "MixedPhaseOptimizationComponent.h"
 #include <cmath>
 #include <thread>
 
@@ -341,6 +342,10 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     irAdvancedButton.setTooltip("Open detailed IR settings");
     irAdvancedButton.addListener(this);
     addAndMakeVisible(irAdvancedButton);
+
+    optimizationProgressButton.setTooltip("Show Mixed Phase Optimization Progress");
+    optimizationProgressButton.addListener(this);
+    addAndMakeVisible(optimizationProgressButton);
 
     // Phase Choice ComboBox
     phaseChoiceBox.addItem("As-Is", 1);
@@ -761,7 +766,9 @@ void ConvolverControlPanel::resized()
     mixSlider.setBounds(controlRow1);
 
     // --- 2行目 ---
-    experimentalDirectHeadToggle.setBounds(controlRow2.removeFromLeft(controlsStartX - leftGap));
+    auto row2Left = controlRow2.removeFromLeft(controlsStartX - leftGap);
+    experimentalDirectHeadToggle.setBounds(row2Left.removeFromTop(row2Left.getHeight() / 2));
+    optimizationProgressButton.setBounds(row2Left);
 
     // スムージング時間 (Mixスライダーの下に配置)
     auto smoothingRow = controlRow2;
@@ -893,6 +900,10 @@ void ConvolverControlPanel::buttonClicked(juce::Button* button)
     {
         showIRAdvancedWindow();
     }
+    else if (button == &optimizationProgressButton)
+    {
+        showOptimizationProgressWindow();
+    }
     else if (button == &experimentalDirectHeadToggle)
     {
         engine.getConvolverProcessor().setExperimentalDirectHeadEnabled(experimentalDirectHeadToggle.getToggleState());
@@ -921,6 +932,18 @@ void ConvolverControlPanel::showIRAdvancedWindow()
     irAdvancedWindow = window;
     if (window != nullptr)
         window->setAlwaysOnTop(false);
+}
+
+void ConvolverControlPanel::showOptimizationProgressWindow()
+{
+    if (optimizationProgressWindow != nullptr)
+    {
+        optimizationProgressWindow->toFront(true);
+        return;
+    }
+
+    auto* window = MixedPhaseOptimizationWindow::show(engine.getConvolverProcessor());
+    optimizationProgressWindow = window;
 }
 
 void ConvolverControlPanel::startAsyncIRLoadPreview(const juce::File& irFile)

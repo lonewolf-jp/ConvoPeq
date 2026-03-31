@@ -119,8 +119,9 @@ public:
                 for (; i < rampSamples; ++i)
                 {
                     stepRampCurrent();
-                    dataL[i] = processSample(0, dataL[i], states[0], ramp.current, headroom);
-                    dataR[i] = processSample(1, dataR[i], states[1], ramp.current, headroom);
+                    const double* activeCoeffs = ramp.current.data();
+                    dataL[i] = processSample(0, dataL[i], states[0], activeCoeffs, headroom);
+                    dataR[i] = processSample(1, dataR[i], states[1], activeCoeffs, headroom);
                 }
             }
             else
@@ -128,7 +129,8 @@ public:
                 for (; i < rampSamples; ++i)
                 {
                     stepRampCurrent();
-                    dataL[i] = processSample(0, dataL[i], states[0], ramp.current, headroom);
+                    const double* activeCoeffs = ramp.current.data();
+                    dataL[i] = processSample(0, dataL[i], states[0], activeCoeffs, headroom);
                 }
             }
 
@@ -138,24 +140,23 @@ public:
                 ramp.current = ramp.target;
                 coeffs = ramp.target;
             }
-            else
-            {
-                coeffs = ramp.current;
-            }
         }
 
+        const double* activeCoeffs = coeffs.data();
         if (dataR != nullptr)
         {
             for (; i < numSamples; ++i)
             {
-                dataL[i] = processSample(0, dataL[i], states[0], coeffs, headroom);
-                dataR[i] = processSample(1, dataR[i], states[1], coeffs, headroom);
+                dataL[i] = processSample(0, dataL[i], states[0], activeCoeffs, headroom);
+                dataR[i] = processSample(1, dataR[i], states[1], activeCoeffs, headroom);
             }
         }
         else
         {
             for (; i < numSamples; ++i)
-                dataL[i] = processSample(0, dataL[i], states[0], coeffs, headroom);
+            {
+                dataL[i] = processSample(0, dataL[i], states[0], activeCoeffs, headroom);
+            }
         }
 
         clampStateSIMD(states[0].data());
@@ -293,34 +294,54 @@ private:
     }
 
     inline double computeFeedback(const std::array<double, kOrder>& channelState,
-                                  const std::array<double, kOrder>& activeCoeffs) const noexcept
+                                  const double* activeCoeffs) const noexcept
     {
-        double feedback = 0.0;
+        const double* state = channelState.data();
+#if defined(__AVX2__) || defined(_M_AVX2)
+        __m256d v0 = _mm256_loadu_pd(state);
+        __m256d c0 = _mm256_loadu_pd(activeCoeffs);
+        __m256d vSum = _mm256_mul_pd(v0, c0);
 
-        for (int i = 0; i < kOrder; ++i)
-            feedback = killDenormal(feedback + activeCoeffs[static_cast<size_t>(i)] * channelState[static_cast<size_t>(i)]);
+        __m256d v1 = _mm256_loadu_pd(state + 4);
+        __m256d c1 = _mm256_loadu_pd(activeCoeffs + 4);
+        vSum = _mm256_fmadd_pd(v1, c1, vSum);
 
+        // Horizontal add
+        __m128d vLow = _mm256_castpd256_pd128(vSum);
+        __m128d vHigh = _mm256_extractf128_pd(vSum, 1);
+        __m128d vSum128 = _mm_add_pd(vLow, vHigh);
+        vSum128 = _mm_hadd_pd(vSum128, vSum128);
+        double feedback = _mm_cvtsd_f64(vSum128);
+
+        feedback += state[8] * activeCoeffs[8];
         return feedback;
+#else
+        double feedback = 0.0;
+        for (int i = 0; i < kOrder; ++i)
+            feedback += activeCoeffs[i] * state[i];
+        return feedback;
+#endif
     }
 
     inline void advanceState(std::array<double, kOrder>& channelState,
                              double error,
-                             const std::array<double, kOrder>& activeCoeffs) const noexcept
+                             const double* activeCoeffs) const noexcept
     {
         double forward = error;
         double prev_backward = error;
+        double* state = channelState.data();
 
         // State clamping limit to prevent explosion
         constexpr double kLatticeStateLimit = 2.0;
 
         for (int i = 0; i < kOrder; ++i)
         {
-            const double backward = channelState[static_cast<size_t>(i)];
-            const double nextForward = killDenormal(forward + activeCoeffs[static_cast<size_t>(i)] * backward);
-            const double nextBackward = killDenormal(activeCoeffs[static_cast<size_t>(i)] * forward + backward);
+            const double backward = state[i];
+            const double nextForward = forward + activeCoeffs[i] * backward;
+            const double nextBackward = activeCoeffs[i] * forward + backward;
 
             // Clamp state to prevent numerical instability
-            channelState[static_cast<size_t>(i)] = std::clamp(prev_backward, -kLatticeStateLimit, kLatticeStateLimit);
+            state[i] = std::clamp(prev_backward, -kLatticeStateLimit, kLatticeStateLimit);
 
             forward = nextForward;
             prev_backward = nextBackward;
@@ -330,14 +351,13 @@ private:
     inline double processSample(int channel,
                                 double inputSample,
                                 std::array<double, kOrder>& channelState,
-                                const std::array<double, kOrder>& activeCoeffs,
+                                const double* activeCoeffs,
                                 double headroom) noexcept
     {
-        const double feedback = killDenormal(computeFeedback(channelState, activeCoeffs));
-        const double shapedInput = (inputSample * headroom) + feedback;
-        const double shapedInputClean = killDenormal(shapedInput);
-        const double quantized = killDenormal(quantize(shapedInputClean, rngState[channel]));
-        const double error = killDenormal(quantized - shapedInputClean);
+        const double feedback = computeFeedback(channelState, activeCoeffs);
+        const double shapedInputClean = (inputSample * headroom) + feedback;
+        const double quantized = quantize(shapedInputClean, rngState[channel]);
+        const double error = quantized - shapedInputClean;
         const double clampedError = std::clamp(error, -2.0 * scale, 2.0 * scale);
         advanceState(channelState, clampedError, activeCoeffs);
         return quantized;
