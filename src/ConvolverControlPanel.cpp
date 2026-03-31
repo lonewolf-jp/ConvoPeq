@@ -623,11 +623,43 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     updateFilterModeButtons();
     updateTrimSlider();
     updateMixedPhaseControlsEnabled();
+
+    // リスナー登録（起動時XMLロードでも通知を受ける）
+    engine.getConvolverProcessor().addListener(this);
 }
 
 ConvolverControlPanel::~ConvolverControlPanel()
 {
     stopTimer();
+    engine.getConvolverProcessor().removeListener(this);  // メモリリーク防止
+    if (optimizationProgressWindow != nullptr)
+    {
+        optimizationProgressWindow->closeButtonPressed();
+        optimizationProgressWindow = nullptr;
+    }
+}
+
+void ConvolverControlPanel::convolverParamsChanged(ConvolverProcessor* processor)
+{
+    if (processor != &engine.getConvolverProcessor()) return;
+
+    // XMLプリセットロード含む全経路で確実に進捗ウィンドウを制御
+    const float progress = processor->getLoadProgress();
+    if (progress > 0.0f && progress < 1.0f)
+    {
+        showOptimizationProgressWindow();          // 最適化中ウィンドウ表示
+    }
+    else if (optimizationProgressWindow != nullptr)
+    {
+        optimizationProgressWindow->closeButtonPressed(); // 完了で自動非表示
+        // closeButtonPressed() はウィンドウを削除するため、SafePointer は自動的に nullptr になるが、
+        // 明示的に nullptr を代入しても安全
+        optimizationProgressWindow = nullptr;
+    }
+
+    updateIRInfo();
+    updateWaveformPath();   // ← XMLロード完了時に即時グラフ更新（20秒遅延解消）
+    repaint();
 }
 
 //--------------------------------------------------------------
@@ -934,8 +966,12 @@ void ConvolverControlPanel::showIRAdvancedWindow()
         window->setAlwaysOnTop(false);
 }
 
-void ConvolverControlPanel::showOptimizationProgressWindow()
-{
+//--------------------------------------------------------------
+// showOptimizationProgressWindow
+// MixedPhaseOptimizationWindow を非モーダルで表示（最適化状況ウィンドウ）
+//--------------------------------------------------------------
+ void ConvolverControlPanel::showOptimizationProgressWindow()
+ {
     if (optimizationProgressWindow != nullptr)
     {
         optimizationProgressWindow->toFront(true);
@@ -944,7 +980,7 @@ void ConvolverControlPanel::showOptimizationProgressWindow()
 
     auto* window = new convo::MixedPhaseOptimizationWindow("Optimization Progress", engine.getConvolverProcessor());
     optimizationProgressWindow = window;
-}
+ }
 
 void ConvolverControlPanel::startAsyncIRLoadPreview(const juce::File& irFile)
 {
@@ -1266,6 +1302,15 @@ void ConvolverControlPanel::updateIRInfo()
         irInfoLabel.setText(info, juce::dontSendNotification);
         irInfoLabel.setColour(juce::Label::textColourId,
                              juce::Colours::lightgreen);
+    }
+    else if (const float progress = convolver.getLoadProgress(); progress > 0.0f && progress < 1.0f)
+    {
+        // 最適化進行中（XMLプリセットロード時も即時反映）
+        const int percent = juce::roundToInt(progress * 100.0f);
+        irInfoLabel.setText("Optimization Progress... " + juce::String(percent) + "%", juce::dontSendNotification);
+        irInfoLabel.setColour(juce::Label::textColourId, juce::Colours::orange.withAlpha(0.9f));
+        updateWaveformPath();
+        return;
     }
     else
     {

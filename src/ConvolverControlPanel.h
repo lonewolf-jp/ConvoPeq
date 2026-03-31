@@ -12,17 +12,22 @@
 //   - IR情報表示
 //============================================================================
 
+#include "MixedPhaseOptimizationComponent.h"
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 
 class ConvolverControlPanel  : public juce::Component,
                               private juce::Button::Listener,
                               private juce::Slider::Listener,
-                              private juce::Timer
+                              private juce::Timer,
+                              private ConvolverProcessor::Listener   // ← 追加
 {
 public:
     explicit ConvolverControlPanel(AudioEngine& audioEngine);
     ~ConvolverControlPanel() override;
+
+    // ConvolverProcessor::Listener
+    void convolverParamsChanged(ConvolverProcessor* processor) override;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -33,6 +38,10 @@ public:
     void updateIRInfo();
 
 private:
+    // 最適化進捗ウィンドウ（非モーダル）
+    juce::Component::SafePointer<convo::MixedPhaseOptimizationWindow> optimizationProgressWindow = nullptr;
+    void showOptimizationProgressWindow();   // MixedPhaseOptimizationWindow専用
+
     AudioEngine& engine;
 
     // 既存UIコンポーネント
@@ -94,7 +103,6 @@ private:
                                   int requestId);
     void setIRPreviewInProgress(bool isInProgress);
     void showIRAdvancedWindow();
-    void showOptimizationProgressWindow();
     // Convolver Input Trim スライダーの表示と値をエンジンの現在モードに同期する。
     // モード変更後 (バイパス切替・処理順序変更・プリセットロード) に呼ぶこと。
     void updateTrimSlider();
@@ -129,7 +137,6 @@ private:
     std::atomic<int> irPreviewRequestId { 0 };
     bool irPreviewInProgress = false;
     juce::Component::SafePointer<juce::DialogWindow> irAdvancedWindow;
-    juce::Component::SafePointer<juce::DocumentWindow> optimizationProgressWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverControlPanel)
 };
