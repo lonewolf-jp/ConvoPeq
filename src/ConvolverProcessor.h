@@ -34,6 +34,12 @@
 #include "MKLNonUniformConvolver.h"
 #include "AllpassDesigner.h"
 
+// ── Phase 0: Epoch-based RCU 基盤ヘッダー ──
+#include "GenerationManager.h"
+#include "ConvolverState.h"
+#include "SafeStateSwapper.h"
+#include "DeferredFreeThread.h"
+
 class ConvolverProcessor : public juce::ChangeBroadcaster,
                            private juce::Timer
 {
@@ -319,6 +325,14 @@ public:
     // ガベージコレクション (Message Threadから定期的に呼ぶ)
     void cleanup();
     void forceCleanup();
+
+    // ── Phase 0: Epoch-based RCU 状態更新 ──
+    // Message Thread から呼ぶ。新しい ConvolverState を atomic にスワップし、
+    // 旧状態を DeferredFreeThread に委ねる。
+    // GenerationManager で陳腐化チェックを行い、古いタスク結果は破棄する。
+    //
+    // @param newState  新しい状態（所有権を移譲）。世代チェックに失敗した場合は即削除。
+    void updateConvolverState(ConvolverState* newState);
 
 private:
     void timerCallback() override;
@@ -702,6 +716,15 @@ private:
 
     std::function<void(void*)> onSetThreadAffinity;
     std::atomic<bool> audioThreadAffinitySet{ false };
+
+    // ── Phase 0: Epoch-based RCU メンバー ──
+    // SafeStateSwapper: IR 状態の lock-free swap と retired キュー管理
+    SafeStateSwapper rcuSwapper;
+    // DeferredFreeThread: 旧 ConvolverState を Audio Thread 外で安全に解放する専用スレッド
+    // prepareToPlay() で生成、releaseResources() で停止・破棄する。
+    std::unique_ptr<DeferredFreeThread> deferredFreeThread;
+    // GenerationManager: IR ロードタスクの世代管理（陳腐化チェック用）
+    GenerationManager convolverStateGeneration;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)

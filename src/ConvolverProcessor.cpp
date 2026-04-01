@@ -1372,6 +1372,14 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     }
     oldDelay = latencySmoother.getTargetValue();
 
+    // ── Phase 0: DeferredFreeThread の起動 ──
+    // prepareToPlay() ごとに既存スレッドを安全に再起動する。
+    // （デバイス設定変更でサンプルレートが変わった場合も対応）
+    if (!deferredFreeThread)
+    {
+        deferredFreeThread = std::make_unique<DeferredFreeThread>(rcuSwapper);
+    }
+
     isPrepared.store(true, std::memory_order_release);
 }
 
@@ -1430,6 +1438,16 @@ void ConvolverProcessor::releaseResources()
         const juce::ScopedLock sl(trashBinLock);
         trashBin.clear();
     }
+
+    // ── Phase 0: DeferredFreeThread の停止と残余解放 ──
+    // Audio Thread が停止した後にこの関数が呼ばれる保証があるため、
+    // deferredFreeThread を破棄しても UAF は発生しない。
+    // ~DeferredFreeThread() 内で残った retired エントリを強制解放する。
+    deferredFreeThread.reset();
+
+    // rcuSwapper に残っているエントリも念のため強制解放
+    while (auto* ptr = rcuSwapper.tryReclaim(std::numeric_limits<uint64_t>::max()))
+        delete ptr;
 
     isPrepared.store(false, std::memory_order_release);
 }
@@ -2365,6 +2383,35 @@ void ConvolverProcessor::forceCleanup()
 
     for (size_t i = 0; i < stereoConvolversToDeleteCount; ++i)
         stereoConvolversToDelete.get()[i].first->release();
+}
+
+//--------------------------------------------------------------
+// updateConvolverState  ── Phase 0: Epoch-based RCU 状態更新
+//
+// Message Thread から呼ぶ。GenerationManager による陳腐化チェックを行い、
+// 現在世代と一致する場合のみ SafeStateSwapper::swap() に渡す。
+// 不一致の場合（古いタスク結果）は newState を即時 delete して破棄する。
+//
+// 旧 ConvolverState の解放は DeferredFreeThread が非同期に行うため、
+// Audio Thread のリアルタイム性は維持される。
+//--------------------------------------------------------------
+void ConvolverProcessor::updateConvolverState(ConvolverState* newState)
+{
+    jassert(newState != nullptr);
+    if (!newState) return;
+
+    // 陳腐化チェック: タスク起動時の世代と現在の世代を比較
+    if (!convolverStateGeneration.isCurrentGeneration(newState->generationId))
+    {
+        // 古いタスクの結果 → Message Thread で直接解放（Audio Thread は既に離れている）
+        DBG("ConvolverProcessor::updateConvolverState: stale generation, discarding state (gen="
+            + juce::String((int)newState->generationId) + ")");
+        delete newState;
+        return;
+    }
+
+    // 最新世代 → atomic swap（旧状態は DeferredFreeThread が解放）
+    rcuSwapper.swap(newState);
 }
 
 //--------------------------------------------------------------
