@@ -2472,6 +2472,11 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
 
     runtime.reallocate(newState->fftSize, newState->numPartitions);
     updateConvolverState(std::move(newState));
+
+    // Phase 1 path compatibility: notify UI/listeners after successful state swap.
+    postCoalescedChangeNotification();
+    listeners.call(&Listener::convolverParamsChanged, this);
+    setLoadingProgress(1.0f);
 }
 
 void ConvolverProcessor::handleLoadError(const juce::String& error)

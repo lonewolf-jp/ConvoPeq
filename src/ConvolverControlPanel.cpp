@@ -7,7 +7,6 @@
 #include "MixedPhaseOptimizationComponent.h"
 #include "ConvolverSettingsComponent.h"
 #include <cmath>
-#include <thread>
 
 namespace
 {
@@ -938,7 +937,7 @@ void ConvolverControlPanel::buttonClicked(juce::Button* button)
             if (fc.getResults().isEmpty())
                 return;
 
-            safeThis->startAsyncIRLoadPreview(fc.getResult());
+            safeThis->engine.getConvolverProcessor().loadIR(fc.getResult());
         });
     }
     else if (button == &irAdvancedButton)
@@ -1021,135 +1020,6 @@ void ConvolverControlPanel::showConvolverSettingsWindow()
     auto* window = new convo::MixedPhaseOptimizationWindow("Optimization Progress", engine.getConvolverProcessor());
     optimizationProgressWindow = window;
  }
-
-void ConvolverControlPanel::startAsyncIRLoadPreview(const juce::File& irFile)
-{
-    const int requestId = irPreviewRequestId.fetch_add(1, std::memory_order_acq_rel) + 1;
-    const double analysisSampleRate = engine.getProcessingSampleRate() > 0.0
-                                    ? engine.getProcessingSampleRate()
-                                    : engine.getSampleRate();
-
-    setIRPreviewInProgress(true);
-
-    juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
-    std::thread([safeThis, irFile, requestId, analysisSampleRate]()
-    {
-        const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(irFile, analysisSampleRate);
-
-        const bool queued = juce::MessageManager::callAsync([safeThis, irFile, requestId, preview]()
-        {
-            if (safeThis == nullptr)
-                return;
-
-            safeThis->finishAsyncIRLoadPreview(irFile, preview, requestId);
-        });
-
-        if (!queued)
-        {
-            juce::MessageManagerLock mmLock;
-            if (mmLock.lockWasGained() && safeThis != nullptr)
-                safeThis->finishAsyncIRLoadPreview(irFile, preview, requestId);
-        }
-    }).detach();
-}
-
-void ConvolverControlPanel::finishAsyncIRLoadPreview(const juce::File& irFile,
-                                                     const ConvolverProcessor::IRLoadPreview& preview,
-                                                     int requestId)
-{
-    if (requestId != irPreviewRequestId.load(std::memory_order_acquire))
-        return;
-
-    setIRPreviewInProgress(false);
-
-    const auto applyPreviewIRLengthAndLoad = [this, irFile](float targetLengthSec)
-    {
-        auto& panelConvolver = engine.getConvolverProcessor();
-        panelConvolver.applyAutoDetectedIRLength(targetLengthSec);
-        pendingIrLengthSec = targetLengthSec;
-        pendingIrLengthDirty = false;
-        updateIRInfo();
-        engine.requestConvolverPreset(irFile);
-    };
-
-    if (!preview.success)
-    {
-        juce::NativeMessageBox::showAsync(
-            juce::MessageBoxOptions()
-                .withIconType(juce::MessageBoxIconType::WarningIcon)
-                .withTitle("IR Load Error")
-                .withMessage(preview.errorMessage.isNotEmpty() ? preview.errorMessage
-                                                               : "Failed to analyze the selected IR file.")
-                .withButton("OK"),
-            nullptr);
-        updateIRInfo();
-        return;
-    }
-
-    if (preview.exceedsHardLimit)
-    {
-        juce::NativeMessageBox::showAsync(
-            juce::MessageBoxOptions()
-                .withIconType(juce::MessageBoxIconType::WarningIcon)
-                .withTitle("IR Too Long")
-                .withMessage("The processed IR length is " + juce::String(preview.autoDetectedLengthSec, 2)
-                             + " s, which exceeds the current hard limit of "
-                             + juce::String(preview.hardMaxSec, 2)
-                             + " s at this sample rate.\n\nPlease use a shorter IR or lower the sample rate.")
-                .withButton("OK"),
-            nullptr);
-        updateIRInfo();
-        return;
-    }
-
-    if (preview.exceedsRecommended)
-    {
-        juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
-        juce::NativeMessageBox::showAsync(
-            juce::MessageBoxOptions()
-                .withIconType(juce::MessageBoxIconType::WarningIcon)
-                .withTitle("Long IR Warning")
-                .withMessage("The processed IR length is " + juce::String(preview.autoDetectedLengthSec, 2)
-                             + " s.\n\n3.00 s is the recommended limit for room correction IRs. Longer tails may increase rebuild time, CPU load, and phase-processing side effects.\n\nChoose how to continue.")
-                .withButton("Trim to 3 s")
-                .withButton("Load as-is")
-                .withButton("Cancel"),
-            [safeThis, requestId, detectedLengthSec = preview.autoDetectedLengthSec, applyPreviewIRLengthAndLoad](int result)
-            {
-                if (safeThis == nullptr)
-                    return;
-
-                if (requestId != safeThis->irPreviewRequestId.load(std::memory_order_acquire))
-                    return;
-
-                if (result == 0)
-                {
-                    applyPreviewIRLengthAndLoad(ConvolverProcessor::IR_LENGTH_MAX_SEC);
-                }
-                else if (result == 1)
-                {
-                    applyPreviewIRLengthAndLoad(detectedLengthSec);
-                }
-                else
-                {
-                    safeThis->updateIRInfo();
-                }
-            });
-        return;
-    }
-
-    applyPreviewIRLengthAndLoad(preview.autoDetectedLengthSec);
-}
-
-void ConvolverControlPanel::setIRPreviewInProgress(bool isInProgress)
-{
-    irPreviewInProgress = isInProgress;
-    loadIRButton.setEnabled(!isInProgress);
-    irAdvancedButton.setEnabled(!isInProgress);
-    convolverSettingsButton.setEnabled(!isInProgress);
-    loadIRButton.setButtonText(isInProgress ? "Analyzing..." : "Load IR...");
-    updateIRInfo();
-}
 
 //--------------------------------------------------------------
 // sliderValueChanged
@@ -1355,16 +1225,6 @@ void ConvolverControlPanel::updateIRInfo()
     }
     else
     {
-        if (irPreviewInProgress)
-        {
-            irInfoLabel.setText("Analyzing IR...", juce::dontSendNotification);
-            irInfoLabel.setColour(juce::Label::textColourId,
-                                 juce::Colours::orange.withAlpha(0.8f));
-            irInfoLabel.setTooltip("Preprocessing the selected IR to estimate the effective length.");
-            updateWaveformPath();
-            return;
-        }
-
         // エラーがある場合は赤字で表示
         if (convolver.getLastError().isNotEmpty())
         {
