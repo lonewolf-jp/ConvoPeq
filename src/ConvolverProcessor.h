@@ -159,7 +159,8 @@ public:
                                  double sampleRate,
                                  int currentFFTSize,
                                  uint64_t generation,
-                                 uint64_t baseKey);
+                                 uint64_t baseKey,
+                                 int targetLengthSamples);
 
     void setTargetUpgradeFFTSize(int fftSize);
     int getTargetUpgradeFFTSize() const;
@@ -275,7 +276,7 @@ public:
     //----------------------------------------------------------
     // 状態取得
     //----------------------------------------------------------
-    bool isIRLoaded() const { return convolution.load() != nullptr; }
+    bool isIRLoaded() const { return rcuSwapper.getState() != nullptr; }
     juce::String getIRName() const { return irName; }
     int getIRLength() const { return irLength.load(std::memory_order_acquire); }
     juce::String getLastError() const { return lastError; }
@@ -374,6 +375,7 @@ private:
 
     void applyNewState(StereoConvolver* newConv, std::shared_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::shared_ptr<juce::AudioBuffer<double>> displayIR);
     void handleLoadError(const juce::String& error);
+    void createWaveformSnapshotFromPrepared(const PreparedIRState& prepared);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
     int computeTargetIRLength(double sampleRate, int originalLength) const;

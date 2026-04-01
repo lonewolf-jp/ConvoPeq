@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <JuceHeader.h>
 #include <mkl.h>
 
 struct PreparedIRState
@@ -15,6 +16,8 @@ struct PreparedIRState
     double sampleRate = 0.0;
     uint64_t generationId = 0;
     uint64_t cacheKey = 0;
+    juce::String originalFileName;
+    juce::String originalFilePath;
 
     PreparedIRState() = default;
 
@@ -26,7 +29,9 @@ struct PreparedIRState
           numChannels(other.numChannels),
           sampleRate(other.sampleRate),
           generationId(other.generationId),
-          cacheKey(other.cacheKey)
+          cacheKey(other.cacheKey),
+          originalFileName(std::move(other.originalFileName)),
+          originalFilePath(std::move(other.originalFilePath))
     {
         other.partitionData = nullptr;
         other.partitionSizeBytes = 0;
@@ -47,6 +52,8 @@ struct PreparedIRState
             sampleRate = other.sampleRate;
             generationId = other.generationId;
             cacheKey = other.cacheKey;
+            originalFileName = std::move(other.originalFileName);
+            originalFilePath = std::move(other.originalFilePath);
 
             other.partitionData = nullptr;
             other.partitionSizeBytes = 0;

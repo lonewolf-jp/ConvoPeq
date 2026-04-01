@@ -12,6 +12,7 @@ ProgressiveUpgradeThread::ProgressiveUpgradeThread(ConvolverProcessor& p,
                                                    double sr,
                                                    int currentFft,
                                                    int targetFft,
+                                                   int targetLength,
                                                    int phase,
                                                    uint64_t baseGeneration,
                                                    uint64_t key,
@@ -23,6 +24,7 @@ ProgressiveUpgradeThread::ProgressiveUpgradeThread(ConvolverProcessor& p,
             sampleRate(sr),
             currentFFTSize(currentFft),
             targetFFTSize(targetFft),
+            targetLengthSamples(targetLength),
             phaseMode(phase),
       taskGeneration(baseGeneration),
             baseCacheKey(key),
@@ -72,17 +74,18 @@ void ProgressiveUpgradeThread::run()
     if (checkAndCancel())
         return;
 
-    for (int step : upgradeSteps)
+    for (size_t i = 0; i < upgradeSteps.size(); ++i)
     {
         if (!isGenerationValid())
             return;
 
-        if (!upgradeStep(step))
+        const bool isFinalStep = (i == upgradeSteps.size() - 1);
+        if (!upgradeStep(upgradeSteps[i], isFinalStep))
             return;
     }
 }
 
-bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
+bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize, bool isFinalStep)
 {
     if (!isGenerationValid())
         return false;
@@ -91,7 +94,7 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
                                                       nextFFTSize,
                                                       sampleRate,
                                                       phaseMode,
-                                                      nextFFTSize);
+                                                      targetLengthSamples);
 
     auto prepared = cacheManager.load(stepKey, nextFFTSize, taskGeneration);
     if (!prepared)
@@ -99,6 +102,7 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
         prepared = converter.convertToHighRes(irFile,
                                               sampleRate,
                                               nextFFTSize,
+                                              targetLengthSamples,
                                               taskGeneration,
                                               stepKey,
                                               [this]()
@@ -118,12 +122,22 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
     if (!isGenerationValid())
         return false;
 
-    juce::MessageManager::callAsync([this, prepared = std::move(prepared)]() mutable
+    juce::MessageManager::callAsync([this, prepared = std::move(prepared), isFinalStep]() mutable
     {
         if (this->checkAndCancel())
             return;
 
-        processor.applyPreparedIRState(std::move(prepared));
+        // Only update UI visualization on final step to avoid multiple updates
+        if (!isFinalStep)
+        {
+            processor.setVisualizationEnabled(false);
+            processor.applyPreparedIRState(std::move(prepared));
+            processor.setVisualizationEnabled(true);
+        }
+        else
+        {
+            processor.applyPreparedIRState(std::move(prepared));
+        }
     });
 
     return true;

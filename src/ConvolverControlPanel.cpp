@@ -1190,10 +1190,11 @@ void ConvolverControlPanel::updateIRInfo()
         else
             info += " [Auto]";
 
-        // A = algorithm latency, T = total latency (= algorithm + IR peak latency)
-        const int algorithmLatencySamples = convolver.getLatencySamples();
-        const int totalLatencySamples = convolver.getTotalLatencySamples();
-        const double processingSampleRate = engine.getProcessingSampleRate();
+        // A = convolver algorithm latency, T = convolver total latency (base sample rate)
+        const auto latency = engine.getCurrentLatencyBreakdown();
+        const int algorithmLatencySamples = latency.convolverAlgorithmLatencyBaseRateSamples;
+        const int totalLatencySamples = latency.convolverTotalLatencyBaseRateSamples;
+        const double processingSampleRate = engine.getSampleRate();
 
         const auto toRoundedMsInt = [processingSampleRate](int samples) -> int
         {
