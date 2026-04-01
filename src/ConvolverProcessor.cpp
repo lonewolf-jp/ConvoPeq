@@ -1544,6 +1544,20 @@ void ConvolverProcessor::requestDebouncedRebuild()
             if (!self->isIRLoaded() || self->isLoading.load(std::memory_order_acquire))
                 return;
 
+            // Phase 1 path: originalIR not set; reload from file instead.
+            auto snapIR = self->originalIR.load();
+            if (!snapIR || snapIR->getNumSamples() == 0)
+            {
+                juce::File irFile;
+                {
+                    const juce::ScopedLock sl(self->irFileLock);
+                    irFile = self->currentIrFile;
+                }
+                if (irFile.existsAsFile())
+                    self->loadIR(irFile);
+                return;
+            }
+
             self->loadImpulseResponse(juce::File());
         }
     });
@@ -2486,6 +2500,10 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
                                                       prepared->generationId,
                                                       prepared->sampleRate);
 
+    // Waveform snapshot must be created BEFORE partitionData is set to nullptr
+    if (visualizationEnabled)
+        createWaveformSnapshotFromPrepared(*prepared);
+
     prepared->partitionData = nullptr;
 
     activeCacheKey.store(prepared->cacheKey, std::memory_order_release);
@@ -2502,14 +2520,15 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
     if (prepared->originalFileName.isNotEmpty())
         irName = prepared->originalFileName;
 
+    // Use actual IR sample count (numSamples) for accurate length display.
+    // Fall back to partition buffer size if numSamples is not available (e.g. cache load).
     const int safeChannels = juce::jmax(1, prepared->numChannels);
-    const size_t totalSamples = prepared->partitionSizeBytes / sizeof(double);
-    const size_t samplesPerChannel = totalSamples / static_cast<size_t>(safeChannels);
-    irLength.store(static_cast<int>(juce::jmin<size_t>(samplesPerChannel, static_cast<size_t>(std::numeric_limits<int>::max()))),
-                   std::memory_order_release);
-
-    if (visualizationEnabled)
-        createWaveformSnapshotFromPrepared(*prepared);
+    const int actualSamples = (prepared->numSamples > 0)
+        ? prepared->numSamples
+        : static_cast<int>(juce::jmin<size_t>(
+              prepared->partitionSizeBytes / sizeof(double) / static_cast<size_t>(safeChannels),
+              static_cast<size_t>(std::numeric_limits<int>::max())));
+    irLength.store(actualSamples, std::memory_order_release);
 
     // Phase 1 path compatibility: notify UI/listeners after successful state swap.
     lastError.clear();
@@ -4096,6 +4115,18 @@ int ConvolverProcessor::getRebuildDebounceMs() const
 ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() const
 {
     LatencyBreakdown breakdown;
+
+    // Phase 1 path: derive latency from rcuSwapper state's fftSize.
+    // For NUC partitioned convolution, algorithm latency = partition size (fftSize).
+    if (auto* state = rcuSwapper.getState())
+    {
+        breakdown.algorithmLatencySamples = juce::jmax(0, state->fftSize);
+        breakdown.irPeakLatencySamples = 0;
+        breakdown.totalLatencySamples = breakdown.algorithmLatencySamples;
+        return breakdown;
+    }
+
+    // Phase 0 path: read from legacy convolution engine pointer.
     if (auto* conv = convolution.load(std::memory_order_acquire))
     {
         const bool directHeadActive = conv->storedDirectHeadEnabled;

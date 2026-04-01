@@ -11,6 +11,7 @@ struct PreparedIRState
     double* partitionData = nullptr;
     size_t partitionSizeBytes = 0;
     int numPartitions = 0;
+    int numSamples = 0;        // actual IR sample count (before partition padding)
     int fftSize = 0;
     int numChannels = 0;
     double sampleRate = 0.0;
@@ -25,6 +26,7 @@ struct PreparedIRState
         : partitionData(other.partitionData),
           partitionSizeBytes(other.partitionSizeBytes),
           numPartitions(other.numPartitions),
+          numSamples(other.numSamples),
           fftSize(other.fftSize),
           numChannels(other.numChannels),
           sampleRate(other.sampleRate),
@@ -47,6 +49,7 @@ struct PreparedIRState
             partitionData = other.partitionData;
             partitionSizeBytes = other.partitionSizeBytes;
             numPartitions = other.numPartitions;
+            numSamples = other.numSamples;
             fftSize = other.fftSize;
             numChannels = other.numChannels;
             sampleRate = other.sampleRate;

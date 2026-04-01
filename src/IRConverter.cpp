@@ -143,6 +143,7 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
     prepared->partitionSizeBytes = bytes;
     prepared->numPartitions = numPartitions * usableChannels;
     prepared->fftSize = fftSize;
+    prepared->numSamples = samples;    // actual IR length before partition padding
     prepared->numChannels = usableChannels;
     prepared->sampleRate = (config.targetSampleRate > 0.0) ? config.targetSampleRate : sourceRate;
     prepared->generationId = config.generationId;
