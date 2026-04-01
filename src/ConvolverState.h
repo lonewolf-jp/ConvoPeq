@@ -85,7 +85,7 @@ struct ConvolverState
 {
     // --- FFT 作業バッファ（mkl_malloc 64-byte アライン）---
     // Audio Thread 側は .load() で取得して読み書きする。
-    std::atomic<double*> partitionData {nullptr};   // IR 周波数領域パーティション
+    double* partitionData = nullptr;                // IR 周波数領域パーティション
     std::atomic<double*> overlapBuffer {nullptr};   // OLA オーバーラップ
     std::atomic<double*> inputBuffer   {nullptr};   // FFT 入力作業領域
     std::atomic<double*> outputBuffer  {nullptr};   // FFT 出力作業領域
@@ -134,7 +134,7 @@ struct ConvolverState
         jassert(data != nullptr);
         jassert(((uintptr_t)data % 64) == 0 && "ConvolverState: MKL Memory Alignment Failed!");
 
-        partitionData.store(data, std::memory_order_relaxed);
+        partitionData = data;
 
         // 作業バッファ確保ヘルパー（失敗時は std::bad_alloc を throw）
         auto safeMalloc = [](size_t bytes) -> double*
@@ -186,7 +186,7 @@ struct ConvolverState
         if (cleanedUp.exchange(true, std::memory_order_acq_rel)) return;
 
         // 各 atomic ポインタを nullptr に swap して古いポインタを解放
-        if (auto* p = partitionData.exchange(nullptr, std::memory_order_relaxed)) convo::aligned_free(p);
+        if (auto* p = partitionData) { partitionData = nullptr; convo::aligned_free(p); }
         if (auto* p = overlapBuffer.exchange(nullptr, std::memory_order_relaxed))  convo::aligned_free(p);
         if (auto* p = inputBuffer.exchange(nullptr, std::memory_order_relaxed))    convo::aligned_free(p);
         if (auto* p = outputBuffer.exchange(nullptr, std::memory_order_relaxed))   convo::aligned_free(p);
@@ -200,8 +200,8 @@ struct ConvolverState
     // -----------------------------------------------------------------------
     ConvolverState(ConvolverState&& o) noexcept
     {
-        partitionData.store(o.partitionData.exchange(nullptr, std::memory_order_relaxed),
-                            std::memory_order_relaxed);
+        partitionData = o.partitionData;
+        o.partitionData = nullptr;
         overlapBuffer.store(o.overlapBuffer.exchange(nullptr, std::memory_order_relaxed),
                             std::memory_order_relaxed);
         inputBuffer.store(o.inputBuffer.exchange(nullptr, std::memory_order_relaxed),
@@ -230,8 +230,8 @@ struct ConvolverState
         {
             cleanup();
 
-            partitionData.store(o.partitionData.exchange(nullptr, std::memory_order_relaxed),
-                                std::memory_order_relaxed);
+            partitionData = o.partitionData;
+            o.partitionData = nullptr;
             overlapBuffer.store(o.overlapBuffer.exchange(nullptr, std::memory_order_relaxed),
                                 std::memory_order_relaxed);
             inputBuffer.store(o.inputBuffer.exchange(nullptr, std::memory_order_relaxed),

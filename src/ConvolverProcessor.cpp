@@ -20,6 +20,9 @@
 #include "InputBitDepthTransform.h"
 #include "UltraHighRateDCBlocker.h"
 #include "AllpassDesigner.h"
+#include "IRConverter.h"
+#include "CacheManager.h"
+#include "ProgressiveUpgradeThread.h"
 
 #include <mkl.h>
 #include <mkl_vml.h>
@@ -1141,6 +1144,8 @@ private:
 ConvolverProcessor::ConvolverProcessor()
     : mixSmoother(1.0f)
 {
+    irConverter = std::make_unique<IRConverter>();
+    cacheManager = std::make_unique<CacheManager>();
 }
 
 //--------------------------------------------------------------
@@ -1148,6 +1153,7 @@ ConvolverProcessor::ConvolverProcessor()
 //--------------------------------------------------------------
 ConvolverProcessor::~ConvolverProcessor()
 {
+    stopUpgradeThread();
     stopTimer();
     forceCleanup();
     // スレッドを停止
@@ -1385,6 +1391,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void ConvolverProcessor::releaseResources()
 {
+    stopUpgradeThread();
     forceCleanup();
     // 【パッチ2】LoaderThread を先に停止し、解放後の非同期コールバックを防ぐ
     // activeLoader.reset() → stopThread(4000) → ~LoaderThread() の順で安全に停止される。
@@ -1448,6 +1455,8 @@ void ConvolverProcessor::releaseResources()
     // rcuSwapper に残っているエントリも念のため強制解放
     while (auto* ptr = rcuSwapper.tryReclaim(std::numeric_limits<uint64_t>::max()))
         delete ptr;
+
+    runtime.clear();
 
     isPrepared.store(false, std::memory_order_release);
 }
@@ -2257,6 +2266,97 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     return true;
 }
 
+void ConvolverProcessor::stopUpgradeThread()
+{
+    if (upgradeThread)
+    {
+        upgradeThread->cancel();
+        upgradeThread->stopThread(2000);
+        upgradeThread.reset();
+    }
+}
+
+void ConvolverProcessor::loadIR(const juce::File& irFile)
+{
+    JUCE_ASSERT_MESSAGE_THREAD;
+
+    if (!irFile.existsAsFile())
+        return;
+
+    stopUpgradeThread();
+
+    const uint64_t generation = convolverStateGeneration.bumpGeneration();
+    const double sr = currentSampleRate.load(std::memory_order_acquire);
+    const int lowResFFT = 512;
+    const int highResFFT = 4096;
+
+    const uint64_t lowResKey = CacheManager::computeKey(irFile, lowResFFT, sr, static_cast<int>(getPhaseMode()), lowResFFT);
+
+    if (cacheManager)
+    {
+        auto cached = cacheManager->load(lowResKey, generation);
+        if (cached)
+        {
+            applyPreparedIRState(std::move(cached));
+        }
+        else if (irConverter)
+        {
+            IRConverter::ConvertConfig cfg;
+            cfg.fftSize = lowResFFT;
+            cfg.targetSampleRate = sr;
+            cfg.phaseMode = static_cast<int>(getPhaseMode());
+            cfg.partitionSize = lowResFFT;
+            cfg.generationId = generation;
+            cfg.cacheKey = lowResKey;
+
+            auto prepared = irConverter->convertFile(irFile, cfg, [this, generation]()
+            {
+                return !convolverStateGeneration.isCurrentGeneration(generation);
+            });
+
+            if (prepared)
+            {
+                cacheManager->save(lowResKey, *prepared);
+                applyPreparedIRState(std::move(prepared));
+            }
+        }
+    }
+
+    if (irConverter && cacheManager)
+    {
+        const uint64_t highResKey = CacheManager::computeKey(irFile, highResFFT, sr, static_cast<int>(getPhaseMode()), highResFFT);
+        upgradeThread = std::make_unique<ProgressiveUpgradeThread>(*this,
+                                                                    irFile,
+                                                                    sr,
+                                                                    highResFFT,
+                                                                    generation,
+                                                                    highResKey,
+                                                                    *irConverter,
+                                                                    *cacheManager);
+        upgradeThread->startThread();
+    }
+}
+
+void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> prepared)
+{
+    if (!prepared)
+        return;
+
+    JUCE_ASSERT_MESSAGE_THREAD;
+
+    auto newState = std::make_unique<ConvolverState>(prepared->partitionData,
+                                                      prepared->partitionSizeBytes,
+                                                      prepared->numPartitions,
+                                                      prepared->fftSize,
+                                                      prepared->generationId,
+                                                      prepared->sampleRate);
+
+    prepared->partitionData = nullptr;
+
+    runtime.reallocate(newState->fftSize, newState->numPartitions);
+    updateConvolverState(std::move(newState));
+}
+
 void ConvolverProcessor::handleLoadError(const juce::String& error)
 {
     lastError = error;
@@ -2397,8 +2497,11 @@ void ConvolverProcessor::forceCleanup()
 //--------------------------------------------------------------
 void ConvolverProcessor::updateConvolverState(ConvolverState* newState)
 {
+    JUCE_ASSERT_MESSAGE_THREAD;
     jassert(newState != nullptr);
     if (!newState) return;
+
+    jassert(!writerActive.exchange(true, std::memory_order_acquire));
 
     // 陳腐化チェック: タスク起動時の世代と現在の世代を比較
     if (!convolverStateGeneration.isCurrentGeneration(newState->generationId))
@@ -2407,11 +2510,18 @@ void ConvolverProcessor::updateConvolverState(ConvolverState* newState)
         DBG("ConvolverProcessor::updateConvolverState: stale generation, discarding state (gen="
             + juce::String((int)newState->generationId) + ")");
         delete newState;
+        writerActive.store(false, std::memory_order_release);
         return;
     }
 
     // 最新世代 → atomic swap（旧状態は DeferredFreeThread が解放）
     rcuSwapper.swap(newState);
+    writerActive.store(false, std::memory_order_release);
+}
+
+void ConvolverProcessor::updateConvolverState(std::unique_ptr<ConvolverState> newState)
+{
+    updateConvolverState(newState.release());
 }
 
 //--------------------------------------------------------------

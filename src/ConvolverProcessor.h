@@ -39,6 +39,12 @@
 #include "ConvolverState.h"
 #include "SafeStateSwapper.h"
 #include "DeferredFreeThread.h"
+#include "PreparedIRState.h"
+#include "ConvolverRuntime.h"
+
+class IRConverter;
+class CacheManager;
+class ProgressiveUpgradeThread;
 
 class ConvolverProcessor : public juce::ChangeBroadcaster,
                            private juce::Timer
@@ -146,6 +152,9 @@ public:
     // @return true=読み込み開始成功（非同期）, false=開始失敗
     //----------------------------------------------------------
     bool loadImpulseResponse(const juce::File& irFile, bool optimizeForRealTime = false);
+    void loadIR(const juce::File& irFile);
+    void applyPreparedIRState(std::unique_ptr<PreparedIRState> prepared);
+    void stopUpgradeThread();
 
     // メイン処理（Audio Thread）
     //
@@ -333,6 +342,12 @@ public:
     //
     // @param newState  新しい状態（所有権を移譲）。世代チェックに失敗した場合は即削除。
     void updateConvolverState(ConvolverState* newState);
+    void updateConvolverState(std::unique_ptr<ConvolverState> newState);
+
+    bool isConvolverGenerationCurrent(uint64_t generation) const
+    {
+        return convolverStateGeneration.isCurrentGeneration(generation);
+    }
 
 private:
     void timerCallback() override;
@@ -716,6 +731,12 @@ private:
 
     std::function<void(void*)> onSetThreadAffinity;
     std::atomic<bool> audioThreadAffinitySet{ false };
+
+    std::unique_ptr<IRConverter> irConverter;
+    std::unique_ptr<CacheManager> cacheManager;
+    std::unique_ptr<ProgressiveUpgradeThread> upgradeThread;
+    ConvolverRuntime runtime;
+    std::atomic<bool> writerActive { false };
 
     // ── Phase 0: Epoch-based RCU メンバー ──
     // SafeStateSwapper: IR 状態の lock-free swap と retired キュー管理

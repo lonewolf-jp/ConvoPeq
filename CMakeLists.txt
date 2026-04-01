@@ -120,6 +120,9 @@ target_sources(ConvoPeq PRIVATE
     src/CustomInputOversampler.cpp
     src/AudioEngineProcessor.cpp
     src/ConvolverProcessor.cpp
+    src/IRConverter.cpp
+    src/CacheManager.cpp
+    src/ProgressiveUpgradeThread.cpp
     src/MKLNonUniformConvolver.cpp
     src/EQProcessor.cpp
     src/ConvolverControlPanel.cpp
@@ -138,6 +141,11 @@ target_sources(ConvoPeq PRIVATE
     src/MKLNonUniformConvolver.h
     src/OutputFilter.h
     src/AllpassDesigner.h
+    src/PreparedIRState.h
+    src/ConvolverRuntime.h
+    src/IRConverter.h
+    src/CacheManager.h
+    src/ProgressiveUpgradeThread.h
     src/MixedPhaseOptimizationComponent.cpp
 )
 

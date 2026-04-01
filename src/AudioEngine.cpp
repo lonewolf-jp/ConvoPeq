@@ -860,7 +860,7 @@ void AudioEngine::publishCoeffsToBank(int bankIndex, const double* coeffs)
 
     // 【安全性向上】Audio Thread からの呼び出しをブロック（デバッグビルド）
     // Message Thread またはオフラインレンダリング時のみ許可
-    jassert (juce::MessageManager::getInstance()->isCurrentlyOnMessageThread());
+    jassert (juce::MessageManager::existsAndIsCurrentThread());
 
     auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
 
@@ -3324,7 +3324,7 @@ void AudioEngine::requestEqPresetFromText(const juce::File& file)
 
 void AudioEngine::requestConvolverPreset(const juce::File& irFile)
 {
-    uiConvolverProcessor.loadImpulseResponse (irFile);
+    uiConvolverProcessor.loadIR(irFile);
 }
 
 void AudioEngine::requestLoadState (const juce::ValueTree& state)

@@ -1,0 +1,36 @@
+#pragma once
+
+#include <functional>
+#include <memory>
+
+#include <JuceHeader.h>
+
+#include "PreparedIRState.h"
+
+class IRConverter
+{
+public:
+    struct ConvertConfig
+    {
+        int fftSize = 512;
+        int phaseMode = 0;
+        int partitionSize = 512;
+        double targetSampleRate = 0.0;
+        uint64_t generationId = 0;
+        uint64_t cacheKey = 0;
+    };
+
+    std::unique_ptr<PreparedIRState> convertFile(const juce::File& irFile,
+                                                 const ConvertConfig& config,
+                                                 const std::function<bool()>& shouldCancel) const;
+
+private:
+    static bool loadAudioFile(const juce::File& file,
+                              juce::AudioBuffer<double>& out,
+                              double& sampleRateOut);
+
+    static juce::AudioBuffer<double> resampleLinear(const juce::AudioBuffer<double>& input,
+                                                    double srcRate,
+                                                    double dstRate,
+                                                    const std::function<bool()>& shouldCancel);
+};
