@@ -155,6 +155,20 @@ public:
     void loadIR(const juce::File& irFile);
     void applyPreparedIRState(std::unique_ptr<PreparedIRState> prepared);
     void stopUpgradeThread();
+    void startProgressiveUpgrade(const juce::File& file,
+                                 double sampleRate,
+                                 int currentFFTSize,
+                                 uint64_t generation,
+                                 uint64_t baseKey);
+
+    void setTargetUpgradeFFTSize(int fftSize);
+    int getTargetUpgradeFFTSize() const;
+    void setEnableProgressiveUpgrade(bool enable);
+    bool isProgressiveUpgradeEnabled() const;
+    void setMaxCacheEntries(size_t maxEntries);
+    size_t getMaxCacheEntries() const;
+    void clearCache();
+    bool isCacheEntrySafeToDelete(uint64_t cacheKey, int fftSize) const;
 
     // メイン処理（Audio Thread）
     //
@@ -737,6 +751,11 @@ private:
     std::unique_ptr<ProgressiveUpgradeThread> upgradeThread;
     ConvolverRuntime runtime;
     std::atomic<bool> writerActive { false };
+    std::atomic<int> targetUpgradeFFTSize { 4096 };
+    std::atomic<bool> enableProgressiveUpgrade { true };
+    std::atomic<size_t> maxCacheEntries { 10 };
+    std::atomic<uint64_t> activeCacheKey { 0 };
+    std::atomic<int> activeCacheFFTSize { 0 };
 
     // ── Phase 0: Epoch-based RCU メンバー ──
     // SafeStateSwapper: IR 状態の lock-free swap と retired キュー管理

@@ -147,3 +147,19 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
 
     return prepared;
 }
+
+std::unique_ptr<PreparedIRState> IRConverter::convertToHighRes(const juce::File& irFile,
+                                                               double sampleRate,
+                                                               int nextFFTSize,
+                                                               uint64_t generationId,
+                                                               uint64_t cacheKey,
+                                                               const std::function<bool()>& shouldCancel) const
+{
+    ConvertConfig cfg;
+    cfg.fftSize = nextFFTSize;
+    cfg.partitionSize = nextFFTSize;
+    cfg.targetSampleRate = sampleRate;
+    cfg.generationId = generationId;
+    cfg.cacheKey = cacheKey;
+    return convertFile(irFile, cfg, shouldCancel);
+}

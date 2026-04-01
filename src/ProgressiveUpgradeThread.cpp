@@ -9,8 +9,10 @@
 
 ProgressiveUpgradeThread::ProgressiveUpgradeThread(ConvolverProcessor& p,
                                                    const juce::File& file,
-                                                   double targetSR,
-                                                   int fft,
+                                                   double sr,
+                                                   int currentFft,
+                                                   int targetFft,
+                                                   int phase,
                                                    uint64_t baseGeneration,
                                                    uint64_t key,
                                                    IRConverter& conv,
@@ -18,13 +20,21 @@ ProgressiveUpgradeThread::ProgressiveUpgradeThread(ConvolverProcessor& p,
     : juce::Thread("ConvolverProgressiveUpgrade"),
       processor(p),
       irFile(file),
-      sampleRate(targetSR),
-      targetFFTSize(fft),
+            sampleRate(sr),
+            currentFFTSize(currentFft),
+            targetFFTSize(targetFft),
+            phaseMode(phase),
       taskGeneration(baseGeneration),
-      cacheKey(key),
+            baseCacheKey(key),
       converter(conv),
       cacheManager(cache)
 {
+        static constexpr int kStepTable[] = { 1024, 2048, 4096 };
+        for (int step : kStepTable)
+        {
+                if (step > currentFFTSize && step <= targetFFTSize)
+                        upgradeSteps.push_back(step);
+        }
 }
 
 ProgressiveUpgradeThread::~ProgressiveUpgradeThread()
@@ -62,21 +72,51 @@ void ProgressiveUpgradeThread::run()
     if (checkAndCancel())
         return;
 
-    IRConverter::ConvertConfig cfg;
-    cfg.fftSize = targetFFTSize;
-    cfg.targetSampleRate = sampleRate;
-    cfg.generationId = taskGeneration;
-    cfg.cacheKey = cacheKey;
-
-    auto prepared = converter.convertFile(irFile, cfg, [this]()
+    for (int step : upgradeSteps)
     {
-        return this->threadShouldExit() || this->checkAndCancel();
-    });
+        if (!isGenerationValid())
+            return;
 
-    if (!prepared || checkAndCancel())
-        return;
+        if (!upgradeStep(step))
+            return;
+    }
+}
 
-    cacheManager.save(cacheKey, *prepared);
+bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
+{
+    if (!isGenerationValid())
+        return false;
+
+    const uint64_t stepKey = CacheManager::computeKey(irFile,
+                                                      nextFFTSize,
+                                                      sampleRate,
+                                                      phaseMode,
+                                                      nextFFTSize);
+
+    auto prepared = cacheManager.load(stepKey, nextFFTSize, taskGeneration);
+    if (!prepared)
+    {
+        prepared = converter.convertToHighRes(irFile,
+                                              sampleRate,
+                                              nextFFTSize,
+                                              taskGeneration,
+                                              stepKey,
+                                              [this]()
+                                              {
+                                                  return this->threadShouldExit() || this->checkAndCancel();
+                                              });
+        if (!prepared)
+            return false;
+
+        if (!isGenerationValid())
+            return false;
+
+        cacheManager.save(stepKey, nextFFTSize, *prepared);
+        cacheManager.evictLRU(processor.getMaxCacheEntries());
+    }
+
+    if (!isGenerationValid())
+        return false;
 
     juce::MessageManager::callAsync([this, prepared = std::move(prepared)]() mutable
     {
@@ -85,4 +125,6 @@ void ProgressiveUpgradeThread::run()
 
         processor.applyPreparedIRState(std::move(prepared));
     });
+
+    return true;
 }

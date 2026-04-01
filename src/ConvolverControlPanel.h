@@ -47,6 +47,7 @@ private:
     // 既存UIコンポーネント
     juce::TextButton loadIRButton{"Load IR..."};
     juce::TextButton irAdvancedButton{"IR Advanced..."};
+    juce::TextButton convolverSettingsButton{"Conv Settings..."};
     juce::TextButton optimizationProgressButton{"Optimization Progress..."};
     juce::ComboBox phaseChoiceBox;
     juce::ToggleButton experimentalDirectHeadToggle;
@@ -103,6 +104,7 @@ private:
                                   int requestId);
     void setIRPreviewInProgress(bool isInProgress);
     void showIRAdvancedWindow();
+    void showConvolverSettingsWindow();
     // Convolver Input Trim スライダーの表示と値をエンジンの現在モードに同期する。
     // モード変更後 (バイパス切替・処理順序変更・プリセットロード) に呼ぶこと。
     void updateTrimSlider();
@@ -137,6 +139,7 @@ private:
     std::atomic<int> irPreviewRequestId { 0 };
     bool irPreviewInProgress = false;
     juce::Component::SafePointer<juce::DialogWindow> irAdvancedWindow;
+    juce::Component::SafePointer<juce::DialogWindow> convolverSettingsWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverControlPanel)
 };

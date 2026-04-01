@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <vector>
 
 #include <JuceHeader.h>
 
@@ -14,10 +15,12 @@ class ProgressiveUpgradeThread : public juce::Thread
 public:
     ProgressiveUpgradeThread(ConvolverProcessor& processor,
                              const juce::File& irFile,
-                             double targetSampleRate,
+                             double sampleRate,
+                             int currentFFTSize,
                              int targetFFTSize,
+                             int phaseMode,
                              uint64_t baseGeneration,
-                             uint64_t cacheKey,
+                             uint64_t baseCacheKey,
                              IRConverter& converter,
                              CacheManager& cacheManager);
 
@@ -29,13 +32,17 @@ public:
 private:
     bool isGenerationValid() const;
     bool checkAndCancel();
+    bool upgradeStep(int nextFFTSize);
 
     ConvolverProcessor& processor;
     juce::File irFile;
     double sampleRate = 0.0;
+    int currentFFTSize = 0;
     int targetFFTSize = 0;
+    int phaseMode = 0;
     uint64_t taskGeneration = 0;
-    uint64_t cacheKey = 0;
+    uint64_t baseCacheKey = 0;
+    std::vector<int> upgradeSteps;
     std::atomic<bool> cancelled{false};
 
     IRConverter& converter;

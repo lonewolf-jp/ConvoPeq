@@ -24,6 +24,13 @@ public:
                                                  const ConvertConfig& config,
                                                  const std::function<bool()>& shouldCancel) const;
 
+    std::unique_ptr<PreparedIRState> convertToHighRes(const juce::File& irFile,
+                                                      double sampleRate,
+                                                      int nextFFTSize,
+                                                      uint64_t generationId,
+                                                      uint64_t cacheKey,
+                                                      const std::function<bool()>& shouldCancel) const;
+
 private:
     static bool loadAudioFile(const juce::File& file,
                               juce::AudioBuffer<double>& out,

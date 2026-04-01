@@ -27,6 +27,11 @@ uint64_t CacheManager::hashCombine(uint64_t seed, uint64_t value)
     return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
 }
 
+uint64_t CacheManager::makeEntryKey(uint64_t key, int fftSize)
+{
+    return hashCombine(key, static_cast<uint64_t>(fftSize));
+}
+
 uint64_t CacheManager::computeCRC64(const uint8_t* data, size_t size)
 {
     return crc64Update(0ULL, data, size);
@@ -85,12 +90,15 @@ juce::File CacheManager::getCacheDirectory() const
     return dir;
 }
 
-juce::File CacheManager::getCacheFile(uint64_t key) const
+juce::File CacheManager::getCacheFile(uint64_t key, int fftSize) const
 {
-    return getCacheDirectory().getChildFile(juce::String::toHexString(static_cast<int64>(key)) + ".bin");
+    return getCacheDirectory().getChildFile(juce::String::toHexString(static_cast<int64>(key))
+                                            + "_"
+                                            + juce::String(fftSize)
+                                            + ".bin");
 }
 
-bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKey, CacheHeader& headerOut) const
+bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKey, int expectedFftSize, CacheHeader& headerOut) const
 {
     if (!file.existsAsFile())
         return false;
@@ -109,6 +117,9 @@ bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKe
         return false;
 
     if (headerOut.key != expectedKey)
+        return false;
+
+    if (static_cast<int>(headerOut.fftSize) != expectedFftSize)
         return false;
 
     const int64 expectedTotalSize = static_cast<int64>(sizeof(CacheHeader)) + static_cast<int64>(headerOut.dataSize);
@@ -141,11 +152,11 @@ double* CacheManager::copyFromMmapToAligned(juce::MemoryMappedFile& mmap, size_t
     return dst;
 }
 
-std::unique_ptr<PreparedIRState> CacheManager::load(uint64_t key, uint64_t generationId)
+std::unique_ptr<PreparedIRState> CacheManager::load(uint64_t key, int fftSize, uint64_t generationId)
 {
     CacheHeader header{};
-    const auto file = getCacheFile(key);
-    if (!validateCacheFile(file, key, header))
+    const auto file = getCacheFile(key, fftSize);
+    if (!validateCacheFile(file, key, fftSize, header))
         return nullptr;
 
     juce::MemoryMappedFile mmap(file, juce::MemoryMappedFile::readOnly);
@@ -185,15 +196,17 @@ std::unique_ptr<PreparedIRState> CacheManager::load(uint64_t key, uint64_t gener
     prepared->generationId = generationId;
     prepared->cacheKey = key;
 
+    touch(key, fftSize);
+
     return prepared;
 }
 
-void CacheManager::save(uint64_t key, const PreparedIRState& state)
+void CacheManager::save(uint64_t key, int fftSize, const PreparedIRState& state)
 {
     if (!state.partitionData || state.partitionSizeBytes == 0)
         return;
 
-    const auto file = getCacheFile(key);
+    const auto file = getCacheFile(key, fftSize);
     const auto temp = file.withFileExtension("tmp");
 
     CacheHeader header{};
@@ -201,7 +214,7 @@ void CacheManager::save(uint64_t key, const PreparedIRState& state)
     header.dataSize = static_cast<uint64_t>(state.partitionSizeBytes);
     header.checksum = computeCRC64(reinterpret_cast<const uint8_t*>(state.partitionData), state.partitionSizeBytes);
     header.timestamp = static_cast<uint64_t>(juce::Time::getCurrentTime().toMilliseconds());
-    header.fftSize = static_cast<uint64_t>(state.fftSize);
+    header.fftSize = static_cast<uint64_t>(fftSize);
     header.numPartitions = static_cast<uint64_t>(state.numPartitions);
     header.numChannels = static_cast<uint64_t>(state.numChannels);
     header.sampleRate = state.sampleRate;
@@ -215,6 +228,42 @@ void CacheManager::save(uint64_t key, const PreparedIRState& state)
     out->flush();
 
     temp.moveFileTo(file);
+    touch(key, fftSize);
+}
+
+void CacheManager::touch(uint64_t key, int fftSize)
+{
+    const uint64_t entryKey = makeEntryKey(key, fftSize);
+    const auto file = getCacheFile(key, fftSize);
+    std::lock_guard<std::mutex> lock(cacheMutex);
+
+    auto it = cacheMap.find(entryKey);
+    const uint64_t nowMs = static_cast<uint64_t>(juce::Time::getCurrentTime().toMilliseconds());
+    if (it != cacheMap.end())
+    {
+        lruList.erase(it->second.lruPos);
+        lruList.push_front(entryKey);
+        it->second.lruPos = lruList.begin();
+        it->second.lastAccessTime = nowMs;
+        it->second.file = file;
+        it->second.originalKey = key;
+        return;
+    }
+
+    lruList.push_front(entryKey);
+    CacheEntry entry;
+    entry.file = file;
+    entry.originalKey = key;
+    entry.lastAccessTime = nowMs;
+    entry.fftSize = fftSize;
+    entry.lruPos = lruList.begin();
+    cacheMap.emplace(entryKey, std::move(entry));
+}
+
+void CacheManager::setSafeDeleteChecker(SafeDeleteFn checker)
+{
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    safeDeleteChecker = std::move(checker);
 }
 
 void CacheManager::clear()
@@ -223,26 +272,47 @@ void CacheManager::clear()
     if (dir.exists())
         dir.deleteRecursively();
     dir.createDirectory();
+
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    cacheMap.clear();
+    lruList.clear();
 }
 
-void CacheManager::evictOldest(size_t maxEntries)
+bool CacheManager::isEntrySafeToDelete(uint64_t key, int fftSize) const
 {
-    const auto dir = getCacheDirectory();
-    if (!dir.exists())
-        return;
+    if (!safeDeleteChecker)
+        return true;
 
-    juce::Array<juce::File> files;
-    dir.findChildFiles(files, juce::File::findFiles, false, "*.bin");
+    return safeDeleteChecker(key, fftSize);
+}
 
-    if (static_cast<size_t>(files.size()) <= maxEntries)
-        return;
+void CacheManager::evictLRU(size_t maxEntries)
+{
+    std::lock_guard<std::mutex> lock(cacheMutex);
 
-    std::sort(files.begin(), files.end(), [](const juce::File& a, const juce::File& b)
+    while (cacheMap.size() > maxEntries && !lruList.empty())
     {
-        return a.getLastModificationTime() < b.getLastModificationTime();
-    });
+        bool removed = false;
 
-    const size_t removeCount = static_cast<size_t>(files.size()) - maxEntries;
-    for (size_t i = 0; i < removeCount; ++i)
-        files[static_cast<int>(i)].deleteFile();
+        for (auto rit = lruList.rbegin(); rit != lruList.rend(); ++rit)
+        {
+            const uint64_t entryKey = *rit;
+            auto it = cacheMap.find(entryKey);
+            if (it == cacheMap.end())
+                continue;
+
+            if (!isEntrySafeToDelete(it->second.originalKey, it->second.fftSize))
+                continue;
+
+            it->second.file.deleteFile();
+            auto erasePos = std::next(rit).base();
+            lruList.erase(erasePos);
+            cacheMap.erase(it);
+            removed = true;
+            break;
+        }
+
+        if (!removed)
+            break;
+    }
 }

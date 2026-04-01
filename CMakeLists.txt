@@ -126,6 +126,7 @@ target_sources(ConvoPeq PRIVATE
     src/MKLNonUniformConvolver.cpp
     src/EQProcessor.cpp
     src/ConvolverControlPanel.cpp
+    src/ConvolverSettingsComponent.cpp
     src/EQControlPanel.cpp
     src/SpectrumAnalyzerComponent.cpp
     src/DeviceSettings.cpp
@@ -146,6 +147,7 @@ target_sources(ConvoPeq PRIVATE
     src/IRConverter.h
     src/CacheManager.h
     src/ProgressiveUpgradeThread.h
+    src/ConvolverSettingsComponent.h
     src/MixedPhaseOptimizationComponent.cpp
 )
 

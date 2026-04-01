@@ -3,6 +3,10 @@
 #include <memory>
 #include <cstddef>
 #include <cstdint>
+#include <list>
+#include <mutex>
+#include <unordered_map>
+#include <functional>
 
 #include <JuceHeader.h>
 
@@ -25,25 +29,47 @@ struct CacheHeader
 class CacheManager
 {
 public:
+    using SafeDeleteFn = std::function<bool(uint64_t, int)>;
+
     static uint64_t computeKey(const juce::File& file,
                                int fftSize,
                                double sampleRate,
                                int phaseMode,
                                int partitionSize);
 
-    std::unique_ptr<PreparedIRState> load(uint64_t key, uint64_t generationId);
-    void save(uint64_t key, const PreparedIRState& state);
+    std::unique_ptr<PreparedIRState> load(uint64_t key, int fftSize, uint64_t generationId);
+    void save(uint64_t key, int fftSize, const PreparedIRState& state);
+    void touch(uint64_t key, int fftSize);
+    void setSafeDeleteChecker(SafeDeleteFn checker);
+
     void clear();
-    void evictOldest(size_t maxEntries = 10);
+    void evictLRU(size_t maxEntries = 10);
 
 private:
+    struct CacheEntry
+    {
+        juce::File file;
+        uint64_t originalKey = 0;
+        uint64_t lastAccessTime = 0;
+        int fftSize = 0;
+        std::list<uint64_t>::iterator lruPos;
+    };
+
     static uint64_t computeFileContentCRC(const juce::File& file);
     static uint64_t computeCRC64(const uint8_t* data, size_t size);
     static uint64_t hashCombine(uint64_t seed, uint64_t value);
+    static uint64_t makeEntryKey(uint64_t key, int fftSize);
 
     double* copyFromMmapToAligned(juce::MemoryMappedFile& mmap, size_t dataSize);
 
     juce::File getCacheDirectory() const;
-    juce::File getCacheFile(uint64_t key) const;
-    bool validateCacheFile(const juce::File& file, uint64_t expectedKey, CacheHeader& headerOut) const;
+    juce::File getCacheFile(uint64_t key, int fftSize) const;
+    bool validateCacheFile(const juce::File& file, uint64_t expectedKey, int expectedFftSize, CacheHeader& headerOut) const;
+
+    bool isEntrySafeToDelete(uint64_t key, int fftSize) const;
+
+    std::unordered_map<uint64_t, CacheEntry> cacheMap;
+    std::list<uint64_t> lruList;
+    mutable std::mutex cacheMutex;
+    SafeDeleteFn safeDeleteChecker;
 };

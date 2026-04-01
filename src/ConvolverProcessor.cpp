@@ -1146,6 +1146,10 @@ ConvolverProcessor::ConvolverProcessor()
 {
     irConverter = std::make_unique<IRConverter>();
     cacheManager = std::make_unique<CacheManager>();
+    cacheManager->setSafeDeleteChecker([this](uint64_t key, int fftSize)
+    {
+        return this->isCacheEntrySafeToDelete(key, fftSize);
+    });
 }
 
 //--------------------------------------------------------------
@@ -2276,6 +2280,107 @@ void ConvolverProcessor::stopUpgradeThread()
     }
 }
 
+void ConvolverProcessor::startProgressiveUpgrade(const juce::File& file,
+                                                 double sampleRate,
+                                                 int currentFFTSize,
+                                                 uint64_t generation,
+                                                 uint64_t baseKey)
+{
+    if (!enableProgressiveUpgrade.load(std::memory_order_acquire))
+        return;
+
+    const int targetFFT = getTargetUpgradeFFTSize();
+    if (currentFFTSize >= targetFFT)
+        return;
+
+    stopUpgradeThread();
+
+    upgradeThread = std::make_unique<ProgressiveUpgradeThread>(*this,
+                                                                file,
+                                                                sampleRate,
+                                                                currentFFTSize,
+                                                                targetFFT,
+                                                                static_cast<int>(getPhaseMode()),
+                                                                generation,
+                                                                baseKey,
+                                                                *irConverter,
+                                                                *cacheManager);
+    upgradeThread->startThread();
+}
+
+void ConvolverProcessor::setTargetUpgradeFFTSize(int fftSize)
+{
+    static constexpr int allowed[] = { 512, 1024, 2048, 4096 };
+    int resolved = 4096;
+    for (int a : allowed)
+    {
+        if (fftSize <= a)
+        {
+            resolved = a;
+            break;
+        }
+    }
+    targetUpgradeFFTSize.store(resolved, std::memory_order_release);
+}
+
+int ConvolverProcessor::getTargetUpgradeFFTSize() const
+{
+    return targetUpgradeFFTSize.load(std::memory_order_acquire);
+}
+
+void ConvolverProcessor::setEnableProgressiveUpgrade(bool enable)
+{
+    enableProgressiveUpgrade.store(enable, std::memory_order_release);
+    if (!enable)
+        stopUpgradeThread();
+}
+
+bool ConvolverProcessor::isProgressiveUpgradeEnabled() const
+{
+    return enableProgressiveUpgrade.load(std::memory_order_acquire);
+}
+
+void ConvolverProcessor::setMaxCacheEntries(size_t maxEntries)
+{
+    const size_t clamped = juce::jlimit<size_t>(1, 64, maxEntries);
+    maxCacheEntries.store(clamped, std::memory_order_release);
+    if (cacheManager)
+        cacheManager->evictLRU(clamped);
+}
+
+size_t ConvolverProcessor::getMaxCacheEntries() const
+{
+    return maxCacheEntries.load(std::memory_order_acquire);
+}
+
+void ConvolverProcessor::clearCache()
+{
+    stopUpgradeThread();
+    if (cacheManager)
+        cacheManager->clear();
+}
+
+bool ConvolverProcessor::isCacheEntrySafeToDelete(uint64_t cacheKey, int fftSize) const
+{
+    const uint64_t activeKey = activeCacheKey.load(std::memory_order_acquire);
+    const int activeFFT = activeCacheFFTSize.load(std::memory_order_acquire);
+
+    if (cacheKey == activeKey && fftSize == activeFFT)
+        return false;
+
+    if (auto* state = rcuSwapper.getState())
+    {
+        if (convolverStateGeneration.isCurrentGeneration(state->generationId)
+            && state->fftSize == fftSize
+            && cacheKey == activeKey)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void ConvolverProcessor::loadIR(const juce::File& irFile)
 {
     JUCE_ASSERT_MESSAGE_THREAD;
@@ -2287,24 +2392,40 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
 
     const uint64_t generation = convolverStateGeneration.bumpGeneration();
     const double sr = currentSampleRate.load(std::memory_order_acquire);
+    const int targetFFT = getTargetUpgradeFFTSize();
     const int lowResFFT = 512;
-    const int highResFFT = 4096;
+    const int phase = static_cast<int>(getPhaseMode());
+    const size_t cacheLimit = maxCacheEntries.load(std::memory_order_acquire);
 
-    const uint64_t lowResKey = CacheManager::computeKey(irFile, lowResFFT, sr, static_cast<int>(getPhaseMode()), lowResFFT);
+    int appliedFft = 0;
+    const uint64_t targetKey = CacheManager::computeKey(irFile, targetFFT, sr, phase, targetFFT);
 
     if (cacheManager)
     {
-        auto cached = cacheManager->load(lowResKey, generation);
-        if (cached)
+        auto directTarget = cacheManager->load(targetKey, targetFFT, generation);
+        if (directTarget)
         {
-            applyPreparedIRState(std::move(cached));
+            appliedFft = targetFFT;
+            applyPreparedIRState(std::move(directTarget));
         }
-        else if (irConverter)
+    }
+
+    if (appliedFft == 0 && cacheManager && irConverter)
+    {
+        const uint64_t lowResKey = CacheManager::computeKey(irFile, lowResFFT, sr, phase, lowResFFT);
+        auto cachedLow = cacheManager->load(lowResKey, lowResFFT, generation);
+
+        if (cachedLow)
+        {
+            appliedFft = lowResFFT;
+            applyPreparedIRState(std::move(cachedLow));
+        }
+        else
         {
             IRConverter::ConvertConfig cfg;
             cfg.fftSize = lowResFFT;
             cfg.targetSampleRate = sr;
-            cfg.phaseMode = static_cast<int>(getPhaseMode());
+            cfg.phaseMode = phase;
             cfg.partitionSize = lowResFFT;
             cfg.generationId = generation;
             cfg.cacheKey = lowResKey;
@@ -2316,24 +2437,17 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
 
             if (prepared)
             {
-                cacheManager->save(lowResKey, *prepared);
+                cacheManager->save(lowResKey, lowResFFT, *prepared);
+                cacheManager->evictLRU(cacheLimit);
+                appliedFft = lowResFFT;
                 applyPreparedIRState(std::move(prepared));
             }
         }
     }
 
-    if (irConverter && cacheManager)
+    if (appliedFft > 0)
     {
-        const uint64_t highResKey = CacheManager::computeKey(irFile, highResFFT, sr, static_cast<int>(getPhaseMode()), highResFFT);
-        upgradeThread = std::make_unique<ProgressiveUpgradeThread>(*this,
-                                                                    irFile,
-                                                                    sr,
-                                                                    highResFFT,
-                                                                    generation,
-                                                                    highResKey,
-                                                                    *irConverter,
-                                                                    *cacheManager);
-        upgradeThread->startThread();
+        startProgressiveUpgrade(irFile, sr, appliedFft, generation, targetKey);
     }
 }
 
@@ -2352,6 +2466,9 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
                                                       prepared->sampleRate);
 
     prepared->partitionData = nullptr;
+
+    activeCacheKey.store(prepared->cacheKey, std::memory_order_release);
+    activeCacheFFTSize.store(newState->fftSize, std::memory_order_release);
 
     runtime.reallocate(newState->fftSize, newState->numPartitions);
     updateConvolverState(std::move(newState));
@@ -2864,6 +2981,9 @@ juce::ValueTree ConvolverProcessor::getState() const
     v.setProperty ("tailRolloffStartHz", tailRolloffStartHz.load(std::memory_order_acquire), nullptr);
     v.setProperty ("tailRolloffStrength", tailRolloffStrength.load(std::memory_order_acquire), nullptr);
     v.setProperty ("partitionTailStrength", partitionTailStrength.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("targetUpgradeFFTSize", getTargetUpgradeFFTSize(), nullptr);
+    v.setProperty ("enableProgressiveUpgrade", isProgressiveUpgradeEnabled(), nullptr);
+    v.setProperty ("maxCacheEntries", static_cast<int>(getMaxCacheEntries()), nullptr);
     {
         const juce::ScopedLock sl(irFileLock);
         v.setProperty ("irPath", currentIrFile.getFullPathName(), nullptr);
@@ -2930,6 +3050,9 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
     if (v.hasProperty ("mixedTau")) setMixedPreRingTau (v.getProperty ("mixedTau"));
     if (v.hasProperty ("rebuildDebounceMs")) setRebuildDebounceMs (static_cast<int>(v.getProperty("rebuildDebounceMs")));
     if (v.hasProperty ("experimentalDirectHeadEnabled")) setExperimentalDirectHeadEnabled (v.getProperty ("experimentalDirectHeadEnabled"));
+    if (v.hasProperty ("targetUpgradeFFTSize")) setTargetUpgradeFFTSize (static_cast<int>(v.getProperty("targetUpgradeFFTSize")));
+    if (v.hasProperty ("enableProgressiveUpgrade")) setEnableProgressiveUpgrade (static_cast<bool>(v.getProperty("enableProgressiveUpgrade")));
+    if (v.hasProperty ("maxCacheEntries")) setMaxCacheEntries (static_cast<size_t>(static_cast<int>(v.getProperty("maxCacheEntries"))));
 
     const bool hasTailMode = v.hasProperty("tailProcessingMode");
     const bool hasTailStart = v.hasProperty("tailRolloffStartHz");
@@ -3001,7 +3124,7 @@ void ConvolverProcessor::setState (const juce::ValueTree& v)
 
         // ロックの外でロードを実行
         if (fileToLoad.existsAsFile())
-            loadImpulseResponse(fileToLoad);
+            loadIR(fileToLoad);
     }
 }
 
@@ -3027,6 +3150,9 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     tailRolloffStartHz.store(other.tailRolloffStartHz.load(std::memory_order_acquire), std::memory_order_release);
     tailRolloffStrength.store(other.tailRolloffStrength.load(std::memory_order_acquire), std::memory_order_release);
     partitionTailStrength.store(other.partitionTailStrength.load(std::memory_order_acquire), std::memory_order_release);
+    targetUpgradeFFTSize.store(other.targetUpgradeFFTSize.load(std::memory_order_acquire), std::memory_order_release);
+    enableProgressiveUpgrade.store(other.enableProgressiveUpgrade.load(std::memory_order_acquire), std::memory_order_release);
+    maxCacheEntries.store(other.maxCacheEntries.load(std::memory_order_acquire), std::memory_order_release);
 
     // サンプルレート変更時にリビルドできるよう、元のIR情報を共有する
     // [Bug E fix] std::atomic<shared_ptr>::store() でアトミックに代入。

@@ -5,6 +5,7 @@
 //============================================================================
 #include "ConvolverControlPanel.h"
 #include "MixedPhaseOptimizationComponent.h"
+#include "ConvolverSettingsComponent.h"
 #include <cmath>
 #include <thread>
 
@@ -342,6 +343,14 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     irAdvancedButton.setTooltip("Open detailed IR settings");
     irAdvancedButton.addListener(this);
     addAndMakeVisible(irAdvancedButton);
+
+    convolverSettingsButton.setColour(juce::TextButton::buttonColourId,
+                                      juce::Colours::darkslategrey.withAlpha(0.85f));
+    convolverSettingsButton.setColour(juce::TextButton::textColourOffId,
+                                      juce::Colours::white);
+    convolverSettingsButton.setTooltip("Open phase2 convolver cache/upgrade settings");
+    convolverSettingsButton.addListener(this);
+    addAndMakeVisible(convolverSettingsButton);
 
     optimizationProgressButton.setTooltip("Show Mixed Phase Optimization Progress");
     optimizationProgressButton.addListener(this);
@@ -770,6 +779,7 @@ void ConvolverControlPanel::resized()
     constexpr int loadWidth = 90;
     constexpr int phaseWidth = 80;
     constexpr int advancedWidth = 90;
+    constexpr int settingsWidth = 110;
 
     auto controlRow1 = bounds.removeFromTop(26);
     bounds.removeFromTop(4);
@@ -778,7 +788,7 @@ void ConvolverControlPanel::resized()
 
     const int labelWidth = 78;
     const int inlineGap = 6;
-    const int controlsStartX = loadWidth + leftGap + phaseWidth + leftGap + advancedWidth + leftGap;
+    const int controlsStartX = loadWidth + leftGap + phaseWidth + leftGap + advancedWidth + leftGap + settingsWidth + leftGap;
 
     // --- 1行目 ---
     loadIRButton.setBounds(controlRow1.removeFromLeft(loadWidth));
@@ -790,6 +800,9 @@ void ConvolverControlPanel::resized()
 
     // 詳細設定ボタン
     irAdvancedButton.setBounds(controlRow1.removeFromLeft(advancedWidth));
+    controlRow1.removeFromLeft(leftGap);
+
+    convolverSettingsButton.setBounds(controlRow1.removeFromLeft(settingsWidth));
     controlRow1.removeFromLeft(leftGap);
 
     // Dry/Wetミックス
@@ -932,6 +945,10 @@ void ConvolverControlPanel::buttonClicked(juce::Button* button)
     {
         showIRAdvancedWindow();
     }
+    else if (button == &convolverSettingsButton)
+    {
+        showConvolverSettingsWindow();
+    }
     else if (button == &optimizationProgressButton)
     {
         showOptimizationProgressWindow();
@@ -962,6 +979,29 @@ void ConvolverControlPanel::showIRAdvancedWindow()
 
     auto* window = options.launchAsync();
     irAdvancedWindow = window;
+    if (window != nullptr)
+        window->setAlwaysOnTop(false);
+}
+
+void ConvolverControlPanel::showConvolverSettingsWindow()
+{
+    if (convolverSettingsWindow != nullptr)
+    {
+        convolverSettingsWindow->toFront(true);
+        return;
+    }
+
+    juce::DialogWindow::LaunchOptions options;
+    options.dialogTitle = "Convolver Settings";
+    options.dialogBackgroundColour = juce::Colours::darkslategrey.withAlpha(0.95f);
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    options.componentToCentreAround = this;
+    options.content.setOwned(new ConvolverSettingsComponent(engine));
+
+    auto* window = options.launchAsync();
+    convolverSettingsWindow = window;
     if (window != nullptr)
         window->setAlwaysOnTop(false);
 }
@@ -1106,6 +1146,7 @@ void ConvolverControlPanel::setIRPreviewInProgress(bool isInProgress)
     irPreviewInProgress = isInProgress;
     loadIRButton.setEnabled(!isInProgress);
     irAdvancedButton.setEnabled(!isInProgress);
+    convolverSettingsButton.setEnabled(!isInProgress);
     loadIRButton.setButtonText(isInProgress ? "Analyzing..." : "Load IR...");
     updateIRInfo();
 }
