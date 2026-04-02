@@ -34,13 +34,14 @@ double AllpassDesigner::sectionGroupDelay(double f0, double gain, double omega, 
 // 無制約変数 → 物理パラメータ変換（高Q領域改善版）
 //==============================================================================
 static inline double unconstrainedToRho(double x) {
-    // ρ = 0.995 * (1 - exp(-x²)) : 高Q領域の分解能を確保
-    return 0.995 * (1.0 - std::exp(-x * x));
+    // ρ 上限を 0.98 に制限して極端な高Q解を避ける。
+    return 0.98 * (1.0 - std::exp(-x * x));
 }
 
 static inline double unconstrainedToTheta(double x) {
-    // ラップせずそのまま角度として使用（cos, sin は周期関数のため問題ない）
-    return x;
+    return juce::jlimit(-juce::MathConstants<double>::pi,
+                        juce::MathConstants<double>::pi,
+                        x);
 }
 
 //==============================================================================
@@ -91,9 +92,11 @@ DesignResult AllpassDesigner::designWithCMAES(
         // 現在の候補から各セクションの (ρ, θ) を計算
         std::vector<double> rho_list(config.numSections);
         std::vector<double> theta_list(config.numSections);
+        double polePenalty = 0.0;
         for (int s = 0; s < config.numSections; ++s) {
             rho_list[s] = unconstrainedToRho(x[2*s]);
             theta_list[s] = unconstrainedToTheta(x[2*s+1]);
+            polePenalty += std::pow(rho_list[s], 4.0);
         }
         double error = 0.0;
         for (size_t i = 0; i < freq_hz.size(); ++i) {
@@ -120,10 +123,15 @@ DesignResult AllpassDesigner::designWithCMAES(
                 sec.theta = theta_list[s];
                 totalResp *= sec.response(o);
             }
+            if (!std::isfinite(totalResp.real()) || !std::isfinite(totalResp.imag()))
+                return 1.0e12;
+
             const double mag    = std::abs(totalResp);
             const double magErr = mag - 1.0;
             error += kAmpPenaltyWeight * magErr * magErr;
         }
+        static constexpr double kPolePenaltyWeight = 10.0;
+        error += kPolePenaltyWeight * polePenalty;
         return error;
     };
 
@@ -169,6 +177,9 @@ DesignResult AllpassDesigner::designWithCMAES(
     }
 
     sections.clear();
+    if (!std::isfinite(bestFitness))
+        return DesignResult::Failed;
+
     for (int s = 0; s < config.numSections; ++s) {
         SecondOrderAllpass section;
         section.rho = unconstrainedToRho(bestParams[2*s]);
@@ -454,6 +465,21 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
                 return {};
             }
         }
+    }
+
+    double peak = 0.0;
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* data = result.getReadPointer(ch);
+        for (int i = 0; i < irLen; ++i)
+            peak = std::max(peak, std::abs(data[i]));
+    }
+
+    if (peak > 0.99)
+    {
+        const double gain = 0.98 / peak;
+        for (int ch = 0; ch < numChannels; ++ch)
+            result.applyGain(ch, 0, irLen, gain);
     }
 
     DftiFreeDescriptor(&dfti);

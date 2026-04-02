@@ -7,6 +7,8 @@
 #include "CacheManager.h"
 #include "PreparedIRState.h"
 
+#include <cmath>
+
 ProgressiveUpgradeThread::ProgressiveUpgradeThread(ConvolverProcessor& p,
                                                    const juce::File& file,
                                                    double sr,
@@ -120,6 +122,31 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
 
     if (!isGenerationValid())
         return false;
+
+    if (prepared && prepared->timeDomainIR)
+    {
+        double peak = 0.0;
+        const int channels = prepared->timeDomainIR->getNumChannels();
+        const int samples = prepared->timeDomainIR->getNumSamples();
+
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            const double* data = prepared->timeDomainIR->getReadPointer(ch);
+            for (int i = 0; i < samples; ++i)
+            {
+                const double value = data[i];
+                if (!std::isfinite(value))
+                    return false;
+                peak = std::max(peak, std::abs(value));
+            }
+        }
+
+        if (peak > 2.0)
+        {
+            DBG("ProgressiveUpgradeThread: generated IR has excessive peak, skipping");
+            return false;
+        }
+    }
 
     juce::MessageManager::callAsync([this, prepared = std::move(prepared)]() mutable
     {

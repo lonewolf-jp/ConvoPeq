@@ -29,8 +29,18 @@ struct SecondOrderAllpass {
         const double a2 = rho2;
         const std::complex<double> num = a2 + a1 * z + z * z;
         const std::complex<double> den = 1.0 + a1 * z + a2 * z * z;
-        if (std::abs(den) < 1e-12) return std::complex<double>(1.0, 0.0);
-        return num / den;
+        const double denMag = std::abs(den);
+        if (denMag < 1e-12)
+            return std::complex<double>(1.0, 0.0);
+
+        auto h = num / den;
+        const double mag = std::abs(h);
+        if (mag > 1e-12)
+            h /= mag;
+        else
+            h = std::complex<double>(1.0, 0.0);
+
+        return h;
     }
 
     // 解析的群遅延（サンプル単位）

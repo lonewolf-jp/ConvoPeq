@@ -2069,6 +2069,54 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         }
     }
 
+    double peak = 0.0;
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* p = mixedIR.getReadPointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+            peak = std::max(peak, std::abs(p[i]));
+    }
+
+    // Patch ⑥: RMS 正規化後のピーク過大ガード – RMS 正規化により peak/RMS 比が著しく
+    // 高いIRが生成された場合（allpass 設計失敗の典型例）、0.98 へのリミットで誤魔化すより
+    // 空バッファを返して Phase 1 フォールバックを起動させる。
+    if (peak > 4.0)
+    {
+        DBG("convertToMixedPhaseAllpass: Excessive peak after RMS normalization (peak="
+            << peak << "), falling back to Phase 1.");
+        return {};
+    }
+
+    // Patch ⑦: Crest factor ガード – peak が閾値内でも RMS が極小の場合
+    // （例: peak=3.9, RMS=0.01 → crest factor=390）はエネルギーが特定サンプルに
+    // 集中しており、畳み込みで遅延型クリップを引き起こす典型例。
+    {
+        double sumSq = 0.0;
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            const double* p = mixedIR.getReadPointer(ch);
+            for (int i = 0; i < numSamples; ++i)
+                sumSq += p[i] * p[i];
+        }
+        const double rms = std::sqrt(sumSq / static_cast<double>(numChannels * numSamples));
+        if (rms > 1.0e-12)
+        {
+            const double crest = peak / rms;
+            if (crest > 50.0)
+            {
+                DBG("convertToMixedPhaseAllpass: Excessive crest factor (crest=" << crest
+                    << ", peak=" << peak << ", rms=" << rms << "), falling back to Phase 1.");
+                return {};
+            }
+        }
+    }
+
+    if (peak > 0.99)
+    {
+        const double gain = 0.98 / peak;
+        mixedIR.applyGain(gain);
+    }
+
     // --- Store in Cache ---
     if (owner && fileHash != 0) {
         ConvolverProcessor::IRCacheKey key;
@@ -2512,6 +2560,70 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
         return;
 
     JUCE_ASSERT_MESSAGE_THREAD;
+
+    if (prepared->timeDomainIR)
+    {
+        bool valid = true;
+        const int channels = prepared->timeDomainIR->getNumChannels();
+        const int samples = prepared->timeDomainIR->getNumSamples();
+        double newPeak = 0.0;
+        double newEnergy = 0.0;
+
+        for (int ch = 0; ch < channels && valid; ++ch)
+        {
+            const double* data = prepared->timeDomainIR->getReadPointer(ch);
+            for (int i = 0; i < samples; ++i)
+            {
+                const double value = data[i];
+                if (!std::isfinite(value) || std::abs(value) > 10.0)
+                {
+                    valid = false;
+                    break;
+                }
+
+                newPeak = std::max(newPeak, std::abs(value));
+                newEnergy += value * value;
+            }
+        }
+
+        if (valid && samples > 0)
+        {
+            const double newRms = std::sqrt(newEnergy / static_cast<double>(channels * samples));
+            auto currentIr = originalIR.load();
+
+            if (currentIr && currentIr->getNumChannels() > 0 && currentIr->getNumSamples() > 0)
+            {
+                double currentPeak = 0.0;
+                double currentEnergy = 0.0;
+                const int currentChannels = currentIr->getNumChannels();
+                const int currentSamples = currentIr->getNumSamples();
+
+                for (int ch = 0; ch < currentChannels; ++ch)
+                {
+                    const double* data = currentIr->getReadPointer(ch);
+                    for (int i = 0; i < currentSamples; ++i)
+                    {
+                        const double value = data[i];
+                        currentPeak = std::max(currentPeak, std::abs(value));
+                        currentEnergy += value * value;
+                    }
+                }
+
+                const double currentRms = std::sqrt(currentEnergy / static_cast<double>(currentChannels * currentSamples));
+                const bool excessivePeakJump = currentPeak > 1.0e-9 && newPeak > currentPeak * 4.0 && newPeak > 0.5;
+                const bool excessiveRmsJump = currentRms > 1.0e-9 && newRms > currentRms * 4.0 && newRms > 0.25;
+                if (excessivePeakJump || excessiveRmsJump)
+                    valid = false;
+            }
+        }
+
+        if (!valid)
+        {
+            lastError = "Invalid IR (amplitude out of range or sudden level jump)";
+            isLoading.store(false, std::memory_order_release);
+            return;
+        }
+    }
 
     // 1. UI 用レガシー状態の更新
     {
