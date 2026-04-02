@@ -115,6 +115,9 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
         cacheManager.evictLRU(processor.getMaxCacheEntries());
     }
 
+    if (prepared)
+        prepared->originalFileName = irFile.getFileNameWithoutExtension();
+
     if (!isGenerationValid())
         return false;
 

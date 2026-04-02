@@ -304,9 +304,6 @@ private:
             tailModeCombo.setSelectedId(convolver.getTailProcessingMode() + 1, juce::dontSendNotification);
 
         const bool mixedEnabled = engine.getConvolverPhaseMode() == ConvolverProcessor::PhaseMode::Mixed;
-        mixedF1Slider.setEnabled(mixedEnabled);
-        mixedF2Slider.setEnabled(mixedEnabled);
-        mixedTauSlider.setEnabled(mixedEnabled);
         mixedF1Label.setEnabled(mixedEnabled);
         mixedF2Label.setEnabled(mixedEnabled);
         mixedTauLabel.setEnabled(mixedEnabled);
@@ -712,7 +709,9 @@ void ConvolverControlPanel::paint(juce::Graphics& g)
         if (engine.getConvolverProcessor().isIRLoaded())
         {
             const int irSamples = engine.getConvolverProcessor().getIRLength();
-            const double sampleRate = static_cast<double>(engine.getSampleRate());
+            const double sampleRate = engine.getProcessingSampleRate() > 0.0
+                                    ? engine.getProcessingSampleRate()
+                                    : static_cast<double>(engine.getSampleRate());
 
             if (irSamples > 0 && sampleRate > 0.0)
             {
@@ -1311,9 +1310,20 @@ void ConvolverControlPanel::updateIRInfo()
 
     if (convolver.isIRLoaded())
     {
-        juce::String info = convolver.getIRName();
-        info += " (" + juce::String(convolver.getIRLength()) + " smp)";
-        info += " IR Len: " + juce::String(convolver.getTargetIRLength(), 2) + "s";
+        const int irSamples = convolver.getIRLength();
+        const double processingSampleRate = engine.getProcessingSampleRate() > 0.0
+                                          ? engine.getProcessingSampleRate()
+                                          : static_cast<double>(engine.getSampleRate());
+        const double actualIrLenSec = (processingSampleRate > 0.0)
+                                    ? static_cast<double>(irSamples) / processingSampleRate
+                                    : 0.0;
+        const int actualIrLenMs = juce::roundToInt(actualIrLenSec * 1000.0);
+        const int targetIrLenMs = juce::roundToInt(static_cast<double>(convolver.getTargetIRLength()) * 1000.0);
+
+        juce::String info = convolver.getIRName().isNotEmpty() ? convolver.getIRName() : "(Unnamed IR)";
+        info += " (" + juce::String(irSamples) + " smp)";
+        info += " Actual: " + juce::String(actualIrLenMs) + "ms";
+        info += " Target: " + juce::String(targetIrLenMs) + "ms";
 
         if (convolver.hasManualIRLengthOverride())
             info += " [Manual, Auto " + juce::String(convolver.getAutoDetectedIRLength(), 2) + "s]";
@@ -1323,7 +1333,6 @@ void ConvolverControlPanel::updateIRInfo()
         // A = algorithm latency, T = total latency (= algorithm + IR peak latency)
         const int algorithmLatencySamples = convolver.getLatencySamples();
         const int totalLatencySamples = convolver.getTotalLatencySamples();
-        const double processingSampleRate = engine.getProcessingSampleRate();
 
         const auto toRoundedMsInt = [processingSampleRate](int samples) -> int
         {

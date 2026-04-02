@@ -2388,6 +2388,11 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
     if (!irFile.existsAsFile())
         return;
 
+    {
+        const juce::ScopedLock sl(irFileLock);
+        currentIrFile = irFile;
+    }
+
     stopUpgradeThread();
 
     const uint64_t generation = convolverStateGeneration.bumpGeneration();
@@ -2464,8 +2469,9 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
     // 1. UI 用レガシー状態の更新
     {
         const juce::ScopedLock sl(irFileLock);
-        currentIrFile = juce::File();
-        irName = prepared->originalFileName;
+        irName = prepared->originalFileName.isNotEmpty()
+               ? prepared->originalFileName
+               : currentIrFile.getFileNameWithoutExtension();
     }
 
     currentSampleRate.store(prepared->sampleRate, std::memory_order_release);
