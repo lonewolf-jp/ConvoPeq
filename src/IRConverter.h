@@ -15,7 +15,6 @@ public:
         int fftSize = 512;
         int phaseMode = 0;
         int partitionSize = 512;
-        int targetLengthSamples = 0;
         double targetSampleRate = 0.0;
         uint64_t generationId = 0;
         uint64_t cacheKey = 0;
@@ -28,7 +27,6 @@ public:
     std::unique_ptr<PreparedIRState> convertToHighRes(const juce::File& irFile,
                                                       double sampleRate,
                                                       int nextFFTSize,
-                                                      int targetLengthSamples,
                                                       uint64_t generationId,
                                                       uint64_t cacheKey,
                                                       const std::function<bool()>& shouldCancel) const;

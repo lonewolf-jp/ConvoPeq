@@ -1544,20 +1544,6 @@ void ConvolverProcessor::requestDebouncedRebuild()
             if (!self->isIRLoaded() || self->isLoading.load(std::memory_order_acquire))
                 return;
 
-            // Phase 1 path: originalIR not set; reload from file instead.
-            auto snapIR = self->originalIR.load();
-            if (!snapIR || snapIR->getNumSamples() == 0)
-            {
-                juce::File irFile;
-                {
-                    const juce::ScopedLock sl(self->irFileLock);
-                    irFile = self->currentIrFile;
-                }
-                if (irFile.existsAsFile())
-                    self->loadIR(irFile);
-                return;
-            }
-
             self->loadImpulseResponse(juce::File());
         }
     });
@@ -2298,8 +2284,7 @@ void ConvolverProcessor::startProgressiveUpgrade(const juce::File& file,
                                                  double sampleRate,
                                                  int currentFFTSize,
                                                  uint64_t generation,
-                                                 uint64_t baseKey,
-                                                 int targetLengthSamples)
+                                                 uint64_t baseKey)
 {
     if (!enableProgressiveUpgrade.load(std::memory_order_acquire))
         return;
@@ -2315,7 +2300,6 @@ void ConvolverProcessor::startProgressiveUpgrade(const juce::File& file,
                                                                 sampleRate,
                                                                 currentFFTSize,
                                                                 targetFFT,
-                                                                targetLengthSamples,
                                                                 static_cast<int>(getPhaseMode()),
                                                                 generation,
                                                                 baseKey,
@@ -2404,11 +2388,6 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
     if (!irFile.existsAsFile())
         return;
 
-    isLoading.store(true, std::memory_order_release);
-    isRebuilding.store(false, std::memory_order_release);
-    lastError.clear();
-    setLoadingProgress(0.0f);
-
     stopUpgradeThread();
 
     const uint64_t generation = convolverStateGeneration.bumpGeneration();
@@ -2416,19 +2395,16 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
     const int targetFFT = getTargetUpgradeFFTSize();
     const int lowResFFT = 512;
     const int phase = static_cast<int>(getPhaseMode());
-    const int targetLengthSamples = computeTargetIRLength(sr, 0);
     const size_t cacheLimit = maxCacheEntries.load(std::memory_order_acquire);
 
     int appliedFft = 0;
-    const uint64_t targetKey = CacheManager::computeKey(irFile, targetFFT, sr, phase, targetLengthSamples);
+    const uint64_t targetKey = CacheManager::computeKey(irFile, targetFFT, sr, phase, targetFFT);
 
     if (cacheManager)
     {
         auto directTarget = cacheManager->load(targetKey, targetFFT, generation);
         if (directTarget)
         {
-            directTarget->originalFileName = irFile.getFileNameWithoutExtension();
-            directTarget->originalFilePath = irFile.getFullPathName();
             appliedFft = targetFFT;
             applyPreparedIRState(std::move(directTarget));
         }
@@ -2436,13 +2412,11 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
 
     if (appliedFft == 0 && cacheManager && irConverter)
     {
-        const uint64_t lowResKey = CacheManager::computeKey(irFile, lowResFFT, sr, phase, targetLengthSamples);
+        const uint64_t lowResKey = CacheManager::computeKey(irFile, lowResFFT, sr, phase, lowResFFT);
         auto cachedLow = cacheManager->load(lowResKey, lowResFFT, generation);
 
         if (cachedLow)
         {
-            cachedLow->originalFileName = irFile.getFileNameWithoutExtension();
-            cachedLow->originalFilePath = irFile.getFullPathName();
             appliedFft = lowResFFT;
             applyPreparedIRState(std::move(cachedLow));
         }
@@ -2453,7 +2427,6 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
             cfg.targetSampleRate = sr;
             cfg.phaseMode = phase;
             cfg.partitionSize = lowResFFT;
-            cfg.targetLengthSamples = targetLengthSamples;
             cfg.generationId = generation;
             cfg.cacheKey = lowResKey;
 
@@ -2464,8 +2437,6 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
 
             if (prepared)
             {
-                prepared->originalFileName = irFile.getFileNameWithoutExtension();
-                prepared->originalFilePath = irFile.getFullPathName();
                 cacheManager->save(lowResKey, lowResFFT, *prepared);
                 cacheManager->evictLRU(cacheLimit);
                 appliedFft = lowResFFT;
@@ -2476,13 +2447,7 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
 
     if (appliedFft > 0)
     {
-        startProgressiveUpgrade(irFile, sr, appliedFft, generation, targetKey, targetLengthSamples);
-    }
-    else
-    {
-        isLoading.store(false, std::memory_order_release);
-        setLoadingProgress(0.0f);
-        handleLoadError("Failed to prepare IR state.");
+        startProgressiveUpgrade(irFile, sr, appliedFft, generation, targetKey);
     }
 }
 
@@ -2500,10 +2465,6 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
                                                       prepared->generationId,
                                                       prepared->sampleRate);
 
-    // Waveform snapshot must be created BEFORE partitionData is set to nullptr
-    if (visualizationEnabled)
-        createWaveformSnapshotFromPrepared(*prepared);
-
     prepared->partitionData = nullptr;
 
     activeCacheKey.store(prepared->cacheKey, std::memory_order_release);
@@ -2511,31 +2472,6 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
 
     runtime.reallocate(newState->fftSize, newState->numPartitions);
     updateConvolverState(std::move(newState));
-
-    {
-        const juce::ScopedLock sl(irFileLock);
-        if (prepared->originalFilePath.isNotEmpty())
-            currentIrFile = juce::File(prepared->originalFilePath);
-    }
-    if (prepared->originalFileName.isNotEmpty())
-        irName = prepared->originalFileName;
-
-    // Use actual IR sample count (numSamples) for accurate length display.
-    // Fall back to partition buffer size if numSamples is not available (e.g. cache load).
-    const int safeChannels = juce::jmax(1, prepared->numChannels);
-    const int actualSamples = (prepared->numSamples > 0)
-        ? prepared->numSamples
-        : static_cast<int>(juce::jmin<size_t>(
-              prepared->partitionSizeBytes / sizeof(double) / static_cast<size_t>(safeChannels),
-              static_cast<size_t>(std::numeric_limits<int>::max())));
-    irLength.store(actualSamples, std::memory_order_release);
-
-    // Phase 1 path compatibility: notify UI/listeners after successful state swap.
-    lastError.clear();
-    postCoalescedChangeNotification();
-    listeners.call(&Listener::convolverParamsChanged, this);
-    isLoading.store(false, std::memory_order_release);
-    setLoadingProgress(1.0f);
 }
 
 void ConvolverProcessor::handleLoadError(const juce::String& error)
@@ -2543,7 +2479,6 @@ void ConvolverProcessor::handleLoadError(const juce::String& error)
     lastError = error;
     isLoading.store(false);
     isRebuilding.store(false, std::memory_order_release);
-    loadProgress.store(0.0f, std::memory_order_release);
     // UIに通知してエラーメッセージを表示させる
     postCoalescedChangeNotification();
 }
@@ -2883,46 +2818,6 @@ double ConvolverProcessor::getIRSpectrumSampleRate() const
 {
     const juce::ScopedLock sl(visualizationDataLock);
     return irSpectrumSampleRate;
-}
-
-void ConvolverProcessor::createWaveformSnapshotFromPrepared(const PreparedIRState& prepared)
-{
-    const juce::ScopedLock sl(visualizationDataLock);
-
-    irWaveform.assign(WAVEFORM_POINTS, 0.0f);
-
-    if (prepared.partitionData == nullptr || prepared.partitionSizeBytes == 0)
-        return;
-
-    const int channels = juce::jmax(1, prepared.numChannels);
-    const size_t totalSamples = prepared.partitionSizeBytes / sizeof(double);
-    const size_t samplesPerChannel = totalSamples / static_cast<size_t>(channels);
-    if (samplesPerChannel == 0)
-        return;
-
-    const size_t samplesPerPoint = juce::jmax<size_t>(1, samplesPerChannel / static_cast<size_t>(WAVEFORM_POINTS));
-    float maxAbs = 0.0f;
-
-    for (int i = 0; i < WAVEFORM_POINTS; ++i)
-    {
-        const size_t start = static_cast<size_t>(i) * samplesPerPoint;
-        const size_t end = juce::jmin(samplesPerChannel, start + samplesPerPoint);
-        float peak = 0.0f;
-
-        for (int ch = 0; ch < channels; ++ch)
-        {
-            const size_t base = static_cast<size_t>(ch) * samplesPerChannel;
-            for (size_t s = start; s < end; ++s)
-                peak = juce::jmax(peak, static_cast<float>(std::abs(prepared.partitionData[base + s])));
-        }
-
-        irWaveform[static_cast<size_t>(i)] = peak;
-        maxAbs = juce::jmax(maxAbs, peak);
-    }
-
-    if (maxAbs > 0.0f)
-        for (auto& v : irWaveform)
-            v /= maxAbs;
 }
 
 //--------------------------------------------------------------
@@ -4115,18 +4010,6 @@ int ConvolverProcessor::getRebuildDebounceMs() const
 ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() const
 {
     LatencyBreakdown breakdown;
-
-    // Phase 1 path: derive latency from rcuSwapper state's fftSize.
-    // For NUC partitioned convolution, algorithm latency = partition size (fftSize).
-    if (auto* state = rcuSwapper.getState())
-    {
-        breakdown.algorithmLatencySamples = juce::jmax(0, state->fftSize);
-        breakdown.irPeakLatencySamples = 0;
-        breakdown.totalLatencySamples = breakdown.algorithmLatencySamples;
-        return breakdown;
-    }
-
-    // Phase 0 path: read from legacy convolution engine pointer.
     if (auto* conv = convolution.load(std::memory_order_acquire))
     {
         const bool directHeadActive = conv->storedDirectHeadEnabled;

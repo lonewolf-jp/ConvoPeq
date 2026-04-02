@@ -106,10 +106,7 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
 
     const int fftSize = juce::jmax(32, config.fftSize);
     const int usableChannels = juce::jmax(1, converted.getNumChannels());
-    const int maxTargetSamples = (config.targetLengthSamples > 0)
-                                   ? config.targetLengthSamples
-                                   : converted.getNumSamples();
-    const int samples = juce::jmin(converted.getNumSamples(), maxTargetSamples);
+    const int samples = converted.getNumSamples();
 
     const int numPartitions = juce::jmax(1, (samples + fftSize - 1) / fftSize);
     const size_t totalSamples = static_cast<size_t>(numPartitions) * static_cast<size_t>(fftSize) * static_cast<size_t>(usableChannels);
@@ -143,13 +140,10 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
     prepared->partitionSizeBytes = bytes;
     prepared->numPartitions = numPartitions * usableChannels;
     prepared->fftSize = fftSize;
-    prepared->numSamples = samples;    // actual IR length before partition padding
     prepared->numChannels = usableChannels;
     prepared->sampleRate = (config.targetSampleRate > 0.0) ? config.targetSampleRate : sourceRate;
     prepared->generationId = config.generationId;
     prepared->cacheKey = config.cacheKey;
-    prepared->originalFileName = irFile.getFileNameWithoutExtension();
-    prepared->originalFilePath = irFile.getFullPathName();
 
     return prepared;
 }
@@ -157,7 +151,6 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
 std::unique_ptr<PreparedIRState> IRConverter::convertToHighRes(const juce::File& irFile,
                                                                double sampleRate,
                                                                int nextFFTSize,
-                                                               int targetLengthSamples,
                                                                uint64_t generationId,
                                                                uint64_t cacheKey,
                                                                const std::function<bool()>& shouldCancel) const
@@ -165,7 +158,6 @@ std::unique_ptr<PreparedIRState> IRConverter::convertToHighRes(const juce::File&
     ConvertConfig cfg;
     cfg.fftSize = nextFFTSize;
     cfg.partitionSize = nextFFTSize;
-    cfg.targetLengthSamples = targetLengthSamples;
     cfg.targetSampleRate = sampleRate;
     cfg.generationId = generationId;
     cfg.cacheKey = cacheKey;

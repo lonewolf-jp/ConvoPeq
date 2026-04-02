@@ -98,6 +98,11 @@ private:
 
     void updateWaveformPath();
     void updateMixedPhaseControlsEnabled();
+    void startAsyncIRLoadPreview(const juce::File& irFile);
+    void finishAsyncIRLoadPreview(const juce::File& irFile,
+                                  const ConvolverProcessor::IRLoadPreview& preview,
+                                  int requestId);
+    void setIRPreviewInProgress(bool isInProgress);
     void showIRAdvancedWindow();
     void showConvolverSettingsWindow();
     // Convolver Input Trim スライダーの表示と値をエンジンの現在モードに同期する。
@@ -131,6 +136,8 @@ private:
     float pendingMixedF1Hz = ConvolverProcessor::MIXED_F1_DEFAULT_HZ;
     float pendingMixedF2Hz = ConvolverProcessor::MIXED_F2_DEFAULT_HZ;
     float pendingMixedTau = ConvolverProcessor::MIXED_TAU_DEFAULT;
+    std::atomic<int> irPreviewRequestId { 0 };
+    bool irPreviewInProgress = false;
     juce::Component::SafePointer<juce::DialogWindow> irAdvancedWindow;
     juce::Component::SafePointer<juce::DialogWindow> convolverSettingsWindow;
 
