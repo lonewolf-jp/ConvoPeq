@@ -145,6 +145,10 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
     prepared->generationId = config.generationId;
     prepared->cacheKey = config.cacheKey;
 
+    // 時間領域 IR を保持（UI 表示用）
+    // converted はリサンプリング済みの加工済み IR
+    prepared->timeDomainIR = std::make_unique<juce::AudioBuffer<double>>(std::move(converted));
+
     return prepared;
 }
 

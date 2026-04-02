@@ -24,6 +24,9 @@ struct CacheHeader
     uint64_t numPartitions = 0;
     uint64_t numChannels = 0;
     double sampleRate = 0.0;
+    uint64_t timeDomainChannels = 0;
+    uint64_t timeDomainNumSamples = 0;
+    uint64_t timeDomainSizeBytes = 0;
 };
 
 class CacheManager

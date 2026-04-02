@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <juce_core/juce_core.h>
 
 #include <mkl.h>
 
@@ -15,6 +17,8 @@ struct PreparedIRState
     double sampleRate = 0.0;
     uint64_t generationId = 0;
     uint64_t cacheKey = 0;
+    juce::String originalFileName;
+    std::unique_ptr<juce::AudioBuffer<double>> timeDomainIR;
 
     PreparedIRState() = default;
 
@@ -26,7 +30,9 @@ struct PreparedIRState
           numChannels(other.numChannels),
           sampleRate(other.sampleRate),
           generationId(other.generationId),
-          cacheKey(other.cacheKey)
+          cacheKey(other.cacheKey),
+          originalFileName(std::move(other.originalFileName)),
+          timeDomainIR(std::move(other.timeDomainIR))
     {
         other.partitionData = nullptr;
         other.partitionSizeBytes = 0;
@@ -47,6 +53,8 @@ struct PreparedIRState
             sampleRate = other.sampleRate;
             generationId = other.generationId;
             cacheKey = other.cacheKey;
+            originalFileName = std::move(other.originalFileName);
+            timeDomainIR = std::move(other.timeDomainIR);
 
             other.partitionData = nullptr;
             other.partitionSizeBytes = 0;

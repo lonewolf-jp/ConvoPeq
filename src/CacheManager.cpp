@@ -122,7 +122,9 @@ bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKe
     if (static_cast<int>(headerOut.fftSize) != expectedFftSize)
         return false;
 
-    const int64 expectedTotalSize = static_cast<int64>(sizeof(CacheHeader)) + static_cast<int64>(headerOut.dataSize);
+    const int64 expectedTotalSize = static_cast<int64>(sizeof(CacheHeader))
+                                  + static_cast<int64>(headerOut.dataSize)
+                                  + static_cast<int64>(headerOut.timeDomainSizeBytes);
     if (file.getSize() != expectedTotalSize)
         return false;
 
@@ -196,6 +198,29 @@ std::unique_ptr<PreparedIRState> CacheManager::load(uint64_t key, int fftSize, u
     prepared->generationId = generationId;
     prepared->cacheKey = key;
 
+    // timeDomainIR があれば復元
+    if (header.timeDomainSizeBytes > 0 && header.timeDomainChannels > 0 && header.timeDomainNumSamples > 0)
+    {
+        const uint8_t* tdStart = dataStart + header.dataSize;
+        const size_t expectedTdBytes = static_cast<size_t>(header.timeDomainSizeBytes);
+        if (static_cast<size_t>(mmap.getSize() - sizeof(CacheHeader) - header.dataSize) >= expectedTdBytes)
+        {
+            auto tdBuffer = std::make_unique<juce::AudioBuffer<double>>(
+                static_cast<int>(header.timeDomainChannels),
+                static_cast<int>(header.timeDomainNumSamples));
+            const double* tdSrc = reinterpret_cast<const double*>(tdStart);
+            size_t idx = 0;
+            for (int ch = 0; ch < static_cast<int>(header.timeDomainChannels); ++ch)
+            {
+                std::memcpy(tdBuffer->getWritePointer(ch),
+                            tdSrc + idx,
+                            static_cast<size_t>(header.timeDomainNumSamples) * sizeof(double));
+                idx += static_cast<size_t>(header.timeDomainNumSamples);
+            }
+            prepared->timeDomainIR = std::move(tdBuffer);
+        }
+    }
+
     touch(key, fftSize);
 
     return prepared;
@@ -218,6 +243,20 @@ void CacheManager::save(uint64_t key, int fftSize, const PreparedIRState& state)
     header.numPartitions = static_cast<uint64_t>(state.numPartitions);
     header.numChannels = static_cast<uint64_t>(state.numChannels);
     header.sampleRate = state.sampleRate;
+    if (state.timeDomainIR)
+    {
+        header.timeDomainChannels = static_cast<uint64_t>(state.timeDomainIR->getNumChannels());
+        header.timeDomainNumSamples = static_cast<uint64_t>(state.timeDomainIR->getNumSamples());
+        header.timeDomainSizeBytes = static_cast<uint64_t>(state.timeDomainIR->getNumChannels())
+                                   * static_cast<uint64_t>(state.timeDomainIR->getNumSamples())
+                                   * sizeof(double);
+    }
+    else
+    {
+        header.timeDomainChannels = 0;
+        header.timeDomainNumSamples = 0;
+        header.timeDomainSizeBytes = 0;
+    }
 
     std::unique_ptr<juce::FileOutputStream> out(temp.createOutputStream());
     if (!out)
@@ -225,6 +264,14 @@ void CacheManager::save(uint64_t key, int fftSize, const PreparedIRState& state)
 
     out->write(&header, static_cast<size_t>(sizeof(CacheHeader)));
     out->write(state.partitionData, state.partitionSizeBytes);
+    if (state.timeDomainIR && header.timeDomainSizeBytes > 0)
+    {
+        const int channels = state.timeDomainIR->getNumChannels();
+        const int samples = state.timeDomainIR->getNumSamples();
+        for (int ch = 0; ch < channels; ++ch)
+            out->write(state.timeDomainIR->getReadPointer(ch),
+                       static_cast<size_t>(samples) * sizeof(double));
+    }
     out->flush();
 
     temp.moveFileTo(file);

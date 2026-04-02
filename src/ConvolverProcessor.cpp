@@ -2405,6 +2405,7 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
         auto directTarget = cacheManager->load(targetKey, targetFFT, generation);
         if (directTarget)
         {
+            directTarget->originalFileName = irFile.getFileNameWithoutExtension();
             appliedFft = targetFFT;
             applyPreparedIRState(std::move(directTarget));
         }
@@ -2417,6 +2418,7 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
 
         if (cachedLow)
         {
+            cachedLow->originalFileName = irFile.getFileNameWithoutExtension();
             appliedFft = lowResFFT;
             applyPreparedIRState(std::move(cachedLow));
         }
@@ -2437,6 +2439,7 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
 
             if (prepared)
             {
+                prepared->originalFileName = irFile.getFileNameWithoutExtension();
                 cacheManager->save(lowResKey, lowResFFT, *prepared);
                 cacheManager->evictLRU(cacheLimit);
                 appliedFft = lowResFFT;
@@ -2458,6 +2461,22 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
 
     JUCE_ASSERT_MESSAGE_THREAD;
 
+    // 1. UI 用レガシー状態の更新
+    {
+        const juce::ScopedLock sl(irFileLock);
+        currentIrFile = juce::File();
+        irName = prepared->originalFileName;
+    }
+
+    // 2. 波形／スペクトルスナップショットの生成
+    if (visualizationEnabled && prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
+    {
+        createWaveformSnapshot(*(prepared->timeDomainIR));
+        createFrequencyResponseSnapshot(*(prepared->timeDomainIR), prepared->sampleRate);
+    }
+
+    // 3. RCU 状態の更新
+
     auto newState = std::make_unique<ConvolverState>(prepared->partitionData,
                                                       prepared->partitionSizeBytes,
                                                       prepared->numPartitions,
@@ -2472,6 +2491,13 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
 
     runtime.reallocate(newState->fftSize, newState->numPartitions);
     updateConvolverState(std::move(newState));
+
+    // 4. UI 通知
+    postCoalescedChangeNotification();
+    listeners.call(&Listener::convolverParamsChanged, this);
+
+    isLoading.store(false, std::memory_order_release);
+    setLoadingProgress(1.0f);
 }
 
 void ConvolverProcessor::handleLoadError(const juce::String& error)
