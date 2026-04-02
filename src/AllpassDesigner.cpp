@@ -2,6 +2,7 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <cstring>
 
 namespace convo {
 
@@ -102,6 +103,26 @@ DesignResult AllpassDesigner::designWithCMAES(
             }
             const double diff = tau_sum - target_group_delay_samples[i];
             error += weight[i] * diff * diff;
+        }
+        // Patch ④: 振幅ペナルティ（|H| = 1 からの偏差に対するソフト制約）
+        // 16 点の代表周波数で全セクションの複素振幅応答を検査し、1 からの偏差をペナルティとして加算する。
+        // 理論上 |H| = 1 は常に成立するが、数値精度の劣化や極端な ρ/θ 値に対する安全マージンとして機能する。
+        static constexpr int    kAmpCheckPoints   = 16;
+        static constexpr double kAmpPenaltyWeight = 1.0;
+        for (int ci = 0; ci < kAmpCheckPoints; ++ci)
+        {
+            const double o = juce::MathConstants<double>::pi * ci / (kAmpCheckPoints - 1);
+            std::complex<double> totalResp(1.0, 0.0);
+            for (int s = 0; s < config.numSections; ++s)
+            {
+                SecondOrderAllpass sec;
+                sec.rho   = rho_list[s];
+                sec.theta = theta_list[s];
+                totalResp *= sec.response(o);
+            }
+            const double mag    = std::abs(totalResp);
+            const double magErr = mag - 1.0;
+            error += kAmpPenaltyWeight * magErr * magErr;
         }
         return error;
     };
@@ -222,7 +243,7 @@ bool AllpassDesigner::gridSearch2D(const std::vector<double, convo::MKLAllocator
         3000.0, 5000.0, 8000.0, 10000.0, 12000.0, 15000.0, 20000.0
     };
     const std::vector<double> gain_candidates = { 0.1, 0.3, 0.5, 0.7, 0.9, 0.95, 0.98 };
-    
+
     double best_error = std::numeric_limits<double>::max();
     for (double f0 : f0_candidates) {
         for (double gain : gain_candidates) {
@@ -250,7 +271,7 @@ bool AllpassDesigner::adaptiveGradientDescent(const std::vector<double, convo::M
     const double eps = 1e-6;
     double grad_f0_norm = 0.0, grad_gain_norm = 0.0;
     double prev_error = std::numeric_limits<double>::max();
-    
+
     for (int iter = 0; iter < maxIterations; ++iter) {
         double error = 0.0;
         for (size_t i = 0; i < omega.size(); ++i) {
@@ -260,7 +281,7 @@ bool AllpassDesigner::adaptiveGradientDescent(const std::vector<double, convo::M
         }
         if (error >= prev_error) break;
         prev_error = error;
-        
+
         double err_f0_plus = 0.0, err_f0_minus = 0.0;
         double err_gain_plus = 0.0, err_gain_minus = 0.0;
         for (size_t i = 0; i < omega.size(); ++i) {
@@ -269,7 +290,7 @@ bool AllpassDesigner::adaptiveGradientDescent(const std::vector<double, convo::M
             err_gain_plus += std::pow(sectionGroupDelay(f0, gain + eps, omega[i], sampleRate) - residual[i], 2);
             err_gain_minus += std::pow(sectionGroupDelay(f0, gain - eps, omega[i], sampleRate) - residual[i], 2);
         }
-        
+
         double grad_f0 = (err_f0_plus - err_f0_minus) / (2.0 * eps);
         double grad_gain = (err_gain_plus - err_gain_minus) / (2.0 * eps);
         grad_f0_norm += grad_f0 * grad_f0;
@@ -301,40 +322,141 @@ AllpassDesigner::computeResponse(const std::vector<SecondOrderAllpass>& sections
 }
 
 //==============================================================================
-// applyAllpassToIR
+// applyAllpassToIR  (Patch ①+⑤: MKL DFTI による正しい全通過変換実装)
+//
+// linearIR の各チャンネルを FFT し、設計済み全通過セクションの複素応答を
+// Hermitian 対称性を保ちながら乗算したのち IFFT する。
+// 振幅は必ず 1 に正規化 (resp /= mag) するため IR のレベルが保存される。
 //==============================================================================
 juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
     const juce::AudioBuffer<double>& linearIR,
     const std::vector<SecondOrderAllpass>& sections,
     double sampleRate,
-    const std::vector<double>& freq_hz,
-    int /*fftSize*/,
+    const std::vector<double>& /*freq_hz*/,
+    int fftSize,
     const std::function<bool()>& shouldExit,
     std::function<void(float)> progressCallback)
 {
     if (shouldExit && shouldExit()) return {};
 
     const int numChannels = linearIR.getNumChannels();
-    const int irLen = linearIR.getNumSamples();
+    const int irLen       = linearIR.getNumSamples();
+    if (numChannels <= 0 || irLen <= 0 || sampleRate <= 0.0) return {};
+
+    // FFT サイズを IR 長以上の次の 2 のべき乗に固定
+    if (fftSize < irLen)
+        fftSize = juce::nextPowerOfTwo(irLen);
+
+    const int half        = fftSize / 2;
+    const int complexSize = half + 1;
+
+    // 1. 全通過フィルタの周波数応答を FFT ビン単位 (k = 0..N/2) で計算し
+    //    振幅を 1 に強制正規化する (Patch ①核心)
+    std::vector<std::complex<double>, convo::MKLAllocator<std::complex<double>>> allpassResp(complexSize);
+    for (int k = 0; k < complexSize; ++k)
+    {
+        const double omega     = 2.0 * juce::MathConstants<double>::pi * k / fftSize;
+        std::complex<double> resp(1.0, 0.0);
+        for (const auto& sec : sections)
+            resp *= sec.response(omega);
+        const double mag = std::abs(resp);
+        allpassResp[k] = (mag > 1e-12) ? (resp / mag) : std::complex<double>(1.0, 0.0);
+    }
+    // DC (k=0) と Nyquist (k=half) は実数のみ（位相は 0 か π のみ許容）
+    allpassResp[0]    = std::complex<double>(1.0, 0.0);
+    allpassResp[half] = std::complex<double>(
+        std::real(allpassResp[half]) >= 0.0 ? 1.0 : -1.0, 0.0);
+
+    // 2. MKL DFTI ディスクリプタ作成 (複素 in-place, BACKWARD_SCALE = 1/N)
+    DFTI_DESCRIPTOR_HANDLE dfti = nullptr;
+    const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
+    if (DftiCreateDescriptor(&dfti, DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
+        return {};
+    if (DftiSetValue(dfti, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR ||
+        DftiSetValue(dfti, DFTI_BACKWARD_SCALE,
+                     1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR ||
+        DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
+    {
+        DftiFreeDescriptor(&dfti);
+        return {};
+    }
+
+    // 3. 作業バッファ: 複素数列 (fftSize 要素)
+    convo::ScopedAlignedPtr<MKL_Complex16> spec(
+        static_cast<MKL_Complex16*>(
+            convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
+    if (!spec) { DftiFreeDescriptor(&dfti); return {}; }
+
     juce::AudioBuffer<double> result(numChannels, irLen);
+    result.clear();
 
-    // 周波数応答の計算
-    auto allpassResponse = computeResponse(sections, sampleRate, freq_hz);
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        if (shouldExit && shouldExit()) { DftiFreeDescriptor(&dfti); return {}; }
 
-    // 各チャンネルに適用
-    for (int ch = 0; ch < numChannels; ++ch) {
-        if (shouldExit && shouldExit()) return {};
+        // ゼロパディングしながら実部に IR をコピー
+        std::memset(spec.get(), 0, static_cast<size_t>(fftSize) * sizeof(MKL_Complex16));
+        const double* src = linearIR.getReadPointer(ch);
+        for (int i = 0; i < irLen; ++i)
+            spec.get()[i].real = src[i];
 
-        // 簡易的な実装：FFT -> 乗算 -> IFFT
-        // 実際には MKL を使用して高速化する
-        // ここではプレースホルダーとして線形IRをコピーする（後で修正）
-        result.copyFrom(ch, 0, linearIR, ch, 0, irLen);
+        // 順方向 FFT
+        if (DftiComputeForward(dfti, spec.get()) != DFTI_NO_ERROR)
+        { DftiFreeDescriptor(&dfti); return {}; }
 
-        if (progressCallback) {
+        // 全通過応答を正の半スペクトル (k = 0..N/2) に乗算
+        for (int k = 0; k <= half; ++k)
+        {
+            const std::complex<double> h(spec.get()[k].real, spec.get()[k].imag);
+            const std::complex<double> out = h * allpassResp[k];
+            spec.get()[k].real = out.real();
+            spec.get()[k].imag = out.imag();
+        }
+        // Hermitian 対称性: 負の半スペクトル (k = N/2+1..N-1) を共役ミラーで更新
+        for (int k = half + 1; k < fftSize; ++k)
+        {
+            const int mirror = fftSize - k;
+            const std::complex<double> h(spec.get()[k].real, spec.get()[k].imag);
+            const std::complex<double> out = h * std::conj(allpassResp[mirror]);
+            spec.get()[k].real = out.real();
+            spec.get()[k].imag = out.imag();
+        }
+        // DC と Nyquist の虚部を強制ゼロ（実 IR の Hermitian 条件）
+        spec.get()[0].imag    = 0.0;
+        spec.get()[half].imag = 0.0;
+
+        // 逆方向 FFT (1/N スケーリング適用済み)
+        if (DftiComputeBackward(dfti, spec.get()) != DFTI_NO_ERROR)
+        { DftiFreeDescriptor(&dfti); return {}; }
+
+        // 実部のみ irLen サンプル書き出し（デノーマル抑制付き）
+        double* dst = result.getWritePointer(ch);
+        for (int i = 0; i < irLen; ++i)
+        {
+            const double v = spec.get()[i].real;
+            dst[i] = (std::abs(v) < 1.0e-18) ? 0.0 : v;
+        }
+
+        if (progressCallback)
             progressCallback(0.75f + 0.25f * static_cast<float>(ch + 1) / numChannels);
+    }
+
+    // Patch ⑤: 安全ガード - NaN/Inf チェック
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* p = result.getReadPointer(ch);
+        for (int i = 0; i < irLen; ++i)
+        {
+            if (!std::isfinite(p[i]))
+            {
+                DBG("applyAllpassToIR: Safety guard triggered (NaN/Inf detected).");
+                DftiFreeDescriptor(&dfti);
+                return {};
+            }
         }
     }
 
+    DftiFreeDescriptor(&dfti);
     return result;
 }
 
@@ -343,10 +465,10 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
 //==============================================================================
 uint64_t AllpassDesigner::computeIRHash(const juce::File& irFile, bool /*useMD5*/) {
     if (!irFile.existsAsFile()) return 0;
-    
+
     uint64_t hash = static_cast<uint64_t>(irFile.getSize());
     hash ^= static_cast<uint64_t>(irFile.getLastModificationTime().toMilliseconds()) << 1;
-    
+
     std::unique_ptr<juce::FileInputStream> stream(irFile.createInputStream());
     if (stream) {
         uint8_t buffer[1024];
@@ -355,7 +477,7 @@ uint64_t AllpassDesigner::computeIRHash(const juce::File& irFile, bool /*useMD5*
             hash = (hash * 31) + buffer[i];
         }
     }
-    
+
     return hash;
 }
 

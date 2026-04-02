@@ -553,6 +553,11 @@ private:
     // このフラグと値を使用して Audio Thread に更新を委譲する。
     std::atomic<bool> latencyResetPending { false };
     std::atomic<double> pendingLatencyValue { 0.0 };
+    // RCU経路でもUIがレイテンシー表示できるように、直近の内訳を保持する。
+    std::atomic<int> uiAlgorithmLatencySamples { 0 };
+    std::atomic<int> uiIrPeakLatencySamples { 0 };
+    std::atomic<int> uiTotalLatencySamples { 0 };
+    std::atomic<bool> uiDirectHeadActive { false };
 
     // ドップラー効果対策: クロスフェード用
     juce::SmoothedValue<double> crossfadeGain;

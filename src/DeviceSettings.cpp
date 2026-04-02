@@ -1034,7 +1034,9 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             // Convolver state
             if (auto* convXml = xml->getChildByName("Convolver"))
             {
-                engine.getConvolverProcessor().setState(juce::ValueTree::fromXml(*convXml));
+                auto convolverState = juce::ValueTree::fromXml(*convXml);
+                convolverState.removeProperty("irPath", nullptr);
+                engine.getConvolverProcessor().setState(convolverState);
             }
 
             return;

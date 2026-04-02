@@ -586,6 +586,13 @@ private:
 
     inline double nextTPDF_MKL(int channel) noexcept
     {
+        if (!rng[channel].isValid())
+        {
+            const double u1 = fallbackUniform(channel);
+            const double u2 = fallbackUniform(channel);
+            return (u1 - 0.5) + (u2 - 0.5);
+        }
+
         const double u1 = popUniformFromRing(channel);
         const double u2 = popUniformFromRing(channel);
         return (u1 - 0.5) + (u2 - 0.5);

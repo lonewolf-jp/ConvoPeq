@@ -1956,9 +1956,19 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
             // 線形位相成分 (-peakDelay) を差し引いて、全通過フィルタが補うべき分を抽出
             targetGroupDelay[k] -= static_cast<double>(peakDelay);
+        }
 
-            // 負の群遅延は物理的に実現不可なのでクリップ
-            if (targetGroupDelay[k] < 0.0) targetGroupDelay[k] = 0.0;
+        // Patch ②: 負の群遅延をクリップではなくシフトして、物理的に実現可能なターゲットに射影する。
+        // 単純なクリップは「低域で异常に大きな正の群遅延」という
+        // 物理的に実現不可能なターゲットを生成する場合があるため。
+        {
+            const double minGD = *std::min_element(targetGroupDelay.begin(), targetGroupDelay.end());
+            if (minGD < 0.0)
+            {
+                const double offset = -minGD + 1e-6;
+                for (auto& gd : targetGroupDelay)
+                    gd += offset;
+            }
         }
 
         // --- AllpassDesigner の呼び出し ---
@@ -2019,6 +2029,43 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         {
             const double value = linearSpec.get()[i].real;
             mixedTime[i] = (std::abs(value) < 1.0e-18) ? 0.0 : value;
+        }
+    }
+
+    // Patch ③: RMS 正規化 – 混合位相 IR の RMS を線形位相 IR に合わせる（振幅保存）
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        double rmsLinear = 0.0;
+        double rmsMixed  = 0.0;
+        const double* srcL = linearIR.getReadPointer(ch);
+        const double* srcM = mixedIR.getReadPointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            rmsLinear += srcL[i] * srcL[i];
+            rmsMixed  += srcM[i] * srcM[i];
+        }
+        rmsLinear = std::sqrt(rmsLinear / numSamples);
+        rmsMixed  = std::sqrt(rmsMixed  / numSamples);
+        if (rmsMixed > 1e-12 && rmsLinear > 1e-12)
+        {
+            const double gain = rmsLinear / rmsMixed;
+            double* dst = mixedIR.getWritePointer(ch);
+            for (int i = 0; i < numSamples; ++i)
+                dst[i] *= gain;
+        }
+    }
+
+    // Patch ⑤: 安全ガード – NaN/Inf チェック（実現不能な値を検出した場合は空バッファを返しフォールバックを促す）
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* p = mixedIR.getReadPointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            if (!std::isfinite(p[i]))
+            {
+                DBG("convertToMixedPhaseAllpass: Safety guard triggered (NaN/Inf detected), returning empty.");
+                return {};
+            }
         }
     }
 
@@ -2478,11 +2525,57 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
     irLength.store(prepared->timeDomainIR ? prepared->timeDomainIR->getNumSamples() : 0,
                    std::memory_order_release);
 
+    // RCU経路では legacy convolution を経由しないため、UI表示用のレイテンシー推定値を更新する。
+    {
+        const bool directHeadActive = experimentalDirectHeadEnabled.load(std::memory_order_acquire);
+        const int algorithmLatency = directHeadActive ? 0 : juce::jmax(0, prepared->fftSize);
+
+        int irPeakLatency = 0;
+        if (prepared->timeDomainIR && prepared->timeDomainIR->getNumChannels() > 0)
+        {
+            const int channels = prepared->timeDomainIR->getNumChannels();
+            const int samples = prepared->timeDomainIR->getNumSamples();
+            double bestAbs = 0.0;
+            int bestIndex = 0;
+
+            for (int ch = 0; ch < channels; ++ch)
+            {
+                const double* src = prepared->timeDomainIR->getReadPointer(ch);
+                for (int i = 0; i < samples; ++i)
+                {
+                    const double a = std::abs(src[i]);
+                    if (a > bestAbs)
+                    {
+                        bestAbs = a;
+                        bestIndex = i;
+                    }
+                }
+            }
+
+            irPeakLatency = juce::jmax(0, bestIndex);
+        }
+
+        const int totalLatency = juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY);
+        uiAlgorithmLatencySamples.store(algorithmLatency, std::memory_order_release);
+        uiIrPeakLatencySamples.store(irPeakLatency, std::memory_order_release);
+        uiTotalLatencySamples.store(totalLatency, std::memory_order_release);
+        uiDirectHeadActive.store(directHeadActive, std::memory_order_release);
+    }
+
     // 2. 波形／スペクトルスナップショットの生成
     if (visualizationEnabled && prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
     {
         createWaveformSnapshot(*(prepared->timeDomainIR));
         createFrequencyResponseSnapshot(*(prepared->timeDomainIR), prepared->sampleRate);
+    }
+
+    // loadIR() (RCU経路) では applyNewState() が呼ばれないため、
+    // DSP側 rebuildAllIRsSynchronous() が参照する originalIR をここで保持する。
+    if (prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
+    {
+        auto irShared = std::shared_ptr<juce::AudioBuffer<double>>(std::move(prepared->timeDomainIR));
+        originalIR.store(irShared);
+        originalIRSampleRate.store(prepared->sampleRate, std::memory_order_release);
     }
 
     // 3. RCU 状態の更新
@@ -3261,6 +3354,10 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     activeConvolution = otherConv;
 
     irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
+    uiAlgorithmLatencySamples.store(other.uiAlgorithmLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
+    uiIrPeakLatencySamples.store(other.uiIrPeakLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
+    uiTotalLatencySamples.store(other.uiTotalLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
+    uiDirectHeadActive.store(other.uiDirectHeadActive.load(std::memory_order_acquire), std::memory_order_release);
 }
 
 void ConvolverProcessor::refreshLatency()
@@ -3271,6 +3368,10 @@ void ConvolverProcessor::refreshLatency()
     {
         const int algorithmLatency = conv->storedDirectHeadEnabled ? 0 : juce::jmax(0, conv->latency);
         const int irPeakLatency = juce::jmax(0, conv->irLatency);
+        uiAlgorithmLatencySamples.store(algorithmLatency, std::memory_order_release);
+        uiIrPeakLatencySamples.store(irPeakLatency, std::memory_order_release);
+        uiTotalLatencySamples.store(juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY), std::memory_order_release);
+        uiDirectHeadActive.store(conv->storedDirectHeadEnabled, std::memory_order_release);
         totalLatency = static_cast<double>(juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY));
     }
 
@@ -4054,9 +4155,37 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
         breakdown.irPeakLatencySamples = juce::jmax(0, conv->irLatency);
         breakdown.totalLatencySamples = juce::jmax(0,
             breakdown.algorithmLatencySamples + breakdown.irPeakLatencySamples);
+
+        // legacy側が0を返す場合は、RCU経路で更新したスナップショットを使う。
+        if (breakdown.algorithmLatencySamples == 0 &&
+            breakdown.irPeakLatencySamples == 0 &&
+            breakdown.totalLatencySamples == 0)
+        {
+            const int snapTotal = uiTotalLatencySamples.load(std::memory_order_acquire);
+            if (snapTotal > 0)
+            {
+                breakdown.algorithmLatencySamples = uiAlgorithmLatencySamples.load(std::memory_order_acquire);
+                breakdown.irPeakLatencySamples = uiIrPeakLatencySamples.load(std::memory_order_acquire);
+                breakdown.totalLatencySamples = snapTotal;
+                breakdown.directHeadActive = uiDirectHeadActive.load(std::memory_order_acquire);
+            }
+        }
     }
 
-    // RCU状態では現時点でレイテンシー情報を保持していないため0とする
+    // convolution が未構築なタイミングでは、UIスナップショット値を返す。
+    if (breakdown.algorithmLatencySamples == 0 &&
+        breakdown.irPeakLatencySamples == 0 &&
+        breakdown.totalLatencySamples == 0)
+    {
+        const int snapTotal = uiTotalLatencySamples.load(std::memory_order_acquire);
+        if (snapTotal > 0)
+        {
+            breakdown.algorithmLatencySamples = uiAlgorithmLatencySamples.load(std::memory_order_acquire);
+            breakdown.irPeakLatencySamples = uiIrPeakLatencySamples.load(std::memory_order_acquire);
+            breakdown.totalLatencySamples = snapTotal;
+            breakdown.directHeadActive = uiDirectHeadActive.load(std::memory_order_acquire);
+        }
+    }
 
     return breakdown;
 }

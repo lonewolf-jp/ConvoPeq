@@ -437,38 +437,22 @@ void MainWindow::timerCallback()
     const auto breakdown = audioEngine.getCurrentLatencyBreakdown();
     const int latencySamples = breakdown.totalLatencyBaseRateSamples;
     const double sr = audioEngine.getSampleRate();
-    const int latencyMs = (sr > 0.0)
-        ? juce::roundToInt((static_cast<double>(latencySamples) * 1000.0) / sr)
-        : 0;
-    latencyLabel.setText ("Lat: " + juce::String (latencyMs) + "ms (" + juce::String(latencySamples) + " smp)",
-                          juce::dontSendNotification);
-
-#if JUCE_DEBUG
+    juce::String latencyText;
+    if (sr > 0.0)
     {
-        static double lastLatencyLogMs = 0.0;
-        const double nowMs = juce::Time::getMillisecondCounterHiRes();
-        if (nowMs - lastLatencyLogMs >= 1000.0)
-        {
-            lastLatencyLogMs = nowMs;
-
-            const int osFactor = juce::jmax(1, audioEngine.getOversamplingFactor());
-            const auto toMsRounded3 = [sr](int samples) -> double
-            {
-                if (sr <= 0.0)
-                    return 0.0;
-                const double ms = (static_cast<double>(samples) * 1000.0) / sr;
-                return std::round(ms * 1000.0) / 1000.0;
-            };
-
-            DBG("lat sr=" << juce::String(sr, 1)
-                << " osFactor=" << osFactor
-                << " os=" << juce::String(toMsRounded3(breakdown.oversamplingLatencyBaseRateSamples), 3)
-                << " convA=" << juce::String(toMsRounded3(breakdown.convolverAlgorithmLatencyBaseRateSamples), 3)
-                << " convPeak=" << juce::String(toMsRounded3(breakdown.convolverIRPeakLatencyBaseRateSamples), 3)
-                << " total=" << latencyMs);
-        }
+        const double latencyMs = (static_cast<double>(latencySamples) * 1000.0) / sr;
+        if (latencySamples > 0 && latencyMs < 1.0)
+            latencyText = "Lat: <1ms (" + juce::String(latencySamples) + " smp)";
+        else
+            latencyText = "Lat: " + juce::String(latencyMs, 1) + "ms (" + juce::String(latencySamples) + " smp)";
     }
-#endif
+    else
+    {
+        latencyText = "Lat: -- ms (" + juce::String(latencySamples) + " smp)";
+    }
+
+    latencyLabel.setText(latencyText, juce::dontSendNotification);
+
 }
 
 //--------------------------------------------------------------

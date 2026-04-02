@@ -1369,7 +1369,15 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 
     if (!convBypassActive.load(std::memory_order_relaxed))
     {
-        const auto convBreakdown = dsp->convolver.getLatencyBreakdown();
+        auto convBreakdown = dsp->convolver.getLatencyBreakdown();
+
+        // DSP側が再構築中などで 0 を返す瞬間は、UI側コンボルバーのスナップショットを使う。
+        if (convBreakdown.algorithmLatencySamples == 0 &&
+            convBreakdown.irPeakLatencySamples == 0 &&
+            convBreakdown.totalLatencySamples == 0)
+        {
+            convBreakdown = uiConvolverProcessor.getLatencyBreakdown();
+        }
 
         breakdown.convolverAlgorithmLatencyBaseRateSamples = toBaseRateSamples(convBreakdown.algorithmLatencySamples);
         breakdown.convolverIRPeakLatencyBaseRateSamples = toBaseRateSamples(convBreakdown.irPeakLatencySamples);
@@ -2084,9 +2092,47 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 {
     if (processor == &uiConvolverProcessor)
     {
-        std::lock_guard<std::mutex> lk(rebuildMutex);
-        if (activeDSP)
-            activeDSP->convolver.syncParametersFrom(uiConvolverProcessor);
+        bool needsStructuralRebuild = false;
+        double srForRebuild = 0.0;
+        int bsForRebuild = 0;
+
+        {
+            std::lock_guard<std::mutex> lk(rebuildMutex);
+            if (activeDSP)
+            {
+                activeDSP->convolver.syncParametersFrom(uiConvolverProcessor);
+
+                const bool uiHasIr = uiConvolverProcessor.isIRLoaded();
+                const bool dspHasIr = activeDSP->convolver.isIRLoaded();
+
+                needsStructuralRebuild = (uiHasIr != dspHasIr);
+
+                if (!needsStructuralRebuild && uiHasIr)
+                {
+                    needsStructuralRebuild =
+                        activeDSP->convolver.getIRName() != uiConvolverProcessor.getIRName()
+                     || activeDSP->convolver.getIRLength() != uiConvolverProcessor.getIRLength()
+                     || activeDSP->convolver.getPhaseMode() != uiConvolverProcessor.getPhaseMode()
+                     || activeDSP->convolver.getExperimentalDirectHeadEnabled() != uiConvolverProcessor.getExperimentalDirectHeadEnabled()
+                     || std::abs(activeDSP->convolver.getTargetIRLength() - uiConvolverProcessor.getTargetIRLength()) > 0.001f;
+                }
+            }
+            else
+            {
+                needsStructuralRebuild = uiConvolverProcessor.isIRLoaded();
+            }
+
+            if (needsStructuralRebuild)
+            {
+                srForRebuild = currentSampleRate.load(std::memory_order_acquire);
+                bsForRebuild = maxSamplesPerBlock.load(std::memory_order_acquire);
+            }
+        }
+
+        if (needsStructuralRebuild && srForRebuild > 0.0)
+        {
+            requestRebuild(srForRebuild, bsForRebuild);
+        }
     }
 }
 
@@ -3280,13 +3326,17 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 void AudioEngine::setEqBypassRequested (bool shouldBypass)
 {
     eqBypassRequested.store (shouldBypass, std::memory_order_release);
+    uiEqProcessor.setBypass(shouldBypass);
     applyDefaultsForCurrentMode();
+    sendChangeMessage();
 }
 
 void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
 {
     convBypassRequested.store (shouldBypass, std::memory_order_release);
+    uiConvolverProcessor.setBypass(shouldBypass);
     applyDefaultsForCurrentMode();
+    sendChangeMessage();
 }
 
 void AudioEngine::setConvolverUseMinPhase(bool useMinPhase)
