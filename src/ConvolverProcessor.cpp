@@ -2468,6 +2468,10 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
         irName = prepared->originalFileName;
     }
 
+    currentSampleRate.store(prepared->sampleRate, std::memory_order_release);
+    irLength.store(prepared->timeDomainIR ? prepared->timeDomainIR->getNumSamples() : 0,
+                   std::memory_order_release);
+
     // 2. 波形／スペクトルスナップショットの生成
     if (visualizationEnabled && prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
     {
@@ -4045,6 +4049,8 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
         breakdown.totalLatencySamples = juce::jmax(0,
             breakdown.algorithmLatencySamples + breakdown.irPeakLatencySamples);
     }
+
+    // RCU状態では現時点でレイテンシー情報を保持していないため0とする
 
     return breakdown;
 }
