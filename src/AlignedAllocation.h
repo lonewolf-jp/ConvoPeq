@@ -107,4 +107,21 @@ struct MKLAllocator {
     bool operator!=(const MKLAllocator&) const noexcept { return false; }
 };
 
+
+// =========================================================================
+// makeAlignedCopy  – src の内容を 64 バイト境界にコピーした ScopedAlignedPtr を返す
+// 非 AudioThread 専用 (LoaderThread 等)。確保失敗時は std::bad_alloc を投げる。
+// =========================================================================
+inline ScopedAlignedPtr<double> makeAlignedCopy(const double* src, int numSamples)
+{
+    if (!src || numSamples <= 0)
+        return ScopedAlignedPtr<double>(nullptr);
+
+    ScopedAlignedPtr<double> dst(
+        static_cast<double*>(aligned_malloc(static_cast<size_t>(numSamples) * sizeof(double), 64)));
+    if (dst)
+        std::memmove(dst.get(), src, static_cast<size_t>(numSamples) * sizeof(double));
+    return dst;
+}
+
 } // namespace convo

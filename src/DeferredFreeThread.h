@@ -23,7 +23,6 @@
 
 #include <thread>
 #include <atomic>
-#include <chrono>
 #include <limits>
 
 class DeferredFreeThread
@@ -81,24 +80,28 @@ private:
     // -----------------------------------------------------------------------
     // run()  ── 専用スレッドで実行
     //
-    // ポーリング間隔: 解放対象がある限り連続実行、なければ 1ms スリープ。
-    // これにより CPU 負荷を抑えつつ、IR 切り替え直後の素早い解放を実現する。
+    // 1ループあたり最大 kMaxReclaimPerLoop 個まで解放してから yield する。
+    // これにより IR 切り替え直後の素早い解放を維持しつつ、
+    // 大量オブジェクト蓄積時の CPU スパイクを防ぐ。
+    // [fix4 R5] sleep_for(1ms) → yield() に変更し応答性を向上
     // -----------------------------------------------------------------------
+    static constexpr int kMaxReclaimPerLoop = 4;
+
     void run()
     {
         while (running.load(std::memory_order_acquire))
         {
             const uint64_t minEpoch = swapperRef.getMinReaderEpoch();
-
-            if (auto* ptr = swapperRef.tryReclaim(minEpoch))
+            int reclaimCount = 0;
+            while (auto* ptr = swapperRef.tryReclaim(minEpoch))
             {
                 delete ptr;
-                // 連続して解放できるかもしれないのでスリープせずに継続
+                if (++reclaimCount >= kMaxReclaimPerLoop) break;
             }
-            else
+            if (reclaimCount == 0)
             {
-                // 解放対象なし → 少し待機して CPU 負荷を軽減
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                // 解放対象なし → yield して CPU 負荷を軽減（sleep より応答性良好）
+                std::this_thread::yield();
             }
         }
     }

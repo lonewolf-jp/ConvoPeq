@@ -197,9 +197,11 @@ static double calculate_post_alpha(int n_taps)
     return std::max(0.05, std::min(0.25, alpha));
 }
 
+// ★ 非AudioThread限定（LoaderThread専用）
+// AudioThreadで呼ばれるとリアルタイム制約違反の可能性がある
 static bool applyAsymmetricTukey(double* data, int numSamples)
 {
-    if (numSamples <= 0) return true; // no-op: エラーではない
+    if (!data || numSamples <= 0) return true; // no-op: エラーではない
 
     // 1. ピーク位置の検出
     auto* start = data;
@@ -274,12 +276,22 @@ static bool applyAsymmetricTukey(double* data, int numSamples)
         }
     }
 
-    // Apply window
-    convo::ScopedAlignedPtr<double> aligned_data(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(numSamples) * sizeof(double), 64)));
-    if (!aligned_data) return false;
-    std::memcpy(aligned_data.get(), data, static_cast<size_t>(numSamples) * sizeof(double));
-    vdMul(numSamples, aligned_data.get(), window_vals.get(), aligned_data.get());
-    std::memcpy(data, aligned_data.get(), static_cast<size_t>(numSamples) * sizeof(double));
+    // Apply window: data のアライメントに基づいて分岐
+    // [fix4 R2] 64 バイトアライン済みの場合は in-place 演算（MKL vdMul は in-place 対応）
+    if ((reinterpret_cast<uintptr_t>(data) & 63u) == 0)
+    {
+        // 64バイトアライン済み → in-place 処理
+        vdMul(numSamples, data, window_vals.get(), data);
+    }
+    else
+    {
+        // 非アライン → 一時アライメントバッファ経由
+        convo::ScopedAlignedPtr<double> aligned_data(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(numSamples) * sizeof(double), 64)));
+        if (!aligned_data) return false;
+        std::memmove(aligned_data.get(), data, static_cast<size_t>(numSamples) * sizeof(double));
+        vdMul(numSamples, aligned_data.get(), window_vals.get(), aligned_data.get());
+        std::memmove(data, aligned_data.get(), static_cast<size_t>(numSamples) * sizeof(double));
+    }
     return true;
 }
 
@@ -915,8 +927,7 @@ public:
             // 2'. Auto Makeup (Energy Normalization) — trimmed バッファ確定後に計算
             // [Bug D fix] ウィンドウ・トリム・MinPhase 変換がすべて完了した trimmed バッファで
             // エネルギーを計測することで、SetImpulse() に渡す実データと一致した scaleFactor を得る。
-            // リビルド時は既に正規化済みのためスキップ。
-            if (!isRebuild)
+            // [fix4 R1] リビルド時もスケールファクタを再計算する（リビルド後のゲイン不整合を防ぐ）。
             {
                 double maxChannelEnergy = 0.0;
                 const int nSamp = trimmed.getNumSamples();
@@ -924,10 +935,12 @@ public:
                 {
                     const double* data = trimmed.getReadPointer(ch);
                     const double energy = cblas_ddot(nSamp, data, 1, data, 1);
+                    // ★ 堅牢な NaN/Inf ガード
+                    if (!std::isfinite(energy) || energy <= 1e-300) continue;
                     if (energy > maxChannelEnergy)
                         maxChannelEnergy = energy;
                 }
-                if (maxChannelEnergy > 1.0e-18)
+                if (maxChannelEnergy > 1.0e-18 && std::isfinite(maxChannelEnergy))
                 {
                     // Makeup Gain = 1.0 / RMS_IR  (Safety Margin = -6dB)
                     const double makeup = 1.0 / std::sqrt(maxChannelEnergy);
@@ -936,7 +949,7 @@ public:
                 }
                 else
                 {
-                    DBG("LoaderThread: IR energy is too low (near silence), skipping Auto Makeup.");
+                    DBG("LoaderThread: IR energy is too low or invalid, skipping Auto Makeup.");
                     result.scaleFactor = 1.0;
                 }
             }
@@ -1939,7 +1952,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         unwrapPhaseRadians(targetPhase.get(), complexSize);
 
         // 目標群遅延の計算 (数値微分: 中央差分)
-        std::vector<double> targetGroupDelay(complexSize, 0.0);
+        // ★ thread-local usage only – スレッド間共有禁止
+        std::vector<double, convo::MKLAllocator<double>> targetGroupDelay(complexSize, 0.0);
         const double dOmega = 2.0 * juce::MathConstants<double>::pi / fftSize;
 
         for (int k = 0; k < complexSize; ++k)
@@ -1988,15 +2002,19 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
         if (progressCallback) progressCallback(0.1f);
 
+        // [fix4] targetGroupDelay のアロケータ型不一致を解決
+        // MKLAllocator<double> から標準アロケータへ変換
+        std::vector<double> targetGroupDelayStd(targetGroupDelay.begin(), targetGroupDelay.end());
+
         bool designSuccess = false;
         if (designer_config.method == convo::OptimizationMethod::CMAES)
         {
             designer_config.progressCallback = progressCallback;
-            designSuccess = (designer.designWithCMAES(sampleRate, freq_hz, targetGroupDelay, designer_config, allpass_sections) == convo::DesignResult::Success);
+            designSuccess = (designer.designWithCMAES(sampleRate, freq_hz, targetGroupDelayStd, designer_config, allpass_sections) == convo::DesignResult::Success);
         }
         else
         {
-            designSuccess = designer.design(sampleRate, freq_hz, targetGroupDelay, designer_config, allpass_sections);
+            designSuccess = designer.design(sampleRate, freq_hz, targetGroupDelayStd, designer_config, allpass_sections);
         }
 
         if (progressCallback) progressCallback(0.9f);
@@ -3561,6 +3579,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // ── Step 3: バッファサイズ安全対策 (Bounds Check) ──
     if (numSamples <= 0 || procChannels == 0 || numSamples > dryBuffer.getNumSamples())
+        return;
+
+    // [fix4 R3] wetBufferStorage のサイズを超えたブロックを受け取らないことを保証
+    jassert(wetBufferCapacity >= numSamples);
+    if (numSamples > wetBufferCapacity)
         return;
 
     // ── Step 4: パラメータ更新と最適化 ──
