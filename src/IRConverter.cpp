@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include <mkl.h>
+#include <mkl_cblas.h>
 
 bool IRConverter::loadAudioFile(const juce::File& file,
                                 juce::AudioBuffer<double>& out,
@@ -148,6 +149,32 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
     // 時間領域 IR を保持（UI 表示用）
     // converted はリサンプリング済みの加工済み IR
     prepared->timeDomainIR = std::make_unique<juce::AudioBuffer<double>>(std::move(converted));
+
+    // LoaderThread::performLoad と同等の scaleFactor 計算
+    if (prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
+    {
+        double maxChannelEnergy = 0.0;
+        const int numSamples = prepared->timeDomainIR->getNumSamples();
+        const int numChannels = prepared->timeDomainIR->getNumChannels();
+
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            const double* chData = prepared->timeDomainIR->getReadPointer(ch);
+            const double energy = cblas_ddot(numSamples, chData, 1, chData, 1);
+            if (!std::isfinite(energy) || energy <= 1.0e-12)
+                continue;
+            if (energy > maxChannelEnergy)
+                maxChannelEnergy = energy;
+        }
+
+        if (maxChannelEnergy > 1.0e-12 && std::isfinite(maxChannelEnergy))
+        {
+            const double makeup = 1.0 / std::sqrt(maxChannelEnergy);
+            constexpr double safetyMargin = 0.5011872336272722;
+            prepared->scaleFactor = makeup * safetyMargin;
+            prepared->hasScaleFactor = true;
+        }
+    }
 
     return prepared;
 }

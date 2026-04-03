@@ -291,12 +291,12 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     outputMakeupLabel.setText("Output Makeup:", juce::dontSendNotification);
     outputMakeupLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(outputMakeupEditor);
-    outputMakeupEditor.setInputRestrictions(0, "-0123456789.");
+    outputMakeupEditor.setInputRestrictions(0, "0123456789.");
     outputMakeupEditor.setText(juce::String(audioEngine.getOutputMakeupDb(), 1));
     outputMakeupEditor.setJustification(juce::Justification::right);
     outputMakeupEditor.onTextChange = [this] {
         double val = outputMakeupEditor.getText().getDoubleValue();
-        if (val < -6.0) val = -6.0;
+        if (val < 0.0) val = 0.0;
         if (val > 12.0) val = 12.0;
         audioEngine.setOutputMakeupDb(static_cast<float>(val));
     };
@@ -490,7 +490,7 @@ void DeviceSettings::updateGainStagingDisplay()
     const auto order = audioEngine.getProcessingOrder();
 
     float inputMaxDb = 0.0f;
-    float makeupMinDb = 6.0f;
+    float makeupMinDb = 0.0f;
     float makeupMaxDb = 12.0f;
     juce::String modeText;
 
@@ -498,29 +498,21 @@ void DeviceSettings::updateGainStagingDisplay()
     {
         modeText = "PEQ only";
         inputMaxDb = 0.0f;
-        makeupMinDb = -6.0f;
-        makeupMaxDb = 0.0f;
     }
     else if (!convBypassed && !eqBypassed && order == AudioEngine::ProcessingOrder::EQThenConvolver)
     {
         modeText = "PEQ -> Conv";
         inputMaxDb = 0.0f;
-        makeupMinDb = 6.0f;
-        makeupMaxDb = 10.0f;
     }
     else if (eqBypassed && !convBypassed)
     {
         modeText = "Conv only";
         inputMaxDb = -6.0f;
-        makeupMinDb = 6.0f;
-        makeupMaxDb = 12.0f;
     }
     else
     {
         modeText = "Conv -> PEQ";
         inputMaxDb = -6.0f;
-        makeupMinDb = 6.0f;
-        makeupMaxDb = 12.0f;
     }
 
     const juce::String inputText = "Input Headroom (" + juce::String(-12.0f, 1) + ".." + juce::String(inputMaxDb, 1) + " dB):";
@@ -1023,7 +1015,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             float headroom = (float)xml->getDoubleAttribute("inputHeadroomDb", -6.0);
             engine.setInputHeadroomDb(headroom);
 
-            // Output Makeup設定の読み込み (デフォルト +15.0dB)
+            // Output Makeup設定の読み込み (デフォルト +12.0dB)
             float makeup = (float)xml->getDoubleAttribute("outputMakeupDb", 12.0); // [Fix] default 15→12 dB
             engine.setOutputMakeupDb(makeup);
 

@@ -19,6 +19,8 @@ struct PreparedIRState
     uint64_t cacheKey = 0;
     juce::String originalFileName;
     std::unique_ptr<juce::AudioBuffer<double>> timeDomainIR;
+    double scaleFactor = 1.0;
+    bool hasScaleFactor = false;
 
     PreparedIRState() = default;
 
@@ -32,10 +34,14 @@ struct PreparedIRState
           generationId(other.generationId),
           cacheKey(other.cacheKey),
           originalFileName(std::move(other.originalFileName)),
-          timeDomainIR(std::move(other.timeDomainIR))
+                    timeDomainIR(std::move(other.timeDomainIR)),
+                    scaleFactor(other.scaleFactor),
+                    hasScaleFactor(other.hasScaleFactor)
     {
         other.partitionData = nullptr;
         other.partitionSizeBytes = 0;
+                other.scaleFactor = 1.0;
+                other.hasScaleFactor = false;
     }
 
     PreparedIRState& operator=(PreparedIRState&& other) noexcept
@@ -55,9 +61,13 @@ struct PreparedIRState
             cacheKey = other.cacheKey;
             originalFileName = std::move(other.originalFileName);
             timeDomainIR = std::move(other.timeDomainIR);
+            scaleFactor = other.scaleFactor;
+            hasScaleFactor = other.hasScaleFactor;
 
             other.partitionData = nullptr;
             other.partitionSizeBytes = 0;
+            other.scaleFactor = 1.0;
+            other.hasScaleFactor = false;
         }
 
         return *this;

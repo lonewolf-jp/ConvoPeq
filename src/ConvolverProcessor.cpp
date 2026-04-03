@@ -2579,6 +2579,39 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
 
     JUCE_ASSERT_MESSAGE_THREAD;
 
+    // scaleFactor 適用（timeDomainIR はコピーしてから適用し、共有元を保護）
+    if (prepared->hasScaleFactor && prepared->scaleFactor != 1.0)
+    {
+        const double sf = prepared->scaleFactor;
+
+        if (prepared->timeDomainIR)
+        {
+            auto scaledTimeIR = std::make_unique<juce::AudioBuffer<double>>(*prepared->timeDomainIR);
+            for (int ch = 0; ch < scaledTimeIR->getNumChannels(); ++ch)
+            {
+                double* data = scaledTimeIR->getWritePointer(ch);
+                const int numSamples = scaledTimeIR->getNumSamples();
+                cblas_dscal(numSamples, sf, data, 1);
+
+                for (int i = 0; i < numSamples; ++i)
+                {
+                    if (!std::isfinite(data[i]))
+                        data[i] = 0.0;
+                }
+            }
+            prepared->timeDomainIR = std::move(scaledTimeIR);
+        }
+
+        if (prepared->partitionData && prepared->partitionSizeBytes > 0)
+        {
+            const size_t numDoubles = prepared->partitionSizeBytes / sizeof(double);
+            cblas_dscal(static_cast<MKL_INT>(numDoubles), sf, prepared->partitionData, 1);
+        }
+
+        DBG("applyPreparedIRState: applied scaleFactor=" << sf
+            << " to timeDomainIR and partitionData");
+    }
+
     if (prepared->timeDomainIR)
     {
         bool valid = true;

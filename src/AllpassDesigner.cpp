@@ -475,11 +475,13 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
             peak = std::max(peak, std::abs(data[i]));
     }
 
-    if (peak > 0.99)
+    constexpr double kHeadroom = 0.708; // -3dB
+    if (peak > kHeadroom)
     {
-        const double gain = 0.98 / peak;
-        for (int ch = 0; ch < numChannels; ++ch)
-            result.applyGain(ch, 0, irLen, gain);
+        const double gain = kHeadroom / peak;
+        for (int ch = 0; ch < result.getNumChannels(); ++ch)
+            result.applyGain(ch, 0, result.getNumSamples(), gain);
+        DBG("applyAllpassToIR: peak reduced from " << peak << " to " << (peak * gain));
     }
 
     DftiFreeDescriptor(&dfti);

@@ -15,7 +15,7 @@
 struct CacheHeader
 {
     uint64_t magic = 0x434F4E564F504551ULL; // "CONVOPEQ"
-    uint64_t version = 1;
+    uint64_t version = 2;
     uint64_t key = 0;
     uint64_t dataSize = 0;
     uint64_t checksum = 0;
@@ -27,6 +27,8 @@ struct CacheHeader
     uint64_t timeDomainChannels = 0;
     uint64_t timeDomainNumSamples = 0;
     uint64_t timeDomainSizeBytes = 0;
+    double scaleFactor = 1.0;
+    uint64_t hasScaleFactor = 0;
 };
 
 class CacheManager

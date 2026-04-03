@@ -3592,20 +3592,8 @@ float AudioEngine::getInputHeadroomDb() const
 
 void AudioEngine::setOutputMakeupDb(float db)
 {
-    // モード別メイクアップゲイン範囲:
-    //   PEQ only    : -6..  0 dB (コンボルバーなし、ユニティ=0dB)
-    //   PEQ→Conv    : +6..+10 dB
-    //   Conv→PEQ / Conv only : +6..+12 dB (+12dB = unity: -6dB input + -6dB IR safety)
-    const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
-    const bool eqBypassed   = eqBypassRequested.load(std::memory_order_relaxed);
-    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
-    float clampedDb;
-    if (convBypassed && !eqBypassed)
-        clampedDb = juce::jlimit(-6.0f, 0.0f, db);                 // PEQ only
-    else if (!convBypassed && order == ProcessingOrder::EQThenConvolver)
-        clampedDb = juce::jlimit(6.0f, 10.0f, db);                 // PEQ→Conv
-    else
-        clampedDb = juce::jlimit(6.0f, 12.0f, db);                 // Conv→PEQ / Conv only
+    // Output makeup は全モード共通で 0..12 dB
+    const float clampedDb = juce::jlimit(0.0f, 12.0f, db);
     if (std::abs(outputMakeupDb.load() - clampedDb) > 1e-5f)
     {
         outputMakeupDb.store(clampedDb);

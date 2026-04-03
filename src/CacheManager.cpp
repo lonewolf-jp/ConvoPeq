@@ -1,14 +1,33 @@
 #include "CacheManager.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
 #include <mkl.h>
+#include <mkl_cblas.h>
 
 namespace
 {
 constexpr uint64_t kCRC64Poly = 0x42F0E1EBA9EA3693ULL;
+
+struct CacheHeaderV1
+{
+    uint64_t magic = 0x434F4E564F504551ULL;
+    uint64_t version = 1;
+    uint64_t key = 0;
+    uint64_t dataSize = 0;
+    uint64_t checksum = 0;
+    uint64_t timestamp = 0;
+    uint64_t fftSize = 0;
+    uint64_t numPartitions = 0;
+    uint64_t numChannels = 0;
+    double sampleRate = 0.0;
+    uint64_t timeDomainChannels = 0;
+    uint64_t timeDomainNumSamples = 0;
+    uint64_t timeDomainSizeBytes = 0;
+};
 
 uint64_t crc64Update(uint64_t crc, const uint8_t* data, size_t size)
 {
@@ -107,14 +126,41 @@ bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKe
     if (!stream)
         return false;
 
-    if (stream->read(&headerOut, static_cast<int>(sizeof(CacheHeader))) != static_cast<int>(sizeof(CacheHeader)))
+    CacheHeaderV1 headerV1{};
+    if (stream->read(&headerV1, static_cast<int>(sizeof(CacheHeaderV1))) != static_cast<int>(sizeof(CacheHeaderV1)))
         return false;
 
-    if (headerOut.magic != 0x434F4E564F504551ULL)
+    if (headerV1.magic != 0x434F4E564F504551ULL)
         return false;
 
-    if (headerOut.version != 1)
+    if (headerV1.version == 1)
+    {
+        headerOut.magic = headerV1.magic;
+        headerOut.version = headerV1.version;
+        headerOut.key = headerV1.key;
+        headerOut.dataSize = headerV1.dataSize;
+        headerOut.checksum = headerV1.checksum;
+        headerOut.timestamp = headerV1.timestamp;
+        headerOut.fftSize = headerV1.fftSize;
+        headerOut.numPartitions = headerV1.numPartitions;
+        headerOut.numChannels = headerV1.numChannels;
+        headerOut.sampleRate = headerV1.sampleRate;
+        headerOut.timeDomainChannels = headerV1.timeDomainChannels;
+        headerOut.timeDomainNumSamples = headerV1.timeDomainNumSamples;
+        headerOut.timeDomainSizeBytes = headerV1.timeDomainSizeBytes;
+        headerOut.scaleFactor = 1.0;
+        headerOut.hasScaleFactor = 0;
+    }
+    else if (headerV1.version == 2)
+    {
+        stream->setPosition(0);
+        if (stream->read(&headerOut, static_cast<int>(sizeof(CacheHeader))) != static_cast<int>(sizeof(CacheHeader)))
+            return false;
+    }
+    else
+    {
         return false;
+    }
 
     if (headerOut.key != expectedKey)
         return false;
@@ -122,7 +168,11 @@ bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKe
     if (static_cast<int>(headerOut.fftSize) != expectedFftSize)
         return false;
 
-    const int64 expectedTotalSize = static_cast<int64>(sizeof(CacheHeader))
+    const int64 headerSize = (headerOut.version == 1)
+                           ? static_cast<int64>(sizeof(CacheHeaderV1))
+                           : static_cast<int64>(sizeof(CacheHeader));
+
+    const int64 expectedTotalSize = headerSize
                                   + static_cast<int64>(headerOut.dataSize)
                                   + static_cast<int64>(headerOut.timeDomainSizeBytes);
     if (file.getSize() != expectedTotalSize)
@@ -162,14 +212,15 @@ std::unique_ptr<PreparedIRState> CacheManager::load(uint64_t key, int fftSize, u
         return nullptr;
 
     juce::MemoryMappedFile mmap(file, juce::MemoryMappedFile::readOnly);
-    if (mmap.getSize() <= static_cast<size_t>(sizeof(CacheHeader)))
+    const size_t headerSize = (header.version == 1) ? sizeof(CacheHeaderV1) : sizeof(CacheHeader);
+    if (mmap.getSize() <= headerSize)
         return nullptr;
 
     const auto* mapped = static_cast<const uint8_t*>(mmap.getData());
     if (!mapped)
         return nullptr;
 
-    const uint8_t* dataStart = mapped + sizeof(CacheHeader);
+    const uint8_t* dataStart = mapped + headerSize;
     const uint64_t checksum = computeCRC64(dataStart, static_cast<size_t>(header.dataSize));
     if (checksum != header.checksum)
         return nullptr;
@@ -203,7 +254,7 @@ std::unique_ptr<PreparedIRState> CacheManager::load(uint64_t key, int fftSize, u
     {
         const uint8_t* tdStart = dataStart + header.dataSize;
         const size_t expectedTdBytes = static_cast<size_t>(header.timeDomainSizeBytes);
-        if (static_cast<size_t>(mmap.getSize() - sizeof(CacheHeader) - header.dataSize) >= expectedTdBytes)
+        if (static_cast<size_t>(mmap.getSize() - headerSize - header.dataSize) >= expectedTdBytes)
         {
             auto tdBuffer = std::make_unique<juce::AudioBuffer<double>>(
                 static_cast<int>(header.timeDomainChannels),
@@ -219,6 +270,52 @@ std::unique_ptr<PreparedIRState> CacheManager::load(uint64_t key, int fftSize, u
             }
             prepared->timeDomainIR = std::move(tdBuffer);
         }
+    }
+
+    if (header.version < 2)
+    {
+        DBG("CacheManager: loading old cache version " << header.version << ", recalculating scaleFactor");
+        if (prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
+        {
+            double maxEnergy = 0.0;
+            const int ns = prepared->timeDomainIR->getNumSamples();
+            const int nc = prepared->timeDomainIR->getNumChannels();
+            for (int ch = 0; ch < nc; ++ch)
+            {
+                const double* data = prepared->timeDomainIR->getReadPointer(ch);
+                const double energy = cblas_ddot(ns, data, 1, data, 1);
+                if (std::isfinite(energy) && energy > maxEnergy)
+                    maxEnergy = energy;
+            }
+
+            double sf = 1.0;
+            if (maxEnergy > 1.0e-12)
+                sf = (1.0 / std::sqrt(maxEnergy)) * 0.5011872336272722;
+
+            for (int ch = 0; ch < nc; ++ch)
+                cblas_dscal(ns, sf, prepared->timeDomainIR->getWritePointer(ch), 1);
+
+            if (prepared->partitionData && prepared->partitionSizeBytes > 0)
+            {
+                const size_t numDoubles = prepared->partitionSizeBytes / sizeof(double);
+                cblas_dscal(static_cast<MKL_INT>(numDoubles), sf, prepared->partitionData, 1);
+            }
+
+            // 旧フォーマットはここでデータ自体を補正済みのため、以降で再適用しない。
+            prepared->scaleFactor = 1.0;
+            prepared->hasScaleFactor = false;
+            DBG("CacheManager: recalculated scaleFactor = " << sf << " (applied in-place)");
+        }
+        else
+        {
+            prepared->scaleFactor = 1.0;
+            prepared->hasScaleFactor = false;
+        }
+    }
+    else
+    {
+        prepared->scaleFactor = header.scaleFactor;
+        prepared->hasScaleFactor = (header.hasScaleFactor != 0);
     }
 
     touch(key, fftSize);
@@ -243,6 +340,9 @@ void CacheManager::save(uint64_t key, int fftSize, const PreparedIRState& state)
     header.numPartitions = static_cast<uint64_t>(state.numPartitions);
     header.numChannels = static_cast<uint64_t>(state.numChannels);
     header.sampleRate = state.sampleRate;
+    header.scaleFactor = state.scaleFactor;
+    header.hasScaleFactor = state.hasScaleFactor ? 1ULL : 0ULL;
+    header.version = 2;
     if (state.timeDomainIR)
     {
         header.timeDomainChannels = static_cast<uint64_t>(state.timeDomainIR->getNumChannels());
