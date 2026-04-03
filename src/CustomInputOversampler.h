@@ -2,6 +2,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <atomic>
 
 #include "AlignedAllocation.h"
 
@@ -32,6 +33,15 @@ public:
     void processDown(const juce::dsp::AudioBlock<double>& upsampledBlock,
                      juce::dsp::AudioBlock<double>& outputBlock,
                      int numChannels) noexcept;
+
+    // 異常フラグを取得してリセットする (Audio Thread 安全)
+    bool consumeCorruptionFlag() noexcept
+    {
+        return corruptionDetected.exchange(false, std::memory_order_acq_rel);
+    }
+
+    // 全ステージ履歴をゼロクリアして異常フラグを解除する
+    void clearAllStages() noexcept;
 
 private:
     struct Stage
@@ -91,4 +101,5 @@ private:
     int workCapacity = 0;
 
     double* blockChannels[2] = { nullptr, nullptr };
+    std::atomic<bool> corruptionDetected { false };
 };

@@ -154,6 +154,18 @@ public:
     //----------------------------------------------------------
     int getLatency() const noexcept { return m_latency; }
 
+    //----------------------------------------------------------
+    // setOverflowCallback  ─ Audio Thread セーフなオーバーフロー通知
+    // ringWrite() でオーバーフローが発生した際に一度呼ばれる。
+    // 実装はロックフリー・メモリ確保禁止。生関数ポインタのみ (std::function 禁止)。
+    //----------------------------------------------------------
+    using OverflowCallback = void(*)(void* userData);
+    void setOverflowCallback(OverflowCallback cb, void* userData) noexcept
+    {
+        overflowCallback = cb;
+        overflowUserData = userData;
+    }
+
 private:
     //----------------------------------------------------------
     // Layer  ─ 1 つのパーティション層
@@ -292,6 +304,10 @@ private:
     // Audio Thread から書き込み、Message Thread から読み出し可。
     // 非ゼロは構造バグの存在を示す (通常は常に 0)。
     std::atomic<int> m_ringOverflowCount { 0 };
+
+    // setOverflowCallback() で設定されるコールバック (Audio Thread から呼び出し)
+    OverflowCallback overflowCallback = nullptr;
+    void*            overflowUserData = nullptr;
 
     // 先頭 Direct Form 用バッファ (すべて Message Thread で事前確保)
     int     m_directTapCount = 0;

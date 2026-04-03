@@ -19,6 +19,7 @@ struct AudioBlock {
     int sampleRateHz = 0;
     int bitDepth = 0;
     int adaptiveCoeffBankIndex = 0;
+    uint64_t sessionId = 0;
 };
 
 // RT/Worker間ダブルバッファ係数連携（RCU）
@@ -304,6 +305,15 @@ public:
     bool getAdaptiveNoiseShaperState(int bankIndex, NoiseShaperLearner::State& outState) const noexcept;
     void setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLearner::State& inState) noexcept;
 
+    enum class LearningState
+    {
+        Idle,
+        PendingStart,
+        WaitingForDSP,
+        Running,
+        Stopping
+    };
+
 private:
     //----------------------------------------------------------
      // DSPコア (Audio Threadで実行される処理のコンテナ)
@@ -331,6 +341,7 @@ private:
             uint32_t adaptiveCoeffGeneration;
             int adaptiveCaptureSampleRateHz;
             int adaptiveCaptureBitDepth;
+            uint64_t captureSessionId;
             LockFreeRingBuffer<AudioBlock, 4096>* adaptiveCaptureQueue;
         };
 
@@ -378,6 +389,7 @@ DSPCore();
         NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
         uint32_t activeAdaptiveCoeffGeneration = 0;
         int activeAdaptiveCoeffBankIndex = -1;
+        uint64_t currentCaptureSessionId = 0;
         double sampleRate = 0.0;
 
     // 【パッチ3】MKL用rawアライメントバッファ（vector完全排除・ガイドライン厳守）
@@ -473,6 +485,9 @@ DSPCore();
     alignas(64) std::atomic<bool> pendingNoiseShaperLearningStart { false };
     alignas(64) std::atomic<bool> pendingNoiseShaperLearningResume { false };
     alignas(64) std::atomic<NoiseShaperLearner::LearningMode> pendingLearningMode { NoiseShaperLearner::LearningMode::Short };
+    alignas(64) std::atomic<LearningState> learningState { LearningState::Idle };
+    alignas(64) std::atomic<bool> asyncStartScheduled { false };
+    alignas(64) std::atomic<uint64_t> globalCaptureSessionId { 1 };
     #pragma warning(pop)
 
     std::atomic<int> fixedNoiseLogIntervalMs { 2000 };

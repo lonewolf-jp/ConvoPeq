@@ -665,27 +665,33 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // 出力リングバッファ確保 (L0 専用)
     // L1/L2 は tailOutputBuf を使用するため、リングは L0 のみに最適化したサイズでよい。
     //
-    // 必要最小サイズ: 2 * l0PartSize
-    //   (L0.partSize ≥ blockSize であるため、1 コールバックで最大 1 回の
-    //    processLayerBlock が発火し、ringAvail の最大値 = 2 * l0PartSize)
+    // FDL と整合したリングサイズ計算:
+    //   numPartsIR = ceil(irLen / blockSize)  … IR 全体のパーティション数
+    //   numParts   = nextPowerOfTwo(numPartsIR) … FDL 幅
+    //   baseSize   = numParts * 2              … FDL 理論必要量 (write-read ≤ numParts)
+    //   margin     = nextPowerOfTwo(blockSize) … 書き込み遅延・ジッタ吸収
+    //   rSize      = nextPowerOfTwo(baseSize + margin)
     //
-    // 確保サイズ: nextPowerOfTwo(l0PartSize * 4 + blockSize * 4)
-    //   ≥ 8 * l0PartSize  (∵ blockSize ≤ l0PartSize)
-    //   → ヘッドルーム 4x。通常動作でのオーバーフローは構造上不可能。
-    //      (詳細は MKLNonUniformConvolver.h m_ringOverflowCount のコメントを参照)
+    // 後方互換のため旧式サイズも計算し、大きい方を採用する。
     // ────────────────────────────────────────────────
-    const int l0PartSize = m_layers[0].partSize;
-    const int rSize = juce::nextPowerOfTwo(l0PartSize * 4 + blockSize * 4);
-    m_ringBuf = static_cast<double*>(mkl_malloc(rSize * sizeof(double), 64));
+    const int l0PartSize  = m_layers[0].partSize;
+    const int numPartsIR  = (irLen + blockSize - 1) / blockSize;
+    const int numParts    = juce::nextPowerOfTwo(numPartsIR);
+    const int baseSize    = numParts * 2;
+    const int margin      = juce::nextPowerOfTwo(blockSize);
+    const int rSize       = juce::nextPowerOfTwo(baseSize + margin);
+    const int minSize     = juce::nextPowerOfTwo(l0PartSize * 4 + blockSize * 4);
+    const int finalSize   = std::max(rSize, minSize);
+    m_ringBuf = static_cast<double*>(mkl_malloc(finalSize * sizeof(double), 64));
     if (!m_ringBuf)
     {
         releaseAllLayers();
         return false;
     }
 
-    memset(m_ringBuf, 0, rSize * sizeof(double));
-    m_ringSize  = rSize;
-    m_ringMask  = rSize - 1;
+    memset(m_ringBuf, 0, finalSize * sizeof(double));
+    m_ringSize  = finalSize;
+    m_ringMask  = finalSize - 1;
     m_ringWrite = 0;
     m_ringRead  = 0;
     m_ringAvail = 0;
@@ -988,23 +994,19 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
     if (nextAvail > m_ringSize)
     {
         // ─────────────────────────────────────────────────────────────────
-        // オーバーフロー安全弁 (通常動作では到達しない)
-        //
-        // 【到達条件】Add/Get の非対称呼び出し、またはリセット直後の連続 Add など
-        //   構造バグが存在する場合のみ発生する。
-        //   証明は m_ringOverflowCount メンバのコメントを参照。
+        // オーバーフロー安全弁
         //
         // 【対応方針】Audio Thread 内でブロックは不可。
-        //   最も古いデータを破棄し、最新データを保持する「ドロップアウト」戦略を採る。
-        //   これにより、不連続は生じるが Audio Thread の遅延は回避できる。
-        //   発生頻度が非ゼロの場合は m_ringOverflowCount の監視によって検出可能。
+        //   m_ringRead は変更せず（既存の出力データを保護）、
+        //   m_ringWrite を調整して最も古い未読データを上書きする「セーフ上書き」戦略。
+        //   コールバックでオーバーフロー発生を通知し、非同期リビルドを促す。
         // ─────────────────────────────────────────────────────────────────
-        jassertfalse; // 通常動作では絶対に到達しない。到達した場合はバグ。
         m_ringOverflowCount.fetch_add(1, std::memory_order_relaxed);
-
-        const int overflow = nextAvail - m_ringSize;
-        m_ringRead  = (m_ringRead + overflow) & m_ringMask;
+        if (overflowCallback)
+            overflowCallback(overflowUserData);
+        // 読み取り位置は変更しない（連続性維持）、書き込み位置を調整
         m_ringAvail = m_ringSize;
+        m_ringWrite = (m_ringRead + m_ringSize - 1) & m_ringMask;
     }
     else
     {

@@ -192,6 +192,7 @@ private:
         int sampleRateHz = 0;
         int bitDepth = 0;
         int adaptiveCoeffBankIndex = 0;
+        uint64_t sessionId = 0;
     };
 
     struct EvaluationContext
@@ -239,6 +240,7 @@ private:
     std::thread workerThread;
     std::atomic<bool> stopRequested { false };
     std::atomic<bool> pendingResume { false };
+    std::atomic<bool> startRequested { false };
 
     // workerThread が完全に終了したことを示すフラグ。
     // workerThreadMain() の最後（stopEvaluationWorkers() 完了後）で true にセットされる。
@@ -256,6 +258,7 @@ private:
     double accumulatedPlaybackSeconds = 0.0;           // Worker thread専用（非atomic）
     double sessionSampleRate = 0.0;
     int sessionBitDepth = 0;
+    uint64_t currentSessionId = 0;
     std::chrono::steady_clock::time_point lastGenerationStart;
     double generationIntervalSeconds = 0.0;
     mutable std::chrono::steady_clock::time_point lastSaveTime;

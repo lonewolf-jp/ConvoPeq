@@ -87,7 +87,8 @@ namespace
                                           int numSamples,
                                           int sampleRateHz,
                                           int bitDepth,
-                                          int adaptiveCoeffBankIndex) noexcept
+                                          int adaptiveCoeffBankIndex,
+                                          uint64_t captureSessionId) noexcept
     {
         if (captureQueue == nullptr || left == nullptr || numSamples <= 0)
             return;
@@ -105,6 +106,7 @@ namespace
                 block.sampleRateHz = sampleRateHz;
                 block.bitDepth = bitDepth;
                 block.adaptiveCoeffBankIndex = adaptiveCoeffBankIndex;
+                block.sessionId = captureSessionId;
 
 #if defined(__AVX2__) || defined(_M_AVX2)
                 const int simdCount = currentBlockSize & ~3;
@@ -490,18 +492,32 @@ void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode
     if (noiseShaperLearner == nullptr)
         return;
 
+    LearningState expected = LearningState::Idle;
+    if (!learningState.compare_exchange_strong(expected, LearningState::PendingStart,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_acquire))
+    {
+        DBG("[AudioEngine] startNoiseShaperLearning: not idle, current state=" << static_cast<int>(expected));
+        return;
+    }
+
     pendingLearningMode.store(mode, std::memory_order_release);
     selectAdaptiveCoeffBankForCurrentSettings();
     pendingNoiseShaperLearningResume.store(resume, std::memory_order_release);
     pendingNoiseShaperLearningStart.store(true, std::memory_order_release);
 
     if (noiseShaperType.load(std::memory_order_acquire) != NoiseShaperType::Adaptive9thOrder)
+    {
+        learningState.store(LearningState::WaitingForDSP, std::memory_order_release);
         setNoiseShaperType(NoiseShaperType::Adaptive9thOrder);
+        return;
+    }
 
     auto* dsp = currentDSP.load(std::memory_order_acquire);
     if (dsp != nullptr && dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder)
     {
         pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
+        learningState.store(LearningState::Running, std::memory_order_release);
         noiseShaperLearner->setLearningMode(mode);
         noiseShaperLearner->startLearning(resume);
         return;
@@ -509,12 +525,23 @@ void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode
 
     const double sr = currentSampleRate.load(std::memory_order_acquire);
     if (sr > 0.0)
+    {
+        learningState.store(LearningState::WaitingForDSP, std::memory_order_release);
         requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
+    }
+    else
+    {
+        pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
+        learningState.store(LearningState::Idle, std::memory_order_release);
+    }
 }
 
 void AudioEngine::stopNoiseShaperLearning()
 {
     pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
+    pendingNoiseShaperLearningResume.store(false, std::memory_order_release);
+    learningState.store(LearningState::Idle, std::memory_order_release);
+    asyncStartScheduled.store(false, std::memory_order_release);
 
     if (noiseShaperLearner)
         noiseShaperLearner->stopLearning();
@@ -1652,6 +1679,14 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     // UIコンポーネント(uiEqProcessor等)へのアクセスやMKLメモリ確保を行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
+    const LearningState currentLearningState = learningState.load(std::memory_order_acquire);
+    if (currentLearningState == LearningState::Running || currentLearningState == LearningState::PendingStart)
+    {
+        learningState.store(LearningState::Stopping, std::memory_order_release);
+        if (noiseShaperLearner)
+            noiseShaperLearner->stopLearning();
+    }
+
     // 新しいDSPコアを作成
     DSPCore* newDSP = new DSPCore();
     newDSP->convolver.setVisualizationEnabled(false); // DSP用は可視化データ不要
@@ -1850,7 +1885,6 @@ void AudioEngine::rebuildThreadLoop()
 void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 {
     DSPCore* dspToTrash = nullptr;
-    bool startPendingNoiseShaperLearningNow = false;
 
     // Lock to ensure the check and commit are atomic with respect to new rebuild requests.
     {
@@ -1872,9 +1906,9 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // 3. Take ownership of the new DSP
         activeDSP = newDSP;
 
-        startPendingNoiseShaperLearningNow = pendingNoiseShaperLearningStart.load(std::memory_order_acquire)
-            && newDSP != nullptr
-            && newDSP->noiseShaperType == NoiseShaperType::Adaptive9thOrder;
+        const uint64_t newSessionId = globalCaptureSessionId.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (newDSP != nullptr)
+            newDSP->currentCaptureSessionId = newSessionId;
     }
 
     // 4. Move the old DSP to the trash bin outside the main lock.
@@ -1893,12 +1927,44 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         }
     }
 
-    if (startPendingNoiseShaperLearningNow && noiseShaperLearner != nullptr)
+    const LearningState stateNow = learningState.load(std::memory_order_acquire);
+    if ((stateNow == LearningState::PendingStart || stateNow == LearningState::WaitingForDSP)
+        && noiseShaperLearner != nullptr)
     {
-        pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
-        bool resume = pendingNoiseShaperLearningResume.exchange(false, std::memory_order_acquire);
-        noiseShaperLearner->setLearningMode(pendingLearningMode.load(std::memory_order_acquire));
-        noiseShaperLearner->startLearning(resume);
+        learningState.store(LearningState::PendingStart, std::memory_order_release);
+
+        if (!asyncStartScheduled.exchange(true, std::memory_order_acq_rel))
+        {
+            const bool resume = pendingNoiseShaperLearningResume.load(std::memory_order_acquire);
+            const auto mode = pendingLearningMode.load(std::memory_order_acquire);
+
+            juce::MessageManager::callAsync([this, resume, mode]()
+            {
+                asyncStartScheduled.store(false, std::memory_order_release);
+
+                if (learningState.load(std::memory_order_acquire) != LearningState::PendingStart)
+                {
+                    DBG("[AudioEngine] commitNewDSP async: state changed, abort start");
+                    return;
+                }
+
+                auto* dsp = currentDSP.load(std::memory_order_acquire);
+                if (noiseShaperLearner && dsp && dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder)
+                {
+                    pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
+                    pendingNoiseShaperLearningResume.store(false, std::memory_order_release);
+                    learningState.store(LearningState::Running, std::memory_order_release);
+                    noiseShaperLearner->setLearningMode(mode);
+                    noiseShaperLearner->startLearning(resume);
+                }
+                else
+                {
+                    pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
+                    learningState.store(LearningState::Idle, std::memory_order_release);
+                    DBG("[AudioEngine] commitNewDSP async: DSP not ready, learning aborted");
+                }
+            });
+        }
     }
 }
 
@@ -2327,6 +2393,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                        .adaptiveCoeffGeneration = adaptiveGenAfter,
                        .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
                        .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
+                       .captureSessionId      = dsp->currentCaptureSessionId,
                        .adaptiveCaptureQueue   = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr });
     }
     else
@@ -2425,6 +2492,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                          .adaptiveCoeffGeneration = adaptiveGenAfter,
                          .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
                          .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
+                         .captureSessionId      = dsp->currentCaptureSessionId,
                          .adaptiveCaptureQueue   = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr });
 }
 
@@ -3106,7 +3174,8 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
                               numSamples,
                               state.adaptiveCaptureSampleRateHz,
                               state.adaptiveCaptureBitDepth,
-                              state.adaptiveCoeffBankIndex);
+                              state.adaptiveCoeffBankIndex,
+                              state.captureSessionId);
 
     // ── Step 3: ディザリング / ヘッドルーム適用 ─────────────────────────────
     if (noiseShaperType == NoiseShaperType::Adaptive9thOrder
@@ -3248,7 +3317,8 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                               numSamples,
                               state.adaptiveCaptureSampleRateHz,
                               state.adaptiveCaptureBitDepth,
-                              state.adaptiveCoeffBankIndex);
+                              state.adaptiveCoeffBankIndex,
+                              state.captureSessionId);
 
     if (noiseShaperType == NoiseShaperType::Adaptive9thOrder
         && state.adaptiveCoeffSet != nullptr

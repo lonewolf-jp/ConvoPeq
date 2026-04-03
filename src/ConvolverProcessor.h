@@ -367,6 +367,9 @@ private:
     void timerCallback() override;
     void postCoalescedChangeNotification();
     void requestDebouncedRebuild();
+    // リングバッファオーバーフロー通知コールバック (Audio Thread 安全; 生関数ポインタ)
+    // MKLNonUniformConvolver::ringWrite() からオーバーフロー時に呼び出される。
+    static void overflowCallbackThunk(void* userData) noexcept;
     struct StereoConvolver;
     class LoaderThread;
     // クロスフェード用の新しいメンバー
@@ -426,7 +429,8 @@ private:
 
         bool init(double* irL, double* irR, int length, double sr, int peakDelay, int maxFFTSize, int knownBlockSize, int firstPartition, int preferredCallSize, double scale = 1.0,
               bool enableDirectHead = false,
-              const convo::FilterSpec* filterSpec = nullptr)
+              const convo::FilterSpec* filterSpec = nullptr,
+              ConvolverProcessor* ownerProcessor = nullptr)
         {
             // Safety: Free existing data if init is called multiple times (Leak prevention)
             if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
@@ -463,6 +467,11 @@ private:
                 {
                     latency   = nucConvolvers[0]->getLatency();
                     DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
+                    if (ownerProcessor != nullptr)
+                    {
+                        nucConvolvers[0]->setOverflowCallback(ConvolverProcessor::overflowCallbackThunk, ownerProcessor);
+                        nucConvolvers[1]->setOverflowCallback(ConvolverProcessor::overflowCallbackThunk, ownerProcessor);
+                    }
                     return true;
                 }
             }
@@ -593,6 +602,9 @@ private:
     std::atomic<std::uint64_t> rebuildDebounceToken { 0 };
     std::atomic<bool> changeNotificationPending { false };
     std::atomic<bool> rebuildPendingAfterLoad { false };
+    // リングバッファオーバーフローフラグ:
+    //   Audio Thread から store(true)、process() 先頭で exchange(false) して rebuildPendingAfterLoad に転送。
+    std::atomic<bool> overflowRequested { false };
 
     #pragma warning(push)
     #pragma warning(disable: 4324)

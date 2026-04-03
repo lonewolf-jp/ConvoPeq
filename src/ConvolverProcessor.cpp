@@ -31,6 +31,18 @@
  #include <pmmintrin.h>
  #include <immintrin.h> // For AVX2
 
+// リングバッファオーバーフロー検出コールバック (Audio Thread セーフ)
+// overflowRequested を cas で 1 回だけセット → process() → timerCallback() → reload
+void ConvolverProcessor::overflowCallbackThunk(void* userData) noexcept
+{
+    auto* self = static_cast<ConvolverProcessor*>(userData);
+    bool expected = false;
+    self->overflowRequested.compare_exchange_strong(expected, true,
+                                                    std::memory_order_acq_rel,
+                                                    std::memory_order_relaxed);
+    // compare_exchange_strong はロックフリー atomic RMW。メモリ確保・待機絶対禁止。
+}
+
 namespace
 {
     struct DftiGuard
@@ -1015,7 +1027,8 @@ public:
 
                 if (result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency,
                                          sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize, result.scaleFactor,
-                                         owner.experimentalDirectHeadEnabled.load(std::memory_order_acquire)))
+                                         owner.experimentalDirectHeadEnabled.load(std::memory_order_acquire),
+                                         nullptr, &owner))
                 {
                     result.success = true;
                 }
@@ -1186,6 +1199,24 @@ ConvolverProcessor::~ConvolverProcessor()
 
 void ConvolverProcessor::timerCallback()
 {
+    // ★ リングバッファオーバーフローによるリビルド要求を処理 (Audio Thread からは呼ばれない)
+    if (rebuildPendingAfterLoad.load(std::memory_order_acquire))
+    {
+        if (!isLoading.load(std::memory_order_acquire) &&
+            !isRebuilding.load(std::memory_order_acquire))
+        {
+            juce::File irFile;
+            {
+                const juce::ScopedLock sl(irFileLock);
+                irFile = currentIrFile;
+            }
+            if (irFile.existsAsFile())
+            {
+                rebuildPendingAfterLoad.store(false, std::memory_order_release);
+                loadImpulseResponse(irFile, false);
+            }
+        }
+    }
     // IR切り替え時のクロスフェードが完了したら、古いコンボルバーを安全に破棄する
     // [Bug G fix] wetCrossfade.isSmoothing() は非スレッドセーフ(AudioThread が同時に getNextValue() を呼ぶ)。
     // wetCrossfadeActive アトミックフラグで代替する。
@@ -1266,7 +1297,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
                 if (newConv->init(irL.release(), irR.release(),
                                   conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, conv->storedScale,
-                                  experimentalDirectHeadEnabled.load(std::memory_order_acquire)))
+                                  experimentalDirectHeadEnabled.load(std::memory_order_acquire),
+                                  nullptr, this))
                 {
                     convolution.store(newConv, std::memory_order_release);
 
@@ -3572,7 +3604,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     auto* conv = convolution.load(std::memory_order_acquire);
     auto* oldConv = fadingOutConvolution.load(std::memory_order_acquire);
 
-    // ── Step 2: 処理実行可能かチェック ──
+    // ★ リングバッファオーバーフローフラグチェック (Audio Thread 内の唯一操作・ロックフリー atomic のみ)
+    if (overflowRequested.exchange(false, std::memory_order_acq_rel))
+    {
+        rebuildPendingAfterLoad.store(true, std::memory_order_release);
+    }
     // バイパス、未準備、IR未ロードの場合はスルー
     if (!isPrepared.load(std::memory_order_acquire) || bypassed.load(std::memory_order_relaxed) || !conv)
     {
@@ -4489,7 +4525,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
                   maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,
                   experimentalDirectHeadEnabled.load(std::memory_order_acquire),
-                  &spec))
+                  &spec, this))
         {
             jassert(newConv->areNUCDescriptorsCommitted());
             applyNewState(newConv, loadedIR, sr, length, isRebuild, irFile, scaleFactor, displayIR);

@@ -59,6 +59,15 @@ void NoiseShaperLearner::startLearning(bool resume)
     if (isRunning())
         return;
 
+    bool expectedStartRequested = false;
+    if (!startRequested.compare_exchange_strong(expectedStartRequested, true,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire))
+    {
+        DBG("[NoiseShaperLearner] startLearning already requested or running");
+        return;
+    }
+
     stopRequested.store(true, std::memory_order_release);
     {
         const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
@@ -80,9 +89,14 @@ void NoiseShaperLearner::startLearning(bool resume)
                 if (auto* self = weakSelf.get())
                 {
                     self->pendingRestart.store(false, std::memory_order_release);
+                    self->startRequested.store(false, std::memory_order_release);
                     self->startLearning(resume);
                 }
             });
+        }
+        else
+        {
+            startRequested.store(false, std::memory_order_release);
         }
         return;
     }
@@ -127,13 +141,23 @@ void NoiseShaperLearner::startLearning(bool resume)
     lastGenerationStart = std::chrono::steady_clock::time_point{};
     applyPhaseParams(activeMode, currentPhase);
 
-    workerThread = std::thread(&NoiseShaperLearner::workerThreadMain, this);
+    try
+    {
+        workerThread = std::thread(&NoiseShaperLearner::workerThreadMain, this);
+    }
+    catch (...)
+    {
+        startRequested.store(false, std::memory_order_release);
+        errorMessage.store("Failed to start learning thread", std::memory_order_release);
+        progress.status.store(Status::Error, std::memory_order_release);
+    }
 }
 
 void NoiseShaperLearner::stopLearning()
 {
     stopRequested.store(true, std::memory_order_release);
     evaluationDispatchCv.notify_all();
+    startRequested.store(false, std::memory_order_release);
 
     if (progress.status.load(std::memory_order_acquire) != Status::Error)
         progress.status.store(Status::Idle, std::memory_order_release);
@@ -775,6 +799,7 @@ void NoiseShaperLearner::workerThreadMain()
 
     stopEvaluationWorkers();
     workerThreadFinished.store(true, std::memory_order_release);
+    startRequested.store(false, std::memory_order_release);
 }
 
 NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature() const noexcept
@@ -783,6 +808,8 @@ NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature
     session.sampleRateHz = static_cast<int>(engine.currentSampleRate.load(std::memory_order_acquire) + 0.5);
     session.bitDepth = engine.getDitherBitDepth();
     session.adaptiveCoeffBankIndex = engine.currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
+    if (auto* dsp = engine.currentDSP.load(std::memory_order_acquire))
+        session.sessionId = dsp->currentCaptureSessionId;
     return session;
 }
 
@@ -816,6 +843,7 @@ void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, b
 
     this->sessionSampleRate = sessionSampleRateVal;
     this->sessionBitDepth = sessionBitDepthVal;
+    this->currentSessionId = session.sessionId;
 
     configureEvaluationContexts(sessionSampleRateVal);
 
@@ -857,8 +885,13 @@ void NoiseShaperLearner::drainCaptureQueue(const SessionSignature& session) noex
     AudioBlock block {};
     while (captureQueue.pop(block))
     {
-        if (block.numSamples > 0
-            && block.sampleRateHz == session.sampleRateHz
+        if (block.numSamples <= 0)
+            continue;
+
+        if (block.sessionId != session.sessionId)
+            continue;
+
+        if (block.sampleRateHz == session.sampleRateHz
             && block.adaptiveCoeffBankIndex == session.adaptiveCoeffBankIndex)
         {
             segmentBuffer.pushBlock(block.L, block.R, block.numSamples);

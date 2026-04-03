@@ -3,6 +3,7 @@
 #include "CustomInputOversampler.h"
 #include "DspNumericPolicy.h"
 
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
@@ -10,6 +11,26 @@
 namespace
 {
     static constexpr int kMaxChannels = 2;
+
+    inline double fastAbs(double x) noexcept
+    {
+        uint64_t bits = std::bit_cast<uint64_t>(x);
+        bits &= 0x7FFFFFFFFFFFFFFFULL;
+        return std::bit_cast<double>(bits);
+    }
+
+    inline bool isBadSample(double x) noexcept
+    {
+        const uint64_t bits = std::bit_cast<uint64_t>(x);
+        const uint64_t exp = bits & 0x7FF0000000000000ULL;
+        if (exp == 0x7FF0000000000000ULL)
+            return true;
+
+        constexpr uint64_t limit = 0x4340000000000000ULL;
+        return (bits & 0x7FFFFFFFFFFFFFFFULL) > limit;
+    }
+
+    constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdAudioState;
 }
 
 CustomInputOversampler::~CustomInputOversampler()
@@ -80,6 +101,7 @@ void CustomInputOversampler::release() noexcept
     numStages = 0;
     maxInputBlockSize = 0;
     maxUpsampledBlockSize = 0;
+    corruptionDetected.store(false, std::memory_order_release);
 }
 
 double CustomInputOversampler::besselI0(double x) noexcept
@@ -136,6 +158,12 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     // Scalar remainder
     for (; i < n; ++i)
         sum += x[i] * coeffs[i];
+
+    if (isBadSample(sum))
+        sum = 0.0;
+    else if (fastAbs(sum) < kDenormThreshold)
+        sum = 0.0;
+
     return sum;
 }
 
@@ -274,6 +302,25 @@ void CustomInputOversampler::reset() noexcept
             if (stage.downHistory[ch]) juce::FloatVectorOperations::clear(stage.downHistory[ch].get(), stage.downHistorySize);
         }
     }
+
+    corruptionDetected.store(false, std::memory_order_release);
+}
+
+void CustomInputOversampler::clearAllStages() noexcept
+{
+    for (int i = 0; i < numStages; ++i)
+    {
+        auto& stage = stages[i];
+        for (int ch = 0; ch < kMaxChannels; ++ch)
+        {
+            if (stage.upHistory[ch])
+                juce::FloatVectorOperations::clear(stage.upHistory[ch].get(), stage.upHistorySize);
+            if (stage.downHistory[ch])
+                juce::FloatVectorOperations::clear(stage.downHistory[ch].get(), stage.downHistorySize);
+        }
+    }
+
+    corruptionDetected.store(false, std::memory_order_release);
 }
 
 void CustomInputOversampler::interpolateStage(const Stage& stage,
@@ -282,25 +329,68 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
                                               double* output,
                                               int channel) noexcept
 {
-    constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdAudioState;
-
     double* history = stage.upHistory[channel].get();
     if (history == nullptr || input == nullptr || output == nullptr)
         return;
 
     const int keep = stage.historyUpKeep;
+    const int capacity = stage.upHistorySize;
     juce::FloatVectorOperations::copy(history + keep, input, inputSamples);
 
     for (int n = 0; n < inputSamples; ++n)
     {
         const int idx = keep + n;
-        const double* xWindow = history + idx - (stage.convCount - 1);
-        double convValue = 2.0 * dotProductAvx2(xWindow, stage.convCoeffsReversed.get(), stage.convCount);
-        double centerValue = 2.0 * stage.centerCoeff * history[idx - stage.centerDelayInput];
+        if (idx < (stage.convCount - 1) || idx >= capacity)
+        {
+            corruptionDetected.store(true, std::memory_order_relaxed);
+            output[n * 2 + 0] = 0.0;
+            output[n * 2 + 1] = 0.0;
+            continue;
+        }
 
-        // Denormal対策: 極小値をゼロに落とす (Explicit Flush-to-Zero)
-        if (std::abs(convValue) < kDenormThreshold) convValue = 0.0;
-        if (std::abs(centerValue) < kDenormThreshold) centerValue = 0.0;
+        const double* xWindow = history + idx - (stage.convCount - 1);
+        double convValue = 0.0;
+        bool bad = false;
+
+#if defined(__AVX2__)
+        if (stage.convCount >= 4)
+        {
+            convValue = dotProductAvx2(xWindow, stage.convCoeffsReversed.get(), stage.convCount);
+            if (isBadSample(convValue))
+                bad = true;
+        }
+        else
+#endif
+        {
+            for (int r = 0; r < stage.convCount; ++r)
+            {
+                const double x = xWindow[r];
+                if (isBadSample(x))
+                {
+                    bad = true;
+                    break;
+                }
+                convValue += stage.convCoeffsReversed[r] * x;
+            }
+        }
+
+        double centerValue = 0.0;
+        if (idx >= stage.centerDelayInput)
+            centerValue = stage.centerCoeff * history[idx - stage.centerDelayInput];
+        else
+            bad = true;
+
+        if (bad || isBadSample(centerValue))
+        {
+            corruptionDetected.store(true, std::memory_order_relaxed);
+            output[n * 2 + 0] = 0.0;
+            output[n * 2 + 1] = 0.0;
+            continue;
+        }
+
+        convValue *= 2.0;
+        if (fastAbs(convValue) < kDenormThreshold) convValue = 0.0;
+        if (fastAbs(centerValue) < kDenormThreshold) centerValue = 0.0;
 
         const int outBase = n << 1;
 
@@ -317,13 +407,12 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
                                            double* output,
                                            int channel) noexcept
 {
-    constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdAudioState;
-
     double* history = stage.downHistory[channel].get();
     if (history == nullptr || input == nullptr || output == nullptr)
         return;
 
     const int keep = stage.historyDownKeep;
+    const int capacity = stage.downHistorySize;
     juce::FloatVectorOperations::copy(history + keep, input, inputSamples);
 
     const int outSamples = inputSamples >> 1;
@@ -331,42 +420,121 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
     for (int n = 0; n < outSamples; ++n)
     {
         const int base = keep + (n << 1);
+        if (base < stage.centerTap || base >= capacity)
+        {
+            output[n] = 0.0;
+            corruptionDetected.store(true, std::memory_order_relaxed);
+            continue;
+        }
+
         double acc = stage.centerCoeff * history[base - stage.centerTap];
+        if (isBadSample(acc))
+        {
+            output[n] = 0.0;
+            corruptionDetected.store(true, std::memory_order_relaxed);
+            continue;
+        }
+
+        bool bad = false;
+        bool usedAvxPath = false;
 
 #if defined(__AVX2__) && defined(__FMA__)
-        __m256d vAcc = _mm256_setzero_pd();
-        int r = 0;
-        for (; r <= stage.convCount - 4; r += 4)
+        if (stage.convCount >= 4)
         {
-            const double s0 = history[base - stage.convParity - ((r + 0) << 1)];
-            const double s1 = history[base - stage.convParity - ((r + 1) << 1)];
-            const double s2 = history[base - stage.convParity - ((r + 2) << 1)];
-            const double s3 = history[base - stage.convParity - ((r + 3) << 1)];
+            usedAvxPath = true;
+            __m256d vAcc = _mm256_setzero_pd();
+            int r = 0;
+            const int simdEnd = (stage.convCount / 4) * 4;
+            for (; r < simdEnd; r += 4)
+            {
+                const int idx0 = base - stage.convParity - ((r + 0) << 1);
+                const int idx1 = base - stage.convParity - ((r + 1) << 1);
+                const int idx2 = base - stage.convParity - ((r + 2) << 1);
+                const int idx3 = base - stage.convParity - ((r + 3) << 1);
+                if (idx0 < 0 || idx0 >= capacity || idx1 < 0 || idx1 >= capacity ||
+                    idx2 < 0 || idx2 >= capacity || idx3 < 0 || idx3 >= capacity)
+                {
+                    bad = true;
+                    break;
+                }
 
-            const __m256d vSamples = _mm256_set_pd(s3, s2, s1, s0);
-            const __m256d vCoeffs  = _mm256_loadu_pd(coeffs + r);
-            vAcc = _mm256_fmadd_pd(vSamples, vCoeffs, vAcc);
-        }
+                const double s0 = history[idx0];
+                const double s1 = history[idx1];
+                const double s2 = history[idx2];
+                const double s3 = history[idx3];
+                if (isBadSample(s0) || isBadSample(s1) || isBadSample(s2) || isBadSample(s3))
+                {
+                    bad = true;
+                    break;
+                }
 
-        alignas(64) double partial[4];
-        _mm256_store_pd(partial, vAcc);
-        acc += partial[0] + partial[1] + partial[2] + partial[3];
+                const __m256d vSamples = _mm256_set_pd(s3, s2, s1, s0);
+                const __m256d vCoeffs  = _mm256_loadu_pd(coeffs + r);
+                vAcc = _mm256_fmadd_pd(vSamples, vCoeffs, vAcc);
+            }
 
-        for (; r < stage.convCount; ++r)
-        {
-            const int sampleIndex = base - stage.convParity - (r << 1);
-            acc += coeffs[r] * history[sampleIndex];
-        }
-#else
-        for (int r = 0; r < stage.convCount; ++r)
-        {
-            const int sampleIndex = base - stage.convParity - (r << 1);
-            acc += coeffs[r] * history[sampleIndex];
+            if (!bad)
+            {
+                alignas(64) double partial[4];
+                _mm256_store_pd(partial, vAcc);
+                acc += partial[0] + partial[1] + partial[2] + partial[3];
+
+                for (; r < stage.convCount; ++r)
+                {
+                    const int idx = base - stage.convParity - (r << 1);
+                    if (idx < 0 || idx >= capacity)
+                    {
+                        bad = true;
+                        break;
+                    }
+                    const double x = history[idx];
+                    if (isBadSample(x))
+                    {
+                        bad = true;
+                        break;
+                    }
+                    acc += coeffs[r] * x;
+                }
+            }
         }
 #endif
 
-        // Denormal対策
-        if (std::abs(acc) < kDenormThreshold) acc = 0.0;
+        if (!usedAvxPath || bad)
+        {
+            bad = false;
+            acc = stage.centerCoeff * history[base - stage.centerTap];
+            if (isBadSample(acc))
+                bad = true;
+
+            if (!bad)
+            {
+                for (int r = 0; r < stage.convCount; ++r)
+                {
+                    const int idx = base - stage.convParity - (r << 1);
+                    if (idx < 0 || idx >= capacity)
+                    {
+                        bad = true;
+                        break;
+                    }
+                    const double x = history[idx];
+                    if (isBadSample(x))
+                    {
+                        bad = true;
+                        break;
+                    }
+                    acc += coeffs[r] * x;
+                }
+            }
+        }
+
+        if (bad)
+        {
+            output[n] = 0.0;
+            corruptionDetected.store(true, std::memory_order_relaxed);
+            continue;
+        }
+
+        if (fastAbs(acc) < kDenormThreshold) acc = 0.0;
         output[n] = acc;
     }
 
@@ -420,13 +588,20 @@ void CustomInputOversampler::processDown(const juce::dsp::AudioBlock<double>& up
                                          juce::dsp::AudioBlock<double>& outputBlock,
                                          int numChannels) noexcept
 {
+    if (corruptionDetected.exchange(false, std::memory_order_acq_rel))
+    {
+        clearAllStages();
+        outputBlock.clear();
+        return;
+    }
+
     const int channels = juce::jlimit(1, kMaxChannels, numChannels);
     const int targetSamples = static_cast<int>(outputBlock.getNumSamples());
 
     // [Safety Guard] 入力サイズが準備された容量を超えている場合は処理をスキップし、出力をクリアする
     if (upsampledBlock.getNumSamples() > static_cast<size_t>(maxUpsampledBlockSize))
     {
-        jassertfalse;
+        corruptionDetected.store(true, std::memory_order_relaxed);
         outputBlock.clear();
         return;
     }
