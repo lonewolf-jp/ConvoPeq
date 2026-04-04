@@ -110,7 +110,7 @@ void NoiseShaperLearner::startLearning(bool resume)
     }
     catch (const std::exception& e)
     {
-        DBG("[NoiseShaperLearner] failed to start worker thread: " << e.what());
+        juce::Logger::writeToLog("[NoiseShaperLearner] failed to start worker thread: " + juce::String(e.what()));
         errorMessage.store("Failed to start learning thread", std::memory_order_release);
         progress.status.store(Status::Error, std::memory_order_release);
         startRequested.store(false, std::memory_order_release);
@@ -403,7 +403,7 @@ void NoiseShaperLearner::startEvaluationWorkers()
         }
         catch (const std::exception& e)
         {
-            DBG("[NoiseShaperLearner] failed to start evaluation worker: " << e.what());
+            juce::Logger::writeToLog("[NoiseShaperLearner] failed to start evaluation worker: " + juce::String(e.what()));
             errorMessage.store("Failed to start evaluation worker", std::memory_order_release);
             progress.status.store(Status::Error, std::memory_order_release);
             break;
