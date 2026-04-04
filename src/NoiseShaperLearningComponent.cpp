@@ -44,8 +44,13 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
 
     startButton.onClick = [this]
     {
+        juce::Logger::writeToLog("Start button clicked");
+
         if (audioEngine.isNoiseShaperLearning())
+        {
+            juce::Logger::writeToLog("Already learning, ignored");
             return;
+        }
 
         NoiseShaperLearner::LearningMode mode = NoiseShaperLearner::LearningMode::Short;
         switch (modeComboBox.getSelectedId())
@@ -57,6 +62,7 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
             case 5: mode = NoiseShaperLearner::LearningMode::Ultra; break;
             case 6: mode = NoiseShaperLearner::LearningMode::Continuous; break;
         }
+        juce::Logger::writeToLog("Calling startNoiseShaperLearning with mode=" + juce::String(static_cast<int>(mode)));
         audioEngine.startNoiseShaperLearning(mode, false);
     };
     addAndMakeVisible(startButton);
@@ -69,8 +75,13 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
 
     resumeButton.onClick = [this]
     {
+        juce::Logger::writeToLog("Resume button clicked");
+
         if (audioEngine.isNoiseShaperLearning())
+        {
+            juce::Logger::writeToLog("Already learning, resume ignored");
             return;
+        }
 
         NoiseShaperLearner::LearningMode mode = NoiseShaperLearner::LearningMode::Short;
         switch (modeComboBox.getSelectedId())
@@ -82,6 +93,7 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
             case 5: mode = NoiseShaperLearner::LearningMode::Ultra; break;
             case 6: mode = NoiseShaperLearner::LearningMode::Continuous; break;
         }
+        juce::Logger::writeToLog("Calling startNoiseShaperLearning with mode=" + juce::String(static_cast<int>(mode)) + ", resume=true");
         audioEngine.startNoiseShaperLearning(mode, true);
     };
     addAndMakeVisible(resumeButton);

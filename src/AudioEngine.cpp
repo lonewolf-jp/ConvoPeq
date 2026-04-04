@@ -495,6 +495,9 @@ void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode
     pendingLearningMode.store(mode, std::memory_order_release);
     selectAdaptiveCoeffBankForCurrentSettings();
 
+    if (noiseShaperType.load(std::memory_order_acquire) != NoiseShaperType::Adaptive9thOrder)
+        setNoiseShaperType(NoiseShaperType::Adaptive9thOrder);
+
     const LearningCommand cmd {
         LearningCommand::Type::Start,
         resume,
@@ -507,9 +510,6 @@ void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode
         DBG("[AudioEngine] startNoiseShaperLearning: command queue overflow");
         return;
     }
-
-    if (noiseShaperType.load(std::memory_order_acquire) != NoiseShaperType::Adaptive9thOrder)
-        setNoiseShaperType(NoiseShaperType::Adaptive9thOrder);
 }
 
 void AudioEngine::stopNoiseShaperLearning()
@@ -716,7 +716,7 @@ void AudioEngine::setCurrentAdaptiveCoefficients(const double* coeffs, int numCo
     // 学習中は UI からの係数更新を拒否（競合防止）
     if (isNoiseShaperLearning())
     {
-        juce::Logger::writeToLog("[AudioEngine] Coefficient update rejected during learning");
+        DBG_LOG("[AudioEngine] Coefficient update rejected during learning");
         return;
     }
 
@@ -763,7 +763,7 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRate(double sampleRate, const 
     // 学習中は UI からの係数更新を拒否（競合防止）
     if (isNoiseShaperLearning())
     {
-        juce::Logger::writeToLog("[AudioEngine] Coefficient update rejected during learning");
+        DBG_LOG("[AudioEngine] Coefficient update rejected during learning");
         return;
     }
 
@@ -819,7 +819,7 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
     // 学習中は UI からの係数更新を拒否（競合防止）
     if (isNoiseShaperLearning())
     {
-        juce::Logger::writeToLog("[AudioEngine] Coefficient update rejected during learning");
+        DBG_LOG("[AudioEngine] Coefficient update rejected during learning");
         return;
     }
 
@@ -889,8 +889,8 @@ void AudioEngine::publishCoeffsToBank(int bankIndex, const double* coeffs)
     // 予約に失敗した場合は更新をスキップ（稀なケース）
     if (!guard.isAcquired())
     {
-        juce::Logger::writeToLog("[AudioEngine] Failed to acquire coeff write lock (bank="
-                                  + juce::String(bankIndex) + ")");
+        DBG_LOG("[AudioEngine] Failed to acquire coeff write lock (bank="
+                + juce::String(bankIndex) + ")");
         return;
     }
 
@@ -1909,7 +1909,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         LearningCommand::Type::DSPReady,
         false,
         pendingLearningMode.load(std::memory_order_acquire),
-        pendingIRGeneration
+        static_cast<uint64_t>(generation)
     };
 
     if (!enqueueLearningCommand(cmd))
@@ -1932,9 +1932,9 @@ void AudioEngine::processLearningCommands() noexcept
                 requestedLearningGeneration = cmd.irGeneration;
 
                 auto* dsp = currentDSP.load(std::memory_order_acquire);
+                // irGeneration チェックを削除: DSP が有効かつ型が適切であれば即座に学習開始可能
                 const bool dspReady = (dsp != nullptr)
-                    && (dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder)
-                    && (cmd.irGeneration == currentIRGeneration);
+                    && (dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder);
 
                 if (!dspReady)
                 {
@@ -2024,25 +2024,23 @@ void AudioEngine::processLearningCommands() noexcept
             {
                 currentIRGeneration = cmd.irGeneration;
 
-                if (learningRuntimeState != LearningRuntimeState::WaitingForDSP
-                    || requestedLearningGeneration != currentIRGeneration)
+                // irGeneration チェックを削除: WaitingForDSP 状態であれば遅延なく学習開始
+                if (learningRuntimeState == LearningRuntimeState::WaitingForDSP)
                 {
-                    break;
-                }
+                    const LearnerDispatchAction startAction {
+                        LearnerDispatchAction::Type::Start,
+                        requestedLearningResume,
+                        requestedLearningMode
+                    };
 
-                const LearnerDispatchAction startAction {
-                    LearnerDispatchAction::Type::Start,
-                    requestedLearningResume,
-                    requestedLearningMode
-                };
-
-                if (enqueueLearnerDispatch(startAction))
-                {
-                    learningRuntimeState = LearningRuntimeState::Running;
-                }
-                else
-                {
-                    DBG("[AudioEngine] processLearningCommands: learner start queue overflow");
+                    if (enqueueLearnerDispatch(startAction))
+                    {
+                        learningRuntimeState = LearningRuntimeState::Running;
+                    }
+                    else
+                    {
+                        DBG("[AudioEngine] processLearningCommands: DSPReady learner start queue overflow");
+                    }
                 }
                 break;
             }
@@ -2133,7 +2131,7 @@ void AudioEngine::timerCallback()
                                                    : (std::numeric_limits<uint32>::max() - entry.second + now);
                 if (age < minAge) minAge = age;
             }
-            juce::Logger::writeToLog(
+            DBG_LOG(
                 "[AudioEngine] trashBin size warning: current=" + juce::String(trashBin.size()) +
                 " limit=" + juce::String(MAX_TRASH_BIN_SIZE) +
                 " min_entry_age_ms=" + juce::String(minAge) +
@@ -2172,7 +2170,7 @@ void AudioEngine::timerCallback()
                 const auto diag = dsp->fixedNoiseShaper.getDiagnostics();
                 if (diag.windowSamples > 0)
                 {
-                    juce::Logger::writeToLog(
+                    DBG_LOG(
                         "[Fixed4Tap] bitDepth=" + juce::String(diag.bitDepth)
                         + " rmsL=" + juce::String(diag.rmsErrorL, 9)
                         + " rmsR=" + juce::String(diag.rmsErrorR, 9)
@@ -2181,7 +2179,7 @@ void AudioEngine::timerCallback()
                 }
                 else
                 {
-                    juce::Logger::writeToLog(
+                    DBG_LOG(
                         "[Fixed4Tap] waiting for diagnostics window"
                         " (bitDepth=" + juce::String(dsp->ditherBitDepth)
                         + ", targetWindow=" + juce::String(fixedNoiseWindowSamples.load(std::memory_order_relaxed))
@@ -2203,7 +2201,7 @@ void AudioEngine::timerCallback()
                 const auto diag = dsp->fixed15TapNoiseShaper.getDiagnostics();
                 if (diag.windowSamples > 0)
                 {
-                    juce::Logger::writeToLog(
+                    DBG_LOG(
                         "[Fixed15Tap] bitDepth=" + juce::String(diag.bitDepth)
                         + " rmsL=" + juce::String(diag.rmsErrorL, 9)
                         + " rmsR=" + juce::String(diag.rmsErrorR, 9)
@@ -2212,7 +2210,7 @@ void AudioEngine::timerCallback()
                 }
                 else
                 {
-                    juce::Logger::writeToLog(
+                    DBG_LOG(
                         "[Fixed15Tap] waiting for diagnostics window"
                         " (bitDepth=" + juce::String(dsp->ditherBitDepth)
                         + ", targetWindow=" + juce::String(fixedNoiseWindowSamples.load(std::memory_order_relaxed))
@@ -2565,6 +2563,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         buffer.clear();
         return;
     }
+
+    processLearningCommands();
 
     const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
     if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
@@ -3880,7 +3880,7 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
     if (ditherBitDepth.load() != bitDepth)
     {
         ditherBitDepth.store(bitDepth);
-        juce::Logger::writeToLog("Dither Bit Depth changed: " + juce::String(bitDepth));
+        DBG_LOG("Dither Bit Depth changed: " + juce::String(bitDepth));
 
         selectAdaptiveCoeffBankForCurrentSettings();
 
@@ -3925,7 +3925,7 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
         else if (type == NoiseShaperType::Adaptive9thOrder)
             typeName = "Adaptive9thOrder";
 
-        juce::Logger::writeToLog("Noise Shaper changed: " + typeName);
+        DBG_LOG("Noise Shaper changed: " + typeName);
         const double sr = currentSampleRate.load();
         if (sr > 0.0)
             requestRebuild(sr, maxSamplesPerBlock.load());

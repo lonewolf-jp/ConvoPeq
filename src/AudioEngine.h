@@ -55,6 +55,13 @@ struct CoeffSet {
 #include "LockFreeRingBuffer.h"
 #include "NoiseShaperLearner.h"
 
+// デバッグビルド時のみログを出力するマクロ
+#if defined(JUCE_DEBUG) && !defined(NDEBUG)
+    #define DBG_LOG(msg) juce::Logger::writeToLog(msg)
+#else
+    #define DBG_LOG(msg) ((void)0)
+#endif
+
 // AudioEngine.h  ── v0.2 (JUCE 8.0.12対応)
 //
 // オーディオエンジン - AudioSource実装
@@ -508,10 +515,10 @@ DSPCore();
 
     #pragma warning(push)
     #pragma warning(disable: 4324)
-    alignas(64) uint32_t learningCommandWrite = 0;  // Message/UI thread only
-    alignas(64) uint32_t learningCommandRead = 0;   // Audio thread only
-    alignas(64) uint32_t learnerDispatchWrite = 0;  // Audio thread only
-    alignas(64) uint32_t learnerDispatchRead = 0;   // Message thread only
+    alignas(64) std::atomic<uint32_t> learningCommandWrite { 0 };  // Message/UI thread only
+    alignas(64) std::atomic<uint32_t> learningCommandRead { 0 };   // Audio thread only
+    alignas(64) std::atomic<uint32_t> learnerDispatchWrite { 0 };  // Audio thread only
+    alignas(64) std::atomic<uint32_t> learnerDispatchRead { 0 };   // Message thread only
     #pragma warning(pop)
 
     LearningRuntimeState learningRuntimeState = LearningRuntimeState::Idle;
@@ -727,52 +734,60 @@ private:
 
 inline bool AudioEngine::enqueueLearningCommand(const LearningCommand& cmd) noexcept
 {
-    const uint32_t next = (learningCommandWrite + 1u) & learningCommandBufferMask;
-    if (next == learningCommandRead)
+    const uint32_t currentWrite = learningCommandWrite.load(std::memory_order_relaxed);
+    const uint32_t currentRead = learningCommandRead.load(std::memory_order_acquire);
+    const uint32_t next = (currentWrite + 1u) & learningCommandBufferMask;
+    if (next == currentRead)
     {
         jassertfalse;
         return false;
     }
 
-    learningCommandBuffer[learningCommandWrite] = cmd;
+    learningCommandBuffer[currentWrite] = cmd;
     std::atomic_thread_fence(std::memory_order_release);
-    learningCommandWrite = next;
+    learningCommandWrite.store(next, std::memory_order_release);
     return true;
 }
 
 inline bool AudioEngine::dequeueLearningCommand(LearningCommand& cmd) noexcept
 {
-    if (learningCommandRead == learningCommandWrite)
+    const uint32_t currentRead = learningCommandRead.load(std::memory_order_relaxed);
+    const uint32_t currentWrite = learningCommandWrite.load(std::memory_order_acquire);
+    if (currentRead == currentWrite)
         return false;
 
     std::atomic_thread_fence(std::memory_order_acquire);
-    cmd = learningCommandBuffer[learningCommandRead];
-    learningCommandRead = (learningCommandRead + 1u) & learningCommandBufferMask;
+    cmd = learningCommandBuffer[currentRead];
+    learningCommandRead.store((currentRead + 1u) & learningCommandBufferMask, std::memory_order_release);
     return true;
 }
 
 inline bool AudioEngine::enqueueLearnerDispatch(const LearnerDispatchAction& action) noexcept
 {
-    const uint32_t next = (learnerDispatchWrite + 1u) & learnerDispatchBufferMask;
-    if (next == learnerDispatchRead)
+    const uint32_t currentWrite = learnerDispatchWrite.load(std::memory_order_relaxed);
+    const uint32_t currentRead = learnerDispatchRead.load(std::memory_order_acquire);
+    const uint32_t next = (currentWrite + 1u) & learnerDispatchBufferMask;
+    if (next == currentRead)
     {
         jassertfalse;
         return false;
     }
 
-    learnerDispatchBuffer[learnerDispatchWrite] = action;
+    learnerDispatchBuffer[currentWrite] = action;
     std::atomic_thread_fence(std::memory_order_release);
-    learnerDispatchWrite = next;
+    learnerDispatchWrite.store(next, std::memory_order_release);
     return true;
 }
 
 inline bool AudioEngine::dequeueLearnerDispatch(LearnerDispatchAction& action) noexcept
 {
-    if (learnerDispatchRead == learnerDispatchWrite)
+    const uint32_t currentRead = learnerDispatchRead.load(std::memory_order_relaxed);
+    const uint32_t currentWrite = learnerDispatchWrite.load(std::memory_order_acquire);
+    if (currentRead == currentWrite)
         return false;
 
     std::atomic_thread_fence(std::memory_order_acquire);
-    action = learnerDispatchBuffer[learnerDispatchRead];
-    learnerDispatchRead = (learnerDispatchRead + 1u) & learnerDispatchBufferMask;
+    action = learnerDispatchBuffer[currentRead];
+    learnerDispatchRead.store((currentRead + 1u) & learnerDispatchBufferMask, std::memory_order_release);
     return true;
 }
