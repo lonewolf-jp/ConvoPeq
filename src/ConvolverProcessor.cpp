@@ -1936,18 +1936,22 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         const double* srcLinear = linearIR.getReadPointer(ch);
         const double* srcMinimum = minimumIR.getReadPointer(ch);
 
-        // 線形位相 IR のピーク位置を特定
-        int peakDelay = 0;
-        double maxVal = 0.0;
+        // 線形位相 IR の中心遅延をエネルギー重心で推定
+        double sumWeight = 0.0;
+        double sumIndex = 0.0;
         for (int i = 0; i < numSamples; ++i)
         {
-            double val = std::abs(srcLinear[i]);
-            if (val > maxVal)
-            {
-                maxVal = val;
-                peakDelay = i;
-            }
+            const double w = srcLinear[i] * srcLinear[i];
+            sumWeight += w;
+            sumIndex += w * static_cast<double>(i);
         }
+        const int peakDelay = (sumWeight > 1.0e-12)
+            ? static_cast<int>(sumIndex / sumWeight)
+            : 0;
+
+        juce::Logger::writeToLog("Linear IR peak delay: "
+                                 + juce::String(peakDelay)
+                                 + " samples");
 
         // バッファ初期化と FFT
         std::memset(linearSpec.get(), 0, static_cast<size_t>(fftSize) * sizeof(MKL_Complex16));
@@ -1984,6 +1988,18 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             targetPhase.get()[k] = wLinear * phi_lin + wMinimum * phi_min;
         }
 
+        // 数値微分前に位相を [-pi, pi] に正規化して巨大値の残留を抑制
+        for (int k = 0; k < complexSize; ++k)
+        {
+            double phi = std::fmod(targetPhase.get()[k], 2.0 * juce::MathConstants<double>::pi);
+            if (phi > juce::MathConstants<double>::pi)
+                phi -= 2.0 * juce::MathConstants<double>::pi;
+            else if (phi < -juce::MathConstants<double>::pi)
+                phi += 2.0 * juce::MathConstants<double>::pi;
+
+            targetPhase.get()[k] = phi;
+        }
+
         // 位相のアンラップ
         unwrapPhaseRadians(targetPhase.get(), complexSize);
 
@@ -2006,6 +2022,34 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
             // 線形位相成分 (-peakDelay) を差し引いて、全通過フィルタが補うべき分を抽出
             targetGroupDelay[k] -= static_cast<double>(peakDelay);
+        }
+
+        // スパイク抑制のため、指数平滑化の前に移動平均を適用
+        {
+            constexpr int smoothWindow = 5;
+            std::vector<double, convo::MKLAllocator<double>> movingAvg(complexSize, 0.0);
+            for (int k = 0; k < complexSize; ++k)
+            {
+                const int start = std::max(0, k - smoothWindow);
+                const int end = std::min(complexSize - 1, k + smoothWindow);
+
+                double sum = 0.0;
+                for (int j = start; j <= end; ++j)
+                    sum += targetGroupDelay[static_cast<size_t>(j)];
+
+                movingAvg[static_cast<size_t>(k)] = sum / static_cast<double>(end - start + 1);
+            }
+            targetGroupDelay.swap(movingAvg);
+        }
+
+        {
+            const double minGD = *std::min_element(targetGroupDelay.begin(), targetGroupDelay.end());
+            const double maxGD = *std::max_element(targetGroupDelay.begin(), targetGroupDelay.end());
+            juce::Logger::writeToLog("Target group delay range: "
+                                     + juce::String(minGD)
+                                     + " to "
+                                     + juce::String(maxGD)
+                                     + " samples");
         }
 
         // Patch ②: 負の群遅延をクリップではなくシフトして、物理的に実現可能なターゲットに射影する。
@@ -2031,6 +2075,24 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 smoothed[i] = alpha * targetGroupDelay[i] + (1.0 - alpha) * smoothed[i - 1];
 
             targetGroupDelay.swap(smoothed);
+        }
+
+        // 設計器が扱える現実的な範囲へクランプ
+        {
+            constexpr double maxAllowedGD = 2000.0;
+            for (auto& gd : targetGroupDelay)
+                gd = std::clamp(gd, 0.0, maxAllowedGD);
+        }
+
+        // クランプ後の範囲をログ出力（AllpassDesigner に渡す実際の値を診断するため）
+        {
+            const double minGDc = *std::min_element(targetGroupDelay.begin(), targetGroupDelay.end());
+            const double maxGDc = *std::max_element(targetGroupDelay.begin(), targetGroupDelay.end());
+            juce::Logger::writeToLog("Target GD after clamping: "
+                                     + juce::String(minGDc)
+                                     + " to "
+                                     + juce::String(maxGDc)
+                                     + " samples");
         }
 
         // --- AllpassDesigner の呼び出し ---
@@ -2063,14 +2125,22 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         }
 
         convo::AllpassDesigner::Config designer_config;
-        designer_config.numSections          = 8;
+        // numSections: 8→12。2次全通過1セクションの最大群遅延 ≈(1+ρ)/(1-ρ)≈99 samples (ρ=0.98)。
+        // 8 sections × 99 ≈ 792 samples では maxAllowedGD=2000 に届かなかったため増強。
+        // 12 sections × 99 ≈ 1188 samples。dim=24 になり探索コストは O(dim^2) で約 2.25 倍。
+        designer_config.numSections          = 12;
         designer_config.method               = convo::OptimizationMethod::CMAES;
         designer_config.freqPoints           = kOptimFreqPoints;
         designer_config.minFreqHz            = 20.0;
         designer_config.maxFreqHz            = sampleRate / 2.0;
-        designer_config.cmaesMaxGenerations  = 100;   // 旧: 200
-        designer_config.cmaesPopulationSize  = 32;    // 旧: 64
-        designer_config.cmaesInitialSigma    = 0.5;
+        designer_config.cmaesMaxGenerations  = 200;   // 100→200: sigma 収縮後も継続探索させる
+        designer_config.cmaesPopulationSize  = 48;    // 32→48: dim=24 に比例したサンプル数
+        designer_config.cmaesInitialSigma    = 1.0;   // 0.5→1.0: 無制約空間での初期探索幅を拡大
+        // sigmaMin=1e-6 (デフォルト) のままだと sigma が gen~10 で 1e-4 を下回り
+        // 早期終了条件に引っかかって探索が停止する。0.05 に設定することで
+        // gen~6 以降 sigma=0.05 でクランプされ、残り ~194 世代の mean 更新が保証される。
+        designer_config.cmaesParams.sigmaMin = 0.05;  // 急収縮防止（重要）
+        designer_config.cmaesParams.sigmaMax = 2.0;   // デフォルト値を明示
         designer_config.progressCallback     = progressCallback;
 
         std::vector<convo::SecondOrderAllpass> allpass_sections;
@@ -2078,11 +2148,17 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
         if (progressCallback) progressCallback(0.1f);
 
+        juce::Logger::writeToLog("MixedPhase: starting design with "
+                                 + juce::String(designer_config.freqPoints)
+                                 + " freq points, maxGen="
+                                 + juce::String(designer_config.cmaesMaxGenerations));
+
         // shouldExit を渡して世代ループ中にキャンセルを受け付ける（旧実装では未渡し）
-        bool designSuccess =
-            (designer.designWithCMAES(sampleRate, optim_freq_hz, optim_target_gd,
-                                      designer_config, allpass_sections, shouldExit)
-             == convo::DesignResult::Success);
+        const auto designResult = designer.designWithCMAES(sampleRate, optim_freq_hz, optim_target_gd,
+                                                            designer_config, allpass_sections, shouldExit);
+        juce::Logger::writeToLog("MixedPhase: design result = " + juce::String(static_cast<int>(designResult)));
+
+        bool designSuccess = (designResult == convo::DesignResult::Success);
 
         // CMA-ES 失敗 / キャンセルされていない場合は Greedy+AdaGrad にフォールバック
         if (!designSuccess && !(shouldExit && shouldExit()))
@@ -4686,8 +4762,11 @@ void ConvolverProcessor::evictOldestCacheEntry()
 
 void ConvolverProcessor::setLoadingProgress(float p)
 {
-    loadProgress.store(p);
-    sendChangeMessage();
+    loadProgress.store(p, std::memory_order_release);
+    // sendChangeMessage() はメッセージスレッド専用。LoaderThread など任意の
+    // スレッドから呼ばれるため、既存の postCoalescedChangeNotification() を使う。
+    // 進捗通知は合体（coalesce）して問題ない（最新値が loadProgress に保持される）。
+    postCoalescedChangeNotification();
 }
 
 void ConvolverProcessor::StereoConvolver::reset()

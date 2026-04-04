@@ -158,6 +158,10 @@ DesignResult AllpassDesigner::designWithCMAES(
     double prevBestFitness = bestFitness;
     int stagnationCounter = 0;
 
+    juce::Logger::writeToLog("CMA-ES optimization started with "
+                             + juce::String(config.numSections)
+                             + " sections, dim=" + juce::String(D));
+
     for (int gen = 0; gen < config.cmaesMaxGenerations; ++gen) {
         if (shouldExit && shouldExit()) return DesignResult::Cancelled;
 
@@ -171,6 +175,13 @@ DesignResult AllpassDesigner::designWithCMAES(
         }
         optimizer.update(population, fitness);
 
+        if ((gen % 10) == 0)
+        {
+            juce::Logger::writeToLog("CMA-ES gen " + juce::String(gen)
+                                     + " bestFitness=" + juce::String(bestFitness)
+                                     + " sigma=" + juce::String(optimizer.getSigma()));
+        }
+
         // 進捗コールバック
         if (progressCallback) {
             float progress = 0.2f + 0.6f * static_cast<float>(gen) / juce::jmax(1, config.cmaesMaxGenerations);
@@ -179,7 +190,9 @@ DesignResult AllpassDesigner::designWithCMAES(
 
         // 早期終了条件：sigma が十分小さい、十分収束、または改善停滞
         double currentSigma = optimizer.getSigma();
-        if (currentSigma < 1e-4) break;
+        // sigmaMin が 1e-4 を超える設定の場合（例: sigmaMin=0.05）、固定値 1e-4 では
+        // 永遠に満たされない。設定された sigmaMin の 1/10 と 1e-4 の小さい方を閾値とする。
+        if (currentSigma < std::min(1e-4, config.cmaesParams.sigmaMin * 0.1)) break;
         // 収束閾値: 重み付き RMSE 1.0サンプル（≈20μs @ 48kHz、5μs @ 192kHz）
         // 旧値 1e-3 は 0.001サンプル ≈ 5ns @ 192kHz で到達不能だったため修正
         if (bestFitness < 1.0) break;
@@ -199,6 +212,10 @@ DesignResult AllpassDesigner::designWithCMAES(
 
     if (progressCallback)
         progressCallback(0.9f);
+
+    juce::Logger::writeToLog("CMA-ES optimization finished. Best fitness="
+                             + juce::String(bestFitness)
+                             + ", sigma=" + juce::String(optimizer.getSigma()));
 
     sections.clear();
     if (!std::isfinite(bestFitness))
