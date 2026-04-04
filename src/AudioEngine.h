@@ -305,15 +305,6 @@ public:
     bool getAdaptiveNoiseShaperState(int bankIndex, NoiseShaperLearner::State& outState) const noexcept;
     void setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLearner::State& inState) noexcept;
 
-    enum class LearningState
-    {
-        Idle,
-        PendingStart,
-        WaitingForDSP,
-        Running,
-        Stopping
-    };
-
 private:
     //----------------------------------------------------------
      // DSPコア (Audio Threadで実行される処理のコンテナ)
@@ -480,15 +471,55 @@ DSPCore();
     std::atomic<NoiseShaperType> noiseShaperType { NoiseShaperType::Psychoacoustic };
 
     // 【False Sharing 防止】頻繁な UI 更新変数を独立キャッシュラインへ配置
+    struct LearningCommand
+    {
+        enum class Type : uint8_t { Start, Stop, IRChanged, DSPReady };
+
+        Type type = Type::Stop;
+        bool resume = false;
+        NoiseShaperLearner::LearningMode mode = NoiseShaperLearner::LearningMode::Short;
+        uint64_t irGeneration = 0;
+    };
+
+    struct LearnerDispatchAction
+    {
+        enum class Type : uint8_t { Start, Stop };
+
+        Type type = Type::Stop;
+        bool resume = false;
+        NoiseShaperLearner::LearningMode mode = NoiseShaperLearner::LearningMode::Short;
+    };
+
+    enum class LearningRuntimeState : uint8_t { Idle, WaitingForDSP, Running };
+
+    static constexpr uint32_t learningCommandBufferSize = 128;
+    static constexpr uint32_t learningCommandBufferMask = learningCommandBufferSize - 1;
+    static constexpr uint32_t learnerDispatchBufferSize = 32;
+    static constexpr uint32_t learnerDispatchBufferMask = learnerDispatchBufferSize - 1;
+
     #pragma warning(push)
     #pragma warning(disable: 4324)
-    alignas(64) std::atomic<bool> pendingNoiseShaperLearningStart { false };
-    alignas(64) std::atomic<bool> pendingNoiseShaperLearningResume { false };
     alignas(64) std::atomic<NoiseShaperLearner::LearningMode> pendingLearningMode { NoiseShaperLearner::LearningMode::Short };
-    alignas(64) std::atomic<LearningState> learningState { LearningState::Idle };
-    alignas(64) std::atomic<bool> asyncStartScheduled { false };
     alignas(64) std::atomic<uint64_t> globalCaptureSessionId { 1 };
     #pragma warning(pop)
+
+    LearningCommand learningCommandBuffer[learningCommandBufferSize] {};
+    LearnerDispatchAction learnerDispatchBuffer[learnerDispatchBufferSize] {};
+
+    #pragma warning(push)
+    #pragma warning(disable: 4324)
+    alignas(64) uint32_t learningCommandWrite = 0;  // Message/UI thread only
+    alignas(64) uint32_t learningCommandRead = 0;   // Audio thread only
+    alignas(64) uint32_t learnerDispatchWrite = 0;  // Audio thread only
+    alignas(64) uint32_t learnerDispatchRead = 0;   // Message thread only
+    #pragma warning(pop)
+
+    LearningRuntimeState learningRuntimeState = LearningRuntimeState::Idle;
+    NoiseShaperLearner::LearningMode requestedLearningMode = NoiseShaperLearner::LearningMode::Short;
+    bool requestedLearningResume = false;
+    uint64_t requestedLearningGeneration = 0;
+    uint64_t currentIRGeneration = 0; // Audio thread only
+    uint64_t pendingIRGeneration = 0; // Message/UI thread only
 
     std::atomic<int> fixedNoiseLogIntervalMs { 2000 };
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
@@ -548,6 +579,13 @@ DSPCore();
     void requestRebuild(double sampleRate, int samplesPerBlock);
     void commitNewDSP(DSPCore* newDSP, int generation);
     bool isRebuildObsolete(int generation) const { return generation != rebuildGeneration.load(); }
+    bool enqueueLearningCommand(const LearningCommand& cmd) noexcept;
+    bool dequeueLearningCommand(LearningCommand& cmd) noexcept;
+    bool enqueueLearnerDispatch(const LearnerDispatchAction& action) noexcept;
+    bool dequeueLearnerDispatch(LearnerDispatchAction& action) noexcept;
+    void processLearningCommands() noexcept;
+    void processDeferredLearningActions();
+    void resetLearningControlState() noexcept;
 
     // Worker thread for rebuilds
     void rebuildThreadLoop();
@@ -686,3 +724,55 @@ private:
     JUCE_DECLARE_WEAK_REFERENCEABLE(AudioEngine)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };
+
+inline bool AudioEngine::enqueueLearningCommand(const LearningCommand& cmd) noexcept
+{
+    const uint32_t next = (learningCommandWrite + 1u) & learningCommandBufferMask;
+    if (next == learningCommandRead)
+    {
+        jassertfalse;
+        return false;
+    }
+
+    learningCommandBuffer[learningCommandWrite] = cmd;
+    std::atomic_thread_fence(std::memory_order_release);
+    learningCommandWrite = next;
+    return true;
+}
+
+inline bool AudioEngine::dequeueLearningCommand(LearningCommand& cmd) noexcept
+{
+    if (learningCommandRead == learningCommandWrite)
+        return false;
+
+    std::atomic_thread_fence(std::memory_order_acquire);
+    cmd = learningCommandBuffer[learningCommandRead];
+    learningCommandRead = (learningCommandRead + 1u) & learningCommandBufferMask;
+    return true;
+}
+
+inline bool AudioEngine::enqueueLearnerDispatch(const LearnerDispatchAction& action) noexcept
+{
+    const uint32_t next = (learnerDispatchWrite + 1u) & learnerDispatchBufferMask;
+    if (next == learnerDispatchRead)
+    {
+        jassertfalse;
+        return false;
+    }
+
+    learnerDispatchBuffer[learnerDispatchWrite] = action;
+    std::atomic_thread_fence(std::memory_order_release);
+    learnerDispatchWrite = next;
+    return true;
+}
+
+inline bool AudioEngine::dequeueLearnerDispatch(LearnerDispatchAction& action) noexcept
+{
+    if (learnerDispatchRead == learnerDispatchWrite)
+        return false;
+
+    std::atomic_thread_fence(std::memory_order_acquire);
+    action = learnerDispatchBuffer[learnerDispatchRead];
+    learnerDispatchRead = (learnerDispatchRead + 1u) & learnerDispatchBufferMask;
+    return true;
+}

@@ -492,56 +492,39 @@ void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode
     if (noiseShaperLearner == nullptr)
         return;
 
-    LearningState expected = LearningState::Idle;
-    if (!learningState.compare_exchange_strong(expected, LearningState::PendingStart,
-                                               std::memory_order_acq_rel,
-                                               std::memory_order_acquire))
-    {
-        DBG("[AudioEngine] startNoiseShaperLearning: not idle, current state=" << static_cast<int>(expected));
-        return;
-    }
-
     pendingLearningMode.store(mode, std::memory_order_release);
     selectAdaptiveCoeffBankForCurrentSettings();
-    pendingNoiseShaperLearningResume.store(resume, std::memory_order_release);
-    pendingNoiseShaperLearningStart.store(true, std::memory_order_release);
+
+    const LearningCommand cmd {
+        LearningCommand::Type::Start,
+        resume,
+        mode,
+        pendingIRGeneration
+    };
+
+    if (!enqueueLearningCommand(cmd))
+    {
+        DBG("[AudioEngine] startNoiseShaperLearning: command queue overflow");
+        return;
+    }
 
     if (noiseShaperType.load(std::memory_order_acquire) != NoiseShaperType::Adaptive9thOrder)
-    {
-        learningState.store(LearningState::WaitingForDSP, std::memory_order_release);
         setNoiseShaperType(NoiseShaperType::Adaptive9thOrder);
-        return;
-    }
-
-    auto* dsp = currentDSP.load(std::memory_order_acquire);
-    if (dsp != nullptr && dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder)
-    {
-        pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
-        learningState.store(LearningState::Running, std::memory_order_release);
-        noiseShaperLearner->setLearningMode(mode);
-        noiseShaperLearner->startLearning(resume);
-        return;
-    }
-
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
-    if (sr > 0.0)
-    {
-        learningState.store(LearningState::WaitingForDSP, std::memory_order_release);
-        requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
-    }
-    else
-    {
-        pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
-        learningState.store(LearningState::Idle, std::memory_order_release);
-    }
 }
 
 void AudioEngine::stopNoiseShaperLearning()
 {
-    pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
-    pendingNoiseShaperLearningResume.store(false, std::memory_order_release);
-    learningState.store(LearningState::Idle, std::memory_order_release);
-    asyncStartScheduled.store(false, std::memory_order_release);
+    const LearningCommand cmd {
+        LearningCommand::Type::Stop,
+        false,
+        pendingLearningMode.load(std::memory_order_acquire),
+        pendingIRGeneration
+    };
+
+    if (!enqueueLearningCommand(cmd))
+    {
+        DBG("[AudioEngine] stopNoiseShaperLearning: command queue overflow");
+    }
 
     if (noiseShaperLearner)
         noiseShaperLearner->stopLearning();
@@ -1679,13 +1662,8 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     // UIコンポーネント(uiEqProcessor等)へのアクセスやMKLメモリ確保を行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
-    const LearningState currentLearningState = learningState.load(std::memory_order_acquire);
-    if (currentLearningState == LearningState::Running || currentLearningState == LearningState::PendingStart)
-    {
-        learningState.store(LearningState::Stopping, std::memory_order_release);
-        if (noiseShaperLearner)
-            noiseShaperLearner->stopLearning();
-    }
+    if (noiseShaperLearner && noiseShaperLearner->isRunning())
+        noiseShaperLearner->stopLearning();
 
     // 新しいDSPコアを作成
     DSPCore* newDSP = new DSPCore();
@@ -1927,49 +1905,187 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         }
     }
 
-    const LearningState stateNow = learningState.load(std::memory_order_acquire);
-    if ((stateNow == LearningState::PendingStart || stateNow == LearningState::WaitingForDSP)
-        && noiseShaperLearner != nullptr)
+    const LearningCommand cmd {
+        LearningCommand::Type::DSPReady,
+        false,
+        pendingLearningMode.load(std::memory_order_acquire),
+        pendingIRGeneration
+    };
+
+    if (!enqueueLearningCommand(cmd))
     {
-        learningState.store(LearningState::PendingStart, std::memory_order_release);
+        DBG("[AudioEngine] commitNewDSP: command queue overflow");
+    }
+}
 
-        if (!asyncStartScheduled.exchange(true, std::memory_order_acq_rel))
+void AudioEngine::processLearningCommands() noexcept
+{
+    LearningCommand cmd;
+    while (dequeueLearningCommand(cmd))
+    {
+        switch (cmd.type)
         {
-            const bool resume = pendingNoiseShaperLearningResume.load(std::memory_order_acquire);
-            const auto mode = pendingLearningMode.load(std::memory_order_acquire);
-
-            juce::MessageManager::callAsync([this, resume, mode]()
+            case LearningCommand::Type::Start:
             {
-                asyncStartScheduled.store(false, std::memory_order_release);
-
-                if (learningState.load(std::memory_order_acquire) != LearningState::PendingStart)
-                {
-                    DBG("[AudioEngine] commitNewDSP async: state changed, abort start");
-                    return;
-                }
+                requestedLearningMode = cmd.mode;
+                requestedLearningResume = cmd.resume;
+                requestedLearningGeneration = cmd.irGeneration;
 
                 auto* dsp = currentDSP.load(std::memory_order_acquire);
-                if (noiseShaperLearner && dsp && dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder)
+                const bool dspReady = (dsp != nullptr)
+                    && (dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder)
+                    && (cmd.irGeneration == currentIRGeneration);
+
+                if (!dspReady)
                 {
-                    pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
-                    pendingNoiseShaperLearningResume.store(false, std::memory_order_release);
-                    learningState.store(LearningState::Running, std::memory_order_release);
-                    noiseShaperLearner->setLearningMode(mode);
-                    noiseShaperLearner->startLearning(resume);
+                    learningRuntimeState = LearningRuntimeState::WaitingForDSP;
+                    break;
+                }
+
+                if (learningRuntimeState == LearningRuntimeState::Running)
+                {
+                    const LearnerDispatchAction stopAction {
+                        LearnerDispatchAction::Type::Stop,
+                        false,
+                        requestedLearningMode
+                    };
+
+                    if (!enqueueLearnerDispatch(stopAction))
+                    {
+                        DBG("[AudioEngine] processLearningCommands: learner stop queue overflow");
+                    }
+                }
+
+                const LearnerDispatchAction startAction {
+                    LearnerDispatchAction::Type::Start,
+                    requestedLearningResume,
+                    requestedLearningMode
+                };
+
+                if (enqueueLearnerDispatch(startAction))
+                    learningRuntimeState = LearningRuntimeState::Running;
+                else
+                {
+                    learningRuntimeState = LearningRuntimeState::WaitingForDSP;
+                    DBG("[AudioEngine] processLearningCommands: learner start queue overflow");
+                }
+                break;
+            }
+
+            case LearningCommand::Type::Stop:
+            {
+                requestedLearningResume = false;
+                requestedLearningGeneration = currentIRGeneration;
+
+                const LearnerDispatchAction stopAction {
+                    LearnerDispatchAction::Type::Stop,
+                    false,
+                    requestedLearningMode
+                };
+
+                if (!enqueueLearnerDispatch(stopAction))
+                {
+                    DBG("[AudioEngine] processLearningCommands: learner stop queue overflow");
+                }
+
+                learningRuntimeState = LearningRuntimeState::Idle;
+                break;
+            }
+
+            case LearningCommand::Type::IRChanged:
+            {
+                const bool shouldRestart = (learningRuntimeState != LearningRuntimeState::Idle);
+                requestedLearningGeneration = cmd.irGeneration;
+
+                const LearnerDispatchAction stopAction {
+                    LearnerDispatchAction::Type::Stop,
+                    false,
+                    requestedLearningMode
+                };
+
+                if (!enqueueLearnerDispatch(stopAction))
+                {
+                    DBG("[AudioEngine] processLearningCommands: learner stop queue overflow");
+                }
+
+                if (shouldRestart)
+                {
+                    requestedLearningResume = false;
+                    learningRuntimeState = LearningRuntimeState::WaitingForDSP;
                 }
                 else
                 {
-                    pendingNoiseShaperLearningStart.store(false, std::memory_order_release);
-                    learningState.store(LearningState::Idle, std::memory_order_release);
-                    DBG("[AudioEngine] commitNewDSP async: DSP not ready, learning aborted");
+                    learningRuntimeState = LearningRuntimeState::Idle;
                 }
-            });
+                break;
+            }
+
+            case LearningCommand::Type::DSPReady:
+            {
+                currentIRGeneration = cmd.irGeneration;
+
+                if (learningRuntimeState != LearningRuntimeState::WaitingForDSP
+                    || requestedLearningGeneration != currentIRGeneration)
+                {
+                    break;
+                }
+
+                const LearnerDispatchAction startAction {
+                    LearnerDispatchAction::Type::Start,
+                    requestedLearningResume,
+                    requestedLearningMode
+                };
+
+                if (enqueueLearnerDispatch(startAction))
+                {
+                    learningRuntimeState = LearningRuntimeState::Running;
+                }
+                else
+                {
+                    DBG("[AudioEngine] processLearningCommands: learner start queue overflow");
+                }
+                break;
+            }
         }
     }
 }
 
+void AudioEngine::processDeferredLearningActions()
+{
+    LearnerDispatchAction action;
+    while (dequeueLearnerDispatch(action))
+    {
+        if (noiseShaperLearner == nullptr)
+            continue;
+
+        if (action.type == LearnerDispatchAction::Type::Stop)
+        {
+            noiseShaperLearner->stopLearning();
+            continue;
+        }
+
+        noiseShaperLearner->setLearningMode(action.mode);
+        noiseShaperLearner->startLearning(action.resume);
+    }
+}
+
+void AudioEngine::resetLearningControlState() noexcept
+{
+    learningCommandWrite = 0;
+    learningCommandRead = 0;
+    learnerDispatchWrite = 0;
+    learnerDispatchRead = 0;
+    learningRuntimeState = LearningRuntimeState::Idle;
+    requestedLearningMode = pendingLearningMode.load(std::memory_order_acquire);
+    requestedLearningResume = false;
+    requestedLearningGeneration = pendingIRGeneration;
+    currentIRGeneration = pendingIRGeneration;
+}
+
 void AudioEngine::timerCallback()
 {
+    processDeferredLearningActions();
+
     // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
     // タイマーコールバック内では、UIの状態を直接使用せずに、
     // Atomic変数から安全に読み取る
@@ -2197,6 +2313,20 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 
         if (needsStructuralRebuild && srForRebuild > 0.0)
         {
+            ++pendingIRGeneration;
+
+            const LearningCommand cmd {
+                LearningCommand::Type::IRChanged,
+                false,
+                pendingLearningMode.load(std::memory_order_acquire),
+                pendingIRGeneration
+            };
+
+            if (!enqueueLearningCommand(cmd))
+            {
+                DBG("[AudioEngine] convolverParamsChanged: command queue overflow");
+            }
+
             requestRebuild(srForRebuild, bsForRebuild);
         }
     }
@@ -2215,6 +2345,11 @@ void AudioEngine::releaseResources()
     // レベルをリセット
     inputLevelLinear.store(0.0f);
     outputLevelLinear.store(0.0f);
+
+    if (noiseShaperLearner)
+        noiseShaperLearner->stopLearning();
+
+    resetLearningControlState();
 
     // ==================================================================
     // 【Issue 2 完全解消】手動MMCSS revertを削除
@@ -2276,6 +2411,8 @@ void AudioEngine::releaseResources()
 //--------------------------------------------------------------
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
+    processLearningCommands();
+
     const juce::ScopedNoDenormals noDenormals;
 
     // 入力検証 (Input Validation)
@@ -3769,7 +3906,18 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
     {
         noiseShaperType.store(type);
         if (type != NoiseShaperType::Adaptive9thOrder)
+        {
             stopNoiseShaperLearning();
+        }
+        else
+        {
+            if (noiseShaperLearner)
+                noiseShaperLearner->stopLearning();
+
+            noiseShaperLearner = std::make_unique<NoiseShaperLearner>(*this, audioCaptureQueue);
+            noiseShaperLearner->setLearningMode(pendingLearningMode.load(std::memory_order_acquire));
+            resetLearningControlState();
+        }
 
         juce::String typeName = "Psychoacoustic";
         if (type == NoiseShaperType::Fixed4Tap)

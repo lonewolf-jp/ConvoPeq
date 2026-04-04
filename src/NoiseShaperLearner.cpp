@@ -56,85 +56,48 @@ NoiseShaperLearner::~NoiseShaperLearner()
 
 void NoiseShaperLearner::startLearning(bool resume)
 {
-    if (isRunning())
-        return;
+    // 前回セッション残骸のクリーンアップ
+    if (isRunning() || workerThread.joinable() || !workerThreadFinished.load(std::memory_order_acquire))
+    {
+        stopLearning();
+        if (workerThread.joinable())
+            workerThread.join();
+    }
+
+    // 全フラグを明示リセット
+    workerThreadFinished.store(true, std::memory_order_release);
+    pendingRestart.store(false, std::memory_order_release);
+    startRequested.store(false, std::memory_order_release);
+    stopRequested.store(false, std::memory_order_release);
+    errorMessage.store(nullptr, std::memory_order_release);
 
     bool expectedStartRequested = false;
     if (!startRequested.compare_exchange_strong(expectedStartRequested, true,
                                                 std::memory_order_acq_rel,
-                                                std::memory_order_acquire))
+                                                std::memory_order_relaxed))
     {
-        DBG("[NoiseShaperLearner] startLearning already requested or running");
         return;
     }
 
-    stopRequested.store(true, std::memory_order_release);
-    {
-        const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
-        evaluationWorkersShouldExit = true;
-    }
-    evaluationDispatchCv.notify_all();
-
-    if (workerThread.joinable() && !workerThreadFinished.load(std::memory_order_acquire))
-    {
-        bool expected = false;
-        if (pendingRestart.compare_exchange_strong(expected, true,
-                                                    std::memory_order_acq_rel,
-                                                    std::memory_order_relaxed))
-        {
-            pendingResume.store(resume, std::memory_order_release);
-            juce::WeakReference<NoiseShaperLearner> weakSelf(this);
-            juce::MessageManager::callAsync([weakSelf, resume]() mutable
-            {
-                if (auto* self = weakSelf.get())
-                {
-                    self->pendingRestart.store(false, std::memory_order_release);
-                    self->startRequested.store(false, std::memory_order_release);
-                    self->startLearning(resume);
-                }
-            });
-        }
-        else
-        {
-            startRequested.store(false, std::memory_order_release);
-        }
-        return;
-    }
-
-    pendingRestart.store(false, std::memory_order_release);
-    if (workerThread.joinable())
-        workerThread.join();
-
-    stopRequested.store(false, std::memory_order_release);
     pendingResume.store(resume, std::memory_order_release);
     workerThreadFinished.store(false, std::memory_order_release);
 
-    if (!resume)
-    {
-        progress.iteration.store(0, std::memory_order_relaxed);
-        progress.segmentCount.store(0, std::memory_order_relaxed);
-        progress.bestScore.store(0.0, std::memory_order_relaxed);
-        progress.latestScore.store(0.0, std::memory_order_relaxed);
-        progress.elapsedPlaybackSeconds.store(0.0, std::memory_order_relaxed);
-        progress.currentPhase.store(1, std::memory_order_relaxed);
-        accumulatedPlaybackSeconds = 0.0;
-        currentPhase = 1;
-        historyCount.store(0, std::memory_order_release);
-        {
-            const std::scoped_lock<std::mutex> lock(historyMutex);
-            bestScoreHistory.fill(0.0);
-            historyHead = 0;
-        }
-    }
-    else
-    {
-        accumulatedPlaybackSeconds = progress.elapsedPlaybackSeconds.load(std::memory_order_relaxed);
-        currentPhase = progress.currentPhase.load(std::memory_order_relaxed);
-    }
-
     progress.status.store(Status::WaitingForAudio, std::memory_order_release);
-    errorMessage.store(nullptr, std::memory_order_release);
+    progress.iteration.store(0, std::memory_order_relaxed);
+    progress.segmentCount.store(0, std::memory_order_relaxed);
+    progress.bestScore.store(0.0, std::memory_order_relaxed);
+    progress.latestScore.store(0.0, std::memory_order_relaxed);
+    progress.elapsedPlaybackSeconds.store(0.0, std::memory_order_relaxed);
+    progress.currentPhase.store(1, std::memory_order_relaxed);
+    accumulatedPlaybackSeconds = 0.0;
+    currentPhase = 1;
     segmentBuffer.clear();
+    historyCount.store(0, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(historyMutex);
+        bestScoreHistory.fill(0.0);
+        historyHead = 0;
+    }
 
     activeMode = pendingMode;
     progress.learningMode.store(static_cast<int>(activeMode), std::memory_order_relaxed);
@@ -145,22 +108,38 @@ void NoiseShaperLearner::startLearning(bool resume)
     {
         workerThread = std::thread(&NoiseShaperLearner::workerThreadMain, this);
     }
-    catch (...)
+    catch (const std::exception& e)
     {
-        startRequested.store(false, std::memory_order_release);
+        DBG("[NoiseShaperLearner] failed to start worker thread: " << e.what());
         errorMessage.store("Failed to start learning thread", std::memory_order_release);
         progress.status.store(Status::Error, std::memory_order_release);
+        startRequested.store(false, std::memory_order_release);
+        workerThreadFinished.store(true, std::memory_order_release);
+    }
+    catch (...)
+    {
+        errorMessage.store("Unknown error starting worker thread", std::memory_order_release);
+        progress.status.store(Status::Error, std::memory_order_release);
+        startRequested.store(false, std::memory_order_release);
+        workerThreadFinished.store(true, std::memory_order_release);
     }
 }
 
 void NoiseShaperLearner::stopLearning()
 {
     stopRequested.store(true, std::memory_order_release);
-    evaluationDispatchCv.notify_all();
-    startRequested.store(false, std::memory_order_release);
+    stopEvaluationWorkers();
+    if (workerThread.joinable())
+        workerThread.join();
 
-    if (progress.status.load(std::memory_order_acquire) != Status::Error)
-        progress.status.store(Status::Idle, std::memory_order_release);
+    workerThreadFinished.store(true, std::memory_order_release);
+    startRequested.store(false, std::memory_order_release);
+    pendingRestart.store(false, std::memory_order_release);
+    pendingResume.store(false, std::memory_order_release);
+    progress.status.store(Status::Idle, std::memory_order_release);
+    errorMessage.store(nullptr, std::memory_order_release);
+
+    evaluationDispatchCv.notify_all();
 }
 
 void NoiseShaperLearner::setLearningMode(LearningMode mode) noexcept
@@ -394,6 +373,20 @@ void NoiseShaperLearner::startEvaluationWorkers()
     if (activeAuxEvaluationWorkerCount <= 0)
         return;
 
+    // 既存ワーカーを完全終了
+    {
+        const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
+        evaluationWorkersShouldExit = true;
+    }
+    evaluationDispatchCv.notify_all();
+
+    for (int workerIndex = 1; workerIndex < activeEvaluationWorkerCount; ++workerIndex)
+    {
+        auto& slot = evaluationWorkers[static_cast<size_t>(workerIndex)];
+        if (slot.thread.joinable())
+            slot.thread.join();
+    }
+
     {
         const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
         evaluationWorkersShouldExit = false;
@@ -404,10 +397,23 @@ void NoiseShaperLearner::startEvaluationWorkers()
     for (int workerIndex = 1; workerIndex < activeEvaluationWorkerCount; ++workerIndex)
     {
         auto& slot = evaluationWorkers[static_cast<size_t>(workerIndex)];
-        if (slot.thread.joinable())
-            slot.thread.join();
-
-        slot.thread = std::thread(&NoiseShaperLearner::evaluationWorkerMain, this, workerIndex);
+        try
+        {
+            slot.thread = std::thread(&NoiseShaperLearner::evaluationWorkerMain, this, workerIndex);
+        }
+        catch (const std::exception& e)
+        {
+            DBG("[NoiseShaperLearner] failed to start evaluation worker: " << e.what());
+            errorMessage.store("Failed to start evaluation worker", std::memory_order_release);
+            progress.status.store(Status::Error, std::memory_order_release);
+            break;
+        }
+        catch (...)
+        {
+            errorMessage.store("Unknown error starting evaluation worker", std::memory_order_release);
+            progress.status.store(Status::Error, std::memory_order_release);
+            break;
+        }
     }
 }
 
@@ -528,6 +534,9 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
                                            int& bestCandidateIndex,
                                            double& bestCandidateScore)
 {
+    if (stopRequested.load(std::memory_order_acquire))
+        return 0;
+
     nextEvaluationCandidateIndex.store(0, std::memory_order_seq_cst);
 
     {
@@ -570,6 +579,9 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
     const int numElitesToReevaluate = std::min(3, evaluatedCandidates);
     for (int i = 0; i < numElitesToReevaluate; ++i)
     {
+        if (stopRequested.load(std::memory_order_acquire))
+            break;
+
         const int idx = sortedIndices[i];
         // Use a different context or just re-run (if segments were randomized, this would be more effective)
         // For now, we just re-run to ensure stability.
@@ -580,6 +592,9 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
     // Final pass to find the best
     for (int populationIndex = 0; populationIndex < evaluatedCandidates; ++populationIndex)
     {
+        if (stopRequested.load(std::memory_order_acquire))
+            break;
+
         const double score = candidateFitness[populationIndex];
         if (score < bestCandidateScore)
         {
@@ -604,7 +619,14 @@ void NoiseShaperLearner::workerThreadMain()
     {
         progress.status.store(Status::WaitingForAudio, std::memory_order_release);
 
-        startEvaluationWorkers();
+        try
+        {
+            startEvaluationWorkers();
+        }
+        catch (...)
+        {
+            // 後処理で一貫して終了させる
+        }
         engine.pinCurrentThreadToNoiseLearnerCoreIfNeeded();
 
         SessionSignature activeSession = captureSessionSignature();

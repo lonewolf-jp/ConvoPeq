@@ -44,6 +44,9 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
 
     startButton.onClick = [this]
     {
+        if (audioEngine.isNoiseShaperLearning())
+            return;
+
         NoiseShaperLearner::LearningMode mode = NoiseShaperLearner::LearningMode::Short;
         switch (modeComboBox.getSelectedId())
         {
@@ -66,6 +69,9 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
 
     resumeButton.onClick = [this]
     {
+        if (audioEngine.isNoiseShaperLearning())
+            return;
+
         NoiseShaperLearner::LearningMode mode = NoiseShaperLearner::LearningMode::Short;
         switch (modeComboBox.getSelectedId())
         {
