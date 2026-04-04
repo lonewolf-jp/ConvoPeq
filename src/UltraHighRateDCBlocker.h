@@ -38,7 +38,7 @@ private:
     alignas(64) double m_state[2] = {0.0, 0.0};
     // 各セクションの係数（α = 1 - exp(-ω)）
     double m_alpha[2] = {1.0e-6, 1.0e-6};
-    
+
     // 位相分散率（内部固定・外部から変更不可）
     static constexpr double INTERNAL_SPREAD = 0.1;
 
@@ -99,10 +99,10 @@ public:
         {
             const double fc = cutoffHz * ratios[i];
             const double omega = 2.0 * juce::MathConstants<double>::pi * fc / sampleRate;
-            
+
             // 小値域での桁落ち防止に std::expm1() を使用
             double alpha = -std::expm1(-omega);  // = 1 - exp(-omega)
-            
+
             // 係数の有効範囲チェック（防御的プログラミング）
             // alpha ∈ (0, 1) であることが 1 次 IIR の安定条件
             if (!std::isfinite(alpha) || alpha <= 0.0 || alpha >= 1.0)
@@ -158,7 +158,7 @@ public:
     void process(double* data, int numSamples) noexcept
     {
         if (data == nullptr || numSamples <= 0) return;
-        
+
         // 状態変数をローカルにコピー（キャッシュ最適化）
         double state0 = m_state[0];
         double state1 = m_state[1];
@@ -191,6 +191,16 @@ public:
         m_state[1] = isFiniteAndBelowThresholdMask(state1, 1.0e15) ? state1 : 0.0;
     }
 
+    // ステレオ同時処理。内部状態はインスタンスごとに独立しているため、
+    // 片方をL、もう片方をRとして2インスタンスで運用する前提。
+    void processStereo(double* dataL, double* dataR, int numSamples, UltraHighRateDCBlocker& right) noexcept
+    {
+        if (dataL != nullptr)
+            process(dataL, numSamples);
+        if (dataR != nullptr)
+            right.process(dataR, numSamples);
+    }
+
     //==========================================================================
     // 状態取得（テスト・デバッグ用）
     //==========================================================================
@@ -199,7 +209,7 @@ public:
         if (section < 0 || section >= 2) return 0.0;
         return m_state[section];
     }
-    
+
     double getAlpha(int section) const noexcept
     {
         if (section < 0 || section >= 2) return 0.0;

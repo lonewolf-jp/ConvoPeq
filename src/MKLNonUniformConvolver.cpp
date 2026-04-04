@@ -766,6 +766,7 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
             for (; k < vEnd8; k += 8)
             {
                 const __m256d h0 = _mm256_load_pd(m_directIRRev + k);
+                // x is m_directWindow + n, and n advances by 1 sample, so alignment is not guaranteed here.
                 const __m256d x0 = _mm256_loadu_pd(x + k);
                 const __m256d h1 = _mm256_load_pd(m_directIRRev + k + 4);
                 const __m256d x1 = _mm256_loadu_pd(x + k + 4);
@@ -1354,11 +1355,17 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
 #if defined(__AVX2__)
         int i = 0;
         const int vEnd = (n / 4) * 4;
+        const bool aligned = ((reinterpret_cast<std::uintptr_t>(dst) & static_cast<std::uintptr_t>(31)) == 0)
+            && ((reinterpret_cast<std::uintptr_t>(src) & static_cast<std::uintptr_t>(31)) == 0);
+
         for (; i < vEnd; i += 4)
         {
-            const __m256d a = _mm256_loadu_pd(dst + i);
-            const __m256d b = _mm256_loadu_pd(src + i);
-            _mm256_storeu_pd(dst + i, _mm256_add_pd(a, b));
+            const __m256d a = aligned ? _mm256_load_pd(dst + i) : _mm256_loadu_pd(dst + i);
+            const __m256d b = aligned ? _mm256_load_pd(src + i) : _mm256_loadu_pd(src + i);
+            if (aligned)
+                _mm256_store_pd(dst + i, _mm256_add_pd(a, b));
+            else
+                _mm256_storeu_pd(dst + i, _mm256_add_pd(a, b));
         }
         for (; i < n; ++i)
             dst[i] += src[i];

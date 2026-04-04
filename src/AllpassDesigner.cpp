@@ -79,9 +79,13 @@ DesignResult AllpassDesigner::designWithCMAES(
     // 周波数重み（対数周波数均等に近い設計、低域重視しすぎない）
     std::vector<double, convo::MKLAllocator<double>> omega(freq_hz.size());
     std::vector<double, convo::MKLAllocator<double>> weight(freq_hz.size());
+    std::vector<double, convo::MKLAllocator<double>> cosOmega(freq_hz.size());
+    std::vector<double, convo::MKLAllocator<double>> sinOmega(freq_hz.size());
     double weightSum = 0.0;
     for (size_t i = 0; i < freq_hz.size(); ++i) {
         omega[i] = 2.0 * juce::MathConstants<double>::pi * freq_hz[i] / sampleRate;
+        cosOmega[i] = std::cos(omega[i]);
+        sinOmega[i] = std::sin(omega[i]);
         weight[i] = 1.0 / std::sqrt(freq_hz[i] + 1.0);
         weightSum += weight[i];
     }
@@ -92,17 +96,32 @@ DesignResult AllpassDesigner::designWithCMAES(
         // 現在の候補から各セクションの (ρ, θ) を計算
         std::vector<double> rho_list(config.numSections);
         std::vector<double> theta_list(config.numSections);
+        std::vector<double> cosTheta(config.numSections);
+        std::vector<double> sinTheta(config.numSections);
         double polePenalty = 0.0;
         for (int s = 0; s < config.numSections; ++s) {
             rho_list[s] = unconstrainedToRho(x[2*s]);
             theta_list[s] = unconstrainedToTheta(x[2*s+1]);
+            cosTheta[s] = std::cos(theta_list[s]);
+            sinTheta[s] = std::sin(theta_list[s]);
             polePenalty += std::pow(rho_list[s], 4.0);
         }
         double error = 0.0;
         for (size_t i = 0; i < freq_hz.size(); ++i) {
             double tau_sum = 0.0;
+            const double cw = cosOmega[i];
+            const double sw = sinOmega[i];
             for (int s = 0; s < config.numSections; ++s) {
-                tau_sum += sectionGroupDelayRhoTheta(rho_list[s], theta_list[s], omega[i], sampleRate);
+                const double rho = rho_list[s];
+                const double rho2 = rho * rho;
+                const double termNum = 1.0 - rho2;
+                const double cosMinus = cw * cosTheta[s] + sw * sinTheta[s];
+                const double cosPlus = cw * cosTheta[s] - sw * sinTheta[s];
+                const double denom1 = 1.0 - 2.0 * rho * cosMinus + rho2;
+                const double denom2 = 1.0 - 2.0 * rho * cosPlus + rho2;
+                const double eps = 1e-12 * (1.0 + rho2);
+                if (denom1 > eps) tau_sum += termNum / denom1;
+                if (denom2 > eps) tau_sum += termNum / denom2;
             }
             const double diff = tau_sum - target_group_delay_samples[i];
             error += weight[i] * diff * diff;

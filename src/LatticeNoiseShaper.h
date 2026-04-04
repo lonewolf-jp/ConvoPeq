@@ -8,6 +8,11 @@
 #include <immintrin.h>
 #include "DspNumericPolicy.h"
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4324)
+#endif
+
 class LatticeNoiseShaper
 {
 public:
@@ -46,7 +51,7 @@ public:
     {
         for (auto& channelState : states)
             juce::FloatVectorOperations::clear(channelState.data(), kOrder);
-        
+
         ramp.samplesRemaining = 0;
     }
 
@@ -59,7 +64,7 @@ public:
 
         for (int i = limit; i < kOrder; ++i)
             coeffs[static_cast<size_t>(i)] = 0.0;
-        
+
         ramp.current = coeffs;
         ramp.target = coeffs;
         ramp.samplesRemaining = 0;
@@ -205,7 +210,6 @@ private:
 
     inline void stepRampCurrent() noexcept
     {
-#if defined(__AVX2__) || defined(_M_AVX2)
         double* current = ramp.current.data();
         const double* delta = ramp.delta.data();
 
@@ -218,17 +222,13 @@ private:
         _mm256_storeu_pd(current + 4, _mm256_add_pd(cur1, del1));
 
         current[8] += delta[8];
-#else
-        for (int c = 0; c < kOrder; ++c)
-            ramp.current[static_cast<size_t>(c)] += ramp.delta[static_cast<size_t>(c)];
-#endif
     }
 
     inline void clampStateSIMD(double* state) noexcept
     {
         const __m256d limit = _mm256_set1_pd(kStateLimit);
         const __m256d negLimit = _mm256_set1_pd(-kStateLimit);
-        
+
         // kOrder is 9. 9 = 4 + 4 + 1.
         __m256d v0 = _mm256_loadu_pd(state);
         v0 = _mm256_min_pd(v0, limit);
@@ -297,7 +297,6 @@ private:
                                   const double* activeCoeffs) const noexcept
     {
         const double* state = channelState.data();
-#if defined(__AVX2__) || defined(_M_AVX2)
         __m256d v0 = _mm256_loadu_pd(state);
         __m256d c0 = _mm256_loadu_pd(activeCoeffs);
         __m256d vSum = _mm256_mul_pd(v0, c0);
@@ -315,12 +314,6 @@ private:
 
         feedback += state[8] * activeCoeffs[8];
         return feedback;
-#else
-        double feedback = 0.0;
-        for (int i = 0; i < kOrder; ++i)
-            feedback += activeCoeffs[i] * state[i];
-        return feedback;
-#endif
     }
 
     inline void advanceState(std::array<double, kOrder>& channelState,
@@ -363,8 +356,8 @@ private:
         return quantized;
     }
 
-    std::array<double, kOrder> coeffs {};
-    std::array<std::array<double, kOrder>, kNumChannels> states {};
+    alignas(64) std::array<double, kOrder> coeffs {};
+    alignas(64) std::array<std::array<double, kOrder>, kNumChannels> states {};
     Xoshiro256State rngState[kNumChannels] = {
         {{ 0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL, 0x0123456789ABCDEFULL, 0xEFCDAB8967452301ULL }},
         {{ 0x89ABCDEF01234567ULL, 0x76543210FEDCBA98ULL, 0xABCDEF0123456789ULL, 0x67452301EFCDAB89ULL }}
@@ -374,3 +367,7 @@ private:
     double scale = 1.0;
     double invScale = 1.0;
 };
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif

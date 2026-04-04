@@ -8,6 +8,7 @@
 #include <limits>
 #include <numeric>
 #include <vector>
+#include <mkl_vml.h>
 #include <xmmintrin.h>  // _MM_SET_FLUSH_ZERO_MODE
 #include <pmmintrin.h>  // _MM_SET_DENORMALS_ZERO_MODE
 
@@ -516,7 +517,22 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
         return;
 
     auto& context = evaluationWorkers[static_cast<size_t>(workerIndex)].context;
-    double parcor[CmaEsOptimizer::kDim] = {};
+    alignas(64) double mappedPopulation[CmaEsOptimizer::kPopulation][CmaEsOptimizer::kDim] = {};
+
+    {
+        constexpr int totalCoeffs = CmaEsOptimizer::kPopulation * CmaEsOptimizer::kDim;
+        alignas(64) double tanhBuffer[totalCoeffs] = {};
+        vdTanh(totalCoeffs,
+               reinterpret_cast<const double*>(candidatePopulation),
+               tanhBuffer);
+
+        const double safetyMargin = settings.coeffSafetyMargin.load(std::memory_order_relaxed);
+        for (int p = 0; p < CmaEsOptimizer::kPopulation; ++p)
+            for (int d = 0; d < CmaEsOptimizer::kDim; ++d)
+                mappedPopulation[p][d] = LatticeNoiseShaper::clampCoeff(
+                    tanhBuffer[p * CmaEsOptimizer::kDim + d],
+                    safetyMargin);
+    }
 
     while (!stopRequested.load(std::memory_order_acquire))
     {
@@ -524,8 +540,10 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
         if (populationIndex >= CmaEsOptimizer::kPopulation)
             break;
 
-        CmaEsOptimizer::toParcor(candidatePopulation[populationIndex], parcor);
-        const double score = evaluateCandidate(context, parcor, numSegments, evaluationBitDepth);
+        const double score = evaluateCandidateMapped(context,
+                                                     mappedPopulation[populationIndex],
+                                                     numSegments,
+                                                     evaluationBitDepth);
         candidateFitness[populationIndex] = score;
         progress.processCount.fetch_add(1, std::memory_order_release);
     }
@@ -1010,24 +1028,32 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
 {
     juce::ScopedNoDenormals noDenormals;
 
-    // Map unconstrained CMA-ES parameters to reflection coefficients using tanh
     std::array<double, kOrder> mappedCoeffs;
     for (int i = 0; i < kOrder; ++i)
     {
         const double k = std::tanh(candidateCoefficients[i]);
-        // 【追加】安全マージンの適用
         mappedCoeffs[static_cast<size_t>(i)] = LatticeNoiseShaper::clampCoeff(k, settings.coeffSafetyMargin.load());
     }
+
+    return evaluateCandidateMapped(context, mappedCoeffs.data(), numSegments, evaluationBitDepth);
+}
+
+double NoiseShaperLearner::evaluateCandidateMapped(EvaluationContext& context,
+                                                   const double* mappedCoefficients,
+                                                   int numSegments,
+                                                   int evaluationBitDepth) noexcept
+{
+    juce::ScopedNoDenormals noDenormals;
 
     // 【追加】安定性チェック（有効な場合）
     if (settings.enableStabilityCheck.load())
     {
-        if (!LatticeNoiseShaper::isStable(mappedCoeffs.data(), kOrder))
+        if (!LatticeNoiseShaper::isStable(mappedCoefficients, kOrder))
             return 1e18; // 不安定な場合は巨大なペナルティを返す
     }
 
     context.shaper.prepare(evaluationBitDepth);
-    context.shaper.setCoefficients(mappedCoeffs.data(), kOrder);
+    context.shaper.setCoefficients(mappedCoefficients, kOrder);
 
     double totalWeightedScore = 0.0;
     double totalWeight = 0.0;

@@ -28,7 +28,7 @@ namespace
     static constexpr std::array<double, convo::Fixed15TapNoiseShaper::ORDER> kFixed15TapNoiseShaperTunedCoeffs
     {
         // 15th-order noise shaper coefficients (psychoacoustically optimized)
-        2.033, -2.165, 1.959, -1.590, 1.221, -0.886, 0.604, -0.389, 0.235, -0.132, 0.068, -0.031, 0.012, -0.004, 0.001
+        2.033, -2.165, 1.959, -1.590, 1.221, -0.886, 0.604, -0.389, 0.235, -0.132, 0.068, -0.031, 0.012, -0.004, 0.001, 0.0
     };
 
     static constexpr std::array<double, kAdaptiveNoiseShaperOrder> kDefaultAdaptiveNoiseShaperCoeffs
@@ -108,7 +108,6 @@ namespace
                 block.adaptiveCoeffBankIndex = adaptiveCoeffBankIndex;
                 block.sessionId = captureSessionId;
 
-#if defined(__AVX2__) || defined(_M_AVX2)
                 const int simdCount = currentBlockSize & ~3;
                 int i = 0;
 
@@ -128,10 +127,6 @@ namespace
                 }
                 for (; i < currentBlockSize; ++i)
                     block.R[i] = srcR[i];
-#else
-                std::memcpy(block.L, srcL, static_cast<size_t>(currentBlockSize) * sizeof(double));
-                std::memcpy(block.R, srcR, static_cast<size_t>(currentBlockSize) * sizeof(double));
-#endif
             });
         }
     }
@@ -216,7 +211,6 @@ namespace
 
     inline void scaleBlockFallback(double* data, int numSamples, double gain) noexcept
     {
-#if defined(__AVX2__)
         int i = 0;
         const int vEnd = numSamples / 4 * 4;
         const __m256d vGain = _mm256_set1_pd(gain);
@@ -227,10 +221,6 @@ namespace
         }
         for (; i < numSamples; ++i)
             data[i] *= gain;
-#else
-        for (int i = 0; i < numSamples; ++i)
-            data[i] *= gain;
-#endif
     }
 
     // AVX2 helper to calculate magnitude squared for a biquad over an array of complex frequencies
@@ -1270,7 +1260,6 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
 
     if (outMagnitudesL)
     {
-#if defined(__AVX2__)
         int j = 0;
         const int vEndSqrt = numPoints / 8 * 8;
         const __m256 vZero = _mm256_setzero_ps();
@@ -1282,17 +1271,12 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
         }
         for (; j < numPoints; ++j)
             outMagnitudesL[j] = std::sqrt(std::max(0.0f, totalMagSqL[j]));
-#else
-        for (int j = 0; j < numPoints; ++j)
-            outMagnitudesL[j] = std::sqrt(std::max(0.0f, totalMagSqL[j]));
-#endif
         for (int k = 0; k < numPoints; ++k)
             if (!std::isfinite(outMagnitudesL[k])) outMagnitudesL[k] = 1.0f;
     }
 
     if (outMagnitudesR)
     {
-#if defined(__AVX2__)
         int j = 0;
         const int vEndSqrt = numPoints / 8 * 8;
         const __m256 vZero = _mm256_setzero_ps();
@@ -1304,10 +1288,6 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
         }
         for (; j < numPoints; ++j)
             outMagnitudesR[j] = std::sqrt(std::max(0.0f, totalMagSqR[j]));
-#else
-        for (int j = 0; j < numPoints; ++j)
-            outMagnitudesR[j] = std::sqrt(std::max(0.0f, totalMagSqR[j]));
-#endif
         for (int k = 0; k < numPoints; ++k)
             if (!std::isfinite(outMagnitudesR[k])) outMagnitudesR[k] = 1.0f;
     }
@@ -3414,9 +3394,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     double* dataL = (numChannels > 0) ? alignedL.get() : nullptr;
     double* dataR = (numChannels > 1) ? alignedR.get() : nullptr;
 
-    dcBlockerL.process(dataL, numSamples);
-    if (dataR != nullptr)
-        dcBlockerR.process(dataR, numSamples);
+    dcBlockerL.processStereo(dataL, dataR, numSamples, dcBlockerR);
 
     {
         const __m256d vInf = _mm256_set1_pd(1.0e300);
@@ -3519,12 +3497,36 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
         }
     }
 
-    for (int sample = 0; sample < numSamples; ++sample)
-        buffer.setSample(0, sample, juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataL[sample]));
+    {
+        const __m256d vLimit = _mm256_set1_pd(kOutputHeadroom);
+        const __m256d vNegLimit = _mm256_set1_pd(-kOutputHeadroom);
+        int i = 0;
+        const int vEnd = (numSamples / 4) * 4;
+        for (; i < vEnd; i += 4)
+        {
+            __m256d vL = _mm256_loadu_pd(dataL + i);
+            vL = _mm256_min_pd(_mm256_max_pd(vL, vNegLimit), vLimit);
+            _mm256_storeu_pd(dataL + i, vL);
 
-    if (numChannels > 1)
-        for (int sample = 0; sample < numSamples; ++sample)
-            buffer.setSample(1, sample, juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[sample]));
+            if (dataR != nullptr)
+            {
+                __m256d vR = _mm256_loadu_pd(dataR + i);
+                vR = _mm256_min_pd(_mm256_max_pd(vR, vNegLimit), vLimit);
+                _mm256_storeu_pd(dataR + i, vR);
+            }
+        }
+
+        for (; i < numSamples; ++i)
+        {
+            dataL[i] = juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataL[i]);
+            if (dataR != nullptr)
+                dataR[i] = juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[i]);
+        }
+    }
+
+    juce::FloatVectorOperations::copy(buffer.getWritePointer(0, 0), dataL, numSamples);
+    if (numChannels > 1 && dataR != nullptr)
+        juce::FloatVectorOperations::copy(buffer.getWritePointer(1, 0), dataR, numSamples);
 
     for (int channel = numChannels; channel < buffer.getNumChannels(); ++channel)
         buffer.clear(channel, 0, numSamples);

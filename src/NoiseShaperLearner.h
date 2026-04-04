@@ -226,6 +226,10 @@ private:
                              const double* candidateCoefficients,
                              int numSegments,
                              int evaluationBitDepth) noexcept;
+    double evaluateCandidateMapped(EvaluationContext& context,
+                                   const double* mappedCoefficients,
+                                   int numSegments,
+                                   int evaluationBitDepth) noexcept;
     void precomputeMaskingThresholds(LeveledSegment& seg, double sampleRate) noexcept;
     void publishGenerationResult(const double* coeffs, double score, int evaluatedCandidates) noexcept;
     void appendHistoryPoint(double score) noexcept;
