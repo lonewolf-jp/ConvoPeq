@@ -25,6 +25,8 @@ public:
 
     void setParams(const Params& p) noexcept { params = p; }
     void setSeed(uint64_t seed) { rng.seed(static_cast<std::mt19937::result_type>(seed)); }
+    /** 初期σを外部から設定する（initFromParcor() の後に呼ぶこと） */
+    void setSigma(double s) noexcept { sigma = s; }
     void initFromParcor(const double* initialMean);
     void sample(std::vector<std::vector<double>>& candidates);
     void update(const std::vector<std::vector<double>>& candidates,

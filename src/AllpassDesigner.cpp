@@ -31,17 +31,19 @@ double AllpassDesigner::sectionGroupDelay(double f0, double gain, double omega, 
 }
 
 //==============================================================================
-// 無制約変数 → 物理パラメータ変換（高Q領域改善版）
+// 無制約変数 → 物理パラメータ変換
 //==============================================================================
 static inline double unconstrainedToRho(double x) {
-    // ρ 上限を 0.98 に制限して極端な高Q解を避ける。
-    return 0.98 * (1.0 - std::exp(-x * x));
+    // 単調増加写像 R → (0, 0.98)。x=0 で ρ=0.49。
+    // 旧実装は偶関数（rho(-x)==rho(x)）で二重縮退が生じていたため sigmoid に変更。
+    return 0.98 / (1.0 + std::exp(-x));
 }
 
 static inline double unconstrainedToTheta(double x) {
-    return juce::jlimit(-juce::MathConstants<double>::pi,
-                        juce::MathConstants<double>::pi,
-                        x);
+    // 単調増加写像 R → (0, π)。x=0 で θ=π/2。
+    // 群遅延式は cos(ω-θ)+cos(ω+θ) の対称性から θ ∈ (0,π) で充足。
+    // 旧実装の ±π ハードクリップによるコスト関数不連続を解消。
+    return juce::MathConstants<double>::pi / (1.0 + std::exp(-x));
 }
 
 //==============================================================================
@@ -69,12 +71,30 @@ DesignResult AllpassDesigner::designWithCMAES(
     }
 
     // 初期平均値（無制約空間）
+    // ρ: sigmoid(0) = 0.49 を起点に全セクションで共通
+    // θ: 20Hz〜20kHz を対数均等に各セクションへ分散配置
+    //    （旧実装では全セクション θ=0 (DC集中) で探索効率が著しく低下していた）
     std::vector<double> initialMean(D, 0.0);
-    for (int i = 0; i < config.numSections; ++i) {
-        initialMean[2*i] = 1.0;       // ρ ≈ 0.63
-        initialMean[2*i+1] = 0.0;     // θ = 0
+    {
+        const double logMin = std::log(config.minFreqHz);
+        const double logMax = std::log(config.maxFreqHz);
+        for (int i = 0; i < config.numSections; ++i) {
+            initialMean[2*i] = 0.0;  // unconstrainedToRho(0) = 0.49
+
+            // θ = π * sigmoid(x) なので x = logit(θ/π)
+            const double freqHz  = std::exp(logMin + (logMax - logMin) *
+                                            (i + 0.5) / config.numSections);
+            const double theta   = 2.0 * juce::MathConstants<double>::pi * freqHz / sampleRate;
+            const double tNorm   = std::clamp(theta / juce::MathConstants<double>::pi, 1e-6, 1.0 - 1e-6);
+            initialMean[2*i+1]   = std::log(tNorm / (1.0 - tNorm));  // logit
+        }
     }
     optimizer.initFromParcor(initialMean.data());
+
+    // cmaesInitialSigma を初期σに正しく反映
+    // （旧実装では sigmaMin/Max の調整のみで initFromParcor の σ=0.12 に上書きされていた）
+    if (config.cmaesInitialSigma > 0.0)
+        optimizer.setSigma(config.cmaesInitialSigma);
 
     // 周波数重み（対数周波数均等に近い設計、低域重視しすぎない）
     std::vector<double, convo::MKLAllocator<double>> omega(freq_hz.size());
@@ -91,20 +111,18 @@ DesignResult AllpassDesigner::designWithCMAES(
     }
     for (auto& w : weight) w /= weightSum;
 
-    // 目的関数：全セクションの群遅延を合計してから誤差を計算（致命的欠陥修正）
+    // 目的関数：全セクションの群遅延を合計してから誤差を計算
     auto costFunc = [&](const std::vector<double>& x) -> double {
         // 現在の候補から各セクションの (ρ, θ) を計算
         std::vector<double> rho_list(config.numSections);
         std::vector<double> theta_list(config.numSections);
         std::vector<double> cosTheta(config.numSections);
         std::vector<double> sinTheta(config.numSections);
-        double polePenalty = 0.0;
         for (int s = 0; s < config.numSections; ++s) {
-            rho_list[s] = unconstrainedToRho(x[2*s]);
+            rho_list[s]   = unconstrainedToRho(x[2*s]);
             theta_list[s] = unconstrainedToTheta(x[2*s+1]);
-            cosTheta[s] = std::cos(theta_list[s]);
-            sinTheta[s] = std::sin(theta_list[s]);
-            polePenalty += std::pow(rho_list[s], 4.0);
+            cosTheta[s]   = std::cos(theta_list[s]);
+            sinTheta[s]   = std::sin(theta_list[s]);
         }
         double weightedSquaredError = 0.0;
         for (size_t i = 0; i < freq_hz.size(); ++i) {
@@ -112,55 +130,24 @@ DesignResult AllpassDesigner::designWithCMAES(
             const double cw = cosOmega[i];
             const double sw = sinOmega[i];
             for (int s = 0; s < config.numSections; ++s) {
-                const double rho = rho_list[s];
+                const double rho  = rho_list[s];
                 const double rho2 = rho * rho;
-                const double termNum = 1.0 - rho2;
+                const double termNum  = 1.0 - rho2;
                 const double cosMinus = cw * cosTheta[s] + sw * sinTheta[s];
-                const double cosPlus = cw * cosTheta[s] - sw * sinTheta[s];
-                const double denom1 = 1.0 - 2.0 * rho * cosMinus + rho2;
-                const double denom2 = 1.0 - 2.0 * rho * cosPlus + rho2;
-                const double eps = 1e-12 * (1.0 + rho2);
+                const double cosPlus  = cw * cosTheta[s] - sw * sinTheta[s];
+                const double denom1   = 1.0 - 2.0 * rho * cosMinus + rho2;
+                const double denom2   = 1.0 - 2.0 * rho * cosPlus  + rho2;
+                const double eps      = 1e-12 * (1.0 + rho2);
                 if (denom1 > eps) tau_sum += termNum / denom1;
                 if (denom2 > eps) tau_sum += termNum / denom2;
             }
             const double diff = tau_sum - target_group_delay_samples[i];
             weightedSquaredError += weight[i] * diff * diff;
         }
-        const double rmse = std::sqrt(weightedSquaredError / juce::jmax(1, static_cast<int>(freq_hz.size())));
-
-        // 振幅ペナルティ（|H| = 1 からの偏差に対するソフト制約）
-        double ampError = 0.0;
-        int ampCount = 0;
-        const int step = juce::jmax(1, static_cast<int>(freq_hz.size() / 100));
-        for (size_t i = 0; i < freq_hz.size(); i += static_cast<size_t>(step))
-        {
-            const double o = 2.0 * juce::MathConstants<double>::pi * freq_hz[i] / sampleRate;
-            std::complex<double> totalResp(1.0, 0.0);
-            for (int s = 0; s < config.numSections; ++s)
-            {
-                SecondOrderAllpass sec;
-                sec.rho   = rho_list[s];
-                sec.theta = theta_list[s];
-                totalResp *= sec.response(o);
-            }
-            if (!std::isfinite(totalResp.real()) || !std::isfinite(totalResp.imag()))
-                return 1.0e12;
-
-            const double mag    = std::abs(totalResp);
-            const double magErr = mag - 1.0;
-            ampError += magErr * magErr;
-            ++ampCount;
-        }
-        if (ampCount > 0)
-            ampError = std::sqrt(ampError / static_cast<double>(ampCount));
-
-        static constexpr double kPolePenaltyWeight = 1.0;
-        static constexpr double kAmpPenaltyWeight = 20.0;
-
-        double total = rmse;
-        total += kPolePenaltyWeight * polePenalty;
-        total += kAmpPenaltyWeight * ampError;
-        return total;
+        // weights が sum=1 に正規化済みなので weightedSquaredError は重み付き MSE そのもの
+        // polePenalty（ρを小さくする方向へ働き最適化目標と相反）は除去
+        // 振幅ペナルティ（response() が |H|=1 を保証するため常に≈0）は除去
+        return std::sqrt(weightedSquaredError);
     };
 
     const int lambda = (config.cmaesPopulationSize > 0) ? config.cmaesPopulationSize : 4 * D;
@@ -190,9 +177,12 @@ DesignResult AllpassDesigner::designWithCMAES(
             progressCallback(progress);
         }
 
-        // 早期終了条件：sigma が十分小さい、または改善停滞
+        // 早期終了条件：sigma が十分小さい、十分収束、または改善停滞
         double currentSigma = optimizer.getSigma();
         if (currentSigma < 1e-4) break;
+        // 収束閾値: 重み付き RMSE 1.0サンプル（≈20μs @ 48kHz、5μs @ 192kHz）
+        // 旧値 1e-3 は 0.001サンプル ≈ 5ns @ 192kHz で到達不能だったため修正
+        if (bestFitness < 1.0) break;
 
         const double relImprovement = (prevBestFitness - bestFitness) / (prevBestFitness + 1e-12);
         const double absImprovement = prevBestFitness - bestFitness;

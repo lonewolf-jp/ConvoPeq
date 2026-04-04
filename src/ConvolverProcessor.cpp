@@ -2034,38 +2034,64 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         }
 
         // --- AllpassDesigner の呼び出し ---
-        convo::AllpassDesigner::Config designer_config;
-        designer_config.numSections = 8;
-        designer_config.method = convo::OptimizationMethod::CMAES; // CMA-ES を有効化
-        designer_config.freqPoints = complexSize;
-        designer_config.minFreqHz = 20.0;
-        designer_config.maxFreqHz = sampleRate / 2.0;
-        designer_config.cmaesMaxGenerations = 200;
-        designer_config.cmaesPopulationSize = 64;
-        designer_config.cmaesInitialSigma = 1.0;
+        // 最適化専用周波数点を 256点 対数間隔にサブサンプリング。
+        // 元の complexSize（例: 32769 @ 192kHz/82ms）をそのまま使うと
+        // 1評価あたり 32769×8 ≈ 26万演算 × 100世代×32個 ≈ 83億演算 になり非実用的。
+        // 256点にすると約128倍高速（同等の近似精度は対数間隔で保証される）。
+        static constexpr int kOptimFreqPoints = 256;
 
-        std::vector<double> freq_hz(complexSize);
-        for (int k = 0; k < complexSize; ++k)
-            freq_hz[k] = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
+        // MKLAllocator → 標準アロケータへ変換
+        std::vector<double> targetGroupDelayStd(targetGroupDelay.begin(), targetGroupDelay.end());
+
+        // 対数間隔で 20Hz ～ Nyquist を 256点サンプリングし、元の線形 bin 配列から線形補間
+        std::vector<double> optim_freq_hz(kOptimFreqPoints);
+        std::vector<double> optim_target_gd(kOptimFreqPoints);
+        {
+            const double logMin = std::log(20.0);
+            const double logMax = std::log(sampleRate / 2.0);
+            for (int i = 0; i < kOptimFreqPoints; ++i)
+            {
+                const double f = std::exp(logMin + (logMax - logMin) * i / (kOptimFreqPoints - 1));
+                optim_freq_hz[i] = f;
+                // 線形 bin 配列: freq[k] = k * sampleRate / fftSize → k = f * fftSize / sampleRate
+                const double kReal = f * static_cast<double>(fftSize) / sampleRate;
+                const int k0 = std::clamp(static_cast<int>(kReal), 0, complexSize - 1);
+                const int k1 = std::min(k0 + 1, complexSize - 1);
+                const double t  = kReal - std::floor(kReal);
+                optim_target_gd[i] = (1.0 - t) * targetGroupDelayStd[k0] + t * targetGroupDelayStd[k1];
+            }
+        }
+
+        convo::AllpassDesigner::Config designer_config;
+        designer_config.numSections          = 8;
+        designer_config.method               = convo::OptimizationMethod::CMAES;
+        designer_config.freqPoints           = kOptimFreqPoints;
+        designer_config.minFreqHz            = 20.0;
+        designer_config.maxFreqHz            = sampleRate / 2.0;
+        designer_config.cmaesMaxGenerations  = 100;   // 旧: 200
+        designer_config.cmaesPopulationSize  = 32;    // 旧: 64
+        designer_config.cmaesInitialSigma    = 0.5;
+        designer_config.progressCallback     = progressCallback;
 
         std::vector<convo::SecondOrderAllpass> allpass_sections;
         convo::AllpassDesigner designer;
 
         if (progressCallback) progressCallback(0.1f);
 
-        // [fix4] targetGroupDelay のアロケータ型不一致を解決
-        // MKLAllocator<double> から標準アロケータへ変換
-        std::vector<double> targetGroupDelayStd(targetGroupDelay.begin(), targetGroupDelay.end());
+        // shouldExit を渡して世代ループ中にキャンセルを受け付ける（旧実装では未渡し）
+        bool designSuccess =
+            (designer.designWithCMAES(sampleRate, optim_freq_hz, optim_target_gd,
+                                      designer_config, allpass_sections, shouldExit)
+             == convo::DesignResult::Success);
 
-        bool designSuccess = false;
-        if (designer_config.method == convo::OptimizationMethod::CMAES)
+        // CMA-ES 失敗 / キャンセルされていない場合は Greedy+AdaGrad にフォールバック
+        if (!designSuccess && !(shouldExit && shouldExit()))
         {
-            designer_config.progressCallback = progressCallback;
-            designSuccess = (designer.designWithCMAES(sampleRate, freq_hz, targetGroupDelayStd, designer_config, allpass_sections) == convo::DesignResult::Success);
-        }
-        else
-        {
-            designSuccess = designer.design(sampleRate, freq_hz, targetGroupDelayStd, designer_config, allpass_sections);
+            designer_config.method        = convo::OptimizationMethod::GreedyAdaGrad;
+            designer_config.maxIterations = 50;
+            designer_config.learningRate  = 0.01;
+            designSuccess = designer.design(sampleRate, optim_freq_hz, optim_target_gd,
+                                            designer_config, allpass_sections, shouldExit);
         }
 
         if (progressCallback) progressCallback(0.9f);
@@ -2076,7 +2102,11 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             return {}; // 失敗 → フォールバックへ
         }
 
-        // 全通過フィルタの周波数応答を計算
+        // 全通過フィルタ応答は IR スペクトル乗算のために全 complexSize ビンで計算
+        std::vector<double> freq_hz(complexSize);
+        for (int k = 0; k < complexSize; ++k)
+            freq_hz[k] = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
+
         auto allpass_response = convo::AllpassDesigner::computeResponse(allpass_sections, sampleRate, freq_hz);
 
         // 線形位相 IR のスペクトルに乗算（振幅維持）

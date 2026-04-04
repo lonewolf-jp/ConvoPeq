@@ -111,17 +111,19 @@ void CmaEsOptimizerDynamic::update(const std::vector<std::vector<double>>& candi
     for (int i = 0; i < dim; ++i)
         covariance[i * dim + i] += 1e-9;
 
-    // 簡易的な step-size 適応（次元補正付き）
+    // step-size 適応（次元スケーリング対応版）
+    // cs は Hansen (2016) 推奨の次元依存値。大きな dim でも安定して機能する。
     double stepNorm = 0.0;
     for (int d = 0; d < dim; ++d) {
         double diff = mean[d] - oldMean[d];
         stepNorm += diff * diff;
     }
-    stepNorm = std::sqrt(stepNorm / dim);
+    stepNorm = std::sqrt(stepNorm / static_cast<double>(dim));
     const double expectedStep = sigma * std::sqrt(static_cast<double>(dim));
     const double ratio = stepNorm / (expectedStep + 1e-12);
-    const double cs = 0.3;
-    sigma *= std::exp(cs * (ratio - 1.0));
+    const double cs = std::min(1.0, (2.0 + std::log(static_cast<double>(dim) + 1.0)) /
+                                    (std::sqrt(static_cast<double>(dim)) + 10.0));
+    sigma *= std::exp((cs / (1.0 - cs + 1e-12)) * (ratio - 1.0));
     sigma = std::clamp(sigma, params.sigmaMin, params.sigmaMax);
 }
 
