@@ -106,7 +106,7 @@ DesignResult AllpassDesigner::designWithCMAES(
             sinTheta[s] = std::sin(theta_list[s]);
             polePenalty += std::pow(rho_list[s], 4.0);
         }
-        double error = 0.0;
+        double weightedSquaredError = 0.0;
         for (size_t i = 0; i < freq_hz.size(); ++i) {
             double tau_sum = 0.0;
             const double cw = cosOmega[i];
@@ -124,16 +124,17 @@ DesignResult AllpassDesigner::designWithCMAES(
                 if (denom2 > eps) tau_sum += termNum / denom2;
             }
             const double diff = tau_sum - target_group_delay_samples[i];
-            error += weight[i] * diff * diff;
+            weightedSquaredError += weight[i] * diff * diff;
         }
-        // Patch ④: 振幅ペナルティ（|H| = 1 からの偏差に対するソフト制約）
-        // 16 点の代表周波数で全セクションの複素振幅応答を検査し、1 からの偏差をペナルティとして加算する。
-        // 理論上 |H| = 1 は常に成立するが、数値精度の劣化や極端な ρ/θ 値に対する安全マージンとして機能する。
-        static constexpr int    kAmpCheckPoints   = 16;
-        static constexpr double kAmpPenaltyWeight = 1.0;
-        for (int ci = 0; ci < kAmpCheckPoints; ++ci)
+        const double rmse = std::sqrt(weightedSquaredError / juce::jmax(1, static_cast<int>(freq_hz.size())));
+
+        // 振幅ペナルティ（|H| = 1 からの偏差に対するソフト制約）
+        double ampError = 0.0;
+        int ampCount = 0;
+        const int step = juce::jmax(1, static_cast<int>(freq_hz.size() / 100));
+        for (size_t i = 0; i < freq_hz.size(); i += static_cast<size_t>(step))
         {
-            const double o = juce::MathConstants<double>::pi * ci / (kAmpCheckPoints - 1);
+            const double o = 2.0 * juce::MathConstants<double>::pi * freq_hz[i] / sampleRate;
             std::complex<double> totalResp(1.0, 0.0);
             for (int s = 0; s < config.numSections; ++s)
             {
@@ -147,11 +148,19 @@ DesignResult AllpassDesigner::designWithCMAES(
 
             const double mag    = std::abs(totalResp);
             const double magErr = mag - 1.0;
-            error += kAmpPenaltyWeight * magErr * magErr;
+            ampError += magErr * magErr;
+            ++ampCount;
         }
-        static constexpr double kPolePenaltyWeight = 10.0;
-        error += kPolePenaltyWeight * polePenalty;
-        return error;
+        if (ampCount > 0)
+            ampError = std::sqrt(ampError / static_cast<double>(ampCount));
+
+        static constexpr double kPolePenaltyWeight = 1.0;
+        static constexpr double kAmpPenaltyWeight = 20.0;
+
+        double total = rmse;
+        total += kPolePenaltyWeight * polePenalty;
+        total += kAmpPenaltyWeight * ampError;
+        return total;
     };
 
     const int lambda = (config.cmaesPopulationSize > 0) ? config.cmaesPopulationSize : 4 * D;
@@ -177,7 +186,7 @@ DesignResult AllpassDesigner::designWithCMAES(
 
         // 進捗コールバック
         if (progressCallback) {
-            float progress = 0.5f + 0.25f * static_cast<float>(gen) / config.cmaesMaxGenerations;
+            float progress = 0.2f + 0.6f * static_cast<float>(gen) / juce::jmax(1, config.cmaesMaxGenerations);
             progressCallback(progress);
         }
 
@@ -185,15 +194,21 @@ DesignResult AllpassDesigner::designWithCMAES(
         double currentSigma = optimizer.getSigma();
         if (currentSigma < 1e-4) break;
 
-        const double improvement = (prevBestFitness - bestFitness) / (prevBestFitness + 1e-12);
-        if (improvement < 1e-6) {
-            stagnationCounter++;
-            if (stagnationCounter > 20) break;
-        } else {
-            stagnationCounter = 0;
+        const double relImprovement = (prevBestFitness - bestFitness) / (prevBestFitness + 1e-12);
+        const double absImprovement = prevBestFitness - bestFitness;
+        if (gen > 20) {
+            if (relImprovement < 1e-6 && absImprovement < 1e-2) {
+                stagnationCounter++;
+                if (stagnationCounter >= 15) break;
+            } else {
+                stagnationCounter = 0;
+            }
         }
         prevBestFitness = bestFitness;
     }
+
+    if (progressCallback)
+        progressCallback(0.9f);
 
     sections.clear();
     if (!std::isfinite(bestFitness))

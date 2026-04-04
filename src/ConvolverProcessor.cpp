@@ -1831,9 +1831,12 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhase(ConvolverProce
     if (result.getNumSamples() == 0 && (wasCancelled == nullptr || !*wasCancelled))
     {
         DBG("Allpass design failed, falling back to Phase 1.");
-        return convertToMixedPhaseFallback(linearIR, minimumIR, sampleRate,
+        auto fallbackResult = convertToMixedPhaseFallback(linearIR, minimumIR, sampleRate,
                                            transitionLoHz, transitionHiHz,
                                            tau, shouldExit, wasCancelled);
+        if (fallbackResult.getNumSamples() > 0)
+            if (progressCallback) progressCallback(1.0f);
+        return fallbackResult;
     }
     return result;
 }
@@ -1869,6 +1872,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             it->second.lastUsedTime = juce::Time::getMillisecondCounter();
             if (it->second.ir) {
                 DBG("convertToMixedPhaseAllpass: Cache Hit!");
+                if (progressCallback) progressCallback(1.0f);
                 return *(it->second.ir);
             }
         }
@@ -2011,10 +2015,22 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             const double minGD = *std::min_element(targetGroupDelay.begin(), targetGroupDelay.end());
             if (minGD < 0.0)
             {
-                const double offset = -minGD + 1e-6;
+                const double offset = -minGD + 5.0;
                 for (auto& gd : targetGroupDelay)
                     gd += offset;
             }
+        }
+
+        // 急峻な変化を平滑化して最適化の探索空間を安定化する
+        if (!targetGroupDelay.empty())
+        {
+            std::vector<double, convo::MKLAllocator<double>> smoothed(targetGroupDelay.size(), 0.0);
+            constexpr double alpha = 0.45;
+            smoothed[0] = targetGroupDelay[0];
+            for (size_t i = 1; i < targetGroupDelay.size(); ++i)
+                smoothed[i] = alpha * targetGroupDelay[i] + (1.0 - alpha) * smoothed[i - 1];
+
+            targetGroupDelay.swap(smoothed);
         }
 
         // --- AllpassDesigner の呼び出し ---
@@ -2024,6 +2040,9 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         designer_config.freqPoints = complexSize;
         designer_config.minFreqHz = 20.0;
         designer_config.maxFreqHz = sampleRate / 2.0;
+        designer_config.cmaesMaxGenerations = 200;
+        designer_config.cmaesPopulationSize = 64;
+        designer_config.cmaesInitialSigma = 1.0;
 
         std::vector<double> freq_hz(complexSize);
         for (int k = 0; k < complexSize; ++k)
@@ -2052,7 +2071,10 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         if (progressCallback) progressCallback(0.9f);
 
         if (!designSuccess)
+        {
+            if (progressCallback) progressCallback(1.0f);
             return {}; // 失敗 → フォールバックへ
+        }
 
         // 全通過フィルタの周波数応答を計算
         auto allpass_response = convo::AllpassDesigner::computeResponse(allpass_sections, sampleRate, freq_hz);
@@ -2186,6 +2208,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         owner->evictOldestCacheEntry();
     }
 
+    if (progressCallback) progressCallback(1.0f);
     return mixedIR;
 }
 

@@ -89,10 +89,10 @@ struct AllpassDesignerConfig {
     std::function<void(float)> progressCallback;
 
     AllpassDesignerConfig() {
-        cmaesParams.sigmaMin = 0.01;
-        cmaesParams.sigmaMax = 0.30;
-        cmaesParams.covRetentionTarget = 0.95;
-        cmaesParams.covRetentionStep = 0.005;
+        cmaesParams.sigmaMin = 1e-6;
+        cmaesParams.sigmaMax = 2.0;
+        cmaesParams.covRetentionTarget = 0.98;
+        cmaesParams.covRetentionStep = 0.002;
     }
 };
 

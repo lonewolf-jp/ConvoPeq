@@ -276,6 +276,7 @@ public:
     // 状態取得
     //----------------------------------------------------------
     bool isIRLoaded() const { return rcuSwapper.getState() != nullptr; }
+    bool isLoadingIR() const { return isLoading.load(std::memory_order_acquire); }
     juce::String getIRName() const { return irName; }
     int getIRLength() const { return irLength.load(std::memory_order_acquire); }
     juce::String getLastError() const { return lastError; }

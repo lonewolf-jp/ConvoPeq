@@ -1353,11 +1353,18 @@ void ConvolverControlPanel::updateIRInfo()
         irInfoLabel.setColour(juce::Label::textColourId,
                              juce::Colours::lightgreen);
     }
-    else if (const float progress = convolver.getLoadProgress(); progress > 0.0f && progress < 1.0f)
+    else if (const float progress = convolver.getLoadProgress(); convolver.isLoadingIR() && progress >= 0.0f && progress < 1.0f)
     {
         // 最適化進行中（XMLプリセットロード時も即時反映）
-        const int percent = juce::roundToInt(progress * 100.0f);
-        irInfoLabel.setText("Optimization Progress... " + juce::String(percent) + "%", juce::dontSendNotification);
+        if (progress <= 0.0f)
+        {
+            irInfoLabel.setText("Optimization Progress... (initializing)", juce::dontSendNotification);
+        }
+        else
+        {
+            const int percent = juce::roundToInt(progress * 100.0f);
+            irInfoLabel.setText("Optimization Progress... " + juce::String(percent) + "%", juce::dontSendNotification);
+        }
         irInfoLabel.setColour(juce::Label::textColourId, juce::Colours::orange.withAlpha(0.9f));
         updateWaveformPath();
         return;
