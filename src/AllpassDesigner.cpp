@@ -63,6 +63,9 @@ DesignResult AllpassDesigner::designWithCMAES(
     const int D = 2 * config.numSections;   // (x_rho, x_theta) のペア
     CmaEsOptimizerDynamic optimizer(D);
     optimizer.setParams(config.cmaesParams);
+    if (config.cmaesSeed != 0) {
+        optimizer.setSeed(config.cmaesSeed);
+    }
     if (config.cmaesInitialSigma > 0.0) {
         CmaEsOptimizerDynamic::Params p = config.cmaesParams;
         p.sigmaMin = std::min(p.sigmaMin, config.cmaesInitialSigma);

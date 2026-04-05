@@ -661,12 +661,12 @@ public:
 
                 if (fileLength > MAX_FILE_LENGTH) {
                     result.errorMessage = "IR file is too large (exceeds 2GB samples limit).";
-                    DBG("LoaderThread: " << result.errorMessage);
+                    juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
                     return result;
                 }
                 if (numChannels <= 0) {
                     result.errorMessage = "Invalid channel count in IR file.";
-                    DBG("LoaderThread: " << result.errorMessage);
+                    juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
                     return result;
                 }
 
@@ -675,7 +675,7 @@ public:
                 if (!reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true))
                 {
                     result.errorMessage = "Failed to read audio data from file.";
-                    DBG("LoaderThread: " << result.errorMessage);
+                    juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
                     return result;
                 }
 
@@ -688,7 +688,7 @@ public:
                 if (!tempAlignedBuffer)
                 {
                     result.errorMessage = "Failed to allocate temporary buffer for IR loading.";
-                    DBG("LoaderThread: " << result.errorMessage);
+                    juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
                     return result;
                 }
 
@@ -795,7 +795,7 @@ public:
                     // キャンセルされたか、エラーで0長になった場合
                     if (!checkCancellation(shouldStop, nullptr))
                     {
-                        DBG("LoaderThread: Resampling failed (produced 0 samples or overflow).");
+                        juce::Logger::writeToLog("LoaderThread: Resampling failed (produced 0 samples or overflow).");
                         result.errorMessage = "Resampling failed (unknown error).";
                     }
                     return result;
@@ -837,7 +837,7 @@ public:
                     if (!applyAsymmetricTukey(result.loadedIR.getWritePointer(ch), numSamples))
                     {
                         result.errorMessage = "Failed to allocate Tukey window buffer (Out of Memory).";
-                        DBG("LoaderThread: " << result.errorMessage);
+                        juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
                         return result;
                     }
                 }
@@ -961,7 +961,7 @@ public:
                 }
                 else
                 {
-                    DBG("LoaderThread: IR energy is too low or invalid, skipping Auto Makeup.");
+                    juce::Logger::writeToLog("LoaderThread: IR energy is too low or invalid, skipping Auto Makeup.");
                     result.scaleFactor = 1.0;
                 }
             }
@@ -1113,19 +1113,19 @@ public:
         catch (const std::bad_alloc&)
         {
             result.errorMessage = "IR too large (Out of Memory)";
-            DBG("LoaderThread: " << result.errorMessage);
+            juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
             return result;
         }
         catch (const std::exception& e)
         {
             result.errorMessage = "Error loading IR: " + juce::String(e.what());
-            DBG("LoaderThread: " << result.errorMessage);
+            juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
             return result;
         }
         catch (...)
         {
             result.errorMessage = "Unknown error loading IR";
-            DBG("LoaderThread: " << result.errorMessage);
+            juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
             return result;
         }
     }
@@ -1311,7 +1311,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 }
                 else
                 {
-                    DBG("ConvolverProcessor::prepareToPlay: NUC re-init failed (MKL alloc?). Keeping existing engine.");
+                    juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: NUC re-init failed (MKL alloc?). Keeping existing engine.");
                     newConv->release();
                     newConv = nullptr;
                 }
@@ -1324,7 +1324,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                     newConv->release();
                     newConv = nullptr;
                 }
-                DBG("ConvolverProcessor::prepareToPlay: NUC re-init failed (std::bad_alloc). Keeping existing engine.");
+                juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: NUC re-init failed (std::bad_alloc). Keeping existing engine.");
             }
         }
     }
@@ -1660,7 +1660,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     static constexpr int MAX_MINPHASE_FFT_SIZE = 8388608; // 2^23
     if (fftSize > MAX_MINPHASE_FFT_SIZE)
     {
-        DBG("convertToMinimumPhase: fftSize (" << fftSize << ") exceeds limit. Skipping min-phase conversion to prevent excessive memory usage.");
+        juce::Logger::writeToLog("convertToMinimumPhase: fftSize (" + juce::String(fftSize) + ") exceeds limit. Skipping min-phase conversion to prevent excessive memory usage.");
         return {}; // 失敗/スキップを通知するために空のバッファを返す
     }
 
@@ -1675,25 +1675,25 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
     // Each step is checked to prevent using an invalid handle.
     if (DftiCreateDescriptor(&dfti, DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
     {
-        DBG("convertToMinimumPhase: DftiCreateDescriptor failed.");
+        juce::Logger::writeToLog("convertToMinimumPhase: DftiCreateDescriptor failed.");
         return {};
     }
 
     if (DftiSetValue(dfti, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR)
     {
-        DBG("convertToMinimumPhase: DftiSetValue(DFTI_PLACEMENT) failed.");
+        juce::Logger::writeToLog("convertToMinimumPhase: DftiSetValue(DFTI_PLACEMENT) failed.");
         return {};
     }
 
     if (DftiSetValue(dfti, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR)
     {
-        DBG("convertToMinimumPhase: DftiSetValue(DFTI_BACKWARD_SCALE) failed.");
+        juce::Logger::writeToLog("convertToMinimumPhase: DftiSetValue(DFTI_BACKWARD_SCALE) failed.");
         return {};
     }
 
     if (DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
     {
-        DBG("convertToMinimumPhase: DftiCommitDescriptor failed.");
+        juce::Logger::writeToLog("convertToMinimumPhase: DftiCommitDescriptor failed.");
         return {};
     }
 
@@ -1716,7 +1716,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
 
         // 1) FFT
         if (DftiComputeForward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
-            DBG("convertToMinimumPhase: DftiComputeForward (1) failed.");
+            juce::Logger::writeToLog("convertToMinimumPhase: DftiComputeForward (1) failed.");
             return {};
         }
 
@@ -1739,7 +1739,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         }
         // 3) IFFT -> real cepstrum
         if (DftiComputeBackward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
-            DBG("convertToMinimumPhase: DftiComputeBackward (1) failed.");
+            juce::Logger::writeToLog("convertToMinimumPhase: DftiComputeBackward (1) failed.");
             return {};
         }
 
@@ -1773,7 +1773,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
 
         // 5) FFT
         if (DftiComputeForward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
-            DBG("convertToMinimumPhase: DftiComputeForward (2) failed.");
+            juce::Logger::writeToLog("convertToMinimumPhase: DftiComputeForward (2) failed.");
             return {};
         }
 
@@ -1793,7 +1793,7 @@ static juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<d
         }
         // 7) IFFT -> minimum-phase IR
         if (DftiComputeBackward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
-            DBG("convertToMinimumPhase: DftiComputeBackward (2) failed.");
+            juce::Logger::writeToLog("convertToMinimumPhase: DftiComputeBackward (2) failed.");
             return {};
         }
 
@@ -1842,7 +1842,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhase(ConvolverProce
 
     if (result.getNumSamples() == 0 && (wasCancelled == nullptr || !*wasCancelled))
     {
-        DBG("Allpass design failed, falling back to Phase 1.");
+        juce::Logger::writeToLog("Allpass design failed, falling back to Phase 1.");
         auto fallbackResult = convertToMixedPhaseFallback(linearIR, minimumIR, sampleRate,
                                            transitionLoHz, transitionHiHz,
                                            tau, shouldExit, wasCancelled);
@@ -1899,7 +1899,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         if (it != owner->irCache.end()) {
             it->second.lastUsedTime = juce::Time::getMillisecondCounter();
             if (it->second.ir) {
-                DBG("convertToMixedPhaseAllpass: Cache Hit!");
+                juce::Logger::writeToLog("convertToMixedPhaseAllpass: Cache Hit!");
                 setMixedPhaseState(2);
                 juce::Logger::writeToLog("[MixedPhase] State -> Completed (cache hit)");
                 if (progressCallback) progressCallback(1.0f);
@@ -1932,7 +1932,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
     static constexpr int MAX_MIXED_FFT_SIZE = 8388608;
     if (fftSize > MAX_MIXED_FFT_SIZE)
     {
-        DBG("convertToMixedPhaseAllpass: fftSize (" << fftSize << ") exceeds limit.");
+        juce::Logger::writeToLog("convertToMixedPhaseAllpass: fftSize (" + juce::String(fftSize) + ") exceeds limit.");
         return {};
     }
 
@@ -1971,18 +1971,18 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         const double* srcLinear = linearIR.getReadPointer(ch);
         const double* srcMinimum = minimumIR.getReadPointer(ch);
 
-        // 線形位相 IR の中心遅延をエネルギー重心で推定
-        double sumWeight = 0.0;
-        double sumIndex = 0.0;
+        // 線形位相 IR のピーク位置を最大振幅サンプルで推定
+        int peakDelay = 0;
+        double maxPeakVal = 0.0;
         for (int i = 0; i < numSamples; ++i)
         {
-            const double w = srcLinear[i] * srcLinear[i];
-            sumWeight += w;
-            sumIndex += w * static_cast<double>(i);
+            const double val = std::abs(srcLinear[i]);
+            if (val > maxPeakVal)
+            {
+                maxPeakVal = val;
+                peakDelay = i;
+            }
         }
-        const int peakDelay = (sumWeight > 1.0e-12)
-            ? static_cast<int>(sumIndex / sumWeight)
-            : 0;
 
         juce::Logger::writeToLog("Linear IR peak delay: "
                                  + juce::String(peakDelay)
@@ -2001,7 +2001,22 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         if (DftiComputeForward(dfti, linearSpec.get()) != DFTI_NO_ERROR) return {};
         if (DftiComputeForward(dfti, minimumSpec.get()) != DFTI_NO_ERROR) return {};
 
+        // 最小位相IRの位相を事前にアンラップ（単調減少を強制）
+        std::vector<double> phiMinUnwrapped(static_cast<size_t>(complexSize));
+        phiMinUnwrapped[0] = std::atan2(minimumSpec.get()[0].imag, minimumSpec.get()[0].real);
+        for (int k = 1; k < complexSize; ++k)
+        {
+            const double raw = std::atan2(minimumSpec.get()[k].imag, minimumSpec.get()[k].real);
+            const double delta = raw - phiMinUnwrapped[static_cast<size_t>(k - 1)];
+            if (delta > juce::MathConstants<double>::pi)
+                phiMinUnwrapped[static_cast<size_t>(k)] = phiMinUnwrapped[static_cast<size_t>(k - 1)]
+                                                       + delta - 2.0 * juce::MathConstants<double>::pi;
+            else
+                phiMinUnwrapped[static_cast<size_t>(k)] = phiMinUnwrapped[static_cast<size_t>(k - 1)] + delta;
+        }
+
         // 目標位相の計算
+        std::vector<bool> phaseValid(static_cast<size_t>(complexSize), true);
         for (int k = 0; k < complexSize; ++k)
         {
             const double freq = (static_cast<double>(k) * sampleRate) / static_cast<double>(fftSize);
@@ -2018,30 +2033,49 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
             const double omega = 2.0 * juce::MathConstants<double>::pi * k / fftSize;
             const double phi_lin = -omega * peakDelay;
-            const double phi_min = std::atan2(minimumSpec.get()[k].imag, minimumSpec.get()[k].real);
+            const double phi_min = phiMinUnwrapped[static_cast<size_t>(k)];
 
-            targetPhase.get()[k] = wLinear * phi_lin + wMinimum * phi_min;
+            const double phiTarget = wLinear * phi_lin + wMinimum * phi_min;
+            const double magnitude = std::hypot(linearSpec.get()[k].real, linearSpec.get()[k].imag);
+
+            if (magnitude < 1.0e-10)
+            {
+                phaseValid[static_cast<size_t>(k)] = false;
+                targetPhase.get()[k] = (k > 0) ? targetPhase.get()[k - 1] : 0.0;
+            }
+            else
+            {
+                targetPhase.get()[k] = phiTarget;
+            }
         }
 
-        // 数値微分前に位相を [-pi, pi] に正規化して巨大値の残留を抑制
-        for (int k = 0; k < complexSize; ++k)
+        // 事前アンラップ済みのため targetPhase の追加アンラップは不要
+        // unwrapPhaseRadians(targetPhase.get(), complexSize);
+
+        const double dOmega = 2.0 * juce::MathConstants<double>::pi / fftSize;
+        constexpr double maxAllowedGD = 120.0;
+        const double maxPhaseSlope = maxAllowedGD * dOmega;
+
+        for (int k = 1; k < complexSize; ++k)
         {
-            double phi = std::fmod(targetPhase.get()[k], 2.0 * juce::MathConstants<double>::pi);
-            if (phi > juce::MathConstants<double>::pi)
-                phi -= 2.0 * juce::MathConstants<double>::pi;
-            else if (phi < -juce::MathConstants<double>::pi)
-                phi += 2.0 * juce::MathConstants<double>::pi;
+            if (!std::isfinite(targetPhase.get()[k]))
+            {
+                targetPhase.get()[k] = targetPhase.get()[k - 1];
+                phaseValid[static_cast<size_t>(k)] = false;
+                continue;
+            }
 
-            targetPhase.get()[k] = phi;
+            const double delta = targetPhase.get()[k] - targetPhase.get()[k - 1];
+            if (std::abs(delta) > maxPhaseSlope)
+            {
+                targetPhase.get()[k] = targetPhase.get()[k - 1];
+                phaseValid[static_cast<size_t>(k)] = false;
+            }
         }
-
-        // 位相のアンラップ
-        unwrapPhaseRadians(targetPhase.get(), complexSize);
 
         // 目標群遅延の計算 (数値微分: 中央差分)
         // ★ thread-local usage only – スレッド間共有禁止
         std::vector<double, convo::MKLAllocator<double>> targetGroupDelay(complexSize, 0.0);
-        const double dOmega = 2.0 * juce::MathConstants<double>::pi / fftSize;
 
         for (int k = 0; k < complexSize; ++k)
         {
@@ -2112,11 +2146,34 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             targetGroupDelay.swap(smoothed);
         }
 
+        for (int k = 1; k < complexSize; ++k)
+        {
+            if (!std::isfinite(targetGroupDelay[static_cast<size_t>(k)])
+                || std::abs(targetGroupDelay[static_cast<size_t>(k)]) > maxAllowedGD * 2.0)
+            {
+                targetGroupDelay[static_cast<size_t>(k)] = targetGroupDelay[static_cast<size_t>(k - 1)];
+            }
+        }
+
         // 設計器が扱える現実的な範囲へクランプ
         {
-            constexpr double maxAllowedGD = 2000.0;
             for (auto& gd : targetGroupDelay)
                 gd = std::clamp(gd, 0.0, maxAllowedGD);
+        }
+
+        {
+            double minGDPostFix = std::numeric_limits<double>::max();
+            double maxGDPostFix = std::numeric_limits<double>::lowest();
+            for (const auto gd : targetGroupDelay)
+            {
+                if (gd < minGDPostFix) minGDPostFix = gd;
+                if (gd > maxGDPostFix) maxGDPostFix = gd;
+            }
+            juce::Logger::writeToLog("GD range (post-fix): "
+                                     + juce::String(minGDPostFix)
+                                     + " to "
+                                     + juce::String(maxGDPostFix)
+                                     + " samples");
         }
 
         // クランプ後の範囲をログ出力（AllpassDesigner に渡す実際の値を診断するため）
@@ -2160,22 +2217,20 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         }
 
         convo::AllpassDesigner::Config designer_config;
-        // numSections: 8→12。2次全通過1セクションの最大群遅延 ≈(1+ρ)/(1-ρ)≈99 samples (ρ=0.98)。
-        // 8 sections × 99 ≈ 792 samples では maxAllowedGD=2000 に届かなかったため増強。
-        // 12 sections × 99 ≈ 1188 samples。dim=24 になり探索コストは O(dim^2) で約 2.25 倍。
-        designer_config.numSections          = 12;
+        // 第4案: 直接音重視。セクション数20、母集団8*dim=320、世代数600、sigmaMin=0.002。
+        designer_config.numSections          = 20;
         designer_config.method               = convo::OptimizationMethod::CMAES;
         designer_config.freqPoints           = kOptimFreqPoints;
         designer_config.minFreqHz            = 20.0;
         designer_config.maxFreqHz            = sampleRate / 2.0;
-        designer_config.cmaesMaxGenerations  = 200;   // 100→200: sigma 収縮後も継続探索させる
-        designer_config.cmaesPopulationSize  = 48;    // 32→48: dim=24 に比例したサンプル数
-        designer_config.cmaesInitialSigma    = 1.0;   // 0.5→1.0: 無制約空間での初期探索幅を拡大
-        // sigmaMin=1e-6 (デフォルト) のままだと sigma が gen~10 で 1e-4 を下回り
-        // 早期終了条件に引っかかって探索が停止する。0.05 に設定することで
-        // gen~6 以降 sigma=0.05 でクランプされ、残り ~194 世代の mean 更新が保証される。
-        designer_config.cmaesParams.sigmaMin = 0.05;  // 急収縮防止（重要）
-        designer_config.cmaesParams.sigmaMax = 2.0;   // デフォルト値を明示
+        designer_config.cmaesMaxGenerations  = 600;
+        designer_config.cmaesPopulationSize  = 320;  // 8 * dim, dim=40 (numSections=20)
+        designer_config.cmaesInitialSigma    = 1.0;
+        designer_config.cmaesParams.sigmaMin = 0.002;
+        designer_config.cmaesParams.sigmaMax = 2.0;
+#if defined(JUCE_DEBUG)
+        designer_config.cmaesSeed            = 0xDEADBEEFCAFEBABEULL;
+#endif
         designer_config.progressCallback     = progressCallback;
 
         std::vector<convo::SecondOrderAllpass> allpass_sections;
@@ -2278,7 +2333,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         {
             if (!std::isfinite(p[i]))
             {
-                DBG("convertToMixedPhaseAllpass: Safety guard triggered (NaN/Inf detected), returning empty.");
+                juce::Logger::writeToLog("convertToMixedPhaseAllpass: Safety guard triggered (NaN/Inf detected), returning empty.");
                 return {};
             }
         }
@@ -2295,16 +2350,21 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
     // Patch ⑥: RMS 正規化後のピーク過大ガード – RMS 正規化により peak/RMS 比が著しく
     // 高いIRが生成された場合（allpass 設計失敗の典型例）、0.98 へのリミットで誤魔化すより
     // 空バッファを返して Phase 1 フォールバックを起動させる。
-    if (peak > 4.0)
+    // デバッグビルドでは閾値を緩和してフォールバック回避を検証する。
+#if defined(JUCE_DEBUG)
+    constexpr double PEAK_LIMIT  = 8.0;
+    constexpr double CREST_LIMIT = 200.0;
+#else
+    constexpr double PEAK_LIMIT  = 4.0;
+    constexpr double CREST_LIMIT = 50.0;
+#endif
+    if (peak > PEAK_LIMIT)
     {
-        DBG("convertToMixedPhaseAllpass: Excessive peak after RMS normalization (peak="
-            << peak << "), falling back to Phase 1.");
+        juce::Logger::writeToLog("convertToMixedPhaseAllpass: Excessive peak after RMS normalization (peak=" + juce::String(peak) + "), falling back to Phase 1.");
         return {};
     }
 
-    // Patch ⑦: Crest factor ガード – peak が閾値内でも RMS が極小の場合
-    // （例: peak=3.9, RMS=0.01 → crest factor=390）はエネルギーが特定サンプルに
-    // 集中しており、畳み込みで遅延型クリップを引き起こす典型例。
+    // RMS と crest を併用して異常インパルスを判定する。
     {
         double sumSq = 0.0;
         for (int ch = 0; ch < numChannels; ++ch)
@@ -2314,15 +2374,18 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 sumSq += p[i] * p[i];
         }
         const double rms = std::sqrt(sumSq / static_cast<double>(numChannels * numSamples));
-        if (rms > 1.0e-12)
+        if (rms < 1.0e-6)
         {
-            const double crest = peak / rms;
-            if (crest > 50.0)
-            {
-                DBG("convertToMixedPhaseAllpass: Excessive crest factor (crest=" << crest
-                    << ", peak=" << peak << ", rms=" << rms << "), falling back to Phase 1.");
-                return {};
-            }
+            juce::Logger::writeToLog("convertToMixedPhaseAllpass: RMS too low (" + juce::String(rms) + "), falling back.");
+            return {};
+        }
+
+        const double crest = peak / rms;
+        if (crest > CREST_LIMIT && rms < 1.0e-4)
+        {
+            juce::Logger::writeToLog("convertToMixedPhaseAllpass: Crest factor too high (" + juce::String(crest)
+                                     + ") with low RMS (" + juce::String(rms) + "), falling back.");
+            return {};
         }
     }
 
@@ -2397,7 +2460,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseFallback(const 
     static constexpr int MAX_MIXED_FFT_SIZE = 8388608;
     if (fftSize > MAX_MIXED_FFT_SIZE)
     {
-        DBG("convertToMixedPhase: fftSize (" << fftSize << ") exceeds limit.");
+        juce::Logger::writeToLog("convertToMixedPhase: fftSize (" + juce::String(fftSize) + ") exceeds limit.");
         return {};
     }
 
@@ -2537,7 +2600,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     {
         if (isRebuilding.exchange(true, std::memory_order_acquire))
         {
-            DBG("ConvolverProcessor::rebuild (via loadImpulseResponse) already in progress, skipping");
+            juce::Logger::writeToLog("ConvolverProcessor::rebuild (via loadImpulseResponse) already in progress, skipping");
             return true;
         }
         auto snapIR = originalIR.load();
@@ -2815,8 +2878,8 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
             cblas_dscal(static_cast<MKL_INT>(numDoubles), sf, prepared->partitionData, 1);
         }
 
-        DBG("applyPreparedIRState: applied scaleFactor=" << sf
-            << " to timeDomainIR and partitionData");
+        juce::Logger::writeToLog("applyPreparedIRState: applied scaleFactor=" + juce::String(sf)
+            + " to timeDomainIR and partitionData");
     }
 
     if (prepared->timeDomainIR)
@@ -3123,7 +3186,7 @@ void ConvolverProcessor::updateConvolverState(ConvolverState* newState)
     if (!convolverStateGeneration.isCurrentGeneration(newState->generationId))
     {
         // 古いタスクの結果 → Message Thread で直接解放（Audio Thread は既に離れている）
-        DBG("ConvolverProcessor::updateConvolverState: stale generation, discarding state (gen="
+        juce::Logger::writeToLog("ConvolverProcessor::updateConvolverState: stale generation, discarding state (gen="
             + juce::String((int)newState->generationId) + ")");
         delete newState;
         writerActive.store(false, std::memory_order_release);
