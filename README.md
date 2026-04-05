@@ -3,63 +3,68 @@
 
 ---
 
-## New in v0.5.9
+## New in v0.6.0
 
-### Main Changes from v0.5.8 to v0.5.9
+### Main Changes in v0.6.0
 
-This section summarizes the main changes between commit 794631b and 37fee3b, focusing on major enhancements and refactoring in Convolver/AudioEngine/EQ/MKL, as well as large-scale EQ/UI improvements.
-
----
-
-## 1. Major Updates in Convolver/AudioEngine/MKL
-
-- **Significant expansion of ConvolverProcessor (convolution engine):**
-  - Integrated Intel oneMKL-based Non-Uniform Partitioned Convolution (NUC) engine for fast, high-precision convolution with large IRs and heavy processing loads.
-  - Asynchronous IR (impulse response) loading on the Message Thread, with atomic RCU handoff for seamless, glitch-free operation during background loads.
-  - Thread-safe atomic control of numerous parameters: PhaseMode (AsIs/Mixed/Minimum), Dry/Wet Mix, Smoothing, IR length, tail rolloff, and more.
-  - Added APIs for parameter change notification (Listener/ChangeBroadcaster), state save/restore, and waveform/spectrum retrieval.
-  - Enhanced integration with AudioEngine/EQProcessor (processing order switching, parameter sync).
-
-- **AudioEngine enhancements:**
-  - New APIs for managing multiple ConvolverProcessor/EQProcessor instances, bypass/parameter sync, and preset loading.
-  - Thorough thread-safe state management using atomics and LockFreeRingBuffer.
-
-- **MKL/AlignedAllocation improvements:**
-  - Enforced 64-byte alignment for MKL allocators, strict memory leak prevention, and explicit resource release.
+This release is centered on a major redesign of the convolver pipeline and the systems around it. The changes are not just feature additions on top of the existing convolver. They reshape how IR data is prepared, swapped, optimized, visualized, and integrated with the rest of the application.
 
 ---
 
-## 2. Large-Scale EQ Refactor & UI Enhancements
+## 1. Convolver Internal State Management Redesign
 
-- **EQProcessor refactor and feature expansion:**
-  - 20-band parametric EQ implemented with lock-free (RCU) pattern. All band parameters (frequency, gain, Q, enable/disable) are managed atomically for instant UI-thread updates.
-  - Adopted TPT SVF (Topology-Preserving Transform State Variable Filter) for high-quality, low-noise coefficient modulation.
-  - Added AGC (auto-gain control), total gain, bypass, state save/restore, and response curve calculation APIs.
-  - Band/global change notification via Listener/ChangeBroadcaster.
+The largest change is the way IR data is loaded, converted, and swapped into the runtime engine. Instead of relying on a simple direct-update model, the system now prepares new convolution states off the audio thread and switches them in safely when they are ready.
 
-- **EQControlPanel UI expansion:**
-  - Dynamic generation of UI controls (gain, frequency, Q, enable/disable) for all 20 bands, with full two-way sync to AudioEngine/EQProcessor.
-  - Enhanced event handling for all labels, sliders, and buttons.
+This redesign introduces RCU-style state swapping, generation tracking, deferred destruction, caching, and progressive upgrade paths. In practice, that means IR rebuilds can continue without stalling the audio thread, allowing the application to keep processing audio while new convolution states are being prepared in the background.
+
+The core files behind this redesign are:
+
+- ConvolverProcessor.h
+- ConvolverState.h
+- SafeStateSwapper.h
+- PreparedIRState.h
+- CacheManager.h
+- ProgressiveUpgradeThread.h
+
+In short, the convolver architecture has been moved decisively toward a model where expensive work is prepared asynchronously and activated safely, rather than being handled in a more immediate and disruptive way.
 
 ---
 
-## 3. Other
+## 2. Mixed Phase Conversion Elevated into a Full Optimization Feature
 
-- **Similar UI/DSP control enhancements for ConvolverControlPanel, MKLNonUniformConvolver, etc.**
-- **Strict adherence to JUCE 8.0.12 API and design guidelines**
-- **Coding standards, documentation updates**
-- **Major additions to manuals (Japanese/English)**
+The second major pillar of this release is the expansion of Mixed Phase processing into a full optimization pipeline.
+
+Instead of treating Mixed Phase as a simple variation of the phase mode, the implementation now builds a target phase response from the linear-phase IR and the minimum-phase IR, derives a target group delay profile from that result, and then approximates it using cascaded allpass sections.
+
+To support this, a dedicated allpass design layer and a CMA-ES-based optimizer were added, together with a progress display component for long-running optimization tasks. The key files are:
+
+- AllpassDesigner.h
+- CmaEsOptimizerDynamic.h
+- MixedPhaseOptimizationComponent.h
+
+This means Mixed Phase is no longer just an internal transformation step. It has become a fully fledged optimization feature with explicit design targets, a real search strategy, and visible progress reporting when needed.
+
+---
+
+## 3. Surrounding Systems Reorganized to Support the New Architecture
+
+Once the convolver and Mixed Phase pipeline became this sophisticated, the surrounding systems also had to be reworked. As a result, AudioEngine, UI components, build definitions, and supporting DSP layers were updated together rather than in isolation.
+
+On the engine side, convolver state handling, latency reporting, processing-order coordination, and analyzer integration were tightened up. In particular, latency breakdown reporting in AudioEngine.h was strengthened so the UI can reflect the runtime state more accurately.
+
+On the UI side, new controls and windows were added so that the new functionality is actually operable. Examples include the Optimization Progress button in ConvolverControlPanel.h and the dedicated ConvolverSettingsComponent.h panel for cache and progressive-upgrade related controls.
+
+The build system was also updated so the new source files are first-class parts of the project, rather than side additions. CMakeLists.txt now explicitly includes the new convolver-related modules and the associated build flow has been reinforced.
+
+Taken together, these changes should be understood not as isolated convolver improvements, but as a coordinated reorganization of the surrounding application to support a more advanced convolver architecture.
 
 ---
 
 ### Summary
 
-- **Major expansion and refactor for real-time safety, high performance, flexible parameter control, and robust UI integration**
-- **Significant acceleration for large IR/high-load processing via Intel MKL**
-- **Strict separation of UI/logic, thread safety, and extensibility**
-- **Substantial improvements to documentation and manuals**
+The changes in this period can be summarized in one sentence:
 
-These changes represent a major evolution in DSP core, UI, and overall design quality during this period.
+ConvoPeq’s convolver has been rebuilt into a production-oriented engine based on real-time-safe state swapping, caching, and progressive upgrades, then extended with a CMA-ES-driven Mixed Phase optimization pipeline, with AudioEngine, UI, build configuration, and supporting DSP systems reorganized around that new architecture.
 
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 

@@ -52,7 +52,6 @@ public:
         configureLabel(rebuildLabel, "Rebuild:");
         configureLabel(mixedF1Label, "Mix Start f:");
         configureLabel(mixedF2Label, "Mix End f:");
-        configureLabel(mixedTauLabel, "Mix tau:");
         configureLabel(tailModeLabel, "Tail Mode:");
         configureLabel(tailRolloffStartLabel, "Tail Start:");
         configureLabel(tailRolloffStrengthLabel, "Tail Strength:");
@@ -89,14 +88,6 @@ public:
         mixedF2Slider.setNumDecimalPlacesToDisplay(0);
         mixedF2Slider.addListener(this);
 
-        mixedTauSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        mixedTauSlider.setRange(ConvolverProcessor::MIXED_TAU_MIN,
-                                ConvolverProcessor::MIXED_TAU_MAX, 1.0);
-        mixedTauSlider.setSkewFactorFromMidPoint(48.0);
-        mixedTauSlider.setTextValueSuffix(" smp");
-        mixedTauSlider.setNumDecimalPlacesToDisplay(0);
-        mixedTauSlider.addListener(this);
-
         tailModeCombo.addItem("Air Absorption (All Layers)", 1);
         tailModeCombo.addItem("Layer Tail Contouring (L1/L2)", 2);
         tailModeCombo.addListener(this);
@@ -130,8 +121,6 @@ public:
         addAndMakeVisible(mixedF1Slider);
         addAndMakeVisible(mixedF2Label);
         addAndMakeVisible(mixedF2Slider);
-        addAndMakeVisible(mixedTauLabel);
-        addAndMakeVisible(mixedTauSlider);
         addAndMakeVisible(tailModeLabel);
         addAndMakeVisible(tailModeCombo);
         addAndMakeVisible(tailRolloffStartLabel);
@@ -152,7 +141,6 @@ public:
         rebuildSlider.removeListener(this);
         mixedF1Slider.removeListener(this);
         mixedF2Slider.removeListener(this);
-        mixedTauSlider.removeListener(this);
         tailRolloffStartSlider.removeListener(this);
         tailRolloffStrengthSlider.removeListener(this);
         partitionTailSlider.removeListener(this);
@@ -187,7 +175,6 @@ public:
         placeRow(irLengthLabel, irLengthSlider);
         placeRow(mixedF1Label, mixedF1Slider);
         placeRow(mixedF2Label, mixedF2Slider);
-        placeRow(mixedTauLabel, mixedTauSlider);
         placeComboRow(tailModeLabel, tailModeCombo);
         placeRow(tailRolloffStartLabel, tailRolloffStartSlider);
         placeRow(tailRolloffStrengthLabel, tailRolloffStrengthSlider);
@@ -205,8 +192,6 @@ private:
     juce::Slider mixedF1Slider;
     juce::Label mixedF2Label;
     juce::Slider mixedF2Slider;
-    juce::Label mixedTauLabel;
-    juce::Slider mixedTauSlider;
     juce::Label tailModeLabel;
     juce::ComboBox tailModeCombo;
     juce::Label tailRolloffStartLabel;
@@ -240,10 +225,6 @@ private:
         else if (slider == &mixedF2Slider)
         {
             convolver.setMixedTransitionEndHz(static_cast<float>(mixedF2Slider.getValue()));
-        }
-        else if (slider == &mixedTauSlider)
-        {
-            convolver.setMixedPreRingTau(static_cast<float>(mixedTauSlider.getValue()));
         }
         else if (slider == &tailRolloffStartSlider)
         {
@@ -292,8 +273,6 @@ private:
             mixedF1Slider.setValue(convolver.getMixedTransitionStartHz(), juce::dontSendNotification);
         if (!mixedF2Slider.isMouseButtonDown())
             mixedF2Slider.setValue(convolver.getMixedTransitionEndHz(), juce::dontSendNotification);
-        if (!mixedTauSlider.isMouseButtonDown())
-            mixedTauSlider.setValue(convolver.getMixedPreRingTau(), juce::dontSendNotification);
         if (!tailRolloffStartSlider.isMouseButtonDown())
             tailRolloffStartSlider.setValue(convolver.getTailRolloffStartHz(), juce::dontSendNotification);
         if (!tailRolloffStrengthSlider.isMouseButtonDown())
@@ -306,7 +285,6 @@ private:
         const bool mixedEnabled = engine.getConvolverPhaseMode() == ConvolverProcessor::PhaseMode::Mixed;
         mixedF1Label.setEnabled(mixedEnabled);
         mixedF2Label.setEnabled(mixedEnabled);
-        mixedTauLabel.setEnabled(mixedEnabled);
         updateTailControlsVisibility();
     }
 
@@ -784,6 +762,8 @@ void ConvolverControlPanel::resized()
     bounds.removeFromTop(4);
     auto controlRow2 = bounds.removeFromTop(26);
     bounds.removeFromTop(4);
+    auto controlRow3 = bounds.removeFromTop(26);
+    bounds.removeFromTop(4);
 
     const int labelWidth = 78;
     const int inlineGap = 6;
@@ -809,21 +789,24 @@ void ConvolverControlPanel::resized()
     controlRow1.removeFromLeft(inlineGap);
     mixSlider.setBounds(controlRow1);
 
-    // --- 2行目 ---
+    // --- 2行目: Exp Direct Head + Smoothing ---
     auto row2Left = controlRow2.removeFromLeft(controlsStartX - leftGap);
-    experimentalDirectHeadToggle.setBounds(row2Left.removeFromTop(row2Left.getHeight() / 2));
-    optimizationProgressButton.setBounds(row2Left);
+    experimentalDirectHeadToggle.setBounds(row2Left.reduced(0, 2));
 
-    // スムージング時間 (Mixスライダーの下に配置)
+    // スムージング時間
     auto smoothingRow = controlRow2;
     smoothingRow.removeFromLeft(leftGap);
     smoothingTimeLabel.setBounds(smoothingRow.removeFromLeft(labelWidth));
     smoothingRow.removeFromLeft(inlineGap);
     smoothingTimeSlider.setBounds(smoothingRow);
 
+    // --- 3行目: 最適化進捗ボタン ---
+    auto progressRow = controlRow3;
+    optimizationProgressButton.setBounds(progressRow.removeFromLeft(controlsStartX - leftGap));
+
     bounds.removeFromTop(6);
 
-    // --- 8行目: ハイカットフィルターモード ---
+    // --- 4行目: ハイカットフィルターモード ---
     auto hcfRow = bounds.removeFromTop(26);
     hcfLabel.setBounds(hcfRow.removeFromLeft(38).reduced(0, 3));
     hcfRow.removeFromLeft(4);
@@ -831,7 +814,7 @@ void ConvolverControlPanel::resized()
     hcfNaturalButton.setBounds(hcfRow.removeFromLeft(60).reduced(2, 2));
     hcfSoftButton.setBounds(hcfRow.removeFromLeft(48).reduced(2, 2));
 
-    // --- 9行目: ローカットフィルターモード ---
+    // --- 5行目: ローカットフィルターモード ---
     auto lcfRow = bounds.removeFromTop(26);
     lcfLabel.setBounds(lcfRow.removeFromLeft(38).reduced(0, 3));
     lcfRow.removeFromLeft(4);
