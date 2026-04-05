@@ -1885,6 +1885,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         }
     }
 
+    if (newDSP != nullptr)
+    {
+        uiConvolverProcessor.setMixedPhaseState(newDSP->convolver.getMixedPhaseState());
+    }
+
     const LearningCommand cmd {
         LearningCommand::Type::DSPReady,
         false,

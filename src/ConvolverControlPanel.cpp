@@ -1018,6 +1018,8 @@ void ConvolverControlPanel::showConvolverSettingsWindow()
     }
 
     auto* window = new convo::MixedPhaseOptimizationWindow("Optimization Progress", engine.getConvolverProcessor());
+    window->setVisible(true);
+    window->toFront(true);
     optimizationProgressWindow = window;
  }
 

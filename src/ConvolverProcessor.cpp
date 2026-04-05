@@ -1824,9 +1824,21 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhase(ConvolverProce
                                                                bool* wasCancelled,
                                                                std::function<void(float)> progressCallback)
 {
+    const auto setMixedPhaseState = [owner](int state)
+    {
+        if (owner != nullptr)
+            owner->mixedPhaseState.store(state, std::memory_order_release);
+    };
+
     auto result = convertToMixedPhaseAllpass(owner, fileHash, linearIR, minimumIR, sampleRate,
                                              transitionLoHz, transitionHiHz,
                                              tau, shouldExit, wasCancelled, progressCallback);
+
+    if (result.getNumSamples() > 0)
+    {
+        setMixedPhaseState(2);
+        return result;
+    }
 
     if (result.getNumSamples() == 0 && (wasCancelled == nullptr || !*wasCancelled))
     {
@@ -1835,9 +1847,19 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhase(ConvolverProce
                                            transitionLoHz, transitionHiHz,
                                            tau, shouldExit, wasCancelled);
         if (fallbackResult.getNumSamples() > 0)
+        {
+            setMixedPhaseState(2);
+            juce::Logger::writeToLog("[MixedPhase] State -> Completed (fallback)");
             if (progressCallback) progressCallback(1.0f);
+        }
+        else
+        {
+            setMixedPhaseState(0);
+        }
         return fallbackResult;
     }
+
+    setMixedPhaseState(0);
     return result;
 }
 
@@ -1853,6 +1875,12 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                                                                bool* wasCancelled,
                                                                std::function<void(float)> progressCallback)
 {
+    const auto setMixedPhaseState = [owner](int state)
+    {
+        if (owner != nullptr)
+            owner->mixedPhaseState.store(state, std::memory_order_release);
+    };
+
     if (wasCancelled) *wasCancelled = false;
 
     // 0. Cache Check
@@ -1872,6 +1900,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             it->second.lastUsedTime = juce::Time::getMillisecondCounter();
             if (it->second.ir) {
                 DBG("convertToMixedPhaseAllpass: Cache Hit!");
+                setMixedPhaseState(2);
+                juce::Logger::writeToLog("[MixedPhase] State -> Completed (cache hit)");
                 if (progressCallback) progressCallback(1.0f);
                 return *(it->second.ir);
             }
@@ -1894,6 +1924,9 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
     if (transitionHiHz <= transitionLoHz)
         return {};
+
+    setMixedPhaseState(1);
+    juce::Logger::writeToLog("[MixedPhase] State -> Optimizing");
 
     const int fftSize = juce::nextPowerOfTwo(numSamples * 4);
     static constexpr int MAX_MIXED_FFT_SIZE = 8388608;
@@ -1928,6 +1961,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
     const double invSpan = 1.0 / (transitionHiHz - transitionLoHz);
     juce::AudioBuffer<double> mixedIR(numChannels, numSamples);
 
+    try
+    {
     for (int ch = 0; ch < numChannels; ++ch)
     {
         if (checkCancellation(shouldExit, wasCancelled))
@@ -2155,7 +2190,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
         // shouldExit を渡して世代ループ中にキャンセルを受け付ける（旧実装では未渡し）
         const auto designResult = designer.designWithCMAES(sampleRate, optim_freq_hz, optim_target_gd,
-                                                            designer_config, allpass_sections, shouldExit);
+                                    designer_config, allpass_sections, shouldExit);
         juce::Logger::writeToLog("MixedPhase: design result = " + juce::String(static_cast<int>(designResult)));
 
         bool designSuccess = (designResult == convo::DesignResult::Success);
@@ -2174,6 +2209,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
         if (!designSuccess)
         {
+            setMixedPhaseState(0);
+            juce::Logger::writeToLog("[MixedPhase] State -> WaitingIR (design failed)");
             if (progressCallback) progressCallback(1.0f);
             return {}; // 失敗 → フォールバックへ
         }
@@ -2315,7 +2352,16 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
     }
 
     if (progressCallback) progressCallback(1.0f);
+    setMixedPhaseState(2);
+    juce::Logger::writeToLog("[MixedPhase] State -> Completed");
     return mixedIR;
+    }
+    catch (...)
+    {
+        setMixedPhaseState(0);
+        juce::Logger::writeToLog("[MixedPhase] State -> WaitingIR (exception)");
+        throw;
+    }
 }
 
 juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseFallback(const juce::AudioBuffer<double>& linearIR,

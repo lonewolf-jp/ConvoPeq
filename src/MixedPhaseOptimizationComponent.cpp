@@ -3,10 +3,8 @@
 namespace convo {
 
 MixedPhaseOptimizationComponent::MixedPhaseOptimizationComponent(ConvolverProcessor& p)
-    : processor(p),
-      progressBar(progressValue)
+    : processor(p)
 {
-    addAndMakeVisible(progressBar);
     addAndMakeVisible(statusLabel);
     addAndMakeVisible(infoLabel);
     addAndMakeVisible(closeButton);
@@ -15,17 +13,18 @@ MixedPhaseOptimizationComponent::MixedPhaseOptimizationComponent(ConvolverProces
     statusLabel.setFont(juce::Font(juce::FontOptions(18.0f, juce::Font::bold)));
     statusLabel.setJustificationType(juce::Justification::centred);
 
-    infoLabel.setText("Calculating Mixed Phase Allpass...", juce::dontSendNotification);
+    infoLabel.setText("Waiting IR", juce::dontSendNotification);
     infoLabel.setJustificationType(juce::Justification::centred);
 
     closeButton.setButtonText("Close");
     closeButton.onClick = [this] {
+        juce::Logger::writeToLog("[MixedPhaseUI] Close button clicked");
         if (auto* window = findParentComponentOfClass<juce::DocumentWindow>())
             window->closeButtonPressed();
     };
 
     processor.addChangeListener(this);
-    startTimer(100); // 100ms ごとに進捗をポーリング (ChangeBroadcaster 経由でも更新するが、念のため)
+    startTimerHz(30);
 }
 
 MixedPhaseOptimizationComponent::~MixedPhaseOptimizationComponent()
@@ -43,9 +42,7 @@ void MixedPhaseOptimizationComponent::resized()
     auto area = getLocalBounds().reduced(20);
     statusLabel.setBounds(area.removeFromTop(30));
     area.removeFromTop(10);
-    infoLabel.setBounds(area.removeFromTop(20));
-    area.removeFromTop(10);
-    progressBar.setBounds(area.removeFromTop(30));
+    infoLabel.setBounds(area.removeFromTop(30));
     area.removeFromBottom(10);
     closeButton.setBounds(area.removeFromBottom(30).withSizeKeepingCentre(100, 30));
 }
@@ -54,37 +51,32 @@ void MixedPhaseOptimizationComponent::changeListenerCallback(juce::ChangeBroadca
 {
     if (source == &processor)
     {
-        updateStatus();
+        // State polling is handled in timerCallback().
     }
 }
 
 void MixedPhaseOptimizationComponent::timerCallback()
 {
-    updateStatus();
-}
+    const int state = processor.getMixedPhaseState();
 
-void MixedPhaseOptimizationComponent::updateStatus()
-{
-    progressValue = processor.getLoadProgress();
-    if (progressValue != lastProgress)
+    static int lastState = -1;
+    if (state != lastState)
     {
-        lastProgress = progressValue;
+        juce::Logger::writeToLog("[MixedPhaseUI] timerCallback: state = " + juce::String(state));
+        lastState = state;
+    }
 
-        if (progressValue >= 1.0)
-        {
-            infoLabel.setText("Optimization Complete", juce::dontSendNotification);
-            closeButton.setEnabled(true);
-        }
-        else if (progressValue < 0.0)
-        {
-            infoLabel.setText("Optimization Failed", juce::dontSendNotification);
-            closeButton.setEnabled(true);
-        }
-        else
-        {
-            infoLabel.setText(juce::String::formatted("Optimizing... %.1f%%", progressValue * 100.0), juce::dontSendNotification);
-            closeButton.setEnabled(false);
-        }
+    switch (state)
+    {
+        case 1:
+            infoLabel.setText("Optimizing... (CMA-ES)", juce::dontSendNotification);
+            break;
+        case 2:
+            infoLabel.setText("Optimization Completed", juce::dontSendNotification);
+            break;
+        default:
+            infoLabel.setText("Waiting IR", juce::dontSendNotification);
+            break;
     }
 }
 

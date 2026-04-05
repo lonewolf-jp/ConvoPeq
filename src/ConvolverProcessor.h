@@ -281,6 +281,8 @@ public:
     int getIRLength() const { return irLength.load(std::memory_order_acquire); }
     juce::String getLastError() const { return lastError; }
     float getLoadProgress() const { return loadProgress.load(); }
+    int getMixedPhaseState() const noexcept { return mixedPhaseState.load(std::memory_order_acquire); }
+    void setMixedPhaseState(int state) noexcept { mixedPhaseState.store(juce::jlimit(0, 2, state), std::memory_order_release); }
     void setLoadingProgress(float p);
     int getCurrentBufferSize() const { return currentBufferSize.load(std::memory_order_acquire); }
     struct LatencyBreakdown
@@ -544,6 +546,7 @@ private:
     std::unique_ptr<LoaderThread> activeLoader;
     std::deque<std::unique_ptr<LoaderThread>> loaderTrashBin;
     std::atomic<float> loadProgress { 0.0f };
+    std::atomic<int> mixedPhaseState { 0 }; // 0=WaitingIR, 1=Optimizing, 2=Completed
     juce::String lastError;
 
     juce::dsp::ProcessSpec currentSpec = { 48000.0, 512, 2 };

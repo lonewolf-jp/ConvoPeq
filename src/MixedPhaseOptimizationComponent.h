@@ -23,17 +23,11 @@ private:
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void timerCallback() override;
 
-    void updateStatus();
-
     ConvolverProcessor& processor;
 
-    double progressValue = 0.0;
-    juce::ProgressBar progressBar;
     juce::Label statusLabel;
     juce::Label infoLabel;
     juce::TextButton closeButton;
-
-    double lastProgress = -1.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MixedPhaseOptimizationComponent)
 };
