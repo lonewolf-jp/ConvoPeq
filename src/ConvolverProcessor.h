@@ -320,6 +320,7 @@ public:
     //----------------------------------------------------------
     void rebuildAllIRs();
     void rebuildAllIRsSynchronous(std::function<bool()> shouldCancel = nullptr);
+    void invalidatePendingLoads();
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const ConvolverProcessor& other);

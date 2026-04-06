@@ -1611,6 +1611,11 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
     }
 }
 
+void ConvolverProcessor::invalidatePendingLoads()
+{
+    convolverStateGeneration.bumpGeneration();
+}
+
 //--------------------------------------------------------------
 // StereoConvolver Copy Constructor
 //--------------------------------------------------------------
@@ -2847,6 +2852,13 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
     if (!prepared)
         return;
 
+    if (!convolverStateGeneration.isCurrentGeneration(prepared->generationId))
+        return;
+
+    const double sr = currentSampleRate.load(std::memory_order_acquire);
+    if (sr > 0.0 && std::abs(prepared->sampleRate - sr) > 1e-6)
+        return;
+
     JUCE_ASSERT_MESSAGE_THREAD;
 
     // scaleFactor 適用（timeDomainIR はコピーしてから適用し、共有元を保護）
@@ -3847,8 +3859,21 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     {
         rebuildPendingAfterLoad.store(true, std::memory_order_release);
     }
+    // [C2 fix] バイパス中IRロードの解除時クリック防止: 先に wetCrossfade の再開要求を処理。
+    if (wetCrossfadeResetPending.exchange(false, std::memory_order_acq_rel))
+    {
+        wetCrossfade.setCurrentAndTargetValue(0.0);
+        wetCrossfade.setTargetValue(1.0);
+        wetCrossfadeActive.store(true, std::memory_order_release);
+    }
+
+    const bool wetTransitionActive = wetCrossfadeActive.load(std::memory_order_acquire);
+
     // バイパス、未準備、IR未ロードの場合はスルー
-    if (!isPrepared.load(std::memory_order_acquire) || bypassed.load(std::memory_order_relaxed) || !conv)
+    // ただし wet クロスフェード中は処理を継続する。
+    if (!isPrepared.load(std::memory_order_acquire)
+        || !conv
+        || (bypassed.load(std::memory_order_relaxed) && !wetTransitionActive))
     {
         return;
     }
@@ -3894,12 +3919,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         return;
 
     // ── Step 4: パラメータ更新と最適化 ──
-    // [Bug 1 fix] wetCrossfade ペンディングリセットの処理。
-    if (wetCrossfadeResetPending.exchange(false, std::memory_order_acq_rel))
-    {
-        wetCrossfade.setCurrentAndTargetValue(0.0);
-        wetCrossfade.setTargetValue(1.0);
-    }
 
     // [Issue 2 fix] latencySmoother ペンディングリセットの処理。
     if (latencyResetPending.exchange(false, std::memory_order_acq_rel))

@@ -186,6 +186,11 @@ public:
         return errorMessage.load(std::memory_order_acquire);
     }
 
+    void setErrorMessage(const char* msg) noexcept
+    {
+        errorMessage.store(msg, std::memory_order_release);
+    }
+
 private:
     struct SessionSignature
     {

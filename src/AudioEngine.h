@@ -368,12 +368,26 @@ DSPCore();
     void process(const juce::AudioSourceChannelInfo& bufferToFill, juce::AbstractFifo& audioFifo,
                  juce::AudioBuffer<float>& audioFifoBuffer, std::atomic<float>& inputLevelLinear,
                  std::atomic<float>& outputLevelLinear, const ProcessingState& state);
+    void processToBuffer(const juce::AudioSourceChannelInfo& source,
+                         juce::AudioBuffer<float>& destination,
+                         juce::AbstractFifo& audioFifo,
+                         juce::AudioBuffer<float>& audioFifoBuffer,
+                         std::atomic<float>& inputLevelLinear,
+                         std::atomic<float>& outputLevelLinear,
+                         const ProcessingState& state);
     void processDouble(juce::AudioBuffer<double>& buffer,
                        juce::AbstractFifo& audioFifo,
                        juce::AudioBuffer<float>& audioFifoBuffer,
                        std::atomic<float>& inputLevelLinear,
                        std::atomic<float>& outputLevelLinear,
                        const ProcessingState& state);
+    void processDoubleToBuffer(const juce::AudioBuffer<double>& source,
+                               juce::AudioBuffer<double>& destination,
+                               juce::AbstractFifo& audioFifo,
+                               juce::AudioBuffer<float>& audioFifoBuffer,
+                               std::atomic<float>& inputLevelLinear,
+                               std::atomic<float>& outputLevelLinear,
+                               const ProcessingState& state);
         ConvolverProcessor convolver;
         EQProcessor eq;
         // 【最適化】出力 / 入力 DC 除去を UltraHighRateDCBlocker (1次IIR, ブロックモード) に統一。
@@ -416,6 +430,13 @@ DSPCore();
         int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（常にSAFE_MAX×8）
         std::atomic<int> fadeInSamplesLeft {0};
         static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
+
+        // B2: processDouble 用のバイパスフェード状態
+        convo::ScopedAlignedPtr<double> dryBypassBufferDoubleL;
+        convo::ScopedAlignedPtr<double> dryBypassBufferDoubleR;
+        int dryBypassCapacityDouble = 0;
+        juce::SmoothedValue<double> bypassFadeGainDouble;
+        bool bypassedDouble = false;
 
         // インターサンプルピーク近似: 前ブロック末尾のクリップ済み出力 (L/R)
         // softClipBlockAVX2() へブロック間状態を渡すために保持する。
@@ -466,6 +487,11 @@ DSPCore();
     //----------------------------------------------------------
     std::atomic<DSPCore*> currentDSP { nullptr }; // Raw pointer for Audio Thread (Lock-free)
     DSPCore* activeDSP = nullptr; // Ownership holder for Message Thread (Raw pointer)
+    std::atomic<DSPCore*> fadingOutDSP { nullptr }; // D2: DSP切替クロスフェード用
+    std::atomic<bool> dspCrossfadePending { false };
+    juce::SmoothedValue<double> dspCrossfadeGain;
+    juce::AudioBuffer<float> dspCrossfadeFloatBuffer;
+    juce::AudioBuffer<double> dspCrossfadeDoubleBuffer;
     std::vector<std::pair<DSPCore*, uint32>> trashBin; // Time-based garbage collection for old DSPs
     juce::CriticalSection trashBinLock;
 
@@ -522,7 +548,7 @@ DSPCore();
     LearningCommand learningCommandBuffer[learningCommandBufferSize] {};
     LearnerDispatchAction learnerDispatchBuffer[learnerDispatchBufferSize] {};
     std::atomic<bool> learnerDispatchOverflow { false };
-    LearnerDispatchAction lastFailedAction {};
+    std::atomic<LearnerDispatchAction> lastFailedAction {};
 
     #pragma warning(push)
     #pragma warning(disable: 4324)
@@ -780,7 +806,7 @@ inline bool AudioEngine::enqueueLearnerDispatch(const LearnerDispatchAction& act
     const uint32_t next = (currentWrite + 1u) & learnerDispatchBufferMask;
     if (next == currentRead)
     {
-        lastFailedAction = action;
+        lastFailedAction.store(action, std::memory_order_release);
         learnerDispatchOverflow.store(true, std::memory_order_release);
         return false;
     }

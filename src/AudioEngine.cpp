@@ -478,6 +478,8 @@ AudioEngine::AudioEngine()
     // バッファ初期化
     audioFifoBuffer.setSize (2, FIFO_SIZE);
     currentDSP.store(nullptr);
+    dspCrossfadeGain.reset(48000.0, 0.03);
+    dspCrossfadeGain.setCurrentAndTargetValue(1.0);
 }
 
 
@@ -1026,6 +1028,9 @@ AudioEngine::~AudioEngine()
         activeDSP = nullptr;
     }
 
+    if (auto* fading = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
+        fading->release();
+
     // 5. Explicit Generation Sweep (Trash Bin Cleanup)
     // Clear all pending and old DSPs.
     {
@@ -1428,7 +1433,13 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     maxSamplesPerBlock.store(bufferSize);
     currentSampleRate.store(safeSampleRate);
+    dspCrossfadeGain.reset(safeSampleRate, 0.03);
+    dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+    dspCrossfadePending.store(false, std::memory_order_release);
     selectAdaptiveCoeffBankForCurrentSettings();
+
+    dspCrossfadeFloatBuffer.setSize(2, std::max(SAFE_MAX_BLOCK_SIZE, bufferSize), false, false, true);
+    dspCrossfadeDoubleBuffer.setSize(2, std::max(SAFE_MAX_BLOCK_SIZE, bufferSize), false, false, true);
 
 
     audioFifo.reset();
@@ -1453,6 +1464,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // numPartitions = (irLen - 1) / 0 → ゼロ除算クラッシュが発生する。
     // prepareToPlay は Message Thread から呼ばれることが保証されているので安全。
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
+
+    if (rateChanged)
+        uiConvolverProcessor.invalidatePendingLoads();
 
     if (rateChanged || blockSizeChanged || currentDSP.load(std::memory_order_acquire) == nullptr)
     {
@@ -1552,6 +1566,23 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
         alignedCapacity = newRequired;
     }
 
+    if (newRequired > dryBypassCapacityDouble || !dryBypassBufferDoubleL || !dryBypassBufferDoubleR)
+    {
+        auto newDryL = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
+            static_cast<size_t>(newRequired) * sizeof(double), 64)));
+        auto newDryR = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
+            static_cast<size_t>(newRequired) * sizeof(double), 64)));
+        juce::FloatVectorOperations::clear(newDryL.get(), newRequired);
+        juce::FloatVectorOperations::clear(newDryR.get(), newRequired);
+        dryBypassBufferDoubleL = std::move(newDryL);
+        dryBypassBufferDoubleR = std::move(newDryR);
+        dryBypassCapacityDouble = newRequired;
+    }
+
+    bypassFadeGainDouble.reset(newSampleRate, 0.005);
+    bypassFadeGainDouble.setCurrentAndTargetValue(1.0);
+    bypassedDouble = false;
+
     const auto osPreset = (oversamplingType == OversamplingType::LinearPhase)
                         ? CustomInputOversampler::Preset::LinearPhase
                         : CustomInputOversampler::Preset::IIRLike;
@@ -1633,6 +1664,13 @@ void AudioEngine::DSPCore::reset()
         juce::FloatVectorOperations::clear(alignedL.get(), alignedCapacity);
     if (alignedR && alignedCapacity > 0)
         juce::FloatVectorOperations::clear(alignedR.get(), alignedCapacity);
+    if (dryBypassBufferDoubleL && dryBypassCapacityDouble > 0)
+        juce::FloatVectorOperations::clear(dryBypassBufferDoubleL.get(), dryBypassCapacityDouble);
+    if (dryBypassBufferDoubleR && dryBypassCapacityDouble > 0)
+        juce::FloatVectorOperations::clear(dryBypassBufferDoubleR.get(), dryBypassCapacityDouble);
+
+    bypassFadeGainDouble.setCurrentAndTargetValue(1.0);
+    bypassedDouble = false;
 
     // インターサンプルピーク用ブロック間状態をリセット
     softClipPrevSample[0] = 0.0;
@@ -1916,6 +1954,14 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     // 4. Move the old DSP to the trash bin outside the main lock.
     if (dspToTrash != nullptr)
     {
+        if (newDSP != nullptr && dspToTrash->oversamplingFactor != newDSP->oversamplingFactor)
+        {
+            dspToTrash->addRef();
+            if (auto* oldFading = fadingOutDSP.exchange(dspToTrash, std::memory_order_acq_rel))
+                oldFading->release();
+            dspCrossfadePending.store(true, std::memory_order_release);
+        }
+
         const juce::ScopedLock sl(trashBinLock);
         try
         {
@@ -1951,7 +1997,8 @@ void AudioEngine::processLearningCommands() noexcept
 {
     if (learnerDispatchOverflow.load(std::memory_order_acquire))
     {
-        if (enqueueLearnerDispatch(lastFailedAction))
+        const LearnerDispatchAction last = lastFailedAction.load(std::memory_order_acquire);
+        if (enqueueLearnerDispatch(last))
             learnerDispatchOverflow.store(false, std::memory_order_release);
     }
 
@@ -2109,7 +2156,7 @@ void AudioEngine::resetLearningControlState() noexcept
     learnerDispatchWrite = 0;
     learnerDispatchRead = 0;
     learnerDispatchOverflow.store(false, std::memory_order_release);
-    lastFailedAction = {};
+    lastFailedAction.store(LearnerDispatchAction {}, std::memory_order_release);
     learningRuntimeState = LearningRuntimeState::Idle;
     requestedLearningMode = pendingLearningMode.load(std::memory_order_acquire);
     requestedLearningResume = false;
@@ -2119,6 +2166,7 @@ void AudioEngine::resetLearningControlState() noexcept
 
 void AudioEngine::timerCallback()
 {
+    processLearningCommands();
     processDeferredLearningActions();
 
     // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
@@ -2426,6 +2474,12 @@ void AudioEngine::releaseResources()
             trashBin.push_back({activeDSP, juce::Time::getMillisecondCounter()});
             activeDSP = nullptr;
         }
+
+        if (auto* fading = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
+            fading->release();
+
+        dspCrossfadePending.store(false, std::memory_order_release);
+        dspCrossfadeGain.setCurrentAndTargetValue(1.0);
     }
 
     // 3. Release UI Processor Resources
@@ -2446,8 +2500,6 @@ void AudioEngine::releaseResources()
 //--------------------------------------------------------------
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    processLearningCommands();
-
     const juce::ScopedNoDenormals noDenormals;
 
     // 入力検証 (Input Validation)
@@ -2552,28 +2604,97 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
         convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
-        // 処理委譲
-        dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear,
-                     { .eqBypassed             = eqBypassed,
-                       .convBypassed           = convBypassed,
-                       .order                  = order,
-                       .analyzerSource         = analyzerSource,
-                       .analyzerEnabled        = analyzerEnabledNow,
-                       .softClipEnabled        = softClip,
-                       .saturationAmount       = satAmt,
-                       .inputHeadroomGain      = headroomGain,
-                       .outputMakeupGain       = makeupGain,
-                       .convolverInputTrimGain = convInputTrimGain,
-                       .convHCMode             = hcMode,
-                       .convLCMode             = lcMode,
-                       .eqLPFMode              = lpfMode,
-                       .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
-                       .adaptiveCoeffSet       = safeAdaptiveSet,
-                       .adaptiveCoeffGeneration = adaptiveGenAfter,
-                       .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
-                       .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
-                       .captureSessionId      = dsp->currentCaptureSessionId,
-                       .adaptiveCaptureQueue   = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr });
+        DSPCore::ProcessingState procState {
+            .eqBypassed               = eqBypassed,
+            .convBypassed             = convBypassed,
+            .order                    = order,
+            .analyzerSource           = analyzerSource,
+            .analyzerEnabled          = analyzerEnabledNow,
+            .softClipEnabled          = softClip,
+            .saturationAmount         = satAmt,
+            .inputHeadroomGain        = headroomGain,
+            .outputMakeupGain         = makeupGain,
+            .convolverInputTrimGain   = convInputTrimGain,
+            .convHCMode               = hcMode,
+            .convLCMode               = lcMode,
+            .eqLPFMode                = lpfMode,
+            .adaptiveCoeffBankIndex   = adaptiveCoeffBankIndex,
+            .adaptiveCoeffSet         = safeAdaptiveSet,
+            .adaptiveCoeffGeneration  = adaptiveGenAfter,
+            .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
+            .adaptiveCaptureBitDepth  = dsp->ditherBitDepth,
+            .captureSessionId         = dsp->currentCaptureSessionId,
+            .adaptiveCaptureQueue     = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
+        };
+
+        DSPCore* fading = fadingOutDSP.load(std::memory_order_acquire);
+        if (fading != nullptr && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
+        {
+            dspCrossfadeGain.reset(std::max(1.0, dsp->sampleRate), 0.03);
+            dspCrossfadeGain.setCurrentAndTargetValue(0.0);
+            dspCrossfadeGain.setTargetValue(1.0);
+        }
+
+        const bool canCrossfade = (fading != nullptr)
+            && dspCrossfadeGain.isSmoothing()
+            && dspCrossfadeFloatBuffer.getNumChannels() >= 2
+            && dspCrossfadeFloatBuffer.getNumSamples() >= numSamples;
+
+        if (canCrossfade)
+        {
+            juce::AudioSourceChannelInfo fadeInfo(&dspCrossfadeFloatBuffer, 0, numSamples);
+            dspCrossfadeFloatBuffer.clear(0, 0, numSamples);
+            dspCrossfadeFloatBuffer.clear(1, 0, numSamples);
+
+            auto fadingState = procState;
+            fadingState.analyzerEnabled = false;
+            fadingState.adaptiveCaptureQueue = nullptr;
+
+            std::atomic<float> fadingInputMeter { 0.0f };
+            std::atomic<float> fadingOutputMeter { 0.0f };
+            fading->addRef();
+            dsp->addRef();
+            fading->processToBuffer(bufferToFill, dspCrossfadeFloatBuffer, audioFifo, audioFifoBuffer,
+                                   fadingInputMeter, fadingOutputMeter, fadingState);
+            dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+
+            const int outChannels = std::min(2, buffer->getNumChannels());
+            float* dstL = (outChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
+            float* dstR = (outChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
+            const float* oldL = (outChannels > 0) ? dspCrossfadeFloatBuffer.getReadPointer(0, 0) : nullptr;
+            const float* oldR = (outChannels > 1) ? dspCrossfadeFloatBuffer.getReadPointer(1, 0) : nullptr;
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const double gNew = dspCrossfadeGain.getNextValue();
+                const double gOld = 1.0 - gNew;
+                if (dstL != nullptr)
+                    dstL[i] = static_cast<float>(dstL[i] * gNew + oldL[i] * gOld);
+                if (dstR != nullptr)
+                    dstR[i] = static_cast<float>(dstR[i] * gNew + oldR[i] * gOld);
+            }
+
+            dsp->release();
+            fading->release();
+
+            if (!dspCrossfadeGain.isSmoothing())
+            {
+                if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
+                    done->release();
+                dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+            }
+        }
+        else
+        {
+            dsp->addRef();
+            dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+            dsp->release();
+
+            if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
+            {
+                if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
+                    done->release();
+            }
+        }
     }
     else
     {
@@ -2607,8 +2728,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         buffer.clear();
         return;
     }
-
-    processLearningCommands();
 
     const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
     if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
@@ -2661,27 +2780,126 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
     convBypassActive.store(convBypassed, std::memory_order_relaxed);
 
-    dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear,
-                       { .eqBypassed             = eqBypassed,
-                         .convBypassed           = convBypassed,
-                         .order                  = order,
-                         .analyzerSource         = analyzerSource,
-                         .analyzerEnabled        = analyzerEnabledNow,
-                         .softClipEnabled        = softClip,
-                         .saturationAmount       = satAmt,
-                         .inputHeadroomGain      = headroomGain,
-                         .outputMakeupGain       = makeupGain,
-                         .convolverInputTrimGain = convInputTrimGain,
-                         .convHCMode             = hcMode,
-                         .convLCMode             = lcMode,
-                         .eqLPFMode              = lpfMode,
-                         .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
-                         .adaptiveCoeffSet       = safeAdaptiveSet,
-                         .adaptiveCoeffGeneration = adaptiveGenAfter,
-                         .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
-                         .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
-                         .captureSessionId      = dsp->currentCaptureSessionId,
-                         .adaptiveCaptureQueue   = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr });
+    DSPCore::ProcessingState procState {
+        .eqBypassed               = eqBypassed,
+        .convBypassed             = convBypassed,
+        .order                    = order,
+        .analyzerSource           = analyzerSource,
+        .analyzerEnabled          = analyzerEnabledNow,
+        .softClipEnabled          = softClip,
+        .saturationAmount         = satAmt,
+        .inputHeadroomGain        = headroomGain,
+        .outputMakeupGain         = makeupGain,
+        .convolverInputTrimGain   = convInputTrimGain,
+        .convHCMode               = hcMode,
+        .convLCMode               = lcMode,
+        .eqLPFMode                = lpfMode,
+        .adaptiveCoeffBankIndex   = adaptiveCoeffBankIndex,
+        .adaptiveCoeffSet         = safeAdaptiveSet,
+        .adaptiveCoeffGeneration  = adaptiveGenAfter,
+        .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
+        .adaptiveCaptureBitDepth  = dsp->ditherBitDepth,
+        .captureSessionId         = dsp->currentCaptureSessionId,
+        .adaptiveCaptureQueue     = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
+    };
+
+    DSPCore* fading = fadingOutDSP.load(std::memory_order_acquire);
+    if (fading != nullptr && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
+    {
+        dspCrossfadeGain.reset(std::max(1.0, dsp->sampleRate), 0.03);
+        dspCrossfadeGain.setCurrentAndTargetValue(0.0);
+        dspCrossfadeGain.setTargetValue(1.0);
+    }
+
+    const bool canCrossfade = (fading != nullptr)
+        && dspCrossfadeGain.isSmoothing()
+        && dspCrossfadeDoubleBuffer.getNumChannels() >= 2
+        && dspCrossfadeDoubleBuffer.getNumSamples() >= numSamples;
+
+    if (canCrossfade)
+    {
+        dspCrossfadeDoubleBuffer.clear(0, 0, numSamples);
+        dspCrossfadeDoubleBuffer.clear(1, 0, numSamples);
+
+        auto fadingState = procState;
+        fadingState.analyzerEnabled = false;
+        fadingState.adaptiveCaptureQueue = nullptr;
+
+        std::atomic<float> fadingInputMeter { 0.0f };
+        std::atomic<float> fadingOutputMeter { 0.0f };
+        fading->addRef();
+        dsp->addRef();
+        fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, audioFifo, audioFifoBuffer,
+                                      fadingInputMeter, fadingOutputMeter, fadingState);
+        dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+
+        const int outChannels = std::min(2, buffer.getNumChannels());
+        double* dstL = (outChannels > 0) ? buffer.getWritePointer(0, 0) : nullptr;
+        double* dstR = (outChannels > 1) ? buffer.getWritePointer(1, 0) : nullptr;
+        const double* oldL = (outChannels > 0) ? dspCrossfadeDoubleBuffer.getReadPointer(0, 0) : nullptr;
+        const double* oldR = (outChannels > 1) ? dspCrossfadeDoubleBuffer.getReadPointer(1, 0) : nullptr;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double gNew = dspCrossfadeGain.getNextValue();
+            const double gOld = 1.0 - gNew;
+            if (dstL != nullptr)
+                dstL[i] = dstL[i] * gNew + oldL[i] * gOld;
+            if (dstR != nullptr)
+                dstR[i] = dstR[i] * gNew + oldR[i] * gOld;
+        }
+
+        dsp->release();
+        fading->release();
+
+        if (!dspCrossfadeGain.isSmoothing())
+        {
+            if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
+                done->release();
+            dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+        }
+    }
+    else
+    {
+        dsp->addRef();
+        dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+        dsp->release();
+
+        if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
+        {
+            if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
+                done->release();
+        }
+    }
+}
+
+void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& source,
+                                          juce::AudioBuffer<float>& destination,
+                                          juce::AbstractFifo& audioFifo,
+                                          juce::AudioBuffer<float>& audioFifoBuffer,
+                                          std::atomic<float>& inputLevelLinear,
+                                          std::atomic<float>& outputLevelLinear,
+                                          const ProcessingState& state)
+{
+    const int numSamples = source.numSamples;
+    const int numChannels = std::min(2, source.buffer != nullptr ? source.buffer->getNumChannels() : 0);
+
+    if (source.buffer == nullptr || numSamples <= 0 || destination.getNumSamples() < numSamples)
+    {
+        destination.clear();
+        return;
+    }
+
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const float* src = source.buffer->getReadPointer(ch, source.startSample);
+        float* dst = destination.getWritePointer(ch, 0);
+        juce::FloatVectorOperations::copy(dst, src, numSamples);
+    }
+    for (int ch = numChannels; ch < destination.getNumChannels(); ++ch)
+        destination.clear(ch, 0, numSamples);
+
+    juce::AudioSourceChannelInfo destinationInfo(&destination, 0, numSamples);
+    process(destinationInfo, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, state);
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
@@ -2901,6 +3119,35 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     }
 }
 
+void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>& source,
+                                                 juce::AudioBuffer<double>& destination,
+                                                 juce::AbstractFifo& audioFifo,
+                                                 juce::AudioBuffer<float>& audioFifoBuffer,
+                                                 std::atomic<float>& inputLevelLinear,
+                                                 std::atomic<float>& outputLevelLinear,
+                                                 const ProcessingState& state)
+{
+    const int numSamples = source.getNumSamples();
+    const int numChannels = std::min(2, source.getNumChannels());
+
+    if (numSamples <= 0 || destination.getNumSamples() < numSamples)
+    {
+        destination.clear();
+        return;
+    }
+
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* src = source.getReadPointer(ch, 0);
+        double* dst = destination.getWritePointer(ch, 0);
+        juce::FloatVectorOperations::copy(dst, src, numSamples);
+    }
+    for (int ch = numChannels; ch < destination.getNumChannels(); ++ch)
+        destination.clear(ch, 0, numSamples);
+
+    processDouble(destination, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, state);
+}
+
 void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                                          juce::AbstractFifo& audioFifo,
                                          juce::AudioBuffer<float>& audioFifoBuffer,
@@ -2932,9 +3179,22 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                                                      inputTapD, audioFifo, audioFifoBuffer);
     inputLevelLinear.store(rawInputLinearD, std::memory_order_relaxed);
 
+    const bool requestedFullBypass = state.eqBypassed && state.convBypassed;
+    if (requestedFullBypass != bypassedDouble)
+    {
+        bypassFadeGainDouble.setTargetValue(requestedFullBypass ? 0.0 : 1.0);
+        bypassedDouble = requestedFullBypass;
+    }
+
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
     juce::dsp::AudioBlock<double> originalBlock = processBlock;
+
+    if (dryBypassBufferDoubleL && dryBypassBufferDoubleR && dryBypassCapacityDouble >= numSamples)
+    {
+        juce::FloatVectorOperations::copy(dryBypassBufferDoubleL.get(), alignedL.get(), numSamples);
+        juce::FloatVectorOperations::copy(dryBypassBufferDoubleR.get(), alignedR.get(), numSamples);
+    }
 
     if (oversamplingFactor > 1)
     {
@@ -3029,10 +3289,46 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
         pushToFifo(processBlock, audioFifo, audioFifoBuffer);
 
+    const bool bypassBlendRequested = bypassFadeGainDouble.isSmoothing() || requestedFullBypass;
+    if (oversamplingFactor == 1
+        && dryBypassBufferDoubleL
+        && dryBypassBufferDoubleR
+        && dryBypassCapacityDouble >= numSamples
+        && bypassBlendRequested)
+    {
+        double* wetL = (numProcChannels > 0) ? processBlock.getChannelPointer(0) : nullptr;
+        double* wetR = (numProcChannels > 1) ? processBlock.getChannelPointer(1) : nullptr;
+        const double* dryL = dryBypassBufferDoubleL.get();
+        const double* dryR = dryBypassBufferDoubleR.get();
+        for (int i = 0; i < numProcSamples; ++i)
+        {
+            const double gWet = bypassFadeGainDouble.getNextValue();
+            const double gDry = 1.0 - gWet;
+            if (wetL != nullptr)
+                wetL[i] = wetL[i] * gWet + dryL[i] * gDry;
+            if (wetR != nullptr)
+                wetR[i] = wetR[i] * gWet + dryR[i] * gDry;
+        }
+    }
+
     if (oversamplingFactor > 1)
     {
         oversampling.processDown(processBlock, originalBlock, static_cast<int>(originalBlock.getNumChannels()));
         processBlock = originalBlock;
+
+        if (bypassBlendRequested)
+        {
+            double* wetL = processBlock.getNumChannels() > 0 ? processBlock.getChannelPointer(0) : nullptr;
+            double* wetR = processBlock.getNumChannels() > 1 ? processBlock.getChannelPointer(1) : nullptr;
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const double gWet = bypassFadeGainDouble.getNextValue();
+                if (wetL != nullptr)
+                    wetL[i] *= gWet;
+                if (wetR != nullptr)
+                    wetR[i] *= gWet;
+            }
+        }
     }
 
     const float outputLinear = measureLevel(originalBlock);
@@ -3952,6 +4248,16 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
 {
     if (ditherBitDepth.load() != bitDepth)
     {
+        const bool adaptiveLearningActive = (noiseShaperType.load(std::memory_order_relaxed) == NoiseShaperType::Adaptive9thOrder)
+            && noiseShaperLearner
+            && noiseShaperLearner->isRunning();
+
+        if (adaptiveLearningActive)
+        {
+            stopNoiseShaperLearning();
+            noiseShaperLearner->setErrorMessage("Learning stopped due to bit depth change. Please restart learning.");
+        }
+
         ditherBitDepth.store(bitDepth);
         DBG_LOG("Dither Bit Depth changed: " + juce::String(bitDepth));
 
