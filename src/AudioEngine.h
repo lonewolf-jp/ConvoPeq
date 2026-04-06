@@ -318,6 +318,8 @@ private:
     //----------------------------------------------------------
     struct DSPCore
     {
+        mutable std::atomic<int> refCount { 1 };
+
         struct ProcessingState
         {
             bool eqBypassed;
@@ -346,6 +348,13 @@ private:
 DSPCore();
         DSPCore(const DSPCore&) = delete;
         DSPCore& operator=(const DSPCore&) = delete;
+
+    void addRef() const noexcept { refCount.fetch_add(1, std::memory_order_relaxed); }
+    void release() const noexcept
+    {
+        if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        delete this;
+    }
 
     ~DSPCore()
     {
@@ -512,6 +521,8 @@ DSPCore();
 
     LearningCommand learningCommandBuffer[learningCommandBufferSize] {};
     LearnerDispatchAction learnerDispatchBuffer[learnerDispatchBufferSize] {};
+    std::atomic<bool> learnerDispatchOverflow { false };
+    LearnerDispatchAction lastFailedAction {};
 
     #pragma warning(push)
     #pragma warning(disable: 4324)
@@ -769,13 +780,15 @@ inline bool AudioEngine::enqueueLearnerDispatch(const LearnerDispatchAction& act
     const uint32_t next = (currentWrite + 1u) & learnerDispatchBufferMask;
     if (next == currentRead)
     {
-        jassertfalse;
+        lastFailedAction = action;
+        learnerDispatchOverflow.store(true, std::memory_order_release);
         return false;
     }
 
     learnerDispatchBuffer[currentWrite] = action;
     std::atomic_thread_fence(std::memory_order_release);
     learnerDispatchWrite.store(next, std::memory_order_release);
+    learnerDispatchOverflow.store(false, std::memory_order_relaxed);
     return true;
 }
 

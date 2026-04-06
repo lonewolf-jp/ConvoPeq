@@ -149,7 +149,7 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
         int inputProcessed = 0;
         int iterations = 0;
         constexpr int maxIterations = 1000000; // 無限ループ防止のための安全カウンター
-        constexpr int CHUNK_SIZE = 4096; // キャンセル応答性を高めるためのチャンクサイズ
+        constexpr int CHUNK_SIZE = 1024; // キャンセル応答性を高めるためのチャンクサイズ
 
         // 入力をチャンク分割して処理 (キャンセルチェックを頻繁に行うため)
         while (inputProcessed < inLength && done < maxOutLen && ++iterations < maxIterations)

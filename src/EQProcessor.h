@@ -376,6 +376,10 @@ private:
     std::atomic<double> agcReleaseCoeff { 0.0 };
     std::atomic<double> agcSmoothCoeff { 0.0 };
     double cachedInputRMS = 0.0; // AGC用の入力レベルキャッシュ
+    convo::ScopedAlignedPtr<double> agcAttackCoeffTable;
+    convo::ScopedAlignedPtr<double> agcReleaseCoeffTable;
+    convo::ScopedAlignedPtr<double> agcSmoothCoeffTable;
+    int agcCoeffTableCapacity = 0;
 
     // ── パラメータ補間 (Smoothing) ──
     std::atomic<float>  totalGainDbTarget { 0.0f };

@@ -30,6 +30,7 @@
 #include <functional>
 #include <deque>
 #include <map>
+#include <cmath>
 #include "AlignedAllocation.h"
 #include "MKLNonUniformConvolver.h"
 #include "AllpassDesigner.h"
@@ -713,9 +714,9 @@ private:
             if (fileHash != other.fileHash) return fileHash < other.fileHash;
             if (sampleRate != other.sampleRate) return sampleRate < other.sampleRate;
             if (phaseMode != other.phaseMode) return phaseMode < other.phaseMode;
-            if (f1 != other.f1) return f1 < other.f1;
-            if (f2 != other.f2) return f2 < other.f2;
-            if (tau != other.tau) return tau < other.tau;
+            if (std::abs(f1 - other.f1) > 1.0e-6f) return f1 < other.f1;
+            if (std::abs(f2 - other.f2) > 1.0e-6f) return f2 < other.f2;
+            if (std::abs(tau - other.tau) > 1.0e-6f) return tau < other.tau;
             return targetLength < other.targetLength;
         }
     };

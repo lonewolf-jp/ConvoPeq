@@ -601,6 +601,19 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
         juce::FloatVectorOperations::clear(structureOldOutBuffer.get(), channelRequired);
         juce::FloatVectorOperations::clear(structureNewOutBuffer.get(), channelRequired);
     }
+
+    if (newMaxInternalBlockSize > 0 && agcCoeffTableCapacity < (newMaxInternalBlockSize + 1))
+    {
+        agcAttackCoeffTable.reset(static_cast<double*>(convo::aligned_malloc((newMaxInternalBlockSize + 1) * sizeof(double), 64)));
+        agcReleaseCoeffTable.reset(static_cast<double*>(convo::aligned_malloc((newMaxInternalBlockSize + 1) * sizeof(double), 64)));
+        agcSmoothCoeffTable.reset(static_cast<double*>(convo::aligned_malloc((newMaxInternalBlockSize + 1) * sizeof(double), 64)));
+
+        if (agcAttackCoeffTable && agcReleaseCoeffTable && agcSmoothCoeffTable)
+            agcCoeffTableCapacity = newMaxInternalBlockSize + 1;
+        else
+            agcCoeffTableCapacity = 0;
+    }
+
     // This can be called from a worker thread, so use the raw pointer.
     auto state = currentStateRaw.load(std::memory_order_acquire);
 
@@ -625,6 +638,17 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     agcAttackCoeff.store(std::exp(-1.0 / (sr * AGC_ATTACK_TIME_SEC)), std::memory_order_relaxed);
     agcReleaseCoeff.store(std::exp(-1.0 / (sr * AGC_RELEASE_TIME_SEC)), std::memory_order_relaxed);
     agcSmoothCoeff.store(std::exp(-1.0 / (sr * AGC_SMOOTH_TIME_SEC)), std::memory_order_relaxed);
+
+    if (agcCoeffTableCapacity > 0 && agcAttackCoeffTable && agcReleaseCoeffTable && agcSmoothCoeffTable)
+    {
+        for (int i = 0; i < agcCoeffTableCapacity; ++i)
+        {
+            const double n = static_cast<double>(i);
+            agcAttackCoeffTable[i]  = 1.0 - std::exp(-n / (sr * AGC_ATTACK_TIME_SEC));
+            agcReleaseCoeffTable[i] = 1.0 - std::exp(-n / (sr * AGC_RELEASE_TIME_SEC));
+            agcSmoothCoeffTable[i]  = 1.0 - std::exp(-n / (sr * AGC_SMOOTH_TIME_SEC));
+        }
+    }
 
     agcCurrentGain.store(1.0, std::memory_order_relaxed);
     agcEnvInput.store(0.0, std::memory_order_relaxed);
@@ -1222,15 +1246,31 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     const double releaseCoeff = agcReleaseCoeff.load(std::memory_order_relaxed);
     const double smoothCoeff = agcSmoothCoeff.load(std::memory_order_relaxed);
 
-    // ブロック長に応じた係数補正（サンプル単位相当の応答に近づける）
-    // テイラー展開1次近似: (1 - ε)^N ≈ 1 - N·ε  (εが小さい場合)
-    const double attackEpsilon = 1.0 - attackCoeff;
-    const double releaseEpsilon = 1.0 - releaseCoeff;
-    const double smoothEpsilon = 1.0 - smoothCoeff;
+    double blockAttackCoeff;
+    double blockReleaseCoeff;
+    double blockSmoothCoeff;
 
-    const double blockAttackCoeff = std::min(1.0, static_cast<double>(numSamples) * attackEpsilon);
-    const double blockReleaseCoeff = std::min(1.0, static_cast<double>(numSamples) * releaseEpsilon);
-    const double blockSmoothCoeff = std::min(1.0, static_cast<double>(numSamples) * smoothEpsilon);
+    if (numSamples >= 0
+        && numSamples < agcCoeffTableCapacity
+        && agcAttackCoeffTable
+        && agcReleaseCoeffTable
+        && agcSmoothCoeffTable)
+    {
+        blockAttackCoeff = agcAttackCoeffTable[numSamples];
+        blockReleaseCoeff = agcReleaseCoeffTable[numSamples];
+        blockSmoothCoeff = agcSmoothCoeffTable[numSamples];
+    }
+    else
+    {
+        // テーブル未確保時のみ、既存の libm 非依存近似へフォールバックする。
+        const double attackEpsilon = 1.0 - attackCoeff;
+        const double releaseEpsilon = 1.0 - releaseCoeff;
+        const double smoothEpsilon = 1.0 - smoothCoeff;
+
+        blockAttackCoeff = std::min(1.0, static_cast<double>(numSamples) * attackEpsilon);
+        blockReleaseCoeff = std::min(1.0, static_cast<double>(numSamples) * releaseEpsilon);
+        blockSmoothCoeff = std::min(1.0, static_cast<double>(numSamples) * smoothEpsilon);
+    }
 
     double inputRMS = cachedInputRMS;
 
@@ -1324,6 +1364,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (absNoLibm(bypassFadeGain.getTargetValue() - targetBypassFade) > 1.0e-12)
     {
         if (!requestedBypass && effectiveBypass)
+            bandResetMask.store(0xFFFFFFFFu, std::memory_order_relaxed);
             bypassed.store(false, std::memory_order_relaxed);
         bypassFadeGain.setTargetValue(targetBypassFade);
         effectiveBypass = bypassed.load(std::memory_order_relaxed);

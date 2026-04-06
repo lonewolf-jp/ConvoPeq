@@ -93,6 +93,8 @@ namespace
         if (captureQueue == nullptr || left == nullptr || numSamples <= 0)
             return;
 
+        static std::atomic<uint64_t> dropCount { 0 };
+
         static constexpr int kBlockSize = 256;
         for (int offset = 0; offset < numSamples; offset += kBlockSize)
         {
@@ -100,7 +102,7 @@ namespace
             const double* srcL = left + offset;
             const double* srcR = (right != nullptr) ? (right + offset) : srcL;
 
-            captureQueue->pushWithWriter([&](AudioBlock& block) noexcept
+            if (!captureQueue->pushWithWriter([&](AudioBlock& block) noexcept
             {
                 block.numSamples = currentBlockSize;
                 block.sampleRateHz = sampleRateHz;
@@ -127,7 +129,10 @@ namespace
                 }
                 for (; i < currentBlockSize; ++i)
                     block.R[i] = srcR[i];
-            });
+            }))
+            {
+                dropCount.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -1017,7 +1022,7 @@ AudioEngine::~AudioEngine()
     if (activeDSP)
     {
         activeDSP->convolver.forceCleanup();
-        delete activeDSP;
+        activeDSP->release();
         activeDSP = nullptr;
     }
 
@@ -1025,7 +1030,7 @@ AudioEngine::~AudioEngine()
     // Clear all pending and old DSPs.
     {
         juce::ScopedLock sl(trashBinLock);
-        for (auto& entry : trashBin) delete entry.first;
+        for (auto& entry : trashBin) entry.first->release();
         trashBin.clear();
     }
 }
@@ -1659,6 +1664,8 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     OversamplingType osType = oversamplingType.load();
     NoiseShaperType nsType = noiseShaperType.load();
     DSPCore* current = activeDSP; // 現在のアクティブDSPをキャプチャ
+    if (current != nullptr)
+        current->addRef();
     int generation = 0;
 
     RebuildTask task;
@@ -1672,6 +1679,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     task.noiseShaperType = nsType;
 
     DSPCore* dspToDestroy = nullptr; // To be destroyed outside the lock
+    DSPCore* currentToRelease = nullptr;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
 
@@ -1682,7 +1690,10 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
         // If a task is already pending, move it out to be destroyed outside the lock.
         // This prevents holding the lock during a potentially slow DSPCore destruction.
         if (hasPendingTask)
+        {
             dspToDestroy = pendingTask.newDSP;
+            currentToRelease = pendingTask.currentDSP;
+        }
 
         pendingTask = task;
         hasPendingTask = true;
@@ -1691,7 +1702,9 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 
     // Destroy the orphaned DSP from the superseded task outside the lock.
     if (dspToDestroy)
-        delete dspToDestroy;
+        dspToDestroy->release();
+    if (currentToRelease)
+        currentToRelease->release();
 }
 
 void AudioEngine::rebuildThreadLoop()
@@ -1728,20 +1741,37 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
             }
 
-            // Use unique_ptr to ensure deletion if we continue/break/throw before commit
-            std::unique_ptr<DSPCore> dspGuard(task.newDSP);
+            struct DSPGuard
+            {
+                DSPCore* ptr;
+                ~DSPGuard()
+                {
+                    if (ptr != nullptr)
+                        ptr->release();
+                }
+            } dspGuard { task.newDSP };
 
             // Helper to check obsolescence
             const auto isObsolete = [&] {
                 return isRebuildObsolete(task.generation) || rebuildThreadShouldExit.load();
             };
 
-            if (isObsolete()) continue;
+            if (isObsolete())
+            {
+                if (task.currentDSP != nullptr)
+                    task.currentDSP->release();
+                continue;
+            }
 
             // 1. Prepare (メモリ確保)
             task.newDSP->prepare(task.sampleRate, task.samplesPerBlock, task.ditherDepth, task.manualOversamplingFactor, task.oversamplingType, task.noiseShaperType);
 
-            if (isObsolete()) continue;
+            if (isObsolete())
+            {
+                if (task.currentDSP != nullptr)
+                    task.currentDSP->release();
+                continue;
+            }
 
             // 2. Reuse Logic
             //
@@ -1797,11 +1827,21 @@ void AudioEngine::rebuildThreadLoop()
             // 3. Rebuild IR if needed (Heavy operation)
             if (!irReused && task.newDSP->convolver.getIRLength() > 0)
             {
-                if (isObsolete()) continue;
+                if (isObsolete())
+                {
+                    if (task.currentDSP != nullptr)
+                        task.currentDSP->release();
+                    continue;
+                }
                 task.newDSP->convolver.rebuildAllIRsSynchronous(isObsolete);
             }
 
-            if (isObsolete()) continue;
+            if (isObsolete())
+            {
+                if (task.currentDSP != nullptr)
+                    task.currentDSP->release();
+                continue;
+            }
 
             // 4. Refresh Latency (Prevent pitch slide during fade-in)
             task.newDSP->convolver.refreshLatency();
@@ -1811,7 +1851,8 @@ void AudioEngine::rebuildThreadLoop()
 
             // 6. Commit on Message Thread
             // Release ownership from guard, pass to commitNewDSP
-            DSPCore* dspToCommit = dspGuard.release();
+            DSPCore* dspToCommit = dspGuard.ptr;
+            dspGuard.ptr = nullptr;
             if (! juce::MessageManager::callAsync([weakSelf = juce::WeakReference<AudioEngine>(this), newDSP = dspToCommit, generation = task.generation] {
                 if (auto* self = weakSelf.get())
                 {
@@ -1820,13 +1861,16 @@ void AudioEngine::rebuildThreadLoop()
                 else
                 {
                     // Engine is gone, delete the orphan DSP
-                    delete newDSP;
+                    newDSP->release();
                 }
             }))
             {
                 // MessageManager failed (e.g. shutting down), prevent leak
-                delete dspToCommit;
+                dspToCommit->release();
             }
+
+            if (task.currentDSP != nullptr)
+                task.currentDSP->release();
         }
         catch (const std::exception& e)
         {
@@ -1851,7 +1895,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // 古いリクエストの結果であれば破棄 (Race condition対策)
         if (generation != rebuildGeneration.load(std::memory_order_relaxed))
         {
-            delete newDSP;
+            newDSP->release();
             return;
         }
 
@@ -1881,7 +1925,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         {
             // Fallback: if we can't enqueue for later deletion, delete immediately.
             // This prevents a memory leak in case of std::bad_alloc.
-            delete dspToTrash;
+            dspToTrash->release();
         }
     }
 
@@ -1905,6 +1949,12 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
 void AudioEngine::processLearningCommands() noexcept
 {
+    if (learnerDispatchOverflow.load(std::memory_order_acquire))
+    {
+        if (enqueueLearnerDispatch(lastFailedAction))
+            learnerDispatchOverflow.store(false, std::memory_order_release);
+    }
+
     LearningCommand cmd;
     while (dequeueLearningCommand(cmd))
     {
@@ -2058,6 +2108,8 @@ void AudioEngine::resetLearningControlState() noexcept
     learningCommandRead = 0;
     learnerDispatchWrite = 0;
     learnerDispatchRead = 0;
+    learnerDispatchOverflow.store(false, std::memory_order_release);
+    lastFailedAction = {};
     learningRuntimeState = LearningRuntimeState::Idle;
     requestedLearningMode = pendingLearningMode.load(std::memory_order_acquire);
     requestedLearningResume = false;
@@ -2127,7 +2179,7 @@ void AudioEngine::timerCallback()
 
     // ロック解放後に削除
     for (size_t i = 0; i < toDeleteCount; ++i)
-        delete toDelete[i];
+        toDelete[i]->release();
 
     // 3. 内部プロセッサのクリーンアップを実行
     // 現在アクティブなDSPの内部ゴミ箱も掃除する
@@ -2487,7 +2539,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
         // 取得中に世代が変化した場合、ポインタが指すバッファが Writer によって再利用されている可能性がある。
         // 安全のため、このブロックでは係数更新をスキップする（nullptr を渡す）。
-        const CoeffSet* safeAdaptiveSet = (adaptiveGenBefore == adaptiveGenAfter) ? adaptiveSet : nullptr;
+        CoeffSet localAdaptiveSet {};
+        const CoeffSet* safeAdaptiveSet = nullptr;
+        if (adaptiveSet != nullptr && adaptiveGenBefore == adaptiveGenAfter)
+        {
+            localAdaptiveSet = *adaptiveSet;
+            if (adaptiveCoeffBank.generation.load(std::memory_order_acquire) == adaptiveGenAfter)
+                safeAdaptiveSet = &localAdaptiveSet;
+        }
 
         // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
         eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
@@ -2589,7 +2648,14 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
     // 取得中に世代が変化した場合、ポインタが指すバッファが Writer によって再利用されている可能性がある。
     // 安全のため、このブロックでは係数更新をスキップする（nullptr を渡す）。
-    const CoeffSet* safeAdaptiveSet = (adaptiveGenBefore == adaptiveGenAfter) ? adaptiveSet : nullptr;
+    CoeffSet localAdaptiveSet {};
+    const CoeffSet* safeAdaptiveSet = nullptr;
+    if (adaptiveSet != nullptr && adaptiveGenBefore == adaptiveGenAfter)
+    {
+        localAdaptiveSet = *adaptiveSet;
+        if (adaptiveCoeffBank.generation.load(std::memory_order_acquire) == adaptiveGenAfter)
+            safeAdaptiveSet = &localAdaptiveSet;
+    }
 
     // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
     eqBypassActive.store(eqBypassed, std::memory_order_relaxed);

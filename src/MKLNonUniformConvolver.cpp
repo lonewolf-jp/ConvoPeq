@@ -205,7 +205,7 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         {
             // [Issue 5 fix] OOM 時はエラーログを出力し、当該レイヤーのフィルタ適用をスキップ。
             // これによりクラッシュを回避しつつ、異常状態を通知する。
-            std::cerr << "MKLNonUniformConvolver: OOM in applySpectrumFilter for layer " << li << std::endl;
+            juce::Logger::writeToLog("MKLNonUniformConvolver: OOM in applySpectrumFilter for layer " + juce::String(li));
             continue;
         }
         std::fill_n(gain.get(), cSize, 1.0);
@@ -998,16 +998,16 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
         // オーバーフロー安全弁
         //
         // 【対応方針】Audio Thread 内でブロックは不可。
-        //   m_ringRead は変更せず（既存の出力データを保護）、
-        //   m_ringWrite を調整して最も古い未読データを上書きする「セーフ上書き」戦略。
+        //   最も古い未読データを破棄し、最新データの連続性を優先する。
         //   コールバックでオーバーフロー発生を通知し、非同期リビルドを促す。
         // ─────────────────────────────────────────────────────────────────
+        const int overflow = nextAvail - m_ringSize;
+        m_ringRead = (m_ringRead + overflow) & m_ringMask;
+        m_ringAvail = m_ringSize;
+        m_ringWrite = (m_ringWrite + overflow) & m_ringMask;
         m_ringOverflowCount.fetch_add(1, std::memory_order_relaxed);
         if (overflowCallback)
             overflowCallback(overflowUserData);
-        // 読み取り位置は変更しない（連続性維持）、書き込み位置を調整
-        m_ringAvail = m_ringSize;
-        m_ringWrite = (m_ringRead + m_ringSize - 1) & m_ringMask;
     }
     else
     {
