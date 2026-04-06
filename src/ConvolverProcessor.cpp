@@ -1171,6 +1171,17 @@ ConvolverProcessor::ConvolverProcessor()
     : mixSmoother(1.0f)
 {
     irConverter = std::make_unique<IRConverter>();
+
+    // 等パワークロスフェード用ランプの事前計算
+    crossfadeRamp.resize(FADE_SAMPLES);
+    for (int i = 0; i < FADE_SAMPLES; ++i)
+    {
+        const double angle = static_cast<double>(i) / (FADE_SAMPLES - 1)
+                             * juce::MathConstants<double>::pi / 2.0;
+        crossfadeRamp[i].active = std::sin(angle); // 0 → 1 (新IR フェードイン)
+        crossfadeRamp[i].fading = std::cos(angle); // 1 → 0 (旧IR フェードアウト)
+    }
+
     cacheManager = std::make_unique<CacheManager>();
     cacheManager->setSafeDeleteChecker([this](uint64_t key, int fftSize)
     {
@@ -1218,17 +1229,16 @@ void ConvolverProcessor::timerCallback()
         }
     }
     // IR切り替え時のクロスフェードが完了したら、古いコンボルバーを安全に破棄する
-    // [Bug G fix] wetCrossfade.isSmoothing() は非スレッドセーフ(AudioThread が同時に getNextValue() を呼ぶ)。
-    // wetCrossfadeActive アトミックフラグで代替する。
-    if (!wetCrossfadeActive.load(std::memory_order_acquire))
+    // clearFadingPending は Audio Thread がフェード完了時に立てる。
+    if (clearFadingPending.exchange(false, std::memory_order_acq_rel))
     {
-        auto* doneFading = fadingOutConvolution.exchange(nullptr);
-        if (doneFading != nullptr)
-        {
-            const juce::ScopedLock sl(trashBinLock);
-            // 参照カウントを解放するために release() を呼ぶ
-            trashBin.push_back({doneFading, juce::Time::getMillisecondCounter()});
-        }
+        clearFadingSnapshot();
+    }
+    // 中断されたフェードのコンボルバーをここで解放する (前回 timerCallback から ≥30ms 経過)
+    if (prevInterruptedFade)
+    {
+        prevInterruptedFade->release();
+        prevInterruptedFade = nullptr;
     }
 
     cleanup();
@@ -1303,10 +1313,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                     convolution.store(newConv, std::memory_order_release);
 
                     if (activeConvolution)
-                    {
-                        const juce::ScopedLock sl(trashBinLock);
-                        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
-                    }
+                        activeConvolution->release();
                     activeConvolution = newConv;
                 }
                 else
@@ -1372,24 +1379,23 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     oldDryBuffer.setDataToReferTo(oldDryChs, 2, MAX_BLOCK_SIZE);
     oldDryBuffer.clear();
 
-    if (oldWetBufferCapacity < MAX_BLOCK_SIZE)
+    // 等パワークロスフェード用バッファの確保
+    if (bufferCapacity < MAX_BLOCK_SIZE)
     {
-        oldWetBufferStorage[0].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
-        oldWetBufferStorage[1].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
-        oldWetBufferCapacity = MAX_BLOCK_SIZE;
+        activeBufferL.reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        activeBufferR.reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        fadingBufferL.reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        fadingBufferR.reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        bufferCapacity = MAX_BLOCK_SIZE;
     }
-    double* oldWetChs[2] = { oldWetBufferStorage[0].get(), oldWetBufferStorage[1].get() };
-    oldWetBuffer.setDataToReferTo(oldWetChs, 2, MAX_BLOCK_SIZE);
-    oldWetBuffer.clear();
+    juce::FloatVectorOperations::clear(activeBufferL.get(), MAX_BLOCK_SIZE);
+    juce::FloatVectorOperations::clear(activeBufferR.get(), MAX_BLOCK_SIZE);
+    juce::FloatVectorOperations::clear(fadingBufferL.get(), MAX_BLOCK_SIZE);
+    juce::FloatVectorOperations::clear(fadingBufferR.get(), MAX_BLOCK_SIZE);
 
-    if (crossfadeRampBufferCapacity < MAX_BLOCK_SIZE)
-    {
-        crossfadeRampBuffer.reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
-        crossfadeRampBufferCapacity = MAX_BLOCK_SIZE;
-    }
-
-    wetCrossfade.reset(sampleRate, 0.02); // 20ms crossfade
-    wetCrossfade.setCurrentAndTargetValue(1.0);
+    // フェード状態をリセット
+    fadeState = FadeState{};
+    clearFadingPending.store(false, std::memory_order_release);
 
     // Wetバッファ確保
     if (wetBufferCapacity < MAX_BLOCK_SIZE)
@@ -1461,12 +1467,15 @@ void ConvolverProcessor::releaseResources()
     oldDryBufferStorage[1].reset();
     oldDryBufferCapacity = 0;
 
-    oldWetBufferStorage[0].reset();
-    oldWetBufferStorage[1].reset();
-    oldWetBufferCapacity = 0;
+    activeBufferL.reset();
+    activeBufferR.reset();
+    fadingBufferL.reset();
+    fadingBufferR.reset();
+    bufferCapacity = 0;
+    fadeState = FadeState{};
+    clearFadingPending.store(false, std::memory_order_release);
 
-    crossfadeRampBuffer.reset();
-    crossfadeRampBufferCapacity = 0;
+    if (prevInterruptedFade) { prevInterruptedFade->release(); prevInterruptedFade = nullptr; }
 
     smoothingBufferStorage[0].reset();
     smoothingBufferStorage[1].reset();
@@ -1489,11 +1498,6 @@ void ConvolverProcessor::releaseResources()
     if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
     auto* fading = fadingOutConvolution.exchange(nullptr);
     if (fading) fading->release();
-
-    {
-        const juce::ScopedLock sl(trashBinLock);
-        trashBin.clear();
-    }
 
     // ── Phase 0: DeferredFreeThread の停止と残余解放 ──
     // Audio Thread が停止した後にこの関数が呼ばれる保証があるため、
@@ -3096,39 +3100,8 @@ void ConvolverProcessor::cleanup()
         }
     }
 
-    // StereoConvolver のクリーンアップ (Worker Threadと競合するためロックが必要)
-    juce::ScopedTryLock lock(trashBinLock);
-    if (!lock.isLocked())
-        return;
-
-    const uint32 now = juce::Time::getMillisecondCounter();
-    const size_t trashSize = trashBin.size();
-    convo::ScopedAlignedPtr<StereoConvolver*> toRelease(
-        (trashSize > 0)
-            ? static_cast<StereoConvolver**>(convo::aligned_malloc(trashSize * sizeof(StereoConvolver*), 64))
-            : nullptr);
-    size_t toReleaseCount = 0;
-
-    for (auto it = trashBin.begin(); it != trashBin.end(); )
-    {
-        uint32 age = (now >= it->second) ?
-                     (now - it->second) :
-                     (std::numeric_limits<uint32>::max() - it->second + now);
-
-        if (age > 10000)
-        {
-            toRelease.get()[toReleaseCount++] = it->first;
-            it = trashBin.erase(it);
-        }
-        else
-        {
-            ++it;
-        }
-    }
-
-    // ロック解放後、削除対象を release() する
-    for (size_t i = 0; i < toReleaseCount; ++i)
-        toRelease.get()[i]->release();
+    // StereoConvolver のクリーンアップは timerCallback で行うため、
+    // ここでは loaderTrashBin のクリーンアップのみ実施する。
 }
 
 void ConvolverProcessor::forceCleanup()
@@ -3136,22 +3109,10 @@ void ConvolverProcessor::forceCleanup()
     // This method is for eager cleanup of non-blocking resources.
     // The blocking cleanup of LoaderThreads is handled by the destructor.
 
-    using TrashEntry = std::pair<StereoConvolver*, uint32>;
-    convo::ScopedAlignedPtr<TrashEntry> stereoConvolversToDelete;
-    size_t stereoConvolversToDeleteCount = 0;
-    {
-        juce::ScopedLock lock(trashBinLock);
-        const size_t trashSize = trashBin.size();
-        if (trashSize > 0)
-        {
-            stereoConvolversToDelete.reset(
-                static_cast<TrashEntry*>(convo::aligned_malloc(trashSize * sizeof(TrashEntry), 64)));
-            for (size_t i = 0; i < trashSize; ++i)
-                stereoConvolversToDelete.get()[i] = trashBin[i];
-            stereoConvolversToDeleteCount = trashSize;
-            trashBin.clear();
-        }
-    }
+    // 中断されたフェードを即時解放
+    if (prevInterruptedFade) { prevInterruptedFade->release(); prevInterruptedFade = nullptr; }
+    if (clearFadingPending.exchange(false, std::memory_order_acq_rel))
+        clearFadingSnapshot();
 
     // 【Fix】LoaderThread のクリーンアップ漏れ防止
     // DSPCore破棄時やreleaseResources時に、残っているローダースレッドを
@@ -3171,9 +3132,6 @@ void ConvolverProcessor::forceCleanup()
             loader->stopThread(4000);
     }
     loadersToDelete.clear(); // unique_ptrのデストラクタが呼ばれ、スレッドがクリーンアップされる
-
-    for (size_t i = 0; i < stereoConvolversToDeleteCount; ++i)
-        stereoConvolversToDelete.get()[i].first->release();
 }
 
 //--------------------------------------------------------------
@@ -3792,10 +3750,7 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     convolution.store(otherConv, std::memory_order_release);
 
     if (activeConvolution)
-    {
-        const juce::ScopedLock sl(trashBinLock);
-        trashBin.push_back({activeConvolution, juce::Time::getMillisecondCounter()});
-    }
+        activeConvolution->release();
     activeConvolution = otherConv;
 
     irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
@@ -3859,15 +3814,18 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     {
         rebuildPendingAfterLoad.store(true, std::memory_order_release);
     }
-    // [C2 fix] バイパス中IRロードの解除時クリック防止: 先に wetCrossfade の再開要求を処理。
-    if (wetCrossfadeResetPending.exchange(false, std::memory_order_acq_rel))
+
+    // 等パワークロスフェードの状態チェック:
+    // fadingOutConvolution が変化した場合は新たなフェードを開始する。
+    if (oldConv != fadeState.lastSeenFadingConv)
     {
-        wetCrossfade.setCurrentAndTargetValue(0.0);
-        wetCrossfade.setTargetValue(1.0);
-        wetCrossfadeActive.store(true, std::memory_order_release);
+        fadeState.lastSeenFadingConv = oldConv;
+        fadeState.accumulatedSamples = 0;
+        clearFadingPending.store(false, std::memory_order_release);
     }
 
-    const bool wetTransitionActive = wetCrossfadeActive.load(std::memory_order_acquire);
+    const bool isCrossfading = (oldConv != nullptr && fadeState.accumulatedSamples < FADE_SAMPLES);
+    const bool wetTransitionActive = isCrossfading;
 
     // バイパス、未準備、IR未ロードの場合はスルー
     // ただし wet クロスフェード中は処理を継続する。
@@ -3968,8 +3926,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     const bool needsConvolution = isSmoothing || targetMixValue > 0.001;
     const bool needsDrySignal   = isSmoothing || targetMixValue < 0.999;
 
-    const bool isCrossfading = (oldConv != nullptr && wetCrossfadeActive.load(std::memory_order_acquire));
-    int activeWetCrossfadeSamples = 0;
+    // クロスフェード有効サンプル数 (このブロックでのフェード進捗分)
+    const int crossfadeSamplesInBlock = isCrossfading
+        ? juce::jmin(numSamples, FADE_SAMPLES - fadeState.accumulatedSamples)
+        : 0;
+    const int fadeStartInRamp = fadeState.accumulatedSamples;
     // ── Step 5: Dry信号生成 ──
     // DelayLineの内部状態（履歴）を維持するため、Dry信号が不要な場合(100% Wet)でも常に処理を実行する。
     // これにより、Mixパラメータ変更時に過去のDry信号が正しく再生されるようにする。
@@ -3997,7 +3958,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         {
             // --- クロスフェード処理 ---
             const double newDelay = latencySmoother.getTargetValue();
-            double* delayFadeRamp = crossfadeRampBuffer.get();
+            double* delayFadeRamp = fadingBufferL.get(); // スクラッチ用途: このセクションはコンボリューション等パワーフェード処理より前に実行される
             int activeDelayCrossfadeSamples = 0;
 
             for (; activeDelayCrossfadeSamples < numSamples; ++activeDelayCrossfadeSamples)
@@ -4185,25 +4146,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // これにより、Mixを0%から上げた際のグリッチを防ぐ。
     // MKL NUC を使用
 
-    if (isCrossfading)
-    {
-        double* ramp = crossfadeRampBuffer.get();
-        for (; activeWetCrossfadeSamples < numSamples; ++activeWetCrossfadeSamples)
-        {
-            ramp[activeWetCrossfadeSamples] = wetCrossfade.getNextValue();
-            if (!wetCrossfade.isSmoothing())
-            {
-                ++activeWetCrossfadeSamples;
-                break;
-            }
-        }
-        for (int i = activeWetCrossfadeSamples; i < numSamples; ++i)
-            ramp[i] = 1.0;
-
-        if (!wetCrossfade.isSmoothing())
-            wetCrossfadeActive.store(false, std::memory_order_release);
-    }
-
     const double headroom = CONVOLUTION_HEADROOM_GAIN;
 
     const double* wetGains = nullptr;
@@ -4341,39 +4283,50 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
             conv->process(ch, input, wetOut, chunkSamples);
 
-            // クロスフェード処理
+            // 等パワークロスフェード処理
             if (isCrossfading)
             {
-                const int crossfadeSamplesThisChunk = juce::jlimit(0, chunkSamples, activeWetCrossfadeSamples - processed);
+                const int crossfadeSamplesThisChunk = juce::jlimit(0, chunkSamples,
+                                                                   crossfadeSamplesInBlock - processed);
                 if (crossfadeSamplesThisChunk > 0)
                 {
-                    double* oldWetOut = oldWetBuffer.getWritePointer(ch, processed);
-                    oldConv->process(ch, input, oldWetOut, crossfadeSamplesThisChunk);
+                    // フェード中コンボルバーの出力をチャンネル別バッファに書き込む
+                    double* fadingBuf = (ch == 0) ? fadingBufferL.get() : fadingBufferR.get();
+                    double* fadingOut = fadingBuf + processed;
+                    oldConv->process(ch, input, fadingOut, crossfadeSamplesThisChunk);
 
-                    const double* fadeInRamp = crossfadeRampBuffer.get() + processed;
+                    // 事前計算済み等パワーランプで2出力をブレンド
+                    const int rampStart = fadeStartInRamp + processed;
 #if defined(__AVX2__)
                     int i = 0;
                     const int vEnd = crossfadeSamplesThisChunk / 4 * 4;
-                    const __m256d vOne = _mm256_set1_pd(1.0);
                     for (; i < vEnd; i += 4)
                     {
-                        const __m256d vFade = _mm256_loadu_pd(fadeInRamp + i);
-                        const __m256d vNew = _mm256_loadu_pd(wetOut + i);
-                        const __m256d vOld = _mm256_loadu_pd(oldWetOut + i);
-                        const __m256d vOut = _mm256_add_pd(_mm256_mul_pd(vNew, vFade),
-                                                           _mm256_mul_pd(vOld, _mm256_sub_pd(vOne, vFade)));
+                        const int ri = rampStart + i;
+                        const __m256d vA0 = _mm256_set_pd(crossfadeRamp[ri+3].active,
+                                                          crossfadeRamp[ri+2].active,
+                                                          crossfadeRamp[ri+1].active,
+                                                          crossfadeRamp[ri+0].active);
+                        const __m256d vF0 = _mm256_set_pd(crossfadeRamp[ri+3].fading,
+                                                          crossfadeRamp[ri+2].fading,
+                                                          crossfadeRamp[ri+1].fading,
+                                                          crossfadeRamp[ri+0].fading);
+                        const __m256d vNew  = _mm256_loadu_pd(wetOut   + i);
+                        const __m256d vOld  = _mm256_loadu_pd(fadingOut + i);
+                        const __m256d vOut  = _mm256_add_pd(_mm256_mul_pd(vNew, vA0),
+                                                            _mm256_mul_pd(vOld, vF0));
                         _mm256_storeu_pd(wetOut + i, vOut);
                     }
                     for (; i < crossfadeSamplesThisChunk; ++i)
                     {
-                        const double fade = fadeInRamp[i];
-                        wetOut[i] = wetOut[i] * fade + oldWetOut[i] * (1.0 - fade);
+                        const RampPoint& rp = crossfadeRamp[rampStart + i];
+                        wetOut[i] = wetOut[i] * rp.active + fadingOut[i] * rp.fading;
                     }
 #else
                     for (int i = 0; i < crossfadeSamplesThisChunk; ++i)
                     {
-                        const double fade = fadeInRamp[i];
-                        wetOut[i] = wetOut[i] * fade + oldWetOut[i] * (1.0 - fade);
+                        const RampPoint& rp = crossfadeRamp[rampStart + i];
+                        wetOut[i] = wetOut[i] * rp.active + fadingOut[i] * rp.fading;
                     }
 #endif
                 }
@@ -4426,6 +4379,17 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             }
 
             processed += chunkSamples;
+        }
+    }
+
+    // クロスフェード進捗を更新 (全チャンネル処理後に1度だけ)
+    if (isCrossfading)
+    {
+        fadeState.accumulatedSamples += crossfadeSamplesInBlock;
+        if (fadeState.accumulatedSamples >= FADE_SAMPLES)
+        {
+            // フェード完了: Message Thread に解放を要求
+            clearFadingPending.store(true, std::memory_order_release);
         }
     }
 }
@@ -4831,30 +4795,26 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     auto* convToFadeOut = activeConvolution;
     activeConvolution = newConv;
 
-    // Audio Threadが新しいコンボルバーを参照するようにアトミックに更新
+    // Audio Thread が新しいコンボルバーを参照するようにアトミックに更新
     convolution.store(newConv, std::memory_order_release);
 
-    // [Bug C fix] wet フェードイン (0→1) は初回ロードを含む常に起動する。
-    // 旧実装は convToFadeOut != nullptr のブロック内のみで起動していたため、
-    // 初回ロード時には wetCrossfade が開始されず wet 信号がフルレベルで瞬間出力されていた。
-    // [Bug G fix] wetCrossfadeActive を Message Thread 側の通知フラグとして立てる。
-    // [Bug 1 fix] wetCrossfade フィールドへの直接書き込みをここで行うと Audio Thread の
-    //             getNextValue()/isSmoothing() と競合 (データ競合) する。
-    //             代わりに wetCrossfadeResetPending を立てて、Audio Thread の process() 先頭で
-    //             初期化させる (Audio Thread のみが wetCrossfade フィールドを操作する設計)。
-    wetCrossfadeResetPending.store(true, std::memory_order_release);
-    wetCrossfadeActive.store(true, std::memory_order_release);
-
-    // 古いコンボルバーがあれば、フェードアウトも開始する
+    // 古いコンボルバーがあれば等パワークロスフェードを開始する。
+    // NOTE: fadingOutConvolution は Audio Thread が次のブロックで load() するため、
+    //       このストアよりも後のブロックから新フェードが始まる。
+    //       Audio Thread 側は lastSeenFadingConv の変化でリセットを検知する。
     if (convToFadeOut != nullptr)
     {
-        // 既に別のクロスフェードが進行中だった場合、その古いエンジンは即座に破棄リストへ
+        // 既に別のクロスフェードが進行中だった場合、その古いエンジンを
+        // prevInterruptedFade に退避し、次の timerCallback で解放する。
         auto* interruptedFade = fadingOutConvolution.exchange(convToFadeOut);
         if (interruptedFade != nullptr)
         {
-            const juce::ScopedLock sl(trashBinLock);
-            trashBin.push_back({interruptedFade, juce::Time::getMillisecondCounter()});
+            // 前の中断フェードがまだ残っている場合は即時解放
+            // (timerCallback が2回連続で来る前に applyNewState が呼ばれた稀なケース)
+            if (prevInterruptedFade) prevInterruptedFade->release();
+            prevInterruptedFade = interruptedFade;
         }
+        clearFadingPending.store(false, std::memory_order_release);
     }
 
     irLength.store(targetLength, std::memory_order_release);
@@ -4865,6 +4825,25 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     if (rebuildPendingAfterLoad.exchange(false, std::memory_order_acq_rel) && isIRLoaded())
         requestDebouncedRebuild();
     postCoalescedChangeNotification();
+}
+
+// applyNewState へのシンプルな転送。新しいコードからは commitNewConvolver を使用する。
+void ConvolverProcessor::commitNewConvolver(StereoConvolver* newConv,
+                                            std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
+                                            double loadedSR, int targetLength, bool isRebuild,
+                                            const juce::File& file, double scaleFactor,
+                                            std::shared_ptr<juce::AudioBuffer<double>> displayIR)
+{
+    applyNewState(newConv, std::move(loadedIR), loadedSR, targetLength, isRebuild, file, scaleFactor, std::move(displayIR));
+}
+
+// Audio Thread がフェード完了を通知した後に Message Thread から呼ぶ。
+// fadingOutConvolution の ref を解放して GC する。
+void ConvolverProcessor::clearFadingSnapshot()
+{
+    auto* doneFading = fadingOutConvolution.exchange(nullptr, std::memory_order_acq_rel);
+    if (doneFading)
+        doneFading->release();
 }
 
 void ConvolverProcessor::evictOldestCacheEntry()

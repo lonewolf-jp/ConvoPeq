@@ -375,10 +375,21 @@ private:
     // リングバッファオーバーフロー通知コールバック (Audio Thread 安全; 生関数ポインタ)
     // MKLNonUniformConvolver::ringWrite() からオーバーフロー時に呼び出される。
     static void overflowCallbackThunk(void* userData) noexcept;
+
+    // 等パワークロスフェード管理 (Message Thread)
+    // commitNewConvolver / clearFadingSnapshot は StereoConvolver 前方宣言の後で宣言 (下記参照)
+
     struct StereoConvolver;
     class LoaderThread;
     // クロスフェード用の新しいメンバー
     std::atomic<StereoConvolver*> fadingOutConvolution { nullptr };
+
+    void commitNewConvolver(StereoConvolver* newConv,
+                            std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
+                            double loadedSR, int targetLength, bool isRebuild,
+                            const juce::File& file, double scaleFactor,
+                            std::shared_ptr<juce::AudioBuffer<double>> displayIR);
+    void clearFadingSnapshot();
 
     void applyNewState(StereoConvolver* newConv, std::shared_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::shared_ptr<juce::AudioBuffer<double>> displayIR);
     void handleLoadError(const juce::String& error);
@@ -538,11 +549,8 @@ private:
         void process(int channel, const double* in, double* out, int numSamples);
     };
 
-    // Note: trashBin is used to hold old Convolution objects that the Audio Thread may still be using.
     std::atomic<StereoConvolver*> convolution { nullptr }; // Raw pointer for Audio Thread (Lock-free)
     StereoConvolver* activeConvolution = nullptr; // Ownership holder for Message Thread
-    std::vector<std::pair<StereoConvolver*, uint32>> trashBin; // Time-based GC
-    juce::CriticalSection trashBinLock;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
     std::unique_ptr<LoaderThread> activeLoader;
@@ -590,15 +598,30 @@ private:
     #pragma warning(pop)
 
     juce::SmoothedValue<double> mixSmoother; // オーディオスレッドでの平滑化用
-    juce::LinearSmoothedValue<double> wetCrossfade; // Wet信号のクロスフェード用
 
-    // [Bug G fix] wetCrossfade.isSmoothing() は非スレッドセーフ (Audio Thread が getNextValue() を同時呼び出し)。
-    // このフラグを代替として使う: Message Thread が store(), Audio Thread が完了時に clear()。
-    std::atomic<bool> wetCrossfadeActive { false };
-    // [Bug 1 fix] wetCrossfade の初期化を Audio Thread 側に委譲するためのペンディングフラグ。
-    // applyNewState() (Message Thread) は wetCrossfade フィールドへの直接書き込みを行わず、
-    // このフラグを立てるだけにする。Audio Thread が process() 先頭で検出し初期化する。
-    std::atomic<bool> wetCrossfadeResetPending { false };
+    // ── 等パワークロスフェード ──
+    // IR 切り替え時に使用するサインコサインカーブの事前計算済みランプ。
+    // active: sin(angle), fading: cos(angle) で等パワー特性を実現する。
+    static constexpr int FADE_SAMPLES = 2048;
+    struct RampPoint { double active; double fading; };
+    std::vector<RampPoint> crossfadeRamp; // size = FADE_SAMPLES, 構築時に計算
+
+    // 等パワークロスフェード用バッファ (prepareToPlay で確保)
+    convo::ScopedAlignedPtr<double> activeBufferL, activeBufferR;
+    convo::ScopedAlignedPtr<double> fadingBufferL, fadingBufferR;
+    int bufferCapacity = 0;
+
+    // Audio Thread のみが読み書きするフェード状態 (atomic 不要)
+    struct FadeState {
+        StereoConvolver* lastSeenFadingConv = nullptr; // フェード開始の検出用
+        int accumulatedSamples = FADE_SAMPLES;         // FADE_SAMPLES 以上 = クロスフェードなし
+    };
+    FadeState fadeState;
+
+    // Audio Thread がフェード完了を通知するフラグ (Audio→Message)
+    std::atomic<bool> clearFadingPending { false };
+    // 中断されたフェードを次の timerCallback まで保持 (Message Thread のみ)
+    StereoConvolver* prevInterruptedFade = nullptr;
 
     #pragma warning(push)
     #pragma warning(disable: 4324)
@@ -684,12 +707,6 @@ private:
     convo::ScopedAlignedPtr<double> oldDryBufferStorage[2];
     int oldDryBufferCapacity = 0;
 
-    // Wet信号クロスフェード用バッファ
-    juce::AudioBuffer<double> oldWetBuffer;
-    convo::ScopedAlignedPtr<double> oldWetBufferStorage[2];
-    int oldWetBufferCapacity = 0;
-    convo::ScopedAlignedPtr<double> crossfadeRampBuffer;
-    int crossfadeRampBufferCapacity = 0;
     // Wet信号用一時バッファ (StereoConvolver::process用)
     convo::ScopedAlignedPtr<double> wetBufferStorage[2];
     int wetBufferCapacity = 0;
