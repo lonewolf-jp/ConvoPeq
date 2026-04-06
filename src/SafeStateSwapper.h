@@ -243,13 +243,14 @@ public:
         return minEpoch;
     }
 
-private:
-    // ラップアラウンドを考慮した「より古い」判定
-    static bool isOlder(uint64_t a, uint64_t b) noexcept
+    // ラップアラウンドを考慮した「より古い」判定（RCU で必須）
+    // AudioEngine の processDeferredReleases からも呼び出し可能
+    static inline bool isOlder(uint64_t a, uint64_t b) noexcept
     {
-        return (a - b) > (1ULL << 63);
+        return static_cast<int64_t>(a - b) < 0;
     }
 
+private:
     // -----------------------------------------------------------------------
     // 内部データ構造
     // -----------------------------------------------------------------------

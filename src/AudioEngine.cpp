@@ -19,7 +19,15 @@
 #include <immintrin.h>
 
 // ==================================================================
-// RCU 実装（段階 1：参照追跡のみ、削除は従来通り trashBin が担当）
+// 段階 2+3：thread_local スロット管理および定数
+// ==================================================================
+thread_local size_t tls_readerSlot = SIZE_MAX;
+static constexpr size_t INVALID_SLOT = SIZE_MAX;
+static constexpr uint64_t kIdleEpoch = 0;
+static constexpr size_t RCU_BACKLOG_WARNING_THRESHOLD = 128;
+
+// ==================================================================
+// RCU 実装
 // ==================================================================
 
 // -------------------------------------------------------------------
@@ -39,7 +47,7 @@ size_t AudioEngine::registerReader()
 void AudioEngine::unregisterReader(size_t slot)
 {
     if (slot < MAX_READERS) {
-        readerEpochs[slot].store(UINT64_MAX, std::memory_order_release);
+        readerEpochs[slot].store(kIdleEpoch, std::memory_order_release);
     }
 }
 
@@ -75,26 +83,105 @@ void AudioEngine::enqueueForDeletion(DSPCore* dsp, uint64_t epoch)
     queueWrite.store(next, std::memory_order_release);
 }
 
-void AudioEngine::processDeletionQueue()
+void AudioEngine::processDeferredReleases()
 {
-    // ★ 段階 1：削除処理は行わない（従来の trashBin が担当）
-    // この関数は後続の段階で本実装する。
-    // 現時点ではキューを消費せず、何もしない。
-    //
-    // 注意：キューを消費しないため、エントリは滞留し続ける。
-    //       これはメモリリークのように見えるが、段階 2 以降で
-    //       processDeletionQueue を本実装するまでの一時的な状態。
-    //       段階 1 では削除は従来の trashBin が担当するため問題ない。
-    //
-    // デバッグビルドでは滞留数をログ出力してもよい。
-#ifdef JUCE_DEBUG
-    size_t w = queueWrite.load(std::memory_order_acquire);
+    // この関数は Timer コールバックから呼ばれる（非 RT スレッド）
+    // Audio Thread からは呼ばないこと。
+    // overflowMutex を取得する前に他のロックを取らないこと（デッドロック防止）。
+
+    const uint64_t minEpoch = getMinReaderEpoch();
+
+    // SPSC キューから解放可能なエントリを取り出す
     size_t r = queueRead.load(std::memory_order_acquire);
-    size_t pending = (w >= r) ? (w - r) : (QUEUE_SIZE - r + w);
-    if (pending > 0) {
-        DBG("[RCU] processDeletionQueue: " << pending << " entries pending (deletion skipped in Stage 1)");
+    size_t w = queueWrite.load(std::memory_order_acquire);
+    size_t backlog = 0;
+
+    while (r != w) {
+        RetiredEntry& entry = deletionQueue[r];
+        if (SafeStateSwapper::isOlder(entry.retireEpoch, minEpoch)) {
+            DSPCore* ptr = entry.ptr;
+            entry.ptr = nullptr;
+            r = (r + 1) % QUEUE_SIZE;
+            ptr->release();   // delete ではなく release を遅延実行
+        } else {
+            break;
+        }
+        ++backlog;
     }
-#endif
+
+    queueRead.store(r, std::memory_order_release);
+
+    if (backlog > RCU_BACKLOG_WARNING_THRESHOLD) {
+        DBG("[RCU] processDeferredReleases: backlog " << backlog << " entries");
+    }
+
+    // フォールバックキュー（overflowList）も同様に処理
+    std::lock_guard<std::mutex> lock(overflowMutex);
+    auto it = overflowList.begin();
+    while (it != overflowList.end()) {
+        if (SafeStateSwapper::isOlder(it->retireEpoch, minEpoch)) {
+            DSPCore* ptr = it->ptr;
+            it = overflowList.erase(it);
+            ptr->release();
+        } else {
+            ++it;
+        }
+    }
+}
+
+// ==================================================================
+// 段階 2+3 実装（追加）
+// ==================================================================
+
+size_t AudioEngine::getOrRegisterCurrentThreadSlot()
+{
+    if (tls_readerSlot != INVALID_SLOT)
+        return tls_readerSlot;
+
+    size_t slot = registerReader();
+    if (slot >= MAX_READERS) {
+        jassertfalse;
+        tls_readerSlot = INVALID_SLOT;
+        return INVALID_SLOT;
+    }
+    tls_readerSlot = slot;
+    return slot;
+}
+
+void AudioEngine::enterReader(size_t slot, uint64_t epoch)
+{
+    if (slot >= MAX_READERS) return;
+
+    // Publish epoch with release semantics
+    readerEpochs[slot].store(epoch, std::memory_order_release);
+    // ★ 強化：seq_cst fence により publish 以降のロードが store より後に見えることを完全保証
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
+void AudioEngine::exitReader(size_t slot)
+{
+    if (slot >= MAX_READERS) return;
+    readerEpochs[slot].store(kIdleEpoch, std::memory_order_release);
+}
+
+uint64_t AudioEngine::getMinReaderEpoch() const noexcept
+{
+    uint64_t minEpoch = std::numeric_limits<uint64_t>::max();
+    bool hasActiveReader = false;
+
+    for (size_t i = 0; i < MAX_READERS; ++i) {
+        const uint64_t e = readerEpochs[i].load(std::memory_order_acquire);
+        if (e != kIdleEpoch) {
+            hasActiveReader = true;
+            if (SafeStateSwapper::isOlder(e, minEpoch))
+                minEpoch = e;
+        }
+    }
+
+    if (!hasActiveReader)
+        return globalEpoch.load(std::memory_order_acquire);
+
+    return minEpoch;
 }
 
 // epoch 比較ヘルパー（isOlder）はヘッダ内でインライン定義済み
@@ -563,6 +650,8 @@ AudioEngine::AudioEngine()
     // バッファ初期化
     audioFifoBuffer.setSize (2, FIFO_SIZE);
     currentDSP.store(nullptr);
+    // 段階 2+3：globalEpoch を 1 から開始（0 は kIdleEpoch と区別するため）
+    globalEpoch.store(1, std::memory_order_relaxed);
     dspCrossfadeGain.reset(48000.0, 0.03);
     dspCrossfadeGain.setCurrentAndTargetValue(1.0);
 }
@@ -1124,22 +1213,32 @@ AudioEngine::~AudioEngine()
     if (auto* fading = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
         fading->release();
 
-    // 5. Explicit Generation Sweep (Trash Bin Cleanup)
-    // Clear all pending and old DSPs.
-    {
-        juce::ScopedLock sl(trashBinLock);
-        for (auto& entry : trashBin) entry.first->release();
-        trashBin.clear();
-    }
-
-    // 段階 1：削除キューに残ったエントリをクリーンアップしない（二重解放防止）
-    // 代わりにデバッグビルドで滞留数を警告する
-#ifdef JUCE_DEBUG
-    size_t w = queueWrite.load(std::memory_order_acquire);
+    // 5. RCU リリースキューを最終解放する。
+    //    ここでは Audio Thread / rebuildThread ともに停止済みのため、安全に全解放できる。
     size_t r = queueRead.load(std::memory_order_acquire);
-    size_t pending = (w >= r) ? (w - r) : (QUEUE_SIZE - r + w);
-    if (pending > 0) DBG("[RCU] ~AudioEngine: " << pending << " entries still in deletion queue (not freed)");
-#endif
+    const size_t w = queueWrite.load(std::memory_order_acquire);
+    while (r != w)
+    {
+        RetiredEntry& entry = deletionQueue[r];
+        if (entry.ptr != nullptr)
+        {
+            entry.ptr->release();
+            entry.ptr = nullptr;
+        }
+        r = (r + 1) % QUEUE_SIZE;
+    }
+    queueRead.store(w, std::memory_order_release);
+
+    // overflowList も同様に処理する。
+    {
+        std::lock_guard<std::mutex> lock(overflowMutex);
+        for (auto& entry : overflowList)
+        {
+            if (entry.ptr != nullptr)
+                entry.ptr->release();
+        }
+        overflowList.clear();
+    }
 }
 
 //--------------------------------------------------------------
@@ -1897,43 +1996,22 @@ void AudioEngine::rebuildThreadLoop()
             };
 
             if (isObsolete())
-            {
-                if (task.currentDSP != nullptr)
-                    task.currentDSP->release();
                 continue;
-            }
 
             // 1. Prepare (メモリ確保)
             task.newDSP->prepare(task.sampleRate, task.samplesPerBlock, task.ditherDepth, task.manualOversamplingFactor, task.oversamplingType, task.noiseShaperType);
 
             if (isObsolete())
-            {
-                if (task.currentDSP != nullptr)
-                    task.currentDSP->release();
                 continue;
-            }
 
             // 2. Reuse Logic
             //
             // 【task.currentDSP (= 旧 activeDSP) の安全性証明】
             //
-            // task.currentDSP が trashBin に入る経路は2つ:
-            //
-            // (A) commitNewDSP() 経由 (通常パス):
-            //     commitNewDSP は callAsync で Message Thread に投入される。
-            //     callAsync は rebuildThreadLoop の末尾でのみ発行される。
-            //     rebuildThread は単一スレッドであるため、本タスクの Reuse Logic を
-            //     実行中に本タスクの callAsync が実行されることは構造上不可能。
-            //     → Reuse Logic 実行中に (A) 経由で trashBin に入ることはない。
-            //
-            // (B) releaseResources() 経由 (デバイス切断等):
-            //     releaseResources() は DSP_A を trashBin に移動するが、
-            //     Bug1 修正により即時 delete を廃止済みで 10 秒の猶予期間がある。
-            //     Reuse Logic はフィールド読み取りのみでマイクロ秒単位で完了する。
-            //     rebuildGeneration は fetch_add されるため直後の isObsolete() が
-            //     true を返し、以降の重い処理には進まない。
-            //     → 10 秒猶予に対してマイクロ秒の Reuse Logic が実際の UAF を
-            //        引き起こす可能性は皆無。
+            // task.currentDSP は requestRebuild() 側で addRef 済みであり、
+            // rebuild タスクの寿命全体を通じて参照カウントで保持される。
+            // activeDSP/currentDSP が差し替わっても、このローカル参照が残る限り
+            // UAF は発生しない。
             //
             // 【shared_ptr 不採用の理由】
             //     Audio Thread は std::shared_ptr の参照カウント操作を禁止している
@@ -1968,20 +2046,12 @@ void AudioEngine::rebuildThreadLoop()
             if (!irReused && task.newDSP->convolver.getIRLength() > 0)
             {
                 if (isObsolete())
-                {
-                    if (task.currentDSP != nullptr)
-                        task.currentDSP->release();
                     continue;
-                }
                 task.newDSP->convolver.rebuildAllIRsSynchronous(isObsolete);
             }
 
             if (isObsolete())
-            {
-                if (task.currentDSP != nullptr)
-                    task.currentDSP->release();
                 continue;
-            }
 
             // 4. Refresh Latency (Prevent pitch slide during fade-in)
             task.newDSP->convolver.refreshLatency();
@@ -2008,9 +2078,6 @@ void AudioEngine::rebuildThreadLoop()
                 // MessageManager failed (e.g. shutting down), prevent leak
                 dspToCommit->release();
             }
-
-            if (task.currentDSP != nullptr)
-                task.currentDSP->release();
         }
         catch (const std::exception& e)
         {
@@ -2027,6 +2094,7 @@ void AudioEngine::rebuildThreadLoop()
 void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 {
     DSPCore* dspToTrash = nullptr;
+    uint64_t retireEpoch = 0;
 
     // Lock to ensure the check and commit are atomic with respect to new rebuild requests.
     {
@@ -2039,13 +2107,17 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             return;
         }
 
-        // 1. Update the atomic raw pointer for the Audio Thread (Wait-free)
-        currentDSP.store(newDSP, std::memory_order_release);
-
-        // 2. Move the previous active DSP to a temporary variable to be trashed later.
+        // 1. 旧 DSP を安全にキャプチャしてから新 DSP を公開する（段階 3）
         dspToTrash = activeDSP;
 
-        // 3. Take ownership of the new DSP
+        // 2. Update the atomic raw pointer for the Audio Thread (Wait-free)
+        currentDSP.store(newDSP, std::memory_order_release);
+
+        // 3. 段階 3：エポックを進め、旧 DSP の retire epoch を記録する
+        //    fetch_add は旧値を返すため、retireEpoch = 公開直前のグローバルエポック
+        retireEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
+
+        // 4. Take ownership of the new DSP
         activeDSP = newDSP;
 
         const uint64_t newSessionId = globalCaptureSessionId.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -2053,7 +2125,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             newDSP->currentCaptureSessionId = newSessionId;
     }
 
-    // 4. Move the old DSP to the trash bin outside the main lock.
+    // 5. RCU deferred release：旧 DSP を grace period 後に解放する
     if (dspToTrash != nullptr)
     {
         if (newDSP != nullptr && dspToTrash->oversamplingFactor != newDSP->oversamplingFactor)
@@ -2064,23 +2136,8 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             dspCrossfadePending.store(true, std::memory_order_release);
         }
 
-        // ★ 段階 1：RCU 削除キューにも登録（削除はまだ行わない）
-        // 現時点では削除処理（processDeletionQueue）は空実装のため、
-        // エントリは滞留するが、従来の trashBin が削除を担当する。
-        uint64_t retireEpoch = globalEpoch.load(std::memory_order_acquire);
+        // 段階 3：RCU キューに登録し、grace period 経過後に processDeferredReleases が release() する
         enqueueForDeletion(dspToTrash, retireEpoch);
-
-        const juce::ScopedLock sl(trashBinLock);
-        try
-        {
-            trashBin.push_back({dspToTrash, juce::Time::getMillisecondCounter()});
-        }
-        catch (...)
-        {
-            // Fallback: if we can't enqueue for later deletion, delete immediately.
-            // This prevents a memory leak in case of std::bad_alloc.
-            dspToTrash->release();
-        }
     }
 
     if (newDSP != nullptr)
@@ -2277,8 +2334,8 @@ void AudioEngine::timerCallback()
     processLearningCommands();
     processDeferredLearningActions();
 
-    // 段階 1：RCU 削除キュー処理（現時点では空実装）
-    processDeletionQueue();
+    // Grace period に基づく安全なリリース遅延を実行する。
+    processDeferredReleases();
 
     // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
     // タイマーコールバック内では、UIの状態を直接使用せずに、
@@ -2296,53 +2353,7 @@ void AudioEngine::timerCallback()
         sendChangeMessage();
     }
 
-    constexpr size_t MAX_DELETE_BATCH = 64;
-    constexpr size_t MAX_TRASH_BIN_SIZE = 64;
-    DSPCore* toDelete[MAX_DELETE_BATCH] = {};
-    size_t toDeleteCount = 0;
-    {
-        const juce::ScopedLock sl(trashBinLock);
-
-        const uint32 now = juce::Time::getMillisecondCounter();
-        for (auto it = trashBin.begin(); it != trashBin.end(); )
-        {
-            if ((now - it->second) > 10000)
-            {
-                if (toDeleteCount < MAX_DELETE_BATCH)
-                    toDelete[toDeleteCount++] = it->first;
-                else
-                    jassertfalse; // 通常は到達しないが、保険として残りは次回以降に
-                it = trashBin.erase(it);
-            }
-            else { ++it; }
-        }
-
-        // 保持数上限超過警告（メモリ枯渇リスクの早期検出）
-        if (trashBin.size() > MAX_TRASH_BIN_SIZE)
-        {
-            uint32 minAge = std::numeric_limits<uint32>::max();
-            for (const auto& entry : trashBin)
-            {
-                uint32 age = (now >= entry.second) ? (now - entry.second)
-                                                   : (std::numeric_limits<uint32>::max() - entry.second + now);
-                if (age < minAge) minAge = age;
-            }
-            DBG_LOG(
-                "[AudioEngine] trashBin size warning: current=" + juce::String(trashBin.size()) +
-                " limit=" + juce::String(MAX_TRASH_BIN_SIZE) +
-                " min_entry_age_ms=" + juce::String(minAge) +
-                " (entries <10s retained for Audio Thread safety)");
-        }
-
-    }
-
-    // ロック解放後に削除
-    for (size_t i = 0; i < toDeleteCount; ++i)
-        toDelete[i]->release();
-
-    // 3. 内部プロセッサのクリーンアップを実行
-    // 現在アクティブなDSPの内部ゴミ箱も掃除する
-    // [Fix Bug C] cleanup() を trashBinLock の外で、currentDSP 経由で一度だけ呼ぶ
+    // 内部プロセッサのクリーンアップを実行する。
     if (auto* dsp = currentDSP.load(std::memory_order_acquire))
     {
         dsp->eq.cleanup();
@@ -2553,14 +2564,8 @@ void AudioEngine::releaseResources()
     //   3. 手動revertは不要・リークリスクあり → JUCEに任せる
     // ==================================================================
 
-    // [Bug Fix: TOCTOU race condition with commitNewDSP]
     // rebuildGeneration インクリメント・currentDSP・activeDSP の変更を
-    // rebuildMutex で保護し、commitNewDSP() との race condition を防ぐ。
-    // この critical section 内で：
-    //   1) generation をインクリメント → commitNewDSP() での generation チェック無効化
-    //   2) currentDSP = nullptr → Audio Thread のアクセス停止
-    //   3) activeDSP を trashBin へ移動 → UI/Message Thread メソッドでの null dereference 防止
-    // これにより commitNewDSP() と releaseResources() の interleaving が安全になる。
+    // rebuildMutex で保護し、commitNewDSP() との競合を防ぐ。
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
 
@@ -2573,16 +2578,11 @@ void AudioEngine::releaseResources()
         // 1. Stop Audio Thread access
         currentDSP.store(nullptr, std::memory_order_release);
 
-        // 2. activeDSP を trashBin に移動する（即時削除禁止）。
-        //    trashBin / trashBinPending の既存エントリも即時削除しない。
-        //    理由: rebuildThread が task.currentDSP として trashBin 内エントリを
-        //    参照中の可能性があり、直ちに delete するとダングリングポインタアクセスになる。
-        //    安全な削除は ~AudioEngine() の rebuildThread.join() 後、
-        //    または timerCallback() の時間ベース GC に委ねる。
+        // 2. activeDSP を deferred release キューへ移す。
         if (activeDSP)
         {
-            const juce::ScopedLock sl(trashBinLock);
-            trashBin.push_back({activeDSP, juce::Time::getMillisecondCounter()});
+            const uint64_t retireEpoch = globalEpoch.load(std::memory_order_acquire);
+            enqueueForDeletion(activeDSP, retireEpoch);
             activeDSP = nullptr;
         }
 
@@ -2641,9 +2641,42 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
 
-    // DSPコアの取得 (Atomic Load - Raw Pointer)
-    // shared_ptrの参照カウント操作(atomic RMW)を回避し、完全なWait-freeを実現
-    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
+    // DSPコアの取得 (RCU リードサイドクリティカルセクション)
+    // Audio Thread がリーダー epoch を記録し、grace period 内は processDeferredReleases が
+    // このポインタを解放しないことを保証する（addRef/release 不要）。
+    const size_t readerSlot = getOrRegisterCurrentThreadSlot();
+    if (readerSlot == INVALID_SLOT)
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
+    // epoch-retry ループ：epoch が一致することを確認しながら currentDSP をロードする
+    DSPCore* dsp = nullptr;
+    for (int retry = 0; retry < 4; ++retry)
+    {
+        const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
+        enterReader(readerSlot, epoch);
+        dsp = currentDSP.load(std::memory_order_acquire);
+        if (globalEpoch.load(std::memory_order_acquire) == epoch)
+            break;
+        // epoch が変化した: DSP スワップが発生した可能性 → 再試行
+        exitReader(readerSlot);
+        dsp = nullptr;
+    }
+    if (dsp == nullptr)
+    {
+        // retry 上限超過または DSP が null（まだ初期化されていない）
+        exitReader(readerSlot);
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
+    // RAII により関数終了時に必ず exitReader を呼ぶ（early return にも対応）
+    struct RdGuard {
+        AudioEngine& e; size_t s;
+        ~RdGuard() { e.exitReader(s); }
+    } rdGuard { *this, readerSlot };
 
     if (dsp != nullptr)
     {
@@ -2764,7 +2797,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             std::atomic<float> fadingInputMeter { 0.0f };
             std::atomic<float> fadingOutputMeter { 0.0f };
             fading->addRef();
-            dsp->addRef();
             fading->processToBuffer(bufferToFill, dspCrossfadeFloatBuffer, audioFifo, audioFifoBuffer,
                                    fadingInputMeter, fadingOutputMeter, fadingState);
             dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
@@ -2784,7 +2816,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                     dstR[i] = static_cast<float>(dstR[i] * gNew + oldR[i] * gOld);
             }
 
-            dsp->release();
             fading->release();
 
             if (!dspCrossfadeGain.isSmoothing())
@@ -2796,9 +2827,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
         else
         {
-            dsp->addRef();
+            // 通常パス（クロスフェードなし）：RCU で dsp の生存が保証されるため addRef/release 不要
             dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
-            dsp->release();
 
             if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
             {
@@ -2807,10 +2837,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             }
         }
     }
-    else
-    {
-        bufferToFill.clearActiveBufferRegion();
-    }
+
 }
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
@@ -2826,12 +2853,39 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
-    if (dsp == nullptr)
+    const size_t readerSlot = getOrRegisterCurrentThreadSlot();
+    if (readerSlot == INVALID_SLOT)
     {
         buffer.clear();
         return;
     }
+
+    DSPCore* dsp = nullptr;
+    for (int retry = 0; retry < 4; ++retry)
+    {
+        const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
+        enterReader(readerSlot, epoch);
+        dsp = currentDSP.load(std::memory_order_acquire);
+        if (globalEpoch.load(std::memory_order_acquire) == epoch)
+            break;
+
+        exitReader(readerSlot);
+        dsp = nullptr;
+    }
+
+    if (dsp == nullptr)
+    {
+        exitReader(readerSlot);
+        buffer.clear();
+        return;
+    }
+
+    struct RdGuard
+    {
+        AudioEngine& e;
+        size_t s;
+        ~RdGuard() { e.exitReader(s); }
+    } rdGuard { *this, readerSlot };
 
     // DSPCore 固有の上限チェック (getNextAudioBlock と同様)
     if (numSamples > dsp->maxSamplesPerBlock)
@@ -2939,7 +2993,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         std::atomic<float> fadingInputMeter { 0.0f };
         std::atomic<float> fadingOutputMeter { 0.0f };
         fading->addRef();
-        dsp->addRef();
         fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, audioFifo, audioFifoBuffer,
                                       fadingInputMeter, fadingOutputMeter, fadingState);
         dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
@@ -2958,8 +3011,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             if (dstR != nullptr)
                 dstR[i] = dstR[i] * gNew + oldR[i] * gOld;
         }
-
-        dsp->release();
         fading->release();
 
         if (!dspCrossfadeGain.isSmoothing())
@@ -2971,9 +3022,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
     else
     {
-        dsp->addRef();
         dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
-        dsp->release();
 
         if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
         {

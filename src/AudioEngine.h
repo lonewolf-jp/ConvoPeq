@@ -492,8 +492,6 @@ DSPCore();
     juce::SmoothedValue<double> dspCrossfadeGain;
     juce::AudioBuffer<float> dspCrossfadeFloatBuffer;
     juce::AudioBuffer<double> dspCrossfadeDoubleBuffer;
-    std::vector<std::pair<DSPCore*, uint32>> trashBin; // Time-based garbage collection for old DSPs
-    juce::CriticalSection trashBinLock;
 
     std::atomic<double> currentSampleRate{48000.0};
     // 【Fix Bug #8】linear gain を格納 (dB変換はgetInputLevel/getOutputLevelで行う)
@@ -766,7 +764,24 @@ private:
 };
 
     // ==================================================================
-    // RCU 基盤（段階 1：参照追跡のみ、削除は従来通り trashBin が担当）
+    // RCU 基盤（段階 2+3：参照追跡＋Grace Period による安全なリリース遅延）
+    // ==================================================================
+
+    // Audio Thread 用：スレッドローカルなスロット番号を取得するヘルパー
+    size_t getOrRegisterCurrentThreadSlot();
+
+    // 参照追跡用の enter/exit（epoch 引数付き）
+    void enterReader(size_t slot, uint64_t epoch);
+    void exitReader(size_t slot);
+
+    // リリースキューに溜まったエントリを解放可能なものから処理する
+    void processDeferredReleases();
+
+    // 現在の最小 reader epoch を取得（grace period 判定用）
+    uint64_t getMinReaderEpoch() const noexcept;
+
+    // ==================================================================
+    // RCU 基盤
     // ==================================================================
 
     // マルチリーダー epoch 追跡配列
@@ -782,7 +797,7 @@ private:
     void unregisterReader(size_t slot);
     void updateReaderEpoch(size_t slot, uint64_t epoch);
 
-    // epoch カウンタ（段階 1 ではまだインクリメントしない）
+    // epoch カウンタ
     std::atomic<uint64_t> globalEpoch{0};
 
     // 削除キュー（SPSC）
@@ -800,11 +815,8 @@ private:
     std::vector<RetiredEntry> overflowList;
     std::mutex overflowMutex;   // Timer Thread のみ使用（Audio Thread は不使用）
 
-    // 削除キューへの登録（段階 1 では削除処理は行わない）
+    // 削除キューへの登録（段階 3 では release を遅延する）
     void enqueueForDeletion(DSPCore* dsp, uint64_t epoch);
-
-    // 削除処理（段階 1 では空実装）
-    void processDeletionQueue();
 
     // epoch 比較ヘルパー（ラップアラウンド対応）
     static bool isOlder(uint64_t a, uint64_t b) noexcept
