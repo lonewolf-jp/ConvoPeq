@@ -195,7 +195,7 @@ public:
         if (h == tail.load(std::memory_order_acquire)) return nullptr;
 
         const uint64_t entryEpoch = retiredBuffer[h].epoch.load(std::memory_order_acquire);
-        if (entryEpoch < minReaderEpoch)
+        if (isOlder(entryEpoch, minReaderEpoch))
         {
             ConvolverState* ptr = retiredBuffer[h].state.load(std::memory_order_acquire);
             // state を nullptr にクリアしてから head を進める（二重取得防止）
@@ -244,6 +244,12 @@ public:
     }
 
 private:
+    // ラップアラウンドを考慮した「より古い」判定
+    static bool isOlder(uint64_t a, uint64_t b) noexcept
+    {
+        return (a - b) > (1ULL << 63);
+    }
+
     // -----------------------------------------------------------------------
     // 内部データ構造
     // -----------------------------------------------------------------------

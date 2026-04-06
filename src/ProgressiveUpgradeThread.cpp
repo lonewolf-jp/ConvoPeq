@@ -1,7 +1,5 @@
 #include "ProgressiveUpgradeThread.h"
 
-#include <Windows.h>
-
 #include "ConvolverProcessor.h"
 #include "IRConverter.h"
 #include "CacheManager.h"
@@ -69,7 +67,8 @@ bool ProgressiveUpgradeThread::checkAndCancel()
 
 void ProgressiveUpgradeThread::run()
 {
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    // JUCE のクロスプラットフォーム優先度設定
+    setPriority(Priority::low);
 
     if (checkAndCancel())
         return;

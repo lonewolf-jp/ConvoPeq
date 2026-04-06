@@ -495,9 +495,18 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         ok = ok && (DftiSetValue(l.fftHandle, DFTI_PLACEMENT,             DFTI_NOT_INPLACE)     == DFTI_NO_ERROR);
         ok = ok && (DftiSetValue(l.fftHandle, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX) == DFTI_NO_ERROR);
         ok = ok && (DftiSetValue(l.fftHandle, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(l.fftSize)) == DFTI_NO_ERROR);
+
+        // ★ Audio Thread 向けリアルタイム安全設定
+        ok = ok && (DftiSetValue(l.fftHandle, DFTI_THREAD_LIMIT, 1) == DFTI_NO_ERROR);
+        ok = ok && (DftiSetValue(l.fftHandle, DFTI_WORKSPACE, DFTI_NO_WORKSPACE) == DFTI_NO_ERROR);
+
         ok = ok && (DftiCommitDescriptor(l.fftHandle) == DFTI_NO_ERROR);
         l.descriptorCommitted = ok;
 
+        if (!ok)
+        {
+            juce::Logger::writeToLog("MKLNonUniformConvolver: DFTI setup failed for layer " + juce::String(li));
+        }
         if (!ok)
         {
             releaseAllLayers();
