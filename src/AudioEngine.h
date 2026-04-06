@@ -765,6 +765,55 @@ private:
     bool committed;
 };
 
+    // ==================================================================
+    // RCU 基盤（段階 1：参照追跡のみ、削除は従来通り trashBin が担当）
+    // ==================================================================
+
+    // マルチリーダー epoch 追跡配列
+    static constexpr size_t MAX_READERS = 8;
+    #pragma warning(push)
+    #pragma warning(disable:4324)
+    alignas(64) std::array<std::atomic<uint64_t>, MAX_READERS> readerEpochs{};
+    #pragma warning(pop)
+    std::atomic<size_t> nextReaderSlot{0};
+
+    // スレッド登録 API（Message/Timer スレッド用）
+    size_t registerReader();
+    void unregisterReader(size_t slot);
+    void updateReaderEpoch(size_t slot, uint64_t epoch);
+
+    // epoch カウンタ（段階 1 ではまだインクリメントしない）
+    std::atomic<uint64_t> globalEpoch{0};
+
+    // 削除キュー（SPSC）
+    struct RetiredEntry {
+        DSPCore* ptr = nullptr;
+        uint64_t retireEpoch = 0;
+    };
+    static constexpr size_t QUEUE_SIZE = 256;
+    #pragma warning(push)
+    #pragma warning(disable:4324)
+    alignas(64) std::array<RetiredEntry, QUEUE_SIZE> deletionQueue{};
+    #pragma warning(pop)
+    std::atomic<size_t> queueWrite{0};
+    std::atomic<size_t> queueRead{0};
+    std::vector<RetiredEntry> overflowList;
+    std::mutex overflowMutex;   // Timer Thread のみ使用（Audio Thread は不使用）
+
+    // 削除キューへの登録（段階 1 では削除処理は行わない）
+    void enqueueForDeletion(DSPCore* dsp, uint64_t epoch);
+
+    // 削除処理（段階 1 では空実装）
+    void processDeletionQueue();
+
+    // epoch 比較ヘルパー（ラップアラウンド対応）
+    static bool isOlder(uint64_t a, uint64_t b) noexcept
+    {
+        return (a - b) > (1ULL << 63);
+    }
+
+    // ==================================================================
+
     JUCE_DECLARE_WEAK_REFERENCEABLE(AudioEngine)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

@@ -18,6 +18,91 @@
 #include <xmmintrin.h>
 #include <immintrin.h>
 
+// ==================================================================
+// RCU 実装（段階 1：参照追跡のみ、削除は従来通り trashBin が担当）
+// ==================================================================
+
+// -------------------------------------------------------------------
+// スレッド登録
+// -------------------------------------------------------------------
+size_t AudioEngine::registerReader()
+{
+    size_t slot = nextReaderSlot.fetch_add(1, std::memory_order_relaxed);
+    if (slot >= MAX_READERS) {
+        jassertfalse;
+        slot = MAX_READERS - 1;
+    }
+    readerEpochs[slot].store(0, std::memory_order_relaxed);
+    return slot;
+}
+
+void AudioEngine::unregisterReader(size_t slot)
+{
+    if (slot < MAX_READERS) {
+        readerEpochs[slot].store(UINT64_MAX, std::memory_order_release);
+    }
+}
+
+void AudioEngine::updateReaderEpoch(size_t slot, uint64_t epoch)
+{
+    if (slot < MAX_READERS) {
+        readerEpochs[slot].store(epoch, std::memory_order_release);
+    }
+}
+
+// -------------------------------------------------------------------
+// 削除キュー（段階 1：登録のみ、削除処理は行わない）
+// -------------------------------------------------------------------
+void AudioEngine::enqueueForDeletion(DSPCore* dsp, uint64_t epoch)
+{
+    if (dsp == nullptr) return;
+
+    RetiredEntry entry{dsp, epoch};
+    size_t w = queueWrite.load(std::memory_order_relaxed);
+    size_t r = queueRead.load(std::memory_order_acquire);
+    size_t next = (w + 1) % QUEUE_SIZE;
+
+    if (next == r) {
+        // キュー溢れ → フォールバックキューへ
+        std::lock_guard<std::mutex> lock(overflowMutex);
+        overflowList.push_back(entry);
+        // 溢れた分だけ read を進めてスペースを確保
+        r = (r + 1) % QUEUE_SIZE;
+        queueRead.store(r, std::memory_order_release);
+    }
+
+    deletionQueue[w] = entry;
+    queueWrite.store(next, std::memory_order_release);
+}
+
+void AudioEngine::processDeletionQueue()
+{
+    // ★ 段階 1：削除処理は行わない（従来の trashBin が担当）
+    // この関数は後続の段階で本実装する。
+    // 現時点ではキューを消費せず、何もしない。
+    //
+    // 注意：キューを消費しないため、エントリは滞留し続ける。
+    //       これはメモリリークのように見えるが、段階 2 以降で
+    //       processDeletionQueue を本実装するまでの一時的な状態。
+    //       段階 1 では削除は従来の trashBin が担当するため問題ない。
+    //
+    // デバッグビルドでは滞留数をログ出力してもよい。
+#ifdef JUCE_DEBUG
+    size_t w = queueWrite.load(std::memory_order_acquire);
+    size_t r = queueRead.load(std::memory_order_acquire);
+    size_t pending = (w >= r) ? (w - r) : (QUEUE_SIZE - r + w);
+    if (pending > 0) {
+        DBG("[RCU] processDeletionQueue: " << pending << " entries pending (deletion skipped in Stage 1)");
+    }
+#endif
+}
+
+// epoch 比較ヘルパー（isOlder）はヘッダ内でインライン定義済み
+
+// ==================================================================
+// 以下、既存の AudioEngine 実装
+// ==================================================================
+
 namespace
 {
     static constexpr std::array<double, convo::FixedNoiseShaper::ORDER> kFixedNoiseShaperTunedCoeffs
@@ -971,6 +1056,14 @@ void AudioEngine::pinCurrentThreadToNonAudioCoresIfNeeded() const noexcept
 
 void AudioEngine::initialize()
 {
+    // ==================================================================
+    // 段階 1：RCU 基盤の初期化
+    // ==================================================================
+    queueWrite.store(0, std::memory_order_relaxed);
+    queueRead.store(0, std::memory_order_relaxed);
+    overflowList.clear();
+    // readerEpochs と globalEpoch は静的初期化で 0
+
     // Start worker thread
     rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
 
@@ -1038,6 +1131,15 @@ AudioEngine::~AudioEngine()
         for (auto& entry : trashBin) entry.first->release();
         trashBin.clear();
     }
+
+    // 段階 1：削除キューに残ったエントリをクリーンアップしない（二重解放防止）
+    // 代わりにデバッグビルドで滞留数を警告する
+#ifdef JUCE_DEBUG
+    size_t w = queueWrite.load(std::memory_order_acquire);
+    size_t r = queueRead.load(std::memory_order_acquire);
+    size_t pending = (w >= r) ? (w - r) : (QUEUE_SIZE - r + w);
+    if (pending > 0) DBG("[RCU] ~AudioEngine: " << pending << " entries still in deletion queue (not freed)");
+#endif
 }
 
 //--------------------------------------------------------------
@@ -1962,6 +2064,12 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             dspCrossfadePending.store(true, std::memory_order_release);
         }
 
+        // ★ 段階 1：RCU 削除キューにも登録（削除はまだ行わない）
+        // 現時点では削除処理（processDeletionQueue）は空実装のため、
+        // エントリは滞留するが、従来の trashBin が削除を担当する。
+        uint64_t retireEpoch = globalEpoch.load(std::memory_order_acquire);
+        enqueueForDeletion(dspToTrash, retireEpoch);
+
         const juce::ScopedLock sl(trashBinLock);
         try
         {
@@ -2168,6 +2276,9 @@ void AudioEngine::timerCallback()
 {
     processLearningCommands();
     processDeferredLearningActions();
+
+    // 段階 1：RCU 削除キュー処理（現時点では空実装）
+    processDeletionQueue();
 
     // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
     // タイマーコールバック内では、UIの状態を直接使用せずに、
