@@ -1,5 +1,5 @@
 //============================================================================
-// MainApplication.cpp ── v0.5.3 (JUCE 8.0.12対応)
+// MainApplication.cpp ── v0.5.3 → v2.1 (Intel IPP 初期化追加)
 //
 // アプリケーション起動・終了実装
 // JUCE_CREATE_APPLICATION マクロが main() を自動生成する
@@ -9,6 +9,12 @@
 //   - ASIO: シングルクライアント対応 (BRAVO-HD, ASIO4ALL等) を考慮し、ブラックリスト機能を実装
 //   - スタンドアローンアプリ (VST3等ではない) として設計
 //   - 構造化例外処理 (SEH) 不使用
+//
+// ■ v2.1 変更点:
+//   - #include <ipp.h> を追加
+//   - initialise() 内に ippInit() を追加
+//     MKL 設定ブロックの直後に配置し、Audio Thread 到達前に
+//     IPP CPU ディスパッチテーブルの確定を保証する。
 //============================================================================
 #include "MainApplication.h"
 #include "MainWindow.h"
@@ -17,6 +23,7 @@
 #include <pmmintrin.h>
 
 #include <mkl.h>
+#include <ipp.h>    // [v2.1] ippInit() の宣言 (IPP CPU ディスパッチ初期化)
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -101,6 +108,29 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
     mkl_set_dynamic(0);     // 動的なスレッド数調整を無効化
     // Audio Thread内でのVMLモード変更を避けるため、起動時に1回だけ設定する。
     vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
+
+    // [v2.1] Intel IPP 初期化
+    // CPU ディスパッチテーブル (SSE2/AVX2/AVX-512 等) を確定させ、
+    // ippsFFTFwd_RToCCS_64f / ippsFFTInv_CCSToR_64f の初回呼び出しによる
+    // 遅延初期化が Audio Thread コールバックに乗ることを防ぐ。
+    //
+    // ■ 呼び出しタイミングの根拠:
+    //   MKL 設定ブロック直後に配置することで「Audio Thread に触れる前の
+    //   すべてのライブラリ初期化をここに集約する」という既存のコード規約に従う。
+    //
+    // ■ 安全性:
+    //   - スレッドセーフ（複数回呼び出し可、2回目以降は即時リターン）
+    //   - ippStsNoErr 以外は実機上ほぼ発生しないが、ログで診断可能にする
+    //   - SetImpulse() 内の ippsFFTGetSize_R_64f でも暗黙初期化されるが、
+    //     ここで先に完了させることで SetImpulse() の初回コストも削減される
+    {
+        const IppStatus ippSt = ippInit();
+        if (ippSt != ippStsNoErr)
+            juce::Logger::writeToLog("[MainApplication] ippInit() returned status="
+                                     + juce::String(static_cast<int>(ippSt)));
+        else
+            juce::Logger::writeToLog("[MainApplication] ippInit() succeeded.");
+    }
 
     // メインスレッドでも Denormal 対策を有効化
     // UIスレッドで実行されるEQ応答曲線計算 (AVX2) 等のパフォーマンスを向上させる

@@ -1122,8 +1122,9 @@ void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, do
 {
     auto& evaluator = evaluationWorkers[0].context.fftEvaluator;
 
-    MKL_Complex16 spectrumL[MklFftEvaluator::kSpectrumBins];
-    MKL_Complex16 spectrumR[MklFftEvaluator::kSpectrumBins];
+    MklFftEvaluator::CcsComplex spectrumL[MklFftEvaluator::kSpectrumBins];  // ← 変更後
+    MklFftEvaluator::CcsComplex spectrumR[MklFftEvaluator::kSpectrumBins];  // ← 変更後
+
 
     evaluator.computeFft(leveled.segment.left, leveled.segment.right, spectrumL, spectrumR);
 

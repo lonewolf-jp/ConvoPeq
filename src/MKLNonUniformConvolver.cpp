@@ -1,35 +1,33 @@
 //============================================================================
-// MKLNonUniformConvolver.cpp  ── v2.0 (JUCE 8.0.12 / Intel oneMKL 対応)
+// MKLNonUniformConvolver.cpp  ── v2.1 (JUCE 8.0.12 / Intel oneMKL + IPP 対応)
 //
-// Non-Uniform Partitioned Convolution の完全実装。
-// 3 層レイヤー構造で低遅延と大 IR を両立する。
+// v2.1 変更点: Audio Thread 内 FFT を MKL DFTI → Intel IPP に換装。
 //
-// ■ 修正内容 (v1.0 → v2.0):
+// ■ IPP FFT 換装の設計根拠:
+//   MKL DFTI は内部スレッドプールへのアクセスを行う可能性があり、
+//   DFTI_THREAD_LIMIT=1 / mkl_set_num_threads(1) を設定しても
+//   スレッド同期オーバーヘッドがゼロにならない場合がある。
+//   Intel IPP FFT (ippsFFTFwd_RToCCS_64f / ippsFFTInv_CCSToR_64f) は
+//   完全シングルスレッド設計であり、Audio Thread のリアルタイム性を最大化する。
 //
-//   [Bug1 fix] 出力アーキテクチャを「別テールバッファ」方式に変更。
-//     - v1.0: L0/L1/L2 が同一リングバッファに独立して ringWrite() (memcpy 上書き)。
-//             複数レイヤーの出力が時間位置を合わせず逐次上書きされ、OLA が崩壊。
-//     - v2.0: L0 のみリングバッファを独占使用 (ringWrite = memcpy, 順次書き込み)。
-//             L1/L2 は IFFT 完了時に tailOutputBuf へコピーし、Get() で vdAdd 合算。
-//             共有リングの OLA タイミング問題を根本解消。
+// ■ バッファ互換性:
+//   IPP CCS 出力形式: [re0,im0,re1,im1,...] (kFftLength/2+1)*2 doubles
+//   MKL DFTI_COMPLEX_COMPLEX 出力と同一レイアウト。
+//   → fdlBuf / irFreqDomain の既存 AVX2 複素乗算コードは無変更で動作する。
 //
-//   [Bug2 fix] baseFdlIdxSaved による FDL スナップショット保存。
-//     - v1.0: baseFdlIdx をトリガブロック内で毎回再計算。同一サイクルでも
-//             fdlIndex が進むため、各パーティションが異なる FDL 時間軸を参照。
-//     - v2.0: トリガ時に baseFdlIdxSaved として一度だけ保存し、
-//             IFFT 完了まで全パーティションで同一値を使用。
+// ■ 正規化:
+//   IPP_FFT_DIV_INV_BY_N フラグ使用 → IFFT 時に 1/N 正規化自動適用。
+//   MKL の DFTI_BACKWARD_SCALE = 1/N 設定と完全等価。
 //
-//   [Bug3 fix] 分散計算ループをトリガブロック外に移動。
-//     - v1.0: 分散計算がトリガ時の 1 コールバックにのみ実行されていた。
-//             (1 トリガあたり 1 バッチ = partsPerCallback 個しか処理されず、
-//              残りは永遠に処理されない。全パーティション処理不完全。)
-//     - v2.0: 分散計算ループを for(li) ループ内・while(consumed) 外へ移動。
-//             毎コールバックで partsPerCallback 個ずつ処理し、
-//             numPartsIR 個完了後に IFFT + tailOutputBuf コピーを行う。
+// ■ ワークバッファ事前確保:
+//   SetImpulse() 内で ippsFFTGetSize_R_64f が返す sizeWork 分を事前確保。
+//   sizeWork == 0 の場合のみ fftWorkBuf = nullptr (IPP が外部バッファ不要)。
+//   Audio Thread (processLayerBlock / Add の分散ループ) でのメモリ確保はゼロ。
 //
-// ■ CPU 負荷比較 (IR=3s@48kHz=144000samples, blockSize=128):
-//   v1.0: L0 単独 = 1125 パーティション/コールバック → 大スパイク
-//   v2.0: L0=32 + L1=8(分散) + L2=1(分散) ≈ 41相当/コールバック → フラット
+// ■ 継続使用する MKL 機能 (VML/BLAS: Message Thread のみ):
+//   mkl_malloc / mkl_free   : オーディオデータバッファ確保
+//   vdMul (MKL VML)         : applySpectrumFilter での周波数ゲイン適用
+//   cblas_dscal (MKL BLAS)  : IR スケーリング
 //
 //============================================================================
 
@@ -38,10 +36,10 @@
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
 
-#include <mkl.h>
-#include <mkl_dfti.h>
-#include <mkl_vml.h>
-#include <mkl_cblas.h>
+#include <mkl.h>        // mkl_malloc, mkl_free, mkl_set_num_threads
+#include <mkl_vml.h>    // vdMul
+#include <mkl_cblas.h>  // cblas_dscal
+#include <ipp.h>       // ippsFFTFwd_RToCCS_64f, ippsFFTInv_CCSToR_64f (MKL DFTI 代替)
 #include <cstring>
 #include <algorithm>
 #include <cmath>
@@ -91,7 +89,6 @@ inline double computeTailGainForBin(int k,
     if (nyquist <= 1.0)
         return 1.0;
 
-    // 将来の範囲拡張・異常値混入に備えて、ナイキスト直下へクランプする。
     const double safeStartHz = std::max(0.0, std::min(startHz, nyquist - 1.0));
     const double f = static_cast<double>(k) * nyquist / static_cast<double>(numBins - 1);
 
@@ -109,11 +106,23 @@ inline double computeTailGainForBin(int k,
 //==============================================================================
 void MKLNonUniformConvolver::Layer::freeAll() noexcept
 {
-    if (fftHandle)     { DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; }
+    // [v2.1] IPP FFT リソース解放
+    // fftSpec は fftSpecBuf 内を指すポインタなので、fftSpecBuf の解放で自動的に無効化。
+    if (fftSpecBuf)
+    {
+        ippsFree(fftSpecBuf);
+        fftSpecBuf = nullptr;
+        fftSpec    = nullptr;
+    }
+    if (fftWorkBuf)
+    {
+        ippsFree(fftWorkBuf);
+        fftWorkBuf = nullptr;
+    }
     descriptorCommitted = false;
+
     if (irFreqDomain)  { mkl_free(irFreqDomain);  irFreqDomain  = nullptr; }
     if (fdlBuf)        { mkl_free(fdlBuf);         fdlBuf        = nullptr; }
-    // [Bug F fix] overlapBuf 削除済み
     if (fftTimeBuf)    { mkl_free(fftTimeBuf);     fftTimeBuf    = nullptr; }
     if (fftOutBuf)     { mkl_free(fftOutBuf);      fftOutBuf     = nullptr; }
     if (prevInputBuf)  { mkl_free(prevInputBuf);   prevInputBuf  = nullptr; }
@@ -135,6 +144,8 @@ void MKLNonUniformConvolver::Layer::freeAll() noexcept
 //==============================================================================
 MKLNonUniformConvolver::MKLNonUniformConvolver()
 {
+    // MKL VML / CBLAS (applySpectrumFilter) のスレッド数を制限。
+    // IPP は単一スレッド設計のため、この設定は MKL 依存部のみに影響する。
     mkl_set_num_threads(1);
 }
 
@@ -145,28 +156,6 @@ MKLNonUniformConvolver::~MKLNonUniformConvolver()
 
 //==============================================================================
 // applySpectrumFilter  ─ Message Thread のみ
-//
-// SetImpulse() の完了後に呼ばれ、全レイヤーの irFreqDomain に
-// ハイカット (HC) / ローカット (LC) のゲインテーブルを乗算して焼き込む。
-//
-// ■ アルゴリズム:
-//   各レイヤーは fftSize が異なる (L0 < L1 < L2)。
-//   物理周波数 → ビンインデックス変換は k = round(f * fftSize / fs) なので、
-//   各レイヤーに対して独立にゲインテーブルを計算・適用する。
-//
-// ■ HC カットオフ:
-//   fs ≤ 48000 Hz: fc_start=18kHz, fc_end=ナイキスト
-//   fs >  48000 Hz: fc_start=22kHz, fc_end=ナイキスト
-//   (可聴域上限を確保しつつナイキスト直下のエイリアシングを抑圧)
-//
-// ■ LC カットオフ:
-//   Natural: コサインロールオン  end=8Hz, start=18Hz
-//   Soft:    コサインロールオン  end=6Hz, start=15Hz
-//   (DC 直流成分 ～ end までをゼロにし、start まで緩やかに持ち上げる)
-//
-// ■ 使用する MKL 関数: cblas_dscal (各 bin へのスカラー乗算)
-//   [指摘1 fix] MKL VML 使用箇所のメモリは mkl_malloc/ScopedAlignedPtr で管理する。
-//   Audio Thread では本関数を呼ばない。
 //==============================================================================
 void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcept
 {
@@ -177,11 +166,9 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
     const double baseTailStrength = juce::jlimit(0.0, 2.0, static_cast<double>(spec.tailRolloffStrength));
     const double partitionStrength = juce::jlimit(0.0, 2.0, static_cast<double>(spec.partitionTailStrength));
 
-    // HC カットオフ周波数 (サンプルレート依存)
     const double hcFcStart = (fs <= 48000.0) ? 18000.0 : 22000.0;
-    const double hcFcEnd   = nyquist; // ナイキストでゲイン=0
+    const double hcFcEnd   = nyquist;
 
-    // LC カットオフ周波数
     const double lcFcEnd   = (spec.lcMode == LCMode::Soft) ?  6.0 :  8.0;
     const double lcFcStart = (spec.lcMode == LCMode::Soft) ? 15.0 : 18.0;
 
@@ -190,21 +177,15 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         Layer& l = m_layers[li];
         if (!l.irFreqDomain) continue;
 
-        const int N      = l.fftSize;   // = partSize * 2
-        const int halfN  = N / 2;       // ナイキスト bin
-        const int cSize  = l.complexSize; // = halfN + 1
+        const int N      = l.fftSize;
+        const int halfN  = N / 2;
+        const int cSize  = l.complexSize;
         const int stride = l.partStride;
 
-        // ── ゲインテーブル計算 (全 bin 分, Message Thread のみ) ──
-        // [指摘1 fix] MKL VML (vdMul) 使用箇所のメモリは mkl_malloc/mkl_free で管理する。
-        // convo::aligned_malloc は noexcept 関数内で throw するため、mkl_malloc を直接使用して
-        // nullptr チェックで対処する (OOM 時は当該レイヤーの filter 適用をスキップ)。
         convo::ScopedAlignedPtr<double> gain(
             static_cast<double*>(mkl_malloc(static_cast<size_t>(cSize) * sizeof(double), 64)));
         if (!gain.get())
         {
-            // [Issue 5 fix] OOM 時はエラーログを出力し、当該レイヤーのフィルタ適用をスキップ。
-            // これによりクラッシュを回避しつつ、異常状態を通知する。
             juce::Logger::writeToLog("MKLNonUniformConvolver: OOM in applySpectrumFilter for layer " + juce::String(li));
             continue;
         }
@@ -220,40 +201,35 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
             {
                 if (k <= kStart)
                 {
-                    // パスバンド: ゲイン 1.0 (初期値のまま)
+                    // パスバンド: ゲイン 1.0
                 }
                 else if (k <= kEnd)
                 {
-                    // ロールオフ域: [kStart+1, kEnd]
                     const double denom = static_cast<double>(kEnd - kStart);
-                    const double x     = static_cast<double>(k - kStart) / denom; // [0,1]
+                    const double x     = static_cast<double>(k - kStart) / denom;
 
                     switch (spec.hcMode)
                     {
                     case HCMode::Sharp:
-                        // x^8 に基づくローパス近似 (Butterworth 急峻)
                         gain[k] = 1.0 / std::sqrt(1.0 + std::pow(x, 8.0));
                         break;
                     case HCMode::Natural:
-                        // コサインクロスフェード (Hann 窓片側, 位相特性良好)
                         gain[k] = 0.5 * (1.0 + std::cos(
                             juce::MathConstants<double>::pi * x));
                         break;
                     case HCMode::Soft:
-                        // ガウス型 (-60dB を kEnd 付近に設定)
                         gain[k] = std::exp(-4.60517 * x * x);
                         break;
                     }
                 }
                 else
                 {
-                    // ストップバンド (kEnd より上): ゲイン 0.0
                     gain[k] = 0.0;
                 }
             }
         }
 
-        // ── LC ゲイン (既存 HC ゲインに乗算) ──
+        // ── LC ゲイン ──
         {
             const int kEnd   = static_cast<int>(std::round(lcFcEnd   * N / fs));
             const int kStart = static_cast<int>(std::round(lcFcStart * N / fs));
@@ -262,30 +238,25 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
             {
                 if (k <= kEnd)
                 {
-                    // DC ～ lcFcEnd: ゲイン 0.0
                     gain[k] = 0.0;
                 }
                 else if (k < kStart)
                 {
-                    // ロールオン域: [lcFcEnd+1, lcFcStart-1]
                     const double denom = static_cast<double>(
                         std::max(1, kStart - kEnd));
-                    const double x     = static_cast<double>(k - kEnd) / denom; // [0,1)
-                    // コサインロールオン (0→1)
+                    const double x     = static_cast<double>(k - kEnd) / denom;
                     const double g_lc  = 0.5 * (1.0 - std::cos(
                         juce::MathConstants<double>::pi * x));
                     gain[k] *= g_lc;
                 }
-                // k >= kStart: LC ゲイン 1.0 → 乗算不要 (HC ゲインのみ)
             }
         }
 
-        // ── Tail ゲイン (既存 HC/LC ゲインに乗算) ──
+        // ── Tail ゲイン ──
         double layerTailStrength = baseTailStrength;
         if (tailMode == 1)
             layerTailStrength = (li == 0) ? 0.0 : juce::jlimit(0.0, 4.0, baseTailStrength * partitionStrength);
 
-        // 強度ゼロなら tail 計算をスキップして無駄な計算を避ける。
         if (layerTailStrength > 0.0)
         {
             for (int k = 0; k < cSize; ++k)
@@ -293,15 +264,6 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         }
 
         // ── 全パーティションの irFreqDomain に gain[] を適用 ──
-        // MKL VML vdMul を使用してベクトル化乗算 (Message Thread のみ)。
-        //
-        // interleaved complex 形式: [re0, im0, re1, im1, ...]
-        // ビン k に対して gain[k] を re[k] と im[k] の両方へ適用するため、
-        // gainIL[2k] = gainIL[2k+1] = gain[k] とした interleaved ゲイン配列を
-        // 一度構築し、全パーティションに vdMul で一括適用する。
-        //
-        // [指摘1 fix] MKL VML 使用箇所は mkl_malloc/mkl_free で管理する。
-        // vdMul のインプレース演算 (y == a) は MKL 規約で許可されている。
         {
             convo::ScopedAlignedPtr<double> gainIL(
                 static_cast<double*>(mkl_malloc(static_cast<size_t>(cSize) * 2 * sizeof(double), 64)));
@@ -353,17 +315,11 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     if (impulse == nullptr || irLen <= 0 || blockSize <= 0)
         return false;
 
-    // 前回のリソースを解放
     releaseAllLayers();
 
     // ────────────────────────────────────────────────
     // 先頭 Direct Form 設定
-    //   - 先頭タップは時間領域で即時処理 (AVX2/FMA + MKL)
-    //   - FFT 側IRは先頭区間をゼロ化して二重加算を回避
     // ────────────────────────────────────────────────
-    // NOTE:
-    // Direct head path remains behind an experimental flag.
-    // Direct output is kept in a dedicated zero-latency mix buffer and added in Get().
     constexpr int kMaxDirectTaps = 32;
     const int directPart = juce::nextPowerOfTwo(std::max(blockSize, 64));
     m_directTapCount = (enableDirectHead ? std::min(irLen, std::min(directPart, kMaxDirectTaps)) : 0);
@@ -402,50 +358,26 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         releaseAllLayers();
         return false;
     }
+
     memcpy(impulseForFft.get(), impulse, static_cast<size_t>(irLen) * sizeof(double));
 
     if (m_directEnabled)
         memset(impulseForFft.get(), 0, static_cast<size_t>(m_directTapCount) * sizeof(double));
 
-    // NOTE: vmlSetMode はここでは呼ばない。
-    // MainApplication::initialise() で vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE) を
-    // 設定済みであり、ここで再度呼ぶと VML_ERRMODE_IGNORE が失われ、VML エラー時に
-    // プロセス全体が強制終了するリスクがある。
-    // また vmlSetMode はグローバル設定であるため、IR ロードのたびに呼び出すことは
-    // スレッド安全性の観点からも望ましくない。
+    // NOTE: vmlSetMode はここでは呼ばない (MainApplication::initialise() 設定済み)。
 
     // ────────────────────────────────────────────────
     // レイヤー構成決定 (Non-Uniform Partitioned Convolution)
-    //
-    // [設計方針]
-    // L0 (即時): 最初の kL0MaxParts パーティション。
-    //            毎コールバックで全パーティション処理 → 低レイテンシー
-    //            L1/L2 CPU キャッシュ (L2: 512KB, L3: 16MB) に収まるサイズ。
-    //
-    // L1 (遅延): L0 担当外の IR 前半。partSize = l0Part * 8。
-    //            partsPerCallback 個ずつ分散処理 → CPUスパイク抑制。
-    //            IFFT 完了時に tailOutputBuf へコピー。
-    //
-    // L2 (遅延): IR テール全体。partSize = l1Part * 8。
-    //            同上。
-    //
-    // [L1/L2 の遅延について]
-    // L1/L2 の出力は 1 パーティション (partSize サンプル) 分遅延する。
-    // リバーブのテール領域 (Lateリフレクション) は拡散・密度が高く、
-    // 数十ms の遅延は知覚不可能なため実用上問題なし。
     // ────────────────────────────────────────────────
     const int l0Part = juce::nextPowerOfTwo(std::max(blockSize, 64));
     const int l1Part = l0Part * 8;
     const int l2Part = l1Part * 8;
 
-    // L0: IR の先頭 kL0MaxParts パーティション
     const int l0Len = std::min(irLen, kL0MaxParts * l0Part);
 
-    // L1: 残りの前半 kL1MaxParts パーティション
     const int l1Offset = l0Len;
     const int l1Len    = std::max(0, std::min(irLen - l0Len, kL1MaxParts * l1Part));
 
-    // L2: 残り全部
     const int l2Offset = l0Len + l1Len;
     const int l2Len    = std::max(0, irLen - l0Len - l1Len);
 
@@ -464,7 +396,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     for (int li = 0; li < kNumLayers; ++li)
     {
         if (cfgs[li].len <= 0)
-            continue;  // このレイヤーは使用しない
+            continue;
 
         Layer& l = m_layers[m_numActiveLayers];
         l.descriptorCommitted = false;
@@ -473,64 +405,101 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         l.fftSize     = l.partSize * 2;
         l.isImmediate = cfgs[li].immediate;
 
-        // complexSize = fftSize/2 + 1
         l.complexSize = l.fftSize / 2 + 1;
-        // partStride: double 換算 complexSize*2 を 8-double (64byte) 境界にアライン
         l.partStride  = (l.complexSize * 2 + 7) & ~7;
 
-        // IR パーティション数 (実数)
         l.numPartsIR = (cfgs[li].len + l.partSize - 1) / l.partSize;
-        // FDL 用に power-of-two に切り上げ
         l.numParts   = juce::nextPowerOfTwo(l.numPartsIR);
         l.fdlMask    = l.numParts - 1;
 
-        // ── DFTI ハンドル生成 (Message Thread で DftiCommitDescriptor) ──
-        if (DftiCreateDescriptor(&l.fftHandle, DFTI_DOUBLE, DFTI_REAL, 1, l.fftSize) != DFTI_NO_ERROR)
+        // ── IPP FFT スペック初期化 (Message Thread で事前確保) ──
+        //
+        // [v2.1] MKL DFTI_DESCRIPTOR_HANDLE の代替。
+        // fftSize = 2 * partSize は常に 2 の冪なので FFT (DFT より高速) を使用可能。
+        // IPP_FFT_DIV_INV_BY_N: IFFT 時に 1/N 正規化を自動適用
+        //   (旧: DftiSetValue(DFTI_BACKWARD_SCALE, 1.0/fftSize) と等価)
+        // ippAlgHintFast: 速度優先 (精度を一切犠牲にしない範囲でのヒント)
         {
-            releaseAllLayers();
-            return false;
-        }
+            // fftSize = 2^order を求める (fftSize は必ず 2 の冪)
+            int order = 0;
+            {
+                int tmp = l.fftSize;
+                while (tmp > 1) { tmp >>= 1; ++order; }
+            }
 
-        bool ok = true;
-        ok = ok && (DftiSetValue(l.fftHandle, DFTI_PLACEMENT,             DFTI_NOT_INPLACE)     == DFTI_NO_ERROR);
-        ok = ok && (DftiSetValue(l.fftHandle, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX) == DFTI_NO_ERROR);
-        ok = ok && (DftiSetValue(l.fftHandle, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(l.fftSize)) == DFTI_NO_ERROR);
+            int sizeSpec = 0, sizeInit = 0, sizeWork = 0;
+            const IppStatus getSt = ippsFFTGetSize_R_64f(
+                order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
+                &sizeSpec, &sizeInit, &sizeWork);
+            if (getSt != ippStsNoErr)
+            {
+                juce::Logger::writeToLog("MKLNonUniformConvolver: ippsFFTGetSize_R_64f failed for layer "
+                                         + juce::String(li) + " (status=" + juce::String(static_cast<int>(getSt)) + ")");
+                releaseAllLayers();
+                return false;
+            }
 
-        // ★ Audio Thread 向けリアルタイム安全設定
-        ok = ok && (DftiSetValue(l.fftHandle, DFTI_THREAD_LIMIT, 1) == DFTI_NO_ERROR);
-        ok = ok && (DftiSetValue(l.fftHandle, DFTI_WORKSPACE, DFTI_NO_WORKSPACE) == DFTI_NO_ERROR);
+            // スペックバッファ確保 (IPP FFT スペックのメモリオーナー)
+            l.fftSpecBuf = ippsMalloc_8u(sizeSpec);
+            if (!l.fftSpecBuf)
+            {
+                juce::Logger::writeToLog("MKLNonUniformConvolver: ippsMalloc_8u(sizeSpec) failed for layer " + juce::String(li));
+                releaseAllLayers();
+                return false;
+            }
 
-        ok = ok && (DftiCommitDescriptor(l.fftHandle) == DFTI_NO_ERROR);
-        l.descriptorCommitted = ok;
+            // 初期化用一時バッファ (不要なら nullptr)
+            Ipp8u* initBuf = (sizeInit > 0) ? ippsMalloc_8u(sizeInit) : nullptr;
 
-        if (!ok)
-        {
-            juce::Logger::writeToLog("MKLNonUniformConvolver: DFTI setup failed for layer " + juce::String(li));
-        }
-        if (!ok)
-        {
-            releaseAllLayers();
-            return false;
+            const IppStatus initSt = ippsFFTInit_R_64f(
+                &l.fftSpec, order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
+                l.fftSpecBuf, initBuf);
+
+            if (initBuf)
+            {
+                ippsFree(initBuf);
+                initBuf = nullptr;
+            }
+
+            if (initSt != ippStsNoErr || l.fftSpec == nullptr)
+            {
+                juce::Logger::writeToLog("MKLNonUniformConvolver: ippsFFTInit_R_64f failed for layer "
+                                         + juce::String(li) + " (status=" + juce::String(static_cast<int>(initSt)) + ")");
+                releaseAllLayers();
+                return false;
+            }
+
+            // ワークバッファ確保 (Audio Thread での動的確保を防ぐため事前確保)
+            // sizeWork == 0 の場合 nullptr のまま (IPP が外部バッファ不要)
+            // sizeWork > 0 かつ確保失敗 → リアルタイム安全でないため初期化失敗とする
+            if (sizeWork > 0)
+            {
+                l.fftWorkBuf = ippsMalloc_8u(sizeWork);
+                if (!l.fftWorkBuf)
+                {
+                    juce::Logger::writeToLog("MKLNonUniformConvolver: ippsMalloc_8u(sizeWork=" + juce::String(sizeWork)
+                                             + ") failed for layer " + juce::String(li));
+                    releaseAllLayers();
+                    return false;
+                }
+            }
+            // else: sizeWork == 0 → l.fftWorkBuf は nullptr のまま (正常)
+
+            l.descriptorCommitted = true;
         }
 
         // ── バッファ確保 (すべて mkl_malloc 64byte アライン) ──
         const size_t irBufSize  = static_cast<size_t>(l.numParts) * l.partStride;
-        // [最適化2] Linearized ring buffer: FDL を 2×numParts 分確保。
-        // fdlBuf[fdlIndex] と fdlBuf[fdlIndex + numParts] に同一データをミラー書き込みし、
-        // forward 方向への連続アクセスを実現する (hardware prefetcher 最大活用)。
         const size_t fdlBufSize = static_cast<size_t>(l.numParts) * 2 * l.partStride;
 
         l.irFreqDomain = static_cast<double*>(mkl_malloc(irBufSize  * sizeof(double), 64));
         l.fdlBuf       = static_cast<double*>(mkl_malloc(fdlBufSize * sizeof(double), 64));
-        // [Bug F fix] overlapBuf 削除済み
         l.fftTimeBuf   = static_cast<double*>(mkl_malloc(l.fftSize   * sizeof(double), 64));
         l.fftOutBuf    = static_cast<double*>(mkl_malloc(l.fftSize   * sizeof(double), 64));
         l.prevInputBuf = static_cast<double*>(mkl_malloc(l.partSize  * sizeof(double), 64));
         l.accumBuf     = static_cast<double*>(mkl_malloc(l.partStride * sizeof(double), 64));
         l.inputAccBuf  = static_cast<double*>(mkl_malloc(l.partSize  * sizeof(double), 64));
 
-        // L1/L2: テール出力バッファ確保
-        // L0 (isImmediate) では不要 (nullptr のまま)
         if (!l.isImmediate)
             l.tailOutputBuf = static_cast<double*>(mkl_malloc(l.partSize * sizeof(double), 64));
 
@@ -554,9 +523,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
             juce::FloatVectorOperations::clear(l.tailOutputBuf, l.partSize);
 
         // ── IR プリコンピュート ──
-        // 一時バッファ (スタック上では大きすぎるので mkl_malloc)
-        double* tempTime = static_cast<double*>(mkl_malloc(l.fftSize * sizeof(double), 64));
-        double* tempFreq = static_cast<double*>(mkl_malloc((l.fftSize + 2) * sizeof(double), 64));
+        // tempFreq は CCS 出力用に (fftSize + 2) 分確保
+        // (IPP CCS 形式: (N/2+1)*2 = N+2 doubles)
+        double* tempTime = static_cast<double*>(mkl_malloc(l.fftSize          * sizeof(double), 64));
+        double* tempFreq = static_cast<double*>(mkl_malloc((l.fftSize + 2)    * sizeof(double), 64));
         if (!tempTime || !tempFreq)
         {
             if (tempTime) mkl_free(tempTime);
@@ -579,37 +549,30 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
                 if (copyLen > 0)
                     memcpy(tempTime, irSrc + copyStart, copyLen * sizeof(double));
             }
-            // p >= numPartsIR のスロットはゼロパディング (音質影響なし)
 
-            DftiComputeForward(l.fftHandle, tempTime, tempFreq);
+            // [v2.1] Forward FFT: real → CCS
+            // IPP CCS 出力: [re0,im0,re1,im1,...] ← MKL DFTI_COMPLEX_COMPLEX と同一レイアウト
+            ippsFFTFwd_RToCCS_64f(tempTime, tempFreq, l.fftSpec, l.fftWorkBuf);
 
             // interleaved complex として irFreqDomain に格納
             memcpy(l.irFreqDomain + p * l.partStride, tempFreq,
                    l.complexSize * 2 * sizeof(double));
 
-            // ヘッドルーム確保のためのスケーリング (MKL BLAS, Message Thread のみ)
             if (scale != 1.0)
                 cblas_dscal(l.complexSize * 2, scale, l.irFreqDomain + p * l.partStride, 1);
         }
 
         // Backward FFT のウォームアップ
-        // Audio Thread での初回実行時の遅延 (DFT テーブル生成等) を防ぐ
-        DftiComputeBackward(l.fftHandle, tempFreq, tempTime);
+        // Audio Thread での初回実行時の遅延 (IPP テーブル生成等) を事前消化する。
+        // [v2.1] IFFT: CCS → real (IPP_FFT_DIV_INV_BY_N により 1/N 正規化済み)
+        ippsFFTInv_CCSToR_64f(tempFreq, tempTime, l.fftSpec, l.fftWorkBuf);
 
         mkl_free(tempTime);
         mkl_free(tempFreq);
 
-        // [最適化2] IR パーティションを逆順に並び替える。
-        // Linearized ring buffer での forward 読み出し:
-        //   FDL: [oldest ... newest] (linStart + 0, +1, ... +numPartsIR-1)
-        //   IR:  [newest ... oldest] を逆順格納 → p=0 が oldest FDL に対応
-        //
-        // 正しい畳み込み: accumBuf += sum_p FDL[fdlIndex - p] * IR[p]
-        //   → 格納を逆順にすることで forward アクセスで同じ結果が得られる。
-        // この逆順変換は SetImpulse() のみで行い、Audio Thread にはコストゼロ。
+        // [最適化2] IR パーティションを逆順に並び替える (forward アクセス最適化)
         if (l.numPartsIR > 1)
         {
-            // スワップ用一時バッファ (IR 1 パーティション分)
             double* swapBuf = static_cast<double*>(mkl_malloc(
                 static_cast<size_t>(l.partStride) * sizeof(double), 64));
             if (swapBuf)
@@ -625,32 +588,11 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
                 }
                 mkl_free(swapBuf);
             }
-            // swapBuf 確保失敗 (OOM) の場合: 逆順格納なしでも音は出るが
-            // 畳み込み順序が反転する (IR が逆再生になる)。実用上許容できない
-            // ケースだが OOM = 極めて稀であり、NoExcept 関数内なので致命的とはしない。
         }
 
         // ── 非 Immediate レイヤーのコールバックあたりパーティション数 ──
-        // 1 コールバック (blockSize サンプル) あたりに処理するパーティション数:
-        //
-        // 【設計上の不変条件】
-        //   partSize = nextPowerOfTwo(max(blockSize,64)) * 8^n  (L1: n=1, L2: n=2)
-        //   blockSize = nextPowerOfTwo(ホスト指定値)
-        //   → partSize は常に blockSize の正確な倍数 (partSize % blockSize == 0)
-        //
-        //   blocksPerPart = partSize / blockSize  (整除。切り捨てなし)
-        //   partsPerCallback = ceil(numPartsIR / blocksPerPart)
-        //
-        // これにより分散計算は 1 トリガ周期 (blocksPerPart コールバック) 内に完了する。
-        //
-        // 【注意】「= ceil(numPartsIR * blockSize / partSize)」は
-        //   partSize % blockSize == 0 の場合のみ成立する等式である。
-        //   非整除の場合、提案式は partsPerCallback を過小評価し
-        //   分散計算が完了しない可能性があるため使用しないこと。
         if (!l.isImmediate)
         {
-            // [Issue 4 fix] partSize が blockSize の倍数でない場合、blocksPerPart を切り上げる。
-            // これにより、分散計算が 1 トリガ周期内に確実に完了するようにする。
             const int blocksPerPart = (l.partSize + std::max(blockSize, 1) - 1) / std::max(blockSize, 1);
             l.partsPerCallback = std::max(1,
                 (l.numPartsIR + blocksPerPart - 1) / blocksPerPart);
@@ -672,16 +614,6 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
     // ────────────────────────────────────────────────
     // 出力リングバッファ確保 (L0 専用)
-    // L1/L2 は tailOutputBuf を使用するため、リングは L0 のみに最適化したサイズでよい。
-    //
-    // FDL と整合したリングサイズ計算:
-    //   numPartsIR = ceil(irLen / blockSize)  … IR 全体のパーティション数
-    //   numParts   = nextPowerOfTwo(numPartsIR) … FDL 幅
-    //   baseSize   = numParts * 2              … FDL 理論必要量 (write-read ≤ numParts)
-    //   margin     = nextPowerOfTwo(blockSize) … 書き込み遅延・ジッタ吸収
-    //   rSize      = nextPowerOfTwo(baseSize + margin)
-    //
-    // 後方互換のため旧式サイズも計算し、大きい方を採用する。
     // ────────────────────────────────────────────────
     const int l0PartSize  = m_layers[0].partSize;
     const int numPartsIR  = (irLen + blockSize - 1) / blockSize;
@@ -705,11 +637,8 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     m_ringRead  = 0;
     m_ringAvail = 0;
 
-    m_latency = m_layers[0].partSize;  // Layer0 の partSize = 最低遅延
+    m_latency = m_layers[0].partSize;
 
-    // ── 出力周波数フィルターを irFreqDomain に焼き込む (Message Thread のみ) ──
-    // filterSpec が nullptr の場合はスルー (既存動作と完全互換)。
-    // Audio Thread の追加コストはゼロ (計算済みゲインが irFreqDomain に乗算済み)。
     if (filterSpec != nullptr)
         applySpectrumFilter(*filterSpec);
 
@@ -725,7 +654,8 @@ bool MKLNonUniformConvolver::areFftDescriptorsCommitted() const noexcept
     for (int li = 0; li < m_numActiveLayers; ++li)
     {
         const Layer& l = m_layers[li];
-        if (l.fftHandle == nullptr || !l.descriptorCommitted)
+        // [v2.1] fftHandle → fftSpec
+        if (l.fftSpec == nullptr || !l.descriptorCommitted)
             return false;
     }
 
@@ -734,7 +664,6 @@ bool MKLNonUniformConvolver::areFftDescriptorsCommitted() const noexcept
 
 //==============================================================================
 // processDirectBlock  ─ Audio Thread
-// 先頭IRを時間領域で即時処理し、結果を専用ミックスバッファへ書き込む。
 //==============================================================================
 void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamples) noexcept
 {
@@ -775,7 +704,6 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
             for (; k < vEnd8; k += 8)
             {
                 const __m256d h0 = _mm256_load_pd(m_directIRRev + k);
-                // x is m_directWindow + n, and n advances by 1 sample, so alignment is not guaranteed here.
                 const __m256d x0 = _mm256_loadu_pd(x + k);
                 const __m256d h1 = _mm256_load_pd(m_directIRRev + k + 4);
                 const __m256d x1 = _mm256_loadu_pd(x + k + 4);
@@ -805,14 +733,12 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
 //==============================================================================
 // processLayerBlock  ─ Audio Thread (L0 専用)
 //
-// l.inputAccBuf に 1 パーティション分の入力が溜まったタイミングで呼ぶ。
-//
 // 処理:
 //   1. Overlap-Save 形式で fftTimeBuf を組み立てる [prevInput | currentInput]
 //   2. Forward FFT → FDL の現在スロットへ格納
 //   3. FDL × IR の複素乗算積算 (AVX2 FMA)
 //   4. Backward FFT
-//   5. 有効出力 (後半 partSize サンプル) をリングバッファへ書き込む (ringWrite)
+//   5. 有効出力 (後半 partSize サンプル) をリングバッファへ書き込み (ringWrite)
 //   6. FDL インデックスを進める
 //==============================================================================
 void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
@@ -820,18 +746,16 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     // ── 1. [prevInput | currentInput] を fftTimeBuf に配置 (Overlap-Save) ──
     juce::FloatVectorOperations::copy(l.fftTimeBuf,              l.prevInputBuf, l.partSize);
     juce::FloatVectorOperations::copy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize);
-
-    // 現在の入力を次回の "prev" として保存
     juce::FloatVectorOperations::copy(l.prevInputBuf, l.inputAccBuf, l.partSize);
 
     // ── 2. Forward FFT ──
-    // 出力は FDL の現在スロットへ直接書き込む
+    // [v2.1] ippsFFTFwd_RToCCS_64f: real → CCS interleaved complex
+    // CCS 出力形式: [re0,im0,re1,im1,...] ← 既存 AVX2 複素乗算と完全互換
+    // partStride >= complexSize*2 = fftSize+2 を確保済み (SetImpulse で検証)
     double* currentFDLSlot = l.fdlBuf + l.fdlIndex * l.partStride;
-    DftiComputeForward(l.fftHandle, l.fftTimeBuf, currentFDLSlot);
+    ippsFFTFwd_RToCCS_64f(l.fftTimeBuf, currentFDLSlot, l.fftSpec, l.fftWorkBuf);
 
-    // [最適化2] Linearized ring buffer: mirror write。
-    // fdlBuf[fdlIndex + numParts] にも同一データを書き込む。
-    // これにより convolution ループで forward 方向の連続アクセスが可能になる。
+    // [最適化2] Linearized ring buffer: mirror write
     double* mirrorFDLSlot = l.fdlBuf + (l.fdlIndex + l.numParts) * l.partStride;
     memcpy(mirrorFDLSlot, currentFDLSlot, l.partStride * sizeof(double));
 
@@ -842,20 +766,14 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     const double* irBase  = l.irFreqDomain;
     double*       dst     = l.accumBuf;
 
-    // [最適化2] Linearized ring buffer: forward 順次アクセス。
-    // linStart = fdlIndex - numPartsIR + 1 + numParts
-    //   → 常に [1, 2*numParts-1] 範囲内 (modulo 演算不要)
-    // IR は SetImpulse() で逆順格納済みのため forward アクセスで正しい畳み込みになる。
     const int linStart   = l.fdlIndex - l.numPartsIR + 1 + l.numParts;
     const double* fdlLin = fdlBase + linStart * l.partStride;
 
     for (int p = 0; p < l.numPartsIR; ++p)
     {
-        const double* srcA = fdlLin + p * l.partStride;  // FDL: oldest→newest (forward)
-        const double* srcB = irBase + p * l.partStride;  // IR:  forward (逆順格納済み)
+        const double* srcA = fdlLin + p * l.partStride;
+        const double* srcB = irBase + p * l.partStride;
 
-        // ── パーティション先読み (T1: L2キャッシュターゲット, 2 iterations 先) ──
-        // forward アクセスのため stride は一定 → hardware prefetcher も有効
         if (p + 1 < l.numPartsIR)
         {
             _mm_prefetch((const char*)(srcA + l.partStride),     _MM_HINT_T1);
@@ -868,20 +786,14 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
         }
 
         int k = 0;
-
-        // ── 8 複素数 (= 16 double) を 1 ループで処理 (AVX2 8-wide unroll) ──
-        // 2 組の acc/a/b ペアをアウトオブオーダー実行で並列投入し
-        // FMA パイプラインのスループットを最大化する。
         const int vEnd8 = (l.complexSize / 8) * 8;
         const int vEnd4 = (l.complexSize / 4) * 4;
 
         for (; k < vEnd8; k += 8)
         {
-            // 内側ループ先読み (T0: L1キャッシュターゲット, 2 iterations 先)
             _mm_prefetch((const char*)(srcA + 2 * k + 64), _MM_HINT_T0);
             _mm_prefetch((const char*)(srcB + 2 * k + 64), _MM_HINT_T0);
 
-            // ── 複素 k..k+3 ──
             __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
             __m256d acc1 = _mm256_load_pd(dst  + 2 * k + 4);
             __m256d a0   = _mm256_load_pd(srcA + 2 * k);
@@ -904,7 +816,6 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
             _mm256_store_pd(dst + 2 * k,     acc0);
             _mm256_store_pd(dst + 2 * k + 4, acc1);
 
-            // ── 複素 k+4..k+7 ──
             __m256d acc2 = _mm256_load_pd(dst  + 2 * k + 8);
             __m256d acc3 = _mm256_load_pd(dst  + 2 * k + 12);
             __m256d a2   = _mm256_load_pd(srcA + 2 * k + 8);
@@ -928,7 +839,6 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
             _mm256_store_pd(dst + 2 * k + 12, acc3);
         }
 
-        // 4-wide 残余 (vEnd8 〜 vEnd4)
         for (; k < vEnd4; k += 4)
         {
             __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
@@ -954,7 +864,6 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
             _mm256_store_pd(dst + 2 * k + 4, acc1);
         }
 
-        // スカラーフォールバック (残り要素)
         for (; k < l.complexSize; ++k)
         {
             const double ar = srcA[2 * k],     ai = srcA[2 * k + 1];
@@ -965,6 +874,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     }
 
     // ── 4. Backward FFT ──
+    // IFFT 前にデノーマル対策 (accumBuf の複素データに適用)
 #if defined(__AVX2__)
     for (int k = 0; k < l.partStride; k += 4) {
         __m256d v = _mm256_load_pd(&l.accumBuf[k]);
@@ -975,10 +885,11 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     for (int k = 0; k < l.partStride; ++k)
         l.accumBuf[k] = killDenormal(l.accumBuf[k]);
 #endif
-    DftiComputeBackward(l.fftHandle, l.accumBuf, l.fftOutBuf);
+    // [v2.1] ippsFFTInv_CCSToR_64f: CCS → real
+    // IPP_FFT_DIV_INV_BY_N により 1/N 正規化自動適用 (旧 DFTI_BACKWARD_SCALE と等価)
+    ippsFFTInv_CCSToR_64f(l.accumBuf, l.fftOutBuf, l.fftSpec, l.fftWorkBuf);
 
-    // ── 5. Overlap-Save: 有効出力 (後半 partSize サンプル) をリングへ順次書き込み ──
-    // [Bug1 fix] L0 のみリングを独占使用。memcpy による上書きは安全 (L1/L2 非使用)。
+    // ── 5. Overlap-Save: 有効出力をリングへ書き込み ──
     ringWrite(l.fftOutBuf + l.partSize, l.partSize);
 
     // ── 6. FDL インデックスを進める ──
@@ -987,7 +898,6 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 
 //==============================================================================
 // ringWrite  ─ Audio Thread (L0 専用)
-// L0 の IFFT 出力をリングバッファへ順次書き込み、m_ringWrite / m_ringAvail を更新する。
 //==============================================================================
 void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
 {
@@ -1003,13 +913,6 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
     const int nextAvail = m_ringAvail + n;
     if (nextAvail > m_ringSize)
     {
-        // ─────────────────────────────────────────────────────────────────
-        // オーバーフロー安全弁
-        //
-        // 【対応方針】Audio Thread 内でブロックは不可。
-        //   最も古い未読データを破棄し、最新データの連続性を優先する。
-        //   コールバックでオーバーフロー発生を通知し、非同期リビルドを促す。
-        // ─────────────────────────────────────────────────────────────────
         const int overflow = nextAvail - m_ringSize;
         m_ringRead = (m_ringRead + overflow) & m_ringMask;
         m_ringAvail = m_ringSize;
@@ -1026,14 +929,6 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
 
 //==============================================================================
 // ringRead  ─ Audio Thread (L0 専用)
-// リングバッファから n サンプルを読み出す。
-//
-// 【Zero-Flush 削除について】
-//   旧実装は読み出し後に memset(0) でバッファ領域をクリアしていたが、
-//   ringWrite は memcpy による上書きのみであるため、読み出し済み領域は
-//   次回 ringWrite で必ず完全に上書きされる。
-//   クリアは冗長であり Audio Thread での余分な memset は避けるべきため削除した。
-//   初期状態は setup() の memset(0) で保証されている。
 //==============================================================================
 int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
 {
@@ -1054,7 +949,6 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
         if (toRead > first)
             juce::FloatVectorOperations::copy(dst + first, m_ringBuf, toRead - first);
 
-        // 読み取れなかった分をゼロ埋め
         if (toRead < n)
             memset(dst + toRead, 0, (n - toRead) * sizeof(double));
     }
@@ -1066,50 +960,18 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
 
 //==============================================================================
 // Add  ─ Audio Thread
-//
-// [処理フロー]
-//   L0 (即時レイヤー):
-//     - blockSize サンプルごとに processLayerBlock() → ringWrite()
-//
-//   L1/L2 (遅延レイヤー):
-//     トリガブロック (partSize サンプル蓄積後, while ループ内):
-//       1. Overlap-Save 形式で fftTimeBuf を組み立てる
-//       2. Forward FFT → FDL 格納
-//       3. fdlIndex を +1 (トリガ完了)
-//       4. [Bug2 fix] baseFdlIdxSaved を保存 (サイクル全体で再計算禁止)
-//       5. accumBuf クリア, nextPart=0, distributing=true
-//
-//     分散計算ループ (while ループ外, 毎コールバック実行):
-//       [Bug3 fix] トリガブロック外に移動。
-//       6. partsPerCallback 個の FDL × IR 複素乗算積算 (AVX2 FMA)
-//       7. numPartsIR 完了時: Backward FFT → tailOutputBuf へコピー
-//          distributing=false, nextPart=0
 //==============================================================================
 void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 {
-    // input == nullptr は無音として扱う
     if (!m_ready.load(std::memory_order_acquire) || numSamples <= 0)
         return;
 
-    // 先頭Direct区間を即時処理 (AVX2/FMA + MKL dot)
     processDirectBlock(input, numSamples);
 
     for (int li = 0; li < m_numActiveLayers; ++li)
     {
         Layer& l = m_layers[li];
 
-        // ────────────────────────────────────────────
-        // 入力を partSize 単位で蓄積し、溜まったらトリガ処理する
-        //
-        // 【複数トリガ不発生の証明】
-        //   L1/L2 の partSize と numSamples の大小関係:
-        //     L1.partSize = l0Part × 8 ≥ blockSize × 8
-        //     L2.partSize = l0Part × 64 ≥ blockSize × 64
-        //     numSamples  = blockSize (StereoConvolver::process から渡される値)
-        //   よって numSamples ≤ L1.partSize / 8 であり、
-        //   1 回の Add() 呼び出しで L1/L2 が 2 回以上トリガすることは
-        //   構造上不可能。while ループの L1/L2 トリガ分岐は高々 1 回しか実行されない。
-        // ────────────────────────────────────────────
         int consumed = 0;
         while (consumed < numSamples)
         {
@@ -1123,47 +985,33 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
             if (l.inputPos >= l.partSize)
             {
-                // 1 パーティション分が溜まった
                 l.inputPos = 0;
 
                 if (l.isImmediate)
                 {
-                    // ── L0: 即時処理 (全パーティション畳み込み → ringWrite) ──
                     processLayerBlock(l);
                 }
                 else
                 {
-                    // ── L1/L2: トリガ処理 (Forward FFT + FDL 更新のみ) ──
-                    // 分散計算ループは下 (while ループ外) で毎コールバック実行する。
+                    jassert(consumed <= numSamples);
 
-                    // 【不変条件】1 回の Add() でこの分岐は高々 1 回しか実行されない。
-                    // partSize ≥ 8 × blockSize が保証されているため、
-                    // numSamples(= blockSize) < partSize が常に成立する。
-                    jassert(consumed <= numSamples); // この分岐後は consumed == numSamples になるはず
-
-                    // Overlap-Save 形式で fftTimeBuf を組み立てる
                     juce::FloatVectorOperations::copy(l.fftTimeBuf,              l.prevInputBuf, l.partSize);
                     juce::FloatVectorOperations::copy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize);
                     juce::FloatVectorOperations::copy(l.prevInputBuf, l.inputAccBuf, l.partSize);
 
-                    // Forward FFT → FDL の現在スロットへ格納
+                    // [v2.1] L1/L2 Forward FFT: real → CCS
                     double* currentFDLSlot = l.fdlBuf + l.fdlIndex * l.partStride;
-                    DftiComputeForward(l.fftHandle, l.fftTimeBuf, currentFDLSlot);
+                    ippsFFTFwd_RToCCS_64f(l.fftTimeBuf, currentFDLSlot, l.fftSpec, l.fftWorkBuf);
 
-                    // [最適化2] Linearized ring buffer: mirror write
-                    // fdlBuf[fdlIndex + numParts] にも同一データを書き込む。
+                    // [最適化2] mirror write
                     double* mirrorFDLSlot = l.fdlBuf + (l.fdlIndex + l.numParts) * l.partStride;
                     juce::FloatVectorOperations::copy(mirrorFDLSlot, currentFDLSlot, l.partStride);
 
-                    // FDL インデックスを進める (トリガ完了)
                     l.fdlIndex = (l.fdlIndex + 1) & l.fdlMask;
 
-                    // [Bug2 fix] 新サイクル開始時に FDL スナップショットを保存。
-                    // fdlIndex は既に +1 済みなので「-1」が直前に書き込んだスロット。
-                    // このサイクルの全パーティションはこの値を使い、再計算しない。
+                    // [Bug2 fix] FDL スナップショット保存
                     l.baseFdlIdxSaved = (l.fdlIndex - 1 + l.numParts) & l.fdlMask;
 
-                    // accumBuf クリア・カウンタリセット (新サイクル開始)
                     memset(l.accumBuf, 0, l.partStride * sizeof(double));
                     l.nextPart    = 0;
                     l.distributing = true;
@@ -1172,11 +1020,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
         } // while consumed < numSamples
 
         // ────────────────────────────────────────────────────────────────────
-        // [Bug3 fix] 分散計算ループ: while ループ外で毎コールバック実行。
-        //
-        // トリガブロック内に置くと、トリガ時の 1 コールバックしか実行されない。
-        // ここに置くことで毎コールバック partsPerCallback 個ずつ処理が進み、
-        // numPartsIR 完了後に IFFT + tailOutputBuf コピーが行われる。
+        // [Bug3 fix] 分散計算ループ: 毎コールバック実行
         // ────────────────────────────────────────────────────────────────────
         if (!l.isImmediate && l.distributing)
         {
@@ -1185,21 +1029,16 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
             const double* fdlBase    = l.fdlBuf;
             const double* irBase     = l.irFreqDomain;
             double*       dst        = l.accumBuf;
-            // [Bug2 fix] サイクル開始時に保存したスナップショットを使用 (再計算禁止)
             const int     baseFdlIdx = l.baseFdlIdxSaved;
 
-            // [最適化2] Linearized ring buffer: forward 順次アクセス。
-            // linStart = baseFdlIdx - numPartsIR + 1 + numParts
-            // IR は SetImpulse() で逆順格納済み。
             const int linStart   = baseFdlIdx - l.numPartsIR + 1 + l.numParts;
             const double* fdlLin = fdlBase + linStart * l.partStride;
 
             for (int p = l.nextPart; p < endPart; ++p)
             {
-                const double* srcA = fdlLin + p * l.partStride;  // FDL: forward
-                const double* srcB = irBase + p * l.partStride;  // IR:  forward (逆順格納済み)
+                const double* srcA = fdlLin + p * l.partStride;
+                const double* srcB = irBase + p * l.partStride;
 
-                // [最適化2] prefetch: forward 方向なので stride = partStride (一定)
                 if (p + 1 < endPart)
                 {
                     _mm_prefetch((const char*)(srcA + l.partStride), _MM_HINT_T1);
@@ -1212,8 +1051,6 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                 }
 
                 int k = 0;
-
-                // ── 8 複素数 (= 16 double) 8-wide AVX2 アンロール ──
                 const int vEnd8 = (l.complexSize / 8) * 8;
                 const int vEnd4 = (l.complexSize / 4) * 4;
 
@@ -1222,7 +1059,6 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     _mm_prefetch((const char*)(srcA + 2 * k + 128), _MM_HINT_T0);
                     _mm_prefetch((const char*)(srcB + 2 * k + 128), _MM_HINT_T0);
 
-                    // 複素 k..k+3
                     __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
                     __m256d acc1 = _mm256_load_pd(dst  + 2 * k + 4);
                     __m256d a0   = _mm256_load_pd(srcA + 2 * k);
@@ -1245,7 +1081,6 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     _mm256_store_pd(dst + 2 * k,     acc0);
                     _mm256_store_pd(dst + 2 * k + 4, acc1);
 
-                    // 複素 k+4..k+7
                     __m256d acc2 = _mm256_load_pd(dst  + 2 * k + 8);
                     __m256d acc3 = _mm256_load_pd(dst  + 2 * k + 12);
                     __m256d a2   = _mm256_load_pd(srcA + 2 * k + 8);
@@ -1269,7 +1104,6 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     _mm256_store_pd(dst + 2 * k + 12, acc3);
                 }
 
-                // 4-wide 残余
                 for (; k < vEnd4; k += 4)
                 {
                     __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
@@ -1295,7 +1129,6 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     _mm256_store_pd(dst + 2 * k + 4, acc1);
                 }
 
-                // スカラーフォールバック
                 for (; k < l.complexSize; ++k)
                 {
                     const double ar = srcA[2 * k],     ai = srcA[2 * k + 1];
@@ -1310,12 +1143,9 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
             // ── 全パーティション累積完了 → IFFT → tailOutputBuf へコピー ──
             if (l.nextPart >= l.numPartsIR)
             {
-                // Backward FFT (規約遵守: Audio Thread 内で DftiCommitDescriptor 禁止)
-                DftiComputeBackward(l.fftHandle, l.accumBuf, l.fftOutBuf);
+                // [v2.1] Backward FFT: CCS → real (Audio Thread 内で再初期化禁止の制約はIPPも同様)
+                ippsFFTInv_CCSToR_64f(l.accumBuf, l.fftOutBuf, l.fftSpec, l.fftWorkBuf);
 
-                // [Bug1 fix] リングバッファへの上書きではなく tailOutputBuf へコピー。
-                // Get() で L0 の ring 出力に vdAdd で合算する。
-                // 有効出力は Overlap-Save の後半 partSize サンプル。
                 memcpy(l.tailOutputBuf, l.fftOutBuf + l.partSize, l.partSize * sizeof(double));
                 l.tailOutputPos = 0;
 
@@ -1329,18 +1159,6 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
 //==============================================================================
 // Get  ─ Audio Thread
-//
-// L0 の出力 (リングバッファ) に L1/L2 の遅延出力 (tailOutputBuf) を vdAdd で合算して返す。
-//
-// [L1/L2 の遅延特性]
-//   L1/L2 の tailOutputBuf は IFFT 完了後に埋まる。IFFT は partSize/blockSize コールバック後に
-//   完了するため、L1/L2 の出力は 1 パーティション (partSize サンプル) 分遅延する。
-//   リバーブのテール領域では知覚不可能なため実用上問題なし。
-//
-// [tailOutputBuf の消費タイミング]
-//   L1: partsPerCallback × (partSize/blockSize) = numPartsIR 処理後に IFFT 完了。
-//       tailOutputBuf が partSize サンプル分を保持し、blockSize ずつ消費。
-//       tailOutputPos が partSize に達したら次の IFFT まで zeros を合算。
 //==============================================================================
 int MKLNonUniformConvolver::Get(double* output, int numSamples)
 {
@@ -1351,7 +1169,6 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
         return 0;
     }
 
-    // ── L0 出力: リングバッファから読み出し ──
     const int got = ringRead(output, numSamples);
 
     auto isAligned64 = [](const void* ptr) noexcept
@@ -1384,37 +1201,36 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
 #endif
     };
 
-    // ── Direct 出力: 専用ゼロ遅延ミックスバッファを加算 ──
+    // suppress unused warning
+    (void)isAligned64;
+
+    // ── Direct 出力 ──
     if (m_directEnabled && m_directOutBuf != nullptr)
     {
         const int toAdd = std::min(numSamples, m_directPendingSamples);
         if (toAdd > 0)
         {
             if (output != nullptr)
-            {
                 addFallback(toAdd, output, m_directOutBuf);
-            }
 
             memset(m_directOutBuf, 0, static_cast<size_t>(toAdd) * sizeof(double));
             m_directPendingSamples = 0;
         }
     }
 
-    // ── L1/L2 出力: tailOutputBuf から vdAdd で合算 ──
-    // output が nullptr の場合でも tailOutputPos を正しく進める。
+    // ── L1/L2 出力 ──
     for (int li = 1; li < m_numActiveLayers; ++li)
     {
         Layer& l = m_layers[li];
-        if (l.tailOutputBuf == nullptr) continue;  // 未初期化時はスキップ
+        if (l.tailOutputBuf == nullptr) continue;
 
         const int remaining = l.partSize - l.tailOutputPos;
-        if (remaining <= 0) continue;  // tailOutputBuf が枯渇 (次 IFFT まで待機)
+        if (remaining <= 0) continue;
 
         const int toAdd = std::min(numSamples, remaining);
 
         if (output != nullptr)
         {
-            // addFallback: output[0..toAdd-1] += tailOutputBuf[tailOutputPos..tailOutputPos+toAdd-1]
             const double* tailPtr = l.tailOutputBuf + l.tailOutputPos;
             addFallback(toAdd, output, tailPtr);
         }
@@ -1427,7 +1243,6 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
 
 //==============================================================================
 // Reset  ─ Message Thread
-// すべての内部バッファをゼロクリアし、位置変数を初期化する。
 //==============================================================================
 void MKLNonUniformConvolver::Reset()
 {
@@ -1436,7 +1251,6 @@ void MKLNonUniformConvolver::Reset()
         Layer& l = m_layers[li];
         if (l.irFreqDomain == nullptr) continue;
 
-        // [最適化2] Linearized ring buffer: fdlBuf は 2×numParts 分確保済み
         const size_t fdlBufSize = static_cast<size_t>(l.numParts) * 2 * l.partStride;
         juce::FloatVectorOperations::clear(l.fdlBuf,       fdlBufSize);
         juce::FloatVectorOperations::clear(l.fftTimeBuf,   l.fftSize);

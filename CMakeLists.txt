@@ -220,6 +220,23 @@ target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
 target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
 
 #------------------------------------------------------------
+# Intel IPP Configuration
+#------------------------------------------------------------
+if(DEFINED ENV{IPPROOT})
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{IPPROOT}")
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{IPPROOT}/lib/cmake/ipp")
+endif()
+
+set(IPP_LINK static)
+set(IPP_THREADING sequential)
+find_package(IPP REQUIRED CONFIG COMPONENTS ippcore ipps)
+message(STATUS "Intel IPP found. Enabling IPP for signal processing.")
+
+target_include_directories(ConvoPeq SYSTEM PRIVATE ${IPP_INCLUDE_DIRS})
+target_link_libraries(ConvoPeq PRIVATE IPP::ippcore IPP::ipps)
+target_compile_definitions(ConvoPeq PRIVATE USE_INTEL_IPP=1)
+
+#------------------------------------------------------------
 # JUCEヘッダー自動生成 (JuceHeader.h)
 #------------------------------------------------------------
 juce_generate_juce_header(ConvoPeq)

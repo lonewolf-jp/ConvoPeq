@@ -7,15 +7,32 @@
 #include <cstring>
 #include <limits>
 
-#include <mkl.h>
+// [v2.1] MKL DFTI を Intel IPP に換装。
+// mkl_malloc / mkl_free は引き続きオーディオデータバッファ用に使用。
+#include <mkl.h>   // mkl_malloc, mkl_free
+#include <ipp.h>  // ippsFFTFwd_RToCCS_64f, IppsFFTSpec_R_64f
 
 class MklFftEvaluator
 {
 public:
-    static constexpr int kFftLength = 4096;
-    static constexpr int kSpectrumBins = (kFftLength / 2) + 1;
+    static constexpr int kFftLength  = 4096;
+    static constexpr int kSpectrumBins = (kFftLength / 2) + 1;  // = 2049
     static constexpr double kDefaultSampleRateHz = 48000.0;
     static constexpr int kBarkBandCount = 24;
+
+    // [v2.1] MKL_Complex16 の代替。標準レイアウト構造体。
+    // メモリ配置: { double real; double im; } = 16バイト。
+    // IPP CCS 出力 [re0,im0,re1,im1,...] と同一レイアウトのため
+    // reinterpret_cast による相互変換が安全。
+    // .real / .imag のメンバ名を維持することで、呼び出し側 (NoiseShaperLearner) の
+    // コード変更を MKL_Complex16 → MklFftEvaluator::CcsComplex の型名変更のみに限定する。
+    struct CcsComplex
+    {
+        double real = 0.0;
+        double imag = 0.0;
+    };
+    static_assert(sizeof(CcsComplex) == 2 * sizeof(double),
+                  "CcsComplex must be exactly 2 doubles (16 bytes)");
 
     struct Result
     {
@@ -28,39 +45,93 @@ public:
 
     MklFftEvaluator()
     {
-        inputLeft = static_cast<double*>(mkl_malloc(sizeof(double) * kFftLength, 64));
+        // オーディオデータバッファ (mkl_malloc: 64バイトアライン)
+        inputLeft  = static_cast<double*>(mkl_malloc(sizeof(double) * kFftLength, 64));
         inputRight = static_cast<double*>(mkl_malloc(sizeof(double) * kFftLength, 64));
-        spectrumLeft = static_cast<MKL_Complex16*>(mkl_malloc(sizeof(MKL_Complex16) * kSpectrumBins, 64));
-        spectrumRight = static_cast<MKL_Complex16*>(mkl_malloc(sizeof(MKL_Complex16) * kSpectrumBins, 64));
 
-        mkl_set_num_threads_local(1);
+        // [v2.1] スペクトラムバッファ: CcsComplex 配列として確保
+        // kSpectrumBins 個 × 2 double = kFftLength+2 doubles (IPP CCS 出力サイズと一致)
+        spectrumLeft  = static_cast<CcsComplex*>(
+            mkl_malloc(sizeof(CcsComplex) * kSpectrumBins, 64));
+        spectrumRight = static_cast<CcsComplex*>(
+            mkl_malloc(sizeof(CcsComplex) * kSpectrumBins, 64));
 
-        DftiCreateDescriptor(&descriptor, DFTI_DOUBLE, DFTI_REAL, 1, kFftLength);
-        DftiSetValue(descriptor, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-        DftiSetValue(descriptor, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
-        DftiSetValue(descriptor, DFTI_FORWARD_SCALE, 1.0);
-        DftiSetValue(descriptor, DFTI_THREAD_LIMIT, 1);
-        DftiCommitDescriptor(descriptor);
+        // [v2.1] IPP FFT スペック初期化
+        // kFftLength = 4096 = 2^12 → order = 12
+        // IPP_FFT_NODIV_BY_ANY: forward に正規化なし (evaluate は forward のみ使用)
+        // ippAlgHintFast: 速度優先ヒント
+        constexpr int kOrder = 12; // log2(4096)
+        static_assert((1 << kOrder) == kFftLength, "kOrder must be log2(kFftLength)");
+
+        int sizeSpec = 0, sizeInit = 0, sizeWork = 0;
+        const IppStatus getSt = ippsFFTGetSize_R_64f(
+            kOrder, IPP_FFT_NODIV_BY_ANY, ippAlgHintFast,
+            &sizeSpec, &sizeInit, &sizeWork);
+
+        if (getSt == ippStsNoErr)
+        {
+            fftSpecBuf = ippsMalloc_8u(sizeSpec);
+
+            Ipp8u* initBuf = (sizeInit > 0) ? ippsMalloc_8u(sizeInit) : nullptr;
+
+            // [Bug 2 fix] ippsFFTInit_R_64f の戻り値と fftSpec の null を明示チェック。
+            // 失敗時は fftSpec を nullptr のまま残し、evaluate()/computeFft() 冒頭の
+            // ガードで早期リターンさせる。
+            if (fftSpecBuf)
+            {
+                const IppStatus initSt = ippsFFTInit_R_64f(
+                    &fftSpec, kOrder, IPP_FFT_NODIV_BY_ANY, ippAlgHintFast,
+                    fftSpecBuf, initBuf);
+
+                if (initSt != ippStsNoErr || fftSpec == nullptr)
+                {
+                    // 初期化失敗 → fftSpec を安全に nullptr にリセット
+                    // fftSpecBuf はデストラクタで解放
+                    fftSpec = nullptr;
+                    DBG("MklFftEvaluator: ippsFFTInit_R_64f failed (status="
+                        + juce::String(static_cast<int>(initSt)) + ")");
+                }
+            }
+            if (initBuf) { ippsFree(initBuf); }
+
+            // [Bug 3 fix] fftWorkBuf 確保失敗時のガード。
+            // sizeWork > 0 かつ ippsMalloc が nullptr を返した場合、
+            // nullptr を IPP に渡すと未定義動作になるため、fftSpec を無効化して
+            // evaluate()/computeFft() 冒頭のガードで早期リターンさせる。
+            if (sizeWork > 0)
+            {
+                fftWorkBuf = ippsMalloc_8u(sizeWork);
+                if (!fftWorkBuf)
+                {
+                    fftSpec = nullptr;  // FFT 不使用状態に落とす
+                    DBG("MklFftEvaluator: ippsMalloc_8u(sizeWork="
+                        + juce::String(sizeWork) + ") failed");
+                }
+            }
+        }
 
         configureForSampleRate(kDefaultSampleRateHz);
     }
 
     ~MklFftEvaluator()
     {
-        if (descriptor != nullptr)
-            DftiFreeDescriptor(&descriptor);
+        // [v2.1] IPP FFT リソース解放
+        if (fftSpecBuf)
+        {
+            ippsFree(fftSpecBuf);
+            fftSpecBuf = nullptr;
+            fftSpec    = nullptr;
+        }
+        if (fftWorkBuf)
+        {
+            ippsFree(fftWorkBuf);
+            fftWorkBuf = nullptr;
+        }
 
-        if (inputLeft != nullptr)
-            mkl_free(inputLeft);
-
-        if (inputRight != nullptr)
-            mkl_free(inputRight);
-
-        if (spectrumLeft != nullptr)
-            mkl_free(spectrumLeft);
-
-        if (spectrumRight != nullptr)
-            mkl_free(spectrumRight);
+        if (inputLeft   != nullptr) mkl_free(inputLeft);
+        if (inputRight  != nullptr) mkl_free(inputRight);
+        if (spectrumLeft  != nullptr) mkl_free(spectrumLeft);
+        if (spectrumRight != nullptr) mkl_free(spectrumRight);
     }
 
     void configureForSampleRate(double sampleRateHz) noexcept
@@ -73,7 +144,6 @@ public:
         {
             if (binWidthHz <= 0.0)
                 return 0;
-
             return std::clamp(static_cast<int>(std::lround(hz / binWidthHz)), 0, kSpectrumBins - 1);
         };
 
@@ -110,25 +180,21 @@ public:
 
         auto bandWeightForHz = [nyquistHz](double f) noexcept
         {
-            // ITU-R BS.468-4 weighting approximation
-            // Reference: https://en.wikipedia.org/wiki/ITU-R_BS.468_weighting
             if (f < 1.0) f = 1.0;
-            
+
             const double f2 = f * f;
             const double h1 = -4.737338981378384e-24 * f2 * f2 * f2 + 2.043828333606125e-15 * f2 * f2 - 1.363894795463638e-7 * f2 + 1.0;
             const double h2 = 1.306612257402824e-19 * f2 * f2 * f - 2.118150887541247e-11 * f2 * f + 5.559488023498642e-4 * f;
             const double r_f = (1.246332637532143e-4 * f) / std::sqrt(h1 * h1 + h2 * h2);
-            
-            // Convert to power weight (squared)
+
             double w = r_f * r_f;
-            
-            // Add extra high-frequency roll-off if above 18kHz to avoid over-optimizing inaudible range
+
             if (f > 18000.0)
             {
                 const double rollOff = std::pow(10.0, -12.0 * (f - 18000.0) / std::max(1000.0, nyquistHz - 18000.0) / 20.0);
                 w *= rollOff * rollOff;
             }
-            
+
             return std::max(1.0e-6, w);
         };
 
@@ -166,7 +232,6 @@ public:
             binToBand[static_cast<size_t>(bin)] = band;
         }
 
-        // No explicit analysis window is applied before FFT in this path.
         windowCorrection = 1.0;
     }
 
@@ -174,12 +239,15 @@ public:
                     const double* errorRight,
                     const std::array<double, kSpectrumBins>* maskingThresholds = nullptr) noexcept
     {
-        static thread_local bool currentThreadConfigured = false;
-        if (!currentThreadConfigured)
-        {
-            mkl_set_num_threads_local(1);
-            currentThreadConfigured = true;
-        }
+        // [v2.1] IPP は完全シングルスレッド設計のため、
+        // mkl_set_num_threads_local(1) の呼び出しは不要。
+
+        // [Bug 2/3 fix] IPP 初期化失敗時の安全フォールバック。
+        // fftSpec == nullptr は constructor でのエラー (OOM等) を示す。
+        // クラッシュを防ぐため、ゼロ結果を返す。
+        if (fftSpec == nullptr || inputLeft == nullptr || inputRight == nullptr
+            || spectrumLeft == nullptr || spectrumRight == nullptr)
+            return Result{};
 
         double sumSq = 0.0;
         for (int i = 0; i < kFftLength; ++i)
@@ -188,11 +256,13 @@ public:
         }
         const double timeRms = std::sqrt(sumSq / kFftLength);
 
-        juce::FloatVectorOperations::copy(inputLeft, errorLeft, kFftLength);
+        juce::FloatVectorOperations::copy(inputLeft,  errorLeft,  kFftLength);
         juce::FloatVectorOperations::copy(inputRight, errorRight, kFftLength);
 
-        DftiComputeForward(descriptor, inputLeft, spectrumLeft);
-        DftiComputeForward(descriptor, inputRight, spectrumRight);
+        // [v2.1] Forward FFT: real → CCS
+        // 出力は CcsComplex 配列に直接書き込む (reinterpret_cast 安全: 同一メモリレイアウト)
+        ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(spectrumLeft),  fftSpec, fftWorkBuf);
+        ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(spectrumRight), fftSpec, fftWorkBuf);
 
         std::array<double, kSpectrumBins> averagePower {};
 
@@ -206,10 +276,12 @@ public:
 
         for (int bin = 0; bin < kSpectrumBins; ++bin)
         {
-            const double magSqLeft = (spectrumLeft[bin].real * spectrumLeft[bin].real)
-                                   + (spectrumLeft[bin].imag * spectrumLeft[bin].imag);
-            const double magSqRight = (spectrumRight[bin].real * spectrumRight[bin].real)
-                                    + (spectrumRight[bin].imag * spectrumRight[bin].imag);
+            // [v2.1] MKL_Complex16 の .real/.imag → CcsComplex の .real/.imag
+            // CcsComplex は同名メンバを持つため、元のコードとの差分なし。
+            const double magSqLeft  = spectrumLeft[bin].real  * spectrumLeft[bin].real
+                                    + spectrumLeft[bin].imag  * spectrumLeft[bin].imag;
+            const double magSqRight = spectrumRight[bin].real * spectrumRight[bin].real
+                                    + spectrumRight[bin].imag * spectrumRight[bin].imag;
             const double averageMagSq = std::max(kMinPower, 0.5 * (magSqLeft + magSqRight) * windowCorrection);
             const double safeMagSq = averageMagSq + kMinPower;
 
@@ -229,16 +301,17 @@ public:
             if (bin >= ultraHighStartBin)
                 ultraHighEnergy += averageMagSq;
 
-            // Tonal detection: find peaks relative to neighbors
             if (bin > 0 && bin < kSpectrumBins - 1)
             {
-                const double prevMagSq = 0.5 * ((spectrumLeft[bin-1].real * spectrumLeft[bin-1].real + spectrumLeft[bin-1].imag * spectrumLeft[bin-1].imag) +
-                                                (spectrumRight[bin-1].real * spectrumRight[bin-1].real + spectrumRight[bin-1].imag * spectrumRight[bin-1].imag));
-                const double nextMagSq = 0.5 * ((spectrumLeft[bin+1].real * spectrumLeft[bin+1].real + spectrumLeft[bin+1].imag * spectrumLeft[bin+1].imag) +
-                                                (spectrumRight[bin+1].real * spectrumRight[bin+1].real + spectrumRight[bin+1].imag * spectrumRight[bin+1].imag));
-                
+                const double prevMagSq = 0.5 * (
+                    (spectrumLeft[bin-1].real  * spectrumLeft[bin-1].real  + spectrumLeft[bin-1].imag  * spectrumLeft[bin-1].imag) +
+                    (spectrumRight[bin-1].real * spectrumRight[bin-1].real + spectrumRight[bin-1].imag * spectrumRight[bin-1].imag));
+                const double nextMagSq = 0.5 * (
+                    (spectrumLeft[bin+1].real  * spectrumLeft[bin+1].real  + spectrumLeft[bin+1].imag  * spectrumLeft[bin+1].imag) +
+                    (spectrumRight[bin+1].real * spectrumRight[bin+1].real + spectrumRight[bin+1].imag * spectrumRight[bin+1].imag));
+
                 const double localAvg = 0.5 * (prevMagSq + nextMagSq) + kMinPower;
-                if (averageMagSq > 6.0 * localAvg) // 6dB threshold
+                if (averageMagSq > 6.0 * localAvg)
                     peakEnergy = std::max(peakEnergy, averageMagSq);
             }
         }
@@ -325,12 +398,26 @@ public:
         return std::max(athPower, spreadPower);
     }
 
-    void computeFft(const double* dataL, const double* dataR, MKL_Complex16* outL, MKL_Complex16* outR) noexcept
+    // [v2.1] 引数型を MKL_Complex16* → CcsComplex* に変更。
+    // CcsComplex は .real/.imag メンバを持ち MKL_Complex16 と同一レイアウト。
+    // 呼び出し側 (NoiseShaperLearner) の変更: 型名を CcsComplex に変更するのみ。
+    void computeFft(const double* dataL, const double* dataR,
+                    CcsComplex* outL, CcsComplex* outR) noexcept
     {
-        juce::FloatVectorOperations::copy(inputLeft, dataL, kFftLength);
+        // [Bug 2/3 fix] IPP 初期化失敗時のガード。出力をゼロクリアして返す。
+        if (fftSpec == nullptr || inputLeft == nullptr || inputRight == nullptr)
+        {
+            if (outL) std::memset(outL, 0, sizeof(CcsComplex) * kSpectrumBins);
+            if (outR) std::memset(outR, 0, sizeof(CcsComplex) * kSpectrumBins);
+            return;
+        }
+
+        juce::FloatVectorOperations::copy(inputLeft,  dataL, kFftLength);
         juce::FloatVectorOperations::copy(inputRight, dataR, kFftLength);
-        DftiComputeForward(descriptor, inputLeft, outL);
-        DftiComputeForward(descriptor, inputRight, outR);
+        // CcsComplex は [double real, double im] の標準レイアウト構造体。
+        // IPP CCS 出力 [re0,im0,...] と同一メモリ配置のため reinterpret_cast 安全。
+        ippsFFTFwd_RToCCS_64f(inputLeft,  reinterpret_cast<Ipp64f*>(outL), fftSpec, fftWorkBuf);
+        ippsFFTFwd_RToCCS_64f(inputRight, reinterpret_cast<Ipp64f*>(outR), fftSpec, fftWorkBuf);
     }
 
 private:
@@ -378,10 +465,7 @@ private:
         std::array<Masker, kMaxMaskers> data {};
         int size = 0;
 
-        void clear() noexcept
-        {
-            size = 0;
-        }
+        void clear() noexcept { size = 0; }
 
         void push(const Masker& masker) noexcept
         {
@@ -395,10 +479,7 @@ private:
         std::array<double, kMaxContributions> db {};
         int size = 0;
 
-        void clear() noexcept
-        {
-            size = 0;
-        }
+        void clear() noexcept { size = 0; }
 
         void push(double valueDb) noexcept
         {
@@ -420,10 +501,8 @@ private:
     static double softplus(double x) noexcept
     {
         const double z = kSoftplusK * x;
-        if (z > 50.0)
-            return x;
-        if (z < -50.0)
-            return std::exp(z) / kSoftplusK;
+        if (z > 50.0) return x;
+        if (z < -50.0) return std::exp(z) / kSoftplusK;
         return std::log1p(std::exp(z)) / kSoftplusK;
     }
 
@@ -521,26 +600,16 @@ private:
                 if ((i - k) >= 0)
                 {
                     const double leftDelta = centerDb - powerToDb(power[static_cast<size_t>(i - k)]);
-                    if (leftDelta < kTonalPeakThresholdDb)
-                    {
-                        isPeak = false;
-                        break;
-                    }
+                    if (leftDelta < kTonalPeakThresholdDb) { isPeak = false; break; }
                 }
-
                 if ((i + k) < kSpectrumBins)
                 {
                     const double rightDelta = centerDb - powerToDb(power[static_cast<size_t>(i + k)]);
-                    if (rightDelta < kTonalPeakThresholdDb)
-                    {
-                        isPeak = false;
-                        break;
-                    }
+                    if (rightDelta < kTonalPeakThresholdDb) { isPeak = false; break; }
                 }
             }
 
-            if (!isPeak)
-                continue;
+            if (!isPeak) continue;
 
             const double centerBark = barkHz[static_cast<size_t>(i)];
             double sumEnergy = 0.0;
@@ -552,15 +621,13 @@ private:
             {
                 if (std::abs(barkHz[static_cast<size_t>(j)] - centerBark) > kTonalAbsorbRadiusBark)
                     continue;
-
                 const double e = power[static_cast<size_t>(j)] * getBinWidth(j);
                 sumEnergy += e;
                 sumBarkWeighted += barkHz[static_cast<size_t>(j)] * e;
                 consumed[static_cast<size_t>(j)] = true;
             }
 
-            if (sumEnergy <= kMinPower)
-                continue;
+            if (sumEnergy <= kMinPower) continue;
 
             Masker masker;
             masker.energy = sumEnergy;
@@ -584,15 +651,13 @@ private:
         {
             if (binToBand[static_cast<size_t>(i)] != targetBand || tonalConsumed[static_cast<size_t>(i)])
                 continue;
-
             const double p = std::max(power[static_cast<size_t>(i)], 1.0e-15);
             logSum += std::log(p);
             linearSum += p;
             ++count;
         }
 
-        if (count <= 0)
-            return 1.0;
+        if (count <= 0) return 1.0;
 
         const double geometric = std::exp(logSum / static_cast<double>(count));
         const double arithmetic = linearSum / static_cast<double>(count);
@@ -615,15 +680,13 @@ private:
             {
                 if (binToBand[static_cast<size_t>(i)] != band || tonalConsumed[static_cast<size_t>(i)])
                     continue;
-
                 const double e = power[static_cast<size_t>(i)] * getBinWidth(i);
                 sumEnergy += e;
                 sumBarkWeighted += barkHz[static_cast<size_t>(i)] * e;
                 ++count;
             }
 
-            if (count <= 0 || sumEnergy <= kMinPower)
-                continue;
+            if (count <= 0 || sumEnergy <= kMinPower) continue;
 
             const double sfm = computeSfm(power, tonalConsumed, band);
 
@@ -652,8 +715,7 @@ private:
             {
                 const Masker& masker = maskers.data[static_cast<size_t>(j)];
                 const double deltaBark = barkHz[static_cast<size_t>(i)] - masker.bark;
-                if (std::abs(deltaBark) > kSpreadMaxDeltaBark)
-                    continue;
+                if (std::abs(deltaBark) > kSpreadMaxDeltaBark) continue;
 
                 double levelDb = masker.levelDb;
                 if (masker.type == Noise)
@@ -661,8 +723,7 @@ private:
 
                 const double totalDb = levelDb + spreadingFunctionAnnexD(deltaBark, masker.type);
                 contributions.push(totalDb);
-                if (totalDb > maxDb)
-                    maxDb = totalDb;
+                if (totalDb > maxDb) maxDb = totalDb;
             }
 
             if (contributions.size <= 0 || !std::isfinite(maxDb))
@@ -683,32 +744,38 @@ private:
         }
     }
 
-    double* inputLeft = nullptr;
-    double* inputRight = nullptr;
-    MKL_Complex16* spectrumLeft = nullptr;
-    MKL_Complex16* spectrumRight = nullptr;
+    // ── データバッファ (mkl_malloc 64バイトアライン) ──
+    double*     inputLeft     = nullptr;  ///< FFT 入力 L ch (kFftLength doubles)
+    double*     inputRight    = nullptr;  ///< FFT 入力 R ch (kFftLength doubles)
+    CcsComplex* spectrumLeft  = nullptr;  ///< FFT 出力 L ch (kSpectrumBins CcsComplex)
+    CcsComplex* spectrumRight = nullptr;  ///< FFT 出力 R ch (kSpectrumBins CcsComplex)
 
+    // ── IPP FFT リソース ──
+    IppsFFTSpec_R_64f* fftSpec    = nullptr; ///< IPP FFT スペック (fftSpecBuf 内を指す)
+    Ipp8u*             fftSpecBuf = nullptr; ///< fftSpec のメモリオーナー
+    Ipp8u*             fftWorkBuf = nullptr; ///< FFT スクラッチ (sizeWork==0 なら nullptr)
+
+    // ── 分析パラメータ ──
     std::array<double, kSpectrumBins> weights {};
     std::array<double, kSpectrumBins> freqHz {};
     std::array<double, kSpectrumBins> barkHz {};
-    std::array<int, kSpectrumBins> binToBand {};
-    std::array<int, kSpectrumBins> neighborRangeBins {};
+    std::array<int,    kSpectrumBins> binToBand {};
+    std::array<int,    kSpectrumBins> neighborRangeBins {};
     std::array<double, kSpectrumBins> athThresholdDb {};
     std::array<double, kSpectrumBins> athThresholdPower {};
     std::array<double, kBarkBandCount> bandCenterBark {};
     std::array<double, kBarkBandCount> bandCenterFreqHz {};
 
-    DFTI_DESCRIPTOR_HANDLE descriptor = nullptr;
     double configuredSampleRateHz = kDefaultSampleRateHz;
     double windowCorrection = 1.0;
 
-    int flatnessStartBin = 0;
-    int flatnessEndBin = kSpectrumBins - 1;
-    int highBandStartBin = 0;
+    int flatnessStartBin  = 0;
+    int flatnessEndBin    = kSpectrumBins - 1;
+    int highBandStartBin  = 0;
     int ultraHighStartBin = kSpectrumBins - 1;
 
-    double expectedUltraHighShare = 0.0;
-    double configuredWeightSum = 1.0;
-    double flatnessPenaltyWeight = 0.35;
-    double hfPenaltyWeight = 0.20;
+    double expectedUltraHighShare  = 0.0;
+    double configuredWeightSum     = 1.0;
+    double flatnessPenaltyWeight   = 0.35;
+    double hfPenaltyWeight         = 0.20;
 };

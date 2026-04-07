@@ -1,9 +1,21 @@
 //============================================================================
-// MKLNonUniformConvolver.h  ── v2.0 (JUCE 8.0.12 / Intel oneMKL 対応)
+// MKLNonUniformConvolver.h  ── v2.1 (JUCE 8.0.12 / Intel oneMKL + IPP 対応)
 //
-// Intel MKL を使用した Non-Uniform Partitioned Convolution (NUP) エンジン。
-// WDL_ConvolutionEngine_Div の低遅延特性を維持しつつ、
-// MKL DFTI + AVX2 FMA でスループットを最大化する。
+// Intel IPP FFT を使用した Non-Uniform Partitioned Convolution (NUP) エンジン。
+// v2.0 から FFT バックエンドを MKL DFTI → Intel IPP に換装。
+//
+// ■ v2.1 変更点 (v2.0 → v2.1):
+//   [FFT換装] オーディオスレッド内 FFT を MKL DFTI → Intel IPP に変更。
+//     - DFTI_DESCRIPTOR_HANDLE → IppsFFTSpec_R_64f* (ipps.h)
+//     - DftiComputeForward/Backward → ippsFFTFwd_RToCCS_64f / ippsFFTInv_CCSToR_64f
+//     - ワークバッファをSetImpulse()で事前確保 → Audio Thread 内メモリ確保ゼロ保証
+//     - IPP_FFT_DIV_INV_BY_N フラグ: IFFT 時に 1/N 正規化 (MKL DFTI_BACKWARD_SCALE相当)
+//     - IPP の CCS 出力形式: [re0,im0,re1,im1,...] は MKL DFTI_COMPLEX_COMPLEX と同一
+//       → 既存の複素乗算 AVX2 コードは無変更で動作する
+//     - MKL VML (vdMul) / MKL BLAS (cblas_dscal) は引き続き Message Thread で使用
+//
+// ■ 3層レイヤー構造 (v2.0 から変更なし):
+//   Layer 0 (即時): partSize = nextPowerOfTwo(max(blockSize,64))
 //                   最大 kL0MaxParts 個のパーティション (=IRの先頭約85ms@48kHz)
 //                   毎コールバックで全パーティションを即時処理 → 低レイテンシー
 //   Layer 1 (遅延): partSize = L0.partSize * 8
@@ -13,24 +25,10 @@
 //                   残りの IR テール
 //                   partsPerCallback ずつ分散処理
 //
-// ■ 出力アーキテクチャ:
+// ■ 出力アーキテクチャ (v2.0 から変更なし):
 //   L0  → 出力リングバッファ (ringBuf) に即時書き込み
 //   L1/L2 → tailOutputBuf にIFFT完了時コピー
 //   Get() = ringRead(L0) + vdAdd(L1.tailOutputBuf) + vdAdd(L2.tailOutputBuf)
-//
-//   L1/L2は1パーティション(partSize サンプル)分の遅延を持つ。
-//   リバーブのテール領域では知覚不可のため実用上問題なし。
-//   この設計により共有リングバッファのOLA時間整合問題を根本解消する。
-//
-// ■ CPU最適化効果 (例: IR=3s@48kHz=144000samples, blockSize=128):
-//   旧設計 (L0単独): 144000/128 = 1125 パーティション/コールバック → スパイク
-//   新設計 (3層NUC): L0=32 + L1=8(分散) + L2=1(分散) = 41相当/コールバック → フラット
-//
-// ■ バグ修正:
-//   [Bug2 fix] baseFdlIdxSaved: 分散累積サイクル全体で同一のFDL時間軸を参照。
-//              トリガ時に一度だけ保存し、IFFT完了まで再計算しない。
-//   [Bug1 fix] 出力先分離: L0はリング独占使用、L1/L2はtailOutputBuf経由で合算。
-//              共有リングへの不整合書き込みを排除。
 //
 // ■ スレッド安全設計:
 //   SetImpulse()  : Message Thread (prepareToPlay 相当) からのみ呼び出す
@@ -38,15 +36,16 @@
 //   Reset()       : Message Thread または releaseResources() から呼び出す
 //
 // ■ 規約遵守:
-//   - 64bit double 処理 (MKL_Complex16)
-//   - mkl_malloc(64) によるメモリ管理 (new / std::vector 禁止)
-//   - Audio Thread 内でのメモリ確保・DftiCommitDescriptor 禁止
+//   - 64bit double 処理
+//   - mkl_malloc(64) によるオーディオデータメモリ管理 (new / std::vector 禁止)
+//   - ippsMalloc_8u による IPP FFT spec/work バッファ管理
+//   - Audio Thread 内でのメモリ確保・FFT 再初期化禁止
 //   - FTZ/DAZ は呼び出し元 (ConvolverProcessor) で設定済みを前提とする
 //============================================================================
 #pragma once
 
-#include <mkl.h>
-#include <mkl_dfti.h>
+#include <mkl.h>        // mkl_malloc, mkl_free, VML, CBLAS (オーディオデータ用)
+#include <ipp.h>       // IppsFFTSpec_R_64f (MKL DFTI の代替)
 #include <atomic>
 #include <JuceHeader.h>  // juce::nextPowerOfTwo, JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR
 #include "OutputFilter.h" // convo::HCMode, convo::LCMode
@@ -60,8 +59,6 @@ namespace convo
 // NUC は SetImpulse() 内で irFreqDomain に周波数ゲインを乗算して「焼き込む」。
 // Audio Thread の追加コストはゼロ。モード変更時は SetImpulse() を再実行する
 // (rebuildAllIRs() トリガー)。
-//
-// サンプルレートは SetImpulse() 呼び出し元が管理するため、ここには含まない。
 //
 // hcMode = HCMode を参照 (OutputFilter.h):
 //   Sharp   : Butterworth 4次相当の急峻ロールオフ
@@ -105,7 +102,7 @@ public:
     // @param scale         IRの振幅スケール (ヘッドルーム確保用, デフォルト=1.0)
     // @param filterSpec    出力周波数フィルター仕様。nullptr の場合フィルターなし。
     //                      irFreqDomain に周波数ゲインを焼き込む (Audio Thread コストゼロ)。
-    // @return true=成功, false=パラメータ不正またはMKL初期化失敗
+    // @return true=成功, false=パラメータ不正またはIPP初期化失敗
     //----------------------------------------------------------
     bool SetImpulse(const double* impulse, int irLen, int blockSize,
                     double scale = 1.0,
@@ -143,8 +140,8 @@ public:
 
     //----------------------------------------------------------
     // areFftDescriptorsCommitted  ─ いつでも呼び出し可
-    // Audio Thread で使用する DFTI ハンドルが SetImpulse() で
-    // Commit 済みかを検証する。
+    // Audio Thread で使用する IPP FFT スペックが SetImpulse() で
+    // 初期化済みかを検証する。
     //----------------------------------------------------------
     bool areFftDescriptorsCommitted() const noexcept;
 
@@ -182,21 +179,31 @@ private:
         int partStride    = 0;   // double 換算 complexSize*2 を 8-double アライン
         bool isImmediate  = false; // true = L0 (Add() 内で即時処理, リングを使用)
 
-        // ── MKL ──
-        DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
-        bool descriptorCommitted = false;
+        // ── IPP FFT ──
+        // [v2.1] MKL DFTI_DESCRIPTOR_HANDLE から Intel IPP へ換装。
+        //
+        // fftSpec    : ippsFFTInit_R_64f が fftSpecBuf 内を指すよう設定したポインタ。
+        //              Audio Thread からは Read-Only で参照 (スレッドセーフ)。
+        // fftSpecBuf : fftSpec の実メモリオーナー (ippsMalloc_8u 確保, ippsFree 解放)。
+        // fftWorkBuf : 各 FFT 計算呼び出しが使用するスクラッチバッファ。
+        //              ippsFFTGetSize_R_64f が sizeWork > 0 を返した場合のみ確保。
+        //              sizeWork == 0 の場合 nullptr のまま (IPP が外部バッファ不要)。
+        //              ★ Audio Thread での確保を防ぐため SetImpulse() で事前確保済み。
+        //                 nullptr かつ sizeWork==0 の場合のみ IPP に nullptr を渡してよい。
+        IppsFFTSpec_R_64f* fftSpec    = nullptr; ///< IPP FFT スペック (fftSpecBuf 内を指す)
+        Ipp8u*             fftSpecBuf = nullptr; ///< fftSpec のメモリオーナー
+        Ipp8u*             fftWorkBuf = nullptr; ///< FFT スクラッチ (sizeWork==0なら nullptr)
+        bool               descriptorCommitted = false; ///< IPP 初期化成功フラグ
 
         // ── IR 周波数領域 (Message Thread で確保・プリコンピュート) ──
-        // レイアウト: [numParts][partStride] (double 配列として管理、MKL_Complex16 として解釈)
+        // レイアウト: [numParts][partStride] (double 配列として管理)
+        // IPP CCS 形式: [re0,im0,re1,im1,...] は MKL DFTI_COMPLEX_COMPLEX と同一レイアウト。
+        // → 既存の AVX2 複素乗算コードは無変更で動作する。
         double* irFreqDomain  = nullptr;  // mkl_malloc(numParts * partStride * sizeof(double), 64)
 
         // ── 入力 FDL (Frequency Domain Delay Line, Audio Thread で更新) ──
         // レイアウト: [numParts][partStride]
         double* fdlBuf        = nullptr;  // mkl_malloc(...)
-
-        // ── 重複保存バッファ (Overlap-Save 用, L0 専用) ──
-        // [Bug F fix] overlapBuf は確保・解放されるのみで処理コードから一切参照されない dead memory。
-        // Overlap-Save の重複領域は prevInputBuf と fftTimeBuf 前半で実装されている。削除。
 
         // ── 作業バッファ (Audio Thread, FFT 入力/出力/複素積算) ──
         double* fftTimeBuf    = nullptr;  // mkl_malloc(fftSize * sizeof(double), 64)  前半=prev, 後半=cur
@@ -210,9 +217,6 @@ private:
         double* inputAccBuf = nullptr;    // mkl_malloc(partSize * sizeof(double), 64) 入力蓄積
 
         // ── L1/L2: テール出力バッファ (遅延出力を一時保持) ──
-        // IFFT 完了時に fftOutBuf の有効部分 (後半 partSize サンプル) をここにコピーし、
-        // Get() で L0 出力 (リング) に vdAdd で合算する。
-        // L0 (isImmediate=true) では使用しない (nullptr のまま)。
         double* tailOutputBuf = nullptr;  // mkl_malloc(partSize * sizeof(double), 64)
         int     tailOutputPos = 0;        // Get() での読み出しカーソル [0, partSize]
 
@@ -221,10 +225,6 @@ private:
         int  nextPart          = 0;  // 次に処理すべきパーティション番号
 
         // [Bug2 fix] 分散累積サイクル開始時に保存した FDL スナップショット。
-        // nextPart==0 の時点 (トリガ) で一度だけ計算・保存し、
-        // 同一サイクルの全パーティションで再計算を禁止する。
-        // 再計算すると fdlIndex が進むため、各パーティションが異なる FDL 時間位置を
-        // 参照してしまい、出力に時間的な不整合が生じる。
         int  baseFdlIdxSaved   = 0;
 
         // 分散計算進行中フラグ (トリガ → true, IFFT 完了 → false)
@@ -236,89 +236,44 @@ private:
     //----------------------------------------------------------
     // 内部ヘルパー
     //----------------------------------------------------------
-
-    // L0 を 1 パーティション分処理 (Overlap-Save → Forward FFT → FDL × IR → IFFT → ringWrite)
     void processLayerBlock(Layer& l) noexcept;
-
-    // L0 専用: リングバッファへの順次書き込み (memcpy + m_ringWrite/m_ringAvail 更新)
     void ringWrite(const double* src, int n) noexcept;
-
-    // L0 専用: リングバッファからの読み出し (memcpy + Zero-Flush + m_ringRead/m_ringAvail 更新)
     int  ringRead(double* dst, int n) noexcept;
-
-    // Direct Form 先頭タップ処理 (Audio Thread, AVX2/FMA + MKL)
-    // 先頭IRは時間領域で即時処理し、FFT側IRは同区間をゼロ化して二重加算を回避する。
     void processDirectBlock(const double* input, int numSamples) noexcept;
-
     void releaseAllLayers() noexcept;
-
-    // SetImpulse() の末尾で呼ぶ。全レイヤーの irFreqDomain に
-    // HC/LC ゲインテーブルを乗算して焼き込む (Message Thread のみ)。
     void applySpectrumFilter(const FilterSpec& spec) noexcept;
 
     //----------------------------------------------------------
     // メンバ変数
     //----------------------------------------------------------
     static constexpr int kNumLayers = 3;
-
-    // L0: 最大パーティション数 (即時処理対象の上限, CPUキャッシュに収まるサイズ)
-    // 32 * 128 = 4096 samples ≈ 85ms@48kHz → L1/L2キャッシュ収まりサイズ
     static constexpr int kL0MaxParts = 32;
-
-    // L1: 最大パーティション数
-    // 64 * 1024 = 65536 samples ≈ 1365ms@48kHz
     static constexpr int kL1MaxParts = 64;
 
     Layer m_layers[kNumLayers];
     int   m_numActiveLayers = 0;
-    int   m_latency         = 0;   // = Layer0.partSize
+    int   m_latency         = 0;
 
-    // 出力リングバッファ (L0 専用。Add/Get が同一 Audio Thread なので lock 不要)
-    //
-    // ── リングサイズのオーバーフロー不可証明 ──────────────────────────────
-    // 前提: L0.partSize = nextPowerOfTwo(max(blockSize, 64)) ≥ blockSize
-    //       processLayerBlock() は Add(N) 1回で最大 ceil(N / L0.partSize) = 1 回しか
-    //       呼ばれないため、ringWrite の最大書き込み量 = L0.partSize / コールバック。
-    //
-    // ringAvail の最大値:
-    //   Add後: (前回残留) + L0.partSize ≤ L0.partSize + L0.partSize = 2 * L0.partSize
-    //   Get後: 2 * L0.partSize - numSamples < 2 * L0.partSize
-    //
-    // 現在のリングサイズ = nextPowerOfTwo(L0.partSize*4 + blockSize*4)
-    //                     ≥ nextPowerOfTwo(8 * L0.partSize)  (∵ blockSize ≤ L0.partSize)
-    //                     ≥ 8 * L0.partSize
-    //
-    // ヘッドルーム = 8 * L0.partSize / (2 * L0.partSize) = 4x
-    // → 通常動作でのオーバーフローは構造上不可能。
-    //   以下の m_ringOverflowCount が非ゼロになる場合、
-    //   Add/Get の非対称呼び出しなどのロジックバグを示す。
-    // ──────────────────────────────────────────────────────────────────────
     double* m_ringBuf     = nullptr;
     int     m_ringSize    = 0;
-    int     m_ringMask    = 0;   // = m_ringSize - 1 (power-of-two 前提)
+    int     m_ringMask    = 0;
     int     m_ringWrite   = 0;
     int     m_ringRead    = 0;
-    int     m_ringAvail   = 0;   // 利用可能サンプル数 (L0 出力のみカウント)
+    int     m_ringAvail   = 0;
 
-    // デバッグ用オーバーフロー検出カウンタ
-    // Audio Thread から書き込み、Message Thread から読み出し可。
-    // 非ゼロは構造バグの存在を示す (通常は常に 0)。
     std::atomic<int> m_ringOverflowCount { 0 };
-
-    // setOverflowCallback() で設定されるコールバック (Audio Thread から呼び出し)
     OverflowCallback overflowCallback = nullptr;
     void*            overflowUserData = nullptr;
 
-    // 先頭 Direct Form 用バッファ (すべて Message Thread で事前確保)
     int     m_directTapCount = 0;
     int     m_directHistLen  = 0;
     int     m_directMaxBlock = 0;
     int     m_directPendingSamples = 0;
     bool    m_directEnabled  = false;
-    double* m_directIRRev    = nullptr; // 逆順IR (dot用)
-    double* m_directHistory  = nullptr; // 長さ = m_directHistLen
-    double* m_directWindow   = nullptr; // 長さ = m_directHistLen + m_directMaxBlock
-    double* m_directOutBuf   = nullptr; // 現コールバックのゼロ遅延出力
+    double* m_directIRRev    = nullptr;
+    double* m_directHistory  = nullptr;
+    double* m_directWindow   = nullptr;
+    double* m_directOutBuf   = nullptr;
 
     std::atomic<bool> m_ready { false };
 
