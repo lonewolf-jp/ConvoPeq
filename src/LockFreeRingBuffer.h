@@ -58,9 +58,11 @@ public:
         size_t r = readIndex.load(std::memory_order_acquire);
         return w - r;
     }
+    // 注意: この関数はスレッドセーフではない。
+    // プロデューサーとコンシューマーが完全に停止している状態でのみ呼び出すこと。
     void clear() noexcept {
-        writeIndex.store(0, std::memory_order_relaxed);
-        readIndex.store(0, std::memory_order_relaxed);
+        writeIndex.store(0, std::memory_order_seq_cst);
+        readIndex.store(0, std::memory_order_seq_cst);
     }
 };
 

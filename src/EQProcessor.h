@@ -292,7 +292,7 @@ public:
     //----------------------------------------------------------
     // 状態スナップショット取得 (AudioEngine用)
     //----------------------------------------------------------
-    EQState* getEQState() const;  // 生ポインタ (所有権は共有せず、ライフタイムは activeState に依存)
+    EQState* getEQState() const;  // 生ポインタ (所有権は共有せず、ライフタイムは currentStateRaw に依存)
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const EQProcessor& other);
@@ -360,7 +360,6 @@ private:
 
     // スムージング処理
     std::atomic<EQState*> currentStateRaw { nullptr }; // Raw pointer for Audio Thread (Lock-free)
-    EQState* activeState = nullptr;                    // Ownership for Message Thread
 
     // ── 状態リセットフラグ (Audio Thread用) ──
     std::atomic<uint32_t> bandResetMask { 0 };

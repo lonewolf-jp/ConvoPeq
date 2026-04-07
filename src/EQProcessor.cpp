@@ -68,8 +68,8 @@ EQProcessor::~EQProcessor()
 {
     forceCleanup();
     // shared_ptrが自動的にリソースを管理するため、デストラクタは空で良い
-    currentStateRaw.store(nullptr, std::memory_order_release);
-    if (activeState) { activeState->release(); activeState = nullptr; }
+    if (auto* oldState = currentStateRaw.exchange(nullptr, std::memory_order_acq_rel))
+        oldState->release();
     for (auto& node : bandNodes) {
         node.store(nullptr, std::memory_order_release);
     }
@@ -124,9 +124,7 @@ void EQProcessor::resetToDefaults()
     requestedStructure.store(FilterStructure::Serial, std::memory_order_relaxed);
     activeStructure.store(FilterStructure::Serial, std::memory_order_relaxed);
 
-    auto oldState = activeState;
-    activeState = newState;
-    currentStateRaw.store(newState, std::memory_order_release);
+    auto oldState = currentStateRaw.exchange(newState, std::memory_order_release);
 
     if (oldState) {
         const juce::ScopedLock sl(trashBinLock);
@@ -403,7 +401,7 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
 //--------------------------------------------------------------
 juce::ValueTree EQProcessor::getState() const
 {
-    auto state = activeState;
+    auto state = currentStateRaw.load(std::memory_order_acquire);
     if (state == nullptr) return juce::ValueTree("EQ");
 
     juce::ValueTree v ("EQ");
@@ -471,11 +469,9 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     storeTotalGainDb(other.totalGainDbTarget.load(std::memory_order_relaxed));
 
     // 共有状態のコピー
-    auto otherState = other.activeState;
-    auto oldState = activeState;
-    activeState = otherState;
-    if (activeState) activeState->addRef();
-    currentStateRaw.store(activeState, std::memory_order_release);
+    auto otherState = other.currentStateRaw.load(std::memory_order_acquire);
+    if (otherState) otherState->addRef();
+    auto oldState = currentStateRaw.exchange(otherState, std::memory_order_release);
 
     // 安全性と整合性のためにtrashBinを使用
     const juce::ScopedLock sl(trashBinLock); // This lock is for the trash bin, not the state itself
@@ -698,15 +694,13 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 void EQProcessor::setBandFrequency(int band, float freq)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    auto oldState = activeState;
+    auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->addRef();
     newState->bands[band].frequency = freq;
 
-    activeState = newState;
-    currentStateRaw.store(newState, std::memory_order_release);
-    auto prev = oldState;
+    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(prev);
@@ -718,15 +712,13 @@ void EQProcessor::setBandFrequency(int band, float freq)
 void EQProcessor::setBandGain(int band, float gainDb)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    auto oldState = activeState;
+    auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->addRef();
     newState->bands[band].gain = gainDb;
 
-    activeState = newState;
-    currentStateRaw.store(newState, std::memory_order_release);
-    auto prev = oldState;
+    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(prev);
@@ -738,15 +730,13 @@ void EQProcessor::setBandGain(int band, float gainDb)
 void EQProcessor::setBandQ(int band, float q)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    auto oldState = activeState;
+    auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->addRef();
     newState->bands[band].q = q;
 
-    activeState = newState;
-    currentStateRaw.store(newState, std::memory_order_release);
-    auto prev = oldState;
+    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(prev);
@@ -758,7 +748,7 @@ void EQProcessor::setBandQ(int band, float q)
 void EQProcessor::setBandEnabled(int band, bool enabled)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    auto oldState = activeState;
+    auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->addRef();
@@ -768,9 +758,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
     if (enabled)
         bandResetMask.fetch_or(1 << band, std::memory_order_relaxed);
 
-    activeState = newState;
-    currentStateRaw.store(newState, std::memory_order_release);
-    auto prev = oldState;
+    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(prev);
@@ -787,15 +775,13 @@ void EQProcessor::setTotalGain(float gainDb)
     // ✅ Atomicに保存（Audio Threadで読み取る）
     storeTotalGainDb(gainDb);
 
-    auto oldState = activeState;
+    auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->addRef();
     newState->totalGainDb = gainDb;
 
-    activeState = newState;
-    currentStateRaw.store(newState, std::memory_order_release);
-    auto prev = oldState;
+    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(prev);
@@ -820,7 +806,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
 {
     if (band < 0 || band >= NUM_BANDS) return;
 
-    auto oldState = activeState;
+    auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->addRef();
@@ -829,9 +815,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
     // フィルタタイプ変更時はトポロジーが変わるためリセット必須
     bandResetMask.fetch_or(1 << band, std::memory_order_relaxed);
 
-    activeState = newState;
-    currentStateRaw.store(newState, std::memory_order_release);
-    auto prev = oldState;
+    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(prev);
@@ -843,7 +827,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
 void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    auto oldState = activeState;
+    auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->addRef();
@@ -852,9 +836,7 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
     // チャンネルモード変更時もリセット推奨
     bandResetMask.fetch_or(1 << band, std::memory_order_relaxed);
 
-    activeState = newState;
-    currentStateRaw.store(newState, std::memory_order_release);
-    auto prev = oldState;
+    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
         const juce::ScopedLock sl(trashBinLock);
         stateTrashBinPending.push_back(prev);
@@ -900,19 +882,19 @@ EQProcessor::FilterStructure EQProcessor::getFilterStructure() const noexcept
 EQBandParams EQProcessor::getBandParams(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return {};
-    auto state = activeState;
+    auto state = currentStateRaw.load(std::memory_order_acquire);
     if (state == nullptr) return {};
     return state->bands[band];
 }
 
 EQProcessor::EQState* EQProcessor::getEQState() const
 {
-    return activeState;
+    return currentStateRaw.load(std::memory_order_acquire);
 }
 
 EQProcessor::EQState* EQProcessor::getEQStateAndAddRef() const
 {
-    auto state = activeState;
+    auto state = currentStateRaw.load(std::memory_order_acquire);
     if (state)
         state->addRef();
     return state;
@@ -920,7 +902,7 @@ EQProcessor::EQState* EQProcessor::getEQStateAndAddRef() const
 
 float EQProcessor::getTotalGain() const
 {
-    auto state = activeState;
+    auto state = currentStateRaw.load(std::memory_order_acquire);
     if (state == nullptr) return 0.0f;
     return state->totalGainDb;
 }
@@ -928,7 +910,7 @@ float EQProcessor::getTotalGain() const
 EQBandType EQProcessor::getBandType(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQBandType::Peaking;
-    auto state = activeState;
+    auto state = currentStateRaw.load(std::memory_order_acquire);
     if (state == nullptr) return EQBandType::Peaking;
     return state->bandTypes[band];
 }
@@ -936,7 +918,7 @@ EQBandType EQProcessor::getBandType(int band) const
 EQChannelMode EQProcessor::getBandChannelMode(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQChannelMode::Stereo;
-    auto state = activeState;
+    auto state = currentStateRaw.load(std::memory_order_acquire);
     if (state == nullptr) return EQChannelMode::Stereo;
     return state->bandChannelModes[band];
 }
@@ -1837,7 +1819,7 @@ static inline bool areCoeffsEqual(const EQCoeffsSVF& a, const EQCoeffsSVF& b) no
 //--------------------------------------------------------------
 void EQProcessor::updateBandNode(int band)
 {
-    auto state = activeState;
+    auto state = currentStateRaw.load(std::memory_order_acquire);
     if (state == nullptr) return;
     auto newNode = createBandNode(band, *state);
 

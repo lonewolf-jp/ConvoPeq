@@ -183,6 +183,13 @@ static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inp
             std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
             done += toCopy;
         }
+
+        if (iterations >= maxIterations)
+        {
+            jassertfalse;
+            juce::Logger::writeToLog("resampleIR: maxIterations exceeded, IR may be truncated.");
+        }
+
         maxLength = std::max(maxLength, done);
     }
     resampled.setSize(inputIR.getNumChannels(), maxLength, true, true, true);
@@ -1249,6 +1256,8 @@ void ConvolverProcessor::timerCallback()
 //--------------------------------------------------------------
 void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    isPrepared.store(false, std::memory_order_release);
+
     audioThreadAffinitySet.store(false, std::memory_order_release);
 
     // 旧descriptor未解放防止
@@ -1339,8 +1348,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // DelayLine準備
     if (delayBufferCapacity < DELAY_BUFFER_SIZE)
     {
-        delayBuffer[0].reset(static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64)));
-        delayBuffer[1].reset(static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64)));
+        auto* newL = static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64));
+        auto* newR = static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64));
+        if (!newL || !newR)
+        {
+            if (newL) convo::aligned_free(newL);
+            if (newR) convo::aligned_free(newR);
+            lastError = "Failed to allocate delay buffers";
+            isPrepared.store(false, std::memory_order_release);
+            return;
+        }
+        delayBuffer[0].reset(newL);
+        delayBuffer[1].reset(newR);
         delayBufferCapacity = DELAY_BUFFER_SIZE;
     }
     // バッファクリア
@@ -1351,8 +1370,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // Dryバッファ確保
     if (dryBufferCapacity < MAX_BLOCK_SIZE)
     {
-        dryBufferStorage[0].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
-        dryBufferStorage[1].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        auto* newL = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        auto* newR = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        if (!newL || !newR)
+        {
+            if (newL) convo::aligned_free(newL);
+            if (newR) convo::aligned_free(newR);
+            lastError = "Failed to allocate dry buffers";
+            isPrepared.store(false, std::memory_order_release);
+            return;
+        }
+        dryBufferStorage[0].reset(newL);
+        dryBufferStorage[1].reset(newR);
         dryBufferCapacity = MAX_BLOCK_SIZE;
     }
     double* dryChs[2] = { dryBufferStorage[0].get(), dryBufferStorage[1].get() };
@@ -1361,8 +1390,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     if (smoothingBufferCapacity < MAX_BLOCK_SIZE)
     {
-        smoothingBufferStorage[0].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
-        smoothingBufferStorage[1].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        auto* newL = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        auto* newR = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        if (!newL || !newR)
+        {
+            if (newL) convo::aligned_free(newL);
+            if (newR) convo::aligned_free(newR);
+            lastError = "Failed to allocate smoothing buffers";
+            isPrepared.store(false, std::memory_order_release);
+            return;
+        }
+        smoothingBufferStorage[0].reset(newL);
+        smoothingBufferStorage[1].reset(newR);
         smoothingBufferCapacity = MAX_BLOCK_SIZE;
     }
     double* smoothChs[2] = { smoothingBufferStorage[0].get(), smoothingBufferStorage[1].get() };
@@ -1371,8 +1410,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     if (oldDryBufferCapacity < MAX_BLOCK_SIZE)
     {
-        oldDryBufferStorage[0].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
-        oldDryBufferStorage[1].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        auto* newL = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        auto* newR = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        if (!newL || !newR)
+        {
+            if (newL) convo::aligned_free(newL);
+            if (newR) convo::aligned_free(newR);
+            lastError = "Failed to allocate old dry buffers";
+            isPrepared.store(false, std::memory_order_release);
+            return;
+        }
+        oldDryBufferStorage[0].reset(newL);
+        oldDryBufferStorage[1].reset(newR);
         oldDryBufferCapacity = MAX_BLOCK_SIZE;
     }
     double* oldDryChs[2] = { oldDryBufferStorage[0].get(), oldDryBufferStorage[1].get() };
@@ -1382,10 +1431,24 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // 等パワークロスフェード用バッファの確保
     if (bufferCapacity < MAX_BLOCK_SIZE)
     {
-        activeBufferL.reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
-        activeBufferR.reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
-        fadingBufferL.reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
-        fadingBufferR.reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        auto* activeL = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        auto* activeR = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        auto* fadingL = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        auto* fadingR = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        if (!activeL || !activeR || !fadingL || !fadingR)
+        {
+            if (activeL) convo::aligned_free(activeL);
+            if (activeR) convo::aligned_free(activeR);
+            if (fadingL) convo::aligned_free(fadingL);
+            if (fadingR) convo::aligned_free(fadingR);
+            lastError = "Failed to allocate crossfade buffers";
+            isPrepared.store(false, std::memory_order_release);
+            return;
+        }
+        activeBufferL.reset(activeL);
+        activeBufferR.reset(activeR);
+        fadingBufferL.reset(fadingL);
+        fadingBufferR.reset(fadingR);
         bufferCapacity = MAX_BLOCK_SIZE;
     }
     juce::FloatVectorOperations::clear(activeBufferL.get(), MAX_BLOCK_SIZE);
@@ -1400,8 +1463,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // Wetバッファ確保
     if (wetBufferCapacity < MAX_BLOCK_SIZE)
     {
-        wetBufferStorage[0].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
-        wetBufferStorage[1].reset(static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64)));
+        auto* newL = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        auto* newR = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
+        if (!newL || !newR)
+        {
+            if (newL) convo::aligned_free(newL);
+            if (newR) convo::aligned_free(newR);
+            lastError = "Failed to allocate wet buffers";
+            isPrepared.store(false, std::memory_order_release);
+            return;
+        }
+        wetBufferStorage[0].reset(newL);
+        wetBufferStorage[1].reset(newR);
         wetBufferCapacity = MAX_BLOCK_SIZE;
     }
     juce::FloatVectorOperations::clear(wetBufferStorage[0].get(), MAX_BLOCK_SIZE);
@@ -3791,6 +3864,12 @@ void ConvolverProcessor::refreshLatency()
 //--------------------------------------------------------------
 void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
+    if (!isPrepared.load(std::memory_order_acquire))
+    {
+        block.clear();
+        return;
+    }
+
     if (!audioThreadAffinitySet.load(std::memory_order_acquire) && onSetThreadAffinity)
     {
         onSetThreadAffinity(nullptr);
@@ -3829,8 +3908,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // バイパス、未準備、IR未ロードの場合はスルー
     // ただし wet クロスフェード中は処理を継続する。
-    if (!isPrepared.load(std::memory_order_acquire)
-        || !conv
+    if (!conv
         || (bypassed.load(std::memory_order_relaxed) && !wetTransitionActive))
     {
         return;

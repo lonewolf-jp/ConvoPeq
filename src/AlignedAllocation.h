@@ -5,6 +5,7 @@
 #include <limits>
 #include <new>
 #include <memory>
+#include <type_traits>
 
 #include <mkl.h>
 
@@ -61,9 +62,10 @@ public:
     T* release() noexcept { T* p = ptr; ptr = nullptr; return p; }
     void reset(T* p = nullptr) noexcept
     {
+        static_assert(std::is_trivially_destructible_v<T>,
+                      "ScopedAlignedPtr only supports trivially destructible types (POD arrays)");
         if (ptr)
         {
-            ptr->~T();
             aligned_free(ptr);
         }
         ptr = p;

@@ -227,14 +227,22 @@ if(DEFINED ENV{IPPROOT})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{IPPROOT}/lib/cmake/ipp")
 endif()
 
+# 静的リンクとシングルスレッドを明示
 set(IPP_LINK static)
 set(IPP_THREADING sequential)
-find_package(IPP REQUIRED CONFIG COMPONENTS ippcore ipps)
-message(STATUS "Intel IPP found. Enabling IPP for signal processing.")
+set(IPP_USE_STATIC_LIBS ON)   # 明示的に静的を要求
 
+# find_package を実行 (コンポーネントは ippcore, ipps)
+find_package(IPP REQUIRED CONFIG COMPONENTS ippcore ipps)
+
+# インクルードディレクトリ
 target_include_directories(ConvoPeq SYSTEM PRIVATE ${IPP_INCLUDE_DIRS})
+
+# リンク (CMake が自動的に適切な静的ライブラリを選択)
 target_link_libraries(ConvoPeq PRIVATE IPP::ippcore IPP::ipps)
 target_compile_definitions(ConvoPeq PRIVATE USE_INTEL_IPP=1)
+
+message(STATUS "Intel IPP linked (static, single-threaded).")
 
 #------------------------------------------------------------
 # JUCEヘッダー自動生成 (JuceHeader.h)

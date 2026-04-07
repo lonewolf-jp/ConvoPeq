@@ -402,7 +402,7 @@ private:
     {
         double* irData[2] = { nullptr, nullptr };
 
-        std::array<convo::ScopedAlignedPtr<convo::MKLNonUniformConvolver>, 2> nucConvolvers;
+        std::array<convo::MKLNonUniformConvolver*, 2> nucConvolvers { nullptr, nullptr };
         int irDataLength = 0;
 
         int latency = 0;
@@ -420,7 +420,19 @@ private:
 
         StereoConvolver() = default;
 
+        static void destroyNUCConvolver(convo::MKLNonUniformConvolver*& ptr) noexcept
+        {
+            if (ptr != nullptr)
+            {
+                ptr->~MKLNonUniformConvolver();
+                convo::aligned_free(ptr);
+                ptr = nullptr;
+            }
+        }
+
         ~StereoConvolver() {
+            destroyNUCConvolver(nucConvolvers[0]);
+            destroyNUCConvolver(nucConvolvers[1]);
             if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
             if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
         }
@@ -472,11 +484,13 @@ private:
                 // new完全禁止 → aligned_malloc + placement new (規約準拠)
                 void* rn0 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
                 new (rn0) convo::MKLNonUniformConvolver();
-                nucConvolvers[0].reset(static_cast<convo::MKLNonUniformConvolver*>(rn0));
+                destroyNUCConvolver(nucConvolvers[0]);
+                nucConvolvers[0] = static_cast<convo::MKLNonUniformConvolver*>(rn0);
 
                 void* rn1 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
                 new (rn1) convo::MKLNonUniformConvolver();
-                nucConvolvers[1].reset(static_cast<convo::MKLNonUniformConvolver*>(rn1));
+                destroyNUCConvolver(nucConvolvers[1]);
+                nucConvolvers[1] = static_cast<convo::MKLNonUniformConvolver*>(rn1);
 
                 if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec) &&
                     nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec))
@@ -497,8 +511,8 @@ private:
             }
 
             // NUC セットアップ失敗 or メモリ確保失敗
-            nucConvolvers[0].reset();
-            nucConvolvers[1].reset();
+            destroyNUCConvolver(nucConvolvers[0]);
+            destroyNUCConvolver(nucConvolvers[1]);
             return false;
         }
 
@@ -506,14 +520,12 @@ private:
         // 失敗時 (MKLメモリ確保失敗等) は nullptr を返す。呼び出し元で必ずチェックすること。
         StereoConvolver* clone() const
         {
-            // convo::ScopedAlignedPtr を使用して、例外安全性を確保しつつ、
-            // MKLアライメント規約 (mkl_malloc) を遵守する。
-            convo::ScopedAlignedPtr<StereoConvolver> newConv;
+            StereoConvolver* newConv = nullptr;
             try
             {
                 void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
                 new (mem) StereoConvolver();
-                newConv.reset(static_cast<StereoConvolver*>(mem));
+                newConv = static_cast<StereoConvolver*>(mem);
 
                 if (irDataLength > 0 && irData[0] && irData[1])
                 {
@@ -524,13 +536,21 @@ private:
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
 
                     if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale, storedDirectHeadEnabled))
-                        return nullptr; // init失敗時、newConvのデストラクタが呼ばれ安全にクリーンアップされる
+                    {
+                        newConv->~StereoConvolver();
+                        convo::aligned_free(newConv);
+                        return nullptr;
+                    }
                 }
-                return newConv.release();
+                return newConv;
             }
             catch (const std::bad_alloc&)
             {
-                // メモリ確保失敗時、ScopedAlignedPtrが自動でクリーンアップする
+                if (newConv != nullptr)
+                {
+                    newConv->~StereoConvolver();
+                    convo::aligned_free(newConv);
+                }
                 return nullptr;
             }
         }

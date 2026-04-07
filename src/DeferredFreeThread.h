@@ -23,6 +23,7 @@
 
 #include <thread>
 #include <atomic>
+#include <chrono>
 #include <limits>
 
 class DeferredFreeThread
@@ -83,7 +84,7 @@ private:
     // 1ループあたり最大 kMaxReclaimPerLoop 個まで解放してから yield する。
     // これにより IR 切り替え直後の素早い解放を維持しつつ、
     // 大量オブジェクト蓄積時の CPU スパイクを防ぐ。
-    // [fix4 R5] sleep_for(1ms) → yield() に変更し応答性を向上
+    // [Bug 2] アイドル時は短時間 sleep し、解放が進んだループのみ yield する
     // -----------------------------------------------------------------------
     static constexpr int kMaxReclaimPerLoop = 4;
 
@@ -99,10 +100,9 @@ private:
                 if (++reclaimCount >= kMaxReclaimPerLoop) break;
             }
             if (reclaimCount == 0)
-            {
-                // 解放対象なし → yield して CPU 負荷を軽減（sleep より応答性良好）
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            else
                 std::this_thread::yield();
-            }
         }
     }
 

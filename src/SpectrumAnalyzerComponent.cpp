@@ -97,6 +97,7 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     addAndMakeVisible(analyzerEnableButton);
     setAnalyzerEnabled(analyzerEnableButton.getToggleState());
 
+    prepareFFT();
 
     engine.addChangeListener(this);
     engine.getEQProcessor().addChangeListener(this);
@@ -104,7 +105,6 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 
     updateEQData(); // 初期状態のEQカーブを計算
 
-    prepareFFT();
     lastTime = juce::Time::getMillisecondCounterHiRes() * 0.001;
     updateTimerRate();
 }

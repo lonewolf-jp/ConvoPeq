@@ -194,7 +194,9 @@ public:
         const size_t h = head.load(std::memory_order_relaxed);
         if (h == tail.load(std::memory_order_acquire)) return nullptr;
 
+        // tail(acquire) により、それ以前の epoch/state の release store は可視
         const uint64_t entryEpoch = retiredBuffer[h].epoch.load(std::memory_order_acquire);
+        // 注意: atomic_thread_fence(acquire) は不要。tail.load との同期で十分。
         if (isOlder(entryEpoch, minReaderEpoch))
         {
             ConvolverState* ptr = retiredBuffer[h].state.load(std::memory_order_acquire);
