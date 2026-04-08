@@ -1,4 +1,5 @@
 #include "IRConverter.h"
+#include "IRDSP.h"
 
 #include <algorithm>
 #include <cmath>
@@ -46,42 +47,6 @@ bool IRConverter::loadAudioFile(const juce::File& file,
     return true;
 }
 
-juce::AudioBuffer<double> IRConverter::resampleLinear(const juce::AudioBuffer<double>& input,
-                                                      double srcRate,
-                                                      double dstRate,
-                                                      const std::function<bool()>& shouldCancel)
-{
-    if (srcRate <= 0.0 || dstRate <= 0.0 || std::abs(srcRate - dstRate) < 1.0e-6)
-        return input;
-
-    const double ratio = dstRate / srcRate;
-    const int inN = input.getNumSamples();
-    const int outN = juce::jmax(1, static_cast<int>(std::ceil(static_cast<double>(inN) * ratio)));
-
-    juce::AudioBuffer<double> out(input.getNumChannels(), outN);
-    out.clear();
-
-    for (int ch = 0; ch < input.getNumChannels(); ++ch)
-    {
-        const double* src = input.getReadPointer(ch);
-        double* dst = out.getWritePointer(ch);
-
-        for (int i = 0; i < outN; ++i)
-        {
-            if ((i & 0xF) == 0 && shouldCancel && shouldCancel())
-                return {};
-
-            const double pos = static_cast<double>(i) / ratio;
-            const int i0 = juce::jlimit(0, inN - 1, static_cast<int>(std::floor(pos)));
-            const int i1 = juce::jlimit(0, inN - 1, i0 + 1);
-            const double frac = pos - static_cast<double>(i0);
-            dst[i] = src[i0] * (1.0 - frac) + src[i1] * frac;
-        }
-    }
-
-    return out;
-}
-
 std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFile,
                                                           const ConvertConfig& config,
                                                           const std::function<bool()>& shouldCancel) const
@@ -97,7 +62,7 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
     juce::AudioBuffer<double> converted = ir;
     if (config.targetSampleRate > 0.0 && sourceRate > 0.0 && std::abs(sourceRate - config.targetSampleRate) > 1.0e-6)
     {
-        converted = resampleLinear(ir, sourceRate, config.targetSampleRate, shouldCancel);
+        converted = IRDSP::resampleIR(ir, sourceRate, config.targetSampleRate, shouldCancel);
         if (converted.getNumSamples() <= 0)
             return nullptr;
     }

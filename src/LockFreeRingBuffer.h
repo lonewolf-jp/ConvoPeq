@@ -49,6 +49,20 @@ public:
         size_t r = readIndex.load(std::memory_order_relaxed);
         size_t w = writeIndex.load(std::memory_order_acquire);
         if (r == w) return false; // empty
+        // Memory ordering contract (SPSC):
+        // - Producer writes buffer slot BEFORE publishing via writeIndex.store(release)
+        // - Consumer reads writeIndex(acquire) BEFORE reading buffer slot
+        // This guarantees the element is fully written before it is read.
+        //
+        // NOTE:
+        // - The copy is non-atomic; T must be trivially copyable.
+        // - Do NOT use with types that have internal pointers, ownership,
+        //   or non-trivial invariants.
+        // - Do NOT rely on this pattern for multi-producer/consumer scenarios.
+        //
+        // Real-time safety: ensures no torn reads under proper memory ordering.
+        // This relies on the producer's writeIndex release and consumer's acquire
+        // to establish a happens-before relationship between write and read.
         item = buffer[r & MASK];
         readIndex.store(r + 1, std::memory_order_release);
         return true;

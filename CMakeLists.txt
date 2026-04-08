@@ -120,13 +120,9 @@ target_sources(ConvoPeq PRIVATE
     src/CustomInputOversampler.cpp
     src/AudioEngineProcessor.cpp
     src/ConvolverProcessor.cpp
-    src/IRConverter.cpp
-    src/CacheManager.cpp
-    src/ProgressiveUpgradeThread.cpp
     src/MKLNonUniformConvolver.cpp
     src/EQProcessor.cpp
     src/ConvolverControlPanel.cpp
-    src/ConvolverSettingsComponent.cpp
     src/EQControlPanel.cpp
     src/SpectrumAnalyzerComponent.cpp
     src/DeviceSettings.cpp
@@ -142,13 +138,12 @@ target_sources(ConvoPeq PRIVATE
     src/MKLNonUniformConvolver.h
     src/OutputFilter.h
     src/AllpassDesigner.h
-    src/PreparedIRState.h
-    src/ConvolverRuntime.h
-    src/IRConverter.h
-    src/CacheManager.h
-    src/ProgressiveUpgradeThread.h
-    src/ConvolverSettingsComponent.h
     src/MixedPhaseOptimizationComponent.cpp
+    src/IRConverter.cpp
+    src/ProgressiveUpgradeThread.cpp
+    src/CacheManager.cpp
+    src/ConvolverSettingsComponent.cpp
+    src/IRDSP.cpp
 )
 
 #------------------------------------------------------------
@@ -225,24 +220,14 @@ target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
 if(DEFINED ENV{IPPROOT})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{IPPROOT}")
     list(APPEND CMAKE_PREFIX_PATH "$ENV{IPPROOT}/lib/cmake/ipp")
+    target_include_directories(ConvoPeq SYSTEM PRIVATE "$ENV{IPPROOT}/include")
 endif()
 
-# 静的リンクとシングルスレッドを明示
 set(IPP_LINK static)
 set(IPP_THREADING sequential)
-set(IPP_USE_STATIC_LIBS ON)   # 明示的に静的を要求
-
-# find_package を実行 (コンポーネントは ippcore, ipps)
 find_package(IPP REQUIRED CONFIG COMPONENTS ippcore ipps)
-
-# インクルードディレクトリ
-target_include_directories(ConvoPeq SYSTEM PRIVATE ${IPP_INCLUDE_DIRS})
-
-# リンク (CMake が自動的に適切な静的ライブラリを選択)
+message(STATUS "Intel IPP found.")
 target_link_libraries(ConvoPeq PRIVATE IPP::ippcore IPP::ipps)
-target_compile_definitions(ConvoPeq PRIVATE USE_INTEL_IPP=1)
-
-message(STATUS "Intel IPP linked (static, single-threaded).")
 
 #------------------------------------------------------------
 # JUCEヘッダー自動生成 (JuceHeader.h)

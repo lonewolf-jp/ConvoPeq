@@ -18,6 +18,7 @@
 //============================================================================
 #include "MainApplication.h"
 #include "MainWindow.h"
+#include "MKLRealTimeSetup.h"
 
 #include <xmmintrin.h>
 #include <pmmintrin.h>
@@ -99,14 +100,11 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
 #endif
 
 
-    // リアルタイムオーディオ用 Intel MKL 設定
-    // リアルタイムオーディオ処理において、MKL内部のスレッド管理による
-    // 予測不可能なレイテンシ（ジッター）の発生は致命的です。
-    // そのため、MKLの並列処理を完全に無効化し、シングルスレッドで動作させることが
-    // 安定性確保のために不可欠です。
-    mkl_set_num_threads(1); // 1スレッドに固定
-    mkl_set_dynamic(0);     // 動的なスレッド数調整を無効化
-    vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
+    // ────────────────────────────────────────────────────────────
+    // Intel MKL リアルタイム設定（B7 対応）
+    //   シングルスレッド固定、動的調整無効、環境変数による強制
+    // ────────────────────────────────────────────────────────────
+    MKLRealTime::setup();
 
     // [v2.1] Intel IPP 初期化
     // CPU ディスパッチテーブル (SSE2/AVX2/AVX-512 等) を確定させ、
@@ -135,6 +133,9 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
     // UIスレッドで実行されるEQ応答曲線計算 (AVX2) 等のパフォーマンスを向上させる
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+
+    // VMLモード設定（Audio Thread 用、setup() では設定しない）
+    vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
 
     // メインウィンドウを生成する
     mainWindow = std::make_unique<MainWindow>(getApplicationName());

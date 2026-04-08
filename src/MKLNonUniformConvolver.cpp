@@ -33,6 +33,7 @@
 
 #include <JuceHeader.h>
 #include "MKLNonUniformConvolver.h"
+#include "MKLRealTimeSetup.h"
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
 
@@ -743,6 +744,9 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
 //==============================================================================
 void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 {
+    // B7: Audio Thread 内での初回 FFT 実行による遅延を防止（Message Thread で warmup 済みを保証）
+    MKLRealTime::warmupLayer(l);
+
     // ── 1. [prevInput | currentInput] を fftTimeBuf に配置 (Overlap-Save) ──
     juce::FloatVectorOperations::copy(l.fftTimeBuf,              l.prevInputBuf, l.partSize);
     juce::FloatVectorOperations::copy(l.fftTimeBuf + l.partSize, l.inputAccBuf,  l.partSize);
@@ -971,6 +975,9 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
     for (int li = 0; li < m_numActiveLayers; ++li)
     {
         Layer& l = m_layers[li];
+
+        // B7: Audio Thread 内での初回 FFT 実行による遅延を防止（Message Thread で warmup 済みを保証）
+        MKLRealTime::warmupLayer(l);
 
         int consumed = 0;
         while (consumed < numSamples)

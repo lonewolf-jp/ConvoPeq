@@ -54,6 +54,7 @@ struct CoeffSet {
 #include "UltraHighRateDCBlocker.h"
 #include "LockFreeRingBuffer.h"
 #include "NoiseShaperLearner.h"
+#include "RefCountedDeferred.h"
 
 // デバッグビルド時のみログを出力するマクロ
 #if defined(JUCE_DEBUG) && !defined(NDEBUG)
@@ -316,10 +317,8 @@ private:
     //----------------------------------------------------------
      // DSPコア (Audio Threadで実行される処理のコンテナ)
     //----------------------------------------------------------
-    struct DSPCore
+    struct DSPCore : public RefCountedDeferred<DSPCore>
     {
-        mutable std::atomic<int> refCount { 1 };
-
         struct ProcessingState
         {
             bool eqBypassed;
@@ -348,13 +347,6 @@ private:
 DSPCore();
         DSPCore(const DSPCore&) = delete;
         DSPCore& operator=(const DSPCore&) = delete;
-
-    void addRef() const noexcept { refCount.fetch_add(1, std::memory_order_relaxed); }
-    void release() const noexcept
-    {
-        if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
-        delete this;
-    }
 
     ~DSPCore()
     {
@@ -798,25 +790,10 @@ private:
     void updateReaderEpoch(size_t slot, uint64_t epoch);
 
     // epoch カウンタ
-    std::atomic<uint64_t> globalEpoch{0};
+    std::atomic<uint64_t> globalEpoch{1};
+    std::atomic<uint64_t> audioThreadEpoch{0};
+    uint64_t lastReclaimedEpoch{0};
 
-    // 削除キュー（SPSC）
-    struct RetiredEntry {
-        DSPCore* ptr = nullptr;
-        uint64_t retireEpoch = 0;
-    };
-    static constexpr size_t QUEUE_SIZE = 256;
-    #pragma warning(push)
-    #pragma warning(disable:4324)
-    alignas(64) std::array<RetiredEntry, QUEUE_SIZE> deletionQueue{};
-    #pragma warning(pop)
-    std::atomic<size_t> queueWrite{0};
-    std::atomic<size_t> queueRead{0};
-    std::vector<RetiredEntry> overflowList;
-    std::mutex overflowMutex;   // Timer Thread のみ使用（Audio Thread は不使用）
-
-    // 削除キューへの登録（段階 3 では release を遅延する）
-    void enqueueForDeletion(DSPCore* dsp, uint64_t epoch);
 
     // epoch 比較ヘルパー（ラップアラウンド対応）
     static bool isOlder(uint64_t a, uint64_t b) noexcept

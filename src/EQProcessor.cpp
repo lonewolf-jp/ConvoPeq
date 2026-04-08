@@ -66,22 +66,26 @@ EQProcessor::EQProcessor()
 //--------------------------------------------------------------
 EQProcessor::~EQProcessor()
 {
-    forceCleanup();
-    // shared_ptrが自動的にリソースを管理するため、デストラクタは空で良い
     if (auto* oldState = currentStateRaw.exchange(nullptr, std::memory_order_acq_rel))
         oldState->release();
+
     for (auto& node : bandNodes) {
-        node.store(nullptr, std::memory_order_release);
+        if (auto* n = node.exchange(nullptr, std::memory_order_release))
+            n->release();
     }
-    // activeBandNodes will be cleared automatically
-    for (auto* node : activeBandNodes) if (node) node->release();
+
+    for (auto*& node : activeBandNodes) {
+        if (node) {
+            node->release();
+            node = nullptr;
+        }
+    }
 
     releaseResources();
 }
 
 void EQProcessor::releaseResources()
 {
-    forceCleanup();
     scratchBuffer.reset();
     scratchCapacity = 0;
     dryBypassBuffer.reset();
@@ -127,8 +131,7 @@ void EQProcessor::resetToDefaults()
     auto oldState = currentStateRaw.exchange(newState, std::memory_order_release);
 
     if (oldState) {
-        const juce::ScopedLock sl(trashBinLock);
-        stateTrashBinPending.push_back(oldState);
+        oldState->release();
     }
 
     agcCurrentGain.store(1.0, std::memory_order_relaxed);
@@ -473,12 +476,9 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     if (otherState) otherState->addRef();
     auto oldState = currentStateRaw.exchange(otherState, std::memory_order_release);
 
-    // 安全性と整合性のためにtrashBinを使用
-    const juce::ScopedLock sl(trashBinLock); // This lock is for the trash bin, not the state itself
-
     if (oldState)
     {
-        stateTrashBinPending.push_back(oldState);
+        oldState->release();
     }
 
     for (int i = 0; i < NUM_BANDS; ++i)
@@ -487,7 +487,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
         if (node) node->addRef();
         bandNodes[i].store(node, std::memory_order_release);
         if (activeBandNodes[i]) {
-            bandNodeTrashBinPending.push_back(activeBandNodes[i]);
+            activeBandNodes[i]->release();
         }
         activeBandNodes[i] = node;
     }
@@ -502,9 +502,6 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     // 状態リセット要求の同期 (UI側で発生したリセットをAudio Thread側に引き継ぐ)
     bandResetMask.store(other.bandResetMask.load(std::memory_order_relaxed), std::memory_order_relaxed);
     agcResetRequest.store(other.agcResetRequest.load(std::memory_order_relaxed), std::memory_order_relaxed);
-
-    // 注意: smoothTotalGainのターゲットは、totalGainTarget(linear値)に基づいてprocess()内で更新されます。
-    // totalGainTargetはtotalGainDbTargetから storeTotalGainDb() を通じて同期されます。
 }
 
 void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
@@ -520,8 +517,7 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
 
     if (activeBandNodes[bandIndex])
     {
-        const juce::ScopedLock sl(trashBinLock);
-        bandNodeTrashBinPending.push_back(activeBandNodes[bandIndex]);
+        activeBandNodes[bandIndex]->release();
     }
     activeBandNodes[bandIndex] = node;
 }
@@ -668,11 +664,10 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
             if (loopState)
             {
                 auto newNode = createBandNode(i, *loopState);
-                bandNodes[i].store(newNode, std::memory_order_release);
+                auto oldNode = bandNodes[i].exchange(newNode, std::memory_order_release);
 
-                const juce::ScopedLock sl(trashBinLock);
                 if (activeBandNodes[i])
-                    bandNodeTrashBinPending.push_back(activeBandNodes[i]);
+                    activeBandNodes[i]->release();
 
                 activeBandNodes[i] = newNode;
             }
@@ -702,8 +697,7 @@ void EQProcessor::setBandFrequency(int band, float freq)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        const juce::ScopedLock sl(trashBinLock);
-        stateTrashBinPending.push_back(prev);
+        prev->release();
     }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
@@ -720,8 +714,7 @@ void EQProcessor::setBandGain(int band, float gainDb)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        const juce::ScopedLock sl(trashBinLock);
-        stateTrashBinPending.push_back(prev);
+        prev->release();
     }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
@@ -738,8 +731,7 @@ void EQProcessor::setBandQ(int band, float q)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        const juce::ScopedLock sl(trashBinLock);
-        stateTrashBinPending.push_back(prev);
+        prev->release();
     }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
@@ -760,8 +752,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        const juce::ScopedLock sl(trashBinLock);
-        stateTrashBinPending.push_back(prev);
+        prev->release();
     }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
@@ -783,8 +774,7 @@ void EQProcessor::setTotalGain(float gainDb)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        const juce::ScopedLock sl(trashBinLock);
-        stateTrashBinPending.push_back(prev);
+        prev->release();
     }
     listeners.call(&Listener::eqGlobalChanged, this);
 }
@@ -817,8 +807,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        const juce::ScopedLock sl(trashBinLock);
-        stateTrashBinPending.push_back(prev);
+        prev->release();
     }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
@@ -838,8 +827,7 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        const juce::ScopedLock sl(trashBinLock);
-        stateTrashBinPending.push_back(prev);
+        prev->release();
     }
     updateBandNode(band);
     listeners.call(&Listener::eqBandChanged, this, band);
@@ -885,6 +873,13 @@ EQBandParams EQProcessor::getBandParams(int band) const
     auto state = currentStateRaw.load(std::memory_order_acquire);
     if (state == nullptr) return {};
     return state->bands[band];
+}
+
+void EQProcessor::cleanup()
+{
+    // B22: 状態の削除は RefCountedDeferred::release() 経由で
+    //      グローバルの g_deletionQueue に委ねられるため、
+    //      ここでは個別のクリーンアップは不要。
 }
 
 EQProcessor::EQState* EQProcessor::getEQState() const
@@ -1346,13 +1341,23 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (absNoLibm(bypassFadeGain.getTargetValue() - targetBypassFade) > 1.0e-12)
     {
         if (!requestedBypass && effectiveBypass)
+        {
             bandResetMask.store(0xFFFFFFFFu, std::memory_order_relaxed);
             bypassed.store(false, std::memory_order_relaxed);
+        }
         bypassFadeGain.setTargetValue(targetBypassFade);
         effectiveBypass = bypassed.load(std::memory_order_relaxed);
     }
 
     const bool bypassTransitionActive = bypassFadeGain.isSmoothing();
+
+    // フェードアウト完了時に bypassed を true にする
+    if (requestedBypass && !effectiveBypass && !bypassTransitionActive)
+    {
+        bypassed.store(true, std::memory_order_relaxed);
+        effectiveBypass = true;
+    }
+
     if (requestedBypass && effectiveBypass && !bypassTransitionActive)
         return;
 
@@ -1819,12 +1824,14 @@ static inline bool areCoeffsEqual(const EQCoeffsSVF& a, const EQCoeffsSVF& b) no
 //--------------------------------------------------------------
 void EQProcessor::updateBandNode(int band)
 {
+    if (band < 0 || band >= NUM_BANDS) return;
+
     auto state = currentStateRaw.load(std::memory_order_acquire);
     if (state == nullptr) return;
     auto newNode = createBandNode(band, *state);
 
     // 係数が実際に変更されたかを判定
-    const BandNode* oldNode = activeBandNodes[band];
+    BandNode* oldNode = activeBandNodes[band];
     if (oldNode && !areCoeffsEqual(oldNode->coeffs, newNode->coeffs))
     {
         // 係数が変わる場合: 前回の係数を保持し、クロスフェードフラグを立てる
@@ -1840,84 +1847,13 @@ void EQProcessor::updateBandNode(int band)
 
     bandNodes[band].store(newNode, std::memory_order_release);
 
-    // 古いノードをゴミ箱へ (Audio Threadが使用中の可能性があるため即削除しない)
-    const juce::ScopedLock sl(trashBinLock);
     if (oldNode)
     {
-        bandNodeTrashBinPending.push_back(const_cast<BandNode*>(oldNode));
+        oldNode->release();
     }
     activeBandNodes[band] = newNode;
 }
 
-void EQProcessor::cleanup()
-{
-    std::vector<BandNode*> nodesToDelete;
-    std::vector<EQState*> statesToDelete;
-
-    {
-        const juce::ScopedLock sl(trashBinLock);
-        const uint32 now = juce::Time::getMillisecondCounter();
-
-        // Clean BandNodes (Time-based)
-        // Audio ThreadがRaw Pointerを参照している可能性があるため、即時削除せず一定時間(10000ms)待つ
-        for (auto it = bandNodeTrashBin.begin(); it != bandNodeTrashBin.end(); )
-        {
-            if ((now - it->second) > 10000)
-            {
-                nodesToDelete.push_back(it->first);
-                it = bandNodeTrashBin.erase(it);
-            }
-            else { ++it; }
-        }
-
-        // Move pending to main trash with timestamp
-        for (const auto& ptr : bandNodeTrashBinPending)
-            bandNodeTrashBin.push_back({ptr, now});
-        bandNodeTrashBinPending.clear();
-
-        // Clean States (use_count==1 で解放)
-        for (auto it = stateTrashBin.begin(); it != stateTrashBin.end(); )
-        {
-            if ((*it)->refCount.load() == 1)
-            {
-                statesToDelete.push_back(*it);
-                it = stateTrashBin.erase(it);
-            }
-            else { ++it; }
-        }
-
-        stateTrashBin.insert(stateTrashBin.end(), stateTrashBinPending.begin(), stateTrashBinPending.end());
-        stateTrashBinPending.clear();
-
-        // 安全性優先: use_count == 1 の条件を満たすもののみ回収する。
-        // サイズ超過のみを理由に強制解放すると、Audio Thread 参照中オブジェクトの
-        // 早期解放リスクがあるため行わない。
-    }
-
-    for (auto* p : nodesToDelete) p->release();
-    for (auto* p : statesToDelete) p->release();
-}
-
-void EQProcessor::forceCleanup()
-{
-    std::vector<std::pair<BandNode*, uint32>> nodesToDelete;
-    std::vector<BandNode*> nodesPendingToDelete;
-    std::vector<EQState*> statesToDelete;
-    std::vector<EQState*> statesPendingToDelete;
-
-    {
-        const juce::ScopedLock sl(trashBinLock);
-        nodesToDelete.swap(bandNodeTrashBin);
-        nodesPendingToDelete.swap(bandNodeTrashBinPending);
-        statesToDelete.swap(stateTrashBin);
-        statesPendingToDelete.swap(stateTrashBinPending);
-    }
-
-    for (auto& entry : nodesToDelete) entry.first->release();
-    for (auto* p : nodesPendingToDelete) p->release();
-    for (auto* p : statesToDelete) p->release();
-    for (auto* p : statesPendingToDelete) p->release();
-}
 
 // --------------------------------------------------------------
 // パラメータ検証とクランプ (Helper)

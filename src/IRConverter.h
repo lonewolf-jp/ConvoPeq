@@ -35,9 +35,4 @@ private:
     static bool loadAudioFile(const juce::File& file,
                               juce::AudioBuffer<double>& out,
                               double& sampleRateOut);
-
-    static juce::AudioBuffer<double> resampleLinear(const juce::AudioBuffer<double>& input,
-                                                    double srcRate,
-                                                    double dstRate,
-                                                    const std::function<bool()>& shouldCancel);
 };

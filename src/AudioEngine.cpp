@@ -8,6 +8,8 @@
 #include "AudioEngine.h"
 #include "InputBitDepthTransform.h"
 #include "OutputFilter.h"
+#include "DeferredDeletionQueue.h"
+#include "RefCountedDeferred.h"
 #include <Windows.h>
 #include <cmath>
 #include <cstdint>
@@ -25,6 +27,27 @@ thread_local size_t tls_readerSlot = SIZE_MAX;
 static constexpr size_t INVALID_SLOT = SIZE_MAX;
 static constexpr uint64_t kIdleEpoch = 0;
 static constexpr size_t RCU_BACKLOG_WARNING_THRESHOLD = 128;
+
+// ==================================================================
+// B19: requestLoadState の例外安全性確保用 RAII ガード
+// ==================================================================
+class RestoreStateGuard {
+public:
+    explicit RestoreStateGuard(bool& flag) noexcept : m_flag(flag) {
+        m_flag = true;
+    }
+    ~RestoreStateGuard() noexcept {
+        m_flag = false;
+    }
+    RestoreStateGuard(const RestoreStateGuard&) = delete;
+    RestoreStateGuard& operator=(const RestoreStateGuard&) = delete;
+private:
+    bool& m_flag;
+};
+
+// グローバルインスタンスの定義
+DeferredDeletionQueue g_deletionQueue;
+std::atomic<uint64_t> g_currentEpoch{1};
 
 // ==================================================================
 // RCU 実装
@@ -58,75 +81,18 @@ void AudioEngine::updateReaderEpoch(size_t slot, uint64_t epoch)
     }
 }
 
-// -------------------------------------------------------------------
-// 削除キュー（段階 1：登録のみ、削除処理は行わない）
-// -------------------------------------------------------------------
-void AudioEngine::enqueueForDeletion(DSPCore* dsp, uint64_t epoch)
-{
-    if (dsp == nullptr) return;
-
-    RetiredEntry entry{dsp, epoch};
-    size_t w = queueWrite.load(std::memory_order_relaxed);
-    size_t r = queueRead.load(std::memory_order_acquire);
-    size_t next = (w + 1) % QUEUE_SIZE;
-
-    if (next == r) {
-        // キュー溢れ → フォールバックキューへ
-        std::lock_guard<std::mutex> lock(overflowMutex);
-        overflowList.push_back(entry);
-        // 溢れた分だけ read を進めてスペースを確保
-        r = (r + 1) % QUEUE_SIZE;
-        queueRead.store(r, std::memory_order_release);
-    }
-
-    deletionQueue[w] = entry;
-    queueWrite.store(next, std::memory_order_release);
-}
-
 void AudioEngine::processDeferredReleases()
 {
+    // B22: 旧 SPSC キューの重複処理を完全に削除し、MPMC g_deletionQueue に一本化。
     // この関数は Timer コールバックから呼ばれる（非 RT スレッド）
-    // Audio Thread からは呼ばないこと。
-    // overflowMutex を取得する前に他のロックを取らないこと（デッドロック防止）。
-
     const uint64_t minEpoch = getMinReaderEpoch();
 
-    // SPSC キューから解放可能なエントリを取り出す
-    size_t r = queueRead.load(std::memory_order_acquire);
-    size_t w = queueWrite.load(std::memory_order_acquire);
-    size_t backlog = 0;
+    // 最後にクリーンアップした epoch から進んでいない場合はスキップ
+    if (minEpoch <= lastReclaimedEpoch)
+        return;
 
-    while (r != w) {
-        RetiredEntry& entry = deletionQueue[r];
-        if (SafeStateSwapper::isOlder(entry.retireEpoch, minEpoch)) {
-            DSPCore* ptr = entry.ptr;
-            entry.ptr = nullptr;
-            r = (r + 1) % QUEUE_SIZE;
-            ptr->release();   // delete ではなく release を遅延実行
-        } else {
-            break;
-        }
-        ++backlog;
-    }
-
-    queueRead.store(r, std::memory_order_release);
-
-    if (backlog > RCU_BACKLOG_WARNING_THRESHOLD) {
-        DBG("[RCU] processDeferredReleases: backlog " << backlog << " entries");
-    }
-
-    // フォールバックキュー（overflowList）も同様に処理
-    std::lock_guard<std::mutex> lock(overflowMutex);
-    auto it = overflowList.begin();
-    while (it != overflowList.end()) {
-        if (SafeStateSwapper::isOlder(it->retireEpoch, minEpoch)) {
-            DSPCore* ptr = it->ptr;
-            it = overflowList.erase(it);
-            ptr->release();
-        } else {
-            ++it;
-        }
-    }
+    g_deletionQueue.reclaim(minEpoch);
+    lastReclaimedEpoch = minEpoch;
 }
 
 // ==================================================================
@@ -176,6 +142,14 @@ uint64_t AudioEngine::getMinReaderEpoch() const noexcept
             if (SafeStateSwapper::isOlder(e, minEpoch))
                 minEpoch = e;
         }
+    }
+
+    // Audio Thread の epoch も考慮
+    const uint64_t ae = audioThreadEpoch.load(std::memory_order_acquire);
+    if (ae != kIdleEpoch) {
+        hasActiveReader = true;
+        if (SafeStateSwapper::isOlder(ae, minEpoch))
+            minEpoch = ae;
     }
 
     if (!hasActiveReader)
@@ -1148,9 +1122,8 @@ void AudioEngine::initialize()
     // ==================================================================
     // 段階 1：RCU 基盤の初期化
     // ==================================================================
-    queueWrite.store(0, std::memory_order_relaxed);
-    queueRead.store(0, std::memory_order_relaxed);
-    overflowList.clear();
+    // B22: 旧 SPSC キュー (queueWrite/queueRead/overflowList) は廃止。
+    //      g_deletionQueue は静的初期化される。
     // readerEpochs と globalEpoch は静的初期化で 0
 
     // Start worker thread
@@ -1215,30 +1188,9 @@ AudioEngine::~AudioEngine()
 
     // 5. RCU リリースキューを最終解放する。
     //    ここでは Audio Thread / rebuildThread ともに停止済みのため、安全に全解放できる。
-    size_t r = queueRead.load(std::memory_order_acquire);
-    const size_t w = queueWrite.load(std::memory_order_acquire);
-    while (r != w)
-    {
-        RetiredEntry& entry = deletionQueue[r];
-        if (entry.ptr != nullptr)
-        {
-            entry.ptr->release();
-            entry.ptr = nullptr;
-        }
-        r = (r + 1) % QUEUE_SIZE;
-    }
-    queueRead.store(w, std::memory_order_release);
-
-    // overflowList も同様に処理する。
-    {
-        std::lock_guard<std::mutex> lock(overflowMutex);
-        for (auto& entry : overflowList)
-        {
-            if (entry.ptr != nullptr)
-                entry.ptr->release();
-        }
-        overflowList.clear();
-    }
+    // B22: 旧 SPSC キューの処理を削除し、g_deletionQueue の最終 reclaim を行う。
+    const uint64_t finalEpoch = std::numeric_limits<uint64_t>::max();
+    g_deletionQueue.reclaim(finalEpoch);
 }
 
 //--------------------------------------------------------------
@@ -2116,6 +2068,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // 3. 段階 3：エポックを進め、旧 DSP の retire epoch を記録する
         //    fetch_add は旧値を返すため、retireEpoch = 公開直前のグローバルエポック
         retireEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
+        g_currentEpoch.store(retireEpoch, std::memory_order_release);
 
         // 4. Take ownership of the new DSP
         activeDSP = newDSP;
@@ -2137,7 +2090,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         }
 
         // 段階 3：RCU キューに登録し、grace period 経過後に processDeferredReleases が release() する
-        enqueueForDeletion(dspToTrash, retireEpoch);
+        dspToTrash->release();
     }
 
     if (newDSP != nullptr)
@@ -2581,8 +2534,7 @@ void AudioEngine::releaseResources()
         // 2. activeDSP を deferred release キューへ移す。
         if (activeDSP)
         {
-            const uint64_t retireEpoch = globalEpoch.load(std::memory_order_acquire);
-            enqueueForDeletion(activeDSP, retireEpoch);
+            activeDSP->release();
             activeDSP = nullptr;
         }
 
@@ -2641,42 +2593,23 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
 
-    // DSPコアの取得 (RCU リードサイドクリティカルセクション)
-    // Audio Thread がリーダー epoch を記録し、grace period 内は processDeferredReleases が
-    // このポインタを解放しないことを保証する（addRef/release 不要）。
-    const size_t readerSlot = getOrRegisterCurrentThreadSlot();
-    if (readerSlot == INVALID_SLOT)
-    {
-        bufferToFill.clearActiveBufferRegion();
-        return;
-    }
+    // Audio Thread Epoch 管理
+    const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
+    audioThreadEpoch.store(epoch, std::memory_order_release);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 
-    // epoch-retry ループ：epoch が一致することを確認しながら currentDSP をロードする
-    DSPCore* dsp = nullptr;
-    for (int retry = 0; retry < 4; ++retry)
-    {
-        const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
-        enterReader(readerSlot, epoch);
-        dsp = currentDSP.load(std::memory_order_acquire);
-        if (globalEpoch.load(std::memory_order_acquire) == epoch)
-            break;
-        // epoch が変化した: DSP スワップが発生した可能性 → 再試行
-        exitReader(readerSlot);
-        dsp = nullptr;
-    }
+    // RAII により関数終了時に必ず audioThreadEpoch をリセット
+    struct EpochGuard {
+        std::atomic<uint64_t>& ae;
+        ~EpochGuard() { ae.store(0, std::memory_order_release); }
+    } epochGuard { audioThreadEpoch };
+
+    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
     if (dsp == nullptr)
     {
-        // retry 上限超過または DSP が null（まだ初期化されていない）
-        exitReader(readerSlot);
         bufferToFill.clearActiveBufferRegion();
         return;
     }
-
-    // RAII により関数終了時に必ず exitReader を呼ぶ（early return にも対応）
-    struct RdGuard {
-        AudioEngine& e; size_t s;
-        ~RdGuard() { e.exitReader(s); }
-    } rdGuard { *this, readerSlot };
 
     if (dsp != nullptr)
     {
@@ -2853,39 +2786,23 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    const size_t readerSlot = getOrRegisterCurrentThreadSlot();
-    if (readerSlot == INVALID_SLOT)
-    {
-        buffer.clear();
-        return;
-    }
+    // Audio Thread Epoch 管理
+    const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
+    audioThreadEpoch.store(epoch, std::memory_order_release);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 
-    DSPCore* dsp = nullptr;
-    for (int retry = 0; retry < 4; ++retry)
-    {
-        const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
-        enterReader(readerSlot, epoch);
-        dsp = currentDSP.load(std::memory_order_acquire);
-        if (globalEpoch.load(std::memory_order_acquire) == epoch)
-            break;
+    // RAII により関数終了時に必ず audioThreadEpoch をリセット
+    struct EpochGuard {
+        std::atomic<uint64_t>& ae;
+        ~EpochGuard() { ae.store(0, std::memory_order_release); }
+    } epochGuard { audioThreadEpoch };
 
-        exitReader(readerSlot);
-        dsp = nullptr;
-    }
-
+    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
     if (dsp == nullptr)
     {
-        exitReader(readerSlot);
         buffer.clear();
         return;
     }
-
-    struct RdGuard
-    {
-        AudioEngine& e;
-        size_t s;
-        ~RdGuard() { e.exitReader(s); }
-    } rdGuard { *this, readerSlot };
 
     // DSPCore 固有の上限チェック (getNextAudioBlock と同様)
     if (numSamples > dsp->maxSamplesPerBlock)
@@ -4115,9 +4032,8 @@ void AudioEngine::requestConvolverPreset(const juce::File& irFile)
 
 void AudioEngine::requestLoadState (const juce::ValueTree& state)
 {
-    // m_isRestoringState=true の間は applyDefaultsForCurrentMode() を抑制する。
-    // これにより、モード/バイパス設定の変更がゲイン値をデフォルトに上書きするのを防ぐ。
-    m_isRestoringState = true;
+    // B19: RAII ガードを使用して、例外発生時も確実にフラグを戻す
+    RestoreStateGuard guard(m_isRestoringState);
 
     // ─── Step 1: モード・バイパス状態を先に復元 ────────────────────────────
     if (state.hasProperty("processingOrder"))
@@ -4138,7 +4054,9 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     }
 
     // ─── Step 2: ゲイン値を復元 (モード依存クランプが正しく適用される) ─────
-    m_isRestoringState = false; // クランプはモードに基づいて正しく機能させる
+    // NOTE: ここで guard を破棄せず、関数終了まで維持することで
+    //       setInputHeadroomDb 等の内部で呼ばれる applyDefaults を抑制し続ける。
+    //       (旧実装では 4059 行目で false に戻していたが、B19 では安全のため全域カバー)
 
     if (state.hasProperty("inputHeadroomDb"))
         setInputHeadroomDb(state.getProperty("inputHeadroomDb"));

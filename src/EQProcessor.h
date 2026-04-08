@@ -28,6 +28,7 @@
 #include <array>
 #include <vector>
 #include "AlignedAllocation.h"
+#include "RefCountedDeferred.h"
 
 //--------------------------------------------------------------
 // バンドタイプ列挙型
@@ -210,27 +211,21 @@ public:
     //----------------------------------------------------------
     // 状態構造体
     //----------------------------------------------------------
-    struct BandNode
+    struct BandNode : public RefCountedDeferred<BandNode>
     {
         EQCoeffsSVF coeffs;
         EQCoeffsSVF prevCoeffs;  // 前回の係数（クロスフェード用）
         bool active;
         EQChannelMode mode;
         bool coeffsChanged = false;  // 係数が変更されたかどうかのフラグ
-
-        mutable std::atomic<int> refCount { 0 };
-        void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }
-        void release() const { if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this; }
     };
 
-    struct EQState
+    struct EQState : public RefCountedDeferred<EQState>
     {
         std::array<EQBandParams, NUM_BANDS> bands;
         std::array<EQBandType, NUM_BANDS> bandTypes;
         std::array<EQChannelMode, NUM_BANDS> bandChannelModes;
         float totalGainDb = 0.0f;
-
-        mutable std::atomic<int> refCount { 0 };
 
         // Explicitly define the copy constructor
         EQState() = default;
@@ -239,25 +234,19 @@ public:
             : bands(other.bands),
               bandTypes(other.bandTypes),
               bandChannelModes(other.bandChannelModes),
-              totalGainDb(other.totalGainDb),
-              refCount(0) // Initialize refCount to 0 in the copy
+              totalGainDb(other.totalGainDb)
         {
         }
 
         // Explicitly define the move constructor
-        // std::atomic はムーブ不可のため = default は暗黙 deleted になる
         EQState(EQState&& other)
             : bands(std::move(other.bands)),
               bandTypes(std::move(other.bandTypes)),
               bandChannelModes(std::move(other.bandChannelModes)),
-              totalGainDb(other.totalGainDb),
-              refCount(0) // refCount は引き継がない
+              totalGainDb(other.totalGainDb)
         {
         }
 
-        // std::atomic はコピー/ムーブ代入が delete されているため = default は
-        // 暗黙的に deleted として定義される。呼び出し時点でコンパイルエラーになる潜在バグ。
-        // 明示実装し refCount をコピーしないことを明確化する。
         EQState& operator=(const EQState& other)
         {
             if (this != &other)
@@ -266,7 +255,6 @@ public:
                 bandTypes         = other.bandTypes;
                 bandChannelModes  = other.bandChannelModes;
                 totalGainDb       = other.totalGainDb;
-                // refCount はコピーしない（RCU の参照カウントは各インスタンス固有）
             }
             return *this;
         }
@@ -279,14 +267,9 @@ public:
                 bandTypes         = std::move(other.bandTypes);
                 bandChannelModes  = std::move(other.bandChannelModes);
                 totalGainDb       = other.totalGainDb;
-                // refCount はコピーしない
             }
             return *this;
         }
-
-
-        void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }
-        void release() const { if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this; }
     };
 
     //----------------------------------------------------------
@@ -299,10 +282,6 @@ public:
     // 個別パラメータの同期 (最適化)
     void syncBandNodeFrom(const EQProcessor& other, int bandIndex);
     void syncGlobalStateFrom(const EQProcessor& other);
-
-    // ガベージコレクション
-    void cleanup();
-    void forceCleanup();
 
     // 参照カウントを追加した状態ポインタを返す (呼び出し元は release() する責任を持つ)
     EQState* getEQStateAndAddRef() const;
@@ -322,6 +301,8 @@ public:
     //----------------------------------------------------------
     juce::ValueTree getState() const;
     void setState (const juce::ValueTree& state);
+
+    void cleanup();
 
     //----------------------------------------------------------
     // 係数計算ヘルパー (static public)
@@ -392,11 +373,6 @@ private:
     // ── 係数管理 (Atomic Swap) ──
     std::array<std::atomic<BandNode*>, NUM_BANDS> bandNodes; // Raw pointer for Audio Thread
     std::array<BandNode*, NUM_BANDS> activeBandNodes { nullptr }; // Ownership for Message Thread
-    std::vector<std::pair<BandNode*, uint32>> bandNodeTrashBin; // Time-based GC
-    std::vector<BandNode*> bandNodeTrashBinPending;
-    std::vector<EQState*> stateTrashBin;
-    std::vector<EQState*> stateTrashBinPending;
-    juce::CriticalSection trashBinLock;
 
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──
     // SVFの2つの積分器状態 (ic1eq, ic2eq)
