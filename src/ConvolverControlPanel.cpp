@@ -344,6 +344,33 @@ ConvolverControlPanel::ConvolverControlPanel(AudioEngine& audioEngine)
     };
     addAndMakeVisible(phaseChoiceBox);
 
+    // ── リサンプリング位相モード選択 ────────────────────────────────────────
+    // IR のサンプルレートがプロジェクトと異なる場合のリサンプリングに適用される。
+    // Linear (デフォルト): 周波数特性が科学的に正確。測定・ミキシング用途向け。
+    // Minimum: アタック成分を保持し自然な聴感。ギターキャビネット等の音楽用途向け。
+    resamplingPhaseLabel.setText("Resample Phase:", juce::dontSendNotification);
+    resamplingPhaseLabel.setJustificationType(juce::Justification::centredRight);
+    resamplingPhaseLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    addAndMakeVisible(resamplingPhaseLabel);
+
+    resamplingPhaseBox.addItem("Linear (precise)", 1);
+    resamplingPhaseBox.addItem("Minimum (musical)", 2);
+    resamplingPhaseBox.setSelectedId(1, juce::dontSendNotification);
+    resamplingPhaseBox.setJustificationType(juce::Justification::centred);
+    resamplingPhaseBox.setTooltip(
+        "Resampling phase mode applied when the IR sample rate differs from the project rate.\n"
+        "Linear: phase-accurate, suitable for measurement and mixing.\n"
+        "Minimum: preserves transients naturally, suitable for musical use (guitar cabs etc.).\n"
+        "Changing this setting triggers an IR rebuild.");
+    resamplingPhaseBox.onChange = [this]
+    {
+        const auto mode = (resamplingPhaseBox.getSelectedId() == 1)
+                          ? ConvolverProcessor::ResamplingPhaseMode::Linear
+                          : ConvolverProcessor::ResamplingPhaseMode::Minimum;
+        engine.getConvolverProcessor().setResamplingPhaseMode(mode);
+    };
+    addAndMakeVisible(resamplingPhaseBox);
+
     experimentalDirectHeadToggle.setButtonText("Exp Direct Head");
     experimentalDirectHeadToggle.setTooltip("Experimental zero-latency direct head path. Rebuilds the convolver when changed.");
     experimentalDirectHeadToggle.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
@@ -747,6 +774,15 @@ void ConvolverControlPanel::resized()
     // 波形エリア
     waveformArea = bounds.removeFromTop(38);
     bounds.removeFromTop(4);
+
+    // リサンプリング位相モード行（波形エリアの直下）
+    {
+        auto resampleRow = bounds.removeFromTop(26);
+        bounds.removeFromTop(4);
+        resamplingPhaseLabel.setBounds(resampleRow.removeFromLeft(110).reduced(2, 0));
+        resampleRow.removeFromLeft(4);
+        resamplingPhaseBox.setBounds(resampleRow.removeFromLeft(140).reduced(2, 0));
+    }
 
     // IR情報ラベル
     irInfoLabel.setBounds(bounds.removeFromTop(16));
@@ -1276,6 +1312,14 @@ void ConvolverControlPanel::updateIRInfo()
     phaseChoiceBox.setSelectedId(phaseModeToComboId(convolver.getPhaseMode()), juce::dontSendNotification);
     updateMixedPhaseControlsEnabled();
     experimentalDirectHeadToggle.setToggleState(convolver.getExperimentalDirectHeadEnabled(), juce::dontSendNotification);
+
+    // リサンプリング位相モードの同期
+    {
+        const int resPhaseId = (convolver.getResamplingPhaseMode() ==
+                                ConvolverProcessor::ResamplingPhaseMode::Linear) ? 1 : 2;
+        if (resamplingPhaseBox.getSelectedId() != resPhaseId)
+            resamplingPhaseBox.setSelectedId(resPhaseId, juce::dontSendNotification);
+    }
     smoothingTimeSlider.setValue((pendingSmoothingDirty ? pendingSmoothingTimeSec : convolver.getSmoothingTime()) * 1000.0,
                                  juce::dontSendNotification);
     const double irLengthSliderMax = std::max(static_cast<double>(ConvolverProcessor::IR_LENGTH_MAX_SEC),

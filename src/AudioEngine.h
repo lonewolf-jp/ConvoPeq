@@ -177,6 +177,7 @@ public:
 
     LatencyBreakdown getCurrentLatencyBreakdown() const;
     int getCurrentLatencySamples() const;
+    int getTotalLatencySamples() const;  // PDC 用エイリアス (getCurrentLatencySamples と同値)
     double getCurrentLatencyMs() const;
 
     // 【Fix Bug #8】gainToDecibels (std::log10 / libm) を Audio Thread から排除。

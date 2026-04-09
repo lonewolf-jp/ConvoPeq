@@ -52,6 +52,10 @@ private:
     juce::ComboBox phaseChoiceBox;
     juce::ToggleButton experimentalDirectHeadToggle;
 
+    // リサンプリング位相モード選択
+    juce::ComboBox resamplingPhaseBox;
+    juce::Label   resamplingPhaseLabel;
+
     juce::Slider mixSlider;
     juce::Label mixLabel;
 

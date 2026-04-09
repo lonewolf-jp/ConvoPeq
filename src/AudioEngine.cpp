@@ -1497,6 +1497,11 @@ int AudioEngine::getCurrentLatencySamples() const
     return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
 }
 
+int AudioEngine::getTotalLatencySamples() const
+{
+    return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
+}
+
 AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 {
     LatencyBreakdown breakdown;

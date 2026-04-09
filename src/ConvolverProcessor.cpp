@@ -112,97 +112,134 @@ static void shrinkToFit(juce::AudioBuffer<double>& buffer)
     buffer = std::move(newBuffer);
 }
 
-// リサンプリング用ヘルパー
-static juce::AudioBuffer<double> resampleIR(const juce::AudioBuffer<double>& inputIR, double inputSR, double targetSR, const std::function<bool()>& shouldExit)
+// ============================================================================
+// テールトリム（実質無効: -300dB）
+// ============================================================================
+static int findTailThreshold(const juce::AudioBuffer<double>& buf, double thresholdDB = -300.0) noexcept
 {
-    if (inputSR <= 0.0 || targetSR <= 0.0 || std::abs(inputSR - targetSR) <= 1e-6)
-        return inputIR;
-
-    const double ratio = targetSR / inputSR;
-    const int inLength = inputIR.getNumSamples();
-
-    // 出力長オーバーフローの安全チェック
-    const double expectedLen = inLength * ratio + 2.0;
-    if (expectedLen > static_cast<double>(std::numeric_limits<int>::max()))
-        return {};
-
-    const int maxOutLen = static_cast<int>(expectedLen);
-
-    juce::AudioBuffer<double> resampled(inputIR.getNumChannels(), maxOutLen);
-    resampled.clear();
-
-    constexpr double transBand = 2.0;
-    constexpr double stopBandAtten = 140.0;
-    constexpr r8b::EDSPFilterPhaseResponse phase = r8b::fprLinearPhase;
-
-    int maxLength = 0;
-    for (int ch = 0; ch < inputIR.getNumChannels(); ++ch)
+    const double threshold = std::pow(10.0, thresholdDB / 20.0);
+    const int len = buf.getNumSamples();
+    for (int i = len - 1; i >= 0; --i)
     {
-        if (checkCancellation(shouldExit, nullptr)) return {};
-
-        auto resampler = std::make_unique<r8b::CDSPResampler>(inputSR, targetSR, inLength, transBand, stopBandAtten, phase);
-
-        const double* inPtr = inputIR.getReadPointer(ch);
-        double* outPtr = resampled.getWritePointer(ch);
-
-        int done = 0;
-        int inputProcessed = 0;
-        int iterations = 0;
-        constexpr int maxIterations = 1000000; // 無限ループ防止のための安全カウンター
-        constexpr int CHUNK_SIZE = 1024; // キャンセル応答性を高めるためのチャンクサイズ
-
-        // 入力をチャンク分割して処理 (キャンセルチェックを頻繁に行うため)
-        while (inputProcessed < inLength && done < maxOutLen && ++iterations < maxIterations)
-        {
-            if (checkCancellation(shouldExit, nullptr)) return {};
-
-            int chunk = std::min(CHUNK_SIZE, inLength - inputProcessed);
-            double* r8bOutput = nullptr;
-
-            const int generated = resampler->process(const_cast<double*>(inPtr + inputProcessed), chunk, r8bOutput);
-            inputProcessed += chunk;
-
-            if (generated > 0)
-            {
-                const int toCopy = std::min(generated, maxOutLen - done);
-                std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
-                done += toCopy;
-            }
-        }
-
-        // 残りの出力をフラッシュ (r8brainのレイテンシー分など)
-        while (done < maxOutLen && ++iterations < maxIterations)
-        {
-            if (checkCancellation(shouldExit, nullptr)) return {};
-            double* r8bOutput = nullptr;
-            const int generated = resampler->process(nullptr, 0, r8bOutput);
-
-            if (generated <= 0) break;
-
-            const int toCopy = std::min(generated, maxOutLen - done);
-            std::memcpy(outPtr + done, r8bOutput, toCopy * sizeof(double));
-            done += toCopy;
-        }
-
-        if (iterations >= maxIterations)
-        {
-            jassertfalse;
-            juce::Logger::writeToLog("resampleIR: maxIterations exceeded, IR may be truncated.");
-        }
-
-        maxLength = std::max(maxLength, done);
+        double maxAbs = 0.0;
+        for (int ch = 0; ch < buf.getNumChannels(); ++ch)
+            maxAbs = std::max(maxAbs, std::abs(buf.getSample(ch, i)));
+        if (maxAbs > threshold)
+            return i + 1;
     }
-    resampled.setSize(inputIR.getNumChannels(), maxLength, true, true, true);
-    shrinkToFit(resampled); // 余分なキャパシティを解放
+    return 1;
+}
 
-    // コンボリューション用のIRリサンプリングでは、サンプルレート比率の逆数をゲインとして適用する。
-    // Upsampling (ratio > 1.0) -> Gain < 1.0 (減衰)
-    // Downsampling (ratio < 1.0) -> Gain > 1.0 (増幅)
-    // これにより、畳み込み積分のDCゲイン（総エネルギー）がサンプルレート変更前後で維持される。
-    if (ratio > 0.0)
-        resampled.applyGain(1.0 / ratio);
+// ============================================================================
+// リサンプリング結果の状態
+// ============================================================================
+enum class ResampleResult { Success, SilentIR, Cancelled, Error };
+struct ResampleOutput {
+    juce::AudioBuffer<double> buffer;
+    ResampleResult result;
+};
 
-    return resampled;
+// ============================================================================
+// メインリサンプリング関数（r8brain CDSPResampler::oneshot + getMaxOutLen 使用）
+//
+// 変更点（旧実装からの修正）:
+//   - CDSPResampler::process() チャンク分割ループ → oneshot() に移行
+//   - applyGain(1.0/ratio) による誤ったゲイン補正を削除
+//   - getMaxOutLen() で出力長を正確に確保（手計算を排除）
+//   - 全チャンネルの maxLen を統一してゼロパディング
+//   - r8brain 出力に対する不要な後処理を排除
+//   - 位相モード選択（Linear / Minimum）のサポート
+// ============================================================================
+static ResampleOutput resampleIR(
+    const juce::AudioBuffer<double>& inputIR,
+    double inputSR,
+    double targetSR,
+    r8b::EDSPFilterPhaseResponse phaseMode,
+    const std::function<bool()>& shouldExit)
+{
+    // 1. バリデーション: 同一SR は変換不要
+    if (inputSR <= 0.0 || targetSR <= 0.0 || std::abs(inputSR - targetSR) <= 1e-6)
+        return { inputIR, ResampleResult::Success };
+
+    const int numCh = inputIR.getNumChannels();
+    const int inLen  = inputIR.getNumSamples();
+    if (numCh <= 0 || inLen <= 0)
+        return {{}, ResampleResult::Error};
+
+    // 2. 無音検出（全チャンネル）
+    double peak = 0.0;
+    for (int ch = 0; ch < numCh; ++ch)
+    {
+        const double* data = inputIR.getReadPointer(ch);
+        for (int i = 0; i < inLen; ++i)
+            peak = std::max(peak, std::abs(data[i]));
+    }
+    if (peak < 1e-12)
+        return {{}, ResampleResult::SilentIR};
+
+    // 3. リサンプラ設定
+    constexpr double transBand     = 2.0;
+    constexpr double stopBandAtten = 140.0;
+
+    // 4. 最大出力長を getMaxOutLen() で正確に取得
+    //    CDSPResampler::getMaxOutLen() はコンストラクタの MaxInLen に基づいて
+    //    最大出力サンプル数を返す（引数は無視される）。
+    const int maxOut = r8b::CDSPResampler(inputSR, targetSR, inLen,
+                                          transBand, stopBandAtten, phaseMode)
+                           .getMaxOutLen(0);
+    if (maxOut <= 0)
+        return {{}, ResampleResult::Error};
+
+    // 5. 全チャンネル処理＋実際の出力長を収集
+    std::vector<int>                 lengths(static_cast<size_t>(numCh));
+    std::vector<std::vector<double>> chData (static_cast<size_t>(numCh));
+    int maxLen = 0;
+
+    for (int ch = 0; ch < numCh; ++ch)
+    {
+        if (shouldExit && shouldExit())
+            return {{}, ResampleResult::Cancelled};
+
+        // コンストラクタに inLen を渡すことでリサンプラが内部バッファを最適確保する
+        r8b::CDSPResampler resampler(inputSR, targetSR, inLen,
+                                      transBand, stopBandAtten, phaseMode);
+
+        chData[static_cast<size_t>(ch)].resize(static_cast<size_t>(maxOut), 0.0);
+
+        // oneshot(): 入力を一括処理し、レイテンシ補正済みの出力を op に書き込む。
+        // 戻り値なし（oplen に収まる分を書き込む）。
+        // 実際の有効長は maxOut で確定しているためそのまま使用する。
+        resampler.oneshot(
+            inputIR.getReadPointer(ch),
+            inLen,
+            chData[static_cast<size_t>(ch)].data(),
+            maxOut);
+
+        lengths[static_cast<size_t>(ch)] = maxOut;
+        maxLen = std::max(maxLen, maxOut);
+    }
+
+    // 6. 出力バッファ（全チャンネルを maxLen に統一してゼロパディング）
+    juce::AudioBuffer<double> result(numCh, maxLen);
+    result.clear();
+
+    for (int ch = 0; ch < numCh; ++ch)
+    {
+        const int copy = std::min(lengths[static_cast<size_t>(ch)], maxLen);
+        std::memcpy(result.getWritePointer(ch),
+                    chData[static_cast<size_t>(ch)].data(),
+                    static_cast<size_t>(copy) * sizeof(double));
+    }
+
+    // 7. ★ r8brain 出力に対する追加補正・ゲイン操作は一切行わない
+    //    (旧実装の applyGain(1.0/ratio) を削除)
+
+    // 8. テールトリム（-300dB: 実質無効）
+    const int tail = findTailThreshold(result, -300.0);
+    if (tail < result.getNumSamples())
+        result.setSize(result.getNumChannels(), tail, true, true, true);
+
+    return { std::move(result), ResampleResult::Success };
 }
 
 // -------------------------------------------------------------------------
@@ -795,21 +832,48 @@ public:
             if (result.loadedSR > 0.0 && sampleRate > 0.0 &&
                 std::abs(result.loadedSR - sampleRate) > 1e-6)
             {
-                auto resampled = resampleIR(result.loadedIR, result.loadedSR, sampleRate, shouldStop);
+                // 現在の世代IDを取得し、キャンセル検出に使用する
+                const uint64_t myGen = owner.convolverStateGeneration.getCurrentGeneration();
 
-                if (resampled.getNumSamples() == 0)
+                // 位相モードを取得（LoaderThread 実行中に変わっても次回リビルドで反映）
+                const r8b::EDSPFilterPhaseResponse r8bPhase =
+                    (owner.getResamplingPhaseMode() == ResamplingPhaseMode::Linear)
+                        ? r8b::fprLinearPhase
+                        : r8b::fprMinPhase;
+
+                auto resampleOut = resampleIR(
+                    result.loadedIR, result.loadedSR, sampleRate, r8bPhase,
+                    [&]() -> bool {
+                        return shouldStop() ||
+                               !owner.convolverStateGeneration.isCurrentGeneration(myGen);
+                    });
+
+                // 世代チェック: 別のロードが開始されていたら結果を破棄
+                if (!owner.convolverStateGeneration.isCurrentGeneration(myGen))
                 {
-                    // キャンセルされたか、エラーで0長になった場合
-                    if (!checkCancellation(shouldStop, nullptr))
-                    {
-                        juce::Logger::writeToLog("LoaderThread: Resampling failed (produced 0 samples or overflow).");
-                        result.errorMessage = "Resampling failed (unknown error).";
-                    }
+                    result.success = false;
                     return result;
                 }
 
-                result.loadedIR = std::move(resampled);
-                result.loadedSR = sampleRate;
+                switch (resampleOut.result)
+                {
+                    case ResampleResult::Success:
+                        result.loadedIR = std::move(resampleOut.buffer);
+                        result.loadedSR = sampleRate;
+                        break;
+                    case ResampleResult::Cancelled:
+                        // キャンセル: 上流の checkCancellation で処理される
+                        return result;
+                    case ResampleResult::SilentIR:
+                        juce::Logger::writeToLog("LoaderThread: Resampling skipped – IR is silent.");
+                        result.errorMessage = "IR is silent (all samples near zero).";
+                        return result;
+                    case ResampleResult::Error:
+                    default:
+                        juce::Logger::writeToLog("LoaderThread: Resampling failed (produced 0 samples or error).");
+                        result.errorMessage = "Resampling failed (unknown error).";
+                        return result;
+                }
             }
 
             // 5. 高精度型 DC Blocker (1次IIR)
@@ -3324,14 +3388,17 @@ ConvolverProcessor::IRLoadPreview ConvolverProcessor::analyzeImpulseResponseFile
 
     if (loadedSampleRate > 0.0 && processingSampleRate > 0.0 && std::abs(loadedSampleRate - processingSampleRate) > 1e-6)
     {
-        auto resampled = resampleIR(loadedIR, loadedSampleRate, processingSampleRate, neverCancel);
-        if (resampled.getNumSamples() == 0)
+        // analyzeImpulseResponseFile はプレビュー用途のため Linear Phase を固定で使用する
+        auto resampleOut = resampleIR(loadedIR, loadedSampleRate, processingSampleRate,
+                                      r8b::fprLinearPhase, neverCancel);
+        if (resampleOut.result != ResampleResult::Success ||
+            resampleOut.buffer.getNumSamples() == 0)
         {
             preview.errorMessage = "Resampling failed (unknown error).";
             return preview;
         }
 
-        loadedIR = std::move(resampled);
+        loadedIR = std::move(resampleOut.buffer);
         loadedSampleRate = processingSampleRate;
     }
 
@@ -3833,6 +3900,17 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     uiDirectHeadActive.store(other.uiDirectHeadActive.load(std::memory_order_acquire), std::memory_order_release);
 }
 
+void ConvolverProcessor::setResamplingPhaseMode(ResamplingPhaseMode mode)
+{
+    currentResamplingPhaseMode.store(mode, std::memory_order_release);
+    requestDebouncedRebuild();
+}
+
+ConvolverProcessor::ResamplingPhaseMode ConvolverProcessor::getResamplingPhaseMode() const
+{
+    return currentResamplingPhaseMode.load(std::memory_order_acquire);
+}
+
 void ConvolverProcessor::refreshLatency()
 {
     auto* conv = convolution.load(std::memory_order_acquire);
@@ -3848,9 +3926,12 @@ void ConvolverProcessor::refreshLatency()
         totalLatency = static_cast<double>(juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY));
     }
 
-    // [Issue 2 fix] Audio Thread に更新を委譲。
+    // Audio Thread に遅延値の更新を委譲（即時リセット用）
     pendingLatencyValue.store(totalLatency, std::memory_order_release);
     latencyResetPending.store(true, std::memory_order_release);
+
+    // IR 切り替え時の遅延ジャンプをクロスフェードに統合するためのフラグ
+    latencyChangeRequested.store(true, std::memory_order_release);
 }
 
 //--------------------------------------------------------------
@@ -3961,6 +4042,24 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     {
         const double val = pendingLatencyValue.load(std::memory_order_acquire);
         latencySmoother.setCurrentAndTargetValue(val);
+    }
+
+    // IR切り替え時の遅延ジャンプをクロスフェードに統合する。
+    // latencyChangeRequested は refreshLatency() がセットし、ここで消費する。
+    // 遅延変化が 2 サンプル以上かつクロスフェード非進行中のときのみ開始する。
+    if (latencyChangeRequested.exchange(false, std::memory_order_acq_rel))
+    {
+        const double newTarget = pendingLatencyValue.load(std::memory_order_acquire);
+        if (std::abs(latencySmoother.getTargetValue() - newTarget) >= 2.0)
+        {
+            if (!crossfadeGain.isSmoothing())
+            {
+                oldDelay = latencySmoother.getCurrentValue();
+                latencySmoother.setTargetValue(newTarget);
+                crossfadeGain.setCurrentAndTargetValue(0.0);
+                crossfadeGain.setTargetValue(1.0);
+            }
+        }
     }
 
     // [Bug 1' fix] mixSmoother ペンディングリセットの処理。

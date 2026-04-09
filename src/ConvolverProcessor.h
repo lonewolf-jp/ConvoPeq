@@ -70,6 +70,17 @@ public:
         Minimum = 2
     };
 
+    // リサンプリング時の位相モード（r8brain CDSPResampler24IR 用）
+    // Linear : 科学的に正確な線形位相（測定・ミキシング用途）
+    // Minimum: アタック保持・自然な聴感（音楽用途）
+    enum class ResamplingPhaseMode {
+        Linear,   // デフォルト: 位相的に正確
+        Minimum   // Minimum phase: トランジェント保持
+    };
+
+    void setResamplingPhaseMode(ResamplingPhaseMode mode);
+    ResamplingPhaseMode getResamplingPhaseMode() const;
+
     class Listener
     {
     public:
@@ -596,6 +607,12 @@ private:
     // このフラグと値を使用して Audio Thread に更新を委譲する。
     std::atomic<bool> latencyResetPending { false };
     std::atomic<double> pendingLatencyValue { 0.0 };
+    // IR切り替え時の遅延ジャンプをクロスフェードに統合するためのフラグ。
+    // refreshLatency() がセットし、process() がクロスフェード開始前に消費する。
+    std::atomic<bool> latencyChangeRequested { false };
+    // リサンプリング位相モード（r8brain CDSPResampler24IR に渡す）
+    // Message Thread からのみ更新、LoaderThread が読む（memory_order_acquire）
+    std::atomic<ResamplingPhaseMode> currentResamplingPhaseMode { ResamplingPhaseMode::Linear };
     // RCU経路でもUIがレイテンシー表示できるように、直近の内訳を保持する。
     std::atomic<int> uiAlgorithmLatencySamples { 0 };
     std::atomic<int> uiIrPeakLatencySamples { 0 };
