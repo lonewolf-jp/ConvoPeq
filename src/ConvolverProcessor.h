@@ -41,6 +41,7 @@
 #include "SafeStateSwapper.h"
 #include "DeferredFreeThread.h"
 #include "PreparedIRState.h"
+#include "DeferredDeletionQueue.h"
 #include "ConvolverRuntime.h"
 
 class IRConverter;
@@ -150,6 +151,10 @@ public:
 
     ConvolverProcessor();
     ~ConvolverProcessor();
+
+    // RCU リーダー (Audio Thread のみ)
+    void enterReader();
+    void exitReader();
 
     //----------------------------------------------------------
     // 準備（Audio Thread開始前）
@@ -448,17 +453,8 @@ private:
             if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
         }
 
-        // Intrusive Reference Counting
-        mutable std::atomic<int> refCount { 0 };
-        void addRef() const { refCount.fetch_add(1, std::memory_order_relaxed); }
-        void release() const
-        {
-            if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
-            {
-                this->~StereoConvolver();
-                convo::aligned_free(const_cast<StereoConvolver*>(this));
-            }
-        }
+        // RCU ベースのライフタイム管理 (参照カウントは使用しない)
+        // 解放は retireStereoConvolver() を使用すること
 
         // コピーコンストラクタは禁止 (NUCエンジンは複製コストが高く、状態を持つため)
         StereoConvolver(const StereoConvolver& other) = delete;
@@ -642,6 +638,7 @@ private:
     static constexpr int FADE_SAMPLES = 2048;
     struct RampPoint { double active; double fading; };
     std::vector<RampPoint> crossfadeRamp; // size = FADE_SAMPLES, 構築時に計算
+    int currentFadeSamples = FADE_SAMPLES;
 
     // 等パワークロスフェード用バッファ (prepareToPlay で確保)
     convo::ScopedAlignedPtr<double> activeBufferL, activeBufferR;
@@ -833,6 +830,16 @@ private:
     std::atomic<size_t> maxCacheEntries { 10 };
     std::atomic<uint64_t> activeCacheKey { 0 };
     std::atomic<int> activeCacheFFTSize { 0 };
+
+    // RCU 管理 (StereoConvolver 用, 単一リーダー)
+#pragma warning(push)
+#pragma warning(disable: 4324) // 「構造体がパッドされました」を無視
+    std::atomic<uint64_t> globalEpoch { 1 };
+    alignas(64) std::atomic<uint64_t> readerEpoch { 0 };
+#pragma warning(pop)
+    std::atomic<bool> firstProcessCall { true };
+
+    static void retireStereoConvolver(StereoConvolver* conv, uint64_t retireEpoch);
 
     // ── Phase 0: Epoch-based RCU メンバー ──
     // SafeStateSwapper: IR 状態の lock-free swap と retired キュー管理

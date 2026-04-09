@@ -82,9 +82,6 @@ juce::AudioBuffer<double> resampleIR(
     for (auto& f : futures) f.wait();
 
     resampled.setSize(numCh, maxOutLen, true, true, true);
-    // DCゲイン保存（エネルギー保存のため）
-    if (ratio > 0.0)
-        resampled.applyGain(1.0 / ratio);
 
     return resampled;
 }

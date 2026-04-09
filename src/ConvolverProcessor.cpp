@@ -23,6 +23,7 @@
 #include "IRConverter.h"
 #include "CacheManager.h"
 #include "ProgressiveUpgradeThread.h"
+#include "DeferredDeletionQueue.h"
 
 #include <mkl.h>
 #include <mkl_vml.h>
@@ -41,6 +42,30 @@ void ConvolverProcessor::overflowCallbackThunk(void* userData) noexcept
                                                     std::memory_order_acq_rel,
                                                     std::memory_order_relaxed);
     // compare_exchange_strong はロックフリー atomic RMW。メモリ確保・待機絶対禁止。
+}
+
+void ConvolverProcessor::enterReader()
+{
+    const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
+    readerEpoch.store(epoch, std::memory_order_release);
+}
+
+void ConvolverProcessor::exitReader()
+{
+    readerEpoch.store(0, std::memory_order_release);
+}
+
+void ConvolverProcessor::retireStereoConvolver(StereoConvolver* conv, uint64_t retireEpoch)
+{
+    if (conv == nullptr)
+        return;
+
+    g_deletionQueue.enqueue(conv, [](void* p)
+    {
+        auto* sc = static_cast<StereoConvolver*>(p);
+        sc->~StereoConvolver();
+        convo::aligned_free(sc);
+    }, retireEpoch);
 }
 
 namespace
@@ -628,7 +653,8 @@ public:
         // 非同期成功時は result.finalizeQueued で判定する。
         if (result.newConv)
         {
-            result.newConv->release();
+            result.newConv->~StereoConvolver();
+            convo::aligned_free(result.newConv);
             result.newConv = nullptr;
         }
 
@@ -1094,7 +1120,6 @@ public:
                 void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
                 new (mem) StereoConvolver();
                 result.newConv = static_cast<StereoConvolver*>(mem);
-                result.newConv->addRef();
 
                 if (result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency,
                                          sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize, result.scaleFactor,
@@ -1105,7 +1130,8 @@ public:
                 }
                 else
                 {
-                    result.newConv->release();
+                    result.newConv->~StereoConvolver();
+                    convo::aligned_free(result.newConv);
                     result.newConv = nullptr;
                     result.success = false;
                     result.errorMessage = "Failed to initialize NUC engine (Memory allocation or MKL setup failed).";
@@ -1152,29 +1178,23 @@ public:
 
                 if (!queued)
                 {
-                    juce::MessageManagerLock mmLock;
-                    bool fallbackSucceeded = false;
-                    if (mmLock.lockWasGained())
+                    juce::Logger::writeToLog("LoaderThread: callAsync failed, aborting IR load");
+                    result.errorMessage = "Internal message queue full, cannot complete IR load";
+
+                    if (result.newConv)
                     {
-                        if (auto* ownerPtr = this->weakOwner.get())
-                        {
-                            ownerPtr->finalizeNUCEngineOnMessageThread(std::move(state->irL),
-                                                                       std::move(state->irR),
-                                                                       result.targetLength, sampleRate, irPeakLatency,
-                                                                       sizing.maxFFTSize, internalBlockSize,
-                                                                       sizing.firstPartition, blockSize,
-                                                                       isRebuild, file,
-                                                                       result.scaleFactor, state->loadedIR, state->displayIR);
-                            fallbackSucceeded = true;
-                        }
-                    }
-                    // If both callAsync and the fallback lock failed, ensure any allocated
-                    // StereoConvolver is released (defensive cleanup).
-                    if (!fallbackSucceeded && result.newConv != nullptr)
-                    {
-                        result.newConv->release();
+                        result.newConv->~StereoConvolver();
+                        convo::aligned_free(result.newConv);
                         result.newConv = nullptr;
                     }
+
+                    juce::MessageManager::callAsync([weakOwner = this->weakOwner, errorMsg = result.errorMessage]()
+                    {
+                        if (auto* ownerPtr = weakOwner.get())
+                            ownerPtr->handleLoadError(errorMsg);
+                    });
+
+                    return result;
                 }
 
                 result.finalizeQueued = true; // run() の FlagResetter フォールバックを抑止
@@ -1216,7 +1236,11 @@ public:
         else
         {
             // [FIX] Clean up leaked StereoConvolver if load failed or cancelled
-            if (result.newConv) result.newConv->release();
+            if (result.newConv)
+            {
+                result.newConv->~StereoConvolver();
+                convo::aligned_free(result.newConv);
+            }
         }
     }
 private:
@@ -1244,10 +1268,10 @@ ConvolverProcessor::ConvolverProcessor()
     irConverter = std::make_unique<IRConverter>();
 
     // 等パワークロスフェード用ランプの事前計算
-    crossfadeRamp.resize(FADE_SAMPLES);
-    for (int i = 0; i < FADE_SAMPLES; ++i)
+    crossfadeRamp.resize(currentFadeSamples);
+    for (int i = 0; i < currentFadeSamples; ++i)
     {
-        const double angle = static_cast<double>(i) / (FADE_SAMPLES - 1)
+        const double angle = static_cast<double>(i) / (currentFadeSamples - 1)
                              * juce::MathConstants<double>::pi / 2.0;
         crossfadeRamp[i].active = std::sin(angle); // 0 → 1 (新IR フェードイン)
         crossfadeRamp[i].fading = std::cos(angle); // 1 → 0 (旧IR フェードアウト)
@@ -1270,8 +1294,23 @@ ConvolverProcessor::~ConvolverProcessor()
     forceCleanup();
     // スレッドを停止
     activeLoader.reset();
-    convolution.store(nullptr);
-    if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
+
+    const uint64_t retireEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
+    auto* oldConv = convolution.exchange(nullptr, std::memory_order_release);
+    if (activeConvolution && activeConvolution != oldConv)
+        retireStereoConvolver(activeConvolution, retireEpoch);
+    activeConvolution = nullptr;
+    if (oldConv)
+        retireStereoConvolver(oldConv, retireEpoch);
+
+    if (auto* fading = fadingOutConvolution.exchange(nullptr, std::memory_order_acq_rel))
+        retireStereoConvolver(fading, retireEpoch);
+    if (prevInterruptedFade)
+    {
+        retireStereoConvolver(prevInterruptedFade, retireEpoch);
+        prevInterruptedFade = nullptr;
+    }
+    g_deletionQueue.reclaim(std::numeric_limits<uint64_t>::max());
 
     if (fftHandle) {
         DftiFreeDescriptor(&fftHandle);
@@ -1308,9 +1347,16 @@ void ConvolverProcessor::timerCallback()
     // 中断されたフェードのコンボルバーをここで解放する (前回 timerCallback から ≥30ms 経過)
     if (prevInterruptedFade)
     {
-        prevInterruptedFade->release();
+        const uint64_t retireEpoch = globalEpoch.load(std::memory_order_acquire) - 1;
+        retireStereoConvolver(prevInterruptedFade, retireEpoch);
         prevInterruptedFade = nullptr;
     }
+
+    const uint64_t reader = readerEpoch.load(std::memory_order_acquire);
+    const uint64_t safeEpoch = (reader == 0)
+        ? globalEpoch.load(std::memory_order_acquire)
+        : reader;
+    g_deletionQueue.reclaim(safeEpoch);
 
     cleanup();
 }
@@ -1369,7 +1415,6 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
                 new (mem) StereoConvolver();
                 newConv = static_cast<StereoConvolver*>(mem);
-                newConv->addRef();
 
                 convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
                 convo::ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
@@ -1383,16 +1428,20 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                                   experimentalDirectHeadEnabled.load(std::memory_order_acquire),
                                   nullptr, this))
                 {
-                    convolution.store(newConv, std::memory_order_release);
-
-                    if (activeConvolution)
-                        activeConvolution->release();
+                    const uint64_t newEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+                    const uint64_t retireEpoch = newEpoch - 1;
+                    auto* oldConv = convolution.exchange(newConv, std::memory_order_release);
+                    if (activeConvolution && activeConvolution != oldConv)
+                        retireStereoConvolver(activeConvolution, retireEpoch);
+                    if (oldConv)
+                        retireStereoConvolver(oldConv, retireEpoch);
                     activeConvolution = newConv;
                 }
                 else
                 {
                     juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: NUC re-init failed (MKL alloc?). Keeping existing engine.");
-                    newConv->release();
+                    newConv->~StereoConvolver();
+                    convo::aligned_free(newConv);
                     newConv = nullptr;
                 }
             }
@@ -1401,7 +1450,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 // [Bug 5 fix] 例外発生時に newConv (refCount=1) を確実に解放する。
                 if (newConv != nullptr)
                 {
-                    newConv->release();
+                    newConv->~StereoConvolver();
+                    convo::aligned_free(newConv);
                     newConv = nullptr;
                 }
                 juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: NUC re-init failed (std::bad_alloc). Keeping existing engine.");
@@ -1522,6 +1572,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     // フェード状態をリセット
     fadeState = FadeState{};
+    fadeState.accumulatedSamples = currentFadeSamples;
     clearFadingPending.store(false, std::memory_order_release);
 
     // Wetバッファ確保
@@ -1578,6 +1629,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         deferredFreeThread = std::make_unique<DeferredFreeThread>(rcuSwapper);
     }
 
+    firstProcessCall.store(true, std::memory_order_release);
+    currentFadeSamples = juce::jlimit(1024, 8192, static_cast<int>(sampleRate * 0.02));
+    crossfadeRamp.resize(currentFadeSamples);
+    for (int i = 0; i < currentFadeSamples; ++i)
+    {
+        const double angle = static_cast<double>(i) / (currentFadeSamples - 1)
+                             * juce::MathConstants<double>::pi / 2.0;
+        crossfadeRamp[i].active = std::sin(angle);
+        crossfadeRamp[i].fading = std::cos(angle);
+    }
+    fadeState.accumulatedSamples = currentFadeSamples;
+
     isPrepared.store(true, std::memory_order_release);
 }
 
@@ -1612,7 +1675,11 @@ void ConvolverProcessor::releaseResources()
     fadeState = FadeState{};
     clearFadingPending.store(false, std::memory_order_release);
 
-    if (prevInterruptedFade) { prevInterruptedFade->release(); prevInterruptedFade = nullptr; }
+    if (prevInterruptedFade)
+    {
+        retireStereoConvolver(prevInterruptedFade, globalEpoch.load(std::memory_order_acquire));
+        prevInterruptedFade = nullptr;
+    }
 
     smoothingBufferStorage[0].reset();
     smoothingBufferStorage[1].reset();
@@ -1631,10 +1698,16 @@ void ConvolverProcessor::releaseResources()
     }
 
     // Release active convolution engine
-    convolution.store(nullptr, std::memory_order_release);
-    if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
-    auto* fading = fadingOutConvolution.exchange(nullptr);
-    if (fading) fading->release();
+    const uint64_t retireEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
+    auto* oldConv = convolution.exchange(nullptr, std::memory_order_release);
+    if (activeConvolution && activeConvolution != oldConv)
+        retireStereoConvolver(activeConvolution, retireEpoch);
+    activeConvolution = nullptr;
+    if (oldConv)
+        retireStereoConvolver(oldConv, retireEpoch);
+    auto* fading = fadingOutConvolution.exchange(nullptr, std::memory_order_acq_rel);
+    if (fading)
+        retireStereoConvolver(fading, retireEpoch);
 
     // ── Phase 0: DeferredFreeThread の停止と残余解放 ──
     // Audio Thread が停止した後にこの関数が呼ばれる保証があるため、
@@ -1645,6 +1718,8 @@ void ConvolverProcessor::releaseResources()
     // rcuSwapper に残っているエントリも念のため強制解放
     while (auto* ptr = rcuSwapper.tryReclaim(std::numeric_limits<uint64_t>::max()))
         delete ptr;
+
+    g_deletionQueue.reclaim(std::numeric_limits<uint64_t>::max());
 
     runtime.clear();
 
@@ -3247,7 +3322,11 @@ void ConvolverProcessor::forceCleanup()
     // The blocking cleanup of LoaderThreads is handled by the destructor.
 
     // 中断されたフェードを即時解放
-    if (prevInterruptedFade) { prevInterruptedFade->release(); prevInterruptedFade = nullptr; }
+    if (prevInterruptedFade)
+    {
+        retireStereoConvolver(prevInterruptedFade, globalEpoch.load(std::memory_order_acquire));
+        prevInterruptedFade = nullptr;
+    }
     if (clearFadingPending.exchange(false, std::memory_order_acq_rel))
         clearFadingSnapshot();
 
@@ -3845,8 +3924,13 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     // クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
     // SCはDSPCore::prepare()内のprepareToPlay、またはrebuildAllIRsSynchronousで生成する
     // activeConvolution / convolution はnullptrのままにする
-    convolution.store(nullptr, std::memory_order_release);
-    if (activeConvolution) { activeConvolution->release(); activeConvolution = nullptr; }
+    const uint64_t retireEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
+    auto* oldConv = convolution.exchange(nullptr, std::memory_order_release);
+    if (activeConvolution && activeConvolution != oldConv)
+        retireStereoConvolver(activeConvolution, retireEpoch);
+    activeConvolution = nullptr;
+    if (oldConv)
+        retireStereoConvolver(oldConv, retireEpoch);
 }
 
 void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
@@ -3884,14 +3968,25 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
 
 void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& other)
 {
-    // Share the active convolution engine (Shared Pointer copy)
+    // 所有権共有を避けるため clone を作成して保持する
     auto* otherConv = other.convolution.load(std::memory_order_acquire);
-    if (otherConv) otherConv->addRef();
-    convolution.store(otherConv, std::memory_order_release);
+    if (otherConv == nullptr)
+        return;
 
-    if (activeConvolution)
-        activeConvolution->release();
-    activeConvolution = otherConv;
+    auto* clonedConv = otherConv->clone();
+    if (clonedConv == nullptr)
+        return;
+
+    const uint64_t newEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const uint64_t retireEpoch = newEpoch - 1;
+    auto* oldConv = convolution.exchange(clonedConv, std::memory_order_release);
+
+    if (activeConvolution && activeConvolution != oldConv)
+        retireStereoConvolver(activeConvolution, retireEpoch);
+    if (oldConv)
+        retireStereoConvolver(oldConv, retireEpoch);
+
+    activeConvolution = clonedConv;
 
     irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
     uiAlgorithmLatencySamples.store(other.uiAlgorithmLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
@@ -3945,9 +4040,17 @@ void ConvolverProcessor::refreshLatency()
 //--------------------------------------------------------------
 void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
+    enterReader();
+    struct ReaderGuard
+    {
+        ConvolverProcessor& owner;
+        ~ReaderGuard() { owner.exitReader(); }
+    } readerGuard{ *this };
+
     if (!isPrepared.load(std::memory_order_acquire))
     {
-        block.clear();
+        if (firstProcessCall.exchange(false, std::memory_order_acq_rel))
+            block.clear();
         return;
     }
 
@@ -3984,7 +4087,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         clearFadingPending.store(false, std::memory_order_release);
     }
 
-    const bool isCrossfading = (oldConv != nullptr && fadeState.accumulatedSamples < FADE_SAMPLES);
+    const bool isCrossfading = (oldConv != nullptr && fadeState.accumulatedSamples < currentFadeSamples);
     const bool wetTransitionActive = isCrossfading;
 
     // バイパス、未準備、IR未ロードの場合はスルー
@@ -4105,7 +4208,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // クロスフェード有効サンプル数 (このブロックでのフェード進捗分)
     const int crossfadeSamplesInBlock = isCrossfading
-        ? juce::jmin(numSamples, FADE_SAMPLES - fadeState.accumulatedSamples)
+        ? juce::jmin(numSamples, currentFadeSamples - fadeState.accumulatedSamples)
         : 0;
     const int fadeStartInRamp = fadeState.accumulatedSamples;
     // ── Step 5: Dry信号生成 ──
@@ -4563,7 +4666,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (isCrossfading)
     {
         fadeState.accumulatedSamples += crossfadeSamplesInBlock;
-        if (fadeState.accumulatedSamples >= FADE_SAMPLES)
+        if (fadeState.accumulatedSamples >= currentFadeSamples)
         {
             // フェード完了: Message Thread に解放を要求
             clearFadingPending.store(true, std::memory_order_release);
@@ -4909,7 +5012,6 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
         new (mem) StereoConvolver();
         auto* newConv = static_cast<StereoConvolver*>(mem);
-        newConv->addRef();
 
         convo::FilterSpec spec;
         spec.sampleRate = sr;
@@ -4930,7 +5032,8 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         }
         else
         {
-            newConv->release();
+            newConv->~StereoConvolver();
+            convo::aligned_free(newConv);
             handleLoadError("Failed to initialize NUC engine (Memory allocation or MKL setup failed).");
         }
     }
@@ -4949,6 +5052,10 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
                                        double scaleFactor,
                                        std::shared_ptr<juce::AudioBuffer<double>> displayIR)
 {
+    const uint64_t newEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const uint64_t retireEpoch = newEpoch - 1;
+    auto* oldConv = convolution.exchange(newConv, std::memory_order_release);
+
     // 元データの更新 (新規ロード時のみ)
     if (!isRebuild)
     {
@@ -4972,9 +5079,6 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     auto* convToFadeOut = activeConvolution;
     activeConvolution = newConv;
 
-    // Audio Thread が新しいコンボルバーを参照するようにアトミックに更新
-    convolution.store(newConv, std::memory_order_release);
-
     // 古いコンボルバーがあれば等パワークロスフェードを開始する。
     // NOTE: fadingOutConvolution は Audio Thread が次のブロックで load() するため、
     //       このストアよりも後のブロックから新フェードが始まる。
@@ -4983,16 +5087,18 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     {
         // 既に別のクロスフェードが進行中だった場合、その古いエンジンを
         // prevInterruptedFade に退避し、次の timerCallback で解放する。
-        auto* interruptedFade = fadingOutConvolution.exchange(convToFadeOut);
+        auto* interruptedFade = fadingOutConvolution.exchange(convToFadeOut, std::memory_order_acq_rel);
         if (interruptedFade != nullptr)
         {
-            // 前の中断フェードがまだ残っている場合は即時解放
-            // (timerCallback が2回連続で来る前に applyNewState が呼ばれた稀なケース)
-            if (prevInterruptedFade) prevInterruptedFade->release();
+            if (prevInterruptedFade)
+                retireStereoConvolver(prevInterruptedFade, retireEpoch);
             prevInterruptedFade = interruptedFade;
         }
         clearFadingPending.store(false, std::memory_order_release);
     }
+
+    if (oldConv != nullptr && oldConv != convToFadeOut)
+        retireStereoConvolver(oldConv, retireEpoch);
 
     irLength.store(targetLength, std::memory_order_release);
     currentSampleRate.store(loadedSR, std::memory_order_release);
@@ -5020,7 +5126,11 @@ void ConvolverProcessor::clearFadingSnapshot()
 {
     auto* doneFading = fadingOutConvolution.exchange(nullptr, std::memory_order_acq_rel);
     if (doneFading)
-        doneFading->release();
+    {
+        const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
+        const uint64_t retireEpoch = (epoch > 0) ? (epoch - 1) : 0;
+        retireStereoConvolver(doneFading, retireEpoch);
+    }
 }
 
 void ConvolverProcessor::evictOldestCacheEntry()
