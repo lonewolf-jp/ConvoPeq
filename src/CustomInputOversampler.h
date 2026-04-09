@@ -15,6 +15,9 @@ public:
         LinearPhase
     };
 
+    static constexpr bool isLinearPhaseFIR = true;
+    static constexpr bool isSymmetricUpDown = true;
+
     CustomInputOversampler() = default;
     ~CustomInputOversampler();
 

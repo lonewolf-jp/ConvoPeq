@@ -282,9 +282,15 @@ namespace
         }
     }
 
-    inline double estimateOversamplingLatencySamples(int oversamplingFactor, AudioEngine::OversamplingType oversamplingType) noexcept
+    static_assert(CustomInputOversampler::isLinearPhaseFIR
+                  && CustomInputOversampler::isSymmetricUpDown,
+                  "Oversampling latency formula assumes symmetric linear-phase FIR with identical up/down taps");
+
+    inline double estimateOversamplingLatencySamplesImpl(int oversamplingFactor,
+                                                         AudioEngine::OversamplingType oversamplingType,
+                                                         double baseSampleRate) noexcept
     {
-        if (oversamplingFactor <= 1)
+        if (oversamplingFactor <= 1 || baseSampleRate <= 0.0)
             return 0.0;
 
         const int numStages = (oversamplingFactor == 8) ? 3 : ((oversamplingFactor == 4) ? 2 : ((oversamplingFactor == 2) ? 1 : 0));
@@ -296,15 +302,16 @@ namespace
         static constexpr int linearPhaseTaps[3] = { 1023, 255, 63 };
         taps = (oversamplingType == AudioEngine::OversamplingType::LinearPhase) ? linearPhaseTaps : iirLikeTaps;
 
-        double latencySamples = 0.0;
+        double totalLatencyBaseSamples = 0.0;
         for (int stage = 0; stage < numStages; ++stage)
         {
-            const double stageGroupDelay = static_cast<double>(taps[stage] - 1) * 0.5;
-            const double baseRateWeight = 1.0 / static_cast<double>(1 << (stage + 1));
-            latencySamples += stageGroupDelay * baseRateWeight;
+            const double stageRate = baseSampleRate * static_cast<double>(1 << (stage + 1));
+            const double groupDelaySamplesAtStageRate = static_cast<double>(taps[stage] - 1); // up + down
+            const double delayBaseSamples = groupDelaySamplesAtStageRate * (baseSampleRate / stageRate);
+            totalLatencyBaseSamples += delayBaseSamples;
         }
 
-        return latencySamples;
+        return totalLatencyBaseSamples;
     }
 
     inline void applyGainRamp(double* __restrict data, int numSamples,
@@ -1497,6 +1504,13 @@ int AudioEngine::getCurrentLatencySamples() const
     return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
 }
 
+double AudioEngine::estimateOversamplingLatencySamples(int oversamplingFactor,
+                                                       OversamplingType oversamplingType,
+                                                       double baseSampleRate) noexcept
+{
+    return estimateOversamplingLatencySamplesImpl(oversamplingFactor, oversamplingType, baseSampleRate);
+}
+
 int AudioEngine::getTotalLatencySamples() const
 {
     return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
@@ -1523,7 +1537,8 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
     breakdown.oversamplingLatencyBaseRateSamples = juce::jmax(0,
         static_cast<int>(std::lround(estimateOversamplingLatencySamples(
             safeOsFactor,
-            oversamplingType.load(std::memory_order_acquire)))));
+            oversamplingType.load(std::memory_order_acquire),
+            currentSampleRate.load(std::memory_order_acquire)))));
 
     if (!convBypassActive.load(std::memory_order_relaxed))
     {

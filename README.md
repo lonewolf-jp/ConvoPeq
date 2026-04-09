@@ -3,68 +3,20 @@
 
 ---
 
-## New in v0.6.0
+## New in v0.6.1
 
-### Main Changes in v0.6.0
+### Main Changes in v0.6.1
 
-This release is centered on a major redesign of the convolver pipeline and the systems around it. The changes are not just feature additions on top of the existing convolver. They reshape how IR data is prepared, swapped, optimized, visualized, and integrated with the rest of the application.
+This update summarizes the source-code changes from commit 08dfe14 to the current state.
 
----
+- The audio-engine and convolver lifetime model was reworked around safer deferred-release and RCU-style state handoff patterns, reducing the risk of blocking, use-after-free, and disruptive runtime swaps.
+- The convolution pipeline was strengthened with safer IR rebuild handling, generation-based invalidation, progressive upgrade support, dynamic crossfades, and more defensive buffer allocation/error paths.
+- The FFT/convolution backend was modernized with pre-initialized real-time-oriented setup and additional warmup paths to reduce first-use latency and improve runtime stability.
+- EQ and related DSP paths were cleaned up to rely on safer state exchange and precomputed coefficient tables, reducing callback-time work and simplifying resource ownership.
+- UI and host integration were improved with better latency reporting, a resampling phase-mode control for IR workflows, and smaller fixes in analyzer and noise-shaper related components.
+- Build/runtime initialization was tightened so required compiler and SDK environments are validated earlier, while project metadata and documentation were updated to match the current release.
 
-## 1. Convolver Internal State Management Redesign
-
-The largest change is the way IR data is loaded, converted, and swapped into the runtime engine. Instead of relying on a simple direct-update model, the system now prepares new convolution states off the audio thread and switches them in safely when they are ready.
-
-This redesign introduces RCU-style state swapping, generation tracking, deferred destruction, caching, and progressive upgrade paths. In practice, that means IR rebuilds can continue without stalling the audio thread, allowing the application to keep processing audio while new convolution states are being prepared in the background.
-
-The core files behind this redesign are:
-
-- ConvolverProcessor.h
-- ConvolverState.h
-- SafeStateSwapper.h
-- PreparedIRState.h
-- CacheManager.h
-- ProgressiveUpgradeThread.h
-
-In short, the convolver architecture has been moved decisively toward a model where expensive work is prepared asynchronously and activated safely, rather than being handled in a more immediate and disruptive way.
-
----
-
-## 2. Mixed Phase Conversion Elevated into a Full Optimization Feature
-
-The second major pillar of this release is the expansion of Mixed Phase processing into a full optimization pipeline.
-
-Instead of treating Mixed Phase as a simple variation of the phase mode, the implementation now builds a target phase response from the linear-phase IR and the minimum-phase IR, derives a target group delay profile from that result, and then approximates it using cascaded allpass sections.
-
-To support this, a dedicated allpass design layer and a CMA-ES-based optimizer were added, together with a progress display component for long-running optimization tasks. The key files are:
-
-- AllpassDesigner.h
-- CmaEsOptimizerDynamic.h
-- MixedPhaseOptimizationComponent.h
-
-This means Mixed Phase is no longer just an internal transformation step. It has become a fully fledged optimization feature with explicit design targets, a real search strategy, and visible progress reporting when needed.
-
----
-
-## 3. Surrounding Systems Reorganized to Support the New Architecture
-
-Once the convolver and Mixed Phase pipeline became this sophisticated, the surrounding systems also had to be reworked. As a result, AudioEngine, UI components, build definitions, and supporting DSP layers were updated together rather than in isolation.
-
-On the engine side, convolver state handling, latency reporting, processing-order coordination, and analyzer integration were tightened up. In particular, latency breakdown reporting in AudioEngine.h was strengthened so the UI can reflect the runtime state more accurately.
-
-On the UI side, new controls and windows were added so that the new functionality is actually operable. Examples include the Optimization Progress button in ConvolverControlPanel.h and the dedicated ConvolverSettingsComponent.h panel for cache and progressive-upgrade related controls.
-
-The build system was also updated so the new source files are first-class parts of the project, rather than side additions. CMakeLists.txt now explicitly includes the new convolver-related modules and the associated build flow has been reinforced.
-
-Taken together, these changes should be understood not as isolated convolver improvements, but as a coordinated reorganization of the surrounding application to support a more advanced convolver architecture.
-
----
-
-### Summary
-
-The changes in this period can be summarized in one sentence:
-
-ConvoPeq’s convolver has been rebuilt into a production-oriented engine based on real-time-safe state swapping, caching, and progressive upgrades, then extended with a CMA-ES-driven Mixed Phase optimization pipeline, with AudioEngine, UI, build configuration, and supporting DSP systems reorganized around that new architecture.
+In short, this period focused on making the core DSP pipeline more production-ready: safer state transitions, more predictable real-time behavior, and tighter integration between the engine, convolver workflow, UI, and build system.
 
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 

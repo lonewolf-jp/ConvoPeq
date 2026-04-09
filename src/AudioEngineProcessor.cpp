@@ -62,6 +62,7 @@ void AudioEngineProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     {
         setLatencySamples(newLatency);
         lastLatency = newLatency;
+        updateHostDisplay();
     }
     juce::AudioSourceChannelInfo info(&buffer, 0, buffer.getNumSamples());
     audioEngine.getNextAudioBlock(info);
@@ -75,6 +76,7 @@ void AudioEngineProcessor::processBlock(juce::AudioBuffer<double>& buffer, juce:
     {
         setLatencySamples(newLatency);
         lastLatency = newLatency;
+        updateHostDisplay();
     }
     audioEngine.processBlockDouble(buffer);
 }

@@ -310,6 +310,14 @@ public:
         bool directHeadActive = false;
     };
 
+    struct LatencySnapshot
+    {
+        int32_t algorithmLatencySamples = 0;
+        int32_t irPeakLatencySamples = 0;
+        int32_t totalLatencySamples = 0;
+        bool hasParallelDryPath = false;
+    };
+
     LatencyBreakdown getLatencyBreakdown() const;
     int getLatencySamples() const;
     int getTotalLatencySamples() const;
@@ -387,6 +395,9 @@ public:
 private:
     void timerCallback() override;
     void postCoalescedChangeNotification();
+    void updateLatencyCache() noexcept;
+    void requestHostDisplayUpdate();
+    void debugCheckAtomicLockFree() const;
     void requestDebouncedRebuild();
     // リングバッファオーバーフロー通知コールバック (Audio Thread 安全; 生関数ポインタ)
     // MKLNonUniformConvolver::ringWrite() からオーバーフロー時に呼び出される。
@@ -614,6 +625,10 @@ private:
     std::atomic<int> uiIrPeakLatencySamples { 0 };
     std::atomic<int> uiTotalLatencySamples { 0 };
     std::atomic<bool> uiDirectHeadActive { false };
+
+    std::atomic<LatencySnapshot> cachedLatency {};
+    std::atomic<bool> latencyChangePending { false };
+    int lastReportedLatency = -1;
 
     // ドップラー効果対策: クロスフェード用
     juce::SmoothedValue<double> crossfadeGain;

@@ -315,6 +315,10 @@ public:
     void setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLearner::State& inState) noexcept;
 
 private:
+    static double estimateOversamplingLatencySamples(int oversamplingFactor,
+                                                     OversamplingType oversamplingType,
+                                                     double baseSampleRate) noexcept;
+
     //----------------------------------------------------------
      // DSPコア (Audio Threadで実行される処理のコンテナ)
     //----------------------------------------------------------

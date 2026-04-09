@@ -1359,9 +1359,9 @@ void ConvolverControlPanel::updateIRInfo()
         else
             info += " [Auto]";
 
-        // A = algorithm latency, T = total latency (= algorithm + IR peak latency)
-        const int algorithmLatencySamples = convolver.getLatencySamples();
-        const int totalLatencySamples = convolver.getTotalLatencySamples();
+        const auto breakdown = convolver.getLatencyBreakdown();
+        const int algorithmLatencySamples = breakdown.algorithmLatencySamples;
+        const int totalLatencySamples = breakdown.totalLatencySamples;
 
         const auto toRoundedMsInt = [processingSampleRate](int samples) -> int
         {
@@ -1376,7 +1376,10 @@ void ConvolverControlPanel::updateIRInfo()
         const int algorithmMs = toRoundedMsInt(algorithmLatencySamples);
         const int totalMs = toRoundedMsInt(totalLatencySamples);
 
-        info += " Lat A: " + juce::String(algorithmMs) + "ms / T: " + juce::String(totalMs) + "ms";
+        if (breakdown.directHeadActive)
+            info += " (Dry: 0ms, Wet: " + juce::String(totalMs) + "ms)";
+        else
+            info += " Lat A: " + juce::String(algorithmMs) + "ms / T: " + juce::String(totalMs) + "ms";
 
         irInfoLabel.setText(info, juce::dontSendNotification);
         irInfoLabel.setColour(juce::Label::textColourId,

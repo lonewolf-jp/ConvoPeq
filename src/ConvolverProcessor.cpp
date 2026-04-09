@@ -138,24 +138,6 @@ static void shrinkToFit(juce::AudioBuffer<double>& buffer)
 }
 
 // ============================================================================
-// テールトリム（実質無効: -300dB）
-// ============================================================================
-static int findTailThreshold(const juce::AudioBuffer<double>& buf, double thresholdDB = -300.0) noexcept
-{
-    const double threshold = std::pow(10.0, thresholdDB / 20.0);
-    const int len = buf.getNumSamples();
-    for (int i = len - 1; i >= 0; --i)
-    {
-        double maxAbs = 0.0;
-        for (int ch = 0; ch < buf.getNumChannels(); ++ch)
-            maxAbs = std::max(maxAbs, std::abs(buf.getSample(ch, i)));
-        if (maxAbs > threshold)
-            return i + 1;
-    }
-    return 1;
-}
-
-// ============================================================================
 // リサンプリング結果の状態
 // ============================================================================
 enum class ResampleResult { Success, SilentIR, Cancelled, Error };
@@ -202,20 +184,11 @@ static ResampleOutput resampleIR(
     if (peak < 1e-12)
         return {{}, ResampleResult::SilentIR};
 
-    // 3. リサンプラ設定
+    // 3. リサンプラ設定（定数）
     constexpr double transBand     = 2.0;
     constexpr double stopBandAtten = 140.0;
 
-    // 4. 最大出力長を getMaxOutLen() で正確に取得
-    //    CDSPResampler::getMaxOutLen() はコンストラクタの MaxInLen に基づいて
-    //    最大出力サンプル数を返す（引数は無視される）。
-    const int maxOut = r8b::CDSPResampler(inputSR, targetSR, inLen,
-                                          transBand, stopBandAtten, phaseMode)
-                           .getMaxOutLen(0);
-    if (maxOut <= 0)
-        return {{}, ResampleResult::Error};
-
-    // 5. 全チャンネル処理＋実際の出力長を収集
+    // 4. 全チャンネル処理＋実際の出力長を収集
     std::vector<int>                 lengths(static_cast<size_t>(numCh));
     std::vector<std::vector<double>> chData (static_cast<size_t>(numCh));
     int maxLen = 0;
@@ -225,23 +198,50 @@ static ResampleOutput resampleIR(
         if (shouldExit && shouldExit())
             return {{}, ResampleResult::Cancelled};
 
-        // コンストラクタに inLen を渡すことでリサンプラが内部バッファを最適確保する
+        // リサンプラをチャンネルごとに作成（状態を分離）
         r8b::CDSPResampler resampler(inputSR, targetSR, inLen,
                                       transBand, stopBandAtten, phaseMode);
 
-        chData[static_cast<size_t>(ch)].resize(static_cast<size_t>(maxOut), 0.0);
+        // 同一インスタンスから最大出力長を取得（引数は無視されるが inLen を渡す）
+        const int maxOut = resampler.getMaxOutLen(inLen);
+        if (maxOut <= 0)
+            return {{}, ResampleResult::Error};
 
-        // oneshot(): 入力を一括処理し、レイテンシ補正済みの出力を op に書き込む。
-        // 戻り値なし（oplen に収まる分を書き込む）。
-        // 実際の有効長は maxOut で確定しているためそのまま使用する。
+        auto& buf = chData[static_cast<size_t>(ch)];
+        buf.resize(static_cast<size_t>(maxOut), 0.0);
+
         resampler.oneshot(
             inputIR.getReadPointer(ch),
             inLen,
-            chData[static_cast<size_t>(ch)].data(),
+            buf.data(),
             maxOut);
 
-        lengths[static_cast<size_t>(ch)] = maxOut;
-        maxLen = std::max(maxLen, maxOut);
+        // 実効 IR 長を推定（相対閾値 + 連続サンプル確認）
+        const int effectiveLen = [&buf, maxOut]() {
+            constexpr double TAIL_DB = -160.0;
+            double peak = 0.0;
+            for (int i = 0; i < maxOut; ++i)
+                peak = std::max(peak, std::abs(buf[i]));
+            if (peak < 1e-12)
+                return 1;
+
+            const double threshold = peak * std::pow(10.0, TAIL_DB / 20.0);
+            int consecutive = 0;
+            constexpr int MIN_CONSECUTIVE = 8;
+            for (int i = maxOut - 1; i >= 0; --i) {
+                if (std::abs(buf[i]) > threshold) {
+                    consecutive++;
+                    if (consecutive >= MIN_CONSECUTIVE)
+                        return i + MIN_CONSECUTIVE;
+                } else {
+                    consecutive = 0;
+                }
+            }
+            return 1;
+        }();
+
+        lengths[static_cast<size_t>(ch)] = effectiveLen;
+        maxLen = std::max(maxLen, effectiveLen);
     }
 
     // 6. 出力バッファ（全チャンネルを maxLen に統一してゼロパディング）
@@ -254,15 +254,14 @@ static ResampleOutput resampleIR(
         std::memcpy(result.getWritePointer(ch),
                     chData[static_cast<size_t>(ch)].data(),
                     static_cast<size_t>(copy) * sizeof(double));
+        // 余った領域はゼロのまま
     }
 
     // 7. ★ r8brain 出力に対する追加補正・ゲイン操作は一切行わない
-    //    (旧実装の applyGain(1.0/ratio) を削除)
 
-    // 8. テールトリム（-300dB: 実質無効）
-    const int tail = findTailThreshold(result, -300.0);
-    if (tail < result.getNumSamples())
-        result.setSize(result.getNumChannels(), tail, true, true, true);
+    // 8. 最終テールトリム（全チャンネル統一長を使用）
+    if (maxLen < result.getNumSamples())
+        result.setSize(result.getNumChannels(), maxLen, true, true, true);
 
     return { std::move(result), ResampleResult::Success };
 }
@@ -1063,30 +1062,60 @@ public:
                 }
             }
 
-            // 9.ピーク位置検出 (レイテンシー補正用)
-            // Linear Phaseの場合、ピークが遅れてやってくるため、その分Dryを遅らせる必要がある
-            // MinPhase変換に失敗した場合も、Linear Phaseとして扱う必要があるためピーク検出を行う
+            // 9. レイテンシー推定: エネルギー重心（99.9%範囲）
             int irPeakLatency = 0;
-            if (trimmed.getNumChannels() > 0)
-            {
-                if (phaseMode != ConvolverProcessor::PhaseMode::Minimum || !conversionSuccessful)
-                {
-                    // 全チャンネルの中で最大振幅を持つサンプルの位置を探す
-                    double maxMag = 0.0;
-                    for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
-                    {
-                        const double* data = trimmed.getReadPointer(ch);
-                        for (int i = 0; i < result.targetLength; ++i)
-                        {
-                            double mag = std::abs(data[i]);
-                            if (mag > maxMag)
-                            {
-                                maxMag = mag;
-                                irPeakLatency = i;
-                            }
+            if (trimmed.getNumChannels() > 0) {
+                constexpr double ENERGY_THRESHOLD = 0.999;
+                double maxCentroid = 0.0;
+
+                thread_local std::vector<double> energyBuffer;
+                const int length = result.targetLength;
+                const size_t needed = static_cast<size_t>(length);
+                if (energyBuffer.capacity() > needed * 4) {
+                    std::vector<double>().swap(energyBuffer);
+                    energyBuffer.reserve(needed);
+                }
+                if (energyBuffer.size() < needed)
+                    energyBuffer.resize(needed);
+
+                double* energy = energyBuffer.data();
+                for (int ch = 0; ch < trimmed.getNumChannels(); ++ch) {
+                    const double* data = trimmed.getReadPointer(ch);
+
+                    double totalEnergy = 0.0;
+                    for (int i = 0; i < length; ++i) {
+                        const double e = data[i] * data[i];
+                        energy[i] = e;
+                        totalEnergy += e;
+                    }
+                    if (totalEnergy < 1e-12)
+                        continue;
+
+                    double cumulative = 0.0;
+                    int cutoff = length - 1;
+                    for (int i = 0; i < length; ++i) {
+                        cumulative += energy[i];
+                        if (cumulative >= totalEnergy * ENERGY_THRESHOLD) {
+                            cutoff = i;
+                            break;
                         }
                     }
+
+                    double sumE = 0.0;
+                    double sumW = 0.0;
+                    for (int i = 0; i <= cutoff; ++i) {
+                        const double e = energy[i];
+                        sumE += e;
+                        sumW += static_cast<double>(i) * e;
+                    }
+
+                    const double centroid = (sumE > 0.0) ? (sumW / sumE) : 0.0;
+                    if (centroid > maxCentroid)
+                        maxCentroid = centroid;
                 }
+
+                irPeakLatency = static_cast<int>(std::floor(maxCentroid + 0.5));
+                irPeakLatency = juce::jlimit(0, result.targetLength - 1, irPeakLatency);
             }
 
             // IRデータを格納するアラインされたバッファを準備 (Rebuild用に保持)
@@ -1282,6 +1311,9 @@ ConvolverProcessor::ConvolverProcessor()
     {
         return this->isCacheEntrySafeToDelete(key, fftSize);
     });
+
+    updateLatencyCache();
+    debugCheckAtomicLockFree();
 }
 
 //--------------------------------------------------------------
@@ -1436,6 +1468,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                     if (oldConv)
                         retireStereoConvolver(oldConv, retireEpoch);
                     activeConvolution = newConv;
+                    updateLatencyCache();
                 }
                 else
                 {
@@ -1642,6 +1675,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     fadeState.accumulatedSamples = currentFadeSamples;
 
     isPrepared.store(true, std::memory_order_release);
+    updateLatencyCache();
+    requestHostDisplayUpdate();
 }
 
 void ConvolverProcessor::releaseResources()
@@ -3221,6 +3256,8 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
         uiIrPeakLatencySamples.store(irPeakLatency, std::memory_order_release);
         uiTotalLatencySamples.store(totalLatency, std::memory_order_release);
         uiDirectHeadActive.store(directHeadActive, std::memory_order_release);
+        updateLatencyCache();
+        requestHostDisplayUpdate();
     }
 
     // 2. 波形／スペクトルスナップショットの生成
@@ -3987,12 +4024,14 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
         retireStereoConvolver(oldConv, retireEpoch);
 
     activeConvolution = clonedConv;
+    cachedLatency.store(other.cachedLatency.load(std::memory_order_acquire), std::memory_order_release);
 
     irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
     uiAlgorithmLatencySamples.store(other.uiAlgorithmLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
     uiIrPeakLatencySamples.store(other.uiIrPeakLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
     uiTotalLatencySamples.store(other.uiTotalLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
     uiDirectHeadActive.store(other.uiDirectHeadActive.load(std::memory_order_acquire), std::memory_order_release);
+    requestHostDisplayUpdate();
 }
 
 void ConvolverProcessor::setResamplingPhaseMode(ResamplingPhaseMode mode)
@@ -4020,6 +4059,9 @@ void ConvolverProcessor::refreshLatency()
         uiDirectHeadActive.store(conv->storedDirectHeadEnabled, std::memory_order_release);
         totalLatency = static_cast<double>(juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY));
     }
+
+    updateLatencyCache();
+    requestHostDisplayUpdate();
 
     // Audio Thread に遅延値の更新を委譲（即時リセット用）
     pendingLatencyValue.store(totalLatency, std::memory_order_release);
@@ -4897,12 +4939,57 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
 
 int ConvolverProcessor::getLatencySamples() const
 {
-    return getLatencyBreakdown().algorithmLatencySamples;
+    return cachedLatency.load(std::memory_order_acquire).totalLatencySamples;
 }
 
 int ConvolverProcessor::getTotalLatencySamples() const
 {
-    return getLatencyBreakdown().totalLatencySamples;
+    return cachedLatency.load(std::memory_order_acquire).totalLatencySamples;
+}
+
+void ConvolverProcessor::updateLatencyCache() noexcept
+{
+    LatencySnapshot snap;
+    const auto breakdown = getLatencyBreakdown();
+    snap.algorithmLatencySamples = breakdown.algorithmLatencySamples;
+    snap.irPeakLatencySamples = breakdown.irPeakLatencySamples;
+    snap.totalLatencySamples = breakdown.totalLatencySamples;
+    snap.hasParallelDryPath = breakdown.directHeadActive;
+    cachedLatency.store(snap, std::memory_order_release);
+}
+
+void ConvolverProcessor::requestHostDisplayUpdate()
+{
+    const int total = cachedLatency.load(std::memory_order_acquire).totalLatencySamples;
+    if (total == lastReportedLatency)
+        return;
+
+    if (latencyChangePending.exchange(true, std::memory_order_acq_rel))
+        return;
+
+    const bool queued = juce::MessageManager::callAsync([weakThis = juce::WeakReference<ConvolverProcessor>(this)]
+    {
+        if (auto* self = weakThis.get())
+        {
+            const int latest = self->cachedLatency.load(std::memory_order_acquire).totalLatencySamples;
+            if (latest != self->lastReportedLatency)
+            {
+                self->lastReportedLatency = latest;
+                self->postCoalescedChangeNotification();
+            }
+            self->latencyChangePending.store(false, std::memory_order_release);
+        }
+    });
+
+    if (!queued)
+        latencyChangePending.store(false, std::memory_order_release);
+}
+
+void ConvolverProcessor::debugCheckAtomicLockFree() const
+{
+   #if JUCE_DEBUG
+    jassert(std::atomic<LatencySnapshot>{}.is_lock_free());
+   #endif
 }
 
 void ConvolverProcessor::setPhaseMode(ConvolverProcessor::PhaseMode mode)
@@ -5107,6 +5194,8 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     isRebuilding.store(false, std::memory_order_release);
     if (rebuildPendingAfterLoad.exchange(false, std::memory_order_acq_rel) && isIRLoaded())
         requestDebouncedRebuild();
+    updateLatencyCache();
+    requestHostDisplayUpdate();
     postCoalescedChangeNotification();
 }
 
