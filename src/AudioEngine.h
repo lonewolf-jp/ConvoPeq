@@ -55,9 +55,12 @@ struct CoeffSet {
 #include "LockFreeRingBuffer.h"
 #include "NoiseShaperLearner.h"
 #include "RefCountedDeferred.h"
+#include "GenerationManager.h"
 #include "core/Types.h"
 #include "core/SnapshotCoordinator.h"
 #include "core/ReaderEpoch.h"
+#include "core/CommandBuffer.h"
+#include "core/WorkerThread.h"
 
 // デバッグビルド時のみログを出力するマクロ
 #if defined(JUCE_DEBUG) && !defined(NDEBUG)
@@ -94,11 +97,7 @@ class AudioEngine : public juce::AudioSource,
 public:
     using SampleType = double; // 内部DSP精度 (JUCE推奨)
 
-     enum class ProcessingOrder
-    {
-        ConvolverThenEQ,
-        EQThenConvolver
-    };
+    using ProcessingOrder = convo::ProcessingOrder;
 
     enum class AnalyzerSource
     {
@@ -106,19 +105,8 @@ public:
         Output
     };
 
-    enum class OversamplingType
-    {
-        IIR,
-        LinearPhase
-    };
-
-    enum class NoiseShaperType
-    {
-        Psychoacoustic = 0,
-        Fixed4Tap = 1,
-        Adaptive9thOrder = 2,
-        Fixed15Tap = 3
-    };
+    using OversamplingType = convo::OversamplingType;
+    using NoiseShaperType = convo::NoiseShaperType;
 
     class Listener
     {
@@ -628,6 +616,12 @@ DSPCore();
     void processLearningCommands() noexcept;
     void processDeferredLearningActions();
     void resetLearningControlState() noexcept;
+    bool enqueueSnapshotCommand() noexcept;
+
+    static void onSnapshotRequired(void* userData, uint64_t generation);
+    void createSnapshotFromCurrentState(uint64_t generation);
+    void initWorkerThread();
+    void shutdownWorkerThread();
 
     // Worker thread for rebuilds
     void rebuildThreadLoop();
@@ -813,7 +807,26 @@ private:
     // スナップショット基盤（Phase 2）
     // ==================================================================
     convo::SnapshotCoordinator m_coordinator;
-    std::atomic<uint64_t> m_paramGeneration{0};
+    GenerationManager m_generationManager;
+
+    // ==================================================================
+    // Phase 3: コマンドバッファ + ワーカースレッド
+    // ==================================================================
+    convo::CommandBuffer m_commandBuffer;
+    convo::WorkerThread m_workerThread;
+
+    std::atomic<float> m_currentInputHeadroomDb { -6.0f };
+    std::atomic<float> m_currentOutputMakeupDb { 12.0f };
+    std::atomic<float> m_currentConvInputTrimDb { 0.0f };
+    std::atomic<bool> m_currentEqBypass { false };
+    std::atomic<bool> m_currentConvBypass { false };
+    std::atomic<convo::ProcessingOrder> m_currentProcessingOrder { convo::ProcessingOrder::ConvolverThenEQ };
+    std::atomic<bool> m_currentSoftClipEnabled { true };
+    std::atomic<float> m_currentSaturationAmount { 0.1f };
+    std::atomic<int> m_currentOversamplingFactor { 0 };
+    std::atomic<convo::OversamplingType> m_currentOversamplingType { convo::OversamplingType::IIR };
+    std::atomic<int> m_currentDitherBitDepth { 24 };
+    std::atomic<convo::NoiseShaperType> m_currentNoiseShaperType { convo::NoiseShaperType::Psychoacoustic };
 
     // ==================================================================
 

@@ -161,6 +161,10 @@ target_sources(ConvoPeq PRIVATE
     src/core/SnapshotCoordinator.cpp
     # Phase 2: Types
     src/core/Types.h
+    # Phase 3: Debounced snapshot worker
+    src/core/CommandBuffer.h
+    src/core/WorkerThread.h
+    src/core/WorkerThread.cpp
 )
 
 #------------------------------------------------------------

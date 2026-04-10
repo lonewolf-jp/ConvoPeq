@@ -29,6 +29,7 @@
 #include <vector>
 #include "AlignedAllocation.h"
 #include "RefCountedDeferred.h"
+#include "core/EQParameters.h"
 
 //--------------------------------------------------------------
 // バンドタイプ列挙型
@@ -227,6 +228,8 @@ public:
         std::array<EQChannelMode, NUM_BANDS> bandChannelModes;
         float totalGainDb = 0.0f;
 
+        convo::EQParameters toEQParameters() const;
+
         // Explicitly define the copy constructor
         EQState() = default;
 
@@ -276,6 +279,7 @@ public:
     // 状態スナップショット取得 (AudioEngine用)
     //----------------------------------------------------------
     EQState* getEQState() const;  // 生ポインタ (所有権は共有せず、ライフタイムは currentStateRaw に依存)
+    const EQState* getEQStateSnapshot() const { return getEQState(); }
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const EQProcessor& other);

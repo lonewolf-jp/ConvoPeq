@@ -10,6 +10,7 @@
 #include "OutputFilter.h"
 #include "DeferredDeletionQueue.h"
 #include "RefCountedDeferred.h"
+#include "core/SnapshotAssembler.h"
 #include <Windows.h>
 #include <cmath>
 #include <cstdint>
@@ -617,6 +618,7 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 // コンストラクタ
 //--------------------------------------------------------------
 AudioEngine::AudioEngine()
+    : m_workerThread(m_commandBuffer, m_coordinator, m_generationManager)
 {
     initialiseAdaptiveCoeffBanks();
     selectAdaptiveCoeffBankForCurrentSettings();
@@ -636,7 +638,20 @@ AudioEngine::AudioEngine()
     dspCrossfadeGain.reset(48000.0, 0.03);
     dspCrossfadeGain.setCurrentAndTargetValue(1.0);
 
-    // Phase 2: 初期スナップショットを生成して SnapshotCoordinator に登録する
+    m_currentInputHeadroomDb.store(inputHeadroomDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentOutputMakeupDb.store(outputMakeupDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentConvInputTrimDb.store(convolverInputTrimDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentEqBypass.store(eqBypassRequested.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentConvBypass.store(convBypassRequested.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentProcessingOrder.store(currentProcessingOrder.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentSoftClipEnabled.store(softClipEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentSaturationAmount.store(saturationAmount.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentOversamplingFactor.store(manualOversamplingFactor.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentOversamplingType.store(oversamplingType.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentDitherBitDepth.store(ditherBitDepth.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    m_currentNoiseShaperType.store(noiseShaperType.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+    // Phase 2/3: 初期スナップショットを生成して SnapshotCoordinator に登録する
     {
         convo::SnapshotParams initParams;
         initParams.inputHeadroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
@@ -654,7 +669,7 @@ AudioEngine::AudioEngine()
         initParams.ditherBitDepth    = ditherBitDepth.load(std::memory_order_relaxed);
         initParams.noiseShaperType   = static_cast<convo::NoiseShaperType>(
                                            static_cast<int>(noiseShaperType.load(std::memory_order_relaxed)));
-        initParams.generation        = m_paramGeneration.fetch_add(1, std::memory_order_relaxed);
+        initParams.generation        = m_generationManager.bumpGeneration();
         const convo::GlobalSnapshot* initSnap = convo::SnapshotFactory::create(initParams);
         m_coordinator.switchImmediate(initSnap);
     }
@@ -1180,12 +1195,94 @@ void AudioEngine::initialize()
     // - DSP再構築リクエストのポーリング (Audio Threadからの依頼を処理)
     // - ガベージコレクション
     startTimer(100);
+
+    m_workerThread.setSnapshotCreator(&AudioEngine::onSnapshotRequired, this);
+    initWorkerThread();
+}
+
+void AudioEngine::initWorkerThread()
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    m_workerThread.start();
+}
+
+void AudioEngine::shutdownWorkerThread()
+{
+    m_workerThread.stop();
+}
+
+bool AudioEngine::enqueueSnapshotCommand() noexcept
+{
+    const uint64_t generation = m_generationManager.bumpGeneration();
+    const convo::ParameterCommand cmd(convo::ParameterCommand::Type::ParameterChanged, generation);
+    if (!m_commandBuffer.push(cmd))
+    {
+        DBG("AudioEngine: CommandBuffer full, dropping parameter change command");
+        return false;
+    }
+    return true;
+}
+
+void AudioEngine::onSnapshotRequired(void* userData, uint64_t generation)
+{
+    auto* self = static_cast<AudioEngine*>(userData);
+    if (self != nullptr)
+        self->createSnapshotFromCurrentState(generation);
+}
+
+void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
+{
+    const ConvolverState* convState = uiConvolverProcessor.getConvolverState();
+
+    convo::EQParameters eqParams;
+    if (const auto* eqState = uiEqProcessor.getEQStateSnapshot())
+        eqParams = eqState->toEQParameters();
+
+    std::array<double, 9> nsCoeffs{};
+    for (int i = 0; i < kAdaptiveNoiseShaperOrder; ++i)
+        nsCoeffs[static_cast<size_t>(i)] = kDefaultAdaptiveNoiseShaperCoeffs[static_cast<size_t>(i)];
+
+    const double inputHeadroomGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentInputHeadroomDb.load(std::memory_order_relaxed)));
+    const double outputMakeupGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentOutputMakeupDb.load(std::memory_order_relaxed)));
+    const double convInputTrimGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentConvInputTrimDb.load(std::memory_order_relaxed)));
+    const bool convBypass = m_currentConvBypass.load(std::memory_order_relaxed);
+    const bool eqBypass = m_currentEqBypass.load(std::memory_order_relaxed);
+    const bool softClip = m_currentSoftClipEnabled.load(std::memory_order_relaxed);
+    const float satAmount = m_currentSaturationAmount.load(std::memory_order_relaxed);
+    const convo::ProcessingOrder order = m_currentProcessingOrder.load(std::memory_order_relaxed);
+    const convo::OversamplingType osType = m_currentOversamplingType.load(std::memory_order_relaxed);
+    const int osFactor = m_currentOversamplingFactor.load(std::memory_order_relaxed);
+    const int bitDepth = m_currentDitherBitDepth.load(std::memory_order_relaxed);
+    const convo::NoiseShaperType nsType = m_currentNoiseShaperType.load(std::memory_order_relaxed);
+
+    convo::SnapshotParams params = convo::SnapshotAssembler::assemble(
+        convState,
+        eqParams,
+        nsCoeffs,
+        inputHeadroomGainValue,
+        outputMakeupGainValue,
+        convInputTrimGainValue,
+        convBypass,
+        eqBypass,
+        softClip,
+        satAmount,
+        order,
+        osType,
+        osFactor,
+        bitDepth,
+        nsType,
+        generation);
+
+    const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::create(params);
+    m_coordinator.switchImmediate(newSnap);
 }
 
 
 
 AudioEngine::~AudioEngine()
 {
+    shutdownWorkerThread();
+
     stopTimer();
 
     // 1. Stop Audio Thread access immediately
@@ -2451,6 +2548,7 @@ void AudioEngine::eqBandChanged(EQProcessor* processor, int bandIndex)
         std::lock_guard<std::mutex> lk(rebuildMutex);
         if (activeDSP)
             activeDSP->eq.syncBandNodeFrom(uiEqProcessor, bandIndex);
+        enqueueSnapshotCommand();
     }
 }
 
@@ -2468,6 +2566,7 @@ void AudioEngine::eqGlobalChanged(EQProcessor* processor)
             activeDSP->eq.setNonlinearSaturation(uiEqProcessor.getNonlinearSaturation());
             activeDSP->eq.setFilterStructure(uiEqProcessor.getFilterStructure());
         }
+        enqueueSnapshotCommand();
     }
 }
 
@@ -2682,18 +2781,18 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // 【Parameter安全設計】
         // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
         // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
-        // ── Audio Thread 最適化: 全アトミック変数をスナップショット構築（load 回数最小化） ──
-        // すべての読み取りをここに集中させ、process() 内では追加の .load() を一切行わない。
-        const bool eqBypassed               = eqBypassRequested.load(std::memory_order_acquire);
-        const bool convBypassed             = convBypassRequested.load(std::memory_order_acquire);
-        const ProcessingOrder order         = currentProcessingOrder.load(std::memory_order_relaxed);
+        // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
+        const convo::GlobalSnapshot* snap = m_coordinator.getCurrent();
+        const bool eqBypassed               = (snap != nullptr) ? snap->eqBypass : eqBypassRequested.load(std::memory_order_acquire);
+        const bool convBypassed             = (snap != nullptr) ? snap->convBypass : convBypassRequested.load(std::memory_order_acquire);
+        const ProcessingOrder order         = (snap != nullptr) ? snap->processingOrder : currentProcessingOrder.load(std::memory_order_relaxed);
         const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
         const bool analyzerEnabledNow       = analyzerEnabled.load(std::memory_order_relaxed);
-        const bool softClip                 = softClipEnabled.load(std::memory_order_relaxed);
-        const float satAmt                  = saturationAmount.load(std::memory_order_relaxed);
-        const double headroomGain           = inputHeadroomGain.load(std::memory_order_relaxed);
-        const double makeupGain             = outputMakeupGain.load(std::memory_order_relaxed);
-        const double convInputTrimGain      = convolverInputTrimGain.load(std::memory_order_relaxed);
+        const bool softClip                 = (snap != nullptr) ? snap->softClipEnabled : softClipEnabled.load(std::memory_order_relaxed);
+        const float satAmt                  = (snap != nullptr) ? snap->saturationAmount : saturationAmount.load(std::memory_order_relaxed);
+        const double headroomGain           = (snap != nullptr) ? snap->inputHeadroomGain : inputHeadroomGain.load(std::memory_order_relaxed);
+        const double makeupGain             = (snap != nullptr) ? snap->outputMakeupGain : outputMakeupGain.load(std::memory_order_relaxed);
+        const double convInputTrimGain      = (snap != nullptr) ? snap->convInputTrimGain : convolverInputTrimGain.load(std::memory_order_relaxed);
         const convo::HCMode hcMode      = convHCFilterMode.load(std::memory_order_relaxed);
         const convo::LCMode lcMode      = convLCFilterMode.load(std::memory_order_relaxed);
         const convo::HCMode lpfMode     = eqLPFFilterMode.load(std::memory_order_relaxed);
@@ -4022,16 +4121,20 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 void AudioEngine::setEqBypassRequested (bool shouldBypass)
 {
     eqBypassRequested.store (shouldBypass, std::memory_order_release);
+    m_currentEqBypass.store(shouldBypass, std::memory_order_release);
     uiEqProcessor.setBypass(shouldBypass);
     applyDefaultsForCurrentMode();
+    enqueueSnapshotCommand();
     sendChangeMessage();
 }
 
 void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
 {
     convBypassRequested.store (shouldBypass, std::memory_order_release);
+    m_currentConvBypass.store(shouldBypass, std::memory_order_release);
     uiConvolverProcessor.setBypass(shouldBypass);
     applyDefaultsForCurrentMode();
+    enqueueSnapshotCommand();
     sendChangeMessage();
 }
 
@@ -4279,6 +4382,8 @@ void AudioEngine::setInputHeadroomDb(float db)
     {
         inputHeadroomDb.store(clampedDb);
         inputHeadroomGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
+        m_currentInputHeadroomDb.store(clampedDb, std::memory_order_relaxed);
+        enqueueSnapshotCommand();
     }
 }
 
@@ -4295,6 +4400,8 @@ void AudioEngine::setOutputMakeupDb(float db)
     {
         outputMakeupDb.store(clampedDb);
         outputMakeupGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
+        m_currentOutputMakeupDb.store(clampedDb, std::memory_order_relaxed);
+        enqueueSnapshotCommand();
     }
 }
 
@@ -4306,6 +4413,8 @@ float AudioEngine::getOutputMakeupDb() const
 void AudioEngine::setProcessingOrder(ProcessingOrder order)
 {
     currentProcessingOrder.store(order);
+    m_currentProcessingOrder.store(order, std::memory_order_relaxed);
+    enqueueSnapshotCommand();
     applyDefaultsForCurrentMode();
 }
 
@@ -4317,6 +4426,8 @@ void AudioEngine::setConvolverInputTrimDb(float db)
     {
         convolverInputTrimDb.store(clampedDb);
         convolverInputTrimGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
+        m_currentConvInputTrimDb.store(clampedDb, std::memory_order_relaxed);
+        enqueueSnapshotCommand();
     }
 }
 
@@ -4333,36 +4444,46 @@ void AudioEngine::applyDefaultsForCurrentMode()
     const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
     const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
 
+    float newInputHeadroomDb = 0.0f;
+    float newOutputMakeupDb = 0.0f;
+    float newConvTrimDb = 0.0f;
+
     if (convBypassed && !eqBypassed)
     {
-        // PEQ only
-        setInputHeadroomDb(0.0f);
-        setOutputMakeupDb(0.0f);
-        // convolverInputTrim は未使用のためリセットのみ
-        convolverInputTrimDb.store(0.0f);
-        convolverInputTrimGain.store(1.0);
+        newInputHeadroomDb = 0.0f;
+        newOutputMakeupDb = 0.0f;
+        newConvTrimDb = 0.0f;
     }
     else if (!convBypassed && order == ProcessingOrder::EQThenConvolver && !eqBypassed)
     {
-        // PEQ→Conv
-        setInputHeadroomDb(0.0f);
-        setOutputMakeupDb(10.0f);
-        setConvolverInputTrimDb(-6.0f);
+        newInputHeadroomDb = 0.0f;
+        newOutputMakeupDb = 10.0f;
+        newConvTrimDb = -6.0f;
     }
     else if (eqBypassed && !convBypassed)
     {
-        // Conv only
-        setInputHeadroomDb(-6.0f);
-        setOutputMakeupDb(12.0f);
-        setConvolverInputTrimDb(0.0f);
+        newInputHeadroomDb = -6.0f;
+        newOutputMakeupDb = 12.0f;
+        newConvTrimDb = 0.0f;
     }
     else
     {
-        // Conv→PEQ (ConvolverThenEQ, 両方アクティブ) または両方バイパス
-        setInputHeadroomDb(-6.0f);
-        setOutputMakeupDb(12.0f);
-        setConvolverInputTrimDb(0.0f);
+        newInputHeadroomDb = -6.0f;
+        newOutputMakeupDb = 12.0f;
+        newConvTrimDb = 0.0f;
     }
+
+    inputHeadroomDb.store(newInputHeadroomDb, std::memory_order_relaxed);
+    outputMakeupDb.store(newOutputMakeupDb, std::memory_order_relaxed);
+    convolverInputTrimDb.store(newConvTrimDb, std::memory_order_relaxed);
+    inputHeadroomGain.store(juce::Decibels::decibelsToGain(static_cast<double>(newInputHeadroomDb)), std::memory_order_relaxed);
+    outputMakeupGain.store(juce::Decibels::decibelsToGain(static_cast<double>(newOutputMakeupDb)), std::memory_order_relaxed);
+    convolverInputTrimGain.store(juce::Decibels::decibelsToGain(static_cast<double>(newConvTrimDb)), std::memory_order_relaxed);
+
+    m_currentInputHeadroomDb.store(newInputHeadroomDb, std::memory_order_relaxed);
+    m_currentOutputMakeupDb.store(newOutputMakeupDb, std::memory_order_relaxed);
+    m_currentConvInputTrimDb.store(newConvTrimDb, std::memory_order_relaxed);
+    enqueueSnapshotCommand();
 }
 
 void AudioEngine::setDitherBitDepth(int bitDepth)
@@ -4380,7 +4501,9 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
         }
 
         ditherBitDepth.store(bitDepth);
+        m_currentDitherBitDepth.store(bitDepth, std::memory_order_relaxed);
         DBG_LOG("Dither Bit Depth changed: " + juce::String(bitDepth));
+        enqueueSnapshotCommand();
 
         selectAdaptiveCoeffBankForCurrentSettings();
 
@@ -4405,6 +4528,7 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
     if (noiseShaperType.load() != type)
     {
         noiseShaperType.store(type);
+        m_currentNoiseShaperType.store(type, std::memory_order_relaxed);
         if (type != NoiseShaperType::Adaptive9thOrder)
         {
             stopNoiseShaperLearning();
@@ -4426,6 +4550,7 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
             typeName = "Adaptive9thOrder";
 
         DBG_LOG("Noise Shaper changed: " + typeName);
+        enqueueSnapshotCommand();
         const double sr = currentSampleRate.load();
         if (sr > 0.0)
             requestRebuild(sr, maxSamplesPerBlock.load());
@@ -4460,6 +4585,8 @@ int AudioEngine::getFixedNoiseWindowSamples() const noexcept
 void AudioEngine::setSoftClipEnabled(bool enabled)
 {
     softClipEnabled.store(enabled, std::memory_order_relaxed);
+    m_currentSoftClipEnabled.store(enabled, std::memory_order_relaxed);
+    enqueueSnapshotCommand();
 }
 
 bool AudioEngine::isSoftClipEnabled() const
@@ -4469,7 +4596,10 @@ bool AudioEngine::isSoftClipEnabled() const
 
 void AudioEngine::setSaturationAmount(float amount)
 {
-    saturationAmount.store(juce::jlimit(0.0f, 1.0f, amount), std::memory_order_relaxed);
+    const float clamped = juce::jlimit(0.0f, 1.0f, amount);
+    saturationAmount.store(clamped, std::memory_order_relaxed);
+    m_currentSaturationAmount.store(clamped, std::memory_order_relaxed);
+    enqueueSnapshotCommand();
 }
 
 float AudioEngine::getSaturationAmount() const
@@ -4489,6 +4619,8 @@ void AudioEngine::setOversamplingFactor(int factor)
     if (manualOversamplingFactor.load() != newFactor)
     {
         manualOversamplingFactor.store(newFactor);
+        m_currentOversamplingFactor.store(newFactor, std::memory_order_relaxed);
+        enqueueSnapshotCommand();
         const double sr = currentSampleRate.load();
         if (sr > 0.0)
         {
@@ -4505,6 +4637,8 @@ int AudioEngine::getOversamplingFactor() const
 void AudioEngine::setOversamplingType(OversamplingType type)
 {
     oversamplingType.store(type);
+    m_currentOversamplingType.store(type, std::memory_order_relaxed);
+    enqueueSnapshotCommand();
     const double sr = currentSampleRate.load();
     if (sr > 0.0)
     {

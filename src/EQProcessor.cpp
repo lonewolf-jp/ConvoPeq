@@ -882,6 +882,25 @@ void EQProcessor::cleanup()
     //      ここでは個別のクリーンアップは不要。
 }
 
+convo::EQParameters EQProcessor::EQState::toEQParameters() const
+{
+    convo::EQParameters params;
+    for (int i = 0; i < EQProcessor::NUM_BANDS; ++i)
+    {
+        params.bands[i].frequency = bands[i].frequency;
+        params.bands[i].gain = bands[i].gain;
+        params.bands[i].q = bands[i].q;
+        params.bands[i].enabled = bands[i].enabled;
+        params.bands[i].type = static_cast<int>(bandTypes[i]);
+        params.bands[i].channelMode = static_cast<int>(bandChannelModes[i]);
+    }
+    params.totalGainDb = totalGainDb;
+    params.agcEnabled = false;
+    params.nonlinearSaturation = 0.2f;
+    params.filterStructure = 0;
+    return params;
+}
+
 EQProcessor::EQState* EQProcessor::getEQState() const
 {
     return currentStateRaw.load(std::memory_order_acquire);

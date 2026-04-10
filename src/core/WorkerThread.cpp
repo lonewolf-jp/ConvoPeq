@@ -1,0 +1,131 @@
+//==============================================================================
+// WorkerThread.cpp
+//==============================================================================
+
+#include "WorkerThread.h"
+#include "SnapshotCoordinator.h"
+#include "../GenerationManager.h"
+
+#include <chrono>
+#include <thread>
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
+ #include <xmmintrin.h>
+ #include <pmmintrin.h>
+#endif
+
+#ifdef _WIN32
+ #include <windows.h>
+#endif
+
+namespace convo {
+
+WorkerThread::WorkerThread(CommandBuffer& cmdBuf,
+                           SnapshotCoordinator& coord,
+                           GenerationManager& genMgr,
+                           const WorkerThreadConfig& cfg)
+    : commandBuffer(cmdBuf),
+      coordinator(coord),
+      generationManager(genMgr),
+      config(cfg)
+{
+}
+
+WorkerThread::~WorkerThread()
+{
+    stop();
+}
+
+void WorkerThread::start()
+{
+    if (thread.joinable())
+        return;
+
+    running.store(true, std::memory_order_release);
+    pendingFlush.store(false, std::memory_order_release);
+    thread = std::thread(&WorkerThread::run, this);
+}
+
+void WorkerThread::stop()
+{
+    running.store(false, std::memory_order_release);
+    pendingFlush.store(true, std::memory_order_release);
+
+    if (thread.joinable())
+        thread.join();
+}
+
+void WorkerThread::flush()
+{
+    pendingFlush.store(true, std::memory_order_release);
+}
+
+void WorkerThread::run()
+{
+#if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+
+#ifdef _WIN32
+    DWORD_PTR processMask = 0;
+    DWORD_PTR systemMask = 0;
+    if (::GetProcessAffinityMask(::GetCurrentProcess(), &processMask, &systemMask)) {
+        const DWORD_PTR firstCore = 1;
+        DWORD_PTR nonAudioMask = processMask & ~firstCore;
+        if (nonAudioMask == 0)
+            nonAudioMask = processMask;
+        ::SetThreadAffinityMask(::GetCurrentThread(), nonAudioMask);
+    }
+#endif
+
+    bool hasPending = false;
+    uint64_t pendingGeneration = 0;
+    auto lastCommandTime = std::chrono::steady_clock::now();
+
+    while (running.load(std::memory_order_acquire)) {
+        ParameterCommand cmd;
+        bool poppedAny = false;
+
+        while (commandBuffer.pop(cmd)) {
+            poppedAny = true;
+#ifdef _DEBUG
+            commandsReceived.fetch_add(1, std::memory_order_relaxed);
+#endif
+            hasPending = true;
+            pendingGeneration = cmd.generation;
+            lastCommandTime = std::chrono::steady_clock::now();
+        }
+
+        if (hasPending) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsedMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - lastCommandTime).count());
+
+            if (pendingFlush.exchange(false, std::memory_order_acq_rel) || elapsedMs >= config.debounceDelayMs) {
+                hasPending = false;
+
+                SnapshotCreatorCallback cb = callbackFunc.load(std::memory_order_acquire);
+                void* userData = callbackUserData.load(std::memory_order_acquire);
+
+                if (cb != nullptr && userData != nullptr && generationManager.isCurrentGeneration(pendingGeneration)) {
+                    cb(userData, pendingGeneration);
+#ifdef _DEBUG
+                    snapshotsCreated.fetch_add(1, std::memory_order_relaxed);
+#endif
+                }
+#ifdef _DEBUG
+                else {
+                    commandsDropped.fetch_add(1, std::memory_order_relaxed);
+                }
+#endif
+            }
+        }
+
+        if (!poppedAny) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(config.idleSleepMs));
+        }
+    }
+}
+
+} // namespace convo

@@ -197,6 +197,7 @@ public:
     //----------------------------------------------------------
     void setBypass(bool shouldBypass);
     bool isBypassed() const { return bypassed.load(); }
+    const ConvolverState* getConvolverState() const { return rcuSwapper.getState(); }
 
     //----------------------------------------------------------
     // Dry/Wet Mix (0.0 = Dry only, 1.0 = Wet only)
