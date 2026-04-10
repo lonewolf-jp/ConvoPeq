@@ -1181,6 +1181,9 @@ void AudioEngine::initialize()
     maxSamplesPerBlock.store(SAFE_MAX_BLOCK_SIZE);
     currentSampleRate.store(48000.0);
 
+    m_fadeFloatBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE, false, false, true);
+    m_fadeDoubleBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE, false, false, true);
+
     // オーディオデバイスがまだ開始していない段階でも、IRロード側には実用的な既定値を渡す。
     // SAFE_MAX_BLOCK_SIZE をそのまま使うと不要に巨大な一時NUCを組んでメモリ使用量が跳ねるため、
     // ローダー用の暫定値は一般的な 48kHz / 512samples に固定する。
@@ -1274,7 +1277,10 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         generation);
 
     const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::create(params);
-    m_coordinator.switchImmediate(newSnap);
+    const int fadeSamples = m_pendingIRChange.exchange(false, std::memory_order_acq_rel)
+        ? m_irFadeSamples.load(std::memory_order_relaxed)
+        : m_eqFadeSamples.load(std::memory_order_relaxed);
+    m_coordinator.startFade(newSnap, fadeSamples);
 }
 
 
@@ -2227,6 +2233,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             if (auto* oldFading = fadingOutDSP.exchange(dspToTrash, std::memory_order_acq_rel))
                 oldFading->release();
             dspCrossfadePending.store(true, std::memory_order_release);
+            setIRChangeFlag();
         }
 
         // 段階 3：RCU キューに登録し、grace period 経過後に processDeferredReleases が release() する
@@ -2430,6 +2437,9 @@ void AudioEngine::timerCallback()
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();
 
+    if (m_coordinator.tryCompleteFade())
+        sendChangeMessage();
+
     // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
     // タイマーコールバック内では、UIの状態を直接使用せずに、
     // Atomic変数から安全に読み取る
@@ -2614,6 +2624,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
         if (needsStructuralRebuild && srForRebuild > 0.0)
         {
             ++pendingIRGeneration;
+            setIRChangeFlag();
 
             const LearningCommand cmd {
                 LearningCommand::Type::IRChanged,
@@ -2750,6 +2761,67 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     if (dsp == nullptr)
     {
         bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
+    const convo::GlobalSnapshot* snapCurrent = nullptr;
+    const convo::GlobalSnapshot* snapTarget = nullptr;
+    float fadeAlpha = 1.0f;
+    const bool isFading = m_coordinator.updateFade(fadeAlpha, snapCurrent, snapTarget);
+
+    if (isFading && snapTarget != nullptr)
+    {
+        if (snapCurrent == nullptr)
+        {
+            m_coordinator.switchImmediate(snapTarget);
+            processWithSnapshot(bufferToFill, snapTarget, false);
+            return;
+        }
+
+        if (m_fadeFloatBuffer.getNumChannels() < 2 || m_fadeFloatBuffer.getNumSamples() < numSamples)
+        {
+            bufferToFill.clearActiveBufferRegion();
+            return;
+        }
+
+        const int copyChannels = std::min(2, buffer->getNumChannels());
+        for (int ch = 0; ch < copyChannels; ++ch)
+        {
+            const float* src = buffer->getReadPointer(ch, startSample);
+            float* dst = m_fadeFloatBuffer.getWritePointer(ch, 0);
+            juce::FloatVectorOperations::copy(dst, src, numSamples);
+        }
+        for (int ch = copyChannels; ch < m_fadeFloatBuffer.getNumChannels(); ++ch)
+            m_fadeFloatBuffer.clear(ch, 0, numSamples);
+
+        juce::AudioSourceChannelInfo oldInfo(&m_fadeFloatBuffer, 0, numSamples);
+        processWithSnapshot(oldInfo, snapCurrent, false);
+        processWithSnapshot(bufferToFill, snapTarget, true);
+
+        const float gainNew = juce::jlimit(0.0f, 1.0f, fadeAlpha);
+        const float gainOld = convo::equalPowerSinApprox(1.0f - gainNew);
+
+        if (gainNew < 1.0e-6f)
+        {
+            for (int ch = 0; ch < copyChannels; ++ch)
+            {
+                float* dst = buffer->getWritePointer(ch, startSample);
+                const float* srcOld = m_fadeFloatBuffer.getReadPointer(ch, 0);
+                juce::FloatVectorOperations::copy(dst, srcOld, numSamples);
+            }
+        }
+        else if (gainOld >= 1.0e-6f)
+        {
+            for (int ch = 0; ch < copyChannels; ++ch)
+            {
+                float* dst = buffer->getWritePointer(ch, startSample);
+                const float* srcOld = m_fadeFloatBuffer.getReadPointer(ch, 0);
+                for (int i = 0; i < numSamples; ++i)
+                    dst[i] = dst[i] * gainNew + srcOld[i] * gainOld;
+            }
+        }
+
+        m_coordinator.advanceFade(numSamples);
         return;
     }
 
@@ -2913,6 +2985,86 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
     }
 
+}
+
+void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
+                                      const convo::GlobalSnapshot* snap,
+                                      bool isFadingTarget)
+{
+    if (snap == nullptr)
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
+    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
+    if (dsp == nullptr)
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
+    const bool eqBypassed = snap->eqBypass;
+    const bool convBypassed = snap->convBypass;
+    const ProcessingOrder order = snap->processingOrder;
+    const bool softClip = snap->softClipEnabled;
+    const float satAmt = snap->saturationAmount;
+    const double headroomGain = snap->inputHeadroomGain;
+    const double makeupGain = snap->outputMakeupGain;
+    const double convInputTrimGain = snap->convInputTrimGain;
+
+    if (!isFadingTarget)
+    {
+        eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
+        convBypassActive.store(convBypassed, std::memory_order_relaxed);
+    }
+
+    const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
+    const bool analyzerEnabledNow = analyzerEnabled.load(std::memory_order_relaxed);
+    const convo::HCMode hcMode = convHCFilterMode.load(std::memory_order_relaxed);
+    const convo::LCMode lcMode = convLCFilterMode.load(std::memory_order_relaxed);
+    const convo::HCMode lpfMode = eqLPFFilterMode.load(std::memory_order_relaxed);
+    const int adaptiveCoeffBankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
+    const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
+    const bool adaptiveCaptureEnabled = noiseShaperLearner && noiseShaperLearner->isRunning();
+
+    const uint32_t adaptiveGenBefore = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+    const CoeffSet* adaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
+    const uint32_t adaptiveGenAfter = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+
+    CoeffSet localAdaptiveSet {};
+    const CoeffSet* safeAdaptiveSet = nullptr;
+    if (adaptiveSet != nullptr && adaptiveGenBefore == adaptiveGenAfter)
+    {
+        localAdaptiveSet = *adaptiveSet;
+        if (adaptiveCoeffBank.generation.load(std::memory_order_acquire) == adaptiveGenAfter)
+            safeAdaptiveSet = &localAdaptiveSet;
+    }
+
+    DSPCore::ProcessingState procState {
+        .eqBypassed               = eqBypassed,
+        .convBypassed             = convBypassed,
+        .order                    = order,
+        .analyzerSource           = analyzerSource,
+        .analyzerEnabled          = isFadingTarget ? false : analyzerEnabledNow,
+        .softClipEnabled          = softClip,
+        .saturationAmount         = satAmt,
+        .inputHeadroomGain        = headroomGain,
+        .outputMakeupGain         = makeupGain,
+        .convolverInputTrimGain   = convInputTrimGain,
+        .convHCMode               = hcMode,
+        .convLCMode               = lcMode,
+        .eqLPFMode                = lpfMode,
+        .adaptiveCoeffBankIndex   = adaptiveCoeffBankIndex,
+        .adaptiveCoeffSet         = safeAdaptiveSet,
+        .adaptiveCoeffGeneration  = adaptiveGenAfter,
+        .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
+        .adaptiveCaptureBitDepth  = dsp->ditherBitDepth,
+        .captureSessionId         = dsp->currentCaptureSessionId,
+        .adaptiveCaptureQueue     = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
+    };
+
+    dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
 }
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)

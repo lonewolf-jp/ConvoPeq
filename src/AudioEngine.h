@@ -244,6 +244,13 @@ public:
     void setFixedNoiseWindowSamples(int windowSamples) noexcept;
     int getFixedNoiseWindowSamples() const noexcept;
 
+    void setIRFadeSamples(int samples) noexcept { m_irFadeSamples.store(samples, std::memory_order_relaxed); }
+    void setEQFadeSamples(int samples) noexcept { m_eqFadeSamples.store(samples, std::memory_order_relaxed); }
+    int getIRFadeSamples() const noexcept { return m_irFadeSamples.load(std::memory_order_relaxed); }
+    int getEQFadeSamples() const noexcept { return m_eqFadeSamples.load(std::memory_order_relaxed); }
+    bool isFading() const noexcept { return m_coordinator.isFading(); }
+    void setIRChangeFlag() noexcept { m_pendingIRChange.store(true, std::memory_order_release); }
+
     void setSoftClipEnabled(bool enabled);
     bool isSoftClipEnabled() const;
 
@@ -617,6 +624,9 @@ DSPCore();
     void processDeferredLearningActions();
     void resetLearningControlState() noexcept;
     bool enqueueSnapshotCommand() noexcept;
+    void processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
+                             const convo::GlobalSnapshot* snap,
+                             bool isFadingTarget);
 
     static void onSnapshotRequired(void* userData, uint64_t generation);
     void createSnapshotFromCurrentState(uint64_t generation);
@@ -827,6 +837,15 @@ private:
     std::atomic<convo::OversamplingType> m_currentOversamplingType { convo::OversamplingType::IIR };
     std::atomic<int> m_currentDitherBitDepth { 24 };
     std::atomic<convo::NoiseShaperType> m_currentNoiseShaperType { convo::NoiseShaperType::Psychoacoustic };
+
+    static constexpr int DEFAULT_IR_FADE_SAMPLES = 2048;
+    static constexpr int DEFAULT_EQ_FADE_SAMPLES = 512;
+    std::atomic<int> m_irFadeSamples{ DEFAULT_IR_FADE_SAMPLES };
+    std::atomic<int> m_eqFadeSamples{ DEFAULT_EQ_FADE_SAMPLES };
+    std::atomic<bool> m_pendingIRChange{ false };
+
+    juce::AudioBuffer<float> m_fadeFloatBuffer;
+    juce::AudioBuffer<double> m_fadeDoubleBuffer;
 
     // ==================================================================
 
