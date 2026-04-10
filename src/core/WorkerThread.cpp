@@ -86,29 +86,31 @@ void WorkerThread::run()
     while (running.load(std::memory_order_acquire)) {
         ParameterCommand cmd;
         bool poppedAny = false;
+        bool flushRequested = pendingFlush.exchange(false, std::memory_order_acq_rel);
 
         while (commandBuffer.pop(cmd)) {
             poppedAny = true;
 #ifdef _DEBUG
             commandsReceived.fetch_add(1, std::memory_order_relaxed);
 #endif
-            hasPending = true;
-            pendingGeneration = cmd.generation;
+            pendingGeneration = cmd.generation; // 最新の世代のみ保持
             lastCommandTime = std::chrono::steady_clock::now();
         }
 
-        if (hasPending) {
+        // flush 要求があれば、コマンドがなくても処理を試みる
+        if (flushRequested || poppedAny) {
+            hasPending = true; // poppedAny が true なら pendingGeneration は有効
             const auto now = std::chrono::steady_clock::now();
             const auto elapsedMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - lastCommandTime).count());
 
-            if (pendingFlush.exchange(false, std::memory_order_acq_rel) || elapsedMs >= config.debounceDelayMs) {
+            if (flushRequested || elapsedMs >= config.debounceDelayMs) {
                 hasPending = false;
 
                 SnapshotCreatorCallback cb = callbackFunc.load(std::memory_order_acquire);
                 void* userData = callbackUserData.load(std::memory_order_acquire);
 
-                if (cb != nullptr && userData != nullptr && generationManager.isCurrentGeneration(pendingGeneration)) {
+                if (cb && userData && generationManager.isCurrentGeneration(pendingGeneration)) {
                     cb(userData, pendingGeneration);
 #ifdef _DEBUG
                     snapshotsCreated.fetch_add(1, std::memory_order_relaxed);

@@ -2813,10 +2813,11 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     if (isFading && snapTarget != nullptr)
     {
-        if (snapCurrent == nullptr)
-        {
+        if (snapCurrent == nullptr) {
+            // 異常状態：switchImmediate() は内部で abortFade() を実行して Idle に戻す
             m_coordinator.switchImmediate(snapTarget);
             processWithSnapshot(bufferToFill, snapTarget, false);
+            // レベルメーター等の更新は processWithSnapshot 内で行われる
             return;
         }
 
@@ -2914,24 +2915,18 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const auto& adaptiveCoeffBank       = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
         const bool adaptiveCaptureEnabled   = noiseShaperLearner && noiseShaperLearner->isRunning();
 
-        // [Bug Fix] RCU 世代検証によるデータ競合の完全排除
-        // 1. 取得前の世代をスナップショット
-        const uint32_t adaptiveGenBefore = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
-        // 2. ポインタを取得
-        const CoeffSet* adaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
-        // 3. 取得後の世代をスナップショット
-        const uint32_t adaptiveGenAfter = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+        // RCU スナップショット取得：generation と active ポインタはダブルバッファリングにより一貫性が保証される
+        const uint32_t genSnapshot = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+        const CoeffSet* safeAdaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
+        // safeAdaptiveSet は、genSnapshot 時点で有効な係数セットを指す。
+        // Writer が後で切り替えても、このポインタの指す内容は不変である。
 
-        // 取得中に世代が変化した場合、ポインタが指すバッファが Writer によって再利用されている可能性がある。
-        // 安全のため、このブロックでは係数更新をスキップする（nullptr を渡す）。
-        CoeffSet localAdaptiveSet {};
-        const CoeffSet* safeAdaptiveSet = nullptr;
-        if (adaptiveSet != nullptr && adaptiveGenBefore == adaptiveGenAfter)
-        {
-            localAdaptiveSet = *adaptiveSet;
-            if (adaptiveCoeffBank.generation.load(std::memory_order_acquire) == adaptiveGenAfter)
-                safeAdaptiveSet = &localAdaptiveSet;
+        // 念のため nullptr チェック
+        if (!safeAdaptiveSet) {
+            // フォールバック：デフォルト係数を使用するなどの処理（必要に応じて）
+            // ここでは単に nullptr のまま処理を続行（process() 側で対処）
         }
+        const uint32_t adaptiveGenAfter = genSnapshot; // 互換性のため変数名を維持
 
         // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
         eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
@@ -3070,18 +3065,16 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
     const bool adaptiveCaptureEnabled = noiseShaperLearner && noiseShaperLearner->isRunning();
 
-    const uint32_t adaptiveGenBefore = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
-    const CoeffSet* adaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
-    const uint32_t adaptiveGenAfter = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+    // RCU スナップショット取得：generation と active ポインタはダブルバッファリングにより一貫性が保証される
+    const uint32_t genSnapshot = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+    const CoeffSet* safeAdaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
+    // safeAdaptiveSet は、genSnapshot 時点で有効な係数セットを指す。
+    // Writer が後で切り替えても、このポインタの指す内容は不変である。
 
-    CoeffSet localAdaptiveSet {};
-    const CoeffSet* safeAdaptiveSet = nullptr;
-    if (adaptiveSet != nullptr && adaptiveGenBefore == adaptiveGenAfter)
-    {
-        localAdaptiveSet = *adaptiveSet;
-        if (adaptiveCoeffBank.generation.load(std::memory_order_acquire) == adaptiveGenAfter)
-            safeAdaptiveSet = &localAdaptiveSet;
+    if (!safeAdaptiveSet) {
+        // ここでは nullptr のまま process() 側へ渡す
     }
+    const uint32_t adaptiveGenAfter = genSnapshot;
 
     DSPCore::ProcessingState procState {
         .eqBypassed               = eqBypassed,

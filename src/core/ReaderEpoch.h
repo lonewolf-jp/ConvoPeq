@@ -14,6 +14,7 @@ namespace convo {
 class ReaderEpoch {
 public:
     static constexpr size_t kMaxReaders = 512;   // スロット枯渇をほぼ防止
+    static constexpr size_t kOverflowSlot = SIZE_MAX; // 無効スロット識別子
     static constexpr uint64_t kIdleEpoch = UINT64_MAX;
 
     static size_t getThreadSlot() noexcept;

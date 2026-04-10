@@ -17,16 +17,17 @@ size_t ReaderEpoch::getThreadSlot() noexcept
     if (t_readerSlot == SIZE_MAX) {
         size_t newSlot = s_nextSlot.fetch_add(1, std::memory_order_relaxed);
         if (newSlot >= kMaxReaders) {
+            // スロット枯渇時は共有せず、無効なスロットを返す
 #ifdef _DEBUG
-            assert(newSlot < kMaxReaders && "RCU slot exhausted, increase kMaxReaders");
+            assert(false && "RCU slot exhausted. Increase kMaxReaders.");
 #else
-            static constexpr size_t kOverflowSlot = kMaxReaders - 1;
-            newSlot = kOverflowSlot;
-            DBG("RCU slot exhausted, using overflow slot " << kOverflowSlot);
+            DBG("RCU slot exhausted, new readers will not be protected.");
 #endif
+            newSlot = kOverflowSlot;
+        } else {
+            s_readerEpochs[newSlot].store(kIdleEpoch, std::memory_order_relaxed);
         }
         t_readerSlot = newSlot;
-        s_readerEpochs[t_readerSlot].store(kIdleEpoch, std::memory_order_relaxed);
     }
     return t_readerSlot;
 }
@@ -34,14 +35,14 @@ size_t ReaderEpoch::getThreadSlot() noexcept
 void ReaderEpoch::enter(size_t slot) noexcept
 {
     if (slot >= kMaxReaders) return;
-    uint64_t epoch = s_globalEpoch.load(std::memory_order_acquire);
+    const uint64_t epoch = s_globalEpoch.load(std::memory_order_acquire);
     s_readerEpochs[slot].store(epoch, std::memory_order_release);
 }
 
 void ReaderEpoch::exit(size_t slot) noexcept
 {
     if (slot >= kMaxReaders) return;
-    s_readerEpochs[slot].store(kIdleEpoch, std::memory_order_release);
+    s_readerEpochs[slot].store(kIdleEpoch, std::memory_order_relaxed);
 }
 
 uint64_t ReaderEpoch::getMinActiveEpoch() noexcept

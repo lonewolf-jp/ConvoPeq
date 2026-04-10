@@ -76,6 +76,25 @@ private:
     T* ptr = nullptr;
 };
 
+//==============================================================================
+// 配列用エイリアス（意図を明確化）
+//==============================================================================
+template <typename T>
+using ScopedAlignedArray = ScopedAlignedPtr<T>;
+
+// 配列として使用する場合の推奨ファクトリ関数
+template <typename T>
+inline ScopedAlignedArray<T> makeAlignedArray(size_t count) {
+    static_assert(std::is_trivially_destructible_v<T>,
+                  "Aligned array only supports trivially destructible types");
+    T* ptr = static_cast<T*>(aligned_malloc(count * sizeof(T), 64));
+    if (!ptr) throw std::bad_alloc();
+    return ScopedAlignedArray<T>(ptr);
+}
+
+// 既存コードとの互換性のため、makeAlignedCopy はそのまま維持
+// 新規コードでは makeAlignedArray<double>(size) を推奨
+
 //-----------------------------------------------------------------------------
 // STL Allocator for MKL/AVX512 (64-byte alignment)
 // std::vector 等で使用するためのカスタムアロケータ
