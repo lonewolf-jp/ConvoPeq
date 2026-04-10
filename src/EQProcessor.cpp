@@ -127,6 +127,9 @@ void EQProcessor::resetToDefaults()
     nonlinearSaturation.store(0.2f, std::memory_order_relaxed);
     requestedStructure.store(FilterStructure::Serial, std::memory_order_relaxed);
     activeStructure.store(FilterStructure::Serial, std::memory_order_relaxed);
+    newState->agcEnabled = false;
+    newState->nonlinearSaturation = 0.2f;
+    newState->filterStructure = 0;
 
     auto oldState = currentStateRaw.exchange(newState, std::memory_order_release);
 
@@ -782,6 +785,19 @@ void EQProcessor::setTotalGain(float gainDb)
 void EQProcessor::setAGCEnabled(bool enabled)
 {
     agcEnabled.store(enabled, std::memory_order_release);
+    m_pendingAGCChange.store(true, std::memory_order_release);
+
+    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    if (oldState != nullptr)
+    {
+        auto newState = new EQState(*oldState);
+        newState->addRef();
+        newState->agcEnabled = enabled;
+        auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+        if (prev)
+            prev->release();
+    }
+
     if (enabled)
         agcResetRequest.store(true, std::memory_order_relaxed);
     listeners.call(&Listener::eqGlobalChanged, this);
@@ -841,6 +857,18 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
         return;
 
     nonlinearSaturation.store(clamped, std::memory_order_relaxed);
+
+    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    if (oldState != nullptr)
+    {
+        auto newState = new EQState(*oldState);
+        newState->addRef();
+        newState->nonlinearSaturation = clamped;
+        auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+        if (prev)
+            prev->release();
+    }
+
     listeners.call(&Listener::eqGlobalChanged, this);
 }
 
@@ -859,6 +887,18 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
         return;
 
     requestedStructure.store(mode, std::memory_order_relaxed);
+
+    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    if (oldState != nullptr)
+    {
+        auto newState = new EQState(*oldState);
+        newState->addRef();
+        newState->filterStructure = (mode == FilterStructure::Parallel) ? 1 : 0;
+        auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+        if (prev)
+            prev->release();
+    }
+
     listeners.call(&Listener::eqGlobalChanged, this);
 }
 
@@ -895,9 +935,9 @@ convo::EQParameters EQProcessor::EQState::toEQParameters() const
         params.bands[i].channelMode = static_cast<int>(bandChannelModes[i]);
     }
     params.totalGainDb = totalGainDb;
-    params.agcEnabled = false;
-    params.nonlinearSaturation = 0.2f;
-    params.filterStructure = 0;
+    params.agcEnabled = agcEnabled;
+    params.nonlinearSaturation = nonlinearSaturation;
+    params.filterStructure = filterStructure;
     return params;
 }
 
@@ -1484,103 +1524,27 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     const auto processSerial = [&](double* dataL,
                                    double* dataR,
-                                   FilterStateStorage& states,
-                                   bool allowCoeffCrossfade)
+                                   FilterStateStorage& states)
     {
         for (int i = 0; i < numActiveBands; ++i)
         {
             const auto& band = activeBands[i];
             const EQChannelMode mode = band.node->mode;
 
-            if (allowCoeffCrossfade
-                && band.node->coeffsChanged
-                && scratchBuffer
-                && scratchCapacity >= numSamples * MAX_CHANNELS)
+            if (mode == EQChannelMode::Stereo && numChannels >= 2)
             {
-                if (mode == EQChannelMode::Stereo && numChannels >= 2)
-                {
-                    double* scratchL = scratchBuffer.get();
-                    double* scratchR = scratchBuffer.get() + numSamples;
-                    std::memcpy(scratchL, dataL, sizeof(double) * static_cast<size_t>(numSamples));
-                    std::memcpy(scratchR, dataR, sizeof(double) * static_cast<size_t>(numSamples));
-
-                    double prevStateL[2] = { states[0][band.index][0], states[0][band.index][1] };
-                    double prevStateR[2] = { states[1][band.index][0], states[1][band.index][1] };
-
-                    processBandStereo(scratchL, scratchR, numSamples,
-                                      band.node->prevCoeffs,
-                                      prevStateL, prevStateR,
-                                      saturation);
-                    processBandStereo(dataL, dataR, numSamples,
-                                      band.node->coeffs,
-                                      states[0][band.index].data(),
-                                      states[1][band.index].data(),
-                                      saturation);
-
-                    const double step = 1.0 / static_cast<double>(numSamples);
-                    for (int n = 0; n < numSamples; ++n)
-                    {
-                        const double t = (n + 1.0) * step;
-                        const double wNew = equalPowerSin(t);
-                        const double wOld = equalPowerSin(1.0 - t);
-                        dataL[n] = scratchL[n] * wOld + dataL[n] * wNew;
-                        dataR[n] = scratchR[n] * wOld + dataR[n] * wNew;
-                    }
-                }
-                else
-                {
-                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
-                    {
-                        std::memcpy(scratchBuffer.get(), dataL, sizeof(double) * static_cast<size_t>(numSamples));
-                        double prevState[2] = { states[0][band.index][0], states[0][band.index][1] };
-                        processBand(scratchBuffer.get(), numSamples, band.node->prevCoeffs, prevState, saturation);
-                        processBand(dataL, numSamples, band.node->coeffs, states[0][band.index].data(), saturation);
-
-                        const double step = 1.0 / static_cast<double>(numSamples);
-                        for (int n = 0; n < numSamples; ++n)
-                        {
-                            const double t = (n + 1.0) * step;
-                            const double wNew = equalPowerSin(t);
-                            const double wOld = equalPowerSin(1.0 - t);
-                            dataL[n] = scratchBuffer[n] * wOld + dataL[n] * wNew;
-                        }
-                    }
-
-                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
-                    {
-                        std::memcpy(scratchBuffer.get(), dataR, sizeof(double) * static_cast<size_t>(numSamples));
-                        double prevState[2] = { states[1][band.index][0], states[1][band.index][1] };
-                        processBand(scratchBuffer.get(), numSamples, band.node->prevCoeffs, prevState, saturation);
-                        processBand(dataR, numSamples, band.node->coeffs, states[1][band.index].data(), saturation);
-
-                        const double step = 1.0 / static_cast<double>(numSamples);
-                        for (int n = 0; n < numSamples; ++n)
-                        {
-                            const double t = (n + 1.0) * step;
-                            const double wNew = equalPowerSin(t);
-                            const double wOld = equalPowerSin(1.0 - t);
-                            dataR[n] = scratchBuffer[n] * wOld + dataR[n] * wNew;
-                        }
-                    }
-                }
+                processBandStereo(dataL, dataR, numSamples,
+                                  band.node->coeffs,
+                                  states[0][band.index].data(),
+                                  states[1][band.index].data(),
+                                  saturation);
             }
             else
             {
-                if (mode == EQChannelMode::Stereo && numChannels >= 2)
-                {
-                    processBandStereo(dataL, dataR, numSamples,
-                                      band.node->coeffs,
-                                      states[0][band.index].data(),
-                                      states[1][band.index].data(),
-                                      saturation);
-                }
-                else
-                {
-                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
-                        processBand(dataL, numSamples, band.node->coeffs, states[0][band.index].data(), saturation);
-                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
-                        processBand(dataR, numSamples, band.node->coeffs, states[1][band.index].data(), saturation);
-                }
+                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
+                    processBand(dataL, numSamples, band.node->coeffs, states[0][band.index].data(), saturation);
+                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
+                    processBand(dataR, numSamples, band.node->coeffs, states[1][band.index].data(), saturation);
             }
         }
     };
@@ -1689,12 +1653,12 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
         auto oldStateSnapshot = filterState;
         if (activeMode == FilterStructure::Serial)
-            processSerial(oldL, oldR, oldStateSnapshot, false);
+            processSerial(oldL, oldR, oldStateSnapshot);
         else
             processParallel(srcL, srcR, oldL, oldR, oldStateSnapshot);
 
         if (requestedMode == FilterStructure::Serial)
-            processSerial(newL, newR, filterState, false);
+            processSerial(newL, newR, filterState);
         else
             processParallel(srcL, srcR, newL, newR, filterState);
 
@@ -1721,7 +1685,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
         if (activeMode == FilterStructure::Serial || !canUseParallelBuffers)
         {
-            processSerial(blockL, blockR, filterState, true);
+            processSerial(blockL, blockR, filterState);
         }
         else
         {
@@ -1822,24 +1786,8 @@ EQProcessor::BandNode* EQProcessor::createBandNode(int band, const EQState& stat
 }
 
 //--------------------------------------------------------------
-// SVF係数比較ヘルパー (Message Thread内での使用)
-//--------------------------------------------------------------
-static inline bool areCoeffsEqual(const EQCoeffsSVF& a, const EQCoeffsSVF& b) noexcept
-{
-    static constexpr double COEFF_EPSILON = 1e-10;
-    return std::abs(a.g - b.g) < COEFF_EPSILON &&
-           std::abs(a.k - b.k) < COEFF_EPSILON &&
-           std::abs(a.a1 - b.a1) < COEFF_EPSILON &&
-           std::abs(a.a2 - b.a2) < COEFF_EPSILON &&
-           std::abs(a.a3 - b.a3) < COEFF_EPSILON &&
-           std::abs(a.m0 - b.m0) < COEFF_EPSILON &&
-           std::abs(a.m1 - b.m1) < COEFF_EPSILON &&
-           std::abs(a.m2 - b.m2) < COEFF_EPSILON;
-}
-
-//--------------------------------------------------------------
 // BandNode更新 (Message Thread)
-// C-1 改善: 係数変化検出とクロスフェード準備
+// 内部係数クロスフェードを使わず、最新係数に直接差し替える
 //--------------------------------------------------------------
 void EQProcessor::updateBandNode(int band)
 {
@@ -1848,21 +1796,7 @@ void EQProcessor::updateBandNode(int band)
     auto state = currentStateRaw.load(std::memory_order_acquire);
     if (state == nullptr) return;
     auto newNode = createBandNode(band, *state);
-
-    // 係数が実際に変更されたかを判定
     BandNode* oldNode = activeBandNodes[band];
-    if (oldNode && !areCoeffsEqual(oldNode->coeffs, newNode->coeffs))
-    {
-        // 係数が変わる場合: 前回の係数を保持し、クロスフェードフラグを立てる
-        newNode->prevCoeffs = oldNode->coeffs;
-        newNode->coeffsChanged = true;
-    }
-    else
-    {
-        // 係数が変わらない場合: 前回の係数を新しい係数で初期化（初回時など）
-        newNode->prevCoeffs = newNode->coeffs;
-        newNode->coeffsChanged = false;
-    }
 
     bandNodes[band].store(newNode, std::memory_order_release);
 

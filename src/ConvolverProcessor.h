@@ -404,20 +404,14 @@ private:
     // MKLNonUniformConvolver::ringWrite() からオーバーフロー時に呼び出される。
     static void overflowCallbackThunk(void* userData) noexcept;
 
-    // 等パワークロスフェード管理 (Message Thread)
-    // commitNewConvolver / clearFadingSnapshot は StereoConvolver 前方宣言の後で宣言 (下記参照)
-
     struct StereoConvolver;
     class LoaderThread;
-    // クロスフェード用の新しいメンバー
-    std::atomic<StereoConvolver*> fadingOutConvolution { nullptr };
 
     void commitNewConvolver(StereoConvolver* newConv,
                             std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
                             double loadedSR, int targetLength, bool isRebuild,
                             const juce::File& file, double scaleFactor,
                             std::shared_ptr<juce::AudioBuffer<double>> displayIR);
-    void clearFadingSnapshot();
 
     void applyNewState(StereoConvolver* newConv, std::shared_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::shared_ptr<juce::AudioBuffer<double>> displayIR);
     void handleLoadError(const juce::String& error);
@@ -648,30 +642,7 @@ private:
 
     juce::SmoothedValue<double> mixSmoother; // オーディオスレッドでの平滑化用
 
-    // ── 等パワークロスフェード ──
-    // IR 切り替え時に使用するサインコサインカーブの事前計算済みランプ。
-    // active: sin(angle), fading: cos(angle) で等パワー特性を実現する。
-    static constexpr int FADE_SAMPLES = 2048;
-    struct RampPoint { double active; double fading; };
-    std::vector<RampPoint> crossfadeRamp; // size = FADE_SAMPLES, 構築時に計算
-    int currentFadeSamples = FADE_SAMPLES;
 
-    // 等パワークロスフェード用バッファ (prepareToPlay で確保)
-    convo::ScopedAlignedPtr<double> activeBufferL, activeBufferR;
-    convo::ScopedAlignedPtr<double> fadingBufferL, fadingBufferR;
-    int bufferCapacity = 0;
-
-    // Audio Thread のみが読み書きするフェード状態 (atomic 不要)
-    struct FadeState {
-        StereoConvolver* lastSeenFadingConv = nullptr; // フェード開始の検出用
-        int accumulatedSamples = FADE_SAMPLES;         // FADE_SAMPLES 以上 = クロスフェードなし
-    };
-    FadeState fadeState;
-
-    // Audio Thread がフェード完了を通知するフラグ (Audio→Message)
-    std::atomic<bool> clearFadingPending { false };
-    // 中断されたフェードを次の timerCallback まで保持 (Message Thread のみ)
-    StereoConvolver* prevInterruptedFade = nullptr;
 
     #pragma warning(push)
     #pragma warning(disable: 4324)

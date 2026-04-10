@@ -215,10 +215,8 @@ public:
     struct BandNode : public RefCountedDeferred<BandNode>
     {
         EQCoeffsSVF coeffs;
-        EQCoeffsSVF prevCoeffs;  // 前回の係数（クロスフェード用）
         bool active;
         EQChannelMode mode;
-        bool coeffsChanged = false;  // 係数が変更されたかどうかのフラグ
     };
 
     struct EQState : public RefCountedDeferred<EQState>
@@ -227,6 +225,9 @@ public:
         std::array<EQBandType, NUM_BANDS> bandTypes;
         std::array<EQChannelMode, NUM_BANDS> bandChannelModes;
         float totalGainDb = 0.0f;
+        bool agcEnabled = false;
+        float nonlinearSaturation = 0.2f;
+        int filterStructure = 0; // 0: Serial, 1: Parallel
 
         convo::EQParameters toEQParameters() const;
 
@@ -237,7 +238,10 @@ public:
             : bands(other.bands),
               bandTypes(other.bandTypes),
               bandChannelModes(other.bandChannelModes),
-              totalGainDb(other.totalGainDb)
+              totalGainDb(other.totalGainDb),
+              agcEnabled(other.agcEnabled),
+              nonlinearSaturation(other.nonlinearSaturation),
+              filterStructure(other.filterStructure)
         {
         }
 
@@ -246,7 +250,10 @@ public:
             : bands(std::move(other.bands)),
               bandTypes(std::move(other.bandTypes)),
               bandChannelModes(std::move(other.bandChannelModes)),
-              totalGainDb(other.totalGainDb)
+              totalGainDb(other.totalGainDb),
+              agcEnabled(other.agcEnabled),
+              nonlinearSaturation(other.nonlinearSaturation),
+              filterStructure(other.filterStructure)
         {
         }
 
@@ -258,6 +265,9 @@ public:
                 bandTypes         = other.bandTypes;
                 bandChannelModes  = other.bandChannelModes;
                 totalGainDb       = other.totalGainDb;
+                agcEnabled        = other.agcEnabled;
+                nonlinearSaturation = other.nonlinearSaturation;
+                filterStructure   = other.filterStructure;
             }
             return *this;
         }
@@ -270,6 +280,9 @@ public:
                 bandTypes         = std::move(other.bandTypes);
                 bandChannelModes  = std::move(other.bandChannelModes);
                 totalGainDb       = other.totalGainDb;
+                agcEnabled        = other.agcEnabled;
+                nonlinearSaturation = other.nonlinearSaturation;
+                filterStructure   = other.filterStructure;
             }
             return *this;
         }
@@ -280,6 +293,10 @@ public:
     //----------------------------------------------------------
     EQState* getEQState() const;  // 生ポインタ (所有権は共有せず、ライフタイムは currentStateRaw に依存)
     const EQState* getEQStateSnapshot() const { return getEQState(); }
+    bool getAndClearPendingAGCChange() noexcept
+    {
+        return m_pendingAGCChange.exchange(false, std::memory_order_acq_rel);
+    }
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const EQProcessor& other);
@@ -353,6 +370,7 @@ private:
     juce::ListenerList<Listener> listeners;
 
     std::atomic<bool> agcEnabled { false };
+    std::atomic<bool> m_pendingAGCChange { false };
     std::atomic<double> agcCurrentGain { 1.0 };
     std::atomic<double> agcEnvInput    { 0.0 };
     std::atomic<double> agcEnvOutput   { 0.0 };

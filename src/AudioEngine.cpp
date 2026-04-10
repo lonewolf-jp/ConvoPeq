@@ -1233,8 +1233,30 @@ void AudioEngine::onSnapshotRequired(void* userData, uint64_t generation)
         self->createSnapshotFromCurrentState(generation);
 }
 
+AudioEngine::ConvolverStateReaderGuard::ConvolverStateReaderGuard(ConvolverProcessor& conv) noexcept
+    : m_convolver(conv)
+{
+    m_convolver.enterReader();
+}
+
+AudioEngine::ConvolverStateReaderGuard::~ConvolverStateReaderGuard() noexcept
+{
+    m_convolver.exitReader();
+}
+
+void AudioEngine::debugAssertNotAudioThread() const
+{
+    // Worker Thread 専用チェック。
+    // 現状は簡易的に Message Thread でないことを確認する。
+    // （Worker Thread は Message Thread ではないため、このチェックで十分）
+    jassert(!juce::MessageManager::getInstance()->isThisTheMessageThread());
+}
+
 void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 {
+    debugAssertNotAudioThread();
+
+    ConvolverStateReaderGuard readerGuard(uiConvolverProcessor);
     const ConvolverState* convState = uiConvolverProcessor.getConvolverState();
 
     convo::EQParameters eqParams;
@@ -1242,8 +1264,10 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         eqParams = eqState->toEQParameters();
 
     std::array<double, 9> nsCoeffs{};
-    for (int i = 0; i < kAdaptiveNoiseShaperOrder; ++i)
-        nsCoeffs[static_cast<size_t>(i)] = kDefaultAdaptiveNoiseShaperCoeffs[static_cast<size_t>(i)];
+    getCurrentAdaptiveCoefficients(nsCoeffs.data(), kAdaptiveNoiseShaperOrder);
+
+    if (uiEqProcessor.getAndClearPendingAGCChange())
+        m_pendingAGCChange.store(true, std::memory_order_release);
 
     const double inputHeadroomGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentInputHeadroomDb.load(std::memory_order_relaxed)));
     const double outputMakeupGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentOutputMakeupDb.load(std::memory_order_relaxed)));
@@ -1277,9 +1301,27 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         generation);
 
     const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::create(params);
-    const int fadeSamples = m_pendingIRChange.exchange(false, std::memory_order_acq_rel)
-        ? m_irFadeSamples.load(std::memory_order_relaxed)
-        : m_eqFadeSamples.load(std::memory_order_relaxed);
+    int fadeSamples = m_eqFadeSamples.load(std::memory_order_relaxed);
+    if (m_pendingIRChange.exchange(false, std::memory_order_acq_rel))
+    {
+        fadeSamples = m_irFadeSamples.load(std::memory_order_relaxed);
+        DBG("Phase6: IR fade triggered");
+    }
+    else if (m_pendingNSChange.exchange(false, std::memory_order_acq_rel))
+    {
+        fadeSamples = m_nsFadeSamples.load(std::memory_order_relaxed);
+        DBG("Phase6: NS fade triggered");
+    }
+    else if (m_pendingAGCChange.exchange(false, std::memory_order_acq_rel))
+    {
+        fadeSamples = m_agcFadeSamples.load(std::memory_order_relaxed);
+        DBG("Phase6: AGC fade triggered");
+    }
+    else
+    {
+        DBG("Phase6: EQ fade triggered");
+    }
+
     m_coordinator.startFade(newSnap, fadeSamples);
 }
 
@@ -4681,6 +4723,7 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
     {
         noiseShaperType.store(type);
         m_currentNoiseShaperType.store(type, std::memory_order_relaxed);
+        m_pendingNSChange.store(true, std::memory_order_release);
         if (type != NoiseShaperType::Adaptive9thOrder)
         {
             stopNoiseShaperLearning();
@@ -4707,6 +4750,18 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
         if (sr > 0.0)
             requestRebuild(sr, maxSamplesPerBlock.load());
     }
+}
+
+void AudioEngine::requestSnapshotForNoiseShaper()
+{
+    m_pendingNSChange.store(true, std::memory_order_release);
+    (void)enqueueSnapshotCommand();
+}
+
+void AudioEngine::commitAGCChange()
+{
+    m_pendingAGCChange.store(true, std::memory_order_release);
+    (void)enqueueSnapshotCommand();
 }
 
 AudioEngine::NoiseShaperType AudioEngine::getNoiseShaperType() const

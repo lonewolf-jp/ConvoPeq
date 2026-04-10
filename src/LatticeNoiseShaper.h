@@ -19,15 +19,6 @@ public:
     static constexpr int kOrder = 9;
     static constexpr int kNumChannels = 2;
 
-    struct CoefficientRamp
-    {
-        std::array<double, kOrder> current {};
-        std::array<double, kOrder> target {};
-        std::array<double, kOrder> delta {};
-        int samplesRemaining = 0;
-        static constexpr int kRampLength = 512;
-    };
-
     void prepare(int bitDepth) noexcept
     {
         currentBitDepth = bitDepth;
@@ -51,8 +42,6 @@ public:
     {
         for (auto& channelState : states)
             juce::FloatVectorOperations::clear(channelState.data(), kOrder);
-
-        ramp.samplesRemaining = 0;
     }
 
     void setCoefficients(const double* newCoeffs, int numCoeffs) noexcept
@@ -64,32 +53,12 @@ public:
 
         for (int i = limit; i < kOrder; ++i)
             coeffs[static_cast<size_t>(i)] = 0.0;
-
-        ramp.current = coeffs;
-        ramp.target = coeffs;
-        ramp.samplesRemaining = 0;
-    }
-
-    void startCoefficientRamp(const double* newCoeffs) noexcept
-    {
-        for (int i = 0; i < kOrder; ++i)
-        {
-            ramp.target[static_cast<size_t>(i)] = clampCoeff(newCoeffs[i]);
-            ramp.delta[static_cast<size_t>(i)] = (ramp.target[static_cast<size_t>(i)] - ramp.current[static_cast<size_t>(i)]) / CoefficientRamp::kRampLength;
-        }
-        ramp.samplesRemaining = CoefficientRamp::kRampLength;
     }
 
     void applyMatchedCoefficients(const double* newCoeffs, int numCoeffs) noexcept
     {
-        // 新係数をクリップ
-        std::array<double, kOrder> clampedCoeffs{};
-        const int limit = std::min(kOrder, std::max(0, numCoeffs));
-        for (int i = 0; i < limit; ++i)
-            clampedCoeffs[static_cast<size_t>(i)] = clampCoeff(newCoeffs[i]);
-
-        // ランプで徐々に切り替え（クリック回避）
-        startCoefficientRamp(clampedCoeffs.data());
+        setCoefficients(newCoeffs, numCoeffs);
+        reset();
     }
 
     const double* getCoefficients() const noexcept
@@ -114,40 +83,8 @@ public:
             return;
         }
 
-        int i = 0;
-        const int rampSamples = std::min(numSamples, ramp.samplesRemaining);
-
-        if (rampSamples > 0)
-        {
-            if (dataR != nullptr)
-            {
-                for (; i < rampSamples; ++i)
-                {
-                    stepRampCurrent();
-                    const double* activeCoeffs = ramp.current.data();
-                    dataL[i] = processSample(0, dataL[i], states[0], activeCoeffs, headroom);
-                    dataR[i] = processSample(1, dataR[i], states[1], activeCoeffs, headroom);
-                }
-            }
-            else
-            {
-                for (; i < rampSamples; ++i)
-                {
-                    stepRampCurrent();
-                    const double* activeCoeffs = ramp.current.data();
-                    dataL[i] = processSample(0, dataL[i], states[0], activeCoeffs, headroom);
-                }
-            }
-
-            ramp.samplesRemaining -= rampSamples;
-            if (ramp.samplesRemaining == 0)
-            {
-                ramp.current = ramp.target;
-                coeffs = ramp.target;
-            }
-        }
-
         const double* activeCoeffs = coeffs.data();
+        int i = 0;
         if (dataR != nullptr)
         {
             for (; i < numSamples; ++i)
@@ -207,22 +144,6 @@ public:
 
 private:
     static constexpr double kStateLimit = 1.0e12;
-
-    inline void stepRampCurrent() noexcept
-    {
-        double* current = ramp.current.data();
-        const double* delta = ramp.delta.data();
-
-        __m256d cur0 = _mm256_loadu_pd(current);
-        __m256d del0 = _mm256_loadu_pd(delta);
-        _mm256_storeu_pd(current, _mm256_add_pd(cur0, del0));
-
-        __m256d cur1 = _mm256_loadu_pd(current + 4);
-        __m256d del1 = _mm256_loadu_pd(delta + 4);
-        _mm256_storeu_pd(current + 4, _mm256_add_pd(cur1, del1));
-
-        current[8] += delta[8];
-    }
 
     inline void clampStateSIMD(double* state) noexcept
     {
@@ -362,7 +283,6 @@ private:
         {{ 0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL, 0x0123456789ABCDEFULL, 0xEFCDAB8967452301ULL }},
         {{ 0x89ABCDEF01234567ULL, 0x76543210FEDCBA98ULL, 0xABCDEF0123456789ULL, 0x67452301EFCDAB89ULL }}
     };
-    CoefficientRamp ramp;
     int currentBitDepth = 0;
     double scale = 1.0;
     double invScale = 1.0;

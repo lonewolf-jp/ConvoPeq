@@ -23,9 +23,9 @@ struct EQBandParams {
 struct EQParameters {
     std::array<EQBandParams, 20> bands{};
     float totalGainDb = 0.0f;
-    bool agcEnabled = false;
-    float nonlinearSaturation = 0.2f;
-    int filterStructure = 0;  // 0:Serial, 1:Parallel
+    bool agcEnabled = false;               // AGC 有効フラグ（スナップショット保持対象）
+    float nonlinearSaturation = 0.2f;      // SVF 非線形飽和度（0.0〜1.0）
+    int filterStructure = 0;               // 0:Serial, 1:Parallel（スナップショット保持対象）
 
     // デフォルト値で初期化
     EQParameters() {

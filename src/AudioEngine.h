@@ -239,6 +239,8 @@ public:
 
     void setNoiseShaperType(NoiseShaperType type);
     NoiseShaperType getNoiseShaperType() const;
+    void requestSnapshotForNoiseShaper();
+    void commitAGCChange();
     void setFixedNoiseLogIntervalMs(int intervalMs) noexcept;
     int getFixedNoiseLogIntervalMs() const noexcept;
     void setFixedNoiseWindowSamples(int windowSamples) noexcept;
@@ -687,6 +689,21 @@ DSPCore();
     void pinCurrentThreadToNonAudioCoresIfNeeded() const noexcept;
     void publishCoeffsToBank(int bankIndex, const double* coeffs);
 
+    class ConvolverStateReaderGuard
+    {
+    public:
+        explicit ConvolverStateReaderGuard(ConvolverProcessor& conv) noexcept;
+        ~ConvolverStateReaderGuard() noexcept;
+
+        ConvolverStateReaderGuard(const ConvolverStateReaderGuard&) = delete;
+        ConvolverStateReaderGuard& operator=(const ConvolverStateReaderGuard&) = delete;
+
+    private:
+        ConvolverProcessor& m_convolver;
+    };
+
+    void debugAssertNotAudioThread() const;
+
     friend class NoiseShaperLearner;
 
 //==============================================================================
@@ -839,10 +856,16 @@ private:
     std::atomic<convo::NoiseShaperType> m_currentNoiseShaperType { convo::NoiseShaperType::Psychoacoustic };
 
     static constexpr int DEFAULT_IR_FADE_SAMPLES = 2048;
-    static constexpr int DEFAULT_EQ_FADE_SAMPLES = 512;
+    static constexpr int DEFAULT_EQ_FADE_SAMPLES = 256;
+    static constexpr int DEFAULT_NS_FADE_SAMPLES = 1024;
+    static constexpr int DEFAULT_AGC_FADE_SAMPLES = 128;
     std::atomic<int> m_irFadeSamples{ DEFAULT_IR_FADE_SAMPLES };
     std::atomic<int> m_eqFadeSamples{ DEFAULT_EQ_FADE_SAMPLES };
+    std::atomic<int> m_nsFadeSamples{ DEFAULT_NS_FADE_SAMPLES };
+    std::atomic<int> m_agcFadeSamples{ DEFAULT_AGC_FADE_SAMPLES };
     std::atomic<bool> m_pendingIRChange{ false };
+    std::atomic<bool> m_pendingNSChange{ false };
+    std::atomic<bool> m_pendingAGCChange{ false };
 
     juce::AudioBuffer<float> m_fadeFloatBuffer;
     juce::AudioBuffer<double> m_fadeDoubleBuffer;
