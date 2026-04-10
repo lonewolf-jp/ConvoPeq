@@ -144,6 +144,23 @@ target_sources(ConvoPeq PRIVATE
     src/CacheManager.cpp
     src/ConvolverSettingsComponent.cpp
     src/IRDSP.cpp
+    # Phase 1: RCU Snapshot Foundation (v13.0)
+    src/core/EQParameters.h
+    src/core/GlobalSnapshot.h
+    src/core/GlobalSnapshot.cpp
+    src/core/SnapshotParams.h
+    src/core/SnapshotFactory.h
+    src/core/SnapshotFactory.cpp
+    src/core/SnapshotAssembler.h
+    src/core/SnapshotAssembler.cpp
+    src/core/ReaderEpoch.h
+    src/core/ReaderEpoch.cpp
+    src/core/DeletionQueue.h
+    src/core/DeletionQueue.cpp
+    src/core/SnapshotCoordinator.h
+    src/core/SnapshotCoordinator.cpp
+    # Phase 2: Types
+    src/core/Types.h
 )
 
 #------------------------------------------------------------

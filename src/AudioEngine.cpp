@@ -635,6 +635,29 @@ AudioEngine::AudioEngine()
     globalEpoch.store(1, std::memory_order_relaxed);
     dspCrossfadeGain.reset(48000.0, 0.03);
     dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+
+    // Phase 2: 初期スナップショットを生成して SnapshotCoordinator に登録する
+    {
+        convo::SnapshotParams initParams;
+        initParams.inputHeadroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
+        initParams.outputMakeupGain  = outputMakeupGain.load(std::memory_order_relaxed);
+        initParams.convInputTrimGain = convolverInputTrimGain.load(std::memory_order_relaxed);
+        initParams.eqBypass          = eqBypassRequested.load(std::memory_order_relaxed);
+        initParams.convBypass        = convBypassRequested.load(std::memory_order_relaxed);
+        initParams.processingOrder   = static_cast<convo::ProcessingOrder>(
+                                           static_cast<int>(currentProcessingOrder.load(std::memory_order_relaxed)));
+        initParams.softClipEnabled   = softClipEnabled.load(std::memory_order_relaxed);
+        initParams.saturationAmount  = saturationAmount.load(std::memory_order_relaxed);
+        initParams.oversamplingType  = static_cast<convo::OversamplingType>(
+                                           static_cast<int>(oversamplingType.load(std::memory_order_relaxed)));
+        initParams.oversamplingFactor = manualOversamplingFactor.load(std::memory_order_relaxed);
+        initParams.ditherBitDepth    = ditherBitDepth.load(std::memory_order_relaxed);
+        initParams.noiseShaperType   = static_cast<convo::NoiseShaperType>(
+                                           static_cast<int>(noiseShaperType.load(std::memory_order_relaxed)));
+        initParams.generation        = m_paramGeneration.fetch_add(1, std::memory_order_relaxed);
+        const convo::GlobalSnapshot* initSnap = convo::SnapshotFactory::create(initParams);
+        m_coordinator.switchImmediate(initSnap);
+    }
 }
 
 

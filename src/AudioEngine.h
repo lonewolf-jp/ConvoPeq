@@ -55,6 +55,9 @@ struct CoeffSet {
 #include "LockFreeRingBuffer.h"
 #include "NoiseShaperLearner.h"
 #include "RefCountedDeferred.h"
+#include "core/Types.h"
+#include "core/SnapshotCoordinator.h"
+#include "core/ReaderEpoch.h"
 
 // デバッグビルド時のみログを出力するマクロ
 #if defined(JUCE_DEBUG) && !defined(NDEBUG)
@@ -805,6 +808,12 @@ private:
     {
         return (a - b) > (1ULL << 63);
     }
+
+    // ==================================================================
+    // スナップショット基盤（Phase 2）
+    // ==================================================================
+    convo::SnapshotCoordinator m_coordinator;
+    std::atomic<uint64_t> m_paramGeneration{0};
 
     // ==================================================================
 
