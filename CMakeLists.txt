@@ -154,7 +154,6 @@ target_sources(ConvoPeq PRIVATE
     src/core/SnapshotAssembler.h
     src/core/SnapshotAssembler.cpp
     src/core/ReaderEpoch.h
-    src/core/ReaderEpoch.cpp
     src/core/DeletionQueue.h
     src/core/DeletionQueue.cpp
     src/core/SnapshotCoordinator.h

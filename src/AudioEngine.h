@@ -360,7 +360,7 @@ DSPCore();
         convolver.forceCleanup();
     }
 
-    void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType);
+    void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner);
     void reset();
     void process(const juce::AudioSourceChannelInfo& bufferToFill, juce::AbstractFifo& audioFifo,
                  juce::AudioBuffer<float>& audioFifoBuffer, std::atomic<float>& inputLevelLinear,
@@ -427,6 +427,7 @@ DSPCore();
         int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（常にSAFE_MAX×8）
         std::atomic<int> fadeInSamplesLeft {0};
         static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
+        AudioEngine* ownerEngine = nullptr;
 
         // B2: processDouble 用のバイパスフェード状態
         convo::ScopedAlignedPtr<double> dryBypassBufferDoubleL;
@@ -788,18 +789,18 @@ private:
     // RCU 基盤（段階 2+3：参照追跡＋Grace Period による安全なリリース遅延）
     // ==================================================================
 
-    // Audio Thread 用：スレッドローカルなスロット番号を取得するヘルパー
-    size_t getOrRegisterCurrentThreadSlot();
+public:
+    void enterReader() noexcept;
+    void exitReader() noexcept;
+    uint64_t getMinReaderEpoch() const noexcept;
+    uint64_t advanceGlobalEpoch() noexcept;
 
-    // 参照追跡用の enter/exit（epoch 引数付き）
-    void enterReader(size_t slot, uint64_t epoch);
-    void exitReader(size_t slot);
+private:
+    // Audio Thread 用：スレッドローカルなスロット番号を取得するヘルパー
+    size_t getOrAllocateSlot() noexcept;
 
     // リリースキューに溜まったエントリを解放可能なものから処理する
     void processDeferredReleases();
-
-    // 現在の最小 reader epoch を取得（grace period 判定用）
-    uint64_t getMinReaderEpoch() const noexcept;
 
     // ==================================================================
     // RCU 基盤
@@ -812,6 +813,7 @@ private:
     alignas(64) std::array<std::atomic<uint64_t>, MAX_READERS> readerEpochs{};
     #pragma warning(pop)
     std::atomic<size_t> nextReaderSlot{0};
+    static thread_local size_t tls_readerSlot;
 
     // スレッド登録 API（Message/Timer スレッド用）
     size_t registerReader();

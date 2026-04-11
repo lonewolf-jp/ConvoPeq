@@ -58,7 +58,7 @@ public:
         abortFade();
         const GlobalSnapshot* oldSnap = m_current.exchange(newSnap, std::memory_order_release);
         if (oldSnap) {
-            uint64_t newEpoch = ReaderEpoch::advanceGlobalEpoch();
+            uint64_t newEpoch = SnapshotEpoch::advance();
             m_deletionQueue.enqueue(
                 const_cast<GlobalSnapshot*>(oldSnap),
                 [](void* ptr) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr)); },

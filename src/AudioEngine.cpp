@@ -24,10 +24,11 @@
 // ==================================================================
 // 段階 2+3：thread_local スロット管理および定数
 // ==================================================================
-thread_local size_t tls_readerSlot = SIZE_MAX;
 static constexpr size_t INVALID_SLOT = SIZE_MAX;
 static constexpr uint64_t kIdleEpoch = 0;
 static constexpr size_t RCU_BACKLOG_WARNING_THRESHOLD = 128;
+
+thread_local size_t AudioEngine::tls_readerSlot = SIZE_MAX;
 
 // ==================================================================
 // B19: requestLoadState の例外安全性確保用 RAII ガード
@@ -100,7 +101,7 @@ void AudioEngine::processDeferredReleases()
 // 段階 2+3 実装（追加）
 // ==================================================================
 
-size_t AudioEngine::getOrRegisterCurrentThreadSlot()
+size_t AudioEngine::getOrAllocateSlot() noexcept
 {
     if (tls_readerSlot != INVALID_SLOT)
         return tls_readerSlot;
@@ -115,20 +116,28 @@ size_t AudioEngine::getOrRegisterCurrentThreadSlot()
     return slot;
 }
 
-void AudioEngine::enterReader(size_t slot, uint64_t epoch)
+void AudioEngine::enterReader() noexcept
 {
+    const size_t slot = getOrAllocateSlot();
     if (slot >= MAX_READERS) return;
 
+    const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
     // Publish epoch with release semantics
     readerEpochs[slot].store(epoch, std::memory_order_release);
     // ★ 強化：seq_cst fence により publish 以降のロードが store より後に見えることを完全保証
     std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
-void AudioEngine::exitReader(size_t slot)
+void AudioEngine::exitReader() noexcept
 {
+    const size_t slot = tls_readerSlot;
     if (slot >= MAX_READERS) return;
     readerEpochs[slot].store(kIdleEpoch, std::memory_order_release);
+}
+
+uint64_t AudioEngine::advanceGlobalEpoch() noexcept
+{
+    return globalEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
 }
 
 uint64_t AudioEngine::getMinReaderEpoch() const noexcept
@@ -1829,10 +1838,12 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 //--------------------------------------------------------------
 AudioEngine::DSPCore::DSPCore() = default;
 
-void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType)
+void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner)
 {
     this->sampleRate = newSampleRate;
     this->noiseShaperType = selectedNoiseShaperType;
+    this->ownerEngine = owner;
+    convolver.setRcuProvider(ownerEngine);
 
     int targetFactor = 1;
     if (manualOversamplingFactor > 0)
@@ -2139,7 +2150,7 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
 
             // 1. Prepare (メモリ確保)
-            task.newDSP->prepare(task.sampleRate, task.samplesPerBlock, task.ditherDepth, task.manualOversamplingFactor, task.oversamplingType, task.noiseShaperType);
+            task.newDSP->prepare(task.sampleRate, task.samplesPerBlock, task.ditherDepth, task.manualOversamplingFactor, task.oversamplingType, task.noiseShaperType, this);
 
             if (isObsolete())
                 continue;

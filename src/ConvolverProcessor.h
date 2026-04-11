@@ -45,6 +45,7 @@
 #include "ConvolverRuntime.h"
 #include "core/ReaderEpoch.h"
 
+class AudioEngine;
 class IRConverter;
 class CacheManager;
 class ProgressiveUpgradeThread;
@@ -152,6 +153,8 @@ public:
 
     ConvolverProcessor();
     ~ConvolverProcessor();
+
+    void setRcuProvider(AudioEngine* engine) noexcept { rcuProvider = engine; }
 
     // RCU リーダー (Audio Thread のみ)
     void enterReader();
@@ -700,12 +703,19 @@ private:
     juce::File currentIrFile;
     juce::CriticalSection irFileLock;
     std::atomic<bool> currentIrOptimized { false };
-    // [Bug E fix] Message Thread (applyNewState) と rebuildThread (rebuildAllIRsSynchronous) が
-    // 同時に読み書きする可能性があるため std::atomic<std::shared_ptr<T>> (C++20) を使用。
-    std::atomic<std::shared_ptr<juce::AudioBuffer<double>>> originalIR;
-    // [Bug 4 fix] Message Thread (applyNewState) と rebuildThread (rebuildAllIRsSynchronous) が
-    // 同時に読み書きする可能性があるため std::atomic<double> を使用。
-    std::atomic<double> originalIRSampleRate { 0.0 };
+    struct IRState {
+        std::shared_ptr<juce::AudioBuffer<double>> irOwner;
+        const juce::AudioBuffer<double>* ir = nullptr;
+        double sampleRate = 0.0;
+        uint64_t generation = 0;
+    };
+    std::atomic<IRState*> currentIRState { nullptr };
+    AudioEngine* rcuProvider = nullptr;
+
+    const IRState* acquireIRState() const noexcept;
+    void releaseIRState(const IRState* state) const noexcept;
+    void updateIRState(std::shared_ptr<juce::AudioBuffer<double>> newIR, double newSR);
+
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
     std::atomic<double> currentIRScale { 1.0 }; // IRのスケールファクター (Auto Makeup + Safety Margin)
     convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
@@ -762,6 +772,26 @@ private:
         }
     };
 
+
+        class ReaderGuard
+        {
+        public:
+            explicit ReaderGuard(ConvolverProcessor& proc) noexcept : processor(proc)
+            {
+                processor.enterReader();
+            }
+
+            ~ReaderGuard() noexcept
+            {
+                processor.exitReader();
+            }
+
+            ReaderGuard(const ReaderGuard&) = delete;
+            ReaderGuard& operator=(const ReaderGuard&) = delete;
+
+        private:
+            ConvolverProcessor& processor;
+        };
     struct CacheEntry {
         std::shared_ptr<juce::AudioBuffer<double>> ir;
         std::vector<convo::SecondOrderAllpass> allpassSections;
