@@ -46,13 +46,12 @@ void ConvolverProcessor::overflowCallbackThunk(void* userData) noexcept
 
 void ConvolverProcessor::enterReader()
 {
-    const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
-    readerEpoch.store(epoch, std::memory_order_release);
+    convo::ReaderEpoch::enter(convo::ReaderEpoch::getThreadSlot());
 }
 
 void ConvolverProcessor::exitReader()
 {
-    readerEpoch.store(0, std::memory_order_release);
+    convo::ReaderEpoch::exit(convo::ReaderEpoch::getThreadSlot());
 }
 
 void ConvolverProcessor::retireStereoConvolver(StereoConvolver* conv, uint64_t retireEpoch)
@@ -1317,11 +1316,8 @@ ConvolverProcessor::~ConvolverProcessor()
     // スレッドを停止
     activeLoader.reset();
 
-    const uint64_t retireEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
-    auto* oldConv = convolution.exchange(nullptr, std::memory_order_release);
-    if (activeConvolution && activeConvolution != oldConv)
-        retireStereoConvolver(activeConvolution, retireEpoch);
-    activeConvolution = nullptr;
+    const uint64_t retireEpoch = convo::ReaderEpoch::advanceGlobalEpoch();
+    auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
 
@@ -1354,10 +1350,7 @@ void ConvolverProcessor::timerCallback()
         }
     }
 
-    const uint64_t reader = readerEpoch.load(std::memory_order_acquire);
-    const uint64_t safeEpoch = (reader == 0)
-        ? globalEpoch.load(std::memory_order_acquire)
-        : reader;
+    const uint64_t safeEpoch = convo::ReaderEpoch::getMinActiveEpoch();
     g_deletionQueue.reclaim(safeEpoch);
 
     cleanup();
@@ -1396,7 +1389,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     currentSpec = spec;
 
     // 既存のコンボリューション状態の確認
-    auto* conv = convolution.load(std::memory_order_acquire);
+    auto* conv = m_activeEngine.load(std::memory_order_acquire);
     if (conv) {
         // FIX: Oversampling x8時のblockSize/partitionSize不整合対策
         // MKL NUC に正しい knownBlockSize を渡すために、エンジンを再構築する。
@@ -1430,14 +1423,10 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                                   experimentalDirectHeadEnabled.load(std::memory_order_acquire),
                                   nullptr, this))
                 {
-                    const uint64_t newEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
-                    const uint64_t retireEpoch = newEpoch - 1;
-                    auto* oldConv = convolution.exchange(newConv, std::memory_order_release);
-                    if (activeConvolution && activeConvolution != oldConv)
-                        retireStereoConvolver(activeConvolution, retireEpoch);
+                    const uint64_t retireEpoch = convo::ReaderEpoch::advanceGlobalEpoch();
+                    auto* oldConv = m_activeEngine.exchange(newConv, std::memory_order_acq_rel);
                     if (oldConv)
                         retireStereoConvolver(oldConv, retireEpoch);
-                    activeConvolution = newConv;
                     updateLatencyCache();
                 }
                 else
@@ -1646,11 +1635,8 @@ void ConvolverProcessor::releaseResources()
     }
 
     // Release active convolution engine
-    const uint64_t retireEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
-    auto* oldConv = convolution.exchange(nullptr, std::memory_order_release);
-    if (activeConvolution && activeConvolution != oldConv)
-        retireStereoConvolver(activeConvolution, retireEpoch);
-    activeConvolution = nullptr;
+    const uint64_t retireEpoch = convo::ReaderEpoch::advanceGlobalEpoch();
+    auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
 
@@ -1673,7 +1659,7 @@ void ConvolverProcessor::releaseResources()
 
 void ConvolverProcessor::reset()
 {
-    auto* conv = convolution.load(std::memory_order_acquire);
+    auto* conv = m_activeEngine.load(std::memory_order_acquire);
     if (conv)
     {
         conv->reset();
@@ -3861,12 +3847,9 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
 
     // クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
     // SCはDSPCore::prepare()内のprepareToPlay、またはrebuildAllIRsSynchronousで生成する
-    // activeConvolution / convolution はnullptrのままにする
-    const uint64_t retireEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
-    auto* oldConv = convolution.exchange(nullptr, std::memory_order_release);
-    if (activeConvolution && activeConvolution != oldConv)
-        retireStereoConvolver(activeConvolution, retireEpoch);
-    activeConvolution = nullptr;
+    // エンジンは nullptr のままにする
+    const uint64_t retireEpoch = convo::ReaderEpoch::advanceGlobalEpoch();
+    auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
 }
@@ -3894,8 +3877,8 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
     // UI側のオブジェクトをコピーするとピッチズレやレイテンシー不整合が発生する。
     if (std::abs(currentSampleRate.load() - other.currentSampleRate.load()) < 1e-6)
     {
-        auto* otherConv = other.convolution.load(std::memory_order_acquire);
-        auto* expectedConv = convolution.load(std::memory_order_acquire);
+        auto* otherConv = other.m_activeEngine.load(std::memory_order_acquire);
+        auto* expectedConv = m_activeEngine.load(std::memory_order_acquire);
 
         if (otherConv != expectedConv && otherConv != nullptr)
         {
@@ -3907,7 +3890,7 @@ void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
 void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& other)
 {
     // 所有権共有を避けるため clone を作成して保持する
-    auto* otherConv = other.convolution.load(std::memory_order_acquire);
+    auto* otherConv = other.m_activeEngine.load(std::memory_order_acquire);
     if (otherConv == nullptr)
         return;
 
@@ -3915,16 +3898,10 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     if (clonedConv == nullptr)
         return;
 
-    const uint64_t newEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
-    const uint64_t retireEpoch = newEpoch - 1;
-    auto* oldConv = convolution.exchange(clonedConv, std::memory_order_release);
-
-    if (activeConvolution && activeConvolution != oldConv)
-        retireStereoConvolver(activeConvolution, retireEpoch);
+    const uint64_t retireEpoch = convo::ReaderEpoch::advanceGlobalEpoch();
+    auto* oldConv = m_activeEngine.exchange(clonedConv, std::memory_order_acq_rel);
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
-
-    activeConvolution = clonedConv;
     cachedLatency.store(other.cachedLatency.load(std::memory_order_acquire), std::memory_order_release);
 
     irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
@@ -3948,7 +3925,7 @@ ConvolverProcessor::ResamplingPhaseMode ConvolverProcessor::getResamplingPhaseMo
 
 void ConvolverProcessor::refreshLatency()
 {
-    auto* conv = convolution.load(std::memory_order_acquire);
+    auto* conv = m_activeEngine.load(std::memory_order_acquire);
     double totalLatency = 0.0;
     if (conv)
     {
@@ -4012,7 +3989,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // ── Step 1: RCU State Load (Lock-free / Wait-free) ──
     // Raw pointer load (No ref counting)
-    auto* conv = convolution.load(std::memory_order_acquire);
+    auto* conv = m_activeEngine.load(std::memory_order_acquire);
 
     // ★ リングバッファオーバーフローフラグチェック (Audio Thread 内の唯一操作・ロックフリー atomic のみ)
     if (overflowRequested.exchange(false, std::memory_order_acq_rel))
@@ -4715,7 +4692,7 @@ int ConvolverProcessor::getRebuildDebounceMs() const
 ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() const
 {
     LatencyBreakdown breakdown;
-    if (auto* conv = convolution.load(std::memory_order_acquire))
+    if (auto* conv = m_activeEngine.load(std::memory_order_acquire))
     {
         const bool directHeadActive = conv->storedDirectHeadEnabled;
         breakdown.directHeadActive = directHeadActive;
@@ -4960,10 +4937,6 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
                                        double scaleFactor,
                                        std::shared_ptr<juce::AudioBuffer<double>> displayIR)
 {
-    const uint64_t newEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
-    const uint64_t retireEpoch = newEpoch - 1;
-    auto* oldConv = convolution.exchange(newConv, std::memory_order_release);
-
     // 元データの更新 (新規ロード時のみ)
     if (!isRebuild)
     {
@@ -4984,14 +4957,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
         createFrequencyResponseSnapshot(*displayIR, loadedSR);
     }
 
-    auto* convToFadeOut = activeConvolution;
-    activeConvolution = newConv;
-
-    if (convToFadeOut != nullptr)
-        retireStereoConvolver(convToFadeOut, retireEpoch);
-
-    if (oldConv != nullptr && oldConv != convToFadeOut)
-        retireStereoConvolver(oldConv, retireEpoch);
+    switchEngineOnMessageThread(newConv);
 
     irLength.store(targetLength, std::memory_order_release);
     currentSampleRate.store(loadedSR, std::memory_order_release);
@@ -5003,6 +4969,17 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     updateLatencyCache();
     requestHostDisplayUpdate();
     postCoalescedChangeNotification();
+}
+
+void ConvolverProcessor::switchEngineOnMessageThread(StereoConvolver* newEngine) noexcept
+{
+    if (newEngine == nullptr)
+        return;
+
+    const uint64_t retireEpoch = convo::ReaderEpoch::advanceGlobalEpoch();
+    auto* oldEngine = m_activeEngine.exchange(newEngine, std::memory_order_acq_rel);
+    if (oldEngine)
+        retireStereoConvolver(oldEngine, retireEpoch);
 }
 
 // applyNewState へのシンプルな転送。新しいコードからは commitNewConvolver を使用する。

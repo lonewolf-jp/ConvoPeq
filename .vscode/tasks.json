@@ -67,6 +67,64 @@
             ],
             "isBackground": false,
             "group": "build"
+        },
+        {
+            "label": "MCP: Start io.github.upstash/context7",
+            "type": "shell",
+            "command": "if \"%CONTEXT7_API_KEY%\"==\"\" echo [WARN] CONTEXT7_API_KEY is empty. && start \"mcp-context7\" /B cmd /d /c \"npx @upstash/context7-mcp@1.0.31\"",
+            "problemMatcher": []
+        },
+        {
+            "label": "MCP: Start oraios/serena",
+            "type": "shell",
+            "command": "start \"mcp-serena\" /B cmd /d /c \"uvx --from git+https://github.com/oraios/serena serena start-mcp-server --context ide-assistant --project .\"",
+            "problemMatcher": []
+        },
+        {
+            "label": "MCP: Start microsoft/markitdown",
+            "type": "shell",
+            "command": "start \"mcp-markitdown\" /B cmd /d /c \"uvx markitdown-mcp@0.0.1a4\"",
+            "problemMatcher": []
+        },
+        {
+            "label": "MCP: Start microsoft/playwright-mcp",
+            "type": "shell",
+            "command": "start \"mcp-playwright\" /B cmd /d /c \"npx @playwright/mcp@latest\"",
+            "problemMatcher": []
+        },
+        {
+            "label": "MCP: Start firecrawl/firecrawl-mcp-server",
+            "type": "shell",
+            "command": "if \"%FIRECRAWL_API_KEY%\"==\"\" echo [WARN] FIRECRAWL_API_KEY is empty. && start \"mcp-firecrawl\" /B cmd /d /c \"set FIRECRAWL_API_KEY=%FIRECRAWL_API_KEY%&& npx -y firecrawl-mcp@latest\"",
+            "problemMatcher": []
+        },
+        {
+            "label": "MCP: Start All Local (stdio)",
+            "dependsOn": [
+                "MCP: Start io.github.upstash/context7",
+                "MCP: Start oraios/serena",
+                "MCP: Start microsoft/markitdown",
+                "MCP: Start microsoft/playwright-mcp",
+                "MCP: Start firecrawl/firecrawl-mcp-server"
+            ],
+            "dependsOrder": "parallel",
+            "problemMatcher": []
+        },
+        {
+            "label": "MCP: Auto Start on Folder Open",
+            "dependsOn": [
+                "MCP: Start All Local (stdio)"
+            ],
+            "runOptions": {
+                "runOn": "folderOpen"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MCP: Stop All Local (stdio)",
+            "type": "shell",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$targets = @('context7-mcp@1.0.31','serena start-mcp-server','markitdown-mcp@0.0.1a4','@playwright/mcp@latest','firecrawl-mcp@latest'); $procs = Get-CimInstance Win32_Process | Where-Object { $cmd = $_.CommandLine; if (-not $cmd) { return $false }; $lc = $cmd.ToLowerInvariant(); foreach ($t in $targets) { if ($lc.Contains($t.ToLowerInvariant())) { return $true } }; return $false }; $count = 0; foreach ($p in $procs) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; $count++ } catch {} }; Write-Host ('Stopped MCP processes: ' + $count)\"",
+            "problemMatcher": []
         }
     ]
 }

@@ -43,6 +43,7 @@
 #include "PreparedIRState.h"
 #include "DeferredDeletionQueue.h"
 #include "ConvolverRuntime.h"
+#include "core/ReaderEpoch.h"
 
 class IRConverter;
 class CacheManager;
@@ -413,6 +414,8 @@ private:
                             const juce::File& file, double scaleFactor,
                             std::shared_ptr<juce::AudioBuffer<double>> displayIR);
 
+    void switchEngineOnMessageThread(StereoConvolver* newEngine) noexcept;
+
     void applyNewState(StereoConvolver* newConv, std::shared_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::shared_ptr<juce::AudioBuffer<double>> displayIR);
     void handleLoadError(const juce::String& error);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
@@ -582,8 +585,7 @@ private:
         void process(int channel, const double* in, double* out, int numSamples);
     };
 
-    std::atomic<StereoConvolver*> convolution { nullptr }; // Raw pointer for Audio Thread (Lock-free)
-    StereoConvolver* activeConvolution = nullptr; // Ownership holder for Message Thread
+    std::atomic<StereoConvolver*> m_activeEngine { nullptr }; // Raw pointer for Audio Thread (Lock-free)
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
     std::unique_ptr<LoaderThread> activeLoader;
@@ -818,12 +820,7 @@ private:
     std::atomic<uint64_t> activeCacheKey { 0 };
     std::atomic<int> activeCacheFFTSize { 0 };
 
-    // RCU 管理 (StereoConvolver 用, 単一リーダー)
-#pragma warning(push)
-#pragma warning(disable: 4324) // 「構造体がパッドされました」を無視
-    std::atomic<uint64_t> globalEpoch { 1 };
-    alignas(64) std::atomic<uint64_t> readerEpoch { 0 };
-#pragma warning(pop)
+    // RCU 管理 (StereoConvolver 用)
     std::atomic<bool> firstProcessCall { true };
 
     static void retireStereoConvolver(StereoConvolver* conv, uint64_t retireEpoch);
