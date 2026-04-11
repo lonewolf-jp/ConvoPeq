@@ -48,6 +48,9 @@ struct GlobalSnapshot {
     // ---------- 世代管理 ----------
     uint64_t generation = 0;
 
+    // v2.3 フェーズ 1 追加フィールド
+    uint64_t eqCoeffHash = 0;           // EQパラメータハッシュ値（キャッシュ識別子）
+
 #ifdef _DEBUG
     mutable std::atomic<bool> alive{true};
     uint64_t snapshotId = 0;

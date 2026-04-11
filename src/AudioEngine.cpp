@@ -627,7 +627,8 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 // コンストラクタ
 //--------------------------------------------------------------
 AudioEngine::AudioEngine()
-    : m_workerThread(m_commandBuffer, m_coordinator, m_generationManager)
+    : m_workerThread(m_commandBuffer, m_coordinator, m_generationManager),
+      uiEqEditor(*this)
 {
     initialiseAdaptiveCoeffBanks();
     selectAdaptiveCoeffBankForCurrentSettings();
@@ -1199,9 +1200,8 @@ void AudioEngine::initialize()
     uiConvolverProcessor.prepareToPlay(48000.0, 512);
 
     uiConvolverProcessor.addChangeListener(this);
-    uiEqProcessor.addChangeListener(this);
+    uiEqEditor.addChangeListener(this);
     uiConvolverProcessor.addListener(this);
-    uiEqProcessor.addListener(this);
 
     // タイマー開始 (100ms間隔)
     // - DSP再構築リクエストのポーリング (Audio Threadからの依頼を処理)
@@ -1261,6 +1261,66 @@ void AudioEngine::debugAssertNotAudioThread() const
     jassert(!juce::MessageManager::getInstance()->isThisTheMessageThread());
 }
 
+EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters& params,
+                                                       double sampleRate,
+                                                       int maxBlockSize,
+                                                       uint64_t generation)
+{
+    const uint64_t hash = EQProcessor::computeParamsHash(params);
+    auto currentMap = loadMap();
+    auto it = currentMap->find(hash);
+    if (it != currentMap->end())
+        return it->second;
+
+    EQCoeffCache* cache = EQProcessor::createCoeffCache(params, sampleRate, maxBlockSize, generation);
+    if (cache == nullptr)
+        return nullptr;
+
+    std::lock_guard<std::mutex> lock(writeMutex);
+
+    // Lock取得中に他スレッドが同じハッシュを追加した可能性を再確認
+    currentMap = loadMap();
+    it = currentMap->find(hash);
+    if (it != currentMap->end())
+    {
+        // 先に追加されたキャッシュを採用し、新規作成分を破棄
+        cache->release();
+        return it->second;
+    }
+
+    auto newMap = std::make_shared<CacheMap>(*currentMap);
+    (*newMap)[hash] = cache;
+    cacheMapPtr.store(std::shared_ptr<const CacheMap>(newMap), std::memory_order_release);
+
+    return cache;
+}
+
+EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) const noexcept
+{
+    auto currentMap = loadMap();
+    const auto it = currentMap->find(hash);
+    return (it != currentMap->end()) ? it->second : nullptr;
+}
+
+void AudioEngine::EQCacheManager::releaseCache(EQCoeffCache* cache) noexcept
+{
+    if (cache != nullptr)
+        cache->release();
+}
+
+AudioEngine::EQCacheManager::~EQCacheManager()
+{
+    std::lock_guard<std::mutex> lock(writeMutex);
+    auto currentMap = loadMap();
+    for (const auto& entry : *currentMap)
+    {
+        if (entry.second != nullptr)
+            entry.second->release();
+    }
+
+    cacheMapPtr.store(std::shared_ptr<const CacheMap>(std::make_shared<CacheMap>()), std::memory_order_release);
+}
+
 void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 {
     debugAssertNotAudioThread();
@@ -1269,13 +1329,13 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     const ConvolverState* convState = uiConvolverProcessor.getConvolverState();
 
     convo::EQParameters eqParams;
-    if (const auto* eqState = uiEqProcessor.getEQStateSnapshot())
+    if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
         eqParams = eqState->toEQParameters();
 
     std::array<double, 9> nsCoeffs{};
     getCurrentAdaptiveCoefficients(nsCoeffs.data(), kAdaptiveNoiseShaperOrder);
 
-    if (uiEqProcessor.getAndClearPendingAGCChange())
+    if (uiEqEditor.getAndClearPendingAGCChange())
         m_pendingAGCChange.store(true, std::memory_order_release);
 
     const double inputHeadroomGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentInputHeadroomDb.load(std::memory_order_relaxed)));
@@ -1290,6 +1350,12 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     const int osFactor = m_currentOversamplingFactor.load(std::memory_order_relaxed);
     const int bitDepth = m_currentDitherBitDepth.load(std::memory_order_relaxed);
     const convo::NoiseShaperType nsType = m_currentNoiseShaperType.load(std::memory_order_relaxed);
+    const double sampleRate = currentSampleRate.load(std::memory_order_acquire);
+    const int maxBlockSize = maxSamplesPerBlock.load(std::memory_order_acquire);
+
+    uint64_t eqCoeffHash = 0;
+    if (EQCoeffCache* cache = eqCacheManager.getOrCreate(eqParams, sampleRate, maxBlockSize, generation))
+        eqCoeffHash = cache->paramsHash;
 
     convo::SnapshotParams params = convo::SnapshotAssembler::assemble(
         convState,
@@ -1307,7 +1373,11 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         osFactor,
         bitDepth,
         nsType,
-        generation);
+        generation,
+        sampleRate,
+        maxBlockSize,
+        eqCoeffHash);
+
 
     const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::create(params);
     int fadeSamples = m_eqFadeSamples.load(std::memory_order_relaxed);
@@ -1355,9 +1425,8 @@ AudioEngine::~AudioEngine()
 
     // 3. Remove listeners
     uiConvolverProcessor.removeChangeListener(this);
-    uiEqProcessor.removeChangeListener(this);
+    uiEqEditor.removeChangeListener(this);
     uiConvolverProcessor.removeListener(this);
-    uiEqProcessor.removeListener(this);
 
     // 4. Release Active DSP
     if (activeDSP)
@@ -1479,7 +1548,7 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
     int numActiveBands = 0;
 
     // 状態スナップショットを取得して一貫性を確保
-    auto eqState = uiEqProcessor.getEQState();
+    auto eqState = uiEqEditor.getEQState();
 
     if (eqState == nullptr)
     {
@@ -1525,7 +1594,7 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
     }
 
     float totalGainLinear = 1.0f;
-    if (!uiEqProcessor.getAGCEnabled())
+    if (!uiEqEditor.getAGCEnabled())
     {
         totalGainLinear = juce::Decibels::decibelsToGain(eqState->totalGainDb);
     }
@@ -2034,7 +2103,7 @@ void AudioEngine::DSPCore::reset()
 //--------------------------------------------------------------
 void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 {
-    // UIコンポーネント(uiEqProcessor等)へのアクセスやMKLメモリ確保を行うため、必ずMessage Threadで実行すること
+    // UIコンポーネント(uiEqEditor等)へのアクセスやMKLメモリ確保を行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
     if (noiseShaperLearner && noiseShaperLearner->isRunning())
@@ -2045,7 +2114,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     newDSP->convolver.setVisualizationEnabled(false); // DSP用は可視化データ不要
 
     // UIプロセッサから状態をコピー
-    newDSP->eq.syncStateFrom(uiEqProcessor); // 最適化: ValueTreeを経由せず直接同期
+    // EQ状態は Snapshot 経由で反映するため、ここでの直接同期は行わない。
     newDSP->convolver.syncStateFrom(uiConvolverProcessor);
 
     // キャプチャ用変数
@@ -2170,8 +2239,6 @@ void AudioEngine::rebuildThreadLoop()
             bool irReused = false;
             if (task.currentDSP)
             {
-                // 既存のDSPからAGCの状態を引き継ぐ
-                task.newDSP->eq.syncGlobalStateFrom(task.currentDSP->eq);
 
                 if (std::abs(task.currentDSP->sampleRate - task.sampleRate) < 1e-6 &&
                     task.currentDSP->oversamplingFactor == task.newDSP->oversamplingFactor &&
@@ -2584,14 +2651,14 @@ void AudioEngine::timerCallback()
     }
 
     // UI用プロセッサのクリーンアップ
-    uiEqProcessor.cleanup();
+    uiEqEditor.cleanup();
     uiConvolverProcessor.cleanup();
 }
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
     // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
-    if (source == &uiEqProcessor || source == &uiConvolverProcessor)
+    if (source == &uiEqEditor || source == &uiConvolverProcessor)
     {
         const double sr = currentSampleRate.load();
         if (sr <= 0.0) return;
@@ -2601,35 +2668,6 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 
         // UIに更新を通知 (MainWindowが受け取る)
         sendChangeMessage();
-    }
-}
-
-void AudioEngine::eqBandChanged(EQProcessor* processor, int bandIndex)
-{
-    if (processor == &uiEqProcessor)
-    {
-        std::lock_guard<std::mutex> lk(rebuildMutex);
-        if (activeDSP)
-            activeDSP->eq.syncBandNodeFrom(uiEqProcessor, bandIndex);
-        enqueueSnapshotCommand();
-    }
-}
-
-void AudioEngine::eqGlobalChanged(EQProcessor* processor)
-{
-    if (processor == &uiEqProcessor)
-    {
-        std::lock_guard<std::mutex> lk(rebuildMutex);
-        if (activeDSP) {
-            // syncGlobalStateFrom は AGC の実行状態も上書きしてしまうため、
-            // UIからの変更通知では、UIが管理するパラメータのみを個別に設定する。
-            // これにより、アクティブなDSPのAGC状態がリセットされるのを防ぐ。
-            activeDSP->eq.setTotalGain(uiEqProcessor.getTotalGain());
-            activeDSP->eq.setAGCEnabled(uiEqProcessor.getAGCEnabled());
-            activeDSP->eq.setNonlinearSaturation(uiEqProcessor.getNonlinearSaturation());
-            activeDSP->eq.setFilterStructure(uiEqProcessor.getFilterStructure());
-        }
-        enqueueSnapshotCommand();
     }
 }
 
@@ -2753,7 +2791,7 @@ void AudioEngine::releaseResources()
 
     // 3. Release UI Processor Resources
     uiConvolverProcessor.releaseResources();
-    uiEqProcessor.releaseResources();
+    uiEqEditor.releaseResources();
 }
 
 //--------------------------------------------------------------
@@ -3394,6 +3432,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     int numProcSamples = (int)processBlock.getNumSamples();
     int numProcChannels = (int)processBlock.getNumChannels(); // 通常は2
 
+    const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->m_coordinator.getCurrent() : nullptr;
+    const bool useSnapshotEq = (snap != nullptr);
+
     //----------------------------------------------------------
     // DSP処理チェーン (Dynamic Processing Order)
     //----------------------------------------------------------
@@ -3407,12 +3448,42 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         if (!state.convBypassed) // stateから読み出し
             convolver.process(processBlock);
         // 2. EQ
-        eq.process(processBlock);
+        if (!state.eqBypassed)
+        {
+            if (useSnapshotEq)
+            {
+                const EQCoeffCache* cache = ownerEngine->eqCacheManager.get(snap->eqCoeffHash);
+                eq.process(processBlock, snap->eqParams, cache);
+            }
+            else
+            {
+                eq.process(processBlock);
+            }
+        }
+        else
+        {
+            eq.process(processBlock);
+        }
     }
     else
     {
         // 1. EQ
-        eq.process(processBlock);
+        if (!state.eqBypassed)
+        {
+            if (useSnapshotEq)
+            {
+                const EQCoeffCache* cache = ownerEngine->eqCacheManager.get(snap->eqCoeffHash);
+                eq.process(processBlock, snap->eqParams, cache);
+            }
+            else
+            {
+                eq.process(processBlock);
+            }
+        }
+        else
+        {
+            eq.process(processBlock);
+        }
         // 2. Convolver
         if (!state.convBypassed) // stateから読み出し
         {
@@ -3625,17 +3696,50 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
     const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
 
+    const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->m_coordinator.getCurrent() : nullptr;
+    const bool useSnapshotEq = (snap != nullptr);
+
     eq.setBypass(state.eqBypassed);
 
     if (state.order == ProcessingOrder::ConvolverThenEQ)
     {
         if (!state.convBypassed)
             convolver.process(processBlock);
-        eq.process(processBlock);
+        if (!state.eqBypassed)
+        {
+            if (useSnapshotEq)
+            {
+                const EQCoeffCache* cache = ownerEngine->eqCacheManager.get(snap->eqCoeffHash);
+                eq.process(processBlock, snap->eqParams, cache);
+            }
+            else
+            {
+                eq.process(processBlock);
+            }
+        }
+        else
+        {
+            eq.process(processBlock);
+        }
     }
     else
     {
-        eq.process(processBlock);
+        if (!state.eqBypassed)
+        {
+            if (useSnapshotEq)
+            {
+                const EQCoeffCache* cache = ownerEngine->eqCacheManager.get(snap->eqCoeffHash);
+                eq.process(processBlock, snap->eqParams, cache);
+            }
+            else
+            {
+                eq.process(processBlock);
+            }
+        }
+        else
+        {
+            eq.process(processBlock);
+        }
         if (!state.convBypassed)
         {
             // EQ→Conv 時: コンボルバー入力トリムを適用してから畳み込む
@@ -4309,7 +4413,7 @@ void AudioEngine::setEqBypassRequested (bool shouldBypass)
 {
     eqBypassRequested.store (shouldBypass, std::memory_order_release);
     m_currentEqBypass.store(shouldBypass, std::memory_order_release);
-    uiEqProcessor.setBypass(shouldBypass);
+    uiEqEditor.setBypass(shouldBypass);
     applyDefaultsForCurrentMode();
     enqueueSnapshotCommand();
     sendChangeMessage();
@@ -4348,13 +4452,13 @@ ConvolverProcessor::PhaseMode AudioEngine::getConvolverPhaseMode() const
 
 void AudioEngine::requestEqPreset (int presetIndex)
 {
-    uiEqProcessor.loadPreset (presetIndex);
+    uiEqEditor.loadPreset (presetIndex);
     sendChangeMessage();
 }
 
 void AudioEngine::requestEqPresetFromText(const juce::File& file)
 {
-    if (uiEqProcessor.loadFromTextFile(file))
+    if (uiEqEditor.loadFromTextFile(file))
         sendChangeMessage();
 }
 
@@ -4376,7 +4480,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     {
         bool bypassed = state.getProperty("eqBypassed");
         eqBypassRequested.store(bypassed, std::memory_order_release);
-        uiEqProcessor.setBypass(bypassed);
+        uiEqEditor.setBypass(bypassed);
     }
 
     if (state.hasProperty("convBypassed"))
@@ -4496,7 +4600,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     // ─── Step 4: サブプロセッサ状態の復元 ───────────────────────────────────
     auto eqState = state.getChildWithName ("EQ");
     if (eqState.isValid())
-        uiEqProcessor.setState (eqState);
+        uiEqEditor.setState (eqState);
 
     auto convState = state.getChildWithName ("Convolver");
     if (convState.isValid())
@@ -4550,7 +4654,7 @@ juce::ValueTree AudioEngine::getCurrentState() const
                               nullptr);
     }
 
-    state.addChild (uiEqProcessor.getState(), -1, nullptr);
+    state.addChild (uiEqEditor.getState(), -1, nullptr);
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
     return state;
 }

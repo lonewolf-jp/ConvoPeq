@@ -703,7 +703,6 @@ void EQProcessor::setBandFrequency(int band, float freq)
         prev->release();
     }
     updateBandNode(band);
-    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 void EQProcessor::setBandGain(int band, float gainDb)
@@ -720,7 +719,6 @@ void EQProcessor::setBandGain(int band, float gainDb)
         prev->release();
     }
     updateBandNode(band);
-    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 void EQProcessor::setBandQ(int band, float q)
@@ -737,7 +735,6 @@ void EQProcessor::setBandQ(int band, float q)
         prev->release();
     }
     updateBandNode(band);
-    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 void EQProcessor::setBandEnabled(int band, bool enabled)
@@ -758,7 +755,6 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
         prev->release();
     }
     updateBandNode(band);
-    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 void EQProcessor::setTotalGain(float gainDb)
@@ -779,7 +775,6 @@ void EQProcessor::setTotalGain(float gainDb)
     if (prev) {
         prev->release();
     }
-    listeners.call(&Listener::eqGlobalChanged, this);
 }
 
 void EQProcessor::setAGCEnabled(bool enabled)
@@ -800,7 +795,6 @@ void EQProcessor::setAGCEnabled(bool enabled)
 
     if (enabled)
         agcResetRequest.store(true, std::memory_order_relaxed);
-    listeners.call(&Listener::eqGlobalChanged, this);
 }
 
 bool EQProcessor::getAGCEnabled() const
@@ -826,7 +820,6 @@ void EQProcessor::setBandType(int band, EQBandType type)
         prev->release();
     }
     updateBandNode(band);
-    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
@@ -846,7 +839,6 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
         prev->release();
     }
     updateBandNode(band);
-    listeners.call(&Listener::eqBandChanged, this, band);
 }
 
 void EQProcessor::setNonlinearSaturation(float value) noexcept
@@ -868,8 +860,6 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
         if (prev)
             prev->release();
     }
-
-    listeners.call(&Listener::eqGlobalChanged, this);
 }
 
 float EQProcessor::getNonlinearSaturation() const noexcept
@@ -898,8 +888,6 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
         if (prev)
             prev->release();
     }
-
-    listeners.call(&Listener::eqGlobalChanged, this);
 }
 
 EQProcessor::FilterStructure EQProcessor::getFilterStructure() const noexcept
@@ -1784,6 +1772,229 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
 }
 
+void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
+                          const convo::EQParameters& eqParams,
+                          const EQCoeffCache* coeffCache)
+{
+    // 既存バイパス遷移ロジックを維持するため、遷移中は既存パスへフォールバック
+    if (coeffCache == nullptr
+        || bypassRequested.load(std::memory_order_relaxed)
+        || bypassed.load(std::memory_order_relaxed)
+        || bypassFadeGain.isSmoothing())
+    {
+        process(block);
+        return;
+    }
+
+    juce::ScopedNoDenormals noDenormals;
+
+    const int numSamples = static_cast<int>(block.getNumSamples());
+    if (numSamples <= 0 || static_cast<size_t>(numSamples) > static_cast<size_t>(maxInternalBlockSize))
+    {
+        for (int ch = 0; ch < static_cast<int>(block.getNumChannels()); ++ch)
+            juce::FloatVectorOperations::clear(block.getChannelPointer(ch), numSamples);
+        return;
+    }
+
+    const int numChannels = std::min(static_cast<int>(block.getNumChannels()), MAX_CHANNELS);
+    if (numChannels <= 0)
+        return;
+
+    if (agcResetRequest.exchange(false, std::memory_order_relaxed))
+    {
+        agcCurrentGain.store(1.0, std::memory_order_relaxed);
+        agcEnvInput.store(0.0, std::memory_order_relaxed);
+        agcEnvOutput.store(0.0, std::memory_order_relaxed);
+    }
+
+    uint32_t mask = bandResetMask.exchange(0, std::memory_order_relaxed);
+    if (mask != 0)
+    {
+        if (isAudioBlockSilent(block, numChannels, numSamples))
+        {
+            if (mask == 0xFFFFFFFFu)
+            {
+                std::memset(filterState.data(), 0, sizeof(filterState));
+            }
+            else
+            {
+                for (int i = 0; i < NUM_BANDS; ++i)
+                {
+                    if (mask & (1u << i))
+                    {
+                        for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+                            std::memset(filterState[ch][i].data(), 0, sizeof(double) * 2);
+                    }
+                }
+            }
+        }
+        else
+        {
+            bandResetMask.fetch_or(mask, std::memory_order_relaxed);
+        }
+    }
+
+    const double saturation = static_cast<double>(eqParams.nonlinearSaturation);
+
+    if (eqParams.agcEnabled)
+    {
+        cachedInputRMS = 0.0;
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            const double* data = block.getChannelPointer(ch);
+            const double rms = calculateRMS(data, numSamples);
+            if (rms > cachedInputRMS)
+                cachedInputRMS = rms;
+        }
+    }
+
+    double* blockL = block.getChannelPointer(0);
+    double* blockR = (numChannels > 1) ? block.getChannelPointer(1) : nullptr;
+
+    if (coeffCache->filterStructure == static_cast<int>(FilterStructure::Parallel))
+    {
+        if (!(coeffCache->parallelInputBuffer && coeffCache->parallelWorkBuffer && coeffCache->parallelAccumBuffer)
+            || coeffCache->parallelBufferSize < (numSamples * numChannels))
+        {
+            // Parallelバッファが無い/不足時は安全にSerial処理へフォールバック
+            for (int i = 0; i < NUM_BANDS; ++i)
+            {
+                if (!coeffCache->bandActive[i])
+                    continue;
+
+                const EQCoeffsSVF& c = coeffCache->coeffs[i];
+                const EQChannelMode mode = static_cast<EQChannelMode>(coeffCache->channelModes[i]);
+
+                if (mode == EQChannelMode::Stereo && numChannels >= 2)
+                {
+                    processBandStereo(blockL, blockR, numSamples, c,
+                                      filterState[0][i].data(),
+                                      filterState[1][i].data(),
+                                      saturation);
+                }
+                else
+                {
+                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
+                        processBand(blockL, numSamples, c, filterState[0][i].data(), saturation);
+                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
+                        processBand(blockR, numSamples, c, filterState[1][i].data(), saturation);
+                }
+            }
+        }
+        else
+        {
+            double* srcL = coeffCache->parallelInputBuffer;
+            double* srcR = (numChannels > 1) ? (coeffCache->parallelInputBuffer + numSamples) : nullptr;
+            double* workL = coeffCache->parallelWorkBuffer;
+            double* workR = (numChannels > 1) ? (coeffCache->parallelWorkBuffer + numSamples) : nullptr;
+            double* accumL = coeffCache->parallelAccumBuffer;
+            double* accumR = (numChannels > 1) ? (coeffCache->parallelAccumBuffer + numSamples) : nullptr;
+
+            juce::FloatVectorOperations::copy(srcL, blockL, numSamples);
+            if (numChannels > 1)
+                juce::FloatVectorOperations::copy(srcR, blockR, numSamples);
+
+            juce::FloatVectorOperations::clear(accumL, numSamples);
+            if (numChannels > 1)
+                juce::FloatVectorOperations::clear(accumR, numSamples);
+
+            for (int i = 0; i < NUM_BANDS; ++i)
+            {
+                if (!coeffCache->bandActive[i])
+                    continue;
+
+                const EQCoeffsSVF& c = coeffCache->coeffs[i];
+                const EQChannelMode mode = static_cast<EQChannelMode>(coeffCache->channelModes[i]);
+
+                if (mode == EQChannelMode::Stereo && numChannels >= 2)
+                {
+                    juce::FloatVectorOperations::copy(workL, srcL, numSamples);
+                    juce::FloatVectorOperations::copy(workR, srcR, numSamples);
+                    processBandStereo(workL, workR, numSamples, c,
+                                      filterState[0][i].data(),
+                                      filterState[1][i].data(),
+                                      saturation);
+                    juce::FloatVectorOperations::add(accumL, workL, numSamples);
+                    juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
+                    juce::FloatVectorOperations::add(accumR, workR, numSamples);
+                    juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
+                }
+                else
+                {
+                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
+                    {
+                        juce::FloatVectorOperations::copy(workL, srcL, numSamples);
+                        processBand(workL, numSamples, c, filterState[0][i].data(), saturation);
+                        juce::FloatVectorOperations::add(accumL, workL, numSamples);
+                        juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
+                    }
+
+                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
+                    {
+                        juce::FloatVectorOperations::copy(workR, srcR, numSamples);
+                        processBand(workR, numSamples, c, filterState[1][i].data(), saturation);
+                        juce::FloatVectorOperations::add(accumR, workR, numSamples);
+                        juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
+                    }
+                }
+            }
+
+            juce::FloatVectorOperations::copy(blockL, srcL, numSamples);
+            juce::FloatVectorOperations::add(blockL, accumL, numSamples);
+            if (numChannels > 1)
+            {
+                juce::FloatVectorOperations::copy(blockR, srcR, numSamples);
+                juce::FloatVectorOperations::add(blockR, accumR, numSamples);
+            }
+        }
+    }
+    else
+    {
+        for (int i = 0; i < NUM_BANDS; ++i)
+        {
+            if (!coeffCache->bandActive[i])
+                continue;
+
+            const EQCoeffsSVF& c = coeffCache->coeffs[i];
+            const EQChannelMode mode = static_cast<EQChannelMode>(coeffCache->channelModes[i]);
+
+            if (mode == EQChannelMode::Stereo && numChannels >= 2)
+            {
+                processBandStereo(blockL, blockR, numSamples, c,
+                                  filterState[0][i].data(),
+                                  filterState[1][i].data(),
+                                  saturation);
+            }
+            else
+            {
+                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
+                    processBand(blockL, numSamples, c, filterState[0][i].data(), saturation);
+                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
+                    processBand(blockR, numSamples, c, filterState[1][i].data(), saturation);
+            }
+        }
+    }
+
+    if (eqParams.agcEnabled)
+    {
+        processAGC(block);
+    }
+    else
+    {
+        const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
+        if (absNoLibm(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
+            smoothTotalGain.setTargetValue(targetGain);
+
+        const double startGain = smoothTotalGain.getCurrentValue();
+        smoothTotalGain.skip(numSamples);
+        const double endGain = smoothTotalGain.getCurrentValue();
+        const double increment = (endGain - startGain) / static_cast<double>(numSamples);
+
+        for (int ch = 0; ch < numChannels; ++ch)
+            applyGainRamp_AVX2(block.getChannelPointer(ch), numSamples, startGain, increment);
+    }
+}
+
 
 //--------------------------------------------------------------
 // BandNode作成 (Message Thread)
@@ -2328,4 +2539,156 @@ EQCoeffsBiquad EQProcessor::calcHighPassBiquad(double freq, double q, double sr)
     c.a1 =  -2.0 * cosw0;
     c.a2 =   1.0 - alpha;
     return c;
+}
+
+//==============================================================================
+// フェーズ 1: EQCoeffCache 実装 (v2.3)
+//==============================================================================
+
+//--------------------------------------------------------------
+// ハッシュ計算: 浮動小数点ビット正準化
+//--------------------------------------------------------------
+static inline uint32_t floatToCanonicalBits(float f) noexcept
+{
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(float));
+    return bits & 0x7FFFFFFF;  // 符号ビットをマスク（-0.0f → 0.0f）
+}
+
+//--------------------------------------------------------------
+// ハッシュ結合: FNV-1a 変種
+//--------------------------------------------------------------
+static inline uint64_t hashCombine(uint64_t seed, uint64_t value) noexcept
+{
+    return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+}
+
+//--------------------------------------------------------------
+// EQParameters のハッシュ値を計算（パラメータ一意化）
+//--------------------------------------------------------------
+uint64_t EQProcessor::computeParamsHash(const convo::EQParameters& params) noexcept
+{
+    uint64_t hash = 0;
+
+    // 20バンドを順序通りハッシュ
+    for (int i = 0; i < 20; ++i)
+    {
+        const auto& band = params.bands[i];
+        hash = hashCombine(hash, floatToCanonicalBits(band.frequency));
+        hash = hashCombine(hash, floatToCanonicalBits(band.gain));
+        hash = hashCombine(hash, floatToCanonicalBits(band.q));
+        hash = hashCombine(hash, static_cast<uint64_t>(band.enabled ? 1 : 0));
+        hash = hashCombine(hash, static_cast<uint64_t>(band.type));
+        hash = hashCombine(hash, static_cast<uint64_t>(band.channelMode));
+    }
+
+    // グローバルパラメータ
+    hash = hashCombine(hash, floatToCanonicalBits(params.totalGainDb));
+    hash = hashCombine(hash, static_cast<uint64_t>(params.agcEnabled ? 1 : 0));
+    hash = hashCombine(hash, floatToCanonicalBits(params.nonlinearSaturation));
+    hash = hashCombine(hash, static_cast<uint64_t>(params.filterStructure));
+
+    return hash;
+}
+
+//--------------------------------------------------------------
+// EQCoeffCache 生成（MessageThread / WorkerThread 専用）
+// 係数計算とParallelモードバッファ確保を行う
+//--------------------------------------------------------------
+EQCoeffCache* EQProcessor::createCoeffCache(
+    const convo::EQParameters& eqParams,
+    double sampleRate,
+    int maxBlockSize,
+    uint64_t generation) noexcept
+{
+    auto* cache = new EQCoeffCache();
+    if (!cache) return nullptr;
+
+    cache->paramsHash = computeParamsHash(eqParams);
+    cache->sampleRate = sampleRate;
+    cache->maxBlockSize = maxBlockSize;
+    cache->generation = generation;
+    cache->filterStructure = eqParams.filterStructure;
+
+    // 係数計算（全バンド）
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        const auto& band = eqParams.bands[i];
+        cache->bandActive[i] = band.enabled;
+        cache->channelModes[i] = band.channelMode;
+
+        if (band.enabled)
+        {
+            // SVF 係数計算（MessageThread でのみ呼び出し）
+            cache->coeffs[i] = calcSVFCoeffs(
+                static_cast<EQBandType>(band.type),
+                band.frequency,
+                band.gain,
+                band.q,
+                sampleRate);
+        }
+        else
+        {
+            // 無効バンドは係数デフォルト状態
+            cache->coeffs[i] = EQCoeffsSVF();
+        }
+    }
+
+    // Parallel モード用バッファ確保（64byte アライメント）
+    if (cache->filterStructure == 1)  // FilterStructure::Parallel
+    {
+        const int requiredSize = maxBlockSize * MAX_CHANNELS;
+
+        cache->parallelInputBuffer = static_cast<double*>(
+            convo::aligned_malloc(requiredSize * sizeof(double), 64));
+        cache->parallelWorkBuffer = static_cast<double*>(
+            convo::aligned_malloc(requiredSize * sizeof(double), 64));
+        cache->parallelAccumBuffer = static_cast<double*>(
+            convo::aligned_malloc(requiredSize * sizeof(double), 64));
+
+        // メモリ確保失敗時の3段階解放
+        if (!cache->parallelInputBuffer || !cache->parallelWorkBuffer || !cache->parallelAccumBuffer)
+        {
+            if (cache->parallelInputBuffer)
+                convo::aligned_free(cache->parallelInputBuffer);
+            if (cache->parallelWorkBuffer)
+                convo::aligned_free(cache->parallelWorkBuffer);
+            if (cache->parallelAccumBuffer)
+                convo::aligned_free(cache->parallelAccumBuffer);
+            delete cache;
+            return nullptr;
+        }
+
+        cache->parallelBufferSize = requiredSize;
+
+        // バッファクリア
+        std::memset(cache->parallelInputBuffer, 0, requiredSize * sizeof(double));
+        std::memset(cache->parallelWorkBuffer, 0, requiredSize * sizeof(double));
+        std::memset(cache->parallelAccumBuffer, 0, requiredSize * sizeof(double));
+    }
+
+    return cache;
+}
+
+//--------------------------------------------------------------
+// EQCoeffCache デストラクタ (ParallelバッファリソースシーズDealloc)
+//--------------------------------------------------------------
+EQCoeffCache::~EQCoeffCache()
+{
+    if (parallelInputBuffer)
+    {
+        convo::aligned_free(parallelInputBuffer);
+        parallelInputBuffer = nullptr;
+    }
+    if (parallelWorkBuffer)
+    {
+        convo::aligned_free(parallelWorkBuffer);
+        parallelWorkBuffer = nullptr;
+    }
+    if (parallelAccumBuffer)
+    {
+        convo::aligned_free(parallelAccumBuffer);
+        parallelAccumBuffer = nullptr;
+    }
+    parallelBufferSize = 0;
 }

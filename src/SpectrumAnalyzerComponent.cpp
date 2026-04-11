@@ -100,8 +100,6 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     prepareFFT();
 
     engine.addChangeListener(this);
-    engine.getEQProcessor().addChangeListener(this);
-    engine.getEQProcessor().addListener(this);
 
     updateEQData(); // 初期状態のEQカーブを計算
 
@@ -117,8 +115,6 @@ SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
     stopTimer();
     releaseFFT();
     engine.removeChangeListener(this);
-    engine.getEQProcessor().removeChangeListener(this);
-    engine.getEQProcessor().removeListener(this);
 }
 
 void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
@@ -245,6 +241,14 @@ void SpectrumAnalyzerComponent::timerCallback()
     const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
     const double dt = std::max(0.0, now - lastTime);
     lastTime = now;
+
+    // Snapshot のハッシュ差分で EQ 更新を検知する。
+    const auto* snap = engine.getSnapshotCoordinator().getCurrent();
+    if (snap != nullptr && snap->eqCoeffHash != lastEqHash)
+    {
+        lastEqHash = snap->eqCoeffHash;
+        eqDataDirty = true;
+    }
 
     const bool meterVisualChanged = updateLevelPeaks(dt);
 
@@ -490,7 +494,7 @@ void SpectrumAnalyzerComponent::timerCallback()
 void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
     // AudioEngine (EQProcessor, ConvolverProcessor) からの変更通知
-    if (source == &engine || source == &engine.getEQProcessor())
+    if (source == &engine)
     {
         updateTimerRate();
         eqDataDirty = true;
@@ -501,26 +505,6 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
 
         // 入力データ変更・オーバーサンプリング変更・IRファイル変更時にピークをリセット
         resetLevelPeaks();
-    }
-}
-
-void SpectrumAnalyzerComponent::eqBandChanged(EQProcessor* processor, int /*bandIndex*/)
-{
-
-   if (processor == &engine.getEQProcessor())
-    {
-        updateTimerRate();
-        eqDataDirty = true;
-    }
-}
-
-void SpectrumAnalyzerComponent::eqGlobalChanged(EQProcessor* processor)
-{
-
-    if (processor == &engine.getEQProcessor())
-    {
-        updateTimerRate();
-        eqDataDirty = true;
     }
 }
 

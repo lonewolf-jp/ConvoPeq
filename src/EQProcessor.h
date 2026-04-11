@@ -96,6 +96,43 @@ struct EQCoeffsBiquad
 };
 
 //--------------------------------------------------------------
+// EQCoeffCache: 係数キャッシュ（RefCounted資源）
+// v2.3 Phase 1 新規追加
+//
+// 複数のスナップショット間で同一EQパラメータの係数を共有し、
+// CPU/メモリ効率を向上させる不変キャッシュ
+//--------------------------------------------------------------
+#pragma warning(push)
+#pragma warning(disable : 4324)  // alignas(64) により構造体がパッドされることは意図した動作のため警告を無視
+
+struct alignas(64) EQCoeffCache : public RefCountedDeferred<EQCoeffCache>
+{
+    EQCoeffsSVF coeffs[20];              // SVF係数 (20バンド)
+    bool bandActive[20] = {};            // バンド有効フラグ
+    int channelModes[20] = {};           // チャンネルモード (0:Stereo, 1:Left, 2:Right)
+    int filterStructure = 0;             // 0:Serial, 1:Parallel
+
+    // メタデータ
+    uint64_t paramsHash = 0;             // パラメータハッシュ値
+    double sampleRate = 0.0;             // サンプリングレート
+    int maxBlockSize = 0;                // 最大ブロックサイズ
+    uint64_t generation = 0;             // 世代番号
+
+    // Parallel モード用バッファ（事前割り当て）
+    double* parallelInputBuffer = nullptr;
+    double* parallelWorkBuffer = nullptr;
+    double* parallelAccumBuffer = nullptr;
+    int parallelBufferSize = 0;
+
+    EQCoeffCache() = default;
+    ~EQCoeffCache();
+    EQCoeffCache(const EQCoeffCache&) = delete;
+    EQCoeffCache& operator=(const EQCoeffCache&) = delete;
+};
+
+#pragma warning(pop)
+
+//--------------------------------------------------------------
 // EQプロセッサークラス
 //--------------------------------------------------------------
 class EQProcessor : public juce::ChangeBroadcaster
@@ -106,17 +143,6 @@ public:
         Serial,
         Parallel
     };
-
-    class Listener
-    {
-    public:
-        virtual ~Listener() = default;
-        virtual void eqBandChanged(EQProcessor* processor, int bandIndex) = 0;
-        virtual void eqGlobalChanged(EQProcessor* processor) = 0;
-    };
-
-    void addListener(Listener* listener) { listeners.add(listener); }
-    void removeListener(Listener* listener) { listeners.remove(listener); }
 
     static constexpr int NUM_BANDS        = 20;  // 20バンドパラメトリックEQ
     static constexpr int MAX_CHANNELS     = 2;   // ステレオ対応
@@ -160,6 +186,9 @@ public:
     // ロック・new・I/O・待機（IR再ロード等）禁止
     //----------------------------------------------------------
     void process(juce::dsp::AudioBlock<double>& block);
+    void process(juce::dsp::AudioBlock<double>& block,
+                 const convo::EQParameters& eqParams,
+                 const EQCoeffCache* coeffCache);
     void releaseResources();
 
     // バイパス制御
@@ -193,6 +222,16 @@ public:
     float getNonlinearSaturation() const noexcept;
     void setFilterStructure(FilterStructure mode) noexcept;
     FilterStructure getFilterStructure() const noexcept;
+
+    //----------------------------------------------------------
+    // v2.3 EQCoeffCache 生成インターフェース
+    //----------------------------------------------------------
+    static uint64_t computeParamsHash(const convo::EQParameters& params) noexcept;
+    static EQCoeffCache* createCoeffCache(
+        const convo::EQParameters& eqParams,
+        double sampleRate,
+        int maxBlockSize,
+        uint64_t generation) noexcept;
 
     //----------------------------------------------------------
     // パラメータ読み取り (UIスレッドで表示に使用)
@@ -367,8 +406,6 @@ private:
     // ── 状態リセットフラグ (Audio Thread用) ──
     std::atomic<uint32_t> bandResetMask { 0 };
     std::atomic<bool> agcResetRequest { false };
-
-    juce::ListenerList<Listener> listeners;
 
     std::atomic<bool> agcEnabled { false };
     std::atomic<bool> m_pendingAGCChange { false };

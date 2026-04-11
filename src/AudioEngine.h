@@ -34,6 +34,8 @@ struct CoeffSet {
 #include <cstring>
 #include <array>
 #include <functional>
+#include <memory>
+#include <unordered_map>
 #include <vector>
 #include <juce_dsp/juce_dsp.h>
 #include <thread>
@@ -45,6 +47,7 @@ struct CoeffSet {
 #include "CustomInputOversampler.h"
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
+#include "EQEditProcessor.h"
 #include "PsychoacousticDither.h"
 #include "FixedNoiseShaper.h"
 #include "Fixed15TapNoiseShaper.h"
@@ -90,7 +93,6 @@ struct CoeffSet {
 class AudioEngine : public juce::AudioSource,
                                      public juce::ChangeBroadcaster,
                                      private juce::ChangeListener,
-                                     private EQProcessor::Listener,
                                      private ConvolverProcessor::Listener,
                                      private juce::Timer
 {
@@ -143,8 +145,6 @@ public:
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
-    void eqBandChanged(EQProcessor* processor, int bandIndex) override;
-    void eqGlobalChanged(EQProcessor* processor) override;
     void convolverParamsChanged(ConvolverProcessor* processor) override;
     void timerCallback() override;
 
@@ -153,7 +153,7 @@ public:
     //----------------------------------------------------------
     ConvolverProcessor& getConvolverProcessor() { return uiConvolverProcessor; }
     const ConvolverProcessor& getConvolverProcessor() const { return uiConvolverProcessor; }
-    EQProcessor& getEQProcessor() { return uiEqProcessor; }
+    EQEditProcessor& getEQProcessor() { return uiEqEditor; }
 
     double getSampleRate() const { return currentSampleRate.load(); }
     double getProcessingSampleRate() const;
@@ -251,6 +251,7 @@ public:
     int getIRFadeSamples() const noexcept { return m_irFadeSamples.load(std::memory_order_relaxed); }
     int getEQFadeSamples() const noexcept { return m_eqFadeSamples.load(std::memory_order_relaxed); }
     bool isFading() const noexcept { return m_coordinator.isFading(); }
+    const convo::SnapshotCoordinator& getSnapshotCoordinator() const noexcept { return m_coordinator; }
     void setIRChangeFlag() noexcept { m_pendingIRChange.store(true, std::memory_order_release); }
 
     void setSoftClipEnabled(bool enabled);
@@ -315,6 +316,28 @@ public:
     void setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLearner::State& inState) noexcept;
 
 private:
+    class EQCacheManager
+    {
+    public:
+        EQCoeffCache* getOrCreate(const convo::EQParameters& params,
+                                  double sampleRate,
+                                  int maxBlockSize,
+                                  uint64_t generation);
+        EQCoeffCache* get(uint64_t hash) const noexcept;
+        void releaseCache(EQCoeffCache* cache) noexcept;
+        ~EQCacheManager();
+
+    private:
+        using CacheMap = std::unordered_map<uint64_t, EQCoeffCache*>;
+        std::shared_ptr<const CacheMap> loadMap() const noexcept
+        {
+            return cacheMapPtr.load(std::memory_order_acquire);
+        }
+
+        mutable std::mutex writeMutex;
+        std::atomic<std::shared_ptr<const CacheMap>> cacheMapPtr { std::make_shared<CacheMap>() };
+    };
+
     static double estimateOversamplingLatencySamples(int oversamplingFactor,
                                                      OversamplingType oversamplingType,
                                                      double baseSampleRate) noexcept;
@@ -474,7 +497,7 @@ DSPCore();
     //----------------------------------------------------------
      // UI/State管理用のインスタンス (Audio Threadでは使用しない)
     ConvolverProcessor  uiConvolverProcessor;
-    EQProcessor uiEqProcessor;
+    EQEditProcessor uiEqEditor;
 
     juce::AbstractFifo audioFifo { FIFO_SIZE };
     juce::AudioBuffer<float> audioFifoBuffer;
@@ -502,6 +525,7 @@ DSPCore();
     std::atomic<bool> eqBypassActive   { false };
     std::atomic<bool> convBypassActive { false };
     std::atomic<bool> rebuildRequested { false };
+    EQCacheManager eqCacheManager;
     std::atomic<ProcessingOrder> currentProcessingOrder{ProcessingOrder::ConvolverThenEQ};
     std::atomic<AnalyzerSource> currentAnalyzerSource { AnalyzerSource::Output };
     std::atomic<bool> analyzerEnabled { false };
@@ -706,6 +730,7 @@ DSPCore();
     void debugAssertNotAudioThread() const;
 
     friend class NoiseShaperLearner;
+    friend class EQEditProcessor;
 
 //==============================================================================
 // インラインヘルパー関数（Adaptive 係数アクセス）

@@ -37,6 +37,11 @@ struct SnapshotParams {
 
     uint64_t generation = 0;
 
+    // v2.3 フェーズ 1 追加フィールド
+    double sampleRate = 48000.0;        // サンプリングレート [Hz]
+    int maxBlockSize = 512;             // 最大ブロックサイズ [samples]
+    uint64_t eqCoeffHash = 0;           // EQパラメータハッシュ値（キャッシュ識別子）
+
     SnapshotParams() = default;
     SnapshotParams(const SnapshotParams&) = default;
     SnapshotParams& operator=(const SnapshotParams&) = default;

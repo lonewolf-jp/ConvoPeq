@@ -28,8 +28,7 @@
 
 class SpectrumAnalyzerComponent : public juce::Component,
                                   private juce::Timer,
-                                  private juce::ChangeListener,
-                                  private EQProcessor::Listener
+                                  private juce::ChangeListener
 {
 public:
     explicit SpectrumAnalyzerComponent(AudioEngine& audioEngine);
@@ -141,8 +140,6 @@ private:
 
     // ── Timer コールバック (~60fps) ──
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
-    void eqBandChanged(EQProcessor* processor, int bandIndex) override;
-    void eqGlobalChanged(EQProcessor* processor) override;
     void timerCallback() override;
 
     // ── 描画ヘルパー ──
@@ -177,6 +174,7 @@ private:
     bool eqPathsDirty = true;
     bool eqDataDirty = false;
     bool analyzerVisualsCleared = false;
+    uint64_t lastEqHash = 0;
 
     int currentTimerHz = 0;
     double lastEqUpdateTime = 0.0;

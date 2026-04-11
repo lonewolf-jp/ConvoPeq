@@ -122,6 +122,7 @@ target_sources(ConvoPeq PRIVATE
     src/ConvolverProcessor.cpp
     src/MKLNonUniformConvolver.cpp
     src/EQProcessor.cpp
+    src/EQEditProcessor.cpp
     src/ConvolverControlPanel.cpp
     src/EQControlPanel.cpp
     src/SpectrumAnalyzerComponent.cpp
@@ -334,8 +335,8 @@ if(MSVC)
     target_compile_definitions(ConvoPeq PRIVATE JUCE_DISABLE_ACCESSIBILITY=1)
     target_compile_definitions(ConvoPeq PRIVATE JUCE_WIN_PER_MONITOR_DPI_AWARE=0)
 
-    set(CMAKE_CXX_FLAGS_RELEASE "/Zm500 /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
-    set(CMAKE_C_FLAGS_RELEASE "/Zm500 /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
+    set(CMAKE_CXX_FLAGS_RELEASE "/Zm2000 /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
+    set(CMAKE_C_FLAGS_RELEASE "/Zm2000 /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG /OPT:REF /OPT:ICF /OPT:LBR")
 
     # AVX2を全コンフィグで有効化

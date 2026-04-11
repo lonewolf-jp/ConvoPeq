@@ -22,6 +22,7 @@ GlobalSnapshot::GlobalSnapshot(const SnapshotParams& params) noexcept
     , ditherBitDepth(params.ditherBitDepth)
     , noiseShaperType(params.noiseShaperType)
     , generation(params.generation)
+    , eqCoeffHash(params.eqCoeffHash)
 {
 #ifdef _DEBUG
     alive.store(true, std::memory_order_relaxed);

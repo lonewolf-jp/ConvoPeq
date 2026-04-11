@@ -1,0 +1,100 @@
+==========================================
+ConvoPeq - Build Script
+==========================================
+
+[INFO] Initial PGO_FLAGS: -DCONVOPEQ_PGO_INSTRUMENT=OFF -DCONVOPEQ_PGO_USE=OFF
+[PGO] Normal build   no PGO
+[INFO] Final PGO_FLAGS: -DCONVOPEQ_PGO_INSTRUMENT=OFF -DCONVOPEQ_PGO_USE=OFF
+[INFO] BUILD_CONFIG: Release
+[INFO] PGO_MODE: normal
+[CHECK] JUCE Directory: OK
+
+[INFO] Found vcvarsall.bat. Executing...
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.5.0-insiders
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+[INFO] MSVC environment initialized.
+[INFO] Found Intel oneAPI setvars.bat. Executing...
+:: initializing oneAPI environment...
+   Initializing Visual Studio command-line environment...
+   Visual Studio version 18.5.0-insiders environment configured.
+   "C:\Program Files\Microsoft Visual Studio\18\Insiders\"
+   Visual Studio command-line environment initialized for: 'x64'
+:  advisor -- latest
+:  compiler -- latest
+:  dal -- latest
+:  dev-utilities -- latest
+:  dnnl -- latest
+:  dpcpp-ct -- latest
+:  dpl -- latest
+:  ipp -- latest
+:  ippcp -- latest
+:  mkl -- latest
+:  mpi -- latest
+:  ocloc -- latest
+:  tbb -- latest
+:  umf -- latest
+:  vtune -- latest
+:: oneAPI environment initialized ::
+[INFO] Intel oneAPI environment initialized.
+[1/4] Creating build directory...
+[2/4] Configuring CMake...
+-- clang-tidy build-time integration disabled.
+-- Configuring juceaide
+-- Building juceaide
+-- Exporting juceaide
+-- Testing juceaide
+-- Finished setting up juceaide
+-- MKL_VERSION: 2025.3.0
+-- MKL_ROOT: C:/Program Files (x86)/Intel/oneAPI/mkl/latest
+-- MKL_ARCH: intel64
+-- MKL_LINK: static
+-- MKL_INTERFACE_FULL: intel_lp64
+-- MKL_THREADING: sequential
+-- MKL_MPI: intelmpi
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/latest/lib/mkl_scalapack_lp64.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/latest/lib/mkl_cdft_core.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/latest/lib/mkl_intel_lp64.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/latest/lib/mkl_sequential.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/latest/lib/mkl_core.lib
+-- Found C:/Program Files (x86)/Intel/oneAPI/mkl/latest/lib/mkl_blacs_intelmpi_lp64.lib
+-- Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.
+-- Intel IPP found.
+-- [PGO] Normal Release build with LTCG
+-- Configuring done (1.0s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/VSC_Project/ConvoPeq/build
+[3/4] Building Release configuration...
+[0/2] Re-checking globbed directories...
+[1/6] Building CXX object CMakeFiles\ConvoPeq.dir\Release\src\AudioEngineProcessor.cpp.obj
+[2/6] Building CXX object CMakeFiles\ConvoPeq.dir\Release\src\EQControlPanel.cpp.obj
+[3/6] Building CXX object CMakeFiles\ConvoPeq.dir\Release\src\DeviceSettings.cpp.obj
+[4/6] Building CXX object CMakeFiles\ConvoPeq.dir\Release\src\NoiseShaperLearner.cpp.obj
+[5/6] Linking CXX executable ConvoPeq_artefacts\Release\ConvoPeq.exe
+[VERIFY] Checking CMakeCache.txt...
+CONVOPEQ_PGO_INSTRUMENT:BOOL=OFF
+CONVOPEQ_PGO_USE:BOOL=OFF
+
+[VERIFY] Build Configuration: Release
+[VERIFY] PGO Mode: normal
+
+[4/4] Checking build artifacts...
+[SUCCESS] Executable created successfully.
+
+==========================================
+Build Complete
+==========================================
+
+Build configuration:
+  Release
+Build directory:
+  build
+Executable location:
+  build\ConvoPeq_artefacts\Release\ConvoPeq.exe
+
+To run:
+  "build\ConvoPeq_artefacts\Release\ConvoPeq.exe"
+
+Press any key to continue . . . 
