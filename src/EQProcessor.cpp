@@ -1378,6 +1378,23 @@ bool EQProcessor::isBufferSilent(const juce::AudioBuffer<double>& buffer, int nu
     return true;
 }
 
+bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block, int numChannels, int numSamples) const noexcept
+{
+    constexpr double silenceThreshold = 1.0e-8;
+
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* channelData = block.getChannelPointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            if (absNoLibm(channelData[i]) > silenceThreshold)
+                return false;
+        }
+    }
+
+    return true;
+}
+
 //--------------------------------------------------------------
 // process (Audio Thread)
 // リアルタイム制約 (Real-time Constraints)
@@ -1438,6 +1455,10 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (numChannels <= 0)
         return;
     const double saturation = static_cast<double>(nonlinearSaturation.load(std::memory_order_relaxed));
+    const bool canSafelyResetState = requestedBypass
+                                     || effectiveBypass
+                                     || bypassTransitionActive
+                                     || isAudioBlockSilent(block, numChannels, numSamples);
 
     double* dryCopyBase = nullptr;
     if (bypassTransitionActive)
@@ -1465,8 +1486,12 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     uint32_t mask = bandResetMask.exchange(0, std::memory_order_relaxed);
     if (mask != 0)
     {
+        if (!canSafelyResetState)
+        {
+            bandResetMask.fetch_or(mask, std::memory_order_relaxed);
+        }
         // 最適化: 全バンドリセットの場合は memset で一括クリア
-        if (mask == 0xFFFFFFFF)
+        else if (mask == 0xFFFFFFFF)
         {
             std::memset(filterState.data(), 0, sizeof(filterState));
         }

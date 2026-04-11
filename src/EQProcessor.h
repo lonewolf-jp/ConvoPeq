@@ -355,6 +355,7 @@ private:
 
     // サイレンス検出
     bool isBufferSilent(const juce::AudioBuffer<double>& buffer, int numSamples) const noexcept;
+    bool isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block, int numChannels, int numSamples) const noexcept;
 
     // 係数計算
     BandNode* createBandNode(int bandIndex, const EQState& state) const;
