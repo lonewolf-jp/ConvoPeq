@@ -319,6 +319,7 @@ private:
     class EQCacheManager
     {
     public:
+        EQCacheManager();
         EQCoeffCache* getOrCreate(const convo::EQParameters& params,
                                   double sampleRate,
                                   int maxBlockSize,
@@ -328,14 +329,45 @@ private:
         ~EQCacheManager();
 
     private:
-        using CacheMap = std::unordered_map<uint64_t, EQCoeffCache*>;
-        std::shared_ptr<const CacheMap> loadMap() const noexcept
+        struct CacheMap
+        {
+            CacheMap() = default;
+
+            CacheMap(const CacheMap& other)
+            {
+                for (const auto& entry : other.map)
+                {
+                    if (entry.second != nullptr)
+                        entry.second->addRef();
+
+                    map.emplace(entry.first, entry.second);
+                }
+            }
+
+            ~CacheMap()
+            {
+                for (auto& entry : map)
+                {
+                    if (entry.second != nullptr)
+                        entry.second->release();
+                }
+            }
+
+            std::unordered_map<uint64_t, EQCoeffCache*> map;
+        };
+
+        const CacheMap* loadMap() const noexcept
         {
             return cacheMapPtr.load(std::memory_order_acquire);
         }
 
+        void storeNewMap(CacheMap* newMap) noexcept;
+        void drainDeferredMapsUnderLock() noexcept;
+        bool tryEnqueueDeferredMap(CacheMap* map) noexcept;
+
         mutable std::mutex writeMutex;
-        std::atomic<std::shared_ptr<const CacheMap>> cacheMapPtr { std::make_shared<CacheMap>() };
+        std::atomic<CacheMap*> cacheMapPtr { nullptr };
+        std::vector<CacheMap*> enqueueFallbackMaps;
     };
 
     static double estimateOversamplingLatencySamples(int oversamplingFactor,

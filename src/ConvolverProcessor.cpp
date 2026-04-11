@@ -35,6 +35,8 @@
 
 // リングバッファオーバーフロー検出コールバック (Audio Thread セーフ)
 // overflowRequested を cas で 1 回だけセット → process() → timerCallback() → reload
+static std::atomic<int> g_totalLatencyClampCount { 0 };
+
 void ConvolverProcessor::overflowCallbackThunk(void* userData) noexcept
 {
     auto* self = static_cast<ConvolverProcessor*>(userData);
@@ -1394,6 +1396,15 @@ ConvolverProcessor::~ConvolverProcessor()
 
 void ConvolverProcessor::timerCallback()
 {
+    static int lastReportedClampCount = 0;
+    const int currentClampCount = g_totalLatencyClampCount.load(std::memory_order_relaxed);
+    if (currentClampCount != lastReportedClampCount)
+    {
+        juce::Logger::writeToLog("ConvolverProcessor: Latency clamp triggered (total: "
+                                 + juce::String(currentClampCount) + " times)");
+        lastReportedClampCount = currentClampCount;
+    }
+
     // ★ リングバッファオーバーフローによるリビルド要求を処理 (Audio Thread からは呼ばれない)
     if (rebuildPendingAfterLoad.load(std::memory_order_acquire))
     {
@@ -4096,7 +4107,12 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         // 安全対策: 要求される遅延が最大許容値を超えていないかデバッグ時にチェック
         jassert(calculatedLatency <= MAX_TOTAL_DELAY);
 
-        const int totalLatency = juce::jmin(calculatedLatency, MAX_TOTAL_DELAY);
+        int totalLatency = calculatedLatency;
+        if (totalLatency > MAX_TOTAL_DELAY)
+        {
+            totalLatency = MAX_TOTAL_DELAY;
+            g_totalLatencyClampCount.fetch_add(1, std::memory_order_relaxed);
+        }
 
         // ターゲット値が変更された場合のみ更新
         if (std::abs(latencySmoother.getTargetValue() - static_cast<double>(totalLatency)) >= kLatencyRetargetThresholdSamples)

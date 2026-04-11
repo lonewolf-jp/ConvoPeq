@@ -10,15 +10,59 @@
 ・JUCE framework公式githubのサンプルコードにない過剰な安定化機構は導入しないでください。
 ・プロジェクトルートにあるJUCEフォルダ内、r8brain-free-srcフォルダ内のファイルは、絶対に編集しないでください。
 ・構造化例外処理 (SEH) は、絶対に使用しないでください。
-・Audio thread（getNextAudioBlock() が呼ばれているスレッド）内では、「待つ可能性が1%でもある処理」（メモリ確保(new / malloc / vector::resize / mkl_malloc / mkl_free / _aligned_malloc / vslNewStream)、try-catch、DftiCommitDescriptor、mkl_set_interface_layer、IRの再ロード、mutex lock、critical section、condition_variable、ファイルI/O、コンソール出力、std::exp()、libm呼び出しとなる関数、MMCSS設定、MessageManagerへのアクセス、std::shared_ptrの使用）は絶対にしないでください。
+・Audio thread（getNextAudioBlock() が呼ばれているスレッド）内では、「待つ可能性が1%でもある処理」（メモリ確保(new / malloc / vector::resize / mkl_malloc / mkl_free / _aligned_malloc / vslNewStream)、try-catch、DftiCommitDescriptor、mkl_set_interface_layer、IRの再ロード、mutex lock、critical section、condition_variable、ファイルI/O、コンソール出力、std::exp()、libm呼び出しとなる関数、MMCSS設定、MessageManagerへのアクセス、std::shared_ptrの使用）は絶対にしないでください。ただし、デバッグビルドは対象外とします。
 ・Audio thread（getNextAudioBlock() が呼ばれているスレッド）内では、AudioBlock::allocate、AudioBlock::copyFrom、FFT::performFrequencyOnlyForwardTransform（事前確保なし）は絶対にしないでください。
 ・Audio thread（getNextAudioBlock() が呼ばれているスレッド）以外で、かつINTEL oneAPI MKL(one MKL)使用箇所では、new、std::vector、std::make_uniqueを使用せず、かわりにmkl_malloc / mkl_free、_aligned_malloc(64)、std::pmr + custom allocatorを使用してください。
-・Audio thread（getNextAudioBlock() が呼ばれているスレッド）とそれ以外のスレッド間のデータ授受・共有は、Audio threadのリアルタイム性およびスレッドセーフを確実に保証できる方法で行ってください。
+・Audio thread（getNextAudioBlock() が呼ばれているスレッド）とそれ以外のスレッド間のデータ授受・共有は、Audio threadのリアルタイム性およびスレッドセーフを確実に保証できる方法で行ってください。ただし、デバッグビルドは対象外とします。
 ・外部からの入力、外部への出力以外のすべてのデータ処理は、64bit doubleで行ってください。ただし、スペアナの演算についてはfloatでかまいません。
+・データアクセス規則に基づいてデータアクセスを実装してください。
+・状態マシンおよびその周辺部は＜状態監視（モニタリング）技術設計指針＞に基づいて実装してください。
 ・INTEL oneAPI MKL(one MKL)を使用する箇所はメモリは64byteアライメントとし、メモリ確保が必要になった場合は、Audio Threadではなく、prepareToPlay()などのメッセージスレッドからのみ呼び出すようにしてください。
 ・デノーマル対策をしっかり行ってください。
 ・デストラクタの設置漏れがないよう注意してください。
 ・メモリリークが起きないようメモリ開放に注意してください。
+＜データアクセス規則＞
+1. 状態マシン ⇄ リアルタイム（RT）スレッド
+原則：読み取り専用、またはアトミックな通知
+やり取り方法: std::atomic 変数 によるフラグ参照。
+具体的方法:
+状態マシン本体（複雑な遷移ロジック）は非RT側に置きます。
+RTスレッドは、毎サイクルの冒頭で std::atomic<State> をチェックするだけにします。
+RTスレッドから状態を変えたい場合（エラー検知など）は、アトミックな「エラーフラグ」を立てるのみに留め、実際の状態遷移（リソースの解放など）は非RTスレッドに任せます。
+2. 状態マシン ⇄ 非リアルタイム（Non-RT）スレッド
+原則：ロジックの実行とリソースのライフサイクル管理
+やり取り方法: Mutex（ミューテックス） や標準的な条件分岐。
+具体的方法:
+ユーザー操作やファイルI/Oに伴う「重い処理（IPPの初期化やMKLのメモリ確保）」をここで行います。
+状態遷移に伴うリソースの生成・破棄を完全に完了させてから、最後にRTスレッドが見ているアトミックな「状態フラグ」を書き換えます。
+ここではリアルタイム性の制約がないため、安全性を最優先してロックを使用しても問題ありません。
+3. リアルタイム ⇄ 非リアルタイム（RT ⇄ Non-RT）スレッド
+ここが最も重要で、データの性質によって2つの「型」を使い分けます。
+A. 設定値やパラメータ（小さなデータ）
+手法: std::atomic<float> や std::atomic<double>。
+具体的方法: 非RTが書き込み、RTが読み取ります。ロックは不要です。
+B. 信号や大容量バッファ（大きなデータ / IPPの係数など）
+手法: SPSC (Single-Producer Single-Consumer) FIFO。
+具体的方法:
+データ送信: 非RT側でメモリを確保・加工し、そのポインタをFIFOに送ります。RT側はそれを取り出して現在の処理に差し替えます。
+メモリ返却: 使用済みメモリの free をRTスレッドで行うのは厳禁です。「返却用FIFO」を使い、古いポインタを非RTスレッドへ戻し、そちらで安全に破棄します。
+＜状態監視（モニタリング）技術設計指針＞
+１．単一方向データフロー（Read-Only Access）
+　　・閲覧スレッド（UI/Log等）は、状態マシンの内部変数に対する直接的な書込権限を持たない。
+　　・状態変更が必要な場合は、コマンドキューまたはメッセージバスを介した非同期リクエストに限定する。
+２．非ブロッキング読込（Lock-Free Snapshots）
+　　・閲覧側からのアクセスにおいて、std::mutex 等の同期プリミティブによる排他ロックを原則禁止する。
+　　・スカラー値（State, Level等）は std::atomic<T> を使用し、一貫性を保証した上でロックフリーに取得する。
+　　・複雑な構造体は、状態マシン側が二重バッファ（Double Buffering）またはコピー（Snapshot）を用意し、閲覧側はポインタのコピーのみをアトミックに取得する。
+３．プル型更新モデル（Pull-based Observation）
+　　・状態マシンからのプッシュ通知（Callback）を避け、閲覧側が独自のタイマー（低優先度）で最新値を参照しに行く「ポーリング方式」を採用する。
+　　・これにより、表示負荷の高騰がコアロジック（状態遷移や信号処理）の決定論的動作を妨げるリスクを排除する。
+４．処理責任の局所化（Responsibility Separation）
+　　・表示用のデータ加工（文字列成形、スケーリング、可視化演算）は、すべて閲覧スレッド側の計算リソースで実行する。
+　　・状態マシン側は、生データ（Raw Data）の書き出しのみに専念し、フォーマット処理によるオーバーヘッドを一切持たない。
+５．更新のベストエフォート保証（Best-effort Consistency）
+　　・情報の「最新性」よりも「処理の独立性」を優先する。
+　　・閲覧側は、一時的に古いデータ（Stale Data）を参照することを許容し、ジッターやパケットロスの影響を状態マシン側に波及させない。
 ＜必須情報＞
 ・本プログラムはJUCE framework V8.0.12 https://github.com/juce-framework/JUCE/tree/8.0.12 を使用しています。
 ・JUCE frameworkは https://docs.juce.com/master/index.html で情報を閲覧できます。
@@ -58,7 +102,7 @@
  https://rutgers.box.com/s/ijyxsvc2muaxa7o45jaujl2hadxqdkk6
  Solutions Manual errata
  https://https//rutgers.box.com/s/07ucb1ru83189jxf68mf6yzncc3fw7qg
-・Applied Optimum Signal Processing (2018) 
+・Applied Optimum Signal Processing (2018)
  https://rutgers.box.com/s/7sqyou4r7pg9wgx0zveexiukj9ca2ih0
 ・Optimum Signal Processing (2nd Edition 2007)
  https://rutgers.box.com/s/m4qylu904kheuuptdt30tbdh1ahsps3h
@@ -87,5 +131,5 @@
  https://inria.hal.science/inria-00276854v3/document
 ・Optuna (Dashboard/Library)
  https://docs-ja.optuna.org/
- 
+
   use context7

@@ -220,8 +220,8 @@ private:
         double* tailOutputBuf = nullptr;  // mkl_malloc(partSize * sizeof(double), 64)
         int     tailOutputPos = 0;        // Get() での読み出しカーソル [0, partSize]
 
-        // B7: FFT ウォームアップ済みフラグ（レイヤーごと）
-        std::once_flag warmupFlag;
+        // B7: FFT ウォームアップ済みフラグ（レイヤーごと、Non-Audio Thread でセット）
+        std::atomic<bool> warmupCompleted { false };
 
         // ── 遅延処理用 (L1/L2 非 Immediate Layer) ──
         int  partsPerCallback  = 0;  // 1 コールバックあたり処理するパーティション数

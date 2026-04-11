@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <complex>
 #include <algorithm>
+#include <new>
 #include <mutex>
 #include <condition_variable>
 #include <xmmintrin.h>
@@ -1261,15 +1262,61 @@ void AudioEngine::debugAssertNotAudioThread() const
     jassert(!juce::MessageManager::getInstance()->isThisTheMessageThread());
 }
 
+AudioEngine::EQCacheManager::EQCacheManager()
+{
+    cacheMapPtr.store(new CacheMap(), std::memory_order_release);
+}
+
+bool AudioEngine::EQCacheManager::tryEnqueueDeferredMap(CacheMap* map) noexcept
+{
+    if (map == nullptr)
+        return true;
+
+    return g_deletionQueue.enqueue(map,
+                                   [](void* p) { delete static_cast<CacheMap*>(p); },
+                                   g_currentEpoch.load(std::memory_order_acquire));
+}
+
+void AudioEngine::EQCacheManager::drainDeferredMapsUnderLock() noexcept
+{
+    if (enqueueFallbackMaps.empty())
+        return;
+
+    auto out = enqueueFallbackMaps.begin();
+    for (auto it = enqueueFallbackMaps.begin(); it != enqueueFallbackMaps.end(); ++it)
+    {
+        if (!tryEnqueueDeferredMap(*it))
+            *out++ = *it;
+    }
+
+    enqueueFallbackMaps.erase(out, enqueueFallbackMaps.end());
+}
+
+void AudioEngine::EQCacheManager::storeNewMap(CacheMap* newMap) noexcept
+{
+    CacheMap* old = cacheMapPtr.exchange(newMap, std::memory_order_acq_rel);
+    if (old == nullptr)
+        return;
+
+    if (!tryEnqueueDeferredMap(old))
+    {
+        // Queue full fallback: never delete synchronously here because readers may still observe old.
+        enqueueFallbackMaps.push_back(old);
+    }
+}
+
 EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters& params,
                                                        double sampleRate,
                                                        int maxBlockSize,
                                                        uint64_t generation)
 {
     const uint64_t hash = EQProcessor::computeParamsHash(params);
-    auto currentMap = loadMap();
-    auto it = currentMap->find(hash);
-    if (it != currentMap->end())
+    const CacheMap* currentMap = loadMap();
+    if (currentMap == nullptr)
+        return nullptr;
+
+    auto it = currentMap->map.find(hash);
+    if (it != currentMap->map.end())
         return it->second;
 
     EQCoeffCache* cache = EQProcessor::createCoeffCache(params, sampleRate, maxBlockSize, generation);
@@ -1278,28 +1325,49 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 
     std::lock_guard<std::mutex> lock(writeMutex);
 
+    drainDeferredMapsUnderLock();
+
     // Lock取得中に他スレッドが同じハッシュを追加した可能性を再確認
     currentMap = loadMap();
-    it = currentMap->find(hash);
-    if (it != currentMap->end())
+    if (currentMap == nullptr)
+    {
+        cache->release();
+        return nullptr;
+    }
+
+    it = currentMap->map.find(hash);
+    if (it != currentMap->map.end())
     {
         // 先に追加されたキャッシュを採用し、新規作成分を破棄
         cache->release();
         return it->second;
     }
 
-    auto newMap = std::make_shared<CacheMap>(*currentMap);
-    (*newMap)[hash] = cache;
-    cacheMapPtr.store(std::shared_ptr<const CacheMap>(newMap), std::memory_order_release);
+    CacheMap* newMap = nullptr;
+    try
+    {
+        newMap = new CacheMap(*currentMap);
+    }
+    catch (const std::bad_alloc&)
+    {
+        cache->release();
+        return nullptr;
+    }
+
+    newMap->map[hash] = cache;
+    storeNewMap(newMap);
 
     return cache;
 }
 
 EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) const noexcept
 {
-    auto currentMap = loadMap();
-    const auto it = currentMap->find(hash);
-    return (it != currentMap->end()) ? it->second : nullptr;
+    const CacheMap* currentMap = loadMap();
+    if (currentMap == nullptr)
+        return nullptr;
+
+    const auto it = currentMap->map.find(hash);
+    return (it != currentMap->map.end()) ? it->second : nullptr;
 }
 
 void AudioEngine::EQCacheManager::releaseCache(EQCoeffCache* cache) noexcept
@@ -1311,14 +1379,15 @@ void AudioEngine::EQCacheManager::releaseCache(EQCoeffCache* cache) noexcept
 AudioEngine::EQCacheManager::~EQCacheManager()
 {
     std::lock_guard<std::mutex> lock(writeMutex);
-    auto currentMap = loadMap();
-    for (const auto& entry : *currentMap)
-    {
-        if (entry.second != nullptr)
-            entry.second->release();
-    }
 
-    cacheMapPtr.store(std::shared_ptr<const CacheMap>(std::make_shared<CacheMap>()), std::memory_order_release);
+    CacheMap* currentMap = cacheMapPtr.exchange(nullptr, std::memory_order_acq_rel);
+    if (currentMap != nullptr)
+        delete currentMap;
+
+    for (auto* map : enqueueFallbackMaps)
+        delete map;
+
+    enqueueFallbackMaps.clear();
 }
 
 void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)

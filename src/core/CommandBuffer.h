@@ -75,7 +75,7 @@ private:
 #pragma warning(pop)
 #endif
 
-constexpr size_t kCommandBufferCapacity = 256;
+constexpr size_t kCommandBufferCapacity = 1024;
 using CommandBuffer = SPSCRingBuffer<ParameterCommand, kCommandBufferCapacity>;
 
 } // namespace convo

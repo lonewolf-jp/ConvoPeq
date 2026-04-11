@@ -7,30 +7,104 @@
 * When using JUCE Framework functions, be sure to verify that the function exists in the latest JUCE version at the URL mentioned above.
 * It is crucial to **fully understand** the API specifications of JUCE framework V8.0.12. In particular, thoroughly investigate the meaning of return values, side effects, thread safety, and prerequisites before coding.
 * Note that the sample code on the official JUCE framework GitHub is basically VST3, etc., and not a standalone application like this one. * Do not implement excessive stabilization mechanisms not found in the sample code on the official JUCE framework GitHub repository.
+
 * Never edit files within the JUCE folder in the project root or the r8brain-free-src folder.
+
 * Never use Structured Exception Handling (SEH).
-* Within the Audio thread (the thread where getNextAudioBlock() is called), absolutely do not perform any operations that have even a 1% chance of waiting (memory allocation (new / malloc / vector::resize / mkl_malloc / mkl_free / _aligned_malloc / vslNewStream), try-catch, DftiCommitDescriptor, mkl_set_interface_layer, IR reloading, mutex lock, critical section, condition_variable, file I/O, console output, std::exp(), functions that call libm, MMCSS settings, access to MessageManager, use of std::shared_ptr). * **Never use AudioBlock::allocate, AudioBlock::copyFrom, or FFT::performFrequencyOnlyForwardTransform (without pre-allocation)** within the Audio thread (the thread calling getNextAudioBlock()).
-* **Outside of the Audio thread (the thread calling getNextAudioBlock()), and where INTEL oneAPI MKL (one MKL) is used, do not use new, std::vector, or std::make_unique. Instead, use mkl_malloc / mkl_free, _aligned_malloc(64), or std::pmr + custom allocator.**
-* **Data exchange and sharing between the Audio thread (the thread calling getNextAudioBlock()) and other threads must be conducted in a way that reliably guarantees the real-time performance and thread safety of the Audio thread.**
-* **All data processing other than external input and output must be performed using 64-bit doubles.** However, floats are acceptable for spectrum analyzer calculations.
-* Where INTEL oneAPI MKL (one MKL) is used, ensure memory is aligned to 64 bytes, and if memory allocation is required, call it only from a message thread such as prepareToPlay(), not from the Audio Thread.
+
+* Within the Audio thread (the thread where getNextAudioBlock() is called), absolutely do not perform any operations that have even a 1% chance of waiting (memory allocation (new / malloc / vector::resize / mkl_malloc / mkl_free / _aligned_malloc / vslNewStream), try-catch, DftiCommitDescriptor, mkl_set_interface_layer, IR reloading, mutex lock, critical section, condition_variable, file I/O, console output, std::exp(), functions that call libm, MMCSS settings, access to MessageManager, use of std::shared_ptr). However, debug builds are exempt from these restrictions.
+
+* **Never use AudioBlock::allocate, AudioBlock::copyFrom, or FFT::performFrequencyOnlyForwardTransform (without pre-allocation)** within the Audio thread (the thread where getNextAudioBlock() is called).
+
+* **Outside of the Audio thread (the thread where getNextAudioBlock() is called), and where INTEL oneAPI MKL (one MKL) is used, do not use new, std::vector, or std::make_unique. Instead, use mkl_malloc / mkl_free, _aligned_malloc(64), or std::pmr + custom allocator.**
+
+* **Data exchange and sharing between the Audio thread (the thread where getNextAudioBlock() is called) and other threads must be conducted in a way that reliably guarantees the real-time performance and thread safety of the Audio thread.** However, this does not apply to debug builds.
+
+
+* * All data processing, except for external input and output, should be performed using 64-bit doubles. However, floats are acceptable for spectrum analyzer calculations.
+
+* Implement data access according to the data access rules.
+
+* Implement the state machine and its surrounding parts according to the <State Monitoring Technology Design Guidelines>.
+
+* Where INTEL oneAPI MKL (one MKL) is used, the memory should be 64-byte aligned, and if memory allocation is required, call it only from message threads such as prepareToPlay(), not from the Audio Thread.
+
 * Ensure proper denormalization countermeasures are in place.
-* Be careful not to forget to set destructors.
+
+* Be careful not to forget to install destructors.
+
 * Pay attention to memory release to prevent memory leaks.
+<Data Access Rules>
+1. State Machine ⇄ Real-time (RT) Thread
+Principle: Read-only, or atomic notification
+Method of interaction: Flag reference using std::atomic variables.
+Specific method:
+The state machine itself (complex transition logic) is placed on the non-RT side.
+The RT thread will only check `std::atomic<State>` at the beginning of each cycle.
+If the RT thread needs to change the state (e.g., error detection), it will only set an atomic "error flag," leaving the actual state transition (e.g., resource release) to the non-RT thread.
+2. State Machine ⇄ Non-Real-Time (Non-RT) Threads
+Principle: Execution of logic and management of resource lifecycle
+Method of interaction: Mutex and standard conditional branching.
+Specific method:
+Heavy processing (IPP initialization and MKL memory allocation) associated with user operations and file I/O is performed here.
+After completely completing the creation and destruction of resources associated with state transitions, the atomic "state flag" seen by the RT thread is finally rewritten.
+Since there are no real-time constraints here, it is acceptable to use locks to prioritize safety. 3. Real-time ⇄ Non-Real-time (RT ⇄ Non-RT) Threads
+This is the most important part; two "types" are used depending on the nature of the data.
+A. Configuration values ​​and parameters (small data)
+Method: std::atomic<float> or std::atomic<double>.
+Specific method: Non-RT writes, RT reads. Locking is not required.
+B. Signals and large buffers (large data / IPP coefficients, etc.)
+Method: SPSC (Single-Producer Single-Consumer) FIFO.
+Specific method:
+Data transmission: The non-RT side allocates and processes memory, and sends its pointer to the FIFO. The RT side retrieves it and replaces it with the current processing.
+Memory return: It is strictly forbidden to free used memory in the RT thread. Use a "return FIFO" to return the old pointer to the non-RT thread, where it is safely discarded.
+<State Monitoring Technology Design Guidelines>
+1. Unidirectional Data Flow (Read-Only Access)
+• Viewing threads (UI/Log, etc.) do not have direct write privileges to internal variables of the state machine.
+• State changes should be limited to asynchronous requests via command queues or message buses.
+2. Non-Blocking Reads (Lock-Free Snapshots)
+• In principle, exclusive locks using synchronization primitives such as std::mutex should be prohibited when accessing from the viewing side.
+• Scalar values ​​(State, Level, etc.) should be obtained lock-free using std::atomic<T> to ensure consistency.
+• For complex structures, the state machine should provide double buffering or a copy (Snapshot), and the viewing side should atomically obtain only a copy of the pointer.
+3. Pull-based Observation Model
+
+- Avoids push notifications (callbacks) from the state machine and employs a "polling method" where the viewer uses its own timer (low priority) to retrieve the latest value.
+
+- This eliminates the risk that high display load will interfere with the deterministic operation of the core logic (state transitions and signal processing).
+
+4. Responsibility Separation
+
+- All data processing for display (string formatting, scaling, visualization calculations) is performed using the computing resources of the viewer thread.
+
+- The state machine focuses solely on writing raw data and has no overhead from formatting processing.
+
+5. Best-effort Consistency
+
+- Prioritizes "processing independence" over "lateness" of information.
+
+- The viewing side is allowed to temporarily access old data (stale data) to prevent the effects of jitter and packet loss from spreading to the state machine.
 
 <Required Information>
 * This program uses JUCE framework V8.0.12 https://github.com/juce-framework/JUCE/tree/8.0.12.
 * Information on the JUCE framework can be found at https://docs.juce.com/master/index.html.
-* The JUCE Framework forum is at the following URL. Reference information for the program can be found there.
+* The following URLs are for the JUCE Framework forum. You can find reference information for this program there.
+
 https://forum.juce.com/c/general-juce-discussion/10
+
 https://forum.juce.com/c/audio-plugins/11
+
 https://forum.juce.com/c/windows/15
+
 https://forum.juce.com/c/getting-started/20
+
 https://forum.juce.com/c/cmake/31
 * This program uses r8brain-free-src https://github.com/avaneev/r8brain-free-src.git.
-* This program uses INTEL oneAPI MKL (one MKL) https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html.
-• Information on Intel oneAPI MKL (one MKL) can be found at https://www.intel.com/content/www/us/en/docs/onemkl/developer-guide-windows/2025-2/overview.html.
-• Information on the Windows SDK can be found at https://learn.microsoft.com/ja-jp/windows/apps/windows-sdk/.
+
+This program uses Intel oneAPI MKL (one MKL) https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html.
+
+Information about Intel oneAPI MKL (one MKL) can be found at https://www.intel.com/content/www/us/en/docs/onemkl/developer-guide-windows/2025-2/overview.html.
+
+Information about the Windows SDK can be found at https://learn.microsoft.com/ja-jp/windows/apps/windows-sdk/.
 
 <References>
 〇Programming
@@ -46,43 +120,43 @@ https://www.native-instruments.com/fileadmin/ni_media/downloads/pdf/VAFilterDesi
 〇Convolution
 ・Real-Time Partitioned Convolution for Ambiophonics (Angelo Farina)
 https://www.angelofarina.it/Public/Papers/164-Mohonk2001.PDF
-・FFTW 
-https://www.fftw.org/fftw-paper-ieee.pdf 
+・FFTW
+https://www.fftw.org/fftw-paper-ieee.pdf
 https://www.fftw.org/
 〇Signal Processing
-・The Scientist and Engineer's Guide to Digital Signal Processing (Steven W. Smith) 
+・The Scientist and Engineer's Guide to Digital Signal Processing (Steven W. Smith)
 https://img.anfulai.cn/bbs/97312/The%20Scientist%20and%20Engineer%20Guide%20to%20DSP.pdf
-・Introduction to Signal Processing (2nd Edition, 2023) 
+・Introduction to Signal Processing (2nd Edition, 2023)
 https://rutgers.box.com/s/92is8ajwe2b0liokflkqx1ul2fqqqa7l
-・Solutions Manual 
-https://rutgers.box.com/s/ijyxsvc2muaxa7o45jaujl2hadxqdkk6 
+・Solutions Manual
+https://rutgers.box.com/s/ijyxsvc2muaxa7o45jaujl2hadxqdkk6
 Solutions Manual errata https://https//rutgers.box.com/s/07ucb1ru83189jxf68mf6yzncc3fw7qg
-・Applied Optimum Signal Processing (2018) 
+・Applied Optimum Signal Processing (2018)
 https://rutgers.box.com/s/7sqyou4r7pg9wgx0zveexiukj9ca2ih0
-・Optimum Signal Processing (2nd Edition 2007) 
+・Optimum Signal Processing (2nd Edition 2007)
 https://rutgers.box.com/s/m4qylu904kheuuptdt30tbdh1ahsps3h
-・cytomic knowledge and algorithms 
+・cytomic knowledge and algorithms
 https://cytomic.com/technical-papers/
 ・Audio EQ Cookbook (Robert Bristow-Johnson) https://github.com/WebAudio/Audio-EQ-Cookbook/blob/main/Audio-EQ-Cookbook.txt
-・EarLevel Engineering (Nigel Redmon) 
+・EarLevel Engineering (Nigel Redmon)
 https://www.earlevel.com/main/
-・Free DSP Books 
+・Free DSP Books
 https://www.dsprelated.com/freebooks/pasp/
 〇CMA-ES
-・The CMA Evolution Strategy: A Tutorial 
+・The CMA Evolution Strategy: A Tutorial
 http://www.cmap.polytechnique.fr/~nikolaus.hansen/cmatutorial110628.pdf
-・CMA-ES Source Code Page (Nikolaus Hansen) 
+・CMA-ES Source Code Page (Nikolaus Hansen)
 http://www.cmap.polytechnique.fr/~nikolaus.hansen/cmaes_inmatlab.html
 〇Online Optimization
 ・Introduction to Online Convex Optimization (Elad Hazan) https://wuzequn.com/2018/10/16/online-learning-algorithm-background-knowledge-ftrl-provement/online-convext-optimization-book.pdf
 〇CMA-ES / Online Optimization
-・Learning Step-Size Adaptation in CMA-ES 
+・Learning Step-Size Adaptation in CMA-ES
 https://ml.informatik.uni-freiburg.de/wp-content/uploads/papers/20-PPSN-LTO-CMA.pdf
-・CMAES_Tutorial 
+・CMAES_Tutorial
 https://github.com/akimotolab/CMAES_Tutorial
 ・CMA-ES with Two-Point Step-Size Adaptation
 https://inria.hal.science/inria-00276854v3/document
 ・Optuna (Dashboard/Library)
 https://docs-ja.optuna.org/
- 
-  use context7
+
+use context7

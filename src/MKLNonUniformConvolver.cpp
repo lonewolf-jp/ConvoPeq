@@ -34,6 +34,12 @@
 #include <JuceHeader.h>
 #include "MKLNonUniformConvolver.h"
 #include "MKLRealTimeSetup.h"
+
+namespace {
+#if JUCE_DEBUG
+std::atomic<int> g_warmupGuardCount { 0 };
+#endif
+}
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
 
@@ -401,6 +407,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         Layer& l = m_layers[m_numActiveLayers];
         l.descriptorCommitted = false;
+        l.warmupCompleted.store(false, std::memory_order_relaxed);
 
         l.partSize    = cfgs[li].partSize;
         l.fftSize     = l.partSize * 2;
@@ -567,6 +574,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         // Audio Thread での初回実行時の遅延 (IPP テーブル生成等) を事前消化する。
         // [v2.1] IFFT: CCS → real (IPP_FFT_DIV_INV_BY_N により 1/N 正規化済み)
         ippsFFTInv_CCSToR_64f(tempFreq, tempTime, l.fftSpec, l.fftWorkBuf);
+        l.warmupCompleted.store(true, std::memory_order_release);
 
         mkl_free(tempTime);
         mkl_free(tempFreq);
@@ -744,8 +752,10 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
 //==============================================================================
 void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 {
-    // B7: Audio Thread 内での初回 FFT 実行による遅延を防止（Message Thread で warmup 済みを保証）
-    MKLRealTime::warmupLayer(l);
+#if JUCE_DEBUG
+    if (!l.warmupCompleted.load(std::memory_order_acquire))
+        g_warmupGuardCount.fetch_add(1, std::memory_order_relaxed);
+#endif
 
     // ── 1. [prevInput | currentInput] を fftTimeBuf に配置 (Overlap-Save) ──
     juce::FloatVectorOperations::copy(l.fftTimeBuf,              l.prevInputBuf, l.partSize);
@@ -976,8 +986,10 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
     {
         Layer& l = m_layers[li];
 
-        // B7: Audio Thread 内での初回 FFT 実行による遅延を防止（Message Thread で warmup 済みを保証）
-        MKLRealTime::warmupLayer(l);
+#if JUCE_DEBUG
+        if (!l.warmupCompleted.load(std::memory_order_acquire))
+            g_warmupGuardCount.fetch_add(1, std::memory_order_relaxed);
+#endif
 
         int consumed = 0;
         while (consumed < numSamples)
