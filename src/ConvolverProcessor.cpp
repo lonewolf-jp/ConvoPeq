@@ -25,6 +25,7 @@
 #include "ProgressiveUpgradeThread.h"
 #include "DeferredDeletionQueue.h"
 #include "AudioEngine.h"
+#include "core/ThreadAffinityManager.h"
 
 #include <mkl.h>
 #include <mkl_vml.h>
@@ -656,8 +657,8 @@ public:
 
     void run() override
     {
-        if (owner.onSetThreadAffinity)
-            owner.onSetThreadAffinity(nullptr);
+        if (owner.rcuProvider != nullptr)
+            owner.rcuProvider->getAffinityManager().applyCurrentThreadPolicy(ThreadType::HeavyBackground);
 
         juce::ScopedNoDenormals noDenormals; // バックグラウンド処理でのDenormal対策
 
@@ -1439,8 +1440,6 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     isPrepared.store(false, std::memory_order_release);
 
-    audioThreadAffinitySet.store(false, std::memory_order_release);
-
     // 旧descriptor未解放防止
     if (fftHandle) {
         DftiFreeDescriptor(&fftHandle);
@@ -1661,7 +1660,11 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // （デバイス設定変更でサンプルレートが変わった場合も対応）
     if (!deferredFreeThread)
     {
-        deferredFreeThread = std::make_unique<DeferredFreeThread>(rcuSwapper);
+        ThreadAffinityManager* affinityMgr = nullptr;
+        if (rcuProvider != nullptr)
+            affinityMgr = const_cast<ThreadAffinityManager*>(&rcuProvider->getAffinityManager());
+
+        deferredFreeThread = std::make_unique<DeferredFreeThread>(rcuSwapper, affinityMgr);
     }
 
     firstProcessCall.store(true, std::memory_order_release);
@@ -2933,7 +2936,10 @@ void ConvolverProcessor::startProgressiveUpgrade(const juce::File& file,
                                                                 generation,
                                                                 baseKey,
                                                                 *irConverter,
-                                                                *cacheManager);
+                                                                *cacheManager,
+                                                                rcuProvider != nullptr
+                                                                    ? const_cast<ThreadAffinityManager*>(&rcuProvider->getAffinityManager())
+                                                                    : nullptr);
     upgradeThread->startThread();
 }
 
@@ -4066,12 +4072,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (firstProcessCall.exchange(false, std::memory_order_acq_rel))
             block.clear();
         return;
-    }
-
-    if (!audioThreadAffinitySet.load(std::memory_order_acquire) && onSetThreadAffinity)
-    {
-        onSetThreadAffinity(nullptr);
-        audioThreadAffinitySet.store(true, std::memory_order_release);
     }
 
     static constexpr double kLatencyRetargetThresholdSamples = 2.0;

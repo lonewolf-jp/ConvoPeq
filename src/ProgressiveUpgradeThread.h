@@ -9,6 +9,7 @@
 class ConvolverProcessor;
 class IRConverter;
 class CacheManager;
+class ThreadAffinityManager;
 
 class ProgressiveUpgradeThread : public juce::Thread
 {
@@ -22,7 +23,8 @@ public:
                              uint64_t baseGeneration,
                              uint64_t baseCacheKey,
                              IRConverter& converter,
-                             CacheManager& cacheManager);
+                             CacheManager& cacheManager,
+                             ThreadAffinityManager* affinityManager);
 
     ~ProgressiveUpgradeThread() override;
 
@@ -47,4 +49,5 @@ private:
 
     IRConverter& converter;
     CacheManager& cacheManager;
+    ThreadAffinityManager* affinityManager = nullptr;
 };

@@ -4,6 +4,8 @@
 
 #include "WorkerThread.h"
 #include "SnapshotCoordinator.h"
+#include "ThreadAffinityManager.h"
+#include "../AudioEngine.h"
 #include "../GenerationManager.h"
 
 #include <chrono>
@@ -14,19 +16,17 @@
  #include <pmmintrin.h>
 #endif
 
-#ifdef _WIN32
- #include <windows.h>
-#endif
-
 namespace convo {
 
 WorkerThread::WorkerThread(CommandBuffer& cmdBuf,
                            SnapshotCoordinator& coord,
                            GenerationManager& genMgr,
+                   AudioEngine& engine,
                            const WorkerThreadConfig& cfg)
     : commandBuffer(cmdBuf),
       coordinator(coord),
       generationManager(genMgr),
+    audioEngine(engine),
       config(cfg)
 {
 }
@@ -62,21 +62,11 @@ void WorkerThread::flush()
 
 void WorkerThread::run()
 {
+    audioEngine.getAffinityManager().applyCurrentThreadPolicy(ThreadType::Worker);
+
 #if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-#endif
-
-#ifdef _WIN32
-    DWORD_PTR processMask = 0;
-    DWORD_PTR systemMask = 0;
-    if (::GetProcessAffinityMask(::GetCurrentProcess(), &processMask, &systemMask)) {
-        const DWORD_PTR firstCore = 1;
-        DWORD_PTR nonAudioMask = processMask & ~firstCore;
-        if (nonAudioMask == 0)
-            nonAudioMask = processMask;
-        ::SetThreadAffinityMask(::GetCurrentThread(), nonAudioMask);
-    }
 #endif
 
     bool hasPending = false;

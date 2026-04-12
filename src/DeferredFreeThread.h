@@ -20,6 +20,7 @@
 #pragma once
 
 #include "SafeStateSwapper.h"
+#include "core/ThreadAffinityManager.h"
 
 #include <thread>
 #include <atomic>
@@ -34,8 +35,8 @@ public:
     //
     // @param swapper  解放対象の retired キューを持つ SafeStateSwapper への参照
     // -----------------------------------------------------------------------
-    explicit DeferredFreeThread(SafeStateSwapper& swapper)
-        : swapperRef(swapper), running(true)
+    explicit DeferredFreeThread(SafeStateSwapper& swapper, ThreadAffinityManager* affinityMgr = nullptr)
+        : swapperRef(swapper), affinityManager(affinityMgr), running(true)
     {
         thread = std::thread([this]() { run(); });
     }
@@ -90,6 +91,9 @@ private:
 
     void run()
     {
+        if (affinityManager != nullptr)
+            affinityManager->applyCurrentThreadPolicy(ThreadType::LightBackground);
+
         while (running.load(std::memory_order_acquire))
         {
             const uint64_t minEpoch = swapperRef.getMinReaderEpoch();
@@ -107,6 +111,7 @@ private:
     }
 
     SafeStateSwapper&     swapperRef;
+    ThreadAffinityManager* affinityManager;
     std::atomic<bool>     running;
     std::thread           thread;
 };

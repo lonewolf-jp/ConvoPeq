@@ -63,6 +63,7 @@ struct CoeffSet {
 #include "core/SnapshotCoordinator.h"
 #include "core/ReaderEpoch.h"
 #include "core/CommandBuffer.h"
+#include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
 
 // デバッグビルド時のみログを出力するマクロ
@@ -154,6 +155,7 @@ public:
     ConvolverProcessor& getConvolverProcessor() { return uiConvolverProcessor; }
     const ConvolverProcessor& getConvolverProcessor() const { return uiConvolverProcessor; }
     EQEditProcessor& getEQProcessor() { return uiEqEditor; }
+    const ThreadAffinityManager& getAffinityManager() const noexcept { return affinityManager; }
 
     double getSampleRate() const { return currentSampleRate.load(); }
     double getProcessingSampleRate() const;
@@ -744,11 +746,9 @@ DSPCore();
 
     LockFreeRingBuffer<AudioBlock, 4096> audioCaptureQueue;
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
+    ThreadAffinityManager affinityManager;
     std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount> adaptiveCoeffBanks {};
     std::atomic<int> currentAdaptiveCoeffBankIndex { 1 };
-    std::uintptr_t audioThreadAffinityMask = 0;
-    std::uintptr_t noiseLearnerThreadAffinityMask = 0;
-    std::uintptr_t nonAudioThreadAffinityMask = 0;
     std::mutex adaptiveAutosaveCallbackMutex;
     std::function<void()> adaptiveAutosaveCallback;
     void initialiseAdaptiveCoeffBanks() noexcept;
@@ -757,9 +757,6 @@ DSPCore();
     AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) noexcept;
     const AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept;
     void selectAdaptiveCoeffBankForCurrentSettings() noexcept;
-    void initialiseThreadAffinityMasks() noexcept;
-    void pinCurrentThreadToNoiseLearnerCoreIfNeeded() const noexcept;
-    void pinCurrentThreadToNonAudioCoresIfNeeded() const noexcept;
     void publishCoeffsToBank(int bankIndex, const double* coeffs);
 
     class ConvolverStateReaderGuard

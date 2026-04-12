@@ -285,11 +285,6 @@ public:
     static IRLoadPreview analyzeImpulseResponseFile(const juce::File& irFile, double processingSampleRate);
 
     //----------------------------------------------------------
-    // Thread Affinity & Optimization
-    //----------------------------------------------------------
-    void setThreadAffinityCallback(std::function<void(void*)> callback) { onSetThreadAffinity = callback; }
-
-    //----------------------------------------------------------
     // 状態リセット
     //----------------------------------------------------------
     void reset();
@@ -847,9 +842,6 @@ private:
                                                                  double tau,
                                                                  const std::function<bool()>& shouldExit,
                                                                  bool* wasCancelled);
-
-    std::function<void(void*)> onSetThreadAffinity;
-    std::atomic<bool> audioThreadAffinitySet{ false };
 
     std::unique_ptr<IRConverter> irConverter;
     std::unique_ptr<CacheManager> cacheManager;

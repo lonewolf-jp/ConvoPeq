@@ -10,6 +10,7 @@
 #include "CommandBuffer.h"
 
 class GenerationManager;
+class AudioEngine;
 
 namespace convo {
 
@@ -27,6 +28,7 @@ public:
     WorkerThread(CommandBuffer& cmdBuf,
                  SnapshotCoordinator& coordinator,
                  GenerationManager& genManager,
+                 AudioEngine& engine,
                  const WorkerThreadConfig& config = WorkerThreadConfig());
     ~WorkerThread();
 
@@ -57,6 +59,7 @@ private:
     CommandBuffer& commandBuffer;
     SnapshotCoordinator& coordinator;
     GenerationManager& generationManager;
+    AudioEngine& audioEngine;
     WorkerThreadConfig config;
 
     std::atomic<SnapshotCreatorCallback> callbackFunc{nullptr};

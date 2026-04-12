@@ -3,9 +3,9 @@
 
 ---
 
-## New in v0.6.1
+## New in v0.6.2
 
-### Main Changes in v0.6.1
+### Main Changes in v0.6.2
 
 This update summarizes the source-code changes from commit 08dfe14 to the current state.
 

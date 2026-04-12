@@ -27,6 +27,13 @@
 #include <immintrin.h>
 #include <mkl_vsl.h>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
+
 namespace convo
 {
 //============================================================
@@ -468,6 +475,12 @@ private:
 
     void rngProducerLoop() noexcept
     {
+#ifdef _WIN32
+        HANDLE hThread = ::GetCurrentThread();
+        if (hThread != nullptr)
+            ::SetThreadPriority(hThread, THREAD_PRIORITY_LOWEST);
+#endif
+
         // FTZ/DAZ settings for stable MKL performance
         // このスレッドは MKL の vdRngUniform を呼び出すため、デノーマル数による
         // スループット低下を防ぐために Flush To Zero / Denormals Are Zero を有効化する。

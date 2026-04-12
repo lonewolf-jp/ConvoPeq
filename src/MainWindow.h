@@ -26,6 +26,8 @@ public:
     ~MainWindow() override;
 
     void closeButtonPressed() override;
+    AudioEngine* getAudioEngine() noexcept { return &audioEngine; }
+    const AudioEngine* getAudioEngine() const noexcept { return &audioEngine; }
 
 private:
     struct DownwardComboLookAndFeel : public juce::LookAndFeel_V4

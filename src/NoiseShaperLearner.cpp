@@ -1,5 +1,6 @@
 #include "NoiseShaperLearner.h"
 #include "AudioEngine.h"
+#include "core/ThreadAffinityManager.h"
 
 #include <JuceHeader.h>
 #include <algorithm>
@@ -455,13 +456,13 @@ void NoiseShaperLearner::configureEvaluationContexts(double sampleRateHz) noexce
 
 void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
 {
+    engine.getAffinityManager().applyCurrentThreadPolicy(ThreadType::LearnerEval, workerIndex);
+
     // FTZ/DAZ をスレッド開始時に設定する（スレッドローカルフラグ）。
     // 評価ワーカーは MKL DFTI および LatticeNoiseShaper を使用するため、
     // デノーマル数による CPU 速度低下を防ぐために必須。
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-
-    engine.pinCurrentThreadToNonAudioCoresIfNeeded();
 
     uint32_t observedDispatchSerial = 0;
 
@@ -628,6 +629,8 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
 
 void NoiseShaperLearner::workerThreadMain()
 {
+    engine.getAffinityManager().applyCurrentThreadPolicy(ThreadType::LearnerMain);
+
     // FTZ/DAZ をスレッド開始時に設定する。
     // これらのフラグはスレッドローカルであるため、スレッドごとに設定が必要。
     // 設定しない場合、LatticeNoiseShaper の状態変数や MKL DFTI の中間バッファで
@@ -647,8 +650,6 @@ void NoiseShaperLearner::workerThreadMain()
         {
             // 後処理で一貫して終了させる
         }
-        engine.pinCurrentThreadToNoiseLearnerCoreIfNeeded();
-
         SessionSignature activeSession = captureSessionSignature();
         bool resume = pendingResume.exchange(false, std::memory_order_acquire);
         resetLearningSession(activeSession, resume);

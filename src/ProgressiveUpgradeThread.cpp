@@ -4,6 +4,7 @@
 #include "IRConverter.h"
 #include "CacheManager.h"
 #include "PreparedIRState.h"
+#include "core/ThreadAffinityManager.h"
 
 #include <cmath>
 
@@ -16,7 +17,8 @@ ProgressiveUpgradeThread::ProgressiveUpgradeThread(ConvolverProcessor& p,
                                                    uint64_t baseGeneration,
                                                    uint64_t key,
                                                    IRConverter& conv,
-                                                   CacheManager& cache)
+                                                   CacheManager& cache,
+                                                   ThreadAffinityManager* affinityMgr)
     : juce::Thread("ConvolverProgressiveUpgrade"),
       processor(p),
       irFile(file),
@@ -27,7 +29,8 @@ ProgressiveUpgradeThread::ProgressiveUpgradeThread(ConvolverProcessor& p,
       taskGeneration(baseGeneration),
             baseCacheKey(key),
       converter(conv),
-      cacheManager(cache)
+    cacheManager(cache),
+    affinityManager(affinityMgr)
 {
         static constexpr int kStepTable[] = { 1024, 2048, 4096 };
         for (int step : kStepTable)
@@ -67,6 +70,9 @@ bool ProgressiveUpgradeThread::checkAndCancel()
 
 void ProgressiveUpgradeThread::run()
 {
+    if (affinityManager != nullptr)
+        affinityManager->applyCurrentThreadPolicy(ThreadType::HeavyBackground);
+
     // JUCE のクロスプラットフォーム優先度設定
     setPriority(Priority::low);
 

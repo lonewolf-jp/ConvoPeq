@@ -682,13 +682,15 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 // コンストラクタ
 //--------------------------------------------------------------
 AudioEngine::AudioEngine()
-    : m_workerThread(m_commandBuffer, m_coordinator, m_generationManager),
+    : m_workerThread(m_commandBuffer, m_coordinator, m_generationManager, *this),
       uiEqEditor(*this)
 {
     initialiseAdaptiveCoeffBanks();
     selectAdaptiveCoeffBankForCurrentSettings();
 
-    initialiseThreadAffinityMasks();
+    if (!affinityManager.initialize())
+        DBG_LOG("ThreadAffinityManager initialization failed; falling back to default scheduling");
+
     noiseShaperLearner = std::make_unique<NoiseShaperLearner>(*this, audioCaptureQueue);
     noiseShaperLearner->setLearningMode(pendingLearningMode.load(std::memory_order_acquire));
 
@@ -1173,58 +1175,6 @@ void AudioEngine::setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLe
     auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
     std::lock_guard<std::mutex> lock(bank.stateMutex);
     bank.state = inState;
-}
-
-void AudioEngine::initialiseThreadAffinityMasks() noexcept
-{
-    DWORD_PTR processAffinityMask = 0;
-    DWORD_PTR systemAffinityMask = 0;
-
-    if (!::GetProcessAffinityMask(::GetCurrentProcess(), &processAffinityMask, &systemAffinityMask))
-        return;
-
-    DWORD_PTR firstMask = 0;
-    DWORD_PTR secondMask = 0;
-
-    for (DWORD_PTR bit = 1; bit != 0; bit <<= 1)
-    {
-        if ((processAffinityMask & bit) == 0)
-            continue;
-
-        if (firstMask == 0)
-            firstMask = bit;
-        else
-        {
-            secondMask = bit;
-            break;
-        }
-    }
-
-    audioThreadAffinityMask = static_cast<std::uintptr_t>(firstMask);
-    noiseLearnerThreadAffinityMask = static_cast<std::uintptr_t>(secondMask != 0 ? secondMask : firstMask);
-    const DWORD_PTR nonAudioMask = processAffinityMask & ~firstMask;
-    nonAudioThreadAffinityMask = static_cast<std::uintptr_t>(nonAudioMask != 0 ? nonAudioMask : (secondMask != 0 ? secondMask : firstMask));
-}
-
-void AudioEngine::pinCurrentThreadToNoiseLearnerCoreIfNeeded() const noexcept
-{
-    if (noiseLearnerThreadAffinityMask == 0)
-        return;
-
-    ::SetThreadAffinityMask(::GetCurrentThread(), static_cast<DWORD_PTR>(noiseLearnerThreadAffinityMask));
-}
-
-void AudioEngine::pinCurrentThreadToNonAudioCoresIfNeeded() const noexcept
-{
-    static thread_local bool isPinned = false;
-    if (isPinned)
-        return;
-
-    if (nonAudioThreadAffinityMask == 0)
-        return;
-
-    ::SetThreadAffinityMask(::GetCurrentThread(), static_cast<DWORD_PTR>(nonAudioThreadAffinityMask));
-    isPinned = true;
 }
 
 void AudioEngine::initialize()
