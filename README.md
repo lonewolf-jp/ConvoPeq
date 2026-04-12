@@ -7,16 +7,48 @@
 
 ### Main Changes in v0.6.2
 
-This update summarizes the source-code changes from commit 08dfe14 to the current state.
+This update summarizes the source-code changes from commit b340698 to the current state.
 
-- The audio-engine and convolver lifetime model was reworked around safer deferred-release and RCU-style state handoff patterns, reducing the risk of blocking, use-after-free, and disruptive runtime swaps.
-- The convolution pipeline was strengthened with safer IR rebuild handling, generation-based invalidation, progressive upgrade support, dynamic crossfades, and more defensive buffer allocation/error paths.
-- The FFT/convolution backend was modernized with pre-initialized real-time-oriented setup and additional warmup paths to reduce first-use latency and improve runtime stability.
-- EQ and related DSP paths were cleaned up to rely on safer state exchange and precomputed coefficient tables, reducing callback-time work and simplifying resource ownership.
-- UI and host integration were improved with better latency reporting, a resampling phase-mode control for IR workflows, and smaller fixes in analyzer and noise-shaper related components.
-- Build/runtime initialization was tightened so required compiler and SDK environments are validated earlier, while project metadata and documentation were updated to match the current release.
+#### 1. New Architecture Foundation (`src/core/` addition – 1344 lines)
 
-In short, this period focused on making the core DSP pipeline more production-ready: safer state transitions, more predictable real-time behavior, and tighter integration between the engine, convolver workflow, UI, and build system.
+**Introduction of snapshot/RCU-based state management architecture:**
+
+- `ThreadAffinityManager.h` (317 lines) – Thread affinity and epoch management
+- `SnapshotCoordinator.h/cpp` (128+112 lines) – Snapshot coordination
+- `GlobalSnapshot.h/cpp` – Global state snapshots
+- `SnapshotAssembler.h/cpp` – Snapshot assembly
+- `SnapshotFactory.h/cpp` – Snapshot creation
+- `WorkerThread.h/cpp` – Worker thread foundation
+- `CommandBuffer.h` – Lock-free command buffer
+- `DeletionQueue.h/cpp` – RCU deletion queue
+- `ReaderEpoch.h`, `EQParameters.h`, `SnapshotParams.h`, `Types.h`
+
+#### 2. EQ Processing Separation and Extension
+
+- **New:** `EQEditProcessor.h/cpp` – EQ edit processor added
+- **Modified:** `EQProcessor.h/cpp` (605+94 lines changed) – Significant refactoring of the existing EQ processor
+
+#### 3. Core Engine Major Refactoring
+
+- **AudioEngine.h/cpp** (1000+ lines added) – Snapshot/RCU integration, thread management overhaul
+- **ConvolverProcessor.h/cpp** (748+120 lines changed) – Snapshot-based state management introduction
+
+#### 4. Other Enhancements
+
+- `AlignedAllocation.h` – Memory alignment feature additions
+- `CustomInputOversampler.h`, `PsychoacousticDither.h` – Signal processing enhancements
+- `.vscode/tasks.json` (58 lines added) – Build task expansion
+- `README.md`, coding convention documents updated
+
+#### 5. Deletions
+
+- `tests/test_group_delay.cpp` – Removed
+
+#### Summary
+
+**Total:** 52 files changed, 4028 lines added, 1105 lines deleted
+
+**Primary Focus:** Introduction of snapshot/RCU-based inter-thread data handoff mechanisms that guarantee real-time safety, and architectural overhaul to eliminate audio-thread blocking.
 
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 
@@ -24,10 +56,10 @@ ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combi
 
 ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows.
 
-- Platform: **Windows-only**
+- Platform: **Windows 11 x64 only**
 - Framework: **JUCE 8.0.12**
 - Precision: **64-bit double** on the main DSP path
-- Performance focus: **AVX2 + Intel oneMKL**
+- Performance focus: **AVX2 + Intel oneMKL and IPP** (requires minimum 4 physical CPU cores)
 
 ---
 
@@ -76,7 +108,7 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
 
 ## Audio Processing Method
 
-This section is a user-facing summary of the current block processing strategy. For subsystem-level details, see `ARCHITECTURE.md`.
+This section is a user-facing summary of the current block processing strategy. For subsystem-level architectural details, threading model, snapshot/RCU patterns, and component interactions, see `ARCHITECTURE.md`.
 
 ### 1) Quality-Oriented Design Principles
 
@@ -89,7 +121,7 @@ ConvoPeq is designed to preserve fidelity under real-time conditions.
 
 ### 2) Block Entry and State Snapshot
 
-For each callback block, the engine snapshots current runtime flags (bypass/order/analyzer source/quality options) from atomics and processes the block without blocking operations.
+For each callback block, `AudioEngine` obtains a snapshot of the current global DSP state via `SnapshotCoordinator`, capturing all runtime flags (bypass/order/analyzer source/quality options), parameter sets, and processor states in a thread-safe, read-only aggregate. This snapshot is assembled from atomic reads and pre-computed shared state (RCU-style pattern); the block is then processed using only this snapshot, ensuring no blocking operations or parameter races occur during audio execution.
 
 ### 3) Main DSP Chain
 
@@ -128,11 +160,12 @@ Convolver control notes:
 
 ### 5) EQ Strategy
 
-`EQProcessor` applies per-band parametric filtering in real time. EQ response visualization is computed on the UI side and does not run as heavy work inside the callback path.
+`EQProcessor` applies per-band parametric filtering in real time. EQ response visualization and coefficient updates are handled by `EQEditProcessor` on the message/worker thread; the Audio Thread uses only pre-computed, read-only coefficient tables obtained from the current snapshot.
 
 EQ quality notes:
 
 - The EQ is implemented as a **20-band parametric stage**, intended for precise tonal shaping.
+- Parameter edits (`EQEditProcessor`) are performed asynchronously on a non-real-time thread; audio computation uses RCU-style snapshots of the latest validated coefficients.
 - Display computation is separated from audio computation so the audible path remains focused on deterministic DSP work.
 - Processing order with the convolver is selectable, which makes the EQ usable either as a corrective stage before convolution or as a tonal finishing stage after convolution.
 
