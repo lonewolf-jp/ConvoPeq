@@ -90,6 +90,29 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
 - [manual/IR_ADVANCED_WINDOW_JP.md](manual/IR_ADVANCED_WINDOW_JP.md): IR advanced window (Japanese)
 - [manual/ADAPTIVE_NOISE_SHAPER_LEARNING_WINDOW_JP.md](manual/ADAPTIVE_NOISE_SHAPER_LEARNING_WINDOW_JP.md): Adaptive Noise Shaper Learning (Japanese)
 
+### Directory Map (ASCII Tree)
+
+```text
+ConvoPeq/
+|-- src/                      # Main C++ source (DSP, engine, UI)
+|   |-- core/                 # Snapshot/RCU foundation and thread-safe state handoff
+|   |-- AudioEngine.*         # Audio processing core
+|   |-- EQProcessor.*         # 20-band parametric EQ
+|   |-- ConvolverProcessor.*  # IR convolution processing
+|   `-- MainApplication.*     # App entry/runtime wiring
+|-- manual/                   # User manuals (EN/JP)
+|-- resources/                # App resources (icons, assets)
+|-- sampledata/               # Sample IR/EQ files
+|-- JUCE/                     # JUCE framework source (external dependency)
+|-- r8brain-free-src/         # r8brain source (external dependency)
+|-- build/                    # Generated build outputs (CMake/Ninja)
+|-- README.md
+|-- ARCHITECTURE.md
+|-- SOUND_PROCESSING.md
+|-- BUILD_GUIDE_WINDOWS.md
+`-- HOW_TO_USE.md
+```
+
 ---
 
 ## Key Features
