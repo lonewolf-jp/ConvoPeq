@@ -44,6 +44,7 @@
 #include "DeferredDeletionQueue.h"
 #include "ConvolverRuntime.h"
 #include "core/ReaderEpoch.h"
+#include "DspNumericPolicy.h"
 
 class AudioEngine;
 class IRConverter;
@@ -615,7 +616,7 @@ private:
     convo::ScopedAlignedPtr<double> delayBuffer[2]; // L/R separate buffers
     int delayBufferCapacity = 0;
     int delayWritePos = 0;
-    juce::SmoothedValue<double> latencySmoother;
+    convo::LinearRamp latencySmoother;
     // [Issue 2 fix] latencySmoother のスレッドセーフティ向上のためのペンディングフラグ。
     // refreshLatency() (Message/Rebuild Thread) は直接 SmoothedValue を触らず、
     // このフラグと値を使用して Audio Thread に更新を委譲する。
@@ -638,7 +639,7 @@ private:
     int lastReportedLatency = -1;
 
     // ドップラー効果対策: クロスフェード用
-    juce::SmoothedValue<double> crossfadeGain;
+    convo::LinearRamp crossfadeGain;
     double oldDelay = 0.0;
 
     //----------------------------------------------------------
@@ -652,7 +653,7 @@ private:
     alignas(64) std::atomic<bool> experimentalDirectHeadEnabled{false};
     #pragma warning(pop)
 
-    juce::SmoothedValue<double> mixSmoother; // オーディオスレッドでの平滑化用
+    convo::LinearRamp mixSmoother; // オーディオスレッドでの平滑化用
 
 
 

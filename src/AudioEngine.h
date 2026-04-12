@@ -490,7 +490,7 @@ DSPCore();
         convo::ScopedAlignedPtr<double> dryBypassBufferDoubleL;
         convo::ScopedAlignedPtr<double> dryBypassBufferDoubleR;
         int dryBypassCapacityDouble = 0;
-        juce::SmoothedValue<double> bypassFadeGainDouble;
+        convo::LinearRamp bypassFadeGainDouble;
         bool bypassedDouble = false;
 
         // インターサンプルピーク近似: 前ブロック末尾のクリップ済み出力 (L/R)
@@ -560,7 +560,7 @@ DSPCore();
         std::atomic<double> m_osFadeTimeSec { 0.030 };
 
     std::atomic<bool> dspCrossfadePending { false };
-    juce::SmoothedValue<double> dspCrossfadeGain;
+    convo::LinearRamp dspCrossfadeGain;
     juce::AudioBuffer<float> dspCrossfadeFloatBuffer;
     juce::AudioBuffer<double> dspCrossfadeDoubleBuffer;
 

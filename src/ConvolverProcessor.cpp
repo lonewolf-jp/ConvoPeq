@@ -38,6 +38,12 @@
 // overflowRequested を cas で 1 回だけセット → process() → timerCallback() → reload
 static std::atomic<int> g_totalLatencyClampCount { 0 };
 
+// Audio Thread 用: libm に依存しない絶対値
+static inline double absNoLibm(double x) noexcept
+{
+    return (x < 0.0) ? -x : x;
+}
+
 void ConvolverProcessor::overflowCallbackThunk(void* userData) noexcept
 {
     auto* self = static_cast<ConvolverProcessor*>(userData);
@@ -1350,7 +1356,7 @@ private:
 // コンストラクタ
 //--------------------------------------------------------------
 ConvolverProcessor::ConvolverProcessor()
-    : mixSmoother(1.0f)
+    : mixSmoother(1.0)
 {
     irConverter = std::make_unique<IRConverter>();
 
@@ -4115,7 +4121,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
 
         // ターゲット値が変更された場合のみ更新
-        if (std::abs(latencySmoother.getTargetValue() - static_cast<double>(totalLatency)) >= kLatencyRetargetThresholdSamples)
+        if (absNoLibm(latencySmoother.getTargetValue() - static_cast<double>(totalLatency)) >= kLatencyRetargetThresholdSamples)
         {
             // ドップラー効果対策: クロスフェードを開始
             // クロスフェード中はターゲット更新を保留し、不連続なジャンプ（クリック）を防ぐ
@@ -4157,7 +4163,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (latencyChangeRequested.exchange(false, std::memory_order_acq_rel))
     {
         const double newTarget = pendingLatencyValue.load(std::memory_order_acquire);
-        if (std::abs(latencySmoother.getTargetValue() - newTarget) >= 2.0)
+        if (absNoLibm(latencySmoother.getTargetValue() - newTarget) >= 2.0)
         {
             if (!crossfadeGain.isSmoothing())
             {
@@ -4199,7 +4205,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // Audio Threadでのみ setTargetValue() を呼ぶことでスレッドセーフティを確保
     const double targetMixValue = static_cast<double>(mixTarget.load(std::memory_order_relaxed));
-    if (std::abs(mixSmoother.getTargetValue() - targetMixValue) > 1.0e-5)
+    if (absNoLibm(mixSmoother.getTargetValue() - targetMixValue) > 1.0e-5)
     {
         mixSmoother.setTargetValue(targetMixValue);
     }
@@ -4269,7 +4275,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 const double frac = rPos - iRead;
 
                 // 最適化: ほぼ整数の場合は高速パス (memcpy)
-                if (std::abs(frac) < 1.0e-6)
+                if (absNoLibm(frac) < 1.0e-6)
                 {
                     int rPosInt = iRead; // frac ~ 0.0
                     int samplesFirst = std::min(samplesToRead, DELAY_BUFFER_SIZE - rPosInt);
@@ -4278,7 +4284,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                         juce::FloatVectorOperations::copy(dst + samplesFirst, srcBuf, samplesToRead - samplesFirst);
                     return;
                 }
-                else if (std::abs(frac - 1.0) < 1.0e-6)
+                else if (absNoLibm(frac - 1.0) < 1.0e-6)
                 {
                     int rPosInt = (iRead + 1) & DELAY_BUFFER_MASK; // frac ~ 1.0
                     int samplesFirst = std::min(samplesToRead, DELAY_BUFFER_SIZE - rPosInt);

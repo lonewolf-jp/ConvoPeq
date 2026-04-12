@@ -1474,7 +1474,11 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         DBG("Phase6: EQ fade triggered");
     }
 
-    m_coordinator.startFade(newSnap, fadeSamples);
+    // v14.0-P1-Final:
+    // SnapshotCoordinator のフェード進行ロジックは使わず、状態保持のみ利用する。
+    // （DSP 側クロスフェード経路が有効な場合はそちらで処理される）
+    (void)fadeSamples;
+    m_coordinator.switchImmediate(newSnap);
 }
 
 
@@ -2987,68 +2991,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         return;
     }
 
-    const convo::GlobalSnapshot* snapCurrent = nullptr;
-    const convo::GlobalSnapshot* snapTarget = nullptr;
-    float fadeAlpha = 1.0f;
-    const bool isFading = m_coordinator.updateFade(fadeAlpha, snapCurrent, snapTarget);
-
-    if (isFading && snapTarget != nullptr)
-    {
-        if (snapCurrent == nullptr) {
-            // 異常状態：switchImmediate() は内部で abortFade() を実行して Idle に戻す
-            m_coordinator.switchImmediate(snapTarget);
-            processWithSnapshot(bufferToFill, snapTarget, false);
-            // レベルメーター等の更新は processWithSnapshot 内で行われる
-            return;
-        }
-
-        if (m_fadeFloatBuffer.getNumChannels() < 2 || m_fadeFloatBuffer.getNumSamples() < numSamples)
-        {
-            bufferToFill.clearActiveBufferRegion();
-            return;
-        }
-
-        const int copyChannels = std::min(2, buffer->getNumChannels());
-        for (int ch = 0; ch < copyChannels; ++ch)
-        {
-            const float* src = buffer->getReadPointer(ch, startSample);
-            float* dst = m_fadeFloatBuffer.getWritePointer(ch, 0);
-            juce::FloatVectorOperations::copy(dst, src, numSamples);
-        }
-        for (int ch = copyChannels; ch < m_fadeFloatBuffer.getNumChannels(); ++ch)
-            m_fadeFloatBuffer.clear(ch, 0, numSamples);
-
-        juce::AudioSourceChannelInfo oldInfo(&m_fadeFloatBuffer, 0, numSamples);
-        processWithSnapshot(oldInfo, snapCurrent, false);
-        processWithSnapshot(bufferToFill, snapTarget, true);
-
-        const float gainNew = juce::jlimit(0.0f, 1.0f, fadeAlpha);
-        const float gainOld = convo::equalPowerSinApprox(1.0f - gainNew);
-
-        if (gainNew < 1.0e-6f)
-        {
-            for (int ch = 0; ch < copyChannels; ++ch)
-            {
-                float* dst = buffer->getWritePointer(ch, startSample);
-                const float* srcOld = m_fadeFloatBuffer.getReadPointer(ch, 0);
-                juce::FloatVectorOperations::copy(dst, srcOld, numSamples);
-            }
-        }
-        else if (gainOld >= 1.0e-6f)
-        {
-            for (int ch = 0; ch < copyChannels; ++ch)
-            {
-                float* dst = buffer->getWritePointer(ch, startSample);
-                const float* srcOld = m_fadeFloatBuffer.getReadPointer(ch, 0);
-                for (int i = 0; i < numSamples; ++i)
-                    dst[i] = dst[i] * gainNew + srcOld[i] * gainOld;
-            }
-        }
-
-        m_coordinator.advanceFade(numSamples);
-        return;
-    }
-
     if (dsp != nullptr)
     {
         // DSPCore 固有の上限チェック
@@ -3686,17 +3628,18 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 
     //----------------------------------------------------------
 
-    // ── Analyzer Output Tap (Post-DSP) ──
-    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
-    {
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
-    }
-
     // ダウンサンプリング (結果は processBuffer に書き戻される)
     if (oversamplingFactor > 1)
     {
         oversampling.processDown(processBlock, originalBlock, static_cast<int>(originalBlock.getNumChannels()));
         processBlock = originalBlock;
+    }
+
+    // ── Analyzer Output Tap (Post-DSP, Post-Downsampling) ──
+    // オーバーサンプリング有効時でも、UI へはベースレートのデータを供給する。
+    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
+    {
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
     }
 
     //----------------------------------------------------------
@@ -3928,9 +3871,6 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         }
     }
 
-    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
-
     const bool bypassBlendRequested = bypassFadeGainDouble.isSmoothing() || requestedFullBypass;
     if (oversamplingFactor == 1
         && dryBypassBufferDoubleL
@@ -3972,6 +3912,11 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
             }
         }
     }
+
+    // ── Analyzer Output Tap (Post-DSP, Post-Downsampling) ──
+    // オーバーサンプリング有効時でも、UI へはベースレートのデータを供給する。
+    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
+        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
 
     const float outputLinear = measureLevel(originalBlock);
     outputLevelLinear.store(outputLinear, std::memory_order_relaxed);

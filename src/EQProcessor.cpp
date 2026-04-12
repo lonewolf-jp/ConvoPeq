@@ -1193,8 +1193,9 @@ namespace
         const __m256d vInc16 = _mm256_set1_pd(16.0 * increment);
 
         int i = 0;
-        const int vEnd = numSamples / 16 * 16;
-        for (; i < vEnd; i += 16)
+        const int vEnd16 = numSamples / 16 * 16;
+        const int vEnd4 = numSamples / 4 * 4;
+        for (; i < vEnd16; i += 16)
         {
             _mm_prefetch(reinterpret_cast<const char*>(data + i + 64), _MM_HINT_T0);
 
@@ -1224,7 +1225,7 @@ namespace
             vGain = _mm256_add_pd(vGain, vInc16);
         }
         // Remaining
-        for (; i < (numSamples / 4 * 4); i += 4)
+        for (; i < vEnd4; i += 4)
         {
             __m256d vData = _mm256_loadu_pd(data + i);
             __m256d vOut  = _mm256_mul_pd(vData, vGain);
