@@ -354,6 +354,18 @@ public:
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const ConvolverProcessor& other);
     void syncParametersFrom(const ConvolverProcessor& other);
+
+        // 構造的パラメータのハッシュ値を返す（クロスフェード要否判定用）
+        uint64_t getStructuralHash() const noexcept;
+
+        // 構造変更検出用 getter（不足分のみ追加）
+        uint64_t getActiveCacheKey() const noexcept;
+        int getNUCHCMode() const noexcept;
+        int getNUCLCMode() const noexcept;
+        // 注：getTailProcessingMode, getTailRolloffStartHz, getTailRolloffStrength,
+        //      getPartitionTailStrength は既にヘッダ内で inline 定義済みのため追加不要。
+        //      getPhaseMode, getMixedTransitionStartHz, getMixedTransitionEndHz,
+        //      getMixedPreRingTau, getExperimentalDirectHeadEnabled, getIRLength も既存。
     void shareConvolutionEngineFrom(const ConvolverProcessor& other);
     void refreshLatency();
 

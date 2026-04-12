@@ -4971,6 +4971,69 @@ void ConvolverProcessor::setPartitionTailStrength(float strength)
 }
 
 //==============================================================================
+// getStructuralHash - 構造的パラメータ変更検出用ハッシュ
+// 浮動小数点数はビット表現を使用し、丸め誤差の影響を受けない
+//==============================================================================
+uint64_t ConvolverProcessor::getStructuralHash() const noexcept
+{
+    uint64_t hash = 0x9e3779b97f4a7c15ULL;
+
+    auto hashCombine = [&hash](uint64_t value) {
+        hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+    };
+
+    // IR 識別子
+    hashCombine(activeCacheKey.load(std::memory_order_acquire));
+    hashCombine(static_cast<uint64_t>(irLength.load(std::memory_order_acquire)));
+
+    // 位相モード
+    hashCombine(static_cast<uint64_t>(phaseMode.load(std::memory_order_acquire)));
+
+    // Mixed Phase パラメータ（float ビット表現）
+    auto floatBits = [](float f) -> uint32_t {
+        uint32_t bits;
+        std::memcpy(&bits, &f, sizeof(bits));
+        return bits;
+    };
+    hashCombine(floatBits(mixedTransitionStartHz.load(std::memory_order_acquire)));
+    hashCombine(floatBits(mixedTransitionEndHz.load(std::memory_order_acquire)));
+    hashCombine(floatBits(mixedPreRingTau.load(std::memory_order_acquire)));
+
+    // Direct Head フラグ
+    hashCombine(experimentalDirectHeadEnabled.load(std::memory_order_acquire) ? 1ULL : 0ULL);
+
+    // NUC フィルターモード
+    hashCombine(static_cast<uint64_t>(nucHCMode.load(std::memory_order_acquire)));
+    hashCombine(static_cast<uint64_t>(nucLCMode.load(std::memory_order_acquire)));
+
+    // テール処理パラメータ（既存 inline getter を使用）
+    hashCombine(static_cast<uint64_t>(getTailProcessingMode()));
+    hashCombine(floatBits(getTailRolloffStartHz()));
+    hashCombine(floatBits(getTailRolloffStrength()));
+    hashCombine(floatBits(getPartitionTailStrength()));
+
+    return hash;
+}
+
+//==============================================================================
+// 不足 getter の実装
+//==============================================================================
+uint64_t ConvolverProcessor::getActiveCacheKey() const noexcept
+{
+    return activeCacheKey.load(std::memory_order_acquire);
+}
+
+int ConvolverProcessor::getNUCHCMode() const noexcept
+{
+    return nucHCMode.load(std::memory_order_acquire);
+}
+
+int ConvolverProcessor::getNUCLCMode() const noexcept
+{
+    return nucLCMode.load(std::memory_order_acquire);
+}
+
+//==============================================================================
 // finalizeNUCEngineOnMessageThread
 // LoaderThreadから委譲されたNUCエンジン構築（メッセージスレッド専用）
 //==============================================================================

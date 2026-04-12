@@ -541,6 +541,22 @@ DSPCore();
     std::atomic<DSPCore*> currentDSP { nullptr }; // Raw pointer for Audio Thread (Lock-free)
     DSPCore* activeDSP = nullptr; // Ownership holder for Message Thread (Raw pointer)
     std::atomic<DSPCore*> fadingOutDSP { nullptr }; // D2: DSP切替クロスフェード用
+
+        // フェードキューイング機構（DSP構造切替用）
+        std::atomic<DSPCore*> queuedOldDSP { nullptr };
+        std::atomic<double> queuedFadeTimeSec { 0.030 };      // 現在開始するフェード時間
+        std::atomic<double> queuedNextFadeTimeSec { 0.030 };  // キュー待機中の次フェード時間
+        std::atomic<bool> fadeQueued { false };
+
+        // モード別フェード時間（秒）
+        std::atomic<double> m_irFadeTimeSec { 0.080 };
+        std::atomic<double> m_irLengthFadeTimeSec { 0.050 };
+        std::atomic<double> m_phaseFadeTimeSec { 0.060 };
+        std::atomic<double> m_directHeadFadeTimeSec { 0.010 };
+        std::atomic<double> m_nucFilterFadeTimeSec { 0.030 };
+        std::atomic<double> m_tailFadeTimeSec { 0.030 };
+        std::atomic<double> m_osFadeTimeSec { 0.030 };
+
     std::atomic<bool> dspCrossfadePending { false };
     juce::SmoothedValue<double> dspCrossfadeGain;
     juce::AudioBuffer<float> dspCrossfadeFloatBuffer;

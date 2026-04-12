@@ -22,6 +22,44 @@
 #include <xmmintrin.h>
 #include <immintrin.h>
 
+//----------------------------------------------------------------------------
+// fastTanh 高精度 Padé 近似用の定数
+//----------------------------------------------------------------------------
+namespace TanhApprox {
+    // Padé [5/4] 近似係数
+    constexpr double NUM_A = 10395.0;
+    constexpr double NUM_B = 1260.0;
+    constexpr double NUM_C = 21.0;
+    constexpr double DEN_A = 10395.0;
+    constexpr double DEN_B = 4725.0;
+    constexpr double DEN_C = 210.0;
+
+    // 近似有効範囲
+    constexpr double CLIP_THRESHOLD = 4.5;
+}
+
+//==============================================================================
+// 等電力クロスフェード用近似関数（Audio Thread安全・libm不使用）
+//==============================================================================
+static inline float equalPowerSinFloat(float x) noexcept
+{
+    x = juce::jlimit(0.0f, 1.0f, x);
+    const float t = x * 1.5707963267948966f;  // π/2
+    const float t2 = t * t;
+    return t * (1.0f + t2 * (-1.0f/6.0f + t2 * (1.0f/120.0f
+             + t2 * (-1.0f/5040.0f + t2 * (1.0f/362880.0f)))));
+}
+
+static inline double equalPowerSinDouble(double x) noexcept
+{
+    x = juce::jlimit(0.0, 1.0, x);
+    const double t = x * 1.5707963267948966;
+    const double t2 = t * t;
+    return t * (1.0 + t2 * (-1.0/6.0 + t2 * (1.0/120.0
+             + t2 * (-1.0/5040.0 + t2 * (1.0/362880.0)))));
+}
+//==============================================================================
+
 // ==================================================================
 // 段階 2+3：thread_local スロット管理および定数
 // ==================================================================
@@ -448,13 +486,17 @@ namespace
 struct AudioEngine::DSPCore; // Forward declaration
 
 // Padé近似による高速tanh (std::exp回避)
-// 精度: |x| < 3.0 で誤差 1e-4 以下
 static inline double fastTanh(double x) noexcept
 {
-    if (x >= 3.0) return 1.0;
-    if (x <= -3.0) return -1.0;
+    using namespace TanhApprox;
+
+    if (x >= CLIP_THRESHOLD) return 1.0;
+    if (x <= -CLIP_THRESHOLD) return -1.0;
     const double x2 = x * x;
-    return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+
+    const double num = x * (NUM_A + x2 * (NUM_B + x2 * NUM_C));
+    const double den = DEN_A + x2 * (DEN_B + x2 * (DEN_C + x2));
+    return num / den;
 }
 
 // Helper for soft clipping (Scalar version)
@@ -513,8 +555,12 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
     const __m256d vThree       = _mm256_set1_pd(3.0);
     const __m256d vNegThree    = _mm256_set1_pd(-3.0);
     const __m256d vHalf        = _mm256_set1_pd(0.5);
-    const __m256d v27          = _mm256_set1_pd(27.0);
-    const __m256d v9           = _mm256_set1_pd(9.0);
+
+    const __m256d vNumA        = _mm256_set1_pd(TanhApprox::NUM_A);
+    const __m256d vNumB        = _mm256_set1_pd(TanhApprox::NUM_B);
+    const __m256d vNumC        = _mm256_set1_pd(TanhApprox::NUM_C);
+    const __m256d vDenB        = _mm256_set1_pd(TanhApprox::DEN_B);
+    const __m256d vDenC        = _mm256_set1_pd(TanhApprox::DEN_C);
     const __m256d vZero        = _mm256_setzero_pd();
     const __m256d vSignMask    = _mm256_set1_pd(-0.0);
 
@@ -575,8 +621,16 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
         __m256d satHi    = _mm256_cmp_pd(arg, vThree,    _CMP_GE_OQ);
         __m256d satLo    = _mm256_cmp_pd(arg, vNegThree, _CMP_LE_OQ);
         __m256d arg2     = _mm256_mul_pd(arg, arg);
-        __m256d num      = _mm256_mul_pd(arg, _mm256_add_pd(v27, arg2));
-        __m256d den      = _mm256_add_pd(v27, _mm256_mul_pd(v9, arg2));
+
+        __m256d num      = _mm256_mul_pd(arg,
+                            _mm256_fmadd_pd(arg2,
+                                _mm256_fmadd_pd(arg2, vNumC, vNumB),
+                            vNumA));
+        __m256d den      = _mm256_fmadd_pd(arg2,
+                            _mm256_fmadd_pd(arg2,
+                                _mm256_fmadd_pd(arg2, vDenC, vDenB),
+                            vDenC),
+                           vNumA);
         __m256d tanhVal  = _mm256_div_pd(num, den);
         tanhVal = _mm256_blendv_pd(tanhVal, vOne,      satHi);
         tanhVal = _mm256_blendv_pd(tanhVal, vMinusOne, satLo);
@@ -2416,17 +2470,76 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     // 5. RCU deferred release：旧 DSP を grace period 後に解放する
     if (dspToTrash != nullptr)
     {
-        if (newDSP != nullptr && dspToTrash->oversamplingFactor != newDSP->oversamplingFactor)
+        // 構造変更検出とクロスフェード開始条件判定
+        bool needsCrossfade = false;
+        double fadeTimeSec = 0.0;
+
+        if (newDSP != nullptr && dspToTrash != nullptr)
         {
-            dspToTrash->addRef();
-            if (auto* oldFading = fadingOutDSP.exchange(dspToTrash, std::memory_order_acq_rel))
-                oldFading->release();
-            dspCrossfadePending.store(true, std::memory_order_release);
-            setIRChangeFlag();
+            // 1. オーバーサンプリング倍率変更
+            if (newDSP->oversamplingFactor != dspToTrash->oversamplingFactor)
+            {
+                needsCrossfade = true;
+                fadeTimeSec = std::max(fadeTimeSec, m_osFadeTimeSec.load(std::memory_order_relaxed));
+            }
+
+            // 2. 構造ハッシュ比較によるその他の変更検出
+            const uint64_t oldHash = dspToTrash->convolver.getStructuralHash();
+            const uint64_t newHash = newDSP->convolver.getStructuralHash();
+
+            if (oldHash != newHash)
+            {
+                needsCrossfade = true;
+                // ハッシュが異なる場合、最大フェード時間を採用
+                fadeTimeSec = std::max(fadeTimeSec, m_irFadeTimeSec.load(std::memory_order_relaxed));
+                fadeTimeSec = std::max(fadeTimeSec, m_irLengthFadeTimeSec.load(std::memory_order_relaxed));
+                fadeTimeSec = std::max(fadeTimeSec, m_phaseFadeTimeSec.load(std::memory_order_relaxed));
+                fadeTimeSec = std::max(fadeTimeSec, m_directHeadFadeTimeSec.load(std::memory_order_relaxed));
+                fadeTimeSec = std::max(fadeTimeSec, m_nucFilterFadeTimeSec.load(std::memory_order_relaxed));
+                fadeTimeSec = std::max(fadeTimeSec, m_tailFadeTimeSec.load(std::memory_order_relaxed));
+            }
+
+            // デフォルト値（万が一 fadeTimeSec が 0 の場合）
+            if (fadeTimeSec <= 0.0)
+                fadeTimeSec = 0.030;  // 30ms
         }
 
-        // 段階 3：RCU キューに登録し、grace period 経過後に processDeferredReleases が release() する
-        dspToTrash->release();
+        if (needsCrossfade)
+        {
+            // 旧 DSP の参照カウントを増やす（キューまたは即時フェード用）
+            dspToTrash->addRef();
+
+            // 現在フェード中またはフェード要求が保留中かどうかを判断
+            const bool isFadingActive = (fadingOutDSP.load(std::memory_order_acquire) != nullptr) ||
+                                        dspCrossfadePending.load(std::memory_order_acquire);
+
+            if (isFadingActive)
+            {
+                // フェード中 → キューに登録
+                if (auto* prev = queuedOldDSP.exchange(dspToTrash, std::memory_order_acq_rel))
+                    prev->release();
+                queuedNextFadeTimeSec.store(fadeTimeSec, std::memory_order_release);
+                fadeQueued.store(true, std::memory_order_release);
+            }
+            else
+            {
+                // 即時フェード開始
+                if (auto* oldFading = fadingOutDSP.exchange(dspToTrash, std::memory_order_acq_rel))
+                    oldFading->release();
+
+                queuedFadeTimeSec.store(fadeTimeSec, std::memory_order_release);
+                dspCrossfadePending.store(true, std::memory_order_release);
+                setIRChangeFlag();
+            }
+
+            // 旧 active 所有分の参照を解放する
+            dspToTrash->release();
+        }
+        else if (dspToTrash != nullptr)
+        {
+            // クロスフェード不要な場合、dspToTrash を解放
+            dspToTrash->release();
+        }
     }
 
     if (newDSP != nullptr)
