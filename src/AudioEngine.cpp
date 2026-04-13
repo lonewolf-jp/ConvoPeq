@@ -1499,7 +1499,9 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     // 反映は次のオーディオブロック境界を検知してから行う。
     const uint64_t boundaryBefore = m_audioBlockCounter.load(std::memory_order_acquire);
     if (!waitForAudioBlockBoundary(boundaryBefore, 20))
+    {
         DBG("Phase6: boundary wait timeout, applying snapshot immediately on control thread");
+    }
 
     if (fadeSamples > 0)
         m_coordinator.startFade(newSnap, fadeSamples);
