@@ -291,10 +291,10 @@ else()
     if("Release" IN_LIST CMAKE_CONFIGURATION_TYPES OR CMAKE_BUILD_TYPE STREQUAL "Release")
         message(STATUS "[PGO] Normal Release build with LTCG")
         target_compile_options(ConvoPeq PRIVATE
-            $<$<CXX_COMPILER_ID:MSVC>:/GL>
+            $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/GL>
         )
         target_link_options(ConvoPeq PRIVATE
-            $<$<CXX_COMPILER_ID:MSVC>:/LTCG>
+            $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/LTCG>
         )
     endif()
 endif()
@@ -331,6 +331,7 @@ if(MSVC)
         /wd4189     # C4189: ローカル変数が初期化されましたが、参照されていません (r8brain対策)
         /MP1        # マルチプロセッサコンパイル有効化 (1コアに制限してメモリ使用量を最小化)
         /EHsc       # 標準C++例外処理のみ有効化 (SEH無効 - 構造化例外処理は使用しない)
+        $<$<CONFIG:Debug>:/Zm2000> # C1060緩和: コンパイラ内部ヒープ上限を引き上げ
     )
 
     target_compile_definitions(ConvoPeq PRIVATE JUCE_DISABLE_ACCESSIBILITY=1)

@@ -1266,6 +1266,23 @@ void AudioEngine::debugAssertNotAudioThread() const
     jassert(!juce::MessageManager::getInstance()->isThisTheMessageThread());
 }
 
+bool AudioEngine::waitForAudioBlockBoundary(uint64_t observedCounter, uint32_t timeoutMs) const noexcept
+{
+    const uint32_t startMs = juce::Time::getMillisecondCounter();
+    while (!rebuildThreadShouldExit.load(std::memory_order_acquire))
+    {
+        if (m_audioBlockCounter.load(std::memory_order_acquire) != observedCounter)
+            return true;
+
+        if ((juce::Time::getMillisecondCounter() - startMs) >= timeoutMs)
+            return false;
+
+        juce::Thread::sleep(1);
+    }
+
+    return false;
+}
+
 AudioEngine::EQCacheManager::EQCacheManager()
 {
     cacheMapPtr.store(new CacheMap(), std::memory_order_release);
@@ -1452,14 +1469,19 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         eqCoeffHash);
 
 
-    const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::create(params);
     int fadeSamples = m_eqFadeSamples.load(std::memory_order_relaxed);
-    if (m_pendingIRChange.exchange(false, std::memory_order_acq_rel))
+    const bool promoteToStructural = m_pendingIRChange.exchange(false, std::memory_order_acq_rel);
+    if (promoteToStructural)
     {
-        fadeSamples = m_irFadeSamples.load(std::memory_order_relaxed);
-        DBG("Phase6: IR fade triggered");
+        // 例外昇格判定は制御スレッド側で確定する。
+        // IR/構造変更はスナップショットfadeに流さず、構造クロスフェード経路へ昇格する。
+        DBG("Phase6: IR change promoted to structural path on control thread");
+        return;
     }
-    else if (m_pendingNSChange.exchange(false, std::memory_order_acq_rel))
+
+    const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::create(params);
+
+    if (m_pendingNSChange.exchange(false, std::memory_order_acq_rel))
     {
         fadeSamples = m_nsFadeSamples.load(std::memory_order_relaxed);
         DBG("Phase6: NS fade triggered");
@@ -1474,11 +1496,15 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         DBG("Phase6: EQ fade triggered");
     }
 
-    // v14.0-P1-Final:
-    // SnapshotCoordinator のフェード進行ロジックは使わず、状態保持のみ利用する。
-    // （DSP 側クロスフェード経路が有効な場合はそちらで処理される）
-    (void)fadeSamples;
-    m_coordinator.switchImmediate(newSnap);
+    // 反映は次のオーディオブロック境界を検知してから行う。
+    const uint64_t boundaryBefore = m_audioBlockCounter.load(std::memory_order_acquire);
+    if (!waitForAudioBlockBoundary(boundaryBefore, 20))
+        DBG("Phase6: boundary wait timeout, applying snapshot immediately on control thread");
+
+    if (fadeSamples > 0)
+        m_coordinator.startFade(newSnap, fadeSamples);
+    else
+        m_coordinator.switchImmediate(newSnap);
 }
 
 
@@ -2690,6 +2716,21 @@ void AudioEngine::timerCallback()
     processLearningCommands();
     processDeferredLearningActions();
 
+    if (fadingOutDSP.load(std::memory_order_acquire) == nullptr &&
+        !dspCrossfadePending.load(std::memory_order_acquire) &&
+        fadeQueued.exchange(false, std::memory_order_acq_rel))
+    {
+        if (auto* queued = queuedOldDSP.exchange(nullptr, std::memory_order_acq_rel))
+        {
+            const double fadeSec = queuedNextFadeTimeSec.load(std::memory_order_acquire);
+            queuedFadeTimeSec.store(fadeSec, std::memory_order_release);
+            if (auto* oldFading = fadingOutDSP.exchange(queued, std::memory_order_acq_rel))
+                oldFading->release();
+            dspCrossfadePending.store(true, std::memory_order_release);
+            setIRChangeFlag();
+        }
+    }
+
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();
 
@@ -2944,6 +2985,7 @@ void AudioEngine::releaseResources()
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
     const juce::ScopedNoDenormals noDenormals;
+    m_audioBlockCounter.fetch_add(1, std::memory_order_release);
 
     // 入力検証 (Input Validation)
     if (bufferToFill.buffer == nullptr)
@@ -3077,6 +3119,45 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             .captureSessionId         = dsp->currentCaptureSessionId,
             .adaptiveCaptureQueue     = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
         };
+
+        if (m_coordinator.isFading())
+            m_coordinator.advanceFade(numSamples);
+
+        float snapshotAlpha = 1.0f;
+        const convo::GlobalSnapshot* snapshotFrom = nullptr;
+        const convo::GlobalSnapshot* snapshotTo = nullptr;
+        const bool snapshotFading = m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo)
+            && snapshotFrom != nullptr
+            && snapshotTo != nullptr;
+
+        if (snapshotFading)
+        {
+            const int fadeChannels = std::min(dspCrossfadeFloatBuffer.getNumChannels(), buffer->getNumChannels());
+            for (int ch = 0; ch < fadeChannels; ++ch)
+                dspCrossfadeFloatBuffer.clear(ch, 0, numSamples);
+
+            juce::AudioSourceChannelInfo oldInfo(&dspCrossfadeFloatBuffer, 0, numSamples);
+            processWithSnapshot(oldInfo, snapshotFrom, true);
+            processWithSnapshot(bufferToFill, snapshotTo, false);
+
+            const float gNew = snapshotAlpha;
+            const float gOld = 1.0f - snapshotAlpha;
+            const int outChannels = std::min(buffer->getNumChannels(), dspCrossfadeFloatBuffer.getNumChannels());
+            float* dstL = (outChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
+            float* dstR = (outChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
+            const float* oldL = (outChannels > 0) ? dspCrossfadeFloatBuffer.getReadPointer(0, 0) : nullptr;
+            const float* oldR = (outChannels > 1) ? dspCrossfadeFloatBuffer.getReadPointer(1, 0) : nullptr;
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                if (dstL != nullptr)
+                    dstL[i] = dstL[i] * gNew + oldL[i] * gOld;
+                if (dstR != nullptr)
+                    dstR[i] = dstR[i] * gNew + oldR[i] * gOld;
+            }
+
+            return;
+        }
 
         DSPCore* fading = fadingOutDSP.load(std::memory_order_acquire);
         if (fading != nullptr && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
@@ -3222,12 +3303,17 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
         .adaptiveCaptureQueue     = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
     };
 
-    dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+    std::atomic<float> fadingInputMeter { 0.0f };
+    std::atomic<float> fadingOutputMeter { 0.0f };
+    auto& inMeter = isFadingTarget ? fadingInputMeter : inputLevelLinear;
+    auto& outMeter = isFadingTarget ? fadingOutputMeter : outputLevelLinear;
+    dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inMeter, outMeter, procState);
 }
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 {
     const juce::ScopedNoDenormals noDenormals;
+    m_audioBlockCounter.fetch_add(1, std::memory_order_release);
 
     const int numSamples = buffer.getNumSamples();
     // 事前サニティチェック (getNextAudioBlock と同様)
@@ -3325,6 +3411,70 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         .captureSessionId         = dsp->currentCaptureSessionId,
         .adaptiveCaptureQueue     = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
     };
+
+    if (m_coordinator.isFading())
+        m_coordinator.advanceFade(numSamples);
+
+    float snapshotAlpha = 1.0f;
+    const convo::GlobalSnapshot* snapshotFrom = nullptr;
+    const convo::GlobalSnapshot* snapshotTo = nullptr;
+    const bool snapshotFading = m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo)
+        && snapshotFrom != nullptr
+        && snapshotTo != nullptr;
+
+    if (snapshotFading)
+    {
+        auto makeStateFromSnapshot = [&](const convo::GlobalSnapshot* snapState, bool analyzerOn)
+        {
+            auto st = procState;
+            if (snapState != nullptr)
+            {
+                st.eqBypassed = snapState->eqBypass;
+                st.convBypassed = snapState->convBypass;
+                st.order = snapState->processingOrder;
+                st.softClipEnabled = snapState->softClipEnabled;
+                st.saturationAmount = snapState->saturationAmount;
+                st.inputHeadroomGain = snapState->inputHeadroomGain;
+                st.outputMakeupGain = snapState->outputMakeupGain;
+                st.convolverInputTrimGain = snapState->convInputTrimGain;
+            }
+            st.analyzerEnabled = analyzerOn;
+            st.adaptiveCaptureQueue = analyzerOn ? procState.adaptiveCaptureQueue : nullptr;
+            return st;
+        };
+
+        const int fadeChannels = std::min(dspCrossfadeDoubleBuffer.getNumChannels(), buffer.getNumChannels());
+        for (int ch = 0; ch < fadeChannels; ++ch)
+            dspCrossfadeDoubleBuffer.clear(ch, 0, numSamples);
+
+        const auto oldState = makeStateFromSnapshot(snapshotFrom, false);
+        const auto newState = makeStateFromSnapshot(snapshotTo, analyzerEnabledNow);
+
+        std::atomic<float> oldInputMeter { 0.0f };
+        std::atomic<float> oldOutputMeter { 0.0f };
+
+        dsp->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, audioFifo, audioFifoBuffer,
+                                   oldInputMeter, oldOutputMeter, oldState);
+        dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, newState);
+
+        const double gNew = static_cast<double>(snapshotAlpha);
+        const double gOld = 1.0 - gNew;
+        const int outChannels = std::min(buffer.getNumChannels(), dspCrossfadeDoubleBuffer.getNumChannels());
+        double* dstL = (outChannels > 0) ? buffer.getWritePointer(0, 0) : nullptr;
+        double* dstR = (outChannels > 1) ? buffer.getWritePointer(1, 0) : nullptr;
+        const double* oldL = (outChannels > 0) ? dspCrossfadeDoubleBuffer.getReadPointer(0, 0) : nullptr;
+        const double* oldR = (outChannels > 1) ? dspCrossfadeDoubleBuffer.getReadPointer(1, 0) : nullptr;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            if (dstL != nullptr)
+                dstL[i] = dstL[i] * gNew + oldL[i] * gOld;
+            if (dstR != nullptr)
+                dstR[i] = dstR[i] * gNew + oldR[i] * gOld;
+        }
+
+        return;
+    }
 
     DSPCore* fading = fadingOutDSP.load(std::memory_order_acquire);
     if (fading != nullptr && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))

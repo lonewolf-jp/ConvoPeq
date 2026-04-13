@@ -1101,23 +1101,15 @@ public:
             // エネルギーを計測することで、SetImpulse() に渡す実データと一致した scaleFactor を得る。
             // [fix4 R1] リビルド時もスケールファクタを再計算する（リビルド後のゲイン不整合を防ぐ）。
             {
-                double maxChannelEnergy = 0.0;
-                const int nSamp = trimmed.getNumSamples();
-                for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
+                const IRState* currentState = owner.acquireIRState();
+                auto currentIr = (currentState != nullptr) ? currentState->ir : nullptr;
+                const double currentScale = owner.currentIRScale.load(std::memory_order_acquire);
+                const auto scaleInfo = IRConverter::computeScaleFactor(trimmed, currentIr, currentScale);
+                owner.releaseIRState(currentState);
+
+                if (scaleInfo.hasScaleFactor)
                 {
-                    const double* data = trimmed.getReadPointer(ch);
-                    const double energy = cblas_ddot(nSamp, data, 1, data, 1);
-                    // ★ 堅牢な NaN/Inf ガード
-                    if (!std::isfinite(energy) || energy <= 1e-300) continue;
-                    if (energy > maxChannelEnergy)
-                        maxChannelEnergy = energy;
-                }
-                if (maxChannelEnergy > 1.0e-18 && std::isfinite(maxChannelEnergy))
-                {
-                    // Makeup Gain = 1.0 / RMS_IR  (Safety Margin = -6dB)
-                    const double makeup = 1.0 / std::sqrt(maxChannelEnergy);
-                    constexpr double safetyMargin = 0.5011872336272722;
-                    result.scaleFactor = makeup * safetyMargin;
+                    result.scaleFactor = scaleInfo.scaleFactor;
                 }
                 else
                 {

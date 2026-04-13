@@ -704,6 +704,7 @@ DSPCore();
     void processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
                              const convo::GlobalSnapshot* snap,
                              bool isFadingTarget);
+    bool waitForAudioBlockBoundary(uint64_t observedCounter, uint32_t timeoutMs) const noexcept;
 
     static void onSnapshotRequired(void* userData, uint64_t generation);
     void createSnapshotFromCurrentState(uint64_t generation);
@@ -938,6 +939,7 @@ private:
     std::atomic<bool> m_pendingIRChange{ false };
     std::atomic<bool> m_pendingNSChange{ false };
     std::atomic<bool> m_pendingAGCChange{ false };
+    std::atomic<uint64_t> m_audioBlockCounter{ 0 };
 
     juce::AudioBuffer<float> m_fadeFloatBuffer;
     juce::AudioBuffer<double> m_fadeDoubleBuffer;

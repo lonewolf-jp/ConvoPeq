@@ -10,6 +10,12 @@
 class IRConverter
 {
 public:
+    struct ScaleFactorResult
+    {
+        double scaleFactor = 1.0;
+        bool hasScaleFactor = false;
+    };
+
     struct ConvertConfig
     {
         int fftSize = 512;
@@ -30,6 +36,10 @@ public:
                                                       uint64_t generationId,
                                                       uint64_t cacheKey,
                                                       const std::function<bool()>& shouldCancel) const;
+
+    static ScaleFactorResult computeScaleFactor(const juce::AudioBuffer<double>& ir,
+                                                const juce::AudioBuffer<double>* currentIr = nullptr,
+                                                double currentScale = 1.0) noexcept;
 
 private:
     static bool loadAudioFile(const juce::File& file,
