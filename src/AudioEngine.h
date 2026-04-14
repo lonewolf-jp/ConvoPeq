@@ -318,6 +318,27 @@ public:
     void setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLearner::State& inState) noexcept;
 
 private:
+    //==================================================
+    // クロスフェード用レイテンシ整合バッファ（最大2秒@48kHz, double精度, L/R独立）
+    // 64byte aligned double* buffers (RT外確保)
+    // ===== 遅延整合バッファ・スレッド安全 =====
+    double* latencyBufOldL = nullptr;
+    double* latencyBufOldR = nullptr;
+    double* latencyBufNewL = nullptr;
+    double* latencyBufNewR = nullptr;
+    int latencyBufSize = 0;
+    // AudioThread専用（atomic不要）
+    int latencyWritePos = 0;
+    // 遅延値はatomicで管理（MessageThread→AudioThread）
+    std::atomic<int> latencyDelayOld { 0 };
+    std::atomic<int> latencyDelayNew { 0 };
+    // AudioThread snapshot（フェード単位で固定）
+    int latencyDelayOld_RT = 0;
+    int latencyDelayNew_RT = 0;
+    // バッファリセット要求（MessageThread→AudioThread）
+    std::atomic<bool> latencyResetPending { false };
+    static constexpr int kMaxLatencySamples = 1536000; // 最大2秒@768kHz対応
+    static constexpr int MAX_LATENCY_ALIGN_SAMPLES = 96000 * 2; // 2秒@48kHz
     class EQCacheManager
     {
     public:
