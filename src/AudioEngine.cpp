@@ -790,9 +790,9 @@ AudioEngine::~AudioEngine()
 
     // まず rebuild thread 側へ終了を通知し、pending task を破棄して
     // 終了時に重い再構築へ入る経路を閉じる。
+    // pending task を破棄して進行中 rebuild を obsolete にし、thread を停止する。
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
-        rebuildThreadShouldExit.store(true, std::memory_order_release);
         rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
 
         if (hasPendingTask)
@@ -812,7 +812,7 @@ AudioEngine::~AudioEngine()
             hasPendingTask = false;
         }
     }
-    rebuildCV.notify_one();
+    stopRebuildThread();
 
     uiConvolverProcessor.removeChangeListener(this);
     uiEqEditor.removeChangeListener(this);
@@ -821,12 +821,6 @@ AudioEngine::~AudioEngine()
     // Snapshot worker を先に停止。
     shutdownWorkerThread();
 
-    // デストラクタでは releaseResources() が事前に呼ばれている想定だが、
-    // 安全性のため、もしスレッドがまだ joinable ならここでも join する。
-    if (rebuildThread.joinable())
-    {
-        rebuildThread.join();
-    }
     // ...既存の解放処理...
     if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
     if (latencyBufOldR) { _aligned_free(latencyBufOldR); latencyBufOldR = nullptr; }
@@ -2381,13 +2375,25 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
         pendingTask = task;
         hasPendingTask = true;
     }
-    rebuildCV.notify_one();
+    rebuildCV.notify_all();
 
     // Destroy the orphaned DSP from the superseded task outside the lock.
     if (dspToDestroy)
         dspToDestroy->release();
     if (currentToRelease)
         currentToRelease->release();
+}
+
+void AudioEngine::stopRebuildThread()
+{
+    // exit フラグを立てる（predicate が次に評価された時に break する）
+    rebuildThreadShouldExit.store(true, std::memory_order_release);
+
+    // 待機中のスレッドを確実に起こす
+    rebuildCV.notify_all();
+
+    if (rebuildThread.joinable())
+        rebuildThread.join();
 }
 
 void AudioEngine::rebuildThreadLoop()
@@ -2398,6 +2404,8 @@ void AudioEngine::rebuildThreadLoop()
     vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+
+    rebuildThreadIsRunning.store(true, std::memory_order_release);
 
     while (true)
     {
@@ -2531,6 +2539,8 @@ void AudioEngine::rebuildThreadLoop()
             DBG("AudioEngine::rebuildThreadLoop unknown exception");
         }
     }
+
+    rebuildThreadIsRunning.store(false, std::memory_order_release);
 }
 
 void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
@@ -3090,8 +3100,6 @@ void AudioEngine::releaseResources()
     // 4. rebuild thread を停止（prepareToPlay で必要時に再起動する）
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
-        rebuildThreadShouldExit.store(true, std::memory_order_release);
-
         if (hasPendingTask)
         {
             if (pendingTask.newDSP)
@@ -3107,10 +3115,7 @@ void AudioEngine::releaseResources()
             hasPendingTask = false;
         }
     }
-    rebuildCV.notify_one();
-
-    if (rebuildThread.joinable())
-        rebuildThread.join();
+    stopRebuildThread();
 }
 
 //--------------------------------------------------------------

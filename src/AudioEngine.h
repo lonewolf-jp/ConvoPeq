@@ -740,10 +740,12 @@ DSPCore();
 
     // Worker thread for rebuilds
     void rebuildThreadLoop();
+    void stopRebuildThread();
     std::thread rebuildThread;
     std::mutex rebuildMutex;
     std::condition_variable rebuildCV;
     std::atomic<bool> rebuildThreadShouldExit { false };
+    std::atomic<bool> rebuildThreadIsRunning { false };
     std::atomic<bool> shutdownInProgress { false };
     bool hasPendingTask = false;
 
