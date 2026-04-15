@@ -86,6 +86,49 @@ static inline double equalPowerSinDouble(double x) noexcept
 }
 //==============================================================================
 
+// =============================================================
+// Rebuild request coalescing (Stage 3)
+// =============================================================
+void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
+{
+    if (kind == convo::RebuildKind::None)
+        return;
+
+    const uint32_t mask = convo::toMask(kind);
+    const uint32_t prev = pendingRebuildMask_.fetch_or(mask, std::memory_order_acq_rel);
+
+    if (prev == 0)
+        triggerAsyncUpdate();
+}
+
+void AudioEngine::handleAsyncUpdate()
+{
+    processRebuildRequestsInternal();
+}
+
+void AudioEngine::processRebuildRequestsInternal()
+{
+    const uint32_t mask = pendingRebuildMask_.exchange(0, std::memory_order_acq_rel);
+    if (mask == 0)
+        return;
+
+    const double sr = currentSampleRate.load(std::memory_order_acquire);
+    const int bs = maxSamplesPerBlock.load(std::memory_order_acquire);
+
+    if (sr <= 0.0 || bs <= 0)
+    {
+        pendingRebuildMask_.fetch_or(mask, std::memory_order_release);
+        return;
+    }
+
+    requestRebuild(sr, bs);
+}
+
+void AudioEngine::processRebuildRequestsFallback()
+{
+    processRebuildRequestsInternal();
+}
+
 // ==================================================================
 // 段階 2+3：thread_local スロット管理および定数
 // ==================================================================
@@ -718,12 +761,49 @@ AudioEngine::AudioEngine()
 
 AudioEngine::~AudioEngine()
 {
+    shutdownInProgress.store(true, std::memory_order_release);
+    cancelPendingUpdate();
+
+    // 終了順序を固定化して、終了時フリーズを防ぐ。
+    stopTimer();
+
+    // まず rebuild thread 側へ終了を通知し、pending task を破棄して
+    // 終了時に重い再構築へ入る経路を閉じる。
+    {
+        std::lock_guard<std::mutex> lock(rebuildMutex);
+        rebuildThreadShouldExit.store(true, std::memory_order_release);
+        rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
+
+        if (hasPendingTask)
+        {
+            if (pendingTask.newDSP)
+            {
+                pendingTask.newDSP->release();
+                pendingTask.newDSP = nullptr;
+            }
+
+            if (pendingTask.currentDSP)
+            {
+                pendingTask.currentDSP->release();
+                pendingTask.currentDSP = nullptr;
+            }
+
+            hasPendingTask = false;
+        }
+    }
+    rebuildCV.notify_one();
+
+    uiConvolverProcessor.removeChangeListener(this);
+    uiEqEditor.removeChangeListener(this);
+    uiConvolverProcessor.removeListener(this);
+
+    // Snapshot worker を先に停止。
+    shutdownWorkerThread();
+
     // デストラクタでは releaseResources() が事前に呼ばれている想定だが、
     // 安全性のため、もしスレッドがまだ joinable ならここでも join する。
     if (rebuildThread.joinable())
     {
-        rebuildThreadShouldExit.store(true);
-        rebuildCV.notify_one();
         rebuildThread.join();
     }
     // ...既存の解放処理...
@@ -1237,8 +1317,13 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
 void AudioEngine::onSnapshotRequired(void* userData, uint64_t generation)
 {
     auto* self = static_cast<AudioEngine*>(userData);
-    if (self != nullptr)
-        self->createSnapshotFromCurrentState(generation);
+    if (self == nullptr)
+        return;
+
+    if (self->shutdownInProgress.load(std::memory_order_acquire))
+        return;
+
+    self->createSnapshotFromCurrentState(generation);
 }
 
 AudioEngine::ConvolverStateReaderGuard::ConvolverStateReaderGuard(ConvolverProcessor& conv) noexcept
@@ -1408,6 +1493,9 @@ AudioEngine::EQCacheManager::~EQCacheManager()
 void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 {
     debugAssertNotAudioThread();
+
+    if (shutdownInProgress.load(std::memory_order_acquire))
+        return;
 
     ConvolverStateReaderGuard readerGuard(uiConvolverProcessor);
     const ConvolverState* convState = uiConvolverProcessor.getConvolverState();
@@ -1888,6 +1976,20 @@ double AudioEngine::getCurrentLatencyMs() const
 void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 {
 
+    shutdownInProgress.store(false, std::memory_order_release);
+
+    // releaseResources() で停止済みの場合に備えて、必要なら rebuild thread を再起動する。
+    if (!rebuildThread.joinable())
+    {
+        {
+            std::lock_guard<std::mutex> lock(rebuildMutex);
+            rebuildThreadShouldExit.store(false, std::memory_order_release);
+            hasPendingTask = false;
+            pendingTask = RebuildTask{};
+        }
+        rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
+    }
+
     // --- AudioEngine::prepareToPlay ---
     // ※本関数は「AudioThread停止中のみ呼ぶ」ことがJUCE AudioSource仕様上の前提です。
     //   これを破るとバッファfree競合・data raceの危険があります。
@@ -1969,7 +2071,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             requestRebuild(safeSampleRate, bufferSize);
         } else {
-            rebuildRequested.store(true, std::memory_order_release);
+            requestRebuild(convo::RebuildKind::Structural);
         }
     }
 
@@ -1997,8 +2099,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         else
         {
             // フォールバック: メッセージスレッド以外から呼ばれた場合は
-            // フラグを立てtimerCallbackに委ねる (通常は到達しない)
-            rebuildRequested.store(true, std::memory_order_release);
+            // mask に積んで AsyncUpdater/Timer 側へ委ねる (通常は到達しない)
+            requestRebuild(convo::RebuildKind::Structural);
         }
     }
 }
@@ -2547,6 +2649,8 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     {
         DBG("[AudioEngine] commitNewDSP: command queue overflow");
     }
+
+    sendChangeMessage();
 }
 
 void AudioEngine::processLearningCommands() noexcept
@@ -2722,6 +2826,8 @@ void AudioEngine::resetLearningControlState() noexcept
 
 void AudioEngine::timerCallback()
 {
+    processRebuildRequestsFallback();
+
     processLearningCommands();
     processDeferredLearningActions();
 
@@ -2745,22 +2851,6 @@ void AudioEngine::timerCallback()
 
     if (m_coordinator.tryCompleteFade())
         sendChangeMessage();
-
-    // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
-    // タイマーコールバック内では、UIの状態を直接使用せずに、
-    // Atomic変数から安全に読み取る
-    const double sr = currentSampleRate.load();
-    const int bs = maxSamplesPerBlock.load();
-
-    // [FIX] rebuildRequestedフラグが立っているときだけ再ビルドを実行する。
-    // 以前は毎50ms無条件でrequestRebuild()を呼んでいたため、
-    // 新DSPのfadeInSamplesLeft(2048サンプル≈42ms)によるフェードが
-    // 50ms周期でリセットされ続け、プチプチノイズの原因となっていた。
-    if (sr > 0.0 && rebuildRequested.exchange(false, std::memory_order_acq_rel))
-    {
-        requestRebuild(sr, bs);
-        sendChangeMessage();
-    }
 
     // 内部プロセッサのクリーンアップを実行する。
     if (auto* dsp = currentDSP.load(std::memory_order_acquire))
@@ -2843,17 +2933,9 @@ void AudioEngine::timerCallback()
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
-    // UIプロセッサからの構造変更（プリセットロード、IRロードなど）を検知
-    if (source == &uiEqEditor || source == &uiConvolverProcessor)
+    if (source == &uiEqEditor)
     {
-        const double sr = currentSampleRate.load();
-        if (sr <= 0.0) return;
-
-        // DSPグラフを安全に再構築
-        requestRebuild(sr, maxSamplesPerBlock.load());
-
-        // UIに更新を通知 (MainWindowが受け取る)
-        sendChangeMessage();
+        requestRebuild(convo::RebuildKind::Structural);
     }
 }
 
@@ -2863,7 +2945,6 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
     {
         bool needsStructuralRebuild = false;
         double srForRebuild = 0.0;
-        int bsForRebuild = 0;
 
         {
             std::lock_guard<std::mutex> lk(rebuildMutex);
@@ -2892,10 +2973,12 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
             }
 
             if (needsStructuralRebuild)
-            {
                 srForRebuild = currentSampleRate.load(std::memory_order_acquire);
-                bsForRebuild = maxSamplesPerBlock.load(std::memory_order_acquire);
-            }
+        }
+
+        if (needsStructuralRebuild)
+        {
+            requestRebuild(convo::RebuildKind::Structural);
         }
 
         if (needsStructuralRebuild && srForRebuild > 0.0)
@@ -2914,8 +2997,6 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
             {
                 DBG("[AudioEngine] convolverParamsChanged: command queue overflow");
             }
-
-            requestRebuild(srForRebuild, bsForRebuild);
         }
     }
 }
@@ -2927,6 +3008,8 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 //--------------------------------------------------------------
 void AudioEngine::releaseResources()
 {
+    shutdownInProgress.store(true, std::memory_order_release);
+
     // サンプルレートをリセット (描画停止用)
     currentSampleRate.store(0.0);
 
@@ -2978,6 +3061,31 @@ void AudioEngine::releaseResources()
     // 3. Release UI Processor Resources
     uiConvolverProcessor.releaseResources();
     uiEqEditor.releaseResources();
+
+    // 4. rebuild thread を停止（prepareToPlay で必要時に再起動する）
+    {
+        std::lock_guard<std::mutex> lock(rebuildMutex);
+        rebuildThreadShouldExit.store(true, std::memory_order_release);
+
+        if (hasPendingTask)
+        {
+            if (pendingTask.newDSP)
+            {
+                pendingTask.newDSP->release();
+                pendingTask.newDSP = nullptr;
+            }
+            if (pendingTask.currentDSP)
+            {
+                pendingTask.currentDSP->release();
+                pendingTask.currentDSP = nullptr;
+            }
+            hasPendingTask = false;
+        }
+    }
+    rebuildCV.notify_one();
+
+    if (rebuildThread.joinable())
+        rebuildThread.join();
 }
 
 //--------------------------------------------------------------

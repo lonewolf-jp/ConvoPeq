@@ -643,7 +643,7 @@ public:
 
     ~LoaderThread() override
     {
-        stopThread(4000);
+        stopThread(500);
     }
 
     std::function<bool()> externalCancellationCheck;
@@ -734,12 +734,9 @@ public:
 
             if (!queued)
             {
-                juce::MessageManagerLock mmLock;
-                if (mmLock.lockWasGained())
-                {
-                    if (auto* o = wp.get())
-                        o->handleLoadError(error);
-                }
+                // シャットダウン中は MessageManagerLock 取得でデッドロックし得るため、
+                // フォールバックは非ブロッキングで破棄する。
+                juce::Logger::writeToLog("LoaderThread: callAsync failed in error path; dropping UI error dispatch");
             }
         }
     }
@@ -1788,9 +1785,10 @@ void ConvolverProcessor::postCoalescedChangeNotification()
     const bool queued = juce::MessageManager::callAsync(dispatchNotification);
     if (!queued)
     {
-        juce::MessageManagerLock mmLock;
-        if (mmLock.lockWasGained())
-            dispatchNotification();
+        // シャットダウン中に MessageManagerLock を取りに行くと join と相互待ちになり得る。
+        // 通知は best-effort とし、失敗時は pending フラグだけ戻す。
+        if (auto* self = weakThis.get())
+            self->changeNotificationPending.store(false, std::memory_order_release);
     }
 }
 
@@ -3369,7 +3367,7 @@ void ConvolverProcessor::forceCleanup()
     for (auto& loader : loadersToDelete)
     {
         if (loader)
-            loader->stopThread(4000);
+            loader->stopThread(500);
     }
     loadersToDelete.clear(); // unique_ptrのデストラクタが呼ばれ、スレッドがクリーンアップされる
 }

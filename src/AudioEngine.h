@@ -65,6 +65,7 @@ struct CoeffSet {
 #include "core/CommandBuffer.h"
 #include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
+#include "core/RebuildTypes.h"
 
 // デバッグビルド時のみログを出力するマクロ
 #if defined(JUCE_DEBUG) && !defined(NDEBUG)
@@ -95,7 +96,8 @@ class AudioEngine : public juce::AudioSource,
                                      public juce::ChangeBroadcaster,
                                      private juce::ChangeListener,
                                      private ConvolverProcessor::Listener,
-                                     private juce::Timer
+                                     private juce::Timer,
+                                     private juce::AsyncUpdater
 {
 public:
     using SampleType = double; // 内部DSP精度 (JUCE推奨)
@@ -243,6 +245,7 @@ public:
     NoiseShaperType getNoiseShaperType() const;
     void requestSnapshotForNoiseShaper();
     void commitAGCChange();
+    void requestRebuild(convo::RebuildKind kind) noexcept;
     void setFixedNoiseLogIntervalMs(int intervalMs) noexcept;
     int getFixedNoiseLogIntervalMs() const noexcept;
     void setFixedNoiseWindowSamples(int windowSamples) noexcept;
@@ -595,7 +598,7 @@ DSPCore();
     std::atomic<bool> convBypassRequested { false };
     std::atomic<bool> eqBypassActive   { false };
     std::atomic<bool> convBypassActive { false };
-    std::atomic<bool> rebuildRequested { false };
+    std::atomic<uint32_t> pendingRebuildMask_{ 0 };
     EQCacheManager eqCacheManager;
     std::atomic<ProcessingOrder> currentProcessingOrder{ProcessingOrder::ConvolverThenEQ};
     std::atomic<AnalyzerSource> currentAnalyzerSource { AnalyzerSource::Output };
@@ -726,6 +729,9 @@ DSPCore();
                              const convo::GlobalSnapshot* snap,
                              bool isFadingTarget);
     bool waitForAudioBlockBoundary(uint64_t observedCounter, uint32_t timeoutMs) const noexcept;
+    void handleAsyncUpdate() override;
+    void processRebuildRequestsInternal();
+    void processRebuildRequestsFallback();
 
     static void onSnapshotRequired(void* userData, uint64_t generation);
     void createSnapshotFromCurrentState(uint64_t generation);
@@ -738,6 +744,7 @@ DSPCore();
     std::mutex rebuildMutex;
     std::condition_variable rebuildCV;
     std::atomic<bool> rebuildThreadShouldExit { false };
+    std::atomic<bool> shutdownInProgress { false };
     bool hasPendingTask = false;
 
     struct RebuildTask {
