@@ -108,20 +108,41 @@ void AudioEngine::handleAsyncUpdate()
 
 void AudioEngine::processRebuildRequestsInternal()
 {
+    // 1. mask 取得（完全 drain）
     const uint32_t mask = pendingRebuildMask_.exchange(0, std::memory_order_acq_rel);
     if (mask == 0)
         return;
 
+    // 2. 現在の DSP パラメータ取得
     const double sr = currentSampleRate.load(std::memory_order_acquire);
     const int bs = maxSamplesPerBlock.load(std::memory_order_acquire);
 
+    // 3. 無効状態 → 再投入（重要）
     if (sr <= 0.0 || bs <= 0)
     {
         pendingRebuildMask_.fetch_or(mask, std::memory_order_release);
         return;
     }
 
-    requestRebuild(sr, bs);
+    // 4. 優先度制御
+    // =============================
+
+    // --- HIGH: Structural ---
+    if (mask & static_cast<uint32_t>(convo::RebuildKind::Structural))
+    {
+        requestRebuild(sr, bs);
+        return; // 他は defer
+    }
+
+    // --- MID: IRContent ---
+    if (mask & static_cast<uint32_t>(convo::RebuildKind::IRContent))
+    {
+        requestRebuild(sr, bs);
+        return;
+    }
+
+    // --- LOW: Runtime / UIOnly ---
+    // 現状は何もしない（将来拡張ポイント）
 }
 
 void AudioEngine::processRebuildRequestsFallback()
@@ -2650,6 +2671,10 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         DBG("[AudioEngine] commitNewDSP: command queue overflow");
     }
 
+    // NOTE: rebuild 完了通知の唯一の発火点。
+    // sendChangeMessage() は commitNewDSP() でのみ rebuild 用途で呼ぶ。
+    // それ以外の sendChangeMessage() はフェード完了・UIパラメータ変更・
+    // 状態復元など rebuild とは独立したイベント用途。
     sendChangeMessage();
 }
 
