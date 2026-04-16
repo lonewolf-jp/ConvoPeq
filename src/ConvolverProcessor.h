@@ -295,6 +295,7 @@ public:
     //----------------------------------------------------------
     bool isIRLoaded() const { return rcuSwapper.getState() != nullptr; }
     bool isLoadingIR() const { return isLoading.load(std::memory_order_acquire); }
+    bool isIRFinalized() const noexcept { return irFinalized.load(std::memory_order_acquire); }
     juce::String getIRName() const { return irName; }
     int getIRLength() const { return irLength.load(std::memory_order_acquire); }
     juce::String getLastError() const { return lastError; }
@@ -599,6 +600,7 @@ private:
     std::atomic<StereoConvolver*> m_activeEngine { nullptr }; // Raw pointer for Audio Thread (Lock-free)
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
+    std::atomic<bool> irFinalized { false };
     std::unique_ptr<LoaderThread> activeLoader;
     std::deque<std::unique_ptr<LoaderThread>> loaderTrashBin;
     std::atomic<float> loadProgress { 0.0f };

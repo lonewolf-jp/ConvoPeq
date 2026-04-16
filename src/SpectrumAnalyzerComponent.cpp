@@ -97,8 +97,6 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     addAndMakeVisible(analyzerEnableButton);
     setAnalyzerEnabled(analyzerEnableButton.getToggleState());
 
-    prepareFFT();
-
     engine.addChangeListener(this);
 
     updateEQData(); // 初期状態のEQカーブを計算
@@ -113,25 +111,56 @@ SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
 SpectrumAnalyzerComponent::~SpectrumAnalyzerComponent()
 {
     stopTimer();
-    releaseFFT();
+    disableAnalyzer();
     engine.removeChangeListener(this);
 }
 
 void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
 {
-    engine.setAnalyzerEnabled(enabled);
+    if (enabled)
+        enableAnalyzer();
+    else
+        disableAnalyzer();
+
     analyzerVisualsCleared = false;
     updateTimerRate();
 
-    if (enabled)
+    if (isReady())
     {
         analyzerEnableButton.setButtonText("Analyzer: ON");
     }
     else
     {
         analyzerEnableButton.setButtonText("Analyzer: OFF");
+        if (enabled)
+            analyzerEnableButton.setToggleState(false, juce::dontSendNotification);
     }
 
+}
+
+void SpectrumAnalyzerComponent::enableAnalyzer()
+{
+    analyzerState.store(AnalyzerState::Initializing, std::memory_order_release);
+    engine.setAnalyzerEnabled(false);
+
+    prepareFFT();
+
+    if (fftHandle == nullptr || fftTimeDomainBuffer.get() == nullptr || fftWorkBuffer.get() == nullptr)
+    {
+        analyzerState.store(AnalyzerState::Disabled, std::memory_order_release);
+        engine.setAnalyzerEnabled(false);
+        return;
+    }
+
+    analyzerState.store(AnalyzerState::Ready, std::memory_order_release);
+    engine.setAnalyzerEnabled(true);
+}
+
+void SpectrumAnalyzerComponent::disableAnalyzer()
+{
+    analyzerState.store(AnalyzerState::Disabled, std::memory_order_release);
+    engine.setAnalyzerEnabled(false);
+    releaseFFT();
 }
 
 bool SpectrumAnalyzerComponent::updateLevelPeaks(double dt) noexcept
@@ -203,11 +232,9 @@ void SpectrumAnalyzerComponent::updateTimerRate()
 
 void SpectrumAnalyzerComponent::prepareFFT()
 {
-    if (fftHandle)
-    {
-        DftiFreeDescriptor(&fftHandle);
-        fftHandle = nullptr;
-    }
+    if (fftHandle != nullptr)
+        return;
+
     // Complex 1D FFT, Single Precision
     // リアルタイム性を考慮し、事前にDescriptorを作成・コミットしておく
     if (DftiCreateDescriptor(&fftHandle, DFTI_SINGLE, DFTI_COMPLEX, 1, NUM_FFT_POINTS) != DFTI_NO_ERROR) {
@@ -219,6 +246,8 @@ void SpectrumAnalyzerComponent::prepareFFT()
     if (DftiCommitDescriptor(fftHandle) != DFTI_NO_ERROR) {
         DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; return;
     }
+
+    jassert(fftHandle != nullptr);
 }
 
 void SpectrumAnalyzerComponent::releaseFFT()
@@ -296,6 +325,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     analyzerVisualsCleared = false;
 
     if (!isShowing() || !analyzerEnableButton.getToggleState()) return;
+    if (analyzerState.load(std::memory_order_acquire) != AnalyzerState::Ready) return;
+    if (fftHandle == nullptr) return;
 
 
     // ── FFTデータの取得とスムーシング ──

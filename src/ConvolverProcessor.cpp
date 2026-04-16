@@ -1801,6 +1801,13 @@ void ConvolverProcessor::requestDebouncedRebuild()
         return;
     }
 
+    // 位相最適化やIR再構築の最終コミット前は再ビルド要求を保留する。
+    if (!isIRFinalized())
+    {
+        rebuildPendingAfterLoad.store(true, std::memory_order_release);
+        return;
+    }
+
     const std::uint64_t token = rebuildDebounceToken.fetch_add(1, std::memory_order_acq_rel) + 1;
     auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
 
@@ -2853,6 +2860,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     }
 
     isLoading.store(true);
+    irFinalized.store(false, std::memory_order_release);
     lastError.clear(); // 新しいロード開始時にエラーをクリア
 
     // 既存のローダーを停止してゴミ箱へ退避 (即時resetによるブロックを回避)
@@ -3287,6 +3295,10 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
     runtime.reallocate(newState->fftSize, newState->numPartitions);
     updateConvolverState(std::move(newState));
 
+    // 4. FINAL COMMIT: 確定フラグを立ててからレイテンシを1回だけ反映する。
+    irFinalized.store(true, std::memory_order_release);
+    refreshLatency();
+
     // 4. UI 通知
     postCoalescedChangeNotification();
     listeners.call(&Listener::convolverParamsChanged, this);
@@ -3298,6 +3310,7 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
 void ConvolverProcessor::handleLoadError(const juce::String& error)
 {
     lastError = error;
+    irFinalized.store(isIRLoaded(), std::memory_order_release);
     isLoading.store(false);
     isRebuilding.store(false, std::memory_order_release);
     // UIに通知してエラーメッセージを表示させる
@@ -4026,6 +4039,10 @@ ConvolverProcessor::ResamplingPhaseMode ConvolverProcessor::getResamplingPhaseMo
 
 void ConvolverProcessor::refreshLatency()
 {
+    // IR未確定中（位相最適化/再構築中）は中間レイテンシ反映を完全停止する。
+    if (!irFinalized.load(std::memory_order_acquire))
+        return;
+
     auto* conv = m_activeEngine.load(std::memory_order_acquire);
     double totalLatency = 0.0;
     if (conv)
@@ -4045,8 +4062,6 @@ void ConvolverProcessor::refreshLatency()
     // Audio Thread に遅延値の更新を委譲（即時リセット用）
     pendingLatencyValue.store(totalLatency, std::memory_order_release);
     latencyResetPending.store(true, std::memory_order_release);
-
-    // IR 切り替え時の遅延ジャンプをクロスフェードに統合するためのフラグ
     latencyChangeRequested.store(true, std::memory_order_release);
 }
 
@@ -5118,6 +5133,10 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
 
     irLength.store(targetLength, std::memory_order_release);
     currentSampleRate.store(loadedSR, std::memory_order_release);
+
+    // FINAL COMMIT: フラグ確定後にレイテンシを1回だけ反映する。
+    irFinalized.store(true, std::memory_order_release);
+    refreshLatency();
 
     isLoading.store(false);
     isRebuilding.store(false, std::memory_order_release);

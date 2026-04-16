@@ -5,7 +5,6 @@
 #include "WorkerThread.h"
 #include "SnapshotCoordinator.h"
 #include "ThreadAffinityManager.h"
-#include "../AudioEngine.h"
 #include "../GenerationManager.h"
 
 #include <chrono>
@@ -16,17 +15,19 @@
  #include <pmmintrin.h>
 #endif
 
+extern std::atomic<bool> gShuttingDown;
+
 namespace convo {
 
 WorkerThread::WorkerThread(CommandBuffer& cmdBuf,
                            SnapshotCoordinator& coord,
                            GenerationManager& genMgr,
-                   AudioEngine& engine,
+                   const ThreadAffinityManager* affinityMgr,
                            const WorkerThreadConfig& cfg)
     : commandBuffer(cmdBuf),
       coordinator(coord),
       generationManager(genMgr),
-    audioEngine(engine),
+    affinityManager(affinityMgr),
       config(cfg)
 {
 }
@@ -48,11 +49,16 @@ void WorkerThread::start()
 
 void WorkerThread::stop()
 {
-    running.store(false, std::memory_order_release);
+    requestStop();
     pendingFlush.store(true, std::memory_order_release);
 
     if (thread.joinable())
         thread.join();
+}
+
+void WorkerThread::requestStop() noexcept
+{
+    running.store(false, std::memory_order_release);
 }
 
 void WorkerThread::flush()
@@ -62,7 +68,8 @@ void WorkerThread::flush()
 
 void WorkerThread::run()
 {
-    audioEngine.getAffinityManager().applyCurrentThreadPolicy(ThreadType::Worker);
+    if (affinityManager != nullptr)
+        affinityManager->applyCurrentThreadPolicy(ThreadType::Worker);
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
@@ -74,6 +81,9 @@ void WorkerThread::run()
     auto lastCommandTime = std::chrono::steady_clock::now();
 
     while (running.load(std::memory_order_acquire)) {
+        if (::gShuttingDown.load(std::memory_order_acquire))
+            break;
+
         ParameterCommand cmd;
         bool poppedAny = false;
         bool flushRequested = pendingFlush.exchange(false, std::memory_order_acq_rel);
@@ -115,7 +125,17 @@ void WorkerThread::run()
         }
 
         if (!poppedAny) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(config.idleSleepMs));
+            const int sleepChunks = (config.idleSleepMs > 0)
+                ? ((config.idleSleepMs + 1) / 2)
+                : 0;
+
+            for (int i = 0; i < sleepChunks; ++i) {
+                if (!running.load(std::memory_order_acquire) ||
+                    ::gShuttingDown.load(std::memory_order_acquire))
+                    break;
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
         }
     }
 }

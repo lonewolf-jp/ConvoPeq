@@ -49,6 +49,9 @@ static inline void crossfadeAVX2(
 #include "OutputFilter.h"
 #include "DeferredDeletionQueue.h"
 #include "core/SnapshotAssembler.h"
+
+extern std::atomic<bool> gShuttingDown;
+
 // fastTanh 高精度 Padé 近似用の定数
 //----------------------------------------------------------------------------
 namespace TanhApprox {
@@ -91,8 +94,27 @@ static inline double equalPowerSinDouble(double x) noexcept
 // =============================================================
 void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
 {
+    if (shutdownInProgress.load(std::memory_order_acquire) ||
+        gShuttingDown.load(std::memory_order_acquire))
+        return;
+
     if (kind == convo::RebuildKind::None)
         return;
+
+    if (kind == convo::RebuildKind::IRContent)
+    {
+        if (!uiConvolverProcessor.isIRFinalized())
+            return;
+
+        const int64_t nowTicks = juce::Time::getHighResolutionTicks();
+        const int64_t lastTicks = lastIRContentRebuildTicks_.load(std::memory_order_relaxed);
+        const int64_t minDelta = juce::Time::getHighResolutionTicksPerSecond() / 5; // 200ms
+
+        if (lastTicks > 0 && (nowTicks - lastTicks) < minDelta)
+            return;
+
+        lastIRContentRebuildTicks_.store(nowTicks, std::memory_order_relaxed);
+    }
 
     const uint32_t mask = convo::toMask(kind);
     const uint32_t prev = pendingRebuildMask_.fetch_or(mask, std::memory_order_acq_rel);
@@ -103,6 +125,10 @@ void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
 
 void AudioEngine::handleAsyncUpdate()
 {
+    if (shutdownInProgress.load(std::memory_order_acquire) ||
+        gShuttingDown.load(std::memory_order_acquire))
+        return;
+
     processRebuildRequestsInternal();
 }
 
@@ -179,6 +205,7 @@ private:
 // グローバルインスタンスの定義
 DeferredDeletionQueue g_deletionQueue;
 std::atomic<uint64_t> g_currentEpoch{1};
+std::atomic<bool> gShuttingDown{false};
 
 // ==================================================================
 // RCU 実装
@@ -214,6 +241,13 @@ void AudioEngine::updateReaderEpoch(size_t slot, uint64_t epoch)
 
 void AudioEngine::processDeferredReleases()
 {
+    if (shutdownInProgress.load(std::memory_order_acquire) ||
+        gShuttingDown.load(std::memory_order_acquire))
+    {
+        g_deletionQueue.reclaimAllIgnoringEpoch();
+        return;
+    }
+
     // B22: 旧 SPSC キューの重複処理を完全に削除し、MPMC g_deletionQueue に一本化。
     // この関数は Timer コールバックから呼ばれる（非 RT スレッド）
     const uint64_t minEpoch = getMinReaderEpoch();
@@ -774,8 +808,9 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 
 AudioEngine::AudioEngine()
     : uiEqEditor(*this)
-    , m_workerThread(m_commandBuffer, m_coordinator, m_generationManager, *this)
+    , m_workerThread(m_commandBuffer, m_coordinator, m_generationManager, &affinityManager)
 {
+    gShuttingDown.store(false, std::memory_order_release);
     // 必要な初期化処理があればここに追加
 }
 
@@ -783,6 +818,7 @@ AudioEngine::AudioEngine()
 AudioEngine::~AudioEngine()
 {
     shutdownInProgress.store(true, std::memory_order_release);
+    gShuttingDown.store(true, std::memory_order_release);
     cancelPendingUpdate();
 
     // 終了順序を固定化して、終了時フリーズを防ぐ。
@@ -820,6 +856,9 @@ AudioEngine::~AudioEngine()
 
     // Snapshot worker を先に停止。
     shutdownWorkerThread();
+
+    // Shutdown 時は reader epoch 進行を待たずに遅延解放を強制回収する。
+    g_deletionQueue.reclaimAllIgnoringEpoch();
 
     // ...既存の解放処理...
     if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
@@ -1991,6 +2030,7 @@ double AudioEngine::getCurrentLatencyMs() const
 void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 {
 
+    gShuttingDown.store(false, std::memory_order_release);
     shutdownInProgress.store(false, std::memory_order_release);
 
     // releaseResources() で停止済みの場合に備えて、必要なら rebuild thread を再起動する。
@@ -3116,6 +3156,9 @@ void AudioEngine::releaseResources()
         }
     }
     stopRebuildThread();
+
+    // Audio 停止後の解放フェーズでは grace period を待たずに回収してよい。
+    g_deletionQueue.reclaimAllIgnoringEpoch();
 }
 
 //--------------------------------------------------------------

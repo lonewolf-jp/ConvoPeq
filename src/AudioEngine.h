@@ -599,6 +599,7 @@ DSPCore();
     std::atomic<bool> eqBypassActive   { false };
     std::atomic<bool> convBypassActive { false };
     std::atomic<uint32_t> pendingRebuildMask_{ 0 };
+    std::atomic<int64_t> lastIRContentRebuildTicks_{ 0 };
     EQCacheManager eqCacheManager;
     std::atomic<ProcessingOrder> currentProcessingOrder{ProcessingOrder::ConvolverThenEQ};
     std::atomic<AnalyzerSource> currentAnalyzerSource { AnalyzerSource::Output };

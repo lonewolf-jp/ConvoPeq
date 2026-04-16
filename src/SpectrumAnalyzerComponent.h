@@ -24,7 +24,16 @@
 //============================================================================
 
 #include <JuceHeader.h>
+#include <atomic>
+#include <cstdint>
 #include "AudioEngine.h"
+
+enum class AnalyzerState : uint8_t
+{
+    Disabled = 0,
+    Initializing,
+    Ready
+};
 
 class SpectrumAnalyzerComponent : public juce::Component,
                                   private juce::Timer,
@@ -35,6 +44,10 @@ public:
     ~SpectrumAnalyzerComponent() override;
 
     void setAnalyzerEnabled(bool enabled);
+    bool isReady() const noexcept
+    {
+        return analyzerState.load(std::memory_order_acquire) == AnalyzerState::Ready;
+    }
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -45,6 +58,7 @@ public:
 
 private:
     AudioEngine& engine;
+    std::atomic<AnalyzerState> analyzerState { AnalyzerState::Disabled };
 
     // ── 定数定義 (バッファサイズ決定のために先頭に配置) ──
     static constexpr int NUM_DISPLAY_BARS = AudioEngine::NUM_DISPLAY_BARS;
@@ -158,6 +172,8 @@ private:
 
     void prepareFFT();
     void releaseFFT();
+    void enableAnalyzer();
+    void disableAnalyzer();
 
     // ── パス生成ヘルパー ──
     void updateEQData();

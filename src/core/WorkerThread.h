@@ -10,7 +10,7 @@
 #include "CommandBuffer.h"
 
 class GenerationManager;
-class AudioEngine;
+class ThreadAffinityManager;
 
 namespace convo {
 
@@ -28,12 +28,13 @@ public:
     WorkerThread(CommandBuffer& cmdBuf,
                  SnapshotCoordinator& coordinator,
                  GenerationManager& genManager,
-                 AudioEngine& engine,
+                 const ThreadAffinityManager* affinityMgr,
                  const WorkerThreadConfig& config = WorkerThreadConfig());
     ~WorkerThread();
 
     void start();
     void stop();
+    void requestStop() noexcept;
     void flush();
 
     void setSnapshotCreator(SnapshotCreatorCallback callback, void* userData) noexcept {
@@ -59,7 +60,7 @@ private:
     CommandBuffer& commandBuffer;
     SnapshotCoordinator& coordinator;
     GenerationManager& generationManager;
-    AudioEngine& audioEngine;
+    const ThreadAffinityManager* affinityManager = nullptr;
     WorkerThreadConfig config;
 
     std::atomic<SnapshotCreatorCallback> callbackFunc{nullptr};

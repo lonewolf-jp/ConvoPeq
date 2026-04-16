@@ -24,20 +24,20 @@ struct DeletionEntry {
 };
 
 // B23: リアルタイム安全性のための静的チェック
-static_assert(std::is_trivially_copyable_v<DeletionEntry>, 
+static_assert(std::is_trivially_copyable_v<DeletionEntry>,
     "DeletionEntry must be trivially copyable for lock-free queue operations");
-static_assert(std::is_trivially_destructible_v<DeletionEntry>, 
+static_assert(std::is_trivially_destructible_v<DeletionEntry>,
     "DeletionEntry must be trivially destructible");
-static_assert(std::atomic<size_t>::is_always_lock_free, 
+static_assert(std::atomic<size_t>::is_always_lock_free,
     "std::atomic<size_t> must be lock-free for real-time safety");
-static_assert(std::atomic<uint64_t>::is_always_lock_free, 
+static_assert(std::atomic<uint64_t>::is_always_lock_free,
     "std::atomic<uint64_t> must be lock-free for real-time safety");
 
 #pragma warning(push)
 #pragma warning(disable : 4324) // 「構造体がパッドされました」を無視
 /**
  * DeferredDeletionQueue: ロックフリー MPMC 削除キュー (B9 修正版)
- * 
+ *
  * Dmitry Vyukov の bounded MPMC queue アルゴリズムを採用。
  * シーケンス番号をエントリ外に配置することで、エントリ自体のトリビアルコピー可能性を確保しています。
  */
@@ -102,10 +102,35 @@ public:
         }
     }
 
+    // Shutdown 専用: epoch 判定を無視して全エントリを回収する。
+    void reclaimAllIgnoringEpoch() {
+        uint32_t pos = dequeuePos.load(std::memory_order_relaxed);
+        while (true) {
+            auto& seq_atom = sequences[pos & kMask];
+            uint32_t seq = seq_atom.load(std::memory_order_acquire);
+            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+
+            if (diff == 0) {
+                auto& entry = ringBuffer[pos & kMask];
+                if (dequeuePos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                    if (entry.deleter && entry.ptr) {
+                        entry.deleter(entry.ptr);
+                    }
+                    entry.ptr = nullptr;
+                    entry.deleter = nullptr;
+                    seq_atom.store(pos + kQueueSize, std::memory_order_release);
+                    pos++;
+                }
+            } else {
+                break; // Empty
+            }
+        }
+    }
+
 private:
     static constexpr uint32_t kQueueSize = 4096;
     static constexpr uint32_t kMask = kQueueSize - 1;
-    
+
     alignas(64) std::array<DeletionEntry, kQueueSize> ringBuffer;
     alignas(64) std::array<std::atomic<uint32_t>, kQueueSize> sequences;
     alignas(64) std::atomic<uint32_t> enqueuePos{0};
