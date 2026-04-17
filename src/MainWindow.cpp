@@ -14,6 +14,23 @@ namespace
         return juce::String(value, 2);
     }
 
+   #if JUCE_WINDOWS && JUCE_DEBUG
+    void forceSoftwareRendererIfAvailable(juce::TopLevelWindow& window)
+    {
+        if (auto* peer = window.getPeer())
+        {
+            const auto engines = peer->getAvailableRenderingEngines();
+            const int softwareIndex = engines.indexOf("Software Renderer");
+
+            if (softwareIndex >= 0 && peer->getCurrentRenderingEngine() != softwareIndex)
+            {
+                peer->setCurrentRenderingEngine(softwareIndex);
+                juce::Logger::writeToLog("[MainWindow] Forced Software Renderer for debug window: " + window.getName());
+            }
+        }
+    }
+   #endif
+
     class SettingsWindow : public juce::DocumentWindow
     {
     public:
@@ -30,6 +47,15 @@ namespace
                 onClose();
 
             setVisible (false);
+        }
+
+        std::unique_ptr<juce::AccessibilityHandler> createAccessibilityHandler() override
+        {
+           #if JUCE_WINDOWS && JUCE_DEBUG
+            return createIgnoredAccessibilityHandler(*this);
+           #else
+            return juce::DocumentWindow::createAccessibilityHandler();
+           #endif
         }
 
         std::function<void()> onClose;
@@ -121,7 +147,33 @@ MainWindow::MainWindow (const juce::String& name)
     createUIComponents();
 
     startTimer (500); // CPU使用率の更新頻度を上げる (500ms)
-    setVisible (true);
+}
+
+void MainWindow::showMainWindowAsync()
+{
+    juce::Component::SafePointer<MainWindow> safeThis(this);
+    juce::MessageManager::callAsync([safeThis]
+    {
+        if (safeThis == nullptr)
+            return;
+
+        safeThis->setVisible(true);
+
+       #if JUCE_WINDOWS && JUCE_DEBUG
+        forceSoftwareRendererIfAvailable(*safeThis);
+       #endif
+
+        safeThis->toFront(true);
+    });
+}
+
+std::unique_ptr<juce::AccessibilityHandler> MainWindow::createAccessibilityHandler()
+{
+   #if JUCE_WINDOWS && JUCE_DEBUG
+    return createIgnoredAccessibilityHandler(*this);
+   #else
+    return juce::DocumentWindow::createAccessibilityHandler();
+   #endif
 }
 
 //--------------------------------------------------------------
@@ -230,9 +282,9 @@ void MainWindow::createUIComponents()
     eqPanel        = std::make_unique<EQControlPanel> (audioEngine);
     specAnalyzer   = std::make_unique<SpectrumAnalyzerComponent> (audioEngine);
 
-    addAndMakeVisible (convolverPanel.get());
-    addAndMakeVisible (eqPanel.get());
-    addAndMakeVisible (specAnalyzer.get());
+    juce::Component::addAndMakeVisible (convolverPanel.get());
+    juce::Component::addAndMakeVisible (eqPanel.get());
+    juce::Component::addAndMakeVisible (specAnalyzer.get());
 
     deviceSettings = std::make_unique<DeviceSettings> (audioDeviceManager, audioEngine);
 
@@ -241,7 +293,14 @@ void MainWindow::createUIComponents()
                                       juce::Colours::darkslategrey.withAlpha (0.8f));
     showDeviceSelectorButton.setColour (juce::TextButton::textColourOffId,
                                       juce::Colours::white);
-    showDeviceSelectorButton.onClick = [this] { toggleDeviceSelector(); };
+    showDeviceSelectorButton.onClick = [safeThis = juce::Component::SafePointer<MainWindow>(this)]
+    {
+        juce::MessageManager::callAsync([safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->toggleDeviceSelector();
+        });
+    };
     juce::Component::addAndMakeVisible (showDeviceSelectorButton);
 
     // 処理モード選択
@@ -257,11 +316,25 @@ void MainWindow::createUIComponents()
 
     // 保存/読み込みボタン
     saveButton.setButtonText ("Save");
-    saveButton.onClick = [this] { savePreset(); };
+    saveButton.onClick = [safeThis = juce::Component::SafePointer<MainWindow>(this)]
+    {
+        juce::MessageManager::callAsync([safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->savePreset();
+        });
+    };
     juce::Component::addAndMakeVisible (saveButton);
 
     loadButton.setButtonText ("Load");
-    loadButton.onClick = [this] { loadPreset(); };
+    loadButton.onClick = [safeThis = juce::Component::SafePointer<MainWindow>(this)]
+    {
+        juce::MessageManager::callAsync([safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->loadPreset();
+        });
+    };
     juce::Component::addAndMakeVisible (loadButton);
 
     // CPU使用率ラベル
@@ -278,7 +351,14 @@ void MainWindow::createUIComponents()
     // Aboutボタン
     aboutButton.setButtonText ("?");
     aboutButton.setTooltip ("About this application");
-    aboutButton.onClick = [this] { showAboutDialog(); };
+    aboutButton.onClick = [safeThis = juce::Component::SafePointer<MainWindow>(this)]
+    {
+        juce::MessageManager::callAsync([safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->showAboutDialog();
+        });
+    };
     juce::Component::addAndMakeVisible (aboutButton);
 
     // ソフトクリップボタン
@@ -357,6 +437,16 @@ void MainWindow::loadSettings()
 //--------------------------------------------------------------
 void MainWindow::toggleDeviceSelector()
 {
+    juce::Component::SafePointer<MainWindow> safeThis(this);
+    juce::MessageManager::callAsync([safeThis]
+    {
+        if (safeThis != nullptr)
+            safeThis->toggleDeviceSelectorImpl();
+    });
+}
+
+void MainWindow::toggleDeviceSelectorImpl()
+{
     if (settingsWindow == nullptr)
     {
         auto background = juce::Desktop::getInstance().getDefaultLookAndFeel()
@@ -383,6 +473,12 @@ void MainWindow::toggleDeviceSelector()
     else
     {
         settingsWindow->setVisible (true);
+
+       #if JUCE_WINDOWS && JUCE_DEBUG
+        if (settingsWindow != nullptr)
+            forceSoftwareRendererIfAvailable(*settingsWindow);
+       #endif
+
         settingsWindow->toFront (true);
         showDeviceSelectorButton.setButtonText ("Hide Settings");
     }
@@ -476,6 +572,16 @@ void MainWindow::loadPreset()
 //--------------------------------------------------------------
 void MainWindow::launchFileChooser(bool isSaving)
 {
+    juce::Component::SafePointer<MainWindow> safeThis(this);
+    juce::MessageManager::callAsync([safeThis, isSaving]
+    {
+        if (safeThis != nullptr)
+            safeThis->launchFileChooserImpl(isSaving);
+    });
+}
+
+void MainWindow::launchFileChooserImpl(bool isSaving)
+{
     const juce::String title = isSaving ? "Save Preset" : "Load Preset";
     const juce::String wildcards = isSaving ? "*.xml" : "*.xml;*.txt";
     const int chooserFlags = isSaving ? (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles)
@@ -531,6 +637,16 @@ void MainWindow::launchFileChooser(bool isSaving)
 // バージョン情報ダイアログ
 //--------------------------------------------------------------
 void MainWindow::showAboutDialog()
+{
+    juce::Component::SafePointer<MainWindow> safeThis(this);
+    juce::MessageManager::callAsync([safeThis]
+    {
+        if (safeThis != nullptr)
+            safeThis->showAboutDialogImpl();
+    });
+}
+
+void MainWindow::showAboutDialogImpl()
 {
     juce::DialogWindow::LaunchOptions options;
     options.content.setOwned (new AboutComponent());

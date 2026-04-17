@@ -108,7 +108,9 @@ private:
                                   int requestId);
     void setIRPreviewInProgress(bool isInProgress);
     void showIRAdvancedWindow();
+    void showIRAdvancedWindowImpl();
     void showConvolverSettingsWindow();
+    void showConvolverSettingsWindowImpl();
     // Convolver Input Trim スライダーの表示と値をエンジンの現在モードに同期する。
     // モード変更後 (バイパス切替・処理順序変更・プリセットロード) に呼ぶこと。
     void updateTrimSlider();
@@ -122,6 +124,7 @@ private:
         juce::Label  convTrimLabel;
     void applyPendingConvolverParameters();
     bool hasPendingConvolverParameters() const noexcept;
+    void showOptimizationProgressWindowImpl();
 
     juce::Path waveformPath;
     juce::Rectangle<int> waveformArea;

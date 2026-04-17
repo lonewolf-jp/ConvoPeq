@@ -153,13 +153,20 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
         }
     }
 
-    juce::MessageManager::callAsync([this, prepared = std::move(prepared)]() mutable
+    // 中間ステップの engine swap は音切れ・CPU スパイクの原因となるため、
+    // 最終 FFT サイズ到達時のみ publish する。
+    // 中間ステップの結果はキャッシュに保存済みなので処理は無駄にならない。
+    const bool isFinalStep = (nextFFTSize >= targetFFTSize);
+    if (isFinalStep)
     {
-        if (this->checkAndCancel())
-            return;
+        juce::MessageManager::callAsync([this, prepared = std::move(prepared)]() mutable
+        {
+            if (this->checkAndCancel())
+                return;
 
-        processor.applyPreparedIRState(std::move(prepared));
-    });
+            processor.applyPreparedIRState(std::move(prepared));
+        });
+    }
 
     return true;
 }

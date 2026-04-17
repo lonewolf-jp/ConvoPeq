@@ -26,6 +26,7 @@ public:
     ~MainWindow() override;
 
     void closeButtonPressed() override;
+    void showMainWindowAsync();
     AudioEngine* getAudioEngine() noexcept { return &audioEngine; }
     const AudioEngine* getAudioEngine() const noexcept { return &audioEngine; }
 
@@ -44,15 +45,19 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
     void labelTextChanged(juce::Label* label) override;
     void editorShown(juce::Label* label, juce::TextEditor& editor) override;
+    std::unique_ptr<juce::AccessibilityHandler> createAccessibilityHandler() override;
     void orderModeBoxChanged();
 
     void createUIComponents();
     void loadSettings();
     void toggleDeviceSelector();
+    void toggleDeviceSelectorImpl();
     void savePreset();
     void loadPreset();
     void launchFileChooser(bool isSaving);
+    void launchFileChooserImpl(bool isSaving);
     void showAboutDialog();
+    void showAboutDialogImpl();
 
     AsioBlacklist asioBlacklist;
     AudioEngine audioEngine;

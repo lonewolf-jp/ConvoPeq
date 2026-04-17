@@ -47,11 +47,14 @@
 #include <mkl.h>        // mkl_malloc, mkl_free, VML, CBLAS (オーディオデータ用)
 #include <ipp.h>       // IppsFFTSpec_R_64f (MKL DFTI の代替)
 #include <atomic>
+#include <memory>
 #include <JuceHeader.h>  // juce::nextPowerOfTwo, JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR
 #include "OutputFilter.h" // convo::HCMode, convo::LCMode
 
 namespace convo
 {
+
+struct IppFFTPlan;
 
 //==============================================================================
 // FilterSpec  ─ SetImpulse() に渡す出力周波数フィルター仕様
@@ -182,16 +185,16 @@ private:
         // ── IPP FFT ──
         // [v2.1] MKL DFTI_DESCRIPTOR_HANDLE から Intel IPP へ換装。
         //
-        // fftSpec    : ippsFFTInit_R_64f が fftSpecBuf 内を指すよう設定したポインタ。
+        // fftSpec    : ippsFFTInit_R_64f が管理する共有プラン内スペック。
         //              Audio Thread からは Read-Only で参照 (スレッドセーフ)。
-        // fftSpecBuf : fftSpec の実メモリオーナー (ippsMalloc_8u 確保, ippsFree 解放)。
+        // fftPlanOwner: サイズ単位で共有される FFT plan の所有権。
         // fftWorkBuf : 各 FFT 計算呼び出しが使用するスクラッチバッファ。
         //              ippsFFTGetSize_R_64f が sizeWork > 0 を返した場合のみ確保。
         //              sizeWork == 0 の場合 nullptr のまま (IPP が外部バッファ不要)。
         //              ★ Audio Thread での確保を防ぐため SetImpulse() で事前確保済み。
         //                 nullptr かつ sizeWork==0 の場合のみ IPP に nullptr を渡してよい。
-        IppsFFTSpec_R_64f* fftSpec    = nullptr; ///< IPP FFT スペック (fftSpecBuf 内を指す)
-        Ipp8u*             fftSpecBuf = nullptr; ///< fftSpec のメモリオーナー
+        std::shared_ptr<const IppFFTPlan> fftPlanOwner; ///< 共有 FFT plan (サイズ単位キャッシュ)
+        IppsFFTSpec_R_64f* fftSpec    = nullptr; ///< IPP FFT スペック (共有 plan 内を指す)
         Ipp8u*             fftWorkBuf = nullptr; ///< FFT スクラッチ (sizeWork==0なら nullptr)
         bool               descriptorCommitted = false; ///< IPP 初期化成功フラグ
 
@@ -200,16 +203,23 @@ private:
         // IPP CCS 形式: [re0,im0,re1,im1,...] は MKL DFTI_COMPLEX_COMPLEX と同一レイアウト。
         // → 既存の AVX2 複素乗算コードは無変更で動作する。
         double* irFreqDomain  = nullptr;  // mkl_malloc(numParts * partStride * sizeof(double), 64)
+        // split-complex 検証用 SoA ストレージ（実部/虚部分離）
+        double* irFreqReal    = nullptr;  // mkl_malloc(numParts * complexSize * sizeof(double), 64)
+        double* irFreqImag    = nullptr;  // mkl_malloc(numParts * complexSize * sizeof(double), 64)
 
         // ── 入力 FDL (Frequency Domain Delay Line, Audio Thread で更新) ──
         // レイアウト: [numParts][partStride]
         double* fdlBuf        = nullptr;  // mkl_malloc(...)
+        double* fdlReal       = nullptr;  // mkl_malloc((numParts*2) * complexSize * sizeof(double), 64)
+        double* fdlImag       = nullptr;  // mkl_malloc((numParts*2) * complexSize * sizeof(double), 64)
 
         // ── 作業バッファ (Audio Thread, FFT 入力/出力/複素積算) ──
         double* fftTimeBuf    = nullptr;  // mkl_malloc(fftSize * sizeof(double), 64)  前半=prev, 後半=cur
         double* fftOutBuf     = nullptr;  // mkl_malloc(fftSize * sizeof(double), 64)  IFFT 出力
         double* prevInputBuf  = nullptr;  // mkl_malloc(partSize * sizeof(double), 64) 前ブロック (Overlap-Save)
         double* accumBuf      = nullptr;  // mkl_malloc(partStride * sizeof(double), 64) 複素積算バッファ
+        double* accumReal     = nullptr;  // mkl_malloc(complexSize * sizeof(double), 64)
+        double* accumImag     = nullptr;  // mkl_malloc(complexSize * sizeof(double), 64)
 
         // ── 状態変数 (Audio Thread) ──
         int     fdlIndex    = 0;          // FDL の現在書き込みインデックス

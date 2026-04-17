@@ -62,10 +62,12 @@ public:
     void scanForDevices() override
     {
         inner->scanForDevices();
+        hasScanned = true;
     }
 
     juce::StringArray getDeviceNames (bool wantInputNames) const override
     {
+        ensureScanned();
         auto names = inner->getDeviceNames (wantInputNames);
 
         // ブラックリストにあるデバイスを除外
@@ -80,6 +82,7 @@ public:
 
     int getDefaultDeviceIndex (bool forInput) const override
     {
+        ensureScanned();
         auto innerNames = inner->getDeviceNames (forInput);
         int innerDefault = inner->getDefaultDeviceIndex (forInput);
 
@@ -101,6 +104,7 @@ public:
 
     int getIndexOfDevice (juce::AudioIODevice* device, bool asInput) const override
     {
+        ensureScanned();
         int innerIndex = inner->getIndexOfDevice (device, asInput);
         if (innerIndex >= 0)
         {
@@ -119,6 +123,8 @@ public:
     juce::AudioIODevice* createDevice (const juce::String& outputDeviceName,
                                        const juce::String& inputDeviceName) override
     {
+        ensureScanned();
+
         // 生成時にも念のためチェック
         if (blacklist.isBlacklisted (outputDeviceName) || blacklist.isBlacklisted (inputDeviceName))
             return nullptr;
@@ -127,8 +133,18 @@ public:
     }
 
 private:
+    void ensureScanned() const
+    {
+        if (!hasScanned)
+        {
+            inner->scanForDevices();
+            hasScanned = true;
+        }
+    }
+
     std::unique_ptr<juce::AudioIODeviceType> inner;
     const AsioBlacklist& blacklist;
+    mutable bool hasScanned = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BlacklistedASIODeviceType)
 };
@@ -237,7 +253,14 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
 
     addAndMakeVisible(adaptiveLearningButton);
     adaptiveLearningButton.setTooltip("Open the adaptive 9th-order learning window");
-    adaptiveLearningButton.onClick = [this] { showAdaptiveLearningWindow(); };
+    adaptiveLearningButton.onClick = [safeThis = juce::Component::SafePointer<DeviceSettings>(this)]
+    {
+        juce::MessageManager::callAsync([safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->showAdaptiveLearningWindow();
+        });
+    };
 
     addAndMakeVisible(fixedNoiseLogIntervalLabel);
     fixedNoiseLogIntervalLabel.setText("NS Log Interval:", juce::dontSendNotification);
@@ -445,6 +468,16 @@ void DeviceSettings::showAdaptiveLearningWindow()
     noiseShaperComboBox.setSelectedId(4, juce::dontSendNotification);
     updateNoiseShaperControls();
 
+    juce::Component::SafePointer<DeviceSettings> safeThis(this);
+    juce::MessageManager::callAsync([safeThis]
+    {
+        if (safeThis != nullptr)
+            safeThis->showAdaptiveLearningWindowImpl();
+    });
+}
+
+void DeviceSettings::showAdaptiveLearningWindowImpl()
+{
     if (adaptiveLearningWindow != nullptr)
     {
         adaptiveLearningWindow->setVisible(true);
@@ -1069,34 +1102,26 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
 }
 void DeviceSettings::applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist)
 {
-    // 既存のASIOタイプを探す
-    // Note: JUCEのAudioDeviceManagerは、登録済みのAudioIODeviceTypeを外部から安全に
-    //       置き換えるAPIを提供していません。
-    //       そのため、const_castを用いて内部のOwnedArrayに直接アクセスし、
-    //       既存のASIOドライバインスタンスを自作のラッパークラスで置き換えるというハックを行っています。
-    //       この方法はJUCEの将来のバージョンで互換性がなくなる可能性があります。
-
-    auto& availableTypes = const_cast<juce::OwnedArray<juce::AudioIODeviceType>&>(deviceManager.getAvailableDeviceTypes());
-    int asioIndex = -1;
+    // JUCE の公開 API で既存 ASIO タイプを差し替える。
+    // 以前の内部 OwnedArray 直接書き換えは lastDeviceTypeConfigs との整合を壊し、
+    // AudioDeviceManager 内部 assertion の原因になっていた。
+    auto& availableTypes = deviceManager.getAvailableDeviceTypes();
+    juce::AudioIODeviceType* asioTypeToRemove = nullptr;
 
     for (int i = 0; i < availableTypes.size(); ++i)
     {
         if (availableTypes[i] != nullptr && availableTypes[i]->getTypeName() == "ASIO")
         {
-            asioIndex = i;
+            asioTypeToRemove = availableTypes[i];
             break;
         }
     }
 
-    if (asioIndex != -1)
+    if (asioTypeToRemove != nullptr)
     {
-        // remove() の第2引数に false を指定し、OwnedArrayによる自動削除を防ぎます。
-        // これにより、オブジェクトの所有権を unique_ptr に安全に移行できます。
-        auto* rawPtr = availableTypes[asioIndex];
-        availableTypes.remove(asioIndex, false);
-        auto originalAsio = std::unique_ptr<juce::AudioIODeviceType>(rawPtr);
+        deviceManager.removeAudioDeviceType(asioTypeToRemove);
 
-        // ラッパーで包んで再登録します。addAudioDeviceType() が所有権を引き継ぎます。
-        deviceManager.addAudioDeviceType (std::make_unique<BlacklistedASIODeviceType> (std::move(originalAsio), blacklist));
+        if (auto replacement = std::unique_ptr<juce::AudioIODeviceType>(juce::AudioIODeviceType::createAudioIODeviceType_ASIO()))
+            deviceManager.addAudioDeviceType(std::make_unique<BlacklistedASIODeviceType>(std::move(replacement), blacklist));
     }
 }

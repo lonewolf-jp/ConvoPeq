@@ -346,6 +346,8 @@ public:
     //----------------------------------------------------------
     void rebuildAllIRs();
     void rebuildAllIRsSynchronous(std::function<bool()> shouldCancel = nullptr);
+    void setUseIncrementalRebuild(bool enable) noexcept;
+    bool isIncrementalRebuildEnabled() const noexcept;
     void invalidatePendingLoads();
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
@@ -357,6 +359,7 @@ public:
 
         // 構造変更検出用 getter（不足分のみ追加）
         uint64_t getActiveCacheKey() const noexcept;
+        int getActiveCacheFFTSize() const noexcept;
         int getNUCHCMode() const noexcept;
         int getNUCLCMode() const noexcept;
         // 注：getTailProcessingMode, getTailRolloffStartHz, getTailRolloffStrength,
@@ -407,18 +410,54 @@ public:
     }
 
 private:
+    struct StereoConvolver;
+    class LoaderThread;
+
+    struct IncrementalRebuildJob
+    {
+        enum class Stage
+        {
+            Idle,
+            Prepared,
+            Building,
+            Finalizing,
+            Done
+        };
+
+        Stage stage { Stage::Idle };
+        std::shared_ptr<juce::AudioBuffer<double>> preparedIR;
+        double preparedSampleRate = 0.0;
+        std::function<bool()> shouldCancel;
+        // LoaderThread ステートマシン (incremental 経路専用)
+        std::unique_ptr<LoaderThread> incrementalLoader;
+        bool loaderInitialized = false;
+        StereoConvolver* pendingConv = nullptr;
+        juce::AudioBuffer<double> pendingLoadedIR;
+        double pendingLoadedSR = 0.0;
+        int pendingTargetLength = 0;
+        juce::AudioBuffer<double> pendingDisplayIR;
+        double pendingScaleFactor = 1.0;
+        juce::File pendingFile;
+        bool pendingIsRebuild = false;
+        bool finalizeApplied = false;
+        juce::String lastError;
+
+        void reset() noexcept;
+    };
+
     void timerCallback() override;
+    void processBypassWithLatencyCompensation(juce::dsp::AudioBlock<double>& block,
+                                              const StereoConvolver& conv) noexcept;
     void postCoalescedChangeNotification();
     void updateLatencyCache() noexcept;
     void requestHostDisplayUpdate();
     void debugCheckAtomicLockFree() const;
     void requestDebouncedRebuild();
+    bool runIncrementalBuildStep(IncrementalRebuildJob& job);
+    bool runIncrementalFinalizeStep(IncrementalRebuildJob& job);
     // リングバッファオーバーフロー通知コールバック (Audio Thread 安全; 生関数ポインタ)
     // MKLNonUniformConvolver::ringWrite() からオーバーフロー時に呼び出される。
     static void overflowCallbackThunk(void* userData) noexcept;
-
-    struct StereoConvolver;
-    class LoaderThread;
 
     void commitNewConvolver(StereoConvolver* newConv,
                             std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
@@ -601,6 +640,8 @@ private:
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
     std::atomic<bool> irFinalized { false };
+    std::atomic<bool> useIncrementalRebuild { false };
+    std::unique_ptr<IncrementalRebuildJob> rebuildJob;
     std::unique_ptr<LoaderThread> activeLoader;
     std::deque<std::unique_ptr<LoaderThread>> loaderTrashBin;
     std::atomic<float> loadProgress { 0.0f };
@@ -730,6 +771,9 @@ private:
     std::atomic<double> currentIRScale { 1.0 }; // IRのスケールファクター (Auto Makeup + Safety Margin)
     convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     int cachedFFTBufferCapacity = 0;
+    convo::ScopedAlignedPtr<float> cachedLinearMagsBuffer; // スムージング入力用キャッシュ
+    convo::ScopedAlignedPtr<float> cachedSmoothedMagsBuffer; // スムージング出力用キャッシュ
+    int cachedMagnitudeBufferCapacity = 0;
     std::atomic<double> currentSampleRate { 0.0 };
 
     DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;

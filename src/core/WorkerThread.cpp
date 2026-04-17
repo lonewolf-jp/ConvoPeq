@@ -97,9 +97,11 @@ void WorkerThread::run()
             lastCommandTime = std::chrono::steady_clock::now();
         }
 
-        // flush 要求があれば、コマンドがなくても処理を試みる
-        if (flushRequested || poppedAny) {
-            hasPending = true; // poppedAny が true なら pendingGeneration は有効
+        if (poppedAny)
+            hasPending = true;
+
+        // flush 要求または pending のデバウンス満了時にスナップショットを生成する。
+        if (flushRequested || hasPending) {
             const auto now = std::chrono::steady_clock::now();
             const auto elapsedMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - lastCommandTime).count());

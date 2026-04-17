@@ -44,6 +44,12 @@ static inline double absNoLibm(double x) noexcept
     return (x < 0.0) ? -x : x;
 }
 
+static void diagLog(const juce::String& message)
+{
+    DBG(message);
+    juce::Logger::writeToLog(message);
+}
+
 void ConvolverProcessor::overflowCallbackThunk(void* userData) noexcept
 {
     auto* self = static_cast<ConvolverProcessor*>(userData);
@@ -743,564 +749,266 @@ public:
 
     LoadResult performLoad(juce::Thread* thread)
     {
-        LoadResult result;
+        // thread キャンセルを externalCancellationCheck に統合
+        std::function<bool()> savedCheck = externalCancellationCheck;
+        if (thread != nullptr)
+        {
+            externalCancellationCheck = [thread, saved = savedCheck]() -> bool {
+                if (thread->threadShouldExit()) return true;
+                return saved && saved();
+            };
+        }
 
-        // 0. Compute IR Hash for Caching
-        uint64_t fileHash = 0;
-        if (!isRebuild && file.existsAsFile())
-            fileHash = convo::AllpassDesigner::computeIRHash(file);
-
-        // キャンセル判定用ラムダ: スレッド自身の終了フラグ または 外部コールバックをチェック
-        auto shouldStop = [thread, this]() -> bool {
-            if (thread && thread->threadShouldExit()) return true;
-            if (externalCancellationCheck && externalCancellationCheck()) return true;
-            return false;
-        };
+        stepCurrentThread = thread;
+        stepState = StepState::LoadIR;
+        stepResult  = LoadResult{};
+        stepTrimmed.setSize(0, 0);
+        stepFileHash = 0;
 
         try
         {
-            // 1. IRデータの取得 (ファイル読み込み or メモリコピー)
-            if (isRebuild)
+            while (true)
             {
-                result.loadedIR = std::move(sourceIR); // 最適化: コピーではなくムーブ
-                result.loadedSR = sourceSampleRate;
-                result.scaleFactor = this->scaleFactor;
-            }
-            else
-            {
-                if (!file.existsAsFile())
-                {
-                    result.errorMessage = "IR file not found: " + file.getFullPathName();
-                    return result;
-                }
-
-                juce::AudioFormatManager formatManager;
-                formatManager.registerBasicFormats();
-                std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
-
-                if (!reader)
-                {
-                    result.errorMessage = "Unsupported audio format or corrupted file: " + file.getFileName();
-                    return result;
-                }
-
-                // サイズの妥当性チェック (lengthInSamples が int の範囲を超える場合への対策)
-                const int64 fileLength = reader->lengthInSamples;
-                const int numChannels = static_cast<int>(reader->numChannels);
-                static constexpr int64 MAX_FILE_LENGTH = 2147483647;  // int の最大値
-
-                if (fileLength > MAX_FILE_LENGTH) {
-                    result.errorMessage = "IR file is too large (exceeds 2GB samples limit).";
-                    juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
-                    return result;
-                }
-                if (numChannels <= 0) {
-                    result.errorMessage = "Invalid channel count in IR file.";
-                    juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
-                    return result;
-                }
-
-                // AudioFormatReader::read は float のみ対応のため、一時バッファを使用
-                juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
-                if (!reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true))
-                {
-                    result.errorMessage = "Failed to read audio data from file.";
-                    juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
-                    return result;
-                }
-
-                // convo::input_transform::convertFloatToDoubleHighQuality はアライメント済みストア命令(_mm256_store_pd)を使用するため、
-                // 出力先バッファは32byteアライメントされている必要がある。
-                // juce::AudioBuffer はアライメントを保証しないため、一時的なアライメント済みバッファに変換後、コピーする。
-                convo::ScopedAlignedPtr<double> tempAlignedBuffer(static_cast<double*>(convo::aligned_malloc(
-                    static_cast<size_t>(fileLength) * sizeof(double), 64)));
-
-                if (!tempAlignedBuffer)
-                {
-                    result.errorMessage = "Failed to allocate temporary buffer for IR loading.";
-                    juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
-                    return result;
-                }
-
-                result.loadedIR.setSize(numChannels, static_cast<int>(fileLength));
-                for (int ch = 0; ch < numChannels; ++ch)
-                {
-                    const float* src = tempFloatBuffer.getReadPointer(ch);
-                    // アライメント済みの一時バッファに変換
-                    convo::input_transform::convertFloatToDoubleHighQuality(src, tempAlignedBuffer.get(), static_cast<int>(fileLength));
-                    // 結果を juce::AudioBuffer にコピー
-                    result.loadedIR.copyFrom(ch, 0, tempAlignedBuffer.get(), static_cast<int>(fileLength));
-                }
-                result.loadedSR = reader->sampleRate;
-            }
-
-            if (checkCancellation(shouldStop, nullptr) || result.loadedIR.getNumSamples() == 0 || result.loadedIR.getNumChannels() == 0) return result;
-
-            // 2. [Bug D fix] scaleFactor の計算をここから Step 2' (trimmed バッファ確定後) に移動。
-            // 旧実装は生 IR (ウィンドウ・トリム・MinPhase 変換前) のエネルギーで計算していたため、
-            // 実際に SetImpulse() に渡すデータのエネルギーと乖離し、ヘッドルームが不正確だった。
-
-            // 3. 末尾の無音カット (Denormal対策 & 効率化)
-            // IR末尾の極小値(Denormal領域)をカットすることで、畳み込み負荷とDenormal発生リスクを低減
-            if (result.loadedIR.getNumSamples() > 0)
-            {
-                const int numSamples = result.loadedIR.getNumSamples();
-                const int numChannels = result.loadedIR.getNumChannels();
-                const double threshold = 1.0e-15; // -300dB (double精度における実質的な無音)
-
-                int newLength = 0; // Assume all silent if nothing found
-
-                if (numChannels > 0)
-                {
-                    const double* ch0_ptr = result.loadedIR.getReadPointer(0);
-                    const double* ch1_ptr = (numChannels > 1) ? result.loadedIR.getReadPointer(1) : nullptr;
-
-                    const __m256d vThreshold = _mm256_set1_pd(threshold);
-                    const __m256d vSignMask = _mm256_set1_pd(-0.0);
-
-                    int i = numSamples;
-                    bool found = false;
-
-                    // Process in chunks of 4 from the end using AVX2
-                    for (; i >= 4; i -= 4)
-                    {
-                        __m256d v0 = _mm256_loadu_pd(ch0_ptr + i - 4);
-                        __m256d abs_v0 = _mm256_andnot_pd(vSignMask, v0);
-                        __m256d mask = _mm256_cmp_pd(abs_v0, vThreshold, _CMP_GT_OQ);
-
-                        if (ch1_ptr)
-                        {
-                            __m256d v1 = _mm256_loadu_pd(ch1_ptr + i - 4);
-                            __m256d abs_v1 = _mm256_andnot_pd(vSignMask, v1);
-                            __m256d mask1 = _mm256_cmp_pd(abs_v1, vThreshold, _CMP_GT_OQ);
-                            mask = _mm256_or_pd(mask, mask1);
-                        }
-
-                        if (_mm256_testz_pd(mask, mask) == 0) // if not all zero
-                        {
-                            // Non-silent sample found in this chunk. Find the exact one.
-                            for (int j = i - 1; j >= i - 4; --j)
-                            {
-                                if (std::abs(ch0_ptr[j]) > threshold || (ch1_ptr && std::abs(ch1_ptr[j]) > threshold))
-                                {
-                                    newLength = j + 1;
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (found) break;
-                        }
-                    }
-
-                    if (!found)
-                    {
-                        // Check remaining samples (scalar)
-                        for (int j = i - 1; j >= 0; --j)
-                        {
-                            if (std::abs(ch0_ptr[j]) > threshold || (ch1_ptr && std::abs(ch1_ptr[j]) > threshold))
-                            {
-                                newLength = j + 1;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (newLength < numSamples)
-                {
-                    result.loadedIR.setSize(numChannels, std::max(1, newLength), true);
-                    shrinkToFit(result.loadedIR); // 末尾カット後の余分なメモリを解放
-                }
-            }
-
-            // 4. リサンプリング (SR不一致の場合)
-            // IRのサンプルレートがターゲットと異なる場合、ピッチズレを防ぐためにリサンプリングする
-            if (result.loadedSR > 0.0 && sampleRate > 0.0 &&
-                std::abs(result.loadedSR - sampleRate) > 1e-6)
-            {
-                // 現在の世代IDを取得し、キャンセル検出に使用する
-                const uint64_t myGen = owner.convolverStateGeneration.getCurrentGeneration();
-
-                // 位相モードを取得（LoaderThread 実行中に変わっても次回リビルドで反映）
-                const r8b::EDSPFilterPhaseResponse r8bPhase =
-                    (owner.getResamplingPhaseMode() == ResamplingPhaseMode::Linear)
-                        ? r8b::fprLinearPhase
-                        : r8b::fprMinPhase;
-
-                auto resampleOut = resampleIR(
-                    result.loadedIR, result.loadedSR, sampleRate, r8bPhase,
-                    [&]() -> bool {
-                        return shouldStop() ||
-                               !owner.convolverStateGeneration.isCurrentGeneration(myGen);
-                    });
-
-                // 世代チェック: 別のロードが開始されていたら結果を破棄
-                if (!owner.convolverStateGeneration.isCurrentGeneration(myGen))
-                {
-                    result.success = false;
-                    return result;
-                }
-
-                switch (resampleOut.result)
-                {
-                    case ResampleResult::Success:
-                        result.loadedIR = std::move(resampleOut.buffer);
-                        result.loadedSR = sampleRate;
-                        break;
-                    case ResampleResult::Cancelled:
-                        // キャンセル: 上流の checkCancellation で処理される
-                        return result;
-                    case ResampleResult::SilentIR:
-                        juce::Logger::writeToLog("LoaderThread: Resampling skipped – IR is silent.");
-                        result.errorMessage = "IR is silent (all samples near zero).";
-                        return result;
-                    case ResampleResult::Error:
-                    default:
-                        juce::Logger::writeToLog("LoaderThread: Resampling failed (produced 0 samples or error).");
-                        result.errorMessage = "Resampling failed (unknown error).";
-                        return result;
-                }
-            }
-
-            // 5. 高精度型 DC Blocker (1次IIR)
-            // NUCコンボルバー直前に置くため、位相回転を最小限に抑えつつDCを除去する
-            // 超高サンプリングレート（OSR）対応
-            if (result.loadedSR > 0.0 && result.loadedIR.getNumSamples() > 0)
-            {
-                for (int ch = 0; ch < result.loadedIR.getNumChannels(); ++ch)
-                {
-                    convo::UltraHighRateDCBlocker dcBlocker;
-                    // カットオフ周波数は 1.0Hz に設定 (超低域ノイズ除去)
-                    dcBlocker.init(result.loadedSR, 1.0);
-
-                    double* data = result.loadedIR.getWritePointer(ch);
-                    const int numSamples = result.loadedIR.getNumSamples();
-                    dcBlocker.process(data, numSamples);
-                }
-            }
-
-            if (checkCancellation(shouldStop, nullptr)) return result;
-
-            // 6. Asymmetric Tukey Window (Peak-based)
-            // IRデータの先頭と末尾を滑らかにする「ピーク位置基準の非対称tukey窓」を適用
-            if (result.loadedIR.getNumSamples() > 0)
-            {
-                const int numSamples = result.loadedIR.getNumSamples();
-                for (int ch = 0; ch < result.loadedIR.getNumChannels(); ++ch)
-                {
-                    // [Bug D fix] メモリ確保失敗時はエラーを伝播してロードを中断する。
-                    // 旧実装はエラーを無視してウィンドウ未適用のIRのままリターンしていたため、
-                    // IR末端の不連続点がクリックノイズを引き起こす可能性があった。
-                    if (!applyAsymmetricTukey(result.loadedIR.getWritePointer(ch), numSamples))
-                    {
-                        result.errorMessage = "Failed to allocate Tukey window buffer (Out of Memory).";
-                        juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
-                        return result;
-                    }
-                }
-            }
-
-            if (checkCancellation(shouldStop, nullptr)) return result;
-
-            if (checkCancellation(shouldStop, nullptr)) return result;
-
-            // 7. ターゲット長計算とトリミング
-            result.targetLength = owner.computeTargetIRLength(sampleRate, result.loadedIR.getNumSamples());
-            juce::AudioBuffer<double> trimmed(result.loadedIR.getNumChannels(), result.targetLength);
-            trimmed.clear();
-
-            int copySamples = (std::min)(result.targetLength, result.loadedIR.getNumSamples());
-            constexpr int minFadeSamples = 256;
-            constexpr double fadeRatio = 0.02;
-            const int maxFadeSamples = juce::jmax(minFadeSamples,
-                                                  static_cast<int>(std::round(sampleRate * 0.080)));
-            int fadeSamples = static_cast<int>(std::round(static_cast<double>(copySamples) * fadeRatio));
-            fadeSamples = juce::jlimit(minFadeSamples, maxFadeSamples, fadeSamples);
-            fadeSamples = juce::jmax(0, juce::jmin(fadeSamples, copySamples - 1));
-
-            for (int ch = 0; ch < result.loadedIR.getNumChannels(); ++ch)
-            {
-                trimmed.copyFrom(ch, 0, result.loadedIR, ch, 0, copySamples);
-                // フェードアウト
-                if (fadeSamples > 0)
-                    trimmed.applyGainRamp(ch, copySamples - fadeSamples, fadeSamples, 1.0, 0.0);
-            }
-
-            if (checkCancellation(shouldStop, nullptr)) return result;
-
-            // 8. MinPhase変換 (オプション)
-                bool conversionSuccessful = false;
-                auto validateBuffer = [](const juce::AudioBuffer<double>& buffer) -> bool
-                {
-                    bool allFinite = (buffer.getNumSamples() > 0 && buffer.getNumChannels() > 0);
-                    double maxAbs = 0.0;
-                    if (allFinite)
-                    {
-                        for (int ch = 0; ch < buffer.getNumChannels() && allFinite; ++ch)
-                        {
-                            const double* ptr = buffer.getReadPointer(ch);
-                            for (int i = 0; i < buffer.getNumSamples(); ++i)
-                            {
-                                const double v = ptr[i];
-                                if (!std::isfinite(v))
-                                {
-                                    allFinite = false;
-                                    break;
-                                }
-                                maxAbs = (std::max)(maxAbs, std::abs(v));
-                            }
-                        }
-                    }
-
-                    return allFinite && maxAbs > 1.0e-12;
-                };
-
-                if (phaseMode == ConvolverProcessor::PhaseMode::Minimum || phaseMode == ConvolverProcessor::PhaseMode::Mixed)
-                {
-                    bool wasCancelled = false;
-                    auto minPhaseIR = convertToMinimumPhase(trimmed, shouldStop, &wasCancelled);
-                    if (wasCancelled) return result;
-
-                    if (validateBuffer(minPhaseIR))
-                    {
-                        if (phaseMode == ConvolverProcessor::PhaseMode::Minimum)
-                        {
-                            trimmed = std::move(minPhaseIR);
-                            conversionSuccessful = true;
-                        }
-                        else
-                        {
-                            bool mixedCancelled = false;
-                            auto progressCb = [this](float p) {
-                                owner.setLoadingProgress(p);
-                            };
-                            auto mixedIR = convertToMixedPhase(&owner, fileHash, trimmed, minPhaseIR, sampleRate,
-                                                               static_cast<double>(mixedTransitionStartHz),
-                                                               static_cast<double>(mixedTransitionEndHz),
-                                                               static_cast<double>(mixedPreRingTau),
-                                                               shouldStop, &mixedCancelled, progressCb);
-                            if (mixedCancelled) return result;
-
-                            if (validateBuffer(mixedIR))
-                            {
-                                trimmed = std::move(mixedIR);
-                                conversionSuccessful = true;
-                            }
-                        }
-                    }
-                    // 変換失敗時は trimmed(As-Is) を使用
-                }
-
-            if (checkCancellation(shouldStop, nullptr)) return result;
-
-            // 2'. Auto Makeup (Energy Normalization) — trimmed バッファ確定後に計算
-            // [Bug D fix] ウィンドウ・トリム・MinPhase 変換がすべて完了した trimmed バッファで
-            // エネルギーを計測することで、SetImpulse() に渡す実データと一致した scaleFactor を得る。
-            // [fix4 R1] リビルド時もスケールファクタを再計算する（リビルド後のゲイン不整合を防ぐ）。
-            {
-                const IRState* currentState = owner.acquireIRState();
-                auto currentIr = (currentState != nullptr) ? currentState->ir : nullptr;
-                const double currentScale = owner.currentIRScale.load(std::memory_order_acquire);
-                const auto scaleInfo = IRConverter::computeScaleFactor(trimmed, currentIr, currentScale);
-                owner.releaseIRState(currentState);
-
-                if (scaleInfo.hasScaleFactor)
-                {
-                    result.scaleFactor = scaleInfo.scaleFactor;
-                }
-                else
-                {
-                    juce::Logger::writeToLog("LoaderThread: IR energy is too low or invalid, skipping Auto Makeup.");
-                    result.scaleFactor = 1.0;
-                }
-            }
-
-            // 9. レイテンシー推定: エネルギー重心（99.9%範囲）
-            int irPeakLatency = 0;
-            if (trimmed.getNumChannels() > 0) {
-                constexpr double ENERGY_THRESHOLD = 0.999;
-                double maxCentroid = 0.0;
-
-                thread_local std::vector<double> energyBuffer;
-                const int length = result.targetLength;
-                const size_t needed = static_cast<size_t>(length);
-                if (energyBuffer.capacity() > needed * 4) {
-                    std::vector<double>().swap(energyBuffer);
-                    energyBuffer.reserve(needed);
-                }
-                if (energyBuffer.size() < needed)
-                    energyBuffer.resize(needed);
-
-                double* energy = energyBuffer.data();
-                for (int ch = 0; ch < trimmed.getNumChannels(); ++ch) {
-                    const double* data = trimmed.getReadPointer(ch);
-
-                    double totalEnergy = 0.0;
-                    for (int i = 0; i < length; ++i) {
-                        const double e = data[i] * data[i];
-                        energy[i] = e;
-                        totalEnergy += e;
-                    }
-                    if (totalEnergy < 1e-12)
-                        continue;
-
-                    double cumulative = 0.0;
-                    int cutoff = length - 1;
-                    for (int i = 0; i < length; ++i) {
-                        cumulative += energy[i];
-                        if (cumulative >= totalEnergy * ENERGY_THRESHOLD) {
-                            cutoff = i;
-                            break;
-                        }
-                    }
-
-                    double sumE = 0.0;
-                    double sumW = 0.0;
-                    for (int i = 0; i <= cutoff; ++i) {
-                        const double e = energy[i];
-                        sumE += e;
-                        sumW += static_cast<double>(i) * e;
-                    }
-
-                    const double centroid = (sumE > 0.0) ? (sumW / sumE) : 0.0;
-                    if (centroid > maxCentroid)
-                        maxCentroid = centroid;
-                }
-
-                irPeakLatency = static_cast<int>(std::floor(maxCentroid + 0.5));
-                irPeakLatency = juce::jlimit(0, result.targetLength - 1, irPeakLatency);
-            }
-
-            // IRデータを格納するアラインされたバッファを準備 (Rebuild用に保持)
-            convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
-            convo::ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
-
-            // 安全対策: チャンネル数チェック
-            if (trimmed.getNumChannels() == 0) return result;
-
-            const double* srcL = trimmed.getReadPointer(0);
-            const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
-
-            // データを一度だけコピー
-            std::memcpy(irL.get(), srcL, result.targetLength * sizeof(double));
-            std::memcpy(irR.get(), srcR, result.targetLength * sizeof(double));
-
-            // 10. 新しいConvolutionの構築 (initメソッドを使用して安全に初期化)
-            // prepareToPlayとロジックを統一し、NUCエンジンを同条件で構築する
-            int internalBlockSize = juce::nextPowerOfTwo(blockSize);
-            auto sizing = computeMasteringSizing(internalBlockSize, result.targetLength);
-
-            // Display用コピーを作成 (move前に)
-            if (owner.isVisualizationEnabled()) {
-                result.displayIR = trimmed;
-                // 表示用にはスケールを適用しておく (処理用IRはSetImpulseでスケールされる)
-                result.displayIR.applyGain(result.scaleFactor);
-            }
-
-            if (thread == nullptr) // Synchronous mode (Worker Thread)
-            {
-                void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
-                new (mem) StereoConvolver();
-                result.newConv = static_cast<StereoConvolver*>(mem);
-
-                if (result.newConv->init(irL.release(), irR.release(), result.targetLength, sampleRate, irPeakLatency,
-                                         sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, blockSize, result.scaleFactor,
-                                         owner.experimentalDirectHeadEnabled.load(std::memory_order_acquire),
-                                         nullptr, &owner))
-                {
-                    result.success = true;
-                }
-                else
-                {
-                    result.newConv->~StereoConvolver();
-                    convo::aligned_free(result.newConv);
-                    result.newConv = nullptr;
-                    result.success = false;
-                    result.errorMessage = "Failed to initialize NUC engine (Memory allocation or MKL setup failed).";
-                }
-                return result;
-            }
-            else // Async mode (Loader Thread)
-            {
-                // std::function (callAsync) requires CopyConstructible, so we cannot capture move-only types directly.
-                // We wrap them in a shared_ptr.
-                struct AsyncState {
-                    convo::ScopedAlignedPtr<double> irL;
-                    convo::ScopedAlignedPtr<double> irR;
-                    std::shared_ptr<juce::AudioBuffer<double>> loadedIR;
-                    std::shared_ptr<juce::AudioBuffer<double>> displayIR;
-                };
-
-                auto state = std::make_shared<AsyncState>();
-                state->irL = std::move(irL);
-                state->irR = std::move(irR);
-                state->loadedIR = std::make_shared<juce::AudioBuffer<double>>(std::move(result.loadedIR));
-                state->displayIR = std::make_shared<juce::AudioBuffer<double>>(std::move(result.displayIR));
-
-                const bool queued = juce::MessageManager::callAsync([weakOwner = this->weakOwner, state,
-                                                 length   = result.targetLength,
-                                                 sr       = sampleRate,
-                                                 peak     = irPeakLatency,
-                                                 maxFFT   = sizing.maxFFTSize,
-                                                 known    = internalBlockSize,
-                                                 first    = sizing.firstPartition,
-                                                 callQ    = blockSize,
-                                                 isReb    = isRebuild,
-                                                 file     = file,
-                                                 scale    = result.scaleFactor]() mutable
-                {
-                    if (auto* owner = weakOwner.get())
-                    {
-                        owner->finalizeNUCEngineOnMessageThread(std::move(state->irL),
-                                                                std::move(state->irR),
-                                                                length, sr, peak, maxFFT, known, first, callQ, isReb, file,
-                                                                scale, state->loadedIR, state->displayIR);
-                    }
-                });
-
-                if (!queued)
-                {
-                    juce::Logger::writeToLog("LoaderThread: callAsync failed, aborting IR load");
-                    result.errorMessage = "Internal message queue full, cannot complete IR load";
-
-                    if (result.newConv)
-                    {
-                        result.newConv->~StereoConvolver();
-                        convo::aligned_free(result.newConv);
-                        result.newConv = nullptr;
-                    }
-
-                    juce::MessageManager::callAsync([weakOwner = this->weakOwner, errorMsg = result.errorMessage]()
-                    {
-                        if (auto* ownerPtr = weakOwner.get())
-                            ownerPtr->handleLoadError(errorMsg);
-                    });
-
-                    return result;
-                }
-
-                result.finalizeQueued = true; // run() の FlagResetter フォールバックを抑止
-                return result;
+                const bool terminal = stepOnce();
+                if (terminal) break;
             }
         }
         catch (const std::bad_alloc&)
         {
-            result.errorMessage = "IR too large (Out of Memory)";
-            juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
-            return result;
+            stepResult.errorMessage = "IR too large (Out of Memory)";
+            juce::Logger::writeToLog("LoaderThread: " + stepResult.errorMessage);
         }
         catch (const std::exception& e)
         {
-            result.errorMessage = "Error loading IR: " + juce::String(e.what());
-            juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
-            return result;
+            stepResult.errorMessage = "Error loading IR: " + juce::String(e.what());
+            juce::Logger::writeToLog("LoaderThread: " + stepResult.errorMessage);
         }
         catch (...)
         {
-            result.errorMessage = "Unknown error loading IR";
-            juce::Logger::writeToLog("LoaderThread: " + result.errorMessage);
-            return result;
+            stepResult.errorMessage = "Unknown error loading IR";
+            juce::Logger::writeToLog("LoaderThread: " + stepResult.errorMessage);
         }
+
+        externalCancellationCheck = std::move(savedCheck);
+        stepCurrentThread = nullptr;
+        return std::move(stepResult);
+    }
+
+    int estimatePeakLatencySamples(const juce::AudioBuffer<double>& trimmed, int targetLength) const
+    {
+        int irPeakLatency = 0;
+        if (trimmed.getNumChannels() > 0)
+        {
+            constexpr double ENERGY_THRESHOLD = 0.999;
+            double maxCentroid = 0.0;
+
+            thread_local std::vector<double> energyBuffer;
+            const int length = targetLength;
+            const size_t needed = static_cast<size_t>(length);
+            if (energyBuffer.capacity() > needed * 4)
+            {
+                std::vector<double>().swap(energyBuffer);
+                energyBuffer.reserve(needed);
+            }
+            if (energyBuffer.size() < needed)
+                energyBuffer.resize(needed);
+
+            double* energy = energyBuffer.data();
+            for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
+            {
+                const double* data = trimmed.getReadPointer(ch);
+
+                double totalEnergy = 0.0;
+                for (int i = 0; i < length; ++i)
+                {
+                    const double e = data[i] * data[i];
+                    energy[i] = e;
+                    totalEnergy += e;
+                }
+                if (totalEnergy < 1e-12)
+                    continue;
+
+                double cumulative = 0.0;
+                int cutoff = length - 1;
+                for (int i = 0; i < length; ++i)
+                {
+                    cumulative += energy[i];
+                    if (cumulative >= totalEnergy * ENERGY_THRESHOLD)
+                    {
+                        cutoff = i;
+                        break;
+                    }
+                }
+
+                double sumE = 0.0;
+                double sumW = 0.0;
+                for (int i = 0; i <= cutoff; ++i)
+                {
+                    const double e = energy[i];
+                    sumE += e;
+                    sumW += static_cast<double>(i) * e;
+                }
+
+                const double centroid = (sumE > 0.0) ? (sumW / sumE) : 0.0;
+                if (centroid > maxCentroid)
+                    maxCentroid = centroid;
+            }
+
+            irPeakLatency = static_cast<int>(std::floor(maxCentroid + 0.5));
+            irPeakLatency = juce::jlimit(0, targetLength - 1, irPeakLatency);
+        }
+
+        return irPeakLatency;
+    }
+
+    bool buildConvolverFromTrimmed(LoadResult& result,
+                                   const juce::AudioBuffer<double>& trimmed,
+                                   double sr,
+                                   int bs,
+                                   juce::Thread* thread)
+    {
+        if (trimmed.getNumChannels() == 0)
+            return false;
+
+        const int irPeakLatency = estimatePeakLatencySamples(trimmed, result.targetLength);
+
+        convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
+        convo::ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
+
+        const double* srcL = trimmed.getReadPointer(0);
+        const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
+        std::memcpy(irL.get(), srcL, result.targetLength * sizeof(double));
+        std::memcpy(irR.get(), srcR, result.targetLength * sizeof(double));
+
+        const int internalBlockSize = juce::nextPowerOfTwo(bs);
+        const auto sizing = computeMasteringSizing(internalBlockSize, result.targetLength);
+
+        if (owner.isVisualizationEnabled())
+        {
+            result.displayIR = trimmed;
+            result.displayIR.applyGain(result.scaleFactor);
+        }
+
+        if (thread == nullptr)
+            return initializeConvolverSynchronously(result,
+                                                    std::move(irL),
+                                                    std::move(irR),
+                                                    sr,
+                                                    irPeakLatency,
+                                                    sizing.maxFFTSize,
+                                                    internalBlockSize,
+                                                    sizing.firstPartition,
+                                                    bs);
+
+        return queueFinalizeOnMessageThread(result,
+                                            std::move(irL),
+                                            std::move(irR),
+                                            sr,
+                                            irPeakLatency,
+                                            sizing.maxFFTSize,
+                                            internalBlockSize,
+                                            sizing.firstPartition,
+                                            bs);
+    }
+
+    bool initializeConvolverSynchronously(LoadResult& result,
+                                          convo::ScopedAlignedPtr<double> irL,
+                                          convo::ScopedAlignedPtr<double> irR,
+                                          double sr,
+                                          int irPeakLatency,
+                                          int maxFFTSize,
+                                          int internalBlockSize,
+                                          int firstPartition,
+                                          int callBlockSize)
+    {
+        void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
+        new (mem) StereoConvolver();
+        result.newConv = static_cast<StereoConvolver*>(mem);
+
+        if (result.newConv->init(irL.release(), irR.release(), result.targetLength, sr, irPeakLatency,
+                                 maxFFTSize, internalBlockSize, firstPartition, callBlockSize, result.scaleFactor,
+                                 owner.experimentalDirectHeadEnabled.load(std::memory_order_acquire),
+                                 nullptr, &owner))
+        {
+            result.success = true;
+            return true;
+        }
+
+        result.newConv->~StereoConvolver();
+        convo::aligned_free(result.newConv);
+        result.newConv = nullptr;
+        result.success = false;
+        result.errorMessage = "Failed to initialize NUC engine (Memory allocation or MKL setup failed).";
+        return false;
+    }
+
+    bool queueFinalizeOnMessageThread(LoadResult& result,
+                                      convo::ScopedAlignedPtr<double> irL,
+                                      convo::ScopedAlignedPtr<double> irR,
+                                      double sr,
+                                      int irPeakLatency,
+                                      int maxFFTSize,
+                                      int internalBlockSize,
+                                      int firstPartition,
+                                      int callBlockSize)
+    {
+        struct AsyncState {
+            convo::ScopedAlignedPtr<double> irL;
+            convo::ScopedAlignedPtr<double> irR;
+            std::shared_ptr<juce::AudioBuffer<double>> loadedIR;
+            std::shared_ptr<juce::AudioBuffer<double>> displayIR;
+        };
+
+        auto state = std::make_shared<AsyncState>();
+        state->irL = std::move(irL);
+        state->irR = std::move(irR);
+        state->loadedIR = std::make_shared<juce::AudioBuffer<double>>(std::move(result.loadedIR));
+        state->displayIR = std::make_shared<juce::AudioBuffer<double>>(std::move(result.displayIR));
+
+        const bool queued = juce::MessageManager::callAsync([weakOwner = this->weakOwner, state,
+                                         length   = result.targetLength,
+                                         sr,
+                                         peak     = irPeakLatency,
+                                         maxFFT   = maxFFTSize,
+                                         known    = internalBlockSize,
+                                         first    = firstPartition,
+                                         callQ    = callBlockSize,
+                                         isReb    = isRebuild,
+                                         file     = file,
+                                         scale    = result.scaleFactor]() mutable
+        {
+            if (auto* ownerPtr = weakOwner.get())
+            {
+                ownerPtr->finalizeNUCEngineOnMessageThread(std::move(state->irL),
+                                                           std::move(state->irR),
+                                                           length, sr, peak, maxFFT, known, first, callQ, isReb, file,
+                                                           scale, state->loadedIR, state->displayIR);
+            }
+        });
+
+        if (!queued)
+        {
+            juce::Logger::writeToLog("LoaderThread: callAsync failed, aborting IR load");
+            result.errorMessage = "Internal message queue full, cannot complete IR load";
+
+            if (result.newConv)
+            {
+                result.newConv->~StereoConvolver();
+                convo::aligned_free(result.newConv);
+                result.newConv = nullptr;
+            }
+
+            juce::MessageManager::callAsync([weakOwner = this->weakOwner, errorMsg = result.errorMessage]()
+            {
+                if (auto* ownerPtr = weakOwner.get())
+                    ownerPtr->handleLoadError(errorMsg);
+            });
+
+            return false;
+        }
+
+        result.finalizeQueued = true;
+        return true;
     }
 
     void runSynchronously()
@@ -1325,7 +1033,366 @@ public:
             }
         }
     }
+
+    //------------------------------------------------------------------
+    // Incremental step machine
+    // stepOnce() を呼ぶたびに1ステージ進む。true = 終了（Done/Error）
+    //------------------------------------------------------------------
+    enum class StepState { LoadIR, Trim, Transform, Build, Done, Error };
+
+    StepState stepState { StepState::LoadIR };
+    LoadResult stepResult;
+    juce::AudioBuffer<double> stepTrimmed;
+    uint64_t stepFileHash { 0 };
+    juce::Thread* stepCurrentThread = nullptr;
+
+    bool isDone()     const noexcept { return stepState == StepState::Done; }
+    bool hasError()   const noexcept { return stepState == StepState::Error; }
+    LoadResult&       getStepResult() noexcept { return stepResult; }
+
+    // 1ステップ実行。true = 終端に到達（Done or Error）
+    bool stepOnce()
+    {
+        switch (stepState)
+        {
+            case StepState::LoadIR:
+                if (!doLoadIRStep())  { stepState = StepState::Error; return true; }
+                stepState = StepState::Trim;
+                return false;
+
+            case StepState::Trim:
+                if (!doTrimStep())    { stepState = StepState::Error; return true; }
+                stepState = StepState::Transform;
+                return false;
+
+            case StepState::Transform:
+                if (!doTransformStep()) { stepState = StepState::Error; return true; }
+                stepState = StepState::Build;
+                return false;
+
+            case StepState::Build:
+                if (!doBuildStep())   { stepState = StepState::Error; return true; }
+                stepState = StepState::Done;
+                return true;
+
+            case StepState::Done:
+            case StepState::Error:
+                return true;
+        }
+        return true;
+    }
+
 private:
+    // ---------- Incremental step implementations ----------
+
+    // Step 1: IRファイル読み込み または メモリコピー
+    bool doLoadIRStep()
+    {
+        stepFileHash = 0;
+        if (!isRebuild && file.existsAsFile())
+            stepFileHash = convo::AllpassDesigner::computeIRHash(file);
+
+        if (isRebuild)
+        {
+            stepResult.loadedIR    = std::move(sourceIR);
+            stepResult.loadedSR    = sourceSampleRate;
+            stepResult.scaleFactor = this->scaleFactor;
+        }
+        else
+        {
+            if (!file.existsAsFile())
+            {
+                stepResult.errorMessage = "IR file not found: " + file.getFullPathName();
+                return false;
+            }
+
+            juce::AudioFormatManager formatManager;
+            formatManager.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+            if (!reader)
+            {
+                stepResult.errorMessage = "Unsupported audio format or corrupted file: " + file.getFileName();
+                return false;
+            }
+
+            const int64 fileLength  = reader->lengthInSamples;
+            const int numChannels   = static_cast<int>(reader->numChannels);
+            static constexpr int64 MAX_FILE_LENGTH = 2147483647;
+
+            if (fileLength > MAX_FILE_LENGTH)
+            {
+                stepResult.errorMessage = "IR file is too large (exceeds 2GB samples limit).";
+                return false;
+            }
+            if (numChannels <= 0)
+            {
+                stepResult.errorMessage = "Invalid channel count in IR file.";
+                return false;
+            }
+
+            juce::AudioBuffer<float> tempFloatBuffer(numChannels, static_cast<int>(fileLength));
+            if (!reader->read(&tempFloatBuffer, 0, static_cast<int>(fileLength), 0, true, true))
+            {
+                stepResult.errorMessage = "Failed to read audio data from file.";
+                return false;
+            }
+
+            convo::ScopedAlignedPtr<double> tempAligned(static_cast<double*>(
+                convo::aligned_malloc(static_cast<size_t>(fileLength) * sizeof(double), 64)));
+            if (!tempAligned)
+            {
+                stepResult.errorMessage = "Failed to allocate temporary buffer for IR loading.";
+                return false;
+            }
+
+            stepResult.loadedIR.setSize(numChannels, static_cast<int>(fileLength));
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                const float* src = tempFloatBuffer.getReadPointer(ch);
+                convo::input_transform::convertFloatToDoubleHighQuality(
+                    src, tempAligned.get(), static_cast<int>(fileLength));
+                stepResult.loadedIR.copyFrom(ch, 0, tempAligned.get(), static_cast<int>(fileLength));
+            }
+            stepResult.loadedSR = reader->sampleRate;
+        }
+
+        return (stepResult.loadedIR.getNumSamples() > 0 && stepResult.loadedIR.getNumChannels() > 0);
+    }
+
+    // Step 2: 無音カット / リサンプリング / DCブロッカー / Tukeyウィンドウ / トリム長決定
+    bool doTrimStep()
+    {
+        auto shouldStop = [this]() -> bool {
+            return externalCancellationCheck && externalCancellationCheck();
+        };
+
+        if (checkCancellation(shouldStop, nullptr)) return false;
+
+        // --- 無音末尾カット ---
+        if (stepResult.loadedIR.getNumSamples() > 0)
+        {
+            const int numSamples  = stepResult.loadedIR.getNumSamples();
+            const int numChannels = stepResult.loadedIR.getNumChannels();
+            const double threshold = 1.0e-15;
+
+            int newLength = 0;
+            if (numChannels > 0)
+            {
+                const double* ch0 = stepResult.loadedIR.getReadPointer(0);
+                const double* ch1 = (numChannels > 1) ? stepResult.loadedIR.getReadPointer(1) : nullptr;
+
+                const __m256d vThreshold = _mm256_set1_pd(threshold);
+                const __m256d vSignMask  = _mm256_set1_pd(-0.0);
+
+                int i = numSamples;
+                bool found = false;
+                for (; i >= 4; i -= 4)
+                {
+                    __m256d v0   = _mm256_loadu_pd(ch0 + i - 4);
+                    __m256d abs0 = _mm256_andnot_pd(vSignMask, v0);
+                    __m256d mask = _mm256_cmp_pd(abs0, vThreshold, _CMP_GT_OQ);
+                    if (ch1)
+                    {
+                        __m256d v1   = _mm256_loadu_pd(ch1 + i - 4);
+                        __m256d abs1 = _mm256_andnot_pd(vSignMask, v1);
+                        mask = _mm256_or_pd(mask, _mm256_cmp_pd(abs1, vThreshold, _CMP_GT_OQ));
+                    }
+                    if (_mm256_testz_pd(mask, mask) == 0)
+                    {
+                        for (int j = i - 1; j >= i - 4; --j)
+                        {
+                            if (std::abs(ch0[j]) > threshold || (ch1 && std::abs(ch1[j]) > threshold))
+                            { newLength = j + 1; found = true; break; }
+                        }
+                        if (found) break;
+                    }
+                }
+                if (!found)
+                {
+                    for (int j = i - 1; j >= 0; --j)
+                    {
+                        if (std::abs(ch0[j]) > threshold || (ch1 && std::abs(ch1[j]) > threshold))
+                        { newLength = j + 1; break; }
+                    }
+                }
+            }
+            if (newLength < numSamples)
+            {
+                stepResult.loadedIR.setSize(numChannels, std::max(1, newLength), true);
+                shrinkToFit(stepResult.loadedIR);
+            }
+        }
+
+        // --- リサンプリング ---
+        if (stepResult.loadedSR > 0.0 && sampleRate > 0.0 &&
+            std::abs(stepResult.loadedSR - sampleRate) > 1e-6)
+        {
+            const uint64_t myGen = owner.convolverStateGeneration.getCurrentGeneration();
+            const r8b::EDSPFilterPhaseResponse r8bPhase =
+                (owner.getResamplingPhaseMode() == ResamplingPhaseMode::Linear)
+                    ? r8b::fprLinearPhase : r8b::fprMinPhase;
+
+            auto resampleOut = resampleIR(
+                stepResult.loadedIR, stepResult.loadedSR, sampleRate, r8bPhase,
+                [&]() -> bool {
+                    return shouldStop() ||
+                           !owner.convolverStateGeneration.isCurrentGeneration(myGen);
+                });
+
+            if (!owner.convolverStateGeneration.isCurrentGeneration(myGen))
+                return false;
+
+            switch (resampleOut.result)
+            {
+                case ResampleResult::Success:
+                    stepResult.loadedIR = std::move(resampleOut.buffer);
+                    stepResult.loadedSR = sampleRate;
+                    break;
+                case ResampleResult::Cancelled:
+                    return false;
+                case ResampleResult::SilentIR:
+                    stepResult.errorMessage = "IR is silent (all samples near zero).";
+                    return false;
+                case ResampleResult::Error:
+                default:
+                    stepResult.errorMessage = "Resampling failed (unknown error).";
+                    return false;
+            }
+        }
+
+        if (checkCancellation(shouldStop, nullptr)) return false;
+
+        // --- DCブロッカー ---
+        if (stepResult.loadedSR > 0.0 && stepResult.loadedIR.getNumSamples() > 0)
+        {
+            for (int ch = 0; ch < stepResult.loadedIR.getNumChannels(); ++ch)
+            {
+                convo::UltraHighRateDCBlocker dcBlocker;
+                dcBlocker.init(stepResult.loadedSR, 1.0);
+                double* data = stepResult.loadedIR.getWritePointer(ch);
+                dcBlocker.process(data, stepResult.loadedIR.getNumSamples());
+            }
+        }
+
+        if (checkCancellation(shouldStop, nullptr)) return false;
+
+        // --- 非対称 Tukey ウィンドウ ---
+        if (stepResult.loadedIR.getNumSamples() > 0)
+        {
+            const int numSamples = stepResult.loadedIR.getNumSamples();
+            for (int ch = 0; ch < stepResult.loadedIR.getNumChannels(); ++ch)
+            {
+                if (!applyAsymmetricTukey(stepResult.loadedIR.getWritePointer(ch), numSamples))
+                {
+                    stepResult.errorMessage = "Failed to allocate Tukey window buffer (Out of Memory).";
+                    return false;
+                }
+            }
+        }
+
+        if (checkCancellation(shouldStop, nullptr)) return false;
+
+        // --- トリム長計算 + フェード ---
+        stepResult.targetLength = owner.computeTargetIRLength(stepResult.loadedSR, stepResult.loadedIR.getNumSamples());
+        stepTrimmed.setSize(stepResult.loadedIR.getNumChannels(), stepResult.targetLength);
+        stepTrimmed.clear();
+
+        const int copySamples = std::min(stepResult.targetLength, stepResult.loadedIR.getNumSamples());
+        constexpr int minFadeSamples = 256;
+        constexpr double fadeRatio   = 0.02;
+        const int maxFadeSamples = juce::jmax(minFadeSamples, static_cast<int>(std::round(sampleRate * 0.080)));
+        int fadeSamples = static_cast<int>(std::round(static_cast<double>(copySamples) * fadeRatio));
+        fadeSamples = juce::jlimit(minFadeSamples, maxFadeSamples, fadeSamples);
+        fadeSamples = juce::jmax(0, juce::jmin(fadeSamples, copySamples - 1));
+
+        for (int ch = 0; ch < stepResult.loadedIR.getNumChannels(); ++ch)
+        {
+            stepTrimmed.copyFrom(ch, 0, stepResult.loadedIR, ch, 0, copySamples);
+            if (fadeSamples > 0)
+                stepTrimmed.applyGainRamp(ch, copySamples - fadeSamples, fadeSamples, 1.0, 0.0);
+        }
+
+        return true;
+    }
+
+    // Step 3: MinPhase/Mixed 変換 + AutoMakeup
+    bool doTransformStep()
+    {
+        auto shouldStop = [this]() -> bool {
+            return externalCancellationCheck && externalCancellationCheck();
+        };
+
+        if (checkCancellation(shouldStop, nullptr)) return false;
+
+        auto validateBuffer = [](const juce::AudioBuffer<double>& buf) -> bool
+        {
+            if (buf.getNumSamples() <= 0 || buf.getNumChannels() <= 0) return false;
+            double maxAbs = 0.0;
+            for (int ch = 0; ch < buf.getNumChannels(); ++ch)
+            {
+                const double* ptr = buf.getReadPointer(ch);
+                for (int i = 0; i < buf.getNumSamples(); ++i)
+                {
+                    if (!std::isfinite(ptr[i])) return false;
+                    maxAbs = std::max(maxAbs, std::abs(ptr[i]));
+                }
+            }
+            return maxAbs > 1.0e-12;
+        };
+
+        if (phaseMode == ConvolverProcessor::PhaseMode::Minimum ||
+            phaseMode == ConvolverProcessor::PhaseMode::Mixed)
+        {
+            bool wasCancelled = false;
+            auto minPhaseIR = convertToMinimumPhase(stepTrimmed, shouldStop, &wasCancelled);
+            if (wasCancelled) return false;
+
+            if (validateBuffer(minPhaseIR))
+            {
+                if (phaseMode == ConvolverProcessor::PhaseMode::Minimum)
+                {
+                    stepTrimmed = std::move(minPhaseIR);
+                }
+                else
+                {
+                    bool mixedCancelled = false;
+                    auto progressCb = [this](float p) { owner.setLoadingProgress(p); };
+                    auto mixedIR = convertToMixedPhase(&owner, stepFileHash, stepTrimmed, minPhaseIR,
+                                                       sampleRate,
+                                                       static_cast<double>(mixedTransitionStartHz),
+                                                       static_cast<double>(mixedTransitionEndHz),
+                                                       static_cast<double>(mixedPreRingTau),
+                                                       shouldStop, &mixedCancelled, progressCb);
+                    if (mixedCancelled) return false;
+                    if (validateBuffer(mixedIR))
+                        stepTrimmed = std::move(mixedIR);
+                }
+            }
+        }
+
+        if (checkCancellation(shouldStop, nullptr)) return false;
+
+        // --- Auto Makeup (Energy Normalization) ---
+        {
+            const IRState* currentState = owner.acquireIRState();
+            auto currentIr = (currentState != nullptr) ? currentState->ir : nullptr;
+            const double currentScale = owner.currentIRScale.load(std::memory_order_acquire);
+            const auto scaleInfo = IRConverter::computeScaleFactor(stepTrimmed, currentIr, currentScale);
+            owner.releaseIRState(currentState);
+
+            stepResult.scaleFactor = scaleInfo.hasScaleFactor ? scaleInfo.scaleFactor : 1.0;
+        }
+
+        return true;
+    }
+
+    // Step 4: StereoConvolver 生成 (stepCurrentThread が null なら同期 init、非 null なら async finalize)
+    bool doBuildStep()
+    {
+        return buildConvolverFromTrimmed(stepResult, stepTrimmed, sampleRate, blockSize, stepCurrentThread);
+    }
+
+    // --- existing private fields ---
     ConvolverProcessor& owner;
     juce::WeakReference<ConvolverProcessor> weakOwner;
     juce::File file;
@@ -1825,6 +1892,9 @@ void ConvolverProcessor::requestDebouncedRebuild()
             if (!self->isIRLoaded() || self->isLoading.load(std::memory_order_acquire))
                 return;
 
+                diagLog("[DIAG] requestDebouncedRebuild timer fired: calling loadImpulseResponse irName="
+                    + self->getIRName());
+
             self->loadImpulseResponse(juce::File());
         }
     });
@@ -1832,18 +1902,357 @@ void ConvolverProcessor::requestDebouncedRebuild()
 
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
 {
+    auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
+    {
+        switch (stage)
+        {
+            case IncrementalRebuildJob::Stage::Idle: return "Idle";
+            case IncrementalRebuildJob::Stage::Prepared: return "Prepared";
+            case IncrementalRebuildJob::Stage::Building: return "Building";
+            case IncrementalRebuildJob::Stage::Finalizing: return "Finalizing";
+            case IncrementalRebuildJob::Stage::Done: return "Done";
+            default: return "Unknown";
+        }
+    };
+
     const IRState* state = acquireIRState();
     if (state && state->ir && state->ir->getNumSamples() > 0 && state->sampleRate > 0.0)
     {
-        // リビルドモードでローダーを作成し、同期的に実行
-        const double processingSampleRate = currentSampleRate.load(std::memory_order_acquire);
-        LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, currentBufferSize.load(std::memory_order_acquire), getPhaseMode(),
-                    mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
-                    mixedPreRingTau.load(std::memory_order_acquire), currentIRScale.load(std::memory_order_acquire));
-        loader.externalCancellationCheck = shouldCancel;
-        loader.runSynchronously();
+        if (useIncrementalRebuild.load(std::memory_order_acquire))
+        {
+            if (!rebuildJob)
+                rebuildJob = std::make_unique<IncrementalRebuildJob>();
+
+            rebuildJob->stage = IncrementalRebuildJob::Stage::Prepared;
+            rebuildJob->preparedIR = state->irOwner;
+            rebuildJob->preparedSampleRate = state->sampleRate;
+            rebuildJob->shouldCancel = shouldCancel;
+
+            // Step1 scaffold only:
+            // 増分リビルドの状態は ConvolverProcessor 内で保持するが、
+            // 実処理は既存の同期経路を維持して安全に共存させる。
+                diagLog("[DIAG] rebuildAllIRsSynchronous: incremental scaffold prepared"
+                    " stage=" + juce::String(stageToString(rebuildJob->stage))
+                    + " finalizeApplied=" + juce::String(rebuildJob->finalizeApplied ? "true" : "false")
+                    + " lastError=" + rebuildJob->lastError);
+        }
+
+        if (shouldCancel && shouldCancel())
+        {
+            if (rebuildJob)
+                rebuildJob->reset();
+            releaseIRState(state);
+            return;
+        }
+
+        auto runLegacyPath = [&]()
+        {
+            const double processingSampleRate = currentSampleRate.load(std::memory_order_acquire);
+            diagLog("[DIAG] rebuildAllIRsSynchronous START irName=" + irName
+                + " phaseMode=" + juce::String((int) phaseMode.load()));
+            LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, currentBufferSize.load(std::memory_order_acquire), getPhaseMode(),
+                        mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
+                        mixedPreRingTau.load(std::memory_order_acquire), currentIRScale.load(std::memory_order_acquire));
+            loader.externalCancellationCheck = shouldCancel;
+            loader.runSynchronously();
+            diagLog("[DIAG] rebuildAllIRsSynchronous END irName=" + irName);
+        };
+
+        if (useIncrementalRebuild.load(std::memory_order_acquire) && rebuildJob)
+        {
+            rebuildJob->stage = IncrementalRebuildJob::Stage::Building;
+            diagLog("[DIAG] incremental stage enter"
+                    " stage=" + juce::String(stageToString(rebuildJob->stage))
+                    + " finalizeApplied=" + juce::String(rebuildJob->finalizeApplied ? "true" : "false")
+                    + " lastError=" + rebuildJob->lastError);
+
+            bool buildOk = true;
+            while (rebuildJob->stage == IncrementalRebuildJob::Stage::Building)
+            {
+                buildOk = runIncrementalBuildStep(*rebuildJob);
+                if (!buildOk)
+                    break;
+            }
+
+            if (buildOk && rebuildJob->stage == IncrementalRebuildJob::Stage::Finalizing)
+            {
+                const bool finalized = runIncrementalFinalizeStep(*rebuildJob);
+                if (!finalized)
+                {
+                    diagLog("[DIAG] incremental finalize step failed, fallback to legacy path"
+                            " stage=" + juce::String(stageToString(rebuildJob->stage))
+                            + " finalizeApplied=" + juce::String(rebuildJob->finalizeApplied ? "true" : "false")
+                            + " lastError=" + rebuildJob->lastError);
+                    runLegacyPath();
+                }
+                else
+                {
+                    diagLog("[DIAG] incremental finalize step succeeded"
+                            " stage=" + juce::String(stageToString(rebuildJob->stage))
+                            + " finalizeApplied=" + juce::String(rebuildJob->finalizeApplied ? "true" : "false")
+                            + " lastError=" + rebuildJob->lastError);
+                }
+            }
+                    else if (buildOk)
+                    {
+                    diagLog("[DIAG] incremental build ended in unexpected stage, fallback to legacy path"
+                        " stage=" + juce::String(stageToString(rebuildJob->stage))
+                        + " finalizeApplied=" + juce::String(rebuildJob->finalizeApplied ? "true" : "false")
+                        + " lastError=" + rebuildJob->lastError);
+                    runLegacyPath();
+                    }
+            else
+            {
+                diagLog("[DIAG] incremental build step failed, fallback to legacy path"
+                        " stage=" + juce::String(stageToString(rebuildJob->stage))
+                        + " finalizeApplied=" + juce::String(rebuildJob->finalizeApplied ? "true" : "false")
+                        + " lastError=" + rebuildJob->lastError);
+                runLegacyPath();
+            }
+        }
+        else
+            runLegacyPath();
     }
+
+    if (rebuildJob)
+        rebuildJob->reset();
+
     releaseIRState(state);
+}
+
+void ConvolverProcessor::IncrementalRebuildJob::reset() noexcept
+{
+    if (pendingConv != nullptr)
+    {
+        pendingConv->~StereoConvolver();
+        convo::aligned_free(pendingConv);
+        pendingConv = nullptr;
+    }
+
+    stage = Stage::Idle;
+    preparedIR.reset();
+    preparedSampleRate = 0.0;
+    shouldCancel = nullptr;
+    incrementalLoader.reset();
+    loaderInitialized = false;
+    pendingLoadedIR.setSize(0, 0);
+    pendingLoadedSR = 0.0;
+    pendingTargetLength = 0;
+    pendingDisplayIR.setSize(0, 0);
+    pendingScaleFactor = 1.0;
+    pendingFile = juce::File();
+    pendingIsRebuild = false;
+    finalizeApplied = false;
+    lastError.clear();
+}
+
+bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
+{
+    auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
+    {
+        switch (stage)
+        {
+            case IncrementalRebuildJob::Stage::Idle: return "Idle";
+            case IncrementalRebuildJob::Stage::Prepared: return "Prepared";
+            case IncrementalRebuildJob::Stage::Building: return "Building";
+            case IncrementalRebuildJob::Stage::Finalizing: return "Finalizing";
+            case IncrementalRebuildJob::Stage::Done: return "Done";
+            default: return "Unknown";
+        }
+    };
+
+    if (!job.preparedIR || job.preparedIR->getNumSamples() <= 0 || job.preparedSampleRate <= 0.0)
+    {
+        job.lastError = "incremental build: prepared payload is not ready";
+        diagLog("[DIAG] incremental build precondition failed"
+                " stage=" + juce::String(stageToString(job.stage))
+                + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
+                + " lastError=" + job.lastError);
+        return false;
+    }
+
+    if (job.shouldCancel && job.shouldCancel())
+    {
+        job.lastError = "incremental build: canceled by callback";
+        diagLog("[DIAG] incremental build canceled"
+                " stage=" + juce::String(stageToString(job.stage))
+                + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
+                + " lastError=" + job.lastError);
+        return false;
+    }
+
+    // --- ローダーを初回のみ生成 ---
+    if (!job.loaderInitialized)
+    {
+        const double processingSampleRate = currentSampleRate.load(std::memory_order_acquire);
+        job.incrementalLoader = std::make_unique<LoaderThread>(
+            *this,
+            *(job.preparedIR),
+            job.preparedSampleRate,
+            processingSampleRate,
+            currentBufferSize.load(std::memory_order_acquire),
+            getPhaseMode(),
+            mixedTransitionStartHz.load(std::memory_order_acquire),
+            mixedTransitionEndHz.load(std::memory_order_acquire),
+            mixedPreRingTau.load(std::memory_order_acquire),
+            currentIRScale.load(std::memory_order_acquire));
+        job.incrementalLoader->externalCancellationCheck = job.shouldCancel;
+        job.loaderInitialized = true;
+    }
+
+    auto& loader = *job.incrementalLoader;
+
+    static const char* stepStateNames[] = {
+        "LoadIR", "Trim", "Transform", "Build", "Done", "Error"
+    };
+    auto stepStateName = [&]() -> const char* {
+        const int idx = static_cast<int>(loader.stepState);
+        return (idx >= 0 && idx < 6) ? stepStateNames[idx] : "?";
+    };
+
+    diagLog("[DIAG] incremental build step START irName=" + irName
+        + " phaseMode=" + juce::String((int) phaseMode.load())
+        + " stage=" + juce::String(stageToString(job.stage))
+        + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
+        + " lastError=" + job.lastError);
+
+    // --- 1呼び出し = 1ステップのみ進める ---
+    const bool terminal = loader.stepOnce();
+
+    diagLog("[DIAG] incremental step done step=" + juce::String(stepStateName())
+            + " terminal=" + juce::String(terminal ? "true" : "false"));
+
+    if (loader.hasError())
+    {
+        job.lastError = loader.getStepResult().errorMessage;
+        diagLog("[DIAG] incremental build step FAILED irName=" + irName
+            + " step=" + juce::String(stepStateName())
+            + " stage=" + juce::String(stageToString(job.stage))
+            + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
+            + " lastError=" + job.lastError);
+        return false;
+    }
+
+    if (job.shouldCancel && job.shouldCancel())
+    {
+        job.lastError = "incremental build: canceled between steps";
+        diagLog("[DIAG] incremental build canceled between steps irName=" + irName
+            + " step=" + juce::String(stepStateName())
+            + " stage=" + juce::String(stageToString(job.stage)));
+        return false;
+    }
+
+    // まだ終端でない場合は Building 継続（次回呼び出しで次ステップへ）
+    if (!terminal)
+    {
+        job.stage = IncrementalRebuildJob::Stage::Building;
+        job.lastError.clear();
+        diagLog("[DIAG] incremental build step CONTINUE irName=" + irName
+                + " stage=" + juce::String(stageToString(job.stage))
+                + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
+                + " lastError=" + job.lastError);
+        return true;
+    }
+
+    // --- 終端成功: pending payload を job に移譲 ---
+    LoaderThread::LoadResult& result = loader.getStepResult();
+
+    if (job.pendingConv != nullptr)
+    {
+        job.pendingConv->~StereoConvolver();
+        convo::aligned_free(job.pendingConv);
+        job.pendingConv = nullptr;
+    }
+
+    job.pendingConv = result.newConv;
+    result.newConv = nullptr;
+    job.pendingLoadedIR    = std::move(result.loadedIR);
+    job.pendingLoadedSR    = result.loadedSR;
+    job.pendingTargetLength = result.targetLength;
+    job.pendingDisplayIR   = std::move(result.displayIR);
+    job.pendingScaleFactor = result.scaleFactor;
+    job.pendingFile        = juce::File();
+    job.pendingIsRebuild   = true;
+    job.stage              = IncrementalRebuildJob::Stage::Finalizing;
+    job.finalizeApplied    = false;
+    job.lastError.clear();
+
+    diagLog("[DIAG] incremental build step END irName=" + irName
+            + " stage=" + juce::String(stageToString(job.stage))
+            + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
+            + " lastError=" + job.lastError);
+    return true;
+}
+
+bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
+{
+    auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
+    {
+        switch (stage)
+        {
+            case IncrementalRebuildJob::Stage::Idle: return "Idle";
+            case IncrementalRebuildJob::Stage::Prepared: return "Prepared";
+            case IncrementalRebuildJob::Stage::Building: return "Building";
+            case IncrementalRebuildJob::Stage::Finalizing: return "Finalizing";
+            case IncrementalRebuildJob::Stage::Done: return "Done";
+            default: return "Unknown";
+        }
+    };
+
+    diagLog("[DIAG] incremental finalize step START"
+            " stage=" + juce::String(stageToString(job.stage))
+            + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
+            + " lastError=" + job.lastError);
+
+    if (job.stage != IncrementalRebuildJob::Stage::Finalizing)
+    {
+        job.lastError = "incremental finalize: invalid stage";
+        diagLog("[DIAG] incremental finalize precondition failed"
+                " stage=" + juce::String(stageToString(job.stage))
+                + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
+                + " lastError=" + job.lastError);
+        return false;
+    }
+
+    if (job.pendingConv == nullptr || job.pendingTargetLength <= 0)
+    {
+        job.lastError = "incremental finalize: pending payload is not ready";
+        diagLog("[DIAG] incremental finalize precondition failed"
+                " stage=" + juce::String(stageToString(job.stage))
+                + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
+                + " lastError=" + job.lastError);
+        return false;
+    }
+
+    auto loadedIRShared = std::make_shared<juce::AudioBuffer<double>>(std::move(job.pendingLoadedIR));
+    auto displayIRShared = std::make_shared<juce::AudioBuffer<double>>(std::move(job.pendingDisplayIR));
+    StereoConvolver* conv = job.pendingConv;
+    job.pendingConv = nullptr;
+
+    applyNewState(conv, loadedIRShared, job.pendingLoadedSR, job.pendingTargetLength,
+                  job.pendingIsRebuild, job.pendingFile, job.pendingScaleFactor, displayIRShared);
+
+    job.finalizeApplied = true;
+    job.lastError.clear();
+    job.stage = IncrementalRebuildJob::Stage::Done;
+
+    diagLog("[DIAG] incremental finalize step END"
+            " stage=" + juce::String(stageToString(job.stage))
+            + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
+            + " lastError=" + job.lastError);
+    return true;
+}
+
+void ConvolverProcessor::setUseIncrementalRebuild(bool enable) noexcept
+{
+    useIncrementalRebuild.store(enable, std::memory_order_release);
+    if (!enable && rebuildJob)
+        rebuildJob->reset();
+}
+
+bool ConvolverProcessor::isIncrementalRebuildEnabled() const noexcept
+{
+    return useIncrementalRebuild.load(std::memory_order_acquire);
 }
 
 void ConvolverProcessor::invalidatePendingLoads()
@@ -2201,10 +2610,49 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
     const double invSpan = 1.0 / (transitionHiHz - transitionLoHz);
     juce::AudioBuffer<double> mixedIR(numChannels, numSamples);
 
+    bool reuseMixedDesignAcrossChannels = false;
+    if (numChannels > 1)
+    {
+        auto channelsAlmostEqual = [numSamples](const juce::AudioBuffer<double>& buffer,
+                                                int refChannel,
+                                                int targetChannel,
+                                                double tolerance) -> bool
+        {
+            const double* ref = buffer.getReadPointer(refChannel);
+            const double* dst = buffer.getReadPointer(targetChannel);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                if (std::abs(ref[i] - dst[i]) > tolerance)
+                    return false;
+            }
+            return true;
+        };
+
+        reuseMixedDesignAcrossChannels = true;
+        for (int ch = 1; ch < numChannels; ++ch)
+        {
+            if (!channelsAlmostEqual(linearIR, 0, ch, 1.0e-12)
+                || !channelsAlmostEqual(minimumIR, 0, ch, 1.0e-12))
+            {
+                reuseMixedDesignAcrossChannels = false;
+                break;
+            }
+        }
+
+        if (reuseMixedDesignAcrossChannels)
+            juce::Logger::writeToLog("MixedPhase: channel optimization enabled (reuse ch0 result for identical channels)");
+    }
+
     try
     {
     for (int ch = 0; ch < numChannels; ++ch)
     {
+        if (reuseMixedDesignAcrossChannels && ch > 0)
+        {
+            mixedIR.copyFrom(ch, 0, mixedIR, 0, 0, numSamples);
+            continue;
+        }
+
         if (checkCancellation(shouldExit, wasCancelled))
             return {};
 
@@ -2463,8 +2911,11 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         designer_config.freqPoints           = kOptimFreqPoints;
         designer_config.minFreqHz            = 20.0;
         designer_config.maxFreqHz            = sampleRate / 2.0;
-        designer_config.cmaesMaxGenerations  = 600;
-        designer_config.cmaesPopulationSize  = 320;  // 8 * dim, dim=40 (numSections=20)
+        // Real-time safety tuning:
+        // 過度な探索コストで再生系を圧迫しないよう、母集団と最大世代を抑制する。
+        // 実測ログでは 30 世代前後で収束しているため、品質を維持しつつ負荷を削減できる。
+        designer_config.cmaesMaxGenerations  = 160;
+        designer_config.cmaesPopulationSize  = 64;   // dim=40 に対して 1.6x（旧: 320）
         designer_config.cmaesInitialSigma    = 1.0;
         designer_config.cmaesParams.sigmaMin = 0.002;
         designer_config.cmaesParams.sigmaMax = 2.0;
@@ -2869,8 +3320,6 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
         activeLoader->signalThreadShouldExit();
         loaderTrashBin.push_back(std::move(activeLoader));
     }
-
-    // 新しいローダーを作成して開始
     const double rawProcessingSampleRate = currentSampleRate.load(std::memory_order_acquire);
     const double processingSampleRate = (std::isfinite(rawProcessingSampleRate) && rawProcessingSampleRate > 0.0)
                                           ? rawProcessingSampleRate
@@ -3301,7 +3750,21 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
 
     // 4. UI 通知
     postCoalescedChangeNotification();
-    listeners.call(&Listener::convolverParamsChanged, this);
+
+    // DSP リビルドトリガー:
+    // Progressive upgrade が有効な場合、途中ステップ（512/1024/2048）では
+    // convolverParamsChanged を呼ばない。targetFFT 到達時のみ DSP rebuild を起動する。
+    // これにより CMA-ES Mixed Phase 計算が1回だけ実行され、CPU スパイクによる
+    // 音切れ（タタタタ）が複数回発生しなくなる。
+    // Progressive upgrade が無効な場合は常に通知する（upgrade OFF の動作を保持）。
+    {
+        const bool progressiveEnabled = enableProgressiveUpgrade.load(std::memory_order_acquire);
+        const int publishedFftSize    = activeCacheFFTSize.load(std::memory_order_acquire);
+        const bool isFinalPublish     = !progressiveEnabled
+                                     || (publishedFftSize >= getTargetUpgradeFFTSize());
+        if (isFinalPublish)
+            listeners.call(&Listener::convolverParamsChanged, this);
+    }
 
     isLoading.store(false, std::memory_order_release);
     setLoadingProgress(1.0f);
@@ -3723,23 +4186,27 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     std::memcpy(dst, magBuf, numBins * sizeof(float));
 
     // スムージング適用 (Linear Magnitudeに対して行う)
-    convo::ScopedAlignedPtr<float> linearMags(
-        static_cast<float*>(convo::aligned_malloc(static_cast<size_t>(numBins) * sizeof(float), 64)));
-    convo::ScopedAlignedPtr<float> smoothedMags(
-        static_cast<float*>(convo::aligned_malloc(static_cast<size_t>(numBins) * sizeof(float), 64)));
+    if (cachedMagnitudeBufferCapacity < numBins)
+    {
+        cachedLinearMagsBuffer.reset(static_cast<float*>(convo::aligned_malloc(static_cast<size_t>(numBins) * sizeof(float), 64)));
+        cachedSmoothedMagsBuffer.reset(static_cast<float*>(convo::aligned_malloc(static_cast<size_t>(numBins) * sizeof(float), 64)));
+        if (!cachedLinearMagsBuffer || !cachedSmoothedMagsBuffer)
+        {
+            cachedMagnitudeBufferCapacity = 0;
+            return;
+        }
+        cachedMagnitudeBufferCapacity = numBins;
+    }
 
-    if (!linearMags || !smoothedMags)
-        return;
-
-    std::memcpy(linearMags.get(), cachedFFTBuffer.get(), static_cast<size_t>(numBins) * sizeof(float));
-    applySmoothing(linearMags.get(), smoothedMags.get(), numBins);
+    std::memcpy(cachedLinearMagsBuffer.get(), cachedFFTBuffer.get(), static_cast<size_t>(numBins) * sizeof(float));
+    applySmoothing(cachedLinearMagsBuffer.get(), cachedSmoothedMagsBuffer.get(), numBins);
 
     // マグニチュード(dB)に変換して格納
     irMagnitudeSpectrum.resize(numBins);
 
     for (int i = 0; i < numBins; ++i)
     {
-        float mag = smoothedMags[i];
+        float mag = cachedSmoothedMagsBuffer[i];
         irMagnitudeSpectrum[i] = (mag > 1e-9f) ? juce::Decibels::gainToDecibels(mag) : -100.0f;
     }
 }
@@ -4065,6 +4532,60 @@ void ConvolverProcessor::refreshLatency()
     latencyChangeRequested.store(true, std::memory_order_release);
 }
 
+void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBlock<double>& block,
+                                                              const StereoConvolver& conv) noexcept
+{
+    const int procChannels = (std::min)(static_cast<int>(block.getNumChannels()), 2);
+    const int numSamples = static_cast<int>(block.getNumSamples());
+    if (procChannels == 0 || numSamples <= 0)
+        return;
+
+    if (!delayBuffer[0] || !delayBuffer[1] || delayBufferCapacity < DELAY_BUFFER_SIZE)
+        return;
+
+    const int algorithmLatency = conv.storedDirectHeadEnabled ? 0 : juce::jmax(0, conv.latency);
+    const int irPeakLatency = juce::jmax(0, conv.irLatency);
+    int delaySamples = juce::jmax(0, algorithmLatency + irPeakLatency);
+    delaySamples = juce::jmin(delaySamples, MAX_TOTAL_DELAY);
+    delaySamples = juce::jlimit(0, DELAY_BUFFER_SIZE - 1, delaySamples);
+
+    const int writePos = delayWritePos;
+
+    // 1) 入力をリングバッファへ保存
+    for (int ch = 0; ch < procChannels; ++ch)
+    {
+        const double* src = block.getChannelPointer(static_cast<size_t>(ch));
+        double* buf = delayBuffer[ch].get();
+
+        const int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - writePos);
+        const int samplesSecond = numSamples - samplesFirst;
+
+        std::memcpy(buf + writePos, src, static_cast<size_t>(samplesFirst) * sizeof(double));
+        if (samplesSecond > 0)
+            std::memcpy(buf, src + samplesFirst, static_cast<size_t>(samplesSecond) * sizeof(double));
+    }
+
+    // 2) 遅延した信号を出力へ戻す
+    int readPos = (writePos - delaySamples) & DELAY_BUFFER_MASK;
+    if (readPos < 0)
+        readPos += DELAY_BUFFER_SIZE;
+
+    for (int ch = 0; ch < procChannels; ++ch)
+    {
+        const double* srcBuf = delayBuffer[ch].get();
+        double* dstBuf = block.getChannelPointer(static_cast<size_t>(ch));
+
+        const int samplesFirst = std::min(numSamples, DELAY_BUFFER_SIZE - readPos);
+        const int samplesSecond = numSamples - samplesFirst;
+
+        juce::FloatVectorOperations::copy(dstBuf, srcBuf + readPos, samplesFirst);
+        if (samplesSecond > 0)
+            juce::FloatVectorOperations::copy(dstBuf + samplesFirst, srcBuf, samplesSecond);
+    }
+
+    delayWritePos = (writePos + numSamples) & DELAY_BUFFER_MASK;
+}
+
 //--------------------------------------------------------------
 // process (Audio Thread)
 // リアルタイム制約 (Real-time Constraints)
@@ -4096,15 +4617,23 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // Raw pointer load (No ref counting)
     auto* conv = m_activeEngine.load(std::memory_order_acquire);
 
-    // ★ リングバッファオーバーフローフラグチェック (Audio Thread 内の唯一操作・ロックフリー atomic のみ)
-    if (overflowRequested.exchange(false, std::memory_order_acq_rel))
+    // ★ リングバッファオーバーフローフラグチェック
+    // 以前はここで rebuildPendingAfterLoad を立て、timerCallback() から
+    // loadImpulseResponse() を再実行していたが、これが重い再構築ループを誘発し
+    // CPU スパイク（100%）と音切れの原因になっていた。
+    // ここではフラグを消費するだけにして、自動再ロードは行わない。
+    (void) overflowRequested.exchange(false, std::memory_order_acq_rel);
+
+    // 未準備/IR未ロードの場合はスルー
+    if (!conv)
     {
-        rebuildPendingAfterLoad.store(true, std::memory_order_release);
+        return;
     }
 
-    // バイパス、未準備、IR未ロードの場合はスルー
-    if (!conv || bypassed.load(std::memory_order_relaxed))
+    // バイパス時は dry をそのまま返さず、IR側と同じ遅延で補償して位相整合を保つ。
+    if (bypassed.load(std::memory_order_relaxed))
     {
+        processBypassWithLatencyCompensation(block, *conv);
         return;
     }
 
@@ -4896,7 +5425,10 @@ void ConvolverProcessor::requestHostDisplayUpdate()
 void ConvolverProcessor::debugCheckAtomicLockFree() const
 {
    #if JUCE_DEBUG
-    jassert(std::atomic<LatencySnapshot>{}.is_lock_free());
+    if (!std::atomic<LatencySnapshot>{}.is_lock_free())
+    {
+        DBG("[ConvolverProcessor] std::atomic<LatencySnapshot> is not lock-free on this build; continuing with implementation-provided atomic semantics.");
+    }
    #endif
 }
 
@@ -5032,6 +5564,11 @@ uint64_t ConvolverProcessor::getStructuralHash() const noexcept
 uint64_t ConvolverProcessor::getActiveCacheKey() const noexcept
 {
     return activeCacheKey.load(std::memory_order_acquire);
+}
+
+int ConvolverProcessor::getActiveCacheFFTSize() const noexcept
+{
+    return activeCacheFFTSize.load(std::memory_order_acquire);
 }
 
 int ConvolverProcessor::getNUCHCMode() const noexcept

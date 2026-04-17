@@ -67,6 +67,12 @@ namespace TanhApprox {
     constexpr double CLIP_THRESHOLD = 4.5;
 }
 
+static void diagLog(const juce::String& message)
+{
+    DBG(message);
+    juce::Logger::writeToLog(message);
+}
+
 //==============================================================================
 // 等電力クロスフェード用近似関数（Audio Thread安全・libm不使用）
 //==============================================================================
@@ -1307,6 +1313,10 @@ void AudioEngine::setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLe
 
 void AudioEngine::initialize()
 {
+    firstIrDryCrossfadePending.store(false, std::memory_order_release);
+    firstIrDryCrossfadeDone.store(false, std::memory_order_release);
+    dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
+
     // ==================================================================
     // 段階 1：RCU 基盤の初期化
     // ==================================================================
@@ -1654,55 +1664,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 //--------------------------------------------------------------
 void AudioEngine::readFromFifo(float* dest, int numSamples)
 {
-    // 単一のリーダーを保証: 複数のUIコンポーネント（アナライザーなど）からの同時読み出しを防ぐ。
-	//
-    // Note: 書き込み側 (DSPCore::pushToFifo / Audio Thread) はこのロックを使用しないため、ロックフリーです。
-    //       したがって、ここでロックを取得してもオーディオスレッドをブロックする恐れはありません (Deadlock Free)。
-    const juce::ScopedLock sl(fifoReadLock);
-
-    int start1, size1, start2, size2;
-    audioFifo.prepareToRead(numSamples, start1, size1, start2, size2);
-
-    // 実際に読み取れるサンプル数を計算 (FIFO内の有効データ量に依存)
-    // prepareToRead は numSamples 分の領域を返さない場合がある (FIFO不足時)
-    const int actualRead = size1 + size2;
-    const bool hasRightChannel = (audioFifoBuffer.getNumChannels() > 1);
-
-    // AVX2 L+R 平均化ヘルパー
-    auto mixToMono = [](const float* srcL, const float* srcR, float* dst, int n) noexcept
-    {
-        const __m256 half = _mm256_set1_ps(0.5f);
-        int i = 0;
-        const int vEnd = n / 8 * 8;
-        for (; i < vEnd; i += 8)
-        {
-            __m256 vL  = _mm256_loadu_ps(srcL + i);
-            __m256 vR  = _mm256_loadu_ps(srcR + i);
-            __m256 avg = _mm256_mul_ps(_mm256_add_ps(vL, vR), half);
-            _mm256_storeu_ps(dst + i, avg);
-        }
-        for (; i < n; ++i) dst[i] = (srcL[i] + srcR[i]) * 0.5f;
-    };
-
-    if (size1 > 0)
-    {
-        const float* srcL = audioFifoBuffer.getReadPointer(0, start1);
-        const float* srcR = hasRightChannel ? audioFifoBuffer.getReadPointer(1, start1) : srcL;
-        mixToMono(srcL, srcR, dest, size1);
-    }
-
-    if (size2 > 0)
-    {
-        const float* srcL = audioFifoBuffer.getReadPointer(0, start2);
-        const float* srcR = hasRightChannel ? audioFifoBuffer.getReadPointer(1, start2) : srcL;
-        mixToMono(srcL, srcR, dest + size1, size2);
-    }
-
-    // 実際に読み取った分だけFIFOを進める
-    if (actualRead > 0)
-        audioFifo.finishedRead(actualRead);
-
-    // 足りない分はゼロ埋め (グリッチ防止)
+    const int actualRead = analyzerFifo.popMixToMono(dest, numSamples);
     if (actualRead < numSamples)
         juce::FloatVectorOperations::clear(dest + actualRead, numSamples - actualRead);
 }
@@ -1712,12 +1674,7 @@ void AudioEngine::readFromFifo(float* dest, int numSamples)
 //--------------------------------------------------------------
 void AudioEngine::skipFifo(int numSamples)
 {
-    const juce::ScopedLock sl(fifoReadLock);
-    int start1, size1, start2, size2;
-    audioFifo.prepareToRead(numSamples, start1, size1, start2, size2);
-    const int total = size1 + size2;
-    if (total > 0)
-        audioFifo.finishedRead(total);
+    analyzerFifo.skip(numSamples);
 }
 
 //--------------------------------------------------------------
@@ -2075,7 +2032,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     dspCrossfadeFloatBuffer.setSize(2, std::max(SAFE_MAX_BLOCK_SIZE, bufferSize), false, false, true);
     dspCrossfadeDoubleBuffer.setSize(2, std::max(SAFE_MAX_BLOCK_SIZE, bufferSize), false, false, true);
 
-    audioFifo.reset();
+    analyzerFifo.prepare(2, FIFO_SIZE);
     inputLevelLinear.store(0.0f);
     outputLevelLinear.store(0.0f);
 
@@ -2117,6 +2074,30 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     latencyDelayOld_RT = 0;
     latencyDelayNew_RT = 0;
+
+    // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
+    if (currentDSP.load(std::memory_order_acquire) == nullptr && activeDSP == nullptr)
+    {
+        DSPCore* placeholderDSP = new DSPCore();
+        placeholderDSP->convolver.setVisualizationEnabled(false);
+        placeholderDSP->prepare(safeSampleRate,
+                                bufferSize,
+                                ditherBitDepth.load(std::memory_order_relaxed),
+                                manualOversamplingFactor.load(std::memory_order_relaxed),
+                                oversamplingType.load(std::memory_order_relaxed),
+                                noiseShaperType.load(std::memory_order_relaxed),
+                                this);
+        placeholderDSP->convolver.setBypass(true);
+
+        // Use same formula as actual convolver L0 partition size (MKLNonUniformConvolver.cpp:534)
+        // to ensure placeholder bypass latency matches NUC algorithm latency during DSP transition
+        int predictedLatency = juce::nextPowerOfTwo(std::max(bufferSize, 64));
+        predictedLatency = juce::jlimit(0, latencyBufSize - 1, predictedLatency);
+        placeholderDSP->setFixedLatencySamples(predictedLatency);
+
+        activeDSP = placeholderDSP;
+        currentDSP.store(placeholderDSP, std::memory_order_release);
+    }
 
     // --- DSP再ビルド判定・同期 ---
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
@@ -2318,6 +2299,37 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
 
     // 【Issue 5】Fade-inカウンタをリセット
     fadeInSamplesLeft.store(0, std::memory_order_relaxed);
+
+    // 初期状態は固定レイテンシなし
+    setFixedLatencySamples(0);
+}
+
+void AudioEngine::DSPCore::setFixedLatencySamples(int samples)
+{
+    const int clamped = std::max(0, samples);
+    fixedLatencySamples = clamped;
+    fixedLatencyWritePos = 0;
+
+    const int requiredSize = clamped + std::max(1, maxInternalBlockSize) + 2;
+    if (requiredSize > fixedLatencyBufferSize || !fixedLatencyBufferL || !fixedLatencyBufferR)
+    {
+        auto newDelayL = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
+            static_cast<size_t>(requiredSize) * sizeof(double), 64)));
+        auto newDelayR = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
+            static_cast<size_t>(requiredSize) * sizeof(double), 64)));
+
+        juce::FloatVectorOperations::clear(newDelayL.get(), requiredSize);
+        juce::FloatVectorOperations::clear(newDelayR.get(), requiredSize);
+
+        fixedLatencyBufferL = std::move(newDelayL);
+        fixedLatencyBufferR = std::move(newDelayR);
+        fixedLatencyBufferSize = requiredSize;
+    }
+    else if (fixedLatencyBufferSize > 0)
+    {
+        juce::FloatVectorOperations::clear(fixedLatencyBufferL.get(), fixedLatencyBufferSize);
+        juce::FloatVectorOperations::clear(fixedLatencyBufferR.get(), fixedLatencyBufferSize);
+    }
 }
 
 void AudioEngine::DSPCore::reset()
@@ -2351,6 +2363,12 @@ void AudioEngine::DSPCore::reset()
     bypassFadeGainDouble.setCurrentAndTargetValue(1.0);
     bypassedDouble = false;
 
+    fixedLatencyWritePos = 0;
+    if (fixedLatencyBufferL && fixedLatencyBufferSize > 0)
+        juce::FloatVectorOperations::clear(fixedLatencyBufferL.get(), fixedLatencyBufferSize);
+    if (fixedLatencyBufferR && fixedLatencyBufferSize > 0)
+        juce::FloatVectorOperations::clear(fixedLatencyBufferR.get(), fixedLatencyBufferSize);
+
     // インターサンプルピーク用ブロック間状態をリセット
     softClipPrevSample[0] = 0.0;
     softClipPrevSample[1] = 0.0;
@@ -2363,6 +2381,23 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 {
     // UIコンポーネント(uiEqEditor等)へのアクセスやMKLメモリ確保を行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+
+    const int publishedFftSize = uiConvolverProcessor.getActiveCacheFFTSize();
+    const int targetFftSize = uiConvolverProcessor.getTargetUpgradeFFTSize();
+    const bool suppressIntermediateMixedPhasePublish =
+        uiConvolverProcessor.isProgressiveUpgradeEnabled()
+        && uiConvolverProcessor.getPhaseMode() == ConvolverProcessor::PhaseMode::Mixed
+        && publishedFftSize > 0
+        && publishedFftSize < targetFftSize;
+
+    if (suppressIntermediateMixedPhasePublish)
+    {
+        diagLog("[DIAG] requestRebuild(sr,bs): SUPPRESSED intermediate progressive mixed-phase publish fft="
+                + juce::String(publishedFftSize)
+                + " targetFFT=" + juce::String(targetFftSize)
+                + " SR=" + juce::String(sampleRate, 2));
+        return;
+    }
 
     if (noiseShaperLearner && noiseShaperLearner->isRunning())
         noiseShaperLearner->stopLearning();
@@ -2416,6 +2451,8 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
         hasPendingTask = true;
     }
     rebuildCV.notify_all();
+        diagLog("[DIAG] requestRebuild(sr,bs): task queued generation=" + juce::String(generation)
+            + " SR=" + juce::String(sampleRate, 2));
 
     // Destroy the orphaned DSP from the superseded task outside the lock.
     if (dspToDestroy)
@@ -2438,6 +2475,8 @@ void AudioEngine::stopRebuildThread()
 
 void AudioEngine::rebuildThreadLoop()
 {
+    affinityManager.applyCurrentThreadPolicy(ThreadType::HeavyBackground);
+
     // Set denormal handling modes for this thread. This is crucial for performance
     // in MKL VML and AVX/SSE operations, which can be significantly slowed down
     // by subnormal numbers. This setting is thread-local.
@@ -2587,6 +2626,8 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 {
     DSPCore* dspToTrash = nullptr;
     uint64_t retireEpoch = 0;
+    bool scheduleDryAsOldCrossfade = false;
+    double dryAsOldFadeTimeSec = 0.0;
 
     // Lock to ensure the check and commit are atomic with respect to new rebuild requests.
     {
@@ -2596,6 +2637,18 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         if (generation != rebuildGeneration.load(std::memory_order_relaxed))
         {
             newDSP->release();
+            return;
+        }
+
+        // 公開不変条件:
+        // IR を実際に使う構成では finalized 済みのみ公開する。
+        // 一方、IR 未ロード時のパススルーDSPまで弾くと起動直後に無音化するため許可する。
+        if (newDSP == nullptr
+            || (newDSP->convolver.isIRLoaded() && !newDSP->convolver.isIRFinalized()))
+        {
+            DBG("[AudioEngine] commitNewDSP: rejected non-finalized DSP publish");
+            if (newDSP != nullptr)
+                newDSP->release();
             return;
         }
 
@@ -2618,6 +2671,24 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             newDSP->currentCaptureSessionId = newSessionId;
     }
 
+
+    // 5. 初回IRロード時（旧DSPなし）: dry を旧信号としてクロスフェード予約
+    if (dspToTrash == nullptr
+        && newDSP != nullptr
+        && newDSP->convolver.isIRLoaded()
+        && !firstIrDryCrossfadeDone.load(std::memory_order_acquire))
+    {
+        // 初回のみ dry -> IR を明示的にフェードし、立ち上がりノイズを抑制する。
+        scheduleDryAsOldCrossfade = true;
+        dryAsOldFadeTimeSec = std::max(0.001, m_irFadeTimeSec.load(std::memory_order_relaxed));
+
+        const int newLatency = newDSP->convolver.getTotalLatencySamples();
+        int dOld = std::min(newLatency, latencyBufSize - 1); // dry 側を遅延させて整合
+        const int dNew = 0;
+        latencyDelayOld.store(dOld, std::memory_order_release);
+        latencyDelayNew.store(dNew, std::memory_order_release);
+        latencyResetPending.store(true, std::memory_order_release);
+    }
 
     // 5. RCU deferred release：旧 DSP を grace period 後に解放する
     if (dspToTrash != nullptr)
@@ -2700,8 +2771,24 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         else
         {
             // クロスフェード不要時は即時解放
+                diagLog("[DIAG] commitNewDSP: new DSP committed, crossfade="
+                    + juce::String(dspCrossfadePending.load() || fadeQueued.load() ? "yes" : "no")
+                    + " irName=" + newDSP->convolver.getIRName());
             dspToTrash->release();
         }
+    }
+
+    if (scheduleDryAsOldCrossfade)
+    {
+        queuedFadeTimeSec.store(dryAsOldFadeTimeSec, std::memory_order_release);
+        firstIrDryCrossfadePending.store(true, std::memory_order_release);
+        dspCrossfadePending.store(true, std::memory_order_release);
+        firstIrDryCrossfadeDone.store(true, std::memory_order_release);
+        setIRChangeFlag();
+
+        diagLog("[DIAG] commitNewDSP: first-load dry->IR crossfade armed fadeSec="
+            + juce::String(dryAsOldFadeTimeSec, 3)
+            + " irName=" + newDSP->convolver.getIRName());
     }
 
     if (newDSP != nullptr)
@@ -3010,6 +3097,9 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
     if (source == &uiEqEditor)
     {
+        // UI (SpectrumAnalyzerComponent など) が EQ 編集を即時反映できるよう通知する。
+        // 実 DSP 反映は従来どおり requestRebuild() 経由で行う。
+        sendChangeMessage();
         requestRebuild(convo::RebuildKind::Structural);
     }
 }
@@ -3018,17 +3108,37 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 {
     if (processor == &uiConvolverProcessor)
     {
+        const bool suppressIntermediateMixedPhasePublish =
+            uiConvolverProcessor.isProgressiveUpgradeEnabled()
+            && uiConvolverProcessor.getPhaseMode() == ConvolverProcessor::PhaseMode::Mixed
+            && uiConvolverProcessor.getActiveCacheFFTSize() > 0
+            && uiConvolverProcessor.getActiveCacheFFTSize() < uiConvolverProcessor.getTargetUpgradeFFTSize();
+
+        if (suppressIntermediateMixedPhasePublish)
+        {
+            diagLog("[DIAG] convolverParamsChanged: SUPPRESSED intermediate progressive mixed-phase publish fft="
+                    + juce::String(uiConvolverProcessor.getActiveCacheFFTSize())
+                    + " targetFFT=" + juce::String(uiConvolverProcessor.getTargetUpgradeFFTSize())
+                    + " irName=" + uiConvolverProcessor.getIRName());
+            return;
+        }
+
         bool needsStructuralRebuild = false;
         double srForRebuild = 0.0;
+        uint64_t uiStructuralHash = 0;
 
         {
             std::lock_guard<std::mutex> lk(rebuildMutex);
+            diagLog("[DIAG] convolverParamsChanged: enter");
             if (activeDSP)
             {
                 activeDSP->convolver.syncParametersFrom(uiConvolverProcessor);
 
                 const bool uiHasIr = uiConvolverProcessor.isIRLoaded();
                 const bool dspHasIr = activeDSP->convolver.isIRLoaded();
+
+                if (uiHasIr)
+                    uiStructuralHash = uiConvolverProcessor.getStructuralHash();
 
                 needsStructuralRebuild = (uiHasIr != dspHasIr);
 
@@ -3045,10 +3155,30 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
             else
             {
                 needsStructuralRebuild = uiConvolverProcessor.isIRLoaded();
+                if (needsStructuralRebuild)
+                    uiStructuralHash = uiConvolverProcessor.getStructuralHash();
             }
 
             if (needsStructuralRebuild)
                 srForRebuild = currentSampleRate.load(std::memory_order_acquire);
+        }
+
+        // 同一構造ハッシュで再通知が来ても、重い Structural rebuild を再発火させない。
+        // これにより IR 読み込み後の rebuild 連鎖（CPU スパイク）を抑止する。
+        if (needsStructuralRebuild && uiStructuralHash != 0)
+        {
+            const uint64_t prevHash = lastIssuedConvolverStructuralHash_.load(std::memory_order_acquire);
+            if (prevHash == uiStructuralHash)
+            {
+                diagLog("[DIAG] convolverParamsChanged: BLOCKED by hash dedup hash="
+                    + juce::String::toHexString((int64_t) uiStructuralHash));
+                needsStructuralRebuild = false;
+            }
+            else
+                lastIssuedConvolverStructuralHash_.store(uiStructuralHash, std::memory_order_release);
+                        diagLog("[DIAG] convolverParamsChanged: requestRebuild Structural hash="
+                            + juce::String::toHexString((int64_t) uiStructuralHash)
+                            + " irName=" + uiConvolverProcessor.getIRName());
         }
 
         if (needsStructuralRebuild)
@@ -3084,6 +3214,10 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 void AudioEngine::releaseResources()
 {
     shutdownInProgress.store(true, std::memory_order_release);
+    firstIrDryCrossfadePending.store(false, std::memory_order_release);
+    dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
+    // デバイス停止時に重複抑止トークンをリセットする。
+    lastIssuedConvolverStructuralHash_.store(0, std::memory_order_release);
 
     // サンプルレートをリセット (描画停止用)
     currentSampleRate.store(0.0);
@@ -3350,15 +3484,27 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
 
         DSPCore* fading = fadingOutDSP.load(std::memory_order_acquire);
-        if (fading != nullptr && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
+        bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+        if ((fading != nullptr || firstIrDryCrossfadePending.load(std::memory_order_acquire))
+            && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
         {
             const double fadeSec = std::max(0.001, queuedFadeTimeSec.load(std::memory_order_acquire));
             dspCrossfadeGain.reset(std::max(1.0, dsp->sampleRate), fadeSec);
             dspCrossfadeGain.setCurrentAndTargetValue(0.0);
             dspCrossfadeGain.setTargetValue(1.0);
+
+            // レイテンシ整合値を Audio Thread スナップショットへ反映する。
+            latencyDelayOld_RT = latencyDelayOld.load(std::memory_order_acquire);
+            latencyDelayNew_RT = latencyDelayNew.load(std::memory_order_acquire);
+
+            if (firstIrDryCrossfadePending.exchange(false, std::memory_order_acq_rel))
+            {
+                dspCrossfadeUseDryAsOld.store(true, std::memory_order_release);
+                useDryAsOld = true;
+            }
         }
 
-        const bool canCrossfade = (fading != nullptr)
+        const bool canCrossfade = (fading != nullptr || useDryAsOld)
             && dspCrossfadeGain.isSmoothing()
             && dspCrossfadeFloatBuffer.getNumChannels() >= 2
             && dspCrossfadeFloatBuffer.getNumSamples() >= numSamples;
@@ -3375,45 +3521,95 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
             std::atomic<float> fadingInputMeter { 0.0f };
             std::atomic<float> fadingOutputMeter { 0.0f };
-            fading->addRef();
-            fading->processToBuffer(bufferToFill, dspCrossfadeFloatBuffer, audioFifo, audioFifoBuffer,
-                                   fadingInputMeter, fadingOutputMeter, fadingState);
-            dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+            if (useDryAsOld)
+            {
+                const int outChannels = std::min(2, buffer->getNumChannels());
+                if (outChannels > 0)
+                    juce::FloatVectorOperations::copy(dspCrossfadeFloatBuffer.getWritePointer(0, 0), buffer->getReadPointer(0, startSample), numSamples);
+                if (outChannels > 1)
+                    juce::FloatVectorOperations::copy(dspCrossfadeFloatBuffer.getWritePointer(1, 0), buffer->getReadPointer(1, startSample), numSamples);
+            }
+            else
+            {
+                fading->addRef();
+                fading->processToBuffer(bufferToFill, dspCrossfadeFloatBuffer, analyzerFifo,
+                                       fadingInputMeter, fadingOutputMeter, fadingState);
+            }
+            dsp->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
 
             const int outChannels = std::min(2, buffer->getNumChannels());
             float* dstL = (outChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
             float* dstR = (outChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
             const float* oldL = (outChannels > 0) ? dspCrossfadeFloatBuffer.getReadPointer(0, 0) : nullptr;
             const float* oldR = (outChannels > 1) ? dspCrossfadeFloatBuffer.getReadPointer(1, 0) : nullptr;
+
+            const int bufferSize = latencyBufSize;
+            int writePos = latencyWritePos;
+            const int delayOld = latencyDelayOld_RT;
+            const int delayNew = latencyDelayNew_RT;
+            if (latencyResetPending.exchange(false, std::memory_order_acq_rel))
+            {
+                if (latencyBufOldL) std::memset(latencyBufOldL, 0, sizeof(double) * bufferSize);
+                if (latencyBufOldR) std::memset(latencyBufOldR, 0, sizeof(double) * bufferSize);
+                if (latencyBufNewL) std::memset(latencyBufNewL, 0, sizeof(double) * bufferSize);
+                if (latencyBufNewR) std::memset(latencyBufNewR, 0, sizeof(double) * bufferSize);
+                writePos = 0;
+            }
             for (int i = 0; i < numSamples; ++i)
             {
+                latencyBufOldL[writePos] = (oldL != nullptr) ? static_cast<double>(oldL[i]) : 0.0;
+                latencyBufOldR[writePos] = (oldR != nullptr) ? static_cast<double>(oldR[i]) : 0.0;
+                latencyBufNewL[writePos] = (dstL != nullptr) ? static_cast<double>(dstL[i]) : 0.0;
+                latencyBufNewR[writePos] = (dstR != nullptr) ? static_cast<double>(dstR[i]) : 0.0;
+
+                int readOld = writePos - delayOld;
+                int readNew = writePos - delayNew;
+                while (readOld < 0) readOld += bufferSize;
+                while (readOld >= bufferSize) readOld -= bufferSize;
+                while (readNew < 0) readNew += bufferSize;
+                while (readNew >= bufferSize) readNew -= bufferSize;
+
+                const double alignedOldL = latencyBufOldL[readOld];
+                const double alignedOldR = latencyBufOldR[readOld];
+                const double alignedNewL = latencyBufNewL[readNew];
+                const double alignedNewR = latencyBufNewR[readNew];
+
                 const double gNew = dspCrossfadeGain.getNextValue();
                 const double gOld = 1.0 - gNew;
                 if (dstL != nullptr)
-                    dstL[i] = static_cast<float>(dstL[i] * gNew + oldL[i] * gOld);
+                    dstL[i] = static_cast<float>(alignedNewL * gNew + alignedOldL * gOld);
                 if (dstR != nullptr)
-                    dstR[i] = static_cast<float>(dstR[i] * gNew + oldR[i] * gOld);
-            }
+                    dstR[i] = static_cast<float>(alignedNewR * gNew + alignedOldR * gOld);
 
-            fading->release();
+                writePos++;
+                if (writePos >= bufferSize)
+                    writePos = 0;
+            }
+            latencyWritePos = writePos;
+
+            if (!useDryAsOld)
+                fading->release();
 
             if (!dspCrossfadeGain.isSmoothing())
             {
                 if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
                     done->release();
                 dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+                dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
             }
         }
         else
         {
             // 通常パス（クロスフェードなし）：RCU で dsp の生存が保証されるため addRef/release 不要
-            dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+            dsp->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
 
             if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
             {
                 if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
                     done->release();
             }
+            if (!dspCrossfadeGain.isSmoothing())
+                dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
         }
     }
 
@@ -3498,7 +3694,7 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     std::atomic<float> fadingOutputMeter { 0.0f };
     auto& inMeter = isFadingTarget ? fadingInputMeter : inputLevelLinear;
     auto& outMeter = isFadingTarget ? fadingOutputMeter : outputLevelLinear;
-    dsp->process(bufferToFill, audioFifo, audioFifoBuffer, inMeter, outMeter, procState);
+    dsp->process(bufferToFill, analyzerFifo, inMeter, outMeter, procState);
 }
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
@@ -3586,7 +3782,27 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         inputLevelLinear.store(0.0f);
         // --- クロスフェード・遅延整合処理（現行設計に準拠） ---
         DSPCore* fading = fadingOutDSP.load(std::memory_order_acquire);
-        const bool canCrossfade = (fading != nullptr)
+        bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+        if ((fading != nullptr || firstIrDryCrossfadePending.load(std::memory_order_acquire))
+            && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
+        {
+            const double fadeSec = std::max(0.001, queuedFadeTimeSec.load(std::memory_order_acquire));
+            dspCrossfadeGain.reset(std::max(1.0, dsp->sampleRate), fadeSec);
+            dspCrossfadeGain.setCurrentAndTargetValue(0.0);
+            dspCrossfadeGain.setTargetValue(1.0);
+
+            // レイテンシ整合値を Audio Thread スナップショットへ反映する。
+            latencyDelayOld_RT = latencyDelayOld.load(std::memory_order_acquire);
+            latencyDelayNew_RT = latencyDelayNew.load(std::memory_order_acquire);
+
+            if (firstIrDryCrossfadePending.exchange(false, std::memory_order_acq_rel))
+            {
+                dspCrossfadeUseDryAsOld.store(true, std::memory_order_release);
+                useDryAsOld = true;
+            }
+        }
+
+        const bool canCrossfade = (fading != nullptr || useDryAsOld)
             && dspCrossfadeGain.isSmoothing()
             && dspCrossfadeDoubleBuffer.getNumChannels() >= 2
             && dspCrossfadeDoubleBuffer.getNumSamples() >= numSamples;
@@ -3603,10 +3819,21 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
             std::atomic<float> fadingInputMeter { 0.0f };
             std::atomic<float> fadingOutputMeter { 0.0f };
-            fading->addRef();
-            fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, audioFifo, audioFifoBuffer,
-                                          fadingInputMeter, fadingOutputMeter, fadingState);
-            dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+            if (useDryAsOld)
+            {
+                const int outChannels = std::min(2, buffer.getNumChannels());
+                if (outChannels > 0)
+                    juce::FloatVectorOperations::copy(dspCrossfadeDoubleBuffer.getWritePointer(0, 0), buffer.getReadPointer(0, 0), numSamples);
+                if (outChannels > 1)
+                    juce::FloatVectorOperations::copy(dspCrossfadeDoubleBuffer.getWritePointer(1, 0), buffer.getReadPointer(1, 0), numSamples);
+            }
+            else
+            {
+                fading->addRef();
+                fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, analyzerFifo,
+                                              fadingInputMeter, fadingOutputMeter, fadingState);
+            }
+            dsp->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
 
             const int outChannels = std::min(2, buffer.getNumChannels());
             double* dstL = (outChannels > 0) ? buffer.getWritePointer(0, 0) : nullptr;
@@ -3659,31 +3886,37 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                 if (latencyWritePos >= bufferSize)
                     latencyWritePos = 0;
             }
-            fading->release();
+            if (!useDryAsOld)
+                fading->release();
 
             if (!dspCrossfadeGain.isSmoothing())
             {
                 if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
                     done->release();
                 dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+                dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
             }
             return;
         }
 
         // --- 通常パス（クロスフェードなし） ---
-        dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+        dsp->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
 
         if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
         {
             if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
                 done->release();
         }
+        if (!dspCrossfadeGain.isSmoothing())
+            dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
         return;
     }
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
     DSPCore* fading = fadingOutDSP.load(std::memory_order_acquire);
-    if (fading != nullptr && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
+    bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+    if ((fading != nullptr || firstIrDryCrossfadePending.load(std::memory_order_acquire))
+        && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
     {
         // queuedFadeTimeSecはcommitNewDSPでセット済み、ここでスナップショット
         const double fadeSec = std::max(0.001, queuedFadeTimeSec.load(std::memory_order_acquire));
@@ -3692,9 +3925,19 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         dspCrossfadeGain.reset(std::max(1.0, dsp->sampleRate), fadeSec);
         dspCrossfadeGain.setCurrentAndTargetValue(0.0);
         dspCrossfadeGain.setTargetValue(1.0);
+
+        // レイテンシ整合値を Audio Thread スナップショットへ反映する。
+        latencyDelayOld_RT = latencyDelayOld.load(std::memory_order_acquire);
+        latencyDelayNew_RT = latencyDelayNew.load(std::memory_order_acquire);
+
+        if (firstIrDryCrossfadePending.exchange(false, std::memory_order_acq_rel))
+        {
+            dspCrossfadeUseDryAsOld.store(true, std::memory_order_release);
+            useDryAsOld = true;
+        }
     }
 
-    const bool canCrossfade = (fading != nullptr)
+    const bool canCrossfade = (fading != nullptr || useDryAsOld)
         && dspCrossfadeGain.isSmoothing()
         && dspCrossfadeDoubleBuffer.getNumChannels() >= 2
         && dspCrossfadeDoubleBuffer.getNumSamples() >= numSamples;
@@ -3711,10 +3954,21 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
         std::atomic<float> fadingInputMeter { 0.0f };
         std::atomic<float> fadingOutputMeter { 0.0f };
-        fading->addRef();
-        fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, audioFifo, audioFifoBuffer,
-                                      fadingInputMeter, fadingOutputMeter, fadingState);
-        dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+        if (useDryAsOld)
+        {
+            const int outChannels = std::min(2, buffer.getNumChannels());
+            if (outChannels > 0)
+                juce::FloatVectorOperations::copy(dspCrossfadeDoubleBuffer.getWritePointer(0, 0), buffer.getReadPointer(0, 0), numSamples);
+            if (outChannels > 1)
+                juce::FloatVectorOperations::copy(dspCrossfadeDoubleBuffer.getWritePointer(1, 0), buffer.getReadPointer(1, 0), numSamples);
+        }
+        else
+        {
+            fading->addRef();
+            fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, analyzerFifo,
+                                          fadingInputMeter, fadingOutputMeter, fadingState);
+        }
+        dsp->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
 
         // スナップショット（commitNewDSPでセット済み、ここでは読み取り専用）
         const int outChannels = std::min(2, buffer.getNumChannels());
@@ -3767,13 +4021,15 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                 writePos = 0;
         }
         latencyWritePos = writePos;
-        fading->release();
+        if (!useDryAsOld)
+            fading->release();
 
         if (!dspCrossfadeGain.isSmoothing())
         {
             if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
                 done->release();
             dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+            dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
         }
         // --- 最適化パス ---
         // LinearRampはskip()を持たないため、step/totalStepsから線形補間値を計算
@@ -3824,24 +4080,26 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             latencyDelayOld = 0;
             latencyDelayNew = 0;
             latencyWritePos = 0;
+            dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
         }
     }
     else
     {
-        dsp->processDouble(buffer, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, procState);
+        dsp->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
 
         if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
         {
             if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
                 done->release();
         }
+        if (!dspCrossfadeGain.isSmoothing())
+            dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
     }
 }
 
 void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& source,
                                           juce::AudioBuffer<float>& destination,
-                                          juce::AbstractFifo& audioFifo,
-                                          juce::AudioBuffer<float>& audioFifoBuffer,
+                                          LockFreeAudioRingBuffer& analyzerFifo,
                                           std::atomic<float>& inputLevelLinear,
                                           std::atomic<float>& outputLevelLinear,
                                           const ProcessingState& state)
@@ -3865,12 +4123,11 @@ void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& s
         destination.clear(ch, 0, numSamples);
 
     juce::AudioSourceChannelInfo destinationInfo(&destination, 0, numSamples);
-    process(destinationInfo, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, state);
+    process(destinationInfo, analyzerFifo, inputLevelLinear, outputLevelLinear, state);
 }
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
-                                  juce::AbstractFifo& audioFifo,
-                                  juce::AudioBuffer<float>& audioFifoBuffer,
+                                  LockFreeAudioRingBuffer& analyzerFifo,
                                   std::atomic<float>& inputLevelLinear,
                                   std::atomic<float>& outputLevelLinear,
                                   const ProcessingState& state) // ProcessingState構造体でパラメータを受け取る
@@ -3906,7 +4163,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     // analyzerInputTap=true の場合、同関数内で pre-gain の FIFO プッシュも行う。
     const bool inputTap = state.analyzerEnabled && (state.analyzerSource == AnalyzerSource::Input);
     const float rawInputLinear = processInput(bufferToFill, numSamples, state.inputHeadroomGain,
-                                              inputTap, audioFifo, audioFifoBuffer);
+                                              inputTap, analyzerFifo);
 
     //----------------------------------------------------------
     // AudioBlockの構築 (AlignedBufferを使用)
@@ -4087,7 +4344,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     // オーバーサンプリング有効時でも、UI へはベースレートのデータを供給する。
     if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
     {
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
+        pushToFifo(processBlock, analyzerFifo);
     }
 
     //----------------------------------------------------------
@@ -4121,8 +4378,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 
 void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>& source,
                                                  juce::AudioBuffer<double>& destination,
-                                                 juce::AbstractFifo& audioFifo,
-                                                 juce::AudioBuffer<float>& audioFifoBuffer,
+                                                 LockFreeAudioRingBuffer& analyzerFifo,
                                                  std::atomic<float>& inputLevelLinear,
                                                  std::atomic<float>& outputLevelLinear,
                                                  const ProcessingState& state)
@@ -4145,12 +4401,11 @@ void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>
     for (int ch = numChannels; ch < destination.getNumChannels(); ++ch)
         destination.clear(ch, 0, numSamples);
 
-    processDouble(destination, audioFifo, audioFifoBuffer, inputLevelLinear, outputLevelLinear, state);
+    processDouble(destination, analyzerFifo, inputLevelLinear, outputLevelLinear, state);
 }
 
 void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
-                                         juce::AbstractFifo& audioFifo,
-                                         juce::AudioBuffer<float>& audioFifoBuffer,
+                                         LockFreeAudioRingBuffer& analyzerFifo,
                                          std::atomic<float>& inputLevelLinear,
                                          std::atomic<float>& outputLevelLinear,
                                          const ProcessingState& state)
@@ -4176,7 +4431,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     // ── 入力処理 + Raw Input Analyzer Tap ──
     const bool inputTapD = state.analyzerEnabled && (state.analyzerSource == AnalyzerSource::Input);
     const float rawInputLinearD = processInputDouble(buffer, numSamples, state.inputHeadroomGain,
-                                                     inputTapD, audioFifo, audioFifoBuffer);
+                                                     inputTapD, analyzerFifo);
     inputLevelLinear.store(rawInputLinearD, std::memory_order_relaxed);
 
     const bool requestedFullBypass = state.eqBypassed && state.convBypassed;
@@ -4364,7 +4619,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     // ── Analyzer Output Tap (Post-DSP, Post-Downsampling) ──
     // オーバーサンプリング有効時でも、UI へはベースレートのデータを供給する。
     if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
-        pushToFifo(processBlock, audioFifo, audioFifoBuffer);
+        pushToFifo(processBlock, analyzerFifo);
 
     const float outputLinear = measureLevel(originalBlock);
     outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
@@ -4405,90 +4660,15 @@ float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const doub
 }
 
 void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>& block,
-                                      juce::AbstractFifo& audioFifo,
-                                      juce::AudioBuffer<float>& audioFifoBuffer) const noexcept
+                                      LockFreeAudioRingBuffer& analyzerFifo) const noexcept
 {
-    const int numSamples = (int)block.getNumSamples();
-
-    // 安全性確認: FIFOバッファのサイズが初期化時から変更されていないことを保証
-    jassert (audioFifoBuffer.getNumSamples() == audioFifo.getTotalSize());
-
-    // FIFO空き容量チェック (Overflow Protection)
-    // 部分書き込みは波形不連続（グリッチ）の原因となるため、
-    // ブロック全体が書き込めない場合は書き込みをスキップする (All or Nothing)
-    if (audioFifo.getFreeSpace() < numSamples)
-        return;
-
-    int start1, size1, start2, size2;
-    audioFifo.prepareToWrite(numSamples, start1, size1, start2, size2);
-
-    if (size1 + size2 < numSamples)
-    {
-        // getFreeSpace() チェックを通過したにもかかわらず、prepareToWrite() が
-        // 要求されたサンプル数より少ない領域しか返さなかった場合の防御的措置。
-        // SPSCキューでは理論上到達しないはずだが、部分書き込みを確実に防ぐためにチェックする。
-        jassertfalse;
-        return;
-    }
-
-    const double* l = block.getChannelPointer(0);
-    const double* r = (block.getNumChannels() > 1) ? block.getChannelPointer(1) : nullptr;
-    const bool hasRightChannel = (audioFifoBuffer.getNumChannels() > 1);
-
-    // AVX2 double→float 変換ヘルパー (4 doubles → 4 floats)
-    auto convertBlock = [&](const double* srcL, const double* srcR,
-                             float* dstL, float* dstR, int n) noexcept
-    {
-        int i = 0;
-        const int vEnd = n / 4 * 4;
-        for (; i < vEnd; i += 4)
-        {
-            __m256d vL = _mm256_loadu_pd(srcL + i);
-            __m128  fL = _mm256_cvtpd_ps(vL);
-            _mm_storeu_ps(dstL + i, fL);
-            if (dstR && srcR)
-            {
-                __m256d vR = _mm256_loadu_pd(srcR + i);
-                _mm_storeu_ps(dstR + i, _mm256_cvtpd_ps(vR));
-            }
-            else if (dstR)
-            {
-                _mm_storeu_ps(dstR + i, fL); // モノ → ステレオ
-            }
-        }
-        for (; i < n; ++i)
-        {
-            dstL[i] = static_cast<float>(srcL[i]);
-            if (dstR) dstR[i] = srcR ? static_cast<float>(srcR[i]) : dstL[i];
-        }
-    };
-
-    if (size1 > 0)
-    {
-        convertBlock(l, r,
-                     audioFifoBuffer.getWritePointer(0, start1),
-                     hasRightChannel ? audioFifoBuffer.getWritePointer(1, start1) : nullptr,
-                     size1);
-        l += size1;
-        if (r != nullptr) r += size1;
-    }
-
-    if (size2 > 0)
-    {
-        convertBlock(l, r,
-                     audioFifoBuffer.getWritePointer(0, start2),
-                     hasRightChannel ? audioFifoBuffer.getWritePointer(1, start2) : nullptr,
-                     size2);
-    }
-
-    audioFifo.finishedWrite(size1 + size2);
+    analyzerFifo.push(block);
 }
 
 float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples,
                                           double headroomGain,
                                           bool analyzerInputTap,
-                                          juce::AbstractFifo& audioFifo,
-                                          juce::AudioBuffer<float>& audioFifoBuffer) noexcept
+                                          LockFreeAudioRingBuffer& analyzerFifo) noexcept
 {
     auto* buffer = bufferToFill.buffer;
     const int startSample = bufferToFill.startSample;
@@ -4538,7 +4718,7 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
     // ヘッドルームゲイン適用前の raw 入力データを FIFO へプッシュ。
     // インプットスペアナ・レベルメーターが "入力されたデータそのもの" を表示するために必須。
     if (analyzerInputTap)
-        pushToFifo(block, audioFifo, audioFifoBuffer);
+        pushToFifo(block, analyzerFifo);
 
     // 3. Apply headroom gain
     if (absDiffNoLibm(headroomGain, 1.0) > 1e-9)
@@ -4561,8 +4741,7 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
 float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples,
                                                double headroomGain,
                                                bool analyzerInputTap,
-                                               juce::AbstractFifo& audioFifo,
-                                               juce::AudioBuffer<float>& audioFifoBuffer) noexcept
+                                               LockFreeAudioRingBuffer& analyzerFifo) noexcept
 {
     const int effectiveInputChannels = std::min(buffer.getNumChannels(), 2);
 
@@ -4593,7 +4772,7 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
 
     // ── Analyzer Input Tap (Pre-Gain / Raw Input) ──
     if (analyzerInputTap)
-        pushToFifo(block, audioFifo, audioFifoBuffer);
+        pushToFifo(block, analyzerFifo);
 
     // 3. Apply headroom gain
     if (absDiffNoLibm(headroomGain, 1.0) > 1e-9)
@@ -4610,6 +4789,40 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
 
     return inputLevel;
 }
+
+void AudioEngine::DSPCore::applyFixedLatencyDelay(double* dataL, double* dataR, int numSamples) noexcept
+{
+    if (fixedLatencySamples <= 0 || fixedLatencyBufferSize <= 0 || dataL == nullptr)
+        return;
+
+    const int delay = std::min(fixedLatencySamples, fixedLatencyBufferSize - 1);
+    int writePos = fixedLatencyWritePos;
+    const int bufferSize = fixedLatencyBufferSize;
+    double* delayL = fixedLatencyBufferL.get();
+    double* delayR = fixedLatencyBufferR.get();
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        delayL[writePos] = dataL[i];
+        if (dataR != nullptr)
+            delayR[writePos] = dataR[i];
+
+        int readPos = writePos - delay;
+        while (readPos < 0)
+            readPos += bufferSize;
+
+        dataL[i] = delayL[readPos];
+        if (dataR != nullptr)
+            dataR[i] = delayR[readPos];
+
+        ++writePos;
+        if (writePos >= bufferSize)
+            writePos = 0;
+    }
+
+    fixedLatencyWritePos = writePos;
+}
+
 // 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加える。
 // @param x 入力信号
 // @param threshold クリッピングが開始される閾値 (正の値)
@@ -4771,6 +4984,9 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
         }
     }
 
+    // パススルーDSP等に固定レイテンシを付与する。
+    applyFixedLatencyDelay(dataL, dataR, numSamples);
+
     // ── Step 4: double→float 変換・クランプ ─────────────────────────────────
     // juce::jlimit<double>(-1.0, 1.0, x) は JUCE 8.0.12 で存在確認済み (template)。
     // Step 2 のサニタイズ後は dataL/dataR に NaN/Inf がないため、
@@ -4925,6 +5141,9 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
                 dataR[i] = juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[i]);
         }
     }
+
+    // パススルーDSP等に固定レイテンシを付与する。
+    applyFixedLatencyDelay(dataL, dataR, numSamples);
 
     juce::FloatVectorOperations::copy(buffer.getWritePointer(0, 0), dataL, numSamples);
     if (numChannels > 1 && dataR != nullptr)

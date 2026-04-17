@@ -148,7 +148,7 @@ public:
                 break;
             case ThreadType::HeavyBackground:
                 mask = masks_.heavyBackground;
-                priority = THREAD_PRIORITY_NORMAL;
+                priority = THREAD_PRIORITY_BELOW_NORMAL;
                 break;
             case ThreadType::LightBackground:
                 mask = masks_.lightBackground;

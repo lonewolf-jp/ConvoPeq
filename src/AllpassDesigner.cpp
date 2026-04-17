@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <limits>
 #include <cstring>
+#include <thread>
+#include <chrono>
 
 namespace convo {
 
@@ -163,7 +165,9 @@ DesignResult AllpassDesigner::designWithCMAES(
 
     juce::Logger::writeToLog("CMA-ES optimization started with "
                              + juce::String(config.numSections)
-                             + " sections, dim=" + juce::String(D));
+                             + " sections, dim=" + juce::String(D)
+                             + ", lambda=" + juce::String(lambda)
+                             + ", maxGen=" + juce::String(config.cmaesMaxGenerations));
 
     for (int gen = 0; gen < config.cmaesMaxGenerations; ++gen) {
         if (shouldExit && shouldExit()) return DesignResult::Cancelled;
@@ -177,6 +181,12 @@ DesignResult AllpassDesigner::designWithCMAES(
             }
         }
         optimizer.update(population, fitness);
+
+        // Non-RT worker thread側で協調的にCPUを譲り、再生スレッドへの干渉を抑える。
+        if ((gen & 1) == 0)
+            std::this_thread::yield();
+        if ((gen % 8) == 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
         if ((gen % 10) == 0)
         {
@@ -205,7 +215,7 @@ DesignResult AllpassDesigner::designWithCMAES(
         if (gen > 20) {
             if (relImprovement < 1e-6 && absImprovement < 1e-2) {
                 stagnationCounter++;
-                if (stagnationCounter >= 15) break;
+                if (stagnationCounter >= 6) break;
             } else {
                 stagnationCounter = 0;
             }

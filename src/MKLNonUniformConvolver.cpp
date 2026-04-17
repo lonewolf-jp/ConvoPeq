@@ -51,14 +51,103 @@ std::atomic<int> g_warmupGuardCount { 0 };
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 
 #include <immintrin.h>  // AVX2
 
 namespace convo
 {
 
+struct IppFFTPlan
+{
+    int order = 0;
+    int fftSize = 0;
+    int sizeWork = 0;
+    IppsFFTSpec_R_64f* fftSpec = nullptr;
+    Ipp8u* fftSpecBuf = nullptr;
+
+    ~IppFFTPlan()
+    {
+        if (fftSpecBuf)
+            ippsFree(fftSpecBuf);
+    }
+};
+
+class IppFFTPlanCache
+{
+public:
+    static std::shared_ptr<const IppFFTPlan> getOrCreate(int order)
+    {
+        std::lock_guard<std::mutex> lock(getMutex());
+        auto& cache = getCache();
+        const auto it = cache.find(order);
+        if (it != cache.end())
+            return it->second;
+
+        auto plan = createPlan(order);
+        if (!plan)
+            return {};
+
+        auto inserted = cache.emplace(order, plan);
+        return inserted.first->second;
+    }
+
+private:
+    static std::unordered_map<int, std::shared_ptr<const IppFFTPlan>>& getCache()
+    {
+        static std::unordered_map<int, std::shared_ptr<const IppFFTPlan>> cache;
+        return cache;
+    }
+
+    static std::mutex& getMutex()
+    {
+        static std::mutex mtx;
+        return mtx;
+    }
+
+    static std::shared_ptr<const IppFFTPlan> createPlan(int order)
+    {
+        int sizeSpec = 0, sizeInit = 0, sizeWork = 0;
+        const IppStatus getSt = ippsFFTGetSize_R_64f(
+            order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
+            &sizeSpec, &sizeInit, &sizeWork);
+        if (getSt != ippStsNoErr)
+            return {};
+
+        std::unique_ptr<IppFFTPlan> plan = std::make_unique<IppFFTPlan>();
+        plan->order = order;
+        plan->fftSize = 1 << order;
+        plan->sizeWork = sizeWork;
+
+        plan->fftSpecBuf = ippsMalloc_8u(sizeSpec);
+        if (!plan->fftSpecBuf)
+            return {};
+
+        Ipp8u* initBuf = (sizeInit > 0) ? ippsMalloc_8u(sizeInit) : nullptr;
+        const IppStatus initSt = ippsFFTInit_R_64f(
+            &plan->fftSpec, order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
+            plan->fftSpecBuf, initBuf);
+
+        if (initBuf)
+            ippsFree(initBuf);
+
+        if (initSt != ippStsNoErr || plan->fftSpec == nullptr)
+            return {};
+
+        return std::shared_ptr<const IppFFTPlan>(plan.release());
+    }
+};
+
 namespace
 {
+#if defined(__AVX2__)
+constexpr bool kEnableSplitComplexKernel = true;
+#else
+constexpr bool kEnableSplitComplexKernel = false;
+#endif
+
 inline double hsum256_pd(__m256d v) noexcept
 {
     const __m128d hi = _mm256_extractf128_pd(v, 1);
@@ -106,6 +195,66 @@ inline double computeTailGainForBin(int k,
     const double x = juce::jlimit(0.0, 1.0, (f - safeStartHz) / denom);
     return std::exp(-strength * x * x);
 }
+
+inline void deinterleaveComplex(const double* srcInterleaved, double* dstReal, double* dstImag, int complexSize) noexcept
+{
+    for (int k = 0; k < complexSize; ++k)
+    {
+        dstReal[k] = srcInterleaved[2 * k];
+        dstImag[k] = srcInterleaved[2 * k + 1];
+    }
+}
+
+inline void interleaveComplex(const double* srcReal, const double* srcImag, double* dstInterleaved, int complexSize) noexcept
+{
+    for (int k = 0; k < complexSize; ++k)
+    {
+        dstInterleaved[2 * k] = srcReal[k];
+        dstInterleaved[2 * k + 1] = srcImag[k];
+    }
+}
+
+inline void accumulateSplitComplex(const double* srcAReal,
+                                   const double* srcAImag,
+                                   const double* srcBReal,
+                                   const double* srcBImag,
+                                   double* dstReal,
+                                   double* dstImag,
+                                   int complexSize) noexcept
+{
+#if defined(__AVX2__)
+    int k = 0;
+    const int vEnd = (complexSize / 4) * 4;
+    for (; k < vEnd; k += 4)
+    {
+        __m256d ar = _mm256_load_pd(srcAReal + k);
+        __m256d ai = _mm256_load_pd(srcAImag + k);
+        __m256d br = _mm256_load_pd(srcBReal + k);
+        __m256d bi = _mm256_load_pd(srcBImag + k);
+
+        __m256d dr = _mm256_load_pd(dstReal + k);
+        __m256d di = _mm256_load_pd(dstImag + k);
+
+        dr = _mm256_add_pd(dr, _mm256_sub_pd(_mm256_mul_pd(ar, br), _mm256_mul_pd(ai, bi)));
+        di = _mm256_add_pd(di, _mm256_add_pd(_mm256_mul_pd(ar, bi), _mm256_mul_pd(ai, br)));
+
+        _mm256_store_pd(dstReal + k, dr);
+        _mm256_store_pd(dstImag + k, di);
+    }
+
+    for (; k < complexSize; ++k)
+    {
+        dstReal[k] += srcAReal[k] * srcBReal[k] - srcAImag[k] * srcBImag[k];
+        dstImag[k] += srcAReal[k] * srcBImag[k] + srcAImag[k] * srcBReal[k];
+    }
+#else
+    for (int k = 0; k < complexSize; ++k)
+    {
+        dstReal[k] += srcAReal[k] * srcBReal[k] - srcAImag[k] * srcBImag[k];
+        dstImag[k] += srcAReal[k] * srcBImag[k] + srcAImag[k] * srcBReal[k];
+    }
+#endif
+}
 } // namespace
 
 //==============================================================================
@@ -113,14 +262,10 @@ inline double computeTailGainForBin(int k,
 //==============================================================================
 void MKLNonUniformConvolver::Layer::freeAll() noexcept
 {
-    // [v2.1] IPP FFT リソース解放
-    // fftSpec は fftSpecBuf 内を指すポインタなので、fftSpecBuf の解放で自動的に無効化。
-    if (fftSpecBuf)
-    {
-        ippsFree(fftSpecBuf);
-        fftSpecBuf = nullptr;
-        fftSpec    = nullptr;
-    }
+    // [v2.2] FFT plan はサイズ単位の共有キャッシュ管理。
+    // レイヤー側は所有権のみ解放し、スペック実体はキャッシュ側で保持する。
+    fftPlanOwner.reset();
+    fftSpec = nullptr;
     if (fftWorkBuf)
     {
         ippsFree(fftWorkBuf);
@@ -129,11 +274,17 @@ void MKLNonUniformConvolver::Layer::freeAll() noexcept
     descriptorCommitted = false;
 
     if (irFreqDomain)  { mkl_free(irFreqDomain);  irFreqDomain  = nullptr; }
+    if (irFreqReal)    { mkl_free(irFreqReal);    irFreqReal    = nullptr; }
+    if (irFreqImag)    { mkl_free(irFreqImag);    irFreqImag    = nullptr; }
     if (fdlBuf)        { mkl_free(fdlBuf);         fdlBuf        = nullptr; }
+    if (fdlReal)       { mkl_free(fdlReal);       fdlReal       = nullptr; }
+    if (fdlImag)       { mkl_free(fdlImag);       fdlImag       = nullptr; }
     if (fftTimeBuf)    { mkl_free(fftTimeBuf);     fftTimeBuf    = nullptr; }
     if (fftOutBuf)     { mkl_free(fftOutBuf);      fftOutBuf     = nullptr; }
     if (prevInputBuf)  { mkl_free(prevInputBuf);   prevInputBuf  = nullptr; }
     if (accumBuf)      { mkl_free(accumBuf);       accumBuf      = nullptr; }
+    if (accumReal)     { mkl_free(accumReal);      accumReal     = nullptr; }
+    if (accumImag)     { mkl_free(accumImag);      accumImag     = nullptr; }
     if (inputAccBuf)   { mkl_free(inputAccBuf);    inputAccBuf   = nullptr; }
     if (tailOutputBuf) { mkl_free(tailOutputBuf);  tailOutputBuf = nullptr; }
 
@@ -282,6 +433,10 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
             {
                 double* slot = l.irFreqDomain + p * stride;
                 vdMul(cSize * 2, slot, gainIL.get(), slot);
+                deinterleaveComplex(slot,
+                                    l.irFreqReal + static_cast<size_t>(p) * l.complexSize,
+                                    l.irFreqImag + static_cast<size_t>(p) * l.complexSize,
+                                    l.complexSize);
             }
         }
     }
@@ -435,57 +590,26 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
                 while (tmp > 1) { tmp >>= 1; ++order; }
             }
 
-            int sizeSpec = 0, sizeInit = 0, sizeWork = 0;
-            const IppStatus getSt = ippsFFTGetSize_R_64f(
-                order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
-                &sizeSpec, &sizeInit, &sizeWork);
-            if (getSt != ippStsNoErr)
+            l.fftPlanOwner = IppFFTPlanCache::getOrCreate(order);
+            if (!l.fftPlanOwner || l.fftPlanOwner->fftSpec == nullptr)
             {
-                juce::Logger::writeToLog("MKLNonUniformConvolver: ippsFFTGetSize_R_64f failed for layer "
-                                         + juce::String(li) + " (status=" + juce::String(static_cast<int>(getSt)) + ")");
+                juce::Logger::writeToLog("MKLNonUniformConvolver: FFT plan cache creation failed for layer "
+                                         + juce::String(li) + " (order=" + juce::String(order) + ")");
                 releaseAllLayers();
                 return false;
             }
 
-            // スペックバッファ確保 (IPP FFT スペックのメモリオーナー)
-            l.fftSpecBuf = ippsMalloc_8u(sizeSpec);
-            if (!l.fftSpecBuf)
-            {
-                juce::Logger::writeToLog("MKLNonUniformConvolver: ippsMalloc_8u(sizeSpec) failed for layer " + juce::String(li));
-                releaseAllLayers();
-                return false;
-            }
-
-            // 初期化用一時バッファ (不要なら nullptr)
-            Ipp8u* initBuf = (sizeInit > 0) ? ippsMalloc_8u(sizeInit) : nullptr;
-
-            const IppStatus initSt = ippsFFTInit_R_64f(
-                &l.fftSpec, order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
-                l.fftSpecBuf, initBuf);
-
-            if (initBuf)
-            {
-                ippsFree(initBuf);
-                initBuf = nullptr;
-            }
-
-            if (initSt != ippStsNoErr || l.fftSpec == nullptr)
-            {
-                juce::Logger::writeToLog("MKLNonUniformConvolver: ippsFFTInit_R_64f failed for layer "
-                                         + juce::String(li) + " (status=" + juce::String(static_cast<int>(initSt)) + ")");
-                releaseAllLayers();
-                return false;
-            }
+            l.fftSpec = l.fftPlanOwner->fftSpec;
 
             // ワークバッファ確保 (Audio Thread での動的確保を防ぐため事前確保)
             // sizeWork == 0 の場合 nullptr のまま (IPP が外部バッファ不要)
             // sizeWork > 0 かつ確保失敗 → リアルタイム安全でないため初期化失敗とする
-            if (sizeWork > 0)
+            if (l.fftPlanOwner->sizeWork > 0)
             {
-                l.fftWorkBuf = ippsMalloc_8u(sizeWork);
+                l.fftWorkBuf = ippsMalloc_8u(l.fftPlanOwner->sizeWork);
                 if (!l.fftWorkBuf)
                 {
-                    juce::Logger::writeToLog("MKLNonUniformConvolver: ippsMalloc_8u(sizeWork=" + juce::String(sizeWork)
+                    juce::Logger::writeToLog("MKLNonUniformConvolver: ippsMalloc_8u(sizeWork=" + juce::String(l.fftPlanOwner->sizeWork)
                                              + ") failed for layer " + juce::String(li));
                     releaseAllLayers();
                     return false;
@@ -499,20 +623,28 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         // ── バッファ確保 (すべて mkl_malloc 64byte アライン) ──
         const size_t irBufSize  = static_cast<size_t>(l.numParts) * l.partStride;
         const size_t fdlBufSize = static_cast<size_t>(l.numParts) * 2 * l.partStride;
+        const size_t irSoaSize  = static_cast<size_t>(l.numParts) * static_cast<size_t>(l.complexSize);
+        const size_t fdlSoaSize = static_cast<size_t>(l.numParts) * 2 * static_cast<size_t>(l.complexSize);
 
         l.irFreqDomain = static_cast<double*>(mkl_malloc(irBufSize  * sizeof(double), 64));
+        l.irFreqReal   = static_cast<double*>(mkl_malloc(irSoaSize  * sizeof(double), 64));
+        l.irFreqImag   = static_cast<double*>(mkl_malloc(irSoaSize  * sizeof(double), 64));
         l.fdlBuf       = static_cast<double*>(mkl_malloc(fdlBufSize * sizeof(double), 64));
+        l.fdlReal      = static_cast<double*>(mkl_malloc(fdlSoaSize * sizeof(double), 64));
+        l.fdlImag      = static_cast<double*>(mkl_malloc(fdlSoaSize * sizeof(double), 64));
         l.fftTimeBuf   = static_cast<double*>(mkl_malloc(l.fftSize   * sizeof(double), 64));
         l.fftOutBuf    = static_cast<double*>(mkl_malloc(l.fftSize   * sizeof(double), 64));
         l.prevInputBuf = static_cast<double*>(mkl_malloc(l.partSize  * sizeof(double), 64));
         l.accumBuf     = static_cast<double*>(mkl_malloc(l.partStride * sizeof(double), 64));
+        l.accumReal    = static_cast<double*>(mkl_malloc(l.complexSize * sizeof(double), 64));
+        l.accumImag    = static_cast<double*>(mkl_malloc(l.complexSize * sizeof(double), 64));
         l.inputAccBuf  = static_cast<double*>(mkl_malloc(l.partSize  * sizeof(double), 64));
 
         if (!l.isImmediate)
             l.tailOutputBuf = static_cast<double*>(mkl_malloc(l.partSize * sizeof(double), 64));
 
-        if (!l.irFreqDomain || !l.fdlBuf || !l.fftTimeBuf ||
-            !l.fftOutBuf || !l.prevInputBuf || !l.accumBuf || !l.inputAccBuf ||
+        if (!l.irFreqDomain || !l.irFreqReal || !l.irFreqImag || !l.fdlBuf || !l.fdlReal || !l.fdlImag || !l.fftTimeBuf ||
+            !l.fftOutBuf || !l.prevInputBuf || !l.accumBuf || !l.accumReal || !l.accumImag || !l.inputAccBuf ||
             (!l.isImmediate && !l.tailOutputBuf))
         {
             releaseAllLayers();
@@ -521,11 +653,17 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         // ゼロ初期化
         juce::FloatVectorOperations::clear(l.irFreqDomain, irBufSize);
+        juce::FloatVectorOperations::clear(l.irFreqReal,   irSoaSize);
+        juce::FloatVectorOperations::clear(l.irFreqImag,   irSoaSize);
         juce::FloatVectorOperations::clear(l.fdlBuf,       fdlBufSize);
+        juce::FloatVectorOperations::clear(l.fdlReal,      fdlSoaSize);
+        juce::FloatVectorOperations::clear(l.fdlImag,      fdlSoaSize);
         juce::FloatVectorOperations::clear(l.fftTimeBuf,   l.fftSize);
         juce::FloatVectorOperations::clear(l.fftOutBuf,    l.fftSize);
         juce::FloatVectorOperations::clear(l.prevInputBuf, l.partSize);
         juce::FloatVectorOperations::clear(l.accumBuf,     l.partStride);
+        juce::FloatVectorOperations::clear(l.accumReal,    l.complexSize);
+        juce::FloatVectorOperations::clear(l.accumImag,    l.complexSize);
         juce::FloatVectorOperations::clear(l.inputAccBuf,  l.partSize);
         if (l.tailOutputBuf)
             juce::FloatVectorOperations::clear(l.tailOutputBuf, l.partSize);
@@ -568,6 +706,11 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
             if (scale != 1.0)
                 cblas_dscal(l.complexSize * 2, scale, l.irFreqDomain + p * l.partStride, 1);
+
+                 deinterleaveComplex(l.irFreqDomain + p * l.partStride,
+                            l.irFreqReal + static_cast<size_t>(p) * l.complexSize,
+                            l.irFreqImag + static_cast<size_t>(p) * l.complexSize,
+                            l.complexSize);
         }
 
         // Backward FFT のウォームアップ
@@ -769,12 +912,25 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     double* currentFDLSlot = l.fdlBuf + l.fdlIndex * l.partStride;
     ippsFFTFwd_RToCCS_64f(l.fftTimeBuf, currentFDLSlot, l.fftSpec, l.fftWorkBuf);
 
+    deinterleaveComplex(currentFDLSlot,
+                        l.fdlReal + static_cast<size_t>(l.fdlIndex) * l.complexSize,
+                        l.fdlImag + static_cast<size_t>(l.fdlIndex) * l.complexSize,
+                        l.complexSize);
+
     // [最適化2] Linearized ring buffer: mirror write
     double* mirrorFDLSlot = l.fdlBuf + (l.fdlIndex + l.numParts) * l.partStride;
     memcpy(mirrorFDLSlot, currentFDLSlot, l.partStride * sizeof(double));
 
+    const int mirrorIndex = l.fdlIndex + l.numParts;
+    deinterleaveComplex(mirrorFDLSlot,
+                        l.fdlReal + static_cast<size_t>(mirrorIndex) * l.complexSize,
+                        l.fdlImag + static_cast<size_t>(mirrorIndex) * l.complexSize,
+                        l.complexSize);
+
     // ── 3. 複素乗算積算 (FDL × IR) → accumBuf ──
     memset(l.accumBuf, 0, l.partStride * sizeof(double));
+    memset(l.accumReal, 0, static_cast<size_t>(l.complexSize) * sizeof(double));
+    memset(l.accumImag, 0, static_cast<size_t>(l.complexSize) * sizeof(double));
 
     const double* fdlBase = l.fdlBuf;
     const double* irBase  = l.irFreqDomain;
@@ -799,93 +955,30 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
             _mm_prefetch((const char*)(srcB + 2 * l.partStride), _MM_HINT_T1);
         }
 
-        int k = 0;
-        const int vEnd8 = (l.complexSize / 8) * 8;
-        const int vEnd4 = (l.complexSize / 4) * 4;
-
-        for (; k < vEnd8; k += 8)
+        if (kEnableSplitComplexKernel)
         {
-            _mm_prefetch((const char*)(srcA + 2 * k + 64), _MM_HINT_T0);
-            _mm_prefetch((const char*)(srcB + 2 * k + 64), _MM_HINT_T0);
-
-            __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
-            __m256d acc1 = _mm256_load_pd(dst  + 2 * k + 4);
-            __m256d a0   = _mm256_load_pd(srcA + 2 * k);
-            __m256d a1   = _mm256_load_pd(srcA + 2 * k + 4);
-            __m256d b0   = _mm256_load_pd(srcB + 2 * k);
-            __m256d b1   = _mm256_load_pd(srcB + 2 * k + 4);
-
-            __m256d a0_re = _mm256_movedup_pd(a0);
-            __m256d a0_im = _mm256_permute_pd(a0, 0xF);
-            acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
-            __m256d b0_sw = _mm256_permute_pd(b0, 0x5);
-            acc0 = _mm256_addsub_pd(acc0, _mm256_mul_pd(a0_im, b0_sw));
-
-            __m256d a1_re = _mm256_movedup_pd(a1);
-            __m256d a1_im = _mm256_permute_pd(a1, 0xF);
-            acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
-            __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
-            acc1 = _mm256_addsub_pd(acc1, _mm256_mul_pd(a1_im, b1_sw));
-
-            _mm256_store_pd(dst + 2 * k,     acc0);
-            _mm256_store_pd(dst + 2 * k + 4, acc1);
-
-            __m256d acc2 = _mm256_load_pd(dst  + 2 * k + 8);
-            __m256d acc3 = _mm256_load_pd(dst  + 2 * k + 12);
-            __m256d a2   = _mm256_load_pd(srcA + 2 * k + 8);
-            __m256d a3   = _mm256_load_pd(srcA + 2 * k + 12);
-            __m256d b2   = _mm256_load_pd(srcB + 2 * k + 8);
-            __m256d b3   = _mm256_load_pd(srcB + 2 * k + 12);
-
-            __m256d a2_re = _mm256_movedup_pd(a2);
-            __m256d a2_im = _mm256_permute_pd(a2, 0xF);
-            acc2 = _mm256_fmadd_pd(a2_re, b2, acc2);
-            __m256d b2_sw = _mm256_permute_pd(b2, 0x5);
-            acc2 = _mm256_addsub_pd(acc2, _mm256_mul_pd(a2_im, b2_sw));
-
-            __m256d a3_re = _mm256_movedup_pd(a3);
-            __m256d a3_im = _mm256_permute_pd(a3, 0xF);
-            acc3 = _mm256_fmadd_pd(a3_re, b3, acc3);
-            __m256d b3_sw = _mm256_permute_pd(b3, 0x5);
-            acc3 = _mm256_addsub_pd(acc3, _mm256_mul_pd(a3_im, b3_sw));
-
-            _mm256_store_pd(dst + 2 * k + 8,  acc2);
-            _mm256_store_pd(dst + 2 * k + 12, acc3);
+            const int index = linStart + p;
+            const double* srcARe = l.fdlReal + static_cast<size_t>(index) * l.complexSize;
+            const double* srcAIm = l.fdlImag + static_cast<size_t>(index) * l.complexSize;
+            const double* srcBRe = l.irFreqReal + static_cast<size_t>(p) * l.complexSize;
+            const double* srcBIm = l.irFreqImag + static_cast<size_t>(p) * l.complexSize;
+            accumulateSplitComplex(srcARe, srcAIm, srcBRe, srcBIm, l.accumReal, l.accumImag, l.complexSize);
         }
-
-        for (; k < vEnd4; k += 4)
+        else
         {
-            __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
-            __m256d acc1 = _mm256_load_pd(dst  + 2 * k + 4);
-            __m256d a0   = _mm256_load_pd(srcA + 2 * k);
-            __m256d a1   = _mm256_load_pd(srcA + 2 * k + 4);
-            __m256d b0   = _mm256_load_pd(srcB + 2 * k);
-            __m256d b1   = _mm256_load_pd(srcB + 2 * k + 4);
-
-            __m256d a0_re = _mm256_movedup_pd(a0);
-            __m256d a0_im = _mm256_permute_pd(a0, 0xF);
-            acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
-            __m256d b0_sw = _mm256_permute_pd(b0, 0x5);
-            acc0 = _mm256_addsub_pd(acc0, _mm256_mul_pd(a0_im, b0_sw));
-
-            __m256d a1_re = _mm256_movedup_pd(a1);
-            __m256d a1_im = _mm256_permute_pd(a1, 0xF);
-            acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
-            __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
-            acc1 = _mm256_addsub_pd(acc1, _mm256_mul_pd(a1_im, b1_sw));
-
-            _mm256_store_pd(dst + 2 * k,     acc0);
-            _mm256_store_pd(dst + 2 * k + 4, acc1);
-        }
-
-        for (; k < l.complexSize; ++k)
-        {
-            const double ar = srcA[2 * k],     ai = srcA[2 * k + 1];
-            const double br = srcB[2 * k],     bi = srcB[2 * k + 1];
-            dst[2 * k]     += ar * br - ai * bi;
-            dst[2 * k + 1] += ar * bi + ai * br;
+            int k = 0;
+            for (; k < l.complexSize; ++k)
+            {
+                const double ar = srcA[2 * k], ai = srcA[2 * k + 1];
+                const double br = srcB[2 * k], bi = srcB[2 * k + 1];
+                dst[2 * k] += ar * br - ai * bi;
+                dst[2 * k + 1] += ar * bi + ai * br;
+            }
         }
     }
+
+    if (kEnableSplitComplexKernel)
+        interleaveComplex(l.accumReal, l.accumImag, l.accumBuf, l.complexSize);
 
     // ── 4. Backward FFT ──
     // IFFT 前にデノーマル対策 (accumBuf の複素データに適用)
@@ -1022,9 +1115,20 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     double* currentFDLSlot = l.fdlBuf + l.fdlIndex * l.partStride;
                     ippsFFTFwd_RToCCS_64f(l.fftTimeBuf, currentFDLSlot, l.fftSpec, l.fftWorkBuf);
 
+                    deinterleaveComplex(currentFDLSlot,
+                                        l.fdlReal + static_cast<size_t>(l.fdlIndex) * l.complexSize,
+                                        l.fdlImag + static_cast<size_t>(l.fdlIndex) * l.complexSize,
+                                        l.complexSize);
+
                     // [最適化2] mirror write
                     double* mirrorFDLSlot = l.fdlBuf + (l.fdlIndex + l.numParts) * l.partStride;
                     juce::FloatVectorOperations::copy(mirrorFDLSlot, currentFDLSlot, l.partStride);
+
+                    const int mirrorIndex = l.fdlIndex + l.numParts;
+                    deinterleaveComplex(mirrorFDLSlot,
+                                        l.fdlReal + static_cast<size_t>(mirrorIndex) * l.complexSize,
+                                        l.fdlImag + static_cast<size_t>(mirrorIndex) * l.complexSize,
+                                        l.complexSize);
 
                     l.fdlIndex = (l.fdlIndex + 1) & l.fdlMask;
 
@@ -1032,6 +1136,8 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     l.baseFdlIdxSaved = (l.fdlIndex - 1 + l.numParts) & l.fdlMask;
 
                     memset(l.accumBuf, 0, l.partStride * sizeof(double));
+                    memset(l.accumReal, 0, static_cast<size_t>(l.complexSize) * sizeof(double));
+                    memset(l.accumImag, 0, static_cast<size_t>(l.complexSize) * sizeof(double));
                     l.nextPart    = 0;
                     l.distributing = true;
                 }
@@ -1069,95 +1175,35 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
                     _mm_prefetch((const char*)(srcB + 2 * l.partStride), _MM_HINT_T1);
                 }
 
-                int k = 0;
-                const int vEnd8 = (l.complexSize / 8) * 8;
-                const int vEnd4 = (l.complexSize / 4) * 4;
-
-                for (; k < vEnd8; k += 8)
+                if (kEnableSplitComplexKernel)
                 {
-                    _mm_prefetch((const char*)(srcA + 2 * k + 128), _MM_HINT_T0);
-                    _mm_prefetch((const char*)(srcB + 2 * k + 128), _MM_HINT_T0);
-
-                    __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
-                    __m256d acc1 = _mm256_load_pd(dst  + 2 * k + 4);
-                    __m256d a0   = _mm256_load_pd(srcA + 2 * k);
-                    __m256d a1   = _mm256_load_pd(srcA + 2 * k + 4);
-                    __m256d b0   = _mm256_load_pd(srcB + 2 * k);
-                    __m256d b1   = _mm256_load_pd(srcB + 2 * k + 4);
-
-                    __m256d a0_re = _mm256_movedup_pd(a0);
-                    __m256d a0_im = _mm256_permute_pd(a0, 0xF);
-                    acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
-                    __m256d b0_sw = _mm256_permute_pd(b0, 0x5);
-                    acc0 = _mm256_addsub_pd(acc0, _mm256_mul_pd(a0_im, b0_sw));
-
-                    __m256d a1_re = _mm256_movedup_pd(a1);
-                    __m256d a1_im = _mm256_permute_pd(a1, 0xF);
-                    acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
-                    __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
-                    acc1 = _mm256_addsub_pd(acc1, _mm256_mul_pd(a1_im, b1_sw));
-
-                    _mm256_store_pd(dst + 2 * k,     acc0);
-                    _mm256_store_pd(dst + 2 * k + 4, acc1);
-
-                    __m256d acc2 = _mm256_load_pd(dst  + 2 * k + 8);
-                    __m256d acc3 = _mm256_load_pd(dst  + 2 * k + 12);
-                    __m256d a2   = _mm256_load_pd(srcA + 2 * k + 8);
-                    __m256d a3   = _mm256_load_pd(srcA + 2 * k + 12);
-                    __m256d b2   = _mm256_load_pd(srcB + 2 * k + 8);
-                    __m256d b3   = _mm256_load_pd(srcB + 2 * k + 12);
-
-                    __m256d a2_re = _mm256_movedup_pd(a2);
-                    __m256d a2_im = _mm256_permute_pd(a2, 0xF);
-                    acc2 = _mm256_fmadd_pd(a2_re, b2, acc2);
-                    __m256d b2_sw = _mm256_permute_pd(b2, 0x5);
-                    acc2 = _mm256_addsub_pd(acc2, _mm256_mul_pd(a2_im, b2_sw));
-
-                    __m256d a3_re = _mm256_movedup_pd(a3);
-                    __m256d a3_im = _mm256_permute_pd(a3, 0xF);
-                    acc3 = _mm256_fmadd_pd(a3_re, b3, acc3);
-                    __m256d b3_sw = _mm256_permute_pd(b3, 0x5);
-                    acc3 = _mm256_addsub_pd(acc3, _mm256_mul_pd(a3_im, b3_sw));
-
-                    _mm256_store_pd(dst + 2 * k + 8,  acc2);
-                    _mm256_store_pd(dst + 2 * k + 12, acc3);
+                    const int index = linStart + p;
+                    const double* srcARe = l.fdlReal + static_cast<size_t>(index) * l.complexSize;
+                    const double* srcAIm = l.fdlImag + static_cast<size_t>(index) * l.complexSize;
+                    const double* srcBRe = l.irFreqReal + static_cast<size_t>(p) * l.complexSize;
+                    const double* srcBIm = l.irFreqImag + static_cast<size_t>(p) * l.complexSize;
+                    accumulateSplitComplex(srcARe, srcAIm, srcBRe, srcBIm, l.accumReal, l.accumImag, l.complexSize);
                 }
-
-                for (; k < vEnd4; k += 4)
+                else
                 {
-                    __m256d acc0 = _mm256_load_pd(dst  + 2 * k);
-                    __m256d acc1 = _mm256_load_pd(dst  + 2 * k + 4);
-                    __m256d a0   = _mm256_load_pd(srcA + 2 * k);
-                    __m256d a1   = _mm256_load_pd(srcA + 2 * k + 4);
-                    __m256d b0   = _mm256_load_pd(srcB + 2 * k);
-                    __m256d b1   = _mm256_load_pd(srcB + 2 * k + 4);
-
-                    __m256d a0_re = _mm256_movedup_pd(a0);
-                    __m256d a0_im = _mm256_permute_pd(a0, 0xF);
-                    acc0 = _mm256_fmadd_pd(a0_re, b0, acc0);
-                    __m256d b0_sw = _mm256_permute_pd(b0, 0x5);
-                    acc0 = _mm256_addsub_pd(acc0, _mm256_mul_pd(a0_im, b0_sw));
-
-                    __m256d a1_re = _mm256_movedup_pd(a1);
-                    __m256d a1_im = _mm256_permute_pd(a1, 0xF);
-                    acc1 = _mm256_fmadd_pd(a1_re, b1, acc1);
-                    __m256d b1_sw = _mm256_permute_pd(b1, 0x5);
-                    acc1 = _mm256_addsub_pd(acc1, _mm256_mul_pd(a1_im, b1_sw));
-
-                    _mm256_store_pd(dst + 2 * k,     acc0);
-                    _mm256_store_pd(dst + 2 * k + 4, acc1);
-                }
-
-                for (; k < l.complexSize; ++k)
-                {
-                    const double ar = srcA[2 * k],     ai = srcA[2 * k + 1];
-                    const double br = srcB[2 * k],     bi = srcB[2 * k + 1];
-                    dst[2 * k]     += ar * br - ai * bi;
-                    dst[2 * k + 1] += ar * bi + ai * br;
+                    int k = 0;
+                    for (; k < l.complexSize; ++k)
+                    {
+                        const double ar = srcA[2 * k], ai = srcA[2 * k + 1];
+                        const double br = srcB[2 * k], bi = srcB[2 * k + 1];
+                        dst[2 * k] += ar * br - ai * bi;
+                        dst[2 * k + 1] += ar * bi + ai * br;
+                    }
                 }
             }
 
             l.nextPart = endPart;
+
+            if (kEnableSplitComplexKernel)
+            {
+                memset(l.accumBuf, 0, l.partStride * sizeof(double));
+                interleaveComplex(l.accumReal, l.accumImag, l.accumBuf, l.complexSize);
+            }
 
             // ── 全パーティション累積完了 → IFFT → tailOutputBuf へコピー ──
             if (l.nextPart >= l.numPartsIR)
@@ -1271,11 +1317,16 @@ void MKLNonUniformConvolver::Reset()
         if (l.irFreqDomain == nullptr) continue;
 
         const size_t fdlBufSize = static_cast<size_t>(l.numParts) * 2 * l.partStride;
+        const size_t fdlSoaSize = static_cast<size_t>(l.numParts) * 2 * static_cast<size_t>(l.complexSize);
         juce::FloatVectorOperations::clear(l.fdlBuf,       fdlBufSize);
+        juce::FloatVectorOperations::clear(l.fdlReal,      fdlSoaSize);
+        juce::FloatVectorOperations::clear(l.fdlImag,      fdlSoaSize);
         juce::FloatVectorOperations::clear(l.fftTimeBuf,   l.fftSize);
         juce::FloatVectorOperations::clear(l.fftOutBuf,    l.fftSize);
         juce::FloatVectorOperations::clear(l.prevInputBuf, l.partSize);
         juce::FloatVectorOperations::clear(l.accumBuf,     l.partStride);
+        juce::FloatVectorOperations::clear(l.accumReal,    l.complexSize);
+        juce::FloatVectorOperations::clear(l.accumImag,    l.complexSize);
         juce::FloatVectorOperations::clear(l.inputAccBuf,  l.partSize);
 
         if (l.tailOutputBuf)

@@ -2005,12 +2005,22 @@ EQProcessor::BandNode* EQProcessor::createBandNode(int band, const EQState& stat
     auto node = new BandNode();
     node->addRef();
     const auto& params = state.bands[band];
+    const double sr = currentSampleRate.load(std::memory_order_relaxed);
 
     node->active = params.enabled;
     node->mode = state.bandChannelModes[band];
-    // 【修正】atomic load して calcSVFCoeffs に渡す
-    node->coeffs = calcSVFCoeffs(state.bandTypes[band], params.frequency, params.gain, params.q,
-                                 currentSampleRate.load(std::memory_order_relaxed));
+
+    // prepareToPlay 前は sampleRate が未確定のため、係数計算を保留して
+    // バイパス係数を保持する。sampleRate 確定後に prepareToPlay() で再計算される。
+    if (sr > 0.0)
+    {
+        node->coeffs = calcSVFCoeffs(state.bandTypes[band], params.frequency, params.gain, params.q, sr);
+    }
+    else
+    {
+        node->coeffs = EQCoeffsSVF();
+        node->active = false;
+    }
 
     // 最適化: ゲインが0dB付近ならスキップ
     if (node->active) {
@@ -2615,10 +2625,10 @@ EQCoeffCache* EQProcessor::createCoeffCache(
     for (int i = 0; i < NUM_BANDS; ++i)
     {
         const auto& band = eqParams.bands[i];
-        cache->bandActive[i] = band.enabled;
+        cache->bandActive[i] = band.enabled && sampleRate > 0.0;
         cache->channelModes[i] = band.channelMode;
 
-        if (band.enabled)
+        if (band.enabled && sampleRate > 0.0)
         {
             // SVF 係数計算（MessageThread でのみ呼び出し）
             cache->coeffs[i] = calcSVFCoeffs(

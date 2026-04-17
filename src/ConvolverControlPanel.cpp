@@ -933,43 +933,60 @@ void ConvolverControlPanel::updateMixedPhaseControlsEnabled()
 //--------------------------------------------------------------
 void ConvolverControlPanel::buttonClicked(juce::Button* button)
 {
+    juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
+
     if (button == &loadIRButton)
     {
-        // ファイル選択ダイアログ
-        // JUCE v8.0.12 推奨パターン: ローカルなshared_ptrを使用し、ラムダでキャプチャする。
-        //
-        // これにより、ダイアログ表示中に ConvolverControlPanel が破棄されても安全に動作する。
-        auto fileChooser = std::make_shared<juce::FileChooser>("Select Impulse Response (IR) File",
-                                  juce::File::getSpecialLocation(
-                                      juce::File::userDocumentsDirectory),
-                                  "*.wav;*.aif;*.aiff;*.flac");
-
-        const auto chooserFlags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
-
-        juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
-
-        fileChooser->launchAsync(chooserFlags, [safeThis, fileChooser](const juce::FileChooser& fc)
+        juce::MessageManager::callAsync([safeThis]
         {
             if (safeThis == nullptr)
                 return;
 
-            if (fc.getResults().isEmpty())
-                return;
+            // ファイル選択ダイアログ
+            // JUCE v8.0.12 推奨パターン: ローカルなshared_ptrを使用し、ラムダでキャプチャする。
+            // これにより、ダイアログ表示中に ConvolverControlPanel が破棄されても安全に動作する。
+            auto fileChooser = std::make_shared<juce::FileChooser>("Select Impulse Response (IR) File",
+                                      juce::File::getSpecialLocation(
+                                          juce::File::userDocumentsDirectory),
+                                      "*.wav;*.aif;*.aiff;*.flac");
 
-            safeThis->startAsyncIRLoadPreview(fc.getResult());
+            const auto chooserFlags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+
+            fileChooser->launchAsync(chooserFlags, [safeThis, fileChooser](const juce::FileChooser& fc)
+            {
+                if (safeThis == nullptr)
+                    return;
+
+                if (fc.getResults().isEmpty())
+                    return;
+
+                safeThis->startAsyncIRLoadPreview(fc.getResult());
+            });
         });
     }
     else if (button == &irAdvancedButton)
     {
-        showIRAdvancedWindow();
+        juce::MessageManager::callAsync([safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->showIRAdvancedWindow();
+        });
     }
     else if (button == &convolverSettingsButton)
     {
-        showConvolverSettingsWindow();
+        juce::MessageManager::callAsync([safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->showConvolverSettingsWindow();
+        });
     }
     else if (button == &optimizationProgressButton)
     {
-        showOptimizationProgressWindow();
+        juce::MessageManager::callAsync([safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->showOptimizationProgressWindow();
+        });
     }
     else if (button == &experimentalDirectHeadToggle)
     {
@@ -979,6 +996,16 @@ void ConvolverControlPanel::buttonClicked(juce::Button* button)
 }
 
 void ConvolverControlPanel::showIRAdvancedWindow()
+{
+    juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
+    juce::MessageManager::callAsync([safeThis]
+    {
+        if (safeThis != nullptr)
+            safeThis->showIRAdvancedWindowImpl();
+    });
+}
+
+void ConvolverControlPanel::showIRAdvancedWindowImpl()
 {
     if (irAdvancedWindow != nullptr)
     {
@@ -1002,6 +1029,16 @@ void ConvolverControlPanel::showIRAdvancedWindow()
 }
 
 void ConvolverControlPanel::showConvolverSettingsWindow()
+{
+    juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
+    juce::MessageManager::callAsync([safeThis]
+    {
+        if (safeThis != nullptr)
+            safeThis->showConvolverSettingsWindowImpl();
+    });
+}
+
+void ConvolverControlPanel::showConvolverSettingsWindowImpl()
 {
     if (convolverSettingsWindow != nullptr)
     {
@@ -1029,6 +1066,16 @@ void ConvolverControlPanel::showConvolverSettingsWindow()
 // MixedPhaseOptimizationWindow を非モーダルで表示（最適化状況ウィンドウ）
 //--------------------------------------------------------------
  void ConvolverControlPanel::showOptimizationProgressWindow()
+ {
+    juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
+    juce::MessageManager::callAsync([safeThis]
+    {
+        if (safeThis != nullptr)
+            safeThis->showOptimizationProgressWindowImpl();
+    });
+ }
+
+ void ConvolverControlPanel::showOptimizationProgressWindowImpl()
  {
     if (optimizationProgressWindow != nullptr)
     {

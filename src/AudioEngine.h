@@ -56,6 +56,7 @@ struct CoeffSet {
 #include "DspNumericPolicy.h"
 #include "UltraHighRateDCBlocker.h"
 #include "LockFreeRingBuffer.h"
+#include "LockFreeAudioRingBuffer.h"
 #include "NoiseShaperLearner.h"
 #include "RefCountedDeferred.h"
 #include "GenerationManager.h"
@@ -196,7 +197,7 @@ public:
 
 
 
-    int getFifoNumReady() const { return audioFifo.getNumReady(); }
+    int getFifoNumReady() const { return analyzerFifo.getAvailableSamples(); }
     void readFromFifo(float* dest, int numSamples);
     void skipFifo(int numSamples);
 
@@ -442,27 +443,25 @@ DSPCore();
     }
 
     void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner);
+    void setFixedLatencySamples(int samples);
     void reset();
-    void process(const juce::AudioSourceChannelInfo& bufferToFill, juce::AbstractFifo& audioFifo,
-                 juce::AudioBuffer<float>& audioFifoBuffer, std::atomic<float>& inputLevelLinear,
+        void process(const juce::AudioSourceChannelInfo& bufferToFill, LockFreeAudioRingBuffer& analyzerFifo,
+             std::atomic<float>& inputLevelLinear,
                  std::atomic<float>& outputLevelLinear, const ProcessingState& state);
     void processToBuffer(const juce::AudioSourceChannelInfo& source,
                          juce::AudioBuffer<float>& destination,
-                         juce::AbstractFifo& audioFifo,
-                         juce::AudioBuffer<float>& audioFifoBuffer,
+                 LockFreeAudioRingBuffer& analyzerFifo,
                          std::atomic<float>& inputLevelLinear,
                          std::atomic<float>& outputLevelLinear,
                          const ProcessingState& state);
     void processDouble(juce::AudioBuffer<double>& buffer,
-                       juce::AbstractFifo& audioFifo,
-                       juce::AudioBuffer<float>& audioFifoBuffer,
+                   LockFreeAudioRingBuffer& analyzerFifo,
                        std::atomic<float>& inputLevelLinear,
                        std::atomic<float>& outputLevelLinear,
                        const ProcessingState& state);
     void processDoubleToBuffer(const juce::AudioBuffer<double>& source,
                                juce::AudioBuffer<double>& destination,
-                               juce::AbstractFifo& audioFifo,
-                               juce::AudioBuffer<float>& audioFifoBuffer,
+                       LockFreeAudioRingBuffer& analyzerFifo,
                                std::atomic<float>& inputLevelLinear,
                                std::atomic<float>& outputLevelLinear,
                                const ProcessingState& state);
@@ -517,32 +516,37 @@ DSPCore();
         convo::LinearRamp bypassFadeGainDouble;
         bool bypassedDouble = false;
 
+        // パススルーDSPの固定レイテンシ付与用ディレイライン
+        convo::ScopedAlignedPtr<double> fixedLatencyBufferL;
+        convo::ScopedAlignedPtr<double> fixedLatencyBufferR;
+        int fixedLatencyBufferSize = 0;
+        int fixedLatencyWritePos = 0;
+        int fixedLatencySamples = 0;
+
         // インターサンプルピーク近似: 前ブロック末尾のクリップ済み出力 (L/R)
         // softClipBlockAVX2() へブロック間状態を渡すために保持する。
         double softClipPrevSample[2] = {0.0, 0.0};
 
         // Helpers
         float measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept;
+        void applyFixedLatencyDelay(double* dataL, double* dataR, int numSamples) noexcept;
         void pushToFifo(const juce::dsp::AudioBlock<const double>& block,
-                        juce::AbstractFifo& audioFifo,
-                        juce::AudioBuffer<float>& audioFifoBuffer) const noexcept;
+                        LockFreeAudioRingBuffer& analyzerFifo) const noexcept;
         // analyzerInputTap=true の場合、ヘッドルームゲイン適用前の raw 入力を
-        // audioFifo / audioFifoBuffer にプッシュする。
+        // analyzerFifo にプッシュする。
         // これにより、インプットスペアナ/レベルメーターがヘッドルーム非適用の
         // "入力されたデータそのもの" を表示できる。
         float processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples,
                            double headroomGain,
                            bool analyzerInputTap,
-                           juce::AbstractFifo& audioFifo,
-                           juce::AudioBuffer<float>& audioFifoBuffer) noexcept;
+                       LockFreeAudioRingBuffer& analyzerFifo) noexcept;
         void processOutput(const juce::AudioSourceChannelInfo& bufferToFill,
                            int numSamples,
                            const ProcessingState& state) noexcept;
         float processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples,
                                  double headroomGain,
                                  bool analyzerInputTap,
-                                 juce::AbstractFifo& audioFifo,
-                                 juce::AudioBuffer<float>& audioFifoBuffer) noexcept;
+                           LockFreeAudioRingBuffer& analyzerFifo) noexcept;
         void processOutputDouble(juce::AudioBuffer<double>& buffer,
                                  int numSamples,
                                  const ProcessingState& state) noexcept;
@@ -557,9 +561,7 @@ DSPCore();
     ConvolverProcessor  uiConvolverProcessor;
     EQEditProcessor uiEqEditor;
 
-    juce::AbstractFifo audioFifo { FIFO_SIZE };
-    juce::AudioBuffer<float> audioFifoBuffer;
-    juce::CriticalSection fifoReadLock;
+    LockFreeAudioRingBuffer analyzerFifo;
 
     //----------------------------------------------------------
     // 状態管理
@@ -584,6 +586,9 @@ DSPCore();
         std::atomic<double> m_osFadeTimeSec { 0.030 };
 
     std::atomic<bool> dspCrossfadePending { false };
+    std::atomic<bool> firstIrDryCrossfadePending { false }; // 初回IRロード時に dry を旧信号として使用
+    std::atomic<bool> firstIrDryCrossfadeDone { false };    // アプリ起動後の初回1回のみ有効
+    std::atomic<bool> dspCrossfadeUseDryAsOld { false };    // Audio Thread 実行中フラグ
     convo::LinearRamp dspCrossfadeGain;
     juce::AudioBuffer<float> dspCrossfadeFloatBuffer;
     juce::AudioBuffer<double> dspCrossfadeDoubleBuffer;
@@ -600,6 +605,9 @@ DSPCore();
     std::atomic<bool> convBypassActive { false };
     std::atomic<uint32_t> pendingRebuildMask_{ 0 };
     std::atomic<int64_t> lastIRContentRebuildTicks_{ 0 };
+    // 同一IR構造に対する Structural rebuild の多重発火を抑止する。
+    // 値は「直近で rebuild を要求した UI 側 Convolver 構造ハッシュ」。
+    std::atomic<uint64_t> lastIssuedConvolverStructuralHash_{ 0 };
     EQCacheManager eqCacheManager;
     std::atomic<ProcessingOrder> currentProcessingOrder{ProcessingOrder::ConvolverThenEQ};
     std::atomic<AnalyzerSource> currentAnalyzerSource { AnalyzerSource::Output };

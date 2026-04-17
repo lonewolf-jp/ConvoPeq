@@ -139,6 +139,7 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
 
     // メインウィンドウを生成する
     mainWindow = std::make_unique<MainWindow>(getApplicationName());
+    mainWindow->showMainWindowAsync();
 
     if (auto* engine = mainWindow->getAudioEngine())
         engine->getAffinityManager().applyMessageThreadPolicy();

@@ -1,0 +1,80 @@
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.6.0-insiders
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+:: initializing oneAPI environment...
+   Initializing Visual Studio command-line environment...
+   Visual Studio version 18.6.0-insiders environment configured.
+   "C:\Program Files\Microsoft Visual Studio\18\Insiders\"
+   Visual Studio command-line environment initialized for: 'x64'
+:  advisor -- latest
+:  compiler -- latest
+:  dal -- latest
+:  dev-utilities -- latest
+:  dnnl -- latest
+:  dpcpp-ct -- latest
+:  dpl -- latest
+:  ipp -- latest
+:  ippcp -- latest
+:  mkl -- latest
+:  mpi -- latest
+:  ocloc -- latest
+:  tbb -- latest
+:  umf -- latest
+:  vtune -- latest
+:: oneAPI environment initialized ::
+ninja: warning: premature end of file; recovering
+[0/2] Re-checking globbed directories...
+[1/53] Generating ConvoPeq_artefacts/JuceLibraryCode/ConvoPeq_resources.rc
+[2/53] Building RC object CMakeFiles\ConvoPeq_rc_lib.dir\Debug\ConvoPeq_artefacts\JuceLibraryCode\ConvoPeq_resources.rc.res
+[3/53] Generating ConvoPeq_artefacts/JuceLibraryCode/JuceHeader.h
+[4/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\MainApplication.cpp.obj
+[5/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\MainWindow.cpp.obj
+[6/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\AudioEngine.cpp.obj
+[7/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\CustomInputOversampler.cpp.obj
+[8/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\AudioEngineProcessor.cpp.obj
+[9/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\ConvolverProcessor.cpp.obj
+[10/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\MKLNonUniformConvolver.cpp.obj
+[11/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\EQProcessor.cpp.obj
+[12/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\EQEditProcessor.cpp.obj
+[13/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\ConvolverControlPanel.cpp.obj
+[14/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\EQControlPanel.cpp.obj
+[15/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\SpectrumAnalyzerComponent.cpp.obj
+[16/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\DeviceSettings.cpp.obj
+[17/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\NoiseShaperLearningComponent.cpp.obj
+[18/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\OutputFilter.cpp.obj
+[19/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\NoiseShaperLearner.cpp.obj
+[20/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\AllpassDesigner.cpp.obj
+[21/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\CmaEsOptimizerDynamic.cpp.obj
+[22/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\MixedPhaseOptimizationComponent.cpp.obj
+[23/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\IRConverter.cpp.obj
+[24/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\ProgressiveUpgradeThread.cpp.obj
+[25/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\CacheManager.cpp.obj
+[26/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\ConvolverSettingsComponent.cpp.obj
+[27/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\IRDSP.cpp.obj
+[28/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\core\GlobalSnapshot.cpp.obj
+[29/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\core\SnapshotFactory.cpp.obj
+[30/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\core\SnapshotAssembler.cpp.obj
+[31/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\core\DeletionQueue.cpp.obj
+[32/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\core\SnapshotCoordinator.cpp.obj
+[33/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\src\core\WorkerThread.cpp.obj
+[34/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_audio_utils\juce_audio_utils.cpp.obj
+[35/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_audio_processors\juce_audio_processors.cpp.obj
+[36/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_gui_extra\juce_gui_extra.cpp.obj
+[37/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_gui_basics\juce_gui_basics.cpp.obj
+[38/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_graphics\juce_graphics.cpp.obj
+[39/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_graphics\juce_graphics_Harfbuzz.cpp.obj
+[40/53] Building C object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_graphics\juce_graphics_Sheenbidi.c.obj
+[41/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_events\juce_events.cpp.obj
+[42/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_core\juce_core.cpp.obj
+[43/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_core\juce_core_CompilationTime.cpp.obj
+[44/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_data_structures\juce_data_structures.cpp.obj
+[45/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_audio_processors_headless\juce_audio_processors_headless.cpp.obj
+[46/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_audio_processors_headless\juce_audio_processors_headless_ara.cpp.obj
+[47/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_audio_processors_headless\juce_audio_processors_headless_lv2_libs.cpp.obj
+[48/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_audio_basics\juce_audio_basics.cpp.obj
+[49/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_audio_formats\juce_audio_formats.cpp.obj
+[50/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_audio_devices\juce_audio_devices.cpp.obj
+[51/53] Building CXX object CMakeFiles\ConvoPeq.dir\Debug\JUCE\modules\juce_dsp\juce_dsp.cpp.obj
+[52/53] Linking CXX executable ConvoPeq_artefacts\Debug\ConvoPeq.exe

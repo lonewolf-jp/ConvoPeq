@@ -48,6 +48,7 @@ private:
     void updateBitDepthList();
     void updateGainStagingDisplay();
     void showAdaptiveLearningWindow();
+    void showAdaptiveLearningWindowImpl();
     void updateNoiseShaperControls();
 
     juce::AudioDeviceManager& audioDeviceManager;
