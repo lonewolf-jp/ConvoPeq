@@ -176,6 +176,7 @@ public:
     bool loadImpulseResponse(const juce::File& irFile, bool optimizeForRealTime = false);
     void loadIR(const juce::File& irFile);
     void applyPreparedIRState(std::unique_ptr<PreparedIRState> prepared);
+    int64_t getLastPreparedIRApplyTicks() const noexcept { return lastPreparedIRApplyTicks.load(std::memory_order_acquire); }
     void stopUpgradeThread();
     void startProgressiveUpgrade(const juce::File& file,
                                  double sampleRate,
@@ -293,7 +294,14 @@ public:
     //----------------------------------------------------------
     // 状態取得
     //----------------------------------------------------------
-    bool isIRLoaded() const { return rcuSwapper.getState() != nullptr; }
+    bool isIRLoaded() const
+    {
+        const bool hasPublishedState = (rcuSwapper.getState() != nullptr);
+        const bool hasActiveEngine = (m_activeEngine.load(std::memory_order_acquire) != nullptr);
+        const bool hasIRMetadata = (currentIRState.load(std::memory_order_acquire) != nullptr)
+            || (irLength.load(std::memory_order_acquire) > 0);
+        return hasPublishedState || (hasActiveEngine && hasIRMetadata);
+    }
     bool isLoadingIR() const { return isLoading.load(std::memory_order_acquire); }
     bool isIRFinalized() const noexcept { return irFinalized.load(std::memory_order_acquire); }
     juce::String getIRName() const { return irName; }
@@ -344,8 +352,18 @@ public:
     //----------------------------------------------------------
     // リビルド (サンプルレート変更時など)
     //----------------------------------------------------------
+    enum class IncrementalRebuildSliceResult
+    {
+        InProgress,
+        Completed,
+        Failed
+    };
+
     void rebuildAllIRs();
     void rebuildAllIRsSynchronous(std::function<bool()> shouldCancel = nullptr);
+    bool beginIncrementalRebuild(std::function<bool()> shouldCancel = nullptr);
+    IncrementalRebuildSliceResult advanceIncrementalRebuild() noexcept;
+    void resetIncrementalRebuild() noexcept;
     void setUseIncrementalRebuild(bool enable) noexcept;
     bool isIncrementalRebuildEnabled() const noexcept;
     void invalidatePendingLoads();
@@ -420,7 +438,8 @@ private:
             Idle,
             Prepared,
             Building,
-            Finalizing,
+            FinalizingPrepare,
+            FinalizingApply,
             Done
         };
 
@@ -433,12 +452,15 @@ private:
         bool loaderInitialized = false;
         StereoConvolver* pendingConv = nullptr;
         juce::AudioBuffer<double> pendingLoadedIR;
+        std::shared_ptr<juce::AudioBuffer<double>> pendingLoadedIRShared;
         double pendingLoadedSR = 0.0;
         int pendingTargetLength = 0;
         juce::AudioBuffer<double> pendingDisplayIR;
+        std::shared_ptr<juce::AudioBuffer<double>> pendingDisplayIRShared;
         double pendingScaleFactor = 1.0;
         juce::File pendingFile;
         bool pendingIsRebuild = false;
+        int finalizeApplyStep = 0;
         bool finalizeApplied = false;
         juce::String lastError;
 
@@ -466,6 +488,18 @@ private:
                             std::shared_ptr<juce::AudioBuffer<double>> displayIR);
 
     void switchEngineOnMessageThread(StereoConvolver* newEngine) noexcept;
+
+    void applyNewStateBindStep(std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
+                               double loadedSR,
+                               bool isRebuild,
+                               const juce::File& file,
+                               double scaleFactor);
+    void applyNewStateUpdateStep(std::shared_ptr<juce::AudioBuffer<double>> displayIR,
+                                 double loadedSR);
+    void applyNewStatePublishStep(StereoConvolver* newConv,
+                                  int targetLength,
+                                  double loadedSR);
+    void applyNewStateNotifyStep();
 
     void applyNewState(StereoConvolver* newConv, std::shared_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::shared_ptr<juce::AudioBuffer<double>> displayIR);
     void handleLoadError(const juce::String& error);
@@ -677,7 +711,7 @@ private:
     std::atomic<int> uiTotalLatencySamples { 0 };
     std::atomic<bool> uiDirectHeadActive { false };
 
-    std::atomic<LatencySnapshot> cachedLatency {};
+    std::atomic<LatencySnapshot*> cachedLatency { new LatencySnapshot() };
     std::atomic<bool> latencyChangePending { false };
     int lastReportedLatency = -1;
 
@@ -754,6 +788,7 @@ private:
     juce::File currentIrFile;
     juce::CriticalSection irFileLock;
     std::atomic<bool> currentIrOptimized { false };
+    std::atomic<int64_t> lastPreparedIRApplyTicks { 0 };
     struct IRState {
         std::shared_ptr<juce::AudioBuffer<double>> irOwner;
         const juce::AudioBuffer<double>* ir = nullptr;

@@ -66,6 +66,7 @@ EQProcessor::EQProcessor()
 //--------------------------------------------------------------
 EQProcessor::~EQProcessor()
 {
+    juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: enter");
     if (auto* oldState = currentStateRaw.exchange(nullptr, std::memory_order_acq_rel))
         oldState->release();
 
@@ -82,21 +83,44 @@ EQProcessor::~EQProcessor()
     }
 
     releaseResources();
+    juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: exit");
 }
 
 void EQProcessor::releaseResources()
 {
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: before scratchBuffer.reset");
     scratchBuffer.reset();
     scratchCapacity = 0;
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: after scratchBuffer.reset");
+
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: before dryBypassBuffer.reset");
     dryBypassBuffer.reset();
     dryBypassCapacity = 0;
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: after dryBypassBuffer.reset");
+
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: before parallelInputBuffer.reset");
     parallelInputBuffer.reset();
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: after parallelInputBuffer.reset");
+
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: before parallelWorkBuffer.reset");
     parallelWorkBuffer.reset();
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: after parallelWorkBuffer.reset");
+
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: before parallelAccumBuffer.reset");
     parallelAccumBuffer.reset();
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: after parallelAccumBuffer.reset");
+
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: before structureOldOutBuffer.reset");
     structureOldOutBuffer.reset();
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: after structureOldOutBuffer.reset");
+
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: before structureNewOutBuffer.reset");
     structureNewOutBuffer.reset();
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: after structureNewOutBuffer.reset");
+
     parallelBufferCapacity = 0;
     structureXfadeBufferCapacity = 0;
+    juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: end");
 }
 
 //--------------------------------------------------------------

@@ -1449,7 +1449,9 @@ ConvolverProcessor::~ConvolverProcessor()
         mkl_free(oldIrState);
     }
 
-    g_deletionQueue.reclaim(std::numeric_limits<uint64_t>::max());
+    // Clean up latency snapshot pointer
+    auto* oldSnap = cachedLatency.exchange(nullptr, std::memory_order_acq_rel);
+    delete oldSnap;
 
     if (fftHandle) {
         DftiFreeDescriptor(&fftHandle);
@@ -1738,48 +1740,61 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void ConvolverProcessor::releaseResources()
 {
+    diagLog("[DIAG ConvolverProcessor] releaseResources: start");
     stopUpgradeThread();
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after stopUpgradeThread");
     forceCleanup();
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after forceCleanup");
     // 【パッチ2】LoaderThread を先に停止し、解放後の非同期コールバックを防ぐ
     // activeLoader.reset() → stopThread(4000) → ~LoaderThread() の順で安全に停止される。
     // これを省略すると、ローダーが releaseResources() 完了後に callAsync() で
     // convolution ポインタや isPrepared フラグを書き換え、Use-After-Free の原因になる。
     activeLoader.reset();
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after activeLoader.reset");
 
     // バッファの解放
     delayBuffer[0].reset();
     delayBuffer[1].reset();
     delayBufferCapacity = 0;
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after delayBuffer reset");
 
     dryBufferStorage[0].reset();
     dryBufferStorage[1].reset();
     dryBufferCapacity = 0;
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after dryBufferStorage reset");
 
     oldDryBufferStorage[0].reset();
     oldDryBufferStorage[1].reset();
     oldDryBufferCapacity = 0;
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after oldDryBufferStorage reset");
 
     smoothingBufferStorage[0].reset();
     smoothingBufferStorage[1].reset();
     smoothingBufferCapacity = 0;
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after smoothingBufferStorage reset");
 
     cachedFFTBuffer.reset();
     cachedFFTBufferCapacity = 0;
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after cachedFFTBuffer reset");
 
-    dryBuffer.setSize(0, 0);
-    smoothingBuffer.setSize(0, 0);
+    // ！！！注意：dryBuffer/smoothingBuffer は setDataToRefereTo() で参照管理されているため、
+    // setSize(0, 0) は実装してはいけない。Audio Thread 中でメモリ操作が発生し、
+    // クリックノイズと CPU 100% の原因になる。バッキングストレージのリセットで十分。
+    diagLog("[DIAG ConvolverProcessor] releaseResources: skipped dryBuffer/smoothingBuffer setSize (Audio Thread safe)");
 
     if (fftHandle) {
         DftiFreeDescriptor(&fftHandle);
         fftHandle = nullptr;
         fftHandleSize = 0;
     }
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after fftHandle free");
 
     // Release active convolution engine
     const uint64_t retireEpoch = convo::SnapshotEpoch::advance();
     auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after m_activeEngine retire");
 
     auto* oldIrState = currentIRState.exchange(nullptr, std::memory_order_acq_rel);
     if (oldIrState != nullptr)
@@ -1787,22 +1802,29 @@ void ConvolverProcessor::releaseResources()
         oldIrState->~IRState();
         mkl_free(oldIrState);
     }
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after currentIRState free");
 
     // ── Phase 0: DeferredFreeThread の停止と残余解放 ──
     // Audio Thread が停止した後にこの関数が呼ばれる保証があるため、
     // deferredFreeThread を破棄しても UAF は発生しない。
     // ~DeferredFreeThread() 内で残った retired エントリを強制解放する。
     deferredFreeThread.reset();
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after deferredFreeThread.reset");
 
     // rcuSwapper に残っているエントリも念のため強制解放
     while (auto* ptr = rcuSwapper.tryReclaim(std::numeric_limits<uint64_t>::max()))
         delete ptr;
-
-    g_deletionQueue.reclaim(std::numeric_limits<uint64_t>::max());
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after rcuSwapper reclaim loop");
 
     runtime.clear();
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after runtime.clear");
 
+    diagLog("[DIAG ConvolverProcessor] releaseResources: before isPrepared.store");
     isPrepared.store(false, std::memory_order_release);
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after isPrepared.store");
+
+    diagLog("[DIAG ConvolverProcessor] releaseResources: end");
+    diagLog("[DIAG ConvolverProcessor] releaseResources: EXITING");
 }
 
 void ConvolverProcessor::reset()
@@ -1909,7 +1931,8 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
             case IncrementalRebuildJob::Stage::Idle: return "Idle";
             case IncrementalRebuildJob::Stage::Prepared: return "Prepared";
             case IncrementalRebuildJob::Stage::Building: return "Building";
-            case IncrementalRebuildJob::Stage::Finalizing: return "Finalizing";
+            case IncrementalRebuildJob::Stage::FinalizingPrepare: return "FinalizingPrepare";
+            case IncrementalRebuildJob::Stage::FinalizingApply: return "FinalizingApply";
             case IncrementalRebuildJob::Stage::Done: return "Done";
             default: return "Unknown";
         }
@@ -1918,7 +1941,7 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
     const IRState* state = acquireIRState();
     if (state && state->ir && state->ir->getNumSamples() > 0 && state->sampleRate > 0.0)
     {
-        if (useIncrementalRebuild.load(std::memory_order_acquire))
+        if (false)
         {
             if (!rebuildJob)
                 rebuildJob = std::make_unique<IncrementalRebuildJob>();
@@ -1958,7 +1981,7 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
             diagLog("[DIAG] rebuildAllIRsSynchronous END irName=" + irName);
         };
 
-        if (useIncrementalRebuild.load(std::memory_order_acquire) && rebuildJob)
+        if (false && rebuildJob)
         {
             rebuildJob->stage = IncrementalRebuildJob::Stage::Building;
             diagLog("[DIAG] incremental stage enter"
@@ -1974,7 +1997,7 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
                     break;
             }
 
-            if (buildOk && rebuildJob->stage == IncrementalRebuildJob::Stage::Finalizing)
+            if (buildOk && rebuildJob->stage == IncrementalRebuildJob::Stage::FinalizingApply)
             {
                 const bool finalized = runIncrementalFinalizeStep(*rebuildJob);
                 if (!finalized)
@@ -2055,7 +2078,8 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
             case IncrementalRebuildJob::Stage::Idle: return "Idle";
             case IncrementalRebuildJob::Stage::Prepared: return "Prepared";
             case IncrementalRebuildJob::Stage::Building: return "Building";
-            case IncrementalRebuildJob::Stage::Finalizing: return "Finalizing";
+            case IncrementalRebuildJob::Stage::FinalizingPrepare: return "FinalizingPrepare";
+            case IncrementalRebuildJob::Stage::FinalizingApply: return "FinalizingApply";
             case IncrementalRebuildJob::Stage::Done: return "Done";
             default: return "Unknown";
         }
@@ -2173,7 +2197,7 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
     job.pendingScaleFactor = result.scaleFactor;
     job.pendingFile        = juce::File();
     job.pendingIsRebuild   = true;
-    job.stage              = IncrementalRebuildJob::Stage::Finalizing;
+    job.stage              = IncrementalRebuildJob::Stage::FinalizingApply;
     job.finalizeApplied    = false;
     job.lastError.clear();
 
@@ -2193,7 +2217,8 @@ bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
             case IncrementalRebuildJob::Stage::Idle: return "Idle";
             case IncrementalRebuildJob::Stage::Prepared: return "Prepared";
             case IncrementalRebuildJob::Stage::Building: return "Building";
-            case IncrementalRebuildJob::Stage::Finalizing: return "Finalizing";
+            case IncrementalRebuildJob::Stage::FinalizingPrepare: return "FinalizingPrepare";
+            case IncrementalRebuildJob::Stage::FinalizingApply: return "FinalizingApply";
             case IncrementalRebuildJob::Stage::Done: return "Done";
             default: return "Unknown";
         }
@@ -2204,7 +2229,7 @@ bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
             + " finalizeApplied=" + juce::String(job.finalizeApplied ? "true" : "false")
             + " lastError=" + job.lastError);
 
-    if (job.stage != IncrementalRebuildJob::Stage::Finalizing)
+    if (job.stage != IncrementalRebuildJob::Stage::FinalizingApply)
     {
         job.lastError = "incremental finalize: invalid stage";
         diagLog("[DIAG] incremental finalize precondition failed"
@@ -2245,8 +2270,9 @@ bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
 
 void ConvolverProcessor::setUseIncrementalRebuild(bool enable) noexcept
 {
-    useIncrementalRebuild.store(enable, std::memory_order_release);
-    if (!enable && rebuildJob)
+    juce::ignoreUnused(enable);
+    useIncrementalRebuild.store(false, std::memory_order_release);
+    if (rebuildJob)
         rebuildJob->reset();
 }
 
@@ -2875,25 +2901,29 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                                      + " samples");
         }
 
+        const bool liveReconfigure = (owner != nullptr) && owner->isPrepared.load(std::memory_order_acquire);
+        const bool highRateLive = liveReconfigure && sampleRate >= 96000.0;
+
         // --- AllpassDesigner の呼び出し ---
-        // 最適化専用周波数点を 256点 対数間隔にサブサンプリング。
+        // 最適化専用周波数点を 対数間隔にサブサンプリング。
         // 元の complexSize（例: 32769 @ 192kHz/82ms）をそのまま使うと
         // 1評価あたり 32769×8 ≈ 26万演算 × 100世代×32個 ≈ 83億演算 になり非実用的。
-        // 256点にすると約128倍高速（同等の近似精度は対数間隔で保証される）。
-        static constexpr int kOptimFreqPoints = 256;
+        // 再生中ライブ再構成では周波数点を削減して CPU スパイクを抑える。
+        // 192kHz などの高レート時はさらに絞り込み、安定再生を優先する。
+        const int optimFreqPoints = liveReconfigure ? (highRateLive ? 24 : 64) : 256;
 
         // MKLAllocator → 標準アロケータへ変換
         std::vector<double> targetGroupDelayStd(targetGroupDelay.begin(), targetGroupDelay.end());
 
         // 対数間隔で 20Hz ～ Nyquist を 256点サンプリングし、元の線形 bin 配列から線形補間
-        std::vector<double> optim_freq_hz(kOptimFreqPoints);
-        std::vector<double> optim_target_gd(kOptimFreqPoints);
+        std::vector<double> optim_freq_hz(optimFreqPoints);
+        std::vector<double> optim_target_gd(optimFreqPoints);
         {
             const double logMin = std::log(20.0);
             const double logMax = std::log(sampleRate / 2.0);
-            for (int i = 0; i < kOptimFreqPoints; ++i)
+            for (int i = 0; i < optimFreqPoints; ++i)
             {
-                const double f = std::exp(logMin + (logMax - logMin) * i / (kOptimFreqPoints - 1));
+                const double f = std::exp(logMin + (logMax - logMin) * i / (optimFreqPoints - 1));
                 optim_freq_hz[i] = f;
                 // 線形 bin 配列: freq[k] = k * sampleRate / fftSize → k = f * fftSize / sampleRate
                 const double kReal = f * static_cast<double>(fftSize) / sampleRate;
@@ -2905,17 +2935,19 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         }
 
         convo::AllpassDesigner::Config designer_config;
-        // 第4案: 直接音重視。セクション数20、母集団8*dim=320、世代数600、sigmaMin=0.002。
-        designer_config.numSections          = 20;
+        // 再生中は問題緩和優先で探索次元を下げる。
+        designer_config.numSections          = liveReconfigure ? (highRateLive ? 4 : 8) : 20;
         designer_config.method               = convo::OptimizationMethod::CMAES;
-        designer_config.freqPoints           = kOptimFreqPoints;
+        designer_config.freqPoints           = optimFreqPoints;
         designer_config.minFreqHz            = 20.0;
         designer_config.maxFreqHz            = sampleRate / 2.0;
         // Real-time safety tuning:
         // 過度な探索コストで再生系を圧迫しないよう、母集団と最大世代を抑制する。
         // 実測ログでは 30 世代前後で収束しているため、品質を維持しつつ負荷を削減できる。
-        designer_config.cmaesMaxGenerations  = 160;
-        designer_config.cmaesPopulationSize  = 64;   // dim=40 に対して 1.6x（旧: 320）
+        // ライブ再生中はCPU占有を最優先で抑え、オーディオ途切れを防止する。
+        // 192kHz など高サンプルレートではさらに探索量を削減する。
+        designer_config.cmaesMaxGenerations  = liveReconfigure ? (highRateLive ? 3 : 12) : 160;
+        designer_config.cmaesPopulationSize  = liveReconfigure ? (highRateLive ? 6 : 12) : 64;
         designer_config.cmaesInitialSigma    = 1.0;
         designer_config.cmaesParams.sigmaMin = 0.002;
         designer_config.cmaesParams.sigmaMax = 2.0;
@@ -3750,6 +3782,7 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
 
     // 4. UI 通知
     postCoalescedChangeNotification();
+    lastPreparedIRApplyTicks.store(juce::Time::getHighResolutionTicks(), std::memory_order_release);
 
     // DSP リビルドトリガー:
     // Progressive upgrade が有効な場合、途中ステップ（512/1024/2048）では
@@ -4483,7 +4516,12 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     auto* oldConv = m_activeEngine.exchange(clonedConv, std::memory_order_acq_rel);
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
-    cachedLatency.store(other.cachedLatency.load(std::memory_order_acquire), std::memory_order_release);
+
+    // Copy latency snapshot with pointer management
+    auto* otherSnap = other.cachedLatency.load(std::memory_order_acquire);
+    auto* newSnap = otherSnap ? new LatencySnapshot(*otherSnap) : new LatencySnapshot();
+    auto* oldSnap = cachedLatency.exchange(newSnap, std::memory_order_acq_rel);
+    delete oldSnap;
 
     irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
     uiAlgorithmLatencySamples.store(other.uiAlgorithmLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
@@ -5376,12 +5414,14 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
 
 int ConvolverProcessor::getLatencySamples() const
 {
-    return cachedLatency.load(std::memory_order_acquire).totalLatencySamples;
+    auto snap = cachedLatency.load(std::memory_order_acquire);
+    return snap ? snap->totalLatencySamples : 0;
 }
 
 int ConvolverProcessor::getTotalLatencySamples() const
 {
-    return cachedLatency.load(std::memory_order_acquire).totalLatencySamples;
+    auto snap = cachedLatency.load(std::memory_order_acquire);
+    return snap ? snap->totalLatencySamples : 0;
 }
 
 void ConvolverProcessor::updateLatencyCache() noexcept
@@ -5392,12 +5432,16 @@ void ConvolverProcessor::updateLatencyCache() noexcept
     snap.irPeakLatencySamples = breakdown.irPeakLatencySamples;
     snap.totalLatencySamples = breakdown.totalLatencySamples;
     snap.hasParallelDryPath = breakdown.directHeadActive;
-    cachedLatency.store(snap, std::memory_order_release);
+
+    auto* newSnap = new LatencySnapshot(snap);
+    auto* oldSnap = cachedLatency.exchange(newSnap, std::memory_order_acq_rel);
+    delete oldSnap;
 }
 
 void ConvolverProcessor::requestHostDisplayUpdate()
 {
-    const int total = cachedLatency.load(std::memory_order_acquire).totalLatencySamples;
+    auto snap = cachedLatency.load(std::memory_order_acquire);
+    const int total = snap ? snap->totalLatencySamples : 0;
     if (total == lastReportedLatency)
         return;
 
@@ -5408,7 +5452,8 @@ void ConvolverProcessor::requestHostDisplayUpdate()
     {
         if (auto* self = weakThis.get())
         {
-            const int latest = self->cachedLatency.load(std::memory_order_acquire).totalLatencySamples;
+            auto snap = self->cachedLatency.load(std::memory_order_acquire);
+            const int latest = snap ? snap->totalLatencySamples : 0;
             if (latest != self->lastReportedLatency)
             {
                 self->lastReportedLatency = latest;

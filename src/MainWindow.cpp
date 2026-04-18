@@ -227,6 +227,8 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
     if (source == &audioEngine)
     {
+        DBG("[DIAG] MainWindow::changeListenerCallback enter (audioEngine)");
+        juce::Logger::writeToLog("[DIAG] MainWindow::changeListenerCallback enter (audioEngine)");
         if (eqPanel != nullptr)
             eqPanel->updateAllControls();
         if (convolverPanel != nullptr)
@@ -249,6 +251,8 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
         softClipButton.setToggleState(audioEngine.isSoftClipEnabled(), juce::dontSendNotification);
         saturationValueLabel.setText(formatSaturationValue(audioEngine.getSaturationAmount()),
                                      juce::dontSendNotification);
+        DBG("[DIAG] MainWindow::changeListenerCallback leave (audioEngine)");
+        juce::Logger::writeToLog("[DIAG] MainWindow::changeListenerCallback leave (audioEngine)");
     }
 }
 

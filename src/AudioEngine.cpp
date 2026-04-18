@@ -1,4 +1,4 @@
-#include <immintrin.h> // AVX2
+﻿#include <immintrin.h> // AVX2
 
 //====================================================
 // AVX2 クロスフェード（double）
@@ -247,8 +247,12 @@ void AudioEngine::updateReaderEpoch(size_t slot, uint64_t epoch)
 
 void AudioEngine::processDeferredReleases()
 {
-    if (shutdownInProgress.load(std::memory_order_acquire) ||
-        gShuttingDown.load(std::memory_order_acquire))
+    // shutdownInProgress は SR/デバイス再構成でも true になるため、
+    // 再構成中の回収そのものを延期する。強制回収はアプリ終了時のみ許可。
+    if (shutdownInProgress.load(std::memory_order_acquire))
+        return;
+
+    if (gShuttingDown.load(std::memory_order_acquire))
     {
         g_deletionQueue.reclaimAllIgnoringEpoch();
         return;
@@ -613,8 +617,6 @@ namespace
     }
 }
 
-struct AudioEngine::DSPCore; // Forward declaration
-
 // Padé近似による高速tanh (std::exp回避)
 static inline double fastTanh(double x) noexcept
 {
@@ -817,12 +819,14 @@ AudioEngine::AudioEngine()
     , m_workerThread(m_commandBuffer, m_coordinator, m_generationManager, &affinityManager)
 {
     gShuttingDown.store(false, std::memory_order_release);
+    uiConvolverProcessor.setRcuProvider(this);
     // 必要な初期化処理があればここに追加
 }
 
 
 AudioEngine::~AudioEngine()
 {
+    diagLog("[DIAG] ~AudioEngine: enter");
     shutdownInProgress.store(true, std::memory_order_release);
     gShuttingDown.store(true, std::memory_order_release);
     cancelPendingUpdate();
@@ -864,7 +868,9 @@ AudioEngine::~AudioEngine()
     shutdownWorkerThread();
 
     // Shutdown 時は reader epoch 進行を待たずに遅延解放を強制回収する。
+        diagLog("[DIAG] ~AudioEngine: before g_deletionQueue.reclaimAllIgnoringEpoch");
     g_deletionQueue.reclaimAllIgnoringEpoch();
+        diagLog("[DIAG] ~AudioEngine: after g_deletionQueue.reclaimAllIgnoringEpoch");
 
     // ...既存の解放処理...
     if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
@@ -872,6 +878,7 @@ AudioEngine::~AudioEngine()
     if (latencyBufNewL) { _aligned_free(latencyBufNewL); latencyBufNewL = nullptr; }
     if (latencyBufNewR) { _aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
     latencyBufSize = 0;
+    diagLog("[DIAG] ~AudioEngine: exit");
 }
 
 // 以降の初期化コードはAudioEngineコンストラクタ本体へ移動すること
@@ -1985,7 +1992,8 @@ double AudioEngine::getCurrentLatencyMs() const
 // prepareToPlay
 //--------------------------------------------------------------
 void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
-{
+  {
+      diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
 
     gShuttingDown.store(false, std::memory_order_release);
     shutdownInProgress.store(false, std::memory_order_release);
@@ -2110,36 +2118,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             requestRebuild(convo::RebuildKind::Structural);
         }
     }
-
-    // [FIX] サンプルレートまたはブロックサイズが変わった場合、あるいはDSPが未初期化の場合、
-    // ここでDSPを再ビルドする。
-    // 以前はtimerCallback()が毎50msに再ビルドしていたが、それは誤りだった。
-    // prepareToPlayはMessageThreadから呼ばれるため、requestRebuild()を直接呼べる。
-
-    // [FIX] uiConvolverProcessor の currentBufferSize を必ず最新の bufferSize に同期する。
-    // この呼び出しが欠けていると currentBufferSize == 0 のまま残り、
-    // IR読み込み時に LoaderThread が blockSize=0 でMKLConvolver::setup(0,...) を呼んで
-    // numPartitions = (irLen - 1) / 0 → ゼロ除算クラッシュが発生する。
-    // prepareToPlay は Message Thread から呼ばれることが保証されているので安全。
-    uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
-
-    if (rateChanged)
-        uiConvolverProcessor.invalidatePendingLoads();
-
-    if (rateChanged || blockSizeChanged || currentDSP.load(std::memory_order_acquire) == nullptr)
-    {
-        if (juce::MessageManager::getInstance()->isThisTheMessageThread())
-        {
-            requestRebuild(safeSampleRate, bufferSize);
-        }
-        else
-        {
-            // フォールバック: メッセージスレッド以外から呼ばれた場合は
-            // mask に積んで AsyncUpdater/Timer 側へ委ねる (通常は到達しない)
-            requestRebuild(convo::RebuildKind::Structural);
-        }
+        diagLog("[DIAG] prepareToPlay: exit currentSR=" + juce::String(currentSampleRate.load(), 2) + " maxSPB=" + juce::String(maxSamplesPerBlock.load()));
     }
-}
 
 //--------------------------------------------------------------
 // DSPCore Implementation
@@ -2382,6 +2362,21 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     // UIコンポーネント(uiEqEditor等)へのアクセスやMKLメモリ確保を行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
+    if (deferredStructuralRebuildPending_.load(std::memory_order_acquire))
+    {
+        const int64_t dueTicks = deferredStructuralRebuildDueTicks_.load(std::memory_order_acquire);
+        const int64_t nowTicks = juce::Time::getHighResolutionTicks();
+        const bool uiHasIr = uiConvolverProcessor.isIRLoaded();
+        const bool activeHasIr = (activeDSP != nullptr) && activeDSP->convolver.isIRLoaded();
+
+        if (dueTicks > 0 && nowTicks < dueTicks && uiHasIr && !activeHasIr)
+        {
+            diagLog("[DIAG] requestRebuild(sr,bs): SUPPRESSED direct rebuild during deferred Structural window SR="
+                + juce::String(sampleRate, 2));
+            return;
+        }
+    }
+
     const int publishedFftSize = uiConvolverProcessor.getActiveCacheFFTSize();
     const int targetFftSize = uiConvolverProcessor.getTargetUpgradeFFTSize();
     const bool suppressIntermediateMixedPhasePublish =
@@ -2430,35 +2425,98 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     task.oversamplingType = osType;
     task.noiseShaperType = nsType;
 
-    DSPCore* dspToDestroy = nullptr; // To be destroyed outside the lock
+        DSPCore* dspToDestroy = nullptr; // To be destroyed outside the lock
     DSPCore* currentToRelease = nullptr;
+    bool queued = false;
+    bool blockedAsDuplicate = false;
+    bool blockedAsRecentDuplicate = false;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
 
-        // Increment generation and create task inside the lock to ensure atomicity
-        generation = ++rebuildGeneration;
-        task.generation = generation;
-
-        // If a task is already pending, move it out to be destroyed outside the lock.
-        // This prevents holding the lock during a potentially slow DSPCore destruction.
         if (hasPendingTask)
         {
-            dspToDestroy = pendingTask.newDSP;
-            currentToRelease = pendingTask.currentDSP;
+            const bool sameAsPending =
+                std::abs(pendingTask.sampleRate - sampleRate) <= 1.0e-6
+                && pendingTask.samplesPerBlock == samplesPerBlock
+                && pendingTask.ditherDepth == ditherDepth
+                && pendingTask.manualOversamplingFactor == osFactor
+                && pendingTask.oversamplingType == osType
+                && pendingTask.noiseShaperType == nsType;
+
+            if (sameAsPending)
+            {
+                blockedAsDuplicate = true;
+            }
+            else
+            {
+                dspToDestroy = pendingTask.newDSP;
+                currentToRelease = pendingTask.currentDSP;
+            }
         }
 
-        pendingTask = task;
-        hasPendingTask = true;
+        if (!blockedAsDuplicate)
+        {
+            const bool sameAsLastQueued =
+                std::abs(lastQueuedTaskSignature.sampleRate - sampleRate) <= 1.0e-6
+                && lastQueuedTaskSignature.samplesPerBlock == samplesPerBlock
+                && lastQueuedTaskSignature.ditherDepth == ditherDepth
+                && lastQueuedTaskSignature.manualOversamplingFactor == osFactor
+                && lastQueuedTaskSignature.oversamplingType == osType
+                && lastQueuedTaskSignature.noiseShaperType == nsType;
+
+            if (sameAsLastQueued)
+            {
+                const int64_t nowTicks = juce::Time::getHighResolutionTicks();
+                const int64_t minDeltaTicks = juce::Time::getHighResolutionTicksPerSecond() / 5; // 200ms
+                if (lastQueuedTaskTicks > 0 && (nowTicks - lastQueuedTaskTicks) < minDeltaTicks)
+                    blockedAsRecentDuplicate = true;
+            }
+        }
+
+        if (!blockedAsDuplicate && !blockedAsRecentDuplicate)
+        {
+            generation = ++rebuildGeneration;
+            task.generation = generation;
+            pendingTask = task;
+            hasPendingTask = true;
+            lastQueuedTaskSignature = task;
+            lastQueuedTaskTicks = juce::Time::getHighResolutionTicks();
+            queued = true;
+        }
     }
-    rebuildCV.notify_all();
+
+    if (queued)
+    {
+        rebuildCV.notify_all();
         diagLog("[DIAG] requestRebuild(sr,bs): task queued generation=" + juce::String(generation)
             + " SR=" + juce::String(sampleRate, 2));
+    }
+    else
+    {
+        if (blockedAsRecentDuplicate)
+        {
+            diagLog("[DIAG] requestRebuild(sr,bs): BLOCKED duplicate recent task SR="
+                + juce::String(sampleRate, 2));
+        }
+        else
+        {
+            diagLog("[DIAG] requestRebuild(sr,bs): BLOCKED duplicate pending task SR="
+                + juce::String(sampleRate, 2));
+        }
+    }
 
-    // Destroy the orphaned DSP from the superseded task outside the lock.
+    // Destroy orphaned DSP objects outside the lock.
     if (dspToDestroy)
         dspToDestroy->release();
     if (currentToRelease)
         currentToRelease->release();
+
+    if (!queued)
+    {
+        newDSP->release();
+        if (current)
+            current->release();
+    }
 }
 
 void AudioEngine::stopRebuildThread()
@@ -2690,6 +2748,9 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         latencyResetPending.store(true, std::memory_order_release);
     }
 
+    diagLog("[DIAG] commitNewDSP: entry gen=" + juce::String(generation)
+        + " dspToTrash=" + (dspToTrash != nullptr ? juce::String(dspToTrash->convolver.isIRLoaded() ? "IR" : "passthrough") : "null")
+        + " irLoaded=" + (newDSP != nullptr ? juce::String((int)newDSP->convolver.isIRLoaded()) : "n/a"));
     // 5. RCU deferred release：旧 DSP を grace period 後に解放する
     if (dspToTrash != nullptr)
     {
@@ -2699,25 +2760,54 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
         if (newDSP != nullptr && dspToTrash != nullptr)
         {
+            const bool oldHasIR = dspToTrash->convolver.isIRLoaded();
+            const bool newHasIR = newDSP->convolver.isIRLoaded();
+            const bool hasAudibleConvolverTransition = oldHasIR || newHasIR;
+            const bool irPresenceChanged = (oldHasIR != newHasIR);
+
             // 1. オーバーサンプリング倍率変更
-            if (newDSP->oversamplingFactor != dspToTrash->oversamplingFactor)
+            if (hasAudibleConvolverTransition
+                && newDSP->oversamplingFactor != dspToTrash->oversamplingFactor)
             {
                 needsCrossfade = true;
                 fadeTimeSec = std::max(fadeTimeSec, m_osFadeTimeSec.load(std::memory_order_relaxed));
             }
 
             // 2. 構造ハッシュ比較によるその他の変更検出
-            const uint64_t oldHash = dspToTrash->convolver.getStructuralHash();
-            const uint64_t newHash = newDSP->convolver.getStructuralHash();
-            if (oldHash != newHash)
+            // 両者とも IR 未ロード（実質 dry/passthrough）の場合、
+            // 構造ハッシュ差だけでクロスフェードを発火させる必要はない。
+            // 起動直後の設定同期で不要なフェード連打が起きるのを防ぐ。
+            if (hasAudibleConvolverTransition)
             {
-                needsCrossfade = true;
-                fadeTimeSec = std::max(fadeTimeSec, m_irFadeTimeSec.load(std::memory_order_relaxed));
-                fadeTimeSec = std::max(fadeTimeSec, m_irLengthFadeTimeSec.load(std::memory_order_relaxed));
-                fadeTimeSec = std::max(fadeTimeSec, m_phaseFadeTimeSec.load(std::memory_order_relaxed));
-                fadeTimeSec = std::max(fadeTimeSec, m_directHeadFadeTimeSec.load(std::memory_order_relaxed));
-                fadeTimeSec = std::max(fadeTimeSec, m_nucFilterFadeTimeSec.load(std::memory_order_relaxed));
-                fadeTimeSec = std::max(fadeTimeSec, m_tailFadeTimeSec.load(std::memory_order_relaxed));
+                const uint64_t oldHash = dspToTrash->convolver.getStructuralHash();
+                const uint64_t newHash = newDSP->convolver.getStructuralHash();
+                diagLog("[DIAG] commitNewDSP: hashes oldHash=" + juce::String((int64)oldHash) + " newHash=" + juce::String((int64)newHash) + " needsCF=" + juce::String((int)needsCrossfade));
+                if (oldHash != newHash)
+                {
+                    needsCrossfade = true;
+                    const double baseIrFade = m_irFadeTimeSec.load(std::memory_order_relaxed);
+
+                    // IRの有無が切り替わる遷移（passthrough->IR / IR->passthrough）は
+                    // 長時間フェードにすると二重処理時間が伸び、再生を圧迫しやすい。
+                    // そのため短いフェード時間に制限し、他の長時間系は適用しない。
+                    if (irPresenceChanged)
+                    {
+                        fadeTimeSec = std::max(fadeTimeSec, std::clamp(baseIrFade, 0.001, 0.010));
+                    }
+                    else
+                    {
+                        fadeTimeSec = std::max(fadeTimeSec, baseIrFade);
+                        fadeTimeSec = std::max(fadeTimeSec, m_irLengthFadeTimeSec.load(std::memory_order_relaxed));
+                        fadeTimeSec = std::max(fadeTimeSec, m_phaseFadeTimeSec.load(std::memory_order_relaxed));
+                        fadeTimeSec = std::max(fadeTimeSec, m_directHeadFadeTimeSec.load(std::memory_order_relaxed));
+                        fadeTimeSec = std::max(fadeTimeSec, m_nucFilterFadeTimeSec.load(std::memory_order_relaxed));
+                        fadeTimeSec = std::max(fadeTimeSec, m_tailFadeTimeSec.load(std::memory_order_relaxed));
+                    }
+                }
+            }
+            else
+            {
+                diagLog("[DIAG] commitNewDSP: skip crossfade for passthrough->passthrough");
             }
 
             // --- レイテンシ差・バッファ初期化はクロスフェード時のみ ---
@@ -2734,10 +2824,16 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                 latencyDelayNew.store(dNew, std::memory_order_release);
                 // ★ resetはAudioThreadで1回だけ行う
                 latencyResetPending.store(true, std::memory_order_release);
+
+                if (!oldHasIR && newHasIR)
+                    dspCrossfadeStartDelayBlocks.store(std::max(0, m_crossfadeStartDelayBlocks.load(std::memory_order_relaxed)), std::memory_order_release);
+                else
+                    dspCrossfadeStartDelayBlocks.store(0, std::memory_order_release);
             }
             else
             {
                 // クロスフェード不要時は絶対に遅延値・バッファを触らない
+                dspCrossfadeStartDelayBlocks.store(0, std::memory_order_release);
             }
 
             // デフォルト値（fadeTimeSec==0なら30ms）
@@ -2748,25 +2844,36 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // --- クロスフェードdeduplication・スナップショット ---
         if (needsCrossfade)
         {
+            diagLog("[DIAG] commitNewDSP: before addRef dspToTrash=" + juce::String((int64)dspToTrash));
             dspToTrash->addRef();
+            diagLog("[DIAG] commitNewDSP: after addRef ok");
             const bool isFadingActive = (fadingOutDSP.load(std::memory_order_acquire) != nullptr) ||
-                                        dspCrossfadePending.load(std::memory_order_acquire);
+                                        dspCrossfadePending.load(std::memory_order_acquire) ||
+                                        dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+            diagLog("[DIAG] commitNewDSP: isFadingActive=" + juce::String((int)isFadingActive));
             if (isFadingActive)
             {
+                diagLog("[DIAG] commitNewDSP: entering isFadingActive=true branch");
                 if (auto* prev = queuedOldDSP.exchange(dspToTrash, std::memory_order_acq_rel))
                     prev->release();
                 queuedNextFadeTimeSec.store(fadeTimeSec, std::memory_order_release);
                 fadeQueued.store(true, std::memory_order_release);
+                diagLog("[DIAG] commitNewDSP: isFadingActive branch done");
             }
             else
             {
+                diagLog("[DIAG] commitNewDSP: entering isFadingActive=false branch");
                 if (auto* oldFading = fadingOutDSP.exchange(dspToTrash, std::memory_order_acq_rel))
                     oldFading->release();
                 queuedFadeTimeSec.store(fadeTimeSec, std::memory_order_release);
                 dspCrossfadePending.store(true, std::memory_order_release);
                 setIRChangeFlag();
+                diagLog("[DIAG] commitNewDSP: isFadingActive=false branch done");
             }
+            diagLog("[DIAG] commitNewDSP: before final release");
             dspToTrash->release();
+            diagLog("[DIAG] commitNewDSP: crossfade block done");
+
         }
         else
         {
@@ -2793,7 +2900,10 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
     if (newDSP != nullptr)
     {
+        diagLog("[DIAG] commitNewDSP: before setMixedPhaseState state="
+            + juce::String(newDSP->convolver.getMixedPhaseState()));
         uiConvolverProcessor.setMixedPhaseState(newDSP->convolver.getMixedPhaseState());
+        diagLog("[DIAG] commitNewDSP: after setMixedPhaseState");
     }
 
     const LearningCommand cmd {
@@ -2803,16 +2913,24 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         static_cast<uint64_t>(generation)
     };
 
+    diagLog("[DIAG] commitNewDSP: before enqueueLearningCommand");
     if (!enqueueLearningCommand(cmd))
     {
         DBG("[AudioEngine] commitNewDSP: command queue overflow");
+        diagLog("[DIAG] commitNewDSP: enqueueLearningCommand overflow");
+    }
+    else
+    {
+        diagLog("[DIAG] commitNewDSP: enqueueLearningCommand ok");
     }
 
     // NOTE: rebuild 完了通知の唯一の発火点。
     // sendChangeMessage() は commitNewDSP() でのみ rebuild 用途で呼ぶ。
     // それ以外の sendChangeMessage() はフェード完了・UIパラメータ変更・
     // 状態復元など rebuild とは独立したイベント用途。
+    diagLog("[DIAG] commitNewDSP: before sendChangeMessage");
     sendChangeMessage();
+    diagLog("[DIAG] commitNewDSP: after sendChangeMessage");
 }
 
 void AudioEngine::processLearningCommands() noexcept
@@ -2990,10 +3108,43 @@ void AudioEngine::timerCallback()
 {
     processRebuildRequestsFallback();
 
+    if (!shutdownInProgress.load(std::memory_order_acquire)
+        && deferredStructuralRebuildPending_.load(std::memory_order_acquire))
+    {
+        const int64_t dueTicks = deferredStructuralRebuildDueTicks_.load(std::memory_order_acquire);
+        const int64_t nowTicks = juce::Time::getHighResolutionTicks();
+
+        if (dueTicks > 0 && nowTicks >= dueTicks)
+        {
+            deferredStructuralRebuildPending_.store(false, std::memory_order_release);
+            deferredStructuralRebuildDueTicks_.store(0, std::memory_order_release);
+
+            if (uiConvolverProcessor.isIRLoaded())
+            {
+                diagLog("[DIAG] timerCallback: issuing deferred Structural rebuild after prepared IR apply");
+                requestRebuild(convo::RebuildKind::Structural);
+
+                ++pendingIRGeneration;
+                setIRChangeFlag();
+
+                const LearningCommand cmd {
+                    LearningCommand::Type::IRChanged,
+                    false,
+                    pendingLearningMode.load(std::memory_order_acquire),
+                    pendingIRGeneration
+                };
+
+                if (!enqueueLearningCommand(cmd))
+                    DBG("[AudioEngine] timerCallback: deferred command queue overflow");
+            }
+        }
+    }
+
     processLearningCommands();
     processDeferredLearningActions();
 
-    if (fadingOutDSP.load(std::memory_order_acquire) == nullptr &&
+    if (!shutdownInProgress.load(std::memory_order_acquire) &&
+        fadingOutDSP.load(std::memory_order_acquire) == nullptr &&
         !dspCrossfadePending.load(std::memory_order_acquire) &&
         fadeQueued.exchange(false, std::memory_order_acq_rel))
     {
@@ -3126,6 +3277,8 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
         bool needsStructuralRebuild = false;
         double srForRebuild = 0.0;
         uint64_t uiStructuralHash = 0;
+        bool uiHasIrForRebuild = false;
+        bool dspHasIrForRebuild = false;
 
         {
             std::lock_guard<std::mutex> lk(rebuildMutex);
@@ -3136,6 +3289,8 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 
                 const bool uiHasIr = uiConvolverProcessor.isIRLoaded();
                 const bool dspHasIr = activeDSP->convolver.isIRLoaded();
+                uiHasIrForRebuild = uiHasIr;
+                dspHasIrForRebuild = dspHasIr;
 
                 if (uiHasIr)
                     uiStructuralHash = uiConvolverProcessor.getStructuralHash();
@@ -3155,6 +3310,8 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
             else
             {
                 needsStructuralRebuild = uiConvolverProcessor.isIRLoaded();
+                uiHasIrForRebuild = needsStructuralRebuild;
+                dspHasIrForRebuild = false;
                 if (needsStructuralRebuild)
                     uiStructuralHash = uiConvolverProcessor.getStructuralHash();
             }
@@ -3179,6 +3336,23 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
                         diagLog("[DIAG] convolverParamsChanged: requestRebuild Structural hash="
                             + juce::String::toHexString((int64_t) uiStructuralHash)
                             + " irName=" + uiConvolverProcessor.getIRName());
+        }
+
+        if (needsStructuralRebuild && uiHasIrForRebuild && !dspHasIrForRebuild)
+        {
+            const int64_t nowTicks = juce::Time::getHighResolutionTicks();
+            const int64_t appliedTicks = uiConvolverProcessor.getLastPreparedIRApplyTicks();
+            const int64_t minDeltaTicks = juce::Time::getHighResolutionTicksPerSecond() / 5; // 200ms
+
+            if (appliedTicks > 0 && (nowTicks - appliedTicks) < minDeltaTicks)
+            {
+                deferredStructuralRebuildPending_.store(true, std::memory_order_release);
+                deferredStructuralRebuildDueTicks_.store(appliedTicks + minDeltaTicks, std::memory_order_release);
+                pendingRebuildMask_.fetch_and(~convo::toMask(convo::RebuildKind::Structural), std::memory_order_acq_rel);
+                needsStructuralRebuild = false;
+
+                diagLog("[DIAG] convolverParamsChanged: DEFERRED Structural rebuild after prepared IR apply and cleared pending Structural bit");
+            }
         }
 
         if (needsStructuralRebuild)
@@ -3213,16 +3387,17 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 //--------------------------------------------------------------
 void AudioEngine::releaseResources()
 {
+    diagLog("[DIAG] releaseResources: enter");
     shutdownInProgress.store(true, std::memory_order_release);
     firstIrDryCrossfadePending.store(false, std::memory_order_release);
     dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
-    // デバイス停止時に重複抑止トークンをリセットする。
-    lastIssuedConvolverStructuralHash_.store(0, std::memory_order_release);
+        const bool finalShutdown = gShuttingDown.load(std::memory_order_acquire);
+    if (finalShutdown)
+    {
+        lastIssuedConvolverStructuralHash_.store(0, std::memory_order_release);
+        currentSampleRate.store(0.0);
+    }
 
-    // サンプルレートをリセット (描画停止用)
-    currentSampleRate.store(0.0);
-
-    // レベルをリセット
     inputLevelLinear.store(0.0f);
     outputLevelLinear.store(0.0f);
 
@@ -3231,68 +3406,69 @@ void AudioEngine::releaseResources()
 
     resetLearningControlState();
 
-    // ==================================================================
-    // 【Issue 2 完全解消】手動MMCSS revertを削除
-    // 理由:
-    //   1. JUCE 8.0.12 の setMMCSSModeEnabled() が内部で管理
-    //   2. mmcssHandle はローカル変数だったため未定義エラー発生
-    //   3. 手動revertは不要・リークリスクあり → JUCEに任せる
-    // ==================================================================
+    DSPCore* activeToRelease = nullptr;
+    DSPCore* fadingToRelease = nullptr;
+    DSPCore* queuedToRelease = nullptr;
+    DSPCore* pendingNewToRelease = nullptr;
+    DSPCore* pendingCurrentToRelease = nullptr;
 
-    // rebuildGeneration インクリメント・currentDSP・activeDSP の変更を
-    // rebuildMutex で保護し、commitNewDSP() との競合を防ぐ。
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
-
-        // rebuildThread の進行中タスクを obsolete にする。
-        // rebuildThread は isObsolete() チェックで task.currentDSP へのアクセスを
-        // 早期に打ち切るため、dangling pointer アクセスのウィンドウを最小化する。
-        // 安全な最終保証は ~AudioEngine() の rebuildThread.join() が担う。
         rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
-
-        // 1. Stop Audio Thread access
         currentDSP.store(nullptr, std::memory_order_release);
 
-        // 2. activeDSP を deferred release キューへ移す。
-        if (activeDSP)
-        {
-            activeDSP->release();
-            activeDSP = nullptr;
-        }
+        activeToRelease = activeDSP;
+        activeDSP = nullptr;
 
-        if (auto* fading = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
-            fading->release();
+        fadingToRelease = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel);
+        queuedToRelease = queuedOldDSP.exchange(nullptr, std::memory_order_acq_rel);
+        fadeQueued.store(false, std::memory_order_release);
+        dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
+        queuedFadeTimeSec.store(0.03, std::memory_order_release);
+        queuedNextFadeTimeSec.store(0.03, std::memory_order_release);
+
+        if (hasPendingTask)
+        {
+            pendingNewToRelease = pendingTask.newDSP;
+            pendingTask.newDSP = nullptr;
+            pendingCurrentToRelease = pendingTask.currentDSP;
+            pendingTask.currentDSP = nullptr;
+            hasPendingTask = false;
+        }
 
         dspCrossfadePending.store(false, std::memory_order_release);
         dspCrossfadeGain.setCurrentAndTargetValue(1.0);
     }
 
-    // 3. Release UI Processor Resources
-    uiConvolverProcessor.releaseResources();
-    uiEqEditor.releaseResources();
-
-    // 4. rebuild thread を停止（prepareToPlay で必要時に再起動する）
-    {
-        std::lock_guard<std::mutex> lock(rebuildMutex);
-        if (hasPendingTask)
-        {
-            if (pendingTask.newDSP)
-            {
-                pendingTask.newDSP->release();
-                pendingTask.newDSP = nullptr;
-            }
-            if (pendingTask.currentDSP)
-            {
-                pendingTask.currentDSP->release();
-                pendingTask.currentDSP = nullptr;
-            }
-            hasPendingTask = false;
-        }
-    }
+    diagLog("[DIAG] releaseResources: before stopRebuildThread");
     stopRebuildThread();
+    diagLog("[DIAG] releaseResources: after stopRebuildThread");
 
-    // Audio 停止後の解放フェーズでは grace period を待たずに回収してよい。
-    g_deletionQueue.reclaimAllIgnoringEpoch();
+    if (activeToRelease)
+        activeToRelease->release();
+    if (fadingToRelease)
+        fadingToRelease->release();
+    if (queuedToRelease)
+        queuedToRelease->release();
+    if (pendingNewToRelease)
+        pendingNewToRelease->release();
+    if (pendingCurrentToRelease)
+        pendingCurrentToRelease->release();
+
+    diagLog("[DIAG] releaseResources: before ui processor release");
+    diagLog("[DIAG] releaseResources: before uiConvolverProcessor.releaseResources");
+    uiConvolverProcessor.releaseResources();
+    diagLog("[DIAG] releaseResources: after uiConvolverProcessor.releaseResources");
+
+    diagLog("[DIAG] releaseResources: before uiEqEditor.releaseResources");
+    uiEqEditor.releaseResources();
+    diagLog("[DIAG] releaseResources: after uiEqEditor.releaseResources");
+
+    diagLog("[DIAG] releaseResources: after ui processor release");
+
+    diagLog("[DIAG] releaseResources: skip deferred reclaim (reconfigure phase)");
+
+    diagLog("[DIAG] releaseResources: ABOUT_TO_EXIT_SCOPE");
 }
 
 //--------------------------------------------------------------
@@ -3485,6 +3661,26 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
         DSPCore* fading = fadingOutDSP.load(std::memory_order_acquire);
         bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+        int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
+        if (fading != nullptr
+            && !useDryAsOld
+            && dspCrossfadePending.load(std::memory_order_acquire)
+            && pendingFadeDelayBlocks > 0)
+        {
+            dspCrossfadeStartDelayBlocks.store(pendingFadeDelayBlocks - 1, std::memory_order_release);
+
+            auto fadingState = procState;
+            fadingState.analyzerEnabled = false;
+            fadingState.adaptiveCaptureQueue = nullptr;
+
+            std::atomic<float> fadingInputMeter { 0.0f };
+            std::atomic<float> fadingOutputMeter { 0.0f };
+            fading->addRef();
+            fading->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
+            fading->release();
+            return;
+        }
+
         if ((fading != nullptr || firstIrDryCrossfadePending.load(std::memory_order_acquire))
             && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
         {
@@ -3783,6 +3979,26 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         // --- クロスフェード・遅延整合処理（現行設計に準拠） ---
         DSPCore* fading = fadingOutDSP.load(std::memory_order_acquire);
         bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+        int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
+        if (fading != nullptr
+            && !useDryAsOld
+            && dspCrossfadePending.load(std::memory_order_acquire)
+            && pendingFadeDelayBlocks > 0)
+        {
+            dspCrossfadeStartDelayBlocks.store(pendingFadeDelayBlocks - 1, std::memory_order_release);
+
+            auto fadingState = procState;
+            fadingState.analyzerEnabled = false;
+            fadingState.adaptiveCaptureQueue = nullptr;
+
+            std::atomic<float> fadingInputMeter { 0.0f };
+            std::atomic<float> fadingOutputMeter { 0.0f };
+            fading->addRef();
+            fading->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
+            fading->release();
+            return;
+        }
+
         if ((fading != nullptr || firstIrDryCrossfadePending.load(std::memory_order_acquire))
             && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
         {
@@ -3915,6 +4131,26 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
     DSPCore* fading = fadingOutDSP.load(std::memory_order_acquire);
     bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+    int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
+    if (fading != nullptr
+        && !useDryAsOld
+        && dspCrossfadePending.load(std::memory_order_acquire)
+        && pendingFadeDelayBlocks > 0)
+    {
+        dspCrossfadeStartDelayBlocks.store(pendingFadeDelayBlocks - 1, std::memory_order_release);
+
+        auto fadingState = procState;
+        fadingState.analyzerEnabled = false;
+        fadingState.adaptiveCaptureQueue = nullptr;
+
+        std::atomic<float> fadingInputMeter { 0.0f };
+        std::atomic<float> fadingOutputMeter { 0.0f };
+        fading->addRef();
+        fading->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
+        fading->release();
+        return;
+    }
+
     if ((fading != nullptr || firstIrDryCrossfadePending.load(std::memory_order_acquire))
         && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
     {
@@ -5211,6 +5447,23 @@ void AudioEngine::requestConvolverPreset(const juce::File& irFile)
     uiConvolverProcessor.loadIR(irFile);
 }
 
+void AudioEngine::beginBulkParameterRestore() noexcept
+{
+    m_isRestoringState = true;
+}
+
+void AudioEngine::endBulkParameterRestore(bool requestRebuildNow) noexcept
+{
+    m_isRestoringState = false;
+
+    if (!requestRebuildNow)
+        return;
+
+    const double sr = currentSampleRate.load(std::memory_order_acquire);
+    if (sr > 0.0)
+        requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
+}
+
 void AudioEngine::requestLoadState (const juce::ValueTree& state)
 {
     // B19: RAII ガードを使用して、例外発生時も確実にフラグを戻す
@@ -5349,6 +5602,10 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     auto convState = state.getChildWithName ("Convolver");
     if (convState.isValid())
         uiConvolverProcessor.setState (convState);
+
+    const double sr = currentSampleRate.load(std::memory_order_acquire);
+    if (sr > 0.0)
+        requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
 
     // UI更新通知
     sendChangeMessage();
@@ -5546,7 +5803,7 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
         sendChangeMessage();
 
         const double sr = currentSampleRate.load();
-        if (sr > 0.0)
+        if (!m_isRestoringState && sr > 0.0)
         {
             requestRebuild(sr, maxSamplesPerBlock.load());
         }
@@ -5588,7 +5845,7 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
         DBG_LOG("Noise Shaper changed: " + typeName);
         enqueueSnapshotCommand();
         const double sr = currentSampleRate.load();
-        if (sr > 0.0)
+        if (!m_isRestoringState && sr > 0.0)
             requestRebuild(sr, maxSamplesPerBlock.load());
     }
 }
@@ -5670,7 +5927,7 @@ void AudioEngine::setOversamplingFactor(int factor)
         m_currentOversamplingFactor.store(newFactor, std::memory_order_relaxed);
         enqueueSnapshotCommand();
         const double sr = currentSampleRate.load();
-        if (sr > 0.0)
+        if (!m_isRestoringState && sr > 0.0)
         {
             requestRebuild(sr, maxSamplesPerBlock.load());
         }
@@ -5688,7 +5945,7 @@ void AudioEngine::setOversamplingType(OversamplingType type)
     m_currentOversamplingType.store(type, std::memory_order_relaxed);
     enqueueSnapshotCommand();
     const double sr = currentSampleRate.load();
-    if (sr > 0.0)
+    if (!m_isRestoringState && sr > 0.0)
     {
         requestRebuild(sr, maxSamplesPerBlock.load());
     }
@@ -5740,3 +5997,6 @@ convo::HCMode AudioEngine::getEqLPFFilterMode() const noexcept
 {
     return eqLPFFilterMode.load(std::memory_order_relaxed);
 }
+
+
+

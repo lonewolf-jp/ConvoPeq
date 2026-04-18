@@ -221,6 +221,8 @@ public:
 
     void requestLoadState (const juce::ValueTree& state);
     juce::ValueTree getCurrentState() const;
+    void beginBulkParameterRestore() noexcept;
+    void endBulkParameterRestore(bool requestRebuildNow = true) noexcept;
 
     void setProcessingOrder(ProcessingOrder order);
     ProcessingOrder getProcessingOrder() const { return currentProcessingOrder.load(); }
@@ -256,6 +258,8 @@ public:
     void setEQFadeSamples(int samples) noexcept { m_eqFadeSamples.store(samples, std::memory_order_relaxed); }
     int getIRFadeSamples() const noexcept { return m_irFadeSamples.load(std::memory_order_relaxed); }
     int getEQFadeSamples() const noexcept { return m_eqFadeSamples.load(std::memory_order_relaxed); }
+    void setCrossfadeStartDelayBlocks(int blocks) noexcept;
+    int getCrossfadeStartDelayBlocks() const noexcept;
     bool isFading() const noexcept { return m_coordinator.isFading(); }
     const convo::SnapshotCoordinator& getSnapshotCoordinator() const noexcept { return m_coordinator; }
     void setIRChangeFlag() noexcept { m_pendingIRChange.store(true, std::memory_order_release); }
@@ -483,6 +487,7 @@ DSPCore();
 
         CustomInputOversampler oversampling;
         size_t oversamplingFactor = 1;
+        OversamplingType activeOversamplingType = OversamplingType::IIR;
         int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
         NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
         uint32_t activeAdaptiveCoeffGeneration = 0;
@@ -584,8 +589,10 @@ DSPCore();
         std::atomic<double> m_nucFilterFadeTimeSec { 0.030 };
         std::atomic<double> m_tailFadeTimeSec { 0.030 };
         std::atomic<double> m_osFadeTimeSec { 0.030 };
+        std::atomic<int> m_crossfadeStartDelayBlocks { 1 };
 
     std::atomic<bool> dspCrossfadePending { false };
+    std::atomic<int> dspCrossfadeStartDelayBlocks { 0 };
     std::atomic<bool> firstIrDryCrossfadePending { false }; // 初回IRロード時に dry を旧信号として使用
     std::atomic<bool> firstIrDryCrossfadeDone { false };    // アプリ起動後の初回1回のみ有効
     std::atomic<bool> dspCrossfadeUseDryAsOld { false };    // Audio Thread 実行中フラグ
@@ -605,6 +612,8 @@ DSPCore();
     std::atomic<bool> convBypassActive { false };
     std::atomic<uint32_t> pendingRebuildMask_{ 0 };
     std::atomic<int64_t> lastIRContentRebuildTicks_{ 0 };
+    std::atomic<bool> deferredStructuralRebuildPending_ { false };
+    std::atomic<int64_t> deferredStructuralRebuildDueTicks_ { 0 };
     // 同一IR構造に対する Structural rebuild の多重発火を抑止する。
     // 値は「直近で rebuild を要求した UI 側 Convolver 構造ハッシュ」。
     std::atomic<uint64_t> lastIssuedConvolverStructuralHash_{ 0 };
@@ -725,6 +734,8 @@ DSPCore();
     // The prepareToPlay() method ensures this by using MessageManager::callAsync if necessary.
     void requestRebuild(double sampleRate, int samplesPerBlock);
     void commitNewDSP(DSPCore* newDSP, int generation);
+    void prepareCommit(DSPCore* newDSP, int generation);
+    void executeCommit();
     bool isRebuildObsolete(int generation) const { return generation != rebuildGeneration.load(); }
     bool enqueueLearningCommand(const LearningCommand& cmd) noexcept;
     bool dequeueLearningCommand(LearningCommand& cmd) noexcept;
@@ -761,15 +772,29 @@ DSPCore();
     struct RebuildTask {
         DSPCore* newDSP = nullptr;
         DSPCore* currentDSP = nullptr;
-        double sampleRate;
-        int samplesPerBlock;
-        int ditherDepth;
-        int manualOversamplingFactor;
-        OversamplingType oversamplingType;
-        NoiseShaperType noiseShaperType;
-        int generation;
+        double sampleRate = 0.0;
+        int samplesPerBlock = 0;
+        int ditherDepth = 0;
+        int manualOversamplingFactor = 0;
+        OversamplingType oversamplingType = OversamplingType::IIR;
+        NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
+        int generation = 0;
     };
     RebuildTask pendingTask;
+    RebuildTask lastQueuedTaskSignature;
+    int64_t lastQueuedTaskTicks = 0;
+
+    // --- Commit 2段階化：CommitStaging と deferredCommitQueue ---
+    struct CommitStaging {
+        DSPCore* newDSP = nullptr;
+        DSPCore* oldDSP = nullptr;
+        int generation = 0;
+    };
+
+    std::queue<CommitStaging> deferredCommitQueue;
+    std::mutex deferredCommitMutex;
+
+    std::vector<DSPCore*> deferredDeleteQueue;  // generation mismatch された DSP を defer release
 
     // --- Adaptiveノイズシェイパー学習用メンバー ---
     struct AdaptiveCoeffBankSlot

@@ -872,6 +872,8 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
 {
     loadNoiseShaperState(engine);
 
+    engine.beginBulkParameterRestore();
+
     // ASIOドライバの切り替え時に発生しうるフリーズを防ぐため、初期化前に一度デバイスを閉じる
     deviceManager.closeAudioDevice();
 
@@ -1064,6 +1066,8 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
                 engine.getConvolverProcessor().setState(convolverState);
             }
 
+            engine.endBulkParameterRestore(true);
+
             return;
         }
     }
@@ -1099,6 +1103,8 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     engine.setInputHeadroomDb(-6.0f); // デフォルト -6dB
     engine.setOutputMakeupDb(12.0f); // [Fix] default 15→12 dB (unity gain)
     engine.setOversamplingType(AudioEngine::OversamplingType::IIR); // デフォルトIIR
+
+    engine.endBulkParameterRestore(true);
 }
 void DeviceSettings::applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist)
 {
