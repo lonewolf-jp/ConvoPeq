@@ -596,7 +596,9 @@ DSPCore();
     std::atomic<bool> firstIrDryCrossfadePending { false }; // 初回IRロード時に dry を旧信号として使用
     std::atomic<bool> firstIrDryCrossfadeDone { false };    // アプリ起動後の初回1回のみ有効
     std::atomic<bool> dspCrossfadeUseDryAsOld { false };    // Audio Thread 実行中フラグ
+    std::atomic<int> dspCrossfadeDryHoldSamples { 0 };      // dry-as-old開始直後の旧信号優先ホールド
     convo::LinearRamp dspCrossfadeGain;
+    convo::LinearRamp dspCrossfadeDryScaleGain;             // dry信号をIRスケールに合わせるため（60ms ramp）
     juce::AudioBuffer<float> dspCrossfadeFloatBuffer;
     juce::AudioBuffer<double> dspCrossfadeDoubleBuffer;
 

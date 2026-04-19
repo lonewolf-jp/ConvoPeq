@@ -1323,6 +1323,9 @@ void AudioEngine::initialize()
     firstIrDryCrossfadePending.store(false, std::memory_order_release);
     firstIrDryCrossfadeDone.store(false, std::memory_order_release);
     dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
+    dspCrossfadeDryHoldSamples.store(0, std::memory_order_release);
+    dspCrossfadeDryScaleGain.reset(48000.0, 0.060);  // Initialize with 60ms ramp time
+    dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
 
     // ==================================================================
     // 段階 1：RCU 基盤の初期化
@@ -2888,6 +2891,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     if (scheduleDryAsOldCrossfade)
     {
         queuedFadeTimeSec.store(dryAsOldFadeTimeSec, std::memory_order_release);
+        dspCrossfadeDryHoldSamples.store(std::max(1, maxSamplesPerBlock.load(std::memory_order_acquire)), std::memory_order_release);
+        // dry スケーリング: passthrough (1.0) -> IR scale (~0.133) へ 60ms で ramp
+        dspCrossfadeDryScaleGain.reset(std::max(1.0, currentSampleRate.load(std::memory_order_acquire)), 0.060);
+        dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
+        dspCrossfadeDryScaleGain.setTargetValue(uiConvolverProcessor.getCurrentIRScale());
         firstIrDryCrossfadePending.store(true, std::memory_order_release);
         dspCrossfadePending.store(true, std::memory_order_release);
         firstIrDryCrossfadeDone.store(true, std::memory_order_release);
@@ -3424,6 +3432,7 @@ void AudioEngine::releaseResources()
         queuedToRelease = queuedOldDSP.exchange(nullptr, std::memory_order_acq_rel);
         fadeQueued.store(false, std::memory_order_release);
         dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
+        dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
         queuedFadeTimeSec.store(0.03, std::memory_order_release);
         queuedNextFadeTimeSec.store(0.03, std::memory_order_release);
 
@@ -3771,11 +3780,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                 const double alignedNewR = latencyBufNewR[readNew];
 
                 const double gNew = dspCrossfadeGain.getNextValue();
+                const double dryScale = useDryAsOld ? dspCrossfadeDryScaleGain.getNextValue() : 1.0;
                 const double gOld = 1.0 - gNew;
+                const double dryScaledL = alignedOldL * dryScale;
+                const double dryScaledR = alignedOldR * dryScale;
                 if (dstL != nullptr)
-                    dstL[i] = static_cast<float>(alignedNewL * gNew + alignedOldL * gOld);
+                    dstL[i] = static_cast<float>(alignedNewL * gNew + dryScaledL * gOld);
                 if (dstR != nullptr)
-                    dstR[i] = static_cast<float>(alignedNewR * gNew + alignedOldR * gOld);
+                    dstR[i] = static_cast<float>(alignedNewR * gNew + dryScaledR * gOld);
 
                 writePos++;
                 if (writePos >= bufferSize)
@@ -3791,6 +3803,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                 if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
                     done->release();
                 dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+                dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
                 dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
             }
         }
@@ -4110,6 +4123,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                 if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
                     done->release();
                 dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+                dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
                 dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
             }
             return;
@@ -4313,6 +4327,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             if (auto* done = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel))
                 done->release();
             dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+            dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
             latencyDelayOld = 0;
             latencyDelayNew = 0;
             latencyWritePos = 0;

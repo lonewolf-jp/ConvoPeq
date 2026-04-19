@@ -803,6 +803,8 @@ private:
     void updateIRState(std::shared_ptr<juce::AudioBuffer<double>> newIR, double newSR);
 
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
+public: // Added for AudioEngine access
+    double getCurrentIRScale() const noexcept { return currentIRScale.load(); }
     std::atomic<double> currentIRScale { 1.0 }; // IRのスケールファクター (Auto Makeup + Safety Margin)
     convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     int cachedFFTBufferCapacity = 0;

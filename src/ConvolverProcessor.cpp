@@ -2910,7 +2910,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         // 1評価あたり 32769×8 ≈ 26万演算 × 100世代×32個 ≈ 83億演算 になり非実用的。
         // 再生中ライブ再構成では周波数点を削減して CPU スパイクを抑える。
         // 192kHz などの高レート時はさらに絞り込み、安定再生を優先する。
-        const int optimFreqPoints = liveReconfigure ? (highRateLive ? 24 : 64) : 256;
+        const int optimFreqPoints = liveReconfigure ? (highRateLive ? 12 : 64) : 256;
 
         // MKLAllocator → 標準アロケータへ変換
         std::vector<double> targetGroupDelayStd(targetGroupDelay.begin(), targetGroupDelay.end());
@@ -2936,7 +2936,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 
         convo::AllpassDesigner::Config designer_config;
         // 再生中は問題緩和優先で探索次元を下げる。
-        designer_config.numSections          = liveReconfigure ? (highRateLive ? 4 : 8) : 20;
+        designer_config.numSections          = liveReconfigure ? (highRateLive ? 2 : 8) : 20;
         designer_config.method               = convo::OptimizationMethod::CMAES;
         designer_config.freqPoints           = optimFreqPoints;
         designer_config.minFreqHz            = 20.0;
@@ -2956,31 +2956,55 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
 #endif
         designer_config.progressCallback     = progressCallback;
 
+        const bool preferGreedyForLive = liveReconfigure && highRateLive;
+        if (preferGreedyForLive)
+        {
+            // 192kHz 再生中は CMA-ES の CPU バーストが短時間ドロップアウトを誘発しやすい。
+            // この条件では軽量な GreedyAdaGrad を優先し、連続再生を最優先する。
+            designer_config.method        = convo::OptimizationMethod::GreedyAdaGrad;
+            designer_config.maxIterations = 4;
+            designer_config.learningRate  = 0.006;
+        }
+
         std::vector<convo::SecondOrderAllpass> allpass_sections;
         convo::AllpassDesigner designer;
 
         if (progressCallback) progressCallback(0.1f);
-
-        juce::Logger::writeToLog("MixedPhase: starting design with "
-                                 + juce::String(designer_config.freqPoints)
-                                 + " freq points, maxGen="
-                                 + juce::String(designer_config.cmaesMaxGenerations));
-
-        // shouldExit を渡して世代ループ中にキャンセルを受け付ける（旧実装では未渡し）
-        const auto designResult = designer.designWithCMAES(sampleRate, optim_freq_hz, optim_target_gd,
-                                    designer_config, allpass_sections, shouldExit);
-        juce::Logger::writeToLog("MixedPhase: design result = " + juce::String(static_cast<int>(designResult)));
-
-        bool designSuccess = (designResult == convo::DesignResult::Success);
-
-        // CMA-ES 失敗 / キャンセルされていない場合は Greedy+AdaGrad にフォールバック
-        if (!designSuccess && !(shouldExit && shouldExit()))
+        bool designSuccess = false;
+        if (designer_config.method == convo::OptimizationMethod::GreedyAdaGrad)
         {
-            designer_config.method        = convo::OptimizationMethod::GreedyAdaGrad;
-            designer_config.maxIterations = 50;
-            designer_config.learningRate  = 0.01;
+            juce::Logger::writeToLog("MixedPhase: starting GreedyAdaGrad with "
+                                     + juce::String(designer_config.freqPoints)
+                                     + " freq points, maxIter="
+                                     + juce::String(designer_config.maxIterations));
+
             designSuccess = designer.design(sampleRate, optim_freq_hz, optim_target_gd,
                                             designer_config, allpass_sections, shouldExit);
+            juce::Logger::writeToLog("MixedPhase: design result = " + juce::String(designSuccess ? 0 : 1));
+        }
+        else
+        {
+            juce::Logger::writeToLog("MixedPhase: starting design with "
+                                     + juce::String(designer_config.freqPoints)
+                                     + " freq points, maxGen="
+                                     + juce::String(designer_config.cmaesMaxGenerations));
+
+            // shouldExit を渡して世代ループ中にキャンセルを受け付ける（旧実装では未渡し）
+            const auto designResult = designer.designWithCMAES(sampleRate, optim_freq_hz, optim_target_gd,
+                                        designer_config, allpass_sections, shouldExit);
+            juce::Logger::writeToLog("MixedPhase: design result = " + juce::String(static_cast<int>(designResult)));
+
+            designSuccess = (designResult == convo::DesignResult::Success);
+
+            // CMA-ES 失敗 / キャンセルされていない場合は Greedy+AdaGrad にフォールバック
+            if (!designSuccess && !(shouldExit && shouldExit()))
+            {
+                designer_config.method        = convo::OptimizationMethod::GreedyAdaGrad;
+                designer_config.maxIterations = 50;
+                designer_config.learningRate  = 0.01;
+                designSuccess = designer.design(sampleRate, optim_freq_hz, optim_target_gd,
+                                                designer_config, allpass_sections, shouldExit);
+            }
         }
 
         if (progressCallback) progressCallback(0.9f);
