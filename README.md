@@ -3,52 +3,30 @@
 
 ---
 
-## New in v0.6.2
+## New in v0.6.3
 
-### Main Changes in v0.6.2
+### Main Changes in v0.6.3
 
-This update summarizes the source-code changes from commit b340698 to the current state.
+This section summarizes source code changes from commit `157bbb4` to the current working state.
 
-#### 1. New Architecture Foundation (`src/core/` addition – 1344 lines)
+- **Engine robustness improvements:**
+  Refactoring in `AudioEngine` and related snapshot paths to improve DSP lifecycle handling, state handoff safety, fade behavior, and runtime recovery/failsafe behavior.
 
-**Introduction of snapshot/RCU-based state management architecture:**
+- **Convolution pipeline optimization:**
+  Major updates in `ConvolverProcessor`, `MKLNonUniformConvolver`, and related DSP components to improve IR processing behavior and runtime performance.
 
-- `ThreadAffinityManager.h` (317 lines) – Thread affinity and epoch management
-- `SnapshotCoordinator.h/cpp` (128+112 lines) – Snapshot coordination
-- `GlobalSnapshot.h/cpp` – Global state snapshots
-- `SnapshotAssembler.h/cpp` – Snapshot assembly
-- `SnapshotFactory.h/cpp` – Snapshot creation
-- `WorkerThread.h/cpp` – Worker thread foundation
-- `CommandBuffer.h` – Lock-free command buffer
-- `DeletionQueue.h/cpp` – RCU deletion queue
-- `ReaderEpoch.h`, `EQParameters.h`, `SnapshotParams.h`, `Types.h`
+- **Threading and background processing updates:**
+  Improvements in worker-thread flow and rebuild orchestration, plus foundational additions such as lock-free buffering and rebuild-related core types.
 
-#### 2. EQ Processing Separation and Extension
+- **UI synchronization adjustments:**
+  Updates in analyzer/main UI components to better track engine state transitions and improve consistency between processing state and visualization.
 
-- **New:** `EQEditProcessor.h/cpp` – EQ edit processor added
-- **Modified:** `EQProcessor.h/cpp` (605+94 lines changed) – Significant refactoring of the existing EQ processor
+- **Documentation and metadata updates:**
+  Added partition-structure technical documentation and refreshed build/project metadata, including the version bump to `v0.6.3`.
 
-#### 3. Core Engine Major Refactoring
+**Range summary (`157bbb4..HEAD`):** 28 files changed, approximately +4072 / -1439 lines.
 
-- **AudioEngine.h/cpp** (1000+ lines added) – Snapshot/RCU integration, thread management overhaul
-- **ConvolverProcessor.h/cpp** (748+120 lines changed) – Snapshot-based state management introduction
-
-#### 4. Other Enhancements
-
-- `AlignedAllocation.h` – Memory alignment feature additions
-- `CustomInputOversampler.h`, `PsychoacousticDither.h` – Signal processing enhancements
-- `.vscode/tasks.json` (58 lines added) – Build task expansion
-- `README.md`, coding convention documents updated
-
-#### 5. Deletions
-
-- `tests/test_group_delay.cpp` – Removed
-
-#### Summary
-
-**Total:** 52 files changed, 4028 lines added, 1105 lines deleted
-
-**Primary Focus:** Introduction of snapshot/RCU-based inter-thread data handoff mechanisms that guarantee real-time safety, and architectural overhaul to eliminate audio-thread blocking.
+**Current uncommitted scope:** version/docs update (`v0.6.3`) and additional snapshot/debounce-related stability improvements.
 
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 
@@ -59,7 +37,7 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
 - Platform: **Windows 11 x64 only**
 - Framework: **JUCE 8.0.12**
 - Precision: **64-bit double** on the main DSP path
-- Performance focus: **AVX2 + Intel oneMKL and IPP** (requires minimum 4 physical CPU cores)
+- Performance focus: **AVX2 + Intel oneMKL and IPP** (best experience on modern multi-core x64 CPUs)
 
 ---
 
@@ -125,7 +103,7 @@ ConvoPeq/
 - Input oversampling and output conditioning (`CustomInputOversampler`, `OutputFilter`)
 - Optional soft clipping and final dither stage
 - Real-time spectrum analyzer with EQ overlay (`SpectrumAnalyzerComponent`)
-- ASIO/WASAPI-oriented standalone runtime with device settings persistence
+- Standalone runtime with ASIO/WASAPI/DirectSound device support and persistent device settings
 
 ---
 

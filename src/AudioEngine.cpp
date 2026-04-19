@@ -1378,6 +1378,60 @@ void AudioEngine::shutdownWorkerThread()
 
 bool AudioEngine::enqueueSnapshotCommand() noexcept
 {
+    auto makeDebounceKey = [](uint64_t seed, uint64_t value) noexcept -> uint64_t
+    {
+        // 64-bit mix (no libm, no allocation)
+        constexpr uint64_t kMul = 0x9E3779B185EBCA87ull;
+        seed ^= value + kMul + (seed << 6) + (seed >> 2);
+        return seed;
+    };
+
+    const auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    if (mm != nullptr && mm->isThisTheMessageThread())
+    {
+        uint64_t eqHash = 0;
+        if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
+            eqHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
+
+        uint64_t key = 0xD6E8FEB86659FD93ull;
+        key = makeDebounceKey(key, eqHash);
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_pendingIRChange.load(std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_pendingNSChange.load(std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_pendingAGCChange.load(std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentEqBypass.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentConvBypass.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentProcessingOrder.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentSoftClipEnabled.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentOversamplingFactor.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentOversamplingType.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentDitherBitDepth.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentNoiseShaperType.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentInputHeadroomDb.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentOutputMakeupDb.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentConvInputTrimDb.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentSaturationAmount.load(std::memory_order_relaxed)));
+
+        const bool hasLastKey = hasLastEnqueuedSnapshotDebounceKey_.load(std::memory_order_acquire);
+        const uint64_t lastKey = lastEnqueuedSnapshotDebounceKey_.load(std::memory_order_acquire);
+        if (hasLastKey && lastKey == key)
+        {
+            diagLog("[VERIFY] enqueue snapshot debounced: identical snapshot intent");
+            return true;
+        }
+
+        const uint64_t generation = m_generationManager.bumpGeneration();
+        const convo::ParameterCommand cmd(convo::ParameterCommand::Type::ParameterChanged, generation);
+        if (!m_commandBuffer.push(cmd))
+        {
+            DBG("AudioEngine: CommandBuffer full, dropping parameter change command");
+            return false;
+        }
+
+        lastEnqueuedSnapshotDebounceKey_.store(key, std::memory_order_release);
+        hasLastEnqueuedSnapshotDebounceKey_.store(true, std::memory_order_release);
+        return true;
+    }
+
     const uint64_t generation = m_generationManager.bumpGeneration();
     const convo::ParameterCommand cmd(convo::ParameterCommand::Type::ParameterChanged, generation);
     if (!m_commandBuffer.push(cmd))
@@ -1603,6 +1657,14 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     if (EQCoeffCache* cache = eqCacheManager.getOrCreate(eqParams, sampleRate, maxBlockSize, generation))
         eqCoeffHash = cache->paramsHash;
 
+    {
+        const int currentIndex = latestEqFallbackReadIndex.load(std::memory_order_relaxed);
+        const int publishIndex = 1 - currentIndex;
+        latestEqParamsForFallback[(size_t) publishIndex] = eqParams;
+        latestEqHashForFallback[(size_t) publishIndex] = eqCoeffHash;
+        latestEqFallbackReadIndex.store(publishIndex, std::memory_order_release);
+    }
+
     convo::SnapshotParams params = convo::SnapshotAssembler::assemble(
         convState,
         eqParams,
@@ -1635,6 +1697,46 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         return;
     }
 
+    const bool hasPendingNSChange = m_pendingNSChange.load(std::memory_order_acquire);
+    const bool hasPendingAGCChange = m_pendingAGCChange.load(std::memory_order_acquire);
+    if (!hasPendingNSChange && !hasPendingAGCChange && !m_coordinator.isFading())
+    {
+        const convo::GlobalSnapshot* currentSnap = m_coordinator.getCurrent();
+        if (currentSnap != nullptr)
+        {
+            const bool snapshotEquivalent =
+                currentSnap->convState == params.convState
+                && currentSnap->eqCoeffHash == params.eqCoeffHash
+                && currentSnap->inputHeadroomGain == params.inputHeadroomGain
+                && currentSnap->outputMakeupGain == params.outputMakeupGain
+                && currentSnap->convInputTrimGain == params.convInputTrimGain
+                && currentSnap->convBypass == params.convBypass
+                && currentSnap->eqBypass == params.eqBypass
+                && currentSnap->processingOrder == params.processingOrder
+                && currentSnap->softClipEnabled == params.softClipEnabled
+                && currentSnap->saturationAmount == params.saturationAmount
+                && currentSnap->oversamplingType == params.oversamplingType
+                && currentSnap->oversamplingFactor == params.oversamplingFactor
+                && currentSnap->ditherBitDepth == params.ditherBitDepth
+                && currentSnap->noiseShaperType == params.noiseShaperType
+                && currentSnap->nsCoeffs == params.nsCoeffs;
+
+            if (snapshotEquivalent)
+            {
+                diagLog("[VERIFY] snapshot no-op suppressed: hash=0x"
+                    + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
+                    + " gen=" + juce::String(static_cast<juce::int64>(generation)));
+                return;
+            }
+        }
+    }
+
+    debugLastCreatedEqHash.store(eqCoeffHash, std::memory_order_release);
+    debugLastCreateAudioBlockCounter.store(m_audioBlockCounter.load(std::memory_order_acquire), std::memory_order_release);
+    diagLog("[VERIFY] EQ createdHash=0x"
+        + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
+        + " gen=" + juce::String(static_cast<juce::int64>(generation)));
+
     const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::create(params);
 
     if (m_pendingNSChange.exchange(false, std::memory_order_acq_rel))
@@ -1660,9 +1762,21 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     }
 
     if (fadeSamples > 0)
+    {
         m_coordinator.startFade(newSnap, fadeSamples);
+    }
     else
+    {
         m_coordinator.switchImmediate(newSnap);
+    }
+
+    // フェイルセーフ: 何らかの競合で fade が開始されず current も空のままなら、
+    // 即時適用にフォールバックして反映欠落を防ぐ。
+    if (!m_coordinator.isFading() && m_coordinator.getCurrent() == nullptr)
+    {
+        DBG("[VERIFY] snapshot apply fallback: force switchImmediate");
+        m_coordinator.switchImmediate(newSnap);
+    }
 }
 
 
@@ -2653,14 +2767,22 @@ void AudioEngine::rebuildThreadLoop()
             // Release ownership from guard, pass to commitNewDSP
             DSPCore* dspToCommit = dspGuard.ptr;
             dspGuard.ptr = nullptr;
-            if (! juce::MessageManager::callAsync([weakSelf = juce::WeakReference<AudioEngine>(this), newDSP = dspToCommit, generation = task.generation] {
-                if (auto* self = weakSelf.get())
+            AudioEngine* const selfPtr = this;
+            if (! juce::MessageManager::callAsync([selfPtr, newDSP = dspToCommit, generation = task.generation] {
+                // シャットダウン開始後はオーファンDSPを即時解放して commit 経路へ入らない。
+                // WeakReference 構築タイミングのアサート回避を優先し、global shutdown flag で防御する。
+                if (gShuttingDown.load(std::memory_order_acquire))
                 {
-                    self->commitNewDSP(newDSP, generation);
+                    newDSP->release();
+                    return;
+                }
+
+                if (selfPtr != nullptr)
+                {
+                    selfPtr->commitNewDSP(newDSP, generation);
                 }
                 else
                 {
-                    // Engine is gone, delete the orphan DSP
                     newDSP->release();
                 }
             }))
@@ -3116,6 +3238,117 @@ void AudioEngine::timerCallback()
 {
     processRebuildRequestsFallback();
 
+    // フェイルセーフ: current snapshot が欠落した状態を放置すると
+    // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
+    if (!shutdownInProgress.load(std::memory_order_acquire)
+        && currentDSP.load(std::memory_order_acquire) != nullptr
+        && !m_coordinator.isFading()
+        && m_coordinator.getCurrent() == nullptr)
+    {
+        diagLog("[VERIFY] snapshot bootstrap: current was null, requesting worker snapshot refresh");
+        if (!enqueueSnapshotCommand())
+            diagLog("[VERIFY] snapshot bootstrap: enqueueSnapshotCommand failed");
+    }
+
+    {
+        const uint32_t observedVersion = debugAppliedEqHashVersion.load(std::memory_order_acquire);
+        debugObservedEqHashVersion = observedVersion;
+
+        const uint64_t createdHash = debugLastCreatedEqHash.load(std::memory_order_acquire);
+        const uint64_t appliedHash = debugLastAppliedEqHash.load(std::memory_order_acquire);
+        const uint64_t createBlockCounter = debugLastCreateAudioBlockCounter.load(std::memory_order_acquire);
+        const uint64_t nowBlockCounter = m_audioBlockCounter.load(std::memory_order_acquire);
+        const uint64_t processedBlocksSinceCreate = (nowBlockCounter >= createBlockCounter)
+            ? (nowBlockCounter - createBlockCounter)
+            : 0;
+        const int dspReady = (currentDSP.load(std::memory_order_acquire) != nullptr) ? 1 : 0;
+        const int coordIsFading = debugLastCoordinatorIsFading.load(std::memory_order_acquire);
+        const int updateFadeReturned = debugLastUpdateFadeReturned.load(std::memory_order_acquire);
+        const int fromNull = debugLastSnapshotFromNull.load(std::memory_order_acquire);
+        const int toNull = debugLastSnapshotToNull.load(std::memory_order_acquire);
+
+        const bool eqMismatch = (createdHash != 0 && createdHash != appliedHash && dspReady == 1);
+        const bool recoveryEligible = eqMismatch
+            && coordIsFading == 0
+            && processedBlocksSinceCreate >= 4;
+        if (recoveryEligible)
+        {
+            if (debugLastRecoveryAttemptCreatedEqHash != createdHash)
+            {
+                debugRecoveryRetryCountForCurrentHash = 0;
+                debugRecoverySuppressedForCurrentHash = false;
+            }
+
+            const bool firstAttemptForThisHash = (debugLastRecoveryAttemptCreatedEqHash != createdHash);
+            const bool retryAfterProgress = (nowBlockCounter > debugLastRecoveryAttemptAudioBlockCounter + 256);
+            if (firstAttemptForThisHash || retryAfterProgress)
+            {
+                debugLastRecoveryAttemptCreatedEqHash = createdHash;
+                debugLastRecoveryAttemptAudioBlockCounter = nowBlockCounter;
+
+                if (debugRecoveryRetryCountForCurrentHash < 3)
+                {
+                    ++debugRecoveryRetryCountForCurrentHash;
+#ifdef _DEBUG
+                    const uint64_t workerRecv = m_workerThread.getCommandsReceived();
+                    const uint64_t workerSnap = m_workerThread.getSnapshotsCreated();
+                    const uint64_t workerDrop = m_workerThread.getCommandsDropped();
+#else
+                    const uint64_t workerRecv = 0;
+                    const uint64_t workerSnap = 0;
+                    const uint64_t workerDrop = 0;
+#endif
+                    diagLog("[VERIFY] snapshot recovery: retry=" + juce::String(debugRecoveryRetryCountForCurrentHash)
+                        + " forcing reapply createdHash=0x"
+                        + juce::String::toHexString(static_cast<juce::int64>(createdHash))
+                        + " appliedHash=0x"
+                        + juce::String::toHexString(static_cast<juce::int64>(appliedHash))
+                        + " blocksSinceCreate=" + juce::String(static_cast<juce::int64>(processedBlocksSinceCreate))
+                        + " workerRecv=" + juce::String(static_cast<juce::int64>(workerRecv))
+                        + " workerSnap=" + juce::String(static_cast<juce::int64>(workerSnap))
+                        + " workerDrop=" + juce::String(static_cast<juce::int64>(workerDrop))
+                        + " genNow=" + juce::String(static_cast<juce::int64>(m_generationManager.getCurrentGeneration())));
+
+                    if (!enqueueSnapshotCommand())
+                        diagLog("[VERIFY] snapshot recovery: enqueueSnapshotCommand failed");
+                }
+                else if (!debugRecoverySuppressedForCurrentHash)
+                {
+                    debugRecoverySuppressedForCurrentHash = true;
+                    diagLog("[VERIFY] snapshot recovery: suppressed for createdHash=0x"
+                        + juce::String::toHexString(static_cast<juce::int64>(createdHash))
+                        + " after 3 retries (waiting for next hash change)");
+                }
+            }
+        }
+        else
+        {
+            debugRecoveryRetryCountForCurrentHash = 0;
+            debugRecoverySuppressedForCurrentHash = false;
+        }
+
+        if (createdHash != debugLastReportedCreatedEqHash ||
+            appliedHash != debugLastReportedAppliedEqHash ||
+            dspReady != debugLastReportedDspReady)
+        {
+            debugLastReportedCreatedEqHash = createdHash;
+            debugLastReportedAppliedEqHash = appliedHash;
+            debugLastReportedDspReady = dspReady;
+            diagLog("[VERIFY] EQ reflection createdHash=0x"
+                + juce::String::toHexString(static_cast<juce::int64>(createdHash))
+                + " appliedHash=0x"
+                + juce::String::toHexString(static_cast<juce::int64>(appliedHash))
+                + " matched=" + juce::String((int)(createdHash == appliedHash))
+                + " ver=" + juce::String((int)observedVersion)
+                + " blocksSinceCreate=" + juce::String(static_cast<juce::int64>(processedBlocksSinceCreate))
+                + " dspReady=" + juce::String(dspReady)
+                + " coordFading=" + juce::String(coordIsFading)
+                + " updRet=" + juce::String(updateFadeReturned)
+                + " fromNull=" + juce::String(fromNull)
+                + " toNull=" + juce::String(toNull));
+        }
+    }
+
     if (!shutdownInProgress.load(std::memory_order_acquire)
         && deferredStructuralRebuildPending_.load(std::memory_order_acquire))
     {
@@ -3143,7 +3376,9 @@ void AudioEngine::timerCallback()
                 };
 
                 if (!enqueueLearningCommand(cmd))
+                {
                     DBG("[AudioEngine] timerCallback: deferred command queue overflow");
+                }
             }
         }
     }
@@ -3171,7 +3406,9 @@ void AudioEngine::timerCallback()
     processDeferredReleases();
 
     if (m_coordinator.tryCompleteFade())
+    {
         sendChangeMessage();
+    }
 
     // 内部プロセッサのクリーンアップを実行する。
     if (auto* dsp = currentDSP.load(std::memory_order_acquire))
@@ -3631,12 +3868,17 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
         if (m_coordinator.isFading())
             m_coordinator.advanceFade(numSamples);
+        debugLastCoordinatorIsFading.store(m_coordinator.isFading() ? 1 : 0, std::memory_order_relaxed);
 
         float snapshotAlpha = 1.0f;
         const convo::GlobalSnapshot* snapshotFrom = nullptr;
         const convo::GlobalSnapshot* snapshotTo = nullptr;
-        const bool snapshotFading = m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo)
-            && snapshotFrom != nullptr
+        const bool updateFadeReturned = m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo);
+        debugLastUpdateFadeReturned.store(updateFadeReturned ? 1 : 0, std::memory_order_relaxed);
+        debugLastSnapshotFromNull.store(snapshotFrom == nullptr ? 1 : 0, std::memory_order_relaxed);
+        debugLastSnapshotToNull.store(snapshotTo == nullptr ? 1 : 0, std::memory_order_relaxed);
+
+        const bool snapshotFading = updateFadeReturned
             && snapshotTo != nullptr;
 
         if (snapshotFading)
@@ -3841,6 +4083,13 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
         return;
     }
 
+    const uint64_t hash = snap->eqCoeffHash;
+    if (hash != debugLastAppliedEqHash.load(std::memory_order_relaxed))
+    {
+        debugLastAppliedEqHash.store(hash, std::memory_order_relaxed);
+        debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
+    }
+
     const bool eqBypassed = snap->eqBypass;
     const bool convBypassed = snap->convBypass;
     const ProcessingOrder order = snap->processingOrder;
@@ -3984,6 +4233,21 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         buffer.clear();
         return;
     }
+
+    // EQ スナップショットフェードを進める (getNextAudioBlock と同等)
+    if (m_coordinator.isFading())
+        m_coordinator.advanceFade(numSamples);
+
+        debugLastCoordinatorIsFading.store(m_coordinator.isFading() ? 1 : 0, std::memory_order_relaxed);
+
+        float snapshotAlpha = 1.0f;
+        const convo::GlobalSnapshot* snapshotFrom = nullptr;
+        const convo::GlobalSnapshot* snapshotTo = nullptr;
+        const bool updateFadeReturned = m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo);
+        debugLastUpdateFadeReturned.store(updateFadeReturned ? 1 : 0, std::memory_order_relaxed);
+        debugLastSnapshotFromNull.store(snapshotFrom == nullptr ? 1 : 0, std::memory_order_relaxed);
+        debugLastSnapshotToNull.store(snapshotTo == nullptr ? 1 : 0, std::memory_order_relaxed);
+        (void) snapshotAlpha;
 
     const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
     if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
@@ -4464,6 +4728,31 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
 
     const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->m_coordinator.getCurrent() : nullptr;
     const bool useSnapshotEq = (snap != nullptr);
+    const convo::EQParameters* eqParamsToUse = nullptr;
+    const EQCoeffCache* eqCacheToUse = nullptr;
+    if (useSnapshotEq && ownerEngine != nullptr)
+    {
+        const uint64_t hash = snap->eqCoeffHash;
+        eqParamsToUse = &snap->eqParams;
+        eqCacheToUse = ownerEngine->eqCacheManager.get(hash);
+        if (hash != ownerEngine->debugLastAppliedEqHash.load(std::memory_order_relaxed))
+        {
+            ownerEngine->debugLastAppliedEqHash.store(hash, std::memory_order_relaxed);
+            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
+        }
+    }
+    else if (ownerEngine != nullptr)
+    {
+        uint64_t fallbackHash = 0;
+        const convo::EQParameters& fallbackParams = ownerEngine->getLatestEqParamsFallback(fallbackHash);
+        eqParamsToUse = &fallbackParams;
+        eqCacheToUse = ownerEngine->eqCacheManager.get(fallbackHash);
+        if (fallbackHash != 0 && fallbackHash != ownerEngine->debugLastAppliedEqHash.load(std::memory_order_relaxed))
+        {
+            ownerEngine->debugLastAppliedEqHash.store(fallbackHash, std::memory_order_relaxed);
+            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
+        }
+    }
 
     //----------------------------------------------------------
     // DSP処理チェーン (Dynamic Processing Order)
@@ -4480,10 +4769,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         // 2. EQ
         if (!state.eqBypassed)
         {
-            if (useSnapshotEq)
+            if (eqParamsToUse != nullptr)
             {
-                const EQCoeffCache* cache = ownerEngine->eqCacheManager.get(snap->eqCoeffHash);
-                eq.process(processBlock, snap->eqParams, cache);
+                eq.process(processBlock, *eqParamsToUse, eqCacheToUse);
             }
             else
             {
@@ -4500,10 +4788,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         // 1. EQ
         if (!state.eqBypassed)
         {
-            if (useSnapshotEq)
+            if (eqParamsToUse != nullptr)
             {
-                const EQCoeffCache* cache = ownerEngine->eqCacheManager.get(snap->eqCoeffHash);
-                eq.process(processBlock, snap->eqParams, cache);
+                eq.process(processBlock, *eqParamsToUse, eqCacheToUse);
             }
             else
             {
@@ -4727,6 +5014,31 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 
     const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->m_coordinator.getCurrent() : nullptr;
     const bool useSnapshotEq = (snap != nullptr);
+    const convo::EQParameters* eqParamsToUse = nullptr;
+    const EQCoeffCache* eqCacheToUse = nullptr;
+    if (useSnapshotEq && ownerEngine != nullptr)
+    {
+        const uint64_t hash = snap->eqCoeffHash;
+        eqParamsToUse = &snap->eqParams;
+        eqCacheToUse = ownerEngine->eqCacheManager.get(hash);
+        if (hash != ownerEngine->debugLastAppliedEqHash.load(std::memory_order_relaxed))
+        {
+            ownerEngine->debugLastAppliedEqHash.store(hash, std::memory_order_relaxed);
+            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
+        }
+    }
+    else if (ownerEngine != nullptr)
+    {
+        uint64_t fallbackHash = 0;
+        const convo::EQParameters& fallbackParams = ownerEngine->getLatestEqParamsFallback(fallbackHash);
+        eqParamsToUse = &fallbackParams;
+        eqCacheToUse = ownerEngine->eqCacheManager.get(fallbackHash);
+        if (fallbackHash != 0 && fallbackHash != ownerEngine->debugLastAppliedEqHash.load(std::memory_order_relaxed))
+        {
+            ownerEngine->debugLastAppliedEqHash.store(fallbackHash, std::memory_order_relaxed);
+            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
+        }
+    }
 
     eq.setBypass(state.eqBypassed);
 
@@ -4736,10 +5048,9 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
             convolver.process(processBlock);
         if (!state.eqBypassed)
         {
-            if (useSnapshotEq)
+            if (eqParamsToUse != nullptr)
             {
-                const EQCoeffCache* cache = ownerEngine->eqCacheManager.get(snap->eqCoeffHash);
-                eq.process(processBlock, snap->eqParams, cache);
+                eq.process(processBlock, *eqParamsToUse, eqCacheToUse);
             }
             else
             {
@@ -4755,10 +5066,9 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     {
         if (!state.eqBypassed)
         {
-            if (useSnapshotEq)
+            if (eqParamsToUse != nullptr)
             {
-                const EQCoeffCache* cache = ownerEngine->eqCacheManager.get(snap->eqCoeffHash);
-                eq.process(processBlock, snap->eqParams, cache);
+                eq.process(processBlock, *eqParamsToUse, eqCacheToUse);
             }
             else
             {

@@ -279,6 +279,17 @@ void SpectrumAnalyzerComponent::timerCallback()
         eqDataDirty = true;
     }
 
+    // Snapshot current 反映が遅延していても、UI側の最新EQ状態変化は取りこぼさない。
+    if (const auto* eqState = engine.getEQProcessor().getEQStateSnapshot())
+    {
+        const uint64_t directHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
+        if (directHash != lastDirectEqHash)
+        {
+            lastDirectEqHash = directHash;
+            eqDataDirty = true;
+        }
+    }
+
     const bool meterVisualChanged = updateLevelPeaks(dt);
 
     // ── サンプルレート変更検知 (タイマー駆動) ──
@@ -292,8 +303,9 @@ void SpectrumAnalyzerComponent::timerCallback()
 
     // EQデータ更新: アナライザーのON/OFFに関係なく、EQ曲線は常に最新状態を維持する。
     // サンプルレートが有効な場合のみ実行する（sr=0時にバッファがゼロクリアされるのを防ぐ）。
-    if (eqDataDirty && isShowing() && currentSampleRate > 0.0
-        && (now - lastEqUpdateTime) >= EQ_UPDATE_INTERVAL_SEC)
+    // さらに、dirty伝播が欠けた場合でも表示停止しないよう定期再計算をフォールバックとして有効化する。
+    const bool periodicEqRefreshDue = (now - lastEqUpdateTime) >= EQ_UPDATE_INTERVAL_SEC;
+    if ((eqDataDirty || periodicEqRefreshDue) && isShowing() && currentSampleRate > 0.0)
     {
         updateEQData();
         eqDataDirty = false;
@@ -536,6 +548,10 @@ void SpectrumAnalyzerComponent::changeListenerCallback (juce::ChangeBroadcaster*
 
         // 入力データ変更・オーバーサンプリング変更・IRファイル変更時にピークをリセット
         resetLevelPeaks();
+
+        // 通知受信時に即時再描画を要求し、EQ曲線の表示停止を防ぐ。
+        if (isShowing())
+            repaint();
     }
 }
 
@@ -928,7 +944,7 @@ void SpectrumAnalyzerComponent::paintEQCurve(juce::Graphics& g, const juce::Rect
 {
     // デバイス未接続時や初期化中はサンプルレートが0になるため、
     // 周波数応答計算（除算）が不正になるのを防ぐ
-    if (engine.getSampleRate() <= 0.0) return;
+    if (engine.getProcessingSampleRate() <= 0.0) return;
 
     const float plotX = static_cast<float>(area.getX());
     const float plotY = static_cast<float>(area.getY());

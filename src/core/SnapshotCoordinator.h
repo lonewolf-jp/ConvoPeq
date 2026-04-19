@@ -84,7 +84,7 @@ public:
 
         outCurrent = m_current.load(std::memory_order_acquire);
         outTarget = m_target.load(std::memory_order_acquire);
-        if (outCurrent == nullptr || outTarget == nullptr)
+        if (outTarget == nullptr)
         {
             abortFade();
             outAlpha = 1.0f;

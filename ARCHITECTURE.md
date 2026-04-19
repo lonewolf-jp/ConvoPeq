@@ -1,5 +1,5 @@
 
-# ConvoPeq Architecture (v0.6.2+)
+# ConvoPeq Architecture (v0.6.3+)
 
 This document describes the internal architecture of **ConvoPeq**, a Windows-only standalone audio application built with **JUCE 8.0.12** and Intel oneMKL. It is intended for developers and contributors working on DSP, threading, state transitions, and runtime behavior.
 

@@ -191,6 +191,7 @@ private:
     bool eqDataDirty = false;
     bool analyzerVisualsCleared = false;
     uint64_t lastEqHash = 0;
+    uint64_t lastDirectEqHash = 0;
 
     int currentTimerHz = 0;
     double lastEqUpdateTime = 0.0;

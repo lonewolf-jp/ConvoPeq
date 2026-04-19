@@ -34,6 +34,7 @@ struct CoeffSet {
 #include <cstring>
 #include <array>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -263,6 +264,17 @@ public:
     bool isFading() const noexcept { return m_coordinator.isFading(); }
     const convo::SnapshotCoordinator& getSnapshotCoordinator() const noexcept { return m_coordinator; }
     void setIRChangeFlag() noexcept { m_pendingIRChange.store(true, std::memory_order_release); }
+
+    // UI 操作が実際の音声演算へ反映されたかを確認するための診断値。
+    uint64_t getLastCreatedEqHashForDebug() const noexcept { return debugLastCreatedEqHash.load(std::memory_order_acquire); }
+    uint64_t getLastAppliedEqHashForDebug() const noexcept { return debugLastAppliedEqHash.load(std::memory_order_acquire); }
+
+    const convo::EQParameters& getLatestEqParamsFallback(uint64_t& outHash) const noexcept
+    {
+        const int index = latestEqFallbackReadIndex.load(std::memory_order_acquire);
+        outHash = latestEqHashForFallback[(size_t) index];
+        return latestEqParamsForFallback[(size_t) index];
+    }
 
     void setSoftClipEnabled(bool enabled);
     bool isSoftClipEnabled() const;
@@ -1006,6 +1018,30 @@ private:
     std::atomic<bool> m_pendingNSChange{ false };
     std::atomic<bool> m_pendingAGCChange{ false };
     std::atomic<uint64_t> m_audioBlockCounter{ 0 };
+
+    std::array<convo::EQParameters, 2> latestEqParamsForFallback{};
+    std::array<uint64_t, 2> latestEqHashForFallback{ 0, 0 };
+    std::atomic<int> latestEqFallbackReadIndex{ 0 };
+
+    // Audio Thread -> Message Thread 反映確認用 (RT安全: atomic store/fetch_add のみ)
+    std::atomic<uint64_t> debugLastCreatedEqHash{ 0 };
+    std::atomic<uint64_t> debugLastCreateAudioBlockCounter{ 0 };
+    std::atomic<uint64_t> debugLastAppliedEqHash{ 0 };
+    std::atomic<uint32_t> debugAppliedEqHashVersion{ 0 };
+    std::atomic<uint64_t> lastEnqueuedSnapshotDebounceKey_{ 0 };
+    std::atomic<bool> hasLastEnqueuedSnapshotDebounceKey_{ false };
+    uint32_t debugObservedEqHashVersion{ 0 }; // timerCallback (Message Thread) 専用
+    uint64_t debugLastReportedCreatedEqHash{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
+    uint64_t debugLastReportedAppliedEqHash{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
+    int debugLastReportedDspReady{ -1 }; // timerCallback 専用
+    uint64_t debugLastRecoveryAttemptCreatedEqHash{ 0 }; // timerCallback 専用
+    uint64_t debugLastRecoveryAttemptAudioBlockCounter{ 0 }; // timerCallback 専用
+    int debugRecoveryRetryCountForCurrentHash{ 0 }; // timerCallback 専用
+    bool debugRecoverySuppressedForCurrentHash{ false }; // timerCallback 専用
+    std::atomic<int> debugLastCoordinatorIsFading{ 0 };
+    std::atomic<int> debugLastUpdateFadeReturned{ 0 };
+    std::atomic<int> debugLastSnapshotFromNull{ 1 };
+    std::atomic<int> debugLastSnapshotToNull{ 1 };
 
     juce::AudioBuffer<float> m_fadeFloatBuffer;
     juce::AudioBuffer<double> m_fadeDoubleBuffer;

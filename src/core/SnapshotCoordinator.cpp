@@ -14,6 +14,14 @@ void SnapshotCoordinator::startFade(const GlobalSnapshot* target, int fadeSample
 		return;
 	}
 
+	// 初回適用で current が未初期化の場合は、
+	// null 起点フェードを避けて即時反映する。
+	if (m_current.load(std::memory_order_acquire) == nullptr)
+	{
+		switchImmediate(target);
+		return;
+	}
+
 	const GlobalSnapshot* oldTarget = m_target.exchange(target, std::memory_order_acq_rel);
 	if (oldTarget) {
 		// Audio Thread が参照中の可能性があるため、即時 delete せず RCU 遅延解放
@@ -44,6 +52,7 @@ void SnapshotCoordinator::advanceFade(int numSamples) noexcept
 	const int newRemaining = remaining - numSamples;
 	if (newRemaining <= 0)
 	{
+		m_fadeRemainingSamples.store(0, std::memory_order_release);
 		requestFadeCompletion();
 		return;
 	}
