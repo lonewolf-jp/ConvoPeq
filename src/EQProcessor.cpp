@@ -129,7 +129,6 @@ void EQProcessor::releaseResources()
 void EQProcessor::resetToDefaults()
 {
     auto newState = new EQState();
-    newState->addRef();
 
     for (int i = 0; i < NUM_BANDS; ++i)
     {
@@ -719,7 +718,6 @@ void EQProcessor::setBandFrequency(int band, float freq)
     auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
-    newState->addRef();
     newState->bands[band].frequency = freq;
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
@@ -735,7 +733,6 @@ void EQProcessor::setBandGain(int band, float gainDb)
     auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
-    newState->addRef();
     newState->bands[band].gain = gainDb;
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
@@ -751,7 +748,6 @@ void EQProcessor::setBandQ(int band, float q)
     auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
-    newState->addRef();
     newState->bands[band].q = q;
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
@@ -767,7 +763,6 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
     auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
-    newState->addRef();
     newState->bands[band].enabled = enabled;
 
     // 有効化時はステートをリセットして、古い状態（ポップノイズの原因）を排除する
@@ -792,7 +787,6 @@ void EQProcessor::setTotalGain(float gainDb)
     auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
-    newState->addRef();
     newState->totalGainDb = gainDb;
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
@@ -810,7 +804,6 @@ void EQProcessor::setAGCEnabled(bool enabled)
     if (oldState != nullptr)
     {
         auto newState = new EQState(*oldState);
-        newState->addRef();
         newState->agcEnabled = enabled;
         auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
         if (prev)
@@ -833,7 +826,6 @@ void EQProcessor::setBandType(int band, EQBandType type)
     auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
-    newState->addRef();
     newState->bandTypes[band] = type;
 
     // フィルタタイプ変更時はトポロジーが変わるためリセット必須
@@ -852,7 +844,6 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
     auto oldState = currentStateRaw.load(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
-    newState->addRef();
     newState->bandChannelModes[band] = mode;
 
     // チャンネルモード変更時もリセット推奨
@@ -878,7 +869,6 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
     if (oldState != nullptr)
     {
         auto newState = new EQState(*oldState);
-        newState->addRef();
         newState->nonlinearSaturation = clamped;
         auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
         if (prev)
@@ -906,7 +896,6 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
     if (oldState != nullptr)
     {
         auto newState = new EQState(*oldState);
-        newState->addRef();
         newState->filterStructure = (mode == FilterStructure::Parallel) ? 1 : 0;
         auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
         if (prev)
