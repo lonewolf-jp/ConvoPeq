@@ -15,6 +15,7 @@ namespace convo {
 
 struct SnapshotParams {
     const ConvolverState* convState = nullptr;
+    uint64_t convStateId = 0;           // ConvolverState インスタンス識別子（UAF回避比較用）
     EQParameters eqParams{};
     std::array<double, 9> nsCoeffs{};
 
@@ -36,6 +37,7 @@ struct SnapshotParams {
     NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
 
     uint64_t generation = 0;
+    uint64_t contentHash = 0;           // パラメータの一意性ハッシュ（高速否定用）
 
     // v2.3 フェーズ 1 追加フィールド
     double sampleRate = 48000.0;        // サンプリングレート [Hz]

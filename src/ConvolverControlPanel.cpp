@@ -41,6 +41,8 @@ public:
     explicit IRAdvancedSettingsComponent(AudioEngine& audioEngine)
         : engine(audioEngine)
     {
+        setOpaque(true);
+
         auto configureLabel = [](juce::Label& label, const juce::String& text)
         {
             label.setText(text, juce::dontSendNotification);
@@ -145,6 +147,11 @@ public:
         tailRolloffStrengthSlider.removeListener(this);
         partitionTailSlider.removeListener(this);
         tailModeCombo.removeListener(this);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
     }
 
     void resized() override
@@ -1015,7 +1022,7 @@ void ConvolverControlPanel::showIRAdvancedWindowImpl()
 
     juce::DialogWindow::LaunchOptions options;
     options.dialogTitle = "IR Advanced Settings";
-    options.dialogBackgroundColour = juce::Colours::darkslategrey.withAlpha(0.95f);
+    options.dialogBackgroundColour = juce::Colours::darkslategrey;
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
     options.resizable = false;
@@ -1048,7 +1055,7 @@ void ConvolverControlPanel::showConvolverSettingsWindowImpl()
 
     juce::DialogWindow::LaunchOptions options;
     options.dialogTitle = "Convolver Settings";
-    options.dialogBackgroundColour = juce::Colours::darkslategrey.withAlpha(0.95f);
+    options.dialogBackgroundColour = juce::Colours::darkslategrey;
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
     options.resizable = false;

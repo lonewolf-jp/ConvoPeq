@@ -47,7 +47,7 @@ class SafeStateSwapper
 {
 public:
     // リタイアバッファの最大エントリ数
-    static constexpr size_t kMaxRetired = 64;
+    static constexpr size_t kMaxRetired = 256;
 
     // 同時参加できる Reader の最大数
     static constexpr int kMaxReaders = 8;
@@ -180,12 +180,15 @@ public:
             std::lock_guard<std::mutex> lock(fallbackMutex);
             if (!fallbackQueue.empty())
             {
-                const auto& entry = fallbackQueue.top();
+                const auto entry = fallbackQueue.top();
                 if (entry.epoch < minReaderEpoch)
                 {
-                    auto* ptr = entry.state;
-                    fallbackQueue.pop();
-                    return ptr;
+                    if (entry.state != nullptr
+                        && entry.state->snapshotRefCount.load(std::memory_order_relaxed) == 0)
+                    {
+                        fallbackQueue.pop();
+                        return entry.state;
+                    }
                 }
             }
         }
@@ -200,10 +203,33 @@ public:
         if (isOlder(entryEpoch, minReaderEpoch))
         {
             ConvolverState* ptr = retiredBuffer[h].state.load(std::memory_order_acquire);
-            // state を nullptr にクリアしてから head を進める（二重取得防止）
-            retiredBuffer[h].state.store(nullptr, std::memory_order_relaxed);
+            if (ptr != nullptr
+                && ptr->snapshotRefCount.load(std::memory_order_relaxed) == 0)
+            {
+                // state を nullptr にクリアしてから head を進める（二重取得防止）
+                retiredBuffer[h].state.store(nullptr, std::memory_order_relaxed);
+                head.store((h + 1) % kMaxRetired, std::memory_order_release);
+                return ptr;
+            }
+
+            // 削除不可: head を進めて tail 側へ回転する
             head.store((h + 1) % kMaxRetired, std::memory_order_release);
-            return ptr;
+
+            const size_t t = tail.load(std::memory_order_relaxed);
+            const size_t nextTail = (t + 1) % kMaxRetired;
+            if (nextTail == head.load(std::memory_order_acquire))
+            {
+                std::lock_guard<std::mutex> lock(fallbackMutex);
+                fallbackQueue.push({ptr, entryEpoch});
+            }
+            else
+            {
+                retiredBuffer[t].state.store(ptr, std::memory_order_relaxed);
+                retiredBuffer[t].epoch.store(entryEpoch, std::memory_order_relaxed);
+                tail.store(nextTail, std::memory_order_release);
+            }
+            retiredBuffer[h].state.store(nullptr, std::memory_order_relaxed);
+            return nullptr;
         }
 
         return nullptr;

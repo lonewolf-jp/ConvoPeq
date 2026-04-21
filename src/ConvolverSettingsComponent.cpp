@@ -3,6 +3,8 @@
 ConvolverSettingsComponent::ConvolverSettingsComponent(AudioEngine& engineRef)
     : engine(engineRef)
 {
+    setOpaque(true);
+
     targetFftLabel.setText("Target FFT", juce::dontSendNotification);
     targetFftLabel.setJustificationType(juce::Justification::centredRight);
     addAndMakeVisible(targetFftLabel);
@@ -41,6 +43,11 @@ ConvolverSettingsComponent::~ConvolverSettingsComponent()
     progressiveToggle.removeListener(this);
     cacheEntriesSlider.removeListener(this);
     clearCacheButton.removeListener(this);
+}
+
+void ConvolverSettingsComponent::paint(juce::Graphics& g)
+{
+    g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
 }
 
 void ConvolverSettingsComponent::resized()

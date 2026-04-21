@@ -628,6 +628,7 @@ DSPCore();
     std::atomic<int64_t> lastIRContentRebuildTicks_{ 0 };
     std::atomic<bool> deferredStructuralRebuildPending_ { false };
     std::atomic<int64_t> deferredStructuralRebuildDueTicks_ { 0 };
+    std::atomic<bool> deferredFinalizeAwareRebuildPending_ { false };
     // 同一IR構造に対する Structural rebuild の多重発火を抑止する。
     // 値は「直近で rebuild を要求した UI 側 Convolver 構造ハッシュ」。
     std::atomic<uint64_t> lastIssuedConvolverStructuralHash_{ 0 };
@@ -712,6 +713,7 @@ DSPCore();
     #pragma warning(pop)
 
     std::atomic<int> rebuildGeneration { 0 }; // 非同期リビルドの競合防止用
+    std::atomic<int> lastCommittedRebuildGeneration { 0 }; // commit 完了済み世代
 
     #pragma warning(push)
     #pragma warning(disable: 4324)

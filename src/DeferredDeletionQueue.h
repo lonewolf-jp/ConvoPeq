@@ -14,6 +14,12 @@
 #include <array>
 #include <cstdint>
 #include <type_traits>
+#include "ConvolverState.h"
+
+enum class DeletionEntryType : uint8_t {
+    Generic = 0,
+    ConvolverState = 1
+};
 
 // DeletionEntry: 削除対象のエントリ
 // B23: static_assert を通すため、std::atomic を含まずトリビアルコピー可能である必要があります。
@@ -21,6 +27,7 @@ struct DeletionEntry {
     void* ptr = nullptr;
     void (*deleter)(void*) = nullptr;
     uint64_t epoch = 0;
+    DeletionEntryType type = DeletionEntryType::Generic;
 };
 
 // B23: リアルタイム安全性のための静的チェック
@@ -50,6 +57,11 @@ public:
 
     // Audio Thread から呼ばれる。ロックフリー。
     bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept {
+        return enqueue(ptr, deleter, epoch, DeletionEntryType::Generic);
+    }
+
+    // Audio Thread から呼ばれる。ロックフリー。
+    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept {
         uint32_t pos = enqueuePos.load(std::memory_order_relaxed);
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
@@ -62,6 +74,7 @@ public:
                     entry.ptr = ptr;
                     entry.deleter = deleter;
                     entry.epoch = epoch;
+                    entry.type = type;
                     seq_atom.store(pos + 1, std::memory_order_release);
                     return true;
                 }
@@ -75,29 +88,62 @@ public:
 
     // Message Thread / Timer から呼ばれる。
     void reclaim(uint64_t minEpoch) {
-        uint32_t pos = dequeuePos.load(std::memory_order_relaxed);
-        while (true) {
-            auto& seq_atom = sequences[pos & kMask];
-            uint32_t seq = seq_atom.load(std::memory_order_acquire);
-            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+        constexpr int kMaxScan = 1024;
+        uint32_t deqPos = dequeuePos.load(std::memory_order_relaxed);
+        uint32_t scanPos = deqPos;
+        int scanned = 0;
 
-            if (diff == 0) {
-                auto& entry = ringBuffer[pos & kMask];
-                if (entry.epoch < minEpoch) {
-                    if (dequeuePos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
-                        if (entry.deleter && entry.ptr) {
-                            entry.deleter(entry.ptr);
-                        }
-                        entry.ptr = nullptr;
-                        entry.deleter = nullptr;
-                        seq_atom.store(pos + kQueueSize, std::memory_order_release);
-                        pos++;
+        while (scanned < kMaxScan) {
+            auto& seq_atom = sequences[scanPos & kMask];
+            const uint32_t seq = seq_atom.load(std::memory_order_acquire);
+            const intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(scanPos + 1);
+
+            if (diff != 0) {
+                break; // Empty
+            }
+
+            auto& entry = ringBuffer[scanPos & kMask];
+            bool canDelete = false;
+
+            if (entry.epoch < minEpoch) {
+                canDelete = true;
+                if (entry.type == DeletionEntryType::ConvolverState) {
+                    auto* state = static_cast<ConvolverState*>(entry.ptr);
+                    if (state != nullptr
+                        && state->snapshotRefCount.load(std::memory_order_relaxed) > 0) {
+                        canDelete = false;
                     }
+                }
+            }
+
+            // FIFO を維持するため、現在の dequeue 先頭と一致した時だけ削除する。
+            if (canDelete && scanPos == deqPos) {
+                if (dequeuePos.compare_exchange_weak(deqPos,
+                                                     deqPos + 1,
+                                                     std::memory_order_release,
+                                                     std::memory_order_relaxed)) {
+                    if (entry.deleter && entry.ptr) {
+                        entry.deleter(entry.ptr);
+                    }
+                    entry.ptr = nullptr;
+                    entry.deleter = nullptr;
+                    entry.type = DeletionEntryType::Generic;
+                    seq_atom.store(scanPos + kQueueSize, std::memory_order_release);
+
+                    scanPos = deqPos;
+                    scanned = 0;
                 } else {
-                    break; // Grace period
+                    deqPos = dequeuePos.load(std::memory_order_relaxed);
+                    scanPos = deqPos;
+                    scanned = 0;
                 }
             } else {
-                break; // Empty
+                if (scanPos - deqPos > static_cast<uint32_t>(kMaxScan)) {
+                    scanPos = deqPos;
+                } else {
+                    ++scanPos;
+                }
+                ++scanned;
             }
         }
     }
@@ -118,6 +164,7 @@ public:
                     }
                     entry.ptr = nullptr;
                     entry.deleter = nullptr;
+                    entry.type = DeletionEntryType::Generic;
                     seq_atom.store(pos + kQueueSize, std::memory_order_release);
                     pos++;
                 }

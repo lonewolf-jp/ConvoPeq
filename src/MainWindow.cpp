@@ -38,6 +38,7 @@ namespace
         SettingsWindow (const juce::String& name, juce::Colour backgroundColour, int buttons)
             : DocumentWindow (name, backgroundColour, buttons)
         {
+            setOpaque (true);
             setUsingNativeTitleBar (true);
         }
 
@@ -67,6 +68,7 @@ namespace
     public:
         AboutComponent()
         {
+            setOpaque (true);
             setSize (400, 200);
         }
 
@@ -96,6 +98,7 @@ MainWindow::MainWindow (const juce::String& name)
                           .findColour (juce::ResizableWindow::backgroundColourId),
                       DocumentWindow::allButtons)
 {
+    setOpaque (true);
     setUsingNativeTitleBar (true);
     setResizable (true, true);
     setResizeLimits (720, 760, 10000, 10000);

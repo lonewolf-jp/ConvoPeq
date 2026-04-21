@@ -77,7 +77,7 @@ void WorkerThread::run()
 #endif
 
     bool hasPending = false;
-    uint64_t pendingGeneration = 0;
+    uint64_t latestCommandGeneration = 0;
     auto lastCommandTime = std::chrono::steady_clock::now();
 
     while (running.load(std::memory_order_acquire)) {
@@ -93,7 +93,7 @@ void WorkerThread::run()
 #ifdef _DEBUG
             commandsReceived.fetch_add(1, std::memory_order_relaxed);
 #endif
-            pendingGeneration = cmd.generation; // 最新の世代のみ保持
+            latestCommandGeneration = cmd.generation; // 最新の世代のみ保持
             lastCommandTime = std::chrono::steady_clock::now();
         }
 
@@ -112,8 +112,8 @@ void WorkerThread::run()
                 SnapshotCreatorCallback cb = callbackFunc.load(std::memory_order_acquire);
                 void* userData = callbackUserData.load(std::memory_order_acquire);
 
-                if (cb && userData && generationManager.isCurrentGeneration(pendingGeneration)) {
-                    cb(userData, pendingGeneration);
+                if (cb && userData && generationManager.isCurrentGeneration(latestCommandGeneration)) {
+                    cb(userData, latestCommandGeneration);
 #ifdef _DEBUG
                     snapshotsCreated.fetch_add(1, std::memory_order_relaxed);
 #endif

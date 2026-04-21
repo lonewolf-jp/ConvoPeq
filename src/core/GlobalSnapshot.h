@@ -18,10 +18,12 @@ namespace convo {
 struct GlobalSnapshot {
     // ---------- 観測専用ポインタ（寿命は SafeStateSwapper 管理） ----------
     const ConvolverState* convState = nullptr;
+    uint64_t convStateId = 0;
 
     // ---------- 値型パラメータ（完全自己完結） ----------
     EQParameters eqParams{};
     std::array<double, 9> nsCoeffs{};
+    uint64_t contentHash = 0;           // パラメータの一意性ハッシュ（高速否定用）
 
     // ---------- ゲイン関連 ----------
     double inputHeadroomGain = 0.0;
@@ -66,7 +68,7 @@ struct GlobalSnapshot {
     GlobalSnapshot& operator=(GlobalSnapshot&&) = delete;
 
     // デストラクタは public（Factory::destroy で呼ばれるため）
-    ~GlobalSnapshot() = default;
+    ~GlobalSnapshot();
 };
 
 } // namespace convo

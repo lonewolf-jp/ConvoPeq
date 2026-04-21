@@ -29,7 +29,8 @@ void SnapshotCoordinator::startFade(const GlobalSnapshot* target, int fadeSample
 		m_deletionQueue.enqueue(
 			const_cast<GlobalSnapshot*>(oldTarget),
 			[](void* p) { SnapshotFactory::destroy(static_cast<const GlobalSnapshot*>(p)); },
-			retireEpoch
+			retireEpoch,
+			DeletionEntryType::Generic
 		);
 	}
 
@@ -109,7 +110,8 @@ void SnapshotCoordinator::completeFade() noexcept
 		m_deletionQueue.enqueue(
 			const_cast<GlobalSnapshot*>(old),
 			[](void* p) { SnapshotFactory::destroy(static_cast<const GlobalSnapshot*>(p)); },
-			retireEpoch);
+			retireEpoch,
+			DeletionEntryType::Generic);
 	}
 
 	m_fadeState.store(FadeState::Idle, std::memory_order_release);

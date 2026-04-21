@@ -135,7 +135,7 @@ void ConvolverProcessor::retireStereoConvolver(StereoConvolver* conv, uint64_t r
         auto* sc = static_cast<StereoConvolver*>(p);
         sc->~StereoConvolver();
         convo::aligned_free(sc);
-    }, retireEpoch);
+    }, retireEpoch, DeletionEntryType::Generic);
 }
 
 namespace
@@ -650,6 +650,14 @@ public:
     ~LoaderThread() override
     {
         stopThread(500);
+
+        // Shutdown may destroy a loader before its step result is consumed.
+        if (stepResult.newConv != nullptr)
+        {
+            stepResult.newConv->~StereoConvolver();
+            convo::aligned_free(stepResult.newConv);
+            stepResult.newConv = nullptr;
+        }
     }
 
     std::function<bool()> externalCancellationCheck;
@@ -1437,10 +1445,14 @@ ConvolverProcessor::~ConvolverProcessor()
     // スレッドを停止
     activeLoader.reset();
 
-    const uint64_t retireEpoch = convo::SnapshotEpoch::advance();
+    // Destructor runs after AudioEngine destructor body.
+    // Do not enqueue to global deferred queue here because final reclaim may have already happened.
     auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
-    if (oldConv)
-        retireStereoConvolver(oldConv, retireEpoch);
+    if (oldConv != nullptr)
+    {
+        oldConv->~StereoConvolver();
+        convo::aligned_free(oldConv);
+    }
 
     auto* oldIrState = currentIRState.exchange(nullptr, std::memory_order_acq_rel);
     if (oldIrState != nullptr)
@@ -1457,6 +1469,9 @@ ConvolverProcessor::~ConvolverProcessor()
         DftiFreeDescriptor(&fftHandle);
         fftHandle = nullptr;
     }
+
+    // Note: Do NOT call g_deletionQueue.reclaimAllIgnoringEpoch() here.
+    // AudioEngine destructor handles the final reclaim to avoid double-deletion.
 }
 
 void ConvolverProcessor::timerCallback()
@@ -3884,6 +3899,12 @@ void ConvolverProcessor::forceCleanup()
 {
     // This method is for eager cleanup of non-blocking resources.
     // The blocking cleanup of LoaderThreads is handled by the destructor.
+
+    if (rebuildJob)
+    {
+        rebuildJob->reset();
+        rebuildJob.reset();
+    }
 
     // 【Fix】LoaderThread のクリーンアップ漏れ防止
     // DSPCore破棄時やreleaseResources時に、残っているローダースレッドを

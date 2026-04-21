@@ -43,6 +43,7 @@ public:
                          juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId),
                          allButtons)
     {
+        setOpaque(true);
         setUsingNativeTitleBar(true);
         setContentOwned(new MixedPhaseOptimizationComponent(processor), true);
         setResizable(false, false);

@@ -5,6 +5,8 @@ namespace convo {
 MixedPhaseOptimizationComponent::MixedPhaseOptimizationComponent(ConvolverProcessor& p)
     : processor(p)
 {
+    setOpaque(true);
+
     addAndMakeVisible(statusLabel);
     addAndMakeVisible(infoLabel);
     addAndMakeVisible(closeButton);

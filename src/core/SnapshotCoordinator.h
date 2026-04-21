@@ -62,7 +62,8 @@ public:
             m_deletionQueue.enqueue(
                 const_cast<GlobalSnapshot*>(oldSnap),
                 [](void* ptr) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr)); },
-                newEpoch
+                newEpoch,
+                DeletionEntryType::Generic
             );
         }
     }

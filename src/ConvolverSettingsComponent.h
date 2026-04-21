@@ -14,6 +14,7 @@ public:
     explicit ConvolverSettingsComponent(AudioEngine& engineRef);
     ~ConvolverSettingsComponent() override;
 
+    void paint(juce::Graphics& g) override;
     void resized() override;
 
 private:

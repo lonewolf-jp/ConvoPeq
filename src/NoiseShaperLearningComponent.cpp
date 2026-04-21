@@ -5,6 +5,8 @@
 NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     : audioEngine(engine), periodicSaver(engine)
 {
+    setOpaque(true);
+
     modeComboBox.addItem("Shortest", 1);
     modeComboBox.addItem("Short", 2);
     modeComboBox.addItem("Middle", 3);

@@ -81,6 +81,8 @@ private:
 // 畳み込みエンジン 1 インスタンス分の MKL リソースをすべて保持する。
 // Epoch-based RCU の「保護対象オブジェクト」として SafeStateSwapper に渡す。
 // ---------------------------------------------------------------------------
+#pragma warning(push)
+#pragma warning(disable: 4324) // alignment specifier introduced padding for this struct intentionally.
 struct ConvolverState
 {
     // --- FFT 作業バッファ（mkl_malloc 64-byte アライン）---
@@ -101,6 +103,18 @@ struct ConvolverState
 
     // 冪等クリーンアップ用フラグ
     std::atomic<bool> cleanedUp {false};
+
+    // スナップショット比較用の不変ID（UAF回避のためポインタ比較を避ける）
+    uint64_t stateId = generateNewStateId();
+
+    // Snapshot lifetime guard: deferred reclaim must observe this as 0 before delete.
+    alignas(64) mutable std::atomic<int> snapshotRefCount {0};
+
+    static uint64_t generateNewStateId() noexcept
+    {
+        static std::atomic<uint64_t> counter {0};
+        return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
 
     // -----------------------------------------------------------------------
     // デフォルトコンストラクタ（空の状態）
@@ -214,6 +228,9 @@ struct ConvolverState
         fftSize            = o.fftSize;
         generationId       = o.generationId;
         sampleRate         = o.sampleRate;
+        stateId            = o.stateId;
+        snapshotRefCount.store(o.snapshotRefCount.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        o.snapshotRefCount.store(0, std::memory_order_relaxed);
         fftHandle          = std::move(o.fftHandle);
 
         // ムーブ元は cleanedUp = true にして二重解放を防ぐ
@@ -244,6 +261,9 @@ struct ConvolverState
             fftSize            = o.fftSize;
             generationId       = o.generationId;
             sampleRate         = o.sampleRate;
+            stateId            = o.stateId;
+            snapshotRefCount.store(o.snapshotRefCount.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            o.snapshotRefCount.store(0, std::memory_order_relaxed);
             fftHandle          = std::move(o.fftHandle);
 
             o.cleanedUp.store(true, std::memory_order_relaxed);
@@ -256,3 +276,4 @@ struct ConvolverState
     ConvolverState(const ConvolverState&)            = delete;
     ConvolverState& operator=(const ConvolverState&) = delete;
 };
+#pragma warning(pop)

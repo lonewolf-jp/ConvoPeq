@@ -135,7 +135,64 @@ void AudioEngine::handleAsyncUpdate()
         gShuttingDown.load(std::memory_order_acquire))
         return;
 
+    executeCommit();
     processRebuildRequestsInternal();
+}
+
+void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
+{
+    if (newDSP == nullptr)
+        return;
+
+    if (shutdownInProgress.load(std::memory_order_acquire) ||
+        gShuttingDown.load(std::memory_order_acquire))
+    {
+        newDSP->release();
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(deferredCommitMutex);
+
+        if (shutdownInProgress.load(std::memory_order_acquire) ||
+            gShuttingDown.load(std::memory_order_acquire))
+        {
+            newDSP->release();
+            return;
+        }
+
+        deferredCommitQueue.push(CommitStaging { newDSP, nullptr, generation });
+    }
+
+    triggerAsyncUpdate();
+}
+
+void AudioEngine::executeCommit()
+{
+    std::queue<CommitStaging> localQueue;
+
+    {
+        std::lock_guard<std::mutex> lock(deferredCommitMutex);
+        std::swap(localQueue, deferredCommitQueue);
+    }
+
+    while (!localQueue.empty())
+    {
+        auto staging = localQueue.front();
+        localQueue.pop();
+
+        if (staging.newDSP == nullptr)
+            continue;
+
+        if (shutdownInProgress.load(std::memory_order_acquire) ||
+            gShuttingDown.load(std::memory_order_acquire))
+        {
+            staging.newDSP->release();
+            continue;
+        }
+
+        commitNewDSP(staging.newDSP, staging.generation);
+    }
 }
 
 void AudioEngine::processRebuildRequestsInternal()
@@ -837,9 +894,21 @@ AudioEngine::~AudioEngine()
     // まず rebuild thread 側へ終了を通知し、pending task を破棄して
     // 終了時に重い再構築へ入る経路を閉じる。
     // pending task を破棄して進行中 rebuild を obsolete にし、thread を停止する。
+    DSPCore* activeToRelease = nullptr;
+    DSPCore* fadingToRelease = nullptr;
+    DSPCore* queuedToRelease = nullptr;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
         rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
+
+        // Audio Thread から参照される公開ポインタを明示的に外す。
+        currentDSP.store(nullptr, std::memory_order_release);
+
+        activeToRelease = activeDSP;
+        activeDSP = nullptr;
+        fadingToRelease = fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel);
+        queuedToRelease = queuedOldDSP.exchange(nullptr, std::memory_order_acq_rel);
+        fadeQueued.store(false, std::memory_order_release);
 
         if (hasPendingTask)
         {
@@ -860,6 +929,30 @@ AudioEngine::~AudioEngine()
     }
     stopRebuildThread();
 
+    {
+        std::queue<CommitStaging> abandonedCommits;
+        std::lock_guard<std::mutex> lock(deferredCommitMutex);
+        std::swap(abandonedCommits, deferredCommitQueue);
+
+        while (!abandonedCommits.empty())
+        {
+            auto staging = abandonedCommits.front();
+            abandonedCommits.pop();
+
+            if (staging.newDSP)
+                staging.newDSP->release();
+            if (staging.oldDSP)
+                staging.oldDSP->release();
+        }
+    }
+
+    if (activeToRelease)
+        activeToRelease->release();
+    if (fadingToRelease)
+        fadingToRelease->release();
+    if (queuedToRelease)
+        queuedToRelease->release();
+
     uiConvolverProcessor.removeChangeListener(this);
     uiEqEditor.removeChangeListener(this);
     uiConvolverProcessor.removeListener(this);
@@ -868,9 +961,9 @@ AudioEngine::~AudioEngine()
     shutdownWorkerThread();
 
     // Shutdown 時は reader epoch 進行を待たずに遅延解放を強制回収する。
-        diagLog("[DIAG] ~AudioEngine: before g_deletionQueue.reclaimAllIgnoringEpoch");
+    diagLog("[DIAG] ~AudioEngine: before g_deletionQueue.reclaimAllIgnoringEpoch");
     g_deletionQueue.reclaimAllIgnoringEpoch();
-        diagLog("[DIAG] ~AudioEngine: after g_deletionQueue.reclaimAllIgnoringEpoch");
+    diagLog("[DIAG] ~AudioEngine: after g_deletionQueue.reclaimAllIgnoringEpoch");
 
     // ...既存の解放処理...
     if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
@@ -1502,7 +1595,8 @@ bool AudioEngine::EQCacheManager::tryEnqueueDeferredMap(CacheMap* map) noexcept
 
     return g_deletionQueue.enqueue(map,
                                    [](void* p) { delete static_cast<CacheMap*>(p); },
-                                   g_currentEpoch.load(std::memory_order_acquire));
+                                   g_currentEpoch.load(std::memory_order_acquire),
+                                   DeletionEntryType::Generic);
 }
 
 void AudioEngine::EQCacheManager::drainDeferredMapsUnderLock() noexcept
@@ -1667,6 +1761,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
     convo::SnapshotParams params = convo::SnapshotAssembler::assemble(
         convState,
+        convState ? convState->stateId : 0,
         eqParams,
         nsCoeffs,
         inputHeadroomGainValue,
@@ -1697,48 +1792,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         return;
     }
 
-    const bool hasPendingNSChange = m_pendingNSChange.load(std::memory_order_acquire);
-    const bool hasPendingAGCChange = m_pendingAGCChange.load(std::memory_order_acquire);
-    if (!hasPendingNSChange && !hasPendingAGCChange && !m_coordinator.isFading())
-    {
-        const convo::GlobalSnapshot* currentSnap = m_coordinator.getCurrent();
-        if (currentSnap != nullptr)
-        {
-            const bool snapshotEquivalent =
-                currentSnap->convState == params.convState
-                && currentSnap->eqCoeffHash == params.eqCoeffHash
-                && currentSnap->inputHeadroomGain == params.inputHeadroomGain
-                && currentSnap->outputMakeupGain == params.outputMakeupGain
-                && currentSnap->convInputTrimGain == params.convInputTrimGain
-                && currentSnap->convBypass == params.convBypass
-                && currentSnap->eqBypass == params.eqBypass
-                && currentSnap->processingOrder == params.processingOrder
-                && currentSnap->softClipEnabled == params.softClipEnabled
-                && currentSnap->saturationAmount == params.saturationAmount
-                && currentSnap->oversamplingType == params.oversamplingType
-                && currentSnap->oversamplingFactor == params.oversamplingFactor
-                && currentSnap->ditherBitDepth == params.ditherBitDepth
-                && currentSnap->noiseShaperType == params.noiseShaperType
-                && currentSnap->nsCoeffs == params.nsCoeffs;
-
-            if (snapshotEquivalent)
-            {
-                diagLog("[VERIFY] snapshot no-op suppressed: hash=0x"
-                    + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
-                    + " gen=" + juce::String(static_cast<juce::int64>(generation)));
-                return;
-            }
-        }
-    }
-
-    debugLastCreatedEqHash.store(eqCoeffHash, std::memory_order_release);
-    debugLastCreateAudioBlockCounter.store(m_audioBlockCounter.load(std::memory_order_acquire), std::memory_order_release);
-    diagLog("[VERIFY] EQ createdHash=0x"
-        + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
-        + " gen=" + juce::String(static_cast<juce::int64>(generation)));
-
-    const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::create(params);
-
+    // pending フラグは no-op 判定前に消費して、次回へ持ち越さない。
     if (m_pendingNSChange.exchange(false, std::memory_order_acq_rel))
     {
         fadeSamples = m_nsFadeSamples.load(std::memory_order_relaxed);
@@ -1753,6 +1807,26 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     {
         DBG("Phase6: EQ fade triggered");
     }
+
+    const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
+        params,
+        m_coordinator.getCurrent(),
+        generation,
+        sampleRate);
+
+    if (newSnap == nullptr)
+    {
+        diagLog("[VERIFY] snapshot no-op suppressed by createImpl: hash=0x"
+            + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
+            + " gen=" + juce::String(static_cast<juce::int64>(generation)));
+        return;
+    }
+
+    debugLastCreatedEqHash.store(eqCoeffHash, std::memory_order_release);
+    debugLastCreateAudioBlockCounter.store(m_audioBlockCounter.load(std::memory_order_acquire), std::memory_order_release);
+    diagLog("[VERIFY] EQ createdHash=0x"
+        + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
+        + " gen=" + juce::String(static_cast<juce::int64>(generation)));
 
     // 反映は次のオーディオブロック境界を検知してから行う。
     const uint64_t boundaryBefore = m_audioBlockCounter.load(std::memory_order_acquire);
@@ -2767,29 +2841,7 @@ void AudioEngine::rebuildThreadLoop()
             // Release ownership from guard, pass to commitNewDSP
             DSPCore* dspToCommit = dspGuard.ptr;
             dspGuard.ptr = nullptr;
-            AudioEngine* const selfPtr = this;
-            if (! juce::MessageManager::callAsync([selfPtr, newDSP = dspToCommit, generation = task.generation] {
-                // シャットダウン開始後はオーファンDSPを即時解放して commit 経路へ入らない。
-                // WeakReference 構築タイミングのアサート回避を優先し、global shutdown flag で防御する。
-                if (gShuttingDown.load(std::memory_order_acquire))
-                {
-                    newDSP->release();
-                    return;
-                }
-
-                if (selfPtr != nullptr)
-                {
-                    selfPtr->commitNewDSP(newDSP, generation);
-                }
-                else
-                {
-                    newDSP->release();
-                }
-            }))
-            {
-                // MessageManager failed (e.g. shutting down), prevent leak
-                dspToCommit->release();
-            }
+            prepareCommit(dspToCommit, task.generation);
         }
         catch (const std::exception& e)
         {
@@ -2852,6 +2904,9 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         const uint64_t newSessionId = globalCaptureSessionId.fetch_add(1, std::memory_order_acq_rel) + 1;
         if (newDSP != nullptr)
             newDSP->currentCaptureSessionId = newSessionId;
+
+        // この世代の publish が完了したので outstanding rebuild 窓を閉じる。
+        lastCommittedRebuildGeneration.store(generation, std::memory_order_release);
     }
 
 
@@ -3383,6 +3438,36 @@ void AudioEngine::timerCallback()
         }
     }
 
+    if (!shutdownInProgress.load(std::memory_order_acquire)
+        && deferredFinalizeAwareRebuildPending_.load(std::memory_order_acquire))
+    {
+        const int queuedGeneration = rebuildGeneration.load(std::memory_order_acquire);
+        const int committedGeneration = lastCommittedRebuildGeneration.load(std::memory_order_acquire);
+        const bool outstandingRebuild = queuedGeneration > committedGeneration;
+        const bool irLoaded = uiConvolverProcessor.isIRLoaded();
+        const bool irFinalized = uiConvolverProcessor.isIRFinalized();
+        const bool irLoading = uiConvolverProcessor.isLoadingIR();
+        const bool structuralDeferred = deferredStructuralRebuildPending_.load(std::memory_order_acquire);
+        const bool pendingIrChange = m_pendingIRChange.load(std::memory_order_acquire);
+
+        // IR 遷移が完全に落ち着いてから 1 回だけ再構築を発火する。
+        if ((!irLoaded || irFinalized)
+            && !irLoading
+            && !structuralDeferred
+            && !pendingIrChange
+            && !outstandingRebuild)
+        {
+            deferredFinalizeAwareRebuildPending_.store(false, std::memory_order_release);
+
+            const double sr = currentSampleRate.load(std::memory_order_acquire);
+            if (!m_isRestoringState && sr > 0.0)
+            {
+                diagLog("[DIAG] timerCallback: issuing deferred finalize-aware rebuild");
+                requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
+            }
+        }
+    }
+
     processLearningCommands();
     processDeferredLearningActions();
 
@@ -3689,6 +3774,23 @@ void AudioEngine::releaseResources()
     diagLog("[DIAG] releaseResources: before stopRebuildThread");
     stopRebuildThread();
     diagLog("[DIAG] releaseResources: after stopRebuildThread");
+
+    {
+        std::queue<CommitStaging> abandonedCommits;
+        std::lock_guard<std::mutex> lock(deferredCommitMutex);
+        std::swap(abandonedCommits, deferredCommitQueue);
+
+        while (!abandonedCommits.empty())
+        {
+            auto staging = abandonedCommits.front();
+            abandonedCommits.pop();
+
+            if (staging.newDSP)
+                staging.newDSP->release();
+            if (staging.oldDSP)
+                staging.oldDSP->release();
+        }
+    }
 
     if (activeToRelease)
         activeToRelease->release();
@@ -6130,7 +6232,26 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
         const double sr = currentSampleRate.load();
         if (!m_isRestoringState && sr > 0.0)
         {
-            requestRebuild(sr, maxSamplesPerBlock.load());
+            const int queuedGeneration = rebuildGeneration.load(std::memory_order_acquire);
+            const int committedGeneration = lastCommittedRebuildGeneration.load(std::memory_order_acquire);
+            const bool outstandingRebuild = queuedGeneration > committedGeneration;
+            const bool shouldDeferRebuild =
+                outstandingRebuild
+                ||
+                uiConvolverProcessor.isLoadingIR()
+                || deferredStructuralRebuildPending_.load(std::memory_order_acquire)
+                || m_pendingIRChange.load(std::memory_order_acquire)
+                || (uiConvolverProcessor.isIRLoaded() && !uiConvolverProcessor.isIRFinalized());
+
+            if (shouldDeferRebuild)
+            {
+                deferredFinalizeAwareRebuildPending_.store(true, std::memory_order_release);
+                diagLog("[DIAG] setDitherBitDepth: deferred rebuild until IR finalized");
+            }
+            else
+            {
+                requestRebuild(sr, maxSamplesPerBlock.load());
+            }
         }
     }
 }
@@ -6171,7 +6292,28 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
         enqueueSnapshotCommand();
         const double sr = currentSampleRate.load();
         if (!m_isRestoringState && sr > 0.0)
-            requestRebuild(sr, maxSamplesPerBlock.load());
+        {
+            const int queuedGeneration = rebuildGeneration.load(std::memory_order_acquire);
+            const int committedGeneration = lastCommittedRebuildGeneration.load(std::memory_order_acquire);
+            const bool outstandingRebuild = queuedGeneration > committedGeneration;
+            const bool shouldDeferRebuild =
+                outstandingRebuild
+                ||
+                uiConvolverProcessor.isLoadingIR()
+                || deferredStructuralRebuildPending_.load(std::memory_order_acquire)
+                || m_pendingIRChange.load(std::memory_order_acquire)
+                || (uiConvolverProcessor.isIRLoaded() && !uiConvolverProcessor.isIRFinalized());
+
+            if (shouldDeferRebuild)
+            {
+                deferredFinalizeAwareRebuildPending_.store(true, std::memory_order_release);
+                diagLog("[DIAG] setNoiseShaperType: deferred rebuild until IR finalized");
+            }
+            else
+            {
+                requestRebuild(sr, maxSamplesPerBlock.load());
+            }
+        }
     }
 }
 
