@@ -4723,19 +4723,18 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     // レイテンシー補正の更新 (必要な場合のみ)
     {
         // Dry/Wet整合用の補償遅延は内部エンジン遅延で評価する
-        const int algorithmLatency = conv->storedDirectHeadEnabled ? 0 : juce::jmax(0, conv->latency);
-        const int irPeakLatency = juce::jmax(0, conv->irLatency);
-        const int calculatedLatency = juce::jmax(0, algorithmLatency + irPeakLatency);
+        const int rawAlgorithmLatency = conv->storedDirectHeadEnabled ? 0 : juce::jmax(0, conv->latency);
+        const int rawIrPeakLatency = juce::jmax(0, conv->irLatency);
 
-        // 安全対策: 要求される遅延が最大許容値を超えていないかデバッグ時にチェック
-        jassert(calculatedLatency <= MAX_TOTAL_DELAY);
+        const int algorithmLatency = juce::jmin(rawAlgorithmLatency, MAX_BLOCK_SIZE);
+        const int irPeakLatency = juce::jmin(rawIrPeakLatency, MAX_IR_LATENCY);
 
-        int totalLatency = calculatedLatency;
-        if (totalLatency > MAX_TOTAL_DELAY)
-        {
-            totalLatency = MAX_TOTAL_DELAY;
+        const int64_t calculatedLatency64 = static_cast<int64_t>(algorithmLatency)
+                                          + static_cast<int64_t>(irPeakLatency);
+        int totalLatency = static_cast<int>(std::min<int64_t>(calculatedLatency64, MAX_TOTAL_DELAY));
+
+        if (rawAlgorithmLatency != algorithmLatency || rawIrPeakLatency != irPeakLatency)
             g_totalLatencyClampCount.fetch_add(1, std::memory_order_relaxed);
-        }
 
         // ターゲット値が変更された場合のみ更新
         if (absNoLibm(latencySmoother.getTargetValue() - static_cast<double>(totalLatency)) >= kLatencyRetargetThresholdSamples)
