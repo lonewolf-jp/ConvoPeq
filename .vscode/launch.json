@@ -11,6 +11,9 @@
             "cwd": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Debug",
             "environment": [],
             "console": "internalConsole",
+            "env": {
+                "PATH": "${env:PATH};C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36223\\bin\\Hostx64\\x64"
+            },
             "preLaunchTask": "Debug"
         },
         {

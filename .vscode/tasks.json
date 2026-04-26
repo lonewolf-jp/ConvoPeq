@@ -25,7 +25,7 @@
         {
             "label": "Release",
             "type": "shell",
-            "command": "call \"C:\\Program Files\\Microsoft Visual Studio\\18\\Insiders\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Release",
+            "command": "call \"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Release",
             "dependsOn": [
                 "Kill Previous Instance"
             ],
@@ -38,7 +38,7 @@
         {
             "label": "Debug",
             "type": "shell",
-            "command": "call \"C:\\Program Files\\Microsoft Visual Studio\\18\\Insiders\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Debug",
+            "command": "call \"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\"/fsanitize=address /Zi /INCREMENTAL:NO\" && cmake --build \"${workspaceFolder}\\build\" --config Debug",
             "dependsOn": [
                 "Kill Previous Instance"
             ],
@@ -51,7 +51,7 @@
             "args": [
                 "/d",
                 "/c",
-                "\"call \\\"C:\\Program Files\\Microsoft Visual Studio\\18\\Insiders\\VC\\Auxiliary\\Build\\vcvarsall.bat\\\" x64 && call \\\"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\\\" intel64 && cmake -S . -B build -G \\\"Ninja Multi-Config\\\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Debug\""
+                "\"call \\\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\\" x64 && call \\\"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\\" intel64 && cmake -S . -B build -G \\\"Ninja Multi-Config\\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\\\"/fsanitize=address /Zi /INCREMENTAL:NO\\\" && cmake --build build --config Debug\""
             ],
             "isBackground": false,
             "group": "build"
@@ -63,7 +63,7 @@
             "args": [
                 "/d",
                 "/c",
-                "call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Insiders\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Debug"
+                "call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\"/fsanitize=address /Zi /INCREMENTAL:NO\" && cmake --build build --config Debug"
             ],
             "isBackground": false,
             "group": "build"

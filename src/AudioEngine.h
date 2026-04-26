@@ -48,6 +48,8 @@ struct CoeffSet {
 #include "CustomInputOversampler.h"
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
+#include "core/RCUReader.h"
+#include "core/EBRQueue.h"
 #include "EQEditProcessor.h"
 #include "PsychoacousticDither.h"
 #include "FixedNoiseShaper.h"
@@ -59,11 +61,10 @@ struct CoeffSet {
 #include "LockFreeRingBuffer.h"
 #include "LockFreeAudioRingBuffer.h"
 #include "NoiseShaperLearner.h"
-#include "RefCountedDeferred.h"
 #include "GenerationManager.h"
 #include "core/Types.h"
 #include "core/SnapshotCoordinator.h"
-#include "core/ReaderEpoch.h"
+#include "core/EpochCore.h"
 #include "core/CommandBuffer.h"
 #include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
@@ -105,6 +106,8 @@ public:
     using SampleType = double; // 内部DSP精度 (JUCE推奨)
 
     using ProcessingOrder = convo::ProcessingOrder;
+    using OversamplingType = convo::OversamplingType;   // ここに追加
+    using NoiseShaperType = convo::NoiseShaperType;     // ここに追加
 
     enum class AnalyzerSource
     {
@@ -112,8 +115,165 @@ public:
         Output
     };
 
-    using OversamplingType = convo::OversamplingType;
-    using NoiseShaperType = convo::NoiseShaperType;
+    //----------------------------------------------------------
+     // DSPコア (Audio Threadで実行される処理のコンテナ)
+    //----------------------------------------------------------
+    struct DSPCore
+    {
+        struct ProcessingState
+        {
+            bool eqBypassed;
+            bool convBypassed;
+            ProcessingOrder order;
+            AnalyzerSource analyzerSource;
+            bool analyzerEnabled;
+            bool softClipEnabled;
+            float saturationAmount;
+            double inputHeadroomGain;
+            double outputMakeupGain;
+            double convolverInputTrimGain; // EQThenConvolver 時のコンボルバー入力トリム
+            // 出力周波数フィルターモード
+            convo::HCMode convHCMode;  // ① ハイカットモード
+            convo::LCMode convLCMode;  // ① ローカットモード
+            convo::HCMode eqLPFMode;   // ② EQローパスモード
+            int adaptiveCoeffBankIndex;
+            const CoeffSet* adaptiveCoeffSet;
+            uint32_t adaptiveCoeffGeneration;
+            int adaptiveCaptureSampleRateHz;
+            int adaptiveCaptureBitDepth;
+            uint64_t captureSessionId;
+            LockFreeRingBuffer<AudioBlock, 4096>* adaptiveCaptureQueue;
+        };
+
+        DSPCore();
+        DSPCore(const DSPCore&) = delete;
+        DSPCore& operator=(const DSPCore&) = delete;
+
+    ~DSPCore()
+    {
+        // Explicitly clean up convolver resources to ensure no WDL memory is leaked,
+        // especially for instances that are destroyed from the trash bin.
+        convolver.forceCleanup();
+    }
+
+    void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner);
+    void setFixedLatencySamples(int samples);
+    void reset();
+        void process(const juce::AudioSourceChannelInfo& bufferToFill, LockFreeAudioRingBuffer& analyzerFifo,
+             std::atomic<float>& inputLevelLinear,
+                 std::atomic<float>& outputLevelLinear, const ProcessingState& state);
+    void processToBuffer(const juce::AudioSourceChannelInfo& source,
+                         juce::AudioBuffer<float>& destination,
+                 LockFreeAudioRingBuffer& analyzerFifo,
+                         std::atomic<float>& inputLevelLinear,
+                         std::atomic<float>& outputLevelLinear,
+                         const ProcessingState& state);
+    void processDouble(juce::AudioBuffer<double>& buffer,
+                   LockFreeAudioRingBuffer& analyzerFifo,
+                       std::atomic<float>& inputLevelLinear,
+                       std::atomic<float>& outputLevelLinear,
+                       const ProcessingState& state);
+    void processDoubleToBuffer(const juce::AudioBuffer<double>& source,
+                               juce::AudioBuffer<double>& destination,
+                       LockFreeAudioRingBuffer& analyzerFifo,
+                               std::atomic<float>& inputLevelLinear,
+                               std::atomic<float>& outputLevelLinear,
+                               const ProcessingState& state);
+        ConvolverProcessor convolver;
+        EQProcessor eq;
+        // 【最適化】出力 / 入力 DC 除去を UltraHighRateDCBlocker (1次IIR, ブロックモード) に統一。
+        // 旧 DCBlocker (4次 Butterworth, サンプル単位) は 1 サンプルあたり ~20 演算を要したが、
+        // 1次 IIR は ~4 演算で済みかつ process(data, N) ブロック呼び出しによりメモリアクセスも効率化。
+        // DC 除去の目的 (3Hz 以下のカット) には 1 次で十分。
+        convo::UltraHighRateDCBlocker dcBlockerL, dcBlockerR;
+        convo::UltraHighRateDCBlocker inputDCBlockerL, inputDCBlockerR;
+        convo::UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
+        ::convo::PsychoacousticDither dither;
+        ::convo::FixedNoiseShaper fixedNoiseShaper;
+        ::convo::Fixed15TapNoiseShaper fixed15TapNoiseShaper;
+        LatticeNoiseShaper adaptiveNoiseShaper;
+        // 出力周波数フィルター (① ハイカット/ローカット / ② ローパス/ハイパス)
+        convo::OutputFilter outputFilter;
+
+        CustomInputOversampler oversampling;
+        size_t oversamplingFactor = 1;
+        OversamplingType activeOversamplingType = OversamplingType::IIR;
+        int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
+        NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
+        uint32_t activeAdaptiveCoeffGeneration = 0;
+        int activeAdaptiveCoeffBankIndex = -1;
+        uint64_t currentCaptureSessionId = 0;
+        double sampleRate = 0.0;
+
+    // 【パッチ3】MKL用rawアライメントバッファ（vector完全排除・ガイドライン厳守）
+        convo::ScopedAlignedPtr<double> alignedL;
+        convo::ScopedAlignedPtr<double> alignedR;
+        int alignedCapacity = 0;                  // 現在確保済み容量（再確保判定用）
+
+        int maxSamplesPerBlock = 0;               // 入力側最大ブロックサイズ (SAFE_MAX_BLOCK_SIZE)
+
+        // ─────────────────────────────────────────────────────────────
+        // 【Issue 3 修正】内部処理用最大バッファサイズ
+        // 理由: Oversampling有効時（最大8x）、processSamplesUp()後の
+        //      ブロックサイズがSAFE_MAX×8になるため。
+        //      固定で×8確保することでRCU再構築時のresizeを完全排除。
+        //      メモリ増加 ≈ 8.4MB（現代PCでは無視できるレベル）
+        // ─────────────────────────────────────────────────────────────
+        int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（常にSAFE_MAX×8）
+        std::atomic<int> fadeInSamplesLeft {0};
+        static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
+        AudioEngine* ownerEngine = nullptr;
+
+        // RCU Reader Support (Forward to ownerEngine)
+        uint64_t publishRcuEpoch() noexcept { return ownerEngine ? ownerEngine->publishRcuEpoch() : 1; }
+        void enterRcuReader(int tid) noexcept { if (ownerEngine) ownerEngine->enterRcuReader(tid); }
+        void exitRcuReader(int tid) noexcept { if (ownerEngine) ownerEngine->exitRcuReader(tid); }
+        static thread_local size_t tls_readerSlot;
+
+        // B2: processDouble 用のバイパスフェード状態
+        convo::ScopedAlignedPtr<double> dryBypassBufferDoubleL;
+        convo::ScopedAlignedPtr<double> dryBypassBufferDoubleR;
+        int dryBypassCapacityDouble = 0;
+        convo::LinearRamp bypassFadeGainDouble;
+        bool bypassedDouble = false;
+
+        // パススルーDSPの固定レイテンシ付与用ディレイライン
+        convo::ScopedAlignedPtr<double> fixedLatencyBufferL;
+        convo::ScopedAlignedPtr<double> fixedLatencyBufferR;
+        int fixedLatencyBufferSize = 0;
+        int fixedLatencyWritePos = 0;
+        int fixedLatencySamples = 0;
+
+        // インターサンプルピーク近似: 前ブロック末尾のクリップ済み出力 (L/R)
+        // softClipBlockAVX2() へブロック間状態を渡すために保持する。
+        double softClipPrevSample[2] = {0.0, 0.0};
+
+        // Helpers
+        float measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept;
+        void applyFixedLatencyDelay(double* dataL, double* dataR, int numSamples) noexcept;
+        void pushToFifo(const juce::dsp::AudioBlock<const double>& block,
+                        LockFreeAudioRingBuffer& analyzerFifo) const noexcept;
+        // analyzerInputTap=true の場合、ヘッドルームゲイン適用前の raw 入力を
+        // analyzerFifo にプッシュする。
+        // これにより、インプットスペアナ/レベルメーターがヘッドルーム非適用の
+        // "入力されたデータそのもの" を表示できる。
+        float processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples,
+                           double headroomGain,
+                           bool analyzerInputTap,
+                       LockFreeAudioRingBuffer& analyzerFifo) noexcept;
+        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill,
+                           int numSamples,
+                           const ProcessingState& state) noexcept;
+        float processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples,
+                                 double headroomGain,
+                                 bool analyzerInputTap,
+                           LockFreeAudioRingBuffer& analyzerFifo) noexcept;
+        void processOutputDouble(juce::AudioBuffer<double>& buffer,
+                                 int numSamples,
+                                 const ProcessingState& state) noexcept;
+    private:
+        static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
+    };
 
     class Listener
     {
@@ -141,6 +301,7 @@ public:
     AudioEngine();
     ~AudioEngine() override;
     void initialize();
+    static thread_local size_t tls_readerSlot;
 
     //----------------------------------------------------------
     // AudioSource インターフェース
@@ -148,6 +309,18 @@ public:
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
     void releaseResources() override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
+
+    // ==================================================================
+    // EBR (Epoch-Based Reclamation) 基盤
+    // ==================================================================
+    void advanceRcuEpoch() noexcept;
+    void tryReclaimResources() noexcept;
+
+    // RCU Reader Support
+    uint64_t publishRcuEpoch() noexcept;
+    void enterRcuReader(int readerIndex) noexcept;
+    void exitRcuReader(int readerIndex) noexcept;
+
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void convolverParamsChanged(ConvolverProcessor* processor) override;
@@ -381,7 +554,10 @@ private:
                 for (const auto& entry : other.map)
                 {
                     if (entry.second != nullptr)
+                    {
+                        // EBR: Using RefCountedDeferred for cache objects as they are shared
                         entry.second->addRef();
+                    }
 
                     map.emplace(entry.first, entry.second);
                 }
@@ -417,160 +593,7 @@ private:
                                                      OversamplingType oversamplingType,
                                                      double baseSampleRate) noexcept;
 
-    //----------------------------------------------------------
-     // DSPコア (Audio Threadで実行される処理のコンテナ)
-    //----------------------------------------------------------
-    struct DSPCore : public RefCountedDeferred<DSPCore>
-    {
-        struct ProcessingState
-        {
-            bool eqBypassed;
-            bool convBypassed;
-            ProcessingOrder order;
-            AnalyzerSource analyzerSource;
-            bool analyzerEnabled;
-            bool softClipEnabled;
-            float saturationAmount;
-            double inputHeadroomGain;
-            double outputMakeupGain;
-            double convolverInputTrimGain; // EQThenConvolver 時のコンボルバー入力トリム
-            // 出力周波数フィルターモード
-            convo::HCMode convHCMode;  // ① ハイカットモード
-            convo::LCMode convLCMode;  // ① ローカットモード
-            convo::HCMode eqLPFMode;   // ② EQローパスモード
-            int adaptiveCoeffBankIndex;
-            const CoeffSet* adaptiveCoeffSet;
-            uint32_t adaptiveCoeffGeneration;
-            int adaptiveCaptureSampleRateHz;
-            int adaptiveCaptureBitDepth;
-            uint64_t captureSessionId;
-            LockFreeRingBuffer<AudioBlock, 4096>* adaptiveCaptureQueue;
-        };
-
-DSPCore();
-        DSPCore(const DSPCore&) = delete;
-        DSPCore& operator=(const DSPCore&) = delete;
-
-    ~DSPCore()
-    {
-        // Explicitly clean up convolver resources to ensure no WDL memory is leaked,
-        // especially for instances that are destroyed from the trash bin.
-        convolver.forceCleanup();
-    }
-
-    void prepare(double sampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner);
-    void setFixedLatencySamples(int samples);
-    void reset();
-        void process(const juce::AudioSourceChannelInfo& bufferToFill, LockFreeAudioRingBuffer& analyzerFifo,
-             std::atomic<float>& inputLevelLinear,
-                 std::atomic<float>& outputLevelLinear, const ProcessingState& state);
-    void processToBuffer(const juce::AudioSourceChannelInfo& source,
-                         juce::AudioBuffer<float>& destination,
-                 LockFreeAudioRingBuffer& analyzerFifo,
-                         std::atomic<float>& inputLevelLinear,
-                         std::atomic<float>& outputLevelLinear,
-                         const ProcessingState& state);
-    void processDouble(juce::AudioBuffer<double>& buffer,
-                   LockFreeAudioRingBuffer& analyzerFifo,
-                       std::atomic<float>& inputLevelLinear,
-                       std::atomic<float>& outputLevelLinear,
-                       const ProcessingState& state);
-    void processDoubleToBuffer(const juce::AudioBuffer<double>& source,
-                               juce::AudioBuffer<double>& destination,
-                       LockFreeAudioRingBuffer& analyzerFifo,
-                               std::atomic<float>& inputLevelLinear,
-                               std::atomic<float>& outputLevelLinear,
-                               const ProcessingState& state);
-        ConvolverProcessor convolver;
-        EQProcessor eq;
-        // 【最適化】出力 / 入力 DC 除去を UltraHighRateDCBlocker (1次IIR, ブロックモード) に統一。
-        // 旧 DCBlocker (4次 Butterworth, サンプル単位) は 1 サンプルあたり ~20 演算を要したが、
-        // 1次 IIR は ~4 演算で済みかつ process(data, N) ブロック呼び出しによりメモリアクセスも効率化。
-        // DC 除去の目的 (3Hz 以下のカット) には 1 次で十分。
-        convo::UltraHighRateDCBlocker dcBlockerL, dcBlockerR;
-        convo::UltraHighRateDCBlocker inputDCBlockerL, inputDCBlockerR;
-        convo::UltraHighRateDCBlocker osDCBlockerL, osDCBlockerR; // Oversampling後のDC除去用
-        ::convo::PsychoacousticDither dither;
-        ::convo::FixedNoiseShaper fixedNoiseShaper;
-        ::convo::Fixed15TapNoiseShaper fixed15TapNoiseShaper;
-        LatticeNoiseShaper adaptiveNoiseShaper;
-        // 出力周波数フィルター (① ハイカット/ローカット / ② ローパス/ハイパス)
-        convo::OutputFilter outputFilter;
-
-        CustomInputOversampler oversampling;
-        size_t oversamplingFactor = 1;
-        OversamplingType activeOversamplingType = OversamplingType::IIR;
-        int ditherBitDepth = 0; // DSPCore内でディザリング判定に使用
-        NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
-        uint32_t activeAdaptiveCoeffGeneration = 0;
-        int activeAdaptiveCoeffBankIndex = -1;
-        uint64_t currentCaptureSessionId = 0;
-        double sampleRate = 0.0;
-
-    // 【パッチ3】MKL用rawアライメントバッファ（vector完全排除・ガイドライン厳守）
-        convo::ScopedAlignedPtr<double> alignedL;
-        convo::ScopedAlignedPtr<double> alignedR;
-        int alignedCapacity = 0;                  // 現在確保済み容量（再確保判定用）
-
-        int maxSamplesPerBlock = 0;               // 入力側最大ブロックサイズ (SAFE_MAX_BLOCK_SIZE)
-
-        // ─────────────────────────────────────────────────────────────
-        // 【Issue 3 修正】内部処理用最大バッファサイズ
-        // 理由: Oversampling有効時（最大8x）、processSamplesUp()後の
-        //      ブロックサイズがSAFE_MAX×8になるため。
-        //      固定で×8確保することでRCU再構築時のresizeを完全排除。
-        //      メモリ増加 ≈ 8.4MB（現代PCでは無視できるレベル）
-        // ─────────────────────────────────────────────────────────────
-        int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（常にSAFE_MAX×8）
-        std::atomic<int> fadeInSamplesLeft {0};
-        static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
-        AudioEngine* ownerEngine = nullptr;
-
-        // B2: processDouble 用のバイパスフェード状態
-        convo::ScopedAlignedPtr<double> dryBypassBufferDoubleL;
-        convo::ScopedAlignedPtr<double> dryBypassBufferDoubleR;
-        int dryBypassCapacityDouble = 0;
-        convo::LinearRamp bypassFadeGainDouble;
-        bool bypassedDouble = false;
-
-        // パススルーDSPの固定レイテンシ付与用ディレイライン
-        convo::ScopedAlignedPtr<double> fixedLatencyBufferL;
-        convo::ScopedAlignedPtr<double> fixedLatencyBufferR;
-        int fixedLatencyBufferSize = 0;
-        int fixedLatencyWritePos = 0;
-        int fixedLatencySamples = 0;
-
-        // インターサンプルピーク近似: 前ブロック末尾のクリップ済み出力 (L/R)
-        // softClipBlockAVX2() へブロック間状態を渡すために保持する。
-        double softClipPrevSample[2] = {0.0, 0.0};
-
-        // Helpers
-        float measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept;
-        void applyFixedLatencyDelay(double* dataL, double* dataR, int numSamples) noexcept;
-        void pushToFifo(const juce::dsp::AudioBlock<const double>& block,
-                        LockFreeAudioRingBuffer& analyzerFifo) const noexcept;
-        // analyzerInputTap=true の場合、ヘッドルームゲイン適用前の raw 入力を
-        // analyzerFifo にプッシュする。
-        // これにより、インプットスペアナ/レベルメーターがヘッドルーム非適用の
-        // "入力されたデータそのもの" を表示できる。
-        float processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples,
-                           double headroomGain,
-                           bool analyzerInputTap,
-                       LockFreeAudioRingBuffer& analyzerFifo) noexcept;
-        void processOutput(const juce::AudioSourceChannelInfo& bufferToFill,
-                           int numSamples,
-                           const ProcessingState& state) noexcept;
-        float processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples,
-                                 double headroomGain,
-                                 bool analyzerInputTap,
-                           LockFreeAudioRingBuffer& analyzerFifo) noexcept;
-        void processOutputDouble(juce::AudioBuffer<double>& buffer,
-                                 int numSamples,
-                                 const ProcessingState& state) noexcept;
-    private:
-        static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
-    };
-
+public:
     //----------------------------------------------------------
     // 処理チェーンコンポーネント
     //----------------------------------------------------------
@@ -767,7 +790,6 @@ DSPCore();
     bool waitForAudioBlockBoundary(uint64_t observedCounter, uint32_t timeoutMs) const noexcept;
     void handleAsyncUpdate() override;
     void processRebuildRequestsInternal();
-    void processRebuildRequestsFallback();
 
     static void onSnapshotRequired(void* userData, uint64_t generation);
     void createSnapshotFromCurrentState(uint64_t generation);
@@ -840,18 +862,7 @@ DSPCore();
     void selectAdaptiveCoeffBankForCurrentSettings() noexcept;
     void publishCoeffsToBank(int bankIndex, const double* coeffs);
 
-    class ConvolverStateReaderGuard
-    {
-    public:
-        explicit ConvolverStateReaderGuard(ConvolverProcessor& conv) noexcept;
-        ~ConvolverStateReaderGuard() noexcept;
 
-        ConvolverStateReaderGuard(const ConvolverStateReaderGuard&) = delete;
-        ConvolverStateReaderGuard& operator=(const ConvolverStateReaderGuard&) = delete;
-
-    private:
-        ConvolverProcessor& m_convolver;
-    };
 
     void debugAssertNotAudioThread() const;
 
@@ -930,62 +941,19 @@ public:
     CoeffSetWriteLockGuard(const CoeffSetWriteLockGuard&) = delete;
     CoeffSetWriteLockGuard& operator=(const CoeffSetWriteLockGuard&) = delete;
 
-private:
-    AdaptiveCoeffBankSlot& slot;
-    bool acquired;
-    bool committed;
-};
-
-    // ==================================================================
-    // RCU 基盤（段階 2+3：参照追跡＋Grace Period による安全なリリース遅延）
-    // ==================================================================
-
-public:
-    void enterReader() noexcept;
-    void exitReader() noexcept;
-    uint64_t getMinReaderEpoch() const noexcept;
-    uint64_t advanceGlobalEpoch() noexcept;
-
-private:
-    // Audio Thread 用：スレッドローカルなスロット番号を取得するヘルパー
-    size_t getOrAllocateSlot() noexcept;
+    private:
+        AdaptiveCoeffBankSlot& slot;
+        bool acquired;
+        bool committed;
+    };
 
     // リリースキューに溜まったエントリを解放可能なものから処理する
     void processDeferredReleases();
 
     // ==================================================================
-    // RCU 基盤
-    // ==================================================================
-
-    // マルチリーダー epoch 追跡配列
-    static constexpr size_t MAX_READERS = 8;
-    #pragma warning(push)
-    #pragma warning(disable:4324)
-    alignas(64) std::array<std::atomic<uint64_t>, MAX_READERS> readerEpochs{};
-    #pragma warning(pop)
-    std::atomic<size_t> nextReaderSlot{0};
-    static thread_local size_t tls_readerSlot;
-
-    // スレッド登録 API（Message/Timer スレッド用）
-    size_t registerReader();
-    void unregisterReader(size_t slot);
-    void updateReaderEpoch(size_t slot, uint64_t epoch);
-
-    // epoch カウンタ
-    std::atomic<uint64_t> globalEpoch{1};
-    std::atomic<uint64_t> audioThreadEpoch{0};
-    uint64_t lastReclaimedEpoch{0};
-
-
-    // epoch 比較ヘルパー（ラップアラウンド対応）
-    static bool isOlder(uint64_t a, uint64_t b) noexcept
-    {
-        return (a - b) > (1ULL << 63);
-    }
-
-    // ==================================================================
     // スナップショット基盤（Phase 2）
     // ==================================================================
+    convo::EpochCore m_epochCore;
     convo::SnapshotCoordinator m_coordinator;
     GenerationManager m_generationManager;
 

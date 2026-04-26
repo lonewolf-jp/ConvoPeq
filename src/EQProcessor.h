@@ -27,9 +27,8 @@
 #include <complex>
 #include <array>
 #include <vector>
-#include "AlignedAllocation.h"
-#include "RefCountedDeferred.h"
 #include "core/EQParameters.h"
+#include "AlignedAllocation.h"
 
 //--------------------------------------------------------------
 // バンドタイプ列挙型
@@ -94,6 +93,8 @@ struct EQCoeffsBiquad
     double b0 = 1.0, b1 = 0.0, b2 = 0.0;
     double a0 = 1.0, a1 = 0.0, a2 = 0.0;
 };
+
+#include "RefCountedDeferred.h"
 
 //--------------------------------------------------------------
 // EQCoeffCache: 係数キャッシュ（RefCounted資源）
@@ -342,9 +343,6 @@ public:
     // 個別パラメータの同期 (最適化)
     void syncBandNodeFrom(const EQProcessor& other, int bandIndex);
     void syncGlobalStateFrom(const EQProcessor& other);
-
-    // 参照カウントを追加した状態ポインタを返す (呼び出し元は release() する責任を持つ)
-    EQState* getEQStateAndAddRef() const;
 
     //----------------------------------------------------------
     // プリセット読み込み (AudioEngine::prepareToPlayから呼ばれる)

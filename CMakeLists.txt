@@ -1,3 +1,9 @@
+# AddressSanitizer (ASan) オプション
+option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
+if(ENABLE_ASAN AND MSVC)
+    target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
+    target_link_options(ConvoPeq PRIVATE /fsanitize=address)
+endif()
 #============================================================================
 # CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + Windows 11)
 #
@@ -155,10 +161,12 @@ target_sources(ConvoPeq PRIVATE
     src/core/SnapshotAssembler.h
     src/core/SnapshotAssembler.cpp
     src/core/ReaderEpoch.h
-    src/core/DeletionQueue.h
-    src/core/DeletionQueue.cpp
+    src/core/EpochManager.h
+    src/core/EBRQueue.h
+    src/core/RCUReader.h
     src/core/SnapshotCoordinator.h
     src/core/SnapshotCoordinator.cpp
+    src/core/DeletionQueue.cpp
     # Phase 2: Types
     src/core/Types.h
     # Phase 3: Debounced snapshot worker

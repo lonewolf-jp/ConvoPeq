@@ -10,6 +10,18 @@
 #include <cmath>
 #include <cstdint>
 #include <algorithm>
+#include "core/EpochManager.h"
+#include "core/EBRQueue.h"
+#include "core/RCUReader.h"
+
+static thread_local convo::RCUReader tls_rcuReader;
+
+static void retireEQState(EQProcessor::EQState* state) {
+    if (state) state->release();
+}
+static void retireBandNode(EQProcessor::BandNode* node) {
+    if (node) node->release();
+}
 #include <complex>
 #include <numeric>
 #include <cstring>
@@ -68,16 +80,16 @@ EQProcessor::~EQProcessor()
 {
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: enter");
     if (auto* oldState = currentStateRaw.exchange(nullptr, std::memory_order_acq_rel))
-        oldState->release();
+        retireEQState(oldState);
 
     for (auto& node : bandNodes) {
         if (auto* n = node.exchange(nullptr, std::memory_order_release))
-            n->release();
+            retireBandNode(n);
     }
 
     for (auto*& node : activeBandNodes) {
         if (node) {
-            node->release();
+            retireBandNode(node);
             node = nullptr;
         }
     }
@@ -154,11 +166,12 @@ void EQProcessor::resetToDefaults()
     newState->nonlinearSaturation = 0.2f;
     newState->filterStructure = 0;
 
-    auto oldState = currentStateRaw.exchange(newState, std::memory_order_release);
+    auto oldState = currentStateRaw.exchange(newState, std::memory_order_acq_rel);
 
     if (oldState) {
-        oldState->release();
+        retireEQState(oldState);
     }
+    convo::EpochManager::instance().advanceEpoch();
 
     agcCurrentGain.store(1.0, std::memory_order_relaxed);
     agcEnvInput.store(0.0, std::memory_order_relaxed);
@@ -499,24 +512,24 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
 
     // 共有状態のコピー
     auto otherState = other.currentStateRaw.load(std::memory_order_acquire);
-    if (otherState) otherState->addRef();
-    auto oldState = currentStateRaw.exchange(otherState, std::memory_order_release);
+    auto oldState = currentStateRaw.exchange(otherState, std::memory_order_acq_rel);
 
     if (oldState)
     {
-        oldState->release();
+        retireEQState(oldState);
     }
+    convo::EpochManager::instance().advanceEpoch();
 
     for (int i = 0; i < NUM_BANDS; ++i)
     {
         auto node = other.activeBandNodes[i];
-        if (node) node->addRef();
         bandNodes[i].store(node, std::memory_order_release);
         if (activeBandNodes[i]) {
-            activeBandNodes[i]->release();
+            retireBandNode(activeBandNodes[i]);
         }
         activeBandNodes[i] = node;
     }
+    convo::EpochManager::instance().advanceEpoch();
     agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
     agcCurrentGain.store(other.agcCurrentGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
     agcEnvInput.store(other.agcEnvInput.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -538,12 +551,14 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
 
     auto node = other.activeBandNodes[bandIndex];
 
-    if (node) node->addRef();
+    if (node) {
+        // EBR: lifetime managed by RCU
+    }
     bandNodes[bandIndex].store(node, std::memory_order_release);
 
     if (activeBandNodes[bandIndex])
     {
-        activeBandNodes[bandIndex]->release();
+        retireBandNode(activeBandNodes[bandIndex]);
     }
     activeBandNodes[bandIndex] = node;
 }
@@ -693,7 +708,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
                 auto oldNode = bandNodes[i].exchange(newNode, std::memory_order_release);
 
                 if (activeBandNodes[i])
-                    activeBandNodes[i]->release();
+                    retireBandNode(activeBandNodes[i]);
 
                 activeBandNodes[i] = newNode;
             }
@@ -720,10 +735,11 @@ void EQProcessor::setBandFrequency(int band, float freq)
     auto newState = new EQState(*oldState);
     newState->bands[band].frequency = freq;
 
-    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+    auto prev = currentStateRaw.exchange(newState, std::memory_order_acq_rel);
     if (prev) {
-        prev->release();
+        retireEQState(prev);
     }
+    convo::EpochManager::instance().advanceEpoch();
     updateBandNode(band);
 }
 
@@ -737,8 +753,9 @@ void EQProcessor::setBandGain(int band, float gainDb)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        prev->release();
+        retireEQState(prev);
     }
+    convo::EpochManager::instance().advanceEpoch();
     updateBandNode(band);
 }
 
@@ -752,8 +769,9 @@ void EQProcessor::setBandQ(int band, float q)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        prev->release();
+        retireEQState(prev);
     }
+    convo::EpochManager::instance().advanceEpoch();
     updateBandNode(band);
 }
 
@@ -771,8 +789,9 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        prev->release();
+        retireEQState(prev);
     }
+    convo::EpochManager::instance().advanceEpoch();
     updateBandNode(band);
 }
 
@@ -791,8 +810,9 @@ void EQProcessor::setTotalGain(float gainDb)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        prev->release();
+        retireEQState(prev);
     }
+    convo::EpochManager::instance().advanceEpoch();
 }
 
 void EQProcessor::setAGCEnabled(bool enabled)
@@ -807,7 +827,8 @@ void EQProcessor::setAGCEnabled(bool enabled)
         newState->agcEnabled = enabled;
         auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
         if (prev)
-            prev->release();
+            retireEQState(prev);
+        convo::EpochManager::instance().advanceEpoch();
     }
 
     if (enabled)
@@ -833,8 +854,9 @@ void EQProcessor::setBandType(int band, EQBandType type)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        prev->release();
+        retireEQState(prev);
     }
+    convo::EpochManager::instance().advanceEpoch();
     updateBandNode(band);
 }
 
@@ -851,8 +873,9 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 
     auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
     if (prev) {
-        prev->release();
+        retireEQState(prev);
     }
+    convo::EpochManager::instance().advanceEpoch();
     updateBandNode(band);
 }
 
@@ -872,7 +895,8 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
         newState->nonlinearSaturation = clamped;
         auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
         if (prev)
-            prev->release();
+            retireEQState(prev);
+        convo::EpochManager::instance().advanceEpoch();
     }
 }
 
@@ -899,7 +923,8 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
         newState->filterStructure = (mode == FilterStructure::Parallel) ? 1 : 0;
         auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
         if (prev)
-            prev->release();
+            retireEQState(prev);
+        convo::EpochManager::instance().advanceEpoch();
     }
 }
 
@@ -945,14 +970,6 @@ convo::EQParameters EQProcessor::EQState::toEQParameters() const
 EQProcessor::EQState* EQProcessor::getEQState() const
 {
     return currentStateRaw.load(std::memory_order_acquire);
-}
-
-EQProcessor::EQState* EQProcessor::getEQStateAndAddRef() const
-{
-    auto state = currentStateRaw.load(std::memory_order_acquire);
-    if (state)
-        state->addRef();
-    return state;
 }
 
 float EQProcessor::getTotalGain() const
@@ -1408,6 +1425,7 @@ bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block,
 //--------------------------------------------------------------
 void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
+    convo::RCUReaderGuard guard(tls_rcuReader);
     // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
@@ -1526,8 +1544,8 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // ── 最適化: アクティブなバンドノードを事前にスタックへロード ──
     // チャンネルごとのループ内で atomic load を繰り返すと負荷が高いため、
     // 処理開始時に一度だけロードする。
-    // Note: 寿命管理は Message Thread 側の trashBin (時間差削除) により保証されるため、
-    // ここでは Raw Pointer を安全に使用できる。
+    // Note: 寿命管理は EBR (Epoch-Based Reclamation) により保証されるため、
+    // ここでは Raw Pointer を安全に使用できる（Audio Thread は現在の Epoch を保護中）。
     struct ActiveBandNode {
         const BandNode* node;
         int index;
@@ -1536,7 +1554,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     int numActiveBands = 0;
 
     // Note: bandNodes[] contains raw pointers. We assume they are valid during this block
-    // because deletion is deferred by trashBin in Message Thread.
+    // because deletion is deferred by EBR (reader epoch mechanism).
     for (int i = 0; i < NUM_BANDS; ++i)
     {
         auto* node = bandNodes[i].load(std::memory_order_acquire);
@@ -2016,7 +2034,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
 EQProcessor::BandNode* EQProcessor::createBandNode(int band, const EQState& state) const
 {
     auto node = new BandNode();
-    node->addRef();
+    // EBR: retirement managed by retireBandNode
     const auto& params = state.bands[band];
     const double sr = currentSampleRate.load(std::memory_order_relaxed);
 
@@ -2059,10 +2077,11 @@ void EQProcessor::updateBandNode(int band)
     BandNode* oldNode = activeBandNodes[band];
 
     bandNodes[band].store(newNode, std::memory_order_release);
+    convo::EpochManager::instance().advanceEpoch();
 
     if (oldNode)
     {
-        oldNode->release();
+        retireBandNode(oldNode);
     }
     activeBandNodes[band] = newNode;
 }

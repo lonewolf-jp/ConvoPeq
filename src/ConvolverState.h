@@ -31,6 +31,8 @@
 // DFTI_DESCRIPTOR_HANDLE の RAII ラッパー
 // std::unique_ptr<void, ...> の代わりにクリーンな所有権管理を提供する。
 // ---------------------------------------------------------------------------
+namespace convo {
+
 class DftiHandleOwner
 {
 public:
@@ -107,8 +109,7 @@ struct ConvolverState
     // スナップショット比較用の不変ID（UAF回避のためポインタ比較を避ける）
     uint64_t stateId = generateNewStateId();
 
-    // Snapshot lifetime guard: deferred reclaim must observe this as 0 before delete.
-    alignas(64) mutable std::atomic<int> snapshotRefCount {0};
+    mutable std::atomic<int> snapshotRefCount{ 0 };
 
     static uint64_t generateNewStateId() noexcept
     {
@@ -229,8 +230,6 @@ struct ConvolverState
         generationId       = o.generationId;
         sampleRate         = o.sampleRate;
         stateId            = o.stateId;
-        snapshotRefCount.store(o.snapshotRefCount.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        o.snapshotRefCount.store(0, std::memory_order_relaxed);
         fftHandle          = std::move(o.fftHandle);
 
         // ムーブ元は cleanedUp = true にして二重解放を防ぐ
@@ -262,8 +261,6 @@ struct ConvolverState
             generationId       = o.generationId;
             sampleRate         = o.sampleRate;
             stateId            = o.stateId;
-            snapshotRefCount.store(o.snapshotRefCount.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            o.snapshotRefCount.store(0, std::memory_order_relaxed);
             fftHandle          = std::move(o.fftHandle);
 
             o.cleanedUp.store(true, std::memory_order_relaxed);
@@ -277,3 +274,5 @@ struct ConvolverState
     ConvolverState& operator=(const ConvolverState&) = delete;
 };
 #pragma warning(pop)
+
+} // namespace convo

@@ -309,6 +309,14 @@ MKLNonUniformConvolver::MKLNonUniformConvolver()
 
 MKLNonUniformConvolver::~MKLNonUniformConvolver()
 {
+    #ifdef NUC_DEBUG_GUARDS
+        // 二重解放検出
+        static std::atomic<bool> destroyed{false};
+    if (destroyed.exchange(true)){
+        __debugbreak(); // 二重解放発生
+    }
+    checkGuards();
+    #endif
     releaseAllLayers();
 }
 
@@ -445,6 +453,27 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
 //==============================================================================
 void MKLNonUniformConvolver::releaseAllLayers() noexcept
 {
+    #ifdef NUC_DEBUG_GUARDS
+        checkGuards();
+        // 解放前に、ポインタが異常でないかチェック（sentinel値は許可しない）
+        auto checkPtr = [](double *&ptr){
+            if (ptr != nullptr){
+                auto addr = reinterpret_cast<uintptr_t>(ptr);
+                // MSVC未初期化/解放済みパターンが混入していたら即座に停止
+                if (addr == 0xFFFFFFFFFFFFFFFFULL ||
+                    (addr & 0xFFFFFFFF00000000) == 0xCDCDCDCD00000000ULL ||
+                     addr < 0x10000)
+            {
+                __debugbreak();
+            }
+        }
+    };
+    checkPtr(m_ringBuf);
+    checkPtr(m_directIRRev);
+    checkPtr(m_directHistory);
+    checkPtr(m_directWindow);
+    checkPtr(m_directOutBuf);
+    #endif +
     for (int i = 0; i < kNumLayers; ++i)
         m_layers[i].freeAll();
     m_numActiveLayers = 0;
@@ -895,6 +924,9 @@ void MKLNonUniformConvolver::processDirectBlock(const double* input, int numSamp
 //==============================================================================
 void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 {
+#ifdef NUC_DEBUG_GUARDS
+    checkGuards();
+#endif
 #if JUCE_DEBUG
     if (!l.warmupCompleted.load(std::memory_order_acquire))
         g_warmupGuardCount.fetch_add(1, std::memory_order_relaxed);
@@ -1008,6 +1040,9 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 //==============================================================================
 void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
 {
+#ifdef NUC_DEBUG_GUARDS
+    checkGuards();
+#endif
     if (n <= 0 || m_ringBuf == nullptr || src == nullptr) return;
 
     const int first = std::min(n, m_ringSize - m_ringWrite);
@@ -1070,6 +1105,11 @@ int MKLNonUniformConvolver::ringRead(double* dst, int n) noexcept
 //==============================================================================
 void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 {
+    #ifdef NUC_DEBUG_GUARDS
+        checkGuards();
+        // 内部バッファの簡単な健全性チェック
+        if (m_ringBuf && reinterpret_cast<uintptr_t>(m_ringBuf) % 64 != 0) __debugbreak();
+    #endif
     if (!m_ready.load(std::memory_order_acquire) || numSamples <= 0)
         return;
 
@@ -1227,6 +1267,9 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 //==============================================================================
 int MKLNonUniformConvolver::Get(double* output, int numSamples)
 {
+    #ifdef NUC_DEBUG_GUARDS
+        checkGuards();
+    #endif
     if (!m_ready.load(std::memory_order_acquire) || numSamples <= 0)
     {
         if (output && numSamples > 0)

@@ -34,6 +34,7 @@
 #include "AlignedAllocation.h"
 #include "MKLNonUniformConvolver.h"
 #include "AllpassDesigner.h"
+#include "core/EBRQueue.h"            // convo::retireObject
 
 // ── Phase 0: Epoch-based RCU 基盤ヘッダー ──
 #include "GenerationManager.h"
@@ -43,7 +44,6 @@
 #include "PreparedIRState.h"
 #include "DeferredDeletionQueue.h"
 #include "ConvolverRuntime.h"
-#include "core/ReaderEpoch.h"
 #include "DspNumericPolicy.h"
 
 class AudioEngine;
@@ -158,8 +158,7 @@ public:
     void setRcuProvider(AudioEngine* engine) noexcept { rcuProvider = engine; }
 
     // RCU リーダー (Audio Thread のみ)
-    void enterReader();
-    void exitReader();
+
 
     //----------------------------------------------------------
     // 準備（Audio Thread開始前）
@@ -203,7 +202,12 @@ public:
     //----------------------------------------------------------
     void setBypass(bool shouldBypass);
     bool isBypassed() const { return bypassed.load(); }
-    const ConvolverState* getConvolverState() const { return rcuSwapper.getState(); }
+    const convo::ConvolverState* getConvolverState() const { return convolverState.load(std::memory_order_acquire); }
+    void enterStateReader(int /*readerIndex*/) const noexcept {}
+    void exitStateReader(int /*readerIndex*/) const noexcept {}
+
+    void enterGlobalReader(int /*readerIndex*/) const noexcept;
+    void exitGlobalReader(int /*readerIndex*/) const noexcept;
 
     //----------------------------------------------------------
     // Dry/Wet Mix (0.0 = Dry only, 1.0 = Wet only)
@@ -296,7 +300,7 @@ public:
     //----------------------------------------------------------
     bool isIRLoaded() const
     {
-        const bool hasPublishedState = (rcuSwapper.getState() != nullptr);
+        const bool hasPublishedState = (convolverState.load(std::memory_order_acquire) != nullptr);
         const bool hasActiveEngine = (m_activeEngine.load(std::memory_order_acquire) != nullptr);
         const bool hasIRMetadata = (currentIRState.load(std::memory_order_acquire) != nullptr)
             || (irLength.load(std::memory_order_acquire) > 0);
@@ -413,14 +417,29 @@ public:
     void cleanup();
     void forceCleanup();
 
+    // 診断用：すべての NUC オブジェクトのガードチェックを一括実行（デバッグビルドのみ）
+    #ifdef NUC_DEBUG_GUARDS
+    void debugCheckNucGuards() const noexcept
+    {
+        auto* engine = m_activeEngine.load(std::memory_order_acquire);
+        if (engine)
+        {
+            for (int i = 0; i < 2; ++i)
+                if (engine->nucConvolvers[i])
+                    engine->nucConvolvers[i]->checkGuards();
+        }
+    }
+    #endif
+
+
     // ── Phase 0: Epoch-based RCU 状態更新 ──
     // Message Thread から呼ぶ。新しい ConvolverState を atomic にスワップし、
     // 旧状態を DeferredFreeThread に委ねる。
     // GenerationManager で陳腐化チェックを行い、古いタスク結果は破棄する。
     //
     // @param newState  新しい状態（所有権を移譲）。世代チェックに失敗した場合は即削除。
-    void updateConvolverState(ConvolverState* newState);
-    void updateConvolverState(std::unique_ptr<ConvolverState> newState);
+    void updateConvolverState(convo::ConvolverState* newState);
+    void updateConvolverState(std::unique_ptr<convo::ConvolverState> newState);
 
     bool isConvolverGenerationCurrent(uint64_t generation) const
     {
@@ -540,15 +559,37 @@ private:
             }
         }
 
-        ~StereoConvolver() {
-            destroyNUCConvolver(nucConvolvers[0]);
-            destroyNUCConvolver(nucConvolvers[1]);
-            if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
-            if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
+        // 二重 retire 防止フラグ
+        std::atomic<bool> retired { false };
+
+        // リソース解放を一括で行う静的関数（retire コールバック用）
+        static void destroyStereoConvolver(void* p) noexcept
+        {
+            auto* sc = static_cast<StereoConvolver*>(p);
+            if (!sc) return;
+            destroyNUCConvolver(sc->nucConvolvers[0]);
+            destroyNUCConvolver(sc->nucConvolvers[1]);
+            if (sc->irData[0]) { convo::aligned_free(sc->irData[0]); sc->irData[0] = nullptr; }
+            if (sc->irData[1]) { convo::aligned_free(sc->irData[1]); sc->irData[1] = nullptr; }
+            sc->~StereoConvolver();
+            convo::aligned_free(sc);
         }
 
-        // RCU ベースのライフタイム管理 (参照カウントは使用しない)
-        // 解放は retireStereoConvolver() を使用すること
+        // 外部から安全に破棄するためのエントリポイント
+        static inline void retireStereoConvolver(StereoConvolver* sc) noexcept
+        {
+            if (!sc || sc->retired.exchange(true, std::memory_order_acq_rel))
+                return;
+            convo::retireObject(sc, destroyStereoConvolver);
+        }
+
+        // デストラクタは空（実際の解放は retire 経由）
+        ~StereoConvolver() {
+            // 直接破棄は禁止（すべて retireStereoConvolver を使用すること）
+            #if JUCE_DEBUG
+            jassertfalse; // 直接 delete 禁止。必ず retireStereoConvolver を使用すること
+            #endif
+        }
 
         // コピーコンストラクタは禁止 (NUCエンジンは複製コストが高く、状態を持つため)
         StereoConvolver(const StereoConvolver& other) = delete;
@@ -730,6 +771,7 @@ private:
     alignas(64) std::atomic<bool> experimentalDirectHeadEnabled{false};
     #pragma warning(pop)
 
+    convo::SafeStateSwapper rcuSwapper;
     convo::LinearRamp mixSmoother; // オーディオスレッドでの平滑化用
 
 
@@ -864,25 +906,7 @@ public: // Added for AudioEngine access
     };
 
 
-        class ReaderGuard
-        {
-        public:
-            explicit ReaderGuard(ConvolverProcessor& proc) noexcept : processor(proc)
-            {
-                processor.enterReader();
-            }
 
-            ~ReaderGuard() noexcept
-            {
-                processor.exitReader();
-            }
-
-            ReaderGuard(const ReaderGuard&) = delete;
-            ReaderGuard& operator=(const ReaderGuard&) = delete;
-
-        private:
-            ConvolverProcessor& processor;
-        };
     struct CacheEntry {
         std::shared_ptr<juce::AudioBuffer<double>> ir;
         std::vector<convo::SecondOrderAllpass> allpassSections;
@@ -944,11 +968,10 @@ public: // Added for AudioEngine access
     static void retireStereoConvolver(StereoConvolver* conv, uint64_t retireEpoch);
 
     // ── Phase 0: Epoch-based RCU メンバー ──
-    // SafeStateSwapper: IR 状態の lock-free swap と retired キュー管理
-    SafeStateSwapper rcuSwapper;
+    std::atomic<convo::ConvolverState*> convolverState { nullptr };
     // DeferredFreeThread: 旧 ConvolverState を Audio Thread 外で安全に解放する専用スレッド
     // prepareToPlay() で生成、releaseResources() で停止・破棄する。
-    std::unique_ptr<DeferredFreeThread> deferredFreeThread;
+    std::unique_ptr<convo::DeferredFreeThread> deferredFreeThread;
     // GenerationManager: IR ロードタスクの世代管理（陳腐化チェック用）
     GenerationManager convolverStateGeneration;
 

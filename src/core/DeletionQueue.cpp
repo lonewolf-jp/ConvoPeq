@@ -1,6 +1,7 @@
 //==============================================================================
 // DeletionQueue.cpp
 //==============================================================================
+#include "../DeferredDeletionQueue.h"   // 先頭付近に追加
 #include "DeletionQueue.h"
 #include "../ConvolverState.h"
 #include <algorithm>
@@ -18,12 +19,14 @@ void DeletionQueue::enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch)
     enqueue(ptr, deleter, epoch, DeletionEntryType::Generic);
 }
 
-void DeletionQueue::reclaim(uint64_t minEpoch)
+void DeletionQueue::reclaim(const EpochCore& core)
 {
+    const uint64_t minReaderEpoch = core.getMinReaderEpoch();
+
     std::lock_guard<std::mutex> lock(mutex);
     auto it = std::stable_partition(queue.begin(), queue.end(),
-        [minEpoch](Entry& e) -> bool {
-            if (e.epoch >= minEpoch)
+        [minReaderEpoch](Entry& e) -> bool {
+            if (!convo::EpochCore::isOlder(e.epoch, minReaderEpoch))
                 return true;
 
             if (e.type == DeletionEntryType::ConvolverState)
@@ -61,3 +64,5 @@ void DeletionQueue::reclaimAllIgnoringEpoch()
 }
 
 } // namespace convo
+
+DeferredDeletionQueue g_deletionQueue;

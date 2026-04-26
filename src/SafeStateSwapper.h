@@ -43,6 +43,7 @@
 #include <cstdint>
 #include <cstddef>
 
+namespace convo {
 class SafeStateSwapper
 {
 public:
@@ -54,16 +55,13 @@ public:
 
     // Reader が非参加（静寂状態）であることを示す特別な値
     // uint64_t の最大値を使うことで、最小値計算から自動的に除外される。
-    static constexpr uint64_t kIdleEpoch = std::numeric_limits<uint64_t>::max();
+    static constexpr uint64_t kIdleEpoch = 0;
 
     // -----------------------------------------------------------------------
     // コンストラクタ / デストラクタ
     // -----------------------------------------------------------------------
-    SafeStateSwapper() noexcept : globalEpoch(0)
+    SafeStateSwapper() noexcept : globalEpoch(1)
     {
-        // 全 Reader を初期状態（非参加）に設定
-        for (auto& e : readerEpochs)
-            e.store(kIdleEpoch, std::memory_order_relaxed);
     }
 
     ~SafeStateSwapper() = default;
@@ -124,7 +122,8 @@ public:
     {
         if (readerIndex >= 0 && readerIndex < kMaxReaders)
         {
-            const uint64_t currentEpoch = globalEpoch.load(std::memory_order_acquire);
+            // relaxed load of global epoch is sufficient; release store publishes participation.
+            const uint64_t currentEpoch = globalEpoch.load(std::memory_order_relaxed);
             readerEpochs[readerIndex].store(currentEpoch, std::memory_order_release);
         }
     }
@@ -145,7 +144,8 @@ public:
     {
         if (readerIndex >= 0 && readerIndex < kMaxReaders)
         {
-            readerEpochs[readerIndex].store(kIdleEpoch, std::memory_order_release);
+            // relaxed store is sufficient for exiting participant.
+            readerEpochs[readerIndex].store(kIdleEpoch, std::memory_order_relaxed);
         }
     }
 
@@ -236,37 +236,34 @@ public:
     }
 
     // -----------------------------------------------------------------------
-    // getMinReaderEpoch()  ── Deferred Free Thread / Message Thread から呼ぶ
-    //
-    // アクティブな全 Reader の中で最古のエポックを計算して返す。
-    //
-    // - kIdleEpoch のスロットは「非参加」として計算から除外。
-    // - アクティブな Reader がいない場合 → 現在の globalEpoch を返す
-    //   （すべての retired エントリが解放可能）。
-    //
-    // @return  tryReclaim() に渡すべき minReaderEpoch 値
+    // getSafeEpoch()  ── Deferred Free Thread / Message Thread から呼ぶ
     // -----------------------------------------------------------------------
+    uint64_t getSafeEpoch() const noexcept
+    {
+        const uint64_t current = globalEpoch.load(std::memory_order_acquire);
+        if (current < 2) return 0;
+        return current - 2;
+    }
+
     uint64_t getMinReaderEpoch() const noexcept
     {
-        uint64_t minEpoch       = std::numeric_limits<uint64_t>::max();
-        bool     hasActiveReader = false;
+        uint64_t minEpoch = std::numeric_limits<uint64_t>::max();
+        bool hasActiveReader = false;
 
-        for (int i = 0; i < kMaxReaders; ++i)
-        {
+        for (size_t i = 0; i < kMaxReaders; ++i) {
             const uint64_t e = readerEpochs[i].load(std::memory_order_acquire);
-
-            // kIdleEpoch = 非参加 → 最小値計算から除外
-            if (e != kIdleEpoch)
-            {
-                hasActiveReader = true;
-                if (e < minEpoch)
+            if (e != kIdleEpoch) {
+                if (!hasActiveReader) {
                     minEpoch = e;
+                    hasActiveReader = true;
+                } else if (isOlder(e, minEpoch)) {
+                    minEpoch = e;
+                }
             }
         }
 
-        // アクティブな Reader が存在しない場合、すべての旧データは安全に解放可能
         if (!hasActiveReader)
-            return globalEpoch.load(std::memory_order_acquire);
+            return globalEpoch.load(std::memory_order_relaxed);
 
         return minEpoch;
     }
@@ -317,9 +314,11 @@ private:
     std::atomic<uint64_t> globalEpoch {0};
 
     // Reader ごとのエポック追跡（kIdleEpoch = 非参加）
-    std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs {};
+    mutable std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs {};
 
     // フォールバックキュー（バッファ溢れ時、非 RT スレッドのみ使用）
     mutable std::mutex                         fallbackMutex;
     std::priority_queue<FallbackEntry>         fallbackQueue;
 };
+
+} // namespace convo

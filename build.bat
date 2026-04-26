@@ -87,7 +87,7 @@ if "%DO_CLEAN%"=="1" (
 
 REM ------------------------------------------------------------
 REM Setup MSVC environment
-set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvarsall.bat"
+set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
 if exist "%VCVARS_PATH%" (
     echo [INFO] Found vcvarsall.bat. Executing...
     call "%VCVARS_PATH%" x64

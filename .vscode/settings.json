@@ -26,11 +26,11 @@
         "editor.defaultFormatter": "ms-vscode.cpptools"
     },
     "C_Cpp.codeAnalysis.clangTidy.enabled": true,
-    "C_Cpp.codeAnalysis.clangTidy.path": "C:/Program Files/Microsoft Visual Studio/18/Insiders/VC/Tools/Llvm/x64/bin/clang-tidy.exe",
+    "C_Cpp.codeAnalysis.clangTidy.path": "C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/Llvm/x64/bin/clang-tidy.exe",
     "C_Cpp.codeAnalysis.clangTidy.useBuildPath": true,
     "C_Cpp.codeAnalysis.clangTidy.headerFilter": ".*/src/.*",
     "editor.formatOnSave": true,
-    "C_Cpp.clang_format_path": "C:/Program Files/Microsoft Visual Studio/18/Insiders/VC/Tools/Llvm/x64/bin/clang-format.exe",
+    "C_Cpp.clang_format_path": "C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/Llvm/x64/bin/clang-format.exe",
     "C_Cpp.clang_format_style": "file",
     "C_Cpp.codeAnalysis.clangTidy.checks.enabled": [
         "*"

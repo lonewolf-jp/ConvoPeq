@@ -1,4 +1,4 @@
-﻿#include <immintrin.h> // AVX2
+#include <immintrin.h> // AVX2
 
 //====================================================
 // AVX2 クロスフェード（double）
@@ -47,10 +47,24 @@ static inline void crossfadeAVX2(
 #include "AudioEngine.h"
 #include "InputBitDepthTransform.h"
 #include "OutputFilter.h"
-#include "DeferredDeletionQueue.h"
 #include "core/SnapshotAssembler.h"
+#include "core/EpochManager.h"
+#include "core/EBRQueue.h"
+#include "core/RCUReader.h"
 
 extern std::atomic<bool> gShuttingDown;
+
+static thread_local convo::RCUReader tls_rcuReader;
+
+static void retireDSP(AudioEngine::DSPCore* dsp)
+{
+    if (dsp) convo::retireObject(dsp, [](void* p) { delete static_cast<AudioEngine::DSPCore*>(p); });
+}
+
+static void retireEQCache(EQCoeffCache* cache)
+{
+    if (cache) cache->release();
+}
 
 // fastTanh 高精度 Padé 近似用の定数
 //----------------------------------------------------------------------------
@@ -148,7 +162,7 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
     if (shutdownInProgress.load(std::memory_order_acquire) ||
         gShuttingDown.load(std::memory_order_acquire))
     {
-        newDSP->release();
+        retireDSP(newDSP);
         return;
     }
 
@@ -158,7 +172,7 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
         if (shutdownInProgress.load(std::memory_order_acquire) ||
             gShuttingDown.load(std::memory_order_acquire))
         {
-            newDSP->release();
+            retireDSP(newDSP);
             return;
         }
 
@@ -188,7 +202,7 @@ void AudioEngine::executeCommit()
         if (shutdownInProgress.load(std::memory_order_acquire) ||
             gShuttingDown.load(std::memory_order_acquire))
         {
-            staging.newDSP->release();
+            retireDSP(staging.newDSP);
             continue;
         }
 
@@ -235,10 +249,6 @@ void AudioEngine::processRebuildRequestsInternal()
     // 現状は何もしない（将来拡張ポイント）
 }
 
-void AudioEngine::processRebuildRequestsFallback()
-{
-    processRebuildRequestsInternal();
-}
 
 // ==================================================================
 // 段階 2+3：thread_local スロット管理および定数
@@ -248,6 +258,7 @@ static constexpr uint64_t kIdleEpoch = 0;
 static constexpr size_t RCU_BACKLOG_WARNING_THRESHOLD = 128;
 
 thread_local size_t AudioEngine::tls_readerSlot = SIZE_MAX;
+thread_local size_t AudioEngine::DSPCore::tls_readerSlot = SIZE_MAX;
 
 // ==================================================================
 // B19: requestLoadState の例外安全性確保用 RAII ガード
@@ -267,7 +278,7 @@ private:
 };
 
 // グローバルインスタンスの定義
-DeferredDeletionQueue g_deletionQueue;
+// (No global g_deletionQueue anymore)
 std::atomic<uint64_t> g_currentEpoch{1};
 std::atomic<bool> gShuttingDown{false};
 
@@ -282,131 +293,45 @@ static inline T* sanitizeRawPtr(T* ptr) noexcept
 // RCU 実装
 // ==================================================================
 
-// -------------------------------------------------------------------
-// スレッド登録
-// -------------------------------------------------------------------
-size_t AudioEngine::registerReader()
+void AudioEngine::advanceRcuEpoch() noexcept
 {
-    size_t slot = nextReaderSlot.fetch_add(1, std::memory_order_relaxed);
-    if (slot >= MAX_READERS) {
-        jassertfalse;
-        slot = MAX_READERS - 1;
-    }
-    readerEpochs[slot].store(0, std::memory_order_relaxed);
-    return slot;
+    convo::EpochManager::instance().advanceEpoch();
 }
 
-void AudioEngine::unregisterReader(size_t slot)
+uint64_t AudioEngine::publishRcuEpoch() noexcept
 {
-    if (slot < MAX_READERS) {
-        readerEpochs[slot].store(kIdleEpoch, std::memory_order_release);
-    }
+    return convo::EpochManager::instance().currentEpoch();
 }
 
-void AudioEngine::updateReaderEpoch(size_t slot, uint64_t epoch)
+void AudioEngine::enterRcuReader(int readerIndex) noexcept
 {
-    if (slot < MAX_READERS) {
-        readerEpochs[slot].store(epoch, std::memory_order_release);
-    }
+    convo::EpochManager::instance().enter(readerIndex);
+}
+
+void AudioEngine::exitRcuReader(int readerIndex) noexcept
+{
+    convo::EpochManager::instance().exit(readerIndex);
+}
+
+void AudioEngine::tryReclaimResources() noexcept
+{
+    convo::EBRQueue::instance().tryReclaim();
 }
 
 void AudioEngine::processDeferredReleases()
 {
-    // shutdownInProgress は SR/デバイス再構成でも true になるため、
-    // 再構成中の回収そのものを延期する。強制回収はアプリ終了時のみ許可。
     if (shutdownInProgress.load(std::memory_order_acquire))
         return;
 
     if (gShuttingDown.load(std::memory_order_acquire))
     {
-        g_deletionQueue.reclaimAllIgnoringEpoch();
+        // For simple EBR in minimal config, just try one last reclaim or rely on cleanup at termination
+        convo::EBRQueue::instance().tryReclaim();
         return;
     }
 
-    // B22: 旧 SPSC キューの重複処理を完全に削除し、MPMC g_deletionQueue に一本化。
-    // この関数は Timer コールバックから呼ばれる（非 RT スレッド）
-    const uint64_t minEpoch = getMinReaderEpoch();
-
-    // 最後にクリーンアップした epoch から進んでいない場合はスキップ
-    if (minEpoch <= lastReclaimedEpoch)
-        return;
-
-    g_deletionQueue.reclaim(minEpoch);
-    lastReclaimedEpoch = minEpoch;
+    convo::EBRQueue::instance().tryReclaim();
 }
-
-// ==================================================================
-// 段階 2+3 実装（追加）
-// ==================================================================
-
-size_t AudioEngine::getOrAllocateSlot() noexcept
-{
-    if (tls_readerSlot != INVALID_SLOT)
-        return tls_readerSlot;
-
-    size_t slot = registerReader();
-    if (slot >= MAX_READERS) {
-        jassertfalse;
-        tls_readerSlot = INVALID_SLOT;
-        return INVALID_SLOT;
-    }
-    tls_readerSlot = slot;
-    return slot;
-}
-
-void AudioEngine::enterReader() noexcept
-{
-    const size_t slot = getOrAllocateSlot();
-    if (slot >= MAX_READERS) return;
-
-    const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
-    // Publish epoch with release semantics
-    readerEpochs[slot].store(epoch, std::memory_order_release);
-    // ★ 強化：seq_cst fence により publish 以降のロードが store より後に見えることを完全保証
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-}
-
-void AudioEngine::exitReader() noexcept
-{
-    const size_t slot = tls_readerSlot;
-    if (slot >= MAX_READERS) return;
-    readerEpochs[slot].store(kIdleEpoch, std::memory_order_release);
-}
-
-uint64_t AudioEngine::advanceGlobalEpoch() noexcept
-{
-    return globalEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
-}
-
-uint64_t AudioEngine::getMinReaderEpoch() const noexcept
-{
-    uint64_t minEpoch = std::numeric_limits<uint64_t>::max();
-    bool hasActiveReader = false;
-
-    for (size_t i = 0; i < MAX_READERS; ++i) {
-        const uint64_t e = readerEpochs[i].load(std::memory_order_acquire);
-        if (e != kIdleEpoch) {
-            hasActiveReader = true;
-            if (SafeStateSwapper::isOlder(e, minEpoch))
-                minEpoch = e;
-        }
-    }
-
-    // Audio Thread の epoch も考慮
-    const uint64_t ae = audioThreadEpoch.load(std::memory_order_acquire);
-    if (ae != kIdleEpoch) {
-        hasActiveReader = true;
-        if (SafeStateSwapper::isOlder(ae, minEpoch))
-            minEpoch = ae;
-    }
-
-    if (!hasActiveReader)
-        return globalEpoch.load(std::memory_order_acquire);
-
-    return minEpoch;
-}
-
-// epoch 比較ヘルパー（isOlder）はヘッダ内でインライン定義済み
 
 // ==================================================================
 // 以下、既存の AudioEngine 実装
@@ -881,6 +806,7 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 
 AudioEngine::AudioEngine()
     : uiEqEditor(*this)
+    , m_coordinator(m_epochCore)
     , m_workerThread(m_commandBuffer, m_coordinator, m_generationManager, &affinityManager)
 {
     gShuttingDown.store(false, std::memory_order_release);
@@ -922,13 +848,13 @@ AudioEngine::~AudioEngine()
         {
             if (pendingTask.newDSP)
             {
-                pendingTask.newDSP->release();
+                retireDSP(pendingTask.newDSP);
                 pendingTask.newDSP = nullptr;
             }
 
             if (pendingTask.currentDSP)
             {
-                pendingTask.currentDSP->release();
+                retireDSP(pendingTask.currentDSP);
                 pendingTask.currentDSP = nullptr;
             }
 
@@ -948,18 +874,15 @@ AudioEngine::~AudioEngine()
             abandonedCommits.pop();
 
             if (staging.newDSP)
-                staging.newDSP->release();
+                retireDSP(staging.newDSP);
             if (staging.oldDSP)
-                staging.oldDSP->release();
+                retireDSP(staging.oldDSP);
         }
     }
 
-    if (activeToRelease)
-        activeToRelease->release();
-    if (fadingToRelease)
-        fadingToRelease->release();
-    if (queuedToRelease)
-        queuedToRelease->release();
+    if (activeToRelease) retireDSP(activeToRelease);
+    if (fadingToRelease) retireDSP(fadingToRelease);
+    if (queuedToRelease) retireDSP(queuedToRelease);
 
     uiConvolverProcessor.removeChangeListener(this);
     uiEqEditor.removeChangeListener(this);
@@ -968,10 +891,8 @@ AudioEngine::~AudioEngine()
     // Snapshot worker を先に停止。
     shutdownWorkerThread();
 
-    // Shutdown 時は reader epoch 進行を待たずに遅延解放を強制回収する。
-    diagLog("[DIAG] ~AudioEngine: before g_deletionQueue.reclaimAllIgnoringEpoch");
-    g_deletionQueue.reclaimAllIgnoringEpoch();
-    diagLog("[DIAG] ~AudioEngine: after g_deletionQueue.reclaimAllIgnoringEpoch");
+    // Shutdown 時は EBR 回収を試みる。
+    convo::EBRQueue::instance().tryReclaim();
 
     // ...既存の解放処理...
     if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
@@ -1555,16 +1476,7 @@ void AudioEngine::onSnapshotRequired(void* userData, uint64_t generation)
     self->createSnapshotFromCurrentState(generation);
 }
 
-AudioEngine::ConvolverStateReaderGuard::ConvolverStateReaderGuard(ConvolverProcessor& conv) noexcept
-    : m_convolver(conv)
-{
-    m_convolver.enterReader();
-}
 
-AudioEngine::ConvolverStateReaderGuard::~ConvolverStateReaderGuard() noexcept
-{
-    m_convolver.exitReader();
-}
 
 void AudioEngine::debugAssertNotAudioThread() const
 {
@@ -1601,10 +1513,8 @@ bool AudioEngine::EQCacheManager::tryEnqueueDeferredMap(CacheMap* map) noexcept
     if (map == nullptr)
         return true;
 
-    return g_deletionQueue.enqueue(map,
-                                   [](void* p) { delete static_cast<CacheMap*>(p); },
-                                   g_currentEpoch.load(std::memory_order_acquire),
-                                   DeletionEntryType::Generic);
+    convo::retireObject(map, [](void* p) { delete static_cast<CacheMap*>(p); });
+    return true;
 }
 
 void AudioEngine::EQCacheManager::drainDeferredMapsUnderLock() noexcept
@@ -1624,15 +1534,11 @@ void AudioEngine::EQCacheManager::drainDeferredMapsUnderLock() noexcept
 
 void AudioEngine::EQCacheManager::storeNewMap(CacheMap* newMap) noexcept
 {
-    CacheMap* old = cacheMapPtr.exchange(newMap, std::memory_order_acq_rel);
+    auto* old = cacheMapPtr.exchange(newMap, std::memory_order_acq_rel);
     if (old == nullptr)
         return;
 
-    if (!tryEnqueueDeferredMap(old))
-    {
-        // Queue full fallback: never delete synchronously here because readers may still observe old.
-        enqueueFallbackMaps.push_back(old);
-    }
+    convo::retireObject(old, [](void* p) { delete static_cast<CacheMap*>(p); });
 }
 
 EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters& params,
@@ -1661,7 +1567,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     currentMap = loadMap();
     if (currentMap == nullptr)
     {
-        cache->release();
+        retireEQCache(cache);
         return nullptr;
     }
 
@@ -1669,7 +1575,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     if (it != currentMap->map.end())
     {
         // 先に追加されたキャッシュを採用し、新規作成分を破棄
-        cache->release();
+        retireEQCache(cache);
         return it->second;
     }
 
@@ -1680,7 +1586,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     }
     catch (const std::bad_alloc&)
     {
-        cache->release();
+        retireEQCache(cache);
         return nullptr;
     }
 
@@ -1703,7 +1609,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) const noexcept
 void AudioEngine::EQCacheManager::releaseCache(EQCoeffCache* cache) noexcept
 {
     if (cache != nullptr)
-        cache->release();
+        retireEQCache(cache);
 }
 
 AudioEngine::EQCacheManager::~EQCacheManager()
@@ -1727,8 +1633,14 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     if (shutdownInProgress.load(std::memory_order_acquire))
         return;
 
-    ConvolverStateReaderGuard readerGuard(uiConvolverProcessor);
-    const ConvolverState* convState = uiConvolverProcessor.getConvolverState();
+
+    struct UIRcuGuard {
+        const ConvolverProcessor& cp;
+        explicit UIRcuGuard(const ConvolverProcessor& cp_) : cp(cp_) { cp.enterStateReader(1); }
+        ~UIRcuGuard() { cp.exitStateReader(1); }
+    } rcuGuard{uiConvolverProcessor};
+
+    const convo::ConvolverState* convState = uiConvolverProcessor.getConvolverState();
 
     convo::EQParameters eqParams;
     if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
@@ -2610,8 +2522,6 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     OversamplingType osType = oversamplingType.load();
     NoiseShaperType nsType = noiseShaperType.load();
     DSPCore* current = activeDSP; // 現在のアクティブDSPをキャプチャ
-    if (current != nullptr)
-        current->addRef();
     int generation = 0;
 
     RebuildTask task;
@@ -2706,15 +2616,17 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 
     // Destroy orphaned DSP objects outside the lock.
     if (dspToDestroy)
-        dspToDestroy->release();
+        retireDSP(dspToDestroy);
     if (currentToRelease)
-        currentToRelease->release();
+        retireDSP(currentToRelease);
 
     if (!queued)
     {
-        newDSP->release();
+        retireDSP(newDSP);
         if (current)
-            current->release();
+        {
+            // EBR: lifetime managed by RCUReader
+        }
     }
 }
 
@@ -2774,7 +2686,7 @@ void AudioEngine::rebuildThreadLoop()
                 ~DSPGuard()
                 {
                     if (ptr != nullptr)
-                        ptr->release();
+                        retireDSP(ptr);
                 }
             } dspGuard { task.newDSP };
 
@@ -2796,10 +2708,9 @@ void AudioEngine::rebuildThreadLoop()
             //
             // 【task.currentDSP (= 旧 activeDSP) の安全性証明】
             //
-            // task.currentDSP は requestRebuild() 側で addRef 済みであり、
-            // rebuild タスクの寿命全体を通じて参照カウントで保持される。
-            // activeDSP/currentDSP が差し替わっても、このローカル参照が残る限り
-            // UAF は発生しない。
+            // task.currentDSP は RCU 設計により、退役後も一定期間（Epoch）生存が
+            // 保証される。rebuild タスクはこの期間内に完了することを前提としている。
+            // (通常、数ミリ秒〜数十ミリ秒。EBR Queue の遅延削除により安全性確保)
             //
             // 【shared_ptr 不採用の理由】
             //     Audio Thread は std::shared_ptr の参照カウント操作を禁止している
@@ -2879,7 +2790,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // 古いリクエストの結果であれば破棄 (Race condition対策)
         if (generation != rebuildGeneration.load(std::memory_order_relaxed))
         {
-            newDSP->release();
+            retireDSP(newDSP);
             return;
         }
 
@@ -2891,19 +2802,19 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         {
             DBG("[AudioEngine] commitNewDSP: rejected non-finalized DSP publish");
             if (newDSP != nullptr)
-                newDSP->release();
+                retireDSP(newDSP);
             return;
         }
 
-        // 1. 旧 DSP を安全にキャプチャしてから新 DSP を公開する（段階 3）
+        // 1. 旧 DSP を安全にキャプチャしてから新 DSP を公開する
         dspToTrash = activeDSP;
 
         // 2. Update the atomic raw pointer for the Audio Thread (Wait-free)
         currentDSP.store(newDSP, std::memory_order_release);
 
-        // 3. 段階 3：エポックを進め、旧 DSP の retire epoch を記録する
-        //    fetch_add は旧値を返すため、retireEpoch = 公開直前のグローバルエポック
-        retireEpoch = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
+        // 3. EBR：エポックを進める
+        convo::EpochManager::instance().advanceEpoch();
+        retireEpoch = convo::EpochManager::instance().currentEpoch();
         g_currentEpoch.store(retireEpoch, std::memory_order_release);
 
         // 4. Take ownership of the new DSP
@@ -3032,44 +2943,29 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // --- クロスフェードdeduplication・スナップショット ---
         if (needsCrossfade)
         {
-            diagLog("[DIAG] commitNewDSP: before addRef dspToTrash=" + juce::String((int64)dspToTrash));
-            dspToTrash->addRef();
-            diagLog("[DIAG] commitNewDSP: after addRef ok");
             const bool isFadingActive = (sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)) != nullptr) ||
                                         dspCrossfadePending.load(std::memory_order_acquire) ||
                                         dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
-            diagLog("[DIAG] commitNewDSP: isFadingActive=" + juce::String((int)isFadingActive));
             if (isFadingActive)
             {
-                diagLog("[DIAG] commitNewDSP: entering isFadingActive=true branch");
                 if (auto* prev = sanitizeRawPtr(queuedOldDSP.exchange(dspToTrash, std::memory_order_acq_rel)))
-                    prev->release();
+                    retireDSP(prev);
                 queuedNextFadeTimeSec.store(fadeTimeSec, std::memory_order_release);
                 fadeQueued.store(true, std::memory_order_release);
-                diagLog("[DIAG] commitNewDSP: isFadingActive branch done");
             }
             else
             {
-                diagLog("[DIAG] commitNewDSP: entering isFadingActive=false branch");
                 if (auto* oldFading = sanitizeRawPtr(fadingOutDSP.exchange(dspToTrash, std::memory_order_acq_rel)))
-                    oldFading->release();
+                    retireDSP(oldFading);
                 queuedFadeTimeSec.store(fadeTimeSec, std::memory_order_release);
                 dspCrossfadePending.store(true, std::memory_order_release);
                 setIRChangeFlag();
-                diagLog("[DIAG] commitNewDSP: isFadingActive=false branch done");
             }
-            diagLog("[DIAG] commitNewDSP: before final release");
-            dspToTrash->release();
-            diagLog("[DIAG] commitNewDSP: crossfade block done");
-
         }
-        else
+        else if (dspToTrash)
         {
             // クロスフェード不要時は即時解放
-                diagLog("[DIAG] commitNewDSP: new DSP committed, crossfade="
-                    + juce::String(dspCrossfadePending.load() || fadeQueued.load() ? "yes" : "no")
-                    + " irName=" + newDSP->convolver.getIRName());
-            dspToTrash->release();
+            retireDSP(dspToTrash);
         }
     }
 
@@ -3299,7 +3195,7 @@ void AudioEngine::resetLearningControlState() noexcept
 
 void AudioEngine::timerCallback()
 {
-    processRebuildRequestsFallback();
+    processRebuildRequestsInternal();
 
     // フェイルセーフ: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
@@ -3488,8 +3384,7 @@ void AudioEngine::timerCallback()
         {
             const double fadeSec = queuedNextFadeTimeSec.load(std::memory_order_acquire);
             queuedFadeTimeSec.store(fadeSec, std::memory_order_release);
-            if (auto* oldFading = sanitizeRawPtr(fadingOutDSP.exchange(queued, std::memory_order_acq_rel)))
-                oldFading->release();
+            fadingOutDSP.store(queued, std::memory_order_release);
             dspCrossfadePending.store(true, std::memory_order_release);
             setIRChangeFlag();
         }
@@ -3794,22 +3689,22 @@ void AudioEngine::releaseResources()
             abandonedCommits.pop();
 
             if (staging.newDSP)
-                staging.newDSP->release();
+                retireDSP(staging.newDSP);
             if (staging.oldDSP)
-                staging.oldDSP->release();
+                retireDSP(staging.oldDSP);
         }
     }
 
     if (activeToRelease)
-        activeToRelease->release();
+        retireDSP(activeToRelease);
     if (fadingToRelease)
-        fadingToRelease->release();
+        retireDSP(fadingToRelease);
     if (queuedToRelease)
-        queuedToRelease->release();
+        retireDSP(queuedToRelease);
     if (pendingNewToRelease)
-        pendingNewToRelease->release();
+        retireDSP(pendingNewToRelease);
     if (pendingCurrentToRelease)
-        pendingCurrentToRelease->release();
+        retireDSP(pendingCurrentToRelease);
 
     diagLog("[DIAG] releaseResources: before ui processor release");
     diagLog("[DIAG] releaseResources: before uiConvolverProcessor.releaseResources");
@@ -3870,17 +3765,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         return;
     }
 
-
-    // Audio Thread Epoch 管理
-    const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
-    audioThreadEpoch.store(epoch, std::memory_order_release);
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-
-    // RAII により関数終了時に必ず audioThreadEpoch をリセット
-    struct EpochGuard {
-        std::atomic<uint64_t>& ae;
-        ~EpochGuard() { ae.store(0, std::memory_order_release); }
-    } epochGuard { audioThreadEpoch };
+    // Epoch tracking for lock-free Audio Thread safety
+    convo::RCUReaderGuard rcuGuard(tls_rcuReader);
 
     DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
     if (dsp == nullptr)
@@ -4036,9 +3922,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
             std::atomic<float> fadingInputMeter { 0.0f };
             std::atomic<float> fadingOutputMeter { 0.0f };
-            fading->addRef();
             fading->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
-            fading->release();
             return;
         }
 
@@ -4088,7 +3972,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             }
             else
             {
-                fading->addRef();
+                // EBR: lifetime managed by RCUReader
                 fading->processToBuffer(bufferToFill, dspCrossfadeFloatBuffer, analyzerFifo,
                                        fadingInputMeter, fadingOutputMeter, fadingState);
             }
@@ -4148,12 +4032,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             latencyWritePos = writePos;
 
             if (!useDryAsOld)
-                fading->release();
+            {
+                // EBR: fading lifetime managed by RCUReaderGuard
+            }
 
             if (!dspCrossfadeGain.isSmoothing())
             {
                 if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                    done->release();
+                    retireDSP(done);
                 dspCrossfadeGain.setCurrentAndTargetValue(1.0);
                 dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
                 dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
@@ -4167,7 +4053,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
             {
                 if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                    done->release();
+                    retireDSP(done);
             }
             if (!dspCrossfadeGain.isSmoothing())
                 dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
@@ -4270,6 +4156,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const juce::ScopedNoDenormals noDenormals;
     m_audioBlockCounter.fetch_add(1, std::memory_order_release);
 
+    // ★ 追加: RCU ガードで現在の DSP を保護する
+    convo::RCUReaderGuard rcuGuard(tls_rcuReader);
     const int numSamples = buffer.getNumSamples();
     // 事前サニティチェック (getNextAudioBlock と同様)
     constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20;
@@ -4279,24 +4167,19 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    // Audio Thread Epoch 管理
-    const uint64_t epoch = globalEpoch.load(std::memory_order_acquire);
-    audioThreadEpoch.store(epoch, std::memory_order_release);
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-
-    // RAII により関数終了時に必ず audioThreadEpoch をリセット
-    struct EpochGuard {
-        std::atomic<uint64_t>& ae;
-        ~EpochGuard() { ae.store(0, std::memory_order_release); }
-    } epochGuard { audioThreadEpoch };
-
-
     DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
     if (dsp == nullptr)
     {
         buffer.clear();
         return;
     }
+
+    // AudioThread入口で、現在のDSPが持つ全てのNUCのガードをチェック（デバッグ時のみ）
+        #ifdef NUC_DEBUG_GUARDS
+        {
+        dsp->convolver.debugCheckNucGuards();
+        }
+    #endif
 
     // --- ProcessingStateを現行設計で初期化 ---
     const bool eqBypassed = eqBypassActive.load(std::memory_order_relaxed);
@@ -4380,9 +4263,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
             std::atomic<float> fadingInputMeter { 0.0f };
             std::atomic<float> fadingOutputMeter { 0.0f };
-            fading->addRef();
             fading->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
-            fading->release();
             return;
         }
 
@@ -4432,7 +4313,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             }
             else
             {
-                fading->addRef();
+                // EBR: lifetime managed by RCUReader
                 fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, analyzerFifo,
                                               fadingInputMeter, fadingOutputMeter, fadingState);
             }
@@ -4490,12 +4371,14 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                     latencyWritePos = 0;
             }
             if (!useDryAsOld)
-                fading->release();
+            {
+                // EBR: managed by RCUReader
+            }
 
             if (!dspCrossfadeGain.isSmoothing())
             {
                 if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                    done->release();
+                    retireDSP(done);
                 dspCrossfadeGain.setCurrentAndTargetValue(1.0);
                 dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
                 dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
@@ -4509,7 +4392,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
         {
             if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                done->release();
+                retireDSP(done);
         }
         if (!dspCrossfadeGain.isSmoothing())
             dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
@@ -4533,9 +4416,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
         std::atomic<float> fadingInputMeter { 0.0f };
         std::atomic<float> fadingOutputMeter { 0.0f };
-        fading->addRef();
         fading->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
-        fading->release();
         return;
     }
 
@@ -4588,7 +4469,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         }
         else
         {
-            fading->addRef();
+            // EBR: managed by RCUReader
             fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, analyzerFifo,
                                           fadingInputMeter, fadingOutputMeter, fadingState);
         }
@@ -4646,12 +4527,14 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         }
         latencyWritePos = writePos;
         if (!useDryAsOld)
-            fading->release();
+        {
+            // EBR: managed by RCUReader
+        }
 
         if (!dspCrossfadeGain.isSmoothing())
         {
             if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                done->release();
+                retireDSP(done);
             dspCrossfadeGain.setCurrentAndTargetValue(1.0);
             dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
         }
@@ -4663,7 +4546,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
         {
             if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                done->release();
+                retireDSP(done);
         }
         if (!dspCrossfadeGain.isSmoothing())
             dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);

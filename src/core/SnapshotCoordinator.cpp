@@ -25,7 +25,7 @@ void SnapshotCoordinator::startFade(const GlobalSnapshot* target, int fadeSample
 	const GlobalSnapshot* oldTarget = m_target.exchange(target, std::memory_order_acq_rel);
 	if (oldTarget) {
 		// Audio Thread が参照中の可能性があるため、即時 delete せず RCU 遅延解放
-		const uint64_t retireEpoch = SnapshotEpoch::get();
+		const uint64_t retireEpoch = m_epochCore.current();
 		m_deletionQueue.enqueue(
 			const_cast<GlobalSnapshot*>(oldTarget),
 			[](void* p) { SnapshotFactory::destroy(static_cast<const GlobalSnapshot*>(p)); },
@@ -103,7 +103,7 @@ void SnapshotCoordinator::completeFade() noexcept
 	if (!target)
 		return;
 
-	const uint64_t retireEpoch = SnapshotEpoch::advance();
+	const uint64_t retireEpoch = m_epochCore.publish();
 	const GlobalSnapshot* old = m_current.exchange(target, std::memory_order_acq_rel);
 	if (old)
 	{

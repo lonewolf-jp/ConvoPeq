@@ -51,6 +51,10 @@
 #include <JuceHeader.h>  // juce::nextPowerOfTwo, JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR
 #include "OutputFilter.h" // convo::HCMode, convo::LCMode
 
+#ifdef _DEBUG
+#define NUC_DEBUG_GUARDS 1
+#endif
+
 namespace convo
 {
 
@@ -93,6 +97,27 @@ struct FilterSpec
 class MKLNonUniformConvolver
 {
 public:
+#ifdef NUC_DEBUG_GUARDS
+    // 診断用ガード（オブジェクトの前後を保護）
+    alignas(64) uint64_t guardBefore[4] = {
+        0x0123456789ABCDEF, 0x0123456789ABCDEF,
+        0x0123456789ABCDEF, 0x0123456789ABCDEF
+    };
+#endif
+    // 診断用ガードチェック（全呼び出し元から安全に呼べるように public）
+    #ifdef NUC_DEBUG_GUARDS
+    inline void checkGuards() const noexcept {
+        if (guardBefore[0] != 0x0123456789ABCDEF) __debugbreak();
+        if (guardBefore[1] != 0x0123456789ABCDEF) __debugbreak();
+        if (guardBefore[2] != 0x0123456789ABCDEF) __debugbreak();
+        if (guardBefore[3] != 0x0123456789ABCDEF) __debugbreak();
+        if (guardAfter[0]  != 0xCAFEBABEDEADBEEF) __debugbreak();
+        if (guardAfter[1]  != 0xCAFEBABEDEADBEEF) __debugbreak();
+        if (guardAfter[2]  != 0xCAFEBABEDEADBEEF) __debugbreak();
+        if (guardAfter[3]  != 0xCAFEBABEDEADBEEF) __debugbreak();
+    }
+    #endif
+
     MKLNonUniformConvolver();
     ~MKLNonUniformConvolver();
 
@@ -167,6 +192,10 @@ public:
     }
 
 private:
+     // 軽量参照カウントによる UAF 防止（削除予定）
+    std::atomic<uint32_t> refCount{0};
+    std::atomic<bool> retireRequested{false};
+
     //----------------------------------------------------------
     // Layer  ─ 1 つのパーティション層
     //----------------------------------------------------------
@@ -289,6 +318,13 @@ private:
     double* m_directOutBuf   = nullptr;
 
     std::atomic<bool> m_ready { false };
+
+    #ifdef NUC_DEBUG_GUARDS
+    alignas(64) uint64_t guardAfter[4] = {
+        0xCAFEBABEDEADBEEF, 0xCAFEBABEDEADBEEF,
+        0xCAFEBABEDEADBEEF, 0xCAFEBABEDEADBEEF
+    };
+    #endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MKLNonUniformConvolver)
 };

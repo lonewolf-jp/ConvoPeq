@@ -9,7 +9,7 @@
 #include <cstdint>
 #include "GlobalSnapshot.h"
 #include "DeletionQueue.h"
-#include "ReaderEpoch.h"
+#include "EpochCore.h"
 #include "SnapshotFactory.h"
 
 namespace convo {
@@ -29,8 +29,8 @@ static inline float equalPowerSinApprox(float x) noexcept
 
 class SnapshotCoordinator {
 public:
-    SnapshotCoordinator() noexcept
-        : m_current(nullptr)
+    explicit SnapshotCoordinator(EpochCore& epochCore) noexcept
+        : m_epochCore(epochCore), m_current(nullptr)
     {
         m_current.store(nullptr, std::memory_order_relaxed);
         m_target.store(nullptr, std::memory_order_relaxed);
@@ -58,7 +58,7 @@ public:
         abortFade();
         const GlobalSnapshot* oldSnap = m_current.exchange(newSnap, std::memory_order_release);
         if (oldSnap) {
-            uint64_t newEpoch = SnapshotEpoch::advance();
+            uint64_t newEpoch = m_epochCore.publish();
             m_deletionQueue.enqueue(
                 const_cast<GlobalSnapshot*>(oldSnap),
                 [](void* ptr) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr)); },
@@ -101,9 +101,9 @@ public:
     void advanceFade(int numSamples) noexcept;
     bool tryCompleteFade() noexcept;
 
-    void reclaim(uint64_t minEpoch) noexcept
+    void reclaim(uint64_t /*unused*/) noexcept
     {
-        m_deletionQueue.reclaim(minEpoch);
+        m_deletionQueue.reclaim(m_epochCore);
     }
 
     bool isFading() const noexcept
@@ -116,6 +116,7 @@ private:
     void abortFade() noexcept;
     void completeFade() noexcept;
 
+    EpochCore& m_epochCore;
     std::atomic<const GlobalSnapshot*> m_current{nullptr};
     std::atomic<const GlobalSnapshot*> m_target{nullptr};
     std::atomic<double> m_fadeAlpha{1.0};

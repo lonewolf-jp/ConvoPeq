@@ -14,6 +14,7 @@
 #include <array>
 #include <cstdint>
 #include <type_traits>
+#include "core/EpochCore.h"
 #include "ConvolverState.h"
 
 enum class DeletionEntryType : uint8_t {
@@ -87,11 +88,12 @@ public:
     }
 
     // Message Thread / Timer から呼ばれる。
-    void reclaim(uint64_t minEpoch) {
+    void reclaim(const convo::EpochCore& core) {
         constexpr int kMaxScan = 1024;
         uint32_t deqPos = dequeuePos.load(std::memory_order_relaxed);
         uint32_t scanPos = deqPos;
         int scanned = 0;
+        const uint64_t minReaderEpoch = core.getMinReaderEpoch();
 
         while (scanned < kMaxScan) {
             auto& seq_atom = sequences[scanPos & kMask];
@@ -105,10 +107,11 @@ public:
             auto& entry = ringBuffer[scanPos & kMask];
             bool canDelete = false;
 
-            if (entry.epoch < minEpoch) {
+            if (convo::EpochCore::isOlder(entry.epoch, minReaderEpoch)) {
                 canDelete = true;
-                if (entry.type == DeletionEntryType::ConvolverState) {
-                    auto* state = static_cast<ConvolverState*>(entry.ptr);
+                if (entry.type == DeletionEntryType::ConvolverState)
+                {
+                    auto* state = static_cast<convo::ConvolverState*>(entry.ptr);
                     if (state != nullptr
                         && state->snapshotRefCount.load(std::memory_order_relaxed) > 0) {
                         canDelete = false;

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <vector>
 #include <mutex>
+#include "EpochCore.h"
 #include "../DeferredDeletionQueue.h"
 
 namespace convo {
@@ -16,7 +17,7 @@ class DeletionQueue {
 public:
     void enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type);
     void enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch);
-    void reclaim(uint64_t minEpoch);
+    void reclaim(const EpochCore& core);
     void reclaimAllIgnoringEpoch();
 
 private:

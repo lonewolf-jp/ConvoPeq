@@ -27,6 +27,8 @@
 #include <chrono>
 #include <limits>
 
+namespace convo {
+
 class DeferredFreeThread
 {
 public:
@@ -115,3 +117,5 @@ private:
     std::atomic<bool>     running;
     std::thread           thread;
 };
+
+} // namespace convo
