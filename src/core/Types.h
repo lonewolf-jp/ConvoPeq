@@ -23,10 +23,10 @@ struct GlobalSnapshot;
  *   3. 1 リタイア 1 ツリー原則：retire は常に ActiveSnapshot 単位で行う
  */
 struct ActiveSnapshot {
-    const std::unique_ptr<const GlobalSnapshot> current;
-    const std::unique_ptr<const GlobalSnapshot> previous;
-    const float fadeAlpha;
-    const uint64_t generation;
+    std::unique_ptr<const GlobalSnapshot> current;
+    std::unique_ptr<const GlobalSnapshot> previous;
+    float fadeAlpha;
+    uint64_t generation;
 
     ActiveSnapshot(std::unique_ptr<const GlobalSnapshot> cur,
                    std::unique_ptr<const GlobalSnapshot> prev,
@@ -40,11 +40,11 @@ struct ActiveSnapshot {
     
     ~ActiveSnapshot() = default;
     
-    // コピー・ムーブ禁止（所有権移動はコンストラクタでのみ）
+    // コピー禁止、ムーブ許可（所有権移動はムーブでのみ）
     ActiveSnapshot(const ActiveSnapshot&) = delete;
     ActiveSnapshot& operator=(const ActiveSnapshot&) = delete;
-    ActiveSnapshot(ActiveSnapshot&&) = delete;
-    ActiveSnapshot& operator=(ActiveSnapshot&&) = delete;
+    ActiveSnapshot(ActiveSnapshot&&) = default;
+    ActiveSnapshot& operator=(ActiveSnapshot&&) = default;
 };
 
 // 処理順序（EQ と Convolver の直列接続順）

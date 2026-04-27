@@ -14,29 +14,26 @@ build/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
-Makefile
 cmake_install.cmake
-compile_commands.json
+Makefile
 
 # Dependencies
 vendor/
 
-# Logs
+# Logs and temp files
 *.log
-
-# Temporary files
 *.tmp
-*.swp
-*.swo
 
 # Environment
 .env
 .env.local
-*.env.*
+.env.*
 
 # Editors
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # Coverage
 coverage/

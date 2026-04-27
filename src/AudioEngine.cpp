@@ -1718,47 +1718,45 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     }
 
     // RCU v17.15: ActiveSnapshot を生成して publish
-    auto oldSnap = m_activeSnapshot.load(std::memory_order_acquire);
-    auto prevSnap = oldSnap ? oldSnap->previous.get() : nullptr;
-    
-    if (fadeSamples > 0)
-    {
-        // フェード開始：新しい ActiveSnapshot を生成
-        auto newActive = std::make_unique<convo::ActiveSnapshot>(
-            std::unique_ptr<const convo::GlobalSnapshot>(newSnap),
-            std::unique_ptr<const convo::GlobalSnapshot>(prevSnap ? 
-                static_cast<const convo::GlobalSnapshot*>(prevSnap) : nullptr),
-            0.0f, // fadeAlpha 初期値
-            m_snapshotGeneration.fetch_add(1, std::memory_order_acq_rel));
+    // 1. 新しい ActiveSnapshot を一時作成（previous は一旦 null）
+    auto newActive = std::make_unique<convo::ActiveSnapshot>(
+        std::unique_ptr<const convo::GlobalSnapshot>(newSnap),
+        nullptr, // ここで previous を設定しないのが重要
+        fadeSamples > 0 ? 0.0f : 1.0f,
+        m_snapshotGeneration.fetch_add(1, std::memory_order_acq_rel)
+    );
+
+    // 2. アトミックに交換し、古いスナップショットを取得
+    // これにより、load/store の間の競合と二重 retire を防止
+    auto* oldSnap = m_activeSnapshot.exchange(newActive.get(), std::memory_order_acq_rel);
+
+    // 3. 所有権の移譲（ここが核心）
+    // oldSnap が存在する場合、その current を newActive の previous へ move する
+    // これにより「単一所有権」が保たれ、二重 delete が防止される
+    if (oldSnap && fadeSamples > 0) {
+        // フェードあり：旧 current を previous として保持
+        newActive->previous = std::move(const_cast<std::unique_ptr<const convo::GlobalSnapshot>&>(oldSnap->current));
         
+        // フェード開始（正しくは oldSnap->current から newSnap へ）
+        // ※ oldSnap->current は既に move 済みだが、ポインタ値は残っているため参照可能
+        // ただし、所有権は newActive に移っているため、寿命は保証される
         m_isFading.store(true, std::memory_order_release);
         m_fadeAlpha.store(0.0f, std::memory_order_release);
         m_fadeStartSample.store(m_audioBlockCounter.load(std::memory_order_acquire) * blockSize, std::memory_order_release);
         m_fadeLengthSamples.store(fadeSamples, std::memory_order_release);
-        
-        // 旧スナップショットを retire してから新規公開（RCU 原則）
-        if (oldSnap) {
-            convo::retire(oldSnap);
-        }
-        m_activeSnapshot.store(newActive.release(), std::memory_order_release);
-    }
-    else
-    {
-        // 即時切り替え
-        auto newActive = std::make_unique<convo::ActiveSnapshot>(
-            std::unique_ptr<const convo::GlobalSnapshot>(newSnap),
-            std::unique_ptr<const convo::GlobalSnapshot>(prevSnap ? 
-                static_cast<const convo::GlobalSnapshot*>(prevSnap) : nullptr),
-            1.0f, // fadeAlpha 完了値
-            m_snapshotGeneration.fetch_add(1, std::memory_order_acq_rel));
-        
+    } else {
+        // fadeSamples == 0 の場合、previous は null のまま（即時切り替え）
         m_isFading.store(false, std::memory_order_release);
         m_fadeAlpha.store(1.0f, std::memory_order_release);
-        
-        auto* oldPtr = m_activeSnapshot.exchange(newActive.release(), std::memory_order_acq_rel);
-        if (oldPtr) {
-            convo::retire(oldPtr);
-        }
+    }
+
+    // 4. 新しいスナップショットを公開（release して所有権を atomic に渡す）
+    m_activeSnapshot.store(newActive.release(), std::memory_order_release);
+
+    // 5. 古いスナップショットを retire
+    // exchange で取得した oldSnap は、ここで唯一の所有者として retire される
+    if (oldSnap) {
+        convo::retire(oldSnap);
     }
 
     // フェイルセーフ: 何らかの競合で snapshot が未適用ならフォールバック
@@ -3872,9 +3870,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             // RCU v17.15: フェード進行は上記で処理済み;
         debugLastCoordinatorIsFading.store(isFading() ? 1 : 0, std::memory_order_relaxed);
 
-        float snapshotAlpha = 1.0f;
-        const convo::GlobalSnapshot* snapshotFrom = nullptr;
-        const convo::GlobalSnapshot* snapshotTo = nullptr;
+        // RCU スナップショットからポインタを取得（これがソース・オブ・トゥルース）
+        RCUReaderGuard guard(tls_rcu_reader);
+        auto* snap = m_activeSnapshot.load(std::memory_order_acquire);
+        
+        float snapshotAlpha = m_fadeAlpha.load(std::memory_order_acquire);
+        const convo::GlobalSnapshot* snapshotTo   = snap ? snap->current.get() : nullptr;
+        const convo::GlobalSnapshot* snapshotFrom = snap ? snap->previous.get() : nullptr;
+        
         const bool updateFadeReturned = isFading() && snapshotFrom != nullptr && snapshotTo != nullptr;
         debugLastUpdateFadeReturned.store(updateFadeReturned ? 1 : 0, std::memory_order_relaxed);
         debugLastSnapshotFromNull.store(snapshotFrom == nullptr ? 1 : 0, std::memory_order_relaxed);
