@@ -1,6 +1,6 @@
 //==============================================================================
 // WorkerThread.h
-// Debounced snapshot update worker
+// Debounced snapshot update worker - RCU v17.15 unified model
 //==============================================================================
 #pragma once
 
@@ -14,7 +14,7 @@ class ThreadAffinityManager;
 
 namespace convo {
 
-class SnapshotCoordinator;
+class ActiveSnapshot;
 
 using SnapshotCreatorCallback = void (*)(void* userData, uint64_t generation);
 
@@ -26,7 +26,7 @@ struct WorkerThreadConfig {
 class WorkerThread {
 public:
     WorkerThread(CommandBuffer& cmdBuf,
-                 SnapshotCoordinator& coordinator,
+                 std::atomic<ActiveSnapshot*>& activeSnapshot,
                  GenerationManager& genManager,
                  const ThreadAffinityManager* affinityMgr,
                  const WorkerThreadConfig& config = WorkerThreadConfig());
@@ -58,7 +58,7 @@ private:
     void run();
 
     CommandBuffer& commandBuffer;
-    SnapshotCoordinator& coordinator;
+    std::atomic<ActiveSnapshot*>& activeSnapshot;
     GenerationManager& generationManager;
     const ThreadAffinityManager* affinityManager = nullptr;
     WorkerThreadConfig config;

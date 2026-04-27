@@ -161,7 +161,7 @@ void SnapshotFactory::destroy(const GlobalSnapshot* snap) noexcept
     g_liveSnapshotCount.fetch_sub(1, std::memory_order_relaxed);
 #endif
 
-    delete snap;
+    convo::retire(snap);
 }
 
 #ifdef _DEBUG

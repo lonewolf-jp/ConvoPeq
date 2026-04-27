@@ -67,8 +67,8 @@ struct GlobalSnapshot {
     GlobalSnapshot(GlobalSnapshot&&) = delete;
     GlobalSnapshot& operator=(GlobalSnapshot&&) = delete;
 
-    // デストラクタは public（Factory::destroy で呼ばれるため）
-    ~GlobalSnapshot();
+    // デストラクタは public（unique_ptr で所有されるためデフォルト実装）
+    ~GlobalSnapshot() = default;
 };
 
 } // namespace convo

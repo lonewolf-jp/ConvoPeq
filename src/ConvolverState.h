@@ -109,7 +109,6 @@ struct ConvolverState
     // スナップショット比較用の不変ID（UAF回避のためポインタ比較を避ける）
     uint64_t stateId = generateNewStateId();
 
-    mutable std::atomic<int> snapshotRefCount{ 0 };
 
     static uint64_t generateNewStateId() noexcept
     {

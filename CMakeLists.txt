@@ -161,19 +161,21 @@ target_sources(ConvoPeq PRIVATE
     src/core/SnapshotAssembler.h
     src/core/SnapshotAssembler.cpp
     src/core/ReaderEpoch.h
-    src/core/EpochManager.h
-    src/core/EBRQueue.h
     src/core/RCUReader.h
-    src/core/SnapshotCoordinator.h
-    src/core/SnapshotCoordinator.cpp
-    src/core/DeletionQueue.cpp
-    # Phase 2: Types
     src/core/Types.h
-    # Phase 3: Debounced snapshot worker
     src/core/CommandBuffer.h
     src/core/ThreadAffinityManager.h
     src/core/WorkerThread.h
     src/core/WorkerThread.cpp
+    # RCU v17.15 - 単一 RCU モデル完全統一
+    src/rcu/EpochManager.h
+    src/rcu/EpochManager.cpp
+    src/rcu/RCUReader.h
+    src/rcu/DeferredDeletionQueue.h
+    src/rcu/DeferredDeletionQueue.cpp
+    src/rcu/ReclaimerThread.h
+    src/rcu/ReclaimerThread.cpp
+    src/rcu/retire.h
 )
 
 #------------------------------------------------------------

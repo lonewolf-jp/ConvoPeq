@@ -1,41 +1,49 @@
-# Build directories
-build/
-
-# Visual Studio / MSVC
-.vs/
-out/
-*.user
-*.suo
-*.ipch
-*.aps
-*.sdf
-*.opensdf
-
-# VS Code (Optional: commit settings if you want to share tasks/launch config)
-# .vscode/
-
-# Binary output
-*.exe
-*.dll
-*.lib
-*.pdb
+```
+# Build artifacts
+*.o
 *.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+*.out
 
-# CMake
-CMakeCache.txt
+# CMake build directories
+build/
+cmake-build-*/
 CMakeFiles/
+CMakeCache.txt
+Makefile
 cmake_install.cmake
+compile_commands.json
 
-# r8brain-free-src (If you want users to provide their own r8brain-free-src)
-r8brain-free-src/
+# Dependencies
+vendor/
 
-# JUCE (If you want users to provide their own JUCE)
-JUCE/
+# Logs
+*.log
 
-# OS Files
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# OS
 .DS_Store
 Thumbs.db
-
-# serena mcp server logs
-.cache/
-.serena/
+```

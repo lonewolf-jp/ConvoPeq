@@ -10,17 +10,17 @@
 #include <cmath>
 #include <cstdint>
 #include <algorithm>
-#include "core/EpochManager.h"
-#include "core/EBRQueue.h"
-#include "core/RCUReader.h"
+#include "rcu/EpochManager.h"
+#include "rcu/ReclaimerThread.h"
+#include "rcu/RCUReader.h"
 
 static thread_local convo::RCUReader tls_rcuReader;
 
 static void retireEQState(EQProcessor::EQState* state) {
-    if (state) state->release();
+    if (state) convo::retire(state);
 }
 static void retireBandNode(EQProcessor::BandNode* node) {
-    if (node) node->release();
+    if (node) convo::retire(node);
 }
 #include <complex>
 #include <numeric>
@@ -943,7 +943,7 @@ EQBandParams EQProcessor::getBandParams(int band) const
 
 void EQProcessor::cleanup()
 {
-    // B22: 状態の削除は RefCountedDeferred::release() 経由で
+    // B22: 状態の削除は convo::retire() 経由で
     //      グローバルの g_deletionQueue に委ねられるため、
     //      ここでは個別のクリーンアップは不要。
 }
@@ -2698,7 +2698,7 @@ EQCoeffCache* EQProcessor::createCoeffCache(
                 convo::aligned_free(cache->parallelWorkBuffer);
             if (cache->parallelAccumBuffer)
                 convo::aligned_free(cache->parallelAccumBuffer);
-            delete cache;
+            convo::retire(cache);
             return nullptr;
         }
 

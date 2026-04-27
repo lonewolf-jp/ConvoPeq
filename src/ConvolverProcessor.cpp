@@ -5,9 +5,9 @@
 //============================================================================
 #include <JuceHeader.h>
 #include "ConvolverProcessor.h"
-#include "core/EpochManager.h"
-#include "core/EBRQueue.h"
-#include "core/RCUReader.h"
+#include "rcu/EpochManager.h"
+#include "rcu/RCUReader.h"
+#include "rcu/retire.h"
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -26,7 +26,7 @@
 #include "IRConverter.h"
 #include "CacheManager.h"
 #include "ProgressiveUpgradeThread.h"
-#include "DeferredDeletionQueue.h"
+#include "rcu/DeferredDeletionQueue.h"
 #include "AudioEngine.h"
 #include "core/ThreadAffinityManager.h"
 
@@ -97,7 +97,7 @@ void ConvolverProcessor::updateIRState(std::shared_ptr<juce::AudioBuffer<double>
     auto* oldState = currentIRState.exchange(newState, std::memory_order_acq_rel);
     if (oldState != nullptr)
     {
-        convo::retireObject(oldState, [](void* p)
+        convo::retire(oldState, [](void* p)
         {
             auto* state = static_cast<IRState*>(p);
             state->~IRState();
@@ -1418,7 +1418,9 @@ ConvolverProcessor::~ConvolverProcessor()
 
     // Clean up latency snapshot pointer
     auto* oldSnap = cachedLatency.exchange(nullptr, std::memory_order_acq_rel);
-    delete oldSnap;
+    if (oldSnap) {
+        convo::retire(oldSnap);
+    }
 
     if (fftHandle) {
         DftiFreeDescriptor(&fftHandle);
@@ -1461,7 +1463,7 @@ void ConvolverProcessor::timerCallback()
 
     auto* provider = rcuProvider;
     if (provider) {
-        convo::EBRQueue::instance().tryReclaim();
+        // RCU v17.15: EBRQueue は不要。ReclaimerThread が全ての解放を担当する。
     }
 
     cleanup();
@@ -1687,19 +1689,6 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         latencySmoother.setCurrentAndTargetValue(0.0);
     }
     oldDelay = latencySmoother.getTargetValue();
-
-    // ── Phase 0: DeferredFreeThread の起動 ──
-    // prepareToPlay() ごとに既存スレッドを安全に再起動する。
-    // （デバイス設定変更でサンプルレートが変わった場合も対応）
-    if (!deferredFreeThread)
-    {
-        ThreadAffinityManager* affinityMgr = nullptr;
-        if (rcuProvider != nullptr)
-            affinityMgr = const_cast<ThreadAffinityManager*>(&rcuProvider->getAffinityManager());
-
-        deferredFreeThread = std::make_unique<convo::DeferredFreeThread>(rcuSwapper, affinityMgr);
-    }
-
     firstProcessCall.store(true, std::memory_order_release);
 
     isPrepared.store(true, std::memory_order_release);
@@ -1773,30 +1762,15 @@ void ConvolverProcessor::releaseResources()
     }
     diagLog("[DIAG ConvolverProcessor] releaseResources: after currentIRState free");
 
-    // ── Phase 0: DeferredFreeThread の停止と残余解放 ──
-    // Audio Thread が停止した後にこの関数が呼ばれる保証があるため、
-    // deferredFreeThread を破棄しても UAF は発生しない。
-    // ~DeferredFreeThread() 内で残った retired エントリを強制解放する。
-    deferredFreeThread.reset();
-    diagLog("[DIAG ConvolverProcessor] releaseResources: after deferredFreeThread.reset");
+    // RCU v17.15: ReclaimerThread が全ての解放を担当するため、
+    // ここでの明示的な解放処理は不要。convolverState に残っているポインタも
+    // EpochManager::shutdownPhase と ReclaimerThread::shutdown() により安全に解放される。
+    if (auto* state = convolverState.load(std::memory_order_acquire)) {
+        convo::retire(state);
+        convolverState.store(nullptr, std::memory_order_release);
+    }
+    diagLog("[DIAG ConvolverProcessor] releaseResources: after convolverState retire");
 
-    // rcuSwapper に残っているエントリも念のため強制解放
-    while (auto* ptr = rcuSwapper.tryReclaim(std::numeric_limits<uint64_t>::max()))
-        delete ptr;
-    diagLog("[DIAG ConvolverProcessor] releaseResources: after rcuSwapper reclaim loop");
-
-    runtime.clear();
-    diagLog("[DIAG ConvolverProcessor] releaseResources: after runtime.clear");
-
-    diagLog("[DIAG ConvolverProcessor] releaseResources: before isPrepared.store");
-    isPrepared.store(false, std::memory_order_release);
-    diagLog("[DIAG ConvolverProcessor] releaseResources: after isPrepared.store");
-
-    diagLog("[DIAG ConvolverProcessor] releaseResources: end");
-    diagLog("[DIAG ConvolverProcessor] releaseResources: EXITING");
-}
-
-void ConvolverProcessor::reset()
 {
     // Index 2 for Message/UI thread safety
     struct GlobalGuard {
@@ -3493,7 +3467,7 @@ bool ConvolverProcessor::isCacheEntrySafeToDelete(uint64_t cacheKey, int fftSize
         ~LocalGuard() { cp.exitStateReader(2); }
     } guard(*this);
 
-    if (auto* state = rcuSwapper.getState())
+    if (auto* state = convolverState.load(std::memory_order_acquire))
     {
         if (convolverStateGeneration.isCurrentGeneration(state->generationId)
             && state->fftSize == fftSize
@@ -3896,10 +3870,10 @@ void ConvolverProcessor::forceCleanup()
 // updateConvolverState  ── Phase 0: Epoch-based RCU 状態更新
 //
 // Message Thread から呼ぶ。GenerationManager による陳腐化チェックを行い、
-// 現在世代と一致する場合のみ SafeStateSwapper::swap() に渡す。
-// 不一致の場合（古いタスク結果）は newState を即時 delete して破棄する。
+// 現在世代と一致する場合のみ atomic swap で公開する。
+// 不一致の場合（古いタスク結果）は newState を convo::retire() で解放して破棄する。
 //
-// 旧 ConvolverState の解放は DeferredFreeThread が非同期に行うため、
+// 旧 ConvolverState の解放は ReclaimerThread が非同期に行うため、
 // Audio Thread のリアルタイム性は維持される。
 //--------------------------------------------------------------
 void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
@@ -3910,19 +3884,25 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
 
     jassert(!writerActive.exchange(true, std::memory_order_acquire));
 
-    // 陳腐化チェック: タスク起動時の世代と現在の世代を比較
+    // 陳腐化チェック：タスク起動時の世代と現在の世代を比較
     if (!convolverStateGeneration.isCurrentGeneration(newState->generationId))
     {
         juce::Logger::writeToLog("ConvolverProcessor::updateConvolverState: stale generation, discarding state (gen="
             + juce::String((int)newState->generationId) + ")");
-        delete newState;
+        convo::retire(newState);
         writerActive.store(false, std::memory_order_release);
         return;
     }
 
-    // 最新世代 → atomic swap
-    rcuSwapper.swap(newState);
+    // 最新世代 → atomic swap (RCU publish)
+    auto* oldState = convolverState.load(std::memory_order_acquire);
     convolverState.store(const_cast<convo::ConvolverState*>(newState), std::memory_order_release);
+
+    // 旧状態を retire (unique_ptr チェーンにより子オブジェクトも自動解放)
+    if (oldState) {
+        convo::retire(oldState);
+    }
+
     convo::EpochManager::instance().advanceEpoch();
 
     writerActive.store(false, std::memory_order_release);
@@ -4548,7 +4528,9 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     auto* otherSnap = other.cachedLatency.load(std::memory_order_acquire);
     auto* newSnap = otherSnap ? new LatencySnapshot(*otherSnap) : new LatencySnapshot();
     auto* oldSnap = cachedLatency.exchange(newSnap, std::memory_order_acq_rel);
-    delete oldSnap;
+    if (oldSnap) {
+        convo::retire(oldSnap);
+    }
 
     irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
     uiAlgorithmLatencySamples.store(other.uiAlgorithmLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
@@ -5489,7 +5471,9 @@ void ConvolverProcessor::updateLatencyCache() noexcept
 
     auto* newSnap = new LatencySnapshot(snap);
     auto* oldSnap = cachedLatency.exchange(newSnap, std::memory_order_acq_rel);
-    delete oldSnap;
+    if (oldSnap) {
+        convo::retire(oldSnap);
+    }
 }
 
 void ConvolverProcessor::requestHostDisplayUpdate()

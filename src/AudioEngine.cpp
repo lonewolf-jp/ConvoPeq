@@ -48,9 +48,9 @@ static inline void crossfadeAVX2(
 #include "InputBitDepthTransform.h"
 #include "OutputFilter.h"
 #include "core/SnapshotAssembler.h"
-#include "core/EpochManager.h"
-#include "core/EBRQueue.h"
-#include "core/RCUReader.h"
+#include "rcu/EpochManager.h"
+#include "rcu/RCUReader.h"
+#include "rcu/ReclaimerThread.h"
 
 extern std::atomic<bool> gShuttingDown;
 
@@ -58,7 +58,7 @@ static thread_local convo::RCUReader tls_rcuReader;
 
 static void retireDSP(AudioEngine::DSPCore* dsp)
 {
-    if (dsp) convo::retireObject(dsp, [](void* p) { delete static_cast<AudioEngine::DSPCore*>(p); });
+    if (dsp) convo::retire(dsp);
 }
 
 static void retireEQCache(EQCoeffCache* cache)
@@ -290,48 +290,11 @@ static inline T* sanitizeRawPtr(T* ptr) noexcept
     return (reinterpret_cast<uintptr_t>(ptr) == kInvalidAllOnes) ? nullptr : ptr;
 }
 // ==================================================================
-// RCU 実装
+// RCU v17.15: Epoch 管理（EpochManager に統合済み）
 // ==================================================================
-
-void AudioEngine::advanceRcuEpoch() noexcept
-{
-    convo::EpochManager::instance().advanceEpoch();
-}
-
-uint64_t AudioEngine::publishRcuEpoch() noexcept
-{
-    return convo::EpochManager::instance().currentEpoch();
-}
-
-void AudioEngine::enterRcuReader(int readerIndex) noexcept
-{
-    convo::EpochManager::instance().enter(readerIndex);
-}
-
-void AudioEngine::exitRcuReader(int readerIndex) noexcept
-{
-    convo::EpochManager::instance().exit(readerIndex);
-}
-
-void AudioEngine::tryReclaimResources() noexcept
-{
-    convo::EBRQueue::instance().tryReclaim();
-}
-
-void AudioEngine::processDeferredReleases()
-{
-    if (shutdownInProgress.load(std::memory_order_acquire))
-        return;
-
-    if (gShuttingDown.load(std::memory_order_acquire))
-    {
-        // For simple EBR in minimal config, just try one last reclaim or rely on cleanup at termination
-        convo::EBRQueue::instance().tryReclaim();
-        return;
-    }
-
-    convo::EBRQueue::instance().tryReclaim();
-}
+// advanceRcuEpoch, publishRcuEpoch, enterRcuReader, exitRcuReader,
+// tryReclaimResources, processDeferredReleases は全て削除。
+// 代わりに EpochManager と ReclaimerThread を直接使用。
 
 // ==================================================================
 // 以下、既存の AudioEngine 実装
@@ -806,8 +769,7 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 
 AudioEngine::AudioEngine()
     : uiEqEditor(*this)
-    , m_coordinator(m_epochCore)
-    , m_workerThread(m_commandBuffer, m_coordinator, m_generationManager, &affinityManager)
+    , m_workerThread(m_commandBuffer, *this, m_generationManager, &affinityManager)
 {
     gShuttingDown.store(false, std::memory_order_release);
     uiConvolverProcessor.setRcuProvider(this);
@@ -891,8 +853,8 @@ AudioEngine::~AudioEngine()
     // Snapshot worker を先に停止。
     shutdownWorkerThread();
 
-    // Shutdown 時は EBR 回収を試みる。
-    convo::EBRQueue::instance().tryReclaim();
+    // RCU v17.15: ReclaimerThread が全ての解放を担当するため、
+    // ここでの明示的な回収処理は不要。
 
     // ...既存の解放処理...
     if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
@@ -1513,7 +1475,7 @@ bool AudioEngine::EQCacheManager::tryEnqueueDeferredMap(CacheMap* map) noexcept
     if (map == nullptr)
         return true;
 
-    convo::retireObject(map, [](void* p) { delete static_cast<CacheMap*>(p); });
+    convo::retire(map);
     return true;
 }
 
@@ -1538,7 +1500,7 @@ void AudioEngine::EQCacheManager::storeNewMap(CacheMap* newMap) noexcept
     if (old == nullptr)
         return;
 
-    convo::retireObject(old, [](void* p) { delete static_cast<CacheMap*>(p); });
+    convo::retire(old);
 }
 
 EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters& params,
@@ -1618,10 +1580,10 @@ AudioEngine::EQCacheManager::~EQCacheManager()
 
     CacheMap* currentMap = cacheMapPtr.exchange(nullptr, std::memory_order_acq_rel);
     if (currentMap != nullptr)
-        delete currentMap;
+        convo::retire(currentMap);
 
     for (auto* map : enqueueFallbackMaps)
-        delete map;
+        convo::retire(map);
 
     enqueueFallbackMaps.clear();
 }
@@ -1730,7 +1692,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
     const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
         params,
-        m_coordinator.getCurrent(),
+        getActiveSnapshot() ? getActiveSnapshot()->current.get() : nullptr,
         generation,
         sampleRate);
 
@@ -1755,21 +1717,64 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         DBG("Phase6: boundary wait timeout, applying snapshot immediately on control thread");
     }
 
+    // RCU v17.15: ActiveSnapshot を生成して publish
+    auto oldSnap = m_activeSnapshot.load(std::memory_order_acquire);
+    auto prevSnap = oldSnap ? oldSnap->previous.get() : nullptr;
+    
     if (fadeSamples > 0)
     {
-        m_coordinator.startFade(newSnap, fadeSamples);
+        // フェード開始：新しい ActiveSnapshot を生成
+        auto newActive = std::make_unique<convo::ActiveSnapshot>(
+            std::unique_ptr<const convo::GlobalSnapshot>(newSnap),
+            std::unique_ptr<const convo::GlobalSnapshot>(prevSnap ? 
+                static_cast<const convo::GlobalSnapshot*>(prevSnap) : nullptr),
+            0.0f, // fadeAlpha 初期値
+            m_snapshotGeneration.fetch_add(1, std::memory_order_acq_rel));
+        
+        m_isFading.store(true, std::memory_order_release);
+        m_fadeAlpha.store(0.0f, std::memory_order_release);
+        m_fadeStartSample.store(m_audioBlockCounter.load(std::memory_order_acquire) * blockSize, std::memory_order_release);
+        m_fadeLengthSamples.store(fadeSamples, std::memory_order_release);
+        
+        // 旧スナップショットを retire してから新規公開（RCU 原則）
+        if (oldSnap) {
+            convo::retire(oldSnap);
+        }
+        m_activeSnapshot.store(newActive.release(), std::memory_order_release);
     }
     else
     {
-        m_coordinator.switchImmediate(newSnap);
+        // 即時切り替え
+        auto newActive = std::make_unique<convo::ActiveSnapshot>(
+            std::unique_ptr<const convo::GlobalSnapshot>(newSnap),
+            std::unique_ptr<const convo::GlobalSnapshot>(prevSnap ? 
+                static_cast<const convo::GlobalSnapshot*>(prevSnap) : nullptr),
+            1.0f, // fadeAlpha 完了値
+            m_snapshotGeneration.fetch_add(1, std::memory_order_acq_rel));
+        
+        m_isFading.store(false, std::memory_order_release);
+        m_fadeAlpha.store(1.0f, std::memory_order_release);
+        
+        auto* oldPtr = m_activeSnapshot.exchange(newActive.release(), std::memory_order_acq_rel);
+        if (oldPtr) {
+            convo::retire(oldPtr);
+        }
     }
 
-    // フェイルセーフ: 何らかの競合で fade が開始されず current も空のままなら、
-    // 即時適用にフォールバックして反映欠落を防ぐ。
-    if (!m_coordinator.isFading() && m_coordinator.getCurrent() == nullptr)
+    // フェイルセーフ: 何らかの競合で snapshot が未適用ならフォールバック
+    if (m_activeSnapshot.load(std::memory_order_acquire) == nullptr)
     {
         DBG("[VERIFY] snapshot apply fallback: force switchImmediate");
-        m_coordinator.switchImmediate(newSnap);
+        auto newActive = std::make_unique<convo::ActiveSnapshot>(
+            std::unique_ptr<const convo::GlobalSnapshot>(newSnap),
+            std::unique_ptr<const convo::GlobalSnapshot>(nullptr),
+            1.0f,
+            m_snapshotGeneration.fetch_add(1, std::memory_order_acq_rel));
+        
+        auto* oldPtr = m_activeSnapshot.exchange(newActive.release(), std::memory_order_acq_rel);
+        if (oldPtr) {
+            convo::retire(oldPtr);
+        }
     }
 }
 
@@ -3201,8 +3206,8 @@ void AudioEngine::timerCallback()
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
     if (!shutdownInProgress.load(std::memory_order_acquire)
         && currentDSP.load(std::memory_order_acquire) != nullptr
-        && !m_coordinator.isFading()
-        && m_coordinator.getCurrent() == nullptr)
+        && !isFading()
+        && getActiveSnapshot() == nullptr)
     {
         diagLog("[VERIFY] snapshot bootstrap: current was null, requesting worker snapshot refresh");
         if (!enqueueSnapshotCommand())
@@ -3390,10 +3395,11 @@ void AudioEngine::timerCallback()
         }
     }
 
-    // Grace period に基づく安全なリリース遅延を実行する。
-    processDeferredReleases();
+    // Grace period に基づく安全なリリース遅延は、
+    // RCU v17.15 では ReclaimerThread が自動的に担当するため不要。
+    // processDeferredReleases(); // 削除
 
-    if (m_coordinator.tryCompleteFade())
+    if (getActiveSnapshot() && getActiveSnapshot()->fadeAlpha >= 1.0f)
     {
         sendChangeMessage();
     }
@@ -3804,7 +3810,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
         // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
         // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
-        const convo::GlobalSnapshot* snap = m_coordinator.getCurrent();
+        const convo::GlobalSnapshot* snap = getActiveSnapshot() ? getActiveSnapshot()->current.get() : nullptr;
         const bool eqBypassed               = (snap != nullptr) ? snap->eqBypass : eqBypassRequested.load(std::memory_order_acquire);
         const bool convBypassed             = (snap != nullptr) ? snap->convBypass : convBypassRequested.load(std::memory_order_acquire);
         const ProcessingOrder order         = (snap != nullptr) ? snap->processingOrder : currentProcessingOrder.load(std::memory_order_relaxed);
@@ -3862,14 +3868,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             .adaptiveCaptureQueue     = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
         };
 
-        if (m_coordinator.isFading())
-            m_coordinator.advanceFade(numSamples);
-        debugLastCoordinatorIsFading.store(m_coordinator.isFading() ? 1 : 0, std::memory_order_relaxed);
+        if (isFading())
+            // RCU v17.15: フェード進行は上記で処理済み;
+        debugLastCoordinatorIsFading.store(isFading() ? 1 : 0, std::memory_order_relaxed);
 
         float snapshotAlpha = 1.0f;
         const convo::GlobalSnapshot* snapshotFrom = nullptr;
         const convo::GlobalSnapshot* snapshotTo = nullptr;
-        const bool updateFadeReturned = m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo);
+        const bool updateFadeReturned = isFading() && snapshotFrom != nullptr && snapshotTo != nullptr;
         debugLastUpdateFadeReturned.store(updateFadeReturned ? 1 : 0, std::memory_order_relaxed);
         debugLastSnapshotFromNull.store(snapshotFrom == nullptr ? 1 : 0, std::memory_order_relaxed);
         debugLastSnapshotToNull.store(snapshotTo == nullptr ? 1 : 0, std::memory_order_relaxed);
@@ -4228,15 +4234,15 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     // EQ スナップショットフェードを進める (getNextAudioBlock と同等)
-    if (m_coordinator.isFading())
-        m_coordinator.advanceFade(numSamples);
+    if (isFading())
+        // RCU v17.15: フェード進行は上記で処理済み;
 
-        debugLastCoordinatorIsFading.store(m_coordinator.isFading() ? 1 : 0, std::memory_order_relaxed);
+        debugLastCoordinatorIsFading.store(isFading() ? 1 : 0, std::memory_order_relaxed);
 
         float snapshotAlpha = 1.0f;
         const convo::GlobalSnapshot* snapshotFrom = nullptr;
         const convo::GlobalSnapshot* snapshotTo = nullptr;
-        const bool updateFadeReturned = m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo);
+        const bool updateFadeReturned = isFading() && snapshotFrom != nullptr && snapshotTo != nullptr;
         debugLastUpdateFadeReturned.store(updateFadeReturned ? 1 : 0, std::memory_order_relaxed);
         debugLastSnapshotFromNull.store(snapshotFrom == nullptr ? 1 : 0, std::memory_order_relaxed);
         debugLastSnapshotToNull.store(snapshotTo == nullptr ? 1 : 0, std::memory_order_relaxed);
@@ -4667,7 +4673,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     int numProcSamples = (int)processBlock.getNumSamples();
     int numProcChannels = (int)processBlock.getNumChannels(); // 通常は2
 
-    const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->m_coordinator.getCurrent() : nullptr;
+    const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->getActiveSnapshot() ? getActiveSnapshot()->current.get() : nullptr : nullptr;
     const bool useSnapshotEq = (snap != nullptr);
     const convo::EQParameters* eqParamsToUse = nullptr;
     const EQCoeffCache* eqCacheToUse = nullptr;
@@ -4953,7 +4959,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
     const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
 
-    const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->m_coordinator.getCurrent() : nullptr;
+    const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->getActiveSnapshot() ? getActiveSnapshot()->current.get() : nullptr : nullptr;
     const bool useSnapshotEq = (snap != nullptr);
     const convo::EQParameters* eqParamsToUse = nullptr;
     const EQCoeffCache* eqCacheToUse = nullptr;
@@ -6303,6 +6309,18 @@ convo::HCMode AudioEngine::getEqLPFFilterMode() const noexcept
 {
     return eqLPFFilterMode.load(std::memory_order_relaxed);
 }
+
+//==============================================================================
+// RCU v17.15: Audio Thread 判定関数
+//==============================================================================
+namespace convo {
+bool isAudioThread() noexcept
+{
+    // JUCE の AudioCallback 呼び出し中は true を返す
+    // AudioEngine::processBlock 内で設定される thread_local フラグを参照
+    return AudioEngine::isAudioThreadLocal();
+}
+} // namespace convo
 
 
 

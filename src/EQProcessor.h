@@ -29,6 +29,7 @@
 #include <vector>
 #include "core/EQParameters.h"
 #include "AlignedAllocation.h"
+#include "rcu/retire.h"
 
 //--------------------------------------------------------------
 // バンドタイプ列挙型
@@ -94,11 +95,11 @@ struct EQCoeffsBiquad
     double a0 = 1.0, a1 = 0.0, a2 = 0.0;
 };
 
-#include "RefCountedDeferred.h"
+// RefCountedDeferred.h removed in v17.15 RCU unification
 
 //--------------------------------------------------------------
 // EQCoeffCache: 係数キャッシュ（RefCounted資源）
-// v2.3 Phase 1 新規追加
+// v17.15 RCU 統一モデル：RefCountedDeferred から移行
 //
 // 複数のスナップショット間で同一EQパラメータの係数を共有し、
 // CPU/メモリ効率を向上させる不変キャッシュ
@@ -106,7 +107,7 @@ struct EQCoeffsBiquad
 #pragma warning(push)
 #pragma warning(disable : 4324)  // alignas(64) により構造体がパッドされることは意図した動作のため警告を無視
 
-struct alignas(64) EQCoeffCache : public RefCountedDeferred<EQCoeffCache>
+struct alignas(64) EQCoeffCache
 {
     EQCoeffsSVF coeffs[20];              // SVF係数 (20バンド)
     bool bandActive[20] = {};            // バンド有効フラグ
@@ -252,14 +253,14 @@ public:
     //----------------------------------------------------------
     // 状態構造体
     //----------------------------------------------------------
-    struct BandNode : public RefCountedDeferred<BandNode>
+    struct BandNode
     {
         EQCoeffsSVF coeffs;
         bool active;
         EQChannelMode mode;
     };
 
-    struct EQState : public RefCountedDeferred<EQState>
+    struct EQState
     {
         std::array<EQBandParams, NUM_BANDS> bands;
         std::array<EQBandType, NUM_BANDS> bandTypes;

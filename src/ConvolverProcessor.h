@@ -34,15 +34,13 @@
 #include "AlignedAllocation.h"
 #include "MKLNonUniformConvolver.h"
 #include "AllpassDesigner.h"
-#include "core/EBRQueue.h"            // convo::retireObject
+#include "rcu/retire.h"            // convo::retire
 
 // ── Phase 0: Epoch-based RCU 基盤ヘッダー ──
 #include "GenerationManager.h"
 #include "ConvolverState.h"
-#include "SafeStateSwapper.h"
-#include "DeferredFreeThread.h"
 #include "PreparedIRState.h"
-#include "DeferredDeletionQueue.h"
+#include "rcu/DeferredDeletionQueue.h"
 #include "ConvolverRuntime.h"
 #include "DspNumericPolicy.h"
 
@@ -434,7 +432,7 @@ public:
 
     // ── Phase 0: Epoch-based RCU 状態更新 ──
     // Message Thread から呼ぶ。新しい ConvolverState を atomic にスワップし、
-    // 旧状態を DeferredFreeThread に委ねる。
+    // 旧状態は convo::retire() で解放する（RCU v17.15）
     // GenerationManager で陳腐化チェックを行い、古いタスク結果は破棄する。
     //
     // @param newState  新しい状態（所有権を移譲）。世代チェックに失敗した場合は即削除。
@@ -580,7 +578,7 @@ private:
         {
             if (!sc || sc->retired.exchange(true, std::memory_order_acq_rel))
                 return;
-            convo::retireObject(sc, destroyStereoConvolver);
+            convo::retire(sc);
         }
 
         // デストラクタは空（実際の解放は retire 経由）
@@ -771,7 +769,6 @@ private:
     alignas(64) std::atomic<bool> experimentalDirectHeadEnabled{false};
     #pragma warning(pop)
 
-    convo::SafeStateSwapper rcuSwapper;
     convo::LinearRamp mixSmoother; // オーディオスレッドでの平滑化用
 
 
@@ -969,9 +966,6 @@ public: // Added for AudioEngine access
 
     // ── Phase 0: Epoch-based RCU メンバー ──
     std::atomic<convo::ConvolverState*> convolverState { nullptr };
-    // DeferredFreeThread: 旧 ConvolverState を Audio Thread 外で安全に解放する専用スレッド
-    // prepareToPlay() で生成、releaseResources() で停止・破棄する。
-    std::unique_ptr<convo::DeferredFreeThread> deferredFreeThread;
     // GenerationManager: IR ロードタスクの世代管理（陳腐化チェック用）
     GenerationManager convolverStateGeneration;
 

@@ -48,8 +48,9 @@ struct CoeffSet {
 #include "CustomInputOversampler.h"
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
-#include "core/RCUReader.h"
-#include "core/EBRQueue.h"
+#include "rcu/EpochManager.h"
+#include "rcu/RCUReader.h"
+#include "rcu/ReclaimerThread.h"
 #include "EQEditProcessor.h"
 #include "PsychoacousticDither.h"
 #include "FixedNoiseShaper.h"
@@ -63,8 +64,6 @@ struct CoeffSet {
 #include "NoiseShaperLearner.h"
 #include "GenerationManager.h"
 #include "core/Types.h"
-#include "core/SnapshotCoordinator.h"
-#include "core/EpochCore.h"
 #include "core/CommandBuffer.h"
 #include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
@@ -311,15 +310,11 @@ public:
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
 
     // ==================================================================
-    // EBR (Epoch-Based Reclamation) 基盤
+    // RCU v17.15: Epoch 管理（EpochManager に統合）
     // ==================================================================
-    void advanceRcuEpoch() noexcept;
-    void tryReclaimResources() noexcept;
-
-    // RCU Reader Support
-    uint64_t publishRcuEpoch() noexcept;
-    void enterRcuReader(int readerIndex) noexcept;
-    void exitRcuReader(int readerIndex) noexcept;
+    // advanceRcuEpoch は EpochManager::advanceEpoch() を使用
+    // tryReclaimResources は ReclaimerThread が担当するため不要
+    // publishRcuEpoch/enterRcuReader/exitRcuReader は RCUReaderGuard で代替
 
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
@@ -434,8 +429,17 @@ public:
     int getEQFadeSamples() const noexcept { return m_eqFadeSamples.load(std::memory_order_relaxed); }
     void setCrossfadeStartDelayBlocks(int blocks) noexcept;
     int getCrossfadeStartDelayBlocks() const noexcept;
-    bool isFading() const noexcept { return m_coordinator.isFading(); }
-    const convo::SnapshotCoordinator& getSnapshotCoordinator() const noexcept { return m_coordinator; }
+    
+    // RCU v17.15: ActiveSnapshot によるフェード状態管理
+    bool isFading() const noexcept { 
+        auto* snap = m_activeSnapshot.load(std::memory_order_acquire);
+        return snap && snap->fadeAlpha > 0.0f && snap->fadeAlpha < 1.0f;
+    }
+    
+    const convo::ActiveSnapshot* getActiveSnapshot() const noexcept { 
+        return m_activeSnapshot.load(std::memory_order_acquire); 
+    }
+    
     void setIRChangeFlag() noexcept { m_pendingIRChange.store(true, std::memory_order_release); }
 
     // UI 操作が実際の音声演算へ反映されたかを確認するための診断値。
@@ -555,7 +559,7 @@ private:
                 {
                     if (entry.second != nullptr)
                     {
-                        // EBR: Using RefCountedDeferred for cache objects as they are shared
+                        // EBR: Using convo::retire for cache objects as they are shared
                         entry.second->addRef();
                     }
 
@@ -951,10 +955,17 @@ public:
     void processDeferredReleases();
 
     // ==================================================================
-    // スナップショット基盤（Phase 2）
+    // RCU v17.15: 単一スナップショット管理（ActiveSnapshot）
     // ==================================================================
-    convo::EpochCore m_epochCore;
-    convo::SnapshotCoordinator m_coordinator;
+    std::atomic<convo::ActiveSnapshot*> m_activeSnapshot { nullptr };
+    std::atomic<uint64_t> m_snapshotGeneration { 0 };
+    
+    // フェード状態管理（Audio Thread 安全）
+    std::atomic<bool> m_isFading {false};
+    std::atomic<float> m_fadeAlpha {0.0f};
+    std::atomic<uint64_t> m_fadeStartSample {0};
+    std::atomic<int> m_fadeLengthSamples {0};
+    
     GenerationManager m_generationManager;
 
     // ==================================================================
