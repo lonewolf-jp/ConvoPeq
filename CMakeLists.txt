@@ -120,24 +120,39 @@ juce_add_gui_app(ConvoPeq
 # ソースファイル
 #------------------------------------------------------------
 target_sources(ConvoPeq PRIVATE
+    # --- Main Application ---
     src/MainApplication.cpp
     src/MainWindow.cpp
+    
+    # --- Audio Engine & Processing ---
     src/AudioEngine.cpp
-    src/CustomInputOversampler.cpp
     src/AudioEngineProcessor.cpp
     src/ConvolverProcessor.cpp
-    src/MKLNonUniformConvolver.cpp
     src/EQProcessor.cpp
     src/EQEditProcessor.cpp
+    src/CustomInputOversampler.cpp
+    src/MKLNonUniformConvolver.cpp
+    
+    # --- UI Components ---
     src/ConvolverControlPanel.cpp
     src/EQControlPanel.cpp
     src/SpectrumAnalyzerComponent.cpp
-    src/DeviceSettings.cpp
     src/NoiseShaperLearningComponent.cpp
-    src/OutputFilter.cpp
-    src/NoiseShaperLearner.cpp
+    src/ConvolverSettingsComponent.cpp
+    src/MixedPhaseOptimizationComponent.cpp
+    
+    # --- DSP & Algorithms ---
     src/AllpassDesigner.cpp
     src/CmaEsOptimizerDynamic.cpp
+    src/NoiseShaperLearner.cpp
+    src/OutputFilter.cpp
+    src/IRDSP.cpp
+    src/IRConverter.cpp
+    src/CacheManager.cpp
+    src/ProgressiveUpgradeThread.cpp
+    src/DeviceSettings.cpp
+    
+    # --- Core Headers (Utility) ---
     src/AsioBlacklist.h
     src/CustomInputOversampler.h
     src/AudioEngineProcessor.h
@@ -145,13 +160,9 @@ target_sources(ConvoPeq PRIVATE
     src/MKLNonUniformConvolver.h
     src/OutputFilter.h
     src/AllpassDesigner.h
-    src/MixedPhaseOptimizationComponent.cpp
-    src/IRConverter.cpp
-    src/ProgressiveUpgradeThread.cpp
-    src/CacheManager.cpp
-    src/ConvolverSettingsComponent.cpp
-    src/IRDSP.cpp
-    # Phase 1: RCU Snapshot Foundation (v13.0)
+    
+    # --- Core Snapshot System (v17.15 Compatible) ---
+    # Note: EBR, SnapshotCoordinator, SafeStateSwapper removed.
     src/core/EQParameters.h
     src/core/GlobalSnapshot.h
     src/core/GlobalSnapshot.cpp
@@ -161,13 +172,14 @@ target_sources(ConvoPeq PRIVATE
     src/core/SnapshotAssembler.h
     src/core/SnapshotAssembler.cpp
     src/core/ReaderEpoch.h
-    src/core/RCUReader.h
-    src/core/Types.h
+    src/core/RCUReader.h          # Legacy alias or helper (if kept)
+    src/core/Types.h              # Contains ActiveSnapshot definition
     src/core/CommandBuffer.h
     src/core/ThreadAffinityManager.h
     src/core/WorkerThread.h
     src/core/WorkerThread.cpp
-    # RCU v17.15 - 単一 RCU モデル完全統一
+    
+    # --- RCU v17.15 Foundation (Single RCU Model) ---
     src/rcu/EpochManager.h
     src/rcu/EpochManager.cpp
     src/rcu/RCUReader.h
