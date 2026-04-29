@@ -1,6 +1,6 @@
 //==============================================================================
 // WorkerThread.h
-// Debounced snapshot update worker - RCU v17.15 unified model
+// Debounced snapshot update worker - Snapshot Double Buffer Model
 //==============================================================================
 #pragma once
 
@@ -8,13 +8,12 @@
 #include <chrono>
 #include <thread>
 #include "CommandBuffer.h"
+#include "EngineView.h"
 
 class GenerationManager;
 class ThreadAffinityManager;
 
 namespace convo {
-
-class ActiveSnapshot;
 
 using SnapshotCreatorCallback = void (*)(void* userData, uint64_t generation);
 
@@ -26,7 +25,7 @@ struct WorkerThreadConfig {
 class WorkerThread {
 public:
     WorkerThread(CommandBuffer& cmdBuf,
-                 std::atomic<ActiveSnapshot*>& activeSnapshot,
+                 EngineView* activeViewPtr,
                  GenerationManager& genManager,
                  const ThreadAffinityManager* affinityMgr,
                  const WorkerThreadConfig& config = WorkerThreadConfig());
@@ -58,7 +57,7 @@ private:
     void run();
 
     CommandBuffer& commandBuffer;
-    std::atomic<ActiveSnapshot*>& activeSnapshot;
+    EngineView* activeView; // Pointer to the active view in AudioEngine's m_views array
     GenerationManager& generationManager;
     const ThreadAffinityManager* affinityManager = nullptr;
     WorkerThreadConfig config;

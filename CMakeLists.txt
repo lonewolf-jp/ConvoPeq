@@ -165,7 +165,6 @@ target_sources(ConvoPeq PRIVATE
     # Note: EBR, SnapshotCoordinator, SafeStateSwapper removed.
     src/core/EQParameters.h
     src/core/GlobalSnapshot.h
-    src/core/GlobalSnapshot.cpp
     src/core/SnapshotParams.h
     src/core/SnapshotFactory.h
     src/core/SnapshotFactory.cpp
@@ -180,14 +179,6 @@ target_sources(ConvoPeq PRIVATE
     src/core/WorkerThread.cpp
     
     # --- RCU v17.15 Foundation (Single RCU Model) ---
-    src/rcu/EpochManager.h
-    src/rcu/EpochManager.cpp
-    src/rcu/RCUReader.h
-    src/rcu/DeferredDeletionQueue.h
-    src/rcu/DeferredDeletionQueue.cpp
-    src/rcu/ReclaimerThread.h
-    src/rcu/ReclaimerThread.cpp
-    src/rcu/retire.h
 )
 
 #------------------------------------------------------------

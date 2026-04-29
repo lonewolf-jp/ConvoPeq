@@ -22,7 +22,7 @@ struct AudioBlock {
     uint64_t sessionId = 0;
 };
 
-// RT/Worker間ダブルバッファ係数連携（RCU）
+// RT/Worker間ダブルバッファ係数連携（分離スロット）
 struct CoeffSet {
     static constexpr int kDim = kAdaptiveNoiseShaperOrder;
     double k[CoeffSet::kDim] = {};
@@ -48,9 +48,6 @@ struct CoeffSet {
 #include "CustomInputOversampler.h"
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
-#include "rcu/EpochManager.h"
-#include "rcu/RCUReader.h"
-#include "rcu/ReclaimerThread.h"
 #include "EQEditProcessor.h"
 #include "PsychoacousticDither.h"
 #include "FixedNoiseShaper.h"
@@ -63,7 +60,7 @@ struct CoeffSet {
 #include "LockFreeAudioRingBuffer.h"
 #include "NoiseShaperLearner.h"
 #include "GenerationManager.h"
-#include "core/Types.h"
+#include "core/EngineView.h"
 #include "core/CommandBuffer.h"
 #include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
@@ -215,19 +212,13 @@ public:
         // 【Issue 3 修正】内部処理用最大バッファサイズ
         // 理由: Oversampling有効時（最大8x）、processSamplesUp()後の
         //      ブロックサイズがSAFE_MAX×8になるため。
-        //      固定で×8確保することでRCU再構築時のresizeを完全排除。
+        //      固定で×8確保することでdouble buffer再構築時のresizeを完全排除。
         //      メモリ増加 ≈ 8.4MB（現代PCでは無視できるレベル）
         // ─────────────────────────────────────────────────────────────
         int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（常にSAFE_MAX×8）
         std::atomic<int> fadeInSamplesLeft {0};
         static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
         AudioEngine* ownerEngine = nullptr;
-
-        // RCU Reader Support (Forward to ownerEngine)
-        uint64_t publishRcuEpoch() noexcept { return ownerEngine ? ownerEngine->publishRcuEpoch() : 1; }
-        void enterRcuReader(int tid) noexcept { if (ownerEngine) ownerEngine->enterRcuReader(tid); }
-        void exitRcuReader(int tid) noexcept { if (ownerEngine) ownerEngine->exitRcuReader(tid); }
-        static thread_local size_t tls_readerSlot;
 
         // B2: processDouble 用のバイパスフェード状態
         convo::ScopedAlignedPtr<double> dryBypassBufferDoubleL;
@@ -310,11 +301,9 @@ public:
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
 
     // ==================================================================
-    // RCU v17.15: Epoch 管理（EpochManager に統合）
     // ==================================================================
-    // advanceRcuEpoch は EpochManager::advanceEpoch() を使用
-    // tryReclaimResources は ReclaimerThread が担当するため不要
-    // publishRcuEpoch/enterRcuReader/exitRcuReader は RCUReaderGuard で代替
+    // Snapshot Double Buffer Model (bounded-latency snapshot consistency)
+    // ==================================================================
 
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
@@ -430,14 +419,10 @@ public:
     void setCrossfadeStartDelayBlocks(int blocks) noexcept;
     int getCrossfadeStartDelayBlocks() const noexcept;
     
-    // RCU v17.15: ActiveSnapshot によるフェード状態管理
-    bool isFading() const noexcept { 
-        auto* snap = m_activeSnapshot.load(std::memory_order_acquire);
-        return snap && snap->fadeAlpha > 0.0f && snap->fadeAlpha < 1.0f;
-    }
-    
-    const convo::ActiveSnapshot* getActiveSnapshot() const noexcept { 
-        return m_activeSnapshot.load(std::memory_order_acquire); 
+    // アクティブな EngineView を取得（Audio Thread 用）
+    const convo::EngineView& getActiveView() const noexcept {
+        int idx = m_activeIndex.load(std::memory_order_acquire);
+        return m_views[idx];
     }
     
     void setIRChangeFlag() noexcept { m_pendingIRChange.store(true, std::memory_order_release); }
@@ -559,7 +544,7 @@ private:
                 {
                     if (entry.second != nullptr)
                     {
-                        // EBR: Using convo::retire for cache objects as they are shared
+                        // Snapshot Double Buffer: キャッシュオブジェクトは参照カウントで管理
                         entry.second->addRef();
                     }
 
@@ -796,7 +781,11 @@ public:
     void processRebuildRequestsInternal();
 
     static void onSnapshotRequired(void* userData, uint64_t generation);
-    void createSnapshotFromCurrentState(uint64_t generation);
+    
+    // Snapshot Double Buffer Model: 状態公開 API（Control Thread のみ）
+    void publishEngineState(convo::EngineState&& newState, float fadeTimeSec);
+    void advanceFade(float step);
+    
     void initWorkerThread();
     void shutdownWorkerThread();
 
@@ -955,17 +944,24 @@ public:
     void processDeferredReleases();
 
     // ==================================================================
-    // RCU v17.15: 単一スナップショット管理（ActiveSnapshot）
+    // Snapshot Double Buffer Model (bounded-latency snapshot consistency)
     // ==================================================================
-    std::atomic<convo::ActiveSnapshot*> m_activeSnapshot { nullptr };
-    std::atomic<uint64_t> m_snapshotGeneration { 0 };
+    // 設計原則:
+    // - shared_ptr・mutex 完全排除
+    // - 固定長配列 m_views[2] と atomic index のみ使用
+    // - Control Thread: publishEngineState / advanceFade のみ書き込み可能
+    // - Audio Thread: const 参照のみ読み取り可能
+    // ==================================================================
+    
+    static constexpr int kNumViews = 2;
+    
+    // ダブルバッファ状態スロット（固定長）
+    convo::EngineView m_views[kNumViews];
+    
+    // アクティブインデックス（atomic 交換でのみ状態遷移）
+    std::atomic<int> m_activeIndex {0};
     
     // フェード状態管理（Audio Thread 安全）
-    std::atomic<bool> m_isFading {false};
-    std::atomic<float> m_fadeAlpha {0.0f};
-    std::atomic<uint64_t> m_fadeStartSample {0};
-    std::atomic<int> m_fadeLengthSamples {0};
-    
     GenerationManager m_generationManager;
 
     // ==================================================================

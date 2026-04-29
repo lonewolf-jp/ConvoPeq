@@ -47,24 +47,8 @@ static inline void crossfadeAVX2(
 #include "AudioEngine.h"
 #include "InputBitDepthTransform.h"
 #include "OutputFilter.h"
-#include "core/SnapshotAssembler.h"
-#include "rcu/EpochManager.h"
-#include "rcu/RCUReader.h"
-#include "rcu/ReclaimerThread.h"
 
 extern std::atomic<bool> gShuttingDown;
-
-static thread_local convo::RCUReader tls_rcuReader;
-
-static void retireDSP(AudioEngine::DSPCore* dsp)
-{
-    if (dsp) convo::retire(dsp);
-}
-
-static void retireEQCache(EQCoeffCache* cache)
-{
-    if (cache) cache->release();
-}
 
 // fastTanh 高精度 Padé 近似用の定数
 //----------------------------------------------------------------------------
@@ -79,6 +63,18 @@ namespace TanhApprox {
 
     // 近似有効範囲
     constexpr double CLIP_THRESHOLD = 4.5;
+}
+
+// ダブルバッファモデル用：DSPCore 削除ヘルパー（単純な delete）
+static void deleteDSP(AudioEngine::DSPCore* dsp)
+{
+    if (dsp) delete dsp;
+}
+
+// ダブルバッファモデル用：EQCoeffCache 削除ヘルパー
+static void deleteEQCache(EQCoeffCache* cache)
+{
+    if (cache) delete cache;
 }
 
 static void diagLog(const juce::String& message)
@@ -162,7 +158,7 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
     if (shutdownInProgress.load(std::memory_order_acquire) ||
         gShuttingDown.load(std::memory_order_acquire))
     {
-        retireDSP(newDSP);
+        deleteDSP(newDSP);
         return;
     }
 
@@ -172,7 +168,7 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
         if (shutdownInProgress.load(std::memory_order_acquire) ||
             gShuttingDown.load(std::memory_order_acquire))
         {
-            retireDSP(newDSP);
+            deleteDSP(newDSP);
             return;
         }
 
@@ -202,7 +198,7 @@ void AudioEngine::executeCommit()
         if (shutdownInProgress.load(std::memory_order_acquire) ||
             gShuttingDown.load(std::memory_order_acquire))
         {
-            retireDSP(staging.newDSP);
+            deleteDSP(staging.newDSP);
             continue;
         }
 
@@ -254,11 +250,6 @@ void AudioEngine::processRebuildRequestsInternal()
 // 段階 2+3：thread_local スロット管理および定数
 // ==================================================================
 static constexpr size_t INVALID_SLOT = SIZE_MAX;
-static constexpr uint64_t kIdleEpoch = 0;
-static constexpr size_t RCU_BACKLOG_WARNING_THRESHOLD = 128;
-
-thread_local size_t AudioEngine::tls_readerSlot = SIZE_MAX;
-thread_local size_t AudioEngine::DSPCore::tls_readerSlot = SIZE_MAX;
 
 // ==================================================================
 // B19: requestLoadState の例外安全性確保用 RAII ガード
@@ -278,10 +269,7 @@ private:
 };
 
 // グローバルインスタンスの定義
-// (No global g_deletionQueue anymore)
-std::atomic<uint64_t> g_currentEpoch{1};
 std::atomic<bool> gShuttingDown{false};
-
 
 template <typename T>
 static inline T* sanitizeRawPtr(T* ptr) noexcept
@@ -289,12 +277,6 @@ static inline T* sanitizeRawPtr(T* ptr) noexcept
     constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
     return (reinterpret_cast<uintptr_t>(ptr) == kInvalidAllOnes) ? nullptr : ptr;
 }
-// ==================================================================
-// RCU v17.15: Epoch 管理（EpochManager に統合済み）
-// ==================================================================
-// advanceRcuEpoch, publishRcuEpoch, enterRcuReader, exitRcuReader,
-// tryReclaimResources, processDeferredReleases は全て削除。
-// 代わりに EpochManager と ReclaimerThread を直接使用。
 
 // ==================================================================
 // 以下、既存の AudioEngine 実装
@@ -810,13 +792,13 @@ AudioEngine::~AudioEngine()
         {
             if (pendingTask.newDSP)
             {
-                retireDSP(pendingTask.newDSP);
+                deleteDSP(pendingTask.newDSP);
                 pendingTask.newDSP = nullptr;
             }
 
             if (pendingTask.currentDSP)
             {
-                retireDSP(pendingTask.currentDSP);
+                deleteDSP(pendingTask.currentDSP);
                 pendingTask.currentDSP = nullptr;
             }
 
@@ -836,15 +818,15 @@ AudioEngine::~AudioEngine()
             abandonedCommits.pop();
 
             if (staging.newDSP)
-                retireDSP(staging.newDSP);
+                deleteDSP(staging.newDSP);
             if (staging.oldDSP)
-                retireDSP(staging.oldDSP);
+                deleteDSP(staging.oldDSP);
         }
     }
 
-    if (activeToRelease) retireDSP(activeToRelease);
-    if (fadingToRelease) retireDSP(fadingToRelease);
-    if (queuedToRelease) retireDSP(queuedToRelease);
+    if (activeToRelease) deleteDSP(activeToRelease);
+    if (fadingToRelease) deleteDSP(fadingToRelease);
+    if (queuedToRelease) deleteDSP(queuedToRelease);
 
     uiConvolverProcessor.removeChangeListener(this);
     uiEqEditor.removeChangeListener(this);
@@ -1308,23 +1290,20 @@ void AudioEngine::initialize()
     firstIrDryCrossfadeDone.store(false, std::memory_order_release);
     dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
     dspCrossfadeDryHoldSamples.store(0, std::memory_order_release);
-    dspCrossfadeDryScaleGain.reset(48000.0, 0.060);  // Initialize with 60ms ramp time
+    dspCrossfadeDryScaleGain.reset(48000.0, 0.060);
     dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
 
-    // ==================================================================
-    // 段階 1：RCU 基盤の初期化
-    // ==================================================================
-    // B22: 旧 SPSC キュー (queueWrite/queueRead/overflowList) は廃止。
-    //      g_deletionQueue は静的初期化される。
-    // readerEpochs と globalEpoch は静的初期化で 0
+    // ダブルバッファ初期状態：alpha=1.0, previousValid=false
+    m_views[0].alpha = 1.0f;
+    m_views[0].previousValid = false;
+    m_views[1].alpha = 1.0f;
+    m_views[1].previousValid = false;
+    m_activeIndex.store(0, std::memory_order_relaxed);
 
     // Start worker thread
     rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
 
     // 初期DSP構築 (デフォルト設定)
-    // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
-    // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
-    requestRebuild(48000.0, SAFE_MAX_BLOCK_SIZE);
     maxSamplesPerBlock.store(SAFE_MAX_BLOCK_SIZE);
     currentSampleRate.store(48000.0);
 
@@ -1333,10 +1312,6 @@ void AudioEngine::initialize()
 
     // オーディオデバイスがまだ開始していない段階でも、IRロード側には実用的な既定値を渡す。
     // SAFE_MAX_BLOCK_SIZE をそのまま使うと不要に巨大な一時NUCを組んでメモリ使用量が跳ねるため、
-    // ローダー用の暫定値は一般的な 48kHz / 512samples に固定する。
-    uiConvolverProcessor.prepareToPlay(48000.0, 512);
-
-    uiConvolverProcessor.addChangeListener(this);
     uiEqEditor.addChangeListener(this);
     uiConvolverProcessor.addListener(this);
 
@@ -1344,10 +1319,6 @@ void AudioEngine::initialize()
     // - DSP再構築リクエストのポーリング (Audio Threadからの依頼を処理)
     // - ガベージコレクション
     startTimer(100);
-
-    m_workerThread.setSnapshotCreator(&AudioEngine::onSnapshotRequired, this);
-    initWorkerThread();
-}
 
 void AudioEngine::initWorkerThread()
 {
@@ -1435,7 +1406,9 @@ void AudioEngine::onSnapshotRequired(void* userData, uint64_t generation)
     if (self->shutdownInProgress.load(std::memory_order_acquire))
         return;
 
-    self->createSnapshotFromCurrentState(generation);
+    // 新しいアーキテクチャでは publishEngineState を使用
+    auto newState = self->buildCurrentState();
+    self->publishEngineState(std::move(newState), 0.0f);
 }
 
 
@@ -1475,7 +1448,7 @@ bool AudioEngine::EQCacheManager::tryEnqueueDeferredMap(CacheMap* map) noexcept
     if (map == nullptr)
         return true;
 
-    convo::retire(map);
+    deleteEQCache((EQCoeffCache*)map);
     return true;
 }
 
@@ -1500,7 +1473,7 @@ void AudioEngine::EQCacheManager::storeNewMap(CacheMap* newMap) noexcept
     if (old == nullptr)
         return;
 
-    convo::retire(old);
+    deleteDSP((AudioEngine::DSPCore*)old);
 }
 
 EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters& params,
@@ -1529,7 +1502,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     currentMap = loadMap();
     if (currentMap == nullptr)
     {
-        retireEQCache(cache);
+        deleteEQCache(cache);
         return nullptr;
     }
 
@@ -1537,7 +1510,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     if (it != currentMap->map.end())
     {
         // 先に追加されたキャッシュを採用し、新規作成分を破棄
-        retireEQCache(cache);
+        deleteEQCache(cache);
         return it->second;
     }
 
@@ -1548,7 +1521,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     }
     catch (const std::bad_alloc&)
     {
-        retireEQCache(cache);
+        deleteEQCache(cache);
         return nullptr;
     }
 
@@ -1571,7 +1544,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) const noexcept
 void AudioEngine::EQCacheManager::releaseCache(EQCoeffCache* cache) noexcept
 {
     if (cache != nullptr)
-        retireEQCache(cache);
+        deleteEQCache(cache);
 }
 
 AudioEngine::EQCacheManager::~EQCacheManager()
@@ -1580,531 +1553,14 @@ AudioEngine::EQCacheManager::~EQCacheManager()
 
     CacheMap* currentMap = cacheMapPtr.exchange(nullptr, std::memory_order_acq_rel);
     if (currentMap != nullptr)
-        convo::retire(currentMap);
+        deleteDSP((AudioEngine::DSPCore*)currentMap);
 
     for (auto* map : enqueueFallbackMaps)
-        convo::retire(map);
+        deleteEQCache((EQCoeffCache*)map);
 
     enqueueFallbackMaps.clear();
 }
 
-void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
-{
-    debugAssertNotAudioThread();
-
-    if (shutdownInProgress.load(std::memory_order_acquire))
-        return;
-
-
-    struct UIRcuGuard {
-        const ConvolverProcessor& cp;
-        explicit UIRcuGuard(const ConvolverProcessor& cp_) : cp(cp_) { cp.enterStateReader(1); }
-        ~UIRcuGuard() { cp.exitStateReader(1); }
-    } rcuGuard{uiConvolverProcessor};
-
-    const convo::ConvolverState* convState = uiConvolverProcessor.getConvolverState();
-
-    convo::EQParameters eqParams;
-    if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
-        eqParams = eqState->toEQParameters();
-
-    std::array<double, 9> nsCoeffs{};
-    getCurrentAdaptiveCoefficients(nsCoeffs.data(), kAdaptiveNoiseShaperOrder);
-
-    if (uiEqEditor.getAndClearPendingAGCChange())
-        m_pendingAGCChange.store(true, std::memory_order_release);
-
-    const double inputHeadroomGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentInputHeadroomDb.load(std::memory_order_relaxed)));
-    const double outputMakeupGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentOutputMakeupDb.load(std::memory_order_relaxed)));
-    const double convInputTrimGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentConvInputTrimDb.load(std::memory_order_relaxed)));
-    const bool convBypass = m_currentConvBypass.load(std::memory_order_relaxed);
-    const bool eqBypass = m_currentEqBypass.load(std::memory_order_relaxed);
-    const bool softClip = m_currentSoftClipEnabled.load(std::memory_order_relaxed);
-    const float satAmount = m_currentSaturationAmount.load(std::memory_order_relaxed);
-    const convo::ProcessingOrder order = m_currentProcessingOrder.load(std::memory_order_relaxed);
-    const convo::OversamplingType osType = m_currentOversamplingType.load(std::memory_order_relaxed);
-    const int osFactor = m_currentOversamplingFactor.load(std::memory_order_relaxed);
-    const int bitDepth = m_currentDitherBitDepth.load(std::memory_order_relaxed);
-    const convo::NoiseShaperType nsType = m_currentNoiseShaperType.load(std::memory_order_relaxed);
-    const double sampleRate = currentSampleRate.load(std::memory_order_acquire);
-    const int maxBlockSize = maxSamplesPerBlock.load(std::memory_order_acquire);
-
-    uint64_t eqCoeffHash = 0;
-    if (EQCoeffCache* cache = eqCacheManager.getOrCreate(eqParams, sampleRate, maxBlockSize, generation))
-        eqCoeffHash = cache->paramsHash;
-
-    {
-        const int currentIndex = latestEqFallbackReadIndex.load(std::memory_order_relaxed);
-        const int publishIndex = 1 - currentIndex;
-        latestEqParamsForFallback[(size_t) publishIndex] = eqParams;
-        latestEqHashForFallback[(size_t) publishIndex] = eqCoeffHash;
-        latestEqFallbackReadIndex.store(publishIndex, std::memory_order_release);
-    }
-
-    convo::SnapshotParams params = convo::SnapshotAssembler::assemble(
-        convState,
-        convState ? convState->stateId : 0,
-        eqParams,
-        nsCoeffs,
-        inputHeadroomGainValue,
-        outputMakeupGainValue,
-        convInputTrimGainValue,
-        convBypass,
-        eqBypass,
-        softClip,
-        satAmount,
-        order,
-        osType,
-        osFactor,
-        bitDepth,
-        nsType,
-        generation,
-        sampleRate,
-        maxBlockSize,
-        eqCoeffHash);
-
-
-    int fadeSamples = m_eqFadeSamples.load(std::memory_order_relaxed);
-    const bool promoteToStructural = m_pendingIRChange.exchange(false, std::memory_order_acq_rel);
-    if (promoteToStructural)
-    {
-        // 例外昇格判定は制御スレッド側で確定する。
-        // IR/構造変更はスナップショットfadeに流さず、構造クロスフェード経路へ昇格する。
-        DBG("Phase6: IR change promoted to structural path on control thread");
-        return;
-    }
-
-    // pending フラグは no-op 判定前に消費して、次回へ持ち越さない。
-    if (m_pendingNSChange.exchange(false, std::memory_order_acq_rel))
-    {
-        fadeSamples = m_nsFadeSamples.load(std::memory_order_relaxed);
-        DBG("Phase6: NS fade triggered");
-    }
-    else if (m_pendingAGCChange.exchange(false, std::memory_order_acq_rel))
-    {
-        fadeSamples = m_agcFadeSamples.load(std::memory_order_relaxed);
-        DBG("Phase6: AGC fade triggered");
-    }
-    else
-    {
-        DBG("Phase6: EQ fade triggered");
-    }
-
-    const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
-        params,
-        getActiveSnapshot() ? getActiveSnapshot()->current.get() : nullptr,
-        generation,
-        sampleRate);
-
-    if (newSnap == nullptr)
-    {
-        diagLog("[VERIFY] snapshot no-op suppressed by createImpl: hash=0x"
-            + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
-            + " gen=" + juce::String(static_cast<juce::int64>(generation)));
-        return;
-    }
-
-    debugLastCreatedEqHash.store(eqCoeffHash, std::memory_order_release);
-    debugLastCreateAudioBlockCounter.store(m_audioBlockCounter.load(std::memory_order_acquire), std::memory_order_release);
-    diagLog("[VERIFY] EQ createdHash=0x"
-        + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
-        + " gen=" + juce::String(static_cast<juce::int64>(generation)));
-
-    // 反映は次のオーディオブロック境界を検知してから行う。
-    const uint64_t boundaryBefore = m_audioBlockCounter.load(std::memory_order_acquire);
-    if (!waitForAudioBlockBoundary(boundaryBefore, 20))
-    {
-        DBG("Phase6: boundary wait timeout, applying snapshot immediately on control thread");
-    }
-
-    // RCU v17.15: ActiveSnapshot を生成して publish
-    // 1. 新しい ActiveSnapshot を一時作成（previous は一旦 null）
-    auto newActive = std::make_unique<convo::ActiveSnapshot>(
-        std::unique_ptr<const convo::GlobalSnapshot>(newSnap),
-        nullptr, // ここで previous を設定しないのが重要
-        fadeSamples > 0 ? 0.0f : 1.0f,
-        m_snapshotGeneration.fetch_add(1, std::memory_order_acq_rel)
-    );
-
-    // 2. アトミックに交換し、古いスナップショットを取得
-    // これにより、load/store の間の競合と二重 retire を防止
-    auto* oldSnap = m_activeSnapshot.exchange(newActive.get(), std::memory_order_acq_rel);
-
-    // 3. 所有権の移譲（ここが核心）
-    // oldSnap が存在する場合、その current を newActive の previous へ move する
-    // これにより「単一所有権」が保たれ、二重 delete が防止される
-    if (oldSnap && fadeSamples > 0) {
-        // フェードあり：旧 current を previous として保持
-        newActive->previous = std::move(const_cast<std::unique_ptr<const convo::GlobalSnapshot>&>(oldSnap->current));
-        
-        // フェード開始（正しくは oldSnap->current から newSnap へ）
-        // ※ oldSnap->current は既に move 済みだが、ポインタ値は残っているため参照可能
-        // ただし、所有権は newActive に移っているため、寿命は保証される
-        m_isFading.store(true, std::memory_order_release);
-        m_fadeAlpha.store(0.0f, std::memory_order_release);
-        m_fadeStartSample.store(m_audioBlockCounter.load(std::memory_order_acquire) * blockSize, std::memory_order_release);
-        m_fadeLengthSamples.store(fadeSamples, std::memory_order_release);
-    } else {
-        // fadeSamples == 0 の場合、previous は null のまま（即時切り替え）
-        m_isFading.store(false, std::memory_order_release);
-        m_fadeAlpha.store(1.0f, std::memory_order_release);
-    }
-
-    // 4. 新しいスナップショットを公開（release して所有権を atomic に渡す）
-    m_activeSnapshot.store(newActive.release(), std::memory_order_release);
-
-    // 5. 古いスナップショットを retire
-    // exchange で取得した oldSnap は、ここで唯一の所有者として retire される
-    if (oldSnap) {
-        convo::retire(oldSnap);
-    }
-
-    // フェイルセーフ: 何らかの競合で snapshot が未適用ならフォールバック
-    if (m_activeSnapshot.load(std::memory_order_acquire) == nullptr)
-    {
-        DBG("[VERIFY] snapshot apply fallback: force switchImmediate");
-        auto newActive = std::make_unique<convo::ActiveSnapshot>(
-            std::unique_ptr<const convo::GlobalSnapshot>(newSnap),
-            std::unique_ptr<const convo::GlobalSnapshot>(nullptr),
-            1.0f,
-            m_snapshotGeneration.fetch_add(1, std::memory_order_acq_rel));
-        
-        auto* oldPtr = m_activeSnapshot.exchange(newActive.release(), std::memory_order_acq_rel);
-        if (oldPtr) {
-            convo::retire(oldPtr);
-        }
-    }
-}
-
-
-
-// (重複デストラクタ定義を削除)
-
-//--------------------------------------------------------------
-// FIFOからデータ読み出し (UI Thread)
-//--------------------------------------------------------------
-void AudioEngine::readFromFifo(float* dest, int numSamples)
-{
-    const int actualRead = analyzerFifo.popMixToMono(dest, numSamples);
-    if (actualRead < numSamples)
-        juce::FloatVectorOperations::clear(dest + actualRead, numSamples - actualRead);
-}
-
-//--------------------------------------------------------------
-// FIFOからデータをスキップ (Latency対策)
-//--------------------------------------------------------------
-void AudioEngine::skipFifo(int numSamples)
-{
-    analyzerFifo.skip(numSamples);
-}
-
-//--------------------------------------------------------------
-// EQ応答曲線計算
-// 現在のEQ設定に基づき、周波数ごとのトータルゲイン応答（マグニチュード）を計算する
-//--------------------------------------------------------------
-void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
-                                     float* outMagnitudesR,
-                                     const std::complex<double>* zArray,
-                                     int numPoints,
-                                     double sampleRate)
-{
-    const double sr = sampleRate;
-    if (sr <= 0.0)
-    {
-        for (int i = 0; i < numPoints; ++i)
-        {
-            if (outMagnitudesL) outMagnitudesL[i] = 1.0f;
-            if (outMagnitudesR) outMagnitudesR[i] = 1.0f;
-        }
-        return;
-    }
-
-    // ── 最適化: 有効なバンドの係数をスタック上で事前に計算 ──
-    // UIスレッドでの計算負荷を下げるため、無効なバンドやゲイン0のバンドは除外する
-    struct ActiveBand {
-        EQCoeffsBiquad coeffs;
-        EQChannelMode mode;
-    };
-    ActiveBand activeBands[EQProcessor::NUM_BANDS];
-    int numActiveBands = 0;
-
-    // 状態スナップショットを取得して一貫性を確保
-    auto eqState = uiEqEditor.getEQState();
-
-    if (eqState == nullptr)
-    {
-        if (outMagnitudesL) std::fill_n(outMagnitudesL, numPoints, 1.0f);
-        if (outMagnitudesR) std::fill_n(outMagnitudesR, numPoints, 1.0f);
-        return;
-    }
-
-    for (int band = 0; band < EQProcessor::NUM_BANDS; ++band)
-    {
-        const auto& params = eqState->bands[band];
-        if (!params.enabled) continue;
-
-        EQBandType type = eqState->bandTypes[band];
-
-        // LowPass/HighPass以外でゲインがほぼ0の場合はスキップ
-        if (type != EQBandType::LowPass && type != EQBandType::HighPass &&
-            std::abs(params.gain) < EQ_GAIN_EPSILON)
-            continue;
-
-        // 【Fix Bug #EQ-Display】 Audio EQ Cookbook (calcBiquadCoeffs) の代わりに
-        // calcSVFCoeffs → svfToDisplayBiquad を使用する。
-        //
-        // 背景:
-        //   実際の音声処理は TPT SVF (calcSVFCoeffs) を使用しており、
-        //   Peaking の場合 k = 1/(Q·A)、LowShelf は g = tan()/√A 等、
-        //   Cookbook とは異なるパラメータ化を採用している。
-        //   その結果、以前の calcBiquadCoeffs (RBJ Cookbook: alpha = sin(w0)/(2Q))
-        //   は実際の SVF フィルタとバンド幅が微妙に異なり、
-        //   総合応答曲線が個別バンド曲線の積と一致しないという表示上の誤りが
-        //   生じていた。
-        //
-        // 修正:
-        //   calcSVFCoeffs → svfToDisplayBiquad のパスは SVF の z 域伝達関数を
-        //   厳密に等価 biquad へ変換する（updateEQData の個別バンド曲線と同一）。
-        //   これにより「総合曲線 = 個別バンド曲線の積 = 実際の DSP 処理」が
-        //   三者完全一致する。
-        activeBands[numActiveBands++] = {
-            EQProcessor::svfToDisplayBiquad(
-                EQProcessor::calcSVFCoeffs(type, params.frequency, params.gain, params.q, sr)),
-            eqState->bandChannelModes[band]
-        };
-    }
-
-    float totalGainLinear = 1.0f;
-    if (!uiEqEditor.getAGCEnabled())
-    {
-        totalGainLinear = juce::Decibels::decibelsToGain(eqState->totalGainDb);
-    }
-
-    // ── 最適化: 有効なバンドがない、かつトータルゲインが0dBの場合は計算をスキップ ──
-    if (numActiveBands == 0 && std::abs(totalGainLinear - 1.0f) < EQ_UNITY_GAIN_EPSILON)
-    {
-        if (outMagnitudesL) std::fill_n(outMagnitudesL, numPoints, 1.0f);
-        if (outMagnitudesR) std::fill_n(outMagnitudesR, numPoints, 1.0f);
-        return;
-    }
-
-    const float totalGainSq = totalGainLinear * totalGainLinear;
-
-    float* totalMagSqL = eqTotalMagSqLBuffer.data();
-    float* totalMagSqR = eqTotalMagSqRBuffer.data();
-    float* bandMagSq = eqBandMagSqBuffer.data();
-
-    const __m256 vTotalGainSq = _mm256_set1_ps(totalGainSq);
-    int i = 0;
-    const int vEnd = numPoints / 8 * 8;
-    for (; i < vEnd; i += 8)
-    {
-        _mm256_storeu_ps(totalMagSqL + i, vTotalGainSq);
-        _mm256_storeu_ps(totalMagSqR + i, vTotalGainSq);
-    }
-    for (; i < numPoints; ++i)
-    {
-        totalMagSqL[i] = totalGainSq;
-        totalMagSqR[i] = totalGainSq;
-    }
-
-    for (int b = 0; b < numActiveBands; ++b)
-    {
-        const auto& band = activeBands[b];
-        calcMagnitudesForBand(band.coeffs, zArray, bandMagSq, numPoints);
-
-        i = 0;
-        if (band.mode == EQChannelMode::Stereo)
-        {
-            for (; i < vEnd; i += 8)
-            {
-                __m256 vBand = _mm256_loadu_ps(bandMagSq + i);
-                __m256 vL = _mm256_loadu_ps(totalMagSqL + i);
-                __m256 vR = _mm256_loadu_ps(totalMagSqR + i);
-                _mm256_storeu_ps(totalMagSqL + i, _mm256_mul_ps(vL, vBand));
-                _mm256_storeu_ps(totalMagSqR + i, _mm256_mul_ps(vR, vBand));
-            }
-        }
-        else if (band.mode == EQChannelMode::Left)
-        {
-            for (; i < vEnd; i += 8)
-            {
-                __m256 vBand = _mm256_loadu_ps(bandMagSq + i);
-                __m256 vL = _mm256_loadu_ps(totalMagSqL + i);
-                _mm256_storeu_ps(totalMagSqL + i, _mm256_mul_ps(vL, vBand));
-            }
-        }
-        else // Right
-        {
-            for (; i < vEnd; i += 8)
-            {
-                __m256 vBand = _mm256_loadu_ps(bandMagSq + i);
-                __m256 vR = _mm256_loadu_ps(totalMagSqR + i);
-                _mm256_storeu_ps(totalMagSqR + i, _mm256_mul_ps(vR, vBand));
-            }
-        }
-
-        for (; i < numPoints; ++i)
-        {
-            float magSq = bandMagSq[i];
-            if (!std::isfinite(magSq)) magSq = 1.0f;
-            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Left)
-                totalMagSqL[i] *= magSq;
-            if (band.mode == EQChannelMode::Stereo || band.mode == EQChannelMode::Right)
-                totalMagSqR[i] *= magSq;
-        }
-    }
-
-    if (outMagnitudesL)
-    {
-        int j = 0;
-        const int vEndSqrt = numPoints / 8 * 8;
-        const __m256 vZero = _mm256_setzero_ps();
-        for (; j < vEndSqrt; j += 8)
-        {
-            __m256 v = _mm256_loadu_ps(totalMagSqL + j);
-            v = _mm256_max_ps(v, vZero);
-            _mm256_storeu_ps(outMagnitudesL + j, _mm256_sqrt_ps(v));
-        }
-        for (; j < numPoints; ++j)
-            outMagnitudesL[j] = std::sqrt(std::max(0.0f, totalMagSqL[j]));
-        for (int k = 0; k < numPoints; ++k)
-            if (!std::isfinite(outMagnitudesL[k])) outMagnitudesL[k] = 1.0f;
-    }
-
-    if (outMagnitudesR)
-    {
-        int j = 0;
-        const int vEndSqrt = numPoints / 8 * 8;
-        const __m256 vZero = _mm256_setzero_ps();
-        for (; j < vEndSqrt; j += 8)
-        {
-            __m256 v = _mm256_loadu_ps(totalMagSqR + j);
-            v = _mm256_max_ps(v, vZero);
-            _mm256_storeu_ps(outMagnitudesR + j, _mm256_sqrt_ps(v));
-        }
-        for (; j < numPoints; ++j)
-            outMagnitudesR[j] = std::sqrt(std::max(0.0f, totalMagSqR[j]));
-        for (int k = 0; k < numPoints; ++k)
-            if (!std::isfinite(outMagnitudesR[k])) outMagnitudesR[k] = 1.0f;
-    }
-}
-
-//--------------------------------------------------------------
-// getProcessingSampleRate
-//--------------------------------------------------------------
-double AudioEngine::getProcessingSampleRate() const
-{
-    const double sr = currentSampleRate.load();
-    if (sr <= 0.0) return 0.0;
-
-    int factor = manualOversamplingFactor.load();
-    int actualFactor = 1;
-
-    if (factor > 0)
-    {
-        if (factor == 1 || factor == 2 || factor == 4 || factor == 8)
-            actualFactor = factor;
-    }
-    else
-    {
-        // Auto
-        if (sr <= 96000.0)       actualFactor = 8;
-        else if (sr <= 192000.0) actualFactor = 4;
-        else if (sr <= 384000.0) actualFactor = 2;
-        else                     actualFactor = 1;
-    }
-
-    // 制限: サンプルレートに応じた最大倍率を適用
-    int maxFactor = 1;
-    if (sr <= 96000.0)       maxFactor = 8;
-    else if (sr <= 192000.0) maxFactor = 4;
-    else if (sr <= 384000.0) maxFactor = 2;
-
-    actualFactor = std::min(actualFactor, maxFactor);
-
-    return sr * static_cast<double>(actualFactor);
-}
-
-int AudioEngine::getCurrentLatencySamples() const
-{
-    return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
-}
-
-double AudioEngine::estimateOversamplingLatencySamples(int oversamplingFactor,
-                                                       OversamplingType oversamplingType,
-                                                       double baseSampleRate) noexcept
-{
-    return estimateOversamplingLatencySamplesImpl(oversamplingFactor, oversamplingType, baseSampleRate);
-}
-
-int AudioEngine::getTotalLatencySamples() const
-{
-    return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
-}
-
-AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
-{
-    LatencyBreakdown breakdown;
-
-    auto* dsp = currentDSP.load(std::memory_order_acquire);
-    if (dsp == nullptr)
-        return breakdown;
-
-    const int osFactor = static_cast<int>(dsp->oversamplingFactor);
-    const int safeOsFactor = std::max(1, osFactor);
-
-    const auto toBaseRateSamples = [safeOsFactor](int processingRateSamples) -> int
-    {
-        return juce::jmax(0,
-            static_cast<int>(std::lround(static_cast<double>(processingRateSamples)
-                                         / static_cast<double>(safeOsFactor))));
-    };
-
-    breakdown.oversamplingLatencyBaseRateSamples = juce::jmax(0,
-        static_cast<int>(std::lround(estimateOversamplingLatencySamples(
-            safeOsFactor,
-            oversamplingType.load(std::memory_order_acquire),
-            currentSampleRate.load(std::memory_order_acquire)))));
-
-    if (!convBypassActive.load(std::memory_order_relaxed))
-    {
-        auto convBreakdown = dsp->convolver.getLatencyBreakdown();
-
-        // DSP側が再構築中などで 0 を返す瞬間は、UI側コンボルバーのスナップショットを使う。
-        if (convBreakdown.algorithmLatencySamples == 0 &&
-            convBreakdown.irPeakLatencySamples == 0 &&
-            convBreakdown.totalLatencySamples == 0)
-        {
-            convBreakdown = uiConvolverProcessor.getLatencyBreakdown();
-        }
-
-        breakdown.convolverAlgorithmLatencyBaseRateSamples = toBaseRateSamples(convBreakdown.algorithmLatencySamples);
-        breakdown.convolverIRPeakLatencyBaseRateSamples = toBaseRateSamples(convBreakdown.irPeakLatencySamples);
-        breakdown.convolverTotalLatencyBaseRateSamples = toBaseRateSamples(convBreakdown.totalLatencySamples);
-    }
-
-    breakdown.totalLatencyBaseRateSamples = juce::jmax(0,
-        breakdown.oversamplingLatencyBaseRateSamples
-      + breakdown.convolverTotalLatencyBaseRateSamples);
-
-    return breakdown;
-}
-
-double AudioEngine::getCurrentLatencyMs() const
-{
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
-    if (sr <= 0.0)
-        return 0.0;
-
-    const int totalSamples = getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
-    const double totalMs = (static_cast<double>(totalSamples) * 1000.0) / sr;
-    return static_cast<double>(juce::roundToInt(totalMs));
-}
-
-//--------------------------------------------------------------
-// prepareToPlay
-//--------------------------------------------------------------
 void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
   {
       diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
@@ -2619,13 +2075,13 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 
     // Destroy orphaned DSP objects outside the lock.
     if (dspToDestroy)
-        retireDSP(dspToDestroy);
+        deleteDSP(dspToDestroy);
     if (currentToRelease)
-        retireDSP(currentToRelease);
+        deleteDSP(currentToRelease);
 
     if (!queued)
     {
-        retireDSP(newDSP);
+        deleteDSP(newDSP);
         if (current)
         {
             // EBR: lifetime managed by RCUReader
@@ -2689,7 +2145,7 @@ void AudioEngine::rebuildThreadLoop()
                 ~DSPGuard()
                 {
                     if (ptr != nullptr)
-                        retireDSP(ptr);
+                        deleteDSP(ptr);
                 }
             } dspGuard { task.newDSP };
 
@@ -2793,7 +2249,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // 古いリクエストの結果であれば破棄 (Race condition対策)
         if (generation != rebuildGeneration.load(std::memory_order_relaxed))
         {
-            retireDSP(newDSP);
+            deleteDSP(newDSP);
             return;
         }
 
@@ -2805,7 +2261,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         {
             DBG("[AudioEngine] commitNewDSP: rejected non-finalized DSP publish");
             if (newDSP != nullptr)
-                retireDSP(newDSP);
+                deleteDSP(newDSP);
             return;
         }
 
@@ -2952,14 +2408,14 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             if (isFadingActive)
             {
                 if (auto* prev = sanitizeRawPtr(queuedOldDSP.exchange(dspToTrash, std::memory_order_acq_rel)))
-                    retireDSP(prev);
+                    deleteDSP(prev);
                 queuedNextFadeTimeSec.store(fadeTimeSec, std::memory_order_release);
                 fadeQueued.store(true, std::memory_order_release);
             }
             else
             {
                 if (auto* oldFading = sanitizeRawPtr(fadingOutDSP.exchange(dspToTrash, std::memory_order_acq_rel)))
-                    retireDSP(oldFading);
+                    deleteDSP(oldFading);
                 queuedFadeTimeSec.store(fadeTimeSec, std::memory_order_release);
                 dspCrossfadePending.store(true, std::memory_order_release);
                 setIRChangeFlag();
@@ -2968,7 +2424,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         else if (dspToTrash)
         {
             // クロスフェード不要時は即時解放
-            retireDSP(dspToTrash);
+            deleteDSP(dspToTrash);
         }
     }
 
@@ -3205,7 +2661,7 @@ void AudioEngine::timerCallback()
     if (!shutdownInProgress.load(std::memory_order_acquire)
         && currentDSP.load(std::memory_order_acquire) != nullptr
         && !isFading()
-        && getActiveSnapshot() == nullptr)
+        && m_activeIndex.load(std::memory_order_acquire) < 0)  // ダブルバッファ初期化チェック
     {
         diagLog("[VERIFY] snapshot bootstrap: current was null, requesting worker snapshot refresh");
         if (!enqueueSnapshotCommand())
@@ -3397,7 +2853,8 @@ void AudioEngine::timerCallback()
     // RCU v17.15 では ReclaimerThread が自動的に担当するため不要。
     // processDeferredReleases(); // 削除
 
-    if (getActiveSnapshot() && getActiveSnapshot()->fadeAlpha >= 1.0f)
+    const auto& view = getActiveView();
+    if (view.previousValid && view.alpha >= 1.0f)
     {
         sendChangeMessage();
     }
@@ -3693,22 +3150,22 @@ void AudioEngine::releaseResources()
             abandonedCommits.pop();
 
             if (staging.newDSP)
-                retireDSP(staging.newDSP);
+                deleteDSP(staging.newDSP);
             if (staging.oldDSP)
-                retireDSP(staging.oldDSP);
+                deleteDSP(staging.oldDSP);
         }
     }
 
     if (activeToRelease)
-        retireDSP(activeToRelease);
+        deleteDSP(activeToRelease);
     if (fadingToRelease)
-        retireDSP(fadingToRelease);
+        deleteDSP(fadingToRelease);
     if (queuedToRelease)
-        retireDSP(queuedToRelease);
+        deleteDSP(queuedToRelease);
     if (pendingNewToRelease)
-        retireDSP(pendingNewToRelease);
+        deleteDSP(pendingNewToRelease);
     if (pendingCurrentToRelease)
-        retireDSP(pendingCurrentToRelease);
+        deleteDSP(pendingCurrentToRelease);
 
     diagLog("[DIAG] releaseResources: before ui processor release");
     diagLog("[DIAG] releaseResources: before uiConvolverProcessor.releaseResources");
@@ -3742,7 +3199,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     const juce::ScopedNoDenormals noDenormals;
     m_audioBlockCounter.fetch_add(1, std::memory_order_release);
 
-    // 入力検証 (Input Validation)
+    // 入力検証
     if (bufferToFill.buffer == nullptr)
         return;
 
@@ -3750,2580 +3207,202 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     const int startSample = bufferToFill.startSample;
     auto* buffer = bufferToFill.buffer;
 
-    // 事前サニティチェック: 絶対的な上限 (1<<20 ≒ 100万サンプル) で明らかな破損データを弾く。
-    // DSPCore の maxSamplesPerBlock は prepareToPlay() でホスト指定値を反映して設定されるため、
-    // ここで SAFE_MAX_BLOCK_SIZE (65536) を使うと、131072 等の正当なブロックを誤って拒否する。
-    // 【Bug Fix】SAFE_MAX_BLOCK_SIZE による早期リジェクトを廃止し、dsp->maxSamplesPerBlock で
-    //            正確なチェックを行う (下記 DSPCore 取得後)。
-    constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20; // 破損データ検出用上限
+    constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20;
     if (numSamples <= 0 || numSamples > ABSOLUTE_MAX_BLOCK_SIZE)
     {
         bufferToFill.clearActiveBufferRegion();
         return;
     }
 
-    // startSampleの妥当性チェック
     if (startSample < 0 || startSample + numSamples > buffer->getNumSamples())
     {
         bufferToFill.clearActiveBufferRegion();
         return;
     }
 
-    // Epoch tracking for lock-free Audio Thread safety
-    convo::RCUReaderGuard rcuGuard(tls_rcuReader);
+    // ========================================================================
+    // ダブルバッファモデル：スロット取得（lock-free）
+    // ========================================================================
+    int idx = m_activeIndex.load(std::memory_order_acquire);
+    const convo::EngineView& view = m_views[idx];
 
-    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
-    if (dsp == nullptr)
+    const convo::EngineState& cur  = view.current;
+    const convo::EngineState& prev = view.previous;
+    const float alpha = view.alpha;
+
+    // ========================================================================
+    // フェード処理または通常処理
+    // ========================================================================
+    if (view.previousValid && alpha < 1.0f)
     {
-        bufferToFill.clearActiveBufferRegion();
-        return;
-    }
+        // クロスフェード中：prev と cur をブレンド
+        m_tmpA.clear();
+        m_tmpB.clear();
 
-    if (dsp != nullptr)
-    {
-        // DSPCore 固有の上限チェック
-        // DSPCore::prepare() でホスト指定の samplesPerBlock を反映した maxSamplesPerBlock が設定される。
-        // dsp は RCU で公開済みのため maxSamplesPerBlock は Audio Thread から安全に読み出せる。
-        if (numSamples > dsp->maxSamplesPerBlock)
-        {
-            bufferToFill.clearActiveBufferRegion();
-            return;
-        }
+        processWithState(m_tmpA, prev, 0, numSamples, 1.0f - alpha);
+        processWithState(m_tmpB, cur,  0, numSamples, alpha);
 
-        // 安全対策: サンプルレート不整合チェック
-        // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
-        // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
-        const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
-        if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
-        {
-            // 不整合時はレベルメーターもリセットして誤表示を防ぐ
-            inputLevelLinear.store(0.0f);
-            outputLevelLinear.store(0.0f);
-            bufferToFill.clearActiveBufferRegion();
-            return;
-        }
-
-        // パラメータのロード
-        // 【Parameter安全設計】
-        // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
-        // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
-        // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
-        const convo::GlobalSnapshot* snap = getActiveSnapshot() ? getActiveSnapshot()->current.get() : nullptr;
-        const bool eqBypassed               = (snap != nullptr) ? snap->eqBypass : eqBypassRequested.load(std::memory_order_acquire);
-        const bool convBypassed             = (snap != nullptr) ? snap->convBypass : convBypassRequested.load(std::memory_order_acquire);
-        const ProcessingOrder order         = (snap != nullptr) ? snap->processingOrder : currentProcessingOrder.load(std::memory_order_relaxed);
-        const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
-        const bool analyzerEnabledNow       = analyzerEnabled.load(std::memory_order_relaxed);
-        const bool softClip                 = (snap != nullptr) ? snap->softClipEnabled : softClipEnabled.load(std::memory_order_relaxed);
-        const float satAmt                  = (snap != nullptr) ? snap->saturationAmount : saturationAmount.load(std::memory_order_relaxed);
-        const double headroomGain           = (snap != nullptr) ? snap->inputHeadroomGain : inputHeadroomGain.load(std::memory_order_relaxed);
-        const double makeupGain             = (snap != nullptr) ? snap->outputMakeupGain : outputMakeupGain.load(std::memory_order_relaxed);
-        const double convInputTrimGain      = (snap != nullptr) ? snap->convInputTrimGain : convolverInputTrimGain.load(std::memory_order_relaxed);
-        const convo::HCMode hcMode      = convHCFilterMode.load(std::memory_order_relaxed);
-        const convo::LCMode lcMode      = convLCFilterMode.load(std::memory_order_relaxed);
-        const convo::HCMode lpfMode     = eqLPFFilterMode.load(std::memory_order_relaxed);
-        const int adaptiveCoeffBankIndex    = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
-        const auto& adaptiveCoeffBank       = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
-        const bool adaptiveCaptureEnabled   = noiseShaperLearner && noiseShaperLearner->isRunning();
-
-        // RCU スナップショット取得：generation と active ポインタはダブルバッファリングにより一貫性が保証される
-        const uint32_t genSnapshot = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
-        const CoeffSet* safeAdaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
-        // safeAdaptiveSet は、genSnapshot 時点で有効な係数セットを指す。
-        // Writer が後で切り替えても、このポインタの指す内容は不変である。
-
-        // 念のため nullptr チェック
-        if (!safeAdaptiveSet) {
-            // フォールバック：デフォルト係数を使用するなどの処理（必要に応じて）
-            // ここでは単に nullptr のまま処理を続行（process() 側で対処）
-        }
-        const uint32_t adaptiveGenAfter = genSnapshot; // 互換性のため変数名を維持
-
-        // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
-        eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
-        convBypassActive.store(convBypassed, std::memory_order_relaxed);
-
-        DSPCore::ProcessingState procState {
-            .eqBypassed               = eqBypassed,
-            .convBypassed             = convBypassed,
-            .order                    = order,
-            .analyzerSource           = analyzerSource,
-            .analyzerEnabled          = analyzerEnabledNow,
-            .softClipEnabled          = softClip,
-            .saturationAmount         = satAmt,
-            .inputHeadroomGain        = headroomGain,
-            .outputMakeupGain         = makeupGain,
-            .convolverInputTrimGain   = convInputTrimGain,
-            .convHCMode               = hcMode,
-            .convLCMode               = lcMode,
-            .eqLPFMode                = lpfMode,
-            .adaptiveCoeffBankIndex   = adaptiveCoeffBankIndex,
-            .adaptiveCoeffSet         = safeAdaptiveSet,
-            .adaptiveCoeffGeneration  = adaptiveGenAfter,
-            .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
-            .adaptiveCaptureBitDepth  = dsp->ditherBitDepth,
-            .captureSessionId         = dsp->currentCaptureSessionId,
-            .adaptiveCaptureQueue     = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
-        };
-
-        if (isFading())
-            // RCU v17.15: フェード進行は上記で処理済み;
-        debugLastCoordinatorIsFading.store(isFading() ? 1 : 0, std::memory_order_relaxed);
-
-        // RCU スナップショットからポインタを取得（これがソース・オブ・トゥルース）
-        RCUReaderGuard guard(tls_rcu_reader);
-        auto* snap = m_activeSnapshot.load(std::memory_order_acquire);
-        
-        float snapshotAlpha = m_fadeAlpha.load(std::memory_order_acquire);
-        const convo::GlobalSnapshot* snapshotTo   = snap ? snap->current.get() : nullptr;
-        const convo::GlobalSnapshot* snapshotFrom = snap ? snap->previous.get() : nullptr;
-        
-        const bool updateFadeReturned = isFading() && snapshotFrom != nullptr && snapshotTo != nullptr;
-        debugLastUpdateFadeReturned.store(updateFadeReturned ? 1 : 0, std::memory_order_relaxed);
-        debugLastSnapshotFromNull.store(snapshotFrom == nullptr ? 1 : 0, std::memory_order_relaxed);
-        debugLastSnapshotToNull.store(snapshotTo == nullptr ? 1 : 0, std::memory_order_relaxed);
-
-        const bool snapshotFading = updateFadeReturned
-            && snapshotTo != nullptr;
-
-        if (snapshotFading)
-        {
-            const int fadeChannels = std::min(dspCrossfadeFloatBuffer.getNumChannels(), buffer->getNumChannels());
-            for (int ch = 0; ch < fadeChannels; ++ch)
-                dspCrossfadeFloatBuffer.clear(ch, 0, numSamples);
-
-            juce::AudioSourceChannelInfo oldInfo(&dspCrossfadeFloatBuffer, 0, numSamples);
-            processWithSnapshot(oldInfo, snapshotFrom, true);
-            processWithSnapshot(bufferToFill, snapshotTo, false);
-
-            const float gNew = snapshotAlpha;
-            const float gOld = 1.0f - snapshotAlpha;
-            const int outChannels = std::min(buffer->getNumChannels(), dspCrossfadeFloatBuffer.getNumChannels());
-            float* dstL = (outChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
-            float* dstR = (outChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
-            const float* oldL = (outChannels > 0) ? dspCrossfadeFloatBuffer.getReadPointer(0, 0) : nullptr;
-            const float* oldR = (outChannels > 1) ? dspCrossfadeFloatBuffer.getReadPointer(1, 0) : nullptr;
-
-            for (int i = 0; i < numSamples; ++i)
-            {
-                if (dstL != nullptr)
-                    dstL[i] = dstL[i] * gNew + oldL[i] * gOld;
-                if (dstR != nullptr)
-                    dstR[i] = dstR[i] * gNew + oldR[i] * gOld;
-            }
-
-            return;
-        }
-
-        DSPCore* fading = sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire));
-        bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
-        int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
-        if (fading != nullptr
-            && !useDryAsOld
-            && dspCrossfadePending.load(std::memory_order_acquire)
-            && pendingFadeDelayBlocks > 0)
-        {
-            dspCrossfadeStartDelayBlocks.store(pendingFadeDelayBlocks - 1, std::memory_order_release);
-
-            auto fadingState = procState;
-            fadingState.analyzerEnabled = false;
-            fadingState.adaptiveCaptureQueue = nullptr;
-
-            std::atomic<float> fadingInputMeter { 0.0f };
-            std::atomic<float> fadingOutputMeter { 0.0f };
-            fading->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
-            return;
-        }
-
-        if ((fading != nullptr || firstIrDryCrossfadePending.load(std::memory_order_acquire))
-            && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
-        {
-            const double fadeSec = std::max(0.001, queuedFadeTimeSec.load(std::memory_order_acquire));
-            dspCrossfadeGain.reset(std::max(1.0, dsp->sampleRate), fadeSec);
-            dspCrossfadeGain.setCurrentAndTargetValue(0.0);
-            dspCrossfadeGain.setTargetValue(1.0);
-
-            // レイテンシ整合値を Audio Thread スナップショットへ反映する。
-            latencyDelayOld_RT = latencyDelayOld.load(std::memory_order_acquire);
-            latencyDelayNew_RT = latencyDelayNew.load(std::memory_order_acquire);
-
-            if (firstIrDryCrossfadePending.exchange(false, std::memory_order_acq_rel))
-            {
-                dspCrossfadeUseDryAsOld.store(true, std::memory_order_release);
-                useDryAsOld = true;
-            }
-        }
-
-        const bool canCrossfade = (fading != nullptr || useDryAsOld)
-            && dspCrossfadeGain.isSmoothing()
-            && dspCrossfadeFloatBuffer.getNumChannels() >= 2
-            && dspCrossfadeFloatBuffer.getNumSamples() >= numSamples;
-
-        if (canCrossfade)
-        {
-            juce::AudioSourceChannelInfo fadeInfo(&dspCrossfadeFloatBuffer, 0, numSamples);
-            dspCrossfadeFloatBuffer.clear(0, 0, numSamples);
-            dspCrossfadeFloatBuffer.clear(1, 0, numSamples);
-
-            auto fadingState = procState;
-            fadingState.analyzerEnabled = false;
-            fadingState.adaptiveCaptureQueue = nullptr;
-
-            std::atomic<float> fadingInputMeter { 0.0f };
-            std::atomic<float> fadingOutputMeter { 0.0f };
-            if (useDryAsOld)
-            {
-                const int outChannels = std::min(2, buffer->getNumChannels());
-                if (outChannels > 0)
-                    juce::FloatVectorOperations::copy(dspCrossfadeFloatBuffer.getWritePointer(0, 0), buffer->getReadPointer(0, startSample), numSamples);
-                if (outChannels > 1)
-                    juce::FloatVectorOperations::copy(dspCrossfadeFloatBuffer.getWritePointer(1, 0), buffer->getReadPointer(1, startSample), numSamples);
-            }
-            else
-            {
-                // EBR: lifetime managed by RCUReader
-                fading->processToBuffer(bufferToFill, dspCrossfadeFloatBuffer, analyzerFifo,
-                                       fadingInputMeter, fadingOutputMeter, fadingState);
-            }
-            dsp->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
-
-            const int outChannels = std::min(2, buffer->getNumChannels());
-            float* dstL = (outChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
-            float* dstR = (outChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
-            const float* oldL = (outChannels > 0) ? dspCrossfadeFloatBuffer.getReadPointer(0, 0) : nullptr;
-            const float* oldR = (outChannels > 1) ? dspCrossfadeFloatBuffer.getReadPointer(1, 0) : nullptr;
-
-            const int bufferSize = latencyBufSize;
-            int writePos = latencyWritePos;
-            const int delayOld = latencyDelayOld_RT;
-            const int delayNew = latencyDelayNew_RT;
-            if (latencyResetPending.exchange(false, std::memory_order_acq_rel))
-            {
-                if (latencyBufOldL) std::memset(latencyBufOldL, 0, sizeof(double) * bufferSize);
-                if (latencyBufOldR) std::memset(latencyBufOldR, 0, sizeof(double) * bufferSize);
-                if (latencyBufNewL) std::memset(latencyBufNewL, 0, sizeof(double) * bufferSize);
-                if (latencyBufNewR) std::memset(latencyBufNewR, 0, sizeof(double) * bufferSize);
-                writePos = 0;
-            }
-            for (int i = 0; i < numSamples; ++i)
-            {
-                latencyBufOldL[writePos] = (oldL != nullptr) ? static_cast<double>(oldL[i]) : 0.0;
-                latencyBufOldR[writePos] = (oldR != nullptr) ? static_cast<double>(oldR[i]) : 0.0;
-                latencyBufNewL[writePos] = (dstL != nullptr) ? static_cast<double>(dstL[i]) : 0.0;
-                latencyBufNewR[writePos] = (dstR != nullptr) ? static_cast<double>(dstR[i]) : 0.0;
-
-                int readOld = writePos - delayOld;
-                int readNew = writePos - delayNew;
-                while (readOld < 0) readOld += bufferSize;
-                while (readOld >= bufferSize) readOld -= bufferSize;
-                while (readNew < 0) readNew += bufferSize;
-                while (readNew >= bufferSize) readNew -= bufferSize;
-
-                const double alignedOldL = latencyBufOldL[readOld];
-                const double alignedOldR = latencyBufOldR[readOld];
-                const double alignedNewL = latencyBufNewL[readNew];
-                const double alignedNewR = latencyBufNewR[readNew];
-
-                const double gNew = dspCrossfadeGain.getNextValue();
-                const double dryScale = useDryAsOld ? dspCrossfadeDryScaleGain.getNextValue() : 1.0;
-                const double gOld = 1.0 - gNew;
-                const double dryScaledL = alignedOldL * dryScale;
-                const double dryScaledR = alignedOldR * dryScale;
-                if (dstL != nullptr)
-                    dstL[i] = static_cast<float>(alignedNewL * gNew + dryScaledL * gOld);
-                if (dstR != nullptr)
-                    dstR[i] = static_cast<float>(alignedNewR * gNew + dryScaledR * gOld);
-
-                writePos++;
-                if (writePos >= bufferSize)
-                    writePos = 0;
-            }
-            latencyWritePos = writePos;
-
-            if (!useDryAsOld)
-            {
-                // EBR: fading lifetime managed by RCUReaderGuard
-            }
-
-            if (!dspCrossfadeGain.isSmoothing())
-            {
-                if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                    retireDSP(done);
-                dspCrossfadeGain.setCurrentAndTargetValue(1.0);
-                dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
-                dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
-            }
-        }
-        else
-        {
-            // 通常パス（クロスフェードなし）：RCU で dsp の生存が保証されるため addRef/release 不要
-            dsp->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
-
-            if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
-            {
-                if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                    retireDSP(done);
-            }
-            if (!dspCrossfadeGain.isSmoothing())
-                dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
-        }
-    }
-
-}
-
-void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
-                                      const convo::GlobalSnapshot* snap,
-                                      bool isFadingTarget)
-{
-    if (snap == nullptr)
-    {
-        bufferToFill.clearActiveBufferRegion();
-        return;
-    }
-
-    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
-    if (dsp == nullptr)
-    {
-        bufferToFill.clearActiveBufferRegion();
-        return;
-    }
-
-    const uint64_t hash = snap->eqCoeffHash;
-    if (hash != debugLastAppliedEqHash.load(std::memory_order_relaxed))
-    {
-        debugLastAppliedEqHash.store(hash, std::memory_order_relaxed);
-        debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
-    }
-
-    const bool eqBypassed = snap->eqBypass;
-    const bool convBypassed = snap->convBypass;
-    const ProcessingOrder order = snap->processingOrder;
-    const bool softClip = snap->softClipEnabled;
-    const float satAmt = snap->saturationAmount;
-    const double headroomGain = snap->inputHeadroomGain;
-    const double makeupGain = snap->outputMakeupGain;
-    const double convInputTrimGain = snap->convInputTrimGain;
-
-    if (!isFadingTarget)
-    {
-        eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
-        convBypassActive.store(convBypassed, std::memory_order_relaxed);
-    }
-
-    const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
-    const bool analyzerEnabledNow = analyzerEnabled.load(std::memory_order_relaxed);
-    const convo::HCMode hcMode = convHCFilterMode.load(std::memory_order_relaxed);
-    const convo::LCMode lcMode = convLCFilterMode.load(std::memory_order_relaxed);
-    const convo::HCMode lpfMode = eqLPFFilterMode.load(std::memory_order_relaxed);
-    const int adaptiveCoeffBankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
-    const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
-    const bool adaptiveCaptureEnabled = noiseShaperLearner && noiseShaperLearner->isRunning();
-
-    // RCU スナップショット取得：generation と active ポインタはダブルバッファリングにより一貫性が保証される
-    const uint32_t genSnapshot = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
-    const CoeffSet* safeAdaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
-    // safeAdaptiveSet は、genSnapshot 時点で有効な係数セットを指す。
-    // Writer が後で切り替えても、このポインタの指す内容は不変である。
-
-    if (!safeAdaptiveSet) {
-        // ここでは nullptr のまま process() 側へ渡す
-    }
-    const uint32_t adaptiveGenAfter = genSnapshot;
-
-    DSPCore::ProcessingState procState {
-        .eqBypassed               = eqBypassed,
-        .convBypassed             = convBypassed,
-        .order                    = order,
-        .analyzerSource           = analyzerSource,
-        .analyzerEnabled          = isFadingTarget ? false : analyzerEnabledNow,
-        .softClipEnabled          = softClip,
-        .saturationAmount         = satAmt,
-        .inputHeadroomGain        = headroomGain,
-        .outputMakeupGain         = makeupGain,
-        .convolverInputTrimGain   = convInputTrimGain,
-        .convHCMode               = hcMode,
-        .convLCMode               = lcMode,
-        .eqLPFMode                = lpfMode,
-        .adaptiveCoeffBankIndex   = adaptiveCoeffBankIndex,
-        .adaptiveCoeffSet         = safeAdaptiveSet,
-        .adaptiveCoeffGeneration  = adaptiveGenAfter,
-        .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
-        .adaptiveCaptureBitDepth  = dsp->ditherBitDepth,
-        .captureSessionId         = dsp->currentCaptureSessionId,
-        .adaptiveCaptureQueue     = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
-    };
-
-    std::atomic<float> fadingInputMeter { 0.0f };
-    std::atomic<float> fadingOutputMeter { 0.0f };
-    auto& inMeter = isFadingTarget ? fadingInputMeter : inputLevelLinear;
-    auto& outMeter = isFadingTarget ? fadingOutputMeter : outputLevelLinear;
-    dsp->process(bufferToFill, analyzerFifo, inMeter, outMeter, procState);
-}
-
-void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
-{
-    const juce::ScopedNoDenormals noDenormals;
-    m_audioBlockCounter.fetch_add(1, std::memory_order_release);
-
-    // ★ 追加: RCU ガードで現在の DSP を保護する
-    convo::RCUReaderGuard rcuGuard(tls_rcuReader);
-    const int numSamples = buffer.getNumSamples();
-    // 事前サニティチェック (getNextAudioBlock と同様)
-    constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20;
-    if (numSamples <= 0 || numSamples > ABSOLUTE_MAX_BLOCK_SIZE)
-    {
-        buffer.clear();
-        return;
-    }
-
-    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
-    if (dsp == nullptr)
-    {
-        buffer.clear();
-        return;
-    }
-
-    // AudioThread入口で、現在のDSPが持つ全てのNUCのガードをチェック（デバッグ時のみ）
-        #ifdef NUC_DEBUG_GUARDS
-        {
-        dsp->convolver.debugCheckNucGuards();
-        }
-    #endif
-
-    // --- ProcessingStateを現行設計で初期化 ---
-    const bool eqBypassed = eqBypassActive.load(std::memory_order_relaxed);
-    const bool convBypassed = convBypassActive.load(std::memory_order_relaxed);
-    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
-    const bool analyzerEnabledNow = analyzerEnabled.load(std::memory_order_relaxed);
-    const AnalyzerSource analyzerSourceNow = currentAnalyzerSource.load(std::memory_order_relaxed);
-    const convo::HCMode hcMode = convHCFilterMode.load(std::memory_order_relaxed);
-    const convo::LCMode lcMode = convLCFilterMode.load(std::memory_order_relaxed);
-    const convo::HCMode lpfMode = eqLPFFilterMode.load(std::memory_order_relaxed);
-    const int adaptiveCoeffBankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
-    const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
-    const uint32_t genSnapshot = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
-    const CoeffSet* safeAdaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
-    const uint32_t adaptiveGenAfter = genSnapshot;
-    const bool adaptiveCaptureEnabled = noiseShaperLearner && noiseShaperLearner->isRunning();
-
-    DSPCore::ProcessingState procState {
-        eqBypassed,
-        convBypassed,
-        order,
-        analyzerSourceNow,
-        analyzerEnabledNow,
-        softClipEnabled.load(std::memory_order_relaxed),
-        saturationAmount.load(std::memory_order_relaxed),
-        inputHeadroomGain.load(std::memory_order_relaxed),
-        outputMakeupGain.load(std::memory_order_relaxed),
-        convolverInputTrimGain.load(std::memory_order_relaxed),
-        hcMode,
-        lcMode,
-        lpfMode,
-        adaptiveCoeffBankIndex,
-        safeAdaptiveSet,
-        adaptiveGenAfter,
-        static_cast<int>(dsp->sampleRate + 0.5),
-        dsp->ditherBitDepth,
-        dsp->currentCaptureSessionId,
-        adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
-    };
-
-    // DSPCore 固有の上限チェック (getNextAudioBlock と同様)
-    if (numSamples > dsp->maxSamplesPerBlock)
-    {
-        buffer.clear();
-        return;
-    }
-
-    // EQ スナップショットフェードを進める (getNextAudioBlock と同等)
-    if (isFading())
-        // RCU v17.15: フェード進行は上記で処理済み;
-
-        debugLastCoordinatorIsFading.store(isFading() ? 1 : 0, std::memory_order_relaxed);
-
-        float snapshotAlpha = 1.0f;
-        const convo::GlobalSnapshot* snapshotFrom = nullptr;
-        const convo::GlobalSnapshot* snapshotTo = nullptr;
-        const bool updateFadeReturned = isFading() && snapshotFrom != nullptr && snapshotTo != nullptr;
-        debugLastUpdateFadeReturned.store(updateFadeReturned ? 1 : 0, std::memory_order_relaxed);
-        debugLastSnapshotFromNull.store(snapshotFrom == nullptr ? 1 : 0, std::memory_order_relaxed);
-        debugLastSnapshotToNull.store(snapshotTo == nullptr ? 1 : 0, std::memory_order_relaxed);
-        (void) snapshotAlpha;
-
-    const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
-    if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
-    {
-        inputLevelLinear.store(0.0f);
-        // --- クロスフェード・遅延整合処理（現行設計に準拠） ---
-        DSPCore* fading = sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire));
-        bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
-        int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
-        if (fading != nullptr
-            && !useDryAsOld
-            && dspCrossfadePending.load(std::memory_order_acquire)
-            && pendingFadeDelayBlocks > 0)
-        {
-            dspCrossfadeStartDelayBlocks.store(pendingFadeDelayBlocks - 1, std::memory_order_release);
-
-            auto fadingState = procState;
-            fadingState.analyzerEnabled = false;
-            fadingState.adaptiveCaptureQueue = nullptr;
-
-            std::atomic<float> fadingInputMeter { 0.0f };
-            std::atomic<float> fadingOutputMeter { 0.0f };
-            fading->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
-            return;
-        }
-
-        if ((fading != nullptr || firstIrDryCrossfadePending.load(std::memory_order_acquire))
-            && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
-        {
-            const double fadeSec = std::max(0.001, queuedFadeTimeSec.load(std::memory_order_acquire));
-            dspCrossfadeGain.reset(std::max(1.0, dsp->sampleRate), fadeSec);
-            dspCrossfadeGain.setCurrentAndTargetValue(0.0);
-            dspCrossfadeGain.setTargetValue(1.0);
-
-            // レイテンシ整合値を Audio Thread スナップショットへ反映する。
-            latencyDelayOld_RT = latencyDelayOld.load(std::memory_order_acquire);
-            latencyDelayNew_RT = latencyDelayNew.load(std::memory_order_acquire);
-
-            if (firstIrDryCrossfadePending.exchange(false, std::memory_order_acq_rel))
-            {
-                dspCrossfadeUseDryAsOld.store(true, std::memory_order_release);
-                useDryAsOld = true;
-            }
-        }
-
-        const bool canCrossfade = (fading != nullptr || useDryAsOld)
-            && dspCrossfadeGain.isSmoothing()
-            && dspCrossfadeDoubleBuffer.getNumChannels() >= 2
-            && dspCrossfadeDoubleBuffer.getNumSamples() >= numSamples;
-
-        if (canCrossfade)
-        {
-            // 旧DSPの出力をバッファに生成
-            dspCrossfadeDoubleBuffer.clear(0, 0, numSamples);
-            dspCrossfadeDoubleBuffer.clear(1, 0, numSamples);
-
-            auto fadingState = procState;
-            fadingState.analyzerEnabled = false;
-            fadingState.adaptiveCaptureQueue = nullptr;
-
-            std::atomic<float> fadingInputMeter { 0.0f };
-            std::atomic<float> fadingOutputMeter { 0.0f };
-            if (useDryAsOld)
-            {
-                const int outChannels = std::min(2, buffer.getNumChannels());
-                if (outChannels > 0)
-                    juce::FloatVectorOperations::copy(dspCrossfadeDoubleBuffer.getWritePointer(0, 0), buffer.getReadPointer(0, 0), numSamples);
-                if (outChannels > 1)
-                    juce::FloatVectorOperations::copy(dspCrossfadeDoubleBuffer.getWritePointer(1, 0), buffer.getReadPointer(1, 0), numSamples);
-            }
-            else
-            {
-                // EBR: lifetime managed by RCUReader
-                fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, analyzerFifo,
-                                              fadingInputMeter, fadingOutputMeter, fadingState);
-            }
-            dsp->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
-
-            const int outChannels = std::min(2, buffer.getNumChannels());
-            double* dstL = (outChannels > 0) ? buffer.getWritePointer(0, 0) : nullptr;
-            double* dstR = (outChannels > 1) ? buffer.getWritePointer(1, 0) : nullptr;
-            const double* oldL = (outChannels > 0) ? dspCrossfadeDoubleBuffer.getReadPointer(0, 0) : nullptr;
-            const double* oldR = (outChannels > 1) ? dspCrossfadeDoubleBuffer.getReadPointer(1, 0) : nullptr;
-
-            // 遅延整合バッファを使ったクロスフェード
-            const int bufferSize = latencyBufSize;
-            const int delayOld = latencyDelayOld_RT;
-            const int delayNew = latencyDelayNew_RT;
-            double gNew = dspCrossfadeGain.getCurrentValue();
-            const double gTarget = dspCrossfadeGain.getTargetValue();
-            const double dg = (gTarget - gNew) / numSamples;
-            // resetPendingはAudioThreadで1回だけ処理
-            if (latencyResetPending.exchange(false, std::memory_order_acq_rel)) {
-                if (latencyBufOldL) std::memset(latencyBufOldL, 0, sizeof(double) * bufferSize);
-                if (latencyBufOldR) std::memset(latencyBufOldR, 0, sizeof(double) * bufferSize);
-                if (latencyBufNewL) std::memset(latencyBufNewL, 0, sizeof(double) * bufferSize);
-                if (latencyBufNewR) std::memset(latencyBufNewR, 0, sizeof(double) * bufferSize);
-                latencyWritePos = 0;
-            }
-            for (int i = 0; i < numSamples; ++i)
-            {
-                latencyBufOldL[latencyWritePos] = (oldL != nullptr) ? oldL[i] : 0.0;
-                latencyBufOldR[latencyWritePos] = (oldR != nullptr) ? oldR[i] : 0.0;
-                latencyBufNewL[latencyWritePos] = (dstL != nullptr) ? dstL[i] : 0.0;
-                latencyBufNewR[latencyWritePos] = (dstR != nullptr) ? dstR[i] : 0.0;
-
-                int readOld = latencyWritePos - delayOld;
-                int readNew = latencyWritePos - delayNew;
-                // 完全wrap
-                while (readOld < 0) readOld += bufferSize;
-                while (readOld >= bufferSize) readOld -= bufferSize;
-                while (readNew < 0) readNew += bufferSize;
-                while (readNew >= bufferSize) readNew -= bufferSize;
-
-                const double alignedOldL = latencyBufOldL[readOld];
-                const double alignedOldR = latencyBufOldR[readOld];
-                const double alignedNewL = latencyBufNewL[readNew];
-                const double alignedNewR = latencyBufNewR[readNew];
-
-                gNew += dg;
-                const double gOld = 1.0 - gNew;
-
-                if (dstL) dstL[i] = alignedNewL * gNew + alignedOldL * gOld;
-                if (dstR) dstR[i] = alignedNewR * gNew + alignedOldR * gOld;
-
-                latencyWritePos++;
-                if (latencyWritePos >= bufferSize)
-                    latencyWritePos = 0;
-            }
-            if (!useDryAsOld)
-            {
-                // EBR: managed by RCUReader
-            }
-
-            if (!dspCrossfadeGain.isSmoothing())
-            {
-                if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                    retireDSP(done);
-                dspCrossfadeGain.setCurrentAndTargetValue(1.0);
-                dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
-                dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
-            }
-            return;
-        }
-
-        // --- 通常パス（クロスフェードなし） ---
-        dsp->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
-
-        if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
-        {
-            if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                retireDSP(done);
-        }
-        if (!dspCrossfadeGain.isSmoothing())
-            dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
-        return;
-    }
-
-    // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
-    DSPCore* fading = sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire));
-    bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
-    int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
-    if (fading != nullptr
-        && !useDryAsOld
-        && dspCrossfadePending.load(std::memory_order_acquire)
-        && pendingFadeDelayBlocks > 0)
-    {
-        dspCrossfadeStartDelayBlocks.store(pendingFadeDelayBlocks - 1, std::memory_order_release);
-
-        auto fadingState = procState;
-        fadingState.analyzerEnabled = false;
-        fadingState.adaptiveCaptureQueue = nullptr;
-
-        std::atomic<float> fadingInputMeter { 0.0f };
-        std::atomic<float> fadingOutputMeter { 0.0f };
-        fading->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
-        return;
-    }
-
-    if ((fading != nullptr || firstIrDryCrossfadePending.load(std::memory_order_acquire))
-        && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
-    {
-        // queuedFadeTimeSecはcommitNewDSPでセット済み、ここでスナップショット
-        const double fadeSec = std::max(0.001, queuedFadeTimeSec.load(std::memory_order_acquire));
-        // latencyDelayOld/New, latencyWritePos, latencyBuf*もcommitNewDSPでセット済み
-        // AudioThread側は読み取り専用、atomic不要
-        dspCrossfadeGain.reset(std::max(1.0, dsp->sampleRate), fadeSec);
-        dspCrossfadeGain.setCurrentAndTargetValue(0.0);
-        dspCrossfadeGain.setTargetValue(1.0);
-
-        // レイテンシ整合値を Audio Thread スナップショットへ反映する。
-        latencyDelayOld_RT = latencyDelayOld.load(std::memory_order_acquire);
-        latencyDelayNew_RT = latencyDelayNew.load(std::memory_order_acquire);
-
-        if (firstIrDryCrossfadePending.exchange(false, std::memory_order_acq_rel))
-        {
-            dspCrossfadeUseDryAsOld.store(true, std::memory_order_release);
-            useDryAsOld = true;
-        }
-    }
-
-    const bool canCrossfade = (fading != nullptr || useDryAsOld)
-        && dspCrossfadeGain.isSmoothing()
-        && dspCrossfadeDoubleBuffer.getNumChannels() >= 2
-        && dspCrossfadeDoubleBuffer.getNumSamples() >= numSamples;
-
-    if (canCrossfade)
-    {
-        // --- wrap安全・スナップショット設計 ---
-        dspCrossfadeDoubleBuffer.clear(0, 0, numSamples);
-        dspCrossfadeDoubleBuffer.clear(1, 0, numSamples);
-
-        auto fadingState = procState;
-        fadingState.analyzerEnabled = false;
-        fadingState.adaptiveCaptureQueue = nullptr;
-
-        std::atomic<float> fadingInputMeter { 0.0f };
-        std::atomic<float> fadingOutputMeter { 0.0f };
-        if (useDryAsOld)
-        {
-            const int outChannels = std::min(2, buffer.getNumChannels());
-            if (outChannels > 0)
-                juce::FloatVectorOperations::copy(dspCrossfadeDoubleBuffer.getWritePointer(0, 0), buffer.getReadPointer(0, 0), numSamples);
-            if (outChannels > 1)
-                juce::FloatVectorOperations::copy(dspCrossfadeDoubleBuffer.getWritePointer(1, 0), buffer.getReadPointer(1, 0), numSamples);
-        }
-        else
-        {
-            // EBR: managed by RCUReader
-            fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, analyzerFifo,
-                                          fadingInputMeter, fadingOutputMeter, fadingState);
-        }
-        dsp->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
-
-        // スナップショット（commitNewDSPでセット済み、ここでは読み取り専用）
-        const int outChannels = std::min(2, buffer.getNumChannels());
-        double* dstL = (outChannels > 0) ? buffer.getWritePointer(0, 0) : nullptr;
-        double* dstR = (outChannels > 1) ? buffer.getWritePointer(1, 0) : nullptr;
-        const double* oldL = (outChannels > 0) ? dspCrossfadeDoubleBuffer.getReadPointer(0, 0) : nullptr;
-        const double* oldR = (outChannels > 1) ? dspCrossfadeDoubleBuffer.getReadPointer(1, 0) : nullptr;
-
-        const int bufferSize = latencyBufSize;
-        int writePos = latencyWritePos;
-        // ===== 遅延整合スナップショット取得（AudioThread）=====
-        // ===== RT snapshot値を使用 =====
-        const int delayOld = latencyDelayOld_RT;
-        const int delayNew = latencyDelayNew_RT;
-        // ===== resetPending処理（AudioThreadのみ）=====
-        if (latencyResetPending.exchange(false, std::memory_order_acq_rel)) {
-            if (latencyBufOldL) std::memset(latencyBufOldL, 0, sizeof(double) * bufferSize);
-            if (latencyBufOldR) std::memset(latencyBufOldR, 0, sizeof(double) * bufferSize);
-            if (latencyBufNewL) std::memset(latencyBufNewL, 0, sizeof(double) * bufferSize);
-            if (latencyBufNewR) std::memset(latencyBufNewR, 0, sizeof(double) * bufferSize);
-            writePos = 0;
-        }
-        for (int i = 0; i < numSamples; ++i) {
-            latencyBufOldL[writePos] = (oldL != nullptr) ? oldL[i] : 0.0;
-            latencyBufOldR[writePos] = (oldR != nullptr) ? oldR[i] : 0.0;
-            latencyBufNewL[writePos] = (dstL != nullptr) ? dstL[i] : 0.0;
-            latencyBufNewR[writePos] = (dstR != nullptr) ? dstR[i] : 0.0;
-
-            int readOld = writePos - delayOld;
-            int readNew = writePos - delayNew;
-            // 完全wrap
-            while (readOld < 0) readOld += bufferSize;
-            while (readOld >= bufferSize) readOld -= bufferSize;
-            while (readNew < 0) readNew += bufferSize;
-            while (readNew >= bufferSize) readNew -= bufferSize;
-
-            const double alignedOldL = latencyBufOldL[readOld];
-            const double alignedOldR = latencyBufOldR[readOld];
-            const double alignedNewL = latencyBufNewL[readNew];
-            const double alignedNewR = latencyBufNewR[readNew];
-
-            const double gNew = dspCrossfadeGain.getNextValue();
-            const double gOld = 1.0 - gNew;
-
-            if (dstL) dstL[i] = alignedNewL * gNew + alignedOldL * gOld;
-            if (dstR) dstR[i] = alignedNewR * gNew + alignedOldR * gOld;
-
-            writePos = (writePos + 1);
-            if (writePos == bufferSize)
-                writePos = 0;
-        }
-        latencyWritePos = writePos;
-        if (!useDryAsOld)
-        {
-            // EBR: managed by RCUReader
-        }
-
-        if (!dspCrossfadeGain.isSmoothing())
-        {
-            if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                retireDSP(done);
-            dspCrossfadeGain.setCurrentAndTargetValue(1.0);
-            dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
-        }
-    }
-    else
-    {
-        dsp->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
-
-        if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
-        {
-            if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                retireDSP(done);
-        }
-        if (!dspCrossfadeGain.isSmoothing())
-            dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
-    }
-}
-
-void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& source,
-                                          juce::AudioBuffer<float>& destination,
-                                          LockFreeAudioRingBuffer& analyzerFifo,
-                                          std::atomic<float>& inputLevelLinear,
-                                          std::atomic<float>& outputLevelLinear,
-                                          const ProcessingState& state)
-{
-    const int numSamples = source.numSamples;
-    const int numChannels = std::min(2, source.buffer != nullptr ? source.buffer->getNumChannels() : 0);
-
-    if (source.buffer == nullptr || numSamples <= 0 || destination.getNumSamples() < numSamples)
-    {
-        destination.clear();
-        return;
-    }
-
-    for (int ch = 0; ch < numChannels; ++ch)
-    {
-        const float* src = source.buffer->getReadPointer(ch, source.startSample);
-        float* dst = destination.getWritePointer(ch, 0);
-        juce::FloatVectorOperations::copy(dst, src, numSamples);
-    }
-    for (int ch = numChannels; ch < destination.getNumChannels(); ++ch)
-        destination.clear(ch, 0, numSamples);
-
-    juce::AudioSourceChannelInfo destinationInfo(&destination, 0, numSamples);
-    process(destinationInfo, analyzerFifo, inputLevelLinear, outputLevelLinear, state);
-}
-
-void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
-                                  LockFreeAudioRingBuffer& analyzerFifo,
-                                  std::atomic<float>& inputLevelLinear,
-                                  std::atomic<float>& outputLevelLinear,
-                                  const ProcessingState& state) // ProcessingState構造体でパラメータを受け取る
-{
-    const int numSamples = bufferToFill.numSamples;
-
-    // バッファサイズ超過ガード (Buffer Overrun Protection)
-    if (numSamples > maxSamplesPerBlock)
-    {
-        // この状況は通常発生しないが、万が一ホストが予期せぬサイズのバッファを渡してきた場合の安全策
-        bufferToFill.clearActiveBufferRegion();
-        return;
-    }
-
-    // ==================================================================
-    // 【Issue 3 追加防御】オーバーラン即検出（リリースでも有効）
-    // オーバーサンプリング有効時にupBlockサイズが内部バッファを超えないことを保証
-    // ==================================================================
-    if (oversamplingFactor > 1)
-    {
-        const int expectedUpSize = numSamples * static_cast<int>(oversamplingFactor);
-
-        // Fix: Releaseビルドでも確実にチェックし、バッファ破壊を防ぐ
-        if (expectedUpSize > maxInternalBlockSize)
-        {
-            bufferToFill.clearActiveBufferRegion(); // 無音を出力
-            return;
-        }
-    }
-
-    // ── 入力処理 + Raw Input Analyzer Tap ──
-    // processInput() がヘッドルームゲイン適用前の raw レベルを返す。
-    // analyzerInputTap=true の場合、同関数内で pre-gain の FIFO プッシュも行う。
-    const bool inputTap = state.analyzerEnabled && (state.analyzerSource == AnalyzerSource::Input);
-    const float rawInputLinear = processInput(bufferToFill, numSamples, state.inputHeadroomGain,
-                                              inputTap, analyzerFifo);
-
-    //----------------------------------------------------------
-    // AudioBlockの構築 (AlignedBufferを使用)
-    // ※ この時点では既にヘッドルームゲイン適用済み
-    //----------------------------------------------------------
-    double* channels[2] = { alignedL.get(), alignedR.get() };
-    juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
-
-    //----------------------------------------------------------
-    // 入力レベル記録 (raw: ヘッドルームゲイン適用前の値を使用)
-    //----------------------------------------------------------
-    inputLevelLinear.store(rawInputLinear, std::memory_order_relaxed);
-
-    //----------------------------------------------------------
-    // オーバーサンプリング処理ブロック
-    //----------------------------------------------------------
-    // バッファ全体ではなく、有効なサンプル数のみをラップする (重要)
-    juce::dsp::AudioBlock<double> originalBlock = processBlock; // 元サイズを保存
-
-    // アップサンプリング
-    if (oversamplingFactor > 1)
-    {
-        processBlock = oversampling.processUp(originalBlock, static_cast<int>(originalBlock.getNumChannels()));
-
-        // [Safety Guard] サイズ超過またはエラー(空ブロック)の場合は無音にして中断
-        if (processBlock.getNumSamples() == 0 || processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
-        {
-            jassertfalse;
-            bufferToFill.clearActiveBufferRegion();
-            return;
-        }
-
-        // オーバーサンプリング直後に高精度DC除去を適用
-        // これにより、後段のDSP処理（Convolver/EQ）にクリーンな信号を渡す
-        const int numOSSamples = (int)processBlock.getNumSamples();
-        if (processBlock.getNumChannels() > 0)
-            osDCBlockerL.process(processBlock.getChannelPointer(0), numOSSamples);
-        if (processBlock.getNumChannels() > 1)
-            osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
-    }
-
-    // ── Analyzer Input Tap は processInput() 内で pre-gain 済みデータをプッシュ済み ──
-    // (oversampling後のここではなく、ゲイン適用前の生データを表示するため移動)
-
-    int numProcSamples = (int)processBlock.getNumSamples();
-    int numProcChannels = (int)processBlock.getNumChannels(); // 通常は2
-
-    const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->getActiveSnapshot() ? getActiveSnapshot()->current.get() : nullptr : nullptr;
-    const bool useSnapshotEq = (snap != nullptr);
-    const convo::EQParameters* eqParamsToUse = nullptr;
-    const EQCoeffCache* eqCacheToUse = nullptr;
-    if (useSnapshotEq && ownerEngine != nullptr)
-    {
-        const uint64_t hash = snap->eqCoeffHash;
-        eqParamsToUse = &snap->eqParams;
-        eqCacheToUse = ownerEngine->eqCacheManager.get(hash);
-        if (hash != ownerEngine->debugLastAppliedEqHash.load(std::memory_order_relaxed))
-        {
-            ownerEngine->debugLastAppliedEqHash.store(hash, std::memory_order_relaxed);
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
-        }
-    }
-    else if (ownerEngine != nullptr)
-    {
-        uint64_t fallbackHash = 0;
-        const convo::EQParameters& fallbackParams = ownerEngine->getLatestEqParamsFallback(fallbackHash);
-        eqParamsToUse = &fallbackParams;
-        eqCacheToUse = ownerEngine->eqCacheManager.get(fallbackHash);
-        if (fallbackHash != 0 && fallbackHash != ownerEngine->debugLastAppliedEqHash.load(std::memory_order_relaxed))
-        {
-            ownerEngine->debugLastAppliedEqHash.store(fallbackHash, std::memory_order_relaxed);
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
-        }
-    }
-
-    //----------------------------------------------------------
-    // DSP処理チェーン (Dynamic Processing Order)
-    //----------------------------------------------------------
-    // EQバイパス要求を毎ブロック反映（実効バイパスはEQProcessor内の短フェードで切替）
-    eq.setBypass(state.eqBypassed);
-
-    // プロセッサには AudioBlock を直接渡す (AudioBuffer作成によるmalloc回避)
-    if (state.order == ProcessingOrder::ConvolverThenEQ) // stateから読み出し
-    {
-        // 1. Convolver
-        if (!state.convBypassed) // stateから読み出し
-            convolver.process(processBlock);
-        // 2. EQ
-        if (!state.eqBypassed)
-        {
-            if (eqParamsToUse != nullptr)
-            {
-                eq.process(processBlock, *eqParamsToUse, eqCacheToUse);
-            }
-            else
-            {
-                eq.process(processBlock);
-            }
-        }
-        else
-        {
-            eq.process(processBlock);
-        }
-    }
-    else
-    {
-        // 1. EQ
-        if (!state.eqBypassed)
-        {
-            if (eqParamsToUse != nullptr)
-            {
-                eq.process(processBlock, *eqParamsToUse, eqCacheToUse);
-            }
-            else
-            {
-                eq.process(processBlock);
-            }
-        }
-        else
-        {
-            eq.process(processBlock);
-        }
-        // 2. Convolver
-        if (!state.convBypassed) // stateから読み出し
-        {
-            // EQ→Conv 時: コンボルバー入力トリムを適用してから畳み込む
-            if (state.convolverInputTrimGain != 1.0)
-            {
-                for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
-                {
-                    double* ptr = processBlock.getChannelPointer(ch);
-                    scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
-                }
-            }
-            convolver.process(processBlock);
-        }
-    }
-
-    // ─── 出力周波数フィルター ──────────────────────────────────────
-    // filter.txt: DSP処理チェーンの直後・出力メイクアップゲイン適用前に挿入
-    // ① コンボルバー最終段: ハイカット(Sharp/Natural/Soft) + ローカット(Natural/Soft)
-    // ② EQ最終段         : ハイパス(固定 20Hz) + ローパス(Sharp/Natural/Soft)
-    // ① コンボルバー最終段: NUC が irFreqDomain に焼き込み済み → IIR 不要
-    {
-        const bool convActive = !state.convBypassed;
-        const bool eqActive   = !state.eqBypassed;
-        if (convActive || eqActive)
-        {
-            const bool convIsLast = convActive &&
-                (!eqActive || state.order == ProcessingOrder::EQThenConvolver);
-            // ① conv-last の場合は NUC 内部で処理済みのため IIR をスキップ
-            if (!convIsLast)
-            {
-                outputFilter.process(processBlock, /*convIsLast=*/false,
-                                     state.convHCMode, state.convLCMode, state.eqLPFMode);
-            }
-        }
-    }
-
-    //----------------------------------------------------------
-    // 出力メイクアップゲイン
-    // [Bug Fix] processDouble() にのみ存在し float path に欠落していたため追加。
-    // 配置: OutputFilter 直後・SoftClipper 直前。processDouble() と同一位置・同一ロジック。
-    //----------------------------------------------------------
-    for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
-    {
-        double* ptr = processBlock.getChannelPointer(ch);
-        scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.outputMakeupGain);
-    }
-
-    //----------------------------------------------------------
-    // ソフトクリッピング (Soft Clipping)
-    // 配置: ダウンサンプリング前に行うことで、倍音成分の折り返しノイズ(エイリアシング)を低減する。
-    //----------------------------------------------------------
-    if (state.softClipEnabled) // stateから読み出し
-    {
-        const double sat = static_cast<double>(state.saturationAmount); // stateから読み出し
-        const double CLIP_THRESHOLD = 0.95 - 0.45 * sat;
-        const double CLIP_KNEE      = 0.05 + 0.35 * sat;
-        const double CLIP_ASYMMETRY = 0.10 * sat;
-
-        for (int ch = 0; ch < numProcChannels; ++ch)
-        {
-            double* data = processBlock.getChannelPointer(ch);
-            // ブロック間インターサンプルピーク状態をチャンネルごとに渡す
-            softClipBlockAVX2(data, numProcSamples, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY,
-                               softClipPrevSample[ch < 2 ? ch : 1]);
-        }
-    }
-
-    //----------------------------------------------------------
-
-    // ダウンサンプリング (結果は processBuffer に書き戻される)
-    if (oversamplingFactor > 1)
-    {
-        oversampling.processDown(processBlock, originalBlock, static_cast<int>(originalBlock.getNumChannels()));
-        processBlock = originalBlock;
-    }
-
-    // ── Analyzer Output Tap (Post-DSP, Post-Downsampling) ──
-    // オーバーサンプリング有効時でも、UI へはベースレートのデータを供給する。
-    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
-    {
-        pushToFifo(processBlock, analyzerFifo);
-    }
-
-    //----------------------------------------------------------
-    // 出力レベル計算 (DC除去後のクリーンな信号で計測)
-    //----------------------------------------------------------
-    // オーバーサンプリング有効時は、ダウンサンプリング後の信号(originalBlock)を使用する
-    const float outputLinear = measureLevel(originalBlock);
-    outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
-
-    processOutput(bufferToFill, numSamples, state);
-
-    // === 【Issue 5 追加】新DSP切り替え時のFade-in Ramp（最終出力に適用）===
-    {
-        int fadeLeft = fadeInSamplesLeft.load(std::memory_order_relaxed);
-        if (fadeLeft > 0)
-        {
-            const int rampThisBlock = std::min(numSamples, fadeLeft);
-            const float gainStep = 1.0f / static_cast<float>(FADE_IN_SAMPLES);
-            const float startGain = static_cast<float>(FADE_IN_SAMPLES - fadeLeft) * gainStep;
-            auto* buffer = bufferToFill.buffer;
-            const int startSample = bufferToFill.startSample;
-            const int numChannels = buffer->getNumChannels();
-
-            for (int ch = 0; ch < numChannels; ++ch)
-                applyGainRamp(buffer->getWritePointer(ch, startSample), rampThisBlock, startGain, gainStep);
-
-            fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
-        }
-    }
-}
-
-void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>& source,
-                                                 juce::AudioBuffer<double>& destination,
-                                                 LockFreeAudioRingBuffer& analyzerFifo,
-                                                 std::atomic<float>& inputLevelLinear,
-                                                 std::atomic<float>& outputLevelLinear,
-                                                 const ProcessingState& state)
-{
-    const int numSamples = source.getNumSamples();
-    const int numChannels = std::min(2, source.getNumChannels());
-
-    if (numSamples <= 0 || destination.getNumSamples() < numSamples)
-    {
-        destination.clear();
-        return;
-    }
-
-    for (int ch = 0; ch < numChannels; ++ch)
-    {
-        const double* src = source.getReadPointer(ch, 0);
-        double* dst = destination.getWritePointer(ch, 0);
-        juce::FloatVectorOperations::copy(dst, src, numSamples);
-    }
-    for (int ch = numChannels; ch < destination.getNumChannels(); ++ch)
-        destination.clear(ch, 0, numSamples);
-
-    processDouble(destination, analyzerFifo, inputLevelLinear, outputLevelLinear, state);
-}
-
-void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
-                                         LockFreeAudioRingBuffer& analyzerFifo,
-                                         std::atomic<float>& inputLevelLinear,
-                                         std::atomic<float>& outputLevelLinear,
-                                         const ProcessingState& state)
-{
-    const int numSamples = buffer.getNumSamples();
-
-    if (numSamples > maxSamplesPerBlock)
-    {
-        buffer.clear();
-        return;
-    }
-
-    if (oversamplingFactor > 1)
-    {
-        const int expectedUpSize = numSamples * static_cast<int>(oversamplingFactor);
-        if (expectedUpSize > maxInternalBlockSize)
-        {
-            buffer.clear();
-            return;
-        }
-    }
-
-    // ── 入力処理 + Raw Input Analyzer Tap ──
-    const bool inputTapD = state.analyzerEnabled && (state.analyzerSource == AnalyzerSource::Input);
-    const float rawInputLinearD = processInputDouble(buffer, numSamples, state.inputHeadroomGain,
-                                                     inputTapD, analyzerFifo);
-    inputLevelLinear.store(rawInputLinearD, std::memory_order_relaxed);
-
-    const bool requestedFullBypass = state.eqBypassed && state.convBypassed;
-    if (requestedFullBypass != bypassedDouble)
-    {
-        bypassFadeGainDouble.setTargetValue(requestedFullBypass ? 0.0 : 1.0);
-        bypassedDouble = requestedFullBypass;
-    }
-
-    double* channels[2] = { alignedL.get(), alignedR.get() };
-    juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
-    juce::dsp::AudioBlock<double> originalBlock = processBlock;
-
-    if (dryBypassBufferDoubleL && dryBypassBufferDoubleR && dryBypassCapacityDouble >= numSamples)
-    {
-        juce::FloatVectorOperations::copy(dryBypassBufferDoubleL.get(), alignedL.get(), numSamples);
-        juce::FloatVectorOperations::copy(dryBypassBufferDoubleR.get(), alignedR.get(), numSamples);
-    }
-
-    if (oversamplingFactor > 1)
-    {
-        processBlock = oversampling.processUp(originalBlock, static_cast<int>(originalBlock.getNumChannels()));
-
-        if (processBlock.getNumSamples() == 0 || processBlock.getNumSamples() > static_cast<size_t>(maxInternalBlockSize))
-        {
-            jassertfalse;
-            buffer.clear();
-            return;
-        }
-
-        const int numOSSamples = static_cast<int>(processBlock.getNumSamples());
-        if (processBlock.getNumChannels() > 0)
-            osDCBlockerL.process(processBlock.getChannelPointer(0), numOSSamples);
-        if (processBlock.getNumChannels() > 1)
-            osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
-    }
-
-    // ── Analyzer Input Tap は processInputDouble() 内で pre-gain データをプッシュ済み ──
-
-    const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
-    const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
-
-    const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->getActiveSnapshot() ? getActiveSnapshot()->current.get() : nullptr : nullptr;
-    const bool useSnapshotEq = (snap != nullptr);
-    const convo::EQParameters* eqParamsToUse = nullptr;
-    const EQCoeffCache* eqCacheToUse = nullptr;
-    if (useSnapshotEq && ownerEngine != nullptr)
-    {
-        const uint64_t hash = snap->eqCoeffHash;
-        eqParamsToUse = &snap->eqParams;
-        eqCacheToUse = ownerEngine->eqCacheManager.get(hash);
-        if (hash != ownerEngine->debugLastAppliedEqHash.load(std::memory_order_relaxed))
-        {
-            ownerEngine->debugLastAppliedEqHash.store(hash, std::memory_order_relaxed);
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
-        }
-    }
-    else if (ownerEngine != nullptr)
-    {
-        uint64_t fallbackHash = 0;
-        const convo::EQParameters& fallbackParams = ownerEngine->getLatestEqParamsFallback(fallbackHash);
-        eqParamsToUse = &fallbackParams;
-        eqCacheToUse = ownerEngine->eqCacheManager.get(fallbackHash);
-        if (fallbackHash != 0 && fallbackHash != ownerEngine->debugLastAppliedEqHash.load(std::memory_order_relaxed))
-        {
-            ownerEngine->debugLastAppliedEqHash.store(fallbackHash, std::memory_order_relaxed);
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
-        }
-    }
-
-    eq.setBypass(state.eqBypassed);
-
-    if (state.order == ProcessingOrder::ConvolverThenEQ)
-    {
-        if (!state.convBypassed)
-            convolver.process(processBlock);
-        if (!state.eqBypassed)
-        {
-            if (eqParamsToUse != nullptr)
-            {
-                eq.process(processBlock, *eqParamsToUse, eqCacheToUse);
-            }
-            else
-            {
-                eq.process(processBlock);
-            }
-        }
-        else
-        {
-            eq.process(processBlock);
-        }
-    }
-    else
-    {
-        if (!state.eqBypassed)
-        {
-            if (eqParamsToUse != nullptr)
-            {
-                eq.process(processBlock, *eqParamsToUse, eqCacheToUse);
-            }
-            else
-            {
-                eq.process(processBlock);
-            }
-        }
-        else
-        {
-            eq.process(processBlock);
-        }
-        if (!state.convBypassed)
-        {
-            // EQ→Conv 時: コンボルバー入力トリムを適用してから畳み込む
-            if (state.convolverInputTrimGain != 1.0)
-            {
-                for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
-                {
-                    double* ptr = processBlock.getChannelPointer(ch);
-                    scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
-                }
-            }
-            convolver.process(processBlock);
-        }
-    }
-
-    // ─── 出力周波数フィルター ──────────────────────────────────────
-    // ① conv-last: NUC irFreqDomain 焼き込み済み → IIR スキップ
-    // ② eq-last:   引き続き IIR で処理
-    {
-        const bool convActive = !state.convBypassed;
-        const bool eqActive   = !state.eqBypassed;
-        if (convActive || eqActive)
-        {
-            const bool convIsLast = convActive &&
-                (!eqActive || state.order == ProcessingOrder::EQThenConvolver);
-            if (!convIsLast)
-            {
-                outputFilter.process(processBlock, /*convIsLast=*/false,
-                                     state.convHCMode, state.convLCMode, state.eqLPFMode);
-            }
-        }
-    }
-
-    // Output Makeup Gain
-    for (size_t ch = 0; ch < processBlock.getNumChannels(); ++ch)
-    {
-        double* ptr = processBlock.getChannelPointer(ch);
-        scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.outputMakeupGain);
-    }
-
-    if (state.softClipEnabled)
-    {
-        const double sat = static_cast<double>(state.saturationAmount);
-        const double CLIP_THRESHOLD = 0.95 - 0.45 * sat;
-        const double CLIP_KNEE      = 0.05 + 0.35 * sat;
-        const double CLIP_ASYMMETRY = 0.10 * sat;
-
-        for (int ch = 0; ch < numProcChannels; ++ch)
-        {
-            double* data = processBlock.getChannelPointer(ch);
-            // ブロック間インターサンプルピーク状態をチャンネルごとに渡す
-            softClipBlockAVX2(data, numProcSamples, CLIP_THRESHOLD, CLIP_KNEE, CLIP_ASYMMETRY,
-                               softClipPrevSample[ch < 2 ? ch : 1]);
-        }
-    }
-
-    const bool bypassBlendRequested = bypassFadeGainDouble.isSmoothing() || requestedFullBypass;
-    if (oversamplingFactor == 1
-        && dryBypassBufferDoubleL
-        && dryBypassBufferDoubleR
-        && dryBypassCapacityDouble >= numSamples
-        && bypassBlendRequested)
-    {
-        double* wetL = (numProcChannels > 0) ? processBlock.getChannelPointer(0) : nullptr;
-        double* wetR = (numProcChannels > 1) ? processBlock.getChannelPointer(1) : nullptr;
-        const double* dryL = dryBypassBufferDoubleL.get();
-        const double* dryR = dryBypassBufferDoubleR.get();
-        for (int i = 0; i < numProcSamples; ++i)
-        {
-            const double gWet = bypassFadeGainDouble.getNextValue();
-            const double gDry = 1.0 - gWet;
-            if (wetL != nullptr)
-                wetL[i] = wetL[i] * gWet + dryL[i] * gDry;
-            if (wetR != nullptr)
-                wetR[i] = wetR[i] * gWet + dryR[i] * gDry;
-        }
-    }
-
-    if (oversamplingFactor > 1)
-    {
-        oversampling.processDown(processBlock, originalBlock, static_cast<int>(originalBlock.getNumChannels()));
-        processBlock = originalBlock;
-
-        if (bypassBlendRequested)
-        {
-            double* wetL = processBlock.getNumChannels() > 0 ? processBlock.getChannelPointer(0) : nullptr;
-            double* wetR = processBlock.getNumChannels() > 1 ? processBlock.getChannelPointer(1) : nullptr;
-            for (int i = 0; i < numSamples; ++i)
-            {
-                const double gWet = bypassFadeGainDouble.getNextValue();
-                if (wetL != nullptr)
-                    wetL[i] *= gWet;
-                if (wetR != nullptr)
-                    wetR[i] *= gWet;
-            }
-        }
-    }
-
-    // ── Analyzer Output Tap (Post-DSP, Post-Downsampling) ──
-    // オーバーサンプリング有効時でも、UI へはベースレートのデータを供給する。
-    if (state.analyzerEnabled && state.analyzerSource == AnalyzerSource::Output)
-        pushToFifo(processBlock, analyzerFifo);
-
-    const float outputLinear = measureLevel(originalBlock);
-    outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
-
-    processOutputDouble(buffer, numSamples, state);
-
-    int fadeLeft = fadeInSamplesLeft.load(std::memory_order_relaxed);
-    if (fadeLeft > 0)
-    {
-        const int rampThisBlock = std::min(numSamples, fadeLeft);
-        const double gainStep = 1.0 / static_cast<double>(FADE_IN_SAMPLES);
-        const double startGain = static_cast<double>(FADE_IN_SAMPLES - fadeLeft) * gainStep;
-        const int numChannels = buffer.getNumChannels();
-
+        const int numChannels = buffer->getNumChannels();
         for (int ch = 0; ch < numChannels; ++ch)
-            applyGainRamp(buffer.getWritePointer(ch), rampThisBlock, startGain, gainStep);
-
-        fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
-    }
-}
-
-float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept
-{
-    double maxLevel = 0.0;
-    const int numChannels = (int)block.getNumChannels();
-    const int numSamples = (int)block.getNumSamples();
-
-    for (int ch = 0; ch < numChannels; ++ch)
-    {
-        auto range = juce::FloatVectorOperations::findMinAndMax(block.getChannelPointer(ch), numSamples);
-        const double level = std::max(absNoLibm(range.getStart()), absNoLibm(range.getEnd()));
-        if (level > maxLevel) maxLevel = level;
-    }
-
-    // 【Fix Bug #8】Audio Thread 内での gainToDecibels (std::log10 / libm) 呼び出しを排除。
-    // linear gain をそのまま返す。dB 変換は UI Thread 側の getInputLevel() / getOutputLevel() で行う。
-    return static_cast<float>(maxLevel);
-}
-
-void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>& block,
-                                      LockFreeAudioRingBuffer& analyzerFifo) const noexcept
-{
-    analyzerFifo.push(block);
-}
-
-float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples,
-                                          double headroomGain,
-                                          bool analyzerInputTap,
-                                          LockFreeAudioRingBuffer& analyzerFifo) noexcept
-{
-    auto* buffer = bufferToFill.buffer;
-    const int startSample = bufferToFill.startSample;
-    const int effectiveInputChannels = std::min(buffer->getNumChannels(), 2);
-
-    for (int ch = 0; ch < effectiveInputChannels; ++ch)
-    {
-        const float* src = buffer->getReadPointer(ch, startSample);
-        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
-        // Convert without gain (gain=1.0), but with sanitization
-        convo::input_transform::convertFloatToDoubleHighQuality(src, dst, numSamples, 1.0);
-    }
-
-    // 入力がないチャンネル、または余剰チャンネルはクリア
-    // ただし、Mono->Stereo展開を行う場合はCh 1のクリアをスキップする (直後に上書きされるため)
-    // ロジック整理:
-    // 1. 入力が1chで出力が2ch以上の場合 -> Ch 1 (R) はコピーされるのでクリア不要。Ch 2以降をクリア。
-    // 2. それ以外 -> 入力チャンネル数以降をすべてクリア。
-    // AlignedBufferは常に2ch分 (L/R) 用意されていると仮定
-    const bool expandMono = (effectiveInputChannels == 1);
-    const int clearStartCh = expandMono ? 2 : effectiveInputChannels;
-
-    for (int ch = clearStartCh; ch < 2; ++ch)
-    {
-        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
-        juce::FloatVectorOperations::clear(dst, numSamples);
-    }
-
-    // ── Mono -> Stereo 展開 ──
-    // 入力が1chのみで、処理バッファが2ch以上ある場合、LchをRchにコピーする
-    // これにより、モノラルマイク入力時などでもステレオ処理として扱えるようにし、
-    // 後段のステレオエフェクト（Convolver等）での片側無音を防ぐ。
-    if (expandMono)
-    {
-        const double* src = alignedL.get();
-        double* dst = alignedR.get();
-        // 高速なメモリコピー (double配列)
-        juce::FloatVectorOperations::copy(dst, src, numSamples);
-    }
-
-    // 2. Measure level before gain
-    double* channels[2] = { alignedL.get(), alignedR.get() };
-    juce::dsp::AudioBlock<double> block(channels, 2, numSamples);
-    const float inputLevel = measureLevel(block);
-
-    // ── Analyzer Input Tap (Pre-Gain / Raw Input) ──
-    // ヘッドルームゲイン適用前の raw 入力データを FIFO へプッシュ。
-    // インプットスペアナ・レベルメーターが "入力されたデータそのもの" を表示するために必須。
-    if (analyzerInputTap)
-        pushToFifo(block, analyzerFifo);
-
-    // 3. Apply headroom gain
-    if (absDiffNoLibm(headroomGain, 1.0) > 1e-9)
-    {
-        for (int ch = 0; ch < 2; ++ch)
-            scaleBlockFallback(block.getChannelPointer(ch), numSamples, headroomGain);
-    }
-
-    // ── 入力段DC除去 (ブロックモード) ──
-    // 旧: 1 サンプルずつ 4 次 IIR を呼出 (~20 ops/sample)
-    // 新: UltraHighRateDCBlocker.process(ptr, N) でブロック単位処理 (~4 ops/sample)
-    double* lPtr = alignedL.get();
-    double* rPtr = alignedR.get();
-    inputDCBlockerL.process(lPtr, numSamples);
-    inputDCBlockerR.process(rPtr, numSamples);
-
-    return inputLevel;
-}
-
-float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples,
-                                               double headroomGain,
-                                               bool analyzerInputTap,
-                                               LockFreeAudioRingBuffer& analyzerFifo) noexcept
-{
-    const int effectiveInputChannels = std::min(buffer.getNumChannels(), 2);
-
-    for (int ch = 0; ch < effectiveInputChannels; ++ch)
-    {
-        const double* src = buffer.getReadPointer(ch);
-        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
-        // Convert without gain (gain=1.0), but with sanitization
-        convo::input_transform::convertDoubleToDoubleHighQuality(src, dst, numSamples, 1.0);
-    }
-
-    const bool expandMono = (effectiveInputChannels == 1);
-    const int clearStartCh = expandMono ? 2 : effectiveInputChannels;
-
-    for (int ch = clearStartCh; ch < 2; ++ch)
-    {
-        double* dst = (ch == 0) ? alignedL.get() : alignedR.get();
-        juce::FloatVectorOperations::clear(dst, numSamples);
-    }
-
-    if (expandMono)
-        std::memcpy(alignedR.get(), alignedL.get(), numSamples * sizeof(double));
-
-    // 2. Measure level before gain
-    double* channels[2] = { alignedL.get(), alignedR.get() };
-    juce::dsp::AudioBlock<double> block(channels, 2, numSamples);
-    const float inputLevel = measureLevel(block);
-
-    // ── Analyzer Input Tap (Pre-Gain / Raw Input) ──
-    if (analyzerInputTap)
-        pushToFifo(block, analyzerFifo);
-
-    // 3. Apply headroom gain
-    if (absDiffNoLibm(headroomGain, 1.0) > 1e-9)
-    {
-        for (int ch = 0; ch < 2; ++ch)
-            scaleBlockFallback(block.getChannelPointer(ch), numSamples, headroomGain);
-    }
-
-    // ── 入力段DC除去 (ブロックモード) ──
-    double* lPtr = alignedL.get();
-    double* rPtr = alignedR.get();
-    inputDCBlockerL.process(lPtr, numSamples);
-    inputDCBlockerR.process(rPtr, numSamples);
-
-    return inputLevel;
-}
-
-void AudioEngine::DSPCore::applyFixedLatencyDelay(double* dataL, double* dataR, int numSamples) noexcept
-{
-    if (fixedLatencySamples <= 0 || fixedLatencyBufferSize <= 0 || dataL == nullptr)
-        return;
-
-    const int delay = std::min(fixedLatencySamples, fixedLatencyBufferSize - 1);
-    int writePos = fixedLatencyWritePos;
-    const int bufferSize = fixedLatencyBufferSize;
-    double* delayL = fixedLatencyBufferL.get();
-    double* delayR = fixedLatencyBufferR.get();
-
-    for (int i = 0; i < numSamples; ++i)
-    {
-        delayL[writePos] = dataL[i];
-        if (dataR != nullptr)
-            delayR[writePos] = dataR[i];
-
-        int readPos = writePos - delay;
-        while (readPos < 0)
-            readPos += bufferSize;
-
-        dataL[i] = delayL[readPos];
-        if (dataR != nullptr)
-            dataR[i] = delayR[readPos];
-
-        ++writePos;
-        if (writePos >= bufferSize)
-            writePos = 0;
-    }
-
-    fixedLatencyWritePos = writePos;
-}
-
-// 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加える。
-// @param x 入力信号
-// @param threshold クリッピングが開始される閾値 (正の値)
-// @param knee 閾値周辺のカーブの滑らかさ（ニー） (正の値)
-// @param asymmetry 非対称性の量。負の波形をより強くクリップし、偶数次倍音を生成する。
-double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept
-{
-    return musicalSoftClipScalar(x, threshold, knee, asymmetry);
-}
-
-void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& bufferToFill,
-                                         int numSamples,
-                                         const ProcessingState& state) noexcept
-{
-    auto* buffer = bufferToFill.buffer;
-    const int startSample = bufferToFill.startSample;
-    constexpr double kOutputHeadroom = 0.8912509381337456; // -1.0dB
-
-    // ビット深度に基づくディザリング判定
-    // ユーザー設定に従い、32-bit (float/int) でもディザリングを適用する。
-    const bool applyDither = (ditherBitDepth > 0);
-    const int numChannels = std::min(2, buffer->getNumChannels());
-
-    // ── ループフュージョンによる最適化 ──
-    // DC除去、ディザリング、変換・クランプを1つのループに統合し、キャッシュ効率を最大化する。
-    // 各処理の結果をレジスタ内で次の処理に渡すことで、メモリへの書き戻しを削減する。
-
-    double* dataL = (numChannels > 0) ? alignedL.get() : nullptr;
-    double* dataR = (numChannels > 1) ? alignedR.get() : nullptr;
-    float* dstL = (numChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
-    float* dstR = (numChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
-
-    // ── Step 1: DC除去 (ブロックモード・AVX2最適化) ──────────────────────────
-    // process() は内部で m_prev_x/m_prev_y を直接読み書きするため
-    // loadState()/saveState() は不要。NaN/Inf・デノーマルも内部でゼロ化する。
-    dcBlockerL.process(dataL, numSamples);
-    if (dataR) dcBlockerR.process(dataR, numSamples);
-
-    // ── Step 2: NaN/Inf サニタイズ (NSフィルタ状態保護) ─────────────────────
-    // DC除去後に残存する NaN/Inf をAVX2でゼロ化（libm完全排除）。
-    {
-        const __m256d vInf = _mm256_set1_pd(1.0e300);
-        int i = 0;
-        const int vEnd = numSamples / 4 * 4;
-        for (; i < vEnd; i += 4)
         {
-            __m256d vL = _mm256_loadu_pd(dataL + i);
-            __m256d nanMaskL = _mm256_cmp_pd(vL, vL, _CMP_ORD_Q); // NaN以外=true
-            __m256d infMaskL = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vL), vInf, _CMP_LT_OQ);
-            __m256d maskL = _mm256_and_pd(nanMaskL, infMaskL);
-            vL = _mm256_and_pd(vL, maskL); // NaN/Inf → 0
-            _mm256_storeu_pd(dataL + i, vL);
-
-            if (dataR)
-            {
-                __m256d vR = _mm256_loadu_pd(dataR + i);
-                __m256d nanMaskR = _mm256_cmp_pd(vR, vR, _CMP_ORD_Q);
-                __m256d infMaskR = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vR), vInf, _CMP_LT_OQ);
-                __m256d maskR = _mm256_and_pd(nanMaskR, infMaskR);
-                vR = _mm256_and_pd(vR, maskR);
-                _mm256_storeu_pd(dataR + i, vR);
-            }
-        }
-        for (; i < numSamples; ++i)
-        {
-            double v = dataL[i];
-            if (!isFiniteAndAbsBelowNoLibm(v, 1.0e300)) v = 0.0; // 最終fallback（極稀）
-            dataL[i] = v;
-            if (dataR)
-            {
-                v = dataR[i];
-                if (!isFiniteAndAbsBelowNoLibm(v, 1.0e300)) v = 0.0;
-                dataR[i] = v;
-            }
-        }
-    }
-
-    pushAdaptiveCaptureBlocks(state.adaptiveCaptureQueue,
-                              dataL,
-                              dataR,
-                              numSamples,
-                              state.adaptiveCaptureSampleRateHz,
-                              state.adaptiveCaptureBitDepth,
-                              state.adaptiveCoeffBankIndex,
-                              state.captureSessionId);
-
-    // ── Step 3: ディザリング / ヘッドルーム適用 ─────────────────────────────
-    if (noiseShaperType == NoiseShaperType::Adaptive9thOrder
-        && state.adaptiveCoeffSet != nullptr
-        && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
-            || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
-    {
-        adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
-        activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
-        activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
-    }
-
-    if (applyDither)
-    {
-        if (noiseShaperType == NoiseShaperType::Fixed4Tap)
-        {
-            fixedNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
-        }
-        else if (noiseShaperType == NoiseShaperType::Fixed15Tap)
-        {
-            fixed15TapNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
-        }
-        else if (noiseShaperType == NoiseShaperType::Adaptive9thOrder)
-        {
-            adaptiveNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
-        }
-        else
-        {
-            dither.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
+            buffer->addFrom(ch, startSample, m_tmpA, ch, 0, numSamples);
+            buffer->addFrom(ch, startSample, m_tmpB, ch, 0, numSamples);
         }
     }
     else
     {
-        // ヘッドルームのみ適用 (コンパイラが AVX2 自動ベクトル化可能な独立ループ)
-        for (int i = 0; i < numSamples; ++i) dataL[i] *= kOutputHeadroom;
-        if (dataR) for (int i = 0; i < numSamples; ++i) dataR[i] *= kOutputHeadroom;
+        // 通常処理：current のみ
+        processWithState(*buffer, cur, startSample, numSamples, 1.0f);
     }
+}
 
-    // ── Step 3.5: ディザリング後・出力直前のNaN/Infサニタイズ ─────────────
+// ============================================================================
+// CONTROL THREAD: 状態構築ヘルパー
+// ============================================================================
+
+convo::EngineState AudioEngine::buildCurrentState() noexcept 
+{
+    convo::EngineState state;
+    
+    // 1. ConvolverProcessor の状態をシリアライズ
+    if (auto* convProc = uiConvolverProcessor.getConvolverState())
     {
-        const __m256d vInf = _mm256_set1_pd(1.0e300);
-        int i = 0;
-        const int vEnd = numSamples / 4 * 4;
-        for (; i < vEnd; i += 4)
-        {
-            __m256d vL = _mm256_loadu_pd(dataL + i);
-            __m256d nanMaskL = _mm256_cmp_pd(vL, vL, _CMP_ORD_Q);
-            __m256d infMaskL = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vL), vInf, _CMP_LT_OQ);
-            __m256d maskL = _mm256_and_pd(nanMaskL, infMaskL);
-            vL = _mm256_and_pd(vL, maskL);
-            _mm256_storeu_pd(dataL + i, vL);
-
-            if (dataR)
-            {
-                __m256d vR = _mm256_loadu_pd(dataR + i);
-                __m256d nanMaskR = _mm256_cmp_pd(vR, vR, _CMP_ORD_Q);
-                __m256d infMaskR = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vR), vInf, _CMP_LT_OQ);
-                __m256d maskR = _mm256_and_pd(nanMaskR, infMaskR);
-                vR = _mm256_and_pd(vR, maskR);
-                _mm256_storeu_pd(dataR + i, vR);
-            }
-        }
-        for (; i < numSamples; ++i)
-        {
-            double v = dataL[i];
-            if (!isFiniteAndAbsBelowNoLibm(v, 1.0e300)) v = 0.0;
-            dataL[i] = v;
-            if (dataR)
-            {
-                v = dataR[i];
-                if (!isFiniteAndAbsBelowNoLibm(v, 1.0e300)) v = 0.0;
-                dataR[i] = v;
-            }
-        }
+        // ConvolverState をバイト列にシリアライズ
+        // TODO: 実際のシリアライズロジックを実装
+        // 例：convProc->serializeTo(state.dspBlob, convo::EngineState::kDSPCoreSize);
+        std::memset(state.dspBlob, 0, sizeof(state.dspBlob));
     }
-
-    // パススルーDSP等に固定レイテンシを付与する。
-    applyFixedLatencyDelay(dataL, dataR, numSamples);
-
-    // ── Step 4: double→float 変換・クランプ ─────────────────────────────────
-    // juce::jlimit<double>(-1.0, 1.0, x) は JUCE 8.0.12 で存在確認済み (template)。
-    // Step 2 のサニタイズ後は dataL/dataR に NaN/Inf がないため、
-    // ここでの追加 isfinite チェックは不要。
-    for (int i = 0; i < numSamples; ++i)
-           dstL[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataL[i]));
-    if (dstR)
-        for (int i = 0; i < numSamples; ++i)
-              dstR[i] = static_cast<float>(juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[i]));
-
-    // 3ch以降は使用しないためクリア (ゴミデータ出力防止)
-    for (int ch = numChannels; ch < buffer->getNumChannels(); ++ch)
-        buffer->clear(ch, startSample, numSamples);
-}
-
-void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer,
-                                               int numSamples,
-                                               const ProcessingState& state) noexcept
-{
-    constexpr double kOutputHeadroom = 0.8912509381337456; // -1.0dB
-    const bool applyDither = (ditherBitDepth > 0);
-    const int numChannels = std::min(2, buffer.getNumChannels());
-    double* dataL = (numChannels > 0) ? alignedL.get() : nullptr;
-    double* dataR = (numChannels > 1) ? alignedR.get() : nullptr;
-
-    dcBlockerL.processStereo(dataL, dataR, numSamples, dcBlockerR);
-
+    
+    // 2. EQEditor の状態をシリアライズ
+    if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
     {
-        const __m256d vInf = _mm256_set1_pd(1.0e300);
-        int i = 0;
-        const int vEnd = numSamples / 4 * 4;
-        for (; i < vEnd; i += 4)
-        {
-            __m256d vL = _mm256_loadu_pd(dataL + i);
-            __m256d nanMaskL = _mm256_cmp_pd(vL, vL, _CMP_ORD_Q);
-            __m256d infMaskL = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vL), vInf, _CMP_LT_OQ);
-            _mm256_storeu_pd(dataL + i, _mm256_and_pd(vL, _mm256_and_pd(nanMaskL, infMaskL)));
-
-            if (dataR != nullptr)
-            {
-                __m256d vR = _mm256_loadu_pd(dataR + i);
-                __m256d nanMaskR = _mm256_cmp_pd(vR, vR, _CMP_ORD_Q);
-                __m256d infMaskR = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vR), vInf, _CMP_LT_OQ);
-                _mm256_storeu_pd(dataR + i, _mm256_and_pd(vR, _mm256_and_pd(nanMaskR, infMaskR)));
-            }
-        }
-
-        for (; i < numSamples; ++i)
-        {
-            if (!isFiniteAndAbsBelowNoLibm(dataL[i], 1.0e300))
-                dataL[i] = 0.0;
-
-            if (dataR != nullptr && !isFiniteAndAbsBelowNoLibm(dataR[i], 1.0e300))
-                dataR[i] = 0.0;
-        }
+        // EQParameters または EQState をバイト列にシリアライズ
+        // TODO: 実際のシリアライズロジックを実装
+        // 例：eqState->serializeTo(state.eqBlob, convo::EngineState::kEQStateSize);
+        std::memset(state.eqBlob, 0, sizeof(state.eqBlob));
     }
-
-    pushAdaptiveCaptureBlocks(state.adaptiveCaptureQueue,
-                              dataL,
-                              dataR,
-                              numSamples,
-                              state.adaptiveCaptureSampleRateHz,
-                              state.adaptiveCaptureBitDepth,
-                              state.adaptiveCoeffBankIndex,
-                              state.captureSessionId);
-
-    if (noiseShaperType == NoiseShaperType::Adaptive9thOrder
-        && state.adaptiveCoeffSet != nullptr
-        && (activeAdaptiveCoeffBankIndex != state.adaptiveCoeffBankIndex
-            || activeAdaptiveCoeffGeneration != state.adaptiveCoeffGeneration))
-    {
-        adaptiveNoiseShaper.applyMatchedCoefficients(state.adaptiveCoeffSet->k, kAdaptiveNoiseShaperOrder);
-        activeAdaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
-        activeAdaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
-    }
-
-    if (applyDither)
-    {
-        if (noiseShaperType == NoiseShaperType::Fixed4Tap)
-            fixedNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
-        else if (noiseShaperType == NoiseShaperType::Fixed15Tap)
-            fixed15TapNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
-        else if (noiseShaperType == NoiseShaperType::Adaptive9thOrder)
-            adaptiveNoiseShaper.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
-        else
-            dither.processStereoBlock(dataL, dataR, numSamples, kOutputHeadroom);
-    }
-    else
-    {
-        for (int i = 0; i < numSamples; ++i)
-        {
-            dataL[i] *= kOutputHeadroom;
-            if (dataR != nullptr)
-                dataR[i] *= kOutputHeadroom;
-        }
-    }
-
-    // ── Step 3.5: ディザリング後・出力直前のNaN/Infサニタイズ ─────────────
-    {
-        const __m256d vInf = _mm256_set1_pd(1.0e300);
-        int i = 0;
-        const int vEnd = numSamples / 4 * 4;
-        for (; i < vEnd; i += 4)
-        {
-            __m256d vL = _mm256_loadu_pd(dataL + i);
-            __m256d nanMaskL = _mm256_cmp_pd(vL, vL, _CMP_ORD_Q);
-            __m256d infMaskL = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vL), vInf, _CMP_LT_OQ);
-            _mm256_storeu_pd(dataL + i, _mm256_and_pd(vL, _mm256_and_pd(nanMaskL, infMaskL)));
-
-            if (dataR != nullptr)
-            {
-                __m256d vR = _mm256_loadu_pd(dataR + i);
-                __m256d nanMaskR = _mm256_cmp_pd(vR, vR, _CMP_ORD_Q);
-                __m256d infMaskR = _mm256_cmp_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.0), vR), vInf, _CMP_LT_OQ);
-                _mm256_storeu_pd(dataR + i, _mm256_and_pd(vR, _mm256_and_pd(nanMaskR, infMaskR)));
-            }
-        }
-
-        for (; i < numSamples; ++i)
-        {
-            if (!isFiniteAndAbsBelowNoLibm(dataL[i], 1.0e300))
-                dataL[i] = 0.0;
-
-            if (dataR != nullptr && !isFiniteAndAbsBelowNoLibm(dataR[i], 1.0e300))
-                dataR[i] = 0.0;
-        }
-    }
-
-    {
-        const __m256d vLimit = _mm256_set1_pd(kOutputHeadroom);
-        const __m256d vNegLimit = _mm256_set1_pd(-kOutputHeadroom);
-        int i = 0;
-        const int vEnd = (numSamples / 4) * 4;
-        for (; i < vEnd; i += 4)
-        {
-            __m256d vL = _mm256_loadu_pd(dataL + i);
-            vL = _mm256_min_pd(_mm256_max_pd(vL, vNegLimit), vLimit);
-            _mm256_storeu_pd(dataL + i, vL);
-
-            if (dataR != nullptr)
-            {
-                __m256d vR = _mm256_loadu_pd(dataR + i);
-                vR = _mm256_min_pd(_mm256_max_pd(vR, vNegLimit), vLimit);
-                _mm256_storeu_pd(dataR + i, vR);
-            }
-        }
-
-        for (; i < numSamples; ++i)
-        {
-            dataL[i] = juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataL[i]);
-            if (dataR != nullptr)
-                dataR[i] = juce::jlimit(-kOutputHeadroom, kOutputHeadroom, dataR[i]);
-        }
-    }
-
-    // パススルーDSP等に固定レイテンシを付与する。
-    applyFixedLatencyDelay(dataL, dataR, numSamples);
-
-    juce::FloatVectorOperations::copy(buffer.getWritePointer(0, 0), dataL, numSamples);
-    if (numChannels > 1 && dataR != nullptr)
-        juce::FloatVectorOperations::copy(buffer.getWritePointer(1, 0), dataR, numSamples);
-
-    for (int channel = numChannels; channel < buffer.getNumChannels(); ++channel)
-        buffer.clear(channel, 0, numSamples);
-}
-
-void AudioEngine::setEqBypassRequested (bool shouldBypass)
-{
-    eqBypassRequested.store (shouldBypass, std::memory_order_release);
-    m_currentEqBypass.store(shouldBypass, std::memory_order_release);
-    uiEqEditor.setBypass(shouldBypass);
-    applyDefaultsForCurrentMode();
-    enqueueSnapshotCommand();
-    sendChangeMessage();
-}
-
-void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
-{
-    convBypassRequested.store (shouldBypass, std::memory_order_release);
-    m_currentConvBypass.store(shouldBypass, std::memory_order_release);
-    uiConvolverProcessor.setBypass(shouldBypass);
-    applyDefaultsForCurrentMode();
-    enqueueSnapshotCommand();
-    sendChangeMessage();
-}
-
-void AudioEngine::setConvolverUseMinPhase(bool useMinPhase)
-{
-    setConvolverPhaseMode(useMinPhase ? ConvolverProcessor::PhaseMode::Minimum
-                                      : ConvolverProcessor::PhaseMode::AsIs);
-}
-
-bool AudioEngine::getConvolverUseMinPhase() const
-{
-    return getConvolverPhaseMode() == ConvolverProcessor::PhaseMode::Minimum;
-}
-
-void AudioEngine::setConvolverPhaseMode(ConvolverProcessor::PhaseMode mode)
-{
-    uiConvolverProcessor.setPhaseMode(mode);
-}
-
-ConvolverProcessor::PhaseMode AudioEngine::getConvolverPhaseMode() const
-{
-    return uiConvolverProcessor.getPhaseMode();
-}
-
-void AudioEngine::requestEqPreset (int presetIndex)
-{
-    uiEqEditor.loadPreset (presetIndex);
-    sendChangeMessage();
-}
-
-void AudioEngine::requestEqPresetFromText(const juce::File& file)
-{
-    if (uiEqEditor.loadFromTextFile(file))
-        sendChangeMessage();
-}
-
-void AudioEngine::requestConvolverPreset(const juce::File& irFile)
-{
-    uiConvolverProcessor.loadIR(irFile);
-}
-
-void AudioEngine::beginBulkParameterRestore() noexcept
-{
-    m_isRestoringState = true;
-}
-
-void AudioEngine::endBulkParameterRestore(bool requestRebuildNow) noexcept
-{
-    m_isRestoringState = false;
-
-    if (!requestRebuildNow)
-        return;
-
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
-    if (sr > 0.0)
-        requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
-}
-
-void AudioEngine::requestLoadState (const juce::ValueTree& state)
-{
-    // B19: RAII ガードを使用して、例外発生時も確実にフラグを戻す
-    RestoreStateGuard guard(m_isRestoringState);
-
-    // ─── Step 1: モード・バイパス状態を先に復元 ────────────────────────────
-    if (state.hasProperty("processingOrder"))
-        currentProcessingOrder.store((ProcessingOrder)(int)state.getProperty("processingOrder"));
-
-    if (state.hasProperty("eqBypassed"))
-    {
-        bool bypassed = state.getProperty("eqBypassed");
-        eqBypassRequested.store(bypassed, std::memory_order_release);
-        uiEqEditor.setBypass(bypassed);
-    }
-
-    if (state.hasProperty("convBypassed"))
-    {
-        bool bypassed = state.getProperty("convBypassed");
-        convBypassRequested.store(bypassed, std::memory_order_release);
-        uiConvolverProcessor.setBypass(bypassed);
-    }
-
-    // ─── Step 2: ゲイン値を復元 (モード依存クランプが正しく適用される) ─────
-    // NOTE: ここで guard を破棄せず、関数終了まで維持することで
-    //       setInputHeadroomDb 等の内部で呼ばれる applyDefaults を抑制し続ける。
-    //       (旧実装では 4059 行目で false に戻していたが、B19 では安全のため全域カバー)
-
-    if (state.hasProperty("inputHeadroomDb"))
-        setInputHeadroomDb(state.getProperty("inputHeadroomDb"));
-
-    if (state.hasProperty("outputMakeupDb"))
-        setOutputMakeupDb(state.getProperty("outputMakeupDb"));
-
-    if (state.hasProperty("convolverInputTrimDb"))
-        setConvolverInputTrimDb(state.getProperty("convolverInputTrimDb"));
-
-    if (state.hasProperty("ditherBitDepth"))
-        setDitherBitDepth(static_cast<int>(state.getProperty("ditherBitDepth")));
-
-    if (state.hasProperty("noiseShaperType"))
-        setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"));
-
-    {
-        bool hasBankedAdaptiveCoefficients = false;
-
-        for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
-        {
-            const double bankSampleRate = getAdaptiveSampleRateBankHz(bankIndex);
-            double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
-            bool hasBankCoefficients = false;
-
-            getAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
-            for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
-            {
-                const auto propertyName = makeAdaptiveCoeffPropertyName(bankSampleRate, coeffIndex);
-                if (state.hasProperty(propertyName))
-                {
-                    adaptiveCoefficients[coeffIndex] = static_cast<double>(state.getProperty(propertyName));
-                    hasBankCoefficients = true;
-                    hasBankedAdaptiveCoefficients = true;
-                }
-            }
-
-            if (hasBankCoefficients)
-                setAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
-        }
-
-        if (!hasBankedAdaptiveCoefficients)
-        {
-            double legacyAdaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
-            bool hasLegacyAdaptiveCoefficients = false;
-
-            for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
-            {
-                const auto propertyName = "adaptiveCoeff" + juce::String(coeffIndex);
-                if (state.hasProperty(propertyName))
-                {
-                    legacyAdaptiveCoefficients[coeffIndex] = static_cast<double>(state.getProperty(propertyName));
-                    hasLegacyAdaptiveCoefficients = true;
-                }
-            }
-
-            if (hasLegacyAdaptiveCoefficients)
-            {
-                for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
-                    setAdaptiveCoefficientsForSampleRate(getAdaptiveSampleRateBankHz(bankIndex),
-                                                         legacyAdaptiveCoefficients,
-                                                         kAdaptiveNoiseShaperOrder);
-            }
-        }
-    }
-
-    if (state.hasProperty("oversamplingFactor"))
-        setOversamplingFactor(static_cast<int>(state.getProperty("oversamplingFactor")));
-
-    if (state.hasProperty("oversamplingType"))
-        setOversamplingType((OversamplingType)(int)state.getProperty("oversamplingType"));
-
-    // --- NoiseShaperLearner Settings ---
-    if (state.hasProperty("cmaesRestarts") || state.hasProperty("coeffSafetyMargin") || state.hasProperty("enableStabilityCheck"))
-    {
-        auto s = getNoiseShaperLearnerSettings();
-        if (state.hasProperty("cmaesRestarts"))
-            s.cmaesRestarts = static_cast<int>(state.getProperty("cmaesRestarts"));
-        if (state.hasProperty("coeffSafetyMargin"))
-            s.coeffSafetyMargin = static_cast<double>(state.getProperty("coeffSafetyMargin"));
-        if (state.hasProperty("enableStabilityCheck"))
-            s.enableStabilityCheck = static_cast<bool>(state.getProperty("enableStabilityCheck"));
-        setNoiseShaperLearnerSettings(s);
-    }
-
-    // ─── Step 3: その他のグローバル設定 ─────────────────────────────────────
-    if (state.hasProperty("softClipEnabled"))
-        setSoftClipEnabled(state.getProperty("softClipEnabled"));
-
-    if (state.hasProperty("saturationAmount"))
-        setSaturationAmount(state.getProperty("saturationAmount"));
-
-    if (state.hasProperty("analyzerSource"))
-        setAnalyzerSource((AnalyzerSource)(int)state.getProperty("analyzerSource"));
-
-    // 出力周波数フィルターモードの読み込み
-    if (state.hasProperty("convHCFilterMode"))
-        setConvHCFilterMode((convo::HCMode)(int)state.getProperty("convHCFilterMode"));
-    if (state.hasProperty("convLCFilterMode"))
-        setConvLCFilterMode((convo::LCMode)(int)state.getProperty("convLCFilterMode"));
-    if (state.hasProperty("eqLPFFilterMode"))
-        setEqLPFFilterMode((convo::HCMode)(int)state.getProperty("eqLPFFilterMode"));
-
-    // ─── Step 4: サブプロセッサ状態の復元 ───────────────────────────────────
-    auto eqState = state.getChildWithName ("EQ");
-    if (eqState.isValid())
-        uiEqEditor.setState (eqState);
-
-    auto convState = state.getChildWithName ("Convolver");
-    if (convState.isValid())
-        uiConvolverProcessor.setState (convState);
-
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
-    if (sr > 0.0)
-        requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
-
-    // UI更新通知
-    sendChangeMessage();
-}
-
-juce::ValueTree AudioEngine::getCurrentState() const
-{
-    juce::ValueTree state ("Preset");
-
-    // グローバル設定の保存
-    state.setProperty("processingOrder", (int)currentProcessingOrder.load(), nullptr);
-    state.setProperty("softClipEnabled", softClipEnabled.load(), nullptr);
-    state.setProperty("saturationAmount", saturationAmount.load(), nullptr);
-    state.setProperty("inputHeadroomDb", inputHeadroomDb.load(), nullptr);
-    state.setProperty("outputMakeupDb", outputMakeupDb.load(), nullptr);
-    state.setProperty("analyzerSource", (int)currentAnalyzerSource.load(), nullptr);
-    state.setProperty("convolverInputTrimDb", convolverInputTrimDb.load(), nullptr);
-    state.setProperty("ditherBitDepth", ditherBitDepth.load(), nullptr);
-    state.setProperty("noiseShaperType", (int)noiseShaperType.load(), nullptr);
-    state.setProperty("oversamplingFactor", manualOversamplingFactor.load(), nullptr);
-    state.setProperty("oversamplingType", (int)oversamplingType.load(), nullptr);
-
-    // NoiseShaperLearner Settings
-    {
-        auto s = getNoiseShaperLearnerSettings();
-        state.setProperty("cmaesRestarts", s.cmaesRestarts.load(), nullptr);
-        state.setProperty("coeffSafetyMargin", s.coeffSafetyMargin.load(), nullptr);
-        state.setProperty("enableStabilityCheck", s.enableStabilityCheck.load(), nullptr);
-    }
-
-    state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);
-    state.setProperty("convBypassed", convBypassRequested.load(), nullptr);
-    // 出力周波数フィルターモードの保存
-    state.setProperty("convHCFilterMode", (int)convHCFilterMode.load(), nullptr);
-    state.setProperty("convLCFilterMode", (int)convLCFilterMode.load(), nullptr);
-    state.setProperty("eqLPFFilterMode",  (int)eqLPFFilterMode.load(), nullptr);
-
-    for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
-    {
-        const double bankSampleRate = getAdaptiveSampleRateBankHz(bankIndex);
-        double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
-        getAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
-
-        for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
-            state.setProperty(makeAdaptiveCoeffPropertyName(bankSampleRate, coeffIndex),
-                              adaptiveCoefficients[coeffIndex],
-                              nullptr);
-    }
-
-    state.addChild (uiEqEditor.getState(), -1, nullptr);
-    state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
+    
+    // 3. スナップショット情報（ノイズシェイパー係数など）をシリアライズ
+    // TODO: 実際のシリアライズロジックを実装
+    std::memset(state.snapBlob, 0, sizeof(state.snapBlob));
+    
+    state.generation++;
+    state.isValid = true;
+    
     return state;
 }
 
-void AudioEngine::setInputHeadroomDb(float db)
+// ============================================================================
+// CONTROL THREAD: 唯一の書き込みパス
+// ============================================================================
+
+void AudioEngine::publishEngineState(convo::EngineState&& newState, float fadeTimeSec) 
 {
-    // コンボルバーが先頭に来る場合 (Conv→PEQ / Conv only) は -6dB 上限で入力保護する。
-    // EQ が先頭またはコンボルバーがバイパスされている場合は 0dB まで許容する。
-    const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
-    const bool eqBypassed   = eqBypassRequested.load(std::memory_order_relaxed);
-    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
-    const bool convIsFirst = !convBypassed && (order == ProcessingOrder::ConvolverThenEQ || eqBypassed);
-    const float maxDb = convIsFirst ? -6.0f : 0.0f;
-    float clampedDb = juce::jlimit(-12.0f, maxDb, db);
-    if (std::abs(inputHeadroomDb.load() - clampedDb) > 1e-5f)
+    // CRITICAL: Single-Writer Guarantee (この関数は単一スレッドからのみ呼ばれる前提)
+    
+    // 1. 非アクティブスロットの取得
+    int active = m_activeIndex.load(std::memory_order_acquire);
+    int write  = 1 - active;
+    
+    convo::EngineView& dst = m_views[write];
+    const convo::EngineView& src = m_views[active];
+    
+    // 2. previous 状態のセットアップ (フェードありの場合)
+    if (fadeTimeSec > 0.0f) 
     {
-        inputHeadroomDb.store(clampedDb);
-        inputHeadroomGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
-        m_currentInputHeadroomDb.store(clampedDb, std::memory_order_relaxed);
-        enqueueSnapshotCommand();
-    }
-}
-
-float AudioEngine::getInputHeadroomDb() const
-{
-    return inputHeadroomDb.load();
-}
-
-void AudioEngine::setOutputMakeupDb(float db)
-{
-    // Output makeup は全モード共通で 0..12 dB
-    const float clampedDb = juce::jlimit(0.0f, 12.0f, db);
-    if (std::abs(outputMakeupDb.load() - clampedDb) > 1e-5f)
-    {
-        outputMakeupDb.store(clampedDb);
-        outputMakeupGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
-        m_currentOutputMakeupDb.store(clampedDb, std::memory_order_relaxed);
-        enqueueSnapshotCommand();
-    }
-}
-
-float AudioEngine::getOutputMakeupDb() const
-{
-    return outputMakeupDb.load();
-}
-
-void AudioEngine::setProcessingOrder(ProcessingOrder order)
-{
-    currentProcessingOrder.store(order);
-    m_currentProcessingOrder.store(order, std::memory_order_relaxed);
-    enqueueSnapshotCommand();
-    applyDefaultsForCurrentMode();
-}
-
-void AudioEngine::setConvolverInputTrimDb(float db)
-{
-    // 範囲: -12..0 dB (0dB = トリムなし / -12dB = 最大保護)
-    float clampedDb = juce::jlimit(-12.0f, 0.0f, db);
-    if (std::abs(convolverInputTrimDb.load() - clampedDb) > 1e-5f)
-    {
-        convolverInputTrimDb.store(clampedDb);
-        convolverInputTrimGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
-        m_currentConvInputTrimDb.store(clampedDb, std::memory_order_relaxed);
-        enqueueSnapshotCommand();
-    }
-}
-
-float AudioEngine::getConvolverInputTrimDb() const
-{
-    return convolverInputTrimDb.load();
-}
-
-void AudioEngine::applyDefaultsForCurrentMode()
-{
-    if (m_isRestoringState) return; // プリセットロード中はデフォルトリセットを抑制する
-
-    const bool eqBypassed  = eqBypassRequested.load(std::memory_order_relaxed);
-    const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
-    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
-
-    float newInputHeadroomDb = 0.0f;
-    float newOutputMakeupDb = 0.0f;
-    float newConvTrimDb = 0.0f;
-
-    if (convBypassed && !eqBypassed)
-    {
-        newInputHeadroomDb = 0.0f;
-        newOutputMakeupDb = 0.0f;
-        newConvTrimDb = 0.0f;
-    }
-    else if (!convBypassed && order == ProcessingOrder::EQThenConvolver && !eqBypassed)
-    {
-        newInputHeadroomDb = 0.0f;
-        newOutputMakeupDb = 10.0f;
-        newConvTrimDb = -6.0f;
-    }
-    else if (eqBypassed && !convBypassed)
-    {
-        newInputHeadroomDb = -6.0f;
-        newOutputMakeupDb = 12.0f;
-        newConvTrimDb = 0.0f;
-    }
-    else
-    {
-        newInputHeadroomDb = -6.0f;
-        newOutputMakeupDb = 12.0f;
-        newConvTrimDb = 0.0f;
-    }
-
-    inputHeadroomDb.store(newInputHeadroomDb, std::memory_order_relaxed);
-    outputMakeupDb.store(newOutputMakeupDb, std::memory_order_relaxed);
-    convolverInputTrimDb.store(newConvTrimDb, std::memory_order_relaxed);
-    inputHeadroomGain.store(juce::Decibels::decibelsToGain(static_cast<double>(newInputHeadroomDb)), std::memory_order_relaxed);
-    outputMakeupGain.store(juce::Decibels::decibelsToGain(static_cast<double>(newOutputMakeupDb)), std::memory_order_relaxed);
-    convolverInputTrimGain.store(juce::Decibels::decibelsToGain(static_cast<double>(newConvTrimDb)), std::memory_order_relaxed);
-
-    m_currentInputHeadroomDb.store(newInputHeadroomDb, std::memory_order_relaxed);
-    m_currentOutputMakeupDb.store(newOutputMakeupDb, std::memory_order_relaxed);
-    m_currentConvInputTrimDb.store(newConvTrimDb, std::memory_order_relaxed);
-    enqueueSnapshotCommand();
-}
-
-void AudioEngine::setDitherBitDepth(int bitDepth)
-{
-    if (ditherBitDepth.load() != bitDepth)
-    {
-        const bool adaptiveLearningActive = (noiseShaperType.load(std::memory_order_relaxed) == NoiseShaperType::Adaptive9thOrder)
-            && noiseShaperLearner
-            && noiseShaperLearner->isRunning();
-
-        if (adaptiveLearningActive)
+        if (src.previousValid) 
         {
-            stopNoiseShaperLearning();
-            noiseShaperLearner->setErrorMessage("Learning stopped due to bit depth change. Please restart learning.");
+            dst.previous.copyFrom(src.previous);
+            dst.previousValid = true;
+        } 
+        else 
+        {
+            dst.previous.copyFrom(src.current);
+            dst.previousValid = true;
         }
+        dst.alpha = 0.0f;
+    } 
+    else 
+    {
+        // フェードなし：即時切り替え
+        dst.previousValid = false;
+        dst.alpha = 1.0f;
+    }
+    
+    // 3. current 状態の更新 (完全コピー)
+    dst.current.copyFrom(newState);
+    
+    // 4. 公開 (Atomic Swap)
+    m_activeIndex.exchange(write, std::memory_order_acq_rel);
+}
 
-        ditherBitDepth.store(bitDepth);
-        m_currentDitherBitDepth.store(bitDepth, std::memory_order_relaxed);
-        DBG_LOG("Dither Bit Depth changed: " + juce::String(bitDepth));
-        enqueueSnapshotCommand();
+void AudioEngine::advanceFade(float step) 
+{
+    // クロスフェード進行用 (Control Thread で定期的に呼ぶ)
+    int active = m_activeIndex.load(std::memory_order_acquire);
+    const convo::EngineView& src = m_views[active];
+    
+    // フェード中でない場合は何もしない
+    if (!src.previousValid || src.alpha >= 1.0f) 
+        return;
+    
+    int write  = 1 - active;
+    convo::EngineView& dst = m_views[write];
+    
+    // current は不変なのでコピー
+    dst.current.copyFrom(src.current);
+    
+    // alpha を線形補間
+    float newAlpha = src.alpha + step;
+    if (newAlpha >= 1.0f) 
+    {
+        dst.alpha = 1.0f;
+        dst.previousValid = false;
+    } 
+    else 
+    {
+        dst.previous.copyFrom(src.previous);
+        dst.previousValid = true;
+        dst.alpha = newAlpha;
+    }
+    
+    // 公開
+    m_activeIndex.exchange(write, std::memory_order_release);
+}
 
-        selectAdaptiveCoeffBankForCurrentSettings();
+// ============================================================================
+// AUDIO THREAD: DSP 処理実体
+// ============================================================================
 
-        // UI側（学習ウィンドウ）が即座に反映できるように通知
-        sendChangeMessage();
-
-        const double sr = currentSampleRate.load();
-        if (!m_isRestoringState && sr > 0.0)
+void AudioEngine::processWithState(juce::AudioBuffer<float>& output, 
+                                   const convo::EngineState& state, 
+                                   int startSample, 
+                                   int numSamples, 
+                                   float gain) 
+{
+    // 実際の DSP 処理パイプライン
+    // state.dspBlob, state.eqBlob, state.snapBlob を参照して処理を行う
+    
+    // 1. ゲイン適用（フェード用）
+    if (gain != 1.0f && gain > 0.0f) 
+    {
+        for (int ch = 0; ch < output.getNumChannels(); ++ch) 
         {
-            const int queuedGeneration = rebuildGeneration.load(std::memory_order_acquire);
-            const int committedGeneration = lastCommittedRebuildGeneration.load(std::memory_order_acquire);
-            const bool outstandingRebuild = queuedGeneration > committedGeneration;
-            const bool shouldDeferRebuild =
-                outstandingRebuild
-                ||
-                uiConvolverProcessor.isLoadingIR()
-                || deferredStructuralRebuildPending_.load(std::memory_order_acquire)
-                || m_pendingIRChange.load(std::memory_order_acquire)
-                || (uiConvolverProcessor.isIRLoaded() && !uiConvolverProcessor.isIRFinalized());
-
-            if (shouldDeferRebuild)
-            {
-                deferredFinalizeAwareRebuildPending_.store(true, std::memory_order_release);
-                diagLog("[DIAG] setDitherBitDepth: deferred rebuild until IR finalized");
-            }
-            else
-            {
-                requestRebuild(sr, maxSamplesPerBlock.load());
-            }
+            output.applyGain(ch, startSample, numSamples, gain);
         }
     }
+    
+    // 2. Convolver 処理
+    // TODO: state.dspBlob から ConvolverState をデシリアライズし、処理を実行
+    // 例：ConvolverProcessor::process(output, state.dspBlob, startSample, numSamples);
+    
+    // 3. EQ 処理
+    // TODO: state.eqBlob から EQState をデシリアライズし、処理を実行
+    // 例：EQProcessor::process(output, state.eqBlob, startSample, numSamples);
+    
+    // 4. Noise Shaper / Dither 処理
+    // TODO: state.snapBlob からパラメータを読み取り、処理を実行
+    
+    // 注意：この関数は Audio Thread 内で呼ばれるため、malloc/new/lock は厳禁
 }
-
-int AudioEngine::getDitherBitDepth() const
-{
-    return ditherBitDepth.load();
-}
-
-void AudioEngine::setNoiseShaperType(NoiseShaperType type)
-{
-    if (noiseShaperType.load() != type)
-    {
-        noiseShaperType.store(type);
-        m_currentNoiseShaperType.store(type, std::memory_order_relaxed);
-        m_pendingNSChange.store(true, std::memory_order_release);
-        if (type != NoiseShaperType::Adaptive9thOrder)
-        {
-            stopNoiseShaperLearning();
-        }
-        else
-        {
-            if (noiseShaperLearner)
-                noiseShaperLearner->stopLearning();
-
-            noiseShaperLearner = std::make_unique<NoiseShaperLearner>(*this, audioCaptureQueue);
-            noiseShaperLearner->setLearningMode(pendingLearningMode.load(std::memory_order_acquire));
-            resetLearningControlState();
-        }
-
-        juce::String typeName = "Psychoacoustic";
-        if (type == NoiseShaperType::Fixed4Tap)
-            typeName = "Fixed4Tap";
-        else if (type == NoiseShaperType::Adaptive9thOrder)
-            typeName = "Adaptive9thOrder";
-
-        DBG_LOG("Noise Shaper changed: " + typeName);
-        enqueueSnapshotCommand();
-        const double sr = currentSampleRate.load();
-        if (!m_isRestoringState && sr > 0.0)
-        {
-            const int queuedGeneration = rebuildGeneration.load(std::memory_order_acquire);
-            const int committedGeneration = lastCommittedRebuildGeneration.load(std::memory_order_acquire);
-            const bool outstandingRebuild = queuedGeneration > committedGeneration;
-            const bool shouldDeferRebuild =
-                outstandingRebuild
-                ||
-                uiConvolverProcessor.isLoadingIR()
-                || deferredStructuralRebuildPending_.load(std::memory_order_acquire)
-                || m_pendingIRChange.load(std::memory_order_acquire)
-                || (uiConvolverProcessor.isIRLoaded() && !uiConvolverProcessor.isIRFinalized());
-
-            if (shouldDeferRebuild)
-            {
-                deferredFinalizeAwareRebuildPending_.store(true, std::memory_order_release);
-                diagLog("[DIAG] setNoiseShaperType: deferred rebuild until IR finalized");
-            }
-            else
-            {
-                requestRebuild(sr, maxSamplesPerBlock.load());
-            }
-        }
-    }
-}
-
-void AudioEngine::requestSnapshotForNoiseShaper()
-{
-    m_pendingNSChange.store(true, std::memory_order_release);
-    (void)enqueueSnapshotCommand();
-}
-
-void AudioEngine::commitAGCChange()
-{
-    m_pendingAGCChange.store(true, std::memory_order_release);
-    (void)enqueueSnapshotCommand();
-}
-
-AudioEngine::NoiseShaperType AudioEngine::getNoiseShaperType() const
-{
-    return noiseShaperType.load();
-}
-
-void AudioEngine::setFixedNoiseLogIntervalMs(int intervalMs) noexcept
-{
-    fixedNoiseLogIntervalMs.store(juce::jlimit(250, 10000, intervalMs), std::memory_order_relaxed);
-}
-
-int AudioEngine::getFixedNoiseLogIntervalMs() const noexcept
-{
-    return fixedNoiseLogIntervalMs.load(std::memory_order_relaxed);
-}
-
-void AudioEngine::setFixedNoiseWindowSamples(int windowSamples) noexcept
-{
-    fixedNoiseWindowSamples.store(juce::jlimit(256, 262144, windowSamples), std::memory_order_relaxed);
-}
-
-int AudioEngine::getFixedNoiseWindowSamples() const noexcept
-{
-    return fixedNoiseWindowSamples.load(std::memory_order_relaxed);
-}
-
-void AudioEngine::setSoftClipEnabled(bool enabled)
-{
-    softClipEnabled.store(enabled, std::memory_order_relaxed);
-    m_currentSoftClipEnabled.store(enabled, std::memory_order_relaxed);
-    enqueueSnapshotCommand();
-}
-
-bool AudioEngine::isSoftClipEnabled() const
-{
-    return softClipEnabled.load(std::memory_order_relaxed);
-}
-
-void AudioEngine::setSaturationAmount(float amount)
-{
-    const float clamped = juce::jlimit(0.0f, 1.0f, amount);
-    saturationAmount.store(clamped, std::memory_order_relaxed);
-    m_currentSaturationAmount.store(clamped, std::memory_order_relaxed);
-    enqueueSnapshotCommand();
-}
-
-float AudioEngine::getSaturationAmount() const
-{
-    return saturationAmount.load(std::memory_order_relaxed);
-}
-
-void AudioEngine::setOversamplingFactor(int factor)
-{
-    // 0=Auto, 1, 2, 4, 8
-    int newFactor = 0;
-    if (factor == 1 || factor == 2 || factor == 4 || factor == 8)
-    {
-        newFactor = factor;
-    }
-
-    if (manualOversamplingFactor.load() != newFactor)
-    {
-        manualOversamplingFactor.store(newFactor);
-        m_currentOversamplingFactor.store(newFactor, std::memory_order_relaxed);
-        enqueueSnapshotCommand();
-        const double sr = currentSampleRate.load();
-        if (!m_isRestoringState && sr > 0.0)
-        {
-            requestRebuild(sr, maxSamplesPerBlock.load());
-        }
-    }
-}
-
-int AudioEngine::getOversamplingFactor() const
-{
-    return manualOversamplingFactor.load();
-}
-
-void AudioEngine::setOversamplingType(OversamplingType type)
-{
-    oversamplingType.store(type);
-    m_currentOversamplingType.store(type, std::memory_order_relaxed);
-    enqueueSnapshotCommand();
-    const double sr = currentSampleRate.load();
-    if (!m_isRestoringState && sr > 0.0)
-    {
-        requestRebuild(sr, maxSamplesPerBlock.load());
-    }
-}
-
-AudioEngine::OversamplingType AudioEngine::getOversamplingType() const
-{
-    return oversamplingType.load();
-}
-
-//──────────────────────────────────────────────────────────────────────────
-// 出力周波数フィルターモード Setter / Getter (Message Thread)
-//──────────────────────────────────────────────────────────────────────────
-void AudioEngine::setConvHCFilterMode(convo::HCMode mode) noexcept
-{
-    convHCFilterMode.store(mode, std::memory_order_relaxed);
-    // NUC irFreqDomain を再焼き込みするため、uiConvolverProcessor を再構築する。
-    // DSPCore::convolver は次回 requestRebuild 時に syncStateFrom + rebuildAllIRsSynchronous で追従する。
-    uiConvolverProcessor.setNUCFilterModes(
-        convHCFilterMode.load(std::memory_order_relaxed),
-        convLCFilterMode.load(std::memory_order_relaxed));
-}
-
-convo::HCMode AudioEngine::getConvHCFilterMode() const noexcept
-{
-    return convHCFilterMode.load(std::memory_order_relaxed);
-}
-
-void AudioEngine::setConvLCFilterMode(convo::LCMode mode) noexcept
-{
-    convLCFilterMode.store(mode, std::memory_order_relaxed);
-    // HC と組み合わせて NUC を再構築
-    uiConvolverProcessor.setNUCFilterModes(
-        convHCFilterMode.load(std::memory_order_relaxed),
-        convLCFilterMode.load(std::memory_order_relaxed));
-}
-
-convo::LCMode AudioEngine::getConvLCFilterMode() const noexcept
-{
-    return convLCFilterMode.load(std::memory_order_relaxed);
-}
-
-void AudioEngine::setEqLPFFilterMode(convo::HCMode mode) noexcept
-{
-    eqLPFFilterMode.store(mode, std::memory_order_relaxed);
-}
-
-convo::HCMode AudioEngine::getEqLPFFilterMode() const noexcept
-{
-    return eqLPFFilterMode.load(std::memory_order_relaxed);
-}
-
-//==============================================================================
-// RCU v17.15: Audio Thread 判定関数
-//==============================================================================
-namespace convo {
-bool isAudioThread() noexcept
-{
-    // JUCE の AudioCallback 呼び出し中は true を返す
-    // AudioEngine::processBlock 内で設定される thread_local フラグを参照
-    return AudioEngine::isAudioThreadLocal();
-}
-} // namespace convo
-
-
 

@@ -29,7 +29,6 @@
 #include <vector>
 #include "core/EQParameters.h"
 #include "AlignedAllocation.h"
-#include "rcu/retire.h"
 
 //--------------------------------------------------------------
 // バンドタイプ列挙型
@@ -271,6 +270,74 @@ public:
         int filterStructure = 0; // 0: Serial, 1: Parallel
 
         convo::EQParameters toEQParameters() const;
+
+        // =========================================================================
+        // シリアライズ用 Blob 構造体 (POD, trivially copyable)
+        // =========================================================================
+        struct EQBlob {
+            float bandGains[20];
+            float bandFreqs[20];
+            float bandQs[20];
+            bool  bandEnabled[20];
+            int   filterTypes[20];
+            int   channelModes[20];
+            float totalGainDb;
+            bool  agcEnabled;
+            float saturation;
+            int   filterStructure;
+            float agcCurrentGain;
+            float agcEnvInput;
+            float agcEnvOutput;
+            
+            // パディング（アライメント調整）
+            uint8_t padding[64 - (sizeof(float)*63 + sizeof(int)*22 + sizeof(bool)*21) % 64];
+        };
+
+        static_assert(std::is_trivially_copyable_v<EQBlob>, "EQBlob must be trivially copyable");
+        static_assert(std::is_standard_layout_v<EQBlob>, "EQBlob must be standard layout");
+        static_assert(sizeof(EQBlob) <= 1024, "EQBlob exceeds expected size");
+
+        void serializeTo(uint8_t* dst, size_t size) const {
+            jassert(size >= sizeof(EQBlob));
+            EQBlob blob = {};
+            
+            for (int i = 0; i < 20 && i < NUM_BANDS; ++i) {
+                blob.bandGains[i]   = bands[i].gain;
+                blob.bandFreqs[i]   = bands[i].frequency;
+                blob.bandQs[i]      = bands[i].q;
+                blob.bandEnabled[i] = bands[i].enabled;
+                blob.filterTypes[i] = static_cast<int>(bandTypes[i]);
+                blob.channelModes[i] = static_cast<int>(bandChannelModes[i]);
+            }
+            
+            blob.totalGainDb    = totalGainDb;
+            blob.agcEnabled     = agcEnabled;
+            blob.saturation     = nonlinearSaturation;
+            blob.filterStructure= filterStructure;
+            // AGC 状態は必要に応じて追加
+            
+            std::memcpy(dst, &blob, sizeof(blob));
+        }
+
+        void deserializeFrom(const uint8_t* src, size_t size) {
+            jassert(size >= sizeof(EQBlob));
+            EQBlob blob;
+            std::memcpy(&blob, src, sizeof(blob));
+
+            for (int i = 0; i < 20 && i < NUM_BANDS; ++i) {
+                bands[i].gain      = blob.bandGains[i];
+                bands[i].frequency = blob.bandFreqs[i];
+                bands[i].q         = blob.bandQs[i];
+                bands[i].enabled   = blob.bandEnabled[i];
+                bandTypes[i]       = static_cast<EQBandType>(blob.filterTypes[i]);
+                bandChannelModes[i] = static_cast<EQChannelMode>(blob.channelModes[i]);
+            }
+            
+            totalGainDb          = blob.totalGainDb;
+            agcEnabled           = blob.agcEnabled;
+            nonlinearSaturation  = blob.saturation;
+            filterStructure      = blob.filterStructure;
+        }
 
         // Explicitly define the copy constructor
         EQState() = default;

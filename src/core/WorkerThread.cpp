@@ -1,12 +1,10 @@
 //==============================================================================
-// WorkerThread.cpp - RCU v17.15 unified model
+// WorkerThread.cpp - Snapshot Double Buffer Model
 //==============================================================================
 
 #include "WorkerThread.h"
 #include "ThreadAffinityManager.h"
 #include "../GenerationManager.h"
-#include "rcu/EpochManager.h"
-#include "Types.h"
 
 #include <chrono>
 #include <thread>
@@ -21,12 +19,12 @@ extern std::atomic<bool> gShuttingDown;
 namespace convo {
 
 WorkerThread::WorkerThread(CommandBuffer& cmdBuf,
-                           std::atomic<ActiveSnapshot*>& activeSnap,
+                           EngineView* activeViewPtr,
                            GenerationManager& genMgr,
                    const ThreadAffinityManager* affinityMgr,
                            const WorkerThreadConfig& cfg)
     : commandBuffer(cmdBuf),
-      activeSnapshot(activeSnap),
+      activeView(activeViewPtr),
       generationManager(genMgr),
     affinityManager(affinityMgr),
       config(cfg)

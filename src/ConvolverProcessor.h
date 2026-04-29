@@ -34,13 +34,11 @@
 #include "AlignedAllocation.h"
 #include "MKLNonUniformConvolver.h"
 #include "AllpassDesigner.h"
-#include "rcu/retire.h"            // convo::retire
 
-// ── Phase 0: Epoch-based RCU 基盤ヘッダー ──
+// ── Snapshot Double Buffer Model ──
 #include "GenerationManager.h"
 #include "ConvolverState.h"
 #include "PreparedIRState.h"
-#include "rcu/DeferredDeletionQueue.h"
 #include "ConvolverRuntime.h"
 #include "DspNumericPolicy.h"
 
@@ -149,6 +147,81 @@ public:
     static_assert((DELAY_BUFFER_SIZE & (DELAY_BUFFER_SIZE - 1)) == 0,
                   "DELAY_BUFFER_SIZE must be a power of 2 for bitmask optimization");
     static constexpr double CONVOLUTION_HEADROOM_GAIN = 1.0; // 0.0 dB (Unity Gain - Headroom is baked into IR)
+
+    // =========================================================================
+    // シリアライズ用 Blob 構造体 (POD, trivially copyable)
+    // =========================================================================
+    struct ConvolverBlob {
+        float mix = 0.5f;
+        int phaseMode = 0; // 0=AsIs, 1=Mixed, 2=Minimum
+        int tailProcessingMode = 0;
+        float tailRolloffStartHz = 3500.0f;
+        float tailRolloffStrength = 0.3f;
+        float partitionTailStrength = 1.0f;
+        bool experimentalDirectHead = false;
+        bool bypassed = false;
+        float smoothingTimeSec = 0.1f;
+        float irLengthSec = 1.0f;
+        float mixedF1Hz = 200.0f;
+        float mixedF2Hz = 1000.0f;
+        float mixedTau = 32.0f;
+        int targetUpgradeFFTSize = 0;
+        bool enableProgressiveUpgrade = false;
+        size_t maxCacheEntries = 100;
+        
+        // パディング（アライメント調整）
+        uint8_t padding[64 - (sizeof(float)*11 + sizeof(int)*4 + sizeof(bool)*4 + sizeof(size_t)) % 64];
+    };
+
+    static_assert(std::is_trivially_copyable_v<ConvolverBlob>, "ConvolverBlob must be trivially copyable");
+    static_assert(std::is_standard_layout_v<ConvolverBlob>, "ConvolverBlob must be standard layout");
+    static_assert(sizeof(ConvolverBlob) <= 256, "ConvolverBlob exceeds expected size");
+
+    void serializeTo(uint8_t* dst, size_t size) const {
+        jassert(size >= sizeof(ConvolverBlob));
+        ConvolverBlob blob;
+        blob.mix = mix.load(std::memory_order_relaxed);
+        blob.phaseMode = phaseMode.load(std::memory_order_relaxed);
+        blob.tailProcessingMode = tailProcessingMode.load(std::memory_order_relaxed);
+        blob.tailRolloffStartHz = tailRolloffStartHz.load(std::memory_order_relaxed);
+        blob.tailRolloffStrength = tailRolloffStrength.load(std::memory_order_relaxed);
+        blob.partitionTailStrength = partitionTailStrength.load(std::memory_order_relaxed);
+        blob.experimentalDirectHead = experimentalDirectHead.load(std::memory_order_relaxed);
+        blob.bypassed = bypassed.load(std::memory_order_relaxed);
+        blob.smoothingTimeSec = smoothingTimeSec.load(std::memory_order_relaxed);
+        blob.irLengthSec = irLengthSec.load(std::memory_order_relaxed);
+        blob.mixedF1Hz = mixedF1Hz.load(std::memory_order_relaxed);
+        blob.mixedF2Hz = mixedF2Hz.load(std::memory_order_relaxed);
+        blob.mixedTau = mixedTau.load(std::memory_order_relaxed);
+        blob.targetUpgradeFFTSize = targetUpgradeFFTSize.load(std::memory_order_relaxed);
+        blob.enableProgressiveUpgrade = enableProgressiveUpgrade.load(std::memory_order_relaxed);
+        blob.maxCacheEntries = maxCacheEntries.load(std::memory_order_relaxed);
+        
+        std::memcpy(dst, &blob, sizeof(blob));
+    }
+
+    void deserializeFrom(const uint8_t* src, size_t size) {
+        jassert(size >= sizeof(ConvolverBlob));
+        ConvolverBlob blob;
+        std::memcpy(&blob, src, sizeof(blob));
+        
+        mix.store(blob.mix, std::memory_order_relaxed);
+        phaseMode.store(blob.phaseMode, std::memory_order_relaxed);
+        tailProcessingMode.store(blob.tailProcessingMode, std::memory_order_relaxed);
+        tailRolloffStartHz.store(blob.tailRolloffStartHz, std::memory_order_relaxed);
+        tailRolloffStrength.store(blob.tailRolloffStrength, std::memory_order_relaxed);
+        partitionTailStrength.store(blob.partitionTailStrength, std::memory_order_relaxed);
+        experimentalDirectHead.store(blob.experimentalDirectHead, std::memory_order_relaxed);
+        bypassed.store(blob.bypassed, std::memory_order_relaxed);
+        smoothingTimeSec.store(blob.smoothingTimeSec, std::memory_order_relaxed);
+        irLengthSec.store(blob.irLengthSec, std::memory_order_relaxed);
+        mixedF1Hz.store(blob.mixedF1Hz, std::memory_order_relaxed);
+        mixedF2Hz.store(blob.mixedF2Hz, std::memory_order_relaxed);
+        mixedTau.store(blob.mixedTau, std::memory_order_relaxed);
+        targetUpgradeFFTSize.store(blob.targetUpgradeFFTSize, std::memory_order_relaxed);
+        enableProgressiveUpgrade.store(blob.enableProgressiveUpgrade, std::memory_order_relaxed);
+        maxCacheEntries.store(blob.maxCacheEntries, std::memory_order_relaxed);
+    }
 
     ConvolverProcessor();
     ~ConvolverProcessor();
@@ -429,10 +502,9 @@ public:
     }
     #endif
 
-
-    // ── Phase 0: Epoch-based RCU 状態更新 ──
-    // Message Thread から呼ぶ。新しい ConvolverState を atomic にスワップし、
-    // 旧状態は convo::retire() で解放する（RCU v17.15）
+    // ── Snapshot Double Buffer Model ──
+    // Message Thread から呼ぶ。新しい状態を serializeTo で EngineState に格納し、
+    // publishEngineState で公開する（RCU は完全廃止）
     // GenerationManager で陳腐化チェックを行い、古いタスク結果は破棄する。
     //
     // @param newState  新しい状態（所有権を移譲）。世代チェックに失敗した場合は即削除。
@@ -578,7 +650,7 @@ private:
         {
             if (!sc || sc->retired.exchange(true, std::memory_order_acq_rel))
                 return;
-            convo::retire(sc);
+            delete sc);
         }
 
         // デストラクタは空（実際の解放は retire 経由）
@@ -968,6 +1040,27 @@ public: // Added for AudioEngine access
     std::atomic<convo::ConvolverState*> convolverState { nullptr };
     // GenerationManager: IR ロードタスクの世代管理（陳腐化チェック用）
     GenerationManager convolverStateGeneration;
+
+    // =========================================================================
+    // Final 3.0: シリアライズ・デシリアライズインターフェース
+    // =========================================================================
+    // ConvolverBlob: trivially copyable な中間構造体
+    struct ConvolverBlob {
+        float params[256];      // phaseMode, smoothingTime, mixedTransition 等
+        int irLength;
+        double sampleRate;
+        double currentIRScale;
+        bool isPrepared;
+        uint8_t reserved[64];   // アラインメント調整用
+
+        // バイナリ互換性チェック
+        static_assert(std::is_trivially_copyable_v<ConvolverBlob>, "ConvolverBlob must be trivially copyable");
+        static_assert(std::is_standard_layout_v<ConvolverBlob>, "ConvolverBlob must be standard layout");
+        static_assert(sizeof(ConvolverBlob) <= 16384, "ConvolverBlob exceeds EngineState::kDSPSize");
+    };
+
+    void serializeTo(uint8_t* dst, size_t size) const;
+    void deserializeFrom(const uint8_t* src, size_t size);
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(ConvolverProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)

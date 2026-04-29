@@ -5,9 +5,6 @@
 //============================================================================
 #include <JuceHeader.h>
 #include "ConvolverProcessor.h"
-#include "rcu/EpochManager.h"
-#include "rcu/RCUReader.h"
-#include "rcu/retire.h"
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -26,7 +23,6 @@
 #include "IRConverter.h"
 #include "CacheManager.h"
 #include "ProgressiveUpgradeThread.h"
-#include "rcu/DeferredDeletionQueue.h"
 #include "AudioEngine.h"
 #include "core/ThreadAffinityManager.h"
 
@@ -97,7 +93,7 @@ void ConvolverProcessor::updateIRState(std::shared_ptr<juce::AudioBuffer<double>
     auto* oldState = currentIRState.exchange(newState, std::memory_order_acq_rel);
     if (oldState != nullptr)
     {
-        convo::retire(oldState, [](void* p)
+        delete oldState, [](void* p)
         {
             auto* state = static_cast<IRState*>(p);
             state->~IRState();
@@ -1419,7 +1415,7 @@ ConvolverProcessor::~ConvolverProcessor()
     // Clean up latency snapshot pointer
     auto* oldSnap = cachedLatency.exchange(nullptr, std::memory_order_acq_rel);
     if (oldSnap) {
-        convo::retire(oldSnap);
+        delete oldSnap);
     }
 
     if (fftHandle) {
@@ -1766,7 +1762,7 @@ void ConvolverProcessor::releaseResources()
     // ここでの明示的な解放処理は不要。convolverState に残っているポインタも
     // EpochManager::shutdownPhase と ReclaimerThread::shutdown() により安全に解放される。
     if (auto* state = convolverState.load(std::memory_order_acquire)) {
-        convo::retire(state);
+        delete state;
         convolverState.store(nullptr, std::memory_order_release);
     }
     diagLog("[DIAG ConvolverProcessor] releaseResources: after convolverState retire");
@@ -3871,7 +3867,7 @@ void ConvolverProcessor::forceCleanup()
 //
 // Message Thread から呼ぶ。GenerationManager による陳腐化チェックを行い、
 // 現在世代と一致する場合のみ atomic swap で公開する。
-// 不一致の場合（古いタスク結果）は newState を convo::retire() で解放して破棄する。
+// 不一致の場合（古いタスク結果）は newState を delete で解放して破棄する (RCU 廃止)。
 //
 // 旧 ConvolverState の解放は ReclaimerThread が非同期に行うため、
 // Audio Thread のリアルタイム性は維持される。
@@ -3889,7 +3885,7 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
     {
         juce::Logger::writeToLog("ConvolverProcessor::updateConvolverState: stale generation, discarding state (gen="
             + juce::String((int)newState->generationId) + ")");
-        convo::retire(newState);
+        delete newState);
         writerActive.store(false, std::memory_order_release);
         return;
     }
@@ -3900,7 +3896,7 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
 
     // 旧状態を retire (unique_ptr チェーンにより子オブジェクトも自動解放)
     if (oldState) {
-        convo::retire(oldState);
+        delete oldState);
     }
 
     convo::EpochManager::instance().advanceEpoch();
@@ -4529,7 +4525,7 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     auto* newSnap = otherSnap ? new LatencySnapshot(*otherSnap) : new LatencySnapshot();
     auto* oldSnap = cachedLatency.exchange(newSnap, std::memory_order_acq_rel);
     if (oldSnap) {
-        convo::retire(oldSnap);
+        delete oldSnap);
     }
 
     irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
@@ -5472,7 +5468,7 @@ void ConvolverProcessor::updateLatencyCache() noexcept
     auto* newSnap = new LatencySnapshot(snap);
     auto* oldSnap = cachedLatency.exchange(newSnap, std::memory_order_acq_rel);
     if (oldSnap) {
-        convo::retire(oldSnap);
+        delete oldSnap);
     }
 }
 

@@ -271,15 +271,15 @@ void SpectrumAnalyzerComponent::timerCallback()
     const double dt = std::max(0.0, now - lastTime);
     lastTime = now;
 
-    // Snapshot のハッシュ差分で EQ 更新を検知する。
-    const auto* snap = engine.getActiveSnapshot();
-    if (snap != nullptr && snap->eqCoeffHash != lastEqHash)
+    // ダブルバッファモデル：EngineView の generation で更新を検知
+    const auto& view = engine.getActiveView();
+    if (view.current.isValid && view.current.generation != lastEqHash)
     {
-        lastEqHash = snap->eqCoeffHash;
+        lastEqHash = view.current.generation;
         eqDataDirty = true;
     }
 
-    // Snapshot current 反映が遅延していても、UI側の最新EQ状態変化は取りこぼさない。
+    // UI 側の最新 EQ 状態変化は取りこぼさない
     if (const auto* eqState = engine.getEQProcessor().getEQStateSnapshot())
     {
         const uint64_t directHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
