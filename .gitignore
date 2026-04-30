@@ -1,41 +1,65 @@
-# Build directories
-build/
-
-# Visual Studio / MSVC
-.vs/
-out/
-*.user
-*.suo
-*.ipch
-*.aps
-*.sdf
-*.opensdf
-
-# VS Code (Optional: commit settings if you want to share tasks/launch config)
-# .vscode/
-
-# Binary output
-*.exe
-*.dll
-*.lib
-*.pdb
+```
+# Build artifacts
+*.o
 *.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+*.out
 
-# CMake
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
+# Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.egg-info/
+dist/
+build/
+target/
 
-# r8brain-free-src (If you want users to provide their own r8brain-free-src)
-r8brain-free-src/
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+*.log
 
-# JUCE (If you want users to provide their own JUCE)
-JUCE/
-
-# OS Files
+# System files
 .DS_Store
 Thumbs.db
+.env
+.env.local
+*.env.*
 
-# serena mcp server logs
-.cache/
-.serena/
+# Coverage and testing
+.coverage
+coverage/
+htmlcov/
+
+# Compressed files
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+```

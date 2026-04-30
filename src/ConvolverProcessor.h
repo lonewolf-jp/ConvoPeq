@@ -37,7 +37,6 @@
 
 // ── Snapshot Double Buffer Model ──
 #include "GenerationManager.h"
-#include "ConvolverState.h"
 #include "PreparedIRState.h"
 #include "ConvolverRuntime.h"
 #include "DspNumericPolicy.h"
@@ -270,12 +269,8 @@ public:
     //----------------------------------------------------------
     void setBypass(bool shouldBypass);
     bool isBypassed() const { return bypassed.load(); }
-    const convo::ConvolverState* getConvolverState() const { return convolverState.load(std::memory_order_acquire); }
-    void enterStateReader(int /*readerIndex*/) const noexcept {}
-    void exitStateReader(int /*readerIndex*/) const noexcept {}
-
-    void enterGlobalReader(int /*readerIndex*/) const noexcept;
-    void exitGlobalReader(int /*readerIndex*/) const noexcept;
+    void enterGlobalReader(int /*readerIndex*/) const noexcept {}
+    void exitGlobalReader(int /*readerIndex*/) const noexcept {}
 
     //----------------------------------------------------------
     // Dry/Wet Mix (0.0 = Dry only, 1.0 = Wet only)
@@ -503,10 +498,6 @@ public:
     // Message Thread から呼ぶ。新しい状態を serializeTo で EngineState に格納し、
     // publishEngineState で公開する（RCU は完全廃止）
     // GenerationManager で陳腐化チェックを行い、古いタスク結果は破棄する。
-    //
-    // @param newState  新しい状態（所有権を移譲）。世代チェックに失敗した場合は即削除。
-    void updateConvolverState(convo::ConvolverState* newState);
-    void updateConvolverState(std::unique_ptr<convo::ConvolverState> newState);
 
     bool isConvolverGenerationCurrent(uint64_t generation) const
     {
@@ -626,38 +617,32 @@ private:
             }
         }
 
-        // 二重 retire 防止フラグ
-        std::atomic<bool> retired { false };
 
-        // リソース解放を一括で行う静的関数（retire コールバック用）
-        static void destroyStereoConvolver(void* p) noexcept
+        // 完全なデストラクタ（RAII）
+        ~StereoConvolver()
         {
-            auto* sc = static_cast<StereoConvolver*>(p);
-            if (!sc) return;
-            destroyNUCConvolver(sc->nucConvolvers[0]);
-            destroyNUCConvolver(sc->nucConvolvers[1]);
-            if (sc->irData[0]) { convo::aligned_free(sc->irData[0]); sc->irData[0] = nullptr; }
-            if (sc->irData[1]) { convo::aligned_free(sc->irData[1]); sc->irData[1] = nullptr; }
-            sc->~StereoConvolver();
-            convo::aligned_free(sc);
+            destroyNUCConvolver(nucConvolvers[0]);
+            destroyNUCConvolver(nucConvolvers[1]);
+            if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
+            if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
         }
 
-        // 外部から安全に破棄するためのエントリポイント
-        static inline void retireStereoConvolver(StereoConvolver* sc) noexcept
+        // 配置 new 用ファクトリ
+        static StereoConvolver* create()
         {
-            if (!sc || sc->retired.exchange(true, std::memory_order_acq_rel))
-                return;
-            destroyStereoConvolver(sc);
+            void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
+            return new (mem) StereoConvolver();
         }
 
-        // デストラクタは空（実際の解放は retire 経由）
-        ~StereoConvolver() {
-            // 直接破棄は禁止（すべて retireStereoConvolver を使用すること）
-            #if JUCE_DEBUG
-            jassertfalse; // 直接 delete 禁止。必ず retireStereoConvolver を使用すること
-            #endif
+        // 安全な破棄用静的関数
+        static void destroy(StereoConvolver* sc) noexcept
+        {
+            if (sc)
+            {
+                sc->~StereoConvolver();
+                convo::aligned_free(sc);
+            }
         }
-
         // コピーコンストラクタは禁止 (NUCエンジンは複製コストが高く、状態を持つため)
         StereoConvolver(const StereoConvolver& other) = delete;
 
@@ -1027,8 +1012,26 @@ public: // Added for AudioEngine access
     std::atomic<uint64_t> activeCacheKey { 0 };
     std::atomic<int> activeCacheFFTSize { 0 };
 
-    // ── Phase 0: Epoch-based RCU メンバー ──
-    std::atomic<convo::ConvolverState*> convolverState { nullptr };
+    // ── Phase 0B: Epoch-based Retirement Queue ──
+    static constexpr size_t kMaxRetired = 256;
+
+    struct RetiredEntry {
+        StereoConvolver* engine = nullptr;
+        uint64_t epoch = 0;
+    };
+    RetiredEntry m_retiredEntries[kMaxRetired];
+    size_t m_retiredCount = 0;
+
+    // AudioEngine から供給されるエポック変数へのポインタ（null 許容）
+    std::atomic<uint64_t>* m_audioEpochPtr = nullptr;
+    std::atomic<bool> m_isShuttingDown { false };
+
+    void enqueueRetired(StereoConvolver* engine);
+    void reclaimRetiredEngines();
+    void tickMaintenance();
+
+    friend class AudioEngine; // タイマーやシャットダウン時にアクセスできるように
+
     // GenerationManager: IR ロードタスクの世代管理（陳腐化チェック用）
     GenerationManager convolverStateGeneration;
 
