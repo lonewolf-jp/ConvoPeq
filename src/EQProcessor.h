@@ -5,8 +5,8 @@
 // 20バンドパラメトリックイコライザー処理クラス
 //
 // ■ スレッドセーフ設計 (Lock-free Parameter Update):
-//   - パラメータ変更: UIスレッドから setBandXxx() を呼び出し、内部で新しい BandNode を作成して atomic に差し替えます (RCUパターン)。
-//   - 係数更新: Audio Thread 側は atomic load で最新の BandNode を取得して処理します。ロックフリーで安全に更新が反映されます。
+//   - パラメータ変更: UIスレッドから setBandXxx() を呼び出し、内部で新しい EQState を作成して atomic に差し替えます。
+//   - 係数更新: serializeTo() メソッドを通じて AudioBlob に最新係数を直接生成します。
 //   - パラメータ読み取り: std::atomic なので Audio Thread から安全に読み取れます。
 //
 // ■ フィルタ実装:
@@ -27,7 +27,6 @@
 #include <complex>
 #include <array>
 #include <vector>
-#include "core/EQParameters.h"
 #include "AlignedAllocation.h"
 
 //--------------------------------------------------------------
@@ -94,45 +93,6 @@ struct EQCoeffsBiquad
     double a0 = 1.0, a1 = 0.0, a2 = 0.0;
 };
 
-#include "RefCountedDeferred.h"
-
-//--------------------------------------------------------------
-// EQCoeffCache: 係数キャッシュ（RefCounted資源）
-// v2.3 Phase 1 新規追加
-//
-// 複数のスナップショット間で同一EQパラメータの係数を共有し、
-// CPU/メモリ効率を向上させる不変キャッシュ
-//--------------------------------------------------------------
-#pragma warning(push)
-#pragma warning(disable : 4324)  // alignas(64) により構造体がパッドされることは意図した動作のため警告を無視
-
-struct alignas(64) EQCoeffCache : public RefCountedDeferred<EQCoeffCache>
-{
-    EQCoeffsSVF coeffs[20];              // SVF係数 (20バンド)
-    bool bandActive[20] = {};            // バンド有効フラグ
-    int channelModes[20] = {};           // チャンネルモード (0:Stereo, 1:Left, 2:Right)
-    int filterStructure = 0;             // 0:Serial, 1:Parallel
-
-    // メタデータ
-    uint64_t paramsHash = 0;             // パラメータハッシュ値
-    double sampleRate = 0.0;             // サンプリングレート
-    int maxBlockSize = 0;                // 最大ブロックサイズ
-    uint64_t generation = 0;             // 世代番号
-
-    // Parallel モード用バッファ（事前割り当て）
-    double* parallelInputBuffer = nullptr;
-    double* parallelWorkBuffer = nullptr;
-    double* parallelAccumBuffer = nullptr;
-    int parallelBufferSize = 0;
-
-    EQCoeffCache() = default;
-    ~EQCoeffCache();
-    EQCoeffCache(const EQCoeffCache&) = delete;
-    EQCoeffCache& operator=(const EQCoeffCache&) = delete;
-};
-
-#pragma warning(pop)
-
 //--------------------------------------------------------------
 // EQプロセッサークラス
 //--------------------------------------------------------------
@@ -187,9 +147,7 @@ public:
     // ロック・new・I/O・待機（IR再ロード等）禁止
     //----------------------------------------------------------
     void process(juce::dsp::AudioBlock<double>& block);
-    void process(juce::dsp::AudioBlock<double>& block,
-                 const convo::EQParameters& eqParams,
-                 const EQCoeffCache* coeffCache);
+    void processWithBlob(const uint8_t* blob, juce::AudioBuffer<float>& buffer, juce::AudioBuffer<double>& workBuffer, int startSample, int numSamples);
     void releaseResources();
 
     // バイパス制御
@@ -225,16 +183,6 @@ public:
     FilterStructure getFilterStructure() const noexcept;
 
     //----------------------------------------------------------
-    // v2.3 EQCoeffCache 生成インターフェース
-    //----------------------------------------------------------
-    static uint64_t computeParamsHash(const convo::EQParameters& params) noexcept;
-    static EQCoeffCache* createCoeffCache(
-        const convo::EQParameters& eqParams,
-        double sampleRate,
-        int maxBlockSize,
-        uint64_t generation) noexcept;
-
-    //----------------------------------------------------------
     // パラメータ読み取り (UIスレッドで表示に使用)
     //----------------------------------------------------------
     EQBandParams getBandParams(int band) const;
@@ -252,14 +200,7 @@ public:
     //----------------------------------------------------------
     // 状態構造体
     //----------------------------------------------------------
-    struct BandNode : public RefCountedDeferred<BandNode>
-    {
-        EQCoeffsSVF coeffs;
-        bool active;
-        EQChannelMode mode;
-    };
-
-    struct EQState : public RefCountedDeferred<EQState>
+    struct EQState
     {
         std::array<EQBandParams, NUM_BANDS> bands;
         std::array<EQBandType, NUM_BANDS> bandTypes;
@@ -269,7 +210,26 @@ public:
         float nonlinearSaturation = 0.2f;
         int filterStructure = 0; // 0: Serial, 1: Parallel
 
-        convo::EQParameters toEQParameters() const;
+        // =========================================================================
+        // シリアライズ用 Blob 構造体 (POD, trivially copyable)
+        // =========================================================================
+        struct EQBlob {
+            EQCoeffsSVF bandCoeffs[20];
+            bool  bandActive[20];
+            int   bandChannelModes[20];
+            float totalGainDb;
+            bool  agcEnabled;
+            float saturation;
+            int   filterStructure;
+            double sampleRate;
+        };
+
+        static_assert(std::is_trivially_copyable_v<EQBlob>, "EQBlob must be trivially copyable");
+        static_assert(std::is_standard_layout_v<EQBlob>, "EQBlob must be standard layout");
+        static_assert(sizeof(EQBlob) <= 2048, "EQBlob exceeds expected size");
+
+        void serializeTo(uint8_t* dst, size_t size, double currentSampleRate) const;
+        void deserializeFrom(const uint8_t* src, size_t size);
 
         // Explicitly define the copy constructor
         EQState() = default;
@@ -338,12 +298,6 @@ public:
         return m_pendingAGCChange.exchange(false, std::memory_order_acq_rel);
     }
 
-    // 他のインスタンスから状態を同期 (AudioEngine用)
-    void syncStateFrom(const EQProcessor& other);
-    // 個別パラメータの同期 (最適化)
-    void syncBandNodeFrom(const EQProcessor& other, int bandIndex);
-    void syncGlobalStateFrom(const EQProcessor& other);
-
     //----------------------------------------------------------
     // プリセット読み込み (AudioEngine::prepareToPlayから呼ばれる)
     //----------------------------------------------------------
@@ -394,10 +348,6 @@ private:
     bool isBufferSilent(const juce::AudioBuffer<double>& buffer, int numSamples) const noexcept;
     bool isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block, int numChannels, int numSamples) const noexcept;
 
-    // 係数計算
-    BandNode* createBandNode(int bandIndex, const EQState& state) const;
-    void updateBandNode(int bandIndex);
-
     // スムージング処理
     std::atomic<EQState*> currentStateRaw { nullptr }; // Raw pointer for Audio Thread (Lock-free)
 
@@ -429,8 +379,7 @@ private:
     static constexpr double BYPASS_FADE_TIME_SEC = 0.005; // 5ms
 
     // ── 係数管理 (Atomic Swap) ──
-    std::array<std::atomic<BandNode*>, NUM_BANDS> bandNodes; // Raw pointer for Audio Thread
-    std::array<BandNode*, NUM_BANDS> activeBandNodes { nullptr }; // Ownership for Message Thread
+    // (Double Buffering Architecture で完全置換されたため、ポインタ交換廃止)
 
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──
     // SVFの2つの積分器状態 (ic1eq, ic2eq)

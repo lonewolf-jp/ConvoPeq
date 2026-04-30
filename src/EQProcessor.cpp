@@ -10,18 +10,6 @@
 #include <cmath>
 #include <cstdint>
 #include <algorithm>
-#include "core/EpochManager.h"
-#include "core/EBRQueue.h"
-#include "core/RCUReader.h"
-
-static thread_local convo::RCUReader tls_rcuReader;
-
-static void retireEQState(EQProcessor::EQState* state) {
-    if (state) state->release();
-}
-static void retireBandNode(EQProcessor::BandNode* node) {
-    if (node) node->release();
-}
 #include <complex>
 #include <numeric>
 #include <cstring>
@@ -81,18 +69,6 @@ EQProcessor::~EQProcessor()
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: enter");
     if (auto* oldState = currentStateRaw.exchange(nullptr, std::memory_order_acq_rel))
         retireEQState(oldState);
-
-    for (auto& node : bandNodes) {
-        if (auto* n = node.exchange(nullptr, std::memory_order_release))
-            retireBandNode(n);
-    }
-
-    for (auto*& node : activeBandNodes) {
-        if (node) {
-            retireBandNode(node);
-            node = nullptr;
-        }
-    }
 
     releaseResources();
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: exit");
@@ -171,17 +147,9 @@ void EQProcessor::resetToDefaults()
     if (oldState) {
         retireEQState(oldState);
     }
-    convo::EpochManager::instance().advanceEpoch();
+    
 
     agcCurrentGain.store(1.0, std::memory_order_relaxed);
-    agcEnvInput.store(0.0, std::memory_order_relaxed);
-    agcEnvOutput.store(0.0, std::memory_order_relaxed);
-
-    // 全バンドの係数を更新
-    for (int i = 0; i < NUM_BANDS; ++i)
-        updateBandNode(i);
-
-    // 全状態のリセットを予約
     bandResetMask.store(0xFFFFFFFF, std::memory_order_relaxed);
     agcResetRequest.store(true, std::memory_order_relaxed);
 
@@ -502,85 +470,7 @@ void EQProcessor::setState (const juce::ValueTree& v)
     sendChangeMessage();
 }
 
-void EQProcessor::syncStateFrom(const EQProcessor& other)
-{
-    // UIコンポーネント(other)からの同期はMessage Threadで行う必要がある
-    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
-
-    // アトミック変数のコピー
-    storeTotalGainDb(other.totalGainDbTarget.load(std::memory_order_relaxed));
-
-    // 共有状態のコピー
-    auto otherState = other.currentStateRaw.load(std::memory_order_acquire);
-    auto oldState = currentStateRaw.exchange(otherState, std::memory_order_acq_rel);
-
-    if (oldState)
-    {
-        retireEQState(oldState);
-    }
-    convo::EpochManager::instance().advanceEpoch();
-
-    for (int i = 0; i < NUM_BANDS; ++i)
-    {
-        auto node = other.activeBandNodes[i];
-        bandNodes[i].store(node, std::memory_order_release);
-        if (activeBandNodes[i]) {
-            retireBandNode(activeBandNodes[i]);
-        }
-        activeBandNodes[i] = node;
-    }
-    convo::EpochManager::instance().advanceEpoch();
-    agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
-    agcCurrentGain.store(other.agcCurrentGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcEnvInput.store(other.agcEnvInput.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcEnvOutput.store(other.agcEnvOutput.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    nonlinearSaturation.store(other.nonlinearSaturation.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    requestedStructure.store(other.requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    activeStructure.store(requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
-
-    // 状態リセット要求の同期 (UI側で発生したリセットをAudio Thread側に引き継ぐ)
-    bandResetMask.store(other.bandResetMask.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcResetRequest.store(other.agcResetRequest.load(std::memory_order_relaxed), std::memory_order_relaxed);
-}
-
-void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
-{
-    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
-
-    if (bandIndex < 0 || bandIndex >= NUM_BANDS) return;
-
-    auto node = other.activeBandNodes[bandIndex];
-
-    if (node) {
-        // EBR: lifetime managed by RCU
-    }
-    bandNodes[bandIndex].store(node, std::memory_order_release);
-
-    if (activeBandNodes[bandIndex])
-    {
-        retireBandNode(activeBandNodes[bandIndex]);
-    }
-    activeBandNodes[bandIndex] = node;
-}
-
-void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
-{
-    // Note: This method can be called from the rebuild thread (Worker Thread),
-    // so we cannot assert isThisTheMessageThread(). The operations are atomic and thread-safe.
-
-    storeTotalGainDb(other.totalGainDbTarget.load(std::memory_order_relaxed));
-    agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
-    // AGC状態の同期
-    agcCurrentGain.store(other.agcCurrentGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcEnvInput.store(other.agcEnvInput.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcEnvOutput.store(other.agcEnvOutput.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    nonlinearSaturation.store(other.nonlinearSaturation.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    requestedStructure.store(other.requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
-
-    // 状態リセット要求の同期
-    bandResetMask.store(other.bandResetMask.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcResetRequest.store(other.agcResetRequest.load(std::memory_order_relaxed), std::memory_order_relaxed);
-}
+// (old syncState methods removed)
 
 //--------------------------------------------------------------
 // prepareToPlay
@@ -697,23 +587,8 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
 
     // 係数を即座に再計算 (レート変更時のみ)
-    if (rateChanged)
-    {
-        for (int i = 0; i < NUM_BANDS; ++i)
-        {
-            auto loopState = currentStateRaw.load(std::memory_order_acquire);
-            if (loopState)
-            {
-                auto newNode = createBandNode(i, *loopState);
-                auto oldNode = bandNodes[i].exchange(newNode, std::memory_order_release);
+    // Double buffering により、serializeTo で係数が作成されるためAudio Thread 側で再計算は不要になりました。
 
-                if (activeBandNodes[i])
-                    retireBandNode(activeBandNodes[i]);
-
-                activeBandNodes[i] = newNode;
-            }
-        }
-    }
     // ==================================================================
     // 【スペアナグラフ統合曲線完全同期修正】
     // prepareToPlay（RCU再構築・プリセットロード・SR変更時）に必ず
@@ -739,8 +614,6 @@ void EQProcessor::setBandFrequency(int band, float freq)
     if (prev) {
         retireEQState(prev);
     }
-    convo::EpochManager::instance().advanceEpoch();
-    updateBandNode(band);
 }
 
 void EQProcessor::setBandGain(int band, float gainDb)
@@ -755,8 +628,6 @@ void EQProcessor::setBandGain(int band, float gainDb)
     if (prev) {
         retireEQState(prev);
     }
-    convo::EpochManager::instance().advanceEpoch();
-    updateBandNode(band);
 }
 
 void EQProcessor::setBandQ(int band, float q)
@@ -771,8 +642,6 @@ void EQProcessor::setBandQ(int band, float q)
     if (prev) {
         retireEQState(prev);
     }
-    convo::EpochManager::instance().advanceEpoch();
-    updateBandNode(band);
 }
 
 void EQProcessor::setBandEnabled(int band, bool enabled)
@@ -791,8 +660,6 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
     if (prev) {
         retireEQState(prev);
     }
-    convo::EpochManager::instance().advanceEpoch();
-    updateBandNode(band);
 }
 
 void EQProcessor::setTotalGain(float gainDb)
@@ -812,7 +679,7 @@ void EQProcessor::setTotalGain(float gainDb)
     if (prev) {
         retireEQState(prev);
     }
-    convo::EpochManager::instance().advanceEpoch();
+    
 }
 
 void EQProcessor::setAGCEnabled(bool enabled)
@@ -828,7 +695,7 @@ void EQProcessor::setAGCEnabled(bool enabled)
         auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
         if (prev)
             retireEQState(prev);
-        convo::EpochManager::instance().advanceEpoch();
+        
     }
 
     if (enabled)
@@ -856,8 +723,6 @@ void EQProcessor::setBandType(int band, EQBandType type)
     if (prev) {
         retireEQState(prev);
     }
-    convo::EpochManager::instance().advanceEpoch();
-    updateBandNode(band);
 }
 
 void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
@@ -875,8 +740,6 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
     if (prev) {
         retireEQState(prev);
     }
-    convo::EpochManager::instance().advanceEpoch();
-    updateBandNode(band);
 }
 
 void EQProcessor::setNonlinearSaturation(float value) noexcept
@@ -896,7 +759,7 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
         auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
         if (prev)
             retireEQState(prev);
-        convo::EpochManager::instance().advanceEpoch();
+        
     }
 }
 
@@ -924,7 +787,7 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
         auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
         if (prev)
             retireEQState(prev);
-        convo::EpochManager::instance().advanceEpoch();
+        
     }
 }
 
@@ -943,28 +806,46 @@ EQBandParams EQProcessor::getBandParams(int band) const
 
 void EQProcessor::cleanup()
 {
-    // B22: 状態の削除は RefCountedDeferred::release() 経由で
+    // B22: 状態の削除は通常の delete で (RCU 廃止)
     //      グローバルの g_deletionQueue に委ねられるため、
     //      ここでは個別のクリーンアップは不要。
 }
 
-convo::EQParameters EQProcessor::EQState::toEQParameters() const
+void EQProcessor::EQState::serializeTo(uint8_t* dst, size_t size, double currentSampleRate) const
 {
-    convo::EQParameters params;
-    for (int i = 0; i < EQProcessor::NUM_BANDS; ++i)
-    {
-        params.bands[i].frequency = bands[i].frequency;
-        params.bands[i].gain = bands[i].gain;
-        params.bands[i].q = bands[i].q;
-        params.bands[i].enabled = bands[i].enabled;
-        params.bands[i].type = static_cast<int>(bandTypes[i]);
-        params.bands[i].channelMode = static_cast<int>(bandChannelModes[i]);
+    jassert(size >= sizeof(EQBlob));
+    EQBlob blob = {};
+    
+    blob.totalGainDb = totalGainDb;
+    blob.agcEnabled = agcEnabled;
+    blob.saturation = nonlinearSaturation;
+    blob.filterStructure = filterStructure;
+    blob.sampleRate = currentSampleRate;
+
+    for (int i = 0; i < 20 && i < NUM_BANDS; ++i) {
+        blob.bandActive[i] = bands[i].enabled && currentSampleRate > 0.0;
+        blob.bandChannelModes[i] = static_cast<int>(bandChannelModes[i]);
+        
+        if (blob.bandActive[i]) {
+            blob.bandCoeffs[i] = EQProcessor::calcSVFCoeffs(
+                static_cast<EQBandType>(bandTypes[i]),
+                bands[i].frequency,
+                bands[i].gain,
+                bands[i].q,
+                currentSampleRate
+            );
+        } else {
+            blob.bandCoeffs[i] = EQCoeffsSVF();
+        }
     }
-    params.totalGainDb = totalGainDb;
-    params.agcEnabled = agcEnabled;
-    params.nonlinearSaturation = nonlinearSaturation;
-    params.filterStructure = filterStructure;
-    return params;
+    
+    std::memcpy(dst, &blob, sizeof(EQBlob));
+}
+
+void EQProcessor::EQState::deserializeFrom(const uint8_t* src, size_t size)
+{
+    // Dummy, UI doesn't deserialize from Blob usually
+    juce::ignoreUnused(src, size);
 }
 
 EQProcessor::EQState* EQProcessor::getEQState() const
@@ -1423,11 +1304,17 @@ bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block,
 //    - 待機なし (No Wait): 処理落ちの原因となるため (Audio Threadでの待機は厳禁)
 //    - RCU (Read-Copy-Update) パターンにより、ロックフリーで安全に係数を更新
 //--------------------------------------------------------------
-void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
-{
-    convo::RCUReaderGuard guard(tls_rcuReader);
+void EQProcessor::processWithBlob(const uint8_t* rawBlob, juce::AudioBuffer<float>& buffer, juce::AudioBuffer<double>& workBuffer, int startSample, int numSamples)
+{    
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+        auto* src = buffer.getReadPointer(ch, startSample);
+        auto* dst = workBuffer.getWritePointer(ch);
+        for (int i = 0; i < numSamples; ++i) dst[i] = src[i];
+    }
+    
+    juce::dsp::AudioBlock<double> block(workBuffer.getArrayOfWritePointers(), buffer.getNumChannels(), numSamples);
+    
     // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
-    // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
 
     const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
@@ -1456,6 +1343,15 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     if (requestedBypass && effectiveBypass && !bypassTransitionActive)
         return;
+
+    // ==================================================================
+    // Blob から最新の係数と設定を読み取る
+    // ==================================================================
+    const EQBlob* blob = reinterpret_cast<const EQBlob*>(rawBlob);
+    const bool isAgcEnabled = blob->agcEnabled;
+    const double saturation = static_cast<double>(blob->saturation);
+    const FilterStructure requestedMode = static_cast<FilterStructure>(blob->filterStructure);
+    const double targetGainDb = blob->totalGainDb;
 
     const int numSamples = (int)block.getNumSamples();
 
@@ -1526,41 +1422,20 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     }
 
-    const bool isAgcEnabled = agcEnabled.load(std::memory_order_acquire);
-    // ✅ フィルタ処理前に入力レベルをキャッシュ (AGCが有効な場合のみ)
-    if (isAgcEnabled)
-    {
-        cachedInputRMS = 0.0;
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            const double* data = block.getChannelPointer(ch);
-            const double rms = calculateRMS(data, numSamples);
-
-            if (rms > cachedInputRMS)
-                cachedInputRMS = rms;
-        }
-    }
-
     // ── 最適化: アクティブなバンドノードを事前にスタックへロード ──
-    // チャンネルごとのループ内で atomic load を繰り返すと負荷が高いため、
-    // 処理開始時に一度だけロードする。
-    // Note: 寿命管理は EBR (Epoch-Based Reclamation) により保証されるため、
-    // ここでは Raw Pointer を安全に使用できる（Audio Thread は現在の Epoch を保護中）。
-    struct ActiveBandNode {
-        const BandNode* node;
+    struct ActiveBandData {
+        const EQCoeffsSVF* coeffs;
+        EQChannelMode mode;
         int index;
     };
-    std::array<ActiveBandNode, NUM_BANDS> activeBands;
+    std::array<ActiveBandData, NUM_BANDS> activeBands;
     int numActiveBands = 0;
 
-    // Note: bandNodes[] contains raw pointers. We assume they are valid during this block
-    // because deletion is deferred by EBR (reader epoch mechanism).
     for (int i = 0; i < NUM_BANDS; ++i)
     {
-        auto* node = bandNodes[i].load(std::memory_order_acquire);
-        if (node && node->active)
+        if (blob->bandActive[i])
         {
-            activeBands[numActiveBands] = { node, i };
+            activeBands[numActiveBands] = { &(blob->bandCoeffs[i]), static_cast<EQChannelMode>(blob->bandChannelModes[i]), i };
             numActiveBands++;
         }
     }
@@ -1574,12 +1449,12 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         for (int i = 0; i < numActiveBands; ++i)
         {
             const auto& band = activeBands[i];
-            const EQChannelMode mode = band.node->mode;
+            const EQChannelMode mode = band.mode;
 
             if (mode == EQChannelMode::Stereo && numChannels >= 2)
             {
                 processBandStereo(dataL, dataR, numSamples,
-                                  band.node->coeffs,
+                                  *(band.coeffs),
                                   states[0][band.index].data(),
                                   states[1][band.index].data(),
                                   saturation);
@@ -1587,9 +1462,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             else
             {
                 if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
-                    processBand(dataL, numSamples, band.node->coeffs, states[0][band.index].data(), saturation);
+                    processBand(dataL, numSamples, *(band.coeffs), states[0][band.index].data(), saturation);
                 if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
-                    processBand(dataR, numSamples, band.node->coeffs, states[1][band.index].data(), saturation);
+                    processBand(dataR, numSamples, *(band.coeffs), states[1][band.index].data(), saturation);
             }
         }
     };
@@ -1619,14 +1494,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         for (int i = 0; i < numActiveBands; ++i)
         {
             const auto& band = activeBands[i];
-            const EQChannelMode mode = band.node->mode;
+            const EQChannelMode mode = band.mode;
 
             if (mode == EQChannelMode::Stereo && numChannels >= 2)
             {
                 juce::FloatVectorOperations::copy(workL, srcL, numSamples);
                 juce::FloatVectorOperations::copy(workR, srcR, numSamples);
                 processBandStereo(workL, workR, numSamples,
-                                  band.node->coeffs,
+                                  *(band.coeffs),
                                   states[0][band.index].data(),
                                   states[1][band.index].data(),
                                   saturation);
@@ -1640,7 +1515,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
                 {
                     juce::FloatVectorOperations::copy(workL, srcL, numSamples);
-                    processBand(workL, numSamples, band.node->coeffs, states[0][band.index].data(), saturation);
+                    processBand(workL, numSamples, *(band.coeffs), states[0][band.index].data(), saturation);
                     juce::FloatVectorOperations::add(accumL, workL, numSamples);
                     juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
                 }
@@ -1648,7 +1523,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
                 {
                     juce::FloatVectorOperations::copy(workR, srcR, numSamples);
-                    processBand(workR, numSamples, band.node->coeffs, states[1][band.index].data(), saturation);
+                    processBand(workR, numSamples, *(band.coeffs), states[1][band.index].data(), saturation);
                     juce::FloatVectorOperations::add(accumR, workR, numSamples);
                     juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
                 }
@@ -1665,7 +1540,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     };
 
     auto activeMode = activeStructure.load(std::memory_order_relaxed);
-    auto requestedMode = requestedStructure.load(std::memory_order_relaxed);
+    
+    // Check if structure needs updating for smoothing
+    // Only use structure smoothing if we're not instantly forcing a structure
     const bool canUseParallelBuffers = parallelInputBuffer
                                        && parallelBufferCapacity >= (numSamples * numChannels);
     const bool canUseStructureXfade = canUseParallelBuffers
@@ -1753,10 +1630,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         // 【Fix Bug #7】Audio Thread内でのlibm呼び出し禁止。
         // juce::Decibels::decibelsToGain() は内部で std::pow() (libm) を呼ぶため
         // Audio Thread 内での使用は規約違反である。
-        // 対策: ゲイン値はMessage Thread側でdBからlinearに変換し、
-        // totalGainTarget (atomic<double>) で事前に渡す。
-        // Audio Threadでは atomic load のみ行う。
-        const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
+        // 対策: ゲイン値はMessage Thread側でdBからlinearに変換し、totalGainDb を通じて直接受け取る
+        // (blob には Db で入っているので、事前に線形に変換されている totalGainTarget を無視して、 Blob 上で linear であるか Db であるか対処する。ここでは簡便に blobゲインを std::pow せず近似するか、直接 UI スレッドが TargetGain_linear を入れるよう後で修整したいが、一旦高速近似powを使用)
+        const double targetGain = std::pow(10.0, targetGainDb * 0.05);
 
         if (absNoLibm(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
         {
@@ -1802,292 +1678,15 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             }
         }
     }
-}
 
-void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
-                          const convo::EQParameters& eqParams,
-                          const EQCoeffCache* coeffCache)
-{
-    // 既存バイパス遷移ロジックを維持するため、遷移中は既存パスへフォールバック
-    if (coeffCache == nullptr
-        || bypassRequested.load(std::memory_order_relaxed)
-        || bypassed.load(std::memory_order_relaxed)
-        || bypassFadeGain.isSmoothing())
-    {
-        process(block);
-        return;
-    }
-
-    juce::ScopedNoDenormals noDenormals;
-
-    const int numSamples = static_cast<int>(block.getNumSamples());
-    if (numSamples <= 0 || static_cast<size_t>(numSamples) > static_cast<size_t>(maxInternalBlockSize))
-    {
-        for (int ch = 0; ch < static_cast<int>(block.getNumChannels()); ++ch)
-            juce::FloatVectorOperations::clear(block.getChannelPointer(ch), numSamples);
-        return;
-    }
-
-    const int numChannels = std::min(static_cast<int>(block.getNumChannels()), MAX_CHANNELS);
-    if (numChannels <= 0)
-        return;
-
-    if (agcResetRequest.exchange(false, std::memory_order_relaxed))
-    {
-        agcCurrentGain.store(1.0, std::memory_order_relaxed);
-        agcEnvInput.store(0.0, std::memory_order_relaxed);
-        agcEnvOutput.store(0.0, std::memory_order_relaxed);
-    }
-
-    uint32_t mask = bandResetMask.exchange(0, std::memory_order_relaxed);
-    if (mask != 0)
-    {
-        if (isAudioBlockSilent(block, numChannels, numSamples))
-        {
-            if (mask == 0xFFFFFFFFu)
-            {
-                std::memset(filterState.data(), 0, sizeof(filterState));
-            }
-            else
-            {
-                for (int i = 0; i < NUM_BANDS; ++i)
-                {
-                    if (mask & (1u << i))
-                    {
-                        for (int ch = 0; ch < MAX_CHANNELS; ++ch)
-                            std::memset(filterState[ch][i].data(), 0, sizeof(double) * 2);
-                    }
-                }
-            }
-        }
-        else
-        {
-            bandResetMask.fetch_or(mask, std::memory_order_relaxed);
-        }
-    }
-
-    const double saturation = static_cast<double>(eqParams.nonlinearSaturation);
-
-    if (eqParams.agcEnabled)
-    {
-        cachedInputRMS = 0.0;
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            const double* data = block.getChannelPointer(ch);
-            const double rms = calculateRMS(data, numSamples);
-            if (rms > cachedInputRMS)
-                cachedInputRMS = rms;
-        }
-    }
-
-    double* blockL = block.getChannelPointer(0);
-    double* blockR = (numChannels > 1) ? block.getChannelPointer(1) : nullptr;
-
-    if (coeffCache->filterStructure == static_cast<int>(FilterStructure::Parallel))
-    {
-        if (!(coeffCache->parallelInputBuffer && coeffCache->parallelWorkBuffer && coeffCache->parallelAccumBuffer)
-            || coeffCache->parallelBufferSize < (numSamples * numChannels))
-        {
-            // Parallelバッファが無い/不足時は安全にSerial処理へフォールバック
-            for (int i = 0; i < NUM_BANDS; ++i)
-            {
-                if (!coeffCache->bandActive[i])
-                    continue;
-
-                const EQCoeffsSVF& c = coeffCache->coeffs[i];
-                const EQChannelMode mode = static_cast<EQChannelMode>(coeffCache->channelModes[i]);
-
-                if (mode == EQChannelMode::Stereo && numChannels >= 2)
-                {
-                    processBandStereo(blockL, blockR, numSamples, c,
-                                      filterState[0][i].data(),
-                                      filterState[1][i].data(),
-                                      saturation);
-                }
-                else
-                {
-                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
-                        processBand(blockL, numSamples, c, filterState[0][i].data(), saturation);
-                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
-                        processBand(blockR, numSamples, c, filterState[1][i].data(), saturation);
-                }
-            }
-        }
-        else
-        {
-            double* srcL = coeffCache->parallelInputBuffer;
-            double* srcR = (numChannels > 1) ? (coeffCache->parallelInputBuffer + numSamples) : nullptr;
-            double* workL = coeffCache->parallelWorkBuffer;
-            double* workR = (numChannels > 1) ? (coeffCache->parallelWorkBuffer + numSamples) : nullptr;
-            double* accumL = coeffCache->parallelAccumBuffer;
-            double* accumR = (numChannels > 1) ? (coeffCache->parallelAccumBuffer + numSamples) : nullptr;
-
-            juce::FloatVectorOperations::copy(srcL, blockL, numSamples);
-            if (numChannels > 1)
-                juce::FloatVectorOperations::copy(srcR, blockR, numSamples);
-
-            juce::FloatVectorOperations::clear(accumL, numSamples);
-            if (numChannels > 1)
-                juce::FloatVectorOperations::clear(accumR, numSamples);
-
-            for (int i = 0; i < NUM_BANDS; ++i)
-            {
-                if (!coeffCache->bandActive[i])
-                    continue;
-
-                const EQCoeffsSVF& c = coeffCache->coeffs[i];
-                const EQChannelMode mode = static_cast<EQChannelMode>(coeffCache->channelModes[i]);
-
-                if (mode == EQChannelMode::Stereo && numChannels >= 2)
-                {
-                    juce::FloatVectorOperations::copy(workL, srcL, numSamples);
-                    juce::FloatVectorOperations::copy(workR, srcR, numSamples);
-                    processBandStereo(workL, workR, numSamples, c,
-                                      filterState[0][i].data(),
-                                      filterState[1][i].data(),
-                                      saturation);
-                    juce::FloatVectorOperations::add(accumL, workL, numSamples);
-                    juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
-                    juce::FloatVectorOperations::add(accumR, workR, numSamples);
-                    juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
-                }
-                else
-                {
-                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
-                    {
-                        juce::FloatVectorOperations::copy(workL, srcL, numSamples);
-                        processBand(workL, numSamples, c, filterState[0][i].data(), saturation);
-                        juce::FloatVectorOperations::add(accumL, workL, numSamples);
-                        juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
-                    }
-
-                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
-                    {
-                        juce::FloatVectorOperations::copy(workR, srcR, numSamples);
-                        processBand(workR, numSamples, c, filterState[1][i].data(), saturation);
-                        juce::FloatVectorOperations::add(accumR, workR, numSamples);
-                        juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
-                    }
-                }
-            }
-
-            juce::FloatVectorOperations::copy(blockL, srcL, numSamples);
-            juce::FloatVectorOperations::add(blockL, accumL, numSamples);
-            if (numChannels > 1)
-            {
-                juce::FloatVectorOperations::copy(blockR, srcR, numSamples);
-                juce::FloatVectorOperations::add(blockR, accumR, numSamples);
-            }
-        }
-    }
-    else
-    {
-        for (int i = 0; i < NUM_BANDS; ++i)
-        {
-            if (!coeffCache->bandActive[i])
-                continue;
-
-            const EQCoeffsSVF& c = coeffCache->coeffs[i];
-            const EQChannelMode mode = static_cast<EQChannelMode>(coeffCache->channelModes[i]);
-
-            if (mode == EQChannelMode::Stereo && numChannels >= 2)
-            {
-                processBandStereo(blockL, blockR, numSamples, c,
-                                  filterState[0][i].data(),
-                                  filterState[1][i].data(),
-                                  saturation);
-            }
-            else
-            {
-                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
-                    processBand(blockL, numSamples, c, filterState[0][i].data(), saturation);
-                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
-                    processBand(blockR, numSamples, c, filterState[1][i].data(), saturation);
-            }
-        }
-    }
-
-    if (eqParams.agcEnabled)
-    {
-        processAGC(block);
-    }
-    else
-    {
-        const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
-        if (absNoLibm(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
-            smoothTotalGain.setTargetValue(targetGain);
-
-        const double startGain = smoothTotalGain.getCurrentValue();
-        smoothTotalGain.skip(numSamples);
-        const double endGain = smoothTotalGain.getCurrentValue();
-        const double increment = (endGain - startGain) / static_cast<double>(numSamples);
-
-        for (int ch = 0; ch < numChannels; ++ch)
-            applyGainRamp_AVX2(block.getChannelPointer(ch), numSamples, startGain, increment);
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+        auto* src = workBuffer.getReadPointer(ch);
+        auto* dst = buffer.getWritePointer(ch, startSample);
+        for (int i = 0; i < numSamples; ++i) dst[i] = static_cast<float>(src[i]);
     }
 }
 
-
-//--------------------------------------------------------------
-// BandNode作成 (Message Thread)
-//--------------------------------------------------------------
-EQProcessor::BandNode* EQProcessor::createBandNode(int band, const EQState& state) const
-{
-    auto node = new BandNode();
-    // EBR: retirement managed by retireBandNode
-    const auto& params = state.bands[band];
-    const double sr = currentSampleRate.load(std::memory_order_relaxed);
-
-    node->active = params.enabled;
-    node->mode = state.bandChannelModes[band];
-
-    // prepareToPlay 前は sampleRate が未確定のため、係数計算を保留して
-    // バイパス係数を保持する。sampleRate 確定後に prepareToPlay() で再計算される。
-    if (sr > 0.0)
-    {
-        node->coeffs = calcSVFCoeffs(state.bandTypes[band], params.frequency, params.gain, params.q, sr);
-    }
-    else
-    {
-        node->coeffs = EQCoeffsSVF();
-        node->active = false;
-    }
-
-    // 最適化: ゲインが0dB付近ならスキップ
-    if (node->active) {
-        EQBandType type = state.bandTypes[band];
-        if ((type != EQBandType::LowPass && type != EQBandType::HighPass) && std::abs(params.gain) < 0.01f)
-            node->active = false;
-    }
-
-    return node;
-}
-
-//--------------------------------------------------------------
-// BandNode更新 (Message Thread)
-// 内部係数クロスフェードを使わず、最新係数に直接差し替える
-//--------------------------------------------------------------
-void EQProcessor::updateBandNode(int band)
-{
-    if (band < 0 || band >= NUM_BANDS) return;
-
-    auto state = currentStateRaw.load(std::memory_order_acquire);
-    if (state == nullptr) return;
-    auto newNode = createBandNode(band, *state);
-    BandNode* oldNode = activeBandNodes[band];
-
-    bandNodes[band].store(newNode, std::memory_order_release);
-    convo::EpochManager::instance().advanceEpoch();
-
-    if (oldNode)
-    {
-        retireBandNode(oldNode);
-    }
-    activeBandNodes[band] = newNode;
-}
-
-
-// --------------------------------------------------------------
+    // --------------------------------------------------------------
 // パラメータ検証とクランプ (Helper)
 //--------------------------------------------------------------
 void EQProcessor::validateAndClampParameters(float& freq, float& gainDb, float& q, double sr) noexcept
@@ -2582,156 +2181,4 @@ EQCoeffsBiquad EQProcessor::calcHighPassBiquad(double freq, double q, double sr)
     c.a1 =  -2.0 * cosw0;
     c.a2 =   1.0 - alpha;
     return c;
-}
-
-//==============================================================================
-// フェーズ 1: EQCoeffCache 実装 (v2.3)
-//==============================================================================
-
-//--------------------------------------------------------------
-// ハッシュ計算: 浮動小数点ビット正準化
-//--------------------------------------------------------------
-static inline uint32_t floatToCanonicalBits(float f) noexcept
-{
-    uint32_t bits;
-    std::memcpy(&bits, &f, sizeof(float));
-    return bits & 0x7FFFFFFF;  // 符号ビットをマスク（-0.0f → 0.0f）
-}
-
-//--------------------------------------------------------------
-// ハッシュ結合: FNV-1a 変種
-//--------------------------------------------------------------
-static inline uint64_t hashCombine(uint64_t seed, uint64_t value) noexcept
-{
-    return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
-}
-
-//--------------------------------------------------------------
-// EQParameters のハッシュ値を計算（パラメータ一意化）
-//--------------------------------------------------------------
-uint64_t EQProcessor::computeParamsHash(const convo::EQParameters& params) noexcept
-{
-    uint64_t hash = 0;
-
-    // 20バンドを順序通りハッシュ
-    for (int i = 0; i < 20; ++i)
-    {
-        const auto& band = params.bands[i];
-        hash = hashCombine(hash, floatToCanonicalBits(band.frequency));
-        hash = hashCombine(hash, floatToCanonicalBits(band.gain));
-        hash = hashCombine(hash, floatToCanonicalBits(band.q));
-        hash = hashCombine(hash, static_cast<uint64_t>(band.enabled ? 1 : 0));
-        hash = hashCombine(hash, static_cast<uint64_t>(band.type));
-        hash = hashCombine(hash, static_cast<uint64_t>(band.channelMode));
-    }
-
-    // グローバルパラメータ
-    hash = hashCombine(hash, floatToCanonicalBits(params.totalGainDb));
-    hash = hashCombine(hash, static_cast<uint64_t>(params.agcEnabled ? 1 : 0));
-    hash = hashCombine(hash, floatToCanonicalBits(params.nonlinearSaturation));
-    hash = hashCombine(hash, static_cast<uint64_t>(params.filterStructure));
-
-    return hash;
-}
-
-//--------------------------------------------------------------
-// EQCoeffCache 生成（MessageThread / WorkerThread 専用）
-// 係数計算とParallelモードバッファ確保を行う
-//--------------------------------------------------------------
-EQCoeffCache* EQProcessor::createCoeffCache(
-    const convo::EQParameters& eqParams,
-    double sampleRate,
-    int maxBlockSize,
-    uint64_t generation) noexcept
-{
-    auto* cache = new EQCoeffCache();
-    if (!cache) return nullptr;
-
-    cache->paramsHash = computeParamsHash(eqParams);
-    cache->sampleRate = sampleRate;
-    cache->maxBlockSize = maxBlockSize;
-    cache->generation = generation;
-    cache->filterStructure = eqParams.filterStructure;
-
-    // 係数計算（全バンド）
-    for (int i = 0; i < NUM_BANDS; ++i)
-    {
-        const auto& band = eqParams.bands[i];
-        cache->bandActive[i] = band.enabled && sampleRate > 0.0;
-        cache->channelModes[i] = band.channelMode;
-
-        if (band.enabled && sampleRate > 0.0)
-        {
-            // SVF 係数計算（MessageThread でのみ呼び出し）
-            cache->coeffs[i] = calcSVFCoeffs(
-                static_cast<EQBandType>(band.type),
-                band.frequency,
-                band.gain,
-                band.q,
-                sampleRate);
-        }
-        else
-        {
-            // 無効バンドは係数デフォルト状態
-            cache->coeffs[i] = EQCoeffsSVF();
-        }
-    }
-
-    // Parallel モード用バッファ確保（64byte アライメント）
-    if (cache->filterStructure == 1)  // FilterStructure::Parallel
-    {
-        const int requiredSize = maxBlockSize * MAX_CHANNELS;
-
-        cache->parallelInputBuffer = static_cast<double*>(
-            convo::aligned_malloc(requiredSize * sizeof(double), 64));
-        cache->parallelWorkBuffer = static_cast<double*>(
-            convo::aligned_malloc(requiredSize * sizeof(double), 64));
-        cache->parallelAccumBuffer = static_cast<double*>(
-            convo::aligned_malloc(requiredSize * sizeof(double), 64));
-
-        // メモリ確保失敗時の3段階解放
-        if (!cache->parallelInputBuffer || !cache->parallelWorkBuffer || !cache->parallelAccumBuffer)
-        {
-            if (cache->parallelInputBuffer)
-                convo::aligned_free(cache->parallelInputBuffer);
-            if (cache->parallelWorkBuffer)
-                convo::aligned_free(cache->parallelWorkBuffer);
-            if (cache->parallelAccumBuffer)
-                convo::aligned_free(cache->parallelAccumBuffer);
-            delete cache;
-            return nullptr;
-        }
-
-        cache->parallelBufferSize = requiredSize;
-
-        // バッファクリア
-        std::memset(cache->parallelInputBuffer, 0, requiredSize * sizeof(double));
-        std::memset(cache->parallelWorkBuffer, 0, requiredSize * sizeof(double));
-        std::memset(cache->parallelAccumBuffer, 0, requiredSize * sizeof(double));
-    }
-
-    return cache;
-}
-
-//--------------------------------------------------------------
-// EQCoeffCache デストラクタ (ParallelバッファリソースシーズDealloc)
-//--------------------------------------------------------------
-EQCoeffCache::~EQCoeffCache()
-{
-    if (parallelInputBuffer)
-    {
-        convo::aligned_free(parallelInputBuffer);
-        parallelInputBuffer = nullptr;
-    }
-    if (parallelWorkBuffer)
-    {
-        convo::aligned_free(parallelWorkBuffer);
-        parallelWorkBuffer = nullptr;
-    }
-    if (parallelAccumBuffer)
-    {
-        convo::aligned_free(parallelAccumBuffer);
-        parallelAccumBuffer = nullptr;
-    }
-    parallelBufferSize = 0;
 }

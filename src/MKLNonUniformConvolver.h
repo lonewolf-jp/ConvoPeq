@@ -192,9 +192,6 @@ public:
     }
 
 private:
-     // 軽量参照カウントによる UAF 防止（削除予定）
-    std::atomic<uint32_t> refCount{0};
-    std::atomic<bool> retireRequested{false};
 
     //----------------------------------------------------------
     // Layer  ─ 1 つのパーティション層

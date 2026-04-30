@@ -81,7 +81,7 @@ private:
 // ---------------------------------------------------------------------------
 // ConvolverState
 // 畳み込みエンジン 1 インスタンス分の MKL リソースをすべて保持する。
-// Epoch-based RCU の「保護対象オブジェクト」として SafeStateSwapper に渡す。
+// Epoch-based RCU を用いてライフサイクルを自動管理する。
 // ---------------------------------------------------------------------------
 #pragma warning(push)
 #pragma warning(disable: 4324) // alignment specifier introduced padding for this struct intentionally.
@@ -103,13 +103,8 @@ struct ConvolverState
     // DFTI ハンドル（RAII 管理）
     DftiHandleOwner fftHandle;
 
-    // 冪等クリーンアップ用フラグ
-    std::atomic<bool> cleanedUp {false};
-
     // スナップショット比較用の不変ID（UAF回避のためポインタ比較を避ける）
     uint64_t stateId = generateNewStateId();
-
-    mutable std::atomic<int> snapshotRefCount{ 0 };
 
     static uint64_t generateNewStateId() noexcept
     {
@@ -189,24 +184,13 @@ struct ConvolverState
     // -----------------------------------------------------------------------
     // デストラクタ
     // -----------------------------------------------------------------------
-    ~ConvolverState() { cleanup(); }
-
-    // -----------------------------------------------------------------------
-    // 冪等クリーンアップ（二重解放防止）
-    // Message Thread / DeferredFreeThread から呼ぶ。Audio Thread からは呼ばない。
-    // -----------------------------------------------------------------------
-    void cleanup() noexcept
+    ~ConvolverState()
     {
-        // exchange が false を返した（＝まだ解放していない）場合のみ実行
-        if (cleanedUp.exchange(true, std::memory_order_acq_rel)) return;
-
-        // 各 atomic ポインタを nullptr に swap して古いポインタを解放
         if (auto* p = partitionData) { partitionData = nullptr; convo::aligned_free(p); }
         if (auto* p = overlapBuffer.exchange(nullptr, std::memory_order_relaxed))  convo::aligned_free(p);
         if (auto* p = inputBuffer.exchange(nullptr, std::memory_order_relaxed))    convo::aligned_free(p);
         if (auto* p = outputBuffer.exchange(nullptr, std::memory_order_relaxed))   convo::aligned_free(p);
 
-        // fftHandle は DftiHandleOwner のデストラクタで自動解放される
         fftHandle.reset();
     }
 
@@ -231,10 +215,6 @@ struct ConvolverState
         sampleRate         = o.sampleRate;
         stateId            = o.stateId;
         fftHandle          = std::move(o.fftHandle);
-
-        // ムーブ元は cleanedUp = true にして二重解放を防ぐ
-        o.cleanedUp.store(true, std::memory_order_relaxed);
-        cleanedUp.store(false, std::memory_order_relaxed);
     }
 
     // -----------------------------------------------------------------------
@@ -244,7 +224,11 @@ struct ConvolverState
     {
         if (this != &o)
         {
-            cleanup();
+            if (auto* p = partitionData) { convo::aligned_free(p); }
+            if (auto* p = overlapBuffer.exchange(nullptr, std::memory_order_relaxed))  convo::aligned_free(p);
+            if (auto* p = inputBuffer.exchange(nullptr, std::memory_order_relaxed))    convo::aligned_free(p);
+            if (auto* p = outputBuffer.exchange(nullptr, std::memory_order_relaxed))   convo::aligned_free(p);
+            fftHandle.reset();
 
             partitionData = o.partitionData;
             o.partitionData = nullptr;
@@ -262,9 +246,6 @@ struct ConvolverState
             sampleRate         = o.sampleRate;
             stateId            = o.stateId;
             fftHandle          = std::move(o.fftHandle);
-
-            o.cleanedUp.store(true, std::memory_order_relaxed);
-            cleanedUp.store(false, std::memory_order_relaxed);
         }
         return *this;
     }

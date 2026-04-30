@@ -228,7 +228,7 @@ public:
         stopRngProducer();
 
         // bitDepth <= 0 の場合はディザリングが無効化されるため、スケール計算は不要。
-        // AudioEngine::DSPCore::processOutput() の applyDither フラグで処理がスキップされる。
+        // AudioEngine の applyDither フラグで処理がスキップされる。
         if (bitDepth <= 0)
         {
             clearRandomRing();

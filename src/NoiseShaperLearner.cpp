@@ -848,11 +848,14 @@ void NoiseShaperLearner::workerThreadMain()
 NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature() const noexcept
 {
     SessionSignature session;
-    session.sampleRateHz = static_cast<int>(engine.currentSampleRate.load(std::memory_order_acquire) + 0.5);
-    session.bitDepth = engine.getDitherBitDepth();
+    const auto& view = engine.getActiveView();
+    const auto& cur = view.current;
+
+    session.sampleRateHz = static_cast<int>(cur.sampleRate + 0.5);
+    session.bitDepth = cur.bitDepth;
     session.adaptiveCoeffBankIndex = engine.currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
-    if (auto* dsp = engine.currentDSP.load(std::memory_order_acquire))
-        session.sessionId = dsp->currentCaptureSessionId;
+    session.sessionId = cur.captureSessionId;
+
     return session;
 }
 

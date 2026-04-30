@@ -1,9 +1,3 @@
-# AddressSanitizer (ASan) オプション
-option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
-if(ENABLE_ASAN AND MSVC)
-    target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
-    target_link_options(ConvoPeq PRIVATE /fsanitize=address)
-endif()
 #============================================================================
 # CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + Windows 11)
 #
@@ -141,6 +135,7 @@ target_sources(ConvoPeq PRIVATE
     src/AsioBlacklist.h
     src/CustomInputOversampler.h
     src/AudioEngineProcessor.h
+    src/EQEditProcessor.h
     src/PsychoacousticDither.h
     src/MKLNonUniformConvolver.h
     src/OutputFilter.h
@@ -151,29 +146,10 @@ target_sources(ConvoPeq PRIVATE
     src/CacheManager.cpp
     src/ConvolverSettingsComponent.cpp
     src/IRDSP.cpp
-    # Phase 1: RCU Snapshot Foundation (v13.0)
-    src/core/EQParameters.h
-    src/core/GlobalSnapshot.h
-    src/core/GlobalSnapshot.cpp
-    src/core/SnapshotParams.h
-    src/core/SnapshotFactory.h
-    src/core/SnapshotFactory.cpp
-    src/core/SnapshotAssembler.h
-    src/core/SnapshotAssembler.cpp
-    src/core/ReaderEpoch.h
-    src/core/EpochManager.h
-    src/core/EBRQueue.h
-    src/core/RCUReader.h
-    src/core/SnapshotCoordinator.h
-    src/core/SnapshotCoordinator.cpp
-    src/core/DeletionQueue.cpp
     # Phase 2: Types
     src/core/Types.h
     # Phase 3: Debounced snapshot worker
     src/core/CommandBuffer.h
-    src/core/ThreadAffinityManager.h
-    src/core/WorkerThread.h
-    src/core/WorkerThread.cpp
 )
 
 #------------------------------------------------------------
@@ -299,10 +275,10 @@ else()
     if("Release" IN_LIST CMAKE_CONFIGURATION_TYPES OR CMAKE_BUILD_TYPE STREQUAL "Release")
         message(STATUS "[PGO] Normal Release build with LTCG")
         target_compile_options(ConvoPeq PRIVATE
-            $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/GL>
+            $<$<CXX_COMPILER_ID:MSVC>:/GL>
         )
         target_link_options(ConvoPeq PRIVATE
-            $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/LTCG>
+            $<$<CXX_COMPILER_ID:MSVC>:/LTCG>
         )
     endif()
 endif()
@@ -339,15 +315,13 @@ if(MSVC)
         /wd4189     # C4189: ローカル変数が初期化されましたが、参照されていません (r8brain対策)
         /MP1        # マルチプロセッサコンパイル有効化 (1コアに制限してメモリ使用量を最小化)
         /EHsc       # 標準C++例外処理のみ有効化 (SEH無効 - 構造化例外処理は使用しない)
-        /Zm200      # C1060緩和: コンパイラ内部ヒープ上限を200%（デフォルトを2倍）に設定
-        /bigobj     # 大規模オブジェクトファイル対応: .objファイルサイズ制限を解放
     )
 
     target_compile_definitions(ConvoPeq PRIVATE JUCE_DISABLE_ACCESSIBILITY=1)
     target_compile_definitions(ConvoPeq PRIVATE JUCE_WIN_PER_MONITOR_DPI_AWARE=0)
 
-    set(CMAKE_CXX_FLAGS_RELEASE "/Zm200 /bigobj /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
-    set(CMAKE_C_FLAGS_RELEASE "/Zm200 /bigobj /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
+    set(CMAKE_CXX_FLAGS_RELEASE "/Zm500 /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
+    set(CMAKE_C_FLAGS_RELEASE "/Zm500 /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG /OPT:REF /OPT:ICF /OPT:LBR")
 
     # AVX2を全コンフィグで有効化
