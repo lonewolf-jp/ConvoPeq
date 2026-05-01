@@ -110,9 +110,6 @@ AudioEngine::AudioEngine() : uiEqEditor(*this)
     
     noiseShaperLearner = std::make_unique<NoiseShaperLearner>(*this, captureQueue);
     
-    // エポックポインタを ConvolverProcessor に設定
-    uiConvolverProcessor.m_audioEpochPtr = &m_audioEpoch;
-    
     startTimer(100);
 }
 
@@ -124,10 +121,8 @@ AudioEngine::~AudioEngine()
     // 2. シャットダウンフラグを立て、非同期コールバックを無効化
     uiConvolverProcessor.m_isShuttingDown.store(true, std::memory_order_release);
 
-    // 3. エポックポインタを無効化
-    uiConvolverProcessor.m_audioEpochPtr = nullptr;
 
-    // 4. その他のクリーンアップ
+    // 3. その他のクリーンアップ
     shutdownInProgress.store(true);
 }
 
@@ -579,11 +574,6 @@ void AudioEngine::processBlockDouble(juce::AudioBuffer<double>& buffer)
 }
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    // EpochGuard: オーディオブロック処理ごとにエポックを進める RAII ガード
-    struct EpochGuard {
-        std::atomic<uint64_t>& epoch;
-        ~EpochGuard() { epoch.fetch_add(1, std::memory_order_release); }
-    } guard { m_audioEpoch };
 
     const juce::ScopedNoDenormals noDenormals;
     m_audioBlockCounter.fetch_add(1, std::memory_order_release);

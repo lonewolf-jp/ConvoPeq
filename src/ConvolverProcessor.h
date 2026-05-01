@@ -1053,60 +1053,26 @@ public: // Added for AudioEngine access
     std::atomic<uint64_t> activeCacheKey { 0 };
     std::atomic<int> activeCacheFFTSize { 0 };
 
-    // ── Phase 1: Epoch-Deferred Reclamation (EDR) Core ──
-    // エポックカウンタ（AudioEngine から呼ばれる）
-    std::atomic<uint64_t> m_audioEpoch { 0 };
+    // ── 新設計：アクティブエンジンと実行中カウンタ ──
+    std::atomic<StereoConvolver*> m_activeEngine { nullptr };
+    std::atomic<int> m_inFlight { 0 };
 
-    // 退役キュー (Message Thread 専用)
-    static constexpr size_t kMaxRetired = 256;
-    static constexpr uint64_t kRetireGraceEpochs = 2;
-    struct RetiredEntry {
-        StereoConvolver* engine = nullptr;
-        uint64_t epoch = 0;
-    };
-    RetiredEntry m_retiredEntries[kMaxRetired];
-    size_t m_retiredCount = 0;   // 非アトミック、Message Thread のみが触れる
-
-    // 再構築要求の世代管理
-    std::atomic<uint64_t> m_requestedRuntimeGen { 0 };
-    std::atomic<uint64_t> m_buildingRuntimeGen { 0 };
-    std::atomic<uint64_t> m_lastProcessedGen   { 0 };
-    std::atomic<bool> m_irEverLoaded { false };
+    // 退役キュー (Message/Timer スレッドのみ操作)
+    mutable std::mutex m_retiredMutex;
+    std::deque<StereoConvolver*> m_retiredQueue;
+    static constexpr size_t MAX_RETIRED = 32;   // 肥大化防止
+    std::atomic<bool> m_retiredOverflow { false };
 
     // 制御フラグ
     std::atomic<bool> m_isShuttingDown { false };
     std::atomic<bool> m_latencyNeedsHostUpdate { false };
-    std::atomic<bool> m_rebuildPending { false };
 
-    // EDR API（AudioEngine 向け）
-    void incrementAudioEpoch() noexcept {
-        m_audioEpoch.fetch_add(1, std::memory_order_relaxed);
-    }
-    uint64_t getAudioEpoch() const noexcept {
-        return m_audioEpoch.load(std::memory_order_relaxed);
-    }
+    // 新しい公開メソッド
+    bool publishEngine(StereoConvolver* newEngine);   // Message Thread
+    void tickMaintenance();                            // Timer コールバックから呼ぶ
 
-    // Audio Thread 向けエンジン参照取得
-    StereoConvolver* getActiveEngine() const noexcept {
-        return m_activeEngine.load(std::memory_order_acquire);
-    }
-
-    bool isShuttingDown() const noexcept {
-        return m_isShuttingDown.load(std::memory_order_acquire);
-    }
-
-    // エンジン公開インターフェース
-    using EnginePtr = std::unique_ptr<StereoConvolver, decltype(&StereoConvolver::destroy)>;
-    bool publishEngine(EnginePtr newEngine);
-
-    // 定期メンテナンス
-    void tickMaintenance();
-
-    // 退役キュー操作
-    void enqueueRetired(StereoConvolver* engine, uint64_t retireEpoch);
-    void reclaimRetiredEngines();
-    void requestAsyncRebuild();
-    void scheduleRebuildPending();
+    // EnginePtr 型定義 (publishEngine 用)
+    using EnginePtr = std::unique_ptr<StereoConvolver, void(*)(StereoConvolver*)>;
 
     friend class AudioEngine;
 
