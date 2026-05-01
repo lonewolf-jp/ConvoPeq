@@ -454,6 +454,8 @@ void AudioEngine::timerCallback()
 
     // 退役キューのメンテナンスを実行
     uiConvolverProcessor.tickMaintenance();
+    // EQState の退役キューも定期的に解放（同一メッセージスレッドで安全）
+    uiEqEditor.reclaimRetiredEQStates();
 }
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)

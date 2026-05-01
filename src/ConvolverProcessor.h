@@ -4,32 +4,19 @@
    ConvoPeq - Convolution Processor
   ==============================================================================
 
-  ── Epoch-Deferred Reclamation (EDR) ──
+  ── Lifetime Management Model ──
 
-  【正確な定義】
-  本システムは「Single-threaded audio-safe deferred reclamation via epoch counter
-  (heuristic GC)」である。RCU でも、古典的な EBR でも、決定論的 GC でもない。
+  This processor uses a bounded in‑flight protection counter (m_inFlight)
+  combined with deferred destruction scheduling to manage the lifetime
+  of convolution engines.
 
-  【安全性の本質】
-  - 提供するもの: 解放タイミングの遅延による UAF 発生確率の大幅な低減 (best-effort)。
-  - 提供しないもの: 決定的なポインタ有効性の保証、数学的に証明可能な並行性安全性。
-  - 安全性は CPU 負荷・バッファサイズ変動・オーディオコールバックのドロップに影響を受ける。
-
-  【設計の三層構造】
-  1. Ownership correctness (強い): publishEngine による所有権の単一化、unique_ptr 管理。
-  2. Visibility correctness (中程度): release/acquire によるエンジン可視性の保証。
-  3. Lifetime correctness (弱い・ヒューリスティック): epoch 差に基づく遅延解放。
-     epoch はリアルタイムクロックではなく、退役猶予 (grace period) を近似するヒューリスティックである。
-
-  【制約と前提】
-  - 複数のオーディオコールバックスレッド (AUHostCallback 等) が並列動作する環境では安全ではない。
-  - 単一オーディオスレッド環境でも、コールバックの再入が発生する場合は安全ではない。
-  - 決定論的安全性はなく、「UAF 事故確率の低減」を目的とした実用的な緩和システムである。
-  - tickMaintenance は Message Thread (UI スレッド) で動作し、リアルタイム性は保証されない。
-
-  【epoch の意味論】
-  - epoch はコールバック通過回数のカウンタであり、退役猶予の目安である。
-  - 時間やオーディオブロック処理の進行を正確に反映するものではない。
+  No hard real‑time guarantee of pointer validity is provided.
+  Safety depends on:
+  - single active audio processing context assumption
+  - bounded callback reentrancy behavior in JUCE host environment
+  - deferred reclamation executed outside the audio callback
+ 
+  This is a pragmatic lifetime deferral mechanism, not a formal RCU or GC system.
 */
 
 #pragma once

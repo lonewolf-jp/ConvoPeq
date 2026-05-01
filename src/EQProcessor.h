@@ -27,6 +27,9 @@
 #include <complex>
 #include <array>
 #include <vector>
+#include <deque>
+#include <mutex>
+#include <cstddef>
 #include "AlignedAllocation.h"
 
 //--------------------------------------------------------------
@@ -316,6 +319,14 @@ public:
 
     void cleanup();
 
+    // 退役キュー内の全 EQState を解放する。
+    // AudioEngine::timerCallback() から定期的に呼ばれる。
+    // この遅延解放は JUCE メッセージスレッドの直列化に依存した実用策であり、
+    // 形式的な RCU やロックフリー回収機構ではない。
+    // デバッグビルドでは JUCE_ASSERT_MESSAGE_THREAD で前提を確認する。
+    void reclaimRetiredEQStates() noexcept;
+
+
     //----------------------------------------------------------
     // 係数計算ヘルパー (static public)
     // 外部からの応答曲線計算などに使用
@@ -349,9 +360,21 @@ private:
     bool isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block, int numChannels, int numSamples) const noexcept;
 
     // スムージング処理
-    std::atomic<EQState*> currentStateRaw { nullptr }; // Raw pointer for Audio Thread (Lock-free)
+    std::atomic<EQState*> currentStateRaw { nullptr };
 
-    // ── 状態リセットフラグ (Audio Thread用) ──
+    // ── 退役キュー (EQState 用) ──
+    std::deque<EQState*> retiredEQStates;
+    mutable std::mutex retiredEQStateMutex;
+    static constexpr size_t kMaxRetiredEQStates = 32;
+    size_t retiredEQStateDropCount = 0; // 溢れによる破棄数（診断用）
+    // 診断用：観測された最大退役キュー長
+    size_t maxRetiredDepthObserved = 0;
+
+    // retireEQState: 古い状態を退役キューに登録する。
+    // これは internal ownership operation であり、外部から呼ぶべきではない。
+    void retireEQState(EQState* state) noexcept;
+
+    // ── 状態リセットフラグ (Audio Thread 用) ──
     std::atomic<uint32_t> bandResetMask { 0 };
     std::atomic<bool> agcResetRequest { false };
 

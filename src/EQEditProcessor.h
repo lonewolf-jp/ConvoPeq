@@ -65,6 +65,10 @@ public:
     // -----------------------------------------------------------------
     void setBypass(bool shouldBypass);
 
+    // reclaimRetiredEQStates は基底クラスの public メソッドであり、
+    // EQEditProcessor を通じて AudioEngine から直接呼び出すことができる。
+    // 追加の宣言は不要。
+
 private:
     // デバウンスタイマー起動
     void scheduleDebounce();
