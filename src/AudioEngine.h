@@ -179,6 +179,9 @@ private:
     std::atomic<float> queuedNextFadeTimeSec { 0.0f };
     std::atomic<float> queuedFadeTimeSec { 0.0f };
 
+    // -- Epoch Management for Retired Engine Reclamation --
+    std::atomic<uint64_t> m_audioEpoch { 0 };
+
     // -- Diagnostics --
     std::atomic<int> fixedNoiseWindowSamples { 4096 };
     std::atomic<int> fixedNoiseLogIntervalMs { 1000 };

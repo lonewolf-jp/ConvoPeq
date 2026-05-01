@@ -1,4 +1,37 @@
 //============================================================================
+/*
+  ==============================================================================
+   ConvoPeq - Convolution Processor
+  ==============================================================================
+
+  ── Epoch-Deferred Reclamation (EDR) ──
+
+  【正確な定義】
+  本システムは「Single-threaded audio-safe deferred reclamation via epoch counter
+  (heuristic GC)」である。RCU でも、古典的な EBR でも、決定論的 GC でもない。
+
+  【安全性の本質】
+  - 提供するもの: 解放タイミングの遅延による UAF 発生確率の大幅な低減 (best-effort)。
+  - 提供しないもの: 決定的なポインタ有効性の保証、数学的に証明可能な並行性安全性。
+  - 安全性は CPU 負荷・バッファサイズ変動・オーディオコールバックのドロップに影響を受ける。
+
+  【設計の三層構造】
+  1. Ownership correctness (強い): publishEngine による所有権の単一化、unique_ptr 管理。
+  2. Visibility correctness (中程度): release/acquire によるエンジン可視性の保証。
+  3. Lifetime correctness (弱い・ヒューリスティック): epoch 差に基づく遅延解放。
+     epoch はリアルタイムクロックではなく、退役猶予 (grace period) を近似するヒューリスティックである。
+
+  【制約と前提】
+  - 複数のオーディオコールバックスレッド (AUHostCallback 等) が並列動作する環境では安全ではない。
+  - 単一オーディオスレッド環境でも、コールバックの再入が発生する場合は安全ではない。
+  - 決定論的安全性はなく、「UAF 事故確率の低減」を目的とした実用的な緩和システムである。
+  - tickMaintenance は Message Thread (UI スレッド) で動作し、リアルタイム性は保証されない。
+
+  【epoch の意味論】
+  - epoch はコールバック通過回数のカウンタであり、退役猶予の目安である。
+  - 時間やオーディオブロック処理の進行を正確に反映するものではない。
+*/
+
 #pragma once
 // ConvolverProcessor.h  ── v0.3 (JUCE 8.0.12対応 / MKL NUC 統合)
 //
@@ -37,7 +70,6 @@
 
 // ── Snapshot Double Buffer Model ──
 #include "GenerationManager.h"
-#include "ConvolverState.h"
 #include "PreparedIRState.h"
 #include "ConvolverRuntime.h"
 #include "DspNumericPolicy.h"
@@ -270,12 +302,8 @@ public:
     //----------------------------------------------------------
     void setBypass(bool shouldBypass);
     bool isBypassed() const { return bypassed.load(); }
-    const convo::ConvolverState* getConvolverState() const { return convolverState.load(std::memory_order_acquire); }
-    void enterStateReader(int /*readerIndex*/) const noexcept {}
-    void exitStateReader(int /*readerIndex*/) const noexcept {}
-
-    void enterGlobalReader(int /*readerIndex*/) const noexcept;
-    void exitGlobalReader(int /*readerIndex*/) const noexcept;
+    void enterGlobalReader(int /*readerIndex*/) const noexcept {}
+    void exitGlobalReader(int /*readerIndex*/) const noexcept {}
 
     //----------------------------------------------------------
     // Dry/Wet Mix (0.0 = Dry only, 1.0 = Wet only)
@@ -503,10 +531,6 @@ public:
     // Message Thread から呼ぶ。新しい状態を serializeTo で EngineState に格納し、
     // publishEngineState で公開する（RCU は完全廃止）
     // GenerationManager で陳腐化チェックを行い、古いタスク結果は破棄する。
-    //
-    // @param newState  新しい状態（所有権を移譲）。世代チェックに失敗した場合は即削除。
-    void updateConvolverState(convo::ConvolverState* newState);
-    void updateConvolverState(std::unique_ptr<convo::ConvolverState> newState);
 
     bool isConvolverGenerationCurrent(uint64_t generation) const
     {
@@ -573,8 +597,7 @@ private:
                             const juce::File& file, double scaleFactor,
                             std::shared_ptr<juce::AudioBuffer<double>> displayIR);
 
-    void switchEngineOnMessageThread(StereoConvolver* newEngine) noexcept;
-
+    // applyNewState 関連（段階的処理）
     void applyNewStateBindStep(std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
                                double loadedSR,
                                bool isRebuild,
@@ -626,38 +649,32 @@ private:
             }
         }
 
-        // 二重 retire 防止フラグ
-        std::atomic<bool> retired { false };
 
-        // リソース解放を一括で行う静的関数（retire コールバック用）
-        static void destroyStereoConvolver(void* p) noexcept
+        // 完全なデストラクタ（RAII）
+        ~StereoConvolver()
         {
-            auto* sc = static_cast<StereoConvolver*>(p);
-            if (!sc) return;
-            destroyNUCConvolver(sc->nucConvolvers[0]);
-            destroyNUCConvolver(sc->nucConvolvers[1]);
-            if (sc->irData[0]) { convo::aligned_free(sc->irData[0]); sc->irData[0] = nullptr; }
-            if (sc->irData[1]) { convo::aligned_free(sc->irData[1]); sc->irData[1] = nullptr; }
-            sc->~StereoConvolver();
-            convo::aligned_free(sc);
+            destroyNUCConvolver(nucConvolvers[0]);
+            destroyNUCConvolver(nucConvolvers[1]);
+            if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
+            if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
         }
 
-        // 外部から安全に破棄するためのエントリポイント
-        static inline void retireStereoConvolver(StereoConvolver* sc) noexcept
+        // 配置 new 用ファクトリ
+        static StereoConvolver* create()
         {
-            if (!sc || sc->retired.exchange(true, std::memory_order_acq_rel))
-                return;
-            destroyStereoConvolver(sc);
+            void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
+            return new (mem) StereoConvolver();
         }
 
-        // デストラクタは空（実際の解放は retire 経由）
-        ~StereoConvolver() {
-            // 直接破棄は禁止（すべて retireStereoConvolver を使用すること）
-            #if JUCE_DEBUG
-            jassertfalse; // 直接 delete 禁止。必ず retireStereoConvolver を使用すること
-            #endif
+        // 安全な破棄用静的関数
+        static void destroy(StereoConvolver* sc) noexcept
+        {
+            if (sc)
+            {
+                sc->~StereoConvolver();
+                convo::aligned_free(sc);
+            }
         }
-
         // コピーコンストラクタは禁止 (NUCエンジンは複製コストが高く、状態を持つため)
         StereoConvolver(const StereoConvolver& other) = delete;
 
@@ -776,6 +793,15 @@ private:
 
         void reset();
         void process(int channel, const double* in, double* out, int numSamples);
+
+#if JUCE_DEBUG
+        // デバッグ用：エンジン状態追跡
+        enum class EngineState : uint8_t { Unpublished, Published };
+        void setPublished() noexcept { m_state = EngineState::Published; }
+        EngineState getState() const noexcept { return m_state; }
+    private:
+        EngineState m_state = EngineState::Unpublished;
+#endif
     };
 
     std::atomic<StereoConvolver*> m_activeEngine { nullptr }; // Raw pointer for Audio Thread (Lock-free)
@@ -1027,8 +1053,63 @@ public: // Added for AudioEngine access
     std::atomic<uint64_t> activeCacheKey { 0 };
     std::atomic<int> activeCacheFFTSize { 0 };
 
-    // ── Phase 0: Epoch-based RCU メンバー ──
-    std::atomic<convo::ConvolverState*> convolverState { nullptr };
+    // ── Phase 1: Epoch-Deferred Reclamation (EDR) Core ──
+    // エポックカウンタ（AudioEngine から呼ばれる）
+    std::atomic<uint64_t> m_audioEpoch { 0 };
+
+    // 退役キュー (Message Thread 専用)
+    static constexpr size_t kMaxRetired = 256;
+    static constexpr uint64_t kRetireGraceEpochs = 2;
+    struct RetiredEntry {
+        StereoConvolver* engine = nullptr;
+        uint64_t epoch = 0;
+    };
+    RetiredEntry m_retiredEntries[kMaxRetired];
+    size_t m_retiredCount = 0;   // 非アトミック、Message Thread のみが触れる
+
+    // 再構築要求の世代管理
+    std::atomic<uint64_t> m_requestedRuntimeGen { 0 };
+    std::atomic<uint64_t> m_buildingRuntimeGen { 0 };
+    std::atomic<uint64_t> m_lastProcessedGen   { 0 };
+    std::atomic<bool> m_irEverLoaded { false };
+
+    // 制御フラグ
+    std::atomic<bool> m_isShuttingDown { false };
+    std::atomic<bool> m_latencyNeedsHostUpdate { false };
+    std::atomic<bool> m_rebuildPending { false };
+
+    // EDR API（AudioEngine 向け）
+    void incrementAudioEpoch() noexcept {
+        m_audioEpoch.fetch_add(1, std::memory_order_relaxed);
+    }
+    uint64_t getAudioEpoch() const noexcept {
+        return m_audioEpoch.load(std::memory_order_relaxed);
+    }
+
+    // Audio Thread 向けエンジン参照取得
+    StereoConvolver* getActiveEngine() const noexcept {
+        return m_activeEngine.load(std::memory_order_acquire);
+    }
+
+    bool isShuttingDown() const noexcept {
+        return m_isShuttingDown.load(std::memory_order_acquire);
+    }
+
+    // エンジン公開インターフェース
+    using EnginePtr = std::unique_ptr<StereoConvolver, decltype(&StereoConvolver::destroy)>;
+    bool publishEngine(EnginePtr newEngine);
+
+    // 定期メンテナンス
+    void tickMaintenance();
+
+    // 退役キュー操作
+    void enqueueRetired(StereoConvolver* engine, uint64_t retireEpoch);
+    void reclaimRetiredEngines();
+    void requestAsyncRebuild();
+    void scheduleRebuildPending();
+
+    friend class AudioEngine;
+
     // GenerationManager: IR ロードタスクの世代管理（陳腐化チェック用）
     GenerationManager convolverStateGeneration;
 
