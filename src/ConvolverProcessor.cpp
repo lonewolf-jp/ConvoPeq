@@ -1,4 +1,17 @@
 //============================================================================
+// InFlightGuard: RAII で m_inFlight を増減 (例外安全)
+//============================================================================
+struct InFlightGuard {
+    std::atomic<int>& counter;
+    explicit InFlightGuard(std::atomic<int>& c) noexcept : counter(c) {
+        counter.fetch_add(1, std::memory_order_relaxed);
+    }
+    ~InFlightGuard() {
+        counter.fetch_sub(1, std::memory_order_release);
+    }
+};
+
+//============================================================================
 // ConvolverProcessor.cpp  ── v0.2 (JUCE 8.0.12対応)
 //
 // コンボリューションプロセッサーの実装
@@ -98,9 +111,64 @@ void ConvolverProcessor::updateIRState(std::shared_ptr<juce::AudioBuffer<double>
     }
 }
 
-void ConvolverProcessor::retireStereoConvolver(StereoConvolver* conv, uint64_t /*retireEpoch*/)
+//==============================================================================
+// publishEngine : アクティブエンジンを交換し、古いエンジンを退役キューに入れる
+// Message Thread からのみ呼び出すこと
+//==============================================================================
+bool ConvolverProcessor::publishEngine(StereoConvolver* newEngine)
 {
-    StereoConvolver::retireStereoConvolver(conv);
+    JUCE_ASSERT_MESSAGE_THREAD;
+
+    if (m_isShuttingDown.load(std::memory_order_acquire)) {
+        StereoConvolver::destroy(newEngine);
+        return false;
+    }
+
+    auto* old = m_activeEngine.exchange(newEngine, std::memory_order_acq_rel);
+    if (old) {
+        std::lock_guard<std::mutex> lock(m_retiredMutex);
+        if (m_retiredQueue.size() < MAX_RETIRED)
+            m_retiredQueue.push_back(old);
+        else {
+            m_retiredOverflow.store(true, std::memory_order_relaxed);
+            StereoConvolver::destroy(old);   // 溢れた場合は直接破棄
+        }
+    }
+    return true;
+}
+
+//==============================================================================
+// tickMaintenance : Timer コールバックから定期的に呼ばれる
+//==============================================================================
+void ConvolverProcessor::tickMaintenance()
+{
+    JUCE_ASSERT_MESSAGE_THREAD;
+
+    // 第 1 チェック：実行中の Audio Thread がないか
+    if (m_inFlight.load(std::memory_order_acquire) != 0)
+        return;
+
+    std::lock_guard<std::mutex> lock(m_retiredMutex);
+
+    // 第 2 チェック：ロック獲得後にもう一度（レース回避）
+    if (m_inFlight.load(std::memory_order_acquire) != 0)
+        return;
+
+    // 退役キューを空にする
+    while (!m_retiredQueue.empty()) {
+        StereoConvolver::destroy(m_retiredQueue.front());
+        m_retiredQueue.pop_front();
+    }
+
+    if (m_retiredOverflow.exchange(false))
+        DBG("ConvolverProcessor: retired queue overflow, some engines were force-destroyed");
+
+    // その他の定期メンテナンス
+    cleanup();
+    
+    // レイテンシ表示の更新
+    if (m_latencyNeedsHostUpdate.exchange(false, std::memory_order_acq_rel))
+        updateHostLatencyIfChanged();
 }
 
 namespace
@@ -617,7 +685,7 @@ public:
         stopThread(500);
 
         auto *conv = std::exchange(stepResult.newConv, nullptr);
-        StereoConvolver::retireStereoConvolver(conv);
+        if (conv) StereoConvolver::destroy(conv);
     }
 
     std::function<bool()> externalCancellationCheck;
@@ -637,8 +705,9 @@ public:
 
     void run() override
     {
-        if (owner.rcuProvider != nullptr)
-            owner.rcuProvider->getAffinityManager().applyCurrentThreadPolicy(ThreadType::HeavyBackground);
+        // Phase 1: RCU 機構は撤去済み。スレッドアフィニティ設定は必要に応じて直接行う。
+        // if (owner.rcuProvider != nullptr)
+        //     owner.rcuProvider->getAffinityManager().applyCurrentThreadPolicy(ThreadType::HeavyBackground);
 
         juce::ScopedNoDenormals noDenormals; // バックグラウンド処理でのDenormal対策
 
@@ -688,7 +757,8 @@ public:
 
         // performLoad() の後処理は、同期成功時は result.success、
         // 非同期成功時は result.finalizeQueued で判定する。
-        StereoConvolver::retireStereoConvolver(std::exchange(result.newConv, nullptr));
+        if (auto* oldConv = std::exchange(result.newConv, nullptr))
+            StereoConvolver::destroy(oldConv);
 
         if (!result.success && result.errorMessage.isNotEmpty() && !threadShouldExit())
         {
@@ -897,7 +967,8 @@ public:
             return true;
         }
 
-        StereoConvolver::retireStereoConvolver(std::exchange(result.newConv, nullptr));
+        if (auto* oldConv = std::exchange(result.newConv, nullptr))
+            StereoConvolver::destroy(oldConv);
         result.success = false;
         result.errorMessage = "Failed to initialize NUC engine (Memory allocation or MKL setup failed).";
         return false;
@@ -952,7 +1023,7 @@ public:
             juce::Logger::writeToLog("LoaderThread: callAsync failed, aborting IR load");
             result.errorMessage = "Internal message queue full, cannot complete IR load";
 
-            StereoConvolver::retireStereoConvolver(std::exchange(result.newConv, nullptr));
+            StereoConvolver::destroy(std::exchange(result.newConv, nullptr));
 
             juce::MessageManager::callAsync([weakOwner = this->weakOwner, errorMsg = result.errorMessage]()
             {
@@ -988,7 +1059,7 @@ public:
             // 失敗時も result.newConv が所有。両方無効化してから解放
             if (result.newConv)
             {
-                StereoConvolver::retireStereoConvolver(std::exchange(result.newConv, nullptr));
+                StereoConvolver::destroy(std::exchange(result.newConv, nullptr));
             }
         }
     }
@@ -1383,6 +1454,9 @@ ConvolverProcessor::ConvolverProcessor()
 
     updateLatencyCache();
     debugCheckAtomicLockFree();
+    
+    // EDR: 定期メンテナンス (30 Hz)
+    startTimerHz(30);
 }
 
 //--------------------------------------------------------------
@@ -1399,7 +1473,7 @@ ConvolverProcessor::~ConvolverProcessor()
     // Destructor runs after AudioEngine destructor body.
     // Do not enqueue to global deferred queue here because final reclaim may have already happened.
     auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
-    StereoConvolver::retireStereoConvolver(oldConv);
+    StereoConvolver::destroy(oldConv);
 
     auto* oldIrState = currentIRState.exchange(nullptr, std::memory_order_acq_rel);
     if (oldIrState != nullptr)
@@ -1425,10 +1499,8 @@ ConvolverProcessor::~ConvolverProcessor()
 
 void ConvolverProcessor::timerCallback()
 {
-    static int lastReportedClampCount = 0;
-    const int currentClampCount = g_totalLatencyClampCount.load(std::memory_order_relaxed);
-    if (currentClampCount != lastReportedClampCount)
-    {
+    tickMaintenance();
+}
         juce::Logger::writeToLog("ConvolverProcessor: Latency clamp triggered (total: "
                                  + juce::String(currentClampCount) + " times)");
         lastReportedClampCount = currentClampCount;
@@ -1453,10 +1525,7 @@ void ConvolverProcessor::timerCallback()
         }
     }
 
-    auto* provider = rcuProvider;
-    if (provider) {
-        // RCU v17.15: EBRQueue は不要。ReclaimerThread が全ての解放を担当する。
-    }
+    // Phase 1: RCU 機構は撤去済み。RCU 関連のクリーンアップは不要。
 
     cleanup();
 }
@@ -1533,21 +1602,27 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                                   experimentalDirectHeadEnabled.load(std::memory_order_acquire),
                                   nullptr, this))
                 {
-                    const uint64_t retireEpoch = rcuProvider ? rcuProvider->publishRcuEpoch() : 1;
                     auto* oldConv = m_activeEngine.exchange(newConv, std::memory_order_acq_rel);
-                    if (oldConv)
-                        retireStereoConvolver(oldConv, retireEpoch);
+                    if (oldConv) {
+                        std::lock_guard<std::mutex> lock(m_retiredMutex);
+                        if (m_retiredQueue.size() < MAX_RETIRED)
+                            m_retiredQueue.push_back(oldConv);
+                        else {
+                            m_retiredOverflow.store(true, std::memory_order_relaxed);
+                            StereoConvolver::destroy(oldConv);
+                        }
+                    }
                     updateLatencyCache();
                 }
                 else
                 {
                     juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: NUC re-init failed (MKL alloc?). Keeping existing engine.");
-                    StereoConvolver::retireStereoConvolver(std::exchange(newConv, nullptr));
+                    StereoConvolver::destroy(std::exchange(newConv, nullptr));
                 }
             }
             catch (const std::bad_alloc&)
             {
-                StereoConvolver::retireStereoConvolver(std::exchange(newConv, nullptr));
+                StereoConvolver::destroy(std::exchange(newConv, nullptr));
                 juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: NUC re-init failed (std::bad_alloc). Keeping existing engine.");
             }
         }
@@ -1740,10 +1815,16 @@ void ConvolverProcessor::releaseResources()
     diagLog("[DIAG ConvolverProcessor] releaseResources: after fftHandle free");
 
     // Release active convolution engine
-    const uint64_t retireEpoch = rcuProvider ? rcuProvider->publishRcuEpoch() : 1;
     auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
-    if (oldConv)
-        retireStereoConvolver(oldConv, retireEpoch);
+    if (oldConv) {
+        std::lock_guard<std::mutex> lock(m_retiredMutex);
+        if (m_retiredQueue.size() < MAX_RETIRED)
+            m_retiredQueue.push_back(oldConv);
+        else {
+            m_retiredOverflow.store(true, std::memory_order_relaxed);
+            StereoConvolver::destroy(oldConv);
+        }
+    }
     diagLog("[DIAG ConvolverProcessor] releaseResources: after m_activeEngine retire");
 
     auto* oldIrState = currentIRState.exchange(nullptr, std::memory_order_acq_rel);
@@ -2125,7 +2206,7 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
 
     if (job.pendingConv != nullptr)
     {
-        StereoConvolver::retireStereoConvolver(std::exchange(job.pendingConv, nullptr));
+        StereoConvolver::destroy(std::exchange(job.pendingConv, nullptr));
     }
 
     // 所有権を一意に移動（copy禁止）
@@ -3386,9 +3467,7 @@ void ConvolverProcessor::startProgressiveUpgrade(const juce::File& file,
                                                                 baseKey,
                                                                 *irConverter,
                                                                 *cacheManager,
-                                                                rcuProvider != nullptr
-                                                                    ? const_cast<ThreadAffinityManager*>(&rcuProvider->getAffinityManager())
-                                                                    : nullptr);
+                                                                nullptr); // Phase 1: RCU 機構は撤去済み。ThreadAffinityManager は不要。
     upgradeThread->startThread();
 }
 
@@ -3730,22 +3809,11 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
         updateIRState(irShared, prepared->sampleRate);
     }
 
-    // 3. RCU 状態の更新
-
-    auto newState = std::make_unique<convo::ConvolverState>(prepared->partitionData,
-                                                          prepared->partitionSizeBytes,
-                                                          prepared->numPartitions,
-                                                          prepared->fftSize,
-                                                          prepared->generationId,
-                                                          prepared->sampleRate);
-
-    prepared->partitionData = nullptr;
-
+    // 3. アクティブエンジンの更新
     activeCacheKey.store(prepared->cacheKey, std::memory_order_release);
-    activeCacheFFTSize.store(newState->fftSize, std::memory_order_release);
+    activeCacheFFTSize.store(prepared->fftSize, std::memory_order_release);
 
-    runtime.reallocate(newState->fftSize, newState->numPartitions);
-    updateConvolverState(std::move(newState));
+    runtime.reallocate(prepared->fftSize, prepared->numPartitions);
 
     // 4. FINAL COMMIT: 確定フラグを立ててからレイテンシを1回だけ反映する。
     irFinalized.store(true, std::memory_order_release);
@@ -3856,53 +3924,6 @@ void ConvolverProcessor::forceCleanup()
             loader->stopThread(500);
     }
     loadersToDelete.clear(); // unique_ptrのデストラクタが呼ばれ、スレッドがクリーンアップされる
-}
-
-//--------------------------------------------------------------
-// updateConvolverState  ── Phase 0: Epoch-based RCU 状態更新
-//
-// Message Thread から呼ぶ。GenerationManager による陳腐化チェックを行い、
-// 現在世代と一致する場合のみ atomic swap で公開する。
-// 不一致の場合（古いタスク結果）は newState を delete で解放して破棄する (RCU 廃止)。
-//
-// 旧 ConvolverState の解放は ReclaimerThread が非同期に行うため、
-// Audio Thread のリアルタイム性は維持される。
-//--------------------------------------------------------------
-void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
-{
-    JUCE_ASSERT_MESSAGE_THREAD;
-    jassert(newState != nullptr);
-    if (!newState) return;
-
-    jassert(!writerActive.exchange(true, std::memory_order_acquire));
-
-    // 陳腐化チェック：タスク起動時の世代と現在の世代を比較
-    if (!convolverStateGeneration.isCurrentGeneration(newState->generationId))
-    {
-        juce::Logger::writeToLog("ConvolverProcessor::updateConvolverState: stale generation, discarding state (gen="
-            + juce::String((int)newState->generationId) + ")");
-        delete newState);
-        writerActive.store(false, std::memory_order_release);
-        return;
-    }
-
-    // 最新世代 → atomic swap (RCU publish)
-    auto* oldState = convolverState.load(std::memory_order_acquire);
-    convolverState.store(const_cast<convo::ConvolverState*>(newState), std::memory_order_release);
-
-    // 旧状態を retire (unique_ptr チェーンにより子オブジェクトも自動解放)
-    if (oldState) {
-        delete oldState);
-    }
-
-    convo::EpochManager::instance().advanceEpoch();
-
-    writerActive.store(false, std::memory_order_release);
-}
-
-void ConvolverProcessor::updateConvolverState(std::unique_ptr<convo::ConvolverState> newState)
-{
-    updateConvolverState(newState.release());
 }
 
 //--------------------------------------------------------------
@@ -4447,10 +4468,16 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     // クローンを作らない (prepareToPlayが正しいレートでSCを生成するため)
     // SCはAudioEngine::prepareToPlay()、またはrebuildAllIRsSynchronousで生成する
     // エンジンは nullptr のままにする
-    const uint64_t retireEpoch = rcuProvider ? rcuProvider->publishRcuEpoch() : 1;
+    
     auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
-    if (oldConv)
-        retireStereoConvolver(oldConv, retireEpoch);
+    if (oldConv) {
+        std::lock_guard<std::mutex> lock(m_retiredMutex);
+        if (m_retiredQueue.size() < MAX_RETIRED)
+            m_retiredQueue.push_back(oldConv);
+        else {
+            m_retiredOverflow.store(true, std::memory_order_relaxed);
+            StereoConvolver::destroy(oldConv);
+        }
 }
 
 void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
@@ -4511,10 +4538,17 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     if (clonedConv == nullptr)
         return;
 
-    const uint64_t retireEpoch = rcuProvider ? rcuProvider->publishRcuEpoch() : 1;
+    
     auto* oldConv = m_activeEngine.exchange(clonedConv, std::memory_order_acq_rel);
-    if (oldConv)
-        retireStereoConvolver(oldConv, retireEpoch);
+    if (oldConv) {
+        std::lock_guard<std::mutex> lock(m_retiredMutex);
+        if (m_retiredQueue.size() < MAX_RETIRED)
+            m_retiredQueue.push_back(oldConv);
+        else {
+            m_retiredOverflow.store(true, std::memory_order_relaxed);
+            StereoConvolver::destroy(oldConv);
+        }
+    }
 
     // Copy latency snapshot with pointer management
     auto* otherSnap = other.cachedLatency.load(std::memory_order_acquire);
@@ -4632,16 +4666,14 @@ void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBl
     delayWritePos = (writePos + numSamples) & DELAY_BUFFER_MASK;
 }
 
-void ConvolverProcessor::enterGlobalReader(int readerIndex) const noexcept
+void ConvolverProcessor::enterGlobalReader(int /*readerIndex*/) const noexcept
 {
-    if (rcuProvider)
-        rcuProvider->enterRcuReader(readerIndex);
+    // Phase 1: RCU 機構は撤去済み。この関数は互換性のために空実装。
 }
 
-void ConvolverProcessor::exitGlobalReader(int readerIndex) const noexcept
+void ConvolverProcessor::exitGlobalReader(int /*readerIndex*/) const noexcept
 {
-    if (rcuProvider)
-        rcuProvider->exitRcuReader(readerIndex);
+    // Phase 1: RCU 機構は撤去済み。この関数は互換性のために空実装。
 }
 
 //--------------------------------------------------------------
@@ -4675,6 +4707,8 @@ void ConvolverProcessor::processWithBlob(const uint8_t* blob, juce::AudioBuffer<
 
 void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
+    InFlightGuard guard(m_inFlight);   // 実行中カウンタを増減
+    
     if (!isPrepared.load(std::memory_order_acquire))
     {
         if (firstProcessCall.exchange(false, std::memory_order_acq_rel))
@@ -5736,7 +5770,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         }
         else
         {
-            StereoConvolver::retireStereoConvolver(newConv);
+            StereoConvolver::destroy(newConv);
             handleLoadError("Failed to initialize NUC engine (Memory allocation or MKL setup failed).");
         }
     }
@@ -5774,7 +5808,14 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
         createFrequencyResponseSnapshot(*displayIR, loadedSR);
     }
 
-    switchEngineOnMessageThread(newConv);
+    // publishEngine を使用して安全にエンジンを公開
+    if (!publishEngine(newConv))
+    {
+        // 公開失敗：エンジンは破棄済み、ロールバック
+        isLoading.store(false, std::memory_order_release);
+        isRebuilding.store(false, std::memory_order_release);
+        return;
+    }
 
     irLength.store(targetLength, std::memory_order_release);
     currentSampleRate.store(loadedSR, std::memory_order_release);
@@ -5790,18 +5831,6 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     updateLatencyCache();
     requestHostDisplayUpdate();
     postCoalescedChangeNotification();
-}
-
-void ConvolverProcessor::switchEngineOnMessageThread(StereoConvolver* newEngine) noexcept
-{
-    if (newEngine == nullptr)
-        return;
-
-    auto* oldEngine = m_activeEngine.exchange(newEngine, std::memory_order_acq_rel);
-    if (oldEngine)
-        retireStereoConvolver(oldEngine, 0);
-
-    convo::EpochManager::instance().advanceEpoch();
 }
 
 // applyNewState へのシンプルな転送。新しいコードからは commitNewConvolver を使用する。

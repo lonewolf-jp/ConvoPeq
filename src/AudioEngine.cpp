@@ -115,8 +115,15 @@ AudioEngine::AudioEngine() : uiEqEditor(*this)
 
 AudioEngine::~AudioEngine()
 {
-    shutdownInProgress.store(true);
+    // 1. タイマーを停止し、メンテナンスの呼び出しを無くす
     stopTimer();
+
+    // 2. シャットダウンフラグを立て、非同期コールバックを無効化
+    uiConvolverProcessor.m_isShuttingDown.store(true, std::memory_order_release);
+
+
+    // 3. その他のクリーンアップ
+    shutdownInProgress.store(true);
 }
 
 void AudioEngine::prepareToPlay(int samplesPerBlock, double sampleRate)
@@ -444,6 +451,9 @@ void AudioEngine::timerCallback()
     // 内部プロセッサのクリーンアップを実行する。
     uiEqEditor.cleanup();
     uiConvolverProcessor.cleanup();
+
+    // 退役キューのメンテナンスを実行
+    uiConvolverProcessor.tickMaintenance();
 }
 
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
@@ -564,6 +574,7 @@ void AudioEngine::processBlockDouble(juce::AudioBuffer<double>& buffer)
 }
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
+
     const juce::ScopedNoDenormals noDenormals;
     m_audioBlockCounter.fetch_add(1, std::memory_order_release);
 
