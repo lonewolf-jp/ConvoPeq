@@ -31,7 +31,6 @@ public:
     void sample(std::vector<std::vector<double>>& candidates);
     void update(const std::vector<std::vector<double>>& candidates,
                 const std::vector<double>& fitness);
-    void getMean(std::vector<double>& out) const { out = mean; }
     void getCovarianceUpperTriangle(std::vector<double>& out) const;
     double getSigma() const noexcept { return sigma; }
     void serializeTo(double* outMean, double* outCov, double& outSigma) const;

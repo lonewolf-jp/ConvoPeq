@@ -42,21 +42,6 @@ struct SecondOrderAllpass {
 
         return h;
     }
-
-    // 解析的群遅延（サンプル単位）
-    // Phase 2 修正：2つの1次セクションの和として正しく計算
-    double groupDelay(double omega) const {
-        if (rho <= 0.0) return 0.0;
-        const double rho2 = rho * rho;
-        const double term_num = 1.0 - rho2;
-        const double denom1 = 1.0 - 2.0 * rho * std::cos(omega - theta) + rho2;
-        const double denom2 = 1.0 - 2.0 * rho * std::cos(omega + theta) + rho2;
-        const double eps = 1e-12 * (1.0 + rho2);
-        double tau = 0.0;
-        if (denom1 > eps) tau += term_num / denom1;
-        if (denom2 > eps) tau += term_num / denom2;
-        return tau;
-    }
 };
 
 //==============================================================================

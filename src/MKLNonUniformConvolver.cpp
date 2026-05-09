@@ -1279,11 +1279,6 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
 
     const int got = ringRead(output, numSamples);
 
-    auto isAligned64 = [](const void* ptr) noexcept
-    {
-        return (reinterpret_cast<std::uintptr_t>(ptr) & static_cast<std::uintptr_t>(63)) == 0;
-    };
-
     auto addFallback = [](int n, double* dst, const double* src) noexcept
     {
 #if defined(__AVX2__)
@@ -1308,9 +1303,6 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
             dst[i] += src[i];
 #endif
     };
-
-    // suppress unused warning
-    (void)isAligned64;
 
     // ── Direct 出力 ──
     if (m_directEnabled && m_directOutBuf != nullptr)

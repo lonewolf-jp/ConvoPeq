@@ -14,11 +14,6 @@ void DeletionQueue::enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, D
     queue.push_back({ptr, deleter, epoch, type});
 }
 
-void DeletionQueue::enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch)
-{
-    enqueue(ptr, deleter, epoch, DeletionEntryType::Generic);
-}
-
 void DeletionQueue::reclaim(const EpochCore& core)
 {
     const uint64_t minReaderEpoch = core.getMinReaderEpoch();
@@ -50,17 +45,6 @@ void DeletionQueue::reclaim(const EpochCore& core)
     }
 
     queue.erase(it, queue.end());
-}
-
-void DeletionQueue::reclaimAllIgnoringEpoch()
-{
-    std::lock_guard<std::mutex> lock(mutex);
-    for (auto& e : queue) {
-        if (e.deleter && e.ptr) {
-            e.deleter(e.ptr);
-        }
-    }
-    queue.clear();
 }
 
 } // namespace convo

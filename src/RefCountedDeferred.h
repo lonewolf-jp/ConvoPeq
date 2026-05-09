@@ -35,10 +35,6 @@ public:
         return false;
     }
 
-    int getRefCount() const noexcept {
-        return refCount.load(std::memory_order_relaxed);
-    }
-
 protected:
     RefCountedDeferred() = default;
     ~RefCountedDeferred() = default;

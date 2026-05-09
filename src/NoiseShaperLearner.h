@@ -152,15 +152,6 @@ public:
 
     std::array<double, kNumLevels> currentLevelWeights = { 0.4, 0.3, 0.2, 0.1 };
 
-    static constexpr std::array<double, kOrder> kDefaultCoeffs = {
-        0.82, -0.68, 0.55, -0.43, 0.33, -0.25, 0.18, -0.12, 0.07
-    };
-
-    // tanh mapping scale to allow CMA-ES to explore a reasonable range
-    // atanh(0.995) is approx 3.0, so a range of [-4, 4] in CMA-ES space is good.
-    static constexpr double kCmaEsInitialSigma = 0.15;
-    static constexpr double kCmaEsCoordinateScale = 1.0;
-
     NoiseShaperLearner(AudioEngine& engineRef,
                        LockFreeRingBuffer<AudioBlock, 4096>& captureQueueRef);
     ~NoiseShaperLearner();

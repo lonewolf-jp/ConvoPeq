@@ -46,10 +46,6 @@ public:
     static bool areSnapshotsEquivalent(const SnapshotParams& params,
                                        const GlobalSnapshot& snapshot) noexcept;
 
-#ifdef _DEBUG
-    static int getLiveSnapshotCount() noexcept;
-#endif
-
 private:
     friend class DeletionQueue;
     friend class SnapshotCoordinator;

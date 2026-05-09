@@ -16,9 +16,7 @@ namespace convo {
 class DeletionQueue {
 public:
     void enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type);
-    void enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch);
     void reclaim(const EpochCore& core);
-    void reclaimAllIgnoringEpoch();
 
 private:
     struct Entry {

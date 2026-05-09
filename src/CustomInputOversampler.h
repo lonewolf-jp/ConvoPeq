@@ -28,10 +28,6 @@ public:
     void reset() noexcept;
     void release() noexcept;
 
-    bool isActive() const noexcept { return upsampleRatio > 1; }
-    int getRatio() const noexcept { return upsampleRatio; }
-    int getMaxUpsampledBlockSize() const noexcept { return maxUpsampledBlockSize; }
-
     juce::dsp::AudioBlock<double> processUp(const juce::dsp::AudioBlock<double>& inputBlock, int numChannels) noexcept;
     void processDown(const juce::dsp::AudioBlock<double>& upsampledBlock,
                      juce::dsp::AudioBlock<double>& outputBlock,

@@ -101,11 +101,6 @@ public:
     void advanceFade(int numSamples) noexcept;
     bool tryCompleteFade() noexcept;
 
-    void reclaim(uint64_t /*unused*/) noexcept
-    {
-        m_deletionQueue.reclaim(m_epochCore);
-    }
-
     bool isFading() const noexcept
     {
         return m_fadeState.load(std::memory_order_acquire) != FadeState::Idle;

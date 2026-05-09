@@ -26,21 +26,6 @@ public:
         return epoch.fetch_add(1, std::memory_order_acq_rel);
     }
 
-    void enterReader(int index) noexcept {
-        if (index >= 0 && index < kMaxReaders) {
-            // relaxed load of global epoch is sufficient; release store publishes participation.
-            uint64_t e = epoch.load(std::memory_order_relaxed);
-            readerEpochs[index].store(e, std::memory_order_release);
-        }
-    }
-
-    void exitReader(int index) noexcept {
-        if (index >= 0 && index < kMaxReaders) {
-            // relaxed store is sufficient for exiting participant.
-            readerEpochs[index].store(kIdleEpoch, std::memory_order_relaxed);
-        }
-    }
-
     uint64_t getMinReaderEpoch() const noexcept {
         uint64_t minEpoch = std::numeric_limits<uint64_t>::max();
         bool hasActiveReader = false;

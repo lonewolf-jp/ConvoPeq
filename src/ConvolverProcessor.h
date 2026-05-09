@@ -100,7 +100,6 @@ public:
 
     // IR処理定数
     static constexpr int MIN_PARTITION_SIZE = 256;
-    static constexpr int PARTITION_SIZE_MULTIPLIER = 2;
     static constexpr float IR_SILENCE_THRESHOLD = 1.0e-6f;
     static constexpr float MIX_MIN = 0.0f;
     static constexpr float MIX_MAX = 1.0f;

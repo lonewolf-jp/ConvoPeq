@@ -55,15 +55,6 @@ public:
         return true;
     }
 
-    bool empty() const noexcept {
-        return readIndex.load(std::memory_order_acquire) == writeIndex.load(std::memory_order_acquire);
-    }
-
-    void clear() noexcept {
-        writeIndex.store(0, std::memory_order_relaxed);
-        readIndex.store(0, std::memory_order_relaxed);
-    }
-
 private:
     static constexpr size_t mask = Capacity - 1;
 
@@ -75,7 +66,6 @@ private:
 #pragma warning(pop)
 #endif
 
-constexpr size_t kCommandBufferCapacity = 1024;
-using CommandBuffer = SPSCRingBuffer<ParameterCommand, kCommandBufferCapacity>;
+using CommandBuffer = SPSCRingBuffer<ParameterCommand, 1024>;
 
 } // namespace convo

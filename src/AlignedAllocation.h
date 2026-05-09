@@ -128,7 +128,6 @@ struct MKLAllocator {
     bool operator!=(const MKLAllocator&) const noexcept { return false; }
 };
 
-
 // =========================================================================
 // makeAlignedCopy  – src の内容を 64 バイト境界にコピーした ScopedAlignedPtr を返す
 // 非 AudioThread 専用 (LoaderThread 等)。確保失敗時は std::bad_alloc を投げる。

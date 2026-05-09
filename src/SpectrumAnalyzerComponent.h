@@ -52,10 +52,6 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
 
-    // 外部からタイマーを制御するためのラッパーメソッド
-    void startAnalysis(int intervalMs) { startTimer(intervalMs); }
-    void stopAnalysis()                { stopTimer(); }
-
 private:
     AudioEngine& engine;
     std::atomic<AnalyzerState> analyzerState { AnalyzerState::Disabled };
@@ -116,7 +112,6 @@ private:
 
     // ── ピーク保持設定 ──
     static constexpr double PEAK_HOLD_SEC = 1.0;
-    static constexpr float PEAK_DECAY_DB_PER_SEC = 15.0f;
 
     // ── レベルメーターのピークホールド設定 ──
     static constexpr double LEVEL_PEAK_HOLD_SEC          = 3.0;   // ピーク保持時間 (秒)

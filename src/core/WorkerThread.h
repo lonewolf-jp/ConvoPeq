@@ -34,18 +34,10 @@ public:
 
     void start();
     void stop();
-    void requestStop() noexcept;
-    void flush();
 
     void setSnapshotCreator(SnapshotCreatorCallback callback, void* userData) noexcept {
         callbackFunc.store(callback, std::memory_order_release);
         callbackUserData.store(userData, std::memory_order_release);
-    }
-
-    void setDebounceDelayMs(int ms) noexcept {
-        if (ms < 0)
-            ms = 0;
-        config.debounceDelayMs = ms;
     }
 
 #ifdef _DEBUG

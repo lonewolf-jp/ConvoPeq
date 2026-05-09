@@ -15,7 +15,6 @@
 namespace convo::input_transform
 {
     // document/input_bitdepth_transform.txt の仕様に合わせた共通定数
-    static constexpr double kHeadroomScale    = 0.988553; // about -0.1 dB
     static constexpr double kDenormThreshold  = convo::numeric_policy::kDenormThresholdInputSanitize;
 
     inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexcept

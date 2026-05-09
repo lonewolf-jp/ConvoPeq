@@ -113,6 +113,7 @@ static inline double equalPowerSinDouble(double x) noexcept
 // =============================================================
 // Rebuild request coalescing (Stage 3)
 // =============================================================
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_DISPATCH)
 void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
 {
     if (shutdownInProgress.load(std::memory_order_acquire) ||
@@ -143,7 +144,9 @@ void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
     if (prev == 0)
         triggerAsyncUpdate();
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_DISPATCH)
 void AudioEngine::handleAsyncUpdate()
 {
     if (shutdownInProgress.load(std::memory_order_acquire) ||
@@ -153,7 +156,9 @@ void AudioEngine::handleAsyncUpdate()
     executeCommit();
     processRebuildRequestsInternal();
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_COMMIT_PREPARE)
 void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
 {
     if (newDSP == nullptr)
@@ -181,7 +186,9 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
 
     triggerAsyncUpdate();
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_COMMIT_EXECUTE)
 void AudioEngine::executeCommit()
 {
     std::queue<CommitStaging> localQueue;
@@ -209,7 +216,9 @@ void AudioEngine::executeCommit()
         commitNewDSP(staging.newDSP, staging.generation);
     }
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_DISPATCH)
 void AudioEngine::processRebuildRequestsInternal()
 {
     // 1. mask 取得（完全 drain）
@@ -248,6 +257,7 @@ void AudioEngine::processRebuildRequestsInternal()
     // --- LOW: Runtime / UIOnly ---
     // 現状は何もしない（将来拡張ポイント）
 }
+#endif
 
 
 // ==================================================================
@@ -293,31 +303,42 @@ static inline T* sanitizeRawPtr(T* ptr) noexcept
 // RCU 実装
 // ==================================================================
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_ADVANCE)
 void AudioEngine::advanceRcuEpoch() noexcept
 {
     convo::EpochManager::instance().advanceEpoch();
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_PUBLISH)
 uint64_t AudioEngine::publishRcuEpoch() noexcept
 {
     return convo::EpochManager::instance().currentEpoch();
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_ENTER)
 void AudioEngine::enterRcuReader(int readerIndex) noexcept
 {
     convo::EpochManager::instance().enter(readerIndex);
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_EXIT)
 void AudioEngine::exitRcuReader(int readerIndex) noexcept
 {
     convo::EpochManager::instance().exit(readerIndex);
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_RECLAIM)
 void AudioEngine::tryReclaimResources() noexcept
 {
     convo::EBRQueue::instance().tryReclaim();
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_DEFERRED)
 void AudioEngine::processDeferredReleases()
 {
     if (shutdownInProgress.load(std::memory_order_acquire))
@@ -332,6 +353,7 @@ void AudioEngine::processDeferredReleases()
 
     convo::EBRQueue::instance().tryReclaim();
 }
+#endif
 
 // ==================================================================
 // 以下、既存の AudioEngine 実装
@@ -907,6 +929,7 @@ AudioEngine::~AudioEngine()
 
 
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_START)
 void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode, bool resume)
 {
     if (noiseShaperLearner == nullptr)
@@ -931,7 +954,9 @@ void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode
         return;
     }
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_STOP)
 void AudioEngine::stopNoiseShaperLearning()
 {
     const LearningCommand cmd {
@@ -949,6 +974,7 @@ void AudioEngine::stopNoiseShaperLearning()
     if (noiseShaperLearner)
         noiseShaperLearner->stopLearning();
 }
+#endif
 
 void AudioEngine::setNoiseShaperLearningMode(NoiseShaperLearner::LearningMode mode)
 {
@@ -3022,6 +3048,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     diagLog("[DIAG] commitNewDSP: after sendChangeMessage");
 }
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_PROCESS)
 void AudioEngine::processLearningCommands() noexcept
 {
     if (learnerDispatchOverflow.load(std::memory_order_acquire))
@@ -3158,7 +3185,9 @@ void AudioEngine::processLearningCommands() noexcept
         }
     }
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_DEFERRED)
 void AudioEngine::processDeferredLearningActions()
 {
     LearnerDispatchAction action;
@@ -3177,7 +3206,9 @@ void AudioEngine::processDeferredLearningActions()
         noiseShaperLearner->startLearning(action.resume);
     }
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_RESET)
 void AudioEngine::resetLearningControlState() noexcept
 {
     learningCommandWrite = 0;
@@ -3192,6 +3223,7 @@ void AudioEngine::resetLearningControlState() noexcept
     requestedLearningGeneration = pendingIRGeneration;
     currentIRGeneration = pendingIRGeneration;
 }
+#endif
 
 void AudioEngine::timerCallback()
 {
@@ -5730,6 +5762,7 @@ void AudioEngine::endBulkParameterRestore(bool requestRebuildNow) noexcept
         requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
 }
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_LOAD)
 void AudioEngine::requestLoadState (const juce::ValueTree& state)
 {
     // B19: RAII ガードを使用して、例外発生時も確実にフラグを戻す
@@ -5876,7 +5909,9 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     // UI更新通知
     sendChangeMessage();
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_GET)
 juce::ValueTree AudioEngine::getCurrentState() const
 {
     juce::ValueTree state ("Preset");
@@ -5925,6 +5960,7 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
     return state;
 }
+#endif
 
 void AudioEngine::setInputHeadroomDb(float db)
 {

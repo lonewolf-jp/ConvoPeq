@@ -55,7 +55,6 @@ struct GlobalSnapshot {
 
 #ifdef _DEBUG
     mutable std::atomic<bool> alive{true};
-    uint64_t snapshotId = 0;
 #endif
 
     // SnapshotParams から全フィールドを初期化

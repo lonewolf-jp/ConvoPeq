@@ -49,21 +49,11 @@ void WorkerThread::start()
 
 void WorkerThread::stop()
 {
-    requestStop();
+    running.store(false, std::memory_order_release);
     pendingFlush.store(true, std::memory_order_release);
 
     if (thread.joinable())
         thread.join();
-}
-
-void WorkerThread::requestStop() noexcept
-{
-    running.store(false, std::memory_order_release);
-}
-
-void WorkerThread::flush()
-{
-    pendingFlush.store(true, std::memory_order_release);
 }
 
 void WorkerThread::run()

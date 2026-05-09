@@ -16,9 +16,6 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
 
-    // recent scoreグラフ拡張のため推奨サイズをさらに拡大（グラフ3倍分）
-    int getRecommendedHeight() const noexcept { return 1760; } // 320*3+α
-
 private:
     class ProgressGraph : public juce::Component
     {
