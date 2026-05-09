@@ -676,7 +676,7 @@ static inline double musicalSoftClipScalar(double x, double threshold, double kn
 }
 
 // prevSampleInOut: 前ブロック末尾のクリップ済み出力サンプル（ブロック間インターサンプルピーク検出用）
-static void softClipBlockAVX2(double* __restrict data, int numSamples,
+[[maybe_unused]] static void softClipBlockAVX2(double* __restrict data, int numSamples,
                                double threshold, double knee, double asymmetry,
                                double& prevSampleInOut) noexcept
 {
@@ -2013,6 +2013,7 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
     }
 }
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_LATENCY_QUERY)
 //--------------------------------------------------------------
 // getProcessingSampleRate
 //--------------------------------------------------------------
@@ -2048,11 +2049,15 @@ double AudioEngine::getProcessingSampleRate() const
 
     return sr * static_cast<double>(actualFactor);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_LATENCY_QUERY)
 
 int AudioEngine::getCurrentLatencySamples() const
 {
     return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_LATENCY_QUERY)
 
 double AudioEngine::estimateOversamplingLatencySamples(int oversamplingFactor,
                                                        OversamplingType oversamplingType,
@@ -2060,11 +2065,15 @@ double AudioEngine::estimateOversamplingLatencySamples(int oversamplingFactor,
 {
     return estimateOversamplingLatencySamplesImpl(oversamplingFactor, oversamplingType, baseSampleRate);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_LATENCY_QUERY)
 
 int AudioEngine::getTotalLatencySamples() const
 {
     return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_LATENCY_QUERY)
 
 AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 {
@@ -2113,6 +2122,8 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 
     return breakdown;
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_LATENCY_QUERY)
 
 double AudioEngine::getCurrentLatencyMs() const
 {
@@ -2124,7 +2135,9 @@ double AudioEngine::getCurrentLatencyMs() const
     const double totalMs = (static_cast<double>(totalSamples) * 1000.0) / sr;
     return static_cast<double>(juce::roundToInt(totalMs));
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_PREPARE_TO_PLAY)
 //--------------------------------------------------------------
 // prepareToPlay
 //--------------------------------------------------------------
@@ -2257,11 +2270,15 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     }
         diagLog("[DIAG] prepareToPlay: exit currentSR=" + juce::String(currentSampleRate.load(), 2) + " maxSPB=" + juce::String(maxSamplesPerBlock.load()));
     }
+#endif
 
 //--------------------------------------------------------------
 // DSPCore Implementation
 //--------------------------------------------------------------
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_PREPARE)
 AudioEngine::DSPCore::DSPCore() = default;
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_PREPARE)
 
 void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner)
 {
@@ -2420,6 +2437,8 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     // 初期状態は固定レイテンシなし
     setFixedLatencySamples(0);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_PREPARE)
 
 void AudioEngine::DSPCore::setFixedLatencySamples(int samples)
 {
@@ -2448,6 +2467,8 @@ void AudioEngine::DSPCore::setFixedLatencySamples(int samples)
         juce::FloatVectorOperations::clear(fixedLatencyBufferR.get(), fixedLatencyBufferSize);
     }
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_PREPARE)
 
 void AudioEngine::DSPCore::reset()
 {
@@ -2490,7 +2511,9 @@ void AudioEngine::DSPCore::reset()
     softClipPrevSample[0] = 0.0;
     softClipPrevSample[1] = 0.0;
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_EXECUTE)
 //--------------------------------------------------------------
 // requestRebuild - DSPグラフの再構築 (Message Thread)
 //--------------------------------------------------------------
@@ -2655,6 +2678,8 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
         }
     }
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_EXECUTE)
 
 void AudioEngine::stopRebuildThread()
 {
@@ -2667,6 +2692,8 @@ void AudioEngine::stopRebuildThread()
     if (rebuildThread.joinable())
         rebuildThread.join();
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_EXECUTE)
 
 void AudioEngine::rebuildThreadLoop()
 {
@@ -2801,6 +2828,8 @@ void AudioEngine::rebuildThreadLoop()
 
     rebuildThreadIsRunning.store(false, std::memory_order_release);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_COMMIT_EXECUTE)
 
 void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 {
@@ -3047,6 +3076,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     sendChangeMessage();
     diagLog("[DIAG] commitNewDSP: after sendChangeMessage");
 }
+#endif
 
 #if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_PROCESS)
 void AudioEngine::processLearningCommands() noexcept
@@ -3645,6 +3675,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
     }
 }
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_RELEASE_RESOURCES)
 //--------------------------------------------------------------
 // releaseResources
 // デバイス停止時に呼ばれる（Audio Thread停止後）
@@ -3753,7 +3784,9 @@ void AudioEngine::releaseResources()
 
     diagLog("[DIAG] releaseResources: ABOUT_TO_EXIT_SCOPE");
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_AUDIO_BLOCK)
 //--------------------------------------------------------------
 // getNextAudioBlock - オーディオ処理コールバック (Audio Thread)
 // リアルタイム制約 (Real-time Constraints)
@@ -4093,6 +4126,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_SNAPSHOT)
 
 void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
                                       const convo::GlobalSnapshot* snap,
@@ -4182,6 +4217,8 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     auto& outMeter = isFadingTarget ? fadingOutputMeter : outputLevelLinear;
     dsp->process(bufferToFill, analyzerFifo, inMeter, outMeter, procState);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_BLOCK_DOUBLE)
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 {
@@ -4584,6 +4621,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
     }
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_TO_BUFFER)
 
 void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& source,
                                           juce::AudioBuffer<float>& destination,
@@ -4613,6 +4652,8 @@ void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& s
     juce::AudioSourceChannelInfo destinationInfo(&destination, 0, numSamples);
     process(destinationInfo, analyzerFifo, inputLevelLinear, outputLevelLinear, state);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_FLOAT)
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
                                   LockFreeAudioRingBuffer& analyzerFifo,
@@ -4886,6 +4927,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         }
     }
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_TO_BUFFER)
 
 void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>& source,
                                                  juce::AudioBuffer<double>& destination,
@@ -4914,6 +4957,8 @@ void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>
 
     processDouble(destination, analyzerFifo, inputLevelLinear, outputLevelLinear, state);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_DOUBLE)
 
 void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                                          LockFreeAudioRingBuffer& analyzerFifo,
@@ -5174,6 +5219,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
     }
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO)
 
 float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept
 {
@@ -5192,12 +5239,16 @@ float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const doub
     // linear gain をそのまま返す。dB 変換は UI Thread 側の getInputLevel() / getOutputLevel() で行う。
     return static_cast<float>(maxLevel);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO)
 
 void AudioEngine::DSPCore::pushToFifo(const juce::dsp::AudioBlock<const double>& block,
                                       LockFreeAudioRingBuffer& analyzerFifo) const noexcept
 {
     analyzerFifo.push(block);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO)
 
 float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& bufferToFill, int numSamples,
                                           double headroomGain,
@@ -5271,6 +5322,8 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
 
     return inputLevel;
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO)
 
 float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& buffer, int numSamples,
                                                double headroomGain,
@@ -5323,6 +5376,8 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
 
     return inputLevel;
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_LATENCY)
 
 void AudioEngine::DSPCore::applyFixedLatencyDelay(double* dataL, double* dataR, int numSamples) noexcept
 {
@@ -5356,7 +5411,9 @@ void AudioEngine::DSPCore::applyFixedLatencyDelay(double* dataL, double* dataR, 
 
     fixedLatencyWritePos = writePos;
 }
+#endif
 
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO)
 // 閾値を超えた信号を滑らかにクリップし、真空管アンプのような温かみのある歪みを加える。
 // @param x 入力信号
 // @param threshold クリッピングが開始される閾値 (正の値)
@@ -5366,6 +5423,8 @@ double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double 
 {
     return musicalSoftClipScalar(x, threshold, knee, asymmetry);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO)
 
 void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& bufferToFill,
                                          int numSamples,
@@ -5535,6 +5594,8 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     for (int ch = numChannels; ch < buffer->getNumChannels(); ++ch)
         buffer->clear(ch, startSample, numSamples);
 }
+#endif
+#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO)
 
 void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer,
                                                int numSamples,
@@ -5686,6 +5747,7 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     for (int channel = numChannels; channel < buffer.getNumChannels(); ++channel)
         buffer.clear(channel, 0, numSamples);
 }
+#endif
 
 void AudioEngine::setEqBypassRequested (bool shouldBypass)
 {

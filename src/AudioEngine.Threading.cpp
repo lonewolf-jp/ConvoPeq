@@ -1,6 +1,8 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 
+extern std::atomic<bool> gShuttingDown;
+
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_ADVANCE)
 
 void AudioEngine::advanceRcuEpoch() noexcept
