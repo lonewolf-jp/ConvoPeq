@@ -94,6 +94,10 @@ struct FilterSpec
 // ステレオ 2ch を個別インスタンスで処理する (呼び出し元が ch 単位で保持)。
 // SetImpulse() に渡す impulse は 1ch 分 (モノラル) の double 配列。
 //==============================================================================
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
 class MKLNonUniformConvolver
 {
 public:
@@ -328,5 +332,9 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MKLNonUniformConvolver)
 };
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 } // namespace convo

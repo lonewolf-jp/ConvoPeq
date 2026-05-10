@@ -34,6 +34,10 @@
 #include "AlignedAllocation.h"
 #include "MKLNonUniformConvolver.h"
 #include "AllpassDesigner.h"
+#include "IRConverter.h"
+#include "InputBitDepthTransform.h"
+#include "UltraHighRateDCBlocker.h"
+#include "convolver/ConvolverProcessor.Internal.h"
 #include "core/EBRQueue.h"            // convo::retireObject
 
 // ── Phase 0: Epoch-based RCU 基盤ヘッダー ──
@@ -47,7 +51,6 @@
 #include "DspNumericPolicy.h"
 
 class AudioEngine;
-class IRConverter;
 class CacheManager;
 class ProgressiveUpgradeThread;
 
@@ -447,7 +450,7 @@ public:
 
 private:
     struct StereoConvolver;
-    class LoaderThread;
+#include "convolver/ConvolverProcessor.LoaderThreadInline.h"
 
     struct IncrementalRebuildJob
     {

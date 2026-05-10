@@ -3,6 +3,8 @@
 #pragma once
 //============================================================================
 
+#include <cstdint>
+
 static constexpr int kAdaptiveNoiseShaperOrder = 9;
 static constexpr int kAdaptiveNoiseShaperSampleRateBankCount = 10;
 
@@ -19,13 +21,13 @@ struct AudioBlock {
     int sampleRateHz = 0;
     int bitDepth = 0;
     int adaptiveCoeffBankIndex = 0;
-    uint64_t sessionId = 0;
+    std::uint64_t sessionId = 0;
 };
 
 // RT/Worker間ダブルバッファ係数連携（RCU）
 struct CoeffSet {
     static constexpr int kDim = kAdaptiveNoiseShaperOrder;
-    double k[CoeffSet::kDim] = {};
+    double k[kDim] = {};
 };
 
 #include <JuceHeader.h>
@@ -76,6 +78,13 @@ struct CoeffSet {
 #else
     #define DBG_LOG(msg) ((void)0)
 #endif
+
+inline double absNoLibm(double x) noexcept
+{
+    union { double d; std::uint64_t u; } v { x };
+    v.u &= 0x7FFFFFFFFFFFFFFFULL;
+    return v.d;
+}
 
 // AudioEngine.h  ── v0.2 (JUCE 8.0.12対応)
 //
@@ -895,6 +904,14 @@ static inline CoeffSet* getReservedInactiveCoeffSet(AdaptiveCoeffBankSlot& slot)
 {
     int active = slot.activeIndex.load(std::memory_order_acquire);
     return (active == 0) ? &slot.coeffSetB : &slot.coeffSetA;
+}
+
+// DSP ポインタのセンチネル値（全ビット 1）をチェックし、無効値なら nullptr を返す
+template <typename T>
+static inline T* sanitizeRawPtr(T* ptr) noexcept
+{
+    constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
+    return (reinterpret_cast<uintptr_t>(ptr) == kInvalidAllOnes) ? nullptr : ptr;
 }
 
 //==============================================================================

@@ -1,4 +1,4 @@
-﻿# AddressSanitizer (ASan) オプション
+# AddressSanitizer (ASan) オプション
 option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
 if(ENABLE_ASAN AND MSVC)
     target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
@@ -122,18 +122,53 @@ juce_add_gui_app(ConvoPeq
 target_sources(ConvoPeq PRIVATE
     src/MainApplication.cpp
     src/MainWindow.cpp
-    src/AudioEngine.cpp
-    src/AudioEngine.RebuildDispatch.cpp
-    src/AudioEngine.Commit.cpp
-    src/AudioEngine.Learning.cpp
-    src/AudioEngine.StateIO.cpp
-    src/AudioEngine.Threading.cpp
-    src/AudioEngine.Processing.cpp
+    src/audioengine/AudioEngine.RebuildDispatch.cpp
+    src/audioengine/AudioEngine.Commit.cpp
+    src/audioengine/AudioEngine.CtorDtor.cpp
+    src/audioengine/AudioEngine.Globals.cpp
+    src/audioengine/AudioEngine.HelpersCrossfade.cpp
+    src/audioengine/AudioEngine.HelpersNumeric.cpp
+    src/audioengine/AudioEngine.Learning.cpp
+    src/audioengine/AudioEngine.Init.cpp
+    src/audioengine/AudioEngine.Cache.cpp
+    src/audioengine/AudioEngine.Snapshot.cpp
+    src/audioengine/AudioEngine.Fifo.cpp
+    src/audioengine/AudioEngine.Timer.cpp
+    src/audioengine/AudioEngine.Parameters.cpp
+    src/audioengine/AudioEngine.EQResponse.cpp
+    src/audioengine/AudioEngine.UIEvents.cpp
+    src/audioengine/AudioEngine.StateIO.cpp
+    src/audioengine/AudioEngine.Threading.cpp
+    src/audioengine/AudioEngine.Processing.Latency.cpp
+    src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp
+    src/audioengine/AudioEngine.Processing.ReleaseResources.cpp
+    src/audioengine/AudioEngine.Processing.AudioBlock.cpp
+    src/audioengine/AudioEngine.Processing.BlockDouble.cpp
+    src/audioengine/AudioEngine.Processing.Snapshot.cpp
+    src/audioengine/AudioEngine.Processing.DSPCoreLifecycle.cpp
+    src/audioengine/AudioEngine.Processing.DSPCoreToBuffer.cpp
+    src/audioengine/AudioEngine.Processing.DSPCoreFloat.cpp
+    src/audioengine/AudioEngine.Processing.DSPCoreDouble.cpp
+    src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp
     src/CustomInputOversampler.cpp
-    src/AudioEngineProcessor.cpp
-    src/ConvolverProcessor.cpp
+    src/audioengine/AudioEngineProcessor.cpp
+    # Convolver split implementation (v1)
+    src/convolver/ConvolverProcessor.Internal.h
+    src/convolver/ConvolverProcessor.Lifecycle.cpp
+    src/convolver/ConvolverProcessor.Rebuild.cpp
+    src/convolver/ConvolverProcessor.LoaderThread.cpp
+    src/convolver/ConvolverProcessor.MixedPhase.cpp
+    src/convolver/ConvolverProcessor.ResampleAndFallback.cpp
+    src/convolver/ConvolverProcessor.LoadPipeline.cpp
+    src/convolver/ConvolverProcessor.Runtime.cpp
+    src/convolver/ConvolverProcessor.StateAndUI.cpp
+    # Legacy monolithic (kept for backward compat, functions guarded by #if)
     src/MKLNonUniformConvolver.cpp
-    src/EQProcessor.cpp
+    src/eqprocessor/EQProcessor.Core.cpp
+    src/eqprocessor/EQProcessor.Parameters.cpp
+    src/eqprocessor/EQProcessor.Coefficients.cpp
+    src/eqprocessor/EQProcessor.Processing.cpp
+    src/eqprocessor/EQProcessor.ProcessingCache.cpp
     src/EQEditProcessor.cpp
     src/ConvolverControlPanel.cpp
     src/EQControlPanel.cpp
@@ -146,7 +181,7 @@ target_sources(ConvoPeq PRIVATE
     src/CmaEsOptimizerDynamic.cpp
     src/AsioBlacklist.h
     src/CustomInputOversampler.h
-    src/AudioEngineProcessor.h
+    src/audioengine/AudioEngineProcessor.h
     src/PsychoacousticDither.h
     src/MKLNonUniformConvolver.h
     src/OutputFilter.h
@@ -207,11 +242,24 @@ target_compile_definitions(ConvoPeq PRIVATE
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_EXECUTE=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_COMMIT_PREPARE=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_COMMIT_EXECUTE=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CTOR_DTOR=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_GLOBALS=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_HELPERS_CROSSFADE=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_HELPERS_NUMERIC=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_START=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_STOP=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_RESET=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_DEFERRED=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_PROCESS=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_HELPERS=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_INIT_LIFECYCLE=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CACHE_MANAGER=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_SNAPSHOT_CREATE=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_FIFO_UI=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_TIMER_CALLBACK=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PARAMETERS=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CALC_EQ_RESPONSE=1
+    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_UI_EVENTS=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_GET=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_LOAD=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_ADVANCE=1
@@ -232,6 +280,14 @@ target_compile_definitions(ConvoPeq PRIVATE
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_RELEASE_RESOURCES=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_SNAPSHOT=1
     CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_TO_BUFFER=1
+    CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1
+    CONVOPEQ_ENABLE_CONVOLVER_SPLIT_REBUILD=1
+    CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1
+    CONVOPEQ_ENABLE_CONVOLVER_SPLIT_MIXED_PHASE=1
+    CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RESAMPLE=1
+    CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE=1
+    CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
+    CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
     JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
     JUCE_APPLICATION_NAME_STRING="${APP_NAME}"
     JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}"
@@ -249,6 +305,9 @@ target_compile_definitions(ConvoPeq PRIVATE
 
 target_include_directories(ConvoPeq PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
 )
 
 #------------------------------------------------------------

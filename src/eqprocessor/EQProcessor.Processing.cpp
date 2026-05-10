@@ -1,0 +1,1086 @@
+//============================================================================
+// EQProcessor.Processing.cpp
+//============================================================================
+#include "EQProcessor.h"
+#include "DspNumericPolicy.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include "core/RCUReader.h"
+
+#if defined(__AVX2__) || defined(__FMA__)
+ #include <immintrin.h>
+#endif
+
+static thread_local convo::RCUReader tls_rcuReader;
+
+static inline double calculateRMS(const double* data, int numSamples) noexcept
+{
+    if (data == nullptr || numSamples <= 0)
+        return 0.0;
+
+    double sumSq = 0.0;
+#if defined(__AVX2__)
+    int i = 0;
+    const int vEnd = numSamples / 4 * 4;
+    __m256d vSumSq = _mm256_setzero_pd();
+    for (; i < vEnd; i += 4)
+    {
+        __m256d vData = _mm256_loadu_pd(data + i);
+        vSumSq = _mm256_fmadd_pd(vData, vData, vSumSq);
+    }
+    alignas(32) double temp[4];
+    _mm256_store_pd(temp, vSumSq);
+    sumSq = temp[0] + temp[1] + temp[2] + temp[3];
+    for (; i < numSamples; ++i)
+        sumSq += data[i] * data[i];
+#else
+    for (int i = 0; i < numSamples; ++i)
+        sumSq += data[i] * data[i];
+#endif
+
+    __m128d n = _mm_set_sd(static_cast<double>(numSamples));
+    __m128d vSumSqSd = _mm_set_sd(sumSq);
+    __m128d vRms = _mm_sqrt_sd(_mm_setzero_pd(), _mm_div_sd(vSumSqSd, n));
+    double rms;
+    _mm_store_sd(&rms, vRms);
+    return rms;
+}
+
+namespace
+{
+    inline double absNoLibm(double value) noexcept
+    {
+        union { double d; uint64_t u; } v { value };
+        v.u &= 0x7FFFFFFFFFFFFFFFULL;
+        return v.d;
+    }
+
+    inline bool isFiniteNoLibm(double value) noexcept
+    {
+        const __m128d v = _mm_set1_pd(value);
+        const __m128d diff = _mm_sub_pd(v, v);
+        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+        return _mm_movemask_pd(finiteMask) == 0x3;
+    }
+
+    inline bool isFiniteAndAbsInRangeMask(double value, double minAbsInclusive, double maxAbsExclusive) noexcept
+    {
+        const __m128d v = _mm_set1_pd(value);
+        const __m128d diff = _mm_sub_pd(v, v);
+        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+
+        const __m128d signMask = _mm_set1_pd(-0.0);
+        const __m128d absV = _mm_andnot_pd(signMask, v);
+        const __m128d minV = _mm_set1_pd(minAbsInclusive);
+        const __m128d maxV = _mm_set1_pd(maxAbsExclusive);
+        const __m128d geMinMask = _mm_cmpge_pd(absV, minV);
+        const __m128d ltMaxMask = _mm_cmplt_pd(absV, maxV);
+
+        const __m128d validMask = _mm_and_pd(finiteMask, _mm_and_pd(geMinMask, ltMaxMask));
+        return _mm_movemask_pd(validMask) == 0x3;
+    }
+
+    inline double fastTanhScalar(double x) noexcept
+    {
+        if (x >= 3.0) return 1.0;
+        if (x <= -3.0) return -1.0;
+        const double x2 = x * x;
+        return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+    }
+
+    inline __m128d fastTanhV128(__m128d x) noexcept
+    {
+        const __m128d vThree = _mm_set1_pd(3.0);
+        const __m128d vNegThree = _mm_set1_pd(-3.0);
+        const __m128d vNine = _mm_set1_pd(9.0);
+        const __m128d vTwentySeven = _mm_set1_pd(27.0);
+
+        const __m128d xClamped = _mm_min_pd(_mm_max_pd(x, vNegThree), vThree);
+        const __m128d x2 = _mm_mul_pd(xClamped, xClamped);
+        const __m128d num = _mm_mul_pd(xClamped, _mm_add_pd(vTwentySeven, x2));
+        const __m128d den = _mm_add_pd(vTwentySeven, _mm_mul_pd(vNine, x2));
+        return _mm_div_pd(num, den);
+    }
+
+    inline double equalPowerSin(double x) noexcept
+    {
+        const double t = x * (juce::MathConstants<double>::pi * 0.5);
+        const double t2 = t * t;
+        return t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0)))));
+    }
+
+//--------------------------------------------------------------
+// 単一チャンネル・単一バンドのフィルタ処理 (TPT SVF)
+// Topology-Preserving Transform State Variable Filter
+// 参照: Vadim Zavalishin "The Art of VA Filter Design"
+//--------------------------------------------------------------
+    inline void processBand (double* data, int numSamples,
+                             const EQCoeffsSVF& c,
+                             double* state,
+                             double saturation)
+    {
+        double ic1eq = state[0];
+        double ic2eq = state[1];
+
+        const double a1 = c.a1;
+        const double a2 = c.a2;
+        const double a3 = c.a3;
+        const double m0 = c.m0;
+        const double m1 = c.m1;
+        const double m2 = c.m2;
+
+        constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
+
+        for (int n = 0; n < numSamples; ++n)
+        {
+            const double v0 = data[n];
+            const double v3 = v0 - ic2eq;
+            const double v1 = a1 * ic1eq + a2 * v3;
+            const double v2 = ic2eq + a2 * ic1eq + a3 * v3;
+
+            ic1eq = 2.0 * v1 - ic1eq;
+            ic2eq = 2.0 * v2 - ic2eq;
+
+            if (saturation > 0.0)
+            {
+                const double oneMinusSat = 1.0 - saturation;
+                ic1eq = ic1eq * oneMinusSat + fastTanhScalar(ic1eq) * saturation;
+                ic2eq = ic2eq * oneMinusSat + fastTanhScalar(ic2eq) * saturation;
+            }
+
+            double output = m0 * v0 + m1 * v1 + m2 * v2;
+
+            // NaN/Infチェックとクランプを追加 (processBandStereoと一貫性を保つ)
+            if (!isFiniteAndAbsInRangeMask(output, 0.0, 1.0e15))
+                output = 0.0;
+
+            // 出力もクランプして発散を防ぐ
+            data[n] = std::clamp(output, -100.0, 100.0);
+
+            // 状態変数が Inf/NaN に発散した場合は即座にリセットして次サンプルへの伝播を遮断する。
+            // FTZ/DAZ 有効下でも Inf は flush されないため、この防衛は省略できない。
+            // 条件式 !(abs < 閾値) は NaN に対しても true を返すため NaN/Inf を一括で捕捉する。
+            // ループ内で状態変数のみをチェックする (出力データへのクランプより低コスト)。
+            if (!isFiniteAndAbsInRangeMask(ic1eq, 0.0, 1.0e15)) ic1eq = 0.0;
+            if (!isFiniteAndAbsInRangeMask(ic2eq, 0.0, 1.0e15)) ic2eq = 0.0;
+        }
+
+        // Denormal対策 & NaNチェック
+        // Note: ScopedNoDenormals (DAZ/FTZ) が有効な場合でも、完全な0にならないと
+        // 極小値が循環し続ける可能性があるため、明示的にフラッシュして計算負荷を抑える。
+        ic1eq = killDenormal(ic1eq);
+        ic2eq = killDenormal(ic2eq);
+
+        state[0] = ic1eq;
+        state[1] = ic2eq;
+    }
+
+    // ── 追加: Stereo 2ch 同時処理 (SSE2 / AVX2 FMA) ──
+    // L, R が完全に独立した IIR 状態を持つため、128-bit レジスタに
+    // [L_value, R_value] をパックして同時演算し、メモリ帯域を節約する。
+    inline void processBandStereo(double* __restrict dataL,
+                                   double* __restrict dataR,
+                                   int numSamples,
+                                   const EQCoeffsSVF& c,
+                                   double* __restrict stateL,
+                                   double* __restrict stateR,
+                                   double saturation) noexcept
+    {
+        // フィルタ状態を __m128d にパック: lower=L, upper=R
+        __m128d ic1eq = _mm_set_pd(stateR[0], stateL[0]);
+        __m128d ic2eq = _mm_set_pd(stateR[1], stateL[1]);
+
+        const __m128d a1  = _mm_set1_pd(c.a1);
+        const __m128d a2  = _mm_set1_pd(c.a2);
+        const __m128d a3  = _mm_set1_pd(c.a3);
+        const __m128d m0  = _mm_set1_pd(c.m0);
+        const __m128d m1  = _mm_set1_pd(c.m1);
+        const __m128d m2  = _mm_set1_pd(c.m2);
+        const __m128d two = _mm_set1_pd(2.0);
+        const __m128d cHigh = _mm_set1_pd(100.0);
+        const __m128d cLow  = _mm_set1_pd(-100.0);
+
+        constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
+
+        for (int n = 0; n < numSamples; ++n)
+        {
+            // 【提案2強化版】AVX2相当のprefetch + 128byte先読み（L1キャッシュ最適化）
+            // 最新コードのprocessBandStereoに適合した形で追加（__m128dベースを維持しつつ帯域向上）
+            if (n + 8 < numSamples)
+            {
+                _mm_prefetch(reinterpret_cast<const char*>(dataL + n + 8), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(dataR + n + 8), _MM_HINT_T0);
+            }
+
+            // L[n] と R[n] を同時ロード
+            const __m128d v0 = _mm_set_pd(dataR[n], dataL[n]);
+
+            const __m128d v3 = _mm_sub_pd(v0, ic2eq);
+            // FMA: a1*ic1eq + a2*v3
+            const __m128d v1 = _mm_fmadd_pd(a1, ic1eq, _mm_mul_pd(a2, v3));
+            // FMA: ic2eq + a2*ic1eq + a3*v3
+            const __m128d v2 = _mm_fmadd_pd(a2, ic1eq,
+                                _mm_fmadd_pd(a3, v3, ic2eq));
+
+            ic1eq = _mm_fmsub_pd(two, v1, ic1eq);  // 2*v1 - ic1eq
+            ic2eq = _mm_fmsub_pd(two, v2, ic2eq);  // 2*v2 - ic2eq
+
+            if (saturation > 0.0)
+            {
+                const __m128d vSat = _mm_set1_pd(saturation);
+                const __m128d vOneMinusSat = _mm_set1_pd(1.0 - saturation);
+                ic1eq = _mm_add_pd(_mm_mul_pd(ic1eq, vOneMinusSat),
+                                   _mm_mul_pd(fastTanhV128(ic1eq), vSat));
+                ic2eq = _mm_add_pd(_mm_mul_pd(ic2eq, vOneMinusSat),
+                                   _mm_mul_pd(fastTanhV128(ic2eq), vSat));
+            }
+            // FMA: m0*v0 + m1*v1 + m2*v2
+            __m128d output = _mm_fmadd_pd(m0, v0,
+                              _mm_fmadd_pd(m1, v1,
+                               _mm_mul_pd(m2, v2)));
+
+            // NaN/Infチェック (isfinite): (x - x) は xがInf/NaNの時NaNになる
+            const __m128d diff = _mm_sub_pd(output, output);
+            const __m128d mask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
+            output = _mm_and_pd(output, mask);
+
+            // クランプ (-100, +100) で発散防止
+            output = _mm_min_pd(_mm_max_pd(output, cLow), cHigh);
+
+            // L: lower element, R: upper element
+            _mm_store_sd(&dataL[n], output);
+            _mm_storeh_pd(&dataR[n], output);
+        }
+
+        // Denormal フラッシュ & NaN チェック (状態変数のみ) - SIMD最適化
+        ic1eq = killDenormalV(ic1eq);
+        ic2eq = killDenormalV(ic2eq);
+
+        // 状態を書き戻す (L/Rチャンネルに分離)
+        _mm_storeu_pd(stateL, _mm_unpacklo_pd(ic1eq, ic2eq)); // [ic1eq_L, ic2eq_L]
+        _mm_storeu_pd(stateR, _mm_unpackhi_pd(ic1eq, ic2eq)); // [ic1eq_R, ic2eq_R]
+    }
+
+    // ── 追加: AVX2 Gain Ramp ──
+    inline void applyGainRamp_AVX2(double* __restrict data, int numSamples,
+                                     double startGain, double increment) noexcept
+    {
+        // 各レーンの初期ゲイン: [g0, g0+inc, g0+2*inc, g0+3*inc]
+        __m256d vGain = _mm256_set_pd(startGain + 3.0 * increment,
+                                       startGain + 2.0 * increment,
+                                       startGain + increment,
+                                       startGain);
+        const __m256d vInc4 = _mm256_set1_pd(4.0 * increment);
+        const __m256d vInc16 = _mm256_set1_pd(16.0 * increment);
+
+        int i = 0;
+        const int vEnd16 = numSamples / 16 * 16;
+        const int vEnd4 = numSamples / 4 * 4;
+        for (; i < vEnd16; i += 16)
+        {
+            _mm_prefetch(reinterpret_cast<const char*>(data + i + 64), _MM_HINT_T0);
+
+            // 1
+            __m256d vData0 = _mm256_loadu_pd(data + i);
+            __m256d vOut0  = _mm256_mul_pd(vData0, vGain);
+            _mm256_storeu_pd(data + i, vOut0);
+            __m256d vGain1 = _mm256_add_pd(vGain, vInc4);
+
+            // 2
+            __m256d vData1 = _mm256_loadu_pd(data + i + 4);
+            __m256d vOut1  = _mm256_mul_pd(vData1, vGain1);
+            _mm256_storeu_pd(data + i + 4, vOut1);
+            __m256d vGain2 = _mm256_add_pd(vGain1, vInc4);
+
+            // 3
+            __m256d vData2 = _mm256_loadu_pd(data + i + 8);
+            __m256d vOut2  = _mm256_mul_pd(vData2, vGain2);
+            _mm256_storeu_pd(data + i + 8, vOut2);
+            __m256d vGain3 = _mm256_add_pd(vGain2, vInc4);
+
+            // 4
+            __m256d vData3 = _mm256_loadu_pd(data + i + 12);
+            __m256d vOut3  = _mm256_mul_pd(vData3, vGain3);
+            _mm256_storeu_pd(data + i + 12, vOut3);
+
+            vGain = _mm256_add_pd(vGain, vInc16);
+        }
+        // Remaining
+        for (; i < vEnd4; i += 4)
+        {
+            __m256d vData = _mm256_loadu_pd(data + i);
+            __m256d vOut  = _mm256_mul_pd(vData, vGain);
+            _mm256_storeu_pd(data + i, vOut);
+            vGain = _mm256_add_pd(vGain, vInc4);
+        }
+        // スカラー残余
+        double gain = startGain + static_cast<double>(i) * increment;
+        for (; i < numSamples; ++i) { data[i] *= gain; gain += increment; }
+    }
+}
+
+//--------------------------------------------------------------
+// AGCゲイン計算 (Private)
+//--------------------------------------------------------------
+double EQProcessor::calculateAGCGain(double inputEnv, double outputEnv) const noexcept
+{
+    constexpr double MIN_ENV = 1e-6;
+    if (outputEnv < MIN_ENV) return 1.0;
+
+    const double ratio = inputEnv / outputEnv;
+
+    // ヒステリシス帯（±0.5dB相当）の導入
+    // 0.5dB ≒ 1.059 の比率（20 * log10(1.059) ≈ 0.5dB）
+    constexpr double DEAD_ZONE_RATIO = 1.059;
+    if (ratio > 1.0 / DEAD_ZONE_RATIO && ratio < DEAD_ZONE_RATIO)
+        return 1.0;  // 微小変動は無視
+
+    // ゲイン制限（線形領域で直接適用）
+    return juce::jlimit(static_cast<double>(AGC_MIN_GAIN), static_cast<double>(AGC_MAX_GAIN), ratio);
+}
+
+//--------------------------------------------------------------
+// AGC処理 (Private)
+//--------------------------------------------------------------
+void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
+{
+    const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
+    const int numSamples = (int)block.getNumSamples();
+
+    // 係数の事前ロード（atomic、relaxedで十分）
+    const double attackCoeff = agcAttackCoeff.load(std::memory_order_relaxed);
+    const double releaseCoeff = agcReleaseCoeff.load(std::memory_order_relaxed);
+    const double smoothCoeff = agcSmoothCoeff.load(std::memory_order_relaxed);
+
+    double blockAttackCoeff;
+    double blockReleaseCoeff;
+    double blockSmoothCoeff;
+
+    if (numSamples >= 0
+        && numSamples < agcCoeffTableCapacity
+        && agcAttackCoeffTable
+        && agcReleaseCoeffTable
+        && agcSmoothCoeffTable)
+    {
+        blockAttackCoeff = agcAttackCoeffTable[numSamples];
+        blockReleaseCoeff = agcReleaseCoeffTable[numSamples];
+        blockSmoothCoeff = agcSmoothCoeffTable[numSamples];
+    }
+    else
+    {
+        // テーブル未確保時のみ、既存の libm 非依存近似へフォールバックする。
+        const double attackEpsilon = 1.0 - attackCoeff;
+        const double releaseEpsilon = 1.0 - releaseCoeff;
+        const double smoothEpsilon = 1.0 - smoothCoeff;
+
+        blockAttackCoeff = std::min(1.0, static_cast<double>(numSamples) * attackEpsilon);
+        blockReleaseCoeff = std::min(1.0, static_cast<double>(numSamples) * releaseEpsilon);
+        blockSmoothCoeff = std::min(1.0, static_cast<double>(numSamples) * smoothEpsilon);
+    }
+
+    double inputRMS = cachedInputRMS;
+
+    // 出力レベル計測
+    double outputRMS = 0.0;
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* data = block.getChannelPointer(ch);
+        const double rms = calculateRMS(data, numSamples);
+
+        if (rms > outputRMS) outputRMS = rms;
+    }
+
+    // 数値安定性対策: NaN/Infチェックとクランプ
+    static constexpr double MAX_ENV_VALUE = 1000.0; // +60dB
+
+    if (!isFiniteNoLibm(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
+    if (!isFiniteNoLibm(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
+
+    // アトミック変数のロード
+    double envIn = agcEnvInput.load(std::memory_order_relaxed);
+    double envOut = agcEnvOutput.load(std::memory_order_relaxed);
+    double currentGain = agcCurrentGain.load(std::memory_order_relaxed);
+
+    if (!isFiniteNoLibm(envIn))  envIn = 0.0;
+    if (!isFiniteNoLibm(envOut)) envOut = 0.0;
+    if (!isFiniteNoLibm(currentGain)) currentGain = 1.0;
+
+    // 指数移動平均 (EMA) によるエンベロープ検波 (アシンメトリック: アタック速い / リリース遅い)
+    const double inAlpha = (inputRMS > envIn) ? blockAttackCoeff : blockReleaseCoeff;
+    const double outAlpha = (outputRMS > envOut) ? blockAttackCoeff : blockReleaseCoeff;
+
+    envIn = envIn * (1.0 - inAlpha) + inputRMS * inAlpha;
+    envOut = envOut * (1.0 - outAlpha) + outputRMS * outAlpha;
+
+    // Denormal対策: 極小値をゼロにクランプ
+    constexpr double DENORM_THRESH = convo::numeric_policy::kDenormThresholdAudioState;
+    if (envIn < DENORM_THRESH) envIn = 0.0;
+    if (envOut < DENORM_THRESH) envOut = 0.0;
+
+    // ターゲットゲイン計算（ヒステリシス帯付き）
+    const double targetGain = calculateAGCGain(envIn, envOut);
+
+    // ゲインスムージング
+    const double nextGain = currentGain * (1.0 - blockSmoothCoeff) + targetGain * blockSmoothCoeff;
+
+    // アトミック変数のストア
+    agcEnvInput.store(envIn, std::memory_order_relaxed);
+    agcEnvOutput.store(envOut, std::memory_order_relaxed);
+    agcCurrentGain.store(nextGain, std::memory_order_relaxed);
+
+    // ゲイン適用 (ランプ: currentGain -> nextGain)
+    const double gainIncrement = (nextGain - currentGain) / static_cast<double>(numSamples);
+
+    for (int ch = 0; ch < numChannels; ++ch)
+        applyGainRamp_AVX2(block.getChannelPointer(ch), numSamples, currentGain, gainIncrement);
+}
+
+//--------------------------------------------------------------
+// サイレンス検出 (Private)
+//--------------------------------------------------------------
+bool EQProcessor::isBufferSilent(const juce::AudioBuffer<double>& buffer, int numSamples) const noexcept
+{
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    {
+        if (buffer.getMagnitude(ch, 0, numSamples) > 1.0e-8)
+            return false;
+    }
+    return true;
+}
+
+bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block, int numChannels, int numSamples) const noexcept
+{
+    constexpr double silenceThreshold = 1.0e-8;
+
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const double* channelData = block.getChannelPointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            if (absNoLibm(channelData[i]) > silenceThreshold)
+                return false;
+        }
+    }
+
+    return true;
+}
+
+//--------------------------------------------------------------
+// process (Audio Thread)
+// リアルタイム制約 (Real-time Constraints)
+//    - メモリ確保なし (No Malloc)
+//    - ロックなし (No Lock)
+//    - ファイルI/Oなし (No I/O)
+//    - 待機なし (No Wait): 処理落ちの原因となるため (Audio Threadでの待機は厳禁)
+//    - RCU (Read-Copy-Update) パターンにより、ロックフリーで安全に係数を更新
+//--------------------------------------------------------------
+void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
+{
+    convo::RCUReaderGuard guard(tls_rcuReader);
+    // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
+    // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
+    juce::ScopedNoDenormals noDenormals;
+
+    const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
+    bool effectiveBypass = bypassed.load(std::memory_order_relaxed);
+
+    const double targetBypassFade = requestedBypass ? 0.0 : 1.0;
+    if (absNoLibm(bypassFadeGain.getTargetValue() - targetBypassFade) > 1.0e-12)
+    {
+        if (!requestedBypass && effectiveBypass)
+        {
+            bandResetMask.store(0xFFFFFFFFu, std::memory_order_relaxed);
+            bypassed.store(false, std::memory_order_relaxed);
+        }
+        bypassFadeGain.setTargetValue(targetBypassFade);
+        effectiveBypass = bypassed.load(std::memory_order_relaxed);
+    }
+
+    const bool bypassTransitionActive = bypassFadeGain.isSmoothing();
+
+    // フェードアウト完了時に bypassed を true にする
+    if (requestedBypass && !effectiveBypass && !bypassTransitionActive)
+    {
+        bypassed.store(true, std::memory_order_relaxed);
+        effectiveBypass = true;
+    }
+
+    if (requestedBypass && effectiveBypass && !bypassTransitionActive)
+        return;
+
+    const int numSamples = (int)block.getNumSamples();
+
+    // ==================================================================
+    // 【Issue 4 追加安全ガード】オーバーラン即検出（Audio Thread安全版）
+    // ==================================================================
+    // パッチ2: jassert削除 + 安全クリア（ガイドライン厳守）
+    if (numSamples <= 0 || static_cast<size_t>(numSamples) > static_cast<size_t>(maxInternalBlockSize))
+    {
+        // バッファオーバーラン時は安全にゼロクリアして早期リターン
+        for (int ch = 0; ch < (int)block.getNumChannels(); ++ch)
+            juce::FloatVectorOperations::clear(block.getChannelPointer(ch), numSamples);
+        return;
+    }
+
+    const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
+    if (numChannels <= 0)
+        return;
+    const double saturation = static_cast<double>(nonlinearSaturation.load(std::memory_order_relaxed));
+    const bool canSafelyResetState = requestedBypass
+                                     || effectiveBypass
+                                     || bypassTransitionActive
+                                     || isAudioBlockSilent(block, numChannels, numSamples);
+
+    double* dryCopyBase = nullptr;
+    if (bypassTransitionActive)
+    {
+        const int requiredDrySamples = numSamples * numChannels;
+        if (dryBypassBuffer && requiredDrySamples <= dryBypassCapacity)
+        {
+            dryCopyBase = dryBypassBuffer.get();
+            for (int ch = 0; ch < numChannels; ++ch)
+                std::memcpy(dryCopyBase + (ch * numSamples),
+                            block.getChannelPointer(ch),
+                            sizeof(double) * static_cast<size_t>(numSamples));
+        }
+    }
+
+    // ── State Reset Handling ──
+    // パラメータ変更に伴う状態リセット要求を処理
+    if (agcResetRequest.exchange(false, std::memory_order_relaxed))
+    {
+        agcCurrentGain.store(1.0, std::memory_order_relaxed);
+        agcEnvInput.store(0.0, std::memory_order_relaxed);
+        agcEnvOutput.store(0.0, std::memory_order_relaxed);
+    }
+
+    uint32_t mask = bandResetMask.exchange(0, std::memory_order_relaxed);
+    if (mask != 0)
+    {
+        if (!canSafelyResetState)
+        {
+            bandResetMask.fetch_or(mask, std::memory_order_relaxed);
+        }
+        // 最適化: 全バンドリセットの場合は memset で一括クリア
+        else if (mask == 0xFFFFFFFF)
+        {
+            std::memset(filterState.data(), 0, sizeof(filterState));
+        }
+        else
+        {
+            for (int i = 0; i < NUM_BANDS; ++i)
+            {
+                if (mask & (1u << i))
+                    for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+                        std::memset(filterState[ch][i].data(), 0, sizeof(double) * 2);
+            }
+        }
+    }
+
+    const bool isAgcEnabled = agcEnabled.load(std::memory_order_acquire);
+    // ✅ フィルタ処理前に入力レベルをキャッシュ (AGCが有効な場合のみ)
+    if (isAgcEnabled)
+    {
+        cachedInputRMS = 0.0;
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            const double* data = block.getChannelPointer(ch);
+            const double rms = calculateRMS(data, numSamples);
+
+            if (rms > cachedInputRMS)
+                cachedInputRMS = rms;
+        }
+    }
+
+    // ── 最適化: アクティブなバンドノードを事前にスタックへロード ──
+    // チャンネルごとのループ内で atomic load を繰り返すと負荷が高いため、
+    // 処理開始時に一度だけロードする。
+    // Note: 寿命管理は EBR (Epoch-Based Reclamation) により保証されるため、
+    // ここでは Raw Pointer を安全に使用できる（Audio Thread は現在の Epoch を保護中）。
+    struct ActiveBandNode {
+        const BandNode* node;
+        int index;
+    };
+    std::array<ActiveBandNode, NUM_BANDS> activeBands;
+    int numActiveBands = 0;
+
+    // Note: bandNodes[] contains raw pointers. We assume they are valid during this block
+    // because deletion is deferred by EBR (reader epoch mechanism).
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        auto* node = bandNodes[i].load(std::memory_order_acquire);
+        if (node && node->active)
+        {
+            activeBands[numActiveBands] = { node, i };
+            numActiveBands++;
+        }
+    }
+
+    using FilterStateStorage = decltype(filterState);
+
+    const auto processSerial = [&](double* dataL,
+                                   double* dataR,
+                                   FilterStateStorage& states)
+    {
+        for (int i = 0; i < numActiveBands; ++i)
+        {
+            const auto& band = activeBands[i];
+            const EQChannelMode mode = band.node->mode;
+
+            if (mode == EQChannelMode::Stereo && numChannels >= 2)
+            {
+                processBandStereo(dataL, dataR, numSamples,
+                                  band.node->coeffs,
+                                  states[0][band.index].data(),
+                                  states[1][band.index].data(),
+                                  saturation);
+            }
+            else
+            {
+                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
+                    processBand(dataL, numSamples, band.node->coeffs, states[0][band.index].data(), saturation);
+                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
+                    processBand(dataR, numSamples, band.node->coeffs, states[1][band.index].data(), saturation);
+            }
+        }
+    };
+
+    const auto processParallel = [&](const double* srcL,
+                                     const double* srcR,
+                                     double* dstL,
+                                     double* dstR,
+                                     FilterStateStorage& states)
+    {
+        if (!(parallelWorkBuffer && parallelAccumBuffer))
+        {
+            std::memcpy(dstL, srcL, sizeof(double) * static_cast<size_t>(numSamples));
+            if (numChannels > 1)
+                std::memcpy(dstR, srcR, sizeof(double) * static_cast<size_t>(numSamples));
+            return;
+        }
+
+        double* workL = parallelWorkBuffer.get();
+        double* workR = parallelWorkBuffer.get() + numSamples;
+        double* accumL = parallelAccumBuffer.get();
+        double* accumR = parallelAccumBuffer.get() + numSamples;
+        juce::FloatVectorOperations::clear(accumL, numSamples);
+        if (numChannels > 1)
+            juce::FloatVectorOperations::clear(accumR, numSamples);
+
+        for (int i = 0; i < numActiveBands; ++i)
+        {
+            const auto& band = activeBands[i];
+            const EQChannelMode mode = band.node->mode;
+
+            if (mode == EQChannelMode::Stereo && numChannels >= 2)
+            {
+                juce::FloatVectorOperations::copy(workL, srcL, numSamples);
+                juce::FloatVectorOperations::copy(workR, srcR, numSamples);
+                processBandStereo(workL, workR, numSamples,
+                                  band.node->coeffs,
+                                  states[0][band.index].data(),
+                                  states[1][band.index].data(),
+                                  saturation);
+                juce::FloatVectorOperations::add(accumL, workL, numSamples);
+                juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
+                juce::FloatVectorOperations::add(accumR, workR, numSamples);
+                juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
+            }
+            else
+            {
+                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
+                {
+                    juce::FloatVectorOperations::copy(workL, srcL, numSamples);
+                    processBand(workL, numSamples, band.node->coeffs, states[0][band.index].data(), saturation);
+                    juce::FloatVectorOperations::add(accumL, workL, numSamples);
+                    juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
+                }
+
+                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
+                {
+                    juce::FloatVectorOperations::copy(workR, srcR, numSamples);
+                    processBand(workR, numSamples, band.node->coeffs, states[1][band.index].data(), saturation);
+                    juce::FloatVectorOperations::add(accumR, workR, numSamples);
+                    juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
+                }
+            }
+        }
+
+        juce::FloatVectorOperations::copy(dstL, srcL, numSamples);
+        juce::FloatVectorOperations::add(dstL, accumL, numSamples);
+        if (numChannels > 1)
+        {
+            juce::FloatVectorOperations::copy(dstR, srcR, numSamples);
+            juce::FloatVectorOperations::add(dstR, accumR, numSamples);
+        }
+    };
+
+    auto activeMode = activeStructure.load(std::memory_order_relaxed);
+    auto requestedMode = requestedStructure.load(std::memory_order_relaxed);
+    const bool canUseParallelBuffers = parallelInputBuffer
+                                       && parallelBufferCapacity >= (numSamples * numChannels);
+    const bool canUseStructureXfade = canUseParallelBuffers
+                                      && structureOldOutBuffer
+                                      && structureNewOutBuffer
+                                      && structureXfadeBufferCapacity >= (numSamples * numChannels);
+
+    auto* blockL = block.getChannelPointer(0);
+    double* blockR = (numChannels > 1) ? block.getChannelPointer(1) : nullptr;
+
+    if (requestedMode != activeMode && canUseStructureXfade)
+    {
+        double* srcL = parallelInputBuffer.get();
+        double* srcR = (numChannels > 1) ? (parallelInputBuffer.get() + numSamples) : nullptr;
+        std::memcpy(srcL, blockL, sizeof(double) * static_cast<size_t>(numSamples));
+        if (numChannels > 1)
+            std::memcpy(srcR, blockR, sizeof(double) * static_cast<size_t>(numSamples));
+
+        double* oldL = structureOldOutBuffer.get();
+        double* oldR = (numChannels > 1) ? (structureOldOutBuffer.get() + numSamples) : nullptr;
+        double* newL = structureNewOutBuffer.get();
+        double* newR = (numChannels > 1) ? (structureNewOutBuffer.get() + numSamples) : nullptr;
+        std::memcpy(oldL, srcL, sizeof(double) * static_cast<size_t>(numSamples));
+        std::memcpy(newL, srcL, sizeof(double) * static_cast<size_t>(numSamples));
+        if (numChannels > 1)
+        {
+            std::memcpy(oldR, srcR, sizeof(double) * static_cast<size_t>(numSamples));
+            std::memcpy(newR, srcR, sizeof(double) * static_cast<size_t>(numSamples));
+        }
+
+        auto oldStateSnapshot = filterState;
+        if (activeMode == FilterStructure::Serial)
+            processSerial(oldL, oldR, oldStateSnapshot);
+        else
+            processParallel(srcL, srcR, oldL, oldR, oldStateSnapshot);
+
+        if (requestedMode == FilterStructure::Serial)
+            processSerial(newL, newR, filterState);
+        else
+            processParallel(srcL, srcR, newL, newR, filterState);
+
+        const double step = 1.0 / static_cast<double>(numSamples);
+        for (int n = 0; n < numSamples; ++n)
+        {
+            const double t = (n + 1.0) * step;
+            const double wNew = equalPowerSin(t);
+            const double wOld = equalPowerSin(1.0 - t);
+            blockL[n] = oldL[n] * wOld + newL[n] * wNew;
+            if (numChannels > 1)
+                blockR[n] = oldR[n] * wOld + newR[n] * wNew;
+        }
+
+        activeStructure.store(requestedMode, std::memory_order_relaxed);
+    }
+    else
+    {
+        if (requestedMode != activeMode)
+        {
+            activeMode = requestedMode;
+            activeStructure.store(activeMode, std::memory_order_relaxed);
+        }
+
+        if (activeMode == FilterStructure::Serial || !canUseParallelBuffers)
+        {
+            processSerial(blockL, blockR, filterState);
+        }
+        else
+        {
+            double* srcL = parallelInputBuffer.get();
+            double* srcR = (numChannels > 1) ? (parallelInputBuffer.get() + numSamples) : nullptr;
+            std::memcpy(srcL, blockL, sizeof(double) * static_cast<size_t>(numSamples));
+            if (numChannels > 1)
+                std::memcpy(srcR, blockR, sizeof(double) * static_cast<size_t>(numSamples));
+            processParallel(srcL, srcR, blockL, blockR, filterState);
+        }
+    }
+
+    // トータルゲイン / AGC 適用
+    if (isAgcEnabled)
+    {
+        processAGC(block);
+    }
+    else
+    {
+        // 【Fix Bug #7】Audio Thread内でのlibm呼び出し禁止。
+        // juce::Decibels::decibelsToGain() は内部で std::pow() (libm) を呼ぶため
+        // Audio Thread 内での使用は規約違反である。
+        // 対策: ゲイン値はMessage Thread側でdBからlinearに変換し、
+        // totalGainTarget (atomic<double>) で事前に渡す。
+        // Audio Threadでは atomic load のみ行う。
+        const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
+
+        if (absNoLibm(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
+        {
+            smoothTotalGain.setTargetValue(targetGain);
+        }
+
+        const double startGain = smoothTotalGain.getCurrentValue();
+        smoothTotalGain.skip(numSamples);
+        const double endGain = smoothTotalGain.getCurrentValue();
+
+        // AGC 無効時のゲインランプ
+        const double increment = (endGain - startGain) / static_cast<double>(numSamples);
+        for (int ch = 0; ch < numChannels; ++ch)
+            applyGainRamp_AVX2(block.getChannelPointer(ch), numSamples, startGain, increment);
+    }
+
+    if (bypassTransitionActive && dryCopyBase != nullptr)
+    {
+        for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
+        {
+            const double wetGain = bypassFadeGain.getNextValue();
+            const double dryGain = 1.0 - wetGain;
+
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                double* wetPtr = block.getChannelPointer(ch);
+                const double dryValue = dryCopyBase[ch * numSamples + sampleIndex];
+                wetPtr[sampleIndex] = wetPtr[sampleIndex] * wetGain + dryValue * dryGain;
+            }
+        }
+
+        if (!bypassFadeGain.isSmoothing())
+        {
+            if (requestedBypass)
+            {
+                bypassed.store(true, std::memory_order_relaxed);
+                bypassFadeGain.setCurrentAndTargetValue(0.0);
+            }
+            else
+            {
+                bypassed.store(false, std::memory_order_relaxed);
+                bypassFadeGain.setCurrentAndTargetValue(1.0);
+            }
+        }
+    }
+}
+
+void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
+                          const convo::EQParameters& eqParams,
+                          const EQCoeffCache* coeffCache)
+{
+    // 既存バイパス遷移ロジックを維持するため、遷移中は既存パスへフォールバック
+    if (coeffCache == nullptr
+        || bypassRequested.load(std::memory_order_relaxed)
+        || bypassed.load(std::memory_order_relaxed)
+        || bypassFadeGain.isSmoothing())
+    {
+        process(block);
+        return;
+    }
+
+    juce::ScopedNoDenormals noDenormals;
+
+    const int numSamples = static_cast<int>(block.getNumSamples());
+    if (numSamples <= 0 || static_cast<size_t>(numSamples) > static_cast<size_t>(maxInternalBlockSize))
+    {
+        for (int ch = 0; ch < static_cast<int>(block.getNumChannels()); ++ch)
+            juce::FloatVectorOperations::clear(block.getChannelPointer(ch), numSamples);
+        return;
+    }
+
+    const int numChannels = std::min(static_cast<int>(block.getNumChannels()), MAX_CHANNELS);
+    if (numChannels <= 0)
+        return;
+
+    if (agcResetRequest.exchange(false, std::memory_order_relaxed))
+    {
+        agcCurrentGain.store(1.0, std::memory_order_relaxed);
+        agcEnvInput.store(0.0, std::memory_order_relaxed);
+        agcEnvOutput.store(0.0, std::memory_order_relaxed);
+    }
+
+    uint32_t mask = bandResetMask.exchange(0, std::memory_order_relaxed);
+    if (mask != 0)
+    {
+        if (isAudioBlockSilent(block, numChannels, numSamples))
+        {
+            if (mask == 0xFFFFFFFFu)
+            {
+                std::memset(filterState.data(), 0, sizeof(filterState));
+            }
+            else
+            {
+                for (int i = 0; i < NUM_BANDS; ++i)
+                {
+                    if (mask & (1u << i))
+                    {
+                        for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+                            std::memset(filterState[ch][i].data(), 0, sizeof(double) * 2);
+                    }
+                }
+            }
+        }
+        else
+        {
+            bandResetMask.fetch_or(mask, std::memory_order_relaxed);
+        }
+    }
+
+    const double saturation = static_cast<double>(eqParams.nonlinearSaturation);
+
+    if (eqParams.agcEnabled)
+    {
+        cachedInputRMS = 0.0;
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            const double* data = block.getChannelPointer(ch);
+            const double rms = calculateRMS(data, numSamples);
+            if (rms > cachedInputRMS)
+                cachedInputRMS = rms;
+        }
+    }
+
+    double* blockL = block.getChannelPointer(0);
+    double* blockR = (numChannels > 1) ? block.getChannelPointer(1) : nullptr;
+
+    if (coeffCache->filterStructure == static_cast<int>(FilterStructure::Parallel))
+    {
+        if (!(coeffCache->parallelInputBuffer && coeffCache->parallelWorkBuffer && coeffCache->parallelAccumBuffer)
+            || coeffCache->parallelBufferSize < (numSamples * numChannels))
+        {
+            // Parallelバッファが無い/不足時は安全にSerial処理へフォールバック
+            for (int i = 0; i < NUM_BANDS; ++i)
+            {
+                if (!coeffCache->bandActive[i])
+                    continue;
+
+                const EQCoeffsSVF& c = coeffCache->coeffs[i];
+                const EQChannelMode mode = static_cast<EQChannelMode>(coeffCache->channelModes[i]);
+
+                if (mode == EQChannelMode::Stereo && numChannels >= 2)
+                {
+                    processBandStereo(blockL, blockR, numSamples, c,
+                                      filterState[0][i].data(),
+                                      filterState[1][i].data(),
+                                      saturation);
+                }
+                else
+                {
+                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
+                        processBand(blockL, numSamples, c, filterState[0][i].data(), saturation);
+                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
+                        processBand(blockR, numSamples, c, filterState[1][i].data(), saturation);
+                }
+            }
+        }
+        else
+        {
+            double* srcL = coeffCache->parallelInputBuffer;
+            double* srcR = (numChannels > 1) ? (coeffCache->parallelInputBuffer + numSamples) : nullptr;
+            double* workL = coeffCache->parallelWorkBuffer;
+            double* workR = (numChannels > 1) ? (coeffCache->parallelWorkBuffer + numSamples) : nullptr;
+            double* accumL = coeffCache->parallelAccumBuffer;
+            double* accumR = (numChannels > 1) ? (coeffCache->parallelAccumBuffer + numSamples) : nullptr;
+
+            juce::FloatVectorOperations::copy(srcL, blockL, numSamples);
+            if (numChannels > 1)
+                juce::FloatVectorOperations::copy(srcR, blockR, numSamples);
+
+            juce::FloatVectorOperations::clear(accumL, numSamples);
+            if (numChannels > 1)
+                juce::FloatVectorOperations::clear(accumR, numSamples);
+
+            for (int i = 0; i < NUM_BANDS; ++i)
+            {
+                if (!coeffCache->bandActive[i])
+                    continue;
+
+                const EQCoeffsSVF& c = coeffCache->coeffs[i];
+                const EQChannelMode mode = static_cast<EQChannelMode>(coeffCache->channelModes[i]);
+
+                if (mode == EQChannelMode::Stereo && numChannels >= 2)
+                {
+                    juce::FloatVectorOperations::copy(workL, srcL, numSamples);
+                    juce::FloatVectorOperations::copy(workR, srcR, numSamples);
+                    processBandStereo(workL, workR, numSamples, c,
+                                      filterState[0][i].data(),
+                                      filterState[1][i].data(),
+                                      saturation);
+                    juce::FloatVectorOperations::add(accumL, workL, numSamples);
+                    juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
+                    juce::FloatVectorOperations::add(accumR, workR, numSamples);
+                    juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
+                }
+                else
+                {
+                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
+                    {
+                        juce::FloatVectorOperations::copy(workL, srcL, numSamples);
+                        processBand(workL, numSamples, c, filterState[0][i].data(), saturation);
+                        juce::FloatVectorOperations::add(accumL, workL, numSamples);
+                        juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
+                    }
+
+                    if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
+                    {
+                        juce::FloatVectorOperations::copy(workR, srcR, numSamples);
+                        processBand(workR, numSamples, c, filterState[1][i].data(), saturation);
+                        juce::FloatVectorOperations::add(accumR, workR, numSamples);
+                        juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
+                    }
+                }
+            }
+
+            juce::FloatVectorOperations::copy(blockL, srcL, numSamples);
+            juce::FloatVectorOperations::add(blockL, accumL, numSamples);
+            if (numChannels > 1)
+            {
+                juce::FloatVectorOperations::copy(blockR, srcR, numSamples);
+                juce::FloatVectorOperations::add(blockR, accumR, numSamples);
+            }
+        }
+    }
+    else
+    {
+        for (int i = 0; i < NUM_BANDS; ++i)
+        {
+            if (!coeffCache->bandActive[i])
+                continue;
+
+            const EQCoeffsSVF& c = coeffCache->coeffs[i];
+            const EQChannelMode mode = static_cast<EQChannelMode>(coeffCache->channelModes[i]);
+
+            if (mode == EQChannelMode::Stereo && numChannels >= 2)
+            {
+                processBandStereo(blockL, blockR, numSamples, c,
+                                  filterState[0][i].data(),
+                                  filterState[1][i].data(),
+                                  saturation);
+            }
+            else
+            {
+                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
+                    processBand(blockL, numSamples, c, filterState[0][i].data(), saturation);
+                if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
+                    processBand(blockR, numSamples, c, filterState[1][i].data(), saturation);
+            }
+        }
+    }
+
+    if (eqParams.agcEnabled)
+    {
+        processAGC(block);
+    }
+    else
+    {
+        const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
+        if (absNoLibm(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
+            smoothTotalGain.setTargetValue(targetGain);
+
+        const double startGain = smoothTotalGain.getCurrentValue();
+        smoothTotalGain.skip(numSamples);
+        const double endGain = smoothTotalGain.getCurrentValue();
+        const double increment = (endGain - startGain) / static_cast<double>(numSamples);
+
+        for (int ch = 0; ch < numChannels; ++ch)
+            applyGainRamp_AVX2(block.getChannelPointer(ch), numSamples, startGain, increment);
+    }
+}
+
+
+//--------------------------------------------------------------
+// BandNode作成 (Message Thread)
+//--------------------------------------------------------------
