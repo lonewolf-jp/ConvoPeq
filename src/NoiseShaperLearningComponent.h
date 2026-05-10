@@ -5,6 +5,7 @@
 #include <array>
 
 #include "AudioEngine.h"
+#include "NoiseShaperLearner.h"
 
 class NoiseShaperLearningComponent : public juce::Component,
                                      private juce::Timer

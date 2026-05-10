@@ -1,13 +1,9 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "NoiseShaperLearner.h"
 #include "core/RCUReader.h"
 
 static thread_local convo::RCUReader tls_rcuReader;
-
-static void retireDSP(AudioEngine::DSPCore* dsp)
-{
-    if (dsp) convo::retireObject(dsp, [](void* p) { delete static_cast<AudioEngine::DSPCore*>(p); });
-}
 
 namespace
 {
@@ -94,71 +90,34 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const bool eqBypassed               = (snap != nullptr) ? snap->eqBypass : eqBypassRequested.load(std::memory_order_acquire);
         const bool convBypassed             = (snap != nullptr) ? snap->convBypass : convBypassRequested.load(std::memory_order_acquire);
         const ProcessingOrder order         = (snap != nullptr) ? snap->processingOrder : currentProcessingOrder.load(std::memory_order_relaxed);
-        const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
-        const bool analyzerEnabledNow       = analyzerEnabled.load(std::memory_order_relaxed);
         const bool softClip                 = (snap != nullptr) ? snap->softClipEnabled : softClipEnabled.load(std::memory_order_relaxed);
         const float satAmt                  = (snap != nullptr) ? snap->saturationAmount : saturationAmount.load(std::memory_order_relaxed);
         const double headroomGain           = (snap != nullptr) ? snap->inputHeadroomGain : inputHeadroomGain.load(std::memory_order_relaxed);
         const double makeupGain             = (snap != nullptr) ? snap->outputMakeupGain : outputMakeupGain.load(std::memory_order_relaxed);
         const double convInputTrimGain      = (snap != nullptr) ? snap->convInputTrimGain : convolverInputTrimGain.load(std::memory_order_relaxed);
-        const convo::HCMode hcMode      = convHCFilterMode.load(std::memory_order_relaxed);
-        const convo::LCMode lcMode      = convLCFilterMode.load(std::memory_order_relaxed);
-        const convo::HCMode lpfMode     = eqLPFFilterMode.load(std::memory_order_relaxed);
-        const int adaptiveCoeffBankIndex    = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
-        const auto& adaptiveCoeffBank       = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
         const bool adaptiveCaptureEnabled   = noiseShaperLearner && noiseShaperLearner->isRunning();
-
-        // RCU スナップショット取得：generation と active ポインタはダブルバッファリングにより一貫性が保証される
-        const uint32_t genSnapshot = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
-        const CoeffSet* safeAdaptiveSet = AudioEngine::getActiveCoeffSet(adaptiveCoeffBank);
-        // safeAdaptiveSet は、genSnapshot 時点で有効な係数セットを指す。
-        // Writer が後で切り替えても、このポインタの指す内容は不変である。
-
-        // 念のため nullptr チェック
-        if (!safeAdaptiveSet) {
-            // フォールバック：デフォルト係数を使用するなどの処理（必要に応じて）
-            // ここでは単に nullptr のまま処理を続行（process() 側で対処）
-        }
-        const uint32_t adaptiveGenAfter = genSnapshot; // 互換性のため変数名を維持
 
         // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
         eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
         convBypassActive.store(convBypassed, std::memory_order_relaxed);
-
-        DSPCore::ProcessingState procState {
-            .eqBypassed               = eqBypassed,
-            .convBypassed             = convBypassed,
-            .order                    = order,
-            .analyzerSource           = analyzerSource,
-            .analyzerEnabled          = analyzerEnabledNow,
-            .softClipEnabled          = softClip,
-            .saturationAmount         = satAmt,
-            .inputHeadroomGain        = headroomGain,
-            .outputMakeupGain         = makeupGain,
-            .convolverInputTrimGain   = convInputTrimGain,
-            .convHCMode               = hcMode,
-            .convLCMode               = lcMode,
-            .eqLPFMode                = lpfMode,
-            .adaptiveCoeffBankIndex   = adaptiveCoeffBankIndex,
-            .adaptiveCoeffSet         = safeAdaptiveSet,
-            .adaptiveCoeffGeneration  = adaptiveGenAfter,
-            .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
-            .adaptiveCaptureBitDepth  = dsp->ditherBitDepth,
-            .captureSessionId         = dsp->currentCaptureSessionId,
-            .adaptiveCaptureQueue     = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
-        };
-
-        if (m_coordinator.isFading())
-            m_coordinator.advanceFade(numSamples);
-        debugLastCoordinatorIsFading.store(m_coordinator.isFading() ? 1 : 0, std::memory_order_relaxed);
+        DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp,
+                                                                             eqBypassed,
+                                                                             convBypassed,
+                                                                             order,
+                                                                             softClip,
+                                                                             satAmt,
+                                                                             headroomGain,
+                                                                             makeupGain,
+                                                                             convInputTrimGain,
+                                                                             adaptiveCaptureEnabled);
 
         float snapshotAlpha = 1.0f;
         const convo::GlobalSnapshot* snapshotFrom = nullptr;
         const convo::GlobalSnapshot* snapshotTo = nullptr;
-        const bool updateFadeReturned = m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo);
-        debugLastUpdateFadeReturned.store(updateFadeReturned ? 1 : 0, std::memory_order_relaxed);
-        debugLastSnapshotFromNull.store(snapshotFrom == nullptr ? 1 : 0, std::memory_order_relaxed);
-        debugLastSnapshotToNull.store(snapshotTo == nullptr ? 1 : 0, std::memory_order_relaxed);
+        const bool updateFadeReturned = updateAudioThreadSnapshotFade(numSamples,
+                                                                      snapshotAlpha,
+                                                                      snapshotFrom,
+                                                                      snapshotTo);
 
         const bool snapshotFading = updateFadeReturned
             && snapshotTo != nullptr;
@@ -194,42 +153,21 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
         DSPCore* fading = sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire));
         bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
-        int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
-        if (fading != nullptr
-            && !useDryAsOld
-            && dspCrossfadePending.load(std::memory_order_acquire)
-            && pendingFadeDelayBlocks > 0)
+        if (processCrossfadeDelayGateIfPending(fading,
+                                               useDryAsOld,
+                                               [&]()
         {
-            dspCrossfadeStartDelayBlocks.store(pendingFadeDelayBlocks - 1, std::memory_order_release);
-
-            auto fadingState = procState;
-            fadingState.analyzerEnabled = false;
-            fadingState.adaptiveCaptureQueue = nullptr;
+            auto fadingState = makeCrossfadeAuxState(procState);
 
             std::atomic<float> fadingInputMeter { 0.0f };
             std::atomic<float> fadingOutputMeter { 0.0f };
             fading->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
+        }))
+        {
             return;
         }
 
-        if ((fading != nullptr || firstIrDryCrossfadePending.load(std::memory_order_acquire))
-            && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
-        {
-            const double fadeSec = std::max(0.001, queuedFadeTimeSec.load(std::memory_order_acquire));
-            dspCrossfadeGain.reset(std::max(1.0, dsp->sampleRate), fadeSec);
-            dspCrossfadeGain.setCurrentAndTargetValue(0.0);
-            dspCrossfadeGain.setTargetValue(1.0);
-
-            // レイテンシ整合値を Audio Thread スナップショットへ反映する。
-            latencyDelayOld_RT = latencyDelayOld.load(std::memory_order_acquire);
-            latencyDelayNew_RT = latencyDelayNew.load(std::memory_order_acquire);
-
-            if (firstIrDryCrossfadePending.exchange(false, std::memory_order_acq_rel))
-            {
-                dspCrossfadeUseDryAsOld.store(true, std::memory_order_release);
-                useDryAsOld = true;
-            }
-        }
+        armCrossfadeIfPending(dsp, fading != nullptr, useDryAsOld);
 
         const bool canCrossfade = (fading != nullptr || useDryAsOld)
             && dspCrossfadeGain.isSmoothing()
@@ -242,9 +180,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             dspCrossfadeFloatBuffer.clear(0, 0, numSamples);
             dspCrossfadeFloatBuffer.clear(1, 0, numSamples);
 
-            auto fadingState = procState;
-            fadingState.analyzerEnabled = false;
-            fadingState.adaptiveCaptureQueue = nullptr;
+            auto fadingState = makeCrossfadeAuxState(procState);
 
             std::atomic<float> fadingInputMeter { 0.0f };
             std::atomic<float> fadingOutputMeter { 0.0f };
@@ -270,79 +206,42 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             const float* oldL = (outChannels > 0) ? dspCrossfadeFloatBuffer.getReadPointer(0, 0) : nullptr;
             const float* oldR = (outChannels > 1) ? dspCrossfadeFloatBuffer.getReadPointer(1, 0) : nullptr;
 
-            const int bufferSize = latencyBufSize;
-            int writePos = latencyWritePos;
-            const int delayOld = latencyDelayOld_RT;
-            const int delayNew = latencyDelayNew_RT;
-            if (latencyResetPending.exchange(false, std::memory_order_acq_rel))
-            {
-                if (latencyBufOldL) std::memset(latencyBufOldL, 0, sizeof(double) * bufferSize);
-                if (latencyBufOldR) std::memset(latencyBufOldR, 0, sizeof(double) * bufferSize);
-                if (latencyBufNewL) std::memset(latencyBufNewL, 0, sizeof(double) * bufferSize);
-                if (latencyBufNewR) std::memset(latencyBufNewR, 0, sizeof(double) * bufferSize);
-                writePos = 0;
-            }
-            for (int i = 0; i < numSamples; ++i)
-            {
-                latencyBufOldL[writePos] = (oldL != nullptr) ? static_cast<double>(oldL[i]) : 0.0;
-                latencyBufOldR[writePos] = (oldR != nullptr) ? static_cast<double>(oldR[i]) : 0.0;
-                latencyBufNewL[writePos] = (dstL != nullptr) ? static_cast<double>(dstL[i]) : 0.0;
-                latencyBufNewR[writePos] = (dstR != nullptr) ? static_cast<double>(dstR[i]) : 0.0;
-
-                int readOld = writePos - delayOld;
-                int readNew = writePos - delayNew;
-                while (readOld < 0) readOld += bufferSize;
-                while (readOld >= bufferSize) readOld -= bufferSize;
-                while (readNew < 0) readNew += bufferSize;
-                while (readNew >= bufferSize) readNew -= bufferSize;
-
-                const double alignedOldL = latencyBufOldL[readOld];
-                const double alignedOldR = latencyBufOldR[readOld];
-                const double alignedNewL = latencyBufNewL[readNew];
-                const double alignedNewR = latencyBufNewR[readNew];
-
-                const double gNew = dspCrossfadeGain.getNextValue();
-                const double dryScale = useDryAsOld ? dspCrossfadeDryScaleGain.getNextValue() : 1.0;
-                const double gOld = 1.0 - gNew;
-                const double dryScaledL = alignedOldL * dryScale;
-                const double dryScaledR = alignedOldR * dryScale;
-                if (dstL != nullptr)
-                    dstL[i] = static_cast<float>(alignedNewL * gNew + dryScaledL * gOld);
-                if (dstR != nullptr)
-                    dstR[i] = static_cast<float>(alignedNewR * gNew + dryScaledR * gOld);
-
-                writePos++;
-                if (writePos >= bufferSize)
-                    writePos = 0;
-            }
-            latencyWritePos = writePos;
+            runLatencyAlignedCrossfadeMixLoop<float>(dstL,
+                                                     dstR,
+                                                     oldL,
+                                                     oldR,
+                                                     numSamples,
+                                                     [this, useDryAsOld](float* outL,
+                                                                         float* outR,
+                                                                         int i,
+                                                                         double gNew,
+                                                                         double alignedOldL,
+                                                                         double alignedOldR,
+                                                                         double alignedNewL,
+                                                                         double alignedNewR)
+                                                     {
+                                                         const double dryScale = useDryAsOld ? dspCrossfadeDryScaleGain.getNextValue() : 1.0;
+                                                         const double gOld = 1.0 - gNew;
+                                                         const double dryScaledL = alignedOldL * dryScale;
+                                                         const double dryScaledR = alignedOldR * dryScale;
+                                                         if (outL != nullptr)
+                                                             outL[i] = static_cast<float>(alignedNewL * gNew + dryScaledL * gOld);
+                                                         if (outR != nullptr)
+                                                             outR[i] = static_cast<float>(alignedNewR * gNew + dryScaledR * gOld);
+                                                     });
 
             if (!useDryAsOld)
             {
                 // EBR: fading lifetime managed by RCUReaderGuard
             }
 
-            if (!dspCrossfadeGain.isSmoothing())
-            {
-                if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                    retireDSP(done);
-                dspCrossfadeGain.setCurrentAndTargetValue(1.0);
-                dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
-                dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
-            }
+            finalizeCrossfadeMixPath(true);
         }
         else
         {
             // 通常パス（クロスフェードなし）：RCU で dsp の生存が保証されるため addRef/release 不要
             dsp->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
-
-            if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
-            {
-                if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
-                    retireDSP(done);
-            }
-            if (!dspCrossfadeGain.isSmoothing())
-                dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
+            cleanupCrossfadeDirectPath(fading);
         }
     }
 

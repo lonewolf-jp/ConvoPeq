@@ -13,6 +13,7 @@
 #include "CmaEsOptimizer.h"
 #include "LatticeNoiseShaper.h"
 #include "MklFftEvaluator.h"
+#include "NoiseShaperLearnerTypes.h"
 
 class AudioEngine;
 struct AudioBlock;
@@ -44,47 +45,13 @@ struct LeveledSegment
 class NoiseShaperLearner
 {
 public:
-    enum class Status
-    {
-        Idle,
-        WaitingForAudio,
-        Running,
-        Completed,
-        Error
-    };
-
-    enum class LearningMode { Shortest, Short, Middle, Long, Ultra, Continuous };
+    using Status = convo::NoiseShaperLearnerStatus;
+    using LearningMode = convo::NoiseShaperLearningMode;
+    using Progress = convo::NoiseShaperLearnerProgress;
+    using State = convo::NoiseShaperLearnerState;
+    using Settings = convo::NoiseShaperLearnerSettings;
 
     static constexpr int kOrder = LatticeNoiseShaper::kOrder;
-
-    struct Progress
-    {
-        std::atomic<int> iteration { 0 };
-        std::atomic<uint64_t> totalGenerations { 0 };
-        std::atomic<int> processCount { 0 };
-        std::atomic<int> segmentCount { 0 };
-        std::atomic<double> bestScore { 0.0 };
-        std::atomic<double> latestScore { 0.0 };
-        std::atomic<Status> status { Status::Idle };
-        std::atomic<double> elapsedPlaybackSeconds {0.0};  // UI表示用
-        std::atomic<int>    currentPhase {1};
-        std::atomic<int>    learningMode {0};
-    };
-
-    struct State
-    {
-        double mean[9] = {};
-        double covarianceUpperTriangle[45] = {};
-        double sigma = 0.12;
-        double bestCoefficients[9] = {};
-        double elapsedPlaybackSeconds = 0.0;
-        int currentPhase = 1;
-        int iteration = 0;
-        double bestScore = 0.0;
-        int processCount = 0;
-        uint64_t totalGenerations = 0;
-        int learningMode = 0;
-    };
 
     struct LearnedState
     {
@@ -100,31 +67,6 @@ public:
     // ============================================================================
     // 追加: 学習設定（Multi-start / 安全マージン / 極配置チェック）
     // ============================================================================
-    struct Settings
-    {
-        std::atomic<int> cmaesRestarts { 5 };
-        std::atomic<double> coeffSafetyMargin { 0.85 };
-        std::atomic<bool> enableStabilityCheck { true };
-
-        // デフォルトコンストラクタ
-        Settings() = default;
-
-        // コピーコンストラクタ（アトミック値をロード）
-        Settings(const Settings& other)
-            : cmaesRestarts(other.cmaesRestarts.load()),
-              coeffSafetyMargin(other.coeffSafetyMargin.load()),
-              enableStabilityCheck(other.enableStabilityCheck.load()) {}
-
-        // コピー代入演算子（アトミックにストア）
-        Settings& operator=(const Settings& other)
-        {
-            cmaesRestarts = other.cmaesRestarts.load();
-            coeffSafetyMargin = other.coeffSafetyMargin.load();
-            enableStabilityCheck = other.enableStabilityCheck.load();
-            return *this;
-        }
-    };
-
     void setSettings(const Settings& newSettings) noexcept
     {
         settings = newSettings;

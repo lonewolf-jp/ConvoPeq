@@ -44,6 +44,11 @@ bool SnapshotFactory::areSnapshotsEquivalent(const SnapshotParams& params,
     if (params.eqCoeffHash != snapshot.eqCoeffHash)
         return false;
 
+    if (std::abs(params.sampleRate - snapshot.sampleRate) > 1.0e-9)
+        return false;
+    if (params.maxBlockSize != snapshot.maxBlockSize)
+        return false;
+
     if (std::abs(params.inputHeadroomGain - snapshot.inputHeadroomGain) > 1.0e-12)
         return false;
     if (std::abs(params.outputMakeupGain - snapshot.outputMakeupGain) > 1.0e-12)
@@ -89,6 +94,8 @@ uint64_t SnapshotFactory::computeContentHash(const SnapshotParams& params) noexc
     h = hashCombine(h, params.convStateId);
 
     h = hashCombine(h, params.eqCoeffHash);
+    h = hashCombine(h, std::bit_cast<uint64_t>(params.sampleRate));
+    h = hashCombine(h, static_cast<uint64_t>(params.maxBlockSize));
 
     h = hashCombine(h, std::bit_cast<uint64_t>(params.inputHeadroomGain));
     h = hashCombine(h, std::bit_cast<uint64_t>(params.outputMakeupGain));
@@ -116,9 +123,11 @@ uint64_t SnapshotFactory::computeContentHash(const SnapshotParams& params) noexc
 const GlobalSnapshot* SnapshotFactory::createImpl(const SnapshotParams& pending,
                                                   const GlobalSnapshot* current,
                                                   uint64_t generation,
-                                                  double /*sampleRate*/) noexcept
+                                                  double sampleRate) noexcept
 {
     SnapshotParams params = pending;
+    if (sampleRate > 0.0)
+        params.sampleRate = sampleRate;
     params.generation = generation;
     params.contentHash = computeContentHash(params);
 

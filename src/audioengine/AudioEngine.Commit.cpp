@@ -10,11 +10,6 @@ static void diagLog(const juce::String& message)
     juce::Logger::writeToLog(message);
 }
 
-static void retireDSP(AudioEngine::DSPCore* dsp)
-{
-    if (dsp) convo::retireObject(dsp, [](void* p) { delete static_cast<AudioEngine::DSPCore*>(p); });
-}
-
 template <typename T>
 static inline T* sanitizeRawPtr(T* ptr) noexcept
 {
@@ -122,6 +117,10 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // 1. 旧 DSP を安全にキャプチャしてから新 DSP を公開する
         dspToTrash = activeDSP;
 
+        const uint64_t newSessionId = globalCaptureSessionId.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (newDSP != nullptr)
+            newDSP->currentCaptureSessionId = newSessionId;
+
         // 2. Update the atomic raw pointer for the Audio Thread (Wait-free)
         currentDSP.store(newDSP, std::memory_order_release);
 
@@ -132,10 +131,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
         // 4. Take ownership of the new DSP
         activeDSP = newDSP;
-
-        const uint64_t newSessionId = globalCaptureSessionId.fetch_add(1, std::memory_order_acq_rel) + 1;
-        if (newDSP != nullptr)
-            newDSP->currentCaptureSessionId = newSessionId;
+        publishRuntimeTransitionState(newDSP,
+                          nullptr,
+                          convo::TransitionPolicy::SmoothOnly,
+                          0.0,
+                          false);
 
         // この世代の publish が完了したので outstanding rebuild 窓を閉じる。
         lastCommittedRebuildGeneration.store(generation, std::memory_order_release);
@@ -259,6 +259,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             const bool isFadingActive = (sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)) != nullptr) ||
                                         dspCrossfadePending.load(std::memory_order_acquire) ||
                                         dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+            publishRuntimeTransitionState(activeDSP,
+                                          dspToTrash,
+                                          convo::TransitionPolicy::SmoothOnly,
+                                          fadeTimeSec,
+                                          true);
             if (isFadingActive)
             {
                 if (auto* prev = sanitizeRawPtr(queuedOldDSP.exchange(dspToTrash, std::memory_order_acq_rel)))
@@ -279,12 +284,22 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         {
             // クロスフェード不要時は即時解放
             retireDSP(dspToTrash);
+            publishRuntimeTransitionState(activeDSP,
+                                          nullptr,
+                                          convo::TransitionPolicy::HardReset,
+                                          0.0,
+                                          false);
         }
     }
 
     if (scheduleDryAsOldCrossfade)
     {
         queuedFadeTimeSec.store(dryAsOldFadeTimeSec, std::memory_order_release);
+        publishRuntimeTransitionState(activeDSP,
+                                      nullptr,
+                                      convo::TransitionPolicy::DryAsOld,
+                                      dryAsOldFadeTimeSec,
+                                      true);
         dspCrossfadeDryHoldSamples.store(std::max(1, maxSamplesPerBlock.load(std::memory_order_acquire)), std::memory_order_release);
         // dry スケーリング: passthrough (1.0) -> IR scale (~0.133) へ 60ms で ramp
         dspCrossfadeDryScaleGain.reset(std::max(1.0, currentSampleRate.load(std::memory_order_acquire)), 0.060);

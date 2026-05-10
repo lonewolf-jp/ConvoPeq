@@ -115,7 +115,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
             {
                 deferredStructuralRebuildPending_.store(true, std::memory_order_release);
                 deferredStructuralRebuildDueTicks_.store(appliedTicks + minDeltaTicks, std::memory_order_release);
-                pendingRebuildMask_.fetch_and(~convo::toMask(convo::RebuildKind::Structural), std::memory_order_acq_rel);
+                pendingStructuralRebuildFromNonMT_.store(false, std::memory_order_release);
                 needsStructuralRebuild = false;
 
                 diagLog("[DIAG] convolverParamsChanged: DEFERRED Structural rebuild after prepared IR apply and cleared pending Structural bit");

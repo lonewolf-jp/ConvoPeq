@@ -23,7 +23,7 @@
     - [技術ドキュメント](https://learn.microsoft.com/ja-jp/windows/apps/windows-sdk/)
 
 ## 2. 編集制限
-プロジェクトルート内の以下のディレクトリにあるファイルは**絶対に編集禁止**です。
+プロジェクトルート内の以下2ディレクトリ**配下の全ファイル（すべての拡張子）**は、条件なしで編集禁止です。
 - `/JUCE` フォルダ
 - `/r8brain-free-src` フォルダ
 
@@ -32,13 +32,19 @@
 
 - **構造化例外処理 (SEH)**: 絶対に使用しないこと。
 - **Audio Thread内でのブロッキング処理**:
-    `getNextAudioBlock()` 等が呼ばれるスレッド内では、待機が発生し得る次の6カテゴリを厳禁とする。
-    1. **メモリ操作**: `new`, `malloc`, `vector::resize`, `mkl_malloc`, `mkl_free`, `_aligned_malloc`, `vslNewStream`
-    2. **例外・計算**: `try-catch`, `std::exp()`, `libm` 呼び出しを伴う関数
-    3. **MKL設定**: `DftiCommitDescriptor`, `mkl_set_interface_layer`
-    4. **同期・通信**: `mutex lock`, `critical section`, `condition_variable`, `MessageManager` へのアクセス
-    5. **I/O・リソース**: ファイルI/O, コンソール出力, IRの再ロード, `std::shared_ptr` の使用, MMCSS設定
-    6. **JUCE特定処理**: `AudioBlock::allocate`, `AudioBlock::copyFrom`, `FFT::performFrequencyOnlyForwardTransform`（事前確保なし）
+        `getNextAudioBlock()` 等が呼ばれるスレッド内では、待機が発生し得る処理を厳禁とする。以下の6カテゴリを**個別に**確認すること。
+        - **カテゴリ1: メモリ操作（禁止）**
+            `new`, `malloc`, `vector::resize`, `mkl_malloc`, `mkl_free`, `_aligned_malloc`, `vslNewStream`
+        - **カテゴリ2: 例外・計算（禁止）**
+            `try-catch`, `std::exp()`, `libm` 呼び出しを伴う関数
+        - **カテゴリ3: MKL設定（禁止）**
+            `DftiCommitDescriptor`, `mkl_set_interface_layer`
+        - **カテゴリ4: 同期・通信（禁止）**
+            `mutex lock`, `critical section`, `condition_variable`, `MessageManager` へのアクセス
+        - **カテゴリ5: I/O・リソース（禁止）**
+            ファイルI/O, コンソール出力, IRの再ロード, `std::shared_ptr` の使用, MMCSS設定
+        - **カテゴリ6: JUCE特定処理（禁止）**
+            `AudioBlock::allocate`, `AudioBlock::copyFrom`, `FFT::performFrequencyOnlyForwardTransform`（事前確保なし）
 
 ## 4. メモリ管理とアライメント
 - **oneMKL使用箇所のメモリ確保**:

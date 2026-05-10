@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "NoiseShaperLearner.h"
 
 namespace {
 static void diagLog(const juce::String& message)
@@ -551,6 +552,16 @@ void AudioEngine::setFixedNoiseWindowSamples(int windowSamples) noexcept
 int AudioEngine::getFixedNoiseWindowSamples() const noexcept
 {
     return fixedNoiseWindowSamples.load(std::memory_order_relaxed);
+}
+
+void AudioEngine::setCrossfadeStartDelayBlocks(int blocks) noexcept
+{
+    m_crossfadeStartDelayBlocks.store(juce::jmax(0, blocks), std::memory_order_relaxed);
+}
+
+int AudioEngine::getCrossfadeStartDelayBlocks() const noexcept
+{
+    return m_crossfadeStartDelayBlocks.load(std::memory_order_relaxed);
 }
 
 void AudioEngine::setSoftClipEnabled(bool enabled)

@@ -62,8 +62,11 @@ struct CoeffSet {
 #include "UltraHighRateDCBlocker.h"
 #include "LockFreeRingBuffer.h"
 #include "LockFreeAudioRingBuffer.h"
-#include "NoiseShaperLearner.h"
+#include "NoiseShaperLearnerTypes.h"
 #include "GenerationManager.h"
+#include "RuntimeBuildTypes.h"
+#include "RuntimeTransition.h"
+#include "RuntimeCommandQueue.h"
 #include "core/Types.h"
 #include "core/SnapshotCoordinator.h"
 #include "core/EpochCore.h"
@@ -71,6 +74,8 @@ struct CoeffSet {
 #include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
 #include "core/RebuildTypes.h"
+
+class NoiseShaperLearner;
 
 // デバッグビルド時のみログを出力するマクロ
 #if defined(JUCE_DEBUG) && !defined(NDEBUG)
@@ -437,7 +442,20 @@ public:
     void setFixedNoiseWindowSamples(int windowSamples) noexcept;
     int getFixedNoiseWindowSamples() const noexcept;
 
-    void setIRFadeSamples(int samples) noexcept { m_irFadeSamples.store(samples, std::memory_order_relaxed); }
+    void setIRFadeSamples(int samples) noexcept
+    {
+        const int clamped = juce::jlimit(0, 96000, samples);
+        m_irFadeSamples.store(clamped, std::memory_order_relaxed);
+
+        const double sr = currentSampleRate.load(std::memory_order_acquire);
+        if (sr > 0.0)
+        {
+            const double fadeSec = (clamped > 0)
+                ? (static_cast<double>(clamped) / sr)
+                : 0.001;
+            m_irFadeTimeSec.store(fadeSec, std::memory_order_relaxed);
+        }
+    }
     void setEQFadeSamples(int samples) noexcept { m_eqFadeSamples.store(samples, std::memory_order_relaxed); }
     int getIRFadeSamples() const noexcept { return m_irFadeSamples.load(std::memory_order_relaxed); }
     int getEQFadeSamples() const noexcept { return m_eqFadeSamples.load(std::memory_order_relaxed); }
@@ -450,6 +468,22 @@ public:
     // UI 操作が実際の音声演算へ反映されたかを確認するための診断値。
     uint64_t getLastCreatedEqHashForDebug() const noexcept { return debugLastCreatedEqHash.load(std::memory_order_acquire); }
     uint64_t getLastAppliedEqHashForDebug() const noexcept { return debugLastAppliedEqHash.load(std::memory_order_acquire); }
+    convo::TransitionState getRuntimeTransitionStateForDebug() const noexcept
+    {
+        convo::TransitionState snapshot{};
+        snapshot.current = reinterpret_cast<void*>(static_cast<uintptr_t>(debugRuntimeTransitionCurrentPtr.load(std::memory_order_acquire)));
+        snapshot.next = reinterpret_cast<void*>(static_cast<uintptr_t>(debugRuntimeTransitionNextPtr.load(std::memory_order_acquire)));
+        int rawPolicy = debugRuntimeTransitionPolicy.load(std::memory_order_acquire);
+        if (rawPolicy < static_cast<int>(convo::TransitionPolicy::SmoothOnly)
+            || rawPolicy > static_cast<int>(convo::TransitionPolicy::DryAsOld))
+        {
+            rawPolicy = static_cast<int>(convo::TransitionPolicy::SmoothOnly);
+        }
+        snapshot.policy = static_cast<convo::TransitionPolicy>(rawPolicy);
+        snapshot.fadeTimeSec = debugRuntimeTransitionFadeSec.load(std::memory_order_acquire);
+        snapshot.active = (debugRuntimeTransitionActive.load(std::memory_order_acquire) != 0);
+        return snapshot;
+    }
 
     const convo::EQParameters& getLatestEqParamsFallback(uint64_t& outHash) const noexcept
     {
@@ -486,20 +520,20 @@ public:
     convo::HCMode getEqLPFFilterMode() const noexcept;
 
     // --- Adaptiveノイズシェイパー学習サポート ---
-    void startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode, bool resume = false);
+    void startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, bool resume = false);
     void stopNoiseShaperLearning();
-    void setNoiseShaperLearningMode(NoiseShaperLearner::LearningMode mode);
-    NoiseShaperLearner::LearningMode getNoiseShaperLearningMode() const { return pendingLearningMode.load(std::memory_order_acquire); }
+    void setNoiseShaperLearningMode(convo::NoiseShaperLearningMode mode);
+    convo::NoiseShaperLearningMode getNoiseShaperLearningMode() const { return pendingLearningMode.load(std::memory_order_acquire); }
     bool isNoiseShaperLearning() const;
-    const NoiseShaperLearner::Progress& getNoiseShaperLearningProgress() const;
+    const convo::NoiseShaperLearnerProgress& getNoiseShaperLearningProgress() const;
     int copyNoiseShaperLearningHistory(double* outScores, int maxPoints) const noexcept;
     // 学習ワーカーが記録したエラーメッセージを返す（UI 表示用）。エラーなしは nullptr。
     const char* getNoiseShaperLearningError() const noexcept;
     static int getAdaptiveSampleRateBankCount() noexcept;
 
     // --- NoiseShaperLearner Settings ---
-    NoiseShaperLearner::Settings getNoiseShaperLearnerSettings() const;
-    void setNoiseShaperLearnerSettings(const NoiseShaperLearner::Settings& settings);
+    convo::NoiseShaperLearnerSettings getNoiseShaperLearnerSettings() const;
+    void setNoiseShaperLearnerSettings(const convo::NoiseShaperLearnerSettings& settings);
 
     static double getAdaptiveSampleRateBankHz(int bankIndex) noexcept;
     void getCurrentAdaptiveCoefficients(double* outCoeffs, int maxCoefficients) const noexcept;
@@ -514,10 +548,10 @@ public:
     void publishCoeffs(const double* coeffs);
 
     // --- Adaptive ノイズシェイパー係数インデックス計算（UI スレッドからアクセス可能） ---
-    static int getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, NoiseShaperLearner::LearningMode mode) noexcept;
+    static int getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, convo::NoiseShaperLearningMode mode) noexcept;
 
-    bool getAdaptiveNoiseShaperState(int bankIndex, NoiseShaperLearner::State& outState) const noexcept;
-    void setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLearner::State& inState) noexcept;
+    bool getAdaptiveNoiseShaperState(int bankIndex, convo::NoiseShaperLearnerState& outState) const noexcept;
+    void setAdaptiveNoiseShaperState(int bankIndex, const convo::NoiseShaperLearnerState& inState) noexcept;
 
 private:
     //==================================================
@@ -656,8 +690,7 @@ public:
     std::atomic<bool> convBypassRequested { false };
     std::atomic<bool> eqBypassActive   { false };
     std::atomic<bool> convBypassActive { false };
-    std::atomic<uint32_t> pendingRebuildMask_{ 0 };
-    std::atomic<int64_t> lastIRContentRebuildTicks_{ 0 };
+    std::atomic<bool> pendingStructuralRebuildFromNonMT_{ false };
     std::atomic<bool> deferredStructuralRebuildPending_ { false };
     std::atomic<int64_t> deferredStructuralRebuildDueTicks_ { 0 };
     std::atomic<bool> deferredFinalizeAwareRebuildPending_ { false };
@@ -678,7 +711,7 @@ public:
 
         Type type = Type::Stop;
         bool resume = false;
-        NoiseShaperLearner::LearningMode mode = NoiseShaperLearner::LearningMode::Short;
+        convo::NoiseShaperLearningMode mode = convo::NoiseShaperLearningMode::Short;
         uint64_t irGeneration = 0;
     };
 
@@ -688,7 +721,7 @@ public:
 
         Type type = Type::Stop;
         bool resume = false;
-        NoiseShaperLearner::LearningMode mode = NoiseShaperLearner::LearningMode::Short;
+        convo::NoiseShaperLearningMode mode = convo::NoiseShaperLearningMode::Short;
     };
 
     enum class LearningRuntimeState : uint8_t { Idle, WaitingForDSP, Running };
@@ -700,7 +733,7 @@ public:
 
     #pragma warning(push)
     #pragma warning(disable: 4324)
-    alignas(64) std::atomic<NoiseShaperLearner::LearningMode> pendingLearningMode { NoiseShaperLearner::LearningMode::Short };
+    alignas(64) std::atomic<convo::NoiseShaperLearningMode> pendingLearningMode { convo::NoiseShaperLearningMode::Short };
     alignas(64) std::atomic<uint64_t> globalCaptureSessionId { 1 };
     #pragma warning(pop)
 
@@ -718,7 +751,7 @@ public:
     #pragma warning(pop)
 
     LearningRuntimeState learningRuntimeState = LearningRuntimeState::Idle;
-    NoiseShaperLearner::LearningMode requestedLearningMode = NoiseShaperLearner::LearningMode::Short;
+    convo::NoiseShaperLearningMode requestedLearningMode = convo::NoiseShaperLearningMode::Short;
     bool requestedLearningResume = false;
     uint64_t requestedLearningGeneration = 0;
     uint64_t currentIRGeneration = 0; // Audio thread only
@@ -798,7 +831,6 @@ public:
                              bool isFadingTarget);
     bool waitForAudioBlockBoundary(uint64_t observedCounter, uint32_t timeoutMs) const noexcept;
     void handleAsyncUpdate() override;
-    void processRebuildRequestsInternal();
 
     static void onSnapshotRequired(void* userData, uint64_t generation);
     void createSnapshotFromCurrentState(uint64_t generation);
@@ -817,14 +849,8 @@ public:
     bool hasPendingTask = false;
 
     struct RebuildTask {
-        DSPCore* newDSP = nullptr;
         DSPCore* currentDSP = nullptr;
-        double sampleRate = 0.0;
-        int samplesPerBlock = 0;
-        int ditherDepth = 0;
-        int manualOversamplingFactor = 0;
-        OversamplingType oversamplingType = OversamplingType::IIR;
-        NoiseShaperType noiseShaperType = NoiseShaperType::Psychoacoustic;
+        convo::BuildInput buildInput {};
         int generation = 0;
     };
     RebuildTask pendingTask;
@@ -840,6 +866,7 @@ public:
 
     std::queue<CommitStaging> deferredCommitQueue;
     std::mutex deferredCommitMutex;
+    convo::TransitionState runtimeTransitionState {};
 
     std::vector<DSPCore*> deferredDeleteQueue;  // generation mismatch された DSP を defer release
 
@@ -851,7 +878,7 @@ public:
         CoeffSet coeffSetB {};
         std::atomic<int> activeIndex { 0 };   // 0 = A, 1 = B
         std::atomic<uint32_t> generation { 1u };
-        NoiseShaperLearner::State state {};
+        convo::NoiseShaperLearnerState state {};
         std::mutex stateMutex;
         std::atomic<bool> writeLock { false };  // CAS用書き込みロック
     };
@@ -874,6 +901,213 @@ public:
 
 
     void debugAssertNotAudioThread() const;
+
+    inline void publishRuntimeTransitionState(DSPCore* current,
+                                              DSPCore* next,
+                                              convo::TransitionPolicy policy,
+                                              double fadeTimeSec,
+                                              bool active) noexcept
+    {
+        runtimeTransitionState.current = current;
+        runtimeTransitionState.next = next;
+        runtimeTransitionState.policy = policy;
+        runtimeTransitionState.fadeTimeSec = fadeTimeSec;
+        runtimeTransitionState.active = active;
+
+        debugRuntimeTransitionActive.store(active ? 1 : 0, std::memory_order_release);
+        debugRuntimeTransitionPolicy.store(static_cast<int>(policy), std::memory_order_release);
+        debugRuntimeTransitionCurrentPtr.store(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(current)), std::memory_order_release);
+        debugRuntimeTransitionNextPtr.store(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(next)), std::memory_order_release);
+        debugRuntimeTransitionFadeSec.store(fadeTimeSec, std::memory_order_release);
+    }
+
+    inline DSPCore::ProcessingState buildAudioThreadProcessingState(DSPCore* dsp,
+                                                                     bool eqBypassed,
+                                                                     bool convBypassed,
+                                                                     ProcessingOrder order,
+                                                                     bool softClip,
+                                                                     float satAmount,
+                                                                     double headroomGain,
+                                                                     double makeupGain,
+                                                                     double convInputTrimGain,
+                                                                     bool adaptiveCaptureEnabled) noexcept
+    {
+        const AnalyzerSource analyzerSource = currentAnalyzerSource.load(std::memory_order_relaxed);
+        const bool analyzerEnabledNow = analyzerEnabled.load(std::memory_order_relaxed);
+        const convo::HCMode hcMode = convHCFilterMode.load(std::memory_order_relaxed);
+        const convo::LCMode lcMode = convLCFilterMode.load(std::memory_order_relaxed);
+        const convo::HCMode lpfMode = eqLPFFilterMode.load(std::memory_order_relaxed);
+        const int adaptiveCoeffBankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
+        const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(adaptiveCoeffBankIndex);
+        const uint32_t adaptiveGen = adaptiveCoeffBank.generation.load(std::memory_order_acquire);
+        const CoeffSet* adaptiveSet = getActiveCoeffSet(adaptiveCoeffBank);
+        return DSPCore::ProcessingState {
+            .eqBypassed = eqBypassed,
+            .convBypassed = convBypassed,
+            .order = order,
+            .analyzerSource = analyzerSource,
+            .analyzerEnabled = analyzerEnabledNow,
+            .softClipEnabled = softClip,
+            .saturationAmount = satAmount,
+            .inputHeadroomGain = headroomGain,
+            .outputMakeupGain = makeupGain,
+            .convolverInputTrimGain = convInputTrimGain,
+            .convHCMode = hcMode,
+            .convLCMode = lcMode,
+            .eqLPFMode = lpfMode,
+            .adaptiveCoeffBankIndex = adaptiveCoeffBankIndex,
+            .adaptiveCoeffSet = adaptiveSet,
+            .adaptiveCoeffGeneration = adaptiveGen,
+            .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
+            .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
+            .captureSessionId = dsp->currentCaptureSessionId,
+            .adaptiveCaptureQueue = adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
+        };
+    }
+
+    inline bool updateAudioThreadSnapshotFade(int numSamples,
+                                              float& snapshotAlpha,
+                                              const convo::GlobalSnapshot*& snapshotFrom,
+                                              const convo::GlobalSnapshot*& snapshotTo) noexcept
+    {
+        if (m_coordinator.isFading())
+            m_coordinator.advanceFade(numSamples);
+
+        const bool updateFadeReturned = m_coordinator.updateFade(snapshotAlpha, snapshotFrom, snapshotTo);
+        return updateFadeReturned;
+    }
+
+    inline void armCrossfadeIfPending(DSPCore* dsp, bool hasFading, bool& useDryAsOld) noexcept
+    {
+        if ((hasFading || firstIrDryCrossfadePending.load(std::memory_order_acquire))
+            && dspCrossfadePending.exchange(false, std::memory_order_acq_rel))
+        {
+            const double fadeSec = std::max(0.001, queuedFadeTimeSec.load(std::memory_order_acquire));
+            dspCrossfadeGain.reset(std::max(1.0, dsp->sampleRate), fadeSec);
+            dspCrossfadeGain.setCurrentAndTargetValue(0.0);
+            dspCrossfadeGain.setTargetValue(1.0);
+
+            latencyDelayOld_RT = latencyDelayOld.load(std::memory_order_acquire);
+            latencyDelayNew_RT = latencyDelayNew.load(std::memory_order_acquire);
+
+            if (firstIrDryCrossfadePending.exchange(false, std::memory_order_acq_rel))
+            {
+                dspCrossfadeUseDryAsOld.store(true, std::memory_order_release);
+                useDryAsOld = true;
+            }
+        }
+    }
+
+    template <typename ProcessFn>
+    inline bool processCrossfadeDelayGateIfPending(DSPCore* fading,
+                                                   bool useDryAsOld,
+                                                   ProcessFn processFn) noexcept
+    {
+        const int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
+        if (fading != nullptr
+            && !useDryAsOld
+            && dspCrossfadePending.load(std::memory_order_acquire)
+            && pendingFadeDelayBlocks > 0)
+        {
+            dspCrossfadeStartDelayBlocks.store(pendingFadeDelayBlocks - 1, std::memory_order_release);
+            processFn();
+            return true;
+        }
+
+        return false;
+    }
+
+    static inline DSPCore::ProcessingState makeCrossfadeAuxState(const DSPCore::ProcessingState& procState) noexcept
+    {
+        auto fadingState = procState;
+        fadingState.analyzerEnabled = false;
+        fadingState.adaptiveCaptureQueue = nullptr;
+        return fadingState;
+    }
+
+    inline void finalizeCrossfadeMixPath(bool resetDryScaleGain) noexcept
+    {
+        if (!dspCrossfadeGain.isSmoothing())
+        {
+            if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
+                retireDSP(done);
+            dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+            if (resetDryScaleGain)
+                dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
+            dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
+        }
+    }
+
+    inline void cleanupCrossfadeDirectPath(DSPCore* fading) noexcept
+    {
+        if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
+        {
+            if (auto* done = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel)))
+                retireDSP(done);
+        }
+        if (!dspCrossfadeGain.isSmoothing())
+            dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
+    }
+
+    inline void resetLatencyBuffersIfPending(int bufferSize, int& writePos) noexcept
+    {
+        if (latencyResetPending.exchange(false, std::memory_order_acq_rel))
+        {
+            if (latencyBufOldL) std::memset(latencyBufOldL, 0, sizeof(double) * bufferSize);
+            if (latencyBufOldR) std::memset(latencyBufOldR, 0, sizeof(double) * bufferSize);
+            if (latencyBufNewL) std::memset(latencyBufNewL, 0, sizeof(double) * bufferSize);
+            if (latencyBufNewR) std::memset(latencyBufNewR, 0, sizeof(double) * bufferSize);
+            writePos = 0;
+        }
+    }
+
+    static inline int wrapLatencyIndex(int index, int bufferSize) noexcept
+    {
+        while (index < 0) index += bufferSize;
+        while (index >= bufferSize) index -= bufferSize;
+        return index;
+    }
+
+    template <typename SampleType, typename MixFn>
+    inline void runLatencyAlignedCrossfadeMixLoop(SampleType* dstL,
+                                                  SampleType* dstR,
+                                                  const SampleType* oldL,
+                                                  const SampleType* oldR,
+                                                  int numSamples,
+                                                  MixFn mixFn) noexcept
+    {
+        const int bufferSize = latencyBufSize;
+        int writePos = latencyWritePos;
+        const int delayOld = latencyDelayOld_RT;
+        const int delayNew = latencyDelayNew_RT;
+
+        resetLatencyBuffersIfPending(bufferSize, writePos);
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            latencyBufOldL[writePos] = (oldL != nullptr) ? static_cast<double>(oldL[i]) : 0.0;
+            latencyBufOldR[writePos] = (oldR != nullptr) ? static_cast<double>(oldR[i]) : 0.0;
+            latencyBufNewL[writePos] = (dstL != nullptr) ? static_cast<double>(dstL[i]) : 0.0;
+            latencyBufNewR[writePos] = (dstR != nullptr) ? static_cast<double>(dstR[i]) : 0.0;
+
+            const int readOld = wrapLatencyIndex(writePos - delayOld, bufferSize);
+            const int readNew = wrapLatencyIndex(writePos - delayNew, bufferSize);
+
+            const double alignedOldL = latencyBufOldL[readOld];
+            const double alignedOldR = latencyBufOldR[readOld];
+            const double alignedNewL = latencyBufNewL[readNew];
+            const double alignedNewR = latencyBufNewR[readNew];
+
+            const double gNew = dspCrossfadeGain.getNextValue();
+            mixFn(dstL, dstR, i, gNew, alignedOldL, alignedOldR, alignedNewL, alignedNewR);
+
+            ++writePos;
+            if (writePos >= bufferSize)
+                writePos = 0;
+        }
+
+        latencyWritePos = writePos;
+    }
 
     friend class NoiseShaperLearner;
     friend class EQEditProcessor;
@@ -912,6 +1146,12 @@ static inline T* sanitizeRawPtr(T* ptr) noexcept
 {
     constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
     return (reinterpret_cast<uintptr_t>(ptr) == kInvalidAllOnes) ? nullptr : ptr;
+}
+
+// DSPCore の解放は必ず EBR retire キュー経由で行う
+static inline void retireDSP(DSPCore* dsp) noexcept
+{
+    if (dsp) convo::retireObject(dsp, [](void* p) { delete static_cast<DSPCore*>(p); });
 }
 
 //==============================================================================
@@ -977,6 +1217,7 @@ public:
     // ==================================================================
     // Phase 3: コマンドバッファ + ワーカースレッド
     // ==================================================================
+    convo::RuntimeCommandQueue m_runtimeCommandQueue;
     convo::CommandBuffer m_commandBuffer;
     convo::WorkerThread m_workerThread;
 
@@ -1025,10 +1266,16 @@ public:
     uint64_t debugLastRecoveryAttemptAudioBlockCounter{ 0 }; // timerCallback 専用
     int debugRecoveryRetryCountForCurrentHash{ 0 }; // timerCallback 専用
     bool debugRecoverySuppressedForCurrentHash{ false }; // timerCallback 専用
-    std::atomic<int> debugLastCoordinatorIsFading{ 0 };
-    std::atomic<int> debugLastUpdateFadeReturned{ 0 };
-    std::atomic<int> debugLastSnapshotFromNull{ 1 };
-    std::atomic<int> debugLastSnapshotToNull{ 1 };
+    std::atomic<int> debugRuntimeTransitionActive{ 0 };
+    std::atomic<int> debugRuntimeTransitionPolicy{ 0 };
+    std::atomic<uint64_t> debugRuntimeTransitionCurrentPtr{ 0 };
+    std::atomic<uint64_t> debugRuntimeTransitionNextPtr{ 0 };
+    std::atomic<double> debugRuntimeTransitionFadeSec{ 0.0 };
+    int debugLastReportedTransitionActive{ -1 }; // timerCallback 専用
+    int debugLastReportedTransitionPolicy{ -1 }; // timerCallback 専用
+    uint64_t debugLastReportedTransitionCurrentPtr{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
+    uint64_t debugLastReportedTransitionNextPtr{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
+    double debugLastReportedTransitionFadeSec{ -1.0 }; // timerCallback 専用
 
     juce::AudioBuffer<float> m_fadeFloatBuffer;
     juce::AudioBuffer<double> m_fadeDoubleBuffer;

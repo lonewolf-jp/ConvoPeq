@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "NoiseShaperLearner.h"
 
 extern std::atomic<bool> gShuttingDown;
 
@@ -9,17 +10,17 @@ static void diagLog(const juce::String& message)
     juce::Logger::writeToLog(message);
 }
 
-static void retireDSP(AudioEngine::DSPCore* dsp)
-{
-    if (dsp) convo::retireObject(dsp, [](void* p) { delete static_cast<AudioEngine::DSPCore*>(p); });
-}
-
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_RELEASE_RESOURCES)
 
 void AudioEngine::releaseResources()
 {
     diagLog("[DIAG] releaseResources: enter");
     shutdownInProgress.store(true, std::memory_order_release);
+
+    // 非MT起点の pending rebuild 要求と AsyncUpdater キューをシャットダウン直後に廃棄する。
+    // stopRebuildThread より先に実行して handleAsyncUpdate が後から rebuild を発火しないようにする。
+    pendingStructuralRebuildFromNonMT_.store(false, std::memory_order_release);
+    cancelPendingUpdate();
     firstIrDryCrossfadePending.store(false, std::memory_order_release);
     dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
     const bool finalShutdown = gShuttingDown.load(std::memory_order_acquire);
@@ -61,8 +62,6 @@ void AudioEngine::releaseResources()
 
         if (hasPendingTask)
         {
-            pendingNewToRelease = sanitizeRawPtr(pendingTask.newDSP);
-            pendingTask.newDSP = nullptr;
             pendingCurrentToRelease = sanitizeRawPtr(pendingTask.currentDSP);
             pendingTask.currentDSP = nullptr;
             hasPendingTask = false;
@@ -70,6 +69,11 @@ void AudioEngine::releaseResources()
 
         dspCrossfadePending.store(false, std::memory_order_release);
         dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+        publishRuntimeTransitionState(nullptr,
+                                      nullptr,
+                                      convo::TransitionPolicy::HardReset,
+                                      0.0,
+                                      false);
     }
 
     diagLog("[DIAG] releaseResources: before stopRebuildThread");

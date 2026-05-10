@@ -1,9 +1,10 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "NoiseShaperLearner.h"
 
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_START)
 
-void AudioEngine::startNoiseShaperLearning(NoiseShaperLearner::LearningMode mode, bool resume)
+void AudioEngine::startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, bool resume)
 {
     if (noiseShaperLearner == nullptr)
         return;
@@ -260,7 +261,7 @@ namespace
     }
 }
 
-void AudioEngine::setNoiseShaperLearningMode(NoiseShaperLearner::LearningMode mode)
+void AudioEngine::setNoiseShaperLearningMode(convo::NoiseShaperLearningMode mode)
 {
     pendingLearningMode.store(mode, std::memory_order_release);
     selectAdaptiveCoeffBankForCurrentSettings();
@@ -273,20 +274,20 @@ bool AudioEngine::isNoiseShaperLearning() const
     return noiseShaperLearner && noiseShaperLearner->isRunning();
 }
 
-const NoiseShaperLearner::Progress& AudioEngine::getNoiseShaperLearningProgress() const
+const convo::NoiseShaperLearnerProgress& AudioEngine::getNoiseShaperLearningProgress() const
 {
     jassert(noiseShaperLearner);
     return noiseShaperLearner->getProgress();
 }
 
-NoiseShaperLearner::Settings AudioEngine::getNoiseShaperLearnerSettings() const
+convo::NoiseShaperLearnerSettings AudioEngine::getNoiseShaperLearnerSettings() const
 {
     if (noiseShaperLearner)
         return noiseShaperLearner->getSettings();
     return {};
 }
 
-void AudioEngine::setNoiseShaperLearnerSettings(const NoiseShaperLearner::Settings& settings)
+void AudioEngine::setNoiseShaperLearnerSettings(const convo::NoiseShaperLearnerSettings& settings)
 {
     if (noiseShaperLearner)
         noiseShaperLearner->setSettings(settings);
@@ -367,7 +368,7 @@ int AudioEngine::getAdaptiveBitDepthIndex(int bitDepth) noexcept
     return 2;
 }
 
-int AudioEngine::getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, NoiseShaperLearner::LearningMode mode) noexcept
+int AudioEngine::getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, convo::NoiseShaperLearningMode mode) noexcept
 {
     const int srBank = resolveAdaptiveCoeffBankIndex(sampleRate);
     const int bdIdx  = getAdaptiveBitDepthIndex(bitDepth);
@@ -620,7 +621,7 @@ void AudioEngine::publishCoeffsToBank(int bankIndex, const double* coeffs)
     guard.commit();
 }
 
-bool AudioEngine::getAdaptiveNoiseShaperState(int bankIndex, NoiseShaperLearner::State& outState) const noexcept
+bool AudioEngine::getAdaptiveNoiseShaperState(int bankIndex, convo::NoiseShaperLearnerState& outState) const noexcept
 {
     const auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
     std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(bank.stateMutex));
@@ -628,7 +629,7 @@ bool AudioEngine::getAdaptiveNoiseShaperState(int bankIndex, NoiseShaperLearner:
     return true;
 }
 
-void AudioEngine::setAdaptiveNoiseShaperState(int bankIndex, const NoiseShaperLearner::State& inState) noexcept
+void AudioEngine::setAdaptiveNoiseShaperState(int bankIndex, const convo::NoiseShaperLearnerState& inState) noexcept
 {
     auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
     std::lock_guard<std::mutex> lock(bank.stateMutex);

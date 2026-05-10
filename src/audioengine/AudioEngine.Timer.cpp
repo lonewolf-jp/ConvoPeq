@@ -13,7 +13,33 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::timerCallback()
 {
-    processRebuildRequestsInternal();
+    {
+        const auto ts = getRuntimeTransitionStateForDebug();
+        const int active = ts.active ? 1 : 0;
+        const int policy = static_cast<int>(ts.policy);
+        const uint64_t currentPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ts.current));
+        const uint64_t nextPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ts.next));
+        const double fadeSec = ts.fadeTimeSec;
+
+        if (active != debugLastReportedTransitionActive
+            || policy != debugLastReportedTransitionPolicy
+            || currentPtr != debugLastReportedTransitionCurrentPtr
+            || nextPtr != debugLastReportedTransitionNextPtr
+            || absNoLibm(fadeSec - debugLastReportedTransitionFadeSec) > 1e-9)
+        {
+            debugLastReportedTransitionActive = active;
+            debugLastReportedTransitionPolicy = policy;
+            debugLastReportedTransitionCurrentPtr = currentPtr;
+            debugLastReportedTransitionNextPtr = nextPtr;
+            debugLastReportedTransitionFadeSec = fadeSec;
+
+            diagLog("[VERIFY] transition state active=" + juce::String(active)
+                + " policy=" + juce::String(policy)
+                + " current=0x" + juce::String::toHexString(static_cast<juce::int64>(currentPtr))
+                + " next=0x" + juce::String::toHexString(static_cast<juce::int64>(nextPtr))
+                + " fadeSec=" + juce::String(fadeSec, 6));
+        }
+    }
 
     // フェイルセーフ: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
@@ -39,10 +65,10 @@ void AudioEngine::timerCallback()
             ? (nowBlockCounter - createBlockCounter)
             : 0;
         const int dspReady = (currentDSP.load(std::memory_order_acquire) != nullptr) ? 1 : 0;
-        const int coordIsFading = debugLastCoordinatorIsFading.load(std::memory_order_acquire);
-        const int updateFadeReturned = debugLastUpdateFadeReturned.load(std::memory_order_acquire);
-        const int fromNull = debugLastSnapshotFromNull.load(std::memory_order_acquire);
-        const int toNull = debugLastSnapshotToNull.load(std::memory_order_acquire);
+        const int coordIsFading = m_coordinator.isFading() ? 1 : 0;
+        const int updateFadeReturned = coordIsFading;
+        const int fromNull = (m_coordinator.getCurrent() == nullptr) ? 1 : 0;
+        const int toNull = -1;
 
         const bool eqMismatch = (createdHash != 0 && createdHash != appliedHash && dspReady == 1);
         const bool recoveryEligible = eqMismatch

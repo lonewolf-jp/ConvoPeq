@@ -1,14 +1,10 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "NoiseShaperLearner.h"
 
 extern std::atomic<bool> gShuttingDown;
 
 namespace {
-static void retireDSP(AudioEngine::DSPCore* dsp)
-{
-    if (dsp) convo::retireObject(dsp, [](void* p) { delete static_cast<AudioEngine::DSPCore*>(p); });
-}
-
 static void diagLog(const juce::String& message)
 {
     DBG(message);
@@ -59,12 +55,6 @@ AudioEngine::~AudioEngine()
 
         if (hasPendingTask)
         {
-            if (pendingTask.newDSP)
-            {
-                retireDSP(pendingTask.newDSP);
-                pendingTask.newDSP = nullptr;
-            }
-
             if (pendingTask.currentDSP)
             {
                 retireDSP(pendingTask.currentDSP);

@@ -38,12 +38,17 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
     // ─── Step 1: モード・バイパス状態を先に復元 ────────────────────────────
     if (state.hasProperty("processingOrder"))
-        currentProcessingOrder.store((ProcessingOrder)(int)state.getProperty("processingOrder"));
+    {
+        const auto order = (ProcessingOrder)(int)state.getProperty("processingOrder");
+        currentProcessingOrder.store(order);
+        m_currentProcessingOrder.store(order, std::memory_order_relaxed);
+    }
 
     if (state.hasProperty("eqBypassed"))
     {
         bool bypassed = state.getProperty("eqBypassed");
         eqBypassRequested.store(bypassed, std::memory_order_release);
+        m_currentEqBypass.store(bypassed, std::memory_order_release);
         uiEqEditor.setBypass(bypassed);
     }
 
@@ -51,6 +56,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     {
         bool bypassed = state.getProperty("convBypassed");
         convBypassRequested.store(bypassed, std::memory_order_release);
+        m_currentConvBypass.store(bypassed, std::memory_order_release);
         uiConvolverProcessor.setBypass(bypassed);
     }
 

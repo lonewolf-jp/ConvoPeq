@@ -52,6 +52,13 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     maxSamplesPerBlock.store(bufferSize);
     currentSampleRate.store(safeSampleRate);
+    {
+        const int irFadeSamples = juce::jmax(0, m_irFadeSamples.load(std::memory_order_relaxed));
+        const double irFadeSec = (irFadeSamples > 0)
+            ? (static_cast<double>(irFadeSamples) / safeSampleRate)
+            : 0.001;
+        m_irFadeTimeSec.store(irFadeSec, std::memory_order_relaxed);
+    }
     dspCrossfadeGain.reset(safeSampleRate, 0.03);
     dspCrossfadeGain.setCurrentAndTargetValue(1.0);
     dspCrossfadePending.store(false, std::memory_order_release);

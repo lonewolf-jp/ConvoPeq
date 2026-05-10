@@ -80,7 +80,21 @@ private:
     juce::Label saturationValueLabel;
     juce::Label saturationLabel;
     juce::Label latencyLabel;
+    juce::Label transitionLabel;
     juce::Label cpuUsageLabel;
+    juce::String lastTransitionLabelText;
+    juce::Colour lastTransitionLabelColour { juce::Colours::transparentBlack };
+    bool hasLastTransitionLabelState { false };
+    int lastTransitionActiveInt { -1 };
+    int lastTransitionPolicyInt { -1 };
+    uint64_t lastTransitionCurrentTail { 0 };
+    uint64_t lastTransitionNextTail { 0 };
+    int lastTransitionFadeMsX10 { -1 };
+    bool lastTransitionCompactMode { false };
+    bool hasLastLatencyLabelState { false };
+    int lastLatencySamples { 0 };
+    int lastLatencyMsX10 { 0 };
+    bool lastLatencySrValid { false };
     std::unique_ptr<juce::DocumentWindow> settingsWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)

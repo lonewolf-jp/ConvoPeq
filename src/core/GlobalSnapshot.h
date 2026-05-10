@@ -50,6 +50,10 @@ struct GlobalSnapshot {
     // ---------- 世代管理 ----------
     uint64_t generation = 0;
 
+    // ---------- 実行コンテキスト ----------
+    double sampleRate = 48000.0;
+    int maxBlockSize = 512;
+
     // v2.3 フェーズ 1 追加フィールド
     uint64_t eqCoeffHash = 0;           // EQパラメータハッシュ値（キャッシュ識別子）
 

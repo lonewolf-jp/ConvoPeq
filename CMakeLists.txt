@@ -151,6 +151,12 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/AudioEngine.Processing.DSPCoreDouble.cpp
     src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp
     src/CustomInputOversampler.cpp
+    src/NoiseShaperLearnerTypes.h
+    src/audioengine/RuntimeCommand.h
+    src/audioengine/RuntimeBuildTypes.h
+    src/audioengine/RuntimeCommandQueue.h
+    src/audioengine/RuntimeBuilder.h
+    src/audioengine/RuntimeBuilder.cpp
     src/audioengine/AudioEngineProcessor.cpp
     # Convolver split implementation (v1)
     src/convolver/ConvolverProcessor.Internal.h

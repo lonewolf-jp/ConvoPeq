@@ -25,6 +25,8 @@ GlobalSnapshot::GlobalSnapshot(const SnapshotParams& params) noexcept
     , ditherBitDepth(params.ditherBitDepth)
     , noiseShaperType(params.noiseShaperType)
     , generation(params.generation)
+    , sampleRate(params.sampleRate)
+    , maxBlockSize(params.maxBlockSize)
     , eqCoeffHash(params.eqCoeffHash)
 {
     if (convState) {

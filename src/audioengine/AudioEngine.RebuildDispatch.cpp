@@ -1,5 +1,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "NoiseShaperLearner.h"
+#include "RuntimeBuilder.h"
 
 extern std::atomic<bool> gShuttingDown;
 
@@ -10,46 +12,89 @@ static void diagLog(const juce::String& message)
     juce::Logger::writeToLog(message);
 }
 
-static void retireDSP(AudioEngine::DSPCore* dsp)
+static std::uint64_t makeRuntimePayloadHash(int ditherDepth,
+                                            int oversamplingFactor,
+                                            AudioEngine::OversamplingType oversamplingType,
+                                            AudioEngine::NoiseShaperType noiseShaperType) noexcept
 {
-    if (dsp) convo::retireObject(dsp, [](void* p) { delete static_cast<AudioEngine::DSPCore*>(p); });
+    std::uint64_t value = static_cast<std::uint64_t>(static_cast<std::uint32_t>(ditherDepth));
+    value = (value << 8) ^ static_cast<std::uint64_t>(static_cast<std::uint32_t>(oversamplingFactor));
+    value = (value << 8) ^ static_cast<std::uint64_t>(static_cast<std::uint32_t>(oversamplingType));
+    value = (value << 8) ^ static_cast<std::uint64_t>(static_cast<std::uint32_t>(noiseShaperType));
+    value ^= (value << 13);
+    value ^= (value >> 7);
+    value ^= (value << 17);
+    return value;
+}
+
+static convo::EngineCommand makeRuntimeCommand(double sampleRate,
+                                               int samplesPerBlock,
+                                               int ditherDepth,
+                                               int oversamplingFactor,
+                                               AudioEngine::OversamplingType oversamplingType,
+                                               AudioEngine::NoiseShaperType noiseShaperType,
+                                               std::uint64_t revision) noexcept
+{
+    convo::EngineCommand cmd {};
+    cmd.type = convo::CommandType::UpdateParameters;
+    cmd.meta.revision = revision;
+    cmd.meta.issuedTick = static_cast<std::uint64_t>(juce::Time::getHighResolutionTicks());
+    cmd.meta.highPriority = true;
+    cmd.sampleRate = sampleRate;
+    cmd.blockSize = samplesPerBlock;
+    cmd.intValue = ditherDepth;
+    cmd.oversamplingFactor = oversamplingFactor;
+    cmd.oversamplingType = static_cast<int>(oversamplingType);
+    cmd.noiseShaperType = static_cast<int>(noiseShaperType);
+    cmd.payloadHash = makeRuntimePayloadHash(ditherDepth,
+                                             oversamplingFactor,
+                                             oversamplingType,
+                                             noiseShaperType);
+    return cmd;
+}
+
+static bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
+{
+    return dsp.convolver.isLoadingIR();
 }
 }
 
 
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_DISPATCH)
 
-// =============================================================
-// Rebuild request coalescing (Stage 3)
-// =============================================================
 void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
 {
     if (shutdownInProgress.load(std::memory_order_acquire) ||
         gShuttingDown.load(std::memory_order_acquire))
         return;
 
-    if (kind == convo::RebuildKind::None)
+    if (kind == convo::RebuildKind::None || kind == convo::RebuildKind::Runtime)
         return;
 
-    if (kind == convo::RebuildKind::IRContent)
+    // Message Thread かつ実行コンテキスト有効時は直接 rebuild 実行へ進む
+    if (kind == convo::RebuildKind::Structural)
     {
-        if (!uiConvolverProcessor.isIRFinalized())
+        if (auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+            mm != nullptr && mm->isThisTheMessageThread())
+        {
+            pendingStructuralRebuildFromNonMT_.store(false, std::memory_order_release);
+
+            const double sr = currentSampleRate.load(std::memory_order_acquire);
+            const int bs = maxSamplesPerBlock.load(std::memory_order_acquire);
+            if (sr > 0.0 && bs > 0)
+            {
+                requestRebuild(sr, bs);
+                return;
+            }
+
+            deferredFinalizeAwareRebuildPending_.store(true, std::memory_order_release);
             return;
-
-        const int64_t nowTicks = juce::Time::getHighResolutionTicks();
-        const int64_t lastTicks = lastIRContentRebuildTicks_.load(std::memory_order_relaxed);
-        const int64_t minDelta = juce::Time::getHighResolutionTicksPerSecond() / 5; // 200ms
-
-        if (lastTicks > 0 && (nowTicks - lastTicks) < minDelta)
-            return;
-
-        lastIRContentRebuildTicks_.store(nowTicks, std::memory_order_relaxed);
+        }
     }
 
-    const uint32_t mask = convo::toMask(kind);
-    const uint32_t prev = pendingRebuildMask_.fetch_or(mask, std::memory_order_acq_rel);
-
-    if (prev == 0)
+    // 非MTパス: bool フラグをセットして MT へ通知
+    const bool wasAlreadyPending = pendingStructuralRebuildFromNonMT_.exchange(true, std::memory_order_acq_rel);
+    if (!wasAlreadyPending)
         triggerAsyncUpdate();
 }
 
@@ -60,46 +105,17 @@ void AudioEngine::handleAsyncUpdate()
         return;
 
     executeCommit();
-    processRebuildRequestsInternal();
-}
 
-void AudioEngine::processRebuildRequestsInternal()
-{
-    // 1. mask 取得（完全 drain）
-    const uint32_t mask = pendingRebuildMask_.exchange(0, std::memory_order_acq_rel);
-    if (mask == 0)
-        return;
-
-    // 2. 現在の DSP パラメータ取得
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
-    const int bs = maxSamplesPerBlock.load(std::memory_order_acquire);
-
-    // 3. 無効状態 → 再投入（重要）
-    if (sr <= 0.0 || bs <= 0)
+    // 非MT起点の Structural rebuild 要求を消費して実行する
+    if (pendingStructuralRebuildFromNonMT_.exchange(false, std::memory_order_acq_rel))
     {
-        pendingRebuildMask_.fetch_or(mask, std::memory_order_release);
-        return;
+        const double sr = currentSampleRate.load(std::memory_order_acquire);
+        const int bs = maxSamplesPerBlock.load(std::memory_order_acquire);
+        if (sr > 0.0 && bs > 0)
+            requestRebuild(sr, bs);
+        else
+            deferredFinalizeAwareRebuildPending_.store(true, std::memory_order_release);
     }
-
-    // 4. 優先度制御
-    // =============================
-
-    // --- HIGH: Structural ---
-    if (mask & static_cast<uint32_t>(convo::RebuildKind::Structural))
-    {
-        requestRebuild(sr, bs);
-        return; // 他は defer
-    }
-
-    // --- MID: IRContent ---
-    if (mask & static_cast<uint32_t>(convo::RebuildKind::IRContent))
-    {
-        requestRebuild(sr, bs);
-        return;
-    }
-
-    // --- LOW: Runtime / UIOnly ---
-    // 現状は何もしない（将来拡張ポイント）
 }
 
 #endif
@@ -111,7 +127,7 @@ void AudioEngine::processRebuildRequestsInternal()
 //--------------------------------------------------------------
 void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 {
-    // UIコンポーネント(uiEqEditor等)へのアクセスやMKLメモリ確保を行うため、必ずMessage Threadで実行すること
+    // UIコンポーネントへのアクセスを行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
     if (deferredStructuralRebuildPending_.load(std::memory_order_acquire))
@@ -149,14 +165,6 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     if (noiseShaperLearner && noiseShaperLearner->isRunning())
         noiseShaperLearner->stopLearning();
 
-    // 新しいDSPコアを作成
-    DSPCore* newDSP = new DSPCore();
-    newDSP->convolver.setVisualizationEnabled(false); // DSP用は可視化データ不要
-
-    // UIプロセッサから状態をコピー
-    // EQ状態は Snapshot 経由で反映するため、ここでの直接同期は行わない。
-    newDSP->convolver.syncStateFrom(uiConvolverProcessor);
-
     // キャプチャ用変数
     int ditherDepth = ditherBitDepth.load();
     int osFactor = manualOversamplingFactor.load();
@@ -166,16 +174,14 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     int generation = 0;
 
     RebuildTask task;
-    task.newDSP = newDSP;
     task.currentDSP = current;
-    task.sampleRate = sampleRate;
-    task.samplesPerBlock = samplesPerBlock;
-    task.ditherDepth = ditherDepth;
-    task.manualOversamplingFactor = osFactor;
-    task.oversamplingType = osType;
-    task.noiseShaperType = nsType;
+    task.buildInput.sampleRate = sampleRate;
+    task.buildInput.blockSize = samplesPerBlock;
+    task.buildInput.ditherBitDepth = ditherDepth;
+    task.buildInput.oversamplingFactor = osFactor;
+    task.buildInput.oversamplingType = static_cast<int>(osType);
+    task.buildInput.noiseShaperType = static_cast<int>(nsType);
 
-        DSPCore* dspToDestroy = nullptr; // To be destroyed outside the lock
     DSPCore* currentToRelease = nullptr;
     bool queued = false;
     bool blockedAsDuplicate = false;
@@ -186,12 +192,12 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
         if (hasPendingTask)
         {
             const bool sameAsPending =
-                std::abs(pendingTask.sampleRate - sampleRate) <= 1.0e-6
-                && pendingTask.samplesPerBlock == samplesPerBlock
-                && pendingTask.ditherDepth == ditherDepth
-                && pendingTask.manualOversamplingFactor == osFactor
-                && pendingTask.oversamplingType == osType
-                && pendingTask.noiseShaperType == nsType;
+                std::abs(pendingTask.buildInput.sampleRate - sampleRate) <= 1.0e-6
+                && pendingTask.buildInput.blockSize == samplesPerBlock
+                && pendingTask.buildInput.ditherBitDepth == ditherDepth
+                && pendingTask.buildInput.oversamplingFactor == osFactor
+                && pendingTask.buildInput.oversamplingType == static_cast<int>(osType)
+                && pendingTask.buildInput.noiseShaperType == static_cast<int>(nsType);
 
             if (sameAsPending)
             {
@@ -199,7 +205,6 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
             }
             else
             {
-                dspToDestroy = pendingTask.newDSP;
                 currentToRelease = pendingTask.currentDSP;
             }
         }
@@ -207,12 +212,12 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
         if (!blockedAsDuplicate)
         {
             const bool sameAsLastQueued =
-                std::abs(lastQueuedTaskSignature.sampleRate - sampleRate) <= 1.0e-6
-                && lastQueuedTaskSignature.samplesPerBlock == samplesPerBlock
-                && lastQueuedTaskSignature.ditherDepth == ditherDepth
-                && lastQueuedTaskSignature.manualOversamplingFactor == osFactor
-                && lastQueuedTaskSignature.oversamplingType == osType
-                && lastQueuedTaskSignature.noiseShaperType == nsType;
+                std::abs(lastQueuedTaskSignature.buildInput.sampleRate - sampleRate) <= 1.0e-6
+                && lastQueuedTaskSignature.buildInput.blockSize == samplesPerBlock
+                && lastQueuedTaskSignature.buildInput.ditherBitDepth == ditherDepth
+                && lastQueuedTaskSignature.buildInput.oversamplingFactor == osFactor
+                && lastQueuedTaskSignature.buildInput.oversamplingType == static_cast<int>(osType)
+                && lastQueuedTaskSignature.buildInput.noiseShaperType == static_cast<int>(nsType);
 
             if (sameAsLastQueued)
             {
@@ -237,6 +242,16 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 
     if (queued)
     {
+        const auto runtimeCommand = makeRuntimeCommand(sampleRate,
+                                                       samplesPerBlock,
+                                                       ditherDepth,
+                                                       osFactor,
+                                                       osType,
+                                                       nsType,
+                                                       static_cast<std::uint64_t>(generation));
+        if (!m_runtimeCommandQueue.enqueue(runtimeCommand))
+            diagLog("[DIAG] requestRebuild(sr,bs): runtime command queue full generation=" + juce::String(generation));
+
         rebuildCV.notify_all();
         diagLog("[DIAG] requestRebuild(sr,bs): task queued generation=" + juce::String(generation)
             + " SR=" + juce::String(sampleRate, 2));
@@ -256,14 +271,11 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     }
 
     // Destroy orphaned DSP objects outside the lock.
-    if (dspToDestroy)
-        retireDSP(dspToDestroy);
     if (currentToRelease)
         retireDSP(currentToRelease);
 
     if (!queued)
     {
-        retireDSP(newDSP);
         if (current)
         {
             // EBR: lifetime managed by RCUReader
@@ -285,6 +297,9 @@ void AudioEngine::stopRebuildThread()
 
     if (rebuildThread.joinable())
         rebuildThread.join();
+
+    // Stop/start ライフサイクルを跨いで古い command が残らないようにする。
+    m_runtimeCommandQueue.clear();
 }
 #endif
 
@@ -309,25 +324,30 @@ void AudioEngine::rebuildThreadLoop()
         try
         {
             RebuildTask task;
+            convo::EngineCommand drainedCommands[8] {};
+            int drainedCommandCount = 0;
             {
                 std::unique_lock<std::mutex> lock(rebuildMutex);
                 rebuildCV.wait(lock, [this] { return hasPendingTask || rebuildThreadShouldExit.load(); });
 
                 if (rebuildThreadShouldExit.load()) break;
+                if (shutdownInProgress.load(std::memory_order_acquire)
+                    || gShuttingDown.load(std::memory_order_acquire))
+                {
+                    hasPendingTask = false;
+                    pendingTask.currentDSP = nullptr;
+                    break;
+                }
 
                 // Copy task and clear pendingTask pointers to transfer ownership
                 task = pendingTask;
-                pendingTask.newDSP = nullptr;
                 pendingTask.currentDSP = nullptr;
 
                 hasPendingTask = false;
             }
 
-            if (task.newDSP == nullptr)
-            {
-                jassertfalse;
-                continue;
-            }
+            drainedCommandCount = m_runtimeCommandQueue.drainCoalesced(drainedCommands,
+                                                                       static_cast<int>(std::size(drainedCommands)));
 
             struct DSPGuard
             {
@@ -337,7 +357,9 @@ void AudioEngine::rebuildThreadLoop()
                     if (ptr != nullptr)
                         retireDSP(ptr);
                 }
-            } dspGuard { task.newDSP };
+            } dspGuard { nullptr };
+
+            convo::RuntimeBuilder runtimeBuilder(*this);
 
             // Helper to check obsolescence
             const auto isObsolete = [&] {
@@ -348,7 +370,41 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
 
             // 1. Prepare (メモリ確保)
-            task.newDSP->prepare(task.sampleRate, task.samplesPerBlock, task.ditherDepth, task.manualOversamplingFactor, task.oversamplingType, task.noiseShaperType, this);
+            convo::BuildResult buildResult {};
+            bool builtFromCommand = false;
+            for (int index = 0; index < drainedCommandCount; ++index)
+            {
+                const auto& drained = drainedCommands[index];
+                if (drained.meta.revision != static_cast<std::uint64_t>(task.generation))
+                    continue;
+
+                buildResult = runtimeBuilder.build(drained);
+                builtFromCommand = true;
+
+                if (buildResult.runtime == nullptr && buildResult.error == convo::BuildError::InvalidInput)
+                {
+                    diagLog("[DIAG] rebuildThreadLoop: invalid runtime command payload, fallback to task.buildInput generation="
+                            + juce::String(task.generation));
+                    buildResult = runtimeBuilder.build(task.buildInput);
+                }
+
+                break;
+            }
+
+            if (!builtFromCommand)
+                buildResult = runtimeBuilder.build(task.buildInput);
+
+            if (buildResult.runtime == nullptr)
+            {
+                diagLog("[DIAG] rebuildThreadLoop: RuntimeBuilder build failed generation="
+                        + juce::String(task.generation)
+                        + " error=" + juce::String(convo::toString(buildResult.error))
+                        + " source=" + juce::String(builtFromCommand ? "runtime-command" : "task-build-input"));
+                continue;
+            }
+
+            dspGuard.ptr = buildResult.runtime;
+            auto* newDSP = buildResult.runtime;
 
             if (isObsolete())
                 continue;
@@ -368,42 +424,60 @@ void AudioEngine::rebuildThreadLoop()
             if (task.currentDSP)
             {
 
-                if (std::abs(task.currentDSP->sampleRate - task.sampleRate) < 1e-6 &&
-                    task.currentDSP->oversamplingFactor == task.newDSP->oversamplingFactor &&
-                    task.currentDSP->convolver.getCurrentBufferSize() == task.newDSP->convolver.getCurrentBufferSize())
+                if (std::abs(task.currentDSP->sampleRate - task.buildInput.sampleRate) < 1e-6 &&
+                    task.currentDSP->oversamplingFactor == newDSP->oversamplingFactor &&
+                    task.currentDSP->convolver.getCurrentBufferSize() == newDSP->convolver.getCurrentBufferSize())
                 {
                     // IRの生成条件が一致しているか確認
-                    if (task.newDSP->convolver.getIRName() == task.currentDSP->convolver.getIRName() &&
-                        task.newDSP->convolver.getPhaseMode() == task.currentDSP->convolver.getPhaseMode() &&
-                        std::abs(task.newDSP->convolver.getMixedTransitionStartHz() - task.currentDSP->convolver.getMixedTransitionStartHz()) < 0.001f &&
-                        std::abs(task.newDSP->convolver.getMixedTransitionEndHz() - task.currentDSP->convolver.getMixedTransitionEndHz()) < 0.001f &&
-                        std::abs(task.newDSP->convolver.getMixedPreRingTau() - task.currentDSP->convolver.getMixedPreRingTau()) < 0.001f &&
-                        task.newDSP->convolver.getExperimentalDirectHeadEnabled() == task.currentDSP->convolver.getExperimentalDirectHeadEnabled() &&
-                        std::abs(task.newDSP->convolver.getTargetIRLength() - task.currentDSP->convolver.getTargetIRLength()) < 0.001f)
+                    if (newDSP->convolver.getIRName() == task.currentDSP->convolver.getIRName() &&
+                        newDSP->convolver.getPhaseMode() == task.currentDSP->convolver.getPhaseMode() &&
+                        std::abs(newDSP->convolver.getMixedTransitionStartHz() - task.currentDSP->convolver.getMixedTransitionStartHz()) < 0.001f &&
+                        std::abs(newDSP->convolver.getMixedTransitionEndHz() - task.currentDSP->convolver.getMixedTransitionEndHz()) < 0.001f &&
+                        std::abs(newDSP->convolver.getMixedPreRingTau() - task.currentDSP->convolver.getMixedPreRingTau()) < 0.001f &&
+                        newDSP->convolver.getExperimentalDirectHeadEnabled() == task.currentDSP->convolver.getExperimentalDirectHeadEnabled() &&
+                        std::abs(newDSP->convolver.getTargetIRLength() - task.currentDSP->convolver.getTargetIRLength()) < 0.001f)
                     {
                         // 既存のConvolutionエンジンを共有（クローン回避・グリッチ防止）
-                        task.newDSP->convolver.shareConvolutionEngineFrom(task.currentDSP->convolver);
+                        newDSP->convolver.shareConvolutionEngineFrom(task.currentDSP->convolver);
                         irReused = true;
                     }
                 }
             }
 
             // 3. Rebuild IR if needed (Heavy operation)
-            if (!irReused && task.newDSP->convolver.getIRLength() > 0)
+            if (!irReused && newDSP->convolver.getIRLength() > 0)
             {
                 if (isObsolete())
                     continue;
-                task.newDSP->convolver.rebuildAllIRsSynchronous(isObsolete);
+                newDSP->convolver.rebuildAllIRsSynchronous(isObsolete);
+            }
+
+            const auto warmupError = runtimeBuilder.validateWarmup(*newDSP);
+            if (warmupError != convo::BuildError::None)
+            {
+                const bool retryable = shouldRetryWarmupFailure(*newDSP);
+                diagLog("[DIAG] rebuildThreadLoop: RuntimeBuilder warmup failed generation="
+                    + juce::String(task.generation)
+                    + " error=" + juce::String(convo::toString(warmupError))
+                    + " retryable=" + juce::String(static_cast<int>(retryable))
+                    + " irLoaded=" + juce::String(static_cast<int>(newDSP->convolver.isIRLoaded()))
+                    + " irFinalized=" + juce::String(static_cast<int>(newDSP->convolver.isIRFinalized()))
+                    + " irLoading=" + juce::String(static_cast<int>(newDSP->convolver.isLoadingIR())));
+
+                if (retryable)
+                    requestRebuild(convo::RebuildKind::Structural);
+
+                continue;
             }
 
             if (isObsolete())
                 continue;
 
             // 4. Refresh Latency (Prevent pitch slide during fade-in)
-            task.newDSP->convolver.refreshLatency();
+            newDSP->convolver.refreshLatency();
 
             // 5. Fade In
-            task.newDSP->fadeInSamplesLeft.store(DSPCore::FADE_IN_SAMPLES, std::memory_order_relaxed);
+            newDSP->fadeInSamplesLeft.store(DSPCore::FADE_IN_SAMPLES, std::memory_order_relaxed);
 
             // 6. Commit on Message Thread
             // Release ownership from guard, pass to commitNewDSP

@@ -10,3 +10,14 @@
 ・拡張のルール: 新しい状態（State）やエフェクトを追加する際の手順（「このインターフェースを継承し、ここに登録する」といったガイド）。
 ３．コーディング規約
 コードの品質を一定に保つための「約束事」です。
+
+４．次世代アーキテクチャ詳細設計
+Layered Transactional Runtime Architecture 移行向けの基準資料です。
+・ファイル: doc/nextgen_runtime_transition_design_jp.md
+・内容: Ownership Diagram / Runtime Lifecycle Diagram / Thread Access Matrix / Transition Matrix
+・追記: Phase 0 具体化（rebuild flag 一覧 / ownership graph / transition path / DSP reset path）
+・追記: 1〜3 実施（Phase 1差分表 / 型単位Ownership+destroy条件 / トランザクション境界テスト項目）
+・追記: 詳細設計継続（TX-01〜TX-10実行手順 / Phase 1実装タスク分解 / 失敗復旧方針 / AI変更提案テンプレート）
+・追記: 実装着手レベル化（ファイル別実装ブループリント / 新規APIシグネチャ案 / 実装チケット分割 / DoD / ロールバック条件）
+・追記: テスト運用分離（TX-11〜TX-15 専用手順書）
+・ファイル: doc/tx11_tx15_test_procedure_jp.md
