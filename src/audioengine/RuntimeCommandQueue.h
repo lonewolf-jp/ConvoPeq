@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <mutex>
 
 #include "RuntimeCommand.h"
 
@@ -19,6 +20,7 @@ public:
 
     bool enqueue(const EngineCommand& cmd) noexcept
     {
+        std::lock_guard<std::mutex> lock(enqueueMutex);
         const std::size_t write = writeIndex.load(std::memory_order_relaxed);
         const std::size_t read = readIndex.load(std::memory_order_acquire);
         if ((write - read) >= capacity)
@@ -78,6 +80,7 @@ private:
     static_assert((capacity & mask) == 0, "RuntimeCommandQueue capacity must be a power of two");
 
     alignas(64) std::array<EngineCommand, capacity> buffer {};
+    alignas(64) std::mutex enqueueMutex;
     alignas(64) std::atomic<std::size_t> writeIndex { 0 };
     alignas(64) std::atomic<std::size_t> readIndex { 0 };
 };

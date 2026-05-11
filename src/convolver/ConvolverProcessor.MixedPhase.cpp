@@ -133,16 +133,15 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
         return {};
     }
 
-    DFTI_DESCRIPTOR_HANDLE dfti = nullptr;
-    DftiGuard dftiGuard { &dfti };
+    convo::ScopedDftiDescriptor dfti;
     const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
-    if (DftiCreateDescriptor(&dfti, DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
+    if (DftiCreateDescriptor(dfti.put(), DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
         return {};
-    if (DftiSetValue(dfti, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR)
+    if (DftiSetValue(dfti.handle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR)
         return {};
-    if (DftiSetValue(dfti, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR)
+    if (DftiSetValue(dfti.handle, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR)
         return {};
-    if (DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
+    if (DftiCommitDescriptor(dfti.handle) != DFTI_NO_ERROR)
         return {};
 
     const int half = fftSize / 2;
@@ -232,8 +231,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 minimumSpec.get()[i].real = srcMinimum[i];
             }
 
-            if (DftiComputeForward(dfti, linearSpec.get()) != DFTI_NO_ERROR) return {};
-            if (DftiComputeForward(dfti, minimumSpec.get()) != DFTI_NO_ERROR) return {};
+            if (DftiComputeForward(dfti.handle, linearSpec.get()) != DFTI_NO_ERROR) return {};
+            if (DftiComputeForward(dfti.handle, minimumSpec.get()) != DFTI_NO_ERROR) return {};
 
             std::vector<double> phiMinUnwrapped(static_cast<size_t>(complexSize));
             phiMinUnwrapped[0] = std::atan2(minimumSpec.get()[0].imag, minimumSpec.get()[0].real);
@@ -520,7 +519,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                 linearSpec.get()[k].imag = h_mixed.imag();
             }
 
-            if (DftiComputeBackward(dfti, linearSpec.get()) != DFTI_NO_ERROR)
+            if (DftiComputeBackward(dfti.handle, linearSpec.get()) != DFTI_NO_ERROR)
                 return {};
 
             double* mixedTime = mixedIR.getWritePointer(ch);
@@ -686,16 +685,15 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseFallback(const 
 
     juce::AudioBuffer<double> mixedIR(numChannels, numSamples);
 
-    DFTI_DESCRIPTOR_HANDLE dfti = nullptr;
-    DftiGuard dftiGuard { &dfti };
+    convo::ScopedDftiDescriptor dfti;
     const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
-    if (DftiCreateDescriptor(&dfti, DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
+    if (DftiCreateDescriptor(dfti.put(), DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
         return {};
-    if (DftiSetValue(dfti, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR)
+    if (DftiSetValue(dfti.handle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR)
         return {};
-    if (DftiSetValue(dfti, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR)
+    if (DftiSetValue(dfti.handle, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR)
         return {};
-    if (DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
+    if (DftiCommitDescriptor(dfti.handle) != DFTI_NO_ERROR)
         return {};
 
     const int half = fftSize / 2;
@@ -739,8 +737,8 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseFallback(const 
             minimumSpec.get()[i].real = srcMinimum[i];
         }
 
-        if (DftiComputeForward(dfti, linearSpec.get()) != DFTI_NO_ERROR) return {};
-        if (DftiComputeForward(dfti, minimumSpec.get()) != DFTI_NO_ERROR) return {};
+        if (DftiComputeForward(dfti.handle, linearSpec.get()) != DFTI_NO_ERROR) return {};
+        if (DftiComputeForward(dfti.handle, minimumSpec.get()) != DFTI_NO_ERROR) return {};
 
         for (int k = 0; k < complexSize; ++k)
         {
@@ -782,7 +780,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseFallback(const 
             linearSpec.get()[k].imag = re * sinD + im * cosD;
         }
 
-        if (DftiComputeBackward(dfti, linearSpec.get()) != DFTI_NO_ERROR)
+        if (DftiComputeBackward(dfti.handle, linearSpec.get()) != DFTI_NO_ERROR)
             return {};
 
         double* mixedTime = mixedIR.getWritePointer(ch);

@@ -41,15 +41,21 @@ void ConvolverProcessor::postCoalescedChangeNotification()
 
 void ConvolverProcessor::requestDebouncedRebuild()
 {
+    debugDebouncedRebuildRequestCount.fetch_add(1, std::memory_order_relaxed);
+
     if (!isIRLoaded())
     {
         if (isLoading.load(std::memory_order_acquire) || isRebuilding.load(std::memory_order_acquire))
+        {
+            debugDebouncedRebuildDeferredAfterLoadCount.fetch_add(1, std::memory_order_relaxed);
             rebuildPendingAfterLoad.store(true, std::memory_order_release);
+        }
         return;
     }
 
     if (!isIRFinalized())
     {
+        debugDebouncedRebuildDeferredAfterLoadCount.fetch_add(1, std::memory_order_relaxed);
         rebuildPendingAfterLoad.store(true, std::memory_order_release);
         return;
     }
@@ -71,9 +77,12 @@ void ConvolverProcessor::requestDebouncedRebuild()
             if (!self->isIRLoaded() || self->isLoading.load(std::memory_order_acquire))
                 return;
 
+            self->debugDebouncedRebuildTriggeredCount.fetch_add(1, std::memory_order_relaxed);
             self->loadImpulseResponse(juce::File());
         }
     });
+
+    debugDebouncedRebuildScheduledCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)

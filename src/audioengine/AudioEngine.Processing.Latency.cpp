@@ -83,7 +83,8 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 {
     LatencyBreakdown breakdown;
 
-    auto* dsp = currentDSP.load(std::memory_order_acquire);
+    const auto* runtimePublish = getRuntimePublishState();
+    auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimePublish);
     if (dsp == nullptr)
         return breakdown;
 
@@ -100,12 +101,12 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
     breakdown.oversamplingLatencyBaseRateSamples = juce::jmax(0,
         static_cast<int>(std::lround(estimateOversamplingLatencySamples(
             safeOsFactor,
-            oversamplingType.load(std::memory_order_acquire),
+            dsp->activeOversamplingType,
             currentSampleRate.load(std::memory_order_acquire)))));
 
     if (!convBypassActive.load(std::memory_order_relaxed))
     {
-        auto convBreakdown = dsp->convolver.getLatencyBreakdown();
+        auto convBreakdown = dsp->convolverRt().getLatencyBreakdown();
 
         if (convBreakdown.algorithmLatencySamples == 0 &&
             convBreakdown.irPeakLatencySamples == 0 &&

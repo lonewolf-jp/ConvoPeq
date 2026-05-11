@@ -3,6 +3,8 @@
 
 namespace
 {
+    std::atomic<std::uint64_t> g_dspRuntimeUuidCounter { 1 };
+
     static constexpr std::array<double, convo::FixedNoiseShaper::ORDER> kFixedNoiseShaperTunedCoeffs
     {
         0.46, 0.28, 0.17, 0.09
@@ -21,14 +23,23 @@ namespace
 
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_PREPARE)
 
-AudioEngine::DSPCore::DSPCore() = default;
+AudioEngine::DSPCore::DSPCore()
+    : runtimeUuid(g_dspRuntimeUuidCounter.fetch_add(1, std::memory_order_relaxed))
+    , dcBlockerState(new DCBlockerRuntimeState())
+    , convolverState(new ConvolverRuntimeState())
+    , eqState(new EQRuntimeState())
+    , rampState(new RampRuntimeState())
+    , historyState(new HistoryRuntimeState())
+{
+    convolverState->bind(convolver);
+    eqState->bind(eq);
+}
 
 void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner)
 {
     this->sampleRate = newSampleRate;
     this->noiseShaperType = selectedNoiseShaperType;
     this->ownerEngine = owner;
-    convolver.setRcuProvider(ownerEngine);
 
     int targetFactor = 1;
     if (manualOversamplingFactor > 0)
@@ -116,9 +127,8 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
         dryBypassCapacityDouble = newRequired;
     }
 
-    bypassFadeGainDouble.reset(newSampleRate, 0.005);
-    bypassFadeGainDouble.setCurrentAndTargetValue(1.0);
-    bypassedDouble = false;
+    auto& ramp = ramps();
+    ramp.prepare(newSampleRate);
 
     const auto osPreset = (oversamplingType == OversamplingType::LinearPhase)
                         ? CustomInputOversampler::Preset::LinearPhase
@@ -130,23 +140,13 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
 
     // プロセッサの準備
     // Convolverには実際のブロックサイズを渡す (パーティションサイズ決定やLoaderThreadで使用)
-    convolver.prepareToPlay(processingRate, processingBlockSize);
+    convolverState->prepare(ownerEngine, processingRate, processingBlockSize);
 
     // EQも内部最大サイズで準備（より安全）
-    eq.prepareToPlay(processingRate, internalMaxBlock);
+    eqState->prepare(processingRate, internalMaxBlock);
 
-    // 出力段(processOutput)で実行されるため、オーバーサンプリング前のレートとサイズを使用する
-    // 【最適化】UltraHighRateDCBlocker の init() は sampleRate + cutoffHz を受け取る
-    dcBlockerL.init(newSampleRate, 3.0);
-    dcBlockerR.init(newSampleRate, 3.0);
-
-    // 入力段用DCBlockerの準備
-    inputDCBlockerL.init(newSampleRate, 3.0);
-    inputDCBlockerR.init(newSampleRate, 3.0);
-
-    // オーバーサンプリング後のDC除去用 (1Hzカットオフ)
-    osDCBlockerL.init(processingRate, 1.0);
-    osDCBlockerR.init(processingRate, 1.0);
+    // 出力段・入力段・OS後の DC blocker 状態を sidecar に初期化する。
+    dcBlockers().init(newSampleRate, processingRate);
 
     // ノイズシェーパーの準備 (出力段で行うため元のサンプルレート)
     if (selectedNoiseShaperType == NoiseShaperType::Psychoacoustic)
@@ -174,51 +174,20 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     // filter.txt: ハイカット/ローカット(①) / ローパス/ハイパス(②) の全モード分を一括生成
     outputFilter.prepare(processingRate);
 
-    // 【Issue 5】Fade-inカウンタをリセット
-    fadeInSamplesLeft.store(0, std::memory_order_relaxed);
-
     // 初期状態は固定レイテンシなし
     setFixedLatencySamples(0);
 }
 
 void AudioEngine::DSPCore::setFixedLatencySamples(int samples)
 {
-    const int clamped = std::max(0, samples);
-    fixedLatencySamples = clamped;
-    fixedLatencyWritePos = 0;
-
-    const int requiredSize = clamped + std::max(1, maxInternalBlockSize) + 2;
-    if (requiredSize > fixedLatencyBufferSize || !fixedLatencyBufferL || !fixedLatencyBufferR)
-    {
-        auto newDelayL = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
-            static_cast<size_t>(requiredSize) * sizeof(double), 64)));
-        auto newDelayR = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
-            static_cast<size_t>(requiredSize) * sizeof(double), 64)));
-
-        juce::FloatVectorOperations::clear(newDelayL.get(), requiredSize);
-        juce::FloatVectorOperations::clear(newDelayR.get(), requiredSize);
-
-        fixedLatencyBufferL = std::move(newDelayL);
-        fixedLatencyBufferR = std::move(newDelayR);
-        fixedLatencyBufferSize = requiredSize;
-    }
-    else if (fixedLatencyBufferSize > 0)
-    {
-        juce::FloatVectorOperations::clear(fixedLatencyBufferL.get(), fixedLatencyBufferSize);
-        juce::FloatVectorOperations::clear(fixedLatencyBufferR.get(), fixedLatencyBufferSize);
-    }
+    histories().configureFixedLatencySamples(samples, maxInternalBlockSize);
 }
 
 void AudioEngine::DSPCore::reset()
 {
-    convolver.reset();
-    eq.reset();
-    dcBlockerL.reset();
-    dcBlockerR.reset();
-    inputDCBlockerL.reset();
-    inputDCBlockerR.reset();
-    osDCBlockerL.reset();
-    osDCBlockerR.reset();
+    convolverState->resetForRuntime();
+    eqState->resetForRuntime();
+    dcBlockers().reset();
     dither.reset();
     fixedNoiseShaper.reset();
     adaptiveNoiseShaper.reset();
@@ -237,18 +206,8 @@ void AudioEngine::DSPCore::reset()
     if (dryBypassBufferDoubleR && dryBypassCapacityDouble > 0)
         juce::FloatVectorOperations::clear(dryBypassBufferDoubleR.get(), dryBypassCapacityDouble);
 
-    bypassFadeGainDouble.setCurrentAndTargetValue(1.0);
-    bypassedDouble = false;
-
-    fixedLatencyWritePos = 0;
-    if (fixedLatencyBufferL && fixedLatencyBufferSize > 0)
-        juce::FloatVectorOperations::clear(fixedLatencyBufferL.get(), fixedLatencyBufferSize);
-    if (fixedLatencyBufferR && fixedLatencyBufferSize > 0)
-        juce::FloatVectorOperations::clear(fixedLatencyBufferR.get(), fixedLatencyBufferSize);
-
-    // インターサンプルピーク用ブロック間状態をリセット
-    softClipPrevSample[0] = 0.0;
-    softClipPrevSample[1] = 0.0;
+    ramps().resetForRuntime();
+    histories().resetForRuntime();
 }
 
 #endif

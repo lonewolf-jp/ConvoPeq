@@ -49,6 +49,7 @@
 #include "DeferredDeletionQueue.h"
 #include "ConvolverRuntime.h"
 #include "DspNumericPolicy.h"
+#include "DftiHandle.h"
 
 class AudioEngine;
 class CacheManager;
@@ -58,6 +59,35 @@ class ConvolverProcessor : public juce::ChangeBroadcaster,
                            private juce::Timer
 {
 public:
+    struct BuildSnapshot
+    {
+        float mix = 1.0f;
+        bool bypassed = false;
+        int phaseMode = 0;
+        int resamplingPhaseMode = 0;
+        float smoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC;
+        float targetIRLengthSec = IR_LENGTH_DEFAULT_SEC;
+        float mixedTransitionStartHz = MIXED_F1_DEFAULT_HZ;
+        float mixedTransitionEndHz = MIXED_F2_DEFAULT_HZ;
+        float mixedPreRingTau = MIXED_TAU_DEFAULT;
+        int rebuildDebounceMs = REBUILD_DEBOUNCE_DEFAULT_MS;
+        bool experimentalDirectHeadEnabled = false;
+        int tailProcessingMode = 0;
+        float tailRolloffStartHz = TAIL_ROLLOFF_START_DEFAULT_HZ;
+        float tailRolloffStrength = 0.0f;
+        float partitionTailStrength = TAIL_PARTITION_STRENGTH_DEFAULT;
+        int targetUpgradeFFTSize = 0;
+        bool enableProgressiveUpgrade = false;
+        int maxCacheEntries = 0;
+        juce::File irFile;
+        juce::String irName;
+        int irLength = 0;
+        double currentIRScale = 1.0;
+        int nucHCMode = 0;
+        int nucLCMode = 0;
+        std::uint64_t fingerprint = 0;
+    };
+
     struct IRLoadPreview
     {
         bool success = false;
@@ -338,6 +368,24 @@ public:
     int getLatencySamples() const;
     int getTotalLatencySamples() const;
 
+    struct RebuildAutomationDiagnostics
+    {
+        std::uint64_t requestCount = 0;
+        std::uint64_t deferredAfterLoadCount = 0;
+        std::uint64_t scheduledCount = 0;
+        std::uint64_t triggeredCount = 0;
+    };
+
+    RebuildAutomationDiagnostics getRebuildAutomationDiagnostics() const noexcept
+    {
+        return {
+            debugDebouncedRebuildRequestCount.load(std::memory_order_acquire),
+            debugDebouncedRebuildDeferredAfterLoadCount.load(std::memory_order_acquire),
+            debugDebouncedRebuildScheduledCount.load(std::memory_order_acquire),
+            debugDebouncedRebuildTriggeredCount.load(std::memory_order_acquire)
+        };
+    }
+
     //----------------------------------------------------------
     // 波形表示用データ取得
     //----------------------------------------------------------
@@ -354,6 +402,8 @@ public:
     //----------------------------------------------------------
     juce::ValueTree getState() const;
     void setState (const juce::ValueTree& state);
+    BuildSnapshot captureBuildSnapshot() const;
+    void applyBuildSnapshot(const BuildSnapshot& snapshot);
 
     //----------------------------------------------------------
     // リビルド (サンプルレート変更時など)
@@ -784,6 +834,10 @@ private:
     #pragma warning(pop)
 
     std::atomic<std::uint64_t> rebuildDebounceToken { 0 };
+    std::atomic<std::uint64_t> debugDebouncedRebuildRequestCount { 0 };
+    std::atomic<std::uint64_t> debugDebouncedRebuildDeferredAfterLoadCount { 0 };
+    std::atomic<std::uint64_t> debugDebouncedRebuildScheduledCount { 0 };
+    std::atomic<std::uint64_t> debugDebouncedRebuildTriggeredCount { 0 };
     std::atomic<bool> changeNotificationPending { false };
     std::atomic<bool> rebuildPendingAfterLoad { false };
     // リングバッファオーバーフローフラグ:
@@ -857,7 +911,7 @@ public: // Added for AudioEngine access
     int cachedMagnitudeBufferCapacity = 0;
     std::atomic<double> currentSampleRate { 0.0 };
 
-    DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
+    convo::ScopedDftiDescriptor fftHandle;
     int fftHandleSize = 0;
 
     //----------------------------------------------------------

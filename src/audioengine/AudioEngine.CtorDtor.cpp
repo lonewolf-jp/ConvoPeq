@@ -27,12 +27,18 @@ AudioEngine::AudioEngine()
 AudioEngine::~AudioEngine()
 {
     diagLog("[DIAG] ~AudioEngine: enter");
+    setShutdownPhase(ShutdownPhase::StopAcceptingWork, "~AudioEngine");
     shutdownInProgress.store(true, std::memory_order_release);
     gShuttingDown.store(true, std::memory_order_release);
     cancelPendingUpdate();
 
     // 終了順序を固定化して、終了時フリーズを防ぐ。
+    setShutdownPhase(ShutdownPhase::StopAudio, "~AudioEngine");
     stopTimer();
+
+    setShutdownPhase(ShutdownPhase::StopWorkers, "~AudioEngine");
+    // releaseResources が未実行の異常系でも worker 終了を保証する。
+    stopRebuildThread();
 
     // まず rebuild thread 側へ終了を通知し、pending task を破棄して
     // 終了時に重い再構築へ入る経路を閉じる。
@@ -42,6 +48,11 @@ AudioEngine::~AudioEngine()
     DSPCore* queuedToRelease = nullptr;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
+        validateDistinctRuntimeSlots("~AudioEngine.beforeClear",
+                                     activeDSP,
+                                     sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                                     sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+
         rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
 
         // Audio Thread から参照される公開ポインタを明示的に外す。
@@ -52,6 +63,11 @@ AudioEngine::~AudioEngine()
         fadingToRelease = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel));
         queuedToRelease = sanitizeRawPtr(queuedOldDSP.exchange(nullptr, std::memory_order_acq_rel));
         fadeQueued.store(false, std::memory_order_release);
+
+        validateDistinctRuntimeSlots("~AudioEngine.afterClear",
+                         activeDSP,
+                         sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                         sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
 
         if (hasPendingTask)
         {
@@ -64,7 +80,6 @@ AudioEngine::~AudioEngine()
             hasPendingTask = false;
         }
     }
-    stopRebuildThread();
 
     {
         std::queue<CommitStaging> abandonedCommits;
@@ -91,10 +106,20 @@ AudioEngine::~AudioEngine()
     uiEqEditor.removeChangeListener(this);
     uiConvolverProcessor.removeListener(this);
 
-    // Snapshot worker を先に停止。
+    // Note: stopRebuildThread は releaseResources() で呼ばれる。
+    // dtor が releaseResources 経由で呼ばれる場合、stopRebuildThread は既に完了している。
+    // dtor が直接呼ばれる場合（例：ホストが releaseResources を呼ばない異常系）、
+    // rebuildThreadShouldExit が既に true なので thread ループは速やかに終了する。
+
+    // Snapshot worker を停止。
     shutdownWorkerThread();
 
+    setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "~AudioEngine");
+    convo::EpochManager::instance().advanceEpoch();
+    g_currentEpoch.store(convo::EpochManager::instance().currentEpoch(), std::memory_order_release);
+
     // Shutdown 時は EBR 回収を試みる。
+    setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
     convo::EBRQueue::instance().tryReclaim();
 
     // ...既存の解放処理...
@@ -103,7 +128,9 @@ AudioEngine::~AudioEngine()
     if (latencyBufNewL) { _aligned_free(latencyBufNewL); latencyBufNewL = nullptr; }
     if (latencyBufNewR) { _aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
     latencyBufSize = 0;
-    diagLog("[DIAG] ~AudioEngine: exit");
+    setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
+    lifecycleState.store(EngineLifecycleState::Destroyed, std::memory_order_release);
+    diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
 }
 
 #endif // defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CTOR_DTOR)

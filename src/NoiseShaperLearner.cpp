@@ -18,6 +18,27 @@ namespace
     constexpr double kOutputHeadroom = 0.8912509381337456;
     constexpr int kSegmentHop = AudioSegment::kLength / 2;
     constexpr int kRecentSampleRequest = AudioSegment::kLength + (kSegmentHop * (NoiseShaperLearner::kMaxTrainingSegments - 1));
+
+    static uint64_t hashLearningSeed(uint64_t seed, uint64_t value) noexcept
+    {
+        seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+        return seed;
+    }
+
+    static uint64_t makeDeterministicRestartSeed(int sampleRateHz,
+                                                 int bitDepth,
+                                                 int bankIndex,
+                                                 uint64_t sessionId,
+                                                 int restartIndex) noexcept
+    {
+        uint64_t seed = 0x4e4f495345534850ull;
+        seed = hashLearningSeed(seed, static_cast<uint64_t>(sampleRateHz));
+        seed = hashLearningSeed(seed, static_cast<uint64_t>(bitDepth));
+        seed = hashLearningSeed(seed, static_cast<uint64_t>(bankIndex));
+        seed = hashLearningSeed(seed, sessionId);
+        seed = hashLearningSeed(seed, static_cast<uint64_t>(restartIndex));
+        return seed;
+    }
 }
 
 // 静的メンバの定義
@@ -496,6 +517,18 @@ void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
             }
             evaluationDispatchCv.notify_all();
         }
+        catch (const std::exception& e)
+        {
+            DBG_LOG("[NoiseShaperLearner] evaluation worker exception: " + juce::String(e.what()));
+            errorMessage.store("Evaluation worker exception", std::memory_order_release);
+            progress.status.store(Status::Error, std::memory_order_release);
+            {
+                const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
+                ++completedAuxEvaluationWorkers;
+            }
+            evaluationDispatchCv.notify_one();
+            return;
+        }
         catch (...)
         {
             errorMessage.store("Error in evaluation worker", std::memory_order_release);
@@ -689,7 +722,11 @@ void NoiseShaperLearner::workerThreadMain()
 
                         // 初期状態に戻してからシードを変える
                         setState(initialState);
-                        optimizer.setSeed(static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()) + restartIdx);
+                        optimizer.setSeed(makeDeterministicRestartSeed(activeSession.sampleRateHz,
+                                                                       activeSession.bitDepth,
+                                                                       activeSession.adaptiveCoeffBankIndex,
+                                                                       activeSession.sessionId,
+                                                                       restartIdx));
 
                         // 数世代だけ回して良し悪しを判断
                         for (int g = 0; g < 3; ++g)
@@ -833,6 +870,12 @@ void NoiseShaperLearner::workerThreadMain()
 
         if (progress.status.load(std::memory_order_acquire) != Status::Completed)
             progress.status.store(Status::Idle, std::memory_order_release);
+    }
+    catch (const std::exception& e)
+    {
+        DBG_LOG("[NoiseShaperLearner] worker thread exception: " + juce::String(e.what()));
+        errorMessage.store("Worker thread exception", std::memory_order_release);
+        progress.status.store(Status::Error, std::memory_order_release);
     }
     catch (...)
     {

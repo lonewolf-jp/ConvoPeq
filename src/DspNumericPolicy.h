@@ -4,9 +4,43 @@
 #include <bit>      // std::bit_cast (C++20)
 #include <cstdint>  // uint64_t, uint32_t
 #include <immintrin.h>
+#include <JuceHeader.h>
 
 namespace convo::numeric_policy
 {
+    enum class ThreadRole : uint8_t
+    {
+        Unknown = 0,
+        AudioRealtime
+    };
+
+    inline thread_local ThreadRole g_currentThreadRole = ThreadRole::Unknown;
+
+    struct ScopedThreadRole final
+    {
+        explicit ScopedThreadRole(ThreadRole nextRole) noexcept
+            : previous(g_currentThreadRole)
+        {
+            g_currentThreadRole = nextRole;
+        }
+
+        ~ScopedThreadRole() noexcept
+        {
+            g_currentThreadRole = previous;
+        }
+
+        ScopedThreadRole(const ScopedThreadRole&) = delete;
+        ScopedThreadRole& operator=(const ScopedThreadRole&) = delete;
+
+    private:
+        ThreadRole previous;
+    };
+
+    inline bool isAudioThread() noexcept
+    {
+        return g_currentThreadRole == ThreadRole::AudioRealtime;
+    }
+
     // ─────────────────────────────────────────────────────────────
     // デノーマル除去のしきい値（一箇所で定義）
     // ─────────────────────────────────────────────────────────────
@@ -34,6 +68,11 @@ namespace convo::numeric_policy
         return std::bit_cast<uint32_t>(kDenormThresholdFloat);
     }
 }
+
+#define RT_AUDIO_THREAD_ONLY
+#define NON_RT_ONLY
+#define ASSERT_AUDIO_THREAD() jassert(convo::numeric_policy::isAudioThread())
+#define ASSERT_NON_RT_THREAD() jassert(!convo::numeric_policy::isAudioThread())
 
 // ─────────────────────────────────────────────────────────────────
 // デノーマル除去ヘルパー関数（libm 非依存・分岐レス）
@@ -127,6 +166,7 @@ struct LinearRamp
     /// prepareToPlay 等の非 Audio Thread から呼ぶ。ランプ長をサンプル数で確定する。
     void reset(double sampleRate, double timeSec) noexcept
     {
+        ASSERT_NON_RT_THREAD();
         const int steps = static_cast<int>(sampleRate * timeSec + 0.5);
         totalSteps = (steps > 0) ? steps : 1;
     }
@@ -134,6 +174,7 @@ struct LinearRamp
     /// current と target を同じ値に設定し、ランプを無効化する。
     void setCurrentAndTargetValue(double v) noexcept
     {
+        ASSERT_NON_RT_THREAD();
         current = target = v;
         step      = 0.0;
         remaining = 0;
@@ -144,6 +185,7 @@ struct LinearRamp
     ///   ランプ中は残りステップ数、停止中は totalSteps を分母に使用。
     void setTargetValue(double v) noexcept
     {
+        ASSERT_AUDIO_THREAD();
         if (v == target) return;
         target = v;
         const int steps = (remaining > 0) ? remaining : totalSteps;
@@ -154,6 +196,7 @@ struct LinearRamp
     /// 1 サンプル進めて新しい current を返す。Audio Thread のみ。
     inline double getNextValue() noexcept
     {
+        ASSERT_AUDIO_THREAD();
         if (remaining <= 0)
             return current;
         current += step;
@@ -164,7 +207,11 @@ struct LinearRamp
 
     double getCurrentValue() const noexcept { return current; }
     double getTargetValue()  const noexcept { return target;  }
-    bool   isSmoothing()     const noexcept { return remaining > 0; }
+    bool   isSmoothing()     const noexcept
+    {
+        ASSERT_AUDIO_THREAD();
+        return remaining > 0;
+    }
 };
 
 } // namespace convo

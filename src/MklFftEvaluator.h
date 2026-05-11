@@ -7,9 +7,11 @@
 #include <cstring>
 #include <limits>
 
+#include "AlignedAllocation.h"
+
 // [v2.1] MKL DFTI を Intel IPP に換装。
-// mkl_malloc / mkl_free は引き続きオーディオデータバッファ用に使用。
-#include <mkl.h>   // mkl_malloc, mkl_free
+// 64 byte アラインの確保は convo::aligned_malloc / aligned_free に統一する。
+#include <mkl.h>
 #include <ipp.h>  // ippsFFTFwd_RToCCS_64f, IppsFFTSpec_R_64f
 
 class MklFftEvaluator
@@ -45,16 +47,16 @@ public:
 
     MklFftEvaluator()
     {
-        // オーディオデータバッファ (mkl_malloc: 64バイトアライン)
-        inputLeft  = static_cast<double*>(mkl_malloc(sizeof(double) * kFftLength, 64));
-        inputRight = static_cast<double*>(mkl_malloc(sizeof(double) * kFftLength, 64));
+        // オーディオデータバッファ (convo::aligned_malloc: 64バイトアライン)
+        inputLeft  = static_cast<double*>(convo::aligned_malloc(sizeof(double) * kFftLength, 64));
+        inputRight = static_cast<double*>(convo::aligned_malloc(sizeof(double) * kFftLength, 64));
 
         // [v2.1] スペクトラムバッファ: CcsComplex 配列として確保
         // kSpectrumBins 個 × 2 double = kFftLength+2 doubles (IPP CCS 出力サイズと一致)
         spectrumLeft  = static_cast<CcsComplex*>(
-            mkl_malloc(sizeof(CcsComplex) * kSpectrumBins, 64));
+            convo::aligned_malloc(sizeof(CcsComplex) * kSpectrumBins, 64));
         spectrumRight = static_cast<CcsComplex*>(
-            mkl_malloc(sizeof(CcsComplex) * kSpectrumBins, 64));
+            convo::aligned_malloc(sizeof(CcsComplex) * kSpectrumBins, 64));
 
         // [v2.1] IPP FFT スペック初期化
         // kFftLength = 4096 = 2^12 → order = 12
@@ -128,10 +130,10 @@ public:
             fftWorkBuf = nullptr;
         }
 
-        if (inputLeft   != nullptr) mkl_free(inputLeft);
-        if (inputRight  != nullptr) mkl_free(inputRight);
-        if (spectrumLeft  != nullptr) mkl_free(spectrumLeft);
-        if (spectrumRight != nullptr) mkl_free(spectrumRight);
+        if (inputLeft   != nullptr) convo::aligned_free(inputLeft);
+        if (inputRight  != nullptr) convo::aligned_free(inputRight);
+        if (spectrumLeft  != nullptr) convo::aligned_free(spectrumLeft);
+        if (spectrumRight != nullptr) convo::aligned_free(spectrumRight);
     }
 
     void configureForSampleRate(double sampleRateHz) noexcept

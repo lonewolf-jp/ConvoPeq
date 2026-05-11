@@ -245,6 +245,16 @@ public:
         return current - 2;
     }
 
+    size_t getPendingRetiredCount() const noexcept
+    {
+        const size_t currentHead = head.load(std::memory_order_acquire);
+        const size_t currentTail = tail.load(std::memory_order_acquire);
+        const size_t ringCount = (currentTail + kMaxRetired - currentHead) % kMaxRetired;
+
+        std::lock_guard<std::mutex> lock(fallbackMutex);
+        return ringCount + fallbackQueue.size();
+    }
+
     uint64_t getMinReaderEpoch() const noexcept
     {
         uint64_t minEpoch = std::numeric_limits<uint64_t>::max();

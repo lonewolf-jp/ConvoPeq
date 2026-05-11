@@ -28,8 +28,14 @@ public:
     explicit RuntimeBuilder(AudioEngine& owner) noexcept : engine(owner) {}
 
     BuildResult build(const BuildInput& in) noexcept;
+    BuildResult build(const BuildInput& in, const ConvolverProcessor::BuildSnapshot& snapshot) noexcept;
     BuildResult build(const EngineCommand& cmd) noexcept;
+    BuildResult build(const EngineCommand& cmd, const ConvolverProcessor::BuildSnapshot& snapshot) noexcept;
     BuildError validateWarmup(const AudioEngine::DSPCore& runtime) const noexcept;
+
+    // Warmup: FIR 履歴と AGC state 初期化
+    int getRequiredWarmupBlocks(const AudioEngine::DSPCore& runtime) const noexcept;
+    BuildError executeWarmup(AudioEngine::DSPCore& runtime) noexcept;
 
 private:
     AudioEngine& engine;

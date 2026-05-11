@@ -113,9 +113,8 @@ ConvolverProcessor::~ConvolverProcessor()
     auto* oldSnap = cachedLatency.exchange(nullptr, std::memory_order_acq_rel);
     delete oldSnap;
 
-    if (fftHandle) {
-        DftiFreeDescriptor(&fftHandle);
-        fftHandle = nullptr;
+    if (fftHandle.get() != nullptr) {
+        fftHandle.reset();
     }
 
     // Note: Do NOT call g_deletionQueue.reclaimAllIgnoringEpoch() here.
@@ -176,9 +175,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     isPrepared.store(false, std::memory_order_release);
 
-    if (fftHandle) {
-        DftiFreeDescriptor(&fftHandle);
-        fftHandle = nullptr;
+    if (fftHandle.get() != nullptr) {
+        fftHandle.reset();
         fftHandleSize = 0;
     }
 
@@ -386,9 +384,8 @@ void ConvolverProcessor::releaseResources()
     cachedFFTBuffer.reset();
     cachedFFTBufferCapacity = 0;
 
-    if (fftHandle) {
-        DftiFreeDescriptor(&fftHandle);
-        fftHandle = nullptr;
+    if (fftHandle.get() != nullptr) {
+        fftHandle.reset();
         fftHandleSize = 0;
     }
 
@@ -405,6 +402,8 @@ void ConvolverProcessor::releaseResources()
         mkl_free(oldIrState);
     }
 
+    if (deferredFreeThread)
+        deferredFreeThread->shutdownAndDrain();
     deferredFreeThread.reset();
 
     while (auto* ptr = rcuSwapper.tryReclaim(std::numeric_limits<uint64_t>::max()))

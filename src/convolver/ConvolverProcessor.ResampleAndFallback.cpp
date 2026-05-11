@@ -350,29 +350,28 @@ juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>&
 
     juce::AudioBuffer<double> minPhaseIR(linearIR.getNumChannels(), numSamples);
 
-    DFTI_DESCRIPTOR_HANDLE dfti = nullptr;
-    DftiGuard dftiGuard { &dfti };
+    convo::ScopedDftiDescriptor dfti;
 
     const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
-    if (DftiCreateDescriptor(&dfti, DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
+    if (DftiCreateDescriptor(dfti.put(), DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
     {
         juce::Logger::writeToLog("convertToMinimumPhase: DftiCreateDescriptor failed.");
         return {};
     }
 
-    if (DftiSetValue(dfti, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR)
+    if (DftiSetValue(dfti.handle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR)
     {
         juce::Logger::writeToLog("convertToMinimumPhase: DftiSetValue(DFTI_PLACEMENT) failed.");
         return {};
     }
 
-    if (DftiSetValue(dfti, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR)
+    if (DftiSetValue(dfti.handle, DFTI_BACKWARD_SCALE, 1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR)
     {
         juce::Logger::writeToLog("convertToMinimumPhase: DftiSetValue(DFTI_BACKWARD_SCALE) failed.");
         return {};
     }
 
-    if (DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
+    if (DftiCommitDescriptor(dfti.handle) != DFTI_NO_ERROR)
     {
         juce::Logger::writeToLog("convertToMinimumPhase: DftiCommitDescriptor failed.");
         return {};
@@ -395,7 +394,7 @@ juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>&
             spectrum.get()[i].imag = 0.0;
         }
 
-        if (DftiComputeForward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
+        if (DftiComputeForward(dfti.handle, spectrum.get()) != DFTI_NO_ERROR) {
             juce::Logger::writeToLog("convertToMinimumPhase: DftiComputeForward (1) failed.");
             return {};
         }
@@ -414,7 +413,7 @@ juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>&
                 { spectrum.get()[i].real = mag[i]; spectrum.get()[i].imag = 0.0; }
         }
 
-        if (DftiComputeBackward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
+        if (DftiComputeBackward(dfti.handle, spectrum.get()) != DFTI_NO_ERROR) {
             juce::Logger::writeToLog("convertToMinimumPhase: DftiComputeBackward (1) failed.");
             return {};
         }
@@ -433,7 +432,7 @@ juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>&
             spectrum.get()[i].imag = 0.0;
         }
 
-        if (DftiComputeForward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
+        if (DftiComputeForward(dfti.handle, spectrum.get()) != DFTI_NO_ERROR) {
             juce::Logger::writeToLog("convertToMinimumPhase: DftiComputeForward (2) failed.");
             return {};
         }
@@ -451,7 +450,7 @@ juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>&
                 if (!std::isfinite(spectrum.get()[i].real) || !std::isfinite(spectrum.get()[i].imag)) return {};
         }
 
-        if (DftiComputeBackward(dfti, spectrum.get()) != DFTI_NO_ERROR) {
+        if (DftiComputeBackward(dfti.handle, spectrum.get()) != DFTI_NO_ERROR) {
             juce::Logger::writeToLog("convertToMinimumPhase: DftiComputeBackward (2) failed.");
             return {};
         }

@@ -204,8 +204,9 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
 
     double* lPtr = alignedL.get();
     double* rPtr = alignedR.get();
-    inputDCBlockerL.process(lPtr, numSamples);
-    inputDCBlockerR.process(rPtr, numSamples);
+    auto& dc = dcBlockers();
+    dc.inputL.process(lPtr, numSamples);
+    dc.inputR.process(rPtr, numSamples);
 
     return inputLevel;
 }
@@ -251,22 +252,24 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
 
     double* lPtr = alignedL.get();
     double* rPtr = alignedR.get();
-    inputDCBlockerL.process(lPtr, numSamples);
-    inputDCBlockerR.process(rPtr, numSamples);
+    auto& dc = dcBlockers();
+    dc.inputL.process(lPtr, numSamples);
+    dc.inputR.process(rPtr, numSamples);
 
     return inputLevel;
 }
 
 void AudioEngine::DSPCore::applyFixedLatencyDelay(double* dataL, double* dataR, int numSamples) noexcept
 {
-    if (fixedLatencySamples <= 0 || fixedLatencyBufferSize <= 0 || dataL == nullptr)
+    auto& history = histories();
+    if (history.fixedLatencySamples <= 0 || history.fixedLatencyBufferSize <= 0 || dataL == nullptr)
         return;
 
-    const int delay = std::min(fixedLatencySamples, fixedLatencyBufferSize - 1);
-    int writePos = fixedLatencyWritePos;
-    const int bufferSize = fixedLatencyBufferSize;
-    double* delayL = fixedLatencyBufferL.get();
-    double* delayR = fixedLatencyBufferR.get();
+    const int delay = std::min(history.fixedLatencySamples, history.fixedLatencyBufferSize - 1);
+    int writePos = history.fixedLatencyWritePos;
+    const int bufferSize = history.fixedLatencyBufferSize;
+    double* delayL = history.fixedLatencyBufferL.get();
+    double* delayR = history.fixedLatencyBufferR.get();
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -287,7 +290,7 @@ void AudioEngine::DSPCore::applyFixedLatencyDelay(double* dataL, double* dataR, 
             writePos = 0;
     }
 
-    fixedLatencyWritePos = writePos;
+    history.fixedLatencyWritePos = writePos;
 }
 
 double AudioEngine::DSPCore::musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept
@@ -311,8 +314,9 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     float* dstL = (numChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
     float* dstR = (numChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
 
-    dcBlockerL.process(dataL, numSamples);
-    if (dataR) dcBlockerR.process(dataR, numSamples);
+    auto& dc = dcBlockers();
+    dc.outputL.process(dataL, numSamples);
+    if (dataR) dc.outputR.process(dataR, numSamples);
 
     {
         const __m256d vInf = _mm256_set1_pd(1.0e300);

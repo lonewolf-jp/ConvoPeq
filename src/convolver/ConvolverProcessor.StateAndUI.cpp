@@ -4,10 +4,68 @@
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "core/EpochManager.h"
 #include "AlignedAllocation.h"
+#include "DftiHandle.h"
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI)
 
 using namespace ConvolverProcessorInternal;
+
+namespace {
+
+static inline void hashCombineUInt64(std::uint64_t& seed, std::uint64_t value) noexcept
+{
+    seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+}
+
+static inline std::uint32_t floatBits(float value) noexcept
+{
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static std::uint64_t computeBuildSnapshotFingerprint(const ConvolverProcessor::BuildSnapshot& snapshot) noexcept
+{
+    std::uint64_t hash = 0x9e3779b97f4a7c15ULL;
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mix)));
+    hashCombineUInt64(hash, snapshot.bypassed ? 1ULL : 0ULL);
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.phaseMode));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.resamplingPhaseMode));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.smoothingTimeSec)));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.targetIRLengthSec)));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mixedTransitionStartHz)));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mixedTransitionEndHz)));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mixedPreRingTau)));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.rebuildDebounceMs));
+    hashCombineUInt64(hash, snapshot.experimentalDirectHeadEnabled ? 1ULL : 0ULL);
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.tailProcessingMode));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.tailRolloffStartHz)));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.tailRolloffStrength)));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.partitionTailStrength)));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.targetUpgradeFFTSize));
+    hashCombineUInt64(hash, snapshot.enableProgressiveUpgrade ? 1ULL : 0ULL);
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.maxCacheEntries));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.irLength));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.nucHCMode));
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.nucLCMode));
+
+    std::uint64_t scaleBits = 0;
+    static_assert(sizeof(scaleBits) == sizeof(snapshot.currentIRScale));
+    std::memcpy(&scaleBits, &snapshot.currentIRScale, sizeof(scaleBits));
+    hashCombineUInt64(hash, scaleBits);
+
+    const auto pathUtf8 = snapshot.irFile.getFullPathName().toRawUTF8();
+    for (const char* ch = pathUtf8; ch != nullptr && *ch != '\0'; ++ch)
+        hashCombineUInt64(hash, static_cast<std::uint64_t>(static_cast<unsigned char>(*ch)));
+
+    const auto nameUtf8 = snapshot.irName.toRawUTF8();
+    for (const char* ch = nameUtf8; ch != nullptr && *ch != '\0'; ++ch)
+        hashCombineUInt64(hash, static_cast<std::uint64_t>(static_cast<unsigned char>(*ch)));
+
+    return hash;
+}
+
+} // namespace
 
 // ────────────────────────────────────────────────────────────────
 // State Management and UI Updates
@@ -73,6 +131,71 @@ juce::ValueTree ConvolverProcessor::getState() const
         v.setProperty ("irPath", currentIrFile.getFullPathName(), nullptr);
     }
     return v;
+}
+
+ConvolverProcessor::BuildSnapshot ConvolverProcessor::captureBuildSnapshot() const
+{
+    BuildSnapshot snapshot;
+    snapshot.mix = mixTarget.load(std::memory_order_acquire);
+    snapshot.bypassed = bypassed.load(std::memory_order_acquire);
+    snapshot.phaseMode = static_cast<int>(phaseMode.load(std::memory_order_acquire));
+    snapshot.resamplingPhaseMode = static_cast<int>(currentResamplingPhaseMode.load(std::memory_order_acquire));
+    snapshot.smoothingTimeSec = smoothingTimeSec.load(std::memory_order_acquire);
+    snapshot.targetIRLengthSec = targetIRLengthSec.load(std::memory_order_acquire);
+    snapshot.mixedTransitionStartHz = mixedTransitionStartHz.load(std::memory_order_acquire);
+    snapshot.mixedTransitionEndHz = mixedTransitionEndHz.load(std::memory_order_acquire);
+    snapshot.mixedPreRingTau = mixedPreRingTau.load(std::memory_order_acquire);
+    snapshot.rebuildDebounceMs = rebuildDebounceMs.load(std::memory_order_acquire);
+    snapshot.experimentalDirectHeadEnabled = experimentalDirectHeadEnabled.load(std::memory_order_acquire);
+    snapshot.tailProcessingMode = tailProcessingMode.load(std::memory_order_acquire);
+    snapshot.tailRolloffStartHz = tailRolloffStartHz.load(std::memory_order_acquire);
+    snapshot.tailRolloffStrength = tailRolloffStrength.load(std::memory_order_acquire);
+    snapshot.partitionTailStrength = partitionTailStrength.load(std::memory_order_acquire);
+    snapshot.targetUpgradeFFTSize = targetUpgradeFFTSize.load(std::memory_order_acquire);
+    snapshot.enableProgressiveUpgrade = enableProgressiveUpgrade.load(std::memory_order_acquire);
+    snapshot.maxCacheEntries = static_cast<int>(maxCacheEntries.load(std::memory_order_acquire));
+    snapshot.irName = irName;
+    snapshot.irLength = irLength.load(std::memory_order_acquire);
+    snapshot.currentIRScale = currentIRScale.load(std::memory_order_acquire);
+    snapshot.nucHCMode = nucHCMode.load(std::memory_order_acquire);
+    snapshot.nucLCMode = nucLCMode.load(std::memory_order_acquire);
+    {
+        const juce::ScopedLock sl(irFileLock);
+        snapshot.irFile = currentIrFile;
+    }
+    snapshot.fingerprint = computeBuildSnapshotFingerprint(snapshot);
+    return snapshot;
+}
+
+void ConvolverProcessor::applyBuildSnapshot(const BuildSnapshot& snapshot)
+{
+    mixTarget.store(snapshot.mix, std::memory_order_release);
+    bypassed.store(snapshot.bypassed, std::memory_order_release);
+    phaseMode.store(snapshot.phaseMode, std::memory_order_release);
+    currentResamplingPhaseMode.store(static_cast<ResamplingPhaseMode>(snapshot.resamplingPhaseMode), std::memory_order_release);
+    smoothingTimeSec.store(snapshot.smoothingTimeSec, std::memory_order_release);
+    targetIRLengthSec.store(snapshot.targetIRLengthSec, std::memory_order_release);
+    mixedTransitionStartHz.store(snapshot.mixedTransitionStartHz, std::memory_order_release);
+    mixedTransitionEndHz.store(snapshot.mixedTransitionEndHz, std::memory_order_release);
+    mixedPreRingTau.store(snapshot.mixedPreRingTau, std::memory_order_release);
+    rebuildDebounceMs.store(snapshot.rebuildDebounceMs, std::memory_order_release);
+    experimentalDirectHeadEnabled.store(snapshot.experimentalDirectHeadEnabled, std::memory_order_release);
+    tailProcessingMode.store(snapshot.tailProcessingMode, std::memory_order_release);
+    tailRolloffStartHz.store(snapshot.tailRolloffStartHz, std::memory_order_release);
+    tailRolloffStrength.store(snapshot.tailRolloffStrength, std::memory_order_release);
+    partitionTailStrength.store(snapshot.partitionTailStrength, std::memory_order_release);
+    targetUpgradeFFTSize.store(snapshot.targetUpgradeFFTSize, std::memory_order_release);
+    enableProgressiveUpgrade.store(snapshot.enableProgressiveUpgrade, std::memory_order_release);
+    maxCacheEntries.store(static_cast<size_t>(snapshot.maxCacheEntries), std::memory_order_release);
+    {
+        const juce::ScopedLock sl(irFileLock);
+        currentIrFile = snapshot.irFile;
+    }
+    irName = snapshot.irName;
+    irLength.store(snapshot.irLength, std::memory_order_release);
+    currentIRScale.store(snapshot.currentIRScale, std::memory_order_release);
+    nucHCMode.store(snapshot.nucHCMode, std::memory_order_release);
+    nucLCMode.store(snapshot.nucLCMode, std::memory_order_release);
 }
 
 void ConvolverProcessor::setState(const juce::ValueTree& v)
@@ -481,18 +604,19 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     const int copyLen = (std::min)(numSamples, fftSize);
     float* dst = cachedFFTBuffer.get();
 
-    if (fftHandle && fftHandleSize != fftSize)
+    if (fftHandle.get() != nullptr && fftHandleSize != fftSize)
     {
-        DftiFreeDescriptor(&fftHandle);
-        fftHandle = nullptr;
+        fftHandle.reset();
         fftHandleSize = 0;
     }
 
-    if (!fftHandle)
+    if (fftHandle.get() == nullptr)
     {
-        if (DftiCreateDescriptor(&fftHandle, DFTI_SINGLE, DFTI_COMPLEX, 1, fftSize) != DFTI_NO_ERROR) return;
-        if (DftiSetValue(fftHandle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR) { DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; return; }
-        if (DftiCommitDescriptor(fftHandle) != DFTI_NO_ERROR) { DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; return; }
+        convo::ScopedDftiDescriptor localDfti;
+        if (DftiCreateDescriptor(localDfti.put(), DFTI_SINGLE, DFTI_COMPLEX, 1, fftSize) != DFTI_NO_ERROR) return;
+        if (DftiSetValue(localDfti.handle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR) return;
+        if (DftiCommitDescriptor(localDfti.handle) != DFTI_NO_ERROR) return;
+        fftHandle.reset(localDfti.release());
         fftHandleSize = fftSize;
     }
 
@@ -505,7 +629,7 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
         dst[2 * i + 1] = 0.0f;
     }
 
-    if (DftiComputeForward(fftHandle, dst) != DFTI_NO_ERROR) return;
+    if (DftiComputeForward(fftHandle.get(), dst) != DFTI_NO_ERROR) return;
 
     const int numBins = fftSize / 2 + 1;
     float* magBuf = dst + fftSize + 16;

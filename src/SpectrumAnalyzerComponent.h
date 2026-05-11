@@ -27,6 +27,7 @@
 #include <atomic>
 #include <cstdint>
 #include "AudioEngine.h"
+#include "DftiHandle.h"
 
 enum class AnalyzerState : uint8_t
 {
@@ -70,7 +71,7 @@ private:
     static constexpr float FFT_DISPLAY_MIN_DB = -100.0f;
     static constexpr float FFT_DISPLAY_MIN_MAG = 1e-9f;
 
-    DFTI_DESCRIPTOR_HANDLE fftHandle = nullptr;
+    convo::ScopedDftiDescriptor fftHandle;
     juce::dsp::WindowingFunction<float> window { NUM_FFT_POINTS, juce::dsp::WindowingFunction<float>::hann };
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
     convo::ScopedAlignedPtr<float> fftTimeDomainBuffer;

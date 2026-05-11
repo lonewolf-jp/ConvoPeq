@@ -26,57 +26,9 @@
 #include <mkl_dfti.h>
 
 #include "AlignedAllocation.h"  // convo::aligned_malloc / aligned_free
+#include "DftiHandle.h"
 
-// ---------------------------------------------------------------------------
-// DFTI_DESCRIPTOR_HANDLE の RAII ラッパー
-// std::unique_ptr<void, ...> の代わりにクリーンな所有権管理を提供する。
-// ---------------------------------------------------------------------------
 namespace convo {
-
-class DftiHandleOwner
-{
-public:
-    DftiHandleOwner() noexcept = default;
-
-    explicit DftiHandleOwner(DFTI_DESCRIPTOR_HANDLE h) noexcept
-        : handle(h) {}
-
-    ~DftiHandleOwner() noexcept { reset(); }
-
-    // ムーブのみ許可（コピー禁止）
-    DftiHandleOwner(DftiHandleOwner&& o) noexcept
-        : handle(o.handle) { o.handle = nullptr; }
-
-    DftiHandleOwner& operator=(DftiHandleOwner&& o) noexcept
-    {
-        if (this != &o) { reset(); handle = o.handle; o.handle = nullptr; }
-        return *this;
-    }
-
-    DftiHandleOwner(const DftiHandleOwner&)            = delete;
-    DftiHandleOwner& operator=(const DftiHandleOwner&) = delete;
-
-    // 新しいハンドルをセット（既存ハンドルは解放）
-    void reset(DFTI_DESCRIPTOR_HANDLE h = nullptr) noexcept
-    {
-        if (handle) { DftiFreeDescriptor(&handle); handle = nullptr; }
-        handle = h;
-    }
-
-    // ハンドルを所有権なしで取得（読み取り専用）
-    DFTI_DESCRIPTOR_HANDLE get() const noexcept { return handle; }
-
-    // 所有権を放棄してハンドルを返す（transfer ownership out）
-    DFTI_DESCRIPTOR_HANDLE release() noexcept
-    {
-        auto h = handle; handle = nullptr; return h;
-    }
-
-    explicit operator bool() const noexcept { return handle != nullptr; }
-
-private:
-    DFTI_DESCRIPTOR_HANDLE handle = nullptr;
-};
 
 // ---------------------------------------------------------------------------
 // ConvolverState
@@ -101,7 +53,7 @@ struct ConvolverState
     double   sampleRate         = 0.0;
 
     // DFTI ハンドル（RAII 管理）
-    DftiHandleOwner fftHandle;
+    ScopedDftiDescriptor fftHandle;
 
     // 冪等クリーンアップ用フラグ
     std::atomic<bool> cleanedUp {false};
@@ -160,13 +112,11 @@ struct ConvolverState
         };
 
         // DFTI ハンドル生成
-        DFTI_DESCRIPTOR_HANDLE h = nullptr;
-        if (DftiCreateDescriptor(&h, DFTI_DOUBLE, DFTI_REAL, 1,
+        if (DftiCreateDescriptor(fftHandle.put(), DFTI_DOUBLE, DFTI_REAL, 1,
                                  static_cast<MKL_LONG>(fftSize)) != DFTI_NO_ERROR)
         {
             throw std::runtime_error("ConvolverState: DftiCreateDescriptor failed");
         }
-        fftHandle.reset(h);
 
         // 各作業バッファを確保してゼロクリア
         {
@@ -206,7 +156,7 @@ struct ConvolverState
         if (auto* p = inputBuffer.exchange(nullptr, std::memory_order_relaxed))    convo::aligned_free(p);
         if (auto* p = outputBuffer.exchange(nullptr, std::memory_order_relaxed))   convo::aligned_free(p);
 
-        // fftHandle は DftiHandleOwner のデストラクタで自動解放される
+        // fftHandle は ScopedDftiDescriptor のデストラクタで自動解放される
         fftHandle.reset();
     }
 

@@ -52,10 +52,10 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
             diagLog("[DIAG] convolverParamsChanged: enter");
             if (activeDSP)
             {
-                activeDSP->convolver.syncParametersFrom(uiConvolverProcessor);
+                activeDSP->convolverRt().syncParametersFrom(uiConvolverProcessor);
 
                 const bool uiHasIr = uiConvolverProcessor.isIRLoaded();
-                const bool dspHasIr = activeDSP->convolver.isIRLoaded();
+                const bool dspHasIr = activeDSP->convolverRt().isIRLoaded();
                 uiHasIrForRebuild = uiHasIr;
                 dspHasIrForRebuild = dspHasIr;
 
@@ -67,11 +67,11 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
                 if (!needsStructuralRebuild && uiHasIr)
                 {
                     needsStructuralRebuild =
-                        activeDSP->convolver.getIRName() != uiConvolverProcessor.getIRName()
-                     || activeDSP->convolver.getIRLength() != uiConvolverProcessor.getIRLength()
-                     || activeDSP->convolver.getPhaseMode() != uiConvolverProcessor.getPhaseMode()
-                     || activeDSP->convolver.getExperimentalDirectHeadEnabled() != uiConvolverProcessor.getExperimentalDirectHeadEnabled()
-                     || std::abs(activeDSP->convolver.getTargetIRLength() - uiConvolverProcessor.getTargetIRLength()) > 0.001f;
+                                activeDSP->convolverRt().getIRName() != uiConvolverProcessor.getIRName()
+                            || activeDSP->convolverRt().getIRLength() != uiConvolverProcessor.getIRLength()
+                            || activeDSP->convolverRt().getPhaseMode() != uiConvolverProcessor.getPhaseMode()
+                            || activeDSP->convolverRt().getExperimentalDirectHeadEnabled() != uiConvolverProcessor.getExperimentalDirectHeadEnabled()
+                            || std::abs(activeDSP->convolverRt().getTargetIRLength() - uiConvolverProcessor.getTargetIRLength()) > 0.001f;
                 }
             }
             else

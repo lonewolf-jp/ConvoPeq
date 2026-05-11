@@ -3,7 +3,8 @@
 #include <cstddef>
 
 #include <JuceHeader.h>
-#include <mkl.h>
+
+#include "AlignedAllocation.h"
 
 struct ConvolverRuntime
 {
@@ -18,9 +19,9 @@ struct ConvolverRuntime
 
     void clear() noexcept
     {
-        if (overlapBuffer) { mkl_free(overlapBuffer); overlapBuffer = nullptr; }
-        if (inputBuffer) { mkl_free(inputBuffer); inputBuffer = nullptr; }
-        if (outputBuffer) { mkl_free(outputBuffer); outputBuffer = nullptr; }
+        if (overlapBuffer) { convo::aligned_free(overlapBuffer); overlapBuffer = nullptr; }
+        if (inputBuffer) { convo::aligned_free(inputBuffer); inputBuffer = nullptr; }
+        if (outputBuffer) { convo::aligned_free(outputBuffer); outputBuffer = nullptr; }
         currentFFTSize = 0;
         currentNumPartitions = 0;
     }
@@ -47,9 +48,9 @@ struct ConvolverRuntime
             clear();
 
             const size_t bytes = static_cast<size_t>(fftSize) * sizeof(double);
-            overlapBuffer = static_cast<double*>(mkl_malloc(bytes, 64));
-            inputBuffer = static_cast<double*>(mkl_malloc(bytes, 64));
-            outputBuffer = static_cast<double*>(mkl_malloc(bytes, 64));
+            overlapBuffer = static_cast<double*>(convo::aligned_malloc(bytes, 64));
+            inputBuffer = static_cast<double*>(convo::aligned_malloc(bytes, 64));
+            outputBuffer = static_cast<double*>(convo::aligned_malloc(bytes, 64));
 
             jassert(overlapBuffer != nullptr && inputBuffer != nullptr && outputBuffer != nullptr);
 

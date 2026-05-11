@@ -17,6 +17,8 @@ namespace
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 {
     const juce::ScopedNoDenormals noDenormals;
+    const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
+    ASSERT_AUDIO_THREAD();
     m_audioBlockCounter.fetch_add(1, std::memory_order_release);
 
     // ★ 追加: RCU ガードで現在の DSP を保護する
@@ -26,14 +28,15 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20;
     if (numSamples <= 0 || numSamples > ABSOLUTE_MAX_BLOCK_SIZE)
     {
-        buffer.clear();
+        applySafeSilentFallback(buffer);
         return;
     }
 
-    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
+    const auto* runtimePublish = getRuntimePublishState();
+    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimePublish);
     if (dsp == nullptr)
     {
-        buffer.clear();
+        applySafeSilentFallback(buffer);
         return;
     }
 
@@ -45,31 +48,18 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     #endif
 
     // --- ProcessingStateを現行設計で初期化 ---
-    const bool eqBypassed = eqBypassActive.load(std::memory_order_relaxed);
-    const bool convBypassed = convBypassActive.load(std::memory_order_relaxed);
-    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
-    const bool softClip = softClipEnabled.load(std::memory_order_relaxed);
-    const float satAmount = saturationAmount.load(std::memory_order_relaxed);
-    const double headroomGain = inputHeadroomGain.load(std::memory_order_relaxed);
-    const double makeupGain = outputMakeupGain.load(std::memory_order_relaxed);
-    const double convInputTrimGain = convolverInputTrimGain.load(std::memory_order_relaxed);
-    const bool adaptiveCaptureEnabled = noiseShaperLearner && noiseShaperLearner->isRunning();
+    const convo::GlobalSnapshot* snap = m_coordinator.getCurrent();
+    const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap);
 
-    DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp,
-                                                                         eqBypassed,
-                                                                         convBypassed,
-                                                                         order,
-                                                                         softClip,
-                                                                         satAmount,
-                                                                         headroomGain,
-                                                                         makeupGain,
-                                                                         convInputTrimGain,
-                                                                         adaptiveCaptureEnabled);
+    eqBypassActive.store(parameterSnapshot.eqBypassed, std::memory_order_relaxed);
+    convBypassActive.store(parameterSnapshot.convBypassed, std::memory_order_relaxed);
+
+    DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 
     // DSPCore 固有の上限チェック (getNextAudioBlock と同様)
     if (numSamples > dsp->maxSamplesPerBlock)
     {
-        buffer.clear();
+        applySafeSilentFallback(buffer);
         return;
     }
 
@@ -82,17 +72,24 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
     if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
     {
-        inputLevelLinear.store(0.0f);
-        outputLevelLinear.store(0.0f);
-        buffer.clear();
+        applySafeSilentFallback(buffer);
         return;
     }
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
-    DSPCore* fading = sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire));
-    bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+    DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimePublish);
+    const auto* engineRuntime = getEngineRuntimeState();
+    const bool atomicUseDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+    bool useDryAsOld = atomicUseDryAsOld
+        || runtimeCrossfadeUseDryAsOld(runtimePublish, engineRuntime);
+    const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
+    const bool hasPendingCrossfade = atomicPendingCrossfade
+        || runtimeCrossfadePending(runtimePublish, engineRuntime);
+    const int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
     if (processCrossfadeDelayGateIfPending(fading,
                                            useDryAsOld,
+                                           hasPendingCrossfade,
+                                           pendingFadeDelayBlocks,
                                            [&]()
     {
         auto fadingState = makeCrossfadeAuxState(procState);
@@ -105,7 +102,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    armCrossfadeIfPending(dsp, fading != nullptr, useDryAsOld);
+    armCrossfadeIfPending(dsp, fading != nullptr, useDryAsOld, runtimePublish);
 
     const bool canCrossfade = (fading != nullptr || useDryAsOld)
         && dspCrossfadeGain.isSmoothing()

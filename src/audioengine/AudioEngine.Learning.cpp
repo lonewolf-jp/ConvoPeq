@@ -117,7 +117,8 @@ void AudioEngine::processLearningCommands() noexcept
                 requestedLearningResume = cmd.resume;
                 requestedLearningGeneration = cmd.irGeneration;
 
-                auto* dsp = currentDSP.load(std::memory_order_acquire);
+                const auto* runtimePublish = getRuntimePublishState();
+                auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimePublish);
                 // irGeneration チェックを削除: DSP が有効かつ型が適切であれば即座に学習開始可能
                 const bool dspReady = (dsp != nullptr)
                     && (dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder);

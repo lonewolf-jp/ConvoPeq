@@ -15,28 +15,6 @@ extern std::atomic<int> g_totalLatencyClampCount;
 namespace ConvolverProcessorInternal
 {
     // ────────────────────────────────────────────────────────────────
-    // DFTI ハンドルガード
-    // ────────────────────────────────────────────────────────────────
-    struct DftiGuard
-    {
-        DFTI_DESCRIPTOR_HANDLE* handle = nullptr;
-
-        explicit DftiGuard(DFTI_DESCRIPTOR_HANDLE* h) noexcept : handle(h) {}
-
-        ~DftiGuard()
-        {
-            if (handle != nullptr && *handle != nullptr)
-            {
-                DftiFreeDescriptor(handle);
-                *handle = nullptr;
-            }
-        }
-
-        DftiGuard(const DftiGuard&) = delete;
-        DftiGuard& operator=(const DftiGuard&) = delete;
-    };
-
-    // ────────────────────────────────────────────────────────────────
     // スレッドキャンセル確認
     // ────────────────────────────────────────────────────────────────
     inline bool checkCancellation(const std::function<bool()>& shouldExit, bool* wasCancelled = nullptr) noexcept

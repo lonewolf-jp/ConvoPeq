@@ -13,6 +13,8 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::timerCallback()
 {
+    const auto* runtimePublish = getRuntimePublishState();
+
     {
         const auto ts = getRuntimeTransitionStateForDebug();
         const int active = ts.active ? 1 : 0;
@@ -20,31 +22,161 @@ void AudioEngine::timerCallback()
         const uint64_t currentPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ts.current));
         const uint64_t nextPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ts.next));
         const double fadeSec = ts.fadeTimeSec;
+        const int latencyDelta = ts.latencyDeltaSamples;
 
         if (active != debugLastReportedTransitionActive
             || policy != debugLastReportedTransitionPolicy
             || currentPtr != debugLastReportedTransitionCurrentPtr
             || nextPtr != debugLastReportedTransitionNextPtr
-            || absNoLibm(fadeSec - debugLastReportedTransitionFadeSec) > 1e-9)
+            || absNoLibm(fadeSec - debugLastReportedTransitionFadeSec) > 1e-9
+            || latencyDelta != debugLastReportedTransitionLatencyDeltaSamples)
         {
             debugLastReportedTransitionActive = active;
             debugLastReportedTransitionPolicy = policy;
             debugLastReportedTransitionCurrentPtr = currentPtr;
             debugLastReportedTransitionNextPtr = nextPtr;
             debugLastReportedTransitionFadeSec = fadeSec;
+            debugLastReportedTransitionLatencyDeltaSamples = latencyDelta;
 
             diagLog("[VERIFY] transition state active=" + juce::String(active)
                 + " policy=" + juce::String(policy)
                 + " current=0x" + juce::String::toHexString(static_cast<juce::int64>(currentPtr))
                 + " next=0x" + juce::String::toHexString(static_cast<juce::int64>(nextPtr))
-                + " fadeSec=" + juce::String(fadeSec, 6));
+                + " fadeSec=" + juce::String(fadeSec, 6)
+                + " latencyDelta=" + juce::String(latencyDelta));
+        }
+
+        const int alignWritePos = debugLatencyAlignWritePos.load(std::memory_order_acquire);
+        const int alignReadOld = debugLatencyAlignReadOld.load(std::memory_order_acquire);
+        const int alignReadNew = debugLatencyAlignReadNew.load(std::memory_order_acquire);
+        const int alignDelayOld = debugLatencyAlignDelayOld.load(std::memory_order_acquire);
+        const int alignDelayNew = debugLatencyAlignDelayNew.load(std::memory_order_acquire);
+
+        if (active != 0
+            && (alignWritePos != debugLastReportedLatencyAlignWritePos
+                || alignReadOld != debugLastReportedLatencyAlignReadOld
+                || alignReadNew != debugLastReportedLatencyAlignReadNew
+                || alignDelayOld != debugLastReportedLatencyAlignDelayOld
+                || alignDelayNew != debugLastReportedLatencyAlignDelayNew
+                || (alignDelayOld - alignDelayNew) != latencyDelta))
+        {
+            debugLastReportedLatencyAlignWritePos = alignWritePos;
+            debugLastReportedLatencyAlignReadOld = alignReadOld;
+            debugLastReportedLatencyAlignReadNew = alignReadNew;
+            debugLastReportedLatencyAlignDelayOld = alignDelayOld;
+            debugLastReportedLatencyAlignDelayNew = alignDelayNew;
+
+            diagLog("[VERIFY] latency align writePos=" + juce::String(alignWritePos)
+                + " readOld=" + juce::String(alignReadOld)
+                + " readNew=" + juce::String(alignReadNew)
+                + " delayOld=" + juce::String(alignDelayOld)
+                + " delayNew=" + juce::String(alignDelayNew)
+                + " deltaFromDelay=" + juce::String(alignDelayOld - alignDelayNew)
+                + " transitionDelta=" + juce::String(latencyDelta));
+        }
+    }
+
+    {
+        const auto* engineRuntime = getEngineRuntimeState();
+        const uint64_t revision = runtimeRevision(runtimePublish, engineRuntime);
+        const uint64_t currentUuid = runtimeCurrentUuid(runtimePublish, engineRuntime);
+        const uint64_t fadingUuid = runtimeFadingUuid(runtimePublish, engineRuntime);
+        const uint64_t queuedOldUuid = runtimeQueuedOldUuid(runtimePublish, engineRuntime);
+        const uint64_t transitionCurrentUuid = runtimeTransitionCurrentUuid(runtimePublish, engineRuntime);
+        const uint64_t transitionNextUuid = runtimeTransitionNextUuid(runtimePublish, engineRuntime);
+
+        if (revision != debugLastReportedRuntimePublishRevision
+            || currentUuid != debugLastReportedRuntimePublishCurrentUuid
+            || fadingUuid != debugLastReportedRuntimePublishFadingUuid
+            || queuedOldUuid != debugLastReportedRuntimePublishQueuedOldUuid
+            || transitionCurrentUuid != debugLastReportedRuntimePublishTransitionCurrentUuid
+            || transitionNextUuid != debugLastReportedRuntimePublishTransitionNextUuid)
+        {
+            debugLastReportedRuntimePublishRevision = revision;
+            debugLastReportedRuntimePublishCurrentUuid = currentUuid;
+            debugLastReportedRuntimePublishFadingUuid = fadingUuid;
+            debugLastReportedRuntimePublishQueuedOldUuid = queuedOldUuid;
+            debugLastReportedRuntimePublishTransitionCurrentUuid = transitionCurrentUuid;
+            debugLastReportedRuntimePublishTransitionNextUuid = transitionNextUuid;
+
+            diagLog("[VERIFY] runtime publish rev=" + juce::String(static_cast<juce::int64>(revision))
+                + " currentUuid=" + juce::String(static_cast<juce::int64>(currentUuid))
+                + " fadingUuid=" + juce::String(static_cast<juce::int64>(fadingUuid))
+                + " queuedOldUuid=" + juce::String(static_cast<juce::int64>(queuedOldUuid))
+                + " transition(" + juce::String(static_cast<juce::int64>(transitionCurrentUuid))
+                + "->" + juce::String(static_cast<juce::int64>(transitionNextUuid)) + ")");
+        }
+    }
+
+    {
+        const auto lifecycle = getRuntimeLifecycleDiagnostics();
+        const auto rebuild = getRebuildDispatchDiagnostics();
+        const auto convRebuild = uiConvolverProcessor.getRebuildAutomationDiagnostics();
+        const int shutdownPhaseValue = static_cast<int>(shutdownPhase.load(std::memory_order_acquire));
+
+        if (lifecycle.publishCount != debugLastReportedRuntimePublishCount
+            || lifecycle.retireCount != debugLastReportedRuntimeRetireCount
+            || lifecycle.reclaimCount != debugLastReportedRuntimeReclaimCount
+            || rebuild.requestCount != debugLastReportedRebuildRequestCount
+            || rebuild.queuedCount != debugLastReportedRebuildQueuedCount
+            || rebuild.blockedPendingDuplicateCount != debugLastReportedRebuildBlockedPendingDuplicateCount
+            || rebuild.blockedRecentDuplicateCount != debugLastReportedRebuildBlockedRecentDuplicateCount
+            || rebuild.runtimeQueueFullCount != debugLastReportedRebuildRuntimeQueueFullCount
+            || rebuild.drainedCommandCount != debugLastReportedRebuildDrainedCommandCount
+            || rebuild.matchedRuntimeCommandCount != debugLastReportedRebuildMatchedRuntimeCommandCount
+            || rebuild.taskSnapshotFallbackCount != debugLastReportedRebuildTaskSnapshotFallbackCount
+            || convRebuild.requestCount != debugLastReportedConvolverRebuildRequestCount
+            || convRebuild.deferredAfterLoadCount != debugLastReportedConvolverRebuildDeferredAfterLoadCount
+            || convRebuild.scheduledCount != debugLastReportedConvolverRebuildScheduledCount
+            || convRebuild.triggeredCount != debugLastReportedConvolverRebuildTriggeredCount
+            || shutdownPhaseValue != debugLastReportedShutdownPhase)
+        {
+            debugLastReportedRuntimePublishCount = lifecycle.publishCount;
+            debugLastReportedRuntimeRetireCount = lifecycle.retireCount;
+            debugLastReportedRuntimeReclaimCount = lifecycle.reclaimCount;
+            debugLastReportedRebuildRequestCount = rebuild.requestCount;
+            debugLastReportedRebuildQueuedCount = rebuild.queuedCount;
+            debugLastReportedRebuildBlockedPendingDuplicateCount = rebuild.blockedPendingDuplicateCount;
+            debugLastReportedRebuildBlockedRecentDuplicateCount = rebuild.blockedRecentDuplicateCount;
+            debugLastReportedRebuildRuntimeQueueFullCount = rebuild.runtimeQueueFullCount;
+            debugLastReportedRebuildDrainedCommandCount = rebuild.drainedCommandCount;
+            debugLastReportedRebuildMatchedRuntimeCommandCount = rebuild.matchedRuntimeCommandCount;
+            debugLastReportedRebuildTaskSnapshotFallbackCount = rebuild.taskSnapshotFallbackCount;
+            debugLastReportedConvolverRebuildRequestCount = convRebuild.requestCount;
+            debugLastReportedConvolverRebuildDeferredAfterLoadCount = convRebuild.deferredAfterLoadCount;
+            debugLastReportedConvolverRebuildScheduledCount = convRebuild.scheduledCount;
+            debugLastReportedConvolverRebuildTriggeredCount = convRebuild.triggeredCount;
+            debugLastReportedShutdownPhase = shutdownPhaseValue;
+
+            diagLog("[VERIFY] tx counters lifecycle(pub/ret/reclaim)="
+                + juce::String(static_cast<juce::int64>(lifecycle.publishCount)) + "/"
+                + juce::String(static_cast<juce::int64>(lifecycle.retireCount)) + "/"
+                + juce::String(static_cast<juce::int64>(lifecycle.reclaimCount))
+                + " rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)="
+                + juce::String(static_cast<juce::int64>(rebuild.requestCount)) + "/"
+                + juce::String(static_cast<juce::int64>(rebuild.queuedCount)) + "/"
+                + juce::String(static_cast<juce::int64>(rebuild.blockedPendingDuplicateCount)) + "/"
+                + juce::String(static_cast<juce::int64>(rebuild.blockedRecentDuplicateCount)) + "/"
+                + juce::String(static_cast<juce::int64>(rebuild.runtimeQueueFullCount)) + "/"
+                + juce::String(static_cast<juce::int64>(rebuild.drainedCommandCount)) + "/"
+                + juce::String(static_cast<juce::int64>(rebuild.matchedRuntimeCommandCount)) + "/"
+                + juce::String(static_cast<juce::int64>(rebuild.taskSnapshotFallbackCount))
+                + " convDebounce(req/defer/sched/trigger)="
+                + juce::String(static_cast<juce::int64>(convRebuild.requestCount)) + "/"
+                + juce::String(static_cast<juce::int64>(convRebuild.deferredAfterLoadCount)) + "/"
+                + juce::String(static_cast<juce::int64>(convRebuild.scheduledCount)) + "/"
+                + juce::String(static_cast<juce::int64>(convRebuild.triggeredCount))
+                + " shutdownPhase="
+                + juce::String(shutdownPhaseToString(static_cast<ShutdownPhase>(shutdownPhaseValue))));
         }
     }
 
     // フェイルセーフ: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
+    auto* currentDspForRuntime = resolveCurrentDSPFromRuntimePublish(runtimePublish);
+    auto* fadingDspForRuntime = resolveFadingDSPFromRuntimePublish(runtimePublish);
     if (!shutdownInProgress.load(std::memory_order_acquire)
-        && currentDSP.load(std::memory_order_acquire) != nullptr
+        && currentDspForRuntime != nullptr
         && !m_coordinator.isFading()
         && m_coordinator.getCurrent() == nullptr)
     {
@@ -64,7 +196,7 @@ void AudioEngine::timerCallback()
         const uint64_t processedBlocksSinceCreate = (nowBlockCounter >= createBlockCounter)
             ? (nowBlockCounter - createBlockCounter)
             : 0;
-        const int dspReady = (currentDSP.load(std::memory_order_acquire) != nullptr) ? 1 : 0;
+        const int dspReady = (currentDspForRuntime != nullptr) ? 1 : 0;
         const int coordIsFading = m_coordinator.isFading() ? 1 : 0;
         const int updateFadeReturned = coordIsFading;
         const int fromNull = (m_coordinator.getCurrent() == nullptr) ? 1 : 0;
@@ -219,18 +351,42 @@ void AudioEngine::timerCallback()
     processLearningCommands();
     processDeferredLearningActions();
 
+    const bool hasFading = (fadingDspForRuntime != nullptr);
+    const auto* engineRuntime = getEngineRuntimeState();
+    const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
+    const bool hasPendingCrossfade = atomicPendingCrossfade
+        || runtimeCrossfadePending(runtimePublish, engineRuntime);
+
     if (!shutdownInProgress.load(std::memory_order_acquire) &&
-        sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)) == nullptr &&
-        !dspCrossfadePending.load(std::memory_order_acquire) &&
+        !hasFading &&
+        !hasPendingCrossfade &&
         fadeQueued.exchange(false, std::memory_order_acq_rel))
     {
+        validateDistinctRuntimeSlots("timerCallback.beforeQueuePromote",
+                                     currentDspForRuntime,
+                                     sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                                     sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+
         if (auto* queued = sanitizeRawPtr(queuedOldDSP.exchange(nullptr, std::memory_order_acq_rel)))
         {
             const double fadeSec = queuedNextFadeTimeSec.load(std::memory_order_acquire);
             queuedFadeTimeSec.store(fadeSec, std::memory_order_release);
             fadingOutDSP.store(queued, std::memory_order_release);
             dspCrossfadePending.store(true, std::memory_order_release);
+            publishRuntimePublishState(makeRuntimePublishState(currentDspForRuntime,
+                                                              queued,
+                                                              convo::TransitionPolicy::SmoothOnly,
+                                                              fadeSec,
+                                                              true));
             setIRChangeFlag();
+
+            validateDistinctRuntimeSlots("timerCallback.afterQueuePromote",
+                                         currentDspForRuntime,
+                                         sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                                         sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+            logRuntimeTransitionEvent("timerCallback.afterQueuePromote",
+                                      currentDspForRuntime,
+                                      queued);
         }
     }
 
@@ -243,10 +399,10 @@ void AudioEngine::timerCallback()
     }
 
     // 内部プロセッサのクリーンアップを実行する。
-    if (auto* dsp = currentDSP.load(std::memory_order_acquire))
+    if (auto* dsp = currentDspForRuntime)
     {
-        dsp->eq.cleanup();
-        dsp->convolver.cleanup();
+        dsp->eqState->cleanupForRuntime();
+        dsp->convolverState->cleanupForRuntime();
 
         const bool activeFixed4Tap = (dsp->noiseShaperType == NoiseShaperType::Fixed4Tap);
         const bool activeFixed15Tap = (dsp->noiseShaperType == NoiseShaperType::Fixed15Tap);

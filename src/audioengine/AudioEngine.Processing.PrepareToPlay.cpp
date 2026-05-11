@@ -13,10 +13,47 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 {
+    ASSERT_NON_RT_THREAD();
     diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
+
+    const auto rollbackPrepareFailure = [this]() noexcept
+    {
+        if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
+        if (latencyBufOldR) { _aligned_free(latencyBufOldR); latencyBufOldR = nullptr; }
+        if (latencyBufNewL) { _aligned_free(latencyBufNewL); latencyBufNewL = nullptr; }
+        if (latencyBufNewR) { _aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
+        latencyBufSize = 0;
+        latencyWritePos = 0;
+        latencyDelayOld.store(0, std::memory_order_release);
+        latencyDelayNew.store(0, std::memory_order_release);
+        latencyResetPending.store(false, std::memory_order_release);
+        lifecycleState.store(EngineLifecycleState::Unprepared, std::memory_order_release);
+    };
+
+    auto previousState = lifecycleState.load(std::memory_order_acquire);
+    for (;;)
+    {
+        if (previousState == EngineLifecycleState::Releasing
+            || previousState == EngineLifecycleState::Destroyed
+            || previousState == EngineLifecycleState::Preparing)
+        {
+            diagLog("[DIAG] prepareToPlay: blocked by lifecycle state=" + juce::String(static_cast<int>(previousState)));
+            return;
+        }
+
+        if (lifecycleState.compare_exchange_weak(previousState,
+                                                 EngineLifecycleState::Preparing,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire))
+            break;
+    }
+
+    if (previousState == EngineLifecycleState::Prepared)
+        diagLog("[DIAG] prepareToPlay: re-prepare requested without release; proceeding with safe reinitialization");
 
     gShuttingDown.store(false, std::memory_order_release);
     shutdownInProgress.store(false, std::memory_order_release);
+    setShutdownPhase(ShutdownPhase::Running, "prepareToPlay");
 
     // releaseResources() で停止済みの場合に備えて、必要なら rebuild thread を再起動する。
     if (!rebuildThread.joinable())
@@ -62,6 +99,17 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     dspCrossfadeGain.reset(safeSampleRate, 0.03);
     dspCrossfadeGain.setCurrentAndTargetValue(1.0);
     dspCrossfadePending.store(false, std::memory_order_release);
+    if (const auto* runtimePublish = getRuntimePublishState(); runtimePublish != nullptr)
+    {
+        auto* currentForPublish = resolveCurrentDSPFromRuntimePublish(runtimePublish);
+        auto* fadingForPublish = resolveFadingDSPFromRuntimePublish(runtimePublish);
+        const auto ts = getRuntimeTransitionStateForDebug();
+        publishRuntimePublishState(makeRuntimePublishState(currentForPublish,
+                                                          fadingForPublish,
+                                                          ts.policy,
+                                                          ts.fadeTimeSec,
+                                                          ts.active));
+    }
     selectAdaptiveCoeffBankForCurrentSettings();
 
     dspCrossfadeFloatBuffer.setSize(2, std::max(SAFE_MAX_BLOCK_SIZE, bufferSize), false, false, true);
@@ -93,7 +141,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // malloc失敗時は安全フェイル
     if (!latencyBufOldL || !latencyBufOldR || !latencyBufNewL || !latencyBufNewR) {
-        latencyBufSize = 0;
+        rollbackPrepareFailure();
         return;
     }
 
@@ -111,40 +159,59 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     latencyDelayNew_RT = 0;
 
     // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
-    if (currentDSP.load(std::memory_order_acquire) == nullptr && activeDSP == nullptr)
+    const auto* runtimePublish = getRuntimePublishState();
+    const auto* engineRuntime = getEngineRuntimeState();
+    const bool hasPublishedCurrent = (runtimePublishedCurrentDSP(runtimePublish, engineRuntime) != nullptr);
+    if (!hasPublishedCurrent && activeDSP == nullptr)
     {
-        DSPCore* placeholderDSP = new DSPCore();
-        placeholderDSP->convolver.setVisualizationEnabled(false);
-        placeholderDSP->prepare(safeSampleRate,
-                                bufferSize,
-                                ditherBitDepth.load(std::memory_order_relaxed),
-                                manualOversamplingFactor.load(std::memory_order_relaxed),
-                                oversamplingType.load(std::memory_order_relaxed),
-                                noiseShaperType.load(std::memory_order_relaxed),
-                                this);
-        placeholderDSP->convolver.setBypass(true);
+        std::unique_ptr<DSPCore> placeholderDSP;
+        try
+        {
+            placeholderDSP = std::make_unique<DSPCore>();
+            placeholderDSP->convolverRt().setVisualizationEnabled(false);
+            placeholderDSP->prepare(safeSampleRate,
+                                    bufferSize,
+                                    ditherBitDepth.load(std::memory_order_relaxed),
+                                    manualOversamplingFactor.load(std::memory_order_relaxed),
+                                    oversamplingType.load(std::memory_order_relaxed),
+                                    noiseShaperType.load(std::memory_order_relaxed),
+                                    this);
+            placeholderDSP->convolverRt().setBypass(true);
 
-        // Use same formula as actual convolver L0 partition size (MKLNonUniformConvolver.cpp:534)
-        // to ensure placeholder bypass latency matches NUC algorithm latency during DSP transition
-        int predictedLatency = juce::nextPowerOfTwo(std::max(bufferSize, 64));
-        predictedLatency = juce::jlimit(0, latencyBufSize - 1, predictedLatency);
-        placeholderDSP->setFixedLatencySamples(predictedLatency);
+            int predictedLatency = juce::nextPowerOfTwo(std::max(bufferSize, 64));
+            predictedLatency = juce::jlimit(0, latencyBufSize - 1, predictedLatency);
+            placeholderDSP->setFixedLatencySamples(predictedLatency);
+        }
+        catch (...)
+        {
+            rollbackPrepareFailure();
+            return;
+        }
 
-        activeDSP = placeholderDSP;
-        currentDSP.store(placeholderDSP, std::memory_order_release);
+        activeDSP = placeholderDSP.release();
+        currentDSP.store(activeDSP, std::memory_order_release);
+        publishRuntimePublishState(makeRuntimePublishState(activeDSP,
+                                                          nullptr,
+                                                          convo::TransitionPolicy::HardReset,
+                                                          0.0,
+                                                          false));
+        publishRuntimeTransitionState(activeDSP, nullptr, convo::TransitionPolicy::HardReset, 0.0, false);
     }
 
     // --- DSP再ビルド判定・同期 ---
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
     if (rateChanged)
         uiConvolverProcessor.invalidatePendingLoads();
-    if (rateChanged || blockSizeChanged || currentDSP.load(std::memory_order_acquire) == nullptr) {
+    const auto* runtimePublishForRebuildCheck = getRuntimePublishState();
+    const bool hasCurrentRuntime = (resolveCurrentDSPFromRuntimePublish(runtimePublishForRebuildCheck) != nullptr);
+    if (rateChanged || blockSizeChanged || !hasCurrentRuntime) {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             requestRebuild(safeSampleRate, bufferSize);
         } else {
             requestRebuild(convo::RebuildKind::Structural);
         }
     }
+    lifecycleState.store(EngineLifecycleState::Prepared, std::memory_order_release);
     diagLog("[DIAG] prepareToPlay: exit currentSR=" + juce::String(currentSampleRate.load(), 2) + " maxSPB=" + juce::String(maxSamplesPerBlock.load()));
 }
 

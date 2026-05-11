@@ -14,8 +14,39 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::releaseResources()
 {
+    ASSERT_NON_RT_THREAD();
     diagLog("[DIAG] releaseResources: enter");
+
+    auto previousState = lifecycleState.load(std::memory_order_acquire);
+    for (;;)
+    {
+        if (previousState == EngineLifecycleState::Destroyed)
+        {
+            diagLog("[DIAG] releaseResources: ignored in Destroyed state");
+            return;
+        }
+
+        if (previousState == EngineLifecycleState::Unprepared)
+        {
+            diagLog("[DIAG] releaseResources: duplicate release ignored (already Unprepared)");
+            return;
+        }
+
+        if (previousState == EngineLifecycleState::Releasing)
+        {
+            diagLog("[DIAG] releaseResources: already Releasing");
+            return;
+        }
+
+        if (lifecycleState.compare_exchange_weak(previousState,
+                                                 EngineLifecycleState::Releasing,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire))
+            break;
+    }
+
     shutdownInProgress.store(true, std::memory_order_release);
+    setShutdownPhase(ShutdownPhase::StopAcceptingWork, "releaseResources");
 
     // 非MT起点の pending rebuild 要求と AsyncUpdater キューをシャットダウン直後に廃棄する。
     // stopRebuildThread より先に実行して handleAsyncUpdate が後から rebuild を発火しないようにする。
@@ -37,6 +68,7 @@ void AudioEngine::releaseResources()
         noiseShaperLearner->stopLearning();
 
     resetLearningControlState();
+    setShutdownPhase(ShutdownPhase::StopAudio, "releaseResources");
 
     DSPCore* activeToRelease = nullptr;
     DSPCore* fadingToRelease = nullptr;
@@ -46,6 +78,11 @@ void AudioEngine::releaseResources()
 
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
+        validateDistinctRuntimeSlots("releaseResources.beforeClear",
+                                     activeDSP,
+                                     sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                                     sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+
         rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
         currentDSP.store(nullptr, std::memory_order_release);
 
@@ -74,11 +111,28 @@ void AudioEngine::releaseResources()
                                       convo::TransitionPolicy::HardReset,
                                       0.0,
                                       false);
+        publishRuntimePublishState(makeRuntimePublishState(nullptr,
+                                                          nullptr,
+                                                          convo::TransitionPolicy::HardReset,
+                                                          0.0,
+                                                          false));
+
+        validateDistinctRuntimeSlots("releaseResources.afterClear",
+                         activeDSP,
+                         sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                         sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
     }
 
     diagLog("[DIAG] releaseResources: before stopRebuildThread");
+    setShutdownPhase(ShutdownPhase::StopWorkers, "releaseResources");
     stopRebuildThread();
     diagLog("[DIAG] releaseResources: after stopRebuildThread");
+
+    setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "releaseResources");
+    convo::EpochManager::instance().advanceEpoch();
+    g_currentEpoch.store(convo::EpochManager::instance().currentEpoch(), std::memory_order_release);
+
+    setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
     {
         std::queue<CommitStaging> abandonedCommits;
@@ -121,6 +175,7 @@ void AudioEngine::releaseResources()
 
     diagLog("[DIAG] releaseResources: skip deferred reclaim (reconfigure phase)");
 
+    lifecycleState.store(EngineLifecycleState::Unprepared, std::memory_order_release);
     diagLog("[DIAG] releaseResources: ABOUT_TO_EXIT_SCOPE");
 }
 

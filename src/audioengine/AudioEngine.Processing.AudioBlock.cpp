@@ -18,6 +18,8 @@ namespace
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
     const juce::ScopedNoDenormals noDenormals;
+    const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
+    ASSERT_AUDIO_THREAD();
     m_audioBlockCounter.fetch_add(1, std::memory_order_release);
 
     // 入力検証 (Input Validation)
@@ -36,24 +38,25 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20; // 破損データ検出用上限
     if (numSamples <= 0 || numSamples > ABSOLUTE_MAX_BLOCK_SIZE)
     {
-        bufferToFill.clearActiveBufferRegion();
+        applySafeSilentFallback(bufferToFill);
         return;
     }
 
     // startSampleの妥当性チェック
     if (startSample < 0 || startSample + numSamples > buffer->getNumSamples())
     {
-        bufferToFill.clearActiveBufferRegion();
+        applySafeSilentFallback(bufferToFill);
         return;
     }
 
     // Epoch tracking for lock-free Audio Thread safety
     convo::RCUReaderGuard rcuGuard(tls_rcuReader);
 
-    DSPCore* dsp = currentDSP.load(std::memory_order_acquire);
+    const auto* runtimePublish = getRuntimePublishState();
+    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimePublish);
     if (dsp == nullptr)
     {
-        bufferToFill.clearActiveBufferRegion();
+        applySafeSilentFallback(bufferToFill);
         return;
     }
 
@@ -64,7 +67,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // dsp は RCU で公開済みのため maxSamplesPerBlock は Audio Thread から安全に読み出せる。
         if (numSamples > dsp->maxSamplesPerBlock)
         {
-            bufferToFill.clearActiveBufferRegion();
+            applySafeSilentFallback(bufferToFill);
             return;
         }
 
@@ -77,7 +80,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             // 不整合時はレベルメーターもリセットして誤表示を防ぐ
             inputLevelLinear.store(0.0f);
             outputLevelLinear.store(0.0f);
-            bufferToFill.clearActiveBufferRegion();
+            applySafeSilentFallback(bufferToFill);
             return;
         }
 
@@ -87,29 +90,12 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
         // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
         const convo::GlobalSnapshot* snap = m_coordinator.getCurrent();
-        const bool eqBypassed               = (snap != nullptr) ? snap->eqBypass : eqBypassRequested.load(std::memory_order_acquire);
-        const bool convBypassed             = (snap != nullptr) ? snap->convBypass : convBypassRequested.load(std::memory_order_acquire);
-        const ProcessingOrder order         = (snap != nullptr) ? snap->processingOrder : currentProcessingOrder.load(std::memory_order_relaxed);
-        const bool softClip                 = (snap != nullptr) ? snap->softClipEnabled : softClipEnabled.load(std::memory_order_relaxed);
-        const float satAmt                  = (snap != nullptr) ? snap->saturationAmount : saturationAmount.load(std::memory_order_relaxed);
-        const double headroomGain           = (snap != nullptr) ? snap->inputHeadroomGain : inputHeadroomGain.load(std::memory_order_relaxed);
-        const double makeupGain             = (snap != nullptr) ? snap->outputMakeupGain : outputMakeupGain.load(std::memory_order_relaxed);
-        const double convInputTrimGain      = (snap != nullptr) ? snap->convInputTrimGain : convolverInputTrimGain.load(std::memory_order_relaxed);
-        const bool adaptiveCaptureEnabled   = noiseShaperLearner && noiseShaperLearner->isRunning();
+        const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap);
 
         // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
-        eqBypassActive.store(eqBypassed, std::memory_order_relaxed);
-        convBypassActive.store(convBypassed, std::memory_order_relaxed);
-        DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp,
-                                                                             eqBypassed,
-                                                                             convBypassed,
-                                                                             order,
-                                                                             softClip,
-                                                                             satAmt,
-                                                                             headroomGain,
-                                                                             makeupGain,
-                                                                             convInputTrimGain,
-                                                                             adaptiveCaptureEnabled);
+        eqBypassActive.store(parameterSnapshot.eqBypassed, std::memory_order_relaxed);
+        convBypassActive.store(parameterSnapshot.convBypassed, std::memory_order_relaxed);
+        DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 
         float snapshotAlpha = 1.0f;
         const convo::GlobalSnapshot* snapshotFrom = nullptr;
@@ -151,10 +137,19 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             return;
         }
 
-        DSPCore* fading = sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire));
-        bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+        DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimePublish);
+        const auto* engineRuntime = getEngineRuntimeState();
+        const bool atomicUseDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+        bool useDryAsOld = atomicUseDryAsOld
+            || runtimeCrossfadeUseDryAsOld(runtimePublish, engineRuntime);
+        const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
+        const bool hasPendingCrossfade = atomicPendingCrossfade
+            || runtimeCrossfadePending(runtimePublish, engineRuntime);
+        const int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
         if (processCrossfadeDelayGateIfPending(fading,
                                                useDryAsOld,
+                                               hasPendingCrossfade,
+                                               pendingFadeDelayBlocks,
                                                [&]()
         {
             auto fadingState = makeCrossfadeAuxState(procState);
@@ -167,7 +162,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             return;
         }
 
-        armCrossfadeIfPending(dsp, fading != nullptr, useDryAsOld);
+        armCrossfadeIfPending(dsp, fading != nullptr, useDryAsOld, runtimePublish);
 
         const bool canCrossfade = (fading != nullptr || useDryAsOld)
             && dspCrossfadeGain.isSmoothing()

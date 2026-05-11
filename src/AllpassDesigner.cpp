@@ -1,4 +1,5 @@
 #include "AllpassDesigner.h"
+#include "DftiHandle.h"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -7,6 +8,188 @@
 #include <chrono>
 
 namespace convo {
+
+namespace {
+
+constexpr uint64_t kDefaultDeterministicCmaesSeed = 0x434f4e564f4251ull;
+
+static std::vector<double> buildFrequencyCandidates(double sampleRate)
+{
+    constexpr int kCandidateCount = 18;
+    constexpr double kMinCandidateHz = 20.0;
+    const double maxCandidateHz = std::max(kMinCandidateHz,
+        std::min(0.45 * sampleRate, 0.499 * sampleRate));
+
+    std::vector<double> candidates;
+    candidates.reserve(kCandidateCount);
+
+    if (maxCandidateHz <= kMinCandidateHz)
+    {
+        candidates.push_back(kMinCandidateHz);
+        return candidates;
+    }
+
+    const double logMin = std::log(kMinCandidateHz);
+    const double logMax = std::log(maxCandidateHz);
+    for (int index = 0; index < kCandidateCount; ++index)
+    {
+        const double t = (kCandidateCount == 1)
+            ? 0.0
+            : static_cast<double>(index) / static_cast<double>(kCandidateCount - 1);
+        candidates.push_back(std::exp(logMin + (logMax - logMin) * t));
+    }
+
+    return candidates;
+}
+
+static double clampOptimizationFrequency(double sampleRate, double value) noexcept
+{
+    const double maxCandidateHz = std::max(20.0,
+        std::min(0.45 * sampleRate, 0.499 * sampleRate));
+    return std::clamp(value, 20.0, maxCandidateHz);
+}
+
+static double makeRelativeFrequencyStep(double f0) noexcept
+{
+    return std::max(1.0e-3, std::abs(f0) * 1.0e-4);
+}
+
+static double makeRelativeGainStep(double gain) noexcept
+{
+    return std::clamp(std::max(1.0e-6, std::abs(gain) * 1.0e-4), 1.0e-6, 5.0e-3);
+}
+
+static inline double stableSigmoid01(double x) noexcept
+{
+    // |x| > 50 では exp がオーバーフロー/アンダーフローするためクランプ (A-4)
+    x = std::clamp(x, -50.0, 50.0);
+    if (x >= 0.0)
+    {
+        const double expNegX = std::exp(-x);
+        return 1.0 / (1.0 + expNegX);
+    }
+
+    const double expX = std::exp(x);
+    return expX / (1.0 + expX);
+}
+
+static inline uint64_t rotl64(uint64_t value, int count) noexcept
+{
+    return (value << count) | (value >> (64 - count));
+}
+
+static inline uint64_t readLE64(const uint8_t* p) noexcept
+{
+    uint64_t v = 0;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+static inline uint32_t readLE32(const uint8_t* p) noexcept
+{
+    uint32_t v = 0;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+static inline uint64_t xxh64Round(uint64_t acc, uint64_t input) noexcept
+{
+    constexpr uint64_t kPrime1 = 11400714785074694791ull;
+    constexpr uint64_t kPrime2 = 14029467366897019727ull;
+    acc += input * kPrime2;
+    acc = rotl64(acc, 31);
+    acc *= kPrime1;
+    return acc;
+}
+
+static inline uint64_t xxh64MergeRound(uint64_t acc, uint64_t val) noexcept
+{
+    constexpr uint64_t kPrime1 = 11400714785074694791ull;
+    constexpr uint64_t kPrime4 = 9650029242287828579ull;
+    acc ^= xxh64Round(0, val);
+    acc = acc * kPrime1 + kPrime4;
+    return acc;
+}
+
+static inline uint64_t xxh64Avalanche(uint64_t h) noexcept
+{
+    constexpr uint64_t kPrime2 = 14029467366897019727ull;
+    constexpr uint64_t kPrime3 = 1609587929392839161ull;
+    h ^= h >> 33;
+    h *= kPrime2;
+    h ^= h >> 29;
+    h *= kPrime3;
+    h ^= h >> 32;
+    return h;
+}
+
+static inline uint64_t xxh64Digest(const uint8_t* data, size_t len, uint64_t seed) noexcept
+{
+    constexpr uint64_t kPrime1 = 11400714785074694791ull;
+    constexpr uint64_t kPrime2 = 14029467366897019727ull;
+    constexpr uint64_t kPrime3 = 1609587929392839161ull;
+    constexpr uint64_t kPrime4 = 9650029242287828579ull;
+    constexpr uint64_t kPrime5 = 2870177450012600261ull;
+
+    const uint8_t* p = data;
+    const uint8_t* end = data + len;
+    uint64_t h = 0;
+
+    if (len >= 32)
+    {
+        uint64_t v1 = seed + kPrime1 + kPrime2;
+        uint64_t v2 = seed + kPrime2;
+        uint64_t v3 = seed + 0;
+        uint64_t v4 = seed - kPrime1;
+
+        const uint8_t* limit = end - 32;
+        do
+        {
+            v1 = xxh64Round(v1, readLE64(p)); p += 8;
+            v2 = xxh64Round(v2, readLE64(p)); p += 8;
+            v3 = xxh64Round(v3, readLE64(p)); p += 8;
+            v4 = xxh64Round(v4, readLE64(p)); p += 8;
+        } while (p <= limit);
+
+        h = rotl64(v1, 1) + rotl64(v2, 7) + rotl64(v3, 12) + rotl64(v4, 18);
+        h = xxh64MergeRound(h, v1);
+        h = xxh64MergeRound(h, v2);
+        h = xxh64MergeRound(h, v3);
+        h = xxh64MergeRound(h, v4);
+    }
+    else
+    {
+        h = seed + kPrime5;
+    }
+
+    h += static_cast<uint64_t>(len);
+
+    while ((p + 8) <= end)
+    {
+        const uint64_t k1 = xxh64Round(0, readLE64(p));
+        h ^= k1;
+        h = rotl64(h, 27) * kPrime1 + kPrime4;
+        p += 8;
+    }
+
+    if ((p + 4) <= end)
+    {
+        h ^= static_cast<uint64_t>(readLE32(p)) * kPrime1;
+        h = rotl64(h, 23) * kPrime2 + kPrime3;
+        p += 4;
+    }
+
+    while (p < end)
+    {
+        h ^= static_cast<uint64_t>(*p) * kPrime5;
+        h = rotl64(h, 11) * kPrime1;
+        ++p;
+    }
+
+    return xxh64Avalanche(h);
+}
+
+} // namespace
 
 //==============================================================================
 // 静的ヘルパー：群遅延（(ρ, θ) 版）
@@ -38,14 +221,15 @@ double AllpassDesigner::sectionGroupDelay(double f0, double gain, double omega, 
 static inline double unconstrainedToRho(double x) {
     // 単調増加写像 R → (0, 0.98)。x=0 で ρ=0.49。
     // 旧実装は偶関数（rho(-x)==rho(x)）で二重縮退が生じていたため sigmoid に変更。
-    return 0.98 / (1.0 + std::exp(-x));
+    return 0.98 * stableSigmoid01(x);
 }
 
 static inline double unconstrainedToTheta(double x) {
-    // 単調増加写像 R → (0, π)。x=0 で θ=π/2。
+    // 単調増加写像 R → (0, 0.99π)。x=0 で θ=0.495π。
     // 群遅延式は cos(ω-θ)+cos(ω+θ) の対称性から θ ∈ (0,π) で充足。
-    // 旧実装の ±π ハードクリップによるコスト関数不連続を解消。
-    return juce::MathConstants<double>::pi / (1.0 + std::exp(-x));
+    // Nyquist 極配置を避けるため上限を π 未満に固定する。
+    constexpr double kThetaMax = 0.99 * juce::MathConstants<double>::pi;
+    return kThetaMax * stableSigmoid01(x);
 }
 
 //==============================================================================
@@ -65,9 +249,7 @@ DesignResult AllpassDesigner::designWithCMAES(
     const int D = 2 * config.numSections;   // (x_rho, x_theta) のペア
     CmaEsOptimizerDynamic optimizer(D);
     optimizer.setParams(config.cmaesParams);
-    if (config.cmaesSeed != 0) {
-        optimizer.setSeed(config.cmaesSeed);
-    }
+    optimizer.setSeed(config.cmaesSeed != 0 ? config.cmaesSeed : kDefaultDeterministicCmaesSeed);
     if (config.cmaesInitialSigma > 0.0) {
         CmaEsOptimizerDynamic::Params p = config.cmaesParams;
         p.sigmaMin = std::min(p.sigmaMin, config.cmaesInitialSigma);
@@ -112,6 +294,8 @@ DesignResult AllpassDesigner::designWithCMAES(
         cosOmega[i] = std::cos(omega[i]);
         sinOmega[i] = std::sin(omega[i]);
         weight[i] = 1.0 / std::sqrt(freq_hz[i] + 1.0);
+        if (freq_hz[i] >= 0.499 * sampleRate)
+            weight[i] *= 0.1;
         weightSum += weight[i];
     }
     for (auto& w : weight) w /= weightSum;
@@ -303,10 +487,7 @@ bool AllpassDesigner::gridSearch2D(const std::vector<double, convo::MKLAllocator
                                    const std::vector<double, convo::MKLAllocator<double>>& residual,
                                    double sampleRate,
                                    double& best_f0, double& best_gain) {
-    const std::vector<double> f0_candidates = {
-        20.0, 40.0, 80.0, 120.0, 200.0, 300.0, 500.0, 800.0, 1000.0, 1500.0, 2000.0,
-        3000.0, 5000.0, 8000.0, 10000.0, 12000.0, 15000.0, 20000.0
-    };
+    const std::vector<double> f0_candidates = buildFrequencyCandidates(sampleRate);
     const std::vector<double> gain_candidates = { 0.1, 0.3, 0.5, 0.7, 0.9, 0.95, 0.98 };
 
     double best_error = std::numeric_limits<double>::max();
@@ -333,7 +514,6 @@ bool AllpassDesigner::adaptiveGradientDescent(const std::vector<double, convo::M
                                               double sampleRate,
                                               double& f0, double& gain,
                                               double learningRate, int maxIterations) {
-    const double eps = 1e-6;
     double grad_f0_norm = 0.0, grad_gain_norm = 0.0;
     double prev_error = std::numeric_limits<double>::max();
 
@@ -347,22 +527,24 @@ bool AllpassDesigner::adaptiveGradientDescent(const std::vector<double, convo::M
         if (error >= prev_error) break;
         prev_error = error;
 
+        const double epsF0 = makeRelativeFrequencyStep(f0);
+        const double epsGain = makeRelativeGainStep(gain);
         double err_f0_plus = 0.0, err_f0_minus = 0.0;
         double err_gain_plus = 0.0, err_gain_minus = 0.0;
         for (size_t i = 0; i < omega.size(); ++i) {
-            err_f0_plus += std::pow(sectionGroupDelay(f0 + eps, gain, omega[i], sampleRate) - residual[i], 2);
-            err_f0_minus += std::pow(sectionGroupDelay(f0 - eps, gain, omega[i], sampleRate) - residual[i], 2);
-            err_gain_plus += std::pow(sectionGroupDelay(f0, gain + eps, omega[i], sampleRate) - residual[i], 2);
-            err_gain_minus += std::pow(sectionGroupDelay(f0, gain - eps, omega[i], sampleRate) - residual[i], 2);
+            err_f0_plus += std::pow(sectionGroupDelay(f0 + epsF0, gain, omega[i], sampleRate) - residual[i], 2);
+            err_f0_minus += std::pow(sectionGroupDelay(f0 - epsF0, gain, omega[i], sampleRate) - residual[i], 2);
+            err_gain_plus += std::pow(sectionGroupDelay(f0, gain + epsGain, omega[i], sampleRate) - residual[i], 2);
+            err_gain_minus += std::pow(sectionGroupDelay(f0, gain - epsGain, omega[i], sampleRate) - residual[i], 2);
         }
 
-        double grad_f0 = (err_f0_plus - err_f0_minus) / (2.0 * eps);
-        double grad_gain = (err_gain_plus - err_gain_minus) / (2.0 * eps);
+        double grad_f0 = (err_f0_plus - err_f0_minus) / (2.0 * epsF0);
+        double grad_gain = (err_gain_plus - err_gain_minus) / (2.0 * epsGain);
         grad_f0_norm += grad_f0 * grad_f0;
         grad_gain_norm += grad_gain * grad_gain;
         f0 -= learningRate * grad_f0 / (std::sqrt(grad_f0_norm) + 1e-8);
         gain -= learningRate * grad_gain / (std::sqrt(grad_gain_norm) + 1e-8);
-        f0 = std::clamp(f0, 20.0, 20000.0);
+        f0 = clampOptimizationFrequency(sampleRate, f0);
         gain = std::clamp(gain, 0.0, 0.995);
     }
     return true;
@@ -433,16 +615,15 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
         std::real(allpassResp[half]) >= 0.0 ? 1.0 : -1.0, 0.0);
 
     // 2. MKL DFTI ディスクリプタ作成 (複素 in-place, BACKWARD_SCALE = 1/N)
-    DFTI_DESCRIPTOR_HANDLE dfti = nullptr;
+    ScopedDftiDescriptor dfti;
     const MKL_LONG len = static_cast<MKL_LONG>(fftSize);
-    if (DftiCreateDescriptor(&dfti, DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
+    if (DftiCreateDescriptor(dfti.put(), DFTI_DOUBLE, DFTI_COMPLEX, 1, len) != DFTI_NO_ERROR)
         return {};
-    if (DftiSetValue(dfti, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR ||
-        DftiSetValue(dfti, DFTI_BACKWARD_SCALE,
+    if (DftiSetValue(dfti.handle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR ||
+        DftiSetValue(dfti.handle, DFTI_BACKWARD_SCALE,
                      1.0 / static_cast<double>(fftSize)) != DFTI_NO_ERROR ||
-        DftiCommitDescriptor(dfti) != DFTI_NO_ERROR)
+        DftiCommitDescriptor(dfti.handle) != DFTI_NO_ERROR)
     {
-        DftiFreeDescriptor(&dfti);
         return {};
     }
 
@@ -450,14 +631,14 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
     convo::ScopedAlignedPtr<MKL_Complex16> spec(
         static_cast<MKL_Complex16*>(
             convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
-    if (!spec) { DftiFreeDescriptor(&dfti); return {}; }
+    if (!spec) { return {}; }
 
     juce::AudioBuffer<double> result(numChannels, irLen);
     result.clear();
 
     for (int ch = 0; ch < numChannels; ++ch)
     {
-        if (shouldExit && shouldExit()) { DftiFreeDescriptor(&dfti); return {}; }
+        if (shouldExit && shouldExit()) { return {}; }
 
         // ゼロパディングしながら実部に IR をコピー
         std::memset(spec.get(), 0, static_cast<size_t>(fftSize) * sizeof(MKL_Complex16));
@@ -466,8 +647,8 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
             spec.get()[i].real = src[i];
 
         // 順方向 FFT
-        if (DftiComputeForward(dfti, spec.get()) != DFTI_NO_ERROR)
-        { DftiFreeDescriptor(&dfti); return {}; }
+        if (DftiComputeForward(dfti.handle, spec.get()) != DFTI_NO_ERROR)
+        { return {}; }
 
         // 全通過応答を正の半スペクトル (k = 0..N/2) に乗算
         for (int k = 0; k <= half; ++k)
@@ -477,22 +658,20 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
             spec.get()[k].real = out.real();
             spec.get()[k].imag = out.imag();
         }
-        // Hermitian 対称性: 負の半スペクトル (k = N/2+1..N-1) を共役ミラーで更新
+        // B-1: 負側は更新済み正側 half-spectrum から共役再構築し、Hermitian 対称性を厳密化する。
         for (int k = half + 1; k < fftSize; ++k)
         {
             const int mirror = fftSize - k;
-            const std::complex<double> h(spec.get()[k].real, spec.get()[k].imag);
-            const std::complex<double> out = h * std::conj(allpassResp[mirror]);
-            spec.get()[k].real = out.real();
-            spec.get()[k].imag = out.imag();
+            spec.get()[k].real = spec.get()[mirror].real;
+            spec.get()[k].imag = -spec.get()[mirror].imag;
         }
         // DC と Nyquist の虚部を強制ゼロ（実 IR の Hermitian 条件）
         spec.get()[0].imag    = 0.0;
         spec.get()[half].imag = 0.0;
 
         // 逆方向 FFT (1/N スケーリング適用済み)
-        if (DftiComputeBackward(dfti, spec.get()) != DFTI_NO_ERROR)
-        { DftiFreeDescriptor(&dfti); return {}; }
+        if (DftiComputeBackward(dfti.handle, spec.get()) != DFTI_NO_ERROR)
+        { return {}; }
 
         // 実部のみ irLen サンプル書き出し（デノーマル抑制付き）
         double* dst = result.getWritePointer(ch);
@@ -515,7 +694,6 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
             if (!std::isfinite(p[i]))
             {
                 DBG("applyAllpassToIR: Safety guard triggered (NaN/Inf detected).");
-                DftiFreeDescriptor(&dfti);
                 return {};
             }
         }
@@ -538,7 +716,6 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
         DBG("applyAllpassToIR: peak reduced from " << peak << " to " << (peak * gain));
     }
 
-    DftiFreeDescriptor(&dfti);
     return result;
 }
 
@@ -546,20 +723,51 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
 // computeIRHash
 //==============================================================================
 uint64_t AllpassDesigner::computeIRHash(const juce::File& irFile, bool /*useMD5*/) {
-    if (!irFile.existsAsFile()) return 0;
+    if (!irFile.existsAsFile())
+        return 0;
 
-    uint64_t hash = static_cast<uint64_t>(irFile.getSize());
-    hash ^= static_cast<uint64_t>(irFile.getLastModificationTime().toMilliseconds()) << 1;
+    const auto sizeBefore = irFile.getSize();
+    const auto mtimeBefore = irFile.getLastModificationTime().toMilliseconds();
 
     std::unique_ptr<juce::FileInputStream> stream(irFile.createInputStream());
-    if (stream) {
-        uint8_t buffer[1024];
-        int bytesRead = stream->read(buffer, 1024);
-        for (int i = 0; i < bytesRead; ++i) {
-            hash = (hash * 31) + buffer[i];
-        }
+    if (stream == nullptr)
+        return 0;
+
+    // A-2: xxHash64 でファイル全体を計算し、TOCTOU は before/after 検証で防止する。
+    constexpr uint64_t kHashVersionSalt = 0x434f4e564f504551ull; // "CONVOPEQ"
+    juce::HeapBlock<uint8_t> fileData;
+    const size_t fileSize = static_cast<size_t>(juce::jmax<int64>(0, sizeBefore));
+    if (fileSize > 0)
+        fileData.malloc(fileSize);
+
+    size_t writePos = 0;
+    uint8_t tempBuffer[4096];
+    for (;;)
+    {
+        const int bytesRead = stream->read(tempBuffer, static_cast<int>(sizeof(tempBuffer)));
+        if (bytesRead <= 0)
+            break;
+
+        const size_t bytes = static_cast<size_t>(bytesRead);
+        if (writePos + bytes > fileSize)
+            return 0;
+        if (bytes > 0)
+            std::memcpy(fileData.getData() + writePos, tempBuffer, bytes);
+        writePos += bytes;
     }
 
+    if (stream->getStatus().failed())
+        return 0;
+
+    if (writePos != fileSize)
+        return 0;
+
+    const auto sizeAfter = irFile.getSize();
+    const auto mtimeAfter = irFile.getLastModificationTime().toMilliseconds();
+    if (sizeBefore != sizeAfter || mtimeBefore != mtimeAfter)
+        return 0;
+
+    const uint64_t hash = xxh64Digest(fileData.getData(), fileSize, kHashVersionSalt);
     return hash;
 }
 

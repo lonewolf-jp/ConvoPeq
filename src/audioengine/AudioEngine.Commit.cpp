@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "RuntimeBuilder.h"
 
 extern std::atomic<bool> gShuttingDown;
 
@@ -90,6 +91,12 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     uint64_t retireEpoch = 0;
     bool scheduleDryAsOldCrossfade = false;
     double dryAsOldFadeTimeSec = 0.0;
+    int transitionLatencyDeltaSamples = 0;
+
+    validateDistinctRuntimeSlots("commitNewDSP.entry",
+                                 activeDSP,
+                                 sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                                 sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
 
     // Lock to ensure the check and commit are atomic with respect to new rebuild requests.
     {
@@ -106,7 +113,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // IR を実際に使う構成では finalized 済みのみ公開する。
         // 一方、IR 未ロード時のパススルーDSPまで弾くと起動直後に無音化するため許可する。
         if (newDSP == nullptr
-            || (newDSP->convolver.isIRLoaded() && !newDSP->convolver.isIRFinalized()))
+            || (newDSP->convolverRt().isIRLoaded() && !newDSP->convolverRt().isIRFinalized()))
         {
             DBG("[AudioEngine] commitNewDSP: rejected non-finalized DSP publish");
             if (newDSP != nullptr)
@@ -121,21 +128,45 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         if (newDSP != nullptr)
             newDSP->currentCaptureSessionId = newSessionId;
 
-        // 2. Update the atomic raw pointer for the Audio Thread (Wait-free)
-        currentDSP.store(newDSP, std::memory_order_release);
+        // Warmup: FIR 履歴と AGC state を初期化する
+        // currentDSP.store より前に実行し、安定した state で Audio thread に提供
+        if (newDSP != nullptr)
+        {
+            convo::RuntimeBuilder builder(*this);
+            const convo::BuildError warmupError = builder.executeWarmup(*newDSP);
+            if (warmupError != convo::BuildError::None)
+            {
+                diagLog("[AudioEngine] commitNewDSP: warmup failed, rejecting DSP publish (err=" + juce::String(convo::toString(warmupError)) + ")");
+                retireDSP(newDSP);
+                return;
+            }
+        }
+
+        // 2. 新ランタイム publish と所有権引き渡しを helper 経由で集約する
+        publishCurrentDSPAndTakeOwnership(newDSP);
 
         // 3. EBR：エポックを進める
         convo::EpochManager::instance().advanceEpoch();
         retireEpoch = convo::EpochManager::instance().currentEpoch();
         g_currentEpoch.store(retireEpoch, std::memory_order_release);
 
-        // 4. Take ownership of the new DSP
-        activeDSP = newDSP;
+        const auto publishState = makeRuntimePublishState(
+                                  newDSP,
+                                  nullptr,
+                                  convo::TransitionPolicy::SmoothOnly,
+                                  0.0,
+                                  false);
+        publishRuntimePublishState(publishState);
         publishRuntimeTransitionState(newDSP,
                           nullptr,
                           convo::TransitionPolicy::SmoothOnly,
                           0.0,
                           false);
+
+        validateDistinctRuntimeSlots("commitNewDSP.afterPublish",
+                                     activeDSP,
+                                     sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                                     sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
 
         // この世代の publish が完了したので outstanding rebuild 窓を閉じる。
         lastCommittedRebuildGeneration.store(generation, std::memory_order_release);
@@ -145,24 +176,34 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     // 5. 初回IRロード時（旧DSPなし）: dry を旧信号としてクロスフェード予約
     if (dspToTrash == nullptr
         && newDSP != nullptr
-        && newDSP->convolver.isIRLoaded()
+        && newDSP->convolverRt().isIRLoaded()
         && !firstIrDryCrossfadeDone.load(std::memory_order_acquire))
     {
         // 初回のみ dry -> IR を明示的にフェードし、立ち上がりノイズを抑制する。
         scheduleDryAsOldCrossfade = true;
         dryAsOldFadeTimeSec = std::max(0.001, m_irFadeTimeSec.load(std::memory_order_relaxed));
 
-        const int newLatency = newDSP->convolver.getTotalLatencySamples();
+        const bool convBypassedForLatency = m_currentConvBypass.load(std::memory_order_relaxed);
+        const int newLatency = estimateRuntimeLatencyBaseRateSamples(newDSP, convBypassedForLatency);
         int dOld = std::min(newLatency, latencyBufSize - 1); // dry 側を遅延させて整合
         const int dNew = 0;
         latencyDelayOld.store(dOld, std::memory_order_release);
         latencyDelayNew.store(dNew, std::memory_order_release);
         latencyResetPending.store(true, std::memory_order_release);
+        transitionLatencyDeltaSamples = dOld - dNew;
+
+        diagLog("[DIAG] commitNewDSP: dry->IR latency align old="
+            + juce::String(static_cast<juce::int64>(dOld))
+            + " new=" + juce::String(static_cast<juce::int64>(dNew))
+            + " effectiveNew=" + juce::String(static_cast<juce::int64>(newLatency))
+            + " convBypassed=" + juce::String(convBypassedForLatency ? 1 : 0));
     }
 
     diagLog("[DIAG] commitNewDSP: entry gen=" + juce::String(generation)
-        + " dspToTrash=" + (dspToTrash != nullptr ? juce::String(dspToTrash->convolver.isIRLoaded() ? "IR" : "passthrough") : "null")
-        + " irLoaded=" + (newDSP != nullptr ? juce::String((int)newDSP->convolver.isIRLoaded()) : "n/a"));
+        + " dspToTrash=" + (dspToTrash != nullptr ? juce::String(dspToTrash->convolverRt().isIRLoaded() ? "IR" : "passthrough") : "null")
+        + " oldUuid=" + juce::String(static_cast<juce::int64>(dspToTrash != nullptr ? dspToTrash->runtimeUuid : 0))
+        + " irLoaded=" + (newDSP != nullptr ? juce::String((int)newDSP->convolverRt().isIRLoaded()) : "n/a")
+        + " newUuid=" + juce::String(static_cast<juce::int64>(newDSP != nullptr ? newDSP->runtimeUuid : 0)));
     // 5. RCU deferred release：旧 DSP を grace period 後に解放する
     if (dspToTrash != nullptr)
     {
@@ -172,8 +213,8 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
         if (newDSP != nullptr && dspToTrash != nullptr)
         {
-            const bool oldHasIR = dspToTrash->convolver.isIRLoaded();
-            const bool newHasIR = newDSP->convolver.isIRLoaded();
+            const bool oldHasIR = dspToTrash->convolverRt().isIRLoaded();
+            const bool newHasIR = newDSP->convolverRt().isIRLoaded();
             const bool hasAudibleConvolverTransition = oldHasIR || newHasIR;
             const bool irPresenceChanged = (oldHasIR != newHasIR);
 
@@ -191,8 +232,8 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             // 起動直後の設定同期で不要なフェード連打が起きるのを防ぐ。
             if (hasAudibleConvolverTransition)
             {
-                const uint64_t oldHash = dspToTrash->convolver.getStructuralHash();
-                const uint64_t newHash = newDSP->convolver.getStructuralHash();
+                const uint64_t oldHash = dspToTrash->convolverRt().getStructuralHash();
+                const uint64_t newHash = newDSP->convolverRt().getStructuralHash();
                 diagLog("[DIAG] commitNewDSP: hashes oldHash=" + juce::String((int64)oldHash) + " newHash=" + juce::String((int64)newHash) + " needsCF=" + juce::String((int)needsCrossfade));
                 if (oldHash != newHash)
                 {
@@ -225,8 +266,9 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             // --- レイテンシ差・バッファ初期化はクロスフェード時のみ ---
             if (needsCrossfade)
             {
-                const int oldLatency = dspToTrash->convolver.getTotalLatencySamples();
-                const int newLatency = newDSP->convolver.getTotalLatencySamples();
+                const bool convBypassedForLatency = m_currentConvBypass.load(std::memory_order_relaxed);
+                const int oldLatency = estimateRuntimeLatencyBaseRateSamples(dspToTrash, convBypassedForLatency);
+                const int newLatency = estimateRuntimeLatencyBaseRateSamples(newDSP, convBypassedForLatency);
                 const int targetLatency = std::max(oldLatency, newLatency);
                 int dOld = targetLatency - oldLatency;
                 int dNew = targetLatency - newLatency;
@@ -236,6 +278,14 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                 latencyDelayNew.store(dNew, std::memory_order_release);
                 // ★ resetはAudioThreadで1回だけ行う
                 latencyResetPending.store(true, std::memory_order_release);
+                transitionLatencyDeltaSamples = dOld - dNew;
+
+                diagLog("[DIAG] commitNewDSP: latency align old="
+                    + juce::String(static_cast<juce::int64>(dOld))
+                    + " new=" + juce::String(static_cast<juce::int64>(dNew))
+                    + " effectiveOld=" + juce::String(static_cast<juce::int64>(oldLatency))
+                    + " effectiveNew=" + juce::String(static_cast<juce::int64>(newLatency))
+                    + " convBypassed=" + juce::String(convBypassedForLatency ? 1 : 0));
 
                 if (!oldHasIR && newHasIR)
                     dspCrossfadeStartDelayBlocks.store(std::max(0, m_crossfadeStartDelayBlocks.load(std::memory_order_relaxed)), std::memory_order_release);
@@ -256,70 +306,53 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // --- クロスフェードdeduplication・スナップショット ---
         if (needsCrossfade)
         {
-            const bool isFadingActive = (sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)) != nullptr) ||
-                                        dspCrossfadePending.load(std::memory_order_acquire) ||
-                                        dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
-            publishRuntimeTransitionState(activeDSP,
-                                          dspToTrash,
-                                          convo::TransitionPolicy::SmoothOnly,
-                                          fadeTimeSec,
-                                          true);
+            const auto* runtimePublish = getRuntimePublishState();
+            const auto* engineRuntime = getEngineRuntimeState();
+            const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimePublish) != nullptr);
+            const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
+            const bool hasPendingCrossfade = atomicPendingCrossfade
+                || runtimeCrossfadePending(runtimePublish, engineRuntime);
+            const bool atomicUseDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
+            const bool useDryAsOld = atomicUseDryAsOld
+                || runtimeCrossfadeUseDryAsOld(runtimePublish, engineRuntime);
+            const bool isFadingActive = hasFadingRuntime || hasPendingCrossfade || useDryAsOld;
+            publishSmoothTransitionState(activeDSP,
+                                         dspToTrash,
+                                         fadeTimeSec,
+                                         transitionLatencyDeltaSamples);
             if (isFadingActive)
             {
-                if (auto* prev = sanitizeRawPtr(queuedOldDSP.exchange(dspToTrash, std::memory_order_acq_rel)))
-                    retireDSP(prev);
-                queuedNextFadeTimeSec.store(fadeTimeSec, std::memory_order_release);
-                fadeQueued.store(true, std::memory_order_release);
+                queueDeferredSmoothTransition(dspToTrash, fadeTimeSec);
             }
             else
             {
-                if (auto* oldFading = sanitizeRawPtr(fadingOutDSP.exchange(dspToTrash, std::memory_order_acq_rel)))
-                    retireDSP(oldFading);
-                queuedFadeTimeSec.store(fadeTimeSec, std::memory_order_release);
-                dspCrossfadePending.store(true, std::memory_order_release);
-                setIRChangeFlag();
+                startImmediateSmoothTransition(dspToTrash, fadeTimeSec);
             }
         }
         else if (dspToTrash)
         {
             // クロスフェード不要時は即時解放
-            retireDSP(dspToTrash);
-            publishRuntimeTransitionState(activeDSP,
-                                          nullptr,
-                                          convo::TransitionPolicy::HardReset,
-                                          0.0,
-                                          false);
+            retireRuntimeImmediately(dspToTrash);
+            publishHardResetForCurrentDSP();
         }
     }
 
     if (scheduleDryAsOldCrossfade)
     {
-        queuedFadeTimeSec.store(dryAsOldFadeTimeSec, std::memory_order_release);
-        publishRuntimeTransitionState(activeDSP,
-                                      nullptr,
-                                      convo::TransitionPolicy::DryAsOld,
-                                      dryAsOldFadeTimeSec,
-                                      true);
-        dspCrossfadeDryHoldSamples.store(std::max(1, maxSamplesPerBlock.load(std::memory_order_acquire)), std::memory_order_release);
-        // dry スケーリング: passthrough (1.0) -> IR scale (~0.133) へ 60ms で ramp
-        dspCrossfadeDryScaleGain.reset(std::max(1.0, currentSampleRate.load(std::memory_order_acquire)), 0.060);
-        dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
-        dspCrossfadeDryScaleGain.setTargetValue(uiConvolverProcessor.getCurrentIRScale());
-        firstIrDryCrossfadePending.store(true, std::memory_order_release);
-        dspCrossfadePending.store(true, std::memory_order_release);
-        firstIrDryCrossfadeDone.store(true, std::memory_order_release);
-        setIRChangeFlag();
+        armDryAsOldCrossfadeForCurrentDSP(dryAsOldFadeTimeSec,
+                                          transitionLatencyDeltaSamples,
+                                          uiConvolverProcessor.getCurrentIRScale());
 
         diagLog("[DIAG] commitNewDSP: first-load dry->IR crossfade armed fadeSec="
             + juce::String(dryAsOldFadeTimeSec, 3)
-            + " irName=" + newDSP->convolver.getIRName());
+            + " irName=" + newDSP->convolverRt().getIRName());
     }
 
     if (newDSP != nullptr)
     {
         diagLog("[DIAG] commitNewDSP: before setMixedPhaseState state="
-            + juce::String(newDSP->convolver.getMixedPhaseState()));
-        uiConvolverProcessor.setMixedPhaseState(newDSP->convolver.getMixedPhaseState());
+            + juce::String(newDSP->convolverRt().getMixedPhaseState()));
+        uiConvolverProcessor.setMixedPhaseState(newDSP->convolverRt().getMixedPhaseState());
         diagLog("[DIAG] commitNewDSP: after setMixedPhaseState");
     }
 
@@ -345,6 +378,10 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     // sendChangeMessage() は commitNewDSP() でのみ rebuild 用途で呼ぶ。
     // それ以外の sendChangeMessage() はフェード完了・UIパラメータ変更・
     // 状態復元など rebuild とは独立したイベント用途。
+    validateDistinctRuntimeSlots("commitNewDSP.beforeSendChangeMessage",
+                                 activeDSP,
+                                 sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                                 sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
     diagLog("[DIAG] commitNewDSP: before sendChangeMessage");
     sendChangeMessage();
     diagLog("[DIAG] commitNewDSP: after sendChangeMessage");

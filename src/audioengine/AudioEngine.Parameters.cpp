@@ -14,6 +14,7 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::setEqBypassRequested (bool shouldBypass)
 {
+    ASSERT_NON_RT_THREAD();
     eqBypassRequested.store (shouldBypass, std::memory_order_release);
     m_currentEqBypass.store(shouldBypass, std::memory_order_release);
     uiEqEditor.setBypass(shouldBypass);
@@ -24,6 +25,7 @@ void AudioEngine::setEqBypassRequested (bool shouldBypass)
 
 void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
 {
+    ASSERT_NON_RT_THREAD();
     convBypassRequested.store (shouldBypass, std::memory_order_release);
     m_currentConvBypass.store(shouldBypass, std::memory_order_release);
     uiConvolverProcessor.setBypass(shouldBypass);
@@ -289,6 +291,7 @@ juce::ValueTree AudioEngine::getCurrentState() const
 
 void AudioEngine::setInputHeadroomDb(float db)
 {
+    ASSERT_NON_RT_THREAD();
     // コンボルバーが先頭に来る場合 (Conv→PEQ / Conv only) は -6dB 上限で入力保護する。
     // EQ が先頭またはコンボルバーがバイパスされている場合は 0dB まで許容する。
     const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
@@ -313,6 +316,7 @@ float AudioEngine::getInputHeadroomDb() const
 
 void AudioEngine::setOutputMakeupDb(float db)
 {
+    ASSERT_NON_RT_THREAD();
     // Output makeup は全モード共通で 0..12 dB
     const float clampedDb = juce::jlimit(0.0f, 12.0f, db);
     if (std::abs(outputMakeupDb.load() - clampedDb) > 1e-5f)
@@ -331,6 +335,7 @@ float AudioEngine::getOutputMakeupDb() const
 
 void AudioEngine::setProcessingOrder(ProcessingOrder order)
 {
+    ASSERT_NON_RT_THREAD();
     currentProcessingOrder.store(order);
     m_currentProcessingOrder.store(order, std::memory_order_relaxed);
     enqueueSnapshotCommand();
@@ -339,6 +344,7 @@ void AudioEngine::setProcessingOrder(ProcessingOrder order)
 
 void AudioEngine::setConvolverInputTrimDb(float db)
 {
+    ASSERT_NON_RT_THREAD();
     // 範囲: -12..0 dB (0dB = トリムなし / -12dB = 最大保護)
     float clampedDb = juce::jlimit(-12.0f, 0.0f, db);
     if (std::abs(convolverInputTrimDb.load() - clampedDb) > 1e-5f)

@@ -225,8 +225,8 @@ private:
     std::atomic<uint32_t> evaluationDispatchSerial{0};
     bool evaluationWorkersShouldExit = false;
     std::atomic<int> nextEvaluationCandidateIndex { 0 };
-    double candidatePopulation[CmaEsOptimizer::kPopulation][CmaEsOptimizer::kDim] = {};
-    double candidateFitness[CmaEsOptimizer::kPopulation] = {};
+    alignas(64) double candidatePopulation[CmaEsOptimizer::kPopulation][CmaEsOptimizer::kDim] = {};
+    alignas(64) double candidateFitness[CmaEsOptimizer::kPopulation] = {};
 
     std::array<LeveledSegment, kMaxSegmentsPerLevel> levelBuckets[kNumLevels] = {};
     int levelBucketCounts[kNumLevels] = {};

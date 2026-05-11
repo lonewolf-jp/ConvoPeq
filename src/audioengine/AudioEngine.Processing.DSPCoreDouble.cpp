@@ -343,10 +343,11 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     inputLevelLinear.store(rawInputLinearD, std::memory_order_relaxed);
 
     const bool requestedFullBypass = state.eqBypassed && state.convBypassed;
-    if (requestedFullBypass != bypassedDouble)
+    auto& ramp = ramps();
+    if (requestedFullBypass != ramp.bypassedDouble)
     {
-        bypassFadeGainDouble.setTargetValue(requestedFullBypass ? 0.0 : 1.0);
-        bypassedDouble = requestedFullBypass;
+        ramp.bypassFadeGainDouble.setTargetValue(requestedFullBypass ? 0.0 : 1.0);
+        ramp.bypassedDouble = requestedFullBypass;
     }
 
     double* channels[2] = { alignedL.get(), alignedR.get() };
@@ -371,10 +372,11 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         }
 
         const int numOSSamples = static_cast<int>(processBlock.getNumSamples());
+        auto& dc = dcBlockers();
         if (processBlock.getNumChannels() > 0)
-            osDCBlockerL.process(processBlock.getChannelPointer(0), numOSSamples);
+            dc.oversampledL.process(processBlock.getChannelPointer(0), numOSSamples);
         if (processBlock.getNumChannels() > 1)
-            osDCBlockerR.process(processBlock.getChannelPointer(1), numOSSamples);
+            dc.oversampledR.process(processBlock.getChannelPointer(1), numOSSamples);
     }
 
     const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
@@ -408,26 +410,26 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         }
     }
 
-    eq.setBypass(state.eqBypassed);
+    eqRt().setBypass(state.eqBypassed);
 
     if (state.order == ProcessingOrder::ConvolverThenEQ)
     {
         if (!state.convBypassed)
-            convolver.process(processBlock);
+            convolverRt().process(processBlock);
         if (!state.eqBypassed)
         {
             if (eqParamsToUse != nullptr)
             {
-                eq.process(processBlock, *eqParamsToUse, eqCacheToUse);
+                eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
             }
             else
             {
-                eq.process(processBlock);
+                eqRt().process(processBlock);
             }
         }
         else
         {
-            eq.process(processBlock);
+            eqRt().process(processBlock);
         }
     }
     else
@@ -436,16 +438,16 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         {
             if (eqParamsToUse != nullptr)
             {
-                eq.process(processBlock, *eqParamsToUse, eqCacheToUse);
+                eqRt().process(processBlock, *eqParamsToUse, eqCacheToUse);
             }
             else
             {
-                eq.process(processBlock);
+                eqRt().process(processBlock);
             }
         }
         else
         {
-            eq.process(processBlock);
+            eqRt().process(processBlock);
         }
         if (!state.convBypassed)
         {
@@ -457,7 +459,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                     scaleBlockFallback(ptr, (int)processBlock.getNumSamples(), state.convolverInputTrimGain);
                 }
             }
-            convolver.process(processBlock);
+            convolverRt().process(processBlock);
         }
     }
 
@@ -484,6 +486,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 
     if (state.softClipEnabled)
     {
+        auto& history = histories();
         const double sat = static_cast<double>(state.saturationAmount);
         const double clipThreshold = 0.95 - 0.45 * sat;
         const double clipKnee      = 0.05 + 0.35 * sat;
@@ -493,11 +496,11 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         {
             double* data = processBlock.getChannelPointer(ch);
             softClipBlockAVX2(data, numProcSamples, clipThreshold, clipKnee, clipAsymmetry,
-                               softClipPrevSample[ch < 2 ? ch : 1]);
+                               history.softClipPrevSample[ch < 2 ? ch : 1]);
         }
     }
 
-    const bool bypassBlendRequested = bypassFadeGainDouble.isSmoothing() || requestedFullBypass;
+    const bool bypassBlendRequested = ramp.bypassFadeGainDouble.isSmoothing() || requestedFullBypass;
     if (oversamplingFactor == 1
         && dryBypassBufferDoubleL
         && dryBypassBufferDoubleR
@@ -510,7 +513,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         const double* dryR = dryBypassBufferDoubleR.get();
         for (int i = 0; i < numProcSamples; ++i)
         {
-            const double gWet = bypassFadeGainDouble.getNextValue();
+            const double gWet = ramp.bypassFadeGainDouble.getNextValue();
             const double gDry = 1.0 - gWet;
             if (wetL != nullptr)
                 wetL[i] = wetL[i] * gWet + dryL[i] * gDry;
@@ -530,7 +533,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
             double* wetR = processBlock.getNumChannels() > 1 ? processBlock.getChannelPointer(1) : nullptr;
             for (int i = 0; i < numSamples; ++i)
             {
-                const double gWet = bypassFadeGainDouble.getNextValue();
+                const double gWet = ramp.bypassFadeGainDouble.getNextValue();
                 if (wetL != nullptr)
                     wetL[i] *= gWet;
                 if (wetR != nullptr)
@@ -547,7 +550,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
 
     processOutputDouble(buffer, numSamples, state);
 
-    int fadeLeft = fadeInSamplesLeft.load(std::memory_order_relaxed);
+    int fadeLeft = ramp.fadeInSamplesLeft.load(std::memory_order_relaxed);
     if (fadeLeft > 0)
     {
         const int rampThisBlock = std::min(numSamples, fadeLeft);
@@ -558,7 +561,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         for (int ch = 0; ch < numChannels; ++ch)
             applyGainRamp(buffer.getWritePointer(ch), rampThisBlock, startGain, gainStep);
 
-        fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
+        ramp.fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
     }
 }
 
@@ -576,7 +579,8 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     double* dataL = (numChannels > 0) ? alignedL.get() : nullptr;
     double* dataR = (numChannels > 1) ? alignedR.get() : nullptr;
 
-    dcBlockerL.processStereo(dataL, dataR, numSamples, dcBlockerR);
+    auto& dc = dcBlockers();
+    dc.outputL.processStereo(dataL, dataR, numSamples, dc.outputR);
 
     {
         const __m256d vInf = _mm256_set1_pd(1.0e300);

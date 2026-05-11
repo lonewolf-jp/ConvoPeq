@@ -6,6 +6,7 @@
 #include <new>
 #include <memory>
 #include <type_traits>
+#include <utility>
 
 #include <mkl.h>
 
@@ -50,7 +51,7 @@ public:
     ScopedAlignedPtr(ScopedAlignedPtr&& o) noexcept : ptr(o.ptr) { o.ptr = nullptr; }
     ScopedAlignedPtr& operator=(ScopedAlignedPtr&& o) noexcept
     {
-        if (this != &o) { reset(o.ptr); o.ptr = nullptr; }
+        if (this != &o) { reset(std::exchange(o.ptr, nullptr)); }
         return *this;
     }
 

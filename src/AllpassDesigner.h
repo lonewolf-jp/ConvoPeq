@@ -30,10 +30,13 @@ struct SecondOrderAllpass {
         const std::complex<double> num = a2 + a1 * z + z * z;
         const std::complex<double> den = 1.0 + a1 * z + a2 * z * z;
         const double denMag = std::abs(den);
-        if (denMag < 1e-12)
-            return std::complex<double>(1.0, 0.0);
+        constexpr double kDenFloor = 1.0e-12;
+        const std::complex<double> denUnit = denMag > 0.0
+            ? (den / denMag)
+            : std::complex<double>(1.0, 0.0);
+        const std::complex<double> safeDen = denUnit * std::max(denMag, kDenFloor);
 
-        auto h = num / den;
+        auto h = num / safeDen;
         const double mag = std::abs(h);
         if (mag > 1e-12)
             h /= mag;
@@ -71,7 +74,7 @@ struct AllpassDesignerConfig {
     int cmaesMaxGenerations = 100;
     int cmaesPopulationSize = 32;          // 0 → 自動 (4 * dim)
     double cmaesInitialSigma = 0.3;
-    uint64_t cmaesSeed = 0;                // 0 の場合は非固定シード
+    uint64_t cmaesSeed = 0x434f4e564f4251ull; // B-12: 既定で決定的シードを使う
     std::function<void(float)> progressCallback;
 
     AllpassDesignerConfig() {

@@ -4,6 +4,7 @@
 // スペクトラムアナライザー＋EQ応答曲線＋レベルメーター・ピーク保持
 //============================================================================
 #include "SpectrumAnalyzerComponent.h"
+#include "DftiHandle.h"
 #include <cmath>
 #include <algorithm>
 #include <complex>
@@ -145,7 +146,7 @@ void SpectrumAnalyzerComponent::enableAnalyzer()
 
     prepareFFT();
 
-    if (fftHandle == nullptr || fftTimeDomainBuffer.get() == nullptr || fftWorkBuffer.get() == nullptr)
+    if (fftHandle.get() == nullptr || fftTimeDomainBuffer.get() == nullptr || fftWorkBuffer.get() == nullptr)
     {
         analyzerState.store(AnalyzerState::Disabled, std::memory_order_release);
         engine.setAnalyzerEnabled(false);
@@ -232,31 +233,30 @@ void SpectrumAnalyzerComponent::updateTimerRate()
 
 void SpectrumAnalyzerComponent::prepareFFT()
 {
-    if (fftHandle != nullptr)
+    if (fftHandle.get() != nullptr)
         return;
 
     // Complex 1D FFT, Single Precision
     // リアルタイム性を考慮し、事前にDescriptorを作成・コミットしておく
-    if (DftiCreateDescriptor(&fftHandle, DFTI_SINGLE, DFTI_COMPLEX, 1, NUM_FFT_POINTS) != DFTI_NO_ERROR) {
-        fftHandle = nullptr; return;
+    convo::ScopedDftiDescriptor localDfti;
+    if (DftiCreateDescriptor(localDfti.put(), DFTI_SINGLE, DFTI_COMPLEX, 1, NUM_FFT_POINTS) != DFTI_NO_ERROR) {
+        return;
     }
-    if (DftiSetValue(fftHandle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR) {
-        DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; return;
+    if (DftiSetValue(localDfti.handle, DFTI_PLACEMENT, DFTI_INPLACE) != DFTI_NO_ERROR) {
+        return;
     }
-    if (DftiCommitDescriptor(fftHandle) != DFTI_NO_ERROR) {
-        DftiFreeDescriptor(&fftHandle); fftHandle = nullptr; return;
+    if (DftiCommitDescriptor(localDfti.handle) != DFTI_NO_ERROR) {
+        return;
     }
 
-    jassert(fftHandle != nullptr);
+    fftHandle.reset(localDfti.release());
+
+    jassert(fftHandle.get() != nullptr);
 }
 
 void SpectrumAnalyzerComponent::releaseFFT()
 {
-    if (fftHandle)
-    {
-        DftiFreeDescriptor(&fftHandle);
-        fftHandle = nullptr;
-    }
+    fftHandle.reset();
 }
 
 //--------------------------------------------------------------
@@ -338,7 +338,7 @@ void SpectrumAnalyzerComponent::timerCallback()
 
     if (!isShowing() || !analyzerEnableButton.getToggleState()) return;
     if (analyzerState.load(std::memory_order_acquire) != AnalyzerState::Ready) return;
-    if (fftHandle == nullptr) return;
+    if (fftHandle.get() == nullptr) return;
 
 
     // ── FFTデータの取得とスムーシング ──
@@ -429,7 +429,7 @@ void SpectrumAnalyzerComponent::timerCallback()
     // MKL: Real -> Complex conversion + Windowing
     // fftWorkBuffer is float array of size NUM_FFT_POINTS * 2
     // We treat it as interleaved complex: re, im, re, im...
-    if (fftHandle == nullptr) return;
+    if (fftHandle.get() == nullptr) return;
 
    { const float* src = fftTimeDomainBuffer.get();
         float* dst = fftWorkBuffer.get();
@@ -447,7 +447,7 @@ void SpectrumAnalyzerComponent::timerCallback()
         }
 
         // Step 3c: FFT (Forward)
-        if (DftiComputeForward(fftHandle, dst) != DFTI_NO_ERROR)
+        if (DftiComputeForward(fftHandle.get(), dst) != DFTI_NO_ERROR)
             return;
 
         // Step 4: Magnitude (dB)

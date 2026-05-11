@@ -3,6 +3,12 @@
 
 extern std::atomic<bool> gShuttingDown;
 
+namespace
+{
+    constexpr size_t kDeferredReclaimBudget = 16;
+    constexpr size_t kReclaimBacklogWarnThreshold = 128;
+}
+
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_ADVANCE)
 
 void AudioEngine::advanceRcuEpoch() noexcept
@@ -43,7 +49,14 @@ void AudioEngine::exitRcuReader(int readerIndex) noexcept
 
 void AudioEngine::tryReclaimResources() noexcept
 {
-    convo::EBRQueue::instance().tryReclaim();
+    g_runtimeReclaimCount.fetch_add(1, std::memory_order_relaxed);
+    auto& queue = convo::EBRQueue::instance();
+    queue.tryReclaim(kDeferredReclaimBudget);
+    const size_t backlog = queue.getPendingRetiredCount();
+    if (backlog >= kReclaimBacklogWarnThreshold)
+    {
+        juce::Logger::writeToLog("[DIAG] EBR backlog warning pending=" + juce::String(static_cast<juce::int64>(backlog)));
+    }
 }
 
 #endif
@@ -58,11 +71,19 @@ void AudioEngine::processDeferredReleases()
     if (gShuttingDown.load(std::memory_order_acquire))
     {
         // For simple EBR in minimal config, just try one last reclaim or rely on cleanup at termination
+        g_runtimeReclaimCount.fetch_add(1, std::memory_order_relaxed);
         convo::EBRQueue::instance().tryReclaim();
         return;
     }
 
-    convo::EBRQueue::instance().tryReclaim();
+    g_runtimeReclaimCount.fetch_add(1, std::memory_order_relaxed);
+    auto& queue = convo::EBRQueue::instance();
+    queue.tryReclaim(kDeferredReclaimBudget);
+    const size_t backlog = queue.getPendingRetiredCount();
+    if (backlog >= kReclaimBacklogWarnThreshold)
+    {
+        juce::Logger::writeToLog("[DIAG] deferred reclaim backlog pending=" + juce::String(static_cast<juce::int64>(backlog)));
+    }
 }
 
 #endif

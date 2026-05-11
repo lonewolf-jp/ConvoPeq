@@ -5,7 +5,8 @@
 #include <cmath>
 #include <cstdint>
 #include <random>
-#include <mkl.h>
+
+#include "AlignedAllocation.h"
 
 class CmaEsOptimizer
 {
@@ -23,8 +24,8 @@ public:
 
     CmaEsOptimizer()
     {
-        mean = static_cast<double*>(mkl_malloc(kDim * sizeof(double), 64));
-        covariance = static_cast<double*>(mkl_malloc(kDim * kDim * sizeof(double), 64));
+        mean = static_cast<double*>(convo::aligned_malloc(kDim * sizeof(double), 64));
+        covariance = static_cast<double*>(convo::aligned_malloc(kDim * kDim * sizeof(double), 64));
 
         std::random_device device;
         rng.seed(device());
@@ -35,8 +36,8 @@ public:
 
     ~CmaEsOptimizer()
     {
-        mkl_free(mean);
-        mkl_free(covariance);
+        convo::aligned_free(mean);
+        convo::aligned_free(covariance);
     }
 
     void setParams(const Params& p) noexcept

@@ -27,6 +27,8 @@
 #include <chrono>
 #include <limits>
 
+#include <JuceHeader.h>
+
 namespace convo {
 
 class DeferredFreeThread
@@ -53,14 +55,7 @@ public:
     // -----------------------------------------------------------------------
     ~DeferredFreeThread()
     {
-        stop();
-
-        if (thread.joinable())
-            thread.join();
-
-        // スレッド停止後の強制解放（Epoch を UINT64_MAX にすれば全エントリが対象）
-        while (auto* ptr = swapperRef.tryReclaim(std::numeric_limits<uint64_t>::max()))
-            delete ptr;
+        shutdownAndDrain();
     }
 
     // コピー・ムーブ禁止
@@ -80,6 +75,16 @@ public:
         running.store(false, std::memory_order_release);
     }
 
+    void shutdownAndDrain() noexcept
+    {
+        stop();
+
+        if (thread.joinable())
+            thread.join();
+
+        drainAllRetired();
+    }
+
 private:
     // -----------------------------------------------------------------------
     // run()  ── 専用スレッドで実行
@@ -90,6 +95,13 @@ private:
     // [Bug 2] アイドル時は短時間 sleep し、解放が進んだループのみ yield する
     // -----------------------------------------------------------------------
     static constexpr int kMaxReclaimPerLoop = 4;
+    static constexpr size_t kPendingRetiredWarnThreshold = 64;
+
+    void drainAllRetired() noexcept
+    {
+        while (auto* ptr = swapperRef.tryReclaim(std::numeric_limits<uint64_t>::max()))
+            delete ptr;
+    }
 
     void run()
     {
@@ -106,7 +118,15 @@ private:
                 if (++reclaimCount >= kMaxReclaimPerLoop) break;
             }
             if (reclaimCount == 0)
+            {
+                const size_t pendingRetired = swapperRef.getPendingRetiredCount();
+                if (pendingRetired >= kPendingRetiredWarnThreshold)
+                {
+                    juce::Logger::writeToLog("[DIAG] DeferredFreeThread backlog pending="
+                                             + juce::String(static_cast<juce::int64>(pendingRetired)));
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
             else
                 std::this_thread::yield();
         }

@@ -3,6 +3,7 @@
 #include <vector>
 #include <functional>
 #include <mutex>
+#include <limits>
 #include "EpochManager.h"
 
 namespace convo {
@@ -20,24 +21,29 @@ public:
     void retire(void* p, std::function<void(void*)> d)
     {
         if (p == nullptr) return;
-        
+
         std::lock_guard<std::mutex> lock(queueMutex);
         uint64_t e = EpochManager::instance().currentEpoch();
         retired.push_back({p, d, e});
     }
 
-    void tryReclaim()
+    void tryReclaim(size_t maxReclaims = std::numeric_limits<size_t>::max())
     {
+        if (maxReclaims == 0)
+            return;
+
         uint64_t minEpoch = EpochManager::instance().minActiveEpoch();
 
         std::lock_guard<std::mutex> lock(queueMutex);
         size_t write = 0;
+        size_t reclaimed = 0;
 
         for (size_t i = 0; i < retired.size(); ++i)
         {
-            if (EpochManager::isOlder(retired[i].epoch, minEpoch))
+            if (reclaimed < maxReclaims && EpochManager::isOlder(retired[i].epoch, minEpoch))
             {
                 retired[i].deleter(retired[i].ptr);
+                ++reclaimed;
             }
             else
             {
@@ -49,7 +55,13 @@ public:
 
         retired.resize(write);
     }
-    
+
+    size_t getPendingRetiredCount() const
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        return retired.size();
+    }
+
     static EBRQueue& instance()
     {
         static EBRQueue inst;
@@ -57,7 +69,7 @@ public:
     }
 
 private:
-    std::mutex queueMutex;
+    mutable std::mutex queueMutex;
     std::vector<Retired> retired;
 };
 

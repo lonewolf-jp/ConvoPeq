@@ -5,7 +5,7 @@
 #include <memory>
 #include <juce_core/juce_core.h>
 
-#include <mkl.h>
+#include "AlignedAllocation.h"
 
 struct PreparedIRState
 {
@@ -49,7 +49,7 @@ struct PreparedIRState
         if (this != &other)
         {
             if (partitionData)
-                mkl_free(partitionData);
+                convo::aligned_free(partitionData);
 
             partitionData = other.partitionData;
             partitionSizeBytes = other.partitionSizeBytes;
@@ -76,7 +76,7 @@ struct PreparedIRState
     ~PreparedIRState()
     {
         if (partitionData)
-            mkl_free(partitionData);
+            convo::aligned_free(partitionData);
     }
 
     PreparedIRState(const PreparedIRState&) = delete;
