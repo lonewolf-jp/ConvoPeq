@@ -373,7 +373,11 @@ void NoiseShaperLearningComponent::refreshFromEngine()
     bool canResume = false;
 
     NoiseShaperLearner::State savedState;
-    const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, static_cast<NoiseShaperLearner::LearningMode>(modeComboBox.getSelectedId() - 1));
+    const int selectedModeId = modeComboBox.getSelectedId();
+    const auto selectedMode = (selectedModeId >= 1 && selectedModeId <= 6)
+        ? static_cast<NoiseShaperLearner::LearningMode>(selectedModeId - 1)
+        : NoiseShaperLearner::LearningMode::Short;
+    const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, selectedMode);
     if (audioEngine.getAdaptiveNoiseShaperState(bankIndex, savedState) && savedState.iteration > 0)
     {
         canResume = true;
@@ -423,13 +427,9 @@ void NoiseShaperLearningComponent::refreshFromEngine()
 
     if (!cmaesRestartsSlider.isMouseButtonDown())
         cmaesRestartsSlider.setValue(audioEngine.getNoiseShaperLearnerSettings().cmaesRestarts, juce::dontSendNotification);
-    else
-        cmaesRestartsSlider.setValue(5, juce::dontSendNotification);
 
     if (!coeffSafetyMarginSlider.isMouseButtonDown())
         coeffSafetyMarginSlider.setValue(audioEngine.getNoiseShaperLearnerSettings().coeffSafetyMargin, juce::dontSendNotification);
-    else
-        coeffSafetyMarginSlider.setValue(0.85, juce::dontSendNotification);
 
     enableStabilityCheckButton.setToggleState(audioEngine.getNoiseShaperLearnerSettings().enableStabilityCheck, juce::dontSendNotification);
 
