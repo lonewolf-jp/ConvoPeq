@@ -9,6 +9,7 @@
 #include <mutex>
 #include <thread>
 
+#include "AlignedAllocation.h"
 #include "AudioSegmentBuffer.h"
 #include "CmaEsOptimizer.h"
 #include "LatticeNoiseShaper.h"
@@ -108,6 +109,26 @@ public:
     void setState(const State& inState) noexcept;
     int copyBestScoreHistory(double* destination, int maxPoints) const noexcept;
     void onCoeffBankChanged(int newBankIndex) noexcept;
+
+    double (*candidatePopulationMatrix() noexcept)[CmaEsOptimizer::kDim]
+    {
+        return reinterpret_cast<double (*)[CmaEsOptimizer::kDim]>(candidatePopulation.get());
+    }
+
+    const double (*candidatePopulationMatrix() const noexcept)[CmaEsOptimizer::kDim]
+    {
+        return reinterpret_cast<const double (*)[CmaEsOptimizer::kDim]>(candidatePopulation.get());
+    }
+
+    double* candidateFitnessData() noexcept
+    {
+        return candidateFitness.get();
+    }
+
+    const double* candidateFitnessData() const noexcept
+    {
+        return candidateFitness.get();
+    }
 
     bool saveLearnedState(const juce::File& file) const;
     bool loadLearnedState(const juce::File& file);
@@ -225,8 +246,8 @@ private:
     std::atomic<uint32_t> evaluationDispatchSerial{0};
     bool evaluationWorkersShouldExit = false;
     std::atomic<int> nextEvaluationCandidateIndex { 0 };
-    alignas(64) double candidatePopulation[CmaEsOptimizer::kPopulation][CmaEsOptimizer::kDim] = {};
-    alignas(64) double candidateFitness[CmaEsOptimizer::kPopulation] = {};
+    convo::ScopedAlignedPtr<double> candidatePopulation;
+    convo::ScopedAlignedPtr<double> candidateFitness;
 
     std::array<LeveledSegment, kMaxSegmentsPerLevel> levelBuckets[kNumLevels] = {};
     int levelBucketCounts[kNumLevels] = {};

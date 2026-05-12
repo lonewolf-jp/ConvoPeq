@@ -50,6 +50,22 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
     // lastSaveTime の初期化（コンストラクタ本体で行う）
       captureQueue(captureQueueRef)
 {
+    const size_t populationBytes = static_cast<size_t>(CmaEsOptimizer::kPopulation * CmaEsOptimizer::kDim) * sizeof(double);
+    const size_t fitnessBytes = static_cast<size_t>(CmaEsOptimizer::kPopulation) * sizeof(double);
+
+    convo::ScopedAlignedPtr<double> populationBuffer(static_cast<double*>(convo::aligned_malloc(populationBytes, 64)));
+    convo::ScopedAlignedPtr<double> fitnessBuffer(static_cast<double*>(convo::aligned_malloc(fitnessBytes, 64)));
+    jassert(populationBuffer.get() != nullptr && fitnessBuffer.get() != nullptr);
+    if (populationBuffer.get() == nullptr || fitnessBuffer.get() == nullptr)
+    {
+        DBG_LOG("[NoiseShaperLearner] failed to allocate candidate buffers");
+        errorMessage.store("Failed to allocate candidate buffers", std::memory_order_release);
+        progress.status.store(Status::Error, std::memory_order_release);
+        return;
+    }
+    candidatePopulation = std::move(populationBuffer);
+    candidateFitness = std::move(fitnessBuffer);
+
     for (auto& c : bestCoefficients)
         c.store(0.0, std::memory_order_relaxed);
 
@@ -79,6 +95,14 @@ NoiseShaperLearner::~NoiseShaperLearner()
 
 void NoiseShaperLearner::startLearning(bool resume)
 {
+    if (candidatePopulationMatrix() == nullptr || candidateFitnessData() == nullptr)
+    {
+        DBG_LOG("[NoiseShaperLearner] startLearning aborted: candidate buffers unavailable");
+        errorMessage.store("Candidate buffers unavailable", std::memory_order_release);
+        progress.status.store(Status::Error, std::memory_order_release);
+        return;
+    }
+
     // 前回セッション残骸のクリーンアップ
     if (isRunning() || workerThread.joinable() || !workerThreadFinished.load(std::memory_order_acquire))
     {
@@ -131,10 +155,9 @@ void NoiseShaperLearner::startLearning(bool resume)
     {
         workerThread = std::thread(&NoiseShaperLearner::workerThreadMain, this);
     }
-    catch (const std::exception& e)
+    catch (const std::exception&)
     {
-        juce::ignoreUnused(e);
-        DBG_LOG("[NoiseShaperLearner] failed to start worker thread: " + juce::String(e.what()));
+        DBG_LOG("[NoiseShaperLearner] failed to start worker thread");
         errorMessage.store("Failed to start learning thread", std::memory_order_release);
         progress.status.store(Status::Error, std::memory_order_release);
         startRequested.store(false, std::memory_order_release);
@@ -425,10 +448,9 @@ void NoiseShaperLearner::startEvaluationWorkers()
         {
             slot.thread = std::thread(&NoiseShaperLearner::evaluationWorkerMain, this, workerIndex);
         }
-        catch (const std::exception& e)
+        catch (const std::exception&)
         {
-            juce::ignoreUnused(e);
-            DBG_LOG("[NoiseShaperLearner] failed to start evaluation worker: " + juce::String(e.what()));
+            DBG_LOG("[NoiseShaperLearner] failed to start evaluation worker");
             errorMessage.store("Failed to start evaluation worker", std::memory_order_release);
             progress.status.store(Status::Error, std::memory_order_release);
             break;
@@ -517,9 +539,9 @@ void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
             }
             evaluationDispatchCv.notify_all();
         }
-        catch (const std::exception& e)
+        catch (const std::exception&)
         {
-            DBG_LOG("[NoiseShaperLearner] evaluation worker exception: " + juce::String(e.what()));
+            DBG_LOG("[NoiseShaperLearner] evaluation worker exception");
             errorMessage.store("Evaluation worker exception", std::memory_order_release);
             progress.status.store(Status::Error, std::memory_order_release);
             {
@@ -556,8 +578,9 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
     {
         constexpr int totalCoeffs = CmaEsOptimizer::kPopulation * CmaEsOptimizer::kDim;
         alignas(64) double tanhBuffer[totalCoeffs] = {};
+        const auto* population = candidatePopulationMatrix();
         vdTanh(totalCoeffs,
-               reinterpret_cast<const double*>(candidatePopulation),
+               reinterpret_cast<const double*>(population),
                tanhBuffer);
 
         const double safetyMargin = settings.coeffSafetyMargin.load(std::memory_order_relaxed);
@@ -578,7 +601,7 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
                                                      mappedPopulation[populationIndex],
                                                      numSegments,
                                                      evaluationBitDepth);
-        candidateFitness[populationIndex] = score;
+        candidateFitnessData()[populationIndex] = score;
         progress.processCount.fetch_add(1, std::memory_order_release);
     }
 }
@@ -626,7 +649,7 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
     std::vector<int> sortedIndices(evaluatedCandidates);
     std::iota(sortedIndices.begin(), sortedIndices.end(), 0);
     std::sort(sortedIndices.begin(), sortedIndices.end(), [this](int a, int b) {
-        return candidateFitness[a] < candidateFitness[b];
+        return candidateFitnessData()[a] < candidateFitnessData()[b];
     });
 
     // Elite Re-evaluation: Re-evaluate top 3 candidates to reduce noise/variance
@@ -639,8 +662,9 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
         const int idx = sortedIndices[i];
         // Use a different context or just re-run (if segments were randomized, this would be more effective)
         // For now, we just re-run to ensure stability.
-        const double secondScore = evaluateCandidate(evaluationWorkers[0].context, candidatePopulation[idx], numSegments, evaluationBitDepth);
-        candidateFitness[idx] = (candidateFitness[idx] + secondScore) * 0.5;
+        const auto* population = candidatePopulationMatrix();
+        const double secondScore = evaluateCandidate(evaluationWorkers[0].context, population[idx], numSegments, evaluationBitDepth);
+        candidateFitnessData()[idx] = (candidateFitnessData()[idx] + secondScore) * 0.5;
     }
 
     // Final pass to find the best
@@ -649,7 +673,7 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
         if (stopRequested.load(std::memory_order_acquire))
             break;
 
-        const double score = candidateFitness[populationIndex];
+        const double score = candidateFitnessData()[populationIndex];
         if (score < bestCandidateScore)
         {
             bestCandidateScore = score;
@@ -731,11 +755,11 @@ void NoiseShaperLearner::workerThreadMain()
                         // 数世代だけ回して良し悪しを判断
                         for (int g = 0; g < 3; ++g)
                         {
-                            optimizer.sample(candidatePopulation);
+                            optimizer.sample(candidatePopulationMatrix());
                             int dummyIdx = 0;
                             double currentBestScore = 0.0;
                             evaluatePopulation(segmentCount, evaluationBitDepth, dummyIdx, currentBestScore);
-                            optimizer.update(candidatePopulation, candidateFitness);
+                            optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
 
                             if (currentBestScore < bestRestartScore)
                             {
@@ -800,7 +824,7 @@ void NoiseShaperLearner::workerThreadMain()
             }
 
             progress.status.store(Status::Running, std::memory_order_release);
-            optimizer.sample(candidatePopulation);
+            optimizer.sample(candidatePopulationMatrix());
 
             int bestCandidateIndex = 0;
             double bestCandidateScore = std::numeric_limits<double>::max();
@@ -820,7 +844,7 @@ void NoiseShaperLearner::workerThreadMain()
             }
 
             for (int fi = evaluatedCandidates; fi < CmaEsOptimizer::kPopulation; ++fi)
-                candidateFitness[fi] = std::numeric_limits<double>::max();
+                candidateFitnessData()[fi] = std::numeric_limits<double>::max();
 
             if (evaluatedCandidates < CmaEsOptimizer::kElite)
             {
@@ -828,9 +852,9 @@ void NoiseShaperLearner::workerThreadMain()
                 continue;
             }
 
-            optimizer.update(candidatePopulation, candidateFitness);
+            optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
 
-            CmaEsOptimizer::toParcor(candidatePopulation[bestCandidateIndex], parcor);
+            CmaEsOptimizer::toParcor(candidatePopulationMatrix()[bestCandidateIndex], parcor);
             if (bestCandidateScore < bestScore && bestCandidateScore < std::numeric_limits<double>::max())
             {
                 bestScore = bestCandidateScore;
@@ -871,9 +895,9 @@ void NoiseShaperLearner::workerThreadMain()
         if (progress.status.load(std::memory_order_acquire) != Status::Completed)
             progress.status.store(Status::Idle, std::memory_order_release);
     }
-    catch (const std::exception& e)
+    catch (const std::exception&)
     {
-        DBG_LOG("[NoiseShaperLearner] worker thread exception: " + juce::String(e.what()));
+        DBG_LOG("[NoiseShaperLearner] worker thread exception");
         errorMessage.store("Worker thread exception", std::memory_order_release);
         progress.status.store(Status::Error, std::memory_order_release);
     }
