@@ -5,7 +5,6 @@
 #include "ProgressiveUpgradeThread.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "core/EpochManager.h"
-#include "core/EBRQueue.h"
 #include "core/RCUReader.h"
 #include "core/ThreadAffinityManager.h"
 #include "AlignedAllocation.h"
@@ -54,18 +53,37 @@ void ConvolverProcessor::updateIRState(std::shared_ptr<juce::AudioBuffer<double>
     auto* oldState = currentIRState.exchange(newState, std::memory_order_acq_rel);
     if (oldState != nullptr)
     {
-        convo::retireObject(oldState, [](void* p)
+        auto deleter = [](void* p)
         {
             auto* state = static_cast<IRState*>(p);
             state->~IRState();
             mkl_free(state);
-        });
+        };
+
+        if (rcuProvider != nullptr)
+            rcuProvider->enqueueDeferredDeleteNonRt(oldState, deleter);
+        else
+            deleter(oldState);
     }
+}
+
+void ConvolverProcessor::StereoConvolver::retireStereoConvolver(StereoConvolver* sc, AudioEngine* provider) noexcept
+{
+    if (!sc || sc->retired.exchange(true, std::memory_order_acq_rel))
+        return;
+
+    if (provider != nullptr)
+    {
+        provider->enqueueDeferredDeleteNonRt(sc, destroyStereoConvolver);
+        return;
+    }
+
+    destroyStereoConvolver(sc);
 }
 
 void ConvolverProcessor::retireStereoConvolver(StereoConvolver* conv, uint64_t /*retireEpoch*/)
 {
-    StereoConvolver::retireStereoConvolver(conv);
+    StereoConvolver::retireStereoConvolver(conv, rcuProvider);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -100,7 +118,7 @@ ConvolverProcessor::~ConvolverProcessor()
     // Destructor runs after AudioEngine destructor body.
     // Do not enqueue to global deferred queue here because final reclaim may have already happened.
     auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
-    StereoConvolver::retireStereoConvolver(oldConv);
+    StereoConvolver::retireStereoConvolver(oldConv, rcuProvider);
 
     auto* oldIrState = currentIRState.exchange(nullptr, std::memory_order_acq_rel);
     if (oldIrState != nullptr)
@@ -155,9 +173,8 @@ void ConvolverProcessor::timerCallback()
     }
 
     auto* provider = rcuProvider;
-    if (provider) {
-        convo::EBRQueue::instance().tryReclaim();
-    }
+    if (provider)
+        provider->tryReclaimResources();
 
     cleanup();
 }
@@ -227,12 +244,12 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 else
                 {
                     juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: NUC re-init failed (MKL alloc?). Keeping existing engine.");
-                    StereoConvolver::retireStereoConvolver(std::exchange(newConv, nullptr));
+                    retireStereoConvolver(std::exchange(newConv, nullptr), 0);
                 }
             }
             catch (const std::bad_alloc&)
             {
-                StereoConvolver::retireStereoConvolver(std::exchange(newConv, nullptr));
+                retireStereoConvolver(std::exchange(newConv, nullptr), 0);
                 juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: NUC re-init failed (std::bad_alloc). Keeping existing engine.");
             }
         }
@@ -338,6 +355,9 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     }
     oldDelay = latencySmoother.getTargetValue();
 
+    if (boundExecutionState != nullptr)
+        bindExecutionState(boundExecutionState);
+
     if (!deferredFreeThread)
     {
         ThreadAffinityManager* affinityMgr = nullptr;
@@ -380,6 +400,28 @@ void ConvolverProcessor::releaseResources()
     smoothingBufferStorage[0].reset();
     smoothingBufferStorage[1].reset();
     smoothingBufferCapacity = 0;
+
+    if (boundExecutionState != nullptr)
+    {
+        auto& convState = boundExecutionState->conv;
+        convState.bypassDelayBuf[0] = nullptr;
+        convState.bypassDelayBuf[1] = nullptr;
+        convState.bypassDelayCapacity = 0;
+        convState.delayWritePos = 0;
+        convState.dryBuf[0] = nullptr;
+        convState.dryBuf[1] = nullptr;
+        convState.dryCapacity = 0;
+        convState.oldDryBuf[0] = nullptr;
+        convState.oldDryBuf[1] = nullptr;
+        convState.oldDryCapacity = 0;
+        convState.wetBuf[0] = nullptr;
+        convState.wetBuf[1] = nullptr;
+        convState.wetCapacity = 0;
+        convState.smoothingBuf[0] = nullptr;
+        convState.smoothingBuf[1] = nullptr;
+        convState.smoothingCapacity = 0;
+        convState.initialized = false;
+    }
 
     cachedFFTBuffer.reset();
     cachedFFTBufferCapacity = 0;

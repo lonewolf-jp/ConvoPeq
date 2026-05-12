@@ -13,8 +13,6 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::timerCallback()
 {
-    const auto* runtimePublish = getRuntimePublishState();
-
     {
         const auto ts = getRuntimeTransitionStateForDebug();
         const int active = ts.active ? 1 : 0;
@@ -77,32 +75,29 @@ void AudioEngine::timerCallback()
     }
 
     {
+        const auto* runtimeGraph = getRuntimeGraphState();
         const auto* engineRuntime = getEngineRuntimeState();
-        const uint64_t revision = runtimeRevision(runtimePublish, engineRuntime);
-        const uint64_t currentUuid = runtimeCurrentUuid(runtimePublish, engineRuntime);
-        const uint64_t fadingUuid = runtimeFadingUuid(runtimePublish, engineRuntime);
-        const uint64_t queuedOldUuid = runtimeQueuedOldUuid(runtimePublish, engineRuntime);
-        const uint64_t transitionCurrentUuid = runtimeTransitionCurrentUuid(runtimePublish, engineRuntime);
-        const uint64_t transitionNextUuid = runtimeTransitionNextUuid(runtimePublish, engineRuntime);
+        const uint64_t revision = runtimeRevision(engineRuntime, runtimeGraph);
+        const uint64_t currentUuid = runtimeCurrentUuid(engineRuntime, runtimeGraph);
+        const uint64_t fadingUuid = runtimeFadingUuid(engineRuntime, runtimeGraph);
+        const uint64_t transitionCurrentUuid = runtimeTransitionCurrentUuid(engineRuntime, runtimeGraph);
+        const uint64_t transitionNextUuid = runtimeTransitionNextUuid(engineRuntime, runtimeGraph);
 
-        if (revision != debugLastReportedRuntimePublishRevision
+        if (revision != debugLastReportedRuntimeSnapshotRevision
             || currentUuid != debugLastReportedRuntimePublishCurrentUuid
             || fadingUuid != debugLastReportedRuntimePublishFadingUuid
-            || queuedOldUuid != debugLastReportedRuntimePublishQueuedOldUuid
             || transitionCurrentUuid != debugLastReportedRuntimePublishTransitionCurrentUuid
             || transitionNextUuid != debugLastReportedRuntimePublishTransitionNextUuid)
         {
-            debugLastReportedRuntimePublishRevision = revision;
+            debugLastReportedRuntimeSnapshotRevision = revision;
             debugLastReportedRuntimePublishCurrentUuid = currentUuid;
             debugLastReportedRuntimePublishFadingUuid = fadingUuid;
-            debugLastReportedRuntimePublishQueuedOldUuid = queuedOldUuid;
             debugLastReportedRuntimePublishTransitionCurrentUuid = transitionCurrentUuid;
             debugLastReportedRuntimePublishTransitionNextUuid = transitionNextUuid;
 
             diagLog("[VERIFY] runtime publish rev=" + juce::String(static_cast<juce::int64>(revision))
                 + " currentUuid=" + juce::String(static_cast<juce::int64>(currentUuid))
                 + " fadingUuid=" + juce::String(static_cast<juce::int64>(fadingUuid))
-                + " queuedOldUuid=" + juce::String(static_cast<juce::int64>(queuedOldUuid))
                 + " transition(" + juce::String(static_cast<juce::int64>(transitionCurrentUuid))
                 + "->" + juce::String(static_cast<juce::int64>(transitionNextUuid)) + ")");
         }
@@ -173,8 +168,20 @@ void AudioEngine::timerCallback()
 
     // フェイルセーフ: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
-    auto* currentDspForRuntime = resolveCurrentDSPFromRuntimePublish(runtimePublish);
-    auto* fadingDspForRuntime = resolveFadingDSPFromRuntimePublish(runtimePublish);
+    const auto* runtimeGraph = getRuntimeGraphState();
+    auto* currentDspForRuntime = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+    auto* fadingDspForRuntime = resolveFadingDSPFromRuntimePublish(runtimeGraph);
+
+    // H-2: RNG producer ownershipをAudioEngine側(NonRT)へ集約。
+    // Audio Threadではpopのみ行い、補充はTimer側で実施する。
+    if (!shutdownInProgress.load(std::memory_order_acquire))
+    {
+        if (currentDspForRuntime != nullptr)
+            currentDspForRuntime->dither.refillRandomRingNonRt();
+        if (fadingDspForRuntime != nullptr && fadingDspForRuntime != currentDspForRuntime)
+            fadingDspForRuntime->dither.refillRandomRingNonRt();
+    }
+
     if (!shutdownInProgress.load(std::memory_order_acquire)
         && currentDspForRuntime != nullptr
         && !m_coordinator.isFading()
@@ -353,42 +360,10 @@ void AudioEngine::timerCallback()
 
     const bool hasFading = (fadingDspForRuntime != nullptr);
     const auto* engineRuntime = getEngineRuntimeState();
+    const auto* runtimeGraphForCrossfade = getRuntimeGraphState();
     const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
     const bool hasPendingCrossfade = atomicPendingCrossfade
-        || runtimeCrossfadePending(runtimePublish, engineRuntime);
-
-    if (!shutdownInProgress.load(std::memory_order_acquire) &&
-        !hasFading &&
-        !hasPendingCrossfade &&
-        fadeQueued.exchange(false, std::memory_order_acq_rel))
-    {
-        validateDistinctRuntimeSlots("timerCallback.beforeQueuePromote",
-                                     currentDspForRuntime,
-                                     sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                                     sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
-
-        if (auto* queued = sanitizeRawPtr(queuedOldDSP.exchange(nullptr, std::memory_order_acq_rel)))
-        {
-            const double fadeSec = queuedNextFadeTimeSec.load(std::memory_order_acquire);
-            queuedFadeTimeSec.store(fadeSec, std::memory_order_release);
-            fadingOutDSP.store(queued, std::memory_order_release);
-            dspCrossfadePending.store(true, std::memory_order_release);
-            publishRuntimePublishState(makeRuntimePublishState(currentDspForRuntime,
-                                                              queued,
-                                                              convo::TransitionPolicy::SmoothOnly,
-                                                              fadeSec,
-                                                              true));
-            setIRChangeFlag();
-
-            validateDistinctRuntimeSlots("timerCallback.afterQueuePromote",
-                                         currentDspForRuntime,
-                                         sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                                         sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
-            logRuntimeTransitionEvent("timerCallback.afterQueuePromote",
-                                      currentDspForRuntime,
-                                      queued);
-        }
-    }
+        || runtimeCrossfadePending(engineRuntime, runtimeGraphForCrossfade);
 
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();
@@ -396,6 +371,20 @@ void AudioEngine::timerCallback()
     if (m_coordinator.tryCompleteFade())
     {
         sendChangeMessage();
+    }
+
+    if (!shutdownInProgress.load(std::memory_order_acquire)
+        && !hasFading
+        && !hasPendingCrossfade)
+    {
+        bool hasDeferredCommits = false;
+        {
+            std::lock_guard<std::mutex> lock(deferredCommitMutex);
+            hasDeferredCommits = !deferredCommitQueue.empty();
+        }
+
+        if (hasDeferredCommits)
+            triggerAsyncUpdate();
     }
 
     // 内部プロセッサのクリーンアップを実行する。

@@ -126,8 +126,6 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/AudioEngine.Commit.cpp
     src/audioengine/AudioEngine.CtorDtor.cpp
     src/audioengine/AudioEngine.Globals.cpp
-    src/audioengine/AudioEngine.HelpersCrossfade.cpp
-    src/audioengine/AudioEngine.HelpersNumeric.cpp
     src/audioengine/AudioEngine.Learning.cpp
     src/audioengine/AudioEngine.Init.cpp
     src/audioengine/AudioEngine.Cache.cpp

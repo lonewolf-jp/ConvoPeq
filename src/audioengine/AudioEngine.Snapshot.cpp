@@ -66,7 +66,6 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     }
 
     convo::SnapshotParams params = convo::SnapshotAssembler::assemble(
-        convState,
         convState ? convState->stateId : 0,
         eqParams,
         nsCoeffs,

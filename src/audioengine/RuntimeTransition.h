@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include "RuntimeGraph.h"
+#include "DSPExecutionState.h"
 
 namespace convo {
 
@@ -23,30 +25,6 @@ struct TransitionState
     bool active = false;
 };
 
-struct RuntimePublishState
-{
-    void* current = nullptr;
-    std::uint64_t currentRuntimeUuid = 0;
-    void* fading = nullptr;
-    std::uint64_t fadingRuntimeUuid = 0;
-    void* queuedOld = nullptr;
-    std::uint64_t queuedOldRuntimeUuid = 0;
-    TransitionState transition {};
-    std::uint64_t transitionCurrentRuntimeUuid = 0;
-    std::uint64_t transitionNextRuntimeUuid = 0;
-    int latencyDelayOld = 0;
-    int latencyDelayNew = 0;
-    bool latencyResetPending = false;
-    bool dspCrossfadePending = false;
-    bool dspCrossfadeUseDryAsOld = false;
-    bool fadeQueued = false;
-    double queuedFadeTimeSec = 0.0;
-    double queuedNextFadeTimeSec = 0.0;
-    int dspCrossfadeStartDelayBlocks = 0;
-    int dspCrossfadeDryHoldSamples = 0;
-    std::uint64_t revision = 0;
-};
-
 // Phase-2 migration target: single runtime snapshot publish for audio-thread reads.
 // This keeps ownership out-of-band and only mirrors the runtime-visible state.
 struct EngineRuntime
@@ -55,8 +33,6 @@ struct EngineRuntime
     std::uint64_t currentRuntimeUuid = 0;
     void* fading = nullptr;
     std::uint64_t fadingRuntimeUuid = 0;
-    void* queuedOld = nullptr;
-    std::uint64_t queuedOldRuntimeUuid = 0;
     TransitionState transition {};
     std::uint64_t transitionCurrentRuntimeUuid = 0;
     std::uint64_t transitionNextRuntimeUuid = 0;
@@ -65,9 +41,7 @@ struct EngineRuntime
     bool latencyResetPending = false;
     bool dspCrossfadePending = false;
     bool dspCrossfadeUseDryAsOld = false;
-    bool fadeQueued = false;
     double queuedFadeTimeSec = 0.0;
-    double queuedNextFadeTimeSec = 0.0;
     int dspCrossfadeStartDelayBlocks = 0;
     int dspCrossfadeDryHoldSamples = 0;
     std::uint64_t revision = 0;

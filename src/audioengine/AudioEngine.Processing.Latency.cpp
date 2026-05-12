@@ -83,8 +83,8 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 {
     LatencyBreakdown breakdown;
 
-    const auto* runtimePublish = getRuntimePublishState();
-    auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimePublish);
+    const auto* runtimeGraph = getRuntimeGraphState();
+    auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
     if (dsp == nullptr)
         return breakdown;
 
@@ -125,17 +125,6 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
       + breakdown.convolverTotalLatencyBaseRateSamples);
 
     return breakdown;
-}
-
-double AudioEngine::getCurrentLatencyMs() const
-{
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
-    if (sr <= 0.0)
-        return 0.0;
-
-    const int totalSamples = getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
-    const double totalMs = (static_cast<double>(totalSamples) * 1000.0) / sr;
-    return static_cast<double>(juce::roundToInt(totalMs));
 }
 
 #endif

@@ -99,16 +99,20 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     dspCrossfadeGain.reset(safeSampleRate, 0.03);
     dspCrossfadeGain.setCurrentAndTargetValue(1.0);
     dspCrossfadePending.store(false, std::memory_order_release);
-    if (const auto* runtimePublish = getRuntimePublishState(); runtimePublish != nullptr)
     {
-        auto* currentForPublish = resolveCurrentDSPFromRuntimePublish(runtimePublish);
-        auto* fadingForPublish = resolveFadingDSPFromRuntimePublish(runtimePublish);
-        const auto ts = getRuntimeTransitionStateForDebug();
-        publishRuntimePublishState(makeRuntimePublishState(currentForPublish,
-                                                          fadingForPublish,
-                                                          ts.policy,
-                                                          ts.fadeTimeSec,
-                                                          ts.active));
+        const auto* runtimeGraph = getRuntimeGraphState();
+        auto* currentForPublish = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+        auto* fadingForPublish = resolveFadingDSPFromRuntimePublish(runtimeGraph);
+        const bool hasAnyRuntime = (currentForPublish != nullptr) || (fadingForPublish != nullptr);
+        if (hasAnyRuntime)
+        {
+            const auto ts = getRuntimeTransitionStateForDebug();
+            publishRuntimeSnapshots(currentForPublish,
+                                    fadingForPublish,
+                                    ts.policy,
+                                    ts.fadeTimeSec,
+                                    ts.active);
+        }
     }
     selectAdaptiveCoeffBankForCurrentSettings();
 
@@ -159,9 +163,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     latencyDelayNew_RT = 0;
 
     // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
-    const auto* runtimePublish = getRuntimePublishState();
     const auto* engineRuntime = getEngineRuntimeState();
-    const bool hasPublishedCurrent = (runtimePublishedCurrentDSP(runtimePublish, engineRuntime) != nullptr);
+    const auto* runtimeGraph = getRuntimeGraphState();
+    const bool hasPublishedCurrent = (runtimePublishedCurrentDSP(engineRuntime, runtimeGraph) != nullptr);
     if (!hasPublishedCurrent && activeDSP == nullptr)
     {
         std::unique_ptr<DSPCore> placeholderDSP;
@@ -190,11 +194,11 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
         activeDSP = placeholderDSP.release();
         currentDSP.store(activeDSP, std::memory_order_release);
-        publishRuntimePublishState(makeRuntimePublishState(activeDSP,
-                                                          nullptr,
-                                                          convo::TransitionPolicy::HardReset,
-                                                          0.0,
-                                                          false));
+        publishRuntimeSnapshots(activeDSP,
+                    nullptr,
+                    convo::TransitionPolicy::HardReset,
+                    0.0,
+                    false);
         publishRuntimeTransitionState(activeDSP, nullptr, convo::TransitionPolicy::HardReset, 0.0, false);
     }
 
@@ -202,8 +206,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
     if (rateChanged)
         uiConvolverProcessor.invalidatePendingLoads();
-    const auto* runtimePublishForRebuildCheck = getRuntimePublishState();
-    const bool hasCurrentRuntime = (resolveCurrentDSPFromRuntimePublish(runtimePublishForRebuildCheck) != nullptr);
+    const auto* runtimeGraphForRebuildCheck = getRuntimeGraphState();
+    const bool hasCurrentRuntime = (resolveCurrentDSPFromRuntimePublish(
+                                                                       runtimeGraphForRebuildCheck) != nullptr);
     if (rateChanged || blockSizeChanged || !hasCurrentRuntime) {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             requestRebuild(safeSampleRate, bufferSize);

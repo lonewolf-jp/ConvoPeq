@@ -3,7 +3,6 @@
 //==============================================================================
 #include "../DeferredDeletionQueue.h"   // 先頭付近に追加
 #include "DeletionQueue.h"
-#include "../ConvolverState.h"
 #include <algorithm>
 
 namespace convo {
@@ -23,16 +22,6 @@ void DeletionQueue::reclaim(const EpochCore& core)
         [minReaderEpoch](Entry& e) -> bool {
             if (!convo::EpochCore::isOlder(e.epoch, minReaderEpoch))
                 return true;
-
-            if (e.type == DeletionEntryType::ConvolverState)
-            {
-                auto* state = static_cast<ConvolverState*>(e.ptr);
-                if (state != nullptr
-                    && state->snapshotRefCount.load(std::memory_order_relaxed) > 0)
-                {
-                    return true;
-                }
-            }
 
             return false;
         }

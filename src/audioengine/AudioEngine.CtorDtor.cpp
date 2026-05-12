@@ -15,7 +15,8 @@ static void diagLog(const juce::String& message)
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CTOR_DTOR)
 
 AudioEngine::AudioEngine()
-    : uiEqEditor(*this)
+    : eqCacheManager(*this)
+    , uiEqEditor(*this)
     , m_coordinator(m_epochCore)
     , m_workerThread(m_commandBuffer, m_coordinator, m_generationManager, &affinityManager)
 {
@@ -45,13 +46,12 @@ AudioEngine::~AudioEngine()
     // pending task を破棄して進行中 rebuild を obsolete にし、thread を停止する。
     DSPCore* activeToRelease = nullptr;
     DSPCore* fadingToRelease = nullptr;
-    DSPCore* queuedToRelease = nullptr;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
         validateDistinctRuntimeSlots("~AudioEngine.beforeClear",
                                      activeDSP,
                                      sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                                     sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+                                     nullptr);
 
         rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
 
@@ -61,13 +61,11 @@ AudioEngine::~AudioEngine()
         activeToRelease = sanitizeRawPtr(activeDSP);
         activeDSP = nullptr;
         fadingToRelease = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel));
-        queuedToRelease = sanitizeRawPtr(queuedOldDSP.exchange(nullptr, std::memory_order_acq_rel));
-        fadeQueued.store(false, std::memory_order_release);
 
         validateDistinctRuntimeSlots("~AudioEngine.afterClear",
                          activeDSP,
                          sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                         sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+                         nullptr);
 
         if (hasPendingTask)
         {
@@ -100,7 +98,6 @@ AudioEngine::~AudioEngine()
 
     if (activeToRelease) retireDSP(activeToRelease);
     if (fadingToRelease) retireDSP(fadingToRelease);
-    if (queuedToRelease) retireDSP(queuedToRelease);
 
     uiConvolverProcessor.removeChangeListener(this);
     uiEqEditor.removeChangeListener(this);
@@ -120,7 +117,8 @@ AudioEngine::~AudioEngine()
 
     // Shutdown 時は EBR 回収を試みる。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
-    convo::EBRQueue::instance().tryReclaim();
+    clearPublishedRuntimeSnapshotsNonRt();
+    processDeferredReleases();
 
     // ...既存の解放処理...
     if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }

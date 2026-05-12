@@ -183,8 +183,7 @@ public:
                 const auto entry = fallbackQueue.top();
                 if (entry.epoch < minReaderEpoch)
                 {
-                    if (entry.state != nullptr
-                        && entry.state->snapshotRefCount.load(std::memory_order_relaxed) == 0)
+                    if (entry.state != nullptr)
                     {
                         fallbackQueue.pop();
                         return entry.state;
@@ -203,8 +202,7 @@ public:
         if (isOlder(entryEpoch, minReaderEpoch))
         {
             ConvolverState* ptr = retiredBuffer[h].state.load(std::memory_order_acquire);
-            if (ptr != nullptr
-                && ptr->snapshotRefCount.load(std::memory_order_relaxed) == 0)
+            if (ptr != nullptr)
             {
                 // state を nullptr にクリアしてから head を進める（二重取得防止）
                 retiredBuffer[h].state.store(nullptr, std::memory_order_relaxed);

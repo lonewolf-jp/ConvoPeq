@@ -52,9 +52,42 @@ public:
         return static_cast<int64_t>(a - b) < 0;
     }
 
+    void enterReader(int readerIndex) noexcept {
+        if (readerIndex < 0 || readerIndex >= kMaxReaders)
+            return;
+        readerEpochs[static_cast<size_t>(readerIndex)].store(current(), std::memory_order_release);
+    }
+
+    void exitReader(int readerIndex) noexcept {
+        if (readerIndex < 0 || readerIndex >= kMaxReaders)
+            return;
+        readerEpochs[static_cast<size_t>(readerIndex)].store(kIdleEpoch, std::memory_order_release);
+    }
+
 private:
     std::atomic<uint64_t> epoch{1};
     std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs;
+};
+
+class EpochCoreReaderGuard {
+public:
+    EpochCoreReaderGuard(EpochCore& coreIn, int readerIndexIn) noexcept
+        : core(coreIn), readerIndex(readerIndexIn)
+    {
+        core.enterReader(readerIndex);
+    }
+
+    ~EpochCoreReaderGuard() noexcept
+    {
+        core.exitReader(readerIndex);
+    }
+
+    EpochCoreReaderGuard(const EpochCoreReaderGuard&) = delete;
+    EpochCoreReaderGuard& operator=(const EpochCoreReaderGuard&) = delete;
+
+private:
+    EpochCore& core;
+    int readerIndex;
 };
 
 } // namespace convo

@@ -25,7 +25,7 @@ ConvolverProcessor::LoaderThread::~LoaderThread()
     stopThread(500);
 
     auto* conv = std::exchange(stepResult.newConv, nullptr);
-    StereoConvolver::retireStereoConvolver(conv);
+    owner.retireStereoConvolver(conv, 0);
 }
 
 void ConvolverProcessor::LoaderThread::run()
@@ -71,7 +71,7 @@ void ConvolverProcessor::LoaderThread::run()
 
     resetter.success = (result.success || result.finalizeQueued);
 
-    StereoConvolver::retireStereoConvolver(std::exchange(result.newConv, nullptr));
+    owner.retireStereoConvolver(std::exchange(result.newConv, nullptr), 0);
 
     if (!result.success && result.errorMessage.isNotEmpty() && !threadShouldExit())
     {
@@ -142,17 +142,8 @@ int ConvolverProcessor::LoaderThread::estimatePeakLatencySamples(const juce::Aud
         constexpr double ENERGY_THRESHOLD = 0.999;
         double maxCentroid = 0.0;
 
-        thread_local std::vector<double> energyBuffer;
         const int length = targetLength;
-        const size_t needed = static_cast<size_t>(length);
-        if (energyBuffer.capacity() > needed * 4)
-        {
-            std::vector<double>().swap(energyBuffer);
-            energyBuffer.reserve(needed);
-        }
-        if (energyBuffer.size() < needed)
-            energyBuffer.resize(needed);
-
+        std::vector<double> energyBuffer(static_cast<size_t>(length));
         double* energy = energyBuffer.data();
         for (int ch = 0; ch < trimmed.getNumChannels(); ++ch)
         {
@@ -274,7 +265,7 @@ bool ConvolverProcessor::LoaderThread::initializeConvolverSynchronously(LoadResu
         return true;
     }
 
-    StereoConvolver::retireStereoConvolver(std::exchange(result.newConv, nullptr));
+    owner.retireStereoConvolver(std::exchange(result.newConv, nullptr), 0);
     result.success = false;
     result.errorMessage = "Failed to initialize NUC engine (Memory allocation or MKL setup failed).";
     return false;
@@ -329,7 +320,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
         juce::Logger::writeToLog("LoaderThread: callAsync failed, aborting IR load");
         result.errorMessage = "Internal message queue full, cannot complete IR load";
 
-        StereoConvolver::retireStereoConvolver(std::exchange(result.newConv, nullptr));
+        owner.retireStereoConvolver(std::exchange(result.newConv, nullptr), 0);
 
         juce::MessageManager::callAsync([weakOwner = this->weakOwner, errorMsg = result.errorMessage]()
         {
@@ -361,7 +352,7 @@ void ConvolverProcessor::LoaderThread::runSynchronously()
     else
     {
         if (result.newConv)
-            StereoConvolver::retireStereoConvolver(std::exchange(result.newConv, nullptr));
+            owner.retireStereoConvolver(std::exchange(result.newConv, nullptr), 0);
     }
 }
 

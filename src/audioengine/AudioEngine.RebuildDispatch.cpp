@@ -398,13 +398,14 @@ void AudioEngine::rebuildThreadLoop()
 
             struct DSPGuard
             {
+                AudioEngine* owner;
                 DSPCore* ptr;
                 ~DSPGuard()
                 {
-                    if (ptr != nullptr)
-                        retireDSP(ptr);
+                    if (owner != nullptr && ptr != nullptr)
+                        owner->retireDSP(ptr);
                 }
-            } dspGuard { nullptr };
+            } dspGuard { this, nullptr };
 
             convo::RuntimeBuilder runtimeBuilder(*this);
 

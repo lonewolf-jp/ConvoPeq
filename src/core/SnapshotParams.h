@@ -7,14 +7,12 @@
 
 #include <array>
 #include <cstdint>
-#include "../ConvolverState.h"
 #include "EQParameters.h"
 #include "Types.h"
 
 namespace convo {
 
 struct SnapshotParams {
-    const ConvolverState* convState = nullptr;
     uint64_t convStateId = 0;           // ConvolverState インスタンス識別子（UAF回避比較用）
     EQParameters eqParams{};
     std::array<double, 9> nsCoeffs{};

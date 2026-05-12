@@ -565,6 +565,36 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     }
 }
 
+void AudioEngine::DSPCore::processDoubleV2(juce::AudioBuffer<double>& buffer,
+                                           LockFreeAudioRingBuffer& analyzerFifo,
+                                           std::atomic<float>& inputLevelLinear,
+                                           std::atomic<float>& outputLevelLinear,
+                                           const convo::RuntimeGraph* runtimeGraph,
+                                           convo::DSPExecutionState& executionState,
+                                           const ProcessingState& state)
+{
+    if (runtimeGraph != nullptr)
+    {
+        executionState.currentNode = runtimeGraph->activeNode;
+        executionState.nextNode = runtimeGraph->fadingNode;
+        executionState.observedGeneration = runtimeGraph->generation;
+        executionState.inCrossfade = (runtimeGraph->fadingNode != nullptr);
+    }
+    else
+    {
+        executionState.currentNode = nullptr;
+        executionState.nextNode = nullptr;
+        executionState.observedGeneration = 0;
+        executionState.inCrossfade = false;
+    }
+
+    convolverRt().bindExecutionState(&executionState);
+    eqRt().bindExecutionState(&executionState);
+    processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, state);
+    eqRt().bindExecutionState(nullptr);
+    convolverRt().bindExecutionState(nullptr);
+}
+
 #endif
 
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO)

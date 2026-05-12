@@ -38,7 +38,7 @@
 #include "InputBitDepthTransform.h"
 #include "UltraHighRateDCBlocker.h"
 #include "convolver/ConvolverProcessor.Internal.h"
-#include "core/EBRQueue.h"            // convo::retireObject
+#include "core/RCUReader.h"
 
 // ── Phase 0: Epoch-based RCU 基盤ヘッダー ──
 #include "GenerationManager.h"
@@ -50,6 +50,8 @@
 #include "ConvolverRuntime.h"
 #include "DspNumericPolicy.h"
 #include "DftiHandle.h"
+
+namespace convo { struct DSPExecutionState; }
 
 class AudioEngine;
 class CacheManager;
@@ -228,6 +230,7 @@ public:
     //
     //----------------------------------------------------------
     void process(juce::dsp::AudioBlock<double>& block);
+    void bindExecutionState(convo::DSPExecutionState* state) noexcept;
 
     //----------------------------------------------------------
     // バイパス制御
@@ -628,12 +631,7 @@ private:
         }
 
         // 外部から安全に破棄するためのエントリポイント
-        static inline void retireStereoConvolver(StereoConvolver* sc) noexcept
-        {
-            if (!sc || sc->retired.exchange(true, std::memory_order_acq_rel))
-                return;
-            convo::retireObject(sc, destroyStereoConvolver);
-        }
+        static void retireStereoConvolver(StereoConvolver* sc, AudioEngine* provider = nullptr) noexcept;
 
         // デストラクタは空（実際の解放は retire 経由）
         ~StereoConvolver() {
@@ -764,6 +762,7 @@ private:
     };
 
     std::atomic<StereoConvolver*> m_activeEngine { nullptr }; // Raw pointer for Audio Thread (Lock-free)
+    convo::DSPExecutionState* boundExecutionState = nullptr;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
     std::atomic<bool> irFinalized { false };
@@ -1020,8 +1019,10 @@ public: // Added for AudioEngine access
 
     // RCU 管理 (StereoConvolver 用)
     std::atomic<bool> firstProcessCall { true };
+    // DSP_THREAD_STATE: Audio Thread process() で使用するRCU reader。
+    convo::RCUReader runtimeRcuReader;
 
-    static void retireStereoConvolver(StereoConvolver* conv, uint64_t retireEpoch);
+    void retireStereoConvolver(StereoConvolver* conv, uint64_t retireEpoch);
 
     // ── Phase 0: Epoch-based RCU メンバー ──
     std::atomic<convo::ConvolverState*> convolverState { nullptr };

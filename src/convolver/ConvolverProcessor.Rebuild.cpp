@@ -230,7 +230,7 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
 
     if (job.pendingConv != nullptr)
     {
-        StereoConvolver::retireStereoConvolver(std::exchange(job.pendingConv, nullptr));
+        retireStereoConvolver(std::exchange(job.pendingConv, nullptr), 0);
     }
 
     job.pendingConv = std::exchange(result.newConv, nullptr);

@@ -603,7 +603,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         }
         else
         {
-            StereoConvolver::retireStereoConvolver(newConv);
+            retireStereoConvolver(newConv, 0);
             handleLoadError("Failed to initialize NUC engine (Memory allocation or MKL setup failed).");
         }
     }

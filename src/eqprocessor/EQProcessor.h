@@ -28,7 +28,9 @@
 #include <array>
 #include <vector>
 #include "core/EQParameters.h"
+#include "core/RCUReader.h"
 #include "AlignedAllocation.h"
+#include "audioengine/DSPExecutionState.h"
 
 //--------------------------------------------------------------
 // バンドタイプ列挙型
@@ -119,12 +121,6 @@ struct alignas(64) EQCoeffCache : public RefCountedDeferred<EQCoeffCache>
     int maxBlockSize = 0;                // 最大ブロックサイズ
     uint64_t generation = 0;             // 世代番号
 
-    // Parallel モード用バッファ（事前割り当て）
-    double* parallelInputBuffer = nullptr;
-    double* parallelWorkBuffer = nullptr;
-    double* parallelAccumBuffer = nullptr;
-    int parallelBufferSize = 0;
-
     EQCoeffCache() = default;
     ~EQCoeffCache();
     EQCoeffCache(const EQCoeffCache&) = delete;
@@ -190,6 +186,7 @@ public:
     void process(juce::dsp::AudioBlock<double>& block,
                  const convo::EQParameters& eqParams,
                  const EQCoeffCache* coeffCache);
+    void bindExecutionState(convo::DSPExecutionState* state) noexcept;
     void releaseResources();
 
     // バイパス制御
@@ -209,6 +206,10 @@ public:
     float getTotalGain() const;
     void setAGCEnabled(bool enabled);
     bool getAGCEnabled() const;
+    const double* getAgcAttackCoeffTable() const noexcept { return agcAttackCoeffTable.get(); }
+    const double* getAgcReleaseCoeffTable() const noexcept { return agcReleaseCoeffTable.get(); }
+    const double* getAgcSmoothCoeffTable() const noexcept { return agcSmoothCoeffTable.get(); }
+    int getAgcCoeffTableCapacity() const noexcept { return agcCoeffTableCapacity; }
 
     // フィルタータイプ変更
     void setBandType(int band, EQBandType type);
@@ -400,6 +401,8 @@ private:
 
     // スムージング処理
     std::atomic<EQState*> currentStateRaw { nullptr }; // Raw pointer for Audio Thread (Lock-free)
+    // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
+    convo::RCUReader rcuReader;
 
     // ── 状態リセットフラグ (Audio Thread用) ──
     std::atomic<uint32_t> bandResetMask { 0 };
@@ -483,4 +486,7 @@ private:
     std::atomic<float> nonlinearSaturation { 0.2f };
     std::atomic<FilterStructure> requestedStructure { FilterStructure::Serial };
     std::atomic<FilterStructure> activeStructure { FilterStructure::Serial };
+
+    // DSP_THREAD_STATE: process 呼び出し中のみ参照する実行状態バインディング。
+    convo::DSPExecutionState* boundExecutionState = nullptr;
 };

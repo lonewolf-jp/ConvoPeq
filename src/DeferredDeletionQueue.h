@@ -15,11 +15,9 @@
 #include <cstdint>
 #include <type_traits>
 #include "core/EpochCore.h"
-#include "ConvolverState.h"
 
 enum class DeletionEntryType : uint8_t {
-    Generic = 0,
-    ConvolverState = 1
+    Generic = 0
 };
 
 // DeletionEntry: 削除対象のエントリ
@@ -109,14 +107,6 @@ public:
 
             if (convo::EpochCore::isOlder(entry.epoch, minReaderEpoch)) {
                 canDelete = true;
-                if (entry.type == DeletionEntryType::ConvolverState)
-                {
-                    auto* state = static_cast<convo::ConvolverState*>(entry.ptr);
-                    if (state != nullptr
-                        && state->snapshotRefCount.load(std::memory_order_relaxed) > 0) {
-                        canDelete = false;
-                    }
-                }
             }
 
             // FIFO を維持するため、現在の dequeue 先頭と一致した時だけ削除する。

@@ -3,8 +3,6 @@
 #include "NoiseShaperLearner.h"
 #include "core/RCUReader.h"
 
-static thread_local convo::RCUReader tls_rcuReader;
-
 namespace
 {
     inline double absDiffNoLibm(double a, double b) noexcept
@@ -16,13 +14,15 @@ namespace
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_BLOCK_DOUBLE)
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 {
+    constexpr int kAudioEpochReaderIndex = 0;
     const juce::ScopedNoDenormals noDenormals;
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
+    const convo::EpochCoreReaderGuard epochReaderGuard(m_epochCore, kAudioEpochReaderIndex);
     ASSERT_AUDIO_THREAD();
     m_audioBlockCounter.fetch_add(1, std::memory_order_release);
 
     // ★ 追加: RCU ガードで現在の DSP を保護する
-    convo::RCUReaderGuard rcuGuard(tls_rcuReader);
+    convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
     const int numSamples = buffer.getNumSamples();
     // 事前サニティチェック (getNextAudioBlock と同様)
     constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20;
@@ -32,8 +32,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    const auto* runtimePublish = getRuntimePublishState();
-    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimePublish);
+    const auto* runtimeGraph = getRuntimeGraphState();
+    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(buffer);
@@ -77,14 +77,14 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
-    DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimePublish);
+    DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimeGraph);
     const auto* engineRuntime = getEngineRuntimeState();
     const bool atomicUseDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
     bool useDryAsOld = atomicUseDryAsOld
-        || runtimeCrossfadeUseDryAsOld(runtimePublish, engineRuntime);
+        || runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
     const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
     const bool hasPendingCrossfade = atomicPendingCrossfade
-        || runtimeCrossfadePending(runtimePublish, engineRuntime);
+        || runtimeCrossfadePending(engineRuntime, runtimeGraph);
     const int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
     if (processCrossfadeDelayGateIfPending(fading,
                                            useDryAsOld,
@@ -93,16 +93,23 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                                            [&]()
     {
         auto fadingState = makeCrossfadeAuxState(procState);
+        syncEqAgcTableViewFromRuntimeGraph(dspExecutionStateFading, runtimeGraph);
 
         std::atomic<float> fadingInputMeter { 0.0f };
         std::atomic<float> fadingOutputMeter { 0.0f };
-        fading->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
+        fading->processDoubleV2(buffer,
+                    analyzerFifo,
+                    inputLevelLinear,
+                    outputLevelLinear,
+                    runtimeGraph,
+                    dspExecutionStateFading,
+                    fadingState);
     }))
     {
         return;
     }
 
-    armCrossfadeIfPending(dsp, fading != nullptr, useDryAsOld, runtimePublish);
+    armCrossfadeIfPending(dsp, fading != nullptr, useDryAsOld, runtimeGraph);
 
     const bool canCrossfade = (fading != nullptr || useDryAsOld)
         && dspCrossfadeGain.isSmoothing()
@@ -130,10 +137,18 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         else
         {
             // EBR: managed by RCUReader
+            syncEqAgcTableViewFromRuntimeGraph(dspExecutionStateFading, runtimeGraph);
             fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, analyzerFifo,
                                           fadingInputMeter, fadingOutputMeter, fadingState);
         }
-        dsp->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
+        syncEqAgcTableViewFromRuntimeGraph(dspExecutionStateCurrent, runtimeGraph);
+        dsp->processDoubleV2(buffer,
+                     analyzerFifo,
+                     inputLevelLinear,
+                     outputLevelLinear,
+                     runtimeGraph,
+                     dspExecutionStateCurrent,
+                     procState);
 
         // スナップショット（commitNewDSPでセット済み、ここでは読み取り専用）
         const int outChannels = std::min(2, buffer.getNumChannels());
@@ -147,6 +162,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                                                   oldL,
                                                   oldR,
                                                   numSamples,
+                                                                  runtimeGraph,
                                                   [](double* outL,
                                                      double* outR,
                                                      int i,
@@ -169,7 +185,13 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
     else
     {
-        dsp->processDouble(buffer, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
+        dsp->processDoubleV2(buffer,
+                     analyzerFifo,
+                     inputLevelLinear,
+                     outputLevelLinear,
+                     runtimeGraph,
+                     dspExecutionStateCurrent,
+                     procState);
         cleanupCrossfadeDirectPath(fading);
     }
 }

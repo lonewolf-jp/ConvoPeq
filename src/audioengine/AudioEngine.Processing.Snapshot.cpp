@@ -16,12 +16,12 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
         return;
     }
 
-    const auto* runtimePublish = getRuntimePublishState();
+    const auto* runtimeGraph = getRuntimeGraphState();
     DSPCore* dsp = isFadingTarget
-        ? resolveFadingDSPFromRuntimePublish(runtimePublish)
-        : resolveCurrentDSPFromRuntimePublish(runtimePublish);
+        ? resolveFadingDSPFromRuntimePublish(runtimeGraph)
+        : resolveCurrentDSPFromRuntimePublish(runtimeGraph);
     if (dsp == nullptr && isFadingTarget)
-        dsp = resolveCurrentDSPFromRuntimePublish(runtimePublish);
+        dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(bufferToFill);
@@ -48,7 +48,9 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     std::atomic<float> fadingOutputMeter { 0.0f };
     auto& inMeter = isFadingTarget ? fadingInputMeter : inputLevelLinear;
     auto& outMeter = isFadingTarget ? fadingOutputMeter : outputLevelLinear;
-    dsp->process(bufferToFill, analyzerFifo, inMeter, outMeter, procState);
+    auto& executionState = isFadingTarget ? dspExecutionStateFading : dspExecutionStateCurrent;
+    syncEqAgcTableViewFromRuntimeGraph(executionState, runtimeGraph);
+    dsp->processV2(bufferToFill, analyzerFifo, inMeter, outMeter, runtimeGraph, executionState, procState);
 }
 
 #endif

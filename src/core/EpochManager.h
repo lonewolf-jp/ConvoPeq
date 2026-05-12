@@ -37,6 +37,15 @@ public:
         return -1; // fatal: too many threads
     }
 
+    bool reserveThread(int tid)
+    {
+        if (tid < 0 || tid >= kMaxThreads)
+            return false;
+
+        uint64_t expected = kInactiveEpoch;
+        return threads[tid].epoch.compare_exchange_strong(expected, kReservedEpoch);
+    }
+
     void enter(int tid)
     {
         if (tid < 0 || tid >= kMaxThreads) return;

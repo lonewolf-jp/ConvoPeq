@@ -2,25 +2,23 @@
 #include "AudioEngine.h"
 
 namespace {
-static void retireEQCache(EQCoeffCache* cache)
+static void retireEQCache(AudioEngine& owner, EQCoeffCache* cache)
 {
-    if (cache) convo::retireObject(cache, [](void* p) { delete static_cast<EQCoeffCache*>(p); });
+    if (cache == nullptr)
+        return;
+
+    owner.enqueueDeferredDeleteNonRt(cache, [](void* p) { delete static_cast<EQCoeffCache*>(p); });
 }
 }
 
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CACHE_MANAGER)
-
-AudioEngine::EQCacheManager::EQCacheManager()
-{
-    cacheMapPtr.store(new CacheMap(), std::memory_order_release);
-}
 
 bool AudioEngine::EQCacheManager::tryEnqueueDeferredMap(CacheMap* map) noexcept
 {
     if (map == nullptr)
         return true;
 
-    convo::retireObject(map, [](void* p) { delete static_cast<CacheMap*>(p); });
+    owner.enqueueDeferredDeleteNonRt(map, [](void* p) { delete static_cast<CacheMap*>(p); });
     return true;
 }
 
@@ -45,7 +43,7 @@ void AudioEngine::EQCacheManager::storeNewMap(CacheMap* newMap) noexcept
     if (old == nullptr)
         return;
 
-    convo::retireObject(old, [](void* p) { delete static_cast<CacheMap*>(p); });
+    owner.enqueueDeferredDeleteNonRt(old, [](void* p) { delete static_cast<CacheMap*>(p); });
 }
 
 EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters& params,
@@ -74,7 +72,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     currentMap = loadMap();
     if (currentMap == nullptr)
     {
-        retireEQCache(cache);
+        retireEQCache(owner, cache);
         return nullptr;
     }
 
@@ -82,7 +80,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     if (it != currentMap->map.end())
     {
         // 先に追加されたキャッシュを採用し、新規作成分を破棄
-        retireEQCache(cache);
+        retireEQCache(owner, cache);
         return it->second;
     }
 
@@ -93,7 +91,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     }
     catch (const std::bad_alloc&)
     {
-        retireEQCache(cache);
+        retireEQCache(owner, cache);
         return nullptr;
     }
 
@@ -116,7 +114,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) const noexcept
 void AudioEngine::EQCacheManager::releaseCache(EQCoeffCache* cache) noexcept
 {
     if (cache != nullptr)
-        retireEQCache(cache);
+    retireEQCache(owner, cache);
 }
 
 AudioEngine::EQCacheManager::~EQCacheManager()

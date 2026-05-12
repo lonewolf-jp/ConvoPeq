@@ -2,7 +2,11 @@
 #pragma once
 
 #include <bit>      // std::bit_cast (C++20)
+#include <array>
 #include <cstdint>  // uint64_t, uint32_t
+#include <atomic>
+#include <functional>
+#include <thread>
 #include <immintrin.h>
 #include <JuceHeader.h>
 
@@ -14,31 +18,96 @@ namespace convo::numeric_policy
         AudioRealtime
     };
 
-    inline thread_local ThreadRole g_currentThreadRole = ThreadRole::Unknown;
+    inline constexpr size_t kMaxAudioThreadSlots = 4;
+
+    struct AudioThreadSlot
+    {
+        std::atomic<uint64_t> tag { 0 };
+        std::atomic<uint32_t> depth { 0 };
+    };
+
+    inline std::array<AudioThreadSlot, kMaxAudioThreadSlots> g_audioThreadSlots {};
+
+    inline uint64_t currentThreadTag() noexcept
+    {
+        return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    }
 
     struct ScopedThreadRole final
     {
         explicit ScopedThreadRole(ThreadRole nextRole) noexcept
-            : previous(g_currentThreadRole)
+            : activatesAudio(nextRole == ThreadRole::AudioRealtime)
         {
-            g_currentThreadRole = nextRole;
+            if (activatesAudio)
+                acquireAudioThreadSlot();
         }
 
         ~ScopedThreadRole() noexcept
         {
-            g_currentThreadRole = previous;
+            if (activatesAudio)
+                releaseAudioThreadSlot();
         }
 
         ScopedThreadRole(const ScopedThreadRole&) = delete;
         ScopedThreadRole& operator=(const ScopedThreadRole&) = delete;
 
     private:
-        ThreadRole previous;
+        void acquireAudioThreadSlot() noexcept
+        {
+            const uint64_t tag = currentThreadTag();
+
+            for (size_t i = 0; i < g_audioThreadSlots.size(); ++i)
+            {
+                auto& slot = g_audioThreadSlots[i];
+                const uint64_t existingTag = slot.tag.load(std::memory_order_acquire);
+                if (existingTag == tag)
+                {
+                    slot.depth.fetch_add(1, std::memory_order_acq_rel);
+                    slotIndex = static_cast<int>(i);
+                    return;
+                }
+            }
+
+            for (size_t i = 0; i < g_audioThreadSlots.size(); ++i)
+            {
+                auto& slot = g_audioThreadSlots[i];
+                uint64_t expected = 0;
+                if (slot.tag.compare_exchange_strong(expected, tag, std::memory_order_acq_rel, std::memory_order_acquire))
+                {
+                    slot.depth.store(1, std::memory_order_release);
+                    slotIndex = static_cast<int>(i);
+                    return;
+                }
+            }
+        }
+
+        void releaseAudioThreadSlot() noexcept
+        {
+            if (slotIndex < 0)
+                return;
+
+            auto& slot = g_audioThreadSlots[static_cast<size_t>(slotIndex)];
+            const uint32_t previousDepth = slot.depth.fetch_sub(1, std::memory_order_acq_rel);
+            if (previousDepth <= 1)
+            {
+                slot.depth.store(0, std::memory_order_release);
+                slot.tag.store(0, std::memory_order_release);
+            }
+        }
+
+        bool activatesAudio = false;
+        int slotIndex = -1;
     };
 
     inline bool isAudioThread() noexcept
     {
-        return g_currentThreadRole == ThreadRole::AudioRealtime;
+        const uint64_t tag = currentThreadTag();
+        for (auto& slot : g_audioThreadSlots)
+        {
+            if (slot.tag.load(std::memory_order_acquire) == tag)
+                return true;
+        }
+        return false;
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -203,6 +272,22 @@ struct LinearRamp
         if (--remaining <= 0)
             current = target;  // 最終ステップで浮動小数点誤差なく収束
         return current;
+    }
+
+    /// numSamples 分だけランプを進める。Audio Thread のみ。
+    inline void skip(int numSamples) noexcept
+    {
+        ASSERT_AUDIO_THREAD();
+        if (numSamples <= 0 || remaining <= 0)
+            return;
+        if (numSamples >= remaining)
+        {
+            current = target;
+            remaining = 0;
+            return;
+        }
+        current += step * static_cast<double>(numSamples);
+        remaining -= numSamples;
     }
 
     double getCurrentValue() const noexcept { return current; }

@@ -34,17 +34,6 @@ void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
     sendChangeMessage();
 }
 
-void AudioEngine::setConvolverUseMinPhase(bool useMinPhase)
-{
-    setConvolverPhaseMode(useMinPhase ? ConvolverProcessor::PhaseMode::Minimum
-                                      : ConvolverProcessor::PhaseMode::AsIs);
-}
-
-bool AudioEngine::getConvolverUseMinPhase() const
-{
-    return getConvolverPhaseMode() == ConvolverProcessor::PhaseMode::Minimum;
-}
-
 void AudioEngine::setConvolverPhaseMode(ConvolverProcessor::PhaseMode mode)
 {
     uiConvolverProcessor.setPhaseMode(mode);
@@ -529,12 +518,6 @@ void AudioEngine::requestSnapshotForNoiseShaper()
     (void)enqueueSnapshotCommand();
 }
 
-void AudioEngine::commitAGCChange()
-{
-    m_pendingAGCChange.store(true, std::memory_order_release);
-    (void)enqueueSnapshotCommand();
-}
-
 AudioEngine::NoiseShaperType AudioEngine::getNoiseShaperType() const
 {
     return noiseShaperType.load();
@@ -558,16 +541,6 @@ void AudioEngine::setFixedNoiseWindowSamples(int windowSamples) noexcept
 int AudioEngine::getFixedNoiseWindowSamples() const noexcept
 {
     return fixedNoiseWindowSamples.load(std::memory_order_relaxed);
-}
-
-void AudioEngine::setCrossfadeStartDelayBlocks(int blocks) noexcept
-{
-    m_crossfadeStartDelayBlocks.store(juce::jmax(0, blocks), std::memory_order_relaxed);
-}
-
-int AudioEngine::getCrossfadeStartDelayBlocks() const noexcept
-{
-    return m_crossfadeStartDelayBlocks.load(std::memory_order_relaxed);
 }
 
 void AudioEngine::setSoftClipEnabled(bool enabled)

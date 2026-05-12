@@ -14,7 +14,6 @@ namespace convo {
 class SnapshotAssembler {
 public:
     static SnapshotParams assemble(
-        const ConvolverState* conv,
         uint64_t convStateId,
         const EQParameters& eq,
         const std::array<double, 9>& nsCoeffs,

@@ -8,7 +8,6 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include "../ConvolverState.h"
 #include "EQParameters.h"
 #include "SnapshotParams.h"
 #include "Types.h"
@@ -16,8 +15,6 @@
 namespace convo {
 
 struct GlobalSnapshot {
-    // ---------- 観測専用ポインタ（寿命は SafeStateSwapper 管理） ----------
-    const ConvolverState* convState = nullptr;
     uint64_t convStateId = 0;
 
     // ---------- 値型パラメータ（完全自己完結） ----------

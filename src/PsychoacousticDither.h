@@ -17,8 +17,6 @@
 #include <JuceHeader.h>
 #include <optional>
 #include <atomic>
-#include <thread>
-#include <chrono>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -26,13 +24,6 @@
 #include "AlignedAllocation.h"
 #include <immintrin.h>
 #include <mkl_vsl.h>
-
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
-#endif
 
 namespace convo
 {
@@ -101,7 +92,6 @@ public:
     };
 
     ~PsychoacousticDither() {
-        stopRngProducer();
         if (shaperStateBuffer) convo::aligned_free(shaperStateBuffer);
     }
 
@@ -225,8 +215,6 @@ public:
 
     void prepare(double sampleRate, int bitDepth = DEFAULT_BIT_DEPTH) noexcept
     {
-        stopRngProducer();
-
         // bitDepth <= 0 の場合はディザリングが無効化されるため、スケール計算は不要。
         // AudioEngine::DSPCore::processOutput() の applyDither フラグで処理がスキップされる。
         if (bitDepth <= 0)
@@ -267,7 +255,6 @@ public:
 
         clearRandomRing();
         prefillRandomRing();
-        startRngProducer();
 
         reset();
     }
@@ -447,69 +434,30 @@ private:
         }
     }
 
-    void startRngProducer() noexcept
+public:
+    // WORKER_ONLY: Audio Thread外からリングを補充する。
+    inline void refillRandomRingNonRt(uint32_t chunk = RNG_REFILL_CHUNK) noexcept
     {
-        rngProducerStopRequested.store(false, std::memory_order_release);
-        try
-        {
-            rngProducerThread = std::thread([this]() { rngProducerLoop(); });
-            rngProducerRunning.store(true, std::memory_order_release);
-        }
-        catch (...)
-        {
-            rngProducerRunning.store(false, std::memory_order_release);
-            rngProducerStopRequested.store(true, std::memory_order_release);
-        }
-    }
-
-    void stopRngProducer() noexcept
-    {
-        const bool wasRunning = rngProducerRunning.exchange(false, std::memory_order_acq_rel);
-        if (!wasRunning)
+        if (chunk == 0u)
             return;
 
-        rngProducerStopRequested.store(true, std::memory_order_release);
-        if (rngProducerThread.joinable())
-            rngProducerThread.join();
-    }
-
-    void rngProducerLoop() noexcept
-    {
-#ifdef _WIN32
-        HANDLE hThread = ::GetCurrentThread();
-        if (hThread != nullptr)
-            ::SetThreadPriority(hThread, THREAD_PRIORITY_LOWEST);
-#endif
-
-        // FTZ/DAZ settings for stable MKL performance
-        // このスレッドは MKL の vdRngUniform を呼び出すため、デノーマル数による
-        // スループット低下を防ぐために Flush To Zero / Denormals Are Zero を有効化する。
-        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-
-        while (!rngProducerStopRequested.load(std::memory_order_acquire))
+        const uint32_t refillChunk = std::min(chunk, RNG_RING_SIZE);
+        for (int ch = 0; ch < MAX_CHANNELS; ++ch)
         {
-            bool didWork = false;
+            const uint32_t readPos = rngReadPos[ch].load(std::memory_order_acquire);
+            const uint32_t writePos = rngWritePos[ch].load(std::memory_order_relaxed);
+            const uint32_t available = writePos - readPos;
+            const uint32_t freeSpace = RNG_RING_SIZE - available;
 
-            for (int ch = 0; ch < MAX_CHANNELS; ++ch)
+            if (freeSpace >= refillChunk)
             {
-                const uint32_t readPos = rngReadPos[ch].load(std::memory_order_acquire);
-                const uint32_t writePos = rngWritePos[ch].load(std::memory_order_relaxed);
-                const uint32_t available = writePos - readPos;
-                const uint32_t freeSpace = RNG_RING_SIZE - available;
-
-                if (freeSpace >= RNG_REFILL_CHUNK)
-                {
-                    fillChunkForChannel(ch, writePos, RNG_REFILL_CHUNK);
-                    rngWritePos[ch].store(writePos + RNG_REFILL_CHUNK, std::memory_order_release);
-                    didWork = true;
-                }
+                fillChunkForChannel(ch, writePos, refillChunk);
+                rngWritePos[ch].store(writePos + refillChunk, std::memory_order_release);
             }
-
-            if (!didWork)
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
+
+private:
 
     inline double fallbackUniform(int channel) noexcept
     {
@@ -593,9 +541,6 @@ private:
     std::atomic<uint32_t> rngWritePos[MAX_CHANNELS] {};
     uint64_t fallbackState[MAX_CHANNELS] {};
 
-    std::thread rngProducerThread;
-    std::atomic<bool> rngProducerRunning { false };
-    std::atomic<bool> rngProducerStopRequested { false };
 
     inline double nextTPDF_MKL(int channel) noexcept
     {

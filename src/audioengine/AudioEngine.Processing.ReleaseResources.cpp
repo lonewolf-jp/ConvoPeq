@@ -72,7 +72,6 @@ void AudioEngine::releaseResources()
 
     DSPCore* activeToRelease = nullptr;
     DSPCore* fadingToRelease = nullptr;
-    DSPCore* queuedToRelease = nullptr;
     DSPCore* pendingNewToRelease = nullptr;
     DSPCore* pendingCurrentToRelease = nullptr;
 
@@ -81,7 +80,7 @@ void AudioEngine::releaseResources()
         validateDistinctRuntimeSlots("releaseResources.beforeClear",
                                      activeDSP,
                                      sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                                     sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+                                     nullptr);
 
         rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
         currentDSP.store(nullptr, std::memory_order_release);
@@ -90,12 +89,9 @@ void AudioEngine::releaseResources()
         activeDSP = nullptr;
 
         fadingToRelease = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel));
-        queuedToRelease = sanitizeRawPtr(queuedOldDSP.exchange(nullptr, std::memory_order_acq_rel));
-        fadeQueued.store(false, std::memory_order_release);
         dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
         dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
         queuedFadeTimeSec.store(0.03, std::memory_order_release);
-        queuedNextFadeTimeSec.store(0.03, std::memory_order_release);
 
         if (hasPendingTask)
         {
@@ -111,16 +107,16 @@ void AudioEngine::releaseResources()
                                       convo::TransitionPolicy::HardReset,
                                       0.0,
                                       false);
-        publishRuntimePublishState(makeRuntimePublishState(nullptr,
-                                                          nullptr,
-                                                          convo::TransitionPolicy::HardReset,
-                                                          0.0,
-                                                          false));
+        publishRuntimeSnapshots(nullptr,
+                    nullptr,
+                    convo::TransitionPolicy::HardReset,
+                    0.0,
+                    false);
 
         validateDistinctRuntimeSlots("releaseResources.afterClear",
                          activeDSP,
                          sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                         sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+                         nullptr);
     }
 
     diagLog("[DIAG] releaseResources: before stopRebuildThread");
@@ -155,8 +151,6 @@ void AudioEngine::releaseResources()
         retireDSP(activeToRelease);
     if (fadingToRelease)
         retireDSP(fadingToRelease);
-    if (queuedToRelease)
-        retireDSP(queuedToRelease);
     if (pendingNewToRelease)
         retireDSP(pendingNewToRelease);
     if (pendingCurrentToRelease)
@@ -174,6 +168,8 @@ void AudioEngine::releaseResources()
     diagLog("[DIAG] releaseResources: after ui processor release");
 
     diagLog("[DIAG] releaseResources: skip deferred reclaim (reconfigure phase)");
+
+    clearPublishedRuntimeSnapshotsNonRt();
 
     lifecycleState.store(EngineLifecycleState::Unprepared, std::memory_order_release);
     diagLog("[DIAG] releaseResources: ABOUT_TO_EXIT_SCOPE");

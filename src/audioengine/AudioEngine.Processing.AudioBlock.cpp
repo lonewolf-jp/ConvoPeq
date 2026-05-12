@@ -3,8 +3,6 @@
 #include "NoiseShaperLearner.h"
 #include "core/RCUReader.h"
 
-static thread_local convo::RCUReader tls_rcuReader;
-
 namespace
 {
     inline double absDiffNoLibm(double a, double b) noexcept
@@ -17,8 +15,10 @@ namespace
 
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
+    constexpr int kAudioEpochReaderIndex = 0;
     const juce::ScopedNoDenormals noDenormals;
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
+    const convo::EpochCoreReaderGuard epochReaderGuard(m_epochCore, kAudioEpochReaderIndex);
     ASSERT_AUDIO_THREAD();
     m_audioBlockCounter.fetch_add(1, std::memory_order_release);
 
@@ -50,10 +50,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
     // Epoch tracking for lock-free Audio Thread safety
-    convo::RCUReaderGuard rcuGuard(tls_rcuReader);
+    convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
 
-    const auto* runtimePublish = getRuntimePublishState();
-    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimePublish);
+    const auto* runtimeGraph = getRuntimeGraphState();
+    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(bufferToFill);
@@ -137,14 +137,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             return;
         }
 
-        DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimePublish);
+        DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimeGraph);
         const auto* engineRuntime = getEngineRuntimeState();
         const bool atomicUseDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
         bool useDryAsOld = atomicUseDryAsOld
-            || runtimeCrossfadeUseDryAsOld(runtimePublish, engineRuntime);
+            || runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
         const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
         const bool hasPendingCrossfade = atomicPendingCrossfade
-            || runtimeCrossfadePending(runtimePublish, engineRuntime);
+            || runtimeCrossfadePending(engineRuntime, runtimeGraph);
         const int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
         if (processCrossfadeDelayGateIfPending(fading,
                                                useDryAsOld,
@@ -153,16 +153,23 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                                                [&]()
         {
             auto fadingState = makeCrossfadeAuxState(procState);
+            syncEqAgcTableViewFromRuntimeGraph(dspExecutionStateFading, runtimeGraph);
 
             std::atomic<float> fadingInputMeter { 0.0f };
             std::atomic<float> fadingOutputMeter { 0.0f };
-            fading->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, fadingState);
+            fading->processV2(bufferToFill,
+                              analyzerFifo,
+                              inputLevelLinear,
+                              outputLevelLinear,
+                              runtimeGraph,
+                              dspExecutionStateFading,
+                              fadingState);
         }))
         {
             return;
         }
 
-        armCrossfadeIfPending(dsp, fading != nullptr, useDryAsOld, runtimePublish);
+        armCrossfadeIfPending(dsp, fading != nullptr, useDryAsOld, runtimeGraph);
 
         const bool canCrossfade = (fading != nullptr || useDryAsOld)
             && dspCrossfadeGain.isSmoothing()
@@ -190,10 +197,18 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             else
             {
                 // EBR: lifetime managed by RCUReader
+                syncEqAgcTableViewFromRuntimeGraph(dspExecutionStateFading, runtimeGraph);
                 fading->processToBuffer(bufferToFill, dspCrossfadeFloatBuffer, analyzerFifo,
                                        fadingInputMeter, fadingOutputMeter, fadingState);
             }
-            dsp->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
+            syncEqAgcTableViewFromRuntimeGraph(dspExecutionStateCurrent, runtimeGraph);
+            dsp->processV2(bufferToFill,
+                           analyzerFifo,
+                           inputLevelLinear,
+                           outputLevelLinear,
+                           runtimeGraph,
+                           dspExecutionStateCurrent,
+                           procState);
 
             const int outChannels = std::min(2, buffer->getNumChannels());
             float* dstL = (outChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
@@ -206,6 +221,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                                                      oldL,
                                                      oldR,
                                                      numSamples,
+                                                     runtimeGraph,
                                                      [this, useDryAsOld](float* outL,
                                                                          float* outR,
                                                                          int i,
@@ -235,7 +251,13 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         else
         {
             // 通常パス（クロスフェードなし）：RCU で dsp の生存が保証されるため addRef/release 不要
-            dsp->process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, procState);
+            dsp->processV2(bufferToFill,
+                           analyzerFifo,
+                           inputLevelLinear,
+                           outputLevelLinear,
+                           runtimeGraph,
+                           dspExecutionStateCurrent,
+                           procState);
             cleanupCrossfadeDirectPath(fading);
         }
     }

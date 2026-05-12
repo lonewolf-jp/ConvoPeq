@@ -13,8 +13,6 @@
  #include <immintrin.h>
 #endif
 
-static thread_local convo::RCUReader tls_rcuReader;
-
 static inline double calculateRMS(const double* data, int numSamples) noexcept
 {
     if (data == nullptr || numSamples <= 0)
@@ -348,6 +346,7 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
 {
     const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
     const int numSamples = (int)block.getNumSamples();
+    auto* activeEqState = (boundExecutionState != nullptr) ? &boundExecutionState->eq : nullptr;
 
     // 係数の事前ロード（atomic、relaxedで十分）
     const double attackCoeff = agcAttackCoeff.load(std::memory_order_relaxed);
@@ -358,15 +357,28 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     double blockReleaseCoeff;
     double blockSmoothCoeff;
 
+    const double* activeAttackCoeffTable = (activeEqState != nullptr)
+        ? activeEqState->agcAttackCoeffTable
+        : agcAttackCoeffTable.get();
+    const double* activeReleaseCoeffTable = (activeEqState != nullptr)
+        ? activeEqState->agcReleaseCoeffTable
+        : agcReleaseCoeffTable.get();
+    const double* activeSmoothCoeffTable = (activeEqState != nullptr)
+        ? activeEqState->agcSmoothCoeffTable
+        : agcSmoothCoeffTable.get();
+    const int activeCoeffTableCapacity = (activeEqState != nullptr)
+        ? activeEqState->agcCoeffTableCapacity
+        : agcCoeffTableCapacity;
+
     if (numSamples >= 0
-        && numSamples < agcCoeffTableCapacity
-        && agcAttackCoeffTable
-        && agcReleaseCoeffTable
-        && agcSmoothCoeffTable)
+        && numSamples < activeCoeffTableCapacity
+        && activeAttackCoeffTable
+        && activeReleaseCoeffTable
+        && activeSmoothCoeffTable)
     {
-        blockAttackCoeff = agcAttackCoeffTable[numSamples];
-        blockReleaseCoeff = agcReleaseCoeffTable[numSamples];
-        blockSmoothCoeff = agcSmoothCoeffTable[numSamples];
+        blockAttackCoeff = activeAttackCoeffTable[numSamples];
+        blockReleaseCoeff = activeReleaseCoeffTable[numSamples];
+        blockSmoothCoeff = activeSmoothCoeffTable[numSamples];
     }
     else
     {
@@ -380,7 +392,7 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
         blockSmoothCoeff = std::min(1.0, static_cast<double>(numSamples) * smoothEpsilon);
     }
 
-    double inputRMS = cachedInputRMS;
+    double inputRMS = (activeEqState != nullptr) ? activeEqState->cachedInputRms : cachedInputRMS;
 
     // 出力レベル計測
     double outputRMS = 0.0;
@@ -399,9 +411,15 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     if (!isFiniteNoLibm(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
 
     // アトミック変数のロード
-    double envIn = agcEnvInput.load(std::memory_order_relaxed);
-    double envOut = agcEnvOutput.load(std::memory_order_relaxed);
-    double currentGain = agcCurrentGain.load(std::memory_order_relaxed);
+    double envIn = (activeEqState != nullptr)
+        ? activeEqState->agcEnvInput
+        : agcEnvInput.load(std::memory_order_relaxed);
+    double envOut = (activeEqState != nullptr)
+        ? activeEqState->agcEnvOutput
+        : agcEnvOutput.load(std::memory_order_relaxed);
+    double currentGain = (activeEqState != nullptr)
+        ? activeEqState->agcCurrentGain
+        : agcCurrentGain.load(std::memory_order_relaxed);
 
     if (!isFiniteNoLibm(envIn))  envIn = 0.0;
     if (!isFiniteNoLibm(envOut)) envOut = 0.0;
@@ -426,9 +444,18 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     const double nextGain = currentGain * (1.0 - blockSmoothCoeff) + targetGain * blockSmoothCoeff;
 
     // アトミック変数のストア
-    agcEnvInput.store(envIn, std::memory_order_relaxed);
-    agcEnvOutput.store(envOut, std::memory_order_relaxed);
-    agcCurrentGain.store(nextGain, std::memory_order_relaxed);
+    if (activeEqState != nullptr)
+    {
+        activeEqState->agcEnvInput = envIn;
+        activeEqState->agcEnvOutput = envOut;
+        activeEqState->agcCurrentGain = nextGain;
+    }
+    else
+    {
+        agcEnvInput.store(envIn, std::memory_order_relaxed);
+        agcEnvOutput.store(envOut, std::memory_order_relaxed);
+        agcCurrentGain.store(nextGain, std::memory_order_relaxed);
+    }
 
     // ゲイン適用 (ランプ: currentGain -> nextGain)
     const double gainIncrement = (nextGain - currentGain) / static_cast<double>(numSamples);
@@ -478,37 +505,89 @@ bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block,
 //--------------------------------------------------------------
 void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
-    convo::RCUReaderGuard guard(tls_rcuReader);
+    auto* activeEqState = (boundExecutionState != nullptr) ? &boundExecutionState->eq : nullptr;
+    convo::RCUReaderGuard guard((activeEqState != nullptr) ? activeEqState->rcuReader : rcuReader);
     // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
 
     const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
-    bool effectiveBypass = bypassed.load(std::memory_order_relaxed);
+    auto* activeBypassRamp = (activeEqState != nullptr) ? &activeEqState->bypassFadeGain : nullptr;
+    bool effectiveBypass = (activeEqState != nullptr)
+        ? activeEqState->bypassed
+        : bypassed.load(std::memory_order_relaxed);
 
     const double targetBypassFade = requestedBypass ? 0.0 : 1.0;
-    if (absNoLibm(bypassFadeGain.getTargetValue() - targetBypassFade) > 1.0e-12)
+    const double currentBypassTarget = (activeBypassRamp != nullptr)
+        ? activeBypassRamp->getTargetValue()
+        : bypassFadeGain.getTargetValue();
+    if (absNoLibm(currentBypassTarget - targetBypassFade) > 1.0e-12)
     {
         if (!requestedBypass && effectiveBypass)
         {
             bandResetMask.store(0xFFFFFFFFu, std::memory_order_relaxed);
+            if (activeEqState != nullptr)
+                activeEqState->bypassed = false;
             bypassed.store(false, std::memory_order_relaxed);
         }
-        bypassFadeGain.setTargetValue(targetBypassFade);
-        effectiveBypass = bypassed.load(std::memory_order_relaxed);
+        if (activeBypassRamp != nullptr)
+            activeBypassRamp->setTargetValue(targetBypassFade);
+        else
+            bypassFadeGain.setTargetValue(targetBypassFade);
+        effectiveBypass = (activeEqState != nullptr)
+            ? activeEqState->bypassed
+            : bypassed.load(std::memory_order_relaxed);
     }
 
-    const bool bypassTransitionActive = bypassFadeGain.isSmoothing();
+    const bool bypassTransitionActive = (activeBypassRamp != nullptr)
+        ? activeBypassRamp->isSmoothing()
+        : bypassFadeGain.isSmoothing();
 
     // フェードアウト完了時に bypassed を true にする
     if (requestedBypass && !effectiveBypass && !bypassTransitionActive)
     {
+        if (activeEqState != nullptr)
+            activeEqState->bypassed = true;
         bypassed.store(true, std::memory_order_relaxed);
         effectiveBypass = true;
     }
 
     if (requestedBypass && effectiveBypass && !bypassTransitionActive)
         return;
+
+    auto& activeFilterState = (activeEqState != nullptr)
+        ? activeEqState->filterState
+        : filterState;
+
+    double* activeDryBypassBuffer = (activeEqState != nullptr)
+        ? activeEqState->dryBypassBuffer
+        : dryBypassBuffer.get();
+    const int activeDryBypassCapacity = (activeEqState != nullptr)
+        ? activeEqState->dryBypassCapacity
+        : dryBypassCapacity;
+
+    double* activeParallelInputBuffer = (activeEqState != nullptr)
+        ? activeEqState->parallelInputBuffer
+        : parallelInputBuffer.get();
+    double* activeParallelWorkBuffer = (activeEqState != nullptr)
+        ? activeEqState->parallelWorkBuffer
+        : parallelWorkBuffer.get();
+    double* activeParallelAccumBuffer = (activeEqState != nullptr)
+        ? activeEqState->parallelAccumBuffer
+        : parallelAccumBuffer.get();
+    const int activeParallelBufferCapacity = (activeEqState != nullptr)
+        ? activeEqState->parallelBufferCapacity
+        : parallelBufferCapacity;
+
+    double* activeStructureOldOutBuffer = (activeEqState != nullptr)
+        ? activeEqState->structureOldOutBuffer
+        : structureOldOutBuffer.get();
+    double* activeStructureNewOutBuffer = (activeEqState != nullptr)
+        ? activeEqState->structureNewOutBuffer
+        : structureNewOutBuffer.get();
+    const int activeStructureXfadeBufferCapacity = (activeEqState != nullptr)
+        ? activeEqState->structureXfadeBufferCapacity
+        : structureXfadeBufferCapacity;
 
     const int numSamples = (int)block.getNumSamples();
 
@@ -537,9 +616,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (bypassTransitionActive)
     {
         const int requiredDrySamples = numSamples * numChannels;
-        if (dryBypassBuffer && requiredDrySamples <= dryBypassCapacity)
+        if (activeDryBypassBuffer != nullptr && requiredDrySamples <= activeDryBypassCapacity)
         {
-            dryCopyBase = dryBypassBuffer.get();
+            dryCopyBase = activeDryBypassBuffer;
             for (int ch = 0; ch < numChannels; ++ch)
                 std::memcpy(dryCopyBase + (ch * numSamples),
                             block.getChannelPointer(ch),
@@ -554,6 +633,12 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         agcCurrentGain.store(1.0, std::memory_order_relaxed);
         agcEnvInput.store(0.0, std::memory_order_relaxed);
         agcEnvOutput.store(0.0, std::memory_order_relaxed);
+        if (boundExecutionState != nullptr)
+        {
+            boundExecutionState->eq.agcCurrentGain = 1.0;
+            boundExecutionState->eq.agcEnvInput = 0.0;
+            boundExecutionState->eq.agcEnvOutput = 0.0;
+        }
     }
 
     uint32_t mask = bandResetMask.exchange(0, std::memory_order_relaxed);
@@ -566,7 +651,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         // 最適化: 全バンドリセットの場合は memset で一括クリア
         else if (mask == 0xFFFFFFFF)
         {
-            std::memset(filterState.data(), 0, sizeof(filterState));
+            std::memset(activeFilterState.data(), 0, sizeof(activeFilterState));
         }
         else
         {
@@ -574,7 +659,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             {
                 if (mask & (1u << i))
                     for (int ch = 0; ch < MAX_CHANNELS; ++ch)
-                        std::memset(filterState[ch][i].data(), 0, sizeof(double) * 2);
+                        std::memset(activeFilterState[ch][i].data(), 0, sizeof(double) * 2);
             }
         }
     }
@@ -583,14 +668,17 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // ✅ フィルタ処理前に入力レベルをキャッシュ (AGCが有効な場合のみ)
     if (isAgcEnabled)
     {
-        cachedInputRMS = 0.0;
+        double& cachedInputRMSRef = (boundExecutionState != nullptr)
+            ? boundExecutionState->eq.cachedInputRms
+            : cachedInputRMS;
+        cachedInputRMSRef = 0.0;
         for (int ch = 0; ch < numChannels; ++ch)
         {
             const double* data = block.getChannelPointer(ch);
             const double rms = calculateRMS(data, numSamples);
 
-            if (rms > cachedInputRMS)
-                cachedInputRMS = rms;
+            if (rms > cachedInputRMSRef)
+                cachedInputRMSRef = rms;
         }
     }
 
@@ -618,7 +706,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     }
 
-    using FilterStateStorage = decltype(filterState);
+    using FilterStateStorage = decltype(activeFilterState);
 
     const auto processSerial = [&](double* dataL,
                                    double* dataR,
@@ -653,7 +741,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                                      double* dstR,
                                      FilterStateStorage& states)
     {
-        if (!(parallelWorkBuffer && parallelAccumBuffer))
+        if (!(activeParallelWorkBuffer && activeParallelAccumBuffer))
         {
             std::memcpy(dstL, srcL, sizeof(double) * static_cast<size_t>(numSamples));
             if (numChannels > 1)
@@ -661,10 +749,10 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             return;
         }
 
-        double* workL = parallelWorkBuffer.get();
-        double* workR = parallelWorkBuffer.get() + numSamples;
-        double* accumL = parallelAccumBuffer.get();
-        double* accumR = parallelAccumBuffer.get() + numSamples;
+        double* workL = activeParallelWorkBuffer;
+        double* workR = activeParallelWorkBuffer + numSamples;
+        double* accumL = activeParallelAccumBuffer;
+        double* accumR = activeParallelAccumBuffer + numSamples;
         juce::FloatVectorOperations::clear(accumL, numSamples);
         if (numChannels > 1)
             juce::FloatVectorOperations::clear(accumR, numSamples);
@@ -717,30 +805,32 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     };
 
-    auto activeMode = activeStructure.load(std::memory_order_relaxed);
+    auto activeMode = (activeEqState != nullptr)
+        ? static_cast<FilterStructure>(activeEqState->activeStructure)
+        : activeStructure.load(std::memory_order_relaxed);
     auto requestedMode = requestedStructure.load(std::memory_order_relaxed);
-    const bool canUseParallelBuffers = parallelInputBuffer
-                                       && parallelBufferCapacity >= (numSamples * numChannels);
+    const bool canUseParallelBuffers = (activeParallelInputBuffer != nullptr)
+                                       && activeParallelBufferCapacity >= (numSamples * numChannels);
     const bool canUseStructureXfade = canUseParallelBuffers
-                                      && structureOldOutBuffer
-                                      && structureNewOutBuffer
-                                      && structureXfadeBufferCapacity >= (numSamples * numChannels);
+                                      && activeStructureOldOutBuffer != nullptr
+                                      && activeStructureNewOutBuffer != nullptr
+                                      && activeStructureXfadeBufferCapacity >= (numSamples * numChannels);
 
     auto* blockL = block.getChannelPointer(0);
     double* blockR = (numChannels > 1) ? block.getChannelPointer(1) : nullptr;
 
     if (requestedMode != activeMode && canUseStructureXfade)
     {
-        double* srcL = parallelInputBuffer.get();
-        double* srcR = (numChannels > 1) ? (parallelInputBuffer.get() + numSamples) : nullptr;
+        double* srcL = activeParallelInputBuffer;
+        double* srcR = (numChannels > 1) ? (activeParallelInputBuffer + numSamples) : nullptr;
         std::memcpy(srcL, blockL, sizeof(double) * static_cast<size_t>(numSamples));
         if (numChannels > 1)
             std::memcpy(srcR, blockR, sizeof(double) * static_cast<size_t>(numSamples));
 
-        double* oldL = structureOldOutBuffer.get();
-        double* oldR = (numChannels > 1) ? (structureOldOutBuffer.get() + numSamples) : nullptr;
-        double* newL = structureNewOutBuffer.get();
-        double* newR = (numChannels > 1) ? (structureNewOutBuffer.get() + numSamples) : nullptr;
+        double* oldL = activeStructureOldOutBuffer;
+        double* oldR = (numChannels > 1) ? (activeStructureOldOutBuffer + numSamples) : nullptr;
+        double* newL = activeStructureNewOutBuffer;
+        double* newR = (numChannels > 1) ? (activeStructureNewOutBuffer + numSamples) : nullptr;
         std::memcpy(oldL, srcL, sizeof(double) * static_cast<size_t>(numSamples));
         std::memcpy(newL, srcL, sizeof(double) * static_cast<size_t>(numSamples));
         if (numChannels > 1)
@@ -749,16 +839,16 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             std::memcpy(newR, srcR, sizeof(double) * static_cast<size_t>(numSamples));
         }
 
-        auto oldStateSnapshot = filterState;
+        auto oldStateSnapshot = activeFilterState;
         if (activeMode == FilterStructure::Serial)
             processSerial(oldL, oldR, oldStateSnapshot);
         else
             processParallel(srcL, srcR, oldL, oldR, oldStateSnapshot);
 
         if (requestedMode == FilterStructure::Serial)
-            processSerial(newL, newR, filterState);
+            processSerial(newL, newR, activeFilterState);
         else
-            processParallel(srcL, srcR, newL, newR, filterState);
+            processParallel(srcL, srcR, newL, newR, activeFilterState);
 
         const double step = 1.0 / static_cast<double>(numSamples);
         for (int n = 0; n < numSamples; ++n)
@@ -771,6 +861,8 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 blockR[n] = oldR[n] * wOld + newR[n] * wNew;
         }
 
+        if (activeEqState != nullptr)
+            activeEqState->activeStructure = static_cast<int>(requestedMode);
         activeStructure.store(requestedMode, std::memory_order_relaxed);
     }
     else
@@ -778,21 +870,23 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (requestedMode != activeMode)
         {
             activeMode = requestedMode;
+            if (activeEqState != nullptr)
+                activeEqState->activeStructure = static_cast<int>(activeMode);
             activeStructure.store(activeMode, std::memory_order_relaxed);
         }
 
         if (activeMode == FilterStructure::Serial || !canUseParallelBuffers)
         {
-            processSerial(blockL, blockR, filterState);
+            processSerial(blockL, blockR, activeFilterState);
         }
         else
         {
-            double* srcL = parallelInputBuffer.get();
-            double* srcR = (numChannels > 1) ? (parallelInputBuffer.get() + numSamples) : nullptr;
+            double* srcL = activeParallelInputBuffer;
+            double* srcR = (numChannels > 1) ? (activeParallelInputBuffer + numSamples) : nullptr;
             std::memcpy(srcL, blockL, sizeof(double) * static_cast<size_t>(numSamples));
             if (numChannels > 1)
                 std::memcpy(srcR, blockR, sizeof(double) * static_cast<size_t>(numSamples));
-            processParallel(srcL, srcR, blockL, blockR, filterState);
+            processParallel(srcL, srcR, blockL, blockR, activeFilterState);
         }
     }
 
@@ -811,14 +905,28 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         // Audio Threadでは atomic load のみ行う。
         const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
 
-        if (absNoLibm(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
+        auto* activeGainRamp = (activeEqState != nullptr) ? &activeEqState->smoothTotalGain : nullptr;
+        const double gainTarget = (activeGainRamp != nullptr)
+            ? activeGainRamp->getTargetValue()
+            : smoothTotalGain.getTargetValue();
+        if (absNoLibm(gainTarget - targetGain) > 1e-6)
         {
-            smoothTotalGain.setTargetValue(targetGain);
+            if (activeGainRamp != nullptr)
+                activeGainRamp->setTargetValue(targetGain);
+            else
+                smoothTotalGain.setTargetValue(targetGain);
         }
 
-        const double startGain = smoothTotalGain.getCurrentValue();
-        smoothTotalGain.skip(numSamples);
-        const double endGain = smoothTotalGain.getCurrentValue();
+        const double startGain = (activeGainRamp != nullptr)
+            ? activeGainRamp->getCurrentValue()
+            : smoothTotalGain.getCurrentValue();
+        if (activeGainRamp != nullptr)
+            activeGainRamp->skip(numSamples);
+        else
+            smoothTotalGain.skip(numSamples);
+        const double endGain = (activeGainRamp != nullptr)
+            ? activeGainRamp->getCurrentValue()
+            : smoothTotalGain.getCurrentValue();
 
         // AGC 無効時のゲインランプ
         const double increment = (endGain - startGain) / static_cast<double>(numSamples);
@@ -830,28 +938,43 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     {
         for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
         {
-            const double wetGain = bypassFadeGain.getNextValue();
-            const double dryGain = 1.0 - wetGain;
+            const double wetGainState = (activeBypassRamp != nullptr)
+                ? activeBypassRamp->getNextValue()
+                : bypassFadeGain.getNextValue();
+            const double dryGain = 1.0 - wetGainState;
 
             for (int ch = 0; ch < numChannels; ++ch)
             {
                 double* wetPtr = block.getChannelPointer(ch);
                 const double dryValue = dryCopyBase[ch * numSamples + sampleIndex];
-                wetPtr[sampleIndex] = wetPtr[sampleIndex] * wetGain + dryValue * dryGain;
+                wetPtr[sampleIndex] = wetPtr[sampleIndex] * wetGainState + dryValue * dryGain;
             }
         }
 
-        if (!bypassFadeGain.isSmoothing())
+        const bool smoothingAfterBlend = (activeBypassRamp != nullptr)
+            ? activeBypassRamp->isSmoothing()
+            : bypassFadeGain.isSmoothing();
+        if (!smoothingAfterBlend)
         {
             if (requestedBypass)
             {
+                if (activeEqState != nullptr)
+                    activeEqState->bypassed = true;
                 bypassed.store(true, std::memory_order_relaxed);
-                bypassFadeGain.setCurrentAndTargetValue(0.0);
+                if (activeBypassRamp != nullptr)
+                    activeBypassRamp->setCurrentAndTargetValue(0.0);
+                else
+                    bypassFadeGain.setCurrentAndTargetValue(0.0);
             }
             else
             {
+                if (activeEqState != nullptr)
+                    activeEqState->bypassed = false;
                 bypassed.store(false, std::memory_order_relaxed);
-                bypassFadeGain.setCurrentAndTargetValue(1.0);
+                if (activeBypassRamp != nullptr)
+                    activeBypassRamp->setCurrentAndTargetValue(1.0);
+                else
+                    bypassFadeGain.setCurrentAndTargetValue(1.0);
             }
         }
     }
@@ -861,11 +984,19 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                           const convo::EQParameters& eqParams,
                           const EQCoeffCache* coeffCache)
 {
+    auto* activeEqState = (boundExecutionState != nullptr) ? &boundExecutionState->eq : nullptr;
+    const bool effectiveBypassed = (activeEqState != nullptr)
+        ? activeEqState->bypassed
+        : bypassed.load(std::memory_order_relaxed);
+    const bool bypassSmoothing = (activeEqState != nullptr)
+        ? activeEqState->bypassFadeGain.isSmoothing()
+        : bypassFadeGain.isSmoothing();
+
     // 既存バイパス遷移ロジックを維持するため、遷移中は既存パスへフォールバック
     if (coeffCache == nullptr
         || bypassRequested.load(std::memory_order_relaxed)
-        || bypassed.load(std::memory_order_relaxed)
-        || bypassFadeGain.isSmoothing())
+        || effectiveBypassed
+        || bypassSmoothing)
     {
         process(block);
         return;
@@ -885,11 +1016,34 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     if (numChannels <= 0)
         return;
 
+    auto& activeFilterState = (boundExecutionState != nullptr)
+        ? boundExecutionState->eq.filterState
+        : filterState;
+
+    double* activeParallelInputBuffer = (boundExecutionState != nullptr)
+        ? boundExecutionState->eq.parallelInputBuffer
+        : parallelInputBuffer.get();
+    double* activeParallelWorkBuffer = (boundExecutionState != nullptr)
+        ? boundExecutionState->eq.parallelWorkBuffer
+        : parallelWorkBuffer.get();
+    double* activeParallelAccumBuffer = (boundExecutionState != nullptr)
+        ? boundExecutionState->eq.parallelAccumBuffer
+        : parallelAccumBuffer.get();
+    const int activeParallelBufferCapacity = (boundExecutionState != nullptr)
+        ? boundExecutionState->eq.parallelBufferCapacity
+        : parallelBufferCapacity;
+
     if (agcResetRequest.exchange(false, std::memory_order_relaxed))
     {
         agcCurrentGain.store(1.0, std::memory_order_relaxed);
         agcEnvInput.store(0.0, std::memory_order_relaxed);
         agcEnvOutput.store(0.0, std::memory_order_relaxed);
+        if (boundExecutionState != nullptr)
+        {
+            boundExecutionState->eq.agcCurrentGain = 1.0;
+            boundExecutionState->eq.agcEnvInput = 0.0;
+            boundExecutionState->eq.agcEnvOutput = 0.0;
+        }
     }
 
     uint32_t mask = bandResetMask.exchange(0, std::memory_order_relaxed);
@@ -899,7 +1053,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
         {
             if (mask == 0xFFFFFFFFu)
             {
-                std::memset(filterState.data(), 0, sizeof(filterState));
+                std::memset(activeFilterState.data(), 0, sizeof(activeFilterState));
             }
             else
             {
@@ -908,7 +1062,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                     if (mask & (1u << i))
                     {
                         for (int ch = 0; ch < MAX_CHANNELS; ++ch)
-                            std::memset(filterState[ch][i].data(), 0, sizeof(double) * 2);
+                            std::memset(activeFilterState[ch][i].data(), 0, sizeof(double) * 2);
                     }
                 }
             }
@@ -923,13 +1077,16 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
 
     if (eqParams.agcEnabled)
     {
-        cachedInputRMS = 0.0;
+        double& cachedInputRMSRef = (boundExecutionState != nullptr)
+            ? boundExecutionState->eq.cachedInputRms
+            : cachedInputRMS;
+        cachedInputRMSRef = 0.0;
         for (int ch = 0; ch < numChannels; ++ch)
         {
             const double* data = block.getChannelPointer(ch);
             const double rms = calculateRMS(data, numSamples);
-            if (rms > cachedInputRMS)
-                cachedInputRMS = rms;
+            if (rms > cachedInputRMSRef)
+                cachedInputRMSRef = rms;
         }
     }
 
@@ -938,8 +1095,8 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
 
     if (coeffCache->filterStructure == static_cast<int>(FilterStructure::Parallel))
     {
-        if (!(coeffCache->parallelInputBuffer && coeffCache->parallelWorkBuffer && coeffCache->parallelAccumBuffer)
-            || coeffCache->parallelBufferSize < (numSamples * numChannels))
+        if (!(activeParallelInputBuffer && activeParallelWorkBuffer && activeParallelAccumBuffer)
+            || activeParallelBufferCapacity < (numSamples * numChannels))
         {
             // Parallelバッファが無い/不足時は安全にSerial処理へフォールバック
             for (int i = 0; i < NUM_BANDS; ++i)
@@ -953,27 +1110,27 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                 if (mode == EQChannelMode::Stereo && numChannels >= 2)
                 {
                     processBandStereo(blockL, blockR, numSamples, c,
-                                      filterState[0][i].data(),
-                                      filterState[1][i].data(),
+                                      activeFilterState[0][i].data(),
+                                      activeFilterState[1][i].data(),
                                       saturation);
                 }
                 else
                 {
                     if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
-                        processBand(blockL, numSamples, c, filterState[0][i].data(), saturation);
+                        processBand(blockL, numSamples, c, activeFilterState[0][i].data(), saturation);
                     if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
-                        processBand(blockR, numSamples, c, filterState[1][i].data(), saturation);
+                        processBand(blockR, numSamples, c, activeFilterState[1][i].data(), saturation);
                 }
             }
         }
         else
         {
-            double* srcL = coeffCache->parallelInputBuffer;
-            double* srcR = (numChannels > 1) ? (coeffCache->parallelInputBuffer + numSamples) : nullptr;
-            double* workL = coeffCache->parallelWorkBuffer;
-            double* workR = (numChannels > 1) ? (coeffCache->parallelWorkBuffer + numSamples) : nullptr;
-            double* accumL = coeffCache->parallelAccumBuffer;
-            double* accumR = (numChannels > 1) ? (coeffCache->parallelAccumBuffer + numSamples) : nullptr;
+            double* srcL = activeParallelInputBuffer;
+            double* srcR = (numChannels > 1) ? (activeParallelInputBuffer + numSamples) : nullptr;
+            double* workL = activeParallelWorkBuffer;
+            double* workR = (numChannels > 1) ? (activeParallelWorkBuffer + numSamples) : nullptr;
+            double* accumL = activeParallelAccumBuffer;
+            double* accumR = (numChannels > 1) ? (activeParallelAccumBuffer + numSamples) : nullptr;
 
             juce::FloatVectorOperations::copy(srcL, blockL, numSamples);
             if (numChannels > 1)
@@ -996,8 +1153,8 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                     juce::FloatVectorOperations::copy(workL, srcL, numSamples);
                     juce::FloatVectorOperations::copy(workR, srcR, numSamples);
                     processBandStereo(workL, workR, numSamples, c,
-                                      filterState[0][i].data(),
-                                      filterState[1][i].data(),
+                                      activeFilterState[0][i].data(),
+                                      activeFilterState[1][i].data(),
                                       saturation);
                     juce::FloatVectorOperations::add(accumL, workL, numSamples);
                     juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
@@ -1009,7 +1166,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                     if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
                     {
                         juce::FloatVectorOperations::copy(workL, srcL, numSamples);
-                        processBand(workL, numSamples, c, filterState[0][i].data(), saturation);
+                        processBand(workL, numSamples, c, activeFilterState[0][i].data(), saturation);
                         juce::FloatVectorOperations::add(accumL, workL, numSamples);
                         juce::FloatVectorOperations::subtract(accumL, srcL, numSamples);
                     }
@@ -1017,7 +1174,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                     if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
                     {
                         juce::FloatVectorOperations::copy(workR, srcR, numSamples);
-                        processBand(workR, numSamples, c, filterState[1][i].data(), saturation);
+                        processBand(workR, numSamples, c, activeFilterState[1][i].data(), saturation);
                         juce::FloatVectorOperations::add(accumR, workR, numSamples);
                         juce::FloatVectorOperations::subtract(accumR, srcR, numSamples);
                     }
@@ -1046,16 +1203,16 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
             if (mode == EQChannelMode::Stereo && numChannels >= 2)
             {
                 processBandStereo(blockL, blockR, numSamples, c,
-                                  filterState[0][i].data(),
-                                  filterState[1][i].data(),
+                                  activeFilterState[0][i].data(),
+                                  activeFilterState[1][i].data(),
                                   saturation);
             }
             else
             {
                 if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Left) && numChannels > 0)
-                    processBand(blockL, numSamples, c, filterState[0][i].data(), saturation);
+                    processBand(blockL, numSamples, c, activeFilterState[0][i].data(), saturation);
                 if ((mode == EQChannelMode::Stereo || mode == EQChannelMode::Right) && numChannels > 1)
-                    processBand(blockR, numSamples, c, filterState[1][i].data(), saturation);
+                    processBand(blockR, numSamples, c, activeFilterState[1][i].data(), saturation);
             }
         }
     }
@@ -1067,12 +1224,28 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     else
     {
         const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
-        if (absNoLibm(smoothTotalGain.getTargetValue() - targetGain) > 1e-6)
-            smoothTotalGain.setTargetValue(targetGain);
+        auto* activeGainRamp = (activeEqState != nullptr) ? &activeEqState->smoothTotalGain : nullptr;
+        const double gainTarget = (activeGainRamp != nullptr)
+            ? activeGainRamp->getTargetValue()
+            : smoothTotalGain.getTargetValue();
+        if (absNoLibm(gainTarget - targetGain) > 1e-6)
+        {
+            if (activeGainRamp != nullptr)
+                activeGainRamp->setTargetValue(targetGain);
+            else
+                smoothTotalGain.setTargetValue(targetGain);
+        }
 
-        const double startGain = smoothTotalGain.getCurrentValue();
-        smoothTotalGain.skip(numSamples);
-        const double endGain = smoothTotalGain.getCurrentValue();
+        const double startGain = (activeGainRamp != nullptr)
+            ? activeGainRamp->getCurrentValue()
+            : smoothTotalGain.getCurrentValue();
+        if (activeGainRamp != nullptr)
+            activeGainRamp->skip(numSamples);
+        else
+            smoothTotalGain.skip(numSamples);
+        const double endGain = (activeGainRamp != nullptr)
+            ? activeGainRamp->getCurrentValue()
+            : smoothTotalGain.getCurrentValue();
         const double increment = (endGain - startGain) / static_cast<double>(numSamples);
 
         for (int ch = 0; ch < numChannels; ++ch)

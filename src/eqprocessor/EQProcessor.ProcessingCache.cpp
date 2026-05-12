@@ -75,54 +75,9 @@ EQCoeffCache* EQProcessor::createCoeffCache(
         }
     }
 
-    if (cache->filterStructure == 1)
-    {
-        const int requiredSize = maxBlockSize * MAX_CHANNELS;
-
-        cache->parallelInputBuffer = static_cast<double*>(
-            convo::aligned_malloc(requiredSize * sizeof(double), 64));
-        cache->parallelWorkBuffer = static_cast<double*>(
-            convo::aligned_malloc(requiredSize * sizeof(double), 64));
-        cache->parallelAccumBuffer = static_cast<double*>(
-            convo::aligned_malloc(requiredSize * sizeof(double), 64));
-
-        if (!cache->parallelInputBuffer || !cache->parallelWorkBuffer || !cache->parallelAccumBuffer)
-        {
-            if (cache->parallelInputBuffer)
-                convo::aligned_free(cache->parallelInputBuffer);
-            if (cache->parallelWorkBuffer)
-                convo::aligned_free(cache->parallelWorkBuffer);
-            if (cache->parallelAccumBuffer)
-                convo::aligned_free(cache->parallelAccumBuffer);
-            delete cache;
-            return nullptr;
-        }
-
-        cache->parallelBufferSize = requiredSize;
-        std::memset(cache->parallelInputBuffer, 0, requiredSize * sizeof(double));
-        std::memset(cache->parallelWorkBuffer, 0, requiredSize * sizeof(double));
-        std::memset(cache->parallelAccumBuffer, 0, requiredSize * sizeof(double));
-    }
-
     return cache;
 }
 
 EQCoeffCache::~EQCoeffCache()
 {
-    if (parallelInputBuffer)
-    {
-        convo::aligned_free(parallelInputBuffer);
-        parallelInputBuffer = nullptr;
-    }
-    if (parallelWorkBuffer)
-    {
-        convo::aligned_free(parallelWorkBuffer);
-        parallelWorkBuffer = nullptr;
-    }
-    if (parallelAccumBuffer)
-    {
-        convo::aligned_free(parallelAccumBuffer);
-        parallelAccumBuffer = nullptr;
-    }
-    parallelBufferSize = 0;
 }

@@ -96,7 +96,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     validateDistinctRuntimeSlots("commitNewDSP.entry",
                                  activeDSP,
                                  sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                                 sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+                                 nullptr);
 
     // Lock to ensure the check and commit are atomic with respect to new rebuild requests.
     {
@@ -142,6 +142,69 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             }
         }
 
+        if (newDSP != nullptr && dspToTrash != nullptr)
+        {
+            bool needsCrossfade = false;
+            double fadeTimeSec = 0.0;
+
+            const bool oldHasIR = dspToTrash->convolverRt().isIRLoaded();
+            const bool newHasIR = newDSP->convolverRt().isIRLoaded();
+            const bool hasAudibleConvolverTransition = oldHasIR || newHasIR;
+            const bool irPresenceChanged = (oldHasIR != newHasIR);
+
+            if (hasAudibleConvolverTransition
+                && newDSP->oversamplingFactor != dspToTrash->oversamplingFactor)
+            {
+                needsCrossfade = true;
+                fadeTimeSec = std::max(fadeTimeSec, m_osFadeTimeSec.load(std::memory_order_relaxed));
+            }
+
+            if (hasAudibleConvolverTransition)
+            {
+                const uint64_t oldHash = dspToTrash->convolverRt().getStructuralHash();
+                const uint64_t newHash = newDSP->convolverRt().getStructuralHash();
+                if (oldHash != newHash)
+                {
+                    needsCrossfade = true;
+                    const double baseIrFade = m_irFadeTimeSec.load(std::memory_order_relaxed);
+                    if (irPresenceChanged)
+                    {
+                        fadeTimeSec = std::max(fadeTimeSec, std::clamp(baseIrFade, 0.001, 0.010));
+                    }
+                    else
+                    {
+                        fadeTimeSec = std::max(fadeTimeSec, baseIrFade);
+                        fadeTimeSec = std::max(fadeTimeSec, m_irLengthFadeTimeSec.load(std::memory_order_relaxed));
+                        fadeTimeSec = std::max(fadeTimeSec, m_phaseFadeTimeSec.load(std::memory_order_relaxed));
+                        fadeTimeSec = std::max(fadeTimeSec, m_directHeadFadeTimeSec.load(std::memory_order_relaxed));
+                        fadeTimeSec = std::max(fadeTimeSec, m_nucFilterFadeTimeSec.load(std::memory_order_relaxed));
+                        fadeTimeSec = std::max(fadeTimeSec, m_tailFadeTimeSec.load(std::memory_order_relaxed));
+                    }
+                }
+            }
+
+            if (needsCrossfade)
+            {
+                const auto* runtimeGraph = getRuntimeGraphState();
+                const auto* engineRuntime = getEngineRuntimeState();
+                const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph) != nullptr);
+                const bool hasPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire)
+                    || runtimeCrossfadePending(engineRuntime, runtimeGraph);
+                const bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire)
+                    || runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
+
+                if (hasFadingRuntime || hasPendingCrossfade || useDryAsOld)
+                {
+                    diagLog("[DIAG] commitNewDSP: deferring commit until active fade settles newUuid="
+                        + juce::String(static_cast<juce::int64>(newDSP->runtimeUuid))
+                        + " oldUuid=" + juce::String(static_cast<juce::int64>(dspToTrash->runtimeUuid))
+                        + " fadeSec=" + juce::String(fadeTimeSec, 3));
+                    deferredCommitQueue.push(CommitStaging { newDSP, nullptr, generation });
+                    return;
+                }
+            }
+        }
+
         // 2. 新ランタイム publish と所有権引き渡しを helper 経由で集約する
         publishCurrentDSPAndTakeOwnership(newDSP);
 
@@ -150,13 +213,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         retireEpoch = convo::EpochManager::instance().currentEpoch();
         g_currentEpoch.store(retireEpoch, std::memory_order_release);
 
-        const auto publishState = makeRuntimePublishState(
-                                  newDSP,
-                                  nullptr,
-                                  convo::TransitionPolicy::SmoothOnly,
-                                  0.0,
-                                  false);
-        publishRuntimePublishState(publishState);
+        publishRuntimeSnapshots(newDSP,
+                    nullptr,
+                    convo::TransitionPolicy::SmoothOnly,
+                    0.0,
+                    false);
         publishRuntimeTransitionState(newDSP,
                           nullptr,
                           convo::TransitionPolicy::SmoothOnly,
@@ -166,7 +227,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         validateDistinctRuntimeSlots("commitNewDSP.afterPublish",
                                      activeDSP,
                                      sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                                     sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+                                     nullptr);
 
         // この世代の publish が完了したので outstanding rebuild 窓を閉じる。
         lastCommittedRebuildGeneration.store(generation, std::memory_order_release);
@@ -306,28 +367,22 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // --- クロスフェードdeduplication・スナップショット ---
         if (needsCrossfade)
         {
-            const auto* runtimePublish = getRuntimePublishState();
+            const auto* runtimeGraph = getRuntimeGraphState();
             const auto* engineRuntime = getEngineRuntimeState();
-            const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimePublish) != nullptr);
+            const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph) != nullptr);
             const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
             const bool hasPendingCrossfade = atomicPendingCrossfade
-                || runtimeCrossfadePending(runtimePublish, engineRuntime);
+                || runtimeCrossfadePending(engineRuntime, runtimeGraph);
             const bool atomicUseDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
             const bool useDryAsOld = atomicUseDryAsOld
-                || runtimeCrossfadeUseDryAsOld(runtimePublish, engineRuntime);
+                || runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
             const bool isFadingActive = hasFadingRuntime || hasPendingCrossfade || useDryAsOld;
             publishSmoothTransitionState(activeDSP,
                                          dspToTrash,
                                          fadeTimeSec,
                                          transitionLatencyDeltaSamples);
-            if (isFadingActive)
-            {
-                queueDeferredSmoothTransition(dspToTrash, fadeTimeSec);
-            }
-            else
-            {
-                startImmediateSmoothTransition(dspToTrash, fadeTimeSec);
-            }
+            jassert(!isFadingActive);
+            startImmediateSmoothTransition(dspToTrash, fadeTimeSec);
         }
         else if (dspToTrash)
         {
@@ -381,7 +436,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     validateDistinctRuntimeSlots("commitNewDSP.beforeSendChangeMessage",
                                  activeDSP,
                                  sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                                 sanitizeRawPtr(queuedOldDSP.load(std::memory_order_acquire)));
+                                 nullptr);
     diagLog("[DIAG] commitNewDSP: before sendChangeMessage");
     sendChangeMessage();
     diagLog("[DIAG] commitNewDSP: after sendChangeMessage");

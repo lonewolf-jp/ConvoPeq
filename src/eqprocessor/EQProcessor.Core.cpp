@@ -8,7 +8,6 @@
 #include <cstring>
 #include <regex>
 #include "core/EpochManager.h"
-#include "core/EBRQueue.h"
 #include "core/RCUReader.h"
 
 //============================================================================
@@ -29,6 +28,49 @@ EQProcessor::EQProcessor()
 {
     // 初期係数ノードの作成
     resetToDefaults();
+}
+
+void EQProcessor::bindExecutionState(convo::DSPExecutionState* state) noexcept
+{
+    boundExecutionState = state;
+    if (boundExecutionState != nullptr)
+    {
+        auto& eqState = boundExecutionState->eq;
+        eqState.dryBypassBuffer = dryBypassBuffer.get();
+        eqState.dryBypassCapacity = dryBypassCapacity;
+        eqState.parallelInputBuffer = parallelInputBuffer.get();
+        eqState.parallelWorkBuffer = parallelWorkBuffer.get();
+        eqState.parallelAccumBuffer = parallelAccumBuffer.get();
+        eqState.parallelBufferCapacity = parallelBufferCapacity;
+        eqState.structureOldOutBuffer = structureOldOutBuffer.get();
+        eqState.structureNewOutBuffer = structureNewOutBuffer.get();
+        eqState.structureXfadeBufferCapacity = structureXfadeBufferCapacity;
+        // RuntimeGraph で供給された view を優先し、未設定時のみ EQ 内部テーブルを使う。
+        if (eqState.agcAttackCoeffTable == nullptr
+            || eqState.agcReleaseCoeffTable == nullptr
+            || eqState.agcSmoothCoeffTable == nullptr
+            || eqState.agcCoeffTableCapacity <= 0)
+        {
+            eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
+            eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
+            eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
+            eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
+        }
+        eqState.bypassed = bypassed.load(std::memory_order_relaxed);
+        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
+        if (!eqState.rampsInitialized)
+        {
+            eqState.smoothTotalGain.current = smoothTotalGain.getCurrentValue();
+            eqState.smoothTotalGain.target = smoothTotalGain.getTargetValue();
+            eqState.smoothTotalGain.step = 0.0;
+            eqState.smoothTotalGain.remaining = 0;
+            eqState.bypassFadeGain.current = bypassFadeGain.getCurrentValue();
+            eqState.bypassFadeGain.target = bypassFadeGain.getTargetValue();
+            eqState.bypassFadeGain.step = 0.0;
+            eqState.bypassFadeGain.remaining = 0;
+            eqState.rampsInitialized = true;
+        }
+    }
 }
 
 //============================================================================
@@ -174,6 +216,24 @@ void EQProcessor::reset()
     const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
     bypassed.store(requestedBypass, std::memory_order_relaxed);
     bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
+
+    if (boundExecutionState != nullptr)
+    {
+        auto& eqState = boundExecutionState->eq;
+        eqState.bypassed = requestedBypass;
+        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
+        eqState.agcCurrentGain = agcCurrentGain.load(std::memory_order_relaxed);
+        eqState.agcEnvInput = agcEnvInput.load(std::memory_order_relaxed);
+        eqState.agcEnvOutput = agcEnvOutput.load(std::memory_order_relaxed);
+        eqState.smoothTotalGain.current = smoothTotalGain.getCurrentValue();
+        eqState.smoothTotalGain.target = smoothTotalGain.getTargetValue();
+        eqState.smoothTotalGain.step = 0.0;
+        eqState.smoothTotalGain.remaining = 0;
+        eqState.bypassFadeGain.current = requestedBypass ? 0.0 : 1.0;
+        eqState.bypassFadeGain.target = requestedBypass ? 0.0 : 1.0;
+        eqState.bypassFadeGain.step = 0.0;
+        eqState.bypassFadeGain.remaining = 0;
+    }
 }
 
 //============================================================================
@@ -442,6 +502,13 @@ void EQProcessor::setState (const juce::ValueTree& v)
     bandResetMask.store(0xFFFFFFFF, std::memory_order_relaxed);
     agcResetRequest.store(true, std::memory_order_relaxed);
     activeStructure.store(requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+    if (boundExecutionState != nullptr)
+    {
+        auto& eqState = boundExecutionState->eq;
+        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
+    }
+
     sendChangeMessage();
 }
 
@@ -480,9 +547,42 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     nonlinearSaturation.store(other.nonlinearSaturation.load(std::memory_order_relaxed), std::memory_order_relaxed);
     requestedStructure.store(other.requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
     activeStructure.store(requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    const bool syncedBypassRequested = other.bypassRequested.load(std::memory_order_relaxed);
+    const bool syncedBypassed = other.bypassed.load(std::memory_order_relaxed);
+    bypassRequested.store(syncedBypassRequested, std::memory_order_relaxed);
+    bypassed.store(syncedBypassed, std::memory_order_relaxed);
+    bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
 
     bandResetMask.store(other.bandResetMask.load(std::memory_order_relaxed), std::memory_order_relaxed);
     agcResetRequest.store(other.agcResetRequest.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+    if (boundExecutionState != nullptr)
+    {
+        auto& eqState = boundExecutionState->eq;
+        eqState.bypassed = bypassed.load(std::memory_order_relaxed);
+        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
+        eqState.agcCurrentGain = agcCurrentGain.load(std::memory_order_relaxed);
+        eqState.agcEnvInput = agcEnvInput.load(std::memory_order_relaxed);
+        eqState.agcEnvOutput = agcEnvOutput.load(std::memory_order_relaxed);
+        if (eqState.agcAttackCoeffTable == nullptr
+            || eqState.agcReleaseCoeffTable == nullptr
+            || eqState.agcSmoothCoeffTable == nullptr
+            || eqState.agcCoeffTableCapacity <= 0)
+        {
+            eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
+            eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
+            eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
+            eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
+        }
+        eqState.smoothTotalGain.current = smoothTotalGain.getCurrentValue();
+        eqState.smoothTotalGain.target = smoothTotalGain.getTargetValue();
+        eqState.smoothTotalGain.step = 0.0;
+        eqState.smoothTotalGain.remaining = 0;
+        eqState.bypassFadeGain.current = syncedBypassed ? 0.0 : 1.0;
+        eqState.bypassFadeGain.target = syncedBypassed ? 0.0 : 1.0;
+        eqState.bypassFadeGain.step = 0.0;
+        eqState.bypassFadeGain.remaining = 0;
+    }
 }
 
 //============================================================================
@@ -520,6 +620,41 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
     agcEnvOutput.store(other.agcEnvOutput.load(std::memory_order_relaxed), std::memory_order_relaxed);
     nonlinearSaturation.store(other.nonlinearSaturation.load(std::memory_order_relaxed), std::memory_order_relaxed);
     requestedStructure.store(other.requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    activeStructure.store(requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+    const bool syncedBypassRequested = other.bypassRequested.load(std::memory_order_relaxed);
+    const bool syncedBypassed = other.bypassed.load(std::memory_order_relaxed);
+    bypassRequested.store(syncedBypassRequested, std::memory_order_relaxed);
+    bypassed.store(syncedBypassed, std::memory_order_relaxed);
+    bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
+
+    if (boundExecutionState != nullptr)
+    {
+        auto& eqState = boundExecutionState->eq;
+        eqState.bypassed = syncedBypassed;
+        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
+        eqState.agcCurrentGain = agcCurrentGain.load(std::memory_order_relaxed);
+        eqState.agcEnvInput = agcEnvInput.load(std::memory_order_relaxed);
+        eqState.agcEnvOutput = agcEnvOutput.load(std::memory_order_relaxed);
+        if (eqState.agcAttackCoeffTable == nullptr
+            || eqState.agcReleaseCoeffTable == nullptr
+            || eqState.agcSmoothCoeffTable == nullptr
+            || eqState.agcCoeffTableCapacity <= 0)
+        {
+            eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
+            eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
+            eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
+            eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
+        }
+        eqState.smoothTotalGain.current = smoothTotalGain.getCurrentValue();
+        eqState.smoothTotalGain.target = smoothTotalGain.getTargetValue();
+        eqState.smoothTotalGain.step = 0.0;
+        eqState.smoothTotalGain.remaining = 0;
+        eqState.bypassFadeGain.current = syncedBypassed ? 0.0 : 1.0;
+        eqState.bypassFadeGain.target = syncedBypassed ? 0.0 : 1.0;
+        eqState.bypassFadeGain.step = 0.0;
+        eqState.bypassFadeGain.remaining = 0;
+    }
 
     bandResetMask.store(other.bandResetMask.load(std::memory_order_relaxed), std::memory_order_relaxed);
     agcResetRequest.store(other.agcResetRequest.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -626,6 +761,31 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
     bypassed.store(requestedBypass, std::memory_order_relaxed);
     bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
+
+    if (boundExecutionState != nullptr)
+    {
+        auto& eqState = boundExecutionState->eq;
+        eqState.bypassed = requestedBypass;
+        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
+        eqState.agcCurrentGain = agcCurrentGain.load(std::memory_order_relaxed);
+        eqState.agcEnvInput = agcEnvInput.load(std::memory_order_relaxed);
+        eqState.agcEnvOutput = agcEnvOutput.load(std::memory_order_relaxed);
+        if (eqState.agcAttackCoeffTable == nullptr
+            || eqState.agcReleaseCoeffTable == nullptr
+            || eqState.agcSmoothCoeffTable == nullptr
+            || eqState.agcCoeffTableCapacity <= 0)
+        {
+            eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
+            eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
+            eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
+            eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
+        }
+        eqState.smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
+        eqState.smoothTotalGain.setCurrentAndTargetValue(smoothTotalGain.getCurrentValue());
+        eqState.bypassFadeGain.reset(sampleRate, BYPASS_FADE_TIME_SEC);
+        eqState.bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
+        eqState.rampsInitialized = true;
+    }
 
     if (rateChanged)
     {

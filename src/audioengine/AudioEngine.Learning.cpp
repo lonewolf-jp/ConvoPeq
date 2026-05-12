@@ -117,8 +117,8 @@ void AudioEngine::processLearningCommands() noexcept
                 requestedLearningResume = cmd.resume;
                 requestedLearningGeneration = cmd.irGeneration;
 
-                const auto* runtimePublish = getRuntimePublishState();
-                auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimePublish);
+                const auto* runtimeGraph = getRuntimeGraphState();
+                auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
                 // irGeneration チェックを削除: DSP が有効かつ型が適切であれば即座に学習開始可能
                 const bool dspReady = (dsp != nullptr)
                     && (dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder);
@@ -316,34 +316,6 @@ double AudioEngine::getAdaptiveSampleRateBankHz(int bankIndex) noexcept
     return kAdaptiveSupportedSampleRatesHz_helpers[static_cast<size_t>(clampAdaptiveBankIndex_helpers(bankIndex))];
 }
 
-void AudioEngine::initialiseAdaptiveCoeffBanks() noexcept
-{
-    for (int srBank = 0; srBank < kAdaptiveNoiseShaperSampleRateBankCount; ++srBank)
-    {
-        double sr = getAdaptiveSampleRateBankHz(srBank);
-        for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
-        {
-            for (int modeIdx = 0; modeIdx < kLearningModeCount; ++modeIdx)
-            {
-                int bankIndex = (srBank * kAdaptiveBitDepthCount + bdIdx) * kLearningModeCount + modeIdx;
-                auto& bank = adaptiveCoeffBanks[static_cast<size_t>(bankIndex)];
-                bank.sampleRateHz = sr;
-
-                for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
-                {
-                    const double coefficient = kDefaultAdaptiveNoiseShaperCoeffs_helpers[static_cast<size_t>(coeffIndex)];
-                    bank.coeffSetA.k[coeffIndex] = coefficient;
-                    bank.coeffSetB.k[coeffIndex] = coefficient;
-                }
-
-                bank.activeIndex.store(0, std::memory_order_relaxed);
-                bank.generation.store(1u, std::memory_order_relaxed);
-                bank.writeLock.store(false, std::memory_order_relaxed);
-            }
-        }
-    }
-}
-
 int AudioEngine::resolveAdaptiveCoeffBankIndex(double sampleRate) noexcept
 {
     int bestIndex = 0;
@@ -437,28 +409,6 @@ void AudioEngine::getCurrentAdaptiveCoefficients(double* outCoeffs, int maxCoeff
             return;
         }
     }
-}
-
-void AudioEngine::setCurrentAdaptiveCoefficients(const double* coeffs, int numCoefficients)
-{
-    if (coeffs == nullptr || numCoefficients <= 0)
-        return;
-
-    if (isNoiseShaperLearning())
-    {
-        DBG_LOG("[AudioEngine] Coefficient update rejected during learning");
-        return;
-    }
-
-    const int bankIndex = currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
-    double stagedCoefficients[kAdaptiveNoiseShaperOrder] = {};
-    getCurrentAdaptiveCoefficients(stagedCoefficients, kAdaptiveNoiseShaperOrder);
-
-    const int limit = std::min(kAdaptiveNoiseShaperOrder, numCoefficients);
-    for (int i = 0; i < limit; ++i)
-        stagedCoefficients[i] = coeffs[i];
-
-    publishCoeffsToBank(bankIndex, stagedCoefficients);
 }
 
 void AudioEngine::getAdaptiveCoefficientsForSampleRate(double sampleRate, double* outCoeffs, int maxCoefficients) const noexcept

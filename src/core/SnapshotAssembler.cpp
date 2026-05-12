@@ -6,7 +6,6 @@
 namespace convo {
 
 SnapshotParams SnapshotAssembler::assemble(
-    const ConvolverState* conv,
     uint64_t convStateId,
     const EQParameters& eq,
     const std::array<double, 9>& nsCoeffs,
@@ -29,7 +28,6 @@ SnapshotParams SnapshotAssembler::assemble(
 ) noexcept
 {
     SnapshotParams params;
-    params.convState = conv;
     params.convStateId = convStateId;
     params.eqParams = eq;
     params.nsCoeffs = nsCoeffs;
