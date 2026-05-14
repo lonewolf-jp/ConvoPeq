@@ -29,6 +29,8 @@
 
 #include <JuceHeader.h>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo {
 
 class DeferredFreeThread
@@ -72,7 +74,7 @@ public:
     // -----------------------------------------------------------------------
     void stop() noexcept
     {
-        running.store(false, std::memory_order_release);
+        convo::publishAtomic(running, false, std::memory_order_release);
     }
 
     void shutdownAndDrain() noexcept
@@ -108,7 +110,7 @@ private:
         if (affinityManager != nullptr)
             affinityManager->applyCurrentThreadPolicy(ThreadType::LightBackground);
 
-        while (running.load(std::memory_order_acquire))
+        while (convo::consumeAtomic(running, std::memory_order_acquire))
         {
             const uint64_t minEpoch = swapperRef.getMinReaderEpoch();
             int reclaimCount = 0;

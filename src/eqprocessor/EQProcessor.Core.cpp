@@ -10,6 +10,8 @@
 #include "core/EpochManager.h"
 #include "core/RCUReader.h"
 
+#include "audioengine/AtomicAccess.h"
+
 //============================================================================
 // Destruction handlers for EBR (Epoch-Based Reclamation)
 //============================================================================
@@ -56,8 +58,8 @@ void EQProcessor::bindExecutionState(convo::DSPExecutionState* state) noexcept
             eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
             eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
         }
-        eqState.bypassed = bypassed.load(std::memory_order_relaxed);
-        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
+        eqState.bypassed = convo::consumeAtomic(bypassed, std::memory_order_acquire);
+        eqState.activeStructure = static_cast<int>(convo::consumeAtomic(activeStructure, std::memory_order_acquire));
         if (!eqState.rampsInitialized)
         {
             eqState.smoothTotalGain.current = smoothTotalGain.getCurrentValue();
@@ -79,17 +81,18 @@ void EQProcessor::bindExecutionState(convo::DSPExecutionState* state) noexcept
 EQProcessor::~EQProcessor()
 {
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: enter");
-    if (auto* oldState = currentStateRaw.exchange(nullptr, std::memory_order_acq_rel))
+    if (auto* oldState = exchangeCurrentState(nullptr, std::memory_order_acq_rel))
         retireEQState(oldState);
 
-    for (auto& node : bandNodes) {
-        if (auto* n = node.exchange(nullptr, std::memory_order_release))
+    for (auto& nodeBits : bandNodeBits) {
+        const auto bits = convo::exchangeAtomic(nodeBits, static_cast<std::uintptr_t>(0), std::memory_order_release);
+        if (auto* n = fromBandNodeBits(bits))
             retireBandNode(n);
     }
 
-    for (auto*& node : activeBandNodes) {
+    for (auto& node : activeBandNodes) {
         if (node) {
-            retireBandNode(node);
+            retireBandNode(node.get());
             node = nullptr;
         }
     }
@@ -161,32 +164,32 @@ void EQProcessor::resetToDefaults()
     newState->bandTypes[19] = EQBandType::HighShelf;
 
     storeTotalGainDb(0.0f);
-    agcEnabled.store(false, std::memory_order_release);
-    nonlinearSaturation.store(0.2f, std::memory_order_relaxed);
-    requestedStructure.store(FilterStructure::Serial, std::memory_order_relaxed);
-    activeStructure.store(FilterStructure::Serial, std::memory_order_relaxed);
+    convo::publishAtomic(agcEnabled, false, std::memory_order_release);
+    convo::publishAtomic(nonlinearSaturation, 0.2f, std::memory_order_release);
+    convo::publishAtomic(requestedStructure, FilterStructure::Serial, std::memory_order_release);
+    convo::publishAtomic(activeStructure, FilterStructure::Serial, std::memory_order_release);
     newState->agcEnabled = false;
     newState->nonlinearSaturation = 0.2f;
     newState->filterStructure = 0;
 
-    auto oldState = currentStateRaw.exchange(newState, std::memory_order_acq_rel);
+    auto oldState = exchangeCurrentState(newState, std::memory_order_acq_rel);
 
     if (oldState) {
         retireEQState(oldState);
     }
     convo::EpochManager::instance().advanceEpoch();
 
-    agcCurrentGain.store(1.0, std::memory_order_relaxed);
-    agcEnvInput.store(0.0, std::memory_order_relaxed);
-    agcEnvOutput.store(0.0, std::memory_order_relaxed);
+    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release);
+    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);
+    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);
 
     // 全バンドの係数を更新
     for (int i = 0; i < NUM_BANDS; ++i)
         updateBandNode(i);
 
     // 全状態のリセットを予約
-    bandResetMask.store(0xFFFFFFFF, std::memory_order_relaxed);
-    agcResetRequest.store(true, std::memory_order_relaxed);
+    requestAllBandReset();
+    requestAgcReset();
 
     sendChangeMessage();
 }
@@ -199,32 +202,35 @@ void EQProcessor::reset()
     // フィルタ状態をリセット (memsetで高速化)
     std::memset(filterState.data(), 0, sizeof(filterState));
 
-    agcCurrentGain.store(1.0, std::memory_order_relaxed);
-    agcEnvInput.store(0.0, std::memory_order_relaxed);
-    agcEnvOutput.store(0.0, std::memory_order_relaxed);
+    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release);
+    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);
+    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);
 
-    auto state = currentStateRaw.load(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire);
     if (state)
     {
         smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
         storeTotalGainDb(state->totalGainDb);
     }
 
-    bandResetMask.store(0, std::memory_order_relaxed);
-    agcResetRequest.store(false, std::memory_order_relaxed);
+    convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);
+    convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);
+    rtDeferredBandResetMask = 0;
+    rtSeenBandResetSerial = 0;
+    rtSeenAgcResetSerial = 0;
 
-    const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
-    bypassed.store(requestedBypass, std::memory_order_relaxed);
+    const bool requestedBypass = convo::consumeAtomic(bypassRequested, std::memory_order_acquire);
+    convo::publishAtomic(bypassed, requestedBypass, std::memory_order_release);
     bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
 
     if (boundExecutionState != nullptr)
     {
         auto& eqState = boundExecutionState->eq;
         eqState.bypassed = requestedBypass;
-        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
-        eqState.agcCurrentGain = agcCurrentGain.load(std::memory_order_relaxed);
-        eqState.agcEnvInput = agcEnvInput.load(std::memory_order_relaxed);
-        eqState.agcEnvOutput = agcEnvOutput.load(std::memory_order_relaxed);
+        eqState.activeStructure = static_cast<int>(convo::consumeAtomic(activeStructure, std::memory_order_acquire));
+        eqState.agcCurrentGain = convo::consumeAtomic(agcCurrentGain, std::memory_order_acquire);
+        eqState.agcEnvInput = convo::consumeAtomic(agcEnvInput, std::memory_order_acquire);
+        eqState.agcEnvOutput = convo::consumeAtomic(agcEnvOutput, std::memory_order_acquire);
         eqState.smoothTotalGain.current = smoothTotalGain.getCurrentValue();
         eqState.smoothTotalGain.target = smoothTotalGain.getTargetValue();
         eqState.smoothTotalGain.step = 0.0;
@@ -433,7 +439,7 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
         }
     }
 
-    bandResetMask.store(0xFFFFFFFF, std::memory_order_relaxed);
+    requestAllBandReset();
     sendChangeMessage();
     return true;
 }
@@ -443,15 +449,15 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
 //============================================================================
 juce::ValueTree EQProcessor::getState() const
 {
-    auto state = currentStateRaw.load(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire);
     if (state == nullptr) return juce::ValueTree("EQ");
 
     juce::ValueTree v ("EQ");
     v.setProperty ("totalGain", state->totalGainDb, nullptr);
-    v.setProperty("agcEnabled", agcEnabled.load(std::memory_order_acquire), nullptr);
-    v.setProperty("nonlinearSaturation", nonlinearSaturation.load(std::memory_order_relaxed), nullptr);
+    v.setProperty("agcEnabled", convo::consumeAtomic(agcEnabled, std::memory_order_acquire), nullptr);
+    v.setProperty("nonlinearSaturation", convo::consumeAtomic(nonlinearSaturation, std::memory_order_acquire), nullptr);
     v.setProperty("filterStructure",
-                  static_cast<int>(requestedStructure.load(std::memory_order_relaxed)),
+                  static_cast<int>(convo::consumeAtomic(requestedStructure, std::memory_order_acquire)),
                   nullptr);
 
     for (int i = 0; i < NUM_BANDS; ++i)
@@ -499,14 +505,14 @@ void EQProcessor::setState (const juce::ValueTree& v)
     }
 
     // 状態ロード時は全リセット
-    bandResetMask.store(0xFFFFFFFF, std::memory_order_relaxed);
-    agcResetRequest.store(true, std::memory_order_relaxed);
-    activeStructure.store(requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    requestAllBandReset();
+    requestAgcReset();
+    convo::publishAtomic(activeStructure, convo::consumeAtomic(requestedStructure, std::memory_order_acquire), std::memory_order_release);
 
     if (boundExecutionState != nullptr)
     {
         auto& eqState = boundExecutionState->eq;
-        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
+        eqState.activeStructure = static_cast<int>(convo::consumeAtomic(activeStructure, std::memory_order_acquire));
     }
 
     sendChangeMessage();
@@ -518,11 +524,12 @@ void EQProcessor::setState (const juce::ValueTree& v)
 void EQProcessor::syncStateFrom(const EQProcessor& other)
 {
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+    auto otherState = other.loadCurrentState(std::memory_order_acquire);
+    if (otherState == nullptr)
+        return;
 
-    storeTotalGainDb(other.totalGainDbTarget.load(std::memory_order_relaxed));
-
-    auto otherState = other.currentStateRaw.load(std::memory_order_acquire);
-    auto oldState = currentStateRaw.exchange(otherState, std::memory_order_acq_rel);
+    auto* clonedState = new EQState(*otherState);
+    auto oldState = exchangeCurrentState(clonedState, std::memory_order_acq_rel);
 
     if (oldState)
     {
@@ -531,39 +538,41 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     convo::EpochManager::instance().advanceEpoch();
 
     for (int i = 0; i < NUM_BANDS; ++i)
-    {
-        auto node = other.activeBandNodes[i];
-        bandNodes[i].store(node, std::memory_order_release);
-        if (activeBandNodes[i]) {
-            retireBandNode(activeBandNodes[i]);
-        }
-        activeBandNodes[i] = node;
-    }
-    convo::EpochManager::instance().advanceEpoch();
-    agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
-    agcCurrentGain.store(other.agcCurrentGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcEnvInput.store(other.agcEnvInput.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcEnvOutput.store(other.agcEnvOutput.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    nonlinearSaturation.store(other.nonlinearSaturation.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    requestedStructure.store(other.requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    activeStructure.store(requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    const bool syncedBypassRequested = other.bypassRequested.load(std::memory_order_relaxed);
-    const bool syncedBypassed = other.bypassed.load(std::memory_order_relaxed);
-    bypassRequested.store(syncedBypassRequested, std::memory_order_relaxed);
-    bypassed.store(syncedBypassed, std::memory_order_relaxed);
-    bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
+        updateBandNode(i);
 
-    bandResetMask.store(other.bandResetMask.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcResetRequest.store(other.agcResetRequest.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    const double syncedAgcCurrentGain = convo::consumeAtomic(other.agcCurrentGain, std::memory_order_acquire);
+    const double syncedAgcEnvInput = convo::consumeAtomic(other.agcEnvInput, std::memory_order_acquire);
+    const double syncedAgcEnvOutput = convo::consumeAtomic(other.agcEnvOutput, std::memory_order_acquire);
+    const FilterStructure syncedStructure = static_cast<FilterStructure>(clonedState->filterStructure);
+    const bool syncedBypassed = convo::consumeAtomic(other.bypassed, std::memory_order_acquire);
+    const std::uint64_t syncedBandResetPacked = convo::consumeAtomic(other.bandResetPacked, std::memory_order_acquire);
+    const std::uint32_t syncedBandResetMask = bandResetMaskFromPacked(syncedBandResetPacked);
+    const std::uint64_t syncedBandResetSerial = static_cast<std::uint64_t>(bandResetSerialFromPacked(syncedBandResetPacked));
+    const std::uint64_t syncedAgcResetSerial = convo::consumeAtomic(other.agcResetSerial, std::memory_order_acquire);
+
+    // Avoid publication-domain split here: sync uses immutable state swap plus RT-local shadow updates.
+    bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
+    smoothTotalGain.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain<double>(static_cast<double>(clonedState->totalGainDb)));
+
+    rtBypassedShadow = syncedBypassed;
+    rtActiveStructureShadow = syncedStructure;
+    rtAgcCurrentGainShadow = syncedAgcCurrentGain;
+    rtAgcEnvInputShadow = syncedAgcEnvInput;
+    rtAgcEnvOutputShadow = syncedAgcEnvOutput;
+
+    rtDeferredBandResetMask = syncedBandResetMask;
+    rtSeenBandResetSerial = syncedBandResetSerial;
+    rtSeenAgcResetSerial = syncedAgcResetSerial;
 
     if (boundExecutionState != nullptr)
     {
         auto& eqState = boundExecutionState->eq;
-        eqState.bypassed = bypassed.load(std::memory_order_relaxed);
-        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
-        eqState.agcCurrentGain = agcCurrentGain.load(std::memory_order_relaxed);
-        eqState.agcEnvInput = agcEnvInput.load(std::memory_order_relaxed);
-        eqState.agcEnvOutput = agcEnvOutput.load(std::memory_order_relaxed);
+        eqState.bypassed = syncedBypassed;
+        eqState.activeStructure = static_cast<int>(syncedStructure);
+        eqState.agcCurrentGain = syncedAgcCurrentGain;
+        eqState.agcEnvInput = syncedAgcEnvInput;
+        eqState.agcEnvOutput = syncedAgcEnvOutput;
         if (eqState.agcAttackCoeffTable == nullptr
             || eqState.agcReleaseCoeffTable == nullptr
             || eqState.agcSmoothCoeffTable == nullptr
@@ -583,6 +592,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
         eqState.bypassFadeGain.step = 0.0;
         eqState.bypassFadeGain.remaining = 0;
     }
+
 }
 
 //============================================================================
@@ -599,7 +609,7 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     if (node) {
         // EBR: lifetime managed by RCU
     }
-    bandNodes[bandIndex].store(node, std::memory_order_release);
+    publishBandNode(bandIndex, node, std::memory_order_release);
 
     if (activeBandNodes[bandIndex])
     {
@@ -613,29 +623,46 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
 //============================================================================
 void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 {
-    storeTotalGainDb(other.totalGainDbTarget.load(std::memory_order_relaxed));
-    agcEnabled.store(other.agcEnabled.load(std::memory_order_acquire), std::memory_order_release);
-    agcCurrentGain.store(other.agcCurrentGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcEnvInput.store(other.agcEnvInput.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcEnvOutput.store(other.agcEnvOutput.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    nonlinearSaturation.store(other.nonlinearSaturation.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    requestedStructure.store(other.requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    activeStructure.store(requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    const auto* otherState = other.loadCurrentState(std::memory_order_acquire);
+    const double syncedAgcCurrentGain = convo::consumeAtomic(other.agcCurrentGain, std::memory_order_acquire);
+    const double syncedAgcEnvInput = convo::consumeAtomic(other.agcEnvInput, std::memory_order_acquire);
+    const double syncedAgcEnvOutput = convo::consumeAtomic(other.agcEnvOutput, std::memory_order_acquire);
+    const FilterStructure syncedStructure = (otherState != nullptr)
+        ? static_cast<FilterStructure>(otherState->filterStructure)
+        : convo::consumeAtomic(other.requestedStructure, std::memory_order_acquire);
+    const bool syncedBypassed = convo::consumeAtomic(other.bypassed, std::memory_order_acquire);
+    const std::uint64_t syncedBandResetPacked = convo::consumeAtomic(other.bandResetPacked, std::memory_order_acquire);
+    const std::uint32_t syncedBandResetMask = bandResetMaskFromPacked(syncedBandResetPacked);
+    const std::uint64_t syncedBandResetSerial = static_cast<std::uint64_t>(bandResetSerialFromPacked(syncedBandResetPacked));
+    const std::uint64_t syncedAgcResetSerial = convo::consumeAtomic(other.agcResetSerial, std::memory_order_acquire);
 
-    const bool syncedBypassRequested = other.bypassRequested.load(std::memory_order_relaxed);
-    const bool syncedBypassed = other.bypassed.load(std::memory_order_relaxed);
-    bypassRequested.store(syncedBypassRequested, std::memory_order_relaxed);
-    bypassed.store(syncedBypassed, std::memory_order_relaxed);
+    // Keep sync as shadow-state update to prevent multi-atomic partial visibility.
     bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
+
+    const float syncedTotalGainDb = (otherState != nullptr)
+        ? otherState->totalGainDb
+        : convo::consumeAtomic(other.totalGainDbTarget, std::memory_order_acquire);
+    smoothTotalGain.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain<double>(static_cast<double>(syncedTotalGainDb)));
+
+    rtBypassedShadow = syncedBypassed;
+    rtActiveStructureShadow = syncedStructure;
+    rtAgcCurrentGainShadow = syncedAgcCurrentGain;
+    rtAgcEnvInputShadow = syncedAgcEnvInput;
+    rtAgcEnvOutputShadow = syncedAgcEnvOutput;
+
+    rtDeferredBandResetMask = syncedBandResetMask;
+    rtSeenBandResetSerial = syncedBandResetSerial;
+    rtSeenAgcResetSerial = syncedAgcResetSerial;
 
     if (boundExecutionState != nullptr)
     {
         auto& eqState = boundExecutionState->eq;
         eqState.bypassed = syncedBypassed;
-        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
-        eqState.agcCurrentGain = agcCurrentGain.load(std::memory_order_relaxed);
-        eqState.agcEnvInput = agcEnvInput.load(std::memory_order_relaxed);
-        eqState.agcEnvOutput = agcEnvOutput.load(std::memory_order_relaxed);
+        eqState.activeStructure = static_cast<int>(syncedStructure);
+        eqState.agcCurrentGain = syncedAgcCurrentGain;
+        eqState.agcEnvInput = syncedAgcEnvInput;
+        eqState.agcEnvOutput = syncedAgcEnvOutput;
         if (eqState.agcAttackCoeffTable == nullptr
             || eqState.agcReleaseCoeffTable == nullptr
             || eqState.agcSmoothCoeffTable == nullptr
@@ -656,8 +683,6 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
         eqState.bypassFadeGain.remaining = 0;
     }
 
-    bandResetMask.store(other.bandResetMask.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    agcResetRequest.store(other.agcResetRequest.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 //============================================================================
@@ -665,9 +690,9 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 //============================================================================
 void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 {
-    const bool rateChanged = (std::abs(currentSampleRate.load(std::memory_order_relaxed) - sampleRate) > 1e-6);
+    const bool rateChanged = (std::abs(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire) - sampleRate) > 1e-6);
     if (rateChanged)
-        currentSampleRate.store(sampleRate, std::memory_order_relaxed);
+        convo::publishAtomic(currentSampleRate, sampleRate, std::memory_order_release);
 
     const int requiredSize = newMaxInternalBlockSize;
     this->maxInternalBlockSize = requiredSize;
@@ -675,7 +700,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     const int required = juce::nextPowerOfTwo(requiredSize) * 8;
     if (scratchCapacity < required)
     {
-        scratchBuffer.reset(static_cast<double*>(convo::aligned_malloc(required * sizeof(double), 64)));
+        scratchBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(required));
         scratchCapacity = required;
         juce::FloatVectorOperations::clear(scratchBuffer.get(), required);
     }
@@ -683,16 +708,16 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     const int channelRequired = juce::nextPowerOfTwo(requiredSize) * MAX_CHANNELS;
     if (dryBypassCapacity < channelRequired)
     {
-        dryBypassBuffer.reset(static_cast<double*>(convo::aligned_malloc(channelRequired * sizeof(double), 64)));
+        dryBypassBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(channelRequired));
         dryBypassCapacity = channelRequired;
         juce::FloatVectorOperations::clear(dryBypassBuffer.get(), channelRequired);
     }
 
     if (parallelBufferCapacity < channelRequired)
     {
-        parallelInputBuffer.reset(static_cast<double*>(convo::aligned_malloc(channelRequired * sizeof(double), 64)));
-        parallelWorkBuffer.reset(static_cast<double*>(convo::aligned_malloc(channelRequired * sizeof(double), 64)));
-        parallelAccumBuffer.reset(static_cast<double*>(convo::aligned_malloc(channelRequired * sizeof(double), 64)));
+        parallelInputBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(channelRequired));
+        parallelWorkBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(channelRequired));
+        parallelAccumBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(channelRequired));
         parallelBufferCapacity = channelRequired;
         juce::FloatVectorOperations::clear(parallelInputBuffer.get(), channelRequired);
         juce::FloatVectorOperations::clear(parallelWorkBuffer.get(), channelRequired);
@@ -701,8 +726,8 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 
     if (structureXfadeBufferCapacity < channelRequired)
     {
-        structureOldOutBuffer.reset(static_cast<double*>(convo::aligned_malloc(channelRequired * sizeof(double), 64)));
-        structureNewOutBuffer.reset(static_cast<double*>(convo::aligned_malloc(channelRequired * sizeof(double), 64)));
+        structureOldOutBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(channelRequired));
+        structureNewOutBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(channelRequired));
         structureXfadeBufferCapacity = channelRequired;
         juce::FloatVectorOperations::clear(structureOldOutBuffer.get(), channelRequired);
         juce::FloatVectorOperations::clear(structureNewOutBuffer.get(), channelRequired);
@@ -710,9 +735,9 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 
     if (newMaxInternalBlockSize > 0 && agcCoeffTableCapacity < (newMaxInternalBlockSize + 1))
     {
-        agcAttackCoeffTable.reset(static_cast<double*>(convo::aligned_malloc((newMaxInternalBlockSize + 1) * sizeof(double), 64)));
-        agcReleaseCoeffTable.reset(static_cast<double*>(convo::aligned_malloc((newMaxInternalBlockSize + 1) * sizeof(double), 64)));
-        agcSmoothCoeffTable.reset(static_cast<double*>(convo::aligned_malloc((newMaxInternalBlockSize + 1) * sizeof(double), 64)));
+        agcAttackCoeffTable = convo::makeAlignedArray<double>(static_cast<size_t>(newMaxInternalBlockSize + 1));
+        agcReleaseCoeffTable = convo::makeAlignedArray<double>(static_cast<size_t>(newMaxInternalBlockSize + 1));
+        agcSmoothCoeffTable = convo::makeAlignedArray<double>(static_cast<size_t>(newMaxInternalBlockSize + 1));
 
         if (agcAttackCoeffTable && agcReleaseCoeffTable && agcSmoothCoeffTable)
             agcCoeffTableCapacity = newMaxInternalBlockSize + 1;
@@ -720,7 +745,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
             agcCoeffTableCapacity = 0;
     }
 
-    auto state = currentStateRaw.load(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire);
 
     smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
     bypassFadeGain.reset(sampleRate, BYPASS_FADE_TIME_SEC);
@@ -735,9 +760,9 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     std::memset(filterState.data(), 0, sizeof(filterState));
 
     const double sr = sampleRate;
-    agcAttackCoeff.store(std::exp(-1.0 / (sr * AGC_ATTACK_TIME_SEC)), std::memory_order_relaxed);
-    agcReleaseCoeff.store(std::exp(-1.0 / (sr * AGC_RELEASE_TIME_SEC)), std::memory_order_relaxed);
-    agcSmoothCoeff.store(std::exp(-1.0 / (sr * AGC_SMOOTH_TIME_SEC)), std::memory_order_relaxed);
+    convo::publishAtomic(agcAttackCoeff, std::exp(-1.0 / (sr * AGC_ATTACK_TIME_SEC)), std::memory_order_release);
+    convo::publishAtomic(agcReleaseCoeff, std::exp(-1.0 / (sr * AGC_RELEASE_TIME_SEC)), std::memory_order_release);
+    convo::publishAtomic(agcSmoothCoeff, std::exp(-1.0 / (sr * AGC_SMOOTH_TIME_SEC)), std::memory_order_release);
 
     if (agcCoeffTableCapacity > 0 && agcAttackCoeffTable && agcReleaseCoeffTable && agcSmoothCoeffTable)
     {
@@ -750,26 +775,29 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
         }
     }
 
-    agcCurrentGain.store(1.0, std::memory_order_relaxed);
-    agcEnvInput.store(0.0, std::memory_order_relaxed);
-    agcEnvOutput.store(0.0, std::memory_order_relaxed);
+    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release);
+    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);
+    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);
 
-    bandResetMask.store(0, std::memory_order_relaxed);
-    agcResetRequest.store(false, std::memory_order_relaxed);
-    activeStructure.store(requestedStructure.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);
+    convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);
+    rtDeferredBandResetMask = 0;
+    rtSeenBandResetSerial = 0;
+    rtSeenAgcResetSerial = 0;
+    convo::publishAtomic(activeStructure, convo::consumeAtomic(requestedStructure, std::memory_order_acquire), std::memory_order_release);
 
-    const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
-    bypassed.store(requestedBypass, std::memory_order_relaxed);
+    const bool requestedBypass = convo::consumeAtomic(bypassRequested, std::memory_order_acquire);
+    convo::publishAtomic(bypassed, requestedBypass, std::memory_order_release);
     bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
 
     if (boundExecutionState != nullptr)
     {
         auto& eqState = boundExecutionState->eq;
         eqState.bypassed = requestedBypass;
-        eqState.activeStructure = static_cast<int>(activeStructure.load(std::memory_order_relaxed));
-        eqState.agcCurrentGain = agcCurrentGain.load(std::memory_order_relaxed);
-        eqState.agcEnvInput = agcEnvInput.load(std::memory_order_relaxed);
-        eqState.agcEnvOutput = agcEnvOutput.load(std::memory_order_relaxed);
+        eqState.activeStructure = static_cast<int>(convo::consumeAtomic(activeStructure, std::memory_order_acquire));
+        eqState.agcCurrentGain = convo::consumeAtomic(agcCurrentGain, std::memory_order_acquire);
+        eqState.agcEnvInput = convo::consumeAtomic(agcEnvInput, std::memory_order_acquire);
+        eqState.agcEnvOutput = convo::consumeAtomic(agcEnvOutput, std::memory_order_acquire);
         if (eqState.agcAttackCoeffTable == nullptr
             || eqState.agcReleaseCoeffTable == nullptr
             || eqState.agcSmoothCoeffTable == nullptr
@@ -791,11 +819,11 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     {
         for (int i = 0; i < NUM_BANDS; ++i)
         {
-            auto loopState = currentStateRaw.load(std::memory_order_acquire);
+            auto loopState = loadCurrentState(std::memory_order_acquire);
             if (loopState)
             {
                 auto newNode = createBandNode(i, *loopState);
-                auto oldNode = bandNodes[i].exchange(newNode, std::memory_order_release);
+                auto oldNode = exchangeBandNode(i, newNode, std::memory_order_release);
 
                 if (activeBandNodes[i])
                     retireBandNode(activeBandNodes[i]);
@@ -832,12 +860,12 @@ convo::EQParameters EQProcessor::EQState::toEQParameters() const
 
 EQProcessor::EQState* EQProcessor::getEQState() const
 {
-    return currentStateRaw.load(std::memory_order_acquire);
+    return loadCurrentState(std::memory_order_acquire);
 }
 
 float EQProcessor::getTotalGain() const
 {
-    auto state = currentStateRaw.load(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire);
     if (state == nullptr) return 0.0f;
     return state->totalGainDb;
 }
@@ -845,7 +873,7 @@ float EQProcessor::getTotalGain() const
 EQBandType EQProcessor::getBandType(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQBandType::Peaking;
-    auto state = currentStateRaw.load(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire);
     if (state == nullptr) return EQBandType::Peaking;
     return state->bandTypes[band];
 }
@@ -853,7 +881,7 @@ EQBandType EQProcessor::getBandType(int band) const
 EQChannelMode EQProcessor::getBandChannelMode(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQChannelMode::Stereo;
-    auto state = currentStateRaw.load(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire);
     if (state == nullptr) return EQChannelMode::Stereo;
     return state->bandChannelModes[band];
 }
@@ -866,7 +894,7 @@ void EQProcessor::cleanup()
 EQBandParams EQProcessor::getBandParams(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return {};
-    auto state = currentStateRaw.load(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire);
     if (state == nullptr) return {};
     return state->bands[band];
 }

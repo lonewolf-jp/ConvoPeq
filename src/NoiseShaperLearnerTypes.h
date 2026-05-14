@@ -4,6 +4,8 @@
 #include <atomic>
 #include <cstdint>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo {
 
 enum class NoiseShaperLearnerStatus
@@ -63,17 +65,17 @@ struct NoiseShaperLearnerSettings
     NoiseShaperLearnerSettings() = default;
 
     NoiseShaperLearnerSettings(const NoiseShaperLearnerSettings& other)
-        : cmaesRestarts(other.cmaesRestarts.load()),
-          coeffSafetyMargin(other.coeffSafetyMargin.load()),
-          enableStabilityCheck(other.enableStabilityCheck.load())
+        : cmaesRestarts(convo::consumeAtomic(other.cmaesRestarts)),
+          coeffSafetyMargin(convo::consumeAtomic(other.coeffSafetyMargin)),
+          enableStabilityCheck(convo::consumeAtomic(other.enableStabilityCheck))
     {
     }
 
     NoiseShaperLearnerSettings& operator=(const NoiseShaperLearnerSettings& other)
     {
-        cmaesRestarts = other.cmaesRestarts.load();
-        coeffSafetyMargin = other.coeffSafetyMargin.load();
-        enableStabilityCheck = other.enableStabilityCheck.load();
+        cmaesRestarts = convo::consumeAtomic(other.cmaesRestarts);
+        coeffSafetyMargin = convo::consumeAtomic(other.coeffSafetyMargin);
+        enableStabilityCheck = convo::consumeAtomic(other.enableStabilityCheck);
         return *this;
     }
 };

@@ -11,6 +11,8 @@
 #include <algorithm>
 #include "core/EpochManager.h"
 
+#include "audioengine/AtomicAccess.h"
+
 static void retireBandNode(EQProcessor::BandNode* node)
 {
     if (node) node->release();
@@ -24,7 +26,7 @@ EQProcessor::BandNode* EQProcessor::createBandNode(int band, const EQState& stat
     auto node = new BandNode();
     // EBR: retirement managed by retireBandNode
     const auto& params = state.bands[band];
-    const double sr = currentSampleRate.load(std::memory_order_relaxed);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
 
     node->active = params.enabled;
     node->mode = state.bandChannelModes[band];
@@ -59,12 +61,12 @@ void EQProcessor::updateBandNode(int band)
 {
     if (band < 0 || band >= NUM_BANDS) return;
 
-    auto state = currentStateRaw.load(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire);
     if (state == nullptr) return;
     auto newNode = createBandNode(band, *state);
     BandNode* oldNode = activeBandNodes[band];
 
-    bandNodes[band].store(newNode, std::memory_order_release);
+    publishBandNode(band, newNode, std::memory_order_release);
     convo::EpochManager::instance().advanceEpoch();
 
     if (oldNode)

@@ -54,10 +54,6 @@ struct GlobalSnapshot {
     // v2.3 フェーズ 1 追加フィールド
     uint64_t eqCoeffHash = 0;           // EQパラメータハッシュ値（キャッシュ識別子）
 
-#ifdef _DEBUG
-    mutable std::atomic<bool> alive{true};
-#endif
-
     // SnapshotParams から全フィールドを初期化
     explicit GlobalSnapshot(const SnapshotParams& params) noexcept;
 

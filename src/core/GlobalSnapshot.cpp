@@ -27,9 +27,6 @@ GlobalSnapshot::GlobalSnapshot(const SnapshotParams& params) noexcept
     , maxBlockSize(params.maxBlockSize)
     , eqCoeffHash(params.eqCoeffHash)
 {
-#ifdef _DEBUG
-    alive.store(true, std::memory_order_relaxed);
-#endif
 }
 
 GlobalSnapshot::~GlobalSnapshot() = default;

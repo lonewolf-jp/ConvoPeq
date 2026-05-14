@@ -6,6 +6,8 @@
 #include "AlignedAllocation.h"
 #include "DftiHandle.h"
 
+#include "audioengine/AtomicAccess.h"
+
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI)
 
 using namespace ConvolverProcessorInternal;
@@ -106,23 +108,23 @@ static void applySmoothing(const float* magnitudes, float* smoothed, int numBins
 juce::ValueTree ConvolverProcessor::getState() const
 {
     juce::ValueTree v ("Convolver");
-    v.setProperty ("mix", mixTarget.load(), nullptr);
-    v.setProperty ("bypassed", bypassed.load(), nullptr);
+    v.setProperty ("mix", convo::consumeAtomic(mixTarget), nullptr);
+    v.setProperty ("bypassed", convo::consumeAtomic(bypassed), nullptr);
     v.setProperty ("phaseMode", static_cast<int>(getPhaseMode()), nullptr);
     v.setProperty ("useMinPhase", getUseMinPhase(), nullptr);
-    v.setProperty ("smoothingTime", smoothingTimeSec.load(), nullptr);
-    v.setProperty ("irLength", targetIRLengthSec.load(), nullptr);
-    v.setProperty ("autoDetectedIRLength", autoDetectedIRLengthSec.load(std::memory_order_acquire), nullptr);
-    v.setProperty ("irLengthManualOverride", irLengthManualOverride.load(std::memory_order_acquire), nullptr);
-    v.setProperty ("mixedF1Hz", mixedTransitionStartHz.load(std::memory_order_acquire), nullptr);
-    v.setProperty ("mixedF2Hz", mixedTransitionEndHz.load(std::memory_order_acquire), nullptr);
-    v.setProperty ("mixedTau", mixedPreRingTau.load(std::memory_order_acquire), nullptr);
-    v.setProperty ("rebuildDebounceMs", rebuildDebounceMs.load(std::memory_order_acquire), nullptr);
-    v.setProperty ("experimentalDirectHeadEnabled", experimentalDirectHeadEnabled.load(std::memory_order_acquire), nullptr);
-    v.setProperty ("tailProcessingMode", tailProcessingMode.load(std::memory_order_acquire), nullptr);
-    v.setProperty ("tailRolloffStartHz", tailRolloffStartHz.load(std::memory_order_acquire), nullptr);
-    v.setProperty ("tailRolloffStrength", tailRolloffStrength.load(std::memory_order_acquire), nullptr);
-    v.setProperty ("partitionTailStrength", partitionTailStrength.load(std::memory_order_acquire), nullptr);
+    v.setProperty ("smoothingTime", convo::consumeAtomic(smoothingTimeSec), nullptr);
+    v.setProperty ("irLength", convo::consumeAtomic(targetIRLengthSec), nullptr);
+    v.setProperty ("autoDetectedIRLength", convo::consumeAtomic(autoDetectedIRLengthSec, std::memory_order_acquire), nullptr);
+    v.setProperty ("irLengthManualOverride", convo::consumeAtomic(irLengthManualOverride, std::memory_order_acquire), nullptr);
+    v.setProperty ("mixedF1Hz", convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire), nullptr);
+    v.setProperty ("mixedF2Hz", convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire), nullptr);
+    v.setProperty ("mixedTau", convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire), nullptr);
+    v.setProperty ("rebuildDebounceMs", convo::consumeAtomic(rebuildDebounceMs, std::memory_order_acquire), nullptr);
+    v.setProperty ("experimentalDirectHeadEnabled", convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire), nullptr);
+    v.setProperty ("tailProcessingMode", convo::consumeAtomic(tailProcessingMode, std::memory_order_acquire), nullptr);
+    v.setProperty ("tailRolloffStartHz", convo::consumeAtomic(tailRolloffStartHz, std::memory_order_acquire), nullptr);
+    v.setProperty ("tailRolloffStrength", convo::consumeAtomic(tailRolloffStrength, std::memory_order_acquire), nullptr);
+    v.setProperty ("partitionTailStrength", convo::consumeAtomic(partitionTailStrength, std::memory_order_acquire), nullptr);
     v.setProperty ("targetUpgradeFFTSize", getTargetUpgradeFFTSize(), nullptr);
     v.setProperty ("enableProgressiveUpgrade", isProgressiveUpgradeEnabled(), nullptr);
     v.setProperty ("maxCacheEntries", static_cast<int>(getMaxCacheEntries()), nullptr);
@@ -136,29 +138,29 @@ juce::ValueTree ConvolverProcessor::getState() const
 ConvolverProcessor::BuildSnapshot ConvolverProcessor::captureBuildSnapshot() const
 {
     BuildSnapshot snapshot;
-    snapshot.mix = mixTarget.load(std::memory_order_acquire);
-    snapshot.bypassed = bypassed.load(std::memory_order_acquire);
-    snapshot.phaseMode = static_cast<int>(phaseMode.load(std::memory_order_acquire));
-    snapshot.resamplingPhaseMode = static_cast<int>(currentResamplingPhaseMode.load(std::memory_order_acquire));
-    snapshot.smoothingTimeSec = smoothingTimeSec.load(std::memory_order_acquire);
-    snapshot.targetIRLengthSec = targetIRLengthSec.load(std::memory_order_acquire);
-    snapshot.mixedTransitionStartHz = mixedTransitionStartHz.load(std::memory_order_acquire);
-    snapshot.mixedTransitionEndHz = mixedTransitionEndHz.load(std::memory_order_acquire);
-    snapshot.mixedPreRingTau = mixedPreRingTau.load(std::memory_order_acquire);
-    snapshot.rebuildDebounceMs = rebuildDebounceMs.load(std::memory_order_acquire);
-    snapshot.experimentalDirectHeadEnabled = experimentalDirectHeadEnabled.load(std::memory_order_acquire);
-    snapshot.tailProcessingMode = tailProcessingMode.load(std::memory_order_acquire);
-    snapshot.tailRolloffStartHz = tailRolloffStartHz.load(std::memory_order_acquire);
-    snapshot.tailRolloffStrength = tailRolloffStrength.load(std::memory_order_acquire);
-    snapshot.partitionTailStrength = partitionTailStrength.load(std::memory_order_acquire);
-    snapshot.targetUpgradeFFTSize = targetUpgradeFFTSize.load(std::memory_order_acquire);
-    snapshot.enableProgressiveUpgrade = enableProgressiveUpgrade.load(std::memory_order_acquire);
-    snapshot.maxCacheEntries = static_cast<int>(maxCacheEntries.load(std::memory_order_acquire));
+    snapshot.mix = convo::consumeAtomic(mixTarget, std::memory_order_acquire);
+    snapshot.bypassed = convo::consumeAtomic(bypassed, std::memory_order_acquire);
+    snapshot.phaseMode = static_cast<int>(convo::consumeAtomic(phaseMode, std::memory_order_acquire));
+    snapshot.resamplingPhaseMode = static_cast<int>(convo::consumeAtomic(currentResamplingPhaseMode, std::memory_order_acquire));
+    snapshot.smoothingTimeSec = convo::consumeAtomic(smoothingTimeSec, std::memory_order_acquire);
+    snapshot.targetIRLengthSec = convo::consumeAtomic(targetIRLengthSec, std::memory_order_acquire);
+    snapshot.mixedTransitionStartHz = convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire);
+    snapshot.mixedTransitionEndHz = convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire);
+    snapshot.mixedPreRingTau = convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire);
+    snapshot.rebuildDebounceMs = convo::consumeAtomic(rebuildDebounceMs, std::memory_order_acquire);
+    snapshot.experimentalDirectHeadEnabled = convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire);
+    snapshot.tailProcessingMode = convo::consumeAtomic(tailProcessingMode, std::memory_order_acquire);
+    snapshot.tailRolloffStartHz = convo::consumeAtomic(tailRolloffStartHz, std::memory_order_acquire);
+    snapshot.tailRolloffStrength = convo::consumeAtomic(tailRolloffStrength, std::memory_order_acquire);
+    snapshot.partitionTailStrength = convo::consumeAtomic(partitionTailStrength, std::memory_order_acquire);
+    snapshot.targetUpgradeFFTSize = convo::consumeAtomic(targetUpgradeFFTSize, std::memory_order_acquire);
+    snapshot.enableProgressiveUpgrade = convo::consumeAtomic(enableProgressiveUpgrade, std::memory_order_acquire);
+    snapshot.maxCacheEntries = static_cast<int>(convo::consumeAtomic(maxCacheEntries, std::memory_order_acquire));
     snapshot.irName = irName;
-    snapshot.irLength = irLength.load(std::memory_order_acquire);
-    snapshot.currentIRScale = currentIRScale.load(std::memory_order_acquire);
-    snapshot.nucHCMode = nucHCMode.load(std::memory_order_acquire);
-    snapshot.nucLCMode = nucLCMode.load(std::memory_order_acquire);
+    snapshot.irLength = convo::consumeAtomic(irLength, std::memory_order_acquire);
+    snapshot.currentIRScale = convo::consumeAtomic(currentIRScale, std::memory_order_acquire);
+    snapshot.nucHCMode = convo::consumeAtomic(nucHCMode, std::memory_order_acquire);
+    snapshot.nucLCMode = convo::consumeAtomic(nucLCMode, std::memory_order_acquire);
     {
         const juce::ScopedLock sl(irFileLock);
         snapshot.irFile = currentIrFile;
@@ -169,33 +171,33 @@ ConvolverProcessor::BuildSnapshot ConvolverProcessor::captureBuildSnapshot() con
 
 void ConvolverProcessor::applyBuildSnapshot(const BuildSnapshot& snapshot)
 {
-    mixTarget.store(snapshot.mix, std::memory_order_release);
-    bypassed.store(snapshot.bypassed, std::memory_order_release);
-    phaseMode.store(snapshot.phaseMode, std::memory_order_release);
-    currentResamplingPhaseMode.store(static_cast<ResamplingPhaseMode>(snapshot.resamplingPhaseMode), std::memory_order_release);
-    smoothingTimeSec.store(snapshot.smoothingTimeSec, std::memory_order_release);
-    targetIRLengthSec.store(snapshot.targetIRLengthSec, std::memory_order_release);
-    mixedTransitionStartHz.store(snapshot.mixedTransitionStartHz, std::memory_order_release);
-    mixedTransitionEndHz.store(snapshot.mixedTransitionEndHz, std::memory_order_release);
-    mixedPreRingTau.store(snapshot.mixedPreRingTau, std::memory_order_release);
-    rebuildDebounceMs.store(snapshot.rebuildDebounceMs, std::memory_order_release);
-    experimentalDirectHeadEnabled.store(snapshot.experimentalDirectHeadEnabled, std::memory_order_release);
-    tailProcessingMode.store(snapshot.tailProcessingMode, std::memory_order_release);
-    tailRolloffStartHz.store(snapshot.tailRolloffStartHz, std::memory_order_release);
-    tailRolloffStrength.store(snapshot.tailRolloffStrength, std::memory_order_release);
-    partitionTailStrength.store(snapshot.partitionTailStrength, std::memory_order_release);
-    targetUpgradeFFTSize.store(snapshot.targetUpgradeFFTSize, std::memory_order_release);
-    enableProgressiveUpgrade.store(snapshot.enableProgressiveUpgrade, std::memory_order_release);
-    maxCacheEntries.store(static_cast<size_t>(snapshot.maxCacheEntries), std::memory_order_release);
+    convo::publishAtomic(mixTarget, snapshot.mix, std::memory_order_release);
+    convo::publishAtomic(bypassed, snapshot.bypassed, std::memory_order_release);
+    convo::publishAtomic(phaseMode, snapshot.phaseMode, std::memory_order_release);
+    convo::publishAtomic(currentResamplingPhaseMode, static_cast<ResamplingPhaseMode>(snapshot.resamplingPhaseMode), std::memory_order_release);
+    convo::publishAtomic(smoothingTimeSec, snapshot.smoothingTimeSec, std::memory_order_release);
+    convo::publishAtomic(targetIRLengthSec, snapshot.targetIRLengthSec, std::memory_order_release);
+    convo::publishAtomic(mixedTransitionStartHz, snapshot.mixedTransitionStartHz, std::memory_order_release);
+    convo::publishAtomic(mixedTransitionEndHz, snapshot.mixedTransitionEndHz, std::memory_order_release);
+    convo::publishAtomic(mixedPreRingTau, snapshot.mixedPreRingTau, std::memory_order_release);
+    convo::publishAtomic(rebuildDebounceMs, snapshot.rebuildDebounceMs, std::memory_order_release);
+    convo::publishAtomic(experimentalDirectHeadEnabled, snapshot.experimentalDirectHeadEnabled, std::memory_order_release);
+    convo::publishAtomic(tailProcessingMode, snapshot.tailProcessingMode, std::memory_order_release);
+    convo::publishAtomic(tailRolloffStartHz, snapshot.tailRolloffStartHz, std::memory_order_release);
+    convo::publishAtomic(tailRolloffStrength, snapshot.tailRolloffStrength, std::memory_order_release);
+    convo::publishAtomic(partitionTailStrength, snapshot.partitionTailStrength, std::memory_order_release);
+    convo::publishAtomic(targetUpgradeFFTSize, snapshot.targetUpgradeFFTSize, std::memory_order_release);
+    convo::publishAtomic(enableProgressiveUpgrade, snapshot.enableProgressiveUpgrade, std::memory_order_release);
+    convo::publishAtomic(maxCacheEntries, static_cast<size_t>(snapshot.maxCacheEntries), std::memory_order_release);
     {
         const juce::ScopedLock sl(irFileLock);
         currentIrFile = snapshot.irFile;
     }
     irName = snapshot.irName;
-    irLength.store(snapshot.irLength, std::memory_order_release);
-    currentIRScale.store(snapshot.currentIRScale, std::memory_order_release);
-    nucHCMode.store(snapshot.nucHCMode, std::memory_order_release);
-    nucLCMode.store(snapshot.nucLCMode, std::memory_order_release);
+    convo::publishAtomic(irLength, snapshot.irLength, std::memory_order_release);
+    convo::publishAtomic(currentIRScale, snapshot.currentIRScale, std::memory_order_release);
+    convo::publishAtomic(nucHCMode, snapshot.nucHCMode, std::memory_order_release);
+    convo::publishAtomic(nucLCMode, snapshot.nucLCMode, std::memory_order_release);
 }
 
 void ConvolverProcessor::setState(const juce::ValueTree& v)
@@ -227,9 +229,9 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
             {
                 const float autoLength = static_cast<float>(v.getProperty ("autoDetectedIRLength"));
                 const float clampedAutoLength = juce::jlimit(IR_LENGTH_MIN_SEC,
-                                                             getMaximumAllowedIRLengthSec(currentSampleRate.load(std::memory_order_acquire)),
+                                                             getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)),
                                                              autoLength);
-                autoDetectedIRLengthSec.store(clampedAutoLength, std::memory_order_release);
+                convo::publishAtomic(autoDetectedIRLengthSec, clampedAutoLength, std::memory_order_release);
             }
 
             if (v.hasProperty ("irLength"))
@@ -332,23 +334,8 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
 {
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
-    mixTarget.store(other.mixTarget.load(), std::memory_order_release);
-    bypassed.store(other.bypassed.load(), std::memory_order_release);
-    phaseMode.store(other.phaseMode.load(std::memory_order_acquire), std::memory_order_release);
-    smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
-    targetIRLengthSec.store(other.targetIRLengthSec.load(), std::memory_order_release);
-    mixedTransitionStartHz.store(other.mixedTransitionStartHz.load(std::memory_order_acquire), std::memory_order_release);
-    mixedTransitionEndHz.store(other.mixedTransitionEndHz.load(std::memory_order_acquire), std::memory_order_release);
-    mixedPreRingTau.store(other.mixedPreRingTau.load(std::memory_order_acquire), std::memory_order_release);
-    rebuildDebounceMs.store(other.rebuildDebounceMs.load(std::memory_order_acquire), std::memory_order_release);
-    experimentalDirectHeadEnabled.store(other.experimentalDirectHeadEnabled.load(std::memory_order_acquire), std::memory_order_release);
-    tailProcessingMode.store(other.tailProcessingMode.load(std::memory_order_acquire), std::memory_order_release);
-    tailRolloffStartHz.store(other.tailRolloffStartHz.load(std::memory_order_acquire), std::memory_order_release);
-    tailRolloffStrength.store(other.tailRolloffStrength.load(std::memory_order_acquire), std::memory_order_release);
-    partitionTailStrength.store(other.partitionTailStrength.load(std::memory_order_acquire), std::memory_order_release);
-    targetUpgradeFFTSize.store(other.targetUpgradeFFTSize.load(std::memory_order_acquire), std::memory_order_release);
-    enableProgressiveUpgrade.store(other.enableProgressiveUpgrade.load(std::memory_order_acquire), std::memory_order_release);
-    maxCacheEntries.store(other.maxCacheEntries.load(std::memory_order_acquire), std::memory_order_release);
+    const BuildSnapshot snapshot = other.captureBuildSnapshot();
+    applyBuildSnapshot(snapshot);
 
     if (const IRState* otherState = other.acquireIRState())
     {
@@ -361,43 +348,16 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
         currentIrFile = other.currentIrFile;
     }
     irName = other.irName;
-    irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
-    currentIRScale.store(other.currentIRScale.load(std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(currentIRScale, convo::consumeAtomic(other.currentIRScale, std::memory_order_acquire), std::memory_order_release);
 
-    nucHCMode.store(other.nucHCMode.load(std::memory_order_acquire), std::memory_order_release);
-    nucLCMode.store(other.nucLCMode.load(std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(nucHCMode, convo::consumeAtomic(other.nucHCMode, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(nucLCMode, convo::consumeAtomic(other.nucLCMode, std::memory_order_acquire), std::memory_order_release);
 
-    const uint64_t retireEpoch = rcuProvider ? rcuProvider->publishRcuEpoch() : 1;
-    auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
+    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
+    auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel);
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
-}
-
-void ConvolverProcessor::syncParametersFrom(const ConvolverProcessor& other)
-{
-    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
-
-    mixTarget.store(other.mixTarget.load(), std::memory_order_release);
-    bypassed.store(other.bypassed.load(), std::memory_order_release);
-    smoothingTimeSec.store(other.smoothingTimeSec.load(), std::memory_order_release);
-    rebuildDebounceMs.store(other.rebuildDebounceMs.load(std::memory_order_acquire), std::memory_order_release);
-
-    if (std::abs(currentSampleRate.load() - other.currentSampleRate.load()) < 1e-6)
-    {
-        struct GlobalGuard {
-            const ConvolverProcessor& cp;
-            GlobalGuard(const ConvolverProcessor& cp_) : cp(cp_) { cp.enterGlobalReader(2); }
-            ~GlobalGuard() { cp.exitGlobalReader(2); }
-        } guard(other);
-
-        auto* otherConv = other.m_activeEngine.load(std::memory_order_acquire);
-        auto* expectedConv = m_activeEngine.load(std::memory_order_acquire);
-
-        if (otherConv != expectedConv && otherConv != nullptr)
-        {
-            shareConvolutionEngineFrom(other);
-        }
-    }
 }
 
 void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& other)
@@ -408,7 +368,7 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
         ~GlobalGuard() { cp.exitGlobalReader(2); }
     } guard(other);
 
-    auto* otherConv = other.m_activeEngine.load(std::memory_order_acquire);
+    auto* otherConv = other.loadActiveEngine(std::memory_order_acquire);
     if (otherConv == nullptr)
         return;
 
@@ -416,21 +376,21 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     if (clonedConv == nullptr)
         return;
 
-    const uint64_t retireEpoch = rcuProvider ? rcuProvider->publishRcuEpoch() : 1;
-    auto* oldConv = m_activeEngine.exchange(clonedConv, std::memory_order_acq_rel);
+    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
+    auto* oldConv = exchangeActiveEngine(clonedConv, std::memory_order_acq_rel);
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
 
-    auto* otherSnap = other.cachedLatency.load(std::memory_order_acquire);
+    auto* otherSnap = convo::consumeAtomic(other.cachedLatency, std::memory_order_acquire);
     auto* newSnap = otherSnap ? new LatencySnapshot(*otherSnap) : new LatencySnapshot();
-    auto* oldSnap = cachedLatency.exchange(newSnap, std::memory_order_acq_rel);
+    auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel);
     delete oldSnap;
 
-    irLength.store(other.irLength.load(std::memory_order_acquire), std::memory_order_release);
-    uiAlgorithmLatencySamples.store(other.uiAlgorithmLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
-    uiIrPeakLatencySamples.store(other.uiIrPeakLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
-    uiTotalLatencySamples.store(other.uiTotalLatencySamples.load(std::memory_order_acquire), std::memory_order_release);
-    uiDirectHeadActive.store(other.uiDirectHeadActive.load(std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(uiAlgorithmLatencySamples, convo::consumeAtomic(other.uiAlgorithmLatencySamples, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(uiIrPeakLatencySamples, convo::consumeAtomic(other.uiIrPeakLatencySamples, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(uiTotalLatencySamples, convo::consumeAtomic(other.uiTotalLatencySamples, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(uiDirectHeadActive, convo::consumeAtomic(other.uiDirectHeadActive, std::memory_order_acquire), std::memory_order_release);
     requestHostDisplayUpdate();
 }
 
@@ -525,19 +485,19 @@ ConvolverProcessor::IRLoadPreview ConvolverProcessor::analyzeImpulseResponseFile
     return preview;
 }
 
-std::vector<float> ConvolverProcessor::getIRWaveform() const
+std::vector<float> ConvolverProcessor::getIRWaveform()
 {
     const juce::ScopedLock sl(visualizationDataLock);
     return irWaveform;
 }
 
-std::vector<float> ConvolverProcessor::getIRMagnitudeSpectrum() const
+std::vector<float> ConvolverProcessor::getIRMagnitudeSpectrum()
 {
     const juce::ScopedLock sl(visualizationDataLock);
     return irMagnitudeSpectrum;
 }
 
-double ConvolverProcessor::getIRSpectrumSampleRate() const
+double ConvolverProcessor::getIRSpectrumSampleRate()
 {
     const juce::ScopedLock sl(visualizationDataLock);
     return irSpectrumSampleRate;
@@ -594,7 +554,7 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
 
     if (cachedFFTBufferCapacity < fftSize * 2)
     {
-        cachedFFTBuffer.reset(static_cast<float*>(convo::aligned_malloc(fftSize * 2 * sizeof(float), 64)));
+        cachedFFTBuffer = convo::makeAlignedArray<float>(static_cast<size_t>(fftSize * 2));
         cachedFFTBufferCapacity = fftSize * 2;
     }
 
@@ -638,8 +598,8 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
 
     if (cachedMagnitudeBufferCapacity < numBins)
     {
-        cachedLinearMagsBuffer.reset(static_cast<float*>(convo::aligned_malloc(static_cast<size_t>(numBins) * sizeof(float), 64)));
-        cachedSmoothedMagsBuffer.reset(static_cast<float*>(convo::aligned_malloc(static_cast<size_t>(numBins) * sizeof(float), 64)));
+        cachedLinearMagsBuffer = convo::makeAlignedArray<float>(static_cast<size_t>(numBins));
+        cachedSmoothedMagsBuffer = convo::makeAlignedArray<float>(static_cast<size_t>(numBins));
         if (!cachedLinearMagsBuffer || !cachedSmoothedMagsBuffer)
         {
             cachedMagnitudeBufferCapacity = 0;
@@ -669,7 +629,7 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
     } guard(*this);
 
     LatencyBreakdown breakdown;
-    if (auto* conv = m_activeEngine.load(std::memory_order_acquire))
+    if (auto* conv = loadActiveEngine(std::memory_order_acquire))
     {
         const bool directHeadActive = conv->storedDirectHeadEnabled;
         breakdown.directHeadActive = directHeadActive;
@@ -682,13 +642,13 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
             breakdown.irPeakLatencySamples == 0 &&
             breakdown.totalLatencySamples == 0)
         {
-            const int snapTotal = uiTotalLatencySamples.load(std::memory_order_acquire);
+            const int snapTotal = convo::consumeAtomic(uiTotalLatencySamples, std::memory_order_acquire);
             if (snapTotal > 0)
             {
-                breakdown.algorithmLatencySamples = uiAlgorithmLatencySamples.load(std::memory_order_acquire);
-                breakdown.irPeakLatencySamples = uiIrPeakLatencySamples.load(std::memory_order_acquire);
+                breakdown.algorithmLatencySamples = convo::consumeAtomic(uiAlgorithmLatencySamples, std::memory_order_acquire);
+                breakdown.irPeakLatencySamples = convo::consumeAtomic(uiIrPeakLatencySamples, std::memory_order_acquire);
                 breakdown.totalLatencySamples = snapTotal;
-                breakdown.directHeadActive = uiDirectHeadActive.load(std::memory_order_acquire);
+                breakdown.directHeadActive = convo::consumeAtomic(uiDirectHeadActive, std::memory_order_acquire);
             }
         }
     }
@@ -697,13 +657,13 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
         breakdown.irPeakLatencySamples == 0 &&
         breakdown.totalLatencySamples == 0)
     {
-        const int snapTotal = uiTotalLatencySamples.load(std::memory_order_acquire);
+        const int snapTotal = convo::consumeAtomic(uiTotalLatencySamples, std::memory_order_acquire);
         if (snapTotal > 0)
         {
-            breakdown.algorithmLatencySamples = uiAlgorithmLatencySamples.load(std::memory_order_acquire);
-            breakdown.irPeakLatencySamples = uiIrPeakLatencySamples.load(std::memory_order_acquire);
+            breakdown.algorithmLatencySamples = convo::consumeAtomic(uiAlgorithmLatencySamples, std::memory_order_acquire);
+            breakdown.irPeakLatencySamples = convo::consumeAtomic(uiIrPeakLatencySamples, std::memory_order_acquire);
             breakdown.totalLatencySamples = snapTotal;
-            breakdown.directHeadActive = uiDirectHeadActive.load(std::memory_order_acquire);
+            breakdown.directHeadActive = convo::consumeAtomic(uiDirectHeadActive, std::memory_order_acquire);
         }
     }
 
@@ -712,13 +672,13 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
 
 int ConvolverProcessor::getLatencySamples() const
 {
-    auto snap = cachedLatency.load(std::memory_order_acquire);
+    auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire);
     return snap ? snap->totalLatencySamples : 0;
 }
 
 int ConvolverProcessor::getTotalLatencySamples() const
 {
-    auto snap = cachedLatency.load(std::memory_order_acquire);
+    auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire);
     return snap ? snap->totalLatencySamples : 0;
 }
 
@@ -732,43 +692,43 @@ void ConvolverProcessor::updateLatencyCache() noexcept
     snap.hasParallelDryPath = breakdown.directHeadActive;
 
     auto* newSnap = new LatencySnapshot(snap);
-    auto* oldSnap = cachedLatency.exchange(newSnap, std::memory_order_acq_rel);
+    auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel);
     delete oldSnap;
 }
 
 void ConvolverProcessor::requestHostDisplayUpdate()
 {
-    auto snap = cachedLatency.load(std::memory_order_acquire);
+    auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire);
     const int total = snap ? snap->totalLatencySamples : 0;
     if (total == lastReportedLatency)
         return;
 
-    if (latencyChangePending.exchange(true, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(latencyChangePending, true, std::memory_order_acq_rel))
         return;
 
     const bool queued = juce::MessageManager::callAsync([weakThis = juce::WeakReference<ConvolverProcessor>(this)]
     {
         if (auto* self = weakThis.get())
         {
-            auto snap2 = self->cachedLatency.load(std::memory_order_acquire);
+            auto snap2 = convo::consumeAtomic(self->cachedLatency, std::memory_order_acquire);
             const int latest = snap2 ? snap2->totalLatencySamples : 0;
             if (latest != self->lastReportedLatency)
             {
                 self->lastReportedLatency = latest;
                 self->postCoalescedChangeNotification();
             }
-            self->latencyChangePending.store(false, std::memory_order_release);
+            convo::publishAtomic(self->latencyChangePending, false, std::memory_order_release);
         }
     });
 
     if (!queued)
-        latencyChangePending.store(false, std::memory_order_release);
+        convo::publishAtomic(latencyChangePending, false, std::memory_order_release);
 }
 
 void ConvolverProcessor::setPhaseMode(PhaseMode mode)
 {
     const int newMode = static_cast<int>(mode);
-    const int oldMode = phaseMode.exchange(newMode, std::memory_order_acq_rel);
+    const int oldMode = convo::exchangeAtomic(phaseMode, newMode, std::memory_order_acq_rel);
     if (oldMode != newMode)
     {
         listeners.call(&Listener::convolverParamsChanged, this);
@@ -786,8 +746,8 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
     const int newHC = static_cast<int>(hcMode);
     const int newLC = static_cast<int>(lcMode);
 
-    const bool changed = (nucHCMode.exchange(newHC) != newHC) ||
-                         (nucLCMode.exchange(newLC) != newLC);
+    const bool changed = (convo::exchangeAtomic(nucHCMode, newHC) != newHC) ||
+                         (convo::exchangeAtomic(nucLCMode, newLC) != newLC);
 
     if (changed)
         requestDebouncedRebuild();
@@ -796,7 +756,7 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
 void ConvolverProcessor::setTailProcessingMode(int mode)
 {
     const int clamped = juce::jlimit(0, 1, mode);
-    const int prev = tailProcessingMode.exchange(clamped, std::memory_order_acq_rel);
+    const int prev = convo::exchangeAtomic(tailProcessingMode, clamped, std::memory_order_acq_rel);
     if (prev != clamped)
     {
         listeners.call(&Listener::convolverParamsChanged, this);
@@ -807,7 +767,7 @@ void ConvolverProcessor::setTailProcessingMode(int mode)
 void ConvolverProcessor::setTailRolloffStartHz(float hz)
 {
     const float clamped = juce::jlimit(TAIL_ROLLOFF_START_MIN_HZ, TAIL_ROLLOFF_START_MAX_HZ, hz);
-    const float prev = tailRolloffStartHz.exchange(clamped, std::memory_order_acq_rel);
+    const float prev = convo::exchangeAtomic(tailRolloffStartHz, clamped, std::memory_order_acq_rel);
     if (std::abs(prev - clamped) > 1.0e-5f)
     {
         listeners.call(&Listener::convolverParamsChanged, this);
@@ -818,7 +778,7 @@ void ConvolverProcessor::setTailRolloffStartHz(float hz)
 void ConvolverProcessor::setTailRolloffStrength(float strength)
 {
     const float clamped = juce::jlimit(TAIL_ROLLOFF_STRENGTH_MIN, TAIL_ROLLOFF_STRENGTH_MAX, strength);
-    const float prev = tailRolloffStrength.exchange(clamped, std::memory_order_acq_rel);
+    const float prev = convo::exchangeAtomic(tailRolloffStrength, clamped, std::memory_order_acq_rel);
     if (std::abs(prev - clamped) > 1.0e-5f)
     {
         listeners.call(&Listener::convolverParamsChanged, this);
@@ -829,7 +789,7 @@ void ConvolverProcessor::setTailRolloffStrength(float strength)
 void ConvolverProcessor::setPartitionTailStrength(float strength)
 {
     const float clamped = juce::jlimit(TAIL_PARTITION_STRENGTH_MIN, TAIL_PARTITION_STRENGTH_MAX, strength);
-    const float prev = partitionTailStrength.exchange(clamped, std::memory_order_acq_rel);
+    const float prev = convo::exchangeAtomic(partitionTailStrength, clamped, std::memory_order_acq_rel);
     if (std::abs(prev - clamped) > 1.0e-5f)
     {
         listeners.call(&Listener::convolverParamsChanged, this);
@@ -845,22 +805,22 @@ uint64_t ConvolverProcessor::getStructuralHash() const noexcept
         hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
     };
 
-    hashCombine(activeCacheKey.load(std::memory_order_acquire));
-    hashCombine(static_cast<uint64_t>(irLength.load(std::memory_order_acquire)));
-    hashCombine(static_cast<uint64_t>(phaseMode.load(std::memory_order_acquire)));
+    hashCombine(convo::consumeAtomic(activeCacheKey, std::memory_order_acquire));
+    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(irLength, std::memory_order_acquire)));
+    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(phaseMode, std::memory_order_acquire)));
 
     auto floatBits = [](float f) -> uint32_t {
         uint32_t bits;
         std::memcpy(&bits, &f, sizeof(bits));
         return bits;
     };
-    hashCombine(floatBits(mixedTransitionStartHz.load(std::memory_order_acquire)));
-    hashCombine(floatBits(mixedTransitionEndHz.load(std::memory_order_acquire)));
-    hashCombine(floatBits(mixedPreRingTau.load(std::memory_order_acquire)));
+    hashCombine(floatBits(convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire)));
+    hashCombine(floatBits(convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire)));
+    hashCombine(floatBits(convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire)));
 
-    hashCombine(experimentalDirectHeadEnabled.load(std::memory_order_acquire) ? 1ULL : 0ULL);
-    hashCombine(static_cast<uint64_t>(nucHCMode.load(std::memory_order_acquire)));
-    hashCombine(static_cast<uint64_t>(nucLCMode.load(std::memory_order_acquire)));
+    hashCombine(convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire) ? 1ULL : 0ULL);
+    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(nucHCMode, std::memory_order_acquire)));
+    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(nucLCMode, std::memory_order_acquire)));
     hashCombine(static_cast<uint64_t>(getTailProcessingMode()));
     hashCombine(floatBits(getTailRolloffStartHz()));
     hashCombine(floatBits(getTailRolloffStrength()));
@@ -871,33 +831,33 @@ uint64_t ConvolverProcessor::getStructuralHash() const noexcept
 
 uint64_t ConvolverProcessor::getActiveCacheKey() const noexcept
 {
-    return activeCacheKey.load(std::memory_order_acquire);
+    return convo::consumeAtomic(activeCacheKey, std::memory_order_acquire);
 }
 
 int ConvolverProcessor::getActiveCacheFFTSize() const noexcept
 {
-    return activeCacheFFTSize.load(std::memory_order_acquire);
+    return convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire);
 }
 
 int ConvolverProcessor::getNUCHCMode() const noexcept
 {
-    return nucHCMode.load(std::memory_order_acquire);
+    return convo::consumeAtomic(nucHCMode, std::memory_order_acquire);
 }
 
 int ConvolverProcessor::getNUCLCMode() const noexcept
 {
-    return nucLCMode.load(std::memory_order_acquire);
+    return convo::consumeAtomic(nucLCMode, std::memory_order_acquire);
 }
 
 void ConvolverProcessor::setResamplingPhaseMode(ResamplingPhaseMode mode)
 {
-    currentResamplingPhaseMode.store(mode, std::memory_order_release);
+    convo::publishAtomic(currentResamplingPhaseMode, mode, std::memory_order_release);
     requestDebouncedRebuild();
 }
 
 ConvolverProcessor::ResamplingPhaseMode ConvolverProcessor::getResamplingPhaseMode() const
 {
-    return currentResamplingPhaseMode.load(std::memory_order_acquire);
+    return convo::consumeAtomic(currentResamplingPhaseMode, std::memory_order_acquire);
 }
 
 float ConvolverProcessor::getMaximumAllowedIRLengthSecForSampleRate(double sampleRate)
@@ -912,7 +872,7 @@ float ConvolverProcessor::getMaximumAllowedIRLengthSec(double sampleRate) const
 {
     const double sr = (sampleRate > 0.0)
                     ? sampleRate
-                    : currentSampleRate.load(std::memory_order_acquire);
+                    : convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
 
     return getMaximumAllowedIRLengthSecForSampleRate(sr);
 }
@@ -920,7 +880,7 @@ float ConvolverProcessor::getMaximumAllowedIRLengthSec(double sampleRate) const
 int ConvolverProcessor::computeTargetIRLength(double sampleRate, int originalLength) const
 {
     juce::ignoreUnused(originalLength);
-    const double targetIRTimeSec = targetIRLengthSec.load();
+    const double targetIRTimeSec = convo::consumeAtomic(targetIRLengthSec);
     static constexpr int kMaxIRCap = MAX_IR_LATENCY;
 
     int target = static_cast<int>(sampleRate * targetIRTimeSec);
@@ -968,22 +928,22 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
     jassert(newState != nullptr);
     if (!newState) return;
 
-    jassert(!writerActive.exchange(true, std::memory_order_acquire));
+    jassert(!convo::exchangeAtomic(writerActive, true, std::memory_order_acquire));
 
     if (!convolverStateGeneration.isCurrentGeneration(newState->generationId))
     {
         juce::Logger::writeToLog("ConvolverProcessor::updateConvolverState: stale generation, discarding state (gen="
             + juce::String((int)newState->generationId) + ")");
         delete newState;
-        writerActive.store(false, std::memory_order_release);
+        convo::publishAtomic(writerActive, false, std::memory_order_release);
         return;
     }
 
     rcuSwapper.swap(newState);
-    convolverState.store(const_cast<convo::ConvolverState*>(newState), std::memory_order_release);
+    convo::publishAtomic(convolverState, newState, std::memory_order_release);
     convo::EpochManager::instance().advanceEpoch();
 
-    writerActive.store(false, std::memory_order_release);
+    convo::publishAtomic(writerActive, false, std::memory_order_release);
 }
 
 void ConvolverProcessor::updateConvolverState(std::unique_ptr<convo::ConvolverState> newState)

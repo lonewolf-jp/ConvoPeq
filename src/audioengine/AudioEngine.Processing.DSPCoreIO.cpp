@@ -131,7 +131,7 @@ inline void pushAdaptiveCaptureBlocks(LockFreeRingBuffer<AudioBlock, 4096>* capt
                 block.R[i] = srcR[i];
         }))
         {
-            dropCount.fetch_add(1, std::memory_order_relaxed);
+            dropCount.fetch_add(1, std::memory_order_acq_rel);
         }
     }
 }

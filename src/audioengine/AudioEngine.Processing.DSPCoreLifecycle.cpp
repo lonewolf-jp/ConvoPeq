@@ -24,7 +24,7 @@ namespace
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_PREPARE)
 
 AudioEngine::DSPCore::DSPCore()
-    : runtimeUuid(g_dspRuntimeUuidCounter.fetch_add(1, std::memory_order_relaxed))
+    : runtimeUuid(g_dspRuntimeUuidCounter.fetch_add(1, std::memory_order_acq_rel))
     , dcBlockerState(new DCBlockerRuntimeState())
     , convolverState(new ConvolverRuntimeState())
     , eqState(new EQRuntimeState())
@@ -99,10 +99,8 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     if (newRequired > alignedCapacity || !alignedL || !alignedR)
     {
         // Exception-safe allocation using local ScopedAlignedPtr
-        auto newL = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
-            static_cast<size_t>(newRequired) * sizeof(double), 64)));
-        auto newR = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
-            static_cast<size_t>(newRequired) * sizeof(double), 64)));
+        auto newL = convo::makeAlignedArray<double>(static_cast<size_t>(newRequired));
+        auto newR = convo::makeAlignedArray<double>(static_cast<size_t>(newRequired));
 
         // 明示的ゼロクリア（Denormal/NaN防止）
         juce::FloatVectorOperations::clear(newL.get(), newRequired);
@@ -116,10 +114,8 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
 
     if (newRequired > dryBypassCapacityDouble || !dryBypassBufferDoubleL || !dryBypassBufferDoubleR)
     {
-        auto newDryL = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
-            static_cast<size_t>(newRequired) * sizeof(double), 64)));
-        auto newDryR = convo::ScopedAlignedPtr<double>(static_cast<double*>(convo::aligned_malloc(
-            static_cast<size_t>(newRequired) * sizeof(double), 64)));
+        auto newDryL = convo::makeAlignedArray<double>(static_cast<size_t>(newRequired));
+        auto newDryR = convo::makeAlignedArray<double>(static_cast<size_t>(newRequired));
         juce::FloatVectorOperations::clear(newDryL.get(), newRequired);
         juce::FloatVectorOperations::clear(newDryR.get(), newRequired);
         dryBypassBufferDoubleL = std::move(newDryL);

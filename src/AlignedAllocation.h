@@ -83,6 +83,36 @@ private:
 template <typename T>
 using ScopedAlignedArray = ScopedAlignedPtr<T>;
 
+template <typename T>
+struct AlignedObjectDeleter
+{
+    void operator()(T* ptr) const noexcept
+    {
+        if (ptr == nullptr)
+            return;
+        ptr->~T();
+        aligned_free(ptr);
+    }
+};
+
+template <typename T>
+using aligned_unique_ptr = std::unique_ptr<T, AlignedObjectDeleter<T>>;
+
+template <typename T, typename... Args>
+inline aligned_unique_ptr<T> aligned_make_unique(Args&&... args)
+{
+    void* mem = aligned_malloc(sizeof(T), 64);
+    try
+    {
+        return aligned_unique_ptr<T>(new (mem) T(std::forward<Args>(args)...));
+    }
+    catch (...)
+    {
+        aligned_free(mem);
+        throw;
+    }
+}
+
 // 配列として使用する場合の推奨ファクトリ関数
 template <typename T>
 inline ScopedAlignedArray<T> makeAlignedArray(size_t count) {

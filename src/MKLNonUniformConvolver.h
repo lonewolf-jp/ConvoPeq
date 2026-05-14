@@ -48,8 +48,12 @@
 #include <ipp.h>       // IppsFFTSpec_R_64f (MKL DFTI の代替)
 #include <atomic>
 #include <memory>
+#include <optional>
+#include <functional>
 #include <JuceHeader.h>  // juce::nextPowerOfTwo, JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR
 #include "OutputFilter.h" // convo::HCMode, convo::LCMode
+
+#include "audioengine/AtomicAccess.h"
 
 #ifdef _DEBUG
 #define NUC_DEBUG_GUARDS 1
@@ -168,7 +172,7 @@ public:
     //----------------------------------------------------------
     // isReady  ─ いつでも呼び出し可
     //----------------------------------------------------------
-    bool isReady() const noexcept { return m_ready.load(std::memory_order_acquire); }
+    bool isReady() const noexcept { return convo::consumeAtomic(m_ready, std::memory_order_acquire); }
 
     //----------------------------------------------------------
     // areFftDescriptorsCommitted  ─ いつでも呼び出し可
@@ -220,13 +224,13 @@ private:
         //
         // fftSpec    : ippsFFTInit_R_64f が管理する共有プラン内スペック。
         //              Audio Thread からは Read-Only で参照 (スレッドセーフ)。
-        // fftPlanOwner: サイズ単位で共有される FFT plan の所有権。
+        // fftPlanOwner: サイズ単位キャッシュへの非所有参照。
         // fftWorkBuf : 各 FFT 計算呼び出しが使用するスクラッチバッファ。
         //              ippsFFTGetSize_R_64f が sizeWork > 0 を返した場合のみ確保。
         //              sizeWork == 0 の場合 nullptr のまま (IPP が外部バッファ不要)。
         //              ★ Audio Thread での確保を防ぐため SetImpulse() で事前確保済み。
         //                 nullptr かつ sizeWork==0 の場合のみ IPP に nullptr を渡してよい。
-        std::shared_ptr<const IppFFTPlan> fftPlanOwner; ///< 共有 FFT plan (サイズ単位キャッシュ)
+        std::optional<std::reference_wrapper<const IppFFTPlan>> fftPlanOwner; ///< FFT plan 参照 (サイズ単位キャッシュ)
         IppsFFTSpec_R_64f* fftSpec    = nullptr; ///< IPP FFT スペック (共有 plan 内を指す)
         Ipp8u*             fftWorkBuf = nullptr; ///< FFT スクラッチ (sizeWork==0なら nullptr)
         bool               descriptorCommitted = false; ///< IPP 初期化成功フラグ

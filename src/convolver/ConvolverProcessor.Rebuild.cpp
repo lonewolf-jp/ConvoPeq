@@ -2,6 +2,8 @@
 #include "ConvolverProcessor.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 
+#include "audioengine/AtomicAccess.h"
+
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_REBUILD)
 
 // ────────────────────────────────────────────────────────────────
@@ -10,7 +12,7 @@
 
 void ConvolverProcessor::rebuildAllIRs()
 {
-    if (isIRLoaded() && !isLoading.load())
+    if (isIRLoaded() && !convo::consumeAtomic(isLoading))
     {
         loadImpulseResponse(juce::File(), false);
     }
@@ -18,7 +20,7 @@ void ConvolverProcessor::rebuildAllIRs()
 
 void ConvolverProcessor::postCoalescedChangeNotification()
 {
-    if (changeNotificationPending.exchange(true, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(changeNotificationPending, true, std::memory_order_acq_rel))
         return;
 
     auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
@@ -26,7 +28,7 @@ void ConvolverProcessor::postCoalescedChangeNotification()
     {
         if (auto* self = weakThis.get())
         {
-            self->changeNotificationPending.store(false, std::memory_order_release);
+            convo::publishAtomic(self->changeNotificationPending, false, std::memory_order_release);
             self->sendChangeMessage();
         }
     };
@@ -35,28 +37,28 @@ void ConvolverProcessor::postCoalescedChangeNotification()
     if (!queued)
     {
         if (auto* self = weakThis.get())
-            self->changeNotificationPending.store(false, std::memory_order_release);
+            convo::publishAtomic(self->changeNotificationPending, false, std::memory_order_release);
     }
 }
 
 void ConvolverProcessor::requestDebouncedRebuild()
 {
-    debugDebouncedRebuildRequestCount.fetch_add(1, std::memory_order_relaxed);
+    debugDebouncedRebuildRequestCount.fetch_add(1, std::memory_order_acq_rel);
 
     if (!isIRLoaded())
     {
-        if (isLoading.load(std::memory_order_acquire) || isRebuilding.load(std::memory_order_acquire))
+        if (convo::consumeAtomic(isLoading, std::memory_order_acquire) || convo::consumeAtomic(isRebuilding, std::memory_order_acquire))
         {
-            debugDebouncedRebuildDeferredAfterLoadCount.fetch_add(1, std::memory_order_relaxed);
-            rebuildPendingAfterLoad.store(true, std::memory_order_release);
+            debugDebouncedRebuildDeferredAfterLoadCount.fetch_add(1, std::memory_order_acq_rel);
+            convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release);
         }
         return;
     }
 
     if (!isIRFinalized())
     {
-        debugDebouncedRebuildDeferredAfterLoadCount.fetch_add(1, std::memory_order_relaxed);
-        rebuildPendingAfterLoad.store(true, std::memory_order_release);
+        debugDebouncedRebuildDeferredAfterLoadCount.fetch_add(1, std::memory_order_acq_rel);
+        convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release);
         return;
     }
 
@@ -65,24 +67,24 @@ void ConvolverProcessor::requestDebouncedRebuild()
 
     const int debounceMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS,
                                         REBUILD_DEBOUNCE_MAX_MS,
-                                        rebuildDebounceMs.load(std::memory_order_acquire));
+                                        convo::consumeAtomic(rebuildDebounceMs, std::memory_order_acquire));
 
     juce::Timer::callAfterDelay(debounceMs, [weakThis, token]()
     {
         if (auto* self = weakThis.get())
         {
-            if (self->rebuildDebounceToken.load(std::memory_order_acquire) != token)
+            if (convo::consumeAtomic(self->rebuildDebounceToken, std::memory_order_acquire) != token)
                 return;
 
-            if (!self->isIRLoaded() || self->isLoading.load(std::memory_order_acquire))
+            if (!self->isIRLoaded() || convo::consumeAtomic(self->isLoading, std::memory_order_acquire))
                 return;
 
-            self->debugDebouncedRebuildTriggeredCount.fetch_add(1, std::memory_order_relaxed);
+            self->debugDebouncedRebuildTriggeredCount.fetch_add(1, std::memory_order_acq_rel);
             self->loadImpulseResponse(juce::File());
         }
     });
 
-    debugDebouncedRebuildScheduledCount.fetch_add(1, std::memory_order_relaxed);
+    debugDebouncedRebuildScheduledCount.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
@@ -114,10 +116,10 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
 
         auto runLegacyPath = [&]()
         {
-            const double processingSampleRate = currentSampleRate.load(std::memory_order_acquire);
-            LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, currentBufferSize.load(std::memory_order_acquire), getPhaseMode(),
-                        mixedTransitionStartHz.load(std::memory_order_acquire), mixedTransitionEndHz.load(std::memory_order_acquire),
-                        mixedPreRingTau.load(std::memory_order_acquire), currentIRScale.load(std::memory_order_acquire));
+            const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+            LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), getPhaseMode(),
+                        convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire), convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire),
+                        convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire), convo::consumeAtomic(currentIRScale, std::memory_order_acquire));
             loader.externalCancellationCheck = shouldCancel;
             loader.runSynchronously();
         };
@@ -187,18 +189,18 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
 
     if (!job.loaderInitialized)
     {
-        const double processingSampleRate = currentSampleRate.load(std::memory_order_acquire);
+        const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         job.incrementalLoader = std::make_unique<LoaderThread>(
             *this,
             *(job.preparedIR),
             job.preparedSampleRate,
             processingSampleRate,
-            currentBufferSize.load(std::memory_order_acquire),
+            convo::consumeAtomic(currentBufferSize, std::memory_order_acquire),
             getPhaseMode(),
-            mixedTransitionStartHz.load(std::memory_order_acquire),
-            mixedTransitionEndHz.load(std::memory_order_acquire),
-            mixedPreRingTau.load(std::memory_order_acquire),
-            currentIRScale.load(std::memory_order_acquire));
+            convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire),
+            convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire),
+            convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire),
+            convo::consumeAtomic(currentIRScale, std::memory_order_acquire));
         job.incrementalLoader->externalCancellationCheck = job.shouldCancel;
         job.loaderInitialized = true;
     }
@@ -276,12 +278,12 @@ bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
         return false;
     }
 
-    auto loadedIRShared = std::make_shared<juce::AudioBuffer<double>>(std::move(job.pendingLoadedIR));
-    auto displayIRShared = std::make_shared<juce::AudioBuffer<double>>(std::move(job.pendingDisplayIR));
+    auto loadedIR = std::make_unique<juce::AudioBuffer<double>>(std::move(job.pendingLoadedIR));
+    auto displayIR = std::make_unique<juce::AudioBuffer<double>>(std::move(job.pendingDisplayIR));
     StereoConvolver *conv = std::exchange(job.pendingConv, nullptr);
 
-    applyNewState(conv, loadedIRShared, job.pendingLoadedSR, job.pendingTargetLength,
-                  job.pendingIsRebuild, job.pendingFile, job.pendingScaleFactor, displayIRShared);
+    applyNewState(conv, std::move(loadedIR), job.pendingLoadedSR, job.pendingTargetLength,
+                  job.pendingIsRebuild, job.pendingFile, job.pendingScaleFactor, std::move(displayIR));
 
     job.finalizeApplied = true;
     job.lastError.clear();
@@ -293,14 +295,14 @@ bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
 void ConvolverProcessor::setUseIncrementalRebuild(bool enable) noexcept
 {
     juce::ignoreUnused(enable);
-    useIncrementalRebuild.store(false, std::memory_order_release);
+    convo::publishAtomic(useIncrementalRebuild, false, std::memory_order_release);
     if (rebuildJob)
         rebuildJob->reset();
 }
 
 bool ConvolverProcessor::isIncrementalRebuildEnabled() const noexcept
 {
-    return useIncrementalRebuild.load(std::memory_order_acquire);
+    return convo::consumeAtomic(useIncrementalRebuild, std::memory_order_acquire);
 }
 
 void ConvolverProcessor::invalidatePendingLoads()

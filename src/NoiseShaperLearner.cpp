@@ -1,8 +1,8 @@
 #include "NoiseShaperLearner.h"
 #include "AudioEngine.h"
 #include "core/ThreadAffinityManager.h"
-
 #include <JuceHeader.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -50,24 +50,24 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
     // lastSaveTime の初期化（コンストラクタ本体で行う）
       captureQueue(captureQueueRef)
 {
-    const size_t populationBytes = static_cast<size_t>(CmaEsOptimizer::kPopulation * CmaEsOptimizer::kDim) * sizeof(double);
-    const size_t fitnessBytes = static_cast<size_t>(CmaEsOptimizer::kPopulation) * sizeof(double);
+    const size_t populationCount = static_cast<size_t>(CmaEsOptimizer::kPopulation * CmaEsOptimizer::kDim);
+    const size_t fitnessCount = static_cast<size_t>(CmaEsOptimizer::kPopulation);
 
-    convo::ScopedAlignedPtr<double> populationBuffer(static_cast<double*>(convo::aligned_malloc(populationBytes, 64)));
-    convo::ScopedAlignedPtr<double> fitnessBuffer(static_cast<double*>(convo::aligned_malloc(fitnessBytes, 64)));
+    auto populationBuffer = convo::makeAlignedArray<double>(populationCount);
+    auto fitnessBuffer = convo::makeAlignedArray<double>(fitnessCount);
     jassert(populationBuffer.get() != nullptr && fitnessBuffer.get() != nullptr);
     if (populationBuffer.get() == nullptr || fitnessBuffer.get() == nullptr)
     {
         DBG_LOG("[NoiseShaperLearner] failed to allocate candidate buffers");
-        errorMessage.store("Failed to allocate candidate buffers", std::memory_order_release);
-        progress.status.store(Status::Error, std::memory_order_release);
+        convo::publishAtomic(errorMessage, "Failed to allocate candidate buffers", std::memory_order_release);
+        convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
         return;
     }
     candidatePopulation = std::move(populationBuffer);
     candidateFitness = std::move(fitnessBuffer);
 
     for (auto& c : bestCoefficients)
-        c.store(0.0, std::memory_order_relaxed);
+        convo::publishAtomic(c, 0.0, std::memory_order_release);
 
     const unsigned int hardwareThreadCount = std::thread::hardware_concurrency();
     lastSaveTime = std::chrono::steady_clock::now();
@@ -80,7 +80,10 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
 
 NoiseShaperLearner::~NoiseShaperLearner()
 {
-    stopRequested.store(true, std::memory_order_release);
+    // Transition:
+    // Running/Starting -> Stopping
+    convo::publishAtomic(workerState, WorkerState::Stopping, std::memory_order_release);
+    convo::publishAtomic(stopRequested, true, std::memory_order_release);
     {
         const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
         evaluationWorkersShouldExit = true;
@@ -88,9 +91,11 @@ NoiseShaperLearner::~NoiseShaperLearner()
     evaluationDispatchCv.notify_all();
 
     if (workerThread.joinable())
-        workerThread.join();
+        workerThread.request_stop();
 
-    pendingRestart.store(false, std::memory_order_release);
+    // Transition:
+    // Stopping -> Idle
+    convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
 }
 
 void NoiseShaperLearner::startLearning(bool resume)
@@ -98,13 +103,13 @@ void NoiseShaperLearner::startLearning(bool resume)
     if (candidatePopulationMatrix() == nullptr || candidateFitnessData() == nullptr)
     {
         DBG_LOG("[NoiseShaperLearner] startLearning aborted: candidate buffers unavailable");
-        errorMessage.store("Candidate buffers unavailable", std::memory_order_release);
-        progress.status.store(Status::Error, std::memory_order_release);
+        convo::publishAtomic(errorMessage, "Candidate buffers unavailable", std::memory_order_release);
+        convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
         return;
     }
 
     // 前回セッション残骸のクリーンアップ
-    if (isRunning() || workerThread.joinable() || !workerThreadFinished.load(std::memory_order_acquire))
+    if (isRunning() || workerThread.joinable() || convo::consumeAtomic(workerState, std::memory_order_acquire) != WorkerState::Idle)
     {
         stopLearning();
         if (workerThread.joinable())
@@ -112,34 +117,34 @@ void NoiseShaperLearner::startLearning(bool resume)
     }
 
     // 全フラグを明示リセット
-    workerThreadFinished.store(true, std::memory_order_release);
-    pendingRestart.store(false, std::memory_order_release);
-    startRequested.store(false, std::memory_order_release);
-    stopRequested.store(false, std::memory_order_release);
-    errorMessage.store(nullptr, std::memory_order_release);
+    convo::publishAtomic(stopRequested, false, std::memory_order_release);
+    convo::publishAtomic(errorMessage, nullptr, std::memory_order_release);
 
-    bool expectedStartRequested = false;
-    if (!startRequested.compare_exchange_strong(expectedStartRequested, true,
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_relaxed))
+    WorkerState expectedState = WorkerState::Idle;
+    // Transition:
+    // Idle -> Starting
+    if (!convo::compareExchangeAtomic(workerState,
+                                      expectedState,
+                                      WorkerState::Starting,
+                                      std::memory_order_acq_rel,
+                                      std::memory_order_acquire))
     {
         return;
     }
 
-    pendingResume.store(resume, std::memory_order_release);
-    workerThreadFinished.store(false, std::memory_order_release);
+    convo::publishAtomic(pendingResume, resume, std::memory_order_release);
 
-    progress.status.store(Status::WaitingForAudio, std::memory_order_release);
-    progress.iteration.store(0, std::memory_order_relaxed);
-    progress.segmentCount.store(0, std::memory_order_relaxed);
-    progress.bestScore.store(0.0, std::memory_order_relaxed);
-    progress.latestScore.store(0.0, std::memory_order_relaxed);
-    progress.elapsedPlaybackSeconds.store(0.0, std::memory_order_relaxed);
-    progress.currentPhase.store(1, std::memory_order_relaxed);
+    convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
+    convo::publishAtomic(progress.iteration, 0, std::memory_order_release);
+    convo::publishAtomic(progress.segmentCount, 0, std::memory_order_release);
+    convo::publishAtomic(progress.bestScore, 0.0, std::memory_order_release);
+    convo::publishAtomic(progress.latestScore, 0.0, std::memory_order_release);
+    convo::publishAtomic(progress.elapsedPlaybackSeconds, 0.0, std::memory_order_release);
+    convo::publishAtomic(progress.currentPhase, 1, std::memory_order_release);
     accumulatedPlaybackSeconds = 0.0;
     currentPhase = 1;
     segmentBuffer.clear();
-    historyCount.store(0, std::memory_order_release);
+    convo::publishAtomic(historyCount, 0, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(historyMutex);
         bestScoreHistory.fill(0.0);
@@ -147,44 +152,48 @@ void NoiseShaperLearner::startLearning(bool resume)
     }
 
     activeMode = pendingMode;
-    progress.learningMode.store(static_cast<int>(activeMode), std::memory_order_relaxed);
+    convo::publishAtomic(progress.learningMode, static_cast<int>(activeMode), std::memory_order_release);
     lastGenerationStart = std::chrono::steady_clock::time_point{};
     applyPhaseParams(activeMode, currentPhase);
 
     try
     {
-        workerThread = std::thread(&NoiseShaperLearner::workerThreadMain, this);
+        workerThread = std::jthread([this](std::stop_token)
+        {
+            workerThreadMain();
+        });
     }
     catch (const std::exception&)
     {
         DBG_LOG("[NoiseShaperLearner] failed to start worker thread");
-        errorMessage.store("Failed to start learning thread", std::memory_order_release);
-        progress.status.store(Status::Error, std::memory_order_release);
-        startRequested.store(false, std::memory_order_release);
-        workerThreadFinished.store(true, std::memory_order_release);
+        convo::publishAtomic(errorMessage, "Failed to start learning thread", std::memory_order_release);
+        convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
+        convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
     }
     catch (...)
     {
-        errorMessage.store("Unknown error starting worker thread", std::memory_order_release);
-        progress.status.store(Status::Error, std::memory_order_release);
-        startRequested.store(false, std::memory_order_release);
-        workerThreadFinished.store(true, std::memory_order_release);
+        convo::publishAtomic(errorMessage, "Unknown error starting worker thread", std::memory_order_release);
+        convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
+        convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
     }
 }
 
 void NoiseShaperLearner::stopLearning()
 {
-    stopRequested.store(true, std::memory_order_release);
+    // Transition:
+    // Running/Starting -> Stopping
+    convo::publishAtomic(workerState, WorkerState::Stopping, std::memory_order_release);
+    convo::publishAtomic(stopRequested, true, std::memory_order_release);
     stopEvaluationWorkers();
     if (workerThread.joinable())
-        workerThread.join();
+        workerThread.request_stop();
 
-    workerThreadFinished.store(true, std::memory_order_release);
-    startRequested.store(false, std::memory_order_release);
-    pendingRestart.store(false, std::memory_order_release);
-    pendingResume.store(false, std::memory_order_release);
-    progress.status.store(Status::Idle, std::memory_order_release);
-    errorMessage.store(nullptr, std::memory_order_release);
+    // Transition:
+    // Stopping -> Idle
+    convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
+    convo::publishAtomic(pendingResume, false, std::memory_order_release);
+    convo::publishAtomic(progress.status, Status::Idle, std::memory_order_release);
+    convo::publishAtomic(errorMessage, nullptr, std::memory_order_release);
 
     evaluationDispatchCv.notify_all();
 }
@@ -192,12 +201,12 @@ void NoiseShaperLearner::stopLearning()
 void NoiseShaperLearner::setLearningMode(LearningMode mode) noexcept
 {
     pendingMode = mode;
-    modeSwitchRequested.store(true, std::memory_order_release);
+    convo::publishAtomic(modeSwitchRequested, true, std::memory_order_release);
 
     if (!isRunning())
     {
         activeMode = mode;
-        progress.learningMode.store(static_cast<int>(activeMode), std::memory_order_relaxed);
+        convo::publishAtomic(progress.learningMode, static_cast<int>(activeMode), std::memory_order_release);
     }
 }
 
@@ -295,7 +304,7 @@ void NoiseShaperLearner::applyPhaseParams(LearningMode mode, int phase) noexcept
 
 void NoiseShaperLearner::handleModeSwitch() noexcept
 {
-    if (!modeSwitchRequested.load(std::memory_order_acquire))
+    if (!convo::consumeAtomic(modeSwitchRequested, std::memory_order_acquire))
         return;
 
     // Save current state to AudioEngine
@@ -307,7 +316,7 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
     engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
 
     activeMode = pendingMode;
-    progress.learningMode.store(static_cast<int>(activeMode), std::memory_order_relaxed);
+    convo::publishAtomic(progress.learningMode, static_cast<int>(activeMode), std::memory_order_release);
 
     // Load new state from AudioEngine
     bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, activeMode);
@@ -324,28 +333,28 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
         optimizer.initFromParcor(initialCoefficients);
 
         for (int i = 0; i < kOrder; ++i)
-            bestCoefficients[static_cast<size_t>(i)].store(initialCoefficients[i], std::memory_order_relaxed);
+            convo::publishAtomic(bestCoefficients[static_cast<size_t>(i)], initialCoefficients[i], std::memory_order_release);
 
         accumulatedPlaybackSeconds = 0.0;
-        progress.iteration.store(0, std::memory_order_relaxed);
-        progress.bestScore.store(0.0, std::memory_order_relaxed);
-        progress.latestScore.store(0.0, std::memory_order_relaxed);
-        progress.processCount.store(0, std::memory_order_relaxed);
-        progress.totalGenerations.store(0, std::memory_order_relaxed);
+        convo::publishAtomic(progress.iteration, 0, std::memory_order_release);
+        convo::publishAtomic(progress.bestScore, 0.0, std::memory_order_release);
+        convo::publishAtomic(progress.latestScore, 0.0, std::memory_order_release);
+        convo::publishAtomic(progress.processCount, 0, std::memory_order_release);
+        convo::publishAtomic(progress.totalGenerations, 0, std::memory_order_release);
     }
 
     // 現在の再生時間に基づいてフェーズを再計算し、パラメータを適用
     currentPhase = computePhase(activeMode, accumulatedPlaybackSeconds);
-    progress.currentPhase.store(currentPhase, std::memory_order_relaxed);
+    convo::publishAtomic(progress.currentPhase, currentPhase, std::memory_order_release);
     applyPhaseParams(activeMode, currentPhase);
 
-    modeSwitchRequested.store(false, std::memory_order_release);
+    convo::publishAtomic(modeSwitchRequested, false, std::memory_order_release);
 }
 
 bool NoiseShaperLearner::isRunning() const noexcept
 {
-    return progress.status.load(std::memory_order_acquire) == Status::Running
-        || progress.status.load(std::memory_order_acquire) == Status::WaitingForAudio;
+    return convo::consumeAtomic(progress.status, std::memory_order_acquire) == Status::Running
+        || convo::consumeAtomic(progress.status, std::memory_order_acquire) == Status::WaitingForAudio;
 }
 
 const NoiseShaperLearner::Progress& NoiseShaperLearner::getProgress() const noexcept
@@ -357,37 +366,37 @@ void NoiseShaperLearner::getState(State& outState) const noexcept
 {
     optimizer.serializeTo(outState.mean, outState.covarianceUpperTriangle, outState.sigma);
     for (int i = 0; i < kOrder; ++i)
-        outState.bestCoefficients[i] = bestCoefficients[i].load(std::memory_order_relaxed);
+        outState.bestCoefficients[i] = convo::consumeAtomic(bestCoefficients[i], std::memory_order_acquire);
     outState.elapsedPlaybackSeconds = accumulatedPlaybackSeconds;
     outState.currentPhase = currentPhase;
-    outState.iteration = progress.iteration.load(std::memory_order_relaxed);
-    outState.bestScore = progress.bestScore.load(std::memory_order_relaxed);
-    outState.processCount = progress.processCount.load(std::memory_order_relaxed);
-    outState.totalGenerations = progress.totalGenerations.load(std::memory_order_relaxed);
+    outState.iteration = convo::consumeAtomic(progress.iteration, std::memory_order_acquire);
+    outState.bestScore = convo::consumeAtomic(progress.bestScore, std::memory_order_acquire);
+    outState.processCount = convo::consumeAtomic(progress.processCount, std::memory_order_acquire);
+    outState.totalGenerations = convo::consumeAtomic(progress.totalGenerations, std::memory_order_acquire);
 }
 
 void NoiseShaperLearner::setState(const State& inState) noexcept
 {
     optimizer.deserializeFrom(inState.mean, inState.covarianceUpperTriangle, inState.sigma);
     for (int i = 0; i < kOrder; ++i)
-        bestCoefficients[i].store(inState.bestCoefficients[i], std::memory_order_relaxed);
+        convo::publishAtomic(bestCoefficients[i], inState.bestCoefficients[i], std::memory_order_release);
     accumulatedPlaybackSeconds = inState.elapsedPlaybackSeconds;
     currentPhase = inState.currentPhase;
-    progress.iteration.store(inState.iteration, std::memory_order_relaxed);
-    progress.bestScore.store(inState.bestScore, std::memory_order_relaxed);
-    progress.elapsedPlaybackSeconds.store(accumulatedPlaybackSeconds, std::memory_order_relaxed);
-    progress.currentPhase.store(currentPhase, std::memory_order_relaxed);
-    progress.processCount.store(inState.processCount, std::memory_order_relaxed);
-    progress.totalGenerations.store(inState.totalGenerations, std::memory_order_relaxed);
+    convo::publishAtomic(progress.iteration, inState.iteration, std::memory_order_release);
+    convo::publishAtomic(progress.bestScore, inState.bestScore, std::memory_order_release);
+    convo::publishAtomic(progress.elapsedPlaybackSeconds, accumulatedPlaybackSeconds, std::memory_order_release);
+    convo::publishAtomic(progress.currentPhase, currentPhase, std::memory_order_release);
+    convo::publishAtomic(progress.processCount, inState.processCount, std::memory_order_release);
+    convo::publishAtomic(progress.totalGenerations, inState.totalGenerations, std::memory_order_release);
 }
 
-int NoiseShaperLearner::copyBestScoreHistory(double* destination, int maxPoints) const noexcept
+int NoiseShaperLearner::copyBestScoreHistory(double* destination, int maxPoints) noexcept
 {
     if (destination == nullptr || maxPoints <= 0)
         return 0;
 
     const std::scoped_lock<std::mutex> lock(historyMutex);
-    const int count = historyCount.load(std::memory_order_acquire);
+    const int count = convo::consumeAtomic(historyCount, std::memory_order_acquire);
     const int available = std::min(count, maxPoints);
     if (available <= 0)
         return 0;
@@ -437,8 +446,8 @@ void NoiseShaperLearner::startEvaluationWorkers()
     {
         const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
         evaluationWorkersShouldExit = false;
-        completedAuxEvaluationWorkers.store(0, std::memory_order_seq_cst);
-        evaluationDispatchSerial.store(0, std::memory_order_seq_cst);
+        convo::publishAtomic(completedAuxEvaluationWorkers, 0, std::memory_order_seq_cst);
+        convo::publishAtomic(evaluationDispatchSerial, 0, std::memory_order_seq_cst);
     }
 
     for (int workerIndex = 1; workerIndex < activeEvaluationWorkerCount; ++workerIndex)
@@ -446,19 +455,22 @@ void NoiseShaperLearner::startEvaluationWorkers()
         auto& slot = evaluationWorkers[static_cast<size_t>(workerIndex)];
         try
         {
-            slot.thread = std::thread(&NoiseShaperLearner::evaluationWorkerMain, this, workerIndex);
+            slot.thread = std::jthread([this, workerIndex](std::stop_token)
+            {
+                evaluationWorkerMain(workerIndex);
+            });
         }
         catch (const std::exception&)
         {
             DBG_LOG("[NoiseShaperLearner] failed to start evaluation worker");
-            errorMessage.store("Failed to start evaluation worker", std::memory_order_release);
-            progress.status.store(Status::Error, std::memory_order_release);
+            convo::publishAtomic(errorMessage, "Failed to start evaluation worker", std::memory_order_release);
+            convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
             break;
         }
         catch (...)
         {
-            errorMessage.store("Unknown error starting evaluation worker", std::memory_order_release);
-            progress.status.store(Status::Error, std::memory_order_release);
+            convo::publishAtomic(errorMessage, "Unknown error starting evaluation worker", std::memory_order_release);
+            convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
             break;
         }
     }
@@ -520,7 +532,7 @@ void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
                 std::unique_lock<std::mutex> lock(evaluationDispatchMutex);
                 evaluationDispatchCv.wait(lock, [&]
                 {
-                    return evaluationWorkersShouldExit || evaluationDispatchSerial.load(std::memory_order_acquire) != observedDispatchSerial;
+                    return evaluationWorkersShouldExit || convo::consumeAtomic(evaluationDispatchSerial, std::memory_order_acquire) != observedDispatchSerial;
                 });
 
                 if (evaluationWorkersShouldExit)
@@ -542,8 +554,8 @@ void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
         catch (const std::exception&)
         {
             DBG_LOG("[NoiseShaperLearner] evaluation worker exception");
-            errorMessage.store("Evaluation worker exception", std::memory_order_release);
-            progress.status.store(Status::Error, std::memory_order_release);
+            convo::publishAtomic(errorMessage, "Evaluation worker exception", std::memory_order_release);
+            convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
             {
                 const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
                 ++completedAuxEvaluationWorkers;
@@ -553,8 +565,8 @@ void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
         }
         catch (...)
         {
-            errorMessage.store("Error in evaluation worker", std::memory_order_release);
-            progress.status.store(Status::Error, std::memory_order_release);
+            convo::publishAtomic(errorMessage, "Error in evaluation worker", std::memory_order_release);
+            convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
             {
                 const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
                 ++completedAuxEvaluationWorkers;
@@ -583,7 +595,7 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
                reinterpret_cast<const double*>(population),
                tanhBuffer);
 
-        const double safetyMargin = settings.coeffSafetyMargin.load(std::memory_order_relaxed);
+        const double safetyMargin = convo::consumeAtomic(settings.coeffSafetyMargin, std::memory_order_acquire);
         for (int p = 0; p < CmaEsOptimizer::kPopulation; ++p)
             for (int d = 0; d < CmaEsOptimizer::kDim; ++d)
                 mappedPopulation[p][d] = LatticeNoiseShaper::clampCoeff(
@@ -591,7 +603,7 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
                     safetyMargin);
     }
 
-    while (!stopRequested.load(std::memory_order_acquire))
+    while (!convo::consumeAtomic(stopRequested, std::memory_order_acquire))
     {
         const int populationIndex = nextEvaluationCandidateIndex.fetch_add(1, std::memory_order_acq_rel);
         if (populationIndex >= CmaEsOptimizer::kPopulation)
@@ -611,16 +623,16 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
                                            int& bestCandidateIndex,
                                            double& bestCandidateScore)
 {
-    if (stopRequested.load(std::memory_order_acquire))
+    if (convo::consumeAtomic(stopRequested, std::memory_order_acquire))
         return 0;
 
-    nextEvaluationCandidateIndex.store(0, std::memory_order_seq_cst);
+    convo::publishAtomic(nextEvaluationCandidateIndex, 0, std::memory_order_seq_cst);
 
     {
         const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
         pendingEvaluationSegmentCount = numSegments;
         pendingEvaluationBitDepth = evaluationBitDepth;
-        completedAuxEvaluationWorkers.store(0, std::memory_order_seq_cst);
+        convo::publishAtomic(completedAuxEvaluationWorkers, 0, std::memory_order_seq_cst);
         evaluationDispatchSerial.fetch_add(1, std::memory_order_release);
     }
 
@@ -634,12 +646,12 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
         std::unique_lock<std::mutex> lock(evaluationDispatchMutex);
         evaluationDispatchCv.wait(lock, [this]
         {
-            return completedAuxEvaluationWorkers.load(std::memory_order_acquire) >= activeAuxEvaluationWorkerCount
-                || stopRequested.load(std::memory_order_acquire);
+            return convo::consumeAtomic(completedAuxEvaluationWorkers, std::memory_order_acquire) >= activeAuxEvaluationWorkerCount
+                || convo::consumeAtomic(stopRequested, std::memory_order_acquire);
         });
     }
 
-    const int evaluatedCandidates = std::min(nextEvaluationCandidateIndex.load(std::memory_order_seq_cst),
+    const int evaluatedCandidates = std::min(convo::consumeAtomic(nextEvaluationCandidateIndex, std::memory_order_seq_cst),
                                              CmaEsOptimizer::kPopulation);
 
     bestCandidateIndex = 0;
@@ -656,7 +668,7 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
     const int numElitesToReevaluate = std::min(3, evaluatedCandidates);
     for (int i = 0; i < numElitesToReevaluate; ++i)
     {
-        if (stopRequested.load(std::memory_order_acquire))
+        if (convo::consumeAtomic(stopRequested, std::memory_order_acquire))
             break;
 
         const int idx = sortedIndices[i];
@@ -670,7 +682,7 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
     // Final pass to find the best
     for (int populationIndex = 0; populationIndex < evaluatedCandidates; ++populationIndex)
     {
-        if (stopRequested.load(std::memory_order_acquire))
+        if (convo::consumeAtomic(stopRequested, std::memory_order_acquire))
             break;
 
         const double score = candidateFitnessData()[populationIndex];
@@ -686,6 +698,9 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
 
 void NoiseShaperLearner::workerThreadMain()
 {
+    // Transition:
+    // Starting -> Running
+    convo::publishAtomic(workerState, WorkerState::Running, std::memory_order_release);
     engine.getAffinityManager().applyCurrentThreadPolicy(ThreadType::LearnerMain);
 
     // FTZ/DAZ をスレッド開始時に設定する。
@@ -697,7 +712,7 @@ void NoiseShaperLearner::workerThreadMain()
 
     try
     {
-        progress.status.store(Status::WaitingForAudio, std::memory_order_release);
+        convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
 
         try
         {
@@ -708,25 +723,25 @@ void NoiseShaperLearner::workerThreadMain()
             // 後処理で一貫して終了させる
         }
         SessionSignature activeSession = captureSessionSignature();
-        bool resume = pendingResume.exchange(false, std::memory_order_acquire);
+        bool resume = convo::exchangeAtomic(pendingResume, false, std::memory_order_acquire);
         resetLearningSession(activeSession, resume);
 
         // ============================================================================
         // 【追加】Multi-start ロジック
         // 初回起動時（resumeでない場合）かつ設定が有効な場合、複数のシードで試行
         // ============================================================================
-        if (!resume && settings.cmaesRestarts.load() > 1)
+        if (!resume && convo::consumeAtomic(settings.cmaesRestarts) > 1)
         {
-            progress.status.store(Status::WaitingForAudio, std::memory_order_release);
+            convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
 
             // 評価に必要なセグメントが溜まるまで待機
-            while (segmentBuffer.getNumAvailableSamples() < kRecentSampleRequest && !stopRequested.load())
+            while (segmentBuffer.getNumAvailableSamples() < kRecentSampleRequest && !convo::consumeAtomic(stopRequested))
             {
                 drainCaptureQueue(activeSession);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
-            if (!stopRequested.load())
+            if (!convo::consumeAtomic(stopRequested))
             {
                 const int segmentCount = buildTrainingSegments();
                 if (segmentCount >= 2)
@@ -739,10 +754,10 @@ void NoiseShaperLearner::workerThreadMain()
 
                     const int evaluationBitDepth = engine.getDitherBitDepth() > 0 ? engine.getDitherBitDepth() : 24;
 
-                    int restarts = settings.cmaesRestarts.load();
+                    int restarts = convo::consumeAtomic(settings.cmaesRestarts);
                     for (int restartIdx = 0; restartIdx < restarts; ++restartIdx)
                     {
-                        if (stopRequested.load()) break;
+                        if (convo::consumeAtomic(stopRequested)) break;
 
                         // 初期状態に戻してからシードを変える
                         setState(initialState);
@@ -778,14 +793,14 @@ void NoiseShaperLearner::workerThreadMain()
         double bestScore = std::numeric_limits<double>::max();
         int generation = 0;
 
-        while (!stopRequested.load(std::memory_order_acquire))
+        while (!convo::consumeAtomic(stopRequested, std::memory_order_acquire))
         {
             const auto thisGenerationStart = std::chrono::steady_clock::now();
 
             // インターバル待機（start-to-start）
             if (generationIntervalSeconds > 0.0 && lastGenerationStart != std::chrono::steady_clock::time_point{}) {
                 auto next = lastGenerationStart + std::chrono::duration<double>(generationIntervalSeconds);
-                while (std::chrono::steady_clock::now() < next && !stopRequested.load(std::memory_order_acquire))
+                while (std::chrono::steady_clock::now() < next && !convo::consumeAtomic(stopRequested, std::memory_order_acquire))
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             lastGenerationStart = thisGenerationStart;
@@ -796,7 +811,7 @@ void NoiseShaperLearner::workerThreadMain()
             const int newPhase = computePhase(activeMode, accumulatedPlaybackSeconds);
             if (newPhase != currentPhase) {
                 currentPhase = newPhase;
-                progress.currentPhase.store(currentPhase, std::memory_order_relaxed);
+                convo::publishAtomic(progress.currentPhase, currentPhase, std::memory_order_release);
                 applyPhaseParams(activeMode, newPhase);
             }
 
@@ -814,16 +829,16 @@ void NoiseShaperLearner::workerThreadMain()
             drainCaptureQueue(activeSession);
 
             const int segmentCount = buildTrainingSegments();
-            progress.segmentCount.store(segmentCount, std::memory_order_relaxed);
+            convo::publishAtomic(progress.segmentCount, segmentCount, std::memory_order_release);
 
             if (segmentCount < 2)
             {
-                progress.status.store(Status::WaitingForAudio, std::memory_order_release);
+                convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
 
-            progress.status.store(Status::Running, std::memory_order_release);
+            convo::publishAtomic(progress.status, Status::Running, std::memory_order_release);
             optimizer.sample(candidatePopulationMatrix());
 
             int bestCandidateIndex = 0;
@@ -834,7 +849,7 @@ void NoiseShaperLearner::workerThreadMain()
                                                                bestCandidateIndex,
                                                                bestCandidateScore);
 
-            if (stopRequested.load(std::memory_order_acquire))
+            if (convo::consumeAtomic(stopRequested, std::memory_order_acquire))
                 break;
 
             if (evaluatedCandidates < 1)
@@ -863,12 +878,12 @@ void NoiseShaperLearner::workerThreadMain()
 
             if (bestCandidateScore < std::numeric_limits<double>::max())
             {
-                progress.latestScore.store(bestCandidateScore, std::memory_order_relaxed);
+                convo::publishAtomic(progress.latestScore, bestCandidateScore, std::memory_order_release);
                 appendHistoryPoint(bestCandidateScore);
             }
 
-            progress.iteration.store(generation + 1, std::memory_order_relaxed);
-            progress.totalGenerations.fetch_add(1, std::memory_order_relaxed);
+            convo::publishAtomic(progress.iteration, generation + 1, std::memory_order_release);
+            progress.totalGenerations.fetch_add(1, std::memory_order_acq_rel);
             ++generation;
 
             // 終了条件の判定
@@ -885,40 +900,41 @@ void NoiseShaperLearner::workerThreadMain()
 
             if (accumulatedPlaybackSeconds >= targetSeconds)
             {
-                progress.status.store(Status::Completed, std::memory_order_release);
+                convo::publishAtomic(progress.status, Status::Completed, std::memory_order_release);
                 break;
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 
-        if (progress.status.load(std::memory_order_acquire) != Status::Completed)
-            progress.status.store(Status::Idle, std::memory_order_release);
+        if (convo::consumeAtomic(progress.status, std::memory_order_acquire) != Status::Completed)
+            convo::publishAtomic(progress.status, Status::Idle, std::memory_order_release);
     }
     catch (const std::exception&)
     {
         DBG_LOG("[NoiseShaperLearner] worker thread exception");
-        errorMessage.store("Worker thread exception", std::memory_order_release);
-        progress.status.store(Status::Error, std::memory_order_release);
+        convo::publishAtomic(errorMessage, "Worker thread exception", std::memory_order_release);
+        convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
     }
     catch (...)
     {
-        errorMessage.store("Error in worker thread", std::memory_order_release);
-        progress.status.store(Status::Error, std::memory_order_release);
+        convo::publishAtomic(errorMessage, "Error in worker thread", std::memory_order_release);
+        convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
     }
 
     stopEvaluationWorkers();
-    workerThreadFinished.store(true, std::memory_order_release);
-    startRequested.store(false, std::memory_order_release);
+    // Transition:
+    // Running/Stopping -> Idle
+    convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
 }
 
 NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature() const noexcept
 {
     SessionSignature session;
-    session.sampleRateHz = static_cast<int>(engine.currentSampleRate.load(std::memory_order_acquire) + 0.5);
+    session.sampleRateHz = static_cast<int>(convo::consumeAtomic(engine.currentSampleRate, std::memory_order_acquire) + 0.5);
     session.bitDepth = engine.getDitherBitDepth();
-    session.adaptiveCoeffBankIndex = engine.currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire);
-    if (auto* dsp = engine.currentDSP.load(std::memory_order_acquire))
+    session.adaptiveCoeffBankIndex = convo::consumeAtomic(engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+    if (auto* dsp = engine.loadCurrentDSP())
         session.sessionId = dsp->currentCaptureSessionId;
     return session;
 }
@@ -930,19 +946,19 @@ void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, b
     if (!resume)
     {
         accumulatedPlaybackSeconds = 0.0;
-        historyCount.store(0, std::memory_order_release);
+        convo::publishAtomic(historyCount, 0, std::memory_order_release);
         {
             const std::scoped_lock<std::mutex> lock(historyMutex);
             bestScoreHistory.fill(0.0);
             historyHead = 0;
         }
-        progress.iteration.store(0, std::memory_order_relaxed);
-        progress.segmentCount.store(0, std::memory_order_relaxed);
-        progress.bestScore.store(0.0, std::memory_order_relaxed);
-        progress.latestScore.store(0.0, std::memory_order_relaxed);
+        convo::publishAtomic(progress.iteration, 0, std::memory_order_release);
+        convo::publishAtomic(progress.segmentCount, 0, std::memory_order_release);
+        convo::publishAtomic(progress.bestScore, 0.0, std::memory_order_release);
+        convo::publishAtomic(progress.latestScore, 0.0, std::memory_order_release);
     }
 
-    progress.status.store(Status::WaitingForAudio, std::memory_order_release);
+    convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
 
     const double sessionSampleRateVal = session.sampleRateHz > 0
         ? static_cast<double>(session.sampleRateHz)
@@ -985,7 +1001,7 @@ void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, b
             optimizer.initFromParcor(initialCoefficients);
 
             for (int i = 0; i < kOrder; ++i)
-                bestCoefficients[static_cast<size_t>(i)].store(initialCoefficients[i], std::memory_order_relaxed);
+                convo::publishAtomic(bestCoefficients[static_cast<size_t>(i)], initialCoefficients[i], std::memory_order_release);
         }
     }
 }
@@ -1008,7 +1024,7 @@ void NoiseShaperLearner::drainCaptureQueue(const SessionSignature& session) noex
             accumulatedPlaybackSeconds += static_cast<double>(block.numSamples) / session.sampleRateHz;
         }
     }
-    progress.elapsedPlaybackSeconds.store(accumulatedPlaybackSeconds, std::memory_order_relaxed);
+    convo::publishAtomic(progress.elapsedPlaybackSeconds, accumulatedPlaybackSeconds, std::memory_order_release);
 }
 
 int NoiseShaperLearner::buildTrainingSegments() noexcept
@@ -1100,7 +1116,7 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
     for (int i = 0; i < kOrder; ++i)
     {
         const double k = std::tanh(candidateCoefficients[i]);
-        mappedCoeffs[static_cast<size_t>(i)] = LatticeNoiseShaper::clampCoeff(k, settings.coeffSafetyMargin.load());
+        mappedCoeffs[static_cast<size_t>(i)] = LatticeNoiseShaper::clampCoeff(k, convo::consumeAtomic(settings.coeffSafetyMargin));
     }
 
     return evaluateCandidateMapped(context, mappedCoeffs.data(), numSegments, evaluationBitDepth);
@@ -1114,7 +1130,7 @@ double NoiseShaperLearner::evaluateCandidateMapped(EvaluationContext& context,
     juce::ScopedNoDenormals noDenormals;
 
     // 【追加】安定性チェック（有効な場合）
-    if (settings.enableStabilityCheck.load())
+    if (convo::consumeAtomic(settings.enableStabilityCheck))
     {
         if (!LatticeNoiseShaper::isStable(mappedCoefficients, kOrder))
             return 1e18; // 不安定な場合は巨大なペナルティを返す
@@ -1134,7 +1150,7 @@ double NoiseShaperLearner::evaluateCandidateMapped(EvaluationContext& context,
         double levelScoreSum = 0.0;
         for (int j = 0; j < count; ++j)
         {
-            if (stopRequested.load(std::memory_order_acquire))
+            if (convo::consumeAtomic(stopRequested, std::memory_order_acquire))
                 break;
 
             const auto& leveled = levelBuckets[i][j];
@@ -1212,15 +1228,15 @@ void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, do
 bool NoiseShaperLearner::saveLearnedState(const juce::File& file) const
 {
     juce::XmlElement xml("ConvoPeqLearnedState");
-    xml.setAttribute("bestScore", progress.bestScore.load());
+    xml.setAttribute("bestScore", convo::consumeAtomic(progress.bestScore));
     xml.setAttribute("sampleRate", this->sessionSampleRate);
     xml.setAttribute("bitDepth", this->sessionBitDepth);
-    xml.setAttribute("phase", progress.currentPhase.load());
-    xml.setAttribute("elapsedPlaybackSeconds", progress.elapsedPlaybackSeconds.load());
+    xml.setAttribute("phase", convo::consumeAtomic(progress.currentPhase));
+    xml.setAttribute("elapsedPlaybackSeconds", convo::consumeAtomic(progress.elapsedPlaybackSeconds));
 
     auto* coeffsXml = xml.createNewChildElement("BestCoefficients");
     for (int i = 0; i < kOrder; ++i)
-        coeffsXml->setAttribute("c" + juce::String(i), bestCoefficients[i].load());
+        coeffsXml->setAttribute("c" + juce::String(i), convo::consumeAtomic(bestCoefficients[i]));
 
     auto* cmaXml = xml.createNewChildElement("CmaMean");
     State state;
@@ -1244,14 +1260,14 @@ bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
     if (std::abs(savedSampleRate - sessionSampleRate) > 0.1 || savedBitDepth != sessionBitDepth)
         return false;
 
-    progress.bestScore.store(xml->getDoubleAttribute("bestScore"));
-    progress.currentPhase.store(xml->getIntAttribute("phase"));
-    progress.elapsedPlaybackSeconds.store(xml->getDoubleAttribute("elapsedPlaybackSeconds"));
+    convo::publishAtomic(progress.bestScore, xml->getDoubleAttribute("bestScore"));
+    convo::publishAtomic(progress.currentPhase, xml->getIntAttribute("phase"));
+    convo::publishAtomic(progress.elapsedPlaybackSeconds, xml->getDoubleAttribute("elapsedPlaybackSeconds"));
 
     if (auto* coeffsXml = xml->getChildByName("BestCoefficients"))
     {
         for (int i = 0; i < kOrder; ++i)
-            bestCoefficients[i].store(coeffsXml->getDoubleAttribute("c" + juce::String(i)));
+            convo::publishAtomic(bestCoefficients[i], coeffsXml->getDoubleAttribute("c" + juce::String(i)));
     }
 
     if (auto* cmaXml = xml->getChildByName("CmaMean"))
@@ -1276,10 +1292,10 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
     {
         const double k = std::tanh(coeffs[i]);
         mappedCoeffs[static_cast<size_t>(i)] = k;
-        bestCoefficients[static_cast<size_t>(i)].store(k, std::memory_order_relaxed);
+        convo::publishAtomic(bestCoefficients[static_cast<size_t>(i)], k, std::memory_order_release);
     }
 
-    progress.bestScore.store(score, std::memory_order_relaxed);
+    convo::publishAtomic(progress.bestScore, score, std::memory_order_release);
 
     // 非同期保存（間隔制限付き）
     const auto now = std::chrono::steady_clock::now();
@@ -1297,11 +1313,11 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
         getState(snapshot);
 
         juce::WeakReference<NoiseShaperLearner> weakSelf(this);
-        saveThreadPool.addJob([weakSelf, filePath, snapshot]() mutable
+        saveThreadPool.addJob([weakSelf, filePath, snapshot]()
         {
             if (auto* self = weakSelf.get())
                 if (!self->saveLearnedState(juce::File(filePath)))
-                    self->errorMessage.store("Failed to save learned state", std::memory_order_release);
+                    convo::publishAtomic(self->errorMessage, "Failed to save learned state", std::memory_order_release);
         });
     }
 
@@ -1313,11 +1329,11 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
     // Capture bank info
     const double sr = engine.getSampleRate();
     const int bd = engine.getDitherBitDepth();
-    const auto currentMode = static_cast<LearningMode>(progress.learningMode.load(std::memory_order_relaxed));
+    const auto currentMode = static_cast<LearningMode>(convo::consumeAtomic(progress.learningMode, std::memory_order_acquire));
     const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, currentMode);
 
     juce::WeakReference<NoiseShaperLearner> weakSelf(this);
-    juce::MessageManager::callAsync([weakSelf, mappedCoeffs, currentState, bankIndex]() mutable
+    juce::MessageManager::callAsync([weakSelf, mappedCoeffs, currentState, bankIndex]()
     {
         if (auto* self = weakSelf.get())
         {
@@ -1333,17 +1349,17 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
 void NoiseShaperLearner::appendHistoryPoint(double score) noexcept
 {
     const std::scoped_lock<std::mutex> lock(historyMutex);
-    const int count = historyCount.load(std::memory_order_relaxed);
+    const int count = convo::consumeAtomic(historyCount, std::memory_order_acquire);
     if (count < kMaxHistoryPoints)
     {
         bestScoreHistory[static_cast<size_t>(historyHead)] = score;
         historyHead = (historyHead + 1) % kMaxHistoryPoints;
-        historyCount.store(count + 1, std::memory_order_release);
+        convo::publishAtomic(historyCount, count + 1, std::memory_order_release);
     }
     else
     {
         bestScoreHistory[static_cast<size_t>(historyHead)] = score;
         historyHead = (historyHead + 1) % kMaxHistoryPoints;
-        historyCount.store(kMaxHistoryPoints, std::memory_order_release);
+        convo::publishAtomic(historyCount, kMaxHistoryPoints, std::memory_order_release);
     }
 }

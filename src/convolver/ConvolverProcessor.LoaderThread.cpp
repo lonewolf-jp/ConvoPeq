@@ -6,6 +6,8 @@
 #include "AlignedAllocation.h"
 #include <mkl.h>
 
+#include "audioengine/AtomicAccess.h"
+
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD)
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
@@ -30,8 +32,8 @@ ConvolverProcessor::LoaderThread::~LoaderThread()
 
 void ConvolverProcessor::LoaderThread::run()
 {
-    if (owner.rcuProvider != nullptr)
-        owner.rcuProvider->getAffinityManager().applyCurrentThreadPolicy(ThreadType::HeavyBackground);
+    if (auto* provider = owner.getRcuProvider(); provider != nullptr)
+        provider->getAffinityManager().applyCurrentThreadPolicy(ThreadType::HeavyBackground);
 
     juce::ScopedNoDenormals noDenormals;
 
@@ -50,8 +52,8 @@ void ConvolverProcessor::LoaderThread::run()
                 auto wp = weakP;
                 const bool queued = juce::MessageManager::callAsync([wp] {
                     if (auto* o = wp.get()) {
-                        o->isLoading.store(false);
-                        o->isRebuilding.store(false);
+                        convo::publishAtomic(o->isLoading, false);
+                        convo::publishAtomic(o->isRebuilding, false);
                     }
                 });
 
@@ -59,8 +61,8 @@ void ConvolverProcessor::LoaderThread::run()
                 {
                     if (auto* o = wp.get())
                     {
-                        o->isLoading.store(false);
-                        o->isRebuilding.store(false);
+                        convo::publishAtomic(o->isLoading, false);
+                        convo::publishAtomic(o->isRebuilding, false);
                     }
                 }
             }
@@ -203,8 +205,8 @@ bool ConvolverProcessor::LoaderThread::buildConvolverFromTrimmed(LoadResult& res
 
     const int irPeakLatency = estimatePeakLatencySamples(trimmed, result.targetLength);
 
-    convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
-    convo::ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(result.targetLength * sizeof(double), 64)));
+    auto irL = convo::makeAlignedArray<double>(static_cast<size_t>(result.targetLength));
+    auto irR = convo::makeAlignedArray<double>(static_cast<size_t>(result.targetLength));
 
     const double* srcL = trimmed.getReadPointer(0);
     const double* srcR = (trimmed.getNumChannels() > 1) ? trimmed.getReadPointer(1) : srcL;
@@ -252,20 +254,18 @@ bool ConvolverProcessor::LoaderThread::initializeConvolverSynchronously(LoadResu
                                                                          int firstPartition,
                                                                          int callBlockSize)
 {
-    void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
-    new (mem) StereoConvolver();
-    result.newConv = static_cast<StereoConvolver*>(mem);
+    auto newConv = convo::aligned_make_unique<StereoConvolver>();
 
-    if (result.newConv->init(irL.release(), irR.release(), result.targetLength, sr, irPeakLatency,
+    if (newConv->init(irL.release(), irR.release(), result.targetLength, sr, irPeakLatency,
                              maxFFTSize, internalBlockSize, firstPartition, callBlockSize, result.scaleFactor,
-                             owner.experimentalDirectHeadEnabled.load(std::memory_order_acquire),
+                             convo::consumeAtomic(owner.experimentalDirectHeadEnabled, std::memory_order_acquire),
                              nullptr, &owner))
     {
+        result.newConv = newConv.release();
         result.success = true;
         return true;
     }
 
-    owner.retireStereoConvolver(std::exchange(result.newConv, nullptr), 0);
     result.success = false;
     result.errorMessage = "Failed to initialize NUC engine (Memory allocation or MKL setup failed).";
     return false;
@@ -281,20 +281,16 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
                                                                      int firstPartition,
                                                                      int callBlockSize)
 {
-    struct AsyncState {
-        convo::ScopedAlignedPtr<double> irL;
-        convo::ScopedAlignedPtr<double> irR;
-        std::shared_ptr<juce::AudioBuffer<double>> loadedIR;
-        std::shared_ptr<juce::AudioBuffer<double>> displayIR;
-    };
+    auto loadedIRRaw = new juce::AudioBuffer<double>(std::move(result.loadedIR));
+    auto displayIRRaw = new juce::AudioBuffer<double>(std::move(result.displayIR));
+    auto irLRaw = irL.release();
+    auto irRRaw = irR.release();
 
-    auto state = std::make_shared<AsyncState>();
-    state->irL = std::move(irL);
-    state->irR = std::move(irR);
-    state->loadedIR = std::make_shared<juce::AudioBuffer<double>>(std::move(result.loadedIR));
-    state->displayIR = std::make_shared<juce::AudioBuffer<double>>(std::move(result.displayIR));
-
-    const bool queued = juce::MessageManager::callAsync([weakOwner = this->weakOwner, state,
+    const bool queued = juce::MessageManager::callAsync([weakOwner = this->weakOwner,
+                                     irLRaw,
+                                     irRRaw,
+                                     loadedIRRaw,
+                                     displayIRRaw,
                                      length = result.targetLength,
                                      sr,
                                      peak = irPeakLatency,
@@ -304,19 +300,29 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
                                      callQ = callBlockSize,
                                      isReb = isRebuild,
                                      file = file,
-                                     scale = result.scaleFactor]() mutable
+                                     scale = result.scaleFactor]()
     {
+        convo::ScopedAlignedPtr<double> irLHolder(irLRaw);
+        convo::ScopedAlignedPtr<double> irRHolder(irRRaw);
+        std::unique_ptr<juce::AudioBuffer<double>> loadedIRHolder(loadedIRRaw);
+        std::unique_ptr<juce::AudioBuffer<double>> displayIRHolder(displayIRRaw);
+
         if (auto* ownerPtr = weakOwner.get())
         {
-            ownerPtr->finalizeNUCEngineOnMessageThread(std::move(state->irL),
-                                                       std::move(state->irR),
+            ownerPtr->finalizeNUCEngineOnMessageThread(std::move(irLHolder),
+                                                       std::move(irRHolder),
                                                        length, sr, peak, maxFFT, known, first, callQ, isReb, file,
-                                                       scale, state->loadedIR, state->displayIR);
+                                                       scale, std::move(loadedIRHolder), std::move(displayIRHolder));
         }
     });
 
     if (!queued)
     {
+        convo::aligned_free(irLRaw);
+        convo::aligned_free(irRRaw);
+        delete loadedIRRaw;
+        delete displayIRRaw;
+
         juce::Logger::writeToLog("LoaderThread: callAsync failed, aborting IR load");
         result.errorMessage = "Internal message queue full, cannot complete IR load";
 
@@ -344,10 +350,10 @@ void ConvolverProcessor::LoaderThread::runSynchronously()
     {
         auto* conv = std::exchange(result.newConv, nullptr);
         stepResult.newConv = nullptr;
-        auto loadedIRShared = std::make_shared<juce::AudioBuffer<double>>(std::move(result.loadedIR));
-        auto displayIRShared = std::make_shared<juce::AudioBuffer<double>>(std::move(result.displayIR));
-        owner.applyNewState(conv, loadedIRShared, result.loadedSR, result.targetLength, isRebuild, file,
-                            result.scaleFactor, displayIRShared);
+        auto loadedIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.loadedIR));
+        auto displayIR = std::make_unique<juce::AudioBuffer<double>>(std::move(result.displayIR));
+        owner.applyNewState(conv, std::move(loadedIR), result.loadedSR, result.targetLength, isRebuild, file,
+                            result.scaleFactor, std::move(displayIR));
     }
     else
     {
@@ -438,8 +444,7 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
             return false;
         }
 
-        convo::ScopedAlignedPtr<double> tempAligned(static_cast<double*>(
-            convo::aligned_malloc(static_cast<size_t>(fileLength) * sizeof(double), 64)));
+        auto tempAligned = convo::makeAlignedArray<double>(static_cast<size_t>(fileLength));
         if (!tempAligned)
         {
             stepResult.errorMessage = "Failed to allocate temporary buffer for IR loading.";
@@ -669,7 +674,7 @@ bool ConvolverProcessor::LoaderThread::doTransformStep()
     {
         const IRState* currentState = owner.acquireIRState();
         auto currentIr = (currentState != nullptr) ? currentState->ir : nullptr;
-        const double currentScale = owner.currentIRScale.load(std::memory_order_acquire);
+        const double currentScale = convo::consumeAtomic(owner.currentIRScale, std::memory_order_acquire);
         const auto scaleInfo = IRConverter::computeScaleFactor(stepTrimmed, currentIr, currentScale);
         owner.releaseIRState(currentState);
 

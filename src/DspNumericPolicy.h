@@ -10,6 +10,8 @@
 #include <immintrin.h>
 #include <JuceHeader.h>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo::numeric_policy
 {
     enum class ThreadRole : uint8_t
@@ -59,10 +61,10 @@ namespace convo::numeric_policy
             for (size_t i = 0; i < g_audioThreadSlots.size(); ++i)
             {
                 auto& slot = g_audioThreadSlots[i];
-                const uint64_t existingTag = slot.tag.load(std::memory_order_acquire);
+                const uint64_t existingTag = convo::consumeAtomic(slot.tag, std::memory_order_acquire);
                 if (existingTag == tag)
                 {
-                    slot.depth.fetch_add(1, std::memory_order_acq_rel);
+                    convo::fetchAddAtomic(slot.depth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
                     slotIndex = static_cast<int>(i);
                     return;
                 }
@@ -72,9 +74,13 @@ namespace convo::numeric_policy
             {
                 auto& slot = g_audioThreadSlots[i];
                 uint64_t expected = 0;
-                if (slot.tag.compare_exchange_strong(expected, tag, std::memory_order_acq_rel, std::memory_order_acquire))
+                if (convo::compareExchangeAtomic(slot.tag,
+                                                 expected,
+                                                 tag,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire))
                 {
-                    slot.depth.store(1, std::memory_order_release);
+                    convo::publishAtomic(slot.depth, 1, std::memory_order_release);
                     slotIndex = static_cast<int>(i);
                     return;
                 }
@@ -87,11 +93,11 @@ namespace convo::numeric_policy
                 return;
 
             auto& slot = g_audioThreadSlots[static_cast<size_t>(slotIndex)];
-            const uint32_t previousDepth = slot.depth.fetch_sub(1, std::memory_order_acq_rel);
+            const uint32_t previousDepth = convo::fetchSubAtomic(slot.depth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
             if (previousDepth <= 1)
             {
-                slot.depth.store(0, std::memory_order_release);
-                slot.tag.store(0, std::memory_order_release);
+                convo::publishAtomic(slot.depth, 0, std::memory_order_release);
+                convo::publishAtomic(slot.tag, 0, std::memory_order_release);
             }
         }
 
@@ -104,7 +110,7 @@ namespace convo::numeric_policy
         const uint64_t tag = currentThreadTag();
         for (auto& slot : g_audioThreadSlots)
         {
-            if (slot.tag.load(std::memory_order_acquire) == tag)
+            if (convo::consumeAtomic(slot.tag, std::memory_order_acquire) == tag)
                 return true;
         }
         return false;

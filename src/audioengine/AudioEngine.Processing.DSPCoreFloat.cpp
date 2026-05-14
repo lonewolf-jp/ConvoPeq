@@ -134,6 +134,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
                                    std::atomic<float>& outputLevelLinear,
                                    const ProcessingState& state)
 {
+    (void) inputLevelLinear;
+    (void) outputLevelLinear;
+
     const int numSamples = bufferToFill.numSamples;
 
     if (numSamples > maxSamplesPerBlock)
@@ -159,7 +162,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
 
-    inputLevelLinear.store(rawInputLinear, std::memory_order_relaxed);
+    (void) rawInputLinear;
 
     juce::dsp::AudioBlock<double> originalBlock = processBlock;
 
@@ -194,10 +197,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         const uint64_t hash = snap->eqCoeffHash;
         eqParamsToUse = &snap->eqParams;
         eqCacheToUse = ownerEngine->eqCacheManager.get(hash);
-        if (hash != ownerEngine->debugLastAppliedEqHash.load(std::memory_order_relaxed))
+        if (hash != convo::consumeAtomic(ownerEngine->debugLastAppliedEqHash, std::memory_order_acquire))
         {
-            ownerEngine->debugLastAppliedEqHash.store(hash, std::memory_order_relaxed);
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
+            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_acq_rel);
         }
     }
     else if (ownerEngine != nullptr)
@@ -206,10 +208,9 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         const convo::EQParameters& fallbackParams = ownerEngine->getLatestEqParamsFallback(fallbackHash);
         eqParamsToUse = &fallbackParams;
         eqCacheToUse = ownerEngine->eqCacheManager.get(fallbackHash);
-        if (fallbackHash != 0 && fallbackHash != ownerEngine->debugLastAppliedEqHash.load(std::memory_order_relaxed))
+        if (fallbackHash != 0 && fallbackHash != convo::consumeAtomic(ownerEngine->debugLastAppliedEqHash, std::memory_order_acquire))
         {
-            ownerEngine->debugLastAppliedEqHash.store(fallbackHash, std::memory_order_relaxed);
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
+            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_acq_rel);
         }
     }
 
@@ -307,12 +308,12 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         pushToFifo(processBlock, analyzerFifo);
 
     const float outputLinear = measureLevel(originalBlock);
-    outputLevelLinear.store(outputLinear, std::memory_order_relaxed);
+    (void) outputLinear;
 
     processOutput(bufferToFill, numSamples, state);
 
     auto& ramp = ramps();
-    int fadeLeft = ramp.fadeInSamplesLeft.load(std::memory_order_relaxed);
+    int fadeLeft = ramp.fadeInSamplesLeft;
     if (fadeLeft > 0)
     {
         const int rampThisBlock = std::min(numSamples, fadeLeft);
@@ -325,7 +326,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         for (int ch = 0; ch < numChannels; ++ch)
             applyGainRamp(buffer->getWritePointer(ch, startSample), rampThisBlock, startGain, gainStep);
 
-        ramp.fadeInSamplesLeft.store(fadeLeft - rampThisBlock, std::memory_order_relaxed);
+        ramp.fadeInSamplesLeft = fadeLeft - rampThisBlock;
     }
 }
 

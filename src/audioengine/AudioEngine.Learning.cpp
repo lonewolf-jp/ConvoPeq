@@ -9,10 +9,10 @@ void AudioEngine::startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, 
     if (noiseShaperLearner == nullptr)
         return;
 
-    pendingLearningMode.store(mode, std::memory_order_release);
+    convo::publishAtomic(pendingLearningMode, mode, std::memory_order_release);
     selectAdaptiveCoeffBankForCurrentSettings();
 
-    if (noiseShaperType.load(std::memory_order_acquire) != NoiseShaperType::Adaptive9thOrder)
+    if (convo::consumeAtomic(noiseShaperType, std::memory_order_acquire) != NoiseShaperType::Adaptive9thOrder)
         setNoiseShaperType(NoiseShaperType::Adaptive9thOrder);
 
     const LearningCommand cmd {
@@ -38,7 +38,7 @@ void AudioEngine::stopNoiseShaperLearning()
     const LearningCommand cmd {
         LearningCommand::Type::Stop,
         false,
-        pendingLearningMode.load(std::memory_order_acquire),
+        convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire),
         pendingIRGeneration
     };
 
@@ -61,10 +61,10 @@ void AudioEngine::resetLearningControlState() noexcept
     learningCommandRead = 0;
     learnerDispatchWrite = 0;
     learnerDispatchRead = 0;
-    learnerDispatchOverflow.store(false, std::memory_order_release);
-    lastFailedAction.store(LearnerDispatchAction {}, std::memory_order_release);
+    convo::publishAtomic(learnerDispatchOverflow, false, std::memory_order_release);
+    convo::publishAtomic(lastFailedAction, LearnerDispatchAction {}, std::memory_order_release);
     learningRuntimeState = LearningRuntimeState::Idle;
-    requestedLearningMode = pendingLearningMode.load(std::memory_order_acquire);
+    requestedLearningMode = convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire);
     requestedLearningResume = false;
     requestedLearningGeneration = pendingIRGeneration;
     currentIRGeneration = pendingIRGeneration;
@@ -99,11 +99,11 @@ void AudioEngine::processDeferredLearningActions()
 
 void AudioEngine::processLearningCommands() noexcept
 {
-    if (learnerDispatchOverflow.load(std::memory_order_acquire))
+    if (convo::consumeAtomic(learnerDispatchOverflow, std::memory_order_acquire))
     {
-        const LearnerDispatchAction last = lastFailedAction.load(std::memory_order_acquire);
+        const LearnerDispatchAction last = convo::consumeAtomic(lastFailedAction, std::memory_order_acquire);
         if (enqueueLearnerDispatch(last))
-            learnerDispatchOverflow.store(false, std::memory_order_release);
+            convo::publishAtomic(learnerDispatchOverflow, false, std::memory_order_release);
     }
 
     LearningCommand cmd;
@@ -117,8 +117,10 @@ void AudioEngine::processLearningCommands() noexcept
                 requestedLearningResume = cmd.resume;
                 requestedLearningGeneration = cmd.irGeneration;
 
-                const auto* runtimeGraph = getRuntimeGraphState();
-                auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+                const auto* world = getRuntimePublishWorld();
+                const auto* engineRuntime = getEngineRuntimeState(world);
+                const auto* runtimeGraph = getRuntimeGraphState(world);
+                auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
                 // irGeneration チェックを削除: DSP が有効かつ型が適切であれば即座に学習開始可能
                 const bool dspReady = (dsp != nullptr)
                     && (dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder);
@@ -264,7 +266,7 @@ namespace
 
 void AudioEngine::setNoiseShaperLearningMode(convo::NoiseShaperLearningMode mode)
 {
-    pendingLearningMode.store(mode, std::memory_order_release);
+    convo::publishAtomic(pendingLearningMode, mode, std::memory_order_release);
     selectAdaptiveCoeffBankForCurrentSettings();
     if (noiseShaperLearner)
         noiseShaperLearner->setLearningMode(mode);
@@ -367,15 +369,15 @@ const AudioEngine::AdaptiveCoeffBankSlot& AudioEngine::getAdaptiveCoeffBankForIn
 
 void AudioEngine::selectAdaptiveCoeffBankForCurrentSettings() noexcept
 {
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
-    const int bd   = ditherBitDepth.load(std::memory_order_acquire);
-    const auto mode = pendingLearningMode.load(std::memory_order_acquire);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    const int bd   = convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire);
+    const auto mode = convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire);
 
     const int newBankIndex = getAdaptiveCoeffBankIndex(sr, bd, mode);
 
-    if (newBankIndex != currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire))
+    if (newBankIndex != convo::consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire))
     {
-        currentAdaptiveCoeffBankIndex.store(newBankIndex, std::memory_order_release);
+        convo::publishAtomic(currentAdaptiveCoeffBankIndex, newBankIndex, std::memory_order_release);
 
         if (noiseShaperLearner)
         {
@@ -393,13 +395,13 @@ void AudioEngine::getCurrentAdaptiveCoefficients(double* outCoeffs, int maxCoeff
         return;
 
     const auto& bank = getAdaptiveCoeffBankForIndex(
-        currentAdaptiveCoeffBankIndex.load(std::memory_order_acquire));
+        convo::consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire));
 
     for (int retry = 0; retry < 3; ++retry)
     {
-        const uint32_t genBefore = bank.generation.load(std::memory_order_acquire);
+        const uint32_t genBefore = convo::consumeAtomic(bank.generation, std::memory_order_acquire);
         const auto* coeffSet = AudioEngine::getActiveCoeffSet(bank);
-        const uint32_t genAfter = bank.generation.load(std::memory_order_acquire);
+        const uint32_t genAfter = convo::consumeAtomic(bank.generation, std::memory_order_acquire);
 
         if (genBefore == genAfter)
         {
@@ -420,9 +422,9 @@ void AudioEngine::getAdaptiveCoefficientsForSampleRate(double sampleRate, double
 
     for (int retry = 0; retry < 3; ++retry)
     {
-        const uint32_t genBefore = bank.generation.load(std::memory_order_acquire);
+        const uint32_t genBefore = convo::consumeAtomic(bank.generation, std::memory_order_acquire);
         const auto* coeffSet = AudioEngine::getActiveCoeffSet(bank);
-        const uint32_t genAfter = bank.generation.load(std::memory_order_acquire);
+        const uint32_t genAfter = convo::consumeAtomic(bank.generation, std::memory_order_acquire);
 
         if (genBefore == genAfter)
         {
@@ -461,15 +463,15 @@ void AudioEngine::getAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
     if (outCoeffs == nullptr || maxCoefficients <= 0)
         return;
 
-    const auto mode = pendingLearningMode.load(std::memory_order_acquire);
+    const auto mode = convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire);
     const int bank = getAdaptiveCoeffBankIndex(sampleRate, bitDepth, mode);
     const auto& slot = getAdaptiveCoeffBankForIndex(bank);
 
     for (int retry = 0; retry < 3; ++retry)
     {
-        const uint32_t genBefore = slot.generation.load(std::memory_order_acquire);
+        const uint32_t genBefore = convo::consumeAtomic(slot.generation, std::memory_order_acquire);
         const CoeffSet* active = AudioEngine::getActiveCoeffSet(slot);
-        const uint32_t genAfter = slot.generation.load(std::memory_order_acquire);
+        const uint32_t genAfter = convo::consumeAtomic(slot.generation, std::memory_order_acquire);
 
         if (genBefore == genAfter)
         {
@@ -499,7 +501,7 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
         return;
     }
 
-    const auto mode = pendingLearningMode.load(std::memory_order_acquire);
+    const auto mode = convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire);
     const int bankIndex = getAdaptiveCoeffBankIndex(sampleRate, bitDepth, mode);
     double stagedCoefficients[kAdaptiveNoiseShaperOrder] = {};
     getAdaptiveCoefficientsForSampleRateAndBitDepth(sampleRate, bitDepth, stagedCoefficients, kAdaptiveNoiseShaperOrder);
@@ -531,9 +533,9 @@ void AudioEngine::requestAdaptiveAutosave()
 
 void AudioEngine::publishCoeffs(const double* coeffs)
 {
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
-    const int bd  = ditherBitDepth.load(std::memory_order_acquire);
-    const auto mode = pendingLearningMode.load(std::memory_order_acquire);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    const int bd  = convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire);
+    const auto mode = convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire);
     const int bank = getAdaptiveCoeffBankIndex(sr, bd, mode);
 
     publishCoeffsToBank(bank, coeffs);
@@ -575,7 +577,6 @@ void AudioEngine::publishCoeffsToBank(int bankIndex, const double* coeffs)
 bool AudioEngine::getAdaptiveNoiseShaperState(int bankIndex, convo::NoiseShaperLearnerState& outState) const noexcept
 {
     const auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
-    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(bank.stateMutex));
     outState = bank.state;
     return true;
 }

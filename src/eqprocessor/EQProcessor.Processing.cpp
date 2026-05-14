@@ -9,6 +9,8 @@
 #include <cstring>
 #include "core/RCUReader.h"
 
+#include "audioengine/AtomicAccess.h"
+
 #if defined(__AVX2__) || defined(__FMA__)
  #include <immintrin.h>
 #endif
@@ -349,9 +351,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     auto* activeEqState = (boundExecutionState != nullptr) ? &boundExecutionState->eq : nullptr;
 
     // 係数の事前ロード（atomic、relaxedで十分）
-    const double attackCoeff = agcAttackCoeff.load(std::memory_order_relaxed);
-    const double releaseCoeff = agcReleaseCoeff.load(std::memory_order_relaxed);
-    const double smoothCoeff = agcSmoothCoeff.load(std::memory_order_relaxed);
+    const double attackCoeff = convo::consumeAtomic(agcAttackCoeff, std::memory_order_acquire);
+    const double releaseCoeff = convo::consumeAtomic(agcReleaseCoeff, std::memory_order_acquire);
+    const double smoothCoeff = convo::consumeAtomic(agcSmoothCoeff, std::memory_order_acquire);
 
     double blockAttackCoeff;
     double blockReleaseCoeff;
@@ -413,13 +415,13 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     // アトミック変数のロード
     double envIn = (activeEqState != nullptr)
         ? activeEqState->agcEnvInput
-        : agcEnvInput.load(std::memory_order_relaxed);
+        : convo::consumeAtomic(agcEnvInput, std::memory_order_acquire);
     double envOut = (activeEqState != nullptr)
         ? activeEqState->agcEnvOutput
-        : agcEnvOutput.load(std::memory_order_relaxed);
+        : convo::consumeAtomic(agcEnvOutput, std::memory_order_acquire);
     double currentGain = (activeEqState != nullptr)
         ? activeEqState->agcCurrentGain
-        : agcCurrentGain.load(std::memory_order_relaxed);
+        : convo::consumeAtomic(agcCurrentGain, std::memory_order_acquire);
 
     if (!isFiniteNoLibm(envIn))  envIn = 0.0;
     if (!isFiniteNoLibm(envOut)) envOut = 0.0;
@@ -452,9 +454,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     }
     else
     {
-        agcEnvInput.store(envIn, std::memory_order_relaxed);
-        agcEnvOutput.store(envOut, std::memory_order_relaxed);
-        agcCurrentGain.store(nextGain, std::memory_order_relaxed);
+        rtAgcEnvInputShadow = envIn;
+        rtAgcEnvOutputShadow = envOut;
+        rtAgcCurrentGainShadow = nextGain;
     }
 
     // ゲイン適用 (ランプ: currentGain -> nextGain)
@@ -505,17 +507,18 @@ bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block,
 //--------------------------------------------------------------
 void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
+    const auto* stateSnapshot = loadCurrentState(std::memory_order_acquire);
     auto* activeEqState = (boundExecutionState != nullptr) ? &boundExecutionState->eq : nullptr;
     convo::RCUReaderGuard guard((activeEqState != nullptr) ? activeEqState->rcuReader : rcuReader);
     // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
 
-    const bool requestedBypass = bypassRequested.load(std::memory_order_relaxed);
+    const bool requestedBypass = convo::consumeAtomic(bypassRequested, std::memory_order_acquire);
     auto* activeBypassRamp = (activeEqState != nullptr) ? &activeEqState->bypassFadeGain : nullptr;
     bool effectiveBypass = (activeEqState != nullptr)
         ? activeEqState->bypassed
-        : bypassed.load(std::memory_order_relaxed);
+        : rtBypassedShadow;
 
     const double targetBypassFade = requestedBypass ? 0.0 : 1.0;
     const double currentBypassTarget = (activeBypassRamp != nullptr)
@@ -525,10 +528,11 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     {
         if (!requestedBypass && effectiveBypass)
         {
-            bandResetMask.store(0xFFFFFFFFu, std::memory_order_relaxed);
+            rtDeferredBandResetMask |= 0xFFFFFFFFu;
             if (activeEqState != nullptr)
                 activeEqState->bypassed = false;
-            bypassed.store(false, std::memory_order_relaxed);
+            else
+                rtBypassedShadow = false;
         }
         if (activeBypassRamp != nullptr)
             activeBypassRamp->setTargetValue(targetBypassFade);
@@ -536,7 +540,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             bypassFadeGain.setTargetValue(targetBypassFade);
         effectiveBypass = (activeEqState != nullptr)
             ? activeEqState->bypassed
-            : bypassed.load(std::memory_order_relaxed);
+            : rtBypassedShadow;
     }
 
     const bool bypassTransitionActive = (activeBypassRamp != nullptr)
@@ -548,7 +552,8 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     {
         if (activeEqState != nullptr)
             activeEqState->bypassed = true;
-        bypassed.store(true, std::memory_order_relaxed);
+        else
+            rtBypassedShadow = true;
         effectiveBypass = true;
     }
 
@@ -606,7 +611,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
     if (numChannels <= 0)
         return;
-    const double saturation = static_cast<double>(nonlinearSaturation.load(std::memory_order_relaxed));
+    const double saturation = (stateSnapshot != nullptr)
+        ? static_cast<double>(stateSnapshot->nonlinearSaturation)
+        : 0.2;
     const bool canSafelyResetState = requestedBypass
                                      || effectiveBypass
                                      || bypassTransitionActive
@@ -628,25 +635,39 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // ── State Reset Handling ──
     // パラメータ変更に伴う状態リセット要求を処理
-    if (agcResetRequest.exchange(false, std::memory_order_relaxed))
+    const std::uint64_t agcResetSerialNow = convo::consumeAtomic(agcResetSerial, std::memory_order_acquire);
+    if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
-        agcCurrentGain.store(1.0, std::memory_order_relaxed);
-        agcEnvInput.store(0.0, std::memory_order_relaxed);
-        agcEnvOutput.store(0.0, std::memory_order_relaxed);
+        rtSeenAgcResetSerial = agcResetSerialNow;
         if (boundExecutionState != nullptr)
         {
             boundExecutionState->eq.agcCurrentGain = 1.0;
             boundExecutionState->eq.agcEnvInput = 0.0;
             boundExecutionState->eq.agcEnvOutput = 0.0;
         }
+        else
+        {
+            rtAgcCurrentGainShadow = 1.0;
+            rtAgcEnvInputShadow = 0.0;
+            rtAgcEnvOutputShadow = 0.0;
+        }
     }
 
-    uint32_t mask = bandResetMask.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
+    const std::uint64_t bandResetSerialNow = static_cast<std::uint64_t>(bandResetSerialFromPacked(bandResetPackedNow));
+    if (bandResetSerialNow != rtSeenBandResetSerial)
+    {
+        rtSeenBandResetSerial = bandResetSerialNow;
+        rtDeferredBandResetMask |= bandResetMaskFromPacked(bandResetPackedNow);
+    }
+
+    uint32_t mask = rtDeferredBandResetMask;
+    rtDeferredBandResetMask = 0;
     if (mask != 0)
     {
         if (!canSafelyResetState)
         {
-            bandResetMask.fetch_or(mask, std::memory_order_relaxed);
+            rtDeferredBandResetMask |= mask;
         }
         // 最適化: 全バンドリセットの場合は memset で一括クリア
         else if (mask == 0xFFFFFFFF)
@@ -664,7 +685,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     }
 
-    const bool isAgcEnabled = agcEnabled.load(std::memory_order_acquire);
+    const bool isAgcEnabled = (stateSnapshot != nullptr)
+        ? stateSnapshot->agcEnabled
+        : false;
     // ✅ フィルタ処理前に入力レベルをキャッシュ (AGCが有効な場合のみ)
     if (isAgcEnabled)
     {
@@ -694,11 +717,11 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     std::array<ActiveBandNode, NUM_BANDS> activeBands;
     int numActiveBands = 0;
 
-    // Note: bandNodes[] contains raw pointers. We assume they are valid during this block
+    // Note: bandNodeBits[] stores non-owning handles. We assume resolved nodes are valid during this block.
     // because deletion is deferred by EBR (reader epoch mechanism).
     for (int i = 0; i < NUM_BANDS; ++i)
     {
-        auto* node = bandNodes[i].load(std::memory_order_acquire);
+        auto* node = loadBandNode(i, std::memory_order_acquire);
         if (node && node->active)
         {
             activeBands[numActiveBands] = { node, i };
@@ -807,8 +830,10 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     auto activeMode = (activeEqState != nullptr)
         ? static_cast<FilterStructure>(activeEqState->activeStructure)
-        : activeStructure.load(std::memory_order_relaxed);
-    auto requestedMode = requestedStructure.load(std::memory_order_relaxed);
+        : rtActiveStructureShadow;
+    auto requestedMode = (stateSnapshot != nullptr)
+        ? static_cast<FilterStructure>(stateSnapshot->filterStructure)
+        : activeMode;
     const bool canUseParallelBuffers = (activeParallelInputBuffer != nullptr)
                                        && activeParallelBufferCapacity >= (numSamples * numChannels);
     const bool canUseStructureXfade = canUseParallelBuffers
@@ -863,7 +888,8 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
         if (activeEqState != nullptr)
             activeEqState->activeStructure = static_cast<int>(requestedMode);
-        activeStructure.store(requestedMode, std::memory_order_relaxed);
+        else
+            rtActiveStructureShadow = requestedMode;
     }
     else
     {
@@ -872,7 +898,8 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             activeMode = requestedMode;
             if (activeEqState != nullptr)
                 activeEqState->activeStructure = static_cast<int>(activeMode);
-            activeStructure.store(activeMode, std::memory_order_relaxed);
+            else
+                rtActiveStructureShadow = activeMode;
         }
 
         if (activeMode == FilterStructure::Serial || !canUseParallelBuffers)
@@ -903,7 +930,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         // 対策: ゲイン値はMessage Thread側でdBからlinearに変換し、
         // totalGainTarget (atomic<double>) で事前に渡す。
         // Audio Threadでは atomic load のみ行う。
-        const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
+        const double targetGain = convo::consumeAtomic(totalGainTarget, std::memory_order_acquire);
 
         auto* activeGainRamp = (activeEqState != nullptr) ? &activeEqState->smoothTotalGain : nullptr;
         const double gainTarget = (activeGainRamp != nullptr)
@@ -960,21 +987,15 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             {
                 if (activeEqState != nullptr)
                     activeEqState->bypassed = true;
-                bypassed.store(true, std::memory_order_relaxed);
-                if (activeBypassRamp != nullptr)
-                    activeBypassRamp->setCurrentAndTargetValue(0.0);
                 else
-                    bypassFadeGain.setCurrentAndTargetValue(0.0);
+                    rtBypassedShadow = true;
             }
             else
             {
                 if (activeEqState != nullptr)
                     activeEqState->bypassed = false;
-                bypassed.store(false, std::memory_order_relaxed);
-                if (activeBypassRamp != nullptr)
-                    activeBypassRamp->setCurrentAndTargetValue(1.0);
                 else
-                    bypassFadeGain.setCurrentAndTargetValue(1.0);
+                    rtBypassedShadow = false;
             }
         }
     }
@@ -987,14 +1008,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     auto* activeEqState = (boundExecutionState != nullptr) ? &boundExecutionState->eq : nullptr;
     const bool effectiveBypassed = (activeEqState != nullptr)
         ? activeEqState->bypassed
-        : bypassed.load(std::memory_order_relaxed);
+        : rtBypassedShadow;
     const bool bypassSmoothing = (activeEqState != nullptr)
         ? activeEqState->bypassFadeGain.isSmoothing()
         : bypassFadeGain.isSmoothing();
 
     // 既存バイパス遷移ロジックを維持するため、遷移中は既存パスへフォールバック
     if (coeffCache == nullptr
-        || bypassRequested.load(std::memory_order_relaxed)
+        || convo::consumeAtomic(bypassRequested, std::memory_order_acquire)
         || effectiveBypassed
         || bypassSmoothing)
     {
@@ -1033,20 +1054,34 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
         ? boundExecutionState->eq.parallelBufferCapacity
         : parallelBufferCapacity;
 
-    if (agcResetRequest.exchange(false, std::memory_order_relaxed))
+    const std::uint64_t agcResetSerialNow = convo::consumeAtomic(agcResetSerial, std::memory_order_acquire);
+    if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
-        agcCurrentGain.store(1.0, std::memory_order_relaxed);
-        agcEnvInput.store(0.0, std::memory_order_relaxed);
-        agcEnvOutput.store(0.0, std::memory_order_relaxed);
+        rtSeenAgcResetSerial = agcResetSerialNow;
         if (boundExecutionState != nullptr)
         {
             boundExecutionState->eq.agcCurrentGain = 1.0;
             boundExecutionState->eq.agcEnvInput = 0.0;
             boundExecutionState->eq.agcEnvOutput = 0.0;
         }
+        else
+        {
+            rtAgcCurrentGainShadow = 1.0;
+            rtAgcEnvInputShadow = 0.0;
+            rtAgcEnvOutputShadow = 0.0;
+        }
     }
 
-    uint32_t mask = bandResetMask.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
+    const std::uint64_t bandResetSerialNow = static_cast<std::uint64_t>(bandResetSerialFromPacked(bandResetPackedNow));
+    if (bandResetSerialNow != rtSeenBandResetSerial)
+    {
+        rtSeenBandResetSerial = bandResetSerialNow;
+        rtDeferredBandResetMask |= bandResetMaskFromPacked(bandResetPackedNow);
+    }
+
+    uint32_t mask = rtDeferredBandResetMask;
+    rtDeferredBandResetMask = 0;
     if (mask != 0)
     {
         if (isAudioBlockSilent(block, numChannels, numSamples))
@@ -1069,7 +1104,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
         }
         else
         {
-            bandResetMask.fetch_or(mask, std::memory_order_relaxed);
+            rtDeferredBandResetMask |= mask;
         }
     }
 
@@ -1223,7 +1258,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     }
     else
     {
-        const double targetGain = totalGainTarget.load(std::memory_order_relaxed);
+        const double targetGain = convo::consumeAtomic(totalGainTarget, std::memory_order_acquire);
         auto* activeGainRamp = (activeEqState != nullptr) ? &activeEqState->smoothTotalGain : nullptr;
         const double gainTarget = (activeGainRamp != nullptr)
             ? activeGainRamp->getTargetValue()

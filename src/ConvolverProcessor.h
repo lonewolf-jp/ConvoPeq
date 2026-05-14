@@ -31,6 +31,7 @@
 #include <deque>
 #include <map>
 #include <cmath>
+#include <optional>
 #include "AlignedAllocation.h"
 #include "MKLNonUniformConvolver.h"
 #include "AllpassDesigner.h"
@@ -189,7 +190,7 @@ public:
     ConvolverProcessor();
     ~ConvolverProcessor();
 
-    void setRcuProvider(AudioEngine* engine) noexcept { rcuProvider = engine; }
+    void setRcuProvider(AudioEngine& engine) noexcept { rcuProvider = engine; }
 
     // RCU リーダー (Audio Thread のみ)
 
@@ -209,7 +210,7 @@ public:
     bool loadImpulseResponse(const juce::File& irFile, bool optimizeForRealTime = false);
     void loadIR(const juce::File& irFile);
     void applyPreparedIRState(std::unique_ptr<PreparedIRState> prepared);
-    int64_t getLastPreparedIRApplyTicks() const noexcept { return lastPreparedIRApplyTicks.load(std::memory_order_acquire); }
+    int64_t getLastPreparedIRApplyTicks() const noexcept { return convo::consumeAtomic(lastPreparedIRApplyTicks, std::memory_order_acquire); }
     void stopUpgradeThread();
     void startProgressiveUpgrade(const juce::File& file,
                                  double sampleRate,
@@ -236,8 +237,8 @@ public:
     // バイパス制御
     //----------------------------------------------------------
     void setBypass(bool shouldBypass);
-    bool isBypassed() const { return bypassed.load(); }
-    const convo::ConvolverState* getConvolverState() const { return convolverState.load(std::memory_order_acquire); }
+    bool isBypassed() const { return convo::consumeAtomic(bypassed); }
+    const convo::ConvolverState* getConvolverState() const { return convo::consumeAtomic(convolverState, std::memory_order_acquire); }
     void enterStateReader(int /*readerIndex*/) const noexcept {}
     void exitStateReader(int /*readerIndex*/) const noexcept {}
 
@@ -254,7 +255,7 @@ public:
     // IR Phase Mode
     //----------------------------------------------------------
     void setPhaseMode(PhaseMode mode);
-    PhaseMode getPhaseMode() const { return static_cast<PhaseMode>(phaseMode.load(std::memory_order_acquire)); }
+    PhaseMode getPhaseMode() const { return static_cast<PhaseMode>(convo::consumeAtomic(phaseMode, std::memory_order_acquire)); }
 
     // 後方互換API
     void setUseMinPhase(bool useMinPhase);
@@ -275,20 +276,20 @@ public:
     // 変更時は Debounced rebuild を要求する。
     //------------------------------------------------------------------
     void setTailProcessingMode(int mode);
-    int getTailProcessingMode() const noexcept { return tailProcessingMode.load(std::memory_order_acquire); }
+    int getTailProcessingMode() const noexcept { return convo::consumeAtomic(tailProcessingMode, std::memory_order_acquire); }
     void setTailRolloffStartHz(float hz);
-    float getTailRolloffStartHz() const noexcept { return tailRolloffStartHz.load(std::memory_order_acquire); }
+    float getTailRolloffStartHz() const noexcept { return convo::consumeAtomic(tailRolloffStartHz, std::memory_order_acquire); }
     void setTailRolloffStrength(float strength);
-    float getTailRolloffStrength() const noexcept { return tailRolloffStrength.load(std::memory_order_acquire); }
+    float getTailRolloffStrength() const noexcept { return convo::consumeAtomic(tailRolloffStrength, std::memory_order_acquire); }
     void setPartitionTailStrength(float strength);
-    float getPartitionTailStrength() const noexcept { return partitionTailStrength.load(std::memory_order_acquire); }
+    float getPartitionTailStrength() const noexcept { return convo::consumeAtomic(partitionTailStrength, std::memory_order_acquire); }
 
     //----------------------------------------------------------
     // Experimental Direct Head Flag
     // 段階導入用の機能フラグ。変更時はIRを再構築する。
     //----------------------------------------------------------
     void setExperimentalDirectHeadEnabled(bool enabled);
-    bool getExperimentalDirectHeadEnabled() const { return experimentalDirectHeadEnabled.load(std::memory_order_acquire); }
+    bool getExperimentalDirectHeadEnabled() const { return convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire); }
 
     //----------------------------------------------------------
     // Smoothing Time
@@ -319,8 +320,8 @@ public:
     float getTargetIRLength() const;
     void applyAutoDetectedIRLength(float timeSec);
     void setIRLengthManualOverride(bool isManual);
-    bool hasManualIRLengthOverride() const { return irLengthManualOverride.load(std::memory_order_acquire); }
-    float getAutoDetectedIRLength() const { return autoDetectedIRLengthSec.load(std::memory_order_acquire); }
+    bool hasManualIRLengthOverride() const { return convo::consumeAtomic(irLengthManualOverride, std::memory_order_acquire); }
+    float getAutoDetectedIRLength() const { return convo::consumeAtomic(autoDetectedIRLengthSec, std::memory_order_acquire); }
     static float getMaximumAllowedIRLengthSecForSampleRate(double sampleRate);
     float getMaximumAllowedIRLengthSec(double sampleRate = 0.0) const;
     static IRLoadPreview analyzeImpulseResponseFile(const juce::File& irFile, double processingSampleRate);
@@ -335,22 +336,22 @@ public:
     //----------------------------------------------------------
     bool isIRLoaded() const
     {
-        const bool hasPublishedState = (convolverState.load(std::memory_order_acquire) != nullptr);
-        const bool hasActiveEngine = (m_activeEngine.load(std::memory_order_acquire) != nullptr);
-        const bool hasIRMetadata = (currentIRState.load(std::memory_order_acquire) != nullptr)
-            || (irLength.load(std::memory_order_acquire) > 0);
+        const bool hasPublishedState = (convo::consumeAtomic(convolverState, std::memory_order_acquire) != nullptr);
+        const bool hasActiveEngine = (loadActiveEngine(std::memory_order_acquire) != nullptr);
+        const bool hasIRMetadata = (convo::consumeAtomic(currentIRState, std::memory_order_acquire) != nullptr)
+            || (convo::consumeAtomic(irLength, std::memory_order_acquire) > 0);
         return hasPublishedState || (hasActiveEngine && hasIRMetadata);
     }
-    bool isLoadingIR() const { return isLoading.load(std::memory_order_acquire); }
-    bool isIRFinalized() const noexcept { return irFinalized.load(std::memory_order_acquire); }
+    bool isLoadingIR() const { return convo::consumeAtomic(isLoading, std::memory_order_acquire); }
+    bool isIRFinalized() const noexcept { return convo::consumeAtomic(irFinalized, std::memory_order_acquire); }
     juce::String getIRName() const { return irName; }
-    int getIRLength() const { return irLength.load(std::memory_order_acquire); }
+    int getIRLength() const { return convo::consumeAtomic(irLength, std::memory_order_acquire); }
     juce::String getLastError() const { return lastError; }
-    float getLoadProgress() const { return loadProgress.load(); }
-    int getMixedPhaseState() const noexcept { return mixedPhaseState.load(std::memory_order_acquire); }
-    void setMixedPhaseState(int state) noexcept { mixedPhaseState.store(juce::jlimit(0, 2, state), std::memory_order_release); }
+    float getLoadProgress() const { return convo::consumeAtomic(loadProgress); }
+    int getMixedPhaseState() const noexcept { return convo::consumeAtomic(mixedPhaseState, std::memory_order_acquire); }
+    void setMixedPhaseState(int state) noexcept { convo::publishAtomic(mixedPhaseState, juce::jlimit(0, 2, state), std::memory_order_release); }
     void setLoadingProgress(float p);
-    int getCurrentBufferSize() const { return currentBufferSize.load(std::memory_order_acquire); }
+    int getCurrentBufferSize() const { return convo::consumeAtomic(currentBufferSize, std::memory_order_acquire); }
     struct LatencyBreakdown
     {
         int algorithmLatencySamples = 0;
@@ -382,23 +383,23 @@ public:
     RebuildAutomationDiagnostics getRebuildAutomationDiagnostics() const noexcept
     {
         return {
-            debugDebouncedRebuildRequestCount.load(std::memory_order_acquire),
-            debugDebouncedRebuildDeferredAfterLoadCount.load(std::memory_order_acquire),
-            debugDebouncedRebuildScheduledCount.load(std::memory_order_acquire),
-            debugDebouncedRebuildTriggeredCount.load(std::memory_order_acquire)
+            convo::consumeAtomic(debugDebouncedRebuildRequestCount, std::memory_order_acquire),
+            convo::consumeAtomic(debugDebouncedRebuildDeferredAfterLoadCount, std::memory_order_acquire),
+            convo::consumeAtomic(debugDebouncedRebuildScheduledCount, std::memory_order_acquire),
+            convo::consumeAtomic(debugDebouncedRebuildTriggeredCount, std::memory_order_acquire)
         };
     }
 
     //----------------------------------------------------------
     // 波形表示用データ取得
     //----------------------------------------------------------
-    std::vector<float> getIRWaveform() const;
+    std::vector<float> getIRWaveform();
 
     //----------------------------------------------------------
     // 周波数特性表示用データ取得
     //----------------------------------------------------------
-    std::vector<float> getIRMagnitudeSpectrum() const;
-    double getIRSpectrumSampleRate() const;
+    std::vector<float> getIRMagnitudeSpectrum();
+    double getIRSpectrumSampleRate();
 
     //----------------------------------------------------------
     // State Management
@@ -429,7 +430,6 @@ public:
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const ConvolverProcessor& other);
-    void syncParametersFrom(const ConvolverProcessor& other);
 
         // 構造的パラメータのハッシュ値を返す（クロスフェード要否判定用）
         uint64_t getStructuralHash() const noexcept;
@@ -461,8 +461,8 @@ public:
                                           bool isRebuild,
                                           const juce::File& irFile,
                                           double scaleFactor, // This is for newConv->init
-                                          std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
-                                          std::shared_ptr<juce::AudioBuffer<double>> displayIR);
+                                          std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
+                                          std::unique_ptr<juce::AudioBuffer<double>> displayIR);
 
     // 可視化データ生成の制御 (DSP用インスタンスでは無効化してメモリを節約)
     void setVisualizationEnabled(bool enabled) { visualizationEnabled = enabled; }
@@ -476,7 +476,7 @@ public:
     #ifdef NUC_DEBUG_GUARDS
     void debugCheckNucGuards() const noexcept
     {
-        auto* engine = m_activeEngine.load(std::memory_order_acquire);
+        auto* engine = loadActiveEngine(std::memory_order_acquire);
         if (engine)
         {
             for (int i = 0; i < 2; ++i)
@@ -505,6 +505,8 @@ private:
     struct StereoConvolver;
 #include "convolver/ConvolverProcessor.LoaderThreadInline.h"
 
+#include "audioengine/AtomicAccess.h"
+
     struct IncrementalRebuildJob
     {
         enum class Stage
@@ -518,7 +520,7 @@ private:
         };
 
         Stage stage { Stage::Idle };
-        std::shared_ptr<juce::AudioBuffer<double>> preparedIR;
+        std::unique_ptr<juce::AudioBuffer<double>> preparedIR;
         double preparedSampleRate = 0.0;
         std::function<bool()> shouldCancel;
         // LoaderThread ステートマシン (incremental 経路専用)
@@ -526,11 +528,9 @@ private:
         bool loaderInitialized = false;
         StereoConvolver* pendingConv = nullptr;
         juce::AudioBuffer<double> pendingLoadedIR;
-        std::shared_ptr<juce::AudioBuffer<double>> pendingLoadedIRShared;
         double pendingLoadedSR = 0.0;
         int pendingTargetLength = 0;
         juce::AudioBuffer<double> pendingDisplayIR;
-        std::shared_ptr<juce::AudioBuffer<double>> pendingDisplayIRShared;
         double pendingScaleFactor = 1.0;
         juce::File pendingFile;
         bool pendingIsRebuild = false;
@@ -556,26 +556,26 @@ private:
     static void overflowCallbackThunk(void* userData) noexcept;
 
     void commitNewConvolver(StereoConvolver* newConv,
-                            std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
+                            std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
                             double loadedSR, int targetLength, bool isRebuild,
                             const juce::File& file, double scaleFactor,
-                            std::shared_ptr<juce::AudioBuffer<double>> displayIR);
+                            std::unique_ptr<juce::AudioBuffer<double>> displayIR);
 
     void switchEngineOnMessageThread(StereoConvolver* newEngine) noexcept;
 
-    void applyNewStateBindStep(std::shared_ptr<juce::AudioBuffer<double>> loadedIR,
+    void applyNewStateBindStep(std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
                                double loadedSR,
                                bool isRebuild,
                                const juce::File& file,
                                double scaleFactor);
-    void applyNewStateUpdateStep(std::shared_ptr<juce::AudioBuffer<double>> displayIR,
+    void applyNewStateUpdateStep(std::unique_ptr<juce::AudioBuffer<double>> displayIR,
                                  double loadedSR);
     void applyNewStatePublishStep(StereoConvolver* newConv,
                                   int targetLength,
                                   double loadedSR);
     void applyNewStateNotifyStep();
 
-    void applyNewState(StereoConvolver* newConv, std::shared_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::shared_ptr<juce::AudioBuffer<double>> displayIR);
+    void applyNewState(StereoConvolver* newConv, std::unique_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::unique_ptr<juce::AudioBuffer<double>> displayIR);
     void handleLoadError(const juce::String& error);
     void createWaveformSnapshot (const juce::AudioBuffer<double>& irBuffer);
     void createFrequencyResponseSnapshot (const juce::AudioBuffer<double>& irBuffer, double sampleRate);
@@ -673,20 +673,17 @@ private:
             try
             {
                 // ── MKL Non-Uniform Partitioned Convolution (NUC) ──
-                // new完全禁止 → aligned_malloc + placement new (規約準拠)
-                void* rn0 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
-                new (rn0) convo::MKLNonUniformConvolver();
-                destroyNUCConvolver(nucConvolvers[0]);
-                nucConvolvers[0] = static_cast<convo::MKLNonUniformConvolver*>(rn0);
+                auto nuc0 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
+                auto nuc1 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
 
-                void* rn1 = convo::aligned_malloc(sizeof(convo::MKLNonUniformConvolver), 64);
-                new (rn1) convo::MKLNonUniformConvolver();
-                destroyNUCConvolver(nucConvolvers[1]);
-                nucConvolvers[1] = static_cast<convo::MKLNonUniformConvolver*>(rn1);
-
-                if (nucConvolvers[0]->SetImpulse(irData[0], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec) &&
-                    nucConvolvers[1]->SetImpulse(irData[1], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec))
+                if (nuc0->SetImpulse(irData[0], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec) &&
+                    nuc1->SetImpulse(irData[1], irDataLength, knownBlockSize, scale, enableDirectHead, filterSpec))
                 {
+                    destroyNUCConvolver(nucConvolvers[0]);
+                    destroyNUCConvolver(nucConvolvers[1]);
+                    nucConvolvers[0] = nuc0.release();
+                    nucConvolvers[1] = nuc1.release();
+
                     latency   = nucConvolvers[0]->getLatency();
                     DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
                     if (ownerProcessor != nullptr)
@@ -712,37 +709,25 @@ private:
         // 失敗時 (MKLメモリ確保失敗等) は nullptr を返す。呼び出し元で必ずチェックすること。
         StereoConvolver* clone() const
         {
-            StereoConvolver* newConv = nullptr;
             try
             {
-                void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
-                new (mem) StereoConvolver();
-                newConv = static_cast<StereoConvolver*>(mem);
+                auto newConv = convo::aligned_make_unique<StereoConvolver>();
 
                 if (irDataLength > 0 && irData[0] && irData[1])
                 {
-                    convo::ScopedAlignedPtr<double> l(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
-                    convo::ScopedAlignedPtr<double> r(static_cast<double*>(convo::aligned_malloc(irDataLength * sizeof(double), 64)));
+                    auto l = convo::makeAlignedArray<double>(static_cast<size_t>(irDataLength));
+                    auto r = convo::makeAlignedArray<double>(static_cast<size_t>(irDataLength));
 
                     std::memcpy(l.get(), irData[0], irDataLength * sizeof(double));
                     std::memcpy(r.get(), irData[1], irDataLength * sizeof(double));
 
                     if (!newConv->init(l.release(), r.release(), irDataLength, storedSampleRate, irLatency, storedMaxFFTSize, storedKnownBlockSize, storedFirstPartition, callQuantumSamples, storedScale, storedDirectHeadEnabled))
-                    {
-                        newConv->~StereoConvolver();
-                        convo::aligned_free(newConv);
                         return nullptr;
-                    }
                 }
-                return newConv;
+                return newConv.release();
             }
             catch (const std::bad_alloc&)
             {
-                if (newConv != nullptr)
-                {
-                    newConv->~StereoConvolver();
-                    convo::aligned_free(newConv);
-                }
                 return nullptr;
             }
         }
@@ -761,7 +746,7 @@ private:
         void process(int channel, const double* in, double* out, int numSamples);
     };
 
-    std::atomic<StereoConvolver*> m_activeEngine { nullptr }; // Raw pointer for Audio Thread (Lock-free)
+    std::atomic<std::uintptr_t> m_activeEngineBits { 0 }; // uintptr_t-backed lock-free handle
     convo::DSPExecutionState* boundExecutionState = nullptr;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
@@ -825,6 +810,33 @@ private:
     convo::SafeStateSwapper rcuSwapper;
     convo::LinearRamp mixSmoother; // オーディオスレッドでの平滑化用
 
+    static StereoConvolver* fromEngineBits(std::uintptr_t bits) noexcept
+    {
+        return reinterpret_cast<StereoConvolver*>(bits);
+    }
+
+    static std::uintptr_t toEngineBits(StereoConvolver* ptr) noexcept
+    {
+        return static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(ptr));
+    }
+
+    StereoConvolver* loadActiveEngine(std::memory_order order = std::memory_order_acquire) const noexcept
+    {
+        return fromEngineBits(convo::consumeAtomic(m_activeEngineBits, order));
+    }
+
+    StereoConvolver* exchangeActiveEngine(StereoConvolver* value,
+                                          std::memory_order order = std::memory_order_acq_rel) noexcept
+    {
+        return fromEngineBits(convo::exchangeAtomic(m_activeEngineBits, toEngineBits(value), order));
+    }
+
+    void publishActiveEngine(StereoConvolver* value,
+                             std::memory_order order = std::memory_order_release) noexcept
+    {
+        convo::publishAtomic(m_activeEngineBits, toEngineBits(value), order);
+    }
+
 
 
     #pragma warning(push)
@@ -880,28 +892,36 @@ private:
     std::vector<float> irWaveform;
     std::vector<float> irMagnitudeSpectrum;
     double irSpectrumSampleRate = 0.0;
-    mutable juce::CriticalSection visualizationDataLock;
+    juce::CriticalSection visualizationDataLock;
 
     juce::File currentIrFile;
     juce::CriticalSection irFileLock;
     std::atomic<bool> currentIrOptimized { false };
     std::atomic<int64_t> lastPreparedIRApplyTicks { 0 };
     struct IRState {
-        std::shared_ptr<juce::AudioBuffer<double>> irOwner;
+        std::unique_ptr<juce::AudioBuffer<double>> irOwner;
         const juce::AudioBuffer<double>* ir = nullptr;
         double sampleRate = 0.0;
         uint64_t generation = 0;
     };
     std::atomic<IRState*> currentIRState { nullptr };
-    AudioEngine* rcuProvider = nullptr;
+    std::optional<std::reference_wrapper<AudioEngine>> rcuProvider;
+
+    AudioEngine* getRcuProvider() noexcept { return rcuProvider ? &rcuProvider->get() : nullptr; }
+    AudioEngine* getRcuProvider() const noexcept { return rcuProvider ? &rcuProvider->get() : nullptr; }
 
     const IRState* acquireIRState() const noexcept;
     void releaseIRState(const IRState* state) const noexcept;
-    void updateIRState(std::shared_ptr<juce::AudioBuffer<double>> newIR, double newSR);
+    void updateIRState(const juce::AudioBuffer<double>& newIR, double newSR);
+    void updateIRState(const std::unique_ptr<juce::AudioBuffer<double>>& newIR, double newSR)
+    {
+        if (newIR)
+            updateIRState(*newIR, newSR);
+    }
 
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
 public: // Added for AudioEngine access
-    double getCurrentIRScale() const noexcept { return currentIRScale.load(); }
+    double getCurrentIRScale() const noexcept { return convo::consumeAtomic(currentIRScale); }
     std::atomic<double> currentIRScale { 1.0 }; // IRのスケールファクター (Auto Makeup + Safety Margin)
     convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     int cachedFFTBufferCapacity = 0;
@@ -963,7 +983,7 @@ public: // Added for AudioEngine access
 
 
     struct CacheEntry {
-        std::shared_ptr<juce::AudioBuffer<double>> ir;
+        std::unique_ptr<juce::AudioBuffer<double>> ir;
         std::vector<convo::SecondOrderAllpass> allpassSections;
         uint32_t lastUsedTime;
     };
@@ -1006,8 +1026,8 @@ public: // Added for AudioEngine access
                                                                  const std::function<bool()>& shouldExit,
                                                                  bool* wasCancelled);
 
-    std::unique_ptr<IRConverter> irConverter;
-    std::unique_ptr<CacheManager> cacheManager;
+    convo::aligned_unique_ptr<IRConverter> irConverter;
+    convo::aligned_unique_ptr<CacheManager> cacheManager;
     std::unique_ptr<ProgressiveUpgradeThread> upgradeThread;
     ConvolverRuntime runtime;
     std::atomic<bool> writerActive { false };
@@ -1028,7 +1048,7 @@ public: // Added for AudioEngine access
     std::atomic<convo::ConvolverState*> convolverState { nullptr };
     // DeferredFreeThread: 旧 ConvolverState を Audio Thread 外で安全に解放する専用スレッド
     // prepareToPlay() で生成、releaseResources() で停止・破棄する。
-    std::unique_ptr<convo::DeferredFreeThread> deferredFreeThread;
+    convo::aligned_unique_ptr<convo::DeferredFreeThread> deferredFreeThread;
     // GenerationManager: IR ロードタスクの世代管理（陳腐化チェック用）
     GenerationManager convolverStateGeneration;
 

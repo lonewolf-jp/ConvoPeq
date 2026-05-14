@@ -16,32 +16,22 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
         return;
     }
 
-    const auto* runtimeGraph = getRuntimeGraphState();
+    const auto* world = getRuntimePublishWorld();
+    const auto* engineRuntime = getEngineRuntimeState(world);
+    const auto* runtimeGraph = getRuntimeGraphState(world);
     DSPCore* dsp = isFadingTarget
-        ? resolveFadingDSPFromRuntimePublish(runtimeGraph)
-        : resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+        ? resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime)
+        : resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
     if (dsp == nullptr && isFadingTarget)
-        dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+        dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(bufferToFill);
         return;
     }
 
-    const uint64_t hash = snap->eqCoeffHash;
-    if (hash != debugLastAppliedEqHash.load(std::memory_order_relaxed))
-    {
-        debugLastAppliedEqHash.store(hash, std::memory_order_relaxed);
-        debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_relaxed);
-    }
-
     const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap, isFadingTarget);
 
-    if (!isFadingTarget)
-    {
-        eqBypassActive.store(parameterSnapshot.eqBypassed, std::memory_order_relaxed);
-        convBypassActive.store(parameterSnapshot.convBypassed, std::memory_order_relaxed);
-    }
     DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 
     std::atomic<float> fadingInputMeter { 0.0f };

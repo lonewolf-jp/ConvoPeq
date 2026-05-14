@@ -1,8 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 
-extern std::atomic<bool> gShuttingDown;
-
 namespace
 {
     constexpr size_t kReclaimBacklogWarnThreshold = 128;
@@ -39,7 +37,7 @@ void AudioEngine::exitRcuReader(int readerIndex) noexcept
 
 void AudioEngine::tryReclaimResources() noexcept
 {
-    g_runtimeReclaimCount.fetch_add(1, std::memory_order_relaxed);
+    g_runtimeReclaimCount.fetch_add(1, std::memory_order_acq_rel);
     g_deletionQueue.reclaim(m_epochCore);
 }
 
@@ -49,16 +47,16 @@ void AudioEngine::tryReclaimResources() noexcept
 
 void AudioEngine::processDeferredReleases()
 {
-    if (shutdownInProgress.load(std::memory_order_acquire))
+    if (isShutdownInProgress())
         return;
 
     auto flushAudioThreadRetireOverflow = [this]() noexcept
     {
-        auto* overflow = audioThreadRetireOverflowPtr.exchange(nullptr, std::memory_order_acq_rel);
+        auto* overflow = convo::exchangeAtomic(audioThreadRetireOverflowPtr, nullptr, std::memory_order_acq_rel);
         if (overflow == nullptr)
             return;
 
-        const uint64_t overflowEpoch = audioThreadRetireOverflowEpoch.exchange(0, std::memory_order_acq_rel);
+        const uint64_t overflowEpoch = convo::exchangeAtomic(audioThreadRetireOverflowEpoch, 0, std::memory_order_acq_rel);
         const uint64_t epoch = overflowEpoch != 0 ? overflowEpoch : m_epochCore.current();
         if (!g_deletionQueue.enqueue(
                 overflow,
@@ -95,19 +93,11 @@ void AudioEngine::processDeferredReleases()
         }
     };
 
-    if (gShuttingDown.load(std::memory_order_acquire))
-    {
-        flushAudioThreadRetireOverflow();
-        flushDeferredDeleteFallbackQueue();
-        g_deletionQueue.reclaimAllIgnoringEpoch();
-        return;
-    }
-
     flushAudioThreadRetireOverflow();
     flushDeferredDeleteFallbackQueue();
     g_deletionQueue.reclaim(m_epochCore);
 
-    const uint64_t dropped = audioThreadRetireEnqueueDropped.load(std::memory_order_acquire);
+    const uint64_t dropped = convo::consumeAtomic(audioThreadRetireEnqueueDropped, std::memory_order_acquire);
     if (dropped >= kReclaimBacklogWarnThreshold)
     {
         juce::Logger::writeToLog("[DIAG] deferred reclaim enqueue drops=" + juce::String(static_cast<juce::int64>(dropped)));

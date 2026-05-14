@@ -15,8 +15,8 @@ static void diagLog(const juce::String& message)
 void AudioEngine::setEqBypassRequested (bool shouldBypass)
 {
     ASSERT_NON_RT_THREAD();
-    eqBypassRequested.store (shouldBypass, std::memory_order_release);
-    m_currentEqBypass.store(shouldBypass, std::memory_order_release);
+    convo::publishAtomic(eqBypassRequested, shouldBypass, std::memory_order_release);
+    convo::publishAtomic(m_currentEqBypass, shouldBypass, std::memory_order_release);
     uiEqEditor.setBypass(shouldBypass);
     applyDefaultsForCurrentMode();
     enqueueSnapshotCommand();
@@ -26,8 +26,8 @@ void AudioEngine::setEqBypassRequested (bool shouldBypass)
 void AudioEngine::setConvolverBypassRequested (bool shouldBypass)
 {
     ASSERT_NON_RT_THREAD();
-    convBypassRequested.store (shouldBypass, std::memory_order_release);
-    m_currentConvBypass.store(shouldBypass, std::memory_order_release);
+    convo::publishAtomic(convBypassRequested, shouldBypass, std::memory_order_release);
+    convo::publishAtomic(m_currentConvBypass, shouldBypass, std::memory_order_release);
     uiConvolverProcessor.setBypass(shouldBypass);
     applyDefaultsForCurrentMode();
     enqueueSnapshotCommand();
@@ -73,9 +73,9 @@ void AudioEngine::endBulkParameterRestore(bool requestRebuildNow) noexcept
     if (!requestRebuildNow)
         return;
 
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (sr > 0.0)
-        requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
+        requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
 }
 
 #if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_LOAD)
@@ -86,19 +86,19 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
     // ─── Step 1: モード・バイパス状態を先に復元 ────────────────────────────
     if (state.hasProperty("processingOrder"))
-        currentProcessingOrder.store((ProcessingOrder)(int)state.getProperty("processingOrder"));
+        convo::publishAtomic(currentProcessingOrder, (ProcessingOrder)(int)state.getProperty("processingOrder"));
 
     if (state.hasProperty("eqBypassed"))
     {
         bool bypassed = state.getProperty("eqBypassed");
-        eqBypassRequested.store(bypassed, std::memory_order_release);
+        convo::publishAtomic(eqBypassRequested, bypassed, std::memory_order_release);
         uiEqEditor.setBypass(bypassed);
     }
 
     if (state.hasProperty("convBypassed"))
     {
         bool bypassed = state.getProperty("convBypassed");
-        convBypassRequested.store(bypassed, std::memory_order_release);
+        convo::publishAtomic(convBypassRequested, bypassed, std::memory_order_release);
         uiConvolverProcessor.setBypass(bypassed);
     }
 
@@ -218,9 +218,9 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (convState.isValid())
         uiConvolverProcessor.setState (convState);
 
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (sr > 0.0)
-        requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
+        requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
 
     // UI更新通知
     sendChangeMessage();
@@ -233,32 +233,32 @@ juce::ValueTree AudioEngine::getCurrentState() const
     juce::ValueTree state ("Preset");
 
     // グローバル設定の保存
-    state.setProperty("processingOrder", (int)currentProcessingOrder.load(), nullptr);
-    state.setProperty("softClipEnabled", softClipEnabled.load(), nullptr);
-    state.setProperty("saturationAmount", saturationAmount.load(), nullptr);
-    state.setProperty("inputHeadroomDb", inputHeadroomDb.load(), nullptr);
-    state.setProperty("outputMakeupDb", outputMakeupDb.load(), nullptr);
-    state.setProperty("analyzerSource", (int)currentAnalyzerSource.load(), nullptr);
-    state.setProperty("convolverInputTrimDb", convolverInputTrimDb.load(), nullptr);
-    state.setProperty("ditherBitDepth", ditherBitDepth.load(), nullptr);
-    state.setProperty("noiseShaperType", (int)noiseShaperType.load(), nullptr);
-    state.setProperty("oversamplingFactor", manualOversamplingFactor.load(), nullptr);
-    state.setProperty("oversamplingType", (int)oversamplingType.load(), nullptr);
+    state.setProperty("processingOrder", (int)convo::consumeAtomic(currentProcessingOrder), nullptr);
+    state.setProperty("softClipEnabled", convo::consumeAtomic(softClipEnabled), nullptr);
+    state.setProperty("saturationAmount", convo::consumeAtomic(saturationAmount), nullptr);
+    state.setProperty("inputHeadroomDb", convo::consumeAtomic(inputHeadroomDb), nullptr);
+    state.setProperty("outputMakeupDb", convo::consumeAtomic(outputMakeupDb), nullptr);
+    state.setProperty("analyzerSource", (int)convo::consumeAtomic(currentAnalyzerSource), nullptr);
+    state.setProperty("convolverInputTrimDb", convo::consumeAtomic(convolverInputTrimDb), nullptr);
+    state.setProperty("ditherBitDepth", convo::consumeAtomic(ditherBitDepth), nullptr);
+    state.setProperty("noiseShaperType", (int)convo::consumeAtomic(noiseShaperType), nullptr);
+    state.setProperty("oversamplingFactor", convo::consumeAtomic(manualOversamplingFactor), nullptr);
+    state.setProperty("oversamplingType", (int)convo::consumeAtomic(oversamplingType), nullptr);
 
     // NoiseShaperLearner Settings
     {
         auto s = getNoiseShaperLearnerSettings();
-        state.setProperty("cmaesRestarts", s.cmaesRestarts.load(), nullptr);
-        state.setProperty("coeffSafetyMargin", s.coeffSafetyMargin.load(), nullptr);
-        state.setProperty("enableStabilityCheck", s.enableStabilityCheck.load(), nullptr);
+        state.setProperty("cmaesRestarts", convo::consumeAtomic(s.cmaesRestarts), nullptr);
+        state.setProperty("coeffSafetyMargin", convo::consumeAtomic(s.coeffSafetyMargin), nullptr);
+        state.setProperty("enableStabilityCheck", convo::consumeAtomic(s.enableStabilityCheck), nullptr);
     }
 
-    state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);
-    state.setProperty("convBypassed", convBypassRequested.load(), nullptr);
+    state.setProperty("eqBypassed", convo::consumeAtomic(eqBypassRequested), nullptr);
+    state.setProperty("convBypassed", convo::consumeAtomic(convBypassRequested), nullptr);
     // 出力周波数フィルターモードの保存
-    state.setProperty("convHCFilterMode", (int)convHCFilterMode.load(), nullptr);
-    state.setProperty("convLCFilterMode", (int)convLCFilterMode.load(), nullptr);
-    state.setProperty("eqLPFFilterMode",  (int)eqLPFFilterMode.load(), nullptr);
+    state.setProperty("convHCFilterMode", (int)convo::consumeAtomic(convHCFilterMode), nullptr);
+    state.setProperty("convLCFilterMode", (int)convo::consumeAtomic(convLCFilterMode), nullptr);
+    state.setProperty("eqLPFFilterMode",  (int)convo::consumeAtomic(eqLPFFilterMode), nullptr);
 
     for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
     {
@@ -283,24 +283,24 @@ void AudioEngine::setInputHeadroomDb(float db)
     ASSERT_NON_RT_THREAD();
     // コンボルバーが先頭に来る場合 (Conv→PEQ / Conv only) は -6dB 上限で入力保護する。
     // EQ が先頭またはコンボルバーがバイパスされている場合は 0dB まで許容する。
-    const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
-    const bool eqBypassed   = eqBypassRequested.load(std::memory_order_relaxed);
-    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
+    const bool convBypassed = convo::consumeAtomic(convBypassRequested, std::memory_order_acquire);
+    const bool eqBypassed   = convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire);
+    const ProcessingOrder order = convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire);
     const bool convIsFirst = !convBypassed && (order == ProcessingOrder::ConvolverThenEQ || eqBypassed);
     const float maxDb = convIsFirst ? -6.0f : 0.0f;
     float clampedDb = juce::jlimit(-12.0f, maxDb, db);
-    if (std::abs(inputHeadroomDb.load() - clampedDb) > 1e-5f)
+    if (std::abs(convo::consumeAtomic(inputHeadroomDb) - clampedDb) > 1e-5f)
     {
-        inputHeadroomDb.store(clampedDb);
-        inputHeadroomGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
-        m_currentInputHeadroomDb.store(clampedDb, std::memory_order_relaxed);
+        convo::publishAtomic(inputHeadroomDb, clampedDb);
+        convo::publishAtomic(inputHeadroomGain, juce::Decibels::decibelsToGain((double)clampedDb));
+        convo::publishAtomic(m_currentInputHeadroomDb, clampedDb, std::memory_order_release);
         enqueueSnapshotCommand();
     }
 }
 
 float AudioEngine::getInputHeadroomDb() const
 {
-    return inputHeadroomDb.load();
+    return convo::consumeAtomic(inputHeadroomDb);
 }
 
 void AudioEngine::setOutputMakeupDb(float db)
@@ -308,25 +308,25 @@ void AudioEngine::setOutputMakeupDb(float db)
     ASSERT_NON_RT_THREAD();
     // Output makeup は全モード共通で 0..12 dB
     const float clampedDb = juce::jlimit(0.0f, 12.0f, db);
-    if (std::abs(outputMakeupDb.load() - clampedDb) > 1e-5f)
+    if (std::abs(convo::consumeAtomic(outputMakeupDb) - clampedDb) > 1e-5f)
     {
-        outputMakeupDb.store(clampedDb);
-        outputMakeupGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
-        m_currentOutputMakeupDb.store(clampedDb, std::memory_order_relaxed);
+        convo::publishAtomic(outputMakeupDb, clampedDb);
+        convo::publishAtomic(outputMakeupGain, juce::Decibels::decibelsToGain((double)clampedDb));
+        convo::publishAtomic(m_currentOutputMakeupDb, clampedDb, std::memory_order_release);
         enqueueSnapshotCommand();
     }
 }
 
 float AudioEngine::getOutputMakeupDb() const
 {
-    return outputMakeupDb.load();
+    return convo::consumeAtomic(outputMakeupDb);
 }
 
 void AudioEngine::setProcessingOrder(ProcessingOrder order)
 {
     ASSERT_NON_RT_THREAD();
-    currentProcessingOrder.store(order);
-    m_currentProcessingOrder.store(order, std::memory_order_relaxed);
+    convo::publishAtomic(currentProcessingOrder, order);
+    convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
     enqueueSnapshotCommand();
     applyDefaultsForCurrentMode();
 }
@@ -336,27 +336,27 @@ void AudioEngine::setConvolverInputTrimDb(float db)
     ASSERT_NON_RT_THREAD();
     // 範囲: -12..0 dB (0dB = トリムなし / -12dB = 最大保護)
     float clampedDb = juce::jlimit(-12.0f, 0.0f, db);
-    if (std::abs(convolverInputTrimDb.load() - clampedDb) > 1e-5f)
+    if (std::abs(convo::consumeAtomic(convolverInputTrimDb) - clampedDb) > 1e-5f)
     {
-        convolverInputTrimDb.store(clampedDb);
-        convolverInputTrimGain.store(juce::Decibels::decibelsToGain((double)clampedDb));
-        m_currentConvInputTrimDb.store(clampedDb, std::memory_order_relaxed);
+        convo::publishAtomic(convolverInputTrimDb, clampedDb);
+        convo::publishAtomic(convolverInputTrimGain, juce::Decibels::decibelsToGain((double)clampedDb));
+        convo::publishAtomic(m_currentConvInputTrimDb, clampedDb, std::memory_order_release);
         enqueueSnapshotCommand();
     }
 }
 
 float AudioEngine::getConvolverInputTrimDb() const
 {
-    return convolverInputTrimDb.load();
+    return convo::consumeAtomic(convolverInputTrimDb);
 }
 
 void AudioEngine::applyDefaultsForCurrentMode()
 {
     if (m_isRestoringState) return; // プリセットロード中はデフォルトリセットを抑制する
 
-    const bool eqBypassed  = eqBypassRequested.load(std::memory_order_relaxed);
-    const bool convBypassed = convBypassRequested.load(std::memory_order_relaxed);
-    const ProcessingOrder order = currentProcessingOrder.load(std::memory_order_relaxed);
+    const bool eqBypassed  = convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire);
+    const bool convBypassed = convo::consumeAtomic(convBypassRequested, std::memory_order_acquire);
+    const ProcessingOrder order = convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire);
 
     float newInputHeadroomDb = 0.0f;
     float newOutputMakeupDb = 0.0f;
@@ -387,24 +387,24 @@ void AudioEngine::applyDefaultsForCurrentMode()
         newConvTrimDb = 0.0f;
     }
 
-    inputHeadroomDb.store(newInputHeadroomDb, std::memory_order_relaxed);
-    outputMakeupDb.store(newOutputMakeupDb, std::memory_order_relaxed);
-    convolverInputTrimDb.store(newConvTrimDb, std::memory_order_relaxed);
-    inputHeadroomGain.store(juce::Decibels::decibelsToGain(static_cast<double>(newInputHeadroomDb)), std::memory_order_relaxed);
-    outputMakeupGain.store(juce::Decibels::decibelsToGain(static_cast<double>(newOutputMakeupDb)), std::memory_order_relaxed);
-    convolverInputTrimGain.store(juce::Decibels::decibelsToGain(static_cast<double>(newConvTrimDb)), std::memory_order_relaxed);
+    convo::publishAtomic(inputHeadroomDb, newInputHeadroomDb, std::memory_order_release);
+    convo::publishAtomic(outputMakeupDb, newOutputMakeupDb, std::memory_order_release);
+    convo::publishAtomic(convolverInputTrimDb, newConvTrimDb, std::memory_order_release);
+    convo::publishAtomic(inputHeadroomGain, juce::Decibels::decibelsToGain(static_cast<double>(newInputHeadroomDb)), std::memory_order_release);
+    convo::publishAtomic(outputMakeupGain, juce::Decibels::decibelsToGain(static_cast<double>(newOutputMakeupDb)), std::memory_order_release);
+    convo::publishAtomic(convolverInputTrimGain, juce::Decibels::decibelsToGain(static_cast<double>(newConvTrimDb)), std::memory_order_release);
 
-    m_currentInputHeadroomDb.store(newInputHeadroomDb, std::memory_order_relaxed);
-    m_currentOutputMakeupDb.store(newOutputMakeupDb, std::memory_order_relaxed);
-    m_currentConvInputTrimDb.store(newConvTrimDb, std::memory_order_relaxed);
+    convo::publishAtomic(m_currentInputHeadroomDb, newInputHeadroomDb, std::memory_order_release);
+    convo::publishAtomic(m_currentOutputMakeupDb, newOutputMakeupDb, std::memory_order_release);
+    convo::publishAtomic(m_currentConvInputTrimDb, newConvTrimDb, std::memory_order_release);
     enqueueSnapshotCommand();
 }
 
 void AudioEngine::setDitherBitDepth(int bitDepth)
 {
-    if (ditherBitDepth.load() != bitDepth)
+    if (convo::consumeAtomic(ditherBitDepth) != bitDepth)
     {
-        const bool adaptiveLearningActive = (noiseShaperType.load(std::memory_order_relaxed) == NoiseShaperType::Adaptive9thOrder)
+        const bool adaptiveLearningActive = (convo::consumeAtomic(noiseShaperType, std::memory_order_acquire) == NoiseShaperType::Adaptive9thOrder)
             && noiseShaperLearner
             && noiseShaperLearner->isRunning();
 
@@ -414,8 +414,8 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
             noiseShaperLearner->setErrorMessage("Learning stopped due to bit depth change. Please restart learning.");
         }
 
-        ditherBitDepth.store(bitDepth);
-        m_currentDitherBitDepth.store(bitDepth, std::memory_order_relaxed);
+        convo::publishAtomic(ditherBitDepth, bitDepth);
+        convo::publishAtomic(m_currentDitherBitDepth, bitDepth, std::memory_order_release);
         DBG_LOG("Dither Bit Depth changed: " + juce::String(bitDepth));
         enqueueSnapshotCommand();
 
@@ -424,28 +424,28 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
         // UI側（学習ウィンドウ）が即座に反映できるように通知
         sendChangeMessage();
 
-        const double sr = currentSampleRate.load();
+        const double sr = convo::consumeAtomic(currentSampleRate);
         if (!m_isRestoringState && sr > 0.0)
         {
-            const int queuedGeneration = rebuildGeneration.load(std::memory_order_acquire);
-            const int committedGeneration = lastCommittedRebuildGeneration.load(std::memory_order_acquire);
+            const int queuedGeneration = convo::consumeAtomic(rebuildGeneration, std::memory_order_acquire);
+            const int committedGeneration = convo::consumeAtomic(lastCommittedRebuildGeneration, std::memory_order_acquire);
             const bool outstandingRebuild = queuedGeneration > committedGeneration;
             const bool shouldDeferRebuild =
                 outstandingRebuild
                 ||
                 uiConvolverProcessor.isLoadingIR()
-                || deferredStructuralRebuildPending_.load(std::memory_order_acquire)
-                || m_pendingIRChange.load(std::memory_order_acquire)
+                || hasRebuildReason(RebuildReason::DeferredStructural)
+                || convo::consumeAtomic(m_pendingIRChange, std::memory_order_acquire)
                 || (uiConvolverProcessor.isIRLoaded() && !uiConvolverProcessor.isIRFinalized());
 
             if (shouldDeferRebuild)
             {
-                deferredFinalizeAwareRebuildPending_.store(true, std::memory_order_release);
+                setRebuildReason(RebuildReason::DeferredFinalizeAware);
                 diagLog("[DIAG] setDitherBitDepth: deferred rebuild until IR finalized");
             }
             else
             {
-                requestRebuild(sr, maxSamplesPerBlock.load());
+                requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock));
             }
         }
     }
@@ -453,16 +453,16 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
 
 int AudioEngine::getDitherBitDepth() const
 {
-    return ditherBitDepth.load();
+    return convo::consumeAtomic(ditherBitDepth);
 }
 
 void AudioEngine::setNoiseShaperType(NoiseShaperType type)
 {
-    if (noiseShaperType.load() != type)
+    if (convo::consumeAtomic(noiseShaperType) != type)
     {
-        noiseShaperType.store(type);
-        m_currentNoiseShaperType.store(type, std::memory_order_relaxed);
-        m_pendingNSChange.store(true, std::memory_order_release);
+        convo::publishAtomic(noiseShaperType, type);
+        convo::publishAtomic(m_currentNoiseShaperType, type, std::memory_order_release);
+        convo::publishAtomic(m_pendingNSChange, true, std::memory_order_release);
         if (type != NoiseShaperType::Adaptive9thOrder)
         {
             stopNoiseShaperLearning();
@@ -473,7 +473,7 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
                 noiseShaperLearner->stopLearning();
 
             noiseShaperLearner = std::make_unique<NoiseShaperLearner>(*this, audioCaptureQueue);
-            noiseShaperLearner->setLearningMode(pendingLearningMode.load(std::memory_order_acquire));
+            noiseShaperLearner->setLearningMode(convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire));
             resetLearningControlState();
         }
 
@@ -485,28 +485,28 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
 
         DBG_LOG("Noise Shaper changed: " + typeName);
         enqueueSnapshotCommand();
-        const double sr = currentSampleRate.load();
+        const double sr = convo::consumeAtomic(currentSampleRate);
         if (!m_isRestoringState && sr > 0.0)
         {
-            const int queuedGeneration = rebuildGeneration.load(std::memory_order_acquire);
-            const int committedGeneration = lastCommittedRebuildGeneration.load(std::memory_order_acquire);
+            const int queuedGeneration = convo::consumeAtomic(rebuildGeneration, std::memory_order_acquire);
+            const int committedGeneration = convo::consumeAtomic(lastCommittedRebuildGeneration, std::memory_order_acquire);
             const bool outstandingRebuild = queuedGeneration > committedGeneration;
             const bool shouldDeferRebuild =
                 outstandingRebuild
                 ||
                 uiConvolverProcessor.isLoadingIR()
-                || deferredStructuralRebuildPending_.load(std::memory_order_acquire)
-                || m_pendingIRChange.load(std::memory_order_acquire)
+                || hasRebuildReason(RebuildReason::DeferredStructural)
+                || convo::consumeAtomic(m_pendingIRChange, std::memory_order_acquire)
                 || (uiConvolverProcessor.isIRLoaded() && !uiConvolverProcessor.isIRFinalized());
 
             if (shouldDeferRebuild)
             {
-                deferredFinalizeAwareRebuildPending_.store(true, std::memory_order_release);
+                setRebuildReason(RebuildReason::DeferredFinalizeAware);
                 diagLog("[DIAG] setNoiseShaperType: deferred rebuild until IR finalized");
             }
             else
             {
-                requestRebuild(sr, maxSamplesPerBlock.load());
+                requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock));
             }
         }
     }
@@ -514,58 +514,58 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
 
 void AudioEngine::requestSnapshotForNoiseShaper()
 {
-    m_pendingNSChange.store(true, std::memory_order_release);
+    convo::publishAtomic(m_pendingNSChange, true, std::memory_order_release);
     (void)enqueueSnapshotCommand();
 }
 
 AudioEngine::NoiseShaperType AudioEngine::getNoiseShaperType() const
 {
-    return noiseShaperType.load();
+    return convo::consumeAtomic(noiseShaperType);
 }
 
 void AudioEngine::setFixedNoiseLogIntervalMs(int intervalMs) noexcept
 {
-    fixedNoiseLogIntervalMs.store(juce::jlimit(250, 10000, intervalMs), std::memory_order_relaxed);
+    convo::publishAtomic(fixedNoiseLogIntervalMs, juce::jlimit(250, 10000, intervalMs), std::memory_order_release);
 }
 
 int AudioEngine::getFixedNoiseLogIntervalMs() const noexcept
 {
-    return fixedNoiseLogIntervalMs.load(std::memory_order_relaxed);
+    return convo::consumeAtomic(fixedNoiseLogIntervalMs, std::memory_order_acquire);
 }
 
 void AudioEngine::setFixedNoiseWindowSamples(int windowSamples) noexcept
 {
-    fixedNoiseWindowSamples.store(juce::jlimit(256, 262144, windowSamples), std::memory_order_relaxed);
+    convo::publishAtomic(fixedNoiseWindowSamples, juce::jlimit(256, 262144, windowSamples), std::memory_order_release);
 }
 
 int AudioEngine::getFixedNoiseWindowSamples() const noexcept
 {
-    return fixedNoiseWindowSamples.load(std::memory_order_relaxed);
+    return convo::consumeAtomic(fixedNoiseWindowSamples, std::memory_order_acquire);
 }
 
 void AudioEngine::setSoftClipEnabled(bool enabled)
 {
-    softClipEnabled.store(enabled, std::memory_order_relaxed);
-    m_currentSoftClipEnabled.store(enabled, std::memory_order_relaxed);
+    convo::publishAtomic(softClipEnabled, enabled, std::memory_order_release);
+    convo::publishAtomic(m_currentSoftClipEnabled, enabled, std::memory_order_release);
     enqueueSnapshotCommand();
 }
 
 bool AudioEngine::isSoftClipEnabled() const
 {
-    return softClipEnabled.load(std::memory_order_relaxed);
+    return convo::consumeAtomic(softClipEnabled, std::memory_order_acquire);
 }
 
 void AudioEngine::setSaturationAmount(float amount)
 {
     const float clamped = juce::jlimit(0.0f, 1.0f, amount);
-    saturationAmount.store(clamped, std::memory_order_relaxed);
-    m_currentSaturationAmount.store(clamped, std::memory_order_relaxed);
+    convo::publishAtomic(saturationAmount, clamped, std::memory_order_release);
+    convo::publishAtomic(m_currentSaturationAmount, clamped, std::memory_order_release);
     enqueueSnapshotCommand();
 }
 
 float AudioEngine::getSaturationAmount() const
 {
-    return saturationAmount.load(std::memory_order_relaxed);
+    return convo::consumeAtomic(saturationAmount, std::memory_order_acquire);
 }
 
 void AudioEngine::setOversamplingFactor(int factor)
@@ -577,39 +577,39 @@ void AudioEngine::setOversamplingFactor(int factor)
         newFactor = factor;
     }
 
-    if (manualOversamplingFactor.load() != newFactor)
+    if (convo::consumeAtomic(manualOversamplingFactor) != newFactor)
     {
-        manualOversamplingFactor.store(newFactor);
-        m_currentOversamplingFactor.store(newFactor, std::memory_order_relaxed);
+        convo::publishAtomic(manualOversamplingFactor, newFactor);
+        convo::publishAtomic(m_currentOversamplingFactor, newFactor, std::memory_order_release);
         enqueueSnapshotCommand();
-        const double sr = currentSampleRate.load();
+        const double sr = convo::consumeAtomic(currentSampleRate);
         if (!m_isRestoringState && sr > 0.0)
         {
-            requestRebuild(sr, maxSamplesPerBlock.load());
+            requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock));
         }
     }
 }
 
 int AudioEngine::getOversamplingFactor() const
 {
-    return manualOversamplingFactor.load();
+    return convo::consumeAtomic(manualOversamplingFactor);
 }
 
 void AudioEngine::setOversamplingType(OversamplingType type)
 {
-    oversamplingType.store(type);
-    m_currentOversamplingType.store(type, std::memory_order_relaxed);
+    convo::publishAtomic(oversamplingType, type);
+    convo::publishAtomic(m_currentOversamplingType, type, std::memory_order_release);
     enqueueSnapshotCommand();
-    const double sr = currentSampleRate.load();
+    const double sr = convo::consumeAtomic(currentSampleRate);
     if (!m_isRestoringState && sr > 0.0)
     {
-        requestRebuild(sr, maxSamplesPerBlock.load());
+        requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock));
     }
 }
 
 AudioEngine::OversamplingType AudioEngine::getOversamplingType() const
 {
-    return oversamplingType.load();
+    return convo::consumeAtomic(oversamplingType);
 }
 
 //──────────────────────────────────────────────────────────────────────────
@@ -617,41 +617,41 @@ AudioEngine::OversamplingType AudioEngine::getOversamplingType() const
 //──────────────────────────────────────────────────────────────────────────
 void AudioEngine::setConvHCFilterMode(convo::HCMode mode) noexcept
 {
-    convHCFilterMode.store(mode, std::memory_order_relaxed);
+    convo::publishAtomic(convHCFilterMode, mode, std::memory_order_release);
     // NUC irFreqDomain を再焼き込みするため、uiConvolverProcessor を再構築する。
     // DSPCore::convolver は次回 requestRebuild 時に syncStateFrom + rebuildAllIRsSynchronous で追従する。
     uiConvolverProcessor.setNUCFilterModes(
-        convHCFilterMode.load(std::memory_order_relaxed),
-        convLCFilterMode.load(std::memory_order_relaxed));
+        convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire),
+        convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire));
 }
 
 convo::HCMode AudioEngine::getConvHCFilterMode() const noexcept
 {
-    return convHCFilterMode.load(std::memory_order_relaxed);
+    return convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire);
 }
 
 void AudioEngine::setConvLCFilterMode(convo::LCMode mode) noexcept
 {
-    convLCFilterMode.store(mode, std::memory_order_relaxed);
+    convo::publishAtomic(convLCFilterMode, mode, std::memory_order_release);
     // HC と組み合わせて NUC を再構築
     uiConvolverProcessor.setNUCFilterModes(
-        convHCFilterMode.load(std::memory_order_relaxed),
-        convLCFilterMode.load(std::memory_order_relaxed));
+        convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire),
+        convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire));
 }
 
 convo::LCMode AudioEngine::getConvLCFilterMode() const noexcept
 {
-    return convLCFilterMode.load(std::memory_order_relaxed);
+    return convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire);
 }
 
 void AudioEngine::setEqLPFFilterMode(convo::HCMode mode) noexcept
 {
-    eqLPFFilterMode.store(mode, std::memory_order_relaxed);
+    convo::publishAtomic(eqLPFFilterMode, mode, std::memory_order_release);
 }
 
 convo::HCMode AudioEngine::getEqLPFFilterMode() const noexcept
 {
-    return eqLPFFilterMode.load(std::memory_order_relaxed);
+    return convo::consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
 }
 
 #endif // defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PARAMETERS)

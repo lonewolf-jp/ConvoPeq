@@ -12,6 +12,8 @@
 #include "EpochCore.h"
 #include "SnapshotFactory.h"
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo {
 
 enum class FadeState : uint8_t {
@@ -32,35 +34,35 @@ public:
     explicit SnapshotCoordinator(EpochCore& epochCore) noexcept
         : m_epochCore(epochCore), m_current(nullptr)
     {
-        m_current.store(nullptr, std::memory_order_relaxed);
-        m_target.store(nullptr, std::memory_order_relaxed);
-        m_fadeAlpha.store(1.0, std::memory_order_relaxed);
-        m_fadeState.store(FadeState::Idle, std::memory_order_relaxed);
-        m_fadeTotalSamples.store(0, std::memory_order_relaxed);
-        m_fadeRemainingSamples.store(0, std::memory_order_relaxed);
-        m_fadeCompleted.store(false, std::memory_order_relaxed);
+        convo::publishAtomic(m_current, nullptr, std::memory_order_release);
+        convo::publishAtomic(m_target, nullptr, std::memory_order_release);
+        convo::publishAtomic(m_fadeAlpha, 1.0, std::memory_order_release);
+        convo::publishAtomic(m_fadeState, FadeState::Idle, std::memory_order_release);
+        convo::publishAtomic(m_fadeTotalSamples, 0, std::memory_order_release);
+        convo::publishAtomic(m_fadeRemainingSamples, 0, std::memory_order_release);
+        convo::publishAtomic(m_fadeCompleted, false, std::memory_order_release);
     }
 
     ~SnapshotCoordinator() noexcept {
-        const GlobalSnapshot* snap = m_current.load(std::memory_order_acquire);
+        GlobalSnapshot* snap = convo::consumeAtomic(m_current, std::memory_order_acquire);
         if (snap)
             SnapshotFactory::destroy(snap);
-        snap = m_target.load(std::memory_order_acquire);
+        snap = convo::consumeAtomic(m_target, std::memory_order_acquire);
         if (snap)
             SnapshotFactory::destroy(snap);
     }
 
-    const GlobalSnapshot* getCurrent() const noexcept {
-        return m_current.load(std::memory_order_acquire);
+    GlobalSnapshot* getCurrent() const noexcept {
+        return convo::consumeAtomic(m_current, std::memory_order_acquire);
     }
 
-    void switchImmediate(const GlobalSnapshot* newSnap) noexcept {
+    void switchImmediate(GlobalSnapshot* newSnap) noexcept {
         abortFade();
-        const GlobalSnapshot* oldSnap = m_current.exchange(newSnap, std::memory_order_release);
+        GlobalSnapshot* oldSnap = convo::exchangeAtomic(m_current, newSnap, std::memory_order_release);
         if (oldSnap) {
             uint64_t newEpoch = m_epochCore.publish();
             m_deletionQueue.enqueue(
-                const_cast<GlobalSnapshot*>(oldSnap),
+                oldSnap,
                 [](void* ptr) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr)); },
                 newEpoch,
                 DeletionEntryType::Generic
@@ -68,23 +70,23 @@ public:
         }
     }
 
-    void startFade(const GlobalSnapshot* target, int fadeSamples) noexcept;
+    void startFade(GlobalSnapshot* target, int fadeSamples) noexcept;
 
     bool updateFade(float& outAlpha,
                     const GlobalSnapshot*& outCurrent,
                     const GlobalSnapshot*& outTarget) noexcept
     {
-        const FadeState state = m_fadeState.load(std::memory_order_acquire);
+        const FadeState state = convo::consumeAtomic(m_fadeState, std::memory_order_acquire);
         if (state == FadeState::Idle)
         {
             outAlpha = 1.0f;
-            outCurrent = m_current.load(std::memory_order_acquire);
+            outCurrent = convo::consumeAtomic(m_current, std::memory_order_acquire);
             outTarget = nullptr;
             return false;
         }
 
-        outCurrent = m_current.load(std::memory_order_acquire);
-        outTarget = m_target.load(std::memory_order_acquire);
+        outCurrent = convo::consumeAtomic(m_current, std::memory_order_acquire);
+        outTarget = convo::consumeAtomic(m_target, std::memory_order_acquire);
         if (outTarget == nullptr)
         {
             abortFade();
@@ -93,7 +95,7 @@ public:
             return false;
         }
 
-        const double alpha = m_fadeAlpha.load(std::memory_order_acquire);
+        const double alpha = convo::consumeAtomic(m_fadeAlpha, std::memory_order_acquire);
         outAlpha = equalPowerSinApprox(static_cast<float>(alpha));
         return true;
     }
@@ -103,7 +105,7 @@ public:
 
     bool isFading() const noexcept
     {
-        return m_fadeState.load(std::memory_order_acquire) != FadeState::Idle;
+        return convo::consumeAtomic(m_fadeState, std::memory_order_acquire) != FadeState::Idle;
     }
 
 private:
@@ -112,8 +114,8 @@ private:
     void completeFade() noexcept;
 
     EpochCore& m_epochCore;
-    std::atomic<const GlobalSnapshot*> m_current{nullptr};
-    std::atomic<const GlobalSnapshot*> m_target{nullptr};
+    std::atomic<GlobalSnapshot*> m_current{nullptr};
+    std::atomic<GlobalSnapshot*> m_target{nullptr};
     std::atomic<double> m_fadeAlpha{1.0};
     std::atomic<FadeState> m_fadeState{FadeState::Idle};
     std::atomic<int> m_fadeTotalSamples{0};

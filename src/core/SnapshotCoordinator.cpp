@@ -4,9 +4,11 @@
 
 #include "SnapshotCoordinator.h"
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo {
 
-void SnapshotCoordinator::startFade(const GlobalSnapshot* target, int fadeSamples) noexcept
+void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noexcept
 {
 	if (target == nullptr || fadeSamples <= 0)
 	{
@@ -16,69 +18,69 @@ void SnapshotCoordinator::startFade(const GlobalSnapshot* target, int fadeSample
 
 	// 初回適用で current が未初期化の場合は、
 	// null 起点フェードを避けて即時反映する。
-	if (m_current.load(std::memory_order_acquire) == nullptr)
+	if (convo::consumeAtomic(m_current, std::memory_order_acquire) == nullptr)
 	{
 		switchImmediate(target);
 		return;
 	}
 
-	const GlobalSnapshot* oldTarget = m_target.exchange(target, std::memory_order_acq_rel);
+	GlobalSnapshot* oldTarget = convo::exchangeAtomic(m_target, target, std::memory_order_acq_rel);
 	if (oldTarget) {
 		// Audio Thread が参照中の可能性があるため、即時 delete せず RCU 遅延解放
 		const uint64_t retireEpoch = m_epochCore.current();
 		m_deletionQueue.enqueue(
-			const_cast<GlobalSnapshot*>(oldTarget),
-			[](void* p) { SnapshotFactory::destroy(static_cast<const GlobalSnapshot*>(p)); },
+			oldTarget,
+			[](void* p) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(p)); },
 			retireEpoch,
 			DeletionEntryType::Generic
 		);
 	}
 
-	m_fadeTotalSamples.store(fadeSamples, std::memory_order_release);
-	m_fadeRemainingSamples.store(fadeSamples, std::memory_order_release);
-	m_fadeAlpha.store(0.0, std::memory_order_release);
-	m_fadeCompleted.store(false, std::memory_order_release);
-	m_fadeState.store(FadeState::FadingIn, std::memory_order_release);
+	convo::publishAtomic(m_fadeTotalSamples, fadeSamples, std::memory_order_release);
+	convo::publishAtomic(m_fadeRemainingSamples, fadeSamples, std::memory_order_release);
+	convo::publishAtomic(m_fadeAlpha, 0.0, std::memory_order_release);
+	convo::publishAtomic(m_fadeCompleted, false, std::memory_order_release);
+	convo::publishAtomic(m_fadeState, FadeState::FadingIn, std::memory_order_release);
 }
 
 void SnapshotCoordinator::advanceFade(int numSamples) noexcept
 {
-	if (m_fadeState.load(std::memory_order_acquire) != FadeState::FadingIn)
+	if (convo::consumeAtomic(m_fadeState, std::memory_order_acquire) != FadeState::FadingIn)
 		return;
 
-	const int remaining = m_fadeRemainingSamples.load(std::memory_order_acquire);
+	const int remaining = convo::consumeAtomic(m_fadeRemainingSamples, std::memory_order_acquire);
 	if (remaining <= 0)
 		return;
 
 	const int newRemaining = remaining - numSamples;
 	if (newRemaining <= 0)
 	{
-		m_fadeRemainingSamples.store(0, std::memory_order_release);
+		convo::publishAtomic(m_fadeRemainingSamples, 0, std::memory_order_release);
 		requestFadeCompletion();
 		return;
 	}
 
-	m_fadeRemainingSamples.store(newRemaining, std::memory_order_release);
-	const int total = m_fadeTotalSamples.load(std::memory_order_acquire);
+	convo::publishAtomic(m_fadeRemainingSamples, newRemaining, std::memory_order_release);
+	const int total = convo::consumeAtomic(m_fadeTotalSamples, std::memory_order_acquire);
 	if (total > 0)
 	{
 		const double alpha = 1.0 - static_cast<double>(newRemaining) / static_cast<double>(total);
-		m_fadeAlpha.store(alpha, std::memory_order_release);
+		convo::publishAtomic(m_fadeAlpha, alpha, std::memory_order_release);
 	}
 }
 
 void SnapshotCoordinator::requestFadeCompletion() noexcept
 {
-	m_fadeCompleted.store(true, std::memory_order_release);
+	convo::publishAtomic(m_fadeCompleted, true, std::memory_order_release);
 }
 
 bool SnapshotCoordinator::tryCompleteFade() noexcept
 {
-	if (!m_fadeCompleted.exchange(false, std::memory_order_acq_rel))
+	if (!convo::exchangeAtomic(m_fadeCompleted, false, std::memory_order_acq_rel))
 		return false;
 
-	if (m_fadeState.load(std::memory_order_acquire) != FadeState::FadingIn ||
-		m_fadeRemainingSamples.load(std::memory_order_acquire) > 0)
+	if (convo::consumeAtomic(m_fadeState, std::memory_order_acquire) != FadeState::FadingIn ||
+		convo::consumeAtomic(m_fadeRemainingSamples, std::memory_order_acquire) > 0)
 		return false;
 
 	completeFade();
@@ -87,37 +89,37 @@ bool SnapshotCoordinator::tryCompleteFade() noexcept
 
 void SnapshotCoordinator::abortFade() noexcept
 {
-	const GlobalSnapshot* target = m_target.exchange(nullptr, std::memory_order_acq_rel);
+	GlobalSnapshot* target = convo::exchangeAtomic(m_target, nullptr, std::memory_order_acq_rel);
 	if (target)
 		SnapshotFactory::destroy(target);
 
-	m_fadeState.store(FadeState::Idle, std::memory_order_release);
-	m_fadeAlpha.store(1.0, std::memory_order_release);
-	m_fadeRemainingSamples.store(0, std::memory_order_release);
-	m_fadeCompleted.store(false, std::memory_order_release);
+	convo::publishAtomic(m_fadeState, FadeState::Idle, std::memory_order_release);
+	convo::publishAtomic(m_fadeAlpha, 1.0, std::memory_order_release);
+	convo::publishAtomic(m_fadeRemainingSamples, 0, std::memory_order_release);
+	convo::publishAtomic(m_fadeCompleted, false, std::memory_order_release);
 }
 
 void SnapshotCoordinator::completeFade() noexcept
 {
-	const GlobalSnapshot* target = m_target.exchange(nullptr, std::memory_order_acq_rel);
+	GlobalSnapshot* target = convo::exchangeAtomic(m_target, nullptr, std::memory_order_acq_rel);
 	if (!target)
 		return;
 
 	const uint64_t retireEpoch = m_epochCore.publish();
-	const GlobalSnapshot* old = m_current.exchange(target, std::memory_order_acq_rel);
+	GlobalSnapshot* old = convo::exchangeAtomic(m_current, target, std::memory_order_acq_rel);
 	if (old)
 	{
 		m_deletionQueue.enqueue(
-			const_cast<GlobalSnapshot*>(old),
-			[](void* p) { SnapshotFactory::destroy(static_cast<const GlobalSnapshot*>(p)); },
+			old,
+			[](void* p) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(p)); },
 			retireEpoch,
 			DeletionEntryType::Generic);
 	}
 
-	m_fadeState.store(FadeState::Idle, std::memory_order_release);
-	m_fadeAlpha.store(1.0, std::memory_order_release);
-	m_fadeRemainingSamples.store(0, std::memory_order_release);
-	m_fadeCompleted.store(false, std::memory_order_release);
+	convo::publishAtomic(m_fadeState, FadeState::Idle, std::memory_order_release);
+	convo::publishAtomic(m_fadeAlpha, 1.0, std::memory_order_release);
+	convo::publishAtomic(m_fadeRemainingSamples, 0, std::memory_order_release);
+	convo::publishAtomic(m_fadeCompleted, false, std::memory_order_release);
 }
 
 } // namespace convo

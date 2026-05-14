@@ -10,20 +10,24 @@
 #include "AlignedAllocation.h"
 #include <mkl.h>
 
+#include "audioengine/AtomicAccess.h"
+
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE)
 
 void ConvolverProcessor::overflowCallbackThunk(void* userData) noexcept
 {
     auto* self = static_cast<ConvolverProcessor*>(userData);
     bool expected = false;
-    self->overflowRequested.compare_exchange_strong(expected, true,
-                                                    std::memory_order_acq_rel,
-                                                    std::memory_order_relaxed);
+    convo::compareExchangeAtomic(self->overflowRequested,
+                                 expected,
+                                 true,
+                                 std::memory_order_acq_rel,
+                                 std::memory_order_acquire);
 }
 
 const ConvolverProcessor::IRState* ConvolverProcessor::acquireIRState() const noexcept
 {
-    return currentIRState.load(std::memory_order_acquire);
+    return convo::consumeAtomic(currentIRState, std::memory_order_acquire);
 }
 
 void ConvolverProcessor::releaseIRState(const IRState* /*state*/) const noexcept
@@ -31,26 +35,21 @@ void ConvolverProcessor::releaseIRState(const IRState* /*state*/) const noexcept
     // IRState lifetime is managed by deferred retirement.
 }
 
-void ConvolverProcessor::updateIRState(std::shared_ptr<juce::AudioBuffer<double>> newIR, double newSR)
+void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, double newSR)
 {
-    if (!newIR)
-        return;
+    auto uniqueIR = std::make_unique<juce::AudioBuffer<double>>(newIR);
 
-    void* mem = mkl_malloc(sizeof(IRState), 64);
-    if (mem == nullptr)
-    {
-        jassertfalse;
-        return;
-    }
-
-    auto* newState = new (mem) IRState();
-    newState->irOwner = std::move(newIR);
+    auto newState = convo::aligned_make_unique<IRState>();
+    newState->irOwner = std::move(uniqueIR);
     newState->ir = newState->irOwner.get();
     newState->sampleRate = newSR;
-    newState->generation = rcuProvider ? rcuProvider->publishRcuEpoch() : 1;
+    if (auto* provider = getRcuProvider(); provider != nullptr)
+        newState->generation = provider->publishRcuEpoch();
+    else
+        newState->generation = 1;
     std::atomic_thread_fence(std::memory_order_release);
 
-    auto* oldState = currentIRState.exchange(newState, std::memory_order_acq_rel);
+    auto* oldState = convo::exchangeAtomic(currentIRState, newState.release(), std::memory_order_acq_rel);
     if (oldState != nullptr)
     {
         auto deleter = [](void* p)
@@ -60,8 +59,8 @@ void ConvolverProcessor::updateIRState(std::shared_ptr<juce::AudioBuffer<double>
             mkl_free(state);
         };
 
-        if (rcuProvider != nullptr)
-            rcuProvider->enqueueDeferredDeleteNonRt(oldState, deleter);
+        if (auto* provider = getRcuProvider(); provider != nullptr)
+            provider->enqueueDeferredDeleteNonRt(oldState, deleter);
         else
             deleter(oldState);
     }
@@ -69,7 +68,7 @@ void ConvolverProcessor::updateIRState(std::shared_ptr<juce::AudioBuffer<double>
 
 void ConvolverProcessor::StereoConvolver::retireStereoConvolver(StereoConvolver* sc, AudioEngine* provider) noexcept
 {
-    if (!sc || sc->retired.exchange(true, std::memory_order_acq_rel))
+    if (!sc || convo::exchangeAtomic(sc->retired, true, std::memory_order_acq_rel))
         return;
 
     if (provider != nullptr)
@@ -83,7 +82,7 @@ void ConvolverProcessor::StereoConvolver::retireStereoConvolver(StereoConvolver*
 
 void ConvolverProcessor::retireStereoConvolver(StereoConvolver* conv, uint64_t /*retireEpoch*/)
 {
-    StereoConvolver::retireStereoConvolver(conv, rcuProvider);
+    StereoConvolver::retireStereoConvolver(conv, getRcuProvider());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -92,9 +91,9 @@ void ConvolverProcessor::retireStereoConvolver(StereoConvolver* conv, uint64_t /
 ConvolverProcessor::ConvolverProcessor()
     : mixSmoother(1.0)
 {
-    irConverter = std::make_unique<IRConverter>();
+    irConverter = convo::aligned_make_unique<IRConverter>();
 
-    cacheManager = std::make_unique<CacheManager>();
+    cacheManager = convo::aligned_make_unique<CacheManager>();
     cacheManager->setSafeDeleteChecker([this](uint64_t key, int fftSize)
     {
         return this->isCacheEntrySafeToDelete(key, fftSize);
@@ -117,10 +116,10 @@ ConvolverProcessor::~ConvolverProcessor()
 
     // Destructor runs after AudioEngine destructor body.
     // Do not enqueue to global deferred queue here because final reclaim may have already happened.
-    auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
-    StereoConvolver::retireStereoConvolver(oldConv, rcuProvider);
+    auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel);
+    StereoConvolver::retireStereoConvolver(oldConv, getRcuProvider());
 
-    auto* oldIrState = currentIRState.exchange(nullptr, std::memory_order_acq_rel);
+    auto* oldIrState = convo::exchangeAtomic(currentIRState, nullptr, std::memory_order_acq_rel);
     if (oldIrState != nullptr)
     {
         oldIrState->~IRState();
@@ -128,7 +127,7 @@ ConvolverProcessor::~ConvolverProcessor()
     }
 
     // Clean up latency snapshot pointer
-    auto* oldSnap = cachedLatency.exchange(nullptr, std::memory_order_acq_rel);
+    auto* oldSnap = convo::exchangeAtomic(cachedLatency, nullptr, std::memory_order_acq_rel);
     delete oldSnap;
 
     if (fftHandle.get() != nullptr) {
@@ -145,7 +144,7 @@ ConvolverProcessor::~ConvolverProcessor()
 void ConvolverProcessor::timerCallback()
 {
     static int lastReportedClampCount = 0;
-    const int currentClampCount = g_totalLatencyClampCount.load(std::memory_order_relaxed);
+    const int currentClampCount = convo::consumeAtomic(g_totalLatencyClampCount, std::memory_order_acquire);
     if (currentClampCount != lastReportedClampCount)
     {
         juce::Logger::writeToLog("ConvolverProcessor: Latency clamp triggered (total: "
@@ -154,10 +153,10 @@ void ConvolverProcessor::timerCallback()
     }
 
     // ★ リングバッファオーバーフローによるリビルド要求を処理 (Audio Thread からは呼ばれない)
-    if (rebuildPendingAfterLoad.load(std::memory_order_acquire))
+    if (convo::consumeAtomic(rebuildPendingAfterLoad, std::memory_order_acquire))
     {
-        if (!isLoading.load(std::memory_order_acquire) &&
-            !isRebuilding.load(std::memory_order_acquire))
+        if (!convo::consumeAtomic(isLoading, std::memory_order_acquire) &&
+            !convo::consumeAtomic(isRebuilding, std::memory_order_acquire))
         {
             juce::File irFile;
             {
@@ -166,13 +165,13 @@ void ConvolverProcessor::timerCallback()
             }
             if (irFile.existsAsFile())
             {
-                rebuildPendingAfterLoad.store(false, std::memory_order_release);
+                convo::publishAtomic(rebuildPendingAfterLoad, false, std::memory_order_release);
                 loadImpulseResponse(irFile, false);
             }
         }
     }
 
-    auto* provider = rcuProvider;
+    auto* provider = getRcuProvider();
     if (provider)
         provider->tryReclaimResources();
 
@@ -190,18 +189,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         ~GlobalGuard() { cp.exitGlobalReader(2); }
     } guard(*this);
 
-    isPrepared.store(false, std::memory_order_release);
+    convo::publishAtomic(isPrepared, false, std::memory_order_release);
 
     if (fftHandle.get() != nullptr) {
         fftHandle.reset();
         fftHandleSize = 0;
     }
 
-    const bool rateChanged = (std::abs(currentSampleRate.load() - sampleRate) > 1e-6);
-    const bool blockChanged = (currentBufferSize.load(std::memory_order_relaxed) != samplesPerBlock);
+    const bool rateChanged = (std::abs(convo::consumeAtomic(currentSampleRate) - sampleRate) > 1e-6);
+    const bool blockChanged = (convo::consumeAtomic(currentBufferSize, std::memory_order_acquire) != samplesPerBlock);
 
-    currentBufferSize.store(samplesPerBlock, std::memory_order_release);
-    currentSampleRate.store(sampleRate, std::memory_order_release);
+    convo::publishAtomic(currentBufferSize, samplesPerBlock, std::memory_order_release);
+    convo::publishAtomic(currentSampleRate, sampleRate, std::memory_order_release);
 
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = sampleRate;
@@ -210,7 +209,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     currentSpec = spec;
 
-    auto* conv = m_activeEngine.load(std::memory_order_acquire);
+    auto* conv = loadActiveEngine(std::memory_order_acquire);
     if (conv) {
         const int internalBlockSize = juce::nextPowerOfTwo(samplesPerBlock);
 
@@ -219,12 +218,11 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
             StereoConvolver* newConv = nullptr;
             try
             {
-                void* mem = convo::aligned_malloc(sizeof(StereoConvolver), 64);
-                new (mem) StereoConvolver();
-                newConv = static_cast<StereoConvolver*>(mem);
+                auto newConvHolder = convo::aligned_make_unique<StereoConvolver>();
+                newConv = newConvHolder.get();
 
-                convo::ScopedAlignedPtr<double> irL(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
-                convo::ScopedAlignedPtr<double> irR(static_cast<double*>(convo::aligned_malloc(conv->irDataLength * sizeof(double), 64)));
+                auto irL = convo::makeAlignedArray<double>(static_cast<size_t>(conv->irDataLength));
+                auto irR = convo::makeAlignedArray<double>(static_cast<size_t>(conv->irDataLength));
                 std::memcpy(irL.get(), conv->irData[0], conv->irDataLength * sizeof(double));
                 std::memcpy(irR.get(), conv->irData[1], conv->irDataLength * sizeof(double));
 
@@ -232,11 +230,12 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
                 if (newConv->init(irL.release(), irR.release(),
                                   conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, conv->storedScale,
-                                  experimentalDirectHeadEnabled.load(std::memory_order_acquire),
+                                  convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire),
                                   nullptr, this))
                 {
-                    const uint64_t retireEpoch = rcuProvider ? rcuProvider->publishRcuEpoch() : 1;
-                    auto* oldConv = m_activeEngine.exchange(newConv, std::memory_order_acq_rel);
+                    newConv = newConvHolder.release();
+                    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
+                    auto* oldConv = exchangeActiveEngine(newConv, std::memory_order_acq_rel);
                     if (oldConv)
                         retireStereoConvolver(oldConv, retireEpoch);
                     updateLatencyCache();
@@ -244,12 +243,10 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 else
                 {
                     juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: NUC re-init failed (MKL alloc?). Keeping existing engine.");
-                    retireStereoConvolver(std::exchange(newConv, nullptr), 0);
                 }
             }
             catch (const std::bad_alloc&)
             {
-                retireStereoConvolver(std::exchange(newConv, nullptr), 0);
                 juce::Logger::writeToLog("ConvolverProcessor::prepareToPlay: NUC re-init failed (std::bad_alloc). Keeping existing engine.");
             }
         }
@@ -258,18 +255,10 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // DelayLine準備
     if (delayBufferCapacity < DELAY_BUFFER_SIZE)
     {
-        auto* newL = static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64));
-        auto* newR = static_cast<double*>(convo::aligned_malloc(DELAY_BUFFER_SIZE * sizeof(double), 64));
-        if (!newL || !newR)
-        {
-            if (newL) convo::aligned_free(newL);
-            if (newR) convo::aligned_free(newR);
-            lastError = "Failed to allocate delay buffers";
-            isPrepared.store(false, std::memory_order_release);
-            return;
-        }
-        delayBuffer[0].reset(newL);
-        delayBuffer[1].reset(newR);
+        auto newL = convo::makeAlignedArray<double>(static_cast<size_t>(DELAY_BUFFER_SIZE));
+        auto newR = convo::makeAlignedArray<double>(static_cast<size_t>(DELAY_BUFFER_SIZE));
+        delayBuffer[0] = std::move(newL);
+        delayBuffer[1] = std::move(newR);
         delayBufferCapacity = DELAY_BUFFER_SIZE;
     }
     juce::FloatVectorOperations::clear(delayBuffer[0].get(), DELAY_BUFFER_SIZE);
@@ -280,18 +269,10 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     auto allocateIfNeeded = [this](convo::ScopedAlignedPtr<double>* storage, int& capacity, const char* name) {
         if (capacity < MAX_BLOCK_SIZE)
         {
-            auto* newL = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
-            auto* newR = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
-            if (!newL || !newR)
-            {
-                if (newL) convo::aligned_free(newL);
-                if (newR) convo::aligned_free(newR);
-                lastError = juce::String("Failed to allocate ") + name;
-                isPrepared.store(false, std::memory_order_release);
-                return false;
-            }
-            storage[0].reset(newL);
-            storage[1].reset(newR);
+            auto newL = convo::makeAlignedArray<double>(static_cast<size_t>(MAX_BLOCK_SIZE));
+            auto newR = convo::makeAlignedArray<double>(static_cast<size_t>(MAX_BLOCK_SIZE));
+            storage[0] = std::move(newL);
+            storage[1] = std::move(newR);
             capacity = MAX_BLOCK_SIZE;
         }
         return true;
@@ -317,26 +298,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // Wet buffers (simple array, not referable buffer)
     if (wetBufferCapacity < MAX_BLOCK_SIZE)
     {
-        auto* newL = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
-        auto* newR = static_cast<double*>(convo::aligned_malloc(MAX_BLOCK_SIZE * sizeof(double), 64));
-        if (!newL || !newR)
-        {
-            if (newL) convo::aligned_free(newL);
-            if (newR) convo::aligned_free(newR);
-            lastError = "Failed to allocate wet buffers";
-            isPrepared.store(false, std::memory_order_release);
-            return;
-        }
-        wetBufferStorage[0].reset(newL);
-        wetBufferStorage[1].reset(newR);
+        auto newL = convo::makeAlignedArray<double>(static_cast<size_t>(MAX_BLOCK_SIZE));
+        auto newR = convo::makeAlignedArray<double>(static_cast<size_t>(MAX_BLOCK_SIZE));
+        wetBufferStorage[0] = std::move(newL);
+        wetBufferStorage[1] = std::move(newR);
         wetBufferCapacity = MAX_BLOCK_SIZE;
     }
     juce::FloatVectorOperations::clear(wetBufferStorage[0].get(), MAX_BLOCK_SIZE);
     juce::FloatVectorOperations::clear(wetBufferStorage[1].get(), MAX_BLOCK_SIZE);
 
     // スムージング時間の設定
-    mixSmoother.reset(sampleRate, static_cast<double>(smoothingTimeSec.load()));
-    mixSmoother.setCurrentAndTargetValue(static_cast<double>(mixTarget.load()));
+    mixSmoother.reset(sampleRate, static_cast<double>(convo::consumeAtomic(smoothingTimeSec)));
+    mixSmoother.setCurrentAndTargetValue(static_cast<double>(convo::consumeAtomic(mixTarget)));
     (void)mixSmoother.getNextValue();
 
     // レイテンシー補正の初期化
@@ -361,15 +334,15 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     if (!deferredFreeThread)
     {
         ThreadAffinityManager* affinityMgr = nullptr;
-        if (rcuProvider != nullptr)
-            affinityMgr = const_cast<ThreadAffinityManager*>(&rcuProvider->getAffinityManager());
+        if (auto* provider = getRcuProvider(); provider != nullptr)
+            affinityMgr = &provider->getAffinityManager();
 
-        deferredFreeThread = std::make_unique<convo::DeferredFreeThread>(rcuSwapper, affinityMgr);
+        deferredFreeThread = convo::aligned_make_unique<convo::DeferredFreeThread>(rcuSwapper, affinityMgr);
     }
 
-    firstProcessCall.store(true, std::memory_order_release);
+    convo::publishAtomic(firstProcessCall, true, std::memory_order_release);
 
-    isPrepared.store(true, std::memory_order_release);
+    convo::publishAtomic(isPrepared, true, std::memory_order_release);
     updateLatencyCache();
     requestHostDisplayUpdate();
 }
@@ -432,12 +405,12 @@ void ConvolverProcessor::releaseResources()
     }
 
     // Release active convolution engine
-    const uint64_t retireEpoch = rcuProvider ? rcuProvider->publishRcuEpoch() : 1;
-    auto* oldConv = m_activeEngine.exchange(nullptr, std::memory_order_acq_rel);
+    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
+    auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel);
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
 
-    auto* oldIrState = currentIRState.exchange(nullptr, std::memory_order_acq_rel);
+    auto* oldIrState = convo::exchangeAtomic(currentIRState, nullptr, std::memory_order_acq_rel);
     if (oldIrState != nullptr)
     {
         oldIrState->~IRState();
@@ -453,7 +426,7 @@ void ConvolverProcessor::releaseResources()
 
     runtime.clear();
 
-    isPrepared.store(false, std::memory_order_release);
+    convo::publishAtomic(isPrepared, false, std::memory_order_release);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -467,7 +440,7 @@ void ConvolverProcessor::reset()
         ~GlobalGuard() { cp.exitGlobalReader(2); }
     } guard(*this);
 
-    auto* conv = m_activeEngine.load(std::memory_order_acquire);
+    auto* conv = loadActiveEngine(std::memory_order_acquire);
     if (conv)
         conv->reset();
 
@@ -477,9 +450,9 @@ void ConvolverProcessor::reset()
 
     dryBuffer.clear();
     smoothingBuffer.clear();
-    mixSmootherResetPending.store(true, std::memory_order_release);
-    pendingLatencyValue.store(latencySmoother.getTargetValue());
-    latencyResetPending.store(true, std::memory_order_release);
+    convo::publishAtomic(mixSmootherResetPending, true, std::memory_order_release);
+    convo::publishAtomic(pendingLatencyValue, latencySmoother.getTargetValue());
+    convo::publishAtomic(latencyResetPending, true, std::memory_order_release);
 }
 
 #endif // CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE

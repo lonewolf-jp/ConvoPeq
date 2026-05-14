@@ -42,7 +42,7 @@ public:
                                int phaseMode,
                                int partitionSize);
 
-    std::unique_ptr<PreparedIRState> load(uint64_t key, int fftSize, uint64_t generationId);
+    std::unique_ptr<PreparedIRState> loadPreparedState(uint64_t key, int fftSize, uint64_t generationId);
     void save(uint64_t key, int fftSize, const PreparedIRState& state);
     void touch(uint64_t key, int fftSize);
     void setSafeDeleteChecker(SafeDeleteFn checker);
@@ -71,10 +71,10 @@ private:
     juce::File getCacheFile(uint64_t key, int fftSize) const;
     bool validateCacheFile(const juce::File& file, uint64_t expectedKey, int expectedFftSize, CacheHeader& headerOut) const;
 
-    bool isEntrySafeToDelete(uint64_t key, int fftSize) const;
+    bool isEntrySafeToDelete(uint64_t key, int fftSize);
 
     std::unordered_map<uint64_t, CacheEntry> cacheMap;
     std::list<uint64_t> lruList;
-    mutable std::mutex cacheMutex;
+    std::mutex cacheMutex;
     SafeDeleteFn safeDeleteChecker;
 };

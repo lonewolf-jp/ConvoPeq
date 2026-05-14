@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstring>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo {
 
 namespace {
@@ -120,10 +122,10 @@ uint64_t SnapshotFactory::computeContentHash(const SnapshotParams& params) noexc
     return h;
 }
 
-const GlobalSnapshot* SnapshotFactory::createImpl(const SnapshotParams& pending,
-                                                  const GlobalSnapshot* current,
-                                                  uint64_t generation,
-                                                  double sampleRate) noexcept
+GlobalSnapshot* SnapshotFactory::createImpl(const SnapshotParams& pending,
+                                            GlobalSnapshot* current,
+                                            uint64_t generation,
+                                            double sampleRate) noexcept
 {
     SnapshotParams params = pending;
     if (sampleRate > 0.0)
@@ -141,27 +143,25 @@ const GlobalSnapshot* SnapshotFactory::createImpl(const SnapshotParams& pending,
     return create(params);
 }
 
-const GlobalSnapshot* SnapshotFactory::create(const SnapshotParams& params)
+GlobalSnapshot* SnapshotFactory::create(const SnapshotParams& params)
 {
     GlobalSnapshot* snap = new GlobalSnapshot(params);
 
     // contentHash は GlobalSnapshot コンストラクタで設定済み
 
 #ifdef _DEBUG
-    const_cast<GlobalSnapshot*>(snap)->alive.store(true, std::memory_order_release);
-    g_liveSnapshotCount.fetch_add(1, std::memory_order_relaxed);
+    g_liveSnapshotCount.fetch_add(1, std::memory_order_acq_rel);
 #endif
 
     return snap;
 }
 
-void SnapshotFactory::destroy(const GlobalSnapshot* snap) noexcept
+void SnapshotFactory::destroy(GlobalSnapshot* snap) noexcept
 {
     if (!snap) return;
 
 #ifdef _DEBUG
-    const_cast<GlobalSnapshot*>(snap)->alive.store(false, std::memory_order_release);
-    g_liveSnapshotCount.fetch_sub(1, std::memory_order_relaxed);
+    g_liveSnapshotCount.fetch_sub(1, std::memory_order_acq_rel);
 #endif
 
     delete snap;

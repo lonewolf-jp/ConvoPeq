@@ -6,6 +6,8 @@
 
 #include "AlignedAllocation.h"
 
+#include "audioengine/AtomicAccess.h"
+
 class CustomInputOversampler
 {
 public:
@@ -17,6 +19,7 @@ public:
 
     static constexpr bool isLinearPhaseFIR = true;
     static constexpr bool isSymmetricUpDown = true;
+    static constexpr int kMaxChannels = 2;
 
     CustomInputOversampler() = default;
     ~CustomInputOversampler();
@@ -28,7 +31,7 @@ public:
     void reset() noexcept;
     void release() noexcept;
 
-    juce::dsp::AudioBlock<double> processUp(const juce::dsp::AudioBlock<double>& inputBlock, int numChannels) noexcept;
+    juce::dsp::AudioBlock<double> processUp(juce::dsp::AudioBlock<double>& inputBlock, int numChannels) noexcept;
     void processDown(const juce::dsp::AudioBlock<double>& upsampledBlock,
                      juce::dsp::AudioBlock<double>& outputBlock,
                      int numChannels) noexcept;
@@ -36,7 +39,7 @@ public:
     // 異常フラグを取得してリセットする (Audio Thread 安全)
     bool consumeCorruptionFlag() noexcept
     {
-        return corruptionDetected.exchange(false, std::memory_order_acq_rel);
+        return convo::exchangeAtomic(corruptionDetected, false, std::memory_order_acq_rel);
     }
 
     // 全ステージ履歴をゼロクリアして異常フラグを解除する
@@ -99,6 +102,6 @@ private:
     convo::ScopedAlignedPtr<double> workB[2];
     int workCapacity = 0;
 
-    double* blockChannels[2] = { nullptr, nullptr };
+    std::array<convo::NonOwningPtr<double>, kMaxChannels> blockChannels {};
     std::atomic<bool> corruptionDetected { false };
 };

@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <type_traits>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo {
 
 struct ParameterCommand {
@@ -34,24 +36,24 @@ class SPSCRingBuffer {
 
 public:
     bool push(const T& item) noexcept {
-        const size_t w = writeIndex.load(std::memory_order_relaxed);
-        const size_t r = readIndex.load(std::memory_order_acquire);
+        const size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
+        const size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         if ((w - r) >= Capacity)
             return false;
 
         buffer[w & mask] = item;
-        writeIndex.store(w + 1, std::memory_order_release);
+        convo::publishAtomic(writeIndex, w + 1, std::memory_order_release);
         return true;
     }
 
     bool pop(T& item) noexcept {
-        const size_t r = readIndex.load(std::memory_order_relaxed);
-        const size_t w = writeIndex.load(std::memory_order_acquire);
+        const size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
+        const size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
         if (r == w)
             return false;
 
         item = buffer[r & mask];
-        readIndex.store(r + 1, std::memory_order_release);
+        convo::publishAtomic(readIndex, r + 1, std::memory_order_release);
         return true;
     }
 

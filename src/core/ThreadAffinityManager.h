@@ -11,6 +11,8 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+
+#include "audioengine/AtomicAccess.h"
 #endif
 
 enum class ThreadType
@@ -50,7 +52,7 @@ public:
     void applyMessageThreadPolicy() const noexcept
     {
 #ifdef _WIN32
-        if (!initialized_.load(std::memory_order_acquire))
+        if (!convo::consumeAtomic(initialized_, std::memory_order_acquire))
             return;
 
         if (masks_.ui != 0)
@@ -64,7 +66,7 @@ public:
     void applyCurrentThreadPolicy(ThreadType type, int evalWorkerIndex = 0) const noexcept
     {
 #ifdef _WIN32
-        if (!initialized_.load(std::memory_order_acquire))
+        if (!convo::consumeAtomic(initialized_, std::memory_order_acquire))
             return;
 
         DWORD_PTR mask = 0;

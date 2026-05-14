@@ -50,48 +50,32 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
         {
             std::lock_guard<std::mutex> lk(rebuildMutex);
             diagLog("[DIAG] convolverParamsChanged: enter");
-            if (activeDSP)
+
+            const bool uiHasIr = uiConvolverProcessor.isIRLoaded();
+            const bool committedHasIr = convo::consumeAtomic(lastCommittedConvolverHasIr_, std::memory_order_acquire);
+            uiHasIrForRebuild = uiHasIr;
+            dspHasIrForRebuild = committedHasIr;
+
+            if (uiHasIr)
+                uiStructuralHash = uiConvolverProcessor.getStructuralHash();
+
+            needsStructuralRebuild = (uiHasIr != committedHasIr);
+
+            if (!needsStructuralRebuild && uiHasIr)
             {
-                activeDSP->convolverRt().syncParametersFrom(uiConvolverProcessor);
-
-                const bool uiHasIr = uiConvolverProcessor.isIRLoaded();
-                const bool dspHasIr = activeDSP->convolverRt().isIRLoaded();
-                uiHasIrForRebuild = uiHasIr;
-                dspHasIrForRebuild = dspHasIr;
-
-                if (uiHasIr)
-                    uiStructuralHash = uiConvolverProcessor.getStructuralHash();
-
-                needsStructuralRebuild = (uiHasIr != dspHasIr);
-
-                if (!needsStructuralRebuild && uiHasIr)
-                {
-                    needsStructuralRebuild =
-                                activeDSP->convolverRt().getIRName() != uiConvolverProcessor.getIRName()
-                            || activeDSP->convolverRt().getIRLength() != uiConvolverProcessor.getIRLength()
-                            || activeDSP->convolverRt().getPhaseMode() != uiConvolverProcessor.getPhaseMode()
-                            || activeDSP->convolverRt().getExperimentalDirectHeadEnabled() != uiConvolverProcessor.getExperimentalDirectHeadEnabled()
-                            || std::abs(activeDSP->convolverRt().getTargetIRLength() - uiConvolverProcessor.getTargetIRLength()) > 0.001f;
-                }
-            }
-            else
-            {
-                needsStructuralRebuild = uiConvolverProcessor.isIRLoaded();
-                uiHasIrForRebuild = needsStructuralRebuild;
-                dspHasIrForRebuild = false;
-                if (needsStructuralRebuild)
-                    uiStructuralHash = uiConvolverProcessor.getStructuralHash();
+                const uint64_t committedStructuralHash = convo::consumeAtomic(lastCommittedConvolverStructuralHash_, std::memory_order_acquire);
+                needsStructuralRebuild = (uiStructuralHash != committedStructuralHash);
             }
 
             if (needsStructuralRebuild)
-                srForRebuild = currentSampleRate.load(std::memory_order_acquire);
+                srForRebuild = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         }
 
         // 同一構造ハッシュで再通知が来ても、重い Structural rebuild を再発火させない。
         // これにより IR 読み込み後の rebuild 連鎖（CPU スパイク）を抑止する。
         if (needsStructuralRebuild && uiStructuralHash != 0)
         {
-            const uint64_t prevHash = lastIssuedConvolverStructuralHash_.load(std::memory_order_acquire);
+            const uint64_t prevHash = convo::consumeAtomic(lastIssuedConvolverStructuralHash_, std::memory_order_acquire);
             if (prevHash == uiStructuralHash)
             {
                 diagLog("[DIAG] convolverParamsChanged: BLOCKED by hash dedup hash="
@@ -99,7 +83,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
                 needsStructuralRebuild = false;
             }
             else
-                lastIssuedConvolverStructuralHash_.store(uiStructuralHash, std::memory_order_release);
+                convo::publishAtomic(lastIssuedConvolverStructuralHash_, uiStructuralHash, std::memory_order_release);
                         diagLog("[DIAG] convolverParamsChanged: requestRebuild Structural hash="
                             + juce::String::toHexString((int64_t) uiStructuralHash)
                             + " irName=" + uiConvolverProcessor.getIRName());
@@ -113,9 +97,9 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 
             if (appliedTicks > 0 && (nowTicks - appliedTicks) < minDeltaTicks)
             {
-                deferredStructuralRebuildPending_.store(true, std::memory_order_release);
-                deferredStructuralRebuildDueTicks_.store(appliedTicks + minDeltaTicks, std::memory_order_release);
-                pendingStructuralRebuildFromNonMT_.store(false, std::memory_order_release);
+                setRebuildReason(RebuildReason::DeferredStructural);
+                convo::publishAtomic(deferredStructuralRebuildDueTicks_, appliedTicks + minDeltaTicks, std::memory_order_release);
+                clearRebuildReason(RebuildReason::StructuralFromNonMT);
                 needsStructuralRebuild = false;
 
                 diagLog("[DIAG] convolverParamsChanged: DEFERRED Structural rebuild after prepared IR apply and cleared pending Structural bit");
@@ -135,7 +119,7 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
             const LearningCommand cmd {
                 LearningCommand::Type::IRChanged,
                 false,
-                pendingLearningMode.load(std::memory_order_acquire),
+                convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire),
                 pendingIRGeneration
             };
 

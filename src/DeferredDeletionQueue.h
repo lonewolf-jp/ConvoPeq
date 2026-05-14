@@ -16,6 +16,8 @@
 #include <type_traits>
 #include "core/EpochCore.h"
 
+#include "audioengine/AtomicAccess.h"
+
 enum class DeletionEntryType : uint8_t {
     Generic = 0
 };
@@ -51,7 +53,7 @@ class DeferredDeletionQueue {
 public:
     DeferredDeletionQueue() noexcept {
         for (uint32_t i = 0; i < kQueueSize; ++i)
-            sequences[i].store(i, std::memory_order_relaxed);
+            convo::publishAtomic(sequences[i], i, std::memory_order_release);
     }
 
     // Audio Thread から呼ばれる。ロックフリー。
@@ -61,26 +63,26 @@ public:
 
     // Audio Thread から呼ばれる。ロックフリー。
     bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept {
-        uint32_t pos = enqueuePos.load(std::memory_order_relaxed);
+        uint32_t pos = convo::consumeAtomic(enqueuePos, std::memory_order_acquire);
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
-            uint32_t seq = seq_atom.load(std::memory_order_acquire);
+            uint32_t seq = convo::consumeAtomic(seq_atom, std::memory_order_acquire);
             intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
 
             if (diff == 0) {
-                if (enqueuePos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                if (enqueuePos.compare_exchange_weak(pos, pos + 1, std::memory_order_acq_rel)) {
                     auto& entry = ringBuffer[pos & kMask];
                     entry.ptr = ptr;
                     entry.deleter = deleter;
                     entry.epoch = epoch;
                     entry.type = type;
-                    seq_atom.store(pos + 1, std::memory_order_release);
+                    convo::publishAtomic(seq_atom, pos + 1, std::memory_order_release);
                     return true;
                 }
             } else if (diff < 0) {
                 return false; // Full
             } else {
-                pos = enqueuePos.load(std::memory_order_relaxed);
+                pos = convo::consumeAtomic(enqueuePos, std::memory_order_acquire);
             }
         }
     }
@@ -88,14 +90,14 @@ public:
     // Message Thread / Timer から呼ばれる。
     void reclaim(const convo::EpochCore& core) {
         constexpr int kMaxScan = 1024;
-        uint32_t deqPos = dequeuePos.load(std::memory_order_relaxed);
+        uint32_t deqPos = convo::consumeAtomic(dequeuePos, std::memory_order_acquire);
         uint32_t scanPos = deqPos;
         int scanned = 0;
         const uint64_t minReaderEpoch = core.getMinReaderEpoch();
 
         while (scanned < kMaxScan) {
             auto& seq_atom = sequences[scanPos & kMask];
-            const uint32_t seq = seq_atom.load(std::memory_order_acquire);
+            const uint32_t seq = convo::consumeAtomic(seq_atom, std::memory_order_acquire);
             const intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(scanPos + 1);
 
             if (diff != 0) {
@@ -114,19 +116,19 @@ public:
                 if (dequeuePos.compare_exchange_weak(deqPos,
                                                      deqPos + 1,
                                                      std::memory_order_release,
-                                                     std::memory_order_relaxed)) {
+                                                     std::memory_order_acquire)) {
                     if (entry.deleter && entry.ptr) {
                         entry.deleter(entry.ptr);
                     }
                     entry.ptr = nullptr;
                     entry.deleter = nullptr;
                     entry.type = DeletionEntryType::Generic;
-                    seq_atom.store(scanPos + kQueueSize, std::memory_order_release);
+                    convo::publishAtomic(seq_atom, scanPos + kQueueSize, std::memory_order_release);
 
                     scanPos = deqPos;
                     scanned = 0;
                 } else {
-                    deqPos = dequeuePos.load(std::memory_order_relaxed);
+                    deqPos = convo::consumeAtomic(dequeuePos, std::memory_order_acquire);
                     scanPos = deqPos;
                     scanned = 0;
                 }
@@ -143,22 +145,22 @@ public:
 
     // Shutdown 専用: epoch 判定を無視して全エントリを回収する。
     void reclaimAllIgnoringEpoch() {
-        uint32_t pos = dequeuePos.load(std::memory_order_relaxed);
+        uint32_t pos = convo::consumeAtomic(dequeuePos, std::memory_order_acquire);
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
-            uint32_t seq = seq_atom.load(std::memory_order_acquire);
+            uint32_t seq = convo::consumeAtomic(seq_atom, std::memory_order_acquire);
             intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
 
             if (diff == 0) {
                 auto& entry = ringBuffer[pos & kMask];
-                if (dequeuePos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                if (dequeuePos.compare_exchange_weak(pos, pos + 1, std::memory_order_acq_rel)) {
                     if (entry.deleter && entry.ptr) {
                         entry.deleter(entry.ptr);
                     }
                     entry.ptr = nullptr;
                     entry.deleter = nullptr;
                     entry.type = DeletionEntryType::Generic;
-                    seq_atom.store(pos + kQueueSize, std::memory_order_release);
+                    convo::publishAtomic(seq_atom, pos + kQueueSize, std::memory_order_release);
                     pos++;
                 }
             } else {

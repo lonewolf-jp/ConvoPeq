@@ -40,10 +40,10 @@ namespace
 
 double AudioEngine::getProcessingSampleRate() const
 {
-    const double sr = currentSampleRate.load();
+    const double sr = convo::consumeAtomic(currentSampleRate);
     if (sr <= 0.0) return 0.0;
 
-    int factor = manualOversamplingFactor.load();
+    int factor = convo::consumeAtomic(manualOversamplingFactor);
     int actualFactor = 1;
 
     if (factor > 0)
@@ -83,8 +83,10 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 {
     LatencyBreakdown breakdown;
 
-    const auto* runtimeGraph = getRuntimeGraphState();
-    auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+    const auto* world = getRuntimePublishWorld();
+    const auto* engineRuntime = getEngineRuntimeState(world);
+    const auto* runtimeGraph = getRuntimeGraphState(world);
+    auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
     if (dsp == nullptr)
         return breakdown;
 
@@ -102,9 +104,9 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
         static_cast<int>(std::lround(estimateOversamplingLatencySamples(
             safeOsFactor,
             dsp->activeOversamplingType,
-            currentSampleRate.load(std::memory_order_acquire)))));
+            convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)))));
 
-    if (!convBypassActive.load(std::memory_order_relaxed))
+    if (!convo::consumeAtomic(convBypassActive, std::memory_order_acquire))
     {
         auto convBreakdown = dsp->convolverRt().getLatencyBreakdown();
 

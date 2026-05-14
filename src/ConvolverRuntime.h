@@ -8,9 +8,9 @@
 
 struct ConvolverRuntime
 {
-    double* overlapBuffer = nullptr;
-    double* inputBuffer = nullptr;
-    double* outputBuffer = nullptr;
+    convo::ScopedAlignedPtr<double> overlapBuffer;
+    convo::ScopedAlignedPtr<double> inputBuffer;
+    convo::ScopedAlignedPtr<double> outputBuffer;
 
     int currentFFTSize = 0;
     int currentNumPartitions = 0;
@@ -19,9 +19,9 @@ struct ConvolverRuntime
 
     void clear() noexcept
     {
-        if (overlapBuffer) { convo::aligned_free(overlapBuffer); overlapBuffer = nullptr; }
-        if (inputBuffer) { convo::aligned_free(inputBuffer); inputBuffer = nullptr; }
-        if (outputBuffer) { convo::aligned_free(outputBuffer); outputBuffer = nullptr; }
+        overlapBuffer.reset();
+        inputBuffer.reset();
+        outputBuffer.reset();
         currentFFTSize = 0;
         currentNumPartitions = 0;
     }
@@ -29,11 +29,11 @@ struct ConvolverRuntime
     void reset() noexcept
     {
         if (overlapBuffer && currentFFTSize > 0)
-            std::memset(overlapBuffer, 0, static_cast<size_t>(currentFFTSize) * sizeof(double));
+            std::memset(overlapBuffer.get(), 0, static_cast<size_t>(currentFFTSize) * sizeof(double));
         if (inputBuffer && currentFFTSize > 0)
-            std::memset(inputBuffer, 0, static_cast<size_t>(currentFFTSize) * sizeof(double));
+            std::memset(inputBuffer.get(), 0, static_cast<size_t>(currentFFTSize) * sizeof(double));
         if (outputBuffer && currentFFTSize > 0)
-            std::memset(outputBuffer, 0, static_cast<size_t>(currentFFTSize) * sizeof(double));
+            std::memset(outputBuffer.get(), 0, static_cast<size_t>(currentFFTSize) * sizeof(double));
     }
 
     void reallocate(int fftSize, int numPartitions)
@@ -47,12 +47,11 @@ struct ConvolverRuntime
         {
             clear();
 
-            const size_t bytes = static_cast<size_t>(fftSize) * sizeof(double);
-            overlapBuffer = static_cast<double*>(convo::aligned_malloc(bytes, 64));
-            inputBuffer = static_cast<double*>(convo::aligned_malloc(bytes, 64));
-            outputBuffer = static_cast<double*>(convo::aligned_malloc(bytes, 64));
+            overlapBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(fftSize));
+            inputBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(fftSize));
+            outputBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(fftSize));
 
-            jassert(overlapBuffer != nullptr && inputBuffer != nullptr && outputBuffer != nullptr);
+            jassert(overlapBuffer.get() != nullptr && inputBuffer.get() != nullptr && outputBuffer.get() != nullptr);
 
             currentFFTSize = fftSize;
             currentNumPartitions = numPartitions;

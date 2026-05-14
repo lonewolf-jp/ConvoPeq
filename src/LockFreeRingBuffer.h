@@ -9,6 +9,8 @@
 #include <cassert>
 #include <utility>
 
+#include "audioengine/AtomicAccess.h"
+
 // T: trivially copyable型のみ
 // Capacity: 2の冪
 
@@ -29,28 +31,28 @@ class LockFreeRingBuffer {
     static constexpr size_t MASK = Capacity - 1;
 public:
     bool push(const T& item) noexcept {
-        size_t w = writeIndex.load(std::memory_order_relaxed);
-        size_t r = readIndex.load(std::memory_order_acquire);
+        size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
+        size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         if ((w - r) >= Capacity) return false; // full
         buffer[w & MASK] = item;
-        writeIndex.store(w + 1, std::memory_order_release);
+        convo::publishAtomic(writeIndex, w + 1, std::memory_order_release);
         return true;
     }
     template<typename Writer>
     bool pushWithWriter(Writer&& writer) noexcept {
-        size_t w = writeIndex.load(std::memory_order_relaxed);
-        size_t r = readIndex.load(std::memory_order_acquire);
+        size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
+        size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         if ((w - r) >= Capacity) return false; // full
         std::forward<Writer>(writer)(buffer[w & MASK]);
-        writeIndex.store(w + 1, std::memory_order_release);
+        convo::publishAtomic(writeIndex, w + 1, std::memory_order_release);
         return true;
     }
     bool pop(T& item) noexcept {
-        size_t r = readIndex.load(std::memory_order_relaxed);
-        size_t w = writeIndex.load(std::memory_order_acquire);
+        size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
+        size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
         if (r == w) return false; // empty
         // Memory ordering contract (SPSC):
-        // - Producer writes buffer slot BEFORE publishing via writeIndex.store(release)
+        // - Producer writes buffer slot BEFORE publishing via convo::publishAtomic(writeIndex, release)
         // - Consumer reads writeIndex(acquire) BEFORE reading buffer slot
         // This guarantees the element is fully written before it is read.
         //
@@ -64,19 +66,19 @@ public:
         // This relies on the producer's writeIndex release and consumer's acquire
         // to establish a happens-before relationship between write and read.
         item = buffer[r & MASK];
-        readIndex.store(r + 1, std::memory_order_release);
+        convo::publishAtomic(readIndex, r + 1, std::memory_order_release);
         return true;
     }
     size_t size() const noexcept {
-        size_t w = writeIndex.load(std::memory_order_acquire);
-        size_t r = readIndex.load(std::memory_order_acquire);
+        size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
+        size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         return w - r;
     }
     // 注意: この関数はスレッドセーフではない。
     // プロデューサーとコンシューマーが完全に停止している状態でのみ呼び出すこと。
     void clear() noexcept {
-        writeIndex.store(0, std::memory_order_seq_cst);
-        readIndex.store(0, std::memory_order_seq_cst);
+        convo::publishAtomic(writeIndex, 0, std::memory_order_seq_cst);
+        convo::publishAtomic(readIndex, 0, std::memory_order_seq_cst);
     }
 };
 

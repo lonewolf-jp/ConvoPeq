@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <immintrin.h>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo
 {
 
@@ -43,23 +45,23 @@ public:
     void setDiagnosticsWindowSamples(uint32_t samples) noexcept
     {
         const uint32_t clamped = std::clamp<uint32_t>(samples, 256u, 262144u);
-        publishWindowSamples.store(clamped, std::memory_order_relaxed);
+        convo::publishAtomic(publishWindowSamples, clamped, std::memory_order_release);
     }
 
     uint32_t getDiagnosticsWindowSamples() const noexcept
     {
-        return publishWindowSamples.load(std::memory_order_relaxed);
+        return convo::consumeAtomic(publishWindowSamples, std::memory_order_acquire);
     }
 
     Diagnostics getDiagnostics() const noexcept
     {
         Diagnostics d;
-        const float meanSqL = meanSqErrorL.load(std::memory_order_relaxed);
-        const float meanSqR = meanSqErrorR.load(std::memory_order_relaxed);
+        const float meanSqL = convo::consumeAtomic(meanSqErrorL, std::memory_order_acquire);
+        const float meanSqR = convo::consumeAtomic(meanSqErrorR, std::memory_order_acquire);
         d.rmsErrorL = std::sqrt(std::max(0.0f, meanSqL));
         d.rmsErrorR = std::sqrt(std::max(0.0f, meanSqR));
-        d.peakAbsError = peakAbsError.load(std::memory_order_relaxed);
-        d.windowSamples = windowSamples.load(std::memory_order_relaxed);
+        d.peakAbsError = convo::consumeAtomic(peakAbsError, std::memory_order_acquire);
+        d.windowSamples = convo::consumeAtomic(windowSamples, std::memory_order_acquire);
         d.bitDepth = currentBitDepth;
         return d;
     }
@@ -188,17 +190,17 @@ private:
             diagPeakAbs = peakAbsBlock;
         diagSampleCount += sampleCountBlock;
 
-        const uint32_t publishWindow = publishWindowSamples.load(std::memory_order_relaxed);
+        const uint32_t publishWindow = convo::consumeAtomic(publishWindowSamples, std::memory_order_acquire);
         if (diagSampleCount >= publishWindow)
         {
             const double invCount = 1.0 / static_cast<double>(diagSampleCount);
             const float meanSqL = static_cast<float>(diagSumSqL * invCount);
             const float meanSqR = hasRightChannel ? static_cast<float>(diagSumSqR * invCount) : 0.0f;
 
-            meanSqErrorL.store(meanSqL, std::memory_order_relaxed);
-            meanSqErrorR.store(meanSqR, std::memory_order_relaxed);
-            peakAbsError.store(static_cast<float>(diagPeakAbs), std::memory_order_relaxed);
-            windowSamples.store(diagSampleCount, std::memory_order_relaxed);
+            convo::publishAtomic(meanSqErrorL, meanSqL, std::memory_order_release);
+            convo::publishAtomic(meanSqErrorR, meanSqR, std::memory_order_release);
+            convo::publishAtomic(peakAbsError, static_cast<float>(diagPeakAbs), std::memory_order_release);
+            convo::publishAtomic(windowSamples, diagSampleCount, std::memory_order_release);
 
             diagSumSqL = 0.0;
             diagSumSqR = 0.0;
@@ -213,10 +215,10 @@ private:
         diagSumSqR = 0.0;
         diagPeakAbs = 0.0;
         diagSampleCount = 0;
-        meanSqErrorL.store(0.0f, std::memory_order_relaxed);
-        meanSqErrorR.store(0.0f, std::memory_order_relaxed);
-        peakAbsError.store(0.0f, std::memory_order_relaxed);
-        windowSamples.store(0u, std::memory_order_relaxed);
+        convo::publishAtomic(meanSqErrorL, 0.0f, std::memory_order_release);
+        convo::publishAtomic(meanSqErrorR, 0.0f, std::memory_order_release);
+        convo::publishAtomic(peakAbsError, 0.0f, std::memory_order_release);
+        convo::publishAtomic(windowSamples, 0u, std::memory_order_release);
     }
 
     inline double absNoLibm(double x) const noexcept

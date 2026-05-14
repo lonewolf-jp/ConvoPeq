@@ -32,8 +32,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    const auto* runtimeGraph = getRuntimeGraphState();
-    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+    const auto* world = getRuntimePublishWorld();
+    const auto* engineRuntime = getEngineRuntimeState(world);
+    const auto* runtimeGraph = getRuntimeGraphState(world);
+    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(buffer);
@@ -51,9 +53,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const convo::GlobalSnapshot* snap = m_coordinator.getCurrent();
     const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap);
 
-    eqBypassActive.store(parameterSnapshot.eqBypassed, std::memory_order_relaxed);
-    convBypassActive.store(parameterSnapshot.convBypassed, std::memory_order_relaxed);
-
     DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 
     // DSPCore 固有の上限チェック (getNextAudioBlock と同様)
@@ -69,7 +68,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     updateAudioThreadSnapshotFade(numSamples, snapshotAlpha, snapshotFrom, snapshotTo);
     (void) snapshotAlpha;
 
-    const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
+    const double engineSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
     {
         applySafeSilentFallback(buffer);
@@ -77,19 +76,12 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
-    DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimeGraph);
-    const auto* engineRuntime = getEngineRuntimeState();
-    const bool atomicUseDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
-    bool useDryAsOld = atomicUseDryAsOld
-        || runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
-    const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
-    const bool hasPendingCrossfade = atomicPendingCrossfade
-        || runtimeCrossfadePending(engineRuntime, runtimeGraph);
-    const int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
+    DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime);
+    bool useDryAsOld = runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
+    const bool hasPendingCrossfade = runtimeCrossfadePending(engineRuntime, runtimeGraph);
     if (processCrossfadeDelayGateIfPending(fading,
                                            useDryAsOld,
                                            hasPendingCrossfade,
-                                           pendingFadeDelayBlocks,
                                            [&]()
     {
         auto fadingState = makeCrossfadeAuxState(procState);
@@ -162,6 +154,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                                                   oldL,
                                                   oldR,
                                                   numSamples,
+                                                                  engineRuntime,
                                                                   runtimeGraph,
                                                   [](double* outL,
                                                      double* outR,

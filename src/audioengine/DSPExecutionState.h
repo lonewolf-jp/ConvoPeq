@@ -7,7 +7,7 @@
 
 namespace convo {
 
-// DSP_THREAD_STATE: Convolver の実行時 mutable 状態。
+// DSP_THREAD_STATE: Convolver の実行時可変状態。
 // audio thread 専有、crossfade 期間中も thread-confined。
 struct ConvolverDSPState
 {
@@ -52,7 +52,7 @@ struct ConvolverDSPState
     convo::RCUReader convRcuReader;
 };
 
-// DSP_THREAD_STATE: EQ の実行時 mutable 状態。
+// DSP_THREAD_STATE: EQ の実行時可変状態。
 struct EQDSPState
 {
     static constexpr int kNumBands = 20;

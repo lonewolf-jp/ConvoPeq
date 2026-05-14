@@ -628,9 +628,7 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
     }
 
     // 3. 作業バッファ: 複素数列 (fftSize 要素)
-    convo::ScopedAlignedPtr<MKL_Complex16> spec(
-        static_cast<MKL_Complex16*>(
-            convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
+    auto spec = convo::makeAlignedArray<MKL_Complex16>(static_cast<size_t>(fftSize));
     if (!spec) { return {}; }
 
     juce::AudioBuffer<double> result(numChannels, irLen);

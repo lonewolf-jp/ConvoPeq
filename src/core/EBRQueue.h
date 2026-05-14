@@ -56,7 +56,7 @@ public:
         retired.resize(write);
     }
 
-    size_t getPendingRetiredCount() const
+    size_t getPendingRetiredCount()
     {
         std::lock_guard<std::mutex> lock(queueMutex);
         return retired.size();
@@ -69,7 +69,7 @@ public:
     }
 
 private:
-    mutable std::mutex queueMutex;
+    std::mutex queueMutex;
     std::vector<Retired> retired;
 };
 

@@ -6,6 +6,8 @@
 #include "EQProcessor.h"
 #include "core/EpochManager.h"
 
+#include "audioengine/AtomicAccess.h"
+
 static void retireEQState(EQProcessor::EQState* state)
 {
     if (state) state->release();
@@ -22,12 +24,12 @@ static void retireEQState(EQProcessor::EQState* state)
 void EQProcessor::setBandFrequency(int band, float freq)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    auto oldState = loadCurrentState(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->bands[band].frequency = freq;
 
-    auto prev = currentStateRaw.exchange(newState, std::memory_order_acq_rel);
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel);
     if (prev) {
         retireEQState(prev);
     }
@@ -41,12 +43,12 @@ void EQProcessor::setBandFrequency(int band, float freq)
 void EQProcessor::setBandGain(int band, float gainDb)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    auto oldState = loadCurrentState(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->bands[band].gain = gainDb;
 
-    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+    auto prev = exchangeCurrentState(newState, std::memory_order_release);
     if (prev) {
         retireEQState(prev);
     }
@@ -60,12 +62,12 @@ void EQProcessor::setBandGain(int band, float gainDb)
 void EQProcessor::setBandQ(int band, float q)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    auto oldState = loadCurrentState(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->bands[band].q = q;
 
-    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+    auto prev = exchangeCurrentState(newState, std::memory_order_release);
     if (prev) {
         retireEQState(prev);
     }
@@ -79,16 +81,16 @@ void EQProcessor::setBandQ(int band, float q)
 void EQProcessor::setBandEnabled(int band, bool enabled)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    auto oldState = loadCurrentState(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->bands[band].enabled = enabled;
 
     // 有効化時はステートをリセットして、古い状態（ポップノイズの原因）を排除する
     if (enabled)
-        bandResetMask.fetch_or(1 << band, std::memory_order_relaxed);
+        requestBandReset(static_cast<uint32_t>(1u << band));
 
-    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+    auto prev = exchangeCurrentState(newState, std::memory_order_release);
     if (prev) {
         retireEQState(prev);
     }
@@ -107,12 +109,12 @@ void EQProcessor::setTotalGain(float gainDb)
     // ✅ Atomicに保存（Audio Threadで読み取る）
     storeTotalGainDb(gainDb);
 
-    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    auto oldState = loadCurrentState(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->totalGainDb = gainDb;
 
-    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+    auto prev = exchangeCurrentState(newState, std::memory_order_release);
     if (prev) {
         retireEQState(prev);
     }
@@ -124,22 +126,22 @@ void EQProcessor::setTotalGain(float gainDb)
 //--------------------------------------------------------------
 void EQProcessor::setAGCEnabled(bool enabled)
 {
-    agcEnabled.store(enabled, std::memory_order_release);
-    m_pendingAGCChange.store(true, std::memory_order_release);
+    convo::publishAtomic(agcEnabled, enabled, std::memory_order_release);
+    convo::publishAtomic(m_pendingAGCChange, true, std::memory_order_release);
 
-    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    auto oldState = loadCurrentState(std::memory_order_acquire);
     if (oldState != nullptr)
     {
         auto newState = new EQState(*oldState);
         newState->agcEnabled = enabled;
-        auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+        auto prev = exchangeCurrentState(newState, std::memory_order_release);
         if (prev)
             retireEQState(prev);
         convo::EpochManager::instance().advanceEpoch();
     }
 
     if (enabled)
-        agcResetRequest.store(true, std::memory_order_relaxed);
+        requestAgcReset();
 }
 
 //--------------------------------------------------------------
@@ -147,7 +149,7 @@ void EQProcessor::setAGCEnabled(bool enabled)
 //--------------------------------------------------------------
 bool EQProcessor::getAGCEnabled() const
 {
-    return agcEnabled.load(std::memory_order_acquire);
+    return convo::consumeAtomic(agcEnabled, std::memory_order_acquire);
 }
 
 //--------------------------------------------------------------
@@ -157,15 +159,15 @@ void EQProcessor::setBandType(int band, EQBandType type)
 {
     if (band < 0 || band >= NUM_BANDS) return;
 
-    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    auto oldState = loadCurrentState(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->bandTypes[band] = type;
 
     // フィルタタイプ変更時はトポロジーが変わるためリセット必須
-    bandResetMask.fetch_or(1 << band, std::memory_order_relaxed);
+    requestBandReset(static_cast<uint32_t>(1u << band));
 
-    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+    auto prev = exchangeCurrentState(newState, std::memory_order_release);
     if (prev) {
         retireEQState(prev);
     }
@@ -179,15 +181,15 @@ void EQProcessor::setBandType(int band, EQBandType type)
 void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 {
     if (band < 0 || band >= NUM_BANDS) return;
-    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    auto oldState = loadCurrentState(std::memory_order_acquire);
     if (oldState == nullptr) return;
     auto newState = new EQState(*oldState);
     newState->bandChannelModes[band] = mode;
 
     // チャンネルモード変更時もリセット推奨
-    bandResetMask.fetch_or(1 << band, std::memory_order_relaxed);
+    requestBandReset(static_cast<uint32_t>(1u << band));
 
-    auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+    auto prev = exchangeCurrentState(newState, std::memory_order_release);
     if (prev) {
         retireEQState(prev);
     }
@@ -201,18 +203,18 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 void EQProcessor::setNonlinearSaturation(float value) noexcept
 {
     const float clamped = juce::jlimit(0.0f, 1.0f, value);
-    const float previous = nonlinearSaturation.load(std::memory_order_relaxed);
+    const float previous = convo::consumeAtomic(nonlinearSaturation, std::memory_order_acquire);
     if (std::abs(static_cast<double>(clamped - previous)) < 1.0e-9)
         return;
 
-    nonlinearSaturation.store(clamped, std::memory_order_relaxed);
+    convo::publishAtomic(nonlinearSaturation, clamped, std::memory_order_release);
 
-    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    auto oldState = loadCurrentState(std::memory_order_acquire);
     if (oldState != nullptr)
     {
         auto newState = new EQState(*oldState);
         newState->nonlinearSaturation = clamped;
-        auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+        auto prev = exchangeCurrentState(newState, std::memory_order_release);
         if (prev)
             retireEQState(prev);
         convo::EpochManager::instance().advanceEpoch();
@@ -224,7 +226,7 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
 //--------------------------------------------------------------
 float EQProcessor::getNonlinearSaturation() const noexcept
 {
-    return nonlinearSaturation.load(std::memory_order_relaxed);
+    return convo::consumeAtomic(nonlinearSaturation, std::memory_order_acquire);
 }
 
 //--------------------------------------------------------------
@@ -235,18 +237,18 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
     if (mode != FilterStructure::Serial && mode != FilterStructure::Parallel)
         mode = FilterStructure::Serial;
 
-    const FilterStructure previous = requestedStructure.load(std::memory_order_relaxed);
+    const FilterStructure previous = convo::consumeAtomic(requestedStructure, std::memory_order_acquire);
     if (previous == mode)
         return;
 
-    requestedStructure.store(mode, std::memory_order_relaxed);
+    convo::publishAtomic(requestedStructure, mode, std::memory_order_release);
 
-    auto oldState = currentStateRaw.load(std::memory_order_acquire);
+    auto oldState = loadCurrentState(std::memory_order_acquire);
     if (oldState != nullptr)
     {
         auto newState = new EQState(*oldState);
         newState->filterStructure = (mode == FilterStructure::Parallel) ? 1 : 0;
-        auto prev = currentStateRaw.exchange(newState, std::memory_order_release);
+        auto prev = exchangeCurrentState(newState, std::memory_order_release);
         if (prev)
             retireEQState(prev);
         convo::EpochManager::instance().advanceEpoch();
@@ -258,5 +260,5 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
 //--------------------------------------------------------------
 EQProcessor::FilterStructure EQProcessor::getFilterStructure() const noexcept
 {
-    return requestedStructure.load(std::memory_order_relaxed);
+    return convo::consumeAtomic(requestedStructure, std::memory_order_acquire);
 }

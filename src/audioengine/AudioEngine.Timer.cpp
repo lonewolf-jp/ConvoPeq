@@ -33,7 +33,6 @@ void AudioEngine::timerCallback()
             debugLastReportedTransitionPolicy = policy;
             debugLastReportedTransitionCurrentPtr = currentPtr;
             debugLastReportedTransitionNextPtr = nextPtr;
-            debugLastReportedTransitionFadeSec = fadeSec;
             debugLastReportedTransitionLatencyDeltaSamples = latencyDelta;
 
             diagLog("[VERIFY] transition state active=" + juce::String(active)
@@ -44,11 +43,11 @@ void AudioEngine::timerCallback()
                 + " latencyDelta=" + juce::String(latencyDelta));
         }
 
-        const int alignWritePos = debugLatencyAlignWritePos.load(std::memory_order_acquire);
-        const int alignReadOld = debugLatencyAlignReadOld.load(std::memory_order_acquire);
-        const int alignReadNew = debugLatencyAlignReadNew.load(std::memory_order_acquire);
-        const int alignDelayOld = debugLatencyAlignDelayOld.load(std::memory_order_acquire);
-        const int alignDelayNew = debugLatencyAlignDelayNew.load(std::memory_order_acquire);
+        const int alignWritePos = convo::consumeAtomic(debugLatencyAlignWritePos, std::memory_order_acquire);
+        const int alignReadOld = convo::consumeAtomic(debugLatencyAlignReadOld, std::memory_order_acquire);
+        const int alignReadNew = convo::consumeAtomic(debugLatencyAlignReadNew, std::memory_order_acquire);
+        const int alignDelayOld = convo::consumeAtomic(debugLatencyAlignDelayOld, std::memory_order_acquire);
+        const int alignDelayNew = convo::consumeAtomic(debugLatencyAlignDelayNew, std::memory_order_acquire);
 
         if (active != 0
             && (alignWritePos != debugLastReportedLatencyAlignWritePos
@@ -75,8 +74,9 @@ void AudioEngine::timerCallback()
     }
 
     {
-        const auto* runtimeGraph = getRuntimeGraphState();
-        const auto* engineRuntime = getEngineRuntimeState();
+        const auto* world = getRuntimePublishWorld();
+        const auto* engineRuntime = getEngineRuntimeState(world);
+        const auto* runtimeGraph = getRuntimeGraphState(world);
         const uint64_t revision = runtimeRevision(engineRuntime, runtimeGraph);
         const uint64_t currentUuid = runtimeCurrentUuid(engineRuntime, runtimeGraph);
         const uint64_t fadingUuid = runtimeFadingUuid(engineRuntime, runtimeGraph);
@@ -107,7 +107,7 @@ void AudioEngine::timerCallback()
         const auto lifecycle = getRuntimeLifecycleDiagnostics();
         const auto rebuild = getRebuildDispatchDiagnostics();
         const auto convRebuild = uiConvolverProcessor.getRebuildAutomationDiagnostics();
-        const int shutdownPhaseValue = static_cast<int>(shutdownPhase.load(std::memory_order_acquire));
+        const int shutdownPhaseValue = static_cast<int>(convo::consumeAtomic(shutdownPhase, std::memory_order_acquire));
 
         if (lifecycle.publishCount != debugLastReportedRuntimePublishCount
             || lifecycle.retireCount != debugLastReportedRuntimeRetireCount
@@ -168,21 +168,16 @@ void AudioEngine::timerCallback()
 
     // フェイルセーフ: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
-    const auto* runtimeGraph = getRuntimeGraphState();
-    auto* currentDspForRuntime = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
-    auto* fadingDspForRuntime = resolveFadingDSPFromRuntimePublish(runtimeGraph);
+    const auto* runtimeWorld = getRuntimePublishWorld();
+    const auto* runtimeEngine = getEngineRuntimeState(runtimeWorld);
+    const auto* runtimeGraph = getRuntimeGraphState(runtimeWorld);
+    auto* currentDspForRuntime = resolveCurrentDSPFromRuntimePublish(runtimeGraph, runtimeEngine);
+    auto* fadingDspForRuntime = resolveFadingDSPFromRuntimePublish(runtimeGraph, runtimeEngine);
 
-    // H-2: RNG producer ownershipをAudioEngine側(NonRT)へ集約。
-    // Audio Threadではpopのみ行い、補充はTimer側で実施する。
-    if (!shutdownInProgress.load(std::memory_order_acquire))
-    {
-        if (currentDspForRuntime != nullptr)
-            currentDspForRuntime->dither.refillRandomRingNonRt();
-        if (fadingDspForRuntime != nullptr && fadingDspForRuntime != currentDspForRuntime)
-            fadingDspForRuntime->dither.refillRandomRingNonRt();
-    }
+    // T1: 公開済みRuntimeへのNonRTからの可変更新を避けるため、
+    // Timerからのdither内部状態更新は行わない。
 
-    if (!shutdownInProgress.load(std::memory_order_acquire)
+    if (!isShutdownInProgress()
         && currentDspForRuntime != nullptr
         && !m_coordinator.isFading()
         && m_coordinator.getCurrent() == nullptr)
@@ -193,13 +188,13 @@ void AudioEngine::timerCallback()
     }
 
     {
-        const uint32_t observedVersion = debugAppliedEqHashVersion.load(std::memory_order_acquire);
+        const uint32_t observedVersion = convo::consumeAtomic(debugAppliedEqHashVersion, std::memory_order_acquire);
         debugObservedEqHashVersion = observedVersion;
 
-        const uint64_t createdHash = debugLastCreatedEqHash.load(std::memory_order_acquire);
-        const uint64_t appliedHash = debugLastAppliedEqHash.load(std::memory_order_acquire);
-        const uint64_t createBlockCounter = debugLastCreateAudioBlockCounter.load(std::memory_order_acquire);
-        const uint64_t nowBlockCounter = m_audioBlockCounter.load(std::memory_order_acquire);
+        const uint64_t createdHash = convo::consumeAtomic(debugLastCreatedEqHash, std::memory_order_acquire);
+        const uint64_t appliedHash = convo::consumeAtomic(debugLastAppliedEqHash, std::memory_order_acquire);
+        const uint64_t createBlockCounter = convo::consumeAtomic(debugLastCreateAudioBlockCounter, std::memory_order_acquire);
+        const uint64_t nowBlockCounter = convo::consumeAtomic(m_audioBlockCounter, std::memory_order_acquire);
         const uint64_t processedBlocksSinceCreate = (nowBlockCounter >= createBlockCounter)
             ? (nowBlockCounter - createBlockCounter)
             : 0;
@@ -291,16 +286,16 @@ void AudioEngine::timerCallback()
         }
     }
 
-    if (!shutdownInProgress.load(std::memory_order_acquire)
-        && deferredStructuralRebuildPending_.load(std::memory_order_acquire))
+    if (!isShutdownInProgress()
+        && hasRebuildReason(RebuildReason::DeferredStructural))
     {
-        const int64_t dueTicks = deferredStructuralRebuildDueTicks_.load(std::memory_order_acquire);
+        const int64_t dueTicks = convo::consumeAtomic(deferredStructuralRebuildDueTicks_, std::memory_order_acquire);
         const int64_t nowTicks = juce::Time::getHighResolutionTicks();
 
         if (dueTicks > 0 && nowTicks >= dueTicks)
         {
-            deferredStructuralRebuildPending_.store(false, std::memory_order_release);
-            deferredStructuralRebuildDueTicks_.store(0, std::memory_order_release);
+            clearRebuildReason(RebuildReason::DeferredStructural);
+            convo::publishAtomic(deferredStructuralRebuildDueTicks_, 0, std::memory_order_release);
 
             if (uiConvolverProcessor.isIRLoaded())
             {
@@ -313,7 +308,7 @@ void AudioEngine::timerCallback()
                 const LearningCommand cmd {
                     LearningCommand::Type::IRChanged,
                     false,
-                    pendingLearningMode.load(std::memory_order_acquire),
+                    convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire),
                     pendingIRGeneration
                 };
 
@@ -325,17 +320,17 @@ void AudioEngine::timerCallback()
         }
     }
 
-    if (!shutdownInProgress.load(std::memory_order_acquire)
-        && deferredFinalizeAwareRebuildPending_.load(std::memory_order_acquire))
+    if (!isShutdownInProgress()
+        && hasRebuildReason(RebuildReason::DeferredFinalizeAware))
     {
-        const int queuedGeneration = rebuildGeneration.load(std::memory_order_acquire);
-        const int committedGeneration = lastCommittedRebuildGeneration.load(std::memory_order_acquire);
+        const int queuedGeneration = convo::consumeAtomic(rebuildGeneration, std::memory_order_acquire);
+        const int committedGeneration = convo::consumeAtomic(lastCommittedRebuildGeneration, std::memory_order_acquire);
         const bool outstandingRebuild = queuedGeneration > committedGeneration;
         const bool irLoaded = uiConvolverProcessor.isIRLoaded();
         const bool irFinalized = uiConvolverProcessor.isIRFinalized();
         const bool irLoading = uiConvolverProcessor.isLoadingIR();
-        const bool structuralDeferred = deferredStructuralRebuildPending_.load(std::memory_order_acquire);
-        const bool pendingIrChange = m_pendingIRChange.load(std::memory_order_acquire);
+        const bool structuralDeferred = hasRebuildReason(RebuildReason::DeferredStructural);
+        const bool pendingIrChange = convo::consumeAtomic(m_pendingIRChange, std::memory_order_acquire);
 
         // IR 遷移が完全に落ち着いてから 1 回だけ再構築を発火する。
         if ((!irLoaded || irFinalized)
@@ -344,13 +339,13 @@ void AudioEngine::timerCallback()
             && !pendingIrChange
             && !outstandingRebuild)
         {
-            deferredFinalizeAwareRebuildPending_.store(false, std::memory_order_release);
+            clearRebuildReason(RebuildReason::DeferredFinalizeAware);
 
-            const double sr = currentSampleRate.load(std::memory_order_acquire);
+            const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
             if (!m_isRestoringState && sr > 0.0)
             {
                 diagLog("[DIAG] timerCallback: issuing deferred finalize-aware rebuild");
-                requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
+                requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
             }
         }
     }
@@ -359,21 +354,31 @@ void AudioEngine::timerCallback()
     processDeferredLearningActions();
 
     const bool hasFading = (fadingDspForRuntime != nullptr);
-    const auto* engineRuntime = getEngineRuntimeState();
-    const auto* runtimeGraphForCrossfade = getRuntimeGraphState();
-    const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
-    const bool hasPendingCrossfade = atomicPendingCrossfade
-        || runtimeCrossfadePending(engineRuntime, runtimeGraphForCrossfade);
+    const auto* crossfadeWorld = getRuntimePublishWorld();
+    const auto* engineRuntime = getEngineRuntimeState(crossfadeWorld);
+    const auto* runtimeGraphForCrossfade = getRuntimeGraphState(crossfadeWorld);
+    const bool hasPendingCrossfade = runtimeCrossfadePending(engineRuntime, runtimeGraphForCrossfade);
 
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();
 
-    if (m_coordinator.tryCompleteFade())
+    const bool fadeCompleted = m_coordinator.tryCompleteFade();
+    if (fadeCompleted)
     {
+        if (auto* done = sanitizeRawPtr(exchangeFadingOutDSP(nullptr)))
+            retireDSP(done);
+        publishAtomic(dspCrossfadePending, false);
+        refreshCrossfadePreparedSnapshotFromAtomics();
         sendChangeMessage();
     }
 
-    if (!shutdownInProgress.load(std::memory_order_acquire)
+    if (!m_coordinator.isFading())
+    {
+        if (auto* done = sanitizeRawPtr(exchangeFadingOutDSP(nullptr)))
+            retireDSP(done);
+    }
+
+    if (!isShutdownInProgress()
         && !hasFading
         && !hasPendingCrossfade)
     {
@@ -400,11 +405,11 @@ void AudioEngine::timerCallback()
         if (activeFixed4Tap && activeDitherEnabled)
         {
             dsp->fixedNoiseShaper.setDiagnosticsWindowSamples(
-                static_cast<uint32_t>(fixedNoiseWindowSamples.load(std::memory_order_relaxed)));
+                static_cast<uint32_t>(convo::consumeAtomic(fixedNoiseWindowSamples, std::memory_order_acquire)));
 
             const uint32 now = juce::Time::getMillisecondCounter();
             const uint32 intervalMs = static_cast<uint32>(
-                std::max(250, fixedNoiseLogIntervalMs.load(std::memory_order_relaxed)));
+                std::max(250, convo::consumeAtomic(fixedNoiseLogIntervalMs, std::memory_order_acquire)));
             if ((now - fixedNoiseLastLogMs) >= intervalMs)
             {
                 fixedNoiseLastLogMs = now;
@@ -423,7 +428,7 @@ void AudioEngine::timerCallback()
                     DBG_LOG(
                         "[Fixed4Tap] waiting for diagnostics window"
                         " (bitDepth=" + juce::String(dsp->ditherBitDepth)
-                        + ", targetWindow=" + juce::String(fixedNoiseWindowSamples.load(std::memory_order_relaxed))
+                        + ", targetWindow=" + juce::String(convo::consumeAtomic(fixedNoiseWindowSamples, std::memory_order_acquire))
                         + ")");
                 }
             }
@@ -431,11 +436,11 @@ void AudioEngine::timerCallback()
         else if (activeFixed15Tap && activeDitherEnabled)
         {
             dsp->fixed15TapNoiseShaper.setDiagnosticsWindowSamples(
-                static_cast<uint32_t>(fixedNoiseWindowSamples.load(std::memory_order_relaxed)));
+                static_cast<uint32_t>(convo::consumeAtomic(fixedNoiseWindowSamples, std::memory_order_acquire)));
 
             const uint32 now = juce::Time::getMillisecondCounter();
             const uint32 intervalMs = static_cast<uint32>(
-                std::max(250, fixedNoiseLogIntervalMs.load(std::memory_order_relaxed)));
+                std::max(250, convo::consumeAtomic(fixedNoiseLogIntervalMs, std::memory_order_acquire)));
             if ((now - fixedNoiseLastLogMs) >= intervalMs)
             {
                 fixedNoiseLastLogMs = now;
@@ -454,7 +459,7 @@ void AudioEngine::timerCallback()
                     DBG_LOG(
                         "[Fixed15Tap] waiting for diagnostics window"
                         " (bitDepth=" + juce::String(dsp->ditherBitDepth)
-                        + ", targetWindow=" + juce::String(fixedNoiseWindowSamples.load(std::memory_order_relaxed))
+                        + ", targetWindow=" + juce::String(convo::consumeAtomic(fixedNoiseWindowSamples, std::memory_order_acquire))
                         + ")");
                 }
             }

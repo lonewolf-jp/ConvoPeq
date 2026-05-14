@@ -57,6 +57,8 @@ std::atomic<int> g_warmupGuardCount { 0 };
 
 #include <immintrin.h>  // AVX2
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo
 {
 
@@ -78,26 +80,27 @@ struct IppFFTPlan
 class IppFFTPlanCache
 {
 public:
-    static std::shared_ptr<const IppFFTPlan> getOrCreate(int order)
+    static const IppFFTPlan* getOrCreate(int order)
     {
         std::lock_guard<std::mutex> lock(getMutex());
         auto& cache = getCache();
         const auto it = cache.find(order);
         if (it != cache.end())
-            return it->second;
+            return it->second.get();
 
         auto plan = createPlan(order);
         if (!plan)
-            return {};
+            return nullptr;
 
-        auto inserted = cache.emplace(order, plan);
-        return inserted.first->second;
+        auto* ptr = plan.get();
+        cache.emplace(order, std::move(plan));
+        return ptr;
     }
 
 private:
-    static std::unordered_map<int, std::shared_ptr<const IppFFTPlan>>& getCache()
+    static std::unordered_map<int, std::unique_ptr<IppFFTPlan>>& getCache()
     {
-        static std::unordered_map<int, std::shared_ptr<const IppFFTPlan>> cache;
+        static std::unordered_map<int, std::unique_ptr<IppFFTPlan>> cache;
         return cache;
     }
 
@@ -107,14 +110,14 @@ private:
         return mtx;
     }
 
-    static std::shared_ptr<const IppFFTPlan> createPlan(int order)
+    static std::unique_ptr<IppFFTPlan> createPlan(int order)
     {
         int sizeSpec = 0, sizeInit = 0, sizeWork = 0;
         const IppStatus getSt = ippsFFTGetSize_R_64f(
             order, IPP_FFT_DIV_INV_BY_N, ippAlgHintFast,
             &sizeSpec, &sizeInit, &sizeWork);
         if (getSt != ippStsNoErr)
-            return {};
+            return nullptr;
 
         std::unique_ptr<IppFFTPlan> plan = std::make_unique<IppFFTPlan>();
         plan->order = order;
@@ -123,7 +126,7 @@ private:
 
         plan->fftSpecBuf = ippsMalloc_8u(sizeSpec);
         if (!plan->fftSpecBuf)
-            return {};
+            return nullptr;
 
         Ipp8u* initBuf = (sizeInit > 0) ? ippsMalloc_8u(sizeInit) : nullptr;
         const IppStatus initSt = ippsFFTInit_R_64f(
@@ -134,9 +137,9 @@ private:
             ippsFree(initBuf);
 
         if (initSt != ippStsNoErr || plan->fftSpec == nullptr)
-            return {};
+            return nullptr;
 
-        return std::shared_ptr<const IppFFTPlan>(plan.release());
+        return plan;
     }
 };
 
@@ -312,7 +315,7 @@ MKLNonUniformConvolver::~MKLNonUniformConvolver()
     #ifdef NUC_DEBUG_GUARDS
         // 二重解放検出
         static std::atomic<bool> destroyed{false};
-    if (destroyed.exchange(true)){
+    if (convo::exchangeAtomic(destroyed, true)){
         __debugbreak(); // 二重解放発生
     }
     checkGuards();
@@ -501,7 +504,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
                                         bool enableDirectHead,
                                         const FilterSpec* filterSpec)
 {
-    m_ready.store(false, std::memory_order_release);
+    convo::publishAtomic(m_ready, false, std::memory_order_release);
 
     if (impulse == nullptr || irLen <= 0 || blockSize <= 0)
         return false;
@@ -591,7 +594,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         Layer& l = m_layers[m_numActiveLayers];
         l.descriptorCommitted = false;
-        l.warmupCompleted.store(false, std::memory_order_relaxed);
+        convo::publishAtomic(l.warmupCompleted, false, std::memory_order_release);
 
         l.partSize    = cfgs[li].partSize;
         l.fftSize     = l.partSize * 2;
@@ -619,8 +622,12 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
                 while (tmp > 1) { tmp >>= 1; ++order; }
             }
 
-            l.fftPlanOwner = IppFFTPlanCache::getOrCreate(order);
-            if (!l.fftPlanOwner || l.fftPlanOwner->fftSpec == nullptr)
+            if (const IppFFTPlan* plan = IppFFTPlanCache::getOrCreate(order); plan != nullptr)
+                l.fftPlanOwner = std::cref(*plan);
+            else
+                l.fftPlanOwner.reset();
+
+            if (!l.fftPlanOwner.has_value() || l.fftPlanOwner->get().fftSpec == nullptr)
             {
                 juce::Logger::writeToLog("MKLNonUniformConvolver: FFT plan cache creation failed for layer "
                                          + juce::String(li) + " (order=" + juce::String(order) + ")");
@@ -628,17 +635,17 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
                 return false;
             }
 
-            l.fftSpec = l.fftPlanOwner->fftSpec;
+            l.fftSpec = l.fftPlanOwner->get().fftSpec;
 
             // ワークバッファ確保 (Audio Thread での動的確保を防ぐため事前確保)
             // sizeWork == 0 の場合 nullptr のまま (IPP が外部バッファ不要)
             // sizeWork > 0 かつ確保失敗 → リアルタイム安全でないため初期化失敗とする
-            if (l.fftPlanOwner->sizeWork > 0)
+            if (l.fftPlanOwner->get().sizeWork > 0)
             {
-                l.fftWorkBuf = ippsMalloc_8u(l.fftPlanOwner->sizeWork);
+                l.fftWorkBuf = ippsMalloc_8u(l.fftPlanOwner->get().sizeWork);
                 if (!l.fftWorkBuf)
                 {
-                    juce::Logger::writeToLog("MKLNonUniformConvolver: ippsMalloc_8u(sizeWork=" + juce::String(l.fftPlanOwner->sizeWork)
+                    juce::Logger::writeToLog("MKLNonUniformConvolver: ippsMalloc_8u(sizeWork=" + juce::String(l.fftPlanOwner->get().sizeWork)
                                              + ") failed for layer " + juce::String(li));
                     releaseAllLayers();
                     return false;
@@ -746,7 +753,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         // Audio Thread での初回実行時の遅延 (IPP テーブル生成等) を事前消化する。
         // [v2.1] IFFT: CCS → real (IPP_FFT_DIV_INV_BY_N により 1/N 正規化済み)
         ippsFFTInv_CCSToR_64f(tempFreq, tempTime, l.fftSpec, l.fftWorkBuf);
-        l.warmupCompleted.store(true, std::memory_order_release);
+        convo::publishAtomic(l.warmupCompleted, true, std::memory_order_release);
 
         mkl_free(tempTime);
         mkl_free(tempFreq);
@@ -823,13 +830,13 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     if (filterSpec != nullptr)
         applySpectrumFilter(*filterSpec);
 
-    m_ready.store(true, std::memory_order_release);
+    convo::publishAtomic(m_ready, true, std::memory_order_release);
     return true;
 }
 
 bool MKLNonUniformConvolver::areFftDescriptorsCommitted() const noexcept
 {
-    if (!m_ready.load(std::memory_order_acquire) || m_numActiveLayers <= 0)
+    if (!convo::consumeAtomic(m_ready, std::memory_order_acquire) || m_numActiveLayers <= 0)
         return false;
 
     for (int li = 0; li < m_numActiveLayers; ++li)
@@ -928,8 +935,8 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
     checkGuards();
 #endif
 #if JUCE_DEBUG
-    if (!l.warmupCompleted.load(std::memory_order_acquire))
-        g_warmupGuardCount.fetch_add(1, std::memory_order_relaxed);
+    if (!convo::consumeAtomic(l.warmupCompleted, std::memory_order_acquire))
+        g_warmupGuardCount.fetch_add(1, std::memory_order_acq_rel);
 #endif
 
     // ── 1. [prevInput | currentInput] を fftTimeBuf に配置 (Overlap-Save) ──
@@ -1059,7 +1066,7 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
         m_ringRead = (m_ringRead + overflow) & m_ringMask;
         m_ringAvail = m_ringSize;
         m_ringWrite = (m_ringWrite + overflow) & m_ringMask;
-        m_ringOverflowCount.fetch_add(1, std::memory_order_relaxed);
+        m_ringOverflowCount.fetch_add(1, std::memory_order_acq_rel);
         if (overflowCallback)
             overflowCallback(overflowUserData);
     }
@@ -1110,7 +1117,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
         // 内部バッファの簡単な健全性チェック
         if (m_ringBuf && reinterpret_cast<uintptr_t>(m_ringBuf) % 64 != 0) __debugbreak();
     #endif
-    if (!m_ready.load(std::memory_order_acquire) || numSamples <= 0)
+    if (!convo::consumeAtomic(m_ready, std::memory_order_acquire) || numSamples <= 0)
         return;
 
     processDirectBlock(input, numSamples);
@@ -1120,8 +1127,8 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
         Layer& l = m_layers[li];
 
 #if JUCE_DEBUG
-        if (!l.warmupCompleted.load(std::memory_order_acquire))
-            g_warmupGuardCount.fetch_add(1, std::memory_order_relaxed);
+        if (!convo::consumeAtomic(l.warmupCompleted, std::memory_order_acquire))
+            g_warmupGuardCount.fetch_add(1, std::memory_order_acq_rel);
 #endif
 
         int consumed = 0;
@@ -1270,7 +1277,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
     #ifdef NUC_DEBUG_GUARDS
         checkGuards();
     #endif
-    if (!m_ready.load(std::memory_order_acquire) || numSamples <= 0)
+    if (!convo::consumeAtomic(m_ready, std::memory_order_acquire) || numSamples <= 0)
     {
         if (output && numSamples > 0)
             memset(output, 0, numSamples * sizeof(double));

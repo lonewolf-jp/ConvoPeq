@@ -9,6 +9,8 @@
 #include <cmath>
 #include <thread>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace
 {
 int phaseModeToComboId(ConvolverProcessor::PhaseMode mode)
@@ -1131,7 +1133,7 @@ void ConvolverControlPanel::finishAsyncIRLoadPreview(const juce::File& irFile,
                                                      const ConvolverProcessor::IRLoadPreview& preview,
                                                      int requestId)
 {
-    if (requestId != irPreviewRequestId.load(std::memory_order_acquire))
+    if (requestId != convo::consumeAtomic(irPreviewRequestId, std::memory_order_acquire))
         return;
 
     setIRPreviewInProgress(false);
@@ -1193,7 +1195,7 @@ void ConvolverControlPanel::finishAsyncIRLoadPreview(const juce::File& irFile,
                 if (safeThis == nullptr)
                     return;
 
-                if (requestId != safeThis->irPreviewRequestId.load(std::memory_order_acquire))
+                if (requestId != convo::consumeAtomic(safeThis->irPreviewRequestId, std::memory_order_acquire))
                     return;
 
                 if (result == 0)

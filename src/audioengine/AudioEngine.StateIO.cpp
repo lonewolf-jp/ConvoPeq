@@ -40,23 +40,23 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (state.hasProperty("processingOrder"))
     {
         const auto order = (ProcessingOrder)(int)state.getProperty("processingOrder");
-        currentProcessingOrder.store(order);
-        m_currentProcessingOrder.store(order, std::memory_order_relaxed);
+        convo::publishAtomic(currentProcessingOrder, order);
+        convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
     }
 
     if (state.hasProperty("eqBypassed"))
     {
         bool bypassed = state.getProperty("eqBypassed");
-        eqBypassRequested.store(bypassed, std::memory_order_release);
-        m_currentEqBypass.store(bypassed, std::memory_order_release);
+        convo::publishAtomic(eqBypassRequested, bypassed, std::memory_order_release);
+        convo::publishAtomic(m_currentEqBypass, bypassed, std::memory_order_release);
         uiEqEditor.setBypass(bypassed);
     }
 
     if (state.hasProperty("convBypassed"))
     {
         bool bypassed = state.getProperty("convBypassed");
-        convBypassRequested.store(bypassed, std::memory_order_release);
-        m_currentConvBypass.store(bypassed, std::memory_order_release);
+        convo::publishAtomic(convBypassRequested, bypassed, std::memory_order_release);
+        convo::publishAtomic(m_currentConvBypass, bypassed, std::memory_order_release);
         uiConvolverProcessor.setBypass(bypassed);
     }
 
@@ -176,9 +176,9 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     if (convState.isValid())
         uiConvolverProcessor.setState (convState);
 
-    const double sr = currentSampleRate.load(std::memory_order_acquire);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (sr > 0.0)
-        requestRebuild(sr, maxSamplesPerBlock.load(std::memory_order_acquire));
+        requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
 
     // UI更新通知
     sendChangeMessage();
@@ -193,32 +193,32 @@ juce::ValueTree AudioEngine::getCurrentState() const
     juce::ValueTree state ("Preset");
 
     // グローバル設定の保存
-    state.setProperty("processingOrder", (int)currentProcessingOrder.load(), nullptr);
-    state.setProperty("softClipEnabled", softClipEnabled.load(), nullptr);
-    state.setProperty("saturationAmount", saturationAmount.load(), nullptr);
-    state.setProperty("inputHeadroomDb", inputHeadroomDb.load(), nullptr);
-    state.setProperty("outputMakeupDb", outputMakeupDb.load(), nullptr);
-    state.setProperty("analyzerSource", (int)currentAnalyzerSource.load(), nullptr);
-    state.setProperty("convolverInputTrimDb", convolverInputTrimDb.load(), nullptr);
-    state.setProperty("ditherBitDepth", ditherBitDepth.load(), nullptr);
-    state.setProperty("noiseShaperType", (int)noiseShaperType.load(), nullptr);
-    state.setProperty("oversamplingFactor", manualOversamplingFactor.load(), nullptr);
-    state.setProperty("oversamplingType", (int)oversamplingType.load(), nullptr);
+    state.setProperty("processingOrder", (int)convo::consumeAtomic(currentProcessingOrder), nullptr);
+    state.setProperty("softClipEnabled", convo::consumeAtomic(softClipEnabled), nullptr);
+    state.setProperty("saturationAmount", convo::consumeAtomic(saturationAmount), nullptr);
+    state.setProperty("inputHeadroomDb", convo::consumeAtomic(inputHeadroomDb), nullptr);
+    state.setProperty("outputMakeupDb", convo::consumeAtomic(outputMakeupDb), nullptr);
+    state.setProperty("analyzerSource", (int)convo::consumeAtomic(currentAnalyzerSource), nullptr);
+    state.setProperty("convolverInputTrimDb", convo::consumeAtomic(convolverInputTrimDb), nullptr);
+    state.setProperty("ditherBitDepth", convo::consumeAtomic(ditherBitDepth), nullptr);
+    state.setProperty("noiseShaperType", (int)convo::consumeAtomic(noiseShaperType), nullptr);
+    state.setProperty("oversamplingFactor", convo::consumeAtomic(manualOversamplingFactor), nullptr);
+    state.setProperty("oversamplingType", (int)convo::consumeAtomic(oversamplingType), nullptr);
 
     // NoiseShaperLearner Settings
     {
         auto s = getNoiseShaperLearnerSettings();
-        state.setProperty("cmaesRestarts", s.cmaesRestarts.load(), nullptr);
-        state.setProperty("coeffSafetyMargin", s.coeffSafetyMargin.load(), nullptr);
-        state.setProperty("enableStabilityCheck", s.enableStabilityCheck.load(), nullptr);
+        state.setProperty("cmaesRestarts", convo::consumeAtomic(s.cmaesRestarts), nullptr);
+        state.setProperty("coeffSafetyMargin", convo::consumeAtomic(s.coeffSafetyMargin), nullptr);
+        state.setProperty("enableStabilityCheck", convo::consumeAtomic(s.enableStabilityCheck), nullptr);
     }
 
-    state.setProperty("eqBypassed", eqBypassRequested.load(), nullptr);
-    state.setProperty("convBypassed", convBypassRequested.load(), nullptr);
+    state.setProperty("eqBypassed", convo::consumeAtomic(eqBypassRequested), nullptr);
+    state.setProperty("convBypassed", convo::consumeAtomic(convBypassRequested), nullptr);
     // 出力周波数フィルターモードの保存
-    state.setProperty("convHCFilterMode", (int)convHCFilterMode.load(), nullptr);
-    state.setProperty("convLCFilterMode", (int)convLCFilterMode.load(), nullptr);
-    state.setProperty("eqLPFFilterMode",  (int)eqLPFFilterMode.load(), nullptr);
+    state.setProperty("convHCFilterMode", (int)convo::consumeAtomic(convHCFilterMode), nullptr);
+    state.setProperty("convLCFilterMode", (int)convo::consumeAtomic(convLCFilterMode), nullptr);
+    state.setProperty("eqLPFFilterMode",  (int)convo::consumeAtomic(eqLPFFilterMode), nullptr);
 
     for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
     {

@@ -16,6 +16,8 @@
 #include <atomic>
 #include <cstdint>
 
+#include "audioengine/AtomicAccess.h"
+
 class GenerationManager
 {
 public:
@@ -32,7 +34,7 @@ public:
     // タスク開始時に自分の世代を取得（キャプチャ）
     uint64_t getCurrentGeneration() const noexcept
     {
-        return currentGeneration.load(std::memory_order_acquire);
+        return convo::consumeAtomic(currentGeneration, std::memory_order_acquire);
     }
 
     // タスク完了時にチェック（現在の世代と一致するか）
@@ -40,7 +42,7 @@ public:
     // @return true = まだ有効（最新世代）、false = 陳腐化済み（破棄すべき）
     bool isCurrentGeneration(uint64_t taskGen) const noexcept
     {
-        return taskGen == currentGeneration.load(std::memory_order_acquire);
+        return taskGen == convo::consumeAtomic(currentGeneration, std::memory_order_acquire);
     }
 
 private:

@@ -3,6 +3,8 @@
 #include "convolver/ConvolverProcessor.Internal.h"
 #include <mkl.h>
 
+#include "audioengine/AtomicAccess.h"
+
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_MIXED_PHASE)
 
 using namespace ConvolverProcessorInternal;
@@ -26,7 +28,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhase(ConvolverProce
     const auto setMixedPhaseState = [owner](int state)
     {
         if (owner != nullptr)
-            owner->mixedPhaseState.store(state, std::memory_order_release);
+            convo::publishAtomic(owner->mixedPhaseState, state, std::memory_order_release);
     };
 
     auto result = convertToMixedPhaseAllpass(owner, fileHash, linearIR, minimumIR, sampleRate,
@@ -77,7 +79,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
     const auto setMixedPhaseState = [owner](int state)
     {
         if (owner != nullptr)
-            owner->mixedPhaseState.store(state, std::memory_order_release);
+            convo::publishAtomic(owner->mixedPhaseState, state, std::memory_order_release);
     };
 
     if (wasCancelled) *wasCancelled = false;
@@ -147,9 +149,9 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
     const int half = fftSize / 2;
     const int complexSize = half + 1;
 
-    convo::ScopedAlignedPtr<MKL_Complex16> linearSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
-    convo::ScopedAlignedPtr<MKL_Complex16> minimumSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
-    convo::ScopedAlignedPtr<double> targetPhase(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(complexSize) * sizeof(double), 64)));
+    auto linearSpec = convo::makeAlignedArray<MKL_Complex16>(static_cast<size_t>(fftSize));
+    auto minimumSpec = convo::makeAlignedArray<MKL_Complex16>(static_cast<size_t>(fftSize));
+    auto targetPhase = convo::makeAlignedArray<double>(static_cast<size_t>(complexSize));
 
     if (!linearSpec || !minimumSpec || !targetPhase)
         return {};
@@ -404,7 +406,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                                          + " samples");
             }
 
-            const bool liveReconfigure = (owner != nullptr) && owner->isPrepared.load(std::memory_order_acquire);
+            const bool liveReconfigure = (owner != nullptr) && convo::consumeAtomic(owner->isPrepared, std::memory_order_acquire);
             const bool highRateLive = liveReconfigure && sampleRate >= 96000.0;
 
             const int optimFreqPoints = liveReconfigure ? (highRateLive ? 12 : 64) : 256;
@@ -699,9 +701,9 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseFallback(const 
     const int half = fftSize / 2;
     const int complexSize = half + 1;
 
-    convo::ScopedAlignedPtr<MKL_Complex16> linearSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
-    convo::ScopedAlignedPtr<MKL_Complex16> minimumSpec(static_cast<MKL_Complex16*>(convo::aligned_malloc(static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
-    convo::ScopedAlignedPtr<double> deltaPhi(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(complexSize) * sizeof(double), 64)));
+    auto linearSpec = convo::makeAlignedArray<MKL_Complex16>(static_cast<size_t>(fftSize));
+    auto minimumSpec = convo::makeAlignedArray<MKL_Complex16>(static_cast<size_t>(fftSize));
+    auto deltaPhi = convo::makeAlignedArray<double>(static_cast<size_t>(complexSize));
 
     if (!linearSpec || !minimumSpec || !deltaPhi)
         return {};

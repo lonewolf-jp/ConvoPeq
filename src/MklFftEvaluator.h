@@ -48,15 +48,13 @@ public:
     MklFftEvaluator()
     {
         // オーディオデータバッファ (convo::aligned_malloc: 64バイトアライン)
-        inputLeft  = static_cast<double*>(convo::aligned_malloc(sizeof(double) * kFftLength, 64));
-        inputRight = static_cast<double*>(convo::aligned_malloc(sizeof(double) * kFftLength, 64));
+        inputLeft  = convo::makeAlignedArray<double>(kFftLength).release();
+        inputRight = convo::makeAlignedArray<double>(kFftLength).release();
 
         // [v2.1] スペクトラムバッファ: CcsComplex 配列として確保
         // kSpectrumBins 個 × 2 double = kFftLength+2 doubles (IPP CCS 出力サイズと一致)
-        spectrumLeft  = static_cast<CcsComplex*>(
-            convo::aligned_malloc(sizeof(CcsComplex) * kSpectrumBins, 64));
-        spectrumRight = static_cast<CcsComplex*>(
-            convo::aligned_malloc(sizeof(CcsComplex) * kSpectrumBins, 64));
+        spectrumLeft  = convo::makeAlignedArray<CcsComplex>(kSpectrumBins).release();
+        spectrumRight = convo::makeAlignedArray<CcsComplex>(kSpectrumBins).release();
 
         // [v2.1] IPP FFT スペック初期化
         // kFftLength = 4096 = 2^12 → order = 12

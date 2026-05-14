@@ -1,8 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 
-extern std::atomic<bool> gShuttingDown;
-
 static void diagLog(const juce::String& message)
 {
     DBG(message);
@@ -18,19 +16,19 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     const auto rollbackPrepareFailure = [this]() noexcept
     {
-        if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
-        if (latencyBufOldR) { _aligned_free(latencyBufOldR); latencyBufOldR = nullptr; }
-        if (latencyBufNewL) { _aligned_free(latencyBufNewL); latencyBufNewL = nullptr; }
-        if (latencyBufNewR) { _aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
+        if (latencyBufOldL) { convo::aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
+        if (latencyBufOldR) { convo::aligned_free(latencyBufOldR); latencyBufOldR = nullptr; }
+        if (latencyBufNewL) { convo::aligned_free(latencyBufNewL); latencyBufNewL = nullptr; }
+        if (latencyBufNewR) { convo::aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
         latencyBufSize = 0;
         latencyWritePos = 0;
-        latencyDelayOld.store(0, std::memory_order_release);
-        latencyDelayNew.store(0, std::memory_order_release);
-        latencyResetPending.store(false, std::memory_order_release);
-        lifecycleState.store(EngineLifecycleState::Unprepared, std::memory_order_release);
+        convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release);
+        convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release);
+        convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
+        convo::publishAtomic(lifecycleState, EngineLifecycleState::Unprepared, std::memory_order_release);
     };
 
-    auto previousState = lifecycleState.load(std::memory_order_acquire);
+    auto previousState = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
     for (;;)
     {
         if (previousState == EngineLifecycleState::Releasing
@@ -51,8 +49,6 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     if (previousState == EngineLifecycleState::Prepared)
         diagLog("[DIAG] prepareToPlay: re-prepare requested without release; proceeding with safe reinitialization");
 
-    gShuttingDown.store(false, std::memory_order_release);
-    shutdownInProgress.store(false, std::memory_order_release);
     setShutdownPhase(ShutdownPhase::Running, "prepareToPlay");
 
     // releaseResources() で停止済みの場合に備えて、必要なら rebuild thread を再起動する。
@@ -60,7 +56,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     {
         {
             std::lock_guard<std::mutex> lock(rebuildMutex);
-            rebuildThreadShouldExit.store(false, std::memory_order_release);
+            convo::publishAtomic(rebuildThreadShouldExit, false, std::memory_order_release);
             hasPendingTask = false;
             pendingTask = RebuildTask{};
         }
@@ -84,25 +80,27 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     const int bufferSize = samplesPerBlockExpected;
 
     // サンプルレート・ブロックサイズ変更検知
-    const bool rateChanged = (std::abs(currentSampleRate.load() - safeSampleRate) > 1e-6);
-    const bool blockSizeChanged = (maxSamplesPerBlock.load() != bufferSize);
+    const bool rateChanged = (std::abs(convo::consumeAtomic(currentSampleRate) - safeSampleRate) > 1e-6);
+    const bool blockSizeChanged = (convo::consumeAtomic(maxSamplesPerBlock) != bufferSize);
 
-    maxSamplesPerBlock.store(bufferSize);
-    currentSampleRate.store(safeSampleRate);
+    convo::publishAtomic(maxSamplesPerBlock, bufferSize);
+    convo::publishAtomic(currentSampleRate, safeSampleRate);
     {
-        const int irFadeSamples = juce::jmax(0, m_irFadeSamples.load(std::memory_order_relaxed));
+        const int irFadeSamples = juce::jmax(0, convo::consumeAtomic(m_irFadeSamples, std::memory_order_acquire));
         const double irFadeSec = (irFadeSamples > 0)
             ? (static_cast<double>(irFadeSamples) / safeSampleRate)
             : 0.001;
-        m_irFadeTimeSec.store(irFadeSec, std::memory_order_relaxed);
+        convo::publishAtomic(m_irFadeTimeSec, irFadeSec, std::memory_order_release);
     }
     dspCrossfadeGain.reset(safeSampleRate, 0.03);
     dspCrossfadeGain.setCurrentAndTargetValue(1.0);
-    dspCrossfadePending.store(false, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
     {
-        const auto* runtimeGraph = getRuntimeGraphState();
-        auto* currentForPublish = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
-        auto* fadingForPublish = resolveFadingDSPFromRuntimePublish(runtimeGraph);
+        const auto* world = getRuntimePublishWorld();
+        const auto* engineRuntime = getEngineRuntimeState(world);
+        const auto* runtimeGraph = getRuntimeGraphState(world);
+        auto* currentForPublish = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
+        auto* fadingForPublish = resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime);
         const bool hasAnyRuntime = (currentForPublish != nullptr) || (fadingForPublish != nullptr);
         if (hasAnyRuntime)
         {
@@ -120,28 +118,28 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     dspCrossfadeDoubleBuffer.setSize(2, std::max(SAFE_MAX_BLOCK_SIZE, bufferSize), false, false, true);
 
     analyzerFifo.prepare(2, FIFO_SIZE);
-    inputLevelLinear.store(0.0f);
-    outputLevelLinear.store(0.0f);
+    convo::publishAtomic(inputLevelLinear, 0.0f);
+    convo::publishAtomic(outputLevelLinear, 0.0f);
 
-    eqBypassActive.store(eqBypassRequested.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    convBypassActive.store(convBypassRequested.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    convo::publishAtomic(eqBypassActive, convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(convBypassActive, convo::consumeAtomic(convBypassRequested, std::memory_order_acquire), std::memory_order_release);
 
     // --- レイテンシ整合バッファの再確保 ---
     // ※本関数はAudioThread停止中のみ呼ぶこと！
-    if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
-    if (latencyBufOldR) { _aligned_free(latencyBufOldR); latencyBufOldR = nullptr; }
-    if (latencyBufNewL) { _aligned_free(latencyBufNewL); latencyBufNewL = nullptr; }
-    if (latencyBufNewR) { _aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
+    if (latencyBufOldL) { convo::aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
+    if (latencyBufOldR) { convo::aligned_free(latencyBufOldR); latencyBufOldR = nullptr; }
+    if (latencyBufNewL) { convo::aligned_free(latencyBufNewL); latencyBufNewL = nullptr; }
+    if (latencyBufNewR) { convo::aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
 
     // 最大遅延（2秒上限・kMaxLatencySamples制限）
     // +blockSizeはwrap安全余裕（リングバッファwrap時の読み出し安全域）
     const int maxDelay = std::min(kMaxLatencySamples, static_cast<int>(safeSampleRate * 2.0));
     latencyBufSize = maxDelay + bufferSize + 2;
 
-    latencyBufOldL = (double*)_aligned_malloc(sizeof(double) * latencyBufSize, 64);
-    latencyBufOldR = (double*)_aligned_malloc(sizeof(double) * latencyBufSize, 64);
-    latencyBufNewL = (double*)_aligned_malloc(sizeof(double) * latencyBufSize, 64);
-    latencyBufNewR = (double*)_aligned_malloc(sizeof(double) * latencyBufSize, 64);
+    latencyBufOldL = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
+    latencyBufOldR = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
+    latencyBufNewL = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
+    latencyBufNewR = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
 
     // malloc失敗時は安全フェイル
     if (!latencyBufOldL || !latencyBufOldR || !latencyBufNewL || !latencyBufNewR) {
@@ -155,30 +153,31 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     std::memset(latencyBufNewR, 0, sizeof(double) * latencyBufSize);
 
     latencyWritePos = 0;
-    latencyDelayOld.store(0, std::memory_order_release);
-    latencyDelayNew.store(0, std::memory_order_release);
-    latencyResetPending.store(false, std::memory_order_release);
+    convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release);
+    convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release);
+    convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
 
     latencyDelayOld_RT = 0;
     latencyDelayNew_RT = 0;
 
     // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
-    const auto* engineRuntime = getEngineRuntimeState();
-    const auto* runtimeGraph = getRuntimeGraphState();
+    const auto* world = getRuntimePublishWorld();
+    const auto* engineRuntime = getEngineRuntimeState(world);
+    const auto* runtimeGraph = getRuntimeGraphState(world);
     const bool hasPublishedCurrent = (runtimePublishedCurrentDSP(engineRuntime, runtimeGraph) != nullptr);
     if (!hasPublishedCurrent && activeDSP == nullptr)
     {
-        std::unique_ptr<DSPCore> placeholderDSP;
+        convo::aligned_unique_ptr<DSPCore> placeholderDSP;
         try
         {
-            placeholderDSP = std::make_unique<DSPCore>();
+            placeholderDSP = convo::aligned_make_unique<DSPCore>();
             placeholderDSP->convolverRt().setVisualizationEnabled(false);
             placeholderDSP->prepare(safeSampleRate,
                                     bufferSize,
-                                    ditherBitDepth.load(std::memory_order_relaxed),
-                                    manualOversamplingFactor.load(std::memory_order_relaxed),
-                                    oversamplingType.load(std::memory_order_relaxed),
-                                    noiseShaperType.load(std::memory_order_relaxed),
+                                    convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire),
+                                    convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire),
+                                    convo::consumeAtomic(oversamplingType, std::memory_order_acquire),
+                                    convo::consumeAtomic(noiseShaperType, std::memory_order_acquire),
                                     this);
             placeholderDSP->convolverRt().setBypass(true);
 
@@ -193,7 +192,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         }
 
         activeDSP = placeholderDSP.release();
-        currentDSP.store(activeDSP, std::memory_order_release);
+        publishCurrentDSP(activeDSP);
+        convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
+        convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
         publishRuntimeSnapshots(activeDSP,
                     nullptr,
                     convo::TransitionPolicy::HardReset,
@@ -206,9 +207,12 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
     if (rateChanged)
         uiConvolverProcessor.invalidatePendingLoads();
-    const auto* runtimeGraphForRebuildCheck = getRuntimeGraphState();
+    const auto* worldForRebuildCheck = getRuntimePublishWorld();
+    const auto* engineRuntimeForRebuildCheck = getEngineRuntimeState(worldForRebuildCheck);
+    const auto* runtimeGraphForRebuildCheck = getRuntimeGraphState(worldForRebuildCheck);
     const bool hasCurrentRuntime = (resolveCurrentDSPFromRuntimePublish(
-                                                                       runtimeGraphForRebuildCheck) != nullptr);
+                                                                       runtimeGraphForRebuildCheck,
+                                                                       engineRuntimeForRebuildCheck) != nullptr);
     if (rateChanged || blockSizeChanged || !hasCurrentRuntime) {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             requestRebuild(safeSampleRate, bufferSize);
@@ -216,8 +220,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             requestRebuild(convo::RebuildKind::Structural);
         }
     }
-    lifecycleState.store(EngineLifecycleState::Prepared, std::memory_order_release);
-    diagLog("[DIAG] prepareToPlay: exit currentSR=" + juce::String(currentSampleRate.load(), 2) + " maxSPB=" + juce::String(maxSamplesPerBlock.load()));
+    convo::publishAtomic(lifecycleState, EngineLifecycleState::Prepared, std::memory_order_release);
+    diagLog("[DIAG] prepareToPlay: exit currentSR=" + juce::String(convo::consumeAtomic(currentSampleRate), 2) + " maxSPB=" + juce::String(convo::consumeAtomic(maxSamplesPerBlock)));
 }
 
 #endif

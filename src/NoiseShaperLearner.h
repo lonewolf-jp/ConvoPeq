@@ -16,6 +16,8 @@
 #include "MklFftEvaluator.h"
 #include "NoiseShaperLearnerTypes.h"
 
+#include "audioengine/AtomicAccess.h"
+
 class AudioEngine;
 struct AudioBlock;
 template <typename T, size_t Capacity>
@@ -76,9 +78,9 @@ public:
     Settings getSettings() const noexcept
     {
         Settings s;
-        s.cmaesRestarts = settings.cmaesRestarts.load();
-        s.coeffSafetyMargin = settings.coeffSafetyMargin.load();
-        s.enableStabilityCheck = settings.enableStabilityCheck.load();
+        s.cmaesRestarts = convo::consumeAtomic(settings.cmaesRestarts);
+        s.coeffSafetyMargin = convo::consumeAtomic(settings.coeffSafetyMargin);
+        s.enableStabilityCheck = convo::consumeAtomic(settings.enableStabilityCheck);
         return s;
     }
 
@@ -107,7 +109,7 @@ public:
     const Progress& getProgress() const noexcept;
     void getState(State& outState) const noexcept;
     void setState(const State& inState) noexcept;
-    int copyBestScoreHistory(double* destination, int maxPoints) const noexcept;
+    int copyBestScoreHistory(double* destination, int maxPoints) noexcept;
     void onCoeffBankChanged(int newBankIndex) noexcept;
 
     double (*candidatePopulationMatrix() noexcept)[CmaEsOptimizer::kDim]
@@ -137,15 +139,23 @@ public:
     // エラーがなければ nullptr を返す。
     const char* getErrorMessage() const noexcept
     {
-        return errorMessage.load(std::memory_order_acquire);
+        return convo::consumeAtomic(errorMessage, std::memory_order_acquire);
     }
 
     void setErrorMessage(const char* msg) noexcept
     {
-        errorMessage.store(msg, std::memory_order_release);
+        convo::publishAtomic(errorMessage, msg, std::memory_order_release);
     }
 
 private:
+    enum class WorkerState : uint8_t
+    {
+        Idle = 0,
+        Starting,
+        Running,
+        Stopping
+    };
+
     struct SessionSignature
     {
         int sampleRateHz = 0;
@@ -167,7 +177,7 @@ private:
     struct EvaluationWorkerSlot
     {
         EvaluationContext context;
-        std::thread thread;
+        std::jthread thread;
     };
 
     void workerThreadMain();
@@ -200,19 +210,10 @@ private:
     AudioEngine& engine;
     LockFreeRingBuffer<AudioBlock, 4096>& captureQueue;
 
-    std::thread workerThread;
+    std::jthread workerThread;
+    std::atomic<WorkerState> workerState { WorkerState::Idle };
     std::atomic<bool> stopRequested { false };
     std::atomic<bool> pendingResume { false };
-    std::atomic<bool> startRequested { false };
-
-    // workerThread が完全に終了したことを示すフラグ。
-    // workerThreadMain() の最後（stopEvaluationWorkers() 完了後）で true にセットされる。
-    // startLearning() が join() でメッセージスレッドをブロックしないために使用する。
-    std::atomic<bool> workerThreadFinished { true };
-
-    // startLearning() の callAsync リトライが多重発行されないようにするためのフラグ。
-    // compare_exchange_strong で排他制御する。
-    std::atomic<bool> pendingRestart { false };
 
     Progress progress;
     Settings settings;
@@ -224,7 +225,7 @@ private:
     uint64_t currentSessionId = 0;
     std::chrono::steady_clock::time_point lastGenerationStart;
     double generationIntervalSeconds = 0.0;
-    mutable std::chrono::steady_clock::time_point lastSaveTime;
+    std::chrono::steady_clock::time_point lastSaveTime;
     static constexpr auto kSaveInterval = std::chrono::seconds(5);
     std::atomic<bool> modeSwitchRequested {false};
     LearningMode pendingMode {LearningMode::Short};
@@ -257,7 +258,7 @@ private:
     std::atomic<int> historyCount { 0 };
     // bestScoreHistory リングバッファの書き込み先インデックス（historyMutex 保護下で使用）
     int historyHead { 0 };
-    mutable std::mutex historyMutex;
+    std::mutex historyMutex;
 
     static juce::ThreadPool saveThreadPool;  // 非同期保存用スレッドプール
 

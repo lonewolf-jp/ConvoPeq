@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <limits>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo {
 
 class EpochManager
@@ -31,7 +33,7 @@ public:
         for (int i = 0; i < kMaxThreads; ++i)
         {
             uint64_t expected = kInactiveEpoch;
-            if (threads[i].epoch.compare_exchange_strong(expected, kReservedEpoch))
+            if (convo::compareExchangeAtomic(threads[i].epoch, expected, kReservedEpoch))
                 return i;
         }
         return -1; // fatal: too many threads
@@ -43,41 +45,41 @@ public:
             return false;
 
         uint64_t expected = kInactiveEpoch;
-        return threads[tid].epoch.compare_exchange_strong(expected, kReservedEpoch);
+        return convo::compareExchangeAtomic(threads[tid].epoch, expected, kReservedEpoch);
     }
 
     void enter(int tid)
     {
         if (tid < 0 || tid >= kMaxThreads) return;
-        uint64_t e = globalEpoch.load(std::memory_order_acquire);
-        threads[tid].epoch.store(e, std::memory_order_release);
+        uint64_t e = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
+        convo::publishAtomic(threads[tid].epoch, e, std::memory_order_release);
     }
 
     void exit(int tid)
     {
         if (tid < 0 || tid >= kMaxThreads) return;
-        threads[tid].epoch.store(kInactiveEpoch, std::memory_order_release);
+        convo::publishAtomic(threads[tid].epoch, kInactiveEpoch, std::memory_order_release);
     }
 
     // ===== Writer API =====
 
     uint64_t currentEpoch() const
     {
-        return globalEpoch.load(std::memory_order_acquire);
+        return convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
     }
 
     void advanceEpoch()
     {
-        globalEpoch.fetch_add(1, std::memory_order_acq_rel);
+        convo::fetchAddAtomic(globalEpoch, static_cast<uint64_t>(1), std::memory_order_acq_rel);
     }
 
     uint64_t minActiveEpoch() const
     {
-        uint64_t minE = globalEpoch.load(std::memory_order_acquire);
+        uint64_t minE = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
 
         for (const auto& t : threads)
         {
-            uint64_t e = t.epoch.load(std::memory_order_acquire);
+            uint64_t e = convo::consumeAtomic(t.epoch, std::memory_order_acquire);
             if (e != kInactiveEpoch && e != kReservedEpoch)
             {
                 if (isOlder(e, minE))

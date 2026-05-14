@@ -8,6 +8,8 @@
 #include <cstring>
 #include <immintrin.h>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace
 {
     static constexpr int kMaxChannels = 2;
@@ -101,7 +103,7 @@ void CustomInputOversampler::release() noexcept
     numStages = 0;
     maxInputBlockSize = 0;
     maxUpsampledBlockSize = 0;
-    corruptionDetected.store(false, std::memory_order_release);
+    convo::publishAtomic(corruptionDetected, false, std::memory_order_release);
 }
 
 double CustomInputOversampler::besselI0(double x) noexcept
@@ -178,7 +180,7 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     stage.maxInputSamples = stageInputMax;
     stage.maxOutputSamples = stageInputMax * 2;
 
-    convo::ScopedAlignedPtr<double> rawCoeffs(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.taps) * sizeof(double), 64)));
+    auto rawCoeffs = convo::makeAlignedArray<double>(static_cast<size_t>(stage.taps));
 
     const double beta = (attenuationDb > 50.0)
                       ? (0.1102 * (attenuationDb - 8.7))
@@ -230,8 +232,8 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
     rawCoeffs[stage.centerTap] = 0.5;
 
     stage.convCount = (stage.taps - stage.convParity + 1) / 2;
-    stage.convCoeffs.reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.convCount) * sizeof(double), 64)));
-    stage.convCoeffsReversed.reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.convCount) * sizeof(double), 64)));
+    stage.convCoeffs = convo::makeAlignedArray<double>(static_cast<size_t>(stage.convCount));
+    stage.convCoeffsReversed = convo::makeAlignedArray<double>(static_cast<size_t>(stage.convCount));
 
     if (!stage.convCoeffs || !stage.convCoeffsReversed)
     {
@@ -256,8 +258,8 @@ void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenua
 
     for (int ch = 0; ch < kMaxChannels; ++ch)
     {
-        stage.upHistory[ch].reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.upHistorySize) * sizeof(double), 64)));
-        stage.downHistory[ch].reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(stage.downHistorySize) * sizeof(double), 64)));
+        stage.upHistory[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(stage.upHistorySize));
+        stage.downHistory[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(stage.downHistorySize));
         if (stage.upHistory[ch]) juce::FloatVectorOperations::clear(stage.upHistory[ch].get(), stage.upHistorySize);
         if (stage.downHistory[ch]) juce::FloatVectorOperations::clear(stage.downHistory[ch].get(), stage.downHistorySize);
     }
@@ -283,8 +285,8 @@ void CustomInputOversampler::prepare(int newMaxInputBlockSize, int ratio, Preset
     workCapacity = juce::jmax(1, maxUpsampledBlockSize);
     for (int ch = 0; ch < kMaxChannels; ++ch)
     {
-        workA[ch].reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(workCapacity) * sizeof(double), 64)));
-        workB[ch].reset(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(workCapacity) * sizeof(double), 64)));
+        workA[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
+        workB[ch] = convo::makeAlignedArray<double>(static_cast<size_t>(workCapacity));
         if (workA[ch]) juce::FloatVectorOperations::clear(workA[ch].get(), workCapacity);
         if (workB[ch]) juce::FloatVectorOperations::clear(workB[ch].get(), workCapacity);
         blockChannels[ch] = workA[ch].get();
@@ -303,7 +305,7 @@ void CustomInputOversampler::reset() noexcept
         }
     }
 
-    corruptionDetected.store(false, std::memory_order_release);
+    convo::publishAtomic(corruptionDetected, false, std::memory_order_release);
 }
 
 void CustomInputOversampler::clearAllStages() noexcept
@@ -320,7 +322,7 @@ void CustomInputOversampler::clearAllStages() noexcept
         }
     }
 
-    corruptionDetected.store(false, std::memory_order_release);
+    convo::publishAtomic(corruptionDetected, false, std::memory_order_release);
 }
 
 void CustomInputOversampler::interpolateStage(const Stage& stage,
@@ -342,7 +344,7 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
         const int idx = keep + n;
         if (idx < (stage.convCount - 1) || idx >= capacity)
         {
-            corruptionDetected.store(true, std::memory_order_relaxed);
+            convo::publishAtomic(corruptionDetected, true, std::memory_order_release);
             output[n * 2 + 0] = 0.0;
             output[n * 2 + 1] = 0.0;
             continue;
@@ -382,7 +384,7 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
 
         if (bad || isBadSample(centerValue))
         {
-            corruptionDetected.store(true, std::memory_order_relaxed);
+            convo::publishAtomic(corruptionDetected, true, std::memory_order_release);
             output[n * 2 + 0] = 0.0;
             output[n * 2 + 1] = 0.0;
             continue;
@@ -423,7 +425,7 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
         if (base < stage.centerTap || base >= capacity)
         {
             output[n] = 0.0;
-            corruptionDetected.store(true, std::memory_order_relaxed);
+            convo::publishAtomic(corruptionDetected, true, std::memory_order_release);
             continue;
         }
 
@@ -431,7 +433,7 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
         if (isBadSample(acc))
         {
             output[n] = 0.0;
-            corruptionDetected.store(true, std::memory_order_relaxed);
+            convo::publishAtomic(corruptionDetected, true, std::memory_order_release);
             continue;
         }
 
@@ -530,7 +532,7 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
         if (bad)
         {
             output[n] = 0.0;
-            corruptionDetected.store(true, std::memory_order_relaxed);
+            convo::publishAtomic(corruptionDetected, true, std::memory_order_release);
             continue;
         }
 
@@ -541,8 +543,10 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
     std::memmove(history, history + inputSamples, static_cast<size_t>(keep) * sizeof(double));
 }
 
-juce::dsp::AudioBlock<double> CustomInputOversampler::processUp(const juce::dsp::AudioBlock<double>& inputBlock, int numChannels) noexcept
+juce::dsp::AudioBlock<double> CustomInputOversampler::processUp(juce::dsp::AudioBlock<double>& inputBlock, int numChannels) noexcept
 {
+    thread_local double* blockChannelView[kMaxChannels] = { nullptr, nullptr };
+
     const int channels = juce::jlimit(1, kMaxChannels, numChannels);
     const int inSamples = static_cast<int>(inputBlock.getNumSamples());
 
@@ -555,14 +559,16 @@ juce::dsp::AudioBlock<double> CustomInputOversampler::processUp(const juce::dsp:
 
     if (upsampleRatio <= 1 || numStages == 0)
     {
-        blockChannels[0] = const_cast<double*>(inputBlock.getChannelPointer(0));
-        blockChannels[1] = (channels > 1) ? const_cast<double*>(inputBlock.getChannelPointer(1))
+        blockChannels[0] = inputBlock.getChannelPointer(0);
+        blockChannels[1] = (channels > 1) ? inputBlock.getChannelPointer(1)
                                           : blockChannels[0];
-        return { blockChannels, static_cast<size_t>(channels), static_cast<size_t>(inSamples) };
+        blockChannelView[0] = blockChannels[0].get();
+        blockChannelView[1] = blockChannels[1].get();
+        return { blockChannelView, static_cast<size_t>(channels), static_cast<size_t>(inSamples) };
     }
 
-    const double* currIn[2] = { inputBlock.getChannelPointer(0),
-                                (channels > 1) ? inputBlock.getChannelPointer(1) : inputBlock.getChannelPointer(0) };
+    double* currIn[2] = { inputBlock.getChannelPointer(0),
+                          (channels > 1) ? inputBlock.getChannelPointer(1) : inputBlock.getChannelPointer(0) };
     int currSamples = inSamples;
 
     for (int stageIndex = 0; stageIndex < numStages; ++stageIndex)
@@ -579,16 +585,18 @@ juce::dsp::AudioBlock<double> CustomInputOversampler::processUp(const juce::dsp:
         currSamples <<= 1;
     }
 
-    blockChannels[0] = const_cast<double*>(currIn[0]);
-    blockChannels[1] = const_cast<double*>(currIn[1]);
-    return { blockChannels, static_cast<size_t>(channels), static_cast<size_t>(currSamples) };
+    blockChannels[0] = currIn[0];
+    blockChannels[1] = currIn[1];
+    blockChannelView[0] = blockChannels[0].get();
+    blockChannelView[1] = blockChannels[1].get();
+    return { blockChannelView, static_cast<size_t>(channels), static_cast<size_t>(currSamples) };
 }
 
 void CustomInputOversampler::processDown(const juce::dsp::AudioBlock<double>& upsampledBlock,
                                          juce::dsp::AudioBlock<double>& outputBlock,
                                          int numChannels) noexcept
 {
-    if (corruptionDetected.exchange(false, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(corruptionDetected, false, std::memory_order_acq_rel))
     {
         clearAllStages();
         outputBlock.clear();
@@ -601,7 +609,7 @@ void CustomInputOversampler::processDown(const juce::dsp::AudioBlock<double>& up
     // [Safety Guard] 入力サイズが準備された容量を超えている場合は処理をスキップし、出力をクリアする
     if (upsampledBlock.getNumSamples() > static_cast<size_t>(maxUpsampledBlockSize))
     {
-        corruptionDetected.store(true, std::memory_order_relaxed);
+        convo::publishAtomic(corruptionDetected, true, std::memory_order_release);
         outputBlock.clear();
         return;
     }

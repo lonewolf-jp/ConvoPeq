@@ -43,6 +43,8 @@
 #include <cstdint>
 #include <cstddef>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo {
 class SafeStateSwapper
 {
@@ -89,14 +91,14 @@ public:
         const uint64_t epoch1   = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
         /* newEpoch = */ globalEpoch.fetch_add(1, std::memory_order_acq_rel);
 
-        ConvolverState* oldState = activeState.exchange(newState, std::memory_order_acq_rel);
+        ConvolverState* oldState = convo::exchangeAtomic(activeState, newState, std::memory_order_acq_rel);
         if (oldState == nullptr) return;
 
         // リングバッファに積む
-        size_t t    = tail.load(std::memory_order_relaxed);
+        size_t t    = convo::consumeAtomic(tail, std::memory_order_acquire);
         size_t next = (t + 1) % kMaxRetired;
 
-        if (next == head.load(std::memory_order_acquire))
+        if (next == convo::consumeAtomic(head, std::memory_order_acquire))
         {
             // バッファ溢れ: フォールバックキュー（非 RT パスなのでロック可）
             std::lock_guard<std::mutex> lock(fallbackMutex);
@@ -104,10 +106,10 @@ public:
             return;
         }
 
-        retiredBuffer[t].state.store(oldState, std::memory_order_release);
+        convo::publishAtomic(retiredBuffer[t].state, oldState, std::memory_order_release);
         // epoch1 を記録: 「このデータが有効だった時代の直前エポック」
-        retiredBuffer[t].epoch.store(epoch1,    std::memory_order_release);
-        tail.store(next, std::memory_order_release);
+        convo::publishAtomic(retiredBuffer[t].epoch, epoch1, std::memory_order_release);
+        convo::publishAtomic(tail, next, std::memory_order_release);
     }
 
     // -----------------------------------------------------------------------
@@ -123,8 +125,8 @@ public:
         if (readerIndex >= 0 && readerIndex < kMaxReaders)
         {
             // relaxed load of global epoch is sufficient; release store publishes participation.
-            const uint64_t currentEpoch = globalEpoch.load(std::memory_order_relaxed);
-            readerEpochs[readerIndex].store(currentEpoch, std::memory_order_release);
+            const uint64_t currentEpoch = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
+            convo::publishAtomic(readerEpochs[readerIndex], currentEpoch, std::memory_order_release);
         }
     }
 
@@ -145,7 +147,7 @@ public:
         if (readerIndex >= 0 && readerIndex < kMaxReaders)
         {
             // relaxed store is sufficient for exiting participant.
-            readerEpochs[readerIndex].store(kIdleEpoch, std::memory_order_relaxed);
+            convo::publishAtomic(readerEpochs[readerIndex], kIdleEpoch, std::memory_order_release);
         }
     }
 
@@ -159,7 +161,7 @@ public:
     // -----------------------------------------------------------------------
     ConvolverState* getState() const noexcept
     {
-        return activeState.load(std::memory_order_acquire);
+        return convo::consumeAtomic(activeState, std::memory_order_acquire);
     }
 
     // -----------------------------------------------------------------------
@@ -193,40 +195,40 @@ public:
         }
 
         // リングバッファを確認
-        const size_t h = head.load(std::memory_order_relaxed);
-        if (h == tail.load(std::memory_order_acquire)) return nullptr;
+        const size_t h = convo::consumeAtomic(head, std::memory_order_acquire);
+        if (h == convo::consumeAtomic(tail, std::memory_order_acquire)) return nullptr;
 
         // tail(acquire) により、それ以前の epoch/state の release store は可視
-        const uint64_t entryEpoch = retiredBuffer[h].epoch.load(std::memory_order_acquire);
+        const uint64_t entryEpoch = convo::consumeAtomic(retiredBuffer[h].epoch, std::memory_order_acquire);
         // 注意: atomic_thread_fence(acquire) は不要。tail.load との同期で十分。
         if (isOlder(entryEpoch, minReaderEpoch))
         {
-            ConvolverState* ptr = retiredBuffer[h].state.load(std::memory_order_acquire);
+            ConvolverState* ptr = convo::consumeAtomic(retiredBuffer[h].state, std::memory_order_acquire);
             if (ptr != nullptr)
             {
                 // state を nullptr にクリアしてから head を進める（二重取得防止）
-                retiredBuffer[h].state.store(nullptr, std::memory_order_relaxed);
-                head.store((h + 1) % kMaxRetired, std::memory_order_release);
+                convo::publishAtomic(retiredBuffer[h].state, nullptr, std::memory_order_release);
+                convo::publishAtomic(head, (h + 1) % kMaxRetired, std::memory_order_release);
                 return ptr;
             }
 
             // 削除不可: head を進めて tail 側へ回転する
-            head.store((h + 1) % kMaxRetired, std::memory_order_release);
+            convo::publishAtomic(head, (h + 1) % kMaxRetired, std::memory_order_release);
 
-            const size_t t = tail.load(std::memory_order_relaxed);
+            const size_t t = convo::consumeAtomic(tail, std::memory_order_acquire);
             const size_t nextTail = (t + 1) % kMaxRetired;
-            if (nextTail == head.load(std::memory_order_acquire))
+            if (nextTail == convo::consumeAtomic(head, std::memory_order_acquire))
             {
                 std::lock_guard<std::mutex> lock(fallbackMutex);
                 fallbackQueue.push({ptr, entryEpoch});
             }
             else
             {
-                retiredBuffer[t].state.store(ptr, std::memory_order_relaxed);
-                retiredBuffer[t].epoch.store(entryEpoch, std::memory_order_relaxed);
-                tail.store(nextTail, std::memory_order_release);
+                convo::publishAtomic(retiredBuffer[t].state, ptr, std::memory_order_release);
+                convo::publishAtomic(retiredBuffer[t].epoch, entryEpoch, std::memory_order_release);
+                convo::publishAtomic(tail, nextTail, std::memory_order_release);
             }
-            retiredBuffer[h].state.store(nullptr, std::memory_order_relaxed);
+            convo::publishAtomic(retiredBuffer[h].state, nullptr, std::memory_order_release);
             return nullptr;
         }
 
@@ -238,15 +240,15 @@ public:
     // -----------------------------------------------------------------------
     uint64_t getSafeEpoch() const noexcept
     {
-        const uint64_t current = globalEpoch.load(std::memory_order_acquire);
+        const uint64_t current = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
         if (current < 2) return 0;
         return current - 2;
     }
 
-    size_t getPendingRetiredCount() const noexcept
+    size_t getPendingRetiredCount() noexcept
     {
-        const size_t currentHead = head.load(std::memory_order_acquire);
-        const size_t currentTail = tail.load(std::memory_order_acquire);
+        const size_t currentHead = convo::consumeAtomic(head, std::memory_order_acquire);
+        const size_t currentTail = convo::consumeAtomic(tail, std::memory_order_acquire);
         const size_t ringCount = (currentTail + kMaxRetired - currentHead) % kMaxRetired;
 
         std::lock_guard<std::mutex> lock(fallbackMutex);
@@ -259,7 +261,7 @@ public:
         bool hasActiveReader = false;
 
         for (size_t i = 0; i < kMaxReaders; ++i) {
-            const uint64_t e = readerEpochs[i].load(std::memory_order_acquire);
+            const uint64_t e = convo::consumeAtomic(readerEpochs[i], std::memory_order_acquire);
             if (e != kIdleEpoch) {
                 if (!hasActiveReader) {
                     minEpoch = e;
@@ -271,7 +273,7 @@ public:
         }
 
         if (!hasActiveReader)
-            return globalEpoch.load(std::memory_order_relaxed);
+            return convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
 
         return minEpoch;
     }
@@ -322,10 +324,10 @@ private:
     std::atomic<uint64_t> globalEpoch {0};
 
     // Reader ごとのエポック追跡（kIdleEpoch = 非参加）
-    mutable std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs {};
+    std::array<std::atomic<uint64_t>, kMaxReaders> readerEpochs {};
 
     // フォールバックキュー（バッファ溢れ時、非 RT スレッドのみ使用）
-    mutable std::mutex                         fallbackMutex;
+    std::mutex                                 fallbackMutex;
     std::priority_queue<FallbackEntry>         fallbackQueue;
 };
 

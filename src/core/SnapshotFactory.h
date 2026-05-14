@@ -16,7 +16,7 @@ class SnapshotCoordinator; // friend 宣言のため前方宣言
 class SnapshotFactory {
 public:
     // 新しいスナップショットを生成（Audio Thread 禁止）
-    static const GlobalSnapshot* create(const SnapshotParams& params);
+    static GlobalSnapshot* create(const SnapshotParams& params);
 
     /**
      * 差分ビルドによるスナップショット生成。
@@ -27,9 +27,9 @@ public:
      * @param generation 世代番号
      * @param sampleRate 現在のサンプルレート（将来の拡張用、現時点では未使用）
      */
-    static const GlobalSnapshot* createImpl(
+    static GlobalSnapshot* createImpl(
         const SnapshotParams& pending,
-        const GlobalSnapshot* current,
+        GlobalSnapshot* current,
         uint64_t generation,
         double sampleRate) noexcept;
 
@@ -51,7 +51,7 @@ private:
     friend class SnapshotCoordinator;
 
     // DeletionQueue / SnapshotCoordinator のみが呼び出し可能
-    static void destroy(const GlobalSnapshot* snap) noexcept;
+    static void destroy(GlobalSnapshot* snap) noexcept;
 
     SnapshotFactory() = delete;
 };

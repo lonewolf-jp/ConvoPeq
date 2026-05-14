@@ -8,6 +8,8 @@
 
 #include <cmath>
 
+#include "audioengine/AtomicAccess.h"
+
 ProgressiveUpgradeThread::ProgressiveUpgradeThread(ConvolverProcessor& p,
                                                    const juce::File& file,
                                                    double sr,
@@ -48,13 +50,13 @@ ProgressiveUpgradeThread::~ProgressiveUpgradeThread()
 
 void ProgressiveUpgradeThread::cancel()
 {
-    cancelled.store(true, std::memory_order_relaxed);
+    convo::publishAtomic(cancelled, true, std::memory_order_release);
     signalThreadShouldExit();
 }
 
 bool ProgressiveUpgradeThread::isGenerationValid() const
 {
-    return !cancelled.load(std::memory_order_relaxed)
+    return !convo::consumeAtomic(cancelled, std::memory_order_acquire)
         && processor.isConvolverGenerationCurrent(taskGeneration);
 }
 
@@ -62,7 +64,7 @@ bool ProgressiveUpgradeThread::checkAndCancel()
 {
     if (!isGenerationValid())
     {
-        cancelled.store(true, std::memory_order_relaxed);
+        convo::publishAtomic(cancelled, true, std::memory_order_release);
         return true;
     }
     return false;
@@ -100,7 +102,7 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
                                                       phaseMode,
                                                       nextFFTSize);
 
-    auto prepared = cacheManager.load(stepKey, nextFFTSize, taskGeneration);
+    auto prepared = cacheManager.loadPreparedState(stepKey, nextFFTSize, taskGeneration);
     if (!prepared)
     {
         prepared = converter.convertToHighRes(irFile,
@@ -159,8 +161,10 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
     const bool isFinalStep = (nextFFTSize >= targetFFTSize);
     if (isFinalStep)
     {
-        juce::MessageManager::callAsync([this, prepared = std::move(prepared)]() mutable
+        auto* preparedRaw = prepared.release();
+        juce::MessageManager::callAsync([this, preparedRaw]()
         {
+            std::unique_ptr<PreparedIRState> prepared(preparedRaw);
             if (this->checkAndCancel())
                 return;
 

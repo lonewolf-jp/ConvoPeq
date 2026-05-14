@@ -13,10 +13,10 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::initialize()
 {
-    firstIrDryCrossfadePending.store(false, std::memory_order_release);
-    firstIrDryCrossfadeDone.store(false, std::memory_order_release);
-    dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
-    dspCrossfadeDryHoldSamples.store(0, std::memory_order_release);
+    convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
+    convo::publishAtomic(firstIrDryCrossfadeDone, false, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
     dspCrossfadeDryScaleGain.reset(48000.0, 0.060);  // Initialize with 60ms ramp time
     dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
 
@@ -34,8 +34,8 @@ void AudioEngine::initialize()
     // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
     // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
     requestRebuild(48000.0, SAFE_MAX_BLOCK_SIZE);
-    maxSamplesPerBlock.store(SAFE_MAX_BLOCK_SIZE);
-    currentSampleRate.store(48000.0);
+    convo::publishAtomic(maxSamplesPerBlock, SAFE_MAX_BLOCK_SIZE);
+    convo::publishAtomic(currentSampleRate, 48000.0);
 
     m_fadeFloatBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE, false, false, true);
     m_fadeDoubleBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE, false, false, true);
@@ -88,24 +88,24 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
 
         uint64_t key = 0xD6E8FEB86659FD93ull;
         key = makeDebounceKey(key, eqHash);
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_pendingIRChange.load(std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_pendingNSChange.load(std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_pendingAGCChange.load(std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentEqBypass.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentConvBypass.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentProcessingOrder.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentSoftClipEnabled.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentOversamplingFactor.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentOversamplingType.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentDitherBitDepth.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentNoiseShaperType.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentInputHeadroomDb.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentOutputMakeupDb.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentConvInputTrimDb.load(std::memory_order_relaxed)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(m_currentSaturationAmount.load(std::memory_order_relaxed)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingIRChange, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingNSChange, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingAGCChange, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentEqBypass, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentConvBypass, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentProcessingOrder, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentSoftClipEnabled, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOversamplingFactor, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOversamplingType, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentDitherBitDepth, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentNoiseShaperType, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentInputHeadroomDb, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOutputMakeupDb, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentConvInputTrimDb, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentSaturationAmount, std::memory_order_acquire)));
 
-        const bool hasLastKey = hasLastEnqueuedSnapshotDebounceKey_.load(std::memory_order_acquire);
-        const uint64_t lastKey = lastEnqueuedSnapshotDebounceKey_.load(std::memory_order_acquire);
+        const bool hasLastKey = convo::consumeAtomic(hasLastEnqueuedSnapshotDebounceKey_, std::memory_order_acquire);
+        const uint64_t lastKey = convo::consumeAtomic(lastEnqueuedSnapshotDebounceKey_, std::memory_order_acquire);
         if (hasLastKey && lastKey == key)
         {
             diagLog("[VERIFY] enqueue snapshot debounced: identical snapshot intent");
@@ -120,8 +120,8 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
             return false;
         }
 
-        lastEnqueuedSnapshotDebounceKey_.store(key, std::memory_order_release);
-        hasLastEnqueuedSnapshotDebounceKey_.store(true, std::memory_order_release);
+        convo::publishAtomic(lastEnqueuedSnapshotDebounceKey_, key, std::memory_order_release);
+        convo::publishAtomic(hasLastEnqueuedSnapshotDebounceKey_, true, std::memory_order_release);
         return true;
     }
 
@@ -141,7 +141,7 @@ void AudioEngine::onSnapshotRequired(void* userData, uint64_t generation)
     if (self == nullptr)
         return;
 
-    if (self->shutdownInProgress.load(std::memory_order_acquire))
+    if (self->isShutdownInProgress())
         return;
 
     self->createSnapshotFromCurrentState(generation);
@@ -158,9 +158,9 @@ void AudioEngine::debugAssertNotAudioThread() const
 bool AudioEngine::waitForAudioBlockBoundary(uint64_t observedCounter, uint32_t timeoutMs) const noexcept
 {
     const uint32_t startMs = juce::Time::getMillisecondCounter();
-    while (!rebuildThreadShouldExit.load(std::memory_order_acquire))
+    while (!convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire))
     {
-        if (m_audioBlockCounter.load(std::memory_order_acquire) != observedCounter)
+        if (convo::consumeAtomic(m_audioBlockCounter, std::memory_order_acquire) != observedCounter)
             return true;
 
         if ((juce::Time::getMillisecondCounter() - startMs) >= timeoutMs)

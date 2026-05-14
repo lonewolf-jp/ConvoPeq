@@ -2,8 +2,6 @@
 #include "AudioEngine.h"
 #include "NoiseShaperLearner.h"
 
-extern std::atomic<bool> gShuttingDown;
-
 static void diagLog(const juce::String& message)
 {
     DBG(message);
@@ -17,7 +15,7 @@ void AudioEngine::releaseResources()
     ASSERT_NON_RT_THREAD();
     diagLog("[DIAG] releaseResources: enter");
 
-    auto previousState = lifecycleState.load(std::memory_order_acquire);
+    auto previousState = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
     for (;;)
     {
         if (previousState == EngineLifecycleState::Destroyed)
@@ -45,24 +43,23 @@ void AudioEngine::releaseResources()
             break;
     }
 
-    shutdownInProgress.store(true, std::memory_order_release);
     setShutdownPhase(ShutdownPhase::StopAcceptingWork, "releaseResources");
 
     // 非MT起点の pending rebuild 要求と AsyncUpdater キューをシャットダウン直後に廃棄する。
     // stopRebuildThread より先に実行して handleAsyncUpdate が後から rebuild を発火しないようにする。
-    pendingStructuralRebuildFromNonMT_.store(false, std::memory_order_release);
+    clearRebuildReason(RebuildReason::StructuralFromNonMT);
+    clearRebuildReason(RebuildReason::DeferredStructural);
+    clearRebuildReason(RebuildReason::DeferredFinalizeAware);
     cancelPendingUpdate();
-    firstIrDryCrossfadePending.store(false, std::memory_order_release);
-    dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
-    const bool finalShutdown = gShuttingDown.load(std::memory_order_acquire);
-    if (finalShutdown)
-    {
-        lastIssuedConvolverStructuralHash_.store(0, std::memory_order_release);
-        currentSampleRate.store(0.0);
-    }
+    convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
+    convo::publishAtomic(lastIssuedConvolverStructuralHash_, 0, std::memory_order_release);
+    convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
+    convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
+    convo::publishAtomic(currentSampleRate, 0.0);
 
-    inputLevelLinear.store(0.0f);
-    outputLevelLinear.store(0.0f);
+    convo::publishAtomic(inputLevelLinear, 0.0f);
+    convo::publishAtomic(outputLevelLinear, 0.0f);
 
     if (noiseShaperLearner)
         noiseShaperLearner->stopLearning();
@@ -78,20 +75,20 @@ void AudioEngine::releaseResources()
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
         validateDistinctRuntimeSlots("releaseResources.beforeClear",
-                                     activeDSP,
-                                     sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                                     nullptr);
+                         activeDSP,
+                         sanitizeRawPtr(loadFadingOutDSP()),
+                         nullptr);
 
-        rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
-        currentDSP.store(nullptr, std::memory_order_release);
+        rebuildGeneration.fetch_add(1, std::memory_order_acq_rel);
+        publishCurrentDSP(nullptr);
 
         activeToRelease = sanitizeRawPtr(activeDSP);
         activeDSP = nullptr;
 
-        fadingToRelease = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel));
-        dspCrossfadeUseDryAsOld.store(false, std::memory_order_release);
+        fadingToRelease = sanitizeRawPtr(exchangeFadingOutDSP(nullptr));
+        convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
         dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
-        queuedFadeTimeSec.store(0.03, std::memory_order_release);
+        convo::publishAtomic(queuedFadeTimeSec, 0.03, std::memory_order_release);
 
         if (hasPendingTask)
         {
@@ -100,7 +97,7 @@ void AudioEngine::releaseResources()
             hasPendingTask = false;
         }
 
-        dspCrossfadePending.store(false, std::memory_order_release);
+        convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
         dspCrossfadeGain.setCurrentAndTargetValue(1.0);
         publishRuntimeTransitionState(nullptr,
                                       nullptr,
@@ -115,7 +112,7 @@ void AudioEngine::releaseResources()
 
         validateDistinctRuntimeSlots("releaseResources.afterClear",
                          activeDSP,
-                         sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                         sanitizeRawPtr(loadFadingOutDSP()),
                          nullptr);
     }
 
@@ -126,7 +123,7 @@ void AudioEngine::releaseResources()
 
     setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "releaseResources");
     convo::EpochManager::instance().advanceEpoch();
-    g_currentEpoch.store(convo::EpochManager::instance().currentEpoch(), std::memory_order_release);
+    convo::publishAtomic(g_currentEpoch, convo::EpochManager::instance().currentEpoch(), std::memory_order_release);
 
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
@@ -171,7 +168,7 @@ void AudioEngine::releaseResources()
 
     clearPublishedRuntimeSnapshotsNonRt();
 
-    lifecycleState.store(EngineLifecycleState::Unprepared, std::memory_order_release);
+    convo::publishAtomic(lifecycleState, EngineLifecycleState::Unprepared, std::memory_order_release);
     diagLog("[DIAG] releaseResources: ABOUT_TO_EXIT_SCOPE");
 }
 

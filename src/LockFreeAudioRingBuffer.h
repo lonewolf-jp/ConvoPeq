@@ -4,6 +4,8 @@
 #include <atomic>
 #include <cstdint>
 
+#include "audioengine/AtomicAccess.h"
+
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4324)
@@ -21,20 +23,20 @@ public:
         storage.clear();
         capacity = size;
         numChannels = channels;
-        writeIndex.store(0, std::memory_order_release);
-        readIndex.store(0, std::memory_order_release);
+        convo::publishAtomic(writeIndex, 0, std::memory_order_release);
+        convo::publishAtomic(readIndex, 0, std::memory_order_release);
     }
 
     void reset() noexcept
     {
-        readIndex.store(0, std::memory_order_release);
-        writeIndex.store(0, std::memory_order_release);
+        convo::publishAtomic(readIndex, 0, std::memory_order_release);
+        convo::publishAtomic(writeIndex, 0, std::memory_order_release);
     }
 
     int getAvailableSamples() const noexcept
     {
-        const auto written = writeIndex.load(std::memory_order_acquire);
-        const auto read = readIndex.load(std::memory_order_acquire);
+        const auto written = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
+        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         return static_cast<int>(written - read);
     }
 
@@ -53,8 +55,8 @@ public:
         if (samplesToWriteRequested <= 0 || channelsToWrite <= 0)
             return;
 
-        const auto write = writeIndex.load(std::memory_order_relaxed);
-        const auto read = readIndex.load(std::memory_order_acquire);
+        const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
+        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         const int free = capacity - static_cast<int>(write - read);
         if (free <= 0)
             return;
@@ -88,7 +90,7 @@ public:
                 destination[i] = static_cast<float>(source[firstChunk + i]);
         }
 
-        writeIndex.store(write + static_cast<uint64_t>(samplesToWrite), std::memory_order_release);
+        convo::publishAtomic(writeIndex, write + static_cast<uint64_t>(samplesToWrite), std::memory_order_release);
     }
 
     int popMixToMono(float* destination, int requestedSamples) noexcept
@@ -96,8 +98,8 @@ public:
         if (destination == nullptr || requestedSamples <= 0 || capacity <= 0 || numChannels <= 0)
             return 0;
 
-        const auto write = writeIndex.load(std::memory_order_acquire);
-        const auto read = readIndex.load(std::memory_order_relaxed);
+        const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
+        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         const int available = static_cast<int>(write - read);
         if (available <= 0)
             return 0;
@@ -114,7 +116,7 @@ public:
         if (secondChunk > 0)
             mixChunk(left, right, destination + firstChunk, secondChunk);
 
-        readIndex.store(read + static_cast<uint64_t>(samplesToRead), std::memory_order_release);
+        convo::publishAtomic(readIndex, read + static_cast<uint64_t>(samplesToRead), std::memory_order_release);
         return samplesToRead;
     }
 
@@ -123,14 +125,14 @@ public:
         if (requestedSamples <= 0 || capacity <= 0)
             return;
 
-        const auto write = writeIndex.load(std::memory_order_acquire);
-        const auto read = readIndex.load(std::memory_order_relaxed);
+        const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
+        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         const int available = static_cast<int>(write - read);
         if (available <= 0)
             return;
 
         const int samplesToSkip = juce::jmin(requestedSamples, available);
-        readIndex.store(read + static_cast<uint64_t>(samplesToSkip), std::memory_order_release);
+        convo::publishAtomic(readIndex, read + static_cast<uint64_t>(samplesToSkip), std::memory_order_release);
     }
 
 private:

@@ -28,6 +28,8 @@
 #include "AlignedAllocation.h"  // convo::aligned_malloc / aligned_free
 #include "DftiHandle.h"
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo {
 
 // ---------------------------------------------------------------------------
@@ -40,7 +42,7 @@ namespace convo {
 struct ConvolverState
 {
     // --- FFT 作業バッファ（mkl_malloc 64-byte アライン）---
-    // Audio Thread 側は .load() で取得して読み書きする。
+    // Audio Thread 側は helper 経由で取得して読み書きする。
     double* partitionData = nullptr;                // IR 周波数領域パーティション
     std::atomic<double*> overlapBuffer {nullptr};   // OLA オーバーラップ
     std::atomic<double*> inputBuffer   {nullptr};   // FFT 入力作業領域
@@ -64,7 +66,7 @@ struct ConvolverState
     static uint64_t generateNewStateId() noexcept
     {
         static std::atomic<uint64_t> counter {0};
-        return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        return counter.fetch_add(1, std::memory_order_acq_rel) + 1;
     }
 
     // -----------------------------------------------------------------------
@@ -104,7 +106,7 @@ struct ConvolverState
         // 作業バッファ確保ヘルパー（失敗時は std::bad_alloc を throw）
         auto safeMalloc = [](size_t bytes) -> double*
         {
-            auto* ptr = static_cast<double*>(convo::aligned_malloc(bytes, 64));
+            auto* ptr = convo::makeAlignedArray<double>(bytes / sizeof(double)).release();
             if (!ptr) throw std::bad_alloc();
             return ptr;
         };
@@ -119,17 +121,17 @@ struct ConvolverState
         // 各作業バッファを確保してゼロクリア
         {
             auto* ov = safeMalloc(static_cast<size_t>(fftSize) * sizeof(double));
-            overlapBuffer.store(ov, std::memory_order_relaxed);
+            convo::publishAtomic(overlapBuffer, ov, std::memory_order_release);
             memset(ov, 0, static_cast<size_t>(fftSize) * sizeof(double));
         }
         {
             auto* ib = safeMalloc(static_cast<size_t>(fftSize) * sizeof(double));
-            inputBuffer.store(ib, std::memory_order_relaxed);
+            convo::publishAtomic(inputBuffer, ib, std::memory_order_release);
             memset(ib, 0, static_cast<size_t>(fftSize) * sizeof(double));
         }
         {
             auto* ob = safeMalloc(static_cast<size_t>(fftSize) * sizeof(double));
-            outputBuffer.store(ob, std::memory_order_relaxed);
+            convo::publishAtomic(outputBuffer, ob, std::memory_order_release);
             memset(ob, 0, static_cast<size_t>(fftSize) * sizeof(double));
         }
     }
@@ -146,13 +148,13 @@ struct ConvolverState
     void cleanup() noexcept
     {
         // exchange が false を返した（＝まだ解放していない）場合のみ実行
-        if (cleanedUp.exchange(true, std::memory_order_acq_rel)) return;
+        if (convo::exchangeAtomic(cleanedUp, true, std::memory_order_acq_rel)) return;
 
         // 各 atomic ポインタを nullptr に swap して古いポインタを解放
         if (auto* p = partitionData) { partitionData = nullptr; convo::aligned_free(p); }
-        if (auto* p = overlapBuffer.exchange(nullptr, std::memory_order_relaxed))  convo::aligned_free(p);
-        if (auto* p = inputBuffer.exchange(nullptr, std::memory_order_relaxed))    convo::aligned_free(p);
-        if (auto* p = outputBuffer.exchange(nullptr, std::memory_order_relaxed))   convo::aligned_free(p);
+        if (auto* p = convo::exchangeAtomic(overlapBuffer, nullptr, std::memory_order_acq_rel))  convo::aligned_free(p);
+        if (auto* p = convo::exchangeAtomic(inputBuffer, nullptr, std::memory_order_acq_rel))    convo::aligned_free(p);
+        if (auto* p = convo::exchangeAtomic(outputBuffer, nullptr, std::memory_order_acq_rel))   convo::aligned_free(p);
 
         // fftHandle は ScopedDftiDescriptor のデストラクタで自動解放される
         fftHandle.reset();
@@ -165,12 +167,9 @@ struct ConvolverState
     {
         partitionData = o.partitionData;
         o.partitionData = nullptr;
-        overlapBuffer.store(o.overlapBuffer.exchange(nullptr, std::memory_order_relaxed),
-                            std::memory_order_relaxed);
-        inputBuffer.store(o.inputBuffer.exchange(nullptr, std::memory_order_relaxed),
-                          std::memory_order_relaxed);
-        outputBuffer.store(o.outputBuffer.exchange(nullptr, std::memory_order_relaxed),
-                           std::memory_order_relaxed);
+        convo::publishAtomic(overlapBuffer, convo::exchangeAtomic(o.overlapBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
+        convo::publishAtomic(inputBuffer, convo::exchangeAtomic(o.inputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
+        convo::publishAtomic(outputBuffer, convo::exchangeAtomic(o.outputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
 
         partitionSizeBytes = o.partitionSizeBytes;
         numPartitions      = o.numPartitions;
@@ -181,8 +180,8 @@ struct ConvolverState
         fftHandle          = std::move(o.fftHandle);
 
         // ムーブ元は cleanedUp = true にして二重解放を防ぐ
-        o.cleanedUp.store(true, std::memory_order_relaxed);
-        cleanedUp.store(false, std::memory_order_relaxed);
+        convo::publishAtomic(o.cleanedUp, true, std::memory_order_release);
+        convo::publishAtomic(cleanedUp, false, std::memory_order_release);
     }
 
     // -----------------------------------------------------------------------
@@ -196,12 +195,9 @@ struct ConvolverState
 
             partitionData = o.partitionData;
             o.partitionData = nullptr;
-            overlapBuffer.store(o.overlapBuffer.exchange(nullptr, std::memory_order_relaxed),
-                                std::memory_order_relaxed);
-            inputBuffer.store(o.inputBuffer.exchange(nullptr, std::memory_order_relaxed),
-                              std::memory_order_relaxed);
-            outputBuffer.store(o.outputBuffer.exchange(nullptr, std::memory_order_relaxed),
-                               std::memory_order_relaxed);
+            convo::publishAtomic(overlapBuffer, convo::exchangeAtomic(o.overlapBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
+            convo::publishAtomic(inputBuffer, convo::exchangeAtomic(o.inputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
+            convo::publishAtomic(outputBuffer, convo::exchangeAtomic(o.outputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
 
             partitionSizeBytes = o.partitionSizeBytes;
             numPartitions      = o.numPartitions;
@@ -211,8 +207,8 @@ struct ConvolverState
             stateId            = o.stateId;
             fftHandle          = std::move(o.fftHandle);
 
-            o.cleanedUp.store(true, std::memory_order_relaxed);
-            cleanedUp.store(false, std::memory_order_relaxed);
+            convo::publishAtomic(o.cleanedUp, true, std::memory_order_release);
+            convo::publishAtomic(cleanedUp, false, std::memory_order_release);
         }
         return *this;
     }

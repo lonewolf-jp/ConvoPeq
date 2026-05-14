@@ -98,6 +98,8 @@ struct EQCoeffsBiquad
 
 #include "RefCountedDeferred.h"
 
+#include "audioengine/AtomicAccess.h"
+
 //--------------------------------------------------------------
 // EQCoeffCache: 係数キャッシュ（RefCounted資源）
 // v2.3 Phase 1 新規追加
@@ -190,8 +192,8 @@ public:
     void releaseResources();
 
     // バイパス制御
-    void setBypass(bool shouldBypass) { bypassRequested.store(shouldBypass, std::memory_order_relaxed); }
-    bool isBypassed() const { return bypassRequested.load(std::memory_order_relaxed); }
+    void setBypass(bool shouldBypass) { convo::publishAtomic(bypassRequested, shouldBypass, std::memory_order_release); }
+    bool isBypassed() const { return convo::consumeAtomic(bypassRequested, std::memory_order_acquire); }
 
     //----------------------------------------------------------
     // パラメータ変更 (UIスレッドから呼ぶ)
@@ -332,11 +334,11 @@ public:
     //----------------------------------------------------------
     // 状態スナップショット取得 (AudioEngine用)
     //----------------------------------------------------------
-    EQState* getEQState() const;  // 生ポインタ (所有権は共有せず、ライフタイムは currentStateRaw に依存)
+    EQState* getEQState() const;  // 生ポインタ (所有権は共有せず、ライフタイムは currentStateBits に依存)
     const EQState* getEQStateSnapshot() const { return getEQState(); }
     bool getAndClearPendingAGCChange() noexcept
     {
-        return m_pendingAGCChange.exchange(false, std::memory_order_acq_rel);
+        return convo::exchangeAtomic(m_pendingAGCChange, false, std::memory_order_acq_rel);
     }
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
@@ -386,9 +388,8 @@ private:
     // Message Thread側でdB→linear変換(std::pow)を行い、Audio Threadは linear値のみ参照する。
     inline void storeTotalGainDb(float gainDb) noexcept
     {
-        totalGainDbTarget.store(gainDb, std::memory_order_relaxed);
-        totalGainTarget.store(juce::Decibels::decibelsToGain<double>(static_cast<double>(gainDb)),
-                              std::memory_order_relaxed);
+        convo::publishAtomic(totalGainDbTarget, gainDb, std::memory_order_release);
+        convo::publishAtomic(totalGainTarget, juce::Decibels::decibelsToGain<double>(static_cast<double>(gainDb)), std::memory_order_release);
     }
 
     // サイレンス検出
@@ -400,13 +401,65 @@ private:
     void updateBandNode(int bandIndex);
 
     // スムージング処理
-    std::atomic<EQState*> currentStateRaw { nullptr }; // Raw pointer for Audio Thread (Lock-free)
+    std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
     convo::RCUReader rcuReader;
 
-    // ── 状態リセットフラグ (Audio Thread用) ──
-    std::atomic<uint32_t> bandResetMask { 0 };
-    std::atomic<bool> agcResetRequest { false };
+    // ── 状態リセット要求 (Message Thread publish / Audio Thread consume-only) ──
+    // high 32-bit: serial, low 32-bit: mask
+    std::atomic<std::uint64_t> bandResetPacked { 0 };
+    std::atomic<std::uint64_t> agcResetSerial { 0 };
+
+    static constexpr std::uint64_t makeBandResetPacked(std::uint32_t serial, std::uint32_t mask) noexcept
+    {
+        return (static_cast<std::uint64_t>(serial) << 32)
+            | static_cast<std::uint64_t>(mask);
+    }
+
+    static constexpr std::uint32_t bandResetSerialFromPacked(std::uint64_t packed) noexcept
+    {
+        return static_cast<std::uint32_t>(packed >> 32);
+    }
+
+    static constexpr std::uint32_t bandResetMaskFromPacked(std::uint64_t packed) noexcept
+    {
+        return static_cast<std::uint32_t>(packed & static_cast<std::uint64_t>(0xFFFFFFFFu));
+    }
+
+    inline void requestBandReset(uint32_t mask) noexcept
+    {
+        if (mask == 0u)
+            return;
+
+        std::uint64_t expected = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
+        for (;;)
+        {
+            const std::uint32_t currentSerial = bandResetSerialFromPacked(expected);
+            const std::uint32_t currentMask = bandResetMaskFromPacked(expected);
+            const std::uint32_t nextSerial = static_cast<std::uint32_t>(currentSerial + 1u);
+            const std::uint32_t nextMask = static_cast<std::uint32_t>(currentMask | mask);
+            const std::uint64_t desired = makeBandResetPacked(nextSerial, nextMask);
+
+            if (convo::compareExchangeAtomic(bandResetPacked,
+                                             expected,
+                                             desired,
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire))
+            {
+                break;
+            }
+        }
+    }
+
+    inline void requestAllBandReset() noexcept
+    {
+        requestBandReset(0xFFFFFFFFu);
+    }
+
+    inline void requestAgcReset() noexcept
+    {
+        convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    }
 
     std::atomic<bool> agcEnabled { false };
     std::atomic<bool> m_pendingAGCChange { false };
@@ -427,20 +480,77 @@ private:
     // 【Fix Bug #7】totalGainDbTargetのlinear値をMessage Threadで事前計算してAudio Threadに渡す。
     // Audio Thread内でのjuce::Decibels::decibelsToGain()(= std::pow/libm)呼び出しを排除する。
     std::atomic<double> totalGainTarget   { 1.0 }; // linear gain, default 0dB = 1.0
-    juce::SmoothedValue<double> smoothTotalGain;
+    convo::LinearRamp smoothTotalGain { 1.0 };
     static constexpr double SMOOTHING_TIME_SEC = 0.05; // 50ms
     static constexpr double BYPASS_FADE_TIME_SEC = 0.005; // 5ms
 
     // ── 係数管理 (Atomic Swap) ──
-    std::array<std::atomic<BandNode*>, NUM_BANDS> bandNodes; // Raw pointer for Audio Thread
-    std::array<BandNode*, NUM_BANDS> activeBandNodes { nullptr }; // Ownership for Message Thread
+    std::array<std::atomic<std::uintptr_t>, NUM_BANDS> bandNodeBits; // uintptr_t-backed lock-free handles
+    std::array<convo::NonOwningPtr<BandNode>, NUM_BANDS> activeBandNodes { convo::NonOwningPtr<BandNode> { nullptr } }; // Ownership slots for Message Thread
+
+    static EQState* fromStateBits(std::uintptr_t bits) noexcept
+    {
+        return reinterpret_cast<EQState*>(bits);
+    }
+
+    static std::uintptr_t toStateBits(EQState* ptr) noexcept
+    {
+        return static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(ptr));
+    }
+
+    static BandNode* fromBandNodeBits(std::uintptr_t bits) noexcept
+    {
+        return reinterpret_cast<BandNode*>(bits);
+    }
+
+    static std::uintptr_t toBandNodeBits(BandNode* ptr) noexcept
+    {
+        return static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(ptr));
+    }
+
+    EQState* loadCurrentState(std::memory_order order = std::memory_order_acquire) const noexcept
+    {
+        return fromStateBits(convo::consumeAtomic(currentStateBits, order));
+    }
+
+    EQState* exchangeCurrentState(EQState* value,
+                                  std::memory_order order = std::memory_order_acq_rel) noexcept
+    {
+        return fromStateBits(convo::exchangeAtomic(currentStateBits, toStateBits(value), order));
+    }
+
+    void publishCurrentState(EQState* value,
+                             std::memory_order order = std::memory_order_release) noexcept
+    {
+        convo::publishAtomic(currentStateBits, toStateBits(value), order);
+    }
+
+    BandNode* loadBandNode(int bandIndex,
+                           std::memory_order order = std::memory_order_acquire) const noexcept
+    {
+        return fromBandNodeBits(convo::consumeAtomic(bandNodeBits[bandIndex], order));
+    }
+
+    BandNode* exchangeBandNode(int bandIndex,
+                               BandNode* value,
+                               std::memory_order order = std::memory_order_acq_rel) noexcept
+    {
+        return fromBandNodeBits(convo::exchangeAtomic(bandNodeBits[bandIndex], toBandNodeBits(value), order));
+    }
+
+    void publishBandNode(int bandIndex,
+                         BandNode* value,
+                         std::memory_order order = std::memory_order_release) noexcept
+    {
+        convo::publishAtomic(bandNodeBits[bandIndex], toBandNodeBits(value), order);
+    }
 
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──
     // SVFの2つの積分器状態 (ic1eq, ic2eq)
     std::array<std::array<std::array<double, 2>, NUM_BANDS>, MAX_CHANNELS> filterState{};
     std::atomic<bool> bypassRequested { false };
     std::atomic<bool> bypassed { false }; // 実効バイパス状態（フェード完了後に更新）
-    juce::SmoothedValue<double> bypassFadeGain;
+    convo::LinearRamp bypassFadeGain { 1.0 };
 
     // ── 現在のサンプルレート ──
     // prepareToPlay で更新。Audio Thread で係数再計算に使用。
@@ -486,6 +596,17 @@ private:
     std::atomic<float> nonlinearSaturation { 0.2f };
     std::atomic<FilterStructure> requestedStructure { FilterStructure::Serial };
     std::atomic<FilterStructure> activeStructure { FilterStructure::Serial };
+
+    // Audio Thread専用のローカル状態。process() 内でのみ更新し、
+    // 他スレッドへの publish を伴わない。
+    double rtAgcCurrentGainShadow = 1.0;
+    double rtAgcEnvInputShadow = 0.0;
+    double rtAgcEnvOutputShadow = 0.0;
+    bool rtBypassedShadow = false;
+    FilterStructure rtActiveStructureShadow { FilterStructure::Serial };
+    std::uint32_t rtDeferredBandResetMask = 0;
+    std::uint64_t rtSeenBandResetSerial = 0;
+    std::uint64_t rtSeenAgcResetSerial = 0;
 
     // DSP_THREAD_STATE: process 呼び出し中のみ参照する実行状態バインディング。
     convo::DSPExecutionState* boundExecutionState = nullptr;

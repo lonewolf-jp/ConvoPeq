@@ -29,6 +29,8 @@
 #include "AudioEngine.h"
 #include "DftiHandle.h"
 
+#include "audioengine/AtomicAccess.h"
+
 enum class AnalyzerState : uint8_t
 {
     Disabled = 0,
@@ -47,7 +49,7 @@ public:
     void setAnalyzerEnabled(bool enabled);
     bool isReady() const noexcept
     {
-        return analyzerState.load(std::memory_order_acquire) == AnalyzerState::Ready;
+        return convo::consumeAtomic(analyzerState, std::memory_order_acquire) == AnalyzerState::Ready;
     }
 
     void paint(juce::Graphics& g) override;

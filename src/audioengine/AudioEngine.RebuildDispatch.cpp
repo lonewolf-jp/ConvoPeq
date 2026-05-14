@@ -3,8 +3,6 @@
 #include "NoiseShaperLearner.h"
 #include "RuntimeBuilder.h"
 
-extern std::atomic<bool> gShuttingDown;
-
 namespace {
 static void diagLog(const juce::String& message)
 {
@@ -23,10 +21,10 @@ struct BuildParameterSnapshot
 static BuildParameterSnapshot captureBuildParameterSnapshot(const AudioEngine& engine) noexcept
 {
     BuildParameterSnapshot snapshot {};
-    snapshot.ditherDepth = engine.ditherBitDepth.load(std::memory_order_acquire);
-    snapshot.oversamplingFactor = engine.manualOversamplingFactor.load(std::memory_order_acquire);
-    snapshot.oversamplingType = engine.oversamplingType.load(std::memory_order_acquire);
-    snapshot.noiseShaperType = engine.noiseShaperType.load(std::memory_order_acquire);
+    snapshot.ditherDepth = convo::consumeAtomic(engine.ditherBitDepth, std::memory_order_acquire);
+    snapshot.oversamplingFactor = convo::consumeAtomic(engine.manualOversamplingFactor, std::memory_order_acquire);
+    snapshot.oversamplingType = convo::consumeAtomic(engine.oversamplingType, std::memory_order_acquire);
+    snapshot.noiseShaperType = convo::consumeAtomic(engine.noiseShaperType, std::memory_order_acquire);
     return snapshot;
 }
 
@@ -88,8 +86,7 @@ static bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
 
 void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
 {
-    if (shutdownInProgress.load(std::memory_order_acquire) ||
-        gShuttingDown.load(std::memory_order_acquire))
+    if (isShutdownInProgress())
         return;
 
     if (kind == convo::RebuildKind::None || kind == convo::RebuildKind::Runtime)
@@ -101,44 +98,43 @@ void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
         if (auto* mm = juce::MessageManager::getInstanceWithoutCreating();
             mm != nullptr && mm->isThisTheMessageThread())
         {
-            pendingStructuralRebuildFromNonMT_.store(false, std::memory_order_release);
+            clearRebuildReason(RebuildReason::StructuralFromNonMT);
 
-            const double sr = currentSampleRate.load(std::memory_order_acquire);
-            const int bs = maxSamplesPerBlock.load(std::memory_order_acquire);
+            const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+            const int bs = convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire);
             if (sr > 0.0 && bs > 0)
             {
                 requestRebuild(sr, bs);
                 return;
             }
 
-            deferredFinalizeAwareRebuildPending_.store(true, std::memory_order_release);
+            setRebuildReason(RebuildReason::DeferredFinalizeAware);
             return;
         }
     }
 
     // 非MTパス: bool フラグをセットして MT へ通知
-    const bool wasAlreadyPending = pendingStructuralRebuildFromNonMT_.exchange(true, std::memory_order_acq_rel);
-    if (!wasAlreadyPending)
+    const bool wasNewlyPending = setRebuildReason(RebuildReason::StructuralFromNonMT);
+    if (wasNewlyPending)
         triggerAsyncUpdate();
 }
 
 void AudioEngine::handleAsyncUpdate()
 {
-    if (shutdownInProgress.load(std::memory_order_acquire) ||
-        gShuttingDown.load(std::memory_order_acquire))
+    if (isShutdownInProgress())
         return;
 
     executeCommit();
 
     // 非MT起点の Structural rebuild 要求を消費して実行する
-    if (pendingStructuralRebuildFromNonMT_.exchange(false, std::memory_order_acq_rel))
+    if (clearRebuildReason(RebuildReason::StructuralFromNonMT))
     {
-        const double sr = currentSampleRate.load(std::memory_order_acquire);
-        const int bs = maxSamplesPerBlock.load(std::memory_order_acquire);
+        const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+        const int bs = convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire);
         if (sr > 0.0 && bs > 0)
             requestRebuild(sr, bs);
         else
-            deferredFinalizeAwareRebuildPending_.store(true, std::memory_order_release);
+            setRebuildReason(RebuildReason::DeferredFinalizeAware);
     }
 }
 
@@ -151,26 +147,26 @@ void AudioEngine::handleAsyncUpdate()
 //--------------------------------------------------------------
 void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 {
-    debugRebuildDispatchRequestCount.fetch_add(1, std::memory_order_relaxed);
+    debugRebuildDispatchRequestCount.fetch_add(1, std::memory_order_acq_rel);
 
     // UIコンポーネントへのアクセスを行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
     // シャットダウン中のリクエストは早期に切る
-    if (shutdownInProgress.load(std::memory_order_acquire) || gShuttingDown.load(std::memory_order_acquire))
+    if (isShutdownInProgress())
     {
         diagLog("[DIAG] requestRebuild(sr,bs): ignored during shutdown");
         return;
     }
 
-    if (deferredStructuralRebuildPending_.load(std::memory_order_acquire))
+    if (hasRebuildReason(RebuildReason::DeferredStructural))
     {
-        const int64_t dueTicks = deferredStructuralRebuildDueTicks_.load(std::memory_order_acquire);
+        const int64_t dueTicks = convo::consumeAtomic(deferredStructuralRebuildDueTicks_, std::memory_order_acquire);
         const int64_t nowTicks = juce::Time::getHighResolutionTicks();
         const bool uiHasIr = uiConvolverProcessor.isIRLoaded();
-        const bool activeHasIr = (activeDSP != nullptr) && activeDSP->convolverRt().isIRLoaded();
+        const bool committedHasIr = convo::consumeAtomic(lastCommittedConvolverHasIr_, std::memory_order_acquire);
 
-        if (dueTicks > 0 && nowTicks < dueTicks && uiHasIr && !activeHasIr)
+        if (dueTicks > 0 && nowTicks < dueTicks && uiHasIr && !committedHasIr)
         {
             diagLog("[DIAG] requestRebuild(sr,bs): SUPPRESSED direct rebuild during deferred Structural window SR="
                 + juce::String(sampleRate, 2));
@@ -282,14 +278,14 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 
     if (queued)
     {
-        debugRebuildDispatchQueuedCount.fetch_add(1, std::memory_order_relaxed);
+        debugRebuildDispatchQueuedCount.fetch_add(1, std::memory_order_acq_rel);
         const auto runtimeCommand = makeRuntimeCommand(sampleRate,
                                                        samplesPerBlock,
                                                        paramSnapshot,
                                                        static_cast<std::uint64_t>(generation));
         if (!m_runtimeCommandQueue.enqueue(runtimeCommand))
         {
-            debugRebuildDispatchRuntimeQueueFullCount.fetch_add(1, std::memory_order_relaxed);
+            debugRebuildDispatchRuntimeQueueFullCount.fetch_add(1, std::memory_order_acq_rel);
             diagLog("[DIAG] requestRebuild(sr,bs): runtime command queue full generation=" + juce::String(generation));
         }
 
@@ -301,13 +297,13 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     {
         if (blockedAsRecentDuplicate)
         {
-            debugRebuildDispatchBlockedRecentDuplicateCount.fetch_add(1, std::memory_order_relaxed);
+            debugRebuildDispatchBlockedRecentDuplicateCount.fetch_add(1, std::memory_order_acq_rel);
             diagLog("[DIAG] requestRebuild(sr,bs): BLOCKED duplicate recent task SR="
                 + juce::String(sampleRate, 2));
         }
         else
         {
-            debugRebuildDispatchBlockedPendingDuplicateCount.fetch_add(1, std::memory_order_relaxed);
+            debugRebuildDispatchBlockedPendingDuplicateCount.fetch_add(1, std::memory_order_acq_rel);
             diagLog("[DIAG] requestRebuild(sr,bs): BLOCKED duplicate pending task SR="
                 + juce::String(sampleRate, 2));
         }
@@ -335,7 +331,7 @@ void AudioEngine::stopRebuildThread()
     setShutdownPhase(ShutdownPhase::StopWorkers, "stopRebuildThread");
 
     // exit フラグを立てる（predicate が次に評価された時に break する）
-    rebuildThreadShouldExit.store(true, std::memory_order_release);
+    convo::publishAtomic(rebuildThreadShouldExit, true, std::memory_order_release);
 
     // 待機中のスレッドを確実に起こす
     rebuildCV.notify_all();
@@ -362,7 +358,7 @@ void AudioEngine::rebuildThreadLoop()
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 
-    rebuildThreadIsRunning.store(true, std::memory_order_release);
+    convo::publishAtomic(rebuildThreadIsRunning, true, std::memory_order_release);
 
     while (true)
     {
@@ -373,11 +369,10 @@ void AudioEngine::rebuildThreadLoop()
             int drainedCommandCount = 0;
             {
                 std::unique_lock<std::mutex> lock(rebuildMutex);
-                rebuildCV.wait(lock, [this] { return hasPendingTask || rebuildThreadShouldExit.load(); });
+                rebuildCV.wait(lock, [this] { return hasPendingTask || convo::consumeAtomic(rebuildThreadShouldExit); });
 
-                if (rebuildThreadShouldExit.load()) break;
-                if (shutdownInProgress.load(std::memory_order_acquire)
-                    || gShuttingDown.load(std::memory_order_acquire))
+                if (convo::consumeAtomic(rebuildThreadShouldExit)) break;
+                if (isShutdownInProgress())
                 {
                     hasPendingTask = false;
                     pendingTask.currentDSP = nullptr;
@@ -394,7 +389,7 @@ void AudioEngine::rebuildThreadLoop()
             drainedCommandCount = m_runtimeCommandQueue.drainCoalesced(drainedCommands,
                                                                        static_cast<int>(std::size(drainedCommands)));
             debugRebuildDispatchDrainedCommandCount.fetch_add(static_cast<std::uint64_t>(juce::jmax(0, drainedCommandCount)),
-                                                              std::memory_order_relaxed);
+                                                              std::memory_order_acq_rel);
 
             struct DSPGuard
             {
@@ -411,7 +406,7 @@ void AudioEngine::rebuildThreadLoop()
 
             // Helper to check obsolescence
             const auto isObsolete = [&] {
-                return isRebuildObsolete(task.generation) || rebuildThreadShouldExit.load();
+                return isRebuildObsolete(task.generation) || convo::consumeAtomic(rebuildThreadShouldExit);
             };
 
             if (isObsolete())
@@ -432,7 +427,7 @@ void AudioEngine::rebuildThreadLoop()
 
             if (matchedRuntimeCommandIndex >= 0)
             {
-                debugRebuildDispatchMatchedRuntimeCommandCount.fetch_add(1, std::memory_order_relaxed);
+                debugRebuildDispatchMatchedRuntimeCommandCount.fetch_add(1, std::memory_order_acq_rel);
                 buildResult = runtimeBuilder.build(drainedCommands[matchedRuntimeCommandIndex], task.convolverBuildSnapshot);
                 if (buildResult.runtime == nullptr && buildResult.error == convo::BuildError::InvalidInput)
                 {
@@ -443,7 +438,7 @@ void AudioEngine::rebuildThreadLoop()
             }
             else
             {
-                debugRebuildDispatchTaskSnapshotFallbackCount.fetch_add(1, std::memory_order_relaxed);
+                debugRebuildDispatchTaskSnapshotFallbackCount.fetch_add(1, std::memory_order_acq_rel);
                 buildResult = runtimeBuilder.build(task.buildInput, task.convolverBuildSnapshot);
             }
 
@@ -530,7 +525,7 @@ void AudioEngine::rebuildThreadLoop()
             newDSP->convolverRt().refreshLatency();
 
             // 5. Fade In
-            newDSP->ramps().fadeInSamplesLeft.store(DSPCore::FADE_IN_SAMPLES, std::memory_order_relaxed);
+            newDSP->ramps().fadeInSamplesLeft = DSPCore::FADE_IN_SAMPLES;
 
             // 6. Commit on Message Thread
             // Release ownership from guard, pass to commitNewDSP
@@ -549,6 +544,6 @@ void AudioEngine::rebuildThreadLoop()
         }
     }
 
-    rebuildThreadIsRunning.store(false, std::memory_order_release);
+    convo::publishAtomic(rebuildThreadIsRunning, false, std::memory_order_release);
 }
 #endif

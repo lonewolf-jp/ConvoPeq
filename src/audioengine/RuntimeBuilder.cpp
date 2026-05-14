@@ -25,7 +25,7 @@ static int getWarmupBlocksOverrideFromEnv() noexcept
 {
     // -2: 未初期化, -1: override 無効, 0以上: override 値
     static std::atomic<int> cached { -2 };
-    int value = cached.load(std::memory_order_acquire);
+    int value = convo::consumeAtomic(cached, std::memory_order_acquire);
     if (value != -2)
         return value;
 
@@ -38,7 +38,7 @@ static int getWarmupBlocksOverrideFromEnv() noexcept
             parsed = std::clamp(static_cast<int>(v), 0, 16);
     }
 
-    cached.store(parsed, std::memory_order_release);
+    convo::publishAtomic(cached, parsed, std::memory_order_release);
     return parsed;
 }
 
@@ -58,29 +58,29 @@ static juce::String updateWarmupBlockStatsAndFormatSummary(int blocks, std::uint
     const int index = std::clamp(blocks, 0, kMaxTrackedBlocks);
     auto& stats = statsByBlocks[static_cast<size_t>(index)];
 
-    const std::uint64_t runs = stats.runs.fetch_add(1, std::memory_order_relaxed) + 1;
-    const std::uint64_t totalUs = stats.totalUs.fetch_add(elapsedUs, std::memory_order_relaxed) + elapsedUs;
+    const std::uint64_t runs = stats.runs.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const std::uint64_t totalUs = stats.totalUs.fetch_add(elapsedUs, std::memory_order_acq_rel) + elapsedUs;
 
     // min 更新
-    std::uint64_t currentMin = stats.minUs.load(std::memory_order_relaxed);
+    std::uint64_t currentMin = convo::consumeAtomic(stats.minUs, std::memory_order_acquire);
     while (elapsedUs < currentMin
         && !stats.minUs.compare_exchange_weak(currentMin, elapsedUs,
-                                              std::memory_order_relaxed,
-                                              std::memory_order_relaxed))
+                              std::memory_order_acq_rel,
+                              std::memory_order_acquire))
     {
     }
 
     // max 更新
-    std::uint64_t currentMax = stats.maxUs.load(std::memory_order_relaxed);
+    std::uint64_t currentMax = convo::consumeAtomic(stats.maxUs, std::memory_order_acquire);
     while (elapsedUs > currentMax
         && !stats.maxUs.compare_exchange_weak(currentMax, elapsedUs,
-                                              std::memory_order_relaxed,
-                                              std::memory_order_relaxed))
+                              std::memory_order_acq_rel,
+                              std::memory_order_acquire))
     {
     }
 
-    const std::uint64_t minUs = stats.minUs.load(std::memory_order_relaxed);
-    const std::uint64_t maxUs = stats.maxUs.load(std::memory_order_relaxed);
+    const std::uint64_t minUs = convo::consumeAtomic(stats.minUs, std::memory_order_acquire);
+    const std::uint64_t maxUs = convo::consumeAtomic(stats.maxUs, std::memory_order_acquire);
     const double avgMs = (runs > 0) ? (static_cast<double>(totalUs) / static_cast<double>(runs) / 1000.0) : 0.0;
 
     return "[DIAG] warmup summary blocks="
@@ -217,18 +217,13 @@ BuildResult RuntimeBuilder::build(const BuildInput& in, const ConvolverProcessor
         return result;
     }
 
-    auto* runtime = new (std::nothrow) AudioEngine::DSPCore();
-    if (runtime == nullptr)
-    {
-        result.error = BuildError::ResourceUnavailable;
-        return result;
-    }
-
-    runtime->convolverRt().setVisualizationEnabled(false);
-    runtime->convolverRt().applyBuildSnapshot(snapshot);
+    convo::aligned_unique_ptr<AudioEngine::DSPCore> runtime;
 
     try
     {
+        runtime = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        runtime->convolverRt().setVisualizationEnabled(false);
+        runtime->convolverRt().applyBuildSnapshot(snapshot);
         runtime->prepare(in.sampleRate,
                          in.blockSize,
                          in.ditherBitDepth,
@@ -236,13 +231,17 @@ BuildResult RuntimeBuilder::build(const BuildInput& in, const ConvolverProcessor
                          static_cast<AudioEngine::OversamplingType>(in.oversamplingType),
                          static_cast<AudioEngine::NoiseShaperType>(in.noiseShaperType),
                          &engine);
-        result.runtime = runtime;
+        result.runtime = runtime.release();
         result.prepared = true;
+        return result;
+    }
+    catch (const std::bad_alloc&)
+    {
+        result.error = BuildError::ResourceUnavailable;
         return result;
     }
     catch (...)
     {
-        delete runtime;
         result.error = BuildError::InternalError;
         return result;
     }
@@ -410,8 +409,8 @@ BuildError RuntimeBuilder::executeWarmup(AudioEngine::DSPCore& runtime) noexcept
 
     static std::atomic<std::uint64_t> warmupRunCount { 0 };
     static std::atomic<std::uint64_t> warmupTotalUs { 0 };
-    const std::uint64_t runs = warmupRunCount.fetch_add(1, std::memory_order_relaxed) + 1;
-    const std::uint64_t totalUs = warmupTotalUs.fetch_add(elapsedUsSafe, std::memory_order_relaxed)
+    const std::uint64_t runs = warmupRunCount.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const std::uint64_t totalUs = warmupTotalUs.fetch_add(elapsedUsSafe, std::memory_order_acq_rel)
         + elapsedUsSafe;
     const double avgMs = (runs > 0) ? (static_cast<double>(totalUs) / static_cast<double>(runs) / 1000.0) : 0.0;
 

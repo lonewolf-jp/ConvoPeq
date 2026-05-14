@@ -10,6 +10,8 @@
 #include <complex>
 #if defined(__AVX2__)
 #include <immintrin.h>
+
+#include "audioengine/AtomicAccess.h"
 #endif
 
 namespace
@@ -47,8 +49,8 @@ namespace
 //--------------------------------------------------------------
 SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     : engine(audioEngine),
-      fftTimeDomainBuffer(static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * sizeof(float), 64))),
-      fftWorkBuffer(static_cast<float*>(convo::aligned_malloc(NUM_FFT_POINTS * 2 * sizeof(float), 64)))
+    fftTimeDomainBuffer(convo::makeAlignedArray<float>(NUM_FFT_POINTS)),
+    fftWorkBuffer(convo::makeAlignedArray<float>(NUM_FFT_POINTS * 2))
 {
     // ScopedAlignedPtr handles memory management and exception safety automatically.
     juce::FloatVectorOperations::clear(fftTimeDomainBuffer.get(), NUM_FFT_POINTS);
@@ -141,25 +143,25 @@ void SpectrumAnalyzerComponent::setAnalyzerEnabled(bool enabled)
 
 void SpectrumAnalyzerComponent::enableAnalyzer()
 {
-    analyzerState.store(AnalyzerState::Initializing, std::memory_order_release);
+    convo::publishAtomic(analyzerState, AnalyzerState::Initializing, std::memory_order_release);
     engine.setAnalyzerEnabled(false);
 
     prepareFFT();
 
     if (fftHandle.get() == nullptr || fftTimeDomainBuffer.get() == nullptr || fftWorkBuffer.get() == nullptr)
     {
-        analyzerState.store(AnalyzerState::Disabled, std::memory_order_release);
+        convo::publishAtomic(analyzerState, AnalyzerState::Disabled, std::memory_order_release);
         engine.setAnalyzerEnabled(false);
         return;
     }
 
-    analyzerState.store(AnalyzerState::Ready, std::memory_order_release);
+    convo::publishAtomic(analyzerState, AnalyzerState::Ready, std::memory_order_release);
     engine.setAnalyzerEnabled(true);
 }
 
 void SpectrumAnalyzerComponent::disableAnalyzer()
 {
-    analyzerState.store(AnalyzerState::Disabled, std::memory_order_release);
+    convo::publishAtomic(analyzerState, AnalyzerState::Disabled, std::memory_order_release);
     engine.setAnalyzerEnabled(false);
     releaseFFT();
 }
@@ -337,7 +339,7 @@ void SpectrumAnalyzerComponent::timerCallback()
     analyzerVisualsCleared = false;
 
     if (!isShowing() || !analyzerEnableButton.getToggleState()) return;
-    if (analyzerState.load(std::memory_order_acquire) != AnalyzerState::Ready) return;
+    if (convo::consumeAtomic(analyzerState, std::memory_order_acquire) != AnalyzerState::Ready) return;
     if (fftHandle.get() == nullptr) return;
 
 

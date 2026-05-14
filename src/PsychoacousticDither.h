@@ -25,6 +25,8 @@
 #include <immintrin.h>
 #include <mkl_vsl.h>
 
+#include "audioengine/AtomicAccess.h"
+
 namespace convo
 {
 //============================================================
@@ -120,11 +122,11 @@ public:
             const uint64_t seedValue = seeder.next();
             rng[i].init(seedValue);
             fallbackState[i] = seedValue ^ 0xd1b54a32d192ed03ULL;
-            rngReadPos[i].store(0u, std::memory_order_relaxed);
-            rngWritePos[i].store(0u, std::memory_order_relaxed);
+            convo::publishAtomic(rngReadPos[i], 0u, std::memory_order_release);
+            convo::publishAtomic(rngWritePos[i], 0u, std::memory_order_release);
         }
 
-        shaperStateBuffer = static_cast<double*>(convo::aligned_malloc(MAX_CHANNELS * STATE_STRIDE * sizeof(double), 64));
+        shaperStateBuffer = convo::makeAlignedArray<double>(MAX_CHANNELS * STATE_STRIDE).release();
         reset();
     }
 
@@ -382,8 +384,8 @@ private:
     {
         for (int ch = 0; ch < MAX_CHANNELS; ++ch)
         {
-            rngReadPos[ch].store(0u, std::memory_order_relaxed);
-            rngWritePos[ch].store(0u, std::memory_order_relaxed);
+            convo::publishAtomic(rngReadPos[ch], 0u, std::memory_order_release);
+            convo::publishAtomic(rngWritePos[ch], 0u, std::memory_order_release);
         }
     }
 
@@ -430,7 +432,7 @@ private:
         for (int ch = 0; ch < MAX_CHANNELS; ++ch)
         {
             fillChunkForChannel(ch, 0u, RNG_RING_SIZE);
-            rngWritePos[ch].store(RNG_RING_SIZE, std::memory_order_release);
+            convo::publishAtomic(rngWritePos[ch], RNG_RING_SIZE, std::memory_order_release);
         }
     }
 
@@ -444,15 +446,15 @@ public:
         const uint32_t refillChunk = std::min(chunk, RNG_RING_SIZE);
         for (int ch = 0; ch < MAX_CHANNELS; ++ch)
         {
-            const uint32_t readPos = rngReadPos[ch].load(std::memory_order_acquire);
-            const uint32_t writePos = rngWritePos[ch].load(std::memory_order_relaxed);
+            const uint32_t readPos = convo::consumeAtomic(rngReadPos[ch], std::memory_order_acquire);
+            const uint32_t writePos = convo::consumeAtomic(rngWritePos[ch], std::memory_order_acquire);
             const uint32_t available = writePos - readPos;
             const uint32_t freeSpace = RNG_RING_SIZE - available;
 
             if (freeSpace >= refillChunk)
             {
                 fillChunkForChannel(ch, writePos, refillChunk);
-                rngWritePos[ch].store(writePos + refillChunk, std::memory_order_release);
+                convo::publishAtomic(rngWritePos[ch], writePos + refillChunk, std::memory_order_release);
             }
         }
     }
@@ -481,14 +483,14 @@ private:
         //   consumer 側の rngWritePos acquire load で同期される。
         // - したがってここで readPos を acquire に強めても正しさは変わらず、
         //   主同期点は writePos (release/acquire) のペアとなる。
-        const uint32_t readPos = rngReadPos[channel].load(std::memory_order_relaxed);
-        const uint32_t writePos = rngWritePos[channel].load(std::memory_order_acquire);
+        const uint32_t readPos = convo::consumeAtomic(rngReadPos[channel], std::memory_order_acquire);
+        const uint32_t writePos = convo::consumeAtomic(rngWritePos[channel], std::memory_order_acquire);
 
         if (readPos == writePos)
             return fallbackUniform(channel);
 
         const double value = rngRing[channel][readPos & RNG_RING_MASK];
-        rngReadPos[channel].store(readPos + 1u, std::memory_order_release);
+        convo::publishAtomic(rngReadPos[channel], readPos + 1u, std::memory_order_release);
         return value;
     }
 

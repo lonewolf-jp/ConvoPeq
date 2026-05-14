@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <mutex>
 
+#include "AtomicAccess.h"
 #include "RuntimeCommand.h"
 
 namespace convo {
@@ -21,25 +22,25 @@ public:
     bool enqueue(const EngineCommand& cmd) noexcept
     {
         std::lock_guard<std::mutex> lock(enqueueMutex);
-        const std::size_t write = writeIndex.load(std::memory_order_relaxed);
-        const std::size_t read = readIndex.load(std::memory_order_acquire);
+        const std::size_t write = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
+        const std::size_t read = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         if ((write - read) >= capacity)
             return false;
 
         buffer[write & mask] = cmd;
-        writeIndex.store(write + 1, std::memory_order_release);
+        convo::publishAtomic(writeIndex, write + 1, std::memory_order_release);
         return true;
     }
 
     bool tryDequeue(EngineCommand& out) noexcept
     {
-        const std::size_t read = readIndex.load(std::memory_order_relaxed);
-        const std::size_t write = writeIndex.load(std::memory_order_acquire);
+        const std::size_t read = convo::consumeAtomic(readIndex, std::memory_order_acquire);
+        const std::size_t write = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
         if (read == write)
             return false;
 
         out = buffer[read & mask];
-        readIndex.store(read + 1, std::memory_order_release);
+        convo::publishAtomic(readIndex, read + 1, std::memory_order_release);
         return true;
     }
 
@@ -72,7 +73,7 @@ public:
 
     void clear() noexcept
     {
-        readIndex.store(writeIndex.load(std::memory_order_acquire), std::memory_order_release);
+        convo::publishAtomic(readIndex, convo::consumeAtomic(writeIndex, std::memory_order_acquire), std::memory_order_release);
     }
 
 private:

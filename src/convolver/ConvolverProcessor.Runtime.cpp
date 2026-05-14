@@ -5,6 +5,8 @@
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "core/RCUReader.h"
 
+#include "audioengine/AtomicAccess.h"
+
 std::atomic<int> g_totalLatencyClampCount { 0 };
 
 namespace
@@ -34,19 +36,19 @@ void ConvolverProcessor::refreshLatency()
     } guard(*this);
 
     // IR未確定中（位相最適化/再構築中）は中間レイテンシ反映を完全停止する。
-    if (!irFinalized.load(std::memory_order_acquire))
+    if (!convo::consumeAtomic(irFinalized, std::memory_order_acquire))
         return;
 
-    auto* conv = m_activeEngine.load(std::memory_order_acquire);
+    auto* conv = loadActiveEngine(std::memory_order_acquire);
     double totalLatency = 0.0;
     if (conv)
     {
         const int algorithmLatency = conv->storedDirectHeadEnabled ? 0 : juce::jmax(0, conv->latency);
         const int irPeakLatency = juce::jmax(0, conv->irLatency);
-        uiAlgorithmLatencySamples.store(algorithmLatency, std::memory_order_release);
-        uiIrPeakLatencySamples.store(irPeakLatency, std::memory_order_release);
-        uiTotalLatencySamples.store(juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY), std::memory_order_release);
-        uiDirectHeadActive.store(conv->storedDirectHeadEnabled, std::memory_order_release);
+        convo::publishAtomic(uiAlgorithmLatencySamples, algorithmLatency, std::memory_order_release);
+        convo::publishAtomic(uiIrPeakLatencySamples, irPeakLatency, std::memory_order_release);
+        convo::publishAtomic(uiTotalLatencySamples, juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY), std::memory_order_release);
+        convo::publishAtomic(uiDirectHeadActive, conv->storedDirectHeadEnabled, std::memory_order_release);
         totalLatency = static_cast<double>(juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY));
     }
 
@@ -54,9 +56,9 @@ void ConvolverProcessor::refreshLatency()
     requestHostDisplayUpdate();
 
     // Audio Thread に遅延値の更新を委譲（即時リセット用）
-    pendingLatencyValue.store(totalLatency, std::memory_order_release);
-    latencyResetPending.store(true, std::memory_order_release);
-    latencyChangeRequested.store(true, std::memory_order_release);
+    convo::publishAtomic(pendingLatencyValue, totalLatency, std::memory_order_release);
+    convo::publishAtomic(latencyResetPending, true, std::memory_order_release);
+    convo::publishAtomic(latencyChangeRequested, true, std::memory_order_release);
 }
 
 void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBlock<double>& block,
@@ -131,14 +133,14 @@ void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBl
 
 void ConvolverProcessor::enterGlobalReader(int readerIndex) const noexcept
 {
-    if (rcuProvider)
-        rcuProvider->enterRcuReader(readerIndex);
+    if (auto* provider = getRcuProvider(); provider != nullptr)
+        provider->enterRcuReader(readerIndex);
 }
 
 void ConvolverProcessor::exitGlobalReader(int readerIndex) const noexcept
 {
-    if (rcuProvider)
-        rcuProvider->exitRcuReader(readerIndex);
+    if (auto* provider = getRcuProvider(); provider != nullptr)
+        provider->exitRcuReader(readerIndex);
 }
 
 void ConvolverProcessor::bindExecutionState(convo::DSPExecutionState* state) noexcept
@@ -251,9 +253,9 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         convState->latencyAlign.delaySamples[1] = static_cast<int>(activeLatencySmoother.getTargetValue() + 0.5);
     }
 
-    if (!isPrepared.load(std::memory_order_acquire))
+    if (!convo::consumeAtomic(isPrepared, std::memory_order_acquire))
     {
-        if (firstProcessCall.exchange(false, std::memory_order_acq_rel))
+        if (convo::exchangeAtomic(firstProcessCall, false, std::memory_order_acq_rel))
             block.clear();
         return;
     }
@@ -262,14 +264,14 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     juce::ScopedNoDenormals noDenormals;
 
-    auto* conv = m_activeEngine.load(std::memory_order_acquire);
+    auto* conv = loadActiveEngine(std::memory_order_acquire);
 
-    (void) overflowRequested.exchange(false, std::memory_order_acq_rel);
+    (void) convo::exchangeAtomic(overflowRequested, false, std::memory_order_acq_rel);
 
     if (!conv)
         return;
 
-    if (bypassed.load(std::memory_order_relaxed))
+    if (convo::consumeAtomic(bypassed, std::memory_order_acquire))
     {
         processBypassWithLatencyCompensation(block, *conv);
         return;
@@ -288,7 +290,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         int totalLatency = static_cast<int>(std::min<int64_t>(calculatedLatency64, MAX_TOTAL_DELAY));
 
         if (rawAlgorithmLatency != algorithmLatency || rawIrPeakLatency != irPeakLatency)
-            g_totalLatencyClampCount.fetch_add(1, std::memory_order_relaxed);
+            g_totalLatencyClampCount.fetch_add(1, std::memory_order_acq_rel);
 
         if (absNoLibm(activeLatencySmoother.getTargetValue() - static_cast<double>(totalLatency)) >= kLatencyRetargetThresholdSamples)
         {
@@ -312,15 +314,15 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (numSamples > activeWetCapacity)
         return;
 
-    if (latencyResetPending.exchange(false, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(latencyResetPending, false, std::memory_order_acq_rel))
     {
-        const double val = pendingLatencyValue.load(std::memory_order_acquire);
+        const double val = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire);
         activeLatencySmoother.setCurrentAndTargetValue(val);
     }
 
-    if (latencyChangeRequested.exchange(false, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(latencyChangeRequested, false, std::memory_order_acq_rel))
     {
-        const double newTarget = pendingLatencyValue.load(std::memory_order_acquire);
+        const double newTarget = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire);
         if (absNoLibm(activeLatencySmoother.getTargetValue() - newTarget) >= 2.0)
         {
             if (!activeCrossfadeGain.isSmoothing())
@@ -333,15 +335,15 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     }
 
-    if (mixSmootherResetPending.exchange(false, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(mixSmootherResetPending, false, std::memory_order_acq_rel))
     {
-        activeMixSmoother.setCurrentAndTargetValue(static_cast<double>(mixTarget.load(std::memory_order_relaxed)));
+        activeMixSmoother.setCurrentAndTargetValue(static_cast<double>(convo::consumeAtomic(mixTarget, std::memory_order_acquire)));
     }
 
-    if (smoothingTimeChangePending.exchange(false, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(smoothingTimeChangePending, false, std::memory_order_acq_rel))
     {
-        const float newTime = smoothingTimeSec.load(std::memory_order_relaxed);
-        const double sampleRate = currentSampleRate.load(std::memory_order_acquire);
+        const float newTime = convo::consumeAtomic(smoothingTimeSec, std::memory_order_acquire);
+        const double sampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
 
         if (sampleRate > 0.0)
         {
@@ -355,7 +357,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     }
 
-    const double targetMixValue = static_cast<double>(mixTarget.load(std::memory_order_relaxed));
+    const double targetMixValue = static_cast<double>(convo::consumeAtomic(mixTarget, std::memory_order_acquire));
     if (absNoLibm(activeMixSmoother.getTargetValue() - targetMixValue) > 1.0e-5)
     {
         activeMixSmoother.setTargetValue(targetMixValue);
@@ -723,34 +725,34 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 void ConvolverProcessor::setMix(float mixAmount)
 {
     float newVal = juce::jlimit(0.0f, 1.0f, mixAmount);
-    if (std::abs(mixTarget.load() - newVal) > 1.0e-5f)
+    if (std::abs(convo::consumeAtomic(mixTarget) - newVal) > 1.0e-5f)
     {
-        mixTarget.store(newVal);
+        convo::publishAtomic(mixTarget, newVal);
         listeners.call(&Listener::convolverParamsChanged, this);
     }
 }
 
 float ConvolverProcessor::getMix() const
 {
-    return mixTarget.load();
+    return convo::consumeAtomic(mixTarget);
 }
 
 void ConvolverProcessor::setBypass(bool shouldBypass)
 {
-    if (bypassed.load() != shouldBypass)
+    if (convo::consumeAtomic(bypassed) != shouldBypass)
     {
-        bypassed.store(shouldBypass);
+        convo::publishAtomic(bypassed, shouldBypass);
         listeners.call(&Listener::convolverParamsChanged, this);
     }
 }
 
 void ConvolverProcessor::setTargetIRLength(float timeSec)
 {
-    const float maxAllowedSec = getMaximumAllowedIRLengthSec(currentSampleRate.load(std::memory_order_acquire));
+    const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire));
     float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
-    if (std::abs(targetIRLengthSec.load() - clampedTime) > 1e-5f)
+    if (std::abs(convo::consumeAtomic(targetIRLengthSec) - clampedTime) > 1e-5f)
     {
-        targetIRLengthSec.store(clampedTime);
+        convo::publishAtomic(targetIRLengthSec, clampedTime);
         listeners.call(&Listener::convolverParamsChanged, this);
 
         requestDebouncedRebuild();
@@ -759,32 +761,32 @@ void ConvolverProcessor::setTargetIRLength(float timeSec)
 
 void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
 {
-    const float maxAllowedSec = getMaximumAllowedIRLengthSec(currentSampleRate.load(std::memory_order_acquire));
+    const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire));
     const float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
 
-    autoDetectedIRLengthSec.store(clampedTime, std::memory_order_release);
-    irLengthManualOverride.store(false, std::memory_order_release);
+    convo::publishAtomic(autoDetectedIRLengthSec, clampedTime, std::memory_order_release);
+    convo::publishAtomic(irLengthManualOverride, false, std::memory_order_release);
 
-    if (std::abs(targetIRLengthSec.load(std::memory_order_acquire) - clampedTime) > 1.0e-5f)
+    if (std::abs(convo::consumeAtomic(targetIRLengthSec, std::memory_order_acquire) - clampedTime) > 1.0e-5f)
     {
-        targetIRLengthSec.store(clampedTime, std::memory_order_release);
+        convo::publishAtomic(targetIRLengthSec, clampedTime, std::memory_order_release);
         listeners.call(&Listener::convolverParamsChanged, this);
     }
 }
 
 void ConvolverProcessor::setIRLengthManualOverride(bool isManual)
 {
-    irLengthManualOverride.store(isManual, std::memory_order_release);
+    convo::publishAtomic(irLengthManualOverride, isManual, std::memory_order_release);
 }
 
 void ConvolverProcessor::setSmoothingTime(float timeSec)
 {
     float clampedTime = juce::jlimit(SMOOTHING_TIME_MIN_SEC, SMOOTHING_TIME_MAX_SEC, timeSec);
-    if (std::abs(smoothingTimeSec.load() - clampedTime) > 1.0e-5f)
+    if (std::abs(convo::consumeAtomic(smoothingTimeSec) - clampedTime) > 1.0e-5f)
     {
-        smoothingTimeSec.store(clampedTime);
+        convo::publishAtomic(smoothingTimeSec, clampedTime);
 
-        smoothingTimeChangePending.store(true, std::memory_order_release);
+        convo::publishAtomic(smoothingTimeChangePending, true, std::memory_order_release);
 
         listeners.call(&Listener::convolverParamsChanged, this);
     }
@@ -792,23 +794,23 @@ void ConvolverProcessor::setSmoothingTime(float timeSec)
 
 float ConvolverProcessor::getTargetIRLength() const
 {
-    return targetIRLengthSec.load();
+    return convo::consumeAtomic(targetIRLengthSec);
 }
 
 float ConvolverProcessor::getSmoothingTime() const
 {
-    return smoothingTimeSec.load();
+    return convo::consumeAtomic(smoothingTimeSec);
 }
 
 void ConvolverProcessor::setMixedTransitionStartHz(float hz)
 {
     const float clamped = juce::jlimit(MIXED_F1_MIN_HZ, MIXED_F1_MAX_HZ, hz);
-    float currentEnd = mixedTransitionEndHz.load(std::memory_order_acquire);
+    float currentEnd = convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire);
     if (currentEnd < clamped + 10.0f)
         currentEnd = juce::jlimit(MIXED_F2_MIN_HZ, MIXED_F2_MAX_HZ, clamped + 10.0f);
 
-    const float prevStart = mixedTransitionStartHz.exchange(clamped, std::memory_order_acq_rel);
-    const float prevEnd = mixedTransitionEndHz.exchange(currentEnd, std::memory_order_acq_rel);
+    const float prevStart = convo::exchangeAtomic(mixedTransitionStartHz, clamped, std::memory_order_acq_rel);
+    const float prevEnd = convo::exchangeAtomic(mixedTransitionEndHz, currentEnd, std::memory_order_acq_rel);
 
     if (std::abs(prevStart - clamped) > 1.0e-5f || std::abs(prevEnd - currentEnd) > 1.0e-5f)
     {
@@ -819,16 +821,16 @@ void ConvolverProcessor::setMixedTransitionStartHz(float hz)
 
 float ConvolverProcessor::getMixedTransitionStartHz() const
 {
-    return mixedTransitionStartHz.load(std::memory_order_acquire);
+    return convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire);
 }
 
 void ConvolverProcessor::setMixedTransitionEndHz(float hz)
 {
-    const float currentStart = mixedTransitionStartHz.load(std::memory_order_acquire);
+    const float currentStart = convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire);
     const float minEnd = (std::max)(MIXED_F2_MIN_HZ, currentStart + 10.0f);
     const float clamped = juce::jlimit(minEnd, MIXED_F2_MAX_HZ, hz);
 
-    const float prev = mixedTransitionEndHz.exchange(clamped, std::memory_order_acq_rel);
+    const float prev = convo::exchangeAtomic(mixedTransitionEndHz, clamped, std::memory_order_acq_rel);
     if (std::abs(prev - clamped) > 1.0e-5f)
     {
         listeners.call(&Listener::convolverParamsChanged, this);
@@ -838,13 +840,13 @@ void ConvolverProcessor::setMixedTransitionEndHz(float hz)
 
 float ConvolverProcessor::getMixedTransitionEndHz() const
 {
-    return mixedTransitionEndHz.load(std::memory_order_acquire);
+    return convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire);
 }
 
 void ConvolverProcessor::setMixedPreRingTau(float tau)
 {
     const float clamped = juce::jlimit(MIXED_TAU_MIN, MIXED_TAU_MAX, tau);
-    const float prev = mixedPreRingTau.exchange(clamped, std::memory_order_acq_rel);
+    const float prev = convo::exchangeAtomic(mixedPreRingTau, clamped, std::memory_order_acq_rel);
     if (std::abs(prev - clamped) > 1.0e-5f)
     {
         listeners.call(&Listener::convolverParamsChanged, this);
@@ -854,12 +856,12 @@ void ConvolverProcessor::setMixedPreRingTau(float tau)
 
 float ConvolverProcessor::getMixedPreRingTau() const
 {
-    return mixedPreRingTau.load(std::memory_order_acquire);
+    return convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire);
 }
 
 void ConvolverProcessor::setExperimentalDirectHeadEnabled(bool enabled)
 {
-    if (experimentalDirectHeadEnabled.exchange(enabled, std::memory_order_acq_rel) != enabled)
+    if (convo::exchangeAtomic(experimentalDirectHeadEnabled, enabled, std::memory_order_acq_rel) != enabled)
     {
         listeners.call(&Listener::convolverParamsChanged, this);
         postCoalescedChangeNotification();
@@ -870,12 +872,12 @@ void ConvolverProcessor::setExperimentalDirectHeadEnabled(bool enabled)
 void ConvolverProcessor::setRebuildDebounceMs(int ms)
 {
     const int clampedMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS, REBUILD_DEBOUNCE_MAX_MS, ms);
-    rebuildDebounceMs.store(clampedMs, std::memory_order_release);
+    convo::publishAtomic(rebuildDebounceMs, clampedMs, std::memory_order_release);
 }
 
 int ConvolverProcessor::getRebuildDebounceMs() const
 {
-    return rebuildDebounceMs.load(std::memory_order_acquire);
+    return convo::consumeAtomic(rebuildDebounceMs, std::memory_order_acquire);
 }
 
 void ConvolverProcessor::StereoConvolver::reset()

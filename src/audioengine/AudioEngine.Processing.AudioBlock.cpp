@@ -52,8 +52,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // Epoch tracking for lock-free Audio Thread safety
     convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
 
-    const auto* runtimeGraph = getRuntimeGraphState();
-    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+    const auto* world = getRuntimePublishWorld();
+    const auto* engineRuntime = getEngineRuntimeState(world);
+    const auto* runtimeGraph = getRuntimeGraphState(world);
+    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(bufferToFill);
@@ -74,12 +76,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // 安全対策: サンプルレート不整合チェック
         // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
         // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
-        const double engineSampleRate = currentSampleRate.load(std::memory_order_relaxed);
+        const double engineSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
         {
-            // 不整合時はレベルメーターもリセットして誤表示を防ぐ
-            inputLevelLinear.store(0.0f);
-            outputLevelLinear.store(0.0f);
             applySafeSilentFallback(bufferToFill);
             return;
         }
@@ -92,9 +91,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const convo::GlobalSnapshot* snap = m_coordinator.getCurrent();
         const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap);
 
-        // UI表示用: 比較なしで直接ストア（ロード→比較→ストアより高速）
-        eqBypassActive.store(parameterSnapshot.eqBypassed, std::memory_order_relaxed);
-        convBypassActive.store(parameterSnapshot.convBypassed, std::memory_order_relaxed);
         DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 
         float snapshotAlpha = 1.0f;
@@ -137,19 +133,12 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             return;
         }
 
-        DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimeGraph);
-        const auto* engineRuntime = getEngineRuntimeState();
-        const bool atomicUseDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
-        bool useDryAsOld = atomicUseDryAsOld
-            || runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
-        const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
-        const bool hasPendingCrossfade = atomicPendingCrossfade
-            || runtimeCrossfadePending(engineRuntime, runtimeGraph);
-        const int pendingFadeDelayBlocks = dspCrossfadeStartDelayBlocks.load(std::memory_order_acquire);
+        DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime);
+        bool useDryAsOld = runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
+        const bool hasPendingCrossfade = runtimeCrossfadePending(engineRuntime, runtimeGraph);
         if (processCrossfadeDelayGateIfPending(fading,
                                                useDryAsOld,
                                                hasPendingCrossfade,
-                                               pendingFadeDelayBlocks,
                                                [&]()
         {
             auto fadingState = makeCrossfadeAuxState(procState);
@@ -221,6 +210,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                                                      oldL,
                                                      oldR,
                                                      numSamples,
+                                                     engineRuntime,
                                                      runtimeGraph,
                                                      [this, useDryAsOld](float* outL,
                                                                          float* outR,

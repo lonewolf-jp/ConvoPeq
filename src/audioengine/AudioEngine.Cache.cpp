@@ -39,7 +39,7 @@ void AudioEngine::EQCacheManager::drainDeferredMapsUnderLock() noexcept
 
 void AudioEngine::EQCacheManager::storeNewMap(CacheMap* newMap) noexcept
 {
-    auto* old = cacheMapPtr.exchange(newMap, std::memory_order_acq_rel);
+    auto* old = convo::exchangeAtomic(cacheMapPtr, newMap, std::memory_order_acq_rel);
     if (old == nullptr)
         return;
 
@@ -101,7 +101,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     return cache;
 }
 
-EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) const noexcept
+EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
 {
     const CacheMap* currentMap = loadMap();
     if (currentMap == nullptr)
@@ -121,7 +121,7 @@ AudioEngine::EQCacheManager::~EQCacheManager()
 {
     std::lock_guard<std::mutex> lock(writeMutex);
 
-    CacheMap* currentMap = cacheMapPtr.exchange(nullptr, std::memory_order_acq_rel);
+    CacheMap* currentMap = convo::exchangeAtomic(cacheMapPtr, nullptr, std::memory_order_acq_rel);
     if (currentMap != nullptr)
         delete currentMap;
 

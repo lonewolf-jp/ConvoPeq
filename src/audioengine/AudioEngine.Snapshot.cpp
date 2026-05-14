@@ -16,7 +16,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 {
     debugAssertNotAudioThread();
 
-    if (shutdownInProgress.load(std::memory_order_acquire))
+    if (isShutdownInProgress())
         return;
 
 
@@ -36,33 +36,33 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     getCurrentAdaptiveCoefficients(nsCoeffs.data(), kAdaptiveNoiseShaperOrder);
 
     if (uiEqEditor.getAndClearPendingAGCChange())
-        m_pendingAGCChange.store(true, std::memory_order_release);
+        convo::publishAtomic(m_pendingAGCChange, true, std::memory_order_release);
 
-    const double inputHeadroomGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentInputHeadroomDb.load(std::memory_order_relaxed)));
-    const double outputMakeupGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentOutputMakeupDb.load(std::memory_order_relaxed)));
-    const double convInputTrimGainValue = juce::Decibels::decibelsToGain(static_cast<double>(m_currentConvInputTrimDb.load(std::memory_order_relaxed)));
-    const bool convBypass = m_currentConvBypass.load(std::memory_order_relaxed);
-    const bool eqBypass = m_currentEqBypass.load(std::memory_order_relaxed);
-    const bool softClip = m_currentSoftClipEnabled.load(std::memory_order_relaxed);
-    const float satAmount = m_currentSaturationAmount.load(std::memory_order_relaxed);
-    const convo::ProcessingOrder order = m_currentProcessingOrder.load(std::memory_order_relaxed);
-    const convo::OversamplingType osType = m_currentOversamplingType.load(std::memory_order_relaxed);
-    const int osFactor = m_currentOversamplingFactor.load(std::memory_order_relaxed);
-    const int bitDepth = m_currentDitherBitDepth.load(std::memory_order_relaxed);
-    const convo::NoiseShaperType nsType = m_currentNoiseShaperType.load(std::memory_order_relaxed);
-    const double sampleRate = currentSampleRate.load(std::memory_order_acquire);
-    const int maxBlockSize = maxSamplesPerBlock.load(std::memory_order_acquire);
+    const double inputHeadroomGainValue = juce::Decibels::decibelsToGain(static_cast<double>(convo::consumeAtomic(m_currentInputHeadroomDb, std::memory_order_acquire)));
+    const double outputMakeupGainValue = juce::Decibels::decibelsToGain(static_cast<double>(convo::consumeAtomic(m_currentOutputMakeupDb, std::memory_order_acquire)));
+    const double convInputTrimGainValue = juce::Decibels::decibelsToGain(static_cast<double>(convo::consumeAtomic(m_currentConvInputTrimDb, std::memory_order_acquire)));
+    const bool convBypass = convo::consumeAtomic(m_currentConvBypass, std::memory_order_acquire);
+    const bool eqBypass = convo::consumeAtomic(m_currentEqBypass, std::memory_order_acquire);
+    const bool softClip = convo::consumeAtomic(m_currentSoftClipEnabled, std::memory_order_acquire);
+    const float satAmount = convo::consumeAtomic(m_currentSaturationAmount, std::memory_order_acquire);
+    const convo::ProcessingOrder order = convo::consumeAtomic(m_currentProcessingOrder, std::memory_order_acquire);
+    const convo::OversamplingType osType = convo::consumeAtomic(m_currentOversamplingType, std::memory_order_acquire);
+    const int osFactor = convo::consumeAtomic(m_currentOversamplingFactor, std::memory_order_acquire);
+    const int bitDepth = convo::consumeAtomic(m_currentDitherBitDepth, std::memory_order_acquire);
+    const convo::NoiseShaperType nsType = convo::consumeAtomic(m_currentNoiseShaperType, std::memory_order_acquire);
+    const double sampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    const int maxBlockSize = convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire);
 
     uint64_t eqCoeffHash = 0;
     if (EQCoeffCache* cache = eqCacheManager.getOrCreate(eqParams, sampleRate, maxBlockSize, generation))
         eqCoeffHash = cache->paramsHash;
 
     {
-        const int currentIndex = latestEqFallbackReadIndex.load(std::memory_order_relaxed);
+        const int currentIndex = convo::consumeAtomic(latestEqFallbackReadIndex, std::memory_order_acquire);
         const int publishIndex = 1 - currentIndex;
         latestEqParamsForFallback[(size_t) publishIndex] = eqParams;
         latestEqHashForFallback[(size_t) publishIndex] = eqCoeffHash;
-        latestEqFallbackReadIndex.store(publishIndex, std::memory_order_release);
+        convo::publishAtomic(latestEqFallbackReadIndex, publishIndex, std::memory_order_release);
     }
 
     convo::SnapshotParams params = convo::SnapshotAssembler::assemble(
@@ -87,8 +87,8 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         eqCoeffHash);
 
 
-    int fadeSamples = m_eqFadeSamples.load(std::memory_order_relaxed);
-    const bool promoteToStructural = m_pendingIRChange.exchange(false, std::memory_order_acq_rel);
+    int fadeSamples = convo::consumeAtomic(m_eqFadeSamples, std::memory_order_acquire);
+    const bool promoteToStructural = convo::exchangeAtomic(m_pendingIRChange, false, std::memory_order_acq_rel);
     if (promoteToStructural)
     {
         // 例外昇格判定は制御スレッド側で確定する。
@@ -98,14 +98,14 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     }
 
     // pending フラグは no-op 判定前に消費して、次回へ持ち越さない。
-    if (m_pendingNSChange.exchange(false, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(m_pendingNSChange, false, std::memory_order_acq_rel))
     {
-        fadeSamples = m_nsFadeSamples.load(std::memory_order_relaxed);
+        fadeSamples = convo::consumeAtomic(m_nsFadeSamples, std::memory_order_acquire);
         DBG("Phase6: NS fade triggered");
     }
-    else if (m_pendingAGCChange.exchange(false, std::memory_order_acq_rel))
+    else if (convo::exchangeAtomic(m_pendingAGCChange, false, std::memory_order_acq_rel))
     {
-        fadeSamples = m_agcFadeSamples.load(std::memory_order_relaxed);
+        fadeSamples = convo::consumeAtomic(m_agcFadeSamples, std::memory_order_acquire);
         DBG("Phase6: AGC fade triggered");
     }
     else
@@ -113,7 +113,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         DBG("Phase6: EQ fade triggered");
     }
 
-    const convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
+    convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
         params,
         m_coordinator.getCurrent(),
         generation,
@@ -127,14 +127,14 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         return;
     }
 
-    debugLastCreatedEqHash.store(eqCoeffHash, std::memory_order_release);
-    debugLastCreateAudioBlockCounter.store(m_audioBlockCounter.load(std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(debugLastCreatedEqHash, eqCoeffHash, std::memory_order_release);
+    convo::publishAtomic(debugLastCreateAudioBlockCounter, convo::consumeAtomic(m_audioBlockCounter, std::memory_order_acquire), std::memory_order_release);
     diagLog("[VERIFY] EQ createdHash=0x"
         + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
         + " gen=" + juce::String(static_cast<juce::int64>(generation)));
 
     // 反映は次のオーディオブロック境界を検知してから行う。
-    const uint64_t boundaryBefore = m_audioBlockCounter.load(std::memory_order_acquire);
+    const uint64_t boundaryBefore = convo::consumeAtomic(m_audioBlockCounter, std::memory_order_acquire);
     if (!waitForAudioBlockBoundary(boundaryBefore, 20))
     {
         DBG("Phase6: boundary wait timeout, applying snapshot immediately on control thread");

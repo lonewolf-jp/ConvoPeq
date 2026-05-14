@@ -9,6 +9,8 @@
 #include <thread>
 #include "CommandBuffer.h"
 
+#include "audioengine/AtomicAccess.h"
+
 class GenerationManager;
 class ThreadAffinityManager;
 
@@ -36,14 +38,14 @@ public:
     void stop();
 
     void setSnapshotCreator(SnapshotCreatorCallback callback, void* userData) noexcept {
-        callbackFunc.store(callback, std::memory_order_release);
-        callbackUserData.store(userData, std::memory_order_release);
+        convo::publishAtomic(callbackFunc, callback, std::memory_order_release);
+        convo::publishAtomic(callbackUserData, userData, std::memory_order_release);
     }
 
 #ifdef _DEBUG
-    uint64_t getCommandsReceived() const noexcept { return commandsReceived.load(std::memory_order_relaxed); }
-    uint64_t getSnapshotsCreated() const noexcept { return snapshotsCreated.load(std::memory_order_relaxed); }
-    uint64_t getCommandsDropped() const noexcept { return commandsDropped.load(std::memory_order_relaxed); }
+    uint64_t getCommandsReceived() const noexcept { return convo::consumeAtomic(commandsReceived, std::memory_order_acquire); }
+    uint64_t getSnapshotsCreated() const noexcept { return convo::consumeAtomic(snapshotsCreated, std::memory_order_acquire); }
+    uint64_t getCommandsDropped() const noexcept { return convo::consumeAtomic(commandsDropped, std::memory_order_acquire); }
 #endif
 
 private:

@@ -130,7 +130,7 @@ bool applyAsymmetricTukey(double* data, int numSamples)
     const double alpha_post = calculate_post_alpha(numSamples);
     const double pi = juce::MathConstants<double>::pi;
 
-    convo::ScopedAlignedPtr<double> window_vals(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(numSamples) * sizeof(double), 64)));
+    auto window_vals = convo::makeAlignedArray<double>(static_cast<size_t>(numSamples));
     if (!window_vals) return false;
 
     std::fill_n(window_vals.get(), numSamples, 1.0);
@@ -140,7 +140,7 @@ bool applyAsymmetricTukey(double* data, int numSamples)
         const int pre_taper_len = static_cast<int>(std::floor(peakIndex * alpha_pre));
         if (pre_taper_len > 0)
         {
-            convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(pre_taper_len) * sizeof(double), 64)));
+            auto cos_args = convo::makeAlignedArray<double>(static_cast<size_t>(pre_taper_len));
             if (!cos_args) return false;
 
             const double scale = pi / (peakIndex * alpha_pre);
@@ -162,10 +162,10 @@ bool applyAsymmetricTukey(double* data, int numSamples)
         const int post_taper_len = numSamples - post_taper_start_idx;
         if (post_taper_len > 0)
         {
-            convo::ScopedAlignedPtr<double> cos_args(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(post_taper_len) * sizeof(double), 64)));
+            auto cos_args = convo::makeAlignedArray<double>(static_cast<size_t>(post_taper_len));
             if (!cos_args) return false;
             double* post_window_vals = window_vals.get() + post_taper_start_idx;
-            convo::ScopedAlignedPtr<double> post_cos_vals(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(post_taper_len) * sizeof(double), 64)));
+            auto post_cos_vals = convo::makeAlignedArray<double>(static_cast<size_t>(post_taper_len));
             if (!post_cos_vals) return false;
 
             const double scale = (pi / alpha_post) / dist_to_end;
@@ -186,7 +186,7 @@ bool applyAsymmetricTukey(double* data, int numSamples)
     }
     else
     {
-        convo::ScopedAlignedPtr<double> aligned_data(static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(numSamples) * sizeof(double), 64)));
+        auto aligned_data = convo::makeAlignedArray<double>(static_cast<size_t>(numSamples));
         if (!aligned_data) return false;
         std::memmove(aligned_data.get(), data, static_cast<size_t>(numSamples) * sizeof(double));
         vdMul(numSamples, aligned_data.get(), window_vals.get(), aligned_data.get());
@@ -202,8 +202,7 @@ int estimateEffectiveIRLengthSamples(const juce::AudioBuffer<double>& irBuffer, 
     if (numSamples <= 0 || numChannels <= 0 || sampleRate <= 0.0)
         return 0;
 
-    convo::ScopedAlignedPtr<double> envelope(
-        static_cast<double*>(convo::aligned_malloc(static_cast<size_t>(numSamples) * sizeof(double), 64)));
+    auto envelope = convo::makeAlignedArray<double>(static_cast<size_t>(numSamples));
     if (!envelope)
         return 0;
     std::fill_n(envelope.get(), numSamples, 0.0);
@@ -235,8 +234,7 @@ int estimateEffectiveIRLengthSamples(const juce::AudioBuffer<double>& irBuffer, 
     const int scanStep = juce::jmax(1, rmsWindow / 8);
     const double thresholdAmp = peak * std::pow(10.0, -50.0 / 20.0);
 
-    convo::ScopedAlignedPtr<double> prefix(
-        static_cast<double*>(convo::aligned_malloc((static_cast<size_t>(numSamples) + 1u) * sizeof(double), 64)));
+    auto prefix = convo::makeAlignedArray<double>(static_cast<size_t>(numSamples) + 1u);
     if (!prefix)
         return juce::jmax(1, juce::jmin(numSamples, static_cast<int>(std::round(sampleRate * ConvolverProcessor::IR_LENGTH_MIN_SEC))));
     std::fill_n(prefix.get(), static_cast<size_t>(numSamples) + 1u, 0.0);
@@ -311,8 +309,7 @@ bool loadImpulseResponsePreviewFile(const juce::File& file,
         return false;
     }
 
-    convo::ScopedAlignedPtr<double> tempAlignedBuffer(static_cast<double*>(convo::aligned_malloc(
-        static_cast<size_t>(fileLength) * sizeof(double), 64)));
+    auto tempAlignedBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(fileLength));
     if (!tempAlignedBuffer)
     {
         errorMessage = "Failed to allocate temporary buffer for IR loading.";
@@ -377,8 +374,7 @@ juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>&
         return {};
     }
 
-    convo::ScopedAlignedPtr<MKL_Complex16> spectrum(static_cast<MKL_Complex16*>(convo::aligned_malloc(
-        static_cast<size_t>(fftSize) * sizeof(MKL_Complex16), 64)));
+    auto spectrum = convo::makeAlignedArray<MKL_Complex16>(static_cast<size_t>(fftSize));
     if (!spectrum)
         return {};
 
@@ -400,7 +396,7 @@ juce::AudioBuffer<double> convertToMinimumPhase(const juce::AudioBuffer<double>&
         }
 
         {
-            convo::ScopedAlignedPtr<double> mag(static_cast<double*>(convo::aligned_malloc(fftSize * sizeof(double), 64)));
+            auto mag = convo::makeAlignedArray<double>(static_cast<size_t>(fftSize));
 
             vzAbs(fftSize, spectrum.get(), mag.get());
 

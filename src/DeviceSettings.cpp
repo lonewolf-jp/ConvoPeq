@@ -62,7 +62,6 @@ public:
     void scanForDevices() override
     {
         inner->scanForDevices();
-        hasScanned = true;
     }
 
     juce::StringArray getDeviceNames (bool wantInputNames) const override
@@ -135,17 +134,11 @@ public:
 private:
     void ensureScanned() const
     {
-        if (!hasScanned)
-        {
-            inner->scanForDevices();
-            hasScanned = true;
-        }
+        inner->scanForDevices();
     }
 
     std::unique_ptr<juce::AudioIODeviceType> inner;
     const AsioBlacklist& blacklist;
-    mutable bool hasScanned = false;
-
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BlacklistedASIODeviceType)
 };
 

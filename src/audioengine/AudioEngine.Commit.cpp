@@ -2,8 +2,6 @@
 #include "AudioEngine.h"
 #include "RuntimeBuilder.h"
 
-extern std::atomic<bool> gShuttingDown;
-
 namespace {
 static void diagLog(const juce::String& message)
 {
@@ -27,8 +25,7 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
     if (newDSP == nullptr)
         return;
 
-    if (shutdownInProgress.load(std::memory_order_acquire) ||
-        gShuttingDown.load(std::memory_order_acquire))
+    if (isShutdownInProgress())
     {
         retireDSP(newDSP);
         return;
@@ -37,8 +34,7 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
     {
         std::lock_guard<std::mutex> lock(deferredCommitMutex);
 
-        if (shutdownInProgress.load(std::memory_order_acquire) ||
-            gShuttingDown.load(std::memory_order_acquire))
+        if (isShutdownInProgress())
         {
             retireDSP(newDSP);
             return;
@@ -70,8 +66,7 @@ void AudioEngine::executeCommit()
         if (staging.newDSP == nullptr)
             continue;
 
-        if (shutdownInProgress.load(std::memory_order_acquire) ||
-            gShuttingDown.load(std::memory_order_acquire))
+        if (isShutdownInProgress())
         {
             retireDSP(staging.newDSP);
             continue;
@@ -95,7 +90,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
     validateDistinctRuntimeSlots("commitNewDSP.entry",
                                  activeDSP,
-                                 sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                                 sanitizeRawPtr(loadFadingOutDSP()),
                                  nullptr);
 
     // Lock to ensure the check and commit are atomic with respect to new rebuild requests.
@@ -103,7 +98,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         std::lock_guard<std::mutex> lock(rebuildMutex);
 
         // 古いリクエストの結果であれば破棄 (Race condition対策)
-        if (generation != rebuildGeneration.load(std::memory_order_relaxed))
+        if (generation != consumeAtomic(rebuildGeneration, std::memory_order_acquire))
         {
             retireDSP(newDSP);
             return;
@@ -156,7 +151,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                 && newDSP->oversamplingFactor != dspToTrash->oversamplingFactor)
             {
                 needsCrossfade = true;
-                fadeTimeSec = std::max(fadeTimeSec, m_osFadeTimeSec.load(std::memory_order_relaxed));
+                fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_osFadeTimeSec, std::memory_order_acquire));
             }
 
             if (hasAudibleConvolverTransition)
@@ -166,7 +161,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                 if (oldHash != newHash)
                 {
                     needsCrossfade = true;
-                    const double baseIrFade = m_irFadeTimeSec.load(std::memory_order_relaxed);
+                    const double baseIrFade = consumeAtomic(m_irFadeTimeSec, std::memory_order_acquire);
                     if (irPresenceChanged)
                     {
                         fadeTimeSec = std::max(fadeTimeSec, std::clamp(baseIrFade, 0.001, 0.010));
@@ -174,24 +169,23 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                     else
                     {
                         fadeTimeSec = std::max(fadeTimeSec, baseIrFade);
-                        fadeTimeSec = std::max(fadeTimeSec, m_irLengthFadeTimeSec.load(std::memory_order_relaxed));
-                        fadeTimeSec = std::max(fadeTimeSec, m_phaseFadeTimeSec.load(std::memory_order_relaxed));
-                        fadeTimeSec = std::max(fadeTimeSec, m_directHeadFadeTimeSec.load(std::memory_order_relaxed));
-                        fadeTimeSec = std::max(fadeTimeSec, m_nucFilterFadeTimeSec.load(std::memory_order_relaxed));
-                        fadeTimeSec = std::max(fadeTimeSec, m_tailFadeTimeSec.load(std::memory_order_relaxed));
+                        fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_irLengthFadeTimeSec, std::memory_order_acquire));
+                        fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_phaseFadeTimeSec, std::memory_order_acquire));
+                        fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_directHeadFadeTimeSec, std::memory_order_acquire));
+                        fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_nucFilterFadeTimeSec, std::memory_order_acquire));
+                        fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_tailFadeTimeSec, std::memory_order_acquire));
                     }
                 }
             }
 
             if (needsCrossfade)
             {
-                const auto* runtimeGraph = getRuntimeGraphState();
-                const auto* engineRuntime = getEngineRuntimeState();
-                const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph) != nullptr);
-                const bool hasPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire)
-                    || runtimeCrossfadePending(engineRuntime, runtimeGraph);
-                const bool useDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire)
-                    || runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
+                const auto* runtimeWorld = getRuntimePublishWorld();
+                const auto* runtimeGraph = getRuntimeGraphState(runtimeWorld);
+                const auto* engineRuntime = getEngineRuntimeState(runtimeWorld);
+                const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime) != nullptr);
+                const bool hasPendingCrossfade = runtimeCrossfadePending(engineRuntime, runtimeGraph);
+                const bool useDryAsOld = runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
 
                 if (hasFadingRuntime || hasPendingCrossfade || useDryAsOld)
                 {
@@ -211,7 +205,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // 3. EBR：エポックを進める
         convo::EpochManager::instance().advanceEpoch();
         retireEpoch = convo::EpochManager::instance().currentEpoch();
-        g_currentEpoch.store(retireEpoch, std::memory_order_release);
+        publishAtomic(g_currentEpoch, retireEpoch);
 
         publishRuntimeSnapshots(newDSP,
                     nullptr,
@@ -225,12 +219,19 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                           false);
 
         validateDistinctRuntimeSlots("commitNewDSP.afterPublish",
-                                     activeDSP,
-                                     sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                                     nullptr);
+                         activeDSP,
+                         sanitizeRawPtr(loadFadingOutDSP()),
+                         nullptr);
 
         // この世代の publish が完了したので outstanding rebuild 窓を閉じる。
-        lastCommittedRebuildGeneration.store(generation, std::memory_order_release);
+        publishAtomic(lastCommittedRebuildGeneration, generation);
+
+        const bool committedHasIr = newDSP->convolverRt().isIRLoaded();
+        const uint64_t committedStructuralHash = committedHasIr
+            ? newDSP->convolverRt().getStructuralHash()
+            : static_cast<uint64_t>(0);
+        publishAtomic(lastCommittedConvolverHasIr_, committedHasIr, std::memory_order_release);
+        publishAtomic(lastCommittedConvolverStructuralHash_, committedStructuralHash, std::memory_order_release);
     }
 
 
@@ -238,19 +239,19 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     if (dspToTrash == nullptr
         && newDSP != nullptr
         && newDSP->convolverRt().isIRLoaded()
-        && !firstIrDryCrossfadeDone.load(std::memory_order_acquire))
+        && !consumeAtomic(firstIrDryCrossfadeDone))
     {
         // 初回のみ dry -> IR を明示的にフェードし、立ち上がりノイズを抑制する。
         scheduleDryAsOldCrossfade = true;
-        dryAsOldFadeTimeSec = std::max(0.001, m_irFadeTimeSec.load(std::memory_order_relaxed));
+        dryAsOldFadeTimeSec = std::max(0.001, consumeAtomic(m_irFadeTimeSec, std::memory_order_acquire));
 
-        const bool convBypassedForLatency = m_currentConvBypass.load(std::memory_order_relaxed);
+        const bool convBypassedForLatency = consumeAtomic(m_currentConvBypass, std::memory_order_acquire);
         const int newLatency = estimateRuntimeLatencyBaseRateSamples(newDSP, convBypassedForLatency);
         int dOld = std::min(newLatency, latencyBufSize - 1); // dry 側を遅延させて整合
         const int dNew = 0;
-        latencyDelayOld.store(dOld, std::memory_order_release);
-        latencyDelayNew.store(dNew, std::memory_order_release);
-        latencyResetPending.store(true, std::memory_order_release);
+        publishAtomic(latencyDelayOld, dOld);
+        publishAtomic(latencyDelayNew, dNew);
+        publishAtomic(latencyResetPending, true);
         transitionLatencyDeltaSamples = dOld - dNew;
 
         diagLog("[DIAG] commitNewDSP: dry->IR latency align old="
@@ -284,7 +285,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                 && newDSP->oversamplingFactor != dspToTrash->oversamplingFactor)
             {
                 needsCrossfade = true;
-                fadeTimeSec = std::max(fadeTimeSec, m_osFadeTimeSec.load(std::memory_order_relaxed));
+                fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_osFadeTimeSec, std::memory_order_acquire));
             }
 
             // 2. 構造ハッシュ比較によるその他の変更検出
@@ -299,7 +300,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                 if (oldHash != newHash)
                 {
                     needsCrossfade = true;
-                    const double baseIrFade = m_irFadeTimeSec.load(std::memory_order_relaxed);
+                    const double baseIrFade = consumeAtomic(m_irFadeTimeSec, std::memory_order_acquire);
 
                     // IRの有無が切り替わる遷移（passthrough->IR / IR->passthrough）は
                     // 長時間フェードにすると二重処理時間が伸び、再生を圧迫しやすい。
@@ -311,11 +312,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                     else
                     {
                         fadeTimeSec = std::max(fadeTimeSec, baseIrFade);
-                        fadeTimeSec = std::max(fadeTimeSec, m_irLengthFadeTimeSec.load(std::memory_order_relaxed));
-                        fadeTimeSec = std::max(fadeTimeSec, m_phaseFadeTimeSec.load(std::memory_order_relaxed));
-                        fadeTimeSec = std::max(fadeTimeSec, m_directHeadFadeTimeSec.load(std::memory_order_relaxed));
-                        fadeTimeSec = std::max(fadeTimeSec, m_nucFilterFadeTimeSec.load(std::memory_order_relaxed));
-                        fadeTimeSec = std::max(fadeTimeSec, m_tailFadeTimeSec.load(std::memory_order_relaxed));
+                        fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_irLengthFadeTimeSec, std::memory_order_acquire));
+                        fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_phaseFadeTimeSec, std::memory_order_acquire));
+                        fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_directHeadFadeTimeSec, std::memory_order_acquire));
+                        fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_nucFilterFadeTimeSec, std::memory_order_acquire));
+                        fadeTimeSec = std::max(fadeTimeSec, consumeAtomic(m_tailFadeTimeSec, std::memory_order_acquire));
                     }
                 }
             }
@@ -327,7 +328,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             // --- レイテンシ差・バッファ初期化はクロスフェード時のみ ---
             if (needsCrossfade)
             {
-                const bool convBypassedForLatency = m_currentConvBypass.load(std::memory_order_relaxed);
+                const bool convBypassedForLatency = consumeAtomic(m_currentConvBypass, std::memory_order_acquire);
                 const int oldLatency = estimateRuntimeLatencyBaseRateSamples(dspToTrash, convBypassedForLatency);
                 const int newLatency = estimateRuntimeLatencyBaseRateSamples(newDSP, convBypassedForLatency);
                 const int targetLatency = std::max(oldLatency, newLatency);
@@ -335,10 +336,10 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                 int dNew = targetLatency - newLatency;
                 dOld = std::min(dOld, latencyBufSize - 1);
                 dNew = std::min(dNew, latencyBufSize - 1);
-                latencyDelayOld.store(dOld, std::memory_order_release);
-                latencyDelayNew.store(dNew, std::memory_order_release);
+                publishAtomic(latencyDelayOld, dOld);
+                publishAtomic(latencyDelayNew, dNew);
                 // ★ resetはAudioThreadで1回だけ行う
-                latencyResetPending.store(true, std::memory_order_release);
+                publishAtomic(latencyResetPending, true);
                 transitionLatencyDeltaSamples = dOld - dNew;
 
                 diagLog("[DIAG] commitNewDSP: latency align old="
@@ -349,14 +350,15 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                     + " convBypassed=" + juce::String(convBypassedForLatency ? 1 : 0));
 
                 if (!oldHasIR && newHasIR)
-                    dspCrossfadeStartDelayBlocks.store(std::max(0, m_crossfadeStartDelayBlocks.load(std::memory_order_relaxed)), std::memory_order_release);
+                    publishAtomic(dspCrossfadeStartDelayBlocks,
+                                  std::max(0, consumeAtomic(m_crossfadeStartDelayBlocks, std::memory_order_acquire)));
                 else
-                    dspCrossfadeStartDelayBlocks.store(0, std::memory_order_release);
+                    publishAtomic(dspCrossfadeStartDelayBlocks, 0);
             }
             else
             {
                 // クロスフェード不要時は絶対に遅延値・バッファを触らない
-                dspCrossfadeStartDelayBlocks.store(0, std::memory_order_release);
+                publishAtomic(dspCrossfadeStartDelayBlocks, 0);
             }
 
             // デフォルト値（fadeTimeSec==0なら30ms）
@@ -367,15 +369,12 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         // --- クロスフェードdeduplication・スナップショット ---
         if (needsCrossfade)
         {
-            const auto* runtimeGraph = getRuntimeGraphState();
-            const auto* engineRuntime = getEngineRuntimeState();
-            const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph) != nullptr);
-            const bool atomicPendingCrossfade = dspCrossfadePending.load(std::memory_order_acquire);
-            const bool hasPendingCrossfade = atomicPendingCrossfade
-                || runtimeCrossfadePending(engineRuntime, runtimeGraph);
-            const bool atomicUseDryAsOld = dspCrossfadeUseDryAsOld.load(std::memory_order_acquire);
-            const bool useDryAsOld = atomicUseDryAsOld
-                || runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
+            const auto* runtimeWorld = getRuntimePublishWorld();
+            const auto* runtimeGraph = getRuntimeGraphState(runtimeWorld);
+            const auto* engineRuntime = getEngineRuntimeState(runtimeWorld);
+            const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime) != nullptr);
+            const bool hasPendingCrossfade = runtimeCrossfadePending(engineRuntime, runtimeGraph);
+            const bool useDryAsOld = runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
             const bool isFadingActive = hasFadingRuntime || hasPendingCrossfade || useDryAsOld;
             publishSmoothTransitionState(activeDSP,
                                          dspToTrash,
@@ -414,7 +413,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     const LearningCommand cmd {
         LearningCommand::Type::DSPReady,
         false,
-        pendingLearningMode.load(std::memory_order_acquire),
+        consumeAtomic(pendingLearningMode),
         static_cast<uint64_t>(generation)
     };
 
@@ -435,10 +434,9 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     // 状態復元など rebuild とは独立したイベント用途。
     validateDistinctRuntimeSlots("commitNewDSP.beforeSendChangeMessage",
                                  activeDSP,
-                                 sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                                 sanitizeRawPtr(loadFadingOutDSP()),
                                  nullptr);
-    diagLog("[DIAG] commitNewDSP: before sendChangeMessage");
-    sendChangeMessage();
-    diagLog("[DIAG] commitNewDSP: after sendChangeMessage");
+    diagLog("[DIAG] commitNewDSP: queue coalesced change notification");
+    queueCoalescedChangeNotification();
 }
 #endif

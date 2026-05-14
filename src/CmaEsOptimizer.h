@@ -24,8 +24,8 @@ public:
 
     CmaEsOptimizer()
     {
-        mean = static_cast<double*>(convo::aligned_malloc(kDim * sizeof(double), 64));
-        covariance = static_cast<double*>(convo::aligned_malloc(kDim * kDim * sizeof(double), 64));
+        mean = convo::makeAlignedArray<double>(kDim).release();
+        covariance = convo::makeAlignedArray<double>(kDim * kDim).release();
 
         std::random_device device;
         rng.seed(device());

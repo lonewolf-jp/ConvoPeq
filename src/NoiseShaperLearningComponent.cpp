@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+#include "audioengine/AtomicAccess.h"
+
 NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     : audioEngine(engine), periodicSaver(engine)
 {
@@ -354,16 +356,16 @@ void NoiseShaperLearningComponent::timerCallback()
 void NoiseShaperLearningComponent::refreshFromEngine()
 {
     const auto& progress = audioEngine.getNoiseShaperLearningProgress();
-    const auto status = progress.status.load(std::memory_order_acquire);
-    int iteration = progress.iteration.load(std::memory_order_relaxed);
-    uint64_t totalGenerations = progress.totalGenerations.load(std::memory_order_relaxed);
-    int processCount = progress.processCount.load(std::memory_order_relaxed);
-    const int segmentCount = progress.segmentCount.load(std::memory_order_relaxed);
-    double bestScore = progress.bestScore.load(std::memory_order_relaxed);
-    const double latestScore = progress.latestScore.load(std::memory_order_relaxed);
-    double elapsedSec = progress.elapsedPlaybackSeconds.load(std::memory_order_relaxed);
-    int currentPhase = progress.currentPhase.load(std::memory_order_relaxed);
-    const auto learningMode = static_cast<NoiseShaperLearner::LearningMode>(progress.learningMode.load(std::memory_order_relaxed));
+    const auto status = convo::consumeAtomic(progress.status, std::memory_order_acquire);
+    int iteration = convo::consumeAtomic(progress.iteration, std::memory_order_acquire);
+    uint64_t totalGenerations = convo::consumeAtomic(progress.totalGenerations, std::memory_order_acquire);
+    int processCount = convo::consumeAtomic(progress.processCount, std::memory_order_acquire);
+    const int segmentCount = convo::consumeAtomic(progress.segmentCount, std::memory_order_acquire);
+    double bestScore = convo::consumeAtomic(progress.bestScore, std::memory_order_acquire);
+    const double latestScore = convo::consumeAtomic(progress.latestScore, std::memory_order_acquire);
+    double elapsedSec = convo::consumeAtomic(progress.elapsedPlaybackSeconds, std::memory_order_acquire);
+    int currentPhase = convo::consumeAtomic(progress.currentPhase, std::memory_order_acquire);
+    const auto learningMode = static_cast<NoiseShaperLearner::LearningMode>(convo::consumeAtomic(progress.learningMode, std::memory_order_acquire));
 
     const double sr = audioEngine.getSampleRate();
     const int bd = audioEngine.getDitherBitDepth();

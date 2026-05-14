@@ -3,7 +3,9 @@
 #include <atomic>
 #include <cstdint>
 #include <array>
-#include <limits>   // ← 追加
+#include <limits>
+
+#include "audioengine/AtomicAccess.h"
 
 namespace convo {
 
@@ -14,12 +16,12 @@ public:
 
     EpochCore() : epoch(1) {
         for (auto& e : readerEpochs) {
-            e.store(kIdleEpoch, std::memory_order_relaxed);
+            convo::publishAtomic(e, kIdleEpoch, std::memory_order_release);
         }
     }
 
     uint64_t current() const noexcept {
-        return epoch.load(std::memory_order_acquire);
+        return convo::consumeAtomic(epoch, std::memory_order_acquire);
     }
 
     uint64_t publish() noexcept {
@@ -31,7 +33,7 @@ public:
         bool hasActiveReader = false;
 
         for (const auto& e : readerEpochs) {
-            uint64_t r = e.load(std::memory_order_acquire);
+            uint64_t r = convo::consumeAtomic(e, std::memory_order_acquire);
             if (r != kIdleEpoch) {
                 if (!hasActiveReader) {
                     minEpoch = r;
@@ -43,7 +45,7 @@ public:
         }
 
         if (!hasActiveReader)
-            return epoch.load(std::memory_order_relaxed);
+            return convo::consumeAtomic(epoch, std::memory_order_acquire);
 
         return minEpoch;
     }
@@ -55,13 +57,13 @@ public:
     void enterReader(int readerIndex) noexcept {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
             return;
-        readerEpochs[static_cast<size_t>(readerIndex)].store(current(), std::memory_order_release);
+        convo::publishAtomic(readerEpochs[static_cast<size_t>(readerIndex)], current(), std::memory_order_release);
     }
 
     void exitReader(int readerIndex) noexcept {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
             return;
-        readerEpochs[static_cast<size_t>(readerIndex)].store(kIdleEpoch, std::memory_order_release);
+        convo::publishAtomic(readerEpochs[static_cast<size_t>(readerIndex)], kIdleEpoch, std::memory_order_release);
     }
 
 private:

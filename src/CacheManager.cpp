@@ -204,7 +204,7 @@ double* CacheManager::copyFromMmapToAligned(juce::MemoryMappedFile& mmap, size_t
     return dst;
 }
 
-std::unique_ptr<PreparedIRState> CacheManager::load(uint64_t key, int fftSize, uint64_t generationId)
+std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, int fftSize, uint64_t generationId)
 {
     CacheHeader header{};
     const auto file = getCacheFile(key, fftSize);
@@ -425,7 +425,7 @@ void CacheManager::clear()
     lruList.clear();
 }
 
-bool CacheManager::isEntrySafeToDelete(uint64_t key, int fftSize) const
+bool CacheManager::isEntrySafeToDelete(uint64_t key, int fftSize)
 {
     if (!safeDeleteChecker)
         return true;

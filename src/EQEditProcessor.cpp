@@ -5,6 +5,8 @@
 #include "EQEditProcessor.h"
 #include "AudioEngine.h"
 
+#include "audioengine/AtomicAccess.h"
+
 //--------------------------------------------------------------
 // コンストラクタ
 //--------------------------------------------------------------
@@ -21,7 +23,7 @@ EQEditProcessor::EQEditProcessor(AudioEngine& engine)
 
 void EQEditProcessor::scheduleDebounce()
 {
-    pendingSnapshot.store(true, std::memory_order_release);
+    convo::publishAtomic(pendingSnapshot, true, std::memory_order_release);
     if (!isTimerRunning())
         startTimer(kDebounceMs);
 }
@@ -29,7 +31,7 @@ void EQEditProcessor::scheduleDebounce()
 void EQEditProcessor::timerCallback()
 {
     stopTimer();
-    if (pendingSnapshot.exchange(false, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(pendingSnapshot, false, std::memory_order_acq_rel))
     {
         if (!audioEngine.enqueueSnapshotCommand())
         {

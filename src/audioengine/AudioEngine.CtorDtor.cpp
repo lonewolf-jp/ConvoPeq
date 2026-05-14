@@ -2,8 +2,6 @@
 #include "AudioEngine.h"
 #include "NoiseShaperLearner.h"
 
-extern std::atomic<bool> gShuttingDown;
-
 namespace {
 static void diagLog(const juce::String& message)
 {
@@ -20,8 +18,7 @@ AudioEngine::AudioEngine()
     , m_coordinator(m_epochCore)
     , m_workerThread(m_commandBuffer, m_coordinator, m_generationManager, &affinityManager)
 {
-    gShuttingDown.store(false, std::memory_order_release);
-    uiConvolverProcessor.setRcuProvider(this);
+    uiConvolverProcessor.setRcuProvider(*this);
     // 必要な初期化処理があればここに追加
 }
 
@@ -29,8 +26,7 @@ AudioEngine::~AudioEngine()
 {
     diagLog("[DIAG] ~AudioEngine: enter");
     setShutdownPhase(ShutdownPhase::StopAcceptingWork, "~AudioEngine");
-    shutdownInProgress.store(true, std::memory_order_release);
-    gShuttingDown.store(true, std::memory_order_release);
+    convo::publishAtomic(lifecycleState, EngineLifecycleState::Releasing, std::memory_order_release);
     cancelPendingUpdate();
 
     // 終了順序を固定化して、終了時フリーズを防ぐ。
@@ -49,22 +45,22 @@ AudioEngine::~AudioEngine()
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
         validateDistinctRuntimeSlots("~AudioEngine.beforeClear",
-                                     activeDSP,
-                                     sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
-                                     nullptr);
+                         activeDSP,
+                         sanitizeRawPtr(loadFadingOutDSP()),
+                         nullptr);
 
-        rebuildGeneration.fetch_add(1, std::memory_order_relaxed);
+        rebuildGeneration.fetch_add(1, std::memory_order_acq_rel);
 
         // Audio Thread から参照される公開ポインタを明示的に外す。
-        currentDSP.store(nullptr, std::memory_order_release);
+        publishCurrentDSP(nullptr);
 
         activeToRelease = sanitizeRawPtr(activeDSP);
         activeDSP = nullptr;
-        fadingToRelease = sanitizeRawPtr(fadingOutDSP.exchange(nullptr, std::memory_order_acq_rel));
+        fadingToRelease = sanitizeRawPtr(exchangeFadingOutDSP(nullptr));
 
         validateDistinctRuntimeSlots("~AudioEngine.afterClear",
                          activeDSP,
-                         sanitizeRawPtr(fadingOutDSP.load(std::memory_order_acquire)),
+                         sanitizeRawPtr(loadFadingOutDSP()),
                          nullptr);
 
         if (hasPendingTask)
@@ -113,7 +109,7 @@ AudioEngine::~AudioEngine()
 
     setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "~AudioEngine");
     convo::EpochManager::instance().advanceEpoch();
-    g_currentEpoch.store(convo::EpochManager::instance().currentEpoch(), std::memory_order_release);
+    convo::publishAtomic(g_currentEpoch, convo::EpochManager::instance().currentEpoch(), std::memory_order_release);
 
     // Shutdown 時は EBR 回収を試みる。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
@@ -127,7 +123,7 @@ AudioEngine::~AudioEngine()
     if (latencyBufNewR) { _aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
     latencyBufSize = 0;
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
-    lifecycleState.store(EngineLifecycleState::Destroyed, std::memory_order_release);
+    convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release);
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
 }
 

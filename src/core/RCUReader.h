@@ -2,6 +2,10 @@
 
 #include "EpochManager.h"
 #include <atomic>
+#include <functional>
+#include <thread>
+
+#include "audioengine/AtomicAccess.h"
 
 namespace convo {
 
@@ -16,49 +20,85 @@ class RCUReader
 {
 public:
     RCUReader() = default;
+    RCUReader(const RCUReader&) = delete;
+    RCUReader& operator=(const RCUReader&) = delete;
+    RCUReader(RCUReader&&) = delete;
+    RCUReader& operator=(RCUReader&&) = delete;
 
     void enter() noexcept
     {
-        const uint32_t previousDepth = nestingDepth.fetch_add(1, std::memory_order_acq_rel);
+        const uint32_t previousDepth = convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
         if (previousDepth > 0)
+        {
             return;
+        }
+
+        const uint64_t threadToken = currentThreadToken();
+        uint64_t expectedOwner = 0;
+        if (!convo::compareExchangeAtomic(ownerThreadToken,
+                                          expectedOwner,
+                                          threadToken,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire)
+            && expectedOwner != threadToken)
+        {
+            convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+            return;
+        }
 
         const int tid = acquireThreadSlot();
         if (tid >= 0)
             EpochManager::instance().enter(tid);
         else
-            nestingDepth.fetch_sub(1, std::memory_order_acq_rel);
+        {
+            convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+            uint64_t expectedOwnerOnRelease = threadToken;
+            convo::compareExchangeAtomic(ownerThreadToken,
+                                         expectedOwnerOnRelease,
+                                         static_cast<uint64_t>(0),
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire);
+        }
     }
 
     void exit() noexcept
     {
-        const uint32_t previousDepth = nestingDepth.fetch_sub(1, std::memory_order_acq_rel);
+        const uint32_t previousDepth = convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
         if (previousDepth == 0)
         {
-            nestingDepth.store(0, std::memory_order_release);
+            convo::publishAtomic(nestingDepth, 0, std::memory_order_release);
             return;
         }
 
         if (previousDepth > 1)
             return;
 
-        const int tid = activeThreadId.exchange(-1, std::memory_order_acq_rel);
+        if (convo::consumeAtomic(ownerThreadToken, std::memory_order_acquire) != currentThreadToken())
+            return;
+
+        const int tid = convo::exchangeAtomic(activeThreadId, -1, std::memory_order_acq_rel);
         if (tid >= 0)
         {
             EpochManager::instance().exit(tid);
-            preferredThreadId.store(tid, std::memory_order_release);
+            convo::publishAtomic(preferredThreadId, tid, std::memory_order_release);
         }
+        convo::publishAtomic(ownerThreadToken, static_cast<uint64_t>(0), std::memory_order_release);
     }
 
 private:
+    static uint64_t currentThreadToken() noexcept
+    {
+        return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    }
+
     int acquireThreadSlot() noexcept
     {
-        const int activeTid = activeThreadId.load(std::memory_order_acquire);
+        const int activeTid = convo::consumeAtomic(activeThreadId, std::memory_order_acquire);
         if (activeTid >= 0)
             return activeTid;
 
         auto& manager = EpochManager::instance();
-        const int preferredTid = preferredThreadId.load(std::memory_order_acquire);
+        const int preferredTid = convo::consumeAtomic(preferredThreadId, std::memory_order_acquire);
         int reservedTid = -1;
         if (preferredTid >= 0 && manager.reserveThread(preferredTid))
         {
@@ -69,13 +109,14 @@ private:
             reservedTid = manager.registerThread();
         }
 
-        activeThreadId.store(reservedTid, std::memory_order_release);
+        convo::publishAtomic(activeThreadId, reservedTid, std::memory_order_release);
         return reservedTid;
     }
 
     std::atomic<int> preferredThreadId { -1 };
     std::atomic<int> activeThreadId { -1 };
     std::atomic<uint32_t> nestingDepth { 0 };
+    std::atomic<uint64_t> ownerThreadToken { 0 };
 };
 
 class RCUReaderGuard
