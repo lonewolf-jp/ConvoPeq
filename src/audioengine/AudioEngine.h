@@ -1004,6 +1004,8 @@ public:
         convo::EngineRuntime engine {};
         convo::RuntimeGraph graph {};
         std::uint64_t generation = 0;
+        std::uint64_t runtimeVersion = 0;  // Monotonically increasing version number
+        std::uint64_t transitionId = 0;    // Unique identifier per crossfade
     };
 
     struct CrossfadePreparedSnapshot
@@ -1828,6 +1830,13 @@ public:
         newWorld->generation = nextGraphGeneration;
         newWorld->engine = engineState;
         newWorld->graph = graphState;
+    // Initialize versioning fields according to magna_carta.md Section 2
+    // runtimeVersion: monotonically increasing version number
+    static std::atomic<std::uint64_t> s_nextRuntimeVersion { 1 };
+    newWorld->runtimeVersion = s_nextRuntimeVersion.fetch_add(1, std::memory_order_acq_rel);
+        
+    // transitionId: unique per crossfade event
+    newWorld->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
 
         auto* oldWorld = exchangeAtomicPtr(runtimePublishWorldState, newWorld);
         if (oldWorld != nullptr)
@@ -2757,3 +2766,5 @@ inline bool AudioEngine::dequeueLearnerDispatch(LearnerDispatchAction& action) n
     publishAtomic(learnerDispatchRead, (currentRead + 1u) & learnerDispatchBufferMask);
     return true;
 }
+
+
