@@ -1400,8 +1400,18 @@ public:
                                                         double fadeTimeSec,
                                                         bool active) noexcept
     {
+        // IR-7 (Chapter 8): State transition precondition validation.
+        jassert(current != nullptr); // Current DSP must always be valid at publish time.
+        jassert(fadeTimeSec >= 0.0);
+
         refreshCrossfadePreparedSnapshotFromAtomics();
         const auto prepared = consumeCrossfadePreparedSnapshot();
+
+        // IR-7: Crossfade parameter sanity checks (invariant enforcement).
+        jassert(prepared.fadeTimeSec >= 0.0);
+        jassert(prepared.latencyDelayOld >= 0 && prepared.latencyDelayNew >= 0);
+        jassert(prepared.startDelayBlocks >= 0);
+        jassert(prepared.dryHoldSamples >= 0);
 
         convo::EngineRuntime runtime {};
         const auto getRuntimeUuid = [](DSPCore* dsp) noexcept -> std::uint64_t
@@ -1801,8 +1811,12 @@ public:
                                         bool active) noexcept
     {
         // IR-2: EngineRuntime と RuntimeGraph を単一 world として原子的に公開する。
-        const auto nextGraphGeneration = runtimeGraphRevision.fetch_add(1, std::memory_order_acq_rel) + 1;
-        g_runtimePublishCount.fetch_add(1, std::memory_order_acq_rel);
+        const auto nextGraphGeneration = convo::fetchAddAtomic(runtimeGraphRevision,
+                                                               static_cast<std::uint64_t>(1),
+                                                               std::memory_order_acq_rel) + 1;
+        convo::fetchAddAtomic(g_runtimePublishCount,
+                             static_cast<std::uint64_t>(1),
+                             std::memory_order_acq_rel);
 
         auto engineState = makeEngineRuntimeState(current, next, policy, fadeTimeSec, active);
         engineState.revision = nextGraphGeneration;
@@ -2492,7 +2506,9 @@ inline void retireDSP(DSPCore* dsp) noexcept
     if (dsp == nullptr)
         return;
 
-    g_runtimeRetireCount.fetch_add(1, std::memory_order_acq_rel);
+    convo::fetchAddAtomic(g_runtimeRetireCount,
+                         static_cast<std::uint64_t>(1),
+                         std::memory_order_acq_rel);
     if (enqueueDeferredDeleteNonRt(dsp, [](void* p) { delete static_cast<DSPCore*>(p); }))
         return;
 }
@@ -2532,7 +2548,9 @@ public:
 
         int oldActive = consumeAtomic(slot.activeIndex, std::memory_order_acquire);
         publishAtomic(slot.activeIndex, 1 - oldActive);
-        slot.generation.fetch_add(1u, std::memory_order_acq_rel);
+        convo::fetchAddAtomic(slot.generation,
+                             1u,
+                             std::memory_order_acq_rel);
         publishAtomic(slot.writeLock, false);
         committed = true;
     }
