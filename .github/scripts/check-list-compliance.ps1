@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $srcDir = Join-Path $repoRoot "src"
+$script:PrintedRgFallbackInfo = $false
 
 if (-not (Test-Path $srcDir)) {
     Write-Error "Target directory not found: $srcDir"
@@ -15,13 +16,42 @@ function Invoke-RgLines {
         [Parameter(Mandatory = $true)][string[]]$Targets
     )
 
+    $rgAvailable = $null -ne (Get-Command rg -ErrorAction SilentlyContinue)
     $results = @()
     foreach ($target in $Targets) {
-        $out = & rg -n --hidden -e $Pattern -- $target 2>$null
-        if ($LASTEXITCODE -eq 0 -and $out) {
-            $results += $out
+        if (-not (Test-Path -LiteralPath $target)) {
+            continue
+        }
+
+        if ($rgAvailable) {
+            $out = & rg -n --hidden -e $Pattern -- $target 2>$null
+            if ($LASTEXITCODE -eq 0 -and $out) {
+                $results += $out
+            }
+            continue
+        }
+
+        $candidateFiles = @()
+        if (Test-Path -LiteralPath $target -PathType Container) {
+            $candidateFiles = Get-ChildItem -LiteralPath $target -Recurse -File -ErrorAction SilentlyContinue
+        }
+        else {
+            $candidateFiles = Get-Item -LiteralPath $target -ErrorAction SilentlyContinue
+        }
+
+        foreach ($file in $candidateFiles) {
+            $matches = Select-String -LiteralPath $file.FullName -Pattern $Pattern -CaseSensitive -ErrorAction SilentlyContinue
+            foreach ($match in $matches) {
+                $results += ("{0}:{1}:{2}" -f $match.Path, $match.LineNumber, $match.Line)
+            }
         }
     }
+
+    if ((-not $rgAvailable) -and (-not $script:PrintedRgFallbackInfo)) {
+        Write-Host "INFO: 'rg' not found. Falling back to Select-String scan."
+        $script:PrintedRgFallbackInfo = $true
+    }
+
     return $results
 }
 
