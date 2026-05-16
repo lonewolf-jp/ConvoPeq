@@ -164,7 +164,7 @@ EQControlPanel::EQControlPanel(AudioEngine& audioEngine)
     agcButton.setTooltip("Auto Gain Control (Match Output Level to Input Level)");
     agcButton.onClick = [this]
     {
-        engine.getEQProcessor().setAGCEnabled(agcButton.getToggleState());
+        engine.setEQAGCEnabled(agcButton.getToggleState());
         totalGainValueLabel.setEnabled(!agcButton.getToggleState());
     };
     addAndMakeVisible(agcButton);
@@ -250,7 +250,7 @@ void EQControlPanel::updateBandValues(int band)
 {
     if (band < 0 || band >= EQProcessor::NUM_BANDS) return;
 
-    auto params = engine.getEQProcessor().getBandParams(band);
+    auto params = engine.getEQBandParams(band);
 
     gainLabels[band].setText(juce::String(params.gain, 1) + " dB", juce::dontSendNotification);
     freqLabels[band].setText(formatFreq(params.frequency), juce::dontSendNotification);
@@ -263,28 +263,28 @@ void EQControlPanel::updateAllControls()
     {
         updateBandValues(i);
 
-        const bool isEnabled = engine.getEQProcessor().getBandParams(i).enabled;
+        const bool isEnabled = engine.getEQBandParams(i).enabled;
         enableButtons[i].setToggleState(isEnabled, juce::dontSendNotification);
         enableButtons[i].setButtonText(isEnabled ? "ON" : "OFF");
 
-        const int typeId = static_cast<int>(engine.getEQProcessor().getBandType(i)) + 1;
+        const int typeId = static_cast<int>(engine.getEQBandType(i)) + 1;
         typeBoxes[i].setSelectedId(typeId, juce::dontSendNotification);
 
-        const int channelId = static_cast<int>(engine.getEQProcessor().getBandChannelMode(i)) + 1;
+        const int channelId = static_cast<int>(engine.getEQBandChannelMode(i)) + 1;
         channelBoxes[i].setSelectedId(channelId, juce::dontSendNotification);
     }
 
-    const float totalGain = engine.getEQProcessor().getTotalGain();
+    const float totalGain = engine.getEQTotalGain();
     totalGainValueLabel.setText(juce::String(totalGain, 1) + " dB", juce::dontSendNotification);
 
-    const float nonlinearSat = engine.getEQProcessor().getNonlinearSaturation();
+    const float nonlinearSat = engine.getEQNonlinearSaturation();
     nonlinearValueLabel.setText(juce::String(nonlinearSat, 2), juce::dontSendNotification);
 
-    const auto structure = engine.getEQProcessor().getFilterStructure();
+    const auto structure = engine.getEQFilterStructure();
     const int structureId = (structure == EQProcessor::FilterStructure::Serial) ? 1 : 2;
     structureBox.setSelectedId(structureId, juce::dontSendNotification);
 
-    const bool agcOn = engine.getEQProcessor().getAGCEnabled();
+    const bool agcOn = engine.isEQAGCEnabled();
     agcButton.setToggleState(agcOn, juce::dontSendNotification);
     totalGainValueLabel.setEnabled(!agcOn);
 
@@ -318,7 +318,7 @@ void EQControlPanel::labelTextChanged(juce::Label* label)
             {
                 float val = label->getText().retainCharacters("-0123456789.").getFloatValue();
                 val = juce::jlimit(MIN_BAND_GAIN, MAX_BAND_GAIN, val);
-                engine.getEQProcessor().setBandGain(i, val);
+                engine.setEQBandGain(i, val);
                 updateBandValues(i); // フォーマットを整える
                 return;
             }
@@ -326,7 +326,7 @@ void EQControlPanel::labelTextChanged(juce::Label* label)
             {
                 float val = label->getText().retainCharacters("0123456789.").getFloatValue();
                 val = juce::jlimit(FREQ_RANGES[i].minHz, FREQ_RANGES[i].maxHz, val);
-                engine.getEQProcessor().setBandFrequency(i, val);
+                engine.setEQBandFrequency(i, val);
                 updateBandValues(i);
                 return;
             }
@@ -334,7 +334,7 @@ void EQControlPanel::labelTextChanged(juce::Label* label)
             {
                 float val = label->getText().retainCharacters("-0123456789.").getFloatValue();
                 val = juce::jlimit(Q_MIN, Q_MAX, val);
-                engine.getEQProcessor().setBandQ(i, val);
+                engine.setEQBandQ(i, val);
                 updateBandValues(i);
                 return;
             }
@@ -347,7 +347,7 @@ void EQControlPanel::labelTextChanged(juce::Label* label)
     {
         float val = label->getText().retainCharacters("-0123456789.").getFloatValue();
         val = juce::jlimit(MIN_TOTAL_GAIN, MAX_TOTAL_GAIN, val);
-        engine.getEQProcessor().setTotalGain(val);
+        engine.setEQTotalGain(val);
         totalGainValueLabel.setText(juce::String(val, 1) + " dB", juce::dontSendNotification);
         return;
     }
@@ -356,7 +356,7 @@ void EQControlPanel::labelTextChanged(juce::Label* label)
     {
         float val = label->getText().retainCharacters("0123456789.").getFloatValue();
         val = juce::jlimit(MIN_NONLINEAR_SAT, MAX_NONLINEAR_SAT, val);
-        engine.getEQProcessor().setNonlinearSaturation(val);
+        engine.setEQNonlinearSaturation(val);
         nonlinearValueLabel.setText(juce::String(val, 2), juce::dontSendNotification);
     }
 }
@@ -381,7 +381,7 @@ void EQControlPanel::editorShown(juce::Label* label, juce::TextEditor& editor)
             case ControlType::Freq:
             {
                 // 編集時はHz単位の数値のみを表示
-                float freq = engine.getEQProcessor().getBandParams(i).frequency;
+                float freq = engine.getEQBandParams(i).frequency;
                 juce::String text = juce::String(freq, 1);
                 if (text.endsWith(".0"))
                     text = text.dropLastCharacters(2);
@@ -419,7 +419,7 @@ void EQControlPanel::buttonClicked(juce::Button* button)
         if (id->type == ControlType::Enable)
         {
             const bool isEnabled = enableButtons[id->bandIndex].getToggleState();
-            engine.getEQProcessor().setBandEnabled(id->bandIndex, isEnabled);
+            engine.setEQBandEnabled(id->bandIndex, isEnabled);
             enableButtons[id->bandIndex].setButtonText(isEnabled ? "ON" : "OFF");
             return;
         }
@@ -428,7 +428,7 @@ void EQControlPanel::buttonClicked(juce::Button* button)
     // ── Reset All ボタン ──
     if (button == &resetButton)
     {
-        engine.getEQProcessor().resetToDefaults();
+        engine.resetEQToDefaults();
         return;
     }
 }
@@ -442,9 +442,9 @@ void EQControlPanel::comboBoxChanged(juce::ComboBox* comboBox)
     {
         const int selectedId = structureBox.getSelectedId();
         if (selectedId == 1)
-            engine.getEQProcessor().setFilterStructure(EQProcessor::FilterStructure::Serial);
+            engine.setEQFilterStructure(EQProcessor::FilterStructure::Serial);
         else if (selectedId == 2)
-            engine.getEQProcessor().setFilterStructure(EQProcessor::FilterStructure::Parallel);
+            engine.setEQFilterStructure(EQProcessor::FilterStructure::Parallel);
         return;
     }
 
@@ -458,11 +458,11 @@ void EQControlPanel::comboBoxChanged(juce::ComboBox* comboBox)
         {
             case ControlType::Type:
                 // ID(1-based) -> Enum(0-based)
-                engine.getEQProcessor().setBandType(i, static_cast<EQBandType>(selectedId - 1));
+                engine.setEQBandType(i, static_cast<EQBandType>(selectedId - 1));
                 return;
 
             case ControlType::Channel:
-                engine.getEQProcessor().setBandChannelMode(i, static_cast<EQChannelMode>(selectedId - 1));
+                engine.setEQBandChannelMode(i, static_cast<EQChannelMode>(selectedId - 1));
                 return;
 
             default:

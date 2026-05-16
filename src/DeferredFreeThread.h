@@ -102,7 +102,9 @@ private:
     void drainAllRetired() noexcept
     {
         while (auto* ptr = swapperRef.tryReclaim(std::numeric_limits<uint64_t>::max()))
-            delete ptr;
+        {
+            std::unique_ptr<convo::ConvolverState> owned{ptr}; // RAII delete
+        }
     }
 
     void run()
@@ -116,7 +118,7 @@ private:
             int reclaimCount = 0;
             while (auto* ptr = swapperRef.tryReclaim(minEpoch))
             {
-                delete ptr;
+                std::unique_ptr<convo::ConvolverState> owned{ptr}; // RAII delete
                 if (++reclaimCount >= kMaxReclaimPerLoop) break;
             }
             if (reclaimCount == 0)

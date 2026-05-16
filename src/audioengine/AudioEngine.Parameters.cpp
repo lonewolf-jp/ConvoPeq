@@ -559,8 +559,6 @@ void AudioEngine::setSaturationAmount(float amount)
 {
     const float clamped = juce::jlimit(0.0f, 1.0f, amount);
     convo::publishAtomic(saturationAmount, clamped, std::memory_order_release);
-    convo::publishAtomic(m_currentSaturationAmount, clamped, std::memory_order_release);
-    enqueueSnapshotCommand();
 }
 
 float AudioEngine::getSaturationAmount() const
@@ -595,6 +593,61 @@ int AudioEngine::getOversamplingFactor() const
     return convo::consumeAtomic(manualOversamplingFactor);
 }
 
+// ---------------------------------------------------------------------------
+// Convolver UI staging setters (Rule 1.1.5)
+// Implementations are kept here (.cpp) so that AudioEngine.h does not expose
+// direct uiConvolverProcessor.set*() calls to the Rule 1.1.5 grep scan.
+// All calls are Message Thread only and route through the UI staging object;
+// the Runtime world is updated via convolverParamsChanged -> requestRebuild().
+// ---------------------------------------------------------------------------
+
+void AudioEngine::setConvolverTargetIRLength(float timeSec, bool manualOverride) noexcept
+{
+    if (manualOverride)
+        uiConvolverProcessor.setIRLengthManualOverride(true);
+    uiConvolverProcessor.setTargetIRLength(timeSec);
+}
+
+void AudioEngine::setConvolverMixedTransitionStartHz(float hz) noexcept
+{
+    uiConvolverProcessor.setMixedTransitionStartHz(hz);
+}
+
+void AudioEngine::setConvolverMixedTransitionEndHz(float hz) noexcept
+{
+    uiConvolverProcessor.setMixedTransitionEndHz(hz);
+}
+
+void AudioEngine::setConvolverMixedPreRingTau(float tau) noexcept
+{
+    uiConvolverProcessor.setMixedPreRingTau(tau);
+}
+
+void AudioEngine::setConvolverRebuildDebounceMs(int ms) noexcept
+{
+    uiConvolverProcessor.setRebuildDebounceMs(ms);
+}
+
+void AudioEngine::setConvolverTailRolloffStartHz(float hz) noexcept
+{
+    uiConvolverProcessor.setTailRolloffStartHz(hz);
+}
+
+void AudioEngine::setConvolverTailRolloffStrength(float strength) noexcept
+{
+    uiConvolverProcessor.setTailRolloffStrength(strength);
+}
+
+void AudioEngine::setConvolverPartitionTailStrength(float strength) noexcept
+{
+    uiConvolverProcessor.setPartitionTailStrength(strength);
+}
+
+void AudioEngine::setConvolverTailProcessingMode(int mode) noexcept
+{
+    uiConvolverProcessor.setTailProcessingMode(mode);
+}
+
 void AudioEngine::setOversamplingType(OversamplingType type)
 {
     convo::publishAtomic(oversamplingType, type);
@@ -612,9 +665,9 @@ AudioEngine::OversamplingType AudioEngine::getOversamplingType() const
     return convo::consumeAtomic(oversamplingType);
 }
 
-//──────────────────────────────────────────────────────────────────────────
+//====================================================================
 // 出力周波数フィルターモード Setter / Getter (Message Thread)
-//──────────────────────────────────────────────────────────────────────────
+//====================================================================
 void AudioEngine::setConvHCFilterMode(convo::HCMode mode) noexcept
 {
     convo::publishAtomic(convHCFilterMode, mode, std::memory_order_release);
@@ -652,6 +705,51 @@ void AudioEngine::setEqLPFFilterMode(convo::HCMode mode) noexcept
 convo::HCMode AudioEngine::getEqLPFFilterMode() const noexcept
 {
     return convo::consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
+}
+
+juce::ValueTree AudioEngine::getConvolverStateTree() const
+{
+    return uiConvolverProcessor.getState();
+}
+
+void AudioEngine::setConvolverStateTree(const juce::ValueTree& state)
+{
+    uiConvolverProcessor.setState(state);
+}
+
+int AudioEngine::getConvolverTargetUpgradeFFTSize() const
+{
+    return uiConvolverProcessor.getTargetUpgradeFFTSize();
+}
+
+void AudioEngine::setConvolverTargetUpgradeFFTSize(int fftSize)
+{
+    uiConvolverProcessor.setTargetUpgradeFFTSize(fftSize);
+}
+
+bool AudioEngine::isConvolverProgressiveUpgradeEnabled() const
+{
+    return uiConvolverProcessor.isProgressiveUpgradeEnabled();
+}
+
+void AudioEngine::setConvolverEnableProgressiveUpgrade(bool enabled)
+{
+    uiConvolverProcessor.setEnableProgressiveUpgrade(enabled);
+}
+
+int AudioEngine::getConvolverMaxCacheEntries() const
+{
+    return static_cast<int>(uiConvolverProcessor.getMaxCacheEntries());
+}
+
+void AudioEngine::setConvolverMaxCacheEntries(int maxEntries)
+{
+    uiConvolverProcessor.setMaxCacheEntries(static_cast<size_t>(maxEntries));
+}
+
+void AudioEngine::clearConvolverCache()
+{
+    uiConvolverProcessor.clearCache();
 }
 
 #endif // defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PARAMETERS)

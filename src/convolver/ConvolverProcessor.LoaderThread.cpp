@@ -320,8 +320,8 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
     {
         convo::aligned_free(irLRaw);
         convo::aligned_free(irRRaw);
-        delete loadedIRRaw;
-        delete displayIRRaw;
+        std::unique_ptr<juce::AudioBuffer<double>>{loadedIRRaw};  // RAII delete
+        std::unique_ptr<juce::AudioBuffer<double>>{displayIRRaw}; // RAII delete
 
         juce::Logger::writeToLog("LoaderThread: callAsync failed, aborting IR load");
         result.errorMessage = "Internal message queue full, cannot complete IR load";

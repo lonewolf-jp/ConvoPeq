@@ -1,0 +1,31 @@
+name: list-compliance
+
+on:
+  pull_request:
+    paths:
+      - src/**
+      - doc/list.md
+      - .github/scripts/check-list-compliance.ps1
+      - .github/scripts/check-src-atomic-dotcall.ps1
+      - .github/workflows/list-compliance.yml
+  push:
+    branches:
+      - main
+    paths:
+      - src/**
+      - doc/list.md
+      - .github/scripts/check-list-compliance.ps1
+      - .github/scripts/check-src-atomic-dotcall.ps1
+      - .github/workflows/list-compliance.yml
+
+jobs:
+  compliance-list-md:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run list.md compliance checks
+        shell: pwsh
+        run: .github/scripts/check-list-compliance.ps1

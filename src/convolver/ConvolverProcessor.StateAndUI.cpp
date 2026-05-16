@@ -384,7 +384,7 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     auto* otherSnap = convo::consumeAtomic(other.cachedLatency, std::memory_order_acquire);
     auto* newSnap = otherSnap ? new LatencySnapshot(*otherSnap) : new LatencySnapshot();
     auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel);
-    delete oldSnap;
+    std::unique_ptr<LatencySnapshot> owned{oldSnap}; // RAII delete
 
     convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release);
     convo::publishAtomic(uiAlgorithmLatencySamples, convo::consumeAtomic(other.uiAlgorithmLatencySamples, std::memory_order_acquire), std::memory_order_release);
@@ -693,7 +693,7 @@ void ConvolverProcessor::updateLatencyCache() noexcept
 
     auto* newSnap = new LatencySnapshot(snap);
     auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel);
-    delete oldSnap;
+    std::unique_ptr<LatencySnapshot> ownedOld{oldSnap}; // RAII delete
 }
 
 void ConvolverProcessor::requestHostDisplayUpdate()
@@ -934,7 +934,7 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
     {
         juce::Logger::writeToLog("ConvolverProcessor::updateConvolverState: stale generation, discarding state (gen="
             + juce::String((int)newState->generationId) + ")");
-        delete newState;
+        std::unique_ptr<convo::ConvolverState> owned{newState}; // RAII delete (stale discard)
         convo::publishAtomic(writerActive, false, std::memory_order_release);
         return;
     }

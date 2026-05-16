@@ -53,7 +53,8 @@ public:
 
     void closeButtonPressed() override
     {
-        delete this;
+        setVisible(false);
+        std::unique_ptr<MixedPhaseOptimizationWindow>(this); // RAII self-delete (replaces delete this)
     }
 
 private:

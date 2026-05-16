@@ -81,9 +81,7 @@ void ConvolverSettingsComponent::timerCallback()
 
 void ConvolverSettingsComponent::syncFromProcessor()
 {
-    auto& convolver = engine.getConvolverProcessor();
-
-    const int target = convolver.getTargetUpgradeFFTSize();
+    const int target = engine.getConvolverTargetUpgradeFFTSize();
     int selectedId = 4;
     if (target <= 512) selectedId = 1;
     else if (target <= 1024) selectedId = 2;
@@ -92,10 +90,10 @@ void ConvolverSettingsComponent::syncFromProcessor()
     if (!targetFftBox.isPopupActive())
         targetFftBox.setSelectedId(selectedId, juce::dontSendNotification);
 
-    progressiveToggle.setToggleState(convolver.isProgressiveUpgradeEnabled(), juce::dontSendNotification);
+    progressiveToggle.setToggleState(engine.isConvolverProgressiveUpgradeEnabled(), juce::dontSendNotification);
 
     if (!cacheEntriesSlider.isMouseButtonDown())
-        cacheEntriesSlider.setValue(static_cast<double>(convolver.getMaxCacheEntries()), juce::dontSendNotification);
+        cacheEntriesSlider.setValue(static_cast<double>(engine.getConvolverMaxCacheEntries()), juce::dontSendNotification);
 }
 
 void ConvolverSettingsComponent::comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged)
@@ -112,25 +110,23 @@ void ConvolverSettingsComponent::comboBoxChanged(juce::ComboBox* comboBoxThatHas
         default: break;
     }
 
-    engine.getConvolverProcessor().setTargetUpgradeFFTSize(fft);
+    engine.setConvolverTargetUpgradeFFTSize(fft);
 }
 
 void ConvolverSettingsComponent::buttonClicked(juce::Button* button)
 {
-    auto& convolver = engine.getConvolverProcessor();
-
     if (button == &clearCacheButton)
     {
-        convolver.clearCache();
+        engine.clearConvolverCache();
     }
     else if (button == &progressiveToggle)
     {
-        convolver.setEnableProgressiveUpgrade(progressiveToggle.getToggleState());
+        engine.setConvolverEnableProgressiveUpgrade(progressiveToggle.getToggleState());
     }
 }
 
 void ConvolverSettingsComponent::sliderValueChanged(juce::Slider* slider)
 {
     if (slider == &cacheEntriesSlider)
-        engine.getConvolverProcessor().setMaxCacheEntries(static_cast<size_t>(juce::roundToInt(cacheEntriesSlider.getValue())));
+        engine.setConvolverMaxCacheEntries(static_cast<size_t>(juce::roundToInt(cacheEntriesSlider.getValue())));
 }

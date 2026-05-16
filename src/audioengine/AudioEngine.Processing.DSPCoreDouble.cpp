@@ -273,7 +273,7 @@ inline void pushAdaptiveCaptureBlocks(LockFreeRingBuffer<AudioBlock, 4096>* capt
                 block.R[i] = srcR[i];
         }))
         {
-            dropCount.fetch_add(1, std::memory_order_acq_rel);
+            dropCount.fetch_add(1, std::memory_order_acq_rel); // RT-RESTRICTED: drop diagnostic counter only, no blocking
         }
     }
 }
@@ -396,7 +396,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         eqCacheToUse = ownerEngine->eqCacheManager.get(hash);
         if (hash != convo::consumeAtomic(ownerEngine->debugLastAppliedEqHash, std::memory_order_acquire))
         {
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_acq_rel);
+            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_acq_rel); // RT-RESTRICTED: debug version counter only, no blocking
         }
     }
     else if (ownerEngine != nullptr)
@@ -407,11 +407,11 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         eqCacheToUse = ownerEngine->eqCacheManager.get(fallbackHash);
         if (fallbackHash != 0 && fallbackHash != convo::consumeAtomic(ownerEngine->debugLastAppliedEqHash, std::memory_order_acquire))
         {
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_acq_rel);
+            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_acq_rel); // RT-RESTRICTED: debug version counter only, no blocking
         }
     }
 
-    eqRt().setBypass(state.eqBypassed);
+    eqRt().setBypassFromRT(state.eqBypassed); // RT-local shadow に書き込み（publishAtomic の RT 使用禁止のため）
 
     if (state.order == ProcessingOrder::ConvolverThenEQ)
     {

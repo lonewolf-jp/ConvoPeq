@@ -115,34 +115,30 @@ private:
     // モード変更後 (バイパス切替・処理順序変更・プリセットロード) に呼ぶこと。
     void updateTrimSlider();
 
-    void markConvolverParameterDirty();
-
         //----------------------------------------------------------
         // Convolver Input Trim (EQ→Conv 時のみ有効)
         //----------------------------------------------------------
         juce::Slider convTrimSlider;
         juce::Label  convTrimLabel;
-    void applyPendingConvolverParameters();
-    bool hasPendingConvolverParameters() const noexcept;
     void showOptimizationProgressWindowImpl();
 
     juce::Path waveformPath;
     juce::Rectangle<int> waveformArea;
 
-    static constexpr int PARAMETER_RECALC_DEBOUNCE_MS = 3000;
-    double lastParameterChangeMs = 0.0;
+    // UI反映待ちの一時値（Timer debounce廃止後も、非同期IR解析直後の表示同期に利用）
     bool pendingMixDirty = false;
+    double pendingMixValue = 0.0;
     bool pendingSmoothingDirty = false;
+    double pendingSmoothingTimeSec = 0.0;
     bool pendingIrLengthDirty = false;
+    double pendingIrLengthSec = 0.0;
     bool pendingMixedF1Dirty = false;
+    double pendingMixedF1Hz = 0.0;
     bool pendingMixedF2Dirty = false;
+    double pendingMixedF2Hz = 0.0;
     bool pendingMixedTauDirty = false;
-    float pendingMixValue = 1.0f;
-    float pendingSmoothingTimeSec = ConvolverProcessor::SMOOTHING_TIME_DEFAULT_SEC;
-    float pendingIrLengthSec = ConvolverProcessor::IR_LENGTH_DEFAULT_SEC;
-    float pendingMixedF1Hz = ConvolverProcessor::MIXED_F1_DEFAULT_HZ;
-    float pendingMixedF2Hz = ConvolverProcessor::MIXED_F2_DEFAULT_HZ;
-    float pendingMixedTau = ConvolverProcessor::MIXED_TAU_DEFAULT;
+    double pendingMixedTau = 0.0;
+
     std::atomic<int> irPreviewRequestId { 0 };
     bool irPreviewInProgress = false;
     juce::Component::SafePointer<juce::DialogWindow> irAdvancedWindow;

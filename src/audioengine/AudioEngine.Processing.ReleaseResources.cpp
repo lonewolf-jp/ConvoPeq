@@ -153,6 +153,10 @@ void AudioEngine::releaseResources()
     if (pendingCurrentToRelease)
         retireDSP(pendingCurrentToRelease);
 
+    // shutdown/release シーケンスでは明示的に deferred retire queue をドレインする。
+    // 通常タイマー経路は Releasing 中に early-return するため、ここで最終回収を保証する。
+    drainDeferredRetireQueues(true);
+
     diagLog("[DIAG] releaseResources: before ui processor release");
     diagLog("[DIAG] releaseResources: before uiConvolverProcessor.releaseResources");
     uiConvolverProcessor.releaseResources();

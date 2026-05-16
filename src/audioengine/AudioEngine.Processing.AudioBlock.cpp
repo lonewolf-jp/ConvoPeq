@@ -20,7 +20,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     const convo::EpochCoreReaderGuard epochReaderGuard(m_epochCore, kAudioEpochReaderIndex);
     ASSERT_AUDIO_THREAD();
-    m_audioBlockCounter.fetch_add(1, std::memory_order_release);
+    ++m_audioBlockCounterRtLocal; // RT-local counter (non-atomic, RT thread only)
+
+    // Process pending runtime commands from UI (non-blocking drain)
+    processAudioThreadRuntimeCommands();
 
     // 入力検証 (Input Validation)
     if (bufferToFill.buffer == nullptr)
@@ -252,6 +255,50 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
     }
 
+}
+
+// ========================================================
+// processAudioThreadRuntimeCommands() - Runtime command processing
+// Called from Audio Thread at start of getNextAudioBlock
+// Non-blocking drain of RuntimeCommandQueue
+// RT-safe setters only (no listeners.call, no locks, no I/O)
+// ========================================================
+void AudioEngine::processAudioThreadRuntimeCommands() noexcept
+{
+    // Drain all pending commands from RuntimeCommandQueue (SPSC, non-blocking)
+    convo::EngineCommand cmd {};
+    while (m_runtimeCommandQueue.tryDequeue(cmd))
+    {
+        switch (cmd.type)
+        {
+            case convo::CommandType::SetConvolverMix:
+                // Use RT-safe variant: atomic write only, no listeners.call()
+                uiConvolverProcessor.setMixRT(cmd.floatValue);
+                break;
+
+            case convo::CommandType::SetConvolverSmoothingTime:
+                // Use RT-safe variant: atomic write + fetch_add only, no listeners.call()
+                uiConvolverProcessor.setSmoothingTimeRT(cmd.floatValue);
+                break;
+
+            case convo::CommandType::SetConvolverTargetIRLength:
+                // IR rebuild setters must NOT be called from Audio Thread (calls listeners)
+                // These parameters are set from UI/message thread and enqueue rebuild separately
+                break;
+
+            case convo::CommandType::SetConvolverMixedTransitionStartHz:
+            case convo::CommandType::SetConvolverMixedTransitionEndHz:
+            case convo::CommandType::SetConvolverMixedPreRingTau:
+                // Mixed-phase optimization parameters must NOT be called from Audio Thread
+                // (calls listeners.call + requestDebouncedRebuild)
+                // These are set from UI/message thread only
+                break;
+
+            default:
+                // Other command types (UpdateParameters, ReplaceIR, etc.) handled elsewhere
+                break;
+        }
+    }
 }
 
 #endif

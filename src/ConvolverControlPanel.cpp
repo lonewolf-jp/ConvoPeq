@@ -217,35 +217,33 @@ private:
 
     void sliderValueChanged(juce::Slider* slider) override
     {
-        auto& convolver = engine.getConvolverProcessor();
         if (slider == &irLengthSlider)
         {
-            convolver.setIRLengthManualOverride(true);
-            convolver.setTargetIRLength(static_cast<float>(irLengthSlider.getValue()));
+            engine.setConvolverTargetIRLength(static_cast<float>(irLengthSlider.getValue()), true);
         }
         else if (slider == &rebuildSlider)
         {
-            convolver.setRebuildDebounceMs(static_cast<int>(rebuildSlider.getValue()));
+            engine.setConvolverRebuildDebounceMs(static_cast<int>(rebuildSlider.getValue()));
         }
         else if (slider == &mixedF1Slider)
         {
-            convolver.setMixedTransitionStartHz(static_cast<float>(mixedF1Slider.getValue()));
+            engine.setConvolverMixedTransitionStartHz(static_cast<float>(mixedF1Slider.getValue()));
         }
         else if (slider == &mixedF2Slider)
         {
-            convolver.setMixedTransitionEndHz(static_cast<float>(mixedF2Slider.getValue()));
+            engine.setConvolverMixedTransitionEndHz(static_cast<float>(mixedF2Slider.getValue()));
         }
         else if (slider == &tailRolloffStartSlider)
         {
-            convolver.setTailRolloffStartHz(static_cast<float>(tailRolloffStartSlider.getValue()));
+            engine.setConvolverTailRolloffStartHz(static_cast<float>(tailRolloffStartSlider.getValue()));
         }
         else if (slider == &tailRolloffStrengthSlider)
         {
-            convolver.setTailRolloffStrength(static_cast<float>(tailRolloffStrengthSlider.getValue()));
+            engine.setConvolverTailRolloffStrength(static_cast<float>(tailRolloffStrengthSlider.getValue()));
         }
         else if (slider == &partitionTailSlider)
         {
-            convolver.setPartitionTailStrength(static_cast<float>(partitionTailSlider.getValue()));
+            engine.setConvolverPartitionTailStrength(static_cast<float>(partitionTailSlider.getValue()));
         }
     }
 
@@ -254,19 +252,18 @@ private:
         if (comboBoxThatHasChanged != &tailModeCombo)
             return;
 
-        auto& convolver = engine.getConvolverProcessor();
         const int mode = juce::jmax(0, tailModeCombo.getSelectedId() - 1);
-        convolver.setTailProcessingMode(mode);
+        engine.setConvolverTailProcessingMode(mode);
 
         if (mode == 0)
         {
-            convolver.setTailRolloffStartHz(ConvolverProcessor::TAIL_AIR_ROLLOFF_START_DEFAULT_HZ);
-            convolver.setTailRolloffStrength(ConvolverProcessor::TAIL_AIR_ROLLOFF_STRENGTH_DEFAULT);
+            engine.setConvolverTailRolloffStartHz(ConvolverProcessor::TAIL_AIR_ROLLOFF_START_DEFAULT_HZ);
+            engine.setConvolverTailRolloffStrength(ConvolverProcessor::TAIL_AIR_ROLLOFF_STRENGTH_DEFAULT);
         }
         else
         {
-            convolver.setTailRolloffStartHz(ConvolverProcessor::TAIL_LAYER_ROLLOFF_START_DEFAULT_HZ);
-            convolver.setTailRolloffStrength(ConvolverProcessor::TAIL_LAYER_ROLLOFF_STRENGTH_DEFAULT);
+            engine.setConvolverTailRolloffStartHz(ConvolverProcessor::TAIL_LAYER_ROLLOFF_START_DEFAULT_HZ);
+            engine.setConvolverTailRolloffStrength(ConvolverProcessor::TAIL_LAYER_ROLLOFF_STRENGTH_DEFAULT);
         }
         updateTailControlsVisibility();
     }
@@ -1232,42 +1229,33 @@ void ConvolverControlPanel::setIRPreviewInProgress(bool isInProgress)
 //--------------------------------------------------------------
 void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
 {
+    // rule 1.1.5: All convolver parameter changes enqueued via RuntimeCommandQueue
+    // (no Timer debounce; commands processed in Audio Thread at start of getNextAudioBlock)
+
     if (slider == &mixSlider)
     {
-        pendingMixValue = static_cast<float>(slider->getValue());
-        pendingMixDirty = true;
-        markConvolverParameterDirty();
+        engine.setConvolverMix(static_cast<float>(slider->getValue()));
     }
     else if (slider == &smoothingTimeSlider)
     {
-        pendingSmoothingTimeSec = static_cast<float>(slider->getValue()) / 1000.0f;
-        pendingSmoothingDirty = true;
-        markConvolverParameterDirty();
+        engine.setConvolverSmoothingTime(static_cast<float>(slider->getValue()) / 1000.0f);
     }
     else if (slider == &irLengthSlider)
     {
         engine.getConvolverProcessor().setIRLengthManualOverride(true);
-        pendingIrLengthSec = static_cast<float>(slider->getValue());
-        pendingIrLengthDirty = true;
-        markConvolverParameterDirty();
+        engine.setConvolverTargetIRLength(static_cast<float>(slider->getValue()), false);
     }
     else if (slider == &mixedF1Slider)
     {
-        pendingMixedF1Hz = static_cast<float>(slider->getValue());
-        pendingMixedF1Dirty = true;
-        markConvolverParameterDirty();
+        engine.setConvolverMixedTransitionStartHz(static_cast<float>(slider->getValue()));
     }
     else if (slider == &mixedF2Slider)
     {
-        pendingMixedF2Hz = static_cast<float>(slider->getValue());
-        pendingMixedF2Dirty = true;
-        markConvolverParameterDirty();
+        engine.setConvolverMixedTransitionEndHz(static_cast<float>(slider->getValue()));
     }
     else if (slider == &mixedTauSlider)
     {
-        pendingMixedTau = static_cast<float>(slider->getValue());
-        pendingMixedTauDirty = true;
-        markConvolverParameterDirty();
+        engine.setConvolverMixedPreRingTau(static_cast<float>(slider->getValue()));
     }
     else if (slider == &rebuildDebounceSlider)
     {
@@ -1281,63 +1269,9 @@ void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
 
 void ConvolverControlPanel::timerCallback()
 {
-    if (!hasPendingConvolverParameters())
-    {
+    // Timer debounce removed; all parameter changes now enqueued immediately
+    if (isTimerRunning())
         stopTimer();
-        return;
-    }
-
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
-    if ((nowMs - lastParameterChangeMs) < static_cast<double>(PARAMETER_RECALC_DEBOUNCE_MS))
-        return;
-
-    applyPendingConvolverParameters();
-    stopTimer();
-}
-
-void ConvolverControlPanel::markConvolverParameterDirty()
-{
-    lastParameterChangeMs = juce::Time::getMillisecondCounterHiRes();
-    if (!isTimerRunning())
-        startTimer(100);
-}
-
-bool ConvolverControlPanel::hasPendingConvolverParameters() const noexcept
-{
-    return pendingMixDirty || pendingSmoothingDirty || pendingIrLengthDirty
-        || pendingMixedF1Dirty || pendingMixedF2Dirty || pendingMixedTauDirty;
-}
-
-void ConvolverControlPanel::applyPendingConvolverParameters()
-{
-    auto& convolver = engine.getConvolverProcessor();
-
-    if (pendingMixDirty)
-        convolver.setMix(pendingMixValue);
-
-    if (pendingSmoothingDirty)
-        convolver.setSmoothingTime(pendingSmoothingTimeSec);
-
-    if (pendingIrLengthDirty)
-        convolver.setTargetIRLength(pendingIrLengthSec);
-
-    if (pendingMixedF1Dirty)
-        convolver.setMixedTransitionStartHz(pendingMixedF1Hz);
-
-    if (pendingMixedF2Dirty)
-        convolver.setMixedTransitionEndHz(pendingMixedF2Hz);
-
-    if (pendingMixedTauDirty)
-        convolver.setMixedPreRingTau(pendingMixedTau);
-
-    pendingMixDirty = false;
-    pendingSmoothingDirty = false;
-    pendingIrLengthDirty = false;
-    pendingMixedF1Dirty = false;
-    pendingMixedF2Dirty = false;
-    pendingMixedTauDirty = false;
-
-    updateIRInfo();
 }
 
 void ConvolverControlPanel::mouseDown(const juce::MouseEvent& event)

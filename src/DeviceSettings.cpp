@@ -832,7 +832,7 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
         xml->setAttribute("inputHeadroomDb", engine.getInputHeadroomDb());
 
         // Convolver state
-        auto convolverState = engine.getConvolverProcessor().getState();
+        auto convolverState = engine.getConvolverStateTree();
         if (auto convolverXml = convolverState.createXml())
         {
             xml->addChildElement(convolverXml.release());
@@ -1056,7 +1056,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             {
                 auto convolverState = juce::ValueTree::fromXml(*convXml);
                 convolverState.removeProperty("irPath", nullptr);
-                engine.getConvolverProcessor().setState(convolverState);
+                engine.setConvolverStateTree(convolverState);
             }
 
             engine.endBulkParameterRestore(true);

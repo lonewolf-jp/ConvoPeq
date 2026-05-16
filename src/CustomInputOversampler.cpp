@@ -545,7 +545,6 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
 
 juce::dsp::AudioBlock<double> CustomInputOversampler::processUp(juce::dsp::AudioBlock<double>& inputBlock, int numChannels) noexcept
 {
-    thread_local double* blockChannelView[kMaxChannels] = { nullptr, nullptr };
 
     const int channels = juce::jlimit(1, kMaxChannels, numChannels);
     const int inSamples = static_cast<int>(inputBlock.getNumSamples());

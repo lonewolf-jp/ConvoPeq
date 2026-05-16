@@ -194,6 +194,8 @@ public:
     // バイパス制御
     void setBypass(bool shouldBypass) { convo::publishAtomic(bypassRequested, shouldBypass, std::memory_order_release); }
     bool isBypassed() const { return convo::consumeAtomic(bypassRequested, std::memory_order_acquire); }
+    // RT スレッド専用バイパスセッター（atomic write 禁止のため shadow に直書き）
+    void setBypassFromRT(bool b) noexcept { m_rtBypassShadow = b; }
 
     //----------------------------------------------------------
     // パラメータ変更 (UIスレッドから呼ぶ)
@@ -550,6 +552,7 @@ private:
     std::array<std::array<std::array<double, 2>, NUM_BANDS>, MAX_CHANNELS> filterState{};
     std::atomic<bool> bypassRequested { false };
     std::atomic<bool> bypassed { false }; // 実効バイパス状態（フェード完了後に更新）
+    bool m_rtBypassShadow = false;       // RT-local bypass shadow（非atomic、RT スレッドのみ書き込み）
     convo::LinearRamp bypassFadeGain { 1.0 };
 
     // ── 現在のサンプルレート ──

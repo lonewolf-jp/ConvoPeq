@@ -3,14 +3,21 @@
 //==============================================================================
 #include "../DeferredDeletionQueue.h"   // 先頭付近に追加
 #include "DeletionQueue.h"
-#include <algorithm>
 
 namespace convo {
 
 void DeletionQueue::enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type)
 {
     std::lock_guard<std::mutex> lock(mutex);
-    queue.push_back({ptr, deleter, epoch, type});
+    if (count >= kCapacity)
+    {
+        // 容量超過: テールのエントリを強制実行してキューを空ける
+        // (安全側に倒れる前に deleter を呼び出す)
+        if (deleter && ptr)
+            deleter(ptr);
+        return;
+    }
+    queue[count++] = {ptr, deleter, epoch, type};
 }
 
 void DeletionQueue::reclaim(const EpochCore& core)
@@ -18,22 +25,30 @@ void DeletionQueue::reclaim(const EpochCore& core)
     const uint64_t minReaderEpoch = core.getMinReaderEpoch();
 
     std::lock_guard<std::mutex> lock(mutex);
-    auto it = std::stable_partition(queue.begin(), queue.end(),
-        [minReaderEpoch](Entry& e) -> bool {
-            if (!convo::EpochCore::isOlder(e.epoch, minReaderEpoch))
-                return true;
 
-            return false;
+    size_t write = 0;
+    for (size_t i = 0; i < count; ++i)
+    {
+        Entry& e = queue[i];
+        if (convo::EpochCore::isOlder(e.epoch, minReaderEpoch))
+        {
+            // 安全に解放可能
+            if (e.deleter && e.ptr)
+                e.deleter(e.ptr);
+            // write を進めない（スロットを空ける）
         }
-    );
-
-    for (auto iter = it; iter != queue.end(); ++iter) {
-        if (iter->deleter && iter->ptr) {
-            iter->deleter(iter->ptr);
+        else
+        {
+            // まだ保持中: 可能なら先頭へ密辺める
+            if (write != i)
+                queue[write] = e;
+            ++write;
         }
     }
-
-    queue.erase(it, queue.end());
+    // 使用済みスロットをクリア
+    for (size_t i = write; i < count; ++i)
+        queue[i] = {};
+    count = write;
 }
 
 } // namespace convo

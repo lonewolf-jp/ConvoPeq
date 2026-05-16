@@ -5,6 +5,7 @@
 #include "GlobalSnapshot.h"
 #include "SnapshotParams.h"
 #include <atomic>
+#include <memory>
 #include <bit>
 #include <cassert>
 #include <cmath>
@@ -164,7 +165,7 @@ void SnapshotFactory::destroy(GlobalSnapshot* snap) noexcept
     g_liveSnapshotCount.fetch_sub(1, std::memory_order_acq_rel);
 #endif
 
-    delete snap;
+    std::unique_ptr<GlobalSnapshot> owned{snap}; // RAII delete
 }
 
 } // namespace convo

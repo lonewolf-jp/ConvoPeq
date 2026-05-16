@@ -96,11 +96,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     dspCrossfadeGain.setCurrentAndTargetValue(1.0);
     convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
     {
-        const auto* world = getRuntimePublishWorld();
-        const auto* engineRuntime = getEngineRuntimeState(world);
-        const auto* runtimeGraph = getRuntimeGraphState(world);
-        auto* currentForPublish = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
-        auto* fadingForPublish = resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime);
+        const auto runtimePublishView = getRuntimePublishView();
+        auto* currentForPublish = resolveCurrentDSPFromRuntimePublish(runtimePublishView.graph, runtimePublishView.engine);
+        auto* fadingForPublish = resolveFadingDSPFromRuntimePublish(runtimePublishView.graph, runtimePublishView.engine);
         const bool hasAnyRuntime = (currentForPublish != nullptr) || (fadingForPublish != nullptr);
         if (hasAnyRuntime)
         {
@@ -161,10 +159,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     latencyDelayNew_RT = 0;
 
     // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
-    const auto* world = getRuntimePublishWorld();
-    const auto* engineRuntime = getEngineRuntimeState(world);
-    const auto* runtimeGraph = getRuntimeGraphState(world);
-    const bool hasPublishedCurrent = (runtimePublishedCurrentDSP(engineRuntime, runtimeGraph) != nullptr);
+    const auto runtimePublishView = getRuntimePublishView();
+    const bool hasPublishedCurrent = (runtimePublishedCurrentDSP(runtimePublishView.engine, runtimePublishView.graph) != nullptr);
     if (!hasPublishedCurrent && activeDSP == nullptr)
     {
         convo::aligned_unique_ptr<DSPCore> placeholderDSP;
@@ -207,12 +203,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
     if (rateChanged)
         uiConvolverProcessor.invalidatePendingLoads();
-    const auto* worldForRebuildCheck = getRuntimePublishWorld();
-    const auto* engineRuntimeForRebuildCheck = getEngineRuntimeState(worldForRebuildCheck);
-    const auto* runtimeGraphForRebuildCheck = getRuntimeGraphState(worldForRebuildCheck);
     const bool hasCurrentRuntime = (resolveCurrentDSPFromRuntimePublish(
-                                                                       runtimeGraphForRebuildCheck,
-                                                                       engineRuntimeForRebuildCheck) != nullptr);
+                                                                       runtimePublishView.graph,
+                                                                       runtimePublishView.engine) != nullptr);
     if (rateChanged || blockSizeChanged || !hasCurrentRuntime) {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             requestRebuild(safeSampleRate, bufferSize);

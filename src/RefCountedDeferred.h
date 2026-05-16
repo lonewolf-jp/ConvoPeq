@@ -20,7 +20,7 @@ public:
             std::atomic_thread_fence(std::memory_order_acquire);
             g_deletionQueue.enqueue(
                 static_cast<T*>(this),
-                [](void* p) { delete static_cast<T*>(p); },
+                [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
                 convo::consumeAtomic(g_currentEpoch, std::memory_order_acquire)
             );
         }

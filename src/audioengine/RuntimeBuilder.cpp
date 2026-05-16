@@ -23,12 +23,7 @@ static void diagLogRuntimeBuilder(const juce::String& message)
 
 static int getWarmupBlocksOverrideFromEnv() noexcept
 {
-    // -2: 未初期化, -1: override 無効, 0以上: override 値
-    static std::atomic<int> cached { -2 };
-    int value = convo::consumeAtomic(cached, std::memory_order_acquire);
-    if (value != -2)
-        return value;
-
+    // static mutable 禁止 (rule 4.3.1, 4.3.3): 環境変数を都度読む
     int parsed = -1;
     if (const char* env = std::getenv("CONVOPEQ_WARMUP_BLOCKS"))
     {
@@ -37,58 +32,16 @@ static int getWarmupBlocksOverrideFromEnv() noexcept
         if (end != env)
             parsed = std::clamp(static_cast<int>(v), 0, 16);
     }
-
-    convo::publishAtomic(cached, parsed, std::memory_order_release);
     return parsed;
 }
 
-struct WarmupBlockStats
+// static mutable 禁止 (rule 4.3.1): WarmupBlockStats/statsByBlocks は削除。
+// 各ビルドの elapsed のみをログする。
+static juce::String formatWarmupElapsedSummary(int blocks, std::uint64_t elapsedUs)
 {
-    std::atomic<std::uint64_t> runs { 0 };
-    std::atomic<std::uint64_t> totalUs { 0 };
-    std::atomic<std::uint64_t> minUs { std::numeric_limits<std::uint64_t>::max() };
-    std::atomic<std::uint64_t> maxUs { 0 };
-};
-
-static juce::String updateWarmupBlockStatsAndFormatSummary(int blocks, std::uint64_t elapsedUs)
-{
-    constexpr int kMaxTrackedBlocks = 16;
-    static std::array<WarmupBlockStats, kMaxTrackedBlocks + 1> statsByBlocks;
-
-    const int index = std::clamp(blocks, 0, kMaxTrackedBlocks);
-    auto& stats = statsByBlocks[static_cast<size_t>(index)];
-
-    const std::uint64_t runs = stats.runs.fetch_add(1, std::memory_order_acq_rel) + 1;
-    const std::uint64_t totalUs = stats.totalUs.fetch_add(elapsedUs, std::memory_order_acq_rel) + elapsedUs;
-
-    // min 更新
-    std::uint64_t currentMin = convo::consumeAtomic(stats.minUs, std::memory_order_acquire);
-    while (elapsedUs < currentMin
-        && !stats.minUs.compare_exchange_weak(currentMin, elapsedUs,
-                              std::memory_order_acq_rel,
-                              std::memory_order_acquire))
-    {
-    }
-
-    // max 更新
-    std::uint64_t currentMax = convo::consumeAtomic(stats.maxUs, std::memory_order_acquire);
-    while (elapsedUs > currentMax
-        && !stats.maxUs.compare_exchange_weak(currentMax, elapsedUs,
-                              std::memory_order_acq_rel,
-                              std::memory_order_acquire))
-    {
-    }
-
-    const std::uint64_t minUs = convo::consumeAtomic(stats.minUs, std::memory_order_acquire);
-    const std::uint64_t maxUs = convo::consumeAtomic(stats.maxUs, std::memory_order_acquire);
-    const double avgMs = (runs > 0) ? (static_cast<double>(totalUs) / static_cast<double>(runs) / 1000.0) : 0.0;
-
     return "[DIAG] warmup summary blocks="
-        + juce::String(index)
-        + " runs=" + juce::String(static_cast<juce::int64>(runs))
-        + " minMs=" + juce::String(static_cast<double>(minUs) / 1000.0, 3)
-        + " avgMs=" + juce::String(avgMs, 3)
-        + " maxMs=" + juce::String(static_cast<double>(maxUs) / 1000.0, 3);
+        + juce::String(blocks)
+        + " elapsedMs=" + juce::String(static_cast<double>(elapsedUs) / 1000.0, 3);
 }
 
 enum class WarmupPhase : int
@@ -362,7 +315,7 @@ BuildError RuntimeBuilder::executeWarmup(AudioEngine::DSPCore& runtime) noexcept
             + " latencySamples=" + juce::String(totalLatency)
             + " blockSize=" + juce::String(blockSize));
         diagLogRuntimeBuilder(formatWarmupPhaseTimingSummary(phaseElapsedUs));
-        diagLogRuntimeBuilder(updateWarmupBlockStatsAndFormatSummary(0, elapsedUsSafe));
+        diagLogRuntimeBuilder(formatWarmupElapsedSummary(0, elapsedUsSafe));
         return BuildError::None;
     }
 
@@ -407,22 +360,14 @@ BuildError RuntimeBuilder::executeWarmup(AudioEngine::DSPCore& runtime) noexcept
         std::chrono::steady_clock::now() - start).count();
     const std::uint64_t elapsedUsSafe = static_cast<std::uint64_t>(std::max<std::int64_t>(elapsedUs, 0));
 
-    static std::atomic<std::uint64_t> warmupRunCount { 0 };
-    static std::atomic<std::uint64_t> warmupTotalUs { 0 };
-    const std::uint64_t runs = warmupRunCount.fetch_add(1, std::memory_order_acq_rel) + 1;
-    const std::uint64_t totalUs = warmupTotalUs.fetch_add(elapsedUsSafe, std::memory_order_acq_rel)
-        + elapsedUsSafe;
-    const double avgMs = (runs > 0) ? (static_cast<double>(totalUs) / static_cast<double>(runs) / 1000.0) : 0.0;
-
+    // static mutable 禁止 (rule 4.3.1): 累積カウンタ削除。現在のビルドの elapsed のみ記録。
     diagLogRuntimeBuilder("[DIAG] warmup result: success blocks="
         + juce::String(warmupBlocks)
         + " elapsedMs=" + juce::String(static_cast<double>(elapsedUs) / 1000.0, 3)
-        + " avgMs=" + juce::String(avgMs, 3)
-        + " runs=" + juce::String(static_cast<juce::int64>(runs))
         + " latencySamples=" + juce::String(totalLatency)
         + " blockSize=" + juce::String(blockSize));
     diagLogRuntimeBuilder(formatWarmupPhaseTimingSummary(phaseElapsedUs));
-    diagLogRuntimeBuilder(updateWarmupBlockStatsAndFormatSummary(warmupBlocks, elapsedUsSafe));
+    diagLogRuntimeBuilder(formatWarmupElapsedSummary(warmupBlocks, elapsedUsSafe));
 
     return BuildError::None;
 }

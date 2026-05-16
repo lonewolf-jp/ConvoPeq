@@ -660,10 +660,9 @@ void ConvolverProcessor::switchEngineOnMessageThread(StereoConvolver* newEngine)
         return;
 
     auto* oldEngine = exchangeActiveEngine(newEngine, std::memory_order_acq_rel);
+    convo::EpochManager::instance().advanceEpoch();
     if (oldEngine)
         retireStereoConvolver(oldEngine, 0);
-
-    convo::EpochManager::instance().advanceEpoch();
 }
 
 // applyNewState へのシンプルな転送。新しいコードからは commitNewConvolver を使用する。

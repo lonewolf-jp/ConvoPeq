@@ -514,7 +514,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
 
-    const bool requestedBypass = convo::consumeAtomic(bypassRequested, std::memory_order_acquire);
+    const bool requestedBypass = m_rtBypassShadow; // RT-local shadow（atomic write 禁止のため setBypassFromRT 経由で設定）
     auto* activeBypassRamp = (activeEqState != nullptr) ? &activeEqState->bypassFadeGain : nullptr;
     bool effectiveBypass = (activeEqState != nullptr)
         ? activeEqState->bypassed
@@ -1015,7 +1015,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
 
     // 既存バイパス遷移ロジックを維持するため、遷移中は既存パスへフォールバック
     if (coeffCache == nullptr
-        || convo::consumeAtomic(bypassRequested, std::memory_order_acquire)
+        || m_rtBypassShadow // RT-local shadow（atomic write 禁止のため setBypassFromRT 経由で設定）
         || effectiveBypassed
         || bypassSmoothing)
     {

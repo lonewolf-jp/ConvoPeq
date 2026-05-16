@@ -206,7 +206,6 @@ target_sources(ConvoPeq PRIVATE
     src/core/SnapshotAssembler.h
     src/core/SnapshotAssembler.cpp
     src/core/EpochManager.h
-    src/core/EBRQueue.h
     src/core/RCUReader.h
     src/core/SnapshotCoordinator.h
     src/core/SnapshotCoordinator.cpp

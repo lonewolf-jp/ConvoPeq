@@ -273,8 +273,8 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
             convolverPanel->updateIRInfo();
 
         // メインウィンドウ上のコントロールを更新 (プリセットロード時など)
-        const bool eqBypassed = audioEngine.getEQProcessor().isBypassed();
-        const bool convBypassed = audioEngine.getConvolverProcessor().isBypassed();
+        const bool eqBypassed = audioEngine.isEQBypassed();
+        const bool convBypassed = audioEngine.isConvolverBypassed();
         int modeId = 3; // Conv->Peq
         if (!eqBypassed && convBypassed)
             modeId = 2; // Peq

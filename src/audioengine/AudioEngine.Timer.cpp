@@ -74,14 +74,12 @@ void AudioEngine::timerCallback()
     }
 
     {
-        const auto* world = getRuntimePublishWorld();
-        const auto* engineRuntime = getEngineRuntimeState(world);
-        const auto* runtimeGraph = getRuntimeGraphState(world);
-        const uint64_t revision = runtimeRevision(engineRuntime, runtimeGraph);
-        const uint64_t currentUuid = runtimeCurrentUuid(engineRuntime, runtimeGraph);
-        const uint64_t fadingUuid = runtimeFadingUuid(engineRuntime, runtimeGraph);
-        const uint64_t transitionCurrentUuid = runtimeTransitionCurrentUuid(engineRuntime, runtimeGraph);
-        const uint64_t transitionNextUuid = runtimeTransitionNextUuid(engineRuntime, runtimeGraph);
+        const auto runtimePublishView = getRuntimePublishView();
+        const uint64_t revision = runtimeRevision(runtimePublishView.engine, runtimePublishView.graph);
+        const uint64_t currentUuid = runtimeCurrentUuid(runtimePublishView.engine, runtimePublishView.graph);
+        const uint64_t fadingUuid = runtimeFadingUuid(runtimePublishView.engine, runtimePublishView.graph);
+        const uint64_t transitionCurrentUuid = runtimeTransitionCurrentUuid(runtimePublishView.engine, runtimePublishView.graph);
+        const uint64_t transitionNextUuid = runtimeTransitionNextUuid(runtimePublishView.engine, runtimePublishView.graph);
 
         if (revision != debugLastReportedRuntimeSnapshotRevision
             || currentUuid != debugLastReportedRuntimePublishCurrentUuid
@@ -168,11 +166,9 @@ void AudioEngine::timerCallback()
 
     // フェイルセーフ: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
-    const auto* runtimeWorld = getRuntimePublishWorld();
-    const auto* runtimeEngine = getEngineRuntimeState(runtimeWorld);
-    const auto* runtimeGraph = getRuntimeGraphState(runtimeWorld);
-    auto* currentDspForRuntime = resolveCurrentDSPFromRuntimePublish(runtimeGraph, runtimeEngine);
-    auto* fadingDspForRuntime = resolveFadingDSPFromRuntimePublish(runtimeGraph, runtimeEngine);
+    const auto runtimePublishView = getRuntimePublishView();
+    auto* currentDspForRuntime = resolveCurrentDSPFromRuntimePublish(runtimePublishView.graph, runtimePublishView.engine);
+    auto* fadingDspForRuntime = resolveFadingDSPFromRuntimePublish(runtimePublishView.graph, runtimePublishView.engine);
 
     // T1: 公開済みRuntimeへのNonRTからの可変更新を避けるため、
     // Timerからのdither内部状態更新は行わない。
@@ -354,10 +350,7 @@ void AudioEngine::timerCallback()
     processDeferredLearningActions();
 
     const bool hasFading = (fadingDspForRuntime != nullptr);
-    const auto* crossfadeWorld = getRuntimePublishWorld();
-    const auto* engineRuntime = getEngineRuntimeState(crossfadeWorld);
-    const auto* runtimeGraphForCrossfade = getRuntimeGraphState(crossfadeWorld);
-    const bool hasPendingCrossfade = runtimeCrossfadePending(engineRuntime, runtimeGraphForCrossfade);
+    const bool hasPendingCrossfade = runtimeCrossfadePending(runtimePublishView.engine, runtimePublishView.graph);
 
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();

@@ -114,7 +114,7 @@ AudioEngine::~AudioEngine()
     // Shutdown 時は EBR 回収を試みる。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
     clearPublishedRuntimeSnapshotsNonRt();
-    processDeferredReleases();
+    drainDeferredRetireQueues(true);
 
     // ...既存の解放処理...
     if (latencyBufOldL) { _aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }

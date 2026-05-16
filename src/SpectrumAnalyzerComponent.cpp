@@ -282,8 +282,9 @@ void SpectrumAnalyzerComponent::timerCallback()
     }
 
     // Snapshot current 反映が遅延していても、UI側の最新EQ状態変化は取りこぼさない。
-    if (const auto* eqState = engine.getEQProcessor().getEQStateSnapshot())
+    if (const auto* rawEqState = engine.getEQStateSnapshot())
     {
+        const auto* eqState = static_cast<const EQProcessor::EQState*>(rawEqState);
         const uint64_t directHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
         if (directHash != lastDirectEqHash)
         {
@@ -854,7 +855,7 @@ void SpectrumAnalyzerComponent::updateEQData()
 
         for (int b = 0; b < EQProcessor::NUM_BANDS; ++b)
         {
-            const auto params = engine.getEQProcessor().getBandParams(b);
+            const auto params = engine.getEQBandParams(b);
             if (!params.enabled)
             {
                 individualBandCurvesL[b].fill(0.0f);
@@ -862,13 +863,13 @@ void SpectrumAnalyzerComponent::updateEQData()
                 continue;
             }
 
-            EQBandType type = engine.getEQProcessor().getBandType(b);
+            EQBandType type = engine.getEQBandType(b);
             // グラフ描画用にBiquad係数を計算
             // 音声処理にはSVFを使用しているが、周波数応答の計算には
             // 等価な特性を持つBiquad係数を使用することで、標準的な計算式(getMagnitudeSquared)を流用している。
            EQCoeffsSVF svf = EQProcessor::calcSVFCoeffs(type, params.frequency, params.gain, params.q, sr);
             EQCoeffsBiquad c = EQProcessor::svfToDisplayBiquad(svf);
-           EQChannelMode mode = engine.getEQProcessor().getBandChannelMode(b);
+           EQChannelMode mode = engine.getEQBandChannelMode(b);
 
             std::array<float, NUM_DISPLAY_BARS> bandMagSq{};
             calcBandMagnitudeSq(c, zCache.data(), bandMagSq.data(), NUM_DISPLAY_BARS);
@@ -956,13 +957,13 @@ void SpectrumAnalyzerComponent::paintEQCurve(juce::Graphics& g, const juce::Rect
     // ── 各バンドの個別応答曲線を描画 ──
     for (int b = 0; b < EQProcessor::NUM_BANDS; ++b)
     {
-        const auto params = engine.getEQProcessor().getBandParams(b);
+        const auto params = engine.getEQBandParams(b);
         if (!params.enabled) continue;
 
-        EQBandType type = engine.getEQProcessor().getBandType(b);
+        EQBandType type = engine.getEQBandType(b);
         if (type != EQBandType::LowPass && type != EQBandType::HighPass && std::abs(params.gain) < 0.01f) continue;
 
-        EQChannelMode mode = engine.getEQProcessor().getBandChannelMode(b);
+        EQChannelMode mode = engine.getEQBandChannelMode(b);
 
         if (mode == EQChannelMode::Stereo || mode == EQChannelMode::Left)
         {
@@ -990,10 +991,10 @@ void SpectrumAnalyzerComponent::paintEQCurve(juce::Graphics& g, const juce::Rect
     {
         for (int b = 0; b < EQProcessor::NUM_BANDS; ++b)
         {
-            const EQBandParams bp = engine.getEQProcessor().getBandParams(b);
+            const EQBandParams bp = engine.getEQBandParams(b);
             if (!bp.enabled) continue;
 
-            EQChannelMode mode = engine.getEQProcessor().getBandChannelMode(b);
+            EQChannelMode mode = engine.getEQBandChannelMode(b);
             const float bandFreq = bp.frequency;
 
             // 周波数 → X座標

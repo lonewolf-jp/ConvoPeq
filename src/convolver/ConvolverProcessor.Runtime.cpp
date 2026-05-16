@@ -57,8 +57,9 @@ void ConvolverProcessor::refreshLatency()
 
     // Audio Thread に遅延値の更新を委譲（即時リセット用）
     convo::publishAtomic(pendingLatencyValue, totalLatency, std::memory_order_release);
-    convo::publishAtomic(latencyResetPending, true, std::memory_order_release);
-    convo::publishAtomic(latencyChangeRequested, true, std::memory_order_release);
+    // [F-01 fix] 世代カウンターをインクリメント (NonRT → RT 通知、RTでのatomic write禁止対策)
+    latencyResetPendingGen.fetch_add(1, std::memory_order_acq_rel);
+    latencyChangeRequestedGen.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBlock<double>& block,
@@ -255,8 +256,15 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     if (!convo::consumeAtomic(isPrepared, std::memory_order_acquire))
     {
-        if (convo::exchangeAtomic(firstProcessCall, false, std::memory_order_acq_rel))
-            block.clear();
+        // [F-01 fix] RT atomic write 禁止: 世代カウンター比較のみ (非atomicローカル変数で追跡)
+        {
+            const uint64_t curGen = convo::consumeAtomic(firstProcessCallGen, std::memory_order_acquire);
+            if (curGen != m_firstProcessCallGenSeen)
+            {
+                m_firstProcessCallGenSeen = curGen;
+                block.clear();
+            }
+        }
         return;
     }
 
@@ -265,8 +273,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     juce::ScopedNoDenormals noDenormals;
 
     auto* conv = loadActiveEngine(std::memory_order_acquire);
-
-    (void) convo::exchangeAtomic(overflowRequested, false, std::memory_order_acq_rel);
 
     if (!conv)
         return;
@@ -314,46 +320,60 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (numSamples > activeWetCapacity)
         return;
 
-    if (convo::exchangeAtomic(latencyResetPending, false, std::memory_order_acq_rel))
+    // [F-01 fix]
     {
-        const double val = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire);
-        activeLatencySmoother.setCurrentAndTargetValue(val);
+        const uint64_t curGen = convo::consumeAtomic(latencyResetPendingGen, std::memory_order_acquire);
+        if (curGen != m_latencyResetPendingGenSeen)
+        {
+            m_latencyResetPendingGenSeen = curGen;
+            const double val = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire);
+            activeLatencySmoother.setCurrentAndTargetValue(val);
+        }
     }
 
-    if (convo::exchangeAtomic(latencyChangeRequested, false, std::memory_order_acq_rel))
     {
-        const double newTarget = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire);
-        if (absNoLibm(activeLatencySmoother.getTargetValue() - newTarget) >= 2.0)
+        const uint64_t curGen = convo::consumeAtomic(latencyChangeRequestedGen, std::memory_order_acquire);
+        if (curGen != m_latencyChangeRequestedGenSeen)
         {
-            if (!activeCrossfadeGain.isSmoothing())
+            m_latencyChangeRequestedGenSeen = curGen;
+            const double newTarget = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire);
+            if (absNoLibm(activeLatencySmoother.getTargetValue() - newTarget) >= 2.0)
             {
-                activeOldDelay = activeLatencySmoother.getCurrentValue();
-                activeLatencySmoother.setTargetValue(newTarget);
-                activeCrossfadeGain.setCurrentAndTargetValue(0.0);
-                activeCrossfadeGain.setTargetValue(1.0);
+                if (!activeCrossfadeGain.isSmoothing())
+                {
+                    activeOldDelay = activeLatencySmoother.getCurrentValue();
+                    activeLatencySmoother.setTargetValue(newTarget);
+                    activeCrossfadeGain.setCurrentAndTargetValue(0.0);
+                    activeCrossfadeGain.setTargetValue(1.0);
+                }
             }
         }
     }
 
-    if (convo::exchangeAtomic(mixSmootherResetPending, false, std::memory_order_acq_rel))
     {
-        activeMixSmoother.setCurrentAndTargetValue(static_cast<double>(convo::consumeAtomic(mixTarget, std::memory_order_acquire)));
+        const uint64_t curGen = convo::consumeAtomic(mixSmootherResetPendingGen, std::memory_order_acquire);
+        if (curGen != m_mixSmootherResetPendingGenSeen)
+        {
+            m_mixSmootherResetPendingGenSeen = curGen;
+            activeMixSmoother.setCurrentAndTargetValue(static_cast<double>(convo::consumeAtomic(mixTarget, std::memory_order_acquire)));
+        }
     }
 
-    if (convo::exchangeAtomic(smoothingTimeChangePending, false, std::memory_order_acq_rel))
     {
-        const float newTime = convo::consumeAtomic(smoothingTimeSec, std::memory_order_acquire);
-        const double sampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
-
-        if (sampleRate > 0.0)
+        const uint64_t curGen = convo::consumeAtomic(smoothingTimeChangePendingGen, std::memory_order_acquire);
+        if (curGen != m_smoothingTimeChangePendingGenSeen)
         {
-            const double currentVal = activeMixSmoother.getCurrentValue();
-            const double targetVal = activeMixSmoother.getTargetValue();
-
-            activeMixSmoother.reset(sampleRate, static_cast<double>(newTime));
-
-            activeMixSmoother.setCurrentAndTargetValue(currentVal);
-            activeMixSmoother.setTargetValue(targetVal);
+            m_smoothingTimeChangePendingGenSeen = curGen;
+            const float newTime = convo::consumeAtomic(smoothingTimeSec, std::memory_order_acquire);
+            const double sampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+            if (sampleRate > 0.0)
+            {
+                const double currentVal = activeMixSmoother.getCurrentValue();
+                const double targetVal = activeMixSmoother.getTargetValue();
+                activeMixSmoother.reset(sampleRate, static_cast<double>(newTime));
+                activeMixSmoother.setCurrentAndTargetValue(currentVal);
+                activeMixSmoother.setTargetValue(targetVal);
+            }
         }
     }
 
@@ -786,7 +806,8 @@ void ConvolverProcessor::setSmoothingTime(float timeSec)
     {
         convo::publishAtomic(smoothingTimeSec, clampedTime);
 
-        convo::publishAtomic(smoothingTimeChangePending, true, std::memory_order_release);
+        // [F-01 fix] 世代カウンターをインクリメント (NonRT → RT 通知)
+        smoothingTimeChangePendingGen.fetch_add(1, std::memory_order_acq_rel);
 
         listeners.call(&Listener::convolverParamsChanged, this);
     }
@@ -800,6 +821,24 @@ float ConvolverProcessor::getTargetIRLength() const
 float ConvolverProcessor::getSmoothingTime() const
 {
     return convo::consumeAtomic(smoothingTimeSec);
+}
+
+//--------------------------------------------------------------
+// RT-safe setters (Audio Thread 専用)
+// listeners.call() / requestDebouncedRebuild() を呼ばない。
+// processAudioThreadRuntimeCommands() からのみ使用可。
+//--------------------------------------------------------------
+
+void ConvolverProcessor::setMixRT(float mixAmount) noexcept
+{
+    convo::publishAtomic(mixTarget, juce::jlimit(0.0f, 1.0f, mixAmount));
+}
+
+void ConvolverProcessor::setSmoothingTimeRT(float timeSec) noexcept
+{
+    const float clampedTime = juce::jlimit(SMOOTHING_TIME_MIN_SEC, SMOOTHING_TIME_MAX_SEC, timeSec);
+    convo::publishAtomic(smoothingTimeSec, clampedTime);
+    smoothingTimeChangePendingGen.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void ConvolverProcessor::setMixedTransitionStartHz(float hz)

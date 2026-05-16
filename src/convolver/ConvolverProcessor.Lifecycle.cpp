@@ -14,17 +14,6 @@
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE)
 
-void ConvolverProcessor::overflowCallbackThunk(void* userData) noexcept
-{
-    auto* self = static_cast<ConvolverProcessor*>(userData);
-    bool expected = false;
-    convo::compareExchangeAtomic(self->overflowRequested,
-                                 expected,
-                                 true,
-                                 std::memory_order_acq_rel,
-                                 std::memory_order_acquire);
-}
-
 const ConvolverProcessor::IRState* ConvolverProcessor::acquireIRState() const noexcept
 {
     return convo::consumeAtomic(currentIRState, std::memory_order_acquire);
@@ -128,7 +117,7 @@ ConvolverProcessor::~ConvolverProcessor()
 
     // Clean up latency snapshot pointer
     auto* oldSnap = convo::exchangeAtomic(cachedLatency, nullptr, std::memory_order_acq_rel);
-    delete oldSnap;
+    std::unique_ptr<LatencySnapshot> owned{oldSnap}; // RAII delete
 
     if (fftHandle.get() != nullptr) {
         fftHandle.reset();
@@ -340,7 +329,8 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         deferredFreeThread = convo::aligned_make_unique<convo::DeferredFreeThread>(rcuSwapper, affinityMgr);
     }
 
-    convo::publishAtomic(firstProcessCall, true, std::memory_order_release);
+    // [F-01 fix] 世代カウンターをインクリメント (NonRT → RT 通知)
+    firstProcessCallGen.fetch_add(1, std::memory_order_acq_rel);
 
     convo::publishAtomic(isPrepared, true, std::memory_order_release);
     updateLatencyCache();
@@ -422,7 +412,7 @@ void ConvolverProcessor::releaseResources()
     deferredFreeThread.reset();
 
     while (auto* ptr = rcuSwapper.tryReclaim(std::numeric_limits<uint64_t>::max()))
-        delete ptr;
+        std::unique_ptr<convo::ConvolverState>{ptr}; // RAII delete
 
     runtime.clear();
 
@@ -450,9 +440,9 @@ void ConvolverProcessor::reset()
 
     dryBuffer.clear();
     smoothingBuffer.clear();
-    convo::publishAtomic(mixSmootherResetPending, true, std::memory_order_release);
+    mixSmootherResetPendingGen.fetch_add(1, std::memory_order_acq_rel);
     convo::publishAtomic(pendingLatencyValue, latencySmoother.getTargetValue());
-    convo::publishAtomic(latencyResetPending, true, std::memory_order_release);
+    latencyResetPendingGen.fetch_add(1, std::memory_order_acq_rel);
 }
 
 #endif // CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE

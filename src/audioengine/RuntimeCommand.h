@@ -12,7 +12,13 @@ enum class CommandType : std::uint8_t {
     ChangeOversampling,
     SuspendProcessing,
     ResumeProcessing,
-    Shutdown
+    Shutdown,
+    SetConvolverMix,
+    SetConvolverSmoothingTime,
+    SetConvolverTargetIRLength,
+    SetConvolverMixedTransitionStartHz,
+    SetConvolverMixedTransitionEndHz,
+    SetConvolverMixedPreRingTau
 };
 
 struct CommandMeta {
@@ -27,6 +33,7 @@ struct EngineCommand {
     CommandType type = CommandType::UpdateParameters;
     CommandMeta meta {};
     double sampleRate = 0.0;
+    float floatValue = 0.0f;
     int blockSize = 0;
     int intValue = 0;
     int oversamplingFactor = 0;

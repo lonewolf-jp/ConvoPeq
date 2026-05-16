@@ -298,6 +298,14 @@ public:
     float getSmoothingTime() const;
 
     //----------------------------------------------------------
+    // RT-safe setters (Audio Thread dispatch 専用)
+    // listeners.call() / requestDebouncedRebuild() を呼ばない。
+    // processAudioThreadRuntimeCommands() からのみ使用可。
+    //----------------------------------------------------------
+    void setMixRT(float mixAmount) noexcept;
+    void setSmoothingTimeRT(float timeSec) noexcept;
+
+    //----------------------------------------------------------
     // Mixed Phase Parameters (f1/f2/tau)
     //----------------------------------------------------------
     void setMixedTransitionStartHz(float hz);
@@ -551,9 +559,6 @@ private:
     void requestDebouncedRebuild();
     bool runIncrementalBuildStep(IncrementalRebuildJob& job);
     bool runIncrementalFinalizeStep(IncrementalRebuildJob& job);
-    // リングバッファオーバーフロー通知コールバック (Audio Thread 安全; 生関数ポインタ)
-    // MKLNonUniformConvolver::ringWrite() からオーバーフロー時に呼び出される。
-    static void overflowCallbackThunk(void* userData) noexcept;
 
     void commitNewConvolver(StereoConvolver* newConv,
                             std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
@@ -688,8 +693,6 @@ private:
                     DBG("Convolver: NUC Engine Active. Latency: " << latency << " samples");
                     if (ownerProcessor != nullptr)
                     {
-                        nucConvolvers[0]->setOverflowCallback(ConvolverProcessor::overflowCallbackThunk, ownerProcessor);
-                        nucConvolvers[1]->setOverflowCallback(ConvolverProcessor::overflowCallbackThunk, ownerProcessor);
                     }
                     return true;
                 }
@@ -774,11 +777,12 @@ private:
     // [Issue 2 fix] latencySmoother のスレッドセーフティ向上のためのペンディングフラグ。
     // refreshLatency() (Message/Rebuild Thread) は直接 SmoothedValue を触らず、
     // このフラグと値を使用して Audio Thread に更新を委譲する。
-    std::atomic<bool> latencyResetPending { false };
+    // [F-01 fix] 世代カウンター方式: NonRT が fetch_add(1), RT が load+比較のみ (atomic write 禁止)
+    std::atomic<uint64_t> latencyResetPendingGen { 0 };
     std::atomic<double> pendingLatencyValue { 0.0 };
     // IR切り替え時の遅延ジャンプをクロスフェードに統合するためのフラグ。
     // refreshLatency() がセットし、process() がクロスフェード開始前に消費する。
-    std::atomic<bool> latencyChangeRequested { false };
+    std::atomic<uint64_t> latencyChangeRequestedGen { 0 };
     // リサンプリング位相モード（r8brain CDSPResampler24IR に渡す）
     // Message Thread からのみ更新、LoaderThread が読む（memory_order_acquire）
     std::atomic<ResamplingPhaseMode> currentResamplingPhaseMode { ResamplingPhaseMode::Linear };
@@ -853,7 +857,7 @@ private:
     std::atomic<bool> rebuildPendingAfterLoad { false };
     // リングバッファオーバーフローフラグ:
     //   Audio Thread から store(true)、process() 先頭で exchange(false) して rebuildPendingAfterLoad に転送。
-    std::atomic<bool> overflowRequested { false };
+    // overflowRequested は削除: RT 側で値を使用せず dead code だったため除去 (F-01 fix)
 
     #pragma warning(push)
     #pragma warning(disable: 4324)
@@ -880,8 +884,9 @@ private:
     std::atomic<float> mixedPreRingTau{MIXED_TAU_DEFAULT};
 
     // 【案 B】Smoothing Time 変更フラグ（Audio Thread 委譲用）
-    std::atomic<bool> smoothingTimeChangePending { false };
-    std::atomic<bool> mixSmootherResetPending { false };
+    // [F-01 fix] 世代カウンター方式
+    std::atomic<uint64_t> smoothingTimeChangePendingGen { 0 };
+    std::atomic<uint64_t> mixSmootherResetPendingGen { 0 };
 
     //----------------------------------------------------------
     // IR情報
@@ -1038,7 +1043,14 @@ public: // Added for AudioEngine access
     std::atomic<int> activeCacheFFTSize { 0 };
 
     // RCU 管理 (StereoConvolver 用)
-    std::atomic<bool> firstProcessCall { true };
+    // [F-01 fix] 世代カウンター (init=1: 初回 prepare 後の最初の process() でブロックをクリアするため)
+    std::atomic<uint64_t> firstProcessCallGen { 1 };
+    // RT-local 世代追跡 (非atomic, RT スレッドのみアクセス)
+    uint64_t m_firstProcessCallGenSeen       { 0 };
+    uint64_t m_latencyResetPendingGenSeen    { 0 };
+    uint64_t m_latencyChangeRequestedGenSeen { 0 };
+    uint64_t m_smoothingTimeChangePendingGenSeen { 0 };
+    uint64_t m_mixSmootherResetPendingGenSeen { 0 };
     // DSP_THREAD_STATE: Audio Thread process() で使用するRCU reader。
     convo::RCUReader runtimeRcuReader;
 

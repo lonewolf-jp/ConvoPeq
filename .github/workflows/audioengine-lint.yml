@@ -3,14 +3,14 @@ name: audioengine-lint
 on:
   pull_request:
     paths:
-      - src/audioengine/**
+      - src/**
       - .github/scripts/check-audioengine-lint.ps1
       - .github/workflows/audioengine-lint.yml
   push:
     branches:
       - main
     paths:
-      - src/audioengine/**
+      - src/**
       - .github/scripts/check-audioengine-lint.ps1
       - .github/workflows/audioengine-lint.yml
 
@@ -22,6 +22,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run AudioEngine lint rules 001-003
+      - name: Run AudioEngine lint rules 001-014
         shell: pwsh
         run: .github/scripts/check-audioengine-lint.ps1

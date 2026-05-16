@@ -54,6 +54,11 @@ public:
         return static_cast<int64_t>(a - b) < 0;
     }
 
+    // EBR-GUARD-EXCEPTION: enterReader/exitReader are called from the RT (audio) thread via
+    // EpochCoreReaderGuard RAII.  The publishAtomic here is a single atomic store (release) with
+    // no blocking, no allocation, and no lock acquisition.  It is the minimum necessary operation
+    // to register/deregister the RT reader epoch for safe deferred reclamation.
+    // This is the only approved use of publishAtomic on the RT thread.
     void enterReader(int readerIndex) noexcept {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
             return;

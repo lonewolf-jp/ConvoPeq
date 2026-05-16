@@ -58,6 +58,7 @@ struct CoeffSet {
 #include "LatticeNoiseShaper.h"
 #include "OutputFilter.h"
 #include "DspNumericPolicy.h"
+#include "RuntimeCommand.h"
 #include "UltraHighRateDCBlocker.h"
 #include "LockFreeRingBuffer.h"
 #include "LockFreeAudioRingBuffer.h"
@@ -611,6 +612,30 @@ public:
     ThreadAffinityManager& getAffinityManager() noexcept { return affinityManager; }
     const ThreadAffinityManager& getAffinityManager() const noexcept { return affinityManager; }
 
+    // ========================================================
+    // EQ Parameter Wrappers (Thread-safe delegation to uiEqEditor)
+    // ========================================================
+    void setEQBandGain(int band, float gainDb) { uiEqEditor.setBandGain(band, gainDb); }
+    void setEQBandFrequency(int band, float freq) { uiEqEditor.setBandFrequency(band, freq); }
+    void setEQBandQ(int band, float q) { uiEqEditor.setBandQ(band, q); }
+    void setEQBandEnabled(int band, bool enabled) { uiEqEditor.setBandEnabled(band, enabled); }
+    void setEQBandType(int band, EQBandType type) { uiEqEditor.setBandType(band, type); }
+    void setEQBandChannelMode(int band, EQChannelMode mode) { uiEqEditor.setBandChannelMode(band, mode); }
+    void setEQTotalGain(float gainDb) { uiEqEditor.setTotalGain(gainDb); }
+    void setEQAGCEnabled(bool enabled) { uiEqEditor.setAGCEnabled(enabled); }
+    void setEQNonlinearSaturation(float value) noexcept { uiEqEditor.setNonlinearSaturation(value); }
+    void setEQFilterStructure(EQProcessor::FilterStructure mode) noexcept { uiEqEditor.setFilterStructure(mode); }
+
+    EQBandParams getEQBandParams(int band) const { return uiEqEditor.getBandParams(band); }
+    EQBandType getEQBandType(int band) const { return uiEqEditor.getBandType(band); }
+    EQChannelMode getEQBandChannelMode(int band) const { return uiEqEditor.getBandChannelMode(band); }
+    float getEQTotalGain() const { return uiEqEditor.getTotalGain(); }
+    bool isEQAGCEnabled() const { return uiEqEditor.getAGCEnabled(); }
+    float getEQNonlinearSaturation() const noexcept { return uiEqEditor.getNonlinearSaturation(); }
+    EQProcessor::FilterStructure getEQFilterStructure() const noexcept { return uiEqEditor.getFilterStructure(); }
+    const void* getEQStateSnapshot() const { return uiEqEditor.getEQStateSnapshot(); }
+    void resetEQToDefaults() { uiEqEditor.reset(); }
+
     double getSampleRate() const { return consumeAtomic(currentSampleRate, std::memory_order_seq_cst); }
     double getProcessingSampleRate() const;
     struct LatencyBreakdown
@@ -658,6 +683,8 @@ public:
     void setConvolverBypassRequested (bool shouldBypass);
     bool isEqBypassRequested() const noexcept { return consumeAtomic(eqBypassRequested, std::memory_order_acquire); }
     bool isConvolverBypassRequested() const noexcept { return consumeAtomic(convBypassRequested, std::memory_order_acquire); }
+    bool isEQBypassed() const noexcept { return consumeAtomic(eqBypassActive, std::memory_order_acquire); }
+    bool isConvolverBypassed() const noexcept { return consumeAtomic(convBypassActive, std::memory_order_acquire); }
 
     void setConvolverPhaseMode(ConvolverProcessor::PhaseMode mode);
     ConvolverProcessor::PhaseMode getConvolverPhaseMode() const;
@@ -687,6 +714,44 @@ public:
 
     void setConvolverInputTrimDb(float db);
     float getConvolverInputTrimDb() const;
+
+    // rule 1.1.5: UI→Runtime direct mutate 禁止 — ConvolverProcessor param setters via command queue
+    void setConvolverMix(float value) noexcept
+    {
+        convo::EngineCommand cmd {};
+        cmd.type = convo::CommandType::SetConvolverMix;
+        cmd.floatValue = value;
+        m_runtimeCommandQueue.enqueue(cmd);
+    }
+
+    void setConvolverSmoothingTime(float timeSec) noexcept
+    {
+        convo::EngineCommand cmd {};
+        cmd.type = convo::CommandType::SetConvolverSmoothingTime;
+        cmd.floatValue = timeSec;
+        m_runtimeCommandQueue.enqueue(cmd);
+    }
+
+    void setConvolverTargetIRLength(float timeSec, bool manualOverride = false) noexcept;
+    void setConvolverMixedTransitionStartHz(float hz) noexcept;
+    void setConvolverMixedTransitionEndHz(float hz) noexcept;
+    void setConvolverMixedPreRingTau(float tau) noexcept;
+    void setConvolverRebuildDebounceMs(int ms) noexcept;
+    void setConvolverTailRolloffStartHz(float hz) noexcept;
+    void setConvolverTailRolloffStrength(float strength) noexcept;
+    void setConvolverPartitionTailStrength(float strength) noexcept;
+    void setConvolverTailProcessingMode(int mode) noexcept;
+
+    // Convolver State Tree & Cache Settings
+    juce::ValueTree getConvolverStateTree() const;
+    void setConvolverStateTree(const juce::ValueTree& state);
+    int getConvolverTargetUpgradeFFTSize() const;
+    void setConvolverTargetUpgradeFFTSize(int fftSize);
+    bool isConvolverProgressiveUpgradeEnabled() const;
+    void setConvolverEnableProgressiveUpgrade(bool enabled);
+    int getConvolverMaxCacheEntries() const;
+    void setConvolverMaxCacheEntries(int maxEntries);
+    void clearConvolverCache();
 
     void setDitherBitDepth(int bitDepth);
     int getDitherBitDepth() const;
@@ -754,6 +819,15 @@ public:
 
     void setSaturationAmount(float amount);
     float getSaturationAmount() const;
+
+    bool isShutdownInProgress() const noexcept
+    {
+        const auto state = consumeAtomic(lifecycleState, std::memory_order_acquire);
+        return state == EngineLifecycleState::Releasing
+            || state == EngineLifecycleState::Destroyed;
+    }
+
+    void drainDeferredRetireQueues(bool allowDuringShutdown) noexcept;
 
     void setOversamplingFactor(int factor);
     int getOversamplingFactor() const;
@@ -1006,6 +1080,13 @@ public:
         std::uint64_t generation = 0;
         std::uint64_t runtimeVersion = 0;  // Monotonically increasing version number
         std::uint64_t transitionId = 0;    // Unique identifier per crossfade
+    };
+
+    struct RuntimePublishView
+    {
+        const RuntimePublishWorld* world = nullptr;
+        const convo::EngineRuntime* engine = nullptr;
+        const convo::RuntimeGraph* graph = nullptr;
     };
 
     struct CrossfadePreparedSnapshot
@@ -1271,13 +1352,6 @@ public:
         juce::Logger::writeToLog(log);
     }
 
-    bool isShutdownInProgress() const noexcept
-    {
-        const auto state = consumeAtomic(lifecycleState, std::memory_order_acquire);
-        return state == EngineLifecycleState::Releasing
-            || state == EngineLifecycleState::Destroyed;
-    }
-
     // Worker thread for rebuilds
     void rebuildThreadLoop();
     void stopRebuildThread();
@@ -1489,6 +1563,12 @@ public:
     static inline const convo::RuntimeGraph* getRuntimeGraphState(const RuntimePublishWorld* world) noexcept
     {
         return world != nullptr ? &world->graph : nullptr;
+    }
+
+    inline RuntimePublishView getRuntimePublishView() const noexcept
+    {
+        const auto* world = getRuntimePublishWorld();
+        return RuntimePublishView { world, getEngineRuntimeState(world), getRuntimeGraphState(world) };
     }
 
     inline const convo::EngineRuntime* getEngineRuntimeState() const noexcept
@@ -1834,7 +1914,7 @@ public:
     // runtimeVersion: monotonically increasing version number
     static std::atomic<std::uint64_t> s_nextRuntimeVersion { 1 };
     newWorld->runtimeVersion = s_nextRuntimeVersion.fetch_add(1, std::memory_order_acq_rel);
-        
+
     // transitionId: unique per crossfade event
     newWorld->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
 
@@ -2579,7 +2659,8 @@ public:
     // リリースキューに溜まったエントリを解放可能なものから処理する
     void processDeferredReleases();
 
-    // ==================================================================
+    // RuntimeCommandQueue からコマンドを処理する（Audio Thread のみ）
+    void processAudioThreadRuntimeCommands() noexcept;
     // スナップショット基盤（Phase 2）
     // ==================================================================
     convo::EpochCore m_epochCore;
@@ -2632,6 +2713,7 @@ public:
     std::atomic<bool> m_pendingNSChange{ false };
     std::atomic<bool> m_pendingAGCChange{ false };
     std::atomic<uint64_t> m_audioBlockCounter{ 0 };
+    uint64_t m_audioBlockCounterRtLocal{ 0 }; // RT-local (non-atomic, Audio Thread only)
 
     std::array<convo::EQParameters, 2> latestEqParamsForFallback{};
     std::array<uint64_t, 2> latestEqHashForFallback{ 0, 0 };

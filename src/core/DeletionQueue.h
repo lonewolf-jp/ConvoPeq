@@ -6,7 +6,7 @@
 #pragma once
 
 #include <cstdint>
-#include <vector>
+#include <array>
 #include <mutex>
 #include "EpochCore.h"
 #include "../DeferredDeletionQueue.h"
@@ -26,7 +26,9 @@ private:
         DeletionEntryType type = DeletionEntryType::Generic;
     };
 
-    std::vector<Entry> queue;
+    static constexpr size_t kCapacity = 128;
+    std::array<Entry, kCapacity> queue{};
+    size_t count = 0;
     std::mutex mutex;
 };
 

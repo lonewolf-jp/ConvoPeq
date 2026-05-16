@@ -7,7 +7,7 @@ REM ============================================================================
 REM build.bat - build script for Windows terminal (UTF-8)
 REM
 REM Usage:
-REM   build.bat [Debug|Release] [clean] [pgo-gen | pgo-use]
+REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use]
 REM ============================================================================
 
 echo ==========================================
@@ -20,16 +20,18 @@ set PreferredToolArchitecture=x64
 REM ------------------------------------------------------------
 REM Parse arguments
 set "BUILD_CONFIG=Release"
-if /i "%~1"=="Debug" set "BUILD_CONFIG=Debug"
-if /i "%~1"=="Release" set "BUILD_CONFIG=Release"
-
-REM ------------------------------------------------------------
-REM Parse PGO mode 3rd argument
 set "PGO_MODE=normal"
-if /i "%~2"=="pgo-gen" set "PGO_MODE=pgo-gen"
-if /i "%~2"=="pgo-use" set "PGO_MODE=pgo-use"
-if /i "%~3"=="pgo-gen" set "PGO_MODE=pgo-gen"
-if /i "%~3"=="pgo-use" set "PGO_MODE=pgo-use"
+set "DO_CLEAN=0"
+set "NO_PAUSE=0"
+
+for %%A in (%*) do (
+    if /i "%%~A"=="Debug" set "BUILD_CONFIG=Debug"
+    if /i "%%~A"=="Release" set "BUILD_CONFIG=Release"
+    if /i "%%~A"=="clean" set "DO_CLEAN=1"
+    if /i "%%~A"=="nopause" set "NO_PAUSE=1"
+    if /i "%%~A"=="pgo-gen" set "PGO_MODE=pgo-gen"
+    if /i "%%~A"=="pgo-use" set "PGO_MODE=pgo-use"
+)
 
 REM PGO用CMakeフラグ 括弧ネスト最小化・パーサー干渉完全排除
 set "CMAKE_PGO_FLAGS=-DCONVOPEQ_PGO_INSTRUMENT=OFF -DCONVOPEQ_PGO_USE=OFF"
@@ -50,13 +52,13 @@ echo [INFO] Final PGO_FLAGS: %CMAKE_PGO_FLAGS%
 echo [INFO] BUILD_CONFIG: %BUILD_CONFIG%
 echo [INFO] PGO_MODE: %PGO_MODE%
 
-set "DO_CLEAN=0"
-if /i "%~2"=="clean" set "DO_CLEAN=1"
-if /i "%~3"=="clean" set "DO_CLEAN=1"
-
 REM Release は build\Release、Debug は build\Debug
 set "BUILD_ROOT=build"
-set "BUILD_DIR=%BUILD_ROOT%"
+if /i "%BUILD_CONFIG%"=="Debug" (
+    set "BUILD_DIR=%BUILD_ROOT%\Debug"
+) else (
+    set "BUILD_DIR=%BUILD_ROOT%\Release"
+)
 
 REM ------------------------------------------------------------
 REM Check JUCE directory
@@ -69,8 +71,7 @@ if not exist "JUCE\CMakeLists.txt" (
     echo   2. Junction:     mklink /J JUCE C:\path\to\JUCE
     echo   3. Copy:         xcopy /E /I C:\path\to\JUCE JUCE
     echo:
-    pause
-    popd
+    call :maybe_pause
     exit /b 1
 )
 
@@ -94,14 +95,14 @@ if exist "%VCVARS_PATH%" (
     @echo off
     if errorlevel 1 (
         echo [ERROR] Failed to initialize MSVC environment.
-        pause
+        call :maybe_pause
         exit /b 1
     )
     echo [INFO] MSVC environment initialized.
 ) else (
     echo [ERROR] vcvarsall.bat not found:
     echo   %VCVARS_PATH%
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -114,14 +115,14 @@ if exist "%ONEAPI_SETVARS%" (
     @echo off
     if errorlevel 1 (
         echo [ERROR] Failed to initialize Intel oneAPI environment.
-        pause
+        call :maybe_pause
         exit /b 1
     )
     echo [INFO] Intel oneAPI environment initialized.
 ) else (
     echo [ERROR] Intel oneAPI MKL not found!
     echo Please install Intel oneAPI Base Toolkit.
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -132,19 +133,32 @@ if not exist "%BUILD_ROOT%" mkdir "%BUILD_ROOT%"
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 if errorlevel 1 (
     echo [ERROR] Failed to create build directory.
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
 REM ------------------------------------------------------------
 REM Configure CMake
-echo [2/4] Configuring CMake...
+set "CMAKE_CONFIG_ATTEMPT=0"
+:configure_cmake
+set /a CMAKE_CONFIG_ATTEMPT+=1
+echo [2/4] Configuring CMake... (attempt !CMAKE_CONFIG_ATTEMPT!)
 cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl %CMAKE_PGO_FLAGS%
-if errorlevel 1 (
-    echo [ERROR] CMake configuration failed.
-    pause
+if not errorlevel 1 goto configure_cmake_ok
+
+if !CMAKE_CONFIG_ATTEMPT! GEQ 3 (
+    echo [ERROR] CMake configuration failed after !CMAKE_CONFIG_ATTEMPT! attempts.
+    call :maybe_pause
     exit /b 1
 )
+
+echo [WARN] CMake configure failed. Cleaning transient Ninja state and retrying...
+if exist "%BUILD_DIR%\.ninja_log" del /f /q "%BUILD_DIR%\.ninja_log" >nul 2>&1
+if exist "%BUILD_DIR%\.ninja_deps" del /f /q "%BUILD_DIR%\.ninja_deps" >nul 2>&1
+timeout /t 2 >nul
+goto configure_cmake
+
+:configure_cmake_ok
 
 REM ------------------------------------------------------------
 REM Build project
@@ -152,7 +166,7 @@ echo [3/4] Building %BUILD_CONFIG% configuration...
 cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG%
 if errorlevel 1 (
     echo [ERROR] Build failed.
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -197,6 +211,13 @@ echo.
 echo To run:
 echo   "%EXE_PATH%"
 echo:
-pause
+call :maybe_pause
 endlocal
+
+goto :eof
+
+:maybe_pause
+if "%NO_PAUSE%"=="1" goto :eof
+pause
+goto :eof
 

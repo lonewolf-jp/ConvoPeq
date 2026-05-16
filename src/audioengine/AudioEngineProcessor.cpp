@@ -53,31 +53,12 @@ bool AudioEngineProcessor::isBusesLayoutSupported(const BusesLayout& layouts) co
 
 void AudioEngineProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
-    // PDC: 遅延値が変化した場合のみ setLatencySamples を呼ぶ
-    // processBlock はオーディオスレッドだが JUCE の仕様上ここでの呼び出しは許容される。
-    // (AudioProcessor::setLatencySamples はスレッドセーフな実装を要求されない)
-    static int lastLatency = -1;
-    const int newLatency = audioEngine.getTotalLatencySamples();
-    if (newLatency != lastLatency)
-    {
-        setLatencySamples(newLatency);
-        lastLatency = newLatency;
-        updateHostDisplay();
-    }
     juce::AudioSourceChannelInfo info(&buffer, 0, buffer.getNumSamples());
     audioEngine.getNextAudioBlock(info);
 }
 
 void AudioEngineProcessor::processBlock(juce::AudioBuffer<double>& buffer, juce::MidiBuffer&)
 {
-    static int lastLatency = -1;
-    const int newLatency = audioEngine.getTotalLatencySamples();
-    if (newLatency != lastLatency)
-    {
-        setLatencySamples(newLatency);
-        lastLatency = newLatency;
-        updateHostDisplay();
-    }
     audioEngine.processBlockDouble(buffer);
 }
 

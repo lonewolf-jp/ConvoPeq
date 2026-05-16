@@ -72,6 +72,10 @@ public:
 
     void startFade(GlobalSnapshot* target, int fadeSamples) noexcept;
 
+    void reclaim(const EpochCore& core) noexcept {
+        m_deletionQueue.reclaim(core);
+    }
+
     bool updateFade(float& outAlpha,
                     const GlobalSnapshot*& outCurrent,
                     const GlobalSnapshot*& outTarget) noexcept

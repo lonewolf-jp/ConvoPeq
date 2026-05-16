@@ -45,9 +45,9 @@ void AudioEngine::tryReclaimResources() noexcept
 
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_DEFERRED)
 
-void AudioEngine::processDeferredReleases()
+void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 {
-    if (isShutdownInProgress())
+    if (!allowDuringShutdown && isShutdownInProgress())
         return;
 
     auto flushAudioThreadRetireOverflow = [this]() noexcept
@@ -60,13 +60,13 @@ void AudioEngine::processDeferredReleases()
         const uint64_t epoch = overflowEpoch != 0 ? overflowEpoch : m_epochCore.current();
         if (!g_deletionQueue.enqueue(
                 overflow,
-                [](void* p) { delete static_cast<DSPCore*>(p); },
+                [](void* p) { std::default_delete<DSPCore>{}(static_cast<DSPCore*>(p)); },
                 epoch))
         {
             std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
             deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry {
                 overflow,
-                [](void* p) { delete static_cast<DSPCore*>(p); },
+                [](void* p) { std::default_delete<DSPCore>{}(static_cast<DSPCore*>(p)); },
                 epoch
             });
         }
@@ -96,12 +96,18 @@ void AudioEngine::processDeferredReleases()
     flushAudioThreadRetireOverflow();
     flushDeferredDeleteFallbackQueue();
     g_deletionQueue.reclaim(m_epochCore);
+    m_coordinator.reclaim(m_epochCore);
 
     const uint64_t dropped = convo::consumeAtomic(audioThreadRetireEnqueueDropped, std::memory_order_acquire);
     if (dropped >= kReclaimBacklogWarnThreshold)
     {
         juce::Logger::writeToLog("[DIAG] deferred reclaim enqueue drops=" + juce::String(static_cast<juce::int64>(dropped)));
     }
+}
+
+void AudioEngine::processDeferredReleases()
+{
+    drainDeferredRetireQueues(false);
 }
 
 #endif

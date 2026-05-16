@@ -122,11 +122,10 @@ AudioEngine::EQCacheManager::~EQCacheManager()
     std::lock_guard<std::mutex> lock(writeMutex);
 
     CacheMap* currentMap = convo::exchangeAtomic(cacheMapPtr, nullptr, std::memory_order_acq_rel);
-    if (currentMap != nullptr)
-        delete currentMap;
+    std::unique_ptr<CacheMap> owned{currentMap}; // RAII delete (handles null safely)
 
     for (auto* map : enqueueFallbackMaps)
-        delete map;
+        std::unique_ptr<CacheMap> ownedMap{map}; // RAII delete
 
     enqueueFallbackMaps.clear();
 }

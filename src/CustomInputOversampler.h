@@ -103,5 +103,8 @@ private:
     int workCapacity = 0;
 
     std::array<convo::NonOwningPtr<double>, kMaxChannels> blockChannels {};
+    // RT-SAFE: blockChannelView is a member (not thread_local) so the returned AudioBlock's
+    // channel pointer array remains valid after processUp() returns.
+    double* blockChannelView[kMaxChannels] = {};
     std::atomic<bool> corruptionDetected { false };
 };

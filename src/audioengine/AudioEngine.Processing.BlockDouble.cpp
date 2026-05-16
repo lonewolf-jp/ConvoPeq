@@ -19,7 +19,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     const convo::EpochCoreReaderGuard epochReaderGuard(m_epochCore, kAudioEpochReaderIndex);
     ASSERT_AUDIO_THREAD();
-    m_audioBlockCounter.fetch_add(1, std::memory_order_release);
+    ++m_audioBlockCounterRtLocal; // RT-local counter (non-atomic, RT thread only)
 
     // ★ 追加: RCU ガードで現在の DSP を保護する
     convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
