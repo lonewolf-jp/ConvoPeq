@@ -25,6 +25,10 @@ AudioEngine::AudioEngine()
 AudioEngine::~AudioEngine()
 {
     diagLog("[DIAG] ~AudioEngine: enter");
+    // Shutdown sequence (list.md 12.1.2):
+    // 1) stop callbacks/workers, 2) detach published runtime pointers,
+    // 3) retire captured runtimes, 4) force epoch advance, 5) deterministic drain/reclaim.
+    // 以後の順序を固定して、終了時の reclaim レースを防止する。
     setShutdownPhase(ShutdownPhase::StopAcceptingWork, "~AudioEngine");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Releasing, std::memory_order_release);
     cancelPendingUpdate();
@@ -54,7 +58,11 @@ AudioEngine::~AudioEngine()
         // Audio Thread から参照される公開ポインタを明示的に外す。
         publishCurrentDSP(nullptr);
 
-        activeToRelease = sanitizeRawPtr(activeDSP);
+        {
+            constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
+            DSPCore* activeRaw = activeDSP.get();
+            activeToRelease = (reinterpret_cast<uintptr_t>(activeRaw) == kInvalidAllOnes) ? nullptr : activeRaw;
+        }
         activeDSP = nullptr;
         fadingToRelease = sanitizeRawPtr(exchangeFadingOutDSP(nullptr));
 

@@ -82,7 +82,7 @@ void AudioEngine::releaseResources()
         rebuildGeneration.fetch_add(1, std::memory_order_acq_rel);
         publishCurrentDSP(nullptr);
 
-        activeToRelease = sanitizeRawPtr(activeDSP);
+        activeToRelease = sanitizeRawPtr(activeDSP.get());
         activeDSP = nullptr;
 
         fadingToRelease = sanitizeRawPtr(exchangeFadingOutDSP(nullptr));

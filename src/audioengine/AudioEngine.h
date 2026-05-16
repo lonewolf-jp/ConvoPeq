@@ -1522,7 +1522,7 @@ public:
 
     inline CrossfadePreparedSnapshot consumeCrossfadePreparedSnapshot() const noexcept
     {
-        const int slot = convo::consumeAtomic(crossfadePreparedSnapshotIndex_, std::memory_order_acquire) & 1;
+        const int slot = static_cast<int>(convo::consumeAtomic(crossfadePreparedSnapshotIndex_, std::memory_order_acquire) & 1u);
         return crossfadePreparedSnapshots_[slot];
     }
 
@@ -1918,6 +1918,8 @@ public:
     // transitionId: unique per crossfade event
     newWorld->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
 
+        // Ensure all writes to newWorld are visible to Audio Thread before publication
+        std::atomic_thread_fence(std::memory_order_release);
         auto* oldWorld = exchangeAtomicPtr(runtimePublishWorldState, newWorld);
         if (oldWorld != nullptr)
             enqueueDeferredDeleteNonRt(oldWorld, [](void* p)
@@ -2535,7 +2537,10 @@ public:
 // Audio Thread 用：現在アクティブな係数セットを取得（ロックフリー）
 static inline const CoeffSet* getActiveCoeffSet(const AdaptiveCoeffBankSlot& slot) noexcept
 {
-    return (consumeAtomic(slot.activeIndex) == 0)
+    const int activeIdx = consumeAtomic(slot.activeIndex, std::memory_order_acquire);
+    // Memory barrier ensures coeffSetA/coeffSetB contents are fully visible
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return (activeIdx == 0)
            ? &slot.coeffSetA
            : &slot.coeffSetB;
 }
@@ -2564,12 +2569,6 @@ static inline T* sanitizeRawPtr(T* ptr) noexcept
 {
     constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
     return (reinterpret_cast<uintptr_t>(ptr) == kInvalidAllOnes) ? nullptr : ptr;
-}
-
-template <typename T>
-static inline T* sanitizeRawPtr(convo::NonOwningPtr<T> ptr) noexcept
-{
-    return sanitizeRawPtr(ptr.get());
 }
 
 inline bool enqueueDeferredDeleteNonRt(void* ptr, void (*deleter)(void*)) noexcept
@@ -2745,6 +2744,8 @@ public:
     std::atomic<uint64_t> debugRuntimeTransitionNextPtr{ 0 };
     std::atomic<double> debugRuntimeTransitionFadeSec{ 0.0 };
     std::atomic<int> debugRuntimeTransitionLatencyDeltaSamples{ 0 };
+    // Non-RT diagnostics: most recently rejected rebuild generation in commitNewDSP.
+    std::atomic<uint64_t> lastRejectedGenerationNonRt{ 0 };
     std::atomic<int> debugLatencyAlignWritePos{ 0 };
     std::atomic<int> debugLatencyAlignReadOld{ 0 };
     std::atomic<int> debugLatencyAlignReadNew{ 0 };

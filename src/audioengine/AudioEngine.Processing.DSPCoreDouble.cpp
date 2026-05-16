@@ -382,6 +382,11 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
     const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
 
+    // RCU lifetime guarantee:
+    // - processDouble() 呼び出し元は Audio Thread 側で RCUReaderGuard を保持する。
+    // - snap はその guard 期間中 read-only で有効。
+    // - eqCacheToUse は snap->eqCoeffHash で引いたキャッシュを参照し、
+    //   reclaim は epoch 遅延解放で行われるため同期間は安全に参照可能。
     const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->m_coordinator.getCurrent() : nullptr;
     const bool useSnapshotEq = (snap != nullptr);
     const convo::EQParameters* eqParamsToUse = nullptr;

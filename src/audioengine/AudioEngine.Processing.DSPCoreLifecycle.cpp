@@ -37,6 +37,10 @@ AudioEngine::DSPCore::DSPCore()
 
 void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner)
 {
+    // Exception-safety context:
+    // - prepare() は Message/Worker 側の non-RT 経路で実行される。
+    // - list.md の RT 例外禁止(2.3)・RT allocation禁止(2.1)の対象外。
+    // - ここでの確保は RAII で commit 前に完了させ、Audio Thread へは完成状態のみ publish する。
     this->sampleRate = newSampleRate;
     this->noiseShaperType = selectedNoiseShaperType;
     this->ownerEngine = owner;
