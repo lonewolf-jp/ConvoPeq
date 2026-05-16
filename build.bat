@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-chcp 65001 >nul
+chcp 65001 >nul 2>&1
 
 REM ============================================================================
 REM build.bat - build script for Windows terminal (UTF-8)
@@ -52,13 +52,10 @@ echo [INFO] Final PGO_FLAGS: %CMAKE_PGO_FLAGS%
 echo [INFO] BUILD_CONFIG: %BUILD_CONFIG%
 echo [INFO] PGO_MODE: %PGO_MODE%
 
-REM Release は build\Release、Debug は build\Debug
+REM Use a single build directory for Ninja Multi-Config.
+REM Output binaries are placed under build\ConvoPeq_artefacts\[Config].
 set "BUILD_ROOT=build"
-if /i "%BUILD_CONFIG%"=="Debug" (
-    set "BUILD_DIR=%BUILD_ROOT%\Debug"
-) else (
-    set "BUILD_DIR=%BUILD_ROOT%\Release"
-)
+set "BUILD_DIR=%BUILD_ROOT%"
 
 REM ------------------------------------------------------------
 REM Check JUCE directory
@@ -81,8 +78,8 @@ echo:
 REM ------------------------------------------------------------
 REM Clean build directory if requested
 if "%DO_CLEAN%"=="1" (
-    echo [CLEAN] Removing "%BUILD_DIR%"...
-    if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
+    echo [CLEAN] Removing "%BUILD_ROOT%"...
+    if exist "%BUILD_ROOT%" rmdir /s /q "%BUILD_ROOT%"
     echo:
 )
 
