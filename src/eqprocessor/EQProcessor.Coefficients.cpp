@@ -32,7 +32,6 @@ EQProcessor::BandNode* EQProcessor::createBandNode(int band, const EQState& stat
     node->mode = state.bandChannelModes[band];
 
     // prepareToPlay 前は sampleRate が未確定のため、係数計算を保留して
-    // バイパス係数を保持する。sampleRate 確定後に prepareToPlay() で再計算される。
     if (sr > 0.0)
     {
         node->coeffs = calcSVFCoeffs(state.bandTypes[band], params.frequency, params.gain, params.q, sr);

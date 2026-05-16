@@ -62,6 +62,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 #------------------------------------------------------------
+# x64 固定（Visual Studio / Ninja Multi-Config）
+#------------------------------------------------------------
+if(WIN32)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        message(FATAL_ERROR "ConvoPeq must be configured as x64. Current target is x86.")
+    endif()
+endif()
+
+#------------------------------------------------------------
 # Windows RC Compiler Fix for Ninja
 #------------------------------------------------------------
 if(WIN32 AND CMAKE_GENERATOR STREQUAL "Ninja")
@@ -413,8 +422,14 @@ if(WIN32)
     )
 
     # Visual Studio用設定
+    set(CONVOPEQ_ARTEFACTS_ROOT "${CMAKE_SOURCE_DIR}/build/ConvoPeq_artefacts")
     set_target_properties(ConvoPeq PROPERTIES
         VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+        RUNTIME_OUTPUT_DIRECTORY "${CONVOPEQ_ARTEFACTS_ROOT}"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CONVOPEQ_ARTEFACTS_ROOT}/Debug"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CONVOPEQ_ARTEFACTS_ROOT}/Release"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CONVOPEQ_ARTEFACTS_ROOT}/RelWithDebInfo"
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CONVOPEQ_ARTEFACTS_ROOT}/MinSizeRel"
     )
 
     # 著作権情報の設定 (Windows リソース)

@@ -415,6 +415,38 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
 
     const int keep = stage.historyDownKeep;
     const int capacity = stage.downHistorySize;
+
+    bool inputSilent = true;
+    for (int i = 0; i < inputSamples; ++i)
+    {
+        if (fastAbs(input[i]) > kDenormThreshold)
+        {
+            inputSilent = false;
+            break;
+        }
+    }
+
+    if (inputSilent)
+    {
+        bool historySilent = true;
+        for (int i = 0; i < keep; ++i)
+        {
+            if (fastAbs(history[i]) > kDenormThreshold)
+            {
+                historySilent = false;
+                break;
+            }
+        }
+
+        if (historySilent)
+        {
+            const int outSamples = inputSamples >> 1;
+            juce::FloatVectorOperations::clear(output, outSamples);
+            juce::FloatVectorOperations::clear(history, keep);
+            return;
+        }
+    }
+
     juce::FloatVectorOperations::copy(history + keep, input, inputSamples);
 
     const int outSamples = inputSamples >> 1;

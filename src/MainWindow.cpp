@@ -14,40 +14,6 @@ namespace
         return juce::String(value, 2);
     }
 
-    const char* toTransitionPolicyText(convo::TransitionPolicy policy) noexcept
-    {
-        switch (policy)
-        {
-            case convo::TransitionPolicy::SmoothOnly: return "Sm";
-            case convo::TransitionPolicy::HardReset: return "Hd";
-            case convo::TransitionPolicy::DryAsOld: return "Dr";
-            default: return "Unknown";
-        }
-    }
-
-    juce::String toPointerTailText(void* ptr) noexcept
-    {
-        if (ptr == nullptr)
-            return "----";
-
-        const auto raw = static_cast<uintptr_t>(reinterpret_cast<uintptr_t>(ptr) & 0xFFFFu);
-        return juce::String::toHexString(static_cast<int>(raw)).paddedLeft('0', 4);
-    }
-
-    juce::Colour getTransitionLabelColour(const convo::TransitionState& transition) noexcept
-    {
-        if (!transition.active)
-            return juce::Colours::lightgrey;
-
-        switch (transition.policy)
-        {
-            case convo::TransitionPolicy::SmoothOnly: return juce::Colours::lightgreen;
-            case convo::TransitionPolicy::HardReset: return juce::Colours::orange;
-            case convo::TransitionPolicy::DryAsOld: return juce::Colours::yellow;
-            default: return juce::Colours::white;
-        }
-    }
-
    #if JUCE_WINDOWS && JUCE_DEBUG
     void forceSoftwareRendererIfAvailable(juce::TopLevelWindow& window)
     {
@@ -390,11 +356,6 @@ void MainWindow::createUIComponents()
     latencyLabel.setColour (juce::Label::textColourId, juce::Colours::white);
     juce::Component::addAndMakeVisible (latencyLabel);
 
-    transitionLabel.setText ("Xf: --", juce::dontSendNotification);
-    transitionLabel.setJustificationType (juce::Justification::centredRight);
-    transitionLabel.setColour (juce::Label::textColourId, juce::Colours::white);
-    juce::Component::addAndMakeVisible (transitionLabel);
-
     // Aboutボタン
     aboutButton.setButtonText ("?");
     aboutButton.setTooltip ("About this application");
@@ -546,7 +507,6 @@ void MainWindow::resized()
 
     // 状態表示
     cpuUsageLabel.setBounds (buttonRow.removeFromRight (95).reduced (2, 2));
-    transitionLabel.setBounds (buttonRow.removeFromRight (265).reduced (2, 2));
     latencyLabel.setBounds (buttonRow.removeFromRight (170).reduced (2, 2));
 
     // クリップ制御 (左→右: Soft Clip, Sat, 数値入力)
@@ -577,55 +537,6 @@ void MainWindow::timerCallback()
 {
     double cpu = audioDeviceManager.getCpuUsage() * 100.0;
     cpuUsageLabel.setText ("CPU: " + juce::String (cpu, 1) + "%", juce::dontSendNotification);
-
-    const auto transition = audioEngine.getRuntimeTransitionStateForDebug();
-    const int transitionActiveInt = transition.active ? 1 : 0;
-    const int transitionPolicyInt = static_cast<int>(transition.policy);
-    const uint64_t transitionCurrentTail = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(transition.current) & 0xFFFFu);
-    const uint64_t transitionNextTail = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(transition.next) & 0xFFFFu);
-    const int transitionFadeMsX10 = static_cast<int>(std::lround(transition.fadeTimeSec * 10000.0));
-    const bool useCompactTransitionText = transitionLabel.getWidth() < 260;
-    const bool transitionSnapshotChanged =
-        !hasLastTransitionLabelState
-        || transitionActiveInt != lastTransitionActiveInt
-        || transitionPolicyInt != lastTransitionPolicyInt
-        || transitionCurrentTail != lastTransitionCurrentTail
-        || transitionNextTail != lastTransitionNextTail
-        || transitionFadeMsX10 != lastTransitionFadeMsX10
-        || useCompactTransitionText != lastTransitionCompactMode;
-
-    juce::String transitionText = lastTransitionLabelText;
-    if (transitionSnapshotChanged)
-    {
-        const juce::String compactTransitionText = "Xf:"
-            + juce::String(transition.active ? "on" : "off")
-            + " " + juce::String(toTransitionPolicyText(transition.policy))
-            + " c:" + toPointerTailText(transition.current)
-            + " n:" + toPointerTailText(transition.next);
-        const juce::String detailedTransitionText = compactTransitionText
-            + " " + juce::String(static_cast<double>(transitionFadeMsX10) / 10.0, 1) + "ms";
-        transitionText = useCompactTransitionText
-            ? compactTransitionText
-            : detailedTransitionText;
-    }
-    const juce::Colour transitionColour = getTransitionLabelColour(transition);
-    if (transitionSnapshotChanged)
-    {
-        transitionLabel.setText(transitionText, juce::dontSendNotification);
-        lastTransitionLabelText = transitionText;
-        lastTransitionActiveInt = transitionActiveInt;
-        lastTransitionPolicyInt = transitionPolicyInt;
-        lastTransitionCurrentTail = transitionCurrentTail;
-        lastTransitionNextTail = transitionNextTail;
-        lastTransitionFadeMsX10 = transitionFadeMsX10;
-        lastTransitionCompactMode = useCompactTransitionText;
-    }
-    if (!hasLastTransitionLabelState || transitionColour != lastTransitionLabelColour)
-    {
-        transitionLabel.setColour(juce::Label::textColourId, transitionColour);
-        lastTransitionLabelColour = transitionColour;
-    }
-    hasLastTransitionLabelState = true;
 
     const auto breakdown = audioEngine.getCurrentLatencyBreakdown();
     const int latencySamples = breakdown.totalLatencyBaseRateSamples;

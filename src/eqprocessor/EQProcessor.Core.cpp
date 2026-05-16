@@ -34,6 +34,26 @@ EQProcessor::EQProcessor()
 
 void EQProcessor::bindExecutionState(convo::DSPExecutionState* state) noexcept
 {
+    // nullptr でアンバインドする場合、現在バインド中の executionState のポインタを
+    // すべてクリアしてダングリング化を防ぐ。
+    if (state == nullptr && boundExecutionState != nullptr)
+    {
+        auto& eqState = boundExecutionState->eq;
+        eqState.dryBypassBuffer = nullptr;
+        eqState.dryBypassCapacity = 0;
+        eqState.parallelInputBuffer = nullptr;
+        eqState.parallelWorkBuffer = nullptr;
+        eqState.parallelAccumBuffer = nullptr;
+        eqState.parallelBufferCapacity = 0;
+        eqState.structureOldOutBuffer = nullptr;
+        eqState.structureNewOutBuffer = nullptr;
+        eqState.structureXfadeBufferCapacity = 0;
+        eqState.agcAttackCoeffTable = nullptr;
+        eqState.agcReleaseCoeffTable = nullptr;
+        eqState.agcSmoothCoeffTable = nullptr;
+        eqState.agcCoeffTableCapacity = 0;
+    }
+
     boundExecutionState = state;
     if (boundExecutionState != nullptr)
     {
@@ -47,17 +67,11 @@ void EQProcessor::bindExecutionState(convo::DSPExecutionState* state) noexcept
         eqState.structureOldOutBuffer = structureOldOutBuffer.get();
         eqState.structureNewOutBuffer = structureNewOutBuffer.get();
         eqState.structureXfadeBufferCapacity = structureXfadeBufferCapacity;
-        // RuntimeGraph で供給された view を優先し、未設定時のみ EQ 内部テーブルを使う。
-        if (eqState.agcAttackCoeffTable == nullptr
-            || eqState.agcReleaseCoeffTable == nullptr
-            || eqState.agcSmoothCoeffTable == nullptr
-            || eqState.agcCoeffTableCapacity <= 0)
-        {
-            eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
-            eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
-            eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
-            eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
-        }
+        // 常に現プロセッサのテーブルを設定する（stale ポインタを残さない）。
+        eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
+        eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
+        eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
+        eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
         eqState.bypassed = convo::consumeAtomic(bypassed, std::memory_order_acquire);
         eqState.activeStructure = static_cast<int>(convo::consumeAtomic(activeStructure, std::memory_order_acquire));
         if (!eqState.rampsInitialized)
@@ -106,6 +120,9 @@ EQProcessor::~EQProcessor()
 //============================================================================
 void EQProcessor::releaseResources()
 {
+    if (boundExecutionState != nullptr)
+        bindExecutionState(nullptr);
+
     juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: before scratchBuffer.reset");
     scratchBuffer.reset();
     scratchCapacity = 0;
@@ -573,16 +590,11 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
         eqState.agcCurrentGain = syncedAgcCurrentGain;
         eqState.agcEnvInput = syncedAgcEnvInput;
         eqState.agcEnvOutput = syncedAgcEnvOutput;
-        if (eqState.agcAttackCoeffTable == nullptr
-            || eqState.agcReleaseCoeffTable == nullptr
-            || eqState.agcSmoothCoeffTable == nullptr
-            || eqState.agcCoeffTableCapacity <= 0)
-        {
-            eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
-            eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
-            eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
-            eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
-        }
+        // 常に現プロセッサのテーブルを設定する（stale ポインタを残さない）。
+        eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
+        eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
+        eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
+        eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
         eqState.smoothTotalGain.current = smoothTotalGain.getCurrentValue();
         eqState.smoothTotalGain.target = smoothTotalGain.getTargetValue();
         eqState.smoothTotalGain.step = 0.0;
@@ -658,21 +670,26 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
     if (boundExecutionState != nullptr)
     {
         auto& eqState = boundExecutionState->eq;
+
+        eqState.dryBypassBuffer = dryBypassBuffer.get();
+        eqState.dryBypassCapacity = dryBypassCapacity;
+        eqState.parallelInputBuffer = parallelInputBuffer.get();
+        eqState.parallelWorkBuffer = parallelWorkBuffer.get();
+        eqState.parallelAccumBuffer = parallelAccumBuffer.get();
+        eqState.parallelBufferCapacity = parallelBufferCapacity;
+        eqState.structureOldOutBuffer = structureOldOutBuffer.get();
+        eqState.structureNewOutBuffer = structureNewOutBuffer.get();
+        eqState.structureXfadeBufferCapacity = structureXfadeBufferCapacity;
+
         eqState.bypassed = syncedBypassed;
         eqState.activeStructure = static_cast<int>(syncedStructure);
         eqState.agcCurrentGain = syncedAgcCurrentGain;
         eqState.agcEnvInput = syncedAgcEnvInput;
         eqState.agcEnvOutput = syncedAgcEnvOutput;
-        if (eqState.agcAttackCoeffTable == nullptr
-            || eqState.agcReleaseCoeffTable == nullptr
-            || eqState.agcSmoothCoeffTable == nullptr
-            || eqState.agcCoeffTableCapacity <= 0)
-        {
-            eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
-            eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
-            eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
-            eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
-        }
+        eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
+        eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
+        eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
+        eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
         eqState.smoothTotalGain.current = smoothTotalGain.getCurrentValue();
         eqState.smoothTotalGain.target = smoothTotalGain.getTargetValue();
         eqState.smoothTotalGain.step = 0.0;
@@ -793,21 +810,30 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     if (boundExecutionState != nullptr)
     {
         auto& eqState = boundExecutionState->eq;
+
+        // prepareToPlay で再確保された最新バッファ参照を必ず反映する。
+        eqState.dryBypassBuffer = dryBypassBuffer.get();
+        eqState.dryBypassCapacity = dryBypassCapacity;
+        eqState.parallelInputBuffer = parallelInputBuffer.get();
+        eqState.parallelWorkBuffer = parallelWorkBuffer.get();
+        eqState.parallelAccumBuffer = parallelAccumBuffer.get();
+        eqState.parallelBufferCapacity = parallelBufferCapacity;
+        eqState.structureOldOutBuffer = structureOldOutBuffer.get();
+        eqState.structureNewOutBuffer = structureNewOutBuffer.get();
+        eqState.structureXfadeBufferCapacity = structureXfadeBufferCapacity;
+
         eqState.bypassed = requestedBypass;
         eqState.activeStructure = static_cast<int>(convo::consumeAtomic(activeStructure, std::memory_order_acquire));
         eqState.agcCurrentGain = convo::consumeAtomic(agcCurrentGain, std::memory_order_acquire);
         eqState.agcEnvInput = convo::consumeAtomic(agcEnvInput, std::memory_order_acquire);
         eqState.agcEnvOutput = convo::consumeAtomic(agcEnvOutput, std::memory_order_acquire);
-        if (eqState.agcAttackCoeffTable == nullptr
-            || eqState.agcReleaseCoeffTable == nullptr
-            || eqState.agcSmoothCoeffTable == nullptr
-            || eqState.agcCoeffTableCapacity <= 0)
-        {
-            eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
-            eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
-            eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
-            eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
-        }
+
+        // stale ポインタを残さないよう毎回上書きする。
+        eqState.agcAttackCoeffTable = agcAttackCoeffTable.get();
+        eqState.agcReleaseCoeffTable = agcReleaseCoeffTable.get();
+        eqState.agcSmoothCoeffTable = agcSmoothCoeffTable.get();
+        eqState.agcCoeffTableCapacity = agcCoeffTableCapacity;
+
         eqState.smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
         eqState.smoothTotalGain.setCurrentAndTargetValue(smoothTotalGain.getCurrentValue());
         eqState.bypassFadeGain.reset(sampleRate, BYPASS_FADE_TIME_SEC);

@@ -60,6 +60,11 @@ void MixedPhaseOptimizationComponent::changeListenerCallback(juce::ChangeBroadca
 void MixedPhaseOptimizationComponent::timerCallback()
 {
     const int state = processor.getMixedPhaseState();
+    const bool isLoading = processor.isLoadingIR();
+    const bool isLoaded = processor.isIRLoaded();
+    const bool isFinalized = processor.isIRFinalized();
+    const float progress = processor.getLoadProgress();
+    const auto phaseMode = processor.getPhaseMode();
 
     static int lastState = -1;
     if (state != lastState)
@@ -77,8 +82,28 @@ void MixedPhaseOptimizationComponent::timerCallback()
             infoLabel.setText("Optimization Completed", juce::dontSendNotification);
             break;
         default:
-            infoLabel.setText("Waiting IR", juce::dontSendNotification);
+        {
+            if (phaseMode != ConvolverProcessor::PhaseMode::Mixed)
+            {
+                infoLabel.setText("Mixed Phase is disabled", juce::dontSendNotification);
+            }
+            else if (isLoading && progress >= 0.0f && progress < 1.0f)
+            {
+                if (progress <= 0.0f)
+                    infoLabel.setText("Optimization Progress... (initializing)", juce::dontSendNotification);
+                else
+                    infoLabel.setText("Optimization Progress... " + juce::String(juce::roundToInt(progress * 100.0f)) + "%", juce::dontSendNotification);
+            }
+            else if (isLoaded && isFinalized)
+            {
+                infoLabel.setText("Optimization Completed", juce::dontSendNotification);
+            }
+            else
+            {
+                infoLabel.setText("Waiting IR", juce::dontSendNotification);
+            }
             break;
+        }
     }
 }
 

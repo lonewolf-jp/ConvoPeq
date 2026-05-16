@@ -299,7 +299,6 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // スムージング時間の設定
     mixSmoother.reset(sampleRate, static_cast<double>(convo::consumeAtomic(smoothingTimeSec)));
     mixSmoother.setCurrentAndTargetValue(static_cast<double>(convo::consumeAtomic(mixTarget)));
-    (void)mixSmoother.getNextValue();
 
     // レイテンシー補正の初期化
     latencySmoother.reset(sampleRate, 0.1);

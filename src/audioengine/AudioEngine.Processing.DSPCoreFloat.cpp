@@ -134,9 +134,6 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
                                    std::atomic<float>& outputLevelLinear,
                                    const ProcessingState& state)
 {
-    (void) inputLevelLinear;
-    (void) outputLevelLinear;
-
     const int numSamples = bufferToFill.numSamples;
 
     if (numSamples > maxSamplesPerBlock)
@@ -158,11 +155,10 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     const bool inputTap = state.analyzerEnabled && (state.analyzerSource == AnalyzerSource::Input);
     const float rawInputLinear = processInput(bufferToFill, numSamples, state.inputHeadroomGain,
                                               inputTap, analyzerFifo);
+    convo::publishAtomic(inputLevelLinear, rawInputLinear, std::memory_order_release);
 
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
-
-    (void) rawInputLinear;
 
     juce::dsp::AudioBlock<double> originalBlock = processBlock;
 
@@ -308,7 +304,7 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         pushToFifo(processBlock, analyzerFifo);
 
     const float outputLinear = measureLevel(originalBlock);
-    (void) outputLinear;
+    convo::publishAtomic(outputLevelLinear, outputLinear, std::memory_order_release);
 
     processOutput(bufferToFill, numSamples, state);
 

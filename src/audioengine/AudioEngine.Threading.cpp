@@ -60,13 +60,23 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         const uint64_t epoch = overflowEpoch != 0 ? overflowEpoch : m_epochCore.current();
         if (!g_deletionQueue.enqueue(
                 overflow,
-                [](void* p) { std::default_delete<DSPCore>{}(static_cast<DSPCore*>(p)); },
+                [](void* p)
+                {
+                    auto* core = static_cast<DSPCore*>(p);
+                    core->~DSPCore();
+                    convo::aligned_free(core);
+                },
                 epoch))
         {
             std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
             deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry {
                 overflow,
-                [](void* p) { std::default_delete<DSPCore>{}(static_cast<DSPCore*>(p)); },
+                [](void* p)
+                {
+                    auto* core = static_cast<DSPCore*>(p);
+                    core->~DSPCore();
+                    convo::aligned_free(core);
+                },
                 epoch
             });
         }

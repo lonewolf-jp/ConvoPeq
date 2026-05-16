@@ -188,7 +188,7 @@ echo:
 REM ------------------------------------------------------------
 REM Check build artifacts
 echo [4/4] Checking build artifacts...
-set "EXE_PATH=%BUILD_DIR%\ConvoPeq_artefacts\%BUILD_CONFIG%\ConvoPeq.exe"
+set "EXE_PATH=build\ConvoPeq_artefacts\%BUILD_CONFIG%\ConvoPeq.exe"
 if exist "%EXE_PATH%" (
     echo [SUCCESS] Executable created successfully.
 ) else (

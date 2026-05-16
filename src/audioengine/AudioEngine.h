@@ -2598,7 +2598,12 @@ inline void retireDSP(DSPCore* dsp) noexcept
     convo::fetchAddAtomic(g_runtimeRetireCount,
                          static_cast<std::uint64_t>(1),
                          std::memory_order_acq_rel);
-    if (enqueueDeferredDeleteNonRt(dsp, [](void* p) { delete static_cast<DSPCore*>(p); }))
+    if (enqueueDeferredDeleteNonRt(dsp, [](void* p)
+    {
+        auto* core = static_cast<DSPCore*>(p);
+        core->~DSPCore();
+        convo::aligned_free(core);
+    }))
         return;
 }
 

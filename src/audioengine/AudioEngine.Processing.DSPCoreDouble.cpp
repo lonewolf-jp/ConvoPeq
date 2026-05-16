@@ -319,9 +319,6 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                                          std::atomic<float>& outputLevelLinear,
                                          const ProcessingState& state)
 {
-    (void) inputLevelLinear;
-    (void) outputLevelLinear;
-
     const int numSamples = buffer.getNumSamples();
 
     if (numSamples > maxSamplesPerBlock)
@@ -343,7 +340,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     const bool inputTapD = state.analyzerEnabled && (state.analyzerSource == AnalyzerSource::Input);
     const float rawInputLinearD = processInputDouble(buffer, numSamples, state.inputHeadroomGain,
                                                      inputTapD, analyzerFifo);
-    (void) rawInputLinearD;
+    convo::publishAtomic(inputLevelLinear, rawInputLinearD, std::memory_order_release);
 
     const bool requestedFullBypass = state.eqBypassed && state.convBypassed;
     auto& ramp = ramps();
@@ -547,7 +544,7 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         pushToFifo(processBlock, analyzerFifo);
 
     const float outputLinear = measureLevel(originalBlock);
-    (void) outputLinear;
+    convo::publishAtomic(outputLevelLinear, outputLinear, std::memory_order_release);
 
     processOutputDouble(buffer, numSamples, state);
 
