@@ -326,34 +326,4 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     }
 }
 
-void AudioEngine::DSPCore::processV2(const juce::AudioSourceChannelInfo& bufferToFill,
-                                     LockFreeAudioRingBuffer& analyzerFifo,
-                                     std::atomic<float>& inputLevelLinear,
-                                     std::atomic<float>& outputLevelLinear,
-                                     const convo::RuntimeGraph* runtimeGraph,
-                                     convo::DSPExecutionState& executionState,
-                                     const ProcessingState& state)
-{
-    if (runtimeGraph != nullptr)
-    {
-        executionState.currentNode = runtimeGraph->activeNode;
-        executionState.nextNode = runtimeGraph->fadingNode;
-        executionState.observedGeneration = runtimeGraph->generation;
-        executionState.inCrossfade = (runtimeGraph->fadingNode != nullptr);
-    }
-    else
-    {
-        executionState.currentNode = nullptr;
-        executionState.nextNode = nullptr;
-        executionState.observedGeneration = 0;
-        executionState.inCrossfade = false;
-    }
-
-    convolverRt().bindExecutionState(&executionState);
-    eqRt().bindExecutionState(&executionState);
-    process(bufferToFill, analyzerFifo, inputLevelLinear, outputLevelLinear, state);
-    eqRt().bindExecutionState(nullptr);
-    convolverRt().bindExecutionState(nullptr);
-}
-
 #endif

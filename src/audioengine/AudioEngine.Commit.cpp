@@ -200,12 +200,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
             if (crossfadeContext.needsCrossfade)
             {
-                const auto* runtimeWorld = getRuntimePublishWorld();
-                const auto* runtimeGraph = getRuntimeGraphState(runtimeWorld);
-                const auto* engineRuntime = getEngineRuntimeState(runtimeWorld);
-                const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime) != nullptr);
-                const bool hasPendingCrossfade = runtimeCrossfadePending(engineRuntime, runtimeGraph);
-                const bool useDryAsOld = runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
+                const auto runtimePublishView = getRuntimePublishView();
+                const auto* runtimeGraph = runtimePublishView.graph;
+                const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph) != nullptr);
+                const bool hasPendingCrossfade = runtimeCrossfadePending(runtimeGraph);
+                const bool useDryAsOld = runtimeCrossfadeUseDryAsOld(runtimeGraph);
 
                 if (hasFadingRuntime || hasPendingCrossfade || useDryAsOld)
                 {
@@ -326,12 +325,15 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                     fadeTimeSec = 0.030;
 
                 // --- クロスフェードdeduplication・スナップショット ---
-                const auto* runtimeWorld = getRuntimePublishWorld();
-                const auto* runtimeGraph = getRuntimeGraphState(runtimeWorld);
-                const auto* engineRuntime = getEngineRuntimeState(runtimeWorld);
-                const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime) != nullptr);
-                const bool hasPendingCrossfade = runtimeCrossfadePending(engineRuntime, runtimeGraph);
-                const bool useDryAsOld = runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
+                const auto runtimePublishView = getRuntimePublishView();
+                const auto* runtimeGraph = runtimePublishView.graph;
+                const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
+                const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph) != nullptr);
+                const bool hasPendingCrossfade = runtimeCrossfadePending(runtimeGraph)
+                    || preparedCrossfade.pending;
+                const bool useDryAsOld = runtimeCrossfadeUseDryAsOld(runtimeGraph)
+                    || preparedCrossfade.firstIrDryCrossfadePending
+                    || preparedCrossfade.useDryAsOld;
                 const bool isFadingActive = hasFadingRuntime || hasPendingCrossfade || useDryAsOld;
                 publishSmoothTransitionState(activeDSP,
                                              dspToTrash,

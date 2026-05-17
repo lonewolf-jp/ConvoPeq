@@ -1,7 +1,6 @@
 #include <JuceHeader.h>
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"
-#include "audioengine/DSPExecutionState.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "core/RCUReader.h"
 
@@ -70,18 +69,8 @@ void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBl
     if (procChannels == 0 || numSamples <= 0)
         return;
 
-    auto* convState = (boundExecutionState != nullptr) ? &boundExecutionState->conv : nullptr;
     double* delayBuf[2] = { delayBuffer[0].get(), delayBuffer[1].get() };
     int activeDelayCapacity = delayBufferCapacity;
-    if (convState != nullptr)
-    {
-        if (convState->bypassDelayBuf[0] != nullptr)
-            delayBuf[0] = convState->bypassDelayBuf[0];
-        if (convState->bypassDelayBuf[1] != nullptr)
-            delayBuf[1] = convState->bypassDelayBuf[1];
-        if (convState->bypassDelayCapacity > 0)
-            activeDelayCapacity = convState->bypassDelayCapacity;
-    }
 
     if (delayBuf[0] == nullptr || delayBuf[1] == nullptr || activeDelayCapacity < DELAY_BUFFER_SIZE)
         return;
@@ -92,7 +81,7 @@ void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBl
     delaySamples = juce::jmin(delaySamples, MAX_TOTAL_DELAY);
     delaySamples = juce::jlimit(0, DELAY_BUFFER_SIZE - 1, delaySamples);
 
-    const int writePos = (convState != nullptr) ? convState->delayWritePos : delayWritePos;
+    const int writePos = delayWritePos;
 
     // 1) 入力をリングバッファへ保存
     for (int ch = 0; ch < procChannels; ++ch)
@@ -128,8 +117,6 @@ void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBl
 
     const int nextWritePos = (writePos + numSamples) & DELAY_BUFFER_MASK;
     delayWritePos = nextWritePos;
-    if (convState != nullptr)
-        convState->delayWritePos = nextWritePos;
 }
 
 void ConvolverProcessor::enterGlobalReader(int readerIndex) const noexcept
@@ -144,61 +131,6 @@ void ConvolverProcessor::exitGlobalReader(int readerIndex) const noexcept
         provider->exitRcuReader(readerIndex);
 }
 
-void ConvolverProcessor::bindExecutionState(convo::DSPExecutionState* state) noexcept
-{
-    if (state == nullptr)
-    {
-        if (boundExecutionState != nullptr)
-        {
-            auto& convState = boundExecutionState->conv;
-            convState.bypassDelayCapacity = delayBufferCapacity;
-            convState.delayWritePos = delayWritePos;
-            convState.oldDelay = oldDelay;
-            convState.crossfadeGain = crossfadeGain;
-            convState.mixSmoother = mixSmoother;
-            convState.latencySmoother = latencySmoother;
-        }
-        boundExecutionState = nullptr;
-        return;
-    }
-
-    boundExecutionState = state;
-    auto& convState = boundExecutionState->conv;
-    convState.bypassDelayBuf[0] = delayBuffer[0].get();
-    convState.bypassDelayBuf[1] = delayBuffer[1].get();
-    convState.bypassDelayCapacity = delayBufferCapacity;
-
-    convState.dryBuf[0] = dryBufferStorage[0].get();
-    convState.dryBuf[1] = dryBufferStorage[1].get();
-    convState.dryCapacity = dryBufferCapacity;
-    convState.oldDryBuf[0] = oldDryBufferStorage[0].get();
-    convState.oldDryBuf[1] = oldDryBufferStorage[1].get();
-    convState.oldDryCapacity = oldDryBufferCapacity;
-    convState.wetBuf[0] = wetBufferStorage[0].get();
-    convState.wetBuf[1] = wetBufferStorage[1].get();
-    convState.wetCapacity = wetBufferCapacity;
-    convState.smoothingBuf[0] = smoothingBufferStorage[0].get();
-    convState.smoothingBuf[1] = smoothingBufferStorage[1].get();
-    convState.smoothingCapacity = smoothingBufferCapacity;
-
-    if (!convState.initialized)
-    {
-        convState.delayWritePos = delayWritePos;
-        convState.oldDelay = oldDelay;
-        convState.crossfadeGain = crossfadeGain;
-        convState.mixSmoother = mixSmoother;
-        convState.latencySmoother = latencySmoother;
-        convState.initialized = true;
-    }
-
-    // Legacy member mirrors are kept synchronized for fallback call sites.
-    delayWritePos = convState.delayWritePos;
-    oldDelay = convState.oldDelay;
-    crossfadeGain = convState.crossfadeGain;
-    mixSmoother = convState.mixSmoother;
-    latencySmoother = convState.latencySmoother;
-}
-
 //--------------------------------------------------------------
 // process (Audio Thread)
 // リアルタイム制約 (Real-time Constraints)
@@ -210,14 +142,13 @@ void ConvolverProcessor::bindExecutionState(convo::DSPExecutionState* state) noe
 //--------------------------------------------------------------
 void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
-    auto* convState = (boundExecutionState != nullptr) ? &boundExecutionState->conv : nullptr;
-    convo::RCUReaderGuard guard((convState != nullptr) ? convState->convRcuReader : runtimeRcuReader);
+    convo::RCUReaderGuard guard(runtimeRcuReader);
 
-    auto& activeCrossfadeGain = (convState != nullptr) ? convState->crossfadeGain : crossfadeGain;
-    auto& activeMixSmoother = (convState != nullptr) ? convState->mixSmoother : mixSmoother;
-    auto& activeLatencySmoother = (convState != nullptr) ? convState->latencySmoother : latencySmoother;
-    auto& activeDelayWritePos = (convState != nullptr) ? convState->delayWritePos : delayWritePos;
-    auto& activeOldDelay = (convState != nullptr) ? convState->oldDelay : oldDelay;
+    auto& activeCrossfadeGain = crossfadeGain;
+    auto& activeMixSmoother = mixSmoother;
+    auto& activeLatencySmoother = latencySmoother;
+    auto& activeDelayWritePos = delayWritePos;
+    auto& activeOldDelay = oldDelay;
 
     double* delayBuf[2] = { delayBuffer[0].get(), delayBuffer[1].get() };
     double* dryBuf[2] = { dryBufferStorage[0].get(), dryBufferStorage[1].get() };
@@ -227,32 +158,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     int activeDryCapacity = dryBufferCapacity;
     int activeWetCapacity = wetBufferCapacity;
     int activeSmoothingCapacity = smoothingBufferCapacity;
-    if (convState != nullptr)
-    {
-        if (convState->bypassDelayBuf[0] != nullptr) delayBuf[0] = convState->bypassDelayBuf[0];
-        if (convState->bypassDelayBuf[1] != nullptr) delayBuf[1] = convState->bypassDelayBuf[1];
-        if (convState->dryBuf[0] != nullptr) dryBuf[0] = convState->dryBuf[0];
-        if (convState->dryBuf[1] != nullptr) dryBuf[1] = convState->dryBuf[1];
-        if (convState->oldDryBuf[0] != nullptr) oldDryBuf[0] = convState->oldDryBuf[0];
-        if (convState->oldDryBuf[1] != nullptr) oldDryBuf[1] = convState->oldDryBuf[1];
-        if (convState->wetBuf[0] != nullptr) wetBuf[0] = convState->wetBuf[0];
-        if (convState->wetBuf[1] != nullptr) wetBuf[1] = convState->wetBuf[1];
-        if (convState->smoothingBuf[0] != nullptr) smoothingBuf[0] = convState->smoothingBuf[0];
-        if (convState->smoothingBuf[1] != nullptr) smoothingBuf[1] = convState->smoothingBuf[1];
-        if (convState->dryCapacity > 0) activeDryCapacity = convState->dryCapacity;
-        if (convState->wetCapacity > 0) activeWetCapacity = convState->wetCapacity;
-        if (convState->smoothingCapacity > 0) activeSmoothingCapacity = convState->smoothingCapacity;
-
-        // Keep latencyAlign snapshot in sync for the current execution block.
-        convState->latencyAlign.bufs[0] = oldDryBuf[0];
-        convState->latencyAlign.bufs[1] = oldDryBuf[1];
-        convState->latencyAlign.bufs[2] = dryBuf[0];
-        convState->latencyAlign.bufs[3] = dryBuf[1];
-        convState->latencyAlign.capacity = juce::jmin(convState->oldDryCapacity, convState->dryCapacity);
-        convState->latencyAlign.writePos = activeDelayWritePos;
-        convState->latencyAlign.delaySamples[0] = static_cast<int>(activeOldDelay + 0.5);
-        convState->latencyAlign.delaySamples[1] = static_cast<int>(activeLatencySmoother.getTargetValue() + 0.5);
-    }
 
     if (!convo::consumeAtomic(isPrepared, std::memory_order_acquire))
     {
@@ -723,19 +628,6 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     }
 
-    if (convState != nullptr)
-    {
-        convState->latencyAlign.writePos = convState->delayWritePos;
-        convState->latencyAlign.delaySamples[0] = static_cast<int>(convState->oldDelay + 0.5);
-        convState->latencyAlign.delaySamples[1] = static_cast<int>(convState->latencySmoother.getTargetValue() + 0.5);
-
-        // Keep legacy members in sync for non-V2 call paths.
-        delayWritePos = convState->delayWritePos;
-        oldDelay = convState->oldDelay;
-        crossfadeGain = convState->crossfadeGain;
-        mixSmoother = convState->mixSmoother;
-        latencySmoother = convState->latencySmoother;
-    }
 }
 
 //--------------------------------------------------------------
@@ -826,7 +718,7 @@ float ConvolverProcessor::getSmoothingTime() const
 //--------------------------------------------------------------
 // RT-safe setters (Audio Thread 専用)
 // listeners.call() / requestDebouncedRebuild() を呼ばない。
-// processAudioThreadRuntimeCommands() からのみ使用可。
+// （現行経路では通常使用しない。互換用途として保持）
 //--------------------------------------------------------------
 
 void ConvolverProcessor::setMixRT(float mixAmount) noexcept

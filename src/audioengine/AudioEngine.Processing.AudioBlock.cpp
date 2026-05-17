@@ -22,9 +22,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     ASSERT_AUDIO_THREAD();
     ++m_audioBlockCounterRtLocal; // RT-local counter (non-atomic, RT thread only)
 
-    // Process pending runtime commands from UI (non-blocking drain)
-    processAudioThreadRuntimeCommands();
-
     // 入力検証 (Input Validation)
     if (bufferToFill.buffer == nullptr)
         return;
@@ -55,10 +52,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // Epoch tracking for lock-free Audio Thread safety
     convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
 
-    const auto* world = getRuntimePublishWorld();
-    const auto* engineRuntime = getEngineRuntimeState(world);
-    const auto* runtimeGraph = getRuntimeGraphState(world);
-    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
+    const auto runtimePublishView = getRuntimePublishView();
+    const auto* runtimeGraph = runtimePublishView.graph;
+    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(bufferToFill);
@@ -136,32 +132,29 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             return;
         }
 
-        DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime);
-        bool useDryAsOld = runtimeCrossfadeUseDryAsOld(engineRuntime, runtimeGraph);
-        const bool hasPendingCrossfade = runtimeCrossfadePending(engineRuntime, runtimeGraph);
+        DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimeGraph);
+        bool useDryAsOld = runtimeCrossfadeUseDryAsOld(runtimeGraph);
+        const bool hasPendingCrossfade = runtimeCrossfadePending(runtimeGraph);
         if (processCrossfadeDelayGateIfPending(fading,
                                                useDryAsOld,
                                                hasPendingCrossfade,
                                                [&]()
         {
             auto fadingState = makeCrossfadeAuxState(procState);
-            syncEqAgcTableViewFromRuntimeGraph(dspExecutionStateFading, runtimeGraph);
 
             std::atomic<float> fadingInputMeter { 0.0f };
             std::atomic<float> fadingOutputMeter { 0.0f };
-            fading->processV2(bufferToFill,
-                              analyzerFifo,
-                              inputLevelLinear,
-                              outputLevelLinear,
-                              runtimeGraph,
-                              dspExecutionStateFading,
-                              fadingState);
+            fading->process(bufferToFill,
+                            analyzerFifo,
+                            inputLevelLinear,
+                            outputLevelLinear,
+                            fadingState);
         }))
         {
             return;
         }
 
-        armCrossfadeIfPending(dsp, fading != nullptr, useDryAsOld, runtimeGraph);
+        armCrossfadeIfPending(fading != nullptr, useDryAsOld, runtimeGraph);
 
         const bool canCrossfade = (fading != nullptr || useDryAsOld)
             && dspCrossfadeGain.isSmoothing()
@@ -189,18 +182,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             else
             {
                 // EBR: lifetime managed by RCUReader
-                syncEqAgcTableViewFromRuntimeGraph(dspExecutionStateFading, runtimeGraph);
                 fading->processToBuffer(bufferToFill, dspCrossfadeFloatBuffer, analyzerFifo,
                                        fadingInputMeter, fadingOutputMeter, fadingState);
             }
-            syncEqAgcTableViewFromRuntimeGraph(dspExecutionStateCurrent, runtimeGraph);
-            dsp->processV2(bufferToFill,
-                           analyzerFifo,
-                           inputLevelLinear,
-                           outputLevelLinear,
-                           runtimeGraph,
-                           dspExecutionStateCurrent,
-                           procState);
+            dsp->process(bufferToFill,
+                         analyzerFifo,
+                         inputLevelLinear,
+                         outputLevelLinear,
+                         procState);
 
             const int outChannels = std::min(2, buffer->getNumChannels());
             float* dstL = (outChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
@@ -213,7 +202,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                                                      oldL,
                                                      oldR,
                                                      numSamples,
-                                                     engineRuntime,
                                                      runtimeGraph,
                                                      [this, useDryAsOld](float* outL,
                                                                          float* outR,
@@ -244,61 +232,15 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         else
         {
             // 通常パス（クロスフェードなし）：RCU で dsp の生存が保証されるため addRef/release 不要
-            dsp->processV2(bufferToFill,
-                           analyzerFifo,
-                           inputLevelLinear,
-                           outputLevelLinear,
-                           runtimeGraph,
-                           dspExecutionStateCurrent,
-                           procState);
+            dsp->process(bufferToFill,
+                         analyzerFifo,
+                         inputLevelLinear,
+                         outputLevelLinear,
+                         procState);
             cleanupCrossfadeDirectPath(fading);
         }
     }
 
-}
-
-// ========================================================
-// processAudioThreadRuntimeCommands() - Runtime command processing
-// Called from Audio Thread at start of getNextAudioBlock
-// Non-blocking drain of RuntimeCommandQueue
-// RT-safe setters only (no listeners.call, no locks, no I/O)
-// ========================================================
-void AudioEngine::processAudioThreadRuntimeCommands() noexcept
-{
-    // Drain all pending commands from RuntimeCommandQueue (SPSC, non-blocking)
-    convo::EngineCommand cmd {};
-    while (m_runtimeCommandQueue.tryDequeue(cmd))
-    {
-        switch (cmd.type)
-        {
-            case convo::CommandType::SetConvolverMix:
-                // Use RT-safe variant: atomic write only, no listeners.call()
-                uiConvolverProcessor.setMixRT(cmd.floatValue);
-                break;
-
-            case convo::CommandType::SetConvolverSmoothingTime:
-                // Use RT-safe variant: atomic write + fetch_add only, no listeners.call()
-                uiConvolverProcessor.setSmoothingTimeRT(cmd.floatValue);
-                break;
-
-            case convo::CommandType::SetConvolverTargetIRLength:
-                // IR rebuild setters must NOT be called from Audio Thread (calls listeners)
-                // These parameters are set from UI/message thread and enqueue rebuild separately
-                break;
-
-            case convo::CommandType::SetConvolverMixedTransitionStartHz:
-            case convo::CommandType::SetConvolverMixedTransitionEndHz:
-            case convo::CommandType::SetConvolverMixedPreRingTau:
-                // Mixed-phase optimization parameters must NOT be called from Audio Thread
-                // (calls listeners.call + requestDebouncedRebuild)
-                // These are set from UI/message thread only
-                break;
-
-            default:
-                // Other command types (UpdateParameters, ReplaceIR, etc.) handled elsewhere
-                break;
-        }
-    }
 }
 
 #endif

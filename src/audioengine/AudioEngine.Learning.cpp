@@ -117,10 +117,9 @@ void AudioEngine::processLearningCommands() noexcept
                 requestedLearningResume = cmd.resume;
                 requestedLearningGeneration = cmd.irGeneration;
 
-                const auto* world = getRuntimePublishWorld();
-                const auto* engineRuntime = getEngineRuntimeState(world);
-                const auto* runtimeGraph = getRuntimeGraphState(world);
-                auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
+                const auto runtimePublishView = getRuntimePublishView();
+                const auto* runtimeGraph = runtimePublishView.graph;
+                auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
                 // irGeneration チェックを削除: DSP が有効かつ型が適切であれば即座に学習開始可能
                 const bool dspReady = (dsp != nullptr)
                     && (dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder);

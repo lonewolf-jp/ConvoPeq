@@ -52,8 +52,6 @@
 #include "DspNumericPolicy.h"
 #include "DftiHandle.h"
 
-namespace convo { struct DSPExecutionState; }
-
 class AudioEngine;
 class CacheManager;
 class ProgressiveUpgradeThread;
@@ -231,7 +229,6 @@ public:
     //
     //----------------------------------------------------------
     void process(juce::dsp::AudioBlock<double>& block);
-    void bindExecutionState(convo::DSPExecutionState* state) noexcept;
 
     //----------------------------------------------------------
     // バイパス制御
@@ -300,7 +297,7 @@ public:
     //----------------------------------------------------------
     // RT-safe setters (Audio Thread dispatch 専用)
     // listeners.call() / requestDebouncedRebuild() を呼ばない。
-    // processAudioThreadRuntimeCommands() からのみ使用可。
+    // （現行経路では通常使用しない。互換用途として保持）
     //----------------------------------------------------------
     void setMixRT(float mixAmount) noexcept;
     void setSmoothingTimeRT(float timeSec) noexcept;
@@ -750,7 +747,6 @@ private:
     };
 
     std::atomic<std::uintptr_t> m_activeEngineBits { 0 }; // uintptr_t-backed lock-free handle
-    convo::DSPExecutionState* boundExecutionState = nullptr;
     std::atomic<bool> isLoading { false };
     std::atomic<bool> isRebuilding { false };
     std::atomic<bool> irFinalized { false };

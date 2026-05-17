@@ -3,9 +3,9 @@
 
 ---
 
-## New in v0.6.3
+## New in v0.6.4
 
-### Main Changes in v0.6.3
+### Main Changes in v0.6.4
 
 This section summarizes source code changes from commit `157bbb4` to the current working state.
 
@@ -22,11 +22,11 @@ This section summarizes source code changes from commit `157bbb4` to the current
   Updates in analyzer/main UI components to better track engine state transitions and improve consistency between processing state and visualization.
 
 - **Documentation and metadata updates:**
-  Added partition-structure technical documentation and refreshed build/project metadata, including the version bump to `v0.6.3`.
+  Added partition-structure technical documentation and refreshed build/project metadata, including the version bump to `v0.6.4`.
 
 **Range summary (`157bbb4..HEAD`):** 28 files changed, approximately +4072 / -1439 lines.
 
-**Current uncommitted scope:** version/docs update (`v0.6.3`) and additional snapshot/debounce-related stability improvements.
+**Current uncommitted scope:** version/docs update (`v0.6.4`) and additional snapshot/debounce-related stability improvements.
 
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 

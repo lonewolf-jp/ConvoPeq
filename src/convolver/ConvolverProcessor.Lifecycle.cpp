@@ -316,9 +316,6 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     }
     oldDelay = latencySmoother.getTargetValue();
 
-    if (boundExecutionState != nullptr)
-        bindExecutionState(boundExecutionState);
-
     if (!deferredFreeThread)
     {
         ThreadAffinityManager* affinityMgr = nullptr;
@@ -362,28 +359,6 @@ void ConvolverProcessor::releaseResources()
     smoothingBufferStorage[0].reset();
     smoothingBufferStorage[1].reset();
     smoothingBufferCapacity = 0;
-
-    if (boundExecutionState != nullptr)
-    {
-        auto& convState = boundExecutionState->conv;
-        convState.bypassDelayBuf[0] = nullptr;
-        convState.bypassDelayBuf[1] = nullptr;
-        convState.bypassDelayCapacity = 0;
-        convState.delayWritePos = 0;
-        convState.dryBuf[0] = nullptr;
-        convState.dryBuf[1] = nullptr;
-        convState.dryCapacity = 0;
-        convState.oldDryBuf[0] = nullptr;
-        convState.oldDryBuf[1] = nullptr;
-        convState.oldDryCapacity = 0;
-        convState.wetBuf[0] = nullptr;
-        convState.wetBuf[1] = nullptr;
-        convState.wetCapacity = 0;
-        convState.smoothingBuf[0] = nullptr;
-        convState.smoothingBuf[1] = nullptr;
-        convState.smoothingCapacity = 0;
-        convState.initialized = false;
-    }
 
     cachedFFTBuffer.reset();
     cachedFFTBufferCapacity = 0;

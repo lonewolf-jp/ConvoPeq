@@ -85,10 +85,45 @@ if "%DO_CLEAN%"=="1" (
 
 REM ------------------------------------------------------------
 REM Setup MSVC environment
-set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
-if exist "%VCVARS_PATH%" (
+set "VCVARS_PATH="
+set "VSWHERE_PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+set "VS_INSTALL_PATH="
+
+if exist "%VSWHERE_PATH%" (
+    echo [INFO] Detecting Visual Studio via vswhere...
+    for /f "delims=" %%I in ('"%VSWHERE_PATH%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul') do (
+        set "VS_INSTALL_PATH=%%I"
+    )
+
+    if defined VS_INSTALL_PATH (
+        set "VCVARS_PATH=!VS_INSTALL_PATH!\VC\Auxiliary\Build\vcvarsall.bat"
+    )
+)
+
+REM Fallback: common hard-coded locations (when vswhere is unavailable)
+if not defined VCVARS_PATH (
+    if exist "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
+)
+if not defined VCVARS_PATH (
+    if exist "C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvarsall.bat"
+)
+if not defined VCVARS_PATH (
+    if exist "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat"
+)
+if not defined VCVARS_PATH (
+    if exist "C:\Program Files\Microsoft Visual Studio\17\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\17\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
+)
+if not defined VCVARS_PATH (
+    if exist "C:\Program Files\Microsoft Visual Studio\17\Professional\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\17\Professional\VC\Auxiliary\Build\vcvarsall.bat"
+)
+if not defined VCVARS_PATH (
+    if exist "C:\Program Files\Microsoft Visual Studio\17\Community\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS_PATH=C:\Program Files\Microsoft Visual Studio\17\Community\VC\Auxiliary\Build\vcvarsall.bat"
+)
+
+if defined VCVARS_PATH (
     echo [INFO] Found vcvarsall.bat. Executing...
-    call "%VCVARS_PATH%" x64
+    echo [INFO]   !VCVARS_PATH!
+    call "!VCVARS_PATH!" x64
     @echo off
     if errorlevel 1 (
         echo [ERROR] Failed to initialize MSVC environment.
@@ -97,8 +132,10 @@ if exist "%VCVARS_PATH%" (
     )
     echo [INFO] MSVC environment initialized.
 ) else (
-    echo [ERROR] vcvarsall.bat not found:
-    echo   %VCVARS_PATH%
+    echo [ERROR] vcvarsall.bat not found.
+    echo [ERROR] Checked via vswhere and common Visual Studio install paths.
+    echo [HINT] Install Visual Studio C++ workload, or ensure vswhere exists at:
+    echo [HINT]   !VSWHERE_PATH!
     call :maybe_pause
     exit /b 1
 )

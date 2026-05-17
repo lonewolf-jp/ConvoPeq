@@ -13,12 +13,26 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::initialize()
 {
+    convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
     convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
     convo::publishAtomic(firstIrDryCrossfadeDone, false, std::memory_order_release);
     convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
     convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
+    convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release);
+    convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release);
+    convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
+    convo::publishAtomic(queuedFadeTimeSec, 0.03, std::memory_order_release);
+    latencyDelayOld_RT = 0;
+    latencyDelayNew_RT = 0;
+    dspCrossfadeStartDelayBlocks_RT = 0;
+    dspCrossfadeArmed_RT = false;
+
+    dspCrossfadeGain.reset(48000.0, 0.03);
+    dspCrossfadeGain.setCurrentAndTargetValue(1.0);
     dspCrossfadeDryScaleGain.reset(48000.0, 0.060);  // Initialize with 60ms ramp time
     dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
+    refreshCrossfadePreparedSnapshotFromAtomics();
 
     // ==================================================================
     // 段階 1：RCU 基盤の初期化

@@ -130,31 +130,6 @@ const char* toString(BuildError error) noexcept
     return "Unknown";
 }
 
-bool tryBuildInputFromCommand(const EngineCommand& cmd, BuildInput& out) noexcept
-{
-    switch (cmd.type)
-    {
-        case CommandType::UpdateParameters:
-        case CommandType::ChangeSampleRate:
-        case CommandType::ChangeOversampling:
-            break;
-
-        default:
-            return false;
-    }
-
-    if (cmd.sampleRate <= 0.0 || cmd.blockSize <= 0)
-        return false;
-
-    out.sampleRate = cmd.sampleRate;
-    out.blockSize = cmd.blockSize;
-    out.ditherBitDepth = cmd.intValue;
-    out.oversamplingFactor = cmd.oversamplingFactor;
-    out.oversamplingType = cmd.oversamplingType;
-    out.noiseShaperType = cmd.noiseShaperType;
-    return true;
-}
-
 BuildResult RuntimeBuilder::build(const BuildInput& in) noexcept
 {
     return build(in, engine.getConvolverProcessor().captureBuildSnapshot());
@@ -198,24 +173,6 @@ BuildResult RuntimeBuilder::build(const BuildInput& in, const ConvolverProcessor
         result.error = BuildError::InternalError;
         return result;
     }
-}
-
-BuildResult RuntimeBuilder::build(const EngineCommand& cmd) noexcept
-{
-    return build(cmd, engine.getConvolverProcessor().captureBuildSnapshot());
-}
-
-BuildResult RuntimeBuilder::build(const EngineCommand& cmd, const ConvolverProcessor::BuildSnapshot& snapshot) noexcept
-{
-    BuildInput input {};
-    if (!tryBuildInputFromCommand(cmd, input))
-    {
-        BuildResult result {};
-        result.error = BuildError::InvalidInput;
-        return result;
-    }
-
-    return build(input, snapshot);
 }
 
 BuildError RuntimeBuilder::validateWarmup(const AudioEngine::DSPCore& runtime) const noexcept

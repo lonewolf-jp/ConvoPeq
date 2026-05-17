@@ -159,9 +159,7 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/AudioEngine.Processing.DSPCoreIO.cpp
     src/CustomInputOversampler.cpp
     src/NoiseShaperLearnerTypes.h
-    src/audioengine/RuntimeCommand.h
     src/audioengine/RuntimeBuildTypes.h
-    src/audioengine/RuntimeCommandQueue.h
     src/audioengine/RuntimeBuilder.h
     src/audioengine/RuntimeBuilder.cpp
     src/audioengine/AudioEngineProcessor.cpp
@@ -450,15 +448,15 @@ if(MSVC)
         /wd4189     # C4189: ローカル変数が初期化されましたが、参照されていません (r8brain対策)
         /MP1        # マルチプロセッサコンパイル有効化 (1コアに制限してメモリ使用量を最小化)
         /EHsc       # 標準C++例外処理のみ有効化 (SEH無効 - 構造化例外処理は使用しない)
-        /Zm200      # C1060緩和: コンパイラ内部ヒープ上限を200%（デフォルトを2倍）に設定
+        /Zm400      # C1060緩和: コンパイラ内部ヒープ上限を400%に設定
         /bigobj     # 大規模オブジェクトファイル対応: .objファイルサイズ制限を解放
     )
 
     target_compile_definitions(ConvoPeq PRIVATE JUCE_DISABLE_ACCESSIBILITY=1)
     target_compile_definitions(ConvoPeq PRIVATE JUCE_WIN_PER_MONITOR_DPI_AWARE=0)
 
-    set(CMAKE_CXX_FLAGS_RELEASE "/Zm200 /bigobj /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
-    set(CMAKE_C_FLAGS_RELEASE "/Zm200 /bigobj /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
+    set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
+    set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG /OPT:REF /OPT:ICF /OPT:LBR")
 
     # AVX2を全コンフィグで有効化

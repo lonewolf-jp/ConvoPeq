@@ -2,7 +2,6 @@
 
 #include "AudioEngine.h"
 #include "RuntimeBuildTypes.h"
-#include "RuntimeCommand.h"
 
 namespace convo {
 
@@ -21,7 +20,6 @@ struct BuildResult {
 };
 
 const char* toString(BuildError error) noexcept;
-bool tryBuildInputFromCommand(const EngineCommand& cmd, BuildInput& out) noexcept;
 
 class RuntimeBuilder {
 public:
@@ -29,8 +27,6 @@ public:
 
     BuildResult build(const BuildInput& in) noexcept;
     BuildResult build(const BuildInput& in, const ConvolverProcessor::BuildSnapshot& snapshot) noexcept;
-    BuildResult build(const EngineCommand& cmd) noexcept;
-    BuildResult build(const EngineCommand& cmd, const ConvolverProcessor::BuildSnapshot& snapshot) noexcept;
     BuildError validateWarmup(const AudioEngine::DSPCore& runtime) const noexcept;
 
     // Warmup: FIR 履歴と AGC state 初期化

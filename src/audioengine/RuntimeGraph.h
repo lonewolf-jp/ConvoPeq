@@ -30,7 +30,10 @@ struct RuntimeGraph
     bool softClipEnabled = false;
     bool dspCrossfadePending = false;
     bool dspCrossfadeUseDryAsOld = false;
+    bool firstIrDryCrossfadePending = false;
     double queuedFadeTimeSec = 0.0;
+    int dspCrossfadeStartDelayBlocks = 0;
+    int dspCrossfadeDryHoldSamples = 0;
     int latencyDelayOld = 0;
     int latencyDelayNew = 0;
     bool latencyResetPending = false;

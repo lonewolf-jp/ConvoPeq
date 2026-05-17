@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include "RuntimeGraph.h"
-#include "DSPExecutionState.h"
 
 namespace convo {
 
@@ -41,6 +40,7 @@ struct EngineRuntime
     bool latencyResetPending = false;
     bool dspCrossfadePending = false;
     bool dspCrossfadeUseDryAsOld = false;
+    bool firstIrDryCrossfadePending = false;
     double queuedFadeTimeSec = 0.0;
     int dspCrossfadeStartDelayBlocks = 0;
     int dspCrossfadeDryHoldSamples = 0;

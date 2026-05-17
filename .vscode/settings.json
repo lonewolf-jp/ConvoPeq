@@ -1,5 +1,6 @@
 {
     "cmake.generator": "Ninja Multi-Config",
+    "cmake.useVsDeveloperEnvironment": "always",
     "cmake.setBuildTypeOnMultiConfig": true,
     "cmake.options.statusBarVisibility": "visible",
     "cmake.buildDirectory": "${workspaceFolder}/build",

@@ -25,6 +25,12 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release);
         convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release);
         convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
+        convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
+        convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
+        convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
+        convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
+        convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
+        refreshCrossfadePreparedSnapshotFromAtomics();
         convo::publishAtomic(lifecycleState, EngineLifecycleState::Unprepared, std::memory_order_release);
     };
 
@@ -95,10 +101,14 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     dspCrossfadeGain.reset(safeSampleRate, 0.03);
     dspCrossfadeGain.setCurrentAndTargetValue(1.0);
     convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
+    convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
     {
         const auto runtimePublishView = getRuntimePublishView();
-        auto* currentForPublish = resolveCurrentDSPFromRuntimePublish(runtimePublishView.graph, runtimePublishView.engine);
-        auto* fadingForPublish = resolveFadingDSPFromRuntimePublish(runtimePublishView.graph, runtimePublishView.engine);
+        auto* currentForPublish = resolveCurrentDSPFromRuntimePublish(runtimePublishView.graph);
+        auto* fadingForPublish = resolveFadingDSPFromRuntimePublish(runtimePublishView.graph);
         const bool hasAnyRuntime = (currentForPublish != nullptr) || (fadingForPublish != nullptr);
         if (hasAnyRuntime)
         {
@@ -154,13 +164,14 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release);
     convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release);
     convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
+    refreshCrossfadePreparedSnapshotFromAtomics();
 
     latencyDelayOld_RT = 0;
     latencyDelayNew_RT = 0;
 
     // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
     const auto runtimePublishView = getRuntimePublishView();
-    const bool hasPublishedCurrent = (runtimePublishedCurrentDSP(runtimePublishView.engine, runtimePublishView.graph) != nullptr);
+    const bool hasPublishedCurrent = (runtimePublishedCurrentDSP(runtimePublishView.graph) != nullptr);
     if (!hasPublishedCurrent && activeDSP == nullptr)
     {
         convo::aligned_unique_ptr<DSPCore> placeholderDSP;
@@ -203,9 +214,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
     if (rateChanged)
         uiConvolverProcessor.invalidatePendingLoads();
-    const bool hasCurrentRuntime = (resolveCurrentDSPFromRuntimePublish(
-                                                                       runtimePublishView.graph,
-                                                                       runtimePublishView.engine) != nullptr);
+    const bool hasCurrentRuntime = (resolveCurrentDSPFromRuntimePublish(runtimePublishView.graph) != nullptr);
     if (rateChanged || blockSizeChanged || !hasCurrentRuntime) {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             requestRebuild(safeSampleRate, bufferSize);

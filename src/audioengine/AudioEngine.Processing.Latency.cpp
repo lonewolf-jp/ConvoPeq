@@ -83,10 +83,9 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 {
     LatencyBreakdown breakdown;
 
-    const auto* world = getRuntimePublishWorld();
-    const auto* engineRuntime = getEngineRuntimeState(world);
-    const auto* runtimeGraph = getRuntimeGraphState(world);
-    auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
+    const auto runtimePublishView = getRuntimePublishView();
+    const auto* runtimeGraph = runtimePublishView.graph;
+    auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
     if (dsp == nullptr)
         return breakdown;
 

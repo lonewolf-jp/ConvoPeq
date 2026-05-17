@@ -1229,8 +1229,8 @@ void ConvolverControlPanel::setIRPreviewInProgress(bool isInProgress)
 //--------------------------------------------------------------
 void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
 {
-    // rule 1.1.5: All convolver parameter changes enqueued via RuntimeCommandQueue
-    // (no Timer debounce; commands processed in Audio Thread at start of getNextAudioBlock)
+    // rule2 Phase 1: Convolver parameter changes are routed through
+    // Message Thread UI staging + snapshot/rebuild path (Audio Thread queue は不使用)。
 
     if (slider == &mixSlider)
     {

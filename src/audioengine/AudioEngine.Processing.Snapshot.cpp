@@ -16,14 +16,13 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
         return;
     }
 
-    const auto* world = getRuntimePublishWorld();
-    const auto* engineRuntime = getEngineRuntimeState(world);
-    const auto* runtimeGraph = getRuntimeGraphState(world);
+    const auto runtimePublishView = getRuntimePublishView();
+    const auto* runtimeGraph = runtimePublishView.graph;
     DSPCore* dsp = isFadingTarget
-        ? resolveFadingDSPFromRuntimePublish(runtimeGraph, engineRuntime)
-        : resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
+        ? resolveFadingDSPFromRuntimePublish(runtimeGraph)
+        : resolveCurrentDSPFromRuntimePublish(runtimeGraph);
     if (dsp == nullptr && isFadingTarget)
-        dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph, engineRuntime);
+        dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(bufferToFill);
@@ -38,9 +37,7 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     std::atomic<float> fadingOutputMeter { 0.0f };
     auto& inMeter = isFadingTarget ? fadingInputMeter : inputLevelLinear;
     auto& outMeter = isFadingTarget ? fadingOutputMeter : outputLevelLinear;
-    auto& executionState = isFadingTarget ? dspExecutionStateFading : dspExecutionStateCurrent;
-    syncEqAgcTableViewFromRuntimeGraph(executionState, runtimeGraph);
-    dsp->processV2(bufferToFill, analyzerFifo, inMeter, outMeter, runtimeGraph, executionState, procState);
+    dsp->process(bufferToFill, analyzerFifo, inMeter, outMeter, procState);
 }
 
 #endif

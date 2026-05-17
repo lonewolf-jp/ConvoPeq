@@ -37,44 +37,6 @@ static bool equalsBuildParameterSnapshot(const BuildParameterSnapshot& lhs,
         && lhs.noiseShaperType == rhs.noiseShaperType;
 }
 
-static std::uint64_t makeRuntimePayloadHash(int ditherDepth,
-                                            int oversamplingFactor,
-                                            AudioEngine::OversamplingType oversamplingType,
-                                            AudioEngine::NoiseShaperType noiseShaperType) noexcept
-{
-    std::uint64_t value = static_cast<std::uint64_t>(static_cast<std::uint32_t>(ditherDepth));
-    value = (value << 8) ^ static_cast<std::uint64_t>(static_cast<std::uint32_t>(oversamplingFactor));
-    value = (value << 8) ^ static_cast<std::uint64_t>(static_cast<std::uint32_t>(oversamplingType));
-    value = (value << 8) ^ static_cast<std::uint64_t>(static_cast<std::uint32_t>(noiseShaperType));
-    value ^= (value << 13);
-    value ^= (value >> 7);
-    value ^= (value << 17);
-    return value;
-}
-
-static convo::EngineCommand makeRuntimeCommand(double sampleRate,
-                                               int samplesPerBlock,
-                                               const BuildParameterSnapshot& snapshot,
-                                               std::uint64_t revision) noexcept
-{
-    convo::EngineCommand cmd {};
-    cmd.type = convo::CommandType::UpdateParameters;
-    cmd.meta.revision = revision;
-    cmd.meta.issuedTick = static_cast<std::uint64_t>(juce::Time::getHighResolutionTicks());
-    cmd.meta.highPriority = true;
-    cmd.sampleRate = sampleRate;
-    cmd.blockSize = samplesPerBlock;
-    cmd.intValue = snapshot.ditherDepth;
-    cmd.oversamplingFactor = snapshot.oversamplingFactor;
-    cmd.oversamplingType = static_cast<int>(snapshot.oversamplingType);
-    cmd.noiseShaperType = static_cast<int>(snapshot.noiseShaperType);
-    cmd.payloadHash = makeRuntimePayloadHash(snapshot.ditherDepth,
-                                             snapshot.oversamplingFactor,
-                                             snapshot.oversamplingType,
-                                             snapshot.noiseShaperType);
-    return cmd;
-}
-
 static bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
 {
     return dsp.convolverRt().isLoadingIR();
@@ -279,16 +241,6 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     if (queued)
     {
         debugRebuildDispatchQueuedCount.fetch_add(1, std::memory_order_acq_rel);
-        const auto runtimeCommand = makeRuntimeCommand(sampleRate,
-                                                       samplesPerBlock,
-                                                       paramSnapshot,
-                                                       static_cast<std::uint64_t>(generation));
-        if (!m_runtimeCommandQueue.enqueue(runtimeCommand))
-        {
-            debugRebuildDispatchRuntimeQueueFullCount.fetch_add(1, std::memory_order_acq_rel);
-            diagLog("[DIAG] requestRebuild(sr,bs): runtime command queue full generation=" + juce::String(generation));
-        }
-
         rebuildCV.notify_all();
         diagLog("[DIAG] requestRebuild(sr,bs): task queued generation=" + juce::String(generation)
             + " SR=" + juce::String(sampleRate, 2));
@@ -339,8 +291,6 @@ void AudioEngine::stopRebuildThread()
     if (rebuildThread.joinable())
         rebuildThread.join();
 
-    // Stop/start ライフサイクルを跨いで古い command が残らないようにする。
-    m_runtimeCommandQueue.clear();
 }
 #endif
 
@@ -365,8 +315,6 @@ void AudioEngine::rebuildThreadLoop()
         try
         {
             RebuildTask task;
-            convo::EngineCommand drainedCommands[8] {};
-            int drainedCommandCount = 0;
             {
                 std::unique_lock<std::mutex> lock(rebuildMutex);
                 rebuildCV.wait(lock, [this] { return hasPendingTask || convo::consumeAtomic(rebuildThreadShouldExit); });
@@ -385,11 +333,6 @@ void AudioEngine::rebuildThreadLoop()
 
                 hasPendingTask = false;
             }
-
-            drainedCommandCount = m_runtimeCommandQueue.drainCoalesced(drainedCommands,
-                                                                       static_cast<int>(std::size(drainedCommands)));
-            debugRebuildDispatchDrainedCommandCount.fetch_add(static_cast<std::uint64_t>(juce::jmax(0, drainedCommandCount)),
-                                                              std::memory_order_acq_rel);
 
             struct DSPGuard
             {
@@ -413,41 +356,14 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
 
             // 1. Prepare (メモリ確保)
-            convo::BuildResult buildResult {};
-            int matchedRuntimeCommandIndex = -1;
-            for (int index = 0; index < drainedCommandCount; ++index)
-            {
-                const auto& drained = drainedCommands[index];
-                if (drained.meta.revision != static_cast<std::uint64_t>(task.generation))
-                    continue;
-
-                matchedRuntimeCommandIndex = index;
-                break;
-            }
-
-            if (matchedRuntimeCommandIndex >= 0)
-            {
-                debugRebuildDispatchMatchedRuntimeCommandCount.fetch_add(1, std::memory_order_acq_rel);
-                buildResult = runtimeBuilder.build(drainedCommands[matchedRuntimeCommandIndex], task.convolverBuildSnapshot);
-                if (buildResult.runtime == nullptr && buildResult.error == convo::BuildError::InvalidInput)
-                {
-                    diagLog("[DIAG] rebuildThreadLoop: invalid runtime command payload, fallback to task.buildInput generation="
-                            + juce::String(task.generation));
-                    buildResult = runtimeBuilder.build(task.buildInput, task.convolverBuildSnapshot);
-                }
-            }
-            else
-            {
-                debugRebuildDispatchTaskSnapshotFallbackCount.fetch_add(1, std::memory_order_acq_rel);
-                buildResult = runtimeBuilder.build(task.buildInput, task.convolverBuildSnapshot);
-            }
+            convo::BuildResult buildResult = runtimeBuilder.build(task.buildInput, task.convolverBuildSnapshot);
 
             if (buildResult.runtime == nullptr)
             {
                 diagLog("[DIAG] rebuildThreadLoop: RuntimeBuilder build failed generation="
                         + juce::String(task.generation)
                         + " error=" + juce::String(convo::toString(buildResult.error))
-                    + " source=" + juce::String(matchedRuntimeCommandIndex >= 0 ? "runtime-command+snapshot" : "task-snapshot"));
+                        + " source=task-snapshot");
                 continue;
             }
 

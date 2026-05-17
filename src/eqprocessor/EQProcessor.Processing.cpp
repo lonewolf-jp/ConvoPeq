@@ -348,9 +348,7 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
 {
     const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
     const int numSamples = (int)block.getNumSamples();
-    auto* activeEqState = (boundExecutionState != nullptr) ? &boundExecutionState->eq : nullptr;
 
-    // 係数の事前ロード（atomic、relaxedで十分）
     const double attackCoeff = convo::consumeAtomic(agcAttackCoeff, std::memory_order_acquire);
     const double releaseCoeff = convo::consumeAtomic(agcReleaseCoeff, std::memory_order_acquire);
     const double smoothCoeff = convo::consumeAtomic(agcSmoothCoeff, std::memory_order_acquire);
@@ -359,18 +357,10 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     double blockReleaseCoeff;
     double blockSmoothCoeff;
 
-    const double* activeAttackCoeffTable = (activeEqState != nullptr)
-        ? activeEqState->agcAttackCoeffTable
-        : agcAttackCoeffTable.get();
-    const double* activeReleaseCoeffTable = (activeEqState != nullptr)
-        ? activeEqState->agcReleaseCoeffTable
-        : agcReleaseCoeffTable.get();
-    const double* activeSmoothCoeffTable = (activeEqState != nullptr)
-        ? activeEqState->agcSmoothCoeffTable
-        : agcSmoothCoeffTable.get();
-    const int activeCoeffTableCapacity = (activeEqState != nullptr)
-        ? activeEqState->agcCoeffTableCapacity
-        : agcCoeffTableCapacity;
+    const double* activeAttackCoeffTable = agcAttackCoeffTable.get();
+    const double* activeReleaseCoeffTable = agcReleaseCoeffTable.get();
+    const double* activeSmoothCoeffTable = agcSmoothCoeffTable.get();
+    const int activeCoeffTableCapacity = agcCoeffTableCapacity;
 
     if (numSamples >= 0
         && numSamples < activeCoeffTableCapacity
@@ -384,84 +374,52 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     }
     else
     {
-        // テーブル未確保時のみ、既存の libm 非依存近似へフォールバックする。
         const double attackEpsilon = 1.0 - attackCoeff;
         const double releaseEpsilon = 1.0 - releaseCoeff;
         const double smoothEpsilon = 1.0 - smoothCoeff;
-
         blockAttackCoeff = std::min(1.0, static_cast<double>(numSamples) * attackEpsilon);
         blockReleaseCoeff = std::min(1.0, static_cast<double>(numSamples) * releaseEpsilon);
         blockSmoothCoeff = std::min(1.0, static_cast<double>(numSamples) * smoothEpsilon);
     }
 
-    double inputRMS = (activeEqState != nullptr) ? activeEqState->cachedInputRms : cachedInputRMS;
-
-    // 出力レベル計測
+    double inputRMS = cachedInputRMS;
     double outputRMS = 0.0;
     for (int ch = 0; ch < numChannels; ++ch)
     {
         const double* data = block.getChannelPointer(ch);
         const double rms = calculateRMS(data, numSamples);
-
-        if (rms > outputRMS) outputRMS = rms;
+        if (rms > outputRMS)
+            outputRMS = rms;
     }
 
-    // 数値安定性対策: NaN/Infチェックとクランプ
-    static constexpr double MAX_ENV_VALUE = 1000.0; // +60dB
-
+    static constexpr double MAX_ENV_VALUE = 1000.0;
     if (!isFiniteNoLibm(inputRMS) || inputRMS > MAX_ENV_VALUE)   inputRMS = MAX_ENV_VALUE;
     if (!isFiniteNoLibm(outputRMS) || outputRMS > MAX_ENV_VALUE) outputRMS = MAX_ENV_VALUE;
 
-    // アトミック変数のロード
-    double envIn = (activeEqState != nullptr)
-        ? activeEqState->agcEnvInput
-        : convo::consumeAtomic(agcEnvInput, std::memory_order_acquire);
-    double envOut = (activeEqState != nullptr)
-        ? activeEqState->agcEnvOutput
-        : convo::consumeAtomic(agcEnvOutput, std::memory_order_acquire);
-    double currentGain = (activeEqState != nullptr)
-        ? activeEqState->agcCurrentGain
-        : convo::consumeAtomic(agcCurrentGain, std::memory_order_acquire);
-
+    double envIn = rtAgcEnvInputShadow;
+    double envOut = rtAgcEnvOutputShadow;
+    double currentGain = rtAgcCurrentGainShadow;
     if (!isFiniteNoLibm(envIn))  envIn = 0.0;
     if (!isFiniteNoLibm(envOut)) envOut = 0.0;
     if (!isFiniteNoLibm(currentGain)) currentGain = 1.0;
 
-    // 指数移動平均 (EMA) によるエンベロープ検波 (アシンメトリック: アタック速い / リリース遅い)
     const double inAlpha = (inputRMS > envIn) ? blockAttackCoeff : blockReleaseCoeff;
     const double outAlpha = (outputRMS > envOut) ? blockAttackCoeff : blockReleaseCoeff;
-
     envIn = envIn * (1.0 - inAlpha) + inputRMS * inAlpha;
     envOut = envOut * (1.0 - outAlpha) + outputRMS * outAlpha;
 
-    // Denormal対策: 極小値をゼロにクランプ
     constexpr double DENORM_THRESH = convo::numeric_policy::kDenormThresholdAudioState;
     if (envIn < DENORM_THRESH) envIn = 0.0;
     if (envOut < DENORM_THRESH) envOut = 0.0;
 
-    // ターゲットゲイン計算（ヒステリシス帯付き）
     const double targetGain = calculateAGCGain(envIn, envOut);
-
-    // ゲインスムージング
     const double nextGain = currentGain * (1.0 - blockSmoothCoeff) + targetGain * blockSmoothCoeff;
 
-    // アトミック変数のストア
-    if (activeEqState != nullptr)
-    {
-        activeEqState->agcEnvInput = envIn;
-        activeEqState->agcEnvOutput = envOut;
-        activeEqState->agcCurrentGain = nextGain;
-    }
-    else
-    {
-        rtAgcEnvInputShadow = envIn;
-        rtAgcEnvOutputShadow = envOut;
-        rtAgcCurrentGainShadow = nextGain;
-    }
+    rtAgcEnvInputShadow = envIn;
+    rtAgcEnvOutputShadow = envOut;
+    rtAgcCurrentGainShadow = nextGain;
 
-    // ゲイン適用 (ランプ: currentGain -> nextGain)
     const double gainIncrement = (nextGain - currentGain) / static_cast<double>(numSamples);
-
     for (int ch = 0; ch < numChannels; ++ch)
         applyGainRamp_AVX2(block.getChannelPointer(ch), numSamples, currentGain, gainIncrement);
 }
@@ -508,91 +466,53 @@ bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block,
 void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
     const auto* stateSnapshot = loadCurrentState(std::memory_order_acquire);
-    auto* activeEqState = (boundExecutionState != nullptr) ? &boundExecutionState->eq : nullptr;
-    convo::RCUReaderGuard guard((activeEqState != nullptr) ? activeEqState->rcuReader : rcuReader);
+    convo::RCUReaderGuard guard(rcuReader);
     // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
 
     const bool requestedBypass = m_rtBypassShadow; // RT-local shadow（atomic write 禁止のため setBypassFromRT 経由で設定）
-    auto* activeBypassRamp = (activeEqState != nullptr) ? &activeEqState->bypassFadeGain : nullptr;
-    bool effectiveBypass = (activeEqState != nullptr)
-        ? activeEqState->bypassed
-        : rtBypassedShadow;
+    auto* activeBypassRamp = &bypassFadeGain;
+    bool effectiveBypass = rtBypassedShadow;
 
     const double targetBypassFade = requestedBypass ? 0.0 : 1.0;
-    const double currentBypassTarget = (activeBypassRamp != nullptr)
-        ? activeBypassRamp->getTargetValue()
-        : bypassFadeGain.getTargetValue();
+    const double currentBypassTarget = activeBypassRamp->getTargetValue();
     if (absNoLibm(currentBypassTarget - targetBypassFade) > 1.0e-12)
     {
         if (!requestedBypass && effectiveBypass)
         {
             rtDeferredBandResetMask |= 0xFFFFFFFFu;
-            if (activeEqState != nullptr)
-                activeEqState->bypassed = false;
-            else
-                rtBypassedShadow = false;
+            rtBypassedShadow = false;
         }
-        if (activeBypassRamp != nullptr)
-            activeBypassRamp->setTargetValue(targetBypassFade);
-        else
-            bypassFadeGain.setTargetValue(targetBypassFade);
-        effectiveBypass = (activeEqState != nullptr)
-            ? activeEqState->bypassed
-            : rtBypassedShadow;
+        activeBypassRamp->setTargetValue(targetBypassFade);
+        effectiveBypass = rtBypassedShadow;
     }
 
-    const bool bypassTransitionActive = (activeBypassRamp != nullptr)
-        ? activeBypassRamp->isSmoothing()
-        : bypassFadeGain.isSmoothing();
+    const bool bypassTransitionActive = activeBypassRamp->isSmoothing();
 
     // フェードアウト完了時に bypassed を true にする
     if (requestedBypass && !effectiveBypass && !bypassTransitionActive)
     {
-        if (activeEqState != nullptr)
-            activeEqState->bypassed = true;
-        else
-            rtBypassedShadow = true;
+        rtBypassedShadow = true;
         effectiveBypass = true;
     }
 
     if (requestedBypass && effectiveBypass && !bypassTransitionActive)
         return;
 
-    auto& activeFilterState = (activeEqState != nullptr)
-        ? activeEqState->filterState
-        : filterState;
+    auto& activeFilterState = filterState;
 
-    double* activeDryBypassBuffer = (activeEqState != nullptr)
-        ? activeEqState->dryBypassBuffer
-        : dryBypassBuffer.get();
-    const int activeDryBypassCapacity = (activeEqState != nullptr)
-        ? activeEqState->dryBypassCapacity
-        : dryBypassCapacity;
+    double* activeDryBypassBuffer = dryBypassBuffer.get();
+    const int activeDryBypassCapacity = dryBypassCapacity;
 
-    double* activeParallelInputBuffer = (activeEqState != nullptr)
-        ? activeEqState->parallelInputBuffer
-        : parallelInputBuffer.get();
-    double* activeParallelWorkBuffer = (activeEqState != nullptr)
-        ? activeEqState->parallelWorkBuffer
-        : parallelWorkBuffer.get();
-    double* activeParallelAccumBuffer = (activeEqState != nullptr)
-        ? activeEqState->parallelAccumBuffer
-        : parallelAccumBuffer.get();
-    const int activeParallelBufferCapacity = (activeEqState != nullptr)
-        ? activeEqState->parallelBufferCapacity
-        : parallelBufferCapacity;
+    double* activeParallelInputBuffer = parallelInputBuffer.get();
+    double* activeParallelWorkBuffer = parallelWorkBuffer.get();
+    double* activeParallelAccumBuffer = parallelAccumBuffer.get();
+    const int activeParallelBufferCapacity = parallelBufferCapacity;
 
-    double* activeStructureOldOutBuffer = (activeEqState != nullptr)
-        ? activeEqState->structureOldOutBuffer
-        : structureOldOutBuffer.get();
-    double* activeStructureNewOutBuffer = (activeEqState != nullptr)
-        ? activeEqState->structureNewOutBuffer
-        : structureNewOutBuffer.get();
-    const int activeStructureXfadeBufferCapacity = (activeEqState != nullptr)
-        ? activeEqState->structureXfadeBufferCapacity
-        : structureXfadeBufferCapacity;
+    double* activeStructureOldOutBuffer = structureOldOutBuffer.get();
+    double* activeStructureNewOutBuffer = structureNewOutBuffer.get();
+    const int activeStructureXfadeBufferCapacity = structureXfadeBufferCapacity;
 
     const int numSamples = (int)block.getNumSamples();
 
@@ -639,18 +559,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
         rtSeenAgcResetSerial = agcResetSerialNow;
-        if (boundExecutionState != nullptr)
-        {
-            boundExecutionState->eq.agcCurrentGain = 1.0;
-            boundExecutionState->eq.agcEnvInput = 0.0;
-            boundExecutionState->eq.agcEnvOutput = 0.0;
-        }
-        else
-        {
-            rtAgcCurrentGainShadow = 1.0;
-            rtAgcEnvInputShadow = 0.0;
-            rtAgcEnvOutputShadow = 0.0;
-        }
+        rtAgcCurrentGainShadow = 1.0;
+        rtAgcEnvInputShadow = 0.0;
+        rtAgcEnvOutputShadow = 0.0;
     }
 
     const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
@@ -691,9 +602,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // ✅ フィルタ処理前に入力レベルをキャッシュ (AGCが有効な場合のみ)
     if (isAgcEnabled)
     {
-        double& cachedInputRMSRef = (boundExecutionState != nullptr)
-            ? boundExecutionState->eq.cachedInputRms
-            : cachedInputRMS;
+        double& cachedInputRMSRef = cachedInputRMS;
         cachedInputRMSRef = 0.0;
         for (int ch = 0; ch < numChannels; ++ch)
         {
@@ -828,9 +737,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     };
 
-    auto activeMode = (activeEqState != nullptr)
-        ? static_cast<FilterStructure>(activeEqState->activeStructure)
-        : rtActiveStructureShadow;
+    auto activeMode = rtActiveStructureShadow;
     auto requestedMode = (stateSnapshot != nullptr)
         ? static_cast<FilterStructure>(stateSnapshot->filterStructure)
         : activeMode;
@@ -886,20 +793,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 blockR[n] = oldR[n] * wOld + newR[n] * wNew;
         }
 
-        if (activeEqState != nullptr)
-            activeEqState->activeStructure = static_cast<int>(requestedMode);
-        else
-            rtActiveStructureShadow = requestedMode;
+        rtActiveStructureShadow = requestedMode;
     }
     else
     {
         if (requestedMode != activeMode)
         {
             activeMode = requestedMode;
-            if (activeEqState != nullptr)
-                activeEqState->activeStructure = static_cast<int>(activeMode);
-            else
-                rtActiveStructureShadow = activeMode;
+            rtActiveStructureShadow = activeMode;
         }
 
         if (activeMode == FilterStructure::Serial || !canUseParallelBuffers)
@@ -932,28 +833,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         // Audio Threadでは atomic load のみ行う。
         const double targetGain = convo::consumeAtomic(totalGainTarget, std::memory_order_acquire);
 
-        auto* activeGainRamp = (activeEqState != nullptr) ? &activeEqState->smoothTotalGain : nullptr;
-        const double gainTarget = (activeGainRamp != nullptr)
-            ? activeGainRamp->getTargetValue()
-            : smoothTotalGain.getTargetValue();
+        auto* activeGainRamp = &smoothTotalGain;
+        const double gainTarget = activeGainRamp->getTargetValue();
         if (absNoLibm(gainTarget - targetGain) > 1e-6)
-        {
-            if (activeGainRamp != nullptr)
-                activeGainRamp->setTargetValue(targetGain);
-            else
-                smoothTotalGain.setTargetValue(targetGain);
-        }
+            activeGainRamp->setTargetValue(targetGain);
 
-        const double startGain = (activeGainRamp != nullptr)
-            ? activeGainRamp->getCurrentValue()
-            : smoothTotalGain.getCurrentValue();
-        if (activeGainRamp != nullptr)
-            activeGainRamp->skip(numSamples);
-        else
-            smoothTotalGain.skip(numSamples);
-        const double endGain = (activeGainRamp != nullptr)
-            ? activeGainRamp->getCurrentValue()
-            : smoothTotalGain.getCurrentValue();
+        const double startGain = activeGainRamp->getCurrentValue();
+        activeGainRamp->skip(numSamples);
+        const double endGain = activeGainRamp->getCurrentValue();
 
         // AGC 無効時のゲインランプ
         const double increment = (endGain - startGain) / static_cast<double>(numSamples);
@@ -978,25 +865,13 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             }
         }
 
-        const bool smoothingAfterBlend = (activeBypassRamp != nullptr)
-            ? activeBypassRamp->isSmoothing()
-            : bypassFadeGain.isSmoothing();
+        const bool smoothingAfterBlend = activeBypassRamp->isSmoothing();
         if (!smoothingAfterBlend)
         {
             if (requestedBypass)
-            {
-                if (activeEqState != nullptr)
-                    activeEqState->bypassed = true;
-                else
-                    rtBypassedShadow = true;
-            }
+                rtBypassedShadow = true;
             else
-            {
-                if (activeEqState != nullptr)
-                    activeEqState->bypassed = false;
-                else
-                    rtBypassedShadow = false;
-            }
+                rtBypassedShadow = false;
         }
     }
 }
@@ -1005,13 +880,8 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
                           const convo::EQParameters& eqParams,
                           const EQCoeffCache* coeffCache)
 {
-    auto* activeEqState = (boundExecutionState != nullptr) ? &boundExecutionState->eq : nullptr;
-    const bool effectiveBypassed = (activeEqState != nullptr)
-        ? activeEqState->bypassed
-        : rtBypassedShadow;
-    const bool bypassSmoothing = (activeEqState != nullptr)
-        ? activeEqState->bypassFadeGain.isSmoothing()
-        : bypassFadeGain.isSmoothing();
+    const bool effectiveBypassed = rtBypassedShadow;
+    const bool bypassSmoothing = bypassFadeGain.isSmoothing();
 
     // 既存バイパス遷移ロジックを維持するため、遷移中は既存パスへフォールバック
     if (coeffCache == nullptr
@@ -1037,39 +907,20 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     if (numChannels <= 0)
         return;
 
-    auto& activeFilterState = (boundExecutionState != nullptr)
-        ? boundExecutionState->eq.filterState
-        : filterState;
+    auto& activeFilterState = filterState;
 
-    double* activeParallelInputBuffer = (boundExecutionState != nullptr)
-        ? boundExecutionState->eq.parallelInputBuffer
-        : parallelInputBuffer.get();
-    double* activeParallelWorkBuffer = (boundExecutionState != nullptr)
-        ? boundExecutionState->eq.parallelWorkBuffer
-        : parallelWorkBuffer.get();
-    double* activeParallelAccumBuffer = (boundExecutionState != nullptr)
-        ? boundExecutionState->eq.parallelAccumBuffer
-        : parallelAccumBuffer.get();
-    const int activeParallelBufferCapacity = (boundExecutionState != nullptr)
-        ? boundExecutionState->eq.parallelBufferCapacity
-        : parallelBufferCapacity;
+    double* activeParallelInputBuffer = parallelInputBuffer.get();
+    double* activeParallelWorkBuffer = parallelWorkBuffer.get();
+    double* activeParallelAccumBuffer = parallelAccumBuffer.get();
+    const int activeParallelBufferCapacity = parallelBufferCapacity;
 
     const std::uint64_t agcResetSerialNow = convo::consumeAtomic(agcResetSerial, std::memory_order_acquire);
     if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
         rtSeenAgcResetSerial = agcResetSerialNow;
-        if (boundExecutionState != nullptr)
-        {
-            boundExecutionState->eq.agcCurrentGain = 1.0;
-            boundExecutionState->eq.agcEnvInput = 0.0;
-            boundExecutionState->eq.agcEnvOutput = 0.0;
-        }
-        else
-        {
-            rtAgcCurrentGainShadow = 1.0;
-            rtAgcEnvInputShadow = 0.0;
-            rtAgcEnvOutputShadow = 0.0;
-        }
+        rtAgcCurrentGainShadow = 1.0;
+        rtAgcEnvInputShadow = 0.0;
+        rtAgcEnvOutputShadow = 0.0;
     }
 
     const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
@@ -1112,9 +963,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
 
     if (eqParams.agcEnabled)
     {
-        double& cachedInputRMSRef = (boundExecutionState != nullptr)
-            ? boundExecutionState->eq.cachedInputRms
-            : cachedInputRMS;
+        double& cachedInputRMSRef = cachedInputRMS;
         cachedInputRMSRef = 0.0;
         for (int ch = 0; ch < numChannels; ++ch)
         {
@@ -1259,28 +1108,14 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     else
     {
         const double targetGain = convo::consumeAtomic(totalGainTarget, std::memory_order_acquire);
-        auto* activeGainRamp = (activeEqState != nullptr) ? &activeEqState->smoothTotalGain : nullptr;
-        const double gainTarget = (activeGainRamp != nullptr)
-            ? activeGainRamp->getTargetValue()
-            : smoothTotalGain.getTargetValue();
+        auto* activeGainRamp = &smoothTotalGain;
+        const double gainTarget = activeGainRamp->getTargetValue();
         if (absNoLibm(gainTarget - targetGain) > 1e-6)
-        {
-            if (activeGainRamp != nullptr)
-                activeGainRamp->setTargetValue(targetGain);
-            else
-                smoothTotalGain.setTargetValue(targetGain);
-        }
+            activeGainRamp->setTargetValue(targetGain);
 
-        const double startGain = (activeGainRamp != nullptr)
-            ? activeGainRamp->getCurrentValue()
-            : smoothTotalGain.getCurrentValue();
-        if (activeGainRamp != nullptr)
-            activeGainRamp->skip(numSamples);
-        else
-            smoothTotalGain.skip(numSamples);
-        const double endGain = (activeGainRamp != nullptr)
-            ? activeGainRamp->getCurrentValue()
-            : smoothTotalGain.getCurrentValue();
+        const double startGain = activeGainRamp->getCurrentValue();
+        activeGainRamp->skip(numSamples);
+        const double endGain = activeGainRamp->getCurrentValue();
         const double increment = (endGain - startGain) / static_cast<double>(numSamples);
 
         for (int ch = 0; ch < numChannels; ++ch)

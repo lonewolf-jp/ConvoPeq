@@ -30,7 +30,7 @@
 #include "core/EQParameters.h"
 #include "core/RCUReader.h"
 #include "AlignedAllocation.h"
-#include "audioengine/DSPExecutionState.h"
+#include "DspNumericPolicy.h"
 
 //--------------------------------------------------------------
 // バンドタイプ列挙型
@@ -188,7 +188,6 @@ public:
     void process(juce::dsp::AudioBlock<double>& block,
                  const convo::EQParameters& eqParams,
                  const EQCoeffCache* coeffCache);
-    void bindExecutionState(convo::DSPExecutionState* state) noexcept;
     void releaseResources();
 
     // バイパス制御
@@ -611,6 +610,4 @@ private:
     std::uint64_t rtSeenBandResetSerial = 0;
     std::uint64_t rtSeenAgcResetSerial = 0;
 
-    // DSP_THREAD_STATE: process 呼び出し中のみ参照する実行状態バインディング。
-    convo::DSPExecutionState* boundExecutionState = nullptr;
 };

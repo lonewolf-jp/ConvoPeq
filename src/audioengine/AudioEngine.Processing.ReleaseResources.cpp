@@ -53,6 +53,10 @@ void AudioEngine::releaseResources()
     cancelPendingUpdate();
     convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
     convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
+    convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
     convo::publishAtomic(lastIssuedConvolverStructuralHash_, 0, std::memory_order_release);
     convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
     convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
@@ -99,6 +103,7 @@ void AudioEngine::releaseResources()
 
         convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
         dspCrossfadeGain.setCurrentAndTargetValue(1.0);
+        refreshCrossfadePreparedSnapshotFromAtomics();
         publishRuntimeTransitionState(nullptr,
                                       nullptr,
                                       convo::TransitionPolicy::HardReset,
