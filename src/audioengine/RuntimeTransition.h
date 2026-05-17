@@ -44,6 +44,7 @@ struct EngineRuntime
     double queuedFadeTimeSec = 0.0;
     int dspCrossfadeStartDelayBlocks = 0;
     int dspCrossfadeDryHoldSamples = 0;
+    double dryScaleTarget = 1.0;           // dry-as-old crossfade の IRスケール目標値
     std::uint64_t revision = 0;
 };
 

@@ -27,8 +27,8 @@ struct ParameterCommand {
 
 template <typename T, size_t Capacity>
 #ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4324) // alignas による意図的なパディング警告を抑制
+#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif
 class SPSCRingBuffer {
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of two");
@@ -65,7 +65,7 @@ private:
     alignas(64) std::atomic<size_t> readIndex{0};
 };
 #ifdef _MSC_VER
-#pragma warning(pop)
+#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif
 
 using CommandBuffer = SPSCRingBuffer<ParameterCommand, 1024>;

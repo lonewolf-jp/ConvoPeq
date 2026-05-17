@@ -41,8 +41,8 @@ static_assert(std::atomic<size_t>::is_always_lock_free,
 static_assert(std::atomic<uint64_t>::is_always_lock_free,
     "std::atomic<uint64_t> must be lock-free for real-time safety");
 
-#pragma warning(push)
-#pragma warning(disable : 4324) // 「構造体がパッドされました」を無視
+#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 /**
  * DeferredDeletionQueue: ロックフリー MPMC 削除キュー (B9 修正版)
  *
@@ -178,6 +178,6 @@ private:
     alignas(64) std::atomic<uint32_t> enqueuePos{0};
     alignas(64) std::atomic<uint32_t> dequeuePos{0};
 };
-#pragma warning(pop)
+#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
 extern DeferredDeletionQueue g_deletionQueue;

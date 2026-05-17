@@ -281,18 +281,6 @@ void SpectrumAnalyzerComponent::timerCallback()
         eqDataDirty = true;
     }
 
-    // Snapshot current 反映が遅延していても、UI側の最新EQ状態変化は取りこぼさない。
-    if (const auto* rawEqState = engine.getEQStateSnapshot())
-    {
-        const auto* eqState = static_cast<const EQProcessor::EQState*>(rawEqState);
-        const uint64_t directHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
-        if (directHash != lastDirectEqHash)
-        {
-            lastDirectEqHash = directHash;
-            eqDataDirty = true;
-        }
-    }
-
     const bool meterVisualChanged = updateLevelPeaks(dt);
 
     // ── サンプルレート変更検知 (タイマー駆動) ──

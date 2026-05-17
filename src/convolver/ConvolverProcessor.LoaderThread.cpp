@@ -258,7 +258,7 @@ bool ConvolverProcessor::LoaderThread::initializeConvolverSynchronously(LoadResu
 
     if (newConv->init(irL.release(), irR.release(), result.targetLength, sr, irPeakLatency,
                              maxFFTSize, internalBlockSize, firstPartition, callBlockSize, result.scaleFactor,
-                             convo::consumeAtomic(owner.experimentalDirectHeadEnabled, std::memory_order_acquire),
+                             owner.getExperimentalDirectHeadEnabled(),
                              nullptr, &owner))
     {
         result.newConv = newConv.release();

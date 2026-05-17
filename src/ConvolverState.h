@@ -37,8 +37,8 @@ namespace convo {
 // 畳み込みエンジン 1 インスタンス分の MKL リソースをすべて保持する。
 // Epoch-based RCU の「保護対象オブジェクト」として SafeStateSwapper に渡す。
 // ---------------------------------------------------------------------------
-#pragma warning(push)
-#pragma warning(disable: 4324) // alignment specifier introduced padding for this struct intentionally.
+#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 struct ConvolverState
 {
     // --- FFT 作業バッファ（mkl_malloc 64-byte アライン）---
@@ -217,6 +217,6 @@ struct ConvolverState
     ConvolverState(const ConvolverState&)            = delete;
     ConvolverState& operator=(const ConvolverState&) = delete;
 };
-#pragma warning(pop)
+#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
 } // namespace convo

@@ -2,11 +2,9 @@
 
 #include <atomic>
 #include "DeferredDeletionQueue.h"
+#include "core/EpochManager.h"
 
 #include "audioengine/AtomicAccess.h"
-
-// グローバル epoch（AudioEngine から設定される）
-extern std::atomic<uint64_t> g_currentEpoch;
 
 template <typename T>
 class RefCountedDeferred {
@@ -21,7 +19,7 @@ public:
             g_deletionQueue.enqueue(
                 static_cast<T*>(this),
                 [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
-                convo::consumeAtomic(g_currentEpoch, std::memory_order_acquire)
+                convo::EpochManager::instance().currentEpoch()
             );
         }
     }

@@ -56,36 +56,46 @@ class AudioEngine;
 class CacheManager;
 class ProgressiveUpgradeThread;
 
+#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 class ConvolverProcessor : public juce::ChangeBroadcaster,
                            private juce::Timer
 {
 public:
+    // BuildSnapshot: 同期/シリアライズ/ハッシュ用の輸送スナップショット。
+    // authoritative source-of-truth は PendingParams (pendingOverride)。
     struct BuildSnapshot
     {
+        // ---- Structural hash 対象（rebuild / crossfade 要否に影響）----
         float mix = 1.0f;
         bool bypassed = false;
-        int phaseMode = 0;
-        int resamplingPhaseMode = 0;
+        int phaseMode = static_cast<int>(PhaseMode::AsIs);
+        int resamplingPhaseMode = static_cast<int>(ResamplingPhaseMode::Linear);
         float smoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC;
         float targetIRLengthSec = IR_LENGTH_DEFAULT_SEC;
+        float autoDetectedIRLengthSec = IR_LENGTH_DEFAULT_SEC;
+        bool irLengthManualOverride = false;
         float mixedTransitionStartHz = MIXED_F1_DEFAULT_HZ;
         float mixedTransitionEndHz = MIXED_F2_DEFAULT_HZ;
         float mixedPreRingTau = MIXED_TAU_DEFAULT;
         int rebuildDebounceMs = REBUILD_DEBOUNCE_DEFAULT_MS;
         bool experimentalDirectHeadEnabled = false;
-        int tailProcessingMode = 0;
-        float tailRolloffStartHz = TAIL_ROLLOFF_START_DEFAULT_HZ;
-        float tailRolloffStrength = 0.0f;
-        float partitionTailStrength = TAIL_PARTITION_STRENGTH_DEFAULT;
+        // Tail* parameters migrated to pendingOverride (no longer in BuildSnapshot)
         int targetUpgradeFFTSize = 0;
         bool enableProgressiveUpgrade = false;
         int maxCacheEntries = 0;
+
+        // ---- Structural hash 非対象（同期/表示/復元用メタデータ）----
         juce::File irFile;
         juce::String irName;
         int irLength = 0;
         double currentIRScale = 1.0;
-        int nucHCMode = 0;
-        int nucLCMode = 0;
+
+        // ---- Structural hash 対象（NUC フィルターモード）----
+        int nucHCMode = static_cast<int>(convo::HCMode::Natural);
+        int nucLCMode = static_cast<int>(convo::LCMode::Natural);
+
+        // capture 時点のスナップショット整合確認用（比較/診断向け）
         std::uint64_t fingerprint = 0;
     };
 
@@ -152,19 +162,6 @@ public:
     static constexpr float MIXED_TAU_MIN = 4.0f;
     static constexpr float MIXED_TAU_MAX = 256.0f;
     static constexpr float MIXED_TAU_DEFAULT = 32.0f;
-    static constexpr float TAIL_ROLLOFF_START_MIN_HZ = 20.0f;
-    static constexpr float TAIL_ROLLOFF_START_MAX_HZ = 20000.0f;
-    static constexpr float TAIL_AIR_ROLLOFF_START_DEFAULT_HZ = 3500.0f;
-    static constexpr float TAIL_LAYER_ROLLOFF_START_DEFAULT_HZ = 2000.0f;
-    static constexpr float TAIL_ROLLOFF_START_DEFAULT_HZ = TAIL_AIR_ROLLOFF_START_DEFAULT_HZ;
-    static constexpr float TAIL_ROLLOFF_STRENGTH_MIN = 0.0f;
-    static constexpr float TAIL_ROLLOFF_STRENGTH_MAX = 2.0f;
-    static constexpr float TAIL_AIR_ROLLOFF_STRENGTH_DEFAULT = 0.3f;
-    static constexpr float TAIL_LAYER_ROLLOFF_STRENGTH_DEFAULT = 0.5f;
-    static constexpr float TAIL_ROLLOFF_STRENGTH_DEFAULT = TAIL_AIR_ROLLOFF_STRENGTH_DEFAULT;
-    static constexpr float TAIL_PARTITION_STRENGTH_MIN = 0.0f;
-    static constexpr float TAIL_PARTITION_STRENGTH_MAX = 2.0f;
-    static constexpr float TAIL_PARTITION_STRENGTH_DEFAULT = 1.0f;
     static constexpr int REBUILD_DEBOUNCE_MIN_MS = 50;
     static constexpr int REBUILD_DEBOUNCE_MAX_MS = 3000;
     static constexpr int REBUILD_DEBOUNCE_DEFAULT_MS = 400;
@@ -234,7 +231,7 @@ public:
     // バイパス制御
     //----------------------------------------------------------
     void setBypass(bool shouldBypass);
-    bool isBypassed() const { return convo::consumeAtomic(bypassed); }
+    bool isBypassed() const { const juce::ScopedLock lock(pendingOverrideLock); return pendingOverride.bypassed; }
     const convo::ConvolverState* getConvolverState() const { return convo::consumeAtomic(convolverState, std::memory_order_acquire); }
     void enterStateReader(int /*readerIndex*/) const noexcept {}
     void exitStateReader(int /*readerIndex*/) const noexcept {}
@@ -252,7 +249,7 @@ public:
     // IR Phase Mode
     //----------------------------------------------------------
     void setPhaseMode(PhaseMode mode);
-    PhaseMode getPhaseMode() const { return static_cast<PhaseMode>(convo::consumeAtomic(phaseMode, std::memory_order_acquire)); }
+    PhaseMode getPhaseMode() const;
 
     // 後方互換API
     void setUseMinPhase(bool useMinPhase);
@@ -268,25 +265,16 @@ public:
     void setNUCFilterModes(convo::HCMode hcMode, convo::LCMode lcMode);
 
     //------------------------------------------------------------------
-    // NUC テール処理パラメータ設定
-    // SetImpulse() 時の irFreqDomain 焼き込みに使用する。
-    // 変更時は Debounced rebuild を要求する。
+    // NUC テール処理パラメータは pendingOverride へ移行済み
+    // rebuild 条件の読み取りは rebuild 関数内で pendingOverride から読む
     //------------------------------------------------------------------
-    void setTailProcessingMode(int mode);
-    int getTailProcessingMode() const noexcept { return convo::consumeAtomic(tailProcessingMode, std::memory_order_acquire); }
-    void setTailRolloffStartHz(float hz);
-    float getTailRolloffStartHz() const noexcept { return convo::consumeAtomic(tailRolloffStartHz, std::memory_order_acquire); }
-    void setTailRolloffStrength(float strength);
-    float getTailRolloffStrength() const noexcept { return convo::consumeAtomic(tailRolloffStrength, std::memory_order_acquire); }
-    void setPartitionTailStrength(float strength);
-    float getPartitionTailStrength() const noexcept { return convo::consumeAtomic(partitionTailStrength, std::memory_order_acquire); }
 
     //----------------------------------------------------------
     // Experimental Direct Head Flag
     // 段階導入用の機能フラグ。変更時はIRを再構築する。
     //----------------------------------------------------------
     void setExperimentalDirectHeadEnabled(bool enabled);
-    bool getExperimentalDirectHeadEnabled() const { return convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire); }
+    bool getExperimentalDirectHeadEnabled() const;
 
     //----------------------------------------------------------
     // Smoothing Time
@@ -296,11 +284,10 @@ public:
 
     //----------------------------------------------------------
     // RT-safe setters (Audio Thread dispatch 専用)
-    // listeners.call() / requestDebouncedRebuild() を呼ばない。
+    // listeners.call() / 直接rebuild要求 を呼ばない。
     // （現行経路では通常使用しない。互換用途として保持）
     //----------------------------------------------------------
-    void setMixRT(float mixAmount) noexcept;
-    void setSmoothingTimeRT(float timeSec) noexcept;
+    // setMixRT / setSmoothingTimeRT: H3 修正により廃止 (shadow atomic 除去)
 
     //----------------------------------------------------------
     // Mixed Phase Parameters (f1/f2/tau)
@@ -325,8 +312,8 @@ public:
     float getTargetIRLength() const;
     void applyAutoDetectedIRLength(float timeSec);
     void setIRLengthManualOverride(bool isManual);
-    bool hasManualIRLengthOverride() const { return convo::consumeAtomic(irLengthManualOverride, std::memory_order_acquire); }
-    float getAutoDetectedIRLength() const { return convo::consumeAtomic(autoDetectedIRLengthSec, std::memory_order_acquire); }
+    bool hasManualIRLengthOverride() const;
+    float getAutoDetectedIRLength() const;
     static float getMaximumAllowedIRLengthSecForSampleRate(double sampleRate);
     float getMaximumAllowedIRLengthSec(double sampleRate = 0.0) const;
     static IRLoadPreview analyzeImpulseResponseFile(const juce::File& irFile, double processingSampleRate);
@@ -444,10 +431,7 @@ public:
         int getActiveCacheFFTSize() const noexcept;
         int getNUCHCMode() const noexcept;
         int getNUCLCMode() const noexcept;
-        // 注：getTailProcessingMode, getTailRolloffStartHz, getTailRolloffStrength,
-        //      getPartitionTailStrength は既にヘッダ内で inline 定義済みのため追加不要。
-        //      getPhaseMode, getMixedTransitionStartHz, getMixedTransitionEndHz,
-        //      getMixedPreRingTau, getExperimentalDirectHeadEnabled, getIRLength も既存。
+
     void shareConvolutionEngineFrom(const ConvolverProcessor& other);
     void refreshLatency();
 
@@ -553,7 +537,6 @@ private:
     void updateLatencyCache() noexcept;
     void requestHostDisplayUpdate();
     void debugCheckAtomicLockFree() const;
-    void requestDebouncedRebuild();
     bool runIncrementalBuildStep(IncrementalRebuildJob& job);
     bool runIncrementalFinalizeStep(IncrementalRebuildJob& job);
 
@@ -576,6 +559,16 @@ private:
                                   int targetLength,
                                   double loadedSR);
     void applyNewStateNotifyStep();
+
+    // H3保守性: BuildSnapshot と PendingParams の相互マッピングを一元化
+    // 呼び出し側で pendingOverrideLock を保持している前提。
+    // [更新ガイド]
+    // - BuildSnapshot または PendingParams に項目を追加/削除したら、
+    //   2関数を同時に更新すること。
+    // - 併せて captureBuildSnapshot() の fingerprint 対象、
+    //   getStructuralHash() の対象可否も必ず見直すこと。
+    void copyPendingToSnapshotUnlocked(BuildSnapshot& snapshot) const noexcept;
+    void copySnapshotToPendingUnlocked(const BuildSnapshot& snapshot) noexcept;
 
     void applyNewState(StereoConvolver* newConv, std::unique_ptr<juce::AudioBuffer<double>> loadedIR, double loadedSR, int targetLength, bool isRebuild, const juce::File& file, double scaleFactor, std::unique_ptr<juce::AudioBuffer<double>> displayIR);
     void handleLoadError(const juce::String& error);
@@ -781,7 +774,7 @@ private:
     std::atomic<uint64_t> latencyChangeRequestedGen { 0 };
     // リサンプリング位相モード（r8brain CDSPResampler24IR に渡す）
     // Message Thread からのみ更新、LoaderThread が読む（memory_order_acquire）
-    std::atomic<ResamplingPhaseMode> currentResamplingPhaseMode { ResamplingPhaseMode::Linear };
+    // pendingOverride に統合済み
     // RCU経路でもUIがレイテンシー表示できるように、直近の内訳を保持する。
     std::atomic<int> uiAlgorithmLatencySamples { 0 };
     std::atomic<int> uiIrPeakLatencySamples { 0 };
@@ -800,15 +793,46 @@ private:
     // パラメータ（atomic）
     //----------------------------------------------------------
     // 【False Sharing 防止】頻繁な UI 更新変数を独立キャッシュラインへ配置
-    #pragma warning(push)
-    #pragma warning(disable: 4324)
-    alignas(64) std::atomic<bool> bypassed{false};
-    alignas(64) std::atomic<float> mixTarget{1.0f}; // UI からのターゲット値 (0.0-1.0)
-    alignas(64) std::atomic<bool> experimentalDirectHeadEnabled{false};
-    #pragma warning(pop)
+    // H3: bypassed / mixTarget shadow atomics 廃止済み。pendingOverride が唯一の Source of Truth。
 
     convo::SafeStateSwapper rcuSwapper;
     convo::LinearRamp mixSmoother; // オーディオスレッドでの平滑化用
+
+    struct RuntimeProcessSnapshot
+    {
+        bool bypassed { false };
+        float mixTarget { 1.0f };
+        float smoothingTimeSec { SMOOTHING_TIME_DEFAULT_SEC };
+        double currentSampleRate { 0.0 };
+    };
+
+    // H3: UI/Message Thread 側の authoritative parameter store。
+    // BuildSnapshot はシリアライズ/輸送用として維持し、
+    // pending state はこの専用構造体で責務分離する。
+    struct PendingParams
+    {
+        float mix = 1.0f;
+        bool bypassed = false;
+        int phaseMode = static_cast<int>(PhaseMode::AsIs);
+        int resamplingPhaseMode = static_cast<int>(ResamplingPhaseMode::Linear);
+        float smoothingTimeSec = SMOOTHING_TIME_DEFAULT_SEC;
+        float targetIRLengthSec = IR_LENGTH_DEFAULT_SEC;
+        float autoDetectedIRLengthSec = IR_LENGTH_DEFAULT_SEC;
+        bool irLengthManualOverride = false;
+        float mixedTransitionStartHz = MIXED_F1_DEFAULT_HZ;
+        float mixedTransitionEndHz = MIXED_F2_DEFAULT_HZ;
+        float mixedPreRingTau = MIXED_TAU_DEFAULT;
+        int rebuildDebounceMs = REBUILD_DEBOUNCE_DEFAULT_MS;
+        bool experimentalDirectHeadEnabled = false;
+        int targetUpgradeFFTSize = 0;
+        bool enableProgressiveUpgrade = false;
+        int maxCacheEntries = 0;
+        int nucHCMode = static_cast<int>(convo::HCMode::Natural);
+        int nucLCMode = static_cast<int>(convo::LCMode::Natural);
+    };
+
+    alignas(64) RuntimeProcessSnapshot runtimeProcessSnapshots[2] {};
+    std::atomic<uint32_t> runtimeProcessSnapshotIndex { 0 };
 
     static StereoConvolver* fromEngineBits(std::uintptr_t bits) noexcept
     {
@@ -837,12 +861,30 @@ private:
         convo::publishAtomic(m_activeEngineBits, toEngineBits(value), order);
     }
 
+    RuntimeProcessSnapshot captureRuntimeProcessSnapshot() const noexcept
+    {
+        const uint32_t index = convo::consumeAtomic(runtimeProcessSnapshotIndex, std::memory_order_acquire) & 1u;
+        return runtimeProcessSnapshots[index];
+    }
+
+    void publishRuntimeProcessSnapshot() noexcept
+    {
+        const uint32_t current = convo::consumeAtomic(runtimeProcessSnapshotIndex, std::memory_order_relaxed) & 1u;
+        const uint32_t next = current ^ 1u;
+
+        // H3: shadow atomic を廃止し pendingOverride（唯一の Source of Truth）から読む
+        {
+            const juce::ScopedLock lock(pendingOverrideLock);
+            runtimeProcessSnapshots[next].bypassed       = pendingOverride.bypassed;
+            runtimeProcessSnapshots[next].mixTarget      = pendingOverride.mix;
+            runtimeProcessSnapshots[next].smoothingTimeSec = pendingOverride.smoothingTimeSec;
+        }
+        runtimeProcessSnapshots[next].currentSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+
+        convo::publishAtomic(runtimeProcessSnapshotIndex, next, std::memory_order_release);
+    }
 
 
-    #pragma warning(push)
-    #pragma warning(disable: 4324)
-    alignas(64) std::atomic<int> phaseMode{static_cast<int>(PhaseMode::Mixed)};
-    #pragma warning(pop)
 
     std::atomic<std::uint64_t> rebuildDebounceToken { 0 };
     std::atomic<std::uint64_t> debugDebouncedRebuildRequestCount { 0 };
@@ -855,34 +897,18 @@ private:
     //   Audio Thread から store(true)、process() 先頭で exchange(false) して rebuildPendingAfterLoad に転送。
     // overflowRequested は削除: RT 側で値を使用せず dead code だったため除去 (F-01 fix)
 
-    #pragma warning(push)
-    #pragma warning(disable: 4324)
-    alignas(64) std::atomic<int> rebuildDebounceMs { REBUILD_DEBOUNCE_DEFAULT_MS };
-    #pragma warning(pop)
-
-    // NUC 出力周波数フィルターモード (Message Thread で更新, finalizeNUC で読む)
-    // int として保存し、使用時に enum へキャスト。
-    std::atomic<int> nucHCMode { static_cast<int>(convo::HCMode::Natural) };
-    std::atomic<int> nucLCMode { static_cast<int>(convo::LCMode::Natural) };
-    #pragma warning(push)
-    #pragma warning(disable: 4324)
-    alignas(64) std::atomic<int> tailProcessingMode { 0 };
-    alignas(64) std::atomic<float> tailRolloffStartHz { TAIL_ROLLOFF_START_DEFAULT_HZ };
-    alignas(64) std::atomic<float> tailRolloffStrength { TAIL_ROLLOFF_STRENGTH_DEFAULT };
-    alignas(64) std::atomic<float> partitionTailStrength { TAIL_PARTITION_STRENGTH_DEFAULT };
-    #pragma warning(pop)
-    std::atomic<float> targetIRLengthSec{IR_LENGTH_DEFAULT_SEC};
-    std::atomic<float> autoDetectedIRLengthSec{IR_LENGTH_DEFAULT_SEC};
-    std::atomic<bool> irLengthManualOverride{false};
-    std::atomic<float> smoothingTimeSec{SMOOTHING_TIME_DEFAULT_SEC};
-    std::atomic<float> mixedTransitionStartHz{MIXED_F1_DEFAULT_HZ};
-    std::atomic<float> mixedTransitionEndHz{MIXED_F2_DEFAULT_HZ};
-    std::atomic<float> mixedPreRingTau{MIXED_TAU_DEFAULT};
+    // H3: smoothingTimeSec shadow atomic 廃止済み。pendingOverride.smoothingTimeSec が唯一の Source of Truth。
 
     // 【案 B】Smoothing Time 変更フラグ（Audio Thread 委譲用）
     // [F-01 fix] 世代カウンター方式
     std::atomic<uint64_t> smoothingTimeChangePendingGen { 0 };
     std::atomic<uint64_t> mixSmootherResetPendingGen { 0 };
+
+    // [H3] Pending parameter override for snapshot-based setter transition
+    // Setters write parameters here instead of directly publishing atomics.
+    // This pending override is captured by rebuild requests.
+    PendingParams pendingOverride;
+    mutable juce::CriticalSection pendingOverrideLock;
 
     //----------------------------------------------------------
     // IR情報
@@ -1032,9 +1058,6 @@ public: // Added for AudioEngine access
     std::unique_ptr<ProgressiveUpgradeThread> upgradeThread;
     ConvolverRuntime runtime;
     std::atomic<bool> writerActive { false };
-    std::atomic<int> targetUpgradeFFTSize { 4096 };
-    std::atomic<bool> enableProgressiveUpgrade { true };
-    std::atomic<size_t> maxCacheEntries { 10 };
     std::atomic<uint64_t> activeCacheKey { 0 };
     std::atomic<int> activeCacheFFTSize { 0 };
 
@@ -1064,3 +1087,4 @@ public: // Added for AudioEngine access
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConvolverProcessor)
 
 };
+#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容

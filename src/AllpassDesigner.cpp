@@ -369,8 +369,6 @@ DesignResult AllpassDesigner::designWithCMAES(
         // Non-RT worker thread側で協調的にCPUを譲り、再生スレッドへの干渉を抑える。
         if ((gen & 1) == 0)
             std::this_thread::yield();
-        if ((gen % 8) == 0)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
         if ((gen % 10) == 0)
         {

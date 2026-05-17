@@ -13,9 +13,18 @@
 
 #include "audioengine/AtomicAccess.h"
 
+//============================================================================
+// Destruction handler for EBR (Epoch-Based Reclamation)
+// L5: epoch-only 削除。RefCountedDeferred の二重ライフタイムモデルを廃止。
+//============================================================================
+static void deleteBandNodePtr_coeff(void* p) { delete static_cast<EQProcessor::BandNode*>(p); }
+
 static void retireBandNode(EQProcessor::BandNode* node)
 {
-    if (node) node->release();
+    if (node) {
+        const uint64_t epoch = convo::EpochManager::instance().currentEpoch();
+        g_deletionQueue.enqueue(node, deleteBandNodePtr_coeff, epoch);
+    }
 }
 
 //============================================================================
@@ -63,16 +72,15 @@ void EQProcessor::updateBandNode(int band)
     auto state = loadCurrentState(std::memory_order_acquire);
     if (state == nullptr) return;
     auto newNode = createBandNode(band, *state);
-    BandNode* oldNode = activeBandNodes[band];
+    BandNode* oldNode = exchangeBandNode(band, newNode, std::memory_order_acq_rel);
 
-    publishBandNode(band, newNode, std::memory_order_release);
-    convo::EpochManager::instance().advanceEpoch();
-
+    activeBandNodes[band] = newNode;
+    // L5 fix: retire old node BEFORE advanceEpoch so epoch N is captured (not N+1).
     if (oldNode)
     {
         retireBandNode(oldNode);
     }
-    activeBandNodes[band] = newNode;
+    convo::EpochManager::instance().advanceEpoch();
 }
 
 //============================================================================

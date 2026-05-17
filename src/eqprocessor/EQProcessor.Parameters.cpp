@@ -8,9 +8,14 @@
 
 #include "audioengine/AtomicAccess.h"
 
+static void deleteEQStatePtr_params(void* p) { delete static_cast<EQProcessor::EQState*>(p); }
+
 static void retireEQState(EQProcessor::EQState* state)
 {
-    if (state) state->release();
+    if (state) {
+        const uint64_t epoch = convo::EpochManager::instance().currentEpoch();
+        g_deletionQueue.enqueue(state, deleteEQStatePtr_params, epoch);
+    }
 }
 
 //============================================================================

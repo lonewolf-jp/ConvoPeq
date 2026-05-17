@@ -180,13 +180,20 @@ private:
         std::jthread thread;
     };
 
-    void workerThreadMain();
+    void workerThreadMain(std::stop_token stopToken);
     void startEvaluationWorkers();
     void stopEvaluationWorkers() noexcept;
     void configureEvaluationContexts(double sampleRateHz) noexcept;
-    void evaluationWorkerMain(int workerIndex) noexcept;
-    void runEvaluationJobsForWorker(int workerIndex, int numSegments, int evaluationBitDepth) noexcept;
-    int evaluatePopulation(int numSegments, int evaluationBitDepth, int& bestCandidateIndex, double& bestCandidateScore);
+    void evaluationWorkerMain(int workerIndex, std::stop_token stopToken) noexcept;
+    void runEvaluationJobsForWorker(int workerIndex,
+                                    int numSegments,
+                                    int evaluationBitDepth,
+                                    const std::stop_token* stopToken = nullptr) noexcept;
+    int evaluatePopulation(int numSegments,
+                           int evaluationBitDepth,
+                           int& bestCandidateIndex,
+                           double& bestCandidateScore,
+                           const std::stop_token& stopToken);
     SessionSignature captureSessionSignature() const noexcept;
     void resetLearningSession(const SessionSignature& session, bool resume) noexcept;
     void drainCaptureQueue(const SessionSignature& session) noexcept;

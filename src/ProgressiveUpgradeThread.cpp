@@ -105,14 +105,24 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
     auto prepared = cacheManager.loadPreparedState(stepKey, nextFFTSize, taskGeneration);
     if (!prepared)
     {
+        juce::WeakReference<ConvolverProcessor> weakOwner(&processor);
+        std::atomic<bool>* cancelledFlag = &cancelled;
+        const uint64_t expectedGeneration = taskGeneration;
+
         prepared = converter.convertToHighRes(irFile,
                                               sampleRate,
                                               nextFFTSize,
                                               taskGeneration,
                                               stepKey,
-                                              [this]()
+                                              [weakOwner, cancelledFlag, expectedGeneration]()
                                               {
-                                                  return this->threadShouldExit() || this->checkAndCancel();
+                                                  auto* owner = weakOwner.get();
+                                                  if (owner == nullptr)
+                                                      return true;
+
+                                                  return juce::Thread::currentThreadShouldExit()
+                                                      || convo::consumeAtomic(*cancelledFlag, std::memory_order_acquire)
+                                                      || !owner->isConvolverGenerationCurrent(expectedGeneration);
                                               });
         if (!prepared)
             return false;
@@ -161,14 +171,20 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
     const bool isFinalStep = (nextFFTSize >= targetFFTSize);
     if (isFinalStep)
     {
+        juce::WeakReference<ConvolverProcessor> weakProcessor(&processor);
+        const uint64_t expectedGeneration = taskGeneration;
         auto* preparedRaw = prepared.release();
-        juce::MessageManager::callAsync([this, preparedRaw]()
+        juce::MessageManager::callAsync([weakProcessor, expectedGeneration, preparedRaw]()
         {
             std::unique_ptr<PreparedIRState> prepared(preparedRaw);
-            if (this->checkAndCancel())
+            auto* owner = weakProcessor.get();
+            if (owner == nullptr)
                 return;
 
-            processor.applyPreparedIRState(std::move(prepared));
+            if (!owner->isConvolverGenerationCurrent(expectedGeneration))
+                return;
+
+            owner->applyPreparedIRState(std::move(prepared));
         });
     }
 

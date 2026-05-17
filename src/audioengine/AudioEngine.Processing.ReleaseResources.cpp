@@ -128,7 +128,6 @@ void AudioEngine::releaseResources()
 
     setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "releaseResources");
     convo::EpochManager::instance().advanceEpoch();
-    convo::publishAtomic(g_currentEpoch, convo::EpochManager::instance().currentEpoch(), std::memory_order_release);
 
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 

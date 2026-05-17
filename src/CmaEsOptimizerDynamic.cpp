@@ -64,12 +64,31 @@ void CmaEsOptimizerDynamic::update(const std::vector<std::vector<double>>& candi
     const int lambda = static_cast<int>(candidates.size());
     const int mu = lambda / 2;
 
+    if (lambda <= 0 || static_cast<int>(fitness.size()) < lambda || mu <= 0)
+        return;
+
     covRetentionCurrent = std::min(params.covRetentionTarget,
                                    covRetentionCurrent + params.covRetentionStep);
 
-    // ランキング
-    std::vector<int> indices(lambda);
-    std::iota(indices.begin(), indices.end(), 0);
+    // ランキング（非有限値は除外）
+    std::vector<int> indices;
+    indices.reserve(lambda);
+    for (int i = 0; i < lambda; ++i) {
+        if (std::isfinite(fitness[i]))
+            indices.push_back(i);
+    }
+
+    // NaN/Inf 汚染時: 共分散とシグマを安全に再初期化して世代更新をスキップ
+    if (static_cast<int>(indices.size()) < mu) {
+        resetIdentityCovariance();
+        const double sigmaReset = std::clamp(std::max(params.sigmaMin * 4.0, 0.12),
+                                             params.sigmaMin,
+                                             params.sigmaMax);
+        sigma = sigmaReset;
+        covRetentionCurrent = params.covRetentionTarget;
+        return;
+    }
+
     std::sort(indices.begin(), indices.end(),
               [&](int a, int b) { return fitness[a] < fitness[b]; });
 

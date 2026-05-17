@@ -72,16 +72,30 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
             return false;
         }
 
+        float mixedF1, mixedF2, mixedTau;
+        {
+            const juce::ScopedLock lock(pendingOverrideLock);
+            mixedF1  = pendingOverride.mixedTransitionStartHz;
+            mixedF2  = pendingOverride.mixedTransitionEndHz;
+            mixedTau = pendingOverride.mixedPreRingTau;
+        }
         activeLoader = std::make_unique<LoaderThread>(*this, *(state->ir), state->sampleRate, processingSampleRate, processingBlockSize, getPhaseMode(),
-                                                      convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire), convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire),
-                                                      convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire), convo::consumeAtomic(currentIRScale, std::memory_order_acquire));
+                                                      mixedF1, mixedF2,
+                                                      mixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire));
         releaseIRState(state);
     }
     else
     {
+        float mixedF1b, mixedF2b, mixedTaub;
+        {
+            const juce::ScopedLock lock(pendingOverrideLock);
+            mixedF1b  = pendingOverride.mixedTransitionStartHz;
+            mixedF2b  = pendingOverride.mixedTransitionEndHz;
+            mixedTaub = pendingOverride.mixedPreRingTau;
+        }
         activeLoader = std::make_unique<LoaderThread>(*this, irFile, processingSampleRate, processingBlockSize, getPhaseMode(),
-                                                      convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire), convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire),
-                                                      convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire));
+                                                      mixedF1b, mixedF2b,
+                                                      mixedTaub);
         convo::publishAtomic(currentIrOptimized, optimizeForRealTime);
     }
 
@@ -106,7 +120,7 @@ void ConvolverProcessor::startProgressiveUpgrade(const juce::File& file,
                                                  uint64_t generation,
                                                  uint64_t baseKey)
 {
-    if (!convo::consumeAtomic(enableProgressiveUpgrade, std::memory_order_acquire))
+    if (!isProgressiveUpgradeEnabled())
         return;
 
     const int targetFFT = getTargetUpgradeFFTSize();
@@ -143,37 +157,49 @@ void ConvolverProcessor::setTargetUpgradeFFTSize(int fftSize)
             break;
         }
     }
-    convo::publishAtomic(targetUpgradeFFTSize, resolved, std::memory_order_release);
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverride.targetUpgradeFFTSize = resolved;
+    }
 }
 
 int ConvolverProcessor::getTargetUpgradeFFTSize() const
 {
-    return convo::consumeAtomic(targetUpgradeFFTSize, std::memory_order_acquire);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.targetUpgradeFFTSize;
 }
 
 void ConvolverProcessor::setEnableProgressiveUpgrade(bool enable)
 {
-    convo::publishAtomic(enableProgressiveUpgrade, enable, std::memory_order_release);
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverride.enableProgressiveUpgrade = enable;
+    }
     if (!enable)
         stopUpgradeThread();
 }
 
 bool ConvolverProcessor::isProgressiveUpgradeEnabled() const
 {
-    return convo::consumeAtomic(enableProgressiveUpgrade, std::memory_order_acquire);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.enableProgressiveUpgrade;
 }
 
 void ConvolverProcessor::setMaxCacheEntries(size_t maxEntries)
 {
     const size_t clamped = juce::jlimit<size_t>(1, 64, maxEntries);
-    convo::publishAtomic(maxCacheEntries, clamped, std::memory_order_release);
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverride.maxCacheEntries = static_cast<int>(clamped);
+    }
     if (cacheManager)
         cacheManager->evictLRU(clamped);
 }
 
 size_t ConvolverProcessor::getMaxCacheEntries() const
 {
-    return convo::consumeAtomic(maxCacheEntries, std::memory_order_acquire);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return static_cast<size_t>(pendingOverride.maxCacheEntries);
 }
 
 void ConvolverProcessor::clearCache()
@@ -230,7 +256,7 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
     const int targetFFT = getTargetUpgradeFFTSize();
     const int lowResFFT = 512;
     const int phase = static_cast<int>(getPhaseMode());
-    const size_t cacheLimit = convo::consumeAtomic(maxCacheEntries, std::memory_order_acquire);
+    const size_t cacheLimit = getMaxCacheEntries();
 
     int appliedFft = 0;
     const uint64_t targetKey = CacheManager::computeKey(irFile, targetFFT, sr, phase, targetFFT);
@@ -416,7 +442,7 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
 
     // RCU経路では legacy convolution を経由しないため、UI表示用のレイテンシー推定値を更新する。
     {
-        const bool directHeadActive = convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire);
+        const bool directHeadActive = getExperimentalDirectHeadEnabled();
         const int algorithmLatency = directHeadActive ? 0 : juce::jmax(0, prepared->fftSize);
 
         int irPeakLatency = 0;
@@ -489,21 +515,6 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
     // 4. UI 通知
     postCoalescedChangeNotification();
     convo::publishAtomic(lastPreparedIRApplyTicks, juce::Time::getHighResolutionTicks(), std::memory_order_release);
-
-    // DSP リビルドトリガー:
-    // Progressive upgrade が有効な場合、途中ステップ（512/1024/2048）では
-    // convolverParamsChanged を呼ばない。targetFFT 到達時のみ DSP rebuild を起動する。
-    // これにより CMA-ES Mixed Phase 計算が1回だけ実行され、CPU スパイクによる
-    // 音切れ（タタタタ）が複数回発生しなくなる。
-    // Progressive upgrade が無効な場合は常に通知する（upgrade OFF の動作を保持）。
-    {
-        const bool progressiveEnabled = convo::consumeAtomic(enableProgressiveUpgrade, std::memory_order_acquire);
-        const int publishedFftSize    = convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire);
-        const bool isFinalPublish     = !progressiveEnabled
-                                     || (publishedFftSize >= getTargetUpgradeFFTSize());
-        if (isFinalPublish)
-            listeners.call(&Listener::convolverParamsChanged, this);
-    }
 
     convo::publishAtomic(isLoading, false, std::memory_order_release);
     setLoadingProgress(1.0f);
@@ -582,16 +593,15 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
 
         convo::FilterSpec spec;
         spec.sampleRate = sr;
-        spec.hcMode = static_cast<convo::HCMode>(convo::consumeAtomic(nucHCMode, std::memory_order_acquire));
-        spec.lcMode = static_cast<convo::LCMode>(convo::consumeAtomic(nucLCMode, std::memory_order_acquire));
-        spec.tailMode = convo::consumeAtomic(tailProcessingMode, std::memory_order_acquire);
-        spec.tailRolloffStartHz = convo::consumeAtomic(tailRolloffStartHz, std::memory_order_acquire);
-        spec.tailRolloffStrength = convo::consumeAtomic(tailRolloffStrength, std::memory_order_acquire);
-        spec.partitionTailStrength = convo::consumeAtomic(partitionTailStrength, std::memory_order_acquire);
+        {
+            const juce::ScopedLock lock(pendingOverrideLock);
+            spec.hcMode = static_cast<convo::HCMode>(pendingOverride.nucHCMode);
+            spec.lcMode = static_cast<convo::LCMode>(pendingOverride.nucLCMode);
+        }
 
         if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,
                   maxFFTSize, knownBlockSize, firstPartition, preferredCallSize, scaleFactor,
-                  convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire),
+                  getExperimentalDirectHeadEnabled(),
                   &spec, this))
         {
             jassert(newConv->areNUCDescriptorsCommitted());
@@ -648,7 +658,16 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
     convo::publishAtomic(isLoading, false);
     convo::publishAtomic(isRebuilding, false, std::memory_order_release);
     if (convo::exchangeAtomic(rebuildPendingAfterLoad, false, std::memory_order_acq_rel) && isIRLoaded())
-        requestDebouncedRebuild();
+    {
+        const bool queued = juce::MessageManager::callAsync([weakThis = juce::WeakReference<ConvolverProcessor>(this)]()
+        {
+            if (auto* self = weakThis.get())
+                self->rebuildAllIRs();
+        });
+
+        if (!queued)
+            convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release);
+    }
     updateLatencyCache();
     requestHostDisplayUpdate();
     postCoalescedChangeNotification();

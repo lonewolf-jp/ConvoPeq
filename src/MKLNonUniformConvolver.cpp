@@ -175,30 +175,6 @@ inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexce
     return _mm_movemask_pd(validMask) == 0x3;
 }
 
-inline double computeTailGainForBin(int k,
-                                    int numBins,
-                                    double sampleRate,
-                                    double startHz,
-                                    double strength) noexcept
-{
-    if (strength <= 0.0 || sampleRate <= 0.0 || numBins <= 1)
-        return 1.0;
-
-    const double nyquist = sampleRate * 0.5;
-    if (nyquist <= 1.0)
-        return 1.0;
-
-    const double safeStartHz = std::max(0.0, std::min(startHz, nyquist - 1.0));
-    const double f = static_cast<double>(k) * nyquist / static_cast<double>(numBins - 1);
-
-    if (f <= safeStartHz)
-        return 1.0;
-
-    const double denom = std::max(1.0, nyquist - safeStartHz);
-    const double x = juce::jlimit(0.0, 1.0, (f - safeStartHz) / denom);
-    return std::exp(-strength * x * x);
-}
-
 inline void deinterleaveComplex(const double* srcInterleaved, double* dstReal, double* dstImag, int complexSize) noexcept
 {
     for (int k = 0; k < complexSize; ++k)
@@ -330,10 +306,6 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
 {
     const double fs      = spec.sampleRate;
     const double nyquist = fs * 0.5;
-    const int tailMode   = juce::jlimit(0, 1, spec.tailMode);
-    const double tailStartHz = juce::jlimit(20.0, 20000.0, static_cast<double>(spec.tailRolloffStartHz));
-    const double baseTailStrength = juce::jlimit(0.0, 2.0, static_cast<double>(spec.tailRolloffStrength));
-    const double partitionStrength = juce::jlimit(0.0, 2.0, static_cast<double>(spec.partitionTailStrength));
 
     const double hcFcStart = (fs <= 48000.0) ? 18000.0 : 22000.0;
     const double hcFcEnd   = nyquist;
@@ -419,17 +391,6 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
                     gain[k] *= g_lc;
                 }
             }
-        }
-
-        // ── Tail ゲイン ──
-        double layerTailStrength = baseTailStrength;
-        if (tailMode == 1)
-            layerTailStrength = (li == 0) ? 0.0 : juce::jlimit(0.0, 4.0, baseTailStrength * partitionStrength);
-
-        if (layerTailStrength > 0.0)
-        {
-            for (int k = 0; k < cSize; ++k)
-                gain[k] *= computeTailGainForBin(k, cSize, fs, tailStartHz, layerTailStrength);
         }
 
         // ── 全パーティションの irFreqDomain に gain[] を適用 ──

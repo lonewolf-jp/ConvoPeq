@@ -219,7 +219,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
                 if (newConv->init(irL.release(), irR.release(),
                                   conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, conv->storedScale,
-                                  convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire),
+                                  getExperimentalDirectHeadEnabled(),
                                   nullptr, this))
                 {
                     newConv = newConvHolder.release();
@@ -296,9 +296,12 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     juce::FloatVectorOperations::clear(wetBufferStorage[0].get(), MAX_BLOCK_SIZE);
     juce::FloatVectorOperations::clear(wetBufferStorage[1].get(), MAX_BLOCK_SIZE);
 
-    // スムージング時間の設定
-    mixSmoother.reset(sampleRate, static_cast<double>(convo::consumeAtomic(smoothingTimeSec)));
-    mixSmoother.setCurrentAndTargetValue(static_cast<double>(convo::consumeAtomic(mixTarget)));
+    // スムージング時間の設定 (H3: pendingOverride が唯一の Source of Truth)
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        mixSmoother.reset(sampleRate, static_cast<double>(pendingOverride.smoothingTimeSec));
+        mixSmoother.setCurrentAndTargetValue(static_cast<double>(pendingOverride.mix));
+    }
 
     // レイテンシー補正の初期化
     latencySmoother.reset(sampleRate, 0.1);

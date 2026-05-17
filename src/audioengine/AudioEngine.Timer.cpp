@@ -425,6 +425,12 @@ void AudioEngine::timerCallback()
         dsp->eqState->cleanupForRuntime();
         dsp->convolverState->cleanupForRuntime();
 
+        // M2: PsychoacousticDither の RNG リングは Audio Thread 外で補充する。
+        // timerCallback は Message Thread で実行されるため、RT 制約に抵触しない。
+        const bool activePsychoacoustic = (dsp->noiseShaperType == NoiseShaperType::Psychoacoustic);
+        if (activePsychoacoustic && dsp->ditherBitDepth > 0)
+            dsp->dither.refillRandomRingNonRt();
+
         const bool activeFixed4Tap = (dsp->noiseShaperType == NoiseShaperType::Fixed4Tap);
         const bool activeFixed15Tap = (dsp->noiseShaperType == NoiseShaperType::Fixed15Tap);
         const bool activeDitherEnabled = (dsp->ditherBitDepth > 0);

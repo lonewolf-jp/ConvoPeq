@@ -21,8 +21,8 @@ namespace convo
 {
 
 #if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable: 4324) // alignment specifier による構造体パディング警告を局所抑制
+#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif
 
 class Fixed15TapNoiseShaper
@@ -482,7 +482,7 @@ private:
 };
 
 #if defined(_MSC_VER)
-#pragma warning(pop)
+#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif
 
 } // namespace convo

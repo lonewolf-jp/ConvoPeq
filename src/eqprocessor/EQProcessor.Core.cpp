@@ -14,13 +14,23 @@
 
 //============================================================================
 // Destruction handlers for EBR (Epoch-Based Reclamation)
+// L5: epoch-only 削除。RefCountedDeferred の二重ライフタイムモデルを廃止。
 //============================================================================
+static void deleteEQStatePtr(void* p) { delete static_cast<EQProcessor::EQState*>(p); }
+static void deleteBandNodePtr_core(void* p) { delete static_cast<EQProcessor::BandNode*>(p); }
+
 static void retireEQState(EQProcessor::EQState* state) {
-    if (state) state->release();
+    if (state) {
+        const uint64_t epoch = convo::EpochManager::instance().currentEpoch();
+        g_deletionQueue.enqueue(state, deleteEQStatePtr, epoch);
+    }
 }
 
 static void retireBandNode(EQProcessor::BandNode* node) {
-    if (node) node->release();
+    if (node) {
+        const uint64_t epoch = convo::EpochManager::instance().currentEpoch();
+        g_deletionQueue.enqueue(node, deleteBandNodePtr_core, epoch);
+    }
 }
 
 //============================================================================
@@ -48,10 +58,7 @@ EQProcessor::~EQProcessor()
     }
 
     for (auto& node : activeBandNodes) {
-        if (node) {
-            retireBandNode(node.get());
-            node = nullptr;
-        }
+        node = nullptr;
     }
 
     releaseResources();
@@ -509,18 +516,19 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
 
     if (bandIndex < 0 || bandIndex >= NUM_BANDS) return;
 
-    auto node = other.activeBandNodes[bandIndex];
+    const auto* otherState = other.loadCurrentState(std::memory_order_acquire);
+    if (otherState == nullptr)
+        return;
 
-    if (node) {
-        // EBR: lifetime managed by RCU
-    }
-    publishBandNode(bandIndex, node, std::memory_order_release);
+    auto* newNode = createBandNode(bandIndex, *otherState);
+    auto* oldNode = exchangeBandNode(bandIndex, newNode, std::memory_order_acq_rel);
 
-    if (activeBandNodes[bandIndex])
-    {
-        retireBandNode(activeBandNodes[bandIndex]);
-    }
-    activeBandNodes[bandIndex] = node;
+    activeBandNodes[bandIndex] = newNode;
+
+    if (oldNode)
+        retireBandNode(oldNode);
+
+    convo::EpochManager::instance().advanceEpoch();
 }
 
 //============================================================================
@@ -675,10 +683,10 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
             if (loopState)
             {
                 auto newNode = createBandNode(i, *loopState);
-                auto oldNode = exchangeBandNode(i, newNode, std::memory_order_release);
+                auto oldNode = exchangeBandNode(i, newNode, std::memory_order_acq_rel);
 
-                if (activeBandNodes[i])
-                    retireBandNode(activeBandNodes[i]);
+                if (oldNode)
+                    retireBandNode(oldNode);
 
                 activeBandNodes[i] = newNode;
             }

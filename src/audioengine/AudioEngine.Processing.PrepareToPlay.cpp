@@ -134,25 +134,34 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // --- レイテンシ整合バッファの再確保 ---
     // ※本関数はAudioThread停止中のみ呼ぶこと！
-    if (latencyBufOldL) { convo::aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
-    if (latencyBufOldR) { convo::aligned_free(latencyBufOldR); latencyBufOldR = nullptr; }
-    if (latencyBufNewL) { convo::aligned_free(latencyBufNewL); latencyBufNewL = nullptr; }
-    if (latencyBufNewR) { convo::aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
-
     // 最大遅延（2秒上限・kMaxLatencySamples制限）
     // +blockSizeはwrap安全余裕（リングバッファwrap時の読み出し安全域）
     const int maxDelay = std::min(kMaxLatencySamples, static_cast<int>(safeSampleRate * 2.0));
-    latencyBufSize = maxDelay + bufferSize + 2;
+    const int requiredLatencyBufSize = maxDelay + bufferSize + 2;
+    const bool needsLatencyReallocation = (latencyBufSize != requiredLatencyBufSize)
+        || (latencyBufOldL == nullptr)
+        || (latencyBufOldR == nullptr)
+        || (latencyBufNewL == nullptr)
+        || (latencyBufNewR == nullptr);
 
-    latencyBufOldL = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
-    latencyBufOldR = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
-    latencyBufNewL = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
-    latencyBufNewR = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
+    if (needsLatencyReallocation)
+    {
+        if (latencyBufOldL) { convo::aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
+        if (latencyBufOldR) { convo::aligned_free(latencyBufOldR); latencyBufOldR = nullptr; }
+        if (latencyBufNewL) { convo::aligned_free(latencyBufNewL); latencyBufNewL = nullptr; }
+        if (latencyBufNewR) { convo::aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
 
-    // malloc失敗時は安全フェイル
-    if (!latencyBufOldL || !latencyBufOldR || !latencyBufNewL || !latencyBufNewR) {
-        rollbackPrepareFailure();
-        return;
+        latencyBufSize = requiredLatencyBufSize;
+        latencyBufOldL = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
+        latencyBufOldR = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
+        latencyBufNewL = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
+        latencyBufNewR = convo::makeAlignedArray<double>(static_cast<size_t>(latencyBufSize)).release();
+
+        // malloc失敗時は安全フェイル
+        if (!latencyBufOldL || !latencyBufOldR || !latencyBufNewL || !latencyBufNewR) {
+            rollbackPrepareFailure();
+            return;
+        }
     }
 
     std::memset(latencyBufOldL, 0, sizeof(double) * latencyBufSize);

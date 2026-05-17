@@ -182,7 +182,9 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (!conv)
         return;
 
-    if (convo::consumeAtomic(bypassed, std::memory_order_acquire))
+    const auto runtimeSnapshot = captureRuntimeProcessSnapshot();
+
+    if (runtimeSnapshot.bypassed)
     {
         processBypassWithLatencyCompensation(block, *conv);
         return;
@@ -260,7 +262,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (curGen != m_mixSmootherResetPendingGenSeen)
         {
             m_mixSmootherResetPendingGenSeen = curGen;
-            activeMixSmoother.setCurrentAndTargetValue(static_cast<double>(convo::consumeAtomic(mixTarget, std::memory_order_acquire)));
+            activeMixSmoother.setCurrentAndTargetValue(static_cast<double>(runtimeSnapshot.mixTarget));
         }
     }
 
@@ -269,7 +271,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (curGen != m_smoothingTimeChangePendingGenSeen)
         {
             m_smoothingTimeChangePendingGenSeen = curGen;
-            const float newTime = convo::consumeAtomic(smoothingTimeSec, std::memory_order_acquire);
+            const float newTime = runtimeSnapshot.smoothingTimeSec;
             const double sampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
             if (sampleRate > 0.0)
             {
@@ -282,7 +284,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         }
     }
 
-    const double targetMixValue = static_cast<double>(convo::consumeAtomic(mixTarget, std::memory_order_acquire));
+    const double targetMixValue = static_cast<double>(runtimeSnapshot.mixTarget);
     if (absNoLibm(activeMixSmoother.getTargetValue() - targetMixValue) > 1.0e-5)
     {
         activeMixSmoother.setTargetValue(targetMixValue);
@@ -637,24 +639,41 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 void ConvolverProcessor::setMix(float mixAmount)
 {
     float newVal = juce::jlimit(0.0f, 1.0f, mixAmount);
-    if (std::abs(convo::consumeAtomic(mixTarget) - newVal) > 1.0e-5f)
+    float prev;
     {
-        convo::publishAtomic(mixTarget, newVal);
-        listeners.call(&Listener::convolverParamsChanged, this);
+        const juce::ScopedLock lock(pendingOverrideLock);
+        prev = pendingOverride.mix;
+        if (std::abs(prev - newVal) > 1.0e-5f)
+            pendingOverride.mix = newVal;
+    }
+    if (std::abs(prev - newVal) > 1.0e-5f)
+    {
+        // H3: shadow atomic 廃止。pendingOverride.mix が唯一の Source of Truth。
+        publishRuntimeProcessSnapshot();
+        postCoalescedChangeNotification();
     }
 }
 
 float ConvolverProcessor::getMix() const
 {
-    return convo::consumeAtomic(mixTarget);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.mix;
 }
 
 void ConvolverProcessor::setBypass(bool shouldBypass)
 {
-    if (convo::consumeAtomic(bypassed) != shouldBypass)
+    bool prev;
     {
-        convo::publishAtomic(bypassed, shouldBypass);
-        listeners.call(&Listener::convolverParamsChanged, this);
+        const juce::ScopedLock lock(pendingOverrideLock);
+        prev = pendingOverride.bypassed;
+        if (prev != shouldBypass)
+            pendingOverride.bypassed = shouldBypass;
+    }
+    if (prev != shouldBypass)
+    {
+        // H3: shadow atomic 廃止。pendingOverride.bypassed が唯一の Source of Truth。
+        publishRuntimeProcessSnapshot();
+        postCoalescedChangeNotification();
     }
 }
 
@@ -662,12 +681,15 @@ void ConvolverProcessor::setTargetIRLength(float timeSec)
 {
     const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire));
     float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
-    if (std::abs(convo::consumeAtomic(targetIRLengthSec) - clampedTime) > 1e-5f)
+    float prev;
     {
-        convo::publishAtomic(targetIRLengthSec, clampedTime);
-        listeners.call(&Listener::convolverParamsChanged, this);
-
-        requestDebouncedRebuild();
+        const juce::ScopedLock lock(pendingOverrideLock);
+        prev = pendingOverride.targetIRLengthSec;
+        pendingOverride.targetIRLengthSec = clampedTime;
+    }
+    if (std::abs(prev - clampedTime) > 1e-5f)
+    {
+        postCoalescedChangeNotification();
     }
 }
 
@@ -676,139 +698,193 @@ void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
     const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire));
     const float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
 
-    convo::publishAtomic(autoDetectedIRLengthSec, clampedTime, std::memory_order_release);
-    convo::publishAtomic(irLengthManualOverride, false, std::memory_order_release);
-
-    if (std::abs(convo::consumeAtomic(targetIRLengthSec, std::memory_order_acquire) - clampedTime) > 1.0e-5f)
+    float prevTarget;
     {
-        convo::publishAtomic(targetIRLengthSec, clampedTime, std::memory_order_release);
-        listeners.call(&Listener::convolverParamsChanged, this);
+        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverride.autoDetectedIRLengthSec = clampedTime;
+        pendingOverride.irLengthManualOverride = false;
+        prevTarget = pendingOverride.targetIRLengthSec;
+    }
+
+    if (std::abs(prevTarget - clampedTime) > 1.0e-5f)
+    {
+        {
+            const juce::ScopedLock lock(pendingOverrideLock);
+            pendingOverride.targetIRLengthSec = clampedTime;
+        }
+        postCoalescedChangeNotification();
     }
 }
 
 void ConvolverProcessor::setIRLengthManualOverride(bool isManual)
 {
-    convo::publishAtomic(irLengthManualOverride, isManual, std::memory_order_release);
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverride.irLengthManualOverride = isManual;
+    }
 }
 
 void ConvolverProcessor::setSmoothingTime(float timeSec)
 {
     float clampedTime = juce::jlimit(SMOOTHING_TIME_MIN_SEC, SMOOTHING_TIME_MAX_SEC, timeSec);
-    if (std::abs(convo::consumeAtomic(smoothingTimeSec) - clampedTime) > 1.0e-5f)
+    float prev;
     {
-        convo::publishAtomic(smoothingTimeSec, clampedTime);
-
+        const juce::ScopedLock lock(pendingOverrideLock);
+        prev = pendingOverride.smoothingTimeSec;
+        if (std::abs(prev - clampedTime) > 1.0e-5f)
+            pendingOverride.smoothingTimeSec = clampedTime;
+    }
+    if (std::abs(prev - clampedTime) > 1.0e-5f)
+    {
+        // H3: shadow atomic 廃止。pendingOverride.smoothingTimeSec が唯一の Source of Truth。
+        publishRuntimeProcessSnapshot();
         // [F-01 fix] 世代カウンターをインクリメント (NonRT → RT 通知)
         smoothingTimeChangePendingGen.fetch_add(1, std::memory_order_acq_rel);
 
-        listeners.call(&Listener::convolverParamsChanged, this);
+        postCoalescedChangeNotification();
     }
 }
 
 float ConvolverProcessor::getTargetIRLength() const
 {
-    return convo::consumeAtomic(targetIRLengthSec);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.targetIRLengthSec;
+}
+
+float ConvolverProcessor::getAutoDetectedIRLength() const
+{
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.autoDetectedIRLengthSec;
+}
+
+bool ConvolverProcessor::hasManualIRLengthOverride() const
+{
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.irLengthManualOverride;
 }
 
 float ConvolverProcessor::getSmoothingTime() const
 {
-    return convo::consumeAtomic(smoothingTimeSec);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.smoothingTimeSec;
 }
 
-//--------------------------------------------------------------
-// RT-safe setters (Audio Thread 専用)
-// listeners.call() / requestDebouncedRebuild() を呼ばない。
-// （現行経路では通常使用しない。互換用途として保持）
-//--------------------------------------------------------------
-
-void ConvolverProcessor::setMixRT(float mixAmount) noexcept
-{
-    convo::publishAtomic(mixTarget, juce::jlimit(0.0f, 1.0f, mixAmount));
-}
-
-void ConvolverProcessor::setSmoothingTimeRT(float timeSec) noexcept
-{
-    const float clampedTime = juce::jlimit(SMOOTHING_TIME_MIN_SEC, SMOOTHING_TIME_MAX_SEC, timeSec);
-    convo::publishAtomic(smoothingTimeSec, clampedTime);
-    smoothingTimeChangePendingGen.fetch_add(1, std::memory_order_acq_rel);
-}
+// setMixRT / setSmoothingTimeRT: H3 修正により廃止。
+// shadow atomic を除去したため実装を削除。
+// 必要な場合は setMix() / setSmoothingTime()（Message Thread）を使用すること。
 
 void ConvolverProcessor::setMixedTransitionStartHz(float hz)
 {
     const float clamped = juce::jlimit(MIXED_F1_MIN_HZ, MIXED_F1_MAX_HZ, hz);
-    float currentEnd = convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire);
+    float currentEnd;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        currentEnd = pendingOverride.mixedTransitionEndHz;
+    }
     if (currentEnd < clamped + 10.0f)
         currentEnd = juce::jlimit(MIXED_F2_MIN_HZ, MIXED_F2_MAX_HZ, clamped + 10.0f);
 
-    const float prevStart = convo::exchangeAtomic(mixedTransitionStartHz, clamped, std::memory_order_acq_rel);
-    const float prevEnd = convo::exchangeAtomic(mixedTransitionEndHz, currentEnd, std::memory_order_acq_rel);
+    float prevStart, prevEnd;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        prevStart = pendingOverride.mixedTransitionStartHz;
+        prevEnd = pendingOverride.mixedTransitionEndHz;
+        pendingOverride.mixedTransitionStartHz = clamped;
+        pendingOverride.mixedTransitionEndHz = currentEnd;
+    }
 
     if (std::abs(prevStart - clamped) > 1.0e-5f || std::abs(prevEnd - currentEnd) > 1.0e-5f)
     {
-        listeners.call(&Listener::convolverParamsChanged, this);
-        requestDebouncedRebuild();
+        // H4 fix: UI notification のみ。rebuild トリガーは UI layer から snapshot publication 経由で行うこと。
+        postCoalescedChangeNotification();
     }
 }
 
 float ConvolverProcessor::getMixedTransitionStartHz() const
 {
-    return convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.mixedTransitionStartHz;
 }
 
 void ConvolverProcessor::setMixedTransitionEndHz(float hz)
 {
-    const float currentStart = convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire);
+    float currentStart;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        currentStart = pendingOverride.mixedTransitionStartHz;
+    }
     const float minEnd = (std::max)(MIXED_F2_MIN_HZ, currentStart + 10.0f);
     const float clamped = juce::jlimit(minEnd, MIXED_F2_MAX_HZ, hz);
 
-    const float prev = convo::exchangeAtomic(mixedTransitionEndHz, clamped, std::memory_order_acq_rel);
+    float prev;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        prev = pendingOverride.mixedTransitionEndHz;
+        pendingOverride.mixedTransitionEndHz = clamped;
+    }
     if (std::abs(prev - clamped) > 1.0e-5f)
     {
-        listeners.call(&Listener::convolverParamsChanged, this);
-        requestDebouncedRebuild();
+        // H4 fix: UI notification のみ。rebuild トリガーは UI layer から snapshot publication 経由で行うこと。
+        postCoalescedChangeNotification();
     }
 }
 
 float ConvolverProcessor::getMixedTransitionEndHz() const
 {
-    return convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.mixedTransitionEndHz;
 }
 
 void ConvolverProcessor::setMixedPreRingTau(float tau)
 {
     const float clamped = juce::jlimit(MIXED_TAU_MIN, MIXED_TAU_MAX, tau);
-    const float prev = convo::exchangeAtomic(mixedPreRingTau, clamped, std::memory_order_acq_rel);
+    float prev;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        prev = pendingOverride.mixedPreRingTau;
+        pendingOverride.mixedPreRingTau = clamped;
+    }
     if (std::abs(prev - clamped) > 1.0e-5f)
     {
-        listeners.call(&Listener::convolverParamsChanged, this);
-        requestDebouncedRebuild();
+        // H4 fix: UI notification のみ。rebuild トリガーは UI layer から snapshot publication 経由で行うこと。
+        postCoalescedChangeNotification();
     }
 }
 
 float ConvolverProcessor::getMixedPreRingTau() const
 {
-    return convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.mixedPreRingTau;
 }
 
 void ConvolverProcessor::setExperimentalDirectHeadEnabled(bool enabled)
 {
-    if (convo::exchangeAtomic(experimentalDirectHeadEnabled, enabled, std::memory_order_acq_rel) != enabled)
+    bool prev;
     {
-        listeners.call(&Listener::convolverParamsChanged, this);
+        const juce::ScopedLock lock(pendingOverrideLock);
+        prev = pendingOverride.experimentalDirectHeadEnabled;
+        pendingOverride.experimentalDirectHeadEnabled = enabled;
+    }
+    if (prev != enabled)
+    {
+        // H4 fix: UI notification のみ。rebuild トリガーは UI layer から snapshot publication 経由で行うこと。
         postCoalescedChangeNotification();
-        requestDebouncedRebuild();
     }
 }
 
 void ConvolverProcessor::setRebuildDebounceMs(int ms)
 {
     const int clampedMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS, REBUILD_DEBOUNCE_MAX_MS, ms);
-    convo::publishAtomic(rebuildDebounceMs, clampedMs, std::memory_order_release);
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverride.rebuildDebounceMs = clampedMs;
+    }
 }
 
 int ConvolverProcessor::getRebuildDebounceMs() const
 {
-    return convo::consumeAtomic(rebuildDebounceMs, std::memory_order_acquire);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.rebuildDebounceMs;
 }
 
 void ConvolverProcessor::StereoConvolver::reset()

@@ -20,6 +20,10 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
         sendChangeMessage();
         requestRebuild(convo::RebuildKind::Structural);
     }
+    else if (source == &uiConvolverProcessor)
+    {
+        convolverParamsChanged(&uiConvolverProcessor);
+    }
 }
 
 void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
@@ -108,7 +112,12 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 
         if (needsStructuralRebuild)
         {
-            requestRebuild(convo::RebuildKind::Structural);
+            // H5: listener callback から直接 rebuild を発火せず、
+            // snapshot command 経由で worker に反映を委譲する。
+            if (!enqueueSnapshotCommand())
+            {
+                diagLog("[DIAG] convolverParamsChanged: enqueueSnapshotCommand failed");
+            }
         }
 
         if (needsStructuralRebuild && srForRebuild > 0.0)

@@ -105,7 +105,6 @@ AudioEngine::~AudioEngine()
 
     uiConvolverProcessor.removeChangeListener(this);
     uiEqEditor.removeChangeListener(this);
-    uiConvolverProcessor.removeListener(this);
 
     // Note: stopRebuildThread は releaseResources() で呼ばれる。
     // dtor が releaseResources 経由で呼ばれる場合、stopRebuildThread は既に完了している。
@@ -117,12 +116,12 @@ AudioEngine::~AudioEngine()
 
     setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "~AudioEngine");
     convo::EpochManager::instance().advanceEpoch();
-    convo::publishAtomic(g_currentEpoch, convo::EpochManager::instance().currentEpoch(), std::memory_order_release);
 
     // Shutdown 時は EBR 回収を試みる。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
     clearPublishedRuntimeSnapshotsNonRt();
     drainDeferredRetireQueues(true);
+    g_deletionQueue.reclaimAllIgnoringEpoch();
 
     // ...既存の解放処理...
     if (latencyBufOldL) { convo::aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }

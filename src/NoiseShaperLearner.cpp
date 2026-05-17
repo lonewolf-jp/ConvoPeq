@@ -158,9 +158,9 @@ void NoiseShaperLearner::startLearning(bool resume)
 
     try
     {
-        workerThread = std::jthread([this](std::stop_token)
+        workerThread = std::jthread([this](std::stop_token stopToken)
         {
-            workerThreadMain();
+            workerThreadMain(stopToken);
         });
     }
     catch (const std::exception&)
@@ -455,9 +455,9 @@ void NoiseShaperLearner::startEvaluationWorkers()
         auto& slot = evaluationWorkers[static_cast<size_t>(workerIndex)];
         try
         {
-            slot.thread = std::jthread([this, workerIndex](std::stop_token)
+            slot.thread = std::jthread([this, workerIndex](std::stop_token stopToken)
             {
-                evaluationWorkerMain(workerIndex);
+                evaluationWorkerMain(workerIndex, stopToken);
             });
         }
         catch (const std::exception&)
@@ -509,7 +509,7 @@ void NoiseShaperLearner::configureEvaluationContexts(double sampleRateHz) noexce
         evaluationWorkers[static_cast<size_t>(workerIndex)].context.fftEvaluator.configureForSampleRate(sampleRateHz);
 }
 
-void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
+void NoiseShaperLearner::evaluationWorkerMain(int workerIndex, std::stop_token stopToken) noexcept
 {
     engine.getAffinityManager().applyCurrentThreadPolicy(ThreadType::LearnerEval, workerIndex);
 
@@ -532,10 +532,12 @@ void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
                 std::unique_lock<std::mutex> lock(evaluationDispatchMutex);
                 evaluationDispatchCv.wait(lock, [&]
                 {
-                    return evaluationWorkersShouldExit || convo::consumeAtomic(evaluationDispatchSerial, std::memory_order_acquire) != observedDispatchSerial;
+                    return evaluationWorkersShouldExit
+                        || stopToken.stop_requested()
+                        || convo::consumeAtomic(evaluationDispatchSerial, std::memory_order_acquire) != observedDispatchSerial;
                 });
 
-                if (evaluationWorkersShouldExit)
+                if (evaluationWorkersShouldExit || stopToken.stop_requested())
                     return;
 
                 ++observedDispatchSerial;
@@ -543,7 +545,10 @@ void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
                 evaluationBitDepth = pendingEvaluationBitDepth;
             }
 
-            runEvaluationJobsForWorker(workerIndex, segmentCount, evaluationBitDepth);
+            runEvaluationJobsForWorker(workerIndex,
+                                       segmentCount,
+                                       evaluationBitDepth,
+                                       &stopToken);
 
             {
                 const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
@@ -579,7 +584,8 @@ void NoiseShaperLearner::evaluationWorkerMain(int workerIndex) noexcept
 
 void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
                                                     int numSegments,
-                                                    int evaluationBitDepth) noexcept
+                                                    int evaluationBitDepth,
+                                                    const std::stop_token* stopToken) noexcept
 {
     if (numSegments <= 0)
         return;
@@ -603,7 +609,8 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
                     safetyMargin);
     }
 
-    while (!convo::consumeAtomic(stopRequested, std::memory_order_acquire))
+    while (!convo::consumeAtomic(stopRequested, std::memory_order_acquire)
+        && (stopToken == nullptr || !stopToken->stop_requested()))
     {
         const int populationIndex = nextEvaluationCandidateIndex.fetch_add(1, std::memory_order_acq_rel);
         if (populationIndex >= CmaEsOptimizer::kPopulation)
@@ -621,9 +628,11 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
 int NoiseShaperLearner::evaluatePopulation(int numSegments,
                                            int evaluationBitDepth,
                                            int& bestCandidateIndex,
-                                           double& bestCandidateScore)
+                                           double& bestCandidateScore,
+                                           const std::stop_token& stopToken)
 {
-    if (convo::consumeAtomic(stopRequested, std::memory_order_acquire))
+    if (convo::consumeAtomic(stopRequested, std::memory_order_acquire)
+        || stopToken.stop_requested())
         return 0;
 
     convo::publishAtomic(nextEvaluationCandidateIndex, 0, std::memory_order_seq_cst);
@@ -639,7 +648,7 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
     if (activeAuxEvaluationWorkerCount > 0)
         evaluationDispatchCv.notify_all();
 
-    runEvaluationJobsForWorker(0, numSegments, evaluationBitDepth);
+    runEvaluationJobsForWorker(0, numSegments, evaluationBitDepth, &stopToken);
 
     if (activeAuxEvaluationWorkerCount > 0)
     {
@@ -668,7 +677,8 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
     const int numElitesToReevaluate = std::min(3, evaluatedCandidates);
     for (int i = 0; i < numElitesToReevaluate; ++i)
     {
-        if (convo::consumeAtomic(stopRequested, std::memory_order_acquire))
+        if (convo::consumeAtomic(stopRequested, std::memory_order_acquire)
+            || stopToken.stop_requested())
             break;
 
         const int idx = sortedIndices[i];
@@ -682,7 +692,8 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
     // Final pass to find the best
     for (int populationIndex = 0; populationIndex < evaluatedCandidates; ++populationIndex)
     {
-        if (convo::consumeAtomic(stopRequested, std::memory_order_acquire))
+        if (convo::consumeAtomic(stopRequested, std::memory_order_acquire)
+            || stopToken.stop_requested())
             break;
 
         const double score = candidateFitnessData()[populationIndex];
@@ -696,7 +707,7 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
     return evaluatedCandidates;
 }
 
-void NoiseShaperLearner::workerThreadMain()
+void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
 {
     // Transition:
     // Starting -> Running
@@ -735,13 +746,15 @@ void NoiseShaperLearner::workerThreadMain()
             convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
 
             // 評価に必要なセグメントが溜まるまで待機
-            while (segmentBuffer.getNumAvailableSamples() < kRecentSampleRequest && !convo::consumeAtomic(stopRequested))
+            while (segmentBuffer.getNumAvailableSamples() < kRecentSampleRequest
+                   && !convo::consumeAtomic(stopRequested)
+                   && !stopToken.stop_requested())
             {
                 drainCaptureQueue(activeSession);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
-            if (!convo::consumeAtomic(stopRequested))
+            if (!convo::consumeAtomic(stopRequested) && !stopToken.stop_requested())
             {
                 const int segmentCount = buildTrainingSegments();
                 if (segmentCount >= 2)
@@ -757,7 +770,7 @@ void NoiseShaperLearner::workerThreadMain()
                     int restarts = convo::consumeAtomic(settings.cmaesRestarts);
                     for (int restartIdx = 0; restartIdx < restarts; ++restartIdx)
                     {
-                        if (convo::consumeAtomic(stopRequested)) break;
+                        if (convo::consumeAtomic(stopRequested) || stopToken.stop_requested()) break;
 
                         // 初期状態に戻してからシードを変える
                         setState(initialState);
@@ -773,7 +786,11 @@ void NoiseShaperLearner::workerThreadMain()
                             optimizer.sample(candidatePopulationMatrix());
                             int dummyIdx = 0;
                             double currentBestScore = 0.0;
-                            evaluatePopulation(segmentCount, evaluationBitDepth, dummyIdx, currentBestScore);
+                            evaluatePopulation(segmentCount,
+                                               evaluationBitDepth,
+                                               dummyIdx,
+                                               currentBestScore,
+                                               stopToken);
                             optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
 
                             if (currentBestScore < bestRestartScore)
@@ -793,14 +810,17 @@ void NoiseShaperLearner::workerThreadMain()
         double bestScore = std::numeric_limits<double>::max();
         int generation = 0;
 
-        while (!convo::consumeAtomic(stopRequested, std::memory_order_acquire))
+         while (!convo::consumeAtomic(stopRequested, std::memory_order_acquire)
+             && !stopToken.stop_requested())
         {
             const auto thisGenerationStart = std::chrono::steady_clock::now();
 
             // インターバル待機（start-to-start）
             if (generationIntervalSeconds > 0.0 && lastGenerationStart != std::chrono::steady_clock::time_point{}) {
                 auto next = lastGenerationStart + std::chrono::duration<double>(generationIntervalSeconds);
-                while (std::chrono::steady_clock::now() < next && !convo::consumeAtomic(stopRequested, std::memory_order_acquire))
+                  while (std::chrono::steady_clock::now() < next
+                      && !convo::consumeAtomic(stopRequested, std::memory_order_acquire)
+                      && !stopToken.stop_requested())
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             lastGenerationStart = thisGenerationStart;
@@ -847,9 +867,10 @@ void NoiseShaperLearner::workerThreadMain()
             const int evaluatedCandidates = evaluatePopulation(segmentCount,
                                                                evaluationBitDepth,
                                                                bestCandidateIndex,
-                                                               bestCandidateScore);
+                                                               bestCandidateScore,
+                                                               stopToken);
 
-            if (convo::consumeAtomic(stopRequested, std::memory_order_acquire))
+            if (convo::consumeAtomic(stopRequested, std::memory_order_acquire) || stopToken.stop_requested())
                 break;
 
             if (evaluatedCandidates < 1)

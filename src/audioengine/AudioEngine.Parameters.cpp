@@ -628,26 +628,6 @@ void AudioEngine::setConvolverRebuildDebounceMs(int ms) noexcept
     uiConvolverProcessor.setRebuildDebounceMs(ms);
 }
 
-void AudioEngine::setConvolverTailRolloffStartHz(float hz) noexcept
-{
-    uiConvolverProcessor.setTailRolloffStartHz(hz);
-}
-
-void AudioEngine::setConvolverTailRolloffStrength(float strength) noexcept
-{
-    uiConvolverProcessor.setTailRolloffStrength(strength);
-}
-
-void AudioEngine::setConvolverPartitionTailStrength(float strength) noexcept
-{
-    uiConvolverProcessor.setPartitionTailStrength(strength);
-}
-
-void AudioEngine::setConvolverTailProcessingMode(int mode) noexcept
-{
-    uiConvolverProcessor.setTailProcessingMode(mode);
-}
-
 void AudioEngine::setOversamplingType(OversamplingType type)
 {
     convo::publishAtomic(oversamplingType, type);

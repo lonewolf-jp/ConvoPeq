@@ -9,8 +9,8 @@
 #include "DspNumericPolicy.h"
 
 #if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable: 4324)
+#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif
 
 class LatticeNoiseShaper
@@ -289,5 +289,5 @@ private:
 };
 
 #if defined(_MSC_VER)
-#pragma warning(pop)
+#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif

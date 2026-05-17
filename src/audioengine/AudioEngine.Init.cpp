@@ -61,7 +61,6 @@ void AudioEngine::initialize()
 
     uiConvolverProcessor.addChangeListener(this);
     uiEqEditor.addChangeListener(this);
-    uiConvolverProcessor.addListener(this);
 
     // タイマー開始 (100ms間隔)
     // - DSP再構築リクエストのポーリング (Audio Threadからの依頼を処理)

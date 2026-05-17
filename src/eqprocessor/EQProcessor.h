@@ -107,8 +107,8 @@ struct EQCoeffsBiquad
 // 複数のスナップショット間で同一EQパラメータの係数を共有し、
 // CPU/メモリ効率を向上させる不変キャッシュ
 //--------------------------------------------------------------
-#pragma warning(push)
-#pragma warning(disable : 4324)  // alignas(64) により構造体がパッドされることは意図した動作のため警告を無視
+#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
 struct alignas(64) EQCoeffCache : public RefCountedDeferred<EQCoeffCache>
 {
@@ -129,7 +129,7 @@ struct alignas(64) EQCoeffCache : public RefCountedDeferred<EQCoeffCache>
     EQCoeffCache& operator=(const EQCoeffCache&) = delete;
 };
 
-#pragma warning(pop)
+#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
 //--------------------------------------------------------------
 // EQプロセッサークラス
@@ -256,14 +256,14 @@ public:
     //----------------------------------------------------------
     // 状態構造体
     //----------------------------------------------------------
-    struct BandNode : public RefCountedDeferred<BandNode>
+    struct BandNode
     {
         EQCoeffsSVF coeffs;
         bool active;
         EQChannelMode mode;
     };
 
-    struct EQState : public RefCountedDeferred<EQState>
+    struct EQState
     {
         std::array<EQBandParams, NUM_BANDS> bands;
         std::array<EQBandType, NUM_BANDS> bandTypes;
@@ -486,8 +486,8 @@ private:
     static constexpr double BYPASS_FADE_TIME_SEC = 0.005; // 5ms
 
     // ── 係数管理 (Atomic Swap) ──
-    std::array<std::atomic<std::uintptr_t>, NUM_BANDS> bandNodeBits; // uintptr_t-backed lock-free handles
-    std::array<convo::NonOwningPtr<BandNode>, NUM_BANDS> activeBandNodes { convo::NonOwningPtr<BandNode> { nullptr } }; // Ownership slots for Message Thread
+    std::array<std::atomic<std::uintptr_t>, NUM_BANDS> bandNodeBits; // uintptr_t-backed lock-free handles (single ownership via epoch retire)
+    std::array<convo::NonOwningPtr<BandNode>, NUM_BANDS> activeBandNodes { convo::NonOwningPtr<BandNode> { nullptr } }; // Message Thread mirror only (non-owning)
 
     static EQState* fromStateBits(std::uintptr_t bits) noexcept
     {

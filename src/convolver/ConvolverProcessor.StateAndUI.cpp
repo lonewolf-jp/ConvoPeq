@@ -28,7 +28,12 @@ static inline std::uint32_t floatBits(float value) noexcept
 
 static std::uint64_t computeBuildSnapshotFingerprint(const ConvolverProcessor::BuildSnapshot& snapshot) noexcept
 {
+    // NOTE:
+    //   ここで算出する fingerprint は getStructuralHash() とは用途が異なる。
+    //   BuildSnapshot の同一性確認/診断向けに、同期対象メタデータも含めて広くハッシュする。
     std::uint64_t hash = 0x9e3779b97f4a7c15ULL;
+
+    // ---- PendingParams 由来の同期対象パラメータ ----
     hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mix)));
     hashCombineUInt64(hash, snapshot.bypassed ? 1ULL : 0ULL);
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.phaseMode));
@@ -40,16 +45,17 @@ static std::uint64_t computeBuildSnapshotFingerprint(const ConvolverProcessor::B
     hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mixedPreRingTau)));
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.rebuildDebounceMs));
     hashCombineUInt64(hash, snapshot.experimentalDirectHeadEnabled ? 1ULL : 0ULL);
-    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.tailProcessingMode));
-    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.tailRolloffStartHz)));
-    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.tailRolloffStrength)));
-    hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.partitionTailStrength)));
+    // tail* パラメータは pendingOverride へ移行済み
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.targetUpgradeFFTSize));
     hashCombineUInt64(hash, snapshot.enableProgressiveUpgrade ? 1ULL : 0ULL);
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.maxCacheEntries));
-    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.irLength));
+
+    // ---- NUC フィルターモード ----
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.nucHCMode));
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.nucLCMode));
+
+    // ---- メタデータ（snapshot 同一性確認用）----
+    hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.irLength));
 
     std::uint64_t scaleBits = 0;
     static_assert(sizeof(scaleBits) == sizeof(snapshot.currentIRScale));
@@ -105,26 +111,88 @@ static void applySmoothing(const float* magnitudes, float* smoothed, int numBins
     }
 }
 
+void ConvolverProcessor::copyPendingToSnapshotUnlocked(BuildSnapshot& snapshot) const noexcept
+{
+    // [更新ガイド]
+    // - ここでの代入順は BuildSnapshot / PendingParams の定義順に揃える。
+    // - 項目追加時は copySnapshotToPendingUnlocked() も同時更新する。
+    // - fingerprint / structural hash の対象可否を同時に見直す。
+    snapshot.mix = pendingOverride.mix;
+    snapshot.bypassed = pendingOverride.bypassed;
+    snapshot.phaseMode = pendingOverride.phaseMode;
+    snapshot.resamplingPhaseMode = pendingOverride.resamplingPhaseMode;
+    snapshot.smoothingTimeSec = pendingOverride.smoothingTimeSec;
+    snapshot.targetIRLengthSec = pendingOverride.targetIRLengthSec;
+    snapshot.autoDetectedIRLengthSec = pendingOverride.autoDetectedIRLengthSec;
+    snapshot.irLengthManualOverride = pendingOverride.irLengthManualOverride;
+    snapshot.mixedTransitionStartHz = pendingOverride.mixedTransitionStartHz;
+    snapshot.mixedTransitionEndHz = pendingOverride.mixedTransitionEndHz;
+    snapshot.mixedPreRingTau = pendingOverride.mixedPreRingTau;
+    snapshot.rebuildDebounceMs = pendingOverride.rebuildDebounceMs;
+    snapshot.experimentalDirectHeadEnabled = pendingOverride.experimentalDirectHeadEnabled;
+    snapshot.targetUpgradeFFTSize = pendingOverride.targetUpgradeFFTSize;
+    snapshot.enableProgressiveUpgrade = pendingOverride.enableProgressiveUpgrade;
+    snapshot.maxCacheEntries = pendingOverride.maxCacheEntries;
+    snapshot.nucHCMode = pendingOverride.nucHCMode;
+    snapshot.nucLCMode = pendingOverride.nucLCMode;
+}
+
+void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snapshot) noexcept
+{
+    // [更新ガイド]
+    // - copyPendingToSnapshotUnlocked() と対称性を維持する。
+    // - 片方向のみ更新すると snapshot 同期の欠落を招くため注意。
+    pendingOverride.mix = snapshot.mix;
+    pendingOverride.bypassed = snapshot.bypassed;
+    pendingOverride.phaseMode = snapshot.phaseMode;
+    pendingOverride.resamplingPhaseMode = snapshot.resamplingPhaseMode;
+    pendingOverride.smoothingTimeSec = snapshot.smoothingTimeSec;
+    pendingOverride.targetIRLengthSec = snapshot.targetIRLengthSec;
+    pendingOverride.autoDetectedIRLengthSec = snapshot.autoDetectedIRLengthSec;
+    pendingOverride.irLengthManualOverride = snapshot.irLengthManualOverride;
+    pendingOverride.mixedTransitionStartHz = snapshot.mixedTransitionStartHz;
+    pendingOverride.mixedTransitionEndHz = snapshot.mixedTransitionEndHz;
+    pendingOverride.mixedPreRingTau = snapshot.mixedPreRingTau;
+    pendingOverride.rebuildDebounceMs = snapshot.rebuildDebounceMs;
+    pendingOverride.experimentalDirectHeadEnabled = snapshot.experimentalDirectHeadEnabled;
+    pendingOverride.targetUpgradeFFTSize = snapshot.targetUpgradeFFTSize;
+    pendingOverride.enableProgressiveUpgrade = snapshot.enableProgressiveUpgrade;
+    pendingOverride.maxCacheEntries = snapshot.maxCacheEntries;
+    pendingOverride.nucHCMode = snapshot.nucHCMode;
+    pendingOverride.nucLCMode = snapshot.nucLCMode;
+}
+
 juce::ValueTree ConvolverProcessor::getState() const
 {
     juce::ValueTree v ("Convolver");
-    v.setProperty ("mix", convo::consumeAtomic(mixTarget), nullptr);
-    v.setProperty ("bypassed", convo::consumeAtomic(bypassed), nullptr);
     v.setProperty ("phaseMode", static_cast<int>(getPhaseMode()), nullptr);
     v.setProperty ("useMinPhase", getUseMinPhase(), nullptr);
-    v.setProperty ("smoothingTime", convo::consumeAtomic(smoothingTimeSec), nullptr);
-    v.setProperty ("irLength", convo::consumeAtomic(targetIRLengthSec), nullptr);
-    v.setProperty ("autoDetectedIRLength", convo::consumeAtomic(autoDetectedIRLengthSec, std::memory_order_acquire), nullptr);
-    v.setProperty ("irLengthManualOverride", convo::consumeAtomic(irLengthManualOverride, std::memory_order_acquire), nullptr);
-    v.setProperty ("mixedF1Hz", convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire), nullptr);
-    v.setProperty ("mixedF2Hz", convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire), nullptr);
-    v.setProperty ("mixedTau", convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire), nullptr);
-    v.setProperty ("rebuildDebounceMs", convo::consumeAtomic(rebuildDebounceMs, std::memory_order_acquire), nullptr);
-    v.setProperty ("experimentalDirectHeadEnabled", convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire), nullptr);
-    v.setProperty ("tailProcessingMode", convo::consumeAtomic(tailProcessingMode, std::memory_order_acquire), nullptr);
-    v.setProperty ("tailRolloffStartHz", convo::consumeAtomic(tailRolloffStartHz, std::memory_order_acquire), nullptr);
-    v.setProperty ("tailRolloffStrength", convo::consumeAtomic(tailRolloffStrength, std::memory_order_acquire), nullptr);
-    v.setProperty ("partitionTailStrength", convo::consumeAtomic(partitionTailStrength, std::memory_order_acquire), nullptr);
+    float mix, smoothingTime, irLen, autoIRL, mixF1, mixF2, mixTau;
+    bool bypassedState, irManual;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        mix     = pendingOverride.mix;
+        bypassedState = pendingOverride.bypassed;
+        smoothingTime = pendingOverride.smoothingTimeSec;
+        irLen   = pendingOverride.targetIRLengthSec;
+        autoIRL = pendingOverride.autoDetectedIRLengthSec;
+        irManual = pendingOverride.irLengthManualOverride;
+        mixF1   = pendingOverride.mixedTransitionStartHz;
+        mixF2   = pendingOverride.mixedTransitionEndHz;
+        mixTau  = pendingOverride.mixedPreRingTau;
+    }
+    v.setProperty ("mix", mix, nullptr);
+    v.setProperty ("bypassed", bypassedState, nullptr);
+    v.setProperty ("smoothingTime", smoothingTime, nullptr);
+    v.setProperty ("irLength", irLen, nullptr);
+    v.setProperty ("autoDetectedIRLength", autoIRL, nullptr);
+    v.setProperty ("irLengthManualOverride", irManual, nullptr);
+    v.setProperty ("mixedF1Hz", mixF1, nullptr);
+    v.setProperty ("mixedF2Hz", mixF2, nullptr);
+    v.setProperty ("mixedTau", mixTau, nullptr);
+    v.setProperty ("rebuildDebounceMs", getRebuildDebounceMs(), nullptr);
+    v.setProperty ("experimentalDirectHeadEnabled", getExperimentalDirectHeadEnabled(), nullptr);
+    // tail* パラメータは pendingOverride に保存済み
     v.setProperty ("targetUpgradeFFTSize", getTargetUpgradeFFTSize(), nullptr);
     v.setProperty ("enableProgressiveUpgrade", isProgressiveUpgradeEnabled(), nullptr);
     v.setProperty ("maxCacheEntries", static_cast<int>(getMaxCacheEntries()), nullptr);
@@ -138,29 +206,16 @@ juce::ValueTree ConvolverProcessor::getState() const
 ConvolverProcessor::BuildSnapshot ConvolverProcessor::captureBuildSnapshot() const
 {
     BuildSnapshot snapshot;
-    snapshot.mix = convo::consumeAtomic(mixTarget, std::memory_order_acquire);
-    snapshot.bypassed = convo::consumeAtomic(bypassed, std::memory_order_acquire);
-    snapshot.phaseMode = static_cast<int>(convo::consumeAtomic(phaseMode, std::memory_order_acquire));
-    snapshot.resamplingPhaseMode = static_cast<int>(convo::consumeAtomic(currentResamplingPhaseMode, std::memory_order_acquire));
-    snapshot.smoothingTimeSec = convo::consumeAtomic(smoothingTimeSec, std::memory_order_acquire);
-    snapshot.targetIRLengthSec = convo::consumeAtomic(targetIRLengthSec, std::memory_order_acquire);
-    snapshot.mixedTransitionStartHz = convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire);
-    snapshot.mixedTransitionEndHz = convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire);
-    snapshot.mixedPreRingTau = convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire);
-    snapshot.rebuildDebounceMs = convo::consumeAtomic(rebuildDebounceMs, std::memory_order_acquire);
-    snapshot.experimentalDirectHeadEnabled = convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire);
-    snapshot.tailProcessingMode = convo::consumeAtomic(tailProcessingMode, std::memory_order_acquire);
-    snapshot.tailRolloffStartHz = convo::consumeAtomic(tailRolloffStartHz, std::memory_order_acquire);
-    snapshot.tailRolloffStrength = convo::consumeAtomic(tailRolloffStrength, std::memory_order_acquire);
-    snapshot.partitionTailStrength = convo::consumeAtomic(partitionTailStrength, std::memory_order_acquire);
-    snapshot.targetUpgradeFFTSize = convo::consumeAtomic(targetUpgradeFFTSize, std::memory_order_acquire);
-    snapshot.enableProgressiveUpgrade = convo::consumeAtomic(enableProgressiveUpgrade, std::memory_order_acquire);
-    snapshot.maxCacheEntries = static_cast<int>(convo::consumeAtomic(maxCacheEntries, std::memory_order_acquire));
+
+    // pending override から値を読む（H3 フェーズ 2c 統一化）
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        copyPendingToSnapshotUnlocked(snapshot);
+    }
+
     snapshot.irName = irName;
     snapshot.irLength = convo::consumeAtomic(irLength, std::memory_order_acquire);
     snapshot.currentIRScale = convo::consumeAtomic(currentIRScale, std::memory_order_acquire);
-    snapshot.nucHCMode = convo::consumeAtomic(nucHCMode, std::memory_order_acquire);
-    snapshot.nucLCMode = convo::consumeAtomic(nucLCMode, std::memory_order_acquire);
     {
         const juce::ScopedLock sl(irFileLock);
         snapshot.irFile = currentIrFile;
@@ -171,24 +226,11 @@ ConvolverProcessor::BuildSnapshot ConvolverProcessor::captureBuildSnapshot() con
 
 void ConvolverProcessor::applyBuildSnapshot(const BuildSnapshot& snapshot)
 {
-    convo::publishAtomic(mixTarget, snapshot.mix, std::memory_order_release);
-    convo::publishAtomic(bypassed, snapshot.bypassed, std::memory_order_release);
-    convo::publishAtomic(phaseMode, snapshot.phaseMode, std::memory_order_release);
-    convo::publishAtomic(currentResamplingPhaseMode, static_cast<ResamplingPhaseMode>(snapshot.resamplingPhaseMode), std::memory_order_release);
-    convo::publishAtomic(smoothingTimeSec, snapshot.smoothingTimeSec, std::memory_order_release);
-    convo::publishAtomic(targetIRLengthSec, snapshot.targetIRLengthSec, std::memory_order_release);
-    convo::publishAtomic(mixedTransitionStartHz, snapshot.mixedTransitionStartHz, std::memory_order_release);
-    convo::publishAtomic(mixedTransitionEndHz, snapshot.mixedTransitionEndHz, std::memory_order_release);
-    convo::publishAtomic(mixedPreRingTau, snapshot.mixedPreRingTau, std::memory_order_release);
-    convo::publishAtomic(rebuildDebounceMs, snapshot.rebuildDebounceMs, std::memory_order_release);
-    convo::publishAtomic(experimentalDirectHeadEnabled, snapshot.experimentalDirectHeadEnabled, std::memory_order_release);
-    convo::publishAtomic(tailProcessingMode, snapshot.tailProcessingMode, std::memory_order_release);
-    convo::publishAtomic(tailRolloffStartHz, snapshot.tailRolloffStartHz, std::memory_order_release);
-    convo::publishAtomic(tailRolloffStrength, snapshot.tailRolloffStrength, std::memory_order_release);
-    convo::publishAtomic(partitionTailStrength, snapshot.partitionTailStrength, std::memory_order_release);
-    convo::publishAtomic(targetUpgradeFFTSize, snapshot.targetUpgradeFFTSize, std::memory_order_release);
-    convo::publishAtomic(enableProgressiveUpgrade, snapshot.enableProgressiveUpgrade, std::memory_order_release);
-    convo::publishAtomic(maxCacheEntries, static_cast<size_t>(snapshot.maxCacheEntries), std::memory_order_release);
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        copySnapshotToPendingUnlocked(snapshot);
+    }
+
     {
         const juce::ScopedLock sl(irFileLock);
         currentIrFile = snapshot.irFile;
@@ -196,8 +238,8 @@ void ConvolverProcessor::applyBuildSnapshot(const BuildSnapshot& snapshot)
     irName = snapshot.irName;
     convo::publishAtomic(irLength, snapshot.irLength, std::memory_order_release);
     convo::publishAtomic(currentIRScale, snapshot.currentIRScale, std::memory_order_release);
-    convo::publishAtomic(nucHCMode, snapshot.nucHCMode, std::memory_order_release);
-    convo::publishAtomic(nucLCMode, snapshot.nucLCMode, std::memory_order_release);
+
+    publishRuntimeProcessSnapshot();
 }
 
 void ConvolverProcessor::setState(const juce::ValueTree& v)
@@ -231,7 +273,10 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
                 const float clampedAutoLength = juce::jlimit(IR_LENGTH_MIN_SEC,
                                                              getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)),
                                                              autoLength);
-                convo::publishAtomic(autoDetectedIRLengthSec, clampedAutoLength, std::memory_order_release);
+                {
+                    const juce::ScopedLock lock(pendingOverrideLock);
+                    pendingOverride.autoDetectedIRLengthSec = clampedAutoLength;
+                }
             }
 
             if (v.hasProperty ("irLength"))
@@ -263,47 +308,7 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
     if (v.hasProperty ("enableProgressiveUpgrade")) setEnableProgressiveUpgrade (static_cast<bool>(v.getProperty("enableProgressiveUpgrade")));
     if (v.hasProperty ("maxCacheEntries")) setMaxCacheEntries (static_cast<size_t>(static_cast<int>(v.getProperty("maxCacheEntries"))));
 
-    const bool hasTailMode = v.hasProperty("tailProcessingMode");
-    const bool hasTailStart = v.hasProperty("tailRolloffStartHz");
-    const bool hasTailStrength = v.hasProperty("tailRolloffStrength");
-    const bool hasPartitionTailStrength = v.hasProperty("partitionTailStrength");
-    const bool hasAnyTailKey = hasTailMode || hasTailStart || hasTailStrength || hasPartitionTailStrength;
-
-    if (hasAnyTailKey)
-    {
-        const int resolvedMode = hasTailMode
-            ? juce::jlimit(0, 1, static_cast<int>(v.getProperty("tailProcessingMode")))
-            : 0;
-
-        if (hasTailMode)
-            setTailProcessingMode(static_cast<int>(v.getProperty("tailProcessingMode")));
-        else
-            setTailProcessingMode(0);
-
-        if (hasTailStart)
-            setTailRolloffStartHz(static_cast<float>(v.getProperty("tailRolloffStartHz")));
-        else
-            setTailRolloffStartHz(resolvedMode == 0 ? TAIL_AIR_ROLLOFF_START_DEFAULT_HZ
-                                                    : TAIL_LAYER_ROLLOFF_START_DEFAULT_HZ);
-
-        if (hasTailStrength)
-            setTailRolloffStrength(static_cast<float>(v.getProperty("tailRolloffStrength")));
-        else
-            setTailRolloffStrength(resolvedMode == 0 ? TAIL_AIR_ROLLOFF_STRENGTH_DEFAULT
-                                                     : TAIL_LAYER_ROLLOFF_STRENGTH_DEFAULT);
-
-        if (hasPartitionTailStrength)
-            setPartitionTailStrength(static_cast<float>(v.getProperty("partitionTailStrength")));
-        else
-            setPartitionTailStrength(TAIL_PARTITION_STRENGTH_DEFAULT);
-    }
-    else
-    {
-        setTailProcessingMode(0);
-        setTailRolloffStartHz(TAIL_ROLLOFF_START_DEFAULT_HZ);
-        setTailRolloffStrength(0.0f);
-        setPartitionTailStrength(TAIL_PARTITION_STRENGTH_DEFAULT);
-    }
+    // Tail* restoration removed: parameters now managed via pendingOverride
 
     if (v.hasProperty ("irPath"))
     {
@@ -350,9 +355,6 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     irName = other.irName;
     convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release);
     convo::publishAtomic(currentIRScale, convo::consumeAtomic(other.currentIRScale, std::memory_order_acquire), std::memory_order_release);
-
-    convo::publishAtomic(nucHCMode, convo::consumeAtomic(other.nucHCMode, std::memory_order_acquire), std::memory_order_release);
-    convo::publishAtomic(nucLCMode, convo::consumeAtomic(other.nucLCMode, std::memory_order_acquire), std::memory_order_release);
 
     const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
     auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel);
@@ -728,12 +730,26 @@ void ConvolverProcessor::requestHostDisplayUpdate()
 void ConvolverProcessor::setPhaseMode(PhaseMode mode)
 {
     const int newMode = static_cast<int>(mode);
-    const int oldMode = convo::exchangeAtomic(phaseMode, newMode, std::memory_order_acq_rel);
+    int oldMode;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        oldMode = pendingOverride.phaseMode;
+    }
     if (oldMode != newMode)
     {
-        listeners.call(&Listener::convolverParamsChanged, this);
-        requestDebouncedRebuild();
+        // Pending override に値を記録（snapshot ベースのデータフロー）
+        {
+            const juce::ScopedLock lock(pendingOverrideLock);
+            pendingOverride.phaseMode = newMode;
+        }
+        postCoalescedChangeNotification();
     }
+}
+
+ConvolverProcessor::PhaseMode ConvolverProcessor::getPhaseMode() const
+{
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return static_cast<PhaseMode>(pendingOverride.phaseMode);
 }
 
 void ConvolverProcessor::setUseMinPhase(bool shouldUseMinPhase)
@@ -746,54 +762,23 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
     const int newHC = static_cast<int>(hcMode);
     const int newLC = static_cast<int>(lcMode);
 
-    const bool changed = (convo::exchangeAtomic(nucHCMode, newHC) != newHC) ||
-                         (convo::exchangeAtomic(nucLCMode, newLC) != newLC);
+    int oldHC, oldLC;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        oldHC = pendingOverride.nucHCMode;
+        oldLC = pendingOverride.nucLCMode;
+    }
+
+    const bool changed = (oldHC != newHC) || (oldLC != newLC);
 
     if (changed)
-        requestDebouncedRebuild();
-}
-
-void ConvolverProcessor::setTailProcessingMode(int mode)
-{
-    const int clamped = juce::jlimit(0, 1, mode);
-    const int prev = convo::exchangeAtomic(tailProcessingMode, clamped, std::memory_order_acq_rel);
-    if (prev != clamped)
     {
-        listeners.call(&Listener::convolverParamsChanged, this);
-        requestDebouncedRebuild();
-    }
-}
-
-void ConvolverProcessor::setTailRolloffStartHz(float hz)
-{
-    const float clamped = juce::jlimit(TAIL_ROLLOFF_START_MIN_HZ, TAIL_ROLLOFF_START_MAX_HZ, hz);
-    const float prev = convo::exchangeAtomic(tailRolloffStartHz, clamped, std::memory_order_acq_rel);
-    if (std::abs(prev - clamped) > 1.0e-5f)
-    {
-        listeners.call(&Listener::convolverParamsChanged, this);
-        requestDebouncedRebuild();
-    }
-}
-
-void ConvolverProcessor::setTailRolloffStrength(float strength)
-{
-    const float clamped = juce::jlimit(TAIL_ROLLOFF_STRENGTH_MIN, TAIL_ROLLOFF_STRENGTH_MAX, strength);
-    const float prev = convo::exchangeAtomic(tailRolloffStrength, clamped, std::memory_order_acq_rel);
-    if (std::abs(prev - clamped) > 1.0e-5f)
-    {
-        listeners.call(&Listener::convolverParamsChanged, this);
-        requestDebouncedRebuild();
-    }
-}
-
-void ConvolverProcessor::setPartitionTailStrength(float strength)
-{
-    const float clamped = juce::jlimit(TAIL_PARTITION_STRENGTH_MIN, TAIL_PARTITION_STRENGTH_MAX, strength);
-    const float prev = convo::exchangeAtomic(partitionTailStrength, clamped, std::memory_order_acq_rel);
-    if (std::abs(prev - clamped) > 1.0e-5f)
-    {
-        listeners.call(&Listener::convolverParamsChanged, this);
-        requestDebouncedRebuild();
+        {
+            const juce::ScopedLock lock(pendingOverrideLock);
+            pendingOverride.nucHCMode = newHC;
+            pendingOverride.nucLCMode = newLC;
+        }
+        postCoalescedChangeNotification();
     }
 }
 
@@ -807,24 +792,34 @@ uint64_t ConvolverProcessor::getStructuralHash() const noexcept
 
     hashCombine(convo::consumeAtomic(activeCacheKey, std::memory_order_acquire));
     hashCombine(static_cast<uint64_t>(convo::consumeAtomic(irLength, std::memory_order_acquire)));
-    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(phaseMode, std::memory_order_acquire)));
+    hashCombine(static_cast<uint64_t>(getPhaseMode()));
 
     auto floatBits = [](float f) -> uint32_t {
         uint32_t bits;
         std::memcpy(&bits, &f, sizeof(bits));
         return bits;
     };
-    hashCombine(floatBits(convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire)));
-    hashCombine(floatBits(convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire)));
-    hashCombine(floatBits(convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire)));
+    float snap_mixF1, snap_mixF2, snap_mixTau;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        snap_mixF1  = pendingOverride.mixedTransitionStartHz;
+        snap_mixF2  = pendingOverride.mixedTransitionEndHz;
+        snap_mixTau = pendingOverride.mixedPreRingTau;
+    }
+    hashCombine(floatBits(snap_mixF1));
+    hashCombine(floatBits(snap_mixF2));
+    hashCombine(floatBits(snap_mixTau));
 
-    hashCombine(convo::consumeAtomic(experimentalDirectHeadEnabled, std::memory_order_acquire) ? 1ULL : 0ULL);
-    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(nucHCMode, std::memory_order_acquire)));
-    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(nucLCMode, std::memory_order_acquire)));
-    hashCombine(static_cast<uint64_t>(getTailProcessingMode()));
-    hashCombine(floatBits(getTailRolloffStartHz()));
-    hashCombine(floatBits(getTailRolloffStrength()));
-    hashCombine(floatBits(getPartitionTailStrength()));
+    int snapNucHC, snapNucLC;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        snapNucHC = pendingOverride.nucHCMode;
+        snapNucLC = pendingOverride.nucLCMode;
+    }
+    hashCombine(getExperimentalDirectHeadEnabled() ? 1ULL : 0ULL);
+    hashCombine(static_cast<uint64_t>(snapNucHC));
+    hashCombine(static_cast<uint64_t>(snapNucLC));
+    // Tail* parameters removed from structural hash (now in pendingOverride)
 
     return hash;
 }
@@ -841,23 +836,39 @@ int ConvolverProcessor::getActiveCacheFFTSize() const noexcept
 
 int ConvolverProcessor::getNUCHCMode() const noexcept
 {
-    return convo::consumeAtomic(nucHCMode, std::memory_order_acquire);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.nucHCMode;
 }
 
 int ConvolverProcessor::getNUCLCMode() const noexcept
 {
-    return convo::consumeAtomic(nucLCMode, std::memory_order_acquire);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.nucLCMode;
 }
 
 void ConvolverProcessor::setResamplingPhaseMode(ResamplingPhaseMode mode)
 {
-    convo::publishAtomic(currentResamplingPhaseMode, mode, std::memory_order_release);
-    requestDebouncedRebuild();
+    bool changed = false;
+    {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        const int newMode = static_cast<int>(mode);
+        changed = (pendingOverride.resamplingPhaseMode != newMode);
+        pendingOverride.resamplingPhaseMode = newMode;
+    }
+    if (changed)
+        postCoalescedChangeNotification();
 }
 
 ConvolverProcessor::ResamplingPhaseMode ConvolverProcessor::getResamplingPhaseMode() const
 {
-    return convo::consumeAtomic(currentResamplingPhaseMode, std::memory_order_acquire);
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return static_cast<ResamplingPhaseMode>(pendingOverride.resamplingPhaseMode);
+}
+
+bool ConvolverProcessor::getExperimentalDirectHeadEnabled() const
+{
+    const juce::ScopedLock lock(pendingOverrideLock);
+    return pendingOverride.experimentalDirectHeadEnabled;
 }
 
 float ConvolverProcessor::getMaximumAllowedIRLengthSecForSampleRate(double sampleRate)
@@ -880,7 +891,10 @@ float ConvolverProcessor::getMaximumAllowedIRLengthSec(double sampleRate) const
 int ConvolverProcessor::computeTargetIRLength(double sampleRate, int originalLength) const
 {
     juce::ignoreUnused(originalLength);
-    const double targetIRTimeSec = convo::consumeAtomic(targetIRLengthSec);
+    const double targetIRTimeSec = [this]() -> double {
+        const juce::ScopedLock lock(pendingOverrideLock);
+        return static_cast<double>(pendingOverride.targetIRLengthSec);
+    }();
     static constexpr int kMaxIRCap = MAX_IR_LATENCY;
 
     int target = static_cast<int>(sampleRate * targetIRTimeSec);

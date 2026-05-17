@@ -720,10 +720,7 @@ public:
     void setConvolverMixedTransitionEndHz(float hz) noexcept;
     void setConvolverMixedPreRingTau(float tau) noexcept;
     void setConvolverRebuildDebounceMs(int ms) noexcept;
-    void setConvolverTailRolloffStartHz(float hz) noexcept;
-    void setConvolverTailRolloffStrength(float strength) noexcept;
-    void setConvolverPartitionTailStrength(float strength) noexcept;
-    void setConvolverTailProcessingMode(int mode) noexcept;
+    // Tail* setter wrappers migrated to pendingOverride (ConvolverProcessor direct only)
 
     // Convolver State Tree & Cache Settings
     juce::ValueTree getConvolverStateTree() const;
@@ -1081,10 +1078,10 @@ public:
         int startDelayBlocks = 0;
         int dryHoldSamples = 0;
         bool latencyResetPending = false;
+        double dryScaleTarget = 1.0;       // dry-as-old crossfade の IR スケール目標値
     };
 
     std::atomic<RuntimePublishWorld*> runtimePublishWorldState { nullptr };
-    std::atomic<std::uint64_t> engineRuntimeRevision { 0 };
     std::atomic<std::uint64_t> runtimeGraphRevision { 0 };
     std::array<CrossfadePreparedSnapshot, 2> crossfadePreparedSnapshots_ {};
     std::atomic<int> crossfadePreparedSnapshotIndex_ { 0 };
@@ -1106,6 +1103,7 @@ public:
     std::atomic<bool> firstIrDryCrossfadePending { false }; // 初回IRロード時に dry を旧信号として使用
     std::atomic<bool> firstIrDryCrossfadeDone { false };    // アプリ起動後の初回1回のみ有効
     std::atomic<bool> dspCrossfadeUseDryAsOld { false };    // Audio Thread 実行中フラグ
+    std::atomic<double> dspCrossfadeDryScaleTarget { 1.0 }; // dry-as-old crossfade の IR スケール目標値
     std::atomic<int> dspCrossfadeDryHoldSamples { 0 };      // dry-as-old開始直後の旧信号優先ホールド
     convo::LinearRamp dspCrossfadeGain;
     convo::LinearRamp dspCrossfadeDryScaleGain;             // dry信号をIRスケールに合わせるため（60ms ramp）
@@ -1174,24 +1172,24 @@ public:
     static constexpr uint32_t learnerDispatchBufferSize = 32;
     static constexpr uint32_t learnerDispatchBufferMask = learnerDispatchBufferSize - 1;
 
-    #pragma warning(push)
-    #pragma warning(disable: 4324)
+    #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+    #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     alignas(64) std::atomic<convo::NoiseShaperLearningMode> pendingLearningMode { convo::NoiseShaperLearningMode::Short };
     alignas(64) std::atomic<uint64_t> globalCaptureSessionId { 1 };
-    #pragma warning(pop)
+    #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
     LearningCommand learningCommandBuffer[learningCommandBufferSize] {};
     LearnerDispatchAction learnerDispatchBuffer[learnerDispatchBufferSize] {};
     std::atomic<bool> learnerDispatchOverflow { false };
     std::atomic<LearnerDispatchAction> lastFailedAction {};
 
-    #pragma warning(push)
-    #pragma warning(disable: 4324)
+    #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+    #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     alignas(64) std::atomic<uint32_t> learningCommandWrite { 0 };  // Message/UI thread only
     alignas(64) std::atomic<uint32_t> learningCommandRead { 0 };   // Audio thread only
     alignas(64) std::atomic<uint32_t> learnerDispatchWrite { 0 };  // Audio thread only
     alignas(64) std::atomic<uint32_t> learnerDispatchRead { 0 };   // Message thread only
-    #pragma warning(pop)
+    #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
     LearningRuntimeState learningRuntimeState = LearningRuntimeState::Idle;
     convo::NoiseShaperLearningMode requestedLearningMode = convo::NoiseShaperLearningMode::Short;
@@ -1204,30 +1202,30 @@ public:
     std::atomic<int> fixedNoiseWindowSamples { 8192 };
     std::atomic<bool> softClipEnabled { true };
 
-    #pragma warning(push)
-    #pragma warning(disable: 4324)
+    #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+    #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     alignas(64) std::atomic<float> saturationAmount { 0.1f };
-    #pragma warning(pop)
+    #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
     std::atomic<int> manualOversamplingFactor { 0 }; // 0=Auto, 1=1x, 2=2x, 4=4x, 8=8x
     std::atomic<OversamplingType> oversamplingType { OversamplingType::IIR };
 
-    #pragma warning(push)
-    #pragma warning(disable: 4324)
+    #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+    #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     alignas(64) std::atomic<float> inputHeadroomDb { -6.0f };
     alignas(64) std::atomic<double> inputHeadroomGain { 0.5011872336272722 }; // -6dB
     alignas(64) std::atomic<float> outputMakeupDb { 12.0f };
     alignas(64) std::atomic<double> outputMakeupGain { 3.981071705534972 }; // +12dB
-    #pragma warning(pop)
+    #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
     std::atomic<int> rebuildGeneration { 0 }; // 非同期リビルドの競合防止用
     std::atomic<int> lastCommittedRebuildGeneration { 0 }; // commit 完了済み世代
 
-    #pragma warning(push)
-    #pragma warning(disable: 4324)
+    #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+    #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     alignas(64) std::atomic<float> convolverInputTrimDb { 0.0f };
     alignas(64) std::atomic<double> convolverInputTrimGain { 1.0 }; // 0 dB
-    #pragma warning(pop)
+    #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
     bool m_isRestoringState { false }; // requestLoadState 中はデフォルトリセットを抑制 (Message Thread のみ)
     uint32 fixedNoiseLastLogMs = 0;
@@ -1497,6 +1495,7 @@ public:
         runtime.queuedFadeTimeSec = prepared.fadeTimeSec;
         runtime.dspCrossfadeStartDelayBlocks = prepared.startDelayBlocks;
         runtime.dspCrossfadeDryHoldSamples = prepared.dryHoldSamples;
+        runtime.dryScaleTarget = prepared.dryScaleTarget;
         return runtime;
     }
 
@@ -1525,7 +1524,8 @@ public:
             .latencyDelayNew = consumeAtomic(latencyDelayNew),
             .startDelayBlocks = consumeAtomic(dspCrossfadeStartDelayBlocks),
             .dryHoldSamples = consumeAtomic(dspCrossfadeDryHoldSamples),
-            .latencyResetPending = consumeAtomic(latencyResetPending)
+            .latencyResetPending = consumeAtomic(latencyResetPending),
+            .dryScaleTarget = consumeAtomic(dspCrossfadeDryScaleTarget)
         };
 
         publishCrossfadePreparedSnapshot(snapshot);
@@ -1600,6 +1600,7 @@ public:
         graph.queuedFadeTimeSec = state.queuedFadeTimeSec;
         graph.dspCrossfadeStartDelayBlocks = state.dspCrossfadeStartDelayBlocks;
         graph.dspCrossfadeDryHoldSamples = state.dspCrossfadeDryHoldSamples;
+        graph.dryScaleTarget = state.dryScaleTarget;
 
         return graph;
     }
@@ -1695,6 +1696,15 @@ public:
         return convo::exchangeAtomic(dst, value, order);
     }
 
+    template <typename T, typename U,
+              typename = std::enable_if_t<std::is_integral_v<T> && std::is_convertible_v<U, T>>>
+    static inline T fetchAddAtomic(std::atomic<T>& dst,
+                                   U value,
+                                   std::memory_order order = std::memory_order_acq_rel) noexcept
+    {
+        return convo::fetchAddAtomic(dst, value, order);
+    }
+
     inline DSPCore* resolveCurrentDSPFromRuntimePublish(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
     {
         DSPCore* atomicCurrent = loadCurrentDSP();
@@ -1734,12 +1744,10 @@ public:
                                         bool active) noexcept
     {
         // IR-2: EngineRuntime と RuntimeGraph を単一 world として原子的に公開する。
-        const auto nextGraphGeneration = convo::fetchAddAtomic(runtimeGraphRevision,
-                                                               static_cast<std::uint64_t>(1),
-                                                               std::memory_order_acq_rel) + 1;
-        convo::fetchAddAtomic(g_runtimePublishCount,
-                             static_cast<std::uint64_t>(1),
-                             std::memory_order_acq_rel);
+        const auto nextGraphGeneration = fetchAddAtomic(runtimeGraphRevision,
+                                                        static_cast<std::uint64_t>(1)) + 1;
+        fetchAddAtomic(g_runtimePublishCount,
+                       static_cast<std::uint64_t>(1));
 
         auto engineState = makeEngineRuntimeState(current, next, policy, fadeTimeSec, active);
         engineState.revision = nextGraphGeneration;
@@ -1751,13 +1759,12 @@ public:
         newWorld->generation = nextGraphGeneration;
         newWorld->engine = engineState;
         newWorld->graph = graphState;
-    // Initialize versioning fields according to magna_carta.md Section 2
-    // runtimeVersion: monotonically increasing version number
-    static std::atomic<std::uint64_t> s_nextRuntimeVersion { 1 };
-    newWorld->runtimeVersion = s_nextRuntimeVersion.fetch_add(1, std::memory_order_acq_rel);
-
-    // transitionId: unique per crossfade event
-    newWorld->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
+        // Initialize versioning fields according to magna_carta.md Section 2
+        // runtimeVersion: monotonically increasing version number
+        static std::atomic<std::uint64_t> s_nextRuntimeVersion { 1 };
+        newWorld->runtimeVersion = fetchAddAtomic(s_nextRuntimeVersion, static_cast<std::uint64_t>(1));
+        // transitionId: unique per crossfade event
+        newWorld->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
 
         // Ensure all writes to newWorld are visible to Audio Thread before publication
         std::atomic_thread_fence(std::memory_order_release);
@@ -1769,8 +1776,6 @@ public:
                 ptr->~RuntimePublishWorld();
                 convo::aligned_free(ptr);
             });
-
-        publishAtomic(engineRuntimeRevision, nextGraphGeneration);
     }
 
     inline void clearPublishedRuntimeSnapshotsNonRt() noexcept
@@ -1784,7 +1789,6 @@ public:
                 convo::aligned_free(ptr);
             });
 
-        publishAtomic(engineRuntimeRevision, static_cast<std::uint64_t>(0));
         publishAtomic(runtimeGraphRevision, static_cast<std::uint64_t>(0));
     }
 
@@ -1962,7 +1966,7 @@ public:
             (atomicCurrent != nullptr) ? atomicCurrent->sampleRate : consumeAtomic(currentSampleRate));
         dspCrossfadeGain.reset(rampSampleRate, std::max(0.001, fadeTimeSec));
         dspCrossfadeGain.setCurrentAndTargetValue(0.0);
-        dspCrossfadeGain.setTargetValue(1.0);
+        // setTargetValue(1.0) は Audio Thread の armCrossfadeIfPending で呼ぶ (C1-2)
 
         replaceFadingOutDSPAndRetirePrevious(previousDSP);
         publishAtomic(dspCrossfadeUseDryAsOld, false);
@@ -2029,7 +2033,7 @@ public:
             (atomicCurrent != nullptr) ? atomicCurrent->sampleRate : consumeAtomic(currentSampleRate));
         dspCrossfadeGain.reset(rampSampleRate, std::max(0.001, fadeTimeSec));
         dspCrossfadeGain.setCurrentAndTargetValue(0.0);
-        dspCrossfadeGain.setTargetValue(1.0);
+        // setTargetValue(1.0) は Audio Thread の armCrossfadeIfPending で呼ぶ (C1-2)
 
         publishAtomic(queuedFadeTimeSec, fadeTimeSec);
         publishRuntimeTransitionState(atomicCurrent,
@@ -2042,7 +2046,8 @@ public:
                   std::max(1, consumeAtomic(maxSamplesPerBlock)));
         dspCrossfadeDryScaleGain.reset(std::max(1.0, consumeAtomic(currentSampleRate)), 0.060);
         dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
-        dspCrossfadeDryScaleGain.setTargetValue(targetIrScale);
+        // setTargetValue(targetIrScale) は Audio Thread の armCrossfadeIfPending で呼ぶ (C1-2)
+        publishAtomic(dspCrossfadeDryScaleTarget, targetIrScale);
         publishAtomic(dspCrossfadeUseDryAsOld, true);
         publishAtomic(firstIrDryCrossfadePending, true);
         publishAtomic(dspCrossfadePending, true);
@@ -2163,9 +2168,14 @@ public:
             latencyDelayNew_RT        = (runtimeGraph != nullptr) ? runtimeGraph->latencyDelayNew              : 0;
             dspCrossfadeStartDelayBlocks_RT = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeStartDelayBlocks : 0;
 
+            // C1-2: activate のみ Audio Thread で実行 (reset/setCurrentAndTargetValue は Message Thread 側)
+            dspCrossfadeGain.setTargetValue(1.0);
+
             if (firstLoadDryPending)
             {
                 useDryAsOld = true;
+                if (runtimeGraph != nullptr)
+                    dspCrossfadeDryScaleGain.setTargetValue(runtimeGraph->dryScaleTarget);
             }
         }
     }

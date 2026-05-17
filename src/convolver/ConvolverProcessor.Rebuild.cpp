@@ -41,52 +41,6 @@ void ConvolverProcessor::postCoalescedChangeNotification()
     }
 }
 
-void ConvolverProcessor::requestDebouncedRebuild()
-{
-    debugDebouncedRebuildRequestCount.fetch_add(1, std::memory_order_acq_rel);
-
-    if (!isIRLoaded())
-    {
-        if (convo::consumeAtomic(isLoading, std::memory_order_acquire) || convo::consumeAtomic(isRebuilding, std::memory_order_acquire))
-        {
-            debugDebouncedRebuildDeferredAfterLoadCount.fetch_add(1, std::memory_order_acq_rel);
-            convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release);
-        }
-        return;
-    }
-
-    if (!isIRFinalized())
-    {
-        debugDebouncedRebuildDeferredAfterLoadCount.fetch_add(1, std::memory_order_acq_rel);
-        convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release);
-        return;
-    }
-
-    const std::uint64_t token = rebuildDebounceToken.fetch_add(1, std::memory_order_acq_rel) + 1;
-    auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
-
-    const int debounceMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS,
-                                        REBUILD_DEBOUNCE_MAX_MS,
-                                        convo::consumeAtomic(rebuildDebounceMs, std::memory_order_acquire));
-
-    juce::Timer::callAfterDelay(debounceMs, [weakThis, token]()
-    {
-        if (auto* self = weakThis.get())
-        {
-            if (convo::consumeAtomic(self->rebuildDebounceToken, std::memory_order_acquire) != token)
-                return;
-
-            if (!self->isIRLoaded() || convo::consumeAtomic(self->isLoading, std::memory_order_acquire))
-                return;
-
-            self->debugDebouncedRebuildTriggeredCount.fetch_add(1, std::memory_order_acq_rel);
-            self->loadImpulseResponse(juce::File());
-        }
-    });
-
-    debugDebouncedRebuildScheduledCount.fetch_add(1, std::memory_order_acq_rel);
-}
-
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
 {
     auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
@@ -117,9 +71,16 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
         auto runLegacyPath = [&]()
         {
             const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+            float mixedF1, mixedF2, mixedTau;
+            {
+                const juce::ScopedLock lock(pendingOverrideLock);
+                mixedF1  = pendingOverride.mixedTransitionStartHz;
+                mixedF2  = pendingOverride.mixedTransitionEndHz;
+                mixedTau = pendingOverride.mixedPreRingTau;
+            }
             LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), getPhaseMode(),
-                        convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire), convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire),
-                        convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire), convo::consumeAtomic(currentIRScale, std::memory_order_acquire));
+                        mixedF1, mixedF2,
+                        mixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire));
             loader.externalCancellationCheck = shouldCancel;
             loader.runSynchronously();
         };
@@ -190,6 +151,13 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
     if (!job.loaderInitialized)
     {
         const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+        float mixedF1, mixedF2, mixedTau;
+        {
+            const juce::ScopedLock lock(pendingOverrideLock);
+            mixedF1  = pendingOverride.mixedTransitionStartHz;
+            mixedF2  = pendingOverride.mixedTransitionEndHz;
+            mixedTau = pendingOverride.mixedPreRingTau;
+        }
         job.incrementalLoader = std::make_unique<LoaderThread>(
             *this,
             *(job.preparedIR),
@@ -197,9 +165,9 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
             processingSampleRate,
             convo::consumeAtomic(currentBufferSize, std::memory_order_acquire),
             getPhaseMode(),
-            convo::consumeAtomic(mixedTransitionStartHz, std::memory_order_acquire),
-            convo::consumeAtomic(mixedTransitionEndHz, std::memory_order_acquire),
-            convo::consumeAtomic(mixedPreRingTau, std::memory_order_acquire),
+            mixedF1,
+            mixedF2,
+            mixedTau,
             convo::consumeAtomic(currentIRScale, std::memory_order_acquire));
         job.incrementalLoader->externalCancellationCheck = job.shouldCancel;
         job.loaderInitialized = true;

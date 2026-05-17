@@ -465,8 +465,8 @@ bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block,
 //--------------------------------------------------------------
 void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
-    const auto* stateSnapshot = loadCurrentState(std::memory_order_acquire);
     convo::RCUReaderGuard guard(rcuReader);
+    const auto* stateSnapshot = loadCurrentState(std::memory_order_acquire);
     // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;

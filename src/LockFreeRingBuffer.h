@@ -17,8 +17,8 @@
 // C4324: alignas指定子によって構造体がパッドされた
 // alignas(64) はキャッシュライン分離に必須のため、警告を抑制する
 #ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable: 4324)
+#  pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#  pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif
 
 template<typename T, size_t Capacity>
@@ -83,5 +83,5 @@ public:
 };
 
 #ifdef _MSC_VER
-#  pragma warning(pop)
+#  pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif

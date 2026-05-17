@@ -91,7 +91,6 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     };
 
     DSPCore* dspToTrash = nullptr;
-    uint64_t retireEpoch = 0;
     bool scheduleDryAsOldCrossfade = false;
     double dryAsOldFadeTimeSec = 0.0;
     int transitionLatencyDeltaSamples = 0;
@@ -202,9 +201,13 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             {
                 const auto runtimePublishView = getRuntimePublishView();
                 const auto* runtimeGraph = runtimePublishView.graph;
+                const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
                 const bool hasFadingRuntime = (resolveFadingDSPFromRuntimePublish(runtimeGraph) != nullptr);
-                const bool hasPendingCrossfade = runtimeCrossfadePending(runtimeGraph);
-                const bool useDryAsOld = runtimeCrossfadeUseDryAsOld(runtimeGraph);
+                const bool hasPendingCrossfade = runtimeCrossfadePending(runtimeGraph)
+                    || preparedCrossfade.pending;
+                const bool useDryAsOld = runtimeCrossfadeUseDryAsOld(runtimeGraph)
+                    || preparedCrossfade.firstIrDryCrossfadePending
+                    || preparedCrossfade.useDryAsOld;
 
                 if (hasFadingRuntime || hasPendingCrossfade || useDryAsOld)
                 {
@@ -223,8 +226,6 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
         // 3. EBR：エポックを進める
         convo::EpochManager::instance().advanceEpoch();
-        retireEpoch = convo::EpochManager::instance().currentEpoch();
-        publishAtomic(g_currentEpoch, retireEpoch);
 
         publishRuntimeSnapshots(newDSP,
                     nullptr,
