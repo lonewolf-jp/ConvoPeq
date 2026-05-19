@@ -20,7 +20,7 @@ void ConvolverProcessor::rebuildAllIRs()
 
 void ConvolverProcessor::postCoalescedChangeNotification()
 {
-    if (convo::exchangeAtomic(changeNotificationPending, true, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(changeNotificationPending, true, std::memory_order_acq_rel)) // acq_rel: acquire で先行状態観測; release で pending=true 公開
         return;
 
     auto weakThis = juce::WeakReference<ConvolverProcessor>(this);
@@ -28,7 +28,7 @@ void ConvolverProcessor::postCoalescedChangeNotification()
     {
         if (auto* self = weakThis.get())
         {
-            convo::publishAtomic(self->changeNotificationPending, false, std::memory_order_release);
+            convo::publishAtomic(self->changeNotificationPending, false, std::memory_order_release); // release: pending=false 公開; 次回 exchangeAtomic acquire と HB
             self->sendChangeMessage();
         }
     };
@@ -37,7 +37,7 @@ void ConvolverProcessor::postCoalescedChangeNotification()
     if (!queued)
     {
         if (auto* self = weakThis.get())
-            convo::publishAtomic(self->changeNotificationPending, false, std::memory_order_release);
+            convo::publishAtomic(self->changeNotificationPending, false, std::memory_order_release); // release: pending=false 公開（callAsync失敗時）
     }
 }
 
@@ -70,7 +70,7 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
 
         auto runLegacyPath = [&]()
         {
-            const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+            const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
             float mixedF1, mixedF2, mixedTau;
             {
                 const juce::ScopedLock lock(pendingOverrideLock);
@@ -78,9 +78,9 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
                 mixedF2  = pendingOverride.mixedTransitionEndHz;
                 mixedTau = pendingOverride.mixedPreRingTau;
             }
-            LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), getPhaseMode(),
+            LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), getPhaseMode(), // acquire: prepareToPlay の publishAtomic release と HB
                         mixedF1, mixedF2,
-                        mixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire));
+                        mixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire)); // acquire: applyNewState の publishAtomic release と HB
             loader.externalCancellationCheck = shouldCancel;
             loader.runSynchronously();
         };
@@ -150,7 +150,7 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
 
     if (!job.loaderInitialized)
     {
-        const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+        const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
         float mixedF1, mixedF2, mixedTau;
         {
             const juce::ScopedLock lock(pendingOverrideLock);
@@ -163,12 +163,12 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
             *(job.preparedIR),
             job.preparedSampleRate,
             processingSampleRate,
-            convo::consumeAtomic(currentBufferSize, std::memory_order_acquire),
+            convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), // acquire: prepareToPlay の publishAtomic release と HB
             getPhaseMode(),
             mixedF1,
             mixedF2,
             mixedTau,
-            convo::consumeAtomic(currentIRScale, std::memory_order_acquire));
+            convo::consumeAtomic(currentIRScale, std::memory_order_acquire)); // acquire: applyNewState の publishAtomic release と HB
         job.incrementalLoader->externalCancellationCheck = job.shouldCancel;
         job.loaderInitialized = true;
     }
@@ -263,14 +263,14 @@ bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
 void ConvolverProcessor::setUseIncrementalRebuild(bool enable) noexcept
 {
     juce::ignoreUnused(enable);
-    convo::publishAtomic(useIncrementalRebuild, false, std::memory_order_release);
+    convo::publishAtomic(useIncrementalRebuild, false, std::memory_order_release); // release: isIncrementalRebuildEnabled 側 acquire と HB
     if (rebuildJob)
         rebuildJob->reset();
 }
 
 bool ConvolverProcessor::isIncrementalRebuildEnabled() const noexcept
 {
-    return convo::consumeAtomic(useIncrementalRebuild, std::memory_order_acquire);
+    return convo::consumeAtomic(useIncrementalRebuild, std::memory_order_acquire); // acquire: setUseIncrementalRebuild の publishAtomic release と HB
 }
 
 void ConvolverProcessor::invalidatePendingLoads()

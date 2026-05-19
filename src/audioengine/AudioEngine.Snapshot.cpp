@@ -113,9 +113,11 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         DBG("Phase6: EQ fade triggered");
     }
 
+    const auto observedCurrent = m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
+
     convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
         params,
-        m_coordinator.getCurrent(),
+        const_cast<convo::GlobalSnapshot*>(observedCurrent.get()),
         generation,
         sampleRate);
 
@@ -128,17 +130,9 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     }
 
     convo::publishAtomic(debugLastCreatedEqHash, eqCoeffHash, std::memory_order_release);
-    convo::publishAtomic(debugLastCreateAudioBlockCounter, convo::consumeAtomic(m_audioBlockCounter, std::memory_order_acquire), std::memory_order_release);
     diagLog("[VERIFY] EQ createdHash=0x"
         + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
         + " gen=" + juce::String(static_cast<juce::int64>(generation)));
-
-    // 反映は次のオーディオブロック境界を検知してから行う。
-    const uint64_t boundaryBefore = convo::consumeAtomic(m_audioBlockCounter, std::memory_order_acquire);
-    if (!waitForAudioBlockBoundary(boundaryBefore, 20))
-    {
-        DBG("Phase6: boundary wait timeout, applying snapshot immediately on control thread");
-    }
 
     if (fadeSamples > 0)
     {
@@ -151,7 +145,8 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
     // フェイルセーフ: 何らかの競合で fade が開始されず current も空のままなら、
     // 即時適用にフォールバックして反映欠落を防ぐ。
-    if (!m_coordinator.isFading() && m_coordinator.getCurrent() == nullptr)
+    const auto observedAfterApply = m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
+    if (!m_coordinator.isFading() && observedAfterApply.get() == nullptr)
     {
         DBG("[VERIFY] snapshot apply fallback: force switchImmediate");
         m_coordinator.switchImmediate(newSnap);

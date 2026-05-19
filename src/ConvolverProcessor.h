@@ -49,6 +49,7 @@
 #include "PreparedIRState.h"
 #include "DeferredDeletionQueue.h"
 #include "ConvolverRuntime.h"
+#include "core/EpochDomain.h"
 #include "DspNumericPolicy.h"
 #include "DftiHandle.h"
 
@@ -205,7 +206,8 @@ public:
     bool loadImpulseResponse(const juce::File& irFile, bool optimizeForRealTime = false);
     void loadIR(const juce::File& irFile);
     void applyPreparedIRState(std::unique_ptr<PreparedIRState> prepared);
-    int64_t getLastPreparedIRApplyTicks() const noexcept { return convo::consumeAtomic(lastPreparedIRApplyTicks, std::memory_order_acquire); }
+    // acquire: applyPreparedIRState の release と HB し、IR 適用時刻を取得。
+    int64_t getLastPreparedIRApplyTicks() const noexcept { return convo::consumeAtomic(lastPreparedIRApplyTicks, std::memory_order_acquire); } // acquire: applyPreparedIRState の release と HB
     void stopUpgradeThread();
     void startProgressiveUpgrade(const juce::File& file,
                                  double sampleRate,
@@ -232,7 +234,8 @@ public:
     //----------------------------------------------------------
     void setBypass(bool shouldBypass);
     bool isBypassed() const { const juce::ScopedLock lock(pendingOverrideLock); return pendingOverride.bypassed; }
-    const convo::ConvolverState* getConvolverState() const { return convo::consumeAtomic(convolverState, std::memory_order_acquire); }
+    // acquire: LoaderThread/executeCommit の publishNewConvolverState release と HB し、有効な state を取得。
+    const convo::ConvolverState* getConvolverState() const { return convo::consumeAtomic(convolverState, std::memory_order_acquire); } // acquire: publishNewConvolverState の release と HB
     void enterStateReader(int /*readerIndex*/) const noexcept {}
     void exitStateReader(int /*readerIndex*/) const noexcept {}
 
@@ -328,22 +331,31 @@ public:
     //----------------------------------------------------------
     bool isIRLoaded() const
     {
+        // acquire: LoaderThread/executeCommit の release と HB し、state/engine/metadata を取得。
         const bool hasPublishedState = (convo::consumeAtomic(convolverState, std::memory_order_acquire) != nullptr);
         const bool hasActiveEngine = (loadActiveEngine(std::memory_order_acquire) != nullptr);
         const bool hasIRMetadata = (convo::consumeAtomic(currentIRState, std::memory_order_acquire) != nullptr)
             || (convo::consumeAtomic(irLength, std::memory_order_acquire) > 0);
         return hasPublishedState || (hasActiveEngine && hasIRMetadata);
     }
-    bool isLoadingIR() const { return convo::consumeAtomic(isLoading, std::memory_order_acquire); }
-    bool isIRFinalized() const noexcept { return convo::consumeAtomic(irFinalized, std::memory_order_acquire); }
+    // acquire: LoaderThread の release と HB し、loading flag を観測。
+    // acquire: LoaderThread の release と HB し、ロード中フラグを観測。
+    bool isLoadingIR() const { return convo::consumeAtomic(isLoading, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
+    // acquire: LoaderThread の release と HB し、最終化フラグを観測。
+    bool isIRFinalized() const noexcept { return convo::consumeAtomic(irFinalized, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
     juce::String getIRName() const { return irName; }
-    int getIRLength() const { return convo::consumeAtomic(irLength, std::memory_order_acquire); }
+    // acquire: LoaderThread/applyPreparedIRState の release と HB し、IR長を取得。
+    int getIRLength() const { return convo::consumeAtomic(irLength, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
     juce::String getLastError() const { return lastError; }
-    float getLoadProgress() const { return convo::consumeAtomic(loadProgress); }
-    int getMixedPhaseState() const noexcept { return convo::consumeAtomic(mixedPhaseState, std::memory_order_acquire); }
-    void setMixedPhaseState(int state) noexcept { convo::publishAtomic(mixedPhaseState, juce::jlimit(0, 2, state), std::memory_order_release); }
+    // acquire: setLoadingProgress の release と HB し、ロード進捗値を取得。
+    float getLoadProgress() const { return convo::consumeAtomic(loadProgress, std::memory_order_acquire); } // acquire: setLoadingProgress の release と HB
+    // acquire: setMixedPhaseState の release と HB し、混合フェーズ状態を取得。
+    int getMixedPhaseState() const noexcept { return convo::consumeAtomic(mixedPhaseState, std::memory_order_acquire); } // acquire: setMixedPhaseState の release と HB
+    // release: getMixedPhaseState の acquire と HB し、混合フェーズ状態を公開。
+    void setMixedPhaseState(int state) noexcept { convo::publishAtomic(mixedPhaseState, juce::jlimit(0, 2, state), std::memory_order_release); } // release: getMixedPhaseState の acquire と HB
     void setLoadingProgress(float p);
-    int getCurrentBufferSize() const { return convo::consumeAtomic(currentBufferSize, std::memory_order_acquire); }
+    // acquire: setCurrentBufferSize の release と HB し、有効なバッファサイズを取得。
+    int getCurrentBufferSize() const { return convo::consumeAtomic(currentBufferSize, std::memory_order_acquire); } // acquire: setCurrentBufferSize の release と HB
     struct LatencyBreakdown
     {
         int algorithmLatencySamples = 0;
@@ -374,6 +386,7 @@ public:
 
     RebuildAutomationDiagnostics getRebuildAutomationDiagnostics() const noexcept
     {
+        // acquire: rebuild automation の各カウント更新（release）と HB し、診断値を取得。
         return {
             convo::consumeAtomic(debugDebouncedRebuildRequestCount, std::memory_order_acquire),
             convo::consumeAtomic(debugDebouncedRebuildDeferredAfterLoadCount, std::memory_order_acquire),
@@ -766,7 +779,7 @@ private:
     // [Issue 2 fix] latencySmoother のスレッドセーフティ向上のためのペンディングフラグ。
     // refreshLatency() (Message/Rebuild Thread) は直接 SmoothedValue を触らず、
     // このフラグと値を使用して Audio Thread に更新を委譲する。
-    // [F-01 fix] 世代カウンター方式: NonRT が fetch_add(1), RT が load+比較のみ (atomic write 禁止)
+    // 世代カウンター方式: NonRT が fetch_add(1), RT が load+比較のみ (atomic write 禁止)
     std::atomic<uint64_t> latencyResetPendingGen { 0 };
     std::atomic<double> pendingLatencyValue { 0.0 };
     // IR切り替え時の遅延ジャンプをクロスフェードに統合するためのフラグ。
@@ -844,23 +857,31 @@ private:
         return static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(ptr));
     }
 
-    StereoConvolver* loadActiveEngine(std::memory_order order = std::memory_order_acquire) const noexcept
+    // acquire: publishActiveEngine/exchangeActiveEngine の release/acq_rel と HB し、アクティブエンジンを取得。
+    StereoConvolver* loadActiveEngine(std::memory_order order = std::memory_order_acquire) const noexcept // default acquire: publish/exchange 側 release/acq_rel と HB
     {
-        return fromEngineBits(convo::consumeAtomic(m_activeEngineBits, order));
+        return fromEngineBits(convo::consumeAtomic(m_activeEngineBits, static_cast<std::memory_order>(order)));
     }
 
+    // acq_rel: 旧エンジンを acquire で取得、新エンジンを release で公開。loadActiveEngine と双方向 HB。
     StereoConvolver* exchangeActiveEngine(StereoConvolver* value,
-                                          std::memory_order order = std::memory_order_acq_rel) noexcept
+                                          std::memory_order order = std::memory_order_acq_rel) noexcept // default acq_rel: 旧値取得(acquire)+新値公開(release)
     {
-        return fromEngineBits(convo::exchangeAtomic(m_activeEngineBits, toEngineBits(value), order));
+        return fromEngineBits(convo::exchangeAtomic(m_activeEngineBits,
+                                                    toEngineBits(value),
+                                                    static_cast<std::memory_order>(order)));
     }
 
+    // release: loadActiveEngine の acquire と HB し、アクティブエンジンを公開。
     void publishActiveEngine(StereoConvolver* value,
-                             std::memory_order order = std::memory_order_release) noexcept
+                             std::memory_order order = std::memory_order_release) noexcept // default release: loadActiveEngine acquire 側へ公開
     {
-        convo::publishAtomic(m_activeEngineBits, toEngineBits(value), order);
+        convo::publishAtomic(m_activeEngineBits,
+                             toEngineBits(value),
+                             static_cast<std::memory_order>(order));
     }
 
+    // acquire: publishRuntimeProcessSnapshot の release と HB し、有効なsnapshot indexを取得。
     RuntimeProcessSnapshot captureRuntimeProcessSnapshot() const noexcept
     {
         const uint32_t index = convo::consumeAtomic(runtimeProcessSnapshotIndex, std::memory_order_acquire) & 1u;
@@ -869,6 +890,7 @@ private:
 
     void publishRuntimeProcessSnapshot() noexcept
     {
+        // 書き込み側自身の前回値読み取りのため HB 不要。relaxed で十分。
         const uint32_t current = convo::consumeAtomic(runtimeProcessSnapshotIndex, std::memory_order_relaxed) & 1u;
         const uint32_t next = current ^ 1u;
 
@@ -879,8 +901,10 @@ private:
             runtimeProcessSnapshots[next].mixTarget      = pendingOverride.mix;
             runtimeProcessSnapshots[next].smoothingTimeSec = pendingOverride.smoothingTimeSec;
         }
+        // acquire: Message Thread の release と HB し、有効なsample rateを取得してsnapshot更新。
         runtimeProcessSnapshots[next].currentSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
 
+        // release: captureRuntimeProcessSnapshot の acquire と HB し、新snapshot indexを公開。
         convo::publishAtomic(runtimeProcessSnapshotIndex, next, std::memory_order_release);
     }
 
@@ -895,12 +919,12 @@ private:
     std::atomic<bool> rebuildPendingAfterLoad { false };
     // リングバッファオーバーフローフラグ:
     //   Audio Thread から store(true)、process() 先頭で exchange(false) して rebuildPendingAfterLoad に転送。
-    // overflowRequested は削除: RT 側で値を使用せず dead code だったため除去 (F-01 fix)
+    // overflowRequested は削除: RT 側で値を使用せず dead code だったため除去
 
     // H3: smoothingTimeSec shadow atomic 廃止済み。pendingOverride.smoothingTimeSec が唯一の Source of Truth。
 
     // 【案 B】Smoothing Time 変更フラグ（Audio Thread 委譲用）
-    // [F-01 fix] 世代カウンター方式
+    // 世代カウンター方式
     std::atomic<uint64_t> smoothingTimeChangePendingGen { 0 };
     std::atomic<uint64_t> mixSmootherResetPendingGen { 0 };
 
@@ -948,7 +972,7 @@ private:
 
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
 public: // Added for AudioEngine access
-    double getCurrentIRScale() const noexcept { return convo::consumeAtomic(currentIRScale); }
+    double getCurrentIRScale() const noexcept { return convo::consumeAtomic(currentIRScale, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
     std::atomic<double> currentIRScale { 1.0 }; // IRのスケールファクター (Auto Makeup + Safety Margin)
     convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     int cachedFFTBufferCapacity = 0;
@@ -1062,7 +1086,7 @@ public: // Added for AudioEngine access
     std::atomic<int> activeCacheFFTSize { 0 };
 
     // RCU 管理 (StereoConvolver 用)
-    // [F-01 fix] 世代カウンター (init=1: 初回 prepare 後の最初の process() でブロックをクリアするため)
+    // 世代カウンター (init=1: 初回 prepare 後の最初の process() でブロックをクリアするため)
     std::atomic<uint64_t> firstProcessCallGen { 1 };
     // RT-local 世代追跡 (非atomic, RT スレッドのみアクセス)
     uint64_t m_firstProcessCallGenSeen       { 0 };
@@ -1070,8 +1094,9 @@ public: // Added for AudioEngine access
     uint64_t m_latencyChangeRequestedGenSeen { 0 };
     uint64_t m_smoothingTimeChangePendingGenSeen { 0 };
     uint64_t m_mixSmootherResetPendingGenSeen { 0 };
+    convo::EpochDomain m_epochDomain;
     // DSP_THREAD_STATE: Audio Thread process() で使用するRCU reader。
-    convo::RCUReader runtimeRcuReader;
+    convo::RCUReader runtimeRcuReader { m_epochDomain };
 
     void retireStereoConvolver(StereoConvolver* conv, uint64_t retireEpoch);
 

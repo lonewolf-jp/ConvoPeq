@@ -45,10 +45,11 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             return;
         }
 
-        if (lifecycleState.compare_exchange_weak(previousState,
-                                                 EngineLifecycleState::Preparing,
-                                                 std::memory_order_acq_rel,
-                                                 std::memory_order_acquire))
+        if (convo::compareExchangeAtomic(lifecycleState,
+                         previousState,
+                         EngineLifecycleState::Preparing,
+                         std::memory_order_acq_rel,
+                         std::memory_order_acquire))
             break;
     }
 
@@ -86,11 +87,11 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     const int bufferSize = samplesPerBlockExpected;
 
     // サンプルレート・ブロックサイズ変更検知
-    const bool rateChanged = (std::abs(convo::consumeAtomic(currentSampleRate) - safeSampleRate) > 1e-6);
-    const bool blockSizeChanged = (convo::consumeAtomic(maxSamplesPerBlock) != bufferSize);
+    const bool rateChanged = (std::abs(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire) - safeSampleRate) > 1e-6);
+    const bool blockSizeChanged = (convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire) != bufferSize);
 
-    convo::publishAtomic(maxSamplesPerBlock, bufferSize);
-    convo::publishAtomic(currentSampleRate, safeSampleRate);
+    convo::publishAtomic(maxSamplesPerBlock, bufferSize, std::memory_order_release);
+    convo::publishAtomic(currentSampleRate, safeSampleRate, std::memory_order_release);
     {
         const int irFadeSamples = juce::jmax(0, convo::consumeAtomic(m_irFadeSamples, std::memory_order_acquire));
         const double irFadeSec = (irFadeSamples > 0)
@@ -106,18 +107,19 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
     convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
     {
-        const auto runtimePublishView = getRuntimePublishView();
-        auto* currentForPublish = resolveCurrentDSPFromRuntimePublish(runtimePublishView.graph);
-        auto* fadingForPublish = resolveFadingDSPFromRuntimePublish(runtimePublishView.graph);
+        const auto* runtimeWorld = runtimeStore.observe();
+        const auto* runtimeGraph = (runtimeWorld != nullptr) ? &runtimeWorld->graph : nullptr;
+        auto* currentForPublish = runtimePublishedCurrentDSP(runtimeGraph);
+        auto* fadingForPublish = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
         const bool hasAnyRuntime = (currentForPublish != nullptr) || (fadingForPublish != nullptr);
         if (hasAnyRuntime)
         {
-            const auto ts = getRuntimeTransitionStateForDebug();
-            publishRuntimeSnapshots(currentForPublish,
-                                    fadingForPublish,
-                                    ts.policy,
-                                    ts.fadeTimeSec,
-                                    ts.active);
+            const auto ts = runtimeWorld != nullptr ? runtimeWorld->engine.transition : convo::TransitionState{};
+            publicationCoordinator().publishState(currentForPublish,
+                                                  fadingForPublish,
+                                                  ts.policy,
+                                                  ts.fadeTimeSec,
+                                                  ts.active);
         }
     }
     selectAdaptiveCoeffBankForCurrentSettings();
@@ -126,8 +128,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     dspCrossfadeDoubleBuffer.setSize(2, std::max(SAFE_MAX_BLOCK_SIZE, bufferSize), false, false, true);
 
     analyzerFifo.prepare(2, FIFO_SIZE);
-    convo::publishAtomic(inputLevelLinear, 0.0f);
-    convo::publishAtomic(outputLevelLinear, 0.0f);
+    convo::publishAtomic(inputLevelLinear, 0.0f, std::memory_order_release);
+    convo::publishAtomic(outputLevelLinear, 0.0f, std::memory_order_release);
 
     convo::publishAtomic(eqBypassActive, convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire), std::memory_order_release);
     convo::publishAtomic(convBypassActive, convo::consumeAtomic(convBypassRequested, std::memory_order_acquire), std::memory_order_release);
@@ -211,19 +213,18 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         publishCurrentDSP(activeDSP);
         convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
         convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
-        publishRuntimeSnapshots(activeDSP,
-                    nullptr,
-                    convo::TransitionPolicy::HardReset,
-                    0.0,
-                    false);
-        publishRuntimeTransitionState(activeDSP, nullptr, convo::TransitionPolicy::HardReset, 0.0, false);
+        publicationCoordinator().publishState(activeDSP,
+                              nullptr,
+                              convo::TransitionPolicy::HardReset,
+                              0.0,
+                              false);
     }
 
     // --- DSP再ビルド判定・同期 ---
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
     if (rateChanged)
         uiConvolverProcessor.invalidatePendingLoads();
-    const bool hasCurrentRuntime = (resolveCurrentDSPFromRuntimePublish(runtimePublishView.graph) != nullptr);
+    const bool hasCurrentRuntime = (runtimePublishedCurrentDSP(runtimePublishView.graph) != nullptr);
     if (rateChanged || blockSizeChanged || !hasCurrentRuntime) {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             requestRebuild(safeSampleRate, bufferSize);
@@ -232,7 +233,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         }
     }
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Prepared, std::memory_order_release);
-    diagLog("[DIAG] prepareToPlay: exit currentSR=" + juce::String(convo::consumeAtomic(currentSampleRate), 2) + " maxSPB=" + juce::String(convo::consumeAtomic(maxSamplesPerBlock)));
+    diagLog("[DIAG] prepareToPlay: exit currentSR=" + juce::String(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire), 2) + " maxSPB=" + juce::String(convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire)));
 }
 
 #endif

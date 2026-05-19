@@ -3,7 +3,7 @@
 #include "audioengine/AudioEngine.h"
 #include "CacheManager.h"
 #include "convolver/ConvolverProcessor.Internal.h"
-#include "core/EpochManager.h"
+#include "core/EpochDomain.h"
 #include "AlignedAllocation.h"
 #include "ProgressiveUpgradeThread.h"
 #include "PreparedIRState.h"
@@ -24,7 +24,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
 
     if (isRebuild)
     {
-        if (convo::exchangeAtomic(isRebuilding, true, std::memory_order_acquire))
+        if (convo::exchangeAtomic(isRebuilding, true, std::memory_order_acquire)) // acquire: 先行 publishAtomic(isRebuilding=false, release) と HB
         {
             juce::Logger::writeToLog("ConvolverProcessor::rebuild (via loadImpulseResponse) already in progress, skipping");
             return true;
@@ -35,7 +35,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
         releaseIRState(state);
         if (missingState)
         {
-            convo::publishAtomic(isRebuilding, false, std::memory_order_release);
+            convo::publishAtomic(isRebuilding, false, std::memory_order_release); // release: timer/load 経路の acquire と HB
             return false;
         }
     }
@@ -45,8 +45,8 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
         return false;
     }
 
-    convo::publishAtomic(isLoading, true);
-    convo::publishAtomic(irFinalized, false, std::memory_order_release);
+    convo::publishAtomic(isLoading, true, std::memory_order_release);   // release: timer/UI 側 isLoading acquire と HB
+    convo::publishAtomic(irFinalized, false, std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
     lastError.clear(); // 新しいロード開始時にエラーをクリア
 
     // 既存のローダーを停止してゴミ箱へ退避 (即時resetによるブロックを回避)
@@ -55,20 +55,20 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
         activeLoader->signalThreadShouldExit();
         loaderTrashBin.push_back(std::move(activeLoader));
     }
-    const double rawProcessingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    const double rawProcessingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
     const double processingSampleRate = (std::isfinite(rawProcessingSampleRate) && rawProcessingSampleRate > 0.0)
                                           ? rawProcessingSampleRate
                                           : 48000.0;
     const int processingBlockSize = juce::jlimit(1, MAX_BLOCK_SIZE,
-                                                 [&]{ const int bs = convo::consumeAtomic(currentBufferSize, std::memory_order_acquire); return bs > 0 ? bs : 512; }());
+                                                 [&]{ const int bs = convo::consumeAtomic(currentBufferSize, std::memory_order_acquire); return bs > 0 ? bs : 512; }()); // acquire: prepareToPlay の publishAtomic release と HB
     if (isRebuild)
     {
         const IRState* state = acquireIRState();
         if (state == nullptr || state->ir == nullptr || state->sampleRate <= 0.0)
         {
             releaseIRState(state);
-            convo::publishAtomic(isLoading, false, std::memory_order_release);
-            convo::publishAtomic(isRebuilding, false, std::memory_order_release);
+            convo::publishAtomic(isLoading, false, std::memory_order_release);   // release: timer/UI 側 acquire と HB
+            convo::publishAtomic(isRebuilding, false, std::memory_order_release); // release: timer/load 経路 acquire と HB
             return false;
         }
 
@@ -81,7 +81,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
         }
         activeLoader = std::make_unique<LoaderThread>(*this, *(state->ir), state->sampleRate, processingSampleRate, processingBlockSize, getPhaseMode(),
                                                       mixedF1, mixedF2,
-                                                      mixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire));
+                                                      mixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire)); // acquire: applyNewState/snapshot restore 側 publishAtomic release と HB
         releaseIRState(state);
     }
     else
@@ -96,7 +96,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
         activeLoader = std::make_unique<LoaderThread>(*this, irFile, processingSampleRate, processingBlockSize, getPhaseMode(),
                                                       mixedF1b, mixedF2b,
                                                       mixedTaub);
-        convo::publishAtomic(currentIrOptimized, optimizeForRealTime);
+        convo::publishAtomic(currentIrOptimized, optimizeForRealTime, std::memory_order_release); // release: UI/loader 側 acquire と HB
     }
 
     activeLoader->startThread();
@@ -211,8 +211,8 @@ void ConvolverProcessor::clearCache()
 
 bool ConvolverProcessor::isCacheEntrySafeToDelete(uint64_t cacheKey, int fftSize) const
 {
-    const uint64_t activeKey = convo::consumeAtomic(activeCacheKey, std::memory_order_acquire);
-    const int activeFFT = convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire);
+    const uint64_t activeKey = convo::consumeAtomic(activeCacheKey, std::memory_order_acquire); // acquire: applyPreparedIRState の publishAtomic release と HB
+    const int activeFFT = convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire);   // acquire: applyPreparedIRState の publishAtomic release と HB
 
     if (cacheKey == activeKey && fftSize == activeFFT)
         return false;
@@ -252,7 +252,7 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
     stopUpgradeThread();
 
     const uint64_t generation = convolverStateGeneration.bumpGeneration();
-    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
     const int targetFFT = getTargetUpgradeFFTSize();
     const int lowResFFT = 512;
     const int phase = static_cast<int>(getPhaseMode());
@@ -323,7 +323,7 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
     if (!convolverStateGeneration.isCurrentGeneration(prepared->generationId))
         return;
 
-    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
     if (sr > 0.0 && std::abs(prepared->sampleRate - sr) > 1e-6)
         return;
 
@@ -424,7 +424,7 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
         if (!valid)
         {
             lastError = "Invalid IR (amplitude out of range or sudden level jump)";
-            convo::publishAtomic(isLoading, false, std::memory_order_release);
+            convo::publishAtomic(isLoading, false, std::memory_order_release); // release: timer/UI 側 acquire と HB
             return;
         }
     }
@@ -437,8 +437,8 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
                : currentIrFile.getFileNameWithoutExtension();
     }
 
-    convo::publishAtomic(currentSampleRate, prepared->sampleRate, std::memory_order_release);
-    convo::publishAtomic(irLength, prepared->timeDomainIR ? prepared->timeDomainIR->getNumSamples() : 0, std::memory_order_release);
+    convo::publishAtomic(currentSampleRate, prepared->sampleRate, std::memory_order_release); // release: Runtime/UI 側 acquire と HB
+    convo::publishAtomic(irLength, prepared->timeDomainIR ? prepared->timeDomainIR->getNumSamples() : 0, std::memory_order_release); // release: UI 側 acquire と HB
 
     // RCU経路では legacy convolution を経由しないため、UI表示用のレイテンシー推定値を更新する。
     {
@@ -471,10 +471,10 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
         }
 
         const int totalLatency = juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY);
-        convo::publishAtomic(uiAlgorithmLatencySamples, algorithmLatency, std::memory_order_release);
-        convo::publishAtomic(uiIrPeakLatencySamples, irPeakLatency, std::memory_order_release);
-        convo::publishAtomic(uiTotalLatencySamples, totalLatency, std::memory_order_release);
-        convo::publishAtomic(uiDirectHeadActive, directHeadActive, std::memory_order_release);
+        convo::publishAtomic(uiAlgorithmLatencySamples, algorithmLatency, std::memory_order_release); // release: UI 側 acquire と HB
+        convo::publishAtomic(uiIrPeakLatencySamples, irPeakLatency, std::memory_order_release);       // release: UI 側 acquire と HB
+        convo::publishAtomic(uiTotalLatencySamples, totalLatency, std::memory_order_release);          // release: UI 側 acquire と HB
+        convo::publishAtomic(uiDirectHeadActive, directHeadActive, std::memory_order_release);         // release: UI 側 acquire と HB
         updateLatencyCache();
         requestHostDisplayUpdate();
     }
@@ -502,30 +502,30 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
 
     prepared->partitionData = nullptr;
 
-    convo::publishAtomic(activeCacheKey, prepared->cacheKey, std::memory_order_release);
-    convo::publishAtomic(activeCacheFFTSize, newState->fftSize, std::memory_order_release);
+    convo::publishAtomic(activeCacheKey, prepared->cacheKey, std::memory_order_release); // release: cache 判定側 acquire と HB
+    convo::publishAtomic(activeCacheFFTSize, newState->fftSize, std::memory_order_release); // release: cache 判定側 acquire と HB
 
     runtime.reallocate(newState->fftSize, newState->numPartitions);
     updateConvolverState(std::move(newState));
 
     // 4. FINAL COMMIT: 確定フラグを立ててからレイテンシを1回だけ反映する。
-    convo::publishAtomic(irFinalized, true, std::memory_order_release);
+    convo::publishAtomic(irFinalized, true, std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
     refreshLatency();
 
     // 4. UI 通知
     postCoalescedChangeNotification();
-    convo::publishAtomic(lastPreparedIRApplyTicks, juce::Time::getHighResolutionTicks(), std::memory_order_release);
+    convo::publishAtomic(lastPreparedIRApplyTicks, juce::Time::getHighResolutionTicks(), std::memory_order_release); // release: UI/診断側 acquire と HB
 
-    convo::publishAtomic(isLoading, false, std::memory_order_release);
+    convo::publishAtomic(isLoading, false, std::memory_order_release); // release: timer/UI 側 acquire と HB
     setLoadingProgress(1.0f);
 }
 
 void ConvolverProcessor::handleLoadError(const juce::String& error)
 {
     lastError = error;
-    convo::publishAtomic(irFinalized, isIRLoaded(), std::memory_order_release);
-    convo::publishAtomic(isLoading, false);
-    convo::publishAtomic(isRebuilding, false, std::memory_order_release);
+    convo::publishAtomic(irFinalized, isIRLoaded(), std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
+    convo::publishAtomic(isLoading, false, std::memory_order_release);           // release: timer/UI 側 acquire と HB
+    convo::publishAtomic(isRebuilding, false, std::memory_order_release);        // release: timer/load 経路 acquire と HB
     // UIに通知してエラーメッセージを表示させる
     postCoalescedChangeNotification();
 }
@@ -636,7 +636,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
             currentIrFile = file;
         }
         irName = file.getFileNameWithoutExtension();
-        convo::publishAtomic(currentIRScale, scaleFactor, std::memory_order_release);  // [Bug 4 fix] atomic store
+        convo::publishAtomic(currentIRScale, scaleFactor, std::memory_order_release);  // release: Loader/Rebuild 側 currentIRScale acquire と HB
     }
 
     // スナップショット更新 (表示用)
@@ -648,16 +648,16 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
 
     switchEngineOnMessageThread(newConv);
 
-    convo::publishAtomic(irLength, targetLength, std::memory_order_release);
-    convo::publishAtomic(currentSampleRate, loadedSR, std::memory_order_release);
+    convo::publishAtomic(irLength, targetLength, std::memory_order_release);       // release: UI 側 acquire と HB
+    convo::publishAtomic(currentSampleRate, loadedSR, std::memory_order_release);  // release: Runtime/Loader 側 acquire と HB
 
     // FINAL COMMIT: フラグ確定後にレイテンシを1回だけ反映する。
-    convo::publishAtomic(irFinalized, true, std::memory_order_release);
+    convo::publishAtomic(irFinalized, true, std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
     refreshLatency();
 
-    convo::publishAtomic(isLoading, false);
-    convo::publishAtomic(isRebuilding, false, std::memory_order_release);
-    if (convo::exchangeAtomic(rebuildPendingAfterLoad, false, std::memory_order_acq_rel) && isIRLoaded())
+    convo::publishAtomic(isLoading, false, std::memory_order_release);    // release: timer/UI 側 acquire と HB
+    convo::publishAtomic(isRebuilding, false, std::memory_order_release); // release: timer/load 経路 acquire と HB
+    if (convo::exchangeAtomic(rebuildPendingAfterLoad, false, std::memory_order_acq_rel) && isIRLoaded()) // acq_rel: acquire で既存要求観測; release で false 公開
     {
         const bool queued = juce::MessageManager::callAsync([weakThis = juce::WeakReference<ConvolverProcessor>(this)]()
         {
@@ -666,7 +666,7 @@ void ConvolverProcessor::applyNewState(StereoConvolver* newConv,
         });
 
         if (!queued)
-            convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release);
+            convo::publishAtomic(rebuildPendingAfterLoad, true, std::memory_order_release); // release: timer 側 acquire と HB
     }
     updateLatencyCache();
     requestHostDisplayUpdate();
@@ -678,8 +678,8 @@ void ConvolverProcessor::switchEngineOnMessageThread(StereoConvolver* newEngine)
     if (newEngine == nullptr)
         return;
 
-    auto* oldEngine = exchangeActiveEngine(newEngine, std::memory_order_acq_rel);
-    convo::EpochManager::instance().advanceEpoch();
+    auto* oldEngine = exchangeActiveEngine(newEngine, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で新 engine 公開
+    m_epochDomain.advanceEpoch();
     if (oldEngine)
         retireStereoConvolver(oldEngine, 0);
 }
@@ -717,7 +717,7 @@ void ConvolverProcessor::evictOldestCacheEntry()
 
 void ConvolverProcessor::setLoadingProgress(float p)
 {
-    convo::publishAtomic(loadProgress, p, std::memory_order_release);
+    convo::publishAtomic(loadProgress, p, std::memory_order_release); // release: UI 側 progress acquire と HB
     // sendChangeMessage() はメッセージスレッド専用。LoaderThread など任意の
     // スレッドから呼ばれるため、既存の postCoalescedChangeNotification() を使う。
     // 進捗通知は合体（coalesce）して問題ない（最新値が loadProgress に保持される）。

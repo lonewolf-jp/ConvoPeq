@@ -13,16 +13,16 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::initialize()
 {
-    convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
-    convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
-    convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
-    convo::publishAtomic(firstIrDryCrossfadeDone, false, std::memory_order_release);
-    convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
-    convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
-    convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release);
-    convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release);
-    convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
-    convo::publishAtomic(queuedFadeTimeSec, 0.03, std::memory_order_release);
+    convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(firstIrDryCrossfadeDone, false, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(latencyResetPending, false, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(queuedFadeTimeSec, 0.03, std::memory_order_release); // release: process の acquire と HB
     latencyDelayOld_RT = 0;
     latencyDelayNew_RT = 0;
     dspCrossfadeStartDelayBlocks_RT = 0;
@@ -38,7 +38,7 @@ void AudioEngine::initialize()
     // 段階 1：RCU 基盤の初期化
     // ==================================================================
     // B22: 旧 SPSC キュー (queueWrite/queueRead/overflowList) は廃止。
-    //      g_deletionQueue は静的初期化される。
+    //      deferred reclaim は EpochDomain 配下で初期化済み。
     // readerEpochs と globalEpoch は静的初期化で 0
 
     // Start worker thread
@@ -48,8 +48,8 @@ void AudioEngine::initialize()
     // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
     // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
     requestRebuild(48000.0, SAFE_MAX_BLOCK_SIZE);
-    convo::publishAtomic(maxSamplesPerBlock, SAFE_MAX_BLOCK_SIZE);
-    convo::publishAtomic(currentSampleRate, 48000.0);
+    convo::publishAtomic(maxSamplesPerBlock, SAFE_MAX_BLOCK_SIZE, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(currentSampleRate, 48000.0, std::memory_order_release); // release: process/loader の acquire と HB
 
     m_fadeFloatBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE, false, false, true);
     m_fadeDoubleBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE, false, false, true);
@@ -101,24 +101,24 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
 
         uint64_t key = 0xD6E8FEB86659FD93ull;
         key = makeDebounceKey(key, eqHash);
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingIRChange, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingNSChange, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingAGCChange, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentEqBypass, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentConvBypass, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentProcessingOrder, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentSoftClipEnabled, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOversamplingFactor, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOversamplingType, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentDitherBitDepth, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentNoiseShaperType, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentInputHeadroomDb, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOutputMakeupDb, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentConvInputTrimDb, std::memory_order_acquire)));
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentSaturationAmount, std::memory_order_acquire)));
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingIRChange, std::memory_order_acquire))); // acquire: setIRChangeFlag の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingNSChange, std::memory_order_acquire))); // acquire: setNSChangeFlag の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingAGCChange, std::memory_order_acquire))); // acquire: setAGCChangeFlag の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentEqBypass, std::memory_order_acquire))); // acquire: setEQBypass の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentConvBypass, std::memory_order_acquire))); // acquire: setConvolverBypass の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentProcessingOrder, std::memory_order_acquire))); // acquire: setProcessingOrder の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentSoftClipEnabled, std::memory_order_acquire))); // acquire: setSoftClipEnabled の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOversamplingFactor, std::memory_order_acquire))); // acquire: setOversamplingFactor の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOversamplingType, std::memory_order_acquire))); // acquire: setOversamplingType の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentDitherBitDepth, std::memory_order_acquire))); // acquire: setDitherBitDepth の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentNoiseShaperType, std::memory_order_acquire))); // acquire: setNoiseShaperType の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentInputHeadroomDb, std::memory_order_acquire))); // acquire: setInputHeadroomDb の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOutputMakeupDb, std::memory_order_acquire))); // acquire: setOutputMakeupDb の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentConvInputTrimDb, std::memory_order_acquire))); // acquire: setConvolverInputTrimDb の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentSaturationAmount, std::memory_order_acquire))); // acquire: setSaturationAmount の publishAtomic release と HB
 
-        const bool hasLastKey = convo::consumeAtomic(hasLastEnqueuedSnapshotDebounceKey_, std::memory_order_acquire);
-        const uint64_t lastKey = convo::consumeAtomic(lastEnqueuedSnapshotDebounceKey_, std::memory_order_acquire);
+        const bool hasLastKey = convo::consumeAtomic(hasLastEnqueuedSnapshotDebounceKey_, std::memory_order_acquire); // acquire: publishAtomic release と HB
+        const uint64_t lastKey = convo::consumeAtomic(lastEnqueuedSnapshotDebounceKey_, std::memory_order_acquire); // acquire: publishAtomic release と HB
         if (hasLastKey && lastKey == key)
         {
             diagLog("[VERIFY] enqueue snapshot debounced: identical snapshot intent");
@@ -133,8 +133,8 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
             return false;
         }
 
-        convo::publishAtomic(lastEnqueuedSnapshotDebounceKey_, key, std::memory_order_release);
-        convo::publishAtomic(hasLastEnqueuedSnapshotDebounceKey_, true, std::memory_order_release);
+        convo::publishAtomic(lastEnqueuedSnapshotDebounceKey_, key, std::memory_order_release); // release: consume 次回 acquire と HB
+        convo::publishAtomic(hasLastEnqueuedSnapshotDebounceKey_, true, std::memory_order_release); // release: consume 次回 acquire と HB
         return true;
     }
 
@@ -166,23 +166,6 @@ void AudioEngine::debugAssertNotAudioThread() const
     // 現状は簡易的に Message Thread でないことを確認する。
     // （Worker Thread は Message Thread ではないため、このチェックで十分）
     jassert(!juce::MessageManager::getInstance()->isThisTheMessageThread());
-}
-
-bool AudioEngine::waitForAudioBlockBoundary(uint64_t observedCounter, uint32_t timeoutMs) const noexcept
-{
-    const uint32_t startMs = juce::Time::getMillisecondCounter();
-    while (!convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire))
-    {
-        if (convo::consumeAtomic(m_audioBlockCounter, std::memory_order_acquire) != observedCounter)
-            return true;
-
-        if ((juce::Time::getMillisecondCounter() - startMs) >= timeoutMs)
-            return false;
-
-        juce::Thread::sleep(1);
-    }
-
-    return false;
 }
 
 #endif // CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_INIT_LIFECYCLE

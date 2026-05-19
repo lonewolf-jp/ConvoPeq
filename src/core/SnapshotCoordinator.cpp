@@ -18,108 +18,59 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 
 	// 初回適用で current が未初期化の場合は、
 	// null 起点フェードを避けて即時反映する。
-	if (convo::consumeAtomic(m_current, std::memory_order_acquire) == nullptr)
+	if (m_slots.loadCurrent(std::memory_order_acquire) == nullptr) // acquire: switchImmediate/completeFade の release と HB し最新 current を観測
 	{
 		switchImmediate(target);
 		return;
 	}
 
-	GlobalSnapshot* oldTarget = convo::exchangeAtomic(m_target, target, std::memory_order_acq_rel);
+	GlobalSnapshot* oldTarget = m_slots.exchangeTarget(target, std::memory_order_acq_rel); // acq_rel: acquire で旧 target の書き込みと HB; release で completeFade の acquire と HB し新 target を公開
 	if (oldTarget) {
 		// Audio Thread が参照中の可能性があるため、即時 delete せず RCU 遅延解放
-		const uint64_t retireEpoch = m_epochCore.current();
-		m_deletionQueue.enqueue(
-			oldTarget,
-			[](void* p) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(p)); },
-			retireEpoch,
-			DeletionEntryType::Generic
-		);
+		const uint64_t retireEpoch = m_epochDomain.current();
+		m_retire.retire(oldTarget, retireEpoch);
 	}
 
-	convo::publishAtomic(m_fadeTotalSamples, fadeSamples, std::memory_order_release);
-	convo::publishAtomic(m_fadeRemainingSamples, fadeSamples, std::memory_order_release);
-	convo::publishAtomic(m_fadeAlpha, 0.0, std::memory_order_release);
-	convo::publishAtomic(m_fadeCompleted, false, std::memory_order_release);
-	convo::publishAtomic(m_fadeState, FadeState::FadingIn, std::memory_order_release);
+	m_fade.start(fadeSamples);
 }
 
 void SnapshotCoordinator::advanceFade(int numSamples) noexcept
 {
-	if (convo::consumeAtomic(m_fadeState, std::memory_order_acquire) != FadeState::FadingIn)
-		return;
-
-	const int remaining = convo::consumeAtomic(m_fadeRemainingSamples, std::memory_order_acquire);
-	if (remaining <= 0)
-		return;
-
-	const int newRemaining = remaining - numSamples;
-	if (newRemaining <= 0)
-	{
-		convo::publishAtomic(m_fadeRemainingSamples, 0, std::memory_order_release);
-		requestFadeCompletion();
-		return;
-	}
-
-	convo::publishAtomic(m_fadeRemainingSamples, newRemaining, std::memory_order_release);
-	const int total = convo::consumeAtomic(m_fadeTotalSamples, std::memory_order_acquire);
-	if (total > 0)
-	{
-		const double alpha = 1.0 - static_cast<double>(newRemaining) / static_cast<double>(total);
-		convo::publishAtomic(m_fadeAlpha, alpha, std::memory_order_release);
-	}
-}
-
-void SnapshotCoordinator::requestFadeCompletion() noexcept
-{
-	convo::publishAtomic(m_fadeCompleted, true, std::memory_order_release);
+	m_fade.advance(numSamples);
 }
 
 bool SnapshotCoordinator::tryCompleteFade() noexcept
 {
-	if (!convo::exchangeAtomic(m_fadeCompleted, false, std::memory_order_acq_rel))
-		return false;
-
-	if (convo::consumeAtomic(m_fadeState, std::memory_order_acquire) != FadeState::FadingIn ||
-		convo::consumeAtomic(m_fadeRemainingSamples, std::memory_order_acquire) > 0)
+	if (!m_fade.tryComplete())
 		return false;
 
 	completeFade();
 	return true;
 }
 
-void SnapshotCoordinator::abortFade() noexcept
+void SnapshotCoordinator::resetFadeStateAndRetireTarget() noexcept
 {
-	GlobalSnapshot* target = convo::exchangeAtomic(m_target, nullptr, std::memory_order_acq_rel);
+	GlobalSnapshot* target = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で startFade の release と HB し旧 target 取得; release で次回 startFade の acquire と HB (null 公開)
 	if (target)
-		SnapshotFactory::destroy(target);
+	{
+		const uint64_t retireEpoch = m_epochDomain.publish();
+		m_retire.retire(target, retireEpoch);
+	}
 
-	convo::publishAtomic(m_fadeState, FadeState::Idle, std::memory_order_release);
-	convo::publishAtomic(m_fadeAlpha, 1.0, std::memory_order_release);
-	convo::publishAtomic(m_fadeRemainingSamples, 0, std::memory_order_release);
-	convo::publishAtomic(m_fadeCompleted, false, std::memory_order_release);
+	m_fade.resetToIdle();
 }
 
 void SnapshotCoordinator::completeFade() noexcept
 {
-	GlobalSnapshot* target = convo::exchangeAtomic(m_target, nullptr, std::memory_order_acq_rel);
+	GlobalSnapshot* target = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で startFade の release と HB し target 取得; release で次回 startFade の acquire と HB (null 公開)
 	if (!target)
 		return;
 
-	const uint64_t retireEpoch = m_epochCore.publish();
-	GlobalSnapshot* old = convo::exchangeAtomic(m_current, target, std::memory_order_acq_rel);
-	if (old)
-	{
-		m_deletionQueue.enqueue(
-			old,
-			[](void* p) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(p)); },
-			retireEpoch,
-			DeletionEntryType::Generic);
-	}
+	const uint64_t retireEpoch = m_epochDomain.publish();
+	GlobalSnapshot* old = m_slots.exchangeCurrent(target, std::memory_order_acq_rel); // acq_rel: acquire で旧 current への全書き込みと HB; release で observeCurrent/updateFade の acquire と HB し新 current を公開
+	m_retire.retire(old, retireEpoch);
 
-	convo::publishAtomic(m_fadeState, FadeState::Idle, std::memory_order_release);
-	convo::publishAtomic(m_fadeAlpha, 1.0, std::memory_order_release);
-	convo::publishAtomic(m_fadeRemainingSamples, 0, std::memory_order_release);
-	convo::publishAtomic(m_fadeCompleted, false, std::memory_order_release);
+	m_fade.resetToIdle();
 }
 
 } // namespace convo

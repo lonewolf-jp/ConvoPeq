@@ -78,9 +78,9 @@ public:
     Settings getSettings() const noexcept
     {
         Settings s;
-        s.cmaesRestarts = convo::consumeAtomic(settings.cmaesRestarts);
-        s.coeffSafetyMargin = convo::consumeAtomic(settings.coeffSafetyMargin);
-        s.enableStabilityCheck = convo::consumeAtomic(settings.enableStabilityCheck);
+        s.cmaesRestarts = convo::consumeAtomic(settings.cmaesRestarts, std::memory_order_acquire);
+        s.coeffSafetyMargin = convo::consumeAtomic(settings.coeffSafetyMargin, std::memory_order_acquire);
+        s.enableStabilityCheck = convo::consumeAtomic(settings.enableStabilityCheck, std::memory_order_acquire);
         return s;
     }
 

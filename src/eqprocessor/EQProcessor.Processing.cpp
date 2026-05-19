@@ -349,9 +349,9 @@ void EQProcessor::processAGC(juce::dsp::AudioBlock<double>& block)
     const int numChannels = std::min((int)block.getNumChannels(), MAX_CHANNELS);
     const int numSamples = (int)block.getNumSamples();
 
-    const double attackCoeff = convo::consumeAtomic(agcAttackCoeff, std::memory_order_acquire);
-    const double releaseCoeff = convo::consumeAtomic(agcReleaseCoeff, std::memory_order_acquire);
-    const double smoothCoeff = convo::consumeAtomic(agcSmoothCoeff, std::memory_order_acquire);
+    const double attackCoeff = convo::consumeAtomic(agcAttackCoeff, std::memory_order_acquire);   // acquire: prepareToPlay の publishAtomic release と HB
+    const double releaseCoeff = convo::consumeAtomic(agcReleaseCoeff, std::memory_order_acquire); // acquire: prepareToPlay の publishAtomic release と HB
+    const double smoothCoeff = convo::consumeAtomic(agcSmoothCoeff, std::memory_order_acquire);   // acquire: prepareToPlay の publishAtomic release と HB
 
     double blockAttackCoeff;
     double blockReleaseCoeff;
@@ -466,7 +466,7 @@ bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block,
 void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
     convo::RCUReaderGuard guard(rcuReader);
-    const auto* stateSnapshot = loadCurrentState(std::memory_order_acquire);
+    const auto* stateSnapshot = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
@@ -555,7 +555,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // ── State Reset Handling ──
     // パラメータ変更に伴う状態リセット要求を処理
-    const std::uint64_t agcResetSerialNow = convo::consumeAtomic(agcResetSerial, std::memory_order_acquire);
+    const std::uint64_t agcResetSerialNow = convo::consumeAtomic(agcResetSerial, std::memory_order_acquire); // acquire: requestAgcReset/prepareToPlay/reset の release/acq_rel と HB
     if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
         rtSeenAgcResetSerial = agcResetSerialNow;
@@ -564,7 +564,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         rtAgcEnvOutputShadow = 0.0;
     }
 
-    const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
+    const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire); // acquire: requestBandReset/prepareToPlay/reset の release/acq_rel と HB
     const std::uint64_t bandResetSerialNow = static_cast<std::uint64_t>(bandResetSerialFromPacked(bandResetPackedNow));
     if (bandResetSerialNow != rtSeenBandResetSerial)
     {
@@ -630,7 +630,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // because deletion is deferred by EBR (reader epoch mechanism).
     for (int i = 0; i < NUM_BANDS; ++i)
     {
-        auto* node = loadBandNode(i, std::memory_order_acquire);
+        auto* node = loadBandNode(i, std::memory_order_acquire); // acquire: exchangeBandNode/publishBandNode の release/acq_rel と HB
         if (node && node->active)
         {
             activeBands[numActiveBands] = { node, i };
@@ -831,7 +831,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
         // 対策: ゲイン値はMessage Thread側でdBからlinearに変換し、
         // totalGainTarget (atomic<double>) で事前に渡す。
         // Audio Threadでは atomic load のみ行う。
-        const double targetGain = convo::consumeAtomic(totalGainTarget, std::memory_order_acquire);
+        const double targetGain = convo::consumeAtomic(totalGainTarget, std::memory_order_acquire); // acquire: storeTotalGainDb の publishAtomic release と HB
 
         auto* activeGainRamp = &smoothTotalGain;
         const double gainTarget = activeGainRamp->getTargetValue();
@@ -914,7 +914,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     double* activeParallelAccumBuffer = parallelAccumBuffer.get();
     const int activeParallelBufferCapacity = parallelBufferCapacity;
 
-    const std::uint64_t agcResetSerialNow = convo::consumeAtomic(agcResetSerial, std::memory_order_acquire);
+    const std::uint64_t agcResetSerialNow = convo::consumeAtomic(agcResetSerial, std::memory_order_acquire); // acquire: requestAgcReset/prepareToPlay/reset の release/acq_rel と HB
     if (agcResetSerialNow != rtSeenAgcResetSerial)
     {
         rtSeenAgcResetSerial = agcResetSerialNow;
@@ -923,7 +923,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
         rtAgcEnvOutputShadow = 0.0;
     }
 
-    const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
+    const std::uint64_t bandResetPackedNow = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire); // acquire: requestBandReset/prepareToPlay/reset の release/acq_rel と HB
     const std::uint64_t bandResetSerialNow = static_cast<std::uint64_t>(bandResetSerialFromPacked(bandResetPackedNow));
     if (bandResetSerialNow != rtSeenBandResetSerial)
     {
@@ -1107,7 +1107,7 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     }
     else
     {
-        const double targetGain = convo::consumeAtomic(totalGainTarget, std::memory_order_acquire);
+        const double targetGain = convo::consumeAtomic(totalGainTarget, std::memory_order_acquire); // acquire: storeTotalGainDb の publishAtomic release と HB
         auto* activeGainRamp = &smoothTotalGain;
         const double gainTarget = activeGainRamp->getTargetValue();
         if (absNoLibm(gainTarget - targetGain) > 1e-6)

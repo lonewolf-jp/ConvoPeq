@@ -36,10 +36,11 @@ void AudioEngine::releaseResources()
             return;
         }
 
-        if (lifecycleState.compare_exchange_weak(previousState,
-                                                 EngineLifecycleState::Releasing,
-                                                 std::memory_order_acq_rel,
-                                                 std::memory_order_acquire))
+        if (convo::compareExchangeAtomic(lifecycleState,
+                         previousState,
+                         EngineLifecycleState::Releasing,
+                         std::memory_order_acq_rel,
+                         std::memory_order_acquire))
             break;
     }
 
@@ -60,10 +61,10 @@ void AudioEngine::releaseResources()
     convo::publishAtomic(lastIssuedConvolverStructuralHash_, 0, std::memory_order_release);
     convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
     convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
-    convo::publishAtomic(currentSampleRate, 0.0);
+    convo::publishAtomic(currentSampleRate, 0.0, std::memory_order_release);
 
-    convo::publishAtomic(inputLevelLinear, 0.0f);
-    convo::publishAtomic(outputLevelLinear, 0.0f);
+    convo::publishAtomic(inputLevelLinear, 0.0f, std::memory_order_release);
+    convo::publishAtomic(outputLevelLinear, 0.0f, std::memory_order_release);
 
     if (noiseShaperLearner)
         noiseShaperLearner->stopLearning();
@@ -80,10 +81,10 @@ void AudioEngine::releaseResources()
         std::lock_guard<std::mutex> lk(rebuildMutex);
         validateDistinctRuntimeSlots("releaseResources.beforeClear",
                          activeDSP,
-                         sanitizeRawPtr(loadFadingOutDSP()),
+                         resolveFadingDSPFromRuntimeWorldOnly(getRuntimePublishView().graph),
                          nullptr);
 
-        rebuildGeneration.fetch_add(1, std::memory_order_acq_rel);
+        convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel);
         publishCurrentDSP(nullptr);
 
         activeToRelease = sanitizeRawPtr(activeDSP.get());
@@ -104,20 +105,15 @@ void AudioEngine::releaseResources()
         convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
         dspCrossfadeGain.setCurrentAndTargetValue(1.0);
         refreshCrossfadePreparedSnapshotFromAtomics();
-        publishRuntimeTransitionState(nullptr,
-                                      nullptr,
-                                      convo::TransitionPolicy::HardReset,
-                                      0.0,
-                                      false);
-        publishRuntimeSnapshots(nullptr,
-                    nullptr,
-                    convo::TransitionPolicy::HardReset,
-                    0.0,
-                    false);
+        publicationCoordinator().publishState(nullptr,
+                              nullptr,
+                              convo::TransitionPolicy::HardReset,
+                              0.0,
+                              false);
 
         validateDistinctRuntimeSlots("releaseResources.afterClear",
                          activeDSP,
-                         sanitizeRawPtr(loadFadingOutDSP()),
+                         resolveFadingDSPFromRuntimeWorldOnly(getRuntimePublishView().graph),
                          nullptr);
     }
 
@@ -127,26 +123,11 @@ void AudioEngine::releaseResources()
     diagLog("[DIAG] releaseResources: after stopRebuildThread");
 
     setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "releaseResources");
-    convo::EpochManager::instance().advanceEpoch();
+    m_epochDomain.advanceEpoch();
 
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
-    {
-        std::queue<CommitStaging> abandonedCommits;
-        std::lock_guard<std::mutex> lock(deferredCommitMutex);
-        std::swap(abandonedCommits, deferredCommitQueue);
-
-        while (!abandonedCommits.empty())
-        {
-            auto staging = abandonedCommits.front();
-            abandonedCommits.pop();
-
-            if (staging.newDSP)
-                retireDSP(staging.newDSP);
-            if (staging.oldDSP)
-                retireDSP(staging.oldDSP);
-        }
-    }
+    drainPublicationLogForShutdown();
 
     if (activeToRelease)
         retireDSP(activeToRelease);
@@ -174,7 +155,7 @@ void AudioEngine::releaseResources()
 
     diagLog("[DIAG] releaseResources: skip deferred reclaim (reconfigure phase)");
 
-    clearPublishedRuntimeSnapshotsNonRt();
+    publicationCoordinator().clearPublishedRuntimeSnapshotsNonRt();
 
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Unprepared, std::memory_order_release);
     diagLog("[DIAG] releaseResources: ABOUT_TO_EXIT_SCOPE");

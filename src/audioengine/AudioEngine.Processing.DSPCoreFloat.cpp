@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include <immintrin.h>
+#include <optional>
 #include "AudioEngine.h"
 
 namespace
@@ -130,8 +131,8 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
                                    LockFreeAudioRingBuffer& analyzerFifo,
-                                   std::atomic<float>& inputLevelLinear,
-                                   std::atomic<float>& outputLevelLinear,
+                                   std::atomic<float>* inputLevelLinear,
+                                   std::atomic<float>* outputLevelLinear,
                                    const ProcessingState& state)
 {
     const int numSamples = bufferToFill.numSamples;
@@ -155,7 +156,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     const bool inputTap = state.analyzerEnabled && (state.analyzerSource == AnalyzerSource::Input);
     const float rawInputLinear = processInput(bufferToFill, numSamples, state.inputHeadroomGain,
                                               inputTap, analyzerFifo);
-    convo::publishAtomic(inputLevelLinear, rawInputLinear, std::memory_order_release);
+    if (inputLevelLinear != nullptr)
+        convo::publishAtomic(*inputLevelLinear, rawInputLinear, std::memory_order_release);
 
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> processBlock(channels, 2, numSamples);
@@ -184,7 +186,10 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     int numProcSamples = (int)processBlock.getNumSamples();
     int numProcChannels = (int)processBlock.getNumChannels();
 
-    const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->m_coordinator.getCurrent() : nullptr;
+    std::optional<convo::ObservedRuntime> observedSnapshot;
+    if (ownerEngine != nullptr)
+        observedSnapshot.emplace(ownerEngine->observeCurrentRuntime());
+    const convo::GlobalSnapshot* snap = observedSnapshot ? observedSnapshot->get() : nullptr;
     const bool useSnapshotEq = (snap != nullptr);
     const convo::EQParameters* eqParamsToUse = nullptr;
     const EQCoeffCache* eqCacheToUse = nullptr;
@@ -193,10 +198,6 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         const uint64_t hash = snap->eqCoeffHash;
         eqParamsToUse = &snap->eqParams;
         eqCacheToUse = ownerEngine->eqCacheManager.get(hash);
-        if (hash != convo::consumeAtomic(ownerEngine->debugLastAppliedEqHash, std::memory_order_acquire))
-        {
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_acq_rel); // RT-RESTRICTED: debug version counter only, no blocking
-        }
     }
     else if (ownerEngine != nullptr)
     {
@@ -204,10 +205,6 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         const convo::EQParameters& fallbackParams = ownerEngine->getLatestEqParamsFallback(fallbackHash);
         eqParamsToUse = &fallbackParams;
         eqCacheToUse = ownerEngine->eqCacheManager.get(fallbackHash);
-        if (fallbackHash != 0 && fallbackHash != convo::consumeAtomic(ownerEngine->debugLastAppliedEqHash, std::memory_order_acquire))
-        {
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_acq_rel); // RT-RESTRICTED: debug version counter only, no blocking
-        }
     }
 
     eqRt().setBypassFromRT(state.eqBypassed); // RT-local shadow に書き込み（publishAtomic の RT 使用禁止のため）
@@ -304,7 +301,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         pushToFifo(processBlock, analyzerFifo);
 
     const float outputLinear = measureLevel(originalBlock);
-    convo::publishAtomic(outputLevelLinear, outputLinear, std::memory_order_release);
+    if (outputLevelLinear != nullptr)
+        convo::publishAtomic(*outputLevelLinear, outputLinear, std::memory_order_release);
 
     processOutput(bufferToFill, numSamples, state);
 

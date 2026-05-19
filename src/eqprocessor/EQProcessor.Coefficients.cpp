@@ -9,7 +9,7 @@
 #include <cmath>
 #include <complex>
 #include <algorithm>
-#include "core/EpochManager.h"
+#include "core/EpochDomain.h"
 
 #include "audioengine/AtomicAccess.h"
 
@@ -19,11 +19,11 @@
 //============================================================================
 static void deleteBandNodePtr_coeff(void* p) { delete static_cast<EQProcessor::BandNode*>(p); }
 
-static void retireBandNode(EQProcessor::BandNode* node)
+static void retireBandNode(convo::EpochDomain& epochDomain, EQProcessor::BandNode* node)
 {
     if (node) {
-        const uint64_t epoch = convo::EpochManager::instance().currentEpoch();
-        g_deletionQueue.enqueue(node, deleteBandNodePtr_coeff, epoch);
+        const uint64_t epoch = epochDomain.currentEpoch();
+        epochDomain.enqueueRetire(node, deleteBandNodePtr_coeff, epoch);
     }
 }
 
@@ -35,7 +35,7 @@ EQProcessor::BandNode* EQProcessor::createBandNode(int band, const EQState& stat
     auto node = new BandNode();
     // EBR: retirement managed by retireBandNode
     const auto& params = state.bands[band];
-    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/setSampleRate の publishAtomic release と HB
 
     node->active = params.enabled;
     node->mode = state.bandChannelModes[band];
@@ -69,18 +69,18 @@ void EQProcessor::updateBandNode(int band)
 {
     if (band < 0 || band >= NUM_BANDS) return;
 
-    auto state = loadCurrentState(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state == nullptr) return;
     auto newNode = createBandNode(band, *state);
-    BandNode* oldNode = exchangeBandNode(band, newNode, std::memory_order_acq_rel);
+    BandNode* oldNode = exchangeBandNode(band, newNode, std::memory_order_acq_rel); // acq_rel: acquire で先行 loadBandNode と HB; release で後続 loadBandNode acquire と HB
 
     activeBandNodes[band] = newNode;
     // L5 fix: retire old node BEFORE advanceEpoch so epoch N is captured (not N+1).
     if (oldNode)
     {
-        retireBandNode(oldNode);
+        retireBandNode(m_epochDomain, oldNode);
     }
-    convo::EpochManager::instance().advanceEpoch();
+    m_epochDomain.advanceEpoch();
 }
 
 //============================================================================

@@ -109,7 +109,7 @@ void AudioEngine::handleAsyncUpdate()
 //--------------------------------------------------------------
 void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 {
-    debugRebuildDispatchRequestCount.fetch_add(1, std::memory_order_acq_rel);
+    convo::fetchAddAtomic(debugRebuildDispatchRequestCount, 1, std::memory_order_acq_rel);
 
     // UIコンポーネントへのアクセスを行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
@@ -156,7 +156,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     if (noiseShaperLearner && noiseShaperLearner->isRunning())
         noiseShaperLearner->stopLearning();
 
-    // A-14: rebuild 開始時のパラメータを凍結し、
+    // rebuild 開始時のパラメータを凍結し、
     // task 作成・重複判定・runtime command で同一 snapshot を使う。
     const BuildParameterSnapshot paramSnapshot = captureBuildParameterSnapshot(*this);
     DSPCore* current = activeDSP; // 現在のアクティブDSPをキャプチャ
@@ -240,7 +240,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 
     if (queued)
     {
-        debugRebuildDispatchQueuedCount.fetch_add(1, std::memory_order_acq_rel);
+        convo::fetchAddAtomic(debugRebuildDispatchQueuedCount, 1, std::memory_order_acq_rel);
         rebuildCV.notify_all();
         diagLog("[DIAG] requestRebuild(sr,bs): task queued generation=" + juce::String(generation)
             + " SR=" + juce::String(sampleRate, 2));
@@ -249,13 +249,13 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     {
         if (blockedAsRecentDuplicate)
         {
-            debugRebuildDispatchBlockedRecentDuplicateCount.fetch_add(1, std::memory_order_acq_rel);
+            convo::fetchAddAtomic(debugRebuildDispatchBlockedRecentDuplicateCount, 1, std::memory_order_acq_rel);
             diagLog("[DIAG] requestRebuild(sr,bs): BLOCKED duplicate recent task SR="
                 + juce::String(sampleRate, 2));
         }
         else
         {
-            debugRebuildDispatchBlockedPendingDuplicateCount.fetch_add(1, std::memory_order_acq_rel);
+            convo::fetchAddAtomic(debugRebuildDispatchBlockedPendingDuplicateCount, 1, std::memory_order_acq_rel);
             diagLog("[DIAG] requestRebuild(sr,bs): BLOCKED duplicate pending task SR="
                 + juce::String(sampleRate, 2));
         }
@@ -317,9 +317,9 @@ void AudioEngine::rebuildThreadLoop()
             RebuildTask task;
             {
                 std::unique_lock<std::mutex> lock(rebuildMutex);
-                rebuildCV.wait(lock, [this] { return hasPendingTask || convo::consumeAtomic(rebuildThreadShouldExit); });
+                rebuildCV.wait(lock, [this] { return hasPendingTask || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire); });
 
-                if (convo::consumeAtomic(rebuildThreadShouldExit)) break;
+                if (convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire)) break;
                 if (isShutdownInProgress())
                 {
                     hasPendingTask = false;
@@ -349,7 +349,7 @@ void AudioEngine::rebuildThreadLoop()
 
             // Helper to check obsolescence
             const auto isObsolete = [&] {
-                return isRebuildObsolete(task.generation) || convo::consumeAtomic(rebuildThreadShouldExit);
+                return isRebuildObsolete(task.generation) || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
             };
 
             if (isObsolete())

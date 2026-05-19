@@ -14,13 +14,10 @@ namespace
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_BLOCK_DOUBLE)
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 {
-    constexpr int kAudioEpochReaderIndex = 0;
     const juce::ScopedNoDenormals noDenormals;
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
-    const convo::EpochCoreReaderGuard epochReaderGuard(m_epochCore, kAudioEpochReaderIndex);
+    const convo::EpochDomainReaderGuard epochReaderGuard(m_epochDomain, kAudioEpochReaderIndex);
     ASSERT_AUDIO_THREAD();
-    ++m_audioBlockCounterRtLocal; // RT-local counter (non-atomic, RT thread only)
-
     // ★ 追加: RCU ガードで現在の DSP を保護する
     convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
     const int numSamples = buffer.getNumSamples();
@@ -34,7 +31,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
     const auto runtimePublishView = getRuntimePublishView();
     const auto* runtimeGraph = runtimePublishView.graph;
-    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+    DSPCore* dsp = resolveCurrentDSPFromRuntimeWorldOnly(runtimeGraph);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(buffer);
@@ -49,7 +46,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     #endif
 
     // --- ProcessingStateを現行設計で初期化 ---
-    const convo::GlobalSnapshot* snap = m_coordinator.getCurrent();
+    const auto observedSnapshot = m_coordinator.observeCurrentRuntime(kAudioEpochReaderIndex);
+    const convo::GlobalSnapshot* snap = observedSnapshot.get();
     const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap);
 
     DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
@@ -67,17 +65,18 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     updateAudioThreadSnapshotFade(numSamples, snapshotAlpha, snapshotFrom, snapshotTo);
     (void) snapshotAlpha;
 
-    const double engineSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
-    if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
+    const double engineSampleRate = runtimeSampleRateWorldOnly(runtimeGraph);
+    if (engineSampleRate <= 0.0
+        || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
     {
         applySafeSilentFallback(buffer);
         return;
     }
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
-    DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimeGraph);
-    bool useDryAsOld = runtimeCrossfadeUseDryAsOld(runtimeGraph);
-    const bool hasPendingCrossfade = runtimeCrossfadePending(runtimeGraph);
+    DSPCore* fading = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
+    bool useDryAsOld = runtimeCrossfadeUseDryAsOldWorldOnly(runtimeGraph);
+    const bool hasPendingCrossfade = runtimeCrossfadePendingWorldOnly(runtimeGraph);
     if (processCrossfadeDelayGateIfPending(fading,
                                            useDryAsOld,
                                            hasPendingCrossfade,
@@ -85,12 +84,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     {
         auto fadingState = makeCrossfadeAuxState(procState);
 
-        std::atomic<float> fadingInputMeter { 0.0f };
-        std::atomic<float> fadingOutputMeter { 0.0f };
         fading->processDouble(buffer,
                       analyzerFifo,
-                      inputLevelLinear,
-                      outputLevelLinear,
+                      nullptr,
+                      nullptr,
                       fadingState);
     }))
     {
@@ -112,8 +109,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
         auto fadingState = makeCrossfadeAuxState(procState);
 
-        std::atomic<float> fadingInputMeter { 0.0f };
-        std::atomic<float> fadingOutputMeter { 0.0f };
         if (useDryAsOld)
         {
             const int outChannels = std::min(2, buffer.getNumChannels());
@@ -126,12 +121,12 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         {
             // EBR: managed by RCUReader
             fading->processDoubleToBuffer(buffer, dspCrossfadeDoubleBuffer, analyzerFifo,
-                                          fadingInputMeter, fadingOutputMeter, fadingState);
+                                          nullptr, nullptr, fadingState);
         }
         dsp->processDouble(buffer,
                    analyzerFifo,
-                   inputLevelLinear,
-                   outputLevelLinear,
+                   &inputLevelLinear,
+                   &outputLevelLinear,
                    procState);
 
         // スナップショット（commitNewDSPでセット済み、ここでは読み取り専用）
@@ -165,16 +160,16 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             // EBR: managed by RCUReader
         }
 
-        finalizeCrossfadeMixPath(false);
+        finalizeCrossfadeMixPath(dsp, fading, false);
     }
     else
     {
         dsp->processDouble(buffer,
                            analyzerFifo,
-                           inputLevelLinear,
-                           outputLevelLinear,
+                           &inputLevelLinear,
+                           &outputLevelLinear,
                            procState);
-        cleanupCrossfadeDirectPath(fading);
+        cleanupCrossfadeDirectPath(dsp, fading);
     }
 }
 

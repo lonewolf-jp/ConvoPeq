@@ -61,7 +61,7 @@ static double makeRelativeGainStep(double gain) noexcept
 
 static inline double stableSigmoid01(double x) noexcept
 {
-    // |x| > 50 では exp がオーバーフロー/アンダーフローするためクランプ (A-4)
+    // |x| > 50 では exp がオーバーフロー/アンダーフローするためクランプ
     x = std::clamp(x, -50.0, 50.0);
     if (x >= 0.0)
     {
@@ -654,7 +654,7 @@ juce::AudioBuffer<double> AllpassDesigner::applyAllpassToIR(
             spec.get()[k].real = out.real();
             spec.get()[k].imag = out.imag();
         }
-        // B-1: 負側は更新済み正側 half-spectrum から共役再構築し、Hermitian 対称性を厳密化する。
+        // 負側は更新済み正側 half-spectrum から共役再構築し、Hermitian 対称性を厳密化する。
         for (int k = half + 1; k < fftSize; ++k)
         {
             const int mirror = fftSize - k;
@@ -729,7 +729,7 @@ uint64_t AllpassDesigner::computeIRHash(const juce::File& irFile, bool /*useMD5*
     if (stream == nullptr)
         return 0;
 
-    // A-2: xxHash64 でファイル全体を計算し、TOCTOU は before/after 検証で防止する。
+    // xxHash64 でファイル全体を計算し、TOCTOU は before/after 検証で防止する。
     constexpr uint64_t kHashVersionSalt = 0x434f4e564f504551ull; // "CONVOPEQ"
     juce::HeapBlock<uint8_t> fileData;
     const size_t fileSize = static_cast<size_t>(juce::jmax<int64>(0, sizeBefore));

@@ -28,7 +28,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhase(ConvolverProce
     const auto setMixedPhaseState = [owner](int state)
     {
         if (owner != nullptr)
-            convo::publishAtomic(owner->mixedPhaseState, state, std::memory_order_release);
+            convo::publishAtomic(owner->mixedPhaseState, state, std::memory_order_release); // release: UI/load \u4e00\u89a7 acquire \u3068 HB
     };
 
     auto result = convertToMixedPhaseAllpass(owner, fileHash, linearIR, minimumIR, sampleRate,
@@ -79,7 +79,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
     const auto setMixedPhaseState = [owner](int state)
     {
         if (owner != nullptr)
-            convo::publishAtomic(owner->mixedPhaseState, state, std::memory_order_release);
+            convo::publishAtomic(owner->mixedPhaseState, state, std::memory_order_release); // release: UI/load \u4e00\u89a7 acquire \u3068 HB
     };
 
     if (wasCancelled) *wasCancelled = false;
@@ -406,7 +406,7 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
                                          + " samples");
             }
 
-            const bool liveReconfigure = (owner != nullptr) && convo::consumeAtomic(owner->isPrepared, std::memory_order_acquire);
+            const bool liveReconfigure = (owner != nullptr) && convo::consumeAtomic(owner->isPrepared, std::memory_order_acquire); // acquire: prepareToPlay/releaseResources の publishAtomic release と HB
             const bool highRateLive = liveReconfigure && sampleRate >= 96000.0;
 
             const int optimFreqPoints = liveReconfigure ? (highRateLive ? 12 : 64) : 256;

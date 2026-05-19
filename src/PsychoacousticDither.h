@@ -111,8 +111,11 @@ public:
         {
             // 時間 + 静的カウンタでユニーク性を確保 (複数インスタンス同時生成時のシード衝突防止)
             static std::atomic<uint64_t> instanceCounter { 0 };
+            // カウンタは一意シード生成のための単純インクリメントであり、他 atomic との HB 不要。relaxed で十分。
             baseSeed = static_cast<uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count())
-                     ^ (instanceCounter.fetch_add(1) * 0x9e3779b97f4a7c15ULL);
+                     ^ (convo::fetchAddAtomic(instanceCounter,
+                                              static_cast<uint64_t>(1),
+                                              std::memory_order_relaxed) * 0x9e3779b97f4a7c15ULL);
         }
 
         // Initialize MKL VSL Streams

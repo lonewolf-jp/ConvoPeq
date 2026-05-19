@@ -74,7 +74,7 @@ struct AllpassDesignerConfig {
     int cmaesMaxGenerations = 100;
     int cmaesPopulationSize = 32;          // 0 → 自動 (4 * dim)
     double cmaesInitialSigma = 0.3;
-    uint64_t cmaesSeed = 0x434f4e564f4251ull; // B-12: 既定で決定的シードを使う
+    uint64_t cmaesSeed = 0x434f4e564f4251ull; // 既定で決定的シードを使う
     std::function<void(float)> progressCallback;
 
     AllpassDesignerConfig() {

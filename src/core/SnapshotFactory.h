@@ -10,9 +10,6 @@
 
 namespace convo {
 
-class DeletionQueue;      // friend 宣言のため前方宣言
-class SnapshotCoordinator; // friend 宣言のため前方宣言
-
 class SnapshotFactory {
 public:
     // 新しいスナップショットを生成（Audio Thread 禁止）
@@ -46,13 +43,10 @@ public:
     static bool areSnapshotsEquivalent(const SnapshotParams& params,
                                        const GlobalSnapshot& snapshot) noexcept;
 
-private:
-    friend class DeletionQueue;
-    friend class SnapshotCoordinator;
-
-    // DeletionQueue / SnapshotCoordinator のみが呼び出し可能
+    // DeletionQueue / SnapshotCoordinator などの解放経路から呼び出す。
     static void destroy(GlobalSnapshot* snap) noexcept;
 
+private:
     SnapshotFactory() = delete;
 };
 

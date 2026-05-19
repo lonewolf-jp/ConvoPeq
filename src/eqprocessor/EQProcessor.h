@@ -28,6 +28,7 @@
 #include <array>
 #include <vector>
 #include "core/EQParameters.h"
+#include "core/EpochDomain.h"
 #include "core/RCUReader.h"
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
@@ -191,8 +192,8 @@ public:
     void releaseResources();
 
     // バイパス制御
-    void setBypass(bool shouldBypass) { convo::publishAtomic(bypassRequested, shouldBypass, std::memory_order_release); }
-    bool isBypassed() const { return convo::consumeAtomic(bypassRequested, std::memory_order_acquire); }
+    void setBypass(bool shouldBypass) { convo::publishAtomic(bypassRequested, shouldBypass, std::memory_order_release); } // release: prepareToPlay/process の bypassRequested acquire と HB
+    bool isBypassed() const { return convo::consumeAtomic(bypassRequested, std::memory_order_acquire); }               // acquire: setBypass の release と HB し最新バイパス状態を観測
     // RT スレッド専用バイパスセッター（atomic write 禁止のため shadow に直書き）
     void setBypassFromRT(bool b) noexcept { m_rtBypassShadow = b; }
 
@@ -339,7 +340,7 @@ public:
     const EQState* getEQStateSnapshot() const { return getEQState(); }
     bool getAndClearPendingAGCChange() noexcept
     {
-        return convo::exchangeAtomic(m_pendingAGCChange, false, std::memory_order_acq_rel);
+        return convo::exchangeAtomic(m_pendingAGCChange, false, std::memory_order_acq_rel); // acq_rel: acquire で setAGCEnabled の publishAtomic release と HB; release で次回呼び出しの acquire と HB
     }
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
@@ -389,8 +390,8 @@ private:
     // Message Thread側でdB→linear変換(std::pow)を行い、Audio Threadは linear値のみ参照する。
     inline void storeTotalGainDb(float gainDb) noexcept
     {
-        convo::publishAtomic(totalGainDbTarget, gainDb, std::memory_order_release);
-        convo::publishAtomic(totalGainTarget, juce::Decibels::decibelsToGain<double>(static_cast<double>(gainDb)), std::memory_order_release);
+        convo::publishAtomic(totalGainDbTarget, gainDb, std::memory_order_release);  // release: getState の acquire と HB しゲイン設定を公知
+        convo::publishAtomic(totalGainTarget, juce::Decibels::decibelsToGain<double>(static_cast<double>(gainDb)), std::memory_order_release); // release: process() の totalGainTarget acquire と HB — RT はこの linear 値のみ参照
     }
 
     // サイレンス検出
@@ -402,9 +403,10 @@ private:
     void updateBandNode(int bandIndex);
 
     // スムージング処理
+    convo::EpochDomain m_epochDomain;
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
-    convo::RCUReader rcuReader;
+    convo::RCUReader rcuReader { m_epochDomain };
 
     // ── 状態リセット要求 (Message Thread publish / Audio Thread consume-only) ──
     // high 32-bit: serial, low 32-bit: mask
@@ -432,7 +434,7 @@ private:
         if (mask == 0u)
             return;
 
-        std::uint64_t expected = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire);
+        std::uint64_t expected = convo::consumeAtomic(bandResetPacked, std::memory_order_acquire); // acquire: 前回 CAS acq_rel と HB し最新 packed 値を観測
         for (;;)
         {
             const std::uint32_t currentSerial = bandResetSerialFromPacked(expected);
@@ -444,8 +446,8 @@ private:
             if (convo::compareExchangeAtomic(bandResetPacked,
                                              expected,
                                              desired,
-                                             std::memory_order_acq_rel,
-                                             std::memory_order_acquire))
+                                             std::memory_order_acq_rel,  // 成功: acq_rel — acquire で前回 CAS と HB; release で Processing.cpp の acquire と HB
+                                             std::memory_order_acquire)) // 失敗: acquire — 最新 packed 値を再観測して retry
             {
                 break;
             }
@@ -459,7 +461,7 @@ private:
 
     inline void requestAgcReset() noexcept
     {
-        convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        convo::fetchAddAtomic(agcResetSerial, static_cast<std::uint64_t>(1), std::memory_order_acq_rel); // acq_rel: acquire で前回の fetchAdd と HB; release で Processing.cpp の agcResetSerial acquire と HB
     }
 
     std::atomic<bool> agcEnabled { false };
@@ -509,41 +511,49 @@ private:
         return static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(ptr));
     }
 
-    EQState* loadCurrentState(std::memory_order order = std::memory_order_acquire) const noexcept
+    EQState* loadCurrentState(std::memory_order order = std::memory_order_acquire) const noexcept // default acquire: publishCurrentState/exchangeCurrentState の release/acq_rel と HB
     {
-        return fromStateBits(convo::consumeAtomic(currentStateBits, order));
+        return fromStateBits(convo::consumeAtomic(currentStateBits, static_cast<std::memory_order>(order))); // acquire(デフォルト): exchangeCurrentState/publishCurrentState の release/acq_rel と HB し最新 EQState を観測
     }
 
     EQState* exchangeCurrentState(EQState* value,
-                                  std::memory_order order = std::memory_order_acq_rel) noexcept
+                                  std::memory_order order = std::memory_order_acq_rel) noexcept // default acq_rel: 旧状態取得(acquire)+新状態公開(release)
     {
-        return fromStateBits(convo::exchangeAtomic(currentStateBits, toStateBits(value), order));
+        return fromStateBits(convo::exchangeAtomic(currentStateBits,
+                                                   toStateBits(value),
+                                                   static_cast<std::memory_order>(order))); // acq_rel(デフォルト): acquire で先行 publishCurrentState release と HB; release で次回 loadCurrentState acquire と HB
     }
 
     void publishCurrentState(EQState* value,
-                             std::memory_order order = std::memory_order_release) noexcept
+                             std::memory_order order = std::memory_order_release) noexcept // default release: loadCurrentState acquire 側へ新状態を公開
     {
-        convo::publishAtomic(currentStateBits, toStateBits(value), order);
+        convo::publishAtomic(currentStateBits,
+                             toStateBits(value),
+                             static_cast<std::memory_order>(order)); // release(デフォルト): loadCurrentState の acquire と HB し新状態を公知
     }
 
     BandNode* loadBandNode(int bandIndex,
-                           std::memory_order order = std::memory_order_acquire) const noexcept
+                           std::memory_order order = std::memory_order_acquire) const noexcept // default acquire: publishBandNode/exchangeBandNode の release/acq_rel と HB
     {
-        return fromBandNodeBits(convo::consumeAtomic(bandNodeBits[bandIndex], order));
+        return fromBandNodeBits(convo::consumeAtomic(bandNodeBits[bandIndex], static_cast<std::memory_order>(order))); // acquire(デフォルト): exchangeBandNode/publishBandNode の acq_rel/release と HB し最新 BandNode を観測
     }
 
     BandNode* exchangeBandNode(int bandIndex,
                                BandNode* value,
-                               std::memory_order order = std::memory_order_acq_rel) noexcept
+                               std::memory_order order = std::memory_order_acq_rel) noexcept // default acq_rel: 旧ノード取得(acquire)+新ノード公開(release)
     {
-        return fromBandNodeBits(convo::exchangeAtomic(bandNodeBits[bandIndex], toBandNodeBits(value), order));
+        return fromBandNodeBits(convo::exchangeAtomic(bandNodeBits[bandIndex],
+                                                      toBandNodeBits(value),
+                                                      static_cast<std::memory_order>(order))); // acq_rel(デフォルト): acquire で先行 publishBandNode release と HB; release で次回 loadBandNode acquire と HB
     }
 
     void publishBandNode(int bandIndex,
                          BandNode* value,
-                         std::memory_order order = std::memory_order_release) noexcept
+                         std::memory_order order = std::memory_order_release) noexcept // default release: loadBandNode acquire 側へ新ノードを公開
     {
-        convo::publishAtomic(bandNodeBits[bandIndex], toBandNodeBits(value), order);
+        convo::publishAtomic(bandNodeBits[bandIndex],
+                             toBandNodeBits(value),
+                             static_cast<std::memory_order>(order)); // release(デフォルト): loadBandNode の acquire と HB し新 BandNode を公知
     }
 
     // ── フィルタ状態 [チャンネル][バンド][z1/z2] ──

@@ -16,8 +16,6 @@ class ThreadAffinityManager;
 
 namespace convo {
 
-class SnapshotCoordinator;
-
 using SnapshotCreatorCallback = void (*)(void* userData, uint64_t generation);
 
 struct WorkerThreadConfig {
@@ -28,7 +26,6 @@ struct WorkerThreadConfig {
 class WorkerThread {
 public:
     WorkerThread(CommandBuffer& cmdBuf,
-                 SnapshotCoordinator& coordinator,
                  GenerationManager& genManager,
                  const ThreadAffinityManager* affinityMgr,
                  const WorkerThreadConfig& config = WorkerThreadConfig());
@@ -38,21 +35,20 @@ public:
     void stop();
 
     void setSnapshotCreator(SnapshotCreatorCallback callback, void* userData) noexcept {
-        convo::publishAtomic(callbackFunc, callback, std::memory_order_release);
-        convo::publishAtomic(callbackUserData, userData, std::memory_order_release);
+        convo::publishAtomic(callbackFunc, callback, std::memory_order_release);       // release: run() の callbackFunc acquire と HB しコールバック設定を公知
+        convo::publishAtomic(callbackUserData, userData, std::memory_order_release);   // release: run() の callbackUserData acquire と HB
     }
 
 #ifdef _DEBUG
-    uint64_t getCommandsReceived() const noexcept { return convo::consumeAtomic(commandsReceived, std::memory_order_acquire); }
-    uint64_t getSnapshotsCreated() const noexcept { return convo::consumeAtomic(snapshotsCreated, std::memory_order_acquire); }
-    uint64_t getCommandsDropped() const noexcept { return convo::consumeAtomic(commandsDropped, std::memory_order_acquire); }
+    uint64_t getCommandsReceived() const noexcept { return convo::consumeAtomic(commandsReceived, std::memory_order_acquire); }   // acquire: run() の fetchAdd acq_rel と HB し最新カウントを観測
+    uint64_t getSnapshotsCreated() const noexcept { return convo::consumeAtomic(snapshotsCreated, std::memory_order_acquire); }   // acquire: run() の fetchAdd acq_rel と HB
+    uint64_t getCommandsDropped() const noexcept { return convo::consumeAtomic(commandsDropped, std::memory_order_acquire); }    // acquire: run() の fetchAdd acq_rel と HB
 #endif
 
 private:
     void run();
 
     CommandBuffer& commandBuffer;
-    SnapshotCoordinator& coordinator;
     GenerationManager& generationManager;
     const ThreadAffinityManager* affinityManager = nullptr;
     WorkerThreadConfig config;

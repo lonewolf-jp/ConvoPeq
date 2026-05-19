@@ -131,7 +131,7 @@ inline void pushAdaptiveCaptureBlocks(LockFreeRingBuffer<AudioBlock, 4096>* capt
                 block.R[i] = srcR[i];
         }))
         {
-            dropCount.fetch_add(1, std::memory_order_acq_rel); // RT-RESTRICTED: drop diagnostic counter only, no blocking
+            convo::fetchAddAtomic(dropCount, static_cast<uint64_t>(1), std::memory_order_acq_rel); // RT-RESTRICTED: drop diagnostic counter only, no blocking
         }
     }
 }

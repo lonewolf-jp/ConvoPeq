@@ -36,23 +36,34 @@ class SPSCRingBuffer {
 
 public:
     bool push(const T& item) noexcept {
+        // SPSC HB 契約:
+        // acquire: 直前の pop() の readIndex release と HB し、最新の読み取り位置を観測して満杯判定。
+        // acquire: writeIndex の自己読み取り — 書き込み側のみが更新するため、
+        //          relaxed でも安全だが acquire で統一し HB 根拠を明確化。
         const size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
         const size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         if ((w - r) >= Capacity)
             return false;
 
         buffer[w & mask] = item;
+        // release: バッファへの書き込みが完了した後に writeIndex を公開し、
+        //          pop() 側の acquire と HB を形成してデータが可視化される。
         convo::publishAtomic(writeIndex, w + 1, std::memory_order_release);
         return true;
     }
 
     bool pop(T& item) noexcept {
+        // SPSC HB 契約:
+        // acquire: readIndex の自己読み取り — 消費側のみが更新するため relaxed でも安全だが acquire で統一。
+        // acquire: push() の writeIndex release と HB し、最新の書き込み位置を観測して空判定。
         const size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         const size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
         if (r == w)
             return false;
 
         item = buffer[r & mask];
+        // release: バッファ読み取り完了後に readIndex を公開し、
+        //          push() 側の acquire と HB を形成してスロット再利用を安全化。
         convo::publishAtomic(readIndex, r + 1, std::memory_order_release);
         return true;
     }

@@ -9,7 +9,16 @@ if (-not (Test-Path $targetDir)) {
     exit 2
 }
 
-$pattern = "\.(load|store|exchange)\s*\("
+$pattern = "\.(load|store|exchange|compare_exchange(_weak|_strong)?|fetch_(add|sub|or|and)|test_and_set)\s*\("
+$forbiddenPatterns = @(
+    "\bglobalEpochDomain\s*\(",
+    "\bstd::atomic_flag\b",
+    "\batomic_flag\b",
+    "\bstd::thread\b.*\bObservedSnapshot\b",
+    "\bObservedSnapshot\b.*\bstd::thread\b",
+    "\bstd::async\b.*\bObservedSnapshot\b",
+    "\bObservedSnapshot\b.*\bstd::async\b"
+)
 $extensions = @("*.h", "*.hpp", "*.hh", "*.cpp", "*.cxx", "*.cc")
 
 function Remove-CommentsFromLine {
@@ -83,6 +92,27 @@ foreach ($file in $sourceFiles) {
                 File    = $relativePath
                 Line    = $lineNumber
                 Snippet = $line.Trim()
+                Rule    = "atomic-dot-call"
+            }
+        }
+
+        foreach ($forbiddenPattern in $forbiddenPatterns) {
+            if ([System.Text.RegularExpressions.Regex]::IsMatch($codeOnly, $forbiddenPattern)) {
+                $violations += [PSCustomObject]@{
+                    File    = $relativePath
+                    Line    = $lineNumber
+                    Snippet = $line.Trim()
+                    Rule    = "forbidden-symbol"
+                }
+            }
+        }
+
+        if ([System.Text.RegularExpressions.Regex]::IsMatch($codeOnly, "\bmemory_order_seq_cst\b")) {
+            $violations += [PSCustomObject]@{
+                File    = $relativePath
+                Line    = $lineNumber
+                Snippet = $line.Trim()
+                Rule    = "forbidden-seq-cst"
             }
         }
     }
@@ -101,7 +131,7 @@ if ($violations.Count -gt 0) {
         Write-Host ""
     }
 
-    Write-Host "Policy: use convo::consumeAtomic / publishAtomic / exchangeAtomic helpers instead of direct .load/.store/.exchange calls."
+    Write-Host "Policy: use convo::consumeAtomic / publishAtomic / exchangeAtomic helpers instead of direct atomic dot-calls, do not reintroduce globalEpochDomain(), and do not hand off ObservedSnapshot across thread boundaries."
     exit 1
 }
 

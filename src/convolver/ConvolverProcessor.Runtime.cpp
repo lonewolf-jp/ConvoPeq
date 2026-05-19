@@ -35,19 +35,19 @@ void ConvolverProcessor::refreshLatency()
     } guard(*this);
 
     // IR未確定中（位相最適化/再構築中）は中間レイテンシ反映を完全停止する。
-    if (!convo::consumeAtomic(irFinalized, std::memory_order_acquire))
+    if (!convo::consumeAtomic(irFinalized, std::memory_order_acquire)) // acquire: LoadPipeline 側 irFinalized publishAtomic release と HB
         return;
 
-    auto* conv = loadActiveEngine(std::memory_order_acquire);
+    auto* conv = loadActiveEngine(std::memory_order_acquire); // acquire: exchangeActiveEngine acq_rel/release と HB
     double totalLatency = 0.0;
     if (conv)
     {
         const int algorithmLatency = conv->storedDirectHeadEnabled ? 0 : juce::jmax(0, conv->latency);
         const int irPeakLatency = juce::jmax(0, conv->irLatency);
-        convo::publishAtomic(uiAlgorithmLatencySamples, algorithmLatency, std::memory_order_release);
-        convo::publishAtomic(uiIrPeakLatencySamples, irPeakLatency, std::memory_order_release);
-        convo::publishAtomic(uiTotalLatencySamples, juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY), std::memory_order_release);
-        convo::publishAtomic(uiDirectHeadActive, conv->storedDirectHeadEnabled, std::memory_order_release);
+        convo::publishAtomic(uiAlgorithmLatencySamples, algorithmLatency, std::memory_order_release); // release: UI 読み側 consumeAtomic acquire と HB
+        convo::publishAtomic(uiIrPeakLatencySamples, irPeakLatency, std::memory_order_release);       // release: UI 読み側 consumeAtomic acquire と HB
+        convo::publishAtomic(uiTotalLatencySamples, juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY), std::memory_order_release); // release: UI 読み側 acquire と HB
+        convo::publishAtomic(uiDirectHeadActive, conv->storedDirectHeadEnabled, std::memory_order_release); // release: UI 読み側 acquire と HB
         totalLatency = static_cast<double>(juce::jmin(juce::jmax(0, algorithmLatency + irPeakLatency), MAX_TOTAL_DELAY));
     }
 
@@ -55,10 +55,10 @@ void ConvolverProcessor::refreshLatency()
     requestHostDisplayUpdate();
 
     // Audio Thread に遅延値の更新を委譲（即時リセット用）
-    convo::publishAtomic(pendingLatencyValue, totalLatency, std::memory_order_release);
-    // [F-01 fix] 世代カウンターをインクリメント (NonRT → RT 通知、RTでのatomic write禁止対策)
-    latencyResetPendingGen.fetch_add(1, std::memory_order_acq_rel);
-    latencyChangeRequestedGen.fetch_add(1, std::memory_order_acq_rel);
+    convo::publishAtomic(pendingLatencyValue, totalLatency, std::memory_order_release); // release: process() 側 pendingLatencyValue acquire と HB
+    // 世代カウンターをインクリメント (NonRT → RT 通知、RTでのatomic write禁止対策)
+    convo::fetchAddAtomic(latencyResetPendingGen, static_cast<uint64_t>(1), std::memory_order_acq_rel);      // acq_rel: process() 側 acquire と HB
+    convo::fetchAddAtomic(latencyChangeRequestedGen, static_cast<uint64_t>(1), std::memory_order_acq_rel);   // acq_rel: process() 側 acquire と HB
 }
 
 void ConvolverProcessor::processBypassWithLatencyCompensation(juce::dsp::AudioBlock<double>& block,
@@ -159,11 +159,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     int activeWetCapacity = wetBufferCapacity;
     int activeSmoothingCapacity = smoothingBufferCapacity;
 
-    if (!convo::consumeAtomic(isPrepared, std::memory_order_acquire))
+    if (!convo::consumeAtomic(isPrepared, std::memory_order_acquire)) // acquire: prepareToPlay/releaseResources の publishAtomic release と HB
     {
-        // [F-01 fix] RT atomic write 禁止: 世代カウンター比較のみ (非atomicローカル変数で追跡)
+        // RT atomic write 禁止: 世代カウンター比較のみ (非atomicローカル変数で追跡)
         {
-            const uint64_t curGen = convo::consumeAtomic(firstProcessCallGen, std::memory_order_acquire);
+            const uint64_t curGen = convo::consumeAtomic(firstProcessCallGen, std::memory_order_acquire); // acquire: prepareToPlay の fetchAddAtomic acq_rel と HB
             if (curGen != m_firstProcessCallGenSeen)
             {
                 m_firstProcessCallGenSeen = curGen;
@@ -177,7 +177,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     juce::ScopedNoDenormals noDenormals;
 
-    auto* conv = loadActiveEngine(std::memory_order_acquire);
+    auto* conv = loadActiveEngine(std::memory_order_acquire); // acquire: exchangeActiveEngine acq_rel/release と HB
 
     if (!conv)
         return;
@@ -203,7 +203,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         int totalLatency = static_cast<int>(std::min<int64_t>(calculatedLatency64, MAX_TOTAL_DELAY));
 
         if (rawAlgorithmLatency != algorithmLatency || rawIrPeakLatency != irPeakLatency)
-            g_totalLatencyClampCount.fetch_add(1, std::memory_order_acq_rel);
+            convo::fetchAddAtomic(g_totalLatencyClampCount, 1, std::memory_order_acq_rel); // acq_rel: clamp count 観測側 acquire と HB
 
         if (absNoLibm(activeLatencySmoother.getTargetValue() - static_cast<double>(totalLatency)) >= kLatencyRetargetThresholdSamples)
         {
@@ -227,23 +227,23 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     if (numSamples > activeWetCapacity)
         return;
 
-    // [F-01 fix]
+    // 世代カウンター比較で pending 値を取り込み
     {
-        const uint64_t curGen = convo::consumeAtomic(latencyResetPendingGen, std::memory_order_acquire);
+        const uint64_t curGen = convo::consumeAtomic(latencyResetPendingGen, std::memory_order_acquire); // acquire: refreshLatency/Lifecycle の fetchAddAtomic acq_rel と HB
         if (curGen != m_latencyResetPendingGenSeen)
         {
             m_latencyResetPendingGenSeen = curGen;
-            const double val = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire);
+            const double val = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire); // acquire: pendingLatencyValue publishAtomic release と HB
             activeLatencySmoother.setCurrentAndTargetValue(val);
         }
     }
 
     {
-        const uint64_t curGen = convo::consumeAtomic(latencyChangeRequestedGen, std::memory_order_acquire);
+        const uint64_t curGen = convo::consumeAtomic(latencyChangeRequestedGen, std::memory_order_acquire); // acquire: refreshLatency の fetchAddAtomic acq_rel と HB
         if (curGen != m_latencyChangeRequestedGenSeen)
         {
             m_latencyChangeRequestedGenSeen = curGen;
-            const double newTarget = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire);
+            const double newTarget = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire); // acquire: pendingLatencyValue publishAtomic release と HB
             if (absNoLibm(activeLatencySmoother.getTargetValue() - newTarget) >= 2.0)
             {
                 if (!activeCrossfadeGain.isSmoothing())
@@ -258,7 +258,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
 
     {
-        const uint64_t curGen = convo::consumeAtomic(mixSmootherResetPendingGen, std::memory_order_acquire);
+        const uint64_t curGen = convo::consumeAtomic(mixSmootherResetPendingGen, std::memory_order_acquire); // acquire: Lifecycle の fetchAddAtomic acq_rel と HB
         if (curGen != m_mixSmootherResetPendingGenSeen)
         {
             m_mixSmootherResetPendingGenSeen = curGen;
@@ -267,12 +267,12 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     }
 
     {
-        const uint64_t curGen = convo::consumeAtomic(smoothingTimeChangePendingGen, std::memory_order_acquire);
+        const uint64_t curGen = convo::consumeAtomic(smoothingTimeChangePendingGen, std::memory_order_acquire); // acquire: setSmoothingTime の fetchAddAtomic acq_rel と HB
         if (curGen != m_smoothingTimeChangePendingGenSeen)
         {
             m_smoothingTimeChangePendingGenSeen = curGen;
             const float newTime = runtimeSnapshot.smoothingTimeSec;
-            const double sampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+            const double sampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/IR load の publishAtomic release と HB
             if (sampleRate > 0.0)
             {
                 const double currentVal = activeMixSmoother.getCurrentValue();
@@ -679,7 +679,7 @@ void ConvolverProcessor::setBypass(bool shouldBypass)
 
 void ConvolverProcessor::setTargetIRLength(float timeSec)
 {
-    const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire));
+    const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)); // acquire: prepareToPlay/IR load の publishAtomic release と HB
     float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
     float prev;
     {
@@ -695,7 +695,7 @@ void ConvolverProcessor::setTargetIRLength(float timeSec)
 
 void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
 {
-    const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire));
+    const float maxAllowedSec = getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)); // acquire: prepareToPlay/IR load の publishAtomic release と HB
     const float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
 
     float prevTarget;
@@ -738,8 +738,8 @@ void ConvolverProcessor::setSmoothingTime(float timeSec)
     {
         // H3: shadow atomic 廃止。pendingOverride.smoothingTimeSec が唯一の Source of Truth。
         publishRuntimeProcessSnapshot();
-        // [F-01 fix] 世代カウンターをインクリメント (NonRT → RT 通知)
-        smoothingTimeChangePendingGen.fetch_add(1, std::memory_order_acq_rel);
+        // 世代カウンターをインクリメント (NonRT → RT 通知)
+        convo::fetchAddAtomic(smoothingTimeChangePendingGen, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: process() 側 acquire と HB
 
         postCoalescedChangeNotification();
     }

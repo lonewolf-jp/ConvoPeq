@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include <immintrin.h>
+#include <optional>
 #include "AudioEngine.h"
 
 namespace
@@ -273,7 +274,7 @@ inline void pushAdaptiveCaptureBlocks(LockFreeRingBuffer<AudioBlock, 4096>* capt
                 block.R[i] = srcR[i];
         }))
         {
-            dropCount.fetch_add(1, std::memory_order_acq_rel); // RT-RESTRICTED: drop diagnostic counter only, no blocking
+            convo::fetchAddAtomic(dropCount, static_cast<uint64_t>(1), std::memory_order_acq_rel); // RT-RESTRICTED: drop diagnostic counter only, no blocking
         }
     }
 }
@@ -284,8 +285,8 @@ inline void pushAdaptiveCaptureBlocks(LockFreeRingBuffer<AudioBlock, 4096>* capt
 void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>& source,
                                                  juce::AudioBuffer<double>& destination,
                                                  LockFreeAudioRingBuffer& analyzerFifo,
-                                                 std::atomic<float>& inputLevelLinear,
-                                                 std::atomic<float>& outputLevelLinear,
+                                                 std::atomic<float>* inputLevelLinear,
+                                                 std::atomic<float>* outputLevelLinear,
                                                  const ProcessingState& state)
 {
     const int numSamples = source.getNumSamples();
@@ -315,8 +316,8 @@ void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>
 
 void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                                          LockFreeAudioRingBuffer& analyzerFifo,
-                                         std::atomic<float>& inputLevelLinear,
-                                         std::atomic<float>& outputLevelLinear,
+                                         std::atomic<float>* inputLevelLinear,
+                                         std::atomic<float>* outputLevelLinear,
                                          const ProcessingState& state)
 {
     const int numSamples = buffer.getNumSamples();
@@ -340,7 +341,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     const bool inputTapD = state.analyzerEnabled && (state.analyzerSource == AnalyzerSource::Input);
     const float rawInputLinearD = processInputDouble(buffer, numSamples, state.inputHeadroomGain,
                                                      inputTapD, analyzerFifo);
-    convo::publishAtomic(inputLevelLinear, rawInputLinearD, std::memory_order_release);
+    if (inputLevelLinear != nullptr)
+        convo::publishAtomic(*inputLevelLinear, rawInputLinearD, std::memory_order_release);
 
     const bool requestedFullBypass = state.eqBypassed && state.convBypassed;
     auto& ramp = ramps();
@@ -387,7 +389,10 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     // - snap はその guard 期間中 read-only で有効。
     // - eqCacheToUse は snap->eqCoeffHash で引いたキャッシュを参照し、
     //   reclaim は epoch 遅延解放で行われるため同期間は安全に参照可能。
-    const convo::GlobalSnapshot* snap = ownerEngine ? ownerEngine->m_coordinator.getCurrent() : nullptr;
+    std::optional<convo::ObservedRuntime> observedSnapshot;
+    if (ownerEngine != nullptr)
+        observedSnapshot.emplace(ownerEngine->observeCurrentRuntime());
+    const convo::GlobalSnapshot* snap = observedSnapshot ? observedSnapshot->get() : nullptr;
     const bool useSnapshotEq = (snap != nullptr);
     const convo::EQParameters* eqParamsToUse = nullptr;
     const EQCoeffCache* eqCacheToUse = nullptr;
@@ -396,10 +401,6 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         const uint64_t hash = snap->eqCoeffHash;
         eqParamsToUse = &snap->eqParams;
         eqCacheToUse = ownerEngine->eqCacheManager.get(hash);
-        if (hash != convo::consumeAtomic(ownerEngine->debugLastAppliedEqHash, std::memory_order_acquire))
-        {
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_acq_rel); // RT-RESTRICTED: debug version counter only, no blocking
-        }
     }
     else if (ownerEngine != nullptr)
     {
@@ -407,10 +408,6 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         const convo::EQParameters& fallbackParams = ownerEngine->getLatestEqParamsFallback(fallbackHash);
         eqParamsToUse = &fallbackParams;
         eqCacheToUse = ownerEngine->eqCacheManager.get(fallbackHash);
-        if (fallbackHash != 0 && fallbackHash != convo::consumeAtomic(ownerEngine->debugLastAppliedEqHash, std::memory_order_acquire))
-        {
-            ownerEngine->debugAppliedEqHashVersion.fetch_add(1u, std::memory_order_acq_rel); // RT-RESTRICTED: debug version counter only, no blocking
-        }
     }
 
     eqRt().setBypassFromRT(state.eqBypassed); // RT-local shadow に書き込み（publishAtomic の RT 使用禁止のため）
@@ -549,7 +546,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         pushToFifo(processBlock, analyzerFifo);
 
     const float outputLinear = measureLevel(originalBlock);
-    convo::publishAtomic(outputLevelLinear, outputLinear, std::memory_order_release);
+    if (outputLevelLinear != nullptr)
+        convo::publishAtomic(*outputLevelLinear, outputLinear, std::memory_order_release);
 
     processOutputDouble(buffer, numSamples, state);
 

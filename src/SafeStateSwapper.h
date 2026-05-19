@@ -88,17 +88,17 @@ public:
     void swap(ConvolverState* newState) noexcept
     {
         // 2-step bump（単調性確保 + 観測ズレの吸収）
-        const uint64_t epoch1   = globalEpoch.fetch_add(1, std::memory_order_acq_rel);
-        /* newEpoch = */ globalEpoch.fetch_add(1, std::memory_order_acq_rel);
+        const uint64_t epoch1   = convo::fetchAddAtomic(globalEpoch, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: acquire で直前の swap の acq_rel と HB; release で getSafeEpoch/enterReader の acquire と HB
+        /* newEpoch = */ convo::fetchAddAtomic(globalEpoch, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: 2-step bump 後半。単調性確保 + getSafeEpoch 観測側の acquire と HB
 
-        ConvolverState* oldState = convo::exchangeAtomic(activeState, newState, std::memory_order_acq_rel);
+        ConvolverState* oldState = convo::exchangeAtomic(activeState, newState, std::memory_order_acq_rel); // acq_rel: acquire で直前の swap の activeState release と HB; release で getState の acquire と HB
         if (oldState == nullptr) return;
 
         // リングバッファに積む
-        size_t t    = convo::consumeAtomic(tail, std::memory_order_acquire);
+        size_t t    = convo::consumeAtomic(tail, std::memory_order_acquire); // acquire: tryReclaim の tail release と HB し最新の tail を観測
         size_t next = (t + 1) % kMaxRetired;
 
-        if (next == convo::consumeAtomic(head, std::memory_order_acquire))
+        if (next == convo::consumeAtomic(head, std::memory_order_acquire)) // acquire: tryReclaim の head release と HB しリングバッファ空き判定
         {
             // バッファ溢れ: フォールバックキュー（非 RT パスなのでロック可）
             std::lock_guard<std::mutex> lock(fallbackMutex);
@@ -106,10 +106,10 @@ public:
             return;
         }
 
-        convo::publishAtomic(retiredBuffer[t].state, oldState, std::memory_order_release);
+        convo::publishAtomic(retiredBuffer[t].state, oldState, std::memory_order_release);  // release: tryReclaim の state acquire と HB し旧状態ポインタを公知
         // epoch1 を記録: 「このデータが有効だった時代の直前エポック」
-        convo::publishAtomic(retiredBuffer[t].epoch, epoch1, std::memory_order_release);
-        convo::publishAtomic(tail, next, std::memory_order_release);
+        convo::publishAtomic(retiredBuffer[t].epoch, epoch1, std::memory_order_release);    // release: tryReclaim の epoch acquire と HB
+        convo::publishAtomic(tail, next, std::memory_order_release);                        // release: tryReclaim の tail acquire と HB しエントリ追加完了を公知
     }
 
     // -----------------------------------------------------------------------
@@ -125,8 +125,8 @@ public:
         if (readerIndex >= 0 && readerIndex < kMaxReaders)
         {
             // relaxed load of global epoch is sufficient; release store publishes participation.
-            const uint64_t currentEpoch = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
-            convo::publishAtomic(readerEpochs[readerIndex], currentEpoch, std::memory_order_release);
+            const uint64_t currentEpoch = convo::consumeAtomic(globalEpoch, std::memory_order_acquire); // acquire: swap の fetchAdd acq_rel と HB し最新グローバルエポックを観測
+            convo::publishAtomic(readerEpochs[readerIndex], currentEpoch, std::memory_order_release);  // release: getMinReaderEpoch の acquire と HB し参加表明を公知
         }
     }
 
@@ -147,7 +147,7 @@ public:
         if (readerIndex >= 0 && readerIndex < kMaxReaders)
         {
             // relaxed store is sufficient for exiting participant.
-            convo::publishAtomic(readerEpochs[readerIndex], kIdleEpoch, std::memory_order_release);
+            convo::publishAtomic(readerEpochs[readerIndex], kIdleEpoch, std::memory_order_release); // release: getMinReaderEpoch の acquire と HB し非参加を公知
         }
     }
 
@@ -161,7 +161,7 @@ public:
     // -----------------------------------------------------------------------
     ConvolverState* getState() const noexcept
     {
-        return convo::consumeAtomic(activeState, std::memory_order_acquire);
+        return convo::consumeAtomic(activeState, std::memory_order_acquire); // acquire: swap の exchangeAtomic acq_rel と HB し最新アクティブ状態を観測
     }
 
     // -----------------------------------------------------------------------
@@ -195,40 +195,40 @@ public:
         }
 
         // リングバッファを確認
-        const size_t h = convo::consumeAtomic(head, std::memory_order_acquire);
-        if (h == convo::consumeAtomic(tail, std::memory_order_acquire)) return nullptr;
+        const size_t h = convo::consumeAtomic(head, std::memory_order_acquire);                          // acquire: 前回の head release と HB
+        if (h == convo::consumeAtomic(tail, std::memory_order_acquire)) return nullptr;                  // acquire: swap の tail release と HB しエントリ存在確認
 
         // tail(acquire) により、それ以前の epoch/state の release store は可視
-        const uint64_t entryEpoch = convo::consumeAtomic(retiredBuffer[h].epoch, std::memory_order_acquire);
+        const uint64_t entryEpoch = convo::consumeAtomic(retiredBuffer[h].epoch, std::memory_order_acquire); // acquire: swap の epoch release と HB
         // 注意: atomic_thread_fence(acquire) は不要。tail.load との同期で十分。
         if (isOlder(entryEpoch, minReaderEpoch))
         {
-            ConvolverState* ptr = convo::consumeAtomic(retiredBuffer[h].state, std::memory_order_acquire);
+            ConvolverState* ptr = convo::consumeAtomic(retiredBuffer[h].state, std::memory_order_acquire); // acquire: swap の state release と HB し旧状態ポインタを取得
             if (ptr != nullptr)
             {
                 // state を nullptr にクリアしてから head を進める（二重取得防止）
-                convo::publishAtomic(retiredBuffer[h].state, nullptr, std::memory_order_release);
-                convo::publishAtomic(head, (h + 1) % kMaxRetired, std::memory_order_release);
+                convo::publishAtomic(retiredBuffer[h].state, nullptr, std::memory_order_release); // release: 次回 tryReclaim の state acquire と HB し二重取得防止
+                convo::publishAtomic(head, (h + 1) % kMaxRetired, std::memory_order_release);    // release: swap の head acquire と HB しスロット解放を公知
                 return ptr;
             }
 
             // 削除不可: head を進めて tail 側へ回転する
-            convo::publishAtomic(head, (h + 1) % kMaxRetired, std::memory_order_release);
+            convo::publishAtomic(head, (h + 1) % kMaxRetired, std::memory_order_release); // release: swap の head acquire と HB しスロット移動を公知
 
-            const size_t t = convo::consumeAtomic(tail, std::memory_order_acquire);
+            const size_t t = convo::consumeAtomic(tail, std::memory_order_acquire); // acquire: swap の tail release と HB し最新 tail を観測
             const size_t nextTail = (t + 1) % kMaxRetired;
-            if (nextTail == convo::consumeAtomic(head, std::memory_order_acquire))
+            if (nextTail == convo::consumeAtomic(head, std::memory_order_acquire)) // acquire: 最新 head を観測してバッファ溢れ判定
             {
                 std::lock_guard<std::mutex> lock(fallbackMutex);
                 fallbackQueue.push({ptr, entryEpoch});
             }
             else
             {
-                convo::publishAtomic(retiredBuffer[t].state, ptr, std::memory_order_release);
-                convo::publishAtomic(retiredBuffer[t].epoch, entryEpoch, std::memory_order_release);
-                convo::publishAtomic(tail, nextTail, std::memory_order_release);
+                convo::publishAtomic(retiredBuffer[t].state, ptr, std::memory_order_release);         // release: 次回 tryReclaim の state acquire と HB
+                convo::publishAtomic(retiredBuffer[t].epoch, entryEpoch, std::memory_order_release);  // release: 次回 tryReclaim の epoch acquire と HB
+                convo::publishAtomic(tail, nextTail, std::memory_order_release);                      // release: swap/tryReclaim の tail acquire と HB しエントリ追加完了を公知
             }
-            convo::publishAtomic(retiredBuffer[h].state, nullptr, std::memory_order_release);
+            convo::publishAtomic(retiredBuffer[h].state, nullptr, std::memory_order_release); // release: 次回 tryReclaim の state acquire と HB しスロットクリアを公知
             return nullptr;
         }
 
@@ -240,15 +240,15 @@ public:
     // -----------------------------------------------------------------------
     uint64_t getSafeEpoch() const noexcept
     {
-        const uint64_t current = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
+        const uint64_t current = convo::consumeAtomic(globalEpoch, std::memory_order_acquire); // acquire: swap の fetchAdd acq_rel と HB し最新グローバルエポックを観測
         if (current < 2) return 0;
         return current - 2;
     }
 
     size_t getPendingRetiredCount() noexcept
     {
-        const size_t currentHead = convo::consumeAtomic(head, std::memory_order_acquire);
-        const size_t currentTail = convo::consumeAtomic(tail, std::memory_order_acquire);
+        const size_t currentHead = convo::consumeAtomic(head, std::memory_order_acquire); // acquire: tryReclaim の head release と HB
+        const size_t currentTail = convo::consumeAtomic(tail, std::memory_order_acquire); // acquire: swap/tryReclaim の tail release と HB
         const size_t ringCount = (currentTail + kMaxRetired - currentHead) % kMaxRetired;
 
         std::lock_guard<std::mutex> lock(fallbackMutex);
@@ -261,7 +261,7 @@ public:
         bool hasActiveReader = false;
 
         for (size_t i = 0; i < kMaxReaders; ++i) {
-            const uint64_t e = convo::consumeAtomic(readerEpochs[i], std::memory_order_acquire);
+            const uint64_t e = convo::consumeAtomic(readerEpochs[i], std::memory_order_acquire); // acquire: enterReader/exitReader の publishAtomic release と HB しエポックを観測
             if (e != kIdleEpoch) {
                 if (!hasActiveReader) {
                     minEpoch = e;
@@ -273,7 +273,7 @@ public:
         }
 
         if (!hasActiveReader)
-            return convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
+            return convo::consumeAtomic(globalEpoch, std::memory_order_acquire); // acquire: swap の fetchAdd acq_rel と HB — 読者なし時は最新グローバルエポックを返す
 
         return minEpoch;
     }

@@ -74,7 +74,7 @@ public:
     // -----------------------------------------------------------------------
     void stop() noexcept
     {
-        convo::publishAtomic(running, false, std::memory_order_release);
+        convo::publishAtomic(running, false, std::memory_order_release); // release: run() の consumeAtomic acquire と HB しループ終了を公知
     }
 
     void shutdownAndDrain() noexcept
@@ -112,7 +112,7 @@ private:
         if (affinityManager != nullptr)
             affinityManager->applyCurrentThreadPolicy(ThreadType::LightBackground);
 
-        while (convo::consumeAtomic(running, std::memory_order_acquire))
+        while (convo::consumeAtomic(running, std::memory_order_acquire)) // acquire: stop() の publishAtomic release と HB し最新の running 値を観測
         {
             const uint64_t minEpoch = swapperRef.getMinReaderEpoch();
             int reclaimCount = 0;

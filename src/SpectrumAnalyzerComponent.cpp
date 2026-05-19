@@ -274,7 +274,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     lastTime = now;
 
     // Snapshot のハッシュ差分で EQ 更新を検知する。
-    const auto* snap = engine.getSnapshotCoordinator().getCurrent();
+    const auto observedSnapshot = engine.observeCurrentRuntime();
+    const auto* snap = observedSnapshot.get();
     if (snap != nullptr && snap->eqCoeffHash != lastEqHash)
     {
         lastEqHash = snap->eqCoeffHash;

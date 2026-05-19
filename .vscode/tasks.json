@@ -51,7 +51,19 @@
             "args": [
                 "/d",
                 "/c",
-                "\"call \\\"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\\" x64 && call \\\"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\\" intel64 && cmake -S . -B build -G \\\"Ninja Multi-Config\\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\\\"/fsanitize=address /Zi /INCREMENTAL:NO\\\" && cmake --build build --config Debug\""
+                "call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\"/fsanitize=address /Zi /INCREMENTAL:NO\" && cmake --build build --config Debug"
+            ],
+            "isBackground": false,
+            "group": "build"
+        },
+        {
+            "label": "Release Build (cmd env retry)",
+            "type": "shell",
+            "command": "cmd.exe",
+            "args": [
+                "/d",
+                "/c",
+                "call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Release"
             ],
             "isBackground": false,
             "group": "build"
@@ -73,6 +85,6 @@
             "type": "shell",
             "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}\\.github\\scripts\\check-src-atomic-dotcall.ps1\"",
             "problemMatcher": []
-        },
+        }
     ]
 }

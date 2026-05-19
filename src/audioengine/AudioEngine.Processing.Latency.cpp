@@ -40,10 +40,10 @@ namespace
 
 double AudioEngine::getProcessingSampleRate() const
 {
-    const double sr = convo::consumeAtomic(currentSampleRate);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (sr <= 0.0) return 0.0;
 
-    int factor = convo::consumeAtomic(manualOversamplingFactor);
+    int factor = convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire);
     int actualFactor = 1;
 
     if (factor > 0)
@@ -85,7 +85,7 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 
     const auto runtimePublishView = getRuntimePublishView();
     const auto* runtimeGraph = runtimePublishView.graph;
-    auto* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+    auto* dsp = runtimePublishedCurrentDSP(runtimeGraph);
     if (dsp == nullptr)
         return breakdown;
 

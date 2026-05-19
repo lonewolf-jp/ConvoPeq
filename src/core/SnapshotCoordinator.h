@@ -5,21 +5,13 @@
 //==============================================================================
 #pragma once
 
-#include <atomic>
 #include <cstdint>
-#include "GlobalSnapshot.h"
-#include "DeletionQueue.h"
-#include "EpochCore.h"
-#include "SnapshotFactory.h"
-
-#include "audioengine/AtomicAccess.h"
+#include "ObservedRuntime.h"
+#include "SnapshotFadeState.h"
+#include "SnapshotRetireManager.h"
+#include "SnapshotSlotStore.h"
 
 namespace convo {
-
-enum class FadeState : uint8_t {
-    Idle,
-    FadingIn
-};
 
 // Audio Thread safe equal-power approximation (sin(pi/2*x), libm free)
 static inline float equalPowerSinApprox(float x) noexcept
@@ -31,75 +23,81 @@ static inline float equalPowerSinApprox(float x) noexcept
 
 class SnapshotCoordinator {
 public:
-    explicit SnapshotCoordinator(EpochCore& epochCore) noexcept
-        : m_epochCore(epochCore), m_current(nullptr)
+    explicit SnapshotCoordinator(EpochDomain& epochDomain) noexcept
+        : m_epochDomain(epochDomain)
     {
-        convo::publishAtomic(m_current, nullptr, std::memory_order_release);
-        convo::publishAtomic(m_target, nullptr, std::memory_order_release);
-        convo::publishAtomic(m_fadeAlpha, 1.0, std::memory_order_release);
-        convo::publishAtomic(m_fadeState, FadeState::Idle, std::memory_order_release);
-        convo::publishAtomic(m_fadeTotalSamples, 0, std::memory_order_release);
-        convo::publishAtomic(m_fadeRemainingSamples, 0, std::memory_order_release);
-        convo::publishAtomic(m_fadeCompleted, false, std::memory_order_release);
+        m_slots.initializeSlots();
+        m_fade.initialize();
     }
 
     ~SnapshotCoordinator() noexcept {
-        GlobalSnapshot* snap = convo::consumeAtomic(m_current, std::memory_order_acquire);
-        if (snap)
-            SnapshotFactory::destroy(snap);
-        snap = convo::consumeAtomic(m_target, std::memory_order_acquire);
-        if (snap)
-            SnapshotFactory::destroy(snap);
+        const uint64_t retireEpoch = m_epochDomain.publish();
+
+        // acq_rel ×2: acquire → 直前の publishNew/switchImmediate release と HB して旧ポインタ取得；
+        //              release → null を公開し後続 acquire と HB してダブルフリーを防止。
+        GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
+        m_retire.retire(snap, retireEpoch);
+
+        // acq_rel: startFade の m_target release と HB し、target を回収して null を公開。
+        snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
+        m_retire.retire(snap, retireEpoch);
+
+        m_retire.reclaim(m_epochDomain);
     }
 
-    GlobalSnapshot* getCurrent() const noexcept {
-        return convo::consumeAtomic(m_current, std::memory_order_acquire);
+    ObservedRuntime observeCurrentRuntime(int readerIndex) const noexcept {
+        auto& domain = const_cast<EpochDomain&>(m_epochDomain);
+        ObservedRuntime observed(domain, readerIndex);
+        // acquire: switchImmediate/publishNew の m_current release と HB し最新スナップを観測。
+        observed.ptr = m_slots.loadCurrent(std::memory_order_acquire);
+        return observed;
     }
 
     void switchImmediate(GlobalSnapshot* newSnap) noexcept {
-        abortFade();
-        GlobalSnapshot* oldSnap = convo::exchangeAtomic(m_current, newSnap, std::memory_order_release);
+        resetFadeStateAndRetireTarget();
+        // release: 新スナップを公開し、observeCurrent/updateFade の acquire と HB 。
+        //          旧ポインタ回収は release で十分（publishNew と同一 NonRT スレッドから呼ぶ前提）。
+        GlobalSnapshot* oldSnap = m_slots.exchangeCurrent(newSnap, std::memory_order_release);
         if (oldSnap) {
-            uint64_t newEpoch = m_epochCore.publish();
-            m_deletionQueue.enqueue(
-                oldSnap,
-                [](void* ptr) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr)); },
-                newEpoch,
-                DeletionEntryType::Generic
-            );
+            uint64_t newEpoch = m_epochDomain.publish();
+            m_retire.retire(oldSnap, newEpoch);
         }
     }
 
     void startFade(GlobalSnapshot* target, int fadeSamples) noexcept;
 
-    void reclaim(const EpochCore& core) noexcept {
-        m_deletionQueue.reclaim(core);
+    void reclaim(const EpochDomain& core) noexcept {
+        m_retire.reclaim(core);
     }
 
     bool updateFade(float& outAlpha,
                     const GlobalSnapshot*& outCurrent,
                     const GlobalSnapshot*& outTarget) noexcept
     {
-        const FadeState state = convo::consumeAtomic(m_fadeState, std::memory_order_acquire);
+        // acquire: SnapshotFadeState::start/resetToIdle の release と HB してフェード状態を観測。
+        const FadeState state = m_fade.state();
         if (state == FadeState::Idle)
         {
             outAlpha = 1.0f;
-            outCurrent = convo::consumeAtomic(m_current, std::memory_order_acquire);
+            // acquire: switchImmediate/publishNew release と HB し、最新スナップを観測。
+            outCurrent = m_slots.loadCurrent(std::memory_order_acquire);
             outTarget = nullptr;
             return false;
         }
 
-        outCurrent = convo::consumeAtomic(m_current, std::memory_order_acquire);
-        outTarget = convo::consumeAtomic(m_target, std::memory_order_acquire);
+        // acquire ×2: m_current/m_target の release と HB し、フェード中の両スナップを観測。
+        outCurrent = m_slots.loadCurrent(std::memory_order_acquire);
+        outTarget = m_slots.loadTarget(std::memory_order_acquire);
         if (outTarget == nullptr)
         {
-            abortFade();
+            resetFadeStateAndRetireTarget();
             outAlpha = 1.0f;
             outTarget = nullptr;
             return false;
         }
 
-        const double alpha = convo::consumeAtomic(m_fadeAlpha, std::memory_order_acquire);
+        // acquire: advanceFade/reset/complete の alpha release と HB し最新アルファ値を観測。
+        const double alpha = m_fade.alpha();
         outAlpha = equalPowerSinApprox(static_cast<float>(alpha));
         return true;
     }
@@ -109,23 +107,17 @@ public:
 
     bool isFading() const noexcept
     {
-        return convo::consumeAtomic(m_fadeState, std::memory_order_acquire) != FadeState::Idle;
+        return m_fade.isFading();
     }
 
 private:
-    void requestFadeCompletion() noexcept;
-    void abortFade() noexcept;
+    void resetFadeStateAndRetireTarget() noexcept;
     void completeFade() noexcept;
 
-    EpochCore& m_epochCore;
-    std::atomic<GlobalSnapshot*> m_current{nullptr};
-    std::atomic<GlobalSnapshot*> m_target{nullptr};
-    std::atomic<double> m_fadeAlpha{1.0};
-    std::atomic<FadeState> m_fadeState{FadeState::Idle};
-    std::atomic<int> m_fadeTotalSamples{0};
-    std::atomic<int> m_fadeRemainingSamples{0};
-    std::atomic<bool> m_fadeCompleted{false};
-    DeletionQueue m_deletionQueue;
+    EpochDomain& m_epochDomain;
+    SnapshotSlotStore m_slots;
+    SnapshotFadeState m_fade;
+    SnapshotRetireManager m_retire;
 };
 
 } // namespace convo

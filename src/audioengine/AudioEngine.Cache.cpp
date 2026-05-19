@@ -13,6 +13,12 @@ static void retireEQCache(AudioEngine& owner, EQCoeffCache* cache)
 
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CACHE_MANAGER)
 
+AudioEngine::EQCacheManager::EQCacheManager(AudioEngine& ownerIn) noexcept
+    : owner(ownerIn)
+{
+    convo::publishAtomic(cacheMapPtr, new CacheMap(ownerIn), std::memory_order_release); // release: loadMap acquire と HB
+}
+
 bool AudioEngine::EQCacheManager::tryEnqueueDeferredMap(CacheMap* map) noexcept
 {
     if (map == nullptr)
@@ -39,7 +45,7 @@ void AudioEngine::EQCacheManager::drainDeferredMapsUnderLock() noexcept
 
 void AudioEngine::EQCacheManager::storeNewMap(CacheMap* newMap) noexcept
 {
-    auto* old = convo::exchangeAtomic(cacheMapPtr, newMap, std::memory_order_acq_rel);
+    auto* old = convo::exchangeAtomic(cacheMapPtr, newMap, std::memory_order_acq_rel); // acq_rel: acquire で旧 map 取得; release で新 map 公開
     if (old == nullptr)
         return;
 
@@ -121,7 +127,7 @@ AudioEngine::EQCacheManager::~EQCacheManager()
 {
     std::lock_guard<std::mutex> lock(writeMutex);
 
-    CacheMap* currentMap = convo::exchangeAtomic(cacheMapPtr, nullptr, std::memory_order_acq_rel);
+    CacheMap* currentMap = convo::exchangeAtomic(cacheMapPtr, nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 map 取得; release で null 公開
     std::unique_ptr<CacheMap> owned{currentMap}; // RAII delete (handles null safely)
 
     for (auto* map : enqueueFallbackMaps)

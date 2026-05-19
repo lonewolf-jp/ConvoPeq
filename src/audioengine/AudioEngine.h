@@ -39,7 +39,9 @@ struct CoeffSet {
 #include <limits>
 #include <memory>
 #include <unordered_map>
+#include <type_traits>
 #include <vector>
+#include <utility>
 #include <juce_dsp/juce_dsp.h>
 #include <thread>
 #include <mutex>
@@ -69,13 +71,16 @@ struct CoeffSet {
 #include "DeferredDeletionQueue.h"
 #include "core/Types.h"
 #include "core/SnapshotCoordinator.h"
-#include "core/EpochCore.h"
+#include "core/EpochDomain.h"
+#include "core/RuntimePublicationCoordinator.h"
+#include "core/RuntimeStore.h"
 #include "core/CommandBuffer.h"
 #include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
 #include "core/RebuildTypes.h"
 
 class NoiseShaperLearner;
+class AudioEngine;
 
 inline std::atomic<std::uint64_t> g_runtimePublishCount { 0 };
 inline std::atomic<std::uint64_t> g_runtimeRetireCount { 0 };
@@ -94,6 +99,17 @@ inline double absNoLibm(double x) noexcept
     v.u &= 0x7FFFFFFFFFFFFFFFULL;
     return v.d;
 }
+
+struct RuntimeState
+{
+    convo::EngineRuntime engine {};
+    convo::RuntimeGraph graph {};
+    std::uint64_t generation = 0;
+    std::uint64_t runtimeVersion = 0;  // Monotonically increasing version number
+    std::uint64_t transitionId = 0;    // Unique identifier per crossfade
+};
+
+using RuntimePublishWorld = RuntimeState;
 
 // AudioEngine.h  ── v0.2 (JUCE 8.0.12対応)
 //
@@ -377,28 +393,28 @@ public:
     void setFixedLatencySamples(int samples);
     void reset();
         void process(const juce::AudioSourceChannelInfo& bufferToFill, LockFreeAudioRingBuffer& analyzerFifo,
-             std::atomic<float>& inputLevelLinear,
-                 std::atomic<float>& outputLevelLinear, const ProcessingState& state);
+             std::atomic<float>* inputLevelLinear,
+             std::atomic<float>* outputLevelLinear, const ProcessingState& state);
     void processToBuffer(const juce::AudioSourceChannelInfo& source,
                          juce::AudioBuffer<float>& destination,
                  LockFreeAudioRingBuffer& analyzerFifo,
-                         std::atomic<float>& inputLevelLinear,
-                         std::atomic<float>& outputLevelLinear,
+                 std::atomic<float>* inputLevelLinear,
+                 std::atomic<float>* outputLevelLinear,
                          const ProcessingState& state);
     void processDouble(juce::AudioBuffer<double>& buffer,
                    LockFreeAudioRingBuffer& analyzerFifo,
-                       std::atomic<float>& inputLevelLinear,
-                       std::atomic<float>& outputLevelLinear,
+                   std::atomic<float>* inputLevelLinear,
+                   std::atomic<float>* outputLevelLinear,
                        const ProcessingState& state);
     void processDoubleToBuffer(const juce::AudioBuffer<double>& source,
                                juce::AudioBuffer<double>& destination,
                        LockFreeAudioRingBuffer& analyzerFifo,
-                               std::atomic<float>& inputLevelLinear,
-                               std::atomic<float>& outputLevelLinear,
+                       std::atomic<float>* inputLevelLinear,
+                       std::atomic<float>* outputLevelLinear,
                                const ProcessingState& state);
         ConvolverProcessor convolver;
         EQProcessor eq;
-        // A-12 first step: DC blocker state is detached from DSP graph members.
+        // DC blocker state is detached from DSP graph members.
         std::unique_ptr<DCBlockerRuntimeState> dcBlockerState;
         std::unique_ptr<ConvolverRuntimeState> convolverState;
         std::unique_ptr<EQRuntimeState> eqState;
@@ -620,7 +636,8 @@ public:
     const void* getEQStateSnapshot() const { return uiEqEditor.getEQStateSnapshot(); }
     void resetEQToDefaults() { uiEqEditor.reset(); }
 
-    double getSampleRate() const { return consumeAtomic(currentSampleRate, std::memory_order_seq_cst); }
+    // acquire: prepareToPlay/releaseResources の release と HB し、有効なサンプルレートを取得。
+    double getSampleRate() const { return consumeAtomic(currentSampleRate, std::memory_order_acquire); }
     double getProcessingSampleRate() const;
     struct LatencyBreakdown
     {
@@ -638,6 +655,8 @@ public:
     // 【Fix Bug #8】gainToDecibels (std::log10 / libm) を Audio Thread から排除。
     // Audio Thread は linear gain を inputLevelLinear / outputLevelLinear に格納し、
     // getter (UI Thread) で dB 変換する。
+    // acquire: Audio Thread の release publishAtomic (inputLevelLinear/outputLevelLinear) と HB
+    //          し、最新のレベル値を UI Thread から安全に取得する。
     float getInputLevel() const
     {
         const float linear = consumeAtomic(inputLevelLinear, std::memory_order_acquire);
@@ -665,6 +684,8 @@ public:
     // パラメータ設定 (Thread-safe)
     void setEqBypassRequested (bool shouldBypass);
     void setConvolverBypassRequested (bool shouldBypass);
+    // 以下 4 getter は acquire: 対応 setter の release publishAtomic/compareExchange と HB し、
+    // Message Thread から bypass 状態の最新値を安全に観測する。
     bool isEqBypassRequested() const noexcept { return consumeAtomic(eqBypassRequested, std::memory_order_acquire); }
     bool isConvolverBypassRequested() const noexcept { return consumeAtomic(convBypassRequested, std::memory_order_acquire); }
     bool isEQBypassed() const noexcept { return consumeAtomic(eqBypassActive, std::memory_order_acquire); }
@@ -683,12 +704,15 @@ public:
     void endBulkParameterRestore(bool requestRebuildNow = true) noexcept;
 
     void setProcessingOrder(ProcessingOrder order);
-    ProcessingOrder getProcessingOrder() const { return consumeAtomic(currentProcessingOrder, std::memory_order_seq_cst); }
+    // acquire: setProcessingOrder の release と HB し、最新の ProcessingOrder を観測。
+    ProcessingOrder getProcessingOrder() const { return consumeAtomic(currentProcessingOrder, std::memory_order_acquire); }
 
-    void setAnalyzerSource(AnalyzerSource source) { publishAtomic(currentAnalyzerSource, source, std::memory_order_seq_cst); }
-    AnalyzerSource getAnalyzerSource() const { return consumeAtomic(currentAnalyzerSource, std::memory_order_seq_cst); }
-    void setAnalyzerEnabled(bool enabled) noexcept { publishAtomic(analyzerEnabled, enabled); }
-    bool isAnalyzerEnabled() const noexcept { return consumeAtomic(analyzerEnabled); }
+    // release: UI スレッドからの設定を Audio Thread が acquire で観測できるよう公開。
+    // acquire: 対応 setter の release と HB し、最新値を取得。
+    void setAnalyzerSource(AnalyzerSource source) { publishAtomic(currentAnalyzerSource, source, std::memory_order_release); }
+    AnalyzerSource getAnalyzerSource() const { return consumeAtomic(currentAnalyzerSource, std::memory_order_acquire); }
+    void setAnalyzerEnabled(bool enabled) noexcept { publishAtomic(analyzerEnabled, enabled, std::memory_order_release); }
+    bool isAnalyzerEnabled() const noexcept { return consumeAtomic(analyzerEnabled, std::memory_order_acquire); }
 
     void setInputHeadroomDb(float db);
     float getInputHeadroomDb() const;
@@ -699,7 +723,7 @@ public:
     void setConvolverInputTrimDb(float db);
     float getConvolverInputTrimDb() const;
 
-    // rule2 Phase 1: Audio Thread command queue 経路を廃止し、
+    // Audio Thread command queue 経路を廃止し、
     // Message Thread 上の UI staging -> snapshot/rebuild 経路に統一する。
     void setConvolverMix(float value) noexcept
     {
@@ -748,48 +772,39 @@ public:
     void setIRFadeSamples(int samples) noexcept
     {
         const int clamped = juce::jlimit(0, 96000, samples);
+        // release: m_irFadeSamples の更新を Audio Thread が acquire で観測できるよう公開。
         publishAtomic(m_irFadeSamples, clamped, std::memory_order_release);
 
-        const double sr = consumeAtomic(currentSampleRate);
+        // acquire: prepareToPlay release と HB し、有効な currentSampleRate を取得。
+        const double sr = consumeAtomic(currentSampleRate, std::memory_order_acquire);
         if (sr > 0.0)
         {
             const double fadeSec = (clamped > 0)
                 ? (static_cast<double>(clamped) / sr)
                 : 0.001;
+            // release: m_irFadeTimeSec の更新を Audio Thread が acquire で観測できるよう公開。
             publishAtomic(m_irFadeTimeSec, fadeSec, std::memory_order_release);
         }
     }
+    // release: 各 setXxx の release と HB する getter は Audio Thread が acquire で観測。
     void setEQFadeSamples(int samples) noexcept { publishAtomic(m_eqFadeSamples, samples, std::memory_order_release); }
     int getIRFadeSamples() const noexcept { return consumeAtomic(m_irFadeSamples, std::memory_order_acquire); }
     int getEQFadeSamples() const noexcept { return consumeAtomic(m_eqFadeSamples, std::memory_order_acquire); }
     bool isFading() const noexcept { return m_coordinator.isFading(); }
-    const convo::SnapshotCoordinator& getSnapshotCoordinator() const noexcept { return m_coordinator; }
-    void setIRChangeFlag() noexcept { publishAtomic(m_pendingIRChange, true); }
-
-    // UI 操作が実際の音声演算へ反映されたかを確認するための診断値。
-    uint64_t getLastCreatedEqHashForDebug() const noexcept { return consumeAtomic(debugLastCreatedEqHash); }
-    uint64_t getLastAppliedEqHashForDebug() const noexcept { return consumeAtomic(debugLastAppliedEqHash); }
-    convo::TransitionState getRuntimeTransitionStateForDebug() const noexcept
+    convo::ObservedRuntime observeCurrentRuntime() const noexcept
     {
-        convo::TransitionState snapshot{};
-        snapshot.current = reinterpret_cast<void*>(static_cast<uintptr_t>(consumeAtomic(debugRuntimeTransitionCurrentPtr)));
-        snapshot.next = reinterpret_cast<void*>(static_cast<uintptr_t>(consumeAtomic(debugRuntimeTransitionNextPtr)));
-        int rawPolicy = consumeAtomic(debugRuntimeTransitionPolicy);
-        if (rawPolicy < static_cast<int>(convo::TransitionPolicy::SmoothOnly)
-            || rawPolicy > static_cast<int>(convo::TransitionPolicy::DryAsOld))
-        {
-            rawPolicy = static_cast<int>(convo::TransitionPolicy::SmoothOnly);
-        }
-        snapshot.policy = static_cast<convo::TransitionPolicy>(rawPolicy);
-        snapshot.fadeTimeSec = consumeAtomic(debugRuntimeTransitionFadeSec);
-        snapshot.latencyDeltaSamples = consumeAtomic(debugRuntimeTransitionLatencyDeltaSamples);
-        snapshot.active = (consumeAtomic(debugRuntimeTransitionActive) != 0);
-        return snapshot;
+        return m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
     }
+    // release: IR 変更フラグを Audio Thread の acquire で観測できるよう公開。
+    void setIRChangeFlag() noexcept { publishAtomic(m_pendingIRChange, true, std::memory_order_release); }
+
+    // acquire: Audio Thread の release (debugLastCreatedEqHash publish) と HB し、診断ハッシュを取得。
+    uint64_t getLastCreatedEqHashForDebug() const noexcept { return consumeAtomic(debugLastCreatedEqHash, std::memory_order_acquire); }
 
     const convo::EQParameters& getLatestEqParamsFallback(uint64_t& outHash) const noexcept
     {
-        const int index = consumeAtomic(latestEqFallbackReadIndex);
+        // acquire: latestEqFallbackReadIndex の release publish と HB し、最新のインデックスを取得。
+        const int index = consumeAtomic(latestEqFallbackReadIndex, std::memory_order_acquire);
         outHash = latestEqHashForFallback[(size_t) index];
         return latestEqParamsForFallback[(size_t) index];
     }
@@ -802,6 +817,8 @@ public:
 
     bool isShutdownInProgress() const noexcept
     {
+        // acquire: lifecycleState の setShutdownPhase/releaseResources release 側と HB し、
+        //          Releasing/Destroyed 遷移を各スレッドから安全に観測する。
         const auto state = consumeAtomic(lifecycleState, std::memory_order_acquire);
         return state == EngineLifecycleState::Releasing
             || state == EngineLifecycleState::Destroyed;
@@ -834,7 +851,8 @@ public:
     void startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, bool resume = false);
     void stopNoiseShaperLearning();
     void setNoiseShaperLearningMode(convo::NoiseShaperLearningMode mode);
-    convo::NoiseShaperLearningMode getNoiseShaperLearningMode() const { return consumeAtomic(pendingLearningMode); }
+    // acquire: setNoiseShaperLearningMode の release と HB し、最新の LearningMode を取得。
+    convo::NoiseShaperLearningMode getNoiseShaperLearningMode() const { return consumeAtomic(pendingLearningMode, std::memory_order_acquire); }
     bool isNoiseShaperLearning() const;
     const convo::NoiseShaperLearnerProgress& getNoiseShaperLearningProgress() const;
     int copyNoiseShaperLearningHistory(double* outScores, int maxPoints) const noexcept;
@@ -906,6 +924,11 @@ public:
     void setAdaptiveNoiseShaperState(int bankIndex, const convo::NoiseShaperLearnerState& inState) noexcept;
 
 private:
+    static constexpr int kAudioEpochReaderIndex = 0;
+    static constexpr int kControlEpochReaderIndex = 1;
+    static constexpr int kCommitProducerEpochReaderIndex = 2;
+    static constexpr int kCommitConsumerEpochReaderIndex = 3;
+
     //==================================================
     // クロスフェード用レイテンシ整合バッファ（最大2秒@48kHz, double精度, L/R独立）
     // 64byte aligned double* buffers (RT外確保)
@@ -932,10 +955,7 @@ private:
     class EQCacheManager
     {
     public:
-        explicit EQCacheManager(AudioEngine& ownerIn) noexcept
-            : owner(ownerIn)
-        {
-        }
+        explicit EQCacheManager(AudioEngine& ownerIn) noexcept;
         EQCoeffCache* getOrCreate(const convo::EQParameters& params,
                                   double sampleRate,
                                   int maxBlockSize,
@@ -947,9 +967,13 @@ private:
     private:
         struct CacheMap
         {
-            CacheMap() = default;
+            explicit CacheMap(AudioEngine& ownerIn) noexcept
+                : owner(&ownerIn)
+            {
+            }
 
             CacheMap(const CacheMap& other)
+                : owner(other.owner)
             {
                 for (const auto& entry : other.map)
                 {
@@ -965,13 +989,15 @@ private:
 
             ~CacheMap()
             {
+                jassert(owner != nullptr);
                 for (auto& entry : map)
                 {
                     if (entry.second != nullptr)
-                        entry.second->release();
+                        entry.second->release(owner->epochDomain());
                 }
             }
 
+            AudioEngine* owner = nullptr;
             std::unordered_map<uint64_t, EQCoeffCache*> map;
         };
 
@@ -1007,61 +1033,52 @@ public:
     //----------------------------------------------------------
     // 状態管理
     //----------------------------------------------------------
-    std::atomic<std::uintptr_t> currentDSPBits { 0 }; // uintptr_t-backed handle for Audio Thread (Lock-free)
-    convo::NonOwningPtr<DSPCore> activeDSP { nullptr }; // Ownership holder for Message Thread
-    std::atomic<std::uintptr_t> fadingOutDSPBits { 0 }; // D2: DSP切替クロスフェード用 (uintptr_t-backed handle)
-        static inline std::uintptr_t toDspBits(DSPCore* ptr) noexcept
-        {
-            return static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(ptr));
-        }
+    convo::NonOwningPtr<DSPCore> activeDSP { nullptr }; // Non-RT ownership holder
+    convo::NonOwningPtr<DSPCore> fadingOutDSP { nullptr }; // Non-RT fading slot holder
 
-        static inline DSPCore* fromDspBits(std::uintptr_t bits) noexcept
-        {
-            return reinterpret_cast<DSPCore*>(bits);
-        }
-
-        inline DSPCore* loadCurrentDSP(std::memory_order order = std::memory_order_acquire) const noexcept
-        {
-            return fromDspBits(convo::consumeAtomic(currentDSPBits, order));
-        }
-
-        inline DSPCore* exchangeCurrentDSP(DSPCore* value,
-                                           std::memory_order order = std::memory_order_acq_rel) noexcept
-        {
-            return fromDspBits(convo::exchangeAtomic(currentDSPBits, toDspBits(value), order));
-        }
-
-        inline void publishCurrentDSP(DSPCore* value,
-                                      std::memory_order order = std::memory_order_release) noexcept
-        {
-            convo::publishAtomic(currentDSPBits, toDspBits(value), order);
-        }
-
-        inline DSPCore* loadFadingOutDSP(std::memory_order order = std::memory_order_acquire) const noexcept
-        {
-            return fromDspBits(convo::consumeAtomic(fadingOutDSPBits, order));
-        }
-
-        inline DSPCore* exchangeFadingOutDSP(DSPCore* value,
-                                             std::memory_order order = std::memory_order_acq_rel) noexcept
-        {
-            return fromDspBits(convo::exchangeAtomic(fadingOutDSPBits, toDspBits(value), order));
-        }
-
-        inline void publishFadingOutDSP(DSPCore* value,
-                                        std::memory_order order = std::memory_order_release) noexcept
-        {
-            convo::publishAtomic(fadingOutDSPBits, toDspBits(value), order);
-        }
-    struct RuntimePublishWorld
+    inline DSPCore* loadCurrentDSP(std::memory_order order = std::memory_order_acquire) const noexcept
     {
-        convo::EngineRuntime engine {};
-        convo::RuntimeGraph graph {};
-        std::uint64_t generation = 0;
-        std::uint64_t runtimeVersion = 0;  // Monotonically increasing version number
-        std::uint64_t transitionId = 0;    // Unique identifier per crossfade
-    };
+        juce::ignoreUnused(order);
+        return activeDSP.get();
+    }
 
+    inline DSPCore* exchangeCurrentDSP(DSPCore* value,
+                                       std::memory_order order = std::memory_order_acq_rel) noexcept
+    {
+        juce::ignoreUnused(order);
+        DSPCore* previous = activeDSP.get();
+        activeDSP = value;
+        return previous;
+    }
+
+    inline void publishCurrentDSP(DSPCore* value,
+                                  std::memory_order order = std::memory_order_release) noexcept
+    {
+        juce::ignoreUnused(order);
+        activeDSP = value;
+    }
+
+    inline DSPCore* loadFadingOutDSP(std::memory_order order = std::memory_order_acquire) const noexcept
+    {
+        juce::ignoreUnused(order);
+        return fadingOutDSP.get();
+    }
+
+    inline DSPCore* exchangeFadingOutDSP(DSPCore* value,
+                                         std::memory_order order = std::memory_order_acq_rel) noexcept
+    {
+        juce::ignoreUnused(order);
+        DSPCore* previous = fadingOutDSP.get();
+        fadingOutDSP = value;
+        return previous;
+    }
+
+    inline void publishFadingOutDSP(DSPCore* value,
+                                    std::memory_order order = std::memory_order_release) noexcept
+    {
+        juce::ignoreUnused(order);
+        fadingOutDSP = value;
+    }
     struct RuntimePublishView
     {
         const convo::RuntimeGraph* graph = nullptr;
@@ -1081,7 +1098,9 @@ public:
         double dryScaleTarget = 1.0;       // dry-as-old crossfade の IR スケール目標値
     };
 
-    std::atomic<RuntimePublishWorld*> runtimePublishWorldState { nullptr };
+    class RuntimePublicationBridge;
+    using DspCoreHandle = DSPCore*;
+
     std::atomic<std::uint64_t> runtimeGraphRevision { 0 };
     std::array<CrossfadePreparedSnapshot, 2> crossfadePreparedSnapshots_ {};
     std::atomic<int> crossfadePreparedSnapshotIndex_ { 0 };
@@ -1258,7 +1277,9 @@ public:
     void commitNewDSP(DSPCore* newDSP, int generation);
     void prepareCommit(DSPCore* newDSP, int generation);
     void executeCommit();
-    bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildGeneration, std::memory_order_seq_cst); }
+    // acquire: commitNewDSP/requestRebuild の rebuildGeneration 更新 release と HB し、
+    //          リビルド世代が古いか否かを各スレッドから安全に判定。
+    bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildGeneration, std::memory_order_acquire); }
     bool enqueueLearningCommand(const LearningCommand& cmd) noexcept;
     bool dequeueLearningCommand(LearningCommand& cmd) noexcept;
     bool enqueueLearnerDispatch(const LearnerDispatchAction& action) noexcept;
@@ -1267,10 +1288,13 @@ public:
     void processDeferredLearningActions();
     void resetLearningControlState() noexcept;
     bool enqueueSnapshotCommand() noexcept;
+    void appendPublicationIntent(DSPCore* newDSP, int generation, int epochReaderIndex) noexcept;
+    void drainPublicationLogForShutdown() noexcept;
+    bool hasPendingPublicationIntents() noexcept;
+    bool hasPublicationLogPending() noexcept;
     void processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
                              const convo::GlobalSnapshot* snap,
                              bool isFadingTarget);
-    bool waitForAudioBlockBoundary(uint64_t observedCounter, uint32_t timeoutMs) const noexcept;
     void handleAsyncUpdate() override;
 
     static void onSnapshotRequired(void* userData, uint64_t generation);
@@ -1315,7 +1339,9 @@ public:
 
     void setShutdownPhase(ShutdownPhase nextPhase, const char* origin) noexcept
     {
-        const ShutdownPhase previous = exchangeAtomic(shutdownPhase, nextPhase);
+        // acq_rel: 取得側 acquire で前フェーズの操作を観測し、
+        //          解放側 release で新フェーズを全スレッドに公開。
+        const ShutdownPhase previous = exchangeAtomic(shutdownPhase, nextPhase, std::memory_order_acq_rel);
         if (previous == nextPhase)
             return;
 
@@ -1351,17 +1377,22 @@ public:
     RebuildTask lastQueuedTaskSignature;
     int64_t lastQueuedTaskTicks = 0;
 
-    // --- Commit 2段階化：CommitStaging と deferredCommitQueue ---
-    struct CommitStaging {
+    // --- Commit 2段階化：PublicationLog と commit staging ---
+    struct PublicationIntent {
         DSPCore* newDSP = nullptr;
-        DSPCore* oldDSP = nullptr;
         int generation = 0;
+        std::atomic<PublicationIntent*> next { nullptr };
     };
 
-    std::queue<CommitStaging> deferredCommitQueue;
-    std::mutex deferredCommitMutex;
-    convo::TransitionState runtimeTransitionState {};
+    struct PublicationLog {
+        std::atomic<PublicationIntent*> head { nullptr };
+        std::atomic<PublicationIntent*> consumedTail { nullptr };
+        std::atomic<PublicationIntent*> retiredHead { nullptr };
+    };
 
+    PublicationLog publicationLog;
+    PublicationIntent* publicationLogSentinel = nullptr;
+    std::atomic<bool> commitDrainInProgress { false };
     struct DeferredDeleteFallbackEntry
     {
         void* ptr = nullptr;
@@ -1405,18 +1436,23 @@ public:
 
     bool hasRebuildReason(RebuildReason reason) const noexcept
     {
+        // acquire: setRebuildReason の acq_rel release-side と HB し、最新の flags を観測。
         const uint32_t flags = convo::consumeAtomic(rebuildReasonFlags_, std::memory_order_acquire);
         return (flags & rebuildReasonMask(reason)) != 0u;
     }
 
     bool setRebuildReason(RebuildReason reason) noexcept
     {
+        // acq_rel: 取得側 acquire で直前の clearRebuildReason を観測し、
+        //          解放側 release で新 flag を hasRebuildReason の acquire に公開。
         const uint32_t oldFlags = convo::fetchOrAtomic(rebuildReasonFlags_, rebuildReasonMask(reason), std::memory_order_acq_rel);
         return (oldFlags & rebuildReasonMask(reason)) == 0u;
     }
 
     bool clearRebuildReason(RebuildReason reason) noexcept
     {
+        // acq_rel: 取得側 acquire で直前の setRebuildReason を観測し、
+        //          解放側 release でクリア後の状態を hasRebuildReason acquire に公開。
         const uint32_t oldFlags = convo::fetchAndAtomic(rebuildReasonFlags_, static_cast<uint32_t>(~rebuildReasonMask(reason)), std::memory_order_acq_rel);
         return (oldFlags & rebuildReasonMask(reason)) != 0u;
     }
@@ -1424,28 +1460,6 @@ public:
 
 
     void debugAssertNotAudioThread() const;
-
-    inline void publishRuntimeTransitionState(DSPCore* current,
-                                              DSPCore* next,
-                                              convo::TransitionPolicy policy,
-                                              double fadeTimeSec,
-                                              bool active,
-                                              int latencyDeltaSamples = 0) noexcept
-    {
-        runtimeTransitionState.current = current;
-        runtimeTransitionState.next = next;
-        runtimeTransitionState.policy = policy;
-        runtimeTransitionState.fadeTimeSec = fadeTimeSec;
-        runtimeTransitionState.latencyDeltaSamples = latencyDeltaSamples;
-        runtimeTransitionState.active = active;
-
-        publishAtomic(debugRuntimeTransitionActive, active ? 1 : 0);
-        publishAtomic(debugRuntimeTransitionPolicy, static_cast<int>(policy));
-        publishAtomic(debugRuntimeTransitionCurrentPtr, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(current)));
-        publishAtomic(debugRuntimeTransitionNextPtr, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(next)));
-        publishAtomic(debugRuntimeTransitionFadeSec, fadeTimeSec);
-        publishAtomic(debugRuntimeTransitionLatencyDeltaSamples, latencyDeltaSamples);
-    }
 
     inline convo::EngineRuntime makeEngineRuntimeState(DSPCore* current,
                                                         DSPCore* next,
@@ -1472,7 +1486,8 @@ public:
             return dsp != nullptr ? dsp->runtimeUuid : 0;
         };
 
-        DSPCore* fading = sanitizeRawPtr(loadFadingOutDSP());
+        const auto runtimePublishView = getRuntimePublishView();
+        DSPCore* fading = resolveFadingDSPFromRuntimeWorldOnly(runtimePublishView.graph);
 
         runtime.current = current;
         runtime.currentRuntimeUuid = getRuntimeUuid(current);
@@ -1501,15 +1516,19 @@ public:
 
     inline CrossfadePreparedSnapshot consumeCrossfadePreparedSnapshot() const noexcept
     {
+        // acquire: publishCrossfadePreparedSnapshot の release と HB し、
+        //          最新のクロスフェードスナップショットスロットを取得。
         const int slot = static_cast<int>(convo::consumeAtomic(crossfadePreparedSnapshotIndex_, std::memory_order_acquire) & 1u);
         return crossfadePreparedSnapshots_[slot];
     }
 
     inline void publishCrossfadePreparedSnapshot(const CrossfadePreparedSnapshot& snapshot) noexcept
     {
+        // acquire: 現スロットの読み出しは直前の公開を観測。
         const int currentSlot = convo::consumeAtomic(crossfadePreparedSnapshotIndex_, std::memory_order_acquire) & 1;
         const int nextSlot = currentSlot ^ 1;
         crossfadePreparedSnapshots_[nextSlot] = snapshot;
+        // release: 新スロット書き込み完了を consumeCrossfadePreparedSnapshot の acquire に公開。
         convo::publishAtomic(crossfadePreparedSnapshotIndex_, nextSlot, std::memory_order_release);
     }
 
@@ -1531,20 +1550,10 @@ public:
         publishCrossfadePreparedSnapshot(snapshot);
     }
 
-    inline const RuntimePublishWorld* getRuntimePublishWorld() const noexcept
-    {
-        return consumeAtomicPtr(runtimePublishWorldState);
-    }
-
-    static inline const convo::RuntimeGraph* getRuntimeGraphState(const RuntimePublishWorld* world) noexcept
-    {
-        return world != nullptr ? &world->graph : nullptr;
-    }
-
     inline RuntimePublishView getRuntimePublishView() const noexcept
     {
-        const auto* world = getRuntimePublishWorld();
-        return RuntimePublishView { getRuntimeGraphState(world) };
+        const auto* world = runtimeStore.observe();
+        return RuntimePublishView { world != nullptr ? &world->graph : nullptr };
     }
 
     inline convo::RuntimeGraph makeRuntimeGraphState(const convo::EngineRuntime& state) const noexcept
@@ -1578,7 +1587,8 @@ public:
         graph.latencyDelayNew = state.latencyDelayNew;
         graph.latencyResetPending = state.latencyResetPending;
 
-        const auto* snapshot = m_coordinator.getCurrent();
+        const auto observedSnapshot = m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
+        const auto* snapshot = observedSnapshot.get();
         if (snapshot != nullptr)
         {
             graph.eqBypassed = snapshot->eqBypass;
@@ -1605,17 +1615,17 @@ public:
         return graph;
     }
 
-    inline bool runtimeCrossfadePending(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
+    inline bool runtimeCrossfadePendingWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
     {
-        if (runtimeGraph != nullptr)
-            return runtimeGraph->dspCrossfadePending;
-        return consumeCrossfadePreparedSnapshot().pending;
+        return runtimeGraph != nullptr
+            ? runtimeGraph->dspCrossfadePending
+            : false;
     }
-    inline bool runtimeCrossfadeUseDryAsOld(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
+    inline bool runtimeCrossfadeUseDryAsOldWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
     {
-        if (runtimeGraph != nullptr)
-            return runtimeGraph->dspCrossfadeUseDryAsOld;
-        return consumeCrossfadePreparedSnapshot().useDryAsOld;
+        return runtimeGraph != nullptr
+            ? runtimeGraph->dspCrossfadeUseDryAsOld
+            : false;
     }
     inline DSPCore* runtimePublishedCurrentDSP(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
     {
@@ -1653,16 +1663,24 @@ public:
             return runtimeGraph->transitionNextRuntimeUuid;
         return 0;
     }
+    inline double runtimeSampleRateWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
+    {
+        return runtimeGraph != nullptr
+            ? runtimeGraph->sampleRate
+            : 0.0;
+    }
 
     template <typename T>
     static inline void publishAtomicPtr(std::atomic<T*>& dst, T* value) noexcept
     {
+        // release: pointer を consumeAtomicPtr acquire に公開。
         convo::publishAtomic(dst, value, std::memory_order_release);
     }
 
     template <typename T>
     static inline T* consumeAtomicPtr(const std::atomic<T*>& src) noexcept
     {
+        // acquire: publishAtomicPtr release と HB し、最新の pointer を取得。
         return convo::consumeAtomic(src, std::memory_order_acquire);
     }
 
@@ -1670,6 +1688,7 @@ public:
               typename = std::enable_if_t<std::is_convertible_v<U, T*>>>
     static inline T* exchangeAtomicPtr(std::atomic<T*>& dst, U&& value) noexcept
     {
+        // acq_rel: 旧 pointer を acquire で取得し、新 pointer を release で公開。
         return convo::exchangeAtomic(dst, static_cast<T*>(std::forward<U>(value)), std::memory_order_acq_rel);
     }
 
@@ -1678,6 +1697,7 @@ public:
                                      T value,
                                      std::memory_order order = std::memory_order_release) noexcept
     {
+        // order (release/relaxed): callerの consumeAtomic acquire と HB し、値を公開。
         convo::publishAtomic(dst, value, order);
     }
 
@@ -1685,6 +1705,7 @@ public:
     static inline T consumeAtomic(const std::atomic<T>& src,
                                   std::memory_order order = std::memory_order_acquire) noexcept
     {
+        // order (acquire/relaxed): callerの publishAtomic release と HB し、値を取得。
         return convo::consumeAtomic(src, order);
     }
 
@@ -1693,6 +1714,7 @@ public:
                                    T value,
                                    std::memory_order order = std::memory_order_acq_rel) noexcept
     {
+        // order (acq_rel): 旧値を acquire で取得し、新値を release で公開。
         return convo::exchangeAtomic(dst, value, order);
     }
 
@@ -1702,52 +1724,96 @@ public:
                                    U value,
                                    std::memory_order order = std::memory_order_acq_rel) noexcept
     {
+        // order (acq_rel): 旧値を acquire で辻取り、新値を release で公開。世代カウンター advance、etc.に使用。
         return convo::fetchAddAtomic(dst, value, order);
     }
 
-    inline DSPCore* resolveCurrentDSPFromRuntimePublish(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
+    // RT helper は publish world が無い場合に side-channel atomic へフォールバックしない。
+    // RuntimeGraph が確立していない期間は無音フェイルセーフへ落とし、
+    // publish world 非依存の DSP 参照は Audio Thread から段階的に除去する。
+    inline DSPCore* resolveCurrentDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
     {
-        DSPCore* atomicCurrent = loadCurrentDSP();
+        if (runtimeGraph == nullptr)
+            return nullptr;
 
-        if (runtimeGraph != nullptr)
-        {
-            auto* graphCurrent = static_cast<DSPCore*>(runtimeGraph->activeNode);
-            const auto graphCurrentUuid = runtimeGraph->runtimeUuid;
-            if (graphCurrent != nullptr
-                && graphCurrentUuid != 0)
-                return graphCurrent;
-        }
+        auto* graphCurrent = static_cast<DSPCore*>(runtimeGraph->activeNode);
+        const auto graphCurrentUuid = runtimeGraph->runtimeUuid;
+        if (graphCurrent != nullptr
+            && graphCurrentUuid != 0)
+            return graphCurrent;
 
-        return atomicCurrent;
+        return nullptr;
     }
 
-    inline DSPCore* resolveFadingDSPFromRuntimePublish(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
+    inline DSPCore* resolveFadingDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
     {
-        DSPCore* atomicFading = sanitizeRawPtr(loadFadingOutDSP());
+        if (runtimeGraph == nullptr)
+            return nullptr;
 
-        if (runtimeGraph != nullptr)
-        {
-            auto* graphFading = static_cast<DSPCore*>(runtimeGraph->fadingNode);
-            const auto graphFadingUuid = runtimeGraph->fadingRuntimeUuid;
-            if (graphFading != nullptr
-                && graphFadingUuid != 0)
-                return graphFading;
-        }
+        auto* graphFading = static_cast<DSPCore*>(runtimeGraph->fadingNode);
+        const auto graphFadingUuid = runtimeGraph->fadingRuntimeUuid;
+        if (graphFading != nullptr
+            && graphFadingUuid != 0)
+            return graphFading;
 
-        return atomicFading;
+        return nullptr;
     }
 
-    inline void publishRuntimeSnapshots(DSPCore* current,
-                                        DSPCore* next,
-                                        convo::TransitionPolicy policy,
-                                        double fadeTimeSec,
-                                        bool active) noexcept
+    // commit 系の寿命遷移を helper へ集約し、
+    // current/fading の更新規約を 1 箇所で追えるようにする。
+    inline void publishCurrentDSPAndTakeOwnership(DSPCore* newDSP) noexcept
     {
-        // IR-2: EngineRuntime と RuntimeGraph を単一 world として原子的に公開する。
-        const auto nextGraphGeneration = fetchAddAtomic(runtimeGraphRevision,
-                                                        static_cast<std::uint64_t>(1)) + 1;
-        fetchAddAtomic(g_runtimePublishCount,
-                       static_cast<std::uint64_t>(1));
+        publishCurrentDSP(newDSP);
+        activeDSP = newDSP;
+    }
+
+    inline std::uint64_t reserveNextRuntimeGraphGeneration() noexcept
+    {
+        // acq_rel: fetch-add で generation counter を advance し、他スレッドへ新 generation を公開。
+        //          acquire 側で旧 generation 参照により stale request 検出を回避。
+        const auto nextGraphGeneration = convo::fetchAddAtomic(runtimeGraphRevision,
+                                                               static_cast<std::uint64_t>(1),
+                                                               std::memory_order_acq_rel) + 1;
+        // acq_rel: publish count を increment し、runtime world 公開イベント数を追跡。
+        convo::fetchAddAtomic(g_runtimePublishCount,
+                              static_cast<std::uint64_t>(1),
+                              std::memory_order_acq_rel);
+        return nextGraphGeneration;
+    }
+
+    static inline std::uint64_t reserveNextRuntimeVersion() noexcept
+    {
+        static std::atomic<std::uint64_t> s_nextRuntimeVersion { 1 };
+        // acq_rel: runtime version counter を increment し、複数 world lifecycle across に unique ID を割り当て。
+        return convo::fetchAddAtomic(s_nextRuntimeVersion,
+                                     static_cast<std::uint64_t>(1),
+                                     std::memory_order_acq_rel);
+    }
+
+    //=== RuntimePublicationCoordinator NonRT helper API ===//
+    // AudioEngine 内部の publish/retire helper（NonRT 専用）。
+
+    inline void retireRuntimePublishWorldNonRt(RuntimePublishWorld* world) noexcept
+    {
+        if (world == nullptr)
+            return;
+
+        enqueueDeferredDeleteNonRt(world, [](void* p)
+        {
+            auto* ptr = static_cast<RuntimePublishWorld*>(p);
+            ptr->~RuntimePublishWorld();
+            convo::aligned_free(ptr);
+        });
+    }
+
+    [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
+    buildRuntimePublishWorld(DspCoreHandle current,
+                             DspCoreHandle next,
+                             convo::TransitionPolicy policy,
+                             double fadeTimeSec,
+                             bool active) noexcept
+    {
+        const auto nextGraphGeneration = reserveNextRuntimeGraphGeneration();
 
         auto engineState = makeEngineRuntimeState(current, next, policy, fadeTimeSec, active);
         engineState.revision = nextGraphGeneration;
@@ -1755,49 +1821,105 @@ public:
         graphState.generation = nextGraphGeneration;
 
         auto worldOwner = convo::aligned_make_unique<RuntimePublishWorld>();
-        auto* newWorld = worldOwner.release();
-        newWorld->generation = nextGraphGeneration;
-        newWorld->engine = engineState;
-        newWorld->graph = graphState;
-        // Initialize versioning fields according to magna_carta.md Section 2
-        // runtimeVersion: monotonically increasing version number
-        static std::atomic<std::uint64_t> s_nextRuntimeVersion { 1 };
-        newWorld->runtimeVersion = fetchAddAtomic(s_nextRuntimeVersion, static_cast<std::uint64_t>(1));
+        worldOwner->generation = nextGraphGeneration;
+        worldOwner->engine = engineState;
+        worldOwner->graph = graphState;
+        // runtimeVersion: monotonically increasing version number (magna_carta.md Section 2)
+        worldOwner->runtimeVersion = reserveNextRuntimeVersion();
         // transitionId: unique per crossfade event
-        newWorld->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
+        worldOwner->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
 
-        // Ensure all writes to newWorld are visible to Audio Thread before publication
-        std::atomic_thread_fence(std::memory_order_release);
-        auto* oldWorld = exchangeAtomicPtr(runtimePublishWorldState, newWorld);
-        if (oldWorld != nullptr)
-            enqueueDeferredDeleteNonRt(oldWorld, [](void* p)
-            {
-                auto* ptr = static_cast<RuntimePublishWorld*>(p);
-                ptr->~RuntimePublishWorld();
-                convo::aligned_free(ptr);
-            });
+        return worldOwner;
     }
 
-    inline void clearPublishedRuntimeSnapshotsNonRt() noexcept
+    // publishState 用 helper: world を構築して返す。
+    [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
+    buildWorldAndPublishTransition(DspCoreHandle current,
+                                   DspCoreHandle next,
+                                   convo::TransitionPolicy policy,
+                                   double fadeTimeSec,
+                                   bool active) noexcept
     {
-        auto* world = exchangeAtomicPtr(runtimePublishWorldState, static_cast<RuntimePublishWorld*>(nullptr));
-        if (world != nullptr)
-            enqueueDeferredDeleteNonRt(world, [](void* p)
-            {
-                auto* ptr = static_cast<RuntimePublishWorld*>(p);
-                ptr->~RuntimePublishWorld();
-                convo::aligned_free(ptr);
-            });
-
-        publishAtomic(runtimeGraphRevision, static_cast<std::uint64_t>(0));
+        return buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active);
     }
 
-    // A-6 Phase 1: commit 系の寿命遷移を helper へ集約し、
-    // current/fading の更新規約を 1 箇所で追えるようにする。
-    inline void publishCurrentDSPAndTakeOwnership(DSPCore* newDSP) noexcept
+    // adoptAndPublish 用 helper: publishCurrentDSP（DSP 採用）+
+    // buildRuntimePublishWorld を 1 本に集約して world を構築して返す。
+    [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
+    adoptAndBuildPublishWorld(DspCoreHandle newCurrent,
+                              DspCoreHandle transitionNext,
+                              convo::TransitionPolicy policy,
+                              double fadeTimeSec,
+                              bool active) noexcept
     {
-        publishCurrentDSP(newDSP);
-        activeDSP = newDSP;
+        publishCurrentDSPAndTakeOwnership(newCurrent);
+        return buildRuntimePublishWorld(newCurrent, transitionNext, policy, fadeTimeSec, active);
+    }
+
+    //=== End RuntimePublicationCoordinator NonRT helper API ===//
+
+    class RuntimePublicationBridge final
+    {
+    public:
+        explicit RuntimePublicationBridge(AudioEngine& engine) noexcept
+            : engine_(&engine)
+        {
+        }
+
+        [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
+        buildWorldAndPublishTransition(DspCoreHandle current,
+                                       DspCoreHandle next,
+                                       convo::TransitionPolicy policy,
+                                       double fadeTimeSec,
+                                       bool active) noexcept
+        {
+            return engine_->buildWorldAndPublishTransition(current, next, policy, fadeTimeSec, active);
+        }
+
+        [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
+        adoptAndBuildPublishWorld(DspCoreHandle newCurrent,
+                                  DspCoreHandle transitionNext,
+                                  convo::TransitionPolicy policy,
+                                  double fadeTimeSec,
+                                  bool active) noexcept
+        {
+            return engine_->adoptAndBuildPublishWorld(newCurrent, transitionNext, policy, fadeTimeSec, active);
+        }
+
+        void retireRuntimePublishWorldNonRt(RuntimePublishWorld* world) noexcept
+        {
+            engine_->retireRuntimePublishWorldNonRt(world);
+        }
+
+        void resetRuntimeGraphRevisionNonRt() noexcept
+        {
+            convo::publishAtomic(engine_->runtimeGraphRevision,
+                                 static_cast<std::uint64_t>(0),
+                                 std::memory_order_release);
+        }
+
+    private:
+        AudioEngine* engine_ = nullptr;
+    };
+
+    using RuntimePublicationCoordinator = convo::RuntimePublicationCoordinator<RuntimePublishWorld,
+                                                                               DspCoreHandle,
+                                                                               RuntimePublicationBridge>;
+
+    static_assert(!std::is_copy_constructible_v<RuntimePublicationCoordinator>,
+                  "RuntimePublicationCoordinator must remain move-only");
+    static_assert(!std::is_copy_assignable_v<RuntimePublicationCoordinator>,
+                  "RuntimePublicationCoordinator must remain move-only");
+    static_assert(std::is_move_constructible_v<RuntimePublicationCoordinator>,
+                  "RuntimePublicationCoordinator must remain move-constructible");
+
+    using RuntimePublishStore = RuntimePublicationCoordinator::Store;
+
+    RuntimePublishStore runtimeStore;
+
+    [[nodiscard]] inline RuntimePublicationCoordinator publicationCoordinator() noexcept
+    {
+        return RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore);
     }
 
     inline void logUnexpectedRuntimeTransition(const char* origin,
@@ -1823,10 +1945,10 @@ public:
             return (dsp != nullptr) ? dsp->runtimeUuid : 0;
         };
 
-        auto* atomicCurrent = loadCurrentDSP();
-        auto* fading = sanitizeRawPtr(loadFadingOutDSP());
+        DSPCore* current = activeDSP.get();
         const auto runtimePublishView = getRuntimePublishView();
         const auto* runtimeGraph = runtimePublishView.graph;
+        auto* fading = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
         const auto revision = runtimeRevision(runtimeGraph);
         const auto publishedCurrentUuid = runtimeCurrentUuid(runtimeGraph);
         const auto publishedFadingUuid = runtimeFadingUuid(runtimeGraph);
@@ -1835,7 +1957,7 @@ public:
             + juce::String(origin != nullptr ? origin : "unknown")
             + " primaryUuid=" + juce::String(static_cast<juce::int64>(getUuid(primary)))
             + " secondaryUuid=" + juce::String(static_cast<juce::int64>(getUuid(secondary)))
-            + " currentUuid=" + juce::String(static_cast<juce::int64>(getUuid(atomicCurrent)))
+            + " currentUuid=" + juce::String(static_cast<juce::int64>(getUuid(current)))
             + " fadingUuid=" + juce::String(static_cast<juce::int64>(getUuid(fading)))
             + " publishRev=" + juce::String(static_cast<juce::int64>(revision))
             + " publishCurrentUuid=" + juce::String(static_cast<juce::int64>(publishedCurrentUuid))
@@ -1887,10 +2009,12 @@ public:
 
     inline void replaceFadingOutDSPAndRetirePrevious(DSPCore* dsp) noexcept
     {
-        auto* atomicCurrent = loadCurrentDSP();
+        DSPCore* atomicCurrent = activeDSP.get();
+        const auto runtimePublishView = getRuntimePublishView();
+        const auto* runtimeGraph = runtimePublishView.graph;
         validateDistinctRuntimeSlots("replaceFadingOutDSPAndRetirePrevious.before",
                                      atomicCurrent,
-                                    sanitizeRawPtr(loadFadingOutDSP()),
+                                     resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph),
                                      nullptr);
 
         if (auto* prev = sanitizeRawPtr(exchangeFadingOutDSP(dsp)))
@@ -1907,7 +2031,7 @@ public:
 
         validateDistinctRuntimeSlots("replaceFadingOutDSPAndRetirePrevious.after",
                                      atomicCurrent,
-                                    sanitizeRawPtr(loadFadingOutDSP()),
+                                     resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph),
                                      nullptr);
         logRuntimeTransitionEvent("replaceFadingOutDSPAndRetirePrevious", dsp);
     }
@@ -1920,7 +2044,7 @@ public:
         const auto runtimePublishView = getRuntimePublishView();
         const auto* runtimeGraph = runtimePublishView.graph;
         auto* publishedCurrent = runtimePublishedCurrentDSP(runtimeGraph);
-        auto* atomicCurrent = loadCurrentDSP();
+        DSPCore* atomicCurrent = activeDSP.get();
         if (dsp == atomicCurrent || dsp == publishedCurrent)
         {
             logUnexpectedRuntimeTransition("retireRuntimeImmediately", atomicCurrent, dsp);
@@ -1934,8 +2058,7 @@ public:
 
     inline void publishSmoothTransitionState(DSPCore* nextDSP,
                                              DSPCore* previousDSP,
-                                             double fadeTimeSec,
-                                             int latencyDeltaSamples) noexcept
+                                             double fadeTimeSec) noexcept
     {
         if (nextDSP == nullptr || nextDSP == previousDSP)
         {
@@ -1943,19 +2066,20 @@ public:
             jassert(nextDSP != nullptr && nextDSP != previousDSP);
         }
 
-        publishRuntimeTransitionState(nextDSP,
-                                      previousDSP,
-                                      convo::TransitionPolicy::SmoothOnly,
-                                      fadeTimeSec,
-                                      true,
-                                      latencyDeltaSamples);
+        publicationCoordinator().publishState(nextDSP,
+                              previousDSP,
+                              convo::TransitionPolicy::SmoothOnly,
+                              fadeTimeSec,
+                              true);
         logRuntimeTransitionEvent("publishSmoothTransitionState", nextDSP, previousDSP);
     }
 
     inline void startImmediateSmoothTransition(DSPCore* previousDSP,
                                                double fadeTimeSec) noexcept
     {
-        auto* atomicCurrent = loadCurrentDSP();
+        DSPCore* atomicCurrent = activeDSP.get();
+        const auto runtimePublishView = getRuntimePublishView();
+        const auto* runtimeGraph = runtimePublishView.graph;
         if (previousDSP == nullptr || previousDSP == atomicCurrent)
         {
             logUnexpectedRuntimeTransition("startImmediateSmoothTransition", atomicCurrent, previousDSP);
@@ -1963,66 +2087,65 @@ public:
         }
 
         const double rampSampleRate = std::max(1.0,
-            (atomicCurrent != nullptr) ? atomicCurrent->sampleRate : consumeAtomic(currentSampleRate));
+            (atomicCurrent != nullptr) ? atomicCurrent->sampleRate : consumeAtomic(currentSampleRate, std::memory_order_acquire));
         dspCrossfadeGain.reset(rampSampleRate, std::max(0.001, fadeTimeSec));
         dspCrossfadeGain.setCurrentAndTargetValue(0.0);
         // setTargetValue(1.0) は Audio Thread の armCrossfadeIfPending で呼ぶ (C1-2)
 
         replaceFadingOutDSPAndRetirePrevious(previousDSP);
-        publishAtomic(dspCrossfadeUseDryAsOld, false);
-        publishAtomic(firstIrDryCrossfadePending, false);
-        publishAtomic(queuedFadeTimeSec, fadeTimeSec);
-        publishAtomic(dspCrossfadePending, true);
+        // release: dspCrossfade フラグ群を Audio Thread acquire で観測できるよう公開。
+        publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
+        publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
+        publishAtomic(queuedFadeTimeSec, fadeTimeSec, std::memory_order_release);
+        publishAtomic(dspCrossfadePending, true, std::memory_order_release);
         setIRChangeFlag();
-        publishRuntimeSnapshots(atomicCurrent,
-                    previousDSP,
-                    convo::TransitionPolicy::SmoothOnly,
-                    fadeTimeSec,
-                    true);
+        publicationCoordinator().publishState(atomicCurrent,
+                              previousDSP,
+                              convo::TransitionPolicy::SmoothOnly,
+                              fadeTimeSec,
+                              true);
         validateDistinctRuntimeSlots("startImmediateSmoothTransition",
                                      atomicCurrent,
-                                    sanitizeRawPtr(loadFadingOutDSP()),
+                                     resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph),
                                      nullptr);
         logRuntimeTransitionEvent("startImmediateSmoothTransition", atomicCurrent, previousDSP);
     }
 
     inline void publishHardResetForCurrentDSP() noexcept
     {
-        auto* atomicCurrent = loadCurrentDSP();
+        DSPCore* atomicCurrent = activeDSP.get();
+        const auto runtimePublishView = getRuntimePublishView();
+        const auto* runtimeGraph = runtimePublishView.graph;
         if (atomicCurrent == nullptr)
         {
             logUnexpectedRuntimeTransition("publishHardResetForCurrentDSP", nullptr, nullptr);
             jassert(atomicCurrent != nullptr);
         }
 
-        publishAtomic(dspCrossfadePending, false);
-        publishAtomic(dspCrossfadeUseDryAsOld, false);
-        publishAtomic(firstIrDryCrossfadePending, false);
-        publishAtomic(dspCrossfadeStartDelayBlocks, 0);
-        publishAtomic(dspCrossfadeDryHoldSamples, 0);
-        publishRuntimeSnapshots(atomicCurrent,
-                    nullptr,
-                    convo::TransitionPolicy::HardReset,
-                    0.0,
-                    false);
-        publishRuntimeTransitionState(atomicCurrent,
-                                      nullptr,
-                                      convo::TransitionPolicy::HardReset,
-                                      0.0,
-                                      false,
-                                      0);
+        publishAtomic(dspCrossfadePending, false, std::memory_order_release);
+        publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
+        publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
+        // release: dspCrossfade delay/sample パラメータをクリアし、Audio Thread acquire で取得。
+        publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
+        publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
+        publicationCoordinator().publishState(atomicCurrent,
+                              nullptr,
+                              convo::TransitionPolicy::HardReset,
+                              0.0,
+                              false);
         validateDistinctRuntimeSlots("publishHardResetForCurrentDSP",
                                      atomicCurrent,
-                                    sanitizeRawPtr(loadFadingOutDSP()),
+                                     resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph),
                                      nullptr);
         logRuntimeTransitionEvent("publishHardResetForCurrentDSP", atomicCurrent);
     }
 
     inline void armDryAsOldCrossfadeForCurrentDSP(double fadeTimeSec,
-                                                  int latencyDeltaSamples,
                                                   double targetIrScale) noexcept
     {
-        auto* atomicCurrent = loadCurrentDSP();
+        DSPCore* atomicCurrent = activeDSP.get();
+        const auto runtimePublishView = getRuntimePublishView();
+        const auto* runtimeGraph = runtimePublishView.graph;
         if (atomicCurrent == nullptr)
         {
             logUnexpectedRuntimeTransition("armDryAsOldCrossfadeForCurrentDSP", nullptr, nullptr);
@@ -2030,43 +2153,44 @@ public:
         }
 
         const double rampSampleRate = std::max(1.0,
-            (atomicCurrent != nullptr) ? atomicCurrent->sampleRate : consumeAtomic(currentSampleRate));
+            // acquire: prepareToPlay/setSampleRate release と HB し、有効な currentSampleRate を取得。
+            (atomicCurrent != nullptr) ? atomicCurrent->sampleRate : consumeAtomic(currentSampleRate, std::memory_order_acquire));
         dspCrossfadeGain.reset(rampSampleRate, std::max(0.001, fadeTimeSec));
         dspCrossfadeGain.setCurrentAndTargetValue(0.0);
         // setTargetValue(1.0) は Audio Thread の armCrossfadeIfPending で呼ぶ (C1-2)
 
-        publishAtomic(queuedFadeTimeSec, fadeTimeSec);
-        publishRuntimeTransitionState(atomicCurrent,
-                                      nullptr,
-                                      convo::TransitionPolicy::DryAsOld,
-                                      fadeTimeSec,
-                                      true,
-                                      latencyDeltaSamples);
+        // release: queuedFadeTimeSec を Audio Thread acquire で観測できるよう公開。
+        publishAtomic(queuedFadeTimeSec, fadeTimeSec, std::memory_order_release);
+        // release: dryHoldSamples を設定。maxSamplesPerBlock を acquire で取得し有効性確保。
         publishAtomic(dspCrossfadeDryHoldSamples,
-                  std::max(1, consumeAtomic(maxSamplesPerBlock)));
-        dspCrossfadeDryScaleGain.reset(std::max(1.0, consumeAtomic(currentSampleRate)), 0.060);
+                  std::max(1, consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire)));
+        // acquire: currentSampleRate を取得し機率設定の確定幾体計置を後繿ゲイン設定削減価を確実。
+        dspCrossfadeDryScaleGain.reset(std::max(1.0, consumeAtomic(currentSampleRate, std::memory_order_acquire)), 0.060);
         dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
         // setTargetValue(targetIrScale) は Audio Thread の armCrossfadeIfPending で呼ぶ (C1-2)
-        publishAtomic(dspCrossfadeDryScaleTarget, targetIrScale);
-        publishAtomic(dspCrossfadeUseDryAsOld, true);
-        publishAtomic(firstIrDryCrossfadePending, true);
-        publishAtomic(dspCrossfadePending, true);
-        publishAtomic(firstIrDryCrossfadeDone, true);
+        // release: dry scale target を設定。
+        publishAtomic(dspCrossfadeDryScaleTarget, targetIrScale, std::memory_order_release);
+        // release: dry-as-old crossfade フラグ群を Audio Thread acquire で観測。
+        publishAtomic(dspCrossfadeUseDryAsOld, true, std::memory_order_release);
+        publishAtomic(firstIrDryCrossfadePending, true, std::memory_order_release);
+        publishAtomic(dspCrossfadePending, true, std::memory_order_release);
+        publishAtomic(firstIrDryCrossfadeDone, true, std::memory_order_release);
         setIRChangeFlag();
-        publishRuntimeSnapshots(atomicCurrent,
-                    nullptr,
-                    convo::TransitionPolicy::DryAsOld,
-                    fadeTimeSec,
-                    true);
+        publicationCoordinator().publishState(atomicCurrent,
+                              nullptr,
+                              convo::TransitionPolicy::DryAsOld,
+                              fadeTimeSec,
+                              true);
         validateDistinctRuntimeSlots("armDryAsOldCrossfadeForCurrentDSP",
                                      atomicCurrent,
-                                    sanitizeRawPtr(loadFadingOutDSP()),
+                                     resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph),
                                      nullptr);
         logRuntimeTransitionEvent("armDryAsOldCrossfadeForCurrentDSP", atomicCurrent);
     }
 
     inline void queueCoalescedChangeNotification() noexcept
     {
+        // acq_rel: pendingChangeNotification を交換し、true にならばasync update をトリガー。
         if (!exchangeAtomic(pendingChangeNotification, true))
             triggerAsyncUpdate();
     }
@@ -2075,8 +2199,9 @@ public:
                                                                        bool isFadingTarget = false) const noexcept
     {
         EngineParameterSnapshot snapshot {};
-        snapshot.eqBypassed = (snap != nullptr) ? snap->eqBypass : consumeAtomic(eqBypassRequested);
-        snapshot.convBypassed = (snap != nullptr) ? snap->convBypass : consumeAtomic(convBypassRequested);
+        // acquire: setXxx の release を観測しパラメータ最新値を取得。
+        snapshot.eqBypassed = (snap != nullptr) ? snap->eqBypass : consumeAtomic(eqBypassRequested, std::memory_order_acquire);
+        snapshot.convBypassed = (snap != nullptr) ? snap->convBypass : consumeAtomic(convBypassRequested, std::memory_order_acquire);
         snapshot.order = (snap != nullptr) ? snap->processingOrder : consumeAtomic(currentProcessingOrder, std::memory_order_acquire);
         snapshot.softClipEnabled = (snap != nullptr) ? snap->softClipEnabled : consumeAtomic(softClipEnabled, std::memory_order_acquire);
         snapshot.saturationAmount = (snap != nullptr) ? snap->saturationAmount : consumeAtomic(saturationAmount, std::memory_order_acquire);
@@ -2088,9 +2213,9 @@ public:
         snapshot.convHCMode = consumeAtomic(convHCFilterMode, std::memory_order_acquire);
         snapshot.convLCMode = consumeAtomic(convLCFilterMode, std::memory_order_acquire);
         snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
-        snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex);
+        snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
         const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
-        snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation);
+        snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
         snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
         snapshot.adaptiveCaptureEnabled = isNoiseShaperLearning();
         return snapshot;
@@ -2207,14 +2332,13 @@ public:
         return fadingState;
     }
 
-    inline void finalizeCrossfadeMixPath(bool resetDryScaleGain) noexcept
+    inline void finalizeCrossfadeMixPath(DSPCore* current,
+                                         DSPCore* fading,
+                                         bool resetDryScaleGain) noexcept
     {
         if (!dspCrossfadeGain.isSmoothing())
         {
-            validateDistinctRuntimeSlotsRT(
-                sanitizeRawPtr(loadCurrentDSP()),
-                sanitizeRawPtr(loadFadingOutDSP()),
-                nullptr);
+            validateDistinctRuntimeSlotsRT(current, fading, nullptr);
 
             if (resetDryScaleGain)
             {
@@ -2226,14 +2350,12 @@ public:
         }
     }
 
-    inline void cleanupCrossfadeDirectPath(DSPCore* fading) noexcept
+    inline void cleanupCrossfadeDirectPath(DSPCore* current,
+                                           DSPCore* fading) noexcept
     {
         if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
         {
-            validateDistinctRuntimeSlotsRT(
-                sanitizeRawPtr(loadCurrentDSP()),
-                sanitizeRawPtr(loadFadingOutDSP()),
-                nullptr);
+            validateDistinctRuntimeSlotsRT(current, fading, nullptr);
         }
     }
 
@@ -2258,7 +2380,7 @@ public:
         if (dsp == nullptr)
             return 0;
 
-        const double cachedSampleRate = consumeAtomic(currentSampleRate);
+        const double cachedSampleRate = consumeAtomic(currentSampleRate, std::memory_order_acquire);
         const double baseSampleRate = cachedSampleRate > 0.0
             ? cachedSampleRate
             : dsp->sampleRate;
@@ -2337,6 +2459,8 @@ public:
 
     friend class NoiseShaperLearner;
     friend class EQEditProcessor;
+    // RuntimePublicationCoordinator は AudioEngine のネストクラスであるため
+    // C++11 以降は自動的にプライベートメンバへアクセス可能。friend 宣言は不要。
 
 //==============================================================================
 // インラインヘルパー関数（Adaptive 係数アクセス）
@@ -2345,6 +2469,7 @@ public:
 // Audio Thread 用：現在アクティブな係数セットを取得（ロックフリー）
 static inline const CoeffSet* getActiveCoeffSet(const AdaptiveCoeffBankSlot& slot) noexcept
 {
+    // acquire: CoeffSetWriteLockGuard::commit の publishAtomic release と HB し、アクティブインデックスを確定取得。
     const int activeIdx = consumeAtomic(slot.activeIndex, std::memory_order_acquire);
     // Memory barrier ensures coeffSetA/coeffSetB contents are fully visible
     std::atomic_thread_fence(std::memory_order_acquire);
@@ -2357,6 +2482,7 @@ static inline const CoeffSet* getActiveCoeffSet(const AdaptiveCoeffBankSlot& slo
 static inline bool reserveInactiveCoeffSet(AdaptiveCoeffBankSlot& slot) noexcept
 {
     bool expected = false;
+    // acquire: writeLock acquire CAS で直前のロック解放を観測し、CAS成功側で排他制御を確立。
     return convo::compareExchangeAtomic(slot.writeLock,
                                         expected,
                                         true,
@@ -2367,7 +2493,8 @@ static inline bool reserveInactiveCoeffSet(AdaptiveCoeffBankSlot& slot) noexcept
 // 書き込み側用：予約した非アクティブセットへのポインタ取得
 static inline CoeffSet* getReservedInactiveCoeffSet(AdaptiveCoeffBankSlot& slot) noexcept
 {
-    int active = consumeAtomic(slot.activeIndex);
+    // acquire: reserveInactiveCoeffSet CAS success の acquire と HB し、ロック下での確定インデックスを取得。
+    int active = consumeAtomic(slot.activeIndex, std::memory_order_acquire);
     return (active == 0) ? &slot.coeffSetB : &slot.coeffSetA;
 }
 
@@ -2384,17 +2511,22 @@ inline bool enqueueDeferredDeleteNonRt(void* ptr, void (*deleter)(void*)) noexce
     if (ptr == nullptr || deleter == nullptr)
         return true;
 
-    const uint64_t epoch = m_epochCore.publish();
-    if (g_deletionQueue.enqueue(ptr, deleter, epoch))
+    const uint64_t epoch = m_epochDomain.publish();
+    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
         return true;
 
-    g_deletionQueue.reclaim(m_epochCore);
-    if (g_deletionQueue.enqueue(ptr, deleter, epoch))
+    m_epochDomain.reclaimRetired();
+    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
         return true;
 
     std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
     deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry{ ptr, deleter, epoch });
     return true;
+}
+
+inline convo::EpochDomain& epochDomain() noexcept
+{
+    return m_epochDomain;
 }
 
 inline void retireDSP(DSPCore* dsp) noexcept
@@ -2427,12 +2559,13 @@ public:
     {
         // commit() が呼ばれていない場合のみ、ロックを解放
         if (acquired && !committed)
-            publishAtomic(slot.writeLock, false);
+            publishAtomic(slot.writeLock, false, std::memory_order_release);
     }
 
     bool acquire() noexcept
     {
         bool expected = false;
+        // acquire: writeLock acquire CAS で直前のロック解放を観測し、CAS成功側で排他制御を確立。
         acquired = convo::compareExchangeAtomic(slot.writeLock,
                             expected,
                             true,
@@ -2447,12 +2580,16 @@ public:
         if (!acquired || committed)
             return;
 
+        // acquire: acquire() の CAS success と HB し、ロック下での確定インデックスを取得。
         int oldActive = consumeAtomic(slot.activeIndex, std::memory_order_acquire);
-        publishAtomic(slot.activeIndex, 1 - oldActive);
+        // release: 新インデックスをgetActiveCoeffSet acquire に公開し、バッファスイッチを原子化。
+        publishAtomic(slot.activeIndex, 1 - oldActive, std::memory_order_release);
+        // acq_rel: 世代を原子的に increment し、getActiveCoeffSet の generation 更新を release で公開。
         convo::fetchAddAtomic(slot.generation,
                              1u,
                              std::memory_order_acq_rel);
-        publishAtomic(slot.writeLock, false);
+        // release: ロック解放を次の acquire() CAS failure に公開し、排他制御を終了。
+        publishAtomic(slot.writeLock, false, std::memory_order_release);
         committed = true;
     }
 
@@ -2473,9 +2610,9 @@ public:
 
     // スナップショット基盤（Phase 2）
     // ==================================================================
-    convo::EpochCore m_epochCore;
+    convo::EpochDomain m_epochDomain;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
-    convo::RCUReader audioThreadRcuReader;
+    convo::RCUReader audioThreadRcuReader { m_epochDomain };
     // ENGINE_CONTROL: Audio thread での deletion queue overflow 退避スロット。
     std::atomic<DSPCore*> audioThreadRetireOverflowPtr { nullptr };
     std::atomic<uint64_t> audioThreadRetireOverflowEpoch { 0 };
@@ -2521,52 +2658,24 @@ public:
     std::atomic<bool> m_pendingIRChange{ false };
     std::atomic<bool> m_pendingNSChange{ false };
     std::atomic<bool> m_pendingAGCChange{ false };
-    std::atomic<uint64_t> m_audioBlockCounter{ 0 };
-    uint64_t m_audioBlockCounterRtLocal{ 0 }; // RT-local (non-atomic, Audio Thread only)
-
     std::array<convo::EQParameters, 2> latestEqParamsForFallback{};
     std::array<uint64_t, 2> latestEqHashForFallback{ 0, 0 };
     std::atomic<int> latestEqFallbackReadIndex{ 0 };
 
     // Audio Thread -> Message Thread 反映確認用 (RT安全: atomic store/fetch_add のみ)
     std::atomic<uint64_t> debugLastCreatedEqHash{ 0 };
-    std::atomic<uint64_t> debugLastCreateAudioBlockCounter{ 0 };
-    std::atomic<uint64_t> debugLastAppliedEqHash{ 0 };
-    std::atomic<uint32_t> debugAppliedEqHashVersion{ 0 };
     std::atomic<uint64_t> lastEnqueuedSnapshotDebounceKey_{ 0 };
     std::atomic<bool> hasLastEnqueuedSnapshotDebounceKey_{ false };
-    uint32_t debugObservedEqHashVersion{ 0 }; // timerCallback (Message Thread) 専用
     uint64_t debugLastReportedCreatedEqHash{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedAppliedEqHash{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
     int debugLastReportedDspReady{ -1 }; // timerCallback 専用
-    uint64_t debugLastRecoveryAttemptCreatedEqHash{ 0 }; // timerCallback 専用
-    uint64_t debugLastRecoveryAttemptAudioBlockCounter{ 0 }; // timerCallback 専用
-    int debugRecoveryRetryCountForCurrentHash{ 0 }; // timerCallback 専用
-    bool debugRecoverySuppressedForCurrentHash{ false }; // timerCallback 専用
-    std::atomic<int> debugRuntimeTransitionActive{ 0 };
-    std::atomic<int> debugRuntimeTransitionPolicy{ 0 };
-    std::atomic<uint64_t> debugRuntimeTransitionCurrentPtr{ 0 };
-    std::atomic<uint64_t> debugRuntimeTransitionNextPtr{ 0 };
-    std::atomic<double> debugRuntimeTransitionFadeSec{ 0.0 };
-    std::atomic<int> debugRuntimeTransitionLatencyDeltaSamples{ 0 };
     // Non-RT diagnostics: most recently rejected rebuild generation in commitNewDSP.
     std::atomic<uint64_t> lastRejectedGenerationNonRt{ 0 };
-    std::atomic<int> debugLatencyAlignWritePos{ 0 };
-    std::atomic<int> debugLatencyAlignReadOld{ 0 };
-    std::atomic<int> debugLatencyAlignReadNew{ 0 };
-    std::atomic<int> debugLatencyAlignDelayOld{ 0 };
-    std::atomic<int> debugLatencyAlignDelayNew{ 0 };
     int debugLastReportedTransitionActive{ -1 }; // timerCallback 専用
     int debugLastReportedTransitionPolicy{ -1 }; // timerCallback 専用
     uint64_t debugLastReportedTransitionCurrentPtr{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
     uint64_t debugLastReportedTransitionNextPtr{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
     double debugLastReportedTransitionFadeSec{ -1.0 }; // timerCallback 専用
     int debugLastReportedTransitionLatencyDeltaSamples{ std::numeric_limits<int>::max() }; // timerCallback 専用
-    int debugLastReportedLatencyAlignWritePos{ std::numeric_limits<int>::max() }; // timerCallback 専用
-    int debugLastReportedLatencyAlignReadOld{ std::numeric_limits<int>::max() }; // timerCallback 専用
-    int debugLastReportedLatencyAlignReadNew{ std::numeric_limits<int>::max() }; // timerCallback 専用
-    int debugLastReportedLatencyAlignDelayOld{ std::numeric_limits<int>::max() }; // timerCallback 専用
-    int debugLastReportedLatencyAlignDelayNew{ std::numeric_limits<int>::max() }; // timerCallback 専用
     uint64_t debugLastReportedRuntimePublishCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
     uint64_t debugLastReportedRuntimeRetireCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
     uint64_t debugLastReportedRuntimeReclaimCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
@@ -2600,8 +2709,9 @@ public:
 
 inline bool AudioEngine::enqueueLearningCommand(const LearningCommand& cmd) noexcept
 {
+    // acquire: processLearningCommands publishAtomic release と HB し、learningCommandRead/Write 最新値を取得。
     const uint32_t currentWrite = consumeAtomic(learningCommandWrite, std::memory_order_acquire);
-    const uint32_t currentRead = consumeAtomic(learningCommandRead);
+    const uint32_t currentRead = consumeAtomic(learningCommandRead, std::memory_order_acquire);
     const uint32_t next = (currentWrite + 1u) & learningCommandBufferMask;
     if (next == currentRead)
     {
@@ -2610,53 +2720,66 @@ inline bool AudioEngine::enqueueLearningCommand(const LearningCommand& cmd) noex
     }
 
     learningCommandBuffer[currentWrite] = cmd;
+    // release: バッファ重の書込みを dequeueLearningCommand acquire fence に公開。
     std::atomic_thread_fence(std::memory_order_release);
-    publishAtomic(learningCommandWrite, next);
+    // release: キュー埋まりを dequeueLearningCommand consumeAtomic acquire に公開。
+    publishAtomic(learningCommandWrite, next, std::memory_order_release);
     return true;
 }
 
 inline bool AudioEngine::dequeueLearningCommand(LearningCommand& cmd) noexcept
 {
+    // acquire: enqueueLearningCommand publishAtomic release と HB し、learningCommandRead/Write 最新値を取得。
     const uint32_t currentRead = consumeAtomic(learningCommandRead, std::memory_order_acquire);
-    const uint32_t currentWrite = consumeAtomic(learningCommandWrite);
+    const uint32_t currentWrite = consumeAtomic(learningCommandWrite, std::memory_order_acquire);
     if (currentRead == currentWrite)
         return false;
 
     std::atomic_thread_fence(std::memory_order_acquire);
+    // acquire: fence でバッファ重の設定を後続のインストラクション下鉅に収所。
     cmd = learningCommandBuffer[currentRead];
-    publishAtomic(learningCommandRead, (currentRead + 1u) & learningCommandBufferMask);
+    // release: キュー出しを enqueueLearningCommand consumeAtomic acquire に公開。
+    publishAtomic(learningCommandRead, (currentRead + 1u) & learningCommandBufferMask, std::memory_order_release);
     return true;
 }
 
 inline bool AudioEngine::enqueueLearnerDispatch(const LearnerDispatchAction& action) noexcept
 {
+    // acquire: processDeferredLearningActions publishAtomic release と HB し、learnerDispatchRead/Write 最新値を取得。
     const uint32_t currentWrite = consumeAtomic(learnerDispatchWrite, std::memory_order_acquire);
-    const uint32_t currentRead = consumeAtomic(learnerDispatchRead);
+    const uint32_t currentRead = consumeAtomic(learnerDispatchRead, std::memory_order_acquire);
     const uint32_t next = (currentWrite + 1u) & learnerDispatchBufferMask;
     if (next == currentRead)
     {
-        publishAtomic(lastFailedAction, action);
-        publishAtomic(learnerDispatchOverflow, true);
+        // release: overflow フラグを processDeferredLearningActions consume acquire に公開。
+        publishAtomic(lastFailedAction, action, std::memory_order_release);
+        publishAtomic(learnerDispatchOverflow, true, std::memory_order_release);
         return false;
     }
 
     learnerDispatchBuffer[currentWrite] = action;
+    // release: バッファ重の書込みを dequeueLearnerDispatch acquire fence に公開。
     std::atomic_thread_fence(std::memory_order_release);
-    publishAtomic(learnerDispatchWrite, next);
+    // release: キュー埋まりを dequeueLearnerDispatch consumeAtomic acquire に公開。
+    publishAtomic(learnerDispatchWrite, next, std::memory_order_release);
+    // release: overflow クリアを processDeferredLearningActions consume acquire に公開。
     publishAtomic(learnerDispatchOverflow, false, std::memory_order_release);
     return true;
 }
 
 inline bool AudioEngine::dequeueLearnerDispatch(LearnerDispatchAction& action) noexcept
 {
+    // acquire: enqueueLearnerDispatch publishAtomic release と HB し、learnerDispatchRead/Write 最新値を取得。
     const uint32_t currentRead = consumeAtomic(learnerDispatchRead, std::memory_order_acquire);
-    const uint32_t currentWrite = consumeAtomic(learnerDispatchWrite);
+    const uint32_t currentWrite = consumeAtomic(learnerDispatchWrite, std::memory_order_acquire);
     if (currentRead == currentWrite)
         return false;
 
     std::atomic_thread_fence(std::memory_order_acquire);
+    // acquire: fence でバッファ重の設定を後続のインストラクション下鉅に収所。
     action = learnerDispatchBuffer[currentRead];
-    publishAtomic(learnerDispatchRead, (currentRead + 1u) & learnerDispatchBufferMask);
+    // release: キュー出しを enqueueLearnerDispatch consumeAtomic acquire に公開。
+    publishAtomic(learnerDispatchRead, (currentRead + 1u) & learnerDispatchBufferMask, std::memory_order_release);
     return true;
 }
 

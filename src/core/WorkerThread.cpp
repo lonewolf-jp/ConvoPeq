@@ -3,7 +3,6 @@
 //==============================================================================
 
 #include "WorkerThread.h"
-#include "SnapshotCoordinator.h"
 #include "ThreadAffinityManager.h"
 #include "../GenerationManager.h"
 
@@ -20,12 +19,10 @@
 namespace convo {
 
 WorkerThread::WorkerThread(CommandBuffer& cmdBuf,
-                           SnapshotCoordinator& coord,
                            GenerationManager& genMgr,
                    const ThreadAffinityManager* affinityMgr,
                            const WorkerThreadConfig& cfg)
     : commandBuffer(cmdBuf),
-      coordinator(coord),
       generationManager(genMgr),
     affinityManager(affinityMgr),
       config(cfg)
@@ -42,15 +39,15 @@ void WorkerThread::start()
     if (thread.joinable())
         return;
 
-    convo::publishAtomic(running, true, std::memory_order_release);
-    convo::publishAtomic(pendingFlush, false, std::memory_order_release);
+    convo::publishAtomic(running, true, std::memory_order_release);    // release: run() の running acquire と HB しスレッド起動を公知
+    convo::publishAtomic(pendingFlush, false, std::memory_order_release); // release: run() の exchangeAtomic acq_rel と HB し初期状態を公知
     thread = std::thread(&WorkerThread::run, this);
 }
 
 void WorkerThread::stop()
 {
-    convo::publishAtomic(running, false, std::memory_order_release);
-    convo::publishAtomic(pendingFlush, true, std::memory_order_release);
+    convo::publishAtomic(running, false, std::memory_order_release);    // release: run() の running acquire と HB しスレッド停止を通知
+    convo::publishAtomic(pendingFlush, true, std::memory_order_release); // release: run() の exchangeAtomic acq_rel と HB し flush 要求を公知
 
     if (thread.joinable())
         thread.join();
@@ -70,15 +67,15 @@ void WorkerThread::run()
     uint64_t latestCommandGeneration = 0;
     auto lastCommandTime = std::chrono::steady_clock::now();
 
-    while (convo::consumeAtomic(running, std::memory_order_acquire)) {
+    while (convo::consumeAtomic(running, std::memory_order_acquire)) {  // acquire: start()/stop() の publishAtomic release と HB
         ParameterCommand cmd;
         bool poppedAny = false;
-        bool flushRequested = convo::exchangeAtomic(pendingFlush, false, std::memory_order_acq_rel);
+        bool flushRequested = convo::exchangeAtomic(pendingFlush, false, std::memory_order_acq_rel); // acq_rel: acquire で stop() の release と HB; release で次回観測と HB
 
         while (commandBuffer.pop(cmd)) {
             poppedAny = true;
 #ifdef _DEBUG
-            commandsReceived.fetch_add(1, std::memory_order_acq_rel);
+            convo::fetchAddAtomic(commandsReceived, 1, std::memory_order_acq_rel); // acq_rel: getCommandsReceived acquire と HB — カウント単調増加を保証
 #endif
             latestCommandGeneration = cmd.generation; // 最新の世代のみ保持
             lastCommandTime = std::chrono::steady_clock::now();
@@ -96,18 +93,18 @@ void WorkerThread::run()
             if (flushRequested || elapsedMs >= config.debounceDelayMs) {
                 hasPending = false;
 
-                SnapshotCreatorCallback cb = convo::consumeAtomic(callbackFunc, std::memory_order_acquire);
-                void* userData = convo::consumeAtomic(callbackUserData, std::memory_order_acquire);
+                SnapshotCreatorCallback cb = convo::consumeAtomic(callbackFunc, std::memory_order_acquire);     // acquire: setSnapshotCreator の publishAtomic release と HB し最新コールバックを観測
+                void* userData = convo::consumeAtomic(callbackUserData, std::memory_order_acquire);             // acquire: setSnapshotCreator の publishAtomic release と HB
 
                 if (cb && userData && generationManager.isCurrentGeneration(latestCommandGeneration)) {
                     cb(userData, latestCommandGeneration);
 #ifdef _DEBUG
-                    snapshotsCreated.fetch_add(1, std::memory_order_acq_rel);
+                    convo::fetchAddAtomic(snapshotsCreated, 1, std::memory_order_acq_rel); // acq_rel: getSnapshotsCreated acquire と HB
 #endif
                 }
 #ifdef _DEBUG
                 else {
-                    commandsDropped.fetch_add(1, std::memory_order_acq_rel);
+                    convo::fetchAddAtomic(commandsDropped, 1, std::memory_order_acq_rel);  // acq_rel: getCommandsDropped acquire と HB
                 }
 #endif
             }
@@ -119,7 +116,7 @@ void WorkerThread::run()
                 : 0;
 
             for (int i = 0; i < sleepChunks; ++i) {
-                if (!convo::consumeAtomic(running, std::memory_order_acquire))
+                if (!convo::consumeAtomic(running, std::memory_order_acquire))  // acquire: stop() の publishAtomic release と HB — 早期終了判定
                     break;
 
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));

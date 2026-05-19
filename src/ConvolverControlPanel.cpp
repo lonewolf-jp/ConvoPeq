@@ -1000,7 +1000,9 @@ void ConvolverControlPanel::showConvolverSettingsWindowImpl()
 
 void ConvolverControlPanel::startAsyncIRLoadPreview(const juce::File& irFile)
 {
-    const int requestId = irPreviewRequestId.fetch_add(1, std::memory_order_acq_rel) + 1;
+    // acq_rel: 取得側 acquire で直前のリクエストを観測し、
+    //          解放側 release で新 requestId を非同期スレッドの acquire で可視化。
+    const int requestId = convo::fetchAddAtomic(irPreviewRequestId, 1, std::memory_order_acq_rel) + 1;
     const double analysisSampleRate = engine.getProcessingSampleRate() > 0.0
                                     ? engine.getProcessingSampleRate()
                                     : engine.getSampleRate();
@@ -1033,6 +1035,8 @@ void ConvolverControlPanel::finishAsyncIRLoadPreview(const juce::File& irFile,
                                                      const ConvolverProcessor::IRLoadPreview& preview,
                                                      int requestId)
 {
+    // acquire: fetchAddAtomic release-side と HB し、最新の requestId を取得。
+    //          操作後に別リクエストが発行された場合は早期リターンするステールネス防止ガード。
     if (requestId != convo::consumeAtomic(irPreviewRequestId, std::memory_order_acquire))
         return;
 
@@ -1095,6 +1099,7 @@ void ConvolverControlPanel::finishAsyncIRLoadPreview(const juce::File& irFile,
                 if (safeThis == nullptr)
                     return;
 
+                // acquire: fetchAddAtomic release-side と HB し、ダイアログコールバック内で最新の requestId を取得。
                 if (requestId != convo::consumeAtomic(safeThis->irPreviewRequestId, std::memory_order_acquire))
                     return;
 
@@ -1132,7 +1137,7 @@ void ConvolverControlPanel::setIRPreviewInProgress(bool isInProgress)
 //--------------------------------------------------------------
 void ConvolverControlPanel::sliderValueChanged(juce::Slider* slider)
 {
-    // rule2 Phase 1: Convolver parameter changes are routed through
+    // Convolver parameter changes are routed through
     // Message Thread UI staging + snapshot/rebuild path (Audio Thread queue は不使用)。
 
     if (slider == &mixSlider)

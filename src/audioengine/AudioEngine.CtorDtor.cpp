@@ -15,9 +15,14 @@ static void diagLog(const juce::String& message)
 AudioEngine::AudioEngine()
     : eqCacheManager(*this)
     , uiEqEditor(*this)
-    , m_coordinator(m_epochCore)
-    , m_workerThread(m_commandBuffer, m_coordinator, m_generationManager, &affinityManager)
+    , m_coordinator(m_epochDomain)
+    , m_workerThread(m_commandBuffer, m_generationManager, &affinityManager)
 {
+    publicationLogSentinel = new PublicationIntent();
+    convo::publishAtomic(publicationLog.head, publicationLogSentinel, std::memory_order_release); // release: commitPublishedState の acquire と HB
+    convo::publishAtomic(publicationLog.consumedTail, publicationLogSentinel, std::memory_order_release); // release: drainPublicationLog の acquire と HB
+    convo::publishAtomic(publicationLog.retiredHead, publicationLogSentinel, std::memory_order_release); // release: drainPublicationLog の acquire と HB
+
     uiConvolverProcessor.setRcuProvider(*this);
     // 必要な初期化処理があればここに追加
 }
@@ -30,7 +35,7 @@ AudioEngine::~AudioEngine()
     // 3) retire captured runtimes, 4) force epoch advance, 5) deterministic drain/reclaim.
     // 以後の順序を固定して、終了時の reclaim レースを防止する。
     setShutdownPhase(ShutdownPhase::StopAcceptingWork, "~AudioEngine");
-    convo::publishAtomic(lifecycleState, EngineLifecycleState::Releasing, std::memory_order_release);
+    convo::publishAtomic(lifecycleState, EngineLifecycleState::Releasing, std::memory_order_release); // release: isShuttingDown の acquire と HB
     cancelPendingUpdate();
 
     // 終了順序を固定化して、終了時フリーズを防ぐ。
@@ -50,10 +55,10 @@ AudioEngine::~AudioEngine()
         std::lock_guard<std::mutex> lock(rebuildMutex);
         validateDistinctRuntimeSlots("~AudioEngine.beforeClear",
                          activeDSP,
-                         sanitizeRawPtr(loadFadingOutDSP()),
+                         resolveFadingDSPFromRuntimeWorldOnly(getRuntimePublishView().graph),
                          nullptr);
 
-        rebuildGeneration.fetch_add(1, std::memory_order_acq_rel);
+        convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel); // acq_rel: rebuild observer の acquire と HB
 
         // Audio Thread から参照される公開ポインタを明示的に外す。
         publishCurrentDSP(nullptr);
@@ -68,7 +73,7 @@ AudioEngine::~AudioEngine()
 
         validateDistinctRuntimeSlots("~AudioEngine.afterClear",
                          activeDSP,
-                         sanitizeRawPtr(loadFadingOutDSP()),
+                         resolveFadingDSPFromRuntimeWorldOnly(getRuntimePublishView().graph),
                          nullptr);
 
         if (hasPendingTask)
@@ -83,22 +88,7 @@ AudioEngine::~AudioEngine()
         }
     }
 
-    {
-        std::queue<CommitStaging> abandonedCommits;
-        std::lock_guard<std::mutex> lock(deferredCommitMutex);
-        std::swap(abandonedCommits, deferredCommitQueue);
-
-        while (!abandonedCommits.empty())
-        {
-            auto staging = abandonedCommits.front();
-            abandonedCommits.pop();
-
-            if (staging.newDSP)
-                retireDSP(staging.newDSP);
-            if (staging.oldDSP)
-                retireDSP(staging.oldDSP);
-        }
-    }
+    drainPublicationLogForShutdown();
 
     if (activeToRelease) retireDSP(activeToRelease);
     if (fadingToRelease) retireDSP(fadingToRelease);
@@ -115,13 +105,13 @@ AudioEngine::~AudioEngine()
     shutdownWorkerThread();
 
     setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "~AudioEngine");
-    convo::EpochManager::instance().advanceEpoch();
+    m_epochDomain.advanceEpoch();
 
     // Shutdown 時は EBR 回収を試みる。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
-    clearPublishedRuntimeSnapshotsNonRt();
+    publicationCoordinator().clearPublishedRuntimeSnapshotsNonRt();
     drainDeferredRetireQueues(true);
-    g_deletionQueue.reclaimAllIgnoringEpoch();
+    m_epochDomain.drainAll();
 
     // ...既存の解放処理...
     if (latencyBufOldL) { convo::aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }
@@ -130,7 +120,7 @@ AudioEngine::~AudioEngine()
     if (latencyBufNewR) { convo::aligned_free(latencyBufNewR); latencyBufNewR = nullptr; }
     latencyBufSize = 0;
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
-    convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release);
+    convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release); // release: isShuttingDown の acquire と HB
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
 }
 

@@ -31,6 +31,8 @@ class LockFreeRingBuffer {
     static constexpr size_t MASK = Capacity - 1;
 public:
     bool push(const T& item) noexcept {
+        // SPSC HB 契約: acquire で最新の readIndex を観測して満杯判定;
+        //               バッファ書き込み後に writeIndex を release し pop() の acquire と HB 形成。
         size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
         size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         if ((w - r) >= Capacity) return false; // full
@@ -40,6 +42,8 @@ public:
     }
     template<typename Writer>
     bool pushWithWriter(Writer&& writer) noexcept {
+        // SPSC HB 契約: push() と同じ acquire/release 対。
+        //               writer() 完了後に writeIndex release で pop() の acquire と HB 形成。
         size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
         size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         if ((w - r) >= Capacity) return false; // full
@@ -70,15 +74,17 @@ public:
         return true;
     }
     size_t size() const noexcept {
+        // acquire × 2: push/pop の release と HB し、一貫した（ベストエフォート）占有数を算出。
         size_t w = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
         size_t r = convo::consumeAtomic(readIndex, std::memory_order_acquire);
         return w - r;
     }
     // 注意: この関数はスレッドセーフではない。
     // プロデューサーとコンシューマーが完全に停止している状態でのみ呼び出すこと。
+    // 停止後の単独再初期化なので seq_cst は不要で、release で十分。
     void clear() noexcept {
-        convo::publishAtomic(writeIndex, 0, std::memory_order_seq_cst);
-        convo::publishAtomic(readIndex, 0, std::memory_order_seq_cst);
+        convo::publishAtomic(writeIndex, 0, std::memory_order_release);
+        convo::publishAtomic(readIndex, 0, std::memory_order_release);
     }
 };
 

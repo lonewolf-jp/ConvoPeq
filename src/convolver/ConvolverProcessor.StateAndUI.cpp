@@ -2,7 +2,7 @@
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"
 #include "convolver/ConvolverProcessor.Internal.h"
-#include "core/EpochManager.h"
+#include "core/EpochDomain.h"
 #include "AlignedAllocation.h"
 #include "DftiHandle.h"
 
@@ -214,8 +214,8 @@ ConvolverProcessor::BuildSnapshot ConvolverProcessor::captureBuildSnapshot() con
     }
 
     snapshot.irName = irName;
-    snapshot.irLength = convo::consumeAtomic(irLength, std::memory_order_acquire);
-    snapshot.currentIRScale = convo::consumeAtomic(currentIRScale, std::memory_order_acquire);
+    snapshot.irLength = convo::consumeAtomic(irLength, std::memory_order_acquire); // acquire: applyBuildSnapshot の publishAtomic release と HB
+    snapshot.currentIRScale = convo::consumeAtomic(currentIRScale, std::memory_order_acquire); // acquire: applyBuildSnapshot の publishAtomic release と HB
     {
         const juce::ScopedLock sl(irFileLock);
         snapshot.irFile = currentIrFile;
@@ -236,8 +236,8 @@ void ConvolverProcessor::applyBuildSnapshot(const BuildSnapshot& snapshot)
         currentIrFile = snapshot.irFile;
     }
     irName = snapshot.irName;
-    convo::publishAtomic(irLength, snapshot.irLength, std::memory_order_release);
-    convo::publishAtomic(currentIRScale, snapshot.currentIRScale, std::memory_order_release);
+    convo::publishAtomic(irLength, snapshot.irLength, std::memory_order_release); // release: captureBuildSnapshot の acquire と HB
+    convo::publishAtomic(currentIRScale, snapshot.currentIRScale, std::memory_order_release); // release: captureBuildSnapshot の acquire と HB
 
     publishRuntimeProcessSnapshot();
 }
@@ -271,7 +271,7 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
             {
                 const float autoLength = static_cast<float>(v.getProperty ("autoDetectedIRLength"));
                 const float clampedAutoLength = juce::jlimit(IR_LENGTH_MIN_SEC,
-                                                             getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)),
+                                                             getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)), // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
                                                              autoLength);
                 {
                     const juce::ScopedLock lock(pendingOverrideLock);
@@ -353,11 +353,11 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
         currentIrFile = other.currentIrFile;
     }
     irName = other.irName;
-    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release);
-    convo::publishAtomic(currentIRScale, convo::consumeAtomic(other.currentIRScale, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release); // acquire: other.captureBuildSnapshot の publishAtomic release と HB; release: captureBuildSnapshot の acquire と HB
+    convo::publishAtomic(currentIRScale, convo::consumeAtomic(other.currentIRScale, std::memory_order_acquire), std::memory_order_release); // acquire: other.applyBuildSnapshot の publishAtomic release と HB; release: captureBuildSnapshot の acquire と HB
 
     const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
-    auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel);
+    auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で null 公開
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
 }
@@ -370,7 +370,7 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
         ~GlobalGuard() { cp.exitGlobalReader(2); }
     } guard(other);
 
-    auto* otherConv = other.loadActiveEngine(std::memory_order_acquire);
+    auto* otherConv = other.loadActiveEngine(std::memory_order_acquire); // acquire: other.exchangeActiveEngine acq_rel と HB
     if (otherConv == nullptr)
         return;
 
@@ -379,20 +379,20 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
         return;
 
     const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
-    auto* oldConv = exchangeActiveEngine(clonedConv, std::memory_order_acq_rel);
+    auto* oldConv = exchangeActiveEngine(clonedConv, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で新 engine 公開
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
 
-    auto* otherSnap = convo::consumeAtomic(other.cachedLatency, std::memory_order_acquire);
+    auto* otherSnap = convo::consumeAtomic(other.cachedLatency, std::memory_order_acquire); // acquire: other.updateLatencyCache の exchangeAtomic acq_rel と HB
     auto* newSnap = otherSnap ? new LatencySnapshot(*otherSnap) : new LatencySnapshot();
-    auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel);
+    auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel); // acq_rel: acquire で旧 snapshot 取得; release で新 snapshot 公開
     std::unique_ptr<LatencySnapshot> owned{oldSnap}; // RAII delete
 
-    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release);
-    convo::publishAtomic(uiAlgorithmLatencySamples, convo::consumeAtomic(other.uiAlgorithmLatencySamples, std::memory_order_acquire), std::memory_order_release);
-    convo::publishAtomic(uiIrPeakLatencySamples, convo::consumeAtomic(other.uiIrPeakLatencySamples, std::memory_order_acquire), std::memory_order_release);
-    convo::publishAtomic(uiTotalLatencySamples, convo::consumeAtomic(other.uiTotalLatencySamples, std::memory_order_acquire), std::memory_order_release);
-    convo::publishAtomic(uiDirectHeadActive, convo::consumeAtomic(other.uiDirectHeadActive, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release); // acquire: other.applyBuildSnapshot の publishAtomic release と HB; release: captureBuildSnapshot の acquire と HB
+    convo::publishAtomic(uiAlgorithmLatencySamples, convo::consumeAtomic(other.uiAlgorithmLatencySamples, std::memory_order_acquire), std::memory_order_release); // acquire: other.refreshLatency の publishAtomic release と HB; release: UI の acquire と HB
+    convo::publishAtomic(uiIrPeakLatencySamples, convo::consumeAtomic(other.uiIrPeakLatencySamples, std::memory_order_acquire), std::memory_order_release); // acquire: other.refreshLatency の publishAtomic release と HB; release: UI の acquire と HB
+    convo::publishAtomic(uiTotalLatencySamples, convo::consumeAtomic(other.uiTotalLatencySamples, std::memory_order_acquire), std::memory_order_release); // acquire: other.refreshLatency の publishAtomic release と HB; release: UI の acquire と HB
+    convo::publishAtomic(uiDirectHeadActive, convo::consumeAtomic(other.uiDirectHeadActive, std::memory_order_acquire), std::memory_order_release); // acquire: other.refreshLatency の publishAtomic release と HB; release: UI の acquire と HB
     requestHostDisplayUpdate();
 }
 
@@ -631,7 +631,7 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
     } guard(*this);
 
     LatencyBreakdown breakdown;
-    if (auto* conv = loadActiveEngine(std::memory_order_acquire))
+    if (auto* conv = loadActiveEngine(std::memory_order_acquire)) // acquire: exchangeActiveEngine acq_rel と HB
     {
         const bool directHeadActive = conv->storedDirectHeadEnabled;
         breakdown.directHeadActive = directHeadActive;
@@ -644,13 +644,13 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
             breakdown.irPeakLatencySamples == 0 &&
             breakdown.totalLatencySamples == 0)
         {
-            const int snapTotal = convo::consumeAtomic(uiTotalLatencySamples, std::memory_order_acquire);
+            const int snapTotal = convo::consumeAtomic(uiTotalLatencySamples, std::memory_order_acquire); // acquire: refreshLatency の publishAtomic release と HB
             if (snapTotal > 0)
             {
-                breakdown.algorithmLatencySamples = convo::consumeAtomic(uiAlgorithmLatencySamples, std::memory_order_acquire);
-                breakdown.irPeakLatencySamples = convo::consumeAtomic(uiIrPeakLatencySamples, std::memory_order_acquire);
+                breakdown.algorithmLatencySamples = convo::consumeAtomic(uiAlgorithmLatencySamples, std::memory_order_acquire); // acquire: refreshLatency の publishAtomic release と HB
+                breakdown.irPeakLatencySamples = convo::consumeAtomic(uiIrPeakLatencySamples, std::memory_order_acquire); // acquire: refreshLatency の publishAtomic release と HB
                 breakdown.totalLatencySamples = snapTotal;
-                breakdown.directHeadActive = convo::consumeAtomic(uiDirectHeadActive, std::memory_order_acquire);
+                breakdown.directHeadActive = convo::consumeAtomic(uiDirectHeadActive, std::memory_order_acquire); // acquire: refreshLatency の publishAtomic release と HB
             }
         }
     }
@@ -659,13 +659,13 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
         breakdown.irPeakLatencySamples == 0 &&
         breakdown.totalLatencySamples == 0)
     {
-        const int snapTotal = convo::consumeAtomic(uiTotalLatencySamples, std::memory_order_acquire);
+        const int snapTotal = convo::consumeAtomic(uiTotalLatencySamples, std::memory_order_acquire); // acquire: refreshLatency の publishAtomic release と HB
         if (snapTotal > 0)
         {
-            breakdown.algorithmLatencySamples = convo::consumeAtomic(uiAlgorithmLatencySamples, std::memory_order_acquire);
-            breakdown.irPeakLatencySamples = convo::consumeAtomic(uiIrPeakLatencySamples, std::memory_order_acquire);
+            breakdown.algorithmLatencySamples = convo::consumeAtomic(uiAlgorithmLatencySamples, std::memory_order_acquire); // acquire: refreshLatency の publishAtomic release と HB
+            breakdown.irPeakLatencySamples = convo::consumeAtomic(uiIrPeakLatencySamples, std::memory_order_acquire); // acquire: refreshLatency の publishAtomic release と HB
             breakdown.totalLatencySamples = snapTotal;
-            breakdown.directHeadActive = convo::consumeAtomic(uiDirectHeadActive, std::memory_order_acquire);
+            breakdown.directHeadActive = convo::consumeAtomic(uiDirectHeadActive, std::memory_order_acquire); // acquire: refreshLatency の publishAtomic release と HB
         }
     }
 
@@ -674,13 +674,13 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
 
 int ConvolverProcessor::getLatencySamples() const
 {
-    auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire);
+    auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire); // acquire: updateLatencyCache の exchangeAtomic acq_rel と HB
     return snap ? snap->totalLatencySamples : 0;
 }
 
 int ConvolverProcessor::getTotalLatencySamples() const
 {
-    auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire);
+    auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire); // acquire: updateLatencyCache の exchangeAtomic acq_rel と HB
     return snap ? snap->totalLatencySamples : 0;
 }
 
@@ -694,37 +694,37 @@ void ConvolverProcessor::updateLatencyCache() noexcept
     snap.hasParallelDryPath = breakdown.directHeadActive;
 
     auto* newSnap = new LatencySnapshot(snap);
-    auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel);
+    auto* oldSnap = convo::exchangeAtomic(cachedLatency, newSnap, std::memory_order_acq_rel); // acq_rel: acquire で旧 snapshot 取得; release で新 snapshot 公開
     std::unique_ptr<LatencySnapshot> ownedOld{oldSnap}; // RAII delete
 }
 
 void ConvolverProcessor::requestHostDisplayUpdate()
 {
-    auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire);
+    auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire); // acquire: updateLatencyCache の exchangeAtomic acq_rel と HB
     const int total = snap ? snap->totalLatencySamples : 0;
     if (total == lastReportedLatency)
         return;
 
-    if (convo::exchangeAtomic(latencyChangePending, true, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(latencyChangePending, true, std::memory_order_acq_rel)) // acq_rel: acquire で先決値監測; release で pending=true 公開
         return;
 
     const bool queued = juce::MessageManager::callAsync([weakThis = juce::WeakReference<ConvolverProcessor>(this)]
     {
         if (auto* self = weakThis.get())
         {
-            auto snap2 = convo::consumeAtomic(self->cachedLatency, std::memory_order_acquire);
+            auto snap2 = convo::consumeAtomic(self->cachedLatency, std::memory_order_acquire); // acquire: updateLatencyCache の exchangeAtomic acq_rel と HB
             const int latest = snap2 ? snap2->totalLatencySamples : 0;
             if (latest != self->lastReportedLatency)
             {
                 self->lastReportedLatency = latest;
                 self->postCoalescedChangeNotification();
             }
-            convo::publishAtomic(self->latencyChangePending, false, std::memory_order_release);
+            convo::publishAtomic(self->latencyChangePending, false, std::memory_order_release); // release: pending=false 公開（callAsync 成功時）
         }
     });
 
     if (!queued)
-        convo::publishAtomic(latencyChangePending, false, std::memory_order_release);
+        convo::publishAtomic(latencyChangePending, false, std::memory_order_release); // release: pending=false 公開（callAsync 失敗時）
 }
 
 void ConvolverProcessor::setPhaseMode(PhaseMode mode)
@@ -790,8 +790,8 @@ uint64_t ConvolverProcessor::getStructuralHash() const noexcept
         hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
     };
 
-    hashCombine(convo::consumeAtomic(activeCacheKey, std::memory_order_acquire));
-    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(irLength, std::memory_order_acquire)));
+    hashCombine(convo::consumeAtomic(activeCacheKey, std::memory_order_acquire)); // acquire: applyPreparedIRState/applyNewState の publishAtomic release と HB
+    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(irLength, std::memory_order_acquire))); // acquire: applyBuildSnapshot/applyPreparedIRState の publishAtomic release と HB
     hashCombine(static_cast<uint64_t>(getPhaseMode()));
 
     auto floatBits = [](float f) -> uint32_t {
@@ -826,12 +826,12 @@ uint64_t ConvolverProcessor::getStructuralHash() const noexcept
 
 uint64_t ConvolverProcessor::getActiveCacheKey() const noexcept
 {
-    return convo::consumeAtomic(activeCacheKey, std::memory_order_acquire);
+    return convo::consumeAtomic(activeCacheKey, std::memory_order_acquire); // acquire: applyPreparedIRState/applyNewState の publishAtomic release と HB
 }
 
 int ConvolverProcessor::getActiveCacheFFTSize() const noexcept
 {
-    return convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire);
+    return convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire); // acquire: applyPreparedIRState/applyNewState の publishAtomic release と HB
 }
 
 int ConvolverProcessor::getNUCHCMode() const noexcept
@@ -883,7 +883,7 @@ float ConvolverProcessor::getMaximumAllowedIRLengthSec(double sampleRate) const
 {
     const double sr = (sampleRate > 0.0)
                     ? sampleRate
-                    : convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+                    : convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
 
     return getMaximumAllowedIRLengthSecForSampleRate(sr);
 }
@@ -942,22 +942,22 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
     jassert(newState != nullptr);
     if (!newState) return;
 
-    jassert(!convo::exchangeAtomic(writerActive, true, std::memory_order_acquire));
+    jassert(!convo::exchangeAtomic(writerActive, true, std::memory_order_acquire)); // acquire: 先行 交換会技 = falseを測定
 
     if (!convolverStateGeneration.isCurrentGeneration(newState->generationId))
     {
         juce::Logger::writeToLog("ConvolverProcessor::updateConvolverState: stale generation, discarding state (gen="
             + juce::String((int)newState->generationId) + ")");
         std::unique_ptr<convo::ConvolverState> owned{newState}; // RAII delete (stale discard)
-        convo::publishAtomic(writerActive, false, std::memory_order_release);
+        convo::publishAtomic(writerActive, false, std::memory_order_release); // release: writerActive=false 公開
         return;
     }
 
     rcuSwapper.swap(newState);
-    convo::publishAtomic(convolverState, newState, std::memory_order_release);
-    convo::EpochManager::instance().advanceEpoch();
+    convo::publishAtomic(convolverState, newState, std::memory_order_release); // release: convolverState 公開
+    m_epochDomain.advanceEpoch();
 
-    convo::publishAtomic(writerActive, false, std::memory_order_release);
+    convo::publishAtomic(writerActive, false, std::memory_order_release); // release: writerActive=false 公開
 }
 
 void ConvolverProcessor::updateConvolverState(std::unique_ptr<convo::ConvolverState> newState)

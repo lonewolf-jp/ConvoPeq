@@ -65,17 +65,17 @@ struct NoiseShaperLearnerSettings
     NoiseShaperLearnerSettings() = default;
 
     NoiseShaperLearnerSettings(const NoiseShaperLearnerSettings& other)
-        : cmaesRestarts(convo::consumeAtomic(other.cmaesRestarts)),
-          coeffSafetyMargin(convo::consumeAtomic(other.coeffSafetyMargin)),
-          enableStabilityCheck(convo::consumeAtomic(other.enableStabilityCheck))
+                : cmaesRestarts(convo::consumeAtomic(other.cmaesRestarts, std::memory_order_acquire)),
+                    coeffSafetyMargin(convo::consumeAtomic(other.coeffSafetyMargin, std::memory_order_acquire)),
+                    enableStabilityCheck(convo::consumeAtomic(other.enableStabilityCheck, std::memory_order_acquire))
     {
     }
 
     NoiseShaperLearnerSettings& operator=(const NoiseShaperLearnerSettings& other)
     {
-        cmaesRestarts = convo::consumeAtomic(other.cmaesRestarts);
-        coeffSafetyMargin = convo::consumeAtomic(other.coeffSafetyMargin);
-        enableStabilityCheck = convo::consumeAtomic(other.enableStabilityCheck);
+        cmaesRestarts = convo::consumeAtomic(other.cmaesRestarts, std::memory_order_acquire);
+        coeffSafetyMargin = convo::consumeAtomic(other.coeffSafetyMargin, std::memory_order_acquire);
+        enableStabilityCheck = convo::consumeAtomic(other.enableStabilityCheck, std::memory_order_acquire);
         return *this;
     }
 };

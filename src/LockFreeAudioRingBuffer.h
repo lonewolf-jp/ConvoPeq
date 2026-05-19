@@ -23,20 +23,20 @@ public:
         storage.clear();
         capacity = size;
         numChannels = channels;
-        convo::publishAtomic(writeIndex, 0, std::memory_order_release);
-        convo::publishAtomic(readIndex, 0, std::memory_order_release);
+        convo::publishAtomic(writeIndex, 0, std::memory_order_release); // release: push/popMixToMono の acquire と HB (初期化後の初回観測を保証)
+        convo::publishAtomic(readIndex, 0, std::memory_order_release);  // release: push/popMixToMono の acquire と HB (初期化後の初回観測を保証)
     }
 
     void reset() noexcept
     {
-        convo::publishAtomic(readIndex, 0, std::memory_order_release);
-        convo::publishAtomic(writeIndex, 0, std::memory_order_release);
+        convo::publishAtomic(readIndex, 0, std::memory_order_release);  // release: push/popMixToMono の acquire と HB (リセット後の初回観測を保証)
+        convo::publishAtomic(writeIndex, 0, std::memory_order_release); // release: push/popMixToMono の acquire と HB (リセット後の初回観測を保証)
     }
 
     int getAvailableSamples() const noexcept
     {
-        const auto written = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
-        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);
+        const auto written = convo::consumeAtomic(writeIndex, std::memory_order_acquire); // acquire: push の writeIndex release と HB
+        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);     // acquire: popMixToMono/skip の readIndex release と HB
         return static_cast<int>(written - read);
     }
 
@@ -55,8 +55,8 @@ public:
         if (samplesToWriteRequested <= 0 || channelsToWrite <= 0)
             return;
 
-        const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
-        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);
+        const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire); // acquire: 前回 push の writeIndex release と HB (ラップアラウンド安全確認)
+        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);   // acquire: popMixToMono/skip の readIndex release と HB (空きスロット数計算)
         const int free = capacity - static_cast<int>(write - read);
         if (free <= 0)
             return;
@@ -90,7 +90,7 @@ public:
                 destination[i] = static_cast<float>(source[firstChunk + i]);
         }
 
-        convo::publishAtomic(writeIndex, write + static_cast<uint64_t>(samplesToWrite), std::memory_order_release);
+        convo::publishAtomic(writeIndex, write + static_cast<uint64_t>(samplesToWrite), std::memory_order_release); // release: popMixToMono/getAvailableSamples の acquire と HB し書き込み完了を公開
     }
 
     int popMixToMono(float* destination, int requestedSamples) noexcept
@@ -98,8 +98,8 @@ public:
         if (destination == nullptr || requestedSamples <= 0 || capacity <= 0 || numChannels <= 0)
             return 0;
 
-        const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
-        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);
+        const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire); // acquire: push の writeIndex release と HB し書き込み済みサンプル数を観測
+        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);   // acquire: 前回 popMixToMono/skip の readIndex release と HB
         const int available = static_cast<int>(write - read);
         if (available <= 0)
             return 0;
@@ -116,7 +116,7 @@ public:
         if (secondChunk > 0)
             mixChunk(left, right, destination + firstChunk, secondChunk);
 
-        convo::publishAtomic(readIndex, read + static_cast<uint64_t>(samplesToRead), std::memory_order_release);
+        convo::publishAtomic(readIndex, read + static_cast<uint64_t>(samplesToRead), std::memory_order_release); // release: push の readIndex acquire と HB し読み取り済み位置を公開
         return samplesToRead;
     }
 
@@ -125,14 +125,14 @@ public:
         if (requestedSamples <= 0 || capacity <= 0)
             return;
 
-        const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire);
-        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);
+        const auto write = convo::consumeAtomic(writeIndex, std::memory_order_acquire); // acquire: push の writeIndex release と HB し利用可能サンプル数を観測
+        const auto read = convo::consumeAtomic(readIndex, std::memory_order_acquire);   // acquire: 前回 popMixToMono/skip の readIndex release と HB
         const int available = static_cast<int>(write - read);
         if (available <= 0)
             return;
 
         const int samplesToSkip = juce::jmin(requestedSamples, available);
-        convo::publishAtomic(readIndex, read + static_cast<uint64_t>(samplesToSkip), std::memory_order_release);
+        convo::publishAtomic(readIndex, read + static_cast<uint64_t>(samplesToSkip), std::memory_order_release); // release: push の readIndex acquire と HB しスキップ後の読み取り位置を公開
     }
 
 private:

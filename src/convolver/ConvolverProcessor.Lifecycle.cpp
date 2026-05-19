@@ -4,7 +4,7 @@
 #include "CacheManager.h"
 #include "ProgressiveUpgradeThread.h"
 #include "convolver/ConvolverProcessor.Internal.h"
-#include "core/EpochManager.h"
+#include "core/EpochDomain.h"
 #include "core/RCUReader.h"
 #include "core/ThreadAffinityManager.h"
 #include "AlignedAllocation.h"
@@ -16,7 +16,7 @@
 
 const ConvolverProcessor::IRState* ConvolverProcessor::acquireIRState() const noexcept
 {
-    return convo::consumeAtomic(currentIRState, std::memory_order_acquire);
+    return convo::consumeAtomic(currentIRState, std::memory_order_acquire); // acquire: updateIRState/releaseResources の exchangeAtomic acq_rel と HB
 }
 
 void ConvolverProcessor::releaseIRState(const IRState* /*state*/) const noexcept
@@ -36,9 +36,9 @@ void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, d
         newState->generation = provider->publishRcuEpoch();
     else
         newState->generation = 1;
-    std::atomic_thread_fence(std::memory_order_release);
+    std::atomic_thread_fence(std::memory_order_release); // release: 直後の currentIRState 交換公開前に newState 初期化を順序化
 
-    auto* oldState = convo::exchangeAtomic(currentIRState, newState.release(), std::memory_order_acq_rel);
+    auto* oldState = convo::exchangeAtomic(currentIRState, newState.release(), std::memory_order_acq_rel); // acq_rel: acquire で旧ポインタ観測と HB; release で acquireIRState/load 側と HB
     if (oldState != nullptr)
     {
         auto deleter = [](void* p)
@@ -57,7 +57,7 @@ void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, d
 
 void ConvolverProcessor::StereoConvolver::retireStereoConvolver(StereoConvolver* sc, AudioEngine* provider) noexcept
 {
-    if (!sc || convo::exchangeAtomic(sc->retired, true, std::memory_order_acq_rel))
+    if (!sc || convo::exchangeAtomic(sc->retired, true, std::memory_order_acq_rel)) // acq_rel: 二重 retire 防止の可視化を双方向で保証
         return;
 
     if (provider != nullptr)
@@ -105,10 +105,10 @@ ConvolverProcessor::~ConvolverProcessor()
 
     // Destructor runs after AudioEngine destructor body.
     // Do not enqueue to global deferred queue here because final reclaim may have already happened.
-    auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel);
+    auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 active engine 取得; release で null 公開
     StereoConvolver::retireStereoConvolver(oldConv, getRcuProvider());
 
-    auto* oldIrState = convo::exchangeAtomic(currentIRState, nullptr, std::memory_order_acq_rel);
+    auto* oldIrState = convo::exchangeAtomic(currentIRState, nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 IRState 取得; release で null 公開
     if (oldIrState != nullptr)
     {
         oldIrState->~IRState();
@@ -116,15 +116,14 @@ ConvolverProcessor::~ConvolverProcessor()
     }
 
     // Clean up latency snapshot pointer
-    auto* oldSnap = convo::exchangeAtomic(cachedLatency, nullptr, std::memory_order_acq_rel);
+    auto* oldSnap = convo::exchangeAtomic(cachedLatency, nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 snapshot 取得; release で null 公開
     std::unique_ptr<LatencySnapshot> owned{oldSnap}; // RAII delete
 
     if (fftHandle.get() != nullptr) {
         fftHandle.reset();
     }
 
-    // Note: Do NOT call g_deletionQueue.reclaimAllIgnoringEpoch() here.
-    // AudioEngine destructor handles the final reclaim to avoid double-deletion.
+    // Note: final deferred reclaim is owned by AudioEngine/EpochDomain shutdown sequence.
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -133,7 +132,7 @@ ConvolverProcessor::~ConvolverProcessor()
 void ConvolverProcessor::timerCallback()
 {
     static int lastReportedClampCount = 0;
-    const int currentClampCount = convo::consumeAtomic(g_totalLatencyClampCount, std::memory_order_acquire);
+    const int currentClampCount = convo::consumeAtomic(g_totalLatencyClampCount, std::memory_order_acquire); // acquire: Runtime 側 fetchAddAtomic acq_rel と HB
     if (currentClampCount != lastReportedClampCount)
     {
         juce::Logger::writeToLog("ConvolverProcessor: Latency clamp triggered (total: "
@@ -142,10 +141,10 @@ void ConvolverProcessor::timerCallback()
     }
 
     // ★ リングバッファオーバーフローによるリビルド要求を処理 (Audio Thread からは呼ばれない)
-    if (convo::consumeAtomic(rebuildPendingAfterLoad, std::memory_order_acquire))
+    if (convo::consumeAtomic(rebuildPendingAfterLoad, std::memory_order_acquire)) // acquire: LoadPipeline 側 publishAtomic/exchangeAtomic と HB
     {
-        if (!convo::consumeAtomic(isLoading, std::memory_order_acquire) &&
-            !convo::consumeAtomic(isRebuilding, std::memory_order_acquire))
+        if (!convo::consumeAtomic(isLoading, std::memory_order_acquire) &&      // acquire: load/rebuild 側 publishAtomic release と HB
+            !convo::consumeAtomic(isRebuilding, std::memory_order_acquire))      // acquire: load/rebuild 側 publishAtomic release と HB
         {
             juce::File irFile;
             {
@@ -154,7 +153,7 @@ void ConvolverProcessor::timerCallback()
             }
             if (irFile.existsAsFile())
             {
-                convo::publishAtomic(rebuildPendingAfterLoad, false, std::memory_order_release);
+                convo::publishAtomic(rebuildPendingAfterLoad, false, std::memory_order_release); // release: timer/loader 側 acquire と HB
                 loadImpulseResponse(irFile, false);
             }
         }
@@ -178,18 +177,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         ~GlobalGuard() { cp.exitGlobalReader(2); }
     } guard(*this);
 
-    convo::publishAtomic(isPrepared, false, std::memory_order_release);
+    convo::publishAtomic(isPrepared, false, std::memory_order_release); // release: Runtime 側 isPrepared acquire と HB
 
     if (fftHandle.get() != nullptr) {
         fftHandle.reset();
         fftHandleSize = 0;
     }
 
-    const bool rateChanged = (std::abs(convo::consumeAtomic(currentSampleRate) - sampleRate) > 1e-6);
-    const bool blockChanged = (convo::consumeAtomic(currentBufferSize, std::memory_order_acquire) != samplesPerBlock);
+    const bool rateChanged = (std::abs(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire) - sampleRate) > 1e-6); // acquire: 先行 publishAtomic release と HB
+    const bool blockChanged = (convo::consumeAtomic(currentBufferSize, std::memory_order_acquire) != samplesPerBlock);           // acquire: 先行 publishAtomic release と HB
 
-    convo::publishAtomic(currentBufferSize, samplesPerBlock, std::memory_order_release);
-    convo::publishAtomic(currentSampleRate, sampleRate, std::memory_order_release);
+    convo::publishAtomic(currentBufferSize, samplesPerBlock, std::memory_order_release); // release: loader/runtime 側 acquire と HB
+    convo::publishAtomic(currentSampleRate, sampleRate, std::memory_order_release);      // release: loader/runtime 側 acquire と HB
 
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = sampleRate;
@@ -198,7 +197,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     currentSpec = spec;
 
-    auto* conv = loadActiveEngine(std::memory_order_acquire);
+    auto* conv = loadActiveEngine(std::memory_order_acquire); // acquire: exchangeActiveEngine acq_rel/release と HB
     if (conv) {
         const int internalBlockSize = juce::nextPowerOfTwo(samplesPerBlock);
 
@@ -224,7 +223,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                 {
                     newConv = newConvHolder.release();
                     const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
-                    auto* oldConv = exchangeActiveEngine(newConv, std::memory_order_acq_rel);
+                    auto* oldConv = exchangeActiveEngine(newConv, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で新 engine 公開
                     if (oldConv)
                         retireStereoConvolver(oldConv, retireEpoch);
                     updateLatencyCache();
@@ -328,10 +327,10 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         deferredFreeThread = convo::aligned_make_unique<convo::DeferredFreeThread>(rcuSwapper, affinityMgr);
     }
 
-    // [F-01 fix] 世代カウンターをインクリメント (NonRT → RT 通知)
-    firstProcessCallGen.fetch_add(1, std::memory_order_acq_rel);
+    // 世代カウンターをインクリメント (NonRT → RT 通知)
+    convo::fetchAddAtomic(firstProcessCallGen, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: Runtime 側 acquire と HB
 
-    convo::publishAtomic(isPrepared, true, std::memory_order_release);
+    convo::publishAtomic(isPrepared, true, std::memory_order_release); // release: Runtime 側 isPrepared acquire と HB
     updateLatencyCache();
     requestHostDisplayUpdate();
 }
@@ -373,11 +372,11 @@ void ConvolverProcessor::releaseResources()
 
     // Release active convolution engine
     const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
-    auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel);
+    auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で null 公開
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
 
-    auto* oldIrState = convo::exchangeAtomic(currentIRState, nullptr, std::memory_order_acq_rel);
+    auto* oldIrState = convo::exchangeAtomic(currentIRState, nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 IRState 取得; release で null 公開
     if (oldIrState != nullptr)
     {
         oldIrState->~IRState();
@@ -393,7 +392,7 @@ void ConvolverProcessor::releaseResources()
 
     runtime.clear();
 
-    convo::publishAtomic(isPrepared, false, std::memory_order_release);
+    convo::publishAtomic(isPrepared, false, std::memory_order_release); // release: Runtime 側 isPrepared acquire と HB
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -407,7 +406,7 @@ void ConvolverProcessor::reset()
         ~GlobalGuard() { cp.exitGlobalReader(2); }
     } guard(*this);
 
-    auto* conv = loadActiveEngine(std::memory_order_acquire);
+    auto* conv = loadActiveEngine(std::memory_order_acquire); // acquire: exchangeActiveEngine acq_rel/release と HB
     if (conv)
         conv->reset();
 
@@ -417,9 +416,9 @@ void ConvolverProcessor::reset()
 
     dryBuffer.clear();
     smoothingBuffer.clear();
-    mixSmootherResetPendingGen.fetch_add(1, std::memory_order_acq_rel);
-    convo::publishAtomic(pendingLatencyValue, latencySmoother.getTargetValue());
-    latencyResetPendingGen.fetch_add(1, std::memory_order_acq_rel);
+    convo::fetchAddAtomic(mixSmootherResetPendingGen, static_cast<uint64_t>(1), std::memory_order_acq_rel); // acq_rel: Runtime 側 acquire と HB
+    convo::publishAtomic(pendingLatencyValue, latencySmoother.getTargetValue(), std::memory_order_release);  // release: Runtime 側 pendingLatencyValue acquire と HB
+    convo::fetchAddAtomic(latencyResetPendingGen, static_cast<uint64_t>(1), std::memory_order_acq_rel);      // acq_rel: Runtime 側 acquire と HB
 }
 
 #endif // CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE

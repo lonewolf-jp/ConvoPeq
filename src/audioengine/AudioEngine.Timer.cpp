@@ -13,8 +13,11 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::timerCallback()
 {
+    const auto* runtimeWorld = runtimeStore.observe();
+    const auto* runtimeGraph = (runtimeWorld != nullptr) ? &runtimeWorld->graph : nullptr;
+
     {
-        const auto ts = getRuntimeTransitionStateForDebug();
+        const auto ts = runtimeWorld != nullptr ? runtimeWorld->engine.transition : convo::TransitionState{};
         const int active = ts.active ? 1 : 0;
         const int policy = static_cast<int>(ts.policy);
         const uint64_t currentPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ts.current));
@@ -53,43 +56,14 @@ void AudioEngine::timerCallback()
                 + " latencyDelta=" + juce::String(latencyDelta));
         }
 
-        const int alignWritePos = convo::consumeAtomic(debugLatencyAlignWritePos, std::memory_order_acquire);
-        const int alignReadOld = convo::consumeAtomic(debugLatencyAlignReadOld, std::memory_order_acquire);
-        const int alignReadNew = convo::consumeAtomic(debugLatencyAlignReadNew, std::memory_order_acquire);
-        const int alignDelayOld = convo::consumeAtomic(debugLatencyAlignDelayOld, std::memory_order_acquire);
-        const int alignDelayNew = convo::consumeAtomic(debugLatencyAlignDelayNew, std::memory_order_acquire);
-
-        if (active != 0
-            && (alignWritePos != debugLastReportedLatencyAlignWritePos
-                || alignReadOld != debugLastReportedLatencyAlignReadOld
-                || alignReadNew != debugLastReportedLatencyAlignReadNew
-                || alignDelayOld != debugLastReportedLatencyAlignDelayOld
-                || alignDelayNew != debugLastReportedLatencyAlignDelayNew
-                || (alignDelayOld - alignDelayNew) != latencyDelta))
-        {
-            debugLastReportedLatencyAlignWritePos = alignWritePos;
-            debugLastReportedLatencyAlignReadOld = alignReadOld;
-            debugLastReportedLatencyAlignReadNew = alignReadNew;
-            debugLastReportedLatencyAlignDelayOld = alignDelayOld;
-            debugLastReportedLatencyAlignDelayNew = alignDelayNew;
-
-            diagLog("[VERIFY] latency align writePos=" + juce::String(alignWritePos)
-                + " readOld=" + juce::String(alignReadOld)
-                + " readNew=" + juce::String(alignReadNew)
-                + " delayOld=" + juce::String(alignDelayOld)
-                + " delayNew=" + juce::String(alignDelayNew)
-                + " deltaFromDelay=" + juce::String(alignDelayOld - alignDelayNew)
-                + " transitionDelta=" + juce::String(latencyDelta));
-        }
     }
 
     {
-        const auto runtimePublishView = getRuntimePublishView();
-        const uint64_t revision = runtimeRevision(runtimePublishView.graph);
-        const uint64_t currentUuid = runtimeCurrentUuid(runtimePublishView.graph);
-        const uint64_t fadingUuid = runtimeFadingUuid(runtimePublishView.graph);
-        const uint64_t transitionCurrentUuid = runtimeTransitionCurrentUuid(runtimePublishView.graph);
-        const uint64_t transitionNextUuid = runtimeTransitionNextUuid(runtimePublishView.graph);
+        const uint64_t revision = runtimeRevision(runtimeGraph);
+        const uint64_t currentUuid = runtimeCurrentUuid(runtimeGraph);
+        const uint64_t fadingUuid = runtimeFadingUuid(runtimeGraph);
+        const uint64_t transitionCurrentUuid = runtimeTransitionCurrentUuid(runtimeGraph);
+        const uint64_t transitionNextUuid = runtimeTransitionNextUuid(runtimeGraph);
 
         if (revision != debugLastReportedRuntimeSnapshotRevision
             || currentUuid != debugLastReportedRuntimePublishCurrentUuid
@@ -176,17 +150,18 @@ void AudioEngine::timerCallback()
 
     // フェイルセーフ: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
-    const auto runtimePublishView = getRuntimePublishView();
-    auto* currentDspForRuntime = resolveCurrentDSPFromRuntimePublish(runtimePublishView.graph);
-    auto* fadingDspForRuntime = resolveFadingDSPFromRuntimePublish(runtimePublishView.graph);
+    auto* currentDspForRuntime = runtimePublishedCurrentDSP(runtimeGraph);
+    auto* fadingDspForRuntime = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
 
     // T1: 公開済みRuntimeへのNonRTからの可変更新を避けるため、
     // Timerからのdither内部状態更新は行わない。
 
+    const auto observedCurrent = m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
+
     if (!isShutdownInProgress()
         && currentDspForRuntime != nullptr
         && !m_coordinator.isFading()
-        && m_coordinator.getCurrent() == nullptr)
+        && observedCurrent.get() == nullptr)
     {
         diagLog("[VERIFY] snapshot bootstrap: current was null, requesting worker snapshot refresh");
         if (!enqueueSnapshotCommand())
@@ -194,96 +169,20 @@ void AudioEngine::timerCallback()
     }
 
     {
-        const uint32_t observedVersion = convo::consumeAtomic(debugAppliedEqHashVersion, std::memory_order_acquire);
-        debugObservedEqHashVersion = observedVersion;
-
         const uint64_t createdHash = convo::consumeAtomic(debugLastCreatedEqHash, std::memory_order_acquire);
-        const uint64_t appliedHash = convo::consumeAtomic(debugLastAppliedEqHash, std::memory_order_acquire);
-        const uint64_t createBlockCounter = convo::consumeAtomic(debugLastCreateAudioBlockCounter, std::memory_order_acquire);
-        const uint64_t nowBlockCounter = convo::consumeAtomic(m_audioBlockCounter, std::memory_order_acquire);
-        const uint64_t processedBlocksSinceCreate = (nowBlockCounter >= createBlockCounter)
-            ? (nowBlockCounter - createBlockCounter)
-            : 0;
         const int dspReady = (currentDspForRuntime != nullptr) ? 1 : 0;
         const int coordIsFading = m_coordinator.isFading() ? 1 : 0;
         const int updateFadeReturned = coordIsFading;
-        const int fromNull = (m_coordinator.getCurrent() == nullptr) ? 1 : 0;
+        const int fromNull = (observedCurrent.get() == nullptr) ? 1 : 0;
         const int toNull = -1;
 
-        const bool eqMismatch = (createdHash != 0 && createdHash != appliedHash && dspReady == 1);
-        const bool recoveryEligible = eqMismatch
-            && coordIsFading == 0
-            && processedBlocksSinceCreate >= 4;
-        if (recoveryEligible)
-        {
-            if (debugLastRecoveryAttemptCreatedEqHash != createdHash)
-            {
-                debugRecoveryRetryCountForCurrentHash = 0;
-                debugRecoverySuppressedForCurrentHash = false;
-            }
-
-            const bool firstAttemptForThisHash = (debugLastRecoveryAttemptCreatedEqHash != createdHash);
-            const bool retryAfterProgress = (nowBlockCounter > debugLastRecoveryAttemptAudioBlockCounter + 256);
-            if (firstAttemptForThisHash || retryAfterProgress)
-            {
-                debugLastRecoveryAttemptCreatedEqHash = createdHash;
-                debugLastRecoveryAttemptAudioBlockCounter = nowBlockCounter;
-
-                if (debugRecoveryRetryCountForCurrentHash < 3)
-                {
-                    ++debugRecoveryRetryCountForCurrentHash;
-#ifdef _DEBUG
-                    const uint64_t workerRecv = m_workerThread.getCommandsReceived();
-                    const uint64_t workerSnap = m_workerThread.getSnapshotsCreated();
-                    const uint64_t workerDrop = m_workerThread.getCommandsDropped();
-#else
-                    const uint64_t workerRecv = 0;
-                    const uint64_t workerSnap = 0;
-                    const uint64_t workerDrop = 0;
-#endif
-                    diagLog("[VERIFY] snapshot recovery: retry=" + juce::String(debugRecoveryRetryCountForCurrentHash)
-                        + " forcing reapply createdHash=0x"
-                        + juce::String::toHexString(static_cast<juce::int64>(createdHash))
-                        + " appliedHash=0x"
-                        + juce::String::toHexString(static_cast<juce::int64>(appliedHash))
-                        + " blocksSinceCreate=" + juce::String(static_cast<juce::int64>(processedBlocksSinceCreate))
-                        + " workerRecv=" + juce::String(static_cast<juce::int64>(workerRecv))
-                        + " workerSnap=" + juce::String(static_cast<juce::int64>(workerSnap))
-                        + " workerDrop=" + juce::String(static_cast<juce::int64>(workerDrop))
-                        + " genNow=" + juce::String(static_cast<juce::int64>(m_generationManager.getCurrentGeneration())));
-
-                    if (!enqueueSnapshotCommand())
-                        diagLog("[VERIFY] snapshot recovery: enqueueSnapshotCommand failed");
-                }
-                else if (!debugRecoverySuppressedForCurrentHash)
-                {
-                    debugRecoverySuppressedForCurrentHash = true;
-                    diagLog("[VERIFY] snapshot recovery: suppressed for createdHash=0x"
-                        + juce::String::toHexString(static_cast<juce::int64>(createdHash))
-                        + " after 3 retries (waiting for next hash change)");
-                }
-            }
-        }
-        else
-        {
-            debugRecoveryRetryCountForCurrentHash = 0;
-            debugRecoverySuppressedForCurrentHash = false;
-        }
-
         if (createdHash != debugLastReportedCreatedEqHash ||
-            appliedHash != debugLastReportedAppliedEqHash ||
             dspReady != debugLastReportedDspReady)
         {
             debugLastReportedCreatedEqHash = createdHash;
-            debugLastReportedAppliedEqHash = appliedHash;
             debugLastReportedDspReady = dspReady;
             diagLog("[VERIFY] EQ reflection createdHash=0x"
                 + juce::String::toHexString(static_cast<juce::int64>(createdHash))
-                + " appliedHash=0x"
-                + juce::String::toHexString(static_cast<juce::int64>(appliedHash))
-                + " matched=" + juce::String((int)(createdHash == appliedHash))
-                + " ver=" + juce::String((int)observedVersion)
-                + " blocksSinceCreate=" + juce::String(static_cast<juce::int64>(processedBlocksSinceCreate))
                 + " dspReady=" + juce::String(dspReady)
                 + " coordFading=" + juce::String(coordIsFading)
                 + " updRet=" + juce::String(updateFadeReturned)
@@ -360,7 +259,7 @@ void AudioEngine::timerCallback()
     processDeferredLearningActions();
 
     const bool hasFading = (fadingDspForRuntime != nullptr);
-    const bool hasPendingCrossfade = runtimeCrossfadePending(runtimePublishView.graph);
+    const bool hasPendingCrossfade = runtimeCrossfadePendingWorldOnly(runtimeGraph);
 
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();
@@ -370,30 +269,24 @@ void AudioEngine::timerCallback()
     {
         if (auto* done = sanitizeRawPtr(exchangeFadingOutDSP(nullptr)))
             retireDSP(done);
-        publishAtomic(dspCrossfadePending, false);
-        publishAtomic(firstIrDryCrossfadePending, false);
-        publishAtomic(dspCrossfadeUseDryAsOld, false);
-        publishAtomic(dspCrossfadeStartDelayBlocks, 0);
-        publishAtomic(dspCrossfadeDryHoldSamples, 0);
+        publishAtomic(dspCrossfadePending, false, std::memory_order_release);
+        publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
+        publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
+        publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
+        publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
         refreshCrossfadePreparedSnapshotFromAtomics();
 
         // Phase4: フェード完了時の RuntimeGraph を idle 状態へ同期する。
         // これにより AudioThread は atomic fallback ではなく publish world だけで
         // crossfade 状態を正しく観測できる。
-        auto* currentAfterFade = resolveCurrentDSPFromRuntimePublish(runtimePublishView.graph);
+        auto* currentAfterFade = runtimePublishedCurrentDSP(runtimeGraph);
         if (currentAfterFade != nullptr)
         {
-            publishRuntimeSnapshots(currentAfterFade,
-                                    nullptr,
-                                    convo::TransitionPolicy::SmoothOnly,
-                                    0.0,
-                                    false);
-            publishRuntimeTransitionState(currentAfterFade,
-                                          nullptr,
-                                          convo::TransitionPolicy::SmoothOnly,
-                                          0.0,
-                                          false,
-                                          0);
+            publicationCoordinator().publishState(currentAfterFade,
+                                                  nullptr,
+                                                  convo::TransitionPolicy::SmoothOnly,
+                                                  0.0,
+                                                  false);
         }
 
         sendChangeMessage();
@@ -409,11 +302,7 @@ void AudioEngine::timerCallback()
         && !hasFading
         && !hasPendingCrossfade)
     {
-        bool hasDeferredCommits = false;
-        {
-            std::lock_guard<std::mutex> lock(deferredCommitMutex);
-            hasDeferredCommits = !deferredCommitQueue.empty();
-        }
+        const bool hasDeferredCommits = hasPendingPublicationIntents();
 
         if (hasDeferredCommits)
             triggerAsyncUpdate();

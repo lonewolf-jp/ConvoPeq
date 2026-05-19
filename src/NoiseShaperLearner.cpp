@@ -446,8 +446,8 @@ void NoiseShaperLearner::startEvaluationWorkers()
     {
         const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
         evaluationWorkersShouldExit = false;
-        convo::publishAtomic(completedAuxEvaluationWorkers, 0, std::memory_order_seq_cst);
-        convo::publishAtomic(evaluationDispatchSerial, 0, std::memory_order_seq_cst);
+        convo::publishAtomic(completedAuxEvaluationWorkers, 0, std::memory_order_release);
+        convo::publishAtomic(evaluationDispatchSerial, 0, std::memory_order_release);
     }
 
     for (int workerIndex = 1; workerIndex < activeEvaluationWorkerCount; ++workerIndex)
@@ -552,7 +552,7 @@ void NoiseShaperLearner::evaluationWorkerMain(int workerIndex, std::stop_token s
 
             {
                 const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
-                completedAuxEvaluationWorkers.fetch_add(1, std::memory_order_release);
+                convo::fetchAddAtomic(completedAuxEvaluationWorkers, 1, std::memory_order_release);
             }
             evaluationDispatchCv.notify_all();
         }
@@ -612,7 +612,7 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
     while (!convo::consumeAtomic(stopRequested, std::memory_order_acquire)
         && (stopToken == nullptr || !stopToken->stop_requested()))
     {
-        const int populationIndex = nextEvaluationCandidateIndex.fetch_add(1, std::memory_order_acq_rel);
+        const int populationIndex = convo::fetchAddAtomic(nextEvaluationCandidateIndex, 1, std::memory_order_acq_rel);
         if (populationIndex >= CmaEsOptimizer::kPopulation)
             break;
 
@@ -621,7 +621,7 @@ void NoiseShaperLearner::runEvaluationJobsForWorker(int workerIndex,
                                                      numSegments,
                                                      evaluationBitDepth);
         candidateFitnessData()[populationIndex] = score;
-        progress.processCount.fetch_add(1, std::memory_order_release);
+        convo::fetchAddAtomic(progress.processCount, 1, std::memory_order_release);
     }
 }
 
@@ -635,14 +635,14 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
         || stopToken.stop_requested())
         return 0;
 
-    convo::publishAtomic(nextEvaluationCandidateIndex, 0, std::memory_order_seq_cst);
+    convo::publishAtomic(nextEvaluationCandidateIndex, 0, std::memory_order_release);
 
     {
         const std::scoped_lock<std::mutex> lock(evaluationDispatchMutex);
         pendingEvaluationSegmentCount = numSegments;
         pendingEvaluationBitDepth = evaluationBitDepth;
-        convo::publishAtomic(completedAuxEvaluationWorkers, 0, std::memory_order_seq_cst);
-        evaluationDispatchSerial.fetch_add(1, std::memory_order_release);
+        convo::publishAtomic(completedAuxEvaluationWorkers, 0, std::memory_order_release);
+        convo::fetchAddAtomic(evaluationDispatchSerial, static_cast<uint32_t>(1), std::memory_order_release);
     }
 
     if (activeAuxEvaluationWorkerCount > 0)
@@ -660,7 +660,7 @@ int NoiseShaperLearner::evaluatePopulation(int numSegments,
         });
     }
 
-    const int evaluatedCandidates = std::min(convo::consumeAtomic(nextEvaluationCandidateIndex, std::memory_order_seq_cst),
+    const int evaluatedCandidates = std::min(convo::consumeAtomic(nextEvaluationCandidateIndex, std::memory_order_acquire),
                                              CmaEsOptimizer::kPopulation);
 
     bestCandidateIndex = 0;
@@ -741,20 +741,20 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
         // 【追加】Multi-start ロジック
         // 初回起動時（resumeでない場合）かつ設定が有効な場合、複数のシードで試行
         // ============================================================================
-        if (!resume && convo::consumeAtomic(settings.cmaesRestarts) > 1)
+        if (!resume && convo::consumeAtomic(settings.cmaesRestarts, std::memory_order_acquire) > 1)
         {
             convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
 
             // 評価に必要なセグメントが溜まるまで待機
             while (segmentBuffer.getNumAvailableSamples() < kRecentSampleRequest
-                   && !convo::consumeAtomic(stopRequested)
+                   && !convo::consumeAtomic(stopRequested, std::memory_order_acquire)
                    && !stopToken.stop_requested())
             {
                 drainCaptureQueue(activeSession);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
-            if (!convo::consumeAtomic(stopRequested) && !stopToken.stop_requested())
+            if (!convo::consumeAtomic(stopRequested, std::memory_order_acquire) && !stopToken.stop_requested())
             {
                 const int segmentCount = buildTrainingSegments();
                 if (segmentCount >= 2)
@@ -767,7 +767,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
 
                     const int evaluationBitDepth = engine.getDitherBitDepth() > 0 ? engine.getDitherBitDepth() : 24;
 
-                    int restarts = convo::consumeAtomic(settings.cmaesRestarts);
+                    int restarts = convo::consumeAtomic(settings.cmaesRestarts, std::memory_order_acquire);
                     for (int restartIdx = 0; restartIdx < restarts; ++restartIdx)
                     {
                         if (convo::consumeAtomic(stopRequested) || stopToken.stop_requested()) break;
@@ -904,7 +904,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             }
 
             convo::publishAtomic(progress.iteration, generation + 1, std::memory_order_release);
-            progress.totalGenerations.fetch_add(1, std::memory_order_acq_rel);
+            convo::fetchAddAtomic(progress.totalGenerations, 1, std::memory_order_acq_rel);
             ++generation;
 
             // 終了条件の判定
@@ -955,7 +955,8 @@ NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature
     session.sampleRateHz = static_cast<int>(convo::consumeAtomic(engine.currentSampleRate, std::memory_order_acquire) + 0.5);
     session.bitDepth = engine.getDitherBitDepth();
     session.adaptiveCoeffBankIndex = convo::consumeAtomic(engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-    if (auto* dsp = engine.loadCurrentDSP())
+    const auto runtimePublishView = engine.getRuntimePublishView();
+    if (auto* dsp = engine.runtimePublishedCurrentDSP(runtimePublishView.graph))
         session.sessionId = dsp->currentCaptureSessionId;
     return session;
 }
@@ -1137,7 +1138,7 @@ double NoiseShaperLearner::evaluateCandidate(EvaluationContext& context,
     for (int i = 0; i < kOrder; ++i)
     {
         const double k = std::tanh(candidateCoefficients[i]);
-        mappedCoeffs[static_cast<size_t>(i)] = LatticeNoiseShaper::clampCoeff(k, convo::consumeAtomic(settings.coeffSafetyMargin));
+        mappedCoeffs[static_cast<size_t>(i)] = LatticeNoiseShaper::clampCoeff(k, convo::consumeAtomic(settings.coeffSafetyMargin, std::memory_order_acquire));
     }
 
     return evaluateCandidateMapped(context, mappedCoeffs.data(), numSegments, evaluationBitDepth);
@@ -1151,7 +1152,7 @@ double NoiseShaperLearner::evaluateCandidateMapped(EvaluationContext& context,
     juce::ScopedNoDenormals noDenormals;
 
     // 【追加】安定性チェック（有効な場合）
-    if (convo::consumeAtomic(settings.enableStabilityCheck))
+    if (convo::consumeAtomic(settings.enableStabilityCheck, std::memory_order_acquire))
     {
         if (!LatticeNoiseShaper::isStable(mappedCoefficients, kOrder))
             return 1e18; // 不安定な場合は巨大なペナルティを返す
@@ -1249,15 +1250,15 @@ void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, do
 bool NoiseShaperLearner::saveLearnedState(const juce::File& file) const
 {
     juce::XmlElement xml("ConvoPeqLearnedState");
-    xml.setAttribute("bestScore", convo::consumeAtomic(progress.bestScore));
+    xml.setAttribute("bestScore", convo::consumeAtomic(progress.bestScore, std::memory_order_acquire));
     xml.setAttribute("sampleRate", this->sessionSampleRate);
     xml.setAttribute("bitDepth", this->sessionBitDepth);
-    xml.setAttribute("phase", convo::consumeAtomic(progress.currentPhase));
-    xml.setAttribute("elapsedPlaybackSeconds", convo::consumeAtomic(progress.elapsedPlaybackSeconds));
+    xml.setAttribute("phase", convo::consumeAtomic(progress.currentPhase, std::memory_order_acquire));
+    xml.setAttribute("elapsedPlaybackSeconds", convo::consumeAtomic(progress.elapsedPlaybackSeconds, std::memory_order_acquire));
 
     auto* coeffsXml = xml.createNewChildElement("BestCoefficients");
     for (int i = 0; i < kOrder; ++i)
-        coeffsXml->setAttribute("c" + juce::String(i), convo::consumeAtomic(bestCoefficients[i]));
+        coeffsXml->setAttribute("c" + juce::String(i), convo::consumeAtomic(bestCoefficients[i], std::memory_order_acquire));
 
     auto* cmaXml = xml.createNewChildElement("CmaMean");
     State state;
@@ -1281,14 +1282,14 @@ bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
     if (std::abs(savedSampleRate - sessionSampleRate) > 0.1 || savedBitDepth != sessionBitDepth)
         return false;
 
-    convo::publishAtomic(progress.bestScore, xml->getDoubleAttribute("bestScore"));
-    convo::publishAtomic(progress.currentPhase, xml->getIntAttribute("phase"));
-    convo::publishAtomic(progress.elapsedPlaybackSeconds, xml->getDoubleAttribute("elapsedPlaybackSeconds"));
+    convo::publishAtomic(progress.bestScore, xml->getDoubleAttribute("bestScore"), std::memory_order_release);
+    convo::publishAtomic(progress.currentPhase, xml->getIntAttribute("phase"), std::memory_order_release);
+    convo::publishAtomic(progress.elapsedPlaybackSeconds, xml->getDoubleAttribute("elapsedPlaybackSeconds"), std::memory_order_release);
 
     if (auto* coeffsXml = xml->getChildByName("BestCoefficients"))
     {
         for (int i = 0; i < kOrder; ++i)
-            convo::publishAtomic(bestCoefficients[i], coeffsXml->getDoubleAttribute("c" + juce::String(i)));
+            convo::publishAtomic(bestCoefficients[i], coeffsXml->getDoubleAttribute("c" + juce::String(i)), std::memory_order_release);
     }
 
     if (auto* cmaXml = xml->getChildByName("CmaMean"))

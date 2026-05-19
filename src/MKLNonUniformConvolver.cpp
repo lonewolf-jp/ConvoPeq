@@ -897,7 +897,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 #endif
 #if JUCE_DEBUG
     if (!convo::consumeAtomic(l.warmupCompleted, std::memory_order_acquire))
-        g_warmupGuardCount.fetch_add(1, std::memory_order_acq_rel);
+    convo::fetchAddAtomic(g_warmupGuardCount, 1, std::memory_order_acq_rel);
 #endif
 
     // ── 1. [prevInput | currentInput] を fftTimeBuf に配置 (Overlap-Save) ──
@@ -1027,7 +1027,7 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
         m_ringRead = (m_ringRead + overflow) & m_ringMask;
         m_ringAvail = m_ringSize;
         m_ringWrite = (m_ringWrite + overflow) & m_ringMask;
-        m_ringOverflowCount.fetch_add(1, std::memory_order_acq_rel);
+        convo::fetchAddAtomic(m_ringOverflowCount, 1, std::memory_order_acq_rel);
         if (overflowCallback)
             overflowCallback(overflowUserData);
     }
@@ -1089,7 +1089,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
 #if JUCE_DEBUG
         if (!convo::consumeAtomic(l.warmupCompleted, std::memory_order_acquire))
-            g_warmupGuardCount.fetch_add(1, std::memory_order_acq_rel);
+            convo::fetchAddAtomic(g_warmupGuardCount, 1, std::memory_order_acq_rel);
 #endif
 
         int consumed = 0;

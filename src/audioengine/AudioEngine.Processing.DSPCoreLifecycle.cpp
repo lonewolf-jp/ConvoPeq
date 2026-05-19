@@ -24,7 +24,9 @@ namespace
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_PREPARE)
 
 AudioEngine::DSPCore::DSPCore()
-    : runtimeUuid(g_dspRuntimeUuidCounter.fetch_add(1, std::memory_order_acq_rel))
+    : runtimeUuid(convo::fetchAddAtomic(g_dspRuntimeUuidCounter,
+                                        static_cast<std::uint64_t>(1),
+                                        std::memory_order_acq_rel))
     , dcBlockerState(new DCBlockerRuntimeState())
     , convolverState(new ConvolverRuntimeState())
     , eqState(new EQRuntimeState())

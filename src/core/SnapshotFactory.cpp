@@ -151,7 +151,7 @@ GlobalSnapshot* SnapshotFactory::create(const SnapshotParams& params)
     // contentHash は GlobalSnapshot コンストラクタで設定済み
 
 #ifdef _DEBUG
-    g_liveSnapshotCount.fetch_add(1, std::memory_order_acq_rel);
+    convo::fetchAddAtomic(g_liveSnapshotCount, 1, std::memory_order_acq_rel);
 #endif
 
     return snap;
@@ -162,7 +162,7 @@ void SnapshotFactory::destroy(GlobalSnapshot* snap) noexcept
     if (!snap) return;
 
 #ifdef _DEBUG
-    g_liveSnapshotCount.fetch_sub(1, std::memory_order_acq_rel);
+    convo::fetchSubAtomic(g_liveSnapshotCount, 1, std::memory_order_acq_rel);
 #endif
 
     std::unique_ptr<GlobalSnapshot> owned{snap}; // RAII delete

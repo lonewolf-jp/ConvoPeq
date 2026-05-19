@@ -66,7 +66,9 @@ struct ConvolverState
     static uint64_t generateNewStateId() noexcept
     {
         static std::atomic<uint64_t> counter {0};
-        return counter.fetch_add(1, std::memory_order_acq_rel) + 1;
+        return convo::fetchAddAtomic(counter,
+                         static_cast<uint64_t>(1),
+                         std::memory_order_acq_rel) + 1; // acq_rel: acquire で前回の fetchAdd と HB し単調増加を確認; release で stateId 比較スレッドの acquire と HB
     }
 
     // -----------------------------------------------------------------------
@@ -121,17 +123,17 @@ struct ConvolverState
         // 各作業バッファを確保してゼロクリア
         {
             auto* ov = safeMalloc(static_cast<size_t>(fftSize) * sizeof(double));
-            convo::publishAtomic(overlapBuffer, ov, std::memory_order_release);
+            convo::publishAtomic(overlapBuffer, ov, std::memory_order_release); // release: getActiveCoeffSet の acquire と HB (初期化完了後の初回観測を保証)
             memset(ov, 0, static_cast<size_t>(fftSize) * sizeof(double));
         }
         {
             auto* ib = safeMalloc(static_cast<size_t>(fftSize) * sizeof(double));
-            convo::publishAtomic(inputBuffer, ib, std::memory_order_release);
+            convo::publishAtomic(inputBuffer, ib, std::memory_order_release); // release: getActiveCoeffSet の acquire と HB (初期化完了後の初回観測を保証)
             memset(ib, 0, static_cast<size_t>(fftSize) * sizeof(double));
         }
         {
             auto* ob = safeMalloc(static_cast<size_t>(fftSize) * sizeof(double));
-            convo::publishAtomic(outputBuffer, ob, std::memory_order_release);
+            convo::publishAtomic(outputBuffer, ob, std::memory_order_release); // release: getActiveCoeffSet の acquire と HB (初期化完了後の初回観測を保証)
             memset(ob, 0, static_cast<size_t>(fftSize) * sizeof(double));
         }
     }
@@ -148,13 +150,13 @@ struct ConvolverState
     void cleanup() noexcept
     {
         // exchange が false を返した（＝まだ解放していない）場合のみ実行
-        if (convo::exchangeAtomic(cleanedUp, true, std::memory_order_acq_rel)) return;
+        if (convo::exchangeAtomic(cleanedUp, true, std::memory_order_acq_rel)) return; // acq_rel: 冪等チェック — acquire で先行 cleanup の acq_rel と HB; release で 2 回目呼び出し元の acquire と HB
 
         // 各 atomic ポインタを nullptr に swap して古いポインタを解放
         if (auto* p = partitionData) { partitionData = nullptr; convo::aligned_free(p); }
-        if (auto* p = convo::exchangeAtomic(overlapBuffer, nullptr, std::memory_order_acq_rel))  convo::aligned_free(p);
-        if (auto* p = convo::exchangeAtomic(inputBuffer, nullptr, std::memory_order_acq_rel))    convo::aligned_free(p);
-        if (auto* p = convo::exchangeAtomic(outputBuffer, nullptr, std::memory_order_acq_rel))   convo::aligned_free(p);
+        if (auto* p = convo::exchangeAtomic(overlapBuffer, nullptr, std::memory_order_acq_rel))  convo::aligned_free(p); // acq_rel: acquire で publishAtomic release と HB しポインタ取得; release で nullptr 観測者との HB
+        if (auto* p = convo::exchangeAtomic(inputBuffer, nullptr, std::memory_order_acq_rel))    convo::aligned_free(p); // acq_rel: 同上
+        if (auto* p = convo::exchangeAtomic(outputBuffer, nullptr, std::memory_order_acq_rel))   convo::aligned_free(p); // acq_rel: 同上
 
         // fftHandle は ScopedDftiDescriptor のデストラクタで自動解放される
         fftHandle.reset();
@@ -167,9 +169,9 @@ struct ConvolverState
     {
         partitionData = o.partitionData;
         o.partitionData = nullptr;
-        convo::publishAtomic(overlapBuffer, convo::exchangeAtomic(o.overlapBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
-        convo::publishAtomic(inputBuffer, convo::exchangeAtomic(o.inputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
-        convo::publishAtomic(outputBuffer, convo::exchangeAtomic(o.outputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
+            convo::publishAtomic(overlapBuffer, convo::exchangeAtomic(o.overlapBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release); // exchange acq_rel: ムーブ元の publishAtomic release と HB; publish release: 新 owner の getActiveCoeffSet acquire と HB
+            convo::publishAtomic(inputBuffer, convo::exchangeAtomic(o.inputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);     // 同上
+            convo::publishAtomic(outputBuffer, convo::exchangeAtomic(o.outputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);   // 同上
 
         partitionSizeBytes = o.partitionSizeBytes;
         numPartitions      = o.numPartitions;
@@ -180,8 +182,8 @@ struct ConvolverState
         fftHandle          = std::move(o.fftHandle);
 
         // ムーブ元は cleanedUp = true にして二重解放を防ぐ
-        convo::publishAtomic(o.cleanedUp, true, std::memory_order_release);
-        convo::publishAtomic(cleanedUp, false, std::memory_order_release);
+            convo::publishAtomic(o.cleanedUp, true, std::memory_order_release);  // release: ムーブ元の cleanup() の exchangeAtomic acquire と HB し二重解放防止
+            convo::publishAtomic(cleanedUp, false, std::memory_order_release);   // release: 新 owner の cleanup() の exchangeAtomic acquire と HB (未解放を表明)
     }
 
     // -----------------------------------------------------------------------
@@ -195,9 +197,9 @@ struct ConvolverState
 
             partitionData = o.partitionData;
             o.partitionData = nullptr;
-            convo::publishAtomic(overlapBuffer, convo::exchangeAtomic(o.overlapBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
-            convo::publishAtomic(inputBuffer, convo::exchangeAtomic(o.inputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
-            convo::publishAtomic(outputBuffer, convo::exchangeAtomic(o.outputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);
+            convo::publishAtomic(overlapBuffer, convo::exchangeAtomic(o.overlapBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release); // exchange acq_rel: ムーブ元の publishAtomic release と HB; publish release: 新 owner の getActiveCoeffSet acquire と HB
+            convo::publishAtomic(inputBuffer, convo::exchangeAtomic(o.inputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);     // 同上
+            convo::publishAtomic(outputBuffer, convo::exchangeAtomic(o.outputBuffer, nullptr, std::memory_order_acq_rel), std::memory_order_release);   // 同上
 
             partitionSizeBytes = o.partitionSizeBytes;
             numPartitions      = o.numPartitions;
@@ -207,8 +209,8 @@ struct ConvolverState
             stateId            = o.stateId;
             fftHandle          = std::move(o.fftHandle);
 
-            convo::publishAtomic(o.cleanedUp, true, std::memory_order_release);
-            convo::publishAtomic(cleanedUp, false, std::memory_order_release);
+            convo::publishAtomic(o.cleanedUp, true, std::memory_order_release);  // release: ムーブ元の cleanup() の exchangeAtomic acquire と HB し二重解放防止
+            convo::publishAtomic(cleanedUp, false, std::memory_order_release);   // release: 新 owner の cleanup() の exchangeAtomic acquire と HB (未解放を表明)
         }
         return *this;
     }

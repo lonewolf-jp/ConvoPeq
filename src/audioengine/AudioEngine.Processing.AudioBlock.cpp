@@ -15,13 +15,10 @@ namespace
 
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    constexpr int kAudioEpochReaderIndex = 0;
     const juce::ScopedNoDenormals noDenormals;
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
-    const convo::EpochCoreReaderGuard epochReaderGuard(m_epochCore, kAudioEpochReaderIndex);
+    const convo::EpochDomainReaderGuard epochReaderGuard(m_epochDomain, kAudioEpochReaderIndex);
     ASSERT_AUDIO_THREAD();
-    ++m_audioBlockCounterRtLocal; // RT-local counter (non-atomic, RT thread only)
-
     // 入力検証 (Input Validation)
     if (bufferToFill.buffer == nullptr)
         return;
@@ -54,7 +51,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     const auto runtimePublishView = getRuntimePublishView();
     const auto* runtimeGraph = runtimePublishView.graph;
-    DSPCore* dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+    DSPCore* dsp = resolveCurrentDSPFromRuntimeWorldOnly(runtimeGraph);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(bufferToFill);
@@ -75,8 +72,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // 安全対策: サンプルレート不整合チェック
         // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
         // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
-        const double engineSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
-        if (absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
+        const double engineSampleRate = runtimeSampleRateWorldOnly(runtimeGraph);
+        if (engineSampleRate <= 0.0
+            || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
         {
             applySafeSilentFallback(bufferToFill);
             return;
@@ -87,7 +85,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
         // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
         // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
-        const convo::GlobalSnapshot* snap = m_coordinator.getCurrent();
+        const auto observedSnapshot = m_coordinator.observeCurrentRuntime(kAudioEpochReaderIndex);
+        const convo::GlobalSnapshot* snap = observedSnapshot.get();
         const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap);
 
         DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
@@ -132,9 +131,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             return;
         }
 
-        DSPCore* fading = resolveFadingDSPFromRuntimePublish(runtimeGraph);
-        bool useDryAsOld = runtimeCrossfadeUseDryAsOld(runtimeGraph);
-        const bool hasPendingCrossfade = runtimeCrossfadePending(runtimeGraph);
+        DSPCore* fading = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
+        bool useDryAsOld = runtimeCrossfadeUseDryAsOldWorldOnly(runtimeGraph);
+        const bool hasPendingCrossfade = runtimeCrossfadePendingWorldOnly(runtimeGraph);
         if (processCrossfadeDelayGateIfPending(fading,
                                                useDryAsOld,
                                                hasPendingCrossfade,
@@ -142,12 +141,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         {
             auto fadingState = makeCrossfadeAuxState(procState);
 
-            std::atomic<float> fadingInputMeter { 0.0f };
-            std::atomic<float> fadingOutputMeter { 0.0f };
             fading->process(bufferToFill,
                             analyzerFifo,
-                            inputLevelLinear,
-                            outputLevelLinear,
+                            nullptr,
+                            nullptr,
                             fadingState);
         }))
         {
@@ -169,8 +166,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
             auto fadingState = makeCrossfadeAuxState(procState);
 
-            std::atomic<float> fadingInputMeter { 0.0f };
-            std::atomic<float> fadingOutputMeter { 0.0f };
             if (useDryAsOld)
             {
                 const int outChannels = std::min(2, buffer->getNumChannels());
@@ -183,12 +178,12 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             {
                 // EBR: lifetime managed by RCUReader
                 fading->processToBuffer(bufferToFill, dspCrossfadeFloatBuffer, analyzerFifo,
-                                       fadingInputMeter, fadingOutputMeter, fadingState);
+                                       nullptr, nullptr, fadingState);
             }
             dsp->process(bufferToFill,
                          analyzerFifo,
-                         inputLevelLinear,
-                         outputLevelLinear,
+                         &inputLevelLinear,
+                         &outputLevelLinear,
                          procState);
 
             const int outChannels = std::min(2, buffer->getNumChannels());
@@ -227,17 +222,17 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                 // EBR: fading lifetime managed by RCUReaderGuard
             }
 
-            finalizeCrossfadeMixPath(true);
+            finalizeCrossfadeMixPath(dsp, fading, true);
         }
         else
         {
             // 通常パス（クロスフェードなし）：RCU で dsp の生存が保証されるため addRef/release 不要
             dsp->process(bufferToFill,
                          analyzerFifo,
-                         inputLevelLinear,
-                         outputLevelLinear,
+                         &inputLevelLinear,
+                         &outputLevelLinear,
                          procState);
-            cleanupCrossfadeDirectPath(fading);
+            cleanupCrossfadeDirectPath(dsp, fading);
         }
     }
 

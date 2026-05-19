@@ -7,7 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <regex>
-#include "core/EpochManager.h"
+#include "core/EpochDomain.h"
 #include "core/RCUReader.h"
 
 #include "audioengine/AtomicAccess.h"
@@ -19,17 +19,17 @@
 static void deleteEQStatePtr(void* p) { delete static_cast<EQProcessor::EQState*>(p); }
 static void deleteBandNodePtr_core(void* p) { delete static_cast<EQProcessor::BandNode*>(p); }
 
-static void retireEQState(EQProcessor::EQState* state) {
+static void retireEQState(convo::EpochDomain& epochDomain, EQProcessor::EQState* state) {
     if (state) {
-        const uint64_t epoch = convo::EpochManager::instance().currentEpoch();
-        g_deletionQueue.enqueue(state, deleteEQStatePtr, epoch);
+        const uint64_t epoch = epochDomain.currentEpoch();
+        epochDomain.enqueueRetire(state, deleteEQStatePtr, epoch);
     }
 }
 
-static void retireBandNode(EQProcessor::BandNode* node) {
+static void retireBandNode(convo::EpochDomain& epochDomain, EQProcessor::BandNode* node) {
     if (node) {
-        const uint64_t epoch = convo::EpochManager::instance().currentEpoch();
-        g_deletionQueue.enqueue(node, deleteBandNodePtr_core, epoch);
+        const uint64_t epoch = epochDomain.currentEpoch();
+        epochDomain.enqueueRetire(node, deleteBandNodePtr_core, epoch);
     }
 }
 
@@ -48,13 +48,13 @@ EQProcessor::EQProcessor()
 EQProcessor::~EQProcessor()
 {
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: enter");
-    if (auto* oldState = exchangeCurrentState(nullptr, std::memory_order_acq_rel))
-        retireEQState(oldState);
+    if (auto* oldState = exchangeCurrentState(nullptr, std::memory_order_acq_rel)) // acq_rel: acquire で先行 exchangeCurrentState/publishCurrentState と HB; release で後続観測者と HB
+        retireEQState(m_epochDomain, oldState);
 
     for (auto& nodeBits : bandNodeBits) {
-        const auto bits = convo::exchangeAtomic(nodeBits, static_cast<std::uintptr_t>(0), std::memory_order_release);
+        const auto bits = convo::exchangeAtomic(nodeBits, static_cast<std::uintptr_t>(0), std::memory_order_release); // release: デストラクタ後の観測者に対して null 書き込みを公知。acquire 不要 — デストラクタは排他的所有権を持つ
         if (auto* n = fromBandNodeBits(bits))
-            retireBandNode(n);
+            retireBandNode(m_epochDomain, n);
     }
 
     for (auto& node : activeBandNodes) {
@@ -128,24 +128,24 @@ void EQProcessor::resetToDefaults()
     newState->bandTypes[19] = EQBandType::HighShelf;
 
     storeTotalGainDb(0.0f);
-    convo::publishAtomic(agcEnabled, false, std::memory_order_release);
-    convo::publishAtomic(nonlinearSaturation, 0.2f, std::memory_order_release);
-    convo::publishAtomic(requestedStructure, FilterStructure::Serial, std::memory_order_release);
-    convo::publishAtomic(activeStructure, FilterStructure::Serial, std::memory_order_release);
+    convo::publishAtomic(agcEnabled, false, std::memory_order_release);             // release: getAGCEnabled acquire と HB
+    convo::publishAtomic(nonlinearSaturation, 0.2f, std::memory_order_release);     // release: getNonlinearSaturation acquire と HB
+    convo::publishAtomic(requestedStructure, FilterStructure::Serial, std::memory_order_release); // release: getFilterStructure acquire と HB
+    convo::publishAtomic(activeStructure, FilterStructure::Serial, std::memory_order_release);    // release: prepareToPlay の acquire と HB
     newState->agcEnabled = false;
     newState->nonlinearSaturation = 0.2f;
     newState->filterStructure = 0;
 
-    auto oldState = exchangeCurrentState(newState, std::memory_order_acq_rel);
+    auto oldState = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadCurrentState acquire と HB
 
     if (oldState) {
-        retireEQState(oldState);
+        retireEQState(m_epochDomain, oldState);
     }
-    convo::EpochManager::instance().advanceEpoch();
+    m_epochDomain.advanceEpoch();
 
-    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release);
-    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);
-    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);
+    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release); // release: Processing.cpp の acquire と HB し AGC 初期化を公知
+    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: 同上
+    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: 同上
 
     // 全バンドの係数を更新
     for (int i = 0; i < NUM_BANDS; ++i)
@@ -166,25 +166,25 @@ void EQProcessor::reset()
     // フィルタ状態をリセット (memsetで高速化)
     std::memset(filterState.data(), 0, sizeof(filterState));
 
-    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release);
-    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);
-    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);
+    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release); // release: Processing.cpp の agcCurrentGain acquire と HB し初期値を公知
+    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: Processing.cpp の acquire と HB
+    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: Processing.cpp の acquire と HB
 
-    auto state = loadCurrentState(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state)
     {
         smoothTotalGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain<double>(static_cast<double>(state->totalGainDb)));
         storeTotalGainDb(state->totalGainDb);
     }
 
-    convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);
-    convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);
+    convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release); // release: Processing.cpp の bandResetPacked acquire と HB しリセット完了を公知
+    convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の agcResetSerial acquire と HB
     rtDeferredBandResetMask = 0;
     rtSeenBandResetSerial = 0;
     rtSeenAgcResetSerial = 0;
 
-    const bool requestedBypass = convo::consumeAtomic(bypassRequested, std::memory_order_acquire);
-    convo::publishAtomic(bypassed, requestedBypass, std::memory_order_release);
+    const bool requestedBypass = convo::consumeAtomic(bypassRequested, std::memory_order_acquire); // acquire: setBypass の publishAtomic release と HB
+    convo::publishAtomic(bypassed, requestedBypass, std::memory_order_release);                    // release: Processing.cpp の bypassed acquire と HB
     bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
 }
 
@@ -395,15 +395,15 @@ bool EQProcessor::loadFromTextFile(const juce::File& file)
 //============================================================================
 juce::ValueTree EQProcessor::getState() const
 {
-    auto state = loadCurrentState(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire); // acquire: publishCurrentState/exchangeCurrentState の release/acq_rel と HB
     if (state == nullptr) return juce::ValueTree("EQ");
 
     juce::ValueTree v ("EQ");
     v.setProperty ("totalGain", state->totalGainDb, nullptr);
-    v.setProperty("agcEnabled", convo::consumeAtomic(agcEnabled, std::memory_order_acquire), nullptr);
-    v.setProperty("nonlinearSaturation", convo::consumeAtomic(nonlinearSaturation, std::memory_order_acquire), nullptr);
+    v.setProperty("agcEnabled", convo::consumeAtomic(agcEnabled, std::memory_order_acquire), nullptr);                    // acquire: setAGCEnabled の publishAtomic release と HB
+    v.setProperty("nonlinearSaturation", convo::consumeAtomic(nonlinearSaturation, std::memory_order_acquire), nullptr);  // acquire: setNonlinearSaturation の publishAtomic release と HB
     v.setProperty("filterStructure",
-                  static_cast<int>(convo::consumeAtomic(requestedStructure, std::memory_order_acquire)),
+                  static_cast<int>(convo::consumeAtomic(requestedStructure, std::memory_order_acquire)), // acquire: setFilterStructure の publishAtomic release と HB
                   nullptr);
 
     for (int i = 0; i < NUM_BANDS; ++i)
@@ -453,7 +453,9 @@ void EQProcessor::setState (const juce::ValueTree& v)
     // 状態ロード時は全リセット
     requestAllBandReset();
     requestAgcReset();
-    convo::publishAtomic(activeStructure, convo::consumeAtomic(requestedStructure, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(activeStructure,
+                         convo::consumeAtomic(requestedStructure, std::memory_order_acquire), // acquire: setFilterStructure の release と HB
+                         std::memory_order_release); // release: prepareToPlay/Processing の activeStructure acquire と HB
 
     sendChangeMessage();
 }
@@ -464,31 +466,31 @@ void EQProcessor::setState (const juce::ValueTree& v)
 void EQProcessor::syncStateFrom(const EQProcessor& other)
 {
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
-    auto otherState = other.loadCurrentState(std::memory_order_acquire);
+    auto otherState = other.loadCurrentState(std::memory_order_acquire); // acquire: other の exchangeCurrentState/publishCurrentState と HB
     if (otherState == nullptr)
         return;
 
     auto* clonedState = new EQState(*otherState);
-    auto oldState = exchangeCurrentState(clonedState, std::memory_order_acq_rel);
+    auto oldState = exchangeCurrentState(clonedState, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadCurrentState acquire と HB
 
     if (oldState)
     {
-        retireEQState(oldState);
+        retireEQState(m_epochDomain, oldState);
     }
-    convo::EpochManager::instance().advanceEpoch();
+    m_epochDomain.advanceEpoch();
 
     for (int i = 0; i < NUM_BANDS; ++i)
         updateBandNode(i);
 
-    const double syncedAgcCurrentGain = convo::consumeAtomic(other.agcCurrentGain, std::memory_order_acquire);
-    const double syncedAgcEnvInput = convo::consumeAtomic(other.agcEnvInput, std::memory_order_acquire);
-    const double syncedAgcEnvOutput = convo::consumeAtomic(other.agcEnvOutput, std::memory_order_acquire);
+    const double syncedAgcCurrentGain = convo::consumeAtomic(other.agcCurrentGain, std::memory_order_acquire); // acquire: other の publishAtomic release と HB
+    const double syncedAgcEnvInput = convo::consumeAtomic(other.agcEnvInput, std::memory_order_acquire);       // acquire: 同上
+    const double syncedAgcEnvOutput = convo::consumeAtomic(other.agcEnvOutput, std::memory_order_acquire);     // acquire: 同上
     const FilterStructure syncedStructure = static_cast<FilterStructure>(clonedState->filterStructure);
-    const bool syncedBypassed = convo::consumeAtomic(other.bypassed, std::memory_order_acquire);
-    const std::uint64_t syncedBandResetPacked = convo::consumeAtomic(other.bandResetPacked, std::memory_order_acquire);
+    const bool syncedBypassed = convo::consumeAtomic(other.bypassed, std::memory_order_acquire);                      // acquire: other の bypassed publishAtomic release と HB
+    const std::uint64_t syncedBandResetPacked = convo::consumeAtomic(other.bandResetPacked, std::memory_order_acquire); // acquire: other の requestBandReset/publishAtomic acq_rel/release と HB
     const std::uint32_t syncedBandResetMask = bandResetMaskFromPacked(syncedBandResetPacked);
     const std::uint64_t syncedBandResetSerial = static_cast<std::uint64_t>(bandResetSerialFromPacked(syncedBandResetPacked));
-    const std::uint64_t syncedAgcResetSerial = convo::consumeAtomic(other.agcResetSerial, std::memory_order_acquire);
+    const std::uint64_t syncedAgcResetSerial = convo::consumeAtomic(other.agcResetSerial, std::memory_order_acquire); // acquire: other の requestAgcReset acq_rel と HB
 
     // Avoid publication-domain split here: sync uses immutable state swap plus RT-local shadow updates.
     bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
@@ -516,19 +518,19 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
 
     if (bandIndex < 0 || bandIndex >= NUM_BANDS) return;
 
-    const auto* otherState = other.loadCurrentState(std::memory_order_acquire);
+    const auto* otherState = other.loadCurrentState(std::memory_order_acquire); // acquire: other の exchangeCurrentState/publishCurrentState と HB
     if (otherState == nullptr)
         return;
 
     auto* newNode = createBandNode(bandIndex, *otherState);
-    auto* oldNode = exchangeBandNode(bandIndex, newNode, std::memory_order_acq_rel);
+    auto* oldNode = exchangeBandNode(bandIndex, newNode, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadBandNode acquire と HB
 
     activeBandNodes[bandIndex] = newNode;
 
     if (oldNode)
-        retireBandNode(oldNode);
+        retireBandNode(m_epochDomain, oldNode);
 
-    convo::EpochManager::instance().advanceEpoch();
+    m_epochDomain.advanceEpoch();
 }
 
 //============================================================================
@@ -536,25 +538,25 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
 //============================================================================
 void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 {
-    const auto* otherState = other.loadCurrentState(std::memory_order_acquire);
-    const double syncedAgcCurrentGain = convo::consumeAtomic(other.agcCurrentGain, std::memory_order_acquire);
-    const double syncedAgcEnvInput = convo::consumeAtomic(other.agcEnvInput, std::memory_order_acquire);
-    const double syncedAgcEnvOutput = convo::consumeAtomic(other.agcEnvOutput, std::memory_order_acquire);
+    const auto* otherState = other.loadCurrentState(std::memory_order_acquire); // acquire: other の exchangeCurrentState/publishCurrentState と HB
+    const double syncedAgcCurrentGain = convo::consumeAtomic(other.agcCurrentGain, std::memory_order_acquire); // acquire: other の publishAtomic release と HB
+    const double syncedAgcEnvInput = convo::consumeAtomic(other.agcEnvInput, std::memory_order_acquire);       // acquire: 同上
+    const double syncedAgcEnvOutput = convo::consumeAtomic(other.agcEnvOutput, std::memory_order_acquire);     // acquire: 同上
     const FilterStructure syncedStructure = (otherState != nullptr)
         ? static_cast<FilterStructure>(otherState->filterStructure)
-        : convo::consumeAtomic(other.requestedStructure, std::memory_order_acquire);
-    const bool syncedBypassed = convo::consumeAtomic(other.bypassed, std::memory_order_acquire);
-    const std::uint64_t syncedBandResetPacked = convo::consumeAtomic(other.bandResetPacked, std::memory_order_acquire);
+        : convo::consumeAtomic(other.requestedStructure, std::memory_order_acquire); // acquire: setFilterStructure の release と HB (フォールバック)
+    const bool syncedBypassed = convo::consumeAtomic(other.bypassed, std::memory_order_acquire);                      // acquire: other の bypassed publishAtomic release と HB
+    const std::uint64_t syncedBandResetPacked = convo::consumeAtomic(other.bandResetPacked, std::memory_order_acquire); // acquire: other の requestBandReset acq_rel と HB
     const std::uint32_t syncedBandResetMask = bandResetMaskFromPacked(syncedBandResetPacked);
     const std::uint64_t syncedBandResetSerial = static_cast<std::uint64_t>(bandResetSerialFromPacked(syncedBandResetPacked));
-    const std::uint64_t syncedAgcResetSerial = convo::consumeAtomic(other.agcResetSerial, std::memory_order_acquire);
+    const std::uint64_t syncedAgcResetSerial = convo::consumeAtomic(other.agcResetSerial, std::memory_order_acquire); // acquire: other の requestAgcReset acq_rel と HB
 
     // Keep sync as shadow-state update to prevent multi-atomic partial visibility.
     bypassFadeGain.setCurrentAndTargetValue(syncedBypassed ? 0.0 : 1.0);
 
     const float syncedTotalGainDb = (otherState != nullptr)
         ? otherState->totalGainDb
-        : convo::consumeAtomic(other.totalGainDbTarget, std::memory_order_acquire);
+        : convo::consumeAtomic(other.totalGainDbTarget, std::memory_order_acquire); // acquire: other.storeTotalGainDb の publishAtomic release と HB
     smoothTotalGain.setCurrentAndTargetValue(
         juce::Decibels::decibelsToGain<double>(static_cast<double>(syncedTotalGainDb)));
 
@@ -575,9 +577,9 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 //============================================================================
 void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 {
-    const bool rateChanged = (std::abs(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire) - sampleRate) > 1e-6);
+    const bool rateChanged = (std::abs(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire) - sampleRate) > 1e-6); // acquire: setSampleRate の publishAtomic release と HB
     if (rateChanged)
-        convo::publishAtomic(currentSampleRate, sampleRate, std::memory_order_release);
+        convo::publishAtomic(currentSampleRate, sampleRate, std::memory_order_release); // release: 次回 prepareToPlay/setSampleRate の acquire と HB
 
     const int requiredSize = newMaxInternalBlockSize;
     this->maxInternalBlockSize = requiredSize;
@@ -630,7 +632,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
             agcCoeffTableCapacity = 0;
     }
 
-    auto state = loadCurrentState(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
 
     smoothTotalGain.reset(sampleRate, SMOOTHING_TIME_SEC);
     bypassFadeGain.reset(sampleRate, BYPASS_FADE_TIME_SEC);
@@ -645,9 +647,9 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     std::memset(filterState.data(), 0, sizeof(filterState));
 
     const double sr = sampleRate;
-    convo::publishAtomic(agcAttackCoeff, std::exp(-1.0 / (sr * AGC_ATTACK_TIME_SEC)), std::memory_order_release);
-    convo::publishAtomic(agcReleaseCoeff, std::exp(-1.0 / (sr * AGC_RELEASE_TIME_SEC)), std::memory_order_release);
-    convo::publishAtomic(agcSmoothCoeff, std::exp(-1.0 / (sr * AGC_SMOOTH_TIME_SEC)), std::memory_order_release);
+    convo::publishAtomic(agcAttackCoeff,  std::exp(-1.0 / (sr * AGC_ATTACK_TIME_SEC)),  std::memory_order_release); // release: Processing.cpp の agcAttackCoeff acquire と HB
+    convo::publishAtomic(agcReleaseCoeff, std::exp(-1.0 / (sr * AGC_RELEASE_TIME_SEC)), std::memory_order_release); // release: Processing.cpp の agcReleaseCoeff acquire と HB
+    convo::publishAtomic(agcSmoothCoeff,  std::exp(-1.0 / (sr * AGC_SMOOTH_TIME_SEC)),  std::memory_order_release); // release: Processing.cpp の agcSmoothCoeff acquire と HB
 
     if (agcCoeffTableCapacity > 0 && agcAttackCoeffTable && agcReleaseCoeffTable && agcSmoothCoeffTable)
     {
@@ -660,33 +662,35 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
         }
     }
 
-    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release);
-    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);
-    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);
+    convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release); // release: Processing.cpp の agcCurrentGain acquire と HB
+    convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: Processing.cpp の acquire と HB
+    convo::publishAtomic(agcEnvOutput, 0.0, std::memory_order_release);   // release: Processing.cpp の acquire と HB
 
-    convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);
-    convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);
+    convo::publishAtomic(bandResetPacked, static_cast<std::uint64_t>(0), std::memory_order_release);  // release: Processing.cpp の bandResetPacked acquire と HB
+    convo::publishAtomic(agcResetSerial, static_cast<std::uint64_t>(0), std::memory_order_release);   // release: Processing.cpp の agcResetSerial acquire と HB
     rtDeferredBandResetMask = 0;
     rtSeenBandResetSerial = 0;
     rtSeenAgcResetSerial = 0;
-    convo::publishAtomic(activeStructure, convo::consumeAtomic(requestedStructure, std::memory_order_acquire), std::memory_order_release);
+    convo::publishAtomic(activeStructure,
+                         convo::consumeAtomic(requestedStructure, std::memory_order_acquire), // acquire: setFilterStructure の release と HB
+                         std::memory_order_release); // release: Processing.cpp の activeStructure acquire と HB
 
-    const bool requestedBypass = convo::consumeAtomic(bypassRequested, std::memory_order_acquire);
-    convo::publishAtomic(bypassed, requestedBypass, std::memory_order_release);
+    const bool requestedBypass = convo::consumeAtomic(bypassRequested, std::memory_order_acquire); // acquire: setBypass の publishAtomic release と HB
+    convo::publishAtomic(bypassed, requestedBypass, std::memory_order_release);                    // release: Processing.cpp の bypassed acquire と HB
     bypassFadeGain.setCurrentAndTargetValue(requestedBypass ? 0.0 : 1.0);
 
     if (rateChanged)
     {
         for (int i = 0; i < NUM_BANDS; ++i)
         {
-            auto loopState = loadCurrentState(std::memory_order_acquire);
+            auto loopState = loadCurrentState(std::memory_order_acquire); // acquire: 直前の exchangeCurrentState acq_rel と HB
             if (loopState)
             {
                 auto newNode = createBandNode(i, *loopState);
-                auto oldNode = exchangeBandNode(i, newNode, std::memory_order_acq_rel);
+                auto oldNode = exchangeBandNode(i, newNode, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadBandNode acquire と HB
 
                 if (oldNode)
-                    retireBandNode(oldNode);
+                    retireBandNode(m_epochDomain, oldNode);
 
                 activeBandNodes[i] = newNode;
             }
@@ -720,12 +724,12 @@ convo::EQParameters EQProcessor::EQState::toEQParameters() const
 
 EQProcessor::EQState* EQProcessor::getEQState() const
 {
-    return loadCurrentState(std::memory_order_acquire);
+    return loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
 }
 
 float EQProcessor::getTotalGain() const
 {
-    auto state = loadCurrentState(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state == nullptr) return 0.0f;
     return state->totalGainDb;
 }
@@ -733,7 +737,7 @@ float EQProcessor::getTotalGain() const
 EQBandType EQProcessor::getBandType(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQBandType::Peaking;
-    auto state = loadCurrentState(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state == nullptr) return EQBandType::Peaking;
     return state->bandTypes[band];
 }
@@ -741,7 +745,7 @@ EQBandType EQProcessor::getBandType(int band) const
 EQChannelMode EQProcessor::getBandChannelMode(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQChannelMode::Stereo;
-    auto state = loadCurrentState(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state == nullptr) return EQChannelMode::Stereo;
     return state->bandChannelModes[band];
 }
@@ -754,7 +758,7 @@ void EQProcessor::cleanup()
 EQBandParams EQProcessor::getBandParams(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return {};
-    auto state = loadCurrentState(std::memory_order_acquire);
+    auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
     if (state == nullptr) return {};
     return state->bands[band];
 }

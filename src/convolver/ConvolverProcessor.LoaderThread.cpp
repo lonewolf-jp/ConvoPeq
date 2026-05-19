@@ -2,7 +2,7 @@
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"
 #include "convolver/ConvolverProcessor.Internal.h"
-#include "core/EpochManager.h"
+#include "core/EpochDomain.h"
 #include "AlignedAllocation.h"
 #include <mkl.h>
 
@@ -52,8 +52,8 @@ void ConvolverProcessor::LoaderThread::run()
                 auto wp = weakP;
                 const bool queued = juce::MessageManager::callAsync([wp] {
                     if (auto* o = wp.get()) {
-                        convo::publishAtomic(o->isLoading, false);
-                        convo::publishAtomic(o->isRebuilding, false);
+                        convo::publishAtomic(o->isLoading, false, std::memory_order_release); // release: timer/UI の isLoading acquire と HB
+                        convo::publishAtomic(o->isRebuilding, false, std::memory_order_release); // release: timer/load 経路 acquire と HB
                     }
                 });
 
@@ -61,8 +61,8 @@ void ConvolverProcessor::LoaderThread::run()
                 {
                     if (auto* o = wp.get())
                     {
-                        convo::publishAtomic(o->isLoading, false);
-                        convo::publishAtomic(o->isRebuilding, false);
+                        convo::publishAtomic(o->isLoading, false, std::memory_order_release); // release: timer/UI の isLoading acquire と HB（callAsync 失敗時）
+                        convo::publishAtomic(o->isRebuilding, false, std::memory_order_release); // release: timer/load 経路 acquire と HB（callAsync 失敗時）
                     }
                 }
             }
@@ -674,7 +674,7 @@ bool ConvolverProcessor::LoaderThread::doTransformStep()
     {
         const IRState* currentState = owner.acquireIRState();
         auto currentIr = (currentState != nullptr) ? currentState->ir : nullptr;
-        const double currentScale = convo::consumeAtomic(owner.currentIRScale, std::memory_order_acquire);
+        const double currentScale = convo::consumeAtomic(owner.currentIRScale, std::memory_order_acquire); // acquire: applyNewState の publishAtomic release と HB
         const auto scaleInfo = IRConverter::computeScaleFactor(stepTrimmed, currentIr, currentScale);
         owner.releaseIRState(currentState);
 

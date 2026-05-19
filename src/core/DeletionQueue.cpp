@@ -20,7 +20,7 @@ void DeletionQueue::enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, D
     queue[count++] = {ptr, deleter, epoch, type};
 }
 
-void DeletionQueue::reclaim(const EpochCore& core)
+void DeletionQueue::reclaim(const EpochDomain& core)
 {
     const uint64_t minReaderEpoch = core.getMinReaderEpoch();
 
@@ -30,7 +30,7 @@ void DeletionQueue::reclaim(const EpochCore& core)
     for (size_t i = 0; i < count; ++i)
     {
         Entry& e = queue[i];
-        if (convo::EpochCore::isOlder(e.epoch, minReaderEpoch))
+        if (convo::EpochDomain::isOlder(e.epoch, minReaderEpoch))
         {
             // 安全に解放可能
             if (e.deleter && e.ptr)
@@ -52,5 +52,3 @@ void DeletionQueue::reclaim(const EpochCore& core)
 }
 
 } // namespace convo
-
-DeferredDeletionQueue g_deletionQueue;

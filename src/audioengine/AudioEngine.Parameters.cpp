@@ -86,7 +86,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
     // ─── Step 1: モード・バイパス状態を先に復元 ────────────────────────────
     if (state.hasProperty("processingOrder"))
-        convo::publishAtomic(currentProcessingOrder, (ProcessingOrder)(int)state.getProperty("processingOrder"));
+        convo::publishAtomic(currentProcessingOrder, (ProcessingOrder)(int)state.getProperty("processingOrder"), std::memory_order_release);
 
     if (state.hasProperty("eqBypassed"))
     {
@@ -233,32 +233,32 @@ juce::ValueTree AudioEngine::getCurrentState() const
     juce::ValueTree state ("Preset");
 
     // グローバル設定の保存
-    state.setProperty("processingOrder", (int)convo::consumeAtomic(currentProcessingOrder), nullptr);
-    state.setProperty("softClipEnabled", convo::consumeAtomic(softClipEnabled), nullptr);
-    state.setProperty("saturationAmount", convo::consumeAtomic(saturationAmount), nullptr);
-    state.setProperty("inputHeadroomDb", convo::consumeAtomic(inputHeadroomDb), nullptr);
-    state.setProperty("outputMakeupDb", convo::consumeAtomic(outputMakeupDb), nullptr);
-    state.setProperty("analyzerSource", (int)convo::consumeAtomic(currentAnalyzerSource), nullptr);
-    state.setProperty("convolverInputTrimDb", convo::consumeAtomic(convolverInputTrimDb), nullptr);
-    state.setProperty("ditherBitDepth", convo::consumeAtomic(ditherBitDepth), nullptr);
-    state.setProperty("noiseShaperType", (int)convo::consumeAtomic(noiseShaperType), nullptr);
-    state.setProperty("oversamplingFactor", convo::consumeAtomic(manualOversamplingFactor), nullptr);
-    state.setProperty("oversamplingType", (int)convo::consumeAtomic(oversamplingType), nullptr);
+    state.setProperty("processingOrder", (int)convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire), nullptr);
+    state.setProperty("softClipEnabled", convo::consumeAtomic(softClipEnabled, std::memory_order_acquire), nullptr);
+    state.setProperty("saturationAmount", convo::consumeAtomic(saturationAmount, std::memory_order_acquire), nullptr);
+    state.setProperty("inputHeadroomDb", convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire), nullptr);
+    state.setProperty("outputMakeupDb", convo::consumeAtomic(outputMakeupDb, std::memory_order_acquire), nullptr);
+    state.setProperty("analyzerSource", (int)convo::consumeAtomic(currentAnalyzerSource, std::memory_order_acquire), nullptr);
+    state.setProperty("convolverInputTrimDb", convo::consumeAtomic(convolverInputTrimDb, std::memory_order_acquire), nullptr);
+    state.setProperty("ditherBitDepth", convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire), nullptr);
+    state.setProperty("noiseShaperType", (int)convo::consumeAtomic(noiseShaperType, std::memory_order_acquire), nullptr);
+    state.setProperty("oversamplingFactor", convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire), nullptr);
+    state.setProperty("oversamplingType", (int)convo::consumeAtomic(oversamplingType, std::memory_order_acquire), nullptr);
 
     // NoiseShaperLearner Settings
     {
         auto s = getNoiseShaperLearnerSettings();
-        state.setProperty("cmaesRestarts", convo::consumeAtomic(s.cmaesRestarts), nullptr);
-        state.setProperty("coeffSafetyMargin", convo::consumeAtomic(s.coeffSafetyMargin), nullptr);
-        state.setProperty("enableStabilityCheck", convo::consumeAtomic(s.enableStabilityCheck), nullptr);
+        state.setProperty("cmaesRestarts", convo::consumeAtomic(s.cmaesRestarts, std::memory_order_acquire), nullptr);
+        state.setProperty("coeffSafetyMargin", convo::consumeAtomic(s.coeffSafetyMargin, std::memory_order_acquire), nullptr);
+        state.setProperty("enableStabilityCheck", convo::consumeAtomic(s.enableStabilityCheck, std::memory_order_acquire), nullptr);
     }
 
-    state.setProperty("eqBypassed", convo::consumeAtomic(eqBypassRequested), nullptr);
-    state.setProperty("convBypassed", convo::consumeAtomic(convBypassRequested), nullptr);
+    state.setProperty("eqBypassed", convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire), nullptr);
+    state.setProperty("convBypassed", convo::consumeAtomic(convBypassRequested, std::memory_order_acquire), nullptr);
     // 出力周波数フィルターモードの保存
-    state.setProperty("convHCFilterMode", (int)convo::consumeAtomic(convHCFilterMode), nullptr);
-    state.setProperty("convLCFilterMode", (int)convo::consumeAtomic(convLCFilterMode), nullptr);
-    state.setProperty("eqLPFFilterMode",  (int)convo::consumeAtomic(eqLPFFilterMode), nullptr);
+    state.setProperty("convHCFilterMode", (int)convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire), nullptr);
+    state.setProperty("convLCFilterMode", (int)convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire), nullptr);
+    state.setProperty("eqLPFFilterMode",  (int)convo::consumeAtomic(eqLPFFilterMode, std::memory_order_acquire), nullptr);
 
     for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
     {
@@ -289,10 +289,10 @@ void AudioEngine::setInputHeadroomDb(float db)
     const bool convIsFirst = !convBypassed && (order == ProcessingOrder::ConvolverThenEQ || eqBypassed);
     const float maxDb = convIsFirst ? -6.0f : 0.0f;
     float clampedDb = juce::jlimit(-12.0f, maxDb, db);
-    if (std::abs(convo::consumeAtomic(inputHeadroomDb) - clampedDb) > 1e-5f)
+    if (std::abs(convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire) - clampedDb) > 1e-5f)
     {
-        convo::publishAtomic(inputHeadroomDb, clampedDb);
-        convo::publishAtomic(inputHeadroomGain, juce::Decibels::decibelsToGain((double)clampedDb));
+        convo::publishAtomic(inputHeadroomDb, clampedDb, std::memory_order_release);
+        convo::publishAtomic(inputHeadroomGain, juce::Decibels::decibelsToGain((double)clampedDb), std::memory_order_release);
         convo::publishAtomic(m_currentInputHeadroomDb, clampedDb, std::memory_order_release);
         enqueueSnapshotCommand();
     }
@@ -300,7 +300,7 @@ void AudioEngine::setInputHeadroomDb(float db)
 
 float AudioEngine::getInputHeadroomDb() const
 {
-    return convo::consumeAtomic(inputHeadroomDb);
+    return convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire);
 }
 
 void AudioEngine::setOutputMakeupDb(float db)
@@ -308,10 +308,10 @@ void AudioEngine::setOutputMakeupDb(float db)
     ASSERT_NON_RT_THREAD();
     // Output makeup は全モード共通で 0..12 dB
     const float clampedDb = juce::jlimit(0.0f, 12.0f, db);
-    if (std::abs(convo::consumeAtomic(outputMakeupDb) - clampedDb) > 1e-5f)
+    if (std::abs(convo::consumeAtomic(outputMakeupDb, std::memory_order_acquire) - clampedDb) > 1e-5f)
     {
-        convo::publishAtomic(outputMakeupDb, clampedDb);
-        convo::publishAtomic(outputMakeupGain, juce::Decibels::decibelsToGain((double)clampedDb));
+        convo::publishAtomic(outputMakeupDb, clampedDb, std::memory_order_release);
+        convo::publishAtomic(outputMakeupGain, juce::Decibels::decibelsToGain((double)clampedDb), std::memory_order_release);
         convo::publishAtomic(m_currentOutputMakeupDb, clampedDb, std::memory_order_release);
         enqueueSnapshotCommand();
     }
@@ -319,13 +319,13 @@ void AudioEngine::setOutputMakeupDb(float db)
 
 float AudioEngine::getOutputMakeupDb() const
 {
-    return convo::consumeAtomic(outputMakeupDb);
+    return convo::consumeAtomic(outputMakeupDb, std::memory_order_acquire);
 }
 
 void AudioEngine::setProcessingOrder(ProcessingOrder order)
 {
     ASSERT_NON_RT_THREAD();
-    convo::publishAtomic(currentProcessingOrder, order);
+    convo::publishAtomic(currentProcessingOrder, order, std::memory_order_release);
     convo::publishAtomic(m_currentProcessingOrder, order, std::memory_order_release);
     enqueueSnapshotCommand();
     applyDefaultsForCurrentMode();
@@ -336,10 +336,10 @@ void AudioEngine::setConvolverInputTrimDb(float db)
     ASSERT_NON_RT_THREAD();
     // 範囲: -12..0 dB (0dB = トリムなし / -12dB = 最大保護)
     float clampedDb = juce::jlimit(-12.0f, 0.0f, db);
-    if (std::abs(convo::consumeAtomic(convolverInputTrimDb) - clampedDb) > 1e-5f)
+    if (std::abs(convo::consumeAtomic(convolverInputTrimDb, std::memory_order_acquire) - clampedDb) > 1e-5f)
     {
-        convo::publishAtomic(convolverInputTrimDb, clampedDb);
-        convo::publishAtomic(convolverInputTrimGain, juce::Decibels::decibelsToGain((double)clampedDb));
+        convo::publishAtomic(convolverInputTrimDb, clampedDb, std::memory_order_release);
+        convo::publishAtomic(convolverInputTrimGain, juce::Decibels::decibelsToGain((double)clampedDb), std::memory_order_release);
         convo::publishAtomic(m_currentConvInputTrimDb, clampedDb, std::memory_order_release);
         enqueueSnapshotCommand();
     }
@@ -347,7 +347,7 @@ void AudioEngine::setConvolverInputTrimDb(float db)
 
 float AudioEngine::getConvolverInputTrimDb() const
 {
-    return convo::consumeAtomic(convolverInputTrimDb);
+    return convo::consumeAtomic(convolverInputTrimDb, std::memory_order_acquire);
 }
 
 void AudioEngine::applyDefaultsForCurrentMode()
@@ -402,7 +402,7 @@ void AudioEngine::applyDefaultsForCurrentMode()
 
 void AudioEngine::setDitherBitDepth(int bitDepth)
 {
-    if (convo::consumeAtomic(ditherBitDepth) != bitDepth)
+    if (convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire) != bitDepth)
     {
         const bool adaptiveLearningActive = (convo::consumeAtomic(noiseShaperType, std::memory_order_acquire) == NoiseShaperType::Adaptive9thOrder)
             && noiseShaperLearner
@@ -414,7 +414,7 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
             noiseShaperLearner->setErrorMessage("Learning stopped due to bit depth change. Please restart learning.");
         }
 
-        convo::publishAtomic(ditherBitDepth, bitDepth);
+        convo::publishAtomic(ditherBitDepth, bitDepth, std::memory_order_release);
         convo::publishAtomic(m_currentDitherBitDepth, bitDepth, std::memory_order_release);
         DBG_LOG("Dither Bit Depth changed: " + juce::String(bitDepth));
         enqueueSnapshotCommand();
@@ -424,7 +424,7 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
         // UI側（学習ウィンドウ）が即座に反映できるように通知
         sendChangeMessage();
 
-        const double sr = convo::consumeAtomic(currentSampleRate);
+        const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         if (!m_isRestoringState && sr > 0.0)
         {
             const int queuedGeneration = convo::consumeAtomic(rebuildGeneration, std::memory_order_acquire);
@@ -445,7 +445,7 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
             }
             else
             {
-                requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock));
+                requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
             }
         }
     }
@@ -453,14 +453,14 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
 
 int AudioEngine::getDitherBitDepth() const
 {
-    return convo::consumeAtomic(ditherBitDepth);
+    return convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire);
 }
 
 void AudioEngine::setNoiseShaperType(NoiseShaperType type)
 {
-    if (convo::consumeAtomic(noiseShaperType) != type)
+    if (convo::consumeAtomic(noiseShaperType, std::memory_order_acquire) != type)
     {
-        convo::publishAtomic(noiseShaperType, type);
+        convo::publishAtomic(noiseShaperType, type, std::memory_order_release);
         convo::publishAtomic(m_currentNoiseShaperType, type, std::memory_order_release);
         convo::publishAtomic(m_pendingNSChange, true, std::memory_order_release);
         if (type != NoiseShaperType::Adaptive9thOrder)
@@ -485,7 +485,7 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
 
         DBG_LOG("Noise Shaper changed: " + typeName);
         enqueueSnapshotCommand();
-        const double sr = convo::consumeAtomic(currentSampleRate);
+        const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         if (!m_isRestoringState && sr > 0.0)
         {
             const int queuedGeneration = convo::consumeAtomic(rebuildGeneration, std::memory_order_acquire);
@@ -506,7 +506,7 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
             }
             else
             {
-                requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock));
+                requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
             }
         }
     }
@@ -520,7 +520,7 @@ void AudioEngine::requestSnapshotForNoiseShaper()
 
 AudioEngine::NoiseShaperType AudioEngine::getNoiseShaperType() const
 {
-    return convo::consumeAtomic(noiseShaperType);
+    return convo::consumeAtomic(noiseShaperType, std::memory_order_acquire);
 }
 
 void AudioEngine::setFixedNoiseLogIntervalMs(int intervalMs) noexcept
@@ -575,22 +575,22 @@ void AudioEngine::setOversamplingFactor(int factor)
         newFactor = factor;
     }
 
-    if (convo::consumeAtomic(manualOversamplingFactor) != newFactor)
+    if (convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire) != newFactor)
     {
-        convo::publishAtomic(manualOversamplingFactor, newFactor);
+        convo::publishAtomic(manualOversamplingFactor, newFactor, std::memory_order_release);
         convo::publishAtomic(m_currentOversamplingFactor, newFactor, std::memory_order_release);
         enqueueSnapshotCommand();
-        const double sr = convo::consumeAtomic(currentSampleRate);
+        const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         if (!m_isRestoringState && sr > 0.0)
         {
-            requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock));
+            requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
         }
     }
 }
 
 int AudioEngine::getOversamplingFactor() const
 {
-    return convo::consumeAtomic(manualOversamplingFactor);
+    return convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire);
 }
 
 // ---------------------------------------------------------------------------
@@ -630,19 +630,19 @@ void AudioEngine::setConvolverRebuildDebounceMs(int ms) noexcept
 
 void AudioEngine::setOversamplingType(OversamplingType type)
 {
-    convo::publishAtomic(oversamplingType, type);
+    convo::publishAtomic(oversamplingType, type, std::memory_order_release);
     convo::publishAtomic(m_currentOversamplingType, type, std::memory_order_release);
     enqueueSnapshotCommand();
-    const double sr = convo::consumeAtomic(currentSampleRate);
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (!m_isRestoringState && sr > 0.0)
     {
-        requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock));
+        requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
     }
 }
 
 AudioEngine::OversamplingType AudioEngine::getOversamplingType() const
 {
-    return convo::consumeAtomic(oversamplingType);
+    return convo::consumeAtomic(oversamplingType, std::memory_order_acquire);
 }
 
 //====================================================================

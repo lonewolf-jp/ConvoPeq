@@ -6,8 +6,8 @@
 void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& source,
                                            juce::AudioBuffer<float>& destination,
                                            LockFreeAudioRingBuffer& analyzerFifo,
-                                           std::atomic<float>& inputLevelLinear,
-                                           std::atomic<float>& outputLevelLinear,
+                                           std::atomic<float>* inputLevelLinear,
+                                           std::atomic<float>* outputLevelLinear,
                                            const ProcessingState& state)
 {
     const int numSamples = source.numSamples;

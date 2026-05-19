@@ -10,7 +10,7 @@ namespace
 
 uint64_t AudioEngine::publishRcuEpoch() noexcept
 {
-    return convo::EpochManager::instance().currentEpoch();
+    return m_epochDomain.currentEpoch();
 }
 
 #endif
@@ -19,7 +19,7 @@ uint64_t AudioEngine::publishRcuEpoch() noexcept
 
 void AudioEngine::enterRcuReader(int readerIndex) noexcept
 {
-    convo::EpochManager::instance().enter(readerIndex);
+    m_epochDomain.enterReader(readerIndex);
 }
 
 #endif
@@ -28,7 +28,7 @@ void AudioEngine::enterRcuReader(int readerIndex) noexcept
 
 void AudioEngine::exitRcuReader(int readerIndex) noexcept
 {
-    convo::EpochManager::instance().exit(readerIndex);
+    m_epochDomain.exitReader(readerIndex);
 }
 
 #endif
@@ -37,8 +37,8 @@ void AudioEngine::exitRcuReader(int readerIndex) noexcept
 
 void AudioEngine::tryReclaimResources() noexcept
 {
-    g_runtimeReclaimCount.fetch_add(1, std::memory_order_acq_rel);
-    g_deletionQueue.reclaim(m_epochCore);
+    convo::fetchAddAtomic(g_runtimeReclaimCount, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    m_epochDomain.reclaimRetired();
 }
 
 #endif
@@ -57,8 +57,8 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
             return;
 
         const uint64_t overflowEpoch = convo::exchangeAtomic(audioThreadRetireOverflowEpoch, 0, std::memory_order_acq_rel);
-        const uint64_t epoch = overflowEpoch != 0 ? overflowEpoch : m_epochCore.current();
-        if (!g_deletionQueue.enqueue(
+        const uint64_t epoch = overflowEpoch != 0 ? overflowEpoch : m_epochDomain.current();
+        if (!m_epochDomain.enqueueRetire(
                 overflow,
                 [](void* p)
                 {
@@ -94,8 +94,8 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
         for (auto& entry : pending)
         {
-            const uint64_t epoch = entry.epoch != 0 ? entry.epoch : m_epochCore.current();
-            if (!g_deletionQueue.enqueue(entry.ptr, entry.deleter, epoch))
+            const uint64_t epoch = entry.epoch != 0 ? entry.epoch : m_epochDomain.current();
+            if (!m_epochDomain.enqueueRetire(entry.ptr, entry.deleter, epoch))
             {
                 std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
                 deferredDeleteFallbackQueue.push_back(entry);
@@ -105,8 +105,8 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
     flushAudioThreadRetireOverflow();
     flushDeferredDeleteFallbackQueue();
-    g_deletionQueue.reclaim(m_epochCore);
-    m_coordinator.reclaim(m_epochCore);
+    m_epochDomain.reclaimRetired();
+    m_coordinator.reclaim(m_epochDomain);
 
     const uint64_t dropped = convo::consumeAtomic(audioThreadRetireEnqueueDropped, std::memory_order_acquire);
     if (dropped >= kReclaimBacklogWarnThreshold)

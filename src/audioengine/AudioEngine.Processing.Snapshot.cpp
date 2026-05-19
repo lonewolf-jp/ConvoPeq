@@ -19,10 +19,10 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     const auto runtimePublishView = getRuntimePublishView();
     const auto* runtimeGraph = runtimePublishView.graph;
     DSPCore* dsp = isFadingTarget
-        ? resolveFadingDSPFromRuntimePublish(runtimeGraph)
-        : resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+        ? resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph)
+        : resolveCurrentDSPFromRuntimeWorldOnly(runtimeGraph);
     if (dsp == nullptr && isFadingTarget)
-        dsp = resolveCurrentDSPFromRuntimePublish(runtimeGraph);
+        dsp = resolveCurrentDSPFromRuntimeWorldOnly(runtimeGraph);
     if (dsp == nullptr)
     {
         applySafeSilentFallback(bufferToFill);
@@ -33,10 +33,8 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
 
     DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 
-    std::atomic<float> fadingInputMeter { 0.0f };
-    std::atomic<float> fadingOutputMeter { 0.0f };
-    auto& inMeter = isFadingTarget ? fadingInputMeter : inputLevelLinear;
-    auto& outMeter = isFadingTarget ? fadingOutputMeter : outputLevelLinear;
+    auto* inMeter = isFadingTarget ? nullptr : &inputLevelLinear;
+    auto* outMeter = isFadingTarget ? nullptr : &outputLevelLinear;
     dsp->process(bufferToFill, analyzerFifo, inMeter, outMeter, procState);
 }
 
