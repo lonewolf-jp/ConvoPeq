@@ -4,6 +4,13 @@
 
 `slotIndex + generation` 方式の DSPHandle で、slot lifetime / reuse / overflow の未確定点を固定する。
 
+### REV3.2運用優先注記
+
+- 本書の allocator/policy 分解は設計参照表現として扱う。
+- 実装運用は `plan5.md` REV3.2 を優先し、
+  `runtime exposes evidence / CI validates evidence` を固定方針とする。
+- stale handle / reuse の解釈衝突時は CI=Abort / Debug=Assert / Release=Quarantine+Silence を優先する。
+
 ## Handle 形式（確定）
 
 ```text

@@ -12,8 +12,24 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 
 確定宣言（2026-05-20）:
 
-- R1〜R18 は `Spec-Fixed` として確定済み
+- R1〜R18 は `Spec-Fixed` として確定済み（安定性優先の必須コア）
+- R19〜R25 は `Spec-Fixed`（ガード付き拡張。Debug/CI 優先、Release 直結では任意）
 - 本書に記載のない追加未完事項は扱わない（追加時はR採番必須）
+
+### REV3.2運用優先注記
+
+- 本書の評価基準は `plan5.md` REV3.2 を優先する。
+- `runtime exposes evidence / CI validates evidence` を固定方針とし、
+  Release へ full artifact / full verify を常時要求しない。
+- 解釈衝突時は few-authority（7 subsystem）/ 2-world（Publication/Execution）/
+  capability-first（runtime coordinator lifecycle 非導入）を優先する。
+- stale handle 関連の Closed 判定は CI=Abort / Debug=Assert / Release=Quarantine+Silence を前提に解釈する。
+
+用語正規化（齟齬回避）:
+
+- 本書では `RuntimePublication` を正規記法として扱う。
+- CI artifact 判定（missing/schema/parse fail）は merge gate 条件であり、
+  runtime correctness は runtime invariants で成立させる。
 
 ---
 
@@ -108,7 +124,7 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 状態: Spec-Fixed（2026-05-20）
 - 重要度: Critical
 - 主要リスク: publish payload 下位オブジェクトで ownership closure が破断
-- 反映先: `ISR_HB_Graph_Specification.md`, `ISR_Runtime_State_Matrix.md`
+- 反映先: `ISR_HB_Graph_Specification.md`, `ISR_Runtime_State_Matrix.md`, `ISR_Runtime_Closure_Descriptor.md`
 - 確定方針:
   - payload closure metadata は再帰閉包（parent->child->grandchild）を表現可能であること
   - closure 未閉包を検出する静的/動的規則を必須化
@@ -172,14 +188,14 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 状態: Spec-Fixed（2026-05-20）
 - 重要度: Critical
 - 主要リスク: transitive ownership が暗黙で closure 破断を検出できない
-- 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_HB_Graph_Specification.md`
+- 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_HB_Graph_Specification.md`, `ISR_Runtime_Closure_Descriptor.md`
 - 実行フェーズ: Phase B/C
 - 完了条件:
   - descriptor node に ownership/mutability/lifetime/HB を保持
   - publish 前 closure validation が運用化
 - Closed最小検証項目:
   - [ ] descriptor node に kind/ownership/mutability/lifetime/HB/authority/allocator 情報が記録される
-  - [ ] publish 前 `validateRuntimeClosure` が mandatory 実行され、違反を reject する
+  - [ ] publish 前 `validateClosureGraph` が mandatory 実行され、違反を reject する
   - [ ] external mutable dependency の混入が CI で検出・失敗する
 
 ## R12. Payload Tier System 固定
@@ -187,7 +203,7 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 状態: Spec-Fixed（2026-05-20）
 - 重要度: High
 - 主要リスク: payload boundary が曖昧で forbidden dependency 混入
-- 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_Runtime_State_Matrix.md`
+- 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_Runtime_State_Matrix.md`, `ISR_Payload_Tier_Model.md`
 - 実行フェーズ: Phase B/C
 - 完了条件:
   - tier 分類（InlineImmutable/ImmutableShared/ExternalPinned/RTLocalOnly/Forbidden）が定義済み
@@ -195,13 +211,13 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - Closed最小検証項目:
   - [ ] 全 payload object family に tier が割当済み
   - [ ] Forbidden tier の payload 混入が検出・失敗する
-  - [ ] RTLocalOnly tier の RuntimePublishWorld 混入が検出・失敗する
+  - [ ] RTLocalOnly tier の RuntimePublication への混入が検出・失敗する
 
 ## R13. Immutable Facade + Mutable Core 分離
 
 - 状態: Spec-Fixed（2026-05-20）
 - 重要度: Critical
-- 主要リスク: RuntimePublishWorld 内 mutable atomic/mutex/lazy-init 混入
+- 主要リスク: RuntimePublication 内への mutable atomic/mutex/lazy-init 混入
 - 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_Immutability_Enforcement_Spec.md`
 - 実行フェーズ: Phase B
 - 完了条件:
@@ -217,7 +233,7 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 状態: Spec-Fixed（2026-05-20）
 - 重要度: High
 - 主要リスク: RT completion detect と retire authority 実行の責務衝突
-- 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_Retire_Authority_Graph.md`
+- 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_Retire_Authority_Graph.md`, `ISR_Deferred_Retire_Intent_Bridge.md`
 - 実行フェーズ: Phase B
 - 完了条件:
   - RT は intent emission のみ、NonRT が authority enqueue を実行
@@ -232,13 +248,13 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 状態: Spec-Fixed（2026-05-20）
 - 重要度: Critical
 - 主要リスク: shutdown ordering が手続き依存で late callback/UAF を誘発
-- 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_HB_Graph_Specification.md`
+- 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_HB_Graph_Specification.md`, `ISR_Shutdown_State_Machine.md`
 - 実行フェーズ: Phase C
 - 完了条件:
   - shutdown state machine と phase HB chain が明文化
   - shutdown verifier で順序違反を検出できる
 - Closed最小検証項目:
-  - [ ] phase enum（Running→StopAudioCallbacks→DrainObservers→StopRetireIngress→EpochSettlement→CompleteReclaim→AllocatorShutdown→Finalized）が実装される
+  - [ ] phase enum（Running→AudioStopped→ObserverDrained→RetireClosed→EpochSettled→ReclaimComplete→ShutdownComplete）が実装される
   - [ ] phase 逆行/飛び越し遷移が検出・拒否される
   - [ ] shutdown verifier が late callback / post-stop enqueue を検出・失敗する
 
@@ -247,7 +263,7 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 状態: Spec-Fixed（2026-05-20）
 - 重要度: Critical
 - 主要リスク: 再現試験依存で最小HB欠落の証明が不足
-- 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_HB_Graph_Specification.md`
+- 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_HB_Graph_Specification.md`, `ISR_Minimal_HB_Failure_Model.md`
 - 実行フェーズ: Phase C
 - 完了条件:
   - failure ordering と required HB の対照モデルが固定
@@ -277,15 +293,127 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 状態: Spec-Fixed（2026-05-20）
 - 重要度: Critical
 - 主要リスク: 文書規律のみで merge 時に形式違反を検出できない
-- 反映先: `ISR_Formal_Guarantee_Package.md`, `plan5.md`
+- 反映先: `ISR_Formal_Guarantee_Package.md`, `plan5.md`, `ISR_Verification_Pipeline.md`, `ISR_Runtime_Reduction_Strategy.md`, `ISR_Proof_Artifact_Schema_Registry.md`
 - 実行フェーズ: Phase C
 - 完了条件:
-  - 6段ステージ（Atomic scan / mutation detector / closure validator / reorder simulator / shutdown verifier / retire latency）が定義済み
+  - 10段ステージ（V1 Atomic Dot-Call Scan / V2 Seal Integrity Check / V3 Recursive Closure Validation / V4 Payload Tier Validation / V5 HB Reorder Simulation / V6 Shutdown FSM Verification / V7 Retire Latency Audit / V8 UAF Suspicion Detector / V9 Forbidden Capability Scan / V10 Ownership Cycle Detection）が定義済み
+  - runtime-generated proof artifacts と CI evaluator の責務分離が定義済み
+  - proof artifact の canonical naming と JSON schema contract が固定済み
   - pipeline failure が merge blocker として運用化
 - Closed最小検証項目:
-  - [ ] 6段ステージがCIワークフローに統合済み
+  - [ ] 10段ステージがCIワークフローに統合済み
+  - [ ] artifact missing / schema mismatch / parse error が CI fail として扱われる
+  - [ ] canonical artifact 名（registry定義）で生成される
   - [ ] いずれか失敗時に merge blocker として PR を停止する
   - [ ] 成功時に証跡（レポート/ログ）が保存される
+
+## R19. Authority capability-first 固定（coordinator互換shim化）
+
+- 状態: Spec-Fixed（2026-05-20）
+- 補足: 必須（authority misuse を型制約で抑制）
+- 重要度: Critical
+- 主要リスク: coordinator中心設計の増殖による authority lifecycle 問題
+- 反映先: `ISR_Execution_Authority_Convergence.md`
+- 実行フェーズ: Phase C+
+- 完了条件:
+  - type-level capability（Publish/Retire/Shutdown）が優先運用される
+  - runtime coordinator lifecycle を導入しない
+- Closed最小検証項目:
+  - [ ] capability tag が API 契約として明示される
+  - [ ] coordinator 依存の新規経路を追加しない
+  - [ ] 分散 authority 導入時に CI でゲート違反となる
+
+## R20. Host Chaos Normalization 固定
+
+- 状態: Spec-Fixed（2026-05-20）
+- 補足: Release 適用候補（Layer 0 補完として優先度高）
+- 重要度: High
+- 主要リスク: host callback 非決定性により lifecycle invariant 崩壊
+- 反映先: `ISR_Execution_Authority_Convergence.md`, `ISR_JUCE_Lifecycle_Isolation.md`
+- 実行フェーズ: Phase C+
+- 完了条件:
+  - HostChaosNormalizer が Layer 0 に統合される
+- Closed最小検証項目:
+  - [ ] HC-1 duplicate prepare collapse が動作
+  - [ ] HC-2 release-before-prepare reject が動作
+  - [ ] HC-3 callback during Releasing reject が動作
+
+## R21. DSP ownership 単純化（few-authority）
+
+- 状態: Spec-Fixed（2026-05-20）
+- 補足: 必須（DSPHandleRuntime への統合）
+- 重要度: Critical
+- 主要リスク: DSP ownership path 分散による運用複雑化
+- 反映先: `ISR_Execution_Authority_Convergence.md`, `ISR_DSPHandle_Runtime.md`
+- 実行フェーズ: Phase C+
+- 完了条件:
+  - DSP ownership は DSPHandleRuntime へ統合される
+  - crossfade 完了前 retire 禁止が単純ルールで運用される
+- Closed最小検証項目:
+  - [ ] DSPHandleRuntime が callback view を一元提供する
+  - [ ] crossfade complete before retire が検証される
+
+## R22. callback-local snapshot consistency 固定
+
+- 状態: Spec-Fixed（2026-05-20）
+- 補足: 必須（RTExecutionFrame の最小保証）
+- 重要度: High
+- 主要リスク: callback 中に runtime snapshot が変化する
+- 反映先: `ISR_Execution_Authority_Convergence.md`, `ISR_RT_Execution_Frame.md`
+- 実行フェーズ: Phase C+
+- 完了条件:
+  - RTExecutionFrame が callback-local immutable snapshot を保持する
+- Closed最小検証項目:
+  - [ ] callback 中 snapshot immutable が検証される
+  - [ ] callbackEpoch 単位で一貫 view が維持される
+
+## R23. world model 簡略化（2-world固定）
+
+- 状態: Spec-Fixed（2026-05-20）
+- 補足: 必須（single-process 最適化）
+- 重要度: Critical
+- 主要リスク: 不要な federation 抽象で実装複雑化
+- 反映先: `ISR_Execution_Authority_Convergence.md`
+- 実行フェーズ: Phase C+
+- 完了条件:
+  - world model を PublicationWorld / ExecutionWorld の2つへ固定
+- Closed最小検証項目:
+  - [ ] RuntimeBoundary 構造で境界が実装される
+  - [ ] full federation runtime 追加が抑制される
+
+## R24. bounded deterministic teardown 固定
+
+- 状態: Spec-Fixed（2026-05-20）
+- 補足: 必須（Release 安定性直結）
+- 重要度: Critical
+- 主要リスク: shutdown phase の肥大化で完了不能リスク増大
+- 反映先: `ISR_Execution_Authority_Convergence.md`, `ISR_Shutdown_State_Machine.md`
+- 実行フェーズ: Phase C+
+- 完了条件:
+  - shutdown phase を 7段（Running->...->Complete）へ固定
+  - bounded completion を必須化
+- Closed最小検証項目:
+  - [ ] SH-1 callback 0
+  - [ ] SH-2 active crossfade 0
+  - [ ] SH-3 pending retire 0
+  - [ ] SH-4 observer 0
+
+## R25. DebugRuntime CI限定化
+
+- 状態: Spec-Fixed（2026-05-20）
+- 補足: 必須（Release から proof負荷を除去）
+- 重要度: High
+- 主要リスク: proof/trace runtime の release 混入による性能劣化
+- 反映先: `ISR_Execution_Authority_Convergence.md`, `ISR_Runtime_Reduction_Strategy.md`, `plan5.md`
+- 実行フェーズ: Phase C+
+- 完了条件:
+  - Release/Debug/CI の proof 有効範囲が固定化される
+  - DebugRuntime へ trace/verify/proof を集約する
+- Closed最小検証項目:
+  - [ ] Release: proof off
+  - [ ] Debug: proof partial
+  - [ ] CI: proof full
+  - [ ] RuntimeReductionGate による新runtime追加審査が CI 強制される
 
 ---
 

@@ -29,6 +29,24 @@
 4. Audio Thread は retire/reclaim authority を持たない
 5. authority identity と implementation detail を分離する
 
+運用注記（REV3.1 優先）:
+
+- authority 制約は capability-first（Publish/Retire/Shutdown）を優先する。
+- 本書で記述する `RuntimeWorldRetireManager` は、上記 root 配下の
+   **retire/reclaim 実装委譲コンポーネント名**として扱う。
+
+### REV3.2運用優先注記
+
+- 本書の authority/queue/worker 分解は設計参照表現として扱う。
+- 実装運用は `plan5.md` REV3.2 を優先し、
+   `runtime exposes evidence / CI validates evidence` を固定方針とする。
+- 解釈衝突時は capability-first を優先し、
+   runtime coordinator lifecycle は導入せず、`RuntimeWorldRetireManager` は実装委譲として解釈する。
+
+用語正規化（齟齬回避）:
+
+- 本書では `RuntimePublication` を正規記法として扱う。
+
 ---
 
 ## Authority Graph（論理図）
@@ -60,7 +78,7 @@
 | Object Family | Retire Authority | Reclaim Authority | Epoch/Grace | Notes |
 | --- | --- | --- | --- | --- |
 | GlobalSnapshot | SnapshotCoordinator（via SnapshotRetireManager） | SnapshotRetireManager | 必須 | 既存系統を canonical とする |
-| RuntimePublishWorld payload | RuntimeWorldRetireManager | RuntimeWorldRetireManager | 必須（共有Epoch） | runtime-only publish world として管理 |
+| RuntimePublication payload | RuntimeWorldRetireManager | RuntimeWorldRetireManager | 必須（共有Epoch） | runtime-only publish world として管理 |
 | DSP lifetime tokens | RuntimeWorldRetireManager | RuntimeWorldRetireManager | 必須（共有Epoch） | `activeDSP/currentDSP/fadingOutDSP/queuedOldDSP` を handle 化して統合 |
 | RT execution-local state | N/A | N/A | 不要 | Audio Thread private、retire不要 |
 | Telemetry state | channel owner（必要時のみ） | N/A（通常 destroy不要） | 原則不要 | lifecycle が runtime と同一なら runtime 終了で解放 |
@@ -105,14 +123,16 @@ DSPHandle {
 
 規則（確定）:
 
-1. **authority identity** は RuntimeWorldRetireManager に固定
-2. enqueue/destroy の具体実装は family ごとに sub-component へ委譲可
-3. 委譲先は authority を再定義してはならない
-4. 外部コンポーネントが独自 retire queue を持つことを禁止
+1. **authority source-of-truth** は capability-first を優先（runtime coordinator lifecycle 非導入）
+2. RuntimeWorldRetireManager は retire/reclaim の実装委譲 identity として運用する
+3. enqueue/destroy の具体実装は family ごとに sub-component へ委譲可
+4. 委譲先は authority を再定義してはならない
+5. 外部コンポーネントが独自 retire queue を持つことを禁止
 
 許可される形:
 
-- RuntimeWorldRetireManager（authority identity）
+- RetireAuthority（type-level capability source-of-truth）
+- RuntimeWorldRetireManager（retire/reclaim 実装委譲 identity）
 - DSPFamilyRetireWorker（実装委譲）
 - RuntimePayloadReclaimWorker（実装委譲）
 

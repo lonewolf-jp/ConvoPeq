@@ -19,6 +19,10 @@
 3. `acquire/release` は対応ペアを持つ箇所にのみ適用
 4. epoch/grace は reclaim 可否判定の仕様として独立定義
 
+用語正規化（齟齬回避）:
+
+- 本書では `RuntimePublication` を正規記法として扱う。
+
 ---
 
 ## Domain 定義
@@ -28,7 +32,7 @@
 対象:
 
 - `GlobalSnapshot`
-- Runtime publish payload（RuntimePublishWorld 側）
+- Runtime publish payload（RuntimePublication 側の payload）
 
 標準HB:
 
@@ -148,7 +152,7 @@ JUCE callback 拡張（確定）:
 | --- | --- | --- | --- | --- |
 | GlobalSnapshot pointer | A | Message publish owner | Audio observer | release->acquire |
 | ObservedRuntime guard scope | A | observer | observer | scope-bound validity |
-| RuntimePublishWorld pointer | A | Message publish owner | Audio observer | release->acquire（確定） |
+| RuntimePublication pointer | A | Message publish owner | Audio observer | release->acquire（確定） |
 | DSPHandle lifecycle | B | retire authority | reclaim authority | enqueue->grace->destroy |
 | `currentDSP` visibility | B/A bridge | Message transition owner | Audio | publish visibility + lifetime token |
 | RTStatistics counters | C | Audio | NonRT/UI | atomic write->read |
@@ -184,7 +188,7 @@ JUCE callback 拡張（確定）:
 
 ### A -> F（publish と audio callback）
 
-- RuntimePublishWorld payload は callback 可視化前に closure 完了していること
+- RuntimePublication の payload は callback 可視化前に closure 完了していること
 - callback 側で追加の ownership 解決を要求する payload 構造は禁止
 
 ### F -> D（callback と UI）
@@ -194,7 +198,7 @@ JUCE callback 拡張（確定）:
 
 ---
 
-## RuntimePublishWorld Payload Closure 規則（確定）
+## RuntimePublication payload closure 規則（確定）
 
 payload closure は次を満たす:
 
@@ -227,7 +231,7 @@ payload closure は次を満たす:
 - [ ] domain bridge rule の違反ケースを禁止事項へ反映済み
 - [ ] bug2 系シナリオで HB 欠落がない
 - [ ] JUCE callback ordering（prepareToPlay / getNextAudioBlock / releaseResources）の順序検証が完了
-- [ ] RuntimePublishWorld payload closure 違反ケースが禁止事項へ反映済み
+- [ ] RuntimePublication の payload closure 違反ケースが禁止事項へ反映済み
 - [ ] RT detect -> NonRT enqueue bridge（R9）の検証が完了
 
 現時点判定:

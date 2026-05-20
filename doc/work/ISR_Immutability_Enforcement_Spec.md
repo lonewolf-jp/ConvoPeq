@@ -4,6 +4,10 @@
 
 `publish immutability discipline` を人間運用に依存させず、**検証可能な enforcement** として定義する。
 
+用語正規化（齟齬回避）:
+
+- 本書では `RuntimePublication` を正規記法として扱う。
+
 ## Enforcement モデル（確定）
 
 ### E1. Builder Freeze
@@ -30,7 +34,7 @@
 
 ## 適用対象
 
-- RuntimePublishWorld payload
+- RuntimePublication payload
 - EngineRuntime publish fields
 - RuntimeGraph publish fields
 - DSPConfig publish payload

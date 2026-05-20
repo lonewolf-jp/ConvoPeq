@@ -5,6 +5,11 @@
 `DSPCore` を単一 immutable object とみなす前提を廃止し、
 **DSPConfig / DSPExecutionInstance / Telemetry** の3層分解を確定仕様として定義する。
 
+運用注記（REV3.2）:
+
+- 本書中の `RuntimeWorldRetireManager` は
+  capability-first（Publish/Retire/Shutdown）制約下の retire/reclaim 実装委譲名として解釈する。
+
 ---
 
 ## 分解結果（確定）
@@ -104,7 +109,8 @@ DSPHandle {
 
 - [x] DSPConfig / DSPExecutionInstance / Telemetry の境界を確定
 - [x] DSPHandle 方式を確定
-- [x] destroy authority を RuntimeWorldRetireManager に単一化
+- [x] destroy authority source-of-truth を capability-first（RetireAuthority）に単一化
+- [x] retire/reclaim 実装委譲を RuntimeWorldRetireManager に固定
 - [x] epoch 方針を shared に確定
 - [ ] 実装後に bug2 系 UAF 検証を実施
 

@@ -2,7 +2,7 @@
 
 ## 目的
 
-本書は、`GlobalSnapshot` と `RuntimePublishWorld` が共有する EpochDomain について、
+本書は、`GlobalSnapshot` と `RuntimePublication` が共有する EpochDomain について、
 **負荷増加時でも retire/reclaim の安全性と進行性を維持できるか** を検証するための計画を定義する。
 
 狙い:
@@ -10,6 +10,17 @@
 - shared strategy の採用妥当性を定量的に確認する
 - bug2 系 UAF 再発防止に必要な証跡を残す
 - 失敗時の縮退運用（fallback）を事前確定する
+
+### REV3.2運用優先注記
+
+- 本書の epoch strategy 比較は設計参照表現として扱う。
+- 実装運用は `plan5.md` REV3.2 を優先し、
+  `runtime exposes evidence / CI validates evidence` を固定方針とする。
+- epoch arbitration の最終配置は RetireRuntime 内部責務への統合優先で解釈する。
+
+用語正規化（齟齬回避）:
+
+- 本書では `RuntimePublication` を正規記法として扱う。
 
 ---
 
@@ -134,7 +145,7 @@ R10 固定ルール:
 
 内容:
 
-- `GlobalSnapshot` 系と `RuntimePublishWorld` 系の EpochDomain を分離
+- `GlobalSnapshot` 系と `RuntimePublication` 系の EpochDomain を分離
 - retire queue も domain 別に分割
 
 制約:
@@ -144,7 +155,7 @@ R10 固定ルール:
 移行手順（最小）:
 
 1. split epoch 用 domain を作成
-2. RuntimePublishWorld family を新domainへ再割当
+2. RuntimePublication family を新domainへ再割当
 3. retire queue を domain 分割
 4. grace/reclaim pipeline を段階切替
 5. rollback 可能な状態で burn-in 検証

@@ -5,6 +5,24 @@
 本書は、実装前に runtime state を object family 単位で固定し、
 ownership leakage / reclaim hole / HB 欠落を防止するための正本である。
 
+運用注記（REV3.1 優先）:
+
+- 本表の `Retire/Reclaim Authority` 列に現れる `RuntimeWorldRetireManager` は
+  capability-first 制約下での実装委譲名を指す（coordinator は互換 shim）。
+- authority source-of-truth は capability-first を優先する。
+
+### REV3.2運用優先注記
+
+- 本表の state/object 分類は設計参照表現として扱う。
+- 実装運用は `plan5.md` REV3.2 を優先し、
+  `runtime exposes evidence / CI validates evidence` を固定方針とする。
+- authority 列の解釈衝突時は capability-first を優先し、
+  coordinator は互換 shim、manager 名は実装委譲として扱う。
+
+用語正規化（齟齬回避）:
+
+- 本表では `RuntimePublication` を正規記法として扱う。
+
 ---
 
 ## Runtime State Matrix（確定）
@@ -13,8 +31,8 @@ ownership leakage / reclaim hole / HB 欠落を防止するための正本であ
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | GlobalSnapshot | No | Message publish path | Audio observe path | Yes | snapshot | SnapshotRetireManager | Yes (shared) | A |
 | ObservedRuntime.guard | scope-bound | observer | observer | No | scope | N/A | Yes | A |
-| RuntimePublishWorld pointer | Atomic ptr | Message publish owner | Audio observer | Yes | runtime | RuntimeWorldRetireManager | Yes (shared) | A |
-| RuntimePublishWorld payload closure metadata | No (publish-fixed) | Message build path | Audio observer | Yes | runtime | RuntimeWorldRetireManager | Yes (shared) | A/F bridge |
+| RuntimePublication pointer（公開ポインタ） | Atomic ptr | Message publish owner | Audio observer | Yes | runtime | RuntimeWorldRetireManager | Yes (shared) | A |
+| RuntimePublication payload closure metadata（公開メタデータ） | No (publish-fixed) | Message build path | Audio observer | Yes | runtime | RuntimeWorldRetireManager | Yes (shared) | A/F bridge |
 | EngineRuntime (publish payload) | Yes (sealed-at-publish) | Message build path | Audio read-only | Yes | runtime | RuntimeWorldRetireManager | Yes (shared) | A |
 | RuntimeGraph (publish payload) | Yes (sealed-at-publish) | Message build path | Audio read-only | Yes | runtime | RuntimeWorldRetireManager | Yes (shared) | A/B bridge |
 | DSPHandle | logical mutable | Message transition owner | Audio + reclaim | Yes (token publish) | runtime | RuntimeWorldRetireManager | Yes (shared) | B |
@@ -50,11 +68,11 @@ ownership leakage / reclaim hole / HB 欠落を防止するための正本であ
 ## 確定事項
 
 1. EpochDomain は shared strategy（GlobalSnapshot と Runtime world で共有）
-2. RuntimePublishWorld は runtime-only publish world
+2. RuntimePublication は runtime-only publish world
 3. DSP pointer retire は禁止、DSPHandle 経由のみ
 4. RTLocalState は execution-local のみ（ownership-bearing state 禁止）
 5. JUCE callback lifecycle（prepare/release）は Domain F で順序管理する
-6. RuntimePublishWorld payload closure は metadata 行で追跡する
+6. RuntimePublication の payload closure は metadata 行で追跡する
 
 ---
 
