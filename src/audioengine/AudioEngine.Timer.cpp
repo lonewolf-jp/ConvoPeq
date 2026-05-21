@@ -40,22 +40,14 @@ void AudioEngine::timerCallback()
             debugLastReportedTransitionNextPtr = nextPtr;
             debugLastReportedTransitionLatencyDeltaSamples = latencyDelta;
 
-           #if defined(NDEBUG)
-            const bool suppressReleaseVerifyTransitionLog =
-                (active == 0
-                    && policy == 1
-                    && nextPtr == 0
-                    && absNoLibm(fadeSec) <= 1e-9
-                    && latencyDelta == 0);
-
-            if (!suppressReleaseVerifyTransitionLog)
-           #endif
+#if JUCE_DEBUG
             diagLog("[VERIFY] transition state active=" + juce::String(active)
                 + " policy=" + juce::String(policy)
                 + " current=0x" + juce::String::toHexString(static_cast<juce::int64>(currentPtr))
                 + " next=0x" + juce::String::toHexString(static_cast<juce::int64>(nextPtr))
                 + " fadeSec=" + juce::String(fadeSec, 6)
                 + " latencyDelta=" + juce::String(latencyDelta));
+#endif
         }
 
     }

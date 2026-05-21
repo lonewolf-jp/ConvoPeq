@@ -39,3 +39,15 @@ Thumbs.db
 # serena mcp server logs
 .cache/
 .serena/
+
+# MUSUBI mcp server
+steering/
+storage/
+.musubi/
+
+# Code Graph mcp server
+.venv-codegraph/
+.codegraph/
+
+# evidence
+evidence/

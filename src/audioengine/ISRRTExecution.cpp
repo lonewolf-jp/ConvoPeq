@@ -75,7 +75,7 @@ size_t RTTraceRelay::getCurrentDrainCount() const noexcept
 // RTCapabilityFirewall Implementation
 // ============================================================================
 
-thread_local bool RTCapabilityFirewall::isRTContextFlag_ = false;
+std::atomic<bool> RTCapabilityFirewall::isRTContextFlag_{ false };
 
 RTCapabilityFirewall::RTCapabilityFirewall() = default;
 RTCapabilityFirewall::~RTCapabilityFirewall() = default;
@@ -88,7 +88,7 @@ FirewallToken RTCapabilityFirewall::enter() noexcept
         .isValid = true
     };
 
-    isRTContextFlag_ = true;
+    convo::publishAtomic(isRTContextFlag_, true, std::memory_order_release);
     return token;
 }
 
@@ -98,13 +98,13 @@ void RTCapabilityFirewall::leave(const FirewallToken& token) noexcept
     assert(token.isValid);
     assert(token.threadId == std::this_thread::get_id());
 
-    isRTContextFlag_ = false;
+    convo::publishAtomic(isRTContextFlag_, false, std::memory_order_release);
 }
 
 void RTCapabilityFirewall::auditPublishAttempt(const char* callSite) noexcept
 {
 #if JUCE_DEBUG || CONVO_CI_BUILD
-    if (isRTContextFlag_) {
+    if (convo::consumeAtomic(isRTContextFlag_, std::memory_order_acquire)) {
         assert(false && "publishAtomic called from RT context!");
     }
 #endif
@@ -115,12 +115,12 @@ void RTCapabilityFirewall::auditPublishAttempt(const char* callSite) noexcept
 // RTAllocatorFirewall Implementation
 // ============================================================================
 
-thread_local bool RTAllocatorFirewall::isRTContextFlag_ = false;
+std::atomic<bool> RTAllocatorFirewall::isRTContextFlag_{ false };
 
 void RTAllocatorFirewall::onAllocAttempt(size_t size, const char* callSite) noexcept
 {
 #if JUCE_DEBUG || CONVO_CI_BUILD
-    if (isRTContextFlag_) {
+    if (convo::consumeAtomic(isRTContextFlag_, std::memory_order_acquire)) {
         assert(false && "heap allocation attempted from RT context!");
     }
 #endif
@@ -130,12 +130,12 @@ void RTAllocatorFirewall::onAllocAttempt(size_t size, const char* callSite) noex
 
 void RTAllocatorFirewall::markRTContext(bool entering) noexcept
 {
-    isRTContextFlag_ = entering;
+    convo::publishAtomic(isRTContextFlag_, entering, std::memory_order_release);
 }
 
 bool RTAllocatorFirewall::isRTContext() noexcept
 {
-    return isRTContextFlag_;
+    return convo::consumeAtomic(isRTContextFlag_, std::memory_order_acquire);
 }
 
 }  // namespace isr

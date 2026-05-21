@@ -1,0 +1,13 @@
+{
+    "servers": {
+        "codegraph": {
+            "type": "stdio",
+            "command": "${workspaceFolder}\\.venv-codegraph\\Scripts\\codegraph-mcp.exe",
+            "args": [
+                "serve",
+                "--repo",
+                "${workspaceFolder}"
+            ]
+        }
+    }
+}

@@ -233,7 +233,7 @@ public:
     // バイパス制御
     //----------------------------------------------------------
     void setBypass(bool shouldBypass);
-    bool isBypassed() const { const juce::ScopedLock lock(pendingOverrideLock); return pendingOverride.bypassed; }
+    bool isBypassed() { const juce::ScopedLock lock(pendingOverrideLock); return pendingOverride.bypassed; }
     // acquire: LoaderThread/executeCommit の publishNewConvolverState release と HB し、有効な state を取得。
     const convo::ConvolverState* getConvolverState() const { return convo::consumeAtomic(convolverState, std::memory_order_acquire); } // acquire: publishNewConvolverState の release と HB
     void enterStateReader(int /*readerIndex*/) const noexcept {}
@@ -932,7 +932,7 @@ private:
     // Setters write parameters here instead of directly publishing atomics.
     // This pending override is captured by rebuild requests.
     PendingParams pendingOverride;
-    mutable juce::CriticalSection pendingOverrideLock;
+    juce::CriticalSection pendingOverrideLock;
 
     //----------------------------------------------------------
     // IR情報

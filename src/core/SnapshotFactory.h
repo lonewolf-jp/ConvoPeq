@@ -26,7 +26,7 @@ public:
      */
     static GlobalSnapshot* createImpl(
         const SnapshotParams& pending,
-        GlobalSnapshot* current,
+        const GlobalSnapshot* current,
         uint64_t generation,
         double sampleRate) noexcept;
 

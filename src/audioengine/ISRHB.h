@@ -55,13 +55,13 @@ public:
     void recordEdge(const HBEdge& edge) noexcept;
 
     // Emit HB trace to file
-    void emitTrace(const std::filesystem::path& outputPath) const;
-    bool validateMonotonicTimestamps() const noexcept;
-    std::vector<HBTraceEvent> snapshotEvents() const;
+    void emitTrace(const std::filesystem::path& outputPath);
+    bool validateMonotonicTimestamps() noexcept;
+    std::vector<HBTraceEvent> snapshotEvents();
 
 private:
     std::vector<HBTraceEvent> traceEvents_;
-    mutable std::mutex traceMutex_;
+    std::mutex traceMutex_;
     std::atomic<uint64_t> eventCount_{0};
 };
 
@@ -105,7 +105,7 @@ public:
     bool simulateReorderScenario(HBReorderScenario scenario) const noexcept;
     std::array<HBScenarioResult, 4> runScenarioSuite() const noexcept;
 
-    void setTraceRuntime(const HBTraceRuntime* traceRuntime) noexcept;
+    void setTraceRuntime(HBTraceRuntime* traceRuntime) noexcept;
 
 private:
     bool hasTraceRuntimeBound() const noexcept;
@@ -115,7 +115,7 @@ private:
     bool checkRetireDelayBound(std::uint64_t maxNs) const noexcept;
     bool checkObserveRaceFree() const noexcept;
 
-    const HBTraceRuntime* traceRuntime_ = nullptr;
+    HBTraceRuntime* traceRuntime_ = nullptr;
 };
 
 }  // namespace isr

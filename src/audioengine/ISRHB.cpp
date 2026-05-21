@@ -33,7 +33,7 @@ void HBTraceRuntime::recordEdge(const HBEdge& edge) noexcept
     (void)convo::fetchAddAtomic(eventCount_, uint64_t{1}, std::memory_order_relaxed);
 }
 
-void HBTraceRuntime::emitTrace(const std::filesystem::path& outputPath) const
+void HBTraceRuntime::emitTrace(const std::filesystem::path& outputPath)
 {
     std::error_code ec;
     std::filesystem::create_directories(outputPath.parent_path(), ec);
@@ -77,7 +77,7 @@ void HBTraceRuntime::emitTrace(const std::filesystem::path& outputPath) const
     file << "}\n";
 }
 
-bool HBTraceRuntime::validateMonotonicTimestamps() const noexcept
+bool HBTraceRuntime::validateMonotonicTimestamps() noexcept
 {
     std::lock_guard<std::mutex> lock(traceMutex_);
     if (traceEvents_.empty()) {
@@ -95,7 +95,7 @@ bool HBTraceRuntime::validateMonotonicTimestamps() const noexcept
     return true;
 }
 
-std::vector<HBTraceEvent> HBTraceRuntime::snapshotEvents() const
+std::vector<HBTraceEvent> HBTraceRuntime::snapshotEvents()
 {
     std::lock_guard<std::mutex> lock(traceMutex_);
     return traceEvents_;
@@ -218,7 +218,7 @@ std::array<HBScenarioResult, 4> HBVerifierRuntime::runScenarioSuite() const noex
     }};
 }
 
-void HBVerifierRuntime::setTraceRuntime(const HBTraceRuntime* traceRuntime) noexcept
+void HBVerifierRuntime::setTraceRuntime(HBTraceRuntime* traceRuntime) noexcept
 {
     traceRuntime_ = traceRuntime;
 }

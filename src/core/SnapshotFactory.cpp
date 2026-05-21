@@ -124,7 +124,7 @@ uint64_t SnapshotFactory::computeContentHash(const SnapshotParams& params) noexc
 }
 
 GlobalSnapshot* SnapshotFactory::createImpl(const SnapshotParams& pending,
-                                            GlobalSnapshot* current,
+                                            const GlobalSnapshot* current,
                                             uint64_t generation,
                                             double sampleRate) noexcept
 {

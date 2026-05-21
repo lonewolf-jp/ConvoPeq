@@ -83,7 +83,7 @@ public:
     void assertAudioRunning() const noexcept;
 
     // artifact emit（shutdown time または CI trigger）
-    void emitPhaseTrace(const std::filesystem::path& outputPath) const;
+    void emitPhaseTrace(const std::filesystem::path& outputPath);
 
 private:
     struct PhaseTransition
@@ -106,7 +106,7 @@ private:
     std::mutex nonRtGuard_;
 
     // artifact 用 trace buffer
-    mutable std::mutex traceGuard_;
+    std::mutex traceGuard_;
     std::vector<PhaseTransition> transitions_;
 };
 

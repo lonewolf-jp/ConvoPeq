@@ -27,7 +27,7 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 	GlobalSnapshot* oldTarget = m_slots.exchangeTarget(target, std::memory_order_acq_rel); // acq_rel: acquire で旧 target の書き込みと HB; release で completeFade の acquire と HB し新 target を公開
 	if (oldTarget) {
 		// Audio Thread が参照中の可能性があるため、即時 delete せず RCU 遅延解放
-		const uint64_t retireEpoch = m_epochDomain.current();
+		const uint64_t retireEpoch = m_epochDomain->current();
 		m_retire.retire(oldTarget, retireEpoch);
 	}
 
@@ -53,7 +53,7 @@ void SnapshotCoordinator::resetFadeStateAndRetireTarget() noexcept
 	GlobalSnapshot* target = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で startFade の release と HB し旧 target 取得; release で次回 startFade の acquire と HB (null 公開)
 	if (target)
 	{
-		const uint64_t retireEpoch = m_epochDomain.publish();
+		const uint64_t retireEpoch = m_epochDomain->publish();
 		m_retire.retire(target, retireEpoch);
 	}
 
@@ -66,7 +66,7 @@ void SnapshotCoordinator::completeFade() noexcept
 	if (!target)
 		return;
 
-	const uint64_t retireEpoch = m_epochDomain.publish();
+	const uint64_t retireEpoch = m_epochDomain->publish();
 	GlobalSnapshot* old = m_slots.exchangeCurrent(target, std::memory_order_acq_rel); // acq_rel: acquire で旧 current への全書き込みと HB; release で observeCurrent/updateFade の acquire と HB し新 current を公開
 	m_retire.retire(old, retireEpoch);
 

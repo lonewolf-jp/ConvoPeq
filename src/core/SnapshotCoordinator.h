@@ -24,14 +24,14 @@ static inline float equalPowerSinApprox(float x) noexcept
 class SnapshotCoordinator {
 public:
     explicit SnapshotCoordinator(EpochDomain& epochDomain) noexcept
-        : m_epochDomain(epochDomain)
+        : m_epochDomain(&epochDomain)
     {
         m_slots.initializeSlots();
         m_fade.initialize();
     }
 
     ~SnapshotCoordinator() noexcept {
-        const uint64_t retireEpoch = m_epochDomain.publish();
+        const uint64_t retireEpoch = m_epochDomain->publish();
 
         // acq_rel ×2: acquire → 直前の publishNew/switchImmediate release と HB して旧ポインタ取得；
         //              release → null を公開し後続 acquire と HB してダブルフリーを防止。
@@ -42,12 +42,11 @@ public:
         snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
         m_retire.retire(snap, retireEpoch);
 
-        m_retire.reclaim(m_epochDomain);
+        m_retire.reclaim(*m_epochDomain);
     }
 
     ObservedRuntime observeCurrentRuntime(int readerIndex) const noexcept {
-        auto& domain = const_cast<EpochDomain&>(m_epochDomain);
-        ObservedRuntime observed(domain, readerIndex);
+        ObservedRuntime observed(*m_epochDomain, readerIndex);
         // acquire: switchImmediate/publishNew の m_current release と HB し最新スナップを観測。
         observed.ptr = m_slots.loadCurrent(std::memory_order_acquire);
         return observed;
@@ -59,7 +58,7 @@ public:
         //          旧ポインタ回収は release で十分（publishNew と同一 NonRT スレッドから呼ぶ前提）。
         GlobalSnapshot* oldSnap = m_slots.exchangeCurrent(newSnap, std::memory_order_release);
         if (oldSnap) {
-            uint64_t newEpoch = m_epochDomain.publish();
+            uint64_t newEpoch = m_epochDomain->publish();
             m_retire.retire(oldSnap, newEpoch);
         }
     }
@@ -114,7 +113,7 @@ private:
     void resetFadeStateAndRetireTarget() noexcept;
     void completeFade() noexcept;
 
-    EpochDomain& m_epochDomain;
+    EpochDomain* m_epochDomain;
     SnapshotSlotStore m_slots;
     SnapshotFadeState m_fade;
     SnapshotRetireManager m_retire;

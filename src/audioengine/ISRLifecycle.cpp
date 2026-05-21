@@ -199,7 +199,7 @@ LifecyclePhase LifecycleIsolationRuntime::transitionTo(LifecyclePhase next)
     return next;
 }
 
-void LifecycleIsolationRuntime::emitPhaseTrace(const std::filesystem::path& outputPath) const
+void LifecycleIsolationRuntime::emitPhaseTrace(const std::filesystem::path& outputPath)
 {
     std::lock_guard<std::mutex> guard(traceGuard_);
 

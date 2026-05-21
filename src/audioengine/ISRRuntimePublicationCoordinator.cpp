@@ -93,7 +93,7 @@ void PublicationBuffer::retireOld() {
     }
 }
 
-std::size_t PublicationBuffer::size() const noexcept {
+std::size_t PublicationBuffer::size() noexcept {
     std::lock_guard<std::mutex> lock(guard_);
     return queued_.size();
 }

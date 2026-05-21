@@ -126,8 +126,8 @@ public:
     void auditPublishAttempt(const char* callSite) noexcept;
 
 private:
-    // thread-local フラグ（RT context 検出用）
-    static thread_local bool isRTContextFlag_;
+    // RT context 検出フラグ
+    static std::atomic<bool> isRTContextFlag_;
 };
 
 /**
@@ -146,7 +146,7 @@ public:
     static bool isRTContext() noexcept;
 
 private:
-    static thread_local bool isRTContextFlag_;
+    static std::atomic<bool> isRTContextFlag_;
 };
 
 /**

@@ -43,7 +43,8 @@
     // Serenaが作成したインデックス（Memories）を優先的に参照させる
     "github.copilot.chat.search.semanticScrolling": true,
     "github.copilot.chat.mcp.allowedServers": [
-        "serena"
+        "serena",
+        "codegraph"
     ],
     "github.copilot.selectedMode": "agent"
 }

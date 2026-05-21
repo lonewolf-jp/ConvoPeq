@@ -62,11 +62,11 @@ public:
     void enqueue(const void* world);
     void retireOld();
 
-    [[nodiscard]] std::size_t size() const noexcept;
+    [[nodiscard]] std::size_t size() noexcept;
 
 private:
     std::vector<const void*> queued_;
-    mutable std::mutex guard_;
+    std::mutex guard_;
 };
 
 } // namespace convo::isr

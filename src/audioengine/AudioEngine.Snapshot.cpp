@@ -117,7 +117,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
     convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
         params,
-        const_cast<convo::GlobalSnapshot*>(observedCurrent.get()),
+        observedCurrent.get(),
         generation,
         sampleRate);
 
