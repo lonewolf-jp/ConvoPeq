@@ -169,6 +169,20 @@ public:
         return minEpoch;
     }
 
+    uint32_t activeReaderCount() const noexcept
+    {
+        uint32_t count = 0;
+
+        for (const auto& slot : readers)
+        {
+            const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
+            if (depth != 0)
+                ++count;
+        }
+
+        return count;
+    }
+
     bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept
     {
         return deferredDeletionQueue.enqueue(ptr, deleter, epoch);

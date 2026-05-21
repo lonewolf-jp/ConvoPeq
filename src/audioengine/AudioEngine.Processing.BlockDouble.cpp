@@ -25,16 +25,18 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20;
     if (numSamples <= 0 || numSamples > ABSOLUTE_MAX_BLOCK_SIZE)
     {
-        applySafeSilentFallback(buffer);
+        buffer.clear();
         return;
     }
 
     const auto runtimePublishView = getRuntimePublishView();
     const auto* runtimeGraph = runtimePublishView.graph;
-    DSPCore* dsp = resolveCurrentDSPFromRuntimeWorldOnly(runtimeGraph);
+    DSPCore* dsp = (runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
+        ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+        : nullptr;
     if (dsp == nullptr)
     {
-        applySafeSilentFallback(buffer);
+        buffer.clear();
         return;
     }
 
@@ -55,7 +57,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // DSPCore 固有の上限チェック (getNextAudioBlock と同様)
     if (numSamples > dsp->maxSamplesPerBlock)
     {
-        applySafeSilentFallback(buffer);
+        buffer.clear();
         return;
     }
 
@@ -65,24 +67,26 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     updateAudioThreadSnapshotFade(numSamples, snapshotAlpha, snapshotFrom, snapshotTo);
     (void) snapshotAlpha;
 
-    const double engineSampleRate = runtimeSampleRateWorldOnly(runtimeGraph);
+    const double engineSampleRate = (runtimeGraph != nullptr) ? runtimeGraph->sampleRate : 0.0;
     if (engineSampleRate <= 0.0
         || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
     {
-        applySafeSilentFallback(buffer);
+        buffer.clear();
         return;
     }
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
     DSPCore* fading = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
-    bool useDryAsOld = runtimeCrossfadeUseDryAsOldWorldOnly(runtimeGraph);
-    const bool hasPendingCrossfade = runtimeCrossfadePendingWorldOnly(runtimeGraph);
+    bool useDryAsOld = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeUseDryAsOld : false;
+    const bool hasPendingCrossfade = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadePending : false;
     if (processCrossfadeDelayGateIfPending(fading,
                                            useDryAsOld,
                                            hasPendingCrossfade,
                                            [&]()
     {
-        auto fadingState = makeCrossfadeAuxState(procState);
+        auto fadingState = procState;
+        fadingState.analyzerEnabled = false;
+        fadingState.adaptiveCaptureQueue = nullptr;
 
         fading->processDouble(buffer,
                       analyzerFifo,
@@ -107,7 +111,9 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         dspCrossfadeDoubleBuffer.clear(0, 0, numSamples);
         dspCrossfadeDoubleBuffer.clear(1, 0, numSamples);
 
-        auto fadingState = makeCrossfadeAuxState(procState);
+        auto fadingState = procState;
+        fadingState.analyzerEnabled = false;
+        fadingState.adaptiveCaptureQueue = nullptr;
 
         if (useDryAsOld)
         {

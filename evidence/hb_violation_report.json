@@ -1,0 +1,28 @@
+﻿{
+    "violations":  [
+
+                   ],
+    "schema":  "hb_violation_report_v1",
+    "scenarioResults":  [
+                            {
+                                "result":  "pass",
+                                "name":  "forced_reorder"
+                            },
+                            {
+                                "result":  "pass",
+                                "name":  "epoch_lag"
+                            },
+                            {
+                                "result":  "pass",
+                                "name":  "retire_delay"
+                            },
+                            {
+                                "result":  "pass",
+                                "name":  "observe_race"
+                            }
+                        ],
+    "status":  "ok",
+    "generatedAtNs":  1779369731543000000,
+    "provenance":  "runtime",
+    "runId":  "local-ci-improved3-1779369710955"
+}

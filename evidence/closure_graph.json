@@ -1,0 +1,17 @@
+﻿{
+    "schema":  "closure_graph_v1",
+    "buildMode":  "Release",
+    "timestamp_ns":  383332134614500,
+    "status":  "valid",
+    "closureId":  3,
+    "nodeCount":  1,
+    "edgeCount":  0,
+    "descriptorCoverageComplete":  true,
+    "externalMutableDependencies":  0,
+    "validationErrors":  [
+
+                         ],
+    "provenance":  "runtime",
+    "runId":  "local-ci-improved3-1779369710955",
+    "generatedAtNs":  1779369731543000000
+}

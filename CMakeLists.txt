@@ -146,7 +146,22 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/AudioEngine.UIEvents.cpp
     src/audioengine/AudioEngine.StateIO.cpp
     src/audioengine/AudioEngine.Threading.cpp
-    src/audioengine/AudioEngine.Processing.Latency.cpp
+    src/audioengine/ISRLifecycle.cpp
+        src/audioengine/ISRRTExecution.cpp
+            src/audioengine/ISRDSPHandle.cpp
+                src/audioengine/ISRClosure.cpp
+                src/audioengine/ISRPayloadTier.cpp
+                src/audioengine/ISRHB.cpp
+                src/audioengine/ISRRetire.cpp
+                src/audioengine/ISRShutdown.cpp
+                src/audioengine/ISRRuntimePublicationCoordinator.cpp
+                src/audioengine/ISRDSPQuarantine.cpp
+                src/audioengine/ISRClosureGraphWalker.cpp
+                src/audioengine/ISRDebugRuntime.cpp
+                src/audioengine/ISRRetireRuntimeEx.cpp
+                src/audioengine/ISRBarrierOptimizer.cpp
+                src/audioengine/ISREvidenceExporter.cpp
+                src/audioengine/AudioEngine.Processing.Latency.cpp
     src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp
     src/audioengine/AudioEngine.Processing.ReleaseResources.cpp
     src/audioengine/AudioEngine.Processing.AudioBlock.cpp

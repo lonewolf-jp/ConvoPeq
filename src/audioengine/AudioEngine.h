@@ -78,6 +78,21 @@ struct CoeffSet {
 #include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
 #include "core/RebuildTypes.h"
+#include "ISRLifecycle.h"
+#include "ISRRTExecution.h"
+#include "ISRDSPHandle.h"
+#include "ISRClosure.h"
+#include "ISRPayloadTier.h"
+#include "ISRHB.h"
+#include "ISRRetire.h"
+#include "ISRShutdown.h"
+#include "ISRRuntimePublicationCoordinator.h"
+#include "ISRDSPQuarantine.h"
+#include "ISRClosureGraphWalker.h"
+#include "ISRDebugRuntime.h"
+#include "ISRRetireRuntimeEx.h"
+#include "ISRBarrierOptimizer.h"
+#include "ISREvidenceExporter.h"
 
 class NoiseShaperLearner;
 class AudioEngine;
@@ -100,7 +115,7 @@ inline double absNoLibm(double x) noexcept
     return v.d;
 }
 
-struct RuntimeState
+struct RuntimeState : convo::isr::SealedObject<RuntimeState>
 {
     convo::EngineRuntime engine {};
     convo::RuntimeGraph graph {};
@@ -597,6 +612,11 @@ public:
     uint64_t publishRcuEpoch() noexcept;
     void enterRcuReader(int readerIndex) noexcept;
     void exitRcuReader(int readerIndex) noexcept;
+    uint64_t publishRetireEpoch() noexcept;
+    uint64_t currentRetireEpoch() const noexcept;
+    uint64_t advanceRetireEpoch() noexcept;
+    bool enqueueRetireEpochBounded(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept;
+    uint32_t activeEpochObserverCount() const noexcept;
 
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
@@ -993,7 +1013,7 @@ private:
                 for (auto& entry : map)
                 {
                     if (entry.second != nullptr)
-                        entry.second->release(owner->epochDomain());
+                        entry.second->release(owner->m_epochDomain);
                 }
             }
 
@@ -1036,48 +1056,13 @@ public:
     convo::NonOwningPtr<DSPCore> activeDSP { nullptr }; // Non-RT ownership holder
     convo::NonOwningPtr<DSPCore> fadingOutDSP { nullptr }; // Non-RT fading slot holder
 
-    inline DSPCore* loadCurrentDSP(std::memory_order order = std::memory_order_acquire) const noexcept
+    inline DSPCore* exchangeFadingOutDSP(DSPCore* value) noexcept
     {
-        juce::ignoreUnused(order);
-        return activeDSP.get();
-    }
 
-    inline DSPCore* exchangeCurrentDSP(DSPCore* value,
-                                       std::memory_order order = std::memory_order_acq_rel) noexcept
-    {
-        juce::ignoreUnused(order);
-        DSPCore* previous = activeDSP.get();
-        activeDSP = value;
-        return previous;
-    }
 
-    inline void publishCurrentDSP(DSPCore* value,
-                                  std::memory_order order = std::memory_order_release) noexcept
-    {
-        juce::ignoreUnused(order);
-        activeDSP = value;
-    }
-
-    inline DSPCore* loadFadingOutDSP(std::memory_order order = std::memory_order_acquire) const noexcept
-    {
-        juce::ignoreUnused(order);
-        return fadingOutDSP.get();
-    }
-
-    inline DSPCore* exchangeFadingOutDSP(DSPCore* value,
-                                         std::memory_order order = std::memory_order_acq_rel) noexcept
-    {
-        juce::ignoreUnused(order);
         DSPCore* previous = fadingOutDSP.get();
         fadingOutDSP = value;
         return previous;
-    }
-
-    inline void publishFadingOutDSP(DSPCore* value,
-                                    std::memory_order order = std::memory_order_release) noexcept
-    {
-        juce::ignoreUnused(order);
-        fadingOutDSP = value;
     }
     struct RuntimePublishView
     {
@@ -1099,7 +1084,6 @@ public:
     };
 
     class RuntimePublicationBridge;
-    using DspCoreHandle = DSPCore*;
 
     std::atomic<std::uint64_t> runtimeGraphRevision { 0 };
     std::array<CrossfadePreparedSnapshot, 2> crossfadePreparedSnapshots_ {};
@@ -1615,61 +1599,6 @@ public:
         return graph;
     }
 
-    inline bool runtimeCrossfadePendingWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
-    {
-        return runtimeGraph != nullptr
-            ? runtimeGraph->dspCrossfadePending
-            : false;
-    }
-    inline bool runtimeCrossfadeUseDryAsOldWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
-    {
-        return runtimeGraph != nullptr
-            ? runtimeGraph->dspCrossfadeUseDryAsOld
-            : false;
-    }
-    inline DSPCore* runtimePublishedCurrentDSP(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
-    {
-        if (runtimeGraph != nullptr)
-            return static_cast<DSPCore*>(runtimeGraph->activeNode);
-        return nullptr;
-    }
-    inline std::uint64_t runtimeRevision(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
-    {
-        if (runtimeGraph != nullptr)
-            return runtimeGraph->generation;
-        return 0;
-    }
-    inline std::uint64_t runtimeCurrentUuid(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
-    {
-        if (runtimeGraph != nullptr)
-            return runtimeGraph->runtimeUuid;
-        return 0;
-    }
-    inline std::uint64_t runtimeFadingUuid(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
-    {
-        if (runtimeGraph != nullptr)
-            return runtimeGraph->fadingRuntimeUuid;
-        return 0;
-    }
-    inline std::uint64_t runtimeTransitionCurrentUuid(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
-    {
-        if (runtimeGraph != nullptr)
-            return runtimeGraph->transitionCurrentRuntimeUuid;
-        return 0;
-    }
-    inline std::uint64_t runtimeTransitionNextUuid(const convo::RuntimeGraph* runtimeGraph = nullptr) const noexcept
-    {
-        if (runtimeGraph != nullptr)
-            return runtimeGraph->transitionNextRuntimeUuid;
-        return 0;
-    }
-    inline double runtimeSampleRateWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
-    {
-        return runtimeGraph != nullptr
-            ? runtimeGraph->sampleRate
-            : 0.0;
-    }
-
     template <typename T>
     static inline void publishAtomicPtr(std::atomic<T*>& dst, T* value) noexcept
     {
@@ -1728,23 +1657,6 @@ public:
         return convo::fetchAddAtomic(dst, value, order);
     }
 
-    // RT helper は publish world が無い場合に side-channel atomic へフォールバックしない。
-    // RuntimeGraph が確立していない期間は無音フェイルセーフへ落とし、
-    // publish world 非依存の DSP 参照は Audio Thread から段階的に除去する。
-    inline DSPCore* resolveCurrentDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
-    {
-        if (runtimeGraph == nullptr)
-            return nullptr;
-
-        auto* graphCurrent = static_cast<DSPCore*>(runtimeGraph->activeNode);
-        const auto graphCurrentUuid = runtimeGraph->runtimeUuid;
-        if (graphCurrent != nullptr
-            && graphCurrentUuid != 0)
-            return graphCurrent;
-
-        return nullptr;
-    }
-
     inline DSPCore* resolveFadingDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
     {
         if (runtimeGraph == nullptr)
@@ -1759,13 +1671,6 @@ public:
         return nullptr;
     }
 
-    // commit 系の寿命遷移を helper へ集約し、
-    // current/fading の更新規約を 1 箇所で追えるようにする。
-    inline void publishCurrentDSPAndTakeOwnership(DSPCore* newDSP) noexcept
-    {
-        publishCurrentDSP(newDSP);
-        activeDSP = newDSP;
-    }
 
     inline std::uint64_t reserveNextRuntimeGraphGeneration() noexcept
     {
@@ -1793,22 +1698,9 @@ public:
     //=== RuntimePublicationCoordinator NonRT helper API ===//
     // AudioEngine 内部の publish/retire helper（NonRT 専用）。
 
-    inline void retireRuntimePublishWorldNonRt(RuntimePublishWorld* world) noexcept
-    {
-        if (world == nullptr)
-            return;
-
-        enqueueDeferredDeleteNonRt(world, [](void* p)
-        {
-            auto* ptr = static_cast<RuntimePublishWorld*>(p);
-            ptr->~RuntimePublishWorld();
-            convo::aligned_free(ptr);
-        });
-    }
-
     [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
-    buildRuntimePublishWorld(DspCoreHandle current,
-                             DspCoreHandle next,
+    buildRuntimePublishWorld(DSPCore* current,
+                             DSPCore* next,
                              convo::TransitionPolicy policy,
                              double fadeTimeSec,
                              bool active) noexcept
@@ -1821,6 +1713,7 @@ public:
         graphState.generation = nextGraphGeneration;
 
         auto worldOwner = convo::aligned_make_unique<RuntimePublishWorld>();
+        worldOwner->assertMutable();
         worldOwner->generation = nextGraphGeneration;
         worldOwner->engine = engineState;
         worldOwner->graph = graphState;
@@ -1828,33 +1721,17 @@ public:
         worldOwner->runtimeVersion = reserveNextRuntimeVersion();
         // transitionId: unique per crossfade event
         worldOwner->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
+        worldOwner->sealRecursively();
 
         return worldOwner;
     }
 
-    // publishState 用 helper: world を構築して返す。
-    [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
-    buildWorldAndPublishTransition(DspCoreHandle current,
-                                   DspCoreHandle next,
-                                   convo::TransitionPolicy policy,
-                                   double fadeTimeSec,
-                                   bool active) noexcept
-    {
-        return buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active);
-    }
+    bool runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept;
+    void onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept;
+    void onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexcept;
+    void emitEvidenceTickNonRt(bool force) noexcept;
 
-    // adoptAndPublish 用 helper: publishCurrentDSP（DSP 採用）+
-    // buildRuntimePublishWorld を 1 本に集約して world を構築して返す。
-    [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
-    adoptAndBuildPublishWorld(DspCoreHandle newCurrent,
-                              DspCoreHandle transitionNext,
-                              convo::TransitionPolicy policy,
-                              double fadeTimeSec,
-                              bool active) noexcept
-    {
-        publishCurrentDSPAndTakeOwnership(newCurrent);
-        return buildRuntimePublishWorld(newCurrent, transitionNext, policy, fadeTimeSec, active);
-    }
+
 
     //=== End RuntimePublicationCoordinator NonRT helper API ===//
 
@@ -1867,35 +1744,47 @@ public:
         }
 
         [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
-        buildWorldAndPublishTransition(DspCoreHandle current,
-                                       DspCoreHandle next,
-                                       convo::TransitionPolicy policy,
-                                       double fadeTimeSec,
-                                       bool active) noexcept
+        buildRuntimePublishWorld(DSPCore* current,
+                                 DSPCore* next,
+                                 convo::TransitionPolicy policy,
+                                 double fadeTimeSec,
+                                 bool active) noexcept
         {
-            return engine_->buildWorldAndPublishTransition(current, next, policy, fadeTimeSec, active);
+            return engine_->buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active);
         }
 
-        [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
-        adoptAndBuildPublishWorld(DspCoreHandle newCurrent,
-                                  DspCoreHandle transitionNext,
-                                  convo::TransitionPolicy policy,
-                                  double fadeTimeSec,
-                                  bool active) noexcept
+        bool validatePublicationNonRt(const RuntimePublishWorld& world) noexcept
         {
-            return engine_->adoptAndBuildPublishWorld(newCurrent, transitionNext, policy, fadeTimeSec, active);
+            return engine_->runPublicationPrecheckNonRt(world);
         }
 
-        void retireRuntimePublishWorldNonRt(RuntimePublishWorld* world) noexcept
+        void didPublishRuntimeNonRt(const RuntimePublishWorld& world) noexcept
         {
-            engine_->retireRuntimePublishWorldNonRt(world);
+            engine_->onRuntimePublishedNonRt(world);
         }
 
-        void resetRuntimeGraphRevisionNonRt() noexcept
+        void willRetireRuntimeNonRt(const RuntimePublishWorld* world) noexcept
         {
-            convo::publishAtomic(engine_->runtimeGraphRevision,
-                                 static_cast<std::uint64_t>(0),
-                                 std::memory_order_release);
+            engine_->onRuntimeRetiredNonRt(world);
+        }
+
+        void retireRuntimePublishWorldNonRt(RuntimePublishWorld* world, bool resetRevision) noexcept
+        {
+            if (world == nullptr)
+                return;
+
+            engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
+            {
+                auto* ptr = static_cast<RuntimePublishWorld*>(p);
+                ptr->~RuntimePublishWorld();
+                convo::aligned_free(ptr);
+            });
+            if (resetRevision)
+            {
+                convo::publishAtomic(engine_->runtimeGraphRevision,
+                                     static_cast<std::uint64_t>(0),
+                                     std::memory_order_release);
+            }
         }
 
     private:
@@ -1903,7 +1792,7 @@ public:
     };
 
     using RuntimePublicationCoordinator = convo::RuntimePublicationCoordinator<RuntimePublishWorld,
-                                                                               DspCoreHandle,
+                                                                               DSPCore*,
                                                                                RuntimePublicationBridge>;
 
     static_assert(!std::is_copy_constructible_v<RuntimePublicationCoordinator>,
@@ -1916,11 +1805,6 @@ public:
     using RuntimePublishStore = RuntimePublicationCoordinator::Store;
 
     RuntimePublishStore runtimeStore;
-
-    [[nodiscard]] inline RuntimePublicationCoordinator publicationCoordinator() noexcept
-    {
-        return RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore);
-    }
 
     inline void logUnexpectedRuntimeTransition(const char* origin,
                                                DSPCore* current,
@@ -1949,9 +1833,9 @@ public:
         const auto runtimePublishView = getRuntimePublishView();
         const auto* runtimeGraph = runtimePublishView.graph;
         auto* fading = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
-        const auto revision = runtimeRevision(runtimeGraph);
-        const auto publishedCurrentUuid = runtimeCurrentUuid(runtimeGraph);
-        const auto publishedFadingUuid = runtimeFadingUuid(runtimeGraph);
+        const auto revision = (runtimeGraph != nullptr) ? runtimeGraph->generation : 0;
+        const auto publishedCurrentUuid = (runtimeGraph != nullptr) ? runtimeGraph->runtimeUuid : 0;
+        const auto publishedFadingUuid = (runtimeGraph != nullptr) ? runtimeGraph->fadingRuntimeUuid : 0;
 
         const juce::String message = "[DIAG] runtime transition event origin="
             + juce::String(origin != nullptr ? origin : "unknown")
@@ -2005,194 +1889,6 @@ public:
 
         jassert(!activeEqualsFading && !activeEqualsQueued && !fadingEqualsQueued);
         return !activeEqualsFading && !activeEqualsQueued && !fadingEqualsQueued;
-    }
-
-    inline void replaceFadingOutDSPAndRetirePrevious(DSPCore* dsp) noexcept
-    {
-        DSPCore* atomicCurrent = activeDSP.get();
-        const auto runtimePublishView = getRuntimePublishView();
-        const auto* runtimeGraph = runtimePublishView.graph;
-        validateDistinctRuntimeSlots("replaceFadingOutDSPAndRetirePrevious.before",
-                                     atomicCurrent,
-                                     resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph),
-                                     nullptr);
-
-        if (auto* prev = sanitizeRawPtr(exchangeFadingOutDSP(dsp)))
-        {
-            if (prev == dsp)
-            {
-                logUnexpectedRuntimeTransition("replaceFadingOutDSPAndRetirePrevious", prev, dsp);
-                jassert(prev != dsp);
-                return;
-            }
-
-            retireDSP(prev);
-        }
-
-        validateDistinctRuntimeSlots("replaceFadingOutDSPAndRetirePrevious.after",
-                                     atomicCurrent,
-                                     resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph),
-                                     nullptr);
-        logRuntimeTransitionEvent("replaceFadingOutDSPAndRetirePrevious", dsp);
-    }
-
-    inline void retireRuntimeImmediately(DSPCore* dsp) noexcept
-    {
-        if (dsp == nullptr)
-            return;
-
-        const auto runtimePublishView = getRuntimePublishView();
-        const auto* runtimeGraph = runtimePublishView.graph;
-        auto* publishedCurrent = runtimePublishedCurrentDSP(runtimeGraph);
-        DSPCore* atomicCurrent = activeDSP.get();
-        if (dsp == atomicCurrent || dsp == publishedCurrent)
-        {
-            logUnexpectedRuntimeTransition("retireRuntimeImmediately", atomicCurrent, dsp);
-            jassert(dsp != atomicCurrent && dsp != publishedCurrent);
-            return;
-        }
-
-        logRuntimeTransitionEvent("retireRuntimeImmediately", dsp);
-        retireDSP(dsp);
-    }
-
-    inline void publishSmoothTransitionState(DSPCore* nextDSP,
-                                             DSPCore* previousDSP,
-                                             double fadeTimeSec) noexcept
-    {
-        if (nextDSP == nullptr || nextDSP == previousDSP)
-        {
-            logUnexpectedRuntimeTransition("publishSmoothTransitionState", nextDSP, previousDSP);
-            jassert(nextDSP != nullptr && nextDSP != previousDSP);
-        }
-
-        publicationCoordinator().publishState(nextDSP,
-                              previousDSP,
-                              convo::TransitionPolicy::SmoothOnly,
-                              fadeTimeSec,
-                              true);
-        logRuntimeTransitionEvent("publishSmoothTransitionState", nextDSP, previousDSP);
-    }
-
-    inline void startImmediateSmoothTransition(DSPCore* previousDSP,
-                                               double fadeTimeSec) noexcept
-    {
-        DSPCore* atomicCurrent = activeDSP.get();
-        const auto runtimePublishView = getRuntimePublishView();
-        const auto* runtimeGraph = runtimePublishView.graph;
-        if (previousDSP == nullptr || previousDSP == atomicCurrent)
-        {
-            logUnexpectedRuntimeTransition("startImmediateSmoothTransition", atomicCurrent, previousDSP);
-            jassert(previousDSP != nullptr && previousDSP != atomicCurrent);
-        }
-
-        const double rampSampleRate = std::max(1.0,
-            (atomicCurrent != nullptr) ? atomicCurrent->sampleRate : consumeAtomic(currentSampleRate, std::memory_order_acquire));
-        dspCrossfadeGain.reset(rampSampleRate, std::max(0.001, fadeTimeSec));
-        dspCrossfadeGain.setCurrentAndTargetValue(0.0);
-        // setTargetValue(1.0) は Audio Thread の armCrossfadeIfPending で呼ぶ (C1-2)
-
-        replaceFadingOutDSPAndRetirePrevious(previousDSP);
-        // release: dspCrossfade フラグ群を Audio Thread acquire で観測できるよう公開。
-        publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
-        publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
-        publishAtomic(queuedFadeTimeSec, fadeTimeSec, std::memory_order_release);
-        publishAtomic(dspCrossfadePending, true, std::memory_order_release);
-        setIRChangeFlag();
-        publicationCoordinator().publishState(atomicCurrent,
-                              previousDSP,
-                              convo::TransitionPolicy::SmoothOnly,
-                              fadeTimeSec,
-                              true);
-        validateDistinctRuntimeSlots("startImmediateSmoothTransition",
-                                     atomicCurrent,
-                                     resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph),
-                                     nullptr);
-        logRuntimeTransitionEvent("startImmediateSmoothTransition", atomicCurrent, previousDSP);
-    }
-
-    inline void publishHardResetForCurrentDSP() noexcept
-    {
-        DSPCore* atomicCurrent = activeDSP.get();
-        const auto runtimePublishView = getRuntimePublishView();
-        const auto* runtimeGraph = runtimePublishView.graph;
-        if (atomicCurrent == nullptr)
-        {
-            logUnexpectedRuntimeTransition("publishHardResetForCurrentDSP", nullptr, nullptr);
-            jassert(atomicCurrent != nullptr);
-        }
-
-        publishAtomic(dspCrossfadePending, false, std::memory_order_release);
-        publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
-        publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
-        // release: dspCrossfade delay/sample パラメータをクリアし、Audio Thread acquire で取得。
-        publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
-        publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
-        publicationCoordinator().publishState(atomicCurrent,
-                              nullptr,
-                              convo::TransitionPolicy::HardReset,
-                              0.0,
-                              false);
-        validateDistinctRuntimeSlots("publishHardResetForCurrentDSP",
-                                     atomicCurrent,
-                                     resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph),
-                                     nullptr);
-        logRuntimeTransitionEvent("publishHardResetForCurrentDSP", atomicCurrent);
-    }
-
-    inline void armDryAsOldCrossfadeForCurrentDSP(double fadeTimeSec,
-                                                  double targetIrScale) noexcept
-    {
-        DSPCore* atomicCurrent = activeDSP.get();
-        const auto runtimePublishView = getRuntimePublishView();
-        const auto* runtimeGraph = runtimePublishView.graph;
-        if (atomicCurrent == nullptr)
-        {
-            logUnexpectedRuntimeTransition("armDryAsOldCrossfadeForCurrentDSP", nullptr, nullptr);
-            jassert(atomicCurrent != nullptr);
-        }
-
-        const double rampSampleRate = std::max(1.0,
-            // acquire: prepareToPlay/setSampleRate release と HB し、有効な currentSampleRate を取得。
-            (atomicCurrent != nullptr) ? atomicCurrent->sampleRate : consumeAtomic(currentSampleRate, std::memory_order_acquire));
-        dspCrossfadeGain.reset(rampSampleRate, std::max(0.001, fadeTimeSec));
-        dspCrossfadeGain.setCurrentAndTargetValue(0.0);
-        // setTargetValue(1.0) は Audio Thread の armCrossfadeIfPending で呼ぶ (C1-2)
-
-        // release: queuedFadeTimeSec を Audio Thread acquire で観測できるよう公開。
-        publishAtomic(queuedFadeTimeSec, fadeTimeSec, std::memory_order_release);
-        // release: dryHoldSamples を設定。maxSamplesPerBlock を acquire で取得し有効性確保。
-        publishAtomic(dspCrossfadeDryHoldSamples,
-                  std::max(1, consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire)));
-        // acquire: currentSampleRate を取得し機率設定の確定幾体計置を後繿ゲイン設定削減価を確実。
-        dspCrossfadeDryScaleGain.reset(std::max(1.0, consumeAtomic(currentSampleRate, std::memory_order_acquire)), 0.060);
-        dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
-        // setTargetValue(targetIrScale) は Audio Thread の armCrossfadeIfPending で呼ぶ (C1-2)
-        // release: dry scale target を設定。
-        publishAtomic(dspCrossfadeDryScaleTarget, targetIrScale, std::memory_order_release);
-        // release: dry-as-old crossfade フラグ群を Audio Thread acquire で観測。
-        publishAtomic(dspCrossfadeUseDryAsOld, true, std::memory_order_release);
-        publishAtomic(firstIrDryCrossfadePending, true, std::memory_order_release);
-        publishAtomic(dspCrossfadePending, true, std::memory_order_release);
-        publishAtomic(firstIrDryCrossfadeDone, true, std::memory_order_release);
-        setIRChangeFlag();
-        publicationCoordinator().publishState(atomicCurrent,
-                              nullptr,
-                              convo::TransitionPolicy::DryAsOld,
-                              fadeTimeSec,
-                              true);
-        validateDistinctRuntimeSlots("armDryAsOldCrossfadeForCurrentDSP",
-                                     atomicCurrent,
-                                     resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph),
-                                     nullptr);
-        logRuntimeTransitionEvent("armDryAsOldCrossfadeForCurrentDSP", atomicCurrent);
-    }
-
-    inline void queueCoalescedChangeNotification() noexcept
-    {
-        // acq_rel: pendingChangeNotification を交換し、true にならばasync update をトリガー。
-        if (!exchangeAtomic(pendingChangeNotification, true))
-            triggerAsyncUpdate();
     }
 
     inline EngineParameterSnapshot captureAudioThreadParameterSnapshot(const convo::GlobalSnapshot* snap,
@@ -2260,16 +1956,6 @@ public:
         return updateFadeReturned;
     }
 
-    inline void applySafeSilentFallback(const juce::AudioSourceChannelInfo& bufferToFill) noexcept
-    {
-        bufferToFill.clearActiveBufferRegion();
-    }
-
-    inline void applySafeSilentFallback(juce::AudioBuffer<double>& buffer) noexcept
-    {
-        buffer.clear();
-    }
-
     inline void armCrossfadeIfPending(bool hasFading,
                                       bool& useDryAsOld,
                                       const convo::RuntimeGraph* runtimeGraph) noexcept
@@ -2322,14 +2008,6 @@ public:
         }
 
         return false;
-    }
-
-    static inline DSPCore::ProcessingState makeCrossfadeAuxState(const DSPCore::ProcessingState& procState) noexcept
-    {
-        auto fadingState = procState;
-        fadingState.analyzerEnabled = false;
-        fadingState.adaptiveCaptureQueue = nullptr;
-        return fadingState;
     }
 
     inline void finalizeCrossfadeMixPath(DSPCore* current,
@@ -2408,13 +2086,6 @@ public:
         return juce::jmax(0, totalLatency);
     }
 
-    static inline int wrapLatencyIndex(int index, int bufferSize) noexcept
-    {
-        while (index < 0) index += bufferSize;
-        while (index >= bufferSize) index -= bufferSize;
-        return index;
-    }
-
     template <typename SampleType, typename MixFn>
     inline void runLatencyAlignedCrossfadeMixLoop(SampleType* dstL,
                                                   SampleType* dstR,
@@ -2438,8 +2109,9 @@ public:
             latencyBufNewL[writePos] = (dstL != nullptr) ? static_cast<double>(dstL[i]) : 0.0;
             latencyBufNewR[writePos] = (dstR != nullptr) ? static_cast<double>(dstR[i]) : 0.0;
 
-            const int readOld = wrapLatencyIndex(writePos - delayOld, bufferSize);
-            const int readNew = wrapLatencyIndex(writePos - delayNew, bufferSize);
+            auto wrapIdx = [](int idx, int sz) { while (idx < 0) idx += sz; while (idx >= sz) idx -= sz; return idx; };
+            const int readOld = wrapIdx(writePos - delayOld, bufferSize);
+            const int readNew = wrapIdx(writePos - delayNew, bufferSize);
 
             const double alignedOldL = latencyBufOldL[readOld];
             const double alignedOldR = latencyBufOldR[readOld];
@@ -2498,25 +2170,17 @@ static inline CoeffSet* getReservedInactiveCoeffSet(AdaptiveCoeffBankSlot& slot)
     return (active == 0) ? &slot.coeffSetB : &slot.coeffSetA;
 }
 
-// DSP ポインタのセンチネル値（全ビット 1）をチェックし、無効値なら nullptr を返す
-template <typename T>
-static inline T* sanitizeRawPtr(T* ptr) noexcept
-{
-    constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
-    return (reinterpret_cast<uintptr_t>(ptr) == kInvalidAllOnes) ? nullptr : ptr;
-}
-
 inline bool enqueueDeferredDeleteNonRt(void* ptr, void (*deleter)(void*)) noexcept
 {
     if (ptr == nullptr || deleter == nullptr)
         return true;
 
-    const uint64_t epoch = m_epochDomain.publish();
-    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
+    const uint64_t epoch = publishRetireEpoch();
+    if (enqueueRetireEpochBounded(ptr, deleter, epoch))
         return true;
 
     m_epochDomain.reclaimRetired();
-    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
+    if (enqueueRetireEpochBounded(ptr, deleter, epoch))
         return true;
 
     std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
@@ -2534,6 +2198,8 @@ inline void retireDSP(DSPCore* dsp) noexcept
     if (dsp == nullptr)
         return;
 
+    retireDSPHandleForRuntime(dsp);
+
     convo::fetchAddAtomic(g_runtimeRetireCount,
                          static_cast<std::uint64_t>(1),
                          std::memory_order_acq_rel);
@@ -2544,6 +2210,41 @@ inline void retireDSP(DSPCore* dsp) noexcept
         convo::aligned_free(core);
     }))
         return;
+}
+
+inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
+{
+    if (dsp == nullptr)
+        return convo::isr::DSPHandle::null();
+
+    std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
+
+    auto it = runtimeDSPHandleMap_.find(dsp);
+    if (it != runtimeDSPHandleMap_.end())
+        return it->second;
+
+    const auto handle = dspHandleRuntime_.create(dsp);
+    runtimeDSPHandleMap_.emplace(dsp, handle);
+    return handle;
+}
+
+inline void retireDSPHandleForRuntime(DSPCore* dsp) noexcept
+{
+    if (dsp == nullptr)
+        return;
+
+    std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
+    const auto it = runtimeDSPHandleMap_.find(dsp);
+    if (it == runtimeDSPHandleMap_.end())
+        return;
+
+    const auto handle = it->second;
+    runtimeDSPHandleMap_.erase(it);
+    if (!handle.isNull())
+    {
+        dspHandleRuntime_.retire(handle);
+        dspHandleRuntime_.reclaim(handle);
+    }
 }
 
 //==============================================================================
@@ -2617,6 +2318,9 @@ public:
     std::atomic<DSPCore*> audioThreadRetireOverflowPtr { nullptr };
     std::atomic<uint64_t> audioThreadRetireOverflowEpoch { 0 };
     std::atomic<uint64_t> audioThreadRetireEnqueueDropped { 0 };
+    std::atomic<uint64_t> audioCallbackEpochCounter_ { 0 };
+    std::atomic<uint64_t> audioSampleCursorCounter_ { 0 };
+    std::atomic<uint32_t> audioCallbackActiveCount_ { 0 };
     convo::SnapshotCoordinator m_coordinator;
     GenerationManager m_generationManager;
 
@@ -2697,14 +2401,56 @@ public:
     uint64_t debugLastReportedConvolverRebuildScheduledCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
     uint64_t debugLastReportedConvolverRebuildTriggeredCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
     int debugLastReportedShutdownPhase{ -1 }; // timerCallback 専用
+    std::atomic<std::int64_t> lastEvidenceEmitHighResTicks_{ 0 };
 
     juce::AudioBuffer<float> m_fadeFloatBuffer;
     juce::AudioBuffer<double> m_fadeDoubleBuffer;
 
     // ==================================================================
+    // ISR Phase 0: Lifecycle Isolation Runtime（P0-A0）
+    // ==================================================================
+
+    convo::isr::LifecycleIsolationRuntime lifecycleRuntime_;
+    convo::isr::LifecycleBarrierRuntime lifecycleBarrierRuntime_{ lifecycleRuntime_ };
+
+    // ===================== ISR Phase 1-9: Core Runtimes =====================
+    convo::isr::RuntimePublicationCoordinator runtimePublicationCoordinator_;
+    convo::isr::DSPQuarantineManager dspQuarantineManager_;
+    convo::isr::ClosureGraphWalker closureGraphWalker_;
+    convo::isr::DebugRuntime debugRuntime_;
+    convo::isr::RetireRuntime retireRuntime_;
+    convo::isr::RetireRuntimeEx retireRuntimeEx_;
+    convo::isr::ShutdownRuntime shutdownRuntime_;
+    convo::isr::BarrierOptimizer barrierOptimizer_;
+    convo::isr::EvidenceExporter evidenceExporter_;
+    convo::isr::BudgetManager budgetManager_;
+    convo::isr::FailureHandler failureHandler_;
+    convo::isr::IntrospectionConsole introspectionConsole_;
+
+    // ==================================================================
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(AudioEngine)
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
+        // ==================================================================
+        // ISR Phase 1: RT Execution Frame Separation（P0-A1）
+        // ==================================================================
+        convo::isr::RTCapabilityFirewall rtCapabilityFirewall_;
+        convo::isr::RTAllocatorFirewall rtAllocatorFirewall_;
+        convo::isr::RTTraceRelay rtTraceRelay_;
+
+        // Current fade accumulator (RCU-managed, updated during crossfade)
+        convo::isr::FadeAccumulator currentFade_{ 0.0, 0.0, false };
+
+        // ==================================================================
+        // ISR Phase 2: DSPHandle Runtime（P0-A2）
+        // ==================================================================
+        convo::isr::DSPHandleRuntime dspHandleRuntime_;
+        convo::isr::CrossfadeAuthorityRuntime crossfadeAuthorityRuntime_;
+        std::mutex runtimeDSPHandleMapMutex_;
+        std::unordered_map<DSPCore*, convo::isr::DSPHandle> runtimeDSPHandleMap_;
+        std::atomic<convo::isr::CrossfadeId> activeCrossfadeId_{ 0u };
+
+        // ==================================================================
+
 };
 
 inline bool AudioEngine::enqueueLearningCommand(const LearningCommand& cmd) noexcept

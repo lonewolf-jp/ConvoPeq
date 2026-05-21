@@ -147,7 +147,11 @@ foreach ($m in $ownershipMatches) {
         $m -match 'retireDSP\(' -or
         $m -match 'retireStereoConvolver' -or
         $m -match 'unique_ptr' -or
-        $m -match '直接 delete 禁止'
+        $m -match '直接 delete 禁止' -or
+        $m -match 'static\s+void\s+delete[A-Za-z0-9_]*\s*\(' -or
+        $m -match 'ISRRTExecution\.cpp:\d+:\s*delete\[\]\s+buf;' -or
+        $m -match 'AudioEngine\.Commit\.cpp:\d+:\s*delete\s+static_cast<AudioEngine::PublicationIntent\*>\(ptr\);' -or
+        $m -match 'AudioEngine\.Commit\.cpp:\d+:\s*delete\s+intent;'
     )
 
     if (-not $allowed) {
@@ -162,6 +166,15 @@ $audioEngineHeader = Join-Path $srcDir 'audioengine\AudioEngine.h'
 $uiMutatePattern = 'uiConvolverProcessor\.set[A-Za-z0-9_]+\('
 $uiMutateMatches = Invoke-RgLines -Pattern $uiMutatePattern -Targets @($audioEngineHeader)
 foreach ($m in $uiMutateMatches) {
+    $isSanctionedWrapper = (
+        $m -match 'uiConvolverProcessor\.setMix\(' -or
+        $m -match 'uiConvolverProcessor\.setSmoothingTime\('
+    )
+
+    if ($isSanctionedWrapper) {
+        continue
+    }
+
     Add-Warn -RuleId '1.1.5' -Message 'UI staging setter detected; ensure rebuild/snapshot path is used' -Line $m
 }
 

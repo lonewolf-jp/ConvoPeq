@@ -16,6 +16,11 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - R19〜R25 は `Spec-Fixed`（ガード付き拡張。Debug/CI 優先、Release 直結では任意）
 - 本書に記載のない追加未完事項は扱わない（追加時はR採番必須）
 
+最新ステータス更新（2026-05-21）:
+
+- R11〜R25 は Closed 最小検証項目を満たし `Closed` へ更新。
+- R1〜R10 は `Spec-Fixed` を維持（段階適用対象）。
+
 ### REV3.2運用優先注記
 
 - 本書の評価基準は `plan5.md` REV3.2 を優先する。
@@ -185,7 +190,7 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 
 ## R11. Closure Descriptor System 固定
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 重要度: Critical
 - 主要リスク: transitive ownership が暗黙で closure 破断を検出できない
 - 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_HB_Graph_Specification.md`, `ISR_Runtime_Closure_Descriptor.md`
@@ -194,13 +199,13 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - descriptor node に ownership/mutability/lifetime/HB を保持
   - publish 前 closure validation が運用化
 - Closed最小検証項目:
-  - [ ] descriptor node に kind/ownership/mutability/lifetime/HB/authority/allocator 情報が記録される
-  - [ ] publish 前 `validateClosureGraph` が mandatory 実行され、違反を reject する
-  - [ ] external mutable dependency の混入が CI で検出・失敗する
+  - [x] descriptor node に kind/ownership/mutability/lifetime/HB/authority/allocator 情報が記録される
+  - [x] publish 前 `validateClosureGraph` が mandatory 実行され、違反を reject する
+  - [x] external mutable dependency の混入が CI で検出・失敗する
 
 ## R12. Payload Tier System 固定
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 重要度: High
 - 主要リスク: payload boundary が曖昧で forbidden dependency 混入
 - 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_Runtime_State_Matrix.md`, `ISR_Payload_Tier_Model.md`
@@ -209,13 +214,13 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - tier 分類（InlineImmutable/ImmutableShared/ExternalPinned/RTLocalOnly/Forbidden）が定義済み
   - Forbidden/RTLocalOnly の payload 禁止検証が運用化
 - Closed最小検証項目:
-  - [ ] 全 payload object family に tier が割当済み
-  - [ ] Forbidden tier の payload 混入が検出・失敗する
-  - [ ] RTLocalOnly tier の RuntimePublication への混入が検出・失敗する
+  - [x] 全 payload object family に tier が割当済み
+  - [x] Forbidden tier の payload 混入が検出・失敗する
+  - [x] RTLocalOnly tier の RuntimePublication への混入が検出・失敗する
 
 ## R13. Immutable Facade + Mutable Core 分離
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 重要度: Critical
 - 主要リスク: RuntimePublication 内への mutable atomic/mutex/lazy-init 混入
 - 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_Immutability_Enforcement_Spec.md`
@@ -224,13 +229,13 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - publish graph が read-only projection のみで構成される
   - mutable cache が RTLocal/Background domain へ隔離済み
 - Closed最小検証項目:
-  - [ ] publish graph 経由で mutable API が露出しない
-  - [ ] publish graph 内 mutex / lazy-init / mutable atomic が存在しない
-  - [ ] mutable cache が RTLocal または Background domain に限定される
+  - [x] publish graph 経由で mutable API が露出しない
+  - [x] publish graph 内 mutex / lazy-init / mutable atomic が存在しない
+  - [x] mutable cache が RTLocal または Background domain に限定される
 
 ## R14. Deferred Retire Intent Queue 固定
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 重要度: High
 - 主要リスク: RT completion detect と retire authority 実行の責務衝突
 - 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_Retire_Authority_Graph.md`, `ISR_Deferred_Retire_Intent_Bridge.md`
@@ -239,13 +244,13 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - RT は intent emission のみ、NonRT が authority enqueue を実行
   - RT reclaim/delete/authority の禁止検証が運用化
 - Closed最小検証項目:
-  - [ ] RT は `RetireIntent` emission のみを実行し、retire/reclaim/delete を実行しない
-  - [ ] NonRT coordinator が intent dequeue 後に authority enqueue を実行する
-  - [ ] RT直enqueue/RT reclaim の違反が検出・失敗（CI）する
+  - [x] RT は `RetireIntent` emission のみを実行し、retire/reclaim/delete を実行しない
+  - [x] NonRT coordinator が intent dequeue 後に authority enqueue を実行する
+  - [x] RT直enqueue/RT reclaim の違反が検出・失敗（CI）する
 
 ## R15. Shutdown HB FSM 固定
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 重要度: Critical
 - 主要リスク: shutdown ordering が手続き依存で late callback/UAF を誘発
 - 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_HB_Graph_Specification.md`, `ISR_Shutdown_State_Machine.md`
@@ -254,13 +259,14 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - shutdown state machine と phase HB chain が明文化
   - shutdown verifier で順序違反を検出できる
 - Closed最小検証項目:
-  - [ ] phase enum（Running→AudioStopped→ObserverDrained→RetireClosed→EpochSettled→ReclaimComplete→ShutdownComplete）が実装される
-  - [ ] phase 逆行/飛び越し遷移が検出・拒否される
-  - [ ] shutdown verifier が late callback / post-stop enqueue を検出・失敗する
+  - [x] phase enum（Running→AudioStopped→ObserverDrained→RetireClosed→EpochSettled→ReclaimComplete→ShutdownComplete）が実装される
+  - [x] phase 逆行/飛び越し遷移が検出・拒否される
+  - [x] shutdown verifier が late callback / post-stop enqueue を検出・失敗する
 
 ## R16. HB Failure Spec + Reorder Simulation 固定
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
+- 監査判定注記（2026-05-21）: **Closed**（`doc/work/R11-R25_Closed判定監査表_2026-05-21.md` と整合）
 - 重要度: Critical
 - 主要リスク: 再現試験依存で最小HB欠落の証明が不足
 - 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_HB_Graph_Specification.md`, `ISR_Minimal_HB_Failure_Model.md`
@@ -269,13 +275,13 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - failure ordering と required HB の対照モデルが固定
   - reorder simulator が CI で実行される
 - Closed最小検証項目:
-  - [ ] bug2 の最小HB欠落モデル（failure ordering）が文書化される
-  - [ ] required HB を適用した対照ケースで UAF 不成立を確認する
-  - [ ] reorder simulator（forced reorder/epoch lag/retire delay/observe race）が CI で実行される
+  - [x] bug2 の最小HB欠落モデル（failure ordering）が文書化される
+  - [x] required HB を適用した対照ケースで UAF 不成立を確認する
+  - [x] reorder simulator（forced reorder/epoch lag/retire delay/observe race）が CI で実行される
 
 ## R17. Epoch Abstraction Layer 固定
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 重要度: High
 - 主要リスク: shared epoch が architecture invariant 化して移行不能
 - 反映先: `ISR_Formal_Guarantee_Package.md`, `ISR_Shared_EpochDomain_Scalability_Validation_Plan.md`
@@ -284,13 +290,14 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - epoch coordinator abstraction が定義済み
   - shared/split/hybrid 切替方針が定義済み
 - Closed最小検証項目:
-  - [ ] runtime code が concrete epoch 実装に直接依存しない
-  - [ ] shared/split/hybrid の切替インターフェースが定義済み
-  - [ ] split 移行時の rollback 手順が実行可能である
+  - [x] runtime code が concrete epoch 実装に直接依存しない
+  - [x] shared/split/hybrid の切替インターフェースが定義済み
+  - [x] split 移行時の rollback 手順が実行可能である
 
 ## R18. CI Verification Pipeline 固定
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
+- 監査判定注記（2026-05-21）: **Closed**（`doc/work/R11-R25_Closed判定監査表_2026-05-21.md` と整合）
 - 重要度: Critical
 - 主要リスク: 文書規律のみで merge 時に形式違反を検出できない
 - 反映先: `ISR_Formal_Guarantee_Package.md`, `plan5.md`, `ISR_Verification_Pipeline.md`, `ISR_Runtime_Reduction_Strategy.md`, `ISR_Proof_Artifact_Schema_Registry.md`
@@ -301,15 +308,15 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - proof artifact の canonical naming と JSON schema contract が固定済み
   - pipeline failure が merge blocker として運用化
 - Closed最小検証項目:
-  - [ ] 10段ステージがCIワークフローに統合済み
-  - [ ] artifact missing / schema mismatch / parse error が CI fail として扱われる
-  - [ ] canonical artifact 名（registry定義）で生成される
-  - [ ] いずれか失敗時に merge blocker として PR を停止する
-  - [ ] 成功時に証跡（レポート/ログ）が保存される
+  - [x] 10段ステージがCIワークフローに統合済み
+  - [x] artifact missing / schema mismatch / parse error が CI fail として扱われる
+  - [x] canonical artifact 名（registry定義）で生成される
+  - [x] いずれか失敗時に merge blocker として PR を停止する
+  - [x] 成功時に証跡（レポート/ログ）が保存される
 
 ## R19. Authority capability-first 固定（coordinator互換shim化）
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 補足: 必須（authority misuse を型制約で抑制）
 - 重要度: Critical
 - 主要リスク: coordinator中心設計の増殖による authority lifecycle 問題
@@ -319,13 +326,13 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - type-level capability（Publish/Retire/Shutdown）が優先運用される
   - runtime coordinator lifecycle を導入しない
 - Closed最小検証項目:
-  - [ ] capability tag が API 契約として明示される
-  - [ ] coordinator 依存の新規経路を追加しない
-  - [ ] 分散 authority 導入時に CI でゲート違反となる
+  - [x] capability tag が API 契約として明示される
+  - [x] coordinator 依存の新規経路を追加しない
+  - [x] 分散 authority 導入時に CI でゲート違反となる
 
 ## R20. Host Chaos Normalization 固定
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 補足: Release 適用候補（Layer 0 補完として優先度高）
 - 重要度: High
 - 主要リスク: host callback 非決定性により lifecycle invariant 崩壊
@@ -334,13 +341,13 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 完了条件:
   - HostChaosNormalizer が Layer 0 に統合される
 - Closed最小検証項目:
-  - [ ] HC-1 duplicate prepare collapse が動作
-  - [ ] HC-2 release-before-prepare reject が動作
-  - [ ] HC-3 callback during Releasing reject が動作
+  - [x] HC-1 duplicate prepare collapse が動作
+  - [x] HC-2 release-before-prepare reject が動作
+  - [x] HC-3 callback during Releasing reject が動作
 
 ## R21. DSP ownership 単純化（few-authority）
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 補足: 必須（DSPHandleRuntime への統合）
 - 重要度: Critical
 - 主要リスク: DSP ownership path 分散による運用複雑化
@@ -350,12 +357,12 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - DSP ownership は DSPHandleRuntime へ統合される
   - crossfade 完了前 retire 禁止が単純ルールで運用される
 - Closed最小検証項目:
-  - [ ] DSPHandleRuntime が callback view を一元提供する
-  - [ ] crossfade complete before retire が検証される
+  - [x] DSPHandleRuntime が callback view を一元提供する
+  - [x] crossfade complete before retire が検証される
 
 ## R22. callback-local snapshot consistency 固定
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 補足: 必須（RTExecutionFrame の最小保証）
 - 重要度: High
 - 主要リスク: callback 中に runtime snapshot が変化する
@@ -364,12 +371,12 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 完了条件:
   - RTExecutionFrame が callback-local immutable snapshot を保持する
 - Closed最小検証項目:
-  - [ ] callback 中 snapshot immutable が検証される
-  - [ ] callbackEpoch 単位で一貫 view が維持される
+  - [x] callback 中 snapshot immutable が検証される
+  - [x] callbackEpoch 単位で一貫 view が維持される
 
 ## R23. world model 簡略化（2-world固定）
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 補足: 必須（single-process 最適化）
 - 重要度: Critical
 - 主要リスク: 不要な federation 抽象で実装複雑化
@@ -378,12 +385,12 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 完了条件:
   - world model を PublicationWorld / ExecutionWorld の2つへ固定
 - Closed最小検証項目:
-  - [ ] RuntimeBoundary 構造で境界が実装される
-  - [ ] full federation runtime 追加が抑制される
+  - [x] RuntimeBoundary 構造で境界が実装される
+  - [x] full federation runtime 追加が抑制される
 
 ## R24. bounded deterministic teardown 固定
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
 - 補足: 必須（Release 安定性直結）
 - 重要度: Critical
 - 主要リスク: shutdown phase の肥大化で完了不能リスク増大
@@ -393,14 +400,15 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - shutdown phase を 7段（Running->...->Complete）へ固定
   - bounded completion を必須化
 - Closed最小検証項目:
-  - [ ] SH-1 callback 0
-  - [ ] SH-2 active crossfade 0
-  - [ ] SH-3 pending retire 0
-  - [ ] SH-4 observer 0
+  - [x] SH-1 callback 0
+  - [x] SH-2 active crossfade 0
+  - [x] SH-3 pending retire 0
+  - [x] SH-4 observer 0
 
 ## R25. DebugRuntime CI限定化
 
-- 状態: Spec-Fixed（2026-05-20）
+- 状態: Closed（2026-05-21）
+- 監査判定注記（2026-05-21）: **Closed**（`doc/work/R11-R25_Closed判定監査表_2026-05-21.md` と整合）
 - 補足: 必須（Release から proof負荷を除去）
 - 重要度: High
 - 主要リスク: proof/trace runtime の release 混入による性能劣化
@@ -410,10 +418,10 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
   - Release/Debug/CI の proof 有効範囲が固定化される
   - DebugRuntime へ trace/verify/proof を集約する
 - Closed最小検証項目:
-  - [ ] Release: proof off
-  - [ ] Debug: proof partial
-  - [ ] CI: proof full
-  - [ ] RuntimeReductionGate による新runtime追加審査が CI 強制される
+  - [x] Release: proof off
+  - [x] Debug: proof partial
+  - [x] CI: proof full
+  - [x] RuntimeReductionGate による新runtime追加審査が CI 強制される
 
 ---
 
@@ -422,3 +430,18 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - 本バックログは `plan5.md` の未完項目を一元管理する
 - 各リスクは「反映先正本への反映 + 実装 + 検証証跡」で Close する
 - Close 判定は Gate 条件の証跡（文書/検証）を必須とする
+- 運用判定ラベルは `doc/work/plan5.md` と `doc/work/R11-R25_Closed判定監査表_2026-05-21.md` と同期し、**Closed（運用重視）/ Closed（厳密）/ 部分適合** の3区分を用いる。
+
+## 外部監査参照
+
+### 監査判定の往復参照（2026-05-21）
+
+- R16: Backlog 状態 `Closed` / 監査判定 `Closed`
+- R18: Backlog 状態 `Closed` / 監査判定 `Closed`
+- R25: Backlog 状態 `Closed` / 監査判定 `Closed`
+- 判定更新原則: `Closed` への更新は本書の「Closed最小検証項目」充足時のみ行う。
+
+- ハブ文書（相互参照）:
+  - `doc/work/plan5.md`
+- R11〜R25 Closed判定監査表（証拠ファイル/コード行付き）:
+  - `doc/work/R11-R25_Closed判定監査表_2026-05-21.md`

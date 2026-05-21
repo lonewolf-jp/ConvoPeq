@@ -12,6 +12,9 @@ static void diagLog(const juce::String& message)
 void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 {
     ASSERT_NON_RT_THREAD();
+    // P0-A0: LifecycleIsolationRuntime integration
+    auto lifecycleToken = lifecycleRuntime_.enterPrepare(samplesPerBlockExpected, static_cast<int>(sampleRate));
+
     diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
 
     const auto rollbackPrepareFailure = [this]() noexcept
@@ -109,17 +112,20 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     {
         const auto* runtimeWorld = runtimeStore.observe();
         const auto* runtimeGraph = (runtimeWorld != nullptr) ? &runtimeWorld->graph : nullptr;
-        auto* currentForPublish = runtimePublishedCurrentDSP(runtimeGraph);
+        auto* currentForPublish = (runtimeGraph != nullptr)
+            ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+            : nullptr;
         auto* fadingForPublish = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
         const bool hasAnyRuntime = (currentForPublish != nullptr) || (fadingForPublish != nullptr);
         if (hasAnyRuntime)
         {
             const auto ts = runtimeWorld != nullptr ? runtimeWorld->engine.transition : convo::TransitionState{};
-            publicationCoordinator().publishState(currentForPublish,
-                                                  fadingForPublish,
-                                                  ts.policy,
-                                                  ts.fadeTimeSec,
-                                                  ts.active);
+            RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+                .publishState(currentForPublish,
+                              fadingForPublish,
+                              ts.policy,
+                              ts.fadeTimeSec,
+                              ts.active);
         }
     }
     selectAdaptiveCoeffBankForCurrentSettings();
@@ -182,7 +188,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
     const auto runtimePublishView = getRuntimePublishView();
-    const bool hasPublishedCurrent = (runtimePublishedCurrentDSP(runtimePublishView.graph) != nullptr);
+    const bool hasPublishedCurrent = (runtimePublishView.graph != nullptr)
+        && (static_cast<DSPCore*>(runtimePublishView.graph->activeNode) != nullptr);
     if (!hasPublishedCurrent && activeDSP == nullptr)
     {
         convo::aligned_unique_ptr<DSPCore> placeholderDSP;
@@ -210,21 +217,22 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         }
 
         activeDSP = placeholderDSP.release();
-        publishCurrentDSP(activeDSP);
         convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
         convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
-        publicationCoordinator().publishState(activeDSP,
-                              nullptr,
-                              convo::TransitionPolicy::HardReset,
-                              0.0,
-                              false);
+        RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+            .publishState(activeDSP,
+                          nullptr,
+                          convo::TransitionPolicy::HardReset,
+                          0.0,
+                          false);
     }
 
     // --- DSP再ビルド判定・同期 ---
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
     if (rateChanged)
         uiConvolverProcessor.invalidatePendingLoads();
-    const bool hasCurrentRuntime = (runtimePublishedCurrentDSP(runtimePublishView.graph) != nullptr);
+    const bool hasCurrentRuntime = (runtimePublishView.graph != nullptr)
+        && (static_cast<DSPCore*>(runtimePublishView.graph->activeNode) != nullptr);
     if (rateChanged || blockSizeChanged || !hasCurrentRuntime) {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             requestRebuild(safeSampleRate, bufferSize);
@@ -234,6 +242,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     }
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Prepared, std::memory_order_release);
     diagLog("[DIAG] prepareToPlay: exit currentSR=" + juce::String(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire), 2) + " maxSPB=" + juce::String(convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire)));
+
+    // P0-A0: LifecycleIsolationRuntime integration - leave prepare phase
+    lifecycleRuntime_.leavePrepare(lifecycleToken);
 }
 
 #endif

@@ -15,13 +15,46 @@ namespace
 
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
+    if (isShutdownInProgress())
+    {
+        shutdownRuntime_.markLateCallback();
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
+    struct AudioCallbackRuntimeScope final
+    {
+        AudioEngine& engine;
+        convo::isr::LifecycleToken lifecycleToken;
+        convo::isr::FirewallToken firewallToken;
+
+        explicit AudioCallbackRuntimeScope(AudioEngine& owner) noexcept
+            : engine(owner)
+            , lifecycleToken(owner.lifecycleRuntime_.enterAudioCallback())
+            , firewallToken(owner.rtCapabilityFirewall_.enter())
+        {
+            convo::isr::RTAllocatorFirewall::markRTContext(true);
+            (void)convo::fetchAddAtomic(engine.audioCallbackActiveCount_, uint32_t{1}, std::memory_order_acq_rel);
+        }
+
+        ~AudioCallbackRuntimeScope() noexcept
+        {
+            (void)convo::fetchSubAtomic(engine.audioCallbackActiveCount_, uint32_t{1}, std::memory_order_acq_rel);
+            convo::isr::RTAllocatorFirewall::markRTContext(false);
+            engine.rtCapabilityFirewall_.leave(firewallToken);
+            engine.lifecycleRuntime_.leaveAudioCallback(lifecycleToken);
+        }
+    } runtimeScope(*this);
+
     const juce::ScopedNoDenormals noDenormals;
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     const convo::EpochDomainReaderGuard epochReaderGuard(m_epochDomain, kAudioEpochReaderIndex);
     ASSERT_AUDIO_THREAD();
     // 入力検証 (Input Validation)
     if (bufferToFill.buffer == nullptr)
+    {
         return;
+    }
 
     const int numSamples = bufferToFill.numSamples;
     const int startSample = bufferToFill.startSample;
@@ -35,14 +68,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20; // 破損データ検出用上限
     if (numSamples <= 0 || numSamples > ABSOLUTE_MAX_BLOCK_SIZE)
     {
-        applySafeSilentFallback(bufferToFill);
+        bufferToFill.clearActiveBufferRegion();
         return;
     }
 
     // startSampleの妥当性チェック
     if (startSample < 0 || startSample + numSamples > buffer->getNumSamples())
     {
-        applySafeSilentFallback(bufferToFill);
+        bufferToFill.clearActiveBufferRegion();
         return;
     }
 
@@ -51,10 +84,43 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     const auto runtimePublishView = getRuntimePublishView();
     const auto* runtimeGraph = runtimePublishView.graph;
-    DSPCore* dsp = resolveCurrentDSPFromRuntimeWorldOnly(runtimeGraph);
+
+    const auto packHandle = [](convo::isr::DSPHandle handle) noexcept -> std::uint64_t
+    {
+        return (static_cast<std::uint64_t>(handle.generation) << 32)
+            | static_cast<std::uint64_t>(handle.slot);
+    };
+
+    const auto activeHandle = dspHandleRuntime_.getActiveDSP();
+    const auto fadingHandle = dspHandleRuntime_.getFadingDSP();
+    const auto resolvedActive = dspHandleRuntime_.resolve(activeHandle);
+    const auto resolvedFading = dspHandleRuntime_.resolve(fadingHandle);
+    const auto callbackEpoch = convo::fetchAddAtomic(audioCallbackEpochCounter_, uint64_t{1}, std::memory_order_acq_rel) + 1u;
+    const auto sampleCursor = convo::fetchAddAtomic(audioSampleCursorCounter_, static_cast<uint64_t>(numSamples), std::memory_order_acq_rel);
+    const auto graphRevision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
+
+    const auto rtFrame = convo::isr::makeRTExecutionFrame(
+        packHandle(activeHandle),
+        packHandle(fadingHandle),
+        currentFade_,
+        nullptr,
+        0,
+        sampleCursor,
+        callbackEpoch,
+        runtimeScope.lifecycleToken.epochId,
+        graphRevision,
+        &rtTraceRelay_);
+
+    rtTraceRelay_.enqueue({ rtFrame.sampleCursor, 0xA001u, static_cast<std::uint32_t>(numSamples) });
+
+    DSPCore* dsp = resolvedActive.valid
+        ? static_cast<DSPCore*>(resolvedActive.instance)
+        : ((runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
+            ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+            : nullptr);
     if (dsp == nullptr)
     {
-        applySafeSilentFallback(bufferToFill);
+        bufferToFill.clearActiveBufferRegion();
         return;
     }
 
@@ -65,18 +131,18 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // dsp は RCU で公開済みのため maxSamplesPerBlock は Audio Thread から安全に読み出せる。
         if (numSamples > dsp->maxSamplesPerBlock)
         {
-            applySafeSilentFallback(bufferToFill);
+            bufferToFill.clearActiveBufferRegion();
             return;
         }
 
         // 安全対策: サンプルレート不整合チェック
         // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
         // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
-        const double engineSampleRate = runtimeSampleRateWorldOnly(runtimeGraph);
+        const double engineSampleRate = (runtimeGraph != nullptr) ? runtimeGraph->sampleRate : 0.0;
         if (engineSampleRate <= 0.0
             || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
         {
-            applySafeSilentFallback(bufferToFill);
+            bufferToFill.clearActiveBufferRegion();
             return;
         }
 
@@ -131,15 +197,19 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             return;
         }
 
-        DSPCore* fading = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
-        bool useDryAsOld = runtimeCrossfadeUseDryAsOldWorldOnly(runtimeGraph);
-        const bool hasPendingCrossfade = runtimeCrossfadePendingWorldOnly(runtimeGraph);
+        DSPCore* fading = resolvedFading.valid
+            ? static_cast<DSPCore*>(resolvedFading.instance)
+            : resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
+        bool useDryAsOld = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeUseDryAsOld : false;
+        const bool hasPendingCrossfade = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadePending : false;
         if (processCrossfadeDelayGateIfPending(fading,
                                                useDryAsOld,
                                                hasPendingCrossfade,
                                                [&]()
         {
-            auto fadingState = makeCrossfadeAuxState(procState);
+            auto fadingState = procState;
+            fadingState.analyzerEnabled = false;
+            fadingState.adaptiveCaptureQueue = nullptr;
 
             fading->process(bufferToFill,
                             analyzerFifo,
@@ -164,7 +234,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             dspCrossfadeFloatBuffer.clear(0, 0, numSamples);
             dspCrossfadeFloatBuffer.clear(1, 0, numSamples);
 
-            auto fadingState = makeCrossfadeAuxState(procState);
+            auto fadingState = procState;
+            fadingState.analyzerEnabled = false;
+            fadingState.adaptiveCaptureQueue = nullptr;
 
             if (useDryAsOld)
             {
@@ -235,7 +307,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             cleanupCrossfadeDirectPath(dsp, fading);
         }
     }
-
 }
 
 #endif

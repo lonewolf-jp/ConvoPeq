@@ -641,10 +641,11 @@ void ConvolverProcessor::setMix(float mixAmount)
     float newVal = juce::jlimit(0.0f, 1.0f, mixAmount);
     float prev;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         prev = pendingOverride.mix;
         if (std::abs(prev - newVal) > 1.0e-5f)
             pendingOverride.mix = newVal;
+        pendingOverrideLock.exit();
     }
     if (std::abs(prev - newVal) > 1.0e-5f)
     {
@@ -656,18 +657,21 @@ void ConvolverProcessor::setMix(float mixAmount)
 
 float ConvolverProcessor::getMix() const
 {
-    const juce::ScopedLock lock(pendingOverrideLock);
-    return pendingOverride.mix;
+    pendingOverrideLock.enter();
+    const float value = pendingOverride.mix;
+    pendingOverrideLock.exit();
+    return value;
 }
 
 void ConvolverProcessor::setBypass(bool shouldBypass)
 {
     bool prev;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         prev = pendingOverride.bypassed;
         if (prev != shouldBypass)
             pendingOverride.bypassed = shouldBypass;
+        pendingOverrideLock.exit();
     }
     if (prev != shouldBypass)
     {
@@ -683,9 +687,10 @@ void ConvolverProcessor::setTargetIRLength(float timeSec)
     float clampedTime = juce::jlimit(IR_LENGTH_MIN_SEC, maxAllowedSec, timeSec);
     float prev;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         prev = pendingOverride.targetIRLengthSec;
         pendingOverride.targetIRLengthSec = clampedTime;
+        pendingOverrideLock.exit();
     }
     if (std::abs(prev - clampedTime) > 1e-5f)
     {
@@ -700,17 +705,19 @@ void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
 
     float prevTarget;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         pendingOverride.autoDetectedIRLengthSec = clampedTime;
         pendingOverride.irLengthManualOverride = false;
         prevTarget = pendingOverride.targetIRLengthSec;
+        pendingOverrideLock.exit();
     }
 
     if (std::abs(prevTarget - clampedTime) > 1.0e-5f)
     {
         {
-            const juce::ScopedLock lock(pendingOverrideLock);
+            pendingOverrideLock.enter();
             pendingOverride.targetIRLengthSec = clampedTime;
+            pendingOverrideLock.exit();
         }
         postCoalescedChangeNotification();
     }
@@ -719,8 +726,9 @@ void ConvolverProcessor::applyAutoDetectedIRLength(float timeSec)
 void ConvolverProcessor::setIRLengthManualOverride(bool isManual)
 {
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         pendingOverride.irLengthManualOverride = isManual;
+        pendingOverrideLock.exit();
     }
 }
 
@@ -729,10 +737,11 @@ void ConvolverProcessor::setSmoothingTime(float timeSec)
     float clampedTime = juce::jlimit(SMOOTHING_TIME_MIN_SEC, SMOOTHING_TIME_MAX_SEC, timeSec);
     float prev;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         prev = pendingOverride.smoothingTimeSec;
         if (std::abs(prev - clampedTime) > 1.0e-5f)
             pendingOverride.smoothingTimeSec = clampedTime;
+        pendingOverrideLock.exit();
     }
     if (std::abs(prev - clampedTime) > 1.0e-5f)
     {
@@ -747,26 +756,34 @@ void ConvolverProcessor::setSmoothingTime(float timeSec)
 
 float ConvolverProcessor::getTargetIRLength() const
 {
-    const juce::ScopedLock lock(pendingOverrideLock);
-    return pendingOverride.targetIRLengthSec;
+    pendingOverrideLock.enter();
+    const float value = pendingOverride.targetIRLengthSec;
+    pendingOverrideLock.exit();
+    return value;
 }
 
 float ConvolverProcessor::getAutoDetectedIRLength() const
 {
-    const juce::ScopedLock lock(pendingOverrideLock);
-    return pendingOverride.autoDetectedIRLengthSec;
+    pendingOverrideLock.enter();
+    const float value = pendingOverride.autoDetectedIRLengthSec;
+    pendingOverrideLock.exit();
+    return value;
 }
 
 bool ConvolverProcessor::hasManualIRLengthOverride() const
 {
-    const juce::ScopedLock lock(pendingOverrideLock);
-    return pendingOverride.irLengthManualOverride;
+    pendingOverrideLock.enter();
+    const bool value = pendingOverride.irLengthManualOverride;
+    pendingOverrideLock.exit();
+    return value;
 }
 
 float ConvolverProcessor::getSmoothingTime() const
 {
-    const juce::ScopedLock lock(pendingOverrideLock);
-    return pendingOverride.smoothingTimeSec;
+    pendingOverrideLock.enter();
+    const float value = pendingOverride.smoothingTimeSec;
+    pendingOverrideLock.exit();
+    return value;
 }
 
 // setMixRT / setSmoothingTimeRT: H3 修正により廃止。
@@ -778,19 +795,21 @@ void ConvolverProcessor::setMixedTransitionStartHz(float hz)
     const float clamped = juce::jlimit(MIXED_F1_MIN_HZ, MIXED_F1_MAX_HZ, hz);
     float currentEnd;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         currentEnd = pendingOverride.mixedTransitionEndHz;
+        pendingOverrideLock.exit();
     }
     if (currentEnd < clamped + 10.0f)
         currentEnd = juce::jlimit(MIXED_F2_MIN_HZ, MIXED_F2_MAX_HZ, clamped + 10.0f);
 
     float prevStart, prevEnd;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         prevStart = pendingOverride.mixedTransitionStartHz;
         prevEnd = pendingOverride.mixedTransitionEndHz;
         pendingOverride.mixedTransitionStartHz = clamped;
         pendingOverride.mixedTransitionEndHz = currentEnd;
+        pendingOverrideLock.exit();
     }
 
     if (std::abs(prevStart - clamped) > 1.0e-5f || std::abs(prevEnd - currentEnd) > 1.0e-5f)
@@ -802,25 +821,29 @@ void ConvolverProcessor::setMixedTransitionStartHz(float hz)
 
 float ConvolverProcessor::getMixedTransitionStartHz() const
 {
-    const juce::ScopedLock lock(pendingOverrideLock);
-    return pendingOverride.mixedTransitionStartHz;
+    pendingOverrideLock.enter();
+    const float value = pendingOverride.mixedTransitionStartHz;
+    pendingOverrideLock.exit();
+    return value;
 }
 
 void ConvolverProcessor::setMixedTransitionEndHz(float hz)
 {
     float currentStart;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         currentStart = pendingOverride.mixedTransitionStartHz;
+        pendingOverrideLock.exit();
     }
     const float minEnd = (std::max)(MIXED_F2_MIN_HZ, currentStart + 10.0f);
     const float clamped = juce::jlimit(minEnd, MIXED_F2_MAX_HZ, hz);
 
     float prev;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         prev = pendingOverride.mixedTransitionEndHz;
         pendingOverride.mixedTransitionEndHz = clamped;
+        pendingOverrideLock.exit();
     }
     if (std::abs(prev - clamped) > 1.0e-5f)
     {
@@ -831,8 +854,10 @@ void ConvolverProcessor::setMixedTransitionEndHz(float hz)
 
 float ConvolverProcessor::getMixedTransitionEndHz() const
 {
-    const juce::ScopedLock lock(pendingOverrideLock);
-    return pendingOverride.mixedTransitionEndHz;
+    pendingOverrideLock.enter();
+    const float value = pendingOverride.mixedTransitionEndHz;
+    pendingOverrideLock.exit();
+    return value;
 }
 
 void ConvolverProcessor::setMixedPreRingTau(float tau)
@@ -840,9 +865,10 @@ void ConvolverProcessor::setMixedPreRingTau(float tau)
     const float clamped = juce::jlimit(MIXED_TAU_MIN, MIXED_TAU_MAX, tau);
     float prev;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         prev = pendingOverride.mixedPreRingTau;
         pendingOverride.mixedPreRingTau = clamped;
+        pendingOverrideLock.exit();
     }
     if (std::abs(prev - clamped) > 1.0e-5f)
     {
@@ -853,17 +879,20 @@ void ConvolverProcessor::setMixedPreRingTau(float tau)
 
 float ConvolverProcessor::getMixedPreRingTau() const
 {
-    const juce::ScopedLock lock(pendingOverrideLock);
-    return pendingOverride.mixedPreRingTau;
+    pendingOverrideLock.enter();
+    const float value = pendingOverride.mixedPreRingTau;
+    pendingOverrideLock.exit();
+    return value;
 }
 
 void ConvolverProcessor::setExperimentalDirectHeadEnabled(bool enabled)
 {
     bool prev;
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         prev = pendingOverride.experimentalDirectHeadEnabled;
         pendingOverride.experimentalDirectHeadEnabled = enabled;
+        pendingOverrideLock.exit();
     }
     if (prev != enabled)
     {
@@ -876,15 +905,18 @@ void ConvolverProcessor::setRebuildDebounceMs(int ms)
 {
     const int clampedMs = juce::jlimit(REBUILD_DEBOUNCE_MIN_MS, REBUILD_DEBOUNCE_MAX_MS, ms);
     {
-        const juce::ScopedLock lock(pendingOverrideLock);
+        pendingOverrideLock.enter();
         pendingOverride.rebuildDebounceMs = clampedMs;
+        pendingOverrideLock.exit();
     }
 }
 
 int ConvolverProcessor::getRebuildDebounceMs() const
 {
-    const juce::ScopedLock lock(pendingOverrideLock);
-    return pendingOverride.rebuildDebounceMs;
+    pendingOverrideLock.enter();
+    const int value = pendingOverride.rebuildDebounceMs;
+    pendingOverrideLock.exit();
+    return value;
 }
 
 void ConvolverProcessor::StereoConvolver::reset()

@@ -956,7 +956,9 @@ NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature
     session.bitDepth = engine.getDitherBitDepth();
     session.adaptiveCoeffBankIndex = convo::consumeAtomic(engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
     const auto runtimePublishView = engine.getRuntimePublishView();
-    if (auto* dsp = engine.runtimePublishedCurrentDSP(runtimePublishView.graph))
+    if (auto* dsp = (runtimePublishView.graph != nullptr)
+            ? static_cast<AudioEngine::DSPCore*>(runtimePublishView.graph->activeNode)
+            : nullptr)
         session.sessionId = dsp->currentCaptureSessionId;
     return session;
 }

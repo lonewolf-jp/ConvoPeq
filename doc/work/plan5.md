@@ -585,6 +585,8 @@ safe runtime first
 - 3-world/federation の記述は **参考モデル** とし、ConvoPeq 実装運用は 2-world（Publication/Execution）を優先する。
 - authority 制約は capability-first を優先し、runtime coordinator lifecycle を導入しない。
 
+運用判定ラベルは `doc/work/R11-R25_Closed判定監査表_2026-05-21.md` と同期し、現行CIゲート（seed evidence + verify + scan + build）で安定運用可能な状態を **Closed（運用重視）**、seed非依存の実行時挙動検証まで満たす状態を **Closed（厳密）**、実装はあるが運用ゲート未結線の状態を **部分適合** とする。
+
 ### 実装優先順位（現実コード整合）
 
 - **Phase A**: DSP ownership singularity
@@ -601,3 +603,8 @@ safe runtime first
 - `plan5.md` は要約とリンクのみ保持
 - 正本にある仕様本文を `plan5.md` へ再掲しない
 - 結合ファイル化（他文書全文貼り戻し）を禁止
+
+## 監査結果リンク
+
+- R11〜R25 Closed判定監査表（証拠ファイル/コード行付き）:
+  - `doc/work/R11-R25_Closed判定監査表_2026-05-21.md`

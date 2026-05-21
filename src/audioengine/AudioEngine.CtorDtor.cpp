@@ -60,16 +60,16 @@ AudioEngine::~AudioEngine()
 
         convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel); // acq_rel: rebuild observer の acquire と HB
 
-        // Audio Thread から参照される公開ポインタを明示的に外す。
-        publishCurrentDSP(nullptr);
-
         {
             constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
             DSPCore* activeRaw = activeDSP.get();
             activeToRelease = (reinterpret_cast<uintptr_t>(activeRaw) == kInvalidAllOnes) ? nullptr : activeRaw;
         }
         activeDSP = nullptr;
-        fadingToRelease = sanitizeRawPtr(exchangeFadingOutDSP(nullptr));
+        {
+            auto* const fadingRaw = exchangeFadingOutDSP(nullptr);
+            fadingToRelease = (reinterpret_cast<uintptr_t>(fadingRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : fadingRaw;
+        }
 
         validateDistinctRuntimeSlots("~AudioEngine.afterClear",
                          activeDSP,
@@ -109,7 +109,8 @@ AudioEngine::~AudioEngine()
 
     // Shutdown 時は EBR 回収を試みる。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
-    publicationCoordinator().clearPublishedRuntimeSnapshotsNonRt();
+    RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+        .clearPublishedRuntimeSnapshotsNonRt();
     drainDeferredRetireQueues(true);
     m_epochDomain.drainAll();
 

@@ -1,0 +1,17 @@
+﻿{
+    "schema":  "retire_timeline_v1",
+    "epochMode":  "shared",
+    "rollbackMode":  "shared",
+    "rollbackReady":  true,
+    "totalTransitions":  8,
+    "laneCounters":  {
+                         "rtIntent":  2,
+                         "coordination":  2,
+                         "epoch":  2,
+                         "reclaim":  2,
+                         "quarantine":  0
+                     },
+    "provenance":  "runtime",
+    "runId":  "local-ci-improved3-1779369710955",
+    "generatedAtNs":  1779369731543000000
+}

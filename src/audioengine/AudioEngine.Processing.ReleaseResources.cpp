@@ -44,7 +44,11 @@ void AudioEngine::releaseResources()
             break;
     }
 
+    // P0-A0: LifecycleIsolationRuntime integration - enter release phase
+    auto lifecycleToken = lifecycleRuntime_.enterRelease();
+
     setShutdownPhase(ShutdownPhase::StopAcceptingWork, "releaseResources");
+    shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::AudioStopped);
 
     // 非MT起点の pending rebuild 要求と AsyncUpdater キューをシャットダウン直後に廃棄する。
     // stopRebuildThread より先に実行して handleAsyncUpdate が後から rebuild を発火しないようにする。
@@ -85,19 +89,24 @@ void AudioEngine::releaseResources()
                          nullptr);
 
         convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel);
-        publishCurrentDSP(nullptr);
-
-        activeToRelease = sanitizeRawPtr(activeDSP.get());
+        {
+            auto* const activeRaw = activeDSP.get();
+            activeToRelease = (reinterpret_cast<uintptr_t>(activeRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : activeRaw;
+        }
         activeDSP = nullptr;
 
-        fadingToRelease = sanitizeRawPtr(exchangeFadingOutDSP(nullptr));
+        {
+            auto* const fadingRaw = exchangeFadingOutDSP(nullptr);
+            fadingToRelease = (reinterpret_cast<uintptr_t>(fadingRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : fadingRaw;
+        }
         convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
         dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
         convo::publishAtomic(queuedFadeTimeSec, 0.03, std::memory_order_release);
 
         if (hasPendingTask)
         {
-            pendingCurrentToRelease = sanitizeRawPtr(pendingTask.currentDSP);
+            auto* const pendingRaw = pendingTask.currentDSP;
+            pendingCurrentToRelease = (reinterpret_cast<uintptr_t>(pendingRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : pendingRaw;
             pendingTask.currentDSP = nullptr;
             hasPendingTask = false;
         }
@@ -105,11 +114,12 @@ void AudioEngine::releaseResources()
         convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
         dspCrossfadeGain.setCurrentAndTargetValue(1.0);
         refreshCrossfadePreparedSnapshotFromAtomics();
-        publicationCoordinator().publishState(nullptr,
-                              nullptr,
-                              convo::TransitionPolicy::HardReset,
-                              0.0,
-                              false);
+        RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+            .publishState(nullptr,
+                          nullptr,
+                          convo::TransitionPolicy::HardReset,
+                          0.0,
+                          false);
 
         validateDistinctRuntimeSlots("releaseResources.afterClear",
                          activeDSP,
@@ -120,10 +130,13 @@ void AudioEngine::releaseResources()
     diagLog("[DIAG] releaseResources: before stopRebuildThread");
     setShutdownPhase(ShutdownPhase::StopWorkers, "releaseResources");
     stopRebuildThread();
+    shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ObserverDrained);
     diagLog("[DIAG] releaseResources: after stopRebuildThread");
 
     setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "releaseResources");
-    m_epochDomain.advanceEpoch();
+    advanceRetireEpoch();
+    shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::RetireClosed);
+    shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::EpochSettled);
 
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
@@ -141,6 +154,21 @@ void AudioEngine::releaseResources()
     // shutdown/release シーケンスでは明示的に deferred retire queue をドレインする。
     // 通常タイマー経路は Releasing 中に early-return するため、ここで最終回収を保証する。
     drainDeferredRetireQueues(true);
+    shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ReclaimComplete);
+
+    const auto activeHandle = dspHandleRuntime_.getActiveDSP();
+    const auto fadingHandle = dspHandleRuntime_.getFadingDSP();
+    if (!activeHandle.isNull())
+    {
+        dspHandleRuntime_.retire(activeHandle);
+        dspHandleRuntime_.reclaim(activeHandle);
+    }
+    if (!fadingHandle.isNull() && fadingHandle != activeHandle)
+    {
+        dspHandleRuntime_.retire(fadingHandle);
+        dspHandleRuntime_.reclaim(fadingHandle);
+    }
+    convo::publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
 
     diagLog("[DIAG] releaseResources: before ui processor release");
     diagLog("[DIAG] releaseResources: before uiConvolverProcessor.releaseResources");
@@ -155,10 +183,43 @@ void AudioEngine::releaseResources()
 
     diagLog("[DIAG] releaseResources: skip deferred reclaim (reconfigure phase)");
 
-    publicationCoordinator().clearPublishedRuntimeSnapshotsNonRt();
+    RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+        .clearPublishedRuntimeSnapshotsNonRt();
+
+    const auto pendingRetireCount = [&]() noexcept -> uint32_t
+    {
+        uint32_t count = 0;
+        if (convo::consumeAtomic(audioThreadRetireOverflowPtr, std::memory_order_acquire) != nullptr)
+            ++count;
+
+        std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
+        count += static_cast<uint32_t>(deferredDeleteFallbackQueue.size());
+        return count;
+    }();
+
+    const auto activeCrossfadeCount = consumeAtomic(activeCrossfadeId_, std::memory_order_acquire) != static_cast<convo::isr::CrossfadeId>(0u) ? 1u : 0u;
+    shutdownRuntime_.setBoundedTeardownCounters(
+        convo::consumeAtomic(audioCallbackActiveCount_, std::memory_order_acquire),
+        activeCrossfadeCount,
+        pendingRetireCount,
+        activeEpochObserverCount());
+
+    debugRuntime_.recordHBEdge(300u,
+                               400u,
+                               static_cast<std::uint64_t>(pendingRetireCount),
+                               static_cast<std::uint64_t>(activeCrossfadeCount),
+                               static_cast<int>(std::memory_order_acq_rel));
+
+    shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ShutdownComplete);
+    shutdownRuntime_.emitShutdownTrace();
+
+    emitEvidenceTickNonRt(true);
 
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Unprepared, std::memory_order_release);
     diagLog("[DIAG] releaseResources: ABOUT_TO_EXIT_SCOPE");
+
+    // P0-A0: LifecycleIsolationRuntime integration - leave release phase
+    lifecycleRuntime_.leaveRelease(lifecycleToken);
 }
 
 #endif

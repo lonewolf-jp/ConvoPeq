@@ -12,7 +12,7 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
 
     if (snap == nullptr)
     {
-        applySafeSilentFallback(bufferToFill);
+        bufferToFill.clearActiveBufferRegion();
         return;
     }
 
@@ -20,12 +20,16 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     const auto* runtimeGraph = runtimePublishView.graph;
     DSPCore* dsp = isFadingTarget
         ? resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph)
-        : resolveCurrentDSPFromRuntimeWorldOnly(runtimeGraph);
+        : ((runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
+            ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+            : nullptr);
     if (dsp == nullptr && isFadingTarget)
-        dsp = resolveCurrentDSPFromRuntimeWorldOnly(runtimeGraph);
+        dsp = (runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
+            ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+            : nullptr;
     if (dsp == nullptr)
     {
-        applySafeSilentFallback(bufferToFill);
+        bufferToFill.clearActiveBufferRegion();
         return;
     }
 

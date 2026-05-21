@@ -16,6 +16,8 @@ void AudioEngine::timerCallback()
     const auto* runtimeWorld = runtimeStore.observe();
     const auto* runtimeGraph = (runtimeWorld != nullptr) ? &runtimeWorld->graph : nullptr;
 
+    emitEvidenceTickNonRt(false);
+
     {
         const auto ts = runtimeWorld != nullptr ? runtimeWorld->engine.transition : convo::TransitionState{};
         const int active = ts.active ? 1 : 0;
@@ -59,11 +61,11 @@ void AudioEngine::timerCallback()
     }
 
     {
-        const uint64_t revision = runtimeRevision(runtimeGraph);
-        const uint64_t currentUuid = runtimeCurrentUuid(runtimeGraph);
-        const uint64_t fadingUuid = runtimeFadingUuid(runtimeGraph);
-        const uint64_t transitionCurrentUuid = runtimeTransitionCurrentUuid(runtimeGraph);
-        const uint64_t transitionNextUuid = runtimeTransitionNextUuid(runtimeGraph);
+        const uint64_t revision = (runtimeGraph != nullptr) ? runtimeGraph->generation : 0;
+        const uint64_t currentUuid = (runtimeGraph != nullptr) ? runtimeGraph->runtimeUuid : 0;
+        const uint64_t fadingUuid = (runtimeGraph != nullptr) ? runtimeGraph->fadingRuntimeUuid : 0;
+        const uint64_t transitionCurrentUuid = (runtimeGraph != nullptr) ? runtimeGraph->transitionCurrentRuntimeUuid : 0;
+        const uint64_t transitionNextUuid = (runtimeGraph != nullptr) ? runtimeGraph->transitionNextRuntimeUuid : 0;
 
         if (revision != debugLastReportedRuntimeSnapshotRevision
             || currentUuid != debugLastReportedRuntimePublishCurrentUuid
@@ -150,7 +152,9 @@ void AudioEngine::timerCallback()
 
     // フェイルセーフ: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
-    auto* currentDspForRuntime = runtimePublishedCurrentDSP(runtimeGraph);
+    auto* currentDspForRuntime = (runtimeGraph != nullptr)
+        ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+        : nullptr;
     auto* fadingDspForRuntime = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
 
     // T1: 公開済みRuntimeへのNonRTからの可変更新を避けるため、
@@ -225,6 +229,9 @@ void AudioEngine::timerCallback()
         }
     }
 
+    if (isShutdownInProgress())
+        emitEvidenceTickNonRt(true);
+
     if (!isShutdownInProgress()
         && hasRebuildReason(RebuildReason::DeferredFinalizeAware))
     {
@@ -259,7 +266,7 @@ void AudioEngine::timerCallback()
     processDeferredLearningActions();
 
     const bool hasFading = (fadingDspForRuntime != nullptr);
-    const bool hasPendingCrossfade = runtimeCrossfadePendingWorldOnly(runtimeGraph);
+    const bool hasPendingCrossfade = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadePending : false;
 
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();
@@ -267,7 +274,16 @@ void AudioEngine::timerCallback()
     const bool fadeCompleted = m_coordinator.tryCompleteFade();
     if (fadeCompleted)
     {
-        if (auto* done = sanitizeRawPtr(exchangeFadingOutDSP(nullptr)))
+        const auto activeCrossfadeId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
+        if (activeCrossfadeId != 0u)
+        {
+            dspHandleRuntime_.endCrossfade(activeCrossfadeId);
+            crossfadeAuthorityRuntime_.unregisterCrossfade(activeCrossfadeId);
+            convo::publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
+        }
+
+        auto* const doneRaw1 = exchangeFadingOutDSP(nullptr);
+        if (auto* done = (reinterpret_cast<uintptr_t>(doneRaw1) == (~static_cast<uintptr_t>(0))) ? nullptr : doneRaw1)
             retireDSP(done);
         publishAtomic(dspCrossfadePending, false, std::memory_order_release);
         publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
@@ -279,14 +295,17 @@ void AudioEngine::timerCallback()
         // Phase4: フェード完了時の RuntimeGraph を idle 状態へ同期する。
         // これにより AudioThread は atomic fallback ではなく publish world だけで
         // crossfade 状態を正しく観測できる。
-        auto* currentAfterFade = runtimePublishedCurrentDSP(runtimeGraph);
+        auto* currentAfterFade = (runtimeGraph != nullptr)
+            ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+            : nullptr;
         if (currentAfterFade != nullptr)
         {
-            publicationCoordinator().publishState(currentAfterFade,
-                                                  nullptr,
-                                                  convo::TransitionPolicy::SmoothOnly,
-                                                  0.0,
-                                                  false);
+            RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+                .publishState(currentAfterFade,
+                              nullptr,
+                              convo::TransitionPolicy::SmoothOnly,
+                              0.0,
+                              false);
         }
 
         sendChangeMessage();
@@ -294,7 +313,8 @@ void AudioEngine::timerCallback()
 
     if (!m_coordinator.isFading())
     {
-        if (auto* done = sanitizeRawPtr(exchangeFadingOutDSP(nullptr)))
+        auto* const doneRaw2 = exchangeFadingOutDSP(nullptr);
+        if (auto* done = (reinterpret_cast<uintptr_t>(doneRaw2) == (~static_cast<uintptr_t>(0))) ? nullptr : doneRaw2)
             retireDSP(done);
     }
 

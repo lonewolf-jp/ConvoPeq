@@ -1,0 +1,14 @@
+﻿{
+    "generatedAtNs":  1779369731543000000,
+    "sh1_callbackCount":  0,
+    "sh3_pendingRetire":  0,
+    "phase":  0,
+    "sh5_lateCallbackCount":  0,
+    "sh2_activeCrossfade":  0,
+    "schema":  "shutdown_trace_v1",
+    "sh6_postStopEnqueueCount":  0,
+    "sh4_observerCount":  0,
+    "verified":  true,
+    "provenance":  "runtime",
+    "runId":  "local-ci-improved3-1779369710955"
+}

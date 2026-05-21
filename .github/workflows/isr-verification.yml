@@ -1,0 +1,97 @@
+name: ISR Verification
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      requireRuntimeEvidence:
+        description: "Require runtime-generated evidence only (do not seed evidence)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  isr-verify:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run ISR V2-V10 verification scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.requireRuntimeEvidence }}" -eq "true") {
+            $env:ISR_REQUIRE_RUNTIME_EVIDENCE = '1'
+            $env:CONVO_ISR_RUNTIME_RUN_ID = "gh-${{ github.run_id }}-${{ github.run_attempt }}"
+            Write-Host "[INFO] Strict runtime evidence mode: runtimeRunId=$($env:CONVO_ISR_RUNTIME_RUN_ID)"
+          }
+          else {
+            $env:ISR_REQUIRE_RUNTIME_EVIDENCE = '0'
+            Remove-Item Env:CONVO_ISR_RUNTIME_RUN_ID -ErrorAction SilentlyContinue
+          }
+
+          # Re-generate evidence each run to avoid stale repository artifact dependency.
+          # Strict evidence mode disables seeding and expects runtime-generated artifacts.
+          if ($env:ISR_REQUIRE_RUNTIME_EVIDENCE -ne '1') {
+            & ./.github/scripts/isr-seed-evidence.ps1
+          }
+          else {
+            Write-Host "[INFO] Strict runtime evidence mode enabled: collecting runtime evidence from executable."
+            & ./.github/scripts/isr-run-runtime-evidence.ps1
+          }
+
+          # Stage mapping (V2〜V10): stage name -> verification artifact/schema
+          # V2  Seal Integrity Check          -> mutation_fault_trace.json / mutation_fault_trace_v1
+          # V3  Recursive Closure Validation  -> closure_graph.json / closure_graph_v1
+          # V4  Payload Tier Validation       -> payload_tier_report.json / payload_tier_report_v1
+          # V5  HB Reorder Simulation         -> hb_graph_trace.json + hb_violation_report.json
+          # V6  Shutdown FSM Verification     -> shutdown_trace.json / shutdown_trace_v1
+          # V7  Retire Latency Audit          -> retire_latency_report.json + retire_timeline.json
+          # V8  UAF Suspicion Detector        -> asan_report.txt or recovery_trace.json
+          # V9  Forbidden Capability Scan     -> payload_tier_report.json / payload_tier_report_v1
+          # V10 Ownership Cycle Detection     -> closure_graph.json / closure_graph_v1
+
+          & ./.github/scripts/isr-verify-v2.ps1
+          & ./.github/scripts/isr-verify-v3.ps1
+          & ./.github/scripts/isr-verify-v4.ps1
+          & ./.github/scripts/isr-verify-v5.ps1
+          & ./.github/scripts/isr-verify-v6.ps1
+          & ./.github/scripts/isr-verify-v7.ps1
+          & ./.github/scripts/isr-verify-v8.ps1
+          & ./.github/scripts/isr-verify-v9.ps1
+          & ./.github/scripts/isr-verify-v10-ownership-cycle.ps1
+          & ./.github/scripts/isr-verify-evidence-provenance.ps1
+          & ./.github/scripts/isr-verify-runtime-reduction-gate.ps1
+          & ./.github/scripts/isr-verify-proof-scope.ps1
+
+      - name: Atomic dot-call scan
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./.github/scripts/check-src-atomic-dotcall.ps1
+
+      - name: List compliance scan
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./.github/scripts/check-list-compliance.ps1
+
+      - name: P3 governance gates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./.github/scripts/isr-verify-p3-governance.ps1
+
+      - name: Upload ISR evidence artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isr-evidence-${{ github.run_id }}
+          path: |
+            evidence/**/*.json
+            build/evidence/**/*.json
+          if-no-files-found: error
+          retention-days: 14

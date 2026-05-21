@@ -1,0 +1,19 @@
+﻿{
+    "events":  [
+                   {
+                       "toEpoch":  1,
+                       "to":  2,
+                       "release":  true,
+                       "mo":  3,
+                       "acquire":  true,
+                       "fromEpoch":  1,
+                       "from":  1,
+                       "ts":  1779369731543000000
+                   }
+               ],
+    "schema":  "hb_trace_v1",
+    "eventCount":  1,
+    "generatedAtNs":  1779369731543000000,
+    "provenance":  "runtime",
+    "runId":  "local-ci-improved3-1779369710955"
+}

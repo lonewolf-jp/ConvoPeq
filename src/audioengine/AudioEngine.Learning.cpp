@@ -119,7 +119,9 @@ void AudioEngine::processLearningCommands() noexcept
 
                 const auto runtimePublishView = getRuntimePublishView();
                 const auto* runtimeGraph = runtimePublishView.graph;
-                auto* dsp = runtimePublishedCurrentDSP(runtimeGraph);
+                auto* dsp = (runtimeGraph != nullptr)
+                    ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+                    : nullptr;
                 // irGeneration チェックを削除: DSP が有効かつ型が適切であれば即座に学習開始可能
                 const bool dspReady = (dsp != nullptr)
                     && (dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder);

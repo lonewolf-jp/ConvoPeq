@@ -1,0 +1,26 @@
+﻿{
+    "violations":  0,
+    "schema":  "payload_tier_report_v1",
+    "families":  [
+                     {
+                         "name":  "activeNode",
+                         "tier":  "InlineImmutable"
+                     },
+                     {
+                         "name":  "fadingNode",
+                         "tier":  "ImmutableShared"
+                     },
+                     {
+                         "name":  "transitionNext",
+                         "tier":  "ImmutableShared"
+                     },
+                     {
+                         "name":  "retireSlot",
+                         "tier":  "MutableAuthority"
+                     }
+                 ],
+    "status":  "generated",
+    "generatedAtNs":  1779369731543000000,
+    "provenance":  "runtime",
+    "runId":  "local-ci-improved3-1779369710955"
+}

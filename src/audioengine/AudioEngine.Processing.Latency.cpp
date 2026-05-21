@@ -85,7 +85,9 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 
     const auto runtimePublishView = getRuntimePublishView();
     const auto* runtimeGraph = runtimePublishView.graph;
-    auto* dsp = runtimePublishedCurrentDSP(runtimeGraph);
+    auto* dsp = (runtimeGraph != nullptr)
+        ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+        : nullptr;
     if (dsp == nullptr)
         return breakdown;
 

@@ -1,0 +1,8 @@
+﻿{
+    "violations":  0,
+    "schema":  "mutation_fault_trace_v1",
+    "status":  "generated",
+    "generatedAtNs":  1779369731543000000,
+    "provenance":  "runtime",
+    "runId":  "local-ci-improved3-1779369710955"
+}

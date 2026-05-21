@@ -1,0 +1,146 @@
+#include "ISRShutdown.h"
+#include "AtomicAccess.h"
+
+#include <filesystem>
+#include <fstream>
+
+namespace convo {
+namespace isr {
+
+ShutdownRuntime::ShutdownRuntime() = default;
+ShutdownRuntime::~ShutdownRuntime() = default;
+
+void ShutdownRuntime::initiateShutdown()
+{
+    transitionTo(ShutdownPhase::AudioStopped);
+}
+
+ShutdownPhase ShutdownRuntime::getPhase() const noexcept
+{
+    return convo::consumeAtomic(phase_, std::memory_order_acquire);
+}
+
+void ShutdownRuntime::advancePhase() noexcept
+{
+    const ShutdownPhase current = convo::consumeAtomic(phase_, std::memory_order_acquire);
+
+    ShutdownPhase next = current;
+    switch (current) {
+        case ShutdownPhase::Running:
+            next = ShutdownPhase::AudioStopped;
+            break;
+        case ShutdownPhase::AudioStopped:
+            next = ShutdownPhase::ObserverDrained;
+            break;
+        case ShutdownPhase::ObserverDrained:
+            next = ShutdownPhase::RetireClosed;
+            break;
+        case ShutdownPhase::RetireClosed:
+            next = ShutdownPhase::EpochSettled;
+            break;
+        case ShutdownPhase::EpochSettled:
+            next = ShutdownPhase::ReclaimComplete;
+            break;
+        case ShutdownPhase::ReclaimComplete:
+            next = ShutdownPhase::ShutdownComplete;
+            break;
+        case ShutdownPhase::ShutdownComplete:
+        default:
+            return;
+    }
+
+    (void)transitionTo(next);
+}
+
+bool ShutdownRuntime::transitionTo(ShutdownPhase target) noexcept
+{
+    const auto current = convo::consumeAtomic(phase_, std::memory_order_acquire);
+    const auto c = static_cast<int>(current);
+    const auto t = static_cast<int>(target);
+
+    if (!(t == c || t == c + 1)) {
+        (void)convo::fetchAddAtomic(transitionViolations_, uint32_t{1}, std::memory_order_acq_rel);
+        return false;
+    }
+
+    convo::publishAtomic(phase_, target, std::memory_order_release);
+    return true;
+}
+
+bool ShutdownRuntime::isShutdownInProgress() const noexcept
+{
+    const ShutdownPhase current = convo::consumeAtomic(phase_, std::memory_order_acquire);
+    return current != ShutdownPhase::Running && current != ShutdownPhase::ShutdownComplete;
+}
+
+void ShutdownRuntime::emitShutdownTrace() const
+{
+    const auto outputPath = std::filesystem::current_path() / "evidence" / "shutdown_trace.json";
+    std::error_code ec;
+    std::filesystem::create_directories(outputPath.parent_path(), ec);
+
+    std::ofstream file(outputPath, std::ios::binary | std::ios::trunc);
+    if (!file.is_open()) {
+        return;
+    }
+
+    const auto phase = convo::consumeAtomic(phase_, std::memory_order_acquire);
+    const auto violations = convo::consumeAtomic(transitionViolations_, std::memory_order_acquire);
+    const auto sh1 = convo::consumeAtomic(sh1CallbackCount_, std::memory_order_acquire);
+    const auto sh2 = convo::consumeAtomic(sh2ActiveCrossfade_, std::memory_order_acquire);
+    const auto sh3 = convo::consumeAtomic(sh3PendingRetire_, std::memory_order_acquire);
+    const auto sh4 = convo::consumeAtomic(sh4ObserverCount_, std::memory_order_acquire);
+    const auto sh5 = convo::consumeAtomic(sh5LateCallbackCount_, std::memory_order_acquire);
+    const auto sh6 = convo::consumeAtomic(sh6PostStopEnqueueCount_, std::memory_order_acquire);
+
+    const char* phaseName = "Running";
+    switch (phase) {
+    case ShutdownPhase::Running: phaseName = "Running"; break;
+    case ShutdownPhase::AudioStopped: phaseName = "AudioStopped"; break;
+    case ShutdownPhase::ObserverDrained: phaseName = "ObserverDrained"; break;
+    case ShutdownPhase::RetireClosed: phaseName = "RetireClosed"; break;
+    case ShutdownPhase::EpochSettled: phaseName = "EpochSettled"; break;
+    case ShutdownPhase::ReclaimComplete: phaseName = "ReclaimComplete"; break;
+    case ShutdownPhase::ShutdownComplete: phaseName = "ShutdownComplete"; break;
+    }
+
+    const bool boundedComplete = (sh1 == 0u && sh2 == 0u && sh3 == 0u && sh4 == 0u && sh5 == 0u && sh6 == 0u);
+
+    file << "{\n";
+    file << "  \"schema\": \"shutdown_trace_v1\",\n";
+    file << "  \"phase\": " << static_cast<int>(phase) << ",\n";
+    file << "  \"phaseName\": \"" << phaseName << "\",\n";
+    file << "  \"transitionViolations\": " << violations << ",\n";
+    file << "  \"sh1_callbackCount\": " << sh1 << ",\n";
+    file << "  \"sh2_activeCrossfade\": " << sh2 << ",\n";
+    file << "  \"sh3_pendingRetire\": " << sh3 << ",\n";
+    file << "  \"sh4_observerCount\": " << sh4 << ",\n";
+    file << "  \"sh5_lateCallbackCount\": " << sh5 << ",\n";
+    file << "  \"sh6_postStopEnqueueCount\": " << sh6 << ",\n";
+    file << "  \"verified\": " << ((violations == 0 && boundedComplete) ? "true" : "false") << "\n";
+    file << "}\n";
+}
+
+void ShutdownRuntime::setBoundedTeardownCounters(uint32_t callbackCount,
+                                                 uint32_t activeCrossfade,
+                                                 uint32_t pendingRetire,
+                                                 uint32_t observerCount) noexcept
+{
+    convo::publishAtomic(sh1CallbackCount_, callbackCount, std::memory_order_release);
+    convo::publishAtomic(sh2ActiveCrossfade_, activeCrossfade, std::memory_order_release);
+    convo::publishAtomic(sh3PendingRetire_, pendingRetire, std::memory_order_release);
+    convo::publishAtomic(sh4ObserverCount_, observerCount, std::memory_order_release);
+}
+
+void ShutdownRuntime::markLateCallback() noexcept
+{
+    (void)convo::fetchAddAtomic(sh5LateCallbackCount_, uint32_t{1}, std::memory_order_acq_rel);
+}
+
+void ShutdownRuntime::markPostStopEnqueue() noexcept
+{
+    (void)convo::fetchAddAtomic(sh6PostStopEnqueueCount_, uint32_t{1}, std::memory_order_acq_rel);
+}
+
+}  // namespace isr
+}  // namespace convo

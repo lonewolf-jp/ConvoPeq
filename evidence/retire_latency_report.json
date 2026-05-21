@@ -1,0 +1,7 @@
+﻿{
+    "generatedAtNs":  1779369731543000000,
+    "schema":  "retire_latency_report_v1",
+    "withinThreshold":  true,
+    "provenance":  "runtime",
+    "runId":  "local-ci-improved3-1779369710955"
+}

@@ -10,7 +10,32 @@ namespace
 
 uint64_t AudioEngine::publishRcuEpoch() noexcept
 {
-    return m_epochDomain.currentEpoch();
+    return currentRetireEpoch();
+}
+
+uint64_t AudioEngine::publishRetireEpoch() noexcept
+{
+    return m_epochDomain.publish();
+}
+
+uint64_t AudioEngine::currentRetireEpoch() const noexcept
+{
+    return m_epochDomain.current();
+}
+
+uint64_t AudioEngine::advanceRetireEpoch() noexcept
+{
+    return m_epochDomain.advanceEpoch();
+}
+
+bool AudioEngine::enqueueRetireEpochBounded(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept
+{
+    return m_epochDomain.enqueueRetire(ptr, deleter, epoch);
+}
+
+uint32_t AudioEngine::activeEpochObserverCount() const noexcept
+{
+    return m_epochDomain.activeReaderCount();
 }
 
 #endif
@@ -57,8 +82,8 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
             return;
 
         const uint64_t overflowEpoch = convo::exchangeAtomic(audioThreadRetireOverflowEpoch, 0, std::memory_order_acq_rel);
-        const uint64_t epoch = overflowEpoch != 0 ? overflowEpoch : m_epochDomain.current();
-        if (!m_epochDomain.enqueueRetire(
+        const uint64_t epoch = overflowEpoch != 0 ? overflowEpoch : currentRetireEpoch();
+        if (!enqueueRetireEpochBounded(
                 overflow,
                 [](void* p)
                 {
@@ -94,8 +119,8 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
         for (auto& entry : pending)
         {
-            const uint64_t epoch = entry.epoch != 0 ? entry.epoch : m_epochDomain.current();
-            if (!m_epochDomain.enqueueRetire(entry.ptr, entry.deleter, epoch))
+            const uint64_t epoch = entry.epoch != 0 ? entry.epoch : currentRetireEpoch();
+            if (!enqueueRetireEpochBounded(entry.ptr, entry.deleter, epoch))
             {
                 std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
                 deferredDeleteFallbackQueue.push_back(entry);
