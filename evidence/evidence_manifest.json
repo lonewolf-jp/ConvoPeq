@@ -1,22 +1,12 @@
-﻿{
-    "schema":  "evidence_manifest_v1",
-    "generationMode":  "runtime",
-    "runtimeRunId":  "local-ci-improved3-1779369710955",
-    "runId":  "local-ci-improved3-1779369710955",
-    "buildMode":  "Release",
-    "proofLevel":  "off",
-    "generatedAtNs":  383349850973000,
-    "minimalEvidence":  true,
-    "generator":  "isr-run-runtime-evidence.ps1",
-    "artifacts":  [
-                      "closure_graph.json",
-                      "hb_graph_trace.json",
-                      "hb_violation_report.json",
-                      "mutation_fault_trace.json",
-                      "payload_tier_report.json",
-                      "recovery_trace.json",
-                      "retire_latency_report.json",
-                      "retire_timeline.json",
-                      "shutdown_trace.json"
-                  ]
+{
+  "schema": "evidence_manifest_v1",
+  "generationMode": "runtime",
+  "runtimeRunId": "runtime-local",
+  "runId": "runtime-local",
+  "buildMode": "Release",
+  "proofLevel": "off",
+  "generatedAtNs": 72169711172000,
+  "artifacts": [
+  ],
+  "minimalEvidence": true
 }

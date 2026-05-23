@@ -821,10 +821,8 @@ void ConvolverProcessor::setMixedTransitionStartHz(float hz)
 
 float ConvolverProcessor::getMixedTransitionStartHz() const
 {
-    pendingOverrideLock.enter();
-    const float value = pendingOverride.mixedTransitionStartHz;
-    pendingOverrideLock.exit();
-    return value;
+    const BuildSnapshot snapshot = captureBuildSnapshot();
+    return snapshot.mixedTransitionStartHz;
 }
 
 void ConvolverProcessor::setMixedTransitionEndHz(float hz)
@@ -854,10 +852,8 @@ void ConvolverProcessor::setMixedTransitionEndHz(float hz)
 
 float ConvolverProcessor::getMixedTransitionEndHz() const
 {
-    pendingOverrideLock.enter();
-    const float value = pendingOverride.mixedTransitionEndHz;
-    pendingOverrideLock.exit();
-    return value;
+    const BuildSnapshot snapshot = captureBuildSnapshot();
+    return snapshot.mixedTransitionEndHz;
 }
 
 void ConvolverProcessor::setMixedPreRingTau(float tau)
@@ -879,10 +875,8 @@ void ConvolverProcessor::setMixedPreRingTau(float tau)
 
 float ConvolverProcessor::getMixedPreRingTau() const
 {
-    pendingOverrideLock.enter();
-    const float value = pendingOverride.mixedPreRingTau;
-    pendingOverrideLock.exit();
-    return value;
+    const BuildSnapshot snapshot = captureBuildSnapshot();
+    return snapshot.mixedPreRingTau;
 }
 
 void ConvolverProcessor::setExperimentalDirectHeadEnabled(bool enabled)
@@ -913,10 +907,93 @@ void ConvolverProcessor::setRebuildDebounceMs(int ms)
 
 int ConvolverProcessor::getRebuildDebounceMs() const
 {
-    pendingOverrideLock.enter();
-    const int value = pendingOverride.rebuildDebounceMs;
-    pendingOverrideLock.exit();
-    return value;
+    const BuildSnapshot snapshot = captureBuildSnapshot();
+    return snapshot.rebuildDebounceMs;
+}
+
+void ConvolverProcessor::setTailMode(TailMode mode)
+{
+    const int clamped = juce::jlimit(static_cast<int>(TailMode::AirAbsorption),
+                                     static_cast<int>(TailMode::Bypass),
+                                     static_cast<int>(mode));
+    int prev;
+    {
+        pendingOverrideLock.enter();
+        prev = pendingOverride.tailMode;
+        pendingOverride.tailMode = clamped;
+        pendingOverrideLock.exit();
+    }
+    if (prev != clamped)
+        postCoalescedChangeNotification();
+}
+
+ConvolverProcessor::TailMode ConvolverProcessor::getTailMode() const
+{
+    const BuildSnapshot snapshot = captureBuildSnapshot();
+    const int mode = snapshot.tailMode;
+    return static_cast<TailMode>(juce::jlimit(static_cast<int>(TailMode::AirAbsorption),
+                                              static_cast<int>(TailMode::Bypass),
+                                              mode));
+}
+
+void ConvolverProcessor::setTailStartSec(float sec)
+{
+    const float clamped = juce::jlimit(TAIL_START_MIN_SEC, TAIL_START_MAX_SEC, sec);
+    float prev;
+    {
+        pendingOverrideLock.enter();
+        prev = pendingOverride.tailStartSec;
+        pendingOverride.tailStartSec = clamped;
+        pendingOverrideLock.exit();
+    }
+    if (std::abs(prev - clamped) > 1.0e-5f)
+        postCoalescedChangeNotification();
+}
+
+float ConvolverProcessor::getTailStartSec() const
+{
+    const BuildSnapshot snapshot = captureBuildSnapshot();
+    return snapshot.tailStartSec;
+}
+
+void ConvolverProcessor::setTailStrength(float strength)
+{
+    const float clamped = juce::jlimit(TAIL_STRENGTH_MIN, TAIL_STRENGTH_MAX, strength);
+    float prev;
+    {
+        pendingOverrideLock.enter();
+        prev = pendingOverride.tailStrength;
+        pendingOverride.tailStrength = clamped;
+        pendingOverrideLock.exit();
+    }
+    if (std::abs(prev - clamped) > 1.0e-5f)
+        postCoalescedChangeNotification();
+}
+
+float ConvolverProcessor::getTailStrength() const
+{
+    const BuildSnapshot snapshot = captureBuildSnapshot();
+    return snapshot.tailStrength;
+}
+
+void ConvolverProcessor::setTailL1L2Multiplier(int multiplier)
+{
+    const int clamped = juce::jlimit(TAIL_L1L2_MULT_MIN, TAIL_L1L2_MULT_MAX, multiplier);
+    int prev;
+    {
+        pendingOverrideLock.enter();
+        prev = pendingOverride.tailL1L2Multiplier;
+        pendingOverride.tailL1L2Multiplier = clamped;
+        pendingOverrideLock.exit();
+    }
+    if (prev != clamped)
+        postCoalescedChangeNotification();
+}
+
+int ConvolverProcessor::getTailL1L2Multiplier() const
+{
+    const BuildSnapshot snapshot = captureBuildSnapshot();
+    return snapshot.tailL1L2Multiplier;
 }
 
 void ConvolverProcessor::StereoConvolver::reset()

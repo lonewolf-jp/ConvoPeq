@@ -11,15 +11,19 @@
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD)
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
-                                               float mixedF1, float mixedF2, float mixedTau)
+                                 float mixedF1, float mixedF2, float mixedTau,
+                                 const ConvolverProcessor::BuildSnapshot& buildSnapshotIn)
     : Thread("IRLoader"), owner(p), weakOwner(&p), file(f), sampleRate(sr), blockSize(bs), phaseMode(phase),
-      mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2), mixedPreRingTau(mixedTau), isRebuild(false)
+    mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2), mixedPreRingTau(mixedTau),
+    buildSnapshot(buildSnapshotIn), isRebuild(false)
 {}
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::AudioBuffer<double>& src, double srcSR, double sr, int bs, ConvolverProcessor::PhaseMode phase,
-                                               float mixedF1, float mixedF2, float mixedTau, double scale)
+                                 float mixedF1, float mixedF2, float mixedTau, double scale,
+                                 const ConvolverProcessor::BuildSnapshot& buildSnapshotIn)
     : Thread("IRRebuilder"), owner(p), weakOwner(&p), sourceIR(src), sourceSampleRate(srcSR), sampleRate(sr), blockSize(bs), phaseMode(phase),
-      mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2), mixedPreRingTau(mixedTau), isRebuild(true), scaleFactor(scale)
+    mixedTransitionStartHz(mixedF1), mixedTransitionEndHz(mixedF2), mixedPreRingTau(mixedTau),
+    buildSnapshot(buildSnapshotIn), isRebuild(true), scaleFactor(scale)
 {}
 
 ConvolverProcessor::LoaderThread::~LoaderThread()
@@ -256,10 +260,24 @@ bool ConvolverProcessor::LoaderThread::initializeConvolverSynchronously(LoadResu
 {
     auto newConv = convo::aligned_make_unique<StereoConvolver>();
 
+    convo::FilterSpec spec;
+    spec.sampleRate = sr;
+    {
+        spec.hcMode = static_cast<convo::HCMode>(buildSnapshot.nucHCMode);
+        spec.lcMode = static_cast<convo::LCMode>(buildSnapshot.nucLCMode);
+        spec.tailMode = juce::jlimit(static_cast<int>(TailMode::AirAbsorption),
+                                     static_cast<int>(TailMode::Bypass),
+                                     buildSnapshot.tailMode);
+        spec.tailEnabled = (spec.tailMode != static_cast<int>(TailMode::Bypass));
+        spec.tailStartSeconds = static_cast<double>(buildSnapshot.tailStartSec);
+        spec.tailStrength = static_cast<double>(buildSnapshot.tailStrength);
+        spec.tailL1L2Multiplier = buildSnapshot.tailL1L2Multiplier;
+    }
+
     if (newConv->init(irL.release(), irR.release(), result.targetLength, sr, irPeakLatency,
                              maxFFTSize, internalBlockSize, firstPartition, callBlockSize, result.scaleFactor,
                              owner.getExperimentalDirectHeadEnabled(),
-                             nullptr, &owner))
+                             &spec, &owner))
     {
         result.newConv = newConv.release();
         result.success = true;
@@ -300,6 +318,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
                                      callQ = callBlockSize,
                                      isReb = isRebuild,
                                      file = file,
+                                     buildSnapshot = this->buildSnapshot,
                                      scale = result.scaleFactor]()
     {
         convo::ScopedAlignedPtr<double> irLHolder(irLRaw);
@@ -312,6 +331,7 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
             ownerPtr->finalizeNUCEngineOnMessageThread(std::move(irLHolder),
                                                        std::move(irRHolder),
                                                        length, sr, peak, maxFFT, known, first, callQ, isReb, file,
+                                                       buildSnapshot,
                                                        scale, std::move(loadedIRHolder), std::move(displayIRHolder));
         }
     });

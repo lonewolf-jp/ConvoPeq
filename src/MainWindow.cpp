@@ -9,6 +9,115 @@
 
 namespace
 {
+    bool tryParseIntOption(const juce::String& text, int& outValue)
+    {
+        if (!text.containsOnly("+-0123456789"))
+            return false;
+
+        outValue = text.getIntValue();
+        return true;
+    }
+
+    bool tryParseFloatOption(const juce::String& text, float& outValue)
+    {
+        if (!text.containsOnly("+-0123456789."))
+            return false;
+
+        outValue = text.getFloatValue();
+        return text.containsAnyOf("0123456789");
+    }
+
+    juce::String normalizeCliValue(juce::String value)
+    {
+        return value.trim().toLowerCase().replace("_", "").replace("-", "").replace(">", "");
+    }
+
+    bool parseCliPhaseMode(const juce::String& value, ConvolverProcessor::PhaseMode& outMode)
+    {
+        const auto normalized = normalizeCliValue(value);
+        if (normalized == "asis")
+        {
+            outMode = ConvolverProcessor::PhaseMode::AsIs;
+            return true;
+        }
+
+        if (normalized == "mixed")
+        {
+            outMode = ConvolverProcessor::PhaseMode::Mixed;
+            return true;
+        }
+
+        if (normalized == "minimum" || normalized == "min")
+        {
+            outMode = ConvolverProcessor::PhaseMode::Minimum;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool parseCliOrderMode(const juce::String& value, int& outModeId)
+    {
+        const auto normalized = normalizeCliValue(value);
+
+        if (normalized == "conv" || normalized == "convolver")
+        {
+            outModeId = 1;
+            return true;
+        }
+
+        if (normalized == "peq" || normalized == "eq")
+        {
+            outModeId = 2;
+            return true;
+        }
+
+        if (normalized == "convpeq" || normalized == "convolverpeq")
+        {
+            outModeId = 3;
+            return true;
+        }
+
+        if (normalized == "peqconv" || normalized == "eqconvolver")
+        {
+            outModeId = 4;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool parseCliNoiseShaper(const juce::String& value, AudioEngine::NoiseShaperType& outType)
+    {
+        const auto normalized = normalizeCliValue(value);
+
+        if (normalized == "psycho" || normalized == "psychoacoustic")
+        {
+            outType = AudioEngine::NoiseShaperType::Psychoacoustic;
+            return true;
+        }
+
+        if (normalized == "fixed4" || normalized == "fixed4tap")
+        {
+            outType = AudioEngine::NoiseShaperType::Fixed4Tap;
+            return true;
+        }
+
+        if (normalized == "adaptive" || normalized == "adaptive9" || normalized == "adaptive9thorder")
+        {
+            outType = AudioEngine::NoiseShaperType::Adaptive9thOrder;
+            return true;
+        }
+
+        if (normalized == "fixed15" || normalized == "fixed15tap")
+        {
+            outType = AudioEngine::NoiseShaperType::Fixed15Tap;
+            return true;
+        }
+
+        return false;
+    }
+
     juce::String formatSaturationValue(float value)
     {
         return juce::String(value, 2);
@@ -169,6 +278,391 @@ void MainWindow::showMainWindowAsync()
 
         safeThis->toFront(true);
     });
+}
+
+void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
+{
+    const auto trimmedCommandLine = commandLine.trim();
+    if (trimmedCommandLine.isEmpty())
+        return;
+
+    juce::StringArray tokens;
+    tokens.addTokens(trimmedCommandLine, true);
+    tokens.trim();
+    tokens.removeEmptyStrings();
+
+    if (tokens.isEmpty())
+        return;
+
+    const auto hasFlag = [&tokens](const juce::String& flag)
+    {
+        return tokens.contains(flag, true);
+    };
+
+    const auto findValue = [&tokens](const juce::String& key) -> juce::String
+    {
+        for (int i = 0; i < tokens.size(); ++i)
+        {
+            if (!tokens[i].equalsIgnoreCase(key))
+                continue;
+
+            if (i + 1 < tokens.size())
+                return tokens[i + 1];
+
+            return {};
+        }
+
+        return {};
+    };
+
+    const bool hasAutomationFlags =
+        hasFlag("--cli-run")
+        || !findValue("--cli-ir").isEmpty()
+        || !findValue("--cli-phase").isEmpty()
+        || !findValue("--cli-order").isEmpty()
+        || !findValue("--cli-dither-bit-depth").isEmpty()
+        || !findValue("--cli-noise-shaper").isEmpty()
+        || !findValue("--cli-post-load-dither-bit-depth").isEmpty()
+        || !findValue("--cli-post-load-delay-ms").isEmpty()
+        || !findValue("--cli-ir-reload-count").isEmpty()
+        || !findValue("--cli-ir-reload-interval-ms").isEmpty()
+        || !findValue("--cli-bypass-burst-count").isEmpty()
+        || !findValue("--cli-bypass-burst-interval-ms").isEmpty()
+        || !findValue("--cli-bypass-burst-value").isEmpty()
+        || !findValue("--cli-intent-burst-count").isEmpty()
+        || !findValue("--cli-intent-burst-interval-ms").isEmpty()
+        || !findValue("--cli-target-ir-sec").isEmpty()
+        || !findValue("--cli-debounce-ms").isEmpty()
+        || !findValue("--cli-f1-hz").isEmpty()
+        || !findValue("--cli-f2-hz").isEmpty()
+        || !findValue("--cli-pre-ring-tau").isEmpty()
+        || !findValue("--cli-exit-ms").isEmpty();
+
+    if (!hasAutomationFlags)
+        return;
+
+    juce::Logger::writeToLog("[CLI] Automation requested: " + trimmedCommandLine);
+
+    if (const auto orderValue = findValue("--cli-order"); !orderValue.isEmpty())
+    {
+        int modeId = 0;
+        if (parseCliOrderMode(orderValue, modeId))
+        {
+            orderModeBox.setSelectedId(modeId, juce::dontSendNotification);
+            orderModeBoxChanged();
+            juce::Logger::writeToLog("[CLI] Applied order mode: " + orderValue);
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Unknown --cli-order value: " + orderValue);
+        }
+    }
+
+    if (const auto phaseValue = findValue("--cli-phase"); !phaseValue.isEmpty())
+    {
+        ConvolverProcessor::PhaseMode phaseMode {};
+        if (parseCliPhaseMode(phaseValue, phaseMode))
+        {
+            audioEngine.setConvolverPhaseMode(phaseMode);
+            juce::Logger::writeToLog("[CLI] Applied phase mode: " + phaseValue);
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Unknown --cli-phase value: " + phaseValue);
+        }
+    }
+
+    if (const auto targetIRLengthValue = findValue("--cli-target-ir-sec"); !targetIRLengthValue.isEmpty())
+    {
+        float seconds = 0.0f;
+        if (tryParseFloatOption(targetIRLengthValue, seconds))
+        {
+            audioEngine.setConvolverTargetIRLength(seconds, true);
+            juce::Logger::writeToLog("[CLI] Applied target IR length (sec): " + juce::String(seconds, 3));
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Invalid --cli-target-ir-sec: " + targetIRLengthValue);
+        }
+    }
+
+    if (const auto debounceValue = findValue("--cli-debounce-ms"); !debounceValue.isEmpty())
+    {
+        int debounceMs = 0;
+        if (tryParseIntOption(debounceValue, debounceMs))
+        {
+            audioEngine.setConvolverRebuildDebounceMs(debounceMs);
+            juce::Logger::writeToLog("[CLI] Applied rebuild debounce (ms): " + juce::String(debounceMs));
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Invalid --cli-debounce-ms: " + debounceValue);
+        }
+    }
+
+    if (const auto f1Value = findValue("--cli-f1-hz"); !f1Value.isEmpty())
+    {
+        float hz = 0.0f;
+        if (tryParseFloatOption(f1Value, hz))
+        {
+            audioEngine.setConvolverMixedTransitionStartHz(hz);
+            juce::Logger::writeToLog("[CLI] Applied mixed f1 (Hz): " + juce::String(hz, 2));
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Invalid --cli-f1-hz: " + f1Value);
+        }
+    }
+
+    if (const auto f2Value = findValue("--cli-f2-hz"); !f2Value.isEmpty())
+    {
+        float hz = 0.0f;
+        if (tryParseFloatOption(f2Value, hz))
+        {
+            audioEngine.setConvolverMixedTransitionEndHz(hz);
+            juce::Logger::writeToLog("[CLI] Applied mixed f2 (Hz): " + juce::String(hz, 2));
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Invalid --cli-f2-hz: " + f2Value);
+        }
+    }
+
+    if (const auto tauValue = findValue("--cli-pre-ring-tau"); !tauValue.isEmpty())
+    {
+        float tau = 0.0f;
+        if (tryParseFloatOption(tauValue, tau))
+        {
+            audioEngine.setConvolverMixedPreRingTau(tau);
+            juce::Logger::writeToLog("[CLI] Applied mixed pre-ring tau: " + juce::String(tau, 2));
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Invalid --cli-pre-ring-tau: " + tauValue);
+        }
+    }
+
+    if (const auto ditherValue = findValue("--cli-dither-bit-depth"); !ditherValue.isEmpty())
+    {
+        int bitDepth = 0;
+        if (tryParseIntOption(ditherValue, bitDepth))
+        {
+            audioEngine.setDitherBitDepth(bitDepth);
+            juce::Logger::writeToLog("[CLI] Applied dither bit depth: " + juce::String(bitDepth));
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Invalid --cli-dither-bit-depth: " + ditherValue);
+        }
+    }
+
+    if (const auto noiseShaperValue = findValue("--cli-noise-shaper"); !noiseShaperValue.isEmpty())
+    {
+        AudioEngine::NoiseShaperType noiseShaperType {};
+        if (parseCliNoiseShaper(noiseShaperValue, noiseShaperType))
+        {
+            audioEngine.setNoiseShaperType(noiseShaperType);
+            juce::Logger::writeToLog("[CLI] Applied noise shaper: " + noiseShaperValue);
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Unknown --cli-noise-shaper value: " + noiseShaperValue);
+        }
+    }
+
+    if (const auto irValue = findValue("--cli-ir"); !irValue.isEmpty())
+    {
+        juce::File irFile;
+        if (juce::File::isAbsolutePath(irValue))
+            irFile = juce::File(irValue);
+        else
+            irFile = juce::File::getCurrentWorkingDirectory().getChildFile(irValue);
+
+        if (irFile.existsAsFile())
+        {
+            audioEngine.requestConvolverPreset(irFile);
+            juce::Logger::writeToLog("[CLI] Loading IR: " + irFile.getFullPathName());
+
+            int reloadCount = 0;
+            if (const auto reloadCountValue = findValue("--cli-ir-reload-count"); !reloadCountValue.isEmpty())
+            {
+                int parsedCount = 0;
+                if (tryParseIntOption(reloadCountValue, parsedCount))
+                    reloadCount = juce::jmax(0, parsedCount);
+            }
+
+            int reloadIntervalMs = 300;
+            if (const auto reloadIntervalValue = findValue("--cli-ir-reload-interval-ms"); !reloadIntervalValue.isEmpty())
+            {
+                int parsedInterval = 0;
+                if (tryParseIntOption(reloadIntervalValue, parsedInterval))
+                    reloadIntervalMs = juce::jmax(1, parsedInterval);
+            }
+
+            if (reloadCount > 0)
+            {
+                juce::Logger::writeToLog("[CLI] Scheduled IR reload storm: count="
+                                         + juce::String(reloadCount)
+                                         + " intervalMs=" + juce::String(reloadIntervalMs));
+
+                for (int i = 1; i <= reloadCount; ++i)
+                {
+                    const int delayMs = i * reloadIntervalMs;
+                    juce::Timer::callAfterDelay(delayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this), irFile, i]
+                    {
+                        if (safeThis == nullptr)
+                            return;
+
+                        safeThis->audioEngine.requestConvolverPreset(irFile);
+                        juce::Logger::writeToLog("[CLI] IR reload iteration=" + juce::String(i)
+                                                 + " file=" + irFile.getFullPathName());
+                    });
+                }
+            }
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] IR file not found: " + irFile.getFullPathName());
+        }
+    }
+
+    if (const auto postLoadDitherValue = findValue("--cli-post-load-dither-bit-depth"); !postLoadDitherValue.isEmpty())
+    {
+        int postLoadBitDepth = 0;
+        if (tryParseIntOption(postLoadDitherValue, postLoadBitDepth))
+        {
+            int delayMs = 200;
+            if (const auto postLoadDelayValue = findValue("--cli-post-load-delay-ms"); !postLoadDelayValue.isEmpty())
+            {
+                int parsedDelay = 0;
+                if (tryParseIntOption(postLoadDelayValue, parsedDelay))
+                    delayMs = juce::jmax(1, parsedDelay);
+            }
+
+            juce::Logger::writeToLog("[CLI] Scheduled post-load dither bit depth: "
+                                     + juce::String(postLoadBitDepth)
+                                     + " (delayMs=" + juce::String(delayMs) + ")");
+
+            juce::Timer::callAfterDelay(delayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this), postLoadBitDepth]
+            {
+                if (safeThis == nullptr)
+                    return;
+
+                safeThis->audioEngine.setDitherBitDepth(postLoadBitDepth);
+                juce::Logger::writeToLog("[CLI] Applied post-load dither bit depth: " + juce::String(postLoadBitDepth));
+            });
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Invalid --cli-post-load-dither-bit-depth: " + postLoadDitherValue);
+        }
+    }
+
+    {
+        int burstCount = 0;
+        if (const auto burstCountValue = findValue("--cli-bypass-burst-count"); !burstCountValue.isEmpty())
+        {
+            int parsedCount = 0;
+            if (tryParseIntOption(burstCountValue, parsedCount))
+                burstCount = juce::jmax(0, parsedCount);
+        }
+
+        if (burstCount > 0)
+        {
+            int burstIntervalMs = 40;
+            if (const auto burstIntervalValue = findValue("--cli-bypass-burst-interval-ms"); !burstIntervalValue.isEmpty())
+            {
+                int parsedInterval = 0;
+                if (tryParseIntOption(burstIntervalValue, parsedInterval))
+                    burstIntervalMs = juce::jmax(1, parsedInterval);
+            }
+
+            bool burstBypassValue = false;
+            if (const auto burstValue = findValue("--cli-bypass-burst-value"); !burstValue.isEmpty())
+            {
+                int parsedValue = 0;
+                if (tryParseIntOption(burstValue, parsedValue))
+                    burstBypassValue = (parsedValue != 0);
+            }
+
+            juce::Logger::writeToLog("[CLI] Scheduled bypass burst: count="
+                                     + juce::String(burstCount)
+                                     + " intervalMs=" + juce::String(burstIntervalMs)
+                                     + " value=" + juce::String(static_cast<int>(burstBypassValue)));
+
+            for (int i = 0; i < burstCount; ++i)
+            {
+                const int delayMs = i * burstIntervalMs;
+                juce::Timer::callAfterDelay(delayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this), burstBypassValue]
+                {
+                    if (safeThis == nullptr)
+                        return;
+
+                    safeThis->audioEngine.setConvolverBypassRequested(burstBypassValue);
+                });
+            }
+        }
+    }
+
+    {
+        int intentBurstCount = 0;
+        if (const auto intentBurstCountValue = findValue("--cli-intent-burst-count"); !intentBurstCountValue.isEmpty())
+        {
+            int parsedCount = 0;
+            if (tryParseIntOption(intentBurstCountValue, parsedCount))
+                intentBurstCount = juce::jmax(0, parsedCount);
+        }
+
+        if (intentBurstCount > 0)
+        {
+            int intentBurstIntervalMs = 25;
+            if (const auto intentBurstIntervalValue = findValue("--cli-intent-burst-interval-ms"); !intentBurstIntervalValue.isEmpty())
+            {
+                int parsedInterval = 0;
+                if (tryParseIntOption(intentBurstIntervalValue, parsedInterval))
+                    intentBurstIntervalMs = juce::jmax(1, parsedInterval);
+            }
+
+            juce::Logger::writeToLog("[CLI] Scheduled structural intent burst: count="
+                                     + juce::String(intentBurstCount)
+                                     + " intervalMs=" + juce::String(intentBurstIntervalMs));
+
+            for (int i = 0; i < intentBurstCount; ++i)
+            {
+                const int delayMs = i * intentBurstIntervalMs;
+                juce::Timer::callAfterDelay(delayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this)]
+                {
+                    if (safeThis == nullptr)
+                        return;
+
+                    safeThis->audioEngine.requestRebuild(convo::RebuildKind::Structural);
+                });
+            }
+        }
+    }
+
+    if (eqPanel != nullptr)
+        eqPanel->updateAllControls();
+    if (convolverPanel != nullptr)
+        convolverPanel->updateIRInfo();
+
+    if (const auto exitValue = findValue("--cli-exit-ms"); !exitValue.isEmpty())
+    {
+        int exitMs = 0;
+        if (tryParseIntOption(exitValue, exitMs) && exitMs > 0)
+        {
+            juce::Logger::writeToLog("[CLI] Auto-exit scheduled in " + juce::String(exitMs) + "ms");
+            juce::Timer::callAfterDelay(exitMs, []
+            {
+                if (auto* app = juce::JUCEApplication::getInstance())
+                    app->systemRequestedQuit();
+            });
+        }
+        else
+        {
+            juce::Logger::writeToLog("[CLI] Invalid --cli-exit-ms: " + exitValue);
+        }
+    }
 }
 
 std::unique_ptr<juce::AccessibilityHandler> MainWindow::createAccessibilityHandler()

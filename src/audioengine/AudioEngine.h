@@ -764,7 +764,10 @@ public:
     void setConvolverMixedTransitionEndHz(float hz) noexcept;
     void setConvolverMixedPreRingTau(float tau) noexcept;
     void setConvolverRebuildDebounceMs(int ms) noexcept;
-    // Tail* setter wrappers migrated to pendingOverride (ConvolverProcessor direct only)
+    void setConvolverTailMode(ConvolverProcessor::TailMode mode) noexcept;
+    void setConvolverTailStartSec(float sec) noexcept;
+    void setConvolverTailStrength(float strength) noexcept;
+    void setConvolverTailL1L2Multiplier(int multiplier) noexcept;
 
     // Convolver State Tree & Cache Settings
     juce::ValueTree getConvolverStateTree() const;
@@ -1134,6 +1137,7 @@ public:
 
     std::atomic<uint32_t> rebuildReasonFlags_ { 0u };
     std::atomic<int64_t> deferredStructuralRebuildDueTicks_ { 0 };
+    std::atomic<int64_t> deferredFinalizeFirstSeenTicks_ { 0 };
     std::atomic<bool> pendingChangeNotification { false };
     // 同一IR構造に対する Structural rebuild の多重発火を抑止する。
     // 値は「直近で rebuild を要求した UI 側 Convolver 構造ハッシュ」。
@@ -1257,7 +1261,7 @@ public:
     // Note: This function performs memory allocation (including MKL) and other blocking operations
     // such as IR resampling. It MUST only be called from the message thread.
     // The prepareToPlay() method ensures this by using MessageManager::callAsync if necessary.
-    void requestRebuild(double sampleRate, int samplesPerBlock);
+    void requestRebuild(double sampleRate, int samplesPerBlock, bool bypassLegacySuppression = false);
     void commitNewDSP(DSPCore* newDSP, int generation);
     void prepareCommit(DSPCore* newDSP, int generation);
     void executeCommit();
@@ -1440,6 +1444,226 @@ public:
         const uint32_t oldFlags = convo::fetchAndAtomic(rebuildReasonFlags_, static_cast<uint32_t>(~rebuildReasonMask(reason)), std::memory_order_acq_rel);
         return (oldFlags & rebuildReasonMask(reason)) != 0u;
     }
+
+    uint64_t nextRebuildTelemetryIntentId() noexcept
+    {
+        return convo::fetchAddAtomic(rebuildTelemetryNextIntentId_, static_cast<uint64_t>(1), std::memory_order_acq_rel);
+    }
+
+    enum class RebuildTelemetryEvent : uint8_t
+    {
+        Requested,
+        Merged,
+        Suppressed,
+        Deferred,
+        ForcedDispatch,
+        Dispatched
+    };
+
+    enum class RebuildTelemetryReason : uint8_t
+    {
+        ConvolverParamsChanged,
+        MixedPhaseIntermediate,
+        HashDedup,
+        PreparedIRApplyWindow,
+        SnapshotEnqueueFailed,
+        SnapshotEnqueued,
+        RequestRebuildKindEntry,
+        UiEqEditorChangeListener,
+        PrepareToPlayNonMt,
+        RebuildThreadWarmupRetry,
+        ShutdownInProgress,
+        KindFiltered,
+        DelegateRequestRebuildSrBs,
+        MissingSrBs,
+        NonMtTriggerAsync,
+        NonMtAlreadyPending,
+        AsyncBridgeConsume,
+        AsyncBridgeDelegateSrBs,
+        AsyncBridgeMissingSrBs,
+        RequestRebuildSrBs,
+        DeferredStructuralWindow,
+        TaskQueued,
+        RecentDuplicate,
+        PendingDuplicate,
+        DeferredStructuralDue,
+        DeferredStructuralRebuildRequested,
+        DeferredFinalizeReady,
+        DeferredFinalizeRebuildRequested,
+        EnqueueSnapshotCommand,
+        SnapshotIntentDebounced,
+        SnapshotCommandBufferFull,
+        SnapshotCommandQueued,
+        SnapshotCommandBufferFullNonMt,
+        SnapshotCommandQueuedNonMt,
+        SameAsPendingWouldMerge
+    };
+
+    enum class RebuildTelemetryClass : uint8_t
+    {
+        NA,
+        Structural,
+        FinalizeAware,
+        Snapshot
+    };
+
+    enum class RebuildTelemetryPolicy : uint8_t
+    {
+        NA,
+        Replaceable,
+        MustExecute
+    };
+
+    enum class RebuildTelemetryDecision : uint8_t
+    {
+        Accepted,
+        Suppressed,
+        Deferred,
+        Dispatched,
+        Merged,
+        Dropped,
+        Released
+    };
+
+    static const char* toTelemetryEventString(RebuildTelemetryEvent value) noexcept
+    {
+        switch (value)
+        {
+            case RebuildTelemetryEvent::Requested: return "REBUILD_REQUESTED";
+            case RebuildTelemetryEvent::Merged: return "REBUILD_MERGED";
+            case RebuildTelemetryEvent::Suppressed: return "REBUILD_SUPPRESSED";
+            case RebuildTelemetryEvent::Deferred: return "REBUILD_DEFERRED";
+            case RebuildTelemetryEvent::ForcedDispatch: return "REBUILD_FORCED_DISPATCH";
+            case RebuildTelemetryEvent::Dispatched: return "REBUILD_DISPATCHED";
+        }
+        return "REBUILD_UNKNOWN";
+    }
+
+    static const char* toTelemetryReasonString(RebuildTelemetryReason value) noexcept
+    {
+        switch (value)
+        {
+            case RebuildTelemetryReason::ConvolverParamsChanged: return "convolver_params_changed";
+            case RebuildTelemetryReason::MixedPhaseIntermediate: return "mixed_phase_intermediate";
+            case RebuildTelemetryReason::HashDedup: return "hash_dedup";
+            case RebuildTelemetryReason::PreparedIRApplyWindow: return "prepared_ir_apply_window";
+            case RebuildTelemetryReason::SnapshotEnqueueFailed: return "snapshot_enqueue_failed";
+            case RebuildTelemetryReason::SnapshotEnqueued: return "snapshot_enqueued";
+            case RebuildTelemetryReason::RequestRebuildKindEntry: return "requestRebuild_kind_entry";
+            case RebuildTelemetryReason::UiEqEditorChangeListener: return "ui_eq_editor_change_listener";
+            case RebuildTelemetryReason::PrepareToPlayNonMt: return "prepare_to_play_non_mt";
+            case RebuildTelemetryReason::RebuildThreadWarmupRetry: return "rebuild_thread_warmup_retry";
+            case RebuildTelemetryReason::ShutdownInProgress: return "shutdown_in_progress";
+            case RebuildTelemetryReason::KindFiltered: return "kind_filtered";
+            case RebuildTelemetryReason::DelegateRequestRebuildSrBs: return "delegate_requestRebuild_sr_bs";
+            case RebuildTelemetryReason::MissingSrBs: return "missing_sr_bs";
+            case RebuildTelemetryReason::NonMtTriggerAsync: return "non_mt_trigger_async";
+            case RebuildTelemetryReason::NonMtAlreadyPending: return "non_mt_already_pending";
+            case RebuildTelemetryReason::AsyncBridgeConsume: return "async_bridge_consume";
+            case RebuildTelemetryReason::AsyncBridgeDelegateSrBs: return "async_bridge_delegate_sr_bs";
+            case RebuildTelemetryReason::AsyncBridgeMissingSrBs: return "async_bridge_missing_sr_bs";
+            case RebuildTelemetryReason::RequestRebuildSrBs: return "requestRebuild_sr_bs";
+            case RebuildTelemetryReason::DeferredStructuralWindow: return "deferred_structural_window";
+            case RebuildTelemetryReason::TaskQueued: return "task_queued";
+            case RebuildTelemetryReason::RecentDuplicate: return "recent_duplicate";
+            case RebuildTelemetryReason::PendingDuplicate: return "pending_duplicate";
+            case RebuildTelemetryReason::DeferredStructuralDue: return "deferred_structural_due";
+            case RebuildTelemetryReason::DeferredStructuralRebuildRequested: return "deferred_structural_rebuild_requested";
+            case RebuildTelemetryReason::DeferredFinalizeReady: return "deferred_finalize_ready";
+            case RebuildTelemetryReason::DeferredFinalizeRebuildRequested: return "deferred_finalize_rebuild_requested";
+            case RebuildTelemetryReason::EnqueueSnapshotCommand: return "enqueue_snapshot_command";
+            case RebuildTelemetryReason::SnapshotIntentDebounced: return "snapshot_intent_debounced";
+            case RebuildTelemetryReason::SnapshotCommandBufferFull: return "snapshot_command_buffer_full";
+            case RebuildTelemetryReason::SnapshotCommandQueued: return "snapshot_command_queued";
+            case RebuildTelemetryReason::SnapshotCommandBufferFullNonMt: return "snapshot_command_buffer_full_non_mt";
+            case RebuildTelemetryReason::SnapshotCommandQueuedNonMt: return "snapshot_command_queued_non_mt";
+            case RebuildTelemetryReason::SameAsPendingWouldMerge: return "same_as_pending_would_merge";
+        }
+        return "unknown_reason";
+    }
+
+    static const char* toTelemetryClassString(RebuildTelemetryClass value) noexcept
+    {
+        switch (value)
+        {
+            case RebuildTelemetryClass::NA: return "N/A";
+            case RebuildTelemetryClass::Structural: return "Structural";
+            case RebuildTelemetryClass::FinalizeAware: return "FinalizeAware";
+            case RebuildTelemetryClass::Snapshot: return "Snapshot";
+        }
+        return "N/A";
+    }
+
+    static const char* toTelemetryPolicyString(RebuildTelemetryPolicy value) noexcept
+    {
+        switch (value)
+        {
+            case RebuildTelemetryPolicy::NA: return "N/A";
+            case RebuildTelemetryPolicy::Replaceable: return "Replaceable";
+            case RebuildTelemetryPolicy::MustExecute: return "MustExecute";
+        }
+        return "N/A";
+    }
+
+    static const char* toTelemetryDecisionString(RebuildTelemetryDecision value) noexcept
+    {
+        switch (value)
+        {
+            case RebuildTelemetryDecision::Accepted: return "accepted";
+            case RebuildTelemetryDecision::Suppressed: return "suppressed";
+            case RebuildTelemetryDecision::Deferred: return "deferred";
+            case RebuildTelemetryDecision::Dispatched: return "dispatched";
+            case RebuildTelemetryDecision::Merged: return "merged";
+            case RebuildTelemetryDecision::Dropped: return "dropped";
+            case RebuildTelemetryDecision::Released: return "released";
+        }
+        return "unknown";
+    }
+
+    void emitRebuildTelemetry(RebuildTelemetryEvent eventName,
+                              uint64_t intentId,
+                              RebuildTelemetryReason reason,
+                              RebuildTelemetryDecision decision,
+                              uint64_t hash = 0,
+                              uint64_t fingerprint = 0,
+                              RebuildTelemetryClass rebuildClass = RebuildTelemetryClass::NA,
+                              RebuildTelemetryPolicy collapsePolicy = RebuildTelemetryPolicy::NA,
+                              const char* finalizeState = "N/A",
+                              double latencyMs = -1.0) const noexcept
+    {
+        juce::String log = "[REBUILD_TELEMETRY] event=";
+        log += juce::String(toTelemetryEventString(eventName));
+        log += " intentId=" + juce::String(static_cast<juce::int64>(intentId));
+        log += " reason=" + juce::String(toTelemetryReasonString(reason));
+        log += " class=" + juce::String(toTelemetryClassString(rebuildClass));
+        log += " policy=" + juce::String(toTelemetryPolicyString(collapsePolicy));
+        log += " hash=0x" + juce::String::toHexString(static_cast<juce::int64>(hash));
+        log += " fingerprint=0x" + juce::String::toHexString(static_cast<juce::int64>(fingerprint));
+        log += " finalizeState=" + juce::String(finalizeState != nullptr ? finalizeState : "N/A");
+        log += " decision=" + juce::String(toTelemetryDecisionString(decision));
+        if (latencyMs >= 0.0)
+            log += " latencyMs=" + juce::String(latencyMs, 3);
+
+        DBG(log);
+        juce::Logger::writeToLog(log);
+    }
+
+    void submitRebuildIntent(convo::RebuildKind kind,
+                             RebuildTelemetryReason reason,
+                             RebuildTelemetryClass rebuildClass = RebuildTelemetryClass::NA,
+                             RebuildTelemetryPolicy collapsePolicy = RebuildTelemetryPolicy::NA) noexcept;
+
+    struct RebuildAdmissionIntentState
+    {
+        bool valid = false;
+        convo::RebuildKind kind = convo::RebuildKind::None;
+        RebuildTelemetryClass rebuildClass = RebuildTelemetryClass::NA;
+        RebuildTelemetryPolicy collapsePolicy = RebuildTelemetryPolicy::NA;
+        uint64_t structuralHash = 0;
+        uint64_t fingerprint = 0;
+        bool deferCategory = false;
+        int64_t lastIntentTicks = 0;
+    };
 
 
 
@@ -2337,6 +2561,9 @@ public:
     std::atomic<std::uint64_t> debugRebuildDispatchDrainedCommandCount { 0 };
     std::atomic<std::uint64_t> debugRebuildDispatchMatchedRuntimeCommandCount { 0 };
     std::atomic<std::uint64_t> debugRebuildDispatchTaskSnapshotFallbackCount { 0 };
+    std::atomic<std::uint64_t> rebuildTelemetryNextIntentId_ { 1 };
+    std::mutex rebuildAdmissionIntentMutex_;
+    RebuildAdmissionIntentState rebuildAdmissionPendingIntent_ {};
 
     std::atomic<float> m_currentInputHeadroomDb { -6.0f };
     std::atomic<float> m_currentOutputMakeupDb { 12.0f };

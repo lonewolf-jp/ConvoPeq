@@ -81,7 +81,10 @@ public:
         float mixedPreRingTau = MIXED_TAU_DEFAULT;
         int rebuildDebounceMs = REBUILD_DEBOUNCE_DEFAULT_MS;
         bool experimentalDirectHeadEnabled = false;
-        // Tail* parameters migrated to pendingOverride (no longer in BuildSnapshot)
+        int tailMode = static_cast<int>(TailMode::LayerTailContouring);
+        float tailStartSec = TAIL_START_DEFAULT_SEC;
+        float tailStrength = TAIL_STRENGTH_DEFAULT;
+        int tailL1L2Multiplier = TAIL_L1L2_MULT_DEFAULT;
         int targetUpgradeFFTSize = 0;
         bool enableProgressiveUpgrade = false;
         int maxCacheEntries = 0;
@@ -127,6 +130,13 @@ public:
         Minimum   // Minimum phase: トランジェント保持
     };
 
+    enum class TailMode : int
+    {
+        AirAbsorption = 0,
+        LayerTailContouring = 1,
+        Bypass = 2
+    };
+
     void setResamplingPhaseMode(ResamplingPhaseMode mode);
     ResamplingPhaseMode getResamplingPhaseMode() const;
 
@@ -166,6 +176,18 @@ public:
     static constexpr int REBUILD_DEBOUNCE_MIN_MS = 50;
     static constexpr int REBUILD_DEBOUNCE_MAX_MS = 3000;
     static constexpr int REBUILD_DEBOUNCE_DEFAULT_MS = 400;
+    static constexpr float TAIL_START_MIN_SEC = 0.01f;
+    static constexpr float TAIL_START_MAX_SEC = 0.80f;
+    static constexpr float TAIL_START_DEFAULT_SEC = 0.085f;
+    static constexpr float TAIL_STRENGTH_MIN = 0.0f;
+    static constexpr float TAIL_STRENGTH_MAX = 2.0f;
+    static constexpr float TAIL_STRENGTH_DEFAULT = 1.0f;
+    static constexpr int TAIL_L1L2_MULT_MIN = 2;
+    static constexpr int TAIL_L1L2_MULT_MAX = 16;
+    static constexpr int TAIL_L1L2_MULT_DEFAULT = 8;
+    static constexpr float TAIL_EXTENDED_START_MIN_SEC = 0.12f;
+    static constexpr float TAIL_EXTENDED_STRENGTH_MIN = 1.25f;
+    static constexpr int TAIL_EXTENDED_L1L2_MULT_MIN = 12;
 
     // DelayLine用定数 (Audio Threadでのメモリ確保防止)
     // IRの最大長(kMaxIRCap)と最大ブロックサイズをカバーする値を設定
@@ -268,8 +290,9 @@ public:
     void setNUCFilterModes(convo::HCMode hcMode, convo::LCMode lcMode);
 
     //------------------------------------------------------------------
-    // NUC テール処理パラメータは pendingOverride へ移行済み
-    // rebuild 条件の読み取りは rebuild 関数内で pendingOverride から読む
+    // NUC テール処理パラメータ
+    // Tail Mode / Start / Strength / L1-L2 Mult は pendingOverride に保持し、
+    // rebuild 時に FilterSpec 経由で NUC 構成へ反映する。
     //------------------------------------------------------------------
 
     //----------------------------------------------------------
@@ -307,6 +330,18 @@ public:
     //----------------------------------------------------------
     void setRebuildDebounceMs(int ms);
     int getRebuildDebounceMs() const;
+
+    //----------------------------------------------------------
+    // Tail Parameters
+    //----------------------------------------------------------
+    void setTailMode(TailMode mode);
+    TailMode getTailMode() const;
+    void setTailStartSec(float sec);
+    float getTailStartSec() const;
+    void setTailStrength(float strength);
+    float getTailStrength() const;
+    void setTailL1L2Multiplier(int multiplier);
+    int getTailL1L2Multiplier() const;
 
     //----------------------------------------------------------
     // IR Length
@@ -462,6 +497,7 @@ public:
                                           int preferredCallSize,
                                           bool isRebuild,
                                           const juce::File& irFile,
+                                          const BuildSnapshot& buildSnapshot,
                                           double scaleFactor, // This is for newConv->init
                                           std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
                                           std::unique_ptr<juce::AudioBuffer<double>> displayIR);
@@ -680,7 +716,6 @@ private:
 
             try
             {
-                // ── MKL Non-Uniform Partitioned Convolution (NUC) ──
                 auto nuc0 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
                 auto nuc1 = convo::aligned_make_unique<convo::MKLNonUniformConvolver>();
 
@@ -837,6 +872,10 @@ private:
         float mixedPreRingTau = MIXED_TAU_DEFAULT;
         int rebuildDebounceMs = REBUILD_DEBOUNCE_DEFAULT_MS;
         bool experimentalDirectHeadEnabled = false;
+        int tailMode = static_cast<int>(TailMode::LayerTailContouring);
+        float tailStartSec = TAIL_START_DEFAULT_SEC;
+        float tailStrength = TAIL_STRENGTH_DEFAULT;
+        int tailL1L2Multiplier = TAIL_L1L2_MULT_DEFAULT;
         int targetUpgradeFFTSize = 0;
         bool enableProgressiveUpgrade = false;
         int maxCacheEntries = 0;

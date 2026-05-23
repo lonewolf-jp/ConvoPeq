@@ -34,6 +34,27 @@ ConvolverProcessor::PhaseMode comboIdToPhaseMode(int id)
     }
 }
 
+int tailModeToComboId(ConvolverProcessor::TailMode mode)
+{
+    switch (mode)
+    {
+        case ConvolverProcessor::TailMode::AirAbsorption:       return 1;
+        case ConvolverProcessor::TailMode::LayerTailContouring: return 2;
+        case ConvolverProcessor::TailMode::Bypass:              return 3;
+        default:                                                return 1;
+    }
+}
+
+ConvolverProcessor::TailMode comboIdToTailMode(int id)
+{
+    switch (id)
+    {
+        case 2:  return ConvolverProcessor::TailMode::LayerTailContouring;
+        case 3:  return ConvolverProcessor::TailMode::Bypass;
+        default: return ConvolverProcessor::TailMode::AirAbsorption;
+    }
+}
+
 class IRAdvancedSettingsComponent : public juce::Component,
                                     private juce::Slider::Listener,
                                     private juce::Timer,
@@ -56,6 +77,10 @@ public:
         configureLabel(rebuildLabel, "Rebuild:");
         configureLabel(mixedF1Label, "Mix Start f:");
         configureLabel(mixedF2Label, "Mix End f:");
+        configureLabel(tailModeLabel, "Tail Mode:");
+        configureLabel(tailStartLabel, "Tail Start:");
+        configureLabel(tailStrengthLabel, "Tail Strength:");
+        configureLabel(tailMultLabel, "Tail L1-L2:");
 
         irLengthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         irLengthSlider.setRange(ConvolverProcessor::IR_LENGTH_MIN_SEC, ConvolverProcessor::IR_LENGTH_MAX_SEC, 0.1);
@@ -88,6 +113,33 @@ public:
         mixedF2Slider.setNumDecimalPlacesToDisplay(0);
         mixedF2Slider.addListener(this);
 
+        tailModeCombo.addItem("Air Absorption", 1);
+        tailModeCombo.addItem("Layer Tail Contouring", 2);
+        tailModeCombo.addItem("Bypass", 3);
+        tailModeCombo.addListener(this);
+
+        tailStartSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        tailStartSlider.setRange(ConvolverProcessor::TAIL_START_MIN_SEC,
+                     ConvolverProcessor::TAIL_START_MAX_SEC, 0.005);
+        tailStartSlider.setSkewFactorFromMidPoint(ConvolverProcessor::TAIL_START_DEFAULT_SEC);
+        tailStartSlider.setTextValueSuffix(" s");
+        tailStartSlider.setNumDecimalPlacesToDisplay(3);
+        tailStartSlider.addListener(this);
+
+        tailStrengthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        tailStrengthSlider.setRange(ConvolverProcessor::TAIL_STRENGTH_MIN,
+                        ConvolverProcessor::TAIL_STRENGTH_MAX, 0.01);
+        tailStrengthSlider.setSkewFactorFromMidPoint(ConvolverProcessor::TAIL_STRENGTH_DEFAULT);
+        tailStrengthSlider.setNumDecimalPlacesToDisplay(2);
+        tailStrengthSlider.addListener(this);
+
+        tailMultSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        tailMultSlider.setRange(ConvolverProcessor::TAIL_L1L2_MULT_MIN,
+                    ConvolverProcessor::TAIL_L1L2_MULT_MAX, 1.0);
+        tailMultSlider.setTextValueSuffix(" x");
+        tailMultSlider.setNumDecimalPlacesToDisplay(0);
+        tailMultSlider.addListener(this);
+
 
         addAndMakeVisible(irLengthLabel);
         addAndMakeVisible(irLengthSlider);
@@ -97,8 +149,16 @@ public:
         addAndMakeVisible(mixedF1Slider);
         addAndMakeVisible(mixedF2Label);
         addAndMakeVisible(mixedF2Slider);
+        addAndMakeVisible(tailModeLabel);
+        addAndMakeVisible(tailModeCombo);
+        addAndMakeVisible(tailStartLabel);
+        addAndMakeVisible(tailStartSlider);
+        addAndMakeVisible(tailStrengthLabel);
+        addAndMakeVisible(tailStrengthSlider);
+        addAndMakeVisible(tailMultLabel);
+        addAndMakeVisible(tailMultSlider);
 
-        setSize(560, 350);
+        setSize(560, 420);
         syncFromProcessor();
         startTimerHz(8);
     }
@@ -109,6 +169,10 @@ public:
         rebuildSlider.removeListener(this);
         mixedF1Slider.removeListener(this);
         mixedF2Slider.removeListener(this);
+        tailModeCombo.removeListener(this);
+        tailStartSlider.removeListener(this);
+        tailStrengthSlider.removeListener(this);
+        tailMultSlider.removeListener(this);
     }
 
     void paint(juce::Graphics& g) override
@@ -145,6 +209,10 @@ public:
         placeRow(mixedF1Label, mixedF1Slider);
         placeRow(mixedF2Label, mixedF2Slider);
         placeRow(rebuildLabel, rebuildSlider);
+        placeComboRow(tailModeLabel, tailModeCombo);
+        placeRow(tailStartLabel, tailStartSlider);
+        placeRow(tailStrengthLabel, tailStrengthSlider);
+        placeRow(tailMultLabel, tailMultSlider);
     }
 
 private:
@@ -157,6 +225,14 @@ private:
     juce::Slider mixedF1Slider;
     juce::Label mixedF2Label;
     juce::Slider mixedF2Slider;
+    juce::Label tailModeLabel;
+    juce::ComboBox tailModeCombo;
+    juce::Label tailStartLabel;
+    juce::Slider tailStartSlider;
+    juce::Label tailStrengthLabel;
+    juce::Slider tailStrengthSlider;
+    juce::Label tailMultLabel;
+    juce::Slider tailMultSlider;
 
     void timerCallback() override
     {
@@ -181,10 +257,31 @@ private:
         {
             engine.setConvolverMixedTransitionEndHz(static_cast<float>(mixedF2Slider.getValue()));
         }
+        else if (slider == &tailStartSlider)
+        {
+            engine.setConvolverTailStartSec(static_cast<float>(tailStartSlider.getValue()));
+        }
+        else if (slider == &tailStrengthSlider)
+        {
+            engine.setConvolverTailStrength(static_cast<float>(tailStrengthSlider.getValue()));
+        }
+        else if (slider == &tailMultSlider)
+        {
+            engine.setConvolverTailL1L2Multiplier(static_cast<int>(std::round(tailMultSlider.getValue())));
+        }
     }
 
-    void comboBoxChanged(juce::ComboBox* /*comboBoxThatHasChanged*/) override
+    void comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged) override
     {
+        if (comboBoxThatHasChanged == &tailModeCombo)
+        {
+            const int selectedId = tailModeCombo.getSelectedId();
+            if (selectedId <= 0)
+                return;
+
+            const auto mode = comboIdToTailMode(selectedId);
+            engine.setConvolverTailMode(mode);
+        }
     }
 
     void syncFromProcessor()
@@ -198,6 +295,24 @@ private:
             mixedF1Slider.setValue(convolver.getMixedTransitionStartHz(), juce::dontSendNotification);
         if (!mixedF2Slider.isMouseButtonDown())
             mixedF2Slider.setValue(convolver.getMixedTransitionEndHz(), juce::dontSendNotification);
+        if (!tailStartSlider.isMouseButtonDown())
+            tailStartSlider.setValue(convolver.getTailStartSec(), juce::dontSendNotification);
+        if (!tailStrengthSlider.isMouseButtonDown())
+            tailStrengthSlider.setValue(convolver.getTailStrength(), juce::dontSendNotification);
+        if (!tailMultSlider.isMouseButtonDown())
+            tailMultSlider.setValue(convolver.getTailL1L2Multiplier(), juce::dontSendNotification);
+
+        const int modeId = tailModeToComboId(convolver.getTailMode());
+        if (tailModeCombo.getSelectedId() != modeId)
+            tailModeCombo.setSelectedId(modeId, juce::dontSendNotification);
+
+        const bool tailEnabled = (modeId != 3);
+        tailStartLabel.setEnabled(tailEnabled);
+        tailStartSlider.setEnabled(tailEnabled);
+        tailStrengthLabel.setEnabled(tailEnabled);
+        tailStrengthSlider.setEnabled(tailEnabled);
+        tailMultLabel.setEnabled(tailEnabled);
+        tailMultSlider.setEnabled(tailEnabled);
 
         const bool mixedEnabled = engine.getConvolverPhaseMode() == ConvolverProcessor::PhaseMode::Mixed;
         mixedF1Label.setEnabled(mixedEnabled);

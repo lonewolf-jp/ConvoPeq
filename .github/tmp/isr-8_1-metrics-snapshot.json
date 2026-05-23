@@ -1,0 +1,16 @@
+{
+  "generatedAt": "2026-05-23 16:44:56",
+  "sourceLog": "C:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.log",
+  "logLastWrite": "2026-05-23 16:42:59",
+  "metrics": {
+    "deferred_finalize_rebuild_req": 2,
+    "rebuild_forced_dispatch": 1,
+    "same_as_pending_would_merge": 0,
+    "suppressed_mixed_phase_intermediate": 0,
+    "deferred_finalize_ready": 0,
+    "policy_must_execute": 5,
+    "pending_duplicate": 0,
+    "requestRebuild_sr_bs": 6,
+    "task_queued": 6
+  }
+}

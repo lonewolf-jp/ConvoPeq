@@ -8,6 +8,147 @@ static void diagLog(const juce::String& message)
     DBG(message);
     juce::Logger::writeToLog(message);
 }
+
+[[maybe_unused]] static bool validateConvolverStateTreeForDebug(const juce::ValueTree& state, juce::String* reason = nullptr)
+{
+    auto fail = [&](const juce::String& message) -> bool
+    {
+        if (reason != nullptr)
+            *reason = message;
+        return false;
+    };
+
+    if (!state.isValid())
+        return fail("Convolver state is invalid");
+
+    if (!state.hasType("Convolver"))
+        return fail("Convolver state has unexpected type: " + state.getType().toString());
+
+    auto hasFiniteDouble = [&](const juce::Identifier& key, double minValue, double maxValue) -> bool
+    {
+        if (!state.hasProperty(key))
+            return true;
+        const double value = static_cast<double>(state.getProperty(key));
+        if (!std::isfinite(value))
+            return fail("Convolver state property is non-finite: " + key.toString());
+        if (value < minValue || value > maxValue)
+            return fail("Convolver state property out of range: " + key.toString());
+        return true;
+    };
+
+    auto hasIntRange = [&](const juce::Identifier& key, int minValue, int maxValue) -> bool
+    {
+        if (!state.hasProperty(key))
+            return true;
+        const int value = static_cast<int>(state.getProperty(key));
+        if (value < minValue || value > maxValue)
+            return fail("Convolver state property out of range: " + key.toString());
+        return true;
+    };
+
+    if (!hasFiniteDouble("mix", 0.0, 1.0)) return false;
+    if (!hasIntRange("phaseMode", 0, 2)) return false;
+    if (!hasFiniteDouble("smoothingTime", ConvolverProcessor::SMOOTHING_TIME_MIN_SEC, ConvolverProcessor::SMOOTHING_TIME_MAX_SEC)) return false;
+    if (!hasFiniteDouble("irLength", ConvolverProcessor::IR_LENGTH_MIN_SEC, ConvolverProcessor::IR_LENGTH_MAX_SEC)) return false;
+    if (!hasFiniteDouble("autoDetectedIRLength", ConvolverProcessor::IR_LENGTH_MIN_SEC, ConvolverProcessor::IR_LENGTH_MAX_SEC)) return false;
+    if (!hasFiniteDouble("mixedF1Hz", ConvolverProcessor::MIXED_F1_MIN_HZ, ConvolverProcessor::MIXED_F1_MAX_HZ)) return false;
+    if (!hasFiniteDouble("mixedF2Hz", ConvolverProcessor::MIXED_F2_MIN_HZ, ConvolverProcessor::MIXED_F2_MAX_HZ)) return false;
+    if (!hasFiniteDouble("mixedTau", ConvolverProcessor::MIXED_TAU_MIN, ConvolverProcessor::MIXED_TAU_MAX)) return false;
+    if (!hasIntRange("rebuildDebounceMs", ConvolverProcessor::REBUILD_DEBOUNCE_MIN_MS, ConvolverProcessor::REBUILD_DEBOUNCE_MAX_MS)) return false;
+    if (!hasIntRange("tailMode", static_cast<int>(ConvolverProcessor::TailMode::AirAbsorption), static_cast<int>(ConvolverProcessor::TailMode::Bypass))) return false;
+    if (!hasFiniteDouble("tailStartSec", ConvolverProcessor::TAIL_START_MIN_SEC, ConvolverProcessor::TAIL_START_MAX_SEC)) return false;
+    if (!hasFiniteDouble("tailStrength", ConvolverProcessor::TAIL_STRENGTH_MIN, ConvolverProcessor::TAIL_STRENGTH_MAX)) return false;
+    if (!hasIntRange("tailL1L2Multiplier", ConvolverProcessor::TAIL_L1L2_MULT_MIN, ConvolverProcessor::TAIL_L1L2_MULT_MAX)) return false;
+
+    if (state.hasProperty("mixedF1Hz") && state.hasProperty("mixedF2Hz"))
+    {
+        const double f1 = static_cast<double>(state.getProperty("mixedF1Hz"));
+        const double f2 = static_cast<double>(state.getProperty("mixedF2Hz"));
+        if (f2 < f1 + 10.0)
+            return fail("Convolver state mixedF2Hz must be >= mixedF1Hz + 10Hz");
+    }
+
+    return true;
+}
+
+[[maybe_unused]] static bool validatePresetStateTreeForDebug(const juce::ValueTree& state, juce::String* reason = nullptr)
+{
+    auto fail = [&](const juce::String& message) -> bool
+    {
+        if (reason != nullptr)
+            *reason = message;
+        return false;
+    };
+
+    if (!state.isValid())
+        return fail("Preset state is invalid");
+
+    if (!state.hasType("Preset"))
+        return fail("Preset state has unexpected type: " + state.getType().toString());
+
+    auto hasFiniteDouble = [&](const juce::Identifier& key, double minValue, double maxValue) -> bool
+    {
+        if (!state.hasProperty(key))
+            return true;
+        const double value = static_cast<double>(state.getProperty(key));
+        if (!std::isfinite(value))
+            return fail("Preset property is non-finite: " + key.toString());
+        if (value < minValue || value > maxValue)
+            return fail("Preset property out of range: " + key.toString());
+        return true;
+    };
+
+    auto hasIntRange = [&](const juce::Identifier& key, int minValue, int maxValue) -> bool
+    {
+        if (!state.hasProperty(key))
+            return true;
+        const int value = static_cast<int>(state.getProperty(key));
+        if (value < minValue || value > maxValue)
+            return fail("Preset property out of range: " + key.toString());
+        return true;
+    };
+
+    if (!hasIntRange("processingOrder", static_cast<int>(convo::ProcessingOrder::ConvolverThenEQ), static_cast<int>(convo::ProcessingOrder::EQThenConvolver))) return false;
+    if (!hasFiniteDouble("saturationAmount", 0.0, 1.0)) return false;
+    if (!hasFiniteDouble("inputHeadroomDb", -12.0, 0.0)) return false;
+    if (!hasFiniteDouble("outputMakeupDb", 0.0, 12.0)) return false;
+    if (!hasFiniteDouble("convolverInputTrimDb", -12.0, 0.0)) return false;
+    if (!hasIntRange("analyzerSource", static_cast<int>(AudioEngine::AnalyzerSource::Input), static_cast<int>(AudioEngine::AnalyzerSource::Output))) return false;
+    if (!hasIntRange("noiseShaperType", static_cast<int>(convo::NoiseShaperType::Psychoacoustic), static_cast<int>(convo::NoiseShaperType::Fixed15Tap))) return false;
+    if (!hasIntRange("oversamplingType", static_cast<int>(convo::OversamplingType::IIR), static_cast<int>(convo::OversamplingType::LinearPhase))) return false;
+    if (!hasIntRange("convHCFilterMode", static_cast<int>(convo::HCMode::Sharp), static_cast<int>(convo::HCMode::Soft))) return false;
+    if (!hasIntRange("convLCFilterMode", static_cast<int>(convo::LCMode::Natural), static_cast<int>(convo::LCMode::Soft))) return false;
+    if (!hasIntRange("eqLPFFilterMode", static_cast<int>(convo::HCMode::Sharp), static_cast<int>(convo::HCMode::Soft))) return false;
+    if (!hasFiniteDouble("coeffSafetyMargin", 0.0, 2.0)) return false;
+    if (!hasIntRange("cmaesRestarts", 0, 1000)) return false;
+
+    if (state.hasProperty("oversamplingFactor"))
+    {
+        const int factor = static_cast<int>(state.getProperty("oversamplingFactor"));
+        if (!(factor == 0 || factor == 1 || factor == 2 || factor == 4 || factor == 8))
+            return fail("Preset property out of range: oversamplingFactor");
+    }
+
+    if (state.hasProperty("ditherBitDepth"))
+    {
+        const int bitDepth = static_cast<int>(state.getProperty("ditherBitDepth"));
+        if (bitDepth <= 0 || bitDepth > 64)
+            return fail("Preset property out of range: ditherBitDepth");
+    }
+
+    const auto eqState = state.getChildWithName("EQ");
+    if (eqState.isValid() && !eqState.hasType("EQ"))
+        return fail("Preset child EQ has unexpected type: " + eqState.getType().toString());
+
+    const auto convState = state.getChildWithName("Convolver");
+    if (convState.isValid())
+    {
+        if (!validateConvolverStateTreeForDebug(convState, reason))
+            return false;
+    }
+
+    return true;
+}
 }
 
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PARAMETERS)
@@ -83,6 +224,14 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 {
     // B19: RAII ガードを使用して、例外発生時も確実にフラグを戻す
     RestoreStateGuard guard(m_isRestoringState);
+
+   #if JUCE_DEBUG
+    juce::String reason;
+    const bool validPresetState = validatePresetStateTreeForDebug(state, &reason);
+    jassert(validPresetState);
+    if (!validPresetState)
+        diagLog("[ASSERT] requestLoadState: invalid Preset state: " + reason);
+   #endif
 
     // ─── Step 1: モード・バイパス状態を先に復元 ────────────────────────────
     if (state.hasProperty("processingOrder"))
@@ -216,7 +365,16 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
     auto convState = state.getChildWithName ("Convolver");
     if (convState.isValid())
+    {
+       #if JUCE_DEBUG
+        juce::String reason;
+        const bool validConvState = validateConvolverStateTreeForDebug(convState, &reason);
+        jassert(validConvState);
+        if (!validConvState)
+            diagLog("[ASSERT] requestLoadState: invalid Convolver state: " + reason);
+       #endif
         uiConvolverProcessor.setState (convState);
+    }
 
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (sr > 0.0)
@@ -274,6 +432,15 @@ juce::ValueTree AudioEngine::getCurrentState() const
 
     state.addChild (uiEqEditor.getState(), -1, nullptr);
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
+
+   #if JUCE_DEBUG
+    juce::String reason;
+    const bool validPresetState = validatePresetStateTreeForDebug(state, &reason);
+    jassert(validPresetState);
+    if (!validPresetState)
+        diagLog("[ASSERT] getCurrentState: invalid exported Preset state: " + reason);
+   #endif
+
     return state;
 }
 #endif
@@ -628,6 +795,26 @@ void AudioEngine::setConvolverRebuildDebounceMs(int ms) noexcept
     uiConvolverProcessor.setRebuildDebounceMs(ms);
 }
 
+void AudioEngine::setConvolverTailMode(ConvolverProcessor::TailMode mode) noexcept
+{
+    uiConvolverProcessor.setTailMode(mode);
+}
+
+void AudioEngine::setConvolverTailStartSec(float sec) noexcept
+{
+    uiConvolverProcessor.setTailStartSec(sec);
+}
+
+void AudioEngine::setConvolverTailStrength(float strength) noexcept
+{
+    uiConvolverProcessor.setTailStrength(strength);
+}
+
+void AudioEngine::setConvolverTailL1L2Multiplier(int multiplier) noexcept
+{
+    uiConvolverProcessor.setTailL1L2Multiplier(multiplier);
+}
+
 void AudioEngine::setOversamplingType(OversamplingType type)
 {
     convo::publishAtomic(oversamplingType, type, std::memory_order_release);
@@ -689,11 +876,26 @@ convo::HCMode AudioEngine::getEqLPFFilterMode() const noexcept
 
 juce::ValueTree AudioEngine::getConvolverStateTree() const
 {
-    return uiConvolverProcessor.getState();
+    auto state = uiConvolverProcessor.getState();
+   #if JUCE_DEBUG
+    juce::String reason;
+    const bool validState = validateConvolverStateTreeForDebug(state, &reason);
+    jassert(validState);
+    if (!validState)
+        diagLog("[ASSERT] getConvolverStateTree: invalid exported Convolver state: " + reason);
+   #endif
+    return state;
 }
 
 void AudioEngine::setConvolverStateTree(const juce::ValueTree& state)
 {
+   #if JUCE_DEBUG
+    juce::String reason;
+    const bool validState = validateConvolverStateTreeForDebug(state, &reason);
+    jassert(validState);
+    if (!validState)
+        diagLog("[ASSERT] setConvolverStateTree: invalid imported Convolver state: " + reason);
+   #endif
     uiConvolverProcessor.setState(state);
 }
 

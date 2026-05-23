@@ -18,7 +18,10 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
         // UI (SpectrumAnalyzerComponent など) が EQ 編集を即時反映できるよう通知する。
         // 実 DSP 反映は従来どおり requestRebuild() 経由で行う。
         sendChangeMessage();
-        requestRebuild(convo::RebuildKind::Structural);
+        submitRebuildIntent(convo::RebuildKind::Structural,
+                            RebuildTelemetryReason::UiEqEditorChangeListener,
+                            RebuildTelemetryClass::Structural,
+                            RebuildTelemetryPolicy::Replaceable);
     }
     else if (source == &uiConvolverProcessor)
     {
@@ -30,6 +33,15 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
 {
     if (processor == &uiConvolverProcessor)
     {
+        constexpr const char* kPhase5TagReduce = "phase5_reduce_target";
+        constexpr const char* kPhase5TagKeep = "phase5_keep_target";
+
+        const uint64_t intentId = nextRebuildTelemetryIntentId();
+        emitRebuildTelemetry(RebuildTelemetryEvent::Requested,
+                     intentId,
+                     RebuildTelemetryReason::ConvolverParamsChanged,
+                     RebuildTelemetryDecision::Accepted);
+
         const bool suppressIntermediateMixedPhasePublish =
             uiConvolverProcessor.isProgressiveUpgradeEnabled()
             && uiConvolverProcessor.getPhaseMode() == ConvolverProcessor::PhaseMode::Mixed
@@ -42,6 +54,15 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
                     + juce::String(uiConvolverProcessor.getActiveCacheFFTSize())
                     + " targetFFT=" + juce::String(uiConvolverProcessor.getTargetUpgradeFFTSize())
                     + " irName=" + uiConvolverProcessor.getIRName());
+            emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                                 intentId,
+                                 RebuildTelemetryReason::MixedPhaseIntermediate,
+                                 RebuildTelemetryDecision::Suppressed,
+                                 0,
+                                 0,
+                                 RebuildTelemetryClass::Structural,
+                                 RebuildTelemetryPolicy::Replaceable,
+                                 kPhase5TagKeep);
             return;
         }
 
@@ -82,9 +103,17 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
             const uint64_t prevHash = convo::consumeAtomic(lastIssuedConvolverStructuralHash_, std::memory_order_acquire);
             if (prevHash == uiStructuralHash)
             {
-                diagLog("[DIAG] convolverParamsChanged: BLOCKED by hash dedup hash="
+                diagLog("[DIAG][PHASE5-REDUCE] convolverParamsChanged: hash dedup observed (suppression relaxed) hash="
                     + juce::String::toHexString((int64_t) uiStructuralHash));
-                needsStructuralRebuild = false;
+                emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
+                                     intentId,
+                                     RebuildTelemetryReason::HashDedup,
+                                     RebuildTelemetryDecision::Merged,
+                                     uiStructuralHash,
+                                     0,
+                                     RebuildTelemetryClass::Structural,
+                                     RebuildTelemetryPolicy::Replaceable,
+                                     kPhase5TagReduce);
             }
             else
                 convo::publishAtomic(lastIssuedConvolverStructuralHash_, uiStructuralHash, std::memory_order_release);
@@ -107,6 +136,15 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
                 needsStructuralRebuild = false;
 
                 diagLog("[DIAG] convolverParamsChanged: DEFERRED Structural rebuild after prepared IR apply and cleared pending Structural bit");
+                emitRebuildTelemetry(RebuildTelemetryEvent::Deferred,
+                                     intentId,
+                                     RebuildTelemetryReason::PreparedIRApplyWindow,
+                                     RebuildTelemetryDecision::Deferred,
+                                     uiStructuralHash,
+                                     0,
+                                     RebuildTelemetryClass::Structural,
+                                     RebuildTelemetryPolicy::NA,
+                                     "deferred_structural");
             }
         }
 
@@ -117,6 +155,27 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
             if (!enqueueSnapshotCommand())
             {
                 diagLog("[DIAG] convolverParamsChanged: enqueueSnapshotCommand failed");
+                emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                                     intentId,
+                                     RebuildTelemetryReason::SnapshotEnqueueFailed,
+                                     RebuildTelemetryDecision::Dropped,
+                                     uiStructuralHash,
+                                     0,
+                                     RebuildTelemetryClass::Structural,
+                                     RebuildTelemetryPolicy::NA,
+                                     "N/A");
+            }
+            else
+            {
+                emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
+                                     intentId,
+                                     RebuildTelemetryReason::SnapshotEnqueued,
+                                     RebuildTelemetryDecision::Dispatched,
+                                     uiStructuralHash,
+                                     0,
+                                     RebuildTelemetryClass::Structural,
+                                     RebuildTelemetryPolicy::NA,
+                                     "N/A");
             }
         }
 

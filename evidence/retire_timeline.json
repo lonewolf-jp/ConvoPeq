@@ -1,17 +1,14 @@
-﻿{
-    "schema":  "retire_timeline_v1",
-    "epochMode":  "shared",
-    "rollbackMode":  "shared",
-    "rollbackReady":  true,
-    "totalTransitions":  8,
-    "laneCounters":  {
-                         "rtIntent":  2,
-                         "coordination":  2,
-                         "epoch":  2,
-                         "reclaim":  2,
-                         "quarantine":  0
-                     },
-    "provenance":  "runtime",
-    "runId":  "local-ci-improved3-1779369710955",
-    "generatedAtNs":  1779369731543000000
+{
+  "schema": "retire_timeline_v1",
+  "epochMode": "shared",
+  "rollbackMode": "shared",
+  "rollbackReady": true,
+  "totalTransitions": 32,
+  "laneCounters": {
+    "rtIntent": 8,
+    "coordination": 8,
+    "epoch": 8,
+    "reclaim": 8,
+    "quarantine": 0
+  }
 }

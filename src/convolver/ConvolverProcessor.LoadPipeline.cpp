@@ -61,6 +61,11 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
                                           : 48000.0;
     const int processingBlockSize = juce::jlimit(1, MAX_BLOCK_SIZE,
                                                  [&]{ const int bs = convo::consumeAtomic(currentBufferSize, std::memory_order_acquire); return bs > 0 ? bs : 512; }()); // acquire: prepareToPlay の publishAtomic release と HB
+    const BuildSnapshot buildSnapshot = captureBuildSnapshot();
+    const int clampedPhaseMode = juce::jlimit(static_cast<int>(PhaseMode::AsIs),
+                                              static_cast<int>(PhaseMode::Minimum),
+                                              buildSnapshot.phaseMode);
+    const PhaseMode snapshotPhaseMode = static_cast<PhaseMode>(clampedPhaseMode);
     if (isRebuild)
     {
         const IRState* state = acquireIRState();
@@ -72,30 +77,19 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
             return false;
         }
 
-        float mixedF1, mixedF2, mixedTau;
-        {
-            const juce::ScopedLock lock(pendingOverrideLock);
-            mixedF1  = pendingOverride.mixedTransitionStartHz;
-            mixedF2  = pendingOverride.mixedTransitionEndHz;
-            mixedTau = pendingOverride.mixedPreRingTau;
-        }
-        activeLoader = std::make_unique<LoaderThread>(*this, *(state->ir), state->sampleRate, processingSampleRate, processingBlockSize, getPhaseMode(),
-                                                      mixedF1, mixedF2,
-                                                      mixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire)); // acquire: applyNewState/snapshot restore 側 publishAtomic release と HB
+        activeLoader = std::make_unique<LoaderThread>(*this, *(state->ir), state->sampleRate, processingSampleRate, processingBlockSize, snapshotPhaseMode,
+                                                      buildSnapshot.mixedTransitionStartHz, buildSnapshot.mixedTransitionEndHz,
+                                                      buildSnapshot.mixedPreRingTau,
+                                                      convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState/snapshot restore 側 publishAtomic release と HB
+                                                      buildSnapshot);
         releaseIRState(state);
     }
     else
     {
-        float mixedF1b, mixedF2b, mixedTaub;
-        {
-            const juce::ScopedLock lock(pendingOverrideLock);
-            mixedF1b  = pendingOverride.mixedTransitionStartHz;
-            mixedF2b  = pendingOverride.mixedTransitionEndHz;
-            mixedTaub = pendingOverride.mixedPreRingTau;
-        }
-        activeLoader = std::make_unique<LoaderThread>(*this, irFile, processingSampleRate, processingBlockSize, getPhaseMode(),
-                                                      mixedF1b, mixedF2b,
-                                                      mixedTaub);
+        activeLoader = std::make_unique<LoaderThread>(*this, irFile, processingSampleRate, processingBlockSize, snapshotPhaseMode,
+                                                      buildSnapshot.mixedTransitionStartHz, buildSnapshot.mixedTransitionEndHz,
+                                                      buildSnapshot.mixedPreRingTau,
+                                                      buildSnapshot);
         convo::publishAtomic(currentIrOptimized, optimizeForRealTime, std::memory_order_release); // release: UI/loader 側 acquire と HB
     }
 
@@ -581,6 +575,7 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
                                                           int preferredCallSize,
                                                           bool isRebuild,
                                                           const juce::File& irFile,
+                                                          const BuildSnapshot& buildSnapshot,
                                                           double scaleFactor,
                                                           std::unique_ptr<juce::AudioBuffer<double>> loadedIR,
                                                           std::unique_ptr<juce::AudioBuffer<double>> displayIR)
@@ -594,9 +589,15 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
         convo::FilterSpec spec;
         spec.sampleRate = sr;
         {
-            const juce::ScopedLock lock(pendingOverrideLock);
-            spec.hcMode = static_cast<convo::HCMode>(pendingOverride.nucHCMode);
-            spec.lcMode = static_cast<convo::LCMode>(pendingOverride.nucLCMode);
+            spec.hcMode = static_cast<convo::HCMode>(buildSnapshot.nucHCMode);
+            spec.lcMode = static_cast<convo::LCMode>(buildSnapshot.nucLCMode);
+            spec.tailMode = juce::jlimit(static_cast<int>(TailMode::AirAbsorption),
+                                         static_cast<int>(TailMode::Bypass),
+                                         buildSnapshot.tailMode);
+            spec.tailEnabled = (spec.tailMode != static_cast<int>(TailMode::Bypass));
+            spec.tailStartSeconds = static_cast<double>(buildSnapshot.tailStartSec);
+            spec.tailStrength = static_cast<double>(buildSnapshot.tailStrength);
+            spec.tailL1L2Multiplier = buildSnapshot.tailL1L2Multiplier;
         }
 
         if (newConv->init(irL.release(), irR.release(), length, sr, peakDelay,

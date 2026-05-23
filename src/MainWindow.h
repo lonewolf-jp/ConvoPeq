@@ -27,6 +27,7 @@ public:
 
     void closeButtonPressed() override;
     void showMainWindowAsync();
+    void runCommandLineAutomation(const juce::String& commandLine);
     AudioEngine* getAudioEngine() noexcept { return &audioEngine; }
     const AudioEngine* getAudioEngine() const noexcept { return &audioEngine; }
 

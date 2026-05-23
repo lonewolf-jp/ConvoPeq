@@ -55,6 +55,7 @@ void AudioEngine::releaseResources()
     clearRebuildReason(RebuildReason::StructuralFromNonMT);
     clearRebuildReason(RebuildReason::DeferredStructural);
     clearRebuildReason(RebuildReason::DeferredFinalizeAware);
+    convo::publishAtomic(deferredFinalizeFirstSeenTicks_, 0, std::memory_order_release);
     cancelPendingUpdate();
     convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
     convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);

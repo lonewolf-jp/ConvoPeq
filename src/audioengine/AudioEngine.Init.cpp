@@ -84,6 +84,19 @@ void AudioEngine::shutdownWorkerThread()
 
 bool AudioEngine::enqueueSnapshotCommand() noexcept
 {
+    constexpr const char* kPhase5TagReduce = "phase5_reduce_target";
+    constexpr const char* kPhase5TagKeep = "phase5_keep_target";
+
+    const uint64_t intentId = nextRebuildTelemetryIntentId();
+    emitRebuildTelemetry(RebuildTelemetryEvent::Requested,
+                         intentId,
+                         RebuildTelemetryReason::EnqueueSnapshotCommand,
+                         RebuildTelemetryDecision::Accepted,
+                         0,
+                         0,
+                         RebuildTelemetryClass::Snapshot,
+                         RebuildTelemetryPolicy::NA);
+
     auto makeDebounceKey = [](uint64_t seed, uint64_t value) noexcept -> uint64_t
     {
         // 64-bit mix (no libm, no allocation)
@@ -122,6 +135,15 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
         if (hasLastKey && lastKey == key)
         {
             diagLog("[VERIFY] enqueue snapshot debounced: identical snapshot intent");
+            emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
+                                 intentId,
+                                 RebuildTelemetryReason::SnapshotIntentDebounced,
+                                 RebuildTelemetryDecision::Merged,
+                                 0,
+                                 0,
+                                 RebuildTelemetryClass::Snapshot,
+                                 RebuildTelemetryPolicy::Replaceable,
+                                 kPhase5TagReduce);
             return true;
         }
 
@@ -130,11 +152,28 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
         if (!m_commandBuffer.push(cmd))
         {
             DBG("AudioEngine: CommandBuffer full, dropping parameter change command");
+            emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                                 intentId,
+                                 RebuildTelemetryReason::SnapshotCommandBufferFull,
+                                 RebuildTelemetryDecision::Dropped,
+                                 0,
+                                 0,
+                                 RebuildTelemetryClass::Snapshot,
+                                 RebuildTelemetryPolicy::NA,
+                                 kPhase5TagKeep);
             return false;
         }
 
         convo::publishAtomic(lastEnqueuedSnapshotDebounceKey_, key, std::memory_order_release); // release: consume 次回 acquire と HB
         convo::publishAtomic(hasLastEnqueuedSnapshotDebounceKey_, true, std::memory_order_release); // release: consume 次回 acquire と HB
+        emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
+                     intentId,
+                     RebuildTelemetryReason::SnapshotCommandQueued,
+                     RebuildTelemetryDecision::Dispatched,
+                     0,
+                     0,
+                     RebuildTelemetryClass::Snapshot,
+                     RebuildTelemetryPolicy::NA);
         return true;
     }
 
@@ -143,8 +182,25 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
     if (!m_commandBuffer.push(cmd))
     {
         DBG("AudioEngine: CommandBuffer full, dropping parameter change command");
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                             intentId,
+                             RebuildTelemetryReason::SnapshotCommandBufferFullNonMt,
+                             RebuildTelemetryDecision::Dropped,
+                             0,
+                             0,
+                             RebuildTelemetryClass::Snapshot,
+                             RebuildTelemetryPolicy::NA,
+                             kPhase5TagKeep);
         return false;
     }
+    emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
+                         intentId,
+                         RebuildTelemetryReason::SnapshotCommandQueuedNonMt,
+                         RebuildTelemetryDecision::Dispatched,
+                         0,
+                         0,
+                         RebuildTelemetryClass::Snapshot,
+                         RebuildTelemetryPolicy::NA);
     return true;
 }
 

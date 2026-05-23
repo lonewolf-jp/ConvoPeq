@@ -29,7 +29,7 @@ public:
 
     // ─── 起動処理 ───
     // MainWindow を生成する。AudioDeviceManager は MainWindow で管理される。
-    void initialise(const juce::String& /*commandLine*/) override;
+    void initialise(const juce::String& commandLine) override;
 
     // ─── 終了処理 ───
     // mainWindow.reset() で MainWindow デストラクタが呼ばれ、

@@ -71,16 +71,23 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
         auto runLegacyPath = [&]()
         {
             const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
-            float mixedF1, mixedF2, mixedTau;
-            {
-                const juce::ScopedLock lock(pendingOverrideLock);
-                mixedF1  = pendingOverride.mixedTransitionStartHz;
-                mixedF2  = pendingOverride.mixedTransitionEndHz;
-                mixedTau = pendingOverride.mixedPreRingTau;
-            }
-            LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), getPhaseMode(), // acquire: prepareToPlay の publishAtomic release と HB
-                        mixedF1, mixedF2,
-                        mixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire)); // acquire: applyNewState の publishAtomic release と HB
+            const BuildSnapshot buildSnapshot = captureBuildSnapshot();
+            const int clampedPhaseMode = juce::jlimit(static_cast<int>(PhaseMode::AsIs),
+                                                      static_cast<int>(PhaseMode::Minimum),
+                                                      buildSnapshot.phaseMode);
+            const float clampedMixedF1 = juce::jlimit(MIXED_F1_MIN_HZ,
+                                                      MIXED_F1_MAX_HZ,
+                                                      buildSnapshot.mixedTransitionStartHz);
+            const float clampedMixedF2 = juce::jlimit((std::max)(MIXED_F2_MIN_HZ, clampedMixedF1 + 10.0f),
+                                                      MIXED_F2_MAX_HZ,
+                                                      buildSnapshot.mixedTransitionEndHz);
+            const float clampedMixedTau = juce::jlimit(MIXED_TAU_MIN,
+                                                       MIXED_TAU_MAX,
+                                                       buildSnapshot.mixedPreRingTau);
+            LoaderThread loader(*this, *(state->ir), state->sampleRate, processingSampleRate, convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), static_cast<PhaseMode>(clampedPhaseMode), // acquire: prepareToPlay の publishAtomic release と HB
+                        clampedMixedF1, clampedMixedF2,
+                        clampedMixedTau, convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState の publishAtomic release と HB
+                        buildSnapshot);
             loader.externalCancellationCheck = shouldCancel;
             loader.runSynchronously();
         };
@@ -151,24 +158,31 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
     if (!job.loaderInitialized)
     {
         const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
-        float mixedF1, mixedF2, mixedTau;
-        {
-            const juce::ScopedLock lock(pendingOverrideLock);
-            mixedF1  = pendingOverride.mixedTransitionStartHz;
-            mixedF2  = pendingOverride.mixedTransitionEndHz;
-            mixedTau = pendingOverride.mixedPreRingTau;
-        }
+        const BuildSnapshot buildSnapshot = captureBuildSnapshot();
+        const int clampedPhaseMode = juce::jlimit(static_cast<int>(PhaseMode::AsIs),
+                                                  static_cast<int>(PhaseMode::Minimum),
+                                                  buildSnapshot.phaseMode);
+        const float clampedMixedF1 = juce::jlimit(MIXED_F1_MIN_HZ,
+                                                  MIXED_F1_MAX_HZ,
+                                                  buildSnapshot.mixedTransitionStartHz);
+        const float clampedMixedF2 = juce::jlimit((std::max)(MIXED_F2_MIN_HZ, clampedMixedF1 + 10.0f),
+                                                  MIXED_F2_MAX_HZ,
+                                                  buildSnapshot.mixedTransitionEndHz);
+        const float clampedMixedTau = juce::jlimit(MIXED_TAU_MIN,
+                                                   MIXED_TAU_MAX,
+                                                   buildSnapshot.mixedPreRingTau);
         job.incrementalLoader = std::make_unique<LoaderThread>(
             *this,
             *(job.preparedIR),
             job.preparedSampleRate,
             processingSampleRate,
             convo::consumeAtomic(currentBufferSize, std::memory_order_acquire), // acquire: prepareToPlay の publishAtomic release と HB
-            getPhaseMode(),
-            mixedF1,
-            mixedF2,
-            mixedTau,
-            convo::consumeAtomic(currentIRScale, std::memory_order_acquire)); // acquire: applyNewState の publishAtomic release と HB
+            static_cast<PhaseMode>(clampedPhaseMode),
+            clampedMixedF1,
+            clampedMixedF2,
+            clampedMixedTau,
+            convo::consumeAtomic(currentIRScale, std::memory_order_acquire), // acquire: applyNewState の publishAtomic release と HB
+            buildSnapshot);
         job.incrementalLoader->externalCancellationCheck = job.shouldCancel;
         job.loaderInitialized = true;
     }

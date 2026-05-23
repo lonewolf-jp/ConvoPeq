@@ -289,11 +289,6 @@ MKLNonUniformConvolver::MKLNonUniformConvolver()
 MKLNonUniformConvolver::~MKLNonUniformConvolver()
 {
     #ifdef NUC_DEBUG_GUARDS
-        // 二重解放検出
-        static std::atomic<bool> destroyed{false};
-    if (convo::exchangeAtomic(destroyed, true)){
-        __debugbreak(); // 二重解放発生
-    }
     checkGuards();
     #endif
     releaseAllLayers();
@@ -437,7 +432,7 @@ void MKLNonUniformConvolver::releaseAllLayers() noexcept
     checkPtr(m_directHistory);
     checkPtr(m_directWindow);
     checkPtr(m_directOutBuf);
-    #endif +
+    #endif
     for (int i = 0; i < kNumLayers; ++i)
         m_layers[i].freeAll();
     m_numActiveLayers = 0;
@@ -456,6 +451,10 @@ void MKLNonUniformConvolver::releaseAllLayers() noexcept
     m_directMaxBlock = 0;
     m_directPendingSamples = 0;
     m_directEnabled  = false;
+    m_tailEnabled = true;
+    m_tailStrength = 1.0;
+    for (int i = 0; i < kNumLayers; ++i)
+        m_tailLayerGain[i] = 1.0;
 }
 
 //==============================================================================
@@ -471,6 +470,62 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         return false;
 
     releaseAllLayers();
+
+    // tailMode: 0=Air Absorption, 1=Layer Tail Contouring, 2=Bypass
+    const int tailMode = (filterSpec != nullptr) ? juce::jlimit(0, 2, filterSpec->tailMode) : 1;
+    const bool tailEnabled = (tailMode != 2) && ((filterSpec != nullptr) ? filterSpec->tailEnabled : true);
+    const double sampleRateForTail = (filterSpec != nullptr) ? filterSpec->sampleRate : 48000.0;
+    double tailStartSec = (filterSpec != nullptr) ? juce::jlimit(0.01, 0.80, filterSpec->tailStartSeconds) : 0.085;
+    const double userTailStrength = (filterSpec != nullptr) ? juce::jlimit(0.0, 2.0, filterSpec->tailStrength) : 1.0;
+    double tailStrength = userTailStrength;
+    int tailL1L2Mult = (filterSpec != nullptr) ? juce::jlimit(2, 16, filterSpec->tailL1L2Multiplier) : 8;
+
+    double layer1Gain = 1.0;
+    double layer2Gain = 1.0;
+
+    const double strength01 = juce::jlimit(0.0, 1.0, userTailStrength * 0.5);
+
+    // Tail profile redesign:
+    // - Air Absorption: tail gain is reduced by layer and HF damping is applied to L1/L2 spectra.
+    // - Layer Tail Contouring: enforce robust lower bounds and shape layer gains for contour clarity.
+    if (!tailEnabled)
+    {
+        tailStrength = 0.0;
+        layer1Gain = 0.0;
+        layer2Gain = 0.0;
+    }
+    else if (tailMode == 0)
+    {
+        // Air Absorption mode: preserve early reflections while progressively damping late layers.
+        tailStartSec = juce::jlimit(0.01, 0.80, std::max(tailStartSec, 0.055));
+        tailL1L2Mult = juce::jlimit(2, 16, std::max(tailL1L2Mult, 6));
+        tailStrength = juce::jlimit(0.0, 2.0, userTailStrength);
+
+        layer1Gain = juce::jlimit(0.0, 2.0, tailStrength * (0.95 - 0.25 * strength01));
+        layer2Gain = juce::jlimit(0.0, 2.0, tailStrength * (0.80 - 0.45 * strength01));
+    }
+    else if (tailMode == 1)
+    {
+        tailStartSec = juce::jlimit(0.01, 0.80, std::max(tailStartSec, 0.12));
+        tailStrength = juce::jlimit(0.0, 2.0, std::max(tailStrength, 1.25));
+        tailL1L2Mult = juce::jlimit(2, 16, std::max(tailL1L2Mult, 12));
+
+        layer1Gain = juce::jlimit(0.0, 2.0, tailStrength * (1.05 + 0.20 * strength01));
+        layer2Gain = juce::jlimit(0.0, 2.0, tailStrength * (0.82 + 0.12 * strength01));
+    }
+    else
+    {
+        // Bypass mode (defensive path)
+        tailStrength = 0.0;
+        layer1Gain = 0.0;
+        layer2Gain = 0.0;
+    }
+
+    m_tailEnabled = tailEnabled;
+    m_tailStrength = tailEnabled ? tailStrength : 0.0;
+    m_tailLayerGain[0] = 1.0;
+    m_tailLayerGain[1] = layer1Gain;
+    m_tailLayerGain[2] = layer2Gain;
 
     // ────────────────────────────────────────────────
     // 先頭 Direct Form 設定
@@ -525,16 +580,19 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // レイヤー構成決定 (Non-Uniform Partitioned Convolution)
     // ────────────────────────────────────────────────
     const int l0Part = juce::nextPowerOfTwo(std::max(blockSize, 64));
-    const int l1Part = l0Part * 8;
-    const int l2Part = l1Part * 8;
+    const int l1Part = l0Part * tailL1L2Mult;
+    const int l2Part = l1Part * tailL1L2Mult;
 
-    const int l0Len = std::min(irLen, kL0MaxParts * l0Part);
+    const int l0MaxLen = kL0MaxParts * l0Part;
+    const int l0LenByTailStart = static_cast<int>(std::llround(tailStartSec * sampleRateForTail));
+    const int l0LenTarget = juce::jlimit(l0Part, l0MaxLen, l0LenByTailStart);
+    const int l0Len = std::min(irLen, tailEnabled ? l0LenTarget : l0MaxLen);
 
     const int l1Offset = l0Len;
-    const int l1Len    = std::max(0, std::min(irLen - l0Len, kL1MaxParts * l1Part));
+    const int l1Len    = tailEnabled ? std::max(0, std::min(irLen - l0Len, kL1MaxParts * l1Part)) : 0;
 
     const int l2Offset = l0Len + l1Len;
-    const int l2Len    = std::max(0, irLen - l0Len - l1Len);
+    const int l2Len    = tailEnabled ? std::max(0, irLen - l0Len - l1Len) : 0;
 
     struct LayerCfg { int offset; int len; int partSize; bool immediate; };
     const LayerCfg cfgs[kNumLayers] = {
@@ -790,6 +848,46 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
     if (filterSpec != nullptr)
         applySpectrumFilter(*filterSpec);
+
+    if (tailEnabled && tailMode == 0)
+    {
+        const double startNorm = juce::jlimit(0.65, 1.55, tailStartSec / 0.085);
+        const double dampingBase = (0.35 + 1.10 * strength01) * startNorm;
+
+        for (int li = 1; li < m_numActiveLayers; ++li)
+        {
+            Layer& l = m_layers[li];
+            if (!l.irFreqDomain || l.complexSize <= 0)
+                continue;
+
+            const double layerWeight = (li == 1) ? 1.0 : 1.6;
+            const double dampingCoeff = dampingBase * layerWeight;
+
+            convo::ScopedAlignedPtr<double> gainInterleaved(
+                static_cast<double*>(mkl_malloc(static_cast<size_t>(l.complexSize) * 2 * sizeof(double), 64)));
+            if (!gainInterleaved.get())
+                continue;
+
+            const double denom = static_cast<double>(std::max(1, l.complexSize - 1));
+            for (int k = 0; k < l.complexSize; ++k)
+            {
+                const double fNorm = static_cast<double>(k) / denom;
+                const double hfTilt = std::exp(-dampingCoeff * fNorm * fNorm);
+                gainInterleaved.get()[2 * k] = hfTilt;
+                gainInterleaved.get()[2 * k + 1] = hfTilt;
+            }
+
+            for (int p = 0; p < l.numParts; ++p)
+            {
+                double* slot = l.irFreqDomain + static_cast<size_t>(p) * l.partStride;
+                vdMul(l.complexSize * 2, slot, gainInterleaved.get(), slot);
+                deinterleaveComplex(slot,
+                                    l.irFreqReal + static_cast<size_t>(p) * l.complexSize,
+                                    l.irFreqImag + static_cast<size_t>(p) * l.complexSize,
+                                    l.complexSize);
+            }
+        }
+    }
 
     convo::publishAtomic(m_ready, true, std::memory_order_release);
     return true;
@@ -1272,6 +1370,17 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
 #endif
     };
 
+    auto addScaledFallback = [&addFallback](int n, double* dst, const double* src, double gain) noexcept
+    {
+        if (std::abs(gain - 1.0) < 1.0e-12)
+        {
+            addFallback(n, dst, src);
+            return;
+        }
+        for (int i = 0; i < n; ++i)
+            dst[i] += src[i] * gain;
+    };
+
     // ── Direct 出力 ──
     if (m_directEnabled && m_directOutBuf != nullptr)
     {
@@ -1300,7 +1409,10 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
         if (output != nullptr)
         {
             const double* tailPtr = l.tailOutputBuf + l.tailOutputPos;
-            addFallback(toAdd, output, tailPtr);
+            const double layerGain = m_tailEnabled
+                ? m_tailLayerGain[juce::jlimit(0, kNumLayers - 1, li)]
+                : 0.0;
+            addScaledFallback(toAdd, output, tailPtr, layerGain);
         }
 
         l.tailOutputPos += toAdd;

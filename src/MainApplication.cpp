@@ -50,7 +50,7 @@
 #endif
 #endif
 
-void MainApplication::initialise(const juce::String& /*commandLine*/)
+void MainApplication::initialise(const juce::String& commandLine)
 {
     {
         const auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
@@ -140,6 +140,7 @@ void MainApplication::initialise(const juce::String& /*commandLine*/)
     // メインウィンドウを生成する
     mainWindow = std::make_unique<MainWindow>(getApplicationName());
     mainWindow->showMainWindowAsync();
+    mainWindow->runCommandLineAutomation(commandLine);
 
     if (auto* engine = mainWindow->getAudioEngine())
         engine->getAffinityManager().applyMessageThreadPolicy();

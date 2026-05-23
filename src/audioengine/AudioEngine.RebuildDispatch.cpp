@@ -46,31 +46,174 @@ static bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
 
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_DISPATCH)
 
-void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
+void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
+                                      RebuildTelemetryReason reason,
+                                      RebuildTelemetryClass rebuildClass,
+                                      RebuildTelemetryPolicy collapsePolicy) noexcept
 {
+    constexpr const char* kPhase5TagReduce = "phase5_reduce_target";
+    constexpr const char* kPhase5TagKeep = "phase5_keep_target";
+
+    const int64_t nowTicks = juce::Time::getHighResolutionTicks();
+    uint64_t structuralHash = 0;
+    uint64_t fingerprint = 0;
+    bool isMessageThread = false;
+    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating(); mm != nullptr)
+        isMessageThread = mm->isThisTheMessageThread();
+
+    if (kind == convo::RebuildKind::Structural && isMessageThread)
+    {
+        if (uiConvolverProcessor.isIRLoaded())
+            structuralHash = uiConvolverProcessor.getStructuralHash();
+        fingerprint = uiConvolverProcessor.captureBuildSnapshot().fingerprint;
+    }
+
+    const double srSnapshot = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    const int bsSnapshot = convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire);
+    const bool deferCategory = (kind == convo::RebuildKind::Structural) && !(srSnapshot > 0.0 && bsSnapshot > 0);
+
+    bool sameAsPendingWouldMerge = false;
+    bool shouldApplyLatestWinsMerge = false;
+    int64_t latestWinsWindowTicks = 0;
+    int latestWinsWindowMs = 0;
+
+    if (collapsePolicy == RebuildTelemetryPolicy::Replaceable)
+    {
+        // UI burst 吸収専用。MustExecute には適用しない。
+        latestWinsWindowMs = (kind == convo::RebuildKind::Structural)
+            ? std::max(1, uiConvolverProcessor.getRebuildDebounceMs())
+            : 50;
+        latestWinsWindowTicks = (juce::Time::getHighResolutionTicksPerSecond() * latestWinsWindowMs) / 1000;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(rebuildAdmissionIntentMutex_);
+        const auto& pending = rebuildAdmissionPendingIntent_;
+        sameAsPendingWouldMerge = pending.valid
+            && pending.kind == kind
+            && pending.rebuildClass == rebuildClass
+            && pending.collapsePolicy == collapsePolicy
+            && pending.structuralHash == structuralHash
+            && pending.fingerprint == fingerprint
+            && pending.deferCategory == deferCategory;
+
+        if (sameAsPendingWouldMerge
+            && collapsePolicy == RebuildTelemetryPolicy::Replaceable
+            && pending.lastIntentTicks > 0
+            && latestWinsWindowTicks > 0)
+        {
+            const int64_t elapsed = nowTicks - pending.lastIntentTicks;
+            shouldApplyLatestWinsMerge = (elapsed >= 0 && elapsed <= latestWinsWindowTicks);
+        }
+
+        rebuildAdmissionPendingIntent_.valid = true;
+        rebuildAdmissionPendingIntent_.kind = kind;
+        rebuildAdmissionPendingIntent_.rebuildClass = rebuildClass;
+        rebuildAdmissionPendingIntent_.collapsePolicy = collapsePolicy;
+        rebuildAdmissionPendingIntent_.structuralHash = structuralHash;
+        rebuildAdmissionPendingIntent_.fingerprint = fingerprint;
+        rebuildAdmissionPendingIntent_.deferCategory = deferCategory;
+        rebuildAdmissionPendingIntent_.lastIntentTicks = nowTicks;
+    }
+
+    const uint64_t intentId = nextRebuildTelemetryIntentId();
+    emitRebuildTelemetry(RebuildTelemetryEvent::Requested,
+                         intentId,
+                         reason,
+                         RebuildTelemetryDecision::Accepted,
+                         structuralHash,
+                         fingerprint,
+                         rebuildClass,
+                         collapsePolicy);
+
+    if (sameAsPendingWouldMerge)
+    {
+        emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
+                             intentId,
+                             RebuildTelemetryReason::SameAsPendingWouldMerge,
+                             RebuildTelemetryDecision::Merged,
+                             structuralHash,
+                             fingerprint,
+                             rebuildClass,
+                             collapsePolicy,
+                             deferCategory ? "defer_candidate" : "dispatch_candidate");
+
+        if (shouldApplyLatestWinsMerge)
+        {
+            emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
+                                 intentId,
+                                 RebuildTelemetryReason::SameAsPendingWouldMerge,
+                                 RebuildTelemetryDecision::Merged,
+                                 structuralHash,
+                                 fingerprint,
+                                 rebuildClass,
+                                 collapsePolicy,
+                                 kPhase5TagReduce,
+                                 static_cast<double>(latestWinsWindowMs));
+            return;
+        }
+    }
+
     if (isShutdownInProgress())
+    {
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                     intentId,
+                     RebuildTelemetryReason::ShutdownInProgress,
+                     RebuildTelemetryDecision::Suppressed,
+                     0,
+                     0,
+                     RebuildTelemetryClass::Structural,
+                     collapsePolicy,
+                     kPhase5TagKeep);
         return;
+    }
 
     if (kind == convo::RebuildKind::None || kind == convo::RebuildKind::Runtime)
+    {
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                     intentId,
+                     RebuildTelemetryReason::KindFiltered,
+                     RebuildTelemetryDecision::Suppressed,
+                     0,
+                     0,
+                     rebuildClass,
+                     collapsePolicy,
+                     kPhase5TagKeep);
         return;
+    }
 
     // Message Thread かつ実行コンテキスト有効時は直接 rebuild 実行へ進む
     if (kind == convo::RebuildKind::Structural)
     {
-        if (auto* mm = juce::MessageManager::getInstanceWithoutCreating();
-            mm != nullptr && mm->isThisTheMessageThread())
+        if (isMessageThread)
         {
             clearRebuildReason(RebuildReason::StructuralFromNonMT);
 
-            const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
-            const int bs = convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire);
+            const double sr = srSnapshot;
+            const int bs = bsSnapshot;
             if (sr > 0.0 && bs > 0)
             {
-                requestRebuild(sr, bs);
+                emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
+                                     intentId,
+                                     RebuildTelemetryReason::DelegateRequestRebuildSrBs,
+                                     RebuildTelemetryDecision::Dispatched,
+                                     structuralHash,
+                                     fingerprint,
+                                     RebuildTelemetryClass::Structural,
+                                     collapsePolicy);
+                requestRebuild(sr, bs, collapsePolicy == RebuildTelemetryPolicy::MustExecute);
                 return;
             }
 
             setRebuildReason(RebuildReason::DeferredFinalizeAware);
+            emitRebuildTelemetry(RebuildTelemetryEvent::Deferred,
+                                 intentId,
+                                 RebuildTelemetryReason::MissingSrBs,
+                                 RebuildTelemetryDecision::Deferred,
+                                 0,
+                                 0,
+                                 RebuildTelemetryClass::FinalizeAware,
+                                 collapsePolicy);
             return;
         }
     }
@@ -78,7 +221,28 @@ void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
     // 非MTパス: bool フラグをセットして MT へ通知
     const bool wasNewlyPending = setRebuildReason(RebuildReason::StructuralFromNonMT);
     if (wasNewlyPending)
+    {
+        emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
+                             intentId,
+                             RebuildTelemetryReason::NonMtTriggerAsync,
+                             RebuildTelemetryDecision::Dispatched,
+                             0,
+                             0,
+                             RebuildTelemetryClass::Structural,
+                             collapsePolicy);
         triggerAsyncUpdate();
+    }
+    else
+    {
+        emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
+                             intentId,
+                             RebuildTelemetryReason::NonMtAlreadyPending,
+                             RebuildTelemetryDecision::Merged,
+                             0,
+                             0,
+                             RebuildTelemetryClass::Structural,
+                             collapsePolicy);
+    }
 }
 
 void AudioEngine::handleAsyncUpdate()
@@ -91,13 +255,59 @@ void AudioEngine::handleAsyncUpdate()
     // 非MT起点の Structural rebuild 要求を消費して実行する
     if (clearRebuildReason(RebuildReason::StructuralFromNonMT))
     {
+        RebuildTelemetryPolicy collapsePolicy = RebuildTelemetryPolicy::NA;
+        {
+            std::lock_guard<std::mutex> lock(rebuildAdmissionIntentMutex_);
+            const auto& pending = rebuildAdmissionPendingIntent_;
+            if (pending.valid && pending.kind == convo::RebuildKind::Structural)
+                collapsePolicy = pending.collapsePolicy;
+        }
+
+        const uint64_t intentId = nextRebuildTelemetryIntentId();
+        emitRebuildTelemetry(RebuildTelemetryEvent::Requested,
+                     intentId,
+                     RebuildTelemetryReason::AsyncBridgeConsume,
+                     RebuildTelemetryDecision::Accepted,
+                     0,
+                     0,
+                     RebuildTelemetryClass::Structural,
+                     collapsePolicy);
+
         const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         const int bs = convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire);
         if (sr > 0.0 && bs > 0)
-            requestRebuild(sr, bs);
+        {
+            emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
+                                 intentId,
+                                 RebuildTelemetryReason::AsyncBridgeDelegateSrBs,
+                                 RebuildTelemetryDecision::Dispatched,
+                                 0,
+                                 0,
+                                 RebuildTelemetryClass::Structural,
+                                 collapsePolicy);
+            requestRebuild(sr, bs, collapsePolicy == RebuildTelemetryPolicy::MustExecute);
+        }
         else
+        {
             setRebuildReason(RebuildReason::DeferredFinalizeAware);
+            emitRebuildTelemetry(RebuildTelemetryEvent::Deferred,
+                                 intentId,
+                                 RebuildTelemetryReason::AsyncBridgeMissingSrBs,
+                                 RebuildTelemetryDecision::Deferred,
+                                 0,
+                                 0,
+                                 RebuildTelemetryClass::FinalizeAware,
+                                 collapsePolicy);
+        }
     }
+}
+
+void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
+{
+    submitRebuildIntent(kind,
+                        RebuildTelemetryReason::RequestRebuildKindEntry,
+                        RebuildTelemetryClass::Structural,
+                        RebuildTelemetryPolicy::Replaceable);
 }
 
 #endif
@@ -107,8 +317,26 @@ void AudioEngine::handleAsyncUpdate()
 //--------------------------------------------------------------
 // requestRebuild - DSPグラフの再構築 (Message Thread)
 //--------------------------------------------------------------
-void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
+void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool bypassLegacySuppression)
 {
+    constexpr const char* kPhase5TagReduce = "phase5_reduce_target";
+    constexpr const char* kPhase5TagKeep = "phase5_keep_target";
+
+    const auto collapsePolicy = bypassLegacySuppression
+        ? RebuildTelemetryPolicy::MustExecute
+        : RebuildTelemetryPolicy::Replaceable;
+
+    const uint64_t intentId = nextRebuildTelemetryIntentId();
+    const double requestStartMs = juce::Time::getMillisecondCounterHiRes();
+    emitRebuildTelemetry(RebuildTelemetryEvent::Requested,
+                         intentId,
+                         RebuildTelemetryReason::RequestRebuildSrBs,
+                         RebuildTelemetryDecision::Accepted,
+                         0,
+                         0,
+                         RebuildTelemetryClass::Structural,
+                         collapsePolicy);
+
     convo::fetchAddAtomic(debugRebuildDispatchRequestCount, 1, std::memory_order_acq_rel);
 
     // UIコンポーネントへのアクセスを行うため、必ずMessage Threadで実行すること
@@ -117,24 +345,22 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     // シャットダウン中のリクエストは早期に切る
     if (isShutdownInProgress())
     {
-        diagLog("[DIAG] requestRebuild(sr,bs): ignored during shutdown");
+        // Phase5: 維持対象（グローバル安全ガード）
+        diagLog("[DIAG][PHASE5-KEEP] requestRebuild(sr,bs): ignored during shutdown");
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                     intentId,
+                     RebuildTelemetryReason::ShutdownInProgress,
+                     RebuildTelemetryDecision::Suppressed,
+                     0,
+                     0,
+                     RebuildTelemetryClass::Structural,
+                     collapsePolicy,
+                     kPhase5TagKeep);
         return;
     }
 
-    if (hasRebuildReason(RebuildReason::DeferredStructural))
-    {
-        const int64_t dueTicks = convo::consumeAtomic(deferredStructuralRebuildDueTicks_, std::memory_order_acquire);
-        const int64_t nowTicks = juce::Time::getHighResolutionTicks();
-        const bool uiHasIr = uiConvolverProcessor.isIRLoaded();
-        const bool committedHasIr = convo::consumeAtomic(lastCommittedConvolverHasIr_, std::memory_order_acquire);
-
-        if (dueTicks > 0 && nowTicks < dueTicks && uiHasIr && !committedHasIr)
-        {
-            diagLog("[DIAG] requestRebuild(sr,bs): SUPPRESSED direct rebuild during deferred Structural window SR="
-                + juce::String(sampleRate, 2));
-            return;
-        }
-    }
+    // Phase5: 縮退対象（legacy deferred window suppress）は削除済み。
+    // DeferredStructural が立っていても、ここでは suppress せず通常の queue 判定へ進める。
 
     const int publishedFftSize = uiConvolverProcessor.getActiveCacheFFTSize();
     const int targetFftSize = uiConvolverProcessor.getTargetUpgradeFFTSize();
@@ -146,10 +372,20 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
 
     if (suppressIntermediateMixedPhasePublish)
     {
-        diagLog("[DIAG] requestRebuild(sr,bs): SUPPRESSED intermediate progressive mixed-phase publish fft="
+        // Phase5: 維持対象（中間状態 publish 防止の安全ガード）
+        diagLog("[DIAG][PHASE5-KEEP] requestRebuild(sr,bs): SUPPRESSED intermediate progressive mixed-phase publish fft="
                 + juce::String(publishedFftSize)
                 + " targetFFT=" + juce::String(targetFftSize)
                 + " SR=" + juce::String(sampleRate, 2));
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                     intentId,
+                     RebuildTelemetryReason::MixedPhaseIntermediate,
+                     RebuildTelemetryDecision::Suppressed,
+                     0,
+                     0,
+                     RebuildTelemetryClass::Structural,
+                 collapsePolicy,
+                 kPhase5TagKeep);
         return;
     }
 
@@ -171,31 +407,39 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
     task.buildInput.oversamplingType = static_cast<int>(paramSnapshot.oversamplingType);
     task.buildInput.noiseShaperType = static_cast<int>(paramSnapshot.noiseShaperType);
     task.convolverBuildSnapshot = uiConvolverProcessor.captureBuildSnapshot();
+    const uint64_t structuralHash = uiConvolverProcessor.isIRLoaded() ? uiConvolverProcessor.getStructuralHash() : 0;
 
     DSPCore* currentToRelease = nullptr;
     bool queued = false;
     bool blockedAsDuplicate = false;
-    bool blockedAsRecentDuplicate = false;
+    const bool allowDuplicateSuppression = !bypassLegacySuppression;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
 
         if (hasPendingTask)
         {
-            BuildParameterSnapshot pendingSnapshot {};
-            pendingSnapshot.ditherDepth = pendingTask.buildInput.ditherBitDepth;
-            pendingSnapshot.oversamplingFactor = pendingTask.buildInput.oversamplingFactor;
-            pendingSnapshot.oversamplingType = static_cast<OversamplingType>(pendingTask.buildInput.oversamplingType);
-            pendingSnapshot.noiseShaperType = static_cast<NoiseShaperType>(pendingTask.buildInput.noiseShaperType);
-
-            const bool sameAsPending =
-                std::abs(pendingTask.buildInput.sampleRate - sampleRate) <= 1.0e-6
-                && pendingTask.buildInput.blockSize == samplesPerBlock
-                && equalsBuildParameterSnapshot(pendingSnapshot, paramSnapshot)
-                && pendingTask.convolverBuildSnapshot.fingerprint == task.convolverBuildSnapshot.fingerprint;
-
-            if (sameAsPending)
+            if (allowDuplicateSuppression)
             {
-                blockedAsDuplicate = true;
+                BuildParameterSnapshot pendingSnapshot {};
+                pendingSnapshot.ditherDepth = pendingTask.buildInput.ditherBitDepth;
+                pendingSnapshot.oversamplingFactor = pendingTask.buildInput.oversamplingFactor;
+                pendingSnapshot.oversamplingType = static_cast<OversamplingType>(pendingTask.buildInput.oversamplingType);
+                pendingSnapshot.noiseShaperType = static_cast<NoiseShaperType>(pendingTask.buildInput.noiseShaperType);
+
+                const bool sameAsPending =
+                    std::abs(pendingTask.buildInput.sampleRate - sampleRate) <= 1.0e-6
+                    && pendingTask.buildInput.blockSize == samplesPerBlock
+                    && equalsBuildParameterSnapshot(pendingSnapshot, paramSnapshot)
+                    && pendingTask.convolverBuildSnapshot.fingerprint == task.convolverBuildSnapshot.fingerprint;
+
+                if (sameAsPending)
+                {
+                    blockedAsDuplicate = true;
+                }
+                else
+                {
+                    currentToRelease = pendingTask.currentDSP;
+                }
             }
             else
             {
@@ -204,29 +448,6 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
         }
 
         if (!blockedAsDuplicate)
-        {
-            BuildParameterSnapshot lastQueuedSnapshot {};
-            lastQueuedSnapshot.ditherDepth = lastQueuedTaskSignature.buildInput.ditherBitDepth;
-            lastQueuedSnapshot.oversamplingFactor = lastQueuedTaskSignature.buildInput.oversamplingFactor;
-            lastQueuedSnapshot.oversamplingType = static_cast<OversamplingType>(lastQueuedTaskSignature.buildInput.oversamplingType);
-            lastQueuedSnapshot.noiseShaperType = static_cast<NoiseShaperType>(lastQueuedTaskSignature.buildInput.noiseShaperType);
-
-            const bool sameAsLastQueued =
-                std::abs(lastQueuedTaskSignature.buildInput.sampleRate - sampleRate) <= 1.0e-6
-                && lastQueuedTaskSignature.buildInput.blockSize == samplesPerBlock
-                && equalsBuildParameterSnapshot(lastQueuedSnapshot, paramSnapshot)
-                && lastQueuedTaskSignature.convolverBuildSnapshot.fingerprint == task.convolverBuildSnapshot.fingerprint;
-
-            if (sameAsLastQueued)
-            {
-                const int64_t nowTicks = juce::Time::getHighResolutionTicks();
-                const int64_t minDeltaTicks = juce::Time::getHighResolutionTicksPerSecond() / 5; // 200ms
-                if (lastQueuedTaskTicks > 0 && (nowTicks - lastQueuedTaskTicks) < minDeltaTicks)
-                    blockedAsRecentDuplicate = true;
-            }
-        }
-
-        if (!blockedAsDuplicate && !blockedAsRecentDuplicate)
         {
             generation = ++rebuildGeneration;
             task.generation = generation;
@@ -244,21 +465,35 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock)
         rebuildCV.notify_all();
         diagLog("[DIAG] requestRebuild(sr,bs): task queued generation=" + juce::String(generation)
             + " SR=" + juce::String(sampleRate, 2));
+        const double latencyMs = juce::Time::getMillisecondCounterHiRes() - requestStartMs;
+        emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
+                     intentId,
+                     RebuildTelemetryReason::TaskQueued,
+                     RebuildTelemetryDecision::Dispatched,
+                             structuralHash,
+                             task.convolverBuildSnapshot.fingerprint,
+                     RebuildTelemetryClass::Structural,
+                 collapsePolicy,
+                     "N/A",
+                     latencyMs);
     }
     else
     {
-        if (blockedAsRecentDuplicate)
-        {
-            convo::fetchAddAtomic(debugRebuildDispatchBlockedRecentDuplicateCount, 1, std::memory_order_acq_rel);
-            diagLog("[DIAG] requestRebuild(sr,bs): BLOCKED duplicate recent task SR="
-                + juce::String(sampleRate, 2));
-        }
-        else
-        {
-            convo::fetchAddAtomic(debugRebuildDispatchBlockedPendingDuplicateCount, 1, std::memory_order_acq_rel);
-            diagLog("[DIAG] requestRebuild(sr,bs): BLOCKED duplicate pending task SR="
-                + juce::String(sampleRate, 2));
-        }
+        // Phase5: PendingDuplicate は維持対象（pending queue の過負荷抑止ガード）。
+        // 直近縮退（RecentDuplicate / DeferredStructuralWindow）後も、
+        // 同一 pending の無限置換を防ぐため merge 扱いを維持する。
+        convo::fetchAddAtomic(debugRebuildDispatchBlockedPendingDuplicateCount, 1, std::memory_order_acq_rel);
+        diagLog("[DIAG][PHASE5-KEEP] requestRebuild(sr,bs): BLOCKED duplicate pending task SR="
+            + juce::String(sampleRate, 2));
+        emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
+                             intentId,
+                             RebuildTelemetryReason::PendingDuplicate,
+                             RebuildTelemetryDecision::Merged,
+                             structuralHash,
+                             task.convolverBuildSnapshot.fingerprint,
+                             RebuildTelemetryClass::Structural,
+                             collapsePolicy,
+                             kPhase5TagKeep);
     }
 
     // Destroy orphaned DSP objects outside the lock.
@@ -429,7 +664,10 @@ void AudioEngine::rebuildThreadLoop()
                     + " irLoading=" + juce::String(static_cast<int>(newDSP->convolverRt().isLoadingIR())));
 
                 if (retryable)
-                    requestRebuild(convo::RebuildKind::Structural);
+                    submitRebuildIntent(convo::RebuildKind::Structural,
+                                        RebuildTelemetryReason::RebuildThreadWarmupRetry,
+                                        RebuildTelemetryClass::Structural,
+                                        RebuildTelemetryPolicy::Replaceable);
 
                 continue;
             }

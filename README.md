@@ -52,6 +52,12 @@ ConvoPeq is built with JUCE 8.0.12 and is designed for low-latency, real-time-sa
 - [BUILD_GUIDE_WINDOWS.md](BUILD_GUIDE_WINDOWS.md): Windows build instructions and troubleshooting
 - [HOW_TO_USE.md](HOW_TO_USE.md): Practical usage guide — room correction via IR convolution with REW, and headphone EQ correction via AutoEq
 
+### ISR Rebuild Admission Docs ([doc/work/](doc/work/))
+
+- [doc/work/ISR_Rebuild_Admission_最終計画書_2026-05-23.md](doc/work/ISR_Rebuild_Admission_最終計画書_2026-05-23.md): 実装計画と受入基準（8章）
+- [doc/work/ISR_Rebuild_Admission_受入基準クローズログ_2026-05-23.md](doc/work/ISR_Rebuild_Admission_受入基準クローズログ_2026-05-23.md): 実測ログ付きのクローズ判定台帳
+- [doc/work/R11-R25_Closed判定監査表_2026-05-21.md](doc/work/R11-R25_Closed判定監査表_2026-05-21.md): R11〜R25監査の正本（8.1連携注記あり）
+
 ### Manuals ([manual/](manual/))
 
 **English Manuals:**

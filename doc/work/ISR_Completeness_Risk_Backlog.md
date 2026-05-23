@@ -439,6 +439,7 @@ ISR completeness 未完領域を、正本仕様に影響する順序で管理す
 - R16: Backlog 状態 `Closed` / 監査判定 `Closed`
 - R18: Backlog 状態 `Closed` / 監査判定 `Closed`
 - R25: Backlog 状態 `Closed` / 監査判定 `Closed`
+- AT-ISR: Air/Tail ISR統合トレーサビリティは `doc/work/R11-R25_Closed判定監査表_2026-05-21.md`（AT-ISR行）および `doc/work/ISR_AirTail_統合設計_2026-05-22.md` を正本参照とする
 - 判定更新原則: `Closed` への更新は本書の「Closed最小検証項目」充足時のみ行う。
 
 - ハブ文書（相互参照）:

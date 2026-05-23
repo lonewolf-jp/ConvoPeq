@@ -86,6 +86,11 @@ struct FilterSpec
     double sampleRate = 48000.0; ///< 処理サンプルレート (Hz)
     HCMode hcMode     = HCMode::Natural; ///< ハイカットモード
     LCMode lcMode     = LCMode::Natural; ///< ローカットモード
+    int tailMode = 1; ///< 0=Air Absorption, 1=Layer Tail Contouring, 2=Bypass
+    bool tailEnabled  = true; ///< false の場合 L1/L2 を無効化（legacy bypass）
+    double tailStartSeconds = 0.085; ///< Tail開始目安（秒）
+    double tailStrength = 1.0; ///< L1/L2 出力の加算ゲイン
+    int tailL1L2Multiplier = 8; ///< L1/L2 の partition 倍率
 };
 
 //==============================================================================
@@ -322,6 +327,9 @@ private:
     double* m_directOutBuf   = nullptr;
 
     std::atomic<bool> m_ready { false };
+    bool    m_tailEnabled = true;
+    double  m_tailStrength = 1.0;
+    double  m_tailLayerGain[kNumLayers] { 1.0, 1.0, 1.0 };
 
     #ifdef NUC_DEBUG_GUARDS
     alignas(64) uint64_t guardAfter[4] = {

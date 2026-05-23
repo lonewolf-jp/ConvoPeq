@@ -237,7 +237,10 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             requestRebuild(safeSampleRate, bufferSize);
         } else {
-            requestRebuild(convo::RebuildKind::Structural);
+            submitRebuildIntent(convo::RebuildKind::Structural,
+                                RebuildTelemetryReason::PrepareToPlayNonMt,
+                                RebuildTelemetryClass::Structural,
+                                RebuildTelemetryPolicy::Replaceable);
         }
     }
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Prepared, std::memory_order_release);

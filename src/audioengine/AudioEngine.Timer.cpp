@@ -190,6 +190,7 @@ void AudioEngine::timerCallback()
     if (!isShutdownInProgress()
         && hasRebuildReason(RebuildReason::DeferredStructural))
     {
+        const uint64_t intentId = nextRebuildTelemetryIntentId();
         const int64_t dueTicks = convo::consumeAtomic(deferredStructuralRebuildDueTicks_, std::memory_order_acquire);
         const int64_t nowTicks = juce::Time::getHighResolutionTicks();
 
@@ -201,7 +202,19 @@ void AudioEngine::timerCallback()
             if (uiConvolverProcessor.isIRLoaded())
             {
                 diagLog("[DIAG] timerCallback: issuing deferred Structural rebuild after prepared IR apply");
-                requestRebuild(convo::RebuildKind::Structural);
+                emitRebuildTelemetry(RebuildTelemetryEvent::Deferred,
+                                     intentId,
+                                     RebuildTelemetryReason::DeferredStructuralDue,
+                                     RebuildTelemetryDecision::Released,
+                                     0,
+                                     0,
+                                     RebuildTelemetryClass::Structural,
+                                     RebuildTelemetryPolicy::NA,
+                                     "deferred_structural");
+                submitRebuildIntent(convo::RebuildKind::Structural,
+                                    RebuildTelemetryReason::DeferredStructuralRebuildRequested,
+                                    RebuildTelemetryClass::Structural,
+                                    RebuildTelemetryPolicy::Replaceable);
 
                 ++pendingIRGeneration;
                 setIRChangeFlag();
@@ -227,6 +240,25 @@ void AudioEngine::timerCallback()
     if (!isShutdownInProgress()
         && hasRebuildReason(RebuildReason::DeferredFinalizeAware))
     {
+        const uint64_t intentId = nextRebuildTelemetryIntentId();
+        static constexpr int kFinalizeDeferMaxDurationMs = 2000;
+        const int64_t nowTicks = juce::Time::getHighResolutionTicks();
+        const int64_t ticksPerSecond = juce::Time::getHighResolutionTicksPerSecond();
+        const int64_t maxDeferTicks = (ticksPerSecond * kFinalizeDeferMaxDurationMs) / 1000;
+
+        int64_t firstSeenTicks = convo::consumeAtomic(deferredFinalizeFirstSeenTicks_, std::memory_order_acquire);
+        if (firstSeenTicks <= 0)
+        {
+            convo::publishAtomic(deferredFinalizeFirstSeenTicks_, nowTicks, std::memory_order_release);
+            firstSeenTicks = nowTicks;
+        }
+
+        const int64_t elapsedTicks = (nowTicks >= firstSeenTicks) ? (nowTicks - firstSeenTicks) : 0;
+        const bool timedOut = (maxDeferTicks > 0) && (elapsedTicks >= maxDeferTicks);
+        const double elapsedMs = (ticksPerSecond > 0)
+            ? (static_cast<double>(elapsedTicks) * 1000.0 / static_cast<double>(ticksPerSecond))
+            : 0.0;
+
         const int queuedGeneration = convo::consumeAtomic(rebuildGeneration, std::memory_order_acquire);
         const int committedGeneration = convo::consumeAtomic(lastCommittedRebuildGeneration, std::memory_order_acquire);
         const bool outstandingRebuild = queuedGeneration > committedGeneration;
@@ -237,19 +269,52 @@ void AudioEngine::timerCallback()
         const bool pendingIrChange = convo::consumeAtomic(m_pendingIRChange, std::memory_order_acquire);
 
         // IR 遷移が完全に落ち着いてから 1 回だけ再構築を発火する。
-        if ((!irLoaded || irFinalized)
+        const bool finalizeReady = (!irLoaded || irFinalized)
             && !irLoading
             && !structuralDeferred
             && !pendingIrChange
-            && !outstandingRebuild)
+            && !outstandingRebuild;
+
+        if (finalizeReady || timedOut)
         {
             clearRebuildReason(RebuildReason::DeferredFinalizeAware);
+            convo::publishAtomic(deferredFinalizeFirstSeenTicks_, 0, std::memory_order_release);
 
             const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
             if (!m_isRestoringState && sr > 0.0)
             {
-                diagLog("[DIAG] timerCallback: issuing deferred finalize-aware rebuild");
-                requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
+                if (timedOut && !finalizeReady)
+                {
+                    diagLog("[DIAG] timerCallback: finalize defer timeout reached, forcing rebuild dispatch");
+                    emitRebuildTelemetry(RebuildTelemetryEvent::ForcedDispatch,
+                                         intentId,
+                                         RebuildTelemetryReason::DeferredFinalizeRebuildRequested,
+                                         RebuildTelemetryDecision::Dispatched,
+                                         0,
+                                         0,
+                                         RebuildTelemetryClass::FinalizeAware,
+                                         RebuildTelemetryPolicy::MustExecute,
+                                         "deferred_finalize_timeout",
+                                         elapsedMs);
+                }
+                else
+                {
+                    diagLog("[DIAG] timerCallback: issuing deferred finalize-aware rebuild");
+                    emitRebuildTelemetry(RebuildTelemetryEvent::Deferred,
+                                         intentId,
+                                         RebuildTelemetryReason::DeferredFinalizeReady,
+                                         RebuildTelemetryDecision::Released,
+                                         0,
+                                         0,
+                                         RebuildTelemetryClass::FinalizeAware,
+                                         RebuildTelemetryPolicy::NA,
+                                         "deferred_finalize_aware");
+                }
+
+                submitRebuildIntent(convo::RebuildKind::Structural,
+                                    RebuildTelemetryReason::DeferredFinalizeRebuildRequested,
+                                    RebuildTelemetryClass::FinalizeAware,
+                                    RebuildTelemetryPolicy::MustExecute);
             }
         }
     }

@@ -208,6 +208,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
             {
                 auto newConvHolder = convo::aligned_make_unique<StereoConvolver>();
                 newConv = newConvHolder.get();
+                const BuildSnapshot buildSnapshot = captureBuildSnapshot();
 
                 auto irL = convo::makeAlignedArray<double>(static_cast<size_t>(conv->irDataLength));
                 auto irR = convo::makeAlignedArray<double>(static_cast<size_t>(conv->irDataLength));
@@ -216,10 +217,24 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
                 auto sizing = ConvolverProcessorInternal::computeMasteringSizing(internalBlockSize, conv->irDataLength);
 
+                convo::FilterSpec tailSpec;
+                tailSpec.sampleRate = sampleRate;
+                {
+                    tailSpec.hcMode = static_cast<convo::HCMode>(buildSnapshot.nucHCMode);
+                    tailSpec.lcMode = static_cast<convo::LCMode>(buildSnapshot.nucLCMode);
+                    tailSpec.tailMode = juce::jlimit(static_cast<int>(TailMode::AirAbsorption),
+                                                     static_cast<int>(TailMode::Bypass),
+                                                     buildSnapshot.tailMode);
+                    tailSpec.tailEnabled = (tailSpec.tailMode != static_cast<int>(TailMode::Bypass));
+                    tailSpec.tailStartSeconds = static_cast<double>(buildSnapshot.tailStartSec);
+                    tailSpec.tailStrength = static_cast<double>(buildSnapshot.tailStrength);
+                    tailSpec.tailL1L2Multiplier = buildSnapshot.tailL1L2Multiplier;
+                }
+
                 if (newConv->init(irL.release(), irR.release(),
                                   conv->irDataLength, sampleRate, conv->irLatency, sizing.maxFFTSize, internalBlockSize, sizing.firstPartition, samplesPerBlock, conv->storedScale,
                                   getExperimentalDirectHeadEnabled(),
-                                  nullptr, this))
+                                  &tailSpec, this))
                 {
                     newConv = newConvHolder.release();
                     const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
