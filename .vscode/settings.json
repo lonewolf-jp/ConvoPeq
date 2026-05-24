@@ -44,6 +44,7 @@
     "github.copilot.chat.search.semanticScrolling": true,
     "github.copilot.chat.mcp.allowedServers": [
         "serena",
+        "ql-mcp",
         "codegraph"
     ],
     "github.copilot.selectedMode": "agent"

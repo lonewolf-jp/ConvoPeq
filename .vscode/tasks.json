@@ -118,6 +118,64 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "CodeQL Create DB (ConvoPeq Standard)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\tools\\codeql\\create-convopeq-codeql-db.ps1"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "CodeQL Create DB (ConvoPeq Standard DryRun)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\tools\\codeql\\create-convopeq-codeql-db.ps1",
+				"-DryRun"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "CodeQL One-Step (ConvoPeq Standard)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\tools\\codeql\\run-convopeq-codeql-onestep.ps1",
+				"-QuerySuite",
+				"codeql/cpp-queries:codeql-suites/cpp-security-and-quality.qls"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "CodeQL One-Step (ConvoPeq Standard DryRun)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\tools\\codeql\\run-convopeq-codeql-onestep.ps1",
+				"-QuerySuite",
+				"codeql/cpp-queries:codeql-suites/cpp-security-and-quality.qls",
+				"-DryRun"
+			],
+			"problemMatcher": []
+		},
+		{
 			"label": "Release Build With PDB",
 			"type": "shell",
 			"command": "cmd.exe",

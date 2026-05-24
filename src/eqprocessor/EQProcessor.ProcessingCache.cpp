@@ -3,6 +3,7 @@
 //============================================================================
 #include "EQProcessor.h"
 #include <cstring>
+#include <new>
 
 static inline uint32_t floatToCanonicalBits(float f) noexcept
 {
@@ -45,8 +46,8 @@ EQCoeffCache* EQProcessor::createCoeffCache(
     int maxBlockSize,
     uint64_t generation) noexcept
 {
-    auto* cache = new EQCoeffCache();
-    if (!cache) return nullptr;
+    auto* cache = new (std::nothrow) EQCoeffCache();
+    if (cache == nullptr) return nullptr;
 
     cache->paramsHash = computeParamsHash(eqParams);
     cache->sampleRate = sampleRate;
