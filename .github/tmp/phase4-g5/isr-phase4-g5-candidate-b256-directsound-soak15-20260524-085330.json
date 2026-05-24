@@ -1,0 +1,81 @@
+﻿{
+    "runId":  "20260524-085330",
+    "generatedAt":  "2026-05-24 08:53:30",
+    "label":  "candidate-b256-directsound-soak15",
+    "inputs":  {
+                   "exePath":  "c:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe",
+                   "irPath":  "c:\\VSC_Project\\ConvoPeq\\sampledata\\impulse_room_correction.wav",
+                   "logPath":  "c:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.log"
+               },
+    "appExitCode":  0,
+    "cpu":  {
+                "min":  0,
+                "max":  11.385043,
+                "count":  92,
+                "avg":  2.424332,
+                "p95":  6.646231
+            },
+    "processingTimeUs":  {
+                             "min":  443.4,
+                             "max":  720.7,
+                             "count":  36,
+                             "avg":  501.7,
+                             "p95":  646.8
+                         },
+    "rebuildLatencyMs":  {
+                             "min":  1.481,
+                             "max":  300,
+                             "count":  60,
+                             "avg":  260.271017,
+                             "p95":  300
+                         },
+    "telemetry":  {
+                      "deferred_finalize_ready":  2,
+                      "task_queued":  8,
+                      "rebuild_forced_dispatch":  0,
+                      "deferred_finalize_rebuild_req":  2,
+                      "policy_must_execute":  8,
+                      "same_as_pending_would_merge":  104,
+                      "pending_duplicate":  0,
+                      "suppressed_mixed_phase_intermediate":  0,
+                      "requestRebuild_sr_bs":  8
+                  },
+    "continuityProxy":  {
+                            "fatal_like_entries":  0,
+                            "ir_reload_iterations":  0,
+                            "runtime_publish_events":  0,
+                            "bypass_burst_scheduled":  0
+                        },
+    "runConfig":  {
+                      "probeFinalizeAware":  true,
+                      "f2Hz":  860,
+                      "cliDeviceType":  "DirectSound",
+                      "exitMs":  18000,
+                      "sampleIntervalMs":  200,
+                      "targetIrSec":  3,
+                      "runTimeoutMs":  120000,
+                      "order":  "peq-conv",
+                      "cliSampleRateHz":  44100,
+                      "effectiveReadbackCount":  36,
+                      "f1Hz":  160,
+                      "effectiveSampleRateHz":  44100,
+                      "preRingTau":  52,
+                      "phase":  "mixed",
+                      "cliBufferSamples":  256,
+                      "debounceMs":  300,
+                      "effectiveBlockSamples":  256
+                  },
+    "validation":  {
+                       "appExitOk":  true,
+                       "sampleRateMatch":  true,
+                       "fixedConfigSatisfied":  true,
+                       "readbackAvailable":  true,
+                       "bufferMatch":  true,
+                       "requestedAudioSetup":  true
+                   },
+    "caveats":  [
+                    "CPU comparison is based on process CPU sampling (Get-Process CPU).",
+                    "Click peak (dBFS) / 20ms RMS delta (dB) cannot be computed from current logs and are out of scope for auto evaluation.",
+                    "mix=0 segment split is not auto-computed because log events do not currently provide explicit segment tags."
+                ]
+}

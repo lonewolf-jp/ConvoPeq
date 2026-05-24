@@ -7,6 +7,7 @@ on:
       - doc/list.md
       - .github/scripts/check-list-compliance.ps1
       - .github/scripts/check-src-atomic-dotcall.ps1
+      - .github/scripts/check-src-size-mul-cast.ps1
       - .github/workflows/list-compliance.yml
   push:
     branches:
@@ -16,7 +17,11 @@ on:
       - doc/list.md
       - .github/scripts/check-list-compliance.ps1
       - .github/scripts/check-src-atomic-dotcall.ps1
+      - .github/scripts/check-src-size-mul-cast.ps1
       - .github/workflows/list-compliance.yml
+
+permissions:
+  contents: read
 
 jobs:
   compliance-list-md:
@@ -29,3 +34,7 @@ jobs:
       - name: Run list.md compliance checks
         shell: pwsh
         run: .github/scripts/check-list-compliance.ps1
+
+      - name: Run size multiplication cast guard (src only)
+        shell: pwsh
+        run: .github/scripts/check-src-size-mul-cast.ps1

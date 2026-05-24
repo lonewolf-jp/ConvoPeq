@@ -3,6 +3,16 @@
 #include "NoiseShaperLearner.h"
 
 #if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_SNAPSHOT)
+namespace
+{
+    inline double absDiffNoLibm(double a, double b) noexcept
+    {
+        return absNoLibm(a - b);
+    }
+}
+#endif
+
+#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_SNAPSHOT)
 
 void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
                                       const convo::GlobalSnapshot* snap,
@@ -20,14 +30,18 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     const auto* runtimeGraph = runtimePublishView.graph;
     DSPCore* dsp = isFadingTarget
         ? resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph)
-        : ((runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
-            ? static_cast<DSPCore*>(runtimeGraph->activeNode)
-            : nullptr);
+        : resolveActiveDSPFromRuntimeWorldOnly(runtimeGraph);
     if (dsp == nullptr && isFadingTarget)
-        dsp = (runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
-            ? static_cast<DSPCore*>(runtimeGraph->activeNode)
-            : nullptr;
+        dsp = resolveActiveDSPFromRuntimeWorldOnly(runtimeGraph);
     if (dsp == nullptr)
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
+    const double engineSampleRate = (runtimeGraph != nullptr) ? runtimeGraph->sampleRate : 0.0;
+    if (engineSampleRate <= 0.0
+        || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
     {
         bufferToFill.clearActiveBufferRegion();
         return;

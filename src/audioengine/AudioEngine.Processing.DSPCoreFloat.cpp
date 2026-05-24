@@ -186,26 +186,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
     int numProcSamples = (int)processBlock.getNumSamples();
     int numProcChannels = (int)processBlock.getNumChannels();
 
-    std::optional<convo::ObservedRuntime> observedSnapshot;
-    if (ownerEngine != nullptr)
-        observedSnapshot.emplace(ownerEngine->observeCurrentRuntime());
-    const convo::GlobalSnapshot* snap = observedSnapshot ? observedSnapshot->get() : nullptr;
-    const bool useSnapshotEq = (snap != nullptr);
-    const convo::EQParameters* eqParamsToUse = nullptr;
-    const EQCoeffCache* eqCacheToUse = nullptr;
-    if (useSnapshotEq && ownerEngine != nullptr)
-    {
-        const uint64_t hash = snap->eqCoeffHash;
-        eqParamsToUse = &snap->eqParams;
-        eqCacheToUse = ownerEngine->eqCacheManager.get(hash);
-    }
-    else if (ownerEngine != nullptr)
-    {
-        uint64_t fallbackHash = 0;
-        const convo::EQParameters& fallbackParams = ownerEngine->getLatestEqParamsFallback(fallbackHash);
-        eqParamsToUse = &fallbackParams;
-        eqCacheToUse = ownerEngine->eqCacheManager.get(fallbackHash);
-    }
+    const convo::EQParameters* eqParamsToUse = state.eqParams;
+    const EQCoeffCache* eqCacheToUse = state.eqCache;
 
     eqRt().setBypassFromRT(state.eqBypassed); // RT-local shadow に書き込み（publishAtomic の RT 使用禁止のため）
 

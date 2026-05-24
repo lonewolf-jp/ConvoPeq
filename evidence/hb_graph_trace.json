@@ -1,1 +1,12 @@
-{"schema":"hb_trace_v1","provenance":"seed","runId":"e70b1d13fd434b6c81e4ab60fe3427e0","eventCount":4,"generatedAtNs":1779516003339000000,"events":[{"release":true,"toEpoch":10,"to":2,"mo":3,"fromEpoch":10,"ts":1779516003339000001,"from":1,"acquire":true},{"release":true,"toEpoch":11,"to":3,"mo":2,"fromEpoch":10,"ts":1779516003339000002,"from":2,"acquire":false},{"release":false,"toEpoch":11,"to":4,"mo":1,"fromEpoch":11,"ts":1779516003339000003,"from":3,"acquire":true},{"release":true,"toEpoch":12,"to":5,"mo":3,"fromEpoch":11,"ts":1779516003339000004,"from":4,"acquire":true}]}
+{
+  "schema": "hb_trace_v1",
+  "eventCount": 6,
+  "events": [
+    {"ts": 103993333260900, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
+    {"ts": 103994075212300, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false},
+    {"ts": 103994078371600, "from": 200, "to": 300, "fromEpoch": 1, "toEpoch": 1, "mo": 4, "release": true, "acquire": true},
+    {"ts": 103994081034400, "from": 100, "to": 200, "fromEpoch": 3, "toEpoch": 3, "mo": 3, "release": true, "acquire": false},
+    {"ts": 103994084389800, "from": 200, "to": 300, "fromEpoch": 2, "toEpoch": 2, "mo": 4, "release": true, "acquire": true},
+    {"ts": 104001950872200, "from": 100, "to": 200, "fromEpoch": 4, "toEpoch": 4, "mo": 3, "release": true, "acquire": false}
+  ]
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":104002002576200}

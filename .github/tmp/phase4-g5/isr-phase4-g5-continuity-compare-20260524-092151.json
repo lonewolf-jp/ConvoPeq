@@ -1,0 +1,24 @@
+﻿{
+    "runId":  "20260524-092151",
+    "generatedAt":  "2026-05-24 09:21:51",
+    "baseline":  {
+                     "jsonPath":  "c:\\VSC_Project\\ConvoPeq\\.github\\tmp\\phase4-g5\\isr-phase4-g5-continuity-baseline-prod-20260524-092138.json",
+                     "runId":  "20260524-092138",
+                     "label":  "baseline-prod",
+                     "clickPeakDbfs":  0,
+                     "rmsDeltaDb":  14.957022,
+                     "overallPass":  false
+                 },
+    "candidate":  {
+                      "jsonPath":  "c:\\VSC_Project\\ConvoPeq\\.github\\tmp\\phase4-g5\\isr-phase4-g5-continuity-candidate-prod-20260524-092151.json",
+                      "runId":  "20260524-092151",
+                      "label":  "candidate-prod",
+                      "clickPeakDbfs":  0,
+                      "rmsDeltaDb":  14.957022,
+                      "overallPass":  false
+                  },
+    "summary":  {
+                    "clickPeakDeltaDbfs":  0,
+                    "rmsDeltaDeltaDb":  0
+                }
+}

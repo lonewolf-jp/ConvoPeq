@@ -1,9 +1,9 @@
 {
   "schema": "closure_graph_v1",
   "buildMode": "Release",
-  "timestamp_ns": 72148919061600,
+  "timestamp_ns": 130293232273200,
   "status": "valid",
-  "closureId": 8,
+  "closureId": 6,
   "nodeCount": 1,
   "edgeCount": 0,
   "descriptorCoverageComplete": true,

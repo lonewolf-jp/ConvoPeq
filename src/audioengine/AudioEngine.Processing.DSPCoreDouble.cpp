@@ -384,31 +384,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     const int numProcSamples = static_cast<int>(processBlock.getNumSamples());
     const int numProcChannels = static_cast<int>(processBlock.getNumChannels());
 
-    // RCU lifetime guarantee:
-    // - processDouble() 呼び出し元は Audio Thread 側で RCUReaderGuard を保持する。
-    // - snap はその guard 期間中 read-only で有効。
-    // - eqCacheToUse は snap->eqCoeffHash で引いたキャッシュを参照し、
-    //   reclaim は epoch 遅延解放で行われるため同期間は安全に参照可能。
-    std::optional<convo::ObservedRuntime> observedSnapshot;
-    if (ownerEngine != nullptr)
-        observedSnapshot.emplace(ownerEngine->observeCurrentRuntime());
-    const convo::GlobalSnapshot* snap = observedSnapshot ? observedSnapshot->get() : nullptr;
-    const bool useSnapshotEq = (snap != nullptr);
-    const convo::EQParameters* eqParamsToUse = nullptr;
-    const EQCoeffCache* eqCacheToUse = nullptr;
-    if (useSnapshotEq && ownerEngine != nullptr)
-    {
-        const uint64_t hash = snap->eqCoeffHash;
-        eqParamsToUse = &snap->eqParams;
-        eqCacheToUse = ownerEngine->eqCacheManager.get(hash);
-    }
-    else if (ownerEngine != nullptr)
-    {
-        uint64_t fallbackHash = 0;
-        const convo::EQParameters& fallbackParams = ownerEngine->getLatestEqParamsFallback(fallbackHash);
-        eqParamsToUse = &fallbackParams;
-        eqCacheToUse = ownerEngine->eqCacheManager.get(fallbackHash);
-    }
+    const convo::EQParameters* eqParamsToUse = state.eqParams;
+    const EQCoeffCache* eqCacheToUse = state.eqCache;
 
     eqRt().setBypassFromRT(state.eqBypassed); // RT-local shadow に書き込み（publishAtomic の RT 使用禁止のため）
 
@@ -531,13 +508,19 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         {
             double* wetL = processBlock.getNumChannels() > 0 ? processBlock.getChannelPointer(0) : nullptr;
             double* wetR = processBlock.getNumChannels() > 1 ? processBlock.getChannelPointer(1) : nullptr;
+            const double* dryL = dryBypassBufferDoubleL ? dryBypassBufferDoubleL.get() : nullptr;
+            const double* dryR = dryBypassBufferDoubleR ? dryBypassBufferDoubleR.get() : nullptr;
+            const bool canUseDry = (dryL != nullptr)
+                && (dryR != nullptr)
+                && (dryBypassCapacityDouble >= numSamples);
             for (int i = 0; i < numSamples; ++i)
             {
                 const double gWet = ramp.bypassFadeGainDouble.getNextValue();
+                const double gDry = 1.0 - gWet;
                 if (wetL != nullptr)
-                    wetL[i] *= gWet;
+                    wetL[i] = canUseDry ? (wetL[i] * gWet + dryL[i] * gDry) : (wetL[i] * gWet);
                 if (wetR != nullptr)
-                    wetR[i] *= gWet;
+                    wetR[i] = canUseDry ? (wetR[i] * gWet + dryR[i] * gDry) : (wetR[i] * gWet);
             }
         }
     }
@@ -577,8 +560,22 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     constexpr double kOutputHeadroom = 0.8912509381337456;
     const bool applyDither = (ditherBitDepth > 0);
     const int numChannels = std::min(2, buffer.getNumChannels());
+
+    if (numSamples <= 0 || numChannels <= 0)
+    {
+        if (numSamples > 0)
+            buffer.clear();
+        return;
+    }
+
     double* dataL = (numChannels > 0) ? alignedL.get() : nullptr;
     double* dataR = (numChannels > 1) ? alignedR.get() : nullptr;
+
+    if (dataL == nullptr)
+    {
+        buffer.clear();
+        return;
+    }
 
     auto& dc = dcBlockers();
     dc.outputL.processStereo(dataL, dataR, numSamples, dc.outputR);

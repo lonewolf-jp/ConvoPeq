@@ -3,12 +3,12 @@
   "epochMode": "shared",
   "rollbackMode": "shared",
   "rollbackReady": true,
-  "totalTransitions": 32,
+  "totalTransitions": 24,
   "laneCounters": {
-    "rtIntent": 8,
-    "coordination": 8,
-    "epoch": 8,
-    "reclaim": 8,
+    "rtIntent": 6,
+    "coordination": 6,
+    "epoch": 6,
+    "reclaim": 6,
     "quarantine": 0
   }
 }

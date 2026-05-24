@@ -1,0 +1,24 @@
+﻿{
+    "runId":  "20260523-224544",
+    "generatedAt":  "2026-05-23 22:45:44",
+    "baseline":  {
+                     "jsonPath":  "c:\\VSC_Project\\ConvoPeq\\.github\\tmp\\phase4-g5\\isr-phase4-g5-continuity-baseline-prod-20260523-223637.json",
+                     "runId":  "20260523-223637",
+                     "label":  "baseline-prod",
+                     "clickPeakDbfs":  -160,
+                     "rmsDeltaDb":  0,
+                     "overallPass":  true
+                 },
+    "candidate":  {
+                      "jsonPath":  "c:\\VSC_Project\\ConvoPeq\\.github\\tmp\\phase4-g5\\isr-phase4-g5-continuity-test-music-autodetect-20260523-224529.json",
+                      "runId":  "20260523-224529",
+                      "label":  "test-music-autodetect",
+                      "clickPeakDbfs":  0,
+                      "rmsDeltaDb":  14.957022,
+                      "overallPass":  false
+                  },
+    "summary":  {
+                    "clickPeakDeltaDbfs":  160,
+                    "rmsDeltaDeltaDb":  14.957022
+                }
+}

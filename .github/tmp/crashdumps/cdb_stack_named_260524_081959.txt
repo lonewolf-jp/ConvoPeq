@@ -1,0 +1,114 @@
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+Deferred                                       srv*
+OK                                             C:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Release
+Opened log file 'C:\VSC_Project\ConvoPeq\.github\tmp\crashdumps\cdb_stack_named_260524_081959.txt'
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+   EnableRedirectToChakraJsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.015 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 46
+
+Microsoft (R) Windows Debugger Version 10.0.29547.1002 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\VSC_Project\ConvoPeq\.github\tmp\crashdumps\ConvoPeq.exe_260524_081959.dmp]
+User Mini Dump File with Full Memory : Only application data is available
+
+Comment: '
+*** "C:\WINDOWS\system32\procdump.exe" -ma -e -w ConvoPeq.exe C:\VSC_Project\ConvoPeq\.github\tmp\crashdumps
+*** Unhandled exception: C0000374'
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+Deferred                                       srv*
+OK                                             C:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Release
+Symbol search path is: srv*;C:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Release
+Executable search path is: 
+Windows 10 Version 26200 MP (16 procs) Free x64
+Product: WinNt, suite: SingleUserTS Personal
+Edition build lab: 26100.1.amd64fre.ge_release.240331-1435
+Debug session time: Sun May 24 08:19:59.000 2026 (UTC + 9:00)
+System Uptime: 1 days 11:37:18.851
+Process Uptime: 0 days 0:00:04.000
+.NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\atlmfc.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\concurrency.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\cpp_rest.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\ObjectiveC.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\stl.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Data.Json.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Media.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\windows.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\winrt.natvis'
+...............................................................
+........................
+Loading unloaded module list
+....
+This dump file has an exception of interest stored in it.
+The stored exception information can be accessed via .ecxr
+(7b58.9230): Unknown exception - code c0000374 (first/second chance not available)
+For analysis of this file, run !analyze -v
+ntdll!RtlReportFatalFailure+0x9:
+00007ffc`d2497175 eb00            jmp     ntdll!RtlReportFatalFailure+0xb (00007ffc`d2497177)
+0:000> .ecxr; kb 30; q
+rax=0000000000000246 rbx=000000436c4fe9f0 rcx=00007ffc294f8aff
+rdx=0000000000000020 rsi=000000436c4fe500 rdi=000000436c4fe500
+rip=00007ffcd2497175 rsp=000000436c4ff2e0 rbp=0000000000000007
+ r8=0000002700000000  r9=000000436c4ff000 r10=00007ffc294b4b51
+r11=0000000000000000 r12=0000000000000000 r13=0000000000000000
+r14=000001d99b4a0000 r15=0000000000000000
+iopl=0         nv up ei pl nz na pe nc
+cs=0033  ss=002b  ds=002b  es=002b  fs=0053  gs=002b             efl=00000204
+ntdll!RtlReportFatalFailure+0x9:
+00007ffc`d2497175 eb00            jmp     ntdll!RtlReportFatalFailure+0xb (00007ffc`d2497177)
+RetAddr               : Args to Child                                                           : Call Site
+00007ffc`d2418be9     : 00000000`00000000 00000000`00000206 00007ffc`d2515be8 00000000`c0000374 : ntdll!RtlReportFatalFailure+0x9
+00007ffc`d23b1de2     : 00000043`6c4ff5c9 00007ffc`d254d0e0 00000000`00000008 000001d9`9b4a0000 : ntdll!RtlReportCriticalFailure+0xa9
+00007ffc`d249d93a     : 00000000`00000008 00000000`00000007 000001d9`9b4a0000 00007ff7`1e10d29c : ntdll!RtlpHeapHandleError+0x12
+00007ffc`d23aa3cb     : 000001d9`9e3dc200 000001d9`e3317e40 00000000`00000000 000003d4`000003c0 : ntdll!RtlpHpHeapHandleError+0x7a
+00007ffc`d23a70ca     : 00000043`6c4ff520 00007ff7`1e10d2be 00000000`0000047c 00000000`00000000 : ntdll!RtlpLogHeapFailure+0x4b
+*** WARNING: Unable to verify checksum for ConvoPeq.exe
+00007ff7`1e433e6c     : 000001d9`9b4a0000 00000000`00000000 000001d9`e3317e50 00000043`6c4ff679 : ntdll!RtlFreeHeap+0x6da
+00007ff7`1e03249b     : 000001d9`9ea3cb50 000001d9`9b4f5d40 000001d9`e30e2d70 00000000`00000000 : ConvoPeq!_invalid_parameter_noinfo+0x18
+00007ff7`1e04fddc     : 00007ffc`cbb19680 00000000`00000000 000003d4`000003c0 000003d4`000003c0 : ConvoPeq!convo::EpochDomain::reclaimRetired+0xdb
+00007ff7`1e049e7c     : 00000000`00000000 00000000`00000000 00000000`00000000 000003d4`000003c0 : ConvoPeq!AudioEngine::drainDeferredRetireQueues+0x3bc
+00007ff7`1e33e3d5     : 00000000`00000000 00000000`00000000 01acff1f`b8ef5692 00000000`00000000 : ConvoPeq!AudioEngine::timerCallback+0x198c
+00007ff7`1e33e488     : 000001d9`9b4a46e0 000001d9`9b4a46e0 000001d9`e30804e0 00000000`00000001 : ConvoPeq!juce::Timer::TimerThread::callTimers+0x145
+00007ff7`1e33f722     : 000001d9`e30804e0 00007ffc`d103b352 00000000`00000000 000001d9`9b4cb460 : ConvoPeq!juce::Timer::TimerThread::CallTimersMessage::messageCallback+0x28
+00007ff7`1e024d90     : 000001d9`e30804e0 00007ff7`1e024b00 000001d9`9b4c6a80 000001d9`9b4e2500 : ConvoPeq!juce::InternalMessageQueue::dispatchMessages+0x92
+00007ff7`1e412789     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ConvoPeq!WinMain+0x1d0
+00007ffc`d0dfe957     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ConvoPeq!__scrt_common_main_seh+0x69
+00007ffc`d238427c     : 00000000`00000000 00000000`00000000 000004f0`fffffb30 000004d0`fffffb30 : kernel32!BaseThreadInitThunk+0x17
+00000000`00000000     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ntdll!RtlUserThreadStart+0x2c
+quit:
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\winrt.natvis'

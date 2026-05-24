@@ -60,6 +60,30 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     const int startSample = bufferToFill.startSample;
     auto* buffer = bufferToFill.buffer;
 
+    struct CallbackTelemetryScope final
+    {
+        AudioEngine& engine;
+        int samples;
+        std::int64_t started;
+        bool enabled;
+
+        CallbackTelemetryScope(AudioEngine& owner, int numSamplesIn) noexcept
+            : engine(owner)
+            , samples(numSamplesIn)
+            , started(0)
+            , enabled(owner.isCliProcessingTelemetryEnabled())
+        {
+            if (enabled)
+                started = juce::Time::getHighResolutionTicks();
+        }
+
+        ~CallbackTelemetryScope() noexcept
+        {
+            if (enabled)
+                engine.recordAudioCallbackProcessingTimeUs(samples, started);
+        }
+    } callbackTelemetry(*this, numSamples);
+
     // 事前サニティチェック: 絶対的な上限 (1<<20 ≒ 100万サンプル) で明らかな破損データを弾く。
     // DSPCore の maxSamplesPerBlock は prepareToPlay() でホスト指定値を反映して設定されるため、
     // ここで SAFE_MAX_BLOCK_SIZE (65536) を使うと、131072 等の正当なブロックを誤って拒否する。

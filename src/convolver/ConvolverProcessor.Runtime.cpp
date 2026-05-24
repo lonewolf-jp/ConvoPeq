@@ -17,6 +17,15 @@ namespace
         const double t2 = t * t;
         return t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0)))));
     }
+
+    static inline double floorNoLibm(double x) noexcept
+    {
+        const auto truncated = static_cast<long long>(x);
+        const double truncatedAsDouble = static_cast<double>(truncated);
+        return (truncatedAsDouble > x)
+            ? static_cast<double>(truncated - 1)
+            : truncatedAsDouble;
+    }
 }
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME)
@@ -334,7 +343,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
                 const double* srcBuf = delayBuf[ch];
                 double rPos = static_cast<double>(activeDelayWritePos) - delay;
-                rPos -= std::floor(rPos / DELAY_BUFFER_SIZE) * DELAY_BUFFER_SIZE;
+                rPos -= floorNoLibm(rPos / DELAY_BUFFER_SIZE) * DELAY_BUFFER_SIZE;
 
                 const int iRead = static_cast<int>(rPos);
                 const double frac = rPos - iRead;
@@ -473,6 +482,19 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         activeDelayWritePos = (activeDelayWritePos + numSamples) & DELAY_BUFFER_MASK;
     }
 
+    if (!needsConvolution)
+    {
+        // Phase 4 dry-only fast path:
+        // wet 側の計算を行わず、dry 生成済みバッファをそのまま出力へ転写する。
+        for (int ch = 0; ch < procChannels; ++ch)
+        {
+            const double* dry = dryBuf[ch];
+            double* dst = block.getChannelPointer(ch);
+            juce::FloatVectorOperations::copy(dst, dry, numSamples);
+        }
+        return;
+    }
+
     // Wet信号生成 & Mix
     const double headroom = CONVOLUTION_HEADROOM_GAIN;
 
@@ -497,10 +519,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         dryGains = dg;
     }
 
-    const int quantizedCallSamples = juce::jmax(1, conv->callQuantumSamples);
-    const int prewarmedMaxSamples = juce::jmax(1, conv->prewarmedMaxSamples);
-    const int guardedCallSamples = juce::jmin(quantizedCallSamples, prewarmedMaxSamples);
-    const int callLen = guardedCallSamples;
+    const int callLen = juce::jmax(1, conv->callQuantumSamples);
 
     auto mixSmoothingSmall = [](double* dst, const double* wet, const double* dry,
                                 const double* wetGain, const double* dryGain, int n) noexcept
@@ -548,29 +567,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 #endif
     };
 
-    auto scaleDrySmall = [](double* dst, const double* dry, const double* gain, int n) noexcept
-    {
-#if defined(__AVX2__)
-        int i = 0;
-        const int vEnd = n / 4 * 4;
-        for (; i < vEnd; i += 4)
-        {
-            const __m256d vDry = _mm256_loadu_pd(dry + i);
-            const __m256d vGain = _mm256_loadu_pd(gain + i);
-            _mm256_storeu_pd(dst + i, _mm256_mul_pd(vDry, vGain));
-        }
-        for (; i < n; ++i)
-            dst[i] = dry[i] * gain[i];
-#else
-        for (int i = 0; i < n; ++i)
-            dst[i] = dry[i] * gain[i];
-#endif
-    };
-
     for (int ch = 0; ch < procChannels; ++ch)
     {
-        const double wetG = needsConvolution ? (equalPowerSin(targetMixValue) * headroom) : 0.0;
-        const double dryG = needsDrySignal   ?  equalPowerSin(1.0 - targetMixValue)         : 0.0;
         const double* inputBase = block.getChannelPointer(ch);
         double* wetBase = wetBuf[ch];
         const double* dryBase = dryBuf[ch];
@@ -582,15 +580,17 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             const int chunkSamples = juce::jmin(callLen, numSamples - processed);
 
             const double* input = inputBase + processed;
+            double* dst = dstBase + processed;
+            const double* dry = dryBase + processed;
+
+            const double wetG = equalPowerSin(targetMixValue) * headroom;
+            const double dryG = needsDrySignal ? equalPowerSin(1.0 - targetMixValue) : 0.0;
             double* wetOut = wetBase + processed;
 
             conv->process(ch, input, wetOut, chunkSamples);
 
             const double* wetSignal = wetOut;
             int validWetSamples = chunkSamples;
-
-            double* dst = dstBase + processed;
-            const double* dry = dryBase + processed;
 
             if (isSmoothing)
             {
@@ -605,9 +605,8 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 {
                     const int remainder = chunkSamples - validWetSamples;
                     const double* remDry = dry + validWetSamples;
-                    const double* remGain = dryGains + processed + validWetSamples;
                     double* remDst = dst + validWetSamples;
-                    scaleDrySmall(remDst, remDry, remGain, remainder);
+                    juce::FloatVectorOperations::copy(remDst, remDry, remainder);
                 }
             }
             else
@@ -622,7 +621,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                     const int remainder = chunkSamples - validWetSamples;
                     const double* remDry = dry + validWetSamples;
                     double* remDst = dst + validWetSamples;
-                    mixSteadySmall(remDst, remDry, remDry, 0.0, dryG, remainder);
+                    juce::FloatVectorOperations::copy(remDst, remDry, remainder);
                 }
             }
 

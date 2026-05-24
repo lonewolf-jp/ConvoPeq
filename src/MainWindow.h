@@ -15,6 +15,7 @@
 #include "SpectrumAnalyzerComponent.h"
 #include "DeviceSettings.h"
 #include "AsioBlacklist.h"
+#include <atomic>
 
 class MainWindow : public juce::DocumentWindow,
                    private juce::Timer,
@@ -63,8 +64,8 @@ private:
     AsioBlacklist asioBlacklist;
     AudioEngine audioEngine;
     std::unique_ptr<AudioEngineProcessor> audioEngineProcessor;
-    juce::AudioProcessorPlayer audioProcessorPlayer;
     juce::AudioDeviceManager audioDeviceManager;
+    juce::AudioProcessorPlayer audioProcessorPlayer;
 
     std::unique_ptr<ConvolverControlPanel> convolverPanel;
     std::unique_ptr<EQControlPanel> eqPanel;
@@ -86,6 +87,12 @@ private:
     int lastLatencySamples { 0 };
     int lastLatencyMsX10 { 0 };
     bool lastLatencySrValid { false };
+    bool cliAutomationTelemetryLoggingEnabled { false };
+    std::atomic<bool> cliAutomationCallbacksEnabled { false };
+    bool cliAudioSetupRequested { false };
+    bool cliAudioSetupMismatchLogged { false };
+    int cliRequestedBufferSamples { 0 };
+    double cliRequestedSampleRateHz { 0.0 };
     std::unique_ptr<juce::DocumentWindow> settingsWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)

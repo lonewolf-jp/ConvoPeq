@@ -183,6 +183,8 @@ public:
         const CoeffSet* adaptiveCoeffSet = nullptr;
         uint32_t adaptiveCoeffGeneration = 0;
         bool adaptiveCaptureEnabled = false;
+        const convo::EQParameters* snapshotEqParams = nullptr;
+        uint64_t snapshotEqCoeffHash = 0;
     };
 
     //----------------------------------------------------------
@@ -391,6 +393,9 @@ public:
             int adaptiveCaptureBitDepth;
             uint64_t captureSessionId;
             LockFreeRingBuffer<AudioBlock, 4096>* adaptiveCaptureQueue;
+            const convo::EQParameters* eqParams;
+            const EQCoeffCache* eqCache;
+            uint64_t eqCoeffHash;
         };
 
         DSPCore();
@@ -899,6 +904,50 @@ public:
         };
     }
 
+    struct CliProcessingTelemetrySnapshot
+    {
+        bool enabled = false;
+        std::uint64_t callbackCount = 0;
+        double lastProcessTimeUs = 0.0;
+        double avgProcessTimeUs = 0.0;
+        double maxProcessTimeUs = 0.0;
+        int lastBlockSamples = 0;
+        double sampleRateHz = 0.0;
+    };
+
+    void setCliProcessingTelemetryEnabled(bool enabled) noexcept
+    {
+        publishAtomic(cliProcessingTelemetryEnabled_, enabled, std::memory_order_release);
+        if (!enabled)
+        {
+            exchangeAtomic(cliTelemetryCallbackCount_, static_cast<std::uint64_t>(0), std::memory_order_acq_rel);
+            exchangeAtomic(cliTelemetryAccumulatedUs_, 0.0, std::memory_order_acq_rel);
+            exchangeAtomic(cliTelemetryMaxUs_, 0.0, std::memory_order_acq_rel);
+            exchangeAtomic(cliTelemetryLastUs_, 0.0, std::memory_order_acq_rel);
+            exchangeAtomic(cliTelemetryLastBlockSamples_, 0, std::memory_order_acq_rel);
+        }
+    }
+
+    bool isCliProcessingTelemetryEnabled() const noexcept
+    {
+        return consumeAtomic(cliProcessingTelemetryEnabled_, std::memory_order_acquire);
+    }
+
+    CliProcessingTelemetrySnapshot consumeCliProcessingTelemetrySnapshot() noexcept
+    {
+        CliProcessingTelemetrySnapshot snapshot {};
+        snapshot.enabled = isCliProcessingTelemetryEnabled();
+        snapshot.callbackCount = exchangeAtomic(cliTelemetryCallbackCount_, static_cast<std::uint64_t>(0), std::memory_order_acq_rel);
+        const double accumulatedUs = exchangeAtomic(cliTelemetryAccumulatedUs_, 0.0, std::memory_order_acq_rel);
+        snapshot.maxProcessTimeUs = exchangeAtomic(cliTelemetryMaxUs_, 0.0, std::memory_order_acq_rel);
+        snapshot.lastProcessTimeUs = consumeAtomic(cliTelemetryLastUs_, std::memory_order_acquire);
+        snapshot.lastBlockSamples = consumeAtomic(cliTelemetryLastBlockSamples_, std::memory_order_acquire);
+        snapshot.sampleRateHz = consumeAtomic(currentSampleRate, std::memory_order_acquire);
+        if (snapshot.callbackCount > 0)
+            snapshot.avgProcessTimeUs = accumulatedUs / static_cast<double>(snapshot.callbackCount);
+        return snapshot;
+    }
+
     struct RebuildDispatchDiagnostics
     {
         std::uint64_t requestCount = 0;
@@ -951,6 +1000,45 @@ private:
     static constexpr int kControlEpochReaderIndex = 1;
     static constexpr int kCommitProducerEpochReaderIndex = 2;
     static constexpr int kCommitConsumerEpochReaderIndex = 3;
+
+    void recordAudioCallbackProcessingTimeUs(int numSamples, std::int64_t startTicks) noexcept
+    {
+        if (!consumeAtomic(cliProcessingTelemetryEnabled_, std::memory_order_relaxed))
+            return;
+
+        const std::int64_t endTicks = juce::Time::getHighResolutionTicks();
+        const std::int64_t deltaTicks = endTicks - startTicks;
+        if (deltaTicks <= 0)
+            return;
+
+        const double ticksPerSecond = static_cast<double>(juce::Time::getHighResolutionTicksPerSecond());
+        if (ticksPerSecond <= 0.0)
+            return;
+
+        const double processTimeUs = (static_cast<double>(deltaTicks) * 1000000.0) / ticksPerSecond;
+        publishAtomic(cliTelemetryLastUs_, processTimeUs, std::memory_order_relaxed);
+        publishAtomic(cliTelemetryLastBlockSamples_, numSamples, std::memory_order_relaxed);
+        convo::fetchAddAtomic(cliTelemetryCallbackCount_, static_cast<std::uint64_t>(1), std::memory_order_relaxed);
+
+        double observedAccum = consumeAtomic(cliTelemetryAccumulatedUs_, std::memory_order_relaxed);
+        while (!convo::compareExchangeAtomic(cliTelemetryAccumulatedUs_,
+                                             observedAccum,
+                                             observedAccum + processTimeUs,
+                                             std::memory_order_relaxed,
+                                             std::memory_order_relaxed))
+        {
+        }
+
+        double observedMax = consumeAtomic(cliTelemetryMaxUs_, std::memory_order_relaxed);
+        while (processTimeUs > observedMax
+            && !convo::compareExchangeAtomic(cliTelemetryMaxUs_,
+                                             observedMax,
+                                             processTimeUs,
+                                             std::memory_order_relaxed,
+                                             std::memory_order_relaxed))
+        {
+        }
+    }
 
     //==================================================
     // クロスフェード用レイテンシ整合バッファ（最大2秒@48kHz, double精度, L/R独立）
@@ -1895,6 +1983,20 @@ public:
         return nullptr;
     }
 
+    inline DSPCore* resolveActiveDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
+    {
+        if (runtimeGraph == nullptr)
+            return nullptr;
+
+        auto* graphActive = static_cast<DSPCore*>(runtimeGraph->activeNode);
+        const auto graphRuntimeUuid = runtimeGraph->runtimeUuid;
+        if (graphActive != nullptr
+            && graphRuntimeUuid != 0)
+            return graphActive;
+
+        return nullptr;
+    }
+
 
     inline std::uint64_t reserveNextRuntimeGraphGeneration() noexcept
     {
@@ -2138,12 +2240,29 @@ public:
         snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
         snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
         snapshot.adaptiveCaptureEnabled = isNoiseShaperLearning();
+        if (snap != nullptr)
+        {
+            snapshot.snapshotEqParams = &snap->eqParams;
+            snapshot.snapshotEqCoeffHash = snap->eqCoeffHash;
+        }
         return snapshot;
     }
 
     inline DSPCore::ProcessingState buildAudioThreadProcessingState(DSPCore* dsp,
                                                                      const EngineParameterSnapshot& snapshot) noexcept
     {
+        const convo::EQParameters* eqParams = snapshot.snapshotEqParams;
+        uint64_t eqCoeffHash = snapshot.snapshotEqCoeffHash;
+
+        if (eqParams == nullptr)
+        {
+            uint64_t fallbackHash = 0;
+            eqParams = &getLatestEqParamsFallback(fallbackHash);
+            eqCoeffHash = fallbackHash;
+        }
+
+        const EQCoeffCache* eqCache = eqCacheManager.get(eqCoeffHash);
+
         return DSPCore::ProcessingState {
             .eqBypassed = snapshot.eqBypassed,
             .convBypassed = snapshot.convBypassed,
@@ -2164,7 +2283,10 @@ public:
             .adaptiveCaptureSampleRateHz = static_cast<int>(dsp->sampleRate + 0.5),
             .adaptiveCaptureBitDepth = dsp->ditherBitDepth,
             .captureSessionId = dsp->currentCaptureSessionId,
-            .adaptiveCaptureQueue = snapshot.adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr
+            .adaptiveCaptureQueue = snapshot.adaptiveCaptureEnabled ? &audioCaptureQueue : nullptr,
+            .eqParams = eqParams,
+            .eqCache = eqCache,
+            .eqCoeffHash = eqCoeffHash
         };
     }
 
@@ -2422,7 +2544,8 @@ inline void retireDSP(DSPCore* dsp) noexcept
     if (dsp == nullptr)
         return;
 
-    retireDSPHandleForRuntime(dsp);
+    if (!retireDSPHandleForRuntime(dsp))
+        return;
 
     convo::fetchAddAtomic(g_runtimeRetireCount,
                          static_cast<std::uint64_t>(1),
@@ -2452,15 +2575,15 @@ inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
     return handle;
 }
 
-inline void retireDSPHandleForRuntime(DSPCore* dsp) noexcept
+inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept
 {
     if (dsp == nullptr)
-        return;
+        return false;
 
     std::lock_guard<std::mutex> lock(runtimeDSPHandleMapMutex_);
     const auto it = runtimeDSPHandleMap_.find(dsp);
     if (it == runtimeDSPHandleMap_.end())
-        return;
+        return false;
 
     const auto handle = it->second;
     runtimeDSPHandleMap_.erase(it);
@@ -2469,6 +2592,8 @@ inline void retireDSPHandleForRuntime(DSPCore* dsp) noexcept
         dspHandleRuntime_.retire(handle);
         dspHandleRuntime_.reclaim(handle);
     }
+
+    return true;
 }
 
 //==============================================================================
@@ -2545,6 +2670,12 @@ public:
     std::atomic<uint64_t> audioCallbackEpochCounter_ { 0 };
     std::atomic<uint64_t> audioSampleCursorCounter_ { 0 };
     std::atomic<uint32_t> audioCallbackActiveCount_ { 0 };
+    std::atomic<bool> cliProcessingTelemetryEnabled_ { false };
+    std::atomic<std::uint64_t> cliTelemetryCallbackCount_ { 0 };
+    std::atomic<double> cliTelemetryAccumulatedUs_ { 0.0 };
+    std::atomic<double> cliTelemetryMaxUs_ { 0.0 };
+    std::atomic<double> cliTelemetryLastUs_ { 0.0 };
+    std::atomic<int> cliTelemetryLastBlockSamples_ { 0 };
     convo::SnapshotCoordinator m_coordinator;
     GenerationManager m_generationManager;
 

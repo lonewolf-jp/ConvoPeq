@@ -309,10 +309,23 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     const bool applyDither = (ditherBitDepth > 0);
     const int numChannels = std::min(2, buffer->getNumChannels());
 
+    if (numSamples <= 0 || numChannels <= 0)
+    {
+        if (numSamples > 0)
+            bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
     double* dataL = (numChannels > 0) ? alignedL.get() : nullptr;
     double* dataR = (numChannels > 1) ? alignedR.get() : nullptr;
     float* dstL = (numChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
     float* dstR = (numChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
+
+    if (dataL == nullptr || dstL == nullptr)
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
 
     auto& dc = dcBlockers();
     dc.outputL.process(dataL, numSamples);

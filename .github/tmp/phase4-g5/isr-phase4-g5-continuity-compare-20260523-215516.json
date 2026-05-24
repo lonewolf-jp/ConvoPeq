@@ -1,0 +1,24 @@
+﻿{
+    "runId":  "20260523-215516",
+    "generatedAt":  "2026-05-23 21:55:16",
+    "baseline":  {
+                     "jsonPath":  "c:\\VSC_Project\\ConvoPeq\\.github\\tmp\\phase4-g5\\isr-phase4-g5-continuity-smoke-20260523-214619.json",
+                     "runId":  "20260523-214619",
+                     "label":  "smoke",
+                     "clickPeakDbfs":  -67.923832,
+                     "rmsDeltaDb":  3.246141,
+                     "overallPass":  false
+                 },
+    "candidate":  {
+                      "jsonPath":  "c:\\VSC_Project\\ConvoPeq\\.github\\tmp\\phase4-g5\\isr-phase4-g5-continuity-autodetect-smoke-20260523-215015.json",
+                      "runId":  "20260523-215015",
+                      "label":  "autodetect-smoke",
+                      "clickPeakDbfs":  5.589247,
+                      "rmsDeltaDb":  42.039283,
+                      "overallPass":  false
+                  },
+    "summary":  {
+                    "clickPeakDeltaDbfs":  73.513079,
+                    "rmsDeltaDeltaDb":  38.793142
+                }
+}

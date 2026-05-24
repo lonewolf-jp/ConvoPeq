@@ -6,6 +6,7 @@
 //============================================================================
 #include "MainWindow.h"
 #include <cmath>
+#include "audioengine/AtomicAccess.h"
 
 namespace
 {
@@ -29,7 +30,7 @@ namespace
 
     juce::String normalizeCliValue(juce::String value)
     {
-        return value.trim().toLowerCase().replace("_", "").replace("-", "").replace(">", "");
+        return value.trim().toLowerCase().replace(" ", "").replace("_", "").replace("-", "").replace(">", "");
     }
 
     bool parseCliPhaseMode(const juce::String& value, ConvolverProcessor::PhaseMode& outMode)
@@ -318,6 +319,9 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
     const bool hasAutomationFlags =
         hasFlag("--cli-run")
         || !findValue("--cli-ir").isEmpty()
+        || !findValue("--cli-device-type").isEmpty()
+        || !findValue("--cli-buffer-samples").isEmpty()
+        || !findValue("--cli-sample-rate-hz").isEmpty()
         || !findValue("--cli-phase").isEmpty()
         || !findValue("--cli-order").isEmpty()
         || !findValue("--cli-dither-bit-depth").isEmpty()
@@ -339,9 +343,197 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         || !findValue("--cli-exit-ms").isEmpty();
 
     if (!hasAutomationFlags)
+    {
+        cliAutomationTelemetryLoggingEnabled = false;
+        convo::publishAtomic(cliAutomationCallbacksEnabled, false, std::memory_order_release);
+        audioEngine.setCliProcessingTelemetryEnabled(false);
+        cliAudioSetupRequested = false;
+        cliAudioSetupMismatchLogged = false;
+        cliRequestedBufferSamples = 0;
+        cliRequestedSampleRateHz = 0.0;
         return;
+    }
 
     juce::Logger::writeToLog("[CLI] Automation requested: " + trimmedCommandLine);
+    cliAutomationTelemetryLoggingEnabled = true;
+    convo::publishAtomic(cliAutomationCallbacksEnabled, true, std::memory_order_release);
+    audioEngine.setCliProcessingTelemetryEnabled(true);
+    audioEngine.setConvolverEnableProgressiveUpgrade(false);
+
+    {
+        if (const auto deviceTypeValue = findValue("--cli-device-type"); !deviceTypeValue.isEmpty())
+        {
+            juce::StringArray availableTypeNames;
+            for (const auto* type : audioDeviceManager.getAvailableDeviceTypes())
+            {
+                if (type != nullptr)
+                    availableTypeNames.add(type->getTypeName());
+            }
+
+            juce::Logger::writeToLog("[CLI_AUDIO_DEV_TYPES] available=" + availableTypeNames.joinIntoString(","));
+
+            juce::String resolvedTypeName;
+            for (const auto& typeName : availableTypeNames)
+            {
+                if (typeName.equalsIgnoreCase(deviceTypeValue)
+                    || normalizeCliValue(typeName) == normalizeCliValue(deviceTypeValue))
+                {
+                    resolvedTypeName = typeName;
+                    break;
+                }
+            }
+
+            if (resolvedTypeName.isNotEmpty())
+            {
+                const auto currentType = audioDeviceManager.getCurrentAudioDeviceType();
+                if (!currentType.equalsIgnoreCase(resolvedTypeName))
+                {
+                    audioDeviceManager.setCurrentAudioDeviceType(resolvedTypeName, false);
+                    const auto switchedType = audioDeviceManager.getCurrentAudioDeviceType();
+
+                    if (!switchedType.equalsIgnoreCase(resolvedTypeName))
+                    {
+                        juce::Logger::writeToLog("[CLI_AUDIO_DEV_SWITCH] failed requested="
+                                                 + deviceTypeValue + " resolved=" + resolvedTypeName
+                                                 + " current=" + switchedType);
+                    }
+                    else
+                    {
+                        juce::Logger::writeToLog("[CLI_AUDIO_DEV_SWITCH] success requested="
+                                                 + deviceTypeValue + " resolved=" + resolvedTypeName
+                                                 + " current=" + switchedType);
+                    }
+                }
+                else
+                {
+                    juce::Logger::writeToLog("[CLI_AUDIO_DEV_SWITCH] skipped requested="
+                                             + deviceTypeValue + " resolved=" + resolvedTypeName
+                                             + " reason=already_current");
+                }
+            }
+            else
+            {
+                juce::Logger::writeToLog("[CLI_AUDIO_DEV_SWITCH] unknown requested="
+                                         + deviceTypeValue + " available=" + availableTypeNames.joinIntoString(","));
+            }
+        }
+
+        bool hasRequestedAudioSetup = false;
+        int requestedBufferSamples = 0;
+        double requestedSampleRateHz = 0.0;
+
+        if (const auto bufferValue = findValue("--cli-buffer-samples"); !bufferValue.isEmpty())
+        {
+            int parsedBuffer = 0;
+            if (tryParseIntOption(bufferValue, parsedBuffer) && parsedBuffer > 0)
+            {
+                requestedBufferSamples = parsedBuffer;
+                hasRequestedAudioSetup = true;
+            }
+            else
+            {
+                juce::Logger::writeToLog("[CLI] Invalid --cli-buffer-samples: " + bufferValue);
+            }
+        }
+
+        if (const auto sampleRateValue = findValue("--cli-sample-rate-hz"); !sampleRateValue.isEmpty())
+        {
+            float parsedSampleRate = 0.0f;
+            if (tryParseFloatOption(sampleRateValue, parsedSampleRate) && parsedSampleRate > 0.0f)
+            {
+                requestedSampleRateHz = static_cast<double>(parsedSampleRate);
+                hasRequestedAudioSetup = true;
+            }
+            else
+            {
+                juce::Logger::writeToLog("[CLI] Invalid --cli-sample-rate-hz: " + sampleRateValue);
+            }
+        }
+
+        if (hasRequestedAudioSetup)
+        {
+            juce::AudioDeviceManager::AudioDeviceSetup setup;
+            audioDeviceManager.getAudioDeviceSetup(setup);
+            const auto setupBefore = setup;
+
+            if (auto* currentDevice = audioDeviceManager.getCurrentAudioDevice())
+            {
+                juce::StringArray bufferSizes;
+                for (const auto size : currentDevice->getAvailableBufferSizes())
+                    bufferSizes.add(juce::String(size));
+
+                juce::StringArray sampleRates;
+                for (const auto rate : currentDevice->getAvailableSampleRates())
+                    sampleRates.add(juce::String(rate, 1));
+
+                juce::Logger::writeToLog("[CLI_AUDIO_CFG_CAPS] deviceType="
+                                         + audioDeviceManager.getCurrentAudioDeviceType()
+                                         + " deviceName=" + currentDevice->getName()
+                                         + " availableBufferSizes=" + bufferSizes.joinIntoString(",")
+                                         + " availableSampleRatesHz=" + sampleRates.joinIntoString(","));
+            }
+            else
+            {
+                juce::Logger::writeToLog("[CLI_AUDIO_CFG_CAPS] deviceUnavailable=1");
+            }
+
+            if (requestedBufferSamples > 0)
+                setup.bufferSize = requestedBufferSamples;
+            if (requestedSampleRateHz > 0.0)
+                setup.sampleRate = requestedSampleRateHz;
+
+            cliAudioSetupRequested = true;
+            cliAudioSetupMismatchLogged = false;
+            cliRequestedBufferSamples = requestedBufferSamples;
+            cliRequestedSampleRateHz = requestedSampleRateHz;
+
+            juce::Logger::writeToLog("[CLI_AUDIO_CFG_REQ] requestedBufferSamples="
+                                     + juce::String(requestedBufferSamples)
+                                     + " requestedSampleRateHz=" + juce::String(requestedSampleRateHz, 1)
+                                     + " setupBeforeBufferSamples=" + juce::String(setupBefore.bufferSize)
+                                     + " setupBeforeSampleRateHz=" + juce::String(setupBefore.sampleRate, 1)
+                                     + " setupTargetBufferSamples=" + juce::String(setup.bufferSize)
+                                     + " setupTargetSampleRateHz=" + juce::String(setup.sampleRate, 1));
+
+            if (const auto err = audioDeviceManager.setAudioDeviceSetup(setup, true); err.isNotEmpty())
+            {
+                juce::Logger::writeToLog("[CLI] Failed to apply audio setup override: " + err);
+            }
+            else
+            {
+                juce::AudioDeviceManager::AudioDeviceSetup setupAfter;
+                audioDeviceManager.getAudioDeviceSetup(setupAfter);
+
+                if (auto* device = audioDeviceManager.getCurrentAudioDevice())
+                {
+                    juce::Logger::writeToLog("[CLI] Applied audio setup override: sampleRateHz="
+                                             + juce::String(device->getCurrentSampleRate(), 1)
+                                             + " bufferSamples=" + juce::String(device->getCurrentBufferSizeSamples()));
+
+                    juce::Logger::writeToLog("[CLI_AUDIO_CFG_COMMIT] setupAfterBufferSamples="
+                                             + juce::String(setupAfter.bufferSize)
+                                             + " setupAfterSampleRateHz=" + juce::String(setupAfter.sampleRate, 1)
+                                             + " deviceBufferSamples=" + juce::String(device->getCurrentBufferSizeSamples())
+                                             + " deviceSampleRateHz=" + juce::String(device->getCurrentSampleRate(), 1));
+                }
+                else
+                {
+                    juce::Logger::writeToLog("[CLI] Applied audio setup override (device unavailable for readback)");
+                    juce::Logger::writeToLog("[CLI_AUDIO_CFG_COMMIT] setupAfterBufferSamples="
+                                             + juce::String(setupAfter.bufferSize)
+                                             + " setupAfterSampleRateHz=" + juce::String(setupAfter.sampleRate, 1)
+                                             + " deviceUnavailable=1");
+                }
+            }
+        }
+        else
+        {
+            cliAudioSetupRequested = false;
+            cliAudioSetupMismatchLogged = false;
+            cliRequestedBufferSamples = 0;
+            cliRequestedSampleRateHz = 0.0;
+        }
+    }
 
     if (const auto orderValue = findValue("--cli-order"); !orderValue.isEmpty())
     {
@@ -513,6 +705,9 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
                         if (safeThis == nullptr)
                             return;
 
+                        if (!convo::consumeAtomic(safeThis->cliAutomationCallbacksEnabled, std::memory_order_acquire))
+                            return;
+
                         safeThis->audioEngine.requestConvolverPreset(irFile);
                         juce::Logger::writeToLog("[CLI] IR reload iteration=" + juce::String(i)
                                                  + " file=" + irFile.getFullPathName());
@@ -546,6 +741,9 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
             juce::Timer::callAfterDelay(delayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this), postLoadBitDepth]
             {
                 if (safeThis == nullptr)
+                    return;
+
+                if (!convo::consumeAtomic(safeThis->cliAutomationCallbacksEnabled, std::memory_order_acquire))
                     return;
 
                 safeThis->audioEngine.setDitherBitDepth(postLoadBitDepth);
@@ -598,6 +796,9 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
                     if (safeThis == nullptr)
                         return;
 
+                    if (!convo::consumeAtomic(safeThis->cliAutomationCallbacksEnabled, std::memory_order_acquire))
+                        return;
+
                     safeThis->audioEngine.setConvolverBypassRequested(burstBypassValue);
                 });
             }
@@ -635,6 +836,9 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
                     if (safeThis == nullptr)
                         return;
 
+                    if (!convo::consumeAtomic(safeThis->cliAutomationCallbacksEnabled, std::memory_order_acquire))
+                        return;
+
                     safeThis->audioEngine.requestRebuild(convo::RebuildKind::Structural);
                 });
             }
@@ -652,8 +856,15 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         if (tryParseIntOption(exitValue, exitMs) && exitMs > 0)
         {
             juce::Logger::writeToLog("[CLI] Auto-exit scheduled in " + juce::String(exitMs) + "ms");
-            juce::Timer::callAfterDelay(exitMs, []
+            juce::Timer::callAfterDelay(exitMs, [safeThis = juce::Component::SafePointer<MainWindow>(this)]
             {
+                if (safeThis != nullptr)
+                {
+                    convo::publishAtomic(safeThis->cliAutomationCallbacksEnabled, false, std::memory_order_release);
+                    safeThis->cliAutomationTelemetryLoggingEnabled = false;
+                    safeThis->audioEngine.setCliProcessingTelemetryEnabled(false);
+                }
+
                 if (auto* app = juce::JUCEApplication::getInstance())
                     app->systemRequestedQuit();
             });
@@ -679,7 +890,10 @@ std::unique_ptr<juce::AccessibilityHandler> MainWindow::createAccessibilityHandl
 //--------------------------------------------------------------
 MainWindow::~MainWindow()
 {
+    convo::publishAtomic(cliAutomationCallbacksEnabled, false, std::memory_order_release);
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: ENTER (before setLookAndFeel)");
     orderModeBox.setLookAndFeel (nullptr);
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: after setLookAndFeel");
 
     // 【パッチ4】audioEngine の ChangeListener を最初に解除する
     // 理由: audioEngine はメンバ変数であり、このデストラクタ本体が完了した後に
@@ -688,26 +902,39 @@ MainWindow::~MainWindow()
     //       UIコンポーネント (specAnalyzer / eqPanel 等) にアクセスする
     //       Use-After-Free が発生する。最初に removeChangeListener することで
     //       このウィンドウへの通知を即座に遮断し、安全にシャットダウンできる。
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: step 1 removeChangeListener");
     audioEngine.removeChangeListener (this);
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: step 2 setAdaptiveAutosaveCallback");
     audioEngine.setAdaptiveAutosaveCallback({});
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: step 3 setCliProcessingTelemetryEnabled");
+    audioEngine.setCliProcessingTelemetryEnabled(false);
+    cliAutomationTelemetryLoggingEnabled = false;
 
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: step 4 setProcessor(nullptr)");
     audioProcessorPlayer.setProcessor (nullptr);
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: step 5 stopTimer");
     stopTimer();
 
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: step 6 saveSettings");
     DeviceSettings::saveSettings (audioDeviceManager, audioEngine);
 
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: step 7 removeAudioCallback");
     // 破棄される前にコールバックとしてAudioEngineの登録を解除
     audioDeviceManager.removeAudioCallback (&audioProcessorPlayer);
 
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: step 8 closeAudioDevice");
     // アプリ終了時にASIOドライバを確実に閉じるための安全手順
     audioDeviceManager.closeAudioDevice();
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: step 9 audioEngineProcessor.reset");
     audioEngineProcessor.reset();
 
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: step 10 UI reset");
     settingsWindow.reset();
     deviceSettings.reset();
     specAnalyzer.reset();
     eqPanel.reset();
     convolverPanel.reset();
+    juce::Logger::writeToLog("[DIAG] ~MainWindow: complete");
 }
 
 //--------------------------------------------------------------
@@ -715,6 +942,9 @@ MainWindow::~MainWindow()
 //--------------------------------------------------------------
 void MainWindow::closeButtonPressed()
 {
+    convo::publishAtomic(cliAutomationCallbacksEnabled, false, std::memory_order_release);
+    cliAutomationTelemetryLoggingEnabled = false;
+    audioEngine.setCliProcessingTelemetryEnabled(false);
     juce::JUCEApplication::getInstance()->systemRequestedQuit();
 }
 
@@ -1031,6 +1261,42 @@ void MainWindow::timerCallback()
 {
     double cpu = audioDeviceManager.getCpuUsage() * 100.0;
     cpuUsageLabel.setText ("CPU: " + juce::String (cpu, 1) + "%", juce::dontSendNotification);
+
+    if (cliAutomationTelemetryLoggingEnabled && audioEngine.isCliProcessingTelemetryEnabled())
+    {
+        const auto cliPerf = audioEngine.consumeCliProcessingTelemetrySnapshot();
+        juce::Logger::writeToLog(
+            "[CLI_PERF_RAW] callbacks=" + juce::String(static_cast<juce::int64>(cliPerf.callbackCount))
+            + " procTimeUsLast=" + juce::String(cliPerf.lastProcessTimeUs, 3)
+            + " procTimeUsAvg=" + juce::String(cliPerf.avgProcessTimeUs, 3)
+            + " procTimeUsMax=" + juce::String(cliPerf.maxProcessTimeUs, 3)
+            + " blockSamples=" + juce::String(cliPerf.lastBlockSamples)
+            + " sampleRateHz=" + juce::String(cliPerf.sampleRateHz, 1));
+
+        if (cliAudioSetupRequested && !cliAudioSetupMismatchLogged)
+        {
+            const bool bufferRequested = (cliRequestedBufferSamples > 0);
+            const bool sampleRateRequested = (cliRequestedSampleRateHz > 0.0);
+            const bool bufferMismatch = bufferRequested && (cliPerf.lastBlockSamples != cliRequestedBufferSamples);
+            const bool sampleRateMismatch = sampleRateRequested
+                && (std::abs(cliPerf.sampleRateHz - cliRequestedSampleRateHz) > 1.0);
+
+            if (bufferMismatch || sampleRateMismatch)
+            {
+                juce::Logger::writeToLog("[CLI_AUDIO_CFG_DRIFT] requestedBufferSamples="
+                                         + juce::String(cliRequestedBufferSamples)
+                                         + " requestedSampleRateHz=" + juce::String(cliRequestedSampleRateHz, 1)
+                                         + " runtimeBlockSamples=" + juce::String(cliPerf.lastBlockSamples)
+                                         + " runtimeSampleRateHz=" + juce::String(cliPerf.sampleRateHz, 1)
+                                         + " bufferMismatch=" + juce::String(static_cast<int>(bufferMismatch))
+                                         + " sampleRateMismatch=" + juce::String(static_cast<int>(sampleRateMismatch)));
+                cliAudioSetupMismatchLogged = true;
+            }
+        }
+    }
+
+    if (cliAutomationTelemetryLoggingEnabled)
+        return;
 
     const auto breakdown = audioEngine.getCurrentLatencyBreakdown();
     const int latencySamples = breakdown.totalLatencyBaseRateSamples;

@@ -25,6 +25,12 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
     }
     else if (source == &uiConvolverProcessor)
     {
+        if (isCliProcessingTelemetryEnabled())
+        {
+            diagLog("[DIAG] convolverParamsChanged: suppressed while CLI telemetry mode is enabled");
+            return;
+        }
+
         convolverParamsChanged(&uiConvolverProcessor);
     }
 }

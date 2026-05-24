@@ -520,7 +520,10 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // 【Issue 4 追加安全ガード】オーバーラン即検出（Audio Thread安全版）
     // ==================================================================
     // パッチ2: jassert削除 + 安全クリア（ガイドライン厳守）
-    if (numSamples <= 0 || static_cast<size_t>(numSamples) > static_cast<size_t>(maxInternalBlockSize))
+    if (numSamples <= 0)
+        return;
+
+    if (static_cast<size_t>(numSamples) > static_cast<size_t>(maxInternalBlockSize))
     {
         // バッファオーバーラン時は安全にゼロクリアして早期リターン
         for (int ch = 0; ch < (int)block.getNumChannels(); ++ch)
@@ -848,8 +851,9 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
             applyGainRamp_AVX2(block.getChannelPointer(ch), numSamples, startGain, increment);
     }
 
-    if (bypassTransitionActive && dryCopyBase != nullptr)
+    if (bypassTransitionActive)
     {
+        const bool canBlendDry = (dryCopyBase != nullptr);
         for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
         {
             const double wetGainState = (activeBypassRamp != nullptr)
@@ -857,11 +861,23 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 : bypassFadeGain.getNextValue();
             const double dryGain = 1.0 - wetGainState;
 
-            for (int ch = 0; ch < numChannels; ++ch)
+            if (canBlendDry)
             {
-                double* wetPtr = block.getChannelPointer(ch);
-                const double dryValue = dryCopyBase[ch * numSamples + sampleIndex];
-                wetPtr[sampleIndex] = wetPtr[sampleIndex] * wetGainState + dryValue * dryGain;
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    double* wetPtr = block.getChannelPointer(ch);
+                    const double dryValue = dryCopyBase[ch * numSamples + sampleIndex];
+                    wetPtr[sampleIndex] = wetPtr[sampleIndex] * wetGainState + dryValue * dryGain;
+                }
+            }
+            else
+            {
+                // dry copy が確保できない場合でも、遷移進行は止めない（wet-only 減衰）。
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    double* wetPtr = block.getChannelPointer(ch);
+                    wetPtr[sampleIndex] = wetPtr[sampleIndex] * wetGainState;
+                }
             }
         }
 
@@ -896,7 +912,10 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block,
     juce::ScopedNoDenormals noDenormals;
 
     const int numSamples = static_cast<int>(block.getNumSamples());
-    if (numSamples <= 0 || static_cast<size_t>(numSamples) > static_cast<size_t>(maxInternalBlockSize))
+    if (numSamples <= 0)
+        return;
+
+    if (static_cast<size_t>(numSamples) > static_cast<size_t>(maxInternalBlockSize))
     {
         for (int ch = 0; ch < static_cast<int>(block.getNumChannels()); ++ch)
             juce::FloatVectorOperations::clear(block.getChannelPointer(ch), numSamples);

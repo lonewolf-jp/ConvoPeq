@@ -636,7 +636,6 @@ private:
         int latency = 0;
         int irLatency = 0; // IR由来の遅延 (ピーク位置)
         int callQuantumSamples = 0;    // Audio Thread でのNUC呼び出し量子
-        int prewarmedMaxSamples = 0;   // Message Thread でプリウォーム済みの最大呼び出し長
 
         // Clone用に初期化パラメータを保存
         double storedSampleRate = 0.0;
@@ -706,7 +705,6 @@ private:
             irDataLength = length;
             this->irLatency = peakDelay;
             callQuantumSamples = juce::jmax(1, preferredCallSize);
-            prewarmedMaxSamples = callQuantumSamples;
             storedSampleRate = sr;
             storedMaxFFTSize = maxFFTSize;
             storedKnownBlockSize = knownBlockSize;

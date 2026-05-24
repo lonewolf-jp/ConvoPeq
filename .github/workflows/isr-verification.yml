@@ -11,6 +11,9 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: read
+
 jobs:
   isr-verify:
     runs-on: windows-latest

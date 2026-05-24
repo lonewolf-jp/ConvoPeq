@@ -495,6 +495,12 @@ if(MSVC)
     target_link_options(ConvoPeq PRIVATE
         $<$<CONFIG:Debug>:/INCREMENTAL:NO>
     )
+
+    # スタティックCRTリンク（DLL依存排除・ASan除外）
+    # Debug→/MTd、Release/RelWithDebInfo/MinSizeRel→/MT
+    # 注意: /MTd は /fsanitize=address と非互換のため、Debugタスクから ASan を除去すること
+    set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 #------------------------------------------------------------

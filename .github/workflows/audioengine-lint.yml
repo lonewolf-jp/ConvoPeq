@@ -14,6 +14,9 @@ on:
       - .github/scripts/check-audioengine-lint.ps1
       - .github/workflows/audioengine-lint.yml
 
+permissions:
+  contents: read
+
 jobs:
   lint-audioengine:
     runs-on: windows-latest

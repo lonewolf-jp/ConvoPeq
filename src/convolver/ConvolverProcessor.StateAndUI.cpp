@@ -614,7 +614,7 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
 
     if (cachedFFTBufferCapacity < fftSize * 2)
     {
-        cachedFFTBuffer = convo::makeAlignedArray<float>(static_cast<size_t>(fftSize * 2));
+        cachedFFTBuffer = convo::makeAlignedArray<float>(static_cast<size_t>(fftSize) * 2u);
         cachedFFTBufferCapacity = fftSize * 2;
     }
 

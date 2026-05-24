@@ -1,0 +1,320 @@
+Opened log file 'C:\VSC_Project\ConvoPeq\.github\tmp\crashdumps\cdb_analysis_260524_081959.txt'
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+   EnableRedirectToChakraJsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.016 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 46
+
+Microsoft (R) Windows Debugger Version 10.0.29547.1002 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\VSC_Project\ConvoPeq\.github\tmp\crashdumps\ConvoPeq.exe_260524_081959.dmp]
+User Mini Dump File with Full Memory : Only application data is available
+
+Comment: '
+*** "C:\WINDOWS\system32\procdump.exe" -ma -e -w ConvoPeq.exe C:\VSC_Project\ConvoPeq\.github\tmp\crashdumps
+*** Unhandled exception: C0000374'
+Symbol search path is: srv*
+Executable search path is: 
+Windows 10 Version 26200 MP (16 procs) Free x64
+Product: WinNt, suite: SingleUserTS Personal
+Edition build lab: 26100.1.amd64fre.ge_release.240331-1435
+Debug session time: Sun May 24 08:19:59.000 2026 (UTC + 9:00)
+System Uptime: 1 days 11:37:18.851
+Process Uptime: 0 days 0:00:04.000
+.NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\atlmfc.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\concurrency.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\cpp_rest.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\ObjectiveC.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\stl.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Data.Json.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Media.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\windows.natvis'
+NatVis script successfully loaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\winrt.natvis'
+...............................................................
+........................
+Loading unloaded module list
+....
+This dump file has an exception of interest stored in it.
+The stored exception information can be accessed via .ecxr
+(7b58.9230): Unknown exception - code c0000374 (first/second chance not available)
+For analysis of this file, run !analyze -v
+ntdll!RtlReportFatalFailure+0x9:
+00007ffc`d2497175 eb00            jmp     ntdll!RtlReportFatalFailure+0xb (00007ffc`d2497177)
+0:000> !analyze -v; .ecxr; kb 40; !heap -s; q
+................................................................
+........................
+Loading unloaded module list
+....
+*******************************************************************************
+*                                                                             *
+*                        Exception Analysis                                   *
+*                                                                             *
+*******************************************************************************
+
+*** WARNING: Unable to verify checksum for ConvoPeq.exe
+
+KEY_VALUES_STRING: 1
+
+    Key  : Analysis.CPU.mSec
+    Value: 1359
+
+    Key  : Analysis.Elapsed.mSec
+    Value: 18294
+
+    Key  : Analysis.IO.Other.Mb
+    Value: 1
+
+    Key  : Analysis.IO.Read.Mb
+    Value: 1
+
+    Key  : Analysis.IO.Write.Mb
+    Value: 51
+
+    Key  : Analysis.Init.CPU.mSec
+    Value: 250
+
+    Key  : Analysis.Init.Elapsed.mSec
+    Value: 1879
+
+    Key  : Analysis.Memory.CommitPeak.Mb
+    Value: 104
+
+    Key  : Analysis.Version.DbgEng
+    Value: 10.0.29547.1002
+
+    Key  : Analysis.Version.Description
+    Value: 10.2602.27.2 amd64fre
+
+    Key  : Analysis.Version.Ext
+    Value: 1.2602.27.2
+
+    Key  : Failure.Bucket
+    Value: HEAP_CORRUPTION_ACTIONABLE_BlockNotBusy_DOUBLE_FREE_c0000374_ConvoPeq.exe!unknown_function
+
+    Key  : Failure.Exception.Code
+    Value: 0xc0000374
+
+    Key  : Failure.Exception.IP.Address
+    Value: 0x7ffcd2497175
+
+    Key  : Failure.Exception.IP.Module
+    Value: ntdll
+
+    Key  : Failure.Exception.IP.Offset
+    Value: 0x117175
+
+    Key  : Failure.Hash
+    Value: {753d9076-eefb-2e78-0c5a-c20980d12acb}
+
+    Key  : Failure.ProblemClass.Primary
+    Value: HEAP_CORRUPTION
+
+    Key  : Faulting.IP.Type
+    Value: Paged
+
+    Key  : Timeline.OS.Boot.DeltaSec
+    Value: 128238
+
+    Key  : Timeline.Process.Start.DeltaSec
+    Value: 4
+
+    Key  : WER.OS.Branch
+    Value: ge_release
+
+    Key  : WER.OS.Version
+    Value: 10.0.26100.1
+
+    Key  : WER.Process.Version
+    Value: 0.6.4.0
+
+
+FILE_IN_CAB:  ConvoPeq.exe_260524_081959.dmp
+
+COMMENT:  
+*** "C:\WINDOWS\system32\procdump.exe" -ma -e -w ConvoPeq.exe C:\VSC_Project\ConvoPeq\.github\tmp\crashdumps
+*** Unhandled exception: C0000374
+
+NTGLOBALFLAG:  4000
+
+APPLICATION_VERIFIER_FLAGS:  0
+
+CONTEXT:  (.ecxr)
+.ecxr
+rax=0000000000000246 rbx=000000436c4fe9f0 rcx=00007ffc294f8aff
+rdx=0000000000000020 rsi=000000436c4fe500 rdi=000000436c4fe500
+rip=00007ffcd2497175 rsp=000000436c4ff2e0 rbp=0000000000000007
+ r8=0000002700000000  r9=000000436c4ff000 r10=00007ffc294b4b51
+r11=0000000000000000 r12=0000000000000000 r13=0000000000000000
+r14=000001d99b4a0000 r15=0000000000000000
+iopl=0         nv up ei pl nz na pe nc
+cs=0033  ss=002b  ds=002b  es=002b  fs=0053  gs=002b             efl=00000204
+ntdll!RtlReportFatalFailure+0x9:
+00007ffc`d2497175 eb00            jmp     ntdll!RtlReportFatalFailure+0xb (00007ffc`d2497177)
+.cxr
+Resetting default scope
+
+EXCEPTION_RECORD:  (.exr -1)
+.exr -1
+ExceptionAddress: 00007ffcd2497175 (ntdll!RtlReportFatalFailure+0x0000000000000009)
+   ExceptionCode: c0000374
+  ExceptionFlags: 00000081
+NumberParameters: 1
+   Parameter[0]: 00007ffcd254d0e0
+
+PROCESS_NAME:  ConvoPeq.exe
+
+ERROR_CODE: (NTSTATUS) 0xc0000374 -  q [ v ?     ? ? ? ? B
+
+EXCEPTION_CODE_STR:  c0000374
+
+EXCEPTION_PARAMETER1:  00007ffcd254d0e0
+
+ADDITIONAL_DEBUG_TEXT:  Followup set based on attribute [Heap_Error_Type] from Frame:[0] on thread:[PSEUDO_THREAD]
+
+FAULTING_THREAD:  ffffffff
+
+STACK_TEXT:  
+00000000`00000000 00000000`00000000 ConvoPeq!unknown_function+0x0
+
+
+STACK_COMMAND: dt ntdll!LdrpLastDllInitializer BaseDllName ; dt ntdll!LdrpFailureData ; !heap ; ** Pseudo Context ** ManagedPseudo ** Value: ffffffff ** ; kb
+
+IP_IN_PAGED_CODE: 
+ntdll!RtlReportFatalFailure+9
+00007ffc`d2497175 eb00            jmp     ntdll!RtlReportFatalFailure+0xb (00007ffc`d2497177)
+
+SYMBOL_NAME:  ConvoPeq!unknown_function
+
+MODULE_NAME: ConvoPeq
+
+IMAGE_NAME:  ConvoPeq.exe
+
+FAILURE_BUCKET_ID:  HEAP_CORRUPTION_ACTIONABLE_BlockNotBusy_DOUBLE_FREE_c0000374_ConvoPeq.exe!unknown_function
+
+OS_VERSION:  10.0.26100.1
+
+BUILDLAB_STR:  ge_release
+
+OSPLATFORM_TYPE:  x64
+
+OSNAME:  Windows 10
+
+IMAGE_VERSION:  0.6.4.0
+
+FAILURE_ID_HASH:  {753d9076-eefb-2e78-0c5a-c20980d12acb}
+
+Followup:     MachineOwner
+---------
+
+rax=0000000000000246 rbx=000000436c4fe9f0 rcx=00007ffc294f8aff
+rdx=0000000000000020 rsi=000000436c4fe500 rdi=000000436c4fe500
+rip=00007ffcd2497175 rsp=000000436c4ff2e0 rbp=0000000000000007
+ r8=0000002700000000  r9=000000436c4ff000 r10=00007ffc294b4b51
+r11=0000000000000000 r12=0000000000000000 r13=0000000000000000
+r14=000001d99b4a0000 r15=0000000000000000
+iopl=0         nv up ei pl nz na pe nc
+cs=0033  ss=002b  ds=002b  es=002b  fs=0053  gs=002b             efl=00000204
+ntdll!RtlReportFatalFailure+0x9:
+00007ffc`d2497175 eb00            jmp     ntdll!RtlReportFatalFailure+0xb (00007ffc`d2497177)
+RetAddr               : Args to Child                                                           : Call Site
+00007ffc`d2418be9     : 00000000`00000000 00000000`00000206 00007ffc`d2515be8 00000000`c0000374 : ntdll!RtlReportFatalFailure+0x9
+00007ffc`d23b1de2     : 00000043`6c4ff5c9 00007ffc`d254d0e0 00000000`00000008 000001d9`9b4a0000 : ntdll!RtlReportCriticalFailure+0xa9
+00007ffc`d249d93a     : 00000000`00000008 00000000`00000007 000001d9`9b4a0000 00007ff7`1e10d29c : ntdll!RtlpHeapHandleError+0x12
+00007ffc`d23aa3cb     : 000001d9`9e3dc200 000001d9`e3317e40 00000000`00000000 000003d4`000003c0 : ntdll!RtlpHpHeapHandleError+0x7a
+00007ffc`d23a70ca     : 00000043`6c4ff520 00007ff7`1e10d2be 00000000`0000047c 00000000`00000000 : ntdll!RtlpLogHeapFailure+0x4b
+00007ff7`1e433e6c     : 000001d9`9b4a0000 00000000`00000000 000001d9`e3317e50 00000043`6c4ff679 : ntdll!RtlFreeHeap+0x6da
+00007ff7`1e03249b     : 000001d9`9ea3cb50 000001d9`9b4f5d40 000001d9`e30e2d70 00000000`00000000 : ConvoPeq+0x1ce3e6c
+00007ff7`1e04fddc     : 00007ffc`cbb19680 00000000`00000000 000003d4`000003c0 000003d4`000003c0 : ConvoPeq+0x18e249b
+00007ff7`1e049e7c     : 00000000`00000000 00000000`00000000 00000000`00000000 000003d4`000003c0 : ConvoPeq+0x18ffddc
+00007ff7`1e33e3d5     : 00000000`00000000 00000000`00000000 01acff1f`b8ef5692 00000000`00000000 : ConvoPeq+0x18f9e7c
+00007ff7`1e33e488     : 000001d9`9b4a46e0 000001d9`9b4a46e0 000001d9`e30804e0 00000000`00000001 : ConvoPeq+0x1bee3d5
+00007ff7`1e33f722     : 000001d9`e30804e0 00007ffc`d103b352 00000000`00000000 000001d9`9b4cb460 : ConvoPeq+0x1bee488
+00007ff7`1e024d90     : 000001d9`e30804e0 00007ff7`1e024b00 000001d9`9b4c6a80 000001d9`9b4e2500 : ConvoPeq+0x1bef722
+00007ff7`1e412789     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ConvoPeq+0x18d4d90
+00007ffc`d0dfe957     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ConvoPeq+0x1cc2789
+00007ffc`d238427c     : 00000000`00000000 00000000`00000000 000004f0`fffffb30 000004d0`fffffb30 : kernel32!BaseThreadInitThunk+0x17
+00000000`00000000     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ntdll!RtlUserThreadStart+0x2c
+
+
+************************************************************************************************************************
+                                              NT HEAP STATS BELOW
+************************************************************************************************************************
+**************************************************************
+*                                                            *
+*                  HEAP ERROR DETECTED                       *
+*                                                            *
+**************************************************************
+
+Details:
+
+Heap address:  000001d99b4a0000
+Error address: 000001d9e3317e40
+Error type:    HEAP_FAILURE_BLOCK_NOT_BUSY
+Details:       The caller performed an operation (such as a free
+               or a size check) that is illegal on a free block.
+Follow-up:     Check the error's stack trace to find the culprit.
+
+Stack trace:
+Stack trace at 0x00007ffcd254d138
+    00007ffcd23aa3cb: ntdll!RtlpLogHeapFailure+0x4b
+    00007ffcd23a70ca: ntdll!RtlFreeHeap+0x6da
+    00007ff71e433e6c: ConvoPeq+0x1ce3e6c
+    00007ff71e03249b: ConvoPeq+0x18e249b
+    00007ff71e04fddc: ConvoPeq+0x18ffddc
+    00007ff71e049e7c: ConvoPeq+0x18f9e7c
+    00007ff71e33e3d5: ConvoPeq+0x1bee3d5
+    00007ff71e33e488: ConvoPeq+0x1bee488
+    00007ff71e33f722: ConvoPeq+0x1bef722
+    00007ff71e024d90: ConvoPeq+0x18d4d90
+    00007ff71e412789: ConvoPeq+0x1cc2789
+    00007ffcd0dfe957: kernel32!BaseThreadInitThunk+0x17
+    00007ffcd238427c: ntdll!RtlUserThreadStart+0x2c
+
+LFH Key                   : 0xcb3dd40b0912d168
+Termination on corruption : ENABLED
+          Heap     Flags   Reserv  Commit  Virt   Free  List   UCR  Virt  Lock  Fast 
+                            (k)     (k)    (k)     (k) length      blocks cont. heap 
+-------------------------------------------------------------------------------------
+000001d99b4a0000 00000002   32944  23012  32552    903   163     6  184     15   LFH
+000001d99b320000 00008000      64      4     64      2     1     1    0      0      
+000001d99b930000 00001002      60      8     60      5     1     1    0      0      
+000001d99b910000 00001002    3516   2392   3124    448    37     3    0     13   LFH
+    External fragmentation  19 % (37 free blocks)
+000001d99cf50000 00000000    2048   2048   2048   2031     3     1    0      0      
+    External fragmentation  99 % (3 free blocks)
+000001d99d210000 00001002     452     40     60      1     1     1    0      0   LFH
+000001d9e3e00000 00001002    1472    436   1080    315    13     2    0      0   LFH
+000001d9fa6d0000 00001002    1472    180   1080    109     4     2    0      0   LFH
+-------------------------------------------------------------------------------------
+quit:
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\amd64\Visualizers\winrt.natvis'

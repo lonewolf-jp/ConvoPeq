@@ -1,0 +1,67 @@
+﻿{
+    "runId":  "20260523-230233",
+    "generatedAt":  "2026-05-23 23:02:33",
+    "label":  "telemetry-smoke4",
+    "inputs":  {
+                   "exePath":  "c:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.exe",
+                   "irPath":  "c:\\VSC_Project\\ConvoPeq\\sampledata\\impulse_room_correction.wav",
+                   "logPath":  "c:\\VSC_Project\\ConvoPeq\\build\\ConvoPeq_artefacts\\Release\\ConvoPeq.log"
+               },
+    "appExitCode":  0,
+    "cpu":  {
+                "min":  0,
+                "max":  9.478452,
+                "count":  33,
+                "avg":  3.007456,
+                "p95":  7.133268
+            },
+    "processingTimeUs":  {
+                             "min":  709.1,
+                             "max":  1406.4,
+                             "count":  9,
+                             "avg":  1030.8,
+                             "p95":  1406.4
+                         },
+    "rebuildLatencyMs":  {
+                             "min":  1.592,
+                             "max":  3.2,
+                             "count":  4,
+                             "avg":  1.9995,
+                             "p95":  3.2
+                         },
+    "telemetry":  {
+                      "deferred_finalize_ready":  0,
+                      "task_queued":  4,
+                      "rebuild_forced_dispatch":  0,
+                      "deferred_finalize_rebuild_req":  0,
+                      "policy_must_execute":  0,
+                      "same_as_pending_would_merge":  0,
+                      "pending_duplicate":  0,
+                      "suppressed_mixed_phase_intermediate":  0,
+                      "requestRebuild_sr_bs":  4
+                  },
+    "continuityProxy":  {
+                            "fatal_like_entries":  0,
+                            "ir_reload_iterations":  0,
+                            "runtime_publish_events":  0,
+                            "bypass_burst_scheduled":  0
+                        },
+    "runConfig":  {
+                      "exitMs":  5000,
+                      "debounceMs":  300,
+                      "f1Hz":  160,
+                      "probeFinalizeAware":  false,
+                      "f2Hz":  860,
+                      "targetIrSec":  3,
+                      "order":  "peq-conv",
+                      "phase":  "mixed",
+                      "sampleIntervalMs":  200,
+                      "runTimeoutMs":  60000,
+                      "preRingTau":  52
+                  },
+    "caveats":  [
+                    "CPU comparison is based on process CPU sampling (Get-Process CPU).",
+                    "Click peak (dBFS) / 20ms RMS delta (dB) cannot be computed from current logs and are out of scope for auto evaluation.",
+                    "mix=0 segment split is not auto-computed because log events do not currently provide explicit segment tags."
+                ]
+}

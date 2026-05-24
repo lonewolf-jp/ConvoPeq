@@ -148,6 +148,7 @@ void MainApplication::initialise(const juce::String& commandLine)
 
 void MainApplication::shutdown()
 {
+    juce::Logger::writeToLog("[DIAG] MainApplication::shutdown() enter");
     // unique_ptr のデストラクタで MainWindow が閉じられる
     // MainWindow デストラクタ内で:
     //   1) オーディオコールバック停止

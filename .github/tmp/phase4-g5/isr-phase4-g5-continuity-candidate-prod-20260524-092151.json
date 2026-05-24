@@ -1,0 +1,38 @@
+﻿{
+    "runId":  "20260524-092151",
+    "generatedAt":  "2026-05-24 09:21:51",
+    "label":  "candidate-prod",
+    "inputWav":  "c:\\VSC_Project\\ConvoPeq\\sampledata\\test_music.wav",
+    "transitionSelection":  {
+                                "autoDetected":  true,
+                                "transitionSample":  43856,
+                                "detection":  {
+                                                  "transitionFrame":  43856,
+                                                  "score":  0.557525873,
+                                                  "searchStartFrame":  1,
+                                                  "searchEndFrame":  200000,
+                                                  "totalFrames":  4677000
+                                              }
+                            },
+    "thresholds":  {
+                       "clickThresholdDbfs":  -70,
+                       "rmsDeltaThresholdDb":  1.5
+                   },
+    "metrics":  {
+                    "channels":  2,
+                    "sampleRate":  48000,
+                    "totalFrames":  4677000,
+                    "transitionFrame":  43856,
+                    "peakWindowFrames":  256,
+                    "rmsWindowMs":  20,
+                    "clickPeakDbfs":  0,
+                    "preRmsDbfs":  -21.19806,
+                    "postRmsDbfs":  -6.241038,
+                    "rmsDeltaDb":  14.957022
+                },
+    "verdict":  {
+                    "clickPass":  false,
+                    "rmsPass":  false,
+                    "overallPass":  false
+                }
+}

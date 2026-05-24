@@ -1,121 +1,133 @@
 {
-    "version": "2.0.0",
-    "options": {
-        "shell": {
-            "executable": "C:\\Windows\\System32\\cmd.exe",
-            "args": [
-                "/d",
-                "/c"
-            ]
-        }
-    },
-    "tasks": [
-        {
-            "label": "Kill Previous Instance",
-            "type": "shell",
-            "command": "taskkill /F /IM \"ConvoPeq.exe\" >nul 2>&1 || exit 0",
-            "problemMatcher": []
-        },
-        {
-            "label": "Clean",
-            "type": "shell",
-            "command": "if exist \"${workspaceFolder}\\build\" rmdir /s /q \"${workspaceFolder}\\build\"",
-            "problemMatcher": []
-        },
-        {
-            "label": "Release",
-            "type": "shell",
-            "command": "call \"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Release",
-            "dependsOn": [
-                "Kill Previous Instance"
-            ],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": "$msCompile"
-        },
-        {
-            "label": "Debug",
-            "type": "shell",
-            "command": "call \"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\"/fsanitize=address /Zi /INCREMENTAL:NO\" && cmake --build \"${workspaceFolder}\\build\" --config Debug",
-            "dependsOn": [
-                "Kill Previous Instance"
-            ],
-            "problemMatcher": "$msCompile"
-        },
-        {
-            "label": "Debug Build (cmd env)",
-            "type": "shell",
-            "command": "cmd.exe",
-            "args": [
-                "/d",
-                "/c",
-                "call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\"/fsanitize=address /Zi /INCREMENTAL:NO\" && cmake --build build --config Debug"
-            ],
-            "isBackground": false,
-            "group": "build"
-        },
-        {
-            "label": "Release Build (cmd env retry)",
-            "type": "shell",
-            "command": "cmd.exe",
-            "args": [
-                "/d",
-                "/c",
-                "call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Release"
-            ],
-            "isBackground": false,
-            "group": "build"
-        },
-        {
-            "label": "Debug Build (cmd env retry)",
-            "type": "shell",
-            "command": "cmd.exe",
-            "args": [
-                "/d",
-                "/c",
-                "call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\"/fsanitize=address /Zi /INCREMENTAL:NO\" && cmake --build build --config Debug"
-            ],
-            "isBackground": false,
-            "group": "build"
-        },
-        {
-            "label": "Strict Atomic Dot-Call Scan",
-            "type": "shell",
-            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}\\.github\\scripts\\check-src-atomic-dotcall.ps1\"",
-            "problemMatcher": []
-        },
-        {
-            "label": "CodeGraph Full Index",
-            "type": "shell",
-            "command": "${workspaceFolder}\\.venv-codegraph\\Scripts\\codegraph-mcp.exe",
-            "args": [
-                "index",
-                "${workspaceFolder}",
-                "--full"
-            ],
-            "problemMatcher": []
-        },
-        {
-            "label": "CodeGraph Incremental Index",
-            "type": "shell",
-            "command": "${workspaceFolder}\\.venv-codegraph\\Scripts\\codegraph-mcp.exe",
-            "args": [
-                "index",
-                "${workspaceFolder}"
-            ],
-            "problemMatcher": []
-        },
-        {
-            "label": "CodeGraph Stats",
-            "type": "shell",
-            "command": "${workspaceFolder}\\.venv-codegraph\\Scripts\\codegraph-mcp.exe",
-            "args": [
-                "stats",
-                "${workspaceFolder}"
-            ],
-            "problemMatcher": []
-        }
-    ]
+	"version": "2.0.0",
+	"options": {
+		"shell": {
+			"executable": "C:\\Windows\\System32\\cmd.exe",
+			"args": [
+				"/d",
+				"/c"
+			]
+		}
+	},
+	"tasks": [
+		{
+			"label": "Kill Previous Instance",
+			"type": "shell",
+			"command": "taskkill /F /IM \"ConvoPeq.exe\" >nul 2>&1 || exit 0",
+			"problemMatcher": []
+		},
+		{
+			"label": "Clean",
+			"type": "shell",
+			"command": "if exist \"${workspaceFolder}\\build\" rmdir /s /q \"${workspaceFolder}\\build\"",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release",
+			"type": "shell",
+			"command": "call \"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build \"${workspaceFolder}\\build\" --config Release",
+			"dependsOn": [
+				"Kill Previous Instance"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": "$msCompile"
+		},
+		{
+			"label": "Debug",
+			"type": "shell",
+			"command": "call \"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\"/Zi /INCREMENTAL:NO\" && cmake --build \"${workspaceFolder}\\build\" --config Debug",
+			"dependsOn": [
+				"Kill Previous Instance"
+			],
+			"problemMatcher": "$msCompile"
+		},
+		{
+			"label": "Debug Build (cmd env)",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\"/Zi /INCREMENTAL:NO\" && cmake --build build --config Debug"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Release Build (cmd env retry)",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl && cmake --build build --config Release"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Debug Build (cmd env retry)",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_DEBUG=\"/Zi /INCREMENTAL:NO\" && cmake --build build --config Debug"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Strict Atomic Dot-Call Scan",
+			"type": "shell",
+			"command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}\\.github\\scripts\\check-src-atomic-dotcall.ps1\"",
+			"problemMatcher": []
+		},
+		{
+			"label": "CodeGraph Full Index",
+			"type": "shell",
+			"command": "${workspaceFolder}\\.venv-codegraph\\Scripts\\codegraph-mcp.exe",
+			"args": [
+				"index",
+				"${workspaceFolder}",
+				"--full"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "CodeGraph Incremental Index",
+			"type": "shell",
+			"command": "${workspaceFolder}\\.venv-codegraph\\Scripts\\codegraph-mcp.exe",
+			"args": [
+				"index",
+				"${workspaceFolder}"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "CodeGraph Stats",
+			"type": "shell",
+			"command": "${workspaceFolder}\\.venv-codegraph\\Scripts\\codegraph-mcp.exe",
+			"args": [
+				"stats",
+				"${workspaceFolder}"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Release Build With PDB",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"call \"%ProgramFiles%\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat\" x64 && call \"%ProgramFiles(x86)%\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S . -B build -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS_RELEASE=\"/Zi\" -DCMAKE_EXE_LINKER_FLAGS_RELEASE=\"/DEBUG /INCREMENTAL:NO\" && cmake --build build --config Release"
+			],
+			"isBackground": false,
+			"group": "build"
+		}
+	]
 }
