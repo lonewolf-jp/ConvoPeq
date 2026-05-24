@@ -1181,6 +1181,28 @@ public:
         const convo::RuntimeGraph* graph = nullptr;
     };
 
+    struct RuntimeExecutionView
+    {
+        RuntimeExecutionView(RuntimePublishView&& runtimePublishIn,
+                             convo::ObservedRuntime&& observedSnapshotIn) noexcept
+            : runtimePublish(std::move(runtimePublishIn))
+            , observedSnapshot(std::move(observedSnapshotIn))
+            , graph(runtimePublish.graph)
+            , snapshot(observedSnapshot.get())
+        {
+        }
+
+        RuntimeExecutionView(const RuntimeExecutionView&) = delete;
+        RuntimeExecutionView& operator=(const RuntimeExecutionView&) = delete;
+        RuntimeExecutionView(RuntimeExecutionView&&) noexcept = default;
+        RuntimeExecutionView& operator=(RuntimeExecutionView&&) noexcept = default;
+
+        RuntimePublishView runtimePublish;
+        convo::ObservedRuntime observedSnapshot;
+        const convo::RuntimeGraph* graph = nullptr;
+        const convo::GlobalSnapshot* snapshot = nullptr;
+    };
+
     struct CrossfadePreparedSnapshot
     {
         bool pending = false;
@@ -1875,6 +1897,17 @@ public:
         // control reader が EpochDomain に参加した状態で runtime graph を参照する。
         const auto* world = runtimeStore.observe();
         return RuntimePublishView { m_epochDomain, kControlEpochReaderIndex, world != nullptr ? &world->graph : nullptr };
+    }
+
+    // P0-2: 読取経路収束用の軽量ビュー。
+    // 取得元は既存と同一（runtimeStore.observe + SnapshotCoordinator.observeCurrentRuntime）で、
+    // 挙動を変えずに読取入口のみを統一する。
+    inline RuntimeExecutionView getRuntimeExecutionViewForAudioThread() const noexcept
+    {
+        return RuntimeExecutionView {
+            getRuntimePublishView(),
+            m_coordinator.observeCurrentRuntime(kAudioEpochReaderIndex)
+        };
     }
 
     inline convo::RuntimeGraph makeRuntimeGraphState(const convo::EngineRuntime& state) const noexcept
