@@ -3,6 +3,7 @@
 
 #include <JuceHeader.h>
 #include <atomic>
+#include <cstdint>
 
 #include "AlignedAllocation.h"
 
@@ -40,6 +41,27 @@ public:
     bool consumeCorruptionFlag() noexcept
     {
         return convo::exchangeAtomic(corruptionDetected, false, std::memory_order_acq_rel);
+    }
+
+    std::uint64_t getCorruptionEventCount() const noexcept
+    {
+        return convo::consumeAtomic(corruptionEventCount, std::memory_order_acquire);
+    }
+
+    std::uint64_t getCorruptionAutoClearCount() const noexcept
+    {
+        return convo::consumeAtomic(corruptionAutoClearCount, std::memory_order_acquire);
+    }
+
+    bool isHardFallbackActive() const noexcept
+    {
+        return convo::consumeAtomic(hardFallbackActive, std::memory_order_acquire);
+    }
+
+    void resetCorruptionTelemetry() noexcept
+    {
+        convo::publishAtomic(corruptionEventCount, static_cast<std::uint64_t>(0), std::memory_order_release);
+        convo::publishAtomic(corruptionAutoClearCount, static_cast<std::uint64_t>(0), std::memory_order_release);
     }
 
     // 全ステージ履歴をゼロクリアして異常フラグを解除する
@@ -89,6 +111,7 @@ private:
                        int inputSamples,
                        double* output,
                        int channel) noexcept;
+    void markCorruptionDetected() noexcept;
 
     int upsampleRatio = 1;
     Preset activePreset = Preset::IIRLike;
@@ -107,4 +130,10 @@ private:
     // channel pointer array remains valid after processUp() returns.
     double* blockChannelView[kMaxChannels] = {};
     std::atomic<bool> corruptionDetected { false };
+    std::atomic<std::uint64_t> corruptionEventCount { 0 };
+    std::atomic<std::uint64_t> corruptionAutoClearCount { 0 };
+    std::atomic<std::uint32_t> consecutiveCorruptionAutoClearCount { 0 };
+    std::atomic<bool> hardFallbackActive { false };
+
+    static constexpr std::uint32_t kHardFallbackAutoClearThreshold = 4;
 };

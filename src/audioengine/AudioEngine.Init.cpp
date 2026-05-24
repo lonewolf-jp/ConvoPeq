@@ -9,8 +9,6 @@ static void diagLog(const juce::String& message)
 }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_INIT_LIFECYCLE)
-
 void AudioEngine::initialize()
 {
     convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release); // release: process の acquire と HB
@@ -219,9 +217,7 @@ void AudioEngine::onSnapshotRequired(void* userData, uint64_t generation)
 void AudioEngine::debugAssertNotAudioThread() const
 {
     // Worker Thread 専用チェック。
-    // 現状は簡易的に Message Thread でないことを確認する。
-    // （Worker Thread は Message Thread ではないため、このチェックで十分）
+    // Message Thread ではないことに加えて Audio Thread でもないことを確認する。
     jassert(!juce::MessageManager::getInstance()->isThisTheMessageThread());
+    jassert(!convo::numeric_policy::isAudioThread());
 }
-
-#endif // CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_INIT_LIFECYCLE

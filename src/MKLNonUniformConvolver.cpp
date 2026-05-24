@@ -308,6 +308,11 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
     const double lcFcEnd   = (spec.lcMode == LCMode::Soft) ?  6.0 :  8.0;
     const double lcFcStart = (spec.lcMode == LCMode::Soft) ? 15.0 : 18.0;
 
+    convo::ScopedAlignedPtr<double> reusableGain;
+    convo::ScopedAlignedPtr<double> reusableGainInterleaved;
+    int reusableGainCapacity = 0;
+    int reusableGainInterleavedCapacity = 0;
+
     for (int li = 0; li < m_numActiveLayers; ++li)
     {
         Layer& l = m_layers[li];
@@ -318,14 +323,18 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
         const int cSize  = l.complexSize;
         const int stride = l.partStride;
 
-        convo::ScopedAlignedPtr<double> gain(
-            static_cast<double*>(mkl_malloc(static_cast<size_t>(cSize) * sizeof(double), 64)));
-        if (!gain.get())
+        if (reusableGainCapacity < cSize || reusableGain.get() == nullptr)
+        {
+            reusableGain.reset(static_cast<double*>(mkl_malloc(static_cast<size_t>(cSize) * sizeof(double), 64)));
+            reusableGainCapacity = (reusableGain.get() != nullptr) ? cSize : 0;
+        }
+        if (!reusableGain.get())
         {
             juce::Logger::writeToLog("MKLNonUniformConvolver: OOM in applySpectrumFilter for layer " + juce::String(li));
             continue;
         }
-        std::fill_n(gain.get(), cSize, 1.0);
+        double* gain = reusableGain.get();
+        std::fill_n(gain, cSize, 1.0);
 
         // ── HC ゲイン ──
         {
@@ -390,16 +399,27 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
 
         // ── 全パーティションの irFreqDomain に gain[] を適用 ──
         {
-            convo::ScopedAlignedPtr<double> gainIL(
-                static_cast<double*>(mkl_malloc(static_cast<size_t>(cSize) * 2 * sizeof(double), 64)));
-            if (!gainIL.get()) continue;
+            const int requiredInterleavedSize = cSize * 2;
+            if (reusableGainInterleavedCapacity < requiredInterleavedSize
+                || reusableGainInterleaved.get() == nullptr)
+            {
+                reusableGainInterleaved.reset(static_cast<double*>(
+                    mkl_malloc(static_cast<size_t>(requiredInterleavedSize) * sizeof(double), 64)));
+                reusableGainInterleavedCapacity = (reusableGainInterleaved.get() != nullptr)
+                    ? requiredInterleavedSize
+                    : 0;
+            }
+            if (!reusableGainInterleaved.get())
+                continue;
+
+            double* gainIL = reusableGainInterleaved.get();
             for (int k = 0; k < cSize; ++k)
-                gainIL.get()[2 * k] = gainIL.get()[2 * k + 1] = gain[k];
+                gainIL[2 * k] = gainIL[2 * k + 1] = gain[k];
 
             for (int p = 0; p < l.numParts; ++p)
             {
                 double* slot = l.irFreqDomain + p * stride;
-                vdMul(cSize * 2, slot, gainIL.get(), slot);
+                vdMul(cSize * 2, slot, gainIL, slot);
                 deinterleaveComplex(slot,
                                     l.irFreqReal + static_cast<size_t>(p) * l.complexSize,
                                     l.irFreqImag + static_cast<size_t>(p) * l.complexSize,

@@ -57,8 +57,6 @@ static void calcMagnitudesForBand(const EQCoeffsBiquad& c,
 }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CALC_EQ_RESPONSE)
-
 void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
                                      float* outMagnitudesR,
                                      const std::complex<double>* zArray,
@@ -249,5 +247,3 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
             if (!std::isfinite(outMagnitudesR[k])) outMagnitudesR[k] = 1.0f;
     }
 }
-
-#endif // CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CALC_EQ_RESPONSE

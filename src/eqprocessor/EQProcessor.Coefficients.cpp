@@ -14,20 +14,6 @@
 #include "audioengine/AtomicAccess.h"
 
 //============================================================================
-// Destruction handler for EBR (Epoch-Based Reclamation)
-// L5: epoch-only 削除。RefCountedDeferred の二重ライフタイムモデルを廃止。
-//============================================================================
-static void deleteBandNodePtr_coeff(void* p) { delete static_cast<EQProcessor::BandNode*>(p); }
-
-static void retireBandNode(convo::EpochDomain& epochDomain, EQProcessor::BandNode* node)
-{
-    if (node) {
-        const uint64_t epoch = epochDomain.currentEpoch();
-        epochDomain.enqueueRetire(node, deleteBandNodePtr_coeff, epoch);
-    }
-}
-
-//============================================================================
 // BandNode生成 (Message Thread)
 //============================================================================
 EQProcessor::BandNode* EQProcessor::createBandNode(int band, const EQState& state) const
@@ -78,7 +64,7 @@ void EQProcessor::updateBandNode(int band)
     // L5 fix: retire old node BEFORE advanceEpoch so epoch N is captured (not N+1).
     if (oldNode)
     {
-        retireBandNode(m_epochDomain, oldNode);
+        retireBandNodeDeferred(oldNode);
     }
     m_epochDomain.advanceEpoch();
 }

@@ -36,8 +36,6 @@ namespace
     }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_LATENCY_QUERY)
-
 double AudioEngine::getProcessingSampleRate() const
 {
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
@@ -130,15 +128,9 @@ AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
     return breakdown;
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_LATENCY)
-
 double AudioEngine::estimateOversamplingLatencySamples(int oversamplingFactor,
                                                        OversamplingType oversamplingType,
                                                        double baseSampleRate) noexcept
 {
     return estimateOversamplingLatencySamplesImpl(oversamplingFactor, oversamplingType, baseSampleRate);
 }
-
-#endif

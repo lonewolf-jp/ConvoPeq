@@ -89,20 +89,30 @@
 		{
 			"label": "CodeGraph Full Index",
 			"type": "shell",
-			"command": "${workspaceFolder}\\.venv-codegraph\\Scripts\\codegraph-mcp.exe",
+			"command": "powershell",
 			"args": [
-				"index",
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\tools\\codegraph\\run-codegraph-index.ps1",
+				"-RepoRoot",
 				"${workspaceFolder}",
-				"--full"
+				"-Full"
 			],
 			"problemMatcher": []
 		},
 		{
 			"label": "CodeGraph Incremental Index",
 			"type": "shell",
-			"command": "${workspaceFolder}\\.venv-codegraph\\Scripts\\codegraph-mcp.exe",
+			"command": "powershell",
 			"args": [
-				"index",
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\tools\\codegraph\\run-codegraph-index.ps1",
+				"-RepoRoot",
 				"${workspaceFolder}"
 			],
 			"problemMatcher": []
@@ -114,6 +124,19 @@
 			"args": [
 				"stats",
 				"${workspaceFolder}"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "CodeGraph Apply Local Patch",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\tools\\codegraph\\patch-codegraph-tools.ps1"
 			],
 			"problemMatcher": []
 		},

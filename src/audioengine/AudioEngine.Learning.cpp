@@ -2,8 +2,6 @@
 #include "AudioEngine.h"
 #include "NoiseShaperLearner.h"
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_START)
-
 void AudioEngine::startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, bool resume)
 {
     if (noiseShaperLearner == nullptr)
@@ -29,9 +27,6 @@ void AudioEngine::startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, 
     }
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_STOP)
 
 void AudioEngine::stopNoiseShaperLearning()
 {
@@ -49,11 +44,10 @@ void AudioEngine::stopNoiseShaperLearning()
 
     if (noiseShaperLearner)
         noiseShaperLearner->stopLearning();
+
+    convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_RESET)
 
 void AudioEngine::resetLearningControlState() noexcept
 {
@@ -68,11 +62,9 @@ void AudioEngine::resetLearningControlState() noexcept
     requestedLearningResume = false;
     requestedLearningGeneration = pendingIRGeneration;
     currentIRGeneration = pendingIRGeneration;
+    convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_DEFERRED)
 
 void AudioEngine::processDeferredLearningActions()
 {
@@ -93,9 +85,6 @@ void AudioEngine::processDeferredLearningActions()
     }
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_PROCESS)
 
 void AudioEngine::processLearningCommands() noexcept
 {
@@ -129,6 +118,7 @@ void AudioEngine::processLearningCommands() noexcept
                 if (!dspReady)
                 {
                     learningRuntimeState = LearningRuntimeState::WaitingForDSP;
+                    convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
                     break;
                 }
 
@@ -153,10 +143,14 @@ void AudioEngine::processLearningCommands() noexcept
                 };
 
                 if (enqueueLearnerDispatch(startAction))
+                {
                     learningRuntimeState = LearningRuntimeState::Running;
+                    convo::publishAtomic(adaptiveCaptureActiveRt, true, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
+                }
                 else
                 {
                     learningRuntimeState = LearningRuntimeState::WaitingForDSP;
+                    convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
                     DBG("[AudioEngine] processLearningCommands: learner start queue overflow");
                 }
                 break;
@@ -179,6 +173,7 @@ void AudioEngine::processLearningCommands() noexcept
                 }
 
                 learningRuntimeState = LearningRuntimeState::Idle;
+                convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
                 break;
             }
 
@@ -207,6 +202,7 @@ void AudioEngine::processLearningCommands() noexcept
                 {
                     learningRuntimeState = LearningRuntimeState::Idle;
                 }
+                convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
                 break;
             }
 
@@ -226,9 +222,11 @@ void AudioEngine::processLearningCommands() noexcept
                     if (enqueueLearnerDispatch(startAction))
                     {
                         learningRuntimeState = LearningRuntimeState::Running;
+                        convo::publishAtomic(adaptiveCaptureActiveRt, true, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
                     }
                     else
                     {
+                        convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
                         DBG("[AudioEngine] processLearningCommands: DSPReady learner start queue overflow");
                     }
                 }
@@ -238,9 +236,6 @@ void AudioEngine::processLearningCommands() noexcept
     }
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_HELPERS)
 
 namespace
 {
@@ -382,9 +377,13 @@ void AudioEngine::selectAdaptiveCoeffBankForCurrentSettings() noexcept
 
         if (noiseShaperLearner)
         {
-            juce::MessageManager::callAsync([this, newBankIndex]() {
-                if (auto* learner = noiseShaperLearner.get())
-                    learner->onCoeffBankChanged(newBankIndex);
+            const juce::WeakReference<AudioEngine> weakEngine(this);
+            juce::MessageManager::callAsync([weakEngine, newBankIndex]() {
+                if (auto* engine = weakEngine.get())
+                {
+                    if (auto* learner = engine->noiseShaperLearner.get())
+                        learner->onCoeffBankChanged(newBankIndex);
+                }
             });
         }
     }
@@ -588,5 +587,3 @@ void AudioEngine::setAdaptiveNoiseShaperState(int bankIndex, const convo::NoiseS
     std::lock_guard<std::mutex> lock(bank.stateMutex);
     bank.state = inState;
 }
-
-#endif // CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_HELPERS

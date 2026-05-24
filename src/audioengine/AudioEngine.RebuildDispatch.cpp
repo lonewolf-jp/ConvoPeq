@@ -44,8 +44,6 @@ static bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
 }
 
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_DISPATCH)
-
 void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
                                       RebuildTelemetryReason reason,
                                       RebuildTelemetryClass rebuildClass,
@@ -310,9 +308,6 @@ void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
                         RebuildTelemetryPolicy::Replaceable);
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_EXECUTE)
 
 //--------------------------------------------------------------
 // requestRebuild - DSPグラフの再構築 (Message Thread)
@@ -508,9 +503,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool by
         }
     }
 }
-#endif
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_EXECUTE)
 
 
 void AudioEngine::stopRebuildThread()
@@ -527,9 +520,7 @@ void AudioEngine::stopRebuildThread()
         rebuildThread.join();
 
 }
-#endif
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_EXECUTE)
 
 
 void AudioEngine::rebuildThreadLoop()
@@ -700,4 +691,3 @@ void AudioEngine::rebuildThreadLoop()
 
     convo::publishAtomic(rebuildThreadIsRunning, false, std::memory_order_release);
 }
-#endif

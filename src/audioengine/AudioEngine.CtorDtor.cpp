@@ -10,8 +10,6 @@ static void diagLog(const juce::String& message)
 }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CTOR_DTOR)
-
 AudioEngine::AudioEngine()
     : eqCacheManager(*this)
     , uiEqEditor(*this)
@@ -60,6 +58,8 @@ AudioEngine::~AudioEngine()
 
         convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel); // acq_rel: rebuild observer の acquire と HB
 
+        // activeDSP / fadingOutDSP はここでスロットを切り離すだけにして、
+        // 実体の解放は retireDSP() → deferred delete / epoch drain に寄せる。
         {
             constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
             DSPCore* activeRaw = activeDSP.get();
@@ -76,6 +76,8 @@ AudioEngine::~AudioEngine()
                          resolveFadingDSPFromRuntimeWorldOnly(getRuntimePublishView().graph),
                          nullptr);
 
+        // pendingTask.currentDSP は worker 側の未コミット生成物なので、
+        // ここで回収して以後の commit 経路に残さない。
         if (hasPendingTask)
         {
             if (pendingTask.currentDSP)
@@ -124,5 +126,3 @@ AudioEngine::~AudioEngine()
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release); // release: isShuttingDown の acquire と HB
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
 }
-
-#endif // defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CTOR_DTOR)

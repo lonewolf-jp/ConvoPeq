@@ -1,8 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_TO_BUFFER)
-
 void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& source,
                                            juce::AudioBuffer<float>& destination,
                                            LockFreeAudioRingBuffer& analyzerFifo,
@@ -32,5 +30,3 @@ void AudioEngine::DSPCore::processToBuffer(const juce::AudioSourceChannelInfo& s
     juce::AudioSourceChannelInfo destinationInfo(&destination, 0, numSamples);
     process(destinationInfo, analyzerFifo, inputLevelLinear, outputLevelLinear, state);
 }
-
-#endif

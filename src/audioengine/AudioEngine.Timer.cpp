@@ -9,8 +9,6 @@ static void diagLog(const juce::String& message)
 }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_TIMER_CALLBACK)
-
 void AudioEngine::timerCallback()
 {
     const auto* runtimeWorld = runtimeStore.observe();
@@ -166,7 +164,7 @@ void AudioEngine::timerCallback()
         const auto* currentSnapshot = observedCurrent.get();
         const uint64_t currentEqHash = (currentSnapshot != nullptr) ? currentSnapshot->eqCoeffHash : 0;
         const bool hasEqHash = (currentEqHash != 0);
-        const bool lookupMiss = hasEqHash && (eqCacheManager.get(currentEqHash) == nullptr);
+        const bool lookupMiss = hasEqHash && !eqCacheManager.containsNonRt(currentEqHash);
 
         if (lookupMiss)
         {
@@ -504,5 +502,3 @@ void AudioEngine::timerCallback()
     uiEqEditor.cleanup();
     uiConvolverProcessor.cleanup();
 }
-
-#endif // CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_TIMER_CALLBACK

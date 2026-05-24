@@ -11,8 +11,6 @@ static void retireEQCache(AudioEngine& owner, EQCoeffCache* cache)
 }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CACHE_MANAGER)
-
 AudioEngine::EQCacheManager::EQCacheManager(AudioEngine& ownerIn) noexcept
     : owner(ownerIn)
 {
@@ -70,6 +68,12 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     if (cache == nullptr)
         return nullptr;
 
+    auto cacheDeleter = [this](EQCoeffCache* p) noexcept
+    {
+        retireEQCache(owner, p);
+    };
+    std::unique_ptr<EQCoeffCache, decltype(cacheDeleter)> cacheHolder(cache, cacheDeleter);
+
     std::lock_guard<std::mutex> lock(writeMutex);
 
     drainDeferredMapsUnderLock();
@@ -86,25 +90,28 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     if (it != currentMap->map.end())
     {
         // 先に追加されたキャッシュを採用し、新規作成分を破棄
-        retireEQCache(owner, cache);
+        // cacheHolder が新規作成分を安全に回収する
         return it->second;
     }
 
-    CacheMap* newMap = nullptr;
+    std::unique_ptr<CacheMap> newMap;
     try
     {
-        newMap = new CacheMap(*currentMap);
+        newMap = std::make_unique<CacheMap>(*currentMap);
+        newMap->map.emplace(hash, cacheHolder.get());
     }
     catch (const std::bad_alloc&)
     {
-        retireEQCache(owner, cache);
+        return nullptr;
+    }
+    catch (...)
+    {
         return nullptr;
     }
 
-    newMap->map[hash] = cache;
-    storeNewMap(newMap);
+    storeNewMap(newMap.release());
 
-    return cache;
+    return cacheHolder.release();
 }
 
 EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
@@ -115,6 +122,18 @@ EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
 
     const auto it = currentMap->map.find(hash);
     return (it != currentMap->map.end()) ? it->second : nullptr;
+}
+
+bool AudioEngine::EQCacheManager::containsNonRt(uint64_t hash) noexcept
+{
+    std::lock_guard<std::mutex> lock(writeMutex);
+    drainDeferredMapsUnderLock();
+
+    const CacheMap* currentMap = loadMap();
+    if (currentMap == nullptr)
+        return false;
+
+    return currentMap->map.find(hash) != currentMap->map.end();
 }
 
 void AudioEngine::EQCacheManager::releaseCache(EQCoeffCache* cache) noexcept
@@ -135,5 +154,3 @@ AudioEngine::EQCacheManager::~EQCacheManager()
 
     enqueueFallbackMaps.clear();
 }
-
-#endif // CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CACHE_MANAGER

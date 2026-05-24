@@ -524,16 +524,15 @@ public:
         convo::ScopedAlignedPtr<double> alignedR;
         int alignedCapacity = 0;                  // 現在確保済み容量（再確保判定用）
 
-        int maxSamplesPerBlock = 0;               // 入力側最大ブロックサイズ (SAFE_MAX_BLOCK_SIZE)
+        int maxSamplesPerBlock = 0;               // ホスト指定の入力ブロック上限（DSPCore::prepare() で設定）
 
         // ─────────────────────────────────────────────────────────────
         // 【Issue 3 修正】内部処理用最大バッファサイズ
-        // 理由: Oversampling有効時（最大8x）、processSamplesUp()後の
-        //      ブロックサイズがSAFE_MAX×8になるため。
-        //      固定で×8確保することでRCU再構築時のresizeを完全排除。
-        //      メモリ増加 ≈ 8.4MB（現代PCでは無視できるレベル）
+        // 理由: Oversampling有効時（最大8x）、processSamplesUp() 後の
+        //      ブロックサイズが SAFE_MAX_BLOCK_SIZE × 8 まで拡大しうるため。
+        //      固定で ×8 確保することで RCU 再構築時の resize を回避する。
         // ─────────────────────────────────────────────────────────────
-        int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（常にSAFE_MAX×8）
+        int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（SAFE_MAX_BLOCK_SIZE × 8）
         static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
         AudioEngine* ownerEngine = nullptr;
 
@@ -576,8 +575,8 @@ public:
 
     class Listener
     {
-     public:
-         virtual ~Listener() = default;
+    public:
+        virtual ~Listener() = default;
         virtual void eqSettingsChanged() = 0;
     };
 
@@ -829,14 +828,6 @@ public:
     // acquire: Audio Thread の release (debugLastCreatedEqHash publish) と HB し、診断ハッシュを取得。
     uint64_t getLastCreatedEqHashForDebug() const noexcept { return consumeAtomic(debugLastCreatedEqHash, std::memory_order_acquire); }
 
-    const convo::EQParameters& getLatestEqParamsFallback(uint64_t& outHash) const noexcept
-    {
-        // acquire: latestEqFallbackReadIndex の release publish と HB し、最新のインデックスを取得。
-        const int index = consumeAtomic(latestEqFallbackReadIndex, std::memory_order_acquire);
-        outHash = latestEqHashForFallback[(size_t) index];
-        return latestEqParamsForFallback[(size_t) index];
-    }
-
     void setSoftClipEnabled(bool enabled);
     bool isSoftClipEnabled() const;
 
@@ -1025,41 +1016,31 @@ private:
     static constexpr int kCommitProducerEpochReaderIndex = 2;
     static constexpr int kCommitConsumerEpochReaderIndex = 3;
 
-    void recordAudioCallbackProcessingTimeUs(int numSamples, std::int64_t startTicks) noexcept
+    void recordAudioCallbackProcessingStats(int numSamples, double processTimeUs) noexcept
     {
         if (!consumeAtomic(cliProcessingTelemetryEnabled_, std::memory_order_relaxed))
             return;
 
-        const std::int64_t endTicks = juce::Time::getHighResolutionTicks();
-        const std::int64_t deltaTicks = endTicks - startTicks;
-        if (deltaTicks <= 0)
-            return;
-
-        const double ticksPerSecond = static_cast<double>(juce::Time::getHighResolutionTicksPerSecond());
-        if (ticksPerSecond <= 0.0)
-            return;
-
-        const double processTimeUs = (static_cast<double>(deltaTicks) * 1000000.0) / ticksPerSecond;
-        publishAtomic(cliTelemetryLastUs_, processTimeUs, std::memory_order_relaxed);
-        publishAtomic(cliTelemetryLastBlockSamples_, numSamples, std::memory_order_relaxed);
         convo::fetchAddAtomic(cliTelemetryCallbackCount_, static_cast<std::uint64_t>(1), std::memory_order_relaxed);
+        publishAtomic(cliTelemetryLastBlockSamples_, numSamples, std::memory_order_relaxed);
+        publishAtomic(cliTelemetryLastUs_, processTimeUs, std::memory_order_relaxed);
 
-        double observedAccum = consumeAtomic(cliTelemetryAccumulatedUs_, std::memory_order_relaxed);
+        double expectedAccum = consumeAtomic(cliTelemetryAccumulatedUs_, std::memory_order_relaxed);
         while (!convo::compareExchangeAtomic(cliTelemetryAccumulatedUs_,
-                                             observedAccum,
-                                             observedAccum + processTimeUs,
-                                             std::memory_order_relaxed,
-                                             std::memory_order_relaxed))
+                             expectedAccum,
+                             expectedAccum + processTimeUs,
+                             std::memory_order_relaxed,
+                             std::memory_order_relaxed))
         {
         }
 
-        double observedMax = consumeAtomic(cliTelemetryMaxUs_, std::memory_order_relaxed);
-        while (processTimeUs > observedMax
-            && !convo::compareExchangeAtomic(cliTelemetryMaxUs_,
-                                             observedMax,
-                                             processTimeUs,
-                                             std::memory_order_relaxed,
-                                             std::memory_order_relaxed))
+        double expectedMax = consumeAtomic(cliTelemetryMaxUs_, std::memory_order_relaxed);
+         while (processTimeUs > expectedMax
+             && !convo::compareExchangeAtomic(cliTelemetryMaxUs_,
+                                  expectedMax,
+                                  processTimeUs,
+                                  std::memory_order_relaxed,
+                                  std::memory_order_relaxed))
         {
         }
     }
@@ -1096,6 +1077,7 @@ private:
                                   int maxBlockSize,
                                   uint64_t generation);
         EQCoeffCache* get(uint64_t hash) noexcept;
+        bool containsNonRt(uint64_t hash) noexcept;
         void releaseCache(EQCoeffCache* cache) noexcept;
         ~EQCacheManager();
 
@@ -1168,8 +1150,12 @@ public:
     //----------------------------------------------------------
     // 状態管理
     //----------------------------------------------------------
-    convo::NonOwningPtr<DSPCore> activeDSP { nullptr }; // Non-RT ownership holder
-    convo::NonOwningPtr<DSPCore> fadingOutDSP { nullptr }; // Non-RT fading slot holder
+    // activeDSP: 現行 DSP の非所有スロット。
+    //            実際の解放は retireDSP() → deferred delete / retire queue で行う。
+    convo::NonOwningPtr<DSPCore> activeDSP { nullptr };
+    // fadingOutDSP: フェード中 DSP の非所有スロット。
+    //               寿命は publish/retire の順序に従い、activeDSP と独立して非所有で管理する。
+    convo::NonOwningPtr<DSPCore> fadingOutDSP { nullptr };
 
     inline DSPCore* exchangeFadingOutDSP(DSPCore* value) noexcept
     {
@@ -1181,6 +1167,17 @@ public:
     }
     struct RuntimePublishView
     {
+        RuntimePublishView(convo::EpochDomain& domain, int readerIndex, const convo::RuntimeGraph* graphIn) noexcept
+            : observed(domain, readerIndex), graph(graphIn)
+        {
+        }
+
+        RuntimePublishView(const RuntimePublishView&) = delete;
+        RuntimePublishView& operator=(const RuntimePublishView&) = delete;
+        RuntimePublishView(RuntimePublishView&&) noexcept = default;
+        RuntimePublishView& operator=(RuntimePublishView&&) noexcept = default;
+
+        convo::ObservedRuntime observed;
         const convo::RuntimeGraph* graph = nullptr;
     };
 
@@ -1294,6 +1291,7 @@ public:
     #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
     alignas(64) std::atomic<convo::NoiseShaperLearningMode> pendingLearningMode { convo::NoiseShaperLearningMode::Short };
+    alignas(64) std::atomic<bool> adaptiveCaptureActiveRt { false };
     alignas(64) std::atomic<uint64_t> globalCaptureSessionId { 1 };
     #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
@@ -1372,7 +1370,7 @@ public:
     //----------------------------------------------------------
     // Note: This function performs memory allocation (including MKL) and other blocking operations
     // such as IR resampling. It MUST only be called from the message thread.
-    // The prepareToPlay() method ensures this by using MessageManager::callAsync if necessary.
+    // prepareToPlay() routes to the message thread before invoking this helper.
     void requestRebuild(double sampleRate, int samplesPerBlock, bool bypassLegacySuppression = false);
     void commitNewDSP(DSPCore* newDSP, int generation);
     void prepareCommit(DSPCore* newDSP, int generation);
@@ -1394,7 +1392,8 @@ public:
     bool hasPublicationLogPending() noexcept;
     void processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
                              const convo::GlobalSnapshot* snap,
-                             bool isFadingTarget);
+                             bool isFadingTarget,
+                             const convo::RuntimeGraph* runtimeGraphHint = nullptr);
     void handleAsyncUpdate() override;
 
     static void onSnapshotRequired(void* userData, uint64_t generation);
@@ -1872,8 +1871,10 @@ public:
 
     inline RuntimePublishView getRuntimePublishView() const noexcept
     {
+        // RuntimePublishView は ObservedRuntime を保持し、このスコープ中は
+        // control reader が EpochDomain に参加した状態で runtime graph を参照する。
         const auto* world = runtimeStore.observe();
-        return RuntimePublishView { world != nullptr ? &world->graph : nullptr };
+        return RuntimePublishView { m_epochDomain, kControlEpochReaderIndex, world != nullptr ? &world->graph : nullptr };
     }
 
     inline convo::RuntimeGraph makeRuntimeGraphState(const convo::EngineRuntime& state) const noexcept
@@ -2263,7 +2264,7 @@ public:
         const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
         snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
         snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
-        snapshot.adaptiveCaptureEnabled = isNoiseShaperLearning();
+        snapshot.adaptiveCaptureEnabled = consumeAtomic(adaptiveCaptureActiveRt, std::memory_order_acquire);
         if (snap != nullptr)
         {
             snapshot.snapshotEqParams = &snap->eqParams;
@@ -2278,17 +2279,12 @@ public:
         const convo::EQParameters* eqParams = snapshot.snapshotEqParams;
         uint64_t eqCoeffHash = snapshot.snapshotEqCoeffHash;
 
-        if (eqParams == nullptr)
-        {
-            uint64_t fallbackHash = 0;
-            eqParams = &getLatestEqParamsFallback(fallbackHash);
-            eqCoeffHash = fallbackHash;
-        }
-
-        const EQCoeffCache* eqCache = eqCacheManager.get(eqCoeffHash);
+        const EQCoeffCache* eqCache = (eqParams != nullptr && eqCoeffHash != 0)
+            ? eqCacheManager.get(eqCoeffHash)
+            : nullptr;
         // ISR厳密化: hash から cache を解決できない場合は EQ を fail-close で bypass する。
         // 非snapshot系フォールバックへ降りるより、公開済み不変状態を維持することを優先する。
-        const bool eqBypassedFailClosed = snapshot.eqBypassed || (eqCache == nullptr);
+        const bool eqBypassedFailClosed = snapshot.eqBypassed || (eqParams == nullptr) || (eqCache == nullptr);
 
         return DSPCore::ProcessingState {
             .eqBypassed = eqBypassedFailClosed,
@@ -2556,8 +2552,20 @@ inline bool enqueueDeferredDeleteNonRt(void* ptr, void (*deleter)(void*)) noexce
     if (enqueueRetireEpochBounded(ptr, deleter, epoch))
         return true;
 
-    std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-    deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry{ ptr, deleter, epoch });
+    {
+        std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
+        deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry{ ptr, deleter, epoch });
+        if (deferredDeleteFallbackQueue.size() >= 1024)
+        {
+            juce::Logger::writeToLog("[DIAG] deferredDeleteFallbackQueue backlog="
+                + juce::String(static_cast<juce::int64>(deferredDeleteFallbackQueue.size())));
+        }
+    }
+
+    // Fallback queue remains bounded only if we periodically retry enqueue.
+    // Kick one best-effort drain here so entries do not accumulate indefinitely
+    // when timer cadence is low.
+    drainDeferredRetireQueues(false);
     return true;
 }
 
@@ -2571,18 +2579,16 @@ inline void retireDSP(DSPCore* dsp) noexcept
     if (dsp == nullptr)
         return;
 
+    // 退役の唯一の入口。
+    // ここでは「公開済みハンドルの解放」と「実体の deferred delete 予約」をまとめて行い、
+    // activeDSP / fadingOutDSP / publicationLog など複数の非所有スロットからの回収責務を集約する。
     if (!retireDSPHandleForRuntime(dsp))
         return;
 
     convo::fetchAddAtomic(g_runtimeRetireCount,
                          static_cast<std::uint64_t>(1),
                          std::memory_order_acq_rel);
-    if (enqueueDeferredDeleteNonRt(dsp, [](void* p)
-    {
-        auto* core = static_cast<DSPCore*>(p);
-        core->~DSPCore();
-        convo::aligned_free(core);
-    }))
+    if (enqueueDeferredDeleteNonRt(dsp, &AudioEngine::destroyDSPCoreNode))
         return;
 }
 
@@ -2684,10 +2690,11 @@ public:
 
     // リリースキューに溜まったエントリを解放可能なものから処理する
     void processDeferredReleases();
+    static void destroyDSPCoreNode(void* p) noexcept;
 
     // スナップショット基盤（Phase 2）
     // ==================================================================
-    convo::EpochDomain m_epochDomain;
+    mutable convo::EpochDomain m_epochDomain;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
     convo::RCUReader audioThreadRcuReader { m_epochDomain };
     // ENGINE_CONTROL: Audio thread での deletion queue overflow 退避スロット。
@@ -2747,10 +2754,6 @@ public:
     std::atomic<bool> m_pendingIRChange{ false };
     std::atomic<bool> m_pendingNSChange{ false };
     std::atomic<bool> m_pendingAGCChange{ false };
-    std::array<convo::EQParameters, 2> latestEqParamsForFallback{};
-    std::array<uint64_t, 2> latestEqHashForFallback{ 0, 0 };
-    std::atomic<int> latestEqFallbackReadIndex{ 0 };
-
     // Audio Thread -> Message Thread 反映確認用 (RT安全: atomic store/fetch_add のみ)
     std::atomic<uint64_t> debugLastCreatedEqHash{ 0 };
     std::atomic<uint64_t> lastEnqueuedSnapshotDebounceKey_{ 0 };

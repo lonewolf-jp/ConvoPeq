@@ -5,8 +5,12 @@
 namespace {
 static void diagLog(const juce::String& message)
 {
+#if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
     DBG(message);
     juce::Logger::writeToLog(message);
+#else
+    juce::ignoreUnused(message);
+#endif
 }
 
 static void destroyPublicationIntentNode(void* ptr) noexcept
@@ -183,8 +187,6 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
     evidenceExporter_.exportEvidence();
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_COMMIT_PREPARE)
-
 void AudioEngine::appendPublicationIntent(DSPCore* newDSP, int generation, int epochReaderIndex) noexcept
 {
     if (newDSP == nullptr)
@@ -300,9 +302,6 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
     triggerAsyncUpdate();
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_COMMIT_EXECUTE)
 bool AudioEngine::hasPublicationLogPending() noexcept
 {
     PublicationIntent* const cursor = convo::consumeAtomic(publicationLog.consumedTail, std::memory_order_acquire); // acquire: executeCommit の publishAtomic release と HB
@@ -367,10 +366,6 @@ void AudioEngine::executeCommit()
     if (hasRemaining && !isShutdownInProgress())
         triggerAsyncUpdate();
 }
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_COMMIT_EXECUTE)
-
 
 void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 {
@@ -891,4 +886,3 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     if (!exchangeAtomic(pendingChangeNotification, true))
         triggerAsyncUpdate();
 }
-#endif

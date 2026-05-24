@@ -548,18 +548,14 @@ void ConvolverProcessor::cleanup()
     // スレッドが終了しない場合でも、一定数を超えたら強制削除してメモリを解放する。
     // [FIX] detached thread はプロセス終了時に未定義動作を引き起こすため、
     //       同期的なチェックと削除に切り替える。
-    while (loaderTrashBin.size() > 2)
+    if (loaderTrashBin.size() > 2)
     {
-        // 最も古いスレッドが終了しているか非ブロックで確認
-        if (loaderTrashBin.front() && loaderTrashBin.front()->waitForThreadToExit(0))
+        for (auto it = loaderTrashBin.begin(); it != loaderTrashBin.end() && loaderTrashBin.size() > 2; )
         {
-            // 終了済みなら安全に削除 (unique_ptrのデストラクタが呼ばれる)
-            loaderTrashBin.pop_front();
-        }
-        else
-        {
-            // 終了していないスレッドが見つかったら、今回はここまで。次回タイマーで再試行。
-            break;
+            if (*it != nullptr && (*it)->waitForThreadToExit(0))
+                it = loaderTrashBin.erase(it);
+            else
+                ++it;
         }
     }
 }

@@ -9,8 +9,6 @@ static void diagLog(const juce::String& message)
 }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_UI_EVENTS)
-
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
     if (source == &uiEqEditor)
@@ -204,5 +202,3 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
         }
     }
 }
-
-#endif // CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_UI_EVENTS

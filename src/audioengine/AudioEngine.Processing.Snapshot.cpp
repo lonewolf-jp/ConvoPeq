@@ -2,7 +2,6 @@
 #include "AudioEngine.h"
 #include "NoiseShaperLearner.h"
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_SNAPSHOT)
 namespace
 {
     inline double absDiffNoLibm(double a, double b) noexcept
@@ -10,13 +9,11 @@ namespace
         return absNoLibm(a - b);
     }
 }
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_SNAPSHOT)
 
 void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
                                       const convo::GlobalSnapshot* snap,
-                                      bool isFadingTarget)
+                                      bool isFadingTarget,
+                                      const convo::RuntimeGraph* runtimeGraphHint)
 {
     ASSERT_AUDIO_THREAD();
 
@@ -26,8 +23,12 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
         return;
     }
 
-    const auto runtimePublishView = getRuntimePublishView();
-    const auto* runtimeGraph = runtimePublishView.graph;
+    const auto* runtimeGraph = runtimeGraphHint;
+    if (runtimeGraph == nullptr)
+    {
+        const auto runtimePublishView = getRuntimePublishView();
+        runtimeGraph = runtimePublishView.graph;
+    }
     DSPCore* dsp = isFadingTarget
         ? resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph)
         : resolveActiveDSPFromRuntimeWorldOnly(runtimeGraph);
@@ -55,5 +56,3 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     auto* outMeter = isFadingTarget ? nullptr : &outputLevelLinear;
     dsp->process(bufferToFill, analyzerFifo, inMeter, outMeter, procState);
 }
-
-#endif

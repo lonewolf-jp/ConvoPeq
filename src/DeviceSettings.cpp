@@ -3,6 +3,7 @@
 //============================================================================
 #include "DeviceSettings.h"
 #include "NoiseShaperLearningComponent.h"
+#include <cmath>
 
 namespace
 {
@@ -33,6 +34,17 @@ juce::String makeAdaptiveCoeffPropertyName(double sampleRate, int bitDepth, int 
 {
     return "adaptiveCoeff_" + juce::String(static_cast<int>(sampleRate + 0.5)) + "_"
            + juce::String(bitDepth) + "_" + juce::String(coeffIndex);
+}
+
+double sanitizeFiniteOrDefault(double value, double fallback) noexcept
+{
+    return std::isfinite(value) ? value : fallback;
+}
+
+double sanitizeFiniteClamped(double value, double fallback, double minValue, double maxValue) noexcept
+{
+    const double finite = sanitizeFiniteOrDefault(value, fallback);
+    return juce::jlimit(minValue, maxValue, finite);
 }
 }
 
@@ -663,7 +675,10 @@ static void stringToDoubleArray(const juce::String& str, double* arr, int size)
     juce::StringArray strArr;
     strArr.addTokens(str, ",", "");
     for (int i = 0; i < std::min(size, strArr.size()); ++i)
-        arr[i] = strArr[i].getDoubleValue();
+    {
+        const double parsed = strArr[i].getDoubleValue();
+        arr[i] = sanitizeFiniteOrDefault(parsed, 0.0);
+    }
 }
 
 void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
@@ -762,15 +777,15 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
                     auto* stateElement = bankElement->getChildByName("State");
                     if (stateElement != nullptr)
                     {
-                        NoiseShaperLearner::State state;
+                        NoiseShaperLearner::State state{};
                         stringToDoubleArray(stateElement->getStringAttribute("mean"), state.mean, 9);
                         stringToDoubleArray(stateElement->getStringAttribute("covarianceUpperTriangle"), state.covarianceUpperTriangle, 45);
-                        state.sigma = stateElement->getDoubleAttribute("sigma", 0.12);
+                        state.sigma = sanitizeFiniteClamped(stateElement->getDoubleAttribute("sigma", 0.12), 0.12, 0.0, 10.0);
                         stringToDoubleArray(stateElement->getStringAttribute("bestCoefficients"), state.bestCoefficients, 9);
-                        state.elapsedPlaybackSeconds = stateElement->getDoubleAttribute("elapsedPlaybackSeconds", 0.0);
+                        state.elapsedPlaybackSeconds = sanitizeFiniteClamped(stateElement->getDoubleAttribute("elapsedPlaybackSeconds", 0.0), 0.0, 0.0, 1.0e12);
                         state.currentPhase = stateElement->getIntAttribute("currentPhase", 1);
                         state.iteration = stateElement->getIntAttribute("iteration", 0);
-                        state.bestScore = stateElement->getDoubleAttribute("bestScore", 0.0);
+                        state.bestScore = sanitizeFiniteOrDefault(stateElement->getDoubleAttribute("bestScore", 0.0), 0.0);
 
                         // version 1 は mode=1 (Short) として読み込む
                         const int modeIdx = 1;
@@ -790,15 +805,15 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
                         auto* stateElement = bankElement->getChildByName("State");
                         if (stateElement != nullptr)
                         {
-                            NoiseShaperLearner::State state;
+                            NoiseShaperLearner::State state{};
                             stringToDoubleArray(stateElement->getStringAttribute("mean"), state.mean, 9);
                             stringToDoubleArray(stateElement->getStringAttribute("covarianceUpperTriangle"), state.covarianceUpperTriangle, 45);
-                            state.sigma = stateElement->getDoubleAttribute("sigma", 0.12);
+                            state.sigma = sanitizeFiniteClamped(stateElement->getDoubleAttribute("sigma", 0.12), 0.12, 0.0, 10.0);
                             stringToDoubleArray(stateElement->getStringAttribute("bestCoefficients"), state.bestCoefficients, 9);
-                            state.elapsedPlaybackSeconds = stateElement->getDoubleAttribute("elapsedPlaybackSeconds", 0.0);
+                            state.elapsedPlaybackSeconds = sanitizeFiniteClamped(stateElement->getDoubleAttribute("elapsedPlaybackSeconds", 0.0), 0.0, 0.0, 1.0e12);
                             state.currentPhase = stateElement->getIntAttribute("currentPhase", 1);
                             state.iteration = stateElement->getIntAttribute("iteration", 0);
-                            state.bestScore = stateElement->getDoubleAttribute("bestScore", 0.0);
+                            state.bestScore = sanitizeFiniteOrDefault(stateElement->getDoubleAttribute("bestScore", 0.0), 0.0);
                             state.processCount = stateElement->getIntAttribute("processCount", 0);
                             state.totalGenerations = static_cast<uint64_t>(stateElement->getStringAttribute("totalGenerations").getLargeIntValue());
 
@@ -866,6 +881,11 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     loadNoiseShaperState(engine);
 
     engine.beginBulkParameterRestore();
+    struct BulkRestoreGuard final
+    {
+        AudioEngine& engineRef;
+        ~BulkRestoreGuard() { engineRef.endBulkParameterRestore(true); }
+    } bulkRestoreGuard { engine };
 
     // ASIOドライバの切り替え時に発生しうるフリーズを防ぐため、初期化前に一度デバイスを閉じる
     deviceManager.closeAudioDevice();
@@ -1014,7 +1034,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
                             juce::String key = makeAdaptiveCoeffPropertyName(bankSR, bitD, c);
                             if (xml->hasAttribute(key))
                             {
-                                coeffs[c] = xml->getDoubleAttribute(key, coeffs[c]);
+                                coeffs[c] = sanitizeFiniteOrDefault(xml->getDoubleAttribute(key, coeffs[c]), 0.0);
                             }
                             else
                             {
@@ -1046,7 +1066,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
                             const auto attributeName = "adaptiveCoeff_" + juce::String(static_cast<int>(bankSR + 0.5)) + "_" + juce::String(coeffIndex);
                             if (xml->hasAttribute(attributeName))
                             {
-                                adaptiveCoefficients[coeffIndex] = xml->getDoubleAttribute(attributeName, adaptiveCoefficients[coeffIndex]);
+                                adaptiveCoefficients[coeffIndex] = sanitizeFiniteOrDefault(xml->getDoubleAttribute(attributeName, adaptiveCoefficients[coeffIndex]), 0.0);
                                 hasBankCoefficients = true;
                             }
                         }
@@ -1072,7 +1092,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
                         const auto attributeName = "adaptiveCoeff" + juce::String(coeffIndex);
                         if (xml->hasAttribute(attributeName))
                         {
-                            legacyAdaptiveCoefficients[coeffIndex] = xml->getDoubleAttribute(attributeName, legacyAdaptiveCoefficients[coeffIndex]);
+                            legacyAdaptiveCoefficients[coeffIndex] = sanitizeFiniteOrDefault(xml->getDoubleAttribute(attributeName, legacyAdaptiveCoefficients[coeffIndex]), 0.0);
                             hasLegacyAdaptiveCoefficients = true;
                         }
                     }
@@ -1102,11 +1122,11 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             engine.setOversamplingFactor(oversampling);
 
             // 入力ヘッドルーム設定の読み込み (デフォルト -6.0dB)
-            float headroom = (float)xml->getDoubleAttribute("inputHeadroomDb", -6.0);
+            float headroom = static_cast<float>(sanitizeFiniteClamped(xml->getDoubleAttribute("inputHeadroomDb", -6.0), -6.0, -12.0, 0.0));
             engine.setInputHeadroomDb(headroom);
 
             // Output Makeup設定の読み込み (デフォルト +12.0dB)
-            float makeup = (float)xml->getDoubleAttribute("outputMakeupDb", 12.0); // [Fix] default 15→12 dB
+            float makeup = static_cast<float>(sanitizeFiniteClamped(xml->getDoubleAttribute("outputMakeupDb", 12.0), 12.0, 0.0, 12.0)); // [Fix] default 15→12 dB
             engine.setOutputMakeupDb(makeup);
 
             // フィルタタイプ設定の読み込み (デフォルト0 = IIR)
@@ -1120,8 +1140,6 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
                 convolverState.removeProperty("irPath", nullptr);
                 engine.setConvolverStateTree(convolverState);
             }
-
-            engine.endBulkParameterRestore(true);
 
             return;
         }
@@ -1161,7 +1179,6 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     engine.setOutputMakeupDb(12.0f); // [Fix] default 15→12 dB (unity gain)
     engine.setOversamplingType(AudioEngine::OversamplingType::IIR); // デフォルトIIR
 
-    engine.endBulkParameterRestore(true);
 }
 void DeviceSettings::applyAsioBlacklist (juce::AudioDeviceManager& deviceManager, const AsioBlacklist& blacklist)
 {

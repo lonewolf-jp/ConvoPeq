@@ -10,8 +10,6 @@ static void diagLog(const juce::String& message)
 }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_SNAPSHOT_CREATE)
-
 void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 {
     debugAssertNotAudioThread();
@@ -68,14 +66,6 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
                               std::memory_order_acq_rel);
         diagLog("[VERIFY] snapshot suppressed: eq cache unavailable");
         return;
-    }
-
-    {
-        const int currentIndex = convo::consumeAtomic(latestEqFallbackReadIndex, std::memory_order_acquire);
-        const int publishIndex = 1 - currentIndex;
-        latestEqParamsForFallback[(size_t) publishIndex] = eqParams;
-        latestEqHashForFallback[(size_t) publishIndex] = eqCoeffHash;
-        convo::publishAtomic(latestEqFallbackReadIndex, publishIndex, std::memory_order_release);
     }
 
     convo::SnapshotParams params = convo::SnapshotAssembler::assemble(
@@ -165,5 +155,3 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         m_coordinator.switchImmediate(newSnap);
     }
 }
-
-#endif // CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_SNAPSHOT_CREATE

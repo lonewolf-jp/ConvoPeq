@@ -26,6 +26,25 @@ namespace
             ? static_cast<double>(truncated - 1)
             : truncatedAsDouble;
     }
+
+    static inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
+    {
+        union { double d; uint64_t u; } v { x };
+        const bool finite = (((v.u >> 52) & 0x7FFu) != 0x7FFu);
+        return finite && (absNoLibm(x) < threshold);
+    }
+
+    static inline void sanitizeFiniteChunk(double* data, int count) noexcept
+    {
+        if (data == nullptr || count <= 0)
+            return;
+
+        for (int i = 0; i < count; ++i)
+        {
+            if (!isFiniteAndAbsBelowNoLibm(data[i], 1.0e300))
+                data[i] = 0.0;
+        }
+    }
 }
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME)
@@ -229,12 +248,21 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
     const int procChannels = (std::min)((int)block.getNumChannels(), 2);
     const int numSamples = (int)block.getNumSamples();
 
-    if (numSamples <= 0 || procChannels == 0 || numSamples > activeDryCapacity)
+    if (numSamples <= 0 || procChannels == 0)
         return;
+
+    if (numSamples > activeDryCapacity)
+    {
+        block.clear();
+        return;
+    }
 
     jassert(activeWetCapacity >= numSamples);
     if (numSamples > activeWetCapacity)
+    {
+        block.clear();
         return;
+    }
 
     // 世代カウンター比較で pending 値を取り込み
     {
@@ -588,6 +616,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             double* wetOut = wetBase + processed;
 
             conv->process(ch, input, wetOut, chunkSamples);
+            sanitizeFiniteChunk(wetOut, chunkSamples);
 
             const double* wetSignal = wetOut;
             int validWetSamples = chunkSamples;

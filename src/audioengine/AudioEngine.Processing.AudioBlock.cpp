@@ -11,8 +11,6 @@ namespace
     }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_AUDIO_BLOCK)
-
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
     if (isShutdownInProgress())
@@ -64,31 +62,36 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     {
         AudioEngine& engine;
         int samples;
-        std::int64_t started;
         bool enabled;
+        std::int64_t startTicks;
+        double tickToUs;
 
         CallbackTelemetryScope(AudioEngine& owner, int numSamplesIn) noexcept
             : engine(owner)
             , samples(numSamplesIn)
-            , started(0)
             , enabled(owner.isCliProcessingTelemetryEnabled())
+            , startTicks(enabled ? juce::Time::getHighResolutionTicks() : 0)
+            , tickToUs(enabled
+                           ? (1000000.0 / static_cast<double>(juce::Time::getHighResolutionTicksPerSecond()))
+                           : 0.0)
         {
-            if (enabled)
-                started = juce::Time::getHighResolutionTicks();
         }
 
         ~CallbackTelemetryScope() noexcept
         {
             if (enabled)
-                engine.recordAudioCallbackProcessingTimeUs(samples, started);
+            {
+                const std::int64_t endTicks = juce::Time::getHighResolutionTicks();
+                const std::int64_t elapsedTicks = endTicks - startTicks;
+                const double processTimeUs = (elapsedTicks > 0) ? (static_cast<double>(elapsedTicks) * tickToUs) : 0.0;
+                engine.recordAudioCallbackProcessingStats(samples, processTimeUs);
+            }
         }
     } callbackTelemetry(*this, numSamples);
 
     // 事前サニティチェック: 絶対的な上限 (1<<20 ≒ 100万サンプル) で明らかな破損データを弾く。
-    // DSPCore の maxSamplesPerBlock は prepareToPlay() でホスト指定値を反映して設定されるため、
-    // ここで SAFE_MAX_BLOCK_SIZE (65536) を使うと、131072 等の正当なブロックを誤って拒否する。
-    // 【Bug Fix】SAFE_MAX_BLOCK_SIZE による早期リジェクトを廃止し、dsp->maxSamplesPerBlock で
-    //            正確なチェックを行う (下記 DSPCore 取得後)。
+    // DSPCore::prepare() でホスト指定のブロックサイズが maxSamplesPerBlock に反映されるため、
+    // ここでは固定の SAFE_MAX_BLOCK_SIZE (65536) を使わず、取得済み DSPCore の値で最終判定する。
     constexpr int ABSOLUTE_MAX_BLOCK_SIZE = 1 << 20; // 破損データ検出用上限
     if (numSamples <= 0 || numSamples > ABSOLUTE_MAX_BLOCK_SIZE)
     {
@@ -106,6 +109,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // Epoch tracking for lock-free Audio Thread safety
     convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
 
+    // RuntimePublishView は取得中の observed guard を保持する（control reader 側）。
     const auto runtimePublishView = getRuntimePublishView();
     const auto* runtimeGraph = runtimePublishView.graph;
 
@@ -177,6 +181,11 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
         const auto observedSnapshot = m_coordinator.observeCurrentRuntime(kAudioEpochReaderIndex);
         const convo::GlobalSnapshot* snap = observedSnapshot.get();
+        if (snap == nullptr)
+        {
+            bufferToFill.clearActiveBufferRegion();
+            return;
+        }
         const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap);
 
         DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
@@ -199,8 +208,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                 dspCrossfadeFloatBuffer.clear(ch, 0, numSamples);
 
             juce::AudioSourceChannelInfo oldInfo(&dspCrossfadeFloatBuffer, 0, numSamples);
-            processWithSnapshot(oldInfo, snapshotFrom, true);
-            processWithSnapshot(bufferToFill, snapshotTo, false);
+            processWithSnapshot(oldInfo, snapshotFrom, true, runtimeGraph);
+            processWithSnapshot(bufferToFill, snapshotTo, false, runtimeGraph);
 
             const float gNew = snapshotAlpha;
             const float gOld = 1.0f - snapshotAlpha;
@@ -332,5 +341,3 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
     }
 }
-
-#endif

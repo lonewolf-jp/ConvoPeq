@@ -127,8 +127,10 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
     const __m256d vNumA        = _mm256_set1_pd(TanhApprox::NUM_A);
     const __m256d vNumB        = _mm256_set1_pd(TanhApprox::NUM_B);
     const __m256d vNumC        = _mm256_set1_pd(TanhApprox::NUM_C);
+    const __m256d vDenA        = _mm256_set1_pd(TanhApprox::DEN_A);
     const __m256d vDenB        = _mm256_set1_pd(TanhApprox::DEN_B);
     const __m256d vDenC        = _mm256_set1_pd(TanhApprox::DEN_C);
+    const __m256d vClipThreshold = _mm256_set1_pd(TanhApprox::CLIP_THRESHOLD);
     const __m256d vZero        = _mm256_setzero_pd();
     const __m256d vSignMask    = _mm256_set1_pd(-0.0);
 
@@ -171,19 +173,17 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
         __m256d ks = _mm256_mul_pd(t2, _mm256_fnmadd_pd(vTwo, t, vThree));
 
         __m256d arg = _mm256_mul_pd(_mm256_sub_pd(absX, vThreshold), vRecipKnee);
-        __m256d satHi    = _mm256_cmp_pd(arg, vThree,    _CMP_GE_OQ);
-        __m256d satLo    = _mm256_cmp_pd(arg, vNegThree, _CMP_LE_OQ);
+        __m256d satHi    = _mm256_cmp_pd(arg, vClipThreshold, _CMP_GE_OQ);
+        __m256d satLo    = _mm256_cmp_pd(arg, _mm256_sub_pd(vZero, vClipThreshold), _CMP_LE_OQ);
         __m256d arg2     = _mm256_mul_pd(arg, arg);
 
         __m256d num      = _mm256_mul_pd(arg,
                             _mm256_fmadd_pd(arg2,
                                 _mm256_fmadd_pd(arg2, vNumC, vNumB),
                             vNumA));
-        __m256d den      = _mm256_fmadd_pd(arg2,
-                            _mm256_fmadd_pd(arg2,
-                                _mm256_fmadd_pd(arg2, vDenC, vDenB),
-                            vDenC),
-                           vNumA);
+        __m256d denInner = _mm256_fmadd_pd(arg2, vOne, vDenC);
+        __m256d denMid   = _mm256_fmadd_pd(arg2, denInner, vDenB);
+        __m256d den      = _mm256_fmadd_pd(arg2, denMid, vDenA);
         __m256d tanhVal  = _mm256_div_pd(num, den);
         tanhVal = _mm256_blendv_pd(tanhVal, vOne,      satHi);
         tanhVal = _mm256_blendv_pd(tanhVal, vMinusOne, satLo);
@@ -236,8 +236,6 @@ inline void pushAdaptiveCaptureBlocks(LockFreeRingBuffer<AudioBlock, 4096>* capt
     if (captureQueue == nullptr || left == nullptr || numSamples <= 0)
         return;
 
-    static std::atomic<uint64_t> dropCount { 0 };
-
     static constexpr int kBlockSize = 256;
     for (int offset = 0; offset < numSamples; offset += kBlockSize)
     {
@@ -274,13 +272,12 @@ inline void pushAdaptiveCaptureBlocks(LockFreeRingBuffer<AudioBlock, 4096>* capt
                 block.R[i] = srcR[i];
         }))
         {
-            convo::fetchAddAtomic(dropCount, static_cast<uint64_t>(1), std::memory_order_acq_rel); // RT-RESTRICTED: drop diagnostic counter only, no blocking
+            // Audio Thread では side-channel atomic 書き込みを行わない。
+            // キュー満杯時は静かにドロップする（従来挙動維持）。
         }
     }
 }
 }
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_TO_BUFFER)
 
 void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>& source,
                                                  juce::AudioBuffer<double>& destination,
@@ -309,10 +306,6 @@ void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>
 
     processDouble(destination, analyzerFifo, inputLevelLinear, outputLevelLinear, state);
 }
-
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_DOUBLE)
 
 void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
                                          LockFreeAudioRingBuffer& analyzerFifo,
@@ -549,10 +542,6 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
     }
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO)
-
 void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer,
                                                int numSamples,
                                                const ProcessingState& state) noexcept
@@ -716,5 +705,3 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     for (int channel = numChannels; channel < buffer.getNumChannels(); ++channel)
         buffer.clear(channel, 0, numSamples);
 }
-
-#endif

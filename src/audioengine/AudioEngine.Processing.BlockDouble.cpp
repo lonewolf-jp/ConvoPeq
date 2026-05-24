@@ -11,7 +11,6 @@ namespace
     }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_BLOCK_DOUBLE)
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 {
     if (isShutdownInProgress())
@@ -57,23 +56,30 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     {
         AudioEngine& engine;
         int samples;
-        std::int64_t started;
         bool enabled;
+        std::int64_t startTicks;
+        double tickToUs;
 
         CallbackTelemetryScope(AudioEngine& owner, int numSamplesIn) noexcept
             : engine(owner)
             , samples(numSamplesIn)
-            , started(0)
             , enabled(owner.isCliProcessingTelemetryEnabled())
+            , startTicks(enabled ? juce::Time::getHighResolutionTicks() : 0)
+            , tickToUs(enabled
+                           ? (1000000.0 / static_cast<double>(juce::Time::getHighResolutionTicksPerSecond()))
+                           : 0.0)
         {
-            if (enabled)
-                started = juce::Time::getHighResolutionTicks();
         }
 
         ~CallbackTelemetryScope() noexcept
         {
             if (enabled)
-                engine.recordAudioCallbackProcessingTimeUs(samples, started);
+            {
+                const std::int64_t endTicks = juce::Time::getHighResolutionTicks();
+                const std::int64_t elapsedTicks = endTicks - startTicks;
+                const double processTimeUs = (elapsedTicks > 0) ? (static_cast<double>(elapsedTicks) * tickToUs) : 0.0;
+                engine.recordAudioCallbackProcessingStats(samples, processTimeUs);
+            }
         }
     } callbackTelemetry(*this, numSamples);
 
@@ -106,6 +112,11 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     // --- ProcessingStateを現行設計で初期化 ---
     const auto observedSnapshot = m_coordinator.observeCurrentRuntime(kAudioEpochReaderIndex);
     const convo::GlobalSnapshot* snap = observedSnapshot.get();
+    if (snap == nullptr)
+    {
+        buffer.clear();
+        return;
+    }
     const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap);
 
     DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
@@ -285,5 +296,4 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 }
 
-#endif
 

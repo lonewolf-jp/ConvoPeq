@@ -42,6 +42,7 @@
 #include <limits>
 #include <cstdint>
 #include <cstddef>
+#include <thread>
 
 #include "audioengine/AtomicAccess.h"
 
@@ -167,6 +168,11 @@ public:
     // -----------------------------------------------------------------------
     // tryReclaim()  ── Deferred Free Thread / Message Thread から呼ぶ
     //
+    // 呼び出し契約（重要）:
+    //   tryReclaim() は Single Consumer 前提。
+    //   1つのスレッドのみが継続的に reclaim ループを実行すること。
+    //   複数スレッドから同時に呼ぶ構成は対象外（将来拡張時に別設計が必要）。
+    //
     // 解放可能なエントリを 1 件取り出して返す。
     // 安全性の保証:
     //   entryEpoch < minReaderEpoch が成立する場合のみ返す。
@@ -177,6 +183,19 @@ public:
     // -----------------------------------------------------------------------
     ConvolverState* tryReclaim(uint64_t minReaderEpoch) noexcept
     {
+#if defined(JUCE_DEBUG) && !defined(NDEBUG)
+        const auto currentThreadId = std::this_thread::get_id();
+        if (!reclaimThreadIdInitializedDebug)
+        {
+            reclaimThreadIdDebug = currentThreadId;
+            reclaimThreadIdInitializedDebug = true;
+        }
+        else
+        {
+            jassert(reclaimThreadIdDebug == currentThreadId);
+        }
+#endif
+
         // フォールバックキューを先に確認（優先度付きキューなので最古エポックから）
         {
             std::lock_guard<std::mutex> lock(fallbackMutex);
@@ -329,6 +348,11 @@ private:
     // フォールバックキュー（バッファ溢れ時、非 RT スレッドのみ使用）
     std::mutex                                 fallbackMutex;
     std::priority_queue<FallbackEntry>         fallbackQueue;
+
+#if defined(JUCE_DEBUG) && !defined(NDEBUG)
+    std::thread::id reclaimThreadIdDebug {};
+    bool reclaimThreadIdInitializedDebug = false;
+#endif
 };
 
 } // namespace convo

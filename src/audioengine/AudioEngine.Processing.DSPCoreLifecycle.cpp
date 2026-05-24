@@ -21,8 +21,6 @@ namespace
     };
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_PREPARE)
-
 AudioEngine::DSPCore::DSPCore()
     : runtimeUuid(convo::fetchAddAtomic(g_dspRuntimeUuidCounter,
                                         static_cast<std::uint64_t>(1),
@@ -212,5 +210,3 @@ void AudioEngine::DSPCore::reset()
     ramps().resetForRuntime();
     histories().resetForRuntime();
 }
-
-#endif

@@ -106,7 +106,10 @@ ConvolverProcessor::~ConvolverProcessor()
     // Destructor runs after AudioEngine destructor body.
     // Do not enqueue to global deferred queue here because final reclaim may have already happened.
     auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 active engine 取得; release で null 公開
-    StereoConvolver::retireStereoConvolver(oldConv, getRcuProvider());
+    // NOTE:
+    // Destructor phase must not depend on rcuProvider/AudioEngine lifetime.
+    // Force local retirement path to avoid touching potentially destroyed owner state.
+    StereoConvolver::retireStereoConvolver(oldConv, nullptr);
 
     auto* oldIrState = convo::exchangeAtomic(currentIRState, nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 IRState 取得; release で null 公開
     if (oldIrState != nullptr)

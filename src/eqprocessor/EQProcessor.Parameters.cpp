@@ -8,16 +8,6 @@
 
 #include "audioengine/AtomicAccess.h"
 
-static void deleteEQStatePtr_params(void* p) { delete static_cast<EQProcessor::EQState*>(p); }
-
-static void retireEQState(convo::EpochDomain& epochDomain, EQProcessor::EQState* state)
-{
-    if (state) {
-        const uint64_t epoch = epochDomain.currentEpoch();
-        epochDomain.enqueueRetire(state, deleteEQStatePtr_params, epoch);
-    }
-}
-
 //============================================================================
 // パラメータ変更メソッド (UIスレッドから呼ぶ)
 // 各メソッドは atomic store で値を書き込み、coeffsDirty を立てる
@@ -36,7 +26,7 @@ void EQProcessor::setBandFrequency(int band, float freq)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQState(m_epochDomain, prev);
+        retireEQStateDeferred(prev);
     }
     m_epochDomain.advanceEpoch();
     updateBandNode(band);
@@ -55,7 +45,7 @@ void EQProcessor::setBandGain(int band, float gainDb)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQState(m_epochDomain, prev);
+        retireEQStateDeferred(prev);
     }
     m_epochDomain.advanceEpoch();
     updateBandNode(band);
@@ -74,7 +64,7 @@ void EQProcessor::setBandQ(int band, float q)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQState(m_epochDomain, prev);
+        retireEQStateDeferred(prev);
     }
     m_epochDomain.advanceEpoch();
     updateBandNode(band);
@@ -97,7 +87,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQState(m_epochDomain, prev);
+        retireEQStateDeferred(prev);
     }
     m_epochDomain.advanceEpoch();
     updateBandNode(band);
@@ -121,7 +111,7 @@ void EQProcessor::setTotalGain(float gainDb)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQState(m_epochDomain, prev);
+        retireEQStateDeferred(prev);
     }
     m_epochDomain.advanceEpoch();
 }
@@ -141,7 +131,7 @@ void EQProcessor::setAGCEnabled(bool enabled)
         newState->agcEnabled = enabled;
         auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
         if (prev)
-            retireEQState(m_epochDomain, prev);
+            retireEQStateDeferred(prev);
         m_epochDomain.advanceEpoch();
     }
 
@@ -174,7 +164,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQState(m_epochDomain, prev);
+        retireEQStateDeferred(prev);
     }
     m_epochDomain.advanceEpoch();
     updateBandNode(band);
@@ -196,7 +186,7 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQState(m_epochDomain, prev);
+        retireEQStateDeferred(prev);
     }
     m_epochDomain.advanceEpoch();
     updateBandNode(band);
@@ -221,7 +211,7 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
         newState->nonlinearSaturation = clamped;
         auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
         if (prev)
-            retireEQState(m_epochDomain, prev);
+            retireEQStateDeferred(prev);
         m_epochDomain.advanceEpoch();
     }
 }
@@ -255,7 +245,7 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
         newState->filterStructure = (mode == FilterStructure::Parallel) ? 1 : 0;
         auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
         if (prev)
-            retireEQState(m_epochDomain, prev);
+            retireEQStateDeferred(prev);
         m_epochDomain.advanceEpoch();
     }
 }

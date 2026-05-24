@@ -678,9 +678,11 @@ private:
 
         // デストラクタは空（実際の解放は retire 経由）
         ~StereoConvolver() {
-            // 直接破棄は禁止（すべて retireStereoConvolver を使用すること）
+            // 直接 delete は禁止だが、retire 経由の正規破棄ではデストラクタ自体は呼ばれる。
+            // ここでは「未解放リソースを抱えたまま破棄されていないか」のみを検証する。
             #if JUCE_DEBUG
-            jassertfalse; // 直接 delete 禁止。必ず retireStereoConvolver を使用すること
+            jassert(nucConvolvers[0] == nullptr && nucConvolvers[1] == nullptr);
+            jassert(irData[0] == nullptr && irData[1] == nullptr);
             #endif
         }
 
@@ -741,6 +743,11 @@ private:
             // NUC セットアップ失敗 or メモリ確保失敗
             destroyNUCConvolver(nucConvolvers[0]);
             destroyNUCConvolver(nucConvolvers[1]);
+            if (irData[0]) { convo::aligned_free(irData[0]); irData[0] = nullptr; }
+            if (irData[1]) { convo::aligned_free(irData[1]); irData[1] = nullptr; }
+            irDataLength = 0;
+            latency = 0;
+            this->irLatency = 0;
             return false;
         }
 

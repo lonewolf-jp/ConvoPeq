@@ -127,8 +127,6 @@ static void softClipBlockAVX2(double* __restrict data, int numSamples,
 }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_FLOAT)
-
 void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToFill,
                                    LockFreeAudioRingBuffer& analyzerFifo,
                                    std::atomic<float>* inputLevelLinear,
@@ -305,5 +303,3 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         ramp.fadeInSamplesLeft = fadeLeft - rampThisBlock;
     }
 }
-
-#endif

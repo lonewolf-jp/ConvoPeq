@@ -1,8 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_FIFO_UI)
-
 //--------------------------------------------------------------
 // FIFOからデータ読み出し (UI Thread)
 //--------------------------------------------------------------
@@ -20,5 +18,3 @@ void AudioEngine::skipFifo(int numSamples)
 {
     analyzerFifo.skip(numSamples);
 }
-
-#endif // CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_FIFO_UI

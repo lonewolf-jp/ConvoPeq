@@ -29,8 +29,6 @@ private:
 };
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_LOAD)
-
 void AudioEngine::requestLoadState (const juce::ValueTree& state)
 {
     // B19: RAII ガードを使用して、例外発生時も確実にフラグを戻す
@@ -184,10 +182,6 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     sendChangeMessage();
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_GET)
-
 juce::ValueTree AudioEngine::getCurrentState() const
 {
     juce::ValueTree state ("Preset");
@@ -236,5 +230,3 @@ juce::ValueTree AudioEngine::getCurrentState() const
     state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
     return state;
 }
-
-#endif

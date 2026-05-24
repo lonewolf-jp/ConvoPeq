@@ -151,8 +151,6 @@ static void diagLog(const juce::String& message)
 }
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PARAMETERS)
-
 void AudioEngine::setEqBypassRequested (bool shouldBypass)
 {
     ASSERT_NON_RT_THREAD();
@@ -938,5 +936,3 @@ void AudioEngine::clearConvolverCache()
 {
     uiConvolverProcessor.clearCache();
 }
-
-#endif // defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PARAMETERS)

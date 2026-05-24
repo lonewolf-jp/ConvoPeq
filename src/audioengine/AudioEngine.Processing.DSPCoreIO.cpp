@@ -35,6 +35,18 @@ inline void scaleBlockFallback(double* data, int numSamples, double gain) noexce
         data[i] *= gain;
 }
 
+inline void sanitizeFiniteChunk(double* data, int count) noexcept
+{
+    if (data == nullptr || count <= 0)
+        return;
+
+    for (int i = 0; i < count; ++i)
+    {
+        if (!isFiniteAndAbsBelowNoLibm(data[i], 1.0e300))
+            data[i] = 0.0;
+    }
+}
+
 static inline double fastTanh(double x) noexcept
 {
     constexpr double numA = 10395.0;
@@ -93,8 +105,6 @@ inline void pushAdaptiveCaptureBlocks(LockFreeRingBuffer<AudioBlock, 4096>* capt
     if (captureQueue == nullptr || left == nullptr || numSamples <= 0)
         return;
 
-    static std::atomic<uint64_t> dropCount { 0 };
-
     static constexpr int kBlockSize = 256;
     for (int offset = 0; offset < numSamples; offset += kBlockSize)
     {
@@ -131,13 +141,12 @@ inline void pushAdaptiveCaptureBlocks(LockFreeRingBuffer<AudioBlock, 4096>* capt
                 block.R[i] = srcR[i];
         }))
         {
-            convo::fetchAddAtomic(dropCount, static_cast<uint64_t>(1), std::memory_order_acq_rel); // RT-RESTRICTED: drop diagnostic counter only, no blocking
+            // Audio Thread では side-channel atomic 書き込みを行わない。
+            // キュー満杯時は静かにドロップする（従来挙動維持）。
         }
     }
 }
 }
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO)
 
 float AudioEngine::DSPCore::measureLevel (const juce::dsp::AudioBlock<const double>& block) const noexcept
 {
@@ -189,6 +198,9 @@ float AudioEngine::DSPCore::processInput(const juce::AudioSourceChannelInfo& buf
     if (expandMono)
         juce::FloatVectorOperations::copy(alignedR.get(), alignedL.get(), numSamples);
 
+    sanitizeFiniteChunk(alignedL.get(), numSamples);
+    sanitizeFiniteChunk(alignedR.get(), numSamples);
+
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> block(channels, 2, numSamples);
     const float inputLevel = measureLevel(block);
@@ -236,6 +248,9 @@ float AudioEngine::DSPCore::processInputDouble(const juce::AudioBuffer<double>& 
 
     if (expandMono)
         std::memcpy(alignedR.get(), alignedL.get(), numSamples * sizeof(double));
+
+    sanitizeFiniteChunk(alignedL.get(), numSamples);
+    sanitizeFiniteChunk(alignedR.get(), numSamples);
 
     double* channels[2] = { alignedL.get(), alignedR.get() };
     juce::dsp::AudioBlock<double> block(channels, 2, numSamples);
@@ -454,5 +469,3 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     for (int ch = numChannels; ch < buffer->getNumChannels(); ++ch)
         buffer->clear(ch, startSample, numSamples);
 }
-
-#endif

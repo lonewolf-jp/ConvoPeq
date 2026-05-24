@@ -3,14 +3,11 @@
 
 #include <JuceHeader.h>
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 
 #include "DspNumericPolicy.h"
 
- #include <immintrin.h>
-
- #include <mkl.h>
+#include <immintrin.h>
 
 namespace convo::input_transform
 {
@@ -45,7 +42,7 @@ namespace convo::input_transform
         const int vEnd = numSamples / 4 * 4;
         for (; i < vEnd; i += 4)
         {
-            __m256d v = _mm256_load_pd(data + i);           // アライン保証→loadu→load に変更可能
+            __m256d v = _mm256_loadu_pd(data + i);
 
             // NaN/Inf チェック: x == x は NaN 以外で true (ORD = Ordered predicate)
             __m256d nanMask     = _mm256_cmp_pd(v, v, _CMP_ORD_Q);
@@ -60,7 +57,7 @@ namespace convo::input_transform
 
             // [-1, 1] クランプ
             v = _mm256_min_pd(_mm256_max_pd(v, vMin), vMax);
-            _mm256_store_pd(data + i, v);
+            _mm256_storeu_pd(data + i, v);
         }
         for (; i < numSamples; ++i)
         {
@@ -70,6 +67,23 @@ namespace convo::input_transform
         }
     }
 
+    inline void scaleBlock(double* data, int numSamples, double gain) noexcept
+    {
+        if (data == nullptr || numSamples <= 0)
+            return;
+
+        int i = 0;
+        const int vEnd = numSamples / 4 * 4;
+        const __m256d vGain = _mm256_set1_pd(gain);
+        for (; i < vEnd; i += 4)
+        {
+            const __m256d v = _mm256_loadu_pd(data + i);
+            _mm256_storeu_pd(data + i, _mm256_mul_pd(v, vGain));
+        }
+        for (; i < numSamples; ++i)
+            data[i] *= gain;
+    }
+
     inline void applyHighQuality64BitTransform(double* data, int numSamples, double gain = 1.0) noexcept
     {
         if (data == nullptr || numSamples <= 0)
@@ -77,8 +91,9 @@ namespace convo::input_transform
 
         // 1) ヘッドルーム確保 (Dynamic)
         // クランプ前に適用することで、>0dBFSの入力を救済する
-        if (std::abs(gain - 1.0) > 1e-9)
-            cblas_dscal(numSamples, gain, data, 1);
+        const double gainDelta = gain - 1.0;
+        if (gainDelta > 1e-9 || gainDelta < -1e-9)
+            scaleBlock(data, numSamples, gain);
 
         // 2) デノーマル/NaN対策 + 範囲制限
         sanitizeAndLimit(data, numSamples);

@@ -1192,9 +1192,10 @@ void MainWindow::toggleDeviceSelectorImpl()
         newSettingsWindow->setContentNonOwned (deviceSettings.get(), false);
         newSettingsWindow->centreWithSize (560, 660);
 
-        newSettingsWindow->onClose = [this]
+        newSettingsWindow->onClose = [safeThis = juce::Component::SafePointer<MainWindow>(this)]
         {
-            showDeviceSelectorButton.setButtonText ("Audio Settings");
+            if (safeThis != nullptr)
+                safeThis->showDeviceSelectorButton.setButtonText ("Audio Settings");
         };
 
         settingsWindow = std::move (newSettingsWindow);

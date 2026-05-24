@@ -1,5 +1,6 @@
 //============================================================================
 #include "AudioEngineProcessor.h"
+#include <cmath>
 
 AudioEngineProcessor::AudioEngineProcessor(AudioEngine& engineRef)
     : juce::AudioProcessor(BusesProperties()
@@ -17,7 +18,18 @@ const juce::String AudioEngineProcessor::getName() const
 bool AudioEngineProcessor::acceptsMidi() const { return false; }
 bool AudioEngineProcessor::producesMidi() const { return false; }
 bool AudioEngineProcessor::isMidiEffect() const { return false; }
-double AudioEngineProcessor::getTailLengthSeconds() const { return 0.0; }
+double AudioEngineProcessor::getTailLengthSeconds() const
+{
+    const auto convState = audioEngine.getConvolverStateTree();
+    if (!convState.isValid())
+        return 0.0;
+
+    const double irLengthSec = static_cast<double>(convState.getProperty("irLength", 0.0));
+    if (!std::isfinite(irLengthSec) || irLengthSec <= 0.0)
+        return 0.0;
+
+    return irLengthSec;
+}
 
 int AudioEngineProcessor::getNumPrograms() { return 1; }
 int AudioEngineProcessor::getCurrentProgram() { return 0; }
@@ -65,5 +77,41 @@ void AudioEngineProcessor::processBlock(juce::AudioBuffer<double>& buffer, juce:
 bool AudioEngineProcessor::hasEditor() const { return false; }
 juce::AudioProcessorEditor* AudioEngineProcessor::createEditor() { return nullptr; }
 
-void AudioEngineProcessor::getStateInformation(juce::MemoryBlock&) {}
-void AudioEngineProcessor::setStateInformation(const void*, int) {}
+void AudioEngineProcessor::getStateInformation(juce::MemoryBlock& destData)
+{
+    destData.reset();
+    const auto state = audioEngine.getCurrentState();
+    if (!state.isValid())
+        return;
+
+    if (auto xml = state.createXml())
+        copyXmlToBinary(*xml, destData);
+}
+
+void AudioEngineProcessor::setStateInformation(const void* data, int sizeInBytes)
+{
+    if (data == nullptr || sizeInBytes <= 0)
+        return;
+
+    std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
+    if (xmlState == nullptr)
+        return;
+
+    const auto state = juce::ValueTree::fromXml(*xmlState);
+    if (!state.isValid())
+        return;
+
+    auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
+    if (messageManager != nullptr && !messageManager->isThisTheMessageThread())
+    {
+        const juce::WeakReference<AudioEngine> weakEngine(&audioEngine);
+        juce::MessageManager::callAsync([weakEngine, state]()
+        {
+            if (auto* engine = weakEngine.get())
+                engine->requestLoadState(state);
+        });
+        return;
+    }
+
+    audioEngine.requestLoadState(state);
+}

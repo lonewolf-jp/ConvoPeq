@@ -39,7 +39,7 @@ public:
 
 private:
     // 最適化進捗ウィンドウ（非モーダル）
-    juce::Component::SafePointer<convo::MixedPhaseOptimizationWindow> optimizationProgressWindow = nullptr;
+    std::unique_ptr<convo::MixedPhaseOptimizationWindow> optimizationProgressWindow;
     void showOptimizationProgressWindow();   // MixedPhaseOptimizationWindow専用
 
     AudioEngine& engine;
@@ -141,6 +141,7 @@ private:
 
     std::atomic<int> irPreviewRequestId { 0 };
     bool irPreviewInProgress = false;
+    static juce::ThreadPool irPreviewThreadPool;
     juce::Component::SafePointer<juce::DialogWindow> irAdvancedWindow;
     juce::Component::SafePointer<juce::DialogWindow> convolverSettingsWindow;
 

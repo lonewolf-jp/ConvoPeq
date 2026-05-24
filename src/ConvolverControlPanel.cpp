@@ -7,9 +7,10 @@
 #include "MixedPhaseOptimizationComponent.h"
 #include "ConvolverSettingsComponent.h"
 #include <cmath>
-#include <thread>
 
 #include "audioengine/AtomicAccess.h"
+
+juce::ThreadPool ConvolverControlPanel::irPreviewThreadPool(1);
 
 namespace
 {
@@ -668,10 +669,8 @@ ConvolverControlPanel::~ConvolverControlPanel()
     stopTimer();
     engine.getConvolverProcessor().removeListener(this);  // メモリリーク防止
     if (optimizationProgressWindow != nullptr)
-    {
         optimizationProgressWindow->closeButtonPressed();
-        optimizationProgressWindow = nullptr;
-    }
+    optimizationProgressWindow.reset();
 }
 
 void ConvolverControlPanel::convolverParamsChanged(ConvolverProcessor* processor)
@@ -1103,14 +1102,14 @@ void ConvolverControlPanel::showConvolverSettingsWindowImpl()
  {
     if (optimizationProgressWindow != nullptr)
     {
+        optimizationProgressWindow->setVisible(true);
         optimizationProgressWindow->toFront(true);
         return;
     }
 
-    auto* window = new convo::MixedPhaseOptimizationWindow("Optimization Progress", engine.getConvolverProcessor());
-    window->setVisible(true);
-    window->toFront(true);
-    optimizationProgressWindow = window;
+    optimizationProgressWindow = std::make_unique<convo::MixedPhaseOptimizationWindow>("Optimization Progress", engine.getConvolverProcessor());
+    optimizationProgressWindow->setVisible(true);
+    optimizationProgressWindow->toFront(true);
  }
 
 void ConvolverControlPanel::startAsyncIRLoadPreview(const juce::File& irFile)
@@ -1125,7 +1124,7 @@ void ConvolverControlPanel::startAsyncIRLoadPreview(const juce::File& irFile)
     setIRPreviewInProgress(true);
 
     juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
-    std::thread([safeThis, irFile, requestId, analysisSampleRate]()
+    irPreviewThreadPool.addJob([safeThis, irFile, requestId, analysisSampleRate]()
     {
         const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(irFile, analysisSampleRate);
 
@@ -1143,7 +1142,7 @@ void ConvolverControlPanel::startAsyncIRLoadPreview(const juce::File& irFile)
             if (mmLock.lockWasGained() && safeThis != nullptr)
                 safeThis->finishAsyncIRLoadPreview(irFile, preview, requestId);
         }
-    }).detach();
+    });
 }
 
 void ConvolverControlPanel::finishAsyncIRLoadPreview(const juce::File& irFile,

@@ -8,8 +8,6 @@ static void diagLog(const juce::String& message)
     juce::Logger::writeToLog(message);
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_RELEASE_RESOURCES)
-
 void AudioEngine::releaseResources()
 {
     ASSERT_NON_RT_THREAD();
@@ -222,5 +220,3 @@ void AudioEngine::releaseResources()
     // P0-A0: LifecycleIsolationRuntime integration - leave release phase
     lifecycleRuntime_.leaveRelease(lifecycleToken);
 }
-
-#endif

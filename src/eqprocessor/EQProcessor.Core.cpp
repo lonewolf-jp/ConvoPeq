@@ -19,18 +19,64 @@
 static void deleteEQStatePtr(void* p) { delete static_cast<EQProcessor::EQState*>(p); }
 static void deleteBandNodePtr_core(void* p) { delete static_cast<EQProcessor::BandNode*>(p); }
 
-static void retireEQState(convo::EpochDomain& epochDomain, EQProcessor::EQState* state) {
-    if (state) {
-        const uint64_t epoch = epochDomain.currentEpoch();
-        epochDomain.enqueueRetire(state, deleteEQStatePtr, epoch);
+bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
+                                                    void (*deleter)(void*),
+                                                    uint64_t epoch) noexcept
+{
+    if (ptr == nullptr || deleter == nullptr)
+        return true;
+
+    drainDeferredDeleteFallbackQueue();
+
+    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
+        return true;
+
+    m_epochDomain.reclaimRetired();
+    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
+        return true;
+
+    std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
+    deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry { ptr, deleter, epoch });
+    return false;
+}
+
+void EQProcessor::drainDeferredDeleteFallbackQueue() noexcept
+{
+    std::vector<DeferredDeleteFallbackEntry> pending;
+    {
+        std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
+        if (deferredDeleteFallbackQueue.empty())
+            return;
+        pending.swap(deferredDeleteFallbackQueue);
+    }
+
+    for (auto& entry : pending)
+    {
+        const uint64_t epoch = (entry.epoch != 0) ? entry.epoch : m_epochDomain.currentEpoch();
+        if (!m_epochDomain.enqueueRetire(entry.ptr, entry.deleter, epoch))
+        {
+            std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
+            deferredDeleteFallbackQueue.push_back(entry);
+        }
     }
 }
 
-static void retireBandNode(convo::EpochDomain& epochDomain, EQProcessor::BandNode* node) {
-    if (node) {
-        const uint64_t epoch = epochDomain.currentEpoch();
-        epochDomain.enqueueRetire(node, deleteBandNodePtr_core, epoch);
-    }
+void EQProcessor::retireEQStateDeferred(EQState* state) noexcept
+{
+    if (state == nullptr)
+        return;
+
+    const uint64_t epoch = m_epochDomain.currentEpoch();
+    enqueueDeferredDeleteWithFallback(state, deleteEQStatePtr, epoch);
+}
+
+void EQProcessor::retireBandNodeDeferred(BandNode* node) noexcept
+{
+    if (node == nullptr)
+        return;
+
+    const uint64_t epoch = m_epochDomain.currentEpoch();
+    enqueueDeferredDeleteWithFallback(node, deleteBandNodePtr_core, epoch);
 }
 
 //============================================================================
@@ -49,17 +95,24 @@ EQProcessor::~EQProcessor()
 {
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: enter");
     if (auto* oldState = exchangeCurrentState(nullptr, std::memory_order_acq_rel)) // acq_rel: acquire で先行 exchangeCurrentState/publishCurrentState と HB; release で後続観測者と HB
-        retireEQState(m_epochDomain, oldState);
+        retireEQStateDeferred(oldState);
 
     for (auto& nodeBits : bandNodeBits) {
         const auto bits = convo::exchangeAtomic(nodeBits, static_cast<std::uintptr_t>(0), std::memory_order_release); // release: デストラクタ後の観測者に対して null 書き込みを公知。acquire 不要 — デストラクタは排他的所有権を持つ
         if (auto* n = fromBandNodeBits(bits))
-            retireBandNode(m_epochDomain, n);
+            retireBandNodeDeferred(n);
     }
 
     for (auto& node : activeBandNodes) {
         node = nullptr;
     }
+
+    // enqueueRetire 失敗分を終了時に再投入し、可能な限り回収する。
+    drainDeferredDeleteFallbackQueue();
+    m_epochDomain.reclaimRetired();
+    m_epochDomain.drainAll();
+    drainDeferredDeleteFallbackQueue();
+    m_epochDomain.reclaimRetired();
 
     releaseResources();
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: exit");
@@ -139,7 +192,7 @@ void EQProcessor::resetToDefaults()
     auto oldState = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadCurrentState acquire と HB
 
     if (oldState) {
-        retireEQState(m_epochDomain, oldState);
+        retireEQStateDeferred(oldState);
     }
     m_epochDomain.advanceEpoch();
 
@@ -475,7 +528,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
 
     if (oldState)
     {
-        retireEQState(m_epochDomain, oldState);
+        retireEQStateDeferred(oldState);
     }
     m_epochDomain.advanceEpoch();
 
@@ -528,7 +581,7 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     activeBandNodes[bandIndex] = newNode;
 
     if (oldNode)
-        retireBandNode(m_epochDomain, oldNode);
+        retireBandNodeDeferred(oldNode);
 
     m_epochDomain.advanceEpoch();
 }
@@ -690,7 +743,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
                 auto oldNode = exchangeBandNode(i, newNode, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadBandNode acquire と HB
 
                 if (oldNode)
-                    retireBandNode(m_epochDomain, oldNode);
+                    retireBandNodeDeferred(oldNode);
 
                 activeBandNodes[i] = newNode;
             }

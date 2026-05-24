@@ -7,8 +7,6 @@ static void diagLog(const juce::String& message)
     juce::Logger::writeToLog(message);
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_PREPARE_TO_PLAY)
-
 void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 {
     ASSERT_NON_RT_THREAD();
@@ -249,5 +247,3 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // P0-A0: LifecycleIsolationRuntime integration - leave prepare phase
     lifecycleRuntime_.leavePrepare(lifecycleToken);
 }
-
-#endif

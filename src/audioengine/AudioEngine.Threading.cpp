@@ -6,7 +6,12 @@ namespace
     constexpr size_t kReclaimBacklogWarnThreshold = 128;
 }
 
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_PUBLISH)
+void AudioEngine::destroyDSPCoreNode(void* p) noexcept
+{
+    auto* core = static_cast<DSPCore*>(p);
+    core->~DSPCore();
+    convo::aligned_free(core);
+}
 
 uint64_t AudioEngine::publishRcuEpoch() noexcept
 {
@@ -38,37 +43,21 @@ uint32_t AudioEngine::activeEpochObserverCount() const noexcept
     return m_epochDomain.activeReaderCount();
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_ENTER)
-
 void AudioEngine::enterRcuReader(int readerIndex) noexcept
 {
     m_epochDomain.enterReader(readerIndex);
 }
-
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_EXIT)
 
 void AudioEngine::exitRcuReader(int readerIndex) noexcept
 {
     m_epochDomain.exitReader(readerIndex);
 }
 
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_RECLAIM)
-
 void AudioEngine::tryReclaimResources() noexcept
 {
     convo::fetchAddAtomic(g_runtimeReclaimCount, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     m_epochDomain.reclaimRetired();
 }
-
-#endif
-
-#if defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_DEFERRED)
 
 void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 {
@@ -85,23 +74,13 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         const uint64_t epoch = overflowEpoch != 0 ? overflowEpoch : currentRetireEpoch();
         if (!enqueueRetireEpochBounded(
                 overflow,
-                [](void* p)
-                {
-                    auto* core = static_cast<DSPCore*>(p);
-                    core->~DSPCore();
-                    convo::aligned_free(core);
-                },
+                &AudioEngine::destroyDSPCoreNode,
                 epoch))
         {
             std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
             deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry {
                 overflow,
-                [](void* p)
-                {
-                    auto* core = static_cast<DSPCore*>(p);
-                    core->~DSPCore();
-                    convo::aligned_free(core);
-                },
+                &AudioEngine::destroyDSPCoreNode,
                 epoch
             });
         }
@@ -144,5 +123,3 @@ void AudioEngine::processDeferredReleases()
 {
     drainDeferredRetireQueues(false);
 }
-
-#endif
