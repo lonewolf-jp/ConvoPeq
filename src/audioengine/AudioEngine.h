@@ -959,6 +959,11 @@ public:
         std::uint64_t matchedRuntimeCommandCount = 0;
         std::uint64_t taskSnapshotFallbackCount = 0;
     };
+    struct EqCacheMissDiagnostics
+    {
+        std::uint64_t snapshotCreateMissCount = 0;
+        std::uint64_t runtimeLookupMissCount = 0;
+    };
 
     RebuildDispatchDiagnostics getRebuildDispatchDiagnostics() const noexcept
     {
@@ -972,6 +977,25 @@ public:
             consumeAtomic(debugRebuildDispatchMatchedRuntimeCommandCount),
             consumeAtomic(debugRebuildDispatchTaskSnapshotFallbackCount)
         };
+    }
+    EqCacheMissDiagnostics getEqCacheMissDiagnostics() const noexcept
+    {
+        return {
+            consumeAtomic(eqCacheSnapshotCreateMissCountNonRt, std::memory_order_acquire),
+            consumeAtomic(eqCacheRuntimeLookupMissCountNonRt, std::memory_order_acquire)
+        };
+    }
+
+    EqCacheMissDiagnostics consumeEqCacheMissDiagnostics() noexcept
+    {
+        EqCacheMissDiagnostics snapshot {};
+        snapshot.snapshotCreateMissCount = exchangeAtomic(eqCacheSnapshotCreateMissCountNonRt,
+                                                          static_cast<std::uint64_t>(0),
+                                                          std::memory_order_acq_rel);
+        snapshot.runtimeLookupMissCount = exchangeAtomic(eqCacheRuntimeLookupMissCountNonRt,
+                                                         static_cast<std::uint64_t>(0),
+                                                         std::memory_order_acq_rel);
+        return snapshot;
     }
 
     // --- NoiseShaperLearner Settings ---
@@ -2262,9 +2286,12 @@ public:
         }
 
         const EQCoeffCache* eqCache = eqCacheManager.get(eqCoeffHash);
+        // ISR厳密化: hash から cache を解決できない場合は EQ を fail-close で bypass する。
+        // 非snapshot系フォールバックへ降りるより、公開済み不変状態を維持することを優先する。
+        const bool eqBypassedFailClosed = snapshot.eqBypassed || (eqCache == nullptr);
 
         return DSPCore::ProcessingState {
-            .eqBypassed = snapshot.eqBypassed,
+            .eqBypassed = eqBypassedFailClosed,
             .convBypassed = snapshot.convBypassed,
             .order = snapshot.order,
             .analyzerSource = snapshot.analyzerSource,
@@ -2758,7 +2785,13 @@ public:
     uint64_t debugLastReportedConvolverRebuildDeferredAfterLoadCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
     uint64_t debugLastReportedConvolverRebuildScheduledCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
     uint64_t debugLastReportedConvolverRebuildTriggeredCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
+    uint64_t debugLastReportedEqCacheSnapshotCreateMissCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
+    uint64_t debugLastReportedEqCacheRuntimeLookupMissCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
     int debugLastReportedShutdownPhase{ -1 }; // timerCallback 専用
+    bool debugEqCacheLookupMissLatched{ false }; // timerCallback 専用
+    uint64_t debugEqCacheLookupMissLatchedHash{ 0 }; // timerCallback 専用
+        std::atomic<std::uint64_t> eqCacheSnapshotCreateMissCountNonRt { 0 };
+        std::atomic<std::uint64_t> eqCacheRuntimeLookupMissCountNonRt { 0 };
     std::atomic<std::int64_t> lastEvidenceEmitHighResTicks_{ 0 };
 
     juce::AudioBuffer<float> m_fadeFloatBuffer;

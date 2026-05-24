@@ -55,7 +55,20 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
     uint64_t eqCoeffHash = 0;
     if (EQCoeffCache* cache = eqCacheManager.getOrCreate(eqParams, sampleRate, maxBlockSize, generation))
+    {
         eqCoeffHash = cache->paramsHash;
+    }
+    else
+    {
+        // ISR厳密化: EQ cache を生成できないスナップショットは適用しない。
+        // これにより Audio Thread 側で「snapshot指定外のフォールバック経路」へ
+        // 落ちることを防ぎ、公開済み snapshot の一貫性を維持する。
+        convo::fetchAddAtomic(eqCacheSnapshotCreateMissCountNonRt,
+                              static_cast<std::uint64_t>(1),
+                              std::memory_order_acq_rel);
+        diagLog("[VERIFY] snapshot suppressed: eq cache unavailable");
+        return;
+    }
 
     {
         const int currentIndex = convo::consumeAtomic(latestEqFallbackReadIndex, std::memory_order_acquire);

@@ -82,6 +82,7 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     else                        factorLog2 = 0;
 
     oversamplingFactor = (size_t)1 << factorLog2;
+    activeOversamplingType = oversamplingType;
 
     // ==================================================================
     // 【Issue 3 完全修正】内部最大バッファサイズの計算（推奨A）

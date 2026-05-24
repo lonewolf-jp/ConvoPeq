@@ -1,12 +1,28 @@
 {
   "schema": "hb_trace_v1",
-  "eventCount": 6,
+  "eventCount": 22,
   "events": [
-    {"ts": 103993333260900, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
-    {"ts": 103994075212300, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false},
-    {"ts": 103994078371600, "from": 200, "to": 300, "fromEpoch": 1, "toEpoch": 1, "mo": 4, "release": true, "acquire": true},
-    {"ts": 103994081034400, "from": 100, "to": 200, "fromEpoch": 3, "toEpoch": 3, "mo": 3, "release": true, "acquire": false},
-    {"ts": 103994084389800, "from": 200, "to": 300, "fromEpoch": 2, "toEpoch": 2, "mo": 4, "release": true, "acquire": true},
-    {"ts": 104001950872200, "from": 100, "to": 200, "fromEpoch": 4, "toEpoch": 4, "mo": 3, "release": true, "acquire": false}
+    {"ts": 142090957389900, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142091107027100, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142091110353600, "from": 200, "to": 300, "fromEpoch": 1, "toEpoch": 1, "mo": 4, "release": true, "acquire": true},
+    {"ts": 142091112282200, "from": 100, "to": 200, "fromEpoch": 3, "toEpoch": 3, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142091115129100, "from": 200, "to": 300, "fromEpoch": 2, "toEpoch": 2, "mo": 4, "release": true, "acquire": true},
+    {"ts": 142115460522300, "from": 100, "to": 200, "fromEpoch": 4, "toEpoch": 4, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142115463964400, "from": 200, "to": 300, "fromEpoch": 3, "toEpoch": 3, "mo": 4, "release": true, "acquire": true},
+    {"ts": 142115499371500, "from": 300, "to": 400, "fromEpoch": 0, "toEpoch": 0, "mo": 4, "release": true, "acquire": true},
+    {"ts": 142120182150600, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 5, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142130325325700, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 6, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142130328811000, "from": 200, "to": 300, "fromEpoch": 5, "toEpoch": 1, "mo": 4, "release": true, "acquire": true},
+    {"ts": 142134575881700, "from": 100, "to": 200, "fromEpoch": 3, "toEpoch": 7, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142134581107400, "from": 200, "to": 300, "fromEpoch": 6, "toEpoch": 2, "mo": 4, "release": true, "acquire": true},
+    {"ts": 142141747700800, "from": 100, "to": 200, "fromEpoch": 4, "toEpoch": 8, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142141751363200, "from": 200, "to": 300, "fromEpoch": 7, "toEpoch": 3, "mo": 4, "release": true, "acquire": true},
+    {"ts": 142142856167300, "from": 100, "to": 200, "fromEpoch": 5, "toEpoch": 9, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142142860229100, "from": 200, "to": 300, "fromEpoch": 8, "toEpoch": 4, "mo": 4, "release": true, "acquire": true},
+    {"ts": 142239510919100, "from": 100, "to": 200, "fromEpoch": 6, "toEpoch": 10, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142239514550800, "from": 200, "to": 300, "fromEpoch": 9, "toEpoch": 5, "mo": 4, "release": true, "acquire": true},
+    {"ts": 142239551507200, "from": 300, "to": 400, "fromEpoch": 0, "toEpoch": 0, "mo": 4, "release": true, "acquire": true},
+    {"ts": 142240208890200, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 11, "mo": 3, "release": true, "acquire": false},
+    {"ts": 142260672064000, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 12, "mo": 3, "release": true, "acquire": false}
   ]
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":104002002576200}
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":142260715978900}

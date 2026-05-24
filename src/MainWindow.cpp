@@ -963,8 +963,10 @@ void MainWindow::changeListenerCallback (juce::ChangeBroadcaster* source)
             convolverPanel->updateIRInfo();
 
         // メインウィンドウ上のコントロールを更新 (プリセットロード時など)
-        const bool eqBypassed = audioEngine.isEQBypassed();
-        const bool convBypassed = audioEngine.isConvolverBypassed();
+        // UI のモード表示はユーザー意図（Requested）に合わせる。
+        // Active は Audio Thread 反映タイミング依存のため、直後に旧値へ戻ることがある。
+        const bool eqBypassed = audioEngine.isEqBypassRequested();
+        const bool convBypassed = audioEngine.isConvolverBypassRequested();
         int modeId = 3; // Conv->Peq
         if (!eqBypassed && convBypassed)
             modeId = 2; // Peq
@@ -1139,15 +1141,15 @@ void MainWindow::orderModeBoxChanged()
     }
     else if (mode == 3)
     {
+        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::ConvolverThenEQ);
         audioEngine.setConvolverBypassRequested(false);
         audioEngine.setEqBypassRequested(false);
-        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::ConvolverThenEQ);
     }
     else if (mode == 4)
     {
+        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::EQThenConvolver);
         audioEngine.setConvolverBypassRequested(false);
         audioEngine.setEqBypassRequested(false);
-        audioEngine.setProcessingOrder(AudioEngine::ProcessingOrder::EQThenConvolver);
     }
 
     if (eqPanel != nullptr)

@@ -725,7 +725,12 @@ bool AudioEngine::isSoftClipEnabled() const
 void AudioEngine::setSaturationAmount(float amount)
 {
     const float clamped = juce::jlimit(0.0f, 1.0f, amount);
-    convo::publishAtomic(saturationAmount, clamped, std::memory_order_release);
+    if (std::abs(convo::consumeAtomic(saturationAmount, std::memory_order_acquire) - clamped) > 1e-6f)
+    {
+        convo::publishAtomic(saturationAmount, clamped, std::memory_order_release);
+        convo::publishAtomic(m_currentSaturationAmount, clamped, std::memory_order_release);
+        enqueueSnapshotCommand();
+    }
 }
 
 float AudioEngine::getSaturationAmount() const

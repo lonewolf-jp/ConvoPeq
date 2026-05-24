@@ -870,6 +870,66 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
     // ASIOドライバの切り替え時に発生しうるフリーズを防ぐため、初期化前に一度デバイスを閉じる
     deviceManager.closeAudioDevice();
 
+    const auto ensureUsableChannelSelection = [&deviceManager]()
+    {
+        auto* device = deviceManager.getCurrentAudioDevice();
+        if (device == nullptr)
+            return;
+
+        auto setup = deviceManager.getAudioDeviceSetup();
+        bool setupChanged = false;
+
+        const int availableInputChannels = device->getInputChannelNames().size();
+        const int availableOutputChannels = device->getOutputChannelNames().size();
+
+        const auto hasAnyValidInputBit = [&setup, availableInputChannels]()
+        {
+            for (int ch = 0; ch < availableInputChannels; ++ch)
+            {
+                if (setup.inputChannels[ch])
+                    return true;
+            }
+            return false;
+        };
+
+        const auto hasAnyValidOutputBit = [&setup, availableOutputChannels]()
+        {
+            for (int ch = 0; ch < availableOutputChannels; ++ch)
+            {
+                if (setup.outputChannels[ch])
+                    return true;
+            }
+            return false;
+        };
+
+        if (availableInputChannels > 0 && !hasAnyValidInputBit())
+        {
+            setup.useDefaultInputChannels = true;
+            setup.inputChannels.clear();
+            setupChanged = true;
+        }
+
+        if (availableOutputChannels > 0 && !hasAnyValidOutputBit())
+        {
+            setup.useDefaultOutputChannels = true;
+            setup.outputChannels.clear();
+            setupChanged = true;
+        }
+
+        if (!setupChanged)
+            return;
+
+        const auto fixError = deviceManager.setAudioDeviceSetup(setup, true);
+        if (fixError.isNotEmpty())
+        {
+            juce::Logger::writeToLog("Audio device channel auto-recovery failed: " + fixError);
+        }
+        else
+        {
+            juce::Logger::writeToLog("Audio device channel auto-recovery applied (default input/output channels)");
+        }
+    };
+
     const auto initialiseDefaultDevice = [&deviceManager]() -> juce::String
     {
         return deviceManager.initialise (2, 2, nullptr, true);
@@ -926,6 +986,8 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
                     juce::Logger::writeToLog("Audio device restore needed relaxed retry and succeeded: " + error);
                 }
             }
+
+            ensureUsableChannelSelection();
 
             // ビット深度設定の読み込み (デフォルト0 = 自動/最大)
             int bitDepth = xml->getIntAttribute("ditherBitDepth", 0);
@@ -1087,6 +1149,8 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             }
         }
     }
+
+    ensureUsableChannelSelection();
 
     engine.setDitherBitDepth(0); // 自動設定へ
     engine.setNoiseShaperType(AudioEngine::NoiseShaperType::Psychoacoustic);

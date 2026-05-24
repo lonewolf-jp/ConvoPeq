@@ -3,12 +3,12 @@
   "epochMode": "shared",
   "rollbackMode": "shared",
   "rollbackReady": true,
-  "totalTransitions": 24,
+  "totalTransitions": 36,
   "laneCounters": {
-    "rtIntent": 6,
-    "coordination": 6,
-    "epoch": 6,
-    "reclaim": 6,
+    "rtIntent": 9,
+    "coordination": 9,
+    "epoch": 9,
+    "reclaim": 9,
     "quarantine": 0
   }
-}
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":142260715978900}

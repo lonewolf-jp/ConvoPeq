@@ -2,7 +2,7 @@
   "schema": "shutdown_trace_v1",
   "phase": 6,
   "phaseName": "ShutdownComplete",
-  "transitionViolations": 0,
+  "transitionViolations": 10,
   "sh1_callbackCount": 0,
   "sh2_activeCrossfade": 0,
   "sh3_pendingRetire": 0,
@@ -10,4 +10,4 @@
   "sh5_lateCallbackCount": 0,
   "sh6_postStopEnqueueCount": 1,
   "verified": false
-}
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":142260715978900}

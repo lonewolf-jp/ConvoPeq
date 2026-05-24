@@ -82,6 +82,7 @@ void AudioEngine::timerCallback()
     {
         const auto lifecycle = getRuntimeLifecycleDiagnostics();
         const auto rebuild = getRebuildDispatchDiagnostics();
+        const auto eqCacheMiss = getEqCacheMissDiagnostics();
         const auto convRebuild = uiConvolverProcessor.getRebuildAutomationDiagnostics();
         const int shutdownPhaseValue = static_cast<int>(convo::consumeAtomic(shutdownPhase, std::memory_order_acquire));
 
@@ -96,6 +97,8 @@ void AudioEngine::timerCallback()
             || rebuild.drainedCommandCount != debugLastReportedRebuildDrainedCommandCount
             || rebuild.matchedRuntimeCommandCount != debugLastReportedRebuildMatchedRuntimeCommandCount
             || rebuild.taskSnapshotFallbackCount != debugLastReportedRebuildTaskSnapshotFallbackCount
+            || eqCacheMiss.snapshotCreateMissCount != debugLastReportedEqCacheSnapshotCreateMissCount
+            || eqCacheMiss.runtimeLookupMissCount != debugLastReportedEqCacheRuntimeLookupMissCount
             || convRebuild.requestCount != debugLastReportedConvolverRebuildRequestCount
             || convRebuild.deferredAfterLoadCount != debugLastReportedConvolverRebuildDeferredAfterLoadCount
             || convRebuild.scheduledCount != debugLastReportedConvolverRebuildScheduledCount
@@ -113,6 +116,8 @@ void AudioEngine::timerCallback()
             debugLastReportedRebuildDrainedCommandCount = rebuild.drainedCommandCount;
             debugLastReportedRebuildMatchedRuntimeCommandCount = rebuild.matchedRuntimeCommandCount;
             debugLastReportedRebuildTaskSnapshotFallbackCount = rebuild.taskSnapshotFallbackCount;
+            debugLastReportedEqCacheSnapshotCreateMissCount = eqCacheMiss.snapshotCreateMissCount;
+            debugLastReportedEqCacheRuntimeLookupMissCount = eqCacheMiss.runtimeLookupMissCount;
             debugLastReportedConvolverRebuildRequestCount = convRebuild.requestCount;
             debugLastReportedConvolverRebuildDeferredAfterLoadCount = convRebuild.deferredAfterLoadCount;
             debugLastReportedConvolverRebuildScheduledCount = convRebuild.scheduledCount;
@@ -132,6 +137,9 @@ void AudioEngine::timerCallback()
                 + juce::String(static_cast<juce::int64>(rebuild.drainedCommandCount)) + "/"
                 + juce::String(static_cast<juce::int64>(rebuild.matchedRuntimeCommandCount)) + "/"
                 + juce::String(static_cast<juce::int64>(rebuild.taskSnapshotFallbackCount))
+                + " eqCacheMiss(create/lookup)="
+                + juce::String(static_cast<juce::int64>(eqCacheMiss.snapshotCreateMissCount)) + "/"
+                + juce::String(static_cast<juce::int64>(eqCacheMiss.runtimeLookupMissCount))
                 + " convDebounce(req/defer/sched/trigger)="
                 + juce::String(static_cast<juce::int64>(convRebuild.requestCount)) + "/"
                 + juce::String(static_cast<juce::int64>(convRebuild.deferredAfterLoadCount)) + "/"
@@ -153,6 +161,33 @@ void AudioEngine::timerCallback()
     // Timerからのdither内部状態更新は行わない。
 
     const auto observedCurrent = m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
+
+    {
+        const auto* currentSnapshot = observedCurrent.get();
+        const uint64_t currentEqHash = (currentSnapshot != nullptr) ? currentSnapshot->eqCoeffHash : 0;
+        const bool hasEqHash = (currentEqHash != 0);
+        const bool lookupMiss = hasEqHash && (eqCacheManager.get(currentEqHash) == nullptr);
+
+        if (lookupMiss)
+        {
+            const bool missEdge = (!debugEqCacheLookupMissLatched)
+                || (debugEqCacheLookupMissLatchedHash != currentEqHash);
+
+            if (missEdge)
+            {
+                convo::fetchAddAtomic(eqCacheRuntimeLookupMissCountNonRt,
+                                      static_cast<std::uint64_t>(1),
+                                      std::memory_order_acq_rel);
+                debugEqCacheLookupMissLatched = true;
+                debugEqCacheLookupMissLatchedHash = currentEqHash;
+            }
+        }
+        else
+        {
+            debugEqCacheLookupMissLatched = false;
+            debugEqCacheLookupMissLatchedHash = 0;
+        }
+    }
 
     if (!isShutdownInProgress()
         && currentDspForRuntime != nullptr
