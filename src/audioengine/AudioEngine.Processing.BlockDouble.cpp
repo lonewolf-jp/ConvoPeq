@@ -91,8 +91,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    const auto runtimePublishView = getRuntimePublishView();
-    const auto* runtimeGraph = runtimePublishView.graph;
+    const auto runtimeExecutionView = getRuntimeExecutionViewForAudioThread();
+    const auto* runtimeGraph = runtimeExecutionView.graph;
     DSPCore* dsp = (runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
         ? static_cast<DSPCore*>(runtimeGraph->activeNode)
         : nullptr;
@@ -110,8 +110,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     #endif
 
     // --- ProcessingStateを現行設計で初期化 ---
-    const auto observedSnapshot = m_coordinator.observeCurrentRuntime(kAudioEpochReaderIndex);
-    const convo::GlobalSnapshot* snap = observedSnapshot.get();
+    const convo::GlobalSnapshot* snap = runtimeExecutionView.snapshot;
     if (snap == nullptr)
     {
         buffer.clear();

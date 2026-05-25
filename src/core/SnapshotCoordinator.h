@@ -13,6 +13,11 @@
 
 namespace convo {
 
+// P0-1 ObserveToken formalization:
+// - SnapshotCoordinator は observe enter/exit をトークン化して返す責務のみを持つ。
+// - 実体型は ObservedRuntime（ObserveToken の互換エイリアス）を使用する。
+// - publish / retire / graph mutation / ownership 管理は本APIの責務外。
+
 // Audio Thread safe equal-power approximation (sin(pi/2*x), libm free)
 static inline float equalPowerSinApprox(float x) noexcept
 {
@@ -45,6 +50,10 @@ public:
         m_retire.reclaim(*m_epochDomain);
     }
 
+    // observeCurrentRuntime:
+    // - reader guard を保持した ObserveToken 相当（ObservedRuntime）を返す。
+    // - 呼び出し側は本トークン寿命内で snapshot を参照する。
+    // - 挙動は既存互換を維持し、P0-1 では型/意味の明文化のみを行う。
     ObservedRuntime observeCurrentRuntime(int readerIndex) const noexcept {
         ObservedRuntime observed(*m_epochDomain, readerIndex);
         // acquire: switchImmediate/publishNew の m_current release と HB し最新スナップを観測。
@@ -54,7 +63,7 @@ public:
 
     void switchImmediate(GlobalSnapshot* newSnap) noexcept {
         resetFadeStateAndRetireTarget();
-        // release: 新スナップを公開し、observeCurrent/updateFade の acquire と HB 。
+        // release: 新スナップを公開し、observeCurrentRuntime/updateFade の acquire と HB 。
         //          旧ポインタ回収は release で十分（publishNew と同一 NonRT スレッドから呼ぶ前提）。
         GlobalSnapshot* oldSnap = m_slots.exchangeCurrent(newSnap, std::memory_order_release);
         if (oldSnap) {

@@ -109,9 +109,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // Epoch tracking for lock-free Audio Thread safety
     convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
 
-    // RuntimePublishView は取得中の observed guard を保持する（control reader 側）。
-    const auto runtimePublishView = getRuntimePublishView();
-    const auto* runtimeGraph = runtimePublishView.graph;
+    // P0-2: 読取入口を RuntimeExecutionView へ収束。
+    const auto runtimeExecutionView = getRuntimeExecutionViewForAudioThread();
+    const auto* runtimeGraph = runtimeExecutionView.graph;
 
     const auto packHandle = [](convo::isr::DSPHandle handle) noexcept -> std::uint64_t
     {
@@ -179,8 +179,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
         // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
         // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
-        const auto observedSnapshot = m_coordinator.observeCurrentRuntime(kAudioEpochReaderIndex);
-        const convo::GlobalSnapshot* snap = observedSnapshot.get();
+        const convo::GlobalSnapshot* snap = runtimeExecutionView.snapshot;
         if (snap == nullptr)
         {
             bufferToFill.clearActiveBufferRegion();
