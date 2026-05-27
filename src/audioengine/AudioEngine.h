@@ -2022,7 +2022,7 @@ public:
     }
 
     [[nodiscard]] inline RuntimePublishView makeRuntimePublishView(int readerIndex,
-                                                                   bool assertAudioThread) const noexcept
+                                                                   bool assertAudioThread) noexcept
     {
         if (assertAudioThread)
             debugAssertAudioThread();
@@ -2039,7 +2039,7 @@ public:
     }
 
     [[nodiscard]] inline RuntimeReadView makeRuntimeReadView(int readerIndex,
-                                                             bool assertAudioThread) const noexcept
+                                                             bool assertAudioThread) noexcept
     {
         return RuntimeReadView {
             makeRuntimePublishView(readerIndex, assertAudioThread),
@@ -2047,12 +2047,12 @@ public:
         };
     }
 
-    [[nodiscard]] inline RuntimeReadView readAudioRuntimeView() const noexcept
+    [[nodiscard]] inline RuntimeReadView readAudioRuntimeView() noexcept
     {
         return makeRuntimeReadView(kAudioEpochReaderIndex, true);
     }
 
-    [[nodiscard]] inline RuntimeReadView readControlRuntimeView() const noexcept
+    [[nodiscard]] inline RuntimeReadView readControlRuntimeView() noexcept
     {
         return makeRuntimeReadView(kControlEpochReaderIndex, false);
     }
@@ -2067,7 +2067,7 @@ public:
         return runtimeReadView.runtimePublish.graph;
     }
 
-    inline convo::RuntimeGraph makeRuntimeGraphState(const convo::EngineRuntime& state) const noexcept
+    inline convo::RuntimeGraph makeRuntimeGraphState(const convo::EngineRuntime& state) noexcept
     {
         convo::RuntimeGraph graph {};
         graph.activeNode = state.current;
@@ -2403,8 +2403,8 @@ public:
         };
 
         DSPCore* current = getActiveRuntimeDSP();
-        const auto runtimeReadView = readControlRuntimeView();
-        const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
+        const auto* publishedWorld = RuntimePublicationCoordinator::observePublishedWorld(runtimeStore);
+        const auto* runtimeGraph = (publishedWorld != nullptr) ? &publishedWorld->graph : nullptr;
         auto* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
         const auto revision = (runtimeGraph != nullptr) ? runtimeGraph->generation : 0;
         const auto publishedCurrentUuid = (runtimeGraph != nullptr) ? runtimeGraph->runtimeUuid : 0;

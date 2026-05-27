@@ -81,8 +81,8 @@ namespace
 {
     LatencyBreakdown breakdown;
 
-    const auto runtimeReadView = readControlRuntimeView();
-    const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
+    const auto* publishedWorld = RuntimePublicationCoordinator::observePublishedWorld(runtimeStore);
+    const auto* runtimeGraph = (publishedWorld != nullptr) ? &publishedWorld->graph : nullptr;
     auto* dsp = (runtimeGraph != nullptr)
         ? static_cast<DSPCore*>(runtimeGraph->activeNode)
         : nullptr;
