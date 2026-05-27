@@ -1,0 +1,61 @@
+{
+    "schema": "metric_governance_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-METRIC-GOV-001",
+    "rationale": "top-level lifecycle governance for metric policy",
+    "expiry": "2026-09-30",
+    "normalizationPolicy": {
+        "enabled": true,
+        "baselineWindowMinutes": 10,
+        "cpuThermalOsNormalization": true,
+        "bucketBy": "cpuModel_osBuild_powerProfile",
+        "strictModeRequireAllMetrics": true,
+        "issue": "BRIDGE-METRIC-NORM-001"
+    },
+    "metrics": [
+        {
+            "id": "xrunDelta",
+            "blocking": "yes",
+            "owner": "audioengine-runtime-bridge",
+            "retention": "14d",
+            "normalization": "baselineWindowNormalized",
+            "threshold": "<=2_per_10min_vs_baseline",
+            "action": "Enable ISR_ROLLBACK_CROSSFADE_ONLY and file incident in BRIDGE-METRIC-001",
+            "issue": "BRIDGE-METRIC-001",
+            "expiry": "2026-08-31"
+        },
+        {
+            "id": "callbackJitter",
+            "blocking": "yes",
+            "owner": "audioengine-runtime-bridge",
+            "retention": "14d",
+            "normalization": "baselineWindowNormalized",
+            "threshold": "p99<=1.5x_baseline",
+            "action": "Enable ISR_ROLLBACK_PUBLICATION_ONLY and run jitter triage playbook",
+            "issue": "BRIDGE-METRIC-002",
+            "expiry": "2026-08-31"
+        },
+        {
+            "id": "retireLatency",
+            "blocking": "yes",
+            "owner": "audioengine-runtime-bridge",
+            "retention": "14d",
+            "normalization": "baselineWindowNormalized",
+            "threshold": "p99<=2.0x_baseline",
+            "action": "Enable ISR_ROLLBACK_RETIRE_PATH_ONLY and collect retire timeline evidence",
+            "issue": "BRIDGE-METRIC-003",
+            "expiry": "2026-08-31"
+        },
+        {
+            "id": "crossfadePeak",
+            "blocking": "no",
+            "owner": "audioengine-runtime-bridge",
+            "retention": "14d",
+            "normalization": "baselineWindowNormalized",
+            "threshold": "<=-1dBFS_peak_delta",
+            "action": "Record anomaly and schedule crossfade tuning follow-up",
+            "issue": "BRIDGE-METRIC-004",
+            "expiry": "2026-08-31"
+        }
+    ]
+}

@@ -1,6 +1,6 @@
 # bug4 観察項目レジスタ（P3）
 
-対象: `doc/work/bug4_action_plan.md` の P3-7
+対象: `doc/work/bridge_runtime_migration_plan.md` の P3-7
 
 このファイルは、現時点で「不成立 / 保留」と判断した項目を、
 将来の変更で再評価できるようにするための運用台帳です。

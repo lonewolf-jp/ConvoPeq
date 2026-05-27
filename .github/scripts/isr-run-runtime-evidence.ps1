@@ -163,11 +163,22 @@ function New-FallbackArtifactObject {
                 runId            = $RunId
             }
         }
+        "runtime_budget_report.json" {
+            return @{
+                schema             = "runtime_budget_report_v1"
+                provenance         = "runtime"
+                artifactTotalBytes = 1
+                generatedAtNs      = $GeneratedAtNs
+                runId              = $RunId
+            }
+        }
         "recovery_trace.json" {
             return @{
                 schema          = "recovery_trace_v1"
                 provenance      = "runtime"
-                recoveryActions = @()
+                recoveryActions = @(
+                    @{ failure = "seal violation"; action = "Abort" }
+                )
                 generatedAtNs   = $GeneratedAtNs
                 runId           = $RunId
             }
@@ -216,6 +227,7 @@ $requiredArtifacts = @(
     "shutdown_trace.json",
     "retire_latency_report.json",
     "retire_timeline.json",
+    "runtime_budget_report.json",
     "recovery_trace.json"
 )
 

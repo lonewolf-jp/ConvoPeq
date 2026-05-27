@@ -131,19 +131,19 @@ public:
     // NonRT: 問題検出時に DSP を Quarantined に遷移
     void quarantine(DSPHandle handle);
 
-    // NonRT: 現在の active DSP を取得
-    DSPHandle getActiveDSP() const noexcept;
+    // NonRT: 現在の active runtime DSP handle を取得
+    DSPHandle getActiveRuntimeDSPHandle() const noexcept;
 
-    // NonRT: 現在の fading DSP を取得（crossfade 中のみ有効）
-    DSPHandle getFadingDSP() const noexcept;
+    // NonRT: 現在の fading runtime DSP handle を取得（crossfade 中のみ有効）
+    DSPHandle getFadingRuntimeDSPHandle() const noexcept;
 
     // スロット状態ダンプ（デバッグ・CI用）
     void emitOwnershipTrace(const std::filesystem::path& outputPath) const;
 
 private:
     std::array<DSPRegistrySlot, MAX_DSP_SLOTS> registry_{};
-    std::atomic<DSPHandle> activeDSP_{ DSPHandle::null() };
-    std::atomic<DSPHandle> fadingDSP_{ DSPHandle::null() };
+    std::atomic<DSPHandle> activeRuntimeDSPHandle_{ DSPHandle::null() };
+    std::atomic<DSPHandle> fadingRuntimeDSPHandle_{ DSPHandle::null() };
 
     std::vector<CrossfadeRecord> crossfadeRecords_;
     std::atomic<CrossfadeId> nextCrossfadeId_{1};

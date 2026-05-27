@@ -14,19 +14,19 @@ using namespace ConvolverProcessorInternal;
 
 namespace {
 
-static inline void hashCombineUInt64(std::uint64_t& seed, std::uint64_t value) noexcept
+inline void hashCombineUInt64(std::uint64_t& seed, std::uint64_t value) noexcept
 {
     seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
 }
 
-static inline std::uint32_t floatBits(float value) noexcept
+inline std::uint32_t floatBits(float value) noexcept
 {
     std::uint32_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
     return bits;
 }
 
-static std::uint64_t computeBuildSnapshotFingerprint(const ConvolverProcessor::BuildSnapshot& snapshot) noexcept
+std::uint64_t computeBuildSnapshotFingerprint(const ConvolverProcessor::BuildSnapshot& snapshot) noexcept
 {
     // NOTE:
     //   ここで算出する fingerprint は getStructuralHash() とは用途が異なる。
@@ -82,7 +82,8 @@ static std::uint64_t computeBuildSnapshotFingerprint(const ConvolverProcessor::B
 // State Management and UI Updates
 // ────────────────────────────────────────────────────────────────
 
-static void applySmoothing(const float* magnitudes, float* smoothed, int numBins)
+namespace {
+void applySmoothing(const float* magnitudes, float* smoothed, int numBins)
 {
     if (magnitudes == nullptr || smoothed == nullptr || numBins <= 0) return;
 
@@ -112,6 +113,7 @@ static void applySmoothing(const float* magnitudes, float* smoothed, int numBins
         else
             smoothed[i] = magnitudes[i];
     }
+}
 }
 
 void ConvolverProcessor::copyPendingToSnapshotUnlocked(BuildSnapshot& snapshot) const noexcept
@@ -203,7 +205,7 @@ void ConvolverProcessor::copySnapshotToPendingUnlocked(const BuildSnapshot& snap
                                              snapshot.nucLCMode);
 }
 
-juce::ValueTree ConvolverProcessor::getState() const
+[[nodiscard]] juce::ValueTree ConvolverProcessor::getState() const
 {
     juce::ValueTree v ("Convolver");
     v.setProperty ("phaseMode", static_cast<int>(getPhaseMode()), nullptr);
@@ -253,7 +255,7 @@ juce::ValueTree ConvolverProcessor::getState() const
     return v;
 }
 
-ConvolverProcessor::BuildSnapshot ConvolverProcessor::captureBuildSnapshot() const
+[[nodiscard]] ConvolverProcessor::BuildSnapshot ConvolverProcessor::captureBuildSnapshot() const
 {
     BuildSnapshot snapshot;
 
@@ -454,7 +456,7 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     requestHostDisplayUpdate();
 }
 
-ConvolverProcessor::IRLoadPreview ConvolverProcessor::analyzeImpulseResponseFile(const juce::File& irFile, double processingSampleRate)
+[[nodiscard]] ConvolverProcessor::IRLoadPreview ConvolverProcessor::analyzeImpulseResponseFile(const juce::File& irFile, double processingSampleRate)
 {
     IRLoadPreview preview;
     preview.recommendedMaxSec = IR_LENGTH_MAX_SEC;
@@ -545,19 +547,19 @@ ConvolverProcessor::IRLoadPreview ConvolverProcessor::analyzeImpulseResponseFile
     return preview;
 }
 
-std::vector<float> ConvolverProcessor::getIRWaveform()
+[[nodiscard]] std::vector<float> ConvolverProcessor::getIRWaveform()
 {
     const juce::ScopedLock sl(visualizationDataLock);
     return irWaveform;
 }
 
-std::vector<float> ConvolverProcessor::getIRMagnitudeSpectrum()
+[[nodiscard]] std::vector<float> ConvolverProcessor::getIRMagnitudeSpectrum()
 {
     const juce::ScopedLock sl(visualizationDataLock);
     return irMagnitudeSpectrum;
 }
 
-double ConvolverProcessor::getIRSpectrumSampleRate()
+[[nodiscard]] double ConvolverProcessor::getIRSpectrumSampleRate()
 {
     const juce::ScopedLock sl(visualizationDataLock);
     return irSpectrumSampleRate;
@@ -680,7 +682,7 @@ void ConvolverProcessor::createFrequencyResponseSnapshot(const juce::AudioBuffer
     }
 }
 
-ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() const
+[[nodiscard]] ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() const
 {
     struct GlobalGuard {
         const ConvolverProcessor& cp;
@@ -730,13 +732,13 @@ ConvolverProcessor::LatencyBreakdown ConvolverProcessor::getLatencyBreakdown() c
     return breakdown;
 }
 
-int ConvolverProcessor::getLatencySamples() const
+[[nodiscard]] int ConvolverProcessor::getLatencySamples() const
 {
     auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire); // acquire: updateLatencyCache の exchangeAtomic acq_rel と HB
     return snap ? snap->totalLatencySamples : 0;
 }
 
-int ConvolverProcessor::getTotalLatencySamples() const
+[[nodiscard]] int ConvolverProcessor::getTotalLatencySamples() const
 {
     auto snap = convo::consumeAtomic(cachedLatency, std::memory_order_acquire); // acquire: updateLatencyCache の exchangeAtomic acq_rel と HB
     return snap ? snap->totalLatencySamples : 0;
@@ -804,7 +806,7 @@ void ConvolverProcessor::setPhaseMode(PhaseMode mode)
     }
 }
 
-ConvolverProcessor::PhaseMode ConvolverProcessor::getPhaseMode() const
+[[nodiscard]] ConvolverProcessor::PhaseMode ConvolverProcessor::getPhaseMode() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     const int mode = juce::jlimit(static_cast<int>(PhaseMode::AsIs),
@@ -843,7 +845,7 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
     }
 }
 
-uint64_t ConvolverProcessor::getStructuralHash() const noexcept
+[[nodiscard]] uint64_t ConvolverProcessor::getStructuralHash() const noexcept
 {
     uint64_t hash = 0x9e3779b97f4a7c15ULL;
     const BuildSnapshot snapshot = captureBuildSnapshot();
@@ -878,23 +880,23 @@ uint64_t ConvolverProcessor::getStructuralHash() const noexcept
     return hash;
 }
 
-uint64_t ConvolverProcessor::getActiveCacheKey() const noexcept
+[[nodiscard]] uint64_t ConvolverProcessor::getActiveCacheKey() const noexcept
 {
     return convo::consumeAtomic(activeCacheKey, std::memory_order_acquire); // acquire: applyPreparedIRState/applyNewState の publishAtomic release と HB
 }
 
-int ConvolverProcessor::getActiveCacheFFTSize() const noexcept
+[[nodiscard]] int ConvolverProcessor::getActiveCacheFFTSize() const noexcept
 {
     return convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire); // acquire: applyPreparedIRState/applyNewState の publishAtomic release と HB
 }
 
-int ConvolverProcessor::getNUCHCMode() const noexcept
+[[nodiscard]] int ConvolverProcessor::getNUCHCMode() const noexcept
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     return snapshot.nucHCMode;
 }
 
-int ConvolverProcessor::getNUCLCMode() const noexcept
+[[nodiscard]] int ConvolverProcessor::getNUCLCMode() const noexcept
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     return snapshot.nucLCMode;
@@ -913,7 +915,7 @@ void ConvolverProcessor::setResamplingPhaseMode(ResamplingPhaseMode mode)
         postCoalescedChangeNotification();
 }
 
-ConvolverProcessor::ResamplingPhaseMode ConvolverProcessor::getResamplingPhaseMode() const
+[[nodiscard]] ConvolverProcessor::ResamplingPhaseMode ConvolverProcessor::getResamplingPhaseMode() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     const int mode = juce::jlimit(static_cast<int>(ResamplingPhaseMode::Linear),
@@ -922,13 +924,13 @@ ConvolverProcessor::ResamplingPhaseMode ConvolverProcessor::getResamplingPhaseMo
     return static_cast<ResamplingPhaseMode>(mode);
 }
 
-bool ConvolverProcessor::getExperimentalDirectHeadEnabled() const
+[[nodiscard]] bool ConvolverProcessor::getExperimentalDirectHeadEnabled() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     return snapshot.experimentalDirectHeadEnabled;
 }
 
-float ConvolverProcessor::getMaximumAllowedIRLengthSecForSampleRate(double sampleRate)
+[[nodiscard]] float ConvolverProcessor::getMaximumAllowedIRLengthSecForSampleRate(double sampleRate)
 {
     if (sampleRate <= 0.0)
         return IR_LENGTH_MAX_SEC;
@@ -936,7 +938,7 @@ float ConvolverProcessor::getMaximumAllowedIRLengthSecForSampleRate(double sampl
     return static_cast<float>(static_cast<double>(MAX_IR_LATENCY) / sampleRate);
 }
 
-float ConvolverProcessor::getMaximumAllowedIRLengthSec(double sampleRate) const
+[[nodiscard]] float ConvolverProcessor::getMaximumAllowedIRLengthSec(double sampleRate) const
 {
     const double sr = (sampleRate > 0.0)
                     ? sampleRate

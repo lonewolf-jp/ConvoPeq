@@ -47,7 +47,7 @@ inline void sanitizeFiniteChunk(double* data, int count) noexcept
     }
 }
 
-static inline double fastTanh(double x) noexcept
+inline double fastTanh(double x) noexcept
 {
     constexpr double numA = 10395.0;
     constexpr double numB = 1260.0;
@@ -66,7 +66,7 @@ static inline double fastTanh(double x) noexcept
     return num / den;
 }
 
-static inline double musicalSoftClipScalar(double x, double threshold, double knee, double asymmetry) noexcept
+inline double musicalSoftClipScalar(double x, double threshold, double knee, double asymmetry) noexcept
 {
     const double abs_x = absNoLibm(x);
     const double clip_start = threshold - knee;

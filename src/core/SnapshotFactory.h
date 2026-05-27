@@ -5,6 +5,8 @@
 //==============================================================================
 #pragma once
 
+#include <atomic>
+
 #include "GlobalSnapshot.h"
 #include "SnapshotParams.h"
 
@@ -47,6 +49,11 @@ public:
     static void destroy(GlobalSnapshot* snap) noexcept;
 
 private:
+#ifdef _DEBUG
+    static std::atomic<int> debugLiveSnapshotCountStorage_;
+    static std::atomic<int>& debugLiveSnapshotCount() noexcept;
+#endif
+
     SnapshotFactory() = delete;
 };
 

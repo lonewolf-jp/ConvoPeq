@@ -15,7 +15,9 @@
  #include <immintrin.h>
 #endif
 
-static inline double calculateRMS(const double* data, int numSamples) noexcept
+namespace
+{
+    inline double calculateRMS(const double* data, int numSamples) noexcept
 {
     if (data == nullptr || numSamples <= 0)
         return 0.0;
@@ -48,8 +50,6 @@ static inline double calculateRMS(const double* data, int numSamples) noexcept
     return rms;
 }
 
-namespace
-{
     inline double absNoLibm(double value) noexcept
     {
         union { double d; uint64_t u; } v { value };

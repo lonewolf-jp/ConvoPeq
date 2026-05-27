@@ -662,7 +662,8 @@ juce::File DeviceSettings::getNoiseShaperStateFile()
     return appDataDir.getChildFile ("noise_shaper_learn.xml");
 }
 
-static juce::String doubleArrayToString(const double* arr, int size)
+namespace {
+juce::String doubleArrayToString(const double* arr, int size)
 {
     juce::StringArray strArr;
     for (int i = 0; i < size; ++i)
@@ -670,7 +671,7 @@ static juce::String doubleArrayToString(const double* arr, int size)
     return strArr.joinIntoString(",");
 }
 
-static void stringToDoubleArray(const juce::String& str, double* arr, int size)
+void stringToDoubleArray(const juce::String& str, double* arr, int size)
 {
     juce::StringArray strArr;
     strArr.addTokens(str, ",", "");
@@ -679,6 +680,7 @@ static void stringToDoubleArray(const juce::String& str, double* arr, int size)
         const double parsed = strArr[i].getDoubleValue();
         arr[i] = sanitizeFiniteOrDefault(parsed, 0.0);
     }
+}
 }
 
 void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
@@ -1053,7 +1055,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
 
                 if (!hasBankedAdaptiveCoefficients)
                 {
-                    // Fallback to legacy SR-only or global coefficients
+                    // Fallback to banked SR-only coefficients
                     for (int srBank = 0; srBank < AudioEngine::getAdaptiveSampleRateBankCount(); ++srBank)
                     {
                         const double bankSR = AudioEngine::getAdaptiveSampleRateBankHz(srBank);
@@ -1062,7 +1064,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
 
                         for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
                         {
-                            // Legacy format: adaptiveCoeff_44100_0
+                            // Banked format: adaptiveCoeff_44100_0
                             const auto attributeName = "adaptiveCoeff_" + juce::String(static_cast<int>(bankSR + 0.5)) + "_" + juce::String(coeffIndex);
                             if (xml->hasAttribute(attributeName))
                             {
@@ -1082,33 +1084,6 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
                     }
                 }
 
-                if (!hasBankedAdaptiveCoefficients)
-                {
-                    double legacyAdaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
-                    bool hasLegacyAdaptiveCoefficients = false;
-
-                    for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
-                    {
-                        const auto attributeName = "adaptiveCoeff" + juce::String(coeffIndex);
-                        if (xml->hasAttribute(attributeName))
-                        {
-                            legacyAdaptiveCoefficients[coeffIndex] = sanitizeFiniteOrDefault(xml->getDoubleAttribute(attributeName, legacyAdaptiveCoefficients[coeffIndex]), 0.0);
-                            hasLegacyAdaptiveCoefficients = true;
-                        }
-                    }
-
-                    if (hasLegacyAdaptiveCoefficients)
-                    {
-                        for (int srBank = 0; srBank < AudioEngine::getAdaptiveSampleRateBankCount(); ++srBank)
-                        {
-                            const double bankSR = AudioEngine::getAdaptiveSampleRateBankHz(srBank);
-                            for (int bdIdx = 0; bdIdx < kAdaptiveBitDepthCount; ++bdIdx)
-                            {
-                                engine.setAdaptiveCoefficientsForSampleRateAndBitDepth(bankSR, kAdaptiveBitDepthValues[bdIdx], legacyAdaptiveCoefficients, kAdaptiveNoiseShaperOrder);
-                            }
-                        }
-                    }
-                }
             }
 
             // Fixed 4-tap 比較ログ設定

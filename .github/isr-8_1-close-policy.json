@@ -1,0 +1,90 @@
+{
+    "schema": "isr_8_1_close_policy_v1",
+    "owner": "runtime-governance",
+    "issue": "BRIDGE-8_1-CLOSE-POLICY",
+    "rationale": "8.1 close evidence collection and enforcement parameters must be policy-driven and fail-closed.",
+    "expiry": "2026-12-31",
+    "expiryGuardDaysByTier": {
+        "standard": 14,
+        "exhaustive": 30
+    },
+    "collector": {
+        "minWindowSec": 1,
+        "maxWindowSec": 120,
+        "minAutoCaptureTimeoutSec": 1,
+        "maxAutoCaptureTimeoutSec": 120,
+        "minProbeExitMs": 100,
+        "maxProbeExitMs": 30000,
+        "minRetryMax": 1,
+        "maxRetryMax": 5,
+        "allowedCollectTiers": [
+            "standard",
+            "exhaustive"
+        ],
+        "allowedEnforceTiers": [
+            "standard",
+            "exhaustive"
+        ]
+    },
+    "workflowInputContract": {
+        "descriptionMustContain": "8.1",
+        "inputs": [
+            {
+                "name": "autoCapture81Log",
+                "type": "boolean",
+                "required": false,
+                "default": "false"
+            },
+            {
+                "name": "collect81CloseEvidence",
+                "type": "boolean",
+                "required": false,
+                "default": "false"
+            },
+            {
+                "name": "collect81WindowSec",
+                "type": "string",
+                "required": false,
+                "default": "20",
+                "policyMinField": "minWindowSec",
+                "policyMaxField": "maxWindowSec"
+            },
+            {
+                "name": "collect81AutoCaptureTimeoutSec",
+                "type": "string",
+                "required": false,
+                "default": "10",
+                "policyMinField": "minAutoCaptureTimeoutSec",
+                "policyMaxField": "maxAutoCaptureTimeoutSec"
+            },
+            {
+                "name": "collect81SignalProbe",
+                "type": "boolean",
+                "required": false,
+                "default": "false"
+            },
+            {
+                "name": "collect81ProbeExitMs",
+                "type": "string",
+                "required": false,
+                "default": "8000",
+                "policyMinField": "minProbeExitMs",
+                "policyMaxField": "maxProbeExitMs"
+            },
+            {
+                "name": "enforce81CloseDecision",
+                "type": "boolean",
+                "required": false,
+                "default": "false"
+            },
+            {
+                "name": "enforce81CloseDecisionRetryMax",
+                "type": "string",
+                "required": false,
+                "default": "2",
+                "policyMinField": "minRetryMax",
+                "policyMaxField": "maxRetryMax"
+            }
+        ]
+    }
+}

@@ -63,13 +63,13 @@ struct ConvolverState
     // スナップショット比較用の不変ID（UAF回避のためポインタ比較を避ける）
     uint64_t stateId = generateNewStateId();
 
-    static uint64_t generateNewStateId() noexcept
-    {
-        static std::atomic<uint64_t> counter {0};
-        return convo::fetchAddAtomic(counter,
-                         static_cast<uint64_t>(1),
-                         std::memory_order_acq_rel) + 1; // acq_rel: acquire で前回の fetchAdd と HB し単調増加を確認; release で stateId 比較スレッドの acquire と HB
-    }
+private:
+
+    static std::atomic<uint64_t> stateIdCounterStorage_;
+    static std::atomic<uint64_t>& stateIdCounter() noexcept;
+    static uint64_t generateNewStateId() noexcept;
+
+    public:
 
     // -----------------------------------------------------------------------
     // デフォルトコンストラクタ（空の状態）

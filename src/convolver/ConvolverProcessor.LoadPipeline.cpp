@@ -157,7 +157,7 @@ void ConvolverProcessor::setTargetUpgradeFFTSize(int fftSize)
     }
 }
 
-int ConvolverProcessor::getTargetUpgradeFFTSize() const
+[[nodiscard]] int ConvolverProcessor::getTargetUpgradeFFTSize() const
 {
     const juce::ScopedLock lock(pendingOverrideLock);
     return pendingOverride.targetUpgradeFFTSize;
@@ -173,7 +173,7 @@ void ConvolverProcessor::setEnableProgressiveUpgrade(bool enable)
         stopUpgradeThread();
 }
 
-bool ConvolverProcessor::isProgressiveUpgradeEnabled() const
+[[nodiscard]] bool ConvolverProcessor::isProgressiveUpgradeEnabled() const
 {
     const juce::ScopedLock lock(pendingOverrideLock);
     return pendingOverride.enableProgressiveUpgrade;
@@ -190,7 +190,7 @@ void ConvolverProcessor::setMaxCacheEntries(size_t maxEntries)
         cacheManager->evictLRU(clamped);
 }
 
-size_t ConvolverProcessor::getMaxCacheEntries() const
+[[nodiscard]] size_t ConvolverProcessor::getMaxCacheEntries() const
 {
     const juce::ScopedLock lock(pendingOverrideLock);
     return static_cast<size_t>(pendingOverride.maxCacheEntries);
@@ -203,7 +203,7 @@ void ConvolverProcessor::clearCache()
         cacheManager->clear();
 }
 
-bool ConvolverProcessor::isCacheEntrySafeToDelete(uint64_t cacheKey, int fftSize) const
+[[nodiscard]] bool ConvolverProcessor::isCacheEntrySafeToDelete(uint64_t cacheKey, int fftSize) const
 {
     const uint64_t activeKey = convo::consumeAtomic(activeCacheKey, std::memory_order_acquire); // acquire: applyPreparedIRState の publishAtomic release と HB
     const int activeFFT = convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire);   // acquire: applyPreparedIRState の publishAtomic release と HB
@@ -423,7 +423,7 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
         }
     }
 
-    // 1. UI 用レガシー状態の更新
+    // 1. UI 用状態の更新
     {
         const juce::ScopedLock sl(irFileLock);
         irName = prepared->originalFileName.isNotEmpty()
@@ -434,7 +434,7 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
     convo::publishAtomic(currentSampleRate, prepared->sampleRate, std::memory_order_release); // release: Runtime/UI 側 acquire と HB
     convo::publishAtomic(irLength, prepared->timeDomainIR ? prepared->timeDomainIR->getNumSamples() : 0, std::memory_order_release); // release: UI 側 acquire と HB
 
-    // RCU経路では legacy convolution を経由しないため、UI表示用のレイテンシー推定値を更新する。
+    // RCU経路では convolution を経由しないため、UI表示用のレイテンシー推定値を更新する。
     {
         const bool directHeadActive = getExperimentalDirectHeadEnabled();
         const int algorithmLatency = directHeadActive ? 0 : juce::jmax(0, prepared->fftSize);

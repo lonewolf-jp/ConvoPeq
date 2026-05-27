@@ -1,4 +1,5 @@
 #include "ISREvidenceExporter.h"
+#include "ISRSealedObject.h"
 
 #include <array>
 #include <chrono>
@@ -163,12 +164,16 @@ void EvidenceExporter::exportEvidence()
     const bool isRelease = (buildMode == "Release");
     const bool isDebug = (buildMode == "Debug");
 
+    const auto mutationFaultTrace = std::string("{\"artifact\":\"mutation_fault_trace.json\",\"schema\":\"mutation_fault_trace_v1\",\"status\":\"generated\",\"violations\":")
+        + std::to_string(convo::isr::sealViolationCountValue())
+        + "}";
+
     const std::array<std::pair<const char*, const char*>, 8> artifacts{{
         {"closure_graph.json", "{\"artifact\":\"closure_graph.json\",\"schema\":\"closure_graph_v1\",\"status\":\"generated\",\"nodeCount\":0,\"edgeCount\":0,\"descriptorCoverageComplete\":true,\"externalMutableDependencies\":0}"},
-        {"mutation_fault_trace.json", "{\"artifact\":\"mutation_fault_trace.json\",\"schema\":\"mutation_fault_trace_v1\",\"status\":\"generated\",\"violations\":0}"},
+        {"mutation_fault_trace.json", mutationFaultTrace.c_str()},
         {"hb_graph_trace.json", "{\"artifact\":\"hb_graph_trace.json\",\"schema\":\"hb_trace_v1\",\"status\":\"generated\",\"eventCount\":0}"},
         {"hb_violation_report.json", "{\"artifact\":\"hb_violation_report.json\",\"schema\":\"hb_violation_report_v1\",\"status\":\"ok\",\"violations\":[]}"},
-        {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v1\",\"status\":\"generated\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":true,\"totalTransitions\":0}"},
+        {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v1\",\"status\":\"generated\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":true,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0}"},
         {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"generated\",\"phase\":0,\"verified\":true,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0}"},
         {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"generated\",\"withinThreshold\":true}"},
         {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"generated\",\"violations\":0,\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"}

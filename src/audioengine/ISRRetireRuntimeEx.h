@@ -19,6 +19,13 @@ struct EpochStrategyDescriptor {
     bool rollbackReady{true};
 };
 
+struct RollbackFlagDescriptor {
+    bool globalEnabled{true};
+    bool publicationOnlyEnabled{false};
+    bool crossfadeOnlyEnabled{false};
+    bool retirePathOnlyEnabled{true};
+};
+
 class RetireRuntimeEx {
 public:
     RetireRuntimeEx();
@@ -31,6 +38,11 @@ public:
     [[nodiscard]] EpochMode getEpochMode() const noexcept;
     void setRollbackMode(EpochMode mode) noexcept;
     [[nodiscard]] EpochMode getRollbackMode() const noexcept;
+    void setRollbackFlags(bool globalEnabled,
+                          bool publicationOnlyEnabled,
+                          bool crossfadeOnlyEnabled,
+                          bool retirePathOnlyEnabled) noexcept;
+    [[nodiscard]] RollbackFlagDescriptor describeRollbackFlags() const noexcept;
     [[nodiscard]] bool canRollback() const noexcept;
     void requestRollback() noexcept;
     [[nodiscard]] EpochStrategyDescriptor describeEpochStrategy() const noexcept;
@@ -45,6 +57,10 @@ private:
     std::atomic<std::uint64_t> totalTransitions_{0};
     std::atomic<std::uint32_t> epochModeRaw_{static_cast<std::uint32_t>(EpochMode::Shared)};
     std::atomic<std::uint32_t> rollbackModeRaw_{static_cast<std::uint32_t>(EpochMode::Shared)};
+    std::atomic<bool> rollbackGlobalEnabled_{true};
+    std::atomic<bool> rollbackPublicationOnlyEnabled_{false};
+    std::atomic<bool> rollbackCrossfadeOnlyEnabled_{false};
+    std::atomic<bool> rollbackRetirePathOnlyEnabled_{true};
     std::atomic<bool> rollbackReady_{true};
 };
 

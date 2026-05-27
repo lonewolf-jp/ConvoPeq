@@ -1,0 +1,22 @@
+{
+    "schema": "isr_validator_tiering_policy_v1",
+    "owner": "@lonewolf-jp",
+    "issue": "bridge-runtime-validator-tiering-sla",
+    "rationale": "Machine-verifiable validator tiering and SLA contract for bridge runtime migration operations.",
+    "expiry": "2027-12-31",
+    "tiers": {
+        "smoke": "pr",
+        "standard": "nightly",
+        "exhaustive": "weekly"
+    },
+    "workflowSchedule": {
+        "nightlyCron": "0 18 * * *",
+        "weeklyCron": "0 19 * * 0",
+        "nightlyTier": "standard",
+        "weeklyTier": "exhaustive"
+    },
+    "slaHours": {
+        "hbViolation": 24,
+        "payloadMismatch": 72
+    }
+}

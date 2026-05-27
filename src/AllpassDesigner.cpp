@@ -13,7 +13,7 @@ namespace {
 
 constexpr uint64_t kDefaultDeterministicCmaesSeed = 0x434f4e564f4251ull;
 
-static std::vector<double> buildFrequencyCandidates(double sampleRate)
+std::vector<double> buildFrequencyCandidates(double sampleRate)
 {
     constexpr int kCandidateCount = 18;
     constexpr double kMinCandidateHz = 20.0;
@@ -42,24 +42,24 @@ static std::vector<double> buildFrequencyCandidates(double sampleRate)
     return candidates;
 }
 
-static double clampOptimizationFrequency(double sampleRate, double value) noexcept
+double clampOptimizationFrequency(double sampleRate, double value) noexcept
 {
     const double maxCandidateHz = std::max(20.0,
         std::min(0.45 * sampleRate, 0.499 * sampleRate));
     return std::clamp(value, 20.0, maxCandidateHz);
 }
 
-static double makeRelativeFrequencyStep(double f0) noexcept
+double makeRelativeFrequencyStep(double f0) noexcept
 {
     return std::max(1.0e-3, std::abs(f0) * 1.0e-4);
 }
 
-static double makeRelativeGainStep(double gain) noexcept
+double makeRelativeGainStep(double gain) noexcept
 {
     return std::clamp(std::max(1.0e-6, std::abs(gain) * 1.0e-4), 1.0e-6, 5.0e-3);
 }
 
-static inline double stableSigmoid01(double x) noexcept
+inline double stableSigmoid01(double x) noexcept
 {
     // |x| > 50 では exp がオーバーフロー/アンダーフローするためクランプ
     x = std::clamp(x, -50.0, 50.0);
@@ -73,26 +73,26 @@ static inline double stableSigmoid01(double x) noexcept
     return expX / (1.0 + expX);
 }
 
-static inline uint64_t rotl64(uint64_t value, int count) noexcept
+inline uint64_t rotl64(uint64_t value, int count) noexcept
 {
     return (value << count) | (value >> (64 - count));
 }
 
-static inline uint64_t readLE64(const uint8_t* p) noexcept
+inline uint64_t readLE64(const uint8_t* p) noexcept
 {
     uint64_t v = 0;
     std::memcpy(&v, p, sizeof(v));
     return v;
 }
 
-static inline uint32_t readLE32(const uint8_t* p) noexcept
+inline uint32_t readLE32(const uint8_t* p) noexcept
 {
     uint32_t v = 0;
     std::memcpy(&v, p, sizeof(v));
     return v;
 }
 
-static inline uint64_t xxh64Round(uint64_t acc, uint64_t input) noexcept
+inline uint64_t xxh64Round(uint64_t acc, uint64_t input) noexcept
 {
     constexpr uint64_t kPrime1 = 11400714785074694791ull;
     constexpr uint64_t kPrime2 = 14029467366897019727ull;
@@ -102,7 +102,7 @@ static inline uint64_t xxh64Round(uint64_t acc, uint64_t input) noexcept
     return acc;
 }
 
-static inline uint64_t xxh64MergeRound(uint64_t acc, uint64_t val) noexcept
+inline uint64_t xxh64MergeRound(uint64_t acc, uint64_t val) noexcept
 {
     constexpr uint64_t kPrime1 = 11400714785074694791ull;
     constexpr uint64_t kPrime4 = 9650029242287828579ull;
@@ -111,7 +111,7 @@ static inline uint64_t xxh64MergeRound(uint64_t acc, uint64_t val) noexcept
     return acc;
 }
 
-static inline uint64_t xxh64Avalanche(uint64_t h) noexcept
+inline uint64_t xxh64Avalanche(uint64_t h) noexcept
 {
     constexpr uint64_t kPrime2 = 14029467366897019727ull;
     constexpr uint64_t kPrime3 = 1609587929392839161ull;
@@ -123,7 +123,7 @@ static inline uint64_t xxh64Avalanche(uint64_t h) noexcept
     return h;
 }
 
-static inline uint64_t xxh64Digest(const uint8_t* data, size_t len, uint64_t seed) noexcept
+inline uint64_t xxh64Digest(const uint8_t* data, size_t len, uint64_t seed) noexcept
 {
     constexpr uint64_t kPrime1 = 11400714785074694791ull;
     constexpr uint64_t kPrime2 = 14029467366897019727ull;
@@ -218,18 +218,20 @@ double AllpassDesigner::sectionGroupDelay(double f0, double gain, double omega, 
 //==============================================================================
 // 無制約変数 → 物理パラメータ変換
 //==============================================================================
-static inline double unconstrainedToRho(double x) {
+namespace {
+inline double unconstrainedToRho(double x) {
     // 単調増加写像 R → (0, 0.98)。x=0 で ρ=0.49。
     // 旧実装は偶関数（rho(-x)==rho(x)）で二重縮退が生じていたため sigmoid に変更。
     return 0.98 * stableSigmoid01(x);
 }
 
-static inline double unconstrainedToTheta(double x) {
+inline double unconstrainedToTheta(double x) {
     // 単調増加写像 R → (0, 0.99π)。x=0 で θ=0.495π。
     // 群遅延式は cos(ω-θ)+cos(ω+θ) の対称性から θ ∈ (0,π) で充足。
     // Nyquist 極配置を避けるため上限を π 未満に固定する。
     constexpr double kThetaMax = 0.99 * juce::MathConstants<double>::pi;
     return kThetaMax * stableSigmoid01(x);
+}
 }
 
 //==============================================================================

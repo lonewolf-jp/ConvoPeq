@@ -5,10 +5,10 @@
 
 namespace {
 // EQ応答曲線計算用補助関数
-static void calcMagnitudesForBand(const EQCoeffsBiquad& c,
-                                  const std::complex<double>* zArr,
-                                  float* outMagSq,
-                                  int numPoints) noexcept
+void calcMagnitudesForBand(const EQCoeffsBiquad& c,
+                           const std::complex<double>* zArr,
+                           float* outMagSq,
+                           int numPoints) noexcept
 {
     const __m256d vB0 = _mm256_set1_pd(c.b0);
     const __m256d vB1 = _mm256_set1_pd(c.b1);

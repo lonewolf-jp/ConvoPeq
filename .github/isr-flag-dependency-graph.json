@@ -1,0 +1,27 @@
+{
+    "schema": "flag_dependency_graph_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-FLAGGRAPH-001",
+    "rationale": "Prevent rollback flag interaction hell by validating acyclic dependencies and matrix alignment",
+    "expiry": "2026-08-31",
+    "nodes": [
+        "ISR_ROLLBACK_GLOBAL",
+        "ISR_ROLLBACK_PUBLICATION_ONLY",
+        "ISR_ROLLBACK_CROSSFADE_ONLY",
+        "ISR_ROLLBACK_RETIRE_PATH_ONLY"
+    ],
+    "edges": [
+        {
+            "from": "ISR_ROLLBACK_GLOBAL",
+            "to": "ISR_ROLLBACK_PUBLICATION_ONLY"
+        },
+        {
+            "from": "ISR_ROLLBACK_GLOBAL",
+            "to": "ISR_ROLLBACK_CROSSFADE_ONLY"
+        },
+        {
+            "from": "ISR_ROLLBACK_GLOBAL",
+            "to": "ISR_ROLLBACK_RETIRE_PATH_ONLY"
+        }
+    ]
+}

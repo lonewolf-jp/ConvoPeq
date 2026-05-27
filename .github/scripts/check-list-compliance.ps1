@@ -40,9 +40,12 @@ function Invoke-RgLines {
         }
 
         foreach ($file in $candidateFiles) {
-            $matches = Select-String -LiteralPath $file.FullName -Pattern $Pattern -CaseSensitive -ErrorAction SilentlyContinue
-            foreach ($match in $matches) {
-                $results += ("{0}:{1}:{2}" -f $match.Path, $match.LineNumber, $match.Line)
+            $lineNumber = 0
+            foreach ($line in Get-Content -LiteralPath $file.FullName -ErrorAction SilentlyContinue) {
+                $lineNumber++
+                if ([regex]::IsMatch([string]$line, $Pattern)) {
+                    $results += ("{0}:{1}:{2}" -f $file.FullName, $lineNumber, $line)
+                }
             }
         }
     }
@@ -68,12 +71,28 @@ function Add-Warn {
     $warnings.Add([PSCustomObject]@{ Rule = $RuleId; Message = $Message; Line = $Line }) | Out-Null
 }
 
+function Get-RgLineNumber {
+    param([Parameter(Mandatory = $true)][string]$MatchLine)
+
+    $m = [regex]::Match($MatchLine, '^(\d+):')
+    if ($m.Success) {
+        return [int]$m.Groups[1].Value
+    }
+
+    $m = [regex]::Match($MatchLine, '^.+:(\d+):')
+    if (-not $m.Success) {
+        throw "Unable to parse rg line number from: $MatchLine"
+    }
+
+    return [int]$m.Groups[1].Value
+}
+
 # ------------------------------------------------------------
 # list.md 15.1 危険コメント
 # ------------------------------------------------------------
 $dangerCommentPattern = '(//|/\*).*\b(TODO|FIXME|workaround|quick\s+fix|just\s+for\s+now|temporary)\b'
-$dangerMatches = Invoke-RgLines -Pattern $dangerCommentPattern -Targets @($srcDir)
-foreach ($m in $dangerMatches) {
+$dangerHits = Invoke-RgLines -Pattern $dangerCommentPattern -Targets @($srcDir)
+foreach ($m in $dangerHits) {
     Add-Failure -RuleId '15.1' -Message 'Danger comment token detected' -Line $m
 }
 
@@ -91,8 +110,8 @@ $rtFiles = @(
 )
 
 $rtAllocPattern = 'new\b|delete\b|malloc|calloc|realloc|free\b|_aligned_malloc|mkl_malloc|mkl_free|setSize\s*\(|resize\s*\(|reserve\s*\(|push_back\s*\(|emplace_back\s*\('
-$rtAllocMatches = Invoke-RgLines -Pattern $rtAllocPattern -Targets $rtFiles
-foreach ($m in $rtAllocMatches) {
+$rtAllocHits = Invoke-RgLines -Pattern $rtAllocPattern -Targets $rtFiles
+foreach ($m in $rtAllocHits) {
     # コメントによる誤検知を除外（実装行のみ）
     if ($m -notmatch '://|//|/\*') {
         Add-Failure -RuleId '2.1' -Message 'Allocation-like token in RT file' -Line $m
@@ -100,21 +119,27 @@ foreach ($m in $rtAllocMatches) {
 }
 
 $rtLockPattern = 'std::mutex|std::lock_guard|std::unique_lock|std::shared_mutex|std::condition_variable|CriticalSection|ScopedLock|WaitableEvent|std::future|std::promise|std::async'
-$rtLockMatches = Invoke-RgLines -Pattern $rtLockPattern -Targets $rtFiles
-foreach ($m in $rtLockMatches) {
+$rtLockHits = Invoke-RgLines -Pattern $rtLockPattern -Targets $rtFiles
+foreach ($m in $rtLockHits) {
     Add-Failure -RuleId '2.2' -Message 'Lock/blocking token in RT file' -Line $m
 }
 
 $rtExPattern = '\bthrow\b|\btry\b|\bcatch\b|__try|__except'
-$rtExMatches = Invoke-RgLines -Pattern $rtExPattern -Targets $rtFiles
-foreach ($m in $rtExMatches) {
+$rtExHits = Invoke-RgLines -Pattern $rtExPattern -Targets $rtFiles
+foreach ($m in $rtExHits) {
     Add-Failure -RuleId '2.3' -Message 'Exception token in RT file' -Line $m
 }
 
 $rtIoPattern = 'Logger::writeToLog|\bDBG\s*\(|printf\s*\(|std::cout|MessageManager|File::|std::ifstream|std::ofstream'
-$rtIoMatches = Invoke-RgLines -Pattern $rtIoPattern -Targets $rtFiles
-foreach ($m in $rtIoMatches) {
+$rtIoHits = Invoke-RgLines -Pattern $rtIoPattern -Targets $rtFiles
+foreach ($m in $rtIoHits) {
     Add-Failure -RuleId '2.5' -Message 'Logging/I-O token in RT file' -Line $m
+}
+
+$rtRetirePattern = '\benqueueRetire\s*\('
+$rtRetireHits = Invoke-RgLines -Pattern $rtRetirePattern -Targets $rtFiles
+foreach ($m in $rtRetireHits) {
+    Add-Failure -RuleId '2.7' -Message 'Retire enqueue direct call in RT file' -Line $m
 }
 
 # ------------------------------------------------------------
@@ -130,8 +155,8 @@ if ($LASTEXITCODE -ne 0) {
 # list.md 7.1 delete/free 監査（deferred reclaim は許可）
 # ------------------------------------------------------------
 $ownershipPattern = '\bdelete\b|\bfree\s*\('
-$ownershipMatches = Invoke-RgLines -Pattern $ownershipPattern -Targets @($srcDir)
-foreach ($m in $ownershipMatches) {
+$ownershipHits = Invoke-RgLines -Pattern $ownershipPattern -Targets @($srcDir)
+foreach ($m in $ownershipHits) {
     # '= delete;' (copy/move禁止宣言) は対象外
     if ($m -match '=\s*delete\s*;') {
         continue
@@ -164,8 +189,8 @@ foreach ($m in $ownershipMatches) {
 # ------------------------------------------------------------
 $audioEngineHeader = Join-Path $srcDir 'audioengine\AudioEngine.h'
 $uiMutatePattern = 'uiConvolverProcessor\.set[A-Za-z0-9_]+\('
-$uiMutateMatches = Invoke-RgLines -Pattern $uiMutatePattern -Targets @($audioEngineHeader)
-foreach ($m in $uiMutateMatches) {
+$uiMutateHits = Invoke-RgLines -Pattern $uiMutatePattern -Targets @($audioEngineHeader)
+foreach ($m in $uiMutateHits) {
     $isSanctionedWrapper = (
         $m -match 'uiConvolverProcessor\.setMix\(' -or
         $m -match 'uiConvolverProcessor\.setSmoothingTime\('
@@ -176,6 +201,48 @@ foreach ($m in $uiMutateMatches) {
     }
 
     Add-Warn -RuleId '1.1.5' -Message 'UI staging setter detected; ensure rebuild/snapshot path is used' -Line $m
+}
+
+# ------------------------------------------------------------
+# list.md 1.1.6 publish freeze 経路固定（R13/R1）
+# ------------------------------------------------------------
+$publishRuntimeVersionPattern = 'worldOwner->runtimeVersion\s*='
+$publishTransitionIdPattern = 'worldOwner->transitionId\s*='
+$publishFreezePattern = 'worldOwner->freeze\s*\('
+$publishReturnPattern = 'return\s+worldOwner\s*;'
+$publishRuntimeVersionHits = Invoke-RgLines -Pattern $publishRuntimeVersionPattern -Targets @($audioEngineHeader)
+$publishTransitionIdHits = Invoke-RgLines -Pattern $publishTransitionIdPattern -Targets @($audioEngineHeader)
+$publishFreezeHits = Invoke-RgLines -Pattern $publishFreezePattern -Targets @($audioEngineHeader)
+$publishReturnHits = Invoke-RgLines -Pattern $publishReturnPattern -Targets @($audioEngineHeader)
+if (@($publishRuntimeVersionHits).Count -eq 0 -or @($publishTransitionIdHits).Count -eq 0) {
+    Add-Failure -RuleId '1.1.6' -Message 'Publish builder pre-freeze assignments missing' -Line $audioEngineHeader
+}
+if (@($publishFreezeHits).Count -eq 0) {
+    Add-Failure -RuleId '1.1.6' -Message 'Publish builder freeze() call missing' -Line $audioEngineHeader
+}
+if (@($publishReturnHits).Count -eq 0) {
+    Add-Failure -RuleId '1.1.6' -Message 'Publish builder return worldOwner missing' -Line $audioEngineHeader
+}
+
+if (@($publishRuntimeVersionHits).Count -gt 0 -and @($publishTransitionIdHits).Count -gt 0 -and @($publishFreezeHits).Count -gt 0 -and @($publishReturnHits).Count -gt 0) {
+    $runtimeVersionLine = Get-RgLineNumber (@($publishRuntimeVersionHits)[0])
+    $transitionIdLine = Get-RgLineNumber (@($publishTransitionIdHits)[0])
+    $freezeLine = Get-RgLineNumber (@($publishFreezeHits)[0])
+    $returnLine = Get-RgLineNumber (@($publishReturnHits)[0])
+
+    if ($freezeLine -le $runtimeVersionLine -or $freezeLine -le $transitionIdLine) {
+        Add-Failure -RuleId '1.1.6' -Message 'Publish builder freeze() must follow runtimeVersion/transitionId assignment' -Line $audioEngineHeader
+    }
+
+    if ($freezeLine -ge $returnLine) {
+        Add-Failure -RuleId '1.1.6' -Message 'Publish builder freeze() must occur before return worldOwner' -Line $audioEngineHeader
+    }
+}
+
+$publishSealRecursivelyPattern = 'worldOwner->sealRecursively\s*\('
+$publishSealRecursivelyHits = Invoke-RgLines -Pattern $publishSealRecursivelyPattern -Targets @($audioEngineHeader)
+foreach ($m in $publishSealRecursivelyHits) {
+    Add-Failure -RuleId '1.1.6' -Message 'Publish builder must use freeze() instead of sealRecursively()' -Line $m
 }
 
 # ------------------------------------------------------------

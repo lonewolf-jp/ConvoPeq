@@ -21,11 +21,13 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 #include "AlignedAllocation.h"
 #include <immintrin.h>
 #include <mkl_vsl.h>
 
 #include "audioengine/AtomicAccess.h"
+#include "DspNumericPolicy.h"
 
 namespace convo
 {
@@ -100,6 +102,13 @@ public:
     PsychoacousticDither(const PsychoacousticDither &) = delete;
     PsychoacousticDither & operator=(const PsychoacousticDither &) = delete;
 
+private:
+
+    static std::atomic<uint64_t> instanceSeedCounterStorage_;
+    static std::atomic<uint64_t>& instanceSeedCounter() noexcept;
+
+public:
+
     explicit PsychoacousticDither(std::optional<uint64_t> seed = std::nullopt)
     {
         uint64_t baseSeed;
@@ -110,10 +119,9 @@ public:
         else
         {
             // 時間 + 静的カウンタでユニーク性を確保 (複数インスタンス同時生成時のシード衝突防止)
-            static std::atomic<uint64_t> instanceCounter { 0 };
             // カウンタは一意シード生成のための単純インクリメントであり、他 atomic との HB 不要。relaxed で十分。
             baseSeed = static_cast<uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count())
-                     ^ (convo::fetchAddAtomic(instanceCounter,
+                     ^ (convo::fetchAddAtomic(instanceSeedCounter(),
                                               static_cast<uint64_t>(1),
                                               std::memory_order_relaxed) * 0x9e3779b97f4a7c15ULL);
         }

@@ -83,8 +83,8 @@ Assert-Match $lifecycleCpp 'currentPhase\s*==\s*LifecyclePhase::Releasing' 'R20 
 # R21: DSPHandle callback view + crossfade completion checks
 $audioBlockCppPath = Join-Path $audioRoot "AudioEngine.Processing.AudioBlock.cpp"
 $audioBlockCpp = Read-Text $audioBlockCppPath
-Assert-Match $audioBlockCpp 'dspHandleRuntime_\.getActiveDSP\s*\(' 'R21 gate: callback active DSP handle view missing'
-Assert-Match $audioBlockCpp 'dspHandleRuntime_\.getFadingDSP\s*\(' 'R21 gate: callback fading DSP handle view missing'
+Assert-Match $audioBlockCpp 'dspHandleRuntime_\.getActiveRuntimeDSPHandle\s*\(' 'R21 gate: callback active runtime DSP handle view missing'
+Assert-Match $audioBlockCpp 'dspHandleRuntime_\.getFadingRuntimeDSPHandle\s*\(' 'R21 gate: callback fading runtime DSP handle view missing'
 
 $timerCppPath = Join-Path $audioRoot "AudioEngine.Timer.cpp"
 $timerCpp = Read-Text $timerCppPath

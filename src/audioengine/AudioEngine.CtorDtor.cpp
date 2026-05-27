@@ -3,7 +3,7 @@
 #include "NoiseShaperLearner.h"
 
 namespace {
-static void diagLog(const juce::String& message)
+void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
@@ -51,29 +51,31 @@ AudioEngine::~AudioEngine()
     DSPCore* fadingToRelease = nullptr;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
+        const auto runtimeReadView = readControlRuntimeView();
+        const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
         validateDistinctRuntimeSlots("~AudioEngine.beforeClear",
-                         activeDSP,
-                         resolveFadingDSPFromRuntimeWorldOnly(getRuntimePublishView().graph),
+                 getActiveRuntimeDSP(),
+                         resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
                          nullptr);
 
         convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel); // acq_rel: rebuild observer の acquire と HB
 
-        // activeDSP / fadingOutDSP はここでスロットを切り離すだけにして、
+        // active runtime slot / fading runtime slot はここでスロットを切り離すだけにして、
         // 実体の解放は retireDSP() → deferred delete / epoch drain に寄せる。
         {
             constexpr uintptr_t kInvalidAllOnes = ~static_cast<uintptr_t>(0);
-            DSPCore* activeRaw = activeDSP.get();
+            DSPCore* activeRaw = getActiveRuntimeDSP();
             activeToRelease = (reinterpret_cast<uintptr_t>(activeRaw) == kInvalidAllOnes) ? nullptr : activeRaw;
         }
-        activeDSP = nullptr;
+        setActiveRuntimeDSP(nullptr);
         {
-            auto* const fadingRaw = exchangeFadingOutDSP(nullptr);
+            auto* const fadingRaw = exchangeFadingRuntimeDSP(nullptr);
             fadingToRelease = (reinterpret_cast<uintptr_t>(fadingRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : fadingRaw;
         }
 
         validateDistinctRuntimeSlots("~AudioEngine.afterClear",
-                         activeDSP,
-                         resolveFadingDSPFromRuntimeWorldOnly(getRuntimePublishView().graph),
+                 getActiveRuntimeDSP(),
+                         resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
                          nullptr);
 
         // pendingTask.currentDSP は worker 側の未コミット生成物なので、
@@ -111,7 +113,7 @@ AudioEngine::~AudioEngine()
 
     // Shutdown 時は EBR 回収を試みる。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
-    RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+    makeRuntimePublicationCoordinator()
         .clearPublishedRuntimeSnapshotsNonRt();
     drainDeferredRetireQueues(true);
     m_epochDomain.drainAll();

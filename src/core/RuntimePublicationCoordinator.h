@@ -34,6 +34,11 @@ public:
         return RuntimePublicationCoordinator { std::move(bridge), store.acquireWriteAccess() };
     }
 
+    [[nodiscard]] static const World* observePublishedWorld(const Store& store) noexcept
+    {
+        return store.observe();
+    }
+
     void clearPublishedRuntimeSnapshotsNonRt() noexcept
     {
         auto* world = writeAccess_.publishAndSwap(nullptr);

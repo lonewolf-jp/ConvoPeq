@@ -3,6 +3,9 @@ name: ISR Verification
 on:
   pull_request:
     branches: [ main, master ]
+  schedule:
+    - cron: '0 18 * * *'
+    - cron: '0 19 * * 0'
   workflow_dispatch:
     inputs:
       requireRuntimeEvidence:
@@ -10,6 +13,75 @@ on:
         required: false
         default: false
         type: boolean
+      verificationTier:
+        description: "Verification tier (smoke/standard/exhaustive)"
+        required: false
+        default: standard
+        type: choice
+        options:
+          - smoke
+          - standard
+          - exhaustive
+      enforceTriggerPolicy:
+        description: "Enforce trigger policy targets (fails if trigger metrics exceed targetMax)"
+        required: false
+        default: false
+        type: boolean
+      requireAstTriggerCheck:
+        description: "Require AST trigger checks (fails if ast-grep is unavailable or scan errors)"
+        required: false
+        default: false
+        type: boolean
+      requireClangTidyAudit:
+        description: "Require clang-tidy audit gate (fails if clang-tidy/compile_commands are unavailable)"
+        required: false
+        default: false
+        type: boolean
+      autoCapture81Log:
+        description: "Try auto-capturing ConvoPeq.log for 8.1 metrics when missing"
+        required: false
+        default: false
+        type: boolean
+      collect81CloseEvidence:
+        description: "Collect 8.1 close evidence (baseline/window/delta) after standard verification"
+        required: false
+        default: false
+        type: boolean
+      collect81WindowSec:
+        description: "Observation window seconds for 8.1 close evidence collection"
+        required: false
+        default: "20"
+        type: string
+      collect81AutoCaptureTimeoutSec:
+        description: "Auto-capture timeout seconds for 8.1 close evidence collection"
+        required: false
+        default: "10"
+        type: string
+      collect81SignalProbe:
+        description: "Run finalize-aware CLI probe when 8.1 close signals are still insufficient"
+        required: false
+        default: false
+        type: boolean
+      collect81ProbeExitMs:
+        description: "CLI probe exit timeout in milliseconds for 8.1 signal collection"
+        required: false
+        default: "8000"
+        type: string
+      autoPruneCleanupDeferred:
+        description: "Auto-prune ready deferred cleanup entries during verification"
+        required: false
+        default: false
+        type: boolean
+      enforce81CloseDecision:
+        description: "Fail workflow when 8.1 operational close decision is not ready"
+        required: false
+        default: false
+        type: boolean
+      enforce81CloseDecisionRetryMax:
+        description: "Maximum collector attempts when enforcing 8.1 close decision"
+        required: false
+        default: "2"
+        type: string
 
 permissions:
   contents: read
@@ -21,72 +93,730 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run ISR V2-V10 verification scripts
+      - name: Run ISR V1-V10 verification scripts
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.requireRuntimeEvidence }}" -eq "true") {
-            $env:ISR_REQUIRE_RUNTIME_EVIDENCE = '1'
+          function Resolve-WorkflowPositiveInt {
+            param(
+              [string]$Raw,
+              [string]$InputName
+            )
+
+            $parsedValue = 0
+            if (-not [int]::TryParse($Raw, [ref]$parsedValue) -or $parsedValue -le 0) {
+              throw "Invalid workflow inputs: $InputName must be a positive integer (actual='$Raw')"
+            }
+
+            return $parsedValue
+          }
+
+          function Assert-WorkflowRange {
+            param(
+              [int]$Value,
+              [int]$Min,
+              [int]$Max,
+              [string]$InputName
+            )
+
+            if ($Value -lt $Min -or $Value -gt $Max) {
+              throw "Invalid workflow inputs: $InputName must be between $Min and $Max (actual=$Value)"
+            }
+          }
+
+          function Get-WorkflowInputContractEntry {
+            param(
+              [pscustomobject]$Policy,
+              [string]$InputName
+            )
+
+            if ($null -eq $Policy.workflowInputContract -or $null -eq $Policy.workflowInputContract.inputs) {
+              throw '8.1 close policy workflowInputContract missing required field: inputs'
+            }
+
+            $entries = @($Policy.workflowInputContract.inputs)
+            if ($entries.Count -eq 0) {
+              throw '8.1 close policy workflowInputContract requires non-empty inputs'
+            }
+
+            $entry = $entries | Where-Object { "$($_.name)" -eq $InputName } | Select-Object -First 1
+            if ($null -eq $entry) {
+              throw "8.1 close policy workflowInputContract missing input contract entry: $InputName"
+            }
+
+            return $entry
+          }
+
+          function Resolve-WorkflowPolicyIntDefault {
+            param(
+              [pscustomobject]$Policy,
+              [string]$InputName
+            )
+
+            $entry = Get-WorkflowInputContractEntry -Policy $Policy -InputName $InputName
+            if ("$($entry.type)" -ne 'string') {
+              throw "8.1 close policy workflowInputContract input must be type=string for int default resolution: $InputName"
+            }
+
+            $rawDefault = "$($entry.default)"
+            $parsedDefault = 0
+            if (-not [int]::TryParse($rawDefault, [ref]$parsedDefault) -or $parsedDefault -le 0) {
+              throw "8.1 close policy workflowInputContract input has invalid positive integer default: name=$InputName default='$rawDefault'"
+            }
+
+            return $parsedDefault
+          }
+
+          function Assert-WorkflowPolicyExpiryGuard {
+            param(
+              [pscustomobject]$Policy,
+              [string]$Tier
+            )
+
+            if ($null -eq $Policy.expiryGuardDaysByTier) {
+              throw '8.1 close policy missing expiryGuardDaysByTier'
+            }
+
+            if ($null -eq $Policy.expiryGuardDaysByTier.standard -or $null -eq $Policy.expiryGuardDaysByTier.exhaustive) {
+              throw '8.1 close policy expiryGuardDaysByTier requires standard/exhaustive fields'
+            }
+
+            $guardStandard = [int]$Policy.expiryGuardDaysByTier.standard
+            $guardExhaustive = [int]$Policy.expiryGuardDaysByTier.exhaustive
+            if ($guardStandard -lt 1 -or $guardExhaustive -lt 1) {
+              throw '8.1 close policy expiryGuardDaysByTier values must be >= 1'
+            }
+
+            if ($guardStandard -gt $guardExhaustive) {
+              throw '8.1 close policy expiryGuardDaysByTier invalid: standard must be <= exhaustive'
+            }
+
+            if ($Tier -ne 'standard' -and $Tier -ne 'exhaustive') {
+              return
+            }
+
+            $policyExpiry = [datetime]::ParseExact("$($Policy.expiry)", 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+            $daysRemaining = [int][math]::Floor(($policyExpiry.Date - (Get-Date).Date).TotalDays)
+            $guardDays = [int]$Policy.expiryGuardDaysByTier.$Tier
+
+            if ($daysRemaining -lt $guardDays) {
+              throw "8.1 close policy expiry guard breached for tier=${Tier}: daysRemaining=$daysRemaining guardDays=$guardDays"
+            }
+          }
+
+          function Get-WorkflowInputBlock {
+            param(
+              [string]$WorkflowContent,
+              [string]$InputName
+            )
+
+            $escapedName = [regex]::Escape($InputName)
+            $blockPattern = "(?ms)^\s{6}${escapedName}:\s*\r?\n(?<block>(?:\s{8}.*\r?\n)+)"
+            $blockMatch = [regex]::Match($WorkflowContent, $blockPattern)
+            if (-not $blockMatch.Success) {
+              return $null
+            }
+
+            return $blockMatch.Groups['block'].Value
+          }
+
+          function Get-WorkflowInputProperty {
+            param(
+              [string]$Block,
+              [string]$PropertyName
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Block)) {
+              return $null
+            }
+
+            $pattern = "(?m)^\s{8}$([regex]::Escape($PropertyName)):\s*(?<value>[^\r\n]+)\s*$"
+            $match = [regex]::Match($Block, $pattern)
+            if (-not $match.Success) {
+              return $null
+            }
+
+            $value = $match.Groups['value'].Value.Trim()
+            if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
+              return $value.Substring(1, $value.Length - 2)
+            }
+
+            return $value
+          }
+
+          function Get-WorkflowDispatchInputNames {
+            param(
+              [string]$WorkflowContent
+            )
+
+            $dispatchMatch = [regex]::Match($WorkflowContent, '(?ms)^\s{2}workflow_dispatch:\s*\r?\n(?<dispatch>(?:\s{4}.*\r?\n)+)')
+            if (-not $dispatchMatch.Success) {
+              return @()
+            }
+
+            $dispatchBlock = $dispatchMatch.Groups['dispatch'].Value
+            $inputsMatch = [regex]::Match($dispatchBlock, '(?ms)^\s{4}inputs:\s*\r?\n(?<inputs>(?:\s{6}.*\r?\n)+)')
+            if (-not $inputsMatch.Success) {
+              return @()
+            }
+
+            $inputsBlock = $inputsMatch.Groups['inputs'].Value
+            return @([regex]::Matches($inputsBlock, '(?m)^\s{6}(?<name>[A-Za-z0-9_]+):\s*$') | ForEach-Object { $_.Groups['name'].Value })
+          }
+
+          function Assert-WorkflowInputContractAgainstPolicy {
+            param(
+              [pscustomobject]$Policy,
+              [string]$WorkflowPath
+            )
+
+            if (-not (Test-Path -LiteralPath $WorkflowPath)) {
+              throw "Workflow contract check failed: missing workflow file: $WorkflowPath"
+            }
+
+            if ($null -eq $Policy.workflowInputContract) {
+              throw '8.1 close policy missing workflowInputContract section'
+            }
+
+            if ([string]::IsNullOrWhiteSpace("$($Policy.workflowInputContract.descriptionMustContain)")) {
+              throw '8.1 close policy workflowInputContract missing required field: descriptionMustContain'
+            }
+
+            if ($null -eq $Policy.workflowInputContract.inputs) {
+              throw '8.1 close policy workflowInputContract missing required field: inputs'
+            }
+
+            $contractEntries = @($Policy.workflowInputContract.inputs)
+            if ($contractEntries.Count -eq 0) {
+              throw '8.1 close policy workflowInputContract requires non-empty inputs'
+            }
+
+            if ($null -eq $Policy.collector) {
+              throw '8.1 close policy missing collector section'
+            }
+
+            $workflowTextForContract = Get-Content -LiteralPath $WorkflowPath -Raw -Encoding UTF8
+            $policyInputNames = New-Object 'System.Collections.Generic.HashSet[string]'
+            $policyInputTypes = @{}
+            foreach ($entry in $contractEntries) {
+              $inputName = "$($entry.name)"
+              $expectedType = "$($entry.type)"
+              $expectedRequired = "$($entry.required)".ToLowerInvariant()
+              $expectedDefault = "$($entry.default)"
+              $descriptionMustContain = "$($Policy.workflowInputContract.descriptionMustContain)"
+
+              if ([string]::IsNullOrWhiteSpace($inputName)) {
+                throw '8.1 close policy workflowInputContract has entry with empty name'
+              }
+
+              [void]$policyInputNames.Add($inputName)
+
+              if ($expectedType -ne 'boolean' -and $expectedType -ne 'string') {
+                throw "8.1 close policy workflowInputContract input has invalid type: name=$inputName type=$expectedType"
+              }
+
+              if ($expectedRequired -ne 'true' -and $expectedRequired -ne 'false') {
+                throw "8.1 close policy workflowInputContract input has invalid required: name=$inputName required=$($entry.required)"
+              }
+
+              $block = Get-WorkflowInputBlock -WorkflowContent $workflowTextForContract -InputName $inputName
+              if ($null -eq $block) {
+                throw "Workflow input contract violation: missing input block: $inputName"
+              }
+
+              $actualType = Get-WorkflowInputProperty -Block $block -PropertyName 'type'
+              $actualRequired = Get-WorkflowInputProperty -Block $block -PropertyName 'required'
+              $actualDefault = Get-WorkflowInputProperty -Block $block -PropertyName 'default'
+              $actualDescription = Get-WorkflowInputProperty -Block $block -PropertyName 'description'
+
+              if ($actualType -ne $expectedType) {
+                throw "Workflow input contract violation: type mismatch: input=$inputName expected=$expectedType actual=$actualType"
+              }
+
+              if ($actualRequired -ne $expectedRequired) {
+                throw "Workflow input contract violation: required mismatch: input=$inputName expected=$expectedRequired actual=$actualRequired"
+              }
+
+              if ($actualDefault -ne $expectedDefault) {
+                throw "Workflow input contract violation: default mismatch: input=$inputName expected=$expectedDefault actual=$actualDefault"
+              }
+
+              if ([string]::IsNullOrWhiteSpace($actualDescription) -or -not $actualDescription.Contains($descriptionMustContain)) {
+                throw "Workflow input contract violation: description mismatch: input=$inputName must include '$descriptionMustContain'"
+              }
+
+              if ($expectedType -eq 'string') {
+                $policyMinField = "$($entry.policyMinField)"
+                $policyMaxField = "$($entry.policyMaxField)"
+                if ([string]::IsNullOrWhiteSpace($policyMinField) -or [string]::IsNullOrWhiteSpace($policyMaxField)) {
+                  throw "8.1 close policy workflowInputContract string input missing policy range fields: name=$inputName"
+                }
+
+                if ($null -eq $Policy.collector.$policyMinField -or $null -eq $Policy.collector.$policyMaxField) {
+                  throw "8.1 close policy workflowInputContract references unknown collector field: name=$inputName minField=$policyMinField maxField=$policyMaxField"
+                }
+              }
+            }
+
+            $workflowInputNames = @(Get-WorkflowDispatchInputNames -WorkflowContent $workflowTextForContract)
+            foreach ($workflowInputName in $workflowInputNames) {
+              if ($workflowInputName -match '81' -and -not $policyInputNames.Contains($workflowInputName)) {
+                throw "Workflow input contract violation: uncontracted 8.1 workflow input detected: $workflowInputName"
+              }
+            }
+          }
+
+          function Assert-WorkflowDispatchInputPolicyAgainstPolicy {
+            param(
+              [pscustomobject]$Policy,
+              [string]$WorkflowPath
+            )
+
+            if (-not (Test-Path -LiteralPath $WorkflowPath)) {
+              throw "Workflow dispatch input policy check failed: missing workflow file: $WorkflowPath"
+            }
+
+            foreach ($field in @('schema', 'owner', 'issue', 'rationale', 'expiry', 'inputContract')) {
+              if ($null -eq $Policy.$field -or [string]::IsNullOrWhiteSpace("$($Policy.$field)")) {
+                throw "Workflow dispatch input policy missing required field: $field"
+              }
+            }
+
+            if ($null -eq $Policy.forwardingContract -or $null -eq $Policy.forwardingContract.switches) {
+              throw 'Workflow dispatch input policy missing required field: forwardingContract.switches'
+            }
+
+            if ("$($Policy.schema)" -ne 'isr_workflow_dispatch_input_policy_v1') {
+              throw "Unexpected workflow dispatch input policy schema: $($Policy.schema)"
+            }
+
+            try {
+              $policyExpiry = [datetime]::ParseExact("$($Policy.expiry)", 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+              if ((Get-Date).Date -gt $policyExpiry.Date) {
+                throw "Workflow dispatch input policy expired: expiry=$($Policy.expiry)"
+              }
+            }
+            catch {
+              if ($_.Exception.Message -like 'Workflow dispatch input policy expired:*') {
+                throw
+              }
+
+              throw "Workflow dispatch input policy has invalid expiry format: '$($Policy.expiry)' (expected yyyy-MM-dd)"
+            }
+
+            if ($null -eq $Policy.inputContract.inputs) {
+              throw 'Workflow dispatch input policy missing required field: inputContract.inputs'
+            }
+
+            $contractEntries = @($Policy.inputContract.inputs)
+            if ($contractEntries.Count -eq 0) {
+              throw 'Workflow dispatch input policy inputContract.inputs requires non-empty inputs'
+            }
+
+            $forwardingSwitches = @($Policy.forwardingContract.switches)
+            if ($forwardingSwitches.Count -eq 0) {
+              throw 'Workflow dispatch input policy forwardingContract.switches requires non-empty switches'
+            }
+
+            $workflowTextForContract = Get-Content -LiteralPath $WorkflowPath -Raw -Encoding UTF8
+            $policyInputNames = New-Object 'System.Collections.Generic.HashSet[string]'
+
+            foreach ($entry in $contractEntries) {
+              $inputName = "$($entry.name)"
+              $expectedType = "$($entry.type)"
+              $expectedRequired = "$($entry.required)".ToLowerInvariant()
+              $expectedDefault = "$($entry.default)"
+              $descriptionMustContain = "$($entry.descriptionMustContain)"
+
+              if ([string]::IsNullOrWhiteSpace($inputName)) {
+                throw 'Workflow dispatch input policy has entry with empty name'
+              }
+
+              if (-not $policyInputNames.Add($inputName)) {
+                throw "Workflow dispatch input policy has duplicate input name: $inputName"
+              }
+              else {
+                $policyInputTypes[$inputName] = $expectedType
+              }
+
+              if ($expectedType -ne 'boolean' -and $expectedType -ne 'choice') {
+                throw "Workflow dispatch input policy has invalid type: input=$inputName type=$expectedType"
+              }
+
+              if ($expectedType -eq 'boolean' -and $expectedDefault -ne 'true' -and $expectedDefault -ne 'false') {
+                throw "Workflow dispatch input policy boolean input has invalid default: input=$inputName default=$expectedDefault"
+              }
+
+              if ($expectedRequired -ne 'true' -and $expectedRequired -ne 'false') {
+                throw "Workflow dispatch input policy has invalid required value: input=$inputName required=$($entry.required)"
+              }
+
+              if ([string]::IsNullOrWhiteSpace($expectedDefault)) {
+                throw "Workflow dispatch input policy has empty default: input=$inputName"
+              }
+
+              if ([string]::IsNullOrWhiteSpace($descriptionMustContain)) {
+                throw "Workflow dispatch input policy missing descriptionMustContain: input=$inputName"
+              }
+
+              $block = Get-WorkflowInputBlock -WorkflowContent $workflowTextForContract -InputName $inputName
+              if ($null -eq $block) {
+                throw "Workflow dispatch input policy violation: missing input block: $inputName"
+              }
+
+              $actualType = Get-WorkflowInputProperty -Block $block -PropertyName 'type'
+              $actualRequired = Get-WorkflowInputProperty -Block $block -PropertyName 'required'
+              $actualDefault = Get-WorkflowInputProperty -Block $block -PropertyName 'default'
+              $actualDescription = Get-WorkflowInputProperty -Block $block -PropertyName 'description'
+
+              if ($actualType -ne $expectedType) {
+                throw "Workflow dispatch input policy violation: type mismatch: input=$inputName expected=$expectedType actual=$actualType"
+              }
+
+              if ($actualRequired -ne $expectedRequired) {
+                throw "Workflow dispatch input policy violation: required mismatch: input=$inputName expected=$expectedRequired actual=$actualRequired"
+              }
+
+              if ($actualDefault -ne $expectedDefault) {
+                throw "Workflow dispatch input policy violation: default mismatch: input=$inputName expected=$expectedDefault actual=$actualDefault"
+              }
+
+              if ([string]::IsNullOrWhiteSpace($actualDescription) -or -not $actualDescription.Contains($descriptionMustContain)) {
+                throw "Workflow dispatch input policy violation: description mismatch: input=$inputName must include '$descriptionMustContain'"
+              }
+
+              if ($expectedType -eq 'choice') {
+                $actualOptions = @(Get-WorkflowInputOptions -Block $block)
+                $expectedOptions = @($entry.options)
+                if ($expectedOptions.Count -eq 0) {
+                  throw "Workflow dispatch input policy choice input missing options: input=$inputName"
+                }
+
+                $optionSet = New-Object 'System.Collections.Generic.HashSet[string]'
+                foreach ($option in $expectedOptions) {
+                  $optionValue = "$option"
+                  if ([string]::IsNullOrWhiteSpace($optionValue)) {
+                    throw "Workflow dispatch input policy choice input has empty option: input=$inputName"
+                  }
+
+                  if (-not $optionSet.Add($optionValue)) {
+                    throw "Workflow dispatch input policy choice input has duplicate option: input=$inputName option=$optionValue"
+                  }
+                }
+
+                if (-not $optionSet.Contains($expectedDefault)) {
+                  throw "Workflow dispatch input policy choice input default is not in options: input=$inputName default=$expectedDefault"
+                }
+
+                if ($actualOptions.Count -gt 0) {
+                  $actualOptionSet = New-Object 'System.Collections.Generic.HashSet[string]'
+                  foreach ($actualOption in $actualOptions) {
+                    if (-not $actualOptionSet.Add("$actualOption")) {
+                      throw "Workflow dispatch input policy violation: workflow has duplicate option: input=$inputName option=$actualOption"
+                    }
+                  }
+                }
+
+                if (($actualOptions -join ',') -ne ($expectedOptions -join ',')) {
+                  throw "Workflow dispatch input policy violation: options mismatch: input=$inputName expected=$($expectedOptions -join '|') actual=$($actualOptions -join '|')"
+                }
+              }
+            }
+
+            $workflowInputNames = @(Get-WorkflowDispatchInputNames -WorkflowContent $workflowTextForContract)
+            foreach ($workflowInputName in $workflowInputNames) {
+              if ($workflowInputName -notmatch '81' -and -not $policyInputNames.Contains($workflowInputName)) {
+                throw "Workflow dispatch input policy violation: uncontracted non-8.1 workflow input detected: $workflowInputName"
+              }
+            }
+
+            $forwardingInputNameSet = New-Object 'System.Collections.Generic.HashSet[string]'
+            $forwardingRunnerSwitchSet = New-Object 'System.Collections.Generic.HashSet[string]'
+
+            foreach ($switchContract in $forwardingSwitches) {
+              $inputName = "$($switchContract.inputName)"
+              $runnerSwitch = "$($switchContract.runnerSwitch)"
+
+              if ([string]::IsNullOrWhiteSpace($inputName)) {
+                throw 'Workflow dispatch input policy forwardingContract has entry with empty inputName'
+              }
+
+              if ([string]::IsNullOrWhiteSpace($runnerSwitch)) {
+                throw "Workflow dispatch input policy forwardingContract has empty runnerSwitch: input=$inputName"
+              }
+
+              if (-not $forwardingInputNameSet.Add($inputName)) {
+                throw "Workflow dispatch input policy forwardingContract has duplicate inputName: input=$inputName"
+              }
+
+              if (-not $forwardingRunnerSwitchSet.Add($runnerSwitch)) {
+                throw "Workflow dispatch input policy forwardingContract has duplicate runnerSwitch: switch=$runnerSwitch"
+              }
+
+              if (-not $policyInputNames.Contains($inputName)) {
+                throw "Workflow dispatch input policy forwardingContract references unknown input: input=$inputName"
+              }
+
+              if ($policyInputTypes[$inputName] -ne 'boolean') {
+                throw "Workflow dispatch input policy forwardingContract requires boolean input type: input=$inputName type=$($policyInputTypes[$inputName])"
+              }
+
+              if (-not $workflowTextForContract.Contains("inputs.$inputName")) {
+                throw "Workflow dispatch input policy violation: missing workflow input reference for forwarding: input=$inputName"
+              }
+
+              if (-not $workflowTextForContract.Contains("'$runnerSwitch'")) {
+                throw "Workflow dispatch input policy violation: missing tier runner switch forwarding: input=$inputName switch=$runnerSwitch"
+              }
+            }
+          }
+
+          function Get-WorkflowInputOptions {
+            param(
+              [string]$Block
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Block)) {
+              return @()
+            }
+
+            $optionsMatch = [regex]::Match($Block, '(?ms)^\s{8}options:\s*\r?\n(?<options>(?:\s{10}-\s*[^\r\n]+\r?\n)+)')
+            if (-not $optionsMatch.Success) {
+              return @()
+            }
+
+            return @([regex]::Matches($optionsMatch.Groups['options'].Value, '(?m)^\s{10}-\s*(?<opt>[^\r\n]+)\s*$') | ForEach-Object { $_.Groups['opt'].Value.Trim() })
+          }
+
+          function Resolve-ValidatorTieringScheduleContract {
+            param(
+              [string]$PolicyPath
+            )
+
+            if (-not (Test-Path -LiteralPath $PolicyPath)) {
+              throw "Missing validator tiering policy: $PolicyPath"
+            }
+
+            $policy = Get-Content -LiteralPath $PolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ("$($policy.schema)" -ne 'isr_validator_tiering_policy_v1') {
+              throw "Unexpected validator tiering policy schema: $($policy.schema)"
+            }
+
+            if ($null -eq $policy.workflowSchedule) {
+              throw 'Validator tiering policy missing workflowSchedule object'
+            }
+
+            foreach ($field in @('nightlyCron', 'weeklyCron', 'nightlyTier', 'weeklyTier')) {
+              if ($null -eq $policy.workflowSchedule.$field -or [string]::IsNullOrWhiteSpace("$($policy.workflowSchedule.$field)")) {
+                throw "Validator tiering policy workflowSchedule missing required field: $field"
+              }
+            }
+
+            return [pscustomobject]@{
+              nightlyCron = "$($policy.workflowSchedule.nightlyCron)"
+              weeklyCron = "$($policy.workflowSchedule.weeklyCron)"
+              nightlyTier = "$($policy.workflowSchedule.nightlyTier)"
+              weeklyTier = "$($policy.workflowSchedule.weeklyTier)"
+            }
+          }
+
+          $validatorTieringPolicyPath = Join-Path $PWD '.github\isr-validator-tiering-policy.json'
+          $validatorTieringScheduleContract = Resolve-ValidatorTieringScheduleContract -PolicyPath $validatorTieringPolicyPath
+
+          $tier = 'smoke'
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch') {
+            $tier = "${{ inputs.verificationTier }}"
+          }
+          elseif ("${{ github.event_name }}" -eq 'schedule') {
+            if ("${{ github.event.schedule }}" -eq $validatorTieringScheduleContract.weeklyCron) {
+              $tier = $validatorTieringScheduleContract.weeklyTier
+            }
+            elseif ("${{ github.event.schedule }}" -eq $validatorTieringScheduleContract.nightlyCron) {
+              $tier = $validatorTieringScheduleContract.nightlyTier
+            }
+            else {
+              throw "Unknown workflow schedule cron: ${{ github.event.schedule }}"
+            }
+          }
+
+          $strictRuntime = $false
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.requireRuntimeEvidence }}" -eq 'true') {
+            $strictRuntime = $true
             $env:CONVO_ISR_RUNTIME_RUN_ID = "gh-${{ github.run_id }}-${{ github.run_attempt }}"
-            Write-Host "[INFO] Strict runtime evidence mode: runtimeRunId=$($env:CONVO_ISR_RUNTIME_RUN_ID)"
-          }
-          else {
-            $env:ISR_REQUIRE_RUNTIME_EVIDENCE = '0'
-            Remove-Item Env:CONVO_ISR_RUNTIME_RUN_ID -ErrorAction SilentlyContinue
+            Write-Host "[INFO] strict runtime evidence mode via workflow_dispatch. runId=$($env:CONVO_ISR_RUNTIME_RUN_ID)"
           }
 
-          # Re-generate evidence each run to avoid stale repository artifact dependency.
-          # Strict evidence mode disables seeding and expects runtime-generated artifacts.
-          if ($env:ISR_REQUIRE_RUNTIME_EVIDENCE -ne '1') {
-            & ./.github/scripts/isr-seed-evidence.ps1
-          }
-          else {
-            Write-Host "[INFO] Strict runtime evidence mode enabled: collecting runtime evidence from executable."
-            & ./.github/scripts/isr-run-runtime-evidence.ps1
+          $enforceTriggerPolicy = $false
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.enforceTriggerPolicy }}" -eq 'true') {
+            $enforceTriggerPolicy = $true
+            Write-Host "[INFO] trigger policy enforce mode enabled"
           }
 
-          # Stage mapping (V2〜V10): stage name -> verification artifact/schema
-          # V2  Seal Integrity Check          -> mutation_fault_trace.json / mutation_fault_trace_v1
-          # V3  Recursive Closure Validation  -> closure_graph.json / closure_graph_v1
-          # V4  Payload Tier Validation       -> payload_tier_report.json / payload_tier_report_v1
-          # V5  HB Reorder Simulation         -> hb_graph_trace.json + hb_violation_report.json
-          # V6  Shutdown FSM Verification     -> shutdown_trace.json / shutdown_trace_v1
-          # V7  Retire Latency Audit          -> retire_latency_report.json + retire_timeline.json
-          # V8  UAF Suspicion Detector        -> asan_report.txt or recovery_trace.json
-          # V9  Forbidden Capability Scan     -> payload_tier_report.json / payload_tier_report_v1
-          # V10 Ownership Cycle Detection     -> closure_graph.json / closure_graph_v1
+          $requireAstTriggerCheck = $false
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.requireAstTriggerCheck }}" -eq 'true') {
+            $requireAstTriggerCheck = $true
+            Write-Host "[INFO] AST trigger check required"
+          }
 
-          & ./.github/scripts/isr-verify-v2.ps1
-          & ./.github/scripts/isr-verify-v3.ps1
-          & ./.github/scripts/isr-verify-v4.ps1
-          & ./.github/scripts/isr-verify-v5.ps1
-          & ./.github/scripts/isr-verify-v6.ps1
-          & ./.github/scripts/isr-verify-v7.ps1
-          & ./.github/scripts/isr-verify-v8.ps1
-          & ./.github/scripts/isr-verify-v9.ps1
-          & ./.github/scripts/isr-verify-v10-ownership-cycle.ps1
-          & ./.github/scripts/isr-verify-evidence-provenance.ps1
-          & ./.github/scripts/isr-verify-runtime-reduction-gate.ps1
-          & ./.github/scripts/isr-verify-proof-scope.ps1
+          $requireClangTidyAudit = $false
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.requireClangTidyAudit }}" -eq 'true') {
+            $requireClangTidyAudit = $true
+            Write-Host "[INFO] clang-tidy audit required"
+          }
 
-      - name: Atomic dot-call scan
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & ./.github/scripts/check-src-atomic-dotcall.ps1
+          $autoCapture81Log = $false
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.autoCapture81Log }}" -eq 'true') {
+            $autoCapture81Log = $true
+            Write-Host "[INFO] 8.1 auto log capture enabled"
+          }
 
-      - name: List compliance scan
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & ./.github/scripts/check-list-compliance.ps1
+          $collect81CloseEvidence = $false
+          $collect81WindowSec = 0
+          $collect81AutoCaptureTimeoutSec = 0
+          $collect81SignalProbe = $false
+          $collect81ProbeExitMs = 0
+          $autoPruneCleanupDeferred = $false
+          $enforce81CloseDecision = $false
+          $enforce81CloseDecisionRetryMax = 0
 
-      - name: P3 governance gates
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & ./.github/scripts/isr-verify-p3-governance.ps1
+          $closePolicyPath = Join-Path $PWD '.github\isr-8_1-close-policy.json'
+          if (-not (Test-Path -LiteralPath $closePolicyPath)) {
+            throw "Missing 8.1 close policy: $closePolicyPath"
+          }
+
+          $closePolicy = Get-Content -LiteralPath $closePolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ("$($closePolicy.schema)" -ne 'isr_8_1_close_policy_v1') {
+            throw "Unexpected 8.1 close policy schema: $($closePolicy.schema)"
+          }
+
+          foreach ($field in @('owner', 'issue', 'rationale', 'expiry')) {
+            if ($null -eq $closePolicy.$field -or [string]::IsNullOrWhiteSpace("$($closePolicy.$field)")) {
+              throw "8.1 close policy missing required field: $field"
+            }
+          }
+
+          try {
+            [void][datetime]::ParseExact("$($closePolicy.expiry)", 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+          }
+          catch {
+            throw "8.1 close policy has invalid expiry format: '$($closePolicy.expiry)' (expected yyyy-MM-dd)"
+          }
+
+          if ($null -eq $closePolicy.collector) {
+            throw '8.1 close policy missing collector section'
+          }
+
+          $collectorPolicy = $closePolicy.collector
+          foreach ($field in @('minWindowSec', 'maxWindowSec', 'minAutoCaptureTimeoutSec', 'maxAutoCaptureTimeoutSec', 'minProbeExitMs', 'maxProbeExitMs', 'minRetryMax', 'maxRetryMax', 'allowedCollectTiers', 'allowedEnforceTiers')) {
+            if ($null -eq $collectorPolicy.$field) {
+              throw "8.1 close policy collector missing required field: $field"
+            }
+          }
+
+          $workflowDispatchInputPolicyPath = Join-Path $PWD '.github\isr-workflow-dispatch-input-policy.json'
+          if (-not (Test-Path -LiteralPath $workflowDispatchInputPolicyPath)) {
+            throw "Missing workflow dispatch input policy: $workflowDispatchInputPolicyPath"
+          }
+
+          $workflowDispatchInputPolicy = Get-Content -LiteralPath $workflowDispatchInputPolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+
+          $collect81WindowSec = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81WindowSec'
+          $collect81AutoCaptureTimeoutSec = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81AutoCaptureTimeoutSec'
+          $collect81ProbeExitMs = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81ProbeExitMs'
+          $enforce81CloseDecisionRetryMax = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'enforce81CloseDecisionRetryMax'
+
+          Assert-WorkflowPolicyExpiryGuard -Policy $closePolicy -Tier $tier
+          Assert-WorkflowInputContractAgainstPolicy -Policy $closePolicy -WorkflowPath (Join-Path $PWD '.github\workflows\isr-verification.yml')
+          Assert-WorkflowDispatchInputPolicyAgainstPolicy -Policy $workflowDispatchInputPolicy -WorkflowPath (Join-Path $PWD '.github\workflows\isr-verification.yml')
+
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.collect81CloseEvidence }}" -eq 'true') {
+            $collect81CloseEvidence = $true
+            Write-Host "[INFO] 8.1 close evidence collection enabled"
+
+            if (@($collectorPolicy.allowedCollectTiers) -notcontains $tier) {
+              throw "Invalid workflow inputs: collect81CloseEvidence is not allowed for verificationTier=$tier"
+            }
+
+            $collect81WindowSec = Resolve-WorkflowPositiveInt -Raw "${{ inputs.collect81WindowSec }}" -InputName 'collect81WindowSec'
+            Assert-WorkflowRange -Value $collect81WindowSec -Min ([int]$collectorPolicy.minWindowSec) -Max ([int]$collectorPolicy.maxWindowSec) -InputName 'collect81WindowSec'
+
+            $collect81AutoCaptureTimeoutSec = Resolve-WorkflowPositiveInt -Raw "${{ inputs.collect81AutoCaptureTimeoutSec }}" -InputName 'collect81AutoCaptureTimeoutSec'
+            Assert-WorkflowRange -Value $collect81AutoCaptureTimeoutSec -Min ([int]$collectorPolicy.minAutoCaptureTimeoutSec) -Max ([int]$collectorPolicy.maxAutoCaptureTimeoutSec) -InputName 'collect81AutoCaptureTimeoutSec'
+
+            if ("${{ inputs.collect81SignalProbe }}" -eq 'true') {
+              $collect81SignalProbe = $true
+              Write-Host "[INFO] 8.1 insufficient-signal probe enabled"
+            }
+
+            $collect81ProbeExitMs = Resolve-WorkflowPositiveInt -Raw "${{ inputs.collect81ProbeExitMs }}" -InputName 'collect81ProbeExitMs'
+            Assert-WorkflowRange -Value $collect81ProbeExitMs -Min ([int]$collectorPolicy.minProbeExitMs) -Max ([int]$collectorPolicy.maxProbeExitMs) -InputName 'collect81ProbeExitMs'
+
+            if ("${{ inputs.enforce81CloseDecision }}" -eq 'true') {
+              $enforce81CloseDecision = $true
+              Write-Host "[INFO] 8.1 close decision enforce mode enabled"
+
+              if (@($collectorPolicy.allowedEnforceTiers) -notcontains $tier) {
+                throw "Invalid workflow inputs: enforce81CloseDecision is not allowed for verificationTier=$tier"
+              }
+
+              $enforce81CloseDecisionRetryMax = Resolve-WorkflowPositiveInt -Raw "${{ inputs.enforce81CloseDecisionRetryMax }}" -InputName 'enforce81CloseDecisionRetryMax'
+              Assert-WorkflowRange -Value $enforce81CloseDecisionRetryMax -Min ([int]$collectorPolicy.minRetryMax) -Max ([int]$collectorPolicy.maxRetryMax) -InputName 'enforce81CloseDecisionRetryMax'
+            }
+          }
+
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.enforce81CloseDecision }}" -eq 'true' -and -not $collect81CloseEvidence) {
+            throw "Invalid workflow inputs: enforce81CloseDecision requires collect81CloseEvidence=true"
+          }
+
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and "${{ inputs.autoPruneCleanupDeferred }}" -eq 'true') {
+            $autoPruneCleanupDeferred = $true
+            Write-Host "[INFO] cleanup deferred auto-prune enabled"
+          }
+
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and $autoPruneCleanupDeferred -and $tier -eq 'smoke') {
+            throw "Invalid workflow inputs: autoPruneCleanupDeferred requires verificationTier=standard or exhaustive"
+          }
+
+          Write-Host "[INFO] ISR verification tier=$tier"
+          $invokeArgs = @('-Tier', $tier)
+          if ($strictRuntime) {
+            $invokeArgs += '-RequireRuntimeEvidence'
+          }
+          if ($enforceTriggerPolicy) {
+            $invokeArgs += '-EnforceTriggerPolicy'
+          }
+          if ($requireAstTriggerCheck) {
+            $invokeArgs += '-RequireAstTriggerCheck'
+          }
+          if ($requireClangTidyAudit) {
+            $invokeArgs += '-RequireClangTidyAudit'
+          }
+          if ($autoCapture81Log) {
+            $invokeArgs += '-AutoCapture81Log'
+          }
+          if ($collect81CloseEvidence) {
+            $invokeArgs += '-Collect81CloseEvidence'
+            $invokeArgs += '-Collect81WindowSec'
+            $invokeArgs += $collect81WindowSec
+            $invokeArgs += '-Collect81AutoCaptureTimeoutSec'
+            $invokeArgs += $collect81AutoCaptureTimeoutSec
+            if ($collect81SignalProbe) {
+              $invokeArgs += '-Collect81SignalProbe'
+              $invokeArgs += '-Collect81ProbeExitMs'
+              $invokeArgs += $collect81ProbeExitMs
+            }
+            if ($enforce81CloseDecision) {
+              $invokeArgs += '-Enforce81CloseDecision'
+              $invokeArgs += '-Enforce81CloseDecisionRetryMax'
+              $invokeArgs += $enforce81CloseDecisionRetryMax
+            }
+          }
+          if ($autoPruneCleanupDeferred) {
+            $invokeArgs += '-AutoPruneCleanupDeferred'
+          }
+
+          & ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs
 
       - name: Upload ISR evidence artifacts
         if: always()

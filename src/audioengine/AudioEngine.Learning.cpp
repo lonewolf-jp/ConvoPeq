@@ -106,8 +106,8 @@ void AudioEngine::processLearningCommands() noexcept
                 requestedLearningResume = cmd.resume;
                 requestedLearningGeneration = cmd.irGeneration;
 
-                const auto runtimePublishView = getRuntimePublishView();
-                const auto* runtimeGraph = runtimePublishView.graph;
+                const auto runtimeReadView = readControlRuntimeView();
+                const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
                 auto* dsp = (runtimeGraph != nullptr)
                     ? static_cast<DSPCore*>(runtimeGraph->activeNode)
                     : nullptr;
@@ -268,18 +268,18 @@ void AudioEngine::setNoiseShaperLearningMode(convo::NoiseShaperLearningMode mode
         noiseShaperLearner->setLearningMode(mode);
 }
 
-bool AudioEngine::isNoiseShaperLearning() const
+[[nodiscard]] bool AudioEngine::isNoiseShaperLearning() const
 {
     return noiseShaperLearner && noiseShaperLearner->isRunning();
 }
 
-const convo::NoiseShaperLearnerProgress& AudioEngine::getNoiseShaperLearningProgress() const
+[[nodiscard]] const convo::NoiseShaperLearnerProgress& AudioEngine::getNoiseShaperLearningProgress() const
 {
     jassert(noiseShaperLearner);
     return noiseShaperLearner->getProgress();
 }
 
-convo::NoiseShaperLearnerSettings AudioEngine::getNoiseShaperLearnerSettings() const
+[[nodiscard]] convo::NoiseShaperLearnerSettings AudioEngine::getNoiseShaperLearnerSettings() const
 {
     if (noiseShaperLearner)
         return noiseShaperLearner->getSettings();
@@ -292,24 +292,24 @@ void AudioEngine::setNoiseShaperLearnerSettings(const convo::NoiseShaperLearnerS
         noiseShaperLearner->setSettings(settings);
 }
 
-int AudioEngine::copyNoiseShaperLearningHistory(double* outScores, int maxPoints) const noexcept
+[[nodiscard]] int AudioEngine::copyNoiseShaperLearningHistory(double* outScores, int maxPoints) const noexcept
 {
     return noiseShaperLearner ? noiseShaperLearner->copyBestScoreHistory(outScores, maxPoints) : 0;
 }
 
-const char* AudioEngine::getNoiseShaperLearningError() const noexcept
+[[nodiscard]] const char* AudioEngine::getNoiseShaperLearningError() const noexcept
 {
     if (noiseShaperLearner == nullptr)
         return nullptr;
     return noiseShaperLearner->getErrorMessage();
 }
 
-int AudioEngine::getAdaptiveSampleRateBankCount() noexcept
+[[nodiscard]] int AudioEngine::getAdaptiveSampleRateBankCount() noexcept
 {
     return kAdaptiveNoiseShaperSampleRateBankCount;
 }
 
-double AudioEngine::getAdaptiveSampleRateBankHz(int bankIndex) noexcept
+[[nodiscard]] double AudioEngine::getAdaptiveSampleRateBankHz(int bankIndex) noexcept
 {
     return kAdaptiveSupportedSampleRatesHz_helpers[static_cast<size_t>(clampAdaptiveBankIndex_helpers(bankIndex))];
 }
@@ -339,7 +339,7 @@ int AudioEngine::getAdaptiveBitDepthIndex(int bitDepth) noexcept
     return 2;
 }
 
-int AudioEngine::getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, convo::NoiseShaperLearningMode mode) noexcept
+[[nodiscard]] int AudioEngine::getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, convo::NoiseShaperLearningMode mode) noexcept
 {
     const int srBank = resolveAdaptiveCoeffBankIndex(sampleRate);
     const int bdIdx  = getAdaptiveBitDepthIndex(bitDepth);
@@ -355,7 +355,7 @@ AudioEngine::AdaptiveCoeffBankSlot& AudioEngine::getAdaptiveCoeffBankForIndex(in
     return adaptiveCoeffBanks[static_cast<size_t>(bankIndex)];
 }
 
-const AudioEngine::AdaptiveCoeffBankSlot& AudioEngine::getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept
+[[nodiscard]] const AudioEngine::AdaptiveCoeffBankSlot& AudioEngine::getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept
 {
     if (bankIndex < 0) bankIndex = 0;
     if (bankIndex >= kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount)
@@ -574,7 +574,7 @@ void AudioEngine::publishCoeffsToBank(int bankIndex, const double* coeffs)
     guard.commit();
 }
 
-bool AudioEngine::getAdaptiveNoiseShaperState(int bankIndex, convo::NoiseShaperLearnerState& outState) const noexcept
+[[nodiscard]] bool AudioEngine::getAdaptiveNoiseShaperState(int bankIndex, convo::NoiseShaperLearnerState& outState) const noexcept
 {
     const auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
     outState = bank.state;

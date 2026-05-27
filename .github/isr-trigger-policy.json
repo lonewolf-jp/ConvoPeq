@@ -1,0 +1,60 @@
+{
+    "schema": "trigger_policy_v1",
+    "mode": "enforce",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-TRIGGER-GOV-001",
+    "rationale": "top-level lifecycle governance for trigger policy",
+    "expiry": "2026-09-30",
+    "entries": [
+        {
+            "id": "activeDspDeletionStart",
+            "metric": "activeDspRefCount",
+            "targetMax": 0,
+            "allowedMax": 0,
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-TRIGGER-001",
+            "rationale": "legacy activeDSP readers remain during controlled coexistence",
+            "expiry": "2026-08-31"
+        },
+        {
+            "id": "fadingOutDspDeletionStart",
+            "metric": "fadingOutDspWriteCount",
+            "targetMax": 0,
+            "allowedMax": 0,
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-TRIGGER-002",
+            "rationale": "crossfade subsystem migration is phased and write path still active",
+            "expiry": "2026-08-31"
+        },
+        {
+            "id": "retireFacadeRemovalStart",
+            "metric": "retireFacadeDirectDependencyCount",
+            "targetMax": 0,
+            "allowedMax": 0,
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-TRIGGER-003",
+            "rationale": "retire facade direct dependencies are reduced incrementally",
+            "expiry": "2026-08-31"
+        },
+        {
+            "id": "observeShimRemovalStart",
+            "metric": "legacyDirectObserveUsageCount",
+            "targetMax": 0,
+            "allowedMax": 0,
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-TRIGGER-004",
+            "rationale": "legacy direct observe paths must converge to shim-only allowlisted usage before shim removal",
+            "expiry": "2026-08-31"
+        },
+        {
+            "id": "runtimeExecutionViewConvergence",
+            "metric": "runtimeExecutionViewUsageCount",
+            "targetMax": 0,
+            "allowedMax": 0,
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-TRIGGER-005",
+            "rationale": "runtime execution read path migration completed and must not regress to legacy symbol naming",
+            "expiry": "2026-08-31"
+        }
+    ]
+}

@@ -97,10 +97,6 @@ struct CoeffSet {
 class NoiseShaperLearner;
 class AudioEngine;
 
-inline std::atomic<std::uint64_t> g_runtimePublishCount { 0 };
-inline std::atomic<std::uint64_t> g_runtimeRetireCount { 0 };
-inline std::atomic<std::uint64_t> g_runtimeReclaimCount { 0 };
-
 // デバッグビルド時のみログを出力するマクロ
 #if defined(JUCE_DEBUG) && !defined(NDEBUG)
     #define DBG_LOG(msg) juce::Logger::writeToLog(msg)
@@ -534,13 +530,6 @@ public:
         // ─────────────────────────────────────────────────────────────
         int maxInternalBlockSize = 0;             // OS考慮後の最大サイズ（SAFE_MAX_BLOCK_SIZE × 8）
         static constexpr int FADE_IN_SAMPLES = 2048; // 42ms @ 48kHz
-        AudioEngine* ownerEngine = nullptr;
-
-        // RCU Reader Support (Forward to ownerEngine)
-        uint64_t publishRcuEpoch() noexcept { return ownerEngine ? ownerEngine->publishRcuEpoch() : 1; }
-        void enterRcuReader(int tid) noexcept { if (ownerEngine) ownerEngine->enterRcuReader(tid); }
-        void exitRcuReader(int tid) noexcept { if (ownerEngine) ownerEngine->exitRcuReader(tid); }
-
         // B2: processDouble 用のバイパスフェード状態
         convo::ScopedAlignedPtr<double> dryBypassBufferDoubleL;
         convo::ScopedAlignedPtr<double> dryBypassBufferDoubleR;
@@ -570,6 +559,9 @@ public:
                                  int numSamples,
                                  const ProcessingState& state) noexcept;
     private:
+        static std::atomic<std::uint64_t> runtimeUuidCounterStorage_;
+        static std::atomic<std::uint64_t>& runtimeUuidCounter() noexcept;
+        [[nodiscard]] static std::uint64_t reserveNextRuntimeUuid() noexcept;
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
     };
 
@@ -613,14 +605,14 @@ public:
     void tryReclaimResources() noexcept;
 
     // RCU Reader Support
-    uint64_t publishRcuEpoch() noexcept;
+    [[nodiscard]] uint64_t publishRcuEpoch() noexcept;
     void enterRcuReader(int readerIndex) noexcept;
     void exitRcuReader(int readerIndex) noexcept;
-    uint64_t publishRetireEpoch() noexcept;
-    uint64_t currentRetireEpoch() const noexcept;
+    [[nodiscard]] uint64_t publishRetireEpoch() noexcept;
+    [[nodiscard]] uint64_t currentRetireEpoch() const noexcept;
     uint64_t advanceRetireEpoch() noexcept;
-    bool enqueueRetireEpochBounded(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept;
-    uint32_t activeEpochObserverCount() const noexcept;
+    [[nodiscard]] bool enqueueRetireEpochBounded(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept;
+    [[nodiscard]] uint32_t activeEpochObserverCount() const noexcept;
 
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
@@ -631,10 +623,10 @@ public:
     // 外部インターフェース (Message Thread)
     //----------------------------------------------------------
     ConvolverProcessor& getConvolverProcessor() { return uiConvolverProcessor; }
-    const ConvolverProcessor& getConvolverProcessor() const { return uiConvolverProcessor; }
+    [[nodiscard]] const ConvolverProcessor& getConvolverProcessor() const { return uiConvolverProcessor; }
     EQEditProcessor& getEQProcessor() { return uiEqEditor; }
     ThreadAffinityManager& getAffinityManager() noexcept { return affinityManager; }
-    const ThreadAffinityManager& getAffinityManager() const noexcept { return affinityManager; }
+    [[nodiscard]] const ThreadAffinityManager& getAffinityManager() const noexcept { return affinityManager; }
 
     // ========================================================
     // EQ Parameter Wrappers (Thread-safe delegation to uiEqEditor)
@@ -650,19 +642,19 @@ public:
     void setEQNonlinearSaturation(float value) noexcept { uiEqEditor.setNonlinearSaturation(value); }
     void setEQFilterStructure(EQProcessor::FilterStructure mode) noexcept { uiEqEditor.setFilterStructure(mode); }
 
-    EQBandParams getEQBandParams(int band) const { return uiEqEditor.getBandParams(band); }
-    EQBandType getEQBandType(int band) const { return uiEqEditor.getBandType(band); }
-    EQChannelMode getEQBandChannelMode(int band) const { return uiEqEditor.getBandChannelMode(band); }
-    float getEQTotalGain() const { return uiEqEditor.getTotalGain(); }
-    bool isEQAGCEnabled() const { return uiEqEditor.getAGCEnabled(); }
-    float getEQNonlinearSaturation() const noexcept { return uiEqEditor.getNonlinearSaturation(); }
-    EQProcessor::FilterStructure getEQFilterStructure() const noexcept { return uiEqEditor.getFilterStructure(); }
-    const void* getEQStateSnapshot() const { return uiEqEditor.getEQStateSnapshot(); }
+    [[nodiscard]] EQBandParams getEQBandParams(int band) const { return uiEqEditor.getBandParams(band); }
+    [[nodiscard]] EQBandType getEQBandType(int band) const { return uiEqEditor.getBandType(band); }
+    [[nodiscard]] EQChannelMode getEQBandChannelMode(int band) const { return uiEqEditor.getBandChannelMode(band); }
+    [[nodiscard]] float getEQTotalGain() const { return uiEqEditor.getTotalGain(); }
+    [[nodiscard]] bool isEQAGCEnabled() const { return uiEqEditor.getAGCEnabled(); }
+    [[nodiscard]] float getEQNonlinearSaturation() const noexcept { return uiEqEditor.getNonlinearSaturation(); }
+    [[nodiscard]] EQProcessor::FilterStructure getEQFilterStructure() const noexcept { return uiEqEditor.getFilterStructure(); }
+    [[nodiscard]] const void* getEQStateSnapshot() const { return uiEqEditor.getEQStateSnapshot(); }
     void resetEQToDefaults() { uiEqEditor.reset(); }
 
     // acquire: prepareToPlay/releaseResources の release と HB し、有効なサンプルレートを取得。
-    double getSampleRate() const { return consumeAtomic(currentSampleRate, std::memory_order_acquire); }
-    double getProcessingSampleRate() const;
+    [[nodiscard]] double getSampleRate() const { return consumeAtomic(currentSampleRate, std::memory_order_acquire); }
+    [[nodiscard]] double getProcessingSampleRate() const;
     struct LatencyBreakdown
     {
         int oversamplingLatencyBaseRateSamples = 0;
@@ -672,23 +664,23 @@ public:
         int totalLatencyBaseRateSamples = 0;
     };
 
-    LatencyBreakdown getCurrentLatencyBreakdown() const;
-    int getCurrentLatencySamples() const;
-    int getTotalLatencySamples() const;  // PDC 用エイリアス (getCurrentLatencySamples と同値)
+    [[nodiscard]] LatencyBreakdown getCurrentLatencyBreakdown() const;
+    [[nodiscard]] int getCurrentLatencySamples() const;
+    [[nodiscard]] int getTotalLatencySamples() const;  // PDC 用エイリアス (getCurrentLatencySamples と同値)
 
     // 【Fix Bug #8】gainToDecibels (std::log10 / libm) を Audio Thread から排除。
     // Audio Thread は linear gain を inputLevelLinear / outputLevelLinear に格納し、
     // getter (UI Thread) で dB 変換する。
     // acquire: Audio Thread の release publishAtomic (inputLevelLinear/outputLevelLinear) と HB
     //          し、最新のレベル値を UI Thread から安全に取得する。
-    float getInputLevel() const
+    [[nodiscard]] float getInputLevel() const
     {
         const float linear = consumeAtomic(inputLevelLinear, std::memory_order_acquire);
         return (linear > LEVEL_METER_MIN_MAG)
                ? juce::Decibels::gainToDecibels(linear)
                : LEVEL_METER_MIN_DB;
     }
-    float getOutputLevel() const
+    [[nodiscard]] float getOutputLevel() const
     {
         const float linear = consumeAtomic(outputLevelLinear, std::memory_order_acquire);
         return (linear > LEVEL_METER_MIN_MAG)
@@ -699,7 +691,7 @@ public:
 
 
 
-    int getFifoNumReady() const { return analyzerFifo.getAvailableSamples(); }
+    [[nodiscard]] int getFifoNumReady() const { return analyzerFifo.getAvailableSamples(); }
     void readFromFifo(float* dest, int numSamples);
     void skipFifo(int numSamples);
 
@@ -710,42 +702,42 @@ public:
     void setConvolverBypassRequested (bool shouldBypass);
     // 以下 4 getter は acquire: 対応 setter の release publishAtomic/compareExchange と HB し、
     // Message Thread から bypass 状態の最新値を安全に観測する。
-    bool isEqBypassRequested() const noexcept { return consumeAtomic(eqBypassRequested, std::memory_order_acquire); }
-    bool isConvolverBypassRequested() const noexcept { return consumeAtomic(convBypassRequested, std::memory_order_acquire); }
-    bool isEQBypassed() const noexcept { return consumeAtomic(eqBypassActive, std::memory_order_acquire); }
-    bool isConvolverBypassed() const noexcept { return consumeAtomic(convBypassActive, std::memory_order_acquire); }
+    [[nodiscard]] bool isEqBypassRequested() const noexcept { return consumeAtomic(eqBypassRequested, std::memory_order_acquire); }
+    [[nodiscard]] bool isConvolverBypassRequested() const noexcept { return consumeAtomic(convBypassRequested, std::memory_order_acquire); }
+    [[nodiscard]] bool isEQBypassed() const noexcept { return consumeAtomic(eqBypassActive, std::memory_order_acquire); }
+    [[nodiscard]] bool isConvolverBypassed() const noexcept { return consumeAtomic(convBypassActive, std::memory_order_acquire); }
 
     void setConvolverPhaseMode(ConvolverProcessor::PhaseMode mode);
-    ConvolverProcessor::PhaseMode getConvolverPhaseMode() const;
+    [[nodiscard]] ConvolverProcessor::PhaseMode getConvolverPhaseMode() const;
 
     void requestEqPreset (int presetIndex);
     void requestEqPresetFromText(const juce::File& file);
     void requestConvolverPreset (const juce::File& irFile);
 
     void requestLoadState (const juce::ValueTree& state);
-    juce::ValueTree getCurrentState() const;
+    [[nodiscard]] juce::ValueTree getCurrentState() const;
     void beginBulkParameterRestore() noexcept;
     void endBulkParameterRestore(bool requestRebuildNow = true) noexcept;
 
     void setProcessingOrder(ProcessingOrder order);
     // acquire: setProcessingOrder の release と HB し、最新の ProcessingOrder を観測。
-    ProcessingOrder getProcessingOrder() const { return consumeAtomic(currentProcessingOrder, std::memory_order_acquire); }
+    [[nodiscard]] ProcessingOrder getProcessingOrder() const { return consumeAtomic(currentProcessingOrder, std::memory_order_acquire); }
 
     // release: UI スレッドからの設定を Audio Thread が acquire で観測できるよう公開。
     // acquire: 対応 setter の release と HB し、最新値を取得。
     void setAnalyzerSource(AnalyzerSource source) { publishAtomic(currentAnalyzerSource, source, std::memory_order_release); }
-    AnalyzerSource getAnalyzerSource() const { return consumeAtomic(currentAnalyzerSource, std::memory_order_acquire); }
+    [[nodiscard]] AnalyzerSource getAnalyzerSource() const { return consumeAtomic(currentAnalyzerSource, std::memory_order_acquire); }
     void setAnalyzerEnabled(bool enabled) noexcept { publishAtomic(analyzerEnabled, enabled, std::memory_order_release); }
-    bool isAnalyzerEnabled() const noexcept { return consumeAtomic(analyzerEnabled, std::memory_order_acquire); }
+    [[nodiscard]] bool isAnalyzerEnabled() const noexcept { return consumeAtomic(analyzerEnabled, std::memory_order_acquire); }
 
     void setInputHeadroomDb(float db);
-    float getInputHeadroomDb() const;
+    [[nodiscard]] float getInputHeadroomDb() const;
 
     void setOutputMakeupDb(float db);
-    float getOutputMakeupDb() const;
+    [[nodiscard]] float getOutputMakeupDb() const;
 
     void setConvolverInputTrimDb(float db);
-    float getConvolverInputTrimDb() const;
+    [[nodiscard]] float getConvolverInputTrimDb() const;
 
     // Audio Thread command queue 経路を廃止し、
     // Message Thread 上の UI staging -> snapshot/rebuild 経路に統一する。
@@ -774,27 +766,27 @@ public:
     void setConvolverTailL1L2Multiplier(int multiplier) noexcept;
 
     // Convolver State Tree & Cache Settings
-    juce::ValueTree getConvolverStateTree() const;
+    [[nodiscard]] juce::ValueTree getConvolverStateTree() const;
     void setConvolverStateTree(const juce::ValueTree& state);
-    int getConvolverTargetUpgradeFFTSize() const;
+    [[nodiscard]] int getConvolverTargetUpgradeFFTSize() const;
     void setConvolverTargetUpgradeFFTSize(int fftSize);
-    bool isConvolverProgressiveUpgradeEnabled() const;
+    [[nodiscard]] bool isConvolverProgressiveUpgradeEnabled() const;
     void setConvolverEnableProgressiveUpgrade(bool enabled);
-    int getConvolverMaxCacheEntries() const;
+    [[nodiscard]] int getConvolverMaxCacheEntries() const;
     void setConvolverMaxCacheEntries(int maxEntries);
     void clearConvolverCache();
 
     void setDitherBitDepth(int bitDepth);
-    int getDitherBitDepth() const;
+    [[nodiscard]] int getDitherBitDepth() const;
 
     void setNoiseShaperType(NoiseShaperType type);
-    NoiseShaperType getNoiseShaperType() const;
+    [[nodiscard]] NoiseShaperType getNoiseShaperType() const;
     void requestSnapshotForNoiseShaper();
     void requestRebuild(convo::RebuildKind kind) noexcept;
     void setFixedNoiseLogIntervalMs(int intervalMs) noexcept;
-    int getFixedNoiseLogIntervalMs() const noexcept;
+    [[nodiscard]] int getFixedNoiseLogIntervalMs() const noexcept;
     void setFixedNoiseWindowSamples(int windowSamples) noexcept;
-    int getFixedNoiseWindowSamples() const noexcept;
+    [[nodiscard]] int getFixedNoiseWindowSamples() const noexcept;
 
     void setIRFadeSamples(int samples) noexcept
     {
@@ -815,26 +807,22 @@ public:
     }
     // release: 各 setXxx の release と HB する getter は Audio Thread が acquire で観測。
     void setEQFadeSamples(int samples) noexcept { publishAtomic(m_eqFadeSamples, samples, std::memory_order_release); }
-    int getIRFadeSamples() const noexcept { return consumeAtomic(m_irFadeSamples, std::memory_order_acquire); }
-    int getEQFadeSamples() const noexcept { return consumeAtomic(m_eqFadeSamples, std::memory_order_acquire); }
-    bool isFading() const noexcept { return m_coordinator.isFading(); }
-    convo::ObservedRuntime observeCurrentRuntime() const noexcept
-    {
-        return m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
-    }
+    [[nodiscard]] int getIRFadeSamples() const noexcept { return consumeAtomic(m_irFadeSamples, std::memory_order_acquire); }
+    [[nodiscard]] int getEQFadeSamples() const noexcept { return consumeAtomic(m_eqFadeSamples, std::memory_order_acquire); }
+    [[nodiscard]] bool isFading() const noexcept { return m_coordinator.isFading(); }
     // release: IR 変更フラグを Audio Thread の acquire で観測できるよう公開。
     void setIRChangeFlag() noexcept { publishAtomic(m_pendingIRChange, true, std::memory_order_release); }
 
     // acquire: Audio Thread の release (debugLastCreatedEqHash publish) と HB し、診断ハッシュを取得。
-    uint64_t getLastCreatedEqHashForDebug() const noexcept { return consumeAtomic(debugLastCreatedEqHash, std::memory_order_acquire); }
+    [[nodiscard]] uint64_t getLastCreatedEqHashForDebug() const noexcept { return consumeAtomic(rtAuxMutable_.debugLastCreatedEqHash, std::memory_order_acquire); }
 
     void setSoftClipEnabled(bool enabled);
-    bool isSoftClipEnabled() const;
+    [[nodiscard]] bool isSoftClipEnabled() const;
 
     void setSaturationAmount(float amount);
-    float getSaturationAmount() const;
+    [[nodiscard]] float getSaturationAmount() const;
 
-    bool isShutdownInProgress() const noexcept
+    [[nodiscard]] bool isShutdownInProgress() const noexcept
     {
         // acquire: lifecycleState の setShutdownPhase/releaseResources release 側と HB し、
         //          Releasing/Destroyed 遷移を各スレッドから安全に観測する。
@@ -846,10 +834,10 @@ public:
     void drainDeferredRetireQueues(bool allowDuringShutdown) noexcept;
 
     void setOversamplingFactor(int factor);
-    int getOversamplingFactor() const;
+    [[nodiscard]] int getOversamplingFactor() const;
 
     void setOversamplingType(OversamplingType type);
-    OversamplingType getOversamplingType() const;
+    [[nodiscard]] OversamplingType getOversamplingType() const;
 
     // ────────────────────────────────────────────────────────────────
     // 出力周波数フィルター設定 (Thread-safe)
@@ -858,26 +846,26 @@ public:
     // eqLPFMode              : ② EQ最終段の場合に使用
     // ────────────────────────────────────────────────────────────────
     void setConvHCFilterMode(convo::HCMode mode) noexcept;
-    convo::HCMode getConvHCFilterMode() const noexcept;
+    [[nodiscard]] convo::HCMode getConvHCFilterMode() const noexcept;
 
     void setConvLCFilterMode(convo::LCMode mode) noexcept;
-    convo::LCMode getConvLCFilterMode() const noexcept;
+    [[nodiscard]] convo::LCMode getConvLCFilterMode() const noexcept;
 
     void setEqLPFFilterMode(convo::HCMode mode) noexcept;
-    convo::HCMode getEqLPFFilterMode() const noexcept;
+    [[nodiscard]] convo::HCMode getEqLPFFilterMode() const noexcept;
 
     // --- Adaptiveノイズシェイパー学習サポート ---
     void startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, bool resume = false);
     void stopNoiseShaperLearning();
     void setNoiseShaperLearningMode(convo::NoiseShaperLearningMode mode);
     // acquire: setNoiseShaperLearningMode の release と HB し、最新の LearningMode を取得。
-    convo::NoiseShaperLearningMode getNoiseShaperLearningMode() const { return consumeAtomic(pendingLearningMode, std::memory_order_acquire); }
-    bool isNoiseShaperLearning() const;
-    const convo::NoiseShaperLearnerProgress& getNoiseShaperLearningProgress() const;
-    int copyNoiseShaperLearningHistory(double* outScores, int maxPoints) const noexcept;
+    [[nodiscard]] convo::NoiseShaperLearningMode getNoiseShaperLearningMode() const { return consumeAtomic(pendingLearningMode, std::memory_order_acquire); }
+    [[nodiscard]] bool isNoiseShaperLearning() const;
+    [[nodiscard]] const convo::NoiseShaperLearnerProgress& getNoiseShaperLearningProgress() const;
+    [[nodiscard]] int copyNoiseShaperLearningHistory(double* outScores, int maxPoints) const noexcept;
     // 学習ワーカーが記録したエラーメッセージを返す（UI 表示用）。エラーなしは nullptr。
-    const char* getNoiseShaperLearningError() const noexcept;
-    static int getAdaptiveSampleRateBankCount() noexcept;
+    [[nodiscard]] const char* getNoiseShaperLearningError() const noexcept;
+    [[nodiscard]] static int getAdaptiveSampleRateBankCount() noexcept;
 
     struct RuntimeLifecycleDiagnostics
     {
@@ -886,12 +874,12 @@ public:
         std::uint64_t reclaimCount = 0;
     };
 
-    RuntimeLifecycleDiagnostics getRuntimeLifecycleDiagnostics() const noexcept
+    [[nodiscard]] RuntimeLifecycleDiagnostics getRuntimeLifecycleDiagnostics() const noexcept
     {
         return {
-            consumeAtomic(g_runtimePublishCount),
-            consumeAtomic(g_runtimeRetireCount),
-            consumeAtomic(g_runtimeReclaimCount)
+            consumeAtomic(rtAuxMutable_.runtimePublishCount),
+            consumeAtomic(rtAuxMutable_.runtimeRetireCount),
+            consumeAtomic(rtAuxMutable_.runtimeReclaimCount)
         };
     }
 
@@ -906,33 +894,106 @@ public:
         double sampleRateHz = 0.0;
     };
 
+    struct RTLocalState
+    {
+        std::atomic<uint64_t> audioCallbackEpochCounter { 0 };
+        std::atomic<uint64_t> audioSampleCursorCounter { 0 };
+        std::atomic<uint32_t> audioCallbackActiveCount { 0 };
+        std::atomic<uint64_t> audioThreadRetireEnqueueDropped { 0 };
+        std::atomic<uint64_t> audioThreadRetireOverflowEpoch { 0 };
+    };
+
+    struct RTAuxMutable
+    {
+        uint64_t debugLastReportedCreatedEqHash { std::numeric_limits<uint64_t>::max() };
+        int debugLastReportedDspReady { -1 };
+        int debugLastReportedTransitionActive { -1 };
+        int debugLastReportedTransitionPolicy { -1 };
+        uint64_t debugLastReportedTransitionCurrentPtr { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedTransitionNextPtr { std::numeric_limits<uint64_t>::max() };
+        double debugLastReportedTransitionFadeSec { -1.0 };
+        int debugLastReportedTransitionLatencyDeltaSamples { std::numeric_limits<int>::max() };
+        uint64_t debugLastReportedRuntimeSnapshotRevision { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRuntimePublishCurrentUuid { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRuntimePublishFadingUuid { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRuntimePublishTransitionCurrentUuid { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRuntimePublishTransitionNextUuid { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRuntimePublishCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRuntimeRetireCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRuntimeReclaimCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRebuildRequestCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRebuildQueuedCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRebuildBlockedPendingDuplicateCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRebuildBlockedRecentDuplicateCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRebuildRuntimeQueueFullCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRebuildDrainedCommandCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRebuildMatchedRuntimeCommandCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedRebuildTaskSnapshotFallbackCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedConvolverRebuildRequestCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedConvolverRebuildDeferredAfterLoadCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedConvolverRebuildScheduledCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedConvolverRebuildTriggeredCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedEqCacheSnapshotCreateMissCount { std::numeric_limits<uint64_t>::max() };
+        uint64_t debugLastReportedEqCacheRuntimeLookupMissCount { std::numeric_limits<uint64_t>::max() };
+        int debugLastReportedShutdownPhase { -1 };
+        bool debugEqCacheLookupMissLatched { false };
+        uint64_t debugEqCacheLookupMissLatchedHash { 0 };
+        uint32 fixedNoiseLastLogMs { 0 };
+        int64_t lastQueuedTaskTicks { 0 };
+        std::atomic<std::uint64_t> rebuildTelemetryNextIntentId { 1 };
+        std::atomic<std::int64_t> lastEvidenceEmitHighResTicks { 0 };
+        std::atomic<std::uint64_t> runtimePublishCount { 0 };
+        std::atomic<std::uint64_t> runtimeRetireCount { 0 };
+        std::atomic<std::uint64_t> runtimeReclaimCount { 0 };
+        std::atomic<uint64_t> lastRejectedGenerationNonRt { 0 };
+        std::atomic<std::uint64_t> debugRebuildDispatchRequestCount { 0 };
+        std::atomic<std::uint64_t> debugRebuildDispatchQueuedCount { 0 };
+        std::atomic<std::uint64_t> debugRebuildDispatchBlockedPendingDuplicateCount { 0 };
+        std::atomic<std::uint64_t> debugRebuildDispatchBlockedRecentDuplicateCount { 0 };
+        std::atomic<std::uint64_t> debugRebuildDispatchRuntimeQueueFullCount { 0 };
+        std::atomic<std::uint64_t> debugRebuildDispatchDrainedCommandCount { 0 };
+        std::atomic<std::uint64_t> debugRebuildDispatchMatchedRuntimeCommandCount { 0 };
+        std::atomic<std::uint64_t> debugRebuildDispatchTaskSnapshotFallbackCount { 0 };
+        std::atomic<std::uint64_t> eqCacheSnapshotCreateMissCountNonRt { 0 };
+        std::atomic<std::uint64_t> eqCacheRuntimeLookupMissCountNonRt { 0 };
+        std::atomic<uint64_t> debugLastCreatedEqHash { 0 };
+        std::atomic<uint64_t> lastEnqueuedSnapshotDebounceKey { 0 };
+        std::atomic<bool> hasLastEnqueuedSnapshotDebounceKey { false };
+        std::atomic<bool> cliProcessingTelemetryEnabled { false };
+        std::atomic<std::uint64_t> cliTelemetryCallbackCount { 0 };
+        std::atomic<double> cliTelemetryAccumulatedUs { 0.0 };
+        std::atomic<double> cliTelemetryMaxUs { 0.0 };
+        std::atomic<double> cliTelemetryLastUs { 0.0 };
+        std::atomic<int> cliTelemetryLastBlockSamples { 0 };
+    };
+
     void setCliProcessingTelemetryEnabled(bool enabled) noexcept
     {
-        publishAtomic(cliProcessingTelemetryEnabled_, enabled, std::memory_order_release);
+        publishAtomic(rtAuxMutable_.cliProcessingTelemetryEnabled, enabled, std::memory_order_release);
         if (!enabled)
         {
-            exchangeAtomic(cliTelemetryCallbackCount_, static_cast<std::uint64_t>(0), std::memory_order_acq_rel);
-            exchangeAtomic(cliTelemetryAccumulatedUs_, 0.0, std::memory_order_acq_rel);
-            exchangeAtomic(cliTelemetryMaxUs_, 0.0, std::memory_order_acq_rel);
-            exchangeAtomic(cliTelemetryLastUs_, 0.0, std::memory_order_acq_rel);
-            exchangeAtomic(cliTelemetryLastBlockSamples_, 0, std::memory_order_acq_rel);
+            exchangeAtomic(rtAuxMutable_.cliTelemetryCallbackCount, static_cast<std::uint64_t>(0), std::memory_order_acq_rel);
+            exchangeAtomic(rtAuxMutable_.cliTelemetryAccumulatedUs, 0.0, std::memory_order_acq_rel);
+            exchangeAtomic(rtAuxMutable_.cliTelemetryMaxUs, 0.0, std::memory_order_acq_rel);
+            exchangeAtomic(rtAuxMutable_.cliTelemetryLastUs, 0.0, std::memory_order_acq_rel);
+            exchangeAtomic(rtAuxMutable_.cliTelemetryLastBlockSamples, 0, std::memory_order_acq_rel);
         }
     }
 
-    bool isCliProcessingTelemetryEnabled() const noexcept
+    [[nodiscard]] bool isCliProcessingTelemetryEnabled() const noexcept
     {
-        return consumeAtomic(cliProcessingTelemetryEnabled_, std::memory_order_acquire);
+        return consumeAtomic(rtAuxMutable_.cliProcessingTelemetryEnabled, std::memory_order_acquire);
     }
 
-    CliProcessingTelemetrySnapshot consumeCliProcessingTelemetrySnapshot() noexcept
+    [[nodiscard]] CliProcessingTelemetrySnapshot consumeCliProcessingTelemetrySnapshot() noexcept
     {
         CliProcessingTelemetrySnapshot snapshot {};
         snapshot.enabled = isCliProcessingTelemetryEnabled();
-        snapshot.callbackCount = exchangeAtomic(cliTelemetryCallbackCount_, static_cast<std::uint64_t>(0), std::memory_order_acq_rel);
-        const double accumulatedUs = exchangeAtomic(cliTelemetryAccumulatedUs_, 0.0, std::memory_order_acq_rel);
-        snapshot.maxProcessTimeUs = exchangeAtomic(cliTelemetryMaxUs_, 0.0, std::memory_order_acq_rel);
-        snapshot.lastProcessTimeUs = consumeAtomic(cliTelemetryLastUs_, std::memory_order_acquire);
-        snapshot.lastBlockSamples = consumeAtomic(cliTelemetryLastBlockSamples_, std::memory_order_acquire);
+        snapshot.callbackCount = exchangeAtomic(rtAuxMutable_.cliTelemetryCallbackCount, static_cast<std::uint64_t>(0), std::memory_order_acq_rel);
+        const double accumulatedUs = exchangeAtomic(rtAuxMutable_.cliTelemetryAccumulatedUs, 0.0, std::memory_order_acq_rel);
+        snapshot.maxProcessTimeUs = exchangeAtomic(rtAuxMutable_.cliTelemetryMaxUs, 0.0, std::memory_order_acq_rel);
+        snapshot.lastProcessTimeUs = consumeAtomic(rtAuxMutable_.cliTelemetryLastUs, std::memory_order_acquire);
+        snapshot.lastBlockSamples = consumeAtomic(rtAuxMutable_.cliTelemetryLastBlockSamples, std::memory_order_acquire);
         snapshot.sampleRateHz = consumeAtomic(currentSampleRate, std::memory_order_acquire);
         if (snapshot.callbackCount > 0)
             snapshot.avgProcessTimeUs = accumulatedUs / static_cast<double>(snapshot.callbackCount);
@@ -956,44 +1017,44 @@ public:
         std::uint64_t runtimeLookupMissCount = 0;
     };
 
-    RebuildDispatchDiagnostics getRebuildDispatchDiagnostics() const noexcept
+    [[nodiscard]] RebuildDispatchDiagnostics getRebuildDispatchDiagnostics() const noexcept
     {
         return {
-            consumeAtomic(debugRebuildDispatchRequestCount),
-            consumeAtomic(debugRebuildDispatchQueuedCount),
-            consumeAtomic(debugRebuildDispatchBlockedPendingDuplicateCount),
-            consumeAtomic(debugRebuildDispatchBlockedRecentDuplicateCount),
-            consumeAtomic(debugRebuildDispatchRuntimeQueueFullCount),
-            consumeAtomic(debugRebuildDispatchDrainedCommandCount),
-            consumeAtomic(debugRebuildDispatchMatchedRuntimeCommandCount),
-            consumeAtomic(debugRebuildDispatchTaskSnapshotFallbackCount)
+            consumeAtomic(rtAuxMutable_.debugRebuildDispatchRequestCount),
+            consumeAtomic(rtAuxMutable_.debugRebuildDispatchQueuedCount),
+            consumeAtomic(rtAuxMutable_.debugRebuildDispatchBlockedPendingDuplicateCount),
+            consumeAtomic(rtAuxMutable_.debugRebuildDispatchBlockedRecentDuplicateCount),
+            consumeAtomic(rtAuxMutable_.debugRebuildDispatchRuntimeQueueFullCount),
+            consumeAtomic(rtAuxMutable_.debugRebuildDispatchDrainedCommandCount),
+            consumeAtomic(rtAuxMutable_.debugRebuildDispatchMatchedRuntimeCommandCount),
+            consumeAtomic(rtAuxMutable_.debugRebuildDispatchTaskSnapshotFallbackCount)
         };
     }
-    EqCacheMissDiagnostics getEqCacheMissDiagnostics() const noexcept
+    [[nodiscard]] EqCacheMissDiagnostics getEqCacheMissDiagnostics() const noexcept
     {
         return {
-            consumeAtomic(eqCacheSnapshotCreateMissCountNonRt, std::memory_order_acquire),
-            consumeAtomic(eqCacheRuntimeLookupMissCountNonRt, std::memory_order_acquire)
+            consumeAtomic(rtAuxMutable_.eqCacheSnapshotCreateMissCountNonRt, std::memory_order_acquire),
+            consumeAtomic(rtAuxMutable_.eqCacheRuntimeLookupMissCountNonRt, std::memory_order_acquire)
         };
     }
 
     EqCacheMissDiagnostics consumeEqCacheMissDiagnostics() noexcept
     {
         EqCacheMissDiagnostics snapshot {};
-        snapshot.snapshotCreateMissCount = exchangeAtomic(eqCacheSnapshotCreateMissCountNonRt,
+        snapshot.snapshotCreateMissCount = exchangeAtomic(rtAuxMutable_.eqCacheSnapshotCreateMissCountNonRt,
                                                           static_cast<std::uint64_t>(0),
                                                           std::memory_order_acq_rel);
-        snapshot.runtimeLookupMissCount = exchangeAtomic(eqCacheRuntimeLookupMissCountNonRt,
+        snapshot.runtimeLookupMissCount = exchangeAtomic(rtAuxMutable_.eqCacheRuntimeLookupMissCountNonRt,
                                                          static_cast<std::uint64_t>(0),
                                                          std::memory_order_acq_rel);
         return snapshot;
     }
 
     // --- NoiseShaperLearner Settings ---
-    convo::NoiseShaperLearnerSettings getNoiseShaperLearnerSettings() const;
+    [[nodiscard]] convo::NoiseShaperLearnerSettings getNoiseShaperLearnerSettings() const;
     void setNoiseShaperLearnerSettings(const convo::NoiseShaperLearnerSettings& settings);
 
-    static double getAdaptiveSampleRateBankHz(int bankIndex) noexcept;
+    [[nodiscard]] static double getAdaptiveSampleRateBankHz(int bankIndex) noexcept;
     void getCurrentAdaptiveCoefficients(double* outCoeffs, int maxCoefficients) const noexcept;
     void getAdaptiveCoefficientsForSampleRate(double sampleRate, double* outCoeffs, int maxCoefficients) const noexcept;
     void setAdaptiveCoefficientsForSampleRate(double sampleRate, const double* coeffs, int numCoefficients);
@@ -1005,9 +1066,9 @@ public:
     void publishCoeffs(const double* coeffs);
 
     // --- Adaptive ノイズシェイパー係数インデックス計算（UI スレッドからアクセス可能） ---
-    static int getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, convo::NoiseShaperLearningMode mode) noexcept;
+    [[nodiscard]] static int getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, convo::NoiseShaperLearningMode mode) noexcept;
 
-    bool getAdaptiveNoiseShaperState(int bankIndex, convo::NoiseShaperLearnerState& outState) const noexcept;
+    [[nodiscard]] bool getAdaptiveNoiseShaperState(int bankIndex, convo::NoiseShaperLearnerState& outState) const noexcept;
     void setAdaptiveNoiseShaperState(int bankIndex, const convo::NoiseShaperLearnerState& inState) noexcept;
 
 private:
@@ -1018,15 +1079,15 @@ private:
 
     void recordAudioCallbackProcessingStats(int numSamples, double processTimeUs) noexcept
     {
-        if (!consumeAtomic(cliProcessingTelemetryEnabled_, std::memory_order_relaxed))
+        if (!consumeAtomic(rtAuxMutable_.cliProcessingTelemetryEnabled, std::memory_order_relaxed))
             return;
 
-        convo::fetchAddAtomic(cliTelemetryCallbackCount_, static_cast<std::uint64_t>(1), std::memory_order_relaxed);
-        publishAtomic(cliTelemetryLastBlockSamples_, numSamples, std::memory_order_relaxed);
-        publishAtomic(cliTelemetryLastUs_, processTimeUs, std::memory_order_relaxed);
+        convo::fetchAddAtomic(rtAuxMutable_.cliTelemetryCallbackCount, static_cast<std::uint64_t>(1), std::memory_order_relaxed);
+        publishAtomic(rtAuxMutable_.cliTelemetryLastBlockSamples, numSamples, std::memory_order_relaxed);
+        publishAtomic(rtAuxMutable_.cliTelemetryLastUs, processTimeUs, std::memory_order_relaxed);
 
-        double expectedAccum = consumeAtomic(cliTelemetryAccumulatedUs_, std::memory_order_relaxed);
-        while (!convo::compareExchangeAtomic(cliTelemetryAccumulatedUs_,
+        double expectedAccum = consumeAtomic(rtAuxMutable_.cliTelemetryAccumulatedUs, std::memory_order_relaxed);
+        while (!convo::compareExchangeAtomic(rtAuxMutable_.cliTelemetryAccumulatedUs,
                              expectedAccum,
                              expectedAccum + processTimeUs,
                              std::memory_order_relaxed,
@@ -1034,9 +1095,9 @@ private:
         {
         }
 
-        double expectedMax = consumeAtomic(cliTelemetryMaxUs_, std::memory_order_relaxed);
+        double expectedMax = consumeAtomic(rtAuxMutable_.cliTelemetryMaxUs, std::memory_order_relaxed);
          while (processTimeUs > expectedMax
-             && !convo::compareExchangeAtomic(cliTelemetryMaxUs_,
+             && !convo::compareExchangeAtomic(rtAuxMutable_.cliTelemetryMaxUs,
                                   expectedMax,
                                   processTimeUs,
                                   std::memory_order_relaxed,
@@ -1077,7 +1138,7 @@ private:
                                   int maxBlockSize,
                                   uint64_t generation);
         EQCoeffCache* get(uint64_t hash) noexcept;
-        bool containsNonRt(uint64_t hash) noexcept;
+        [[nodiscard]] bool containsNonRt(uint64_t hash) noexcept;
         void releaseCache(EQCoeffCache* cache) noexcept;
         ~EQCacheManager();
 
@@ -1125,7 +1186,7 @@ private:
 
         void storeNewMap(CacheMap* newMap) noexcept;
         void drainDeferredMapsUnderLock() noexcept;
-        bool tryEnqueueDeferredMap(CacheMap* map) noexcept;
+        [[nodiscard]] bool tryEnqueueDeferredMap(CacheMap* map) noexcept;
 
         AudioEngine& owner;
         std::mutex writeMutex;
@@ -1150,25 +1211,52 @@ public:
     //----------------------------------------------------------
     // 状態管理
     //----------------------------------------------------------
-    // activeDSP: 現行 DSP の非所有スロット。
+    // active runtime DSP slot: 現行 DSP の非所有スロット。
     //            実際の解放は retireDSP() → deferred delete / retire queue で行う。
-    convo::NonOwningPtr<DSPCore> activeDSP { nullptr };
-    // fadingOutDSP: フェード中 DSP の非所有スロット。
-    //               寿命は publish/retire の順序に従い、activeDSP と独立して非所有で管理する。
-    convo::NonOwningPtr<DSPCore> fadingOutDSP { nullptr };
+    convo::NonOwningPtr<DSPCore> activeRuntimeDSPSlot { nullptr };
+    // fading runtime DSP slot: フェード中 DSP の非所有スロット。
+    //               寿命は publish/retire の順序に従い、active runtime slot と独立して非所有で管理する。
+    convo::NonOwningPtr<DSPCore> fadingRuntimeDSPSlot { nullptr };
 
-    inline DSPCore* exchangeFadingOutDSP(DSPCore* value) noexcept
+    inline DSPCore* exchangeFadingRuntimeDSP(DSPCore* value) noexcept
     {
 
 
-        DSPCore* previous = fadingOutDSP.get();
-        fadingOutDSP = value;
+        DSPCore* previous = fadingRuntimeDSPSlot.get();
+        fadingRuntimeDSPSlot.operator=(value);
         return previous;
     }
+
+    [[nodiscard]] inline DSPCore* getActiveRuntimeDSP() const noexcept
+    {
+        return activeRuntimeDSPSlot.get();
+    }
+
+    inline void setActiveRuntimeDSP(DSPCore* value) noexcept
+    {
+        activeRuntimeDSPSlot = value;
+    }
+
+    [[nodiscard]] inline bool hasActiveRuntimeDSP() const noexcept
+    {
+        return getActiveRuntimeDSP() != nullptr;
+    }
+
+    inline DSPCore* releaseActiveRuntimeDSP() noexcept
+    {
+        DSPCore* activeRaw = getActiveRuntimeDSP();
+        setActiveRuntimeDSP(nullptr);
+        return activeRaw;
+    }
+
     struct RuntimePublishView
     {
-        RuntimePublishView(convo::EpochDomain& domain, int readerIndex, const convo::RuntimeGraph* graphIn) noexcept
+        RuntimePublishView(convo::EpochDomain& domain,
+                           int readerIndex,
+                           const convo::RuntimeGraph* graphIn,
+                           const convo::TransitionState& transitionIn) noexcept
             : observed(domain, readerIndex), graph(graphIn)
+            , transition(transitionIn)
         {
         }
 
@@ -1179,11 +1267,12 @@ public:
 
         convo::ObservedRuntime observed;
         const convo::RuntimeGraph* graph = nullptr;
+        convo::TransitionState transition {};
     };
 
-    struct RuntimeExecutionView
+    struct RuntimeReadView
     {
-        RuntimeExecutionView(RuntimePublishView&& runtimePublishIn,
+        RuntimeReadView(RuntimePublishView&& runtimePublishIn,
                              convo::ObservedRuntime&& observedSnapshotIn) noexcept
             : runtimePublish(std::move(runtimePublishIn))
             , observedSnapshot(std::move(observedSnapshotIn))
@@ -1192,10 +1281,10 @@ public:
         {
         }
 
-        RuntimeExecutionView(const RuntimeExecutionView&) = delete;
-        RuntimeExecutionView& operator=(const RuntimeExecutionView&) = delete;
-        RuntimeExecutionView(RuntimeExecutionView&&) noexcept = default;
-        RuntimeExecutionView& operator=(RuntimeExecutionView&&) noexcept = default;
+        RuntimeReadView(const RuntimeReadView&) = delete;
+        RuntimeReadView& operator=(const RuntimeReadView&) = delete;
+        RuntimeReadView(RuntimeReadView&&) noexcept = default;
+        RuntimeReadView& operator=(RuntimeReadView&&) noexcept = default;
 
         RuntimePublishView runtimePublish;
         convo::ObservedRuntime observedSnapshot;
@@ -1273,7 +1362,7 @@ public:
     // 同一IR構造に対する Structural rebuild の多重発火を抑止する。
     // 値は「直近で rebuild を要求した UI 側 Convolver 構造ハッシュ」。
     std::atomic<uint64_t> lastIssuedConvolverStructuralHash_{ 0 };
-    // activeDSP 実体を直接読まずに判定するための、commit済み Convolver 構造スナップショット。
+    // active runtime slot 実体を直接読まずに判定するための、commit済み Convolver 構造スナップショット。
     std::atomic<uint64_t> lastCommittedConvolverStructuralHash_{ 0 };
     std::atomic<bool> lastCommittedConvolverHasIr_{ false };
     EQCacheManager eqCacheManager;
@@ -1367,8 +1456,6 @@ public:
     #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
     bool m_isRestoringState { false }; // requestLoadState 中はデフォルトリセットを抑制 (Message Thread のみ)
-    uint32 fixedNoiseLastLogMs = 0;
-
     // 出力周波数フィルターモード (Thread-safe)
     std::atomic<convo::HCMode> convHCFilterMode { convo::HCMode::Natural }; // ① ハイカット
     std::atomic<convo::LCMode> convLCFilterMode { convo::LCMode::Natural }; // ① ローカット
@@ -1382,6 +1469,9 @@ public:
     std::array<float, NUM_DISPLAY_BARS> eqTotalMagSqLBuffer;
     std::array<float, NUM_DISPLAY_BARS> eqTotalMagSqRBuffer;
     std::array<float, NUM_DISPLAY_BARS> eqBandMagSqBuffer;
+
+    enum class CommitReaderSlot : int;
+
     //----------------------------------------------------------
     // プライベートヘルパー (Message Thread のみ)
     //----------------------------------------------------------
@@ -1393,25 +1483,27 @@ public:
     // Note: This function performs memory allocation (including MKL) and other blocking operations
     // such as IR resampling. It MUST only be called from the message thread.
     // prepareToPlay() routes to the message thread before invoking this helper.
-    void requestRebuild(double sampleRate, int samplesPerBlock, bool bypassLegacySuppression = false);
+    void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
     void commitNewDSP(DSPCore* newDSP, int generation);
     void prepareCommit(DSPCore* newDSP, int generation);
     void executeCommit();
     // acquire: commitNewDSP/requestRebuild の rebuildGeneration 更新 release と HB し、
     //          リビルド世代が古いか否かを各スレッドから安全に判定。
-    bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildGeneration, std::memory_order_acquire); }
+    [[nodiscard]] bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildGeneration, std::memory_order_acquire); }
     bool enqueueLearningCommand(const LearningCommand& cmd) noexcept;
-    bool dequeueLearningCommand(LearningCommand& cmd) noexcept;
+    [[nodiscard]] bool dequeueLearningCommand(LearningCommand& cmd) noexcept;
     bool enqueueLearnerDispatch(const LearnerDispatchAction& action) noexcept;
-    bool dequeueLearnerDispatch(LearnerDispatchAction& action) noexcept;
+    [[nodiscard]] bool dequeueLearnerDispatch(LearnerDispatchAction& action) noexcept;
     void processLearningCommands() noexcept;
     void processDeferredLearningActions();
     void resetLearningControlState() noexcept;
     bool enqueueSnapshotCommand() noexcept;
-    void appendPublicationIntent(DSPCore* newDSP, int generation, int epochReaderIndex) noexcept;
+    void appendPublicationIntentForCommitProducer(DSPCore* newDSP, int generation) noexcept;
+    void appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int generation) noexcept;
+    void appendPublicationIntentForCommitSlot(DSPCore* newDSP, int generation, CommitReaderSlot readerSlot) noexcept;
     void drainPublicationLogForShutdown() noexcept;
-    bool hasPendingPublicationIntents() noexcept;
-    bool hasPublicationLogPending() noexcept;
+    [[nodiscard]] bool hasPendingPublicationIntents() noexcept;
+    [[nodiscard]] bool hasPublicationLogPending() noexcept;
     void processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
                              const convo::GlobalSnapshot* snap,
                              bool isFadingTarget,
@@ -1496,7 +1588,6 @@ public:
     };
     RebuildTask pendingTask;
     RebuildTask lastQueuedTaskSignature;
-    int64_t lastQueuedTaskTicks = 0;
 
     // --- Commit 2段階化：PublicationLog と commit staging ---
     struct PublicationIntent {
@@ -1546,7 +1637,7 @@ public:
     static int resolveAdaptiveCoeffBankIndex(double sampleRate) noexcept;
     static int getAdaptiveBitDepthIndex(int bitDepth) noexcept;
     AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) noexcept;
-    const AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept;
+    [[nodiscard]] const AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept;
     void selectAdaptiveCoeffBankForCurrentSettings() noexcept;
     void publishCoeffsToBank(int bankIndex, const double* coeffs);
 
@@ -1555,7 +1646,7 @@ public:
         return static_cast<uint32_t>(reason);
     }
 
-    bool hasRebuildReason(RebuildReason reason) const noexcept
+    [[nodiscard]] bool hasRebuildReason(RebuildReason reason) const noexcept
     {
         // acquire: setRebuildReason の acq_rel release-side と HB し、最新の flags を観測。
         const uint32_t flags = convo::consumeAtomic(rebuildReasonFlags_, std::memory_order_acquire);
@@ -1578,9 +1669,9 @@ public:
         return (oldFlags & rebuildReasonMask(reason)) != 0u;
     }
 
-    uint64_t nextRebuildTelemetryIntentId() noexcept
+    [[nodiscard]] uint64_t nextRebuildTelemetryIntentId() noexcept
     {
-        return convo::fetchAddAtomic(rebuildTelemetryNextIntentId_, static_cast<uint64_t>(1), std::memory_order_acq_rel);
+        return convo::fetchAddAtomic(rtAuxMutable_.rebuildTelemetryNextIntentId, static_cast<uint64_t>(1), std::memory_order_acq_rel);
     }
 
     enum class RebuildTelemetryEvent : uint8_t
@@ -1646,7 +1737,6 @@ public:
         Replaceable,
         MustExecute
     };
-
     enum class RebuildTelemetryDecision : uint8_t
     {
         Accepted,
@@ -1801,6 +1891,7 @@ public:
 
 
     void debugAssertNotAudioThread() const;
+    void debugAssertAudioThread() const;
 
     inline convo::EngineRuntime makeEngineRuntimeState(DSPCore* current,
                                                         DSPCore* next,
@@ -1827,8 +1918,8 @@ public:
             return dsp != nullptr ? dsp->runtimeUuid : 0;
         };
 
-        const auto runtimePublishView = getRuntimePublishView();
-        DSPCore* fading = resolveFadingDSPFromRuntimeWorldOnly(runtimePublishView.graph);
+        const auto runtimeReadView = readControlRuntimeView();
+        DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(getRuntimeGraph(runtimeReadView));
 
         runtime.current = current;
         runtime.currentRuntimeUuid = getRuntimeUuid(current);
@@ -1855,7 +1946,7 @@ public:
         return runtime;
     }
 
-    inline CrossfadePreparedSnapshot consumeCrossfadePreparedSnapshot() const noexcept
+    [[nodiscard]] inline CrossfadePreparedSnapshot consumeCrossfadePreparedSnapshot() const noexcept
     {
         // acquire: publishCrossfadePreparedSnapshot の release と HB し、
         //          最新のクロスフェードスナップショットスロットを取得。
@@ -1891,23 +1982,89 @@ public:
         publishCrossfadePreparedSnapshot(snapshot);
     }
 
-    inline RuntimePublishView getRuntimePublishView() const noexcept
+    inline void publishLatencyDelayAtomics(int oldDelay,
+                                           int newDelay) noexcept
     {
-        // RuntimePublishView は ObservedRuntime を保持し、このスコープ中は
-        // control reader が EpochDomain に参加した状態で runtime graph を参照する。
-        const auto* world = runtimeStore.observe();
-        return RuntimePublishView { m_epochDomain, kControlEpochReaderIndex, world != nullptr ? &world->graph : nullptr };
+        convo::publishAtomic(latencyDelayOld, oldDelay, std::memory_order_release); // release: audio thread の latency read と HB
+        convo::publishAtomic(latencyDelayNew, newDelay, std::memory_order_release); // release: audio thread の latency read と HB
     }
 
-    // P0-2: 読取経路収束用の軽量ビュー。
-    // 取得元は既存と同一（runtimeStore.observe + SnapshotCoordinator.observeCurrentRuntime）で、
-    // 挙動を変えずに読取入口のみを統一する。
-    inline RuntimeExecutionView getRuntimeExecutionViewForAudioThread() const noexcept
+    inline void resetLatencyDelayRtState() noexcept
     {
-        return RuntimeExecutionView {
-            getRuntimePublishView(),
-            m_coordinator.observeCurrentRuntime(kAudioEpochReaderIndex)
+        latencyDelayOld_RT = 0;
+        latencyDelayNew_RT = 0;
+    }
+
+    inline void syncLatencyDelayRtState(const convo::RuntimeGraph* runtimeGraph) noexcept
+    {
+        latencyDelayOld_RT = (runtimeGraph != nullptr) ? runtimeGraph->latencyDelayOld : 0;
+        latencyDelayNew_RT = (runtimeGraph != nullptr) ? runtimeGraph->latencyDelayNew : 0;
+    }
+
+    enum class CommitReaderSlot : int
+    {
+        Producer = kCommitProducerEpochReaderIndex,
+        Consumer = kCommitConsumerEpochReaderIndex
+    };
+
+    [[nodiscard]] static constexpr int toCommitReaderIndex(CommitReaderSlot slot) noexcept
+    {
+        switch (slot)
+        {
+            case CommitReaderSlot::Producer:
+                return kCommitProducerEpochReaderIndex;
+            case CommitReaderSlot::Consumer:
+                return kCommitConsumerEpochReaderIndex;
+        }
+
+        jassertfalse;
+        return kCommitConsumerEpochReaderIndex;
+    }
+
+    [[nodiscard]] inline RuntimePublishView makeRuntimePublishView(int readerIndex,
+                                                                   bool assertAudioThread) const noexcept
+    {
+        if (assertAudioThread)
+            debugAssertAudioThread();
+        else
+            debugAssertNotAudioThread();
+
+        const auto* world = RuntimePublicationCoordinator::observePublishedWorld(runtimeStore);
+        return RuntimePublishView {
+            m_epochDomain,
+            readerIndex,
+            world != nullptr ? &world->graph : nullptr,
+            world != nullptr ? world->engine.transition : convo::TransitionState{}
         };
+    }
+
+    [[nodiscard]] inline RuntimeReadView makeRuntimeReadView(int readerIndex,
+                                                             bool assertAudioThread) const noexcept
+    {
+        return RuntimeReadView {
+            makeRuntimePublishView(readerIndex, assertAudioThread),
+            m_coordinator.observeCurrentRuntime(readerIndex)
+        };
+    }
+
+    [[nodiscard]] inline RuntimeReadView readAudioRuntimeView() const noexcept
+    {
+        return makeRuntimeReadView(kAudioEpochReaderIndex, true);
+    }
+
+    [[nodiscard]] inline RuntimeReadView readControlRuntimeView() const noexcept
+    {
+        return makeRuntimeReadView(kControlEpochReaderIndex, false);
+    }
+
+    [[nodiscard]] static inline const convo::GlobalSnapshot* getRuntimeSnapshot(const RuntimeReadView& runtimeReadView) noexcept
+    {
+        return runtimeReadView.snapshot;
+    }
+
+    [[nodiscard]] static inline const convo::RuntimeGraph* getRuntimeGraph(const RuntimeReadView& runtimeReadView) noexcept
+    {
+        return runtimeReadView.runtimePublish.graph;
     }
 
     inline convo::RuntimeGraph makeRuntimeGraphState(const convo::EngineRuntime& state) const noexcept
@@ -1941,8 +2098,8 @@ public:
         graph.latencyDelayNew = state.latencyDelayNew;
         graph.latencyResetPending = state.latencyResetPending;
 
-        const auto observedSnapshot = m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
-        const auto* snapshot = observedSnapshot.get();
+        const auto runtimeReadView = readControlRuntimeView();
+        const auto* snapshot = getRuntimeSnapshot(runtimeReadView);
         if (snapshot != nullptr)
         {
             graph.eqBypassed = snapshot->eqBypass;
@@ -1977,7 +2134,7 @@ public:
     }
 
     template <typename T>
-    static inline T* consumeAtomicPtr(const std::atomic<T*>& src) noexcept
+    [[nodiscard]] static inline T* consumeAtomicPtr(const std::atomic<T*>& src) noexcept
     {
         // acquire: publishAtomicPtr release と HB し、最新の pointer を取得。
         return convo::consumeAtomic(src, std::memory_order_acquire);
@@ -2027,7 +2184,7 @@ public:
         return convo::fetchAddAtomic(dst, value, order);
     }
 
-    inline DSPCore* resolveFadingDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
+    [[nodiscard]] inline DSPCore* resolveFadingRuntimeDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
     {
         if (runtimeGraph == nullptr)
             return nullptr;
@@ -2041,7 +2198,7 @@ public:
         return nullptr;
     }
 
-    inline DSPCore* resolveActiveDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
+    [[nodiscard]] inline DSPCore* resolveActiveRuntimeDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
     {
         if (runtimeGraph == nullptr)
             return nullptr;
@@ -2056,7 +2213,7 @@ public:
     }
 
 
-    inline std::uint64_t reserveNextRuntimeGraphGeneration() noexcept
+    [[nodiscard]] inline std::uint64_t reserveNextRuntimeGraphGeneration() noexcept
     {
         // acq_rel: fetch-add で generation counter を advance し、他スレッドへ新 generation を公開。
         //          acquire 側で旧 generation 参照により stale request 検出を回避。
@@ -2064,20 +2221,15 @@ public:
                                                                static_cast<std::uint64_t>(1),
                                                                std::memory_order_acq_rel) + 1;
         // acq_rel: publish count を increment し、runtime world 公開イベント数を追跡。
-        convo::fetchAddAtomic(g_runtimePublishCount,
+        convo::fetchAddAtomic(rtAuxMutable_.runtimePublishCount,
                               static_cast<std::uint64_t>(1),
                               std::memory_order_acq_rel);
         return nextGraphGeneration;
     }
 
-    static inline std::uint64_t reserveNextRuntimeVersion() noexcept
-    {
-        static std::atomic<std::uint64_t> s_nextRuntimeVersion { 1 };
-        // acq_rel: runtime version counter を increment し、複数 world lifecycle across に unique ID を割り当て。
-        return convo::fetchAddAtomic(s_nextRuntimeVersion,
-                                     static_cast<std::uint64_t>(1),
-                                     std::memory_order_acq_rel);
-    }
+    static std::atomic<std::uint64_t> runtimeVersionCounterStorage_;
+    static std::atomic<std::uint64_t>& runtimeVersionCounter() noexcept;
+    [[nodiscard]] static std::uint64_t reserveNextRuntimeVersion() noexcept;
 
     //=== RuntimePublicationCoordinator NonRT helper API ===//
     // AudioEngine 内部の publish/retire helper（NonRT 専用）。
@@ -2105,12 +2257,13 @@ public:
         worldOwner->runtimeVersion = reserveNextRuntimeVersion();
         // transitionId: unique per crossfade event
         worldOwner->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
-        worldOwner->sealRecursively();
+        // Publish world must be frozen before it can be exposed to any reader.
+        worldOwner->freeze();
 
         return worldOwner;
     }
 
-    bool runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept;
+    [[nodiscard]] bool runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept;
     void onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept;
     void onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexcept;
     void emitEvidenceTickNonRt(bool force) noexcept;
@@ -2137,7 +2290,7 @@ public:
             return engine_->buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active);
         }
 
-        bool validatePublicationNonRt(const RuntimePublishWorld& world) noexcept
+        [[nodiscard]] bool validatePublicationNonRt(const RuntimePublishWorld& world) noexcept
         {
             return engine_->runPublicationPrecheckNonRt(world);
         }
@@ -2149,6 +2302,12 @@ public:
 
         void willRetireRuntimeNonRt(const RuntimePublishWorld* world) noexcept
         {
+            if (world == nullptr)
+                return;
+
+            if (engine_->isShutdownInProgress())
+                return;
+
             engine_->onRuntimeRetiredNonRt(world);
         }
 
@@ -2190,6 +2349,36 @@ public:
 
     RuntimePublishStore runtimeStore;
 
+    [[nodiscard]] inline RuntimePublicationCoordinator makeRuntimePublicationCoordinator() noexcept
+    {
+        using RuntimePublicationCoordinatorFactory = RuntimePublicationCoordinator;
+        return RuntimePublicationCoordinatorFactory::create(RuntimePublicationBridge { *this }, runtimeStore);
+    }
+
+    [[nodiscard]] inline bool precheckRuntimePublication(const convo::isr::PayloadClosureDescriptor& closure,
+                                                         const convo::isr::TieredPayloadDescriptor& descriptor) noexcept
+    {
+        auto& runtimePublicationCoordinator = runtimePublicationBridge_;
+        return runtimePublicationCoordinator.precheckPublish(closure, descriptor);
+    }
+
+    inline void commitRuntimePublication(const RuntimePublishWorld& world) noexcept
+    {
+        auto& runtimePublicationCoordinator = runtimePublicationBridge_;
+        runtimePublicationCoordinator.commit(convo::isr::PublishAuthority::Granted,
+                                             convo::isr::RuntimeBoundary::NonRTWorld,
+                                             &world,
+                                             world.runtimeVersion);
+    }
+
+    inline void retireRuntimePublication(const RuntimePublishWorld* world) noexcept
+    {
+        auto& runtimePublicationCoordinator = runtimePublicationBridge_;
+        runtimePublicationCoordinator.retire(convo::isr::RetireAuthority::Granted,
+                                             convo::isr::RuntimeBoundary::NonRTWorld,
+                                             world);
+    }
+
     inline void logUnexpectedRuntimeTransition(const char* origin,
                                                DSPCore* current,
                                                DSPCore* candidate) const noexcept
@@ -2213,10 +2402,10 @@ public:
             return (dsp != nullptr) ? dsp->runtimeUuid : 0;
         };
 
-        DSPCore* current = activeDSP.get();
-        const auto runtimePublishView = getRuntimePublishView();
-        const auto* runtimeGraph = runtimePublishView.graph;
-        auto* fading = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
+        DSPCore* current = getActiveRuntimeDSP();
+        const auto runtimeReadView = readControlRuntimeView();
+        const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
+        auto* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
         const auto revision = (runtimeGraph != nullptr) ? runtimeGraph->generation : 0;
         const auto publishedCurrentUuid = (runtimeGraph != nullptr) ? runtimeGraph->runtimeUuid : 0;
         const auto publishedFadingUuid = (runtimeGraph != nullptr) ? runtimeGraph->fadingRuntimeUuid : 0;
@@ -2377,8 +2566,7 @@ public:
             && !dspCrossfadeArmed_RT)
         {
             dspCrossfadeArmed_RT = true;
-            latencyDelayOld_RT        = (runtimeGraph != nullptr) ? runtimeGraph->latencyDelayOld              : 0;
-            latencyDelayNew_RT        = (runtimeGraph != nullptr) ? runtimeGraph->latencyDelayNew              : 0;
+            syncLatencyDelayRtState(runtimeGraph);
             dspCrossfadeStartDelayBlocks_RT = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeStartDelayBlocks : 0;
 
             // C1-2: activate のみ Audio Thread で実行 (reset/setCurrentAndTargetValue は Message Thread 側)
@@ -2541,7 +2729,7 @@ public:
 //==============================================================================
 
 // Audio Thread 用：現在アクティブな係数セットを取得（ロックフリー）
-static inline const CoeffSet* getActiveCoeffSet(const AdaptiveCoeffBankSlot& slot) noexcept
+[[nodiscard]] static inline const CoeffSet* getActiveCoeffSet(const AdaptiveCoeffBankSlot& slot) noexcept
 {
     // acquire: CoeffSetWriteLockGuard::commit の publishAtomic release と HB し、アクティブインデックスを確定取得。
     const int activeIdx = consumeAtomic(slot.activeIndex, std::memory_order_acquire);
@@ -2565,7 +2753,7 @@ static inline bool reserveInactiveCoeffSet(AdaptiveCoeffBankSlot& slot) noexcept
 }
 
 // 書き込み側用：予約した非アクティブセットへのポインタ取得
-static inline CoeffSet* getReservedInactiveCoeffSet(AdaptiveCoeffBankSlot& slot) noexcept
+[[nodiscard]] static inline CoeffSet* getReservedInactiveCoeffSet(AdaptiveCoeffBankSlot& slot) noexcept
 {
     // acquire: reserveInactiveCoeffSet CAS success の acquire と HB し、ロック下での確定インデックスを取得。
     int active = consumeAtomic(slot.activeIndex, std::memory_order_acquire);
@@ -2614,11 +2802,11 @@ inline void retireDSP(DSPCore* dsp) noexcept
 
     // 退役の唯一の入口。
     // ここでは「公開済みハンドルの解放」と「実体の deferred delete 予約」をまとめて行い、
-    // activeDSP / fadingOutDSP / publicationLog など複数の非所有スロットからの回収責務を集約する。
+    // active runtime slot / fading runtime slot / publicationLog など複数の非所有スロットからの回収責務を集約する。
     if (!retireDSPHandleForRuntime(dsp))
         return;
 
-    convo::fetchAddAtomic(g_runtimeRetireCount,
+    convo::fetchAddAtomic(rtAuxMutable_.runtimeRetireCount,
                          static_cast<std::uint64_t>(1),
                          std::memory_order_acq_rel);
     if (enqueueDeferredDeleteNonRt(dsp, &AudioEngine::destroyDSPCoreNode))
@@ -2709,8 +2897,8 @@ public:
         committed = true;
     }
 
-    bool isAcquired() const noexcept { return acquired; }
-    bool isCommitted() const noexcept { return committed; }
+    [[nodiscard]] bool isAcquired() const noexcept { return acquired; }
+    [[nodiscard]] bool isCommitted() const noexcept { return committed; }
 
     CoeffSetWriteLockGuard(const CoeffSetWriteLockGuard&) = delete;
     CoeffSetWriteLockGuard& operator=(const CoeffSetWriteLockGuard&) = delete;
@@ -2732,17 +2920,8 @@ public:
     convo::RCUReader audioThreadRcuReader { m_epochDomain };
     // ENGINE_CONTROL: Audio thread での deletion queue overflow 退避スロット。
     std::atomic<DSPCore*> audioThreadRetireOverflowPtr { nullptr };
-    std::atomic<uint64_t> audioThreadRetireOverflowEpoch { 0 };
-    std::atomic<uint64_t> audioThreadRetireEnqueueDropped { 0 };
-    std::atomic<uint64_t> audioCallbackEpochCounter_ { 0 };
-    std::atomic<uint64_t> audioSampleCursorCounter_ { 0 };
-    std::atomic<uint32_t> audioCallbackActiveCount_ { 0 };
-    std::atomic<bool> cliProcessingTelemetryEnabled_ { false };
-    std::atomic<std::uint64_t> cliTelemetryCallbackCount_ { 0 };
-    std::atomic<double> cliTelemetryAccumulatedUs_ { 0.0 };
-    std::atomic<double> cliTelemetryMaxUs_ { 0.0 };
-    std::atomic<double> cliTelemetryLastUs_ { 0.0 };
-    std::atomic<int> cliTelemetryLastBlockSamples_ { 0 };
+    RTLocalState rtLocalState_ {};
+    RTAuxMutable rtAuxMutable_ {};
     convo::SnapshotCoordinator m_coordinator;
     GenerationManager m_generationManager;
 
@@ -2751,15 +2930,6 @@ public:
     // ==================================================================
     convo::CommandBuffer m_commandBuffer;
     convo::WorkerThread m_workerThread;
-    std::atomic<std::uint64_t> debugRebuildDispatchRequestCount { 0 };
-    std::atomic<std::uint64_t> debugRebuildDispatchQueuedCount { 0 };
-    std::atomic<std::uint64_t> debugRebuildDispatchBlockedPendingDuplicateCount { 0 };
-    std::atomic<std::uint64_t> debugRebuildDispatchBlockedRecentDuplicateCount { 0 };
-    std::atomic<std::uint64_t> debugRebuildDispatchRuntimeQueueFullCount { 0 };
-    std::atomic<std::uint64_t> debugRebuildDispatchDrainedCommandCount { 0 };
-    std::atomic<std::uint64_t> debugRebuildDispatchMatchedRuntimeCommandCount { 0 };
-    std::atomic<std::uint64_t> debugRebuildDispatchTaskSnapshotFallbackCount { 0 };
-    std::atomic<std::uint64_t> rebuildTelemetryNextIntentId_ { 1 };
     std::mutex rebuildAdmissionIntentMutex_;
     RebuildAdmissionIntentState rebuildAdmissionPendingIntent_ {};
 
@@ -2788,48 +2958,7 @@ public:
     std::atomic<bool> m_pendingNSChange{ false };
     std::atomic<bool> m_pendingAGCChange{ false };
     // Audio Thread -> Message Thread 反映確認用 (RT安全: atomic store/fetch_add のみ)
-    std::atomic<uint64_t> debugLastCreatedEqHash{ 0 };
-    std::atomic<uint64_t> lastEnqueuedSnapshotDebounceKey_{ 0 };
-    std::atomic<bool> hasLastEnqueuedSnapshotDebounceKey_{ false };
-    uint64_t debugLastReportedCreatedEqHash{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    int debugLastReportedDspReady{ -1 }; // timerCallback 専用
     // Non-RT diagnostics: most recently rejected rebuild generation in commitNewDSP.
-    std::atomic<uint64_t> lastRejectedGenerationNonRt{ 0 };
-    int debugLastReportedTransitionActive{ -1 }; // timerCallback 専用
-    int debugLastReportedTransitionPolicy{ -1 }; // timerCallback 専用
-    uint64_t debugLastReportedTransitionCurrentPtr{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedTransitionNextPtr{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    double debugLastReportedTransitionFadeSec{ -1.0 }; // timerCallback 専用
-    int debugLastReportedTransitionLatencyDeltaSamples{ std::numeric_limits<int>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRuntimePublishCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRuntimeRetireCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRuntimeReclaimCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRebuildRequestCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRebuildQueuedCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRebuildBlockedPendingDuplicateCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRebuildBlockedRecentDuplicateCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRebuildRuntimeQueueFullCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRebuildDrainedCommandCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRebuildMatchedRuntimeCommandCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRebuildTaskSnapshotFallbackCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRuntimeSnapshotRevision{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRuntimePublishCurrentUuid{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRuntimePublishFadingUuid{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRuntimePublishTransitionCurrentUuid{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedRuntimePublishTransitionNextUuid{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedConvolverRebuildRequestCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedConvolverRebuildDeferredAfterLoadCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedConvolverRebuildScheduledCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedConvolverRebuildTriggeredCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedEqCacheSnapshotCreateMissCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    uint64_t debugLastReportedEqCacheRuntimeLookupMissCount{ std::numeric_limits<uint64_t>::max() }; // timerCallback 専用
-    int debugLastReportedShutdownPhase{ -1 }; // timerCallback 専用
-    bool debugEqCacheLookupMissLatched{ false }; // timerCallback 専用
-    uint64_t debugEqCacheLookupMissLatchedHash{ 0 }; // timerCallback 専用
-        std::atomic<std::uint64_t> eqCacheSnapshotCreateMissCountNonRt { 0 };
-        std::atomic<std::uint64_t> eqCacheRuntimeLookupMissCountNonRt { 0 };
-    std::atomic<std::int64_t> lastEvidenceEmitHighResTicks_{ 0 };
-
     juce::AudioBuffer<float> m_fadeFloatBuffer;
     juce::AudioBuffer<double> m_fadeDoubleBuffer;
 
@@ -2841,7 +2970,7 @@ public:
     convo::isr::LifecycleBarrierRuntime lifecycleBarrierRuntime_{ lifecycleRuntime_ };
 
     // ===================== ISR Phase 1-9: Core Runtimes =====================
-    convo::isr::RuntimePublicationCoordinator runtimePublicationCoordinator_;
+    convo::isr::RuntimePublicationCoordinator runtimePublicationBridge_;
     convo::isr::DSPQuarantineManager dspQuarantineManager_;
     convo::isr::ClosureGraphWalker closureGraphWalker_;
     convo::isr::DebugRuntime debugRuntime_;
@@ -2900,7 +3029,7 @@ inline bool AudioEngine::enqueueLearningCommand(const LearningCommand& cmd) noex
     return true;
 }
 
-inline bool AudioEngine::dequeueLearningCommand(LearningCommand& cmd) noexcept
+[[nodiscard]] inline bool AudioEngine::dequeueLearningCommand(LearningCommand& cmd) noexcept
 {
     // acquire: enqueueLearningCommand publishAtomic release と HB し、learningCommandRead/Write 最新値を取得。
     const uint32_t currentRead = consumeAtomic(learningCommandRead, std::memory_order_acquire);
@@ -2940,7 +3069,7 @@ inline bool AudioEngine::enqueueLearnerDispatch(const LearnerDispatchAction& act
     return true;
 }
 
-inline bool AudioEngine::dequeueLearnerDispatch(LearnerDispatchAction& action) noexcept
+[[nodiscard]] inline bool AudioEngine::dequeueLearnerDispatch(LearnerDispatchAction& action) noexcept
 {
     // acquire: enqueueLearnerDispatch publishAtomic release と HB し、learnerDispatchRead/Write 最新値を取得。
     const uint32_t currentRead = consumeAtomic(learnerDispatchRead, std::memory_order_acquire);

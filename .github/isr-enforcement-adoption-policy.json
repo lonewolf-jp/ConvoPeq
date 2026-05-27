@@ -1,0 +1,12 @@
+{
+    "schema": "isr_enforcement_adoption_policy_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-ENFORCE-ADOPTION-001",
+    "rationale": "Keep advanced enforcement migration ratio policy-driven and tier-aware",
+    "expiry": "2026-09-30",
+    "thresholds": {
+        "smoke": 0.8,
+        "standard": 0.8,
+        "exhaustive": 0.8
+    }
+}

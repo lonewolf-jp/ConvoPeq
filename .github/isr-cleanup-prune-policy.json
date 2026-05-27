@@ -1,0 +1,13 @@
+{
+    "schema": "cleanup_prune_policy_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-CLEANUP-PRUNE-POLICY-001",
+    "rationale": "Externalize cleanup deferred prune ready/blocked rules into a machine-verifiable policy.",
+    "expiry": "2026-09-30",
+    "readyRule": {
+        "comparator": "actual_lte_target_max",
+        "requirePolicyEvaluationNotExpired": true,
+        "requireFiniteValues": true,
+        "issue": "BRIDGE-CLEANUP-PRUNE-RULE-001"
+    }
+}

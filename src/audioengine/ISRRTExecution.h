@@ -7,6 +7,10 @@
 namespace convo {
 namespace isr {
 
+namespace detail {
+std::atomic<bool>& sharedRtContextFlag() noexcept;
+}
+
 /**
  * ISR 10層 Architecture Layer 1: RT Execution Frame Separation
  * RT callback内の全状態をスタックローカルなRTExecutionFrameに封じ込める。
@@ -30,7 +34,7 @@ struct RTExecutionFrame
 {
     // DSP ハンドル（read-only view）
     // dspHandleRuntime から解決済み
-    uint64_t activeDSPHandle;
+    uint64_t activeRuntimeDSPHandle;
     uint64_t fadingDSPHandle;   // crossfade 中のみ有効
 
     // crossfade 状態
@@ -124,10 +128,6 @@ public:
     // audit: RT callback 内から publishAtomic が呼ばれていないか検査
     // （Debug/CI build のみ有効）
     void auditPublishAttempt(const char* callSite) noexcept;
-
-private:
-    // RT context 検出フラグ
-    static std::atomic<bool> isRTContextFlag_;
 };
 
 /**
@@ -144,9 +144,6 @@ public:
 
     // RT context であるか確認
     static bool isRTContext() noexcept;
-
-private:
-    static std::atomic<bool> isRTContextFlag_;
 };
 
 /**
@@ -154,7 +151,7 @@ private:
  * RT callback 入口で呼ばれ、フレームを初期化
  */
 inline RTExecutionFrame makeRTExecutionFrame(
-    uint64_t activeDSP,
+    uint64_t activeHandle,
     uint64_t fadingDSP,
     const FadeAccumulator& fade,
     void* scratchPtr,
@@ -166,7 +163,7 @@ inline RTExecutionFrame makeRTExecutionFrame(
     RTTraceRelay* traceRelay) noexcept
 {
     return RTExecutionFrame{
-        .activeDSPHandle   = activeDSP,
+        .activeRuntimeDSPHandle = activeHandle,
         .fadingDSPHandle   = fadingDSP,
         .fade              = fade,
         .scratchPtr        = scratchPtr,

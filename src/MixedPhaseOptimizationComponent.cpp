@@ -66,11 +66,10 @@ void MixedPhaseOptimizationComponent::timerCallback()
     const float progress = processor.getLoadProgress();
     const auto phaseMode = processor.getPhaseMode();
 
-    static int lastState = -1;
-    if (state != lastState)
+    if (state != lastObservedState_)
     {
         juce::Logger::writeToLog("[MixedPhaseUI] timerCallback: state = " + juce::String(state));
-        lastState = state;
+        lastObservedState_ = state;
     }
 
     switch (state)
