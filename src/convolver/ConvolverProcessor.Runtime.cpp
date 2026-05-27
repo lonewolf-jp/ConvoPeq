@@ -6,19 +6,24 @@
 
 #include "audioengine/AtomicAccess.h"
 
-std::atomic<int> g_totalLatencyClampCount { 0 };
+std::atomic<int> ConvolverProcessor::latencyClampCounterStorage_ { 0 };
+
+std::atomic<int>& ConvolverProcessor::latencyClampCounter() noexcept
+{
+    return latencyClampCounterStorage_;
+}
 
 namespace
 {
     // Audio thread path avoids libm calls for deterministic realtime behavior.
-    static inline double equalPowerSin(double x) noexcept
+    inline double equalPowerSin(double x) noexcept
     {
         const double t = x * (juce::MathConstants<double>::pi * 0.5);
         const double t2 = t * t;
         return t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0)))));
     }
 
-    static inline double floorNoLibm(double x) noexcept
+    inline double floorNoLibm(double x) noexcept
     {
         const auto truncated = static_cast<long long>(x);
         const double truncatedAsDouble = static_cast<double>(truncated);
@@ -27,14 +32,14 @@ namespace
             : truncatedAsDouble;
     }
 
-    static inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
+    inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
     {
         union { double d; uint64_t u; } v { x };
         const bool finite = (((v.u >> 52) & 0x7FFu) != 0x7FFu);
         return finite && (absNoLibm(x) < threshold);
     }
 
-    static inline void sanitizeFiniteChunk(double* data, int count) noexcept
+    inline void sanitizeFiniteChunk(double* data, int count) noexcept
     {
         if (data == nullptr || count <= 0)
             return;
@@ -231,7 +236,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         int totalLatency = static_cast<int>(std::min<int64_t>(calculatedLatency64, MAX_TOTAL_DELAY));
 
         if (rawAlgorithmLatency != algorithmLatency || rawIrPeakLatency != irPeakLatency)
-            convo::fetchAddAtomic(g_totalLatencyClampCount, 1, std::memory_order_acq_rel); // acq_rel: clamp count 観測側 acquire と HB
+            convo::fetchAddAtomic(latencyClampCounter(), 1, std::memory_order_acq_rel); // acq_rel: clamp count 観測側 acquire と HB
 
         if (absNoLibm(activeLatencySmoother.getTargetValue() - static_cast<double>(totalLatency)) >= kLatencyRetargetThresholdSamples)
         {
@@ -683,7 +688,7 @@ void ConvolverProcessor::setMix(float mixAmount)
     }
 }
 
-float ConvolverProcessor::getMix() const
+[[nodiscard]] float ConvolverProcessor::getMix() const
 {
     pendingOverrideLock.enter();
     const float value = pendingOverride.mix;
@@ -782,7 +787,7 @@ void ConvolverProcessor::setSmoothingTime(float timeSec)
     }
 }
 
-float ConvolverProcessor::getTargetIRLength() const
+[[nodiscard]] float ConvolverProcessor::getTargetIRLength() const
 {
     pendingOverrideLock.enter();
     const float value = pendingOverride.targetIRLengthSec;
@@ -790,7 +795,7 @@ float ConvolverProcessor::getTargetIRLength() const
     return value;
 }
 
-float ConvolverProcessor::getAutoDetectedIRLength() const
+[[nodiscard]] float ConvolverProcessor::getAutoDetectedIRLength() const
 {
     pendingOverrideLock.enter();
     const float value = pendingOverride.autoDetectedIRLengthSec;
@@ -798,7 +803,7 @@ float ConvolverProcessor::getAutoDetectedIRLength() const
     return value;
 }
 
-bool ConvolverProcessor::hasManualIRLengthOverride() const
+[[nodiscard]] bool ConvolverProcessor::hasManualIRLengthOverride() const
 {
     pendingOverrideLock.enter();
     const bool value = pendingOverride.irLengthManualOverride;
@@ -806,7 +811,7 @@ bool ConvolverProcessor::hasManualIRLengthOverride() const
     return value;
 }
 
-float ConvolverProcessor::getSmoothingTime() const
+[[nodiscard]] float ConvolverProcessor::getSmoothingTime() const
 {
     pendingOverrideLock.enter();
     const float value = pendingOverride.smoothingTimeSec;
@@ -847,7 +852,7 @@ void ConvolverProcessor::setMixedTransitionStartHz(float hz)
     }
 }
 
-float ConvolverProcessor::getMixedTransitionStartHz() const
+[[nodiscard]] float ConvolverProcessor::getMixedTransitionStartHz() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     return snapshot.mixedTransitionStartHz;
@@ -878,7 +883,7 @@ void ConvolverProcessor::setMixedTransitionEndHz(float hz)
     }
 }
 
-float ConvolverProcessor::getMixedTransitionEndHz() const
+[[nodiscard]] float ConvolverProcessor::getMixedTransitionEndHz() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     return snapshot.mixedTransitionEndHz;
@@ -901,7 +906,7 @@ void ConvolverProcessor::setMixedPreRingTau(float tau)
     }
 }
 
-float ConvolverProcessor::getMixedPreRingTau() const
+[[nodiscard]] float ConvolverProcessor::getMixedPreRingTau() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     return snapshot.mixedPreRingTau;
@@ -933,7 +938,7 @@ void ConvolverProcessor::setRebuildDebounceMs(int ms)
     }
 }
 
-int ConvolverProcessor::getRebuildDebounceMs() const
+[[nodiscard]] int ConvolverProcessor::getRebuildDebounceMs() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     return snapshot.rebuildDebounceMs;
@@ -955,7 +960,7 @@ void ConvolverProcessor::setTailMode(TailMode mode)
         postCoalescedChangeNotification();
 }
 
-ConvolverProcessor::TailMode ConvolverProcessor::getTailMode() const
+[[nodiscard]] ConvolverProcessor::TailMode ConvolverProcessor::getTailMode() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     const int mode = snapshot.tailMode;
@@ -978,7 +983,7 @@ void ConvolverProcessor::setTailStartSec(float sec)
         postCoalescedChangeNotification();
 }
 
-float ConvolverProcessor::getTailStartSec() const
+[[nodiscard]] float ConvolverProcessor::getTailStartSec() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     return snapshot.tailStartSec;
@@ -998,7 +1003,7 @@ void ConvolverProcessor::setTailStrength(float strength)
         postCoalescedChangeNotification();
 }
 
-float ConvolverProcessor::getTailStrength() const
+[[nodiscard]] float ConvolverProcessor::getTailStrength() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     return snapshot.tailStrength;
@@ -1018,7 +1023,7 @@ void ConvolverProcessor::setTailL1L2Multiplier(int multiplier)
         postCoalescedChangeNotification();
 }
 
-int ConvolverProcessor::getTailL1L2Multiplier() const
+[[nodiscard]] int ConvolverProcessor::getTailL1L2Multiplier() const
 {
     const BuildSnapshot snapshot = captureBuildSnapshot();
     return snapshot.tailL1L2Multiplier;

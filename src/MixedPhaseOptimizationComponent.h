@@ -24,6 +24,7 @@ private:
     void timerCallback() override;
 
     ConvolverProcessor& processor;
+    int lastObservedState_ = -1;
 
     juce::Label statusLabel;
     juce::Label infoLabel;

@@ -3,12 +3,21 @@
   "epochMode": "shared",
   "rollbackMode": "shared",
   "rollbackReady": true,
-  "totalTransitions": 36,
+  "rollbackFlags": {
+    "global": true,
+    "publicationOnly": false,
+    "crossfadeOnly": false,
+    "retirePathOnly": true
+  },
+  "totalTransitions": 8,
   "laneCounters": {
-    "rtIntent": 9,
-    "coordination": 9,
-    "epoch": 9,
-    "reclaim": 9,
+    "rtIntent": 2,
+    "coordination": 2,
+    "epoch": 2,
+    "reclaim": 2,
     "quarantine": 0
-  }
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":142260715978900}
+  },
+  "provenance": "runtime",
+  "runId": "local-126e7ddbb39949dbbd734ba464277318",
+  "generatedAtNs": 1779894590328000000
+}

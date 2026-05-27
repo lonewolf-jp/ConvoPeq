@@ -63,7 +63,7 @@ CrossfadeId DSPHandleRuntime::beginCrossfade(DSPHandle from, DSPHandle to)
 
     const auto id = convo::fetchAddAtomic(nextCrossfadeId_, 1u, std::memory_order_acq_rel);
     crossfadeRecords_.push_back(CrossfadeRecord{ id, from, to, 0u, true });
-    convo::publishAtomic(fadingDSP_, from, std::memory_order_release);
+    convo::publishAtomic(fadingRuntimeDSPHandle_, from, std::memory_order_release);
     return id;
 }
 
@@ -74,8 +74,8 @@ void DSPHandleRuntime::activate(DSPHandle handle)
     }
 
     convo::publishAtomic(registry_[handle.slot].state, DSPState::Active, std::memory_order_release);
-    convo::publishAtomic(activeDSP_, handle, std::memory_order_release);
-    convo::publishAtomic(fadingDSP_, DSPHandle::null(), std::memory_order_release);
+    convo::publishAtomic(activeRuntimeDSPHandle_, handle, std::memory_order_release);
+    convo::publishAtomic(fadingRuntimeDSPHandle_, DSPHandle::null(), std::memory_order_release);
 }
 
 void DSPHandleRuntime::endCrossfade(CrossfadeId id)
@@ -88,8 +88,8 @@ void DSPHandleRuntime::endCrossfade(CrossfadeId id)
         record.active = false;
         convo::publishAtomic(registry_[record.fromHandle.slot].state, DSPState::Retired, std::memory_order_release);
         convo::publishAtomic(registry_[record.toHandle.slot].state, DSPState::Active, std::memory_order_release);
-        convo::publishAtomic(activeDSP_, record.toHandle, std::memory_order_release);
-        convo::publishAtomic(fadingDSP_, DSPHandle::null(), std::memory_order_release);
+        convo::publishAtomic(activeRuntimeDSPHandle_, record.toHandle, std::memory_order_release);
+        convo::publishAtomic(fadingRuntimeDSPHandle_, DSPHandle::null(), std::memory_order_release);
         break;
     }
 }
@@ -116,14 +116,14 @@ void DSPHandleRuntime::quarantine(DSPHandle handle)
     }
 }
 
-DSPHandle DSPHandleRuntime::getActiveDSP() const noexcept
+DSPHandle DSPHandleRuntime::getActiveRuntimeDSPHandle() const noexcept
 {
-    return convo::consumeAtomic(activeDSP_, std::memory_order_acquire);
+    return convo::consumeAtomic(activeRuntimeDSPHandle_, std::memory_order_acquire);
 }
 
-DSPHandle DSPHandleRuntime::getFadingDSP() const noexcept
+DSPHandle DSPHandleRuntime::getFadingRuntimeDSPHandle() const noexcept
 {
-    return convo::consumeAtomic(fadingDSP_, std::memory_order_acquire);
+    return convo::consumeAtomic(fadingRuntimeDSPHandle_, std::memory_order_acquire);
 }
 
 void DSPHandleRuntime::emitOwnershipTrace(const std::filesystem::path& outputPath) const

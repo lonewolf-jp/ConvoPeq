@@ -3,8 +3,6 @@
 
 namespace
 {
-    std::atomic<std::uint64_t> g_dspRuntimeUuidCounter { 1 };
-
     static constexpr std::array<double, convo::FixedNoiseShaper::ORDER> kFixedNoiseShaperTunedCoeffs
     {
         0.46, 0.28, 0.17, 0.09
@@ -21,10 +19,22 @@ namespace
     };
 }
 
+std::atomic<std::uint64_t> AudioEngine::DSPCore::runtimeUuidCounterStorage_{ 1 };
+
+std::atomic<std::uint64_t>& AudioEngine::DSPCore::runtimeUuidCounter() noexcept
+{
+    return runtimeUuidCounterStorage_;
+}
+
+[[nodiscard]] std::uint64_t AudioEngine::DSPCore::reserveNextRuntimeUuid() noexcept
+{
+    return convo::fetchAddAtomic(runtimeUuidCounter(),
+                                 static_cast<std::uint64_t>(1),
+                                 std::memory_order_acq_rel);
+}
+
 AudioEngine::DSPCore::DSPCore()
-    : runtimeUuid(convo::fetchAddAtomic(g_dspRuntimeUuidCounter,
-                                        static_cast<std::uint64_t>(1),
-                                        std::memory_order_acq_rel))
+    : runtimeUuid(reserveNextRuntimeUuid())
     , dcBlockerState(new DCBlockerRuntimeState())
     , convolverState(new ConvolverRuntimeState())
     , eqState(new EQRuntimeState())
@@ -43,7 +53,6 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     // - ここでの確保は RAII で commit 前に完了させ、Audio Thread へは完成状態のみ publish する。
     this->sampleRate = newSampleRate;
     this->noiseShaperType = selectedNoiseShaperType;
-    this->ownerEngine = owner;
 
     int targetFactor = 1;
     if (manualOversamplingFactor > 0)
@@ -141,7 +150,7 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
 
     // プロセッサの準備
     // Convolverには実際のブロックサイズを渡す (パーティションサイズ決定やLoaderThreadで使用)
-    convolverState->prepare(ownerEngine, processingRate, processingBlockSize);
+    convolverState->prepare(owner, processingRate, processingBlockSize);
 
     // EQも内部最大サイズで準備（より安全）
     eqState->prepare(processingRate, internalMaxBlock);

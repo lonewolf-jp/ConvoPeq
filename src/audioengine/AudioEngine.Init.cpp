@@ -2,7 +2,7 @@
 #include "AudioEngine.h"
 
 namespace {
-static void diagLog(const juce::String& message)
+void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
@@ -17,12 +17,10 @@ void AudioEngine::initialize()
     convo::publishAtomic(firstIrDryCrossfadeDone, false, std::memory_order_release); // release: process の acquire と HB
     convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release); // release: process の acquire と HB
     convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release); // release: process の acquire と HB
-    convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release); // release: process の acquire と HB
-    convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release); // release: process の acquire と HB
+    publishLatencyDelayAtomics(0, 0);
     convo::publishAtomic(latencyResetPending, false, std::memory_order_release); // release: process の acquire と HB
     convo::publishAtomic(queuedFadeTimeSec, 0.03, std::memory_order_release); // release: process の acquire と HB
-    latencyDelayOld_RT = 0;
-    latencyDelayNew_RT = 0;
+    resetLatencyDelayRtState();
     dspCrossfadeStartDelayBlocks_RT = 0;
     dspCrossfadeArmed_RT = false;
 
@@ -128,8 +126,8 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
         key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentConvInputTrimDb, std::memory_order_acquire))); // acquire: setConvolverInputTrimDb の publishAtomic release と HB
         key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentSaturationAmount, std::memory_order_acquire))); // acquire: setSaturationAmount の publishAtomic release と HB
 
-        const bool hasLastKey = convo::consumeAtomic(hasLastEnqueuedSnapshotDebounceKey_, std::memory_order_acquire); // acquire: publishAtomic release と HB
-        const uint64_t lastKey = convo::consumeAtomic(lastEnqueuedSnapshotDebounceKey_, std::memory_order_acquire); // acquire: publishAtomic release と HB
+        const bool hasLastKey = convo::consumeAtomic(rtAuxMutable_.hasLastEnqueuedSnapshotDebounceKey, std::memory_order_acquire); // acquire: publishAtomic release と HB
+        const uint64_t lastKey = convo::consumeAtomic(rtAuxMutable_.lastEnqueuedSnapshotDebounceKey, std::memory_order_acquire); // acquire: publishAtomic release と HB
         if (hasLastKey && lastKey == key)
         {
             diagLog("[VERIFY] enqueue snapshot debounced: identical snapshot intent");
@@ -162,8 +160,8 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
             return false;
         }
 
-        convo::publishAtomic(lastEnqueuedSnapshotDebounceKey_, key, std::memory_order_release); // release: consume 次回 acquire と HB
-        convo::publishAtomic(hasLastEnqueuedSnapshotDebounceKey_, true, std::memory_order_release); // release: consume 次回 acquire と HB
+        convo::publishAtomic(rtAuxMutable_.lastEnqueuedSnapshotDebounceKey, key, std::memory_order_release); // release: consume 次回 acquire と HB
+        convo::publishAtomic(rtAuxMutable_.hasLastEnqueuedSnapshotDebounceKey, true, std::memory_order_release); // release: consume 次回 acquire と HB
         emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
                      intentId,
                      RebuildTelemetryReason::SnapshotCommandQueued,
@@ -216,8 +214,13 @@ void AudioEngine::onSnapshotRequired(void* userData, uint64_t generation)
 
 void AudioEngine::debugAssertNotAudioThread() const
 {
-    // Worker Thread 専用チェック。
-    // Message Thread ではないことに加えて Audio Thread でもないことを確認する。
-    jassert(!juce::MessageManager::getInstance()->isThisTheMessageThread());
+    // Control path 共通チェック。
+    // Message Thread / Worker Thread は許可し、Audio Thread のみ禁止する。
     jassert(!convo::numeric_policy::isAudioThread());
+}
+
+void AudioEngine::debugAssertAudioThread() const
+{
+    // Audio Thread 専用チェック。
+    jassert(convo::numeric_policy::isAudioThread());
 }

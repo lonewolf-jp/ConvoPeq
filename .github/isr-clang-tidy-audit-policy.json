@@ -1,0 +1,11 @@
+{
+    "schema": "clang_tidy_audit_policy_v1",
+    "mode": "monitor",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-CLANGTIDY-002",
+    "rationale": "Govern clang-tidy audit enforce timing without hard-coding script behavior",
+    "expiry": "2026-09-30",
+    "enforceTiers": [
+        "exhaustive"
+    ]
+}

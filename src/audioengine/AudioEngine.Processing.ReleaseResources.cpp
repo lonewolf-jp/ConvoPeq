@@ -2,10 +2,12 @@
 #include "AudioEngine.h"
 #include "NoiseShaperLearner.h"
 
-static void diagLog(const juce::String& message)
+namespace {
+void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
+}
 }
 
 void AudioEngine::releaseResources()
@@ -82,20 +84,22 @@ void AudioEngine::releaseResources()
 
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
+        const auto runtimeReadView = readControlRuntimeView();
+        const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
         validateDistinctRuntimeSlots("releaseResources.beforeClear",
-                         activeDSP,
-                         resolveFadingDSPFromRuntimeWorldOnly(getRuntimePublishView().graph),
+                 getActiveRuntimeDSP(),
+                         resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
                          nullptr);
 
         convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel);
         {
-            auto* const activeRaw = activeDSP.get();
+            auto* const activeRaw = getActiveRuntimeDSP();
             activeToRelease = (reinterpret_cast<uintptr_t>(activeRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : activeRaw;
         }
-        activeDSP = nullptr;
+        setActiveRuntimeDSP(nullptr);
 
         {
-            auto* const fadingRaw = exchangeFadingOutDSP(nullptr);
+            auto* const fadingRaw = exchangeFadingRuntimeDSP(nullptr);
             fadingToRelease = (reinterpret_cast<uintptr_t>(fadingRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : fadingRaw;
         }
         convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
@@ -113,7 +117,7 @@ void AudioEngine::releaseResources()
         convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
         dspCrossfadeGain.setCurrentAndTargetValue(1.0);
         refreshCrossfadePreparedSnapshotFromAtomics();
-        RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+        makeRuntimePublicationCoordinator()
             .publishState(nullptr,
                           nullptr,
                           convo::TransitionPolicy::HardReset,
@@ -121,8 +125,8 @@ void AudioEngine::releaseResources()
                           false);
 
         validateDistinctRuntimeSlots("releaseResources.afterClear",
-                         activeDSP,
-                         resolveFadingDSPFromRuntimeWorldOnly(getRuntimePublishView().graph),
+                 getActiveRuntimeDSP(),
+                         resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
                          nullptr);
     }
 
@@ -155,8 +159,8 @@ void AudioEngine::releaseResources()
     drainDeferredRetireQueues(true);
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ReclaimComplete);
 
-    const auto activeHandle = dspHandleRuntime_.getActiveDSP();
-    const auto fadingHandle = dspHandleRuntime_.getFadingDSP();
+    const auto activeHandle = dspHandleRuntime_.getActiveRuntimeDSPHandle();
+    const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
     if (!activeHandle.isNull())
     {
         dspHandleRuntime_.retire(activeHandle);
@@ -182,7 +186,7 @@ void AudioEngine::releaseResources()
 
     diagLog("[DIAG] releaseResources: skip deferred reclaim (reconfigure phase)");
 
-    RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+    makeRuntimePublicationCoordinator()
         .clearPublishedRuntimeSnapshotsNonRt();
 
     const auto pendingRetireCount = [&]() noexcept -> uint32_t
@@ -198,7 +202,7 @@ void AudioEngine::releaseResources()
 
     const auto activeCrossfadeCount = consumeAtomic(activeCrossfadeId_, std::memory_order_acquire) != static_cast<convo::isr::CrossfadeId>(0u) ? 1u : 0u;
     shutdownRuntime_.setBoundedTeardownCounters(
-        convo::consumeAtomic(audioCallbackActiveCount_, std::memory_order_acquire),
+        convo::consumeAtomic(rtLocalState_.audioCallbackActiveCount, std::memory_order_acquire),
         activeCrossfadeCount,
         pendingRetireCount,
         activeEpochObserverCount());

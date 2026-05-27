@@ -32,12 +32,12 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             , firewallToken(owner.rtCapabilityFirewall_.enter())
         {
             convo::isr::RTAllocatorFirewall::markRTContext(true);
-            (void)convo::fetchAddAtomic(engine.audioCallbackActiveCount_, uint32_t{1}, std::memory_order_acq_rel);
+            (void)convo::fetchAddAtomic(engine.rtLocalState_.audioCallbackActiveCount, uint32_t{1}, std::memory_order_acq_rel);
         }
 
         ~AudioCallbackRuntimeScope() noexcept
         {
-            (void)convo::fetchSubAtomic(engine.audioCallbackActiveCount_, uint32_t{1}, std::memory_order_acq_rel);
+            (void)convo::fetchSubAtomic(engine.rtLocalState_.audioCallbackActiveCount, uint32_t{1}, std::memory_order_acq_rel);
             convo::isr::RTAllocatorFirewall::markRTContext(false);
             engine.rtCapabilityFirewall_.leave(firewallToken);
             engine.lifecycleRuntime_.leaveAudioCallback(lifecycleToken);
@@ -109,9 +109,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // Epoch tracking for lock-free Audio Thread safety
     convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
 
-    // P0-2: 読取入口を RuntimeExecutionView へ収束。
-    const auto runtimeExecutionView = getRuntimeExecutionViewForAudioThread();
-    const auto* runtimeGraph = runtimeExecutionView.graph;
+    // P0-2: 読取入口を RuntimeReadView へ収束。
+    const auto runtimeReadView = readAudioRuntimeView();
+    const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
 
     const auto packHandle = [](convo::isr::DSPHandle handle) noexcept -> std::uint64_t
     {
@@ -119,12 +119,12 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             | static_cast<std::uint64_t>(handle.slot);
     };
 
-    const auto activeHandle = dspHandleRuntime_.getActiveDSP();
-    const auto fadingHandle = dspHandleRuntime_.getFadingDSP();
+    const auto activeHandle = dspHandleRuntime_.getActiveRuntimeDSPHandle();
+    const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
     const auto resolvedActive = dspHandleRuntime_.resolve(activeHandle);
     const auto resolvedFading = dspHandleRuntime_.resolve(fadingHandle);
-    const auto callbackEpoch = convo::fetchAddAtomic(audioCallbackEpochCounter_, uint64_t{1}, std::memory_order_acq_rel) + 1u;
-    const auto sampleCursor = convo::fetchAddAtomic(audioSampleCursorCounter_, static_cast<uint64_t>(numSamples), std::memory_order_acq_rel);
+    const auto callbackEpoch = convo::fetchAddAtomic(rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
+    const auto sampleCursor = convo::fetchAddAtomic(rtLocalState_.audioSampleCursorCounter, static_cast<uint64_t>(numSamples), std::memory_order_acq_rel);
     const auto graphRevision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
 
     const auto rtFrame = convo::isr::makeRTExecutionFrame(
@@ -179,7 +179,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
         // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
         // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
-        const convo::GlobalSnapshot* snap = runtimeExecutionView.snapshot;
+        const convo::GlobalSnapshot* snap = getRuntimeSnapshot(runtimeReadView);
         if (snap == nullptr)
         {
             bufferToFill.clearActiveBufferRegion();
@@ -231,7 +231,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
         DSPCore* fading = resolvedFading.valid
             ? static_cast<DSPCore*>(resolvedFading.instance)
-            : resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
+            : resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
         bool useDryAsOld = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeUseDryAsOld : false;
         const bool hasPendingCrossfade = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadePending : false;
         if (processCrossfadeDelayGateIfPending(fading,

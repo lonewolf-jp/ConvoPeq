@@ -178,6 +178,8 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/RuntimeBuilder.h
     src/audioengine/RuntimeBuilder.cpp
     src/audioengine/AudioEngineProcessor.cpp
+    src/PsychoacousticDither.cpp
+    src/MKLRealTimeSetup.cpp
     # Convolver split implementation (v1)
     src/convolver/ConvolverProcessor.Internal.h
     src/convolver/ConvolverProcessor.Lifecycle.cpp
@@ -188,6 +190,7 @@ target_sources(ConvoPeq PRIVATE
     src/convolver/ConvolverProcessor.LoadPipeline.cpp
     src/convolver/ConvolverProcessor.Runtime.cpp
     src/convolver/ConvolverProcessor.StateAndUI.cpp
+    src/ConvolverState.cpp
     # Legacy monolithic (kept for backward compat, functions guarded by #if)
     src/MKLNonUniformConvolver.cpp
     src/eqprocessor/EQProcessor.Core.cpp

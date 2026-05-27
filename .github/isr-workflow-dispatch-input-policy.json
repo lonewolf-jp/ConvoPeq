@@ -1,0 +1,82 @@
+{
+    "schema": "isr_workflow_dispatch_input_policy_v1",
+    "owner": "@lonewolf-jp",
+    "issue": "bridge-runtime-workflow-dispatch-input-contract",
+    "rationale": "Fail-closed contract for non-8.1 workflow_dispatch inputs in ISR verification workflow.",
+    "expiry": "2027-12-31",
+    "inputContract": {
+        "inputs": [
+            {
+                "name": "requireRuntimeEvidence",
+                "type": "boolean",
+                "required": false,
+                "default": "false",
+                "descriptionMustContain": "Require runtime-generated evidence"
+            },
+            {
+                "name": "verificationTier",
+                "type": "choice",
+                "required": false,
+                "default": "standard",
+                "descriptionMustContain": "Verification tier",
+                "options": [
+                    "smoke",
+                    "standard",
+                    "exhaustive"
+                ]
+            },
+            {
+                "name": "enforceTriggerPolicy",
+                "type": "boolean",
+                "required": false,
+                "default": "false",
+                "descriptionMustContain": "Enforce trigger policy targets"
+            },
+            {
+                "name": "requireAstTriggerCheck",
+                "type": "boolean",
+                "required": false,
+                "default": "false",
+                "descriptionMustContain": "Require AST trigger checks"
+            },
+            {
+                "name": "requireClangTidyAudit",
+                "type": "boolean",
+                "required": false,
+                "default": "false",
+                "descriptionMustContain": "Require clang-tidy audit gate"
+            },
+            {
+                "name": "autoPruneCleanupDeferred",
+                "type": "boolean",
+                "required": false,
+                "default": "false",
+                "descriptionMustContain": "Auto-prune ready deferred cleanup entries"
+            }
+        ]
+    },
+    "forwardingContract": {
+        "switches": [
+            {
+                "inputName": "requireRuntimeEvidence",
+                "runnerSwitch": "-RequireRuntimeEvidence"
+            },
+            {
+                "inputName": "enforceTriggerPolicy",
+                "runnerSwitch": "-EnforceTriggerPolicy"
+            },
+            {
+                "inputName": "requireAstTriggerCheck",
+                "runnerSwitch": "-RequireAstTriggerCheck"
+            },
+            {
+                "inputName": "requireClangTidyAudit",
+                "runnerSwitch": "-RequireClangTidyAudit"
+            },
+            {
+                "inputName": "autoPruneCleanupDeferred",
+                "runnerSwitch": "-AutoPruneCleanupDeferred"
+            }
+        ]
+    }
+}

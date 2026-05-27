@@ -134,13 +134,12 @@ ConvolverProcessor::~ConvolverProcessor()
 // ────────────────────────────────────────────────────────────────
 void ConvolverProcessor::timerCallback()
 {
-    static int lastReportedClampCount = 0;
-    const int currentClampCount = convo::consumeAtomic(g_totalLatencyClampCount, std::memory_order_acquire); // acquire: Runtime 側 fetchAddAtomic acq_rel と HB
-    if (currentClampCount != lastReportedClampCount)
+    const int currentClampCount = convo::consumeAtomic(latencyClampCounter(), std::memory_order_acquire); // acquire: Runtime 側 fetchAddAtomic acq_rel と HB
+    if (currentClampCount != lastReportedClampCount_)
     {
         juce::Logger::writeToLog("ConvolverProcessor: Latency clamp triggered (total: "
                                  + juce::String(currentClampCount) + " times)");
-        lastReportedClampCount = currentClampCount;
+        lastReportedClampCount_ = currentClampCount;
     }
 
     // ★ リングバッファオーバーフローによるリビルド要求を処理 (Audio Thread からは呼ばれない)

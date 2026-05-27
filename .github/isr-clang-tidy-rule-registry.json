@@ -1,0 +1,16 @@
+{
+    "schema": "clang_tidy_rule_registry_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-CLANGTIDY-001",
+    "rationale": "Phase2-2 enforcement migration requires reproducible clang-tidy readiness and minimum check coverage",
+    "expiry": "2026-08-31",
+    "requiredChecks": [
+        "bugprone-use-after-move",
+        "bugprone-branch-clone",
+        "clang-analyzer-core.CallAndMessage",
+        "clang-analyzer-core.NullDereference",
+        "clang-analyzer-cplusplus.NewDelete",
+        "clang-analyzer-cplusplus.NewDeleteLeaks",
+        "clang-analyzer-unix.Malloc"
+    ]
+}

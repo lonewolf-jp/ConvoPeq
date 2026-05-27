@@ -4,7 +4,7 @@
 #include "RuntimeBuilder.h"
 
 namespace {
-static void diagLog(const juce::String& message)
+void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
@@ -18,7 +18,7 @@ struct BuildParameterSnapshot
     AudioEngine::NoiseShaperType noiseShaperType = AudioEngine::NoiseShaperType::Psychoacoustic;
 };
 
-static BuildParameterSnapshot captureBuildParameterSnapshot(const AudioEngine& engine) noexcept
+BuildParameterSnapshot captureBuildParameterSnapshot(const AudioEngine& engine) noexcept
 {
     BuildParameterSnapshot snapshot {};
     snapshot.ditherDepth = convo::consumeAtomic(engine.ditherBitDepth, std::memory_order_acquire);
@@ -28,8 +28,8 @@ static BuildParameterSnapshot captureBuildParameterSnapshot(const AudioEngine& e
     return snapshot;
 }
 
-static bool equalsBuildParameterSnapshot(const BuildParameterSnapshot& lhs,
-                                         const BuildParameterSnapshot& rhs) noexcept
+bool equalsBuildParameterSnapshot(const BuildParameterSnapshot& lhs,
+                                  const BuildParameterSnapshot& rhs) noexcept
 {
     return lhs.ditherDepth == rhs.ditherDepth
         && lhs.oversamplingFactor == rhs.oversamplingFactor
@@ -37,7 +37,7 @@ static bool equalsBuildParameterSnapshot(const BuildParameterSnapshot& lhs,
         && lhs.noiseShaperType == rhs.noiseShaperType;
 }
 
-static bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
+bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
 {
     return dsp.convolverRt().isLoadingIR();
 }
@@ -77,7 +77,7 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
 
     if (collapsePolicy == RebuildTelemetryPolicy::Replaceable)
     {
-        // UI burst 吸収専用。MustExecute には適用しない。
+        // UI burst 吸収専用。MustExecute では抑止しない。
         latestWinsWindowMs = (kind == convo::RebuildKind::Structural)
             ? std::max(1, uiConvolverProcessor.getRebuildDebounceMs())
             : 50;
@@ -312,12 +312,13 @@ void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
 //--------------------------------------------------------------
 // requestRebuild - DSPグラフの再構築 (Message Thread)
 //--------------------------------------------------------------
-void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool bypassLegacySuppression)
+void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute)
 {
     constexpr const char* kPhase5TagReduce = "phase5_reduce_target";
     constexpr const char* kPhase5TagKeep = "phase5_keep_target";
 
-    const auto collapsePolicy = bypassLegacySuppression
+    // forceMustExecute=true は、重複抑止より実行優先を選ぶ明示的な回避経路。
+    const auto collapsePolicy = forceMustExecute
         ? RebuildTelemetryPolicy::MustExecute
         : RebuildTelemetryPolicy::Replaceable;
 
@@ -332,7 +333,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool by
                          RebuildTelemetryClass::Structural,
                          collapsePolicy);
 
-    convo::fetchAddAtomic(debugRebuildDispatchRequestCount, 1, std::memory_order_acq_rel);
+    convo::fetchAddAtomic(rtAuxMutable_.debugRebuildDispatchRequestCount, 1, std::memory_order_acq_rel);
 
     // UIコンポーネントへのアクセスを行うため、必ずMessage Threadで実行すること
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
@@ -354,7 +355,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool by
         return;
     }
 
-    // Phase5: 縮退対象（legacy deferred window suppress）は削除済み。
+    // Phase5: 縮退対象（deferred window suppress）は削除済み。
     // DeferredStructural が立っていても、ここでは suppress せず通常の queue 判定へ進める。
 
     const int publishedFftSize = uiConvolverProcessor.getActiveCacheFFTSize();
@@ -390,7 +391,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool by
     // rebuild 開始時のパラメータを凍結し、
     // task 作成・重複判定・runtime command で同一 snapshot を使う。
     const BuildParameterSnapshot paramSnapshot = captureBuildParameterSnapshot(*this);
-    DSPCore* current = activeDSP; // 現在のアクティブDSPをキャプチャ
+    DSPCore* current = getActiveRuntimeDSP(); // 現在のアクティブ runtime DSP をキャプチャ
     int generation = 0;
 
     RebuildTask task;
@@ -407,7 +408,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool by
     DSPCore* currentToRelease = nullptr;
     bool queued = false;
     bool blockedAsDuplicate = false;
-    const bool allowDuplicateSuppression = !bypassLegacySuppression;
+    const bool allowDuplicateSuppression = !forceMustExecute;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
 
@@ -449,14 +450,14 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool by
             pendingTask = task;
             hasPendingTask = true;
             lastQueuedTaskSignature = task;
-            lastQueuedTaskTicks = juce::Time::getHighResolutionTicks();
+            rtAuxMutable_.lastQueuedTaskTicks = juce::Time::getHighResolutionTicks();
             queued = true;
         }
     }
 
     if (queued)
     {
-        convo::fetchAddAtomic(debugRebuildDispatchQueuedCount, 1, std::memory_order_acq_rel);
+        convo::fetchAddAtomic(rtAuxMutable_.debugRebuildDispatchQueuedCount, 1, std::memory_order_acq_rel);
         rebuildCV.notify_all();
         diagLog("[DIAG] requestRebuild(sr,bs): task queued generation=" + juce::String(generation)
             + " SR=" + juce::String(sampleRate, 2));
@@ -477,7 +478,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool by
         // Phase5: PendingDuplicate は維持対象（pending queue の過負荷抑止ガード）。
         // 直近縮退（RecentDuplicate / DeferredStructuralWindow）後も、
         // 同一 pending の無限置換を防ぐため merge 扱いを維持する。
-        convo::fetchAddAtomic(debugRebuildDispatchBlockedPendingDuplicateCount, 1, std::memory_order_acq_rel);
+        convo::fetchAddAtomic(rtAuxMutable_.debugRebuildDispatchBlockedPendingDuplicateCount, 1, std::memory_order_acq_rel);
         diagLog("[DIAG][PHASE5-KEEP] requestRebuild(sr,bs): BLOCKED duplicate pending task SR="
             + juce::String(sampleRate, 2));
         emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
@@ -601,7 +602,7 @@ void AudioEngine::rebuildThreadLoop()
 
             // 2. Reuse Logic
             //
-            // 【task.currentDSP (= 旧 activeDSP) の安全性証明】
+            // 【task.currentDSP (= 旧 active runtime slot) の安全性証明】
             //
             // task.currentDSP は RCU 設計により、退役後も一定期間（Epoch）生存が
             // 保証される。rebuild タスクはこの期間内に完了することを前提としている。

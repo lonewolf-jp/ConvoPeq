@@ -2,7 +2,7 @@
 #include "AudioEngine.h"
 
 namespace {
-static void retireEQCache(AudioEngine& owner, EQCoeffCache* cache)
+void retireEQCache(AudioEngine& owner, EQCoeffCache* cache)
 {
     if (cache == nullptr)
         return;
@@ -17,7 +17,7 @@ AudioEngine::EQCacheManager::EQCacheManager(AudioEngine& ownerIn) noexcept
     convo::publishAtomic(cacheMapPtr, new CacheMap(ownerIn), std::memory_order_release); // release: loadMap acquire と HB
 }
 
-bool AudioEngine::EQCacheManager::tryEnqueueDeferredMap(CacheMap* map) noexcept
+[[nodiscard]] bool AudioEngine::EQCacheManager::tryEnqueueDeferredMap(CacheMap* map) noexcept
 {
     if (map == nullptr)
         return true;
@@ -124,7 +124,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::get(uint64_t hash) noexcept
     return (it != currentMap->map.end()) ? it->second : nullptr;
 }
 
-bool AudioEngine::EQCacheManager::containsNonRt(uint64_t hash) noexcept
+[[nodiscard]] bool AudioEngine::EQCacheManager::containsNonRt(uint64_t hash) noexcept
 {
     std::lock_guard<std::mutex> lock(writeMutex);
     drainDeferredMapsUnderLock();

@@ -68,7 +68,7 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
             return;
         }
 
-        auto runLegacyPath = [&]()
+        auto runRebuildPath = [&]()
         {
             const double processingSampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
             const BuildSnapshot buildSnapshot = captureBuildSnapshot();
@@ -92,7 +92,7 @@ void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCa
             loader.runSynchronously();
         };
 
-        runLegacyPath();
+        runRebuildPath();
     }
 
     if (rebuildJob)
@@ -282,7 +282,7 @@ void ConvolverProcessor::setUseIncrementalRebuild(bool enable) noexcept
         rebuildJob->reset();
 }
 
-bool ConvolverProcessor::isIncrementalRebuildEnabled() const noexcept
+[[nodiscard]] bool ConvolverProcessor::isIncrementalRebuildEnabled() const noexcept
 {
     return convo::consumeAtomic(useIncrementalRebuild, std::memory_order_acquire); // acquire: setUseIncrementalRebuild の publishAtomic release と HB
 }

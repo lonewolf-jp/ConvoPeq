@@ -10,10 +10,10 @@
 
 #include "audioengine/AtomicAccess.h"
 
-juce::ThreadPool ConvolverControlPanel::irPreviewThreadPool(1);
-
 namespace
 {
+juce::ThreadPool g_irPreviewThreadPool(1);
+
 int phaseModeToComboId(ConvolverProcessor::PhaseMode mode)
 {
     switch (mode)
@@ -1124,7 +1124,7 @@ void ConvolverControlPanel::startAsyncIRLoadPreview(const juce::File& irFile)
     setIRPreviewInProgress(true);
 
     juce::Component::SafePointer<ConvolverControlPanel> safeThis(this);
-    irPreviewThreadPool.addJob([safeThis, irFile, requestId, analysisSampleRate]()
+    g_irPreviewThreadPool.addJob([safeThis, irFile, requestId, analysisSampleRate]()
     {
         const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(irFile, analysisSampleRate);
 

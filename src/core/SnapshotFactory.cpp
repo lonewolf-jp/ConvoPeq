@@ -15,19 +15,25 @@
 
 namespace convo {
 
-namespace {
 #ifdef _DEBUG
-    std::atomic<int> g_liveSnapshotCount{0};
+std::atomic<int> SnapshotFactory::debugLiveSnapshotCountStorage_{0};
+
+std::atomic<int>& SnapshotFactory::debugLiveSnapshotCount() noexcept
+{
+    return debugLiveSnapshotCountStorage_;
+}
 #endif
 
+namespace {
+
     // ハッシュ結合ユーティリティ
-    static inline uint64_t hashCombine(uint64_t seed, uint64_t value) noexcept
+    inline uint64_t hashCombine(uint64_t seed, uint64_t value) noexcept
     {
         seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
         return seed;
     }
 
-    static inline uint64_t hashCombineFloat(uint64_t seed, float value) noexcept
+    inline uint64_t hashCombineFloat(uint64_t seed, float value) noexcept
     {
         uint32_t bits = 0;
         std::memcpy(&bits, &value, sizeof(float));
@@ -151,7 +157,7 @@ GlobalSnapshot* SnapshotFactory::create(const SnapshotParams& params)
     // contentHash は GlobalSnapshot コンストラクタで設定済み
 
 #ifdef _DEBUG
-    convo::fetchAddAtomic(g_liveSnapshotCount, 1, std::memory_order_acq_rel);
+    convo::fetchAddAtomic(SnapshotFactory::debugLiveSnapshotCount(), 1, std::memory_order_acq_rel);
 #endif
 
     return snap;
@@ -162,7 +168,7 @@ void SnapshotFactory::destroy(GlobalSnapshot* snap) noexcept
     if (!snap) return;
 
 #ifdef _DEBUG
-    convo::fetchSubAtomic(g_liveSnapshotCount, 1, std::memory_order_acq_rel);
+    convo::fetchSubAtomic(SnapshotFactory::debugLiveSnapshotCount(), 1, std::memory_order_acq_rel);
 #endif
 
     std::unique_ptr<GlobalSnapshot> owned{snap}; // RAII delete

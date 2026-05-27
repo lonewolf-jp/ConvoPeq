@@ -198,6 +198,7 @@ R10 固定ルール:
 
 - scenario 別 KPI 集計表
 - shared vs split 比較表（latency/jitter/reclaim burst）
+- split migration runbook
 - 受入判定（Pass/Fail）
 - Fail 時の fallback 適用記録
 - 次フェーズ（Phase B/C）への Go/No-Go 判定
@@ -217,3 +218,5 @@ Go/No-Go 判定規則（R10）:
 - `doc/work/ISR_Retire_Authority_Graph.md`
 - `doc/work/ISR_Runtime_State_Matrix.md`
 - `doc/work/ISR_DSPHandle_Allocator_Policy.md`
+- `doc/work/ISR_Shared_EpochDomain_SplitMigration_Runbook_2026-05-27.md`
+- `doc/work/ISR_Shared_EpochDomain_Shared_vs_Split_Comparison_2026-05-27.md`

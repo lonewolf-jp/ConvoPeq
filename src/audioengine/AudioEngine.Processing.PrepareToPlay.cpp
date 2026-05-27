@@ -1,10 +1,12 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 
-static void diagLog(const juce::String& message)
+namespace {
+void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
+}
 }
 
 void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
@@ -107,18 +109,18 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
     convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
     convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
+    const auto runtimeReadView = readControlRuntimeView();
+    const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
     {
-        const auto* runtimeWorld = runtimeStore.observe();
-        const auto* runtimeGraph = (runtimeWorld != nullptr) ? &runtimeWorld->graph : nullptr;
         auto* currentForPublish = (runtimeGraph != nullptr)
             ? static_cast<DSPCore*>(runtimeGraph->activeNode)
             : nullptr;
-        auto* fadingForPublish = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
+        auto* fadingForPublish = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
         const bool hasAnyRuntime = (currentForPublish != nullptr) || (fadingForPublish != nullptr);
         if (hasAnyRuntime)
         {
-            const auto ts = runtimeWorld != nullptr ? runtimeWorld->engine.transition : convo::TransitionState{};
-            RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+            const auto ts = runtimeReadView.runtimePublish.transition;
+            makeRuntimePublicationCoordinator()
                 .publishState(currentForPublish,
                               fadingForPublish,
                               ts.policy,
@@ -176,19 +178,16 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     std::memset(latencyBufNewR, 0, sizeof(double) * latencyBufSize);
 
     latencyWritePos = 0;
-    convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release);
-    convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release);
+    publishLatencyDelayAtomics(0, 0);
     convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
     refreshCrossfadePreparedSnapshotFromAtomics();
 
-    latencyDelayOld_RT = 0;
-    latencyDelayNew_RT = 0;
+    resetLatencyDelayRtState();
 
     // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
-    const auto runtimePublishView = getRuntimePublishView();
-    const bool hasPublishedCurrent = (runtimePublishView.graph != nullptr)
-        && (static_cast<DSPCore*>(runtimePublishView.graph->activeNode) != nullptr);
-    if (!hasPublishedCurrent && activeDSP == nullptr)
+    const bool hasPublishedCurrent = (runtimeGraph != nullptr)
+        && (static_cast<DSPCore*>(runtimeGraph->activeNode) != nullptr);
+    if (!hasPublishedCurrent && !hasActiveRuntimeDSP())
     {
         convo::aligned_unique_ptr<DSPCore> placeholderDSP;
         try
@@ -214,11 +213,11 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             return;
         }
 
-        activeDSP = placeholderDSP.release();
+        setActiveRuntimeDSP(placeholderDSP.release());
         convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
         convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
-        RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
-            .publishState(activeDSP,
+        makeRuntimePublicationCoordinator()
+            .publishState(getActiveRuntimeDSP(),
                           nullptr,
                           convo::TransitionPolicy::HardReset,
                           0.0,
@@ -229,8 +228,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
     if (rateChanged)
         uiConvolverProcessor.invalidatePendingLoads();
-    const bool hasCurrentRuntime = (runtimePublishView.graph != nullptr)
-        && (static_cast<DSPCore*>(runtimePublishView.graph->activeNode) != nullptr);
+    const bool hasCurrentRuntime = (runtimeGraph != nullptr)
+        && (static_cast<DSPCore*>(runtimeGraph->activeNode) != nullptr);
     if (rateChanged || blockSizeChanged || !hasCurrentRuntime) {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             requestRebuild(safeSampleRate, bufferSize);

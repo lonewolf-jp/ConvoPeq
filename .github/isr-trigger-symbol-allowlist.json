@@ -1,0 +1,113 @@
+{
+    "schema": "trigger_symbol_allowlist_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-SYMBOL-GOV-001",
+    "rationale": "enforce top-level lifecycle governance for symbol allowlist policy",
+    "expiry": "2026-09-30",
+    "rules": [
+        {
+            "symbol": "activeDSP",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-011",
+            "rationale": "symbol-level zero-regression guardrail for legacy activeDSP token without any allowlisted path",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "runtimePublicationCoordinator_",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-012",
+            "rationale": "symbol-level zero-regression guardrail for legacy runtimePublicationCoordinator_ token without any allowlisted path",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "RuntimePublicationCoordinator::create",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-010",
+            "rationale": "symbol-level zero-regression guardrail for RuntimePublicationCoordinator::create without any allowlisted path",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "RuntimeExecutionView",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-013",
+            "rationale": "symbol-level zero-regression guardrail for legacy RuntimeExecutionView naming without any allowlisted path",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "getActiveDSP",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-014",
+            "rationale": "symbol-level zero-regression guardrail for retired DSPHandleRuntime accessor name",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "resolveActiveDSPFromRuntimeWorldOnly",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-015",
+            "rationale": "symbol-level zero-regression guardrail for retired active runtime resolver name",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "resolveFadingDSPFromRuntimeWorldOnly",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-016",
+            "rationale": "symbol-level zero-regression guardrail for retired fading runtime resolver name",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "exchangeFadingOutDSP",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-017",
+            "rationale": "symbol-level zero-regression guardrail for retired fading slot exchange helper name",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "getFadingDSP",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-018",
+            "rationale": "symbol-level zero-regression guardrail for retired fading DSP handle accessor name",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "fadingDSP_",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-019",
+            "rationale": "symbol-level zero-regression guardrail for retired fading DSP handle storage member name",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "activeDSP_",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-020",
+            "rationale": "symbol-level zero-regression guardrail for retired active DSP handle storage member name",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "getRuntimeExecutionViewForAudioThread",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-021",
+            "rationale": "symbol-level zero-regression guardrail for retired audio runtime execution view accessor",
+            "expiry": "2026-08-31"
+        },
+        {
+            "symbol": "getRuntimeExecutionViewForControlThread",
+            "pathRegex": "^$",
+            "owner": "audioengine-runtime-bridge",
+            "issue": "BRIDGE-SYMBOL-022",
+            "rationale": "symbol-level zero-regression guardrail for retired control runtime execution view accessor",
+            "expiry": "2026-08-31"
+        }
+    ]
+}

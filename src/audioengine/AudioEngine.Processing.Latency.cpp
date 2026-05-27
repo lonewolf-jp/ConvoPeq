@@ -36,7 +36,7 @@ namespace
     }
 }
 
-double AudioEngine::getProcessingSampleRate() const
+[[nodiscard]] double AudioEngine::getProcessingSampleRate() const
 {
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (sr <= 0.0) return 0.0;
@@ -67,22 +67,22 @@ double AudioEngine::getProcessingSampleRate() const
     return sr * static_cast<double>(actualFactor);
 }
 
-int AudioEngine::getCurrentLatencySamples() const
+[[nodiscard]] int AudioEngine::getCurrentLatencySamples() const
 {
     return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
 }
 
-int AudioEngine::getTotalLatencySamples() const
+[[nodiscard]] int AudioEngine::getTotalLatencySamples() const
 {
     return getCurrentLatencyBreakdown().totalLatencyBaseRateSamples;
 }
 
-AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
+[[nodiscard]] AudioEngine::LatencyBreakdown AudioEngine::getCurrentLatencyBreakdown() const
 {
     LatencyBreakdown breakdown;
 
-    const auto runtimePublishView = getRuntimePublishView();
-    const auto* runtimeGraph = runtimePublishView.graph;
+    const auto runtimeReadView = readControlRuntimeView();
+    const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
     auto* dsp = (runtimeGraph != nullptr)
         ? static_cast<DSPCore*>(runtimeGraph->activeNode)
         : nullptr;

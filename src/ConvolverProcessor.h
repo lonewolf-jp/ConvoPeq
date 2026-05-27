@@ -138,7 +138,7 @@ public:
     };
 
     void setResamplingPhaseMode(ResamplingPhaseMode mode);
-    ResamplingPhaseMode getResamplingPhaseMode() const;
+    [[nodiscard]] ResamplingPhaseMode getResamplingPhaseMode() const;
 
     class Listener
     {
@@ -229,7 +229,7 @@ public:
     void loadIR(const juce::File& irFile);
     void applyPreparedIRState(std::unique_ptr<PreparedIRState> prepared);
     // acquire: applyPreparedIRState の release と HB し、IR 適用時刻を取得。
-    int64_t getLastPreparedIRApplyTicks() const noexcept { return convo::consumeAtomic(lastPreparedIRApplyTicks, std::memory_order_acquire); } // acquire: applyPreparedIRState の release と HB
+    [[nodiscard]] int64_t getLastPreparedIRApplyTicks() const noexcept { return convo::consumeAtomic(lastPreparedIRApplyTicks, std::memory_order_acquire); } // acquire: applyPreparedIRState の release と HB
     void stopUpgradeThread();
     void startProgressiveUpgrade(const juce::File& file,
                                  double sampleRate,
@@ -238,13 +238,13 @@ public:
                                  uint64_t baseKey);
 
     void setTargetUpgradeFFTSize(int fftSize);
-    int getTargetUpgradeFFTSize() const;
+    [[nodiscard]] int getTargetUpgradeFFTSize() const;
     void setEnableProgressiveUpgrade(bool enable);
-    bool isProgressiveUpgradeEnabled() const;
+    [[nodiscard]] bool isProgressiveUpgradeEnabled() const;
     void setMaxCacheEntries(size_t maxEntries);
-    size_t getMaxCacheEntries() const;
+    [[nodiscard]] size_t getMaxCacheEntries() const;
     void clearCache();
-    bool isCacheEntrySafeToDelete(uint64_t cacheKey, int fftSize) const;
+    [[nodiscard]] bool isCacheEntrySafeToDelete(uint64_t cacheKey, int fftSize) const;
 
     // メイン処理（Audio Thread）
     //
@@ -255,9 +255,9 @@ public:
     // バイパス制御
     //----------------------------------------------------------
     void setBypass(bool shouldBypass);
-    bool isBypassed() { const juce::ScopedLock lock(pendingOverrideLock); return pendingOverride.bypassed; }
+    [[nodiscard]] bool isBypassed() { const juce::ScopedLock lock(pendingOverrideLock); return pendingOverride.bypassed; }
     // acquire: LoaderThread/executeCommit の publishNewConvolverState release と HB し、有効な state を取得。
-    const convo::ConvolverState* getConvolverState() const { return convo::consumeAtomic(convolverState, std::memory_order_acquire); } // acquire: publishNewConvolverState の release と HB
+    [[nodiscard]] const convo::ConvolverState* getConvolverState() const { return convo::consumeAtomic(convolverState, std::memory_order_acquire); } // acquire: publishNewConvolverState の release と HB
     void enterStateReader(int /*readerIndex*/) const noexcept {}
     void exitStateReader(int /*readerIndex*/) const noexcept {}
 
@@ -268,17 +268,17 @@ public:
     // Dry/Wet Mix (0.0 = Dry only, 1.0 = Wet only)
     //----------------------------------------------------------
     void setMix(float mixAmount);
-    float getMix() const;
+    [[nodiscard]] float getMix() const;
 
     //----------------------------------------------------------
     // IR Phase Mode
     //----------------------------------------------------------
     void setPhaseMode(PhaseMode mode);
-    PhaseMode getPhaseMode() const;
+    [[nodiscard]] PhaseMode getPhaseMode() const;
 
     // 後方互換API
     void setUseMinPhase(bool useMinPhase);
-    bool getUseMinPhase() const { return getPhaseMode() == PhaseMode::Minimum; }
+    [[nodiscard]] bool getUseMinPhase() const { return getPhaseMode() == PhaseMode::Minimum; }
 
     //------------------------------------------------------------------
     // NUC 出力周波数フィルターモード設定
@@ -300,13 +300,13 @@ public:
     // 段階導入用の機能フラグ。変更時はIRを再構築する。
     //----------------------------------------------------------
     void setExperimentalDirectHeadEnabled(bool enabled);
-    bool getExperimentalDirectHeadEnabled() const;
+    [[nodiscard]] bool getExperimentalDirectHeadEnabled() const;
 
     //----------------------------------------------------------
     // Smoothing Time
     //----------------------------------------------------------
     void setSmoothingTime(float timeSec);
-    float getSmoothingTime() const;
+    [[nodiscard]] float getSmoothingTime() const;
 
     //----------------------------------------------------------
     // RT-safe setters (Audio Thread dispatch 専用)
@@ -319,42 +319,42 @@ public:
     // Mixed Phase Parameters (f1/f2/tau)
     //----------------------------------------------------------
     void setMixedTransitionStartHz(float hz);
-    float getMixedTransitionStartHz() const;
+    [[nodiscard]] float getMixedTransitionStartHz() const;
     void setMixedTransitionEndHz(float hz);
-    float getMixedTransitionEndHz() const;
+    [[nodiscard]] float getMixedTransitionEndHz() const;
     void setMixedPreRingTau(float tau);
-    float getMixedPreRingTau() const;
+    [[nodiscard]] float getMixedPreRingTau() const;
 
     //----------------------------------------------------------
     // Rebuild Debounce Time (Message/Worker burst control)
     //----------------------------------------------------------
     void setRebuildDebounceMs(int ms);
-    int getRebuildDebounceMs() const;
+    [[nodiscard]] int getRebuildDebounceMs() const;
 
     //----------------------------------------------------------
     // Tail Parameters
     //----------------------------------------------------------
     void setTailMode(TailMode mode);
-    TailMode getTailMode() const;
+    [[nodiscard]] TailMode getTailMode() const;
     void setTailStartSec(float sec);
-    float getTailStartSec() const;
+    [[nodiscard]] float getTailStartSec() const;
     void setTailStrength(float strength);
-    float getTailStrength() const;
+    [[nodiscard]] float getTailStrength() const;
     void setTailL1L2Multiplier(int multiplier);
-    int getTailL1L2Multiplier() const;
+    [[nodiscard]] int getTailL1L2Multiplier() const;
 
     //----------------------------------------------------------
     // IR Length
     //----------------------------------------------------------
     void setTargetIRLength(float timeSec);
-    float getTargetIRLength() const;
+    [[nodiscard]] float getTargetIRLength() const;
     void applyAutoDetectedIRLength(float timeSec);
     void setIRLengthManualOverride(bool isManual);
-    bool hasManualIRLengthOverride() const;
-    float getAutoDetectedIRLength() const;
-    static float getMaximumAllowedIRLengthSecForSampleRate(double sampleRate);
-    float getMaximumAllowedIRLengthSec(double sampleRate = 0.0) const;
-    static IRLoadPreview analyzeImpulseResponseFile(const juce::File& irFile, double processingSampleRate);
+    [[nodiscard]] bool hasManualIRLengthOverride() const;
+    [[nodiscard]] float getAutoDetectedIRLength() const;
+    [[nodiscard]] static float getMaximumAllowedIRLengthSecForSampleRate(double sampleRate);
+    [[nodiscard]] float getMaximumAllowedIRLengthSec(double sampleRate = 0.0) const;
+    [[nodiscard]] static IRLoadPreview analyzeImpulseResponseFile(const juce::File& irFile, double processingSampleRate);
 
     //----------------------------------------------------------
     // 状態リセット
@@ -364,7 +364,7 @@ public:
     //----------------------------------------------------------
     // 状態取得
     //----------------------------------------------------------
-    bool isIRLoaded() const
+    [[nodiscard]] bool isIRLoaded() const
     {
         // acquire: LoaderThread/executeCommit の release と HB し、state/engine/metadata を取得。
         const bool hasPublishedState = (convo::consumeAtomic(convolverState, std::memory_order_acquire) != nullptr);
@@ -375,22 +375,22 @@ public:
     }
     // acquire: LoaderThread の release と HB し、loading flag を観測。
     // acquire: LoaderThread の release と HB し、ロード中フラグを観測。
-    bool isLoadingIR() const { return convo::consumeAtomic(isLoading, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
+    [[nodiscard]] bool isLoadingIR() const { return convo::consumeAtomic(isLoading, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
     // acquire: LoaderThread の release と HB し、最終化フラグを観測。
-    bool isIRFinalized() const noexcept { return convo::consumeAtomic(irFinalized, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
-    juce::String getIRName() const { return irName; }
+    [[nodiscard]] bool isIRFinalized() const noexcept { return convo::consumeAtomic(irFinalized, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
+    [[nodiscard]] juce::String getIRName() const { return irName; }
     // acquire: LoaderThread/applyPreparedIRState の release と HB し、IR長を取得。
-    int getIRLength() const { return convo::consumeAtomic(irLength, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
-    juce::String getLastError() const { return lastError; }
+    [[nodiscard]] int getIRLength() const { return convo::consumeAtomic(irLength, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
+    [[nodiscard]] juce::String getLastError() const { return lastError; }
     // acquire: setLoadingProgress の release と HB し、ロード進捗値を取得。
-    float getLoadProgress() const { return convo::consumeAtomic(loadProgress, std::memory_order_acquire); } // acquire: setLoadingProgress の release と HB
+    [[nodiscard]] float getLoadProgress() const { return convo::consumeAtomic(loadProgress, std::memory_order_acquire); } // acquire: setLoadingProgress の release と HB
     // acquire: setMixedPhaseState の release と HB し、混合フェーズ状態を取得。
-    int getMixedPhaseState() const noexcept { return convo::consumeAtomic(mixedPhaseState, std::memory_order_acquire); } // acquire: setMixedPhaseState の release と HB
+    [[nodiscard]] int getMixedPhaseState() const noexcept { return convo::consumeAtomic(mixedPhaseState, std::memory_order_acquire); } // acquire: setMixedPhaseState の release と HB
     // release: getMixedPhaseState の acquire と HB し、混合フェーズ状態を公開。
     void setMixedPhaseState(int state) noexcept { convo::publishAtomic(mixedPhaseState, juce::jlimit(0, 2, state), std::memory_order_release); } // release: getMixedPhaseState の acquire と HB
     void setLoadingProgress(float p);
     // acquire: setCurrentBufferSize の release と HB し、有効なバッファサイズを取得。
-    int getCurrentBufferSize() const { return convo::consumeAtomic(currentBufferSize, std::memory_order_acquire); } // acquire: setCurrentBufferSize の release と HB
+    [[nodiscard]] int getCurrentBufferSize() const { return convo::consumeAtomic(currentBufferSize, std::memory_order_acquire); } // acquire: setCurrentBufferSize の release と HB
     struct LatencyBreakdown
     {
         int algorithmLatencySamples = 0;
@@ -407,9 +407,9 @@ public:
         bool hasParallelDryPath = false;
     };
 
-    LatencyBreakdown getLatencyBreakdown() const;
-    int getLatencySamples() const;
-    int getTotalLatencySamples() const;
+    [[nodiscard]] LatencyBreakdown getLatencyBreakdown() const;
+    [[nodiscard]] int getLatencySamples() const;
+    [[nodiscard]] int getTotalLatencySamples() const;
 
     struct RebuildAutomationDiagnostics
     {
@@ -419,7 +419,7 @@ public:
         std::uint64_t triggeredCount = 0;
     };
 
-    RebuildAutomationDiagnostics getRebuildAutomationDiagnostics() const noexcept
+    [[nodiscard]] RebuildAutomationDiagnostics getRebuildAutomationDiagnostics() const noexcept
     {
         // acquire: rebuild automation の各カウント更新（release）と HB し、診断値を取得。
         return {
@@ -433,20 +433,20 @@ public:
     //----------------------------------------------------------
     // 波形表示用データ取得
     //----------------------------------------------------------
-    std::vector<float> getIRWaveform();
+    [[nodiscard]] std::vector<float> getIRWaveform();
 
     //----------------------------------------------------------
     // 周波数特性表示用データ取得
     //----------------------------------------------------------
-    std::vector<float> getIRMagnitudeSpectrum();
-    double getIRSpectrumSampleRate();
+    [[nodiscard]] std::vector<float> getIRMagnitudeSpectrum();
+    [[nodiscard]] double getIRSpectrumSampleRate();
 
     //----------------------------------------------------------
     // State Management
     //----------------------------------------------------------
-    juce::ValueTree getState() const;
+    [[nodiscard]] juce::ValueTree getState() const;
     void setState (const juce::ValueTree& state);
-    BuildSnapshot captureBuildSnapshot() const;
+    [[nodiscard]] BuildSnapshot captureBuildSnapshot() const;
     void applyBuildSnapshot(const BuildSnapshot& snapshot);
 
     //----------------------------------------------------------
@@ -465,20 +465,20 @@ public:
     IncrementalRebuildSliceResult advanceIncrementalRebuild() noexcept;
     void resetIncrementalRebuild() noexcept;
     void setUseIncrementalRebuild(bool enable) noexcept;
-    bool isIncrementalRebuildEnabled() const noexcept;
+    [[nodiscard]] bool isIncrementalRebuildEnabled() const noexcept;
     void invalidatePendingLoads();
 
     // 他のインスタンスから状態を同期 (AudioEngine用)
     void syncStateFrom(const ConvolverProcessor& other);
 
         // 構造的パラメータのハッシュ値を返す（クロスフェード要否判定用）
-        uint64_t getStructuralHash() const noexcept;
+        [[nodiscard]] uint64_t getStructuralHash() const noexcept;
 
         // 構造変更検出用 getter（不足分のみ追加）
-        uint64_t getActiveCacheKey() const noexcept;
-        int getActiveCacheFFTSize() const noexcept;
-        int getNUCHCMode() const noexcept;
-        int getNUCLCMode() const noexcept;
+        [[nodiscard]] uint64_t getActiveCacheKey() const noexcept;
+        [[nodiscard]] int getActiveCacheFFTSize() const noexcept;
+        [[nodiscard]] int getNUCHCMode() const noexcept;
+        [[nodiscard]] int getNUCLCMode() const noexcept;
 
     void shareConvolutionEngineFrom(const ConvolverProcessor& other);
     void refreshLatency();
@@ -504,7 +504,7 @@ public:
 
     // 可視化データ生成の制御 (DSP用インスタンスでは無効化してメモリを節約)
     void setVisualizationEnabled(bool enabled) { visualizationEnabled = enabled; }
-    bool isVisualizationEnabled() const { return visualizationEnabled; }
+    [[nodiscard]] bool isVisualizationEnabled() const { return visualizationEnabled; }
 
     // ガベージコレクション (Message Threadから定期的に呼ぶ)
     void cleanup();
@@ -534,12 +534,15 @@ public:
     void updateConvolverState(convo::ConvolverState* newState);
     void updateConvolverState(std::unique_ptr<convo::ConvolverState> newState);
 
-    bool isConvolverGenerationCurrent(uint64_t generation) const
+    [[nodiscard]] bool isConvolverGenerationCurrent(uint64_t generation) const
     {
         return convolverStateGeneration.isCurrentGeneration(generation);
     }
 
 private:
+    static std::atomic<int> latencyClampCounterStorage_;
+    static std::atomic<int>& latencyClampCounter() noexcept;
+
     struct StereoConvolver;
 #include "convolver/ConvolverProcessor.LoaderThreadInline.h"
 
@@ -753,7 +756,7 @@ private:
 
         // Deep Copyを作成する。
         // 失敗時 (MKLメモリ確保失敗等) は nullptr を返す。呼び出し元で必ずチェックすること。
-        StereoConvolver* clone() const
+        [[nodiscard]] StereoConvolver* clone() const
         {
             try
             {
@@ -778,7 +781,7 @@ private:
             }
         }
 
-        bool areNUCDescriptorsCommitted() const noexcept
+        [[nodiscard]] bool areNUCDescriptorsCommitted() const noexcept
         {
             for (const auto& conv : nucConvolvers)
             {
@@ -837,6 +840,7 @@ private:
     std::atomic<LatencySnapshot*> cachedLatency { new LatencySnapshot() };
     std::atomic<bool> latencyChangePending { false };
     int lastReportedLatency = -1;
+    int lastReportedClampCount_ = 0;
 
     // ドップラー効果対策: クロスフェード用
     convo::LinearRamp crossfadeGain;
@@ -902,7 +906,7 @@ private:
     }
 
     // acquire: publishActiveEngine/exchangeActiveEngine の release/acq_rel と HB し、アクティブエンジンを取得。
-    StereoConvolver* loadActiveEngine(std::memory_order order = std::memory_order_acquire) const noexcept // default acquire: publish/exchange 側 release/acq_rel と HB
+    [[nodiscard]] StereoConvolver* loadActiveEngine(std::memory_order order = std::memory_order_acquire) const noexcept // default acquire: publish/exchange 側 release/acq_rel と HB
     {
         return fromEngineBits(convo::consumeAtomic(m_activeEngineBits, static_cast<std::memory_order>(order)));
     }
@@ -926,7 +930,7 @@ private:
     }
 
     // acquire: publishRuntimeProcessSnapshot の release と HB し、有効なsnapshot indexを取得。
-    RuntimeProcessSnapshot captureRuntimeProcessSnapshot() const noexcept
+    [[nodiscard]] RuntimeProcessSnapshot captureRuntimeProcessSnapshot() const noexcept
     {
         const uint32_t index = convo::consumeAtomic(runtimeProcessSnapshotIndex, std::memory_order_acquire) & 1u;
         return runtimeProcessSnapshots[index];
@@ -1002,10 +1006,10 @@ private:
     std::atomic<IRState*> currentIRState { nullptr };
     std::optional<std::reference_wrapper<AudioEngine>> rcuProvider;
 
-    AudioEngine* getRcuProvider() noexcept { return rcuProvider ? &rcuProvider->get() : nullptr; }
-    AudioEngine* getRcuProvider() const noexcept { return rcuProvider ? &rcuProvider->get() : nullptr; }
+    [[nodiscard]] AudioEngine* getRcuProvider() noexcept { return rcuProvider ? &rcuProvider->get() : nullptr; }
+    [[nodiscard]] AudioEngine* getRcuProvider() const noexcept { return rcuProvider ? &rcuProvider->get() : nullptr; }
 
-    const IRState* acquireIRState() const noexcept;
+    [[nodiscard]] const IRState* acquireIRState() const noexcept;
     void releaseIRState(const IRState* state) const noexcept;
     void updateIRState(const juce::AudioBuffer<double>& newIR, double newSR);
     void updateIRState(const std::unique_ptr<juce::AudioBuffer<double>>& newIR, double newSR)
@@ -1016,7 +1020,7 @@ private:
 
     // MKL/AVX-512用に64byteアライメントを保証するアロケータを使用
 public: // Added for AudioEngine access
-    double getCurrentIRScale() const noexcept { return convo::consumeAtomic(currentIRScale, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
+    [[nodiscard]] double getCurrentIRScale() const noexcept { return convo::consumeAtomic(currentIRScale, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
     std::atomic<double> currentIRScale { 1.0 }; // IRのスケールファクター (Auto Makeup + Safety Margin)
     convo::ScopedAlignedPtr<float> cachedFFTBuffer; // FFT計算用キャッシュ (Message Thread)
     int cachedFFTBufferCapacity = 0;

@@ -18,18 +18,19 @@ namespace
     constexpr double kOutputHeadroom = 0.8912509381337456;
     constexpr int kSegmentHop = AudioSegment::kLength / 2;
     constexpr int kRecentSampleRequest = AudioSegment::kLength + (kSegmentHop * (NoiseShaperLearner::kMaxTrainingSegments - 1));
+    juce::ThreadPool g_saveThreadPool(1);
 
-    static uint64_t hashLearningSeed(uint64_t seed, uint64_t value) noexcept
+    uint64_t hashLearningSeed(uint64_t seed, uint64_t value) noexcept
     {
         seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
         return seed;
     }
 
-    static uint64_t makeDeterministicRestartSeed(int sampleRateHz,
-                                                 int bitDepth,
-                                                 int bankIndex,
-                                                 uint64_t sessionId,
-                                                 int restartIndex) noexcept
+    uint64_t makeDeterministicRestartSeed(int sampleRateHz,
+                                          int bitDepth,
+                                          int bankIndex,
+                                          uint64_t sessionId,
+                                          int restartIndex) noexcept
     {
         uint64_t seed = 0x4e4f495345534850ull;
         seed = hashLearningSeed(seed, static_cast<uint64_t>(sampleRateHz));
@@ -40,9 +41,6 @@ namespace
         return seed;
     }
 }
-
-// 静的メンバの定義
-juce::ThreadPool NoiseShaperLearner::saveThreadPool(1);
 
 NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
                                        LockFreeRingBuffer<AudioBlock, 4096>& captureQueueRef)
@@ -955,9 +953,9 @@ NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature
     session.sampleRateHz = static_cast<int>(convo::consumeAtomic(engine.currentSampleRate, std::memory_order_acquire) + 0.5);
     session.bitDepth = engine.getDitherBitDepth();
     session.adaptiveCoeffBankIndex = convo::consumeAtomic(engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-    const auto runtimePublishView = engine.getRuntimePublishView();
-    if (auto* dsp = (runtimePublishView.graph != nullptr)
-            ? static_cast<AudioEngine::DSPCore*>(runtimePublishView.graph->activeNode)
+        const auto runtimeReadView = engine.readControlRuntimeView();
+        if (auto* dsp = (runtimeReadView.graph != nullptr)
+            ? static_cast<AudioEngine::DSPCore*>(runtimeReadView.graph->activeNode)
             : nullptr)
         session.sessionId = dsp->currentCaptureSessionId;
     return session;
@@ -1337,7 +1335,7 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
         getState(snapshot);
 
         juce::WeakReference<NoiseShaperLearner> weakSelf(this);
-        saveThreadPool.addJob([weakSelf, filePath, snapshot]()
+        g_saveThreadPool.addJob([weakSelf, filePath, snapshot]()
         {
             if (auto* self = weakSelf.get())
                 if (!self->saveLearnedState(juce::File(filePath)))

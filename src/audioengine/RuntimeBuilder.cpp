@@ -15,13 +15,13 @@ namespace convo {
 
 namespace {
 
-static void diagLogRuntimeBuilder(const juce::String& message)
+void diagLogRuntimeBuilder(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
 }
 
-static int getWarmupBlocksOverrideFromEnv() noexcept
+int getWarmupBlocksOverrideFromEnv() noexcept
 {
     // static mutable 禁止 (rule 4.3.1, 4.3.3): 環境変数を都度読む
     int parsed = -1;
@@ -37,7 +37,7 @@ static int getWarmupBlocksOverrideFromEnv() noexcept
 
 // static mutable 禁止 (rule 4.3.1): WarmupBlockStats/statsByBlocks は削除。
 // 各ビルドの elapsed のみをログする。
-static juce::String formatWarmupElapsedSummary(int blocks, std::uint64_t elapsedUs)
+juce::String formatWarmupElapsedSummary(int blocks, std::uint64_t elapsedUs)
 {
     return "[DIAG] warmup summary blocks="
         + juce::String(blocks)
@@ -53,7 +53,7 @@ enum class WarmupPhase : int
     Ready
 };
 
-static const char* warmupPhaseToString(WarmupPhase phase) noexcept
+const char* warmupPhaseToString(WarmupPhase phase) noexcept
 {
     switch (phase)
     {
@@ -66,7 +66,7 @@ static const char* warmupPhaseToString(WarmupPhase phase) noexcept
     return "UNKNOWN";
 }
 
-static juce::String formatWarmupPhaseTimingSummary(const std::array<std::uint64_t, 5>& phaseElapsedUs)
+juce::String formatWarmupPhaseTimingSummary(const std::array<std::uint64_t, 5>& phaseElapsedUs)
 {
     const std::uint64_t totalUs = phaseElapsedUs[0]
         + phaseElapsedUs[1]

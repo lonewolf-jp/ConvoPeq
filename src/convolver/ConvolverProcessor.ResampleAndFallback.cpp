@@ -107,12 +107,14 @@ ResampleOutput resampleIR(const juce::AudioBuffer<double>& inputIR,
     return { std::move(result), ResampleResult::Success };
 }
 
-static double calculate_post_alpha(int n_taps)
+namespace {
+double calculate_post_alpha(int n_taps)
 {
     if (n_taps <= 0) return 0.05;
     double log2n = std::log2(static_cast<double>(n_taps));
     double alpha = 0.05 + 0.033 * (log2n - 10.0);
     return std::max(0.05, std::min(0.25, alpha));
+}
 }
 
 bool applyAsymmetricTukey(double* data, int numSamples)

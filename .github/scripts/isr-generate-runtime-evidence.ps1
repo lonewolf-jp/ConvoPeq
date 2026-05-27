@@ -64,6 +64,7 @@ $artifacts = @{
         epochMode        = "shared"
         rollbackMode     = "shared"
         rollbackReady    = $true
+        rollbackFlags    = @{ global = $true; publicationOnly = $false; crossfadeOnly = $false; retirePathOnly = $true }
         totalTransitions = 4
         laneCounters     = @{ rtIntent = 1; coordination = 1; epoch = 1; reclaim = 1; quarantine = 0 }
         generatedAtNs    = $generatedAtNs

@@ -16,10 +16,10 @@
 
 namespace
 {
-    static void calcBandMagnitudeSq(const EQCoeffsBiquad& c,
-                                    const std::complex<double>* zArr,
-                                    float* outMagSq,
-                                    int numPoints) noexcept
+    void calcBandMagnitudeSq(const EQCoeffsBiquad& c,
+                             const std::complex<double>* zArr,
+                             float* outMagSq,
+                             int numPoints) noexcept
     {
         for (int i = 0; i < numPoints; ++i)
         {
@@ -274,8 +274,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     lastTime = now;
 
     // Snapshot のハッシュ差分で EQ 更新を検知する。
-    const auto observedSnapshot = engine.observeCurrentRuntime();
-    const auto* snap = observedSnapshot.get();
+    const auto runtimeReadView = engine.readControlRuntimeView();
+    const auto* snap = runtimeReadView.snapshot;
     if (snap != nullptr && snap->eqCoeffHash != lastEqHash)
     {
         lastEqHash = snap->eqCoeffHash;

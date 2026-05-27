@@ -1,0 +1,6 @@
+{
+    "latencyMs": "0.69 (median) / 1.01 (p95)",
+    "jitterMs": "0.07 (p95)",
+    "reclaimBurst": "peak=2 frames / duration=1.0ms",
+    "shutdownDrainMs": "39"
+}

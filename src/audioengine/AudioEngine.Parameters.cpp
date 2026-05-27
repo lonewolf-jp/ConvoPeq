@@ -3,13 +3,13 @@
 #include "NoiseShaperLearner.h"
 
 namespace {
-static void diagLog(const juce::String& message)
+void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
 }
 
-[[maybe_unused]] static bool validateConvolverStateTreeForDebug(const juce::ValueTree& state, juce::String* reason = nullptr)
+[[maybe_unused]] bool validateConvolverStateTreeForDebug(const juce::ValueTree& state, juce::String* reason = nullptr)
 {
     auto fail = [&](const juce::String& message) -> bool
     {
@@ -71,7 +71,7 @@ static void diagLog(const juce::String& message)
     return true;
 }
 
-[[maybe_unused]] static bool validatePresetStateTreeForDebug(const juce::ValueTree& state, juce::String* reason = nullptr)
+[[maybe_unused]] bool validatePresetStateTreeForDebug(const juce::ValueTree& state, juce::String* reason = nullptr)
 {
     auto fail = [&](const juce::String& message) -> bool
     {
@@ -178,7 +178,7 @@ void AudioEngine::setConvolverPhaseMode(ConvolverProcessor::PhaseMode mode)
     uiConvolverProcessor.setPhaseMode(mode);
 }
 
-ConvolverProcessor::PhaseMode AudioEngine::getConvolverPhaseMode() const
+[[nodiscard]] ConvolverProcessor::PhaseMode AudioEngine::getConvolverPhaseMode() const
 {
     return uiConvolverProcessor.getPhaseMode();
 }
@@ -294,29 +294,6 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
                 setAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
         }
 
-        if (!hasBankedAdaptiveCoefficients)
-        {
-            double legacyAdaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
-            bool hasLegacyAdaptiveCoefficients = false;
-
-            for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
-            {
-                const auto propertyName = "adaptiveCoeff" + juce::String(coeffIndex);
-                if (state.hasProperty(propertyName))
-                {
-                    legacyAdaptiveCoefficients[coeffIndex] = static_cast<double>(state.getProperty(propertyName));
-                    hasLegacyAdaptiveCoefficients = true;
-                }
-            }
-
-            if (hasLegacyAdaptiveCoefficients)
-            {
-                for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
-                    setAdaptiveCoefficientsForSampleRate(getAdaptiveSampleRateBankHz(bankIndex),
-                                                         legacyAdaptiveCoefficients,
-                                                         kAdaptiveNoiseShaperOrder);
-            }
-        }
     }
 
     if (state.hasProperty("oversamplingFactor"))
@@ -384,7 +361,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 #endif
 
 #if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_GET)
-juce::ValueTree AudioEngine::getCurrentState() const
+[[nodiscard]] juce::ValueTree AudioEngine::getCurrentState() const
 {
     juce::ValueTree state ("Preset");
 
@@ -463,7 +440,7 @@ void AudioEngine::setInputHeadroomDb(float db)
     }
 }
 
-float AudioEngine::getInputHeadroomDb() const
+[[nodiscard]] float AudioEngine::getInputHeadroomDb() const
 {
     return convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire);
 }
@@ -482,7 +459,7 @@ void AudioEngine::setOutputMakeupDb(float db)
     }
 }
 
-float AudioEngine::getOutputMakeupDb() const
+[[nodiscard]] float AudioEngine::getOutputMakeupDb() const
 {
     return convo::consumeAtomic(outputMakeupDb, std::memory_order_acquire);
 }
@@ -510,7 +487,7 @@ void AudioEngine::setConvolverInputTrimDb(float db)
     }
 }
 
-float AudioEngine::getConvolverInputTrimDb() const
+[[nodiscard]] float AudioEngine::getConvolverInputTrimDb() const
 {
     return convo::consumeAtomic(convolverInputTrimDb, std::memory_order_acquire);
 }
@@ -616,7 +593,7 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
     }
 }
 
-int AudioEngine::getDitherBitDepth() const
+[[nodiscard]] int AudioEngine::getDitherBitDepth() const
 {
     return convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire);
 }
@@ -683,7 +660,7 @@ void AudioEngine::requestSnapshotForNoiseShaper()
     (void)enqueueSnapshotCommand();
 }
 
-AudioEngine::NoiseShaperType AudioEngine::getNoiseShaperType() const
+[[nodiscard]] AudioEngine::NoiseShaperType AudioEngine::getNoiseShaperType() const
 {
     return convo::consumeAtomic(noiseShaperType, std::memory_order_acquire);
 }
@@ -693,7 +670,7 @@ void AudioEngine::setFixedNoiseLogIntervalMs(int intervalMs) noexcept
     convo::publishAtomic(fixedNoiseLogIntervalMs, juce::jlimit(250, 10000, intervalMs), std::memory_order_release);
 }
 
-int AudioEngine::getFixedNoiseLogIntervalMs() const noexcept
+[[nodiscard]] int AudioEngine::getFixedNoiseLogIntervalMs() const noexcept
 {
     return convo::consumeAtomic(fixedNoiseLogIntervalMs, std::memory_order_acquire);
 }
@@ -703,7 +680,7 @@ void AudioEngine::setFixedNoiseWindowSamples(int windowSamples) noexcept
     convo::publishAtomic(fixedNoiseWindowSamples, juce::jlimit(256, 262144, windowSamples), std::memory_order_release);
 }
 
-int AudioEngine::getFixedNoiseWindowSamples() const noexcept
+[[nodiscard]] int AudioEngine::getFixedNoiseWindowSamples() const noexcept
 {
     return convo::consumeAtomic(fixedNoiseWindowSamples, std::memory_order_acquire);
 }
@@ -715,7 +692,7 @@ void AudioEngine::setSoftClipEnabled(bool enabled)
     enqueueSnapshotCommand();
 }
 
-bool AudioEngine::isSoftClipEnabled() const
+[[nodiscard]] bool AudioEngine::isSoftClipEnabled() const
 {
     return convo::consumeAtomic(softClipEnabled, std::memory_order_acquire);
 }
@@ -731,7 +708,7 @@ void AudioEngine::setSaturationAmount(float amount)
     }
 }
 
-float AudioEngine::getSaturationAmount() const
+[[nodiscard]] float AudioEngine::getSaturationAmount() const
 {
     return convo::consumeAtomic(saturationAmount, std::memory_order_acquire);
 }
@@ -758,7 +735,7 @@ void AudioEngine::setOversamplingFactor(int factor)
     }
 }
 
-int AudioEngine::getOversamplingFactor() const
+[[nodiscard]] int AudioEngine::getOversamplingFactor() const
 {
     return convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire);
 }
@@ -830,7 +807,7 @@ void AudioEngine::setOversamplingType(OversamplingType type)
     }
 }
 
-AudioEngine::OversamplingType AudioEngine::getOversamplingType() const
+[[nodiscard]] AudioEngine::OversamplingType AudioEngine::getOversamplingType() const
 {
     return convo::consumeAtomic(oversamplingType, std::memory_order_acquire);
 }
@@ -848,7 +825,7 @@ void AudioEngine::setConvHCFilterMode(convo::HCMode mode) noexcept
         convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire));
 }
 
-convo::HCMode AudioEngine::getConvHCFilterMode() const noexcept
+[[nodiscard]] convo::HCMode AudioEngine::getConvHCFilterMode() const noexcept
 {
     return convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire);
 }
@@ -862,7 +839,7 @@ void AudioEngine::setConvLCFilterMode(convo::LCMode mode) noexcept
         convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire));
 }
 
-convo::LCMode AudioEngine::getConvLCFilterMode() const noexcept
+[[nodiscard]] convo::LCMode AudioEngine::getConvLCFilterMode() const noexcept
 {
     return convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire);
 }
@@ -872,12 +849,12 @@ void AudioEngine::setEqLPFFilterMode(convo::HCMode mode) noexcept
     convo::publishAtomic(eqLPFFilterMode, mode, std::memory_order_release);
 }
 
-convo::HCMode AudioEngine::getEqLPFFilterMode() const noexcept
+[[nodiscard]] convo::HCMode AudioEngine::getEqLPFFilterMode() const noexcept
 {
     return convo::consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
 }
 
-juce::ValueTree AudioEngine::getConvolverStateTree() const
+[[nodiscard]] juce::ValueTree AudioEngine::getConvolverStateTree() const
 {
     auto state = uiConvolverProcessor.getState();
    #if JUCE_DEBUG
@@ -902,7 +879,7 @@ void AudioEngine::setConvolverStateTree(const juce::ValueTree& state)
     uiConvolverProcessor.setState(state);
 }
 
-int AudioEngine::getConvolverTargetUpgradeFFTSize() const
+[[nodiscard]] int AudioEngine::getConvolverTargetUpgradeFFTSize() const
 {
     return uiConvolverProcessor.getTargetUpgradeFFTSize();
 }
@@ -912,7 +889,7 @@ void AudioEngine::setConvolverTargetUpgradeFFTSize(int fftSize)
     uiConvolverProcessor.setTargetUpgradeFFTSize(fftSize);
 }
 
-bool AudioEngine::isConvolverProgressiveUpgradeEnabled() const
+[[nodiscard]] bool AudioEngine::isConvolverProgressiveUpgradeEnabled() const
 {
     return uiConvolverProcessor.isProgressiveUpgradeEnabled();
 }
@@ -922,7 +899,7 @@ void AudioEngine::setConvolverEnableProgressiveUpgrade(bool enabled)
     uiConvolverProcessor.setEnableProgressiveUpgrade(enabled);
 }
 
-int AudioEngine::getConvolverMaxCacheEntries() const
+[[nodiscard]] int AudioEngine::getConvolverMaxCacheEntries() const
 {
     return static_cast<int>(uiConvolverProcessor.getMaxCacheEntries());
 }

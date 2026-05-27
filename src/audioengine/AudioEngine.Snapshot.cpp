@@ -3,7 +3,7 @@
 #include "core/SnapshotAssembler.h"
 
 namespace {
-static void diagLog(const juce::String& message)
+void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
@@ -59,9 +59,9 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     else
     {
         // ISR厳密化: EQ cache を生成できないスナップショットは適用しない。
-        // これにより Audio Thread 側で「snapshot指定外のフォールバック経路」へ
+        // これにより Audio Thread 側で「snapshot指定外の回復経路」へ
         // 落ちることを防ぎ、公開済み snapshot の一貫性を維持する。
-        convo::fetchAddAtomic(eqCacheSnapshotCreateMissCountNonRt,
+        convo::fetchAddAtomic(rtAuxMutable_.eqCacheSnapshotCreateMissCountNonRt,
                               static_cast<std::uint64_t>(1),
                               std::memory_order_acq_rel);
         diagLog("[VERIFY] snapshot suppressed: eq cache unavailable");
@@ -116,11 +116,12 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         DBG("Phase6: EQ fade triggered");
     }
 
-    const auto observedCurrent = m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
+    const auto runtimeReadView = readControlRuntimeView();
+    const auto* observedSnapshot = getRuntimeSnapshot(runtimeReadView);
 
     convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
         params,
-        observedCurrent.get(),
+        observedSnapshot,
         generation,
         sampleRate);
 
@@ -132,7 +133,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         return;
     }
 
-    convo::publishAtomic(debugLastCreatedEqHash, eqCoeffHash, std::memory_order_release);
+    convo::publishAtomic(rtAuxMutable_.debugLastCreatedEqHash, eqCoeffHash, std::memory_order_release);
     diagLog("[VERIFY] EQ createdHash=0x"
         + juce::String::toHexString(static_cast<juce::int64>(eqCoeffHash))
         + " gen=" + juce::String(static_cast<juce::int64>(generation)));
@@ -146,12 +147,12 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         m_coordinator.switchImmediate(newSnap);
     }
 
-    // フェイルセーフ: 何らかの競合で fade が開始されず current も空のままなら、
-    // 即時適用にフォールバックして反映欠落を防ぐ。
-    const auto observedAfterApply = m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
-    if (!m_coordinator.isFading() && observedAfterApply.get() == nullptr)
+    // 回復経路: 何らかの競合で fade が開始されず current も空のままなら、
+    // 即時適用へ切り替えて反映欠落を防ぐ。
+    const auto* observedAfterApply = getRuntimeSnapshot(readControlRuntimeView());
+    if (!m_coordinator.isFading() && observedAfterApply == nullptr)
     {
-        DBG("[VERIFY] snapshot apply fallback: force switchImmediate");
+        DBG("[VERIFY] snapshot apply recovery: force switchImmediate");
         m_coordinator.switchImmediate(newSnap);
     }
 }

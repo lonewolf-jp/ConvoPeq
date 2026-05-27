@@ -87,7 +87,7 @@ struct FilterSpec
     HCMode hcMode     = HCMode::Natural; ///< ハイカットモード
     LCMode lcMode     = LCMode::Natural; ///< ローカットモード
     int tailMode = 1; ///< 0=Air Absorption, 1=Layer Tail Contouring, 2=Bypass
-    bool tailEnabled  = true; ///< false の場合 L1/L2 を無効化（legacy bypass）
+    bool tailEnabled  = true; ///< false の場合 L1/L2 を無効化（tail bypass）
     double tailStartSeconds = 0.085; ///< Tail開始目安（秒）
     double tailStrength = 1.0; ///< L1/L2 出力の加算ゲイン
     int tailL1L2Multiplier = 8; ///< L1/L2 の partition 倍率
@@ -201,6 +201,11 @@ public:
     }
 
 private:
+#if JUCE_DEBUG
+    static std::atomic<int> debugWarmupGuardCountStorage_;
+    static std::atomic<int>& debugWarmupGuardCount() noexcept;
+#endif
+
      // 軽量参照カウントによる UAF 防止（削除予定）
     std::atomic<uint32_t> refCount{0};
     std::atomic<bool> retireRequested{false};

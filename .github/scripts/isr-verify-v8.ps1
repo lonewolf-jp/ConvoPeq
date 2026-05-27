@@ -74,13 +74,26 @@ if (-not ($recovery.PSObject.Properties.Name -contains "recoveryActions")) {
 
 Assert-IsArrayLocal -Value $recovery.recoveryActions -FieldName "recoveryActions"
 
+$sealViolationActionFound = $false
+
 foreach ($action in $recovery.recoveryActions) {
 	if ($action.PSObject.Properties.Name -contains "failure") {
 		$failure = [string]$action.failure
 		if ($failure -match "uaf|use-after-free") {
 			throw "UAF suspicion detected from recovery trace"
 		}
+
+		if ($failure -eq "seal violation") {
+			$sealViolationActionFound = $true
+			if ($action.PSObject.Properties.Name -contains "action" -and [string]$action.action -ne "Abort") {
+				throw "Seal violation recovery action must Abort"
+			}
+		}
 	}
+}
+
+if (-not $sealViolationActionFound) {
+	throw "Seal violation recovery action missing from recovery trace"
 }
 
 Write-Host "[PASS] UAF detector (fallback recovery trace)"

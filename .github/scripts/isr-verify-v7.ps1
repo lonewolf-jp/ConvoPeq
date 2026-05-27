@@ -9,7 +9,7 @@ if (-not $latency.withinThreshold) {
 	throw "Retire latency threshold exceeded"
 }
 
-$timeline = . "$PSScriptRoot\isr-verify-common.ps1" -ArtifactName "retire_timeline.json" -Schema "retire_timeline_v1" -RequiredKeys @("totalTransitions", "epochMode", "rollbackMode", "rollbackReady")
+$timeline = . "$PSScriptRoot\isr-verify-common.ps1" -ArtifactName "retire_timeline.json" -Schema "retire_timeline_v1" -RequiredKeys @("totalTransitions", "epochMode", "rollbackMode", "rollbackReady", "rollbackFlags")
 Assert-NonNegativeInteger -Value $timeline.totalTransitions -FieldName "totalTransitions"
 
 Assert-ValueInSet -Value $timeline.epochMode -Allowed @("shared", "split", "hybrid") -FieldName "epochMode"
@@ -17,6 +17,29 @@ Assert-ValueInSet -Value $timeline.rollbackMode -Allowed @("shared", "split", "h
 
 if ($timeline.rollbackReady -isnot [bool]) {
 	throw "Field 'rollbackReady' must be boolean"
+}
+
+Assert-HasProperty -Object $timeline.rollbackFlags -Name "global"
+Assert-HasProperty -Object $timeline.rollbackFlags -Name "publicationOnly"
+Assert-HasProperty -Object $timeline.rollbackFlags -Name "crossfadeOnly"
+Assert-HasProperty -Object $timeline.rollbackFlags -Name "retirePathOnly"
+
+if ($timeline.rollbackFlags.global -isnot [bool]) {
+	throw "Field 'rollbackFlags.global' must be boolean"
+}
+if ($timeline.rollbackFlags.publicationOnly -isnot [bool]) {
+	throw "Field 'rollbackFlags.publicationOnly' must be boolean"
+}
+if ($timeline.rollbackFlags.crossfadeOnly -isnot [bool]) {
+	throw "Field 'rollbackFlags.crossfadeOnly' must be boolean"
+}
+if ($timeline.rollbackFlags.retirePathOnly -isnot [bool]) {
+	throw "Field 'rollbackFlags.retirePathOnly' must be boolean"
+}
+
+$expectedRollbackReady = ($timeline.rollbackFlags.global -and $timeline.rollbackFlags.retirePathOnly)
+if ($timeline.rollbackReady -ne $expectedRollbackReady) {
+	throw "Field 'rollbackReady' must equal rollbackFlags.global && rollbackFlags.retirePathOnly"
 }
 
 if ($timeline.PSObject.Properties.Name -contains "laneCounters") {

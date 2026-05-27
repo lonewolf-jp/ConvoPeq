@@ -1,8 +1,8 @@
 # .clang-tidy
 
-# ConvoPeq 専用 clang-tidy 設定
+## ConvoPeq 専用 clang-tidy 設定
 
-# JUCE 8.0.12 / Intel MKL / Windows MSVC 環境向け
+## JUCE 8.0.12 / Intel MKL / Windows MSVC 環境向け
 
 ---
 Checks: >
@@ -23,14 +23,21 @@ Checks: >
   -zircon-*,
   -cppcoreguidelines-owning-memory,
   -cppcoreguidelines-pro-type-vararg,
-  -readability-identifier-naming
+    -readability-identifier-naming,
+    bugprone-use-after-move,
+    bugprone-branch-clone,
+    clang-analyzer-core.CallAndMessage,
+    clang-analyzer-core.NullDereference,
+    clang-analyzer-cplusplus.NewDelete,
+    clang-analyzer-cplusplus.NewDeleteLeaks,
+    clang-analyzer-unix.Malloc
 
 FormatStyle: file
 HeaderFilterRegex: '.*/src/.*'
 
 CheckOptions:
 
-# 識別子命名規則（ConvoPeq コーディング規約に準拠）
+## 識別子命名規則（ConvoPeq コーディング規約に準拠）
 
 - key:             readability-identifier-naming.ClassCase
     value:           CamelCase
@@ -49,19 +56,19 @@ CheckOptions:
 - key:             readability-identifier-naming.EnumConstantCase
     value:           UPPER_CASE
 
-# 初期化チェック強化
+## 初期化チェック強化
 
 - key:             cppcoreguidelines-init-variables.CheckArrays
     value:           true
 - key:             cppcoreguidelines-init-variables.CheckPointers
     value:           true
 
-# 例外処理（JUCE は例外を使用するため許可）
+## 例外処理（JUCE は例外を使用するため許可）
 
 - key:             bugprone-unhandled-exception-at-new.Exceptions
     value:           'std::bad_alloc,std::exception'
 
-# 移動セマンティクス（Audio Thread での移動は禁止だが、Message Thread では許可）
+## 移動セマンティクス（Audio Thread での移動は禁止だが、Message Thread では許可）
 
 - key:             bugprone-use-after-move.CheckAfterMove
     value:           true

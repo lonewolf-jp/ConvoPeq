@@ -32,12 +32,12 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             , firewallToken(owner.rtCapabilityFirewall_.enter())
         {
             convo::isr::RTAllocatorFirewall::markRTContext(true);
-            (void)convo::fetchAddAtomic(engine.audioCallbackActiveCount_, uint32_t{1}, std::memory_order_acq_rel);
+            (void)convo::fetchAddAtomic(engine.rtLocalState_.audioCallbackActiveCount, uint32_t{1}, std::memory_order_acq_rel);
         }
 
         ~AudioCallbackRuntimeScope() noexcept
         {
-            (void)convo::fetchSubAtomic(engine.audioCallbackActiveCount_, uint32_t{1}, std::memory_order_acq_rel);
+            (void)convo::fetchSubAtomic(engine.rtLocalState_.audioCallbackActiveCount, uint32_t{1}, std::memory_order_acq_rel);
             convo::isr::RTAllocatorFirewall::markRTContext(false);
             engine.rtCapabilityFirewall_.leave(firewallToken);
             engine.lifecycleRuntime_.leaveAudioCallback(lifecycleToken);
@@ -91,8 +91,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    const auto runtimeExecutionView = getRuntimeExecutionViewForAudioThread();
-    const auto* runtimeGraph = runtimeExecutionView.graph;
+    const auto runtimeReadView = readAudioRuntimeView();
+    const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
     DSPCore* dsp = (runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
         ? static_cast<DSPCore*>(runtimeGraph->activeNode)
         : nullptr;
@@ -110,7 +110,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     #endif
 
     // --- ProcessingStateを現行設計で初期化 ---
-    const convo::GlobalSnapshot* snap = runtimeExecutionView.snapshot;
+    const convo::GlobalSnapshot* snap = getRuntimeSnapshot(runtimeReadView);
     if (snap == nullptr)
     {
         buffer.clear();
@@ -141,7 +141,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
-    DSPCore* fading = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
+    DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
     bool useDryAsOld = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeUseDryAsOld : false;
     if (fading != nullptr && fading == dsp)
     {

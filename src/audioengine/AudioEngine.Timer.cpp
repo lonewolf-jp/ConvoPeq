@@ -2,7 +2,7 @@
 #include "AudioEngine.h"
 
 namespace {
-static void diagLog(const juce::String& message)
+void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
@@ -11,13 +11,15 @@ static void diagLog(const juce::String& message)
 
 void AudioEngine::timerCallback()
 {
-    const auto* runtimeWorld = runtimeStore.observe();
-    const auto* runtimeGraph = (runtimeWorld != nullptr) ? &runtimeWorld->graph : nullptr;
+    const auto runtimeReadView = readControlRuntimeView();
+    const auto& runtimePublishView = runtimeReadView.runtimePublish;
+    const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
+    const auto* currentSnapshot = getRuntimeSnapshot(runtimeReadView);
 
     emitEvidenceTickNonRt(false);
 
     {
-        const auto ts = runtimeWorld != nullptr ? runtimeWorld->engine.transition : convo::TransitionState{};
+        const auto ts = runtimePublishView.transition;
         const int active = ts.active ? 1 : 0;
         const int policy = static_cast<int>(ts.policy);
         const uint64_t currentPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ts.current));
@@ -25,18 +27,18 @@ void AudioEngine::timerCallback()
         const double fadeSec = ts.fadeTimeSec;
         const int latencyDelta = ts.latencyDeltaSamples;
 
-        if (active != debugLastReportedTransitionActive
-            || policy != debugLastReportedTransitionPolicy
-            || currentPtr != debugLastReportedTransitionCurrentPtr
-            || nextPtr != debugLastReportedTransitionNextPtr
-            || absNoLibm(fadeSec - debugLastReportedTransitionFadeSec) > 1e-9
-            || latencyDelta != debugLastReportedTransitionLatencyDeltaSamples)
+        if (active != rtAuxMutable_.debugLastReportedTransitionActive
+            || policy != rtAuxMutable_.debugLastReportedTransitionPolicy
+            || currentPtr != rtAuxMutable_.debugLastReportedTransitionCurrentPtr
+            || nextPtr != rtAuxMutable_.debugLastReportedTransitionNextPtr
+            || absNoLibm(fadeSec - rtAuxMutable_.debugLastReportedTransitionFadeSec) > 1e-9
+            || latencyDelta != rtAuxMutable_.debugLastReportedTransitionLatencyDeltaSamples)
         {
-            debugLastReportedTransitionActive = active;
-            debugLastReportedTransitionPolicy = policy;
-            debugLastReportedTransitionCurrentPtr = currentPtr;
-            debugLastReportedTransitionNextPtr = nextPtr;
-            debugLastReportedTransitionLatencyDeltaSamples = latencyDelta;
+            rtAuxMutable_.debugLastReportedTransitionActive = active;
+            rtAuxMutable_.debugLastReportedTransitionPolicy = policy;
+            rtAuxMutable_.debugLastReportedTransitionCurrentPtr = currentPtr;
+            rtAuxMutable_.debugLastReportedTransitionNextPtr = nextPtr;
+            rtAuxMutable_.debugLastReportedTransitionLatencyDeltaSamples = latencyDelta;
 
 #if JUCE_DEBUG
             diagLog("[VERIFY] transition state active=" + juce::String(active)
@@ -57,17 +59,17 @@ void AudioEngine::timerCallback()
         const uint64_t transitionCurrentUuid = (runtimeGraph != nullptr) ? runtimeGraph->transitionCurrentRuntimeUuid : 0;
         const uint64_t transitionNextUuid = (runtimeGraph != nullptr) ? runtimeGraph->transitionNextRuntimeUuid : 0;
 
-        if (revision != debugLastReportedRuntimeSnapshotRevision
-            || currentUuid != debugLastReportedRuntimePublishCurrentUuid
-            || fadingUuid != debugLastReportedRuntimePublishFadingUuid
-            || transitionCurrentUuid != debugLastReportedRuntimePublishTransitionCurrentUuid
-            || transitionNextUuid != debugLastReportedRuntimePublishTransitionNextUuid)
+        if (revision != rtAuxMutable_.debugLastReportedRuntimeSnapshotRevision
+            || currentUuid != rtAuxMutable_.debugLastReportedRuntimePublishCurrentUuid
+            || fadingUuid != rtAuxMutable_.debugLastReportedRuntimePublishFadingUuid
+            || transitionCurrentUuid != rtAuxMutable_.debugLastReportedRuntimePublishTransitionCurrentUuid
+            || transitionNextUuid != rtAuxMutable_.debugLastReportedRuntimePublishTransitionNextUuid)
         {
-            debugLastReportedRuntimeSnapshotRevision = revision;
-            debugLastReportedRuntimePublishCurrentUuid = currentUuid;
-            debugLastReportedRuntimePublishFadingUuid = fadingUuid;
-            debugLastReportedRuntimePublishTransitionCurrentUuid = transitionCurrentUuid;
-            debugLastReportedRuntimePublishTransitionNextUuid = transitionNextUuid;
+            rtAuxMutable_.debugLastReportedRuntimeSnapshotRevision = revision;
+            rtAuxMutable_.debugLastReportedRuntimePublishCurrentUuid = currentUuid;
+            rtAuxMutable_.debugLastReportedRuntimePublishFadingUuid = fadingUuid;
+            rtAuxMutable_.debugLastReportedRuntimePublishTransitionCurrentUuid = transitionCurrentUuid;
+            rtAuxMutable_.debugLastReportedRuntimePublishTransitionNextUuid = transitionNextUuid;
 
             diagLog("[VERIFY] runtime publish rev=" + juce::String(static_cast<juce::int64>(revision))
                 + " currentUuid=" + juce::String(static_cast<juce::int64>(currentUuid))
@@ -84,43 +86,43 @@ void AudioEngine::timerCallback()
         const auto convRebuild = uiConvolverProcessor.getRebuildAutomationDiagnostics();
         const int shutdownPhaseValue = static_cast<int>(convo::consumeAtomic(shutdownPhase, std::memory_order_acquire));
 
-        if (lifecycle.publishCount != debugLastReportedRuntimePublishCount
-            || lifecycle.retireCount != debugLastReportedRuntimeRetireCount
-            || lifecycle.reclaimCount != debugLastReportedRuntimeReclaimCount
-            || rebuild.requestCount != debugLastReportedRebuildRequestCount
-            || rebuild.queuedCount != debugLastReportedRebuildQueuedCount
-            || rebuild.blockedPendingDuplicateCount != debugLastReportedRebuildBlockedPendingDuplicateCount
-            || rebuild.blockedRecentDuplicateCount != debugLastReportedRebuildBlockedRecentDuplicateCount
-            || rebuild.runtimeQueueFullCount != debugLastReportedRebuildRuntimeQueueFullCount
-            || rebuild.drainedCommandCount != debugLastReportedRebuildDrainedCommandCount
-            || rebuild.matchedRuntimeCommandCount != debugLastReportedRebuildMatchedRuntimeCommandCount
-            || rebuild.taskSnapshotFallbackCount != debugLastReportedRebuildTaskSnapshotFallbackCount
-            || eqCacheMiss.snapshotCreateMissCount != debugLastReportedEqCacheSnapshotCreateMissCount
-            || eqCacheMiss.runtimeLookupMissCount != debugLastReportedEqCacheRuntimeLookupMissCount
-            || convRebuild.requestCount != debugLastReportedConvolverRebuildRequestCount
-            || convRebuild.deferredAfterLoadCount != debugLastReportedConvolverRebuildDeferredAfterLoadCount
-            || convRebuild.scheduledCount != debugLastReportedConvolverRebuildScheduledCount
-            || convRebuild.triggeredCount != debugLastReportedConvolverRebuildTriggeredCount
-            || shutdownPhaseValue != debugLastReportedShutdownPhase)
+        if (lifecycle.publishCount != rtAuxMutable_.debugLastReportedRuntimePublishCount
+            || lifecycle.retireCount != rtAuxMutable_.debugLastReportedRuntimeRetireCount
+            || lifecycle.reclaimCount != rtAuxMutable_.debugLastReportedRuntimeReclaimCount
+            || rebuild.requestCount != rtAuxMutable_.debugLastReportedRebuildRequestCount
+            || rebuild.queuedCount != rtAuxMutable_.debugLastReportedRebuildQueuedCount
+            || rebuild.blockedPendingDuplicateCount != rtAuxMutable_.debugLastReportedRebuildBlockedPendingDuplicateCount
+            || rebuild.blockedRecentDuplicateCount != rtAuxMutable_.debugLastReportedRebuildBlockedRecentDuplicateCount
+            || rebuild.runtimeQueueFullCount != rtAuxMutable_.debugLastReportedRebuildRuntimeQueueFullCount
+            || rebuild.drainedCommandCount != rtAuxMutable_.debugLastReportedRebuildDrainedCommandCount
+            || rebuild.matchedRuntimeCommandCount != rtAuxMutable_.debugLastReportedRebuildMatchedRuntimeCommandCount
+            || rebuild.taskSnapshotFallbackCount != rtAuxMutable_.debugLastReportedRebuildTaskSnapshotFallbackCount
+            || eqCacheMiss.snapshotCreateMissCount != rtAuxMutable_.debugLastReportedEqCacheSnapshotCreateMissCount
+            || eqCacheMiss.runtimeLookupMissCount != rtAuxMutable_.debugLastReportedEqCacheRuntimeLookupMissCount
+            || convRebuild.requestCount != rtAuxMutable_.debugLastReportedConvolverRebuildRequestCount
+            || convRebuild.deferredAfterLoadCount != rtAuxMutable_.debugLastReportedConvolverRebuildDeferredAfterLoadCount
+            || convRebuild.scheduledCount != rtAuxMutable_.debugLastReportedConvolverRebuildScheduledCount
+            || convRebuild.triggeredCount != rtAuxMutable_.debugLastReportedConvolverRebuildTriggeredCount
+            || shutdownPhaseValue != rtAuxMutable_.debugLastReportedShutdownPhase)
         {
-            debugLastReportedRuntimePublishCount = lifecycle.publishCount;
-            debugLastReportedRuntimeRetireCount = lifecycle.retireCount;
-            debugLastReportedRuntimeReclaimCount = lifecycle.reclaimCount;
-            debugLastReportedRebuildRequestCount = rebuild.requestCount;
-            debugLastReportedRebuildQueuedCount = rebuild.queuedCount;
-            debugLastReportedRebuildBlockedPendingDuplicateCount = rebuild.blockedPendingDuplicateCount;
-            debugLastReportedRebuildBlockedRecentDuplicateCount = rebuild.blockedRecentDuplicateCount;
-            debugLastReportedRebuildRuntimeQueueFullCount = rebuild.runtimeQueueFullCount;
-            debugLastReportedRebuildDrainedCommandCount = rebuild.drainedCommandCount;
-            debugLastReportedRebuildMatchedRuntimeCommandCount = rebuild.matchedRuntimeCommandCount;
-            debugLastReportedRebuildTaskSnapshotFallbackCount = rebuild.taskSnapshotFallbackCount;
-            debugLastReportedEqCacheSnapshotCreateMissCount = eqCacheMiss.snapshotCreateMissCount;
-            debugLastReportedEqCacheRuntimeLookupMissCount = eqCacheMiss.runtimeLookupMissCount;
-            debugLastReportedConvolverRebuildRequestCount = convRebuild.requestCount;
-            debugLastReportedConvolverRebuildDeferredAfterLoadCount = convRebuild.deferredAfterLoadCount;
-            debugLastReportedConvolverRebuildScheduledCount = convRebuild.scheduledCount;
-            debugLastReportedConvolverRebuildTriggeredCount = convRebuild.triggeredCount;
-            debugLastReportedShutdownPhase = shutdownPhaseValue;
+            rtAuxMutable_.debugLastReportedRuntimePublishCount = lifecycle.publishCount;
+            rtAuxMutable_.debugLastReportedRuntimeRetireCount = lifecycle.retireCount;
+            rtAuxMutable_.debugLastReportedRuntimeReclaimCount = lifecycle.reclaimCount;
+            rtAuxMutable_.debugLastReportedRebuildRequestCount = rebuild.requestCount;
+            rtAuxMutable_.debugLastReportedRebuildQueuedCount = rebuild.queuedCount;
+            rtAuxMutable_.debugLastReportedRebuildBlockedPendingDuplicateCount = rebuild.blockedPendingDuplicateCount;
+            rtAuxMutable_.debugLastReportedRebuildBlockedRecentDuplicateCount = rebuild.blockedRecentDuplicateCount;
+            rtAuxMutable_.debugLastReportedRebuildRuntimeQueueFullCount = rebuild.runtimeQueueFullCount;
+            rtAuxMutable_.debugLastReportedRebuildDrainedCommandCount = rebuild.drainedCommandCount;
+            rtAuxMutable_.debugLastReportedRebuildMatchedRuntimeCommandCount = rebuild.matchedRuntimeCommandCount;
+            rtAuxMutable_.debugLastReportedRebuildTaskSnapshotFallbackCount = rebuild.taskSnapshotFallbackCount;
+            rtAuxMutable_.debugLastReportedEqCacheSnapshotCreateMissCount = eqCacheMiss.snapshotCreateMissCount;
+            rtAuxMutable_.debugLastReportedEqCacheRuntimeLookupMissCount = eqCacheMiss.runtimeLookupMissCount;
+            rtAuxMutable_.debugLastReportedConvolverRebuildRequestCount = convRebuild.requestCount;
+            rtAuxMutable_.debugLastReportedConvolverRebuildDeferredAfterLoadCount = convRebuild.deferredAfterLoadCount;
+            rtAuxMutable_.debugLastReportedConvolverRebuildScheduledCount = convRebuild.scheduledCount;
+            rtAuxMutable_.debugLastReportedConvolverRebuildTriggeredCount = convRebuild.triggeredCount;
+            rtAuxMutable_.debugLastReportedShutdownPhase = shutdownPhaseValue;
 
             diagLog("[VERIFY] tx counters lifecycle(pub/ret/reclaim)="
                 + juce::String(static_cast<juce::int64>(lifecycle.publishCount)) + "/"
@@ -148,49 +150,46 @@ void AudioEngine::timerCallback()
         }
     }
 
-    // フェイルセーフ: current snapshot が欠落した状態を放置すると
+    // 回復経路: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
     auto* currentDspForRuntime = (runtimeGraph != nullptr)
         ? static_cast<DSPCore*>(runtimeGraph->activeNode)
         : nullptr;
-    auto* fadingDspForRuntime = resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph);
+    auto* fadingDspForRuntime = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
 
     // T1: 公開済みRuntimeへのNonRTからの可変更新を避けるため、
     // Timerからのdither内部状態更新は行わない。
 
-    const auto observedCurrent = m_coordinator.observeCurrentRuntime(kControlEpochReaderIndex);
-
     {
-        const auto* currentSnapshot = observedCurrent.get();
         const uint64_t currentEqHash = (currentSnapshot != nullptr) ? currentSnapshot->eqCoeffHash : 0;
         const bool hasEqHash = (currentEqHash != 0);
         const bool lookupMiss = hasEqHash && !eqCacheManager.containsNonRt(currentEqHash);
 
         if (lookupMiss)
         {
-            const bool missEdge = (!debugEqCacheLookupMissLatched)
-                || (debugEqCacheLookupMissLatchedHash != currentEqHash);
+            const bool missEdge = (!rtAuxMutable_.debugEqCacheLookupMissLatched)
+                || (rtAuxMutable_.debugEqCacheLookupMissLatchedHash != currentEqHash);
 
             if (missEdge)
             {
-                convo::fetchAddAtomic(eqCacheRuntimeLookupMissCountNonRt,
+                convo::fetchAddAtomic(rtAuxMutable_.eqCacheRuntimeLookupMissCountNonRt,
                                       static_cast<std::uint64_t>(1),
                                       std::memory_order_acq_rel);
-                debugEqCacheLookupMissLatched = true;
-                debugEqCacheLookupMissLatchedHash = currentEqHash;
+                rtAuxMutable_.debugEqCacheLookupMissLatched = true;
+                rtAuxMutable_.debugEqCacheLookupMissLatchedHash = currentEqHash;
             }
         }
         else
         {
-            debugEqCacheLookupMissLatched = false;
-            debugEqCacheLookupMissLatchedHash = 0;
+            rtAuxMutable_.debugEqCacheLookupMissLatched = false;
+            rtAuxMutable_.debugEqCacheLookupMissLatchedHash = 0;
         }
     }
 
     if (!isShutdownInProgress()
         && currentDspForRuntime != nullptr
         && !m_coordinator.isFading()
-        && observedCurrent.get() == nullptr)
+        && currentSnapshot == nullptr)
     {
         diagLog("[VERIFY] snapshot bootstrap: current was null, requesting worker snapshot refresh");
         if (!enqueueSnapshotCommand())
@@ -198,18 +197,18 @@ void AudioEngine::timerCallback()
     }
 
     {
-        const uint64_t createdHash = convo::consumeAtomic(debugLastCreatedEqHash, std::memory_order_acquire);
+        const uint64_t createdHash = convo::consumeAtomic(rtAuxMutable_.debugLastCreatedEqHash, std::memory_order_acquire);
         const int dspReady = (currentDspForRuntime != nullptr) ? 1 : 0;
         const int coordIsFading = m_coordinator.isFading() ? 1 : 0;
         const int updateFadeReturned = coordIsFading;
-        const int fromNull = (observedCurrent.get() == nullptr) ? 1 : 0;
+        const int fromNull = (currentSnapshot == nullptr) ? 1 : 0;
         const int toNull = -1;
 
-        if (createdHash != debugLastReportedCreatedEqHash ||
-            dspReady != debugLastReportedDspReady)
+        if (createdHash != rtAuxMutable_.debugLastReportedCreatedEqHash ||
+            dspReady != rtAuxMutable_.debugLastReportedDspReady)
         {
-            debugLastReportedCreatedEqHash = createdHash;
-            debugLastReportedDspReady = dspReady;
+            rtAuxMutable_.debugLastReportedCreatedEqHash = createdHash;
+            rtAuxMutable_.debugLastReportedDspReady = dspReady;
             diagLog("[VERIFY] EQ reflection createdHash=0x"
                 + juce::String::toHexString(static_cast<juce::int64>(createdHash))
                 + " dspReady=" + juce::String(dspReady)
@@ -372,7 +371,7 @@ void AudioEngine::timerCallback()
             convo::publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
         }
 
-        auto* const doneRaw1 = exchangeFadingOutDSP(nullptr);
+        auto* const doneRaw1 = exchangeFadingRuntimeDSP(nullptr);
         if (auto* done = (reinterpret_cast<uintptr_t>(doneRaw1) == (~static_cast<uintptr_t>(0))) ? nullptr : doneRaw1)
             retireDSP(done);
         publishAtomic(dspCrossfadePending, false, std::memory_order_release);
@@ -390,7 +389,7 @@ void AudioEngine::timerCallback()
             : nullptr;
         if (currentAfterFade != nullptr)
         {
-            RuntimePublicationCoordinator::create(RuntimePublicationBridge { *this }, runtimeStore)
+            makeRuntimePublicationCoordinator()
                 .publishState(currentAfterFade,
                               nullptr,
                               convo::TransitionPolicy::SmoothOnly,
@@ -403,7 +402,7 @@ void AudioEngine::timerCallback()
 
     if (!m_coordinator.isFading())
     {
-        auto* const doneRaw2 = exchangeFadingOutDSP(nullptr);
+        auto* const doneRaw2 = exchangeFadingRuntimeDSP(nullptr);
         if (auto* done = (reinterpret_cast<uintptr_t>(doneRaw2) == (~static_cast<uintptr_t>(0))) ? nullptr : doneRaw2)
             retireDSP(done);
     }
@@ -442,9 +441,9 @@ void AudioEngine::timerCallback()
             const uint32 now = juce::Time::getMillisecondCounter();
             const uint32 intervalMs = static_cast<uint32>(
                 std::max(250, convo::consumeAtomic(fixedNoiseLogIntervalMs, std::memory_order_acquire)));
-            if ((now - fixedNoiseLastLogMs) >= intervalMs)
+            if ((now - rtAuxMutable_.fixedNoiseLastLogMs) >= intervalMs)
             {
-                fixedNoiseLastLogMs = now;
+                rtAuxMutable_.fixedNoiseLastLogMs = now;
                 const auto diag = dsp->fixedNoiseShaper.getDiagnostics();
                 if (diag.windowSamples > 0)
                 {
@@ -473,9 +472,9 @@ void AudioEngine::timerCallback()
             const uint32 now = juce::Time::getMillisecondCounter();
             const uint32 intervalMs = static_cast<uint32>(
                 std::max(250, convo::consumeAtomic(fixedNoiseLogIntervalMs, std::memory_order_acquire)));
-            if ((now - fixedNoiseLastLogMs) >= intervalMs)
+            if ((now - rtAuxMutable_.fixedNoiseLastLogMs) >= intervalMs)
             {
-                fixedNoiseLastLogMs = now;
+                rtAuxMutable_.fixedNoiseLastLogMs = now;
                 const auto diag = dsp->fixed15TapNoiseShaper.getDiagnostics();
                 if (diag.windowSamples > 0)
                 {

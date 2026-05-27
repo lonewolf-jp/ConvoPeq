@@ -1,19 +1,23 @@
 {
   "schema": "evidence_manifest_v1",
   "generationMode": "runtime",
-  "runtimeRunId": "runtime-local",
-  "runId": "runtime-local",
-  "buildMode": "CI",
-  "proofLevel": "full",
-  "generatedAtNs": 142260715978900,
+  "runtimeRunId": "local-126e7ddbb39949dbbd734ba464277318",
+  "runId": "local-126e7ddbb39949dbbd734ba464277318",
+  "buildMode": "Release",
+  "proofLevel": "off",
+  "generatedAtNs": 52045684508600,
+  "minimalEvidence": true,
+  "generator": "isr-run-runtime-evidence.ps1",
   "artifacts": [
     "closure_graph.json",
-    "mutation_fault_trace.json",
     "hb_graph_trace.json",
     "hb_violation_report.json",
-    "retire_timeline.json",
-    "shutdown_trace.json",
+    "mutation_fault_trace.json",
+    "payload_tier_report.json",
+    "recovery_trace.json",
     "retire_latency_report.json",
-    "payload_tier_report.json"
+    "retire_timeline.json",
+    "runtime_budget_report.json",
+    "shutdown_trace.json"
   ]
 }

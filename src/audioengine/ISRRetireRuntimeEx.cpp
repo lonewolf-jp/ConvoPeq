@@ -1,6 +1,8 @@
 #include "ISRRetireRuntimeEx.h"
 #include "AtomicAccess.h"
+#include "DspNumericPolicy.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -54,6 +56,25 @@ const char* epochModeName(EpochMode mode) noexcept
     default: return "shared";
     }
 }
+
+bool readEnvFlag(const char* name, bool defaultValue) noexcept
+{
+    if (name == nullptr || name[0] == '\0') {
+        return defaultValue;
+    }
+
+    if (const char* raw = std::getenv(name); raw != nullptr) {
+        const char first = raw[0];
+        if (first == '1' || first == 't' || first == 'T' || first == 'y' || first == 'Y') {
+            return true;
+        }
+        if (first == '0' || first == 'f' || first == 'F' || first == 'n' || first == 'N') {
+            return false;
+        }
+    }
+
+    return defaultValue;
+}
 } // namespace
 
 RetireRuntimeEx::RetireRuntimeEx()
@@ -66,9 +87,18 @@ RetireRuntimeEx::RetireRuntimeEx()
         convo::publishAtomic(counter, static_cast<std::uint64_t>(0), std::memory_order_relaxed);
     }
 
+    const bool globalEnabled = readEnvFlag("ISR_ROLLBACK_GLOBAL", true);
+    const bool publicationOnlyEnabled = readEnvFlag("ISR_ROLLBACK_PUBLICATION_ONLY", false);
+    const bool crossfadeOnlyEnabled = readEnvFlag("ISR_ROLLBACK_CROSSFADE_ONLY", false);
+    const bool retirePathOnlyEnabled = readEnvFlag("ISR_ROLLBACK_RETIRE_PATH_ONLY", true);
+
     convo::publishAtomic(totalTransitions_, static_cast<std::uint64_t>(0), std::memory_order_relaxed);
     convo::publishAtomic(rollbackModeRaw_, toRaw(EpochMode::Shared), std::memory_order_relaxed);
-    convo::publishAtomic(rollbackReady_, true, std::memory_order_relaxed);
+    convo::publishAtomic(rollbackGlobalEnabled_, globalEnabled, std::memory_order_relaxed);
+    convo::publishAtomic(rollbackPublicationOnlyEnabled_, publicationOnlyEnabled, std::memory_order_relaxed);
+    convo::publishAtomic(rollbackCrossfadeOnlyEnabled_, crossfadeOnlyEnabled, std::memory_order_relaxed);
+    convo::publishAtomic(rollbackRetirePathOnlyEnabled_, retirePathOnlyEnabled, std::memory_order_relaxed);
+    convo::publishAtomic(rollbackReady_, (globalEnabled && retirePathOnlyEnabled), std::memory_order_relaxed);
 }
 
 void RetireRuntimeEx::emitIntent(std::uint32_t slot, std::uint32_t generation) {
@@ -83,6 +113,7 @@ void RetireRuntimeEx::emitIntent(std::uint32_t slot, std::uint32_t generation) {
 }
 
 void RetireRuntimeEx::enqueueRetire(std::uint32_t slot) {
+    ASSERT_NON_RT_THREAD();
     if (slot >= laneBySlot_.size()) {
         return;
     }
@@ -134,8 +165,32 @@ EpochMode RetireRuntimeEx::getRollbackMode() const noexcept {
     return epochModeFromRaw(convo::consumeAtomic(rollbackModeRaw_, std::memory_order_acquire));
 }
 
+void RetireRuntimeEx::setRollbackFlags(bool globalEnabled,
+                                       bool publicationOnlyEnabled,
+                                       bool crossfadeOnlyEnabled,
+                                       bool retirePathOnlyEnabled) noexcept
+{
+    convo::publishAtomic(rollbackGlobalEnabled_, globalEnabled, std::memory_order_release);
+    convo::publishAtomic(rollbackPublicationOnlyEnabled_, publicationOnlyEnabled, std::memory_order_release);
+    convo::publishAtomic(rollbackCrossfadeOnlyEnabled_, crossfadeOnlyEnabled, std::memory_order_release);
+    convo::publishAtomic(rollbackRetirePathOnlyEnabled_, retirePathOnlyEnabled, std::memory_order_release);
+    convo::publishAtomic(rollbackReady_, (globalEnabled && retirePathOnlyEnabled), std::memory_order_release);
+}
+
+RollbackFlagDescriptor RetireRuntimeEx::describeRollbackFlags() const noexcept
+{
+    return RollbackFlagDescriptor{
+        .globalEnabled = convo::consumeAtomic(rollbackGlobalEnabled_, std::memory_order_acquire),
+        .publicationOnlyEnabled = convo::consumeAtomic(rollbackPublicationOnlyEnabled_, std::memory_order_acquire),
+        .crossfadeOnlyEnabled = convo::consumeAtomic(rollbackCrossfadeOnlyEnabled_, std::memory_order_acquire),
+        .retirePathOnlyEnabled = convo::consumeAtomic(rollbackRetirePathOnlyEnabled_, std::memory_order_acquire)
+    };
+}
+
 bool RetireRuntimeEx::canRollback() const noexcept {
-    return convo::consumeAtomic(rollbackReady_, std::memory_order_acquire);
+    return convo::consumeAtomic(rollbackReady_, std::memory_order_acquire)
+        && convo::consumeAtomic(rollbackGlobalEnabled_, std::memory_order_acquire)
+        && convo::consumeAtomic(rollbackRetirePathOnlyEnabled_, std::memory_order_acquire);
 }
 
 void RetireRuntimeEx::requestRollback() noexcept {
@@ -171,12 +226,19 @@ void RetireRuntimeEx::emitRetireTimeline(const std::filesystem::path& outputPath
     }
 
     const auto strategy = describeEpochStrategy();
+    const auto rollbackFlags = describeRollbackFlags();
 
     file << "{\n";
     file << "  \"schema\": \"retire_timeline_v1\",\n";
     file << "  \"epochMode\": \"" << epochModeName(strategy.activeMode) << "\",\n";
     file << "  \"rollbackMode\": \"" << epochModeName(strategy.rollbackMode) << "\",\n";
     file << "  \"rollbackReady\": " << (strategy.rollbackReady ? "true" : "false") << ",\n";
+    file << "  \"rollbackFlags\": {\n";
+    file << "    \"global\": " << (rollbackFlags.globalEnabled ? "true" : "false") << ",\n";
+    file << "    \"publicationOnly\": " << (rollbackFlags.publicationOnlyEnabled ? "true" : "false") << ",\n";
+    file << "    \"crossfadeOnly\": " << (rollbackFlags.crossfadeOnlyEnabled ? "true" : "false") << ",\n";
+    file << "    \"retirePathOnly\": " << (rollbackFlags.retirePathOnlyEnabled ? "true" : "false") << "\n";
+    file << "  },\n";
     file << "  \"totalTransitions\": "
          << convo::consumeAtomic(totalTransitions_, std::memory_order_acquire) << ",\n";
     file << "  \"laneCounters\": {\n";

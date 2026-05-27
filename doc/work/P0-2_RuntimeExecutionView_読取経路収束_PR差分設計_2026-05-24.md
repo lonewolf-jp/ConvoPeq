@@ -1,8 +1,8 @@
 # P0-2 RuntimeExecutionView 読取経路収束 専用PR 差分設計
 
-作成日: 2026-05-24  
-対象ブランチ: `feature/p0-1-observetoken-formalization` から派生  
-上位計画: `doc/work/bridge_runtime_migration_plan.md`  
+作成日: 2026-05-24
+対象ブランチ: `feature/p0-1-observetoken-formalization` から派生
+上位計画: `doc/work/bridge_runtime_migration_plan.md`
 厳守規約: `doc/work/ISR_Bridge_Runtime_AI_暴走防止規約.md`
 
 ---

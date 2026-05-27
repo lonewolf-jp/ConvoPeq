@@ -1,0 +1,9 @@
+{
+    "schema": "isr_enforcement_source_policy_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-ENFORCE-SOURCE-001",
+    "rationale": "Prevent regression from advanced source metrics back to rawRegex in trigger audit",
+    "expiry": "2026-09-30",
+    "allowedRawRegexFields": [],
+    "allowedUnknownFields": []
+}

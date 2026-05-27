@@ -148,7 +148,8 @@ void OutputFilter::reset() noexcept
 // デノーマル対策: |w| < 1e-20 をゼロに flush
 // FMA (Fused Multiply-Add) により積算精度向上・レイテンシ削減
 //──────────────────────────────────────────────────────────────────────────
-static inline __m128d biquadStep128_FMA(
+namespace {
+inline __m128d biquadStep128_FMA(
     const __m128d x,
     const __m128d b0, const __m128d b1, const __m128d b2,
     const __m128d a1, const __m128d a2,
@@ -176,6 +177,7 @@ static inline __m128d biquadStep128_FMA(
     w2 = _mm_andnot_pd(_mm_cmplt_pd(abs_w2, kDenThresh), new_w2);
 
     return y;
+}
 }
 
 //──────────────────────────────────────────────────────────────────────────

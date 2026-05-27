@@ -10,10 +10,9 @@
 #include <mkl.h>
 #include <mkl_vml.h>
 
-extern std::atomic<int> g_totalLatencyClampCount;
-
 namespace ConvolverProcessorInternal
 {
+
     // ────────────────────────────────────────────────────────────────
     // スレッドキャンセル確認
     // ────────────────────────────────────────────────────────────────

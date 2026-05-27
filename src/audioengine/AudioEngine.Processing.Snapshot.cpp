@@ -26,14 +26,14 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     const auto* runtimeGraph = runtimeGraphHint;
     if (runtimeGraph == nullptr)
     {
-        const auto runtimePublishView = getRuntimePublishView();
-        runtimeGraph = runtimePublishView.graph;
+        const auto runtimeReadView = readAudioRuntimeView();
+        runtimeGraph = getRuntimeGraph(runtimeReadView);
     }
     DSPCore* dsp = isFadingTarget
-        ? resolveFadingDSPFromRuntimeWorldOnly(runtimeGraph)
-        : resolveActiveDSPFromRuntimeWorldOnly(runtimeGraph);
+        ? resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph)
+        : resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
     if (dsp == nullptr && isFadingTarget)
-        dsp = resolveActiveDSPFromRuntimeWorldOnly(runtimeGraph);
+        dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
     if (dsp == nullptr)
     {
         bufferToFill.clearActiveBufferRegion();

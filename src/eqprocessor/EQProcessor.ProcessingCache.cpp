@@ -5,16 +5,20 @@
 #include <cstring>
 #include <new>
 
-static inline uint32_t floatToCanonicalBits(float f) noexcept
+namespace {
+
+inline uint32_t floatToCanonicalBits(float f) noexcept
 {
     uint32_t bits;
     std::memcpy(&bits, &f, sizeof(float));
     return bits & 0x7FFFFFFF;
 }
 
-static inline uint64_t hashCombine(uint64_t seed, uint64_t value) noexcept
+inline uint64_t hashCombine(uint64_t seed, uint64_t value) noexcept
 {
     return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+}
+
 }
 
 uint64_t EQProcessor::computeParamsHash(const convo::EQParameters& params) noexcept

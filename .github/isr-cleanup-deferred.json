@@ -1,0 +1,8 @@
+{
+    "schema": "cleanup_deferred_registry_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-CLEANUP-GOV-001",
+    "rationale": "top-level lifecycle governance for deferred cleanup policy",
+    "expiry": "2026-09-30",
+    "entries": []
+}

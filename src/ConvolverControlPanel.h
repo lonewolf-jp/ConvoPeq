@@ -141,7 +141,6 @@ private:
 
     std::atomic<int> irPreviewRequestId { 0 };
     bool irPreviewInProgress = false;
-    static juce::ThreadPool irPreviewThreadPool;
     juce::Component::SafePointer<juce::DialogWindow> irAdvancedWindow;
     juce::Component::SafePointer<juce::DialogWindow> convolverSettingsWindow;
 

@@ -35,11 +35,6 @@
 #include "MKLNonUniformConvolver.h"
 #include "MKLRealTimeSetup.h"
 
-namespace {
-#if JUCE_DEBUG
-std::atomic<int> g_warmupGuardCount { 0 };
-#endif
-}
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
 
@@ -61,6 +56,15 @@ std::atomic<int> g_warmupGuardCount { 0 };
 
 namespace convo
 {
+
+#if JUCE_DEBUG
+std::atomic<int> MKLNonUniformConvolver::debugWarmupGuardCountStorage_ { 0 };
+
+std::atomic<int>& MKLNonUniformConvolver::debugWarmupGuardCount() noexcept
+{
+    return debugWarmupGuardCountStorage_;
+}
+#endif
 
 struct IppFFTPlan
 {
@@ -98,16 +102,17 @@ public:
     }
 
 private:
+    static std::unordered_map<int, std::unique_ptr<IppFFTPlan>> cacheStorage_;
+    static std::mutex cacheMutex_;
+
     static std::unordered_map<int, std::unique_ptr<IppFFTPlan>>& getCache()
     {
-        static std::unordered_map<int, std::unique_ptr<IppFFTPlan>> cache;
-        return cache;
+        return cacheStorage_;
     }
 
     static std::mutex& getMutex()
     {
-        static std::mutex mtx;
-        return mtx;
+        return cacheMutex_;
     }
 
     static std::unique_ptr<IppFFTPlan> createPlan(int order)
@@ -142,6 +147,9 @@ private:
         return plan;
     }
 };
+
+std::unordered_map<int, std::unique_ptr<IppFFTPlan>> IppFFTPlanCache::cacheStorage_{};
+std::mutex IppFFTPlanCache::cacheMutex_{};
 
 namespace
 {
@@ -1015,7 +1023,7 @@ void MKLNonUniformConvolver::processLayerBlock(Layer& l) noexcept
 #endif
 #if JUCE_DEBUG
     if (!convo::consumeAtomic(l.warmupCompleted, std::memory_order_acquire))
-    convo::fetchAddAtomic(g_warmupGuardCount, 1, std::memory_order_acq_rel);
+    convo::fetchAddAtomic(debugWarmupGuardCount(), 1, std::memory_order_acq_rel);
 #endif
 
     // ── 1. [prevInput | currentInput] を fftTimeBuf に配置 (Overlap-Save) ──
@@ -1207,7 +1215,7 @@ void MKLNonUniformConvolver::Add(const double* input, int numSamples)
 
 #if JUCE_DEBUG
         if (!convo::consumeAtomic(l.warmupCompleted, std::memory_order_acquire))
-            convo::fetchAddAtomic(g_warmupGuardCount, 1, std::memory_order_acq_rel);
+            convo::fetchAddAtomic(debugWarmupGuardCount(), 1, std::memory_order_acq_rel);
 #endif
 
         int consumed = 0;

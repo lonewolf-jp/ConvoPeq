@@ -1,34 +1,9 @@
 #pragma once
 
-#include <mkl.h>
-#include <mutex>
-#include <JuceHeader.h>
-
 namespace MKLRealTime {
 
 // MUST be called before any MKL DFTI usage.
 // Safe to call multiple times (call_once ensures single execution).
-inline void setup() {
-    static std::once_flag flag;
-    std::call_once(flag, [] {
-        // シングルスレッド固定
-        mkl_set_num_threads(1);
-        mkl_set_dynamic(0);
-
-        // 環境変数でさらに強制（OpenMP 対策）
-#ifdef _WIN32
-        _putenv("MKL_NUM_THREADS=1");
-        _putenv("OMP_NUM_THREADS=1");
-#else
-        setenv("MKL_NUM_THREADS", "1", 1);
-        setenv("OMP_NUM_THREADS", "1", 1);
-#endif
-
-        // FTZ/DAZ（既存設定と重複可）
-        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-        // vmlSetMode は MainApplication で既に呼ばれているのでここでは呼ばない
-    });
-}
+void setup() noexcept;
 
 } // namespace MKLRealTime

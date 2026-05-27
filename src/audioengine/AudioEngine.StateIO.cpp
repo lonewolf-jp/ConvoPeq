@@ -103,29 +103,6 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
                 setAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
         }
 
-        if (!hasBankedAdaptiveCoefficients)
-        {
-            double legacyAdaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
-            bool hasLegacyAdaptiveCoefficients = false;
-
-            for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
-            {
-                const auto propertyName = "adaptiveCoeff" + juce::String(coeffIndex);
-                if (state.hasProperty(propertyName))
-                {
-                    legacyAdaptiveCoefficients[coeffIndex] = static_cast<double>(state.getProperty(propertyName));
-                    hasLegacyAdaptiveCoefficients = true;
-                }
-            }
-
-            if (hasLegacyAdaptiveCoefficients)
-            {
-                for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
-                    setAdaptiveCoefficientsForSampleRate(getAdaptiveSampleRateBankHz(bankIndex),
-                                                         legacyAdaptiveCoefficients,
-                                                         kAdaptiveNoiseShaperOrder);
-            }
-        }
     }
 
     if (state.hasProperty("oversamplingFactor"))
@@ -182,7 +159,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
     sendChangeMessage();
 }
 
-juce::ValueTree AudioEngine::getCurrentState() const
+[[nodiscard]] juce::ValueTree AudioEngine::getCurrentState() const
 {
     juce::ValueTree state ("Preset");
 

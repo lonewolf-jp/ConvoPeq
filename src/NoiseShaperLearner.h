@@ -267,8 +267,6 @@ private:
     int historyHead { 0 };
     std::mutex historyMutex;
 
-    static juce::ThreadPool saveThreadPool;  // 非同期保存用スレッドプール
-
     // callAsync ラムダが this の生存を安全に確認するための WeakReference サポート。
     // デストラクタで masterReference が破棄されると WeakReference::get() が nullptr を返すため、
     // 破棄済みオブジェクトへのアクセスを防げる。

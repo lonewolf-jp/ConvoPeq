@@ -16,8 +16,11 @@
 // Destruction handlers for EBR (Epoch-Based Reclamation)
 // L5: epoch-only 削除。RefCountedDeferred の二重ライフタイムモデルを廃止。
 //============================================================================
-static void deleteEQStatePtr(void* p) { delete static_cast<EQProcessor::EQState*>(p); }
-static void deleteBandNodePtr_core(void* p) { delete static_cast<EQProcessor::BandNode*>(p); }
+namespace
+{
+void deleteEQStatePtr(void* p) noexcept { delete static_cast<EQProcessor::EQState*>(p); }
+void deleteBandNodePtr(void* p) noexcept { delete static_cast<EQProcessor::BandNode*>(p); }
+}
 
 bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
                                                     void (*deleter)(void*),
@@ -76,7 +79,7 @@ void EQProcessor::retireBandNodeDeferred(BandNode* node) noexcept
         return;
 
     const uint64_t epoch = m_epochDomain.currentEpoch();
-    enqueueDeferredDeleteWithFallback(node, deleteBandNodePtr_core, epoch);
+    enqueueDeferredDeleteWithFallback(node, deleteBandNodePtr, epoch);
 }
 
 //============================================================================

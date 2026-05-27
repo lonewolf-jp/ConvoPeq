@@ -28,7 +28,15 @@ namespace convo::numeric_policy
         std::atomic<uint32_t> depth { 0 };
     };
 
-    inline std::array<AudioThreadSlot, kMaxAudioThreadSlots> g_audioThreadSlots {};
+    namespace detail
+    {
+        inline std::array<AudioThreadSlot, kMaxAudioThreadSlots> audioThreadSlotsStorage {};
+    }
+
+    inline std::array<AudioThreadSlot, kMaxAudioThreadSlots>& audioThreadSlots() noexcept
+    {
+        return detail::audioThreadSlotsStorage;
+    }
 
     inline uint64_t currentThreadTag() noexcept
     {
@@ -58,9 +66,10 @@ namespace convo::numeric_policy
         {
             const uint64_t tag = currentThreadTag();
 
-            for (size_t i = 0; i < g_audioThreadSlots.size(); ++i)
+            auto& slots = audioThreadSlots();
+            for (size_t i = 0; i < slots.size(); ++i)
             {
-                auto& slot = g_audioThreadSlots[i];
+                auto& slot = slots[i];
                 const uint64_t existingTag = convo::consumeAtomic(slot.tag, std::memory_order_acquire);
                 if (existingTag == tag)
                 {
@@ -70,9 +79,9 @@ namespace convo::numeric_policy
                 }
             }
 
-            for (size_t i = 0; i < g_audioThreadSlots.size(); ++i)
+            for (size_t i = 0; i < slots.size(); ++i)
             {
-                auto& slot = g_audioThreadSlots[i];
+                auto& slot = slots[i];
                 uint64_t expected = 0;
                 if (convo::compareExchangeAtomic(slot.tag,
                                                  expected,
@@ -92,7 +101,7 @@ namespace convo::numeric_policy
             if (slotIndex < 0)
                 return;
 
-            auto& slot = g_audioThreadSlots[static_cast<size_t>(slotIndex)];
+            auto& slot = audioThreadSlots()[static_cast<size_t>(slotIndex)];
             const uint32_t previousDepth = convo::fetchSubAtomic(slot.depth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
             if (previousDepth <= 1)
             {
@@ -108,7 +117,7 @@ namespace convo::numeric_policy
     inline bool isAudioThread() noexcept
     {
         const uint64_t tag = currentThreadTag();
-        for (auto& slot : g_audioThreadSlots)
+        for (auto& slot : audioThreadSlots())
         {
             if (convo::consumeAtomic(slot.tag, std::memory_order_acquire) == tag)
                 return true;

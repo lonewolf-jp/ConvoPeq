@@ -62,7 +62,7 @@ inline void scaleBlockFallback(double* data, int numSamples, double gain) noexce
         data[i] *= gain;
 }
 
-static inline double fastTanh(double x) noexcept
+inline double fastTanh(double x) noexcept
 {
     constexpr double numA = 10395.0;
     constexpr double numB = 1260.0;
@@ -81,7 +81,7 @@ static inline double fastTanh(double x) noexcept
     return num / den;
 }
 
-static inline double musicalSoftClipScalar(double x, double threshold, double knee, double asymmetry) noexcept
+inline double musicalSoftClipScalar(double x, double threshold, double knee, double asymmetry) noexcept
 {
     const double abs_x = absNoLibm(x);
     const double clip_start = threshold - knee;
@@ -108,9 +108,9 @@ static inline double musicalSoftClipScalar(double x, double threshold, double kn
     return sign * (linear * (1.0 - knee_shape) + clipped * knee_shape) * asymmetric_gain;
 }
 
-static void softClipBlockAVX2(double* __restrict data, int numSamples,
-                              double threshold, double knee,
-                              double asymmetry, double& prevSample) noexcept
+void softClipBlockAVX2(double* __restrict data, int numSamples,
+                       double threshold, double knee,
+                       double asymmetry, double& prevSample) noexcept
 {
     int i = 0;
     for (; i < numSamples; ++i)
