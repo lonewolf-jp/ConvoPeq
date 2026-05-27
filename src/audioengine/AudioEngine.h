@@ -2915,7 +2915,7 @@ public:
 
     // スナップショット基盤（Phase 2）
     // ==================================================================
-    mutable convo::EpochDomain m_epochDomain;
+    convo::EpochDomain m_epochDomain;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
     convo::RCUReader audioThreadRcuReader { m_epochDomain };
     // ENGINE_CONTROL: Audio thread での deletion queue overflow 退避スロット。
