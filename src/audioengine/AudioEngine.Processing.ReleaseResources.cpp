@@ -189,29 +189,12 @@ void AudioEngine::releaseResources()
     makeRuntimePublicationCoordinator()
         .clearPublishedRuntimeSnapshotsNonRt();
 
-    const auto isPublicationDrained = [this]() noexcept -> bool
+    const bool drainedWithinBudget = waitForDrain(2000, 2);
+    if (!drainedWithinBudget || !isFullyDrained())
     {
-        if (convo::consumeAtomic(commitDrainInProgress, std::memory_order_acquire))
-            return false;
-        return !hasPendingPublicationIntents();
-    };
+        if (!drainedWithinBudget)
+            diagLog("[DIAG] releaseResources: drain timeout reached, performing one emergency reclaim boost path");
 
-    const auto isRebuildWorkerStopped = [this]() noexcept -> bool
-    {
-        return !convo::consumeAtomic(rebuildThreadIsRunning, std::memory_order_acquire);
-    };
-
-    const auto isRetireFallbackDrained = [this]() noexcept -> bool
-    {
-        if (convo::consumeAtomic(audioThreadRetireOverflowPtr, std::memory_order_acquire) != nullptr)
-            return false;
-
-        std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-        return deferredDeleteFallbackQueue.empty();
-    };
-
-    if (!isPublicationDrained() || !isRebuildWorkerStopped() || !isRetireFallbackDrained())
-    {
         drainPublicationLogForShutdown();
         drainDeferredRetireQueues(true);
         m_epochDomain.drainAll();

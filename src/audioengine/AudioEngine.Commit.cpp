@@ -285,6 +285,8 @@ void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP, int gene
 
     const auto backlog = hasPendingPublicationIntents() ? 1ull : 0ull;
     convo::publishAtomic(publicationBacklog_, backlog, std::memory_order_release);
+    runtimePublicationBridge_.setPublicationBacklogCount(backlog);
+    runtimePublicationBridge_.setPendingIntentCount(backlog);
 }
 
 void AudioEngine::appendPublicationIntentForCommitProducer(DSPCore* newDSP, int generation) noexcept
@@ -335,6 +337,9 @@ void AudioEngine::drainPublicationLogForShutdown() noexcept
     convo::publishAtomic(publicationLog.head, static_cast<PublicationIntent*>(nullptr), std::memory_order_release); // release: shutdown 後の sentinel 彸残を防止
     convo::publishAtomic(publicationLog.consumedTail, static_cast<PublicationIntent*>(nullptr), std::memory_order_release); // release: 後続の acquire を不可視、null 保証
     convo::publishAtomic(publicationLog.retiredHead, static_cast<PublicationIntent*>(nullptr), std::memory_order_release); // release: 後続の consume acquire と HB
+    convo::publishAtomic(publicationBacklog_, 0ull, std::memory_order_release);
+    runtimePublicationBridge_.setPublicationBacklogCount(0u);
+    runtimePublicationBridge_.setPendingIntentCount(0u);
 }
 
 void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
@@ -420,6 +425,8 @@ void AudioEngine::executeCommit()
     const bool hasRemaining = hasPendingPublicationIntents();
 
     convo::publishAtomic(publicationBacklog_, hasRemaining ? 1ull : 0ull, std::memory_order_release);
+    runtimePublicationBridge_.setPublicationBacklogCount(hasRemaining ? 1u : 0u);
+    runtimePublicationBridge_.setPendingIntentCount(hasRemaining ? 1u : 0u);
 
     convo::publishAtomic(commitDrainInProgress, false, std::memory_order_release); // release: 次回の hasPublicationLogPending の acquire と HB
 

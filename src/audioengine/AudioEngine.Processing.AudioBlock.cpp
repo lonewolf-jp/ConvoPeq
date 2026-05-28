@@ -301,6 +301,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                                                      oldL,
                                                      oldR,
                                                      numSamples,
+                                                     preparedCrossfade.latencyDelayOld,
+                                                     preparedCrossfade.latencyDelayNew,
                                                      preparedCrossfade.latencyResetPending,
                                                      [this, useDryAsOld](float* outL,
                                                                          float* outR,

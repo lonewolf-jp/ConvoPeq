@@ -3,7 +3,19 @@
 
 namespace convo::isr {
 
-RuntimePublicationCoordinator::RuntimePublicationCoordinator() : currentWorld_(nullptr), version_(0), lastRejectCode_(RejectCode::None) {}
+RuntimePublicationCoordinator::RuntimePublicationCoordinator()
+    : currentWorld_(nullptr)
+    , version_(0)
+    , lastRejectCode_(RejectCode::None)
+    , retireBacklogCount_(0)
+    , publicationBacklogCount_(0)
+    , pendingIntentCount_(0)
+    , fallbackBacklogCount_(0)
+    , reclaimInFlightCount_(0)
+    , deferredRetireResidencyCount_(0)
+    , swapPending_(false)
+{
+}
 
 bool RuntimePublicationCoordinator::precheckPublish(const PayloadClosureDescriptor& closure,
                                                     const TieredPayloadDescriptor& descriptor) noexcept {
@@ -43,8 +55,10 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
         return;
     }
 
+    convo::publishAtomic(swapPending_, true, std::memory_order_release);
     convo::publishAtomic(currentWorld_, newWorld, std::memory_order_release);
     convo::publishAtomic(version_, version, std::memory_order_release);
+    convo::publishAtomic(swapPending_, false, std::memory_order_release);
 }
 
 void RuntimePublicationCoordinator::retire(RetireAuthority,
@@ -55,7 +69,11 @@ void RuntimePublicationCoordinator::retire(RetireAuthority,
     }
 
     std::lock_guard<std::mutex> lock(retireGuard_);
+    if (retiredWorlds_.size() >= kMaxRetiredWorldResidency) {
+        retiredWorlds_.erase(retiredWorlds_.begin());
+    }
     retiredWorlds_.push_back(oldWorld);
+    convo::publishAtomic(retireBacklogCount_, static_cast<std::uint64_t>(retiredWorlds_.size()), std::memory_order_release);
 }
 
 const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
@@ -64,6 +82,55 @@ const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
     return convo::consumeAtomic(version_, std::memory_order_acquire);
+}
+
+void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
+    convo::publishAtomic(retireBacklogCount_, count, std::memory_order_release);
+}
+
+void RuntimePublicationCoordinator::setPublicationBacklogCount(std::uint64_t count) noexcept {
+    convo::publishAtomic(publicationBacklogCount_, count, std::memory_order_release);
+}
+
+void RuntimePublicationCoordinator::setPendingIntentCount(std::uint64_t count) noexcept {
+    convo::publishAtomic(pendingIntentCount_, count, std::memory_order_release);
+}
+
+void RuntimePublicationCoordinator::setFallbackBacklogCount(std::uint64_t count) noexcept {
+    convo::publishAtomic(fallbackBacklogCount_, count, std::memory_order_release);
+}
+
+void RuntimePublicationCoordinator::setReclaimInFlightCount(std::uint64_t count) noexcept {
+    convo::publishAtomic(reclaimInFlightCount_, count, std::memory_order_release);
+}
+
+void RuntimePublicationCoordinator::setDeferredRetireResidencyCount(std::uint64_t count) noexcept {
+    convo::publishAtomic(deferredRetireResidencyCount_, count, std::memory_order_release);
+}
+
+void RuntimePublicationCoordinator::setSwapPending(bool pending) noexcept {
+    convo::publishAtomic(swapPending_, pending, std::memory_order_release);
+}
+
+bool RuntimePublicationCoordinator::isSwapPending() const noexcept {
+    return convo::consumeAtomic(swapPending_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimePublicationCoordinator::getReclaimInFlightCount() const noexcept {
+    return convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire);
+}
+
+bool RuntimePublicationCoordinator::isFullyDrained() const noexcept {
+    if (convo::consumeAtomic(swapPending_, std::memory_order_acquire)) {
+        return false;
+    }
+
+    return convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(publicationBacklogCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire) == 0
+        && convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire) == 0;
 }
 
 void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {

@@ -32,6 +32,16 @@ public:
     void retire(RetireAuthority, RuntimeBoundary boundary, const void* oldWorld);
     const void* getCurrent() const noexcept;
     std::uint64_t getVersion() const noexcept;
+    void setRetireBacklogCount(std::uint64_t count) noexcept;
+    void setPublicationBacklogCount(std::uint64_t count) noexcept;
+    void setPendingIntentCount(std::uint64_t count) noexcept;
+    void setFallbackBacklogCount(std::uint64_t count) noexcept;
+    void setReclaimInFlightCount(std::uint64_t count) noexcept;
+    void setDeferredRetireResidencyCount(std::uint64_t count) noexcept;
+    void setSwapPending(bool pending) noexcept;
+    [[nodiscard]] bool isSwapPending() const noexcept;
+    [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
+    [[nodiscard]] bool isFullyDrained() const noexcept;
 private:
     enum class RejectCode : uint8_t {
         None = 0,
@@ -42,8 +52,16 @@ private:
     std::atomic<const void*> currentWorld_;
     std::atomic<std::uint64_t> version_;
     std::atomic<RejectCode> lastRejectCode_;
+    std::atomic<std::uint64_t> retireBacklogCount_;
+    std::atomic<std::uint64_t> publicationBacklogCount_;
+    std::atomic<std::uint64_t> pendingIntentCount_;
+    std::atomic<std::uint64_t> fallbackBacklogCount_;
+    std::atomic<std::uint64_t> reclaimInFlightCount_;
+    std::atomic<std::uint64_t> deferredRetireResidencyCount_;
+    std::atomic<bool> swapPending_;
     std::mutex retireGuard_;
     std::vector<const void*> retiredWorlds_;
+    static constexpr std::size_t kMaxRetiredWorldResidency = 4096;
 };
 
 class MultiStagePublisher {

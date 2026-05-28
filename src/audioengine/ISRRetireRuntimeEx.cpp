@@ -99,6 +99,7 @@ RetireRuntimeEx::RetireRuntimeEx()
     convo::publishAtomic(rollbackCrossfadeOnlyEnabled_, crossfadeOnlyEnabled, std::memory_order_relaxed);
     convo::publishAtomic(rollbackRetirePathOnlyEnabled_, retirePathOnlyEnabled, std::memory_order_relaxed);
     convo::publishAtomic(rollbackReady_, (globalEnabled && retirePathOnlyEnabled), std::memory_order_relaxed);
+    convo::publishAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(0), std::memory_order_relaxed);
 }
 
 void RetireRuntimeEx::emitIntent(std::uint32_t slot, std::uint32_t generation) {
@@ -135,18 +136,28 @@ void RetireRuntimeEx::reclaim(std::uint32_t slot) {
     if (slot >= laneBySlot_.size()) {
         return;
     }
+    const RetireLane previousLane = laneOf(slot);
     convo::publishAtomic(laneBySlot_[slot], toRaw(RetireLane::Reclaim), std::memory_order_release);
     (void)convo::fetchAddAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Reclaim)], static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     (void)convo::fetchAddAtomic(totalTransitions_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    if (previousLane == RetireLane::Quarantine)
+    {
+        const auto resident = convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
+        if (resident > 0)
+            convo::fetchSubAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    }
 }
 
 void RetireRuntimeEx::quarantine(std::uint32_t slot) {
     if (slot >= laneBySlot_.size()) {
         return;
     }
+    const RetireLane previousLane = laneOf(slot);
     convo::publishAtomic(laneBySlot_[slot], toRaw(RetireLane::Quarantine), std::memory_order_release);
     (void)convo::fetchAddAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Quarantine)], static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     (void)convo::fetchAddAtomic(totalTransitions_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    if (previousLane != RetireLane::Quarantine)
+        convo::fetchAddAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
 }
 
 void RetireRuntimeEx::setEpochMode(EpochMode mode) noexcept {
@@ -207,6 +218,10 @@ EpochStrategyDescriptor RetireRuntimeEx::describeEpochStrategy() const noexcept 
         .rollbackMode = getRollbackMode(),
         .rollbackReady = canRollback()
     };
+}
+
+std::uint64_t RetireRuntimeEx::getQuarantineResidentCount() const noexcept {
+    return convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
 }
 
 RetireLane RetireRuntimeEx::laneOf(std::uint32_t slot) const noexcept {

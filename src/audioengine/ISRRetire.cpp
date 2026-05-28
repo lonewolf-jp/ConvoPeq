@@ -1,6 +1,8 @@
 #include "ISRRetire.h"
 #include "AtomicAccess.h"
 
+#include <algorithm>
+
 namespace convo {
 namespace isr {
 
@@ -34,6 +36,16 @@ std::vector<RetireIntent> RetireRuntime::dequeuePendingRetireIntents() noexcept
         result.push_back(retireIntentQueue_[head]);
         head = (head + 1) % RETIRE_INTENT_QUEUE_SIZE;
     }
+
+    std::stable_sort(result.begin(), result.end(), [](const RetireIntent& lhs, const RetireIntent& rhs) noexcept {
+        if (lhs.retireEpoch != rhs.retireEpoch)
+            return lhs.retireEpoch < rhs.retireEpoch;
+
+        if (lhs.generation != rhs.generation)
+            return lhs.generation < rhs.generation;
+
+        return lhs.dspSlot < rhs.dspSlot;
+    });
 
     convo::publishAtomic(retireIntentHead_, head, std::memory_order_release);
     return result;

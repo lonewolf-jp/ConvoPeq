@@ -32,4 +32,25 @@ struct RuntimeBuildSnapshot
     bool sealed = false;
 };
 
+[[nodiscard]] inline bool isRuntimeBuildSnapshotSealedAndCompatible(const RuntimeBuildSnapshot& snapshot,
+                                                                    const RuntimeBuildSnapshot& other) noexcept
+{
+    if (!snapshot.sealed || !other.sealed)
+        return false;
+
+    if (snapshot.rebuildFingerprint.fingerprintVersion != other.rebuildFingerprint.fingerprintVersion)
+        return false;
+
+    return snapshot.buildInput.sampleRate == other.buildInput.sampleRate
+        && snapshot.buildInput.blockSize == other.buildInput.blockSize
+        && snapshot.buildInput.ditherBitDepth == other.buildInput.ditherBitDepth
+        && snapshot.buildInput.oversamplingFactor == other.buildInput.oversamplingFactor
+        && snapshot.buildInput.oversamplingType == other.buildInput.oversamplingType
+        && snapshot.buildInput.noiseShaperType == other.buildInput.noiseShaperType
+        && snapshot.convolverFingerprint == other.convolverFingerprint
+        && snapshot.rebuildFingerprint.irIdentityHash == other.rebuildFingerprint.irIdentityHash
+        && snapshot.rebuildFingerprint.convolutionConfigHash == other.rebuildFingerprint.convolutionConfigHash
+        && snapshot.rebuildFingerprint.dspParameterHash == other.rebuildFingerprint.dspParameterHash;
+}
+
 } // namespace convo

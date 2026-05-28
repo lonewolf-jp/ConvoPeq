@@ -218,6 +218,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                                                   oldL,
                                                   oldR,
                                                   numSamples,
+                                                                  preparedCrossfade.latencyDelayOld,
+                                                                  preparedCrossfade.latencyDelayNew,
                                                                   preparedCrossfade.latencyResetPending,
                                                   [](double* outL,
                                                      double* outR,

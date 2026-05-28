@@ -6,6 +6,9 @@ namespace
     constexpr size_t kReclaimBacklogWarnThreshold = 128;
     constexpr int kBaseRetireHighWatermark = 3072;
     constexpr int kBaseRetireLowWatermark = 1024;
+    constexpr int kEmergencyReclaimBoostWindowMs = 500;
+    constexpr int kEmergencyReclaimBoostMaxCount = 2;
+    constexpr int kEmergencyReclaimBoostMinIntervalMs = 10;
 
     [[nodiscard]] double clampScale(double value) noexcept
     {
@@ -118,8 +121,10 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
     flushAudioThreadRetireOverflow();
     flushDeferredDeleteFallbackQueue();
+    runtimePublicationBridge_.setReclaimInFlightCount(1);
     m_epochDomain.reclaimRetired();
     m_coordinator.reclaim(m_epochDomain);
+    runtimePublicationBridge_.setReclaimInFlightCount(0);
 
     const auto fallbackDepth = [this]() noexcept -> std::uint64_t
     {
@@ -132,8 +137,11 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
     convo::publishAtomic(fallbackQueueDepth_, fallbackDepth, std::memory_order_release);
     convo::publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
+    runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepth);
+    runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
+    runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);
 
-    const std::uint64_t quarantineResident = convo::consumeAtomic(quarantineResident_, std::memory_order_acquire);
+    const std::uint64_t quarantineResident = retireRuntimeEx_.getQuarantineResidentCount();
     convo::publishAtomic(quarantineResident_, quarantineResident, std::memory_order_release);
 
     const auto computeBackpressureScales = [this, retireDepth, fallbackDepth, quarantineResident]() noexcept
@@ -179,24 +187,92 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     }
 
     const bool nowSaturated = retireDepth >= static_cast<std::uint64_t>(hwm);
+    const std::uint64_t publishCount = convo::consumeAtomic(rtAuxMutable_.runtimePublishCount, std::memory_order_acquire);
 
     if (!wasSaturated && nowSaturated)
     {
         convo::publishAtomic(retireSaturationActive_, true, std::memory_order_release);
+        convo::publishAtomic(retireSaturationRecoveryPending_, false, std::memory_order_release);
+        convo::publishAtomic(retireSaturationRecoveryBaselinePublishCount_, publishCount, std::memory_order_release);
         convo::fetchAddAtomic(saturationEnterCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     }
-    else if (wasSaturated && retireDepth < static_cast<std::uint64_t>(lwm))
+    else if (wasSaturated)
     {
-        // stepwise conservative recovery（128刻み）
-        hwm = std::max(kBaseRetireHighWatermark, hwm - 128);
-        lwm = std::max(kBaseRetireLowWatermark, lwm - 128);
-        if (lwm >= hwm)
-            lwm = std::max(kBaseRetireLowWatermark, hwm - 1);
-        convo::publishAtomic(retireHighWatermark_, hwm, std::memory_order_release);
-        convo::publishAtomic(retireLowWatermark_, lwm, std::memory_order_release);
+        const bool belowOrEqualLowWatermark = retireDepth <= static_cast<std::uint64_t>(lwm);
+        if (belowOrEqualLowWatermark)
+        {
+            const bool recoveryPending = convo::consumeAtomic(retireSaturationRecoveryPending_, std::memory_order_acquire);
+            if (!recoveryPending)
+            {
+                convo::publishAtomic(retireSaturationRecoveryPending_, true, std::memory_order_release);
+                convo::publishAtomic(retireSaturationRecoveryBaselinePublishCount_, publishCount, std::memory_order_release);
+            }
+            else
+            {
+                const std::uint64_t baselinePublishCount = convo::consumeAtomic(retireSaturationRecoveryBaselinePublishCount_, std::memory_order_acquire);
+                const bool observedAtLeastOnePublicationCycle = publishCount > baselinePublishCount;
+                if (observedAtLeastOnePublicationCycle)
+                {
+                    // stepwise conservative recovery（128刻み）
+                    hwm = std::max(kBaseRetireHighWatermark, hwm - 128);
+                    lwm = std::max(kBaseRetireLowWatermark, lwm - 128);
+                    if (lwm >= hwm)
+                        lwm = std::max(kBaseRetireLowWatermark, hwm - 1);
+                    convo::publishAtomic(retireHighWatermark_, hwm, std::memory_order_release);
+                    convo::publishAtomic(retireLowWatermark_, lwm, std::memory_order_release);
 
-        convo::publishAtomic(retireSaturationActive_, false, std::memory_order_release);
-        convo::fetchAddAtomic(saturationExitCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+                    convo::publishAtomic(retireSaturationActive_, false, std::memory_order_release);
+                    convo::publishAtomic(retireSaturationRecoveryPending_, false, std::memory_order_release);
+                    convo::fetchAddAtomic(saturationExitCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+                }
+            }
+        }
+        else
+        {
+            convo::publishAtomic(retireSaturationRecoveryPending_, false, std::memory_order_release);
+            convo::publishAtomic(retireSaturationRecoveryBaselinePublishCount_, publishCount, std::memory_order_release);
+        }
+    }
+
+    {
+        const bool saturatedNow = convo::consumeAtomic(retireSaturationActive_, std::memory_order_acquire);
+        const std::int64_t nowTicks = juce::Time::getHighResolutionTicks();
+        const std::int64_t ticksPerSecond = juce::Time::getHighResolutionTicksPerSecond();
+        const std::int64_t boostWindowTicks = (ticksPerSecond * kEmergencyReclaimBoostWindowMs) / 1000;
+        const std::int64_t minIntervalTicks = (ticksPerSecond * kEmergencyReclaimBoostMinIntervalMs) / 1000;
+
+        if (saturatedNow)
+        {
+            std::int64_t windowStart = convo::consumeAtomic(emergencyReclaimWindowStartTicks_, std::memory_order_acquire);
+            if (windowStart <= 0 || (boostWindowTicks > 0 && (nowTicks - windowStart) > boostWindowTicks))
+            {
+                convo::publishAtomic(emergencyReclaimWindowStartTicks_, nowTicks, std::memory_order_release);
+                convo::publishAtomic(emergencyReclaimBoostCount_, 0, std::memory_order_release);
+                windowStart = nowTicks;
+            }
+
+            const int boostCount = convo::consumeAtomic(emergencyReclaimBoostCount_, std::memory_order_acquire);
+            const std::int64_t lastBoostTicks = convo::consumeAtomic(emergencyReclaimLastBoostTicks_, std::memory_order_acquire);
+            const bool withinWindow = (boostWindowTicks <= 0) || ((nowTicks - windowStart) <= boostWindowTicks);
+            const bool intervalReady = (lastBoostTicks <= 0) || (minIntervalTicks <= 0) || ((nowTicks - lastBoostTicks) >= minIntervalTicks);
+
+            if (withinWindow && boostCount < kEmergencyReclaimBoostMaxCount && intervalReady)
+            {
+                runtimePublicationBridge_.setReclaimInFlightCount(1);
+                m_epochDomain.reclaimRetired();
+                m_coordinator.reclaim(m_epochDomain);
+                runtimePublicationBridge_.setReclaimInFlightCount(0);
+
+                convo::publishAtomic(emergencyReclaimLastBoostTicks_, nowTicks, std::memory_order_release);
+                convo::fetchAddAtomic(emergencyReclaimBoostCount_, 1, std::memory_order_acq_rel);
+            }
+        }
+        else
+        {
+            convo::publishAtomic(emergencyReclaimWindowStartTicks_, 0, std::memory_order_release);
+            convo::publishAtomic(emergencyReclaimLastBoostTicks_, 0, std::memory_order_release);
+            convo::publishAtomic(emergencyReclaimBoostCount_, 0, std::memory_order_release);
+        }
     }
 
     const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;
@@ -207,6 +283,49 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     {
         juce::Logger::writeToLog("[DIAG] deferred reclaim enqueue drops=" + juce::String(static_cast<juce::int64>(dropped)));
     }
+}
+
+bool AudioEngine::isFullyDrained() noexcept
+{
+    if (convo::consumeAtomic(commitDrainInProgress, std::memory_order_acquire))
+        return false;
+
+    const std::uint64_t publicationBacklog = convo::consumeAtomic(publicationBacklog_, std::memory_order_acquire);
+    runtimePublicationBridge_.setPublicationBacklogCount(publicationBacklog);
+
+    const bool hasPendingIntents = hasPendingPublicationIntents();
+    runtimePublicationBridge_.setPendingIntentCount(hasPendingIntents ? 1u : 0u);
+
+    const std::uint64_t fallbackDepth = convo::consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire);
+    const std::uint64_t retireDepth = convo::consumeAtomic(retireQueueDepth_, std::memory_order_acquire);
+    runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepth);
+    runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
+    runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);
+
+    return runtimePublicationBridge_.isFullyDrained();
+}
+
+bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
+{
+    ASSERT_NON_RT_THREAD();
+
+    const int boundedTimeoutMs = juce::jlimit(1, 10000, timeoutMs);
+    const int boundedPollIntervalMs = juce::jlimit(1, 100, pollIntervalMs);
+
+    const double startMs = juce::Time::getMillisecondCounterHiRes();
+    while (!isFullyDrained())
+    {
+        drainPublicationLogForShutdown();
+        drainDeferredRetireQueues(true);
+
+        const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;
+        if (elapsedMs >= static_cast<double>(boundedTimeoutMs))
+            return false;
+
+        juce::Thread::sleep(boundedPollIntervalMs);
+    }
+
+    return true;
 }
 
 void AudioEngine::processDeferredReleases()

@@ -832,6 +832,8 @@ public:
     }
 
     [[nodiscard]] bool acceptsRuntimePublication() const noexcept;
+    [[nodiscard]] bool isFullyDrained() noexcept;
+    [[nodiscard]] bool waitForDrain(int timeoutMs = 2000, int pollIntervalMs = 2) noexcept;
 
     void drainDeferredRetireQueues(bool allowDuringShutdown) noexcept;
 
@@ -1152,9 +1154,6 @@ private:
     // 遅延値はatomicで管理（MessageThread→AudioThread）
     std::atomic<int> latencyDelayOld { 0 };
     std::atomic<int> latencyDelayNew { 0 };
-    // AudioThread snapshot（フェード単位で固定）
-    int latencyDelayOld_RT = 0;
-    int latencyDelayNew_RT = 0;
     int dspCrossfadeStartDelayBlocks_RT = 0;
     bool dspCrossfadeArmed_RT = false;
     // バッファリセット要求（MessageThread→AudioThread）
@@ -1915,6 +1914,7 @@ public:
         convo::RebuildKind kind = convo::RebuildKind::None;
         RebuildTelemetryClass rebuildClass = RebuildTelemetryClass::NA;
         RebuildTelemetryPolicy collapsePolicy = RebuildTelemetryPolicy::NA;
+        std::uint32_t fingerprintVersion = 1u;
         uint64_t structuralHash = 0;
         uint64_t fingerprint = 0;
         bool deferCategory = false;
@@ -2024,8 +2024,6 @@ public:
 
     inline void resetLatencyDelayRtState() noexcept
     {
-        latencyDelayOld_RT = 0;
-        latencyDelayNew_RT = 0;
     }
 
     enum class CommitReaderSlot : int
@@ -2582,8 +2580,6 @@ public:
             && !dspCrossfadeArmed_RT)
         {
             dspCrossfadeArmed_RT = true;
-            latencyDelayOld_RT = prepared.latencyDelayOld;
-            latencyDelayNew_RT = prepared.latencyDelayNew;
             dspCrossfadeStartDelayBlocks_RT = prepared.startDelayBlocks;
 
             // C1-2: activate のみ Audio Thread で実行 (reset/setCurrentAndTargetValue は Message Thread 側)
@@ -2697,13 +2693,13 @@ public:
                                                   const SampleType* oldL,
                                                   const SampleType* oldR,
                                                   int numSamples,
+                                                  int delayOld,
+                                                  int delayNew,
                                                   bool runtimeResetPending,
                                                   MixFn mixFn) noexcept
     {
         const int bufferSize = latencyBufSize;
         int writePos = latencyWritePos;
-        const int delayOld = latencyDelayOld_RT;
-        const int delayNew = latencyDelayNew_RT;
 
         resetLatencyBuffersIfPending(bufferSize, writePos, runtimeResetPending);
 
@@ -2970,6 +2966,11 @@ public:
     std::atomic<int> retireHighWatermark_ { 3072 };
     std::atomic<int> retireLowWatermark_ { 1024 };
     std::atomic<bool> retireSaturationActive_ { false };
+    std::atomic<bool> retireSaturationRecoveryPending_ { false };
+    std::atomic<std::uint64_t> retireSaturationRecoveryBaselinePublishCount_ { 0 };
+    std::atomic<std::int64_t> emergencyReclaimWindowStartTicks_ { 0 };
+    std::atomic<std::int64_t> emergencyReclaimLastBoostTicks_ { 0 };
+    std::atomic<int> emergencyReclaimBoostCount_ { 0 };
     std::atomic<int> m_currentOversamplingFactor { 0 };
     std::atomic<convo::OversamplingType> m_currentOversamplingType { convo::OversamplingType::IIR };
     std::atomic<int> m_currentDitherBitDepth { 24 };

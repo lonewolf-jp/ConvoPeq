@@ -21,8 +21,6 @@ void AudioEngine::initialize()
     convo::publishAtomic(latencyResetPending, false, std::memory_order_release); // release: process の acquire と HB
     convo::publishAtomic(queuedFadeTimeSec, 0.03, std::memory_order_release); // release: process の acquire と HB
     resetLatencyDelayRtState();
-    dspCrossfadeStartDelayBlocks_RT = 0;
-    dspCrossfadeArmed_RT = false;
 
     dspCrossfadeGain.reset(48000.0, 0.03);
     dspCrossfadeGain.setCurrentAndTargetValue(1.0);

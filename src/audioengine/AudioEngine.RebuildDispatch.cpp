@@ -51,6 +51,7 @@ convo::RuntimeBuildSnapshot captureRuntimeBuildSnapshot(const convo::BuildInput&
     snapshot.generation = generation;
     snapshot.buildInput = buildInput;
     snapshot.convolverFingerprint = convolverSnapshot.fingerprint;
+    snapshot.rebuildFingerprint.fingerprintVersion = convo::RuntimeBuildFingerprint{}.fingerprintVersion;
     snapshot.rebuildFingerprint.irIdentityHash = structuralHash;
     snapshot.rebuildFingerprint.convolutionConfigHash = convolverSnapshot.fingerprint;
     snapshot.rebuildFingerprint.sampleRate = buildInput.sampleRate;
@@ -101,6 +102,7 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
     constexpr const char* kPhase5TagKeep = "phase5_keep_target";
 
     const int64_t nowTicks = juce::Time::getHighResolutionTicks();
+    const std::uint32_t fingerprintVersion = convo::RuntimeBuildFingerprint {}.fingerprintVersion;
     uint64_t structuralHash = 0;
     uint64_t fingerprint = 0;
     bool isMessageThread = false;
@@ -139,6 +141,7 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
             && pending.kind == kind
             && pending.rebuildClass == rebuildClass
             && pending.collapsePolicy == collapsePolicy
+            && pending.fingerprintVersion == fingerprintVersion
             && pending.structuralHash == structuralHash
             && pending.fingerprint == fingerprint
             && pending.deferCategory == deferCategory;
@@ -156,6 +159,7 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
         rebuildAdmissionPendingIntent_.kind = kind;
         rebuildAdmissionPendingIntent_.rebuildClass = rebuildClass;
         rebuildAdmissionPendingIntent_.collapsePolicy = collapsePolicy;
+        rebuildAdmissionPendingIntent_.fingerprintVersion = fingerprintVersion;
         rebuildAdmissionPendingIntent_.structuralHash = structuralHash;
         rebuildAdmissionPendingIntent_.fingerprint = fingerprint;
         rebuildAdmissionPendingIntent_.deferCategory = deferCategory;
@@ -497,7 +501,9 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                     std::abs(pendingTask.buildInput.sampleRate - sampleRate) <= 1.0e-6
                     && pendingTask.buildInput.blockSize == samplesPerBlock
                     && equalsBuildParameterSnapshot(pendingSnapshot, paramSnapshot)
-                    && pendingTask.convolverBuildSnapshot.fingerprint == task.convolverBuildSnapshot.fingerprint;
+                    && pendingTask.convolverBuildSnapshot.fingerprint == task.convolverBuildSnapshot.fingerprint
+                    && convo::isRuntimeBuildSnapshotSealedAndCompatible(pendingTask.runtimeBuildSnapshot,
+                                                                        task.runtimeBuildSnapshot);
 
                 if (sameAsPending)
                 {
