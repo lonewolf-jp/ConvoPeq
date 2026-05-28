@@ -839,7 +839,7 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
                     if (!convo::consumeAtomic(safeThis->cliAutomationCallbacksEnabled, std::memory_order_acquire))
                         return;
 
-                    safeThis->audioEngine.requestRebuild(convo::RebuildKind::Structural);
+                    safeThis->audioEngine.requestStructuredRebuildIntent(convo::RebuildKind::Structural);
                 });
             }
         }

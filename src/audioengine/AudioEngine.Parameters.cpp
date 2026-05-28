@@ -214,7 +214,10 @@ void AudioEngine::endBulkParameterRestore(bool requestRebuildNow) noexcept
 
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (sr > 0.0)
-        requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
+        submitRebuildIntent(convo::RebuildKind::Structural,
+                    RebuildTelemetryReason::RequestRebuildKindEntry,
+                    RebuildTelemetryClass::Structural,
+                    RebuildTelemetryPolicy::Replaceable);
 }
 
 #if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_LOAD)
@@ -353,7 +356,10 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (sr > 0.0)
-        requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
+        submitRebuildIntent(convo::RebuildKind::Structural,
+                            RebuildTelemetryReason::RequestRebuildKindEntry,
+                            RebuildTelemetryClass::Structural,
+                            RebuildTelemetryPolicy::Replaceable);
 
     // UI更新通知
     sendChangeMessage();
@@ -587,7 +593,10 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
             }
             else
             {
-                requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
+                submitRebuildIntent(convo::RebuildKind::Structural,
+                                    RebuildTelemetryReason::RequestRebuildKindEntry,
+                                    RebuildTelemetryClass::Structural,
+                                    RebuildTelemetryPolicy::Replaceable);
             }
         }
     }
@@ -648,7 +657,10 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
             }
             else
             {
-                requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
+                submitRebuildIntent(convo::RebuildKind::Structural,
+                                    RebuildTelemetryReason::RequestRebuildKindEntry,
+                                    RebuildTelemetryClass::Structural,
+                                    RebuildTelemetryPolicy::Replaceable);
             }
         }
     }
@@ -730,7 +742,10 @@ void AudioEngine::setOversamplingFactor(int factor)
         const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         if (!m_isRestoringState && sr > 0.0)
         {
-            requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
+            submitRebuildIntent(convo::RebuildKind::Structural,
+                                RebuildTelemetryReason::RequestRebuildKindEntry,
+                                RebuildTelemetryClass::Structural,
+                                RebuildTelemetryPolicy::Replaceable);
         }
     }
 }
@@ -745,7 +760,7 @@ void AudioEngine::setOversamplingFactor(int factor)
 // Implementations are kept here (.cpp) so that AudioEngine.h does not expose
 // direct uiConvolverProcessor.set*() calls to the Rule 1.1.5 grep scan.
 // All calls are Message Thread only and route through the UI staging object;
-// the Runtime world is updated via convolverParamsChanged -> requestRebuild().
+// the Runtime world is updated via convolverParamsChanged -> submitRebuildIntent().
 // ---------------------------------------------------------------------------
 
 void AudioEngine::setConvolverTargetIRLength(float timeSec, bool manualOverride) noexcept
@@ -803,7 +818,10 @@ void AudioEngine::setOversamplingType(OversamplingType type)
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (!m_isRestoringState && sr > 0.0)
     {
-        requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
+        submitRebuildIntent(convo::RebuildKind::Structural,
+                            RebuildTelemetryReason::RequestRebuildKindEntry,
+                            RebuildTelemetryClass::Structural,
+                            RebuildTelemetryPolicy::Replaceable);
     }
 }
 

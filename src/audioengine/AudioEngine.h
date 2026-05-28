@@ -783,6 +783,13 @@ public:
     [[nodiscard]] NoiseShaperType getNoiseShaperType() const;
     void requestSnapshotForNoiseShaper();
     void requestRebuild(convo::RebuildKind kind) noexcept;
+    void requestStructuredRebuildIntent(convo::RebuildKind kind) noexcept
+    {
+        submitRebuildIntent(kind,
+                            RebuildTelemetryReason::RequestRebuildKindEntry,
+                            RebuildTelemetryClass::Structural,
+                            RebuildTelemetryPolicy::Replaceable);
+    }
     void setFixedNoiseLogIntervalMs(int intervalMs) noexcept;
     [[nodiscard]] int getFixedNoiseLogIntervalMs() const noexcept;
     void setFixedNoiseWindowSamples(int windowSamples) noexcept;
@@ -890,6 +897,14 @@ public:
         std::uint64_t publicationRejectCount = 0;
         std::uint64_t rebuildCollapseCount = 0;
         double reclaimLatency = 0.0;
+    };
+
+    enum class ResidencyAuthority : uint8_t
+    {
+        PublicationCoordinator = 0,
+        DeferredDeleteFallback,
+        EpochRetire,
+        ShutdownDrain
     };
 
     [[nodiscard]] RuntimeLifecycleDiagnostics getRuntimeLifecycleDiagnostics() const noexcept

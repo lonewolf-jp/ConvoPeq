@@ -41,8 +41,13 @@ if ($headerText -notmatch '&& !dspCrossfadeArmed_RT\)') {
     $violations.Add('Crossfade arm path must guard on !dspCrossfadeArmed_RT')
 }
 
-if ($initText -notmatch 'dspCrossfadeArmed_RT = false;') {
-    $violations.Add('AudioEngine.initialize() must reset dspCrossfadeArmed_RT to false')
+$hasLegacyInitRtReset = $initText -match 'dspCrossfadeArmed_RT\s*=\s*false;'
+$hasSnapshotBackedInitReset = ($initText -match 'publishAtomic\(dspCrossfadePending,\s*false,\s*std::memory_order_release\)') -and
+                             ($initText -match 'publishAtomic\(dspCrossfadeStartDelayBlocks,\s*0,\s*std::memory_order_release\)') -and
+                             ($initText -match 'refreshCrossfadePreparedSnapshotFromAtomics\(\)')
+
+if (-not $hasLegacyInitRtReset -and -not $hasSnapshotBackedInitReset) {
+    $violations.Add('AudioEngine.initialize() must reset crossfade observable state (legacy RT fields or snapshot-backed atomics)')
 }
 
 $report = [ordered]@{

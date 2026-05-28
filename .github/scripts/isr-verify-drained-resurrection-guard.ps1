@@ -48,11 +48,10 @@ Assert-Contains -Text $releaseText -Pattern 'clearRebuildReason\(RebuildReason::
 Assert-Contains -Text $releaseText -Pattern 'clearRebuildReason\(RebuildReason::DeferredFinalizeAware\);' -Message 'Missing clearRebuildReason(DeferredFinalizeAware)'
 Assert-Contains -Text $releaseText -Pattern 'cancelPendingUpdate\(\);' -Message 'Missing cancelPendingUpdate() at release entry'
 
-# Strict drained checks (5 conditions): publication/rebuild/fallback all required before final completion.
-Assert-Contains -Text $releaseText -Pattern 'const auto isPublicationDrained = \[this\]\(\) noexcept -> bool' -Message 'Missing isPublicationDrained predicate'
-Assert-Contains -Text $releaseText -Pattern 'const auto isRebuildWorkerStopped = \[this\]\(\) noexcept -> bool' -Message 'Missing isRebuildWorkerStopped predicate'
-Assert-Contains -Text $releaseText -Pattern 'const auto isRetireFallbackDrained = \[this\]\(\) noexcept -> bool' -Message 'Missing isRetireFallbackDrained predicate'
-Assert-Contains -Text $releaseText -Pattern 'if \(!isPublicationDrained\(\) \|\| !isRebuildWorkerStopped\(\) \|\| !isRetireFallbackDrained\(\)\)' -Message 'Missing strict drained conjunction gate'
+# Strict drained checks: publication/rebuild/fallback all required before final completion.
+# Current implementation uses bounded wait + full-drain fallback.
+Assert-Contains -Text $releaseText -Pattern 'const bool drainedWithinBudget = waitForDrain\(2000,\s*2\);' -Message 'Missing bounded waitForDrain gate'
+Assert-Contains -Text $releaseText -Pattern 'if \(!drainedWithinBudget \|\| !isFullyDrained\(\)\)' -Message 'Missing strict drained conjunction gate (drainedWithinBudget/isFullyDrained)'
 Assert-Contains -Text $releaseText -Pattern 'drainPublicationLogForShutdown\(\);' -Message 'Missing publication drain in release path'
 Assert-Contains -Text $releaseText -Pattern 'drainDeferredRetireQueues\(true\);' -Message 'Missing deferred retire drain in release path'
 Assert-Contains -Text $releaseText -Pattern 'm_epochDomain\.drainAll\(\);' -Message 'Missing epochDomain.drainAll in strict drain fallback path'

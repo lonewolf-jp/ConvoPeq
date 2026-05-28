@@ -85,7 +85,10 @@ $requiredGateScripts = @(
     '.github/scripts/isr-verify-bridge-plan-completeness.ps1',
     '.github/scripts/isr-verify-backlog-specfixed-residual.ps1',
     '.github/scripts/isr-verify-clang-tidy-readiness.ps1',
-    '.github/scripts/isr-verify-clang-tidy-audit.ps1'
+    '.github/scripts/isr-verify-clang-tidy-audit.ps1',
+    '.github/scripts/isr-verify-v73-admission-funnel.ps1',
+    '.github/scripts/isr-verify-v73-shutdown-reclaim.ps1',
+    '.github/scripts/isr-verify-v73-residency-telemetry.ps1'
 )
 
 foreach ($relativeScript in $requiredGateScripts) {
@@ -103,6 +106,13 @@ foreach ($relativeScript in $requiredGateScripts) {
     if (-not $wiredInWorkflow -and -not $wiredInTierRunner) {
         throw "Workflow/tier wiring missing gate invocation: $relativeScript"
     }
+}
+
+$workflowNeedsTierRunnerInvocation =
+$workflowText.Contains("`$invokeArgs = @('-Tier', `$tier)") -and
+$workflowText.Contains('& ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs')
+if (-not $workflowNeedsTierRunnerInvocation) {
+    throw 'Workflow missing mandatory tier-runner invocation wiring'
 }
 
 $workflowNeedsClangTidyAuditInput = [regex]::IsMatch($workflowText, 'requireClangTidyAudit\s*:')

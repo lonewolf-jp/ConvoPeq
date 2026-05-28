@@ -153,7 +153,10 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     if (sr > 0.0)
-        requestRebuild(sr, convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
+        submitRebuildIntent(convo::RebuildKind::Structural,
+                            RebuildTelemetryReason::RequestRebuildKindEntry,
+                            RebuildTelemetryClass::Structural,
+                            RebuildTelemetryPolicy::Replaceable);
 
     // UI更新通知
     sendChangeMessage();

@@ -41,9 +41,12 @@ void AudioEngine::initialize()
     // 初期DSP構築 (デフォルト設定)
     // 安全対策: バッファサイズを余裕を持って確保 (SAFE_MAX_BLOCK_SIZE)
     // これにより、デバイス初期化前やバッファサイズ変更時の不整合による音切れ/無音を防ぐ
-    requestRebuild(48000.0, SAFE_MAX_BLOCK_SIZE);
     convo::publishAtomic(maxSamplesPerBlock, SAFE_MAX_BLOCK_SIZE, std::memory_order_release); // release: process の acquire と HB
     convo::publishAtomic(currentSampleRate, 48000.0, std::memory_order_release); // release: process/loader の acquire と HB
+    submitRebuildIntent(convo::RebuildKind::Structural,
+                        RebuildTelemetryReason::RequestRebuildKindEntry,
+                        RebuildTelemetryClass::Structural,
+                        RebuildTelemetryPolicy::Replaceable);
 
     m_fadeFloatBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE, false, false, true);
     m_fadeDoubleBuffer.setSize(2, SAFE_MAX_BLOCK_SIZE, false, false, true);

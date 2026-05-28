@@ -234,6 +234,9 @@ $standardAdditionalScripts = @(
     '.github/scripts/isr-verify-bridge-plan-completeness.ps1',
     '.github/scripts/isr-verify-clang-tidy-readiness.ps1',
     '.github/scripts/isr-verify-clang-tidy-audit.ps1',
+    '.github/scripts/isr-verify-v73-admission-funnel.ps1',
+    '.github/scripts/isr-verify-v73-shutdown-reclaim.ps1',
+    '.github/scripts/isr-verify-v73-residency-telemetry.ps1',
     '.github/scripts/check-src-atomic-dotcall.ps1',
     '.github/scripts/check-list-compliance.ps1',
     '.github/scripts/isr-verify-p3-governance.ps1'
@@ -246,6 +249,20 @@ $exhaustiveAdditionalScripts = @(
     '.github/scripts/isr-verify-v8.ps1',
     '.github/scripts/isr-verify-v9.ps1'
 )
+
+$requiredV73Scripts = @(
+    '.github/scripts/isr-verify-v73-admission-funnel.ps1',
+    '.github/scripts/isr-verify-v73-shutdown-reclaim.ps1',
+    '.github/scripts/isr-verify-v73-residency-telemetry.ps1'
+)
+
+if ($Tier -eq 'standard' -or $Tier -eq 'exhaustive') {
+    foreach ($requiredScript in $requiredV73Scripts) {
+        if ($standardAdditionalScripts -notcontains $requiredScript) {
+            throw "Tier wiring drift: required v7.3 script is missing from standard tier list: $requiredScript"
+        }
+    }
+}
 
 $scriptsToRun = @($smokeScripts)
 if ($Tier -eq 'standard' -or $Tier -eq 'exhaustive') {

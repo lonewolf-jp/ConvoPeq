@@ -14,7 +14,7 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
     if (source == &uiEqEditor)
     {
         // UI (SpectrumAnalyzerComponent など) が EQ 編集を即時反映できるよう通知する。
-        // 実 DSP 反映は従来どおり requestRebuild() 経由で行う。
+        // 実 DSP 反映は submitRebuildIntent() 経由で行う。
         sendChangeMessage();
         submitRebuildIntent(convo::RebuildKind::Structural,
                             RebuildTelemetryReason::UiEqEditorChangeListener,

@@ -232,7 +232,10 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         && (static_cast<DSPCore*>(runtimeGraph->activeNode) != nullptr);
     if (rateChanged || blockSizeChanged || !hasCurrentRuntime) {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
-            requestRebuild(safeSampleRate, bufferSize);
+            submitRebuildIntent(convo::RebuildKind::Structural,
+                                RebuildTelemetryReason::RequestRebuildKindEntry,
+                                RebuildTelemetryClass::Structural,
+                                RebuildTelemetryPolicy::Replaceable);
         } else {
             submitRebuildIntent(convo::RebuildKind::Structural,
                                 RebuildTelemetryReason::PrepareToPlayNonMt,

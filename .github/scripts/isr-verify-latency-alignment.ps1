@@ -55,8 +55,8 @@ if ($commitText -match 'publishAtomic\(latencyDelayOld,|publishAtomic\(latencyDe
 
 # v5.5 P5: RT latency sync can be done either by legacy runtimeGraph helper or by prepared snapshot handoff.
 $hasLegacyRuntimeGraphSync = $headerText -match 'syncLatencyDelayRtState\(runtimeGraph\)'
-$hasPreparedSnapshotSync = ($headerText -match 'latencyDelayOld_RT\s*=\s*prepared\.latencyDelayOld;') -and
-                           ($headerText -match 'latencyDelayNew_RT\s*=\s*prepared\.latencyDelayNew;')
+$hasPreparedSnapshotSync = ($headerText -match 'runtime\.latencyDelayOld\s*=\s*prepared\.latencyDelayOld;') -and
+                           ($headerText -match 'runtime\.latencyDelayNew\s*=\s*prepared\.latencyDelayNew;')
 
 if (-not $hasLegacyRuntimeGraphSync -and -not $hasPreparedSnapshotSync) {
     $violations.Add('AudioEngine.h must sync RT latency state via legacy runtimeGraph helper or prepared snapshot handoff')

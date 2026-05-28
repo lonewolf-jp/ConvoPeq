@@ -310,7 +310,7 @@ bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
     ASSERT_NON_RT_THREAD();
 
     const int boundedTimeoutMs = juce::jlimit(1, 10000, timeoutMs);
-    const int boundedPollIntervalMs = juce::jlimit(1, 100, pollIntervalMs);
+    const int boundedPollIntervalMs = juce::jlimit(1, 5, pollIntervalMs);
 
     const double startMs = juce::Time::getMillisecondCounterHiRes();
     while (!isFullyDrained())
