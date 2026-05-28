@@ -1,12 +1,13 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $workflowPath = Join-Path $repoRoot ".github\workflows\isr-verification.yml"
 $tierRunnerPath = Join-Path $repoRoot ".github\scripts\isr-run-tiered-verification.ps1"
 $validatorTieringPath = Join-Path $repoRoot '.github\scripts\isr-verify-validator-tiering.ps1'
 $triggerCleanupCompletionPath = Join-Path $repoRoot '.github\scripts\isr-verify-trigger-cleanup-completion.ps1'
+$ownershipMigrationScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-ownership-migration.ps1'
 
-foreach ($path in @($workflowPath, $tierRunnerPath, $validatorTieringPath, $triggerCleanupCompletionPath)) {
+foreach ($path in @($workflowPath, $tierRunnerPath, $validatorTieringPath, $triggerCleanupCompletionPath, $ownershipMigrationScriptPath)) {
     if (-not (Test-Path $path)) {
         throw "Missing required file: $path"
     }
@@ -16,6 +17,23 @@ $workflowText = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
 $tierRunnerText = Get-Content -LiteralPath $tierRunnerPath -Raw -Encoding UTF8
 $validatorTieringText = Get-Content -LiteralPath $validatorTieringPath -Raw -Encoding UTF8
 $triggerCleanupCompletionText = Get-Content -LiteralPath $triggerCleanupCompletionPath -Raw -Encoding UTF8
+$ownershipMigrationScriptText = Get-Content -LiteralPath $ownershipMigrationScriptPath -Raw -Encoding UTF8
+
+$ownershipMigrationNeedsAuthorityTransferContracts =
+$ownershipMigrationScriptText.Contains('ownership_migration_report_v2') -and
+$ownershipMigrationScriptText.Contains('trigger_audit_report.json') -and
+$ownershipMigrationScriptText.Contains('authorityTransferSequence') -and
+$ownershipMigrationScriptText.Contains('allStepsSatisfied') -and
+$ownershipMigrationScriptText.Contains('newAuthorityIntroduced') -and
+$ownershipMigrationScriptText.Contains('readPathCutoverVerified') -and
+$ownershipMigrationScriptText.Contains('writePathCutoverVerified') -and
+$ownershipMigrationScriptText.Contains('metricsConfirmed') -and
+$ownershipMigrationScriptText.Contains('triggerConfirmed') -and
+$ownershipMigrationScriptText.Contains('legacyAuthorityRemoved') -and
+$ownershipMigrationScriptText.Contains('Authority step violation:')
+if (-not $ownershipMigrationNeedsAuthorityTransferContracts) {
+    throw 'Ownership migration gate missing authority transfer v2 contract checks'
+}
 
 $requiredGateScripts = @(
     '.github/scripts/isr-verify-v1-immutability.ps1',
@@ -894,8 +912,10 @@ $canaryNormalizationScriptText = Get-Content -LiteralPath $canaryNormalizationSc
 $canaryNormalizationNeedsContractChecks =
 $canaryNormalizationScriptText.Contains('canary_baseline_normalization_report_v1') -and
 $canaryNormalizationScriptText.Contains('ISR_REQUIRE_RUNTIME_EVIDENCE') -and
+$canaryNormalizationScriptText.Contains('rebuild_admission_8_1_metrics_report_v1') -and
 $canaryNormalizationScriptText.Contains('baselineWindowNormalized') -and
-$canaryNormalizationScriptText.Contains('strictModeRequireAllMetrics')
+$canaryNormalizationScriptText.Contains('strictModeRequireAllMetrics') -and
+$canaryNormalizationScriptText.Contains('Strict mode requires evaluated xrunDelta evidence')
 if (-not $canaryNormalizationNeedsContractChecks) {
     throw 'Canary baseline normalization gate missing contract checks'
 }
@@ -924,8 +944,226 @@ $bridgePlanCompletenessScriptText = Get-Content -LiteralPath $bridgePlanComplete
 $bridgePlanCompletenessNeedsContracts =
 $bridgePlanCompletenessScriptText.Contains('bridge_plan_completeness_report.json') -and
 $bridgePlanCompletenessScriptText.Contains('bridge_plan_completeness_report_v1') -and
+$bridgePlanCompletenessScriptText.Contains('ISR_Bridge_Runtime_AI_暴走防止規約.md') -and
+$bridgePlanCompletenessScriptText.Contains('Plan missing governance section:') -and
+$bridgePlanCompletenessScriptText.Contains('## 7.3 CI rule self-test') -and
+$bridgePlanCompletenessScriptText.Contains('## 11. 既知リスクと抑止') -and
+$bridgePlanCompletenessScriptText.Contains('Plan missing invariant label:') -and
+$bridgePlanCompletenessScriptText.Contains('Plan missing SLA/canary clause:') -and
+$bridgePlanCompletenessScriptText.Contains('Plan missing canary metric clause:') -and
+$bridgePlanCompletenessScriptText.Contains('Plan missing known-risk clause:') -and
+$bridgePlanCompletenessScriptText.Contains('Plan missing completion clause:') -and
+$bridgePlanCompletenessScriptText.Contains('Plan missing anti-purity clause:') -and
+$bridgePlanCompletenessScriptText.Contains('Policy missing guardrail clause:') -and
+$bridgePlanCompletenessScriptText.Contains('Policy missing review-priority clause:') -and
+$bridgePlanCompletenessScriptText.Contains('Policy missing anti-purity clause:') -and
+$bridgePlanCompletenessScriptText.Contains('Policy missing prohibited-ai-action clause:') -and
+$bridgePlanCompletenessScriptText.Contains('Allowlist schema mismatch:') -and
+$bridgePlanCompletenessScriptText.Contains('Allowlist missing required field:') -and
+$bridgePlanCompletenessScriptText.Contains('Allowlist expiry parse failed:') -and
+$bridgePlanCompletenessScriptText.Contains('Allowlist expired:') -and
+$bridgePlanCompletenessScriptText.Contains('Missing required allowlist file:') -and
+$bridgePlanCompletenessScriptText.Contains('allowlistStatus') -and
+$bridgePlanCompletenessScriptText.Contains('Plan missing execution-order item:') -and
+$bridgePlanCompletenessScriptText.Contains('Plan execution-order sequence violated: section 13 items are out of order') -and
+$bridgePlanCompletenessScriptText.Contains('## 7.2 PR canary metrics') -and
+$bridgePlanCompletenessScriptText.Contains('baseline window normalization を実施') -and
+$bridgePlanCompletenessScriptText.Contains('## 8. メトリクス運用規約（Metric Governance）') -and
+$bridgePlanCompletenessScriptText.Contains('## 9. Trigger 一覧（機械判定）') -and
+$bridgePlanCompletenessScriptText.Contains('## 12. この計画での「完成」定義') -and
+$bridgePlanCompletenessScriptText.Contains('IR-A') -and
+$bridgePlanCompletenessScriptText.Contains('IR-G') -and
+$bridgePlanCompletenessScriptText.Contains('validator tiering + SLA') -and
 $bridgePlanCompletenessScriptText.Contains('Phase 6: cleanup（trigger達成後）') -and
+$bridgePlanCompletenessScriptText.Contains('canary_baseline_normalization_report.json') -and
+$bridgePlanCompletenessScriptText.Contains('canary_baseline_normalization_report_v1') -and
+$bridgePlanCompletenessScriptText.Contains('metric_governance_report.json') -and
+$bridgePlanCompletenessScriptText.Contains('metric_governance_report_v2') -and
+$bridgePlanCompletenessScriptText.Contains('flag_dependency_graph_report.json') -and
+$bridgePlanCompletenessScriptText.Contains('flag_dependency_graph_report_v1') -and
+$bridgePlanCompletenessScriptText.Contains('enforcement_adoption_report.json') -and
+$bridgePlanCompletenessScriptText.Contains('enforcement_adoption_report_v1') -and
+$bridgePlanCompletenessScriptText.Contains('enforcement_source_purity_report.json') -and
+$bridgePlanCompletenessScriptText.Contains('enforcement_source_purity_report_v1') -and
+$bridgePlanCompletenessScriptText.Contains('trigger_cleanup_readiness_report.json') -and
+$bridgePlanCompletenessScriptText.Contains('trigger_cleanup_readiness_report_v1') -and
+$bridgePlanCompletenessScriptText.Contains('ownership_migration_report.json') -and
+$bridgePlanCompletenessScriptText.Contains('ownership_migration_report_v2') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence missing authorityTransferSequence field') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence requires authorityTransferSequence.') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence missing allStepsSatisfied field') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence requires allStepsSatisfied=true') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence triggerAuditReportPath mismatch') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence allStepsSatisfied mismatch') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence missing stepDiagnostics field') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence missing stepDiagnostics entry for step=') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence stepDiagnostics.') -and
+$bridgePlanCompletenessScriptText.Contains('missing non-empty reason') -and
+$bridgePlanCompletenessScriptText.Contains('missing evidenceLocators') -and
+$bridgePlanCompletenessScriptText.Contains('contains empty evidence locator') -and
+$bridgePlanCompletenessScriptText.Contains('evidence locator format invalid') -and
+$bridgePlanCompletenessScriptText.Contains('evidence locator prefix invalid') -and
+$bridgePlanCompletenessScriptText.Contains('missing required locator label') -and
+$bridgePlanCompletenessScriptText.Contains('missing satisfied field') -and
+$bridgePlanCompletenessScriptText.Contains('satisfied mismatch with authorityTransferSequence') -and
+$bridgePlanCompletenessScriptText.Contains('Canary normalization evidence missing required metric') -and
+$bridgePlanCompletenessScriptText.Contains('Canary normalization evidence generatedAt parse failed') -and
+$bridgePlanCompletenessScriptText.Contains('Canary normalization evidence freshness breach') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence exceeds controlled canary metric set') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence missing registryOwner field') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence missing registryIssue field') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence missing registryExpiry field') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence registryExpiry parse failed: value=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence registryExpiry expired: value=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence metric entry missing id') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence metric blocking must be yes/no: id=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence metric missing owner: id=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence metric missing retention: id=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence metric missing threshold: id=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence metric missing action: id=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence metric normalization mismatch: id=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence metric missing issue: id=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence metric missing expired field: id=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence metric expired: id=') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence missing violations field') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence requires violations=0 but was') -and
+$bridgePlanCompletenessScriptText.Contains('Flag dependency evidence node count mismatch with rollback matrix') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence matrixPath mismatch: expected=') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence missing matrixOwner field') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence missing matrixIssue field') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence missing matrixExpiry field') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence matrixExpiry parse failed: value=') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence matrixExpiry expired: value=') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence globalFlag mismatch: expected=') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence subsystemFlagCount mismatch: expected=') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence scenarioCount mismatch: expected=') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence missing metricActionCoverage for flag=') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence requires metricActionCoverage>0: flag=') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence missing scenario: scenario=') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence requiredFlags mismatch: scenario=') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence missing violations field') -and
+$bridgePlanCompletenessScriptText.Contains('Rollback compatibility evidence requires violations=0 but was') -and
+$bridgePlanCompletenessScriptText.Contains('Enforcement adoption evidence requires withinTarget=true') -and
+$bridgePlanCompletenessScriptText.Contains('Enforcement adoption evidence requires all tracked sources advanced') -and
+$bridgePlanCompletenessScriptText.Contains('Enforcement source purity evidence requires zero violations') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger cleanup readiness evidence requires readyCount=0') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger cleanup readiness evidence requires blockedCount=0') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence requires violations=0') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup sequence contract violated: readiness evidence must be generated before or at cleanup completion evidence') -and
+$bridgePlanCompletenessScriptText.Contains('Authority migration sequence contract violated: ownership migration evidence must be generated before or at cleanup completion evidence') -and
+$bridgePlanCompletenessScriptText.Contains('Authority transfer sequence contract violated: trigger audit evidence must be generated before or at cleanup readiness evidence') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence requires policyViolations=0') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence missing policy evaluation id=') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence policy evaluation exceeds allowedMax') -and
+$bridgePlanCompletenessScriptText.Contains('Tier runner missing trigger preflight script tokens for order validation') -and
+$bridgePlanCompletenessScriptText.Contains('trigger symbol usage gate must run before trigger audit gate') -and
+$bridgePlanCompletenessScriptText.Contains('observe shim usage gate must run before trigger audit gate') -and
+$bridgePlanCompletenessScriptText.Contains('trigger AST gate must run before trigger audit gate') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: missing trigger AST report:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger AST evidence requires available=true') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger AST evidence requires commandOk=true') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: fadingOutDspWriteCount mismatch:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: astEvidenceRequired=true requires trigger_ast.required=true') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: astEvidenceRequired=true requires fadingOutDspWriteEffectiveSource=astOnly') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger symbol usage evidence requires policyViolations=0') -and
+$bridgePlanCompletenessScriptText.Contains('Observe shim evidence requires policyViolations=0') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence missing metric source field:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence metric source mismatch: field=') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: activeDspRawRefCount mismatch:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: activeDspRefCount mismatch:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: retireFacadeRawDependencyCount mismatch:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: retireFacadeDirectDependencyCount mismatch:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: retireFacadeRuntimeExecutionCount mismatch:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: runtimeExecutionViewUsageCount mismatch:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: legacyDirectObserveRawCount mismatch:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger evidence contract violated: legacyDirectObserveUsageCount mismatch:') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence missing policy block') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence policy schema mismatch: expected=isr_validator_tiering_policy_v1') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence policy missing tiers.') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence policy tier binding mismatch: tier=') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence policy missing slaHours.hbViolation') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence policy slaHours.hbViolation mismatch: expected=24') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence policy missing slaHours.payloadMismatch') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence policy slaHours.payloadMismatch mismatch: expected=72') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence missing slaFreshness block') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence missing slaFreshness entry: key=') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence requires slaFreshness.present=true: key=') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence requires slaFreshness.withinSla=true: key=') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence missing slaFreshness.maxAgeHours: key=') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence slaFreshness.maxAgeHours mismatch: key=') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence missing violations field') -and
+$bridgePlanCompletenessScriptText.Contains('Validator tiering evidence requires violations=0 but was') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence missing metrics block') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence missing metric field:') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence metric parse failed: field=') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence requires metrics.') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence generatedAt parse failed') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence freshness breach') -and
+$bridgePlanCompletenessScriptText.Contains('Authority transfer sequence contract violated: trigger audit evidence must be generated before or at ownership migration evidence') -and
+$bridgePlanCompletenessScriptText.Contains('Authority transfer sequence contract violated: trigger audit evidence must be generated before or at cleanup completion evidence') -and
+$bridgePlanCompletenessScriptText.Contains('Authority transfer readiness sequence evidence order check failed') -and
+$bridgePlanCompletenessScriptText.Contains('Authority transfer completion sequence evidence order check failed') -and
+$bridgePlanCompletenessScriptText.Contains('Phase evidence chronology contract violated:') -and
+$bridgePlanCompletenessScriptText.Contains('generatedAt parse failed') -and
+$bridgePlanCompletenessScriptText.Contains('generated after') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger cleanup readiness evidence generatedAt parse failed') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger cleanup readiness evidence freshness breach') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup prune evidence missing violations field') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup prune evidence requires violations=0') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup prune evidence missing field:') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup prune evidence apply=false requires prunedCount=0') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup prune evidence generatedAt parse failed') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup prune evidence freshness breach') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup deferred evidence missing violations field') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup deferred evidence requires violations=0') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup deferred evidence missing entryCount field') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup deferred evidence requires entryCount=0') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup deferred evidence missing pruneSummary field') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup deferred evidence pruneSummary missing field:') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup deferred evidence generatedAt parse failed') -and
+$bridgePlanCompletenessScriptText.Contains('Cleanup deferred evidence freshness breach') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence generatedAt parse failed') -and
+$bridgePlanCompletenessScriptText.Contains('Ownership migration evidence freshness breach') -and
+$bridgePlanCompletenessScriptText.Contains('phaseCompletionMatrix') -and
+$bridgePlanCompletenessScriptText.Contains('Phase completion contract violated: Phase 0 (統制基盤の先行導入) is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Phase completion contract violated: Phase 1 (計測可能トリガー化) is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Phase completion contract violated: Phase 2 (enforcement 高度化) is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Phase completion contract violated: Phase 3 (facade 統制) is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Phase completion contract violated: Phase 4 (crossfade 専用移行) is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Phase completion contract violated: Phase 5 (rollback hierarchy 導入) is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Phase completion contract violated: Phase 6 (cleanup) is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Phase completion matrix contract violated:') -and
+$bridgePlanCompletenessScriptText.Contains('missing non-empty title') -and
+$bridgePlanCompletenessScriptText.Contains('missing checks') -and
+$bridgePlanCompletenessScriptText.Contains('contains duplicate checks') -and
+$bridgePlanCompletenessScriptText.Contains('missing required check:') -and
+$bridgePlanCompletenessScriptText.Contains('has unexpected check:') -and
+$bridgePlanCompletenessScriptText.Contains('missing satisfied field') -and
+$bridgePlanCompletenessScriptText.Contains('satisfied mismatch with computed phase state') -and
+$bridgePlanCompletenessScriptText.Contains('missing unsatisfied phase contract violation') -and
+$bridgePlanCompletenessScriptText.Contains('missing non-empty reason') -and
+$bridgePlanCompletenessScriptText.Contains('missing evidenceLocators') -and
+$bridgePlanCompletenessScriptText.Contains('contains empty evidence locator') -and
+$bridgePlanCompletenessScriptText.Contains('evidence locator format invalid') -and
+$bridgePlanCompletenessScriptText.Contains('evidence locator prefix invalid') -and
+$bridgePlanCompletenessScriptText.Contains('missing required locator label') -and
+$bridgePlanCompletenessScriptText.Contains('phase0_active_dsp') -and
+$bridgePlanCompletenessScriptText.Contains('phase1_policy_evaluations') -and
+$bridgePlanCompletenessScriptText.Contains('phase2_within_target') -and
+$bridgePlanCompletenessScriptText.Contains('phase3_direct_dependency') -and
+$bridgePlanCompletenessScriptText.Contains('phase4_canary_violations') -and
+$bridgePlanCompletenessScriptText.Contains('phase5_rollback_violations') -and
+$bridgePlanCompletenessScriptText.Contains('phase6_cleanup_completed') -and
+$bridgePlanCompletenessScriptText.Contains('Trigger audit evidence') -and
+$bridgePlanCompletenessScriptText.Contains('Metric governance evidence') -and
+$bridgePlanCompletenessScriptText.Contains('Flag dependency evidence') -and
+$bridgePlanCompletenessScriptText.Contains('Enforcement adoption evidence') -and
+$bridgePlanCompletenessScriptText.Contains('Enforcement source purity evidence') -and
+$bridgePlanCompletenessScriptText.Contains('$($freshnessArtifact.Label) freshness breach') -and
 $bridgePlanCompletenessScriptText.Contains('trigger_cleanup_completion_report.json') -and
+$bridgePlanCompletenessScriptText.Contains('trigger_symbol_usage_report.json') -and
+$bridgePlanCompletenessScriptText.Contains('observe_shim_usage_report.json') -and
+$bridgePlanCompletenessScriptText.Contains('trigger_ast_report.json') -and
 $bridgePlanCompletenessScriptText.Contains('close_policy_8_1_report.json') -and
 $bridgePlanCompletenessScriptText.Contains('close_policy_8_1_report_v1') -and
 $bridgePlanCompletenessScriptText.Contains('close_policy_8_1_workflow_input_contract_report.json') -and
@@ -945,11 +1183,72 @@ $bridgePlanCompletenessScriptText.Contains('generatedAt parse failed') -and
 $bridgePlanCompletenessScriptText.Contains('enforceNoSpecFixed=true') -and
 $bridgePlanCompletenessScriptText.Contains('specFixedResidualCount=0') -and
 $bridgePlanCompletenessScriptText.Contains('scriptOrder') -and
+$bridgePlanCompletenessScriptText.Contains('triggerSymbolUsageIndex') -and
+$bridgePlanCompletenessScriptText.Contains('observeShimUsageIndex') -and
+$bridgePlanCompletenessScriptText.Contains('triggerAstIndex') -and
+$bridgePlanCompletenessScriptText.Contains('triggerAuditIndex') -and
+$bridgePlanCompletenessScriptText.Contains('cleanupPruneIndex') -and
+$bridgePlanCompletenessScriptText.Contains('cleanupDeferredVerifyIndex') -and
+$bridgePlanCompletenessScriptText.Contains('phase4DriftIndex') -and
+$bridgePlanCompletenessScriptText.Contains('enforcementAdoptionIndex') -and
+$bridgePlanCompletenessScriptText.Contains('enforcementSourcePurityIndex') -and
+$bridgePlanCompletenessScriptText.Contains('rollbackMatrixIndex') -and
+$bridgePlanCompletenessScriptText.Contains('facadeBypassIndex') -and
+$bridgePlanCompletenessScriptText.Contains('canaryNormalizationIndex') -and
+$bridgePlanCompletenessScriptText.Contains('metricGovernanceIndex') -and
+$bridgePlanCompletenessScriptText.Contains('flagDependencyIndex') -and
+$bridgePlanCompletenessScriptText.Contains('cleanupReadinessIndex') -and
+$bridgePlanCompletenessScriptText.Contains('ownershipMigrationIndex') -and
+$bridgePlanCompletenessScriptText.Contains('cleanupCompletionIndex') -and
+$bridgePlanCompletenessScriptText.Contains('trigger-audit script token for authority transfer order validation') -and
+$bridgePlanCompletenessScriptText.Contains('trigger audit gate must run before cleanup readiness gate') -and
+$bridgePlanCompletenessScriptText.Contains('trigger audit gate must run before ownership migration gate') -and
+$bridgePlanCompletenessScriptText.Contains('metric governance gate must run before bridge plan completeness gate') -and
+$bridgePlanCompletenessScriptText.Contains('flag dependency graph gate must run before bridge plan completeness gate') -and
+$bridgePlanCompletenessScriptText.Contains('Tier runner missing enforcement script tokens for phase order validation') -and
+$bridgePlanCompletenessScriptText.Contains('enforcement adoption gate must run before cleanup readiness gate') -and
+$bridgePlanCompletenessScriptText.Contains('enforcement source purity gate must run before cleanup readiness gate') -and
+$bridgePlanCompletenessScriptText.Contains('Tier runner missing phase4/canary script tokens for order validation') -and
+$bridgePlanCompletenessScriptText.Contains('phase4 generation drift gate must run before canary normalization gate') -and
+$bridgePlanCompletenessScriptText.Contains('phase4 generation drift gate must run before bridge plan completeness gate') -and
+$bridgePlanCompletenessScriptText.Contains('Tier runner missing rollback/facade/canary script tokens for order validation') -and
+$bridgePlanCompletenessScriptText.Contains('rollback matrix gate must run before cleanup completion gate') -and
+$bridgePlanCompletenessScriptText.Contains('facade bypass gate must run before cleanup completion gate') -and
+$bridgePlanCompletenessScriptText.Contains('canary normalization gate must run before cleanup completion gate') -and
+$bridgePlanCompletenessScriptText.Contains('Tier runner missing cleanup-prune/cleanup-deferred script tokens for order validation') -and
+$bridgePlanCompletenessScriptText.Contains('cleanup prune gate must run before cleanup deferred verification gate') -and
+$bridgePlanCompletenessScriptText.Contains('cleanup deferred verification gate must run before cleanup completion gate') -and
+$bridgePlanCompletenessScriptText.Contains('readiness/ownership/cleanup-completion script tokens for order validation') -and
+$bridgePlanCompletenessScriptText.Contains('cleanup readiness gate must run before cleanup completion gate') -and
+$bridgePlanCompletenessScriptText.Contains('ownership migration gate must run before cleanup completion gate') -and
+$bridgePlanCompletenessScriptText.Contains('cleanup completion gate must run before bridge plan completeness gate') -and
+$bridgePlanCompletenessScriptText.Contains('executionOrderSequence') -and
+$bridgePlanCompletenessScriptText.Contains('phaseEvidenceChronology') -and
+$bridgePlanCompletenessScriptText.Contains('completionDefinitionStatus') -and
+$bridgePlanCompletenessScriptText.Contains('Completion definition contract violated: bridgeRuntimeControllable is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Completion definition contract violated: ciDeviationDetectable is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Completion definition contract violated: rollbackSubsystemGranularity is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Completion definition contract violated: deferredTriggerConvergence is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Completion definition contract violated: noMajorIncidentIncrease is not satisfied') -and
+$bridgePlanCompletenessScriptText.Contains('Completion definition matrix contract violated:') -and
+$bridgePlanCompletenessScriptText.Contains('missing clause') -and
+$bridgePlanCompletenessScriptText.Contains('missing non-empty reason') -and
+$bridgePlanCompletenessScriptText.Contains('missing evidenceLocators') -and
+$bridgePlanCompletenessScriptText.Contains('contains empty evidence locator') -and
+$bridgePlanCompletenessScriptText.Contains('evidence locator format invalid') -and
+$bridgePlanCompletenessScriptText.Contains('evidence locator prefix invalid') -and
+$bridgePlanCompletenessScriptText.Contains('missing required locator label') -and
+$bridgePlanCompletenessScriptText.Contains('completion_bridge_controllable_policy') -and
+$bridgePlanCompletenessScriptText.Contains('completion_ci_detectable_tier_runner') -and
+$bridgePlanCompletenessScriptText.Contains('completion_rollback_violations') -and
+$bridgePlanCompletenessScriptText.Contains('completion_deferred_ready') -and
+$bridgePlanCompletenessScriptText.Contains('completion_incident_canary_violations') -and
 $bridgePlanCompletenessScriptText.Contains('backlogBeforeBridgeCompleteness') -and
 $bridgePlanCompletenessScriptText.Contains('backlogResidualForwarding') -and
 $bridgePlanCompletenessScriptText.Contains('enforceNoSpecFixedForwarded') -and
 $bridgePlanCompletenessScriptText.Contains('isr-8_1-close-policy.json') -and
 $bridgePlanCompletenessScriptText.Contains('isr_8_1_close_policy_v1') -and
+$bridgePlanCompletenessScriptText.Contains('bridgePolicyPath') -and
 $bridgePlanCompletenessScriptText.Contains('policyStatus') -and
 $bridgePlanCompletenessScriptText.Contains('cleanupReferenceConsistency') -and
 $bridgePlanCompletenessScriptText.Contains('deferredRegistryPath') -and

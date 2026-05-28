@@ -1,14 +1,1 @@
-{
-  "sh2_activeCrossfade": 0,
-  "sh3_pendingRetire": 0,
-  "verified": true,
-  "phase": 0,
-  "generatedAtNs": 1779894590328000000,
-  "sh4_observerCount": 0,
-  "sh5_lateCallbackCount": 0,
-  "schema": "shutdown_trace_v1",
-  "sh6_postStopEnqueueCount": 0,
-  "sh1_callbackCount": 0,
-  "provenance": "runtime",
-  "runId": "local-126e7ddbb39949dbbd734ba464277318"
-}
+{"schema":"shutdown_trace_v1","sh5_lateCallbackCount":0,"sh4_observerCount":0,"sh3_pendingRetire":0,"sh2_activeCrossfade":0,"sh1_callbackCount":0,"runId":"5fc45f6ddf6c4bbe8350c25755bcb21c","verified":true,"provenance":"seed","phase":0,"generatedAtNs":1779902825326000000,"sh6_postStopEnqueueCount":0}

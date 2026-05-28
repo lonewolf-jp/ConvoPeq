@@ -1,8 +1,1 @@
-{
-  "violations": 0,
-  "generatedAtNs": 1779894590328000000,
-  "schema": "mutation_fault_trace_v1",
-  "status": "generated",
-  "provenance": "runtime",
-  "runId": "local-126e7ddbb39949dbbd734ba464277318"
-}
+{"generatedAtNs":1779902825326000000,"runId":"5fc45f6ddf6c4bbe8350c25755bcb21c","provenance":"seed","violations":0,"status":"generated","schema":"mutation_fault_trace_v1"}

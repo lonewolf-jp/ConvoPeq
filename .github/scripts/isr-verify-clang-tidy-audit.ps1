@@ -154,7 +154,7 @@ else {
     $compileCommands = Get-Content -LiteralPath $compileCommandsPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $candidate = $compileCommands |
     Where-Object {
-        $filePath = "$_".file
+        $filePath = "$($_.file)"
         -not [string]::IsNullOrWhiteSpace($filePath) -and
         $filePath.Replace('\\', '/').Contains('/src/audioengine/') -and
         $filePath -match '\.(cpp|cc|cxx)$'
@@ -164,7 +164,7 @@ else {
     if (-not $candidate) {
         $candidate = $compileCommands |
         Where-Object {
-            $filePath = "$_".file
+            $filePath = "$($_.file)"
             -not [string]::IsNullOrWhiteSpace($filePath) -and
             $filePath -match '\.(cpp|cc|cxx)$'
         } |

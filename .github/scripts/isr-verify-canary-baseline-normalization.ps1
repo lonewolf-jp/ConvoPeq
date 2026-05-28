@@ -96,11 +96,15 @@ foreach ($metricId in $requiredMetricIds) {
 
     switch ($metricId) {
         'xrunDelta' {
-            if ($null -ne $rebuildMetricsReport -and "$($rebuildMetricsReport.schema)" -eq 'rebuild_admission_8_1_metrics_report_v1' -and "$($rebuildMetricsReport.status)" -eq 'evaluated') {
+            if ($null -ne $rebuildMetricsReport -and "$($rebuildMetricsReport.schema)" -eq 'rebuild_admission_8_1_metrics_report_v1') {
                 $evidenceFound = $true
                 $evidencePath = $resolvedRebuildAdmissionMetricsPath
                 $evidenceSchema = "$($rebuildMetricsReport.schema)"
-                $evidenceSummary = "readyToClose8_1=$($rebuildMetricsReport.readyToClose8_1)"
+                $evidenceSummary = "status=$($rebuildMetricsReport.status) reason=$($rebuildMetricsReport.reason) readyToClose8_1=$($rebuildMetricsReport.readyToClose8_1)"
+
+                if ($strictEvidence -and "$($rebuildMetricsReport.status)" -ne 'evaluated') {
+                    $violations.Add("Strict mode requires evaluated xrunDelta evidence: status=$($rebuildMetricsReport.status) reason=$($rebuildMetricsReport.reason)")
+                }
             }
         }
         'callbackJitter' {

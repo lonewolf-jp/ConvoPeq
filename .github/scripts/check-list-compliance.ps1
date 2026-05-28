@@ -174,6 +174,8 @@ foreach ($m in $ownershipHits) {
         $m -match 'unique_ptr' -or
         $m -match '直接 delete 禁止' -or
         $m -match 'static\s+void\s+delete[A-Za-z0-9_]*\s*\(' -or
+        $m -match 'EQProcessor\.Core\.cpp:\d+:\s*void\s+deleteEQStatePtr\s*\(void\*\s+p\)\s+noexcept\s*\{\s*delete\s+static_cast<EQProcessor::EQState\*>\(p\);\s*\}' -or
+        $m -match 'EQProcessor\.Core\.cpp:\d+:\s*void\s+deleteBandNodePtr\s*\(void\*\s+p\)\s+noexcept\s*\{\s*delete\s+static_cast<EQProcessor::BandNode\*>\(p\);\s*\}' -or
         $m -match 'ISRRTExecution\.cpp:\d+:\s*delete\[\]\s+buf;' -or
         $m -match 'AudioEngine\.Commit\.cpp:\d+:\s*delete\s+static_cast<AudioEngine::PublicationIntent\*>\(ptr\);' -or
         $m -match 'AudioEngine\.Commit\.cpp:\d+:\s*delete\s+intent;'

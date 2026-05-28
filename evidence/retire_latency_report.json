@@ -1,7 +1,1 @@
-{
-  "generatedAtNs": 1779894590328000000,
-  "schema": "retire_latency_report_v1",
-  "withinThreshold": true,
-  "provenance": "runtime",
-  "runId": "local-126e7ddbb39949dbbd734ba464277318"
-}
+{"runId":"5fc45f6ddf6c4bbe8350c25755bcb21c","withinThreshold":true,"schema":"retire_latency_report_v1","generatedAtNs":1779902825326000000,"provenance":"seed"}
