@@ -26,7 +26,7 @@ $commitText = Get-Content -LiteralPath $commitPath -Raw -Encoding UTF8
 
 $violations = New-Object System.Collections.Generic.List[string]
 
-foreach ($required in @('publishLatencyDelayAtomics', 'resetLatencyDelayRtState', 'syncLatencyDelayRtState')) {
+foreach ($required in @('publishLatencyDelayAtomics', 'resetLatencyDelayRtState')) {
     if ($headerText -notmatch [regex]::Escape($required)) {
         $violations.Add("AudioEngine.h missing latency alignment helper: $required")
     }
@@ -53,17 +53,24 @@ if ($commitText -match 'publishAtomic\(latencyDelayOld,|publishAtomic\(latencyDe
     $violations.Add('AudioEngine.Commit.cpp must not directly publish latencyDelay atomics')
 }
 
-if ($headerText -notmatch 'syncLatencyDelayRtState\(runtimeGraph\)') {
-    $violations.Add('AudioEngine.h must sync RT latency state through syncLatencyDelayRtState(runtimeGraph)')
+# v5.5 P5: RT latency sync can be done either by legacy runtimeGraph helper or by prepared snapshot handoff.
+$hasLegacyRuntimeGraphSync = $headerText -match 'syncLatencyDelayRtState\(runtimeGraph\)'
+$hasPreparedSnapshotSync = ($headerText -match 'latencyDelayOld_RT\s*=\s*prepared\.latencyDelayOld;') -and
+                           ($headerText -match 'latencyDelayNew_RT\s*=\s*prepared\.latencyDelayNew;')
+
+if (-not $hasLegacyRuntimeGraphSync -and -not $hasPreparedSnapshotSync) {
+    $violations.Add('AudioEngine.h must sync RT latency state via legacy runtimeGraph helper or prepared snapshot handoff')
 }
 
 $report = [ordered]@{
-    schema = 'latency_alignment_report_v1'
+    schema = 'latency_alignment_report_v2'
     generatedAt = (Get-Date -Format 'o')
     headerPath = $headerPath
     initPath = $initPath
     preparePath = $preparePath
     commitPath = $commitPath
+    hasLegacyRuntimeGraphSync = $hasLegacyRuntimeGraphSync
+    hasPreparedSnapshotSync = $hasPreparedSnapshotSync
     violations = $violations
 }
 

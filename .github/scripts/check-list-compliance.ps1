@@ -143,6 +143,22 @@ foreach ($m in $rtRetireHits) {
 }
 
 # ------------------------------------------------------------
+# v5.5.1 fail-stop: Rule-4 worker runtime pointer direct reference禁止
+# ------------------------------------------------------------
+$rule4Targets = @(
+    (Join-Path $srcDir 'audioengine\AudioEngine.RebuildDispatch.cpp')
+)
+$rule4Pattern = 'task\.currentDSP|activeRuntimeDSPSlot|fadingRuntimeDSPSlot|shareConvolutionEngineFrom\('
+$rule4Hits = Invoke-RgLines -Pattern $rule4Pattern -Targets $rule4Targets
+foreach ($m in $rule4Hits) {
+    # 構造体メンバ宣言は許容（利用を禁止）
+    if ($m -match 'task\.currentDSP\s*=\s*nullptr\s*;') {
+        continue
+    }
+    Add-Failure -RuleId '4.0' -Message 'Worker runtime pointer/reference token detected in rebuild path' -Line $m
+}
+
+# ------------------------------------------------------------
 # list.md 3.1 dot-call atomic 禁止（既存スクリプトを再利用）
 # ------------------------------------------------------------
 $dotCallScript = Join-Path $PSScriptRoot 'check-src-atomic-dotcall.ps1'

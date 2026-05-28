@@ -8,6 +8,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# clang-tidy may emit progress/status lines on stderr even on successful runs.
+# In newer PowerShell versions, native stderr can be promoted to Error records
+# under ErrorActionPreference=Stop, which would abort this gate prematurely.
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $evidenceDir = Join-Path $repoRoot 'evidence'
 $reportPath = Join-Path $evidenceDir 'clang_tidy_audit_report.json'
@@ -205,7 +212,14 @@ else {
                 "--checks=$usedChecks"
             )
 
-            $outputLines = & $clangTidyExecutablePath @runArgs 2>&1
+            $prevErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $outputLines = & $clangTidyExecutablePath @runArgs 2>&1
+            }
+            finally {
+                $ErrorActionPreference = $prevErrorActionPreference
+            }
             $exitCode = $LASTEXITCODE
             $auditOutput = ($outputLines | Out-String)
 

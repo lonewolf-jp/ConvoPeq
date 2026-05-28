@@ -355,7 +355,10 @@ void AudioEngine::timerCallback()
     processDeferredLearningActions();
 
     const bool hasFading = (fadingDspForRuntime != nullptr);
-    const bool hasPendingCrossfade = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadePending : false;
+    const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
+    const bool hasPendingCrossfade = preparedCrossfade.pending
+        || preparedCrossfade.useDryAsOld
+        || preparedCrossfade.firstIrDryCrossfadePending;
 
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();

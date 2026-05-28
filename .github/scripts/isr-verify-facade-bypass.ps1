@@ -19,22 +19,49 @@ if (-not (Test-Path -LiteralPath $triggerAuditReportPath)) {
 
 $files = Get-ChildItem -Path $audioRoot -Recurse -File -Include *.h,*.hpp,*.cpp,*.cxx,*.cc
 
+function Get-RelativePathCompat {
+    param(
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [Parameter(Mandatory = $true)][string]$TargetPath
+    )
+
+    $baseFull = [System.IO.Path]::GetFullPath($BasePath)
+    $targetFull = [System.IO.Path]::GetFullPath($TargetPath)
+
+    if ([System.IO.Path]::GetPathRoot($baseFull) -ne [System.IO.Path]::GetPathRoot($targetFull)) {
+        return $targetFull.Replace('\\', '/')
+    }
+
+    $baseWithSep = if ($baseFull.EndsWith([System.IO.Path]::DirectorySeparatorChar) -or $baseFull.EndsWith([System.IO.Path]::AltDirectorySeparatorChar)) {
+        $baseFull
+    }
+    else {
+        $baseFull + [System.IO.Path]::DirectorySeparatorChar
+    }
+
+    $baseUri = New-Object System.Uri($baseWithSep)
+    $targetUri = New-Object System.Uri($targetFull)
+    $relativeUri = $baseUri.MakeRelativeUri($targetUri)
+
+    return [System.Uri]::UnescapeDataString($relativeUri.ToString()).Replace('/', '/')
+}
+
 function Find-Matches {
     param(
         [string]$Pattern
     )
 
-    $matches = New-Object System.Collections.Generic.List[object]
+    $foundEntries = New-Object System.Collections.Generic.List[object]
     foreach ($file in $files) {
         $text = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
         foreach ($match in [regex]::Matches($text, $Pattern)) {
-            $matches.Add([ordered]@{
-                path = ([System.IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\\', '/'))
+            $foundEntries.Add([ordered]@{
+                path = (Get-RelativePathCompat -BasePath $repoRoot -TargetPath $file.FullName)
                 value = $match.Value
             }) | Out-Null
         }
     }
-    return $matches.ToArray()
+    return $foundEntries.ToArray()
 }
 
 $helperCreateMatches = Find-Matches -Pattern 'RuntimePublicationCoordinatorFactory::create\('

@@ -41,6 +41,54 @@ bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
 {
     return dsp.convolverRt().isLoadingIR();
 }
+
+convo::RuntimeBuildSnapshot captureRuntimeBuildSnapshot(const convo::BuildInput& buildInput,
+                                                        const ConvolverProcessor::BuildSnapshot& convolverSnapshot,
+                                                        int generation,
+                                                        std::uint64_t structuralHash) noexcept
+{
+    convo::RuntimeBuildSnapshot snapshot {};
+    snapshot.generation = generation;
+    snapshot.buildInput = buildInput;
+    snapshot.convolverFingerprint = convolverSnapshot.fingerprint;
+    snapshot.rebuildFingerprint.irIdentityHash = structuralHash;
+    snapshot.rebuildFingerprint.convolutionConfigHash = convolverSnapshot.fingerprint;
+    snapshot.rebuildFingerprint.sampleRate = buildInput.sampleRate;
+    snapshot.rebuildFingerprint.blockSize = buildInput.blockSize;
+    return snapshot;
+}
+
+convo::RuntimeBuildSnapshot finalizeRuntimeBuildSnapshot(convo::RuntimeBuildSnapshot snapshot) noexcept
+{
+    // finalize: semantic input のみで正規化し、非決定的入力を取り込まない。
+    snapshot.buildInput.sampleRate = std::max(0.0, snapshot.buildInput.sampleRate);
+    snapshot.buildInput.blockSize = std::max(0, snapshot.buildInput.blockSize);
+    snapshot.buildInput.oversamplingFactor = std::max(0, snapshot.buildInput.oversamplingFactor);
+    snapshot.rebuildFingerprint.sampleRate = snapshot.buildInput.sampleRate;
+    snapshot.rebuildFingerprint.blockSize = snapshot.buildInput.blockSize;
+
+    std::uint64_t paramHash = 1469598103934665603ull;
+    const auto mixHash = [&paramHash](std::uint64_t value) noexcept {
+        paramHash ^= value;
+        paramHash *= 1099511628211ull;
+    };
+
+    mixHash(static_cast<std::uint64_t>(snapshot.buildInput.ditherBitDepth));
+    mixHash(static_cast<std::uint64_t>(snapshot.buildInput.oversamplingFactor));
+    mixHash(static_cast<std::uint64_t>(snapshot.buildInput.oversamplingType));
+    mixHash(static_cast<std::uint64_t>(snapshot.buildInput.noiseShaperType));
+    mixHash(static_cast<std::uint64_t>(snapshot.buildInput.blockSize));
+    mixHash(static_cast<std::uint64_t>(snapshot.convolverFingerprint));
+    snapshot.rebuildFingerprint.dspParameterHash = paramHash;
+
+    return snapshot;
+}
+
+convo::RuntimeBuildSnapshot sealRuntimeBuildSnapshot(convo::RuntimeBuildSnapshot snapshot) noexcept
+{
+    snapshot.sealed = true;
+    return snapshot;
+}
 }
 
 
@@ -124,7 +172,22 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
                          rebuildClass,
                          collapsePolicy);
 
-    if (sameAsPendingWouldMerge)
+    if (!acceptsRuntimePublication())
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                             intentId,
+                             RebuildTelemetryReason::ShutdownInProgress,
+                             RebuildTelemetryDecision::Suppressed,
+                             structuralHash,
+                             fingerprint,
+                             rebuildClass,
+                             collapsePolicy,
+                             kPhase5TagKeep);
+        return;
+    }
+
+    if (sameAsPendingWouldMerge && shouldApplyLatestWinsMerge)
     {
         emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
                              intentId,
@@ -134,22 +197,10 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
                              fingerprint,
                              rebuildClass,
                              collapsePolicy,
-                             deferCategory ? "defer_candidate" : "dispatch_candidate");
-
-        if (shouldApplyLatestWinsMerge)
-        {
-            emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
-                                 intentId,
-                                 RebuildTelemetryReason::SameAsPendingWouldMerge,
-                                 RebuildTelemetryDecision::Merged,
-                                 structuralHash,
-                                 fingerprint,
-                                 rebuildClass,
-                                 collapsePolicy,
-                                 kPhase5TagReduce,
-                                 static_cast<double>(latestWinsWindowMs));
-            return;
-        }
+                             kPhase5TagReduce,
+                             static_cast<double>(latestWinsWindowMs));
+        convo::fetchAddAtomic(rebuildCollapseCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        return;
     }
 
     if (isShutdownInProgress())
@@ -302,6 +353,12 @@ void AudioEngine::handleAsyncUpdate()
 
 void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
 {
+    if (!acceptsRuntimePublication())
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        return;
+    }
+
     submitRebuildIntent(kind,
                         RebuildTelemetryReason::RequestRebuildKindEntry,
                         RebuildTelemetryClass::Structural,
@@ -332,6 +389,21 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                          0,
                          RebuildTelemetryClass::Structural,
                          collapsePolicy);
+
+    if (!acceptsRuntimePublication())
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                             intentId,
+                             RebuildTelemetryReason::ShutdownInProgress,
+                             RebuildTelemetryDecision::Suppressed,
+                             0,
+                             0,
+                             RebuildTelemetryClass::Structural,
+                             collapsePolicy,
+                             kPhase5TagKeep);
+        return;
+    }
 
     convo::fetchAddAtomic(rtAuxMutable_.debugRebuildDispatchRequestCount, 1, std::memory_order_acq_rel);
 
@@ -391,11 +463,10 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
     // rebuild 開始時のパラメータを凍結し、
     // task 作成・重複判定・runtime command で同一 snapshot を使う。
     const BuildParameterSnapshot paramSnapshot = captureBuildParameterSnapshot(*this);
-    DSPCore* current = getActiveRuntimeDSP(); // 現在のアクティブ runtime DSP をキャプチャ
     int generation = 0;
 
     RebuildTask task;
-    task.currentDSP = current;
+    task.currentDSP = nullptr;
     task.buildInput.sampleRate = sampleRate;
     task.buildInput.blockSize = samplesPerBlock;
     task.buildInput.ditherBitDepth = paramSnapshot.ditherDepth;
@@ -447,8 +518,14 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
         {
             generation = ++rebuildGeneration;
             task.generation = generation;
+            task.runtimeBuildSnapshot = sealRuntimeBuildSnapshot(finalizeRuntimeBuildSnapshot(
+                captureRuntimeBuildSnapshot(task.buildInput,
+                                            task.convolverBuildSnapshot,
+                                            generation,
+                                            structuralHash)));
             pendingTask = task;
             hasPendingTask = true;
+            convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(1), std::memory_order_release);
             lastQueuedTaskSignature = task;
             rtAuxMutable_.lastQueuedTaskTicks = juce::Time::getHighResolutionTicks();
             queued = true;
@@ -490,19 +567,14 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                              RebuildTelemetryClass::Structural,
                              collapsePolicy,
                              kPhase5TagKeep);
+                    convo::fetchAddAtomic(rebuildCollapseCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     }
 
     // Destroy orphaned DSP objects outside the lock.
     if (currentToRelease)
         retireDSP(currentToRelease);
 
-    if (!queued)
-    {
-        if (current)
-        {
-            // EBR: lifetime managed by RCUReader
-        }
-    }
+    juce::ignoreUnused(queued);
 }
 
 
@@ -559,6 +631,7 @@ void AudioEngine::rebuildThreadLoop()
                 pendingTask.currentDSP = nullptr;
 
                 hasPendingTask = false;
+                convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(0), std::memory_order_release);
             }
 
             struct DSPGuard
@@ -582,8 +655,12 @@ void AudioEngine::rebuildThreadLoop()
             if (isObsolete())
                 continue;
 
+            if (!task.runtimeBuildSnapshot.sealed)
+                continue;
+
             // 1. Prepare (メモリ確保)
-            convo::BuildResult buildResult = runtimeBuilder.build(task.buildInput, task.convolverBuildSnapshot);
+            convo::BuildResult buildResult = runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput,
+                                                                  task.convolverBuildSnapshot);
 
             if (buildResult.runtime == nullptr)
             {
@@ -600,43 +677,8 @@ void AudioEngine::rebuildThreadLoop()
             if (isObsolete())
                 continue;
 
-            // 2. Reuse Logic
-            //
-            // 【task.currentDSP (= 旧 active runtime slot) の安全性証明】
-            //
-            // task.currentDSP は RCU 設計により、退役後も一定期間（Epoch）生存が
-            // 保証される。rebuild タスクはこの期間内に完了することを前提としている。
-            // (通常、数ミリ秒〜数十ミリ秒。EBR Queue の遅延削除により安全性確保)
-            //
-            // 【shared_ptr 不採用の理由】
-            //     Audio Thread は std::shared_ptr の参照カウント操作を禁止している
-            //     (コーディング規約)。currentDSP の RCU 設計はこの制約に基づく。
-            bool irReused = false;
-            if (task.currentDSP)
-            {
-
-                if (std::abs(task.currentDSP->sampleRate - task.buildInput.sampleRate) < 1e-6 &&
-                    task.currentDSP->oversamplingFactor == newDSP->oversamplingFactor &&
-                    task.currentDSP->convolverRt().getCurrentBufferSize() == newDSP->convolverRt().getCurrentBufferSize())
-                {
-                    // IRの生成条件が一致しているか確認
-                    if (newDSP->convolverRt().getIRName() == task.currentDSP->convolverRt().getIRName() &&
-                        newDSP->convolverRt().getPhaseMode() == task.currentDSP->convolverRt().getPhaseMode() &&
-                        std::abs(newDSP->convolverRt().getMixedTransitionStartHz() - task.currentDSP->convolverRt().getMixedTransitionStartHz()) < 0.001f &&
-                        std::abs(newDSP->convolverRt().getMixedTransitionEndHz() - task.currentDSP->convolverRt().getMixedTransitionEndHz()) < 0.001f &&
-                        std::abs(newDSP->convolverRt().getMixedPreRingTau() - task.currentDSP->convolverRt().getMixedPreRingTau()) < 0.001f &&
-                        newDSP->convolverRt().getExperimentalDirectHeadEnabled() == task.currentDSP->convolverRt().getExperimentalDirectHeadEnabled() &&
-                        std::abs(newDSP->convolverRt().getTargetIRLength() - task.currentDSP->convolverRt().getTargetIRLength()) < 0.001f)
-                    {
-                        // 既存のConvolutionエンジンを共有（クローン回避・グリッチ防止）
-                        newDSP->convolverRt().shareConvolutionEngineFrom(task.currentDSP->convolverRt());
-                        irReused = true;
-                    }
-                }
-            }
-
-            // 3. Rebuild IR if needed (Heavy operation)
-            if (!irReused && newDSP->convolverRt().getIRLength() > 0)
+            // 2. Rebuild IR if needed (Heavy operation)
+            if (newDSP->convolverRt().getIRLength() > 0)
             {
                 if (isObsolete())
                     continue;

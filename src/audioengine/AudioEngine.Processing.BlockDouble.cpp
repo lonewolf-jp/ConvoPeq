@@ -142,17 +142,17 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
     DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
-    bool useDryAsOld = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeUseDryAsOld : false;
+    const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
+    bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
     if (fading != nullptr && fading == dsp)
     {
         jassertfalse;
         fading = nullptr;
         useDryAsOld = true;
     }
-    const bool hasPendingCrossfade = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadePending : false;
     if (processCrossfadeDelayGateIfPending(fading,
                                            useDryAsOld,
-                                           hasPendingCrossfade,
+                                           preparedCrossfade,
                                            [&]()
     {
         auto fadingState = procState;
@@ -169,7 +169,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    armCrossfadeIfPending(fading != nullptr, useDryAsOld, runtimeGraph);
+    armCrossfadeIfPending(fading != nullptr, useDryAsOld, preparedCrossfade);
 
     const bool canCrossfade = (fading != nullptr || useDryAsOld)
         && dspCrossfadeGain.isSmoothing()
@@ -218,7 +218,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
                                                   oldL,
                                                   oldR,
                                                   numSamples,
-                                                                  runtimeGraph,
+                                                                  preparedCrossfade.latencyResetPending,
                                                   [](double* outL,
                                                      double* outR,
                                                      int i,

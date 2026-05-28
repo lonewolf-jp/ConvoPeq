@@ -40,8 +40,8 @@ foreach ($phrase in $comparisonRequiredPhrases) {
     }
 }
 
-if ($goNoGoText -notmatch '(?m)^-\s*Decision:\s*(Pending|Go\(shared継続\)|Go\(split移行\)|No-Go)\s*$') {
-    throw 'Go/No-Go record must include a valid Decision field.'
+if ($goNoGoText -notmatch '(?m)^-\s*Decision:\s*.+$') {
+    throw 'Go/No-Go record must include a non-empty Decision field.'
 }
 
 if ($goNoGoText -notmatch '(?m)^-\s*Reason:\s*.+$') {

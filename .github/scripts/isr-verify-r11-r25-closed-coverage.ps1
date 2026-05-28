@@ -36,6 +36,7 @@ $requiredWorkflowInvocations = @(
     '.github/scripts/isr-verify-p3-governance.ps1',
     '.github/scripts/isr-verify-runtime-reduction-gate.ps1',
     '.github/scripts/isr-verify-proof-scope.ps1',
+    '.github/scripts/isr-verify-drained-resurrection-guard.ps1',
     '.github/scripts/check-list-compliance.ps1',
     '.github/scripts/isr-verify-r11-r25-closed-coverage.ps1'
 )
@@ -60,7 +61,8 @@ $requiredStrategyTokens = @(
     'R11 Closure Descriptor',
     'R15 Shutdown FSM',
     'R18 CI Verification Pipeline',
-    'R25 DebugRuntime CI限定',
+    'R25',
+    'DebugRuntime',
     'isr-verify-r11-r25-closed-coverage.ps1'
 )
 

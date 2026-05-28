@@ -189,6 +189,34 @@ void AudioEngine::releaseResources()
     makeRuntimePublicationCoordinator()
         .clearPublishedRuntimeSnapshotsNonRt();
 
+    const auto isPublicationDrained = [this]() noexcept -> bool
+    {
+        if (convo::consumeAtomic(commitDrainInProgress, std::memory_order_acquire))
+            return false;
+        return !hasPendingPublicationIntents();
+    };
+
+    const auto isRebuildWorkerStopped = [this]() noexcept -> bool
+    {
+        return !convo::consumeAtomic(rebuildThreadIsRunning, std::memory_order_acquire);
+    };
+
+    const auto isRetireFallbackDrained = [this]() noexcept -> bool
+    {
+        if (convo::consumeAtomic(audioThreadRetireOverflowPtr, std::memory_order_acquire) != nullptr)
+            return false;
+
+        std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
+        return deferredDeleteFallbackQueue.empty();
+    };
+
+    if (!isPublicationDrained() || !isRebuildWorkerStopped() || !isRetireFallbackDrained())
+    {
+        drainPublicationLogForShutdown();
+        drainDeferredRetireQueues(true);
+        m_epochDomain.drainAll();
+    }
+
     const auto pendingRetireCount = [&]() noexcept -> uint32_t
     {
         uint32_t count = 0;

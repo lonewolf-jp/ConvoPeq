@@ -1,18 +1,18 @@
-{
-  "generatedAtNs": 1779902825326000000,
-  "generationMode": "seed",
-  "runId": "5fc45f6ddf6c4bbe8350c25755bcb21c",
-  "artifacts": [
-    "closure_graph.json",
-    "hb_graph_trace.json",
-    "hb_violation_report.json",
-    "mutation_fault_trace.json",
-    "payload_tier_report.json",
-    "retire_latency_report.json",
-    "retire_timeline.json",
-    "runtime_budget_report.json",
-    "shutdown_trace.json"
-  ],
-  "schema": "evidence_manifest_v1",
-  "generator": "isr-seed-evidence.ps1"
+﻿{
+    "generatedAtNs":  1779939075395000000,
+    "runId":  "260ab35f05d34257ac96f23908a43226",
+    "schema":  "evidence_manifest_v1",
+    "artifacts":  [
+                      "closure_graph.json",
+                      "hb_graph_trace.json",
+                      "hb_violation_report.json",
+                      "mutation_fault_trace.json",
+                      "payload_tier_report.json",
+                      "retire_latency_report.json",
+                      "retire_timeline.json",
+                      "runtime_budget_report.json",
+                      "shutdown_trace.json"
+                  ],
+    "generator":  "isr-seed-evidence.ps1",
+    "generationMode":  "seed"
 }

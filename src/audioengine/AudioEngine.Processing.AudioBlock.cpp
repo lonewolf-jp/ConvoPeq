@@ -232,11 +232,11 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         DSPCore* fading = resolvedFading.valid
             ? static_cast<DSPCore*>(resolvedFading.instance)
             : resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
-        bool useDryAsOld = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeUseDryAsOld : false;
-        const bool hasPendingCrossfade = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadePending : false;
+        const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
+        bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
         if (processCrossfadeDelayGateIfPending(fading,
                                                useDryAsOld,
-                                               hasPendingCrossfade,
+                                               preparedCrossfade,
                                                [&]()
         {
             auto fadingState = procState;
@@ -253,7 +253,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             return;
         }
 
-        armCrossfadeIfPending(fading != nullptr, useDryAsOld, runtimeGraph);
+        armCrossfadeIfPending(fading != nullptr, useDryAsOld, preparedCrossfade);
 
         const bool canCrossfade = (fading != nullptr || useDryAsOld)
             && dspCrossfadeGain.isSmoothing()
@@ -301,7 +301,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                                                      oldL,
                                                      oldR,
                                                      numSamples,
-                                                     runtimeGraph,
+                                                     preparedCrossfade.latencyResetPending,
                                                      [this, useDryAsOld](float* outL,
                                                                          float* outR,
                                                                          int i,

@@ -36,8 +36,35 @@ $today = (Get-Date).Date
 $schemaToPaths = @{}
 $issueToPaths = @{}
 
+function Get-RelativePathCompat {
+    param(
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [Parameter(Mandatory = $true)][string]$TargetPath
+    )
+
+    $baseFull = [System.IO.Path]::GetFullPath($BasePath)
+    $targetFull = [System.IO.Path]::GetFullPath($TargetPath)
+
+    if ([System.IO.Path]::GetPathRoot($baseFull) -ne [System.IO.Path]::GetPathRoot($targetFull)) {
+        return $targetFull.Replace('\\', '/')
+    }
+
+    $baseWithSep = if ($baseFull.EndsWith([System.IO.Path]::DirectorySeparatorChar) -or $baseFull.EndsWith([System.IO.Path]::AltDirectorySeparatorChar)) {
+        $baseFull
+    }
+    else {
+        $baseFull + [System.IO.Path]::DirectorySeparatorChar
+    }
+
+    $baseUri = New-Object System.Uri($baseWithSep)
+    $targetUri = New-Object System.Uri($targetFull)
+    $relativeUri = $baseUri.MakeRelativeUri($targetUri)
+
+    return [System.Uri]::UnescapeDataString($relativeUri.ToString()).Replace('/', '/')
+}
+
 foreach ($file in $policyFiles) {
-    $relativePath = [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\\', '/')
+    $relativePath = Get-RelativePathCompat -BasePath $repoRoot -TargetPath $file.FullName
     $json = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
     $schemaRaw = "$($json.schema)"
     $issueRaw = "$($json.issue)"

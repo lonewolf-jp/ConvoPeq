@@ -203,6 +203,7 @@ $standardAdditionalScripts = @(
     '.github/scripts/isr-verify-runtime-reduction-gate.ps1',
     '.github/scripts/isr-verify-proof-scope.ps1',
     '.github/scripts/isr-verify-r11-r25-closed-coverage.ps1',
+    '.github/scripts/isr-verify-drained-resurrection-guard.ps1',
     '.github/scripts/isr-verify-trigger-policy.ps1',
     '.github/scripts/isr-verify-trigger-symbol-usage.ps1',
     '.github/scripts/isr-verify-observe-shim-usage.ps1',

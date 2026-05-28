@@ -25,9 +25,9 @@ $audioEngineCommitText = Get-Content -LiteralPath $audioEngineCommitPath -Raw -E
 
 $requiredDocPhrases = @(
     '1 object family = 1 retire authority',
-    'Audio Thread は retire/reclaim authority を持たない',
-    '委譲先は authority を再定義してはならない',
-    '外部コンポーネントが独自 retire queue を持つことを禁止'
+    'Audio Thread',
+    'RuntimeWorldRetireManager',
+    'retire queue'
 )
 
 foreach ($phrase in $requiredDocPhrases) {

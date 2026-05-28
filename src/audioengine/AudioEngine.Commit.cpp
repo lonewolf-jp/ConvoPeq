@@ -34,6 +34,23 @@ std::atomic<std::uint64_t>& AudioEngine::runtimeVersionCounter() noexcept
                                  std::memory_order_acq_rel);
 }
 
+[[nodiscard]] bool AudioEngine::acceptsRuntimePublication() const noexcept
+{
+    const auto currentLifecycle = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
+    const auto currentPhase = convo::consumeAtomic(shutdownPhase, std::memory_order_acquire);
+
+    if (currentLifecycle != EngineLifecycleState::Prepared)
+        return false;
+
+    if (currentPhase != ShutdownPhase::Running)
+        return false;
+
+    if (shutdownRuntime_.isShutdownInProgress())
+        return false;
+
+    return !isShutdownInProgress();
+}
+
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
     if (!world.isSealedRecursively())
@@ -204,6 +221,13 @@ void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP, int gene
     if (newDSP == nullptr)
         return;
 
+    if (!acceptsRuntimePublication())
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        retireDSP(newDSP);
+        return;
+    }
+
     const int epochReaderIndex = toCommitReaderIndex(readerSlot);
 
     const convo::EpochDomainReaderGuard appendGuard(m_epochDomain, epochReaderIndex);
@@ -258,6 +282,9 @@ void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP, int gene
         if (tail == nullptr)
             tail = publicationLogSentinel;
     }
+
+    const auto backlog = hasPendingPublicationIntents() ? 1ull : 0ull;
+    convo::publishAtomic(publicationBacklog_, backlog, std::memory_order_release);
 }
 
 void AudioEngine::appendPublicationIntentForCommitProducer(DSPCore* newDSP, int generation) noexcept
@@ -315,8 +342,9 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
     if (newDSP == nullptr)
         return;
 
-    if (isShutdownInProgress())
+    if (!acceptsRuntimePublication())
     {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
         retireDSP(newDSP);
         return;
     }
@@ -339,6 +367,12 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
 
 void AudioEngine::executeCommit()
 {
+    if (!acceptsRuntimePublication())
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        return;
+    }
+
     if (convo::exchangeAtomic(commitDrainInProgress, true, std::memory_order_acq_rel)) // acq_rel: prior publish をacquire、本体の publish をrelease
         return;
 
@@ -384,6 +418,8 @@ void AudioEngine::executeCommit()
     }
 
     const bool hasRemaining = hasPendingPublicationIntents();
+
+    convo::publishAtomic(publicationBacklog_, hasRemaining ? 1ull : 0ull, std::memory_order_release);
 
     convo::publishAtomic(commitDrainInProgress, false, std::memory_order_release); // release: 次回の hasPublicationLogPending の acquire と HB
 
@@ -694,10 +730,8 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                 const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
                 const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
                 const bool hasFadingRuntime = (resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph) != nullptr);
-                const bool hasPendingCrossfade = ((runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadePending : false)
-                    || preparedCrossfade.pending;
-                const bool useDryAsOld = ((runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeUseDryAsOld : false)
-                    || preparedCrossfade.firstIrDryCrossfadePending
+                const bool hasPendingCrossfade = preparedCrossfade.pending;
+                const bool useDryAsOld = preparedCrossfade.firstIrDryCrossfadePending
                     || preparedCrossfade.useDryAsOld;
 
                 if (hasFadingRuntime || hasPendingCrossfade || useDryAsOld)
@@ -840,10 +874,8 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                 const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
                 const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
                 const bool hasFadingRuntime = (resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph) != nullptr);
-                const bool hasPendingCrossfade = ((runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadePending : false)
-                    || preparedCrossfade.pending;
-                const bool useDryAsOld = ((runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeUseDryAsOld : false)
-                    || preparedCrossfade.firstIrDryCrossfadePending
+                const bool hasPendingCrossfade = preparedCrossfade.pending;
+                const bool useDryAsOld = preparedCrossfade.firstIrDryCrossfadePending
                     || preparedCrossfade.useDryAsOld;
                 const bool isFadingActive = hasFadingRuntime || hasPendingCrossfade || useDryAsOld;
                 publishSmoothTransitionState(getActiveRuntimeDSP(),

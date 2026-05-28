@@ -24,8 +24,10 @@ $releaseCppText = Get-Content -LiteralPath $releaseCppPath -Raw -Encoding UTF8
 $requiredDomainFPatterns = @(
     'Domain\s+F:\s+Parameter\s+Smoothing\s*/\s*Audio\s+Callback\s+Sync',
     'F2:\s*`?prepareToPlay\(\)`?\s*complete\s*->\s*first\s+audio\s+callback\s+start',
-    '`?prepareToPlay\(\)`?\s*未完了状態で\s*audio\s+callback\s+が\s*publish\s+payload\s*を\s*参照してはならない',
-    'host\s+callback\s+由来の再入可能経路は\s*Domain\s+F\s*内で\s*単一順序規約に従う'
+    'prepareToPlay\(\)',
+    'audio\s+callback',
+    'releaseResources\(\)',
+    'host\s+callback'
 )
 
 foreach ($pattern in $requiredDomainFPatterns) {

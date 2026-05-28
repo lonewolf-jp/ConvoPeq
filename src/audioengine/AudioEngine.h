@@ -831,6 +831,8 @@ public:
             || state == EngineLifecycleState::Destroyed;
     }
 
+    [[nodiscard]] bool acceptsRuntimePublication() const noexcept;
+
     void drainDeferredRetireQueues(bool allowDuringShutdown) noexcept;
 
     void setOversamplingFactor(int factor);
@@ -874,12 +876,42 @@ public:
         std::uint64_t reclaimCount = 0;
     };
 
+    struct RuntimeBackpressureTelemetry
+    {
+        std::uint64_t retireQueueDepth = 0;
+        std::uint64_t fallbackQueueDepth = 0;
+        std::uint64_t quarantineResident = 0;
+        std::uint64_t publicationBacklog = 0;
+        std::uint64_t rebuildBacklog = 0;
+        std::uint64_t saturationEnterCount = 0;
+        std::uint64_t saturationExitCount = 0;
+        std::uint64_t publicationRejectCount = 0;
+        std::uint64_t rebuildCollapseCount = 0;
+        double reclaimLatency = 0.0;
+    };
+
     [[nodiscard]] RuntimeLifecycleDiagnostics getRuntimeLifecycleDiagnostics() const noexcept
     {
         return {
             consumeAtomic(rtAuxMutable_.runtimePublishCount),
             consumeAtomic(rtAuxMutable_.runtimeRetireCount),
             consumeAtomic(rtAuxMutable_.runtimeReclaimCount)
+        };
+    }
+
+    [[nodiscard]] RuntimeBackpressureTelemetry getRuntimeBackpressureTelemetry() const noexcept
+    {
+        return {
+            consumeAtomic(retireQueueDepth_, std::memory_order_acquire),
+            consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire),
+            consumeAtomic(quarantineResident_, std::memory_order_acquire),
+            consumeAtomic(publicationBacklog_, std::memory_order_acquire),
+            consumeAtomic(rebuildBacklog_, std::memory_order_acquire),
+            consumeAtomic(saturationEnterCount_, std::memory_order_acquire),
+            consumeAtomic(saturationExitCount_, std::memory_order_acquire),
+            consumeAtomic(publicationRejectCount_, std::memory_order_acquire),
+            consumeAtomic(rebuildCollapseCount_, std::memory_order_acquire),
+            consumeAtomic(reclaimLatency_, std::memory_order_acquire)
         };
     }
 
@@ -1584,6 +1616,7 @@ public:
         DSPCore* currentDSP = nullptr;
         convo::BuildInput buildInput {};
         ConvolverProcessor::BuildSnapshot convolverBuildSnapshot {};
+        convo::RuntimeBuildSnapshot runtimeBuildSnapshot {};
         int generation = 0;
     };
     RebuildTask pendingTask;
@@ -1995,12 +2028,6 @@ public:
         latencyDelayNew_RT = 0;
     }
 
-    inline void syncLatencyDelayRtState(const convo::RuntimeGraph* runtimeGraph) noexcept
-    {
-        latencyDelayOld_RT = (runtimeGraph != nullptr) ? runtimeGraph->latencyDelayOld : 0;
-        latencyDelayNew_RT = (runtimeGraph != nullptr) ? runtimeGraph->latencyDelayNew : 0;
-    }
-
     enum class CommitReaderSlot : int
     {
         Producer = kCommitProducerEpochReaderIndex,
@@ -2094,9 +2121,6 @@ public:
 
         graph.transitionCurrentRuntimeUuid = state.transitionCurrentRuntimeUuid;
         graph.transitionNextRuntimeUuid = state.transitionNextRuntimeUuid;
-        graph.latencyDelayOld = state.latencyDelayOld;
-        graph.latencyDelayNew = state.latencyDelayNew;
-        graph.latencyResetPending = state.latencyResetPending;
 
         const auto runtimeReadView = readControlRuntimeView();
         const auto* snapshot = getRuntimeSnapshot(runtimeReadView);
@@ -2114,14 +2138,6 @@ public:
             graph.noiseShaperType = static_cast<int>(snapshot->noiseShaperType);
             graph.sampleRate = snapshot->sampleRate;
         }
-
-        graph.dspCrossfadePending = state.dspCrossfadePending;
-        graph.dspCrossfadeUseDryAsOld = state.dspCrossfadeUseDryAsOld;
-        graph.firstIrDryCrossfadePending = state.firstIrDryCrossfadePending;
-        graph.queuedFadeTimeSec = state.queuedFadeTimeSec;
-        graph.dspCrossfadeStartDelayBlocks = state.dspCrossfadeStartDelayBlocks;
-        graph.dspCrossfadeDryHoldSamples = state.dspCrossfadeDryHoldSamples;
-        graph.dryScaleTarget = state.dryScaleTarget;
 
         return graph;
     }
@@ -2549,9 +2565,9 @@ public:
 
     inline void armCrossfadeIfPending(bool hasFading,
                                       bool& useDryAsOld,
-                                      const convo::RuntimeGraph* runtimeGraph) noexcept
+                                      const CrossfadePreparedSnapshot& prepared) noexcept
     {
-        const bool hasPendingCrossfade = (runtimeGraph != nullptr && runtimeGraph->dspCrossfadePending);
+        const bool hasPendingCrossfade = prepared.pending;
 
         if (!hasPendingCrossfade)
         {
@@ -2560,14 +2576,15 @@ public:
             return;
         }
 
-        const bool firstLoadDryPending = (runtimeGraph != nullptr && runtimeGraph->firstIrDryCrossfadePending);
+        const bool firstLoadDryPending = prepared.firstIrDryCrossfadePending;
 
         if ((hasFading || firstLoadDryPending)
             && !dspCrossfadeArmed_RT)
         {
             dspCrossfadeArmed_RT = true;
-            syncLatencyDelayRtState(runtimeGraph);
-            dspCrossfadeStartDelayBlocks_RT = (runtimeGraph != nullptr) ? runtimeGraph->dspCrossfadeStartDelayBlocks : 0;
+            latencyDelayOld_RT = prepared.latencyDelayOld;
+            latencyDelayNew_RT = prepared.latencyDelayNew;
+            dspCrossfadeStartDelayBlocks_RT = prepared.startDelayBlocks;
 
             // C1-2: activate のみ Audio Thread で実行 (reset/setCurrentAndTargetValue は Message Thread 側)
             dspCrossfadeGain.setTargetValue(1.0);
@@ -2575,8 +2592,7 @@ public:
             if (firstLoadDryPending)
             {
                 useDryAsOld = true;
-                if (runtimeGraph != nullptr)
-                    dspCrossfadeDryScaleGain.setTargetValue(runtimeGraph->dryScaleTarget);
+                dspCrossfadeDryScaleGain.setTargetValue(prepared.dryScaleTarget);
             }
         }
     }
@@ -2584,12 +2600,12 @@ public:
     template <typename ProcessFn>
     inline bool processCrossfadeDelayGateIfPending(DSPCore* fading,
                                                    bool useDryAsOld,
-                                                   bool hasPendingCrossfade,
+                                                   const CrossfadePreparedSnapshot& prepared,
                                                    ProcessFn processFn) noexcept
     {
         if (fading != nullptr
             && !useDryAsOld
-            && hasPendingCrossfade
+            && prepared.pending
             && dspCrossfadeStartDelayBlocks_RT > 0)
         {
             --dspCrossfadeStartDelayBlocks_RT;
@@ -2629,9 +2645,8 @@ public:
 
     inline void resetLatencyBuffersIfPending(int bufferSize,
                                              int& writePos,
-                                             const convo::RuntimeGraph* runtimeGraph) noexcept
+                                             bool runtimeResetPending) noexcept
     {
-        const bool runtimeResetPending = (runtimeGraph != nullptr && runtimeGraph->latencyResetPending);
         if (runtimeResetPending)
         {
             if (latencyBufOldL) std::memset(latencyBufOldL, 0, sizeof(double) * bufferSize);
@@ -2682,7 +2697,7 @@ public:
                                                   const SampleType* oldL,
                                                   const SampleType* oldR,
                                                   int numSamples,
-                                                  const convo::RuntimeGraph* runtimeGraph,
+                                                  bool runtimeResetPending,
                                                   MixFn mixFn) noexcept
     {
         const int bufferSize = latencyBufSize;
@@ -2690,7 +2705,7 @@ public:
         const int delayOld = latencyDelayOld_RT;
         const int delayNew = latencyDelayNew_RT;
 
-        resetLatencyBuffersIfPending(bufferSize, writePos, runtimeGraph);
+        resetLatencyBuffersIfPending(bufferSize, writePos, runtimeResetPending);
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -2941,6 +2956,20 @@ public:
     std::atomic<convo::ProcessingOrder> m_currentProcessingOrder { convo::ProcessingOrder::ConvolverThenEQ };
     std::atomic<bool> m_currentSoftClipEnabled { true };
     std::atomic<float> m_currentSaturationAmount { 0.1f };
+
+    std::atomic<std::uint64_t> retireQueueDepth_ { 0 };
+    std::atomic<std::uint64_t> fallbackQueueDepth_ { 0 };
+    std::atomic<std::uint64_t> quarantineResident_ { 0 };
+    std::atomic<std::uint64_t> publicationBacklog_ { 0 };
+    std::atomic<std::uint64_t> rebuildBacklog_ { 0 };
+    std::atomic<std::uint64_t> saturationEnterCount_ { 0 };
+    std::atomic<std::uint64_t> saturationExitCount_ { 0 };
+    std::atomic<std::uint64_t> publicationRejectCount_ { 0 };
+    std::atomic<std::uint64_t> rebuildCollapseCount_ { 0 };
+    std::atomic<double> reclaimLatency_ { 0.0 };
+    std::atomic<int> retireHighWatermark_ { 3072 };
+    std::atomic<int> retireLowWatermark_ { 1024 };
+    std::atomic<bool> retireSaturationActive_ { false };
     std::atomic<int> m_currentOversamplingFactor { 0 };
     std::atomic<convo::OversamplingType> m_currentOversamplingType { convo::OversamplingType::IIR };
     std::atomic<int> m_currentDitherBitDepth { 24 };
