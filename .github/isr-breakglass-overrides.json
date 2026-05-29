@@ -1,0 +1,8 @@
+{
+    "schema": "isr_breakglass_overrides_v1",
+    "owner": "audio-runtime",
+    "issue": "BRIDGE-ISR-BREAKGLASS-001",
+    "rationale": "Auditable and time-bounded BreakGlassOverride registry for temporary runtime exceptions",
+    "expiry": "2027-12-31",
+    "entries": []
+}

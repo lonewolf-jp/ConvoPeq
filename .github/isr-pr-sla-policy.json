@@ -1,0 +1,61 @@
+{
+    "schema": "isr_pr_sla_policy_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-PR-SLA-001",
+    "rationale": "Tier × PR SLA mapping for ISR runtime migration governance",
+    "releaseRequiresExhaustive": true,
+    "expiry": "2026-09-30",
+    "classes": [
+        {
+            "id": "Class-S",
+            "minimumTier": "smoke",
+            "deadlineBusinessDays": 1,
+            "runtimeCodeChangeZeroRequired": true,
+            "inventoryDiffStructuralInvariantRequired": true,
+            "requiredNotes": [
+                "runtime code change zero"
+            ]
+        },
+        {
+            "id": "Class-A",
+            "minimumTier": "standard",
+            "deadlineBusinessDays": 2,
+            "runtimeCodeChangeZeroRequired": false,
+            "inventoryDiffStructuralInvariantRequired": true,
+            "requiredNotes": [
+                "inventory diff structural invariant"
+            ]
+        },
+        {
+            "id": "Class-B",
+            "minimumTier": "exhaustive",
+            "deadlineBusinessDays": 0,
+            "runtimeCodeChangeZeroRequired": false,
+            "inventoryDiffStructuralInvariantRequired": false,
+            "requiredNotes": [
+                "soak short 30m"
+            ]
+        },
+        {
+            "id": "Class-C",
+            "minimumTier": "exhaustive",
+            "deadlineBusinessDays": 0,
+            "runtimeCodeChangeZeroRequired": false,
+            "inventoryDiffStructuralInvariantRequired": false,
+            "requiredNotes": [
+                "soak long 4h"
+            ]
+        },
+        {
+            "id": "Class-D",
+            "minimumTier": "exhaustive",
+            "deadlineBusinessDays": 0,
+            "runtimeCodeChangeZeroRequired": false,
+            "inventoryDiffStructuralInvariantRequired": false,
+            "requiredNotes": [
+                "break-glass approval",
+                "rollback plan required"
+            ]
+        }
+    ]
+}

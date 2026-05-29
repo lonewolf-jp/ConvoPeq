@@ -13,13 +13,20 @@ param(
     [int]$Collect81ProbeExitMs = 0,
     [switch]$AutoPruneCleanupDeferred,
     [switch]$Enforce81CloseDecision,
-    [int]$Enforce81CloseDecisionRetryMax = 0
+    [int]$Enforce81CloseDecisionRetryMax = 0,
+    [string]$PrOpenedAt = '',
+    [string]$DeclaredClass = '',
+    [int]$SoakMinutes = 0
 )
 
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 Set-Location $repoRoot
+
+if ($SoakMinutes -lt 0) {
+    throw 'Invalid configuration: SoakMinutes must be >= 0.'
+}
 
 $closePolicyPath = Join-Path $repoRoot '.github\isr-8_1-close-policy.json'
 if (-not (Test-Path -LiteralPath $closePolicyPath)) {
@@ -179,6 +186,8 @@ $smokeScripts = @(
     '.github/scripts/isr-verify-v1-immutability.ps1',
     '.github/scripts/isr-verify-v2-seal.ps1',
     '.github/scripts/isr-verify-v3-runtime-graph-immutability.ps1',
+    '.github/scripts/isr-verify-breakglass-overrides.ps1',
+    '.github/scripts/isr-verify-runtime-coordinator-state-machine.ps1',
     '.github/scripts/isr-verify-v4-dsp-handle-policy.ps1',
     '.github/scripts/isr-verify-v5-retire-authority-lane.ps1',
     '.github/scripts/isr-verify-v6-domain-f-ordering.ps1',
@@ -202,11 +211,13 @@ $standardAdditionalScripts = @(
     '.github/scripts/isr-verify-evidence-provenance.ps1',
     '.github/scripts/isr-verify-runtime-reduction-gate.ps1',
     '.github/scripts/isr-verify-proof-scope.ps1',
+    '.github/scripts/isr-verify-publication-single-path.ps1',
     '.github/scripts/isr-verify-r11-r25-closed-coverage.ps1',
     '.github/scripts/isr-verify-drained-resurrection-guard.ps1',
     '.github/scripts/isr-verify-trigger-policy.ps1',
     '.github/scripts/isr-verify-trigger-symbol-usage.ps1',
     '.github/scripts/isr-verify-observe-shim-usage.ps1',
+    '.github/scripts/isr-verify-audio-startup-order.ps1',
     '.github/scripts/isr-verify-trigger-ast.ps1',
     '.github/scripts/isr-trigger-audit.ps1',
     '.github/scripts/isr-prune-cleanup-deferred.ps1',
@@ -227,6 +238,9 @@ $standardAdditionalScripts = @(
     '.github/scripts/isr-verify-latency-alignment.ps1',
     '.github/scripts/isr-verify-crossfade-observable-state.ps1',
     '.github/scripts/isr-verify-canary-baseline-normalization.ps1',
+    '.github/scripts/isr-capture-safety-regression-baseline.ps1',
+    '.github/scripts/isr-verify-safety-regression.ps1',
+    '.github/scripts/isr-verify-pr-sla.ps1',
     '.github/scripts/isr-verify-ownership-migration.ps1',
     '.github/scripts/isr-verify-validator-tiering.ps1',
     '.github/scripts/isr-verify-trigger-cleanup-completion.ps1',
@@ -235,8 +249,15 @@ $standardAdditionalScripts = @(
     '.github/scripts/isr-verify-clang-tidy-readiness.ps1',
     '.github/scripts/isr-verify-clang-tidy-audit.ps1',
     '.github/scripts/isr-verify-v73-admission-funnel.ps1',
+    '.github/scripts/isr-verify-v73-retire-pressure-contract.ps1',
+    '.github/scripts/isr-verify-v73-retire-rt-immediate-return.ps1',
     '.github/scripts/isr-verify-v73-shutdown-reclaim.ps1',
     '.github/scripts/isr-verify-v73-residency-telemetry.ps1',
+    '.github/scripts/isr-verify-design-docs-coverage.ps1',
+    '.github/scripts/isr-verify-authority-inventory.ps1',
+    '.github/scripts/isr-verify-documentation-scope-rule.ps1',
+    '.github/scripts/isr-verify-taxonomy-phase-mapping.ps1',
+    '.github/scripts/isr-verify-pr-required-artifacts.ps1',
     '.github/scripts/check-src-atomic-dotcall.ps1',
     '.github/scripts/check-list-compliance.ps1',
     '.github/scripts/isr-verify-p3-governance.ps1'
@@ -343,6 +364,22 @@ foreach ($scriptPath in $scriptsToRun) {
     }
     elseif ($scriptPath -eq '.github/scripts/isr-verify-8_1-close-policy.ps1') {
         & $scriptPath -Tier $Tier
+    }
+    elseif ($scriptPath -eq '.github/scripts/isr-verify-pr-sla.ps1') {
+        $prSlaArgs = @{
+            Tier        = $Tier
+            SoakMinutes = $SoakMinutes
+        }
+        if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            $prSlaArgs['RequireDeclaredClass'] = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($DeclaredClass)) {
+            $prSlaArgs['DeclaredClass'] = $DeclaredClass
+        }
+        if (-not [string]::IsNullOrWhiteSpace($PrOpenedAt)) {
+            $prSlaArgs['OpenedAt'] = $PrOpenedAt
+        }
+        & $scriptPath @prSlaArgs
     }
     elseif ($scriptPath -eq '.github/scripts/isr-rebuild-admission-8_1-metrics.ps1') {
         if ($AutoCapture81Log) {

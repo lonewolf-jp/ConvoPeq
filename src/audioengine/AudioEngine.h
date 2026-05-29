@@ -82,6 +82,7 @@ struct CoeffSet {
 #include "ISRRTExecution.h"
 #include "ISRDSPHandle.h"
 #include "ISRClosure.h"
+#include "ISRAuthorityClass.h"
 #include "ISRPayloadTier.h"
 #include "ISRHB.h"
 #include "ISRRetire.h"
@@ -113,10 +114,15 @@ inline double absNoLibm(double x) noexcept
 
 struct RuntimeState : convo::isr::SealedObject<RuntimeState>
 {
+    // AuthorityClass::Derived
     convo::EngineRuntime engine {};
+    // AuthorityClass::Derived
     convo::RuntimeGraph graph {};
+    // AuthorityClass::Authoritative
     std::uint64_t generation = 0;
-    std::uint64_t runtimeVersion = 0;  // Monotonically increasing version number
+    // AuthorityClass::Diagnostic (must not drive runtime branching)
+    std::uint64_t runtimeVersion = 0;  // Diagnostic mirror (authoritative source is generation)
+    // AuthorityClass::Diagnostic (trace/correlation only)
     std::uint64_t transitionId = 0;    // Unique identifier per crossfade
 };
 
@@ -2256,10 +2262,6 @@ public:
         return nextGraphGeneration;
     }
 
-    static std::atomic<std::uint64_t> runtimeVersionCounterStorage_;
-    static std::atomic<std::uint64_t>& runtimeVersionCounter() noexcept;
-    [[nodiscard]] static std::uint64_t reserveNextRuntimeVersion() noexcept;
-
     //=== RuntimePublicationCoordinator NonRT helper API ===//
     // AudioEngine 内部の publish/retire helper（NonRT 専用）。
 
@@ -2282,8 +2284,8 @@ public:
         worldOwner->generation = nextGraphGeneration;
         worldOwner->engine = engineState;
         worldOwner->graph = graphState;
-        // runtimeVersion: monotonically increasing version number (magna_carta.md Section 2)
-        worldOwner->runtimeVersion = reserveNextRuntimeVersion();
+        // runtimeVersion is retained as diagnostic mirror only. Authoritative identity is generation.
+        worldOwner->runtimeVersion = nextGraphGeneration;
         // transitionId: unique per crossfade event
         worldOwner->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
         // Publish world must be frozen before it can be exposed to any reader.
@@ -2397,7 +2399,7 @@ public:
         runtimePublicationCoordinator.commit(convo::isr::PublishAuthority::Granted,
                                              convo::isr::RuntimeBoundary::NonRTWorld,
                                              &world,
-                                             world.runtimeVersion);
+                                             world.generation);
     }
 
     inline void retireRuntimePublication(const RuntimePublishWorld* world) noexcept
@@ -2788,20 +2790,33 @@ static inline bool reserveInactiveCoeffSet(AdaptiveCoeffBankSlot& slot) noexcept
 
 inline bool enqueueDeferredDeleteNonRt(void* ptr, void (*deleter)(void*)) noexcept
 {
+    const auto result = enqueueDeferredDeleteNonRtWithResult(ptr, deleter);
+    return result != convo::isr::RetireEnqueueResult::Shutdown;
+}
+
+inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void* ptr, void (*deleter)(void*)) noexcept
+{
     if (ptr == nullptr || deleter == nullptr)
-        return true;
+        return convo::isr::RetireEnqueueResult::Success;
+
+    if (isShutdownInProgress())
+        return convo::isr::RetireEnqueueResult::Shutdown;
 
     const uint64_t epoch = publishRetireEpoch();
     if (enqueueRetireEpochBounded(ptr, deleter, epoch))
-        return true;
+        return convo::isr::RetireEnqueueResult::Success;
 
     m_epochDomain.reclaimRetired();
     if (enqueueRetireEpochBounded(ptr, deleter, epoch))
-        return true;
+        return convo::isr::RetireEnqueueResult::Success;
 
+    constexpr std::size_t kRetireFallbackPressureThreshold = 512;
+    constexpr std::size_t kRetireFallbackQueueFullThreshold = 4096;
+    std::size_t fallbackDepth = 0;
     {
         std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
         deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry{ ptr, deleter, epoch });
+        fallbackDepth = deferredDeleteFallbackQueue.size();
         if (deferredDeleteFallbackQueue.size() >= 1024)
         {
             juce::Logger::writeToLog("[DIAG] deferredDeleteFallbackQueue backlog="
@@ -2809,11 +2824,27 @@ inline bool enqueueDeferredDeleteNonRt(void* ptr, void (*deleter)(void*)) noexce
         }
     }
 
+    const std::uint64_t fallbackDepthU64 = static_cast<std::uint64_t>(fallbackDepth);
+    const std::uint64_t overflowDepth = consumeAtomic(audioThreadRetireOverflowPtr, std::memory_order_acquire) != nullptr ? 1ull : 0ull;
+    const std::uint64_t retireDepth = overflowDepth + fallbackDepthU64;
+    publishAtomic(fallbackQueueDepth_, fallbackDepthU64, std::memory_order_release);
+    publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
+    runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepthU64);
+    runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
+    runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepthU64);
+
     // Fallback queue remains bounded only if we periodically retry enqueue.
     // Kick one best-effort drain here so entries do not accumulate indefinitely
     // when timer cadence is low.
     drainDeferredRetireQueues(false);
-    return true;
+
+    if (fallbackDepth >= kRetireFallbackQueueFullThreshold)
+        return convo::isr::RetireEnqueueResult::QueueFull;
+
+    if (fallbackDepth >= kRetireFallbackPressureThreshold)
+        return convo::isr::RetireEnqueueResult::QueuePressure;
+
+    return convo::isr::RetireEnqueueResult::QueuePressure;
 }
 
 inline convo::EpochDomain& epochDomain() noexcept
@@ -2835,8 +2866,20 @@ inline void retireDSP(DSPCore* dsp) noexcept
     convo::fetchAddAtomic(rtAuxMutable_.runtimeRetireCount,
                          static_cast<std::uint64_t>(1),
                          std::memory_order_acq_rel);
-    if (enqueueDeferredDeleteNonRt(dsp, &AudioEngine::destroyDSPCoreNode))
-        return;
+    switch (enqueueDeferredDeleteNonRtWithResult(dsp, &AudioEngine::destroyDSPCoreNode))
+    {
+        case convo::isr::RetireEnqueueResult::Success:
+            return;
+        case convo::isr::RetireEnqueueResult::QueuePressure:
+            return;
+        case convo::isr::RetireEnqueueResult::QueueFull:
+            convo::fetchAddAtomic(rtAuxMutable_.debugRebuildDispatchRuntimeQueueFullCount,
+                                  static_cast<std::uint64_t>(1),
+                                  std::memory_order_acq_rel);
+            return;
+        case convo::isr::RetireEnqueueResult::Shutdown:
+            return;
+    }
 }
 
 inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept

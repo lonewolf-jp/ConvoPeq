@@ -13,6 +13,13 @@ namespace
 
 void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 {
+    const auto lifecycle = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
+    if (lifecycle != EngineLifecycleState::Prepared)
+    {
+        buffer.clear();
+        return;
+    }
+
     if (isShutdownInProgress())
     {
         shutdownRuntime_.markLateCallback();

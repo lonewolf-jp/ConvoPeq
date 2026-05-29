@@ -23,4 +23,8 @@ if ($commitText -notmatch 'world\.isSealedRecursively\s*\(\s*\)') {
     throw "Recursive seal precheck not found in publish precheck: $audioEngineCommit"
 }
 
+if ($commitText -notmatch 'world\.isFrozen\s*\(\s*\)') {
+    throw "Frozen precheck not found in publish precheck: $audioEngineCommit"
+}
+
 Write-Host "[PASS] R1 immutability freeze/seal precheck verified"

@@ -19,21 +19,6 @@ void destroyPublicationIntentNode(void* ptr) noexcept
 }
 }  // namespace
 
-std::atomic<std::uint64_t> AudioEngine::runtimeVersionCounterStorage_ { 1 };
-
-std::atomic<std::uint64_t>& AudioEngine::runtimeVersionCounter() noexcept
-{
-    return runtimeVersionCounterStorage_;
-}
-
-[[nodiscard]] std::uint64_t AudioEngine::reserveNextRuntimeVersion() noexcept
-{
-    // acq_rel: runtime version counter を increment し、複数 world lifecycle across に unique ID を割り当て。
-    return convo::fetchAddAtomic(runtimeVersionCounter(),
-                                 static_cast<std::uint64_t>(1),
-                                 std::memory_order_acq_rel);
-}
-
 [[nodiscard]] bool AudioEngine::acceptsRuntimePublication() const noexcept
 {
     const auto currentLifecycle = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
@@ -53,6 +38,13 @@ std::atomic<std::uint64_t>& AudioEngine::runtimeVersionCounter() noexcept
 
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
+    if (!world.isFrozen())
+    {
+        debugRuntime_.validateOwnershipClosure();
+        emitEvidenceTickNonRt(true);
+        return false;
+    }
+
     if (!world.isSealedRecursively())
     {
         debugRuntime_.validateOwnershipClosure();
@@ -68,9 +60,9 @@ std::atomic<std::uint64_t>& AudioEngine::runtimeVersionCounter() noexcept
         return true;
 
     convo::isr::PayloadClosureDescriptor closure{};
-    closure.closureId = static_cast<uint32_t>((world.runtimeVersion != 0)
-        ? world.runtimeVersion
-        : (world.generation != 0 ? world.generation : 1));
+    closure.closureId = static_cast<uint32_t>((world.generation != 0)
+        ? world.generation
+        : 1u);
 
     std::uint32_t nextNodeId = 1;
     std::uint32_t activeNodeId = 0;
@@ -173,7 +165,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     retireRuntimePublication(world);
 
     const std::uint32_t slot = static_cast<std::uint32_t>(world->generation % 256u);
-    std::uint32_t generation = static_cast<std::uint32_t>(world->runtimeVersion & 0xFFFFFFFFu);
+    std::uint32_t generation = static_cast<std::uint32_t>(world->generation & 0xFFFFFFFFu);
     if (generation == 0u)
         generation = 1u;
 

@@ -163,6 +163,8 @@ if (@('warn', 'fail') -notcontains $effectiveMode) {
 
 $sourceRoot = Join-Path $repoRoot 'src'
 $cppFiles = Get-ChildItem -Path $sourceRoot -Recurse -File -Filter '*.cpp'
+$releaseResourcesPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.ReleaseResources.cpp'
+$ctorDtorPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.CtorDtor.cpp'
 $sourceRelativePaths = @()
 foreach ($f in @($cppFiles)) {
     $sourceRelativePaths += Get-RelativePathCompat -BasePath $repoRoot -TargetPath $f.FullName
@@ -905,12 +907,67 @@ foreach ($entry in @($shutdownPolicyPathEntries)) {
     }
 }
 
-$allViolations = @($violations + $functionScopeViolations + $requiredPatternViolations + $requiredApplicationViolations + $requiredDrainPatternViolations + $requiredDrainApplicationViolations + $requiredDrainWaitPatternViolations + $requiredDrainWaitApplicationViolations + $requiredEmergencyReclaimPatternViolations + $requiredEmergencyReclaimApplicationViolations + $requiredReclaimPrioritizationPatternViolations + $requiredReclaimPrioritizationApplicationViolations + $waitForDrainCallsiteViolations + $isFullyDrainedCallsiteViolations + $drainAuthorityPolicyCoverageViolations + $boundedDrainWaitPolicyCoverageViolations + $drainAuthorityAllowlistOverreachViolations + $boundedDrainWaitAllowlistOverreachViolations + $shutdownRequiredDuplicatePathViolations + $shutdownAllowlistDuplicatePathViolations + $shutdownPolicyOrphanPathViolations)
+$coordinatorShutdownTransitionViolations = @()
+if ((Test-Path -LiteralPath $releaseResourcesPath) -and (Test-Path -LiteralPath $ctorDtorPath)) {
+    $releaseText = Get-Content -LiteralPath $releaseResourcesPath -Raw -Encoding UTF8
+    $ctorDtorText = Get-Content -LiteralPath $ctorDtorPath -Raw -Encoding UTF8
+
+    if (-not [System.Text.RegularExpressions.Regex]::IsMatch($releaseText, 'runtimePublicationBridge_\.requestShutdown\(\);')) {
+        $coordinatorShutdownTransitionViolations += [ordered]@{
+            file    = 'src/audioengine/AudioEngine.Processing.ReleaseResources.cpp'
+            line    = 0
+            snippet = ''
+            checkId = 'CI-SHUTDOWN-014'
+            message = 'releaseResources must request coordinator shutdown before bounded drain.'
+        }
+    }
+
+    if (-not [System.Text.RegularExpressions.Regex]::IsMatch($releaseText, 'runtimePublicationBridge_\.markShutdownComplete\(\);')) {
+        $coordinatorShutdownTransitionViolations += [ordered]@{
+            file    = 'src/audioengine/AudioEngine.Processing.ReleaseResources.cpp'
+            line    = 0
+            snippet = ''
+            checkId = 'CI-SHUTDOWN-014'
+            message = 'releaseResources must finalize coordinator shutdown after bounded drain evaluation.'
+        }
+    }
+
+    if (-not [System.Text.RegularExpressions.Regex]::IsMatch($ctorDtorText, 'runtimePublicationBridge_\.requestShutdown\(\);')) {
+        $coordinatorShutdownTransitionViolations += [ordered]@{
+            file    = 'src/audioengine/AudioEngine.CtorDtor.cpp'
+            line    = 0
+            snippet = ''
+            checkId = 'CI-SHUTDOWN-015'
+            message = 'AudioEngine destructor must request coordinator shutdown in direct teardown path.'
+        }
+    }
+
+    if (-not [System.Text.RegularExpressions.Regex]::IsMatch($ctorDtorText, 'runtimePublicationBridge_\.markShutdownComplete\(\);')) {
+        $coordinatorShutdownTransitionViolations += [ordered]@{
+            file    = 'src/audioengine/AudioEngine.CtorDtor.cpp'
+            line    = 0
+            snippet = ''
+            checkId = 'CI-SHUTDOWN-015'
+            message = 'AudioEngine destructor must finalize coordinator shutdown after forced drain.'
+        }
+    }
+}
+else {
+    $coordinatorShutdownTransitionViolations += [ordered]@{
+        file    = 'src/audioengine/**'
+        line    = 0
+        snippet = ''
+        checkId = 'CI-SHUTDOWN-014'
+        message = 'required shutdown path source files were not found for coordinator transition checks.'
+    }
+}
+
+$allViolations = @($violations + $functionScopeViolations + $requiredPatternViolations + $requiredApplicationViolations + $requiredDrainPatternViolations + $requiredDrainApplicationViolations + $requiredDrainWaitPatternViolations + $requiredDrainWaitApplicationViolations + $requiredEmergencyReclaimPatternViolations + $requiredEmergencyReclaimApplicationViolations + $requiredReclaimPrioritizationPatternViolations + $requiredReclaimPrioritizationApplicationViolations + $waitForDrainCallsiteViolations + $isFullyDrainedCallsiteViolations + $drainAuthorityPolicyCoverageViolations + $boundedDrainWaitPolicyCoverageViolations + $drainAuthorityAllowlistOverreachViolations + $boundedDrainWaitAllowlistOverreachViolations + $shutdownRequiredDuplicatePathViolations + $shutdownAllowlistDuplicatePathViolations + $shutdownPolicyOrphanPathViolations + $coordinatorShutdownTransitionViolations)
 $report = [ordered]@{
     schema         = 'isr_v73_shutdown_reclaim_report_v1'
     generatedAt    = (Get-Date -Format 'o')
     mode           = $effectiveMode
-    checks         = @('CI-SHUTDOWN-001', 'CI-SHUTDOWN-002', 'CI-SHUTDOWN-003', 'CI-SHUTDOWN-004', 'CI-SHUTDOWN-005', 'CI-SHUTDOWN-006', 'CI-SHUTDOWN-007', 'CI-SHUTDOWN-008', 'CI-SHUTDOWN-009', 'CI-SHUTDOWN-010', 'CI-SHUTDOWN-011', 'CI-SHUTDOWN-012', 'CI-SHUTDOWN-013', 'CI-RECLAIM-001', 'CI-RECLAIM-002', 'CI-RECLAIM-003')
+    checks         = @('CI-SHUTDOWN-001', 'CI-SHUTDOWN-002', 'CI-SHUTDOWN-003', 'CI-SHUTDOWN-004', 'CI-SHUTDOWN-005', 'CI-SHUTDOWN-006', 'CI-SHUTDOWN-007', 'CI-SHUTDOWN-008', 'CI-SHUTDOWN-009', 'CI-SHUTDOWN-010', 'CI-SHUTDOWN-011', 'CI-SHUTDOWN-012', 'CI-SHUTDOWN-013', 'CI-SHUTDOWN-014', 'CI-SHUTDOWN-015', 'CI-RECLAIM-001', 'CI-RECLAIM-002', 'CI-RECLAIM-003')
     violationCount = $allViolations.Count
     violations     = $allViolations
 }

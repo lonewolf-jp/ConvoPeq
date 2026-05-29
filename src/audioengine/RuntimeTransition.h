@@ -16,6 +16,7 @@ enum class TransitionPolicy : uint8_t
 // 所有権は持たず、ポインタは状態可視化のためにのみ保持する。
 struct TransitionState
 {
+    // AuthorityClass::Derived (mirrors authoritative transition fact for observation)
     void* current = nullptr;
     void* next = nullptr;
     TransitionPolicy policy = TransitionPolicy::SmoothOnly;
@@ -28,6 +29,7 @@ struct TransitionState
 // This keeps ownership out-of-band and only mirrors the runtime-visible state.
 struct EngineRuntime
 {
+    // AuthorityClass::Derived
     void* current = nullptr;
     std::uint64_t currentRuntimeUuid = 0;
     void* fading = nullptr;

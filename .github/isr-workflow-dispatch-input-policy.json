@@ -26,6 +26,34 @@
                 ]
             },
             {
+                "name": "declaredPrClass",
+                "type": "choice",
+                "required": false,
+                "default": "Class-A",
+                "descriptionMustContain": "Declared PR class",
+                "options": [
+                    "Class-S",
+                    "Class-A",
+                    "Class-B",
+                    "Class-C",
+                    "Class-D"
+                ]
+            },
+            {
+                "name": "prOpenedAt",
+                "type": "string",
+                "required": false,
+                "default": "",
+                "descriptionMustContain": "Optional PR opened-at timestamp"
+            },
+            {
+                "name": "soakMinutes",
+                "type": "string",
+                "required": false,
+                "default": "0",
+                "descriptionMustContain": "Optional soak duration"
+            },
+            {
                 "name": "enforceTriggerPolicy",
                 "type": "boolean",
                 "required": false,
@@ -76,6 +104,23 @@
             {
                 "inputName": "autoPruneCleanupDeferred",
                 "runnerSwitch": "-AutoPruneCleanupDeferred"
+            }
+        ],
+        "arguments": [
+            {
+                "inputName": "declaredPrClass",
+                "runnerSwitch": "-DeclaredClass",
+                "valueMode": "rawNonEmpty"
+            },
+            {
+                "inputName": "prOpenedAt",
+                "runnerSwitch": "-PrOpenedAt",
+                "valueMode": "rawNonEmpty"
+            },
+            {
+                "inputName": "soakMinutes",
+                "runnerSwitch": "-SoakMinutes",
+                "valueMode": "nonNegativeInt"
             }
         ]
     }

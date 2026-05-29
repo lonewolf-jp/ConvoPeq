@@ -80,11 +80,21 @@ Assert-Match $lifecycleCpp 'duplicatePrepareCollapsed_' 'R20 gate: HC-1 duplicat
 Assert-Match $lifecycleCpp 'currentPhase\s*==\s*LifecyclePhase::Uninitialized\s*\|\|\s*currentPhase\s*==\s*LifecyclePhase::Preparing' 'R20 gate: HC-2 release-before-prepare reject is missing'
 Assert-Match $lifecycleCpp 'currentPhase\s*==\s*LifecyclePhase::Releasing' 'R20 gate: HC-3 callback during Releasing reject is missing'
 
-# R21: DSPHandle callback view + crossfade completion checks
+# R21: callback observe path + crossfade completion checks
 $audioBlockCppPath = Join-Path $audioRoot "AudioEngine.Processing.AudioBlock.cpp"
 $audioBlockCpp = Read-Text $audioBlockCppPath
-Assert-Match $audioBlockCpp 'dspHandleRuntime_\.getActiveRuntimeDSPHandle\s*\(' 'R21 gate: callback active runtime DSP handle view missing'
-Assert-Match $audioBlockCpp 'dspHandleRuntime_\.getFadingRuntimeDSPHandle\s*\(' 'R21 gate: callback fading runtime DSP handle view missing'
+$hasHandleCallbackView =
+    [regex]::IsMatch($audioBlockCpp, 'dspHandleRuntime_\.getActiveRuntimeDSPHandle\s*\(', [System.Text.RegularExpressions.RegexOptions]::Multiline) -and
+    [regex]::IsMatch($audioBlockCpp, 'dspHandleRuntime_\.getFadingRuntimeDSPHandle\s*\(', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+
+$hasRuntimeWorldCallbackView =
+    [regex]::IsMatch($audioBlockCpp, 'readAudioRuntimeView\s*\(\s*\)', [System.Text.RegularExpressions.RegexOptions]::Multiline) -and
+    [regex]::IsMatch($audioBlockCpp, 'getRuntimeGraph\s*\(\s*runtimeReadView\s*\)', [System.Text.RegularExpressions.RegexOptions]::Multiline) -and
+    [regex]::IsMatch($audioBlockCpp, 'runtimeGraph->activeNode', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+
+if (-not $hasHandleCallbackView -and -not $hasRuntimeWorldCallbackView) {
+    throw 'R21 gate: callback runtime observe view missing (neither DSPHandleRuntime view nor RuntimeWorld view found)'
+}
 
 $timerCppPath = Join-Path $audioRoot "AudioEngine.Timer.cpp"
 $timerCpp = Read-Text $timerCppPath

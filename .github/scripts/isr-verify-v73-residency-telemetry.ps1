@@ -171,6 +171,7 @@ if (@('warn', 'fail') -notcontains $effectiveMode) {
 
 $sourceRoot = Join-Path $repoRoot 'src'
 $allSourceFiles = Get-ChildItem -Path $sourceRoot -Recurse -File
+$audioEngineHeaderPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
 $sourceRelativePaths = @()
 foreach ($f in @($allSourceFiles)) {
     $sourceRelativePaths += Get-RelativePathCompat -BasePath $repoRoot -TargetPath $f.FullName
@@ -485,6 +486,61 @@ foreach ($requiredApp in @($policy.residencyTelemetryChecks.requiredTelemetryApp
             snippet = ''
             checkId = 'CI-TELEMETRY-002'
             message = "required telemetry application not found: pathRegex=$pathRegex lineRegex=$lineRegex"
+        }
+    }
+}
+
+$telemetryImmediateSyncViolations = @()
+$telemetryImmediateSyncPolicyCoverageViolations = @()
+if (-not (Test-Path -LiteralPath $audioEngineHeaderPath)) {
+    $telemetryImmediateSyncViolations += [ordered]@{
+        file = 'src/audioengine/AudioEngine.h'
+        line = 0
+        snippet = ''
+        checkId = 'CI-TELEMETRY-009'
+        message = 'AudioEngine header not found for immediate telemetry sync contract checks'
+    }
+}
+else {
+    $audioEngineHeaderText = Get-Content -LiteralPath $audioEngineHeaderPath -Raw -Encoding UTF8
+
+    $requiredImmediateSyncPatterns = @(
+        'publishAtomic\(fallbackQueueDepth_,\s*fallbackDepthU64,\s*std::memory_order_release\)',
+        'publishAtomic\(retireQueueDepth_,\s*retireDepth,\s*std::memory_order_release\)',
+        'runtimePublicationBridge_\.setFallbackBacklogCount\(fallbackDepthU64\)',
+        'runtimePublicationBridge_\.setRetireBacklogCount\(retireDepth\)',
+        'runtimePublicationBridge_\.setDeferredRetireResidencyCount\(fallbackDepthU64\)'
+    )
+
+    foreach ($pattern in $requiredImmediateSyncPatterns) {
+        if (-not [System.Text.RegularExpressions.Regex]::IsMatch($audioEngineHeaderText, $pattern)) {
+            $telemetryImmediateSyncViolations += [ordered]@{
+                file = 'src/audioengine/AudioEngine.h'
+                line = 0
+                snippet = $pattern
+                checkId = 'CI-TELEMETRY-009'
+                message = 'missing immediate telemetry sync pattern in fallback enqueue path'
+            }
+        }
+
+        $policyCovered = $false
+        foreach ($requiredApp in @($policy.residencyTelemetryChecks.requiredTelemetryApplications)) {
+            $pathRegex = "$($requiredApp.pathRegex)"
+            $lineRegex = "$($requiredApp.lineRegex)"
+            if ($pathRegex -eq '^src/audioengine/AudioEngine\.h$' -and $lineRegex -eq $pattern) {
+                $policyCovered = $true
+                break
+            }
+        }
+
+        if (-not $policyCovered) {
+            $telemetryImmediateSyncPolicyCoverageViolations += [ordered]@{
+                file = 'policy'
+                line = 0
+                snippet = $pattern
+                checkId = 'CI-TELEMETRY-010'
+                message = 'immediate telemetry sync contract is not declared in requiredTelemetryApplications policy'
+            }
         }
     }
 }
@@ -1346,12 +1402,12 @@ foreach ($entry in @($residencyPolicyPathEntries)) {
     }
 }
 
-$violations = @($residencyViolations + $residencyOwnershipViolations + $residencyAuthorityViolations + $residencyContractDuplicateViolations + $residencyPolicyOrphanPathViolations + $telemetryViolations + $telemetryOwnerCoverageViolations + $requiredTelemetryPatternViolations + $requiredTelemetryApplicationViolations + $requiredTelemetryOwnerScopeCoverageViolations + $telemetryOwnerRequiredApplicationCoverageViolations + $telemetryPolicyDuplicateViolations + $forbiddenTelemetryAuthorityViolations + $crossfadeRtWriteViolations + $requiredCrossfadeAuthorityApplicationViolations + $crossfadeAuthorityScopeViolations + $crossfadeAtomicReadViolations + $requiredCrossfadePreparedSnapshotViolations + $requiredCrossfadePreparedSnapshotConsumerViolations + $crossfadePreparedConsumerPolicyCoverageViolations + $crossfadePreparedSnapshotScopeViolations + $crossfadePreparedStateFieldScopeViolations + $requiredCrossfadePreparedStateFieldApplicationViolations + $crossfadePreparedFieldPolicyCoverageViolations + $crossfadePreparedConsumerToFieldCoverageViolations + $crossfadePreparedFieldToConsumerCoverageViolations + $crossfadePreparedPolicyDuplicatePathViolations + $crossfadePreparedAllowlistDuplicatePathViolations + $crossfadePreparedAllowlistCoverageViolations + $crossfadePreparedAllowlistOverreachViolations)
+$violations = @($residencyViolations + $residencyOwnershipViolations + $residencyAuthorityViolations + $residencyContractDuplicateViolations + $residencyPolicyOrphanPathViolations + $telemetryViolations + $telemetryOwnerCoverageViolations + $requiredTelemetryPatternViolations + $requiredTelemetryApplicationViolations + $telemetryImmediateSyncViolations + $telemetryImmediateSyncPolicyCoverageViolations + $requiredTelemetryOwnerScopeCoverageViolations + $telemetryOwnerRequiredApplicationCoverageViolations + $telemetryPolicyDuplicateViolations + $forbiddenTelemetryAuthorityViolations + $crossfadeRtWriteViolations + $requiredCrossfadeAuthorityApplicationViolations + $crossfadeAuthorityScopeViolations + $crossfadeAtomicReadViolations + $requiredCrossfadePreparedSnapshotViolations + $requiredCrossfadePreparedSnapshotConsumerViolations + $crossfadePreparedConsumerPolicyCoverageViolations + $crossfadePreparedSnapshotScopeViolations + $crossfadePreparedStateFieldScopeViolations + $requiredCrossfadePreparedStateFieldApplicationViolations + $crossfadePreparedFieldPolicyCoverageViolations + $crossfadePreparedConsumerToFieldCoverageViolations + $crossfadePreparedFieldToConsumerCoverageViolations + $crossfadePreparedPolicyDuplicatePathViolations + $crossfadePreparedAllowlistDuplicatePathViolations + $crossfadePreparedAllowlistCoverageViolations + $crossfadePreparedAllowlistOverreachViolations)
 $report = [ordered]@{
     schema = 'isr_v73_residency_telemetry_report_v1'
     generatedAt = (Get-Date -Format 'o')
     mode = $effectiveMode
-    checks = @('CI-RESIDENCY-001', 'CI-RESIDENCY-002', 'CI-RESIDENCY-003', 'CI-RESIDENCY-004', 'CI-RESIDENCY-005', 'CI-TELEMETRY-001', 'CI-TELEMETRY-002', 'CI-TELEMETRY-003', 'CI-TELEMETRY-004', 'CI-TELEMETRY-005', 'CI-TELEMETRY-006', 'CI-TELEMETRY-007', 'CI-TELEMETRY-008', 'CI-CROSSFADE-001', 'CI-CROSSFADE-002', 'CI-CROSSFADE-003', 'CI-CROSSFADE-004', 'CI-CROSSFADE-005', 'CI-CROSSFADE-006', 'CI-CROSSFADE-007', 'CI-CROSSFADE-008', 'CI-CROSSFADE-009', 'CI-CROSSFADE-010', 'CI-CROSSFADE-011', 'CI-CROSSFADE-012', 'CI-CROSSFADE-013', 'CI-CROSSFADE-014', 'CI-CROSSFADE-015', 'CI-CROSSFADE-016', 'CI-CROSSFADE-017')
+    checks = @('CI-RESIDENCY-001', 'CI-RESIDENCY-002', 'CI-RESIDENCY-003', 'CI-RESIDENCY-004', 'CI-RESIDENCY-005', 'CI-TELEMETRY-001', 'CI-TELEMETRY-002', 'CI-TELEMETRY-003', 'CI-TELEMETRY-004', 'CI-TELEMETRY-005', 'CI-TELEMETRY-006', 'CI-TELEMETRY-007', 'CI-TELEMETRY-008', 'CI-TELEMETRY-009', 'CI-TELEMETRY-010', 'CI-CROSSFADE-001', 'CI-CROSSFADE-002', 'CI-CROSSFADE-003', 'CI-CROSSFADE-004', 'CI-CROSSFADE-005', 'CI-CROSSFADE-006', 'CI-CROSSFADE-007', 'CI-CROSSFADE-008', 'CI-CROSSFADE-009', 'CI-CROSSFADE-010', 'CI-CROSSFADE-011', 'CI-CROSSFADE-012', 'CI-CROSSFADE-013', 'CI-CROSSFADE-014', 'CI-CROSSFADE-015', 'CI-CROSSFADE-016', 'CI-CROSSFADE-017')
     violationCount = $violations.Count
     violations = $violations
 }

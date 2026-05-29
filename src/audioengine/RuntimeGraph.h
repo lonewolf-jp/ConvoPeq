@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "ISRAuthorityClass.h"
 
 namespace convo {
 
@@ -8,6 +9,7 @@ namespace convo {
 struct RuntimeGraph
 {
     // IMMUTABLE_RUNTIME: runtime identity / publish generation
+    // AuthorityClass::Authoritative
     std::uint64_t runtimeUuid = 0;
     std::uint64_t fadingRuntimeUuid = 0;
     std::uint64_t transitionCurrentRuntimeUuid = 0;
@@ -15,10 +17,12 @@ struct RuntimeGraph
     std::uint64_t generation = 0;
 
     // IMMUTABLE_RUNTIME: graph node pointers (visibility only, no ownership)
+    // AuthorityClass::Derived
     void* activeNode = nullptr;
     void* fadingNode = nullptr;
 
     // IMMUTABLE_RUNTIME: core processing metadata
+    // AuthorityClass::Authoritative
     double sampleRate = 0.0;
     int ditherBitDepth = 0;
     int noiseShaperType = 0;

@@ -1,0 +1,14 @@
+{
+    "schema": "isr_safety_regression_baseline_v1",
+    "owner": "audioengine-runtime-bridge",
+    "issue": "BRIDGE-SAFETY-BASELINE-001",
+    "rationale": "baseline values for SafetyPass comparison during ISR runtime migration",
+    "expiry": "2026-09-30",
+    "metrics": {
+        "xrunDelta": 0,
+        "staleObserveCount": 0,
+        "retireBacklogSlope": 0,
+        "worldLeakCount": 0,
+        "publicationLatencyP99Ratio": 1
+    }
+}

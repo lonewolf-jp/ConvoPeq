@@ -24,6 +24,16 @@ enum class RuntimeBoundary : uint8_t {
 
 class RuntimePublicationCoordinator {
 public:
+    enum class CoordinatorState : uint8_t {
+        Bootstrapping = 0,
+        Ready,
+        Publishing,
+        Transitioning,
+        Pressure,
+        ShuttingDown,
+        Faulted
+    };
+
     RuntimePublicationCoordinator();
     bool precheckPublish(const PayloadClosureDescriptor& closure,
                          const TieredPayloadDescriptor& descriptor) noexcept;
@@ -42,6 +52,11 @@ public:
     [[nodiscard]] bool isSwapPending() const noexcept;
     [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
     [[nodiscard]] bool isFullyDrained() const noexcept;
+    [[nodiscard]] CoordinatorState getState() const noexcept;
+    void markTransitionStart() noexcept;
+    void markTransitionCommitted() noexcept;
+    void requestShutdown() noexcept;
+    void markShutdownComplete() noexcept;
 private:
     enum class RejectCode : uint8_t {
         None = 0,
@@ -58,10 +73,15 @@ private:
     std::atomic<std::uint64_t> fallbackBacklogCount_;
     std::atomic<std::uint64_t> reclaimInFlightCount_;
     std::atomic<std::uint64_t> deferredRetireResidencyCount_;
+    std::atomic<std::uint64_t> previousRetireBacklogCount_;
+    std::atomic<std::uint32_t> pressureNormalizedWindows_;
     std::atomic<bool> swapPending_;
+    std::atomic<CoordinatorState> state_;
     std::mutex retireGuard_;
     std::vector<const void*> retiredWorlds_;
     static constexpr std::size_t kMaxRetiredWorldResidency = 4096;
+    static constexpr std::uint64_t kPressureSlopeThreshold = 8;
+    static constexpr std::uint32_t kPressureNormalizeWindows = 3;
 };
 
 class MultiStagePublisher {

@@ -19,6 +19,24 @@ $validatorTieringText = Get-Content -LiteralPath $validatorTieringPath -Raw -Enc
 $triggerCleanupCompletionText = Get-Content -LiteralPath $triggerCleanupCompletionPath -Raw -Encoding UTF8
 $ownershipMigrationScriptText = Get-Content -LiteralPath $ownershipMigrationScriptPath -Raw -Encoding UTF8
 
+$workflowUploadNeedsEvidenceContracts =
+$workflowText.Contains('Upload ISR evidence artifacts') -and
+$workflowText.Contains('evidence/pr_sla_report.json') -and
+$workflowText.Contains('evidence/safety_regression_report.json') -and
+$workflowText.Contains('evidence/authority_inventory_report.json') -and
+$workflowText.Contains('evidence/documentation_scope_rule_report.json') -and
+$workflowText.Contains('evidence/pr_required_artifacts_report.json') -and
+$workflowText.Contains('evidence/runtime_coordinator_state_machine_report.json') -and
+$workflowText.Contains('evidence/taxonomy_phase_mapping_report.json') -and
+$workflowText.Contains('evidence/design_docs_coverage_report.json') -and
+$workflowText.Contains('evidence/safety_regression_remeasure_report.json') -and
+$workflowText.Contains('storage/isr_inventory/current_authority_inventory.json') -and
+$workflowText.Contains('storage/isr_inventory/post_authority_inventory.json') -and
+$workflowText.Contains('storage/isr_inventory/inventory_diff_report.json')
+if (-not $workflowUploadNeedsEvidenceContracts) {
+    throw 'Workflow upload-artifact step missing required ISR evidence artifacts'
+}
+
 $ownershipMigrationNeedsAuthorityTransferContracts =
 $ownershipMigrationScriptText.Contains('ownership_migration_report_v2') -and
 $ownershipMigrationScriptText.Contains('trigger_audit_report.json') -and
@@ -39,6 +57,8 @@ $requiredGateScripts = @(
     '.github/scripts/isr-verify-v1-immutability.ps1',
     '.github/scripts/isr-verify-v2-seal.ps1',
     '.github/scripts/isr-verify-v3-runtime-graph-immutability.ps1',
+    '.github/scripts/isr-verify-breakglass-overrides.ps1',
+    '.github/scripts/isr-verify-runtime-coordinator-state-machine.ps1',
     '.github/scripts/isr-verify-v4-dsp-handle-policy.ps1',
     '.github/scripts/isr-verify-v5-retire-authority-lane.ps1',
     '.github/scripts/isr-verify-v6-domain-f-ordering.ps1',
@@ -54,10 +74,13 @@ $requiredGateScripts = @(
     '.github/scripts/isr-verify-v9.ps1',
     '.github/scripts/isr-verify-v10.ps1',
     '.github/scripts/isr-verify-v10-ownership-cycle.ps1',
+    '.github/scripts/isr-verify-documentation-scope-rule.ps1',
+    '.github/scripts/isr-verify-publication-single-path.ps1',
     '.github/scripts/isr-verify-r11-r25-closed-coverage.ps1',
     '.github/scripts/isr-verify-trigger-policy.ps1',
     '.github/scripts/isr-verify-trigger-symbol-usage.ps1',
     '.github/scripts/isr-verify-observe-shim-usage.ps1',
+    '.github/scripts/isr-verify-audio-startup-order.ps1',
     '.github/scripts/isr-verify-trigger-ast.ps1',
     '.github/scripts/isr-trigger-audit.ps1',
     '.github/scripts/isr-prune-cleanup-deferred.ps1',
@@ -74,11 +97,15 @@ $requiredGateScripts = @(
     '.github/scripts/isr-verify-8_1-workflow-input-contract.ps1',
     '.github/scripts/isr-verify-8_1-workflow-input-coherence.ps1',
     '.github/scripts/isr-verify-canary-baseline-normalization.ps1',
+    '.github/scripts/isr-capture-safety-regression-baseline.ps1',
     '.github/scripts/isr-verify-policy-top-level-governance.ps1',
     '.github/scripts/isr-verify-rtmutable-boundary.ps1',
     '.github/scripts/isr-verify-facade-bypass.ps1',
     '.github/scripts/isr-verify-latency-alignment.ps1',
     '.github/scripts/isr-verify-crossfade-observable-state.ps1',
+    '.github/scripts/isr-verify-pr-sla.ps1',
+    '.github/scripts/isr-verify-safety-regression.ps1',
+    '.github/scripts/isr-verify-pr-required-artifacts.ps1',
     '.github/scripts/isr-verify-ownership-migration.ps1',
     '.github/scripts/isr-verify-validator-tiering.ps1',
     '.github/scripts/isr-verify-trigger-cleanup-completion.ps1',
@@ -87,8 +114,12 @@ $requiredGateScripts = @(
     '.github/scripts/isr-verify-clang-tidy-readiness.ps1',
     '.github/scripts/isr-verify-clang-tidy-audit.ps1',
     '.github/scripts/isr-verify-v73-admission-funnel.ps1',
+    '.github/scripts/isr-verify-v73-retire-pressure-contract.ps1',
+    '.github/scripts/isr-verify-v73-retire-rt-immediate-return.ps1',
     '.github/scripts/isr-verify-v73-shutdown-reclaim.ps1',
-    '.github/scripts/isr-verify-v73-residency-telemetry.ps1'
+    '.github/scripts/isr-verify-v73-residency-telemetry.ps1',
+    '.github/scripts/isr-verify-design-docs-coverage.ps1',
+    '.github/scripts/isr-verify-authority-inventory.ps1'
 )
 
 foreach ($relativeScript in $requiredGateScripts) {
@@ -113,6 +144,17 @@ $workflowText.Contains("`$invokeArgs = @('-Tier', `$tier)") -and
 $workflowText.Contains('& ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs')
 if (-not $workflowNeedsTierRunnerInvocation) {
     throw 'Workflow missing mandatory tier-runner invocation wiring'
+}
+
+$workflowNeedsPrSlaLabelingContracts =
+$workflowText.Contains('- name: Apply PR SLA labels') -and
+$workflowText.Contains("github.event_name == 'pull_request'") -and
+$workflowText.Contains('report.labelSuggestions') -and
+$workflowText.Contains('report.needsRevalidation') -and
+$workflowText.Contains('github.rest.issues.addLabels') -and
+$workflowText.Contains("labels: ['needs-revalidation']")
+if (-not $workflowNeedsPrSlaLabelingContracts) {
+    throw 'Workflow missing PR SLA needs-revalidation labeling contracts'
 }
 
 $workflowNeedsClangTidyAuditInput = [regex]::IsMatch($workflowText, 'requireClangTidyAudit\s*:')
@@ -207,11 +249,18 @@ $workflowText.Contains('Workflow dispatch input policy choice input has duplicat
 $workflowText.Contains('Workflow dispatch input policy choice input default is not in options') -and
 $workflowText.Contains('Workflow dispatch input policy violation: workflow has duplicate option') -and
 $workflowText.Contains('Workflow dispatch input policy missing required field: forwardingContract.switches') -and
+$workflowText.Contains('Workflow dispatch input policy missing required field: forwardingContract.arguments') -and
 $workflowText.Contains('Workflow dispatch input policy forwardingContract.switches requires non-empty switches') -and
+$workflowText.Contains('Workflow dispatch input policy forwardingContract.arguments requires non-empty arguments') -and
 $workflowText.Contains('Workflow dispatch input policy forwardingContract has duplicate inputName:') -and
 $workflowText.Contains('Workflow dispatch input policy forwardingContract has duplicate runnerSwitch:') -and
 $workflowText.Contains('Workflow dispatch input policy forwardingContract requires boolean input type:') -and
 $workflowText.Contains('Workflow dispatch input policy forwardingContract references unknown input:') -and
+$workflowText.Contains('Workflow dispatch input policy argument contract has duplicate inputName:') -and
+$workflowText.Contains('Workflow dispatch input policy argument contract has duplicate runnerSwitch:') -and
+$workflowText.Contains('Workflow dispatch input policy argument contract requires string-or-choice input type:') -and
+$workflowText.Contains('Workflow dispatch input policy argument contract requires string input type for nonNegativeInt:') -and
+$workflowText.Contains('Workflow dispatch argument mismatch: missing tier runner argument forwarding:') -and
 $workflowText.Contains('Workflow dispatch input policy violation: missing tier runner switch forwarding:') -and
 $workflowText.Contains('Workflow dispatch input policy has invalid expiry format:') -and
 $workflowText.Contains('Workflow dispatch input policy expired: expiry=') -and
@@ -229,6 +278,12 @@ $workflowText.Contains('Workflow input contract violation: description mismatch'
 $workflowText.Contains('Workflow input contract violation: uncontracted 8.1 workflow input detected') -and
 $workflowText.Contains('workflowInputContract references unknown collector field') -and
 $workflowText.Contains('Assert-WorkflowInputContractAgainstPolicy -Policy $closePolicy -WorkflowPath') -and
+$workflowText.Contains("declaredPrClass:") -and
+$workflowText.Contains("soakMinutes:") -and
+$workflowText.Contains("Resolve-WorkflowNonNegativeInt") -and
+$workflowText.Contains("-InputName 'soakMinutes'") -and
+$workflowText.Contains("'-DeclaredClass'") -and
+$workflowText.Contains("'-SoakMinutes'") -and
 $workflowText.Contains('expiryGuardDaysByTier') -and
 $workflowText.Contains('expiry guard breached for tier=') -and
 $workflowText.Contains('ParseExact') -and
@@ -379,6 +434,11 @@ if (-not (Test-Path $workflowDispatchInputPolicyPath)) {
     throw "Missing workflow dispatch input policy: $workflowDispatchInputPolicyPath"
 }
 
+$breakglassRegistryPath = Join-Path $repoRoot '.github\isr-breakglass-overrides.json'
+if (-not (Test-Path $breakglassRegistryPath)) {
+    throw "Missing BreakGlass override registry: $breakglassRegistryPath"
+}
+
 $validatorTieringPolicy = Get-Content -LiteralPath $validatorTieringPolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
 foreach ($field in @('owner', 'issue', 'rationale', 'expiry')) {
     if ($null -eq $validatorTieringPolicy.$field -or [string]::IsNullOrWhiteSpace("$($validatorTieringPolicy.$field)")) {
@@ -391,6 +451,21 @@ foreach ($field in @('schema', 'owner', 'issue', 'rationale', 'expiry', 'inputCo
     if ($null -eq $workflowDispatchInputPolicy.$field -or [string]::IsNullOrWhiteSpace("$($workflowDispatchInputPolicy.$field)")) {
         throw "Workflow dispatch input policy missing required field: $field"
     }
+}
+
+$breakglassRegistry = Get-Content -LiteralPath $breakglassRegistryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($field in @('schema', 'owner', 'issue', 'rationale', 'expiry')) {
+    if ($null -eq $breakglassRegistry.$field -or [string]::IsNullOrWhiteSpace("$($breakglassRegistry.$field)")) {
+        throw "BreakGlass override registry missing required field: $field"
+    }
+}
+
+if ($null -eq $breakglassRegistry.entries) {
+    throw 'BreakGlass override registry missing required field: entries'
+}
+
+if ("$($breakglassRegistry.schema)" -ne 'isr_breakglass_overrides_v1') {
+    throw "Unexpected BreakGlass override registry schema: $($breakglassRegistry.schema)"
 }
 
 if ("$($workflowDispatchInputPolicy.schema)" -ne 'isr_workflow_dispatch_input_policy_v1') {
@@ -745,6 +820,28 @@ if (-not $policyTopLevelNeedsSchemaGovernance) {
     throw 'Policy top-level governance gate missing schema/duplicate-schema/duplicate-issue fail-closed checks'
 }
 
+$safetyRegressionScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-safety-regression.ps1'
+if (-not (Test-Path $safetyRegressionScriptPath)) {
+    throw "Missing safety regression verifier script: $safetyRegressionScriptPath"
+}
+
+$safetyRegressionScriptText = Get-Content -LiteralPath $safetyRegressionScriptPath -Raw -Encoding UTF8
+$safetyRegressionNeedsNoiseContracts =
+$safetyRegressionScriptText.Contains('safety_regression_remeasure_report.json') -and
+$safetyRegressionScriptText.Contains('safety_regression_remeasure_report_v1') -and
+$safetyRegressionScriptText.Contains('safety_failure_window_history.json') -and
+$safetyRegressionScriptText.Contains('safety_failure_window_history_v1') -and
+$safetyRegressionScriptText.Contains('noiseAllowancePolicy') -and
+$safetyRegressionScriptText.Contains('taxonomyWindowPolicy') -and
+$safetyRegressionScriptText.Contains('failOnConsecutiveWindows') -and
+$safetyRegressionScriptText.Contains('Class-D backlog divergence detected but below consecutive-fail threshold') -and
+$safetyRegressionScriptText.Contains('Class-E retention leak detected but below consecutive-fail threshold') -and
+$safetyRegressionScriptText.Contains('maxRelativeDrift') -and
+$safetyRegressionScriptText.Contains('requiredRemeasureRuns')
+if (-not $safetyRegressionNeedsNoiseContracts) {
+    throw 'Safety regression verifier missing v1.2 noise-tolerance/taxonomy-window contracts'
+}
+
 $workflowDispatchInputPolicyScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-workflow-dispatch-input-policy.ps1'
 if (-not (Test-Path $workflowDispatchInputPolicyScriptPath)) {
     throw "Missing workflow dispatch input policy gate script: $workflowDispatchInputPolicyScriptPath"
@@ -758,10 +855,17 @@ $workflowDispatchInputPolicyScriptText.Contains('isr-workflow-dispatch-input-pol
 $workflowDispatchInputPolicyScriptText.Contains('isr_workflow_dispatch_input_policy_v1') -and
 $workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input mismatch: uncontracted non-8.1 workflow input detected') -and
 $workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy missing required field: forwardingContract.switches') -and
+$workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy missing required field: forwardingContract.arguments') -and
 $workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy forwardingContract.switches requires non-empty switches') -and
+$workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy forwardingContract.arguments requires non-empty arguments') -and
 $workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy forwardingContract has duplicate inputName:') -and
 $workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy forwardingContract has duplicate runnerSwitch:') -and
 $workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy forwardingContract requires boolean input type:') -and
+$workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy argument contract has duplicate inputName:') -and
+$workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy argument contract has duplicate runnerSwitch:') -and
+$workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy argument contract requires string-or-choice input type:') -and
+$workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch input policy argument contract requires string input type for nonNegativeInt:') -and
+$workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch argument mismatch: missing tier runner argument forwarding:') -and
 $workflowDispatchInputPolicyScriptText.Contains('Workflow dispatch forwarding mismatch: missing tier runner switch forwarding:') -and
 $workflowDispatchInputPolicyScriptText.Contains('boolean input has invalid default') -and
 $workflowDispatchInputPolicyScriptText.Contains('choice input has duplicate option') -and
@@ -861,6 +965,67 @@ if (-not $phase4GenerationDriftNeedsEvidenceContracts) {
     throw 'Phase4 generation drift gate missing evidence report contracts'
 }
 
+$documentationScopeScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-documentation-scope-rule.ps1'
+if (-not (Test-Path $documentationScopeScriptPath)) {
+    throw "Missing documentation scope rule script: $documentationScopeScriptPath"
+}
+
+$documentationScopeScriptText = Get-Content -LiteralPath $documentationScopeScriptPath -Raw -Encoding UTF8
+$documentationScopeNeedsContracts =
+$documentationScopeScriptText.Contains('documentation_scope_rule_report.json') -and
+$documentationScopeScriptText.Contains('documentation_scope_rule_report_v1') -and
+[regex]::IsMatch($documentationScopeScriptText, "role\s*=\s*'plan-v3_1'") -and
+[regex]::IsMatch($documentationScopeScriptText, "glob\s*=\s*'Practical_Stable_ISR_Runtime_\*_v3_1\.md'") -and
+[regex]::IsMatch($documentationScopeScriptText, "role\s*=\s*'governance-v1_1'") -and
+[regex]::IsMatch($documentationScopeScriptText, "glob\s*=\s*'ISR_Runtime_\*_v1_1\.md'") -and
+[regex]::IsMatch($documentationScopeScriptText, "role\s*=\s*'design-v1_2'") -and
+[regex]::IsMatch($documentationScopeScriptText, "glob\s*=\s*'Practical_Stable_ISR_Runtime_\*_v1_2\.md'") -and
+[regex]::IsMatch($documentationScopeScriptText, "role\s*=\s*'tasks-v1_0'") -and
+[regex]::IsMatch($documentationScopeScriptText, "glob\s*=\s*'Practical_Stable_ISR_Runtime_\*_v1_0\.md'") -and
+[regex]::IsMatch($documentationScopeScriptText, "role\s*=\s*'topology-diff'") -and
+[regex]::IsMatch($documentationScopeScriptText, "glob\s*=\s*'Practical_Stable_ISR_Runtime_topology_diff_\*\.md'") -and
+$documentationScopeScriptText.Contains('candidateMatchesWithTokens') -and
+$documentationScopeScriptText.Contains('resolves ambiguously (expected single canonical doc)') -and
+$documentationScopeScriptText.Contains('storage/isr_inventory/current_authority_inventory.json') -and
+$documentationScopeScriptText.Contains('storage/isr_inventory/post_authority_inventory.json') -and
+$documentationScopeScriptText.Contains('storage/isr_inventory/inventory_diff_report.json') -and
+$documentationScopeScriptText.Contains('evidence/authority_inventory_report.json')
+if (-not $documentationScopeNeedsContracts) {
+    throw 'Documentation scope rule gate missing required contract checks'
+}
+
+$authorityInventoryScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-authority-inventory.ps1'
+if (-not (Test-Path $authorityInventoryScriptPath)) {
+    throw "Missing authority inventory verifier script: $authorityInventoryScriptPath"
+}
+
+$authorityInventoryScriptText = Get-Content -LiteralPath $authorityInventoryScriptPath -Raw -Encoding UTF8
+$authorityInventoryNeedsContracts =
+$authorityInventoryScriptText.Contains('authority_inventory_report_v1') -and
+$authorityInventoryScriptText.Contains("Publication path drift: single publication contract violated") -and
+$authorityInventoryScriptText.Contains("publish(RuntimeWorld*)") -and
+$authorityInventoryScriptText.Contains("Observe path drift: RuntimeWorld only contract violated") -and
+$authorityInventoryScriptText.Contains('nonSinglePublicationCount')
+if (-not $authorityInventoryNeedsContracts) {
+    throw 'Authority inventory verifier missing single-publication/observe contract checks'
+}
+
+$publicationSinglePathScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-publication-single-path.ps1'
+if (-not (Test-Path $publicationSinglePathScriptPath)) {
+    throw "Missing publication single-path script: $publicationSinglePathScriptPath"
+}
+
+$publicationSinglePathScriptText = Get-Content -LiteralPath $publicationSinglePathScriptPath -Raw -Encoding UTF8
+$publicationSinglePathNeedsContracts =
+$publicationSinglePathScriptText.Contains('publication_single_path_report.json') -and
+$publicationSinglePathScriptText.Contains('publication_single_path_report_v1') -and
+$publicationSinglePathScriptText.Contains("publication_path = 'publish(RuntimeWorld*)'") -and
+$publicationSinglePathScriptText.Contains('RuntimePublicationCoordinator::commit') -and
+$publicationSinglePathScriptText.Contains('Forbidden field-level publication API detected:')
+if (-not $publicationSinglePathNeedsContracts) {
+    throw 'Publication single-path gate missing required contract checks'
+}
+
 $validatorTieringNeedsSlaFreshnessChecks =
 $validatorTieringText.Contains('hb_violation_report.json') -and
 $validatorTieringText.Contains('payload_tier_report.json') -and
@@ -878,6 +1043,26 @@ if (-not (Test-Path $metricGovernanceScriptPath)) {
 $rollbackMatrixScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-rollback-matrix.ps1'
 if (-not (Test-Path $rollbackMatrixScriptPath)) {
     throw "Missing rollback matrix script: $rollbackMatrixScriptPath"
+}
+
+$breakglassScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-breakglass-overrides.ps1'
+if (-not (Test-Path $breakglassScriptPath)) {
+    throw "Missing BreakGlass override verifier script: $breakglassScriptPath"
+}
+
+$breakglassScriptText = Get-Content -LiteralPath $breakglassScriptPath -Raw -Encoding UTF8
+$breakglassScriptNeedsContracts =
+$breakglassScriptText.Contains('.github\isr-breakglass-overrides.json') -and
+$breakglassScriptText.Contains("@('id', 'owner', 'reason', 'expiration', 'rollback_plan', 'approval')") -and
+$breakglassScriptText.Contains('BreakGlass active entry missing soak evidence field:') -and
+$breakglassScriptText.Contains('BreakGlass active entry soak evidence file not found:') -and
+$breakglassScriptText.Contains('BreakGlass persistent override is forbidden:') -and
+$breakglassScriptText.Contains('BreakGlass release persistent override is forbidden:') -and
+$breakglassScriptText.Contains('breakglass_overrides_report_v1') -and
+$breakglassScriptText.Contains('activeEntries') -and
+$breakglassScriptText.Contains('activeEntryDiagnostics')
+if (-not $breakglassScriptNeedsContracts) {
+    throw 'BreakGlass override verifier missing required contract checks'
 }
 
 $rollbackMatrixScriptText = Get-Content -LiteralPath $rollbackMatrixScriptPath -Raw -Encoding UTF8
@@ -928,6 +1113,21 @@ $canaryNormalizationScriptText.Contains('strictModeRequireAllMetrics') -and
 $canaryNormalizationScriptText.Contains('Strict mode requires evaluated xrunDelta evidence')
 if (-not $canaryNormalizationNeedsContractChecks) {
     throw 'Canary baseline normalization gate missing contract checks'
+}
+
+$safetyBaselineCaptureScriptPath = Join-Path $repoRoot '.github\scripts\isr-capture-safety-regression-baseline.ps1'
+if (-not (Test-Path $safetyBaselineCaptureScriptPath)) {
+    throw "Missing safety baseline capture script: $safetyBaselineCaptureScriptPath"
+}
+
+$safetyBaselineCaptureScriptText = Get-Content -LiteralPath $safetyBaselineCaptureScriptPath -Raw -Encoding UTF8
+$safetyBaselineCaptureNeedsContracts =
+$safetyBaselineCaptureScriptText.Contains('isr_safety_regression_baseline_v1') -and
+$safetyBaselineCaptureScriptText.Contains('safety_regression_baseline_capture_report_v1') -and
+$safetyBaselineCaptureScriptText.Contains('isr-safety-regression-baseline.candidate.json') -and
+$safetyBaselineCaptureScriptText.Contains("if (-not (Test-Path -LiteralPath `$evidenceDir))")
+if (-not $safetyBaselineCaptureNeedsContracts) {
+    throw 'Safety baseline capture gate missing contract checks'
 }
 
 $facadeBypassScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-facade-bypass.ps1'
@@ -1266,6 +1466,157 @@ $bridgePlanCompletenessScriptText.Contains('sourceRoot') -and
 $bridgePlanCompletenessScriptText.Contains('satisfied')
 if (-not $bridgePlanCompletenessNeedsContracts) {
     throw 'Bridge plan completeness gate missing core contract checks'
+}
+
+$retirePressureScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-v73-retire-pressure-contract.ps1'
+if (-not (Test-Path $retirePressureScriptPath)) {
+    throw "Missing v7.3 retire pressure verifier script: $retirePressureScriptPath"
+}
+
+$retirePressureScriptText = Get-Content -LiteralPath $retirePressureScriptPath -Raw -Encoding UTF8
+$retirePressureNeedsContracts =
+$retirePressureScriptText.Contains('isr_v73_retire_pressure_report_v1') -and
+$retirePressureScriptText.Contains('CI-RETIREPRESS-001') -and
+$retirePressureScriptText.Contains('CI-RETIREPRESS-005') -and
+$retirePressureScriptText.Contains('deferredDeleteFallbackQueue') -and
+$retirePressureScriptText.Contains('setRetireBacklogCount') -and
+$retirePressureScriptText.Contains('drainDeferredRetireQueues')
+if (-not $retirePressureNeedsContracts) {
+    throw 'v7.3 retire pressure verifier missing required contract checks'
+}
+
+$retireRtImmediateScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-v73-retire-rt-immediate-return.ps1'
+if (-not (Test-Path $retireRtImmediateScriptPath)) {
+    throw "Missing v7.3 retire RT immediate-return verifier script: $retireRtImmediateScriptPath"
+}
+
+$retireRtImmediateScriptText = Get-Content -LiteralPath $retireRtImmediateScriptPath -Raw -Encoding UTF8
+$retireRtImmediateNeedsContracts =
+$retireRtImmediateScriptText.Contains('isr_v73_retire_rt_immediate_return_report_v1') -and
+$retireRtImmediateScriptText.Contains('CI-RETIRE-RT-001') -and
+$retireRtImmediateScriptText.Contains('CI-RETIRE-RT-002') -and
+$retireRtImmediateScriptText.Contains('CI-RETIRE-RT-003') -and
+$retireRtImmediateScriptText.Contains('Set-StrictMode -Version Latest') -and
+$retireRtImmediateScriptText.Contains('AudioEngine.Processing.AudioBlock.cpp') -and
+$retireRtImmediateScriptText.Contains('AudioEngine.Processing.BlockDouble.cpp')
+if (-not $retireRtImmediateNeedsContracts) {
+    throw 'v7.3 retire RT immediate-return verifier missing required contract checks'
+}
+
+$prRequiredArtifactsScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-pr-required-artifacts.ps1'
+if (-not (Test-Path $prRequiredArtifactsScriptPath)) {
+    throw "Missing PR required artifacts verifier script: $prRequiredArtifactsScriptPath"
+}
+
+$prRequiredArtifactsScriptText = Get-Content -LiteralPath $prRequiredArtifactsScriptPath -Raw -Encoding UTF8
+$prRequiredArtifactsNeedsContracts =
+$prRequiredArtifactsScriptText.Contains('pr_required_artifacts_report_v1') -and
+$prRequiredArtifactsScriptText.Contains('authority_inventory_report_v1') -and
+$prRequiredArtifactsScriptText.Contains('authority_inventory_diff_report_v1') -and
+$prRequiredArtifactsScriptText.Contains('safety_regression_report_v1') -and
+$prRequiredArtifactsScriptText.Contains('pr_sla_report_v1') -and
+$prRequiredArtifactsScriptText.Contains('validator_tiering_report_v3') -and
+$prRequiredArtifactsScriptText.Contains('documentation_scope_rule_report_v1') -and
+$prRequiredArtifactsScriptText.Contains('design_docs_coverage_report_v1') -and
+$prRequiredArtifactsScriptText.Contains('runtime_coordinator_state_machine_report_v1') -and
+$prRequiredArtifactsScriptText.Contains('taxonomy_phase_mapping_report_v1') -and
+$prRequiredArtifactsScriptText.Contains('Practical_Stable_ISR_Runtime_topology_diff_*.md') -and
+$prRequiredArtifactsScriptText.Contains('documentation_scope_rule_report must be ready=true') -and
+$prRequiredArtifactsScriptText.Contains('design_docs_coverage_report must be ready=true') -and
+$prRequiredArtifactsScriptText.Contains('documentationScopeReady') -and
+$prRequiredArtifactsScriptText.Contains('designDocsCoverageReady') -and
+$prRequiredArtifactsScriptText.Contains('runtimeCoordinatorStateMachineReady') -and
+$prRequiredArtifactsScriptText.Contains('taxonomyPhaseMappingReady') -and
+$prRequiredArtifactsScriptText.Contains('releaseRequiresExhaustive') -and
+$prRequiredArtifactsScriptText.Contains('releaseWindow') -and
+$prRequiredArtifactsScriptText.Contains('openedAtSource') -and
+$prRequiredArtifactsScriptText.Contains('eventHeadSha') -and
+$prRequiredArtifactsScriptText.Contains('currentHeadSha') -and
+$prRequiredArtifactsScriptText.Contains('staleEvaluation') -and
+$prRequiredArtifactsScriptText.Contains('needsRevalidation=true requires labelSuggestions to include needs-revalidation')
+if (-not $prRequiredArtifactsNeedsContracts) {
+    throw 'PR required artifacts verifier missing required contract checks'
+}
+
+$taxonomyPhaseMappingScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-taxonomy-phase-mapping.ps1'
+if (-not (Test-Path $taxonomyPhaseMappingScriptPath)) {
+    throw "Missing taxonomy phase mapping verifier script: $taxonomyPhaseMappingScriptPath"
+}
+
+$taxonomyPhaseMappingScriptText = Get-Content -LiteralPath $taxonomyPhaseMappingScriptPath -Raw -Encoding UTF8
+$taxonomyPhaseMappingNeedsContracts =
+$taxonomyPhaseMappingScriptText.Contains('taxonomy_phase_mapping_report.json') -and
+$taxonomyPhaseMappingScriptText.Contains('taxonomy_phase_mapping_report_v1') -and
+$taxonomyPhaseMappingScriptText.Contains('Class-A/B/C') -and
+$taxonomyPhaseMappingScriptText.Contains('Class-D/E') -and
+$taxonomyPhaseMappingScriptText.Contains('Class-F')
+if (-not $taxonomyPhaseMappingNeedsContracts) {
+    throw 'Taxonomy phase mapping verifier missing required contract checks'
+}
+
+$designDocsCoverageScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-design-docs-coverage.ps1'
+if (-not (Test-Path $designDocsCoverageScriptPath)) {
+    throw "Missing design docs coverage verifier script: $designDocsCoverageScriptPath"
+}
+
+$designDocsCoverageScriptText = Get-Content -LiteralPath $designDocsCoverageScriptPath -Raw -Encoding UTF8
+$designDocsCoverageNeedsContracts =
+$designDocsCoverageScriptText.Contains('design_docs_coverage_report_v1') -and
+$designDocsCoverageScriptText.Contains('Practical_Stable_ISR_Runtime_基本計画書_v3_1.md') -and
+$designDocsCoverageScriptText.Contains('ISR_Runtime_実装統治規約_v1_1.md') -and
+$designDocsCoverageScriptText.Contains('Practical_Stable_ISR_Runtime_詳細設計_v1_2.md') -and
+$designDocsCoverageScriptText.Contains('Practical_Stable_ISR_Runtime_フェーズ別実装タスク分解_v1_0.md') -and
+$designDocsCoverageScriptText.Contains('Design document token missing:')
+if (-not $designDocsCoverageNeedsContracts) {
+    throw 'Design docs coverage verifier missing required contract checks'
+}
+
+$prSlaScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-pr-sla.ps1'
+if (-not (Test-Path $prSlaScriptPath)) {
+    throw "Missing PR SLA verifier script: $prSlaScriptPath"
+}
+
+$prSlaScriptText = Get-Content -LiteralPath $prSlaScriptPath -Raw -Encoding UTF8
+$prSlaNeedsReleaseContracts =
+$prSlaScriptText.Contains('releaseRequiresExhaustive') -and
+$prSlaScriptText.Contains('Release window requires exhaustive tier for all classes') -and
+$prSlaScriptText.Contains('releaseWindow') -and
+$prSlaScriptText.Contains('gitRef') -and
+$prSlaScriptText.Contains('authority_inventory_report.json') -and
+$prSlaScriptText.Contains('inventory_diff_report.json') -and
+$prSlaScriptText.Contains('Required note check failed: note=soak short 30m') -and
+$prSlaScriptText.Contains('Required note check failed: note=soak long 4h') -and
+$prSlaScriptText.Contains('Required note check failed: note=break-glass approval') -and
+$prSlaScriptText.Contains('Required note check failed: note=rollback plan required') -and
+$prSlaScriptText.Contains('Required note check failed: note=runtime code change zero') -and
+$prSlaScriptText.Contains('PR class policy missing requiredNotes:') -and
+$prSlaScriptText.Contains('Policy boolean check failed: runtimeCodeChangeZeroRequired=true') -and
+$prSlaScriptText.Contains('Policy boolean check failed: inventoryDiffStructuralInvariantRequired=true') -and
+$prSlaScriptText.Contains('runtimeCodeChangeZeroConfidence') -and
+$prSlaScriptText.Contains('Resolve-RuntimeCodeChangeSignal') -and
+$prSlaScriptText.Contains('GITHUB_EVENT_PATH') -and
+$prSlaScriptText.Contains('SoakMinutes must be non-negative') -and
+$prSlaScriptText.Contains('requiredNotes') -and
+$prSlaScriptText.Contains('soakMinutes') -and
+$prSlaScriptText.Contains('breakglassReportReady') -and
+$prSlaScriptText.Contains('RequireDeclaredClass') -and
+$prSlaScriptText.Contains('Resolve-DeclaredClassFromEventLabels') -and
+$prSlaScriptText.Contains('Declared PR class is required but missing') -and
+$prSlaScriptText.Contains('declaredClassSource') -and
+$prSlaScriptText.Contains('Resolve-OpenedAtFromEvent') -and
+$prSlaScriptText.Contains('openedAtSource') -and
+$prSlaScriptText.Contains('Resolve-EventHeadSha') -and
+$prSlaScriptText.Contains('PR SLA evaluation is stale') -and
+$prSlaScriptText.Contains('eventHeadSha') -and
+$prSlaScriptText.Contains('currentHeadSha') -and
+$prSlaScriptText.Contains('staleEvaluation')
+if (-not $prSlaNeedsReleaseContracts) {
+    throw 'PR SLA verifier missing release-window and required-note contracts'
+}
+
+if (-not ($tierRunnerText.Contains('$env:GITHUB_EVENT_NAME -eq ''pull_request''') -and
+          $tierRunnerText.Contains('$prSlaArgs[''RequireDeclaredClass''] = $true'))) {
+    throw 'Tier runner missing pull_request declared-class enforcement wiring for PR SLA verifier'
 }
 
 $closePolicyGateScriptPath = Join-Path $repoRoot '.github\scripts\isr-verify-8_1-close-policy.ps1'

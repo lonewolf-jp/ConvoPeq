@@ -424,6 +424,14 @@
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "releaseResources shutdown completion must reference single drain authority",
                 "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.cpp$",
+                "lineRegex": "if \\(isFullyDrained\\(\\)\\)",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "coordinator shutdown completion state transition must rely on authoritative drain predicate",
+                "expiry": "2027-12-31"
             }
         ],
         "requiredBoundedDrainWaitPatterns": [
@@ -515,6 +523,14 @@
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "coordinator authoritative drain predicate definition is allowed",
+                "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.cpp$",
+                "lineRegex": "if \\(isFullyDrained\\(\\)\\)",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "coordinator shutdown completion check may call authoritative drain predicate",
                 "expiry": "2027-12-31"
             }
         ],
@@ -877,6 +893,46 @@
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "reclaim latency must be published as bounded-residency convergence evidence",
+                "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
+                "lineRegex": "publishAtomic\\(fallbackQueueDepth_,\\s*fallbackDepthU64,\\s*std::memory_order_release\\)",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "fallback enqueue must immediately publish fallback backlog depth for residency telemetry consistency",
+                "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
+                "lineRegex": "publishAtomic\\(retireQueueDepth_,\\s*retireDepth,\\s*std::memory_order_release\\)",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "fallback enqueue must immediately publish retire backlog depth for telemetry comparison coherence",
+                "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
+                "lineRegex": "runtimePublicationBridge_\\.setFallbackBacklogCount\\(fallbackDepthU64\\)",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "fallback enqueue must immediately synchronize fallback backlog into coordinator telemetry bridge",
+                "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
+                "lineRegex": "runtimePublicationBridge_\\.setRetireBacklogCount\\(retireDepth\\)",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "fallback enqueue must immediately synchronize retire backlog into coordinator telemetry bridge",
+                "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
+                "lineRegex": "runtimePublicationBridge_\\.setDeferredRetireResidencyCount\\(fallbackDepthU64\\)",
+                "owner": "audio-runtime",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "fallback enqueue must immediately synchronize deferred-retire residency for pressure comparison",
                 "expiry": "2027-12-31"
             }
         ]

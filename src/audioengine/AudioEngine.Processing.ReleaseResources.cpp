@@ -49,6 +49,7 @@ void AudioEngine::releaseResources()
 
     setShutdownPhase(ShutdownPhase::StopAcceptingWork, "releaseResources");
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::AudioStopped);
+    runtimePublicationBridge_.requestShutdown();
 
     // 非MT起点の pending rebuild 要求と AsyncUpdater キューをシャットダウン直後に廃棄する。
     // stopRebuildThread より先に実行して handleAsyncUpdate が後から rebuild を発火しないようにする。
@@ -199,6 +200,8 @@ void AudioEngine::releaseResources()
         drainDeferredRetireQueues(true);
         m_epochDomain.drainAll();
     }
+
+    runtimePublicationBridge_.markShutdownComplete();
 
     const auto pendingRetireCount = [&]() noexcept -> uint32_t
     {

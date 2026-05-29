@@ -22,6 +22,27 @@ on:
           - smoke
           - standard
           - exhaustive
+      declaredPrClass:
+        description: "Declared PR class (Class-S/Class-A/Class-B/Class-C/Class-D)"
+        required: false
+        default: Class-A
+        type: choice
+        options:
+          - Class-S
+          - Class-A
+          - Class-B
+          - Class-C
+          - Class-D
+      prOpenedAt:
+        description: "Optional PR opened-at timestamp (ISO 8601) for PR SLA evaluation"
+        required: false
+        default: ""
+        type: string
+      soakMinutes:
+        description: "Optional soak duration in minutes for PR SLA required note evaluation"
+        required: false
+        default: "0"
+        type: string
       enforceTriggerPolicy:
         description: "Enforce trigger policy targets (fails if trigger metrics exceed targetMax)"
         required: false
@@ -85,6 +106,8 @@ on:
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   isr-verify:
@@ -112,9 +135,74 @@ jobs:
             return $parsedValue
           }
 
+          function Resolve-WorkflowNonNegativeInt {
+            param(
+              [string]$Raw,
+              [string]$InputName
+            )
+
+            $parsedValue = 0
+            if (-not [int]::TryParse($Raw, [ref]$parsedValue) -or $parsedValue -lt 0) {
+              throw "Invalid workflow inputs: $InputName must be a non-negative integer (actual='$Raw')"
+            }
+
+            return $parsedValue
+          }
+
           function Assert-WorkflowRange {
             param(
               [int]$Value,
+
+      - name: Apply PR SLA labels
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const reportPath = path.join(process.env.GITHUB_WORKSPACE, 'evidence', 'pr_sla_report.json');
+            if (!fs.existsSync(reportPath)) {
+              core.info(`Skip labeling: report not found (${reportPath})`);
+              return;
+            }
+
+            const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+            const labels = Array.isArray(report.labelSuggestions) ? report.labelSuggestions : [];
+            const shouldLabel = Boolean(report.needsRevalidation) || labels.includes('needs-revalidation');
+
+            if (!shouldLabel) {
+              core.info('No PR SLA revalidation label required.');
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['needs-revalidation']
+            });
+            core.info('Applied label: needs-revalidation');
+
+      - name: Upload ISR evidence artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: isr-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            evidence/pr_sla_report.json
+            evidence/safety_regression_report.json
+            evidence/authority_inventory_report.json
+            evidence/documentation_scope_rule_report.json
+            evidence/pr_required_artifacts_report.json
+            evidence/runtime_coordinator_state_machine_report.json
+            evidence/taxonomy_phase_mapping_report.json
+            evidence/design_docs_coverage_report.json
+            evidence/safety_regression_remeasure_report.json
+            storage/isr_inventory/current_authority_inventory.json
+            storage/isr_inventory/post_authority_inventory.json
+            storage/isr_inventory/inventory_diff_report.json
               [int]$Min,
               [int]$Max,
               [string]$InputName
@@ -387,6 +475,10 @@ jobs:
               throw 'Workflow dispatch input policy missing required field: forwardingContract.switches'
             }
 
+            if ($null -eq $Policy.forwardingContract -or $null -eq $Policy.forwardingContract.arguments) {
+              throw 'Workflow dispatch input policy missing required field: forwardingContract.arguments'
+            }
+
             if ("$($Policy.schema)" -ne 'isr_workflow_dispatch_input_policy_v1') {
               throw "Unexpected workflow dispatch input policy schema: $($Policy.schema)"
             }
@@ -419,8 +511,14 @@ jobs:
               throw 'Workflow dispatch input policy forwardingContract.switches requires non-empty switches'
             }
 
+            $forwardingArguments = @($Policy.forwardingContract.arguments)
+            if ($forwardingArguments.Count -eq 0) {
+              throw 'Workflow dispatch input policy forwardingContract.arguments requires non-empty arguments'
+            }
+
             $workflowTextForContract = Get-Content -LiteralPath $WorkflowPath -Raw -Encoding UTF8
             $policyInputNames = New-Object 'System.Collections.Generic.HashSet[string]'
+            $policyInputTypes = @{}
 
             foreach ($entry in $contractEntries) {
               $inputName = "$($entry.name)"
@@ -440,7 +538,7 @@ jobs:
                 $policyInputTypes[$inputName] = $expectedType
               }
 
-              if ($expectedType -ne 'boolean' -and $expectedType -ne 'choice') {
+              if ($expectedType -ne 'boolean' -and $expectedType -ne 'choice' -and $expectedType -ne 'string') {
                 throw "Workflow dispatch input policy has invalid type: input=$inputName type=$expectedType"
               }
 
@@ -448,11 +546,15 @@ jobs:
                 throw "Workflow dispatch input policy boolean input has invalid default: input=$inputName default=$expectedDefault"
               }
 
+              if ($expectedType -eq 'string' -and $null -eq $entry.default) {
+                throw "Workflow dispatch input policy string input has missing default value: input=$inputName"
+              }
+
               if ($expectedRequired -ne 'true' -and $expectedRequired -ne 'false') {
                 throw "Workflow dispatch input policy has invalid required value: input=$inputName required=$($entry.required)"
               }
 
-              if ([string]::IsNullOrWhiteSpace($expectedDefault)) {
+              if ($expectedType -ne 'string' -and [string]::IsNullOrWhiteSpace($expectedDefault)) {
                 throw "Workflow dispatch input policy has empty default: input=$inputName"
               }
 
@@ -570,6 +672,58 @@ jobs:
                 throw "Workflow dispatch input policy violation: missing tier runner switch forwarding: input=$inputName switch=$runnerSwitch"
               }
             }
+
+            foreach ($argumentContract in $forwardingArguments) {
+              $inputName = "$($argumentContract.inputName)"
+              $runnerSwitch = "$($argumentContract.runnerSwitch)"
+              $valueMode = "$($argumentContract.valueMode)"
+
+              if ([string]::IsNullOrWhiteSpace($inputName)) {
+                throw 'Workflow dispatch input policy argument contract has entry with empty inputName'
+              }
+
+              if ([string]::IsNullOrWhiteSpace($runnerSwitch)) {
+                throw "Workflow dispatch input policy argument contract has empty runnerSwitch: input=$inputName"
+              }
+
+              if ([string]::IsNullOrWhiteSpace($valueMode)) {
+                throw "Workflow dispatch input policy argument contract has empty valueMode: input=$inputName"
+              }
+
+              if (-not $forwardingInputNameSet.Add($inputName)) {
+                throw "Workflow dispatch input policy argument contract has duplicate inputName: input=$inputName"
+              }
+
+              if (-not $forwardingRunnerSwitchSet.Add($runnerSwitch)) {
+                throw "Workflow dispatch input policy argument contract has duplicate runnerSwitch: switch=$runnerSwitch"
+              }
+
+              if (-not $policyInputNames.Contains($inputName)) {
+                throw "Workflow dispatch input policy argument contract references unknown input: input=$inputName"
+              }
+
+              if ($valueMode -eq 'rawNonEmpty') {
+                if ($policyInputTypes[$inputName] -ne 'string' -and $policyInputTypes[$inputName] -ne 'choice') {
+                  throw "Workflow dispatch input policy argument contract requires string-or-choice input type: input=$inputName type=$($policyInputTypes[$inputName])"
+                }
+              }
+              elseif ($valueMode -eq 'nonNegativeInt') {
+                if ($policyInputTypes[$inputName] -ne 'string') {
+                  throw "Workflow dispatch input policy argument contract requires string input type for nonNegativeInt: input=$inputName type=$($policyInputTypes[$inputName])"
+                }
+              }
+              else {
+                throw "Workflow dispatch input policy argument contract has invalid valueMode: input=$inputName valueMode=$valueMode"
+              }
+
+              if (-not $workflowTextForContract.Contains("inputs.$inputName")) {
+                throw "Workflow dispatch argument mismatch: missing workflow input reference: input=$inputName text=inputs.$inputName"
+              }
+
+              if (-not $workflowTextForContract.Contains("'$runnerSwitch'")) {
+                throw "Workflow dispatch argument mismatch: missing tier runner argument forwarding: input=$inputName switch=$runnerSwitch"
+              }
+            }
           }
 
           function Get-WorkflowInputOptions {
@@ -625,8 +779,12 @@ jobs:
           $validatorTieringScheduleContract = Resolve-ValidatorTieringScheduleContract -PolicyPath $validatorTieringPolicyPath
 
           $tier = 'smoke'
+          $workflowDispatchDeclaredPrClass = ''
+          $workflowDispatchSoakMinutes = 0
           if ("${{ github.event_name }}" -eq 'workflow_dispatch') {
             $tier = "${{ inputs.verificationTier }}"
+            $workflowDispatchDeclaredPrClass = "${{ inputs.declaredPrClass }}"
+            $workflowDispatchSoakMinutes = Resolve-WorkflowNonNegativeInt -Raw "${{ inputs.soakMinutes }}" -InputName 'soakMinutes'
           }
           elseif ("${{ github.event_name }}" -eq 'schedule') {
             if ("${{ github.event.schedule }}" -eq $validatorTieringScheduleContract.weeklyCron) {
@@ -780,6 +938,14 @@ jobs:
 
           Write-Host "[INFO] ISR verification tier=$tier"
           $invokeArgs = @('-Tier', $tier)
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and -not [string]::IsNullOrWhiteSpace($workflowDispatchDeclaredPrClass)) {
+            $invokeArgs += '-DeclaredClass'
+            $invokeArgs += $workflowDispatchDeclaredPrClass
+          }
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch') {
+            $invokeArgs += '-SoakMinutes'
+            $invokeArgs += $workflowDispatchSoakMinutes
+          }
           if ($strictRuntime) {
             $invokeArgs += '-RequireRuntimeEvidence'
           }
@@ -814,6 +980,16 @@ jobs:
           }
           if ($autoPruneCleanupDeferred) {
             $invokeArgs += '-AutoPruneCleanupDeferred'
+          }
+
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -and -not [string]::IsNullOrWhiteSpace("${{ inputs.prOpenedAt }}")) {
+            $invokeArgs += '-PrOpenedAt'
+            $invokeArgs += "${{ inputs.prOpenedAt }}"
+          }
+
+          if ("${{ github.event_name }}" -eq 'pull_request' -and -not [string]::IsNullOrWhiteSpace("${{ github.event.pull_request.created_at }}")) {
+            $invokeArgs += '-PrOpenedAt'
+            $invokeArgs += "${{ github.event.pull_request.created_at }}"
           }
 
           & ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs

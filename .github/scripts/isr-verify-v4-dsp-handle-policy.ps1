@@ -70,8 +70,14 @@ if ($releaseResourcesText -notmatch 'dspHandleRuntime_\.reclaim\(') {
     throw 'Shutdown reclaim path must route through DSPHandleRuntime::reclaim.'
 }
 
-if ($audioEngineCppText -notmatch 'dspHandleRuntime_\.resolve\(') {
-    throw 'AudioEngine processing path must resolve DSP handles through DSPHandleRuntime.'
+$hasHandleRuntimeObservePath = ($audioEngineCppText -match 'dspHandleRuntime_\.resolve\(')
+$hasRuntimeWorldObservePath =
+    ($audioEngineCppText -match 'readAudioRuntimeView\(\)') -and
+    ($audioEngineCppText -match 'getRuntimeGraph\(runtimeReadView\)') -and
+    ($audioEngineCppText -match 'runtimeGraph->activeNode')
+
+if (-not $hasHandleRuntimeObservePath -and -not $hasRuntimeWorldObservePath) {
+    throw 'AudioEngine processing path must observe runtime DSP via DSPHandleRuntime or RuntimeWorld read path.'
 }
 
 if ($audioEngineCppText -notmatch 'dspHandleRuntime_\.reclaim\(' -and $audioEngineText -notmatch 'dspHandleRuntime_\.reclaim\(') {

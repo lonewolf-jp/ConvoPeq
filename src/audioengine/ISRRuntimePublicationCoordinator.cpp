@@ -13,7 +13,10 @@ RuntimePublicationCoordinator::RuntimePublicationCoordinator()
     , fallbackBacklogCount_(0)
     , reclaimInFlightCount_(0)
     , deferredRetireResidencyCount_(0)
+    , previousRetireBacklogCount_(0)
+    , pressureNormalizedWindows_(0)
     , swapPending_(false)
+    , state_(CoordinatorState::Bootstrapping)
 {
 }
 
@@ -52,19 +55,30 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
                                            const void* newWorld,
                                            std::uint64_t version) {
     if (boundary != RuntimeBoundary::NonRTWorld || newWorld == nullptr) {
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
         return;
     }
 
+    const auto previousVersion = convo::consumeAtomic(version_, std::memory_order_acquire);
+    const auto previousWorld = convo::consumeAtomic(currentWorld_, std::memory_order_acquire);
+    if (previousWorld != nullptr && version <= previousVersion) {
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+        return;
+    }
+
+    convo::publishAtomic(state_, CoordinatorState::Publishing, std::memory_order_release);
     convo::publishAtomic(swapPending_, true, std::memory_order_release);
     convo::publishAtomic(currentWorld_, newWorld, std::memory_order_release);
     convo::publishAtomic(version_, version, std::memory_order_release);
     convo::publishAtomic(swapPending_, false, std::memory_order_release);
+    convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
 }
 
 void RuntimePublicationCoordinator::retire(RetireAuthority,
                                            RuntimeBoundary boundary,
                                            const void* oldWorld) {
     if (boundary != RuntimeBoundary::NonRTWorld || oldWorld == nullptr) {
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
         return;
     }
 
@@ -73,7 +87,8 @@ void RuntimePublicationCoordinator::retire(RetireAuthority,
         retiredWorlds_.erase(retiredWorlds_.begin());
     }
     retiredWorlds_.push_back(oldWorld);
-    convo::publishAtomic(retireBacklogCount_, static_cast<std::uint64_t>(retiredWorlds_.size()), std::memory_order_release);
+    const auto backlog = static_cast<std::uint64_t>(retiredWorlds_.size());
+    setRetireBacklogCount(backlog);
 }
 
 const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
@@ -85,7 +100,43 @@ std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
 }
 
 void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
+    const auto previousBacklog = convo::consumeAtomic(previousRetireBacklogCount_, std::memory_order_acquire);
+    const auto slope = (count > previousBacklog) ? (count - previousBacklog) : 0;
+
     convo::publishAtomic(retireBacklogCount_, count, std::memory_order_release);
+    convo::publishAtomic(previousRetireBacklogCount_, count, std::memory_order_release);
+
+    if (slope > kPressureSlopeThreshold) {
+        convo::publishAtomic(pressureNormalizedWindows_, static_cast<std::uint32_t>(0), std::memory_order_release);
+        convo::publishAtomic(state_, CoordinatorState::Pressure, std::memory_order_release);
+        return;
+    }
+
+    if (!isSwapPending()) {
+        const auto state = convo::consumeAtomic(state_, std::memory_order_acquire);
+        if (state == CoordinatorState::Pressure) {
+            const auto nextWindow = static_cast<std::uint32_t>(
+                convo::consumeAtomic(pressureNormalizedWindows_, std::memory_order_acquire) + 1U);
+            convo::publishAtomic(pressureNormalizedWindows_, nextWindow, std::memory_order_release);
+
+            if (nextWindow < kPressureNormalizeWindows) {
+                return;
+            }
+
+            if (getCurrent() != nullptr) {
+                convo::publishAtomic(pressureNormalizedWindows_, static_cast<std::uint32_t>(0), std::memory_order_release);
+                convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
+            } else {
+                convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+            }
+        } else if (state == CoordinatorState::Publishing && count == 0) {
+            if (getCurrent() != nullptr) {
+                convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
+            } else {
+                convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+            }
+        }
+    }
 }
 
 void RuntimePublicationCoordinator::setPublicationBacklogCount(std::uint64_t count) noexcept {
@@ -131,6 +182,56 @@ bool RuntimePublicationCoordinator::isFullyDrained() const noexcept {
         && convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire) == 0;
+}
+
+RuntimePublicationCoordinator::CoordinatorState RuntimePublicationCoordinator::getState() const noexcept {
+    return convo::consumeAtomic(state_, std::memory_order_acquire);
+}
+
+void RuntimePublicationCoordinator::markTransitionStart() noexcept {
+    const auto state = convo::consumeAtomic(state_, std::memory_order_acquire);
+    if (state != CoordinatorState::Ready) {
+        return;
+    }
+
+    if (getCurrent() == nullptr) {
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+        return;
+    }
+
+    convo::publishAtomic(state_, CoordinatorState::Transitioning, std::memory_order_release);
+}
+
+void RuntimePublicationCoordinator::markTransitionCommitted() noexcept {
+    const auto state = convo::consumeAtomic(state_, std::memory_order_acquire);
+    if (state != CoordinatorState::Transitioning) {
+        return;
+    }
+
+    if (!isSwapPending()) {
+        if (getCurrent() != nullptr) {
+            convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
+        } else {
+            convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+        }
+    }
+}
+
+void RuntimePublicationCoordinator::requestShutdown() noexcept {
+    convo::publishAtomic(state_, CoordinatorState::ShuttingDown, std::memory_order_release);
+}
+
+void RuntimePublicationCoordinator::markShutdownComplete() noexcept {
+    const auto state = convo::consumeAtomic(state_, std::memory_order_acquire);
+    if (state != CoordinatorState::ShuttingDown) {
+        return;
+    }
+
+    if (isFullyDrained()) {
+        convo::publishAtomic(state_, CoordinatorState::Bootstrapping, std::memory_order_release);
+    } else {
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+    }
 }
 
 void MultiStagePublisher::publishTier(PayloadTier tier, const void* payload) {

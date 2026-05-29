@@ -30,6 +30,10 @@ if ($null -eq $policy.forwardingContract -or $null -eq $policy.forwardingContrac
     $violations.Add('Workflow dispatch input policy missing required field: forwardingContract.switches')
 }
 
+if ($null -eq $policy.forwardingContract -or $null -eq $policy.forwardingContract.arguments) {
+    $violations.Add('Workflow dispatch input policy missing required field: forwardingContract.arguments')
+}
+
 if ("$($policy.schema)" -ne 'isr_workflow_dispatch_input_policy_v1') {
     $violations.Add("Workflow dispatch input policy schema mismatch: expected=isr_workflow_dispatch_input_policy_v1 actual=$($policy.schema)")
 }
@@ -56,6 +60,11 @@ if ($contractInputs.Count -eq 0) {
 $forwardingSwitches = @($policy.forwardingContract.switches)
 if ($forwardingSwitches.Count -eq 0) {
     $violations.Add('Workflow dispatch input policy forwardingContract.switches requires non-empty switches')
+}
+
+$forwardingArguments = @($policy.forwardingContract.arguments)
+if ($forwardingArguments.Count -eq 0) {
+    $violations.Add('Workflow dispatch input policy forwardingContract.arguments requires non-empty arguments')
 }
 
 function Get-WorkflowInputBlock {
@@ -158,7 +167,7 @@ foreach ($entry in $contractInputs) {
         $contractInputTypeMap[$inputName] = $expectedType
     }
 
-    if ($expectedType -ne 'boolean' -and $expectedType -ne 'choice') {
+    if ($expectedType -ne 'boolean' -and $expectedType -ne 'choice' -and $expectedType -ne 'string') {
         $violations.Add("Workflow dispatch input policy has invalid type: input=$inputName type=$expectedType")
     }
 
@@ -166,11 +175,15 @@ foreach ($entry in $contractInputs) {
         $violations.Add("Workflow dispatch input policy boolean input has invalid default: input=$inputName default=$expectedDefault")
     }
 
+    if ($expectedType -eq 'string' -and $null -eq $entry.default) {
+        $violations.Add("Workflow dispatch input policy string input has missing default value: input=$inputName")
+    }
+
     if ($expectedRequired -ne 'true' -and $expectedRequired -ne 'false') {
         $violations.Add("Workflow dispatch input policy has invalid required value: input=$inputName required=$($entry.required)")
     }
 
-    if ([string]::IsNullOrWhiteSpace($expectedDefault)) {
+    if ($expectedType -ne 'string' -and [string]::IsNullOrWhiteSpace($expectedDefault)) {
         $violations.Add("Workflow dispatch input policy has empty default: input=$inputName")
     }
 
@@ -319,7 +332,78 @@ foreach ($switchContract in $forwardingSwitches) {
 
     $forwardingStatus.Add([ordered]@{
             inputName       = $inputName
+            forwardingKind  = 'switch'
             runnerSwitch    = $runnerSwitch
+            inputReferenced = $inputReferenced
+            switchForwarded = $switchForwarded
+        }) | Out-Null
+}
+
+foreach ($argumentContract in $forwardingArguments) {
+    $inputName = "$($argumentContract.inputName)"
+    $runnerSwitch = "$($argumentContract.runnerSwitch)"
+    $valueMode = "$($argumentContract.valueMode)"
+
+    if ([string]::IsNullOrWhiteSpace($inputName)) {
+        $violations.Add('Workflow dispatch input policy argument contract has entry with empty inputName')
+        continue
+    }
+
+    if ([string]::IsNullOrWhiteSpace($runnerSwitch)) {
+        $violations.Add("Workflow dispatch input policy argument contract has empty runnerSwitch: input=$inputName")
+        continue
+    }
+
+    if ([string]::IsNullOrWhiteSpace($valueMode)) {
+        $violations.Add("Workflow dispatch input policy argument contract has empty valueMode: input=$inputName")
+        continue
+    }
+
+    if (-not $forwardingInputNameSet.Add($inputName)) {
+        $violations.Add("Workflow dispatch input policy argument contract has duplicate inputName: input=$inputName")
+    }
+
+    if (-not $forwardingRunnerSwitchSet.Add($runnerSwitch)) {
+        $violations.Add("Workflow dispatch input policy argument contract has duplicate runnerSwitch: switch=$runnerSwitch")
+    }
+
+    if (-not $contractInputNameSet.Contains($inputName)) {
+        $violations.Add("Workflow dispatch input policy argument contract references unknown input: input=$inputName")
+    }
+    else {
+        $inputType = $contractInputTypeMap[$inputName]
+        if ($valueMode -eq 'rawNonEmpty') {
+            if ($inputType -ne 'string' -and $inputType -ne 'choice') {
+                $violations.Add("Workflow dispatch input policy argument contract requires string-or-choice input type: input=$inputName type=$inputType")
+            }
+        }
+        elseif ($valueMode -eq 'nonNegativeInt') {
+            if ($inputType -ne 'string') {
+                $violations.Add("Workflow dispatch input policy argument contract requires string input type for nonNegativeInt: input=$inputName type=$inputType")
+            }
+        }
+        else {
+            $violations.Add("Workflow dispatch input policy argument contract has invalid valueMode: input=$inputName valueMode=$valueMode")
+        }
+    }
+
+    $inputReferenceText = "inputs.$inputName"
+    $inputReferenced = $workflowText.Contains($inputReferenceText)
+    $switchForwarded = $workflowText.Contains("'$runnerSwitch'")
+
+    if (-not $inputReferenced) {
+        $violations.Add("Workflow dispatch argument mismatch: missing workflow input reference: input=$inputName text=$inputReferenceText")
+    }
+
+    if (-not $switchForwarded) {
+        $violations.Add("Workflow dispatch argument mismatch: missing tier runner argument forwarding: input=$inputName switch=$runnerSwitch")
+    }
+
+    $forwardingStatus.Add([ordered]@{
+            inputName       = $inputName
+            forwardingKind  = 'argument'
+            runnerSwitch    = $runnerSwitch
+            valueMode       = $valueMode
             inputReferenced = $inputReferenced
             switchForwarded = $switchForwarded
         }) | Out-Null

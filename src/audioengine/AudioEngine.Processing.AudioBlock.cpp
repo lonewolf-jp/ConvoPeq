@@ -13,6 +13,13 @@ namespace
 
 void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill)
 {
+    const auto lifecycle = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
+    if (lifecycle != EngineLifecycleState::Prepared)
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
     if (isShutdownInProgress())
     {
         shutdownRuntime_.markLateCallback();
@@ -113,23 +120,16 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     const auto runtimeReadView = readAudioRuntimeView();
     const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
 
-    const auto packHandle = [](convo::isr::DSPHandle handle) noexcept -> std::uint64_t
-    {
-        return (static_cast<std::uint64_t>(handle.generation) << 32)
-            | static_cast<std::uint64_t>(handle.slot);
-    };
-
-    const auto activeHandle = dspHandleRuntime_.getActiveRuntimeDSPHandle();
-    const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
-    const auto resolvedActive = dspHandleRuntime_.resolve(activeHandle);
-    const auto resolvedFading = dspHandleRuntime_.resolve(fadingHandle);
     const auto callbackEpoch = convo::fetchAddAtomic(rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
     const auto sampleCursor = convo::fetchAddAtomic(rtLocalState_.audioSampleCursorCounter, static_cast<uint64_t>(numSamples), std::memory_order_acq_rel);
     const auto graphRevision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
+    const auto packedActiveHandle = (runtimeGraph != nullptr)
+        ? static_cast<std::uint64_t>(runtimeGraph->runtimeUuid)
+        : 0ull;
 
     const auto rtFrame = convo::isr::makeRTExecutionFrame(
-        packHandle(activeHandle),
-        packHandle(fadingHandle),
+        packedActiveHandle,
+        0ull,
         currentFade_,
         nullptr,
         0,
@@ -141,11 +141,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     rtTraceRelay_.enqueue({ rtFrame.sampleCursor, 0xA001u, static_cast<std::uint32_t>(numSamples) });
 
-    DSPCore* dsp = resolvedActive.valid
-        ? static_cast<DSPCore*>(resolvedActive.instance)
-        : ((runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
-            ? static_cast<DSPCore*>(runtimeGraph->activeNode)
-            : nullptr);
+    DSPCore* dsp = (runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
+        ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+        : nullptr;
     if (dsp == nullptr)
     {
         bufferToFill.clearActiveBufferRegion();
@@ -229,9 +227,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             return;
         }
 
-        DSPCore* fading = resolvedFading.valid
-            ? static_cast<DSPCore*>(resolvedFading.instance)
-            : resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
+        DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
         const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
         bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
         if (processCrossfadeDelayGateIfPending(fading,

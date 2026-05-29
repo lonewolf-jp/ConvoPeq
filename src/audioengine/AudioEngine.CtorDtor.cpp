@@ -35,6 +35,7 @@ AudioEngine::~AudioEngine()
     setShutdownPhase(ShutdownPhase::StopAcceptingWork, "~AudioEngine");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Releasing, std::memory_order_release); // release: isShuttingDown の acquire と HB
     cancelPendingUpdate();
+    runtimePublicationBridge_.requestShutdown();
 
     // 終了順序を固定化して、終了時フリーズを防ぐ。
     setShutdownPhase(ShutdownPhase::StopAudio, "~AudioEngine");
@@ -117,6 +118,7 @@ AudioEngine::~AudioEngine()
         .clearPublishedRuntimeSnapshotsNonRt();
     drainDeferredRetireQueues(true);
     m_epochDomain.drainAll();
+    runtimePublicationBridge_.markShutdownComplete();
 
     // ...既存の解放処理...
     if (latencyBufOldL) { convo::aligned_free(latencyBufOldL); latencyBufOldL = nullptr; }

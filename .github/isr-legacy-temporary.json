@@ -1,0 +1,13 @@
+{
+    "schema": "isr_legacy_temporary_manifest_v1",
+    "issue": "ISR-LEGACY-TEMP-001",
+    "rationale": "manifest for LegacyTemporary state tracking with phase/deadline governance",
+    "expiry": "2026-09-30",
+    "symbol": "LegacyTemporary",
+    "owner": "audioengine-runtime-bridge",
+    "replacement_authority": "Authoritative",
+    "removal_phase": "Phase 3",
+    "deadline": "2026-09-30",
+    "scope": "Runtime-related state classifications and transient migration residues",
+    "entries": []
+}
