@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include "ISRAuthorityClass.h"
+#include "ISRRuntimeSemanticSchema.h"
 
 namespace convo {
 
@@ -59,6 +61,21 @@ struct RuntimeGraph
     const double* eqAgcReleaseCoeffTable = nullptr;
     const double* eqAgcSmoothCoeffTable = nullptr;
     int eqAgcCoeffTableCapacity = 0;
+
+    static constexpr std::array<convo::isr::RuntimeFieldDescriptor, 7> kFieldDescriptors {{
+        {"runtimeUuid", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeGraph, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"fadingRuntimeUuid", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeGraph, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"generation", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeGraph, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"activeNode", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeGraph, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"fadingNode", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeGraph, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"sampleRate", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeGraph, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"oversamplingFactor", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeGraph, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime}
+    }};
+
+    [[nodiscard]] static constexpr bool validateDescriptorSet() noexcept
+    {
+        return convo::isr::validateFieldDescriptorSet(kFieldDescriptors);
+    }
 };
 
 } // namespace convo

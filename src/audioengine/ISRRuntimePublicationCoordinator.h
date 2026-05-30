@@ -77,7 +77,6 @@ private:
     std::atomic<PublicationSequenceId> publicationSequenceId_;
     std::atomic<PublicationEpoch> publicationEpoch_;
     std::atomic<std::uint64_t> mappedRuntimeGeneration_;
-    mutable std::atomic<std::uint64_t> lastObservedVersion_;
     std::atomic<RejectCode> lastRejectCode_;
     std::atomic<std::uint64_t> retireBacklogCount_;
     std::atomic<std::uint64_t> publicationBacklogCount_;

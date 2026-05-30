@@ -47,6 +47,11 @@ void destroyPublicationIntentNode(void* ptr) noexcept
     if (world.schemaVersion != convo::isr::kRuntimeSemanticSchemaVersion)
         return rejectWithEvidence();
 
+    if (!RuntimeState::validateDescriptorSet()
+        || !convo::RuntimeGraph::validateDescriptorSet()
+        || !convo::isr::PublicationSemantic::validateDescriptorSet())
+        return rejectWithEvidence();
+
     if (world.generation == 0
         || world.generationSemantic.runtimeGeneration == 0
         || world.publication.sequenceId == 0
@@ -153,6 +158,17 @@ void destroyPublicationIntentNode(void* ptr) noexcept
 void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept
 {
     debugRuntime_.recordShadowCompareObservation(world.publication.sequenceId, world.semanticHash);
+
+    const bool observeRollbackRequested = convo::exchangeAtomic(observeMonotonicRollbackRequested_, false, std::memory_order_acq_rel);
+    const bool shadowEscalated = debugRuntime_.escalationCount() > 0;
+    const bool monotonicViolated = debugRuntime_.monotonicViolationCount() > 0;
+    if (observeRollbackRequested
+        || shadowEscalated
+        || monotonicViolated
+        || world.publication.sequenceId <= world.publication.previousSequenceId)
+    {
+        retireRuntimeEx_.requestRollback();
+    }
 
     debugRuntime_.recordHBEdge(100u,
                                200u,

@@ -1,10 +1,85 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <string_view>
 
 namespace convo::isr {
 
 inline constexpr std::uint32_t kRuntimeSemanticSchemaVersion = 7u;
+
+enum class SemanticCategory : std::uint8_t
+{
+    Authority = 0,
+    Derived,
+    Diagnostic,
+    Telemetry,
+    Cache
+};
+
+enum class OwnershipClass : std::uint8_t
+{
+    RuntimePublicationCoordinator = 0,
+    RuntimeWorld,
+    RuntimeGraph,
+    PublicationSemantic,
+    ObserveLocal,
+    DiagnosticOnly
+};
+
+enum class MutabilityClass : std::uint8_t
+{
+    ImmutableAfterPublish = 0,
+    MutablePrePublish,
+    ObserveLocalMutable,
+    DiagnosticMutable
+};
+
+enum class VisibilityClass : std::uint8_t
+{
+    PublicationBoundary = 0,
+    ObserveBoundary,
+    DiagnosticBoundary
+};
+
+enum class LifetimeClass : std::uint8_t
+{
+    RuntimeWorldLifetime = 0,
+    ProcessLifetime,
+    ObserveLocalLifetime,
+    DiagnosticLifetime
+};
+
+struct RuntimeFieldDescriptor
+{
+    std::string_view fieldName {};
+    SemanticCategory semanticCategory = SemanticCategory::Derived;
+    OwnershipClass ownership = OwnershipClass::DiagnosticOnly;
+    MutabilityClass mutability = MutabilityClass::DiagnosticMutable;
+    VisibilityClass visibility = VisibilityClass::DiagnosticBoundary;
+    LifetimeClass lifetime = LifetimeClass::DiagnosticLifetime;
+};
+
+template <std::size_t N>
+[[nodiscard]] inline constexpr bool validateFieldDescriptorSet(const std::array<RuntimeFieldDescriptor, N>& descriptors) noexcept
+{
+    if constexpr (N == 0)
+        return false;
+
+    for (std::size_t i = 0; i < N; ++i)
+    {
+        if (descriptors[i].fieldName.empty())
+            return false;
+
+        for (std::size_t j = i + 1; j < N; ++j)
+        {
+            if (descriptors[i].fieldName == descriptors[j].fieldName)
+                return false;
+        }
+    }
+
+    return true;
+}
 
 using PublicationSequenceId = std::uint64_t;
 using PublicationEpoch = std::uint64_t;
@@ -44,6 +119,18 @@ struct PublicationSemantic
     PublicationEpoch epoch = 0;
     std::uint64_t mappedRuntimeGeneration = 0;
     std::uint64_t previousSequenceId = 0;
+
+    static constexpr std::array<RuntimeFieldDescriptor, 4> kFieldDescriptors {{
+        {"sequenceId", SemanticCategory::Authority, OwnershipClass::PublicationSemantic, MutabilityClass::MutablePrePublish, VisibilityClass::PublicationBoundary, LifetimeClass::RuntimeWorldLifetime},
+        {"epoch", SemanticCategory::Authority, OwnershipClass::PublicationSemantic, MutabilityClass::MutablePrePublish, VisibilityClass::PublicationBoundary, LifetimeClass::RuntimeWorldLifetime},
+        {"mappedRuntimeGeneration", SemanticCategory::Authority, OwnershipClass::PublicationSemantic, MutabilityClass::MutablePrePublish, VisibilityClass::PublicationBoundary, LifetimeClass::RuntimeWorldLifetime},
+        {"previousSequenceId", SemanticCategory::Authority, OwnershipClass::PublicationSemantic, MutabilityClass::MutablePrePublish, VisibilityClass::PublicationBoundary, LifetimeClass::RuntimeWorldLifetime}
+    }};
+
+    [[nodiscard]] static constexpr bool validateDescriptorSet() noexcept
+    {
+        return validateFieldDescriptorSet(kFieldDescriptors);
+    }
 };
 
 struct OverlapSemantic

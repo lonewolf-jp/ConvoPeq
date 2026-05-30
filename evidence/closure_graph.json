@@ -1,12 +1,1 @@
-{
-  "schema": "closure_graph_v1",
-  "buildMode": "Release",
-  "timestamp_ns": 256876686552700,
-  "status": "valid",
-  "closureId": 4,
-  "nodeCount": 1,
-  "edgeCount": 0,
-  "descriptorCoverageComplete": true,
-  "externalMutableDependencies": 0,
-  "validationErrors": []
-}
+﻿{"descriptorCoverageComplete":true,"provenance":"seed","runId":"8976f6e1fde6430a99690346f6f54c25","externalMutableDependencies":0,"schema":"closure_graph_v1","status":"generated","generatedAtNs":1780118666342000000}

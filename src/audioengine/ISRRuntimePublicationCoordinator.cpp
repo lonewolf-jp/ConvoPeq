@@ -9,7 +9,6 @@ RuntimePublicationCoordinator::RuntimePublicationCoordinator()
     , publicationSequenceId_(0)
     , publicationEpoch_(0)
     , mappedRuntimeGeneration_(0)
-    , lastObservedVersion_(0)
     , lastRejectCode_(RejectCode::None)
     , retireBacklogCount_(0)
     , publicationBacklogCount_(0)
@@ -139,17 +138,7 @@ const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
 }
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
-    const auto observedVersion = convo::consumeAtomic(version_, std::memory_order_acquire);
-    auto lastObserved = convo::consumeAtomic(lastObservedVersion_, std::memory_order_acquire);
-    while (observedVersion > lastObserved
-        && !convo::compareExchangeAtomic(lastObservedVersion_,
-                                         lastObserved,
-                                         observedVersion,
-                                         std::memory_order_acq_rel,
-                                         std::memory_order_acquire)) {
-    }
-
-    return (observedVersion >= lastObserved) ? observedVersion : lastObserved;
+    return convo::consumeAtomic(version_, std::memory_order_acquire);
 }
 
 void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {

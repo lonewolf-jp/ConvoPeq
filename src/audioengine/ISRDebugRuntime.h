@@ -21,6 +21,8 @@ public:
     void recordShadowCompareObservation(std::uint64_t sequenceId,
                                         const RuntimeSemanticHash& hash) noexcept;
     void emitShadowCompareCadenceReport() const;
+    [[nodiscard]] std::uint64_t monotonicViolationCount() const noexcept;
+    [[nodiscard]] std::uint64_t escalationCount() const noexcept;
 
 private:
     HBTraceRuntime hbTraceRuntime_;

@@ -164,6 +164,22 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     convo::isr::ProjectionFreshness projectionFreshness {};
     // AuthorityClass::Diagnostic (hash is fingerprint only; non-authoritative)
     convo::isr::RuntimeSemanticHash semanticHash {};
+
+    static constexpr std::array<convo::isr::RuntimeFieldDescriptor, 7> kFieldDescriptors {{
+        {"generation", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"graph", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"publication", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"retire", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"timing", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"latency", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"scheduling", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime}
+    }};
+
+    [[nodiscard]] static constexpr bool validateDescriptorSet() noexcept
+    {
+        return convo::isr::validateFieldDescriptorSet(kFieldDescriptors)
+            && convo::isr::PublicationSemantic::validateDescriptorSet();
+    }
 };
 
 using RuntimePublishWorld = RuntimeState;
@@ -2142,6 +2158,32 @@ public:
     [[nodiscard]] inline RuntimeReadView makeRuntimeReadView(int readerIndex,
                                                              bool assertAudioThread) noexcept
     {
+        const auto* world = RuntimePublicationCoordinator::observePublishedWorld(runtimeStore);
+        if (world != nullptr)
+        {
+            constexpr int kObserveReaderSlots = 4;
+            const int slot = juce::jlimit(0, kObserveReaderSlots - 1, readerIndex);
+
+            const auto currentGeneration = world->generation;
+            const auto currentSequence = world->publication.sequenceId;
+            const auto previousGeneration = consumeAtomic(observeLastSeenGeneration_[slot], std::memory_order_acquire);
+            const auto previousSequence = consumeAtomic(observeLastSeenSequenceId_[slot], std::memory_order_acquire);
+
+            const bool generationBackward = (previousGeneration != 0 && currentGeneration < previousGeneration);
+            const bool sequenceBackward = (previousSequence != 0 && currentSequence < previousSequence);
+
+            if (generationBackward || sequenceBackward)
+            {
+                fetchAddAtomic(observeMonotonicViolationCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+                publishAtomic(observeMonotonicRollbackRequested_, true, std::memory_order_release);
+            }
+
+            if (currentGeneration > previousGeneration)
+                publishAtomic(observeLastSeenGeneration_[slot], currentGeneration, std::memory_order_release);
+            if (currentSequence > previousSequence)
+                publishAtomic(observeLastSeenSequenceId_[slot], currentSequence, std::memory_order_release);
+        }
+
         return RuntimeReadView {
             makeRuntimePublishView(readerIndex, assertAudioThread),
             m_coordinator.observeCurrentRuntime(readerIndex)
@@ -3231,6 +3273,21 @@ public:
     convo::isr::BudgetManager budgetManager_;
     convo::isr::FailureHandler failureHandler_;
     convo::isr::IntrospectionConsole introspectionConsole_;
+
+    std::array<std::atomic<std::uint64_t>, 4> observeLastSeenGeneration_ {
+        std::atomic<std::uint64_t>{0},
+        std::atomic<std::uint64_t>{0},
+        std::atomic<std::uint64_t>{0},
+        std::atomic<std::uint64_t>{0}
+    };
+    std::array<std::atomic<std::uint64_t>, 4> observeLastSeenSequenceId_ {
+        std::atomic<std::uint64_t>{0},
+        std::atomic<std::uint64_t>{0},
+        std::atomic<std::uint64_t>{0},
+        std::atomic<std::uint64_t>{0}
+    };
+    std::atomic<std::uint64_t> observeMonotonicViolationCount_ { 0 };
+    std::atomic<bool> observeMonotonicRollbackRequested_ { false };
 
     // ==================================================================
 

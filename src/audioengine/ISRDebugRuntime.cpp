@@ -167,4 +167,14 @@ void DebugRuntime::emitShadowCompareCadenceReport() const
     file << "}\n";
 }
 
+std::uint64_t DebugRuntime::monotonicViolationCount() const noexcept
+{
+    return monotonicViolationCount_;
+}
+
+std::uint64_t DebugRuntime::escalationCount() const noexcept
+{
+    return escalationCount_;
+}
+
 } // namespace convo::isr
