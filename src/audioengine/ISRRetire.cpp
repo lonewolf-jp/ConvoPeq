@@ -13,6 +13,8 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
 
     uint64_t head = convo::consumeAtomic(retireIntentHead_, std::memory_order_acquire);
     if (nextTail == head) {
+        (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
+        (void)convo::fetchAddAtomic(droppedIntentCount_, uint64_t{1}, std::memory_order_acq_rel);
         return;
     }
 
@@ -49,6 +51,25 @@ std::vector<RetireIntent> RetireRuntime::dequeuePendingRetireIntents() noexcept
 
     convo::publishAtomic(retireIntentHead_, head, std::memory_order_release);
     return result;
+}
+
+std::uint64_t RetireRuntime::pendingIntentCount() const noexcept
+{
+    const uint64_t head = convo::consumeAtomic(retireIntentHead_, std::memory_order_acquire);
+    const uint64_t tail = convo::consumeAtomic(retireIntentTail_, std::memory_order_acquire);
+    if (tail >= head)
+        return tail - head;
+    return (RETIRE_INTENT_QUEUE_SIZE - head) + tail;
+}
+
+std::uint64_t RetireRuntime::overflowCount() const noexcept
+{
+    return convo::consumeAtomic(overflowCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RetireRuntime::droppedIntentCount() const noexcept
+{
+    return convo::consumeAtomic(droppedIntentCount_, std::memory_order_acquire);
 }
 
 void RetireRuntime::acknowledgeRetireCoordination(const RetireIntent& intent)

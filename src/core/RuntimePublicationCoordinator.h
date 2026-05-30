@@ -4,7 +4,6 @@
 #include <type_traits>
 #include <utility>
 
-#include "AlignedAllocation.h"
 #include "RuntimeTransition.h"
 #include "core/RuntimeStore.h"
 
@@ -37,6 +36,11 @@ public:
     [[nodiscard]] static const World* observePublishedWorld(const Store& store) noexcept
     {
         return store.observe();
+    }
+
+    [[nodiscard]] static const World* observeWorldHandle(const Store& store) noexcept
+    {
+        return observePublishedWorld(store);
     }
 
     void clearPublishedRuntimeSnapshotsNonRt() noexcept

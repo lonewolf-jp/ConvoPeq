@@ -119,13 +119,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     #endif
 
     // --- ProcessingStateを現行設計で初期化 ---
-    const auto* snap = authority.snapshot;
-    if (snap == nullptr)
-    {
-        buffer.clear();
-        return;
-    }
-    const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap);
+    const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(nullptr);
 
     DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 

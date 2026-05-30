@@ -39,6 +39,10 @@ public:
     // NonRT: dequeue retire intents
     std::vector<RetireIntent> dequeuePendingRetireIntents() noexcept;
 
+    [[nodiscard]] std::uint64_t pendingIntentCount() const noexcept;
+    [[nodiscard]] std::uint64_t overflowCount() const noexcept;
+    [[nodiscard]] std::uint64_t droppedIntentCount() const noexcept;
+
     // NonRT: acknowledge retire coordination
     void acknowledgeRetireCoordination(const RetireIntent& intent);
 
@@ -51,6 +55,8 @@ private:
     RetireIntent retireIntentQueue_[RETIRE_INTENT_QUEUE_SIZE];
     std::array<std::atomic<uint32_t>, RETIRE_INTENT_QUEUE_SIZE> acknowledgeGeneration_{};
     std::atomic<uint64_t> acknowledgedCount_{0};
+    std::atomic<uint64_t> overflowCount_{0};
+    std::atomic<uint64_t> droppedIntentCount_{0};
 };
 
 }  // namespace isr

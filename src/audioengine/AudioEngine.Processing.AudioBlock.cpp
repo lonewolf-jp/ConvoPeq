@@ -121,7 +121,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     const auto authority = AudioCallbackAuthorityView { runtimeReadView, consumeCrossfadePreparedSnapshot() };
     const auto& runtimeReadViewRef = runtimeReadView;
     const auto* runtimeGraph = getRuntimeGraph(runtimeReadViewRef);
-    const auto* snap = authority.snapshot;
 
     const auto callbackEpoch = convo::fetchAddAtomic(rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
     const auto sampleCursor = convo::fetchAddAtomic(rtLocalState_.audioSampleCursorCounter, static_cast<uint64_t>(numSamples), std::memory_order_acq_rel);
@@ -180,12 +179,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
         // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
         // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
-        if (snap == nullptr)
-        {
-            bufferToFill.clearActiveBufferRegion();
-            return;
-        }
-        const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(snap);
+        const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(nullptr);
 
         DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 

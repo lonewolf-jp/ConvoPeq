@@ -48,6 +48,91 @@ else()
     message(STATUS "clang-tidy build-time integration disabled.")
 endif()
 
+#------------------------------------------------------------
+# ISR Runtime Regression Tests (minimal CTest)
+#------------------------------------------------------------
+option(CONVOPEQ_ENABLE_ISR_TESTS "Enable minimal ISR runtime regression tests" ON)
+
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    enable_testing()
+
+    add_executable(ISRRuntimeIdentityTests
+        src/tests/ISRRuntimeIdentityGeneratorsTests.cpp
+    )
+
+    add_executable(RuntimePublicationCoordinatorTests
+        src/tests/RuntimePublicationCoordinatorTests.cpp
+    )
+
+    add_executable(ISRSemanticValidationTests
+        src/tests/ISRSemanticValidationTests.cpp
+        src/audioengine/ISRClosure.cpp
+        src/audioengine/ISRPayloadTier.cpp
+        src/audioengine/ISRRuntimePublicationCoordinator.cpp
+    )
+
+    add_executable(RetireGraceSemanticsTests
+        src/tests/RetireGraceSemanticsTests.cpp
+    )
+
+    add_executable(RuntimeSemanticSchemaValidationTests
+        src/tests/RuntimeSemanticSchemaValidationTests.cpp
+    )
+
+    target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
+    target_compile_features(RuntimePublicationCoordinatorTests PRIVATE cxx_std_20)
+    target_compile_features(ISRSemanticValidationTests PRIVATE cxx_std_20)
+    target_compile_features(RetireGraceSemanticsTests PRIVATE cxx_std_20)
+    target_compile_features(RuntimeSemanticSchemaValidationTests PRIVATE cxx_std_20)
+    target_include_directories(ISRRuntimeIdentityTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+    )
+    target_include_directories(RuntimePublicationCoordinatorTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(ISRSemanticValidationTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_include_directories(RetireGraceSemanticsTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_include_directories(RuntimeSemanticSchemaValidationTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+
+    add_test(NAME ISRRuntimeIdentityGenerators COMMAND ISRRuntimeIdentityTests)
+    add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
+    add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
+    add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
+    add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
+
+    if(MSVC)
+        target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
+        target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
+        target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
+        target_compile_options(RetireGraceSemanticsTests PRIVATE /utf-8)
+        target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /utf-8)
+    endif()
+endif()
+
 # バージョン文字列の分解 (必要に応じて使用)
 # string(REPLACE "." ";" ConvoPeq_VERSION_LIST "${PROJECT_VERSION}")
 # list(GET ConvoPeq_VERSION_LIST 0 ConvoPeq_VERSION_MAJOR)

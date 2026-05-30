@@ -113,6 +113,29 @@ struct ExecutionSemantic
     int crossfadeDryHoldSamples = 0;
 };
 
+[[nodiscard]] inline constexpr bool isValidRoutingSemantic(const RoutingSemantic& routing) noexcept
+{
+    constexpr int kMinProcessingOrder = 0;
+    constexpr int kMaxProcessingOrder = 1;
+    return routing.processingOrder >= kMinProcessingOrder
+        && routing.processingOrder <= kMaxProcessingOrder;
+}
+
+[[nodiscard]] inline constexpr bool isValidExecutionSemantic(const ExecutionSemantic& execution) noexcept
+{
+    constexpr int kMinTransitionPolicy = 0;
+    constexpr int kMaxTransitionPolicy = 2;
+    if (execution.transitionPolicy < kMinTransitionPolicy
+        || execution.transitionPolicy > kMaxTransitionPolicy)
+        return false;
+
+    if (execution.crossfadeStartDelayBlocks < 0
+        || execution.crossfadeDryHoldSamples < 0)
+        return false;
+
+    return true;
+}
+
 struct PublicationSemantic
 {
     PublicationSequenceId sequenceId = 0;
@@ -131,6 +154,12 @@ struct PublicationSemantic
     {
         return validateFieldDescriptorSet(kFieldDescriptors);
     }
+};
+
+struct RuntimeMetadata
+{
+    std::uint32_t schemaVersion = kRuntimeSemanticSchemaVersion;
+    PublicationSequenceId publicationSequence = 0;
 };
 
 struct OverlapSemantic
@@ -197,6 +226,7 @@ struct CoefficientSemantic
 
 struct RuntimeSemanticSchema
 {
+    RuntimeMetadata metadata {};
     GenerationSemantic generation {};
     TopologySemantic topology {};
     RoutingSemantic routing {};

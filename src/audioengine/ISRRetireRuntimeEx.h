@@ -57,6 +57,18 @@ public:
     [[nodiscard]] EpochStrategyDescriptor describeEpochStrategy() const noexcept;
     [[nodiscard]] std::uint64_t getQuarantineResidentCount() const noexcept;
     [[nodiscard]] RetireLifecycleState lifecycleStateOf(std::uint32_t slot) const noexcept;
+    [[nodiscard]] static bool isGracePeriodCompleted(std::uint64_t worldGeneration,
+                                                     std::uint64_t maxObservedGeneration,
+                                                     std::uint32_t audioCallbackActiveCount) noexcept
+    {
+        return (maxObservedGeneration > worldGeneration) || (audioCallbackActiveCount == 0u);
+    }
+    [[nodiscard]] static bool canTransitionRetirePendingToFree(bool graceCompleted,
+                                                               bool pendingIntentOwned,
+                                                               bool authoritativeOwnershipReleased) noexcept
+    {
+        return graceCompleted && pendingIntentOwned && authoritativeOwnershipReleased;
+    }
 
     [[nodiscard]] RetireLane laneOf(std::uint32_t slot) const noexcept;
     void emitRetireTimeline(const std::filesystem::path& outputPath) const;

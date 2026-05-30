@@ -34,17 +34,6 @@ struct RuntimeGraph
     bool eqBypassed = false;
     bool convBypassed = false;
     bool softClipEnabled = false;
-    bool dspCrossfadePending = false;
-    bool dspCrossfadeUseDryAsOld = false;
-    bool firstIrDryCrossfadePending = false;
-    double queuedFadeTimeSec = 0.0;
-    int dspCrossfadeStartDelayBlocks = 0;
-    int dspCrossfadeDryHoldSamples = 0;
-    double dryScaleTarget = 1.0;           // dry-as-old crossfade の IRスケール目標値
-    int latencyDelayOld = 0;
-    int latencyDelayNew = 0;
-    bool latencyResetPending = false;
-
     // IMMUTABLE_RUNTIME: gain / saturation parameters
     double saturationAmount = 0.0;
     double inputHeadroomGain = 1.0;

@@ -47,6 +47,16 @@ void destroyPublicationIntentNode(void* ptr) noexcept
     if (world.schemaVersion != convo::isr::kRuntimeSemanticSchemaVersion)
         return rejectWithEvidence();
 
+    if (world.metadata.schemaVersion != world.schemaVersion)
+        return rejectWithEvidence();
+
+    if (world.metadata.publicationSequence != world.publication.sequenceId)
+        return rejectWithEvidence();
+
+    if (!convo::isr::isValidRoutingSemantic(world.routing)
+        || !convo::isr::isValidExecutionSemantic(world.execution))
+        return rejectWithEvidence();
+
     if (!RuntimeState::validateDescriptorSet()
         || !convo::RuntimeGraph::validateDescriptorSet()
         || !convo::isr::PublicationSemantic::validateDescriptorSet())
@@ -65,6 +75,20 @@ void destroyPublicationIntentNode(void* ptr) noexcept
 
     if (world.publication.previousSequenceId >= world.publication.sequenceId)
         return rejectWithEvidence();
+
+    const auto lastCommittedGeneration = convo::consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_acquire);
+    const auto lastCommittedSequence = convo::consumeAtomic(lastCommittedPublicationSequence_, std::memory_order_acquire);
+    if (lastCommittedGeneration != 0 && world.generation <= lastCommittedGeneration)
+    {
+        convo::publishAtomic(lastDroppedGeneration_, world.generation, std::memory_order_release);
+        return rejectWithEvidence();
+    }
+
+    if (lastCommittedSequence != 0 && world.publication.sequenceId <= lastCommittedSequence)
+    {
+        convo::publishAtomic(lastDroppedGeneration_, world.generation, std::memory_order_release);
+        return rejectWithEvidence();
+    }
 
     if (world.projectionFreshness.projectionGeneration != world.generation
         || world.projectionFreshness.projectionRevision != world.graph.generation)
@@ -157,6 +181,32 @@ void destroyPublicationIntentNode(void* ptr) noexcept
 
 void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept
 {
+    const auto updateMinMetric = [](std::atomic<std::uint64_t>& dst, std::uint64_t value) noexcept
+    {
+        auto observed = convo::consumeAtomic(dst, std::memory_order_acquire);
+        while ((observed == 0 || value < observed)
+               && !convo::compareExchangeAtomic(dst,
+                                                observed,
+                                                value,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire))
+        {
+        }
+    };
+
+    const auto updateMaxMetric = [](std::atomic<std::uint64_t>& dst, std::uint64_t value) noexcept
+    {
+        auto observed = convo::consumeAtomic(dst, std::memory_order_acquire);
+        while (value > observed
+               && !convo::compareExchangeAtomic(dst,
+                                                observed,
+                                                value,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire))
+        {
+        }
+    };
+
     debugRuntime_.recordShadowCompareObservation(world.publication.sequenceId, world.semanticHash);
 
     const bool observeRollbackRequested = convo::exchangeAtomic(observeMonotonicRollbackRequested_, false, std::memory_order_acq_rel);
@@ -177,6 +227,11 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
                                static_cast<int>(std::memory_order_release));
 
     commitRuntimePublication(world);
+    convo::publishAtomic(lastCommittedRuntimeGeneration_, world.generation, std::memory_order_release);
+    convo::publishAtomic(lastCommittedPublicationSequence_, world.publication.sequenceId, std::memory_order_release);
+    convo::fetchAddAtomic(publishedWorldCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    updateMinMetric(oldestPublishedGeneration_, world.generation);
+    updateMaxMetric(youngestPublishedGeneration_, world.generation);
 
 #if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
     debugRuntime_.emitCIArtifacts();
@@ -215,19 +270,109 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     intent.isValid = true;
 
     retireRuntime_.emitRetireIntentRT(intent);
+    runtimePublicationBridge_.setPendingIntentCount(retireRuntime_.pendingIntentCount());
+    runtimePublicationBridge_.setRetireBacklogCount(retireRuntime_.pendingIntentCount());
     const auto pendingIntents = retireRuntime_.dequeuePendingRetireIntents();
+    convo::publishAtomic(pendingRetireGenerationCount_, static_cast<std::uint64_t>(pendingIntents.size()), std::memory_order_release);
+
+    const auto updateMinMetric = [](std::atomic<std::uint64_t>& dst, std::uint64_t value) noexcept
+    {
+        auto observed = convo::consumeAtomic(dst, std::memory_order_acquire);
+        while ((observed == 0 || value < observed)
+               && !convo::compareExchangeAtomic(dst,
+                                                observed,
+                                                value,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire))
+        {
+        }
+    };
+
+    const auto updateMaxMetric = [](std::atomic<std::uint64_t>& dst, std::uint64_t value) noexcept
+    {
+        auto observed = convo::consumeAtomic(dst, std::memory_order_acquire);
+        while (value > observed
+               && !convo::compareExchangeAtomic(dst,
+                                                observed,
+                                                value,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire))
+        {
+        }
+    };
+
+    std::uint64_t pendingMinGeneration = 0;
+    std::uint64_t pendingMaxGeneration = 0;
     for (const auto& pending : pendingIntents)
     {
         if (!pending.isValid)
             continue;
+
+        const auto generationValue = static_cast<std::uint64_t>(pending.generation);
+        if (pendingMinGeneration == 0 || generationValue < pendingMinGeneration)
+            pendingMinGeneration = generationValue;
+        if (generationValue > pendingMaxGeneration)
+            pendingMaxGeneration = generationValue;
+    }
+
+    if (pendingMinGeneration != 0)
+    {
+        updateMinMetric(oldestPendingGeneration_, pendingMinGeneration);
+        updateMinMetric(oldestRetirePendingGeneration_, pendingMinGeneration);
+    }
+    if (pendingMaxGeneration != 0)
+        updateMaxMetric(newestPendingGeneration_, pendingMaxGeneration);
+
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    if (!pendingIntents.empty())
+    {
+        auto firstSeen = convo::consumeAtomic(oldestPendingFirstSeenMs_, std::memory_order_acquire);
+        if (firstSeen <= 0.0)
+        {
+            convo::publishAtomic(oldestPendingFirstSeenMs_, nowMs, std::memory_order_release);
+            firstSeen = nowMs;
+        }
+        convo::publishAtomic(oldestPendingAge_, std::max(0.0, nowMs - firstSeen), std::memory_order_release);
+    }
+    else
+    {
+        convo::publishAtomic(oldestPendingFirstSeenMs_, 0.0, std::memory_order_release);
+        convo::publishAtomic(oldestPendingAge_, 0.0, std::memory_order_release);
+    }
+
+    for (const auto& pending : pendingIntents)
+    {
+        if (!pending.isValid)
+            continue;
+
+        const auto pendingGeneration = static_cast<std::uint64_t>(pending.generation);
+        const auto maxObservedGeneration = convo::consumeAtomic(youngestObservedGeneration_, std::memory_order_acquire);
+        const auto callbackActiveCount = convo::consumeAtomic(rtLocalState_.audioCallbackActiveCount, std::memory_order_acquire);
+        const bool graceCompleted = retireRuntimeEx_.isGracePeriodCompleted(pendingGeneration,
+                                             maxObservedGeneration,
+                                             callbackActiveCount);
+        const bool pendingIntentOwned = pending.isValid;
+        const auto* currentPublished = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
+        const bool authoritativeOwnershipReleased = (currentPublished != world);
 
         const auto pendingSlot = static_cast<std::uint32_t>(pending.dspSlot & 0xFFu);
         retireRuntime_.acknowledgeRetireCoordination(pending);
         retireRuntimeEx_.emitIntent(pendingSlot, pending.generation);
         retireRuntimeEx_.enqueueRetire(pendingSlot);
         retireRuntimeEx_.settleEpoch(pendingSlot);
-        retireRuntimeEx_.reclaim(pendingSlot);
+        if (retireRuntimeEx_.canTransitionRetirePendingToFree(graceCompleted,
+                                                              pendingIntentOwned,
+                                                              authoritativeOwnershipReleased))
+            retireRuntimeEx_.reclaim(pendingSlot);
+        else
+            retireRuntimeEx_.quarantine(pendingSlot);
     }
+
+    convo::fetchAddAtomic(retiredWorldCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    updateMinMetric(oldestRetiredGeneration_, world->generation);
+
+    runtimePublicationBridge_.setPendingIntentCount(retireRuntime_.pendingIntentCount());
+    runtimePublicationBridge_.setRetireBacklogCount(retireRuntime_.pendingIntentCount());
     emitEvidenceTickNonRt(false);
 }
 
