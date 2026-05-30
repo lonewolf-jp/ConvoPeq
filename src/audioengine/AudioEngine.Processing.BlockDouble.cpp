@@ -98,8 +98,10 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    const auto runtimeReadView = readAudioRuntimeView();
-    const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
+    auto runtimeReadView = readAudioRuntimeView();
+    const auto authority = AudioCallbackAuthorityView { runtimeReadView, consumeCrossfadePreparedSnapshot() };
+    const auto& runtimeReadViewRef = runtimeReadView;
+    const auto* runtimeGraph = getRuntimeGraph(runtimeReadViewRef);
     DSPCore* dsp = (runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
         ? static_cast<DSPCore*>(runtimeGraph->activeNode)
         : nullptr;
@@ -117,7 +119,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     #endif
 
     // --- ProcessingStateを現行設計で初期化 ---
-    const convo::GlobalSnapshot* snap = getRuntimeSnapshot(runtimeReadView);
+    const auto* snap = authority.snapshot;
     if (snap == nullptr)
     {
         buffer.clear();
@@ -149,7 +151,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
     DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
-    const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
+    const auto& preparedCrossfade = authority.preparedCrossfade;
     bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
     if (fading != nullptr && fading == dsp)
     {

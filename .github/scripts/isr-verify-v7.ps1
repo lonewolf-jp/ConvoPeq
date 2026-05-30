@@ -9,7 +9,20 @@ if (-not $latency.withinThreshold) {
 	throw "Retire latency threshold exceeded"
 }
 
-$timeline = . "$PSScriptRoot\isr-verify-common.ps1" -ArtifactName "retire_timeline.json" -Schema "retire_timeline_v1" -RequiredKeys @("totalTransitions", "epochMode", "rollbackMode", "rollbackReady", "rollbackFlags")
+$timelinePath = Join-Path (Join-Path $PSScriptRoot '..\..') 'evidence\retire_timeline.json'
+if (-not (Test-Path -LiteralPath $timelinePath)) {
+	throw "Missing required artifact: retire_timeline.json"
+}
+
+$timeline = Get-Content -LiteralPath $timelinePath -Raw -Encoding UTF8 | ConvertFrom-Json
+$timelineSchema = "$($timeline.schema)"
+if ($timelineSchema -ne 'retire_timeline_v1' -and $timelineSchema -ne 'retire_timeline_v2') {
+	throw "Schema mismatch for retire_timeline.json. expected=retire_timeline_v1|retire_timeline_v2 actual=$timelineSchema"
+}
+
+foreach ($requiredField in @('totalTransitions', 'epochMode', 'rollbackMode', 'rollbackReady', 'rollbackFlags')) {
+	Assert-HasProperty -Object $timeline -Name $requiredField
+}
 Assert-NonNegativeInteger -Value $timeline.totalTransitions -FieldName "totalTransitions"
 
 Assert-ValueInSet -Value $timeline.epochMode -Allowed @("shared", "split", "hybrid") -FieldName "epochMode"

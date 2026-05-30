@@ -55,7 +55,7 @@ if ((Get-Date).Date -gt $matrixExpiry.Date) {
 if ($metricGovernance.schema -ne 'metric_governance_v1') {
     throw "Unexpected metric governance schema: $($metricGovernance.schema)"
 }
-if ($retireTimeline.schema -ne 'retire_timeline_v1') {
+if ($retireTimeline.schema -ne 'retire_timeline_v1' -and $retireTimeline.schema -ne 'retire_timeline_v2') {
     throw "Unexpected retire timeline schema: $($retireTimeline.schema)"
 }
 

@@ -75,6 +75,53 @@ bool readEnvFlag(const char* name, bool defaultValue) noexcept
 
     return defaultValue;
 }
+
+constexpr std::uint32_t toRaw(RetireLifecycleState state) noexcept
+{
+    return static_cast<std::uint32_t>(state);
+}
+
+RetireLifecycleState lifecycleFromRaw(std::uint32_t raw) noexcept
+{
+    switch (static_cast<RetireLifecycleState>(raw)) {
+    case RetireLifecycleState::Visible:
+    case RetireLifecycleState::CompareEligible:
+    case RetireLifecycleState::TelemetryRetained:
+    case RetireLifecycleState::ReplayRetainedOptional:
+    case RetireLifecycleState::ReclaimEligible:
+    case RetireLifecycleState::Reclaimed:
+        return static_cast<RetireLifecycleState>(raw);
+    default:
+        return RetireLifecycleState::Visible;
+    }
+}
+
+const char* lifecycleStateName(RetireLifecycleState state) noexcept
+{
+    switch (state) {
+    case RetireLifecycleState::Visible: return "visible";
+    case RetireLifecycleState::CompareEligible: return "compareEligible";
+    case RetireLifecycleState::TelemetryRetained: return "telemetryRetained";
+    case RetireLifecycleState::ReplayRetainedOptional: return "replayRetainedOptional";
+    case RetireLifecycleState::ReclaimEligible: return "reclaimEligible";
+    case RetireLifecycleState::Reclaimed: return "reclaimed";
+    default: return "visible";
+    }
+}
+
+template <std::size_t N>
+void transitionLifecycle(std::array<std::atomic<std::uint32_t>, N>& states,
+                         std::array<std::atomic<std::uint64_t>, 6>& counters,
+                         std::uint32_t slot,
+                         RetireLifecycleState next) noexcept
+{
+    const auto current = lifecycleFromRaw(convo::consumeAtomic(states[slot], std::memory_order_acquire));
+    if (current == next)
+        return;
+
+    convo::publishAtomic(states[slot], toRaw(next), std::memory_order_release);
+    (void)convo::fetchAddAtomic(counters[static_cast<std::size_t>(next)], static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+}
 } // namespace
 
 RetireRuntimeEx::RetireRuntimeEx()
@@ -84,6 +131,14 @@ RetireRuntimeEx::RetireRuntimeEx()
     }
 
     for (auto& counter : laneCounters_) {
+        convo::publishAtomic(counter, static_cast<std::uint64_t>(0), std::memory_order_relaxed);
+    }
+
+    for (auto& state : lifecycleStateBySlot_) {
+        convo::publishAtomic(state, toRaw(RetireLifecycleState::Visible), std::memory_order_relaxed);
+    }
+
+    for (auto& counter : lifecycleCounters_) {
         convo::publishAtomic(counter, static_cast<std::uint64_t>(0), std::memory_order_relaxed);
     }
 
@@ -109,6 +164,7 @@ void RetireRuntimeEx::emitIntent(std::uint32_t slot, std::uint32_t generation) {
 
     const auto lane = (generation == 0u) ? RetireLane::Quarantine : RetireLane::RTIntent;
     convo::publishAtomic(laneBySlot_[slot], toRaw(lane), std::memory_order_release);
+    transitionLifecycle(lifecycleStateBySlot_, lifecycleCounters_, slot, RetireLifecycleState::Visible);
     (void)convo::fetchAddAtomic(laneCounters_[static_cast<std::size_t>(lane)], static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     (void)convo::fetchAddAtomic(totalTransitions_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
 }
@@ -119,6 +175,7 @@ void RetireRuntimeEx::enqueueRetire(std::uint32_t slot) {
         return;
     }
     convo::publishAtomic(laneBySlot_[slot], toRaw(RetireLane::Coordination), std::memory_order_release);
+    transitionLifecycle(lifecycleStateBySlot_, lifecycleCounters_, slot, RetireLifecycleState::CompareEligible);
     (void)convo::fetchAddAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Coordination)], static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     (void)convo::fetchAddAtomic(totalTransitions_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
 }
@@ -128,6 +185,7 @@ void RetireRuntimeEx::settleEpoch(std::uint32_t slot) {
         return;
     }
     convo::publishAtomic(laneBySlot_[slot], toRaw(RetireLane::Epoch), std::memory_order_release);
+    transitionLifecycle(lifecycleStateBySlot_, lifecycleCounters_, slot, RetireLifecycleState::TelemetryRetained);
     (void)convo::fetchAddAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Epoch)], static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     (void)convo::fetchAddAtomic(totalTransitions_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
 }
@@ -137,9 +195,11 @@ void RetireRuntimeEx::reclaim(std::uint32_t slot) {
         return;
     }
     const RetireLane previousLane = laneOf(slot);
+    transitionLifecycle(lifecycleStateBySlot_, lifecycleCounters_, slot, RetireLifecycleState::ReclaimEligible);
     convo::publishAtomic(laneBySlot_[slot], toRaw(RetireLane::Reclaim), std::memory_order_release);
     (void)convo::fetchAddAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Reclaim)], static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     (void)convo::fetchAddAtomic(totalTransitions_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    transitionLifecycle(lifecycleStateBySlot_, lifecycleCounters_, slot, RetireLifecycleState::Reclaimed);
     if (previousLane == RetireLane::Quarantine)
     {
         const auto resident = convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
@@ -153,6 +213,7 @@ void RetireRuntimeEx::quarantine(std::uint32_t slot) {
         return;
     }
     const RetireLane previousLane = laneOf(slot);
+    transitionLifecycle(lifecycleStateBySlot_, lifecycleCounters_, slot, RetireLifecycleState::ReplayRetainedOptional);
     convo::publishAtomic(laneBySlot_[slot], toRaw(RetireLane::Quarantine), std::memory_order_release);
     (void)convo::fetchAddAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Quarantine)], static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
     (void)convo::fetchAddAtomic(totalTransitions_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
@@ -224,6 +285,14 @@ std::uint64_t RetireRuntimeEx::getQuarantineResidentCount() const noexcept {
     return convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire);
 }
 
+RetireLifecycleState RetireRuntimeEx::lifecycleStateOf(std::uint32_t slot) const noexcept {
+    if (slot >= lifecycleStateBySlot_.size()) {
+        return RetireLifecycleState::Visible;
+    }
+
+    return lifecycleFromRaw(convo::consumeAtomic(lifecycleStateBySlot_[slot], std::memory_order_acquire));
+}
+
 RetireLane RetireRuntimeEx::laneOf(std::uint32_t slot) const noexcept {
     if (slot >= laneBySlot_.size()) {
         return RetireLane::Quarantine;
@@ -244,7 +313,7 @@ void RetireRuntimeEx::emitRetireTimeline(const std::filesystem::path& outputPath
     const auto rollbackFlags = describeRollbackFlags();
 
     file << "{\n";
-    file << "  \"schema\": \"retire_timeline_v1\",\n";
+    file << "  \"schema\": \"retire_timeline_v2\",\n";
     file << "  \"epochMode\": \"" << epochModeName(strategy.activeMode) << "\",\n";
     file << "  \"rollbackMode\": \"" << epochModeName(strategy.rollbackMode) << "\",\n";
     file << "  \"rollbackReady\": " << (strategy.rollbackReady ? "true" : "false") << ",\n";
@@ -262,7 +331,25 @@ void RetireRuntimeEx::emitRetireTimeline(const std::filesystem::path& outputPath
     file << "    \"epoch\": " << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Epoch)], std::memory_order_acquire) << ",\n";
     file << "    \"reclaim\": " << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Reclaim)], std::memory_order_acquire) << ",\n";
     file << "    \"quarantine\": " << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Quarantine)], std::memory_order_acquire) << "\n";
-    file << "  }\n";
+    file << "  },\n";
+    file << "  \"lifecycleCounters\": {\n";
+    file << "    \"visible\": " << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::Visible)], std::memory_order_acquire) << ",\n";
+    file << "    \"compareEligible\": " << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::CompareEligible)], std::memory_order_acquire) << ",\n";
+    file << "    \"telemetryRetained\": " << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::TelemetryRetained)], std::memory_order_acquire) << ",\n";
+    file << "    \"replayRetainedOptional\": " << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::ReplayRetainedOptional)], std::memory_order_acquire) << ",\n";
+    file << "    \"reclaimEligible\": " << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::ReclaimEligible)], std::memory_order_acquire) << ",\n";
+    file << "    \"reclaimed\": " << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::Reclaimed)], std::memory_order_acquire) << "\n";
+    file << "  },\n";
+    file << "  \"lifecycleSample\": [\n";
+    for (std::size_t i = 0; i < 8; ++i) {
+        const auto state = lifecycleStateOf(static_cast<std::uint32_t>(i));
+        file << "    {\"slot\": " << i << ", \"state\": \"" << lifecycleStateName(state) << "\"}";
+        if (i + 1 < 8) {
+            file << ",";
+        }
+        file << "\n";
+    }
+    file << "  ]\n";
     file << "}\n";
 }
 

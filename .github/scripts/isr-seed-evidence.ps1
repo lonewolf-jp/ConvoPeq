@@ -55,7 +55,7 @@ $artifacts = @{
     runId           = $runId
   }
   "retire_timeline.json"       = @{
-    schema           = "retire_timeline_v1"
+    schema           = "retire_timeline_v2"
     provenance       = "seed"
     epochMode        = "shared"
     rollbackMode     = "shared"
@@ -63,6 +63,26 @@ $artifacts = @{
     rollbackFlags    = @{ global = $true; publicationOnly = $false; crossfadeOnly = $false; retirePathOnly = $true }
     totalTransitions = 4
     laneCounters     = @{ rtIntent = 1; coordination = 1; epoch = 1; reclaim = 1; quarantine = 0 }
+    lifecycleCounters = @{ visible = 1; compareEligible = 1; telemetryRetained = 1; replayRetainedOptional = 0; reclaimEligible = 1; reclaimed = 1 }
+    lifecycleSample  = @(
+      @{ slot = 0; state = "reclaimed" },
+      @{ slot = 1; state = "visible" }
+    )
+    generatedAtNs    = $generatedAtNs
+    runId            = $runId
+  }
+  "shadow_compare_cadence.json" = @{
+    schema                    = "shadow_compare_cadence_v1"
+    provenance                = "seed"
+    minCadenceMs              = 1000
+    burstWindowMs             = 250
+    burstEscalationThreshold  = 3
+    totalObservations         = 1
+    mismatchCount             = 0
+    monotonicViolationCount   = 0
+    cadenceViolationCount     = 0
+    escalationCount           = 0
+    lastSequenceId            = 1
     generatedAtNs    = $generatedAtNs
     runId            = $runId
   }

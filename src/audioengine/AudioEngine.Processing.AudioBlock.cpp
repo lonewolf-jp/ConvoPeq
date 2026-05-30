@@ -116,9 +116,12 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     // Epoch tracking for lock-free Audio Thread safety
     convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
 
-    // P0-2: 読取入口を RuntimeReadView へ収束。
-    const auto runtimeReadView = readAudioRuntimeView();
-    const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
+    // P0-2: 読取入口を単一の callback authority view へ収束。
+    auto runtimeReadView = readAudioRuntimeView();
+    const auto authority = AudioCallbackAuthorityView { runtimeReadView, consumeCrossfadePreparedSnapshot() };
+    const auto& runtimeReadViewRef = runtimeReadView;
+    const auto* runtimeGraph = getRuntimeGraph(runtimeReadViewRef);
+    const auto* snap = authority.snapshot;
 
     const auto callbackEpoch = convo::fetchAddAtomic(rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
     const auto sampleCursor = convo::fetchAddAtomic(rtLocalState_.audioSampleCursorCounter, static_cast<uint64_t>(numSamples), std::memory_order_acq_rel);
@@ -177,7 +180,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
         // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
         // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
-        const convo::GlobalSnapshot* snap = getRuntimeSnapshot(runtimeReadView);
         if (snap == nullptr)
         {
             bufferToFill.clearActiveBufferRegion();
@@ -205,8 +207,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                 dspCrossfadeFloatBuffer.clear(ch, 0, numSamples);
 
             juce::AudioSourceChannelInfo oldInfo(&dspCrossfadeFloatBuffer, 0, numSamples);
-            processWithSnapshot(oldInfo, snapshotFrom, true, runtimeGraph);
-            processWithSnapshot(bufferToFill, snapshotTo, false, runtimeGraph);
+            processWithSnapshot(oldInfo, snapshotFrom, true, authority.runtimeGraph);
+            processWithSnapshot(bufferToFill, snapshotTo, false, authority.runtimeGraph);
 
             const float gNew = snapshotAlpha;
             const float gOld = 1.0f - snapshotAlpha;
@@ -228,7 +230,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
 
         DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
-        const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
+        const auto& preparedCrossfade = authority.preparedCrossfade;
         bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
         if (processCrossfadeDelayGateIfPending(fading,
                                                useDryAsOld,

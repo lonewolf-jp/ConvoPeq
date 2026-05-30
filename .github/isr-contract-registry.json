@@ -1,0 +1,83 @@
+{
+    "schema": "isr_contract_registry_v1",
+    "version": "2026-05-29",
+    "owner": "audioengine-isr",
+    "issue": "ISR-GOV-REGISTRY-CONTRACTS",
+    "rationale": "single source of truth for contract ownership and phase mapping",
+    "expiry": "2099-12-31",
+    "source": "doc/work6/base_plan.md v2.3, doc/work6/detailed_design_isr_bridge_runtime_v1_6.md",
+    "contracts": [
+        {
+            "id": "publication-authority-contract",
+            "category": "publication",
+            "description": "Single-source publication path with monotonic sequence and out-of-order reject",
+            "owner": "RuntimePublicationCoordinator",
+            "phase": "Phase2",
+            "status": "active"
+        },
+        {
+            "id": "epoch-generation-mapping-contract",
+            "category": "publication",
+            "description": "PublicationEpoch must map monotonically to RuntimeGeneration",
+            "owner": "RuntimePublicationCoordinator",
+            "phase": "Phase2",
+            "status": "active"
+        },
+        {
+            "id": "partial-publication-zero-contract",
+            "category": "publication",
+            "description": "Schema-complete publication only; partial subset visibility is rejected",
+            "owner": "AudioEngine::runPublicationPrecheckNonRt",
+            "phase": "Phase2",
+            "status": "active"
+        },
+        {
+            "id": "snapshot-non-authority-contract",
+            "category": "projection",
+            "description": "Snapshot/projection is diagnostic-only and must not be semantic authority",
+            "owner": "RuntimeWorldReadShim + RuntimeState",
+            "phase": "Phase4",
+            "status": "active"
+        },
+        {
+            "id": "retire-pressure-contract",
+            "category": "retire",
+            "description": "Retire queue pressure policy and bounded fallback behavior",
+            "owner": "RetireRuntime / AudioEngine",
+            "phase": "Phase7",
+            "status": "active"
+        },
+        {
+            "id": "hash-authority-prohibition",
+            "category": "shadow-compare",
+            "description": "RuntimeSemanticHash is diagnostic fingerprint only and must not become authority",
+            "owner": "RuntimeState.semanticHash",
+            "phase": "Phase4",
+            "status": "active"
+        },
+        {
+            "id": "shadow-compare-cadence-contract",
+            "category": "shadow-compare",
+            "description": "Minimum compare cadence, burst-aware escalation, and mismatch accounting must be enforced and evidenced",
+            "owner": "DebugRuntime::recordShadowCompareObservation",
+            "phase": "Phase0",
+            "status": "active"
+        },
+        {
+            "id": "retire-lifecycle-state-contract",
+            "category": "retire",
+            "description": "Retire lifecycle must follow visible->compare->telemetry->replay(optional)->reclaim-eligible->reclaimed state progression",
+            "owner": "ISRRetireRuntimeEx",
+            "phase": "Phase7",
+            "status": "active"
+        },
+        {
+            "id": "governance-consistency-contract",
+            "category": "governance",
+            "description": "ContractRegistry and VerifierRegistry must stay consistent with tier wiring and dependency DAG constraints",
+            "owner": "isr-verify-governance-registries.ps1",
+            "phase": "Phase0",
+            "status": "active"
+        }
+    ]
+}

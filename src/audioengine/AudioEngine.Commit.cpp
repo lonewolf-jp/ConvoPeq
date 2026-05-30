@@ -38,18 +38,41 @@ void destroyPublicationIntentNode(void* ptr) noexcept
 
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
-    if (!world.isFrozen())
-    {
+    const auto rejectWithEvidence = [this]() noexcept {
         debugRuntime_.validateOwnershipClosure();
         emitEvidenceTickNonRt(true);
         return false;
+    };
+
+    if (world.schemaVersion != convo::isr::kRuntimeSemanticSchemaVersion)
+        return rejectWithEvidence();
+
+    if (world.generation == 0
+        || world.generationSemantic.runtimeGeneration == 0
+        || world.publication.sequenceId == 0
+        || world.publication.epoch == 0
+        || world.publication.mappedRuntimeGeneration == 0)
+        return rejectWithEvidence();
+
+    if (world.generationSemantic.runtimeGeneration != world.generation
+        || world.publication.mappedRuntimeGeneration != world.generation)
+        return rejectWithEvidence();
+
+    if (world.publication.previousSequenceId >= world.publication.sequenceId)
+        return rejectWithEvidence();
+
+    if (world.projectionFreshness.projectionGeneration != world.generation
+        || world.projectionFreshness.projectionRevision != world.graph.generation)
+        return rejectWithEvidence();
+
+    if (!world.isFrozen())
+    {
+        return rejectWithEvidence();
     }
 
     if (!world.isSealedRecursively())
     {
-        debugRuntime_.validateOwnershipClosure();
-        emitEvidenceTickNonRt(true);
-        return false;
+        return rejectWithEvidence();
     }
 
     const bool hasActive = (world.graph.activeNode != nullptr);
@@ -121,9 +144,7 @@ void destroyPublicationIntentNode(void* ptr) noexcept
     const bool closureValid = closureGraphWalker_.validateGraph(closure);
     const bool precheckValid = precheckRuntimePublication(closure, descriptor);
     if (!closureValid || !precheckValid) {
-        debugRuntime_.validateOwnershipClosure();
-        emitEvidenceTickNonRt(true);
-        return false;
+        return rejectWithEvidence();
     }
 
     return true;
@@ -131,6 +152,8 @@ void destroyPublicationIntentNode(void* ptr) noexcept
 
 void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept
 {
+    debugRuntime_.recordShadowCompareObservation(world.publication.sequenceId, world.semanticHash);
+
     debugRuntime_.recordHBEdge(100u,
                                200u,
                                static_cast<std::uint64_t>(world.generation),

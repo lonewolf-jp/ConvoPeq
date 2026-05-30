@@ -1,1 +1,12 @@
-{"descriptorCoverageComplete":true,"provenance":"seed","status":"generated","externalMutableDependencies":0,"generatedAtNs":1779988015039000000,"runId":"5a501bab8f4545a9ae13e1bab22f4403","schema":"closure_graph_v1"}
+{
+  "schema": "closure_graph_v1",
+  "buildMode": "Release",
+  "timestamp_ns": 256876686552700,
+  "status": "valid",
+  "closureId": 4,
+  "nodeCount": 1,
+  "edgeCount": 0,
+  "descriptorCoverageComplete": true,
+  "externalMutableDependencies": 0,
+  "validationErrors": []
+}

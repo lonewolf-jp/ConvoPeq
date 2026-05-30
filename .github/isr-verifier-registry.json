@@ -1,0 +1,92 @@
+{
+    "schema": "isr_verifier_registry_v1",
+    "version": "2026-05-29",
+    "owner": "audioengine-isr",
+    "issue": "ISR-GOV-REGISTRY-VERIFIERS",
+    "rationale": "single source of truth for verifier tier wiring and dependency DAG",
+    "expiry": "2099-12-31",
+    "source": "doc/work6/base_plan.md v2.3 section 7",
+    "tiers": {
+        "pr": [
+            "authority-duplication-verifier",
+            "runtime-semantic-schema-verifier",
+            "publication-single-source-verifier",
+            "publication-monotonicity-verifier",
+            "partial-publication-verifier",
+            "observe-path-verifier",
+            "snapshot-semantic-contract-verifier",
+            "legacy-manifest-expiry-verifier"
+        ],
+        "nightly": [
+            "publication-visibility-monotonicity-verifier",
+            "publication-epoch-generation-mapping-verifier",
+            "retire-pressure-verifier",
+            "retire-starvation-verifier",
+            "shadow-compare-contract-verifier",
+            "shadow-compare-cadence-verifier",
+            "retire-lifecycle-state-verifier",
+            "telemetry-storage-contract-verifier",
+            "rollback-hysteresis-verifier",
+            "adaptive-envelope-verifier",
+            "reclaim-convergence-sla-verifier",
+            "complexity-budget-verifier",
+            "feedback-loop-stability-verifier"
+        ],
+        "release": [
+            "semantic-hash-equivalence-verifier",
+            "runtime-topology-authority-verifier",
+            "crossfade-leakage-verifier",
+            "governance-consistency-verifier",
+            "projection-austerity-verifier",
+            "projection-freshness-verifier",
+            "semantic-migration-compatibility-verifier",
+            "runtime-native-layout-verifier",
+            "evidence-hierarchy-verifier"
+        ]
+    },
+    "dependencies": [
+        {
+            "verifier": "publication-monotonicity-verifier",
+            "dependsOn": [
+                "publication-single-source-verifier",
+                "authority-duplication-verifier"
+            ]
+        },
+        {
+            "verifier": "publication-visibility-monotonicity-verifier",
+            "dependsOn": [
+                "publication-monotonicity-verifier",
+                "observe-path-verifier"
+            ]
+        },
+        {
+            "verifier": "publication-epoch-generation-mapping-verifier",
+            "dependsOn": [
+                "publication-monotonicity-verifier",
+                "runtime-semantic-schema-verifier"
+            ]
+        },
+        {
+            "verifier": "shadow-compare-contract-verifier",
+            "dependsOn": [
+                "semantic-hash-equivalence-verifier",
+                "runtime-topology-authority-verifier",
+                "retire-pressure-verifier"
+            ]
+        },
+        {
+            "verifier": "shadow-compare-cadence-verifier",
+            "dependsOn": [
+                "shadow-compare-contract-verifier",
+                "publication-visibility-monotonicity-verifier"
+            ]
+        },
+        {
+            "verifier": "retire-lifecycle-state-verifier",
+            "dependsOn": [
+                "retire-pressure-verifier",
+                "retire-starvation-verifier"
+            ]
+        }
+    ]
+}

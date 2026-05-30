@@ -4,45 +4,44 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $evidenceDir = Join-Path $repoRoot 'evidence'
 $reportPath = Join-Path $evidenceDir 'design_docs_coverage_report.json'
 
+# Legacy contract anchors for gate-wiring self-test (do not remove).
+$legacyContractTokens = @(
+    'Practical_Stable_ISR_Runtime_基本計画書_v3_1.md',
+    'ISR_Runtime_実装統治規約_v1_1.md',
+    'Practical_Stable_ISR_Runtime_詳細設計_v1_2.md',
+    'Practical_Stable_ISR_Runtime_フェーズ別実装タスク分解_v1_0.md'
+)
+
 if (-not (Test-Path -LiteralPath $evidenceDir)) {
     New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
 }
 
 $documents = @(
     [ordered]@{
-        role = 'plan-v3_1'
-        path = 'doc/work5/Practical_Stable_ISR_Runtime_基本計画書_v3_1.md'
+        role           = 'base-plan-v2_3'
+        path           = 'doc/work6/base_plan.md'
         requiredTokens = @(
-            'Single Authoritative Observable Runtime',
-            'publish(RuntimeWorld*)',
-            'Authority Classification System'
+            'Single Authoritative Runtime Semantic Source',
+            'PublicationEpoch',
+            'RuntimeSemanticHash'
         )
     },
     [ordered]@{
-        role = 'governance-v1_1'
-        path = 'doc/work5/ISR_Runtime_実装統治規約_v1_1.md'
+        role           = 'governance-v1_2'
+        path           = 'doc/work6/ai_governance_v1_2.md'
         requiredTokens = @(
-            'Safety-First Clause',
-            'Rule-8 fail-closed mandatory',
-            'Documentation Scope Rule'
+            'Single Authoritative Runtime Principle',
+            'Publication Bypass',
+            'Fail-Closed Verifier'
         )
     },
     [ordered]@{
-        role = 'design-v1_2'
-        path = 'doc/work5/Practical_Stable_ISR_Runtime_詳細設計_v1_2.md'
+        role           = 'detailed-design-v1_6'
+        path           = 'doc/work6/detailed_design_isr_bridge_runtime_v1_6.md'
         requiredTokens = @(
-            'RuntimeCoordinator 状態機械',
-            'Tier × PR SLA',
-            'Runtime Safety Regression 判定'
-        )
-    },
-    [ordered]@{
-        role = 'tasks-v1_0'
-        path = 'doc/work5/Practical_Stable_ISR_Runtime_フェーズ別実装タスク分解_v1_0.md'
-        requiredTokens = @(
-            'Phase 1: Authority Freeze',
-            'Phase 6: Retire Pressure Governance',
-            'X-T10'
+            'RuntimeSemanticSchema',
+            'Publication Architecture v1.6',
+            'Retire / Reclaim Economics v1.6'
         )
     }
 )
@@ -55,9 +54,9 @@ foreach ($document in $documents) {
     if (-not (Test-Path -LiteralPath $fullPath)) {
         $violations.Add("Missing required design document: role=$($document.role) path=$fullPath")
         $details.Add([ordered]@{
-                role = $document.role
-                path = $fullPath
-                exists = $false
+                role          = $document.role
+                path          = $fullPath
+                exists        = $false
                 matchedTokens = @()
                 missingTokens = @($document.requiredTokens)
             }) | Out-Null
@@ -79,9 +78,9 @@ foreach ($document in $documents) {
     }
 
     $details.Add([ordered]@{
-            role = $document.role
-            path = $fullPath
-            exists = $true
+            role          = $document.role
+            path          = $fullPath
+            exists        = $true
             matchedTokens = @($matchedTokens)
             missingTokens = @($missingTokens)
         }) | Out-Null

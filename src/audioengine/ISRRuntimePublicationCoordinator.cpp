@@ -6,6 +6,10 @@ namespace convo::isr {
 RuntimePublicationCoordinator::RuntimePublicationCoordinator()
     : currentWorld_(nullptr)
     , version_(0)
+    , publicationSequenceId_(0)
+    , publicationEpoch_(0)
+    , mappedRuntimeGeneration_(0)
+    , lastObservedVersion_(0)
     , lastRejectCode_(RejectCode::None)
     , retireBacklogCount_(0)
     , publicationBacklogCount_(0)
@@ -54,14 +58,50 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
                                            RuntimeBoundary boundary,
                                            const void* newWorld,
                                            std::uint64_t version) {
+    commit(PublishAuthority::Granted,
+           boundary,
+           newWorld,
+           version,
+           static_cast<PublicationSequenceId>(version),
+           static_cast<PublicationEpoch>(version),
+           version);
+}
+
+void RuntimePublicationCoordinator::commit(PublishAuthority,
+                                           RuntimeBoundary boundary,
+                                           const void* newWorld,
+                                           std::uint64_t version,
+                                           PublicationSequenceId sequenceId,
+                                           PublicationEpoch epoch,
+                                           std::uint64_t mappedGeneration) {
     if (boundary != RuntimeBoundary::NonRTWorld || newWorld == nullptr) {
         convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
         return;
     }
 
     const auto previousVersion = convo::consumeAtomic(version_, std::memory_order_acquire);
+    const auto previousSequenceId = convo::consumeAtomic(publicationSequenceId_, std::memory_order_acquire);
+    const auto previousEpoch = convo::consumeAtomic(publicationEpoch_, std::memory_order_acquire);
+    const auto previousMappedGeneration = convo::consumeAtomic(mappedRuntimeGeneration_, std::memory_order_acquire);
     const auto previousWorld = convo::consumeAtomic(currentWorld_, std::memory_order_acquire);
     if (previousWorld != nullptr && version <= previousVersion) {
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+        return;
+    }
+
+    if (previousWorld != nullptr && sequenceId <= previousSequenceId) {
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+        return;
+    }
+
+    if (previousWorld != nullptr && epoch < previousEpoch) {
+        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
+        return;
+    }
+
+    if (previousWorld != nullptr
+        && epoch > previousEpoch
+        && mappedGeneration < previousMappedGeneration) {
         convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
         return;
     }
@@ -70,6 +110,9 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
     convo::publishAtomic(swapPending_, true, std::memory_order_release);
     convo::publishAtomic(currentWorld_, newWorld, std::memory_order_release);
     convo::publishAtomic(version_, version, std::memory_order_release);
+    convo::publishAtomic(publicationSequenceId_, sequenceId, std::memory_order_release);
+    convo::publishAtomic(publicationEpoch_, epoch, std::memory_order_release);
+    convo::publishAtomic(mappedRuntimeGeneration_, mappedGeneration, std::memory_order_release);
     convo::publishAtomic(swapPending_, false, std::memory_order_release);
     convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
 }
@@ -96,7 +139,17 @@ const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
 }
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
-    return convo::consumeAtomic(version_, std::memory_order_acquire);
+    const auto observedVersion = convo::consumeAtomic(version_, std::memory_order_acquire);
+    auto lastObserved = convo::consumeAtomic(lastObservedVersion_, std::memory_order_acquire);
+    while (observedVersion > lastObserved
+        && !convo::compareExchangeAtomic(lastObservedVersion_,
+                                         lastObserved,
+                                         observedVersion,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire)) {
+    }
+
+    return (observedVersion >= lastObserved) ? observedVersion : lastObserved;
 }
 
 void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {

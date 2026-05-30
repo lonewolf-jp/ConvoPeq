@@ -10,6 +10,7 @@
 #include "ISRRetire.h"
 #include "ISRHB.h"
 #include "ISRShutdown.h"
+#include "ISRRuntimeSemanticSchema.h"
 
 namespace convo::isr {
 
@@ -39,6 +40,13 @@ public:
                          const TieredPayloadDescriptor& descriptor) noexcept;
     const char* lastRejectReason() const noexcept;
     void commit(PublishAuthority, RuntimeBoundary boundary, const void* newWorld, std::uint64_t version);
+    void commit(PublishAuthority,
+                RuntimeBoundary boundary,
+                const void* newWorld,
+                std::uint64_t version,
+                PublicationSequenceId sequenceId,
+                PublicationEpoch epoch,
+                std::uint64_t mappedGeneration);
     void retire(RetireAuthority, RuntimeBoundary boundary, const void* oldWorld);
     const void* getCurrent() const noexcept;
     std::uint64_t getVersion() const noexcept;
@@ -66,6 +74,10 @@ private:
 
     std::atomic<const void*> currentWorld_;
     std::atomic<std::uint64_t> version_;
+    std::atomic<PublicationSequenceId> publicationSequenceId_;
+    std::atomic<PublicationEpoch> publicationEpoch_;
+    std::atomic<std::uint64_t> mappedRuntimeGeneration_;
+    mutable std::atomic<std::uint64_t> lastObservedVersion_;
     std::atomic<RejectCode> lastRejectCode_;
     std::atomic<std::uint64_t> retireBacklogCount_;
     std::atomic<std::uint64_t> publicationBacklogCount_;

@@ -26,6 +26,15 @@ struct RollbackFlagDescriptor {
     bool retirePathOnlyEnabled{true};
 };
 
+enum class RetireLifecycleState : std::uint32_t {
+    Visible = 0,
+    CompareEligible,
+    TelemetryRetained,
+    ReplayRetainedOptional,
+    ReclaimEligible,
+    Reclaimed
+};
+
 class RetireRuntimeEx {
 public:
     RetireRuntimeEx();
@@ -47,6 +56,7 @@ public:
     void requestRollback() noexcept;
     [[nodiscard]] EpochStrategyDescriptor describeEpochStrategy() const noexcept;
     [[nodiscard]] std::uint64_t getQuarantineResidentCount() const noexcept;
+    [[nodiscard]] RetireLifecycleState lifecycleStateOf(std::uint32_t slot) const noexcept;
 
     [[nodiscard]] RetireLane laneOf(std::uint32_t slot) const noexcept;
     void emitRetireTimeline(const std::filesystem::path& outputPath) const;
@@ -54,7 +64,9 @@ public:
 private:
     static constexpr std::size_t kMaxSlots = 256;
     std::array<std::atomic<uint32_t>, kMaxSlots> laneBySlot_{};
+    std::array<std::atomic<std::uint32_t>, kMaxSlots> lifecycleStateBySlot_{};
     std::array<std::atomic<std::uint64_t>, 5> laneCounters_{};
+    std::array<std::atomic<std::uint64_t>, 6> lifecycleCounters_{};
     std::atomic<std::uint64_t> totalTransitions_{0};
     std::atomic<std::uint64_t> quarantineResidentCount_{0};
     std::atomic<std::uint32_t> epochModeRaw_{static_cast<std::uint32_t>(EpochMode::Shared)};

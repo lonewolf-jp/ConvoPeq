@@ -1,1 +1,13 @@
-{"runId":"5a501bab8f4545a9ae13e1bab22f4403","sh3_pendingRetire":0,"sh6_postStopEnqueueCount":0,"sh5_lateCallbackCount":0,"sh1_callbackCount":0,"schema":"shutdown_trace_v1","phase":0,"sh2_activeCrossfade":0,"verified":true,"generatedAtNs":1779988015039000000,"sh4_observerCount":0,"provenance":"seed"}
+{
+  "schema": "shutdown_trace_v1",
+  "phase": 6,
+  "phaseName": "ShutdownComplete",
+  "transitionViolations": 0,
+  "sh1_callbackCount": 0,
+  "sh2_activeCrossfade": 0,
+  "sh3_pendingRetire": 0,
+  "sh4_observerCount": 0,
+  "sh5_lateCallbackCount": 0,
+  "sh6_postStopEnqueueCount": 0,
+  "verified": true
+}

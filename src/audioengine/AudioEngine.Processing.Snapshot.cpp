@@ -26,8 +26,8 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
     const auto* runtimeGraph = runtimeGraphHint;
     if (runtimeGraph == nullptr)
     {
-        const auto runtimeReadView = readAudioRuntimeView();
-        runtimeGraph = getRuntimeGraph(runtimeReadView);
+        bufferToFill.clearActiveBufferRegion();
+        return;
     }
     DSPCore* dsp = isFadingTarget
         ? resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph)
