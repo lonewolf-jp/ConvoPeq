@@ -143,7 +143,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
-    DSPCore* fading = runtimePublishView.transition.active
+    DSPCore* fading = runtimeWorld->topology.hasFadingRuntime
         ? static_cast<DSPCore*>(runtimePublishView.transition.next)
         : nullptr;
     const auto& preparedCrossfade = authority.preparedCrossfade;

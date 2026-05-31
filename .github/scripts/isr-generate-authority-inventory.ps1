@@ -18,7 +18,7 @@ $targetFiles = @(
     'src\audioengine\RuntimeTransition.h'
 )
 
-$authorityPattern = 'AuthorityClass::(?<class>Authoritative|Derived|Diagnostic|ExecutorLocal|LegacyTemporary)'
+$authorityPattern = 'AuthorityClass::(?<class>Authoritative|Derived|Diagnostic|ExecutorLocal)'
 $declarationPattern = '^(?<indent>\s*)(?<type>[\w:\<\>\*\&\s]+?)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]+\])?\s*(?:=[^;]*)?;\s*$'
 $structPattern = '^\s*struct\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\b'
 

@@ -186,7 +186,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
         DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 
-        DSPCore* fading = runtimePublishView.transition.active
+        DSPCore* fading = runtimeWorld->topology.hasFadingRuntime
             ? static_cast<DSPCore*>(runtimePublishView.transition.next)
             : nullptr;
         const auto& preparedCrossfade = authority.preparedCrossfade;

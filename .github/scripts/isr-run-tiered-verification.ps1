@@ -193,6 +193,7 @@ $smokeScripts = @(
     '.github/scripts/isr-verify-runtime-coordinator-state-machine.ps1',
     '.github/scripts/isr-verify-v4-dsp-handle-policy.ps1',
     '.github/scripts/isr-verify-v5-retire-authority-lane.ps1',
+    '.github/scripts/isr-verify-c1-c15-minimal.ps1',
     '.github/scripts/isr-verify-v6-domain-f-ordering.ps1',
     '.github/scripts/isr-verify-v7-rt-nonrt-retire-bridge.ps1',
     '.github/scripts/isr-verify-v8-shared-split-readiness.ps1',

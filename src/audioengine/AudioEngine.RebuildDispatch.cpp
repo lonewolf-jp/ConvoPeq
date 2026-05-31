@@ -92,6 +92,12 @@ convo::RuntimeBuildSnapshot sealRuntimeBuildSnapshot(convo::RuntimeBuildSnapshot
 }
 }
 
+void AudioEngine::applyCurrentConvolverSnapshotToRuntime(DSPCore& runtime) const
+{
+    const auto snapshot = uiConvolverProcessor.captureBuildSnapshot();
+    runtime.convolverRt().applyBuildSnapshot(snapshot);
+}
+
 
 void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
                                       RebuildTelemetryReason reason,
@@ -318,7 +324,7 @@ void AudioEngine::handleAsyncUpdate()
     if (isShutdownInProgress())
         return;
 
-    executeCommit();
+    drainPublicationIntentsForRuntimeCommit();
 
     // 非MT起点の Structural rebuild 要求を消費して実行する
     if (clearRebuildReason(RebuildReason::StructuralFromNonMT))
@@ -701,8 +707,7 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
 
             // 1. Prepare (メモリ確保)
-            convo::BuildResult buildResult = runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput,
-                                                                  task.convolverBuildSnapshot);
+            convo::BuildResult buildResult = runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput);
 
             if (buildResult.runtime == nullptr)
             {
@@ -761,7 +766,7 @@ void AudioEngine::rebuildThreadLoop()
             // Release ownership from guard, pass to commitNewDSP
             DSPCore* dspToCommit = dspGuard.ptr;
             dspGuard.ptr = nullptr;
-            prepareCommit(dspToCommit, task.generation);
+            enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation);
         }
         catch (const std::exception& e)
         {

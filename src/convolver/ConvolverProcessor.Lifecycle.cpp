@@ -33,7 +33,7 @@ void ConvolverProcessor::updateIRState(const juce::AudioBuffer<double>& newIR, d
     newState->ir = newState->irOwner.get();
     newState->sampleRate = newSR;
     if (auto* provider = getRcuProvider(); provider != nullptr)
-        newState->generation = provider->publishRcuEpoch();
+        newState->generation = provider->snapshotRcuEpoch();
     else
         newState->generation = 1;
     std::atomic_thread_fence(std::memory_order_release); // release: 直後の currentIRState 交換公開前に newState 初期化を順序化
@@ -239,7 +239,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
                                   &tailSpec, this))
                 {
                     newConv = newConvHolder.release();
-                    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
+                    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->snapshotRcuEpoch() : 1;
                     auto* oldConv = exchangeActiveEngine(newConv, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で新 engine 公開
                     if (oldConv)
                         retireStereoConvolver(oldConv, retireEpoch);
@@ -388,7 +388,7 @@ void ConvolverProcessor::releaseResources()
     }
 
     // Release active convolution engine
-    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
+    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->snapshotRcuEpoch() : 1;
     auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で null 公開
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);

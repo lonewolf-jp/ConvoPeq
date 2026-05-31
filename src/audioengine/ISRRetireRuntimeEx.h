@@ -1,5 +1,6 @@
 #pragma once
 #include "ISRRetireLane.h"
+#include "core/RetireBoundaryTelemetry.h"
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -87,6 +88,7 @@ public:
     }
 
     [[nodiscard]] RetireLane laneOf(std::uint32_t slot) const noexcept;
+    [[nodiscard]] convo::RetireBoundaryTelemetry snapshotBoundaryTelemetry() const noexcept;
     void emitRetireTimeline(const std::filesystem::path& outputPath) const;
 
 private:

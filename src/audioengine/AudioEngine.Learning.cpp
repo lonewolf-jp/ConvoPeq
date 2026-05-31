@@ -452,7 +452,7 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRate(double sampleRate, const 
     for (int i = 0; i < limit; ++i)
         stagedCoefficients[i] = coeffs[i];
 
-    publishCoeffsToBank(bankIndex, stagedCoefficients);
+    storeLearnedCoeffsToBank(bankIndex, stagedCoefficients);
 }
 
 void AudioEngine::getAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleRate, int bitDepth, double* outCoeffs, int maxCoefficients) const noexcept
@@ -507,7 +507,7 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
     for (int i = 0; i < limit; ++i)
         stagedCoefficients[i] = coeffs[i];
 
-    publishCoeffsToBank(bankIndex, stagedCoefficients);
+    storeLearnedCoeffsToBank(bankIndex, stagedCoefficients);
 }
 
 void AudioEngine::setAdaptiveAutosaveCallback(std::function<void()> callback)
@@ -528,17 +528,17 @@ void AudioEngine::requestAdaptiveAutosave()
         callbackCopy();
 }
 
-void AudioEngine::publishCoeffs(const double* coeffs)
+void AudioEngine::storeLearnedCoeffs(const double* coeffs)
 {
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/setSampleRate publishAtomic release と HB
     const int bd  = convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire); // acquire: setDitherBitDepth publishAtomic release と HB
     const auto mode = convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire); // acquire: setNoiseShaperLearningMode publishAtomic release と HB
     const int bank = getAdaptiveCoeffBankIndex(sr, bd, mode);
 
-    publishCoeffsToBank(bank, coeffs);
+    storeLearnedCoeffsToBank(bank, coeffs);
 }
 
-void AudioEngine::publishCoeffsToBank(int bankIndex, const double* coeffs)
+void AudioEngine::storeLearnedCoeffsToBank(int bankIndex, const double* coeffs)
 {
     if (coeffs == nullptr)
         return;

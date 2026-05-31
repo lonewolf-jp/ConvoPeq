@@ -300,6 +300,16 @@ RetireLane RetireRuntimeEx::laneOf(std::uint32_t slot) const noexcept {
     return fromRaw(convo::consumeAtomic(laneBySlot_[slot], std::memory_order_acquire));
 }
 
+convo::RetireBoundaryTelemetry RetireRuntimeEx::snapshotBoundaryTelemetry() const noexcept
+{
+    return convo::RetireBoundaryTelemetry {
+        .pendingBacklog = convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Coordination)], std::memory_order_acquire),
+        .quarantineResidents = convo::consumeAtomic(quarantineResidentCount_, std::memory_order_acquire),
+        .totalTransitions = convo::consumeAtomic(totalTransitions_, std::memory_order_acquire),
+        .boundaryActive = true
+    };
+}
+
 void RetireRuntimeEx::emitRetireTimeline(const std::filesystem::path& outputPath) const {
     std::error_code ec;
     std::filesystem::create_directories(outputPath.parent_path(), ec);

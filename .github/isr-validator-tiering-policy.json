@@ -18,5 +18,12 @@
     "slaHours": {
         "hbViolation": 24,
         "payloadMismatch": 72
+    },
+    "warningTierAdoption": {
+        "owner": "@lonewolf-jp",
+        "issue": "bridge-runtime-warning-tier-adoption",
+        "adoptionDeadline": "2026-06-30",
+        "scope": "Warning-class verifier onboarding into CI schedule",
+        "targetTier": "standard"
     }
 }

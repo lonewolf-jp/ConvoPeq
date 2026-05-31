@@ -6,14 +6,13 @@
 #include "core/EpochDomain.h"
 #include "AlignedAllocation.h"
 #include "ProgressiveUpgradeThread.h"
-#include "PreparedIRState.h"
 
 #include "audioengine/AtomicAccess.h"
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE)
 
 // ────────────────────────────────────────────────────────────────
-// Load Pipeline (loadImpulseResponse, applyPreparedIRState, finalize)
+// Load Pipeline (loadImpulseResponse, applyComputedIR, finalize)
 // ────────────────────────────────────────────────────────────────
 
 bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool optimizeForRealTime)
@@ -205,8 +204,8 @@ void ConvolverProcessor::clearCache()
 
 [[nodiscard]] bool ConvolverProcessor::isCacheEntrySafeToDelete(uint64_t cacheKey, int fftSize) const
 {
-    const uint64_t activeKey = convo::consumeAtomic(activeCacheKey, std::memory_order_acquire); // acquire: applyPreparedIRState の publishAtomic release と HB
-    const int activeFFT = convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire);   // acquire: applyPreparedIRState の publishAtomic release と HB
+    const uint64_t activeKey = convo::consumeAtomic(activeCacheKey, std::memory_order_acquire); // acquire: applyComputedIR の publishAtomic release と HB
+    const int activeFFT = convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire);   // acquire: applyComputedIR の publishAtomic release と HB
 
     if (cacheKey == activeKey && fftSize == activeFFT)
         return false;
@@ -262,7 +261,7 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
         {
             directTarget->originalFileName = irFile.getFileNameWithoutExtension();
             appliedFft = targetFFT;
-            applyPreparedIRState(std::move(directTarget));
+            applyComputedIR(std::move(directTarget));
         }
     }
 
@@ -275,7 +274,7 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
         {
             cachedLow->originalFileName = irFile.getFileNameWithoutExtension();
             appliedFft = lowResFFT;
-            applyPreparedIRState(std::move(cachedLow));
+            applyComputedIR(std::move(cachedLow));
         }
         else
         {
@@ -298,7 +297,7 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
                 cacheManager->save(lowResKey, lowResFFT, *prepared);
                 cacheManager->evictLRU(cacheLimit);
                 appliedFft = lowResFFT;
-                applyPreparedIRState(std::move(prepared));
+                applyComputedIR(std::move(prepared));
             }
         }
     }
@@ -309,7 +308,7 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
     }
 }
 
-void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> prepared)
+void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> prepared)
 {
     if (!prepared)
         return;
@@ -352,7 +351,7 @@ void ConvolverProcessor::applyPreparedIRState(std::unique_ptr<PreparedIRState> p
             cblas_dscal(static_cast<MKL_INT>(numDoubles), sf, prepared->partitionData, 1);
         }
 
-        juce::Logger::writeToLog("applyPreparedIRState: applied scaleFactor=" + juce::String(sf)
+        juce::Logger::writeToLog("applyComputedIR: applied scaleFactor=" + juce::String(sf)
             + " to timeDomainIR and partitionData");
     }
 

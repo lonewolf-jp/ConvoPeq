@@ -1359,7 +1359,7 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
         if (auto* self = weakSelf.get())
         {
             self->engine.requestSnapshotForNoiseShaper();
-            self->engine.publishCoeffs(mappedCoeffs.data());
+            self->engine.storeLearnedCoeffs(mappedCoeffs.data());
             self->engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
             self->engine.requestAdaptiveAutosave();
         }

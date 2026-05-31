@@ -44,9 +44,8 @@
 // ── Phase 0: Epoch-based RCU 基盤ヘッダー ──
 #include "GenerationManager.h"
 #include "ConvolverState.h"
-#include "SafeStateSwapper.h"
 #include "DeferredFreeThread.h"
-#include "PreparedIRState.h"
+#include "core/ConvolverRuntimeCompatTypes.h"
 #include "DeferredDeletionQueue.h"
 #include "ConvolverRuntime.h"
 #include "core/EpochDomain.h"
@@ -64,7 +63,7 @@ class ConvolverProcessor : public juce::ChangeBroadcaster,
 {
 public:
     // BuildSnapshot: 同期/シリアライズ/ハッシュ用の輸送スナップショット。
-    // authoritative source-of-truth は PendingParams (pendingOverride)。
+    // authoritative source-of-truth は pendingOverride store。
     struct BuildSnapshot
     {
         // ---- Structural hash 対象（rebuild / crossfade 要否に影響）----
@@ -227,9 +226,9 @@ public:
     //----------------------------------------------------------
     bool loadImpulseResponse(const juce::File& irFile, bool optimizeForRealTime = false);
     void loadIR(const juce::File& irFile);
-    void applyPreparedIRState(std::unique_ptr<PreparedIRState> prepared);
-    // acquire: applyPreparedIRState の release と HB し、IR 適用時刻を取得。
-    [[nodiscard]] int64_t getLastPreparedIRApplyTicks() const noexcept { return convo::consumeAtomic(lastPreparedIRApplyTicks, std::memory_order_acquire); } // acquire: applyPreparedIRState の release と HB
+    void applyComputedIR(std::unique_ptr<ConvolverIRPayload> payload);
+    // acquire: applyComputedIR の release と HB し、IR 適用時刻を取得。
+    [[nodiscard]] int64_t getLastPreparedIRApplyTicks() const noexcept { return convo::consumeAtomic(lastPreparedIRApplyTicks, std::memory_order_acquire); } // acquire: applyComputedIR の release と HB
     void stopUpgradeThread();
     void startProgressiveUpgrade(const juce::File& file,
                                  double sampleRate,
@@ -379,7 +378,7 @@ public:
     // acquire: LoaderThread の release と HB し、最終化フラグを観測。
     [[nodiscard]] bool isIRFinalized() const noexcept { return convo::consumeAtomic(irFinalized, std::memory_order_acquire); } // acquire: LoaderThread の release と HB
     [[nodiscard]] juce::String getIRName() const { return irName; }
-    // acquire: LoaderThread/applyPreparedIRState の release と HB し、IR長を取得。
+    // acquire: LoaderThread/applyComputedIR の release と HB し、IR長を取得。
     [[nodiscard]] int getIRLength() const { return convo::consumeAtomic(irLength, std::memory_order_acquire); } // acquire: apply/load 側 release と HB
     [[nodiscard]] juce::String getLastError() const { return lastError; }
     // acquire: setLoadingProgress の release と HB し、ロード進捗値を取得。
@@ -612,10 +611,10 @@ private:
                                   double loadedSR);
     void applyNewStateNotifyStep();
 
-    // H3保守性: BuildSnapshot と PendingParams の相互マッピングを一元化
+    // H3保守性: BuildSnapshot と pendingOverride store の相互マッピングを一元化
     // 呼び出し側で pendingOverrideLock を保持している前提。
     // [更新ガイド]
-    // - BuildSnapshot または PendingParams に項目を追加/削除したら、
+    // - BuildSnapshot または pendingOverride store に項目を追加/削除したら、
     //   2関数を同時に更新すること。
     // - 併せて captureBuildSnapshot() の fingerprint 対象、
     //   getStructuralHash() の対象可否も必ず見直すこと。
@@ -852,7 +851,7 @@ private:
     // 【False Sharing 防止】頻繁な UI 更新変数を独立キャッシュラインへ配置
     // H3: bypassed / mixTarget shadow atomics 廃止済み。pendingOverride が唯一の Source of Truth。
 
-    convo::SafeStateSwapper rcuSwapper;
+    convo::RuntimeStateSwapper rcuSwapper;
     convo::LinearRamp mixSmoother; // オーディオスレッドでの平滑化用
 
     struct RuntimeProcessSnapshot
@@ -866,7 +865,7 @@ private:
     // H3: UI/Message Thread 側の authoritative parameter store。
     // BuildSnapshot はシリアライズ/輸送用として維持し、
     // pending state はこの専用構造体で責務分離する。
-    struct PendingParams
+    struct PendingOverrideStore
     {
         float mix = 1.0f;
         bool bypassed = false;
@@ -979,7 +978,7 @@ private:
     // [H3] Pending parameter override for snapshot-based setter transition
     // Setters write parameters here instead of directly publishing atomics.
     // This pending override is captured by rebuild requests.
-    PendingParams pendingOverride;
+    PendingOverrideStore pendingOverride;
     juce::CriticalSection pendingOverrideLock;
 
     //----------------------------------------------------------

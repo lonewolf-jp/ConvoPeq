@@ -21,6 +21,7 @@
 
 #include "SafeStateSwapper.h"
 #include "core/ThreadAffinityManager.h"
+#include "core/RetireBoundaryTelemetry.h"
 
 #include <thread>
 #include <atomic>
@@ -85,6 +86,16 @@ public:
             thread.join();
 
         drainAllRetired();
+    }
+
+    [[nodiscard]] convo::RetireBoundaryTelemetry snapshotBoundaryTelemetry() const noexcept
+    {
+        return convo::RetireBoundaryTelemetry {
+            .pendingBacklog = static_cast<std::uint64_t>(swapperRef.getPendingRetiredCount()),
+            .quarantineResidents = 0,
+            .totalTransitions = 0,
+            .boundaryActive = convo::consumeAtomic(running, std::memory_order_acquire)
+        };
     }
 
 private:

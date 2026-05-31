@@ -33,7 +33,7 @@ std::uint64_t computeBuildSnapshotFingerprint(const ConvolverProcessor::BuildSna
     //   BuildSnapshot の同一性確認/診断向けに、同期対象メタデータも含めて広くハッシュする。
     std::uint64_t hash = 0x9e3779b97f4a7c15ULL;
 
-    // ---- PendingParams 由来の同期対象パラメータ ----
+    // ---- コンボルバー同期対象パラメータ ----
     hashCombineUInt64(hash, static_cast<std::uint64_t>(floatBits(snapshot.mix)));
     hashCombineUInt64(hash, snapshot.bypassed ? 1ULL : 0ULL);
     hashCombineUInt64(hash, static_cast<std::uint64_t>(snapshot.phaseMode));
@@ -119,7 +119,7 @@ void applySmoothing(const float* magnitudes, float* smoothed, int numBins)
 void ConvolverProcessor::copyPendingToSnapshotUnlocked(BuildSnapshot& snapshot) const noexcept
 {
     // [更新ガイド]
-    // - ここでの代入順は BuildSnapshot / PendingParams の定義順に揃える。
+    // - ここでの代入順は BuildSnapshot の定義順に揃える。
     // - 項目追加時は copySnapshotToPendingUnlocked() も同時更新する。
     // - fingerprint / structural hash の対象可否を同時に見直す。
     snapshot.mix = pendingOverride.mix;
@@ -416,7 +416,7 @@ void ConvolverProcessor::syncStateFrom(const ConvolverProcessor& other)
     convo::publishAtomic(irLength, convo::consumeAtomic(other.irLength, std::memory_order_acquire), std::memory_order_release); // acquire: other.captureBuildSnapshot の publishAtomic release と HB; release: captureBuildSnapshot の acquire と HB
     convo::publishAtomic(currentIRScale, convo::consumeAtomic(other.currentIRScale, std::memory_order_acquire), std::memory_order_release); // acquire: other.applyBuildSnapshot の publishAtomic release と HB; release: captureBuildSnapshot の acquire と HB
 
-    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
+    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->snapshotRcuEpoch() : 1;
     auto* oldConv = exchangeActiveEngine(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で null 公開
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
@@ -438,7 +438,7 @@ void ConvolverProcessor::shareConvolutionEngineFrom(const ConvolverProcessor& ot
     if (clonedConv == nullptr)
         return;
 
-    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->publishRcuEpoch() : 1;
+    const uint64_t retireEpoch = (getRcuProvider() != nullptr) ? getRcuProvider()->snapshotRcuEpoch() : 1;
     auto* oldConv = exchangeActiveEngine(clonedConv, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で新 engine 公開
     if (oldConv)
         retireStereoConvolver(oldConv, retireEpoch);
@@ -854,8 +854,8 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
         hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
     };
 
-    hashCombine(convo::consumeAtomic(activeCacheKey, std::memory_order_acquire)); // acquire: applyPreparedIRState/applyNewState の publishAtomic release と HB
-    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(irLength, std::memory_order_acquire))); // acquire: applyBuildSnapshot/applyPreparedIRState の publishAtomic release と HB
+    hashCombine(convo::consumeAtomic(activeCacheKey, std::memory_order_acquire)); // acquire: applyComputedIR/applyNewState の publishAtomic release と HB
+    hashCombine(static_cast<uint64_t>(convo::consumeAtomic(irLength, std::memory_order_acquire))); // acquire: applyBuildSnapshot/applyComputedIR の publishAtomic release と HB
     hashCombine(static_cast<uint64_t>(juce::jlimit(static_cast<int>(PhaseMode::AsIs),
                                                    static_cast<int>(PhaseMode::Minimum),
                                                    snapshot.phaseMode)));
@@ -882,12 +882,12 @@ void ConvolverProcessor::setNUCFilterModes(convo::HCMode hcMode, convo::LCMode l
 
 [[nodiscard]] uint64_t ConvolverProcessor::getActiveCacheKey() const noexcept
 {
-    return convo::consumeAtomic(activeCacheKey, std::memory_order_acquire); // acquire: applyPreparedIRState/applyNewState の publishAtomic release と HB
+    return convo::consumeAtomic(activeCacheKey, std::memory_order_acquire); // acquire: applyComputedIR/applyNewState の publishAtomic release と HB
 }
 
 [[nodiscard]] int ConvolverProcessor::getActiveCacheFFTSize() const noexcept
 {
-    return convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire); // acquire: applyPreparedIRState/applyNewState の publishAtomic release と HB
+    return convo::consumeAtomic(activeCacheFFTSize, std::memory_order_acquire); // acquire: applyComputedIR/applyNewState の publishAtomic release と HB
 }
 
 [[nodiscard]] int ConvolverProcessor::getNUCHCMode() const noexcept

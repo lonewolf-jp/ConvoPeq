@@ -41,13 +41,21 @@ def main(db_path: str) -> int:
         "(lower(file_path) like '%/storage/codeql/%' "
         "or lower(file_path) like '%\\storage\\codeql\\%')"
     )
+    where_storage = (
+        "(lower(file_path) like '%/storage/%' "
+        "or lower(file_path) like '%\\storage\\%')"
+    )
+    where_musubi = (
+        "(lower(file_path) like '%/.musubi/%' "
+        "or lower(file_path) like '%\\.musubi\\%')"
+    )
     where_vendor = (
         "(lower(file_path) like '%/juce/%' "
         "or lower(file_path) like '%\\juce\\%' "
         "or lower(file_path) like '%/r8brain-free-src/%' "
         "or lower(file_path) like '%\\r8brain-free-src\\%')"
     )
-    where_noise = f"({where_venv} or {where_codeql} or {where_vendor})"
+    where_noise = f"({where_venv} or {where_codeql} or {where_storage} or {where_musubi} or {where_vendor})"
 
     where_venv_files = (
         "(lower(path) like '%/.venv-codegraph/%' "
@@ -59,13 +67,21 @@ def main(db_path: str) -> int:
         "(lower(path) like '%/storage/codeql/%' "
         "or lower(path) like '%\\storage\\codeql\\%')"
     )
+    where_storage_files = (
+        "(lower(path) like '%/storage/%' "
+        "or lower(path) like '%\\storage\\%')"
+    )
+    where_musubi_files = (
+        "(lower(path) like '%/.musubi/%' "
+        "or lower(path) like '%\\.musubi\\%')"
+    )
     where_vendor_files = (
         "(lower(path) like '%/juce/%' "
         "or lower(path) like '%\\juce\\%' "
         "or lower(path) like '%/r8brain-free-src/%' "
         "or lower(path) like '%\\r8brain-free-src\\%')"
     )
-    where_noise_files = f"({where_venv_files} or {where_codeql_files} or {where_vendor_files})"
+    where_noise_files = f"({where_venv_files} or {where_codeql_files} or {where_storage_files} or {where_musubi_files} or {where_vendor_files})"
 
     total_before = cur.execute("select count(*) from entities").fetchone()[0]
     noise_before = cur.execute(f"select count(*) from entities where {where_noise}").fetchone()[0]

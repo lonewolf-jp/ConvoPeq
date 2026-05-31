@@ -117,12 +117,11 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         if (hasAnyRuntime)
         {
             const auto ts = runtimeReadView.runtimePublish.transition;
-            makeRuntimePublicationCoordinator()
-                .publishState(currentForPublish,
-                              fadingForPublish,
-                              ts.policy,
-                              ts.fadeTimeSec,
-                              ts.active);
+            publishRuntimeStateNonRt(currentForPublish,
+                                     fadingForPublish,
+                                     ts.policy,
+                                     ts.fadeTimeSec,
+                                     ts.active);
         }
     }
     selectAdaptiveCoeffBankForCurrentSettings();
@@ -212,12 +211,11 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         setActiveRuntimeDSP(placeholderDSP.release());
         convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
         convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
-        makeRuntimePublicationCoordinator()
-            .publishState(getActiveRuntimeDSP(),
-                          nullptr,
-                          convo::TransitionPolicy::HardReset,
-                          0.0,
-                          false);
+        publishRuntimeStateNonRt(getActiveRuntimeDSP(),
+                                 nullptr,
+                                 convo::TransitionPolicy::HardReset,
+                                 0.0,
+                                 false);
     }
 
     // --- DSP再ビルド判定・同期 ---

@@ -176,6 +176,13 @@ public:
         }
     }
 
+    [[nodiscard]] uint32_t sizeApprox() const noexcept
+    {
+        const uint32_t enq = convo::consumeAtomic(enqueuePos, std::memory_order_acquire);
+        const uint32_t deq = convo::consumeAtomic(dequeuePos, std::memory_order_acquire);
+        return static_cast<uint32_t>(enq - deq);
+    }
+
 private:
     static inline bool isOlder(uint64_t a, uint64_t b) noexcept
     {

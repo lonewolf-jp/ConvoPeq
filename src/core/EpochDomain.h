@@ -203,6 +203,11 @@ public:
         deferredDeletionQueue.drainAllUnsafe();
     }
 
+    [[nodiscard]] uint32_t pendingRetireCount() const noexcept
+    {
+        return deferredDeletionQueue.sizeApprox();
+    }
+
     static bool isOlder(uint64_t a, uint64_t b) noexcept
     {
         return static_cast<int64_t>(a - b) < 0;

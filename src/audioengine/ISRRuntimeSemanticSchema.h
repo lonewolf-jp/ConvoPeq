@@ -65,8 +65,7 @@ enum class RuntimeAuthorityClass : std::uint8_t
     Authoritative = 0,
     Derived,
     Diagnostic,
-    ExecutorLocal,
-    LegacyTemporary
+    ExecutorLocal
 };
 
 struct RuntimeAuthorityInventoryEntry
@@ -223,7 +222,7 @@ struct PublicationSemantic
     static constexpr std::array<RuntimeFieldDescriptor, 4> kFieldDescriptors {{
         {"sequenceId", SemanticCategory::Authority, OwnershipClass::PublicationSemantic, MutabilityClass::MutablePrePublish, VisibilityClass::PublicationBoundary, LifetimeClass::RuntimeWorldLifetime},
         {"epoch", SemanticCategory::Authority, OwnershipClass::PublicationSemantic, MutabilityClass::MutablePrePublish, VisibilityClass::PublicationBoundary, LifetimeClass::RuntimeWorldLifetime},
-        {"mappedRuntimeGeneration", SemanticCategory::Authority, OwnershipClass::PublicationSemantic, MutabilityClass::MutablePrePublish, VisibilityClass::PublicationBoundary, LifetimeClass::RuntimeWorldLifetime},
+        {"mappedRuntimeGeneration", SemanticCategory::Derived, OwnershipClass::PublicationSemantic, MutabilityClass::MutablePrePublish, VisibilityClass::PublicationBoundary, LifetimeClass::RuntimeWorldLifetime},
         {"previousSequenceId", SemanticCategory::Authority, OwnershipClass::PublicationSemantic, MutabilityClass::MutablePrePublish, VisibilityClass::PublicationBoundary, LifetimeClass::RuntimeWorldLifetime}
     }};
 

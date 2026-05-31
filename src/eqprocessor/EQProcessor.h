@@ -409,20 +409,9 @@ private:
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
     convo::RCUReader rcuReader { m_epochDomain };
 
-    struct DeferredDeleteFallbackEntry
-    {
-        void* ptr = nullptr;
-        void (*deleter)(void*) = nullptr;
-        uint64_t epoch = 0;
-    };
-
-    std::mutex deferredDeleteFallbackMutex;
-    std::vector<DeferredDeleteFallbackEntry> deferredDeleteFallbackQueue;
-
     bool enqueueDeferredDeleteWithFallback(void* ptr,
                                            void (*deleter)(void*),
                                            uint64_t epoch) noexcept;
-    void drainDeferredDeleteFallbackQueue() noexcept;
     void retireEQStateDeferred(EQState* state) noexcept;
     void retireBandNodeDeferred(BandNode* node) noexcept;
 

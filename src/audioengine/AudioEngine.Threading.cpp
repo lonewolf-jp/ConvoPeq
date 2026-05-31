@@ -26,12 +26,12 @@ void AudioEngine::destroyDSPCoreNode(void* p) noexcept
     convo::aligned_free(core);
 }
 
-[[nodiscard]] uint64_t AudioEngine::publishRcuEpoch() noexcept
+[[nodiscard]] uint64_t AudioEngine::snapshotRcuEpoch() noexcept
 {
     return currentRetireEpoch();
 }
 
-[[nodiscard]] uint64_t AudioEngine::publishRetireEpoch() noexcept
+[[nodiscard]] uint64_t AudioEngine::markRetireEpoch() noexcept
 {
     return m_epochDomain.publish();
 }
@@ -79,64 +79,13 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
     const double startMs = juce::Time::getMillisecondCounterHiRes();
 
-    auto flushAudioThreadRetireOverflow = [this]() noexcept
-    {
-        auto* overflow = convo::exchangeAtomic(audioThreadRetireOverflowPtr, nullptr, std::memory_order_acq_rel);
-        if (overflow == nullptr)
-            return;
-
-        const uint64_t overflowEpoch = convo::exchangeAtomic(rtLocalState_.audioThreadRetireOverflowEpoch, 0, std::memory_order_acq_rel);
-        const uint64_t epoch = overflowEpoch != 0 ? overflowEpoch : currentRetireEpoch();
-        if (!enqueueRetireEpochBounded(
-                overflow,
-                &AudioEngine::destroyDSPCoreNode,
-                epoch))
-        {
-            std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-            deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry {
-                overflow,
-                &AudioEngine::destroyDSPCoreNode,
-                epoch
-            });
-        }
-    };
-
-    auto flushDeferredDeleteFallbackQueue = [this]() noexcept
-    {
-        std::vector<DeferredDeleteFallbackEntry> pending;
-        {
-            std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-            if (deferredDeleteFallbackQueue.empty())
-                return;
-            pending.swap(deferredDeleteFallbackQueue);
-        }
-
-        for (auto& entry : pending)
-        {
-            const uint64_t epoch = entry.epoch != 0 ? entry.epoch : currentRetireEpoch();
-            if (!enqueueRetireEpochBounded(entry.ptr, entry.deleter, epoch))
-            {
-                std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-                deferredDeleteFallbackQueue.push_back(entry);
-            }
-        }
-    };
-
-    flushAudioThreadRetireOverflow();
-    flushDeferredDeleteFallbackQueue();
     runtimePublicationBridge_.setReclaimInFlightCount(1);
     m_epochDomain.reclaimRetired();
     m_coordinator.reclaim(m_epochDomain);
     runtimePublicationBridge_.setReclaimInFlightCount(0);
 
-    const auto fallbackDepth = [this]() noexcept -> std::uint64_t
-    {
-        std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-        return static_cast<std::uint64_t>(deferredDeleteFallbackQueue.size());
-    }();
-
-    const std::uint64_t overflowDepth = convo::consumeAtomic(audioThreadRetireOverflowPtr, std::memory_order_acquire) != nullptr ? 1ull : 0ull;
-    const std::uint64_t retireDepth = overflowDepth + fallbackDepth;
+    const std::uint64_t fallbackDepth = 0;
+    const std::uint64_t retireDepth = static_cast<std::uint64_t>(m_epochDomain.pendingRetireCount());
 
     convo::publishAtomic(fallbackQueueDepth_, fallbackDepth, std::memory_order_release);
     convo::publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);

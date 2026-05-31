@@ -130,12 +130,137 @@ const char* toString(BuildError error) noexcept
     return "Unknown";
 }
 
-BuildResult RuntimeBuilder::build(const BuildInput& in) noexcept
+convo::aligned_unique_ptr<RuntimePublishWorld>
+RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
+                                         AudioEngine::DSPCore* next,
+                                         convo::TransitionPolicy policy,
+                                         double fadeTimeSec,
+                                         bool active) noexcept
 {
-    return build(in, engine.getConvolverProcessor().captureBuildSnapshot());
+    const auto nextGraphGeneration = engine.reserveNextRuntimeGraphGeneration();
+    const auto nextWorldId = engine.runtimeWorldIdGenerator_.next();
+    const auto nextPublicationSequence = convo::fetchAddAtomic(engine.publicationSequenceCounter_,
+                                    static_cast<convo::isr::PublicationSequenceId>(1),
+                                    std::memory_order_acq_rel) + 1;
+
+    auto engineState = engine.makeEngineRuntimeState(current, next, policy, fadeTimeSec, active);
+    engineState.revision = nextGraphGeneration;
+    auto graphState = engine.makeRuntimeGraphState(engineState);
+    graphState.generation = nextGraphGeneration;
+
+    const auto* previousWorld = AudioEngine::RuntimePublicationCoordinator::observeWorldHandle(engine.runtimeStore);
+
+    auto worldOwner = RuntimePublishWorld::createForBuilder(RuntimePublishWorld::BuilderToken {});
+    worldOwner->assertMutable();
+    worldOwner->worldId = nextWorldId;
+    worldOwner->generation = nextGraphGeneration;
+    worldOwner->engine = engineState;
+    worldOwner->graph = graphState;
+    worldOwner->runtimeVersion = nextGraphGeneration;
+    worldOwner->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
+
+    worldOwner->schemaVersion = convo::isr::kRuntimeSemanticSchemaVersion;
+    worldOwner->metadata.schemaVersion = worldOwner->schemaVersion;
+    worldOwner->metadata.publicationSequence = nextPublicationSequence;
+
+    worldOwner->generationSemantic.runtimeGeneration = nextGraphGeneration;
+    worldOwner->generationSemantic.activationEpoch = nextGraphGeneration;
+
+    worldOwner->topology.runtimeUuid = graphState.runtimeUuid;
+    worldOwner->topology.fadingRuntimeUuid = graphState.fadingRuntimeUuid;
+    worldOwner->topology.hasFadingRuntime = (graphState.fadingNode != nullptr);
+
+    worldOwner->routing.processingOrder = static_cast<int>(engine.getProcessingOrder());
+    worldOwner->routing.eqBypassed = graphState.eqBypassed;
+    worldOwner->routing.convBypassed = graphState.convBypassed;
+
+    worldOwner->execution.transitionActive = engineState.transition.active;
+    worldOwner->execution.transitionPolicy = static_cast<int>(engineState.transition.policy);
+    worldOwner->execution.latencyCompensationSamples = engineState.transition.latencyDeltaSamples;
+    worldOwner->execution.crossfadeStartDelayBlocks = engineState.dspCrossfadeStartDelayBlocks;
+    worldOwner->execution.crossfadeDryHoldSamples = engineState.dspCrossfadeDryHoldSamples;
+
+    worldOwner->publication.sequenceId = nextPublicationSequence;
+    worldOwner->publication.epoch = static_cast<convo::isr::PublicationEpoch>(nextGraphGeneration);
+    worldOwner->publication.mappedRuntimeGeneration = nextGraphGeneration;
+    worldOwner->publication.previousSequenceId = previousWorld != nullptr
+        ? previousWorld->publication.sequenceId
+        : static_cast<convo::isr::PublicationSequenceId>(0);
+
+    worldOwner->overlap.useDryAsOld = engineState.dspCrossfadeUseDryAsOld;
+    worldOwner->overlap.firstIrDryCrossfadePending = engineState.firstIrDryCrossfadePending;
+    worldOwner->overlap.dryScaleTarget = engineState.dryScaleTarget;
+    worldOwner->overlap.fadeTimeSec = engineState.queuedFadeTimeSec;
+
+    worldOwner->retire.retireEpoch = nextGraphGeneration;
+    worldOwner->retire.retireBacklog = engine.consumeAtomic(engine.retireQueueDepth_, std::memory_order_acquire);
+    worldOwner->retire.deferredResidency = engine.consumeAtomic(engine.fallbackQueueDepth_, std::memory_order_acquire);
+
+    worldOwner->timing.sampleRateHz = graphState.sampleRate;
+    worldOwner->timing.queuedFadeTimeSec = engineState.queuedFadeTimeSec;
+    worldOwner->timing.activationEpoch = nextGraphGeneration;
+
+    worldOwner->latency.latencyDelayOld = engineState.latencyDelayOld;
+    worldOwner->latency.latencyDelayNew = engineState.latencyDelayNew;
+    worldOwner->latency.latencyDeltaSamples = engineState.transition.latencyDeltaSamples;
+
+    worldOwner->scheduling.transitionActive = engineState.transition.active;
+    worldOwner->scheduling.crossfadeStartDelayBlocks = engineState.dspCrossfadeStartDelayBlocks;
+    worldOwner->scheduling.crossfadeDryHoldSamples = engineState.dspCrossfadeDryHoldSamples;
+
+    worldOwner->resource.oversamplingFactor = graphState.oversamplingFactor;
+    worldOwner->resource.ditherBitDepth = graphState.ditherBitDepth;
+    worldOwner->resource.noiseShaperType = graphState.noiseShaperType;
+
+    worldOwner->affinity.rebuildWorkerRunning = engine.consumeAtomic(engine.rebuildThreadIsRunning, std::memory_order_acquire);
+
+    worldOwner->automation.eqBypassed = graphState.eqBypassed;
+    worldOwner->automation.convBypassed = graphState.convBypassed;
+    worldOwner->automation.softClipEnabled = graphState.softClipEnabled;
+
+    worldOwner->coefficient.adaptiveCoeffBankIndex = graphState.adaptiveCoeffBankIndex;
+    worldOwner->coefficient.adaptiveCoeffGeneration = graphState.adaptiveCoeffGeneration;
+    worldOwner->coefficient.eqCoeffHash = 0;
+    if (const auto* eqState = engine.uiEqEditor.getEQStateSnapshot())
+        worldOwner->coefficient.eqCoeffHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
+
+    worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;
+    worldOwner->projectionFreshness.projectionRevision = graphState.generation;
+    worldOwner->projectionFreshness.maxStalenessWindows = 1u;
+
+    worldOwner->semanticHash.generationSemanticHash = worldOwner->generationSemantic.runtimeGeneration
+        ^ (worldOwner->generationSemantic.activationEpoch << 1);
+    worldOwner->semanticHash.topologyHash = worldOwner->topology.runtimeUuid
+        ^ (worldOwner->topology.fadingRuntimeUuid << 1)
+        ^ (worldOwner->topology.hasFadingRuntime ? 0x9E3779B97F4A7C15ull : 0ull);
+    worldOwner->semanticHash.executionHash = static_cast<std::uint64_t>(worldOwner->execution.transitionPolicy + 0x9E3779B9)
+        ^ (worldOwner->execution.transitionActive ? 0x517CC1B727220A95ull : 0ull)
+        ^ (static_cast<std::uint64_t>(worldOwner->execution.latencyCompensationSamples + 0x80000000ull) << 1)
+        ^ (static_cast<std::uint64_t>(worldOwner->execution.crossfadeStartDelayBlocks + 0x80000000ull) << 2)
+        ^ (static_cast<std::uint64_t>(worldOwner->execution.crossfadeDryHoldSamples + 0x80000000ull) << 3);
+    worldOwner->semanticHash.routingHash = static_cast<std::uint64_t>(worldOwner->routing.processingOrder + 0x85EBCA6Bu)
+        ^ (worldOwner->routing.eqBypassed ? 0x27D4EB2Full : 0ull)
+        ^ (worldOwner->routing.convBypassed ? 0x165667B1ull : 0ull);
+    worldOwner->semanticHash.payloadHash = static_cast<std::uint64_t>(worldOwner->resource.oversamplingFactor + 0x9E37)
+        ^ (static_cast<std::uint64_t>(worldOwner->resource.ditherBitDepth + 0x100) << 8)
+        ^ (static_cast<std::uint64_t>(worldOwner->resource.noiseShaperType + 0x10) << 16)
+        ^ worldOwner->coefficient.eqCoeffHash;
+    worldOwner->semanticHash.publicationSemanticHash = worldOwner->publication.sequenceId
+        ^ (worldOwner->publication.epoch << 1)
+        ^ (worldOwner->publication.mappedRuntimeGeneration << 2)
+        ^ (worldOwner->publication.previousSequenceId << 3);
+    worldOwner->semanticHash.overlapSemanticHash = (worldOwner->overlap.useDryAsOld ? 0xA24BAED4963EE407ull : 0ull)
+        ^ (worldOwner->overlap.firstIrDryCrossfadePending ? 0x9FB21C651E98DF25ull : 0ull)
+        ^ (worldOwner->engine.transition.active ? 0xC2B2AE3D27D4EB4Full : 0ull);
+    worldOwner->semanticHash.retireSemanticHash = worldOwner->retire.retireEpoch
+        ^ (worldOwner->retire.retireBacklog << 1)
+        ^ (worldOwner->retire.deferredResidency << 2);
+
+    worldOwner->freeze();
+    return worldOwner;
 }
 
-BuildResult RuntimeBuilder::build(const BuildInput& in, const ConvolverProcessor::BuildSnapshot& snapshot) noexcept
+BuildResult RuntimeBuilder::build(const BuildInput& in) noexcept
 {
     BuildResult result {};
 
@@ -151,7 +276,7 @@ BuildResult RuntimeBuilder::build(const BuildInput& in, const ConvolverProcessor
     {
         runtime = convo::aligned_make_unique<AudioEngine::DSPCore>();
         runtime->convolverRt().setVisualizationEnabled(false);
-        runtime->convolverRt().applyBuildSnapshot(snapshot);
+        engine.applyCurrentConvolverSnapshotToRuntime(*runtime);
         runtime->prepare(in.sampleRate,
                          in.blockSize,
                          in.ditherBitDepth,

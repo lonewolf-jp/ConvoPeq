@@ -54,6 +54,11 @@ void destroyPublicationIntentNode(void* ptr) noexcept
     return true;
 }
 
+[[nodiscard]] inline bool hasEquivalentTransitionSemantic(const RuntimePublishWorld& world) noexcept
+{
+    return world.execution.transitionActive == world.topology.hasFadingRuntime;
+}
+
 inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
                                           convo::isr::SemanticTransactionState next) noexcept
 {
@@ -134,6 +139,9 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
     if (!acceptsRuntimePublication())
         return rejectWithEvidence();
 
+    if (!hasEquivalentTransitionSemantic(world))
+        return rejectWithEvidence();
+
     const auto lastCommittedGeneration = convo::consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_acquire);
     const auto lastCommittedSequence = convo::consumeAtomic(lastCommittedPublicationSequence_, std::memory_order_acquire);
     if (lastCommittedGeneration != 0 && world.generation <= lastCommittedGeneration)
@@ -159,7 +167,8 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
         return rejectWithEvidence();
     }
 
-    if (world.execution.transitionActive)
+    const bool hasTransitionNext = world.topology.hasFadingRuntime;
+    if (hasTransitionNext)
     {
         if (world.execution.crossfadeStartDelayBlocks < 0
             || world.execution.crossfadeDryHoldSamples < 0)
@@ -170,7 +179,7 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
         || world.overlap.dryScaleTarget < 0.0)
         return rejectWithEvidence();
 
-    if (!world.execution.transitionActive
+    if (!hasTransitionNext
         && world.overlap.firstIrDryCrossfadePending)
         return rejectWithEvidence();
 
@@ -186,7 +195,6 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 
     const bool hasActive = (world.topology.runtimeUuid != 0);
     const bool hasFading = world.topology.hasFadingRuntime;
-    const bool hasTransitionNext = world.execution.transitionActive;
 
     if (!hasActive && !hasFading && !hasTransitionNext)
         return true;
@@ -241,7 +249,7 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
     }
 
     convo::isr::TieredPayloadDescriptor descriptor{};
-    descriptor.tier = world.execution.transitionActive
+    descriptor.tier = hasTransitionNext
         ? convo::isr::PayloadTier::ImmutableShared
         : convo::isr::PayloadTier::InlineImmutable;
     descriptor.requiresRT = false;
@@ -258,6 +266,17 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
         return rejectWithEvidence();
 
     return true;
+}
+
+convo::aligned_unique_ptr<RuntimePublishWorld>
+AudioEngine::RuntimePublicationBridge::buildRuntimePublishWorld(DSPCore* current,
+                                                                DSPCore* next,
+                                                                convo::TransitionPolicy policy,
+                                                                double fadeTimeSec,
+                                                                bool active) noexcept
+{
+    convo::RuntimeBuilder worldBuilder(*engine_);
+    return worldBuilder.buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active);
 }
 
 void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept
@@ -312,7 +331,13 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
                                static_cast<std::uint64_t>(world.runtimeVersion),
                                static_cast<int>(std::memory_order_release));
 
-    commitRuntimePublication(world);
+    runtimePublicationBridge_.commit(convo::isr::PublishAuthority::Granted,
+                                     convo::isr::RuntimeBoundary::NonRTWorld,
+                                     &world,
+                                     world.generation,
+                                     world.publication.sequenceId,
+                                     world.publication.epoch,
+                                     world.publication.mappedRuntimeGeneration);
     convo::publishAtomic(lastCommittedRuntimeGeneration_, world.generation, std::memory_order_release);
     convo::publishAtomic(lastCommittedPublicationSequence_, world.publication.sequenceId, std::memory_order_release);
     convo::fetchAddAtomic(publishedWorldCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
@@ -342,7 +367,9 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     if (shutdownRuntime_.isShutdownInProgress())
         shutdownRuntime_.markPostStopEnqueue();
 
-    retireRuntimePublication(world);
+    runtimePublicationBridge_.retire(convo::isr::RetireAuthority::Granted,
+                                     convo::isr::RuntimeBoundary::NonRTWorld,
+                                     world);
 
     const std::uint32_t slot = static_cast<std::uint32_t>(world->generation % 256u);
     std::uint32_t generation = static_cast<std::uint32_t>(world->generation & 0xFFFFFFFFu);
@@ -429,7 +456,17 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     const double oldestPendingAgeMs = convo::consumeAtomic(oldestPendingAge_, std::memory_order_acquire);
     const std::uint64_t maxRetireDeferralEpochs = convo::consumeAtomic(maxRetireDeferralEpochs_, std::memory_order_acquire);
     const double maxRetireWallClockMs = convo::consumeAtomic(maxRetireWallClockMs_, std::memory_order_acquire);
-    const bool hasAnyPendingTransition = world->execution.transitionActive || !pendingIntents.empty();
+    const bool transitionSemanticMismatch = !hasEquivalentTransitionSemantic(*world);
+    if (transitionSemanticMismatch)
+    {
+        diagLog("[ISR][Leak-04-Guard] transition semantic mismatch on retire path: execution.transitionActive="
+            + juce::String(world->execution.transitionActive ? 1 : 0)
+            + " topology.hasFadingRuntime="
+            + juce::String(world->topology.hasFadingRuntime ? 1 : 0));
+        retireRuntimeEx_.requestRollback();
+    }
+
+    const bool hasAnyPendingTransition = world->topology.hasFadingRuntime || !pendingIntents.empty();
 
     for (const auto& pending : pendingIntents)
     {
@@ -659,7 +696,7 @@ void AudioEngine::drainPublicationLogForShutdown() noexcept
     runtimePublicationBridge_.setPendingIntentCount(0u);
 }
 
-void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
+void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation)
 {
     if (newDSP == nullptr)
         return;
@@ -687,7 +724,7 @@ void AudioEngine::prepareCommit(DSPCore* newDSP, int generation)
     return hasPublicationLogPending();
 }
 
-void AudioEngine::executeCommit()
+void AudioEngine::drainPublicationIntentsForRuntimeCommit()
 {
     if (!acceptsRuntimePublication())
     {
@@ -728,7 +765,7 @@ void AudioEngine::executeCommit()
             }
             else
             {
-                commitNewDSP(next->newDSP, static_cast<int>(next->targetWorldId));
+                applyRuntimeCommitFromIntent(next->newDSP, static_cast<int>(next->targetWorldId));
             }
 
             if (cursor != publicationLogSentinel)
@@ -751,7 +788,7 @@ void AudioEngine::executeCommit()
         triggerAsyncUpdate();
 }
 
-void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
+void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
 {
     struct CrossfadeContext
     {
@@ -806,12 +843,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             jassert(nextDSP != nullptr && nextDSP != previousDSP);
         }
 
-        makeRuntimePublicationCoordinator()
-            .publishState(nextDSP,
-                          previousDSP,
-                          convo::TransitionPolicy::SmoothOnly,
-                          fadeTimeSec,
-                          true);
+        publishRuntimeStateNonRt(nextDSP,
+                                 previousDSP,
+                                 convo::TransitionPolicy::SmoothOnly,
+                                 fadeTimeSec,
+                                 true);
         logRuntimeTransitionEvent("publishSmoothTransitionState", nextDSP, previousDSP);
     };
 
@@ -837,12 +873,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         publishAtomic(queuedFadeTimeSec, fadeTimeSec, std::memory_order_release);
         publishAtomic(dspCrossfadePending, true, std::memory_order_release);
         setIRChangeFlag();
-        makeRuntimePublicationCoordinator()
-            .publishState(atomicCurrent,
-                          previousDSP,
-                          convo::TransitionPolicy::SmoothOnly,
-                          fadeTimeSec,
-                          true);
+        publishRuntimeStateNonRt(atomicCurrent,
+                                 previousDSP,
+                                 convo::TransitionPolicy::SmoothOnly,
+                                 fadeTimeSec,
+                                 true);
         validateDistinctRuntimeSlots("startImmediateSmoothTransition",
                                      atomicCurrent,
                                      resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
@@ -884,12 +919,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
         publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
         publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
-        makeRuntimePublicationCoordinator()
-            .publishState(atomicCurrent,
-                          nullptr,
-                          convo::TransitionPolicy::HardReset,
-                          0.0,
-                          false);
+        publishRuntimeStateNonRt(atomicCurrent,
+                                 nullptr,
+                                 convo::TransitionPolicy::HardReset,
+                                 0.0,
+                                 false);
         validateDistinctRuntimeSlots("publishHardResetForCurrentDSP",
                                      atomicCurrent,
                                      resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
@@ -924,12 +958,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         publishAtomic(dspCrossfadePending, true, std::memory_order_release);
         publishAtomic(firstIrDryCrossfadeDone, true, std::memory_order_release);
         setIRChangeFlag();
-        makeRuntimePublicationCoordinator()
-            .publishState(atomicCurrent,
-                          nullptr,
-                          convo::TransitionPolicy::DryAsOld,
-                          fadeTimeSec,
-                          true);
+        publishRuntimeStateNonRt(atomicCurrent,
+                                 nullptr,
+                                 convo::TransitionPolicy::DryAsOld,
+                                 fadeTimeSec,
+                                 true);
         validateDistinctRuntimeSlots("armDryAsOldCrossfadeForCurrentDSP",
                                      atomicCurrent,
                                      resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
@@ -1089,12 +1122,11 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
         }
 
-        makeRuntimePublicationCoordinator()
-            .publishState(newDSP,
-                          nullptr,
-                          convo::TransitionPolicy::SmoothOnly,
-                          0.0,
-                          false);
+        publishRuntimeStateNonRt(newDSP,
+                                 nullptr,
+                                 convo::TransitionPolicy::SmoothOnly,
+                                 0.0,
+                                 false);
 
         // 3. EBR：エポックを進める
         advanceRetireEpoch();
@@ -1246,7 +1278,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     }
 
     // NOTE: rebuild 完了通知の唯一の発火点。
-    // sendChangeMessage() は commitNewDSP() でのみ rebuild 用途で呼ぶ。
+    // sendChangeMessage() は runtime commit apply 経路でのみ rebuild 用途で呼ぶ。
     // それ以外の sendChangeMessage() はフェード完了・UIパラメータ変更・
     // 状態復元など rebuild とは独立したイベント用途。
     const auto runtimeReadViewBeforeNotify = readControlRuntimeView();

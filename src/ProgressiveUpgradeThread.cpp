@@ -184,7 +184,7 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
             if (!owner->isConvolverGenerationCurrent(expectedGeneration))
                 return;
 
-            owner->applyPreparedIRState(std::move(prepared));
+            owner->applyComputedIR(std::move(prepared));
         });
     }
 

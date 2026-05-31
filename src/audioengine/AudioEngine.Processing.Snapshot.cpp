@@ -24,8 +24,14 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
 
     const auto runtimeReadView = readAudioRuntimeView();
     const auto& runtimePublishView = runtimeReadView.runtimePublish;
+    const auto* runtimeWorld = runtimeReadView.runtimeWorld;
+    if (runtimeWorld == nullptr)
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
     DSPCore* dsp = isFadingTarget
-        ? (runtimePublishView.transition.active
+        ? (runtimeWorld->topology.hasFadingRuntime
             ? static_cast<DSPCore*>(runtimePublishView.transition.next)
             : nullptr)
         : static_cast<DSPCore*>(runtimePublishView.transition.current);

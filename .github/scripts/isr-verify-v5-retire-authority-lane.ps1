@@ -49,8 +49,9 @@ if ($coordinatorCppText -notmatch 'void RuntimePublicationCoordinator::retire\(R
 }
 
 if ($audioEngineCommitText -notmatch 'runtimePublicationCoordinator_\.retire\(convo::isr::RetireAuthority::Granted,' `
+    -and $audioEngineCommitText -notmatch 'runtimePublicationBridge_\.retire\(convo::isr::RetireAuthority::Granted,' `
     -and $audioEngineCommitText -notmatch '\bretireRuntimePublication\s*\(\s*world\s*\)') {
-    throw 'AudioEngine non-RT retire path must call coordinator with RetireAuthority::Granted (directly or via wrapper).'
+    throw 'AudioEngine non-RT retire path must call retire authority lane with RetireAuthority::Granted (directly or via wrapper/bridge).'
 }
 
 $allSource = Get-ChildItem -Path (Join-Path $repoRoot 'src') -Recurse -File -Include *.h,*.hpp,*.cpp,*.cxx,*.cc |

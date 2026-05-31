@@ -117,12 +117,11 @@ void AudioEngine::releaseResources()
         convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
         dspCrossfadeGain.setCurrentAndTargetValue(1.0);
         refreshCrossfadePreparedSnapshotFromAtomics();
-        makeRuntimePublicationCoordinator()
-            .publishState(nullptr,
-                          nullptr,
-                          convo::TransitionPolicy::HardReset,
-                          0.0,
-                          false);
+        publishRuntimeStateNonRt(nullptr,
+                                 nullptr,
+                                 convo::TransitionPolicy::HardReset,
+                                 0.0,
+                                 false);
 
         validateDistinctRuntimeSlots("releaseResources.afterClear",
                  getActiveRuntimeDSP(),
@@ -204,13 +203,7 @@ void AudioEngine::releaseResources()
 
     const auto pendingRetireCount = [&]() noexcept -> uint32_t
     {
-        uint32_t count = 0;
-        if (convo::consumeAtomic(audioThreadRetireOverflowPtr, std::memory_order_acquire) != nullptr)
-            ++count;
-
-        std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-        count += static_cast<uint32_t>(deferredDeleteFallbackQueue.size());
-        return count;
+        return m_epochDomain.pendingRetireCount();
     }();
 
     const auto activeCrossfadeCount = consumeAtomic(activeCrossfadeId_, std::memory_order_acquire) != static_cast<convo::isr::CrossfadeId>(0u) ? 1u : 0u;

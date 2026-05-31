@@ -13,13 +13,15 @@ void AudioEngine::timerCallback()
 {
     const auto runtimeReadView = readControlRuntimeView();
     const auto& runtimePublishView = runtimeReadView.runtimePublish;
+    const auto* runtimeWorld = runtimeReadView.runtimeWorld;
+    const bool transitionActive = (runtimeWorld != nullptr) && runtimeWorld->topology.hasFadingRuntime;
     const auto* currentSnapshot = getRuntimeSnapshot(runtimeReadView);
 
     emitEvidenceTickNonRt(false);
 
     {
         const auto ts = runtimePublishView.transition;
-        const int active = ts.active ? 1 : 0;
+        const int active = transitionActive ? 1 : 0;
         const int policy = static_cast<int>(ts.policy);
         const uint64_t currentPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ts.current));
         const uint64_t nextPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ts.next));
@@ -53,7 +55,7 @@ void AudioEngine::timerCallback()
 
     {
         auto* currentRuntime = static_cast<DSPCore*>(runtimePublishView.transition.current);
-        auto* fadingRuntime = runtimePublishView.transition.active
+        auto* fadingRuntime = transitionActive
             ? static_cast<DSPCore*>(runtimePublishView.transition.next)
             : nullptr;
         const uint64_t revision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
@@ -158,7 +160,7 @@ void AudioEngine::timerCallback()
     // 回復経路: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
     auto* currentDspForRuntime = static_cast<DSPCore*>(runtimePublishView.transition.current);
-    auto* fadingDspForRuntime = runtimePublishView.transition.active
+    auto* fadingDspForRuntime = ((runtimeWorld != nullptr) && runtimeWorld->topology.hasFadingRuntime)
         ? static_cast<DSPCore*>(runtimePublishView.transition.next)
         : nullptr;
 
@@ -395,12 +397,11 @@ void AudioEngine::timerCallback()
         auto* currentAfterFade = static_cast<DSPCore*>(runtimePublishView.transition.current);
         if (currentAfterFade != nullptr)
         {
-            makeRuntimePublicationCoordinator()
-                .publishState(currentAfterFade,
-                              nullptr,
-                              convo::TransitionPolicy::SmoothOnly,
-                              0.0,
-                              false);
+            publishRuntimeStateNonRt(currentAfterFade,
+                                     nullptr,
+                                     convo::TransitionPolicy::SmoothOnly,
+                                     0.0,
+                                     false);
         }
 
         sendChangeMessage();

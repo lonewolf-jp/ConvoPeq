@@ -29,39 +29,19 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     if (ptr == nullptr || deleter == nullptr)
         return true;
 
-    drainDeferredDeleteFallbackQueue();
+    const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
+    constexpr int kMaxRetry = 4;
+    for (int attempt = 0; attempt < kMaxRetry; ++attempt)
+    {
+        if (m_epochDomain.enqueueRetire(ptr, deleter, retireEpoch))
+            return true;
 
-    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
-        return true;
+        m_epochDomain.reclaimRetired();
+        m_epochDomain.advanceEpoch();
+    }
 
-    m_epochDomain.reclaimRetired();
-    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
-        return true;
-
-    std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-    deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry { ptr, deleter, epoch });
+    juce::Logger::writeToLog("[WARN EQProcessor] enqueueRetire failed after bounded retries");
     return false;
-}
-
-void EQProcessor::drainDeferredDeleteFallbackQueue() noexcept
-{
-    std::vector<DeferredDeleteFallbackEntry> pending;
-    {
-        std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-        if (deferredDeleteFallbackQueue.empty())
-            return;
-        pending.swap(deferredDeleteFallbackQueue);
-    }
-
-    for (auto& entry : pending)
-    {
-        const uint64_t epoch = (entry.epoch != 0) ? entry.epoch : m_epochDomain.currentEpoch();
-        if (!m_epochDomain.enqueueRetire(entry.ptr, entry.deleter, epoch))
-        {
-            std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-            deferredDeleteFallbackQueue.push_back(entry);
-        }
-    }
 }
 
 void EQProcessor::retireEQStateDeferred(EQState* state) noexcept
@@ -110,11 +90,9 @@ EQProcessor::~EQProcessor()
         node = nullptr;
     }
 
-    // enqueueRetire 失敗分を終了時に再投入し、可能な限り回収する。
-    drainDeferredDeleteFallbackQueue();
+    // 退役キューを強制 drain して可能な限り回収する。
     m_epochDomain.reclaimRetired();
     m_epochDomain.drainAll();
-    drainDeferredDeleteFallbackQueue();
     m_epochDomain.reclaimRetired();
 
     releaseResources();

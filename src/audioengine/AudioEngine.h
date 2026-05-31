@@ -99,6 +99,7 @@ struct CoeffSet {
 
 class NoiseShaperLearner;
 class AudioEngine;
+namespace convo { class RuntimeBuilder; }
 
 // デバッグビルド時のみログを出力するマクロ
 #if defined(JUCE_DEBUG) && !defined(NDEBUG)
@@ -120,6 +121,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     {
     private:
         friend class AudioEngine;
+        friend class convo::RuntimeBuilder;
         constexpr BuilderToken() noexcept = default;
     };
 
@@ -156,7 +158,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     // AuthorityClass::Authoritative (schema governance)
     convo::isr::RuntimeMetadata metadata {};
 
-    // AuthorityClass::Authoritative
+    // AuthorityClass::Derived (canonical source is `generation`)
     convo::isr::GenerationSemantic generationSemantic {};
     // AuthorityClass::Authoritative
     convo::isr::TopologySemantic topology {};
@@ -195,7 +197,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     static constexpr std::array<convo::isr::RuntimeFieldDescriptor, 17> kFieldDescriptors {{
         {"worldId", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"generation", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
-        {"generationSemantic", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"generationSemantic", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"topology", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"routing", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"execution", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
@@ -215,7 +217,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 17> kAuthorityInventory {{
         {"worldId", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"generation", convo::isr::RuntimeAuthorityClass::Authoritative},
-        {"generationSemantic", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"generationSemantic", convo::isr::RuntimeAuthorityClass::Derived},
         {"topology", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"routing", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"execution", convo::isr::RuntimeAuthorityClass::Authoritative},
@@ -271,6 +273,7 @@ class AudioEngine : public juce::AudioSource,
                                      private juce::AsyncUpdater
 {
 public:
+    friend class convo::RuntimeBuilder;
     using SampleType = double; // 内部DSP精度 (JUCE推奨)
 
     using ProcessingOrder = convo::ProcessingOrder;
@@ -728,10 +731,10 @@ public:
     void tryReclaimResources() noexcept;
 
     // RCU Reader Support
-    [[nodiscard]] uint64_t publishRcuEpoch() noexcept;
+    [[nodiscard]] uint64_t snapshotRcuEpoch() noexcept;
     void enterRcuReader(int readerIndex) noexcept;
     void exitRcuReader(int readerIndex) noexcept;
-    [[nodiscard]] uint64_t publishRetireEpoch() noexcept;
+    [[nodiscard]] uint64_t markRetireEpoch() noexcept;
     [[nodiscard]] uint64_t currentRetireEpoch() const noexcept;
     uint64_t advanceRetireEpoch() noexcept;
     [[nodiscard]] bool enqueueRetireEpochBounded(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept;
@@ -747,6 +750,7 @@ public:
     //----------------------------------------------------------
     ConvolverProcessor& getConvolverProcessor() { return uiConvolverProcessor; }
     [[nodiscard]] const ConvolverProcessor& getConvolverProcessor() const { return uiConvolverProcessor; }
+    void applyCurrentConvolverSnapshotToRuntime(DSPCore& runtime) const;
     EQEditProcessor& getEQProcessor() { return uiEqEditor; }
     ThreadAffinityManager& getAffinityManager() noexcept { return affinityManager; }
     [[nodiscard]] const ThreadAffinityManager& getAffinityManager() const noexcept { return affinityManager; }
@@ -1094,7 +1098,6 @@ public:
         std::atomic<uint64_t> audioSampleCursorCounter { 0 };
         std::atomic<uint32_t> audioCallbackActiveCount { 0 };
         std::atomic<uint64_t> audioThreadRetireEnqueueDropped { 0 };
-        std::atomic<uint64_t> audioThreadRetireOverflowEpoch { 0 };
     };
 
     struct RTAuxMutable
@@ -1257,7 +1260,7 @@ public:
     void setAdaptiveAutosaveCallback(std::function<void()> callback);
     void requestAdaptiveAutosave();
     // NoiseShaperLearner から学習済み係数を受け取るコールバック (Worker Thread)
-    void publishCoeffs(const double* coeffs);
+    void storeLearnedCoeffs(const double* coeffs);
 
     // --- Adaptive ノイズシェイパー係数インデックス計算（UI スレッドからアクセス可能） ---
     [[nodiscard]] static int getAdaptiveCoeffBankIndex(double sampleRate, int bitDepth, convo::NoiseShaperLearningMode mode) noexcept;
@@ -1704,10 +1707,10 @@ public:
     // such as IR resampling. It MUST only be called from the message thread.
     // prepareToPlay() routes to the message thread before invoking this helper.
     void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
-    void commitNewDSP(DSPCore* newDSP, int generation);
-    void prepareCommit(DSPCore* newDSP, int generation);
-    void executeCommit();
-    // acquire: commitNewDSP/requestRebuild の rebuildGeneration 更新 release と HB し、
+    void applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation);
+    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation);
+    void drainPublicationIntentsForRuntimeCommit();
+    // acquire: applyRuntimeCommitFromIntent/requestRebuild の rebuildGeneration 更新 release と HB し、
     //          リビルド世代が古いか否かを各スレッドから安全に判定。
     [[nodiscard]] bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildGeneration, std::memory_order_acquire); }
     bool enqueueLearningCommand(const LearningCommand& cmd) noexcept;
@@ -1832,14 +1835,6 @@ public:
     PublicationLog publicationLog;
     PublicationIntent* publicationLogSentinel = nullptr;
     std::atomic<bool> commitDrainInProgress { false };
-    struct DeferredDeleteFallbackEntry
-    {
-        void* ptr = nullptr;
-        void (*deleter)(void*) = nullptr;
-        uint64_t epoch = 0;
-    };
-    std::mutex deferredDeleteFallbackMutex;
-    std::vector<DeferredDeleteFallbackEntry> deferredDeleteFallbackQueue;
 
     // --- Adaptiveノイズシェイパー学習用メンバー ---
     struct AdaptiveCoeffBankSlot
@@ -1866,7 +1861,7 @@ public:
     AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) noexcept;
     [[nodiscard]] const AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) const noexcept;
     void selectAdaptiveCoeffBankForCurrentSettings() noexcept;
-    void publishCoeffsToBank(int bankIndex, const double* coeffs);
+    void storeLearnedCoeffsToBank(int bankIndex, const double* coeffs);
 
     static constexpr uint32_t rebuildReasonMask(RebuildReason reason) noexcept
     {
@@ -2149,7 +2144,9 @@ public:
         };
 
         const auto runtimeReadView = readControlRuntimeView();
-        DSPCore* fading = runtimeReadView.runtimePublish.transition.active
+        const bool transitionActive = runtimeReadView.runtimeWorld != nullptr
+            && runtimeReadView.runtimeWorld->topology.hasFadingRuntime;
+        DSPCore* fading = transitionActive
             ? static_cast<DSPCore*>(runtimeReadView.runtimePublish.transition.next)
             : nullptr;
 
@@ -2372,7 +2369,8 @@ public:
     [[nodiscard]] inline DSPCore* resolveFadingRuntimeDSPFromRuntimeWorldOnly(const RuntimeReadView& runtimeReadView) const noexcept
     {
         const auto& transition = runtimeReadView.runtimePublish.transition;
-        if (!transition.active)
+        if (runtimeReadView.runtimeWorld == nullptr
+            || !runtimeReadView.runtimeWorld->topology.hasFadingRuntime)
             return nullptr;
 
         return static_cast<DSPCore*>(transition.next);
@@ -2502,141 +2500,6 @@ public:
     //=== RuntimePublicationCoordinator NonRT helper API ===//
     // AudioEngine 内部の publish/retire helper（NonRT 専用）。
 
-    [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
-    buildRuntimePublishWorld(DSPCore* current,
-                             DSPCore* next,
-                             convo::TransitionPolicy policy,
-                             double fadeTimeSec,
-                             bool active) noexcept
-    {
-        const auto nextGraphGeneration = reserveNextRuntimeGraphGeneration();
-        const auto nextWorldId = runtimeWorldIdGenerator_.next();
-        const auto nextPublicationSequence = convo::fetchAddAtomic(publicationSequenceCounter_,
-                                        static_cast<convo::isr::PublicationSequenceId>(1),
-                                        std::memory_order_acq_rel) + 1;
-
-        auto engineState = makeEngineRuntimeState(current, next, policy, fadeTimeSec, active);
-        engineState.revision = nextGraphGeneration;
-        auto graphState = makeRuntimeGraphState(engineState);
-        graphState.generation = nextGraphGeneration;
-
-        const auto* previousWorld = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
-
-        auto worldOwner = RuntimePublishWorld::createForBuilder(RuntimePublishWorld::BuilderToken {});
-        worldOwner->assertMutable();
-        worldOwner->worldId = nextWorldId;
-        worldOwner->generation = nextGraphGeneration;
-        worldOwner->engine = engineState;
-        worldOwner->graph = graphState;
-        // runtimeVersion is retained as diagnostic mirror only. Authoritative identity is generation.
-        worldOwner->runtimeVersion = nextGraphGeneration;
-        // transitionId: unique per crossfade event
-        worldOwner->transitionId = nextGraphGeneration + (active ? 0x1000000000000000ULL : 0);
-
-        // RuntimeSemanticSchema v1.6 bridge fields
-        worldOwner->schemaVersion = convo::isr::kRuntimeSemanticSchemaVersion;
-        worldOwner->metadata.schemaVersion = worldOwner->schemaVersion;
-        worldOwner->metadata.publicationSequence = nextPublicationSequence;
-
-        worldOwner->generationSemantic.runtimeGeneration = nextGraphGeneration;
-        worldOwner->generationSemantic.activationEpoch = nextGraphGeneration;
-
-        worldOwner->topology.runtimeUuid = graphState.runtimeUuid;
-        worldOwner->topology.fadingRuntimeUuid = graphState.fadingRuntimeUuid;
-        worldOwner->topology.hasFadingRuntime = (graphState.fadingNode != nullptr);
-
-        worldOwner->routing.processingOrder = static_cast<int>(getProcessingOrder());
-        worldOwner->routing.eqBypassed = graphState.eqBypassed;
-        worldOwner->routing.convBypassed = graphState.convBypassed;
-
-        worldOwner->execution.transitionActive = engineState.transition.active;
-        worldOwner->execution.transitionPolicy = static_cast<int>(engineState.transition.policy);
-        worldOwner->execution.latencyCompensationSamples = engineState.transition.latencyDeltaSamples;
-        worldOwner->execution.crossfadeStartDelayBlocks = engineState.dspCrossfadeStartDelayBlocks;
-        worldOwner->execution.crossfadeDryHoldSamples = engineState.dspCrossfadeDryHoldSamples;
-
-        worldOwner->publication.sequenceId = nextPublicationSequence;
-        worldOwner->publication.epoch = static_cast<convo::isr::PublicationEpoch>(nextGraphGeneration);
-        worldOwner->publication.mappedRuntimeGeneration = nextGraphGeneration;
-        worldOwner->publication.previousSequenceId = previousWorld != nullptr
-            ? previousWorld->publication.sequenceId
-            : static_cast<convo::isr::PublicationSequenceId>(0);
-
-        worldOwner->overlap.useDryAsOld = engineState.dspCrossfadeUseDryAsOld;
-        worldOwner->overlap.firstIrDryCrossfadePending = engineState.firstIrDryCrossfadePending;
-        worldOwner->overlap.dryScaleTarget = engineState.dryScaleTarget;
-        worldOwner->overlap.fadeTimeSec = engineState.queuedFadeTimeSec;
-
-        worldOwner->retire.retireEpoch = nextGraphGeneration;
-        worldOwner->retire.retireBacklog = consumeAtomic(retireQueueDepth_, std::memory_order_acquire);
-        worldOwner->retire.deferredResidency = consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire);
-
-        worldOwner->timing.sampleRateHz = graphState.sampleRate;
-        worldOwner->timing.queuedFadeTimeSec = engineState.queuedFadeTimeSec;
-        worldOwner->timing.activationEpoch = nextGraphGeneration;
-
-        worldOwner->latency.latencyDelayOld = engineState.latencyDelayOld;
-        worldOwner->latency.latencyDelayNew = engineState.latencyDelayNew;
-        worldOwner->latency.latencyDeltaSamples = engineState.transition.latencyDeltaSamples;
-
-        worldOwner->scheduling.transitionActive = engineState.transition.active;
-        worldOwner->scheduling.crossfadeStartDelayBlocks = engineState.dspCrossfadeStartDelayBlocks;
-        worldOwner->scheduling.crossfadeDryHoldSamples = engineState.dspCrossfadeDryHoldSamples;
-
-        worldOwner->resource.oversamplingFactor = graphState.oversamplingFactor;
-        worldOwner->resource.ditherBitDepth = graphState.ditherBitDepth;
-        worldOwner->resource.noiseShaperType = graphState.noiseShaperType;
-
-        worldOwner->affinity.rebuildWorkerRunning = consumeAtomic(rebuildThreadIsRunning, std::memory_order_acquire);
-
-        worldOwner->automation.eqBypassed = graphState.eqBypassed;
-        worldOwner->automation.convBypassed = graphState.convBypassed;
-        worldOwner->automation.softClipEnabled = graphState.softClipEnabled;
-
-        worldOwner->coefficient.adaptiveCoeffBankIndex = graphState.adaptiveCoeffBankIndex;
-        worldOwner->coefficient.adaptiveCoeffGeneration = graphState.adaptiveCoeffGeneration;
-        worldOwner->coefficient.eqCoeffHash = 0;
-        if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
-            worldOwner->coefficient.eqCoeffHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
-
-        worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;
-        worldOwner->projectionFreshness.projectionRevision = graphState.generation;
-        worldOwner->projectionFreshness.maxStalenessWindows = 1u;
-
-        worldOwner->semanticHash.generationSemanticHash = worldOwner->generationSemantic.runtimeGeneration
-            ^ (worldOwner->generationSemantic.activationEpoch << 1);
-        worldOwner->semanticHash.topologyHash = worldOwner->topology.runtimeUuid
-            ^ (worldOwner->topology.fadingRuntimeUuid << 1)
-            ^ (worldOwner->topology.hasFadingRuntime ? 0x9E3779B97F4A7C15ull : 0ull);
-        worldOwner->semanticHash.executionHash = static_cast<std::uint64_t>(worldOwner->execution.transitionPolicy + 0x9E3779B9)
-            ^ (worldOwner->execution.transitionActive ? 0x517CC1B727220A95ull : 0ull)
-            ^ (static_cast<std::uint64_t>(worldOwner->execution.latencyCompensationSamples + 0x80000000ull) << 1)
-            ^ (static_cast<std::uint64_t>(worldOwner->execution.crossfadeStartDelayBlocks + 0x80000000ull) << 2)
-            ^ (static_cast<std::uint64_t>(worldOwner->execution.crossfadeDryHoldSamples + 0x80000000ull) << 3);
-        worldOwner->semanticHash.routingHash = static_cast<std::uint64_t>(worldOwner->routing.processingOrder + 0x85EBCA6Bu)
-            ^ (worldOwner->routing.eqBypassed ? 0x27D4EB2Full : 0ull)
-            ^ (worldOwner->routing.convBypassed ? 0x165667B1ull : 0ull);
-        worldOwner->semanticHash.payloadHash = static_cast<std::uint64_t>(worldOwner->resource.oversamplingFactor + 0x9E37)
-            ^ (static_cast<std::uint64_t>(worldOwner->resource.ditherBitDepth + 0x100) << 8)
-            ^ (static_cast<std::uint64_t>(worldOwner->resource.noiseShaperType + 0x10) << 16)
-            ^ worldOwner->coefficient.eqCoeffHash;
-        worldOwner->semanticHash.publicationSemanticHash = worldOwner->publication.sequenceId
-            ^ (worldOwner->publication.epoch << 1)
-            ^ (worldOwner->publication.mappedRuntimeGeneration << 2)
-            ^ (worldOwner->publication.previousSequenceId << 3);
-        worldOwner->semanticHash.overlapSemanticHash = (worldOwner->overlap.useDryAsOld ? 0xA24BAED4963EE407ull : 0ull)
-            ^ (worldOwner->overlap.firstIrDryCrossfadePending ? 0x9FB21C651E98DF25ull : 0ull)
-            ^ (worldOwner->engine.transition.active ? 0xC2B2AE3D27D4EB4Full : 0ull);
-        worldOwner->semanticHash.retireSemanticHash = worldOwner->retire.retireEpoch
-            ^ (worldOwner->retire.retireBacklog << 1)
-            ^ (worldOwner->retire.deferredResidency << 2);
-
-        // Publish world must be frozen before it can be exposed to any reader.
-        worldOwner->freeze();
-
-        return worldOwner;
-    }
-
     [[nodiscard]] bool runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept;
     void onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept;
     void onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexcept;
@@ -2659,10 +2522,7 @@ public:
                                  DSPCore* next,
                                  convo::TransitionPolicy policy,
                                  double fadeTimeSec,
-                                 bool active) noexcept
-        {
-            return engine_->buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active);
-        }
+                                 bool active) noexcept;
 
         [[nodiscard]] bool validatePublicationNonRt(const RuntimePublishWorld& world) noexcept
         {
@@ -2729,31 +2589,24 @@ public:
         return RuntimePublicationCoordinatorFactory::create(RuntimePublicationBridge { *this }, runtimeStore);
     }
 
+    inline void publishRuntimeStateNonRt(DSPCore* current,
+                                         DSPCore* next,
+                                         convo::TransitionPolicy policy,
+                                         double fadeTimeSec,
+                                         bool active) noexcept
+    {
+        makeRuntimePublicationCoordinator().publishState(current,
+                                                         next,
+                                                         policy,
+                                                         fadeTimeSec,
+                                                         active);
+    }
+
     [[nodiscard]] inline bool precheckRuntimePublication(const convo::isr::PayloadClosureDescriptor& closure,
                                                          const convo::isr::TieredPayloadDescriptor& descriptor) noexcept
     {
         auto& runtimePublicationCoordinator = runtimePublicationBridge_;
         return runtimePublicationCoordinator.precheckPublish(closure, descriptor);
-    }
-
-    inline void commitRuntimePublication(const RuntimePublishWorld& world) noexcept
-    {
-        auto& runtimePublicationCoordinator = runtimePublicationBridge_;
-        runtimePublicationCoordinator.commit(convo::isr::PublishAuthority::Granted,
-                                             convo::isr::RuntimeBoundary::NonRTWorld,
-                                             &world,
-                                             world.generation,
-                                             world.publication.sequenceId,
-                                             world.publication.epoch,
-                                             world.publication.mappedRuntimeGeneration);
-    }
-
-    inline void retireRuntimePublication(const RuntimePublishWorld* world) noexcept
-    {
-        auto& runtimePublicationCoordinator = runtimePublicationBridge_;
-        runtimePublicationCoordinator.retire(convo::isr::RetireAuthority::Granted,
-                                             convo::isr::RuntimeBoundary::NonRTWorld,
-                                             world);
     }
 
     inline void logUnexpectedRuntimeTransition(const char* origin,
@@ -2782,14 +2635,15 @@ public:
         DSPCore* current = getActiveRuntimeDSP();
         const auto* publishedWorld = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
         const auto& transition = (publishedWorld != nullptr) ? publishedWorld->engine.transition : convo::TransitionState{};
-        auto* fading = (transition.active && transition.next != nullptr)
+        const bool transitionActive = (publishedWorld != nullptr) && publishedWorld->topology.hasFadingRuntime;
+        auto* fading = (transitionActive && transition.next != nullptr)
             ? static_cast<DSPCore*>(transition.next)
             : nullptr;
         const auto revision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
         const auto publishedCurrentUuid = (transition.current != nullptr)
             ? static_cast<DSPCore*>(transition.current)->runtimeUuid
             : 0;
-        const auto publishedFadingUuid = (transition.active && transition.next != nullptr)
+        const auto publishedFadingUuid = (transitionActive && transition.next != nullptr)
             ? static_cast<DSPCore*>(transition.next)->runtimeUuid
             : 0;
 
@@ -3199,7 +3053,7 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
     if (isShutdownInProgress())
         return convo::isr::RetireEnqueueResult::Shutdown;
 
-    const uint64_t epoch = publishRetireEpoch();
+    const uint64_t epoch = markRetireEpoch();
     if (enqueueRetireEpochBounded(ptr, deleter, epoch))
         return convo::isr::RetireEnqueueResult::Success;
 
@@ -3209,21 +3063,8 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
 
     constexpr std::size_t kRetireFallbackPressureThreshold = 512;
     constexpr std::size_t kRetireFallbackQueueFullThreshold = 4096;
-    std::size_t fallbackDepth = 0;
-    {
-        std::lock_guard<std::mutex> lock(deferredDeleteFallbackMutex);
-        deferredDeleteFallbackQueue.push_back(DeferredDeleteFallbackEntry{ ptr, deleter, epoch });
-        fallbackDepth = deferredDeleteFallbackQueue.size();
-        if (deferredDeleteFallbackQueue.size() >= 1024)
-        {
-            juce::Logger::writeToLog("[DIAG] deferredDeleteFallbackQueue backlog="
-                + juce::String(static_cast<juce::int64>(deferredDeleteFallbackQueue.size())));
-        }
-    }
-
-    const std::uint64_t fallbackDepthU64 = static_cast<std::uint64_t>(fallbackDepth);
-    const std::uint64_t overflowDepth = consumeAtomic(audioThreadRetireOverflowPtr, std::memory_order_acquire) != nullptr ? 1ull : 0ull;
-    const std::uint64_t retireDepth = overflowDepth + fallbackDepthU64;
+    const std::uint64_t fallbackDepthU64 = 0;
+    const std::uint64_t retireDepth = static_cast<std::uint64_t>(m_epochDomain.pendingRetireCount());
     publishAtomic(fallbackQueueDepth_, fallbackDepthU64, std::memory_order_release);
     publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
     runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepthU64);
@@ -3235,10 +3076,10 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
     // when timer cadence is low.
     drainDeferredRetireQueues(false);
 
-    if (fallbackDepth >= kRetireFallbackQueueFullThreshold)
+    if (retireDepth >= kRetireFallbackQueueFullThreshold)
         return convo::isr::RetireEnqueueResult::QueueFull;
 
-    if (fallbackDepth >= kRetireFallbackPressureThreshold)
+    if (retireDepth >= kRetireFallbackPressureThreshold)
         return convo::isr::RetireEnqueueResult::QueuePressure;
 
     return convo::isr::RetireEnqueueResult::QueuePressure;
@@ -3384,8 +3225,6 @@ public:
     convo::EpochDomain m_epochDomain;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
     convo::RCUReader audioThreadRcuReader { m_epochDomain };
-    // ENGINE_CONTROL: Audio thread での deletion queue overflow 退避スロット。
-    std::atomic<DSPCore*> audioThreadRetireOverflowPtr { nullptr };
     RTLocalState rtLocalState_ {};
     RTAuxMutable rtAuxMutable_ {};
     convo::SnapshotCoordinator m_coordinator;

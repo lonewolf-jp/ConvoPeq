@@ -14,8 +14,7 @@ enum class AuthorityClass : std::uint8_t {
     Authoritative = 0,
     Derived,
     Diagnostic,
-    ExecutorLocal,
-    LegacyTemporary
+    ExecutorLocal
 };
 
 // Retire enqueue outcome classification for pressure-governed teardown paths.
