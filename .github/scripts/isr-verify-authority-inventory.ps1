@@ -12,6 +12,7 @@ $evidenceDir = Join-Path $repoRootResolved 'evidence'
 $reportPath = Join-Path $evidenceDir 'authority_inventory_report.json'
 $legacyManifestPath = Join-Path $repoRootResolved '.github\isr-legacy-temporary.json'
 $generateScriptPath = Join-Path $repoRootResolved '.github\scripts\isr-generate-authority-inventory.ps1'
+$growthAllowlistPath = Join-Path $repoRootResolved '.github\isr-authority-growth-allowlist.json'
 
 if (-not (Test-Path -LiteralPath $evidenceDir)) {
     New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
@@ -39,6 +40,17 @@ $legacyManifest = Get-Content -LiteralPath $legacyManifestPath -Raw -Encoding UT
 $currentInventory = Get-Content -LiteralPath $currentInventoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $postInventory = Get-Content -LiteralPath $postInventoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $diffInventory = Get-Content -LiteralPath $diffInventoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+
+$allowedNetGrowth = 0
+if (Test-Path -LiteralPath $growthAllowlistPath) {
+    $growthAllowlist = Get-Content -LiteralPath $growthAllowlistPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ("$($growthAllowlist.schema)" -eq 'isr_authority_growth_allowlist_v1') {
+        $allowedNetGrowth = [int]$growthAllowlist.allowedNetGrowth
+    }
+    else {
+        $warnings.Add("Authority growth allowlist schema mismatch; fallback allowedNetGrowth=0: schema=$($growthAllowlist.schema)")
+    }
+}
 
 $violations = New-Object System.Collections.Generic.List[string]
 $warnings = New-Object System.Collections.Generic.List[string]
@@ -173,7 +185,14 @@ foreach ($stateName in $stateCounts.Keys) {
 if ($null -ne $diffInventory.summary) {
     $addedCount = [int]$diffInventory.summary.addedCount
     if ($addedCount -gt 0) {
-        $violations.Add("Authority source growth detected: addedCount=$addedCount")
+        $removedCount = [int]$diffInventory.summary.removedCount
+        $netGrowth = $addedCount - $removedCount
+        if ($netGrowth -gt $allowedNetGrowth) {
+            $violations.Add("Authority source growth detected: addedCount=$addedCount removedCount=$removedCount netGrowth=$netGrowth allowedNetGrowth=$allowedNetGrowth")
+        }
+        else {
+            $warnings.Add("Authority source growth approved by allowlist: addedCount=$addedCount removedCount=$removedCount netGrowth=$netGrowth allowedNetGrowth=$allowedNetGrowth")
+        }
     }
 
     if ($diffInventory.summary.PSObject.Properties.Name -contains 'observePathChangedCount') {

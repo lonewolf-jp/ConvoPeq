@@ -33,7 +33,7 @@
             "runtimeCodeChangeZeroRequired": false,
             "inventoryDiffStructuralInvariantRequired": false,
             "requiredNotes": [
-                "soak short 30m"
+                "soak medium 24h"
             ]
         },
         {
@@ -43,7 +43,7 @@
             "runtimeCodeChangeZeroRequired": false,
             "inventoryDiffStructuralInvariantRequired": false,
             "requiredNotes": [
-                "soak long 4h"
+                "soak long 72h"
             ]
         },
         {
@@ -53,6 +53,7 @@
             "runtimeCodeChangeZeroRequired": false,
             "inventoryDiffStructuralInvariantRequired": false,
             "requiredNotes": [
+                "soak extreme 1week",
                 "break-glass approval",
                 "rollback plan required"
             ]

@@ -9,6 +9,9 @@ namespace
     constexpr int kEmergencyReclaimBoostWindowMs = 500;
     constexpr int kEmergencyReclaimBoostMaxCount = 2;
     constexpr int kEmergencyReclaimBoostMinIntervalMs = 10;
+    constexpr int kRetirePressureMildPercent = 75;
+    constexpr int kRetirePressureMediumPercent = 90;
+    constexpr int kRetirePressureSeverePercent = 95;
 
     [[nodiscard]] double clampScale(double value) noexcept
     {
@@ -189,6 +192,9 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     const bool nowSaturated = retireDepth >= static_cast<std::uint64_t>(hwm);
     const std::uint64_t publishCount = convo::consumeAtomic(rtAuxMutable_.runtimePublishCount, std::memory_order_acquire);
 
+    const int retirePressureLevel = evaluateRetirePressureLevelNoRt(retireDepth, hwm);
+    applyRetirePressurePolicyNoRt(retirePressureLevel, retireDepth);
+
     if (!wasSaturated && nowSaturated)
     {
         convo::publishAtomic(retireSaturationActive_, true, std::memory_order_release);
@@ -236,12 +242,13 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
     {
         const bool saturatedNow = convo::consumeAtomic(retireSaturationActive_, std::memory_order_acquire);
+        const bool protectiveModeActive = convo::consumeAtomic(retireProtectiveModeActive_, std::memory_order_acquire);
         const std::int64_t nowTicks = juce::Time::getHighResolutionTicks();
         const std::int64_t ticksPerSecond = juce::Time::getHighResolutionTicksPerSecond();
         const std::int64_t boostWindowTicks = (ticksPerSecond * kEmergencyReclaimBoostWindowMs) / 1000;
         const std::int64_t minIntervalTicks = (ticksPerSecond * kEmergencyReclaimBoostMinIntervalMs) / 1000;
 
-        if (saturatedNow)
+        if (saturatedNow || protectiveModeActive)
         {
             std::int64_t windowStart = convo::consumeAtomic(emergencyReclaimWindowStartTicks_, std::memory_order_acquire);
             if (windowStart <= 0 || (boostWindowTicks > 0 && (nowTicks - windowStart) > boostWindowTicks))
@@ -283,6 +290,61 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     {
         juce::Logger::writeToLog("[DIAG] deferred reclaim enqueue drops=" + juce::String(static_cast<juce::int64>(dropped)));
     }
+}
+
+int AudioEngine::evaluateRetirePressureLevelNoRt(std::uint64_t retireDepth,
+                                                 int highWatermark) const noexcept
+{
+    const int safeHwm = std::max(1, highWatermark);
+    const std::uint64_t ratioPercent = (retireDepth * 100ull) / static_cast<std::uint64_t>(safeHwm);
+
+    if (ratioPercent >= static_cast<std::uint64_t>(kRetirePressureSeverePercent))
+        return 3;
+    if (ratioPercent >= static_cast<std::uint64_t>(kRetirePressureMediumPercent))
+        return 2;
+    if (ratioPercent >= static_cast<std::uint64_t>(kRetirePressureMildPercent))
+        return 1;
+    return 0;
+}
+
+void AudioEngine::applyRetirePressurePolicyNoRt(int retirePressureLevel,
+                                                std::uint64_t retireDepth) noexcept
+{
+    const int previousLevel = convo::exchangeAtomic(retirePressureLevel_, retirePressureLevel, std::memory_order_acq_rel);
+    const bool previousProtective = convo::consumeAtomic(retireProtectiveModeActive_, std::memory_order_acquire);
+
+    const bool mild = retirePressureLevel >= 1;
+    const bool medium = retirePressureLevel >= 2;
+    const bool severe = retirePressureLevel >= 3;
+    const bool critical = severe && (retireDepth >= static_cast<std::uint64_t>(std::max(1, convo::consumeAtomic(retireHighWatermark_, std::memory_order_acquire))));
+
+    convo::publishAtomic(retirePressureCoalescingActive_, mild, std::memory_order_release);
+    convo::publishAtomic(retirePressurePublicationThrottleActive_, medium, std::memory_order_release);
+    convo::publishAtomic(retirePressureAdmissionStrict_, severe, std::memory_order_release);
+    convo::publishAtomic(retireProtectiveModeActive_, critical, std::memory_order_release);
+
+    if (!previousProtective && critical)
+    {
+        convo::fetchAddAtomic(retireProtectiveModeEnterCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+    }
+
+    if (previousLevel != retirePressureLevel)
+    {
+        juce::Logger::writeToLog("[DIAG] retire pressure level changed="
+            + juce::String(retirePressureLevel)
+            + " retireDepth=" + juce::String(static_cast<juce::int64>(retireDepth))
+            + " hwm=" + juce::String(convo::consumeAtomic(retireHighWatermark_, std::memory_order_acquire))
+            + " policy{coalesce=" + juce::String(mild ? 1 : 0)
+            + ", throttle=" + juce::String(medium ? 1 : 0)
+            + ", strict=" + juce::String(severe ? 1 : 0)
+            + ", protective=" + juce::String(critical ? 1 : 0)
+            + "}");
+    }
+}
+
+bool AudioEngine::shouldRejectRebuildAdmissionForPressure() const noexcept
+{
+    return convo::consumeAtomic(retirePressureAdmissionStrict_, std::memory_order_acquire);
 }
 
 bool AudioEngine::isFullyDrained() noexcept

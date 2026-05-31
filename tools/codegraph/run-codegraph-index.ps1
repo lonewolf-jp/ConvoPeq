@@ -53,7 +53,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Index step failed with exit code $LASTEXITCODE"
 }
 
-Write-Info "Step 3/3: Prune venv noise"
+Write-Info "Step 3/3: Prune venv/codeql/vendor noise"
 & powershell -NoProfile -ExecutionPolicy Bypass -File $pruneScript -RepoRoot $RepoRoot
 if ($LASTEXITCODE -ne 0) {
     throw "Prune step failed with exit code $LASTEXITCODE"

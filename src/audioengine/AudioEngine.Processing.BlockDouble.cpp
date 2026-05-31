@@ -99,12 +99,16 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     auto runtimeReadView = readAudioRuntimeView();
-    const auto authority = AudioCallbackAuthorityView { runtimeReadView, consumeCrossfadePreparedSnapshot() };
     const auto& runtimeReadViewRef = runtimeReadView;
-    const auto* runtimeGraph = getRuntimeGraph(runtimeReadViewRef);
-    DSPCore* dsp = (runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
-        ? static_cast<DSPCore*>(runtimeGraph->activeNode)
-        : nullptr;
+    const auto* runtimeWorld = runtimeReadViewRef.runtimeWorld;
+    if (runtimeWorld == nullptr)
+    {
+        buffer.clear();
+        return;
+    }
+    const auto authority = AudioCallbackAuthorityView { makeCrossfadePreparedSnapshotFromWorld(*runtimeWorld) };
+    const auto& runtimePublishView = runtimeReadViewRef.runtimePublish;
+    DSPCore* dsp = static_cast<DSPCore*>(runtimePublishView.transition.current);
     if (dsp == nullptr)
     {
         buffer.clear();
@@ -119,7 +123,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     #endif
 
     // --- ProcessingStateを現行設計で初期化 ---
-    const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(nullptr);
+    const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld);
 
     DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 
@@ -130,12 +134,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    float snapshotAlpha = 1.0f;
-    const convo::GlobalSnapshot* snapshotFrom = nullptr;
-    const convo::GlobalSnapshot* snapshotTo = nullptr;
-    updateAudioThreadSnapshotFade(numSamples, snapshotAlpha, snapshotFrom, snapshotTo);
-
-    const double engineSampleRate = (runtimeGraph != nullptr) ? runtimeGraph->sampleRate : 0.0;
+    const double engineSampleRate = runtimePublishView.sampleRateHz;
     if (engineSampleRate <= 0.0
         || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
     {
@@ -144,7 +143,9 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
-    DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
+    DSPCore* fading = runtimePublishView.transition.active
+        ? static_cast<DSPCore*>(runtimePublishView.transition.next)
+        : nullptr;
     const auto& preparedCrossfade = authority.preparedCrossfade;
     bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
     if (fading != nullptr && fading == dsp)
@@ -246,55 +247,11 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
     else
     {
-        const bool shouldBlendSnapshots = (snapshotFrom != nullptr)
-            && (snapshotTo != nullptr)
-            && (absDiffNoLibm(static_cast<double>(snapshotAlpha), 1.0) > 1.0e-6)
-            && (dspCrossfadeDoubleBuffer.getNumChannels() >= 2)
-            && (dspCrossfadeDoubleBuffer.getNumSamples() >= numSamples);
-
-        if (shouldBlendSnapshots)
-        {
-            const EngineParameterSnapshot fromParameterSnapshot = captureAudioThreadParameterSnapshot(snapshotFrom);
-            const EngineParameterSnapshot toParameterSnapshot = captureAudioThreadParameterSnapshot(snapshotTo);
-
-            auto fromState = buildAudioThreadProcessingState(dsp, fromParameterSnapshot);
-            auto toState = buildAudioThreadProcessingState(dsp, toParameterSnapshot);
-
-            fromState.analyzerEnabled = false;
-            fromState.adaptiveCaptureQueue = nullptr;
-
-            dsp->processDoubleToBuffer(buffer,
-                                       dspCrossfadeDoubleBuffer,
-                                       analyzerFifo,
-                                       nullptr,
-                                       nullptr,
-                                       fromState);
-
-            dsp->processDouble(buffer,
-                               analyzerFifo,
-                               &inputLevelLinear,
-                               &outputLevelLinear,
-                               toState);
-
-            const double alpha = juce::jlimit(0.0, 1.0, static_cast<double>(snapshotAlpha));
-            const double invAlpha = 1.0 - alpha;
-            const int outChannels = std::min(2, buffer.getNumChannels());
-            for (int ch = 0; ch < outChannels; ++ch)
-            {
-                double* dst = buffer.getWritePointer(ch, 0);
-                const double* srcFrom = dspCrossfadeDoubleBuffer.getReadPointer(ch, 0);
-                for (int i = 0; i < numSamples; ++i)
-                    dst[i] = dst[i] * alpha + srcFrom[i] * invAlpha;
-            }
-        }
-        else
-        {
-            dsp->processDouble(buffer,
-                               analyzerFifo,
-                               &inputLevelLinear,
-                               &outputLevelLinear,
-                               procState);
-        }
+        dsp->processDouble(buffer,
+                           analyzerFifo,
+                           &inputLevelLinear,
+                           &outputLevelLinear,
+                           procState);
 
         cleanupCrossfadeDirectPath(dsp, fading);
     }

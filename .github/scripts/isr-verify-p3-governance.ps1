@@ -89,8 +89,7 @@ $hasHandleCallbackView =
 
 $hasRuntimeWorldCallbackView =
     [regex]::IsMatch($audioBlockCpp, 'readAudioRuntimeView\s*\(\s*\)', [System.Text.RegularExpressions.RegexOptions]::Multiline) -and
-    [regex]::IsMatch($audioBlockCpp, 'getRuntimeGraph\s*\(\s*runtimeReadView\s*\)', [System.Text.RegularExpressions.RegexOptions]::Multiline) -and
-    [regex]::IsMatch($audioBlockCpp, 'runtimeGraph->activeNode', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    [regex]::IsMatch($audioBlockCpp, 'runtimePublishView\.transition\.current|runtimeReadView(?:Ref)?\.runtimePublish\.transition\.current', [System.Text.RegularExpressions.RegexOptions]::Multiline)
 
 if (-not $hasHandleCallbackView -and -not $hasRuntimeWorldCallbackView) {
     throw 'R21 gate: callback runtime observe view missing (neither DSPHandleRuntime view nor RuntimeWorld view found)'

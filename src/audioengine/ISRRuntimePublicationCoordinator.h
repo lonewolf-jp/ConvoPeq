@@ -2,8 +2,6 @@
 #include <atomic>
 #include <memory>
 #include <cstdint>
-#include <vector>
-#include <mutex>
 #include "ISRClosure.h"
 #include "ISRPayloadTier.h"
 #include "ISRSealedObject.h"
@@ -72,8 +70,6 @@ private:
         InvalidPayloadTier
     };
 
-    std::atomic<const void*> currentWorld_;
-    std::atomic<std::uint64_t> version_;
     std::atomic<PublicationSequenceId> publicationSequenceId_;
     std::atomic<PublicationEpoch> publicationEpoch_;
     std::atomic<std::uint64_t> mappedRuntimeGeneration_;
@@ -88,9 +84,6 @@ private:
     std::atomic<std::uint32_t> pressureNormalizedWindows_;
     std::atomic<bool> swapPending_;
     std::atomic<CoordinatorState> state_;
-    std::mutex retireGuard_;
-    std::vector<const void*> retiredWorlds_;
-    static constexpr std::size_t kMaxRetiredWorldResidency = 4096;
     static constexpr std::uint64_t kPressureSlopeThreshold = 8;
     static constexpr std::uint32_t kPressureNormalizeWindows = 3;
 };

@@ -13,7 +13,6 @@ void AudioEngine::timerCallback()
 {
     const auto runtimeReadView = readControlRuntimeView();
     const auto& runtimePublishView = runtimeReadView.runtimePublish;
-    const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
     const auto* currentSnapshot = getRuntimeSnapshot(runtimeReadView);
 
     emitEvidenceTickNonRt(false);
@@ -53,11 +52,17 @@ void AudioEngine::timerCallback()
     }
 
     {
-        const uint64_t revision = (runtimeGraph != nullptr) ? runtimeGraph->generation : 0;
-        const uint64_t currentUuid = (runtimeGraph != nullptr) ? runtimeGraph->runtimeUuid : 0;
-        const uint64_t fadingUuid = (runtimeGraph != nullptr) ? runtimeGraph->fadingRuntimeUuid : 0;
-        const uint64_t transitionCurrentUuid = (runtimeGraph != nullptr) ? runtimeGraph->transitionCurrentRuntimeUuid : 0;
-        const uint64_t transitionNextUuid = (runtimeGraph != nullptr) ? runtimeGraph->transitionNextRuntimeUuid : 0;
+        auto* currentRuntime = static_cast<DSPCore*>(runtimePublishView.transition.current);
+        auto* fadingRuntime = runtimePublishView.transition.active
+            ? static_cast<DSPCore*>(runtimePublishView.transition.next)
+            : nullptr;
+        const uint64_t revision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
+        const uint64_t currentUuid = (currentRuntime != nullptr) ? currentRuntime->runtimeUuid : 0;
+        const uint64_t fadingUuid = (fadingRuntime != nullptr) ? fadingRuntime->runtimeUuid : 0;
+        const uint64_t transitionCurrentUuid = currentUuid;
+        const uint64_t transitionNextUuid = (runtimePublishView.transition.next != nullptr)
+            ? static_cast<DSPCore*>(runtimePublishView.transition.next)->runtimeUuid
+            : 0;
 
         if (revision != rtAuxMutable_.debugLastReportedRuntimeSnapshotRevision
             || currentUuid != rtAuxMutable_.debugLastReportedRuntimePublishCurrentUuid
@@ -152,10 +157,10 @@ void AudioEngine::timerCallback()
 
     // 回復経路: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
-    auto* currentDspForRuntime = (runtimeGraph != nullptr)
-        ? static_cast<DSPCore*>(runtimeGraph->activeNode)
+    auto* currentDspForRuntime = static_cast<DSPCore*>(runtimePublishView.transition.current);
+    auto* fadingDspForRuntime = runtimePublishView.transition.active
+        ? static_cast<DSPCore*>(runtimePublishView.transition.next)
         : nullptr;
-    auto* fadingDspForRuntime = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
 
     // T1: 公開済みRuntimeへのNonRTからの可変更新を避けるため、
     // Timerからのdither内部状態更新は行わない。
@@ -387,9 +392,7 @@ void AudioEngine::timerCallback()
         // Phase4: フェード完了時の RuntimeGraph を idle 状態へ同期する。
         // これにより AudioThread は atomic fallback ではなく publish world だけで
         // crossfade 状態を正しく観測できる。
-        auto* currentAfterFade = (runtimeGraph != nullptr)
-            ? static_cast<DSPCore*>(runtimeGraph->activeNode)
-            : nullptr;
+        auto* currentAfterFade = static_cast<DSPCore*>(runtimePublishView.transition.current);
         if (currentAfterFade != nullptr)
         {
             makeRuntimePublicationCoordinator()

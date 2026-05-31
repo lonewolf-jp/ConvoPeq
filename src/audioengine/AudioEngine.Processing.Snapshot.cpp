@@ -12,8 +12,7 @@ namespace
 
 void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
                                       const convo::GlobalSnapshot* snap,
-                                      bool isFadingTarget,
-                                      const convo::RuntimeGraph* runtimeGraphHint)
+                                      bool isFadingTarget)
 {
     ASSERT_AUDIO_THREAD();
 
@@ -23,24 +22,22 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
         return;
     }
 
-    const auto* runtimeGraph = runtimeGraphHint;
-    if (runtimeGraph == nullptr)
-    {
-        bufferToFill.clearActiveBufferRegion();
-        return;
-    }
+    const auto runtimeReadView = readAudioRuntimeView();
+    const auto& runtimePublishView = runtimeReadView.runtimePublish;
     DSPCore* dsp = isFadingTarget
-        ? resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph)
-        : resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
+        ? (runtimePublishView.transition.active
+            ? static_cast<DSPCore*>(runtimePublishView.transition.next)
+            : nullptr)
+        : static_cast<DSPCore*>(runtimePublishView.transition.current);
     if (dsp == nullptr && isFadingTarget)
-        dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
+        dsp = static_cast<DSPCore*>(runtimePublishView.transition.current);
     if (dsp == nullptr)
     {
         bufferToFill.clearActiveBufferRegion();
         return;
     }
 
-    const double engineSampleRate = (runtimeGraph != nullptr) ? runtimeGraph->sampleRate : 0.0;
+    const double engineSampleRate = runtimePublishView.sampleRateHz;
     if (engineSampleRate <= 0.0
         || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
     {

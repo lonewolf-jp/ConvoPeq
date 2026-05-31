@@ -86,10 +86,9 @@ void AudioEngine::releaseResources()
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
         const auto runtimeReadView = readControlRuntimeView();
-        const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
         validateDistinctRuntimeSlots("releaseResources.beforeClear",
                  getActiveRuntimeDSP(),
-                         resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
+                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
                          nullptr);
 
         convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel);
@@ -127,7 +126,7 @@ void AudioEngine::releaseResources()
 
         validateDistinctRuntimeSlots("releaseResources.afterClear",
                  getActiveRuntimeDSP(),
-                         resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
+                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
                          nullptr);
     }
 

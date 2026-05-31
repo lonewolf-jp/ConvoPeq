@@ -70,6 +70,22 @@ public:
         return graceCompleted && pendingIntentOwned && authoritativeOwnershipReleased;
     }
 
+    [[nodiscard]] static bool hasExceededDeferralThresholds(std::uint64_t retireDeferralEpochs,
+                                                            double retireDeferralWallClockMs,
+                                                            std::uint64_t maxRetireDeferralEpochs,
+                                                            double maxRetireWallClockMs) noexcept
+    {
+        return retireDeferralEpochs > maxRetireDeferralEpochs
+            || retireDeferralWallClockMs > maxRetireWallClockMs;
+    }
+
+    [[nodiscard]] static bool canReclaimAfterEscalation(bool noReader,
+                                                        bool noExecutorReference,
+                                                        bool noPendingTransition) noexcept
+    {
+        return noReader && noExecutorReference && noPendingTransition;
+    }
+
     [[nodiscard]] RetireLane laneOf(std::uint32_t slot) const noexcept;
     void emitRetireTimeline(const std::filesystem::path& outputPath) const;
 

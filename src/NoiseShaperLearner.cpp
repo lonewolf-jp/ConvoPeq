@@ -953,10 +953,9 @@ NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature
     session.sampleRateHz = static_cast<int>(convo::consumeAtomic(engine.currentSampleRate, std::memory_order_acquire) + 0.5);
     session.bitDepth = engine.getDitherBitDepth();
     session.adaptiveCoeffBankIndex = convo::consumeAtomic(engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-        const auto runtimeReadView = engine.readControlRuntimeView();
-        if (auto* dsp = (runtimeReadView.graph != nullptr)
-            ? static_cast<AudioEngine::DSPCore*>(runtimeReadView.graph->activeNode)
-            : nullptr)
+    const auto runtimeReadView = engine.readControlRuntimeView();
+    auto* dsp = static_cast<AudioEngine::DSPCore*>(runtimeReadView.runtimePublish.transition.current);
+    if (dsp != nullptr)
         session.sessionId = dsp->currentCaptureSessionId;
     return session;
 }

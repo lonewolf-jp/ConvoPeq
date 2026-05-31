@@ -472,6 +472,30 @@ foreach ($requiredNote in $requiredNotes) {
                 $violations += "Required note check failed: note=soak long 4h requiredMinutes=240 actualMinutes=$SoakMinutes"
             }
         }
+        'soak medium 24h' {
+            $noteSatisfied = ($SoakMinutes -ge 1440)
+            $evidence['requiredMinutes'] = 1440
+            $evidence['actualMinutes'] = $SoakMinutes
+            if (-not $noteSatisfied) {
+                $violations += "Required note check failed: note=soak medium 24h requiredMinutes=1440 actualMinutes=$SoakMinutes"
+            }
+        }
+        'soak long 72h' {
+            $noteSatisfied = ($SoakMinutes -ge 4320)
+            $evidence['requiredMinutes'] = 4320
+            $evidence['actualMinutes'] = $SoakMinutes
+            if (-not $noteSatisfied) {
+                $violations += "Required note check failed: note=soak long 72h requiredMinutes=4320 actualMinutes=$SoakMinutes"
+            }
+        }
+        'soak extreme 1week' {
+            $noteSatisfied = ($SoakMinutes -ge 10080)
+            $evidence['requiredMinutes'] = 10080
+            $evidence['actualMinutes'] = $SoakMinutes
+            if (-not $noteSatisfied) {
+                $violations += "Required note check failed: note=soak extreme 1week requiredMinutes=10080 actualMinutes=$SoakMinutes"
+            }
+        }
         'break-glass approval' {
             $noteSatisfied = ($breakglassActiveEntries -gt 0) -and $breakglassReportReady
             $evidence['breakglassReportPath'] = $breakglassReportPath

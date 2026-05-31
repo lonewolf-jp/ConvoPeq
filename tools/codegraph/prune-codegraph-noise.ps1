@@ -37,37 +37,60 @@ def main(db_path: str) -> int:
         "or lower(file_path) like '%/.venv/%' "
         "or lower(file_path) like '%\\.venv\\%')"
     )
+    where_codeql = (
+        "(lower(file_path) like '%/storage/codeql/%' "
+        "or lower(file_path) like '%\\storage\\codeql\\%')"
+    )
+    where_vendor = (
+        "(lower(file_path) like '%/juce/%' "
+        "or lower(file_path) like '%\\juce\\%' "
+        "or lower(file_path) like '%/r8brain-free-src/%' "
+        "or lower(file_path) like '%\\r8brain-free-src\\%')"
+    )
+    where_noise = f"({where_venv} or {where_codeql} or {where_vendor})"
+
     where_venv_files = (
         "(lower(path) like '%/.venv-codegraph/%' "
         "or lower(path) like '%\\.venv-codegraph\\%' "
         "or lower(path) like '%/.venv/%' "
         "or lower(path) like '%\\.venv\\%')"
     )
+    where_codeql_files = (
+        "(lower(path) like '%/storage/codeql/%' "
+        "or lower(path) like '%\\storage\\codeql\\%')"
+    )
+    where_vendor_files = (
+        "(lower(path) like '%/juce/%' "
+        "or lower(path) like '%\\juce\\%' "
+        "or lower(path) like '%/r8brain-free-src/%' "
+        "or lower(path) like '%\\r8brain-free-src\\%')"
+    )
+    where_noise_files = f"({where_venv_files} or {where_codeql_files} or {where_vendor_files})"
 
     total_before = cur.execute("select count(*) from entities").fetchone()[0]
-    venv_before = cur.execute(f"select count(*) from entities where {where_venv}").fetchone()[0]
+    noise_before = cur.execute(f"select count(*) from entities where {where_noise}").fetchone()[0]
 
     cur.execute("BEGIN IMMEDIATE")
-    cur.execute(f"create temp table _drop_ids as select id from entities where {where_venv}")
+    cur.execute(f"create temp table _drop_ids as select id from entities where {where_noise}")
     cur.execute("delete from relations where source_id in (select id from _drop_ids) or target_id in (select id from _drop_ids)")
     deleted_relations = cur.rowcount
     cur.execute("delete from entities where id in (select id from _drop_ids)")
     deleted_entities = cur.rowcount
-    cur.execute(f"delete from files where {where_venv_files}")
+    cur.execute(f"delete from files where {where_noise_files}")
     deleted_files = cur.rowcount
     cur.execute("drop table _drop_ids")
     con.commit()
 
     total_after = cur.execute("select count(*) from entities").fetchone()[0]
-    venv_after = cur.execute(f"select count(*) from entities where {where_venv}").fetchone()[0]
+    noise_after = cur.execute(f"select count(*) from entities where {where_noise}").fetchone()[0]
 
     print(f"total_before={total_before}")
-    print(f"venv_before={venv_before}")
+    print(f"noise_before={noise_before}")
     print(f"deleted_entities={deleted_entities}")
     print(f"deleted_relations={deleted_relations}")
     print(f"deleted_files={deleted_files}")
     print(f"total_after={total_after}")
-    print(f"venv_after={venv_after}")
+    print(f"noise_after={noise_after}")
 
     con.close()
     return 0
@@ -80,8 +103,8 @@ if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1]))
 '@
 
-Write-Info "Pruning CodeGraph DB noise from venv paths..."
- $tmpPy = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".py")
+Write-Info "Pruning CodeGraph DB noise from venv/codeql/vendor paths..."
+$tmpPy = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".py")
 try {
     Set-Content -LiteralPath $tmpPy -Value $py -Encoding UTF8 -NoNewline
     python "$tmpPy" "$dbPath"

@@ -1,0 +1,77 @@
+#include <stdexcept>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <filesystem>
+
+namespace {
+
+[[nodiscard]] std::string resolveRepoRelativePath(const char* relativePath)
+{
+    namespace fs = std::filesystem;
+    const fs::path p(relativePath);
+
+    for (const auto& prefix : { fs::path("."), fs::path(".."), fs::path("../.."), fs::path("../../..") })
+    {
+        const fs::path candidate = prefix / p;
+        if (fs::exists(candidate))
+            return candidate.string();
+    }
+
+    throw std::runtime_error(std::string("failed to resolve repository-relative path: ") + relativePath);
+}
+
+[[nodiscard]] std::string readAllText(const char* path)
+{
+    const std::string resolved = resolveRepoRelativePath(path);
+    std::ifstream in(resolved, std::ios::in | std::ios::binary);
+    if (!in)
+        throw std::runtime_error(std::string("failed to open file: ") + path);
+
+    std::ostringstream oss;
+    oss << in.rdbuf();
+    return oss.str();
+}
+
+[[nodiscard]] bool contains(const std::string& haystack, const std::string& needle)
+{
+    return haystack.find(needle) != std::string::npos;
+}
+
+[[nodiscard]] bool testObserveSingleSourceContract()
+{
+    const auto audioBlock = readAllText("src/audioengine/AudioEngine.Processing.AudioBlock.cpp");
+    const auto blockDouble = readAllText("src/audioengine/AudioEngine.Processing.BlockDouble.cpp");
+
+    if (!contains(audioBlock, "makeCrossfadePreparedSnapshotFromWorld"))
+        return false;
+    if (!contains(blockDouble, "makeCrossfadePreparedSnapshotFromWorld"))
+        return false;
+
+    if (!contains(audioBlock, "authority.preparedCrossfade"))
+        return false;
+    if (!contains(blockDouble, "authority.preparedCrossfade"))
+        return false;
+
+    if (contains(audioBlock, "getRuntimeGraph(runtimeReadView)"))
+        return false;
+    if (contains(blockDouble, "getRuntimeGraph(runtimeReadView)"))
+        return false;
+
+    if (contains(audioBlock, "runtimeGraph->"))
+        return false;
+    if (contains(blockDouble, "runtimeGraph->"))
+        return false;
+
+    return true;
+}
+
+} // namespace
+
+int main()
+{
+    if (!testObserveSingleSourceContract())
+        throw std::runtime_error("observe path single-source contract failed");
+
+    return 0;
+}

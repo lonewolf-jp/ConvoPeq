@@ -191,6 +191,21 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
         return;
     }
 
+    if (shouldRejectRebuildAdmissionForPressure())
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                             intentId,
+                             RebuildTelemetryReason::RetirePressureSevere,
+                             RebuildTelemetryDecision::Suppressed,
+                             structuralHash,
+                             fingerprint,
+                             rebuildClass,
+                             collapsePolicy,
+                             kPhase5TagKeep);
+        return;
+    }
+
     if (sameAsPendingWouldMerge && shouldApplyLatestWinsMerge)
     {
         emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
@@ -363,6 +378,12 @@ void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
         return;
     }
 
+    if (shouldRejectRebuildAdmissionForPressure())
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        return;
+    }
+
     submitRebuildIntent(kind,
                         RebuildTelemetryReason::RequestRebuildKindEntry,
                         RebuildTelemetryClass::Structural,
@@ -400,6 +421,21 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
         emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
                              intentId,
                              RebuildTelemetryReason::ShutdownInProgress,
+                             RebuildTelemetryDecision::Suppressed,
+                             0,
+                             0,
+                             RebuildTelemetryClass::Structural,
+                             collapsePolicy,
+                             kPhase5TagKeep);
+        return;
+    }
+
+    if (shouldRejectRebuildAdmissionForPressure())
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
+                             intentId,
+                             RebuildTelemetryReason::RetirePressureSevere,
                              RebuildTelemetryDecision::Suppressed,
                              0,
                              0,

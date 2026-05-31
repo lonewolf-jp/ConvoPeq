@@ -81,11 +81,7 @@ namespace
 {
     LatencyBreakdown breakdown;
 
-    const auto* publishedWorld = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
-    const auto* runtimeGraph = (publishedWorld != nullptr) ? &publishedWorld->graph : nullptr;
-    auto* dsp = (runtimeGraph != nullptr)
-        ? static_cast<DSPCore*>(runtimeGraph->activeNode)
-        : nullptr;
+    auto* dsp = getActiveRuntimeDSP();
     if (dsp == nullptr)
         return breakdown;
 

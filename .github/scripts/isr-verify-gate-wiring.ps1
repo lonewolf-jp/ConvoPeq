@@ -54,6 +54,7 @@ if (-not $ownershipMigrationNeedsAuthorityTransferContracts) {
 }
 
 $requiredGateScripts = @(
+    '.github/scripts/isr-verify-verifier-execution-layers.ps1',
     '.github/scripts/isr-verify-v1-immutability.ps1',
     '.github/scripts/isr-verify-v2-seal.ps1',
     '.github/scripts/isr-verify-v3-runtime-graph-immutability.ps1',
@@ -119,7 +120,9 @@ $requiredGateScripts = @(
     '.github/scripts/isr-verify-v73-shutdown-reclaim.ps1',
     '.github/scripts/isr-verify-v73-residency-telemetry.ps1',
     '.github/scripts/isr-verify-design-docs-coverage.ps1',
-    '.github/scripts/isr-verify-authority-inventory.ps1'
+    '.github/scripts/isr-verify-authority-inventory.ps1',
+    '.github/scripts/isr-verify-soak-governance.ps1',
+    '.github/scripts/isr-verify-publication-ownership.ps1'
 )
 
 foreach ($relativeScript in $requiredGateScripts) {
@@ -1584,8 +1587,9 @@ $prSlaScriptText.Contains('releaseWindow') -and
 $prSlaScriptText.Contains('gitRef') -and
 $prSlaScriptText.Contains('authority_inventory_report.json') -and
 $prSlaScriptText.Contains('inventory_diff_report.json') -and
-$prSlaScriptText.Contains('Required note check failed: note=soak short 30m') -and
-$prSlaScriptText.Contains('Required note check failed: note=soak long 4h') -and
+$prSlaScriptText.Contains('Required note check failed: note=soak medium 24h') -and
+$prSlaScriptText.Contains('Required note check failed: note=soak long 72h') -and
+$prSlaScriptText.Contains('Required note check failed: note=soak extreme 1week') -and
 $prSlaScriptText.Contains('Required note check failed: note=break-glass approval') -and
 $prSlaScriptText.Contains('Required note check failed: note=rollback plan required') -and
 $prSlaScriptText.Contains('Required note check failed: note=runtime code change zero') -and
@@ -1615,7 +1619,7 @@ if (-not $prSlaNeedsReleaseContracts) {
 }
 
 if (-not ($tierRunnerText.Contains('$env:GITHUB_EVENT_NAME -eq ''pull_request''') -and
-          $tierRunnerText.Contains('$prSlaArgs[''RequireDeclaredClass''] = $true'))) {
+        $tierRunnerText.Contains('$prSlaArgs[''RequireDeclaredClass''] = $true'))) {
     throw 'Tier runner missing pull_request declared-class enforcement wiring for PR SLA verifier'
 }
 

@@ -17,6 +17,70 @@ void destroyPublicationIntentNode(void* ptr) noexcept
 {
     delete static_cast<AudioEngine::PublicationIntent*>(ptr);
 }
+
+[[nodiscard]] inline bool validateSemanticCompleteness(const RuntimePublishWorld& world) noexcept
+{
+    if (world.schemaVersion != convo::isr::kRuntimeSemanticSchemaVersion)
+        return false;
+
+    if (world.metadata.schemaVersion != world.schemaVersion)
+        return false;
+
+    if (world.metadata.publicationSequence != world.publication.sequenceId)
+        return false;
+
+    if (!RuntimeState::validateDescriptorSet()
+        || !convo::isr::PublicationSemantic::validateDescriptorSet())
+        return false;
+
+    if (world.generation == 0
+        || world.generationSemantic.runtimeGeneration == 0
+        || world.publication.sequenceId == 0
+        || world.publication.epoch == 0
+        || world.publication.mappedRuntimeGeneration == 0)
+        return false;
+
+    if (world.generationSemantic.runtimeGeneration != world.generation
+        || world.publication.mappedRuntimeGeneration != world.generation)
+        return false;
+
+    if (world.projectionFreshness.projectionGeneration != world.publication.mappedRuntimeGeneration)
+        return false;
+
+    if (world.projectionFreshness.projectionGeneration != world.generation
+        || world.projectionFreshness.projectionRevision != world.generation)
+        return false;
+
+    return true;
+}
+
+inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
+                                          convo::isr::SemanticTransactionState next) noexcept
+{
+    convo::publishAtomic(state,
+                         static_cast<std::uint8_t>(next),
+                         std::memory_order_release);
+}
+
+[[nodiscard]] inline bool transitionSemanticTransactionState(std::atomic<std::uint8_t>& state,
+                                                             convo::isr::SemanticTransactionState next) noexcept
+{
+    auto observedRaw = convo::consumeAtomic(state, std::memory_order_acquire);
+    for (;;)
+    {
+        const auto from = static_cast<convo::isr::SemanticTransactionState>(observedRaw);
+        if (!convo::isr::isValidSemanticTransactionTransition(from, next))
+            return false;
+
+        const auto desiredRaw = static_cast<std::uint8_t>(next);
+        if (convo::compareExchangeAtomic(state,
+                                         observedRaw,
+                                         desiredRaw,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+            return true;
+    }
+}
 }  // namespace
 
 [[nodiscard]] bool AudioEngine::acceptsRuntimePublication() const noexcept
@@ -38,42 +102,36 @@ void destroyPublicationIntentNode(void* ptr) noexcept
 
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
+    forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Building);
+
     const auto rejectWithEvidence = [this]() noexcept {
+        if (!transitionSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Rejected))
+        {
+            forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Rejected);
+        }
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
         debugRuntime_.validateOwnershipClosure();
         emitEvidenceTickNonRt(true);
         return false;
     };
 
-    if (world.schemaVersion != convo::isr::kRuntimeSemanticSchemaVersion)
+    // Stage 1: semantic completeness.
+    if (!validateSemanticCompleteness(world))
         return rejectWithEvidence();
 
-    if (world.metadata.schemaVersion != world.schemaVersion)
+    if (!transitionSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Validated))
         return rejectWithEvidence();
 
-    if (world.metadata.publicationSequence != world.publication.sequenceId)
-        return rejectWithEvidence();
-
+    // Stage 2: semantic validity.
     if (!convo::isr::isValidRoutingSemantic(world.routing)
         || !convo::isr::isValidExecutionSemantic(world.execution))
         return rejectWithEvidence();
 
-    if (!RuntimeState::validateDescriptorSet()
-        || !convo::RuntimeGraph::validateDescriptorSet()
-        || !convo::isr::PublicationSemantic::validateDescriptorSet())
-        return rejectWithEvidence();
-
-    if (world.generation == 0
-        || world.generationSemantic.runtimeGeneration == 0
-        || world.publication.sequenceId == 0
-        || world.publication.epoch == 0
-        || world.publication.mappedRuntimeGeneration == 0)
-        return rejectWithEvidence();
-
-    if (world.generationSemantic.runtimeGeneration != world.generation
-        || world.publication.mappedRuntimeGeneration != world.generation)
-        return rejectWithEvidence();
-
     if (world.publication.previousSequenceId >= world.publication.sequenceId)
+        return rejectWithEvidence();
+
+    // Stage 3: runtime admission.
+    if (!acceptsRuntimePublication())
         return rejectWithEvidence();
 
     const auto lastCommittedGeneration = convo::consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_acquire);
@@ -90,8 +148,30 @@ void destroyPublicationIntentNode(void* ptr) noexcept
         return rejectWithEvidence();
     }
 
-    if (world.projectionFreshness.projectionGeneration != world.generation
-        || world.projectionFreshness.projectionRevision != world.graph.generation)
+    if (world.topology.hasFadingRuntime)
+    {
+        if (world.topology.fadingRuntimeUuid == 0
+            || world.topology.fadingRuntimeUuid == world.topology.runtimeUuid)
+            return rejectWithEvidence();
+    }
+    else if (world.topology.fadingRuntimeUuid != 0)
+    {
+        return rejectWithEvidence();
+    }
+
+    if (world.execution.transitionActive)
+    {
+        if (world.execution.crossfadeStartDelayBlocks < 0
+            || world.execution.crossfadeDryHoldSamples < 0)
+            return rejectWithEvidence();
+    }
+
+    if (world.overlap.fadeTimeSec < 0.0
+        || world.overlap.dryScaleTarget < 0.0)
+        return rejectWithEvidence();
+
+    if (!world.execution.transitionActive
+        && world.overlap.firstIrDryCrossfadePending)
         return rejectWithEvidence();
 
     if (!world.isFrozen())
@@ -104,9 +184,9 @@ void destroyPublicationIntentNode(void* ptr) noexcept
         return rejectWithEvidence();
     }
 
-    const bool hasActive = (world.graph.activeNode != nullptr);
-    const bool hasFading = (world.graph.fadingNode != nullptr);
-    const bool hasTransitionNext = (world.engine.transition.next != nullptr);
+    const bool hasActive = (world.topology.runtimeUuid != 0);
+    const bool hasFading = world.topology.hasFadingRuntime;
+    const bool hasTransitionNext = world.execution.transitionActive;
 
     if (!hasActive && !hasFading && !hasTransitionNext)
         return true;
@@ -140,14 +220,12 @@ void destroyPublicationIntentNode(void* ptr) noexcept
         closure.nodes.push_back(makeClosureNode(activeNodeId, convo::isr::PayloadTier::InlineImmutable));
     }
 
-    if (hasFading && world.graph.fadingNode != world.graph.activeNode) {
+    if (hasFading && world.topology.fadingRuntimeUuid != world.topology.runtimeUuid) {
         fadingNodeId = nextNodeId++;
         closure.nodes.push_back(makeClosureNode(fadingNodeId, convo::isr::PayloadTier::ImmutableShared));
     }
 
-    if (hasTransitionNext
-        && world.engine.transition.next != world.graph.activeNode
-        && world.engine.transition.next != world.graph.fadingNode) {
+    if (hasTransitionNext) {
         transitionNodeId = nextNodeId++;
         closure.nodes.push_back(makeClosureNode(transitionNodeId, convo::isr::PayloadTier::ImmutableShared));
     }
@@ -163,7 +241,7 @@ void destroyPublicationIntentNode(void* ptr) noexcept
     }
 
     convo::isr::TieredPayloadDescriptor descriptor{};
-    descriptor.tier = world.engine.transition.active
+    descriptor.tier = world.execution.transitionActive
         ? convo::isr::PayloadTier::ImmutableShared
         : convo::isr::PayloadTier::InlineImmutable;
     descriptor.requiresRT = false;
@@ -176,11 +254,19 @@ void destroyPublicationIntentNode(void* ptr) noexcept
         return rejectWithEvidence();
     }
 
+    if (!transitionSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Committed))
+        return rejectWithEvidence();
+
     return true;
 }
 
 void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept
 {
+    if (!transitionSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Published))
+    {
+        forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Published);
+    }
+
     const auto updateMinMetric = [](std::atomic<std::uint64_t>& dst, std::uint64_t value) noexcept
     {
         auto observed = convo::consumeAtomic(dst, std::memory_order_acquire);
@@ -340,6 +426,11 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
         convo::publishAtomic(oldestPendingAge_, 0.0, std::memory_order_release);
     }
 
+    const double oldestPendingAgeMs = convo::consumeAtomic(oldestPendingAge_, std::memory_order_acquire);
+    const std::uint64_t maxRetireDeferralEpochs = convo::consumeAtomic(maxRetireDeferralEpochs_, std::memory_order_acquire);
+    const double maxRetireWallClockMs = convo::consumeAtomic(maxRetireWallClockMs_, std::memory_order_acquire);
+    const bool hasAnyPendingTransition = world->execution.transitionActive || !pendingIntents.empty();
+
     for (const auto& pending : pendingIntents)
     {
         if (!pending.isValid)
@@ -354,18 +445,44 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
         const bool pendingIntentOwned = pending.isValid;
         const auto* currentPublished = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
         const bool authoritativeOwnershipReleased = (currentPublished != world);
+        const std::uint64_t retireDeferralEpochs = (maxObservedGeneration > pendingGeneration)
+            ? (maxObservedGeneration - pendingGeneration)
+            : 0u;
+        const bool exceededDeferralThresholds = retireRuntimeEx_.hasExceededDeferralThresholds(retireDeferralEpochs,
+                                                                                                oldestPendingAgeMs,
+                                                                                                maxRetireDeferralEpochs,
+                                                                                                maxRetireWallClockMs);
 
         const auto pendingSlot = static_cast<std::uint32_t>(pending.dspSlot & 0xFFu);
         retireRuntime_.acknowledgeRetireCoordination(pending);
         retireRuntimeEx_.emitIntent(pendingSlot, pending.generation);
         retireRuntimeEx_.enqueueRetire(pendingSlot);
         retireRuntimeEx_.settleEpoch(pendingSlot);
-        if (retireRuntimeEx_.canTransitionRetirePendingToFree(graceCompleted,
-                                                              pendingIntentOwned,
-                                                              authoritativeOwnershipReleased))
-            retireRuntimeEx_.reclaim(pendingSlot);
-        else
+        if (exceededDeferralThresholds)
+        {
+            convo::fetchAddAtomic(retireEscalationCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
             retireRuntimeEx_.quarantine(pendingSlot);
+
+            const bool noReader = graceCompleted;
+            const bool noExecutorReference = authoritativeOwnershipReleased;
+            const bool noPendingTransition = !hasAnyPendingTransition;
+            if (retireRuntimeEx_.canReclaimAfterEscalation(noReader,
+                                                           noExecutorReference,
+                                                           noPendingTransition))
+            {
+                retireRuntimeEx_.reclaim(pendingSlot);
+            }
+        }
+        else if (retireRuntimeEx_.canTransitionRetirePendingToFree(graceCompleted,
+                                                                    pendingIntentOwned,
+                                                                    authoritativeOwnershipReleased))
+        {
+            retireRuntimeEx_.reclaim(pendingSlot);
+        }
+        else
+        {
+            retireRuntimeEx_.quarantine(pendingSlot);
+        }
     }
 
     convo::fetchAddAtomic(retiredWorldCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
@@ -392,7 +509,7 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
     evidenceExporter_.exportEvidence();
 }
 
-void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP, int generation, CommitReaderSlot readerSlot) noexcept
+void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP, int targetWorldId, CommitReaderSlot readerSlot) noexcept
 {
     if (newDSP == nullptr)
         return;
@@ -408,9 +525,31 @@ void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP, int gene
 
     const convo::EpochDomainReaderGuard appendGuard(m_epochDomain, epochReaderIndex);
 
+    const bool publicationThrottleActive = convo::consumeAtomic(retirePressurePublicationThrottleActive_, std::memory_order_acquire);
+    if (publicationThrottleActive && hasPendingPublicationIntents())
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        retireDSP(newDSP);
+        return;
+    }
+
+    const auto targetWorldIdU64 = static_cast<std::uint64_t>(std::max(0, targetWorldId));
+    const auto lastEnqueuedTargetWorldId = convo::consumeAtomic(lastEnqueuedPublicationTargetWorldId_, std::memory_order_acquire);
+    if (targetWorldIdU64 <= lastEnqueuedTargetWorldId)
+    {
+        convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+        convo::publishAtomic(lastDroppedGeneration_, targetWorldIdU64, std::memory_order_release);
+        retireDSP(newDSP);
+        return;
+    }
+
     auto* intent = new PublicationIntent();
     intent->newDSP = newDSP;
-    intent->generation = generation;
+    intent->targetWorldId = targetWorldIdU64;
+    intent->requestId = convo::fetchAddAtomic(publicationIntentRequestIdCounter_,
+                                              static_cast<std::uint64_t>(1),
+                                              std::memory_order_acq_rel) + 1;
+    intent->enqueueTimeTicks = juce::Time::getHighResolutionTicks();
     // intent は生成直後でまだ他スレッドから不可視のため、next の nullptr 初期化に ordering 不要。
     convo::publishAtomic(intent->next, static_cast<PublicationIntent*>(nullptr), std::memory_order_relaxed);
 
@@ -460,19 +599,20 @@ void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP, int gene
     }
 
     const auto backlog = hasPendingPublicationIntents() ? 1ull : 0ull;
+    convo::publishAtomic(lastEnqueuedPublicationTargetWorldId_, targetWorldIdU64, std::memory_order_release);
     convo::publishAtomic(publicationBacklog_, backlog, std::memory_order_release);
     runtimePublicationBridge_.setPublicationBacklogCount(backlog);
     runtimePublicationBridge_.setPendingIntentCount(backlog);
 }
 
-void AudioEngine::appendPublicationIntentForCommitProducer(DSPCore* newDSP, int generation) noexcept
+void AudioEngine::appendPublicationIntentForCommitProducer(DSPCore* newDSP, int targetWorldId) noexcept
 {
-    appendPublicationIntentForCommitSlot(newDSP, generation, CommitReaderSlot::Producer);
+    appendPublicationIntentForCommitSlot(newDSP, targetWorldId, CommitReaderSlot::Producer);
 }
 
-void AudioEngine::appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int generation) noexcept
+void AudioEngine::appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int targetWorldId) noexcept
 {
-    appendPublicationIntentForCommitSlot(newDSP, generation, CommitReaderSlot::Consumer);
+    appendPublicationIntentForCommitSlot(newDSP, targetWorldId, CommitReaderSlot::Consumer);
 }
 
 void AudioEngine::drainPublicationLogForShutdown() noexcept
@@ -513,6 +653,7 @@ void AudioEngine::drainPublicationLogForShutdown() noexcept
     convo::publishAtomic(publicationLog.head, static_cast<PublicationIntent*>(nullptr), std::memory_order_release); // release: shutdown 後の sentinel 彸残を防止
     convo::publishAtomic(publicationLog.consumedTail, static_cast<PublicationIntent*>(nullptr), std::memory_order_release); // release: 後続の acquire を不可視、null 保証
     convo::publishAtomic(publicationLog.retiredHead, static_cast<PublicationIntent*>(nullptr), std::memory_order_release); // release: 後続の consume acquire と HB
+    convo::publishAtomic(lastEnqueuedPublicationTargetWorldId_, static_cast<std::uint64_t>(0), std::memory_order_release);
     convo::publishAtomic(publicationBacklog_, 0ull, std::memory_order_release);
     runtimePublicationBridge_.setPublicationBacklogCount(0u);
     runtimePublicationBridge_.setPendingIntentCount(0u);
@@ -587,7 +728,7 @@ void AudioEngine::executeCommit()
             }
             else
             {
-                commitNewDSP(next->newDSP, next->generation);
+                commitNewDSP(next->newDSP, static_cast<int>(next->targetWorldId));
             }
 
             if (cursor != publicationLogSentinel)
@@ -630,10 +771,9 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     {
         DSPCore* atomicCurrent = getActiveRuntimeDSP();
         const auto runtimeReadView = readControlRuntimeView();
-        const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
         validateDistinctRuntimeSlots("replaceFadingRuntimeDSPAndRetirePrevious.before",
                                      atomicCurrent,
-                         resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
+                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
                                      nullptr);
 
         auto* const prevRaw = exchangeFadingRuntimeDSP(dsp);
@@ -651,7 +791,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
         validateDistinctRuntimeSlots("replaceFadingRuntimeDSPAndRetirePrevious.after",
                                      atomicCurrent,
-                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
+                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
                                      nullptr);
         logRuntimeTransitionEvent("replaceFadingRuntimeDSPAndRetirePrevious", dsp);
     };
@@ -680,7 +820,6 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     {
         DSPCore* atomicCurrent = getActiveRuntimeDSP();
         const auto runtimeReadView = readControlRuntimeView();
-        const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
         if (previousDSP == nullptr || previousDSP == atomicCurrent)
         {
             logUnexpectedRuntimeTransition("startImmediateSmoothTransition", atomicCurrent, previousDSP);
@@ -706,7 +845,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                           true);
         validateDistinctRuntimeSlots("startImmediateSmoothTransition",
                                      atomicCurrent,
-                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
+                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
                                      nullptr);
         logRuntimeTransitionEvent("startImmediateSmoothTransition", atomicCurrent, previousDSP);
     };
@@ -717,10 +856,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             return;
 
         const auto runtimeReadView = readControlRuntimeView();
-        const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
-        auto* publishedCurrent = (runtimeGraph != nullptr)
-            ? static_cast<DSPCore*>(runtimeGraph->activeNode)
-            : nullptr;
+        auto* publishedCurrent = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadView);
         DSPCore* atomicCurrent = getActiveRuntimeDSP();
         if (dsp == atomicCurrent || dsp == publishedCurrent)
         {
@@ -737,7 +873,6 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     {
         DSPCore* atomicCurrent = getActiveRuntimeDSP();
         const auto runtimeReadView = readControlRuntimeView();
-        const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
         if (atomicCurrent == nullptr)
         {
             logUnexpectedRuntimeTransition("publishHardResetForCurrentDSP", nullptr, nullptr);
@@ -757,7 +892,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                           false);
         validateDistinctRuntimeSlots("publishHardResetForCurrentDSP",
                                      atomicCurrent,
-                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
+                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
                                      nullptr);
         logRuntimeTransitionEvent("publishHardResetForCurrentDSP", atomicCurrent);
     };
@@ -767,7 +902,6 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     {
         DSPCore* atomicCurrent = getActiveRuntimeDSP();
         const auto runtimeReadView = readControlRuntimeView();
-        const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
         if (atomicCurrent == nullptr)
         {
             logUnexpectedRuntimeTransition("armDryAsOldCrossfadeForCurrentDSP", nullptr, nullptr);
@@ -798,7 +932,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
                           true);
         validateDistinctRuntimeSlots("armDryAsOldCrossfadeForCurrentDSP",
                                      atomicCurrent,
-                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph),
+                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
                                      nullptr);
         logRuntimeTransitionEvent("armDryAsOldCrossfadeForCurrentDSP", atomicCurrent);
     };
@@ -806,7 +940,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     const auto runtimeReadViewAtEntry = readControlRuntimeView();
     validateDistinctRuntimeSlots("commitNewDSP.entry",
                                  getActiveRuntimeDSP(),
-                                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(getRuntimeGraph(runtimeReadViewAtEntry)),
+                                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadViewAtEntry),
                                  nullptr);
 
     // Lock to ensure the check and commit are atomic with respect to new rebuild requests.
@@ -910,9 +1044,8 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
             if (crossfadeContext.needsCrossfade)
             {
                 const auto runtimeReadView = readControlRuntimeView();
-                const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
                 const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
-                const bool hasFadingRuntime = (resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph) != nullptr);
+                const bool hasFadingRuntime = (resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView) != nullptr);
                 const bool hasPendingCrossfade = preparedCrossfade.pending;
                 const bool useDryAsOld = preparedCrossfade.firstIrDryCrossfadePending
                     || preparedCrossfade.useDryAsOld;
@@ -969,7 +1102,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
         const auto runtimeReadViewAfterPublish = readControlRuntimeView();
         validateDistinctRuntimeSlots("commitNewDSP.afterPublish",
                  getActiveRuntimeDSP(),
-             resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadViewAfterPublish.graph),
+             resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadViewAfterPublish),
                  nullptr);
 
         // この世代の publish が完了したので outstanding rebuild 窓を閉じる。
@@ -1054,9 +1187,8 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
 
                 // --- クロスフェードdeduplication・スナップショット ---
                 const auto runtimeReadView = readControlRuntimeView();
-                const auto* runtimeGraph = getRuntimeGraph(runtimeReadView);
                 const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
-                const bool hasFadingRuntime = (resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph) != nullptr);
+                const bool hasFadingRuntime = (resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView) != nullptr);
                 const bool hasPendingCrossfade = preparedCrossfade.pending;
                 const bool useDryAsOld = preparedCrossfade.firstIrDryCrossfadePending
                     || preparedCrossfade.useDryAsOld;
@@ -1120,7 +1252,7 @@ void AudioEngine::commitNewDSP(DSPCore* newDSP, int generation)
     const auto runtimeReadViewBeforeNotify = readControlRuntimeView();
     validateDistinctRuntimeSlots("commitNewDSP.beforeSendChangeMessage",
                                  getActiveRuntimeDSP(),
-                                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(getRuntimeGraph(runtimeReadViewBeforeNotify)),
+                                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadViewBeforeNotify),
                                  nullptr);
     diagLog("[DIAG] commitNewDSP: queue coalesced change notification");
     if (!exchangeAtomic(pendingChangeNotification, true))

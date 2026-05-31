@@ -192,21 +192,51 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     // AuthorityClass::Diagnostic (hash is fingerprint only; non-authoritative)
     convo::isr::RuntimeSemanticHash semanticHash {};
 
-    static constexpr std::array<convo::isr::RuntimeFieldDescriptor, 9> kFieldDescriptors {{
+    static constexpr std::array<convo::isr::RuntimeFieldDescriptor, 17> kFieldDescriptors {{
         {"worldId", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"generation", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
-        {"graph", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"generationSemantic", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"topology", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"routing", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"execution", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"publication", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"overlap", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"metadata", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"retire", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"timing", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"latency", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
-        {"scheduling", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime}
+        {"scheduling", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"graph", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeGraph, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::ObserveBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"engine", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::ObserveBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"projectionFreshness", convo::isr::SemanticCategory::Diagnostic, convo::isr::OwnershipClass::DiagnosticOnly, convo::isr::MutabilityClass::DiagnosticMutable, convo::isr::VisibilityClass::DiagnosticBoundary, convo::isr::LifetimeClass::DiagnosticLifetime},
+        {"semanticHash", convo::isr::SemanticCategory::Diagnostic, convo::isr::OwnershipClass::DiagnosticOnly, convo::isr::MutabilityClass::DiagnosticMutable, convo::isr::VisibilityClass::DiagnosticBoundary, convo::isr::LifetimeClass::DiagnosticLifetime}
+    }};
+
+    static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 17> kAuthorityInventory {{
+        {"worldId", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"generation", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"generationSemantic", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"topology", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"routing", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"execution", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"publication", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"overlap", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"metadata", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"retire", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"timing", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"latency", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"scheduling", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"graph", convo::isr::RuntimeAuthorityClass::Derived},
+        {"engine", convo::isr::RuntimeAuthorityClass::Derived},
+        {"projectionFreshness", convo::isr::RuntimeAuthorityClass::Diagnostic},
+        {"semanticHash", convo::isr::RuntimeAuthorityClass::Diagnostic}
     }};
 
     [[nodiscard]] static constexpr bool validateDescriptorSet() noexcept
     {
         return convo::isr::validateFieldDescriptorSet(kFieldDescriptors)
+            && convo::isr::validateAuthorityInventorySet(kAuthorityInventory)
+            && convo::isr::validateAuthorityInventoryAgainstDescriptors(kAuthorityInventory, kFieldDescriptors)
             && convo::isr::PublicationSemantic::validateDescriptorSet();
     }
 };
@@ -823,6 +853,12 @@ public:
     void setAnalyzerEnabled(bool enabled) noexcept { publishAtomic(analyzerEnabled, enabled, std::memory_order_release); }
     [[nodiscard]] bool isAnalyzerEnabled() const noexcept { return consumeAtomic(analyzerEnabled, std::memory_order_acquire); }
 
+    [[nodiscard]] inline const convo::RuntimeGraph* getRuntimeGraph() const noexcept
+    {
+        const auto* world = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
+        return (world != nullptr) ? &world->graph : nullptr;
+    }
+
     void setInputHeadroomDb(float db);
     [[nodiscard]] float getInputHeadroomDb() const;
 
@@ -992,6 +1028,11 @@ public:
         std::uint64_t saturationExitCount = 0;
         std::uint64_t publicationRejectCount = 0;
         std::uint64_t rebuildCollapseCount = 0;
+        int retirePressureLevel = 0;
+        std::uint64_t retireEscalationCount = 0;
+        std::uint64_t retireProtectiveModeEnterCount = 0;
+        std::uint64_t maxRetireDeferralEpochs = 0;
+        double maxRetireWallClockMs = 0.0;
         double reclaimLatency = 0.0;
     };
 
@@ -1027,6 +1068,11 @@ public:
             consumeAtomic(saturationExitCount_, std::memory_order_acquire),
             consumeAtomic(publicationRejectCount_, std::memory_order_acquire),
             consumeAtomic(rebuildCollapseCount_, std::memory_order_acquire),
+            consumeAtomic(retirePressureLevel_, std::memory_order_acquire),
+            consumeAtomic(retireEscalationCount_, std::memory_order_acquire),
+            consumeAtomic(retireProtectiveModeEnterCount_, std::memory_order_acquire),
+            consumeAtomic(maxRetireDeferralEpochs_, std::memory_order_acquire),
+            consumeAtomic(maxRetireWallClockMs_, std::memory_order_acquire),
             consumeAtomic(reclaimLatency_, std::memory_order_acquire)
         };
     }
@@ -1398,10 +1444,11 @@ public:
     {
         RuntimePublishView(convo::EpochDomain& domain,
                            int readerIndex,
-                           const convo::RuntimeGraph* graphIn,
-                           const convo::TransitionState& transitionIn) noexcept
-            : observed(domain, readerIndex), graph(graphIn)
+                           const convo::TransitionState& transitionIn,
+                           double sampleRateHzIn) noexcept
+            : observed(domain, readerIndex)
             , transition(transitionIn)
+            , sampleRateHz(sampleRateHzIn)
         {
         }
 
@@ -1411,17 +1458,18 @@ public:
         RuntimePublishView& operator=(RuntimePublishView&&) noexcept = default;
 
         convo::ObservedRuntime observed;
-        const convo::RuntimeGraph* graph = nullptr;
         convo::TransitionState transition {};
+        double sampleRateHz = 0.0;
     };
 
     struct RuntimeReadView
     {
         RuntimeReadView(RuntimePublishView&& runtimePublishIn,
-                             convo::ObservedRuntime&& observedSnapshotIn) noexcept
+                             convo::ObservedRuntime&& observedSnapshotIn,
+                             const RuntimePublishWorld* runtimeWorldIn) noexcept
             : runtimePublish(std::move(runtimePublishIn))
             , observedSnapshot(std::move(observedSnapshotIn))
-            , graph(runtimePublish.graph)
+            , runtimeWorld(runtimeWorldIn)
         {
         }
 
@@ -1432,7 +1480,7 @@ public:
 
         RuntimePublishView runtimePublish;
         convo::ObservedRuntime observedSnapshot;
-        const convo::RuntimeGraph* graph = nullptr;
+        const RuntimePublishWorld* runtimeWorld = nullptr;
     };
 
     struct CrossfadePreparedSnapshot
@@ -1451,15 +1499,12 @@ public:
 
     struct AudioCallbackAuthorityView
     {
-        explicit AudioCallbackAuthorityView(const RuntimeReadView& runtimeReadViewIn,
-                                            CrossfadePreparedSnapshot preparedCrossfadeIn) noexcept
+        explicit AudioCallbackAuthorityView(CrossfadePreparedSnapshot preparedCrossfadeIn) noexcept
             : preparedCrossfade(preparedCrossfadeIn)
-            , runtimeGraph(runtimeReadViewIn.graph)
         {
         }
 
         CrossfadePreparedSnapshot preparedCrossfade {};
-        const convo::RuntimeGraph* runtimeGraph = nullptr;
     };
 
     class RuntimePublicationBridge;
@@ -1673,16 +1718,20 @@ public:
     void processDeferredLearningActions();
     void resetLearningControlState() noexcept;
     bool enqueueSnapshotCommand() noexcept;
-    void appendPublicationIntentForCommitProducer(DSPCore* newDSP, int generation) noexcept;
-    void appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int generation) noexcept;
-    void appendPublicationIntentForCommitSlot(DSPCore* newDSP, int generation, CommitReaderSlot readerSlot) noexcept;
+    void appendPublicationIntentForCommitProducer(DSPCore* newDSP, int targetWorldId) noexcept;
+    void appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int targetWorldId) noexcept;
+    void appendPublicationIntentForCommitSlot(DSPCore* newDSP, int targetWorldId, CommitReaderSlot readerSlot) noexcept;
     void drainPublicationLogForShutdown() noexcept;
     [[nodiscard]] bool hasPendingPublicationIntents() noexcept;
     [[nodiscard]] bool hasPublicationLogPending() noexcept;
     void processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
                              const convo::GlobalSnapshot* snap,
-                             bool isFadingTarget,
-                             const convo::RuntimeGraph* runtimeGraphHint = nullptr);
+                             bool isFadingTarget);
+    [[nodiscard]] int evaluateRetirePressureLevelNoRt(std::uint64_t retireDepth,
+                                                      int highWatermark) const noexcept;
+    void applyRetirePressurePolicyNoRt(int retirePressureLevel,
+                                       std::uint64_t retireDepth) noexcept;
+    [[nodiscard]] bool shouldRejectRebuildAdmissionForPressure() const noexcept;
     void handleAsyncUpdate() override;
 
     static void onSnapshotRequired(void* userData, uint64_t generation);
@@ -1768,7 +1817,9 @@ public:
     // --- Commit 2段階化：PublicationLog と commit staging ---
     struct PublicationIntent {
         DSPCore* newDSP = nullptr;
-        int generation = 0;
+        std::uint64_t targetWorldId = 0;
+        std::uint64_t requestId = 0;
+        std::int64_t enqueueTimeTicks = 0;
         std::atomic<PublicationIntent*> next { nullptr };
     };
 
@@ -1896,6 +1947,7 @@ public:
         SnapshotCommandQueued,
         SnapshotCommandBufferFullNonMt,
         SnapshotCommandQueuedNonMt,
+        RetirePressureSevere,
         SameAsPendingWouldMerge
     };
 
@@ -1976,6 +2028,7 @@ public:
             case RebuildTelemetryReason::SnapshotCommandQueued: return "snapshot_command_queued";
             case RebuildTelemetryReason::SnapshotCommandBufferFullNonMt: return "snapshot_command_buffer_full_non_mt";
             case RebuildTelemetryReason::SnapshotCommandQueuedNonMt: return "snapshot_command_queued_non_mt";
+            case RebuildTelemetryReason::RetirePressureSevere: return "retire_pressure_severe";
             case RebuildTelemetryReason::SameAsPendingWouldMerge: return "same_as_pending_would_merge";
         }
         return "unknown_reason";
@@ -2096,7 +2149,9 @@ public:
         };
 
         const auto runtimeReadView = readControlRuntimeView();
-        DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(getRuntimeGraph(runtimeReadView));
+        DSPCore* fading = runtimeReadView.runtimePublish.transition.active
+            ? static_cast<DSPCore*>(runtimeReadView.runtimePublish.transition.next)
+            : nullptr;
 
         runtime.current = current;
         runtime.currentRuntimeUuid = getRuntimeUuid(current);
@@ -2202,8 +2257,8 @@ public:
         return RuntimePublishView {
             m_epochDomain,
             readerIndex,
-            world != nullptr ? &world->graph : nullptr,
-            world != nullptr ? world->engine.transition : convo::TransitionState{}
+            world != nullptr ? world->engine.transition : convo::TransitionState{},
+            consumeAtomic(currentSampleRate, std::memory_order_acquire)
         };
     }
 
@@ -2271,8 +2326,25 @@ public:
 
         return RuntimeReadView {
             makeRuntimePublishView(readerIndex, assertAudioThread),
-            std::move(observedSnapshot)
+            std::move(observedSnapshot),
+            world
         };
+    }
+
+    [[nodiscard]] static inline CrossfadePreparedSnapshot makeCrossfadePreparedSnapshotFromWorld(const RuntimePublishWorld& world) noexcept
+    {
+        CrossfadePreparedSnapshot snapshot {};
+        snapshot.pending = world.engine.dspCrossfadePending;
+        snapshot.useDryAsOld = world.overlap.useDryAsOld;
+        snapshot.firstIrDryCrossfadePending = world.overlap.firstIrDryCrossfadePending;
+        snapshot.fadeTimeSec = world.overlap.fadeTimeSec;
+        snapshot.latencyDelayOld = world.latency.latencyDelayOld;
+        snapshot.latencyDelayNew = world.latency.latencyDelayNew;
+        snapshot.startDelayBlocks = world.execution.crossfadeStartDelayBlocks;
+        snapshot.dryHoldSamples = world.execution.crossfadeDryHoldSamples;
+        snapshot.latencyResetPending = world.engine.latencyResetPending;
+        snapshot.dryScaleTarget = world.overlap.dryScaleTarget;
+        return snapshot;
     }
 
     [[nodiscard]] inline RuntimeReadView readAudioRuntimeView() noexcept
@@ -2285,14 +2357,30 @@ public:
         return makeRuntimeReadView(kControlEpochReaderIndex, false);
     }
 
+    [[nodiscard]] inline const convo::RuntimeGraph* getRuntimeGraph(const RuntimeReadView& runtimeReadView) const noexcept
+    {
+        juce::ignoreUnused(runtimeReadView);
+        const auto* world = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
+        return (world != nullptr) ? &world->graph : nullptr;
+    }
+
     [[nodiscard]] static inline const convo::GlobalSnapshot* getRuntimeSnapshot(const RuntimeReadView& runtimeReadView) noexcept
     {
         return runtimeReadView.observedSnapshot.get();
     }
 
-    [[nodiscard]] static inline const convo::RuntimeGraph* getRuntimeGraph(const RuntimeReadView& runtimeReadView) noexcept
+    [[nodiscard]] inline DSPCore* resolveFadingRuntimeDSPFromRuntimeWorldOnly(const RuntimeReadView& runtimeReadView) const noexcept
     {
-        return runtimeReadView.runtimePublish.graph;
+        const auto& transition = runtimeReadView.runtimePublish.transition;
+        if (!transition.active)
+            return nullptr;
+
+        return static_cast<DSPCore*>(transition.next);
+    }
+
+    [[nodiscard]] inline DSPCore* resolveActiveRuntimeDSPFromRuntimeWorldOnly(const RuntimeReadView& runtimeReadView) const noexcept
+    {
+        return static_cast<DSPCore*>(runtimeReadView.runtimePublish.transition.current);
     }
 
     inline convo::RuntimeGraph makeRuntimeGraphState(const convo::EngineRuntime& state) noexcept
@@ -2396,35 +2484,6 @@ public:
         return convo::fetchAddAtomic(dst, value, order);
     }
 
-    [[nodiscard]] inline DSPCore* resolveFadingRuntimeDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
-    {
-        if (runtimeGraph == nullptr)
-            return nullptr;
-
-        auto* graphFading = static_cast<DSPCore*>(runtimeGraph->fadingNode);
-        const auto graphFadingUuid = runtimeGraph->fadingRuntimeUuid;
-        if (graphFading != nullptr
-            && graphFadingUuid != 0)
-            return graphFading;
-
-        return nullptr;
-    }
-
-    [[nodiscard]] inline DSPCore* resolveActiveRuntimeDSPFromRuntimeWorldOnly(const convo::RuntimeGraph* runtimeGraph) const noexcept
-    {
-        if (runtimeGraph == nullptr)
-            return nullptr;
-
-        auto* graphActive = static_cast<DSPCore*>(runtimeGraph->activeNode);
-        const auto graphRuntimeUuid = runtimeGraph->runtimeUuid;
-        if (graphActive != nullptr
-            && graphRuntimeUuid != 0)
-            return graphActive;
-
-        return nullptr;
-    }
-
-
     [[nodiscard]] inline std::uint64_t reserveNextRuntimeGraphGeneration() noexcept
     {
         // acq_rel: fetch-add で generation counter を advance し、他スレッドへ新 generation を公開。
@@ -2460,8 +2519,6 @@ public:
         engineState.revision = nextGraphGeneration;
         auto graphState = makeRuntimeGraphState(engineState);
         graphState.generation = nextGraphGeneration;
-        const auto runtimeReadView = readControlRuntimeView();
-        const auto* runtimeSnapshot = getRuntimeSnapshot(runtimeReadView);
 
         const auto* previousWorld = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
 
@@ -2488,9 +2545,7 @@ public:
         worldOwner->topology.fadingRuntimeUuid = graphState.fadingRuntimeUuid;
         worldOwner->topology.hasFadingRuntime = (graphState.fadingNode != nullptr);
 
-        worldOwner->routing.processingOrder = static_cast<int>((runtimeSnapshot != nullptr)
-            ? runtimeSnapshot->processingOrder
-            : consumeAtomic(currentProcessingOrder, std::memory_order_acquire));
+        worldOwner->routing.processingOrder = static_cast<int>(getProcessingOrder());
         worldOwner->routing.eqBypassed = graphState.eqBypassed;
         worldOwner->routing.convBypassed = graphState.convBypassed;
 
@@ -2540,9 +2595,9 @@ public:
 
         worldOwner->coefficient.adaptiveCoeffBankIndex = graphState.adaptiveCoeffBankIndex;
         worldOwner->coefficient.adaptiveCoeffGeneration = graphState.adaptiveCoeffGeneration;
-        worldOwner->coefficient.eqCoeffHash = (runtimeSnapshot != nullptr)
-            ? runtimeSnapshot->eqCoeffHash
-            : 0;
+        worldOwner->coefficient.eqCoeffHash = 0;
+        if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
+            worldOwner->coefficient.eqCoeffHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
 
         worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;
         worldOwner->projectionFreshness.projectionRevision = graphState.generation;
@@ -2726,11 +2781,17 @@ public:
 
         DSPCore* current = getActiveRuntimeDSP();
         const auto* publishedWorld = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
-        const auto* runtimeGraph = (publishedWorld != nullptr) ? &publishedWorld->graph : nullptr;
-        auto* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
-        const auto revision = (runtimeGraph != nullptr) ? runtimeGraph->generation : 0;
-        const auto publishedCurrentUuid = (runtimeGraph != nullptr) ? runtimeGraph->runtimeUuid : 0;
-        const auto publishedFadingUuid = (runtimeGraph != nullptr) ? runtimeGraph->fadingRuntimeUuid : 0;
+        const auto& transition = (publishedWorld != nullptr) ? publishedWorld->engine.transition : convo::TransitionState{};
+        auto* fading = (transition.active && transition.next != nullptr)
+            ? static_cast<DSPCore*>(transition.next)
+            : nullptr;
+        const auto revision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
+        const auto publishedCurrentUuid = (transition.current != nullptr)
+            ? static_cast<DSPCore*>(transition.current)->runtimeUuid
+            : 0;
+        const auto publishedFadingUuid = (transition.active && transition.next != nullptr)
+            ? static_cast<DSPCore*>(transition.next)->runtimeUuid
+            : 0;
 
         const juce::String message = "[DIAG] runtime transition event origin="
             + juce::String(origin != nullptr ? origin : "unknown")
@@ -2814,6 +2875,51 @@ public:
             snapshot.snapshotEqParams = &snap->eqParams;
             snapshot.snapshotEqCoeffHash = snap->eqCoeffHash;
         }
+        return snapshot;
+    }
+
+    inline EngineParameterSnapshot captureAudioThreadParameterSnapshot(const RuntimePublishWorld* world,
+                                                                       bool isFadingTarget = false) const noexcept
+    {
+        EngineParameterSnapshot snapshot {};
+
+        if (world != nullptr)
+        {
+            const auto processingOrder = world->routing.processingOrder;
+            snapshot.eqBypassed = world->routing.eqBypassed;
+            snapshot.convBypassed = world->routing.convBypassed;
+            snapshot.order = (processingOrder == static_cast<int>(ProcessingOrder::EQThenConvolver))
+                ? ProcessingOrder::EQThenConvolver
+                : ProcessingOrder::ConvolverThenEQ;
+            snapshot.softClipEnabled = world->automation.softClipEnabled;
+            snapshot.saturationAmount = static_cast<float>(world->graph.saturationAmount);
+            snapshot.inputHeadroomGain = world->graph.inputHeadroomGain;
+            snapshot.outputMakeupGain = world->graph.outputMakeupGain;
+            snapshot.convolverInputTrimGain = world->graph.convolverInputTrimGain;
+            snapshot.snapshotEqCoeffHash = world->coefficient.eqCoeffHash;
+        }
+        else
+        {
+            snapshot.eqBypassed = consumeAtomic(eqBypassRequested, std::memory_order_acquire);
+            snapshot.convBypassed = consumeAtomic(convBypassRequested, std::memory_order_acquire);
+            snapshot.order = consumeAtomic(currentProcessingOrder, std::memory_order_acquire);
+            snapshot.softClipEnabled = consumeAtomic(softClipEnabled, std::memory_order_acquire);
+            snapshot.saturationAmount = consumeAtomic(saturationAmount, std::memory_order_acquire);
+            snapshot.inputHeadroomGain = consumeAtomic(inputHeadroomGain, std::memory_order_acquire);
+            snapshot.outputMakeupGain = consumeAtomic(outputMakeupGain, std::memory_order_acquire);
+            snapshot.convolverInputTrimGain = consumeAtomic(convolverInputTrimGain, std::memory_order_acquire);
+        }
+
+        snapshot.analyzerSource = consumeAtomic(currentAnalyzerSource, std::memory_order_acquire);
+        snapshot.analyzerEnabled = isFadingTarget ? false : consumeAtomic(analyzerEnabled, std::memory_order_acquire);
+        snapshot.convHCMode = consumeAtomic(convHCFilterMode, std::memory_order_acquire);
+        snapshot.convLCMode = consumeAtomic(convLCFilterMode, std::memory_order_acquire);
+        snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
+        snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+        const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
+        snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
+        snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
+        snapshot.adaptiveCaptureEnabled = consumeAtomic(adaptiveCaptureActiveRt, std::memory_order_acquire);
         return snapshot;
     }
 
@@ -3310,7 +3416,21 @@ public:
     std::atomic<std::uint64_t> saturationEnterCount_ { 0 };
     std::atomic<std::uint64_t> saturationExitCount_ { 0 };
     std::atomic<std::uint64_t> publicationRejectCount_ { 0 };
+    std::atomic<std::uint8_t> semanticTransactionState_ {
+        static_cast<std::uint8_t>(convo::isr::SemanticTransactionState::Building)
+    };
     std::atomic<std::uint64_t> rebuildCollapseCount_ { 0 };
+    std::atomic<int> retirePressureLevel_ { 0 };
+    std::atomic<bool> retirePressureCoalescingActive_ { false };
+    std::atomic<bool> retirePressurePublicationThrottleActive_ { false };
+    std::atomic<bool> retirePressureAdmissionStrict_ { false };
+    std::atomic<bool> retireProtectiveModeActive_ { false };
+    std::atomic<std::uint64_t> retireEscalationCount_ { 0 };
+    std::atomic<std::uint64_t> retireProtectiveModeEnterCount_ { 0 };
+    std::atomic<std::uint64_t> maxRetireDeferralEpochs_ { 256 };
+    std::atomic<double> maxRetireWallClockMs_ { 5000.0 };
+    std::atomic<std::uint64_t> publicationIntentRequestIdCounter_ { 0 };
+    std::atomic<std::uint64_t> lastEnqueuedPublicationTargetWorldId_ { 0 };
     std::atomic<double> reclaimLatency_ { 0.0 };
     std::atomic<int> retireHighWatermark_ { 3072 };
     std::atomic<int> retireLowWatermark_ { 1024 };

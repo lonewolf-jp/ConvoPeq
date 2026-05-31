@@ -33,7 +33,7 @@ foreach ($token in $forbiddenRuntimeGraphTokens) {
     }
 }
 
-if ($audioEngineText -notmatch 'static inline const convo::RuntimeGraph\* getRuntimeGraph\s*\(') {
+if ($audioEngineText -notmatch 'inline\s+const convo::RuntimeGraph\*\s+getRuntimeGraph\s*\(') {
     throw "RuntimeGraph accessor must remain const-only: $audioEngineHeader"
 }
 

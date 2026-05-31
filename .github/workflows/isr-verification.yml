@@ -789,9 +789,11 @@ jobs:
           elseif ("${{ github.event_name }}" -eq 'schedule') {
             if ("${{ github.event.schedule }}" -eq $validatorTieringScheduleContract.weeklyCron) {
               $tier = $validatorTieringScheduleContract.weeklyTier
+              $workflowDispatchSoakMinutes = 10080
             }
             elseif ("${{ github.event.schedule }}" -eq $validatorTieringScheduleContract.nightlyCron) {
               $tier = $validatorTieringScheduleContract.nightlyTier
+              $workflowDispatchSoakMinutes = 1440
             }
             else {
               throw "Unknown workflow schedule cron: ${{ github.event.schedule }}"
@@ -942,7 +944,7 @@ jobs:
             $invokeArgs += '-DeclaredClass'
             $invokeArgs += $workflowDispatchDeclaredPrClass
           }
-          if ("${{ github.event_name }}" -eq 'workflow_dispatch') {
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch' -or "${{ github.event_name }}" -eq 'schedule') {
             $invokeArgs += '-SoakMinutes'
             $invokeArgs += $workflowDispatchSoakMinutes
           }

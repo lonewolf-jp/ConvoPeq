@@ -1,0 +1,295 @@
+{
+    "schema": "isr_verifier_execution_layers_v1",
+    "version": "2026-05-31",
+    "owner": "audioengine-isr",
+    "issue": "ISR-GOV-EXECUTION-LAYERS-37-VERIFIERS",
+    "rationale": "Execution-layer contract wiring for 37 required verifier definitions (compile-time/unit/integration/soak/gate tier).",
+    "expiry": "2027-12-31",
+    "compileTimeContracts": {
+        "header": "src/audioengine/ISRRuntimeSemanticSchema.h",
+        "requiredStaticAsserts": [
+            "kRequiredVerifierTable.size() == 37",
+            "validateVerifierTable()"
+        ]
+    },
+    "unitContracts": {
+        "tests": [
+            "src/tests/RuntimeSemanticSchemaValidationTests.cpp",
+            "src/tests/RetireGraceSemanticsTests.cpp"
+        ],
+        "requiredUnitSymbols": [
+            "testRequiredVerifierTableAndSeverityContract",
+            "testObserveForbiddenTypeVerifierContract",
+            "testRetireStarvationDualThresholdRules",
+            "testRetireEscalationSafetyRules",
+            "testAuthorityInventoryPolicyContract",
+            "testSemanticTransactionStateMachineContract",
+            "testCanonicalFormPolicyContract",
+            "testPublicationFailureTaxonomyVerifierRegistration",
+            "testExecutorSnapshotFreshnessPolicyContract",
+            "testDeterministicBuildPolicyContract",
+            "testNewWork11VerifierRegistrations"
+        ]
+    },
+    "verifiers": [
+        {
+            "name": "SchemaCompletenessVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-runtime-semantic-schema-v16.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "PartialPublicationVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-partial-publication.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "PublicationSingleSourceVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-publication-single-path.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "ObservePathVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-observe-path.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "OverlapAuthorityVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-overlap-authority.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "RetirePressureVerifier",
+            "severity": "Error",
+            "integrationScript": ".github/scripts/isr-verify-v73-retire-pressure-contract.ps1",
+            "soakScript": ".github/scripts/isr-verify-v73-residency-telemetry.ps1",
+            "gateTier": "nightly"
+        },
+        {
+            "name": "RetireStarvationVerifier",
+            "severity": "Error",
+            "integrationScript": ".github/scripts/isr-verify-retire-starvation.ps1",
+            "soakScript": ".github/scripts/isr-verify-v73-shutdown-reclaim.ps1",
+            "gateTier": "nightly"
+        },
+        {
+            "name": "SemanticHashDriftVerifier",
+            "severity": "Error",
+            "integrationScript": ".github/scripts/isr-verify-semantic-hash-drift.ps1",
+            "soakScript": ".github/scripts/isr-verify-shadow-compare-cadence.ps1",
+            "gateTier": "nightly"
+        },
+        {
+            "name": "ShadowCompareContractVerifier",
+            "severity": "Error",
+            "integrationScript": ".github/scripts/isr-verify-shadow-compare-contract.ps1",
+            "soakScript": ".github/scripts/isr-verify-shadow-compare-coverage.ps1",
+            "gateTier": "nightly"
+        },
+        {
+            "name": "ImmutableWorldVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-v1-immutability.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "GenerationMonotonicityVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-phase4-generation-drift.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "VisibilityMonotonicityVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-visibility-monotonicity.ps1",
+            "soakScript": ".github/scripts/isr-verify-v73-shutdown-reclaim.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "PublicationOrderingVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-publication-atomicity.ps1",
+            "soakScript": ".github/scripts/isr-verify-publication-state-machine.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "BuildIsolationVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-semantic-closure-forbidden-inputs.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "RetireSafetyVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-retire-eligibility.ps1",
+            "soakScript": ".github/scripts/isr-verify-v73-retire-rt-immediate-return.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "ObserveForbiddenTypeVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-runtime-semantic-read-contract.ps1",
+            "soakScript": ".github/scripts/isr-verify-runtime-view-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "PublicationFailureTaxonomyVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-publication-failure-taxonomy.ps1",
+            "soakScript": ".github/scripts/isr-verify-taxonomy-phase-mapping.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "MemoryOrderingContractVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-memory-ordering-contract.ps1",
+            "soakScript": ".github/scripts/isr-verify-v73-shutdown-reclaim.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "OwnershipTransferContractVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-ownership-migration.ps1",
+            "soakScript": ".github/scripts/isr-verify-runtime-memory-lifetime.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "ABAHazardVerifier",
+            "severity": "Error",
+            "integrationScript": ".github/scripts/isr-verify-aba-hazard.ps1",
+            "soakScript": ".github/scripts/isr-verify-runtime-snapshot-identity.ps1",
+            "gateTier": "nightly"
+        },
+        {
+            "name": "RTBoundaryVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/check-src-atomic-dotcall.ps1",
+            "soakScript": ".github/scripts/isr-verify-realtime-budget.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "HiddenAuthorityVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-authority-inventory.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "SemanticAliasVerifier",
+            "severity": "Warning",
+            "integrationScript": ".github/scripts/isr-verify-projection-austerity.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "nightly"
+        },
+        {
+            "name": "MultiWriterProhibitionVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-authority-writer-reader-matrix.ps1",
+            "soakScript": ".github/scripts/isr-verify-authority-classification-rule.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "RetireEscalationVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-retire-escalation-safety.ps1",
+            "soakScript": ".github/scripts/isr-verify-v73-retire-rt-immediate-return.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "SelfContainedWorldVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-self-contained-world.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "SemanticDependencyGraphVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-semantic-dependency-graph.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "RuntimeWorldIdentityVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-runtime-world-identity.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "PartialSemanticUpdateProhibitionVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-partial-semantic-update-prohibition.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "SemanticValidityVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-semantic-validity.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "RuntimeAdmissionVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-runtime-admission.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "SemanticConflictVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-semantic-conflict.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "AuthorityExhaustivenessVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-authority-exhaustiveness.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "SemanticEquivalenceVerifier",
+            "severity": "Error",
+            "integrationScript": ".github/scripts/isr-verify-semantic-equivalence.ps1",
+            "soakScript": ".github/scripts/isr-verify-shadow-compare-coverage.ps1",
+            "gateTier": "nightly"
+        },
+        {
+            "name": "ReplacementAtomicityVerifier",
+            "severity": "Fatal",
+            "integrationScript": ".github/scripts/isr-verify-replacement-atomicity.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "pr"
+        },
+        {
+            "name": "ExecutorSnapshotFreshnessVerifier",
+            "severity": "Error",
+            "integrationScript": ".github/scripts/isr-verify-executor-snapshot-freshness.ps1",
+            "soakScript": ".github/scripts/isr-verify-v73-residency-telemetry.ps1",
+            "gateTier": "nightly"
+        },
+        {
+            "name": "DeterministicBuildVerifier",
+            "severity": "Error",
+            "integrationScript": ".github/scripts/isr-verify-deterministic-build.ps1",
+            "soakScript": ".github/scripts/isr-verify-soak-governance.ps1",
+            "gateTier": "nightly"
+        }
+    ]
+}

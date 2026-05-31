@@ -118,16 +118,21 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     // P0-2: 読取入口を単一の callback authority view へ収束。
     auto runtimeReadView = readAudioRuntimeView();
-    const auto authority = AudioCallbackAuthorityView { runtimeReadView, consumeCrossfadePreparedSnapshot() };
     const auto& runtimeReadViewRef = runtimeReadView;
-    const auto* runtimeGraph = getRuntimeGraph(runtimeReadViewRef);
+    const auto* runtimeWorld = runtimeReadViewRef.runtimeWorld;
+    if (runtimeWorld == nullptr)
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+    const auto authority = AudioCallbackAuthorityView { makeCrossfadePreparedSnapshotFromWorld(*runtimeWorld) };
+    const auto& runtimePublishView = runtimeReadViewRef.runtimePublish;
 
     const auto callbackEpoch = convo::fetchAddAtomic(rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
     const auto sampleCursor = convo::fetchAddAtomic(rtLocalState_.audioSampleCursorCounter, static_cast<uint64_t>(numSamples), std::memory_order_acq_rel);
     const auto graphRevision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
-    const auto packedActiveHandle = (runtimeGraph != nullptr)
-        ? static_cast<std::uint64_t>(runtimeGraph->runtimeUuid)
-        : 0ull;
+    const auto packedActiveHandle = static_cast<std::uint64_t>(
+        reinterpret_cast<uintptr_t>(runtimePublishView.transition.current));
 
     const auto rtFrame = convo::isr::makeRTExecutionFrame(
         packedActiveHandle,
@@ -143,9 +148,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     rtTraceRelay_.enqueue({ rtFrame.sampleCursor, 0xA001u, static_cast<std::uint32_t>(numSamples) });
 
-    DSPCore* dsp = (runtimeGraph != nullptr && runtimeGraph->runtimeUuid != 0)
-        ? static_cast<DSPCore*>(runtimeGraph->activeNode)
-        : nullptr;
+    DSPCore* dsp = static_cast<DSPCore*>(runtimePublishView.transition.current);
     if (dsp == nullptr)
     {
         bufferToFill.clearActiveBufferRegion();
@@ -166,7 +169,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // 安全対策: サンプルレート不整合チェック
         // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
         // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
-        const double engineSampleRate = (runtimeGraph != nullptr) ? runtimeGraph->sampleRate : 0.0;
+        const double engineSampleRate = runtimePublishView.sampleRateHz;
         if (engineSampleRate <= 0.0
             || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
         {
@@ -178,52 +181,14 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // 【Parameter安全設計】
         // Audio ThreadではAtomic変数の読み取りのみを行い、ロックやメモリ確保を伴う処理は行わない。
         // 構造変更が必要な場合は、別途フラグやUIスレッド経由で再構築を行う。
-        // ── Audio Thread 最適化: GlobalSnapshot を優先し、fallback で atomics を読む ──
-        const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(nullptr);
+        // ── Audio Thread authority: RuntimeWorld 由来のスナップショットを使用 ──
+        const EngineParameterSnapshot parameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld);
 
         DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 
-        float snapshotAlpha = 1.0f;
-        const convo::GlobalSnapshot* snapshotFrom = nullptr;
-        const convo::GlobalSnapshot* snapshotTo = nullptr;
-        const bool updateFadeReturned = updateAudioThreadSnapshotFade(numSamples,
-                                                                      snapshotAlpha,
-                                                                      snapshotFrom,
-                                                                      snapshotTo);
-
-        const bool snapshotFading = updateFadeReturned
-            && snapshotTo != nullptr;
-
-        if (snapshotFading)
-        {
-            const int fadeChannels = std::min(dspCrossfadeFloatBuffer.getNumChannels(), buffer->getNumChannels());
-            for (int ch = 0; ch < fadeChannels; ++ch)
-                dspCrossfadeFloatBuffer.clear(ch, 0, numSamples);
-
-            juce::AudioSourceChannelInfo oldInfo(&dspCrossfadeFloatBuffer, 0, numSamples);
-            processWithSnapshot(oldInfo, snapshotFrom, true, authority.runtimeGraph);
-            processWithSnapshot(bufferToFill, snapshotTo, false, authority.runtimeGraph);
-
-            const float gNew = snapshotAlpha;
-            const float gOld = 1.0f - snapshotAlpha;
-            const int outChannels = std::min(buffer->getNumChannels(), dspCrossfadeFloatBuffer.getNumChannels());
-            float* dstL = (outChannels > 0) ? buffer->getWritePointer(0, startSample) : nullptr;
-            float* dstR = (outChannels > 1) ? buffer->getWritePointer(1, startSample) : nullptr;
-            const float* oldL = (outChannels > 0) ? dspCrossfadeFloatBuffer.getReadPointer(0, 0) : nullptr;
-            const float* oldR = (outChannels > 1) ? dspCrossfadeFloatBuffer.getReadPointer(1, 0) : nullptr;
-
-            for (int i = 0; i < numSamples; ++i)
-            {
-                if (dstL != nullptr)
-                    dstL[i] = dstL[i] * gNew + oldL[i] * gOld;
-                if (dstR != nullptr)
-                    dstR[i] = dstR[i] * gNew + oldR[i] * gOld;
-            }
-
-            return;
-        }
-
-        DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeGraph);
+        DSPCore* fading = runtimePublishView.transition.active
+            ? static_cast<DSPCore*>(runtimePublishView.transition.next)
+            : nullptr;
         const auto& preparedCrossfade = authority.preparedCrossfade;
         bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
         if (processCrossfadeDelayGateIfPending(fading,

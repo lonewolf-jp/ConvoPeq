@@ -79,11 +79,31 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/RuntimeSemanticSchemaValidationTests.cpp
     )
 
+    add_executable(ObservePathSingleSourceTests
+        src/tests/ObservePathSingleSourceTests.cpp
+    )
+
+    add_executable(OverlapAuthoritySingularTests
+        src/tests/OverlapAuthoritySingularTests.cpp
+    )
+
+    add_executable(ShadowCompareContractTests
+        src/tests/ShadowCompareContractTests.cpp
+    )
+
+    add_executable(PartialPublicationRejectTests
+        src/tests/PartialPublicationRejectTests.cpp
+    )
+
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
     target_compile_features(RuntimePublicationCoordinatorTests PRIVATE cxx_std_20)
     target_compile_features(ISRSemanticValidationTests PRIVATE cxx_std_20)
     target_compile_features(RetireGraceSemanticsTests PRIVATE cxx_std_20)
     target_compile_features(RuntimeSemanticSchemaValidationTests PRIVATE cxx_std_20)
+    target_compile_features(ObservePathSingleSourceTests PRIVATE cxx_std_20)
+    target_compile_features(OverlapAuthoritySingularTests PRIVATE cxx_std_20)
+    target_compile_features(ShadowCompareContractTests PRIVATE cxx_std_20)
+    target_compile_features(PartialPublicationRejectTests PRIVATE cxx_std_20)
     target_include_directories(ISRRuntimeIdentityTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -117,12 +137,40 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     )
+    target_include_directories(ObservePathSingleSourceTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_include_directories(OverlapAuthoritySingularTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_include_directories(ShadowCompareContractTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_include_directories(PartialPublicationRejectTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
 
     add_test(NAME ISRRuntimeIdentityGenerators COMMAND ISRRuntimeIdentityTests)
     add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
     add_test(NAME RuntimeSemanticSchemaValidation COMMAND RuntimeSemanticSchemaValidationTests)
+    add_test(NAME ObservePathSingleSource COMMAND ObservePathSingleSourceTests)
+    add_test(NAME OverlapAuthoritySingular COMMAND OverlapAuthoritySingularTests)
+    add_test(NAME ShadowCompareContract COMMAND ShadowCompareContractTests)
+    add_test(NAME PartialPublicationReject COMMAND PartialPublicationRejectTests)
 
     if(MSVC)
         target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
@@ -130,6 +178,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
         target_compile_options(RetireGraceSemanticsTests PRIVATE /utf-8)
         target_compile_options(RuntimeSemanticSchemaValidationTests PRIVATE /utf-8)
+        target_compile_options(ObservePathSingleSourceTests PRIVATE /utf-8)
+        target_compile_options(OverlapAuthoritySingularTests PRIVATE /utf-8)
+        target_compile_options(ShadowCompareContractTests PRIVATE /utf-8)
+        target_compile_options(PartialPublicationRejectTests PRIVATE /utf-8)
     endif()
 endif()
 

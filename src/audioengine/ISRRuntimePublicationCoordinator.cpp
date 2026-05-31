@@ -4,9 +4,7 @@
 namespace convo::isr {
 
 RuntimePublicationCoordinator::RuntimePublicationCoordinator()
-    : currentWorld_(nullptr)
-    , version_(0)
-    , publicationSequenceId_(0)
+    : publicationSequenceId_(0)
     , publicationEpoch_(0)
     , mappedRuntimeGeneration_(0)
     , lastRejectCode_(RejectCode::None)
@@ -78,27 +76,24 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
         return;
     }
 
-    const auto previousVersion = convo::consumeAtomic(version_, std::memory_order_acquire);
     const auto previousSequenceId = convo::consumeAtomic(publicationSequenceId_, std::memory_order_acquire);
     const auto previousEpoch = convo::consumeAtomic(publicationEpoch_, std::memory_order_acquire);
     const auto previousMappedGeneration = convo::consumeAtomic(mappedRuntimeGeneration_, std::memory_order_acquire);
-    const auto previousWorld = convo::consumeAtomic(currentWorld_, std::memory_order_acquire);
-    if (previousWorld != nullptr && version <= previousVersion) {
+    const bool hasPrevious = previousSequenceId != 0
+        || previousEpoch != 0
+        || previousMappedGeneration != 0;
+
+    if (hasPrevious && sequenceId <= previousSequenceId) {
         convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
         return;
     }
 
-    if (previousWorld != nullptr && sequenceId <= previousSequenceId) {
+    if (hasPrevious && epoch < previousEpoch) {
         convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
         return;
     }
 
-    if (previousWorld != nullptr && epoch < previousEpoch) {
-        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-        return;
-    }
-
-    if (previousWorld != nullptr
+    if (hasPrevious
         && epoch > previousEpoch
         && mappedGeneration < previousMappedGeneration) {
         convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
@@ -107,8 +102,7 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
 
     convo::publishAtomic(state_, CoordinatorState::Publishing, std::memory_order_release);
     convo::publishAtomic(swapPending_, true, std::memory_order_release);
-    convo::publishAtomic(currentWorld_, newWorld, std::memory_order_release);
-    convo::publishAtomic(version_, version, std::memory_order_release);
+    (void) version;
     convo::publishAtomic(publicationSequenceId_, sequenceId, std::memory_order_release);
     convo::publishAtomic(publicationEpoch_, epoch, std::memory_order_release);
     convo::publishAtomic(mappedRuntimeGeneration_, mappedGeneration, std::memory_order_release);
@@ -124,21 +118,17 @@ void RuntimePublicationCoordinator::retire(RetireAuthority,
         return;
     }
 
-    std::lock_guard<std::mutex> lock(retireGuard_);
-    if (retiredWorlds_.size() >= kMaxRetiredWorldResidency) {
-        retiredWorlds_.erase(retiredWorlds_.begin());
-    }
-    retiredWorlds_.push_back(oldWorld);
-    const auto backlog = static_cast<std::uint64_t>(retiredWorlds_.size());
+    (void) oldWorld;
+    const auto backlog = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire) + 1u;
     setRetireBacklogCount(backlog);
 }
 
 const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
-    return convo::consumeAtomic(currentWorld_, std::memory_order_acquire);
+    return nullptr;
 }
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {
-    return convo::consumeAtomic(version_, std::memory_order_acquire);
+    return convo::consumeAtomic(mappedRuntimeGeneration_, std::memory_order_acquire);
 }
 
 void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
@@ -165,18 +155,10 @@ void RuntimePublicationCoordinator::setRetireBacklogCount(std::uint64_t count) n
                 return;
             }
 
-            if (getCurrent() != nullptr) {
-                convo::publishAtomic(pressureNormalizedWindows_, static_cast<std::uint32_t>(0), std::memory_order_release);
-                convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
-            } else {
-                convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-            }
+            convo::publishAtomic(pressureNormalizedWindows_, static_cast<std::uint32_t>(0), std::memory_order_release);
+            convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
         } else if (state == CoordinatorState::Publishing && count == 0) {
-            if (getCurrent() != nullptr) {
-                convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
-            } else {
-                convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-            }
+            convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
         }
     }
 }
@@ -236,11 +218,6 @@ void RuntimePublicationCoordinator::markTransitionStart() noexcept {
         return;
     }
 
-    if (getCurrent() == nullptr) {
-        convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-        return;
-    }
-
     convo::publishAtomic(state_, CoordinatorState::Transitioning, std::memory_order_release);
 }
 
@@ -251,11 +228,7 @@ void RuntimePublicationCoordinator::markTransitionCommitted() noexcept {
     }
 
     if (!isSwapPending()) {
-        if (getCurrent() != nullptr) {
-            convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
-        } else {
-            convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
-        }
+        convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
     }
 }
 

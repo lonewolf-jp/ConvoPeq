@@ -37,26 +37,25 @@ if (-not [regex]::IsMatch($cppText, 'if \(boundary != RuntimeBoundary::NonRTWorl
 }
 
 if (-not [regex]::IsMatch($cppText, 'convo::publishAtomic\(state_, CoordinatorState::Publishing') -or
-    -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(currentWorld_, newWorld') -or
+    -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(swapPending_, true') -or
+    -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(publicationSequenceId_, sequenceId') -or
+    -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(mappedRuntimeGeneration_, mappedGeneration') -or
+    -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(swapPending_, false') -or
     -not [regex]::IsMatch($cppText, 'convo::publishAtomic\(state_, CoordinatorState::Ready')) {
-    $violations.Add('commit must implement Publishing -> currentWorld publish -> Ready sequence')
+    $violations.Add('commit must implement Publishing -> swapPending(true) -> metadata publish -> swapPending(false) -> Ready sequence')
 }
 
-if (-not [regex]::IsMatch($cppText, 'if \(previousWorld != nullptr && version <= previousVersion\)\s*\{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted')) {
-    $violations.Add('commit must enforce monotonic generation (non-increasing version => Faulted)')
+if (-not [regex]::IsMatch($cppText, 'if \(hasPrevious && sequenceId <= previousSequenceId\)\s*\{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted')) {
+    $violations.Add('commit must enforce monotonic sequence (non-increasing sequenceId => Faulted)')
 }
 
 if (-not [regex]::IsMatch($cppText, 'if \(boundary != RuntimeBoundary::NonRTWorld \|\| oldWorld == nullptr\)\s*\{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted')) {
     $violations.Add('retire must fail-closed to Faulted on invalid boundary/oldWorld')
 }
 
-$retiredWorldPushMatches = [regex]::Matches($cppText, 'retiredWorlds_\.push_back\(')
-if ($retiredWorldPushMatches.Count -ne 1) {
-    $violations.Add("retiredWorlds_ push authority must be single-owner (expected=1 actual=$($retiredWorldPushMatches.Count))")
-}
-
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::retire\([\s\S]*?retiredWorlds_\.push_back\(oldWorld\)')) {
-    $violations.Add('retiredWorlds_ push authority must be implemented inside RuntimePublicationCoordinator::retire')
+if (-not [regex]::IsMatch($cppText, 'const auto backlog = convo::consumeAtomic\(retireBacklogCount_, std::memory_order_acquire\) \+ 1u;') -or
+    -not [regex]::IsMatch($cppText, 'setRetireBacklogCount\(backlog\);')) {
+    $violations.Add('retire must update backlog through setRetireBacklogCount(backlog+1) in thin coordinator mode')
 }
 
 if (-not [regex]::IsMatch($cppText, 'if \(backlog > 0\) \{\s*convo::publishAtomic\(state_, CoordinatorState::Pressure') -and
@@ -77,25 +76,12 @@ if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markTra
     $violations.Add('markTransitionStart must reject requests when current coordinator state is not Ready')
 }
 
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markTransitionStart\(\) noexcept \{[\s\S]*?if \(getCurrent\(\) == nullptr\) \{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted')) {
-    $violations.Add('markTransitionStart must fail-closed to Faulted when current world is null')
-}
-
 if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markTransitionCommitted\(\) noexcept \{[\s\S]*?if \(!isSwapPending\(\)\) \{[\s\S]*?CoordinatorState::Ready')) {
     $violations.Add('markTransitionCommitted must transition to Ready when swap is not pending')
 }
 
 if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markTransitionCommitted\(\) noexcept \{\s*const auto state = convo::consumeAtomic\(state_, std::memory_order_acquire\);\s*if \(state != CoordinatorState::Transitioning\) \{\s*return;\s*\}')) {
     $violations.Add('markTransitionCommitted must reject requests when current coordinator state is not Transitioning')
-}
-
-if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::markTransitionCommitted\(\) noexcept \{[\s\S]*?if \(!isSwapPending\(\)\) \{\s*if \(getCurrent\(\) != nullptr\) \{\s*convo::publishAtomic\(state_, CoordinatorState::Ready\, std::memory_order_release\);\s*\}\s*else \{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted')) {
-    $violations.Add('markTransitionCommitted must keep non-null world invariant for Ready transition')
-}
-
-if (-not [regex]::IsMatch($cppText, 'if \(state == CoordinatorState::Pressure \|\| state == CoordinatorState::Publishing\) \{\s*if \(getCurrent\(\) != nullptr\) \{\s*convo::publishAtomic\(state_, CoordinatorState::Ready\, std::memory_order_release\);\s*\}\s*else \{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted') -and
-    -not [regex]::IsMatch($cppText, 'if \(state == CoordinatorState::Pressure\) \{[\s\S]*?if \(getCurrent\(\) != nullptr\) \{[\s\S]*?CoordinatorState::Ready[\s\S]*?\}\s*else \{\s*convo::publishAtomic\(state_, CoordinatorState::Faulted')) {
-    $violations.Add('setRetireBacklogCount must guard Ready transition with non-null current world invariant')
 }
 
 if (-not [regex]::IsMatch($cppText, 'void RuntimePublicationCoordinator::requestShutdown\(\) noexcept \{\s*convo::publishAtomic\(state_, CoordinatorState::ShuttingDown')) {

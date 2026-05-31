@@ -185,6 +185,7 @@ else {
 $smokeScripts = @(
     '.github/scripts/isr-verify-governance-registries.ps1',
     '.github/scripts/isr-verify-runtime-semantic-schema-v16.ps1',
+    '.github/scripts/isr-verify-verifier-execution-layers.ps1',
     '.github/scripts/isr-verify-v1-immutability.ps1',
     '.github/scripts/isr-verify-v2-seal.ps1',
     '.github/scripts/isr-verify-v3-runtime-graph-immutability.ps1',
@@ -196,6 +197,7 @@ $smokeScripts = @(
     '.github/scripts/isr-verify-v7-rt-nonrt-retire-bridge.ps1',
     '.github/scripts/isr-verify-v8-shared-split-readiness.ps1',
     '.github/scripts/isr-verify-phase4-generation-drift.ps1',
+    '.github/scripts/isr-verify-retire-escalation-safety.ps1',
     '.github/scripts/isr-verify-v6.ps1',
     '.github/scripts/isr-verify-workflow-dispatch-input-policy.ps1',
     '.github/scripts/isr-verify-gate-wiring.ps1'
@@ -268,6 +270,14 @@ $standardAdditionalScripts = @(
     '.github/scripts/isr-verify-authority-inventory.ps1',
     '.github/scripts/isr-verify-documentation-scope-rule.ps1',
     '.github/scripts/isr-verify-taxonomy-phase-mapping.ps1',
+    '.github/scripts/isr-verify-engine-projection-collapse.ps1',
+    '.github/scripts/isr-verify-runtime-view-governance.ps1',
+    '.github/scripts/isr-verify-soak-governance.ps1',
+    '.github/scripts/isr-verify-publication-ownership.ps1',
+    '.github/scripts/isr-verify-runtime-semantic-transition-graph.ps1',
+    '.github/scripts/isr-verify-semantic-reachability.ps1',
+    '.github/scripts/isr-verify-runtimeworld-serialization-contract.ps1',
+    '.github/scripts/isr-verify-verifier-selftest.ps1',
     '.github/scripts/isr-verify-pr-required-artifacts.ps1',
     '.github/scripts/check-src-atomic-dotcall.ps1',
     '.github/scripts/check-list-compliance.ps1',
@@ -281,6 +291,139 @@ $exhaustiveAdditionalScripts = @(
     '.github/scripts/isr-verify-v8.ps1',
     '.github/scripts/isr-verify-v9.ps1'
 )
+
+# ==============================
+# work10 migration phase wiring
+# staged rollout by tier:
+#   smoke      = fast foundational governance checks
+#   standard   = phase 1-5.5 operational governance
+#   exhaustive = phase 5.75 + phase 6 exit governance
+# ==============================
+
+$phase1SmokeScripts = @(
+    '.github/scripts/isr-verify-authority-freeze.ps1',
+    '.github/scripts/isr-verify-authority-count-baseline.ps1',
+    '.github/scripts/isr-verify-authority-identity-baseline.ps1',
+    '.github/scripts/isr-verify-descriptor-uuid-stability.ps1',
+    '.github/scripts/isr-verify-authority-classification-rule.ps1'
+)
+
+$phase1StandardScripts = @(
+    '.github/scripts/isr-verify-semantic-authority-contract.ps1',
+    '.github/scripts/isr-verify-semantic-mutation-governance.ps1',
+    '.github/scripts/isr-verify-authority-reduction-governance.ps1',
+    '.github/scripts/isr-verify-verifier-integrity-governance.ps1'
+)
+
+$phase2StandardScripts = @(
+    '.github/scripts/isr-verify-runtimeworld-builder-governance.ps1',
+    '.github/scripts/isr-verify-runtimeworld-builder-internal-mutation-governance.ps1',
+    '.github/scripts/isr-verify-runtime-semantic-read-contract.ps1',
+    '.github/scripts/isr-verify-runtimeworld-layout-governance.ps1',
+    '.github/scripts/isr-verify-publication-state-machine.ps1',
+    '.github/scripts/isr-verify-runtimeworld-abi-contract.ps1',
+    '.github/scripts/isr-verify-semantic-closure-allowlist.ps1',
+    '.github/scripts/isr-verify-semantic-closure-forbidden-inputs.ps1',
+    '.github/scripts/isr-verify-publication-atomicity.ps1',
+    '.github/scripts/isr-verify-publication-atomic-boundary.ps1'
+)
+
+$phase45StandardScripts = @(
+    '.github/scripts/isr-verify-authority-writer-reader-matrix.ps1',
+    '.github/scripts/isr-verify-runtimeview-escape.ps1',
+    '.github/scripts/isr-verify-runtime-snapshot-identity.ps1',
+    '.github/scripts/isr-verify-runtime-snapshot-never-reuse.ps1',
+    '.github/scripts/isr-verify-retire-eligibility.ps1',
+    '.github/scripts/isr-verify-retire-escalation-safety.ps1',
+    '.github/scripts/isr-verify-retire-queue-saturation-policy.ps1',
+    '.github/scripts/isr-verify-runtime-memory-lifetime.ps1',
+    '.github/scripts/isr-verify-runtime-recovery-semantic.ps1'
+)
+
+$phase55StandardScripts = @(
+    '.github/scripts/isr-verify-runtimeworld-budget-enforcement.ps1',
+    '.github/scripts/isr-verify-soak-exit-volume.ps1',
+    '.github/scripts/isr-verify-operational-mismatch-severity.ps1',
+    '.github/scripts/isr-verify-realtime-budget.ps1',
+    '.github/scripts/isr-verify-shadow-compare-exit-rule.ps1',
+    '.github/scripts/isr-verify-shadow-compare-exit-volume.ps1',
+    '.github/scripts/isr-verify-shadow-compare-coverage.ps1',
+    '.github/scripts/isr-verify-rollback-drill.ps1'
+)
+
+$phase575ExhaustiveScripts = @(
+    '.github/scripts/isr-verify-migration-exit-audit.ps1',
+    '.github/scripts/isr-verify-exit-audit-independence.ps1',
+    '.github/scripts/isr-verify-verifier-manifest-hash.ps1',
+    '.github/scripts/isr-generate-machine-audit-package.ps1',
+    '.github/scripts/isr-verify-migration-reentry-contract.ps1'
+)
+
+$phase6ExhaustiveScripts = @(
+    '.github/scripts/isr-verify-legacytemporary-zero-references.ps1'
+)
+
+function Add-ScriptListUnique {
+    param(
+        [string[]]$Base,
+        [string[]]$Extra
+    )
+
+    $result = @($Base)
+    foreach ($script in @($Extra)) {
+        if ($result -notcontains $script) {
+            $result += $script
+        }
+    }
+
+    return $result
+}
+
+$smokeScripts = Add-ScriptListUnique -Base $smokeScripts -Extra $phase1SmokeScripts
+
+$standardAdditionalScripts = Add-ScriptListUnique -Base $standardAdditionalScripts -Extra $phase1StandardScripts
+$standardAdditionalScripts = Add-ScriptListUnique -Base $standardAdditionalScripts -Extra $phase2StandardScripts
+$standardAdditionalScripts = Add-ScriptListUnique -Base $standardAdditionalScripts -Extra $phase45StandardScripts
+$standardAdditionalScripts = Add-ScriptListUnique -Base $standardAdditionalScripts -Extra $phase55StandardScripts
+
+$exhaustiveAdditionalScripts = Add-ScriptListUnique -Base $exhaustiveAdditionalScripts -Extra $phase575ExhaustiveScripts
+$exhaustiveAdditionalScripts = Add-ScriptListUnique -Base $exhaustiveAdditionalScripts -Extra $phase6ExhaustiveScripts
+
+# ==============================
+# work11 verifier wiring (§5.4.1 採用 verifier 12件)
+# pr-tier: 9 Fatal verifiers (smoke)
+# nightly-tier: 3 Error verifiers (standard)
+# ==============================
+$work11SmokeVerifierScripts = @(
+    '.github/scripts/isr-verify-self-contained-world.ps1',
+    '.github/scripts/isr-verify-semantic-dependency-graph.ps1',
+    '.github/scripts/isr-verify-runtime-world-identity.ps1',
+    '.github/scripts/isr-verify-publication-failure-taxonomy.ps1',
+    '.github/scripts/isr-verify-visibility-monotonicity.ps1',
+    '.github/scripts/isr-verify-memory-ordering-contract.ps1',
+    '.github/scripts/isr-verify-partial-publication.ps1',
+    '.github/scripts/isr-verify-observe-path.ps1',
+    '.github/scripts/isr-verify-observe-forbidden-types.ps1',
+    '.github/scripts/isr-verify-overlap-authority.ps1',
+    '.github/scripts/isr-verify-partial-semantic-update-prohibition.ps1',
+    '.github/scripts/isr-verify-semantic-validity.ps1',
+    '.github/scripts/isr-verify-runtime-admission.ps1',
+    '.github/scripts/isr-verify-semantic-conflict.ps1',
+    '.github/scripts/isr-verify-authority-exhaustiveness.ps1',
+    '.github/scripts/isr-verify-replacement-atomicity.ps1'
+)
+
+$work11StandardVerifierScripts = @(
+    '.github/scripts/isr-verify-aba-hazard.ps1',
+    '.github/scripts/isr-verify-retire-starvation.ps1',
+    '.github/scripts/isr-verify-semantic-hash-drift.ps1',
+    '.github/scripts/isr-verify-semantic-equivalence.ps1',
+    '.github/scripts/isr-verify-executor-snapshot-freshness.ps1',
+    '.github/scripts/isr-verify-deterministic-build.ps1'
+)
+
+$smokeScripts = Add-ScriptListUnique -Base $smokeScripts -Extra $work11SmokeVerifierScripts
+$standardAdditionalScripts = Add-ScriptListUnique -Base $standardAdditionalScripts -Extra $work11StandardVerifierScripts
 
 $requiredV73Scripts = @(
     '.github/scripts/isr-verify-v73-admission-funnel.ps1',

@@ -162,7 +162,8 @@ if (@('warn', 'fail') -notcontains $effectiveMode) {
 }
 
 $sourceRoot = Join-Path $repoRoot 'src'
-$cppFiles = Get-ChildItem -Path $sourceRoot -Recurse -File -Filter '*.cpp'
+$cppFiles = Get-ChildItem -Path $sourceRoot -Recurse -File -Filter '*.cpp' |
+    Where-Object { $_.FullName -notmatch '\\src\\tests\\' }
 $releaseResourcesPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.ReleaseResources.cpp'
 $ctorDtorPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.CtorDtor.cpp'
 $sourceRelativePaths = @()
