@@ -34,50 +34,32 @@ else {
     }
 }
 
-# Contract: world identity fields must be assigned in buildRuntimePublishWorld,
-# and commit path must consume world.generation / world.publication.sequenceId.
-$audioHeader = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
-if (-not (Test-Path -LiteralPath $audioHeader)) {
-    Add-Violation "AudioEngine.h not found: $audioHeader"
+# Contract: world identity fields must be assigned in buildRuntimePublishWorld
+# (RuntimeBuilder.cpp), and commit path must consume world.generation /
+# world.publication.sequenceId (AudioEngine.Commit.cpp).
+$runtimeBuilder = Join-Path $repoRoot 'src\audioengine\RuntimeBuilder.cpp'
+if (-not (Test-Path -LiteralPath $runtimeBuilder)) {
+    Add-Violation "RuntimeBuilder.cpp not found: $runtimeBuilder"
 }
 else {
-    $ah = Get-Content -LiteralPath $audioHeader -Raw -Encoding UTF8
-    $buildMatch = [regex]::Match(
-        $ah,
-        '(?s)\[\[nodiscard\]\]\s+convo::aligned_unique_ptr<RuntimePublishWorld>\s+buildRuntimePublishWorld\(.*?\)\s+noexcept\s*\{(?<body>.*?)\n\s*\}',
-        [System.Text.RegularExpressions.RegexOptions]::Singleline
-    )
-
-    if (-not $buildMatch.Success) {
-        Add-Violation 'AudioEngine.h missing buildRuntimePublishWorld body for RuntimeWorld identity verification'
+    $rb = Get-Content -LiteralPath $runtimeBuilder -Raw -Encoding UTF8
+    if (-not $rb.Contains('buildRuntimePublishWorld(')) {
+        Add-Violation 'RuntimeBuilder.cpp missing buildRuntimePublishWorld function'
     }
-    else {
-        $body = $buildMatch.Groups['body'].Value
-        if (-not $body.Contains('worldOwner->worldId =')) {
-            Add-Violation 'buildRuntimePublishWorld does not assign worldOwner->worldId'
-        }
-        if (-not $body.Contains('worldOwner->generation =')) {
-            Add-Violation 'buildRuntimePublishWorld does not assign worldOwner->generation'
-        }
-        if (-not $body.Contains('worldOwner->publication.sequenceId =')) {
-            Add-Violation 'buildRuntimePublishWorld does not assign worldOwner->publication.sequenceId'
-        }
-        if (-not $body.Contains('worldOwner->semanticHash.generationSemanticHash =')) {
-            Add-Violation 'buildRuntimePublishWorld does not compute semanticHash.generationSemanticHash'
-        }
-        if (-not $body.Contains('worldOwner->freeze()')) {
-            Add-Violation 'buildRuntimePublishWorld must freeze worldOwner before publish'
-        }
+    if (-not $rb.Contains('worldOwner->worldId =')) {
+        Add-Violation 'buildRuntimePublishWorld does not assign worldOwner->worldId'
     }
-
-    if (-not $ah.Contains('commitRuntimePublication(const RuntimePublishWorld& world)')) {
-        Add-Violation 'AudioEngine.h missing commitRuntimePublication function'
+    if (-not $rb.Contains('worldOwner->generation =')) {
+        Add-Violation 'buildRuntimePublishWorld does not assign worldOwner->generation'
     }
-    if (-not $ah.Contains('world.generation')) {
-        Add-Violation 'commitRuntimePublication does not consume world.generation identity'
+    if (-not $rb.Contains('worldOwner->publication.sequenceId =')) {
+        Add-Violation 'buildRuntimePublishWorld does not assign worldOwner->publication.sequenceId'
     }
-    if (-not $ah.Contains('world.publication.sequenceId')) {
-        Add-Violation 'commitRuntimePublication does not consume world.publication.sequenceId identity'
+    if (-not $rb.Contains('worldOwner->semanticHash.generationSemanticHash =')) {
+        Add-Violation 'buildRuntimePublishWorld does not compute semanticHash.generationSemanticHash'
+    }
+    if (-not $rb.Contains('worldOwner->freeze()')) {
+        Add-Violation 'buildRuntimePublishWorld must freeze worldOwner before publish'
     }
 }
 
@@ -87,6 +69,15 @@ if (-not (Test-Path -LiteralPath $commitCpp)) {
 }
 else {
     $cc = Get-Content -LiteralPath $commitCpp -Raw -Encoding UTF8
+    if (-not $cc.Contains('onRuntimePublishedNonRt(const RuntimePublishWorld& world)')) {
+        Add-Violation 'AudioEngine.Commit.cpp missing onRuntimePublishedNonRt(world) commit path'
+    }
+    if (-not $cc.Contains('world.generation')) {
+        Add-Violation 'Commit path does not consume world.generation identity'
+    }
+    if (-not $cc.Contains('world.publication.sequenceId')) {
+        Add-Violation 'Commit path does not consume world.publication.sequenceId identity'
+    }
     if (-not $cc.Contains('lastCommittedRuntimeGeneration_')) {
         Add-Violation 'AudioEngine.Commit.cpp does not enforce generation monotonicity contract'
     }

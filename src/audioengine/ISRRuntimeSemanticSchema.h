@@ -157,6 +157,40 @@ template <std::size_t InventoryN, std::size_t DescriptorN>
     return true;
 }
 
+template <std::size_t N>
+[[nodiscard]] inline constexpr bool validateReadAuthorityInventorySet(
+    const std::array<RuntimeAuthorityInventoryEntry, N>& inventory) noexcept
+{
+    return validateAuthorityInventorySet(inventory);
+}
+
+template <std::size_t InventoryN, std::size_t DescriptorN>
+[[nodiscard]] inline constexpr bool validateReadAuthorityInventoryAgainstDescriptors(
+    const std::array<RuntimeAuthorityInventoryEntry, InventoryN>& readInventory,
+    const std::array<RuntimeFieldDescriptor, DescriptorN>& descriptors) noexcept
+{
+    if (!validateReadAuthorityInventorySet(readInventory) || !validateFieldDescriptorSet(descriptors))
+        return false;
+
+    for (const auto& entry : readInventory)
+    {
+        bool found = false;
+        for (const auto& descriptor : descriptors)
+        {
+            if (entry.fieldName == descriptor.fieldName)
+            {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found)
+            return false;
+    }
+
+    return true;
+}
+
 using PublicationSequenceId = std::uint64_t;
 using PublicationEpoch = std::uint64_t;
 
@@ -291,6 +325,10 @@ struct AutomationSemantic
     bool eqBypassed = false;
     bool convBypassed = false;
     bool softClipEnabled = false;
+    double saturationAmount = 0.0;
+    double inputHeadroomGain = 1.0;
+    double outputMakeupGain = 1.0;
+    double convolverInputTrimGain = 1.0;
 };
 
 struct CoefficientSemantic

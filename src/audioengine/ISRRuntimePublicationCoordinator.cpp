@@ -7,6 +7,7 @@ RuntimePublicationCoordinator::RuntimePublicationCoordinator()
     : publicationSequenceId_(0)
     , publicationEpoch_(0)
     , mappedRuntimeGeneration_(0)
+    , currentWorld_(nullptr)
     , lastRejectCode_(RejectCode::None)
     , retireBacklogCount_(0)
     , publicationBacklogCount_(0)
@@ -88,14 +89,12 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
         return;
     }
 
-    if (hasPrevious && epoch < previousEpoch) {
+    if (hasPrevious && epoch <= previousEpoch) {
         convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
         return;
     }
 
-    if (hasPrevious
-        && epoch > previousEpoch
-        && mappedGeneration < previousMappedGeneration) {
+    if (hasPrevious && mappedGeneration <= previousMappedGeneration) {
         convo::publishAtomic(state_, CoordinatorState::Faulted, std::memory_order_release);
         return;
     }
@@ -106,6 +105,7 @@ void RuntimePublicationCoordinator::commit(PublishAuthority,
     convo::publishAtomic(publicationSequenceId_, sequenceId, std::memory_order_release);
     convo::publishAtomic(publicationEpoch_, epoch, std::memory_order_release);
     convo::publishAtomic(mappedRuntimeGeneration_, mappedGeneration, std::memory_order_release);
+    convo::publishAtomic(currentWorld_, newWorld, std::memory_order_release);
     convo::publishAtomic(swapPending_, false, std::memory_order_release);
     convo::publishAtomic(state_, CoordinatorState::Ready, std::memory_order_release);
 }
@@ -119,12 +119,22 @@ void RuntimePublicationCoordinator::retire(RetireAuthority,
     }
 
     (void) oldWorld;
+    auto observedCurrent = convo::consumeAtomic(currentWorld_, std::memory_order_acquire);
+    if (observedCurrent == oldWorld)
+    {
+        convo::compareExchangeAtomic(currentWorld_,
+                                     observedCurrent,
+                                     static_cast<const void*>(nullptr),
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_acquire);
+    }
+
     const auto backlog = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire) + 1u;
     setRetireBacklogCount(backlog);
 }
 
 const void* RuntimePublicationCoordinator::getCurrent() const noexcept {
-    return nullptr;
+    return convo::consumeAtomic(currentWorld_, std::memory_order_acquire);
 }
 
 std::uint64_t RuntimePublicationCoordinator::getVersion() const noexcept {

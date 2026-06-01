@@ -9,10 +9,19 @@
 
 namespace convo {
 
+struct RuntimeBuildSnapshot;
+
 template <typename World, typename Handle, typename Bridge>
 class RuntimePublicationCoordinator final
 {
 public:
+    struct ReadToken final
+    {
+    private:
+        friend class RuntimePublicationCoordinator<World, Handle, Bridge>;
+        constexpr ReadToken() noexcept = default;
+    };
+
     using Store = RuntimeStore<World, RuntimePublicationCoordinator<World, Handle, Bridge>>;
     using WriteAccess = typename Store::WriteAccess;
 
@@ -33,33 +42,62 @@ public:
         return RuntimePublicationCoordinator { std::move(bridge), store.acquireWriteAccess() };
     }
 
-    [[nodiscard]] static const World* observePublishedWorld(const Store& store) noexcept
+    [[nodiscard]] static const World* consumePublishedWorld(const Store& store) noexcept
     {
         return store.observe();
     }
 
-    [[nodiscard]] static const World* observeWorldHandle(const Store& store) noexcept
+    [[nodiscard]] static ReadToken acquireReadToken(const Store&) noexcept
     {
-        return observePublishedWorld(store);
+        return ReadToken{};
+    }
+
+    [[nodiscard]] static const World* consumePublishedWorld(const Store& store,
+                                                            const ReadToken&) noexcept
+    {
+        return consumePublishedWorld(store);
+    }
+
+    [[nodiscard]] static const World* consumeWorldHandle(const Store& store) noexcept
+    {
+        return consumePublishedWorld(store);
+    }
+
+    [[nodiscard]] static const World* consumeWorldHandle(const Store& store,
+                                                         const ReadToken& token) noexcept
+    {
+        return consumePublishedWorld(store, token);
     }
 
     void clearPublishedRuntimeSnapshotsNonRt() noexcept
     {
+        if (!shutdownClearRequested_)
+            return;
+
+        shutdownClearRequested_ = false;
+
         auto* world = writeAccess_.publishAndSwap(nullptr);
         bridge_.retireRuntimePublishWorldNonRt(world, true);
+    }
+
+    void requestShutdownClearNonRt() noexcept
+    {
+        shutdownClearRequested_ = true;
     }
 
     void publishState(Handle current,
                       Handle next,
                       convo::TransitionPolicy policy,
                       double fadeTimeSec,
-                      bool active) noexcept
+                      bool active,
+                      const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept
     {
         auto worldOwner = bridge_.buildRuntimePublishWorld(current,
                                                            next,
                                                            policy,
                                                            fadeTimeSec,
-                                                           active);
+                                                           active,
+                                                           sealedSnapshot);
 
         if constexpr (requires(Bridge bridge, const World& world) { bridge.validatePublicationNonRt(world); })
         {
@@ -91,6 +129,7 @@ public:
 private:
     Bridge bridge_;
     WriteAccess writeAccess_;
+    bool shutdownClearRequested_ = false;
 };
 
 } // namespace convo

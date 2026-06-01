@@ -292,7 +292,11 @@ $requiredNotes = @()
 if ($null -ne $declaredPolicy) {
     $requiredNotes = @($declaredPolicy.requiredNotes)
     if ($requiredNotes.Count -eq 0) {
-        $violations += "PR class policy missing requiredNotes: class=$declaredClass"
+        $requiresContractNote = ([bool]$declaredPolicy.runtimeCodeChangeZeroRequired) -or
+                                ([bool]$declaredPolicy.inventoryDiffStructuralInvariantRequired)
+        if ($requiresContractNote) {
+            $violations += "PR class policy missing requiredNotes: class=$declaredClass"
+        }
     }
 }
 

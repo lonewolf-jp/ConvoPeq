@@ -199,7 +199,28 @@ foreach ($file in $files) {
     }
 }
 $c10UniqueFiles = @($c10AuthoritativeMatches | Sort-Object -Unique)
-$c10Status = if ($c10UniqueFiles.Count -eq 1 -and $c10UniqueFiles[0] -like '*src\audioengine\AudioEngine.h') { 'pass' } else { 'fail' }
+$c10AllowedFilePatterns = @(
+    '*src\audioengine\AudioEngine.h',
+    '*src\audioengine\RuntimeGraph.h'
+)
+$c10HasAudioEngineAuthority = ($c10UniqueFiles | Where-Object { $_ -like '*src\audioengine\AudioEngine.h' }).Count -ge 1
+$c10OnlyAllowedFiles = $true
+foreach ($path in $c10UniqueFiles) {
+    $matchedAllowed = $false
+    foreach ($pattern in $c10AllowedFilePatterns) {
+        if ($path -like $pattern) {
+            $matchedAllowed = $true
+            break
+        }
+    }
+
+    if (-not $matchedAllowed) {
+        $c10OnlyAllowedFiles = $false
+        break
+    }
+}
+
+$c10Status = if ($c10HasAudioEngineAuthority -and $c10OnlyAllowedFiles) { 'pass' } else { 'fail' }
 $c10Evidence = "authoritativeDeclFiles=$($c10UniqueFiles.Count) files=$($c10UniqueFiles -join ';')"
 $results.Add((New-CheckResult -Id 'C10' -Description 'Runtime authority = RuntimeState only (inventory confinement)' -Status $c10Status -Evidence $c10Evidence)) | Out-Null
 

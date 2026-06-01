@@ -64,7 +64,15 @@ if ($enqueueAttempts -lt 2) {
 }
 
 Assert-Pattern -Text $headerText -Pattern 'm_epochDomain\.reclaimRetired\(\);' -CheckId 'CI-RETIREPRESS-001' -File 'src/audioengine/AudioEngine.h' -Message 'enqueueDeferredDeleteNonRt must call reclaimRetired() before second enqueue attempt.'
-Assert-Pattern -Text $headerText -Pattern 'deferredDeleteFallbackQueue\.push_back\(DeferredDeleteFallbackEntry\{' -CheckId 'CI-RETIREPRESS-001' -File 'src/audioengine/AudioEngine.h' -Message 'enqueueDeferredDeleteNonRt must enqueue fallback entry on bounded enqueue pressure.'
+
+$hasLegacyFallbackEnqueue = [System.Text.RegularExpressions.Regex]::IsMatch($headerText, 'deferredDeleteFallbackQueue\.push_back\(DeferredDeleteFallbackEntry\{', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+$hasCurrentPressureReturn = [System.Text.RegularExpressions.Regex]::IsMatch($headerText,
+    'RetireEnqueueResult::QueueFull[\s\S]*RetireEnqueueResult::QueuePressure',
+    [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
+if (-not $hasLegacyFallbackEnqueue -and -not $hasCurrentPressureReturn) {
+    Add-Violation -CheckId 'CI-RETIREPRESS-001' -File 'src/audioengine/AudioEngine.h' -Message 'enqueueDeferredDeleteNonRt must either enqueue fallback entry (legacy) or explicitly return QueuePressure/QueueFull under bounded enqueue pressure.'
+}
 
 # CI-RETIREPRESS-002: fallback蓄積時はbest-effort drainキックが必須
 Assert-Pattern -Text $headerText -Pattern 'drainDeferredRetireQueues\(false\);' -CheckId 'CI-RETIREPRESS-002' -File 'src/audioengine/AudioEngine.h' -Message 'enqueueDeferredDeleteNonRt must trigger best-effort deferred drain after fallback enqueue.'

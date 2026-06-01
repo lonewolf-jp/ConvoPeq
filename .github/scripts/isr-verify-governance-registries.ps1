@@ -259,7 +259,7 @@ if (Test-Path -LiteralPath $verifierRegistryPath) {
             [ordered]@{ verifier = 'projection-austerity-verifier'; script = '.github/scripts/isr-verify-projection-austerity.ps1' },
             [ordered]@{ verifier = 'projection-freshness-verifier'; script = '.github/scripts/isr-verify-projection-freshness.ps1' },
             [ordered]@{ verifier = 'semantic-migration-compatibility-verifier'; script = '.github/scripts/isr-verify-semantic-migration-compatibility.ps1' },
-            [ordered]@{ verifier = 'governance-consistency-verifier'; script = '.github/scripts/isr-verify-gate-wiring.ps1' }
+            [ordered]@{ verifier = 'governance-consistency-verifier'; script = '.github/scripts/isr-verify-governance-consistency.ps1' }
         )
 
         foreach ($contract in $wiringContracts) {

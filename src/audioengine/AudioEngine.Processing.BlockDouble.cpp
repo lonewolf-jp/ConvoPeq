@@ -98,17 +98,16 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    auto runtimeReadView = readAudioRuntimeView();
-    const auto& runtimeReadViewRef = runtimeReadView;
-    const auto* runtimeWorld = runtimeReadViewRef.runtimeWorld;
+    auto runtimeReadHandle = readAudioRuntimeHandle();
+    const auto& runtimeReadHandleRef = runtimeReadHandle;
+    const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
     if (runtimeWorld == nullptr)
     {
         buffer.clear();
         return;
     }
     const auto authority = AudioCallbackAuthorityView { makeCrossfadePreparedSnapshotFromWorld(*runtimeWorld) };
-    const auto& runtimePublishView = runtimeReadViewRef.runtimePublish;
-    DSPCore* dsp = static_cast<DSPCore*>(runtimePublishView.transition.current);
+    DSPCore* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef);
     if (dsp == nullptr)
     {
         buffer.clear();
@@ -134,7 +133,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    const double engineSampleRate = runtimePublishView.sampleRateHz;
+    const double engineSampleRate = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
     if (engineSampleRate <= 0.0
         || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
     {
@@ -143,9 +142,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     }
 
     // --- クロスフェード開始時: スナップショット取得・RT競合ゼロ設計 ---
-    DSPCore* fading = runtimeWorld->topology.hasFadingRuntime
-        ? static_cast<DSPCore*>(runtimePublishView.transition.next)
-        : nullptr;
+    DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef);
     const auto& preparedCrossfade = authority.preparedCrossfade;
     bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
     if (fading != nullptr && fading == dsp)

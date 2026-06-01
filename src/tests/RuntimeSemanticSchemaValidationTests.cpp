@@ -212,6 +212,131 @@ namespace {
     return visited.find("Destroyed") != visited.end();
 }
 
+[[nodiscard]] bool testSemanticTriggerToHashPathContract()
+{
+    const std::unordered_map<std::string, std::vector<std::string>> graph {
+        {"TriggerAccepted", {"BuildInputSealed"}},
+        {"BuildInputSealed", {"RuntimeWorldPublished"}},
+        {"RuntimeWorldPublished", {"SemanticHashComputed", "PublicationStable"}},
+        {"SemanticHashComputed", {"PublicationStable"}},
+        {"PublicationStable", {"CrossfadeComplete", "RetireSettled"}},
+        {"CrossfadeComplete", {"RetireSettled"}},
+        {"RetireSettled", {}}
+    };
+
+    const std::array<std::string, 7> requiredNodes {
+        "TriggerAccepted",
+        "BuildInputSealed",
+        "RuntimeWorldPublished",
+        "SemanticHashComputed",
+        "PublicationStable",
+        "CrossfadeComplete",
+        "RetireSettled"
+    };
+
+    std::queue<std::string> q;
+    std::unordered_set<std::string> visited;
+    q.push("TriggerAccepted");
+    visited.insert("TriggerAccepted");
+
+    while (!q.empty())
+    {
+        const auto cur = q.front();
+        q.pop();
+
+        const auto it = graph.find(cur);
+        if (it == graph.end())
+            return false;
+
+        for (const auto& next : it->second)
+        {
+            if (visited.insert(next).second)
+                q.push(next);
+        }
+    }
+
+    for (const auto& node : requiredNodes)
+    {
+        if (graph.find(node) == graph.end())
+            return false;
+        if (visited.find(node) == visited.end())
+            return false;
+    }
+
+    for (const auto& [node, next] : graph)
+    {
+        if (node == "RetireSettled")
+            continue;
+        if (next.empty())
+            return false;
+    }
+
+    return true;
+}
+
+[[nodiscard]] bool testSemanticHashCoverageContract()
+{
+    convo::isr::RuntimeSemanticHash base {};
+    base.generationSemanticHash = 10;
+    base.topologyHash = 20;
+    base.executionHash = 30;
+    base.routingHash = 40;
+    base.payloadHash = 50;
+    base.publicationSemanticHash = 60;
+    base.overlapSemanticHash = 70;
+    base.retireSemanticHash = 80;
+
+    auto mutated = base;
+    mutated.generationSemanticHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.topologyHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.executionHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.routingHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.payloadHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.publicationSemanticHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.overlapSemanticHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.retireSemanticHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    return true;
+}
+
 [[nodiscard]] bool testDescriptorCoverageContract()
 {
     constexpr auto& descriptors = convo::isr::PublicationSemantic::kFieldDescriptors;
@@ -555,6 +680,12 @@ int main()
 
     if (!testRuntimeSemanticReachabilityValidation())
         throw std::runtime_error("runtime semantic reachability validation failed");
+
+    if (!testSemanticTriggerToHashPathContract())
+        throw std::runtime_error("semantic trigger-to-hash path contract validation failed");
+
+    if (!testSemanticHashCoverageContract())
+        throw std::runtime_error("semantic hash coverage contract validation failed");
 
     if (!testDescriptorCoverageContract())
         throw std::runtime_error("descriptor coverage contract validation failed");

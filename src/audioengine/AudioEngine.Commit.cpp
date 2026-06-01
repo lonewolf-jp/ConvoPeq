@@ -54,6 +54,53 @@ void destroyPublicationIntentNode(void* ptr) noexcept
     return true;
 }
 
+[[nodiscard]] inline bool validateRuntimeGraphAuthorityContract(const RuntimePublishWorld& world) noexcept
+{
+    if (!convo::RuntimeGraph::validateDescriptorSet())
+        return false;
+
+    if (!convo::RuntimeGraph::validateDecisionCoverageContract())
+        return false;
+
+    if (world.routing.eqBypassed != world.graph.eqBypassed)
+        return false;
+
+    if (world.routing.convBypassed != world.graph.convBypassed)
+        return false;
+
+    const bool hasGraphActiveNode = (world.graph.activeNode != nullptr)
+        || (world.graph.runtimeUuid != 0)
+        || (world.graph.transitionCurrentRuntimeUuid != 0);
+    const bool hasGraphFadingNode = (world.graph.fadingNode != nullptr)
+        || (world.graph.fadingRuntimeUuid != 0)
+        || (world.graph.transitionNextRuntimeUuid != 0);
+
+    if (hasGraphActiveNode != (world.topology.runtimeUuid != 0))
+        return false;
+
+    if (hasGraphFadingNode != world.topology.hasFadingRuntime)
+        return false;
+
+    if (world.topology.runtimeUuid != world.graph.runtimeUuid)
+        return false;
+
+    if (world.topology.fadingRuntimeUuid != world.graph.fadingRuntimeUuid)
+        return false;
+
+    if (world.graph.transitionCurrentRuntimeUuid != 0
+        && world.graph.transitionCurrentRuntimeUuid != world.graph.runtimeUuid)
+        return false;
+
+    if (world.graph.transitionNextRuntimeUuid != 0
+        && world.graph.transitionNextRuntimeUuid != world.graph.fadingRuntimeUuid)
+        return false;
+
+    if (world.execution.transitionActive != world.topology.hasFadingRuntime)
+        return false;
+
+    return true;
+}
+
 [[nodiscard]] inline bool hasEquivalentTransitionSemantic(const RuntimePublishWorld& world) noexcept
 {
     return world.execution.transitionActive == world.topology.hasFadingRuntime;
@@ -122,6 +169,10 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 
     // Stage 1: semantic completeness.
     if (!validateSemanticCompleteness(world))
+        return rejectWithEvidence();
+
+    // Stage 1.5: RuntimeGraph authority contract (fail-closed).
+    if (!validateRuntimeGraphAuthorityContract(world))
         return rejectWithEvidence();
 
     if (!transitionSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Validated))
@@ -273,10 +324,11 @@ AudioEngine::RuntimePublicationBridge::buildRuntimePublishWorld(DSPCore* current
                                                                 DSPCore* next,
                                                                 convo::TransitionPolicy policy,
                                                                 double fadeTimeSec,
-                                                                bool active) noexcept
+                                                                bool active,
+                                                                const convo::RuntimeBuildSnapshot* sealedSnapshot) noexcept
 {
     convo::RuntimeBuilder worldBuilder(*engine_);
-    return worldBuilder.buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active);
+    return worldBuilder.buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active, sealedSnapshot);
 }
 
 void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept
@@ -480,7 +532,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
                                              maxObservedGeneration,
                                              callbackActiveCount);
         const bool pendingIntentOwned = pending.isValid;
-        const auto* currentPublished = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
+        const auto* currentPublished = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore);
         const bool authoritativeOwnershipReleased = (currentPublished != world);
         const std::uint64_t retireDeferralEpochs = (maxObservedGeneration > pendingGeneration)
             ? (maxObservedGeneration - pendingGeneration)
@@ -546,7 +598,10 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
     evidenceExporter_.exportEvidence();
 }
 
-void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP, int targetWorldId, CommitReaderSlot readerSlot) noexcept
+void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP,
+                                                       int targetWorldId,
+                                                       CommitReaderSlot readerSlot,
+                                                       const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept
 {
     if (newDSP == nullptr)
         return;
@@ -587,6 +642,7 @@ void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP, int targ
                                               static_cast<std::uint64_t>(1),
                                               std::memory_order_acq_rel) + 1;
     intent->enqueueTimeTicks = juce::Time::getHighResolutionTicks();
+    intent->runtimeBuildSnapshot = sealedSnapshot;
     // intent は生成直後でまだ他スレッドから不可視のため、next の nullptr 初期化に ordering 不要。
     convo::publishAtomic(intent->next, static_cast<PublicationIntent*>(nullptr), std::memory_order_relaxed);
 
@@ -642,14 +698,18 @@ void AudioEngine::appendPublicationIntentForCommitSlot(DSPCore* newDSP, int targ
     runtimePublicationBridge_.setPendingIntentCount(backlog);
 }
 
-void AudioEngine::appendPublicationIntentForCommitProducer(DSPCore* newDSP, int targetWorldId) noexcept
+void AudioEngine::appendPublicationIntentForCommitProducer(DSPCore* newDSP,
+                                                           int targetWorldId,
+                                                           const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept
 {
-    appendPublicationIntentForCommitSlot(newDSP, targetWorldId, CommitReaderSlot::Producer);
+    appendPublicationIntentForCommitSlot(newDSP, targetWorldId, CommitReaderSlot::Producer, sealedSnapshot);
 }
 
-void AudioEngine::appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int targetWorldId) noexcept
+void AudioEngine::appendPublicationIntentForCommitConsumer(DSPCore* newDSP,
+                                                           int targetWorldId,
+                                                           const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept
 {
-    appendPublicationIntentForCommitSlot(newDSP, targetWorldId, CommitReaderSlot::Consumer);
+    appendPublicationIntentForCommitSlot(newDSP, targetWorldId, CommitReaderSlot::Consumer, sealedSnapshot);
 }
 
 void AudioEngine::drainPublicationLogForShutdown() noexcept
@@ -696,7 +756,9 @@ void AudioEngine::drainPublicationLogForShutdown() noexcept
     runtimePublicationBridge_.setPendingIntentCount(0u);
 }
 
-void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation)
+void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
+                                                           int generation,
+                                                           const convo::RuntimeBuildSnapshot& sealedSnapshot)
 {
     if (newDSP == nullptr)
         return;
@@ -708,7 +770,7 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int 
         return;
     }
 
-    appendPublicationIntentForCommitProducer(newDSP, generation);
+    appendPublicationIntentForCommitProducer(newDSP, generation, sealedSnapshot);
 
     triggerAsyncUpdate();
 }
@@ -765,7 +827,9 @@ void AudioEngine::drainPublicationIntentsForRuntimeCommit()
             }
             else
             {
-                applyRuntimeCommitFromIntent(next->newDSP, static_cast<int>(next->targetWorldId));
+                applyRuntimeCommitFromIntent(next->newDSP,
+                                             static_cast<int>(next->targetWorldId),
+                                             next->runtimeBuildSnapshot);
             }
 
             if (cursor != publicationLogSentinel)
@@ -788,7 +852,9 @@ void AudioEngine::drainPublicationIntentsForRuntimeCommit()
         triggerAsyncUpdate();
 }
 
-void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
+void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
+                                               int generation,
+                                               const convo::RuntimeBuildSnapshot& sealedSnapshot)
 {
     struct CrossfadeContext
     {
@@ -807,10 +873,10 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
     const auto replaceFadingRuntimeDSPAndRetirePrevious = [this](DSPCore* dsp) noexcept
     {
         DSPCore* atomicCurrent = getActiveRuntimeDSP();
-        const auto runtimeReadView = readControlRuntimeView();
+        const auto runtimeReadHandle = readControlRuntimeHandle();
         validateDistinctRuntimeSlots("replaceFadingRuntimeDSPAndRetirePrevious.before",
                                      atomicCurrent,
-                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
+                         resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                                      nullptr);
 
         auto* const prevRaw = exchangeFadingRuntimeDSP(dsp);
@@ -828,14 +894,14 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
 
         validateDistinctRuntimeSlots("replaceFadingRuntimeDSPAndRetirePrevious.after",
                                      atomicCurrent,
-                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
+                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                                      nullptr);
         logRuntimeTransitionEvent("replaceFadingRuntimeDSPAndRetirePrevious", dsp);
     };
 
-    const auto publishSmoothTransitionState = [this](DSPCore* nextDSP,
-                                                     DSPCore* previousDSP,
-                                                     double fadeTimeSec) noexcept
+    const auto publishSmoothTransitionState = [this, &sealedSnapshot](DSPCore* nextDSP,
+                                                                      DSPCore* previousDSP,
+                                                                      double fadeTimeSec) noexcept
     {
         if (nextDSP == nullptr || nextDSP == previousDSP)
         {
@@ -847,15 +913,16 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
                                  previousDSP,
                                  convo::TransitionPolicy::SmoothOnly,
                                  fadeTimeSec,
-                                 true);
+                                 true,
+                                 &sealedSnapshot);
         logRuntimeTransitionEvent("publishSmoothTransitionState", nextDSP, previousDSP);
     };
 
-    const auto startImmediateSmoothTransition = [this, &replaceFadingRuntimeDSPAndRetirePrevious](DSPCore* previousDSP,
-                                                                                                double fadeTimeSec) noexcept
+    const auto startImmediateSmoothTransition = [this, &replaceFadingRuntimeDSPAndRetirePrevious, &sealedSnapshot](DSPCore* previousDSP,
+                                                                                                                   double fadeTimeSec) noexcept
     {
         DSPCore* atomicCurrent = getActiveRuntimeDSP();
-        const auto runtimeReadView = readControlRuntimeView();
+        const auto runtimeReadHandle = readControlRuntimeHandle();
         if (previousDSP == nullptr || previousDSP == atomicCurrent)
         {
             logUnexpectedRuntimeTransition("startImmediateSmoothTransition", atomicCurrent, previousDSP);
@@ -877,10 +944,11 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
                                  previousDSP,
                                  convo::TransitionPolicy::SmoothOnly,
                                  fadeTimeSec,
-                                 true);
+                                 true,
+                                 &sealedSnapshot);
         validateDistinctRuntimeSlots("startImmediateSmoothTransition",
                                      atomicCurrent,
-                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
+                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                                      nullptr);
         logRuntimeTransitionEvent("startImmediateSmoothTransition", atomicCurrent, previousDSP);
     };
@@ -890,8 +958,8 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
         if (dsp == nullptr)
             return;
 
-        const auto runtimeReadView = readControlRuntimeView();
-        auto* publishedCurrent = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadView);
+        const auto runtimeReadHandle = readControlRuntimeHandle();
+        auto* publishedCurrent = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
         DSPCore* atomicCurrent = getActiveRuntimeDSP();
         if (dsp == atomicCurrent || dsp == publishedCurrent)
         {
@@ -904,10 +972,10 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
         retireDSP(dsp);
     };
 
-    const auto publishHardResetForCurrentDSP = [this]() noexcept
+    const auto publishHardResetForCurrentDSP = [this, &sealedSnapshot]() noexcept
     {
         DSPCore* atomicCurrent = getActiveRuntimeDSP();
-        const auto runtimeReadView = readControlRuntimeView();
+        const auto runtimeReadHandle = readControlRuntimeHandle();
         if (atomicCurrent == nullptr)
         {
             logUnexpectedRuntimeTransition("publishHardResetForCurrentDSP", nullptr, nullptr);
@@ -923,19 +991,20 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
                                  nullptr,
                                  convo::TransitionPolicy::HardReset,
                                  0.0,
-                                 false);
+                                 false,
+                                 &sealedSnapshot);
         validateDistinctRuntimeSlots("publishHardResetForCurrentDSP",
                                      atomicCurrent,
-                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
+                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                                      nullptr);
         logRuntimeTransitionEvent("publishHardResetForCurrentDSP", atomicCurrent);
     };
 
-    const auto armDryAsOldCrossfadeForCurrentDSP = [this](double fadeTimeSec,
-                                                          double targetIrScale) noexcept
+    const auto armDryAsOldCrossfadeForCurrentDSP = [this, &sealedSnapshot](double fadeTimeSec,
+                                                                           double targetIrScale) noexcept
     {
         DSPCore* atomicCurrent = getActiveRuntimeDSP();
-        const auto runtimeReadView = readControlRuntimeView();
+        const auto runtimeReadHandle = readControlRuntimeHandle();
         if (atomicCurrent == nullptr)
         {
             logUnexpectedRuntimeTransition("armDryAsOldCrossfadeForCurrentDSP", nullptr, nullptr);
@@ -962,18 +1031,19 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
                                  nullptr,
                                  convo::TransitionPolicy::DryAsOld,
                                  fadeTimeSec,
-                                 true);
+                                 true,
+                                 &sealedSnapshot);
         validateDistinctRuntimeSlots("armDryAsOldCrossfadeForCurrentDSP",
                                      atomicCurrent,
-                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
+                                     resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                                      nullptr);
         logRuntimeTransitionEvent("armDryAsOldCrossfadeForCurrentDSP", atomicCurrent);
     };
 
-    const auto runtimeReadViewAtEntry = readControlRuntimeView();
+    const auto runtimeReadHandleAtEntry = readControlRuntimeHandle();
     validateDistinctRuntimeSlots("commitNewDSP.entry",
                                  getActiveRuntimeDSP(),
-                                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadViewAtEntry),
+                                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleAtEntry),
                                  nullptr);
 
     // Lock to ensure the check and commit are atomic with respect to new rebuild requests.
@@ -1076,12 +1146,10 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
 
             if (crossfadeContext.needsCrossfade)
             {
-                const auto runtimeReadView = readControlRuntimeView();
-                const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
-                const bool hasFadingRuntime = (resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView) != nullptr);
-                const bool hasPendingCrossfade = preparedCrossfade.pending;
-                const bool useDryAsOld = preparedCrossfade.firstIrDryCrossfadePending
-                    || preparedCrossfade.useDryAsOld;
+                const auto runtimeReadHandle = readControlRuntimeHandle();
+                const bool hasFadingRuntime = hasFadingRuntimeInWorld(runtimeReadHandle);
+                const bool hasPendingCrossfade = hasPendingCrossfadeInWorld(runtimeReadHandle);
+                const bool useDryAsOld = shouldUseDryAsOldInWorld(runtimeReadHandle);
 
                 if (hasFadingRuntime || hasPendingCrossfade || useDryAsOld)
                 {
@@ -1089,7 +1157,7 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
                         + juce::String(static_cast<juce::int64>(newDSP->runtimeUuid))
                         + " oldUuid=" + juce::String(static_cast<juce::int64>(dspToTrash->runtimeUuid))
                         + " fadeSec=" + juce::String(crossfadeContext.fadeTimeSec, 3));
-                    appendPublicationIntentForCommitConsumer(newDSP, generation);
+                    appendPublicationIntentForCommitConsumer(newDSP, generation, sealedSnapshot);
                     return;
                 }
             }
@@ -1126,15 +1194,16 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
                                  nullptr,
                                  convo::TransitionPolicy::SmoothOnly,
                                  0.0,
-                                 false);
+                                 false,
+                                 &sealedSnapshot);
 
         // 3. EBR：エポックを進める
         advanceRetireEpoch();
 
-        const auto runtimeReadViewAfterPublish = readControlRuntimeView();
+        const auto runtimeReadHandleAfterPublish = readControlRuntimeHandle();
         validateDistinctRuntimeSlots("commitNewDSP.afterPublish",
                  getActiveRuntimeDSP(),
-             resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadViewAfterPublish),
+             resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleAfterPublish),
                  nullptr);
 
         // この世代の publish が完了したので outstanding rebuild 窓を閉じる。
@@ -1218,12 +1287,10 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
                     fadeTimeSec = 0.030;
 
                 // --- クロスフェードdeduplication・スナップショット ---
-                const auto runtimeReadView = readControlRuntimeView();
-                const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
-                const bool hasFadingRuntime = (resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView) != nullptr);
-                const bool hasPendingCrossfade = preparedCrossfade.pending;
-                const bool useDryAsOld = preparedCrossfade.firstIrDryCrossfadePending
-                    || preparedCrossfade.useDryAsOld;
+                const auto runtimeReadHandle = readControlRuntimeHandle();
+                const bool hasFadingRuntime = hasFadingRuntimeInWorld(runtimeReadHandle);
+                const bool hasPendingCrossfade = hasPendingCrossfadeInWorld(runtimeReadHandle);
+                const bool useDryAsOld = shouldUseDryAsOldInWorld(runtimeReadHandle);
                 const bool isFadingActive = hasFadingRuntime || hasPendingCrossfade || useDryAsOld;
                 publishSmoothTransitionState(getActiveRuntimeDSP(),
                                              dspToTrash,
@@ -1281,10 +1348,10 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation)
     // sendChangeMessage() は runtime commit apply 経路でのみ rebuild 用途で呼ぶ。
     // それ以外の sendChangeMessage() はフェード完了・UIパラメータ変更・
     // 状態復元など rebuild とは独立したイベント用途。
-    const auto runtimeReadViewBeforeNotify = readControlRuntimeView();
+    const auto runtimeReadHandleBeforeNotify = readControlRuntimeHandle();
     validateDistinctRuntimeSlots("commitNewDSP.beforeSendChangeMessage",
                                  getActiveRuntimeDSP(),
-                                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadViewBeforeNotify),
+                                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleBeforeNotify),
                                  nullptr);
     diagLog("[DIAG] commitNewDSP: queue coalesced change notification");
     if (!exchangeAtomic(pendingChangeNotification, true))

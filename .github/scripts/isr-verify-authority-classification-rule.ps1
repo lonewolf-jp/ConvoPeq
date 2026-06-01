@@ -16,8 +16,8 @@ foreach ($e in $entries) {
     $state = "$($e.state)"
     $class = "$($e.authority_class)"
 
-    if ($state -match 'RuntimePublishWorld' -and $class -ne 'Diagnostic') {
-        $violations.Add("RuntimePublishWorld must be Diagnostic: state=$state class=$class") | Out-Null
+    if ($state -match 'RuntimePublishWorld' -and $class -ne 'Derived') {
+        $violations.Add("RuntimePublishWorld must be Derived: state=$state class=$class") | Out-Null
     }
 
     if (($state -match 'schemaVersion|generation|worldId|runtimeUuid|sampleRate') -and $class -ne 'Authoritative') {

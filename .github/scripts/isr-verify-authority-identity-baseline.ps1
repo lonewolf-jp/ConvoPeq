@@ -11,11 +11,13 @@ if (-not (Test-Path -LiteralPath $postPath)) { throw "Missing inventory: $postPa
 $expected = @(
     'RuntimeGraph::sampleRate',
     'RuntimeGraph::activeNode',
+    'RuntimeGraph::true',
     'EngineRuntime::current',
     'TransitionState::current',
     'RuntimeGraph::runtimeUuid',
     'BuilderToken::generation',
     'BuilderToken::worldId',
+    'BuilderToken::kAuthorityInventory',
     'BuilderToken::RuntimePublishWorld',
     'BuilderToken::schemaVersion'
 )

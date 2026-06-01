@@ -1,4 +1,5 @@
 #include <JuceHeader.h>
+#include <bit>
 #include "AudioEngine.h"
 #include "NoiseShaperLearner.h"
 #include "RuntimeBuilder.h"
@@ -16,6 +17,14 @@ struct BuildParameterSnapshot
     int oversamplingFactor = 0;
     AudioEngine::OversamplingType oversamplingType = AudioEngine::OversamplingType::IIR;
     AudioEngine::NoiseShaperType noiseShaperType = AudioEngine::NoiseShaperType::Psychoacoustic;
+    convo::ProcessingOrder processingOrder = convo::ProcessingOrder::ConvolverThenEQ;
+    bool eqBypassed = false;
+    bool convBypassed = false;
+    bool softClipEnabled = false;
+    double saturationAmount = 0.0;
+    double inputHeadroomGain = 1.0;
+    double outputMakeupGain = 1.0;
+    double convolverInputTrimGain = 1.0;
 };
 
 BuildParameterSnapshot captureBuildParameterSnapshot(const AudioEngine& engine) noexcept
@@ -25,6 +34,14 @@ BuildParameterSnapshot captureBuildParameterSnapshot(const AudioEngine& engine) 
     snapshot.oversamplingFactor = convo::consumeAtomic(engine.manualOversamplingFactor, std::memory_order_acquire);
     snapshot.oversamplingType = convo::consumeAtomic(engine.oversamplingType, std::memory_order_acquire);
     snapshot.noiseShaperType = convo::consumeAtomic(engine.noiseShaperType, std::memory_order_acquire);
+    snapshot.processingOrder = convo::consumeAtomic(engine.currentProcessingOrder, std::memory_order_acquire);
+    snapshot.eqBypassed = convo::consumeAtomic(engine.eqBypassRequested, std::memory_order_acquire);
+    snapshot.convBypassed = convo::consumeAtomic(engine.convBypassRequested, std::memory_order_acquire);
+    snapshot.softClipEnabled = convo::consumeAtomic(engine.softClipEnabled, std::memory_order_acquire);
+    snapshot.saturationAmount = static_cast<double>(convo::consumeAtomic(engine.saturationAmount, std::memory_order_acquire));
+    snapshot.inputHeadroomGain = convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_acquire);
+    snapshot.outputMakeupGain = convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_acquire);
+    snapshot.convolverInputTrimGain = convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_acquire);
     return snapshot;
 }
 
@@ -34,7 +51,15 @@ bool equalsBuildParameterSnapshot(const BuildParameterSnapshot& lhs,
     return lhs.ditherDepth == rhs.ditherDepth
         && lhs.oversamplingFactor == rhs.oversamplingFactor
         && lhs.oversamplingType == rhs.oversamplingType
-        && lhs.noiseShaperType == rhs.noiseShaperType;
+        && lhs.noiseShaperType == rhs.noiseShaperType
+        && lhs.processingOrder == rhs.processingOrder
+        && lhs.eqBypassed == rhs.eqBypassed
+        && lhs.convBypassed == rhs.convBypassed
+        && lhs.softClipEnabled == rhs.softClipEnabled
+        && lhs.saturationAmount == rhs.saturationAmount
+        && lhs.inputHeadroomGain == rhs.inputHeadroomGain
+        && lhs.outputMakeupGain == rhs.outputMakeupGain
+        && lhs.convolverInputTrimGain == rhs.convolverInputTrimGain;
 }
 
 bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
@@ -78,7 +103,15 @@ convo::RuntimeBuildSnapshot finalizeRuntimeBuildSnapshot(convo::RuntimeBuildSnap
     mixHash(static_cast<std::uint64_t>(snapshot.buildInput.oversamplingFactor));
     mixHash(static_cast<std::uint64_t>(snapshot.buildInput.oversamplingType));
     mixHash(static_cast<std::uint64_t>(snapshot.buildInput.noiseShaperType));
+    mixHash(static_cast<std::uint64_t>(snapshot.buildInput.processingOrder));
+    mixHash(static_cast<std::uint64_t>(snapshot.buildInput.eqBypassed));
+    mixHash(static_cast<std::uint64_t>(snapshot.buildInput.convBypassed));
+    mixHash(static_cast<std::uint64_t>(snapshot.buildInput.softClipEnabled));
     mixHash(static_cast<std::uint64_t>(snapshot.buildInput.blockSize));
+    mixHash(std::bit_cast<std::uint64_t>(snapshot.buildInput.saturationAmount));
+    mixHash(std::bit_cast<std::uint64_t>(snapshot.buildInput.inputHeadroomGain));
+    mixHash(std::bit_cast<std::uint64_t>(snapshot.buildInput.outputMakeupGain));
+    mixHash(std::bit_cast<std::uint64_t>(snapshot.buildInput.convolverInputTrimGain));
     mixHash(static_cast<std::uint64_t>(snapshot.convolverFingerprint));
     snapshot.rebuildFingerprint.dspParameterHash = paramHash;
 
@@ -91,13 +124,6 @@ convo::RuntimeBuildSnapshot sealRuntimeBuildSnapshot(convo::RuntimeBuildSnapshot
     return snapshot;
 }
 }
-
-void AudioEngine::applyCurrentConvolverSnapshotToRuntime(DSPCore& runtime) const
-{
-    const auto snapshot = uiConvolverProcessor.captureBuildSnapshot();
-    runtime.convolverRt().applyBuildSnapshot(snapshot);
-}
-
 
 void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
                                       RebuildTelemetryReason reason,
@@ -519,6 +545,14 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
     task.buildInput.oversamplingFactor = paramSnapshot.oversamplingFactor;
     task.buildInput.oversamplingType = static_cast<int>(paramSnapshot.oversamplingType);
     task.buildInput.noiseShaperType = static_cast<int>(paramSnapshot.noiseShaperType);
+    task.buildInput.processingOrder = static_cast<int>(paramSnapshot.processingOrder);
+    task.buildInput.eqBypassed = paramSnapshot.eqBypassed;
+    task.buildInput.convBypassed = paramSnapshot.convBypassed;
+    task.buildInput.softClipEnabled = paramSnapshot.softClipEnabled;
+    task.buildInput.saturationAmount = paramSnapshot.saturationAmount;
+    task.buildInput.inputHeadroomGain = paramSnapshot.inputHeadroomGain;
+    task.buildInput.outputMakeupGain = paramSnapshot.outputMakeupGain;
+    task.buildInput.convolverInputTrimGain = paramSnapshot.convolverInputTrimGain;
     task.convolverBuildSnapshot = uiConvolverProcessor.captureBuildSnapshot();
     const uint64_t structuralHash = uiConvolverProcessor.isIRLoaded() ? uiConvolverProcessor.getStructuralHash() : 0;
 
@@ -538,6 +572,14 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                 pendingSnapshot.oversamplingFactor = pendingTask.buildInput.oversamplingFactor;
                 pendingSnapshot.oversamplingType = static_cast<OversamplingType>(pendingTask.buildInput.oversamplingType);
                 pendingSnapshot.noiseShaperType = static_cast<NoiseShaperType>(pendingTask.buildInput.noiseShaperType);
+                pendingSnapshot.processingOrder = static_cast<ProcessingOrder>(pendingTask.buildInput.processingOrder);
+                pendingSnapshot.eqBypassed = pendingTask.buildInput.eqBypassed;
+                pendingSnapshot.convBypassed = pendingTask.buildInput.convBypassed;
+                pendingSnapshot.softClipEnabled = pendingTask.buildInput.softClipEnabled;
+                pendingSnapshot.saturationAmount = pendingTask.buildInput.saturationAmount;
+                pendingSnapshot.inputHeadroomGain = pendingTask.buildInput.inputHeadroomGain;
+                pendingSnapshot.outputMakeupGain = pendingTask.buildInput.outputMakeupGain;
+                pendingSnapshot.convolverInputTrimGain = pendingTask.buildInput.convolverInputTrimGain;
 
                 const bool sameAsPending =
                     std::abs(pendingTask.buildInput.sampleRate - sampleRate) <= 1.0e-6
@@ -707,7 +749,8 @@ void AudioEngine::rebuildThreadLoop()
                 continue;
 
             // 1. Prepare (メモリ確保)
-            convo::BuildResult buildResult = runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput);
+            convo::BuildResult buildResult = runtimeBuilder.build(task.runtimeBuildSnapshot.buildInput,
+                                                                  task.convolverBuildSnapshot);
 
             if (buildResult.runtime == nullptr)
             {
@@ -766,7 +809,7 @@ void AudioEngine::rebuildThreadLoop()
             // Release ownership from guard, pass to commitNewDSP
             DSPCore* dspToCommit = dspGuard.ptr;
             dspGuard.ptr = nullptr;
-            enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation);
+            enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot);
         }
         catch (const std::exception& e)
         {

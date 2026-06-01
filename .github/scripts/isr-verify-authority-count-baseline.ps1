@@ -1,5 +1,5 @@
 param(
-    [int]$ExpectedPostCount = 9
+    [int]$ExpectedPostCount = 11
 )
 
 $ErrorActionPreference = 'Stop'

@@ -274,8 +274,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     lastTime = now;
 
     // Snapshot のハッシュ差分で EQ 更新を検知する。
-    const auto runtimeReadView = engine.readControlRuntimeView();
-    const auto* snap = AudioEngine::getRuntimeSnapshot(runtimeReadView);
+    const auto runtimeReadHandle = engine.readControlRuntimeHandle();
+    const auto* snap = AudioEngine::getRuntimeSnapshotFromReadHandle(runtimeReadHandle);
     if (snap != nullptr && snap->eqCoeffHash != lastEqHash)
     {
         lastEqHash = snap->eqCoeffHash;

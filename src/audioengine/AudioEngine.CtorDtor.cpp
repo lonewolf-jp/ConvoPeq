@@ -52,10 +52,10 @@ AudioEngine::~AudioEngine()
     DSPCore* fadingToRelease = nullptr;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
-        const auto runtimeReadView = readControlRuntimeView();
+        const auto runtimeReadHandle = readControlRuntimeHandle();
         validateDistinctRuntimeSlots("~AudioEngine.beforeClear",
                  getActiveRuntimeDSP(),
-                         resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
+                         resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                          nullptr);
 
         convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel); // acq_rel: rebuild observer の acquire と HB
@@ -75,7 +75,7 @@ AudioEngine::~AudioEngine()
 
         validateDistinctRuntimeSlots("~AudioEngine.afterClear",
                  getActiveRuntimeDSP(),
-                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
+                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                          nullptr);
 
         // pendingTask.currentDSP は worker 側の未コミット生成物なので、
@@ -113,8 +113,9 @@ AudioEngine::~AudioEngine()
 
     // Shutdown 時は EBR 回収を試みる。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
-    makeRuntimePublicationCoordinator()
-        .clearPublishedRuntimeSnapshotsNonRt();
+    auto runtimePublicationCoordinator = makeRuntimePublicationCoordinator();
+    runtimePublicationCoordinator.requestShutdownClearNonRt();
+    runtimePublicationCoordinator.clearPublishedRuntimeSnapshotsNonRt();
     drainDeferredRetireQueues(true);
     m_epochDomain.drainAll();
     runtimePublicationBridge_.markShutdownComplete();

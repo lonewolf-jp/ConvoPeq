@@ -11,22 +11,28 @@ void diagLog(const juce::String& message)
 
 void AudioEngine::timerCallback()
 {
-    const auto runtimeReadView = readControlRuntimeView();
-    const auto& runtimePublishView = runtimeReadView.runtimePublish;
-    const auto* runtimeWorld = runtimeReadView.runtimeWorld;
-    const bool transitionActive = (runtimeWorld != nullptr) && runtimeWorld->topology.hasFadingRuntime;
-    const auto* currentSnapshot = getRuntimeSnapshot(runtimeReadView);
+    const auto runtimeReadHandle = readControlRuntimeHandle();
+    const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+    const bool transitionActive = hasFadingRuntimeInWorld(runtimeReadHandle);
+    const auto* currentSnapshot = getRuntimeSnapshotFromReadHandle(runtimeReadHandle);
 
     emitEvidenceTickNonRt(false);
 
     {
-        const auto ts = runtimePublishView.transition;
         const int active = transitionActive ? 1 : 0;
-        const int policy = static_cast<int>(ts.policy);
-        const uint64_t currentPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ts.current));
-        const uint64_t nextPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ts.next));
-        const double fadeSec = ts.fadeTimeSec;
-        const int latencyDelta = ts.latencyDeltaSamples;
+        const int policy = (runtimeWorld != nullptr)
+            ? runtimeWorld->execution.transitionPolicy
+            : static_cast<int>(convo::TransitionPolicy::SmoothOnly);
+        auto* currentRuntime = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+        auto* fadingRuntime = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+        const uint64_t currentPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(currentRuntime));
+        const uint64_t nextPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(fadingRuntime));
+        const double fadeSec = (runtimeWorld != nullptr)
+            ? runtimeWorld->overlap.fadeTimeSec
+            : 0.0;
+        const int latencyDelta = (runtimeWorld != nullptr)
+            ? runtimeWorld->execution.latencyCompensationSamples
+            : 0;
 
         if (active != rtAuxMutable_.debugLastReportedTransitionActive
             || policy != rtAuxMutable_.debugLastReportedTransitionPolicy
@@ -54,17 +60,13 @@ void AudioEngine::timerCallback()
     }
 
     {
-        auto* currentRuntime = static_cast<DSPCore*>(runtimePublishView.transition.current);
-        auto* fadingRuntime = transitionActive
-            ? static_cast<DSPCore*>(runtimePublishView.transition.next)
-            : nullptr;
+        auto* currentRuntime = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+        auto* fadingRuntime = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
         const uint64_t revision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
         const uint64_t currentUuid = (currentRuntime != nullptr) ? currentRuntime->runtimeUuid : 0;
         const uint64_t fadingUuid = (fadingRuntime != nullptr) ? fadingRuntime->runtimeUuid : 0;
         const uint64_t transitionCurrentUuid = currentUuid;
-        const uint64_t transitionNextUuid = (runtimePublishView.transition.next != nullptr)
-            ? static_cast<DSPCore*>(runtimePublishView.transition.next)->runtimeUuid
-            : 0;
+        const uint64_t transitionNextUuid = (fadingRuntime != nullptr) ? fadingRuntime->runtimeUuid : 0;
 
         if (revision != rtAuxMutable_.debugLastReportedRuntimeSnapshotRevision
             || currentUuid != rtAuxMutable_.debugLastReportedRuntimePublishCurrentUuid
@@ -159,10 +161,8 @@ void AudioEngine::timerCallback()
 
     // 回復経路: current snapshot が欠落した状態を放置すると
     // EQ変更が演算経路へ乗らないため、Message Thread 側で自己修復する。
-    auto* currentDspForRuntime = static_cast<DSPCore*>(runtimePublishView.transition.current);
-    auto* fadingDspForRuntime = ((runtimeWorld != nullptr) && runtimeWorld->topology.hasFadingRuntime)
-        ? static_cast<DSPCore*>(runtimePublishView.transition.next)
-        : nullptr;
+    auto* currentDspForRuntime = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+    auto* fadingDspForRuntime = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
 
     // T1: 公開済みRuntimeへのNonRTからの可変更新を避けるため、
     // Timerからのdither内部状態更新は行わない。
@@ -304,7 +304,7 @@ void AudioEngine::timerCallback()
         const bool irLoaded = uiConvolverProcessor.isIRLoaded();
         const bool irFinalized = uiConvolverProcessor.isIRFinalized();
         const bool irLoading = uiConvolverProcessor.isLoadingIR();
-        const bool structuralDeferred = hasRebuildReason(RebuildReason::DeferredStructural);
+                const bool structuralDeferred = hasRebuildReason(RebuildReason::DeferredStructural);
         const bool pendingIrChange = convo::consumeAtomic(m_pendingIRChange, std::memory_order_acquire);
 
         // IR 遷移が完全に落ち着いてから 1 回だけ再構築を発火する。
@@ -362,10 +362,8 @@ void AudioEngine::timerCallback()
     processDeferredLearningActions();
 
     const bool hasFading = (fadingDspForRuntime != nullptr);
-    const auto preparedCrossfade = consumeCrossfadePreparedSnapshot();
-    const bool hasPendingCrossfade = preparedCrossfade.pending
-        || preparedCrossfade.useDryAsOld
-        || preparedCrossfade.firstIrDryCrossfadePending;
+    const bool hasPendingCrossfade = hasPendingCrossfadeInWorld(runtimeReadHandle)
+        || shouldUseDryAsOldInWorld(runtimeReadHandle);
 
     // Grace period に基づく安全なリリース遅延を実行する。
     processDeferredReleases();
@@ -394,7 +392,7 @@ void AudioEngine::timerCallback()
         // Phase4: フェード完了時の RuntimeGraph を idle 状態へ同期する。
         // これにより AudioThread は atomic fallback ではなく publish world だけで
         // crossfade 状態を正しく観測できる。
-        auto* currentAfterFade = static_cast<DSPCore*>(runtimePublishView.transition.current);
+        auto* currentAfterFade = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
         if (currentAfterFade != nullptr)
         {
             publishRuntimeStateNonRt(currentAfterFade,

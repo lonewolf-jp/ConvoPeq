@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $schemaPath = Join-Path $repoRoot 'src\audioengine\ISRRuntimeSemanticSchema.h'
 $headerPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
+$builderPath = Join-Path $repoRoot 'src\audioengine\RuntimeBuilder.cpp'
 $commitPath = Join-Path $repoRoot 'src\audioengine\AudioEngine.Commit.cpp'
 $coordinatorPath = Join-Path $repoRoot 'src\audioengine\ISRRuntimePublicationCoordinator.cpp'
 $evidenceDir = Join-Path $repoRoot 'evidence'
@@ -14,7 +15,7 @@ if (-not (Test-Path -LiteralPath $evidenceDir)) {
 
 $violations = New-Object 'System.Collections.Generic.List[string]'
 
-foreach ($path in @($schemaPath, $headerPath, $commitPath, $coordinatorPath)) {
+foreach ($path in @($schemaPath, $headerPath, $builderPath, $commitPath, $coordinatorPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         $violations.Add("Missing required file: $path") | Out-Null
     }
@@ -22,6 +23,7 @@ foreach ($path in @($schemaPath, $headerPath, $commitPath, $coordinatorPath)) {
 
 $schemaText = if (Test-Path -LiteralPath $schemaPath) { Get-Content -LiteralPath $schemaPath -Raw -Encoding UTF8 } else { '' }
 $headerText = if (Test-Path -LiteralPath $headerPath) { Get-Content -LiteralPath $headerPath -Raw -Encoding UTF8 } else { '' }
+$builderText = if (Test-Path -LiteralPath $builderPath) { Get-Content -LiteralPath $builderPath -Raw -Encoding UTF8 } else { '' }
 $commitText = if (Test-Path -LiteralPath $commitPath) { Get-Content -LiteralPath $commitPath -Raw -Encoding UTF8 } else { '' }
 $coordinatorText = if (Test-Path -LiteralPath $coordinatorPath) { Get-Content -LiteralPath $coordinatorPath -Raw -Encoding UTF8 } else { '' }
 
@@ -30,7 +32,10 @@ if (-not $schemaText.Contains('"ABAHazardVerifier"')) {
 }
 
 $headerPatterns = @(
-    'RuntimeWorldIdGenerator runtimeWorldIdGenerator_',
+    'RuntimeWorldIdGenerator runtimeWorldIdGenerator_'
+)
+
+$builderPatterns = @(
     'worldOwner->worldId = nextWorldId;',
     'worldOwner->generation = nextGraphGeneration;',
     'worldOwner->retire.retireEpoch = nextGraphGeneration;',
@@ -41,6 +46,12 @@ $headerPatterns = @(
 foreach ($pattern in $headerPatterns) {
     if (-not [regex]::IsMatch($headerText, [regex]::Escape($pattern))) {
         $violations.Add("ABA identity contract pattern missing in AudioEngine.h: $pattern") | Out-Null
+    }
+}
+
+foreach ($pattern in $builderPatterns) {
+    if (-not [regex]::IsMatch($builderText, [regex]::Escape($pattern))) {
+        $violations.Add("ABA identity contract pattern missing in RuntimeBuilder.cpp: $pattern") | Out-Null
     }
 }
 
@@ -60,7 +71,8 @@ $coordinatorPatterns = @(
     'const auto previousSequenceId = convo::consumeAtomic\(publicationSequenceId_, std::memory_order_acquire\);',
     'const auto previousMappedGeneration = convo::consumeAtomic\(mappedRuntimeGeneration_, std::memory_order_acquire\);',
     'if \(hasPrevious && sequenceId <= previousSequenceId\)',
-    'if \(hasPrevious\s*&& epoch > previousEpoch\s*&& mappedGeneration < previousMappedGeneration\)',
+    'if \(hasPrevious && epoch <= previousEpoch\)',
+    'if \(hasPrevious && mappedGeneration <= previousMappedGeneration\)',
     'publishAtomic\(publicationSequenceId_, sequenceId, std::memory_order_release\)',
     'publishAtomic\(mappedRuntimeGeneration_, mappedGeneration, std::memory_order_release\)'
 )
@@ -75,6 +87,7 @@ $report = [ordered]@{
     schema = 'aba_hazard_report_v1'
     generatedAt = (Get-Date -Format 'o')
     headerPath = $headerPath
+    builderPath = $builderPath
     commitPath = $commitPath
     coordinatorPath = $coordinatorPath
     violations = @($violations)

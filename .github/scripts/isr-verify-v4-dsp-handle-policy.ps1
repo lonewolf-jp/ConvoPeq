@@ -19,7 +19,7 @@ $dspHandleCppText = Get-Content -LiteralPath $dspHandleCpp -Raw -Encoding UTF8
 $releaseResourcesText = Get-Content -LiteralPath $releaseResourcesCpp -Raw -Encoding UTF8
 $audioEngineText = Get-Content -LiteralPath $audioEngineHeader -Raw -Encoding UTF8
 $audioEngineCppRoot = Join-Path $repoRoot "src\audioengine"
-$audioEngineCppText = (Get-ChildItem -Path $audioEngineCppRoot -Recurse -File -Include *.cpp,*.cxx,*.cc |
+$audioEngineCppText = (Get-ChildItem -Path $audioEngineCppRoot -Recurse -File -Include *.cpp, *.cxx, *.cc |
     ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 }) -join "`n"
 
 $requiredPolicyPhrases = @(
@@ -72,9 +72,9 @@ if ($releaseResourcesText -notmatch 'dspHandleRuntime_\.reclaim\(') {
 
 $hasHandleRuntimeObservePath = ($audioEngineCppText -match 'dspHandleRuntime_\.resolve\(')
 $hasRuntimeWorldObservePath =
-    ($audioEngineCppText -match 'readAudioRuntimeView\(\)') -and
-    ($audioEngineCppText -match 'getRuntimeGraph\(runtimeReadView\)') -and
-    ($audioEngineCppText -match 'runtimeGraph->activeNode')
+($audioEngineCppText -match 'readAudioRuntimeView\(\)') -and
+($audioEngineCppText -match 'resolveActiveRuntimeDSPFromRuntimeWorldOnly\(' -or
+$audioEngineCppText -match 'runtimeReadView\w*\.runtimeWorld')
 
 if (-not $hasHandleRuntimeObservePath -and -not $hasRuntimeWorldObservePath) {
     throw 'AudioEngine processing path must observe runtime DSP via DSPHandleRuntime or RuntimeWorld read path.'

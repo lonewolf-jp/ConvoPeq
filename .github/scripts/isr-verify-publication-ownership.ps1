@@ -15,8 +15,8 @@ $hits = @()
 
 $checks = [ordered]@{
     publishWorldBuilderExists = $false
-    publishCommitWrapperExists = $false
-    publishRetireWrapperExists = $false
+    publishLifecycleWrapperExists = $false
+    retireLifecycleWrapperExists = $false
     coordinatorFactoryExists = $false
     noRtPublicationFactoryCall = $false
 }
@@ -30,11 +30,17 @@ else {
     if ([regex]::IsMatch($headerText, '\bbuildRuntimePublishWorld\s*\(')) { $checks.publishWorldBuilderExists = $true }
     else { $violations += 'Publication ownership contract missing: buildRuntimePublishWorld()' }
 
-    if ([regex]::IsMatch($headerText, '\bcommitRuntimePublication\s*\(')) { $checks.publishCommitWrapperExists = $true }
-    else { $violations += 'Publication ownership contract missing: commitRuntimePublication()' }
+    if ([regex]::IsMatch($headerText, '\bonRuntimePublishedNonRt\s*\(') -or
+        [regex]::IsMatch($headerText, '\bdidPublishRuntimeNonRt\s*\(')) {
+        $checks.publishLifecycleWrapperExists = $true
+    }
+    else { $violations += 'Publication ownership contract missing: onRuntimePublishedNonRt()/didPublishRuntimeNonRt()' }
 
-    if ([regex]::IsMatch($headerText, '\bretireRuntimePublication\s*\(')) { $checks.publishRetireWrapperExists = $true }
-    else { $violations += 'Publication ownership contract missing: retireRuntimePublication()' }
+    if ([regex]::IsMatch($headerText, '\bonRuntimeRetiredNonRt\s*\(') -or
+        [regex]::IsMatch($headerText, '\bwillRetireRuntimeNonRt\s*\(')) {
+        $checks.retireLifecycleWrapperExists = $true
+    }
+    else { $violations += 'Publication ownership contract missing: onRuntimeRetiredNonRt()/willRetireRuntimeNonRt()' }
 
     if ([regex]::IsMatch($headerText, '\bmakeRuntimePublicationCoordinator\s*\(')) { $checks.coordinatorFactoryExists = $true }
     else { $violations += 'Publication ownership contract missing: makeRuntimePublicationCoordinator()' }
@@ -48,7 +54,9 @@ $rtFiles = @(
 $forbiddenRtPatterns = @(
     'makeRuntimePublicationCoordinator\s*\(',
     'commitRuntimePublication\s*\(',
-    'retireRuntimePublication\s*\('
+    'retireRuntimePublication\s*\(',
+    'onRuntimePublishedNonRt\s*\(',
+    'onRuntimeRetiredNonRt\s*\('
 )
 
 $rtViolations = 0

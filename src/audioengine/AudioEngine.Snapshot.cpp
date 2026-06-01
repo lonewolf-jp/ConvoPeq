@@ -36,14 +36,14 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
     if (uiEqEditor.getAndClearPendingAGCChange())
         convo::publishAtomic(m_pendingAGCChange, true, std::memory_order_release);
 
-    const double inputHeadroomGainValue = juce::Decibels::decibelsToGain(static_cast<double>(convo::consumeAtomic(m_currentInputHeadroomDb, std::memory_order_acquire)));
-    const double outputMakeupGainValue = juce::Decibels::decibelsToGain(static_cast<double>(convo::consumeAtomic(m_currentOutputMakeupDb, std::memory_order_acquire)));
-    const double convInputTrimGainValue = juce::Decibels::decibelsToGain(static_cast<double>(convo::consumeAtomic(m_currentConvInputTrimDb, std::memory_order_acquire)));
-    const bool convBypass = convo::consumeAtomic(m_currentConvBypass, std::memory_order_acquire);
-    const bool eqBypass = convo::consumeAtomic(m_currentEqBypass, std::memory_order_acquire);
-    const bool softClip = convo::consumeAtomic(m_currentSoftClipEnabled, std::memory_order_acquire);
-    const float satAmount = convo::consumeAtomic(m_currentSaturationAmount, std::memory_order_acquire);
-    const convo::ProcessingOrder order = convo::consumeAtomic(m_currentProcessingOrder, std::memory_order_acquire);
+    const double inputHeadroomGainValue = convo::consumeAtomic(inputHeadroomGain, std::memory_order_acquire);
+    const double outputMakeupGainValue = convo::consumeAtomic(outputMakeupGain, std::memory_order_acquire);
+    const double convInputTrimGainValue = convo::consumeAtomic(convolverInputTrimGain, std::memory_order_acquire);
+    const bool convBypass = convo::consumeAtomic(convBypassRequested, std::memory_order_acquire);
+    const bool eqBypass = convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire);
+    const bool softClip = convo::consumeAtomic(softClipEnabled, std::memory_order_acquire);
+    const float satAmount = convo::consumeAtomic(saturationAmount, std::memory_order_acquire);
+    const convo::ProcessingOrder order = convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire);
     const convo::OversamplingType osType = convo::consumeAtomic(m_currentOversamplingType, std::memory_order_acquire);
     const int osFactor = convo::consumeAtomic(m_currentOversamplingFactor, std::memory_order_acquire);
     const int bitDepth = convo::consumeAtomic(m_currentDitherBitDepth, std::memory_order_acquire);
@@ -116,8 +116,8 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         DBG("Phase6: EQ fade triggered");
     }
 
-    const auto runtimeReadView = readControlRuntimeView();
-    const auto* observedSnapshot = getRuntimeSnapshot(runtimeReadView);
+    const auto runtimeReadHandle = readControlRuntimeHandle();
+    const auto* observedSnapshot = getRuntimeSnapshotFromReadHandle(runtimeReadHandle);
 
     convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
         params,
@@ -149,7 +149,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
     // 回復経路: 何らかの競合で fade が開始されず current も空のままなら、
     // 即時適用へ切り替えて反映欠落を防ぐ。
-    const auto* observedAfterApply = getRuntimeSnapshot(readControlRuntimeView());
+    const auto* observedAfterApply = getRuntimeSnapshotFromReadHandle(readControlRuntimeHandle());
     if (!m_coordinator.isFading() && observedAfterApply == nullptr)
     {
         DBG("[VERIFY] snapshot apply recovery: force switchImmediate");

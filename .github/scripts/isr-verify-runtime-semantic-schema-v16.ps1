@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $schemaPath = Join-Path $repoRoot 'src\audioengine\ISRRuntimeSemanticSchema.h'
 $runtimeStatePath = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
+$runtimeBuilderPath = Join-Path $repoRoot 'src\audioengine\RuntimeBuilder.cpp'
 $authorityClassPath = Join-Path $repoRoot 'src\audioengine\ISRAuthorityClass.h'
 $evidenceDir = Join-Path $repoRoot 'evidence'
 $reportPath = Join-Path $evidenceDir 'runtime_semantic_schema_v16_report.json'
@@ -21,12 +22,17 @@ if (-not (Test-Path -LiteralPath $runtimeStatePath)) {
     throw "Missing runtime state header: $runtimeStatePath"
 }
 
+if (-not (Test-Path -LiteralPath $runtimeBuilderPath)) {
+    throw "Missing runtime builder source: $runtimeBuilderPath"
+}
+
 if (-not (Test-Path -LiteralPath $authorityClassPath)) {
     throw "Missing authority class header: $authorityClassPath"
 }
 
 $schemaText = Get-Content -LiteralPath $schemaPath -Raw -Encoding UTF8
 $runtimeText = Get-Content -LiteralPath $runtimeStatePath -Raw -Encoding UTF8
+$runtimeBuilderText = Get-Content -LiteralPath $runtimeBuilderPath -Raw -Encoding UTF8
 $authorityText = Get-Content -LiteralPath $authorityClassPath -Raw -Encoding UTF8
 $runtimeLines = Get-Content -LiteralPath $runtimeStatePath -Encoding UTF8
 
@@ -57,8 +63,7 @@ $requiredAuthorityEnumTokens = @(
     'Authoritative',
     'Derived',
     'Diagnostic',
-    'ExecutorLocal',
-    'LegacyTemporary'
+    'ExecutorLocal'
 )
 
 $requiredRuntimeStateTokens = @(
@@ -174,7 +179,7 @@ foreach ($token in $requiredRuntimeStateTokens) {
 }
 
 foreach ($token in $requiredMappingTokens) {
-    if (-not $runtimeText.Contains($token)) {
+    if (-not $runtimeBuilderText.Contains($token)) {
         $violations.Add("Runtime publish mapping token missing: $token") | Out-Null
     }
 }
@@ -209,6 +214,7 @@ $report = [ordered]@{
     generatedAt                     = (Get-Date -Format 'o')
     schemaPath                      = $schemaPath
     runtimeStatePath                = $runtimeStatePath
+    runtimeBuilderPath              = $runtimeBuilderPath
     requiredSchemaTokens            = $requiredSchemaTokens
     requiredAuthorityEnumTokens     = $requiredAuthorityEnumTokens
     requiredRuntimeStateTokens      = $requiredRuntimeStateTokens

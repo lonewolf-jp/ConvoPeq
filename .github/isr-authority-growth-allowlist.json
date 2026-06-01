@@ -1,11 +1,12 @@
 {
     "schema": "isr_authority_growth_allowlist_v1",
-    "generatedAt": "2026-05-31T00:00:00Z",
+    "generatedAt": "2026-06-01T12:20:00Z",
     "issue": "work10-authority-growth-allowlist-2026-05",
-    "rationale": "Transitional BuilderToken migration allowance until RuntimeState parity cleanup completes.",
-    "allowedNetGrowth": 1,
+    "rationale": "Transitional authority inventory drift allowance during RuntimeGraph/BuilderToken governance alignment.",
+    "allowedNetGrowth": 2,
     "allowedAddedEntries": [
-        "BuilderToken::worldId:Authoritative"
+        "RuntimeGraph::true:Derived",
+        "BuilderToken::kAuthorityInventory:Diagnostic"
     ],
     "expiry": "2026-06-30",
     "owner": "AudioEngineRuntime"

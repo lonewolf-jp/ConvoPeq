@@ -184,6 +184,7 @@ else {
 
 $smokeScripts = @(
     '.github/scripts/isr-verify-governance-registries.ps1',
+    '.github/scripts/isr-verify-governance-consistency.ps1',
     '.github/scripts/isr-verify-runtime-semantic-schema-v16.ps1',
     '.github/scripts/isr-verify-verifier-execution-layers.ps1',
     '.github/scripts/isr-verify-v1-immutability.ps1',

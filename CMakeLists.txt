@@ -56,6 +56,11 @@ option(CONVOPEQ_ENABLE_ISR_TESTS "Enable minimal ISR runtime regression tests" O
 if(CONVOPEQ_ENABLE_ISR_TESTS)
     enable_testing()
 
+    file(WRITE "${CMAKE_BINARY_DIR}/DartConfiguration.tcl"
+        "SET(CTEST_PROJECT_NAME \"${PROJECT_NAME}\")\n"
+        "SET(CTEST_SOURCE_DIRECTORY \"${CMAKE_SOURCE_DIR}\")\n"
+        "SET(CTEST_BINARY_DIRECTORY \"${CMAKE_BINARY_DIR}\")\n")
+
     add_executable(ISRRuntimeIdentityTests
         src/tests/ISRRuntimeIdentityGeneratorsTests.cpp
     )
@@ -91,8 +96,20 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/ShadowCompareContractTests.cpp
     )
 
+    add_executable(CrossfadeExecutorLocalContractTests
+        src/tests/CrossfadeExecutorLocalContractTests.cpp
+    )
+
+    add_executable(RuntimeWorldAuthorityProjectionTests
+        src/tests/RuntimeWorldAuthorityProjectionTests.cpp
+    )
+
     add_executable(PartialPublicationRejectTests
         src/tests/PartialPublicationRejectTests.cpp
+    )
+
+    add_executable(BuildInputSemanticContractTests
+        src/tests/BuildInputSemanticContractTests.cpp
     )
 
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
@@ -103,7 +120,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(ObservePathSingleSourceTests PRIVATE cxx_std_20)
     target_compile_features(OverlapAuthoritySingularTests PRIVATE cxx_std_20)
     target_compile_features(ShadowCompareContractTests PRIVATE cxx_std_20)
+    target_compile_features(CrossfadeExecutorLocalContractTests PRIVATE cxx_std_20)
+    target_compile_features(RuntimeWorldAuthorityProjectionTests PRIVATE cxx_std_20)
     target_compile_features(PartialPublicationRejectTests PRIVATE cxx_std_20)
+    target_compile_features(BuildInputSemanticContractTests PRIVATE cxx_std_20)
     target_include_directories(ISRRuntimeIdentityTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -155,7 +175,25 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     )
+    target_include_directories(CrossfadeExecutorLocalContractTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_include_directories(RuntimeWorldAuthorityProjectionTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
     target_include_directories(PartialPublicationRejectTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    target_include_directories(BuildInputSemanticContractTests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
@@ -170,7 +208,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME ObservePathSingleSource COMMAND ObservePathSingleSourceTests)
     add_test(NAME OverlapAuthoritySingular COMMAND OverlapAuthoritySingularTests)
     add_test(NAME ShadowCompareContract COMMAND ShadowCompareContractTests)
+    add_test(NAME CrossfadeExecutorLocalContract COMMAND CrossfadeExecutorLocalContractTests)
+    add_test(NAME RuntimeWorldAuthorityProjectionContract COMMAND RuntimeWorldAuthorityProjectionTests)
     add_test(NAME PartialPublicationReject COMMAND PartialPublicationRejectTests)
+    add_test(NAME BuildInputSemanticContract COMMAND BuildInputSemanticContractTests)
 
     if(MSVC)
         target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
@@ -181,7 +222,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(ObservePathSingleSourceTests PRIVATE /utf-8)
         target_compile_options(OverlapAuthoritySingularTests PRIVATE /utf-8)
         target_compile_options(ShadowCompareContractTests PRIVATE /utf-8)
+        target_compile_options(CrossfadeExecutorLocalContractTests PRIVATE /utf-8)
+        target_compile_options(RuntimeWorldAuthorityProjectionTests PRIVATE /utf-8)
         target_compile_options(PartialPublicationRejectTests PRIVATE /utf-8)
+        target_compile_options(BuildInputSemanticContractTests PRIVATE /utf-8)
     endif()
 endif()
 

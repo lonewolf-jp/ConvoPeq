@@ -1,16 +1,25 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 
 namespace convo {
 
-struct BuildInput {
+struct BuildInput final {
     double sampleRate = 0.0;
     int blockSize = 0;
     int ditherBitDepth = 0;
     int oversamplingFactor = 0;
     int oversamplingType = 0;
     int noiseShaperType = 0;
+    int processingOrder = 0;
+    bool eqBypassed = false;
+    bool convBypassed = false;
+    bool softClipEnabled = false;
+    double saturationAmount = 0.0;
+    double inputHeadroomGain = 1.0;
+    double outputMakeupGain = 1.0;
+    double convolverInputTrimGain = 1.0;
 };
 
 struct RuntimeBuildFingerprint
@@ -32,6 +41,9 @@ struct RuntimeBuildSnapshot
     bool sealed = false;
 };
 
+static_assert(std::is_same_v<decltype(RuntimeBuildSnapshot{}.buildInput), BuildInput>,
+              "RuntimeBuildSnapshot must use convo::BuildInput as the sole semantic input descriptor.");
+
 [[nodiscard]] inline bool isRuntimeBuildSnapshotSealedAndCompatible(const RuntimeBuildSnapshot& snapshot,
                                                                     const RuntimeBuildSnapshot& other) noexcept
 {
@@ -47,6 +59,14 @@ struct RuntimeBuildSnapshot
         && snapshot.buildInput.oversamplingFactor == other.buildInput.oversamplingFactor
         && snapshot.buildInput.oversamplingType == other.buildInput.oversamplingType
         && snapshot.buildInput.noiseShaperType == other.buildInput.noiseShaperType
+        && snapshot.buildInput.processingOrder == other.buildInput.processingOrder
+        && snapshot.buildInput.eqBypassed == other.buildInput.eqBypassed
+        && snapshot.buildInput.convBypassed == other.buildInput.convBypassed
+        && snapshot.buildInput.softClipEnabled == other.buildInput.softClipEnabled
+        && snapshot.buildInput.saturationAmount == other.buildInput.saturationAmount
+        && snapshot.buildInput.inputHeadroomGain == other.buildInput.inputHeadroomGain
+        && snapshot.buildInput.outputMakeupGain == other.buildInput.outputMakeupGain
+        && snapshot.buildInput.convolverInputTrimGain == other.buildInput.convolverInputTrimGain
         && snapshot.convolverFingerprint == other.convolverFingerprint
         && snapshot.rebuildFingerprint.irIdentityHash == other.rebuildFingerprint.irIdentityHash
         && snapshot.rebuildFingerprint.convolutionConfigHash == other.rebuildFingerprint.convolutionConfigHash

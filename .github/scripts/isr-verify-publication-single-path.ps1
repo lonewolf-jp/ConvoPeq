@@ -50,8 +50,10 @@ if (-not [regex]::IsMatch($coordinatorHeader, 'void\s+commit\s*\(\s*PublishAutho
 }
 
 $commitRuntimePublicationCount = ([regex]::Matches($commitSource, 'commitRuntimePublication\(world\)')).Count
-if ($commitRuntimePublicationCount -ne 1) {
-    $violations.Add("publish-to-commit call count mismatch: expected=1 actual=$commitRuntimePublicationCount")
+$bridgeCommitCallCount = ([regex]::Matches($commitSource, 'runtimePublicationBridge_\.commit\s*\(')).Count
+$publishCommitPathCount = $commitRuntimePublicationCount + $bridgeCommitCallCount
+if ($publishCommitPathCount -ne 1) {
+    $violations.Add("publish-to-commit call count mismatch: expected=1 actual=$publishCommitPathCount (legacy=$commitRuntimePublicationCount bridge=$bridgeCommitCallCount)")
 }
 
 if (-not [regex]::IsMatch($commitSource, 'runPublicationPrecheckNonRt\(const RuntimePublishWorld& world\)')) {
@@ -119,6 +121,8 @@ $report = [ordered]@{
         commitDeclarationCount = $headerCommitCount
         commitDefinitionCount = $sourceCommitCount
         commitRuntimePublicationCount = $commitRuntimePublicationCount
+        bridgeCommitCallCount = $bridgeCommitCallCount
+        publishCommitPathCount = $publishCommitPathCount
         frozenPrecheck = [regex]::IsMatch($commitSource, 'world\.isFrozen\s*\(\s*\)')
         sealedPrecheck = [regex]::IsMatch($commitSource, 'world\.isSealedRecursively\s*\(\s*\)')
         forbiddenPostPublishMutationPatterns = @($forbiddenPostPublishMutationPatterns)

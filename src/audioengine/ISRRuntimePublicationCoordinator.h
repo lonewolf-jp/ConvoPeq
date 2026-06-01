@@ -73,6 +73,7 @@ private:
     std::atomic<PublicationSequenceId> publicationSequenceId_;
     std::atomic<PublicationEpoch> publicationEpoch_;
     std::atomic<std::uint64_t> mappedRuntimeGeneration_;
+    std::atomic<const void*> currentWorld_;
     std::atomic<RejectCode> lastRejectCode_;
     std::atomic<std::uint64_t> retireBacklogCount_;
     std::atomic<std::uint64_t> publicationBacklogCount_;

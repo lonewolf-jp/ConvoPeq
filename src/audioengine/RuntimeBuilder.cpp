@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -82,6 +83,31 @@ juce::String formatWarmupPhaseTimingSummary(const std::array<std::uint64_t, 5>& 
         + " total=" + juce::String(static_cast<double>(totalUs) / 1000.0, 3);
 }
 
+[[nodiscard]] std::uint64_t hashBuildInput(const BuildInput& buildInput) noexcept
+{
+    std::uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&hash](std::uint64_t value) noexcept {
+        hash ^= value;
+        hash *= 1099511628211ull;
+    };
+
+    mix(static_cast<std::uint64_t>(buildInput.sampleRate == 0.0 ? 0 : std::bit_cast<std::uint64_t>(buildInput.sampleRate)));
+    mix(static_cast<std::uint64_t>(buildInput.blockSize));
+    mix(static_cast<std::uint64_t>(buildInput.ditherBitDepth));
+    mix(static_cast<std::uint64_t>(buildInput.oversamplingFactor));
+    mix(static_cast<std::uint64_t>(buildInput.oversamplingType));
+    mix(static_cast<std::uint64_t>(buildInput.noiseShaperType));
+    mix(static_cast<std::uint64_t>(buildInput.processingOrder));
+    mix(static_cast<std::uint64_t>(buildInput.eqBypassed));
+    mix(static_cast<std::uint64_t>(buildInput.convBypassed));
+    mix(static_cast<std::uint64_t>(buildInput.softClipEnabled));
+    mix(std::bit_cast<std::uint64_t>(buildInput.saturationAmount));
+    mix(std::bit_cast<std::uint64_t>(buildInput.inputHeadroomGain));
+    mix(std::bit_cast<std::uint64_t>(buildInput.outputMakeupGain));
+    mix(std::bit_cast<std::uint64_t>(buildInput.convolverInputTrimGain));
+    return hash;
+}
+
 class ScopedWarmupDenormalGuard
 {
 public:
@@ -135,20 +161,23 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
                                          AudioEngine::DSPCore* next,
                                          convo::TransitionPolicy policy,
                                          double fadeTimeSec,
-                                         bool active) noexcept
+                                         bool active,
+                                         const convo::RuntimeBuildSnapshot* sealedSnapshot) noexcept
 {
-    const auto nextGraphGeneration = engine.reserveNextRuntimeGraphGeneration();
-    const auto nextWorldId = engine.runtimeWorldIdGenerator_.next();
-    const auto nextPublicationSequence = convo::fetchAddAtomic(engine.publicationSequenceCounter_,
-                                    static_cast<convo::isr::PublicationSequenceId>(1),
-                                    std::memory_order_acq_rel) + 1;
+    const auto publicationIdentity = engine.reserveRuntimePublicationIdentity();
+    const auto nextGraphGeneration = publicationIdentity.generation;
+    const auto nextWorldId = publicationIdentity.worldId;
+    const auto nextPublicationSequence = publicationIdentity.publicationSequence;
 
-    auto engineState = engine.makeEngineRuntimeState(current, next, policy, fadeTimeSec, active);
-    engineState.revision = nextGraphGeneration;
-    auto graphState = engine.makeRuntimeGraphState(engineState);
-    graphState.generation = nextGraphGeneration;
-
-    const auto* previousWorld = AudioEngine::RuntimePublicationCoordinator::observeWorldHandle(engine.runtimeStore);
+    auto publishComputation = engine.computeRuntimePublishComputation(current,
+                                                                      next,
+                                                                      policy,
+                                                                      fadeTimeSec,
+                                                                      active,
+                                                                      nextGraphGeneration);
+    auto engineState = std::move(publishComputation.engineState);
+    auto graphState = std::move(publishComputation.graphState);
+    const auto previousCommittedSequence = publishComputation.previousCommittedSequence;
 
     auto worldOwner = RuntimePublishWorld::createForBuilder(RuntimePublishWorld::BuilderToken {});
     worldOwner->assertMutable();
@@ -170,9 +199,9 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->topology.fadingRuntimeUuid = graphState.fadingRuntimeUuid;
     worldOwner->topology.hasFadingRuntime = (graphState.fadingNode != nullptr);
 
-    worldOwner->routing.processingOrder = static_cast<int>(engine.getProcessingOrder());
-    worldOwner->routing.eqBypassed = graphState.eqBypassed;
-    worldOwner->routing.convBypassed = graphState.convBypassed;
+    worldOwner->routing.processingOrder = engineState.processingOrder;
+    worldOwner->routing.eqBypassed = engineState.eqBypassed;
+    worldOwner->routing.convBypassed = engineState.convBypassed;
 
     worldOwner->execution.transitionActive = engineState.transition.active;
     worldOwner->execution.transitionPolicy = static_cast<int>(engineState.transition.policy);
@@ -183,9 +212,7 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->publication.sequenceId = nextPublicationSequence;
     worldOwner->publication.epoch = static_cast<convo::isr::PublicationEpoch>(nextGraphGeneration);
     worldOwner->publication.mappedRuntimeGeneration = nextGraphGeneration;
-    worldOwner->publication.previousSequenceId = previousWorld != nullptr
-        ? previousWorld->publication.sequenceId
-        : static_cast<convo::isr::PublicationSequenceId>(0);
+    worldOwner->publication.previousSequenceId = previousCommittedSequence;
 
     worldOwner->overlap.useDryAsOld = engineState.dspCrossfadeUseDryAsOld;
     worldOwner->overlap.firstIrDryCrossfadePending = engineState.firstIrDryCrossfadePending;
@@ -193,8 +220,8 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->overlap.fadeTimeSec = engineState.queuedFadeTimeSec;
 
     worldOwner->retire.retireEpoch = nextGraphGeneration;
-    worldOwner->retire.retireBacklog = engine.consumeAtomic(engine.retireQueueDepth_, std::memory_order_acquire);
-    worldOwner->retire.deferredResidency = engine.consumeAtomic(engine.fallbackQueueDepth_, std::memory_order_acquire);
+    worldOwner->retire.retireBacklog = engineState.retireBacklog;
+    worldOwner->retire.deferredResidency = engineState.deferredResidency;
 
     worldOwner->timing.sampleRateHz = graphState.sampleRate;
     worldOwner->timing.queuedFadeTimeSec = engineState.queuedFadeTimeSec;
@@ -212,21 +239,69 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->resource.ditherBitDepth = graphState.ditherBitDepth;
     worldOwner->resource.noiseShaperType = graphState.noiseShaperType;
 
-    worldOwner->affinity.rebuildWorkerRunning = engine.consumeAtomic(engine.rebuildThreadIsRunning, std::memory_order_acquire);
+    worldOwner->affinity.rebuildWorkerRunning = engineState.rebuildWorkerRunning;
 
-    worldOwner->automation.eqBypassed = graphState.eqBypassed;
-    worldOwner->automation.convBypassed = graphState.convBypassed;
-    worldOwner->automation.softClipEnabled = graphState.softClipEnabled;
+    worldOwner->automation.eqBypassed = engineState.eqBypassed;
+    worldOwner->automation.convBypassed = engineState.convBypassed;
+    worldOwner->automation.softClipEnabled = engineState.softClipEnabled;
+    worldOwner->automation.saturationAmount = engineState.saturationAmount;
+    worldOwner->automation.inputHeadroomGain = engineState.inputHeadroomGain;
+    worldOwner->automation.outputMakeupGain = engineState.outputMakeupGain;
+    worldOwner->automation.convolverInputTrimGain = engineState.convolverInputTrimGain;
 
-    worldOwner->coefficient.adaptiveCoeffBankIndex = graphState.adaptiveCoeffBankIndex;
-    worldOwner->coefficient.adaptiveCoeffGeneration = graphState.adaptiveCoeffGeneration;
-    worldOwner->coefficient.eqCoeffHash = 0;
-    if (const auto* eqState = engine.uiEqEditor.getEQStateSnapshot())
-        worldOwner->coefficient.eqCoeffHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
+    worldOwner->coefficient.adaptiveCoeffBankIndex = engineState.adaptiveCoeffBankIndex;
+    worldOwner->coefficient.adaptiveCoeffGeneration = engineState.adaptiveCoeffGeneration;
+    worldOwner->coefficient.eqCoeffHash = engineState.eqCoeffHash;
 
     worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;
     worldOwner->projectionFreshness.projectionRevision = graphState.generation;
     worldOwner->projectionFreshness.maxStalenessWindows = 1u;
+
+    if (sealedSnapshot != nullptr)
+    {
+        jassert(sealedSnapshot->sealed);
+
+        const auto& sealedBuildInput = sealedSnapshot->buildInput;
+
+        worldOwner->engine.processingOrder = sealedBuildInput.processingOrder;
+        worldOwner->engine.eqBypassed = sealedBuildInput.eqBypassed;
+        worldOwner->engine.convBypassed = sealedBuildInput.convBypassed;
+        worldOwner->engine.softClipEnabled = sealedBuildInput.softClipEnabled;
+        worldOwner->engine.saturationAmount = sealedBuildInput.saturationAmount;
+        worldOwner->engine.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;
+        worldOwner->engine.outputMakeupGain = sealedBuildInput.outputMakeupGain;
+        worldOwner->engine.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
+
+        worldOwner->graph.sampleRate = sealedBuildInput.sampleRate;
+        worldOwner->graph.ditherBitDepth = sealedBuildInput.ditherBitDepth;
+        worldOwner->graph.noiseShaperType = sealedBuildInput.noiseShaperType;
+        worldOwner->graph.oversamplingFactor = sealedBuildInput.oversamplingFactor;
+        worldOwner->graph.eqBypassed = sealedBuildInput.eqBypassed;
+        worldOwner->graph.convBypassed = sealedBuildInput.convBypassed;
+        worldOwner->graph.softClipEnabled = sealedBuildInput.softClipEnabled;
+        worldOwner->graph.saturationAmount = sealedBuildInput.saturationAmount;
+        worldOwner->graph.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;
+        worldOwner->graph.outputMakeupGain = sealedBuildInput.outputMakeupGain;
+        worldOwner->graph.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
+
+        worldOwner->routing.processingOrder = sealedBuildInput.processingOrder;
+        worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;
+        worldOwner->routing.convBypassed = sealedBuildInput.convBypassed;
+
+        worldOwner->timing.sampleRateHz = sealedBuildInput.sampleRate;
+
+        worldOwner->resource.oversamplingFactor = sealedBuildInput.oversamplingFactor;
+        worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;
+        worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;
+
+        worldOwner->automation.eqBypassed = sealedBuildInput.eqBypassed;
+        worldOwner->automation.convBypassed = sealedBuildInput.convBypassed;
+        worldOwner->automation.softClipEnabled = sealedBuildInput.softClipEnabled;
+        worldOwner->automation.saturationAmount = sealedBuildInput.saturationAmount;
+        worldOwner->automation.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;
+        worldOwner->automation.outputMakeupGain = sealedBuildInput.outputMakeupGain;
+        worldOwner->automation.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
+    }
 
     worldOwner->semanticHash.generationSemanticHash = worldOwner->generationSemantic.runtimeGeneration
         ^ (worldOwner->generationSemantic.activationEpoch << 1);
@@ -244,7 +319,18 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->semanticHash.payloadHash = static_cast<std::uint64_t>(worldOwner->resource.oversamplingFactor + 0x9E37)
         ^ (static_cast<std::uint64_t>(worldOwner->resource.ditherBitDepth + 0x100) << 8)
         ^ (static_cast<std::uint64_t>(worldOwner->resource.noiseShaperType + 0x10) << 16)
-        ^ worldOwner->coefficient.eqCoeffHash;
+        ^ worldOwner->coefficient.eqCoeffHash
+        ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffBankIndex + 0x100) << 24)
+        ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffGeneration) << 32)
+        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.saturationAmount)
+        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.inputHeadroomGain)
+        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.outputMakeupGain)
+        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.convolverInputTrimGain)
+        ^ (worldOwner->automation.softClipEnabled ? 0xD1B54A32D192ED03ull : 0ull);
+    if (sealedSnapshot != nullptr)
+    {
+        worldOwner->semanticHash.payloadHash = hashBuildInput(sealedSnapshot->buildInput);
+    }
     worldOwner->semanticHash.publicationSemanticHash = worldOwner->publication.sequenceId
         ^ (worldOwner->publication.epoch << 1)
         ^ (worldOwner->publication.mappedRuntimeGeneration << 2)
@@ -260,7 +346,8 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     return worldOwner;
 }
 
-BuildResult RuntimeBuilder::build(const BuildInput& in) noexcept
+BuildResult RuntimeBuilder::build(const BuildInput& in,
+                                  const ConvolverProcessor::BuildSnapshot& convolverBuildSnapshot) noexcept
 {
     BuildResult result {};
 
@@ -276,7 +363,7 @@ BuildResult RuntimeBuilder::build(const BuildInput& in) noexcept
     {
         runtime = convo::aligned_make_unique<AudioEngine::DSPCore>();
         runtime->convolverRt().setVisualizationEnabled(false);
-        engine.applyCurrentConvolverSnapshotToRuntime(*runtime);
+        runtime->convolverRt().applyBuildSnapshot(convolverBuildSnapshot);
         runtime->prepare(in.sampleRate,
                          in.blockSize,
                          in.ditherBitDepth,

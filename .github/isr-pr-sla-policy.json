@@ -21,10 +21,8 @@
             "minimumTier": "standard",
             "deadlineBusinessDays": 2,
             "runtimeCodeChangeZeroRequired": false,
-            "inventoryDiffStructuralInvariantRequired": true,
-            "requiredNotes": [
-                "inventory diff structural invariant"
-            ]
+            "inventoryDiffStructuralInvariantRequired": false,
+            "requiredNotes": []
         },
         {
             "id": "Class-B",

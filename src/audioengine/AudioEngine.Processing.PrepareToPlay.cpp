@@ -109,19 +109,21 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
     convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
     convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
-    const auto runtimeReadView = readControlRuntimeView();
+    const auto runtimeReadHandle = readControlRuntimeHandle();
     {
-        auto* currentForPublish = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadView);
-        auto* fadingForPublish = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView);
+        auto* currentForPublish = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+        auto* fadingForPublish = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
         const bool hasAnyRuntime = (currentForPublish != nullptr) || (fadingForPublish != nullptr);
         if (hasAnyRuntime)
         {
-            const auto ts = runtimeReadView.runtimePublish.transition;
+            const auto policy = getTransitionPolicyFromRuntimeWorld(runtimeReadHandle, convo::TransitionPolicy::SmoothOnly);
+            const auto fadeTimeSec = getOverlapFadeTimeFromRuntimeWorld(runtimeReadHandle, 0.0);
+            const bool transitionActive = hasFadingRuntimeInWorld(runtimeReadHandle);
             publishRuntimeStateNonRt(currentForPublish,
                                      fadingForPublish,
-                                     ts.policy,
-                                     ts.fadeTimeSec,
-                                     ts.active);
+                                     policy,
+                                     fadeTimeSec,
+                                     transitionActive);
         }
     }
     selectAdaptiveCoeffBankForCurrentSettings();
@@ -181,7 +183,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     resetLatencyDelayRtState();
 
     // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
-    const bool hasPublishedCurrent = (resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadView) != nullptr);
+    const bool hasPublishedCurrent = (resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle) != nullptr);
     if (!hasPublishedCurrent && !hasActiveRuntimeDSP())
     {
         convo::aligned_unique_ptr<DSPCore> placeholderDSP;
@@ -222,7 +224,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     uiConvolverProcessor.prepareToPlay(safeSampleRate, bufferSize);
     if (rateChanged)
         uiConvolverProcessor.invalidatePendingLoads();
-    const bool hasCurrentRuntime = (resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadView) != nullptr);
+    const bool hasCurrentRuntime = (resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle) != nullptr);
     if (rateChanged || blockSizeChanged || !hasCurrentRuntime) {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
             submitRebuildIntent(convo::RebuildKind::Structural,

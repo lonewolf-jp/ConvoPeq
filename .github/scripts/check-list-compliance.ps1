@@ -224,22 +224,25 @@ foreach ($m in $uiMutateHits) {
 # ------------------------------------------------------------
 # list.md 1.1.6 publish freeze 経路固定（R13/R1）
 # ------------------------------------------------------------
+$runtimeBuilderCpp = Join-Path $srcDir 'audioengine\RuntimeBuilder.cpp'
+$publishBuilderTargets = @($audioEngineHeader, $runtimeBuilderCpp)
+
 $publishRuntimeVersionPattern = 'worldOwner->runtimeVersion\s*='
 $publishTransitionIdPattern = 'worldOwner->transitionId\s*='
 $publishFreezePattern = 'worldOwner->freeze\s*\('
 $publishReturnPattern = 'return\s+worldOwner\s*;'
-$publishRuntimeVersionHits = Invoke-RgLines -Pattern $publishRuntimeVersionPattern -Targets @($audioEngineHeader)
-$publishTransitionIdHits = Invoke-RgLines -Pattern $publishTransitionIdPattern -Targets @($audioEngineHeader)
-$publishFreezeHits = Invoke-RgLines -Pattern $publishFreezePattern -Targets @($audioEngineHeader)
-$publishReturnHits = Invoke-RgLines -Pattern $publishReturnPattern -Targets @($audioEngineHeader)
+$publishRuntimeVersionHits = Invoke-RgLines -Pattern $publishRuntimeVersionPattern -Targets $publishBuilderTargets
+$publishTransitionIdHits = Invoke-RgLines -Pattern $publishTransitionIdPattern -Targets $publishBuilderTargets
+$publishFreezeHits = Invoke-RgLines -Pattern $publishFreezePattern -Targets $publishBuilderTargets
+$publishReturnHits = Invoke-RgLines -Pattern $publishReturnPattern -Targets $publishBuilderTargets
 if (@($publishRuntimeVersionHits).Count -eq 0 -or @($publishTransitionIdHits).Count -eq 0) {
-    Add-Failure -RuleId '1.1.6' -Message 'Publish builder pre-freeze assignments missing' -Line $audioEngineHeader
+    Add-Failure -RuleId '1.1.6' -Message 'Publish builder pre-freeze assignments missing' -Line ($publishBuilderTargets -join ', ')
 }
 if (@($publishFreezeHits).Count -eq 0) {
-    Add-Failure -RuleId '1.1.6' -Message 'Publish builder freeze() call missing' -Line $audioEngineHeader
+    Add-Failure -RuleId '1.1.6' -Message 'Publish builder freeze() call missing' -Line ($publishBuilderTargets -join ', ')
 }
 if (@($publishReturnHits).Count -eq 0) {
-    Add-Failure -RuleId '1.1.6' -Message 'Publish builder return worldOwner missing' -Line $audioEngineHeader
+    Add-Failure -RuleId '1.1.6' -Message 'Publish builder return worldOwner missing' -Line ($publishBuilderTargets -join ', ')
 }
 
 if (@($publishRuntimeVersionHits).Count -gt 0 -and @($publishTransitionIdHits).Count -gt 0 -and @($publishFreezeHits).Count -gt 0 -and @($publishReturnHits).Count -gt 0) {
@@ -249,16 +252,16 @@ if (@($publishRuntimeVersionHits).Count -gt 0 -and @($publishTransitionIdHits).C
     $returnLine = Get-RgLineNumber (@($publishReturnHits)[0])
 
     if ($freezeLine -le $runtimeVersionLine -or $freezeLine -le $transitionIdLine) {
-        Add-Failure -RuleId '1.1.6' -Message 'Publish builder freeze() must follow runtimeVersion/transitionId assignment' -Line $audioEngineHeader
+        Add-Failure -RuleId '1.1.6' -Message 'Publish builder freeze() must follow runtimeVersion/transitionId assignment' -Line ($publishBuilderTargets -join ', ')
     }
 
     if ($freezeLine -ge $returnLine) {
-        Add-Failure -RuleId '1.1.6' -Message 'Publish builder freeze() must occur before return worldOwner' -Line $audioEngineHeader
+        Add-Failure -RuleId '1.1.6' -Message 'Publish builder freeze() must occur before return worldOwner' -Line ($publishBuilderTargets -join ', ')
     }
 }
 
 $publishSealRecursivelyPattern = 'worldOwner->sealRecursively\s*\('
-$publishSealRecursivelyHits = Invoke-RgLines -Pattern $publishSealRecursivelyPattern -Targets @($audioEngineHeader)
+$publishSealRecursivelyHits = Invoke-RgLines -Pattern $publishSealRecursivelyPattern -Targets $publishBuilderTargets
 foreach ($m in $publishSealRecursivelyHits) {
     Add-Failure -RuleId '1.1.6' -Message 'Publish builder must use freeze() instead of sealRecursively()' -Line $m
 }

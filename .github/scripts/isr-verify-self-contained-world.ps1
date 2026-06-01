@@ -27,25 +27,31 @@ else {
     }
 }
 
-# Contract: world observation in AudioEngine must route through observeWorldHandle,
-# not direct raw global pointer dereference.
+# Contract: world observation in AudioEngine must route through
+# RuntimePublicationCoordinator read contract (observeWorldHandle OR
+# acquireReadToken + consumeWorldHandle), not direct raw global pointer dereference.
 $coordHeader = Join-Path $repoRoot 'src\core\RuntimePublicationCoordinator.h'
 if (-not (Test-Path -LiteralPath $coordHeader)) {
     Add-Violation "RuntimePublicationCoordinator.h not found: $coordHeader"
 }
 else {
     $coordContent = Get-Content -LiteralPath $coordHeader -Raw
-    if (-not $coordContent.Contains('observeWorldHandle')) {
-        Add-Violation 'observeWorldHandle is not defined in RuntimePublicationCoordinator.h'
+    $hasObserveWorldHandle = $coordContent.Contains('observeWorldHandle')
+    $hasTokenConsumeContract = $coordContent.Contains('acquireReadToken') -and $coordContent.Contains('consumeWorldHandle')
+    if (-not $hasObserveWorldHandle -and -not $hasTokenConsumeContract) {
+        Add-Violation 'RuntimePublicationCoordinator.h does not expose observeWorldHandle nor acquireReadToken+consumeWorldHandle contract'
     }
 }
 
-# Check that AudioEngine.h uses observeWorldHandle (not raw global dereference) for RT observe.
+# Check that AudioEngine.h uses RuntimePublicationCoordinator read contract
+# (observeWorldHandle OR acquireReadToken+consumeWorldHandle) for RT observe.
 $audioEngineHeader = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
 if (Test-Path -LiteralPath $audioEngineHeader) {
     $aeContent = Get-Content -LiteralPath $audioEngineHeader -Raw
-    if (-not $aeContent.Contains('observeWorldHandle')) {
-        Add-Violation 'AudioEngine.h does not use observeWorldHandle for world observation'
+    $usesObserveWorldHandle = $aeContent.Contains('observeWorldHandle')
+    $usesTokenConsumeContract = $aeContent.Contains('RuntimePublicationCoordinator::acquireReadToken') -and $aeContent.Contains('RuntimePublicationCoordinator::consumeWorldHandle')
+    if (-not $usesObserveWorldHandle -and -not $usesTokenConsumeContract) {
+        Add-Violation 'AudioEngine.h does not use RuntimePublicationCoordinator read contract for world observation'
     }
 }
 

@@ -77,6 +77,14 @@
             "issue": "BRIDGE-ISR-AI-GOV-001",
             "rationale": "Policy definition literals for forbidden semantics must not self-trigger CI-ADMISSION-002",
             "expiry": "2027-12-31"
+        },
+        {
+            "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+            "lineRegex": "\\bcritical\\b",
+            "owner": "audio-runtime",
+            "issue": "BRIDGE-ISR-AI-GOV-001",
+            "rationale": "Retire pressure local severity variable name; not an execution semantic authority token",
+            "expiry": "2027-12-31"
         }
     ],
     "suppressionAuthorityFunctions": [
@@ -143,7 +151,9 @@
         "ShutdownInProgress",
         "KindFiltered",
         "MixedPhaseIntermediate",
-        "SnapshotEnqueueFailed"
+        "SnapshotEnqueueFailed",
+        "RetirePressureSevere",
+        "SameAsPendingWouldMerge"
     ],
     "residencyKnownContainers": [
         "retire queue",
@@ -224,18 +234,18 @@
         },
         {
             "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.h$",
-            "lineRegex": "std::vector<const void\\*>\\s+retiredWorlds_\\s*;",
-            "owner": "audio-runtime",
-            "issue": "BRIDGE-ISR-AI-GOV-001",
-            "rationale": "Runtime publication coordinator retired-world residency",
-            "expiry": "2027-12-31"
-        },
-        {
-            "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.h$",
             "lineRegex": "std::vector<const void\\*>\\s+queued_\\s*;",
             "owner": "audio-runtime",
             "issue": "BRIDGE-ISR-AI-GOV-001",
             "rationale": "Runtime publication coordinator queued residency staging",
+            "expiry": "2027-12-31"
+        },
+        {
+            "pathRegex": "^src/core/DeferredRetireFallbackQueue\\.h$",
+            "lineRegex": "std::vector<DeferredRetireFallbackEntry>",
+            "owner": "audio-runtime",
+            "issue": "BRIDGE-ISR-AI-GOV-001",
+            "rationale": "Core deferred-retire fallback queue container residency",
             "expiry": "2027-12-31"
         },
         {
@@ -567,18 +577,9 @@
             }
         ],
         "requiredReclaimPrioritizationPatterns": [
-            "retiredWorlds_\\.erase\\(retiredWorlds_\\.begin\\(\\)\\)",
             "queued_\\.erase\\(queued_\\.begin\\(\\)\\)"
         ],
         "requiredReclaimPrioritizationApplications": [
-            {
-                "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.cpp$",
-                "lineRegex": "retiredWorlds_\\.erase\\(retiredWorlds_\\.begin\\(\\)\\)",
-                "owner": "audio-runtime",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "retire residency overflow must drop oldest world first to preserve newest generation under saturation",
-                "expiry": "2027-12-31"
-            },
             {
                 "pathRegex": "^src/audioengine/ISRRuntimePublicationCoordinator\\.cpp$",
                 "lineRegex": "queued_\\.erase\\(queued_\\.begin\\(\\)\\)",
@@ -694,35 +695,27 @@
         ],
         "requiredCrossfadePreparedSnapshotConsumers": [
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Processing\\.AudioBlock\\.cpp$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
                 "lineRegex": "consumeCrossfadePreparedSnapshot\\(\\)",
                 "owner": "crossfade-authority",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "float block processing path must consume prepared snapshot",
+                "rationale": "shared helper path keeps prepared snapshot consume bridge definition",
+                "expiry": "2027-12-31"
+            },
+            {
+                "pathRegex": "^src/audioengine/AudioEngine\\.Processing\\.AudioBlock\\.cpp$",
+                "lineRegex": "makeCrossfadePreparedSnapshotFromWorld\\(",
+                "owner": "crossfade-authority",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "float block processing path must consume prepared snapshot via world handoff",
                 "expiry": "2027-12-31"
             },
             {
                 "pathRegex": "^src/audioengine/AudioEngine\\.Processing\\.BlockDouble\\.cpp$",
-                "lineRegex": "consumeCrossfadePreparedSnapshot\\(\\)",
+                "lineRegex": "makeCrossfadePreparedSnapshotFromWorld\\(",
                 "owner": "crossfade-authority",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "double block processing path must consume prepared snapshot",
-                "expiry": "2027-12-31"
-            },
-            {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Timer\\.cpp$",
-                "lineRegex": "consumeCrossfadePreparedSnapshot\\(\\)",
-                "owner": "crossfade-authority",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "timer transition path must consume prepared snapshot",
-                "expiry": "2027-12-31"
-            },
-            {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Commit\\.cpp$",
-                "lineRegex": "consumeCrossfadePreparedSnapshot\\(\\)",
-                "owner": "crossfade-authority",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "commit path must consume prepared snapshot for arm/reset decisions",
+                "rationale": "double block processing path must consume prepared snapshot via world handoff",
                 "expiry": "2027-12-31"
             }
         ],
@@ -747,20 +740,6 @@
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "double processing is an authorized prepared-snapshot consumer scope",
                 "expiry": "2027-12-31"
-            },
-            {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Timer\\.cpp$",
-                "owner": "crossfade-authority",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "timer transition is an authorized prepared-snapshot consumer scope",
-                "expiry": "2027-12-31"
-            },
-            {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Commit\\.cpp$",
-                "owner": "crossfade-authority",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "commit transition path is an authorized prepared-snapshot consumer scope",
-                "expiry": "2027-12-31"
             }
         ],
         "crossfadePreparedStateFieldUsageAllowedScopes": [
@@ -784,23 +763,17 @@
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "double processing path may dereference preparedCrossfade fields",
                 "expiry": "2027-12-31"
-            },
-            {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Timer\\.cpp$",
-                "owner": "crossfade-authority",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "timer path may dereference preparedCrossfade fields",
-                "expiry": "2027-12-31"
-            },
-            {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Commit\\.cpp$",
-                "owner": "crossfade-authority",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "commit path may dereference preparedCrossfade fields",
-                "expiry": "2027-12-31"
             }
         ],
         "requiredCrossfadePreparedStateFieldApplications": [
+            {
+                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
+                "lineRegex": "prepared\\.(pending|useDryAsOld|firstIrDryCrossfadePending|startDelayBlocks|dryScaleTarget)",
+                "owner": "crossfade-authority",
+                "issue": "BRIDGE-ISR-AI-GOV-001",
+                "rationale": "shared helper path must consume prepared snapshot fields for crossfade arm/reset decisions",
+                "expiry": "2027-12-31"
+            },
             {
                 "pathRegex": "^src/audioengine/AudioEngine\\.Processing\\.AudioBlock\\.cpp$",
                 "lineRegex": "preparedCrossfade\\.(pending|useDryAsOld|firstIrDryCrossfadePending|startDelayBlocks|dryHoldSamples|dryScaleTarget)",
@@ -815,22 +788,6 @@
                 "owner": "crossfade-authority",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "double processing path must use prepared snapshot fields for crossfade decisions",
-                "expiry": "2027-12-31"
-            },
-            {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Timer\\.cpp$",
-                "lineRegex": "preparedCrossfade\\.(pending|useDryAsOld|firstIrDryCrossfadePending|startDelayBlocks|dryHoldSamples|dryScaleTarget)",
-                "owner": "crossfade-authority",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "timer path must use prepared snapshot fields for crossfade decisions",
-                "expiry": "2027-12-31"
-            },
-            {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Commit\\.cpp$",
-                "lineRegex": "preparedCrossfade\\.(pending|useDryAsOld|firstIrDryCrossfadePending|startDelayBlocks|dryHoldSamples|dryScaleTarget)",
-                "owner": "crossfade-authority",
-                "issue": "BRIDGE-ISR-AI-GOV-001",
-                "rationale": "commit path must use prepared snapshot fields for crossfade arm/reset decisions",
                 "expiry": "2027-12-31"
             }
         ],

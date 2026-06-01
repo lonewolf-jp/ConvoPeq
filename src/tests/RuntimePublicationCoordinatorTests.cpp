@@ -25,7 +25,8 @@ struct TestBridge
                                                         const Candidate* next,
                                                         convo::TransitionPolicy,
                                                         double,
-                                                        bool) noexcept
+                                                        bool,
+                                                        const convo::RuntimeBuildSnapshot*) noexcept
     {
         auto world = std::make_unique<TestWorld>();
         const Candidate* source = (current != nullptr) ? current : next;
@@ -92,30 +93,59 @@ private:
     Candidate c101 { 101, 101 };
 
     coordinator.publishState(&c100, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
-    const TestWorld* first = Coordinator::observeWorldHandle(store);
+    const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr || first->generation != 100 || first->publicationSequence != 1)
         return false;
 
     // Re-publish same token should be rejected.
     coordinator.publishState(&c100, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
-    const TestWorld* afterRepublish = Coordinator::observeWorldHandle(store);
+    const TestWorld* afterRepublish = Coordinator::consumeWorldHandle(store);
     if (afterRepublish != first || afterRepublish->publicationSequence != 1)
         return false;
 
     // Monotonic increase should pass.
     coordinator.publishState(&c101, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
-    const TestWorld* second = Coordinator::observeWorldHandle(store);
+    const TestWorld* second = Coordinator::consumeWorldHandle(store);
     if (second == nullptr || second == first || second->generation != 101 || second->publicationSequence != 2)
         return false;
 
     // Rollback (101 -> 100) should be rejected.
     coordinator.publishState(&c100, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
-    const TestWorld* afterRollback = Coordinator::observeWorldHandle(store);
+    const TestWorld* afterRollback = Coordinator::consumeWorldHandle(store);
     if (afterRollback != second || afterRollback->publicationSequence != 2)
         return false;
 
+    coordinator.requestShutdownClearNonRt();
     coordinator.clearPublishedRuntimeSnapshotsNonRt();
     return true;
+}
+
+[[nodiscard]] bool testClearRequiresShutdownRequest()
+{
+    using Coordinator = convo::RuntimePublicationCoordinator<TestWorld, const Candidate*, TestBridge>;
+    using Store = Coordinator::Store;
+
+    Store store;
+    auto coordinator = Coordinator::create(TestBridge{}, store);
+
+    Candidate c100 { 100, 100 };
+    coordinator.publishState(&c100, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+
+    const TestWorld* published = Coordinator::consumeWorldHandle(store);
+    if (published == nullptr)
+        return false;
+
+    // shutdown request なし clear は no-op（publish(nullptr) を許可しない）
+    coordinator.clearPublishedRuntimeSnapshotsNonRt();
+    const TestWorld* stillPublished = Coordinator::consumeWorldHandle(store);
+    if (stillPublished != published)
+        return false;
+
+    coordinator.requestShutdownClearNonRt();
+    coordinator.clearPublishedRuntimeSnapshotsNonRt();
+
+    const TestWorld* afterShutdownClear = Coordinator::consumeWorldHandle(store);
+    return afterShutdownClear == nullptr;
 }
 
 } // namespace
@@ -124,6 +154,9 @@ int main()
 {
     if (!testRejectRepublishAndRollback())
         throw std::runtime_error("RuntimePublicationCoordinator rejection contract failed");
+
+    if (!testClearRequiresShutdownRequest())
+        throw std::runtime_error("RuntimePublicationCoordinator shutdown clear contract failed");
 
     return 0;
 }

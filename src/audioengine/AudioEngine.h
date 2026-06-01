@@ -214,7 +214,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         {"semanticHash", convo::isr::SemanticCategory::Diagnostic, convo::isr::OwnershipClass::DiagnosticOnly, convo::isr::MutabilityClass::DiagnosticMutable, convo::isr::VisibilityClass::DiagnosticBoundary, convo::isr::LifetimeClass::DiagnosticLifetime}
     }};
 
-    static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 17> kAuthorityInventory {{
+    static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 17> kRuntimeAuthorityInventory {{
         {"worldId", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"generation", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"generationSemantic", convo::isr::RuntimeAuthorityClass::Derived},
@@ -234,11 +234,27 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         {"semanticHash", convo::isr::RuntimeAuthorityClass::Diagnostic}
     }};
 
+    static constexpr const auto& kAuthorityInventory = kRuntimeAuthorityInventory;
+
+    static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 9> kRuntimeReadAuthorityInventory {{
+        {"topology", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"routing", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"execution", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"publication", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"overlap", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"latency", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"engine", convo::isr::RuntimeAuthorityClass::Derived},
+        {"automation", convo::isr::RuntimeAuthorityClass::Derived},
+        {"coefficient", convo::isr::RuntimeAuthorityClass::Derived}
+    }};
+
     [[nodiscard]] static constexpr bool validateDescriptorSet() noexcept
     {
         return convo::isr::validateFieldDescriptorSet(kFieldDescriptors)
-            && convo::isr::validateAuthorityInventorySet(kAuthorityInventory)
-            && convo::isr::validateAuthorityInventoryAgainstDescriptors(kAuthorityInventory, kFieldDescriptors)
+            && convo::isr::validateAuthorityInventorySet(kRuntimeAuthorityInventory)
+            && convo::isr::validateAuthorityInventoryAgainstDescriptors(kRuntimeAuthorityInventory, kFieldDescriptors)
+            && convo::isr::validateReadAuthorityInventorySet(kRuntimeReadAuthorityInventory)
+            && convo::isr::validateReadAuthorityInventoryAgainstDescriptors(kRuntimeReadAuthorityInventory, kFieldDescriptors)
             && convo::isr::PublicationSemantic::validateDescriptorSet();
     }
 };
@@ -750,7 +766,6 @@ public:
     //----------------------------------------------------------
     ConvolverProcessor& getConvolverProcessor() { return uiConvolverProcessor; }
     [[nodiscard]] const ConvolverProcessor& getConvolverProcessor() const { return uiConvolverProcessor; }
-    void applyCurrentConvolverSnapshotToRuntime(DSPCore& runtime) const;
     EQEditProcessor& getEQProcessor() { return uiEqEditor; }
     ThreadAffinityManager& getAffinityManager() noexcept { return affinityManager; }
     [[nodiscard]] const ThreadAffinityManager& getAffinityManager() const noexcept { return affinityManager; }
@@ -859,7 +874,8 @@ public:
 
     [[nodiscard]] inline const convo::RuntimeGraph* getRuntimeGraph() const noexcept
     {
-        const auto* world = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
+        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
+        const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
         return (world != nullptr) ? &world->graph : nullptr;
     }
 
@@ -1058,6 +1074,11 @@ public:
             consumeAtomic(lastCommittedPublicationSequence_),
             consumeAtomic(lastDroppedGeneration_)
         };
+    }
+
+    [[nodiscard]] convo::isr::PublicationSequenceId getLastCommittedPublicationSequence() const noexcept
+    {
+        return consumeAtomic(lastCommittedPublicationSequence_, std::memory_order_acquire);
     }
 
     [[nodiscard]] RuntimeBackpressureTelemetry getRuntimeBackpressureTelemetry() const noexcept
@@ -1443,47 +1464,36 @@ public:
         return activeRaw;
     }
 
-    struct RuntimePublishView
+    struct RuntimeReadHandle
     {
-        RuntimePublishView(convo::EpochDomain& domain,
-                           int readerIndex,
-                           const convo::TransitionState& transitionIn,
-                           double sampleRateHzIn) noexcept
-            : observed(domain, readerIndex)
-            , transition(transitionIn)
-            , sampleRateHz(sampleRateHzIn)
+    public:
+        RuntimeReadHandle(const RuntimeReadHandle&) = delete;
+        RuntimeReadHandle& operator=(const RuntimeReadHandle&) = delete;
+        RuntimeReadHandle(RuntimeReadHandle&&) noexcept = default;
+        RuntimeReadHandle& operator=(RuntimeReadHandle&&) noexcept = default;
+
+        [[nodiscard]] const RuntimePublishWorld* runtimeWorldPtr() const noexcept
+        {
+            return runtimeWorld_;
+        }
+
+        [[nodiscard]] const convo::GlobalSnapshot* observedSnapshotPtr() const noexcept
+        {
+            return observedSnapshot_.get();
+        }
+
+    private:
+        friend class AudioEngine;
+
+        RuntimeReadHandle(convo::ObservedRuntime&& observedSnapshotIn,
+                          const RuntimePublishWorld* runtimeWorldIn) noexcept
+            : observedSnapshot_(std::move(observedSnapshotIn))
+            , runtimeWorld_(runtimeWorldIn)
         {
         }
 
-        RuntimePublishView(const RuntimePublishView&) = delete;
-        RuntimePublishView& operator=(const RuntimePublishView&) = delete;
-        RuntimePublishView(RuntimePublishView&&) noexcept = default;
-        RuntimePublishView& operator=(RuntimePublishView&&) noexcept = default;
-
-        convo::ObservedRuntime observed;
-        convo::TransitionState transition {};
-        double sampleRateHz = 0.0;
-    };
-
-    struct RuntimeReadView
-    {
-        RuntimeReadView(RuntimePublishView&& runtimePublishIn,
-                             convo::ObservedRuntime&& observedSnapshotIn,
-                             const RuntimePublishWorld* runtimeWorldIn) noexcept
-            : runtimePublish(std::move(runtimePublishIn))
-            , observedSnapshot(std::move(observedSnapshotIn))
-            , runtimeWorld(runtimeWorldIn)
-        {
-        }
-
-        RuntimeReadView(const RuntimeReadView&) = delete;
-        RuntimeReadView& operator=(const RuntimeReadView&) = delete;
-        RuntimeReadView(RuntimeReadView&&) noexcept = default;
-        RuntimeReadView& operator=(RuntimeReadView&&) noexcept = default;
-
-        RuntimePublishView runtimePublish;
-        convo::ObservedRuntime observedSnapshot;
-        const RuntimePublishWorld* runtimeWorld = nullptr;
+        convo::ObservedRuntime observedSnapshot_;
+        const RuntimePublishWorld* runtimeWorld_ = nullptr;
     };
 
     struct CrossfadePreparedSnapshot
@@ -1707,8 +1717,8 @@ public:
     // such as IR resampling. It MUST only be called from the message thread.
     // prepareToPlay() routes to the message thread before invoking this helper.
     void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
-    void applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation);
-    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation);
+    void applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);
+    void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);
     void drainPublicationIntentsForRuntimeCommit();
     // acquire: applyRuntimeCommitFromIntent/requestRebuild の rebuildGeneration 更新 release と HB し、
     //          リビルド世代が古いか否かを各スレッドから安全に判定。
@@ -1721,9 +1731,9 @@ public:
     void processDeferredLearningActions();
     void resetLearningControlState() noexcept;
     bool enqueueSnapshotCommand() noexcept;
-    void appendPublicationIntentForCommitProducer(DSPCore* newDSP, int targetWorldId) noexcept;
-    void appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int targetWorldId) noexcept;
-    void appendPublicationIntentForCommitSlot(DSPCore* newDSP, int targetWorldId, CommitReaderSlot readerSlot) noexcept;
+    void appendPublicationIntentForCommitProducer(DSPCore* newDSP, int targetWorldId, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;
+    void appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int targetWorldId, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;
+    void appendPublicationIntentForCommitSlot(DSPCore* newDSP, int targetWorldId, CommitReaderSlot readerSlot, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;
     void drainPublicationLogForShutdown() noexcept;
     [[nodiscard]] bool hasPendingPublicationIntents() noexcept;
     [[nodiscard]] bool hasPublicationLogPending() noexcept;
@@ -1823,6 +1833,7 @@ public:
         std::uint64_t targetWorldId = 0;
         std::uint64_t requestId = 0;
         std::int64_t enqueueTimeTicks = 0;
+        convo::RuntimeBuildSnapshot runtimeBuildSnapshot {};
         std::atomic<PublicationIntent*> next { nullptr };
     };
 
@@ -2118,24 +2129,75 @@ public:
     void debugAssertNotAudioThread() const;
     void debugAssertAudioThread() const;
 
+    struct RuntimeFallbackPolicy
+    {
+        bool allowTransitionFallback = false;
+        bool allowRoutingAutomationFallback = false;
+        bool allowAdaptiveBankIndexFallback = false;
+        bool allowEqCoeffHashFallback = false;
+        bool allowRetireFallback = false; // PR policy: retire/publication-adjacent fields never fallback to atomics.
+    };
+
     inline convo::EngineRuntime makeEngineRuntimeState(DSPCore* current,
                                                         DSPCore* next,
                                                         convo::TransitionPolicy policy,
                                                         double fadeTimeSec,
-                                                        bool active) noexcept
+                                                        bool active,
+                                                        const RuntimePublishWorld* runtimeWorld,
+                                                        const RuntimeFallbackPolicy& fallbackPolicy) noexcept
     {
         // IR-7 (Chapter 8): State transition precondition validation.
         jassert(current != nullptr); // Current DSP must always be valid at publish time.
         jassert(fadeTimeSec >= 0.0);
 
-        refreshCrossfadePreparedSnapshotFromAtomics();
-        const auto prepared = consumeCrossfadePreparedSnapshot();
+        if (runtimeWorld == nullptr
+            && !(fallbackPolicy.allowTransitionFallback
+                || fallbackPolicy.allowRoutingAutomationFallback
+                || fallbackPolicy.allowAdaptiveBankIndexFallback
+                || fallbackPolicy.allowEqCoeffHashFallback
+                || fallbackPolicy.allowRetireFallback))
+        {
+            jassertfalse;
+            convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
+            convo::publishAtomic(observeMonotonicRollbackRequested_, true, std::memory_order_release);
+        }
+
+        const bool crossfadePending = (runtimeWorld != nullptr)
+            ? runtimeWorld->engine.dspCrossfadePending
+            : consumeAtomic(dspCrossfadePending, std::memory_order_acquire);
+        const bool crossfadeUseDryAsOld = (runtimeWorld != nullptr)
+            ? runtimeWorld->overlap.useDryAsOld
+            : consumeAtomic(dspCrossfadeUseDryAsOld, std::memory_order_acquire);
+        const bool firstLoadDryPending = (runtimeWorld != nullptr)
+            ? runtimeWorld->overlap.firstIrDryCrossfadePending
+            : consumeAtomic(firstIrDryCrossfadePending, std::memory_order_acquire);
+        const double queuedFadeTime = (runtimeWorld != nullptr)
+            ? runtimeWorld->overlap.fadeTimeSec
+            : consumeAtomic(queuedFadeTimeSec, std::memory_order_acquire);
+        const int delayOld = (runtimeWorld != nullptr)
+            ? runtimeWorld->latency.latencyDelayOld
+            : consumeAtomic(latencyDelayOld, std::memory_order_acquire);
+        const int delayNew = (runtimeWorld != nullptr)
+            ? runtimeWorld->latency.latencyDelayNew
+            : consumeAtomic(latencyDelayNew, std::memory_order_acquire);
+        const int startDelayBlocks = (runtimeWorld != nullptr)
+            ? runtimeWorld->execution.crossfadeStartDelayBlocks
+            : consumeAtomic(dspCrossfadeStartDelayBlocks, std::memory_order_acquire);
+        const int dryHoldSamples = (runtimeWorld != nullptr)
+            ? runtimeWorld->execution.crossfadeDryHoldSamples
+            : consumeAtomic(dspCrossfadeDryHoldSamples, std::memory_order_acquire);
+        const bool resetLatencyPending = (runtimeWorld != nullptr)
+            ? runtimeWorld->engine.latencyResetPending
+            : consumeAtomic(latencyResetPending, std::memory_order_acquire);
+        const double dryScaleTarget = (runtimeWorld != nullptr)
+            ? runtimeWorld->overlap.dryScaleTarget
+            : consumeAtomic(dspCrossfadeDryScaleTarget, std::memory_order_acquire);
 
         // IR-7: Crossfade parameter sanity checks (invariant enforcement).
-        jassert(prepared.fadeTimeSec >= 0.0);
-        jassert(prepared.latencyDelayOld >= 0 && prepared.latencyDelayNew >= 0);
-        jassert(prepared.startDelayBlocks >= 0);
-        jassert(prepared.dryHoldSamples >= 0);
+        jassert(queuedFadeTime >= 0.0);
+        jassert(delayOld >= 0 && delayNew >= 0);
+        jassert(startDelayBlocks >= 0);
+        jassert(dryHoldSamples >= 0);
 
         convo::EngineRuntime runtime {};
         const auto getRuntimeUuid = [](DSPCore* dsp) noexcept -> std::uint64_t
@@ -2143,12 +2205,8 @@ public:
             return dsp != nullptr ? dsp->runtimeUuid : 0;
         };
 
-        const auto runtimeReadView = readControlRuntimeView();
-        const bool transitionActive = runtimeReadView.runtimeWorld != nullptr
-            && runtimeReadView.runtimeWorld->topology.hasFadingRuntime;
-        DSPCore* fading = transitionActive
-            ? static_cast<DSPCore*>(runtimeReadView.runtimePublish.transition.next)
-            : nullptr;
+        const bool transitionActive = active && next != nullptr;
+        DSPCore* fading = transitionActive ? next : nullptr;
 
         runtime.current = current;
         runtime.currentRuntimeUuid = getRuntimeUuid(current);
@@ -2156,22 +2214,87 @@ public:
         runtime.transition.next = next;
         runtime.transitionCurrentRuntimeUuid = getRuntimeUuid(current);
         runtime.transitionNextRuntimeUuid = getRuntimeUuid(next);
-        runtime.latencyDelayOld = prepared.latencyDelayOld;
-        runtime.latencyDelayNew = prepared.latencyDelayNew;
+        runtime.latencyDelayOld = delayOld;
+        runtime.latencyDelayNew = delayNew;
         runtime.transition.policy = policy;
         runtime.transition.fadeTimeSec = fadeTimeSec;
         runtime.transition.latencyDeltaSamples = runtime.latencyDelayOld - runtime.latencyDelayNew;
-        runtime.transition.active = active;
+        runtime.transition.active = transitionActive;
         runtime.fading = fading;
         runtime.fadingRuntimeUuid = getRuntimeUuid(fading);
-        runtime.latencyResetPending = prepared.latencyResetPending;
-        runtime.dspCrossfadePending = prepared.pending;
-        runtime.dspCrossfadeUseDryAsOld = prepared.useDryAsOld;
-        runtime.firstIrDryCrossfadePending = prepared.firstIrDryCrossfadePending;
-        runtime.queuedFadeTimeSec = prepared.fadeTimeSec;
-        runtime.dspCrossfadeStartDelayBlocks = prepared.startDelayBlocks;
-        runtime.dspCrossfadeDryHoldSamples = prepared.dryHoldSamples;
-        runtime.dryScaleTarget = prepared.dryScaleTarget;
+        runtime.latencyResetPending = resetLatencyPending;
+        runtime.dspCrossfadePending = crossfadePending;
+        runtime.dspCrossfadeUseDryAsOld = crossfadeUseDryAsOld;
+        runtime.firstIrDryCrossfadePending = firstLoadDryPending;
+        runtime.processingOrder = (runtimeWorld != nullptr)
+            ? runtimeWorld->routing.processingOrder
+            : (fallbackPolicy.allowRoutingAutomationFallback
+                ? static_cast<int>(consumeAtomic(currentProcessingOrder, std::memory_order_acquire))
+                : 0);
+        runtime.eqBypassed = (runtimeWorld != nullptr)
+            ? runtimeWorld->routing.eqBypassed
+            : (fallbackPolicy.allowRoutingAutomationFallback
+                ? consumeAtomic(eqBypassRequested, std::memory_order_acquire)
+                : false);
+        runtime.convBypassed = (runtimeWorld != nullptr)
+            ? runtimeWorld->routing.convBypassed
+            : (fallbackPolicy.allowRoutingAutomationFallback
+                ? consumeAtomic(convBypassRequested, std::memory_order_acquire)
+                : false);
+        runtime.softClipEnabled = (runtimeWorld != nullptr)
+            ? runtimeWorld->automation.softClipEnabled
+            : (fallbackPolicy.allowRoutingAutomationFallback
+                ? consumeAtomic(softClipEnabled, std::memory_order_acquire)
+                : false);
+        runtime.saturationAmount = (runtimeWorld != nullptr)
+            ? runtimeWorld->automation.saturationAmount
+            : (fallbackPolicy.allowRoutingAutomationFallback
+                ? static_cast<double>(consumeAtomic(saturationAmount, std::memory_order_acquire))
+                : 0.0);
+        runtime.inputHeadroomGain = (runtimeWorld != nullptr)
+            ? runtimeWorld->automation.inputHeadroomGain
+            : (fallbackPolicy.allowRoutingAutomationFallback
+                ? consumeAtomic(inputHeadroomGain, std::memory_order_acquire)
+                : 1.0);
+        runtime.outputMakeupGain = (runtimeWorld != nullptr)
+            ? runtimeWorld->automation.outputMakeupGain
+            : (fallbackPolicy.allowRoutingAutomationFallback
+                ? consumeAtomic(outputMakeupGain, std::memory_order_acquire)
+                : 1.0);
+        runtime.convolverInputTrimGain = (runtimeWorld != nullptr)
+            ? runtimeWorld->automation.convolverInputTrimGain
+            : (fallbackPolicy.allowRoutingAutomationFallback
+                ? consumeAtomic(convolverInputTrimGain, std::memory_order_acquire)
+                : 1.0);
+        runtime.retireBacklog = (runtimeWorld != nullptr)
+            ? runtimeWorld->retire.retireBacklog
+            : 0;
+        runtime.deferredResidency = (runtimeWorld != nullptr)
+            ? runtimeWorld->retire.deferredResidency
+            : 0;
+        runtime.rebuildWorkerRunning = (runtimeWorld != nullptr)
+            ? runtimeWorld->affinity.rebuildWorkerRunning
+            : false;
+        runtime.adaptiveCoeffBankIndex = (runtimeWorld != nullptr)
+            ? runtimeWorld->coefficient.adaptiveCoeffBankIndex
+            : (fallbackPolicy.allowAdaptiveBankIndexFallback
+                ? consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire)
+                : 0);
+        runtime.adaptiveCoeffGeneration = (runtimeWorld != nullptr)
+            ? runtimeWorld->coefficient.adaptiveCoeffGeneration
+            : 0u;
+        if (runtimeWorld != nullptr)
+            runtime.eqCoeffHash = runtimeWorld->coefficient.eqCoeffHash;
+        else if (!fallbackPolicy.allowEqCoeffHashFallback)
+            runtime.eqCoeffHash = 0;
+        else if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
+            runtime.eqCoeffHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
+        else
+            runtime.eqCoeffHash = 0;
+        runtime.queuedFadeTimeSec = queuedFadeTime;
+        runtime.dspCrossfadeStartDelayBlocks = startDelayBlocks;
+        runtime.dspCrossfadeDryHoldSamples = dryHoldSamples;
+        runtime.dryScaleTarget = dryScaleTarget;
         return runtime;
     }
 
@@ -2242,27 +2365,16 @@ public:
         return kCommitConsumerEpochReaderIndex;
     }
 
-    [[nodiscard]] inline RuntimePublishView makeRuntimePublishView(int readerIndex,
-                                                                   bool assertAudioThread) noexcept
+    [[nodiscard]] inline RuntimeReadHandle makeRuntimeReadHandle(int readerIndex,
+                                                                 bool assertAudioThread) noexcept
     {
         if (assertAudioThread)
             debugAssertAudioThread();
         else
             debugAssertNotAudioThread();
 
-        const auto* world = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
-        return RuntimePublishView {
-            m_epochDomain,
-            readerIndex,
-            world != nullptr ? world->engine.transition : convo::TransitionState{},
-            consumeAtomic(currentSampleRate, std::memory_order_acquire)
-        };
-    }
-
-    [[nodiscard]] inline RuntimeReadView makeRuntimeReadView(int readerIndex,
-                                                             bool assertAudioThread) noexcept
-    {
-        const auto* world = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
+        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
+        const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
         if (world != nullptr)
         {
             constexpr int kObserveReaderSlots = 4;
@@ -2321,8 +2433,7 @@ public:
         if (!assertAudioThread)
             observedSnapshot = m_coordinator.observeCurrentRuntime(readerIndex);
 
-        return RuntimeReadView {
-            makeRuntimePublishView(readerIndex, assertAudioThread),
+        return RuntimeReadHandle {
             std::move(observedSnapshot),
             world
         };
@@ -2344,41 +2455,95 @@ public:
         return snapshot;
     }
 
-    [[nodiscard]] inline RuntimeReadView readAudioRuntimeView() noexcept
+    [[nodiscard]] inline RuntimeReadHandle readAudioRuntimeHandle() noexcept
     {
-        return makeRuntimeReadView(kAudioEpochReaderIndex, true);
+        return makeRuntimeReadHandle(kAudioEpochReaderIndex, true);
     }
 
-    [[nodiscard]] inline RuntimeReadView readControlRuntimeView() noexcept
+    [[nodiscard]] inline RuntimeReadHandle readControlRuntimeHandle() noexcept
     {
-        return makeRuntimeReadView(kControlEpochReaderIndex, false);
+        return makeRuntimeReadHandle(kControlEpochReaderIndex, false);
     }
 
-    [[nodiscard]] inline const convo::RuntimeGraph* getRuntimeGraph(const RuntimeReadView& runtimeReadView) const noexcept
+    [[nodiscard]] static inline const RuntimePublishWorld* getRuntimeWorldFromReadHandle(const RuntimeReadHandle& runtimeReadHandle) noexcept
     {
-        juce::ignoreUnused(runtimeReadView);
-        const auto* world = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
-        return (world != nullptr) ? &world->graph : nullptr;
+        return runtimeReadHandle.runtimeWorldPtr();
     }
 
-    [[nodiscard]] static inline const convo::GlobalSnapshot* getRuntimeSnapshot(const RuntimeReadView& runtimeReadView) noexcept
+    [[nodiscard]] static inline convo::TransitionPolicy getTransitionPolicyFromRuntimeWorld(const RuntimeReadHandle& runtimeReadHandle,
+                                                                                             convo::TransitionPolicy fallback = convo::TransitionPolicy::SmoothOnly) noexcept
     {
-        return runtimeReadView.observedSnapshot.get();
+        const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+        return (runtimeWorld != nullptr)
+            ? static_cast<convo::TransitionPolicy>(runtimeWorld->execution.transitionPolicy)
+            : fallback;
     }
 
-    [[nodiscard]] inline DSPCore* resolveFadingRuntimeDSPFromRuntimeWorldOnly(const RuntimeReadView& runtimeReadView) const noexcept
+    [[nodiscard]] static inline double getOverlapFadeTimeFromRuntimeWorld(const RuntimeReadHandle& runtimeReadHandle,
+                                                                           double fallback = 0.0) noexcept
     {
-        const auto& transition = runtimeReadView.runtimePublish.transition;
-        if (runtimeReadView.runtimeWorld == nullptr
-            || !runtimeReadView.runtimeWorld->topology.hasFadingRuntime)
+        const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+        return (runtimeWorld != nullptr)
+            ? runtimeWorld->overlap.fadeTimeSec
+            : fallback;
+    }
+
+    [[nodiscard]] static inline bool hasFadingRuntimeInWorld(const RuntimeReadHandle& runtimeReadHandle) noexcept
+    {
+        const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+        return (runtimeWorld != nullptr) && runtimeWorld->topology.hasFadingRuntime;
+    }
+
+    [[nodiscard]] static inline bool hasPendingCrossfadeInWorld(const RuntimeReadHandle& runtimeReadHandle) noexcept
+    {
+        const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+        return (runtimeWorld != nullptr) && runtimeWorld->engine.dspCrossfadePending;
+    }
+
+    [[nodiscard]] static inline bool shouldUseDryAsOldInWorld(const RuntimeReadHandle& runtimeReadHandle) noexcept
+    {
+        const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+        return (runtimeWorld != nullptr)
+            && (runtimeWorld->overlap.firstIrDryCrossfadePending
+                || runtimeWorld->overlap.useDryAsOld);
+    }
+
+    [[nodiscard]] static inline double getRuntimeSampleRateHzFromWorld(const RuntimeReadHandle& runtimeReadHandle,
+                                                                        double fallback = 0.0) noexcept
+    {
+        const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+        return (runtimeWorld != nullptr)
+            ? runtimeWorld->graph.sampleRate
+            : fallback;
+    }
+
+    [[nodiscard]] static inline const convo::RuntimeGraph* getRuntimeGraph(const RuntimeReadHandle& runtimeReadHandle) noexcept
+    {
+        const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+        return (runtimeWorld != nullptr) ? &runtimeWorld->graph : nullptr;
+    }
+
+    [[nodiscard]] static inline const convo::GlobalSnapshot* getRuntimeSnapshotFromReadHandle(const RuntimeReadHandle& runtimeReadHandle) noexcept
+    {
+        return runtimeReadHandle.observedSnapshotPtr();
+    }
+
+    [[nodiscard]] inline DSPCore* resolveFadingRuntimeDSPFromRuntimeWorldOnly(const RuntimeReadHandle& runtimeReadHandle) const noexcept
+    {
+        const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+        if (runtimeWorld == nullptr
+            || !runtimeWorld->topology.hasFadingRuntime)
             return nullptr;
 
-        return static_cast<DSPCore*>(transition.next);
+        return static_cast<DSPCore*>(runtimeWorld->engine.fading);
     }
 
-    [[nodiscard]] inline DSPCore* resolveActiveRuntimeDSPFromRuntimeWorldOnly(const RuntimeReadView& runtimeReadView) const noexcept
+    [[nodiscard]] inline DSPCore* resolveActiveRuntimeDSPFromRuntimeWorldOnly(const RuntimeReadHandle& runtimeReadHandle) const noexcept
     {
-        return static_cast<DSPCore*>(runtimeReadView.runtimePublish.transition.current);
+        const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+        return (runtimeWorld != nullptr)
+            ? static_cast<DSPCore*>(runtimeWorld->engine.current)
+            : nullptr;
     }
 
     inline convo::RuntimeGraph makeRuntimeGraphState(const convo::EngineRuntime& state) noexcept
@@ -2409,17 +2574,15 @@ public:
         graph.transitionCurrentRuntimeUuid = state.transitionCurrentRuntimeUuid;
         graph.transitionNextRuntimeUuid = state.transitionNextRuntimeUuid;
 
-        graph.eqBypassed = consumeAtomic(eqBypassRequested, std::memory_order_acquire);
-        graph.convBypassed = consumeAtomic(convBypassRequested, std::memory_order_acquire);
-        graph.softClipEnabled = consumeAtomic(softClipEnabled, std::memory_order_acquire);
-        graph.saturationAmount = static_cast<double>(consumeAtomic(saturationAmount, std::memory_order_acquire));
-        graph.inputHeadroomGain = consumeAtomic(inputHeadroomGain, std::memory_order_acquire);
-        graph.outputMakeupGain = consumeAtomic(outputMakeupGain, std::memory_order_acquire);
-        graph.convolverInputTrimGain = consumeAtomic(convolverInputTrimGain, std::memory_order_acquire);
-        graph.oversamplingFactor = std::max(1, consumeAtomic(manualOversamplingFactor, std::memory_order_acquire));
-        graph.ditherBitDepth = consumeAtomic(ditherBitDepth, std::memory_order_acquire);
-        graph.noiseShaperType = static_cast<int>(consumeAtomic(noiseShaperType, std::memory_order_acquire));
-        graph.sampleRate = consumeAtomic(currentSampleRate, std::memory_order_acquire);
+        graph.eqBypassed = state.eqBypassed;
+        graph.convBypassed = state.convBypassed;
+        graph.softClipEnabled = state.softClipEnabled;
+        graph.saturationAmount = state.saturationAmount;
+        graph.inputHeadroomGain = state.inputHeadroomGain;
+        graph.outputMakeupGain = state.outputMakeupGain;
+        graph.convolverInputTrimGain = state.convolverInputTrimGain;
+        graph.adaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
+        graph.adaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
 
         return graph;
     }
@@ -2497,6 +2660,74 @@ public:
         return nextGraphGeneration;
     }
 
+    struct RuntimePublishComputation
+    {
+        convo::EngineRuntime engineState {};
+        convo::RuntimeGraph graphState {};
+        convo::isr::PublicationSequenceId previousCommittedSequence = 0;
+    };
+
+    [[nodiscard]] inline RuntimePublishComputation computeRuntimePublishComputation(DSPCore* current,
+                                                                                     DSPCore* next,
+                                                                                     convo::TransitionPolicy policy,
+                                                                                     double fadeTimeSec,
+                                                                                     bool active,
+                                                                                     std::uint64_t generation) noexcept
+    {
+        RuntimePublishComputation computation {};
+        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
+        const auto* runtimeWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
+        const bool allowInitialAtomicFallback = (runtimeWorld == nullptr)
+            && (consumeAtomic(lastCommittedPublicationSequence_, std::memory_order_acquire) == 0)
+            && (consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_acquire) == 0);
+
+        const RuntimeFallbackPolicy fallbackPolicy {
+            .allowTransitionFallback = allowInitialAtomicFallback,
+            .allowRoutingAutomationFallback = allowInitialAtomicFallback,
+            .allowAdaptiveBankIndexFallback = allowInitialAtomicFallback,
+            .allowEqCoeffHashFallback = allowInitialAtomicFallback,
+            .allowRetireFallback = false
+        };
+
+        jassert(runtimeWorld != nullptr
+            || fallbackPolicy.allowTransitionFallback
+            || fallbackPolicy.allowRoutingAutomationFallback
+            || fallbackPolicy.allowAdaptiveBankIndexFallback
+            || fallbackPolicy.allowEqCoeffHashFallback
+            || fallbackPolicy.allowRetireFallback);
+
+        computation.engineState = makeEngineRuntimeState(current,
+                                                         next,
+                                                         policy,
+                                                         fadeTimeSec,
+                                                         active,
+                                                         runtimeWorld,
+                                                         fallbackPolicy);
+        computation.engineState.revision = generation;
+        computation.graphState = makeRuntimeGraphState(computation.engineState);
+        computation.graphState.generation = generation;
+        computation.previousCommittedSequence = getLastCommittedPublicationSequence();
+        return computation;
+    }
+
+    struct RuntimePublicationIdentity
+    {
+        std::uint64_t generation = 0;
+        std::uint64_t worldId = 0;
+        convo::isr::PublicationSequenceId publicationSequence = 0;
+    };
+
+    [[nodiscard]] inline RuntimePublicationIdentity reserveRuntimePublicationIdentity() noexcept
+    {
+        RuntimePublicationIdentity identity {};
+        identity.generation = reserveNextRuntimeGraphGeneration();
+        identity.worldId = runtimeWorldIdGenerator_.next();
+        identity.publicationSequence = convo::fetchAddAtomic(publicationSequenceCounter_,
+                                                             static_cast<convo::isr::PublicationSequenceId>(1),
+                                                             std::memory_order_acq_rel) + 1;
+        return identity;
+    }
+
     //=== RuntimePublicationCoordinator NonRT helper API ===//
     // AudioEngine 内部の publish/retire helper（NonRT 専用）。
 
@@ -2522,7 +2753,8 @@ public:
                                  DSPCore* next,
                                  convo::TransitionPolicy policy,
                                  double fadeTimeSec,
-                                 bool active) noexcept;
+                                 bool active,
+                                 const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept;
 
         [[nodiscard]] bool validatePublicationNonRt(const RuntimePublishWorld& world) noexcept
         {
@@ -2593,13 +2825,15 @@ public:
                                          DSPCore* next,
                                          convo::TransitionPolicy policy,
                                          double fadeTimeSec,
-                                         bool active) noexcept
+                                         bool active,
+                                         const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept
     {
         makeRuntimePublicationCoordinator().publishState(current,
                                                          next,
                                                          policy,
                                                          fadeTimeSec,
-                                                         active);
+                                                         active,
+                                                         sealedSnapshot);
     }
 
     [[nodiscard]] inline bool precheckRuntimePublication(const convo::isr::PayloadClosureDescriptor& closure,
@@ -2633,7 +2867,8 @@ public:
         };
 
         DSPCore* current = getActiveRuntimeDSP();
-        const auto* publishedWorld = RuntimePublicationCoordinator::observeWorldHandle(runtimeStore);
+        const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
+        const auto* publishedWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
         const auto& transition = (publishedWorld != nullptr) ? publishedWorld->engine.transition : convo::TransitionState{};
         const bool transitionActive = (publishedWorld != nullptr) && publishedWorld->topology.hasFadingRuntime;
         auto* fading = (transitionActive && transition.next != nullptr)
@@ -2720,8 +2955,8 @@ public:
         snapshot.convLCMode = consumeAtomic(convLCFilterMode, std::memory_order_acquire);
         snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
         snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+        snapshot.adaptiveCoeffGeneration = 0u;
         const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
-        snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
         snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
         snapshot.adaptiveCaptureEnabled = consumeAtomic(adaptiveCaptureActiveRt, std::memory_order_acquire);
         if (snap != nullptr)
@@ -2746,10 +2981,14 @@ public:
                 ? ProcessingOrder::EQThenConvolver
                 : ProcessingOrder::ConvolverThenEQ;
             snapshot.softClipEnabled = world->automation.softClipEnabled;
-            snapshot.saturationAmount = static_cast<float>(world->graph.saturationAmount);
-            snapshot.inputHeadroomGain = world->graph.inputHeadroomGain;
-            snapshot.outputMakeupGain = world->graph.outputMakeupGain;
-            snapshot.convolverInputTrimGain = world->graph.convolverInputTrimGain;
+            snapshot.saturationAmount = static_cast<float>(world->automation.saturationAmount);
+            snapshot.inputHeadroomGain = world->automation.inputHeadroomGain;
+            snapshot.outputMakeupGain = world->automation.outputMakeupGain;
+            snapshot.convolverInputTrimGain = world->automation.convolverInputTrimGain;
+            snapshot.adaptiveCoeffBankIndex = world->coefficient.adaptiveCoeffBankIndex;
+            snapshot.adaptiveCoeffGeneration = world->coefficient.adaptiveCoeffGeneration;
+            const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
+            snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
             snapshot.snapshotEqCoeffHash = world->coefficient.eqCoeffHash;
         }
         else
@@ -2769,10 +3008,13 @@ public:
         snapshot.convHCMode = consumeAtomic(convHCFilterMode, std::memory_order_acquire);
         snapshot.convLCMode = consumeAtomic(convLCFilterMode, std::memory_order_acquire);
         snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
-        snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-        const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
-        snapshot.adaptiveCoeffGeneration = consumeAtomic(adaptiveCoeffBank.generation, std::memory_order_acquire);
-        snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
+        if (world == nullptr)
+        {
+            snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+            snapshot.adaptiveCoeffGeneration = 0u;
+            const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
+            snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
+        }
         snapshot.adaptiveCaptureEnabled = consumeAtomic(adaptiveCaptureActiveRt, std::memory_order_acquire);
         return snapshot;
     }

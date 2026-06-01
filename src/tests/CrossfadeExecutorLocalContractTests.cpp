@@ -38,29 +38,27 @@ namespace {
     return haystack.find(needle) != std::string::npos;
 }
 
-[[nodiscard]] bool testObserveSingleSourceContract()
+[[nodiscard]] bool testCrossfadeExecutorLocalContract()
 {
-    const auto audioBlock = readAllText("src/audioengine/AudioEngine.Processing.AudioBlock.cpp");
-    const auto blockDouble = readAllText("src/audioengine/AudioEngine.Processing.BlockDouble.cpp");
+    const auto commit = readAllText("src/audioengine/AudioEngine.Commit.cpp");
+    const auto timer = readAllText("src/audioengine/AudioEngine.Timer.cpp");
+    const auto header = readAllText("src/audioengine/AudioEngine.h");
 
-    if (!contains(audioBlock, "makeCrossfadePreparedSnapshotFromWorld"))
+    // PR-06: CrossfadePreparedSnapshot must not be semantic source for branch/rebuild/publish/retire/execution decisions.
+    if (contains(commit, "consumeCrossfadePreparedSnapshot("))
         return false;
-    if (!contains(blockDouble, "makeCrossfadePreparedSnapshotFromWorld"))
-        return false;
-
-    if (!contains(audioBlock, "authority.preparedCrossfade"))
-        return false;
-    if (!contains(blockDouble, "authority.preparedCrossfade"))
+    if (contains(commit, "preparedCrossfade"))
         return false;
 
-    if (contains(audioBlock, "getRuntimeGraph(runtimeReadHandle)"))
+    if (contains(timer, "consumeCrossfadePreparedSnapshot("))
         return false;
-    if (contains(blockDouble, "getRuntimeGraph(runtimeReadHandle)"))
+    if (contains(timer, "preparedCrossfade"))
         return false;
 
-    if (contains(audioBlock, "runtimeGraph->"))
+    // makeEngineRuntimeState must source semantic values from RuntimeWorld/atomics, not prepared snapshot cache.
+    if (!contains(header, "inline convo::EngineRuntime makeEngineRuntimeState"))
         return false;
-    if (contains(blockDouble, "runtimeGraph->"))
+    if (contains(header, "refreshCrossfadePreparedSnapshotFromAtomics();\n        const auto prepared = consumeCrossfadePreparedSnapshot();"))
         return false;
 
     return true;
@@ -70,8 +68,8 @@ namespace {
 
 int main()
 {
-    if (!testObserveSingleSourceContract())
-        throw std::runtime_error("observe path single-source contract failed");
+    if (!testCrossfadeExecutorLocalContract())
+        throw std::runtime_error("crossfade executor-local contract failed");
 
     return 0;
 }

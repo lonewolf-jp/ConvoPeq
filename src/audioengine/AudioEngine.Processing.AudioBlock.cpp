@@ -117,22 +117,21 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
 
     // P0-2: 読取入口を単一の callback authority view へ収束。
-    auto runtimeReadView = readAudioRuntimeView();
-    const auto& runtimeReadViewRef = runtimeReadView;
-    const auto* runtimeWorld = runtimeReadViewRef.runtimeWorld;
+    auto runtimeReadHandle = readAudioRuntimeHandle();
+    const auto& runtimeReadHandleRef = runtimeReadHandle;
+    const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
     if (runtimeWorld == nullptr)
     {
         bufferToFill.clearActiveBufferRegion();
         return;
     }
     const auto authority = AudioCallbackAuthorityView { makeCrossfadePreparedSnapshotFromWorld(*runtimeWorld) };
-    const auto& runtimePublishView = runtimeReadViewRef.runtimePublish;
 
     const auto callbackEpoch = convo::fetchAddAtomic(rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
     const auto sampleCursor = convo::fetchAddAtomic(rtLocalState_.audioSampleCursorCounter, static_cast<uint64_t>(numSamples), std::memory_order_acq_rel);
     const auto graphRevision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
     const auto packedActiveHandle = static_cast<std::uint64_t>(
-        reinterpret_cast<uintptr_t>(runtimePublishView.transition.current));
+        reinterpret_cast<uintptr_t>(resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef)));
 
     const auto rtFrame = convo::isr::makeRTExecutionFrame(
         packedActiveHandle,
@@ -148,7 +147,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     rtTraceRelay_.enqueue({ rtFrame.sampleCursor, 0xA001u, static_cast<std::uint32_t>(numSamples) });
 
-    DSPCore* dsp = static_cast<DSPCore*>(runtimePublishView.transition.current);
+    DSPCore* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef);
     if (dsp == nullptr)
     {
         bufferToFill.clearActiveBufferRegion();
@@ -169,7 +168,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         // 安全対策: サンプルレート不整合チェック
         // DSPのサンプルレートとエンジンの現在のサンプルレートが一致しない場合、
         // レート変更処理中とみなし、グリッチを防ぐために無音を出力する。
-        const double engineSampleRate = runtimePublishView.sampleRateHz;
+        const double engineSampleRate = getRuntimeSampleRateHzFromWorld(runtimeReadHandleRef, 0.0);
         if (engineSampleRate <= 0.0
             || absDiffNoLibm(dsp->sampleRate, engineSampleRate) > 1e-6)
         {
@@ -186,9 +185,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
         DSPCore::ProcessingState procState = buildAudioThreadProcessingState(dsp, parameterSnapshot);
 
-        DSPCore* fading = runtimeWorld->topology.hasFadingRuntime
-            ? static_cast<DSPCore*>(runtimePublishView.transition.next)
-            : nullptr;
+        DSPCore* fading = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef);
         const auto& preparedCrossfade = authority.preparedCrossfade;
         bool useDryAsOld = preparedCrossfade.useDryAsOld || preparedCrossfade.firstIrDryCrossfadePending;
         if (processCrossfadeDelayGateIfPending(fading,

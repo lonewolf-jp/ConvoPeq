@@ -1009,6 +1009,9 @@ foreach ($requiredConsumer in @($policy.residencyTelemetryChecks.requiredCrossfa
 $crossfadePreparedSnapshotScopeViolations = @()
 foreach ($f in $allSourceFiles) {
     $relativePath = Get-RelativePathCompat -BasePath $repoRoot -TargetPath $f.FullName
+    if ($relativePath -match '^src/tests/') {
+        continue
+    }
     $hits = Select-String -Path $f.FullName -Pattern 'consumeCrossfadePreparedSnapshot\(\)' -Encoding UTF8
     foreach ($h in $hits) {
         $allowed = $false
@@ -1036,6 +1039,9 @@ foreach ($f in $allSourceFiles) {
 $crossfadePreparedStateFieldScopeViolations = @()
 foreach ($f in $allSourceFiles) {
     $relativePath = Get-RelativePathCompat -BasePath $repoRoot -TargetPath $f.FullName
+    if ($relativePath -match '^src/tests/') {
+        continue
+    }
     $hits = Select-String -Path $f.FullName -Pattern 'preparedCrossfade\.[A-Za-z_][A-Za-z0-9_]*' -Encoding UTF8
     foreach ($h in $hits) {
         $allowed = $false

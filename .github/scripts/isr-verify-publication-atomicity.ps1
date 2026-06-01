@@ -17,7 +17,8 @@ else {
         'if \(lastCommittedSequence != 0 && world\.publication\.sequenceId <= lastCommittedSequence\)',
         'if \(targetWorldIdU64 <= lastEnqueuedTargetWorldId\)',
         'publishAtomic\(lastEnqueuedPublicationTargetWorldId_',
-        'commitRuntimePublication\(world\)',
+        'onRuntimePublishedNonRt\(const RuntimePublishWorld& world\)',
+        'runtimePublicationBridge_\.commit\(',
         'publishAtomic\(lastCommittedRuntimeGeneration_',
         'publishAtomic\(lastCommittedPublicationSequence_'
     )
@@ -28,20 +29,20 @@ else {
         }
     }
 
-    $commitIndex = $s.IndexOf('commitRuntimePublication(world);', [System.StringComparison]::Ordinal)
+    $commitIndex = $s.IndexOf('runtimePublicationBridge_.commit(', [System.StringComparison]::Ordinal)
     $publishGenerationIndex = $s.IndexOf('publishAtomic(lastCommittedRuntimeGeneration_', [System.StringComparison]::Ordinal)
     $publishSequenceIndex = $s.IndexOf('publishAtomic(lastCommittedPublicationSequence_', [System.StringComparison]::Ordinal)
 
     if ($commitIndex -lt 0) {
-        $violations.Add('Atomic publication commit call not found') | Out-Null
+        $violations.Add('Atomic publication bridge commit call not found') | Out-Null
     }
     else {
         if ($publishGenerationIndex -lt 0 -or $publishGenerationIndex -le $commitIndex) {
-            $violations.Add('Atomic publication ordering violation: lastCommittedRuntimeGeneration_ must publish after commitRuntimePublication(world)') | Out-Null
+            $violations.Add('Atomic publication ordering violation: lastCommittedRuntimeGeneration_ must publish after runtimePublicationBridge_.commit(...)') | Out-Null
         }
 
         if ($publishSequenceIndex -lt 0 -or $publishSequenceIndex -le $commitIndex) {
-            $violations.Add('Atomic publication ordering violation: lastCommittedPublicationSequence_ must publish after commitRuntimePublication(world)') | Out-Null
+            $violations.Add('Atomic publication ordering violation: lastCommittedPublicationSequence_ must publish after runtimePublicationBridge_.commit(...)') | Out-Null
         }
     }
 }

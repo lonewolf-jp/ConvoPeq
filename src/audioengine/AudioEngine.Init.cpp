@@ -114,18 +114,18 @@ bool AudioEngine::enqueueSnapshotCommand() noexcept
         key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingIRChange, std::memory_order_acquire))); // acquire: setIRChangeFlag の publishAtomic release と HB
         key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingNSChange, std::memory_order_acquire))); // acquire: setNSChangeFlag の publishAtomic release と HB
         key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_pendingAGCChange, std::memory_order_acquire))); // acquire: setAGCChangeFlag の publishAtomic release と HB
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentEqBypass, std::memory_order_acquire))); // acquire: setEQBypass の publishAtomic release と HB
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentConvBypass, std::memory_order_acquire))); // acquire: setConvolverBypass の publishAtomic release と HB
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentProcessingOrder, std::memory_order_acquire))); // acquire: setProcessingOrder の publishAtomic release と HB
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentSoftClipEnabled, std::memory_order_acquire))); // acquire: setSoftClipEnabled の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire))); // acquire: setEQBypass の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(convBypassRequested, std::memory_order_acquire))); // acquire: setConvolverBypass の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire))); // acquire: setProcessingOrder の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(softClipEnabled, std::memory_order_acquire))); // acquire: setSoftClipEnabled の publishAtomic release と HB
         key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOversamplingFactor, std::memory_order_acquire))); // acquire: setOversamplingFactor の publishAtomic release と HB
         key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOversamplingType, std::memory_order_acquire))); // acquire: setOversamplingType の publishAtomic release と HB
         key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentDitherBitDepth, std::memory_order_acquire))); // acquire: setDitherBitDepth の publishAtomic release と HB
         key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentNoiseShaperType, std::memory_order_acquire))); // acquire: setNoiseShaperType の publishAtomic release と HB
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentInputHeadroomDb, std::memory_order_acquire))); // acquire: setInputHeadroomDb の publishAtomic release と HB
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentOutputMakeupDb, std::memory_order_acquire))); // acquire: setOutputMakeupDb の publishAtomic release と HB
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentConvInputTrimDb, std::memory_order_acquire))); // acquire: setConvolverInputTrimDb の publishAtomic release と HB
-        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(m_currentSaturationAmount, std::memory_order_acquire))); // acquire: setSaturationAmount の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire))); // acquire: setInputHeadroomDb の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(outputMakeupDb, std::memory_order_acquire))); // acquire: setOutputMakeupDb の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(convolverInputTrimDb, std::memory_order_acquire))); // acquire: setConvolverInputTrimDb の publishAtomic release と HB
+        key = makeDebounceKey(key, static_cast<uint64_t>(convo::consumeAtomic(saturationAmount, std::memory_order_acquire))); // acquire: setSaturationAmount の publishAtomic release と HB
 
         const bool hasLastKey = convo::consumeAtomic(rtAuxMutable_.hasLastEnqueuedSnapshotDebounceKey, std::memory_order_acquire); // acquire: publishAtomic release と HB
         const uint64_t lastKey = convo::consumeAtomic(rtAuxMutable_.lastEnqueuedSnapshotDebounceKey, std::memory_order_acquire); // acquire: publishAtomic release と HB

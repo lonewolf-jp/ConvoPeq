@@ -85,10 +85,10 @@ void AudioEngine::releaseResources()
 
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
-        const auto runtimeReadView = readControlRuntimeView();
+        const auto runtimeReadHandle = readControlRuntimeHandle();
         validateDistinctRuntimeSlots("releaseResources.beforeClear",
                  getActiveRuntimeDSP(),
-                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
+                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                          nullptr);
 
         convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel);
@@ -125,7 +125,7 @@ void AudioEngine::releaseResources()
 
         validateDistinctRuntimeSlots("releaseResources.afterClear",
                  getActiveRuntimeDSP(),
-                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadView),
+                 resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                          nullptr);
     }
 
@@ -185,8 +185,9 @@ void AudioEngine::releaseResources()
 
     diagLog("[DIAG] releaseResources: skip deferred reclaim (reconfigure phase)");
 
-    makeRuntimePublicationCoordinator()
-        .clearPublishedRuntimeSnapshotsNonRt();
+    auto runtimePublicationCoordinator = makeRuntimePublicationCoordinator();
+    runtimePublicationCoordinator.requestShutdownClearNonRt();
+    runtimePublicationCoordinator.clearPublishedRuntimeSnapshotsNonRt();
 
     const bool drainedWithinBudget = waitForDrain(2000, 2);
     if (!drainedWithinBudget || !isFullyDrained())

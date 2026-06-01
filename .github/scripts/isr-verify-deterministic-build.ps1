@@ -45,20 +45,20 @@ else {
     }
 }
 
-$audioHeader = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
-if (-not (Test-Path -LiteralPath $audioHeader)) {
-    Add-Violation "AudioEngine.h not found: $audioHeader"
+$runtimeBuilderCpp = Join-Path $repoRoot 'src\audioengine\RuntimeBuilder.cpp'
+if (-not (Test-Path -LiteralPath $runtimeBuilderCpp)) {
+    Add-Violation "RuntimeBuilder.cpp not found: $runtimeBuilderCpp"
 }
 else {
-    $ah = Get-Content -LiteralPath $audioHeader -Raw -Encoding UTF8
+    $ah = Get-Content -LiteralPath $runtimeBuilderCpp -Raw -Encoding UTF8
     $buildMatch = [regex]::Match(
         $ah,
-        '(?s)\[\[nodiscard\]\]\s+convo::aligned_unique_ptr<RuntimePublishWorld>\s+buildRuntimePublishWorld\(.*?\)\s+noexcept\s*\{(?<body>.*?)\n\s*\}',
+        '(?s)RuntimeBuilder::buildRuntimePublishWorld\(.*?\)\s*noexcept\s*\{(?<body>.*?)\n\}',
         [System.Text.RegularExpressions.RegexOptions]::Singleline
     )
 
     if (-not $buildMatch.Success) {
-        Add-Violation 'buildRuntimePublishWorld body extraction failed for deterministic build verification'
+        Add-Violation 'RuntimeBuilder::buildRuntimePublishWorld body extraction failed for deterministic build verification'
     }
     else {
         $body = $buildMatch.Groups['body'].Value

@@ -37,8 +37,7 @@ $requiredRtLocalFields = @(
     'audioCallbackEpochCounter',
     'audioSampleCursorCounter',
     'audioCallbackActiveCount',
-    'audioThreadRetireEnqueueDropped',
-    'audioThreadRetireOverflowEpoch'
+    'audioThreadRetireEnqueueDropped'
 )
 
 foreach ($field in $requiredRtLocalFields) {

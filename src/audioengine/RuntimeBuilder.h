@@ -30,9 +30,11 @@ public:
                              AudioEngine::DSPCore* next,
                              convo::TransitionPolicy policy,
                              double fadeTimeSec,
-                             bool active) noexcept;
+                             bool active,
+                             const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept;
 
-    BuildResult build(const BuildInput& in) noexcept;
+    BuildResult build(const BuildInput& in,
+                      const ConvolverProcessor::BuildSnapshot& convolverBuildSnapshot) noexcept;
     BuildError validateWarmup(const AudioEngine::DSPCore& runtime) const noexcept;
 
     // Warmup: FIR 履歴と AGC state 初期化
