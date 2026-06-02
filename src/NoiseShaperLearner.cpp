@@ -807,6 +807,8 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
         double parcor[CmaEsOptimizer::kDim] = {};
         double bestScore = std::numeric_limits<double>::max();
         int generation = 0;
+        DrainStats cumulativeDrainStats {};
+        auto lastWaitingDiagnosticsLogTime = std::chrono::steady_clock::now();
 
          while (!convo::consumeAtomic(stopRequested, std::memory_order_acquire)
              && !stopToken.stop_requested())
@@ -835,7 +837,8 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
 
             const SessionSignature currentSession = captureSessionSignature();
             if (activeSession.sampleRateHz != currentSession.sampleRateHz
-                || activeSession.adaptiveCoeffBankIndex != currentSession.adaptiveCoeffBankIndex)
+                || activeSession.adaptiveCoeffBankIndex != currentSession.adaptiveCoeffBankIndex
+                || activeSession.sessionId != currentSession.sessionId)
             {
                 activeSession = currentSession;
                 resetLearningSession(activeSession, true);
@@ -844,7 +847,11 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                 continue;
             }
 
-            drainCaptureQueue(activeSession);
+            const DrainStats latestDrainStats = drainCaptureQueue(activeSession);
+            cumulativeDrainStats.acceptedBlocks += latestDrainStats.acceptedBlocks;
+            cumulativeDrainStats.droppedBySession += latestDrainStats.droppedBySession;
+            cumulativeDrainStats.droppedBySampleRate += latestDrainStats.droppedBySampleRate;
+            cumulativeDrainStats.droppedByBank += latestDrainStats.droppedByBank;
 
             const int segmentCount = buildTrainingSegments();
             convo::publishAtomic(progress.segmentCount, segmentCount, std::memory_order_release);
@@ -852,6 +859,23 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             if (segmentCount < 2)
             {
                 convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
+
+                const auto now = std::chrono::steady_clock::now();
+                if (now - lastWaitingDiagnosticsLogTime >= std::chrono::seconds(1))
+                {
+                    juce::Logger::writeToLog("[NoiseShaperLearner] Waiting diagnostics: accepted="
+                        + juce::String(cumulativeDrainStats.acceptedBlocks)
+                        + " dropSession=" + juce::String(cumulativeDrainStats.droppedBySession)
+                        + " dropSampleRate=" + juce::String(cumulativeDrainStats.droppedBySampleRate)
+                        + " dropBank=" + juce::String(cumulativeDrainStats.droppedByBank)
+                        + " bufferedSamples=" + juce::String(segmentBuffer.getNumAvailableSamples())
+                        + " sessionId=" + juce::String(static_cast<juce::int64>(activeSession.sessionId))
+                        + " sampleRateHz=" + juce::String(activeSession.sampleRateHz)
+                        + " bankIndex=" + juce::String(activeSession.adaptiveCoeffBankIndex));
+                    cumulativeDrainStats = {};
+                    lastWaitingDiagnosticsLogTime = now;
+                }
+
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
@@ -1027,25 +1051,50 @@ void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, b
     }
 }
 
-void NoiseShaperLearner::drainCaptureQueue(const SessionSignature& session) noexcept
+NoiseShaperLearner::DrainStats NoiseShaperLearner::drainCaptureQueue(const SessionSignature& session) noexcept
 {
+    DrainStats stats {};
     AudioBlock block {};
     while (captureQueue.pop(block))
     {
         if (block.numSamples <= 0)
             continue;
 
-        if (block.sessionId != session.sessionId)
-            continue;
-
-        if (block.sampleRateHz == session.sampleRateHz
-            && block.adaptiveCoeffBankIndex == session.adaptiveCoeffBankIndex)
+        const bool sessionIdCompatible = (session.sessionId == 0u)
+            || (block.sessionId == 0u)
+            || (block.sessionId == session.sessionId);
+        if (!sessionIdCompatible)
         {
-            segmentBuffer.pushBlock(block.L, block.R, block.numSamples);
-            accumulatedPlaybackSeconds += static_cast<double>(block.numSamples) / session.sampleRateHz;
+            ++stats.droppedBySession;
+            continue;
         }
+
+        const bool sampleRateCompatible = (session.sampleRateHz <= 0)
+            || (block.sampleRateHz <= 0)
+            || (block.sampleRateHz == session.sampleRateHz);
+
+        if (!sampleRateCompatible)
+        {
+            ++stats.droppedBySampleRate;
+            continue;
+        }
+
+        if (block.adaptiveCoeffBankIndex != session.adaptiveCoeffBankIndex)
+        {
+            ++stats.droppedByBank;
+            continue;
+        }
+
+        segmentBuffer.pushBlock(block.L, block.R, block.numSamples);
+        const int playbackSampleRateHz = (session.sampleRateHz > 0)
+            ? session.sampleRateHz
+            : ((block.sampleRateHz > 0) ? block.sampleRateHz : 1);
+        accumulatedPlaybackSeconds += static_cast<double>(block.numSamples)
+            / static_cast<double>(playbackSampleRateHz);
+        ++stats.acceptedBlocks;
     }
     convo::publishAtomic(progress.elapsedPlaybackSeconds, accumulatedPlaybackSeconds, std::memory_order_release);
+    return stats;
 }
 
 int NoiseShaperLearner::buildTrainingSegments() noexcept

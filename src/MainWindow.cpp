@@ -119,6 +119,49 @@ namespace
         return false;
     }
 
+    bool parseCliLearningMode(const juce::String& value, convo::NoiseShaperLearningMode& outMode)
+    {
+        const auto normalized = normalizeCliValue(value);
+
+        if (normalized == "1" || normalized == "shortest")
+        {
+            outMode = convo::NoiseShaperLearningMode::Shortest;
+            return true;
+        }
+
+        if (normalized == "2" || normalized == "short")
+        {
+            outMode = convo::NoiseShaperLearningMode::Short;
+            return true;
+        }
+
+        if (normalized == "3" || normalized == "middle" || normalized == "mid")
+        {
+            outMode = convo::NoiseShaperLearningMode::Middle;
+            return true;
+        }
+
+        if (normalized == "4" || normalized == "long")
+        {
+            outMode = convo::NoiseShaperLearningMode::Long;
+            return true;
+        }
+
+        if (normalized == "5" || normalized == "ultra")
+        {
+            outMode = convo::NoiseShaperLearningMode::Ultra;
+            return true;
+        }
+
+        if (normalized == "6" || normalized == "continuous" || normalized == "cont")
+        {
+            outMode = convo::NoiseShaperLearningMode::Continuous;
+            return true;
+        }
+
+        return false;
+    }
+
     juce::String formatSaturationValue(float value)
     {
         return juce::String(value, 2);
@@ -318,6 +361,8 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
 
     const bool hasAutomationFlags =
         hasFlag("--cli-run")
+        || hasFlag("--cli-start-learning")
+        || hasFlag("--cli-resume-learning")
         || !findValue("--cli-ir").isEmpty()
         || !findValue("--cli-device-type").isEmpty()
         || !findValue("--cli-buffer-samples").isEmpty()
@@ -340,6 +385,8 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         || !findValue("--cli-f1-hz").isEmpty()
         || !findValue("--cli-f2-hz").isEmpty()
         || !findValue("--cli-pre-ring-tau").isEmpty()
+        || !findValue("--cli-learning-action").isEmpty()
+        || !findValue("--cli-learning-mode").isEmpty()
         || !findValue("--cli-exit-ms").isEmpty();
 
     if (!hasAutomationFlags)
@@ -659,6 +706,66 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         else
         {
             juce::Logger::writeToLog("[CLI] Unknown --cli-noise-shaper value: " + noiseShaperValue);
+        }
+    }
+
+    {
+        auto learningMode = audioEngine.getNoiseShaperLearningMode();
+        if (const auto learningModeValue = findValue("--cli-learning-mode"); !learningModeValue.isEmpty())
+        {
+            convo::NoiseShaperLearningMode parsedMode {};
+            if (parseCliLearningMode(learningModeValue, parsedMode))
+            {
+                learningMode = parsedMode;
+                audioEngine.setNoiseShaperLearningMode(learningMode);
+                juce::Logger::writeToLog("[CLI] Applied learning mode: " + learningModeValue);
+            }
+            else
+            {
+                juce::Logger::writeToLog("[CLI] Unknown --cli-learning-mode value: " + learningModeValue);
+            }
+        }
+
+        bool shouldStartLearning = false;
+        bool resumeLearning = false;
+
+        if (hasFlag("--cli-start-learning"))
+        {
+            shouldStartLearning = true;
+            resumeLearning = false;
+        }
+
+        if (hasFlag("--cli-resume-learning"))
+        {
+            shouldStartLearning = true;
+            resumeLearning = true;
+        }
+
+        if (const auto learningActionValue = findValue("--cli-learning-action"); !learningActionValue.isEmpty())
+        {
+            const auto action = normalizeCliValue(learningActionValue);
+            if (action == "start")
+            {
+                shouldStartLearning = true;
+                resumeLearning = false;
+            }
+            else if (action == "resume")
+            {
+                shouldStartLearning = true;
+                resumeLearning = true;
+            }
+            else
+            {
+                juce::Logger::writeToLog("[CLI] Unknown --cli-learning-action value: " + learningActionValue);
+            }
+        }
+
+        if (shouldStartLearning)
+        {
+            audioEngine.startNoiseShaperLearning(learningMode, resumeLearning);
+            juce::Logger::writeToLog("[CLI] Requested learning start: resume="
+                                     + juce::String(static_cast<int>(resumeLearning))
+                                     + " mode=" + juce::String(static_cast<int>(learningMode)));
         }
     }
 

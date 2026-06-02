@@ -4,14 +4,17 @@
 
 void AudioEngine::startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, bool resume)
 {
-    if (noiseShaperLearner == nullptr)
-        return;
-
     convo::publishAtomic(pendingLearningMode, mode, std::memory_order_release); // release: selectAdaptiveCoeffBankForCurrentSettings/processLearningCommands acquire と HB
     selectAdaptiveCoeffBankForCurrentSettings();
 
     if (convo::consumeAtomic(noiseShaperType, std::memory_order_acquire) != NoiseShaperType::Adaptive9thOrder) // acquire: setNoiseShaperType の publishAtomic release と HB
         setNoiseShaperType(NoiseShaperType::Adaptive9thOrder);
+
+    if (noiseShaperLearner == nullptr)
+    {
+        juce::Logger::writeToLog("[AudioEngine] startNoiseShaperLearning: learner unavailable after adaptive switch");
+        return;
+    }
 
     const LearningCommand cmd {
         LearningCommand::Type::Start,
@@ -23,8 +26,13 @@ void AudioEngine::startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, 
     if (!enqueueLearningCommand(cmd))
     {
         DBG("[AudioEngine] startNoiseShaperLearning: command queue overflow");
+        juce::Logger::writeToLog("[AudioEngine] startNoiseShaperLearning: command queue overflow");
         return;
     }
+
+    juce::Logger::writeToLog("[AudioEngine] startNoiseShaperLearning: command queued mode="
+                             + juce::String(static_cast<int>(mode))
+                             + " resume=" + juce::String(static_cast<int>(resume)));
 }
 
 

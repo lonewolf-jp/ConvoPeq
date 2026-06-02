@@ -164,6 +164,14 @@ private:
         uint64_t sessionId = 0;
     };
 
+    struct DrainStats
+    {
+        int acceptedBlocks = 0;
+        int droppedBySession = 0;
+        int droppedBySampleRate = 0;
+        int droppedByBank = 0;
+    };
+
     struct EvaluationContext
     {
         MklFftEvaluator fftEvaluator;
@@ -196,7 +204,7 @@ private:
                            const std::stop_token& stopToken);
     SessionSignature captureSessionSignature() const noexcept;
     void resetLearningSession(const SessionSignature& session, bool resume) noexcept;
-    void drainCaptureQueue(const SessionSignature& session) noexcept;
+    DrainStats drainCaptureQueue(const SessionSignature& session) noexcept;
     int buildTrainingSegments() noexcept;
     double evaluateCandidate(EvaluationContext& context,
                              const double* candidateCoefficients,

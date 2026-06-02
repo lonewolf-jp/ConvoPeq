@@ -16,7 +16,8 @@ if (-not (Test-Path -LiteralPath $ExePath)) {
 
 $logPath = if ($UseReleaseLog) {
     "c:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Release\ConvoPeq.log"
-} else {
+}
+else {
     "c:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Debug\ConvoPeq.log"
 }
 
@@ -40,6 +41,8 @@ if (Test-Path -LiteralPath $logPath) {
 Write-Output "[CLI-SMOKE] Launch: $ExePath"
 $appArgs = @(
     "--cli-run",
+    "--cli-learning-action", "start",
+    "--cli-learning-mode", "short",
     "--cli-exit-ms", ([string]$ExitMs)
 )
 
@@ -63,6 +66,7 @@ if (-not (Test-Path -LiteralPath $logPath)) {
 $automationRequested = 0
 $autoExitScheduled = 0
 $audioCallbacks = 0
+$learningCommandQueued = 0
 
 # logger flush のタイミング差を吸収するため、短時間ポーリングする。
 for ($attempt = 0; $attempt -lt 20; $attempt++) {
@@ -73,9 +77,11 @@ for ($attempt = 0; $attempt -lt 20; $attempt++) {
     $linesToInspect = @(
         if ($allLines.Count -lt $beforeLineCount) {
             $allLines
-        } elseif ($beforeLineCount -lt $allLines.Count) {
+        }
+        elseif ($beforeLineCount -lt $allLines.Count) {
             $allLines[$beforeLineCount..($allLines.Count - 1)]
-        } else {
+        }
+        else {
             @()
         }
     )
@@ -90,8 +96,9 @@ for ($attempt = 0; $attempt -lt 20; $attempt++) {
     $automationRequested = @($linesToInspect | Where-Object { $_ -match '\[CLI\]\s+Automation requested:' }).Count
     $autoExitScheduled = @($linesToInspect | Where-Object { $_ -match '\[CLI\]\s+Auto-exit scheduled in\s+' }).Count
     $audioCallbacks = @($linesToInspect | Where-Object { $_ -match '\[CLI_PERF_RAW\]\s+callbacks=([1-9][0-9]*)\b' }).Count
+    $learningCommandQueued = @($linesToInspect | Where-Object { $_ -match '\[AudioEngine\]\s+startNoiseShaperLearning:\s+command queued\s+mode=' }).Count
 
-    if ($automationRequested -ge 1 -and $autoExitScheduled -ge 1 -and (-not $RequireAudioCallbacks -or $audioCallbacks -ge 1)) {
+    if ($automationRequested -ge 1 -and $autoExitScheduled -ge 1 -and $learningCommandQueued -ge 1 -and (-not $RequireAudioCallbacks -or $audioCallbacks -ge 1)) {
         break
     }
 
@@ -106,6 +113,10 @@ if ($autoExitScheduled -lt 1) {
     throw "CLI smoke failed: '[CLI] Auto-exit scheduled in' was not found in inspected log window."
 }
 
+if ($learningCommandQueued -lt 1) {
+    throw "CLI smoke failed: '[AudioEngine] startNoiseShaperLearning: command queued ...' was not found in inspected log window."
+}
+
 if ($RequireAudioCallbacks -and $audioCallbacks -lt 1) {
     throw "CLI smoke failed: '[CLI_PERF_RAW] callbacks=' with a positive callback count was not found in inspected log window."
 }
@@ -114,6 +125,7 @@ Write-Output "[CLI-SMOKE] PASS"
 Write-Output "[CLI-SMOKE] logPath=$logPath"
 Write-Output "[CLI-SMOKE] automationRequested=$automationRequested"
 Write-Output "[CLI-SMOKE] autoExitScheduled=$autoExitScheduled"
+Write-Output "[CLI-SMOKE] learningCommandQueued=$learningCommandQueued"
 if ($RequireAudioCallbacks) {
     Write-Output "[CLI-SMOKE] audioCallbacks=$audioCallbacks"
 }

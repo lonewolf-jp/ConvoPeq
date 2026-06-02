@@ -119,6 +119,9 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     cmaesRestartsSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     cmaesRestartsSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 40, 20);
     cmaesRestartsSlider.onValueChange = [this] {
+        if (audioEngine.isNoiseShaperLearning())
+            return;
+
         auto s = audioEngine.getNoiseShaperLearnerSettings();
         s.cmaesRestarts = static_cast<int>(cmaesRestartsSlider.getValue());
         audioEngine.setNoiseShaperLearnerSettings(s);
@@ -129,6 +132,9 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     coeffSafetyMarginSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     coeffSafetyMarginSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 40, 20);
     coeffSafetyMarginSlider.onValueChange = [this] {
+        if (audioEngine.isNoiseShaperLearning())
+            return;
+
         auto s = audioEngine.getNoiseShaperLearnerSettings();
         s.coeffSafetyMargin = coeffSafetyMarginSlider.getValue();
         audioEngine.setNoiseShaperLearnerSettings(s);
@@ -136,6 +142,9 @@ NoiseShaperLearningComponent::NoiseShaperLearningComponent(AudioEngine& engine)
     addAndMakeVisible(coeffSafetyMarginSlider);
 
     enableStabilityCheckButton.onClick = [this] {
+        if (audioEngine.isNoiseShaperLearning())
+            return;
+
         auto s = audioEngine.getNoiseShaperLearnerSettings();
         s.enableStabilityCheck = enableStabilityCheckButton.getToggleState();
         audioEngine.setNoiseShaperLearnerSettings(s);
@@ -470,6 +479,13 @@ void NoiseShaperLearningComponent::refreshFromEngine()
     startButton.setEnabled(canStart);
     stopButton.setEnabled(canStop);
     resumeButton.setEnabled(canResume);
+
+    const bool canEditLearnerSettings = (status == NoiseShaperLearner::Status::Idle)
+        || (status == NoiseShaperLearner::Status::Completed)
+        || (status == NoiseShaperLearner::Status::Error);
+    cmaesRestartsSlider.setEnabled(canEditLearnerSettings);
+    coeffSafetyMarginSlider.setEnabled(canEditLearnerSettings);
+    enableStabilityCheckButton.setEnabled(canEditLearnerSettings);
 
     const int points = audioEngine.copyNoiseShaperLearningHistory(historyBuffer.data(),
                                                                   static_cast<int>(historyBuffer.size()));
