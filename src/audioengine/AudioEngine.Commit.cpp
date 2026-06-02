@@ -156,7 +156,12 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 {
     forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Building);
 
-    const auto rejectWithEvidence = [this]() noexcept {
+    const auto rejectWithEvidence = [this, &world](const char* reason) noexcept {
+        diagLog("[DIAG] runPublicationPrecheckNonRt: reject reason="
+            + juce::String(reason != nullptr ? reason : "unknown")
+            + " generation=" + juce::String(static_cast<juce::int64>(world.generation))
+            + " seq=" + juce::String(static_cast<juce::int64>(world.publication.sequenceId))
+            + " runtimeUuid=" + juce::String(static_cast<juce::int64>(world.topology.runtimeUuid)));
         if (!transitionSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Rejected))
         {
             forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Rejected);
@@ -169,53 +174,53 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 
     // Stage 1: semantic completeness.
     if (!validateSemanticCompleteness(world))
-        return rejectWithEvidence();
+        return rejectWithEvidence("semantic_completeness");
 
     // Stage 1.5: RuntimeGraph authority contract (fail-closed).
     if (!validateRuntimeGraphAuthorityContract(world))
-        return rejectWithEvidence();
+        return rejectWithEvidence("runtime_graph_authority_contract");
 
     if (!transitionSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Validated))
-        return rejectWithEvidence();
+        return rejectWithEvidence("semantic_state_validated_transition");
 
     // Stage 2: semantic validity.
     if (!convo::isr::isValidRoutingSemantic(world.routing)
         || !convo::isr::isValidExecutionSemantic(world.execution))
-        return rejectWithEvidence();
+        return rejectWithEvidence("routing_or_execution_semantic_invalid");
 
     if (world.publication.previousSequenceId >= world.publication.sequenceId)
-        return rejectWithEvidence();
+        return rejectWithEvidence("publication_sequence_non_monotonic");
 
     // Stage 3: runtime admission.
     if (!acceptsRuntimePublication())
-        return rejectWithEvidence();
+        return rejectWithEvidence("accepts_runtime_publication_false");
 
     if (!hasEquivalentTransitionSemantic(world))
-        return rejectWithEvidence();
+        return rejectWithEvidence("transition_semantic_mismatch");
 
     const auto lastCommittedGeneration = convo::consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_acquire);
     const auto lastCommittedSequence = convo::consumeAtomic(lastCommittedPublicationSequence_, std::memory_order_acquire);
     if (lastCommittedGeneration != 0 && world.generation <= lastCommittedGeneration)
     {
         convo::publishAtomic(lastDroppedGeneration_, world.generation, std::memory_order_release);
-        return rejectWithEvidence();
+        return rejectWithEvidence("generation_not_monotonic");
     }
 
     if (lastCommittedSequence != 0 && world.publication.sequenceId <= lastCommittedSequence)
     {
         convo::publishAtomic(lastDroppedGeneration_, world.generation, std::memory_order_release);
-        return rejectWithEvidence();
+        return rejectWithEvidence("sequence_not_monotonic");
     }
 
     if (world.topology.hasFadingRuntime)
     {
         if (world.topology.fadingRuntimeUuid == 0
             || world.topology.fadingRuntimeUuid == world.topology.runtimeUuid)
-            return rejectWithEvidence();
+            return rejectWithEvidence("invalid_fading_topology_identity");
     }
     else if (world.topology.fadingRuntimeUuid != 0)
     {
-        return rejectWithEvidence();
+        return rejectWithEvidence("unexpected_fading_uuid_without_flag");
     }
 
     const bool hasTransitionNext = world.topology.hasFadingRuntime;
@@ -223,25 +228,25 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
     {
         if (world.execution.crossfadeStartDelayBlocks < 0
             || world.execution.crossfadeDryHoldSamples < 0)
-            return rejectWithEvidence();
+            return rejectWithEvidence("invalid_crossfade_delay_values");
     }
 
     if (world.overlap.fadeTimeSec < 0.0
         || world.overlap.dryScaleTarget < 0.0)
-        return rejectWithEvidence();
+        return rejectWithEvidence("invalid_overlap_values");
 
     if (!hasTransitionNext
         && world.overlap.firstIrDryCrossfadePending)
-        return rejectWithEvidence();
+        return rejectWithEvidence("dry_crossfade_pending_without_transition");
 
     if (!world.isFrozen())
     {
-        return rejectWithEvidence();
+        return rejectWithEvidence("world_not_frozen");
     }
 
     if (!world.isSealedRecursively())
     {
-        return rejectWithEvidence();
+        return rejectWithEvidence("world_not_sealed_recursively");
     }
 
     const bool hasActive = (world.topology.runtimeUuid != 0);
@@ -310,11 +315,11 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
     const bool closureValid = closureGraphWalker_.validateGraph(closure);
     const bool precheckValid = precheckRuntimePublication(closure, descriptor);
     if (!closureValid || !precheckValid) {
-        return rejectWithEvidence();
+        return rejectWithEvidence("closure_or_precheck_invalid");
     }
 
     if (!transitionSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Committed))
-        return rejectWithEvidence();
+        return rejectWithEvidence("semantic_state_committed_transition");
 
     return true;
 }

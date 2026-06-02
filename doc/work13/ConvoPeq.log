@@ -1,0 +1,180 @@
+
+**********************************************************
+ConvoPeq Log
+Log started: 2 Jun 2026 12:52:33am
+
+Logger initialized: C:\Users\user\Desktop\ConvoPeq\develop\ConvoPeq.log
+Process priority set to HIGH_PRIORITY_CLASS.
+[MainApplication] ippInit() succeeded.
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=1 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=1 reason=shutdown_in_progress class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=phase5_keep_target decision=suppressed
+[DIAG] releaseResources: enter
+[DIAG] releaseResources: duplicate release ignored (already Unprepared)
+[DIAG] releaseResources: enter
+[DIAG] releaseResources: duplicate release ignored (already Unprepared)
+[DIAG] prepareToPlay: enter spb=1024 sr=192000.00
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=2 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=2 reason=shutdown_in_progress class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=phase5_keep_target decision=suppressed
+[DIAG] prepareToPlay: exit currentSR=192000.00 maxSPB=1024
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=3 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=3 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=4 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=4 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=5 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=5 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=6 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=6 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=7 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=7 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=8 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=8 reason=delegate_requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=9 reason=requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[DIAG] requestRebuild(sr,bs): task queued generation=1 SR=192000.00
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=9 reason=task_queued class=Structural policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=dispatched latencyMs=4.322
+[VERIFY] EQ createdHash=0x1acff1fb8ef5692 gen=5
+[DIAG] MainWindow::changeListenerCallback enter (audioEngine)
+[DIAG] MainWindow::changeListenerCallback leave (audioEngine)
+[VERIFY] runtime publish rev=1 currentUuid=0 fadingUuid=0 transition(0->0)
+[VERIFY] tx counters lifecycle(pub/ret/reclaim)=1/0/0 rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)=1/1/0/0/0/0/0/0 eqCacheMiss(create/lookup)=0/0 convDebounce(req/defer/sched/trigger)=0/0/0/0 shutdownPhase=RUNNING
+[VERIFY] EQ reflection createdHash=0x1acff1fb8ef5692 dspReady=0 coordFading=0 updRet=0 fromNull=0 toNull=-1
+[DIAG] MainWindow::changeListenerCallback enter (audioEngine)
+[DIAG] MainWindow::changeListenerCallback leave (audioEngine)
+[DIAG] warmup phase=INIT
+[DIAG] warmup result: skipped blocks=0 elapsedMs=0.854 latencySamples=0 blockSize=2048
+[DIAG] warmup phase-ms init=0.854 zero=0.000 denorm=0.000 signal=0.000 ready=0.000 total=0.854
+[DIAG] warmup summary blocks=0 elapsedMs=0.854
+[DIAG] runtime transition event origin=retireRuntimeImmediately primaryUuid=1 secondaryUuid=0 currentUuid=2 fadingUuid=0 publishRev=2 publishCurrentUuid=0 publishFadingUuid=0
+[DIAG] runtime transition event origin=publishHardResetForCurrentDSP primaryUuid=2 secondaryUuid=0 currentUuid=2 fadingUuid=0 publishRev=3 publishCurrentUuid=0 publishFadingUuid=0
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=10 reason=convolver_params_changed class=N/A policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[DIAG] convolverParamsChanged: enter
+[VERIFY] runtime publish rev=3 currentUuid=0 fadingUuid=0 transition(0->0)
+[VERIFY] tx counters lifecycle(pub/ret/reclaim)=3/0/0 rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)=1/1/0/0/0/0/0/0 eqCacheMiss(create/lookup)=0/0 convDebounce(req/defer/sched/trigger)=0/0/0/0 shutdownPhase=RUNNING
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=11 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=11 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=12 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[VERIFY] enqueue snapshot debounced: identical snapshot intent
+[REBUILD_TELEMETRY] event=REBUILD_MERGED intentId=12 reason=snapshot_intent_debounced class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=phase5_reduce_target decision=merged
+applyComputedIR: applied scaleFactor=0.132589 to timeDomainIR and partitionData
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=13 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=13 reason=delegate_requestRebuild_sr_bs class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=14 reason=requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[DIAG] requestRebuild(sr,bs): task queued generation=2 SR=192000.00
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=14 reason=task_queued class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=dispatched latencyMs=2.419
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=15 reason=ui_eq_editor_change_listener class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_MERGED intentId=15 reason=same_as_pending_would_merge class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_reduce_target decision=merged latencyMs=400.000
+[DIAG] MainWindow::changeListenerCallback enter (audioEngine)
+[DIAG] MainWindow::changeListenerCallback leave (audioEngine)
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=16 reason=convolver_params_changed class=N/A policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[DIAG] convolverParamsChanged: enter
+[DIAG] convolverParamsChanged: requestRebuild Structural hash=fe52718f65d0fc5d irName=impulse
+[DIAG] convolverParamsChanged: DEFERRED Structural rebuild after prepared IR apply and cleared pending Structural bit
+[REBUILD_TELEMETRY] event=REBUILD_DEFERRED intentId=16 reason=prepared_ir_apply_window class=Structural policy=N/A hash=0xfe52718f65d0fc5d fingerprint=0x0 finalizeState=deferred_structural decision=deferred
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=17 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=17 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
+[VERIFY] tx counters lifecycle(pub/ret/reclaim)=3/0/0 rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)=2/2/0/0/0/0/0/0 eqCacheMiss(create/lookup)=0/0 convDebounce(req/defer/sched/trigger)=0/0/0/0 shutdownPhase=RUNNING
+[DIAG] warmup phase=INIT
+[DIAG] warmup result: skipped blocks=0 elapsedMs=0.328 latencySamples=0 blockSize=2048
+[DIAG] warmup phase-ms init=0.328 zero=0.000 denorm=0.000 signal=0.000 ready=0.000 total=0.328
+[DIAG] warmup summary blocks=0 elapsedMs=0.328
+[DIAG] runtime transition event origin=retireRuntimeImmediately primaryUuid=2 secondaryUuid=0 currentUuid=3 fadingUuid=0 publishRev=4 publishCurrentUuid=0 publishFadingUuid=0
+[DIAG] runtime transition event origin=publishHardResetForCurrentDSP primaryUuid=3 secondaryUuid=0 currentUuid=3 fadingUuid=0 publishRev=5 publishCurrentUuid=0 publishFadingUuid=0
+[VERIFY] EQ createdHash=0xdb0104d442abb50e gen=7
+[VERIFY] runtime publish rev=5 currentUuid=0 fadingUuid=0 transition(0->0)
+[VERIFY] tx counters lifecycle(pub/ret/reclaim)=5/1/0 rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)=2/2/0/0/0/0/0/0 eqCacheMiss(create/lookup)=0/0 convDebounce(req/defer/sched/trigger)=0/0/0/0 shutdownPhase=RUNNING
+[VERIFY] EQ reflection createdHash=0xdb0104d442abb50e dspReady=0 coordFading=1 updRet=1 fromNull=0 toNull=-1
+[DIAG] timerCallback: issuing deferred Structural rebuild after prepared IR apply
+[REBUILD_TELEMETRY] event=REBUILD_DEFERRED intentId=20 reason=deferred_structural_due class=Structural policy=N/A hash=0x0 fingerprint=0x0 finalizeState=deferred_structural decision=released
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=21 reason=deferred_structural_rebuild_requested class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_MERGED intentId=21 reason=same_as_pending_would_merge class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_reduce_target decision=merged latencyMs=400.000
+[DIAG EQProcessor] ~EQProcessor: enter
+[DIAG EQProcessor] releaseResources: before scratchBuffer.reset
+[DIAG EQProcessor] releaseResources: after scratchBuffer.reset
+[DIAG EQProcessor] releaseResources: before dryBypassBuffer.reset
+[DIAG EQProcessor] releaseResources: after dryBypassBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelInputBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelInputBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelWorkBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelWorkBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelAccumBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelAccumBuffer.reset
+[DIAG EQProcessor] releaseResources: before structureOldOutBuffer.reset
+[DIAG EQProcessor] releaseResources: after structureOldOutBuffer.reset
+[DIAG EQProcessor] releaseResources: before structureNewOutBuffer.reset
+[DIAG EQProcessor] releaseResources: after structureNewOutBuffer.reset
+[DIAG EQProcessor] releaseResources: end
+[DIAG EQProcessor] ~EQProcessor: exit
+[MixedPhaseUI] timerCallback: state = 0
+[MixedPhaseUI] Close button clicked
+Resume button clicked
+Calling startNoiseShaperLearning with mode=5, resume=true
+[DIAG] MainApplication::shutdown() enter
+[DIAG] ~MainWindow: ENTER (before setLookAndFeel)
+[DIAG] ~MainWindow: after setLookAndFeel
+[DIAG] ~MainWindow: step 1 removeChangeListener
+[DIAG] ~MainWindow: step 2 setAdaptiveAutosaveCallback
+[DIAG] ~MainWindow: step 3 setCliProcessingTelemetryEnabled
+[DIAG] ~MainWindow: step 4 setProcessor(nullptr)
+[DIAG] releaseResources: enter
+[DIAG] shutdown phase: RUNNING -> STOP_ACCEPTING_WORK at releaseResources
+[DIAG] shutdown phase: STOP_ACCEPTING_WORK -> STOP_AUDIO at releaseResources
+[DIAG] releaseResources: before stopRebuildThread
+[DIAG] shutdown phase: STOP_AUDIO -> STOP_WORKERS at releaseResources
+[DIAG] releaseResources: after stopRebuildThread
+[DIAG] shutdown phase: STOP_WORKERS -> FORCE_EPOCH_ADVANCE at releaseResources
+[DIAG] shutdown phase: FORCE_EPOCH_ADVANCE -> DRAIN_RETIRE at releaseResources
+[DIAG] releaseResources: before ui processor release
+[DIAG] releaseResources: before uiConvolverProcessor.releaseResources
+[DIAG] releaseResources: after uiConvolverProcessor.releaseResources
+[DIAG] releaseResources: before uiEqEditor.releaseResources
+[DIAG EQProcessor] releaseResources: before scratchBuffer.reset
+[DIAG EQProcessor] releaseResources: after scratchBuffer.reset
+[DIAG EQProcessor] releaseResources: before dryBypassBuffer.reset
+[DIAG EQProcessor] releaseResources: after dryBypassBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelInputBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelInputBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelWorkBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelWorkBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelAccumBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelAccumBuffer.reset
+[DIAG EQProcessor] releaseResources: before structureOldOutBuffer.reset
+[DIAG EQProcessor] releaseResources: after structureOldOutBuffer.reset
+[DIAG EQProcessor] releaseResources: before structureNewOutBuffer.reset
+[DIAG EQProcessor] releaseResources: after structureNewOutBuffer.reset
+[DIAG EQProcessor] releaseResources: end
+[DIAG] releaseResources: after uiEqEditor.releaseResources
+[DIAG] releaseResources: after ui processor release
+[DIAG] releaseResources: skip deferred reclaim (reconfigure phase)
+[DIAG] releaseResources: ABOUT_TO_EXIT_SCOPE
+[DIAG] ~MainWindow: step 5 stopTimer
+[DIAG] ~MainWindow: step 6 saveSettings
+[DIAG] ~MainWindow: step 7 removeAudioCallback
+[DIAG] ~MainWindow: step 8 closeAudioDevice
+[DIAG] ~MainWindow: step 9 audioEngineProcessor.reset
+[DIAG] ~MainWindow: step 10 UI reset
+[DIAG] ~MainWindow: complete
+[DIAG] ~AudioEngine: enter
+[DIAG] shutdown phase: DRAIN_RETIRE -> STOP_ACCEPTING_WORK at ~AudioEngine
+[DIAG] shutdown phase: STOP_ACCEPTING_WORK -> STOP_AUDIO at ~AudioEngine
+[DIAG] shutdown phase: STOP_AUDIO -> STOP_WORKERS at ~AudioEngine
+[DIAG] shutdown phase: STOP_WORKERS -> FORCE_EPOCH_ADVANCE at ~AudioEngine
+[DIAG] shutdown phase: FORCE_EPOCH_ADVANCE -> DRAIN_RETIRE at ~AudioEngine
+[DIAG] shutdown phase: DRAIN_RETIRE -> DESTROY at ~AudioEngine
+[DIAG] ~AudioEngine: shutdown sequence complete exit
+[DIAG EQProcessor] ~EQProcessor: enter
+[DIAG EQProcessor] releaseResources: before scratchBuffer.reset
+[DIAG EQProcessor] releaseResources: after scratchBuffer.reset
+[DIAG EQProcessor] releaseResources: before dryBypassBuffer.reset
+[DIAG EQProcessor] releaseResources: after dryBypassBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelInputBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelInputBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelWorkBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelWorkBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelAccumBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelAccumBuffer.reset
+[DIAG EQProcessor] releaseResources: before structureOldOutBuffer.reset
+[DIAG EQProcessor] releaseResources: after structureOldOutBuffer.reset
+[DIAG EQProcessor] releaseResources: before structureNewOutBuffer.reset
+[DIAG EQProcessor] releaseResources: after structureNewOutBuffer.reset
+[DIAG EQProcessor] releaseResources: end
+[DIAG EQProcessor] ~EQProcessor: exit
+MainApplication shutting down.

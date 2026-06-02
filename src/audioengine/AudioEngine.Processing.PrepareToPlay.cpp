@@ -182,6 +182,12 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 
     resetLatencyDelayRtState();
 
+    // Runtime publication admission は lifecycle=Prepared を前提にしているため、
+    // 初期 placeholder publish / startup rebuild intent の前に Prepared を公開する。
+    // JUCE 契約上 prepareToPlay 実行中は Audio Thread callback が走らないため、
+    // ここでの状態公開は安全。
+    convo::publishAtomic(lifecycleState, EngineLifecycleState::Prepared, std::memory_order_release);
+
     // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
     const bool hasPublishedCurrent = (resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle) != nullptr);
     if (!hasPublishedCurrent && !hasActiveRuntimeDSP())
@@ -238,7 +244,6 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
                                 RebuildTelemetryPolicy::Replaceable);
         }
     }
-    convo::publishAtomic(lifecycleState, EngineLifecycleState::Prepared, std::memory_order_release);
     diagLog("[DIAG] prepareToPlay: exit currentSR=" + juce::String(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire), 2) + " maxSPB=" + juce::String(convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire)));
 
     // P0-A0: LifecycleIsolationRuntime integration - leave prepare phase

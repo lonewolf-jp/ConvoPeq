@@ -45,6 +45,25 @@
 			"problemMatcher": "$msCompile"
 		},
 		{
+			"label": "CLI Smoke Test",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\.github\\scripts\\cli-smoke-test.ps1",
+				"-KillExisting"
+			],
+			"dependsOn": [
+				"Debug"
+			],
+			"dependsOrder": "sequence",
+			"group": "test",
+			"problemMatcher": []
+		},
+		{
 			"label": "Debug Build (cmd env)",
 			"type": "shell",
 			"command": "cmd.exe",

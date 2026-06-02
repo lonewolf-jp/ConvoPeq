@@ -1,1 +1,13 @@
-﻿{"generatedAtNs":1780320245645000000,"sh1_callbackCount":0,"runId":"3993dfa7e2b740a0ac4d6003a47277ac","provenance":"seed","sh3_pendingRetire":0,"phase":0,"sh5_lateCallbackCount":0,"sh2_activeCrossfade":0,"schema":"shutdown_trace_v1","sh6_postStopEnqueueCount":0,"sh4_observerCount":0,"verified":true}
+{
+  "schema": "shutdown_trace_v1",
+  "phase": 6,
+  "phaseName": "ShutdownComplete",
+  "transitionViolations": 0,
+  "sh1_callbackCount": 0,
+  "sh2_activeCrossfade": 0,
+  "sh3_pendingRetire": 0,
+  "sh4_observerCount": 0,
+  "sh5_lateCallbackCount": 0,
+  "sh6_postStopEnqueueCount": 0,
+  "verified": true
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":180628361532500}

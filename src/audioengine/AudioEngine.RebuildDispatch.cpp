@@ -151,6 +151,9 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
     const double srSnapshot = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     const int bsSnapshot = convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire);
     const bool deferCategory = (kind == convo::RebuildKind::Structural) && !(srSnapshot > 0.0 && bsSnapshot > 0);
+    const int queuedGenerationSnapshot = convo::consumeAtomic(rebuildGeneration, std::memory_order_acquire);
+    const int committedGenerationSnapshot = convo::consumeAtomic(lastCommittedRebuildGeneration, std::memory_order_acquire);
+    const bool rebuildOutstanding = queuedGenerationSnapshot > committedGenerationSnapshot;
 
     bool sameAsPendingWouldMerge = false;
     bool shouldApplyLatestWinsMerge = false;
@@ -168,8 +171,12 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
 
     {
         std::lock_guard<std::mutex> lock(rebuildAdmissionIntentMutex_);
+        if (!rebuildOutstanding)
+            rebuildAdmissionPendingIntent_.valid = false;
+
         const auto& pending = rebuildAdmissionPendingIntent_;
-        sameAsPendingWouldMerge = pending.valid
+        sameAsPendingWouldMerge = rebuildOutstanding
+            && pending.valid
             && pending.kind == kind
             && pending.rebuildClass == rebuildClass
             && pending.collapsePolicy == collapsePolicy

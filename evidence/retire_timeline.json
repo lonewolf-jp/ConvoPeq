@@ -1,1 +1,38 @@
-﻿{"rollbackReady":true,"totalTransitions":4,"runId":"3993dfa7e2b740a0ac4d6003a47277ac","provenance":"seed","epochMode":"shared","lifecycleCounters":{"visible":1,"replayRetainedOptional":0,"telemetryRetained":1,"compareEligible":1,"reclaimed":1,"reclaimEligible":1},"generatedAtNs":1780320245645000000,"rollbackMode":"shared","lifecycleSample":[{"slot":0,"state":"reclaimed"},{"slot":1,"state":"visible"}],"schema":"retire_timeline_v2","rollbackFlags":{"crossfadeOnly":false,"publicationOnly":false,"global":true,"retirePathOnly":true},"laneCounters":{"quarantine":0,"epoch":1,"rtIntent":1,"reclaim":1,"coordination":1}}
+{
+  "schema": "retire_timeline_v2",
+  "epochMode": "shared",
+  "rollbackMode": "shared",
+  "rollbackReady": true,
+  "rollbackFlags": {
+    "global": true,
+    "publicationOnly": false,
+    "crossfadeOnly": false,
+    "retirePathOnly": true
+  },
+  "totalTransitions": 0,
+  "laneCounters": {
+    "rtIntent": 0,
+    "coordination": 0,
+    "epoch": 0,
+    "reclaim": 0,
+    "quarantine": 0
+  },
+  "lifecycleCounters": {
+    "visible": 0,
+    "compareEligible": 0,
+    "telemetryRetained": 0,
+    "replayRetainedOptional": 0,
+    "reclaimEligible": 0,
+    "reclaimed": 0
+  },
+  "lifecycleSample": [
+    {"slot": 0, "state": "visible"},
+    {"slot": 1, "state": "visible"},
+    {"slot": 2, "state": "visible"},
+    {"slot": 3, "state": "visible"},
+    {"slot": 4, "state": "visible"},
+    {"slot": 5, "state": "visible"},
+    {"slot": 6, "state": "visible"},
+    {"slot": 7, "state": "visible"}
+  ]
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":180628361532500}
