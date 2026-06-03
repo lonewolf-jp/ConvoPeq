@@ -291,7 +291,8 @@ struct TimingSemantic
 {
     double sampleRateHz = 0.0;
     double queuedFadeTimeSec = 0.0;
-    std::uint64_t activationEpoch = 0;
+    // activationEpoch is a derived field referencing GenerationSemantic.activationEpoch
+    // Do not define activationEpoch here to avoid duplication (#17 Sprint-1)
 };
 
 struct LatencySemantic
@@ -350,7 +351,9 @@ struct RuntimeSemanticSchema
     RetireSemantic retire {};
     TimingSemantic timing {};
     LatencySemantic latency {};
-    SchedulingSemantic scheduling {};
+    // SchedulingSemantic is deprecated (#16 Sprint-1) - fields are derived from ExecutionSemantic
+    // Retained for backward compatibility during migration period
+    // SchedulingSemantic scheduling {};  // Deprecated: use execution.* instead
     ResourceSemantic resource {};
     AffinitySemantic affinity {};
     AutomationSemantic automation {};
@@ -374,6 +377,13 @@ struct RuntimeSemanticHash
     std::uint64_t publicationSemanticHash = 0;
     std::uint64_t overlapSemanticHash = 0;
     std::uint64_t retireSemanticHash = 0;
+    // Added for full inventory coverage (#18 Sprint-3)
+    std::uint64_t timingHash = 0;
+    std::uint64_t latencyHash = 0;
+    std::uint64_t resourceHash = 0;
+    std::uint64_t automationHash = 0;
+    std::uint64_t coefficientHash = 0;
+    // schedulingHash omitted - SchedulingSemantic is deprecated (#16 Sprint-1)
 };
 
 enum class SemanticEquivalenceClass : std::uint8_t
@@ -387,6 +397,8 @@ enum class SemanticEquivalenceClass : std::uint8_t
     const RuntimeSemanticHash& lhs,
     const RuntimeSemanticHash& rhs) noexcept
 {
+    // Full inventory-driven comparison (#19 Sprint-3)
+    // Equivalent: all authority hashes match
     if (lhs.generationSemanticHash == rhs.generationSemanticHash
         && lhs.topologyHash == rhs.topologyHash
         && lhs.executionHash == rhs.executionHash
@@ -394,9 +406,16 @@ enum class SemanticEquivalenceClass : std::uint8_t
         && lhs.payloadHash == rhs.payloadHash
         && lhs.publicationSemanticHash == rhs.publicationSemanticHash
         && lhs.overlapSemanticHash == rhs.overlapSemanticHash
-        && lhs.retireSemanticHash == rhs.retireSemanticHash)
+        && lhs.retireSemanticHash == rhs.retireSemanticHash
+        && lhs.timingHash == rhs.timingHash
+        && lhs.latencyHash == rhs.latencyHash
+        && lhs.resourceHash == rhs.resourceHash
+        && lhs.automationHash == rhs.automationHash
+        && lhs.coefficientHash == rhs.coefficientHash)
         return SemanticEquivalenceClass::Equivalent;
 
+    // Compatible: core authority hashes match (generation, topology, execution, routing, payload)
+    // Non-destructive differences allowed in timing, latency, resource, automation, coefficient, publication, overlap, retire
     if (lhs.generationSemanticHash == rhs.generationSemanticHash
         && lhs.topologyHash == rhs.topologyHash
         && lhs.executionHash == rhs.executionHash

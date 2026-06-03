@@ -96,6 +96,7 @@ struct CoeffSet {
 #include "ISRRetireRuntimeEx.h"
 #include "ISRBarrierOptimizer.h"
 #include "ISREvidenceExporter.h"
+#include "RuntimePublicationValidator.h"
 
 class NoiseShaperLearner;
 class AudioEngine;
@@ -177,8 +178,9 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     convo::isr::TimingSemantic timing {};
     // AuthorityClass::Authoritative
     convo::isr::LatencySemantic latency {};
-    // AuthorityClass::Authoritative
-    convo::isr::SchedulingSemantic scheduling {};
+    // SchedulingSemantic is deprecated (#16 Sprint-1) - fields are derived from ExecutionSemantic
+    // Retained for backward compatibility during migration period
+    // convo::isr::SchedulingSemantic scheduling {};  // Deprecated: use execution.* instead
 
     // AuthorityClass::Derived
     convo::isr::ResourceSemantic resource {};
@@ -194,7 +196,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     // AuthorityClass::Diagnostic (hash is fingerprint only; non-authoritative)
     convo::isr::RuntimeSemanticHash semanticHash {};
 
-    static constexpr std::array<convo::isr::RuntimeFieldDescriptor, 21> kFieldDescriptors {{
+    static constexpr std::array<convo::isr::RuntimeFieldDescriptor, 20> kFieldDescriptors {{
         {"worldId", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"generation", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"generationSemantic", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
@@ -207,7 +209,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         {"retire", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"timing", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"latency", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
-        {"scheduling", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        // "scheduling" deprecated (#16 Sprint-1) - fields are derived from execution.*
         {"graph", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeGraph, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::ObserveBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"engine", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::ObserveBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"resource", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::ObserveBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
@@ -218,7 +220,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         {"semanticHash", convo::isr::SemanticCategory::Diagnostic, convo::isr::OwnershipClass::DiagnosticOnly, convo::isr::MutabilityClass::DiagnosticMutable, convo::isr::VisibilityClass::DiagnosticBoundary, convo::isr::LifetimeClass::DiagnosticLifetime}
     }};
 
-    static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 21> kRuntimeAuthorityInventory {{
+    static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 20> kRuntimeAuthorityInventory {{
         {"worldId", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"generation", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"generationSemantic", convo::isr::RuntimeAuthorityClass::Derived},
@@ -231,7 +233,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         {"retire", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"timing", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"latency", convo::isr::RuntimeAuthorityClass::Authoritative},
-        {"scheduling", convo::isr::RuntimeAuthorityClass::Authoritative},
+        // "scheduling" deprecated (#16 Sprint-1) - fields are derived from execution.*
         {"graph", convo::isr::RuntimeAuthorityClass::Derived},
         {"engine", convo::isr::RuntimeAuthorityClass::Derived},
         {"resource", convo::isr::RuntimeAuthorityClass::Derived},
@@ -2744,28 +2746,28 @@ public:
     void onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexcept;
     void emitEvidenceTickNonRt(bool force) noexcept;
 
-
-
     //=== End RuntimePublicationCoordinator NonRT helper API ===//
 
     class RuntimePublicationBridge final
     {
     public:
-        explicit RuntimePublicationBridge(AudioEngine& engine) noexcept
-            : engine_(&engine)
+        explicit RuntimePublicationBridge(AudioEngine& engine, RuntimePublicationValidator& validator) noexcept
+            : engine_(&engine), validator_(&validator)
         {
         }
 
-        [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
-        buildRuntimePublishWorld(DSPCore* current,
-                                 DSPCore* next,
-                                 convo::TransitionPolicy policy,
-                                 double fadeTimeSec,
-                                 bool active,
-                                 const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept;
+        // buildRuntimePublishWorld() removed from Bridge (#5/#7 Sprint-2)
+        // Build authority belongs to RuntimeBuilder, not Bridge
+        // Bridge responsibility: validate / didPublish / willRetire only
 
         [[nodiscard]] bool validatePublicationNonRt(const RuntimePublishWorld& world) noexcept
         {
+            // Delegation to independent validator (#21 Sprint-4)
+            const auto result = validator_->validatePublication(world);
+            if (!result.isValid) {
+                return false;
+            }
+            // Additional engine-specific checks (if any) can be added here
             return engine_->runPublicationPrecheckNonRt(world);
         }
 
@@ -2822,11 +2824,13 @@ public:
     using RuntimePublishStore = RuntimePublicationCoordinator::Store;
 
     RuntimePublishStore runtimeStore;
+    RuntimePublicationValidator runtimePublicationValidator_;
 
     [[nodiscard]] inline RuntimePublicationCoordinator makeRuntimePublicationCoordinator() noexcept
     {
         using RuntimePublicationCoordinatorFactory = RuntimePublicationCoordinator;
-        return RuntimePublicationCoordinatorFactory::create(RuntimePublicationBridge { *this }, runtimeStore);
+        return RuntimePublicationCoordinatorFactory::create(
+            RuntimePublicationBridge { *this, runtimePublicationValidator_ }, runtimeStore);
     }
 
     inline void publishRuntimeStateNonRt(DSPCore* current,
@@ -2836,12 +2840,23 @@ public:
                                          bool active,
                                          const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept
     {
-        makeRuntimePublicationCoordinator().publishState(current,
-                                                         next,
-                                                         policy,
-                                                         fadeTimeSec,
-                                                         active,
-                                                         sealedSnapshot);
+        // Wrapper for backward compatibility during migration (#5/#7 Sprint-2)
+        // Callers should migrate to publishWorld() with pre-built RuntimePublishWorld
+        auto coordinator = makeRuntimePublicationCoordinator();
+        auto worldBuilder = convo::RuntimeBuilder(*this);
+        auto worldOwner = worldBuilder.buildRuntimePublishWorld(current,
+                                                                 next,
+                                                                 policy,
+                                                                 fadeTimeSec,
+                                                                 active,
+                                                                 sealedSnapshot);
+        coordinator.publishWorld(std::move(worldOwner));
+    }
+
+    inline void publishWorld(convo::aligned_unique_ptr<RuntimePublishWorld> worldOwner) noexcept
+    {
+        auto coordinator = makeRuntimePublicationCoordinator();
+        coordinator.publishWorld(std::move(worldOwner));
     }
 
     [[nodiscard]] inline bool precheckRuntimePublication(const convo::isr::PayloadClosureDescriptor& closure,

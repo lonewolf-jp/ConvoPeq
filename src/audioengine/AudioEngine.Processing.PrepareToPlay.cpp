@@ -119,11 +119,16 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             const auto policy = getTransitionPolicyFromRuntimeWorld(runtimeReadHandle, convo::TransitionPolicy::SmoothOnly);
             const auto fadeTimeSec = getOverlapFadeTimeFromRuntimeWorld(runtimeReadHandle, 0.0);
             const bool transitionActive = hasFadingRuntimeInWorld(runtimeReadHandle);
-            publishRuntimeStateNonRt(currentForPublish,
-                                     fadingForPublish,
-                                     policy,
-                                     fadeTimeSec,
-                                     transitionActive);
+            
+            // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
+            auto coordinator = makeRuntimePublicationCoordinator();
+            auto worldBuilder = convo::RuntimeBuilder(*this);
+            auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentForPublish,
+                                                                     fadingForPublish,
+                                                                     policy,
+                                                                     fadeTimeSec,
+                                                                     transitionActive);
+            coordinator.publishWorld(std::move(worldOwner));
         }
     }
     selectAdaptiveCoeffBankForCurrentSettings();
@@ -219,11 +224,18 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         setActiveRuntimeDSP(placeholderDSP.release());
         convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
         convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
-        publishRuntimeStateNonRt(getActiveRuntimeDSP(),
-                                 nullptr,
-                                 convo::TransitionPolicy::HardReset,
-                                 0.0,
-                                 false);
+        
+        // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
+        {
+            auto coordinator = makeRuntimePublicationCoordinator();
+            auto worldBuilder = convo::RuntimeBuilder(*this);
+            auto worldOwner = worldBuilder.buildRuntimePublishWorld(getActiveRuntimeDSP(),
+                                                                     nullptr,
+                                                                     convo::TransitionPolicy::HardReset,
+                                                                     0.0,
+                                                                     false);
+            coordinator.publishWorld(std::move(worldOwner));
+        }
     }
 
     // --- DSP再ビルド判定・同期 ---

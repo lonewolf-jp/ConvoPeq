@@ -285,6 +285,12 @@ namespace {
     base.publicationSemanticHash = 60;
     base.overlapSemanticHash = 70;
     base.retireSemanticHash = 80;
+    // Added for full inventory coverage (#18 Sprint-3)
+    base.timingHash = 90;
+    base.latencyHash = 100;
+    base.resourceHash = 110;
+    base.automationHash = 120;
+    base.coefficientHash = 130;
 
     auto mutated = base;
     mutated.generationSemanticHash++;
@@ -330,6 +336,37 @@ namespace {
 
     mutated = base;
     mutated.retireSemanticHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    // Test new hash fields (#18 Sprint-3)
+    mutated = base;
+    mutated.timingHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.latencyHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.resourceHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.automationHash++;
+    if (convo::isr::classifySemanticEquivalence(base, mutated)
+        == convo::isr::SemanticEquivalenceClass::Equivalent)
+        return false;
+
+    mutated = base;
+    mutated.coefficientHash++;
     if (convo::isr::classifySemanticEquivalence(base, mutated)
         == convo::isr::SemanticEquivalenceClass::Equivalent)
         return false;
@@ -477,6 +514,12 @@ namespace {
     base.publicationSemanticHash = 600;
     base.overlapSemanticHash = 700;
     base.retireSemanticHash = 800;
+    // Added for full inventory coverage (#18 Sprint-3)
+    base.timingHash = 900;
+    base.latencyHash = 1000;
+    base.resourceHash = 1100;
+    base.automationHash = 1200;
+    base.coefficientHash = 1300;
 
     auto same = base;
     if (convo::isr::classifySemanticEquivalence(base, same)
@@ -484,12 +527,16 @@ namespace {
         return false;
 
     auto compatible = base;
+    // Change non-core fields - should still be Compatible
     compatible.publicationSemanticHash = base.publicationSemanticHash + 1;
+    compatible.timingHash = base.timingHash + 1;
+    compatible.latencyHash = base.latencyHash + 1;
     if (convo::isr::classifySemanticEquivalence(base, compatible)
         != convo::isr::SemanticEquivalenceClass::Compatible)
         return false;
 
     auto different = base;
+    // Change core authority field - should be Different
     different.executionHash = base.executionHash + 1;
     if (convo::isr::classifySemanticEquivalence(base, different)
         != convo::isr::SemanticEquivalenceClass::Different)

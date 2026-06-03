@@ -117,11 +117,18 @@ void AudioEngine::releaseResources()
         convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
         dspCrossfadeGain.setCurrentAndTargetValue(1.0);
         refreshCrossfadePreparedSnapshotFromAtomics();
-        publishRuntimeStateNonRt(nullptr,
-                                 nullptr,
-                                 convo::TransitionPolicy::HardReset,
-                                 0.0,
-                                 false);
+        
+        // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
+        {
+            auto coordinator = makeRuntimePublicationCoordinator();
+            auto worldBuilder = convo::RuntimeBuilder(*this);
+            auto worldOwner = worldBuilder.buildRuntimePublishWorld(nullptr,
+                                                                     nullptr,
+                                                                     convo::TransitionPolicy::HardReset,
+                                                                     0.0,
+                                                                     false);
+            coordinator.publishWorld(std::move(worldOwner));
+        }
 
         validateDistinctRuntimeSlots("releaseResources.afterClear",
                  getActiveRuntimeDSP(),

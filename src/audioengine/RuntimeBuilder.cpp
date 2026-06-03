@@ -225,15 +225,16 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
 
     worldOwner->timing.sampleRateHz = graphState.sampleRate;
     worldOwner->timing.queuedFadeTimeSec = engineState.queuedFadeTimeSec;
-    worldOwner->timing.activationEpoch = nextGraphGeneration;
+    // activationEpoch is derived from generationSemantic.activationEpoch (#17 Sprint-1)
+    // Do not set timing.activationEpoch directly
 
     worldOwner->latency.latencyDelayOld = engineState.latencyDelayOld;
     worldOwner->latency.latencyDelayNew = engineState.latencyDelayNew;
     worldOwner->latency.latencyDeltaSamples = engineState.transition.latencyDeltaSamples;
 
-    worldOwner->scheduling.transitionActive = engineState.transition.active;
-    worldOwner->scheduling.crossfadeStartDelayBlocks = engineState.dspCrossfadeStartDelayBlocks;
-    worldOwner->scheduling.crossfadeDryHoldSamples = engineState.dspCrossfadeDryHoldSamples;
+    // SchedulingSemantic fields are derived from ExecutionSemantic (#16 Sprint-1)
+    // Do not set scheduling.* directly - they mirror execution.* for backward compatibility
+    // TODO: Remove SchedulingSemantic entirely after all consumers migrate to execution.*
 
     worldOwner->resource.oversamplingFactor = graphState.oversamplingFactor;
     worldOwner->resource.ditherBitDepth = graphState.ditherBitDepth;
@@ -341,6 +342,26 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->semanticHash.retireSemanticHash = worldOwner->retire.retireEpoch
         ^ (worldOwner->retire.retireBacklog << 1)
         ^ (worldOwner->retire.deferredResidency << 2);
+
+    // Added for full inventory coverage (#18 Sprint-3)
+    worldOwner->semanticHash.timingHash = std::bit_cast<std::uint64_t>(worldOwner->timing.sampleRateHz)
+        ^ std::bit_cast<std::uint64_t>(worldOwner->timing.queuedFadeTimeSec);
+    worldOwner->semanticHash.latencyHash = static_cast<std::uint64_t>(worldOwner->latency.latencyDelayOld + 0x80000000u)
+        ^ (static_cast<std::uint64_t>(worldOwner->latency.latencyDelayNew + 0x80000000u) << 1)
+        ^ (static_cast<std::uint64_t>(worldOwner->latency.latencyDeltaSamples + 0x80000000u) << 2);
+    worldOwner->semanticHash.resourceHash = static_cast<std::uint64_t>(worldOwner->resource.oversamplingFactor)
+        ^ (static_cast<std::uint64_t>(worldOwner->resource.ditherBitDepth + 0x100) << 8)
+        ^ (static_cast<std::uint64_t>(worldOwner->resource.noiseShaperType + 0x10) << 16);
+    worldOwner->semanticHash.automationHash = (worldOwner->automation.eqBypassed ? 0x9E3779B97F4A7C15ull : 0ull)
+        ^ (worldOwner->automation.convBypassed ? 0x517CC1B727220A95ull : 0ull)
+        ^ (worldOwner->automation.softClipEnabled ? 0xC2B2AE3D27D4EB4Full : 0ull)
+        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.saturationAmount)
+        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.inputHeadroomGain)
+        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.outputMakeupGain)
+        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.convolverInputTrimGain);
+    worldOwner->semanticHash.coefficientHash = static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffBankIndex + 0x100)
+        ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffGeneration) << 8)
+        ^ (worldOwner->coefficient.eqCoeffHash << 16);
 
     worldOwner->freeze();
     return worldOwner;

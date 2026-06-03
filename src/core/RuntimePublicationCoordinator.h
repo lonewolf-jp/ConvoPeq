@@ -85,19 +85,10 @@ public:
         shutdownClearRequested_ = true;
     }
 
-    void publishState(Handle current,
-                      Handle next,
-                      convo::TransitionPolicy policy,
-                      double fadeTimeSec,
-                      bool active,
-                      const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept
+    void publishWorld(convo::aligned_unique_ptr<World> worldOwner) noexcept
     {
-        auto worldOwner = bridge_.buildRuntimePublishWorld(current,
-                                                           next,
-                                                           policy,
-                                                           fadeTimeSec,
-                                                           active,
-                                                           sealedSnapshot);
+        if (!worldOwner)
+            return;
 
         if constexpr (requires(Bridge bridge, const World& world) { bridge.validatePublicationNonRt(world); })
         {
@@ -124,6 +115,32 @@ public:
         }
 
         bridge_.retireRuntimePublishWorldNonRt(oldWorld, false);
+    }
+
+    void publishState(Handle current,
+                      Handle next,
+                      convo::TransitionPolicy policy,
+                      double fadeTimeSec,
+                      bool active,
+                      const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept
+    {
+        // DEPRECATED: Wrapper for backward compatibility (#5/#7 Sprint-2)
+        // This method should NOT be called in production code.
+        // Callers must use publishWorld() with pre-built RuntimePublishWorld from RuntimeBuilder.
+        // 
+        // Build authority belongs to RuntimeBuilder, not Bridge.
+        // Publication authority belongs to RuntimePublicationCoordinator.
+        // Bridge responsibility: validate / didPublish / willRetire / retire ONLY.
+        
+        // This wrapper intentionally fails at compile-time if Bridge has buildRuntimePublishWorld()
+        // to enforce the separation of concerns.
+        static_assert(!requires(Bridge bridge) { 
+            bridge.buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active, sealedSnapshot); 
+        }, "Bridge must NOT have buildRuntimePublishWorld(). Use RuntimeBuilder directly.");
+        
+        // Placeholder implementation to prevent accidental use
+        // Actual migration should remove all call sites of this method
+        juce::ignoreUnused(current, next, policy, fadeTimeSec, active, sealedSnapshot);
     }
 
 private:

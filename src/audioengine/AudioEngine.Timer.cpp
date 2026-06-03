@@ -395,11 +395,15 @@ void AudioEngine::timerCallback()
         auto* currentAfterFade = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
         if (currentAfterFade != nullptr)
         {
-            publishRuntimeStateNonRt(currentAfterFade,
-                                     nullptr,
-                                     convo::TransitionPolicy::SmoothOnly,
-                                     0.0,
-                                     false);
+            // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
+            auto coordinator = makeRuntimePublicationCoordinator();
+            auto worldBuilder = convo::RuntimeBuilder(*this);
+            auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
+                                                                     nullptr,
+                                                                     convo::TransitionPolicy::SmoothOnly,
+                                                                     0.0,
+                                                                     false);
+            coordinator.publishWorld(std::move(worldOwner));
         }
 
         sendChangeMessage();
