@@ -344,8 +344,13 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         ^ (worldOwner->retire.deferredResidency << 2);
 
     // Added for full inventory coverage (#18 Sprint-3)
-    worldOwner->semanticHash.timingHash = std::bit_cast<std::uint64_t>(worldOwner->timing.sampleRateHz)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->timing.queuedFadeTimeSec);
+    auto bitCast = [](double val) noexcept -> std::uint64_t {
+        std::uint64_t res = 0;
+        std::memcpy(&res, &val, sizeof(val));
+        return res;
+    };
+    worldOwner->semanticHash.timingHash = bitCast(worldOwner->timing.sampleRateHz)
+        ^ bitCast(worldOwner->timing.queuedFadeTimeSec);
     worldOwner->semanticHash.latencyHash = static_cast<std::uint64_t>(worldOwner->latency.latencyDelayOld + 0x80000000u)
         ^ (static_cast<std::uint64_t>(worldOwner->latency.latencyDelayNew + 0x80000000u) << 1)
         ^ (static_cast<std::uint64_t>(worldOwner->latency.latencyDeltaSamples + 0x80000000u) << 2);
@@ -355,10 +360,10 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->semanticHash.automationHash = (worldOwner->automation.eqBypassed ? 0x9E3779B97F4A7C15ull : 0ull)
         ^ (worldOwner->automation.convBypassed ? 0x517CC1B727220A95ull : 0ull)
         ^ (worldOwner->automation.softClipEnabled ? 0xC2B2AE3D27D4EB4Full : 0ull)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.saturationAmount)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.inputHeadroomGain)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.outputMakeupGain)
-        ^ std::bit_cast<std::uint64_t>(worldOwner->automation.convolverInputTrimGain);
+        ^ bitCast(worldOwner->automation.saturationAmount)
+        ^ bitCast(worldOwner->automation.inputHeadroomGain)
+        ^ bitCast(worldOwner->automation.outputMakeupGain)
+        ^ bitCast(worldOwner->automation.convolverInputTrimGain);
     worldOwner->semanticHash.coefficientHash = static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffBankIndex + 0x100)
         ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffGeneration) << 8)
         ^ (worldOwner->coefficient.eqCoeffHash << 16);

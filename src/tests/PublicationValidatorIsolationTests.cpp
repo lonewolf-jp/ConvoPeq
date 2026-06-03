@@ -81,7 +81,6 @@ TEST_F(PublicationValidatorIsolationTests, ValidateSemanticConsistency_Activatio
     RuntimePublishWorld world{};
     world.generation = 1;
     world.generationSemantic.activationEpoch = 200;
-    world.timing.activationEpoch = 0; // derived, should be ignored
     world.execution.transitionActive = false;
     
     // Act
