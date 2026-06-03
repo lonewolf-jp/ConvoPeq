@@ -156,12 +156,12 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
     // Delegate pure validation to RuntimePublicationValidator (Sprint-4 P3-A)
-    static const RuntimePublicationValidator validator;
+    static const iso::audio_engine::RuntimePublicationValidator validator;
     
     const auto validationResult = validator.validatePublication(world);
     if (!validationResult.isValid) {
-        diagLog("[DIAG] runPublicationPrecheckNonRt: validator reject reason=\""
-            + validationResult.errorMessage
+        diagLog(juce::String("[DIAG] runPublicationPrecheckNonRt: validator reject reason=\"")
+            + juce::String(validationResult.errorMessage)
             + " generation=" + juce::String(static_cast<juce::int64>(world.generation))
             + " seq=" + juce::String(static_cast<juce::int64>(world.publication.sequenceId))
             + " runtimeUuid=" + juce::String(static_cast<juce::int64>(world.topology.runtimeUuid)));
@@ -1399,4 +1399,22 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
     diagLog("[DIAG] commitNewDSP: queue coalesced change notification");
     if (!exchangeAtomic(pendingChangeNotification, true))
         triggerAsyncUpdate();
+}
+
+void AudioEngine::publishRuntimeStateNonRt(DSPCore* current,
+                                           DSPCore* next,
+                                           convo::TransitionPolicy policy,
+                                           double fadeTimeSec,
+                                           bool active,
+                                           const convo::RuntimeBuildSnapshot* sealedSnapshot) noexcept
+{
+    auto coordinator = makeRuntimePublicationCoordinator();
+    auto worldBuilder = convo::RuntimeBuilder(*this);
+    auto worldOwner = worldBuilder.buildRuntimePublishWorld(current,
+                                                             next,
+                                                             policy,
+                                                             fadeTimeSec,
+                                                             active,
+                                                             sealedSnapshot);
+    coordinator.publishWorld(std::move(worldOwner));
 }

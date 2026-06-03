@@ -116,6 +116,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/BuildInputSemanticContractTests.cpp
     )
 
+    target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
+    target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
+
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
     target_compile_features(RuntimePublicationCoordinatorTests PRIVATE cxx_std_20)
     target_compile_features(ISRSemanticValidationTests PRIVATE cxx_std_20)

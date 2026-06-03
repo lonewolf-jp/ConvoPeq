@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include "core/RuntimePublicationCoordinator.h"
+#include "AlignedAllocation.h"
 
 namespace {
 
@@ -56,41 +57,6 @@ struct TestWorld
 
 struct TestBridge
 {
-    std::unique_ptr<TestWorld> buildRuntimePublishWorld(const Candidate* current,
-                                                        const Candidate* next,
-                                                        convo::TransitionPolicy,
-                                                        double,
-                                                        bool,
-                                                        const convo::RuntimeBuildSnapshot*) noexcept
-    {
-        auto world = std::make_unique<TestWorld>();
-        const Candidate* source = (next != nullptr) ? next : current;
-        if (source != nullptr)
-        {
-            world->token = source->token;
-            world->generation = source->generation;
-            world->publicationSequence = source->publicationSequence;
-            world->previousSequenceId = source->previousSequenceId;
-            world->mappedRuntimeGeneration = source->mappedRuntimeGeneration;
-            world->semanticComplete = source->semanticComplete;
-            world->routingProcessingOrder = source->routingProcessingOrder;
-            world->routingEqBypassed = source->routingEqBypassed;
-            world->routingConvBypassed = source->routingConvBypassed;
-            world->graphEqBypassed = source->graphEqBypassed;
-            world->graphConvBypassed = source->graphConvBypassed;
-            world->graphRuntimeUuid = source->graphRuntimeUuid;
-            world->graphFadingRuntimeUuid = source->graphFadingRuntimeUuid;
-            world->topologyRuntimeUuid = source->topologyRuntimeUuid;
-            world->topologyHasFadingRuntime = source->topologyHasFadingRuntime;
-            world->topologyFadingRuntimeUuid = source->topologyFadingRuntimeUuid;
-            world->executionTransitionActive = source->executionTransitionActive;
-            world->executionTransitionPolicy = source->executionTransitionPolicy;
-            world->executionCrossfadeStartDelayBlocks = source->executionCrossfadeStartDelayBlocks;
-            world->executionCrossfadeDryHoldSamples = source->executionCrossfadeDryHoldSamples;
-        }
-        return world;
-    }
-
     [[nodiscard]] bool validatePublicationNonRt(const TestWorld& world) noexcept
     {
         if (!world.semanticComplete)
@@ -142,8 +108,37 @@ struct TestBridge
 
     void didPublishRuntimeNonRt(const TestWorld&) noexcept {}
     void willRetireRuntimeNonRt(const TestWorld*) noexcept {}
-    void retireRuntimePublishWorldNonRt(TestWorld* world, bool) noexcept { delete world; }
+    void retireRuntimePublishWorldNonRt(TestWorld* world, bool) noexcept
+    {
+        convo::AlignedObjectDeleter<TestWorld>{}(world);
+    }
 };
+
+convo::aligned_unique_ptr<TestWorld> createWorld(const Candidate& c)
+{
+    auto w = convo::aligned_make_unique<TestWorld>();
+    w->token = c.token;
+    w->generation = c.generation;
+    w->publicationSequence = c.publicationSequence;
+    w->previousSequenceId = c.previousSequenceId;
+    w->mappedRuntimeGeneration = c.mappedRuntimeGeneration;
+    w->semanticComplete = c.semanticComplete;
+    w->routingProcessingOrder = c.routingProcessingOrder;
+    w->routingEqBypassed = c.routingEqBypassed;
+    w->routingConvBypassed = c.routingConvBypassed;
+    w->graphEqBypassed = c.graphEqBypassed;
+    w->graphConvBypassed = c.graphConvBypassed;
+    w->graphRuntimeUuid = c.graphRuntimeUuid;
+    w->graphFadingRuntimeUuid = c.graphFadingRuntimeUuid;
+    w->topologyRuntimeUuid = c.topologyRuntimeUuid;
+    w->topologyHasFadingRuntime = c.topologyHasFadingRuntime;
+    w->topologyFadingRuntimeUuid = c.topologyFadingRuntimeUuid;
+    w->executionTransitionActive = c.executionTransitionActive;
+    w->executionTransitionPolicy = c.executionTransitionPolicy;
+    w->executionCrossfadeStartDelayBlocks = c.executionCrossfadeStartDelayBlocks;
+    w->executionCrossfadeDryHoldSamples = c.executionCrossfadeDryHoldSamples;
+    return w;
+}
 
 [[nodiscard]] bool testRejectIncompleteSemanticWorld()
 {
@@ -183,7 +178,7 @@ struct TestBridge
     incomplete.mappedRuntimeGeneration = 101;
     incomplete.semanticComplete = false;
 
-    coordinator.publishState(&complete, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(complete));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
@@ -191,7 +186,7 @@ struct TestBridge
         return false;
 
     // Incomplete world must be rejected and current published world must stay unchanged.
-    coordinator.publishState(&incomplete, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(incomplete));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -239,12 +234,12 @@ struct TestBridge
     authorityMismatch.mappedRuntimeGeneration = 201;
     authorityMismatch.graphEqBypassed = true; // routingEqBypassed=false と不整合
 
-    coordinator.publishState(&complete, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(complete));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishState(&authorityMismatch, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(authorityMismatch));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -295,12 +290,12 @@ struct TestBridge
     transitionMismatch.mappedRuntimeGeneration = 301;
     transitionMismatch.executionTransitionActive = false; // topologyHasFadingRuntime=true と不整合
 
-    coordinator.publishState(&complete, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(complete));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishState(&transitionMismatch, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(transitionMismatch));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -350,12 +345,12 @@ struct TestBridge
     rollback.previousSequenceId = 31; // previous >= current は reject
     rollback.mappedRuntimeGeneration = 401;
 
-    coordinator.publishState(&complete, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(complete));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishState(&rollback, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(rollback));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -405,12 +400,12 @@ struct TestBridge
     mappingMismatch.previousSequenceId = 40;
     mappingMismatch.mappedRuntimeGeneration = 999; // generation と不整合
 
-    coordinator.publishState(&complete, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(complete));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishState(&mappingMismatch, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(mappingMismatch));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -461,12 +456,12 @@ struct TestBridge
     invalidRouting.mappedRuntimeGeneration = 601;
     invalidRouting.routingProcessingOrder = 2; // schema上の上限(1)超過
 
-    coordinator.publishState(&complete, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(complete));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishState(&invalidRouting, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(invalidRouting));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;
@@ -517,12 +512,12 @@ struct TestBridge
     invalidExecution.mappedRuntimeGeneration = 701;
     invalidExecution.executionTransitionPolicy = 3; // schema上の上限(2)超過
 
-    coordinator.publishState(&complete, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(complete));
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr)
         return false;
 
-    coordinator.publishState(&invalidExecution, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    coordinator.publishWorld(createWorld(invalidExecution));
     const TestWorld* afterReject = Coordinator::consumeWorldHandle(store);
     if (afterReject != first)
         return false;

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <JuceHeader.h>
 #include <vector>
 #include <limits>
 #include <new>
@@ -15,7 +14,6 @@ namespace convo {
 inline void* aligned_malloc(size_t size, size_t alignment) {
     void* ptr = mkl_malloc(size, (int)alignment);
     if (ptr == nullptr) {
-        DBG("Memory allocation failed in aligned_malloc (MKL)");
         throw std::bad_alloc();
     }
     return ptr;

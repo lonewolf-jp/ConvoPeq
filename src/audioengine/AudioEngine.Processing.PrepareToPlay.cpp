@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "RuntimeBuilder.h"
 
 namespace {
 void diagLog(const juce::String& message)

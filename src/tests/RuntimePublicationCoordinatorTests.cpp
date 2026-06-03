@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "core/RuntimePublicationCoordinator.h"
+#include "AlignedAllocation.h"
 
 namespace {
 
@@ -21,21 +22,6 @@ struct TestWorld
 
 struct TestBridge
 {
-    std::unique_ptr<TestWorld> buildRuntimePublishWorld(const Candidate* current,
-                                                        const Candidate* next,
-                                                        convo::TransitionPolicy,
-                                                        double,
-                                                        bool,
-                                                        const convo::RuntimeBuildSnapshot*) noexcept
-    {
-        auto world = std::make_unique<TestWorld>();
-        const Candidate* source = (current != nullptr) ? current : next;
-        world->token = (source != nullptr) ? source->token : 0;
-        world->generation = (source != nullptr) ? source->generation : 0;
-        world->publicationSequence = nextSequence_ + 1;
-        return world;
-    }
-
     [[nodiscard]] bool validatePublicationNonRt(const TestWorld& world) noexcept
     {
         // Reject duplicated token (re-publish).
@@ -53,7 +39,6 @@ struct TestBridge
     {
         lastAcceptedToken_ = world.token;
         lastAcceptedGeneration_ = world.generation;
-        ++nextSequence_;
         publishedCount_++;
     }
 
@@ -67,7 +52,7 @@ struct TestBridge
 
     void retireRuntimePublishWorldNonRt(TestWorld* world, bool) noexcept
     {
-        delete world;
+        convo::AlignedObjectDeleter<TestWorld>{}(world);
     }
 
     [[nodiscard]] std::uint64_t publishedCount() const noexcept { return publishedCount_; }
@@ -76,7 +61,6 @@ struct TestBridge
 private:
     std::uint64_t lastAcceptedToken_ = 0;
     std::uint64_t lastAcceptedGeneration_ = 0;
-    std::uint64_t nextSequence_ = 0;
     std::uint64_t publishedCount_ = 0;
     std::uint64_t retiredCount_ = 0;
 };
@@ -89,28 +73,45 @@ private:
     Store store;
     auto coordinator = Coordinator::create(TestBridge{}, store);
 
-    Candidate c100 { 100, 100 };
-    Candidate c101 { 101, 101 };
+    auto w1 = convo::aligned_make_unique<TestWorld>();
+    w1->token = 100;
+    w1->generation = 100;
+    w1->publicationSequence = 1;
+    coordinator.publishWorld(std::move(w1));
 
-    coordinator.publishState(&c100, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
     const TestWorld* first = Coordinator::consumeWorldHandle(store);
     if (first == nullptr || first->generation != 100 || first->publicationSequence != 1)
         return false;
 
     // Re-publish same token should be rejected.
-    coordinator.publishState(&c100, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    auto w2 = convo::aligned_make_unique<TestWorld>();
+    w2->token = 100;
+    w2->generation = 100;
+    w2->publicationSequence = 2;
+    coordinator.publishWorld(std::move(w2));
+
     const TestWorld* afterRepublish = Coordinator::consumeWorldHandle(store);
     if (afterRepublish != first || afterRepublish->publicationSequence != 1)
         return false;
 
     // Monotonic increase should pass.
-    coordinator.publishState(&c101, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    auto w3 = convo::aligned_make_unique<TestWorld>();
+    w3->token = 101;
+    w3->generation = 101;
+    w3->publicationSequence = 2;
+    coordinator.publishWorld(std::move(w3));
+
     const TestWorld* second = Coordinator::consumeWorldHandle(store);
     if (second == nullptr || second == first || second->generation != 101 || second->publicationSequence != 2)
         return false;
 
     // Rollback (101 -> 100) should be rejected.
-    coordinator.publishState(&c100, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    auto w4 = convo::aligned_make_unique<TestWorld>();
+    w4->token = 100;
+    w4->generation = 100;
+    w4->publicationSequence = 3;
+    coordinator.publishWorld(std::move(w4));
+
     const TestWorld* afterRollback = Coordinator::consumeWorldHandle(store);
     if (afterRollback != second || afterRollback->publicationSequence != 2)
         return false;
@@ -128,8 +129,11 @@ private:
     Store store;
     auto coordinator = Coordinator::create(TestBridge{}, store);
 
-    Candidate c100 { 100, 100 };
-    coordinator.publishState(&c100, nullptr, convo::TransitionPolicy::SmoothOnly, 0.0, false);
+    auto w1 = convo::aligned_make_unique<TestWorld>();
+    w1->token = 100;
+    w1->generation = 100;
+    w1->publicationSequence = 1;
+    coordinator.publishWorld(std::move(w1));
 
     const TestWorld* published = Coordinator::consumeWorldHandle(store);
     if (published == nullptr)

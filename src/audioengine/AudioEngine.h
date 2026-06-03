@@ -2808,6 +2808,7 @@ public:
 
     private:
         AudioEngine* engine_ = nullptr;
+        iso::audio_engine::RuntimePublicationValidator* validator_ = nullptr;
     };
 
     using RuntimePublicationCoordinator = convo::RuntimePublicationCoordinator<RuntimePublishWorld,
@@ -2833,25 +2834,12 @@ public:
             RuntimePublicationBridge { *this, runtimePublicationValidator_ }, runtimeStore);
     }
 
-    inline void publishRuntimeStateNonRt(DSPCore* current,
-                                         DSPCore* next,
-                                         convo::TransitionPolicy policy,
-                                         double fadeTimeSec,
-                                         bool active,
-                                         const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept
-    {
-        // Wrapper for backward compatibility during migration (#5/#7 Sprint-2)
-        // Callers should migrate to publishWorld() with pre-built RuntimePublishWorld
-        auto coordinator = makeRuntimePublicationCoordinator();
-        auto worldBuilder = convo::RuntimeBuilder(*this);
-        auto worldOwner = worldBuilder.buildRuntimePublishWorld(current,
-                                                                 next,
-                                                                 policy,
-                                                                 fadeTimeSec,
-                                                                 active,
-                                                                 sealedSnapshot);
-        coordinator.publishWorld(std::move(worldOwner));
-    }
+    void publishRuntimeStateNonRt(DSPCore* current,
+                                  DSPCore* next,
+                                  convo::TransitionPolicy policy,
+                                  double fadeTimeSec,
+                                  bool active,
+                                  const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept;
 
     inline void publishWorld(convo::aligned_unique_ptr<RuntimePublishWorld> worldOwner) noexcept
     {

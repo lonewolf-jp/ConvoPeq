@@ -6,6 +6,7 @@
 
 #include "RuntimeTransition.h"
 #include "core/RuntimeStore.h"
+#include "AlignedAllocation.h"
 
 namespace convo {
 
@@ -138,9 +139,12 @@ public:
             bridge.buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active, sealedSnapshot); 
         }, "Bridge must NOT have buildRuntimePublishWorld(). Use RuntimeBuilder directly.");
         
-        // Placeholder implementation to prevent accidental use
-        // Actual migration should remove all call sites of this method
-        juce::ignoreUnused(current, next, policy, fadeTimeSec, active, sealedSnapshot);
+        (void)current;
+        (void)next;
+        (void)policy;
+        (void)fadeTimeSec;
+        (void)active;
+        (void)sealedSnapshot;
     }
 
 private:

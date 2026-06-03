@@ -16,6 +16,7 @@
 //   - Audio Thread は cleanup() を呼ばない。
 #pragma once
 
+#include <JuceHeader.h>
 #include <atomic>
 #include <cstring>      // memset
 #include <stdexcept>

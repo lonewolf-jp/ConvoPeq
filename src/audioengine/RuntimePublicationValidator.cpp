@@ -1,5 +1,6 @@
 #include "RuntimePublicationValidator.h"
 #include "ISRRuntimeSemanticSchema.h"
+#include "AudioEngine.h"
 #include <string>
 
 namespace iso::audio_engine {
@@ -93,7 +94,7 @@ bool RuntimePublicationValidator::validateResources(
 }
 
 bool RuntimePublicationValidator::checkExecutionSemanticValidity(
-    const ExecutionSemantic& exec) const
+    const convo::isr::ExecutionSemantic& exec) const
 {
     // Validate execution semantic fields
     // - transitionActive should be consistent with crossfade parameters
@@ -112,8 +113,8 @@ bool RuntimePublicationValidator::checkExecutionSemanticValidity(
 }
 
 bool RuntimePublicationValidator::checkActivationEpochConsistency(
-    const GenerationSemantic& gen,
-    const TimingSemantic& timing) const
+    const convo::isr::GenerationSemantic& gen,
+    const convo::isr::TimingSemantic& timing) const
 {
     // Since TimingSemantic.activationEpoch is now a derived field,
     // we don't need to check consistency here.

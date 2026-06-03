@@ -2,8 +2,12 @@
 
 #include "ISRRuntimeSemanticSchema.h"
 #include <memory>
+#include <string>
+
+struct RuntimeState;
 
 namespace iso::audio_engine {
+using RuntimePublishWorld = ::RuntimeState;
 
 struct RuntimeValidationResult {
     bool isValid = true;
@@ -66,11 +70,11 @@ public:
 private:
     // Helper methods
     bool checkExecutionSemanticValidity(
-        const ExecutionSemantic& exec) const;
+        const convo::isr::ExecutionSemantic& exec) const;
     
     bool checkActivationEpochConsistency(
-        const GenerationSemantic& gen,
-        const TimingSemantic& timing) const;
+        const convo::isr::GenerationSemantic& gen,
+        const convo::isr::TimingSemantic& timing) const;
     
     bool checkNoConflictingTransitions(
         const RuntimePublishWorld& world) const;

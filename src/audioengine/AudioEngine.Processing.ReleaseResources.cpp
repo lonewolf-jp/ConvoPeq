@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "RuntimeBuilder.h"
 #include "NoiseShaperLearner.h"
 
 namespace {
