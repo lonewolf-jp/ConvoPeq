@@ -3019,13 +3019,10 @@ public:
         snapshot.convHCMode = consumeAtomic(convHCFilterMode, std::memory_order_acquire);
         snapshot.convLCMode = consumeAtomic(convLCFilterMode, std::memory_order_acquire);
         snapshot.eqLPFMode = consumeAtomic(eqLPFFilterMode, std::memory_order_acquire);
-        if (world == nullptr)
-        {
-            snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-            snapshot.adaptiveCoeffGeneration = 0u;
-            const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
-            snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
-        }
+        snapshot.adaptiveCoeffBankIndex = consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
+        snapshot.adaptiveCoeffGeneration = 0u;
+        const auto& adaptiveCoeffBank = getAdaptiveCoeffBankForIndex(snapshot.adaptiveCoeffBankIndex);
+        snapshot.adaptiveCoeffSet = getActiveCoeffSet(adaptiveCoeffBank);
         snapshot.adaptiveCaptureEnabled = consumeAtomic(adaptiveCaptureActiveRt, std::memory_order_acquire);
         return snapshot;
     }
