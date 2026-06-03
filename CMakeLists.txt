@@ -438,21 +438,6 @@ target_sources(ConvoPeq PRIVATE
     src/core/ThreadAffinityManager.h
     src/core/WorkerThread.h
     src/core/WorkerThread.cpp
-    # Missing source files added (2026-06-02 verification)
-    src/tests/ISRRuntimeIdentityGeneratorsTests.cpp
-    src/tests/ISRSemanticValidationTests.cpp
-    src/tests/ObservePathSingleSourceTests.cpp
-    src/tests/OverlapAuthoritySingularTests.cpp
-    src/tests/PartialPublicationRejectTests.cpp
-    src/tests/PublicationValidatorIsolationTests.cpp
-    src/tests/RebuildAdmissionRegressionTests.cpp
-    src/tests/RetireGraceSemanticsTests.cpp
-    src/tests/RuntimePublicationCoordinatorTests.cpp
-    src/tests/RuntimeSemanticSchemaValidationTests.cpp
-    src/tests/RuntimeWorldAuthorityProjectionTests.cpp
-    src/tests/ShadowCompareContractTests.cpp
-    src/tests/BuildInputSemanticContractTests.cpp
-    src/tests/CrossfadeExecutorLocalContractTests.cpp
 )
 
 #------------------------------------------------------------

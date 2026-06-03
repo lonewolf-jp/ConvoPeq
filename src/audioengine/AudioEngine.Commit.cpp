@@ -162,9 +162,9 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
     if (!validationResult.isValid) {
         diagLog("[DIAG] runPublicationPrecheckNonRt: validator reject reason=\""
             + validationResult.errorMessage
-            + \" generation=\" + juce::String(static_cast<juce::int64>(world.generation))
-            + \" seq=\" + juce::String(static_cast<juce::int64>(world.publication.sequenceId))
-            + \" runtimeUuid=\" + juce::String(static_cast<juce::int64>(world.topology.runtimeUuid)));
+            + " generation=" + juce::String(static_cast<juce::int64>(world.generation))
+            + " seq=" + juce::String(static_cast<juce::int64>(world.publication.sequenceId))
+            + " runtimeUuid=" + juce::String(static_cast<juce::int64>(world.topology.runtimeUuid)));
         return false;
     }
     

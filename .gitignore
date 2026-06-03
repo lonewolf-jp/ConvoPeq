@@ -1,15 +1,25 @@
 ```
 # Build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+*.out
+
+# CMake build directories
 build/
-CMakeCache.txt
+cmake-build-*/
 CMakeFiles/
-DartConfiguration.tcl
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+compile_commands.json
 
 # Dependencies
-node_modules/
-.venv/
-venv/
-__pycache__/
+vendor/
 
 # Logs and temp files
 *.log
@@ -24,25 +34,15 @@ __pycache__/
 # Editors
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Compiled files
-*.o
-*.obj
-*.exe
-*.dll
-*.so
-*.a
-*.pyc
-*.class
-
-# Coverage
+# Coverage reports
 coverage/
 htmlcov/
 .coverage
 
-# CMake specific
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
+# OS generated files
+.DS_Store
+Thumbs.db
 ```

@@ -2751,7 +2751,7 @@ public:
     class RuntimePublicationBridge final
     {
     public:
-        explicit RuntimePublicationBridge(AudioEngine& engine, RuntimePublicationValidator& validator) noexcept
+        explicit RuntimePublicationBridge(AudioEngine& engine, iso::audio_engine::RuntimePublicationValidator& validator) noexcept
             : engine_(&engine), validator_(&validator)
         {
         }
@@ -2824,7 +2824,7 @@ public:
     using RuntimePublishStore = RuntimePublicationCoordinator::Store;
 
     RuntimePublishStore runtimeStore;
-    RuntimePublicationValidator runtimePublicationValidator_;
+    iso::audio_engine::RuntimePublicationValidator runtimePublicationValidator_;
 
     [[nodiscard]] inline RuntimePublicationCoordinator makeRuntimePublicationCoordinator() noexcept
     {
