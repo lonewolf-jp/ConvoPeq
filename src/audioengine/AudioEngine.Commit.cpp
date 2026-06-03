@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "RuntimeBuilder.h"
+#include "RuntimePublicationValidator.h"
 
 namespace {
 void diagLog(const juce::String& message)
@@ -154,6 +155,19 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
+    // Delegate pure validation to RuntimePublicationValidator (Sprint-4 P3-A)
+    static const RuntimePublicationValidator validator;
+    
+    const auto validationResult = validator.validatePublication(world);
+    if (!validationResult.isValid) {
+        diagLog("[DIAG] runPublicationPrecheckNonRt: validator reject reason=\""
+            + validationResult.errorMessage
+            + \" generation=\" + juce::String(static_cast<juce::int64>(world.generation))
+            + \" seq=\" + juce::String(static_cast<juce::int64>(world.publication.sequenceId))
+            + \" runtimeUuid=\" + juce::String(static_cast<juce::int64>(world.topology.runtimeUuid)));
+        return false;
+    }
+    
     forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Building);
 
     const auto rejectWithEvidence = [this, &world](const char* reason) noexcept {
@@ -324,17 +338,9 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
     return true;
 }
 
-convo::aligned_unique_ptr<RuntimePublishWorld>
-AudioEngine::RuntimePublicationBridge::buildRuntimePublishWorld(DSPCore* current,
-                                                                DSPCore* next,
-                                                                convo::TransitionPolicy policy,
-                                                                double fadeTimeSec,
-                                                                bool active,
-                                                                const convo::RuntimeBuildSnapshot* sealedSnapshot) noexcept
-{
-    convo::RuntimeBuilder worldBuilder(*engine_);
-    return worldBuilder.buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active, sealedSnapshot);
-}
+// buildRuntimePublishWorld() implementation removed from Bridge (#5/#7 Sprint-2)
+// Build authority belongs to RuntimeBuilder, not Bridge
+// Callers should use RuntimeBuilder directly to build RuntimePublishWorld
 
 void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept
 {
@@ -914,12 +920,16 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
             jassert(nextDSP != nullptr && nextDSP != previousDSP);
         }
 
-        publishRuntimeStateNonRt(nextDSP,
-                                 previousDSP,
-                                 convo::TransitionPolicy::SmoothOnly,
-                                 fadeTimeSec,
-                                 true,
-                                 &sealedSnapshot);
+        // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
+        auto coordinator = makeRuntimePublicationCoordinator();
+        auto worldBuilder = convo::RuntimeBuilder(*this);
+        auto worldOwner = worldBuilder.buildRuntimePublishWorld(nextDSP,
+                                                                 previousDSP,
+                                                                 convo::TransitionPolicy::SmoothOnly,
+                                                                 fadeTimeSec,
+                                                                 true,
+                                                                 &sealedSnapshot);
+        coordinator.publishWorld(std::move(worldOwner));
         logRuntimeTransitionEvent("publishSmoothTransitionState", nextDSP, previousDSP);
     };
 
@@ -945,12 +955,20 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
         publishAtomic(queuedFadeTimeSec, fadeTimeSec, std::memory_order_release);
         publishAtomic(dspCrossfadePending, true, std::memory_order_release);
         setIRChangeFlag();
-        publishRuntimeStateNonRt(atomicCurrent,
-                                 previousDSP,
-                                 convo::TransitionPolicy::SmoothOnly,
-                                 fadeTimeSec,
-                                 true,
-                                 &sealedSnapshot);
+        
+        // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
+        {
+            auto coordinator = makeRuntimePublicationCoordinator();
+            auto worldBuilder = convo::RuntimeBuilder(*this);
+            auto worldOwner = worldBuilder.buildRuntimePublishWorld(atomicCurrent,
+                                                                     previousDSP,
+                                                                     convo::TransitionPolicy::SmoothOnly,
+                                                                     fadeTimeSec,
+                                                                     true,
+                                                                     &sealedSnapshot);
+            coordinator.publishWorld(std::move(worldOwner));
+        }
+        
         validateDistinctRuntimeSlots("startImmediateSmoothTransition",
                                      atomicCurrent,
                                      resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
@@ -992,12 +1010,19 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
         publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
         publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
         publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
-        publishRuntimeStateNonRt(atomicCurrent,
-                                 nullptr,
-                                 convo::TransitionPolicy::HardReset,
-                                 0.0,
-                                 false,
-                                 &sealedSnapshot);
+        
+        // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
+        {
+            auto coordinator = makeRuntimePublicationCoordinator();
+            auto worldBuilder = convo::RuntimeBuilder(*this);
+            auto worldOwner = worldBuilder.buildRuntimePublishWorld(atomicCurrent,
+                                                                     nullptr,
+                                                                     convo::TransitionPolicy::HardReset,
+                                                                     0.0,
+                                                                     false,
+                                                                     &sealedSnapshot);
+            coordinator.publishWorld(std::move(worldOwner));
+        }
         validateDistinctRuntimeSlots("publishHardResetForCurrentDSP",
                                      atomicCurrent,
                                      resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
@@ -1032,12 +1057,19 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
         publishAtomic(dspCrossfadePending, true, std::memory_order_release);
         publishAtomic(firstIrDryCrossfadeDone, true, std::memory_order_release);
         setIRChangeFlag();
-        publishRuntimeStateNonRt(atomicCurrent,
-                                 nullptr,
-                                 convo::TransitionPolicy::DryAsOld,
-                                 fadeTimeSec,
-                                 true,
-                                 &sealedSnapshot);
+        
+        // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
+        {
+            auto coordinator = makeRuntimePublicationCoordinator();
+            auto worldBuilder = convo::RuntimeBuilder(*this);
+            auto worldOwner = worldBuilder.buildRuntimePublishWorld(atomicCurrent,
+                                                                     nullptr,
+                                                                     convo::TransitionPolicy::DryAsOld,
+                                                                     fadeTimeSec,
+                                                                     true,
+                                                                     &sealedSnapshot);
+            coordinator.publishWorld(std::move(worldOwner));
+        }
         validateDistinctRuntimeSlots("armDryAsOldCrossfadeForCurrentDSP",
                                      atomicCurrent,
                                      resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
@@ -1194,13 +1226,19 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
 
             publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
         }
-
-        publishRuntimeStateNonRt(newDSP,
-                                 nullptr,
-                                 convo::TransitionPolicy::SmoothOnly,
-                                 0.0,
-                                 false,
-                                 &sealedSnapshot);
+        
+        // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
+        {
+            auto coordinator = makeRuntimePublicationCoordinator();
+            auto worldBuilder = convo::RuntimeBuilder(*this);
+            auto worldOwner = worldBuilder.buildRuntimePublishWorld(newDSP,
+                                                                     nullptr,
+                                                                     convo::TransitionPolicy::SmoothOnly,
+                                                                     0.0,
+                                                                     false,
+                                                                     &sealedSnapshot);
+            coordinator.publishWorld(std::move(worldOwner));
+        }
 
         // 3. EBR：エポックを進める
         advanceRetireEpoch();

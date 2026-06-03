@@ -1,0 +1,3 @@
+SET(CTEST_PROJECT_NAME "ConvoPeq")
+SET(CTEST_SOURCE_DIRECTORY "/workspace")
+SET(CTEST_BINARY_DIRECTORY "/workspace/build")

@@ -1,57 +1,48 @@
-# Build directories
+```
+# Build artifacts
 build/
-
-# Visual Studio / MSVC
-.vs/
-out/
-*.user
-*.suo
-*.ipch
-*.aps
-*.sdf
-*.opensdf
-
-# VS Code (Optional: commit settings if you want to share tasks/launch config)
-# .vscode/
-
-# Binary output
-*.exe
-*.dll
-*.lib
-*.pdb
-*.obj
-
-# CMake
 CMakeCache.txt
 CMakeFiles/
+DartConfiguration.tcl
+
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Compiled files
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+*.pyc
+*.class
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# CMake specific
+CMakeFiles/
+CMakeCache.txt
 cmake_install.cmake
-
-# r8brain-free-src (If you want users to provide their own r8brain-free-src)
-r8brain-free-src/
-
-# JUCE (If you want users to provide their own JUCE)
-JUCE/
-
-# OS Files
-.DS_Store
-Thumbs.db
-
-# serena mcp server logs
-.cache/
-.serena/
-
-# MUSUBI mcp server
-steering/
-storage/
-.musubi/
-
-# Code Graph mcp server
-.venv-codegraph/
-.codegraph/
-
-# evidence
-evidence/
-
-# temporary artifacts (local diagnostics)
-.github/tmp/
-*.dmp
+Makefile
+```
