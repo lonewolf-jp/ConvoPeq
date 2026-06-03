@@ -37,6 +37,20 @@ vendor/
 *.swp
 *.swo
 
+# Others
+.cache/
+.codegraph/
+.musubi/
+.serena/
+.venv-codegraph/
+steering/
+storage/
+tools/
+.github/tmp/
+.vs/
+evidence/
+JUCE/
+
 # Coverage reports
 coverage/
 htmlcov/
