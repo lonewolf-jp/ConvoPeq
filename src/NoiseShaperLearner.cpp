@@ -98,9 +98,13 @@ NoiseShaperLearner::~NoiseShaperLearner()
 
 void NoiseShaperLearner::startLearning(bool resume)
 {
+    juce::Logger::writeToLog("[NoiseShaperLearner] startLearning enter resume=" + juce::String(static_cast<int>(resume)));
+
     if (candidatePopulationMatrix() == nullptr || candidateFitnessData() == nullptr)
     {
-        DBG_LOG("[NoiseShaperLearner] startLearning aborted: candidate buffers unavailable");
+        juce::Logger::writeToLog("[NoiseShaperLearner] startLearning aborted: candidate buffers unavailable"
+            + juce::String(" pop=") + juce::String(candidatePopulationMatrix() == nullptr ? "null" : "ok")
+            + juce::String(" fit=") + juce::String(candidateFitnessData() == nullptr ? "null" : "ok"));
         convo::publishAtomic(errorMessage, "Candidate buffers unavailable", std::memory_order_release);
         convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
         return;
@@ -109,6 +113,7 @@ void NoiseShaperLearner::startLearning(bool resume)
     // 前回セッション残骸のクリーンアップ
     if (isRunning() || workerThread.joinable() || convo::consumeAtomic(workerState, std::memory_order_acquire) != WorkerState::Idle)
     {
+        juce::Logger::writeToLog("[NoiseShaperLearner] startLearning: cleaning up previous session");
         stopLearning();
         if (workerThread.joinable())
             workerThread.join();
@@ -156,20 +161,24 @@ void NoiseShaperLearner::startLearning(bool resume)
 
     try
     {
+        juce::Logger::writeToLog("[NoiseShaperLearner] startLearning: spawning worker thread");
         workerThread = std::jthread([this](std::stop_token stopToken)
         {
+            juce::Logger::writeToLog("[NoiseShaperLearner] worker thread started");
             workerThreadMain(stopToken);
+            juce::Logger::writeToLog("[NoiseShaperLearner] worker thread exited");
         });
     }
-    catch (const std::exception&)
+    catch (const std::exception& e)
     {
-        DBG_LOG("[NoiseShaperLearner] failed to start worker thread");
+        juce::Logger::writeToLog(juce::String("[NoiseShaperLearner] failed to start worker thread: ") + juce::String(e.what()));
         convo::publishAtomic(errorMessage, "Failed to start learning thread", std::memory_order_release);
         convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
         convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
     }
     catch (...)
     {
+        juce::Logger::writeToLog("[NoiseShaperLearner] failed to start worker thread: unknown error");
         convo::publishAtomic(errorMessage, "Unknown error starting worker thread", std::memory_order_release);
         convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
         convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
@@ -733,6 +742,10 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
         }
         SessionSignature activeSession = captureSessionSignature();
         bool resume = convo::exchangeAtomic(pendingResume, false, std::memory_order_acquire);
+        juce::Logger::writeToLog("[NoiseShaperLearner] worker: resume=" + juce::String(static_cast<int>(resume))
+            + " sampleRate=" + juce::String(activeSession.sampleRateHz)
+            + " bank=" + juce::String(activeSession.adaptiveCoeffBankIndex)
+            + " sessionId=" + juce::String(static_cast<juce::int64>(activeSession.sessionId)));
         resetLearningSession(activeSession, resume);
 
         // ============================================================================
@@ -810,9 +823,31 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
         DrainStats cumulativeDrainStats {};
         auto lastWaitingDiagnosticsLogTime = std::chrono::steady_clock::now();
 
-         while (!convo::consumeAtomic(stopRequested, std::memory_order_acquire)
-             && !stopToken.stop_requested())
+        juce::Logger::writeToLog("[NoiseShaperLearner] worker: entering main loop");
+        // Safety: force-reset stopRequested before main loop, in case a stale
+        // Stop dispatch (e.g. from IRChanged during Idle state) set it before
+        // the thread was created.
+        convo::publishAtomic(stopRequested, false, std::memory_order_release);
+        int mainLoopIter = 0;
+        try
         {
+        for (;;)
+        {
+            const bool sr = convo::consumeAtomic(stopRequested, std::memory_order_acquire);
+            const bool st = stopToken.stop_requested();
+            if (mainLoopIter <= 10 || mainLoopIter % 20 == 0)
+                juce::Logger::writeToLog("[NoiseShaperLearner] worker: loop iter=" + juce::String(mainLoopIter)
+                    + " stopReq=" + juce::String(static_cast<int>(sr))
+                    + " stopTok=" + juce::String(static_cast<int>(st)));
+            if (sr || st)
+            {
+                juce::Logger::writeToLog("[NoiseShaperLearner] worker: EXIT at iter=" + juce::String(mainLoopIter)
+                    + " stopReq=" + juce::String(static_cast<int>(sr))
+                    + " stopTok=" + juce::String(static_cast<int>(st)));
+                DBG("[NoiseShaperLearner] worker: EXIT confirm");
+                break;
+            }
+            ++mainLoopIter;
             const auto thisGenerationStart = std::chrono::steady_clock::now();
 
             // インターバル待機（start-to-start）
@@ -837,8 +872,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
 
             const SessionSignature currentSession = captureSessionSignature();
             if (activeSession.sampleRateHz != currentSession.sampleRateHz
-                || activeSession.adaptiveCoeffBankIndex != currentSession.adaptiveCoeffBankIndex
-                || activeSession.sessionId != currentSession.sessionId)
+                || activeSession.adaptiveCoeffBankIndex != currentSession.adaptiveCoeffBankIndex)
             {
                 activeSession = currentSession;
                 resetLearningSession(activeSession, true);
@@ -846,6 +880,11 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                 generation = 0;
                 continue;
             }
+            // When only sessionId changes (e.g. DSP replaced by HardReset), update
+            // the sessionId to 0 (accept any) without resetting accumulated data,
+            // so blocks from both old and new DSP are compatible.
+            if (activeSession.sessionId != currentSession.sessionId)
+                activeSession.sessionId = 0;
 
             const DrainStats latestDrainStats = drainCaptureQueue(activeSession);
             cumulativeDrainStats.acceptedBlocks += latestDrainStats.acceptedBlocks;
@@ -948,19 +987,33 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        } // end for(;;)
+        juce::Logger::writeToLog("[NoiseShaperLearner] worker: AFTER MAIN LOOP (iter=" + juce::String(mainLoopIter) + ")");
+
+        } // end inner try
+        catch (const std::exception& e)
+        {
+            juce::Logger::writeToLog(juce::String("[NoiseShaperLearner] worker: INNER EXCEPTION: ") + juce::String(e.what()));
+            convo::publishAtomic(errorMessage, "Inner worker exception", std::memory_order_release);
+        }
+        catch (...)
+        {
+            juce::Logger::writeToLog("[NoiseShaperLearner] worker: INNER UNKNOWN EXCEPTION");
+            convo::publishAtomic(errorMessage, "Unknown inner exception", std::memory_order_release);
         }
 
         if (convo::consumeAtomic(progress.status, std::memory_order_acquire) != Status::Completed)
             convo::publishAtomic(progress.status, Status::Idle, std::memory_order_release);
     }
-    catch (const std::exception&)
+    catch (const std::exception& e)
     {
-        DBG_LOG("[NoiseShaperLearner] worker thread exception");
+        juce::Logger::writeToLog(juce::String("[NoiseShaperLearner] worker: OUTER EXCEPTION: ") + juce::String(e.what()));
         convo::publishAtomic(errorMessage, "Worker thread exception", std::memory_order_release);
         convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
     }
     catch (...)
     {
+        juce::Logger::writeToLog("[NoiseShaperLearner] worker: OUTER UNKNOWN EXCEPTION");
         convo::publishAtomic(errorMessage, "Error in worker thread", std::memory_order_release);
         convo::publishAtomic(progress.status, Status::Error, std::memory_order_release);
     }
@@ -1407,7 +1460,10 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
     {
         if (auto* self = weakSelf.get())
         {
-            self->engine.requestSnapshotForNoiseShaper();
+            self->engine.submitRebuildIntent(convo::RebuildKind::Structural,
+                                             AudioEngine::RebuildTelemetryReason::EnqueueSnapshotCommand,
+                                             AudioEngine::RebuildTelemetryClass::Snapshot,
+                                             AudioEngine::RebuildTelemetryPolicy::Replaceable);
             self->engine.storeLearnedCoeffs(mappedCoeffs.data());
             self->engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
             self->engine.requestAdaptiveAutosave();

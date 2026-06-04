@@ -53,9 +53,6 @@ struct RTExecutionFrame
     // lifecycle epoch（LifecycleIsolationRuntime から取得）
     uint64_t lifecycleEpoch;
 
-    // callback 開始時点の runtime graph revision
-    uint64_t runtimeGraphRevision;
-
     // RT trace relay buffer へのポインタ（nullptr は tracing 無効）
     class RTTraceRelay* traceRelay;
 };
@@ -159,7 +156,6 @@ inline RTExecutionFrame makeRTExecutionFrame(
     uint64_t sampleCursor,
     uint64_t callbackEpoch,
     uint64_t lifecycleEpoch,
-    uint64_t runtimeGraphRevision,
     RTTraceRelay* traceRelay) noexcept
 {
     return RTExecutionFrame{
@@ -171,7 +167,6 @@ inline RTExecutionFrame makeRTExecutionFrame(
         .sampleCursor      = sampleCursor,
         .callbackEpoch     = callbackEpoch,
         .lifecycleEpoch    = lifecycleEpoch,
-        .runtimeGraphRevision = runtimeGraphRevision,
         .traceRelay        = traceRelay
     };
 }

@@ -48,7 +48,10 @@ uint64_t AudioEngine::advanceRetireEpoch() noexcept
 
 [[nodiscard]] bool AudioEngine::enqueueRetireEpochBounded(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept
 {
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] — transitional wrapper, callers migrate to coordinator
     return m_epochDomain.enqueueRetire(ptr, deleter, epoch);
+#pragma warning(pop)
 }
 
 [[nodiscard]] uint32_t AudioEngine::activeEpochObserverCount() const noexcept

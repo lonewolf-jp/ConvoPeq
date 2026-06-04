@@ -6,7 +6,7 @@
 
 namespace convo::isr {
 
-inline constexpr std::uint32_t kRuntimeSemanticSchemaVersion = 7u;
+inline constexpr std::uint32_t kRuntimeSemanticSchemaVersion = 8u;
 
 enum class SemanticCategory : std::uint8_t
 {
@@ -14,7 +14,8 @@ enum class SemanticCategory : std::uint8_t
     Derived,
     Diagnostic,
     Telemetry,
-    Cache
+    Cache,
+    PublicationSemantic
 };
 
 enum class OwnershipClass : std::uint8_t

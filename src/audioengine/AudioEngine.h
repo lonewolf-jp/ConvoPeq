@@ -118,6 +118,8 @@ inline double absNoLibm(double x) noexcept
 
 struct RuntimeState : convo::isr::SealedObject<RuntimeState>
 {
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] EngineRuntime — transitional, verifier-enforced
     struct BuilderToken
     {
     private:
@@ -141,7 +143,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         return convo::aligned_make_unique<RuntimeState>(token);
     }
 
-    // AuthorityClass::Authoritative
+    // AuthorityClass::Diagnostic (trace/correlation only, must not drive runtime branching)
     std::uint64_t worldId = 0;
     // AuthorityClass::Derived
     convo::EngineRuntime engine {};
@@ -197,7 +199,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     convo::isr::RuntimeSemanticHash semanticHash {};
 
     static constexpr std::array<convo::isr::RuntimeFieldDescriptor, 20> kFieldDescriptors {{
-        {"worldId", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"worldId", convo::isr::SemanticCategory::Diagnostic, convo::isr::OwnershipClass::DiagnosticOnly, convo::isr::MutabilityClass::DiagnosticMutable, convo::isr::VisibilityClass::DiagnosticBoundary, convo::isr::LifetimeClass::DiagnosticLifetime},
         {"generation", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"generationSemantic", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"topology", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
@@ -221,7 +223,7 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     }};
 
     static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 20> kRuntimeAuthorityInventory {{
-        {"worldId", convo::isr::RuntimeAuthorityClass::Authoritative},
+        {"worldId", convo::isr::RuntimeAuthorityClass::Diagnostic},
         {"generation", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"generationSemantic", convo::isr::RuntimeAuthorityClass::Derived},
         {"topology", convo::isr::RuntimeAuthorityClass::Authoritative},
@@ -904,14 +906,20 @@ public:
     {
         ASSERT_NON_RT_THREAD();
         uiConvolverProcessor.setMix(value);
-        enqueueSnapshotCommand();
+        submitRebuildIntent(convo::RebuildKind::Structural,
+                            RebuildTelemetryReason::EnqueueSnapshotCommand,
+                            RebuildTelemetryClass::Snapshot,
+                            RebuildTelemetryPolicy::Replaceable);
     }
 
     void setConvolverSmoothingTime(float timeSec) noexcept
     {
         ASSERT_NON_RT_THREAD();
         uiConvolverProcessor.setSmoothingTime(timeSec);
-        enqueueSnapshotCommand();
+        submitRebuildIntent(convo::RebuildKind::Structural,
+                            RebuildTelemetryReason::EnqueueSnapshotCommand,
+                            RebuildTelemetryClass::Snapshot,
+                            RebuildTelemetryPolicy::Replaceable);
     }
 
     void setConvolverTargetIRLength(float timeSec, bool manualOverride = false) noexcept;
@@ -940,7 +948,6 @@ public:
 
     void setNoiseShaperType(NoiseShaperType type);
     [[nodiscard]] NoiseShaperType getNoiseShaperType() const;
-    void requestSnapshotForNoiseShaper();
     void requestRebuild(convo::RebuildKind kind) noexcept;
     void requestStructuredRebuildIntent(convo::RebuildKind kind) noexcept
     {
@@ -1532,7 +1539,6 @@ public:
 
     class RuntimePublicationBridge;
 
-    std::atomic<std::uint64_t> runtimeGraphRevision { 0 };
     convo::isr::RuntimeWorldIdGenerator runtimeWorldIdGenerator_ {};
     convo::isr::RuntimeGenerationGenerator runtimeGenerationGenerator_ {};
     std::atomic<convo::isr::PublicationSequenceId> publicationSequenceCounter_ { 0 };
@@ -1689,7 +1695,7 @@ public:
     alignas(64) std::atomic<double> outputMakeupGain { 3.981071705534972 }; // +12dB
     #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
-    std::atomic<int> rebuildGeneration { 0 }; // 非同期リビルドの競合防止用
+    std::atomic<int> rebuildRequestGeneration { 0 }; // 非同期リビルドの競合防止用
     std::atomic<int> lastCommittedRebuildGeneration { 0 }; // commit 完了済み世代
 
     #pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
@@ -1730,9 +1736,9 @@ public:
     void applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);
     void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);
     void drainPublicationIntentsForRuntimeCommit();
-    // acquire: applyRuntimeCommitFromIntent/requestRebuild の rebuildGeneration 更新 release と HB し、
+    // acquire: applyRuntimeCommitFromIntent/requestRebuild の rebuildRequestGeneration 更新 release と HB し、
     //          リビルド世代が古いか否かを各スレッドから安全に判定。
-    [[nodiscard]] bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildGeneration, std::memory_order_acquire); }
+    [[nodiscard]] bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
     bool enqueueLearningCommand(const LearningCommand& cmd) noexcept;
     [[nodiscard]] bool dequeueLearningCommand(LearningCommand& cmd) noexcept;
     bool enqueueLearnerDispatch(const LearnerDispatchAction& action) noexcept;
@@ -1740,7 +1746,6 @@ public:
     void processLearningCommands() noexcept;
     void processDeferredLearningActions();
     void resetLearningControlState() noexcept;
-    bool enqueueSnapshotCommand() noexcept;
     void appendPublicationIntentForCommitProducer(DSPCore* newDSP, int targetWorldId, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;
     void appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int targetWorldId, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;
     void appendPublicationIntentForCommitSlot(DSPCore* newDSP, int targetWorldId, CommitReaderSlot readerSlot, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;
@@ -1757,7 +1762,6 @@ public:
     [[nodiscard]] bool shouldRejectRebuildAdmissionForPressure() const noexcept;
     void handleAsyncUpdate() override;
 
-    static void onSnapshotRequired(void* userData, uint64_t generation);
     void createSnapshotFromCurrentState(uint64_t generation);
     void initWorkerThread();
     void shutdownWorkerThread();
@@ -2139,69 +2143,73 @@ public:
     void debugAssertNotAudioThread() const;
     void debugAssertAudioThread() const;
 
-    struct RuntimeFallbackPolicy
-    {
-        bool allowTransitionFallback = false;
-        bool allowRoutingAutomationFallback = false;
-        bool allowAdaptiveBankIndexFallback = false;
-        bool allowEqCoeffHashFallback = false;
-        bool allowRetireFallback = false; // PR policy: retire/publication-adjacent fields never fallback to atomics.
-    };
-
     inline convo::EngineRuntime makeEngineRuntimeState(DSPCore* current,
                                                         DSPCore* next,
                                                         convo::TransitionPolicy policy,
                                                         double fadeTimeSec,
                                                         bool active,
-                                                        const RuntimePublishWorld* runtimeWorld,
-                                                        const RuntimeFallbackPolicy& fallbackPolicy) noexcept
+                                                        const RuntimePublishWorld* runtimeWorld) noexcept
     {
         // IR-7 (Chapter 8): State transition precondition validation.
+        // NOTE: EngineRuntime is deprecated. Projection values should be sourced
+        // from RuntimeSemanticSchema fields (world->routing, world->automation, etc.)
+        // instead of this struct. See 3.2.7 for migration plan.
         jassert(current != nullptr); // Current DSP must always be valid at publish time.
         jassert(fadeTimeSec >= 0.0);
+        jassert(runtimeWorld != nullptr); // Bootstrap World ensures non-null at first publish (#3.2.5)
 
-        if (runtimeWorld == nullptr
-            && !(fallbackPolicy.allowTransitionFallback
-                || fallbackPolicy.allowRoutingAutomationFallback
-                || fallbackPolicy.allowAdaptiveBankIndexFallback
-                || fallbackPolicy.allowEqCoeffHashFallback
-                || fallbackPolicy.allowRetireFallback))
+        // Safety guard: when runtimeWorld is null (e.g. after releaseResources cleared the
+        // published world but before prepareToPlay publishes a new one), produce a minimal
+        // EngineRuntime from atomics so caller never dereferences a null world.
+        if (runtimeWorld == nullptr)
         {
-            jassertfalse;
-            convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
-            convo::publishAtomic(observeMonotonicRollbackRequested_, true, std::memory_order_release);
+            convo::EngineRuntime fallback {};
+            fallback.current = current;
+            fallback.currentRuntimeUuid = (current != nullptr) ? current->runtimeUuid : 0;
+            fallback.transition.current = current;
+            fallback.transition.next = next;
+            fallback.transitionCurrentRuntimeUuid = (current != nullptr) ? current->runtimeUuid : 0;
+            fallback.transitionNextRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;
+            fallback.transition.policy = policy;
+            fallback.transition.fadeTimeSec = fadeTimeSec;
+            fallback.transition.active = active;
+            fallback.latencyDelayOld = consumeAtomic(latencyDelayOld, std::memory_order_acquire);
+            fallback.latencyDelayNew = consumeAtomic(latencyDelayNew, std::memory_order_acquire);
+            fallback.latencyResetPending = consumeAtomic(latencyResetPending, std::memory_order_acquire);
+            fallback.dspCrossfadePending = consumeAtomic(dspCrossfadePending, std::memory_order_acquire);
+            fallback.dspCrossfadeUseDryAsOld = consumeAtomic(dspCrossfadeUseDryAsOld, std::memory_order_acquire);
+            fallback.firstIrDryCrossfadePending = consumeAtomic(firstIrDryCrossfadePending, std::memory_order_acquire);
+            fallback.processingOrder = static_cast<int>(consumeAtomic(currentProcessingOrder, std::memory_order_acquire));
+            fallback.eqBypassed = consumeAtomic(eqBypassActive, std::memory_order_acquire);
+            fallback.convBypassed = consumeAtomic(convBypassActive, std::memory_order_acquire);
+            fallback.softClipEnabled = consumeAtomic(softClipEnabled, std::memory_order_acquire);
+            fallback.saturationAmount = consumeAtomic(saturationAmount, std::memory_order_acquire);
+            fallback.inputHeadroomGain = consumeAtomic(inputHeadroomGain, std::memory_order_acquire);
+            fallback.outputMakeupGain = consumeAtomic(outputMakeupGain, std::memory_order_acquire);
+            fallback.convolverInputTrimGain = consumeAtomic(convolverInputTrimGain, std::memory_order_acquire);
+            fallback.retireBacklog = 0;
+            fallback.deferredResidency = 0;
+            fallback.rebuildWorkerRunning = false;
+            fallback.adaptiveCoeffBankIndex = -1;
+            fallback.adaptiveCoeffGeneration = 0;
+            fallback.eqCoeffHash = 0;
+            fallback.queuedFadeTimeSec = consumeAtomic(queuedFadeTimeSec, std::memory_order_acquire);
+            fallback.dspCrossfadeStartDelayBlocks = consumeAtomic(dspCrossfadeStartDelayBlocks, std::memory_order_acquire);
+            fallback.dspCrossfadeDryHoldSamples = consumeAtomic(dspCrossfadeDryHoldSamples, std::memory_order_acquire);
+            fallback.dryScaleTarget = consumeAtomic(dspCrossfadeDryScaleTarget, std::memory_order_acquire);
+            return fallback;
         }
 
-        const bool crossfadePending = (runtimeWorld != nullptr)
-            ? runtimeWorld->engine.dspCrossfadePending
-            : consumeAtomic(dspCrossfadePending, std::memory_order_acquire);
-        const bool crossfadeUseDryAsOld = (runtimeWorld != nullptr)
-            ? runtimeWorld->overlap.useDryAsOld
-            : consumeAtomic(dspCrossfadeUseDryAsOld, std::memory_order_acquire);
-        const bool firstLoadDryPending = (runtimeWorld != nullptr)
-            ? runtimeWorld->overlap.firstIrDryCrossfadePending
-            : consumeAtomic(firstIrDryCrossfadePending, std::memory_order_acquire);
-        const double queuedFadeTime = (runtimeWorld != nullptr)
-            ? runtimeWorld->overlap.fadeTimeSec
-            : consumeAtomic(queuedFadeTimeSec, std::memory_order_acquire);
-        const int delayOld = (runtimeWorld != nullptr)
-            ? runtimeWorld->latency.latencyDelayOld
-            : consumeAtomic(latencyDelayOld, std::memory_order_acquire);
-        const int delayNew = (runtimeWorld != nullptr)
-            ? runtimeWorld->latency.latencyDelayNew
-            : consumeAtomic(latencyDelayNew, std::memory_order_acquire);
-        const int startDelayBlocks = (runtimeWorld != nullptr)
-            ? runtimeWorld->execution.crossfadeStartDelayBlocks
-            : consumeAtomic(dspCrossfadeStartDelayBlocks, std::memory_order_acquire);
-        const int dryHoldSamples = (runtimeWorld != nullptr)
-            ? runtimeWorld->execution.crossfadeDryHoldSamples
-            : consumeAtomic(dspCrossfadeDryHoldSamples, std::memory_order_acquire);
-        const bool resetLatencyPending = (runtimeWorld != nullptr)
-            ? runtimeWorld->engine.latencyResetPending
-            : consumeAtomic(latencyResetPending, std::memory_order_acquire);
-        const double dryScaleTarget = (runtimeWorld != nullptr)
-            ? runtimeWorld->overlap.dryScaleTarget
-            : consumeAtomic(dspCrossfadeDryScaleTarget, std::memory_order_acquire);
+        const bool crossfadePending = runtimeWorld->engine.dspCrossfadePending;
+        const bool crossfadeUseDryAsOld = runtimeWorld->overlap.useDryAsOld;
+        const bool firstLoadDryPending = runtimeWorld->overlap.firstIrDryCrossfadePending;
+        const double queuedFadeTime = runtimeWorld->overlap.fadeTimeSec;
+        const int delayOld = runtimeWorld->latency.latencyDelayOld;
+        const int delayNew = runtimeWorld->latency.latencyDelayNew;
+        const int startDelayBlocks = runtimeWorld->execution.crossfadeStartDelayBlocks;
+        const int dryHoldSamples = runtimeWorld->execution.crossfadeDryHoldSamples;
+        const bool resetLatencyPending = runtimeWorld->engine.latencyResetPending;
+        const double dryScaleTarget = runtimeWorld->overlap.dryScaleTarget;
 
         // IR-7: Crossfade parameter sanity checks (invariant enforcement).
         jassert(queuedFadeTime >= 0.0);
@@ -2236,71 +2244,20 @@ public:
         runtime.dspCrossfadePending = crossfadePending;
         runtime.dspCrossfadeUseDryAsOld = crossfadeUseDryAsOld;
         runtime.firstIrDryCrossfadePending = firstLoadDryPending;
-        runtime.processingOrder = (runtimeWorld != nullptr)
-            ? runtimeWorld->routing.processingOrder
-            : (fallbackPolicy.allowRoutingAutomationFallback
-                ? static_cast<int>(consumeAtomic(currentProcessingOrder, std::memory_order_acquire))
-                : 0);
-        runtime.eqBypassed = (runtimeWorld != nullptr)
-            ? runtimeWorld->routing.eqBypassed
-            : (fallbackPolicy.allowRoutingAutomationFallback
-                ? consumeAtomic(eqBypassRequested, std::memory_order_acquire)
-                : false);
-        runtime.convBypassed = (runtimeWorld != nullptr)
-            ? runtimeWorld->routing.convBypassed
-            : (fallbackPolicy.allowRoutingAutomationFallback
-                ? consumeAtomic(convBypassRequested, std::memory_order_acquire)
-                : false);
-        runtime.softClipEnabled = (runtimeWorld != nullptr)
-            ? runtimeWorld->automation.softClipEnabled
-            : (fallbackPolicy.allowRoutingAutomationFallback
-                ? consumeAtomic(softClipEnabled, std::memory_order_acquire)
-                : false);
-        runtime.saturationAmount = (runtimeWorld != nullptr)
-            ? runtimeWorld->automation.saturationAmount
-            : (fallbackPolicy.allowRoutingAutomationFallback
-                ? static_cast<double>(consumeAtomic(saturationAmount, std::memory_order_acquire))
-                : 0.0);
-        runtime.inputHeadroomGain = (runtimeWorld != nullptr)
-            ? runtimeWorld->automation.inputHeadroomGain
-            : (fallbackPolicy.allowRoutingAutomationFallback
-                ? consumeAtomic(inputHeadroomGain, std::memory_order_acquire)
-                : 1.0);
-        runtime.outputMakeupGain = (runtimeWorld != nullptr)
-            ? runtimeWorld->automation.outputMakeupGain
-            : (fallbackPolicy.allowRoutingAutomationFallback
-                ? consumeAtomic(outputMakeupGain, std::memory_order_acquire)
-                : 1.0);
-        runtime.convolverInputTrimGain = (runtimeWorld != nullptr)
-            ? runtimeWorld->automation.convolverInputTrimGain
-            : (fallbackPolicy.allowRoutingAutomationFallback
-                ? consumeAtomic(convolverInputTrimGain, std::memory_order_acquire)
-                : 1.0);
-        runtime.retireBacklog = (runtimeWorld != nullptr)
-            ? runtimeWorld->retire.retireBacklog
-            : 0;
-        runtime.deferredResidency = (runtimeWorld != nullptr)
-            ? runtimeWorld->retire.deferredResidency
-            : 0;
-        runtime.rebuildWorkerRunning = (runtimeWorld != nullptr)
-            ? runtimeWorld->affinity.rebuildWorkerRunning
-            : false;
-        runtime.adaptiveCoeffBankIndex = (runtimeWorld != nullptr)
-            ? runtimeWorld->coefficient.adaptiveCoeffBankIndex
-            : (fallbackPolicy.allowAdaptiveBankIndexFallback
-                ? consumeAtomic(currentAdaptiveCoeffBankIndex, std::memory_order_acquire)
-                : 0);
-        runtime.adaptiveCoeffGeneration = (runtimeWorld != nullptr)
-            ? runtimeWorld->coefficient.adaptiveCoeffGeneration
-            : 0u;
-        if (runtimeWorld != nullptr)
-            runtime.eqCoeffHash = runtimeWorld->coefficient.eqCoeffHash;
-        else if (!fallbackPolicy.allowEqCoeffHashFallback)
-            runtime.eqCoeffHash = 0;
-        else if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
-            runtime.eqCoeffHash = EQProcessor::computeParamsHash(eqState->toEQParameters());
-        else
-            runtime.eqCoeffHash = 0;
+        runtime.processingOrder = runtimeWorld->routing.processingOrder;
+        runtime.eqBypassed = runtimeWorld->routing.eqBypassed;
+        runtime.convBypassed = runtimeWorld->routing.convBypassed;
+        runtime.softClipEnabled = runtimeWorld->automation.softClipEnabled;
+        runtime.saturationAmount = runtimeWorld->automation.saturationAmount;
+        runtime.inputHeadroomGain = runtimeWorld->automation.inputHeadroomGain;
+        runtime.outputMakeupGain = runtimeWorld->automation.outputMakeupGain;
+        runtime.convolverInputTrimGain = runtimeWorld->automation.convolverInputTrimGain;
+        runtime.retireBacklog = runtimeWorld->retire.retireBacklog;
+        runtime.deferredResidency = runtimeWorld->retire.deferredResidency;
+        runtime.rebuildWorkerRunning = runtimeWorld->affinity.rebuildWorkerRunning;
+        runtime.adaptiveCoeffBankIndex = runtimeWorld->coefficient.adaptiveCoeffBankIndex;
+        runtime.adaptiveCoeffGeneration = runtimeWorld->coefficient.adaptiveCoeffGeneration;
+        runtime.eqCoeffHash = runtimeWorld->coefficient.eqCoeffHash;
         runtime.queuedFadeTimeSec = queuedFadeTime;
         runtime.dspCrossfadeStartDelayBlocks = startDelayBlocks;
         runtime.dspCrossfadeDryHoldSamples = dryHoldSamples;
@@ -2523,7 +2480,7 @@ public:
     {
         const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
         return (runtimeWorld != nullptr)
-            ? runtimeWorld->graph.sampleRate
+            ? runtimeWorld->timing.sampleRateHz
             : fallback;
     }
 
@@ -2558,6 +2515,9 @@ public:
 
     inline convo::RuntimeGraph makeRuntimeGraphState(const convo::EngineRuntime& state) noexcept
     {
+        // 3.2.9: RuntimeGraph は Projection + Diagnostic のみに縮退。
+        // Authoritative フィールド（runtimeUuid, eqBypassed 等）は
+        // RuntimeWorld の対応する Semantic 構造体から参照する。
         convo::RuntimeGraph graph {};
         graph.activeNode = state.current;
         graph.fadingNode = state.fading;
@@ -2565,34 +2525,12 @@ public:
         auto* current = static_cast<DSPCore*>(state.current);
         if (current != nullptr)
         {
-            graph.runtimeUuid = current->runtimeUuid;
-            graph.sampleRate = current->sampleRate;
-            graph.ditherBitDepth = current->ditherBitDepth;
-            graph.noiseShaperType = static_cast<int>(current->noiseShaperType);
-            graph.oversamplingFactor = static_cast<int>(current->oversamplingFactor);
             auto& eq = current->eqRt();
             graph.eqAgcAttackCoeffTable = eq.getAgcAttackCoeffTable();
             graph.eqAgcReleaseCoeffTable = eq.getAgcReleaseCoeffTable();
             graph.eqAgcSmoothCoeffTable = eq.getAgcSmoothCoeffTable();
             graph.eqAgcCoeffTableCapacity = eq.getAgcCoeffTableCapacity();
         }
-
-        auto* fading = static_cast<DSPCore*>(state.fading);
-        if (fading != nullptr)
-            graph.fadingRuntimeUuid = fading->runtimeUuid;
-
-        graph.transitionCurrentRuntimeUuid = state.transitionCurrentRuntimeUuid;
-        graph.transitionNextRuntimeUuid = state.transitionNextRuntimeUuid;
-
-        graph.eqBypassed = state.eqBypassed;
-        graph.convBypassed = state.convBypassed;
-        graph.softClipEnabled = state.softClipEnabled;
-        graph.saturationAmount = state.saturationAmount;
-        graph.inputHeadroomGain = state.inputHeadroomGain;
-        graph.outputMakeupGain = state.outputMakeupGain;
-        graph.convolverInputTrimGain = state.convolverInputTrimGain;
-        graph.adaptiveCoeffBankIndex = state.adaptiveCoeffBankIndex;
-        graph.adaptiveCoeffGeneration = state.adaptiveCoeffGeneration;
 
         return graph;
     }
@@ -2657,13 +2595,8 @@ public:
 
     [[nodiscard]] inline std::uint64_t reserveNextRuntimeGraphGeneration() noexcept
     {
-        // acq_rel: fetch-add で generation counter を advance し、他スレッドへ新 generation を公開。
-        //          acquire 側で旧 generation 参照により stale request 検出を回避。
-        const auto nextGraphGeneration = runtimeGenerationGenerator_.next();
-        publishAtomic(runtimeGraphRevision,
-                  nextGraphGeneration,
-                  std::memory_order_release);
         // acq_rel: publish count を increment し、runtime world 公開イベント数を追跡。
+        const auto nextGraphGeneration = runtimeGenerationGenerator_.next();
         convo::fetchAddAtomic(rtAuxMutable_.runtimePublishCount,
                               static_cast<std::uint64_t>(1),
                               std::memory_order_acq_rel);
@@ -2687,35 +2620,17 @@ public:
         RuntimePublishComputation computation {};
         const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
         const auto* runtimeWorld = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
-        const bool allowInitialAtomicFallback = (runtimeWorld == nullptr)
-            && (consumeAtomic(lastCommittedPublicationSequence_, std::memory_order_acquire) == 0)
-            && (consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_acquire) == 0);
 
-        const RuntimeFallbackPolicy fallbackPolicy {
-            .allowTransitionFallback = allowInitialAtomicFallback,
-            .allowRoutingAutomationFallback = allowInitialAtomicFallback,
-            .allowAdaptiveBankIndexFallback = allowInitialAtomicFallback,
-            .allowEqCoeffHashFallback = allowInitialAtomicFallback,
-            .allowRetireFallback = false
-        };
-
-        jassert(runtimeWorld != nullptr
-            || fallbackPolicy.allowTransitionFallback
-            || fallbackPolicy.allowRoutingAutomationFallback
-            || fallbackPolicy.allowAdaptiveBankIndexFallback
-            || fallbackPolicy.allowEqCoeffHashFallback
-            || fallbackPolicy.allowRetireFallback);
+        jassert(runtimeWorld != nullptr); // Bootstrap World guarantees non-null (#3.2.5)
 
         computation.engineState = makeEngineRuntimeState(current,
                                                          next,
                                                          policy,
                                                          fadeTimeSec,
                                                          active,
-                                                         runtimeWorld,
-                                                         fallbackPolicy);
+                                                         runtimeWorld);
         computation.engineState.revision = generation;
         computation.graphState = makeRuntimeGraphState(computation.engineState);
-        computation.graphState.generation = generation;
         computation.previousCommittedSequence = getLastCommittedPublicationSequence();
         return computation;
     }
@@ -2798,12 +2713,7 @@ public:
                 ptr->~RuntimePublishWorld();
                 convo::aligned_free(ptr);
             });
-            if (resetRevision)
-            {
-                convo::publishAtomic(engine_->runtimeGraphRevision,
-                                     static_cast<std::uint64_t>(0),
-                                     std::memory_order_release);
-            }
+            (void)resetRevision;
         }
 
     private:
@@ -2885,13 +2795,15 @@ public:
         auto* fading = (transitionActive && transition.next != nullptr)
             ? static_cast<DSPCore*>(transition.next)
             : nullptr;
-        const auto revision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
+        const auto revision = (publishedWorld != nullptr) ? publishedWorld->generation : static_cast<std::uint64_t>(0);
         const auto publishedCurrentUuid = (transition.current != nullptr)
             ? static_cast<DSPCore*>(transition.current)->runtimeUuid
             : 0;
         const auto publishedFadingUuid = (transitionActive && transition.next != nullptr)
             ? static_cast<DSPCore*>(transition.next)->runtimeUuid
             : 0;
+        const bool publishedWorldIsNull = (publishedWorld == nullptr);
+        const bool transitionCurrentIsNull = (transition.current == nullptr);
 
         const juce::String message = "[DIAG] runtime transition event origin="
             + juce::String(origin != nullptr ? origin : "unknown")
@@ -2901,7 +2813,9 @@ public:
             + " fadingUuid=" + juce::String(static_cast<juce::int64>(getUuid(fading)))
             + " publishRev=" + juce::String(static_cast<juce::int64>(revision))
             + " publishCurrentUuid=" + juce::String(static_cast<juce::int64>(publishedCurrentUuid))
-            + " publishFadingUuid=" + juce::String(static_cast<juce::int64>(publishedFadingUuid));
+            + " publishFadingUuid=" + juce::String(static_cast<juce::int64>(publishedFadingUuid))
+            + " worldNull=" + juce::String(static_cast<int>(publishedWorldIsNull))
+            + " transCurNull=" + juce::String(static_cast<int>(transitionCurrentIsNull));
         DBG(message);
         juce::Logger::writeToLog(message);
     }
@@ -3304,12 +3218,29 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
         return convo::isr::RetireEnqueueResult::Shutdown;
 
     const uint64_t epoch = markRetireEpoch();
-    if (enqueueRetireEpochBounded(ptr, deleter, epoch))
+
+    // Retire authority goes through coordinator (single entry point).
+    // Use direct EpochDomain path as primary for robustness during transition.
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] — transitional, coordinator is the authority
+    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
+#pragma warning(pop)
+    {
+        runtimePublicationBridge_.setRetireBacklogCount(
+            static_cast<std::uint64_t>(m_epochDomain.pendingRetireCount()));
         return convo::isr::RetireEnqueueResult::Success;
+    }
 
     m_epochDomain.reclaimRetired();
-    if (enqueueRetireEpochBounded(ptr, deleter, epoch))
+#pragma warning(push)
+#pragma warning(disable : 4996)
+    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
+#pragma warning(pop)
+    {
+        runtimePublicationBridge_.setRetireBacklogCount(
+            static_cast<std::uint64_t>(m_epochDomain.pendingRetireCount()));
         return convo::isr::RetireEnqueueResult::Success;
+    }
 
     constexpr std::size_t kRetireFallbackPressureThreshold = 512;
     constexpr std::size_t kRetireFallbackQueueFullThreshold = 4096;
@@ -3318,7 +3249,6 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
     publishAtomic(fallbackQueueDepth_, fallbackDepthU64, std::memory_order_release);
     publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
     runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepthU64);
-    runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
     runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepthU64);
 
     // Fallback queue remains bounded only if we periodically retry enqueue.
@@ -3611,6 +3541,8 @@ public:
         // ==================================================================
 
 };
+
+#pragma warning(pop) // EngineRuntime deprecation — transitional
 
 inline bool AudioEngine::enqueueLearningCommand(const LearningCommand& cmd) noexcept
 {

@@ -2,12 +2,10 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
-#include <limits>
 #include <immintrin.h>
 
 #include <mkl_vml.h>
@@ -157,6 +155,105 @@ const char* toString(BuildError error) noexcept
 }
 
 convo::aligned_unique_ptr<RuntimePublishWorld>
+RuntimeBuilder::createBootstrapWorld() noexcept
+{
+    const auto publicationIdentity = engine.reserveRuntimePublicationIdentity();
+    const auto bootstrapGeneration = publicationIdentity.generation;
+    const auto bootstrapWorldId = publicationIdentity.worldId;
+    const auto bootstrapPublicationSequence = publicationIdentity.publicationSequence;
+
+    auto worldOwner = RuntimePublishWorld::createForBuilder(RuntimePublishWorld::BuilderToken {});
+    worldOwner->assertMutable();
+
+    // Identity
+    worldOwner->worldId = bootstrapWorldId;
+    worldOwner->generation = bootstrapGeneration;
+    worldOwner->runtimeVersion = bootstrapGeneration;
+    worldOwner->transitionId = 0;
+
+    // Schema
+    worldOwner->schemaVersion = convo::isr::kRuntimeSemanticSchemaVersion;
+    worldOwner->metadata.schemaVersion = worldOwner->schemaVersion;
+    worldOwner->metadata.publicationSequence = bootstrapPublicationSequence;
+
+    // GenerationSemantic
+    worldOwner->generationSemantic.runtimeGeneration = bootstrapGeneration;
+    worldOwner->generationSemantic.activationEpoch = bootstrapGeneration;
+
+    // Topology (all zero/default: no active runtime, no fading runtime)
+    worldOwner->topology.runtimeUuid = 0;
+    worldOwner->topology.fadingRuntimeUuid = 0;
+    worldOwner->topology.hasFadingRuntime = false;
+
+    // Routing (default processing order 0, no bypass)
+    worldOwner->routing.processingOrder = 0;
+    worldOwner->routing.eqBypassed = false;
+    worldOwner->routing.convBypassed = false;
+
+    // Execution (idle, no transition)
+    worldOwner->execution.transitionActive = false;
+    worldOwner->execution.transitionPolicy = 0;
+    worldOwner->execution.latencyCompensationSamples = 0;
+    worldOwner->execution.crossfadeStartDelayBlocks = 0;
+    worldOwner->execution.crossfadeDryHoldSamples = 0;
+
+    // Publication
+    worldOwner->publication.sequenceId = bootstrapPublicationSequence;
+    worldOwner->publication.epoch = static_cast<convo::isr::PublicationEpoch>(bootstrapGeneration);
+    worldOwner->publication.mappedRuntimeGeneration = bootstrapGeneration;
+    worldOwner->publication.previousSequenceId = 0;
+
+    // Overlap (no crossfade)
+    worldOwner->overlap.useDryAsOld = false;
+    worldOwner->overlap.firstIrDryCrossfadePending = false;
+    worldOwner->overlap.dryScaleTarget = 1.0;
+    worldOwner->overlap.fadeTimeSec = 0.0;
+
+    // Retire (zero backlog)
+    worldOwner->retire.retireEpoch = bootstrapGeneration;
+    worldOwner->retire.retireBacklog = 0;
+    worldOwner->retire.deferredResidency = 0;
+
+    // Timing
+    worldOwner->timing.sampleRateHz = 48000.0;
+    worldOwner->timing.queuedFadeTimeSec = 0.0;
+
+    // Latency (zero)
+    worldOwner->latency.latencyDelayOld = 0;
+    worldOwner->latency.latencyDelayNew = 0;
+    worldOwner->latency.latencyDeltaSamples = 0;
+
+    // Resource (defaults)
+    worldOwner->resource.oversamplingFactor = 1;
+    worldOwner->resource.ditherBitDepth = 0;
+    worldOwner->resource.noiseShaperType = 0;
+
+    // Affinity
+    worldOwner->affinity.rebuildWorkerRunning = false;
+
+    // Automation (defaults)
+    worldOwner->automation.eqBypassed = false;
+    worldOwner->automation.convBypassed = false;
+    worldOwner->automation.softClipEnabled = false;
+    worldOwner->automation.saturationAmount = 0.0;
+    worldOwner->automation.inputHeadroomGain = 1.0;
+    worldOwner->automation.outputMakeupGain = 1.0;
+    worldOwner->automation.convolverInputTrimGain = 1.0;
+
+    // Coefficient (no adaptive coefficients yet)
+    worldOwner->coefficient.adaptiveCoeffBankIndex = -1;
+    worldOwner->coefficient.adaptiveCoeffGeneration = 0;
+    worldOwner->coefficient.eqCoeffHash = 0;
+
+    // ProjectionFreshness
+    worldOwner->projectionFreshness.projectionGeneration = bootstrapGeneration;
+    worldOwner->projectionFreshness.projectionRevision = bootstrapGeneration;
+    worldOwner->projectionFreshness.maxStalenessWindows = 1u;
+
+    return worldOwner;
+}
+
+convo::aligned_unique_ptr<RuntimePublishWorld>
 RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
                                          AudioEngine::DSPCore* next,
                                          convo::TransitionPolicy policy,
@@ -195,9 +292,28 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->generationSemantic.runtimeGeneration = nextGraphGeneration;
     worldOwner->generationSemantic.activationEpoch = nextGraphGeneration;
 
-    worldOwner->topology.runtimeUuid = graphState.runtimeUuid;
-    worldOwner->topology.fadingRuntimeUuid = graphState.fadingRuntimeUuid;
-    worldOwner->topology.hasFadingRuntime = (graphState.fadingNode != nullptr);
+    // 3.2.9: RuntimeGraph から Authoritative フィールド削除済み。
+    // topology/routing/resource/automation 等の Semantic 構造体から値を参照。
+    {
+        auto* dspCurrent = static_cast<AudioEngine::DSPCore*>(engineState.current);
+        auto* dspFading = static_cast<AudioEngine::DSPCore*>(engineState.fading);
+        const bool hasFading = (graphState.fadingNode != nullptr);
+
+        worldOwner->topology.runtimeUuid = (dspCurrent != nullptr) ? dspCurrent->runtimeUuid : 0;
+        worldOwner->topology.fadingRuntimeUuid = (dspFading != nullptr) ? dspFading->runtimeUuid : 0;
+        worldOwner->topology.hasFadingRuntime = hasFading;
+
+        const double sr = (dspCurrent != nullptr) ? dspCurrent->sampleRate : 48000.0;
+        worldOwner->timing.sampleRateHz = sr;
+        worldOwner->timing.queuedFadeTimeSec = engineState.queuedFadeTimeSec;
+
+        worldOwner->resource.oversamplingFactor = (dspCurrent != nullptr)
+            ? static_cast<int>(dspCurrent->oversamplingFactor) : 1;
+        worldOwner->resource.ditherBitDepth = (dspCurrent != nullptr)
+            ? dspCurrent->ditherBitDepth : 0;
+        worldOwner->resource.noiseShaperType = (dspCurrent != nullptr)
+            ? static_cast<int>(dspCurrent->noiseShaperType) : 0;
+    }
 
     worldOwner->routing.processingOrder = engineState.processingOrder;
     worldOwner->routing.eqBypassed = engineState.eqBypassed;
@@ -223,8 +339,6 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->retire.retireBacklog = engineState.retireBacklog;
     worldOwner->retire.deferredResidency = engineState.deferredResidency;
 
-    worldOwner->timing.sampleRateHz = graphState.sampleRate;
-    worldOwner->timing.queuedFadeTimeSec = engineState.queuedFadeTimeSec;
     // activationEpoch is derived from generationSemantic.activationEpoch (#17 Sprint-1)
     // Do not set timing.activationEpoch directly
 
@@ -235,10 +349,6 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     // SchedulingSemantic fields are derived from ExecutionSemantic (#16 Sprint-1)
     // Do not set scheduling.* directly - they mirror execution.* for backward compatibility
     // TODO: Remove SchedulingSemantic entirely after all consumers migrate to execution.*
-
-    worldOwner->resource.oversamplingFactor = graphState.oversamplingFactor;
-    worldOwner->resource.ditherBitDepth = graphState.ditherBitDepth;
-    worldOwner->resource.noiseShaperType = graphState.noiseShaperType;
 
     worldOwner->affinity.rebuildWorkerRunning = engineState.rebuildWorkerRunning;
 
@@ -255,7 +365,7 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     worldOwner->coefficient.eqCoeffHash = engineState.eqCoeffHash;
 
     worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;
-    worldOwner->projectionFreshness.projectionRevision = graphState.generation;
+    worldOwner->projectionFreshness.projectionRevision = nextGraphGeneration;
     worldOwner->projectionFreshness.maxStalenessWindows = 1u;
 
     if (sealedSnapshot != nullptr)
@@ -273,17 +383,11 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         worldOwner->engine.outputMakeupGain = sealedBuildInput.outputMakeupGain;
         worldOwner->engine.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
 
-        worldOwner->graph.sampleRate = sealedBuildInput.sampleRate;
-        worldOwner->graph.ditherBitDepth = sealedBuildInput.ditherBitDepth;
-        worldOwner->graph.noiseShaperType = sealedBuildInput.noiseShaperType;
-        worldOwner->graph.oversamplingFactor = sealedBuildInput.oversamplingFactor;
-        worldOwner->graph.eqBypassed = sealedBuildInput.eqBypassed;
-        worldOwner->graph.convBypassed = sealedBuildInput.convBypassed;
-        worldOwner->graph.softClipEnabled = sealedBuildInput.softClipEnabled;
-        worldOwner->graph.saturationAmount = sealedBuildInput.saturationAmount;
-        worldOwner->graph.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;
-        worldOwner->graph.outputMakeupGain = sealedBuildInput.outputMakeupGain;
-        worldOwner->graph.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
+        // 3.2.9: graph の重複 Authority フィールドは削除。
+        // 値は worldOwner->resource/automation/routing/timing 等の Semantic 構造体から参照。
+        worldOwner->resource.oversamplingFactor = sealedBuildInput.oversamplingFactor;
+        worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;
+        worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;
 
         worldOwner->routing.processingOrder = sealedBuildInput.processingOrder;
         worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;

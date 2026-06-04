@@ -151,7 +151,7 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
     const double srSnapshot = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
     const int bsSnapshot = convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire);
     const bool deferCategory = (kind == convo::RebuildKind::Structural) && !(srSnapshot > 0.0 && bsSnapshot > 0);
-    const int queuedGenerationSnapshot = convo::consumeAtomic(rebuildGeneration, std::memory_order_acquire);
+    const int queuedGenerationSnapshot = convo::consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire);
     const int committedGenerationSnapshot = convo::consumeAtomic(lastCommittedRebuildGeneration, std::memory_order_acquire);
     const bool rebuildOutstanding = queuedGenerationSnapshot > committedGenerationSnapshot;
 
@@ -536,8 +536,13 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
         return;
     }
 
-    if (noiseShaperLearner && noiseShaperLearner->isRunning())
-        noiseShaperLearner->stopLearning();
+    // NOTE: 意図的に learner を停止しない。rebuild 中も learner は稼働を継続し、
+    // DSP commit 後に captureSessionSignature() で自然なセッション再設定を行う。
+    // rebuild 完了時に DSPReady が enqueue され、processLearningCommands が
+    // learningRuntimeState に応じて適切に再開を処理する。
+    // ここで stopLearning() を呼ぶと learningRuntimeState が Running のまま
+    // ワーカーだけが停止し、DSPReady が WaitingForDSP 以外では再開しないため、
+    // 学習が永久に停止する不具合の原因となる。
 
     // rebuild 開始時のパラメータを凍結し、
     // task 作成・重複判定・runtime command で同一 snapshot を使う。
@@ -613,7 +618,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
 
         if (!blockedAsDuplicate)
         {
-            generation = ++rebuildGeneration;
+            generation = ++rebuildRequestGeneration;
             task.generation = generation;
             task.runtimeBuildSnapshot = sealRuntimeBuildSnapshot(finalizeRuntimeBuildSnapshot(
                 captureRuntimeBuildSnapshot(task.buildInput,

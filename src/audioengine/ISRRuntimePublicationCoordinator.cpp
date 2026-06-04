@@ -19,6 +19,7 @@ RuntimePublicationCoordinator::RuntimePublicationCoordinator()
     , pressureNormalizedWindows_(0)
     , swapPending_(false)
     , state_(CoordinatorState::Bootstrapping)
+    , retireAuthorityCount_(0)
 {
 }
 
@@ -131,6 +132,36 @@ void RuntimePublicationCoordinator::retire(RetireAuthority,
 
     const auto backlog = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire) + 1u;
     setRetireBacklogCount(backlog);
+}
+
+RetireEnqueueResult RuntimePublicationCoordinator::enqueueRetire(RetireAuthority,
+                                                                   EpochDomain& domain,
+                                                                   void* ptr,
+                                                                   void (*deleter)(void*),
+                                                                   std::uint64_t epoch) noexcept
+{
+    convo::fetchAddAtomic(retireAuthorityCount_,
+                          static_cast<std::uint64_t>(1),
+                          std::memory_order_acq_rel);
+
+    if (ptr == nullptr || deleter == nullptr)
+        return RetireEnqueueResult::Success;
+
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] on EpochDomain::enqueueRetire — coordinator is the authorized caller
+    if (!domain.enqueueRetire(ptr, deleter, epoch))
+#pragma warning(pop)
+        return RetireEnqueueResult::QueueFull;
+
+    const auto backlog = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire) + 1u;
+    setRetireBacklogCount(backlog);
+
+    return RetireEnqueueResult::Success;
+}
+
+std::uint64_t RuntimePublicationCoordinator::retireAuthorityCount() const noexcept
+{
+    return convo::consumeAtomic(retireAuthorityCount_, std::memory_order_acquire);
 }
 
 const void* RuntimePublicationCoordinator::getCurrent() const noexcept {

@@ -1,0 +1,62 @@
+{
+  "manifest_version": 1,
+  "generated_from": "pub_boundary_registry.json",
+  "description": "Publication boundary manifest. Lists all authorized publication boundary functions.",
+  "boundary_functions": [
+    {
+      "name": "convo::RuntimePublicationCoordinator<World,Handle,Bridge>::publishWorld",
+      "file": "src/core/RuntimePublicationCoordinator.h",
+      "category": "publication_coordinator"
+    },
+    {
+      "name": "convo::RuntimeStore<World,Coordinator>::WriteAccess::publishAndSwap",
+      "file": "src/core/RuntimeStore.h",
+      "category": "store_write_access"
+    },
+    {
+      "name": "convo::RuntimePublicationCoordinator<World,Handle,Bridge>::clearPublishedRuntimeSnapshotsNonRt",
+      "file": "src/core/RuntimePublicationCoordinator.h",
+      "category": "publication_coordinator"
+    },
+    {
+      "name": "convo::isr::RuntimePublicationCoordinator::commit",
+      "file": "src/audioengine/ISRRuntimePublicationCoordinator.cpp",
+      "category": "publication_coordinator"
+    },
+    {
+      "name": "convo::isr::RuntimePublicationCoordinator::retire",
+      "file": "src/audioengine/ISRRuntimePublicationCoordinator.cpp",
+      "category": "retire_coordinator"
+    },
+    {
+      "name": "AudioEngine::publishRuntimeStateNonRt",
+      "file": "src/audioengine/AudioEngine.Commit.cpp",
+      "category": "engine_publish"
+    },
+    {
+      "name": "AudioEngine::onRuntimePublishedNonRt",
+      "file": "src/audioengine/AudioEngine.Commit.cpp",
+      "category": "engine_callback"
+    },
+    {
+      "name": "AudioEngine::onRuntimeRetiredNonRt",
+      "file": "src/audioengine/AudioEngine.Commit.cpp",
+      "category": "engine_callback"
+    },
+    {
+      "name": "AudioEngine::runPublicationPrecheckNonRt",
+      "file": "src/audioengine/AudioEngine.Commit.cpp",
+      "category": "engine_precheck"
+    },
+    {
+      "name": "EpochDomain::enqueueRetire",
+      "file": "src/core/EpochDomain.h",
+      "category": "epoch_domain"
+    },
+    {
+      "name": "EpochDomain::reclaimRetired",
+      "file": "src/core/EpochDomain.h",
+      "category": "epoch_domain"
+    }
+  ]
+}

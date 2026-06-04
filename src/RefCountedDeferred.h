@@ -15,11 +15,14 @@ public:
     void release(convo::EpochDomain& epochDomain) {
         if (convo::fetchSubAtomic(refCount, 1, std::memory_order_acq_rel) == 1) { // acq_rel: acquire で全 addRef/tryAddRef の release と HB し最後の参照を確認; release で fence の acquire と HB
             std::atomic_thread_fence(std::memory_order_acquire); // acquire: 上記 fetchSub acq_rel の release 側と HB し、他スレッドの全 addRef/release を可視化してから retire
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] — unused template (inherited but never called)
             epochDomain.enqueueRetire(
                 static_cast<T*>(this),
                 [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
                 epochDomain.currentEpoch()
             );
+#pragma warning(pop)
         }
     }
 

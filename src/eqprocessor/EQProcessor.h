@@ -34,6 +34,8 @@
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
 
+namespace convo::isr { class RuntimePublicationCoordinator; }
+
 //--------------------------------------------------------------
 // バンドタイプ列挙型
 //--------------------------------------------------------------
@@ -382,6 +384,12 @@ public:
 
     static EQCoeffsBiquad svfToDisplayBiquad(const EQCoeffsSVF& svf) noexcept;
 
+    // Retire authority: set coordinator for unified retire path
+    void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept
+    {
+        m_retireCoordinator = coordinator;
+    }
+
 private:
     //----------------------------------------------------------
     // プライベートヘルパー関数
@@ -405,6 +413,7 @@ private:
 
     // スムージング処理
     convo::EpochDomain m_epochDomain;
+    convo::isr::RuntimePublicationCoordinator* m_retireCoordinator{nullptr};
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
     convo::RCUReader rcuReader { m_epochDomain };

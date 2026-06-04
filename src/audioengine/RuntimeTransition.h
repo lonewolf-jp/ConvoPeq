@@ -27,7 +27,7 @@ struct TransitionState
 
 // Phase-2 migration target: single runtime snapshot publish for audio-thread reads.
 // This keeps ownership out-of-band and only mirrors the runtime-visible state.
-struct EngineRuntime
+struct [[deprecated("Authority removed, use RuntimeSemanticSchema")]] EngineRuntime
 {
     // AuthorityClass::Derived
     void* current = nullptr;

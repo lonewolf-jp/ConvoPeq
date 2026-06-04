@@ -118,35 +118,6 @@ public:
         bridge_.retireRuntimePublishWorldNonRt(oldWorld, false);
     }
 
-    void publishState(Handle current,
-                      Handle next,
-                      convo::TransitionPolicy policy,
-                      double fadeTimeSec,
-                      bool active,
-                      const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept
-    {
-        // DEPRECATED: Wrapper for backward compatibility (#5/#7 Sprint-2)
-        // This method should NOT be called in production code.
-        // Callers must use publishWorld() with pre-built RuntimePublishWorld from RuntimeBuilder.
-        // 
-        // Build authority belongs to RuntimeBuilder, not Bridge.
-        // Publication authority belongs to RuntimePublicationCoordinator.
-        // Bridge responsibility: validate / didPublish / willRetire / retire ONLY.
-        
-        // This wrapper intentionally fails at compile-time if Bridge has buildRuntimePublishWorld()
-        // to enforce the separation of concerns.
-        static_assert(!requires(Bridge bridge) { 
-            bridge.buildRuntimePublishWorld(current, next, policy, fadeTimeSec, active, sealedSnapshot); 
-        }, "Bridge must NOT have buildRuntimePublishWorld(). Use RuntimeBuilder directly.");
-        
-        (void)current;
-        (void)next;
-        (void)policy;
-        (void)fadeTimeSec;
-        (void)active;
-        (void)sealedSnapshot;
-    }
-
 private:
     Bridge bridge_;
     WriteAccess writeAccess_;

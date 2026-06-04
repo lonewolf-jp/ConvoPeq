@@ -156,31 +156,16 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
         {
             // H5: listener callback から直接 rebuild を発火せず、
             // snapshot command 経由で worker に反映を委譲する。
-            if (!enqueueSnapshotCommand())
-            {
-                diagLog("[DIAG] convolverParamsChanged: enqueueSnapshotCommand failed");
-                emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
-                                     intentId,
-                                     RebuildTelemetryReason::SnapshotEnqueueFailed,
-                                     RebuildTelemetryDecision::Dropped,
-                                     uiStructuralHash,
-                                     0,
-                                     RebuildTelemetryClass::Structural,
-                                     RebuildTelemetryPolicy::NA,
-                                     "N/A");
-            }
-            else
-            {
-                emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
-                                     intentId,
-                                     RebuildTelemetryReason::SnapshotEnqueued,
-                                     RebuildTelemetryDecision::Dispatched,
-                                     uiStructuralHash,
-                                     0,
-                                     RebuildTelemetryClass::Structural,
-                                     RebuildTelemetryPolicy::NA,
-                                     "N/A");
-            }
+            submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
+            emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
+                                 intentId,
+                                 RebuildTelemetryReason::SnapshotEnqueued,
+                                 RebuildTelemetryDecision::Dispatched,
+                                 uiStructuralHash,
+                                 0,
+                                 RebuildTelemetryClass::Structural,
+                                 RebuildTelemetryPolicy::NA,
+                                 "N/A");
         }
 
         if (needsStructuralRebuild && srForRebuild > 0.0)

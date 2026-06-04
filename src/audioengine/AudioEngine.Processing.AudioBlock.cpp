@@ -129,7 +129,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     const auto callbackEpoch = convo::fetchAddAtomic(rtLocalState_.audioCallbackEpochCounter, uint64_t{1}, std::memory_order_acq_rel) + 1u;
     const auto sampleCursor = convo::fetchAddAtomic(rtLocalState_.audioSampleCursorCounter, static_cast<uint64_t>(numSamples), std::memory_order_acq_rel);
-    const auto graphRevision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
     const auto packedActiveHandle = static_cast<std::uint64_t>(
         reinterpret_cast<uintptr_t>(resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandleRef)));
 
@@ -142,7 +141,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         sampleCursor,
         callbackEpoch,
         runtimeScope.lifecycleToken.epochId,
-        graphRevision,
         &rtTraceRelay_);
 
     rtTraceRelay_.enqueue({ rtFrame.sampleCursor, 0xA001u, static_cast<std::uint32_t>(numSamples) });
@@ -296,3 +294,4 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
     }
 }
+

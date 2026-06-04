@@ -8,8 +8,9 @@
 #include <cstdint>
 #include "ObservedRuntime.h"
 #include "SnapshotFadeState.h"
-#include "SnapshotRetireManager.h"
 #include "SnapshotSlotStore.h"
+#include "EpochDomain.h"
+#include "SnapshotFactory.h"
 
 namespace convo {
 
@@ -36,18 +37,35 @@ public:
     }
 
     ~SnapshotCoordinator() noexcept {
+        constexpr auto snapshotDeleter = [](void* ptr) noexcept
+        {
+            SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
+        };
+
         const uint64_t retireEpoch = m_epochDomain->publish();
 
         // acq_rel ×2: acquire → 直前の publishNew/switchImmediate release と HB して旧ポインタ取得；
         //              release → null を公開し後続 acquire と HB してダブルフリーを防止。
         GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
-        m_retire.retire(snap, retireEpoch);
+        if (snap)
+        {
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
+            m_epochDomain->enqueueRetire(snap, snapshotDeleter, retireEpoch);
+#pragma warning(pop)
+        }
 
         // acq_rel: startFade の m_target release と HB し、target を回収して null を公開。
         snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
-        m_retire.retire(snap, retireEpoch);
+        if (snap)
+        {
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
+            m_epochDomain->enqueueRetire(snap, snapshotDeleter, retireEpoch);
+#pragma warning(pop)
+        }
 
-        m_retire.reclaim(*m_epochDomain);
+        m_epochDomain->reclaimRetired();
     }
 
     // observeCurrentRuntime:
@@ -62,20 +80,28 @@ public:
     }
 
     void switchImmediate(GlobalSnapshot* newSnap) noexcept {
+        constexpr auto snapshotDeleter = [](void* ptr) noexcept
+        {
+            SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
+        };
+
         resetFadeStateAndRetireTarget();
         // release: 新スナップを公開し、observeCurrentRuntime/updateFade の acquire と HB 。
         //          旧ポインタ回収は release で十分（publishNew と同一 NonRT スレッドから呼ぶ前提）。
         GlobalSnapshot* oldSnap = m_slots.exchangeCurrent(newSnap, std::memory_order_release);
         if (oldSnap) {
             uint64_t newEpoch = m_epochDomain->publish();
-            m_retire.retire(oldSnap, newEpoch);
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
+            m_epochDomain->enqueueRetire(oldSnap, snapshotDeleter, newEpoch);
+#pragma warning(pop)
         }
     }
 
     void startFade(GlobalSnapshot* target, int fadeSamples) noexcept;
 
-    void reclaim(const EpochDomain& core) noexcept {
-        m_retire.reclaim(core);
+    void reclaim(const EpochDomain&) noexcept {
+        m_epochDomain->reclaimRetired();
     }
 
     bool updateFade(float& outAlpha,
@@ -125,7 +151,6 @@ private:
     EpochDomain* m_epochDomain;
     SnapshotSlotStore m_slots;
     SnapshotFadeState m_fade;
-    SnapshotRetireManager m_retire;
 };
 
 } // namespace convo

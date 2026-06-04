@@ -22,6 +22,9 @@ AudioEngine::AudioEngine()
     convo::publishAtomic(publicationLog.retiredHead, publicationLogSentinel, std::memory_order_release); // release: drainPublicationLog の acquire と HB
 
     uiConvolverProcessor.setRcuProvider(*this);
+    uiConvolverProcessor.setRetireCoordinator(&runtimePublicationBridge_);
+    // Route EQ retirement through coordinator
+    uiEqEditor.setRetireCoordinator(&runtimePublicationBridge_);
     // 必要な初期化処理があればここに追加
 }
 
@@ -58,7 +61,7 @@ AudioEngine::~AudioEngine()
                          resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                          nullptr);
 
-        convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel); // acq_rel: rebuild observer の acquire と HB
+        convo::fetchAddAtomic(rebuildRequestGeneration, 1, std::memory_order_acq_rel); // acq_rel: rebuild observer の acquire と HB
 
         // active runtime slot / fading runtime slot はここでスロットを切り離すだけにして、
         // 実体の解放は retireDSP() → deferred delete / epoch drain に寄せる。

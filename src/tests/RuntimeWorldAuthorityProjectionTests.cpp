@@ -202,11 +202,7 @@ namespace {
         return false;
     if (!contains(header, "? static_cast<DSPCore*>(runtimeWorld->engine.current)"))
         return false;
-    if (!contains(header, "struct RuntimeFallbackPolicy"))
-        return false;
-    if (!contains(header, "const bool allowInitialAtomicFallback = (runtimeWorld == nullptr)"))
-        return false;
-    if (!contains(header, "&& (consumeAtomic(lastCommittedPublicationSequence_, std::memory_order_acquire) == 0)"))
+    if (!contains(header, "// Bootstrap World guarantees non-null (#3.2.5)"))
         return false;
     if (!contains(header, "&& (consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_acquire) == 0);"))
         return false;

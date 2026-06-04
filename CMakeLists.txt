@@ -48,6 +48,12 @@ else()
     message(STATUS "clang-tidy build-time integration disabled.")
 endif()
 
+# CONVO_CI_BUILD 定義時は NUC_DEBUG_GUARDS も有効化（デバッグガードの CI 対応）
+if(DEFINED ENV{CONVO_CI_BUILD})
+    add_compile_definitions(NUC_DEBUG_GUARDS)
+    message(STATUS "CI build detected: NUC_DEBUG_GUARDS enabled")
+endif()
+
 #------------------------------------------------------------
 # ISR Runtime Regression Tests (minimal CTest)
 #------------------------------------------------------------

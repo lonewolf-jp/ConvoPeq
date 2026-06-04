@@ -38,10 +38,11 @@ void AudioEngine::startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, 
 
 void AudioEngine::stopNoiseShaperLearning()
 {
+    juce::Logger::writeToLog("[AudioEngine] stopNoiseShaperLearning called");
     const LearningCommand cmd {
         LearningCommand::Type::Stop,
         false,
-        convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire), // acquire: publishAtomic release と HB
+        convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire),
         pendingIRGeneration
     };
 
@@ -51,9 +52,12 @@ void AudioEngine::stopNoiseShaperLearning()
     }
 
     if (noiseShaperLearner)
+    {
+        juce::Logger::writeToLog("[AudioEngine] stopNoiseShaperLearning: calling learner->stopLearning()");
         noiseShaperLearner->stopLearning();
+    }
 
-    convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
+    convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release);
 }
 
 
@@ -116,14 +120,17 @@ void AudioEngine::processLearningCommands() noexcept
 
                 const auto runtimeReadHandle = readControlRuntimeHandle();
                 auto* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
-                // irGeneration チェックを削除: DSP が有効かつ型が適切であれば即座に学習開始可能
                 const bool dspReady = (dsp != nullptr)
                     && (dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder);
+
+                juce::Logger::writeToLog("[AudioEngine] processLearningCommands: Start state="
+                    + juce::String(static_cast<int>(learningRuntimeState))
+                    + " dspReady=" + juce::String(static_cast<int>(dspReady)));
 
                 if (!dspReady)
                 {
                     learningRuntimeState = LearningRuntimeState::WaitingForDSP;
-                    convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
+                    convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release);
                     break;
                 }
 
@@ -135,6 +142,7 @@ void AudioEngine::processLearningCommands() noexcept
                         requestedLearningMode
                     };
 
+                    juce::Logger::writeToLog("[AudioEngine] processLearningCommands: enqueue Stop before Start (state was Running)");
                     if (!enqueueLearnerDispatch(stopAction))
                     {
                         DBG("[AudioEngine] processLearningCommands: learner stop queue overflow");
@@ -150,12 +158,13 @@ void AudioEngine::processLearningCommands() noexcept
                 if (enqueueLearnerDispatch(startAction))
                 {
                     learningRuntimeState = LearningRuntimeState::Running;
-                    convo::publishAtomic(adaptiveCaptureActiveRt, true, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
+                    convo::publishAtomic(adaptiveCaptureActiveRt, true, std::memory_order_release);
+                    juce::Logger::writeToLog("[AudioEngine] processLearningCommands: Start dispatch enqueued ok");
                 }
                 else
                 {
                     learningRuntimeState = LearningRuntimeState::WaitingForDSP;
-                    convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
+                    convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release);
                     DBG("[AudioEngine] processLearningCommands: learner start queue overflow");
                 }
                 break;
@@ -187,6 +196,19 @@ void AudioEngine::processLearningCommands() noexcept
                 const bool shouldRestart = (learningRuntimeState != LearningRuntimeState::Idle);
                 requestedLearningGeneration = cmd.irGeneration;
 
+                juce::Logger::writeToLog("[AudioEngine] processLearningCommands: IRChanged state="
+                    + juce::String(static_cast<int>(learningRuntimeState))
+                    + " shouldRestart=" + juce::String(static_cast<int>(shouldRestart)));
+
+                // When learner is actively Running, IRChanged during DSP replacement
+                // (e.g. HardReset) is not an actual IR change. Don't stop the learner.
+                if (learningRuntimeState == LearningRuntimeState::Running)
+                {
+                    currentIRGeneration = cmd.irGeneration;
+                    juce::Logger::writeToLog("[AudioEngine] processLearningCommands: IRChanged suppressed (Running)");
+                    break;
+                }
+
                 const LearnerDispatchAction stopAction {
                     LearnerDispatchAction::Type::Stop,
                     false,
@@ -207,7 +229,7 @@ void AudioEngine::processLearningCommands() noexcept
                 {
                     learningRuntimeState = LearningRuntimeState::Idle;
                 }
-                convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
+                convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release);
                 break;
             }
 
@@ -215,7 +237,9 @@ void AudioEngine::processLearningCommands() noexcept
             {
                 currentIRGeneration = cmd.irGeneration;
 
-                // irGeneration チェックを削除: WaitingForDSP 状態であれば遅延なく学習開始
+                juce::Logger::writeToLog("[AudioEngine] processLearningCommands: DSPReady state="
+                    + juce::String(static_cast<int>(learningRuntimeState)));
+
                 if (learningRuntimeState == LearningRuntimeState::WaitingForDSP)
                 {
                     const LearnerDispatchAction startAction {
@@ -227,11 +251,12 @@ void AudioEngine::processLearningCommands() noexcept
                     if (enqueueLearnerDispatch(startAction))
                     {
                         learningRuntimeState = LearningRuntimeState::Running;
-                        convo::publishAtomic(adaptiveCaptureActiveRt, true, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
+                        convo::publishAtomic(adaptiveCaptureActiveRt, true, std::memory_order_release);
+                        juce::Logger::writeToLog("[AudioEngine] processLearningCommands: DSPReady -> enqueued Start dispatch");
                     }
                     else
                     {
-                        convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release); // release: audio thread consumeAtomic acquire と HB
+                        convo::publishAtomic(adaptiveCaptureActiveRt, false, std::memory_order_release);
                         DBG("[AudioEngine] processLearningCommands: DSPReady learner start queue overflow");
                     }
                 }

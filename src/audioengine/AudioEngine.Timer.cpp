@@ -63,7 +63,7 @@ void AudioEngine::timerCallback()
     {
         auto* currentRuntime = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
         auto* fadingRuntime = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
-        const uint64_t revision = consumeAtomic(runtimeGraphRevision, std::memory_order_acquire);
+        const uint64_t revision = (runtimeWorld != nullptr) ? runtimeWorld->generation : static_cast<std::uint64_t>(0);
         const uint64_t currentUuid = (currentRuntime != nullptr) ? currentRuntime->runtimeUuid : 0;
         const uint64_t fadingUuid = (fadingRuntime != nullptr) ? fadingRuntime->runtimeUuid : 0;
         const uint64_t transitionCurrentUuid = currentUuid;
@@ -199,9 +199,12 @@ void AudioEngine::timerCallback()
         && !m_coordinator.isFading()
         && currentSnapshot == nullptr)
     {
-        diagLog("[VERIFY] snapshot bootstrap: current was null, requesting worker snapshot refresh");
-        if (!enqueueSnapshotCommand())
-            diagLog("[VERIFY] snapshot bootstrap: enqueueSnapshotCommand failed");
+        diagLog("[VERIFY] snapshot bootstrap: current was null, creating snapshot from current state");
+        const auto snapshotGeneration = (runtimeWorld != nullptr)
+            ? runtimeWorld->generation
+            : convo::consumeAtomic(lastCommittedRuntimeGeneration_, std::memory_order_acquire);
+        createSnapshotFromCurrentState(snapshotGeneration);
+        diagLog("[VERIFY] snapshot bootstrap: createSnapshotFromCurrentState done");
     }
 
     {
@@ -299,7 +302,7 @@ void AudioEngine::timerCallback()
             ? (static_cast<double>(elapsedTicks) * 1000.0 / static_cast<double>(ticksPerSecond))
             : 0.0;
 
-        const int queuedGeneration = convo::consumeAtomic(rebuildGeneration, std::memory_order_acquire);
+        const int queuedGeneration = convo::consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire);
         const int committedGeneration = convo::consumeAtomic(lastCommittedRebuildGeneration, std::memory_order_acquire);
         const bool outstandingRebuild = queuedGeneration > committedGeneration;
         const bool irLoaded = uiConvolverProcessor.isIRLoaded();

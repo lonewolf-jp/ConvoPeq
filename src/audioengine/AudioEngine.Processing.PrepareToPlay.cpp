@@ -17,6 +17,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     auto lifecycleToken = lifecycleRuntime_.enterPrepare(samplesPerBlockExpected, static_cast<int>(sampleRate));
 
     diagLog("[DIAG] prepareToPlay: enter spb=" + juce::String(samplesPerBlockExpected) + " sr=" + juce::String(sampleRate, 2));
+    diagLog("[DIAG] prepareToPlay: lifecycleToken acquired");
 
     const auto rollbackPrepareFailure = [this]() noexcept
     {
@@ -60,7 +61,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     if (previousState == EngineLifecycleState::Prepared)
         diagLog("[DIAG] prepareToPlay: re-prepare requested without release; proceeding with safe reinitialization");
 
+    diagLog("[DIAG] prepareToPlay: lifecycle state set to Preparing");
     setShutdownPhase(ShutdownPhase::Running, "prepareToPlay");
+    diagLog("[DIAG] prepareToPlay: shutdownPhase set to Running");
 
     // releaseResources() で停止済みの場合に備えて、必要なら rebuild thread を再起動する。
     if (!rebuildThread.joinable())
@@ -72,7 +75,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             pendingTask = RebuildTask{};
         }
         rebuildThread = std::thread(&AudioEngine::rebuildThreadLoop, this);
+        diagLog("[DIAG] prepareToPlay: rebuild thread started");
     }
+    diagLog("[DIAG] prepareToPlay: rebuild thread check done");
 
     // --- AudioEngine::prepareToPlay ---
     // ※本関数は「AudioThread停止中のみ呼ぶ」ことがJUCE AudioSource仕様上の前提です。
@@ -120,7 +125,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             const auto policy = getTransitionPolicyFromRuntimeWorld(runtimeReadHandle, convo::TransitionPolicy::SmoothOnly);
             const auto fadeTimeSec = getOverlapFadeTimeFromRuntimeWorld(runtimeReadHandle, 0.0);
             const bool transitionActive = hasFadingRuntimeInWorld(runtimeReadHandle);
-            
+
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
@@ -192,17 +197,23 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     // 初期 placeholder publish / startup rebuild intent の前に Prepared を公開する。
     // JUCE 契約上 prepareToPlay 実行中は Audio Thread callback が走らないため、
     // ここでの状態公開は安全。
+    diagLog("[DIAG] prepareToPlay: latency buffers ready");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Prepared, std::memory_order_release);
+    diagLog("[DIAG] prepareToPlay: lifecycleState set to Prepared");
 
     // 初回IRロード前でも currentDSP を常に有効にし、DSP->DSP クロスフェードへ統一する。
     const bool hasPublishedCurrent = (resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle) != nullptr);
+    diagLog("[DIAG] prepareToPlay: hasPublishedCurrent=" + juce::String(static_cast<int>(hasPublishedCurrent)));
     if (!hasPublishedCurrent && !hasActiveRuntimeDSP())
     {
+        diagLog("[DIAG] prepareToPlay: creating placeholderDSP");
         convo::aligned_unique_ptr<DSPCore> placeholderDSP;
         try
         {
             placeholderDSP = convo::aligned_make_unique<DSPCore>();
+            diagLog("[DIAG] prepareToPlay: placeholderDSP created");
             placeholderDSP->convolverRt().setVisualizationEnabled(false);
+            diagLog("[DIAG] prepareToPlay: calling placeholderDSP->prepare");
             placeholderDSP->prepare(safeSampleRate,
                                     bufferSize,
                                     convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire),
@@ -225,7 +236,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         setActiveRuntimeDSP(placeholderDSP.release());
         convo::publishAtomic(lastCommittedConvolverHasIr_, false, std::memory_order_release);
         convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
-        
+
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
         {
             auto coordinator = makeRuntimePublicationCoordinator();

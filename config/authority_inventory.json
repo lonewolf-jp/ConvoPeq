@@ -1,0 +1,383 @@
+{
+  "schema_version": 1,
+  "generated_from": [
+    "src/audioengine/RuntimeGraph.h",
+    "src/audioengine/AudioEngine.h",
+    "src/audioengine/ISRRuntimeSemanticSchema.h"
+  ],
+  "source_counts": {
+    "descriptors": {
+      "src/audioengine/RuntimeGraph.h": 7,
+      "src/audioengine/AudioEngine.h": 20
+    },
+    "inventory": {
+      "src/audioengine/RuntimeGraph.h": 7,
+      "src/audioengine/AudioEngine.h": 29
+    }
+  },
+  "descriptors": [
+    {
+      "fieldName": "activeNode",
+      "semanticCategory": "Derived",
+      "ownership": "RuntimeGraph",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "fadingNode",
+      "semanticCategory": "Derived",
+      "ownership": "RuntimeGraph",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "captureSessionId",
+      "semanticCategory": "Diagnostic",
+      "ownership": "RuntimeGraph",
+      "mutability": "DiagnosticMutable",
+      "visibility": "DiagnosticBoundary",
+      "lifetime": "DiagnosticLifetime"
+    },
+    {
+      "fieldName": "eqAgcAttackCoeffTable",
+      "semanticCategory": "Diagnostic",
+      "ownership": "RuntimeGraph",
+      "mutability": "DiagnosticMutable",
+      "visibility": "DiagnosticBoundary",
+      "lifetime": "DiagnosticLifetime"
+    },
+    {
+      "fieldName": "eqAgcReleaseCoeffTable",
+      "semanticCategory": "Diagnostic",
+      "ownership": "RuntimeGraph",
+      "mutability": "DiagnosticMutable",
+      "visibility": "DiagnosticBoundary",
+      "lifetime": "DiagnosticLifetime"
+    },
+    {
+      "fieldName": "eqAgcSmoothCoeffTable",
+      "semanticCategory": "Diagnostic",
+      "ownership": "RuntimeGraph",
+      "mutability": "DiagnosticMutable",
+      "visibility": "DiagnosticBoundary",
+      "lifetime": "DiagnosticLifetime"
+    },
+    {
+      "fieldName": "eqAgcCoeffTableCapacity",
+      "semanticCategory": "Diagnostic",
+      "ownership": "RuntimeGraph",
+      "mutability": "DiagnosticMutable",
+      "visibility": "DiagnosticBoundary",
+      "lifetime": "DiagnosticLifetime"
+    },
+    {
+      "fieldName": "worldId",
+      "semanticCategory": "Diagnostic",
+      "ownership": "DiagnosticOnly",
+      "mutability": "DiagnosticMutable",
+      "visibility": "DiagnosticBoundary",
+      "lifetime": "DiagnosticLifetime"
+    },
+    {
+      "fieldName": "generation",
+      "semanticCategory": "Authority",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "generationSemantic",
+      "semanticCategory": "Derived",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "topology",
+      "semanticCategory": "Authority",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "routing",
+      "semanticCategory": "Authority",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "execution",
+      "semanticCategory": "Authority",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "publication",
+      "semanticCategory": "Authority",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "overlap",
+      "semanticCategory": "Authority",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "metadata",
+      "semanticCategory": "Authority",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "retire",
+      "semanticCategory": "Authority",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "timing",
+      "semanticCategory": "Authority",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "latency",
+      "semanticCategory": "Authority",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "PublicationBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "graph",
+      "semanticCategory": "Derived",
+      "ownership": "RuntimeGraph",
+      "mutability": "MutablePrePublish",
+      "visibility": "ObserveBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "engine",
+      "semanticCategory": "Derived",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "ObserveBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "resource",
+      "semanticCategory": "Derived",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "ObserveBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "affinity",
+      "semanticCategory": "Diagnostic",
+      "ownership": "DiagnosticOnly",
+      "mutability": "DiagnosticMutable",
+      "visibility": "DiagnosticBoundary",
+      "lifetime": "DiagnosticLifetime"
+    },
+    {
+      "fieldName": "automation",
+      "semanticCategory": "Derived",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "ObserveBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "coefficient",
+      "semanticCategory": "Derived",
+      "ownership": "RuntimeWorld",
+      "mutability": "MutablePrePublish",
+      "visibility": "ObserveBoundary",
+      "lifetime": "RuntimeWorldLifetime"
+    },
+    {
+      "fieldName": "projectionFreshness",
+      "semanticCategory": "Diagnostic",
+      "ownership": "DiagnosticOnly",
+      "mutability": "DiagnosticMutable",
+      "visibility": "DiagnosticBoundary",
+      "lifetime": "DiagnosticLifetime"
+    },
+    {
+      "fieldName": "semanticHash",
+      "semanticCategory": "Diagnostic",
+      "ownership": "DiagnosticOnly",
+      "mutability": "DiagnosticMutable",
+      "visibility": "DiagnosticBoundary",
+      "lifetime": "DiagnosticLifetime"
+    }
+  ],
+  "inventory": [
+    {
+      "fieldName": "activeNode",
+      "authorityClass": "Derived"
+    },
+    {
+      "fieldName": "fadingNode",
+      "authorityClass": "Derived"
+    },
+    {
+      "fieldName": "captureSessionId",
+      "authorityClass": "Diagnostic"
+    },
+    {
+      "fieldName": "eqAgcAttackCoeffTable",
+      "authorityClass": "Diagnostic"
+    },
+    {
+      "fieldName": "eqAgcReleaseCoeffTable",
+      "authorityClass": "Diagnostic"
+    },
+    {
+      "fieldName": "eqAgcSmoothCoeffTable",
+      "authorityClass": "Diagnostic"
+    },
+    {
+      "fieldName": "eqAgcCoeffTableCapacity",
+      "authorityClass": "Diagnostic"
+    },
+    {
+      "fieldName": "worldId",
+      "authorityClass": "Diagnostic"
+    },
+    {
+      "fieldName": "generation",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "generationSemantic",
+      "authorityClass": "Derived"
+    },
+    {
+      "fieldName": "topology",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "routing",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "execution",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "publication",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "overlap",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "metadata",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "retire",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "timing",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "latency",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "graph",
+      "authorityClass": "Derived"
+    },
+    {
+      "fieldName": "engine",
+      "authorityClass": "Derived"
+    },
+    {
+      "fieldName": "resource",
+      "authorityClass": "Derived"
+    },
+    {
+      "fieldName": "affinity",
+      "authorityClass": "Diagnostic"
+    },
+    {
+      "fieldName": "automation",
+      "authorityClass": "Derived"
+    },
+    {
+      "fieldName": "coefficient",
+      "authorityClass": "Derived"
+    },
+    {
+      "fieldName": "projectionFreshness",
+      "authorityClass": "Diagnostic"
+    },
+    {
+      "fieldName": "semanticHash",
+      "authorityClass": "Diagnostic"
+    },
+    {
+      "fieldName": "topology",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "routing",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "execution",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "publication",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "overlap",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "latency",
+      "authorityClass": "Authoritative"
+    },
+    {
+      "fieldName": "engine",
+      "authorityClass": "Derived"
+    },
+    {
+      "fieldName": "automation",
+      "authorityClass": "Derived"
+    },
+    {
+      "fieldName": "coefficient",
+      "authorityClass": "Derived"
+    }
+  ],
+  "consistency_errors": []
+}

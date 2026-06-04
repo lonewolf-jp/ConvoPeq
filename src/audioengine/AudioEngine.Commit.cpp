@@ -57,43 +57,22 @@ void destroyPublicationIntentNode(void* ptr) noexcept
 
 [[nodiscard]] inline bool validateRuntimeGraphAuthorityContract(const RuntimePublishWorld& world) noexcept
 {
+    // 3.2.9: RuntimeGraph の Authoritative フィールドは RuntimeWorld の
+    // Semantic 構造体に移管されたため、graph との一致検証は不要。
+    // RuntimeGraph は Projection + Diagnostic のみを保持する。
     if (!convo::RuntimeGraph::validateDescriptorSet())
         return false;
 
     if (!convo::RuntimeGraph::validateDecisionCoverageContract())
         return false;
 
-    if (world.routing.eqBypassed != world.graph.eqBypassed)
-        return false;
-
-    if (world.routing.convBypassed != world.graph.convBypassed)
-        return false;
-
-    const bool hasGraphActiveNode = (world.graph.activeNode != nullptr)
-        || (world.graph.runtimeUuid != 0)
-        || (world.graph.transitionCurrentRuntimeUuid != 0);
-    const bool hasGraphFadingNode = (world.graph.fadingNode != nullptr)
-        || (world.graph.fadingRuntimeUuid != 0)
-        || (world.graph.transitionNextRuntimeUuid != 0);
+    const bool hasGraphActiveNode = (world.graph.activeNode != nullptr);
+    const bool hasGraphFadingNode = (world.graph.fadingNode != nullptr);
 
     if (hasGraphActiveNode != (world.topology.runtimeUuid != 0))
         return false;
 
     if (hasGraphFadingNode != world.topology.hasFadingRuntime)
-        return false;
-
-    if (world.topology.runtimeUuid != world.graph.runtimeUuid)
-        return false;
-
-    if (world.topology.fadingRuntimeUuid != world.graph.fadingRuntimeUuid)
-        return false;
-
-    if (world.graph.transitionCurrentRuntimeUuid != 0
-        && world.graph.transitionCurrentRuntimeUuid != world.graph.runtimeUuid)
-        return false;
-
-    if (world.graph.transitionNextRuntimeUuid != 0
-        && world.graph.transitionNextRuntimeUuid != world.graph.fadingRuntimeUuid)
         return false;
 
     if (world.execution.transitionActive != world.topology.hasFadingRuntime)
@@ -157,7 +136,7 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 {
     // Delegate pure validation to RuntimePublicationValidator (Sprint-4 P3-A)
     static const iso::audio_engine::RuntimePublicationValidator validator;
-    
+
     const auto validationResult = validator.validatePublication(world);
     if (!validationResult.isValid) {
         diagLog(juce::String("[DIAG] runPublicationPrecheckNonRt: validator reject reason=\"")
@@ -167,7 +146,7 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
             + " runtimeUuid=" + juce::String(static_cast<juce::int64>(world.topology.runtimeUuid)));
         return false;
     }
-    
+
     forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Building);
 
     const auto rejectWithEvidence = [this, &world](const char* reason) noexcept {
@@ -955,7 +934,7 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
         publishAtomic(queuedFadeTimeSec, fadeTimeSec, std::memory_order_release);
         publishAtomic(dspCrossfadePending, true, std::memory_order_release);
         setIRChangeFlag();
-        
+
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
         {
             auto coordinator = makeRuntimePublicationCoordinator();
@@ -968,7 +947,7 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
                                                                      &sealedSnapshot);
             coordinator.publishWorld(std::move(worldOwner));
         }
-        
+
         validateDistinctRuntimeSlots("startImmediateSmoothTransition",
                                      atomicCurrent,
                                      resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
@@ -1010,7 +989,7 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
         publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
         publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
         publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
-        
+
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
         {
             auto coordinator = makeRuntimePublicationCoordinator();
@@ -1021,6 +1000,14 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
                                                                      0.0,
                                                                      false,
                                                                      &sealedSnapshot);
+            if (worldOwner != nullptr) {
+                diagLog("[DIAG] publishHardReset: built world gen=" + juce::String(static_cast<juce::int64>(worldOwner->generation))
+                    + " runtimeUuid=" + juce::String(static_cast<juce::int64>(worldOwner->topology.runtimeUuid))
+                    + " hasFading=" + juce::String(static_cast<int>(worldOwner->topology.hasFadingRuntime))
+                    + " currentPtr=" + juce::String::toHexString(static_cast<juce::int64>(reinterpret_cast<uintptr_t>(worldOwner->engine.current))));
+            } else {
+                diagLog("[DIAG] publishHardReset: worldOwner is NULL after buildRuntimePublishWorld");
+            }
             coordinator.publishWorld(std::move(worldOwner));
         }
         validateDistinctRuntimeSlots("publishHardResetForCurrentDSP",
@@ -1057,7 +1044,7 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
         publishAtomic(dspCrossfadePending, true, std::memory_order_release);
         publishAtomic(firstIrDryCrossfadeDone, true, std::memory_order_release);
         setIRChangeFlag();
-        
+
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
         {
             auto coordinator = makeRuntimePublicationCoordinator();
@@ -1088,7 +1075,7 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
         std::lock_guard<std::mutex> lock(rebuildMutex);
 
         // 古いリクエストの結果であれば破棄 (Race condition対策)
-        if (generation != consumeAtomic(rebuildGeneration, std::memory_order_acquire)) // acquire: prepareCommit の publishAtomic release と HB
+        if (generation != consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire)) // acquire: prepareCommit の publishAtomic release と HB
         {
             publishAtomic(rtAuxMutable_.lastRejectedGenerationNonRt, static_cast<uint64_t>(generation), std::memory_order_release); // release: UI の consumeAtomic acquire と HB
             retireDSP(newDSP);
@@ -1226,7 +1213,7 @@ void AudioEngine::applyRuntimeCommitFromIntent(DSPCore* newDSP,
 
             publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
         }
-        
+
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
         {
             auto coordinator = makeRuntimePublicationCoordinator();

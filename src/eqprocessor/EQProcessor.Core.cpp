@@ -9,6 +9,7 @@
 #include <regex>
 #include "core/EpochDomain.h"
 #include "core/RCUReader.h"
+#include "audioengine/ISRRuntimePublicationCoordinator.h"
 
 #include "audioengine/AtomicAccess.h"
 
@@ -29,11 +30,35 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     if (ptr == nullptr || deleter == nullptr)
         return true;
 
+    // Retire authority: route through coordinator if available
+    if (m_retireCoordinator != nullptr)
+    {
+        const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
+        constexpr int kMaxRetry = 4;
+        for (int attempt = 0; attempt < kMaxRetry; ++attempt)
+        {
+            auto result = m_retireCoordinator->enqueueRetire(
+                convo::isr::RetireAuthority::Granted, m_epochDomain, ptr, deleter, retireEpoch);
+            if (result == convo::isr::RetireEnqueueResult::Success)
+                return true;
+
+            m_epochDomain.reclaimRetired();
+            m_epochDomain.advanceEpoch();
+        }
+
+        juce::Logger::writeToLog("[WARN EQProcessor] enqueueRetire via coordinator failed after bounded retries");
+        return false;
+    }
+
+    // Fallback: direct EpochDomain path (backward compat before coordinator is set)
     const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
     constexpr int kMaxRetry = 4;
     for (int attempt = 0; attempt < kMaxRetry; ++attempt)
     {
+#pragma warning(push)
+#pragma warning(disable : 4996)
         if (m_epochDomain.enqueueRetire(ptr, deleter, retireEpoch))
+#pragma warning(pop)
             return true;
 
         m_epochDomain.reclaimRetired();

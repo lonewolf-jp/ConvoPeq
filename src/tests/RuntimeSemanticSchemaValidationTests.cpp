@@ -55,6 +55,20 @@ namespace {
     return true;
 }
 
+[[nodiscard]] bool testSemanticCategoryPublicationSemanticExists()
+{
+    // Verify that SemanticCategory::PublicationSemantic exists (Phase-0 2.0)
+    constexpr auto pubSem = convo::isr::SemanticCategory::PublicationSemantic;
+    (void)pubSem;
+
+    // Verify that the schema version was incremented (7 -> 8)
+    constexpr auto version = convo::isr::kRuntimeSemanticSchemaVersion;
+    if (version < 8)
+        return false;
+
+    return true;
+}
+
 [[nodiscard]] bool testPublicationDescriptorSetValidation()
 {
     if (!convo::isr::PublicationSemantic::validateDescriptorSet())
@@ -715,6 +729,9 @@ int main()
 
     if (!testPublicationDescriptorSetValidation())
         throw std::runtime_error("publication descriptor validation failed");
+
+    if (!testSemanticCategoryPublicationSemanticExists())
+        throw std::runtime_error("publication semantic category missing or schema version outdated");
 
     if (!testSchemaVersionConsistency())
         throw std::runtime_error("schema version consistency validation failed");

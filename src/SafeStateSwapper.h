@@ -46,6 +46,8 @@
 
 #include "audioengine/AtomicAccess.h"
 
+namespace convo::isr { class RuntimePublicationCoordinator; }
+
 namespace convo {
 class SafeStateSwapper
 {
@@ -73,6 +75,12 @@ public:
     SafeStateSwapper& operator=(const SafeStateSwapper&) = delete;
     SafeStateSwapper(SafeStateSwapper&&)                 = delete;
     SafeStateSwapper& operator=(SafeStateSwapper&&)      = delete;
+
+    // Retire authority: set coordinator for unified retire tracking
+    void setRetireCoordinator(convo::isr::RuntimePublicationCoordinator* coordinator) noexcept
+    {
+        m_retireCoordinator = coordinator;
+    }
 
     // -----------------------------------------------------------------------
     // swap()  ── 非 RT スレッド（Message Thread / Rebuild Thread）から呼ぶ
@@ -104,6 +112,8 @@ public:
             // バッファ溢れ: フォールバックキュー（非 RT パスなのでロック可）
             std::lock_guard<std::mutex> lock(fallbackMutex);
             fallbackQueue.push({oldState, epoch1});
+            // Coordinator fallback backlog notification is handled externally
+            // via SafeStateSwapper::getPendingRetiredCount() polling
             return;
         }
 
@@ -348,6 +358,9 @@ private:
     // フォールバックキュー（バッファ溢れ時、非 RT スレッドのみ使用）
     std::mutex                                 fallbackMutex;
     std::priority_queue<FallbackEntry>         fallbackQueue;
+
+    // Retire authority coordinator reference
+    convo::isr::RuntimePublicationCoordinator* m_retireCoordinator{nullptr};
 
 #if defined(JUCE_DEBUG) && !defined(NDEBUG)
     std::thread::id reclaimThreadIdDebug {};

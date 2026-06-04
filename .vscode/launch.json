@@ -9,12 +9,37 @@
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Debug",
-            "environment": [],
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "C:\\Program Files (x86)\\Intel\\oneAPI\\mkl\\latest\\redist\\intel64;${env:PATH};C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36223\\bin\\Hostx64\\x64"
+                }
+            ],
             "console": "internalConsole",
-            "env": {
-                "PATH": "${env:PATH};C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36223\\bin\\Hostx64\\x64"
-            },
-            "preLaunchTask": "Debug"
+            "preLaunchTask": "Debug",
+            "symbolSearchPath": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Debug",
+            "logging": {
+                "moduleLoad": false,
+                "programOutput": true
+            }
+        },
+        {
+            "name": "ConvoPeq Debug (CLI)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Debug\\ConvoPeq.exe",
+            "args": ["--cli-run", "--cli-exit-ms", "15000"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Debug",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "C:\\Program Files (x86)\\Intel\\oneAPI\\mkl\\latest\\redist\\intel64;${env:PATH};C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36223\\bin\\Hostx64\\x64"
+                }
+            ],
+            "console": "internalConsole",
+            "preLaunchTask": "Debug",
+            "symbolSearchPath": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Debug"
         },
         {
             "name": "ConvoPeq Release",
@@ -24,7 +49,12 @@
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}\\build\\ConvoPeq_artefacts\\Release",
-            "environment": [],
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "C:\\Program Files (x86)\\Intel\\oneAPI\\mkl\\latest\\redist\\intel64;${env:PATH};C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.51.36223\\bin\\Hostx64\\x64"
+                }
+            ],
             "console": "internalConsole",
             "preLaunchTask": "Release"
         }

@@ -74,7 +74,10 @@ void AudioEngine::releaseResources()
     convo::publishAtomic(outputLevelLinear, 0.0f, std::memory_order_release);
 
     if (noiseShaperLearner)
+    {
+        juce::Logger::writeToLog("[AudioEngine] releaseResources: stopping learner");
         noiseShaperLearner->stopLearning();
+    }
 
     resetLearningControlState();
     setShutdownPhase(ShutdownPhase::StopAudio, "releaseResources");
@@ -92,7 +95,7 @@ void AudioEngine::releaseResources()
                  resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
                          nullptr);
 
-        convo::fetchAddAtomic(rebuildGeneration, 1, std::memory_order_acq_rel);
+        convo::fetchAddAtomic(rebuildRequestGeneration, 1, std::memory_order_acq_rel);
         {
             auto* const activeRaw = getActiveRuntimeDSP();
             activeToRelease = (reinterpret_cast<uintptr_t>(activeRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : activeRaw;
@@ -118,7 +121,7 @@ void AudioEngine::releaseResources()
         convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
         dspCrossfadeGain.setCurrentAndTargetValue(1.0);
         refreshCrossfadePreparedSnapshotFromAtomics();
-        
+
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
         {
             auto coordinator = makeRuntimePublicationCoordinator();

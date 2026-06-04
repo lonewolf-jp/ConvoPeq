@@ -93,20 +93,11 @@ void WorkerThread::run()
             if (flushRequested || elapsedMs >= config.debounceDelayMs) {
                 hasPending = false;
 
-                SnapshotCreatorCallback cb = convo::consumeAtomic(callbackFunc, std::memory_order_acquire);     // acquire: setSnapshotCreator の publishAtomic release と HB し最新コールバックを観測
-                void* userData = convo::consumeAtomic(callbackUserData, std::memory_order_acquire);             // acquire: setSnapshotCreator の publishAtomic release と HB
-
-                if (cb && userData && generationManager.isCurrentGeneration(latestCommandGeneration)) {
-                    cb(userData, latestCommandGeneration);
-#ifdef _DEBUG
-                    convo::fetchAddAtomic(snapshotsCreated, 1, std::memory_order_acq_rel); // acq_rel: getSnapshotsCreated acquire と HB
-#endif
-                }
-#ifdef _DEBUG
-                else {
-                    convo::fetchAddAtomic(commandsDropped, 1, std::memory_order_acq_rel);  // acq_rel: getCommandsDropped acquire と HB
-                }
-#endif
+                // SnapshotCreatorCallback removed (#3.2.8): snapshot creation is now
+                // handled via submitRebuildIntent() directly from the intent source.
+                // The worker thread no longer needs to create snapshots on demand.
+                (void)generationManager;
+                (void)latestCommandGeneration;
             }
         }
 

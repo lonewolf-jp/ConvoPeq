@@ -5,6 +5,7 @@
 #include "SnapshotCoordinator.h"
 
 #include "audioengine/AtomicAccess.h"
+#include "SnapshotFactory.h"
 
 namespace convo {
 
@@ -24,11 +25,19 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 		return;
 	}
 
+	constexpr auto snapshotDeleter = [](void* ptr) noexcept
+	{
+		SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
+	};
+
 	GlobalSnapshot* oldTarget = m_slots.exchangeTarget(target, std::memory_order_acq_rel); // acq_rel: acquire で旧 target の書き込みと HB; release で completeFade の acquire と HB し新 target を公開
 	if (oldTarget) {
 		// Audio Thread が参照中の可能性があるため、即時 delete せず RCU 遅延解放
 		const uint64_t retireEpoch = m_epochDomain->current();
-		m_retire.retire(oldTarget, retireEpoch);
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
+		m_epochDomain->enqueueRetire(oldTarget, snapshotDeleter, retireEpoch);
+#pragma warning(pop)
 	}
 
 	m_fade.start(fadeSamples);
@@ -50,11 +59,19 @@ bool SnapshotCoordinator::tryCompleteFade() noexcept
 
 void SnapshotCoordinator::resetFadeStateAndRetireTarget() noexcept
 {
+	constexpr auto snapshotDeleter = [](void* ptr) noexcept
+	{
+		SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
+	};
+
 	GlobalSnapshot* target = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で startFade の release と HB し旧 target 取得; release で次回 startFade の acquire と HB (null 公開)
 	if (target)
 	{
 		const uint64_t retireEpoch = m_epochDomain->publish();
-		m_retire.retire(target, retireEpoch);
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
+		m_epochDomain->enqueueRetire(target, snapshotDeleter, retireEpoch);
+#pragma warning(pop)
 	}
 
 	m_fade.resetToIdle();
@@ -66,9 +83,18 @@ void SnapshotCoordinator::completeFade() noexcept
 	if (!target)
 		return;
 
+	constexpr auto snapshotDeleter = [](void* ptr) noexcept
+	{
+		SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
+	};
+
 	const uint64_t retireEpoch = m_epochDomain->publish();
 	GlobalSnapshot* old = m_slots.exchangeCurrent(target, std::memory_order_acq_rel); // acq_rel: acquire で旧 current への全書き込みと HB; release で observeCurrent/updateFade の acquire と HB し新 current を公開
-	m_retire.retire(old, retireEpoch);
+	if (old)
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
+		m_epochDomain->enqueueRetire(old, snapshotDeleter, retireEpoch);
+#pragma warning(pop)
 
 	m_fade.resetToIdle();
 }

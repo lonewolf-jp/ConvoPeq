@@ -9,6 +9,8 @@
 #include "ISRHB.h"
 #include "ISRShutdown.h"
 #include "ISRRuntimeSemanticSchema.h"
+#include "ISRAuthorityClass.h"
+#include "core/EpochDomain.h"
 
 namespace convo::isr {
 
@@ -46,6 +48,12 @@ public:
                 PublicationEpoch epoch,
                 std::uint64_t mappedGeneration);
     void retire(RetireAuthority, RuntimeBoundary boundary, const void* oldWorld);
+    [[nodiscard]] RetireEnqueueResult enqueueRetire(RetireAuthority auth,
+                                                      EpochDomain& domain,
+                                                      void* ptr,
+                                                      void (*deleter)(void*),
+                                                      std::uint64_t epoch) noexcept;
+    [[nodiscard]] std::uint64_t retireAuthorityCount() const noexcept;
     const void* getCurrent() const noexcept;
     std::uint64_t getVersion() const noexcept;
     void setRetireBacklogCount(std::uint64_t count) noexcept;
@@ -85,6 +93,7 @@ private:
     std::atomic<std::uint32_t> pressureNormalizedWindows_;
     std::atomic<bool> swapPending_;
     std::atomic<CoordinatorState> state_;
+    std::atomic<std::uint64_t> retireAuthorityCount_;
     static constexpr std::uint64_t kPressureSlopeThreshold = 8;
     static constexpr std::uint32_t kPressureNormalizeWindows = 3;
 };

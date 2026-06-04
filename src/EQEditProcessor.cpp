@@ -33,10 +33,8 @@ void EQEditProcessor::timerCallback()
     stopTimer();
     if (convo::exchangeAtomic(pendingSnapshot, false, std::memory_order_acq_rel))
     {
-        if (!audioEngine.enqueueSnapshotCommand())
-        {
-            DBG("[EQEditProcessor] CommandBuffer full, snapshot command dropped");
-        }
+        audioEngine.submitRebuildIntent(convo::RebuildKind::Structural, AudioEngine::RebuildTelemetryReason::EnqueueSnapshotCommand, AudioEngine::RebuildTelemetryClass::Snapshot, AudioEngine::RebuildTelemetryPolicy::Replaceable);
+        DBG("[EQEditProcessor] snapshot rebuild intent submitted");
     }
 }
 

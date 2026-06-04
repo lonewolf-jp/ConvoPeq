@@ -183,12 +183,12 @@ public:
         return count;
     }
 
-    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept
+    [[deprecated("Use ISR RuntimePublicationCoordinator::enqueueRetire")]] bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept
     {
         return deferredDeletionQueue.enqueue(ptr, deleter, epoch);
     }
 
-    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
+    [[deprecated("Use ISR RuntimePublicationCoordinator::enqueueRetire")]] bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
     {
         return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
     }

@@ -153,6 +153,46 @@ jobs:
             param(
               [int]$Value,
 
+      - name: Run Practical Stable ISR Bridge Runtime verifiers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $failed = $false
+
+          $verifiers = @(
+            'tools\coverage_verifier.py'
+            'tools\runtime_graph_authority_verifier.py --mode baseline'
+            'tools\capture_session_id_verifier.py'
+            'tools\identity_authority_verifier.py'
+            'tools\engine_runtime_authority_verifier.py'
+            'tools\non_authoritative_observe_verifier.py'
+            'tools\retire_authority_verifier.py'
+            'tools\snapshot_authority_usage_verifier.py'
+            'tools\authority_source_count_verifier.py'
+            'tools\publication_authority_verifier.py'
+            'tools\generate_publication_manifest.py --verify --repo-root $(pwd)'
+            'tools\detect_publication_mutation.py'
+            'tools\retire_ordering_verifier.py'
+            'tools\authority_inventory_verifier.py'
+            'tools\authority_duplication_verifier.py'
+            'tools\projection_origin_verifier.py'
+            'tools\diagnostic_field_verifier.py'
+          )
+
+          foreach ($v in $verifiers) {
+            Write-Host "::group::Running $v"
+            python $v
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::$v failed (exit=$LASTEXITCODE)"
+              $failed = $true
+            }
+            Write-Host "::endgroup::"
+          }
+
+          if ($failed) {
+            throw "One or more verifiers failed."
+          }
+
       - name: Apply PR SLA labels
         if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/github-script@v7
