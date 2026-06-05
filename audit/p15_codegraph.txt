@@ -1,0 +1,35 @@
+CodeGraph Analysis: RuntimeStore Mutation Authority (P15)
+==========================================================
+
+Capability Flow Graph:
+======================
+
+RuntimeStore (Store)
+  └── acquireWriteAccess() ──→ WriteAccess
+       ↑                          ↑
+       │                          │
+  RuntimePublicationCoordinator::create()
+       │                          │
+       └── WriteAccess stored ────┘
+            │
+            ├── publishAndSwap(newWorld) ──→ currentWorld (atomic store)
+            │    ↑
+            │    │
+            publishWorld(aligned_unique_ptr<World>)  ←── AudioEngine::publishWorld()
+                 ↑                                          ↑
+                 │                                          │
+            coordinator.publishWorld()                      │
+                 ↑                                          │
+                 │                                          │
+            11 call sites (see p15_serena.txt) ──────────────┘
+
+Authority Chain:
+================
+Coordinator (WriteAccess issuer)
+  → publishWorld() (capability user)
+    → publishAndSwap() (mutation executor)
+      → RuntimeStore (state owner)
+
+No bypass paths detected.
+No coordinator-external WriteAccess generation.
+No direct RuntimeStore mutation outside coordinator.

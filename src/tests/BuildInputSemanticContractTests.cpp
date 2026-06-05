@@ -56,7 +56,7 @@ namespace {
     const auto audioHeader = readAllText("src/audioengine/AudioEngine.h");
     const auto runtimeBuilderHeader = readAllText("src/audioengine/RuntimeBuilder.h");
     const auto runtimeBuilderCpp = readAllText("src/audioengine/RuntimeBuilder.cpp");
-    const auto coordinatorHeader = readAllText("src/core/RuntimePublicationCoordinator.h");
+    const auto admissionHeader = readAllText("src/audioengine/PublicationAdmission.h");
     const auto snapshot = readAllText("src/audioengine/AudioEngine.Snapshot.cpp");
     const auto init = readAllText("src/audioengine/AudioEngine.Init.cpp");
 
@@ -103,12 +103,7 @@ namespace {
     }
 
     for (const auto& requiredSnapshotPlumbing : {
-             std::string("intent->runtimeBuildSnapshot = sealedSnapshot;"),
-             std::string("enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot);"),
-             std::string("applyRuntimeCommitFromIntent(next->newDSP,"),
-             std::string("next->runtimeBuildSnapshot"),
-             std::string("publishRuntimeStateNonRt(newDSP,"),
-             std::string("&sealedSnapshot") })
+             std::string("enqueuePublicationIntentForRuntimeCommit(dspToCommit, task.generation, task.runtimeBuildSnapshot);") })
     {
         const bool found = contains(commit, requiredSnapshotPlumbing)
             || contains(rebuildDispatch, requiredSnapshotPlumbing);
@@ -120,17 +115,12 @@ namespace {
         }
     }
 
-    if (!requireContains(audioHeader, "void applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);", "audio header applyRuntimeCommitFromIntent"))
-        return false;
     if (!requireContains(audioHeader, "void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);", "audio header enqueuePublicationIntentForRuntimeCommit"))
         return false;
-    if (!requireContains(audioHeader, "void appendPublicationIntentForCommitProducer(DSPCore* newDSP, int targetWorldId, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;", "audio header appendPublicationIntentForCommitProducer"))
-        return false;
-    if (!requireContains(audioHeader, "void appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int targetWorldId, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;", "audio header appendPublicationIntentForCommitConsumer"))
-        return false;
+    // [P1 Phase1-B] appendPublicationIntentForCommitProducer/Consumer removed
     if (!requireContains(runtimeBuilderHeader, "const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr", "runtime builder header sealed snapshot"))
         return false;
-    if (!requireContains(coordinatorHeader, "const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr", "coordinator header sealed snapshot"))
+    if (!requireContains(admissionHeader, "RuntimeBuildSnapshot sealedSnapshot;", "admission header sealed snapshot"))
         return false;
     if (!requireContains(runtimeBuilderCpp, "if (sealedSnapshot != nullptr)", "runtime builder cpp sealed branch"))
         return false;

@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "RuntimeBuilder.h"
+#include "RuntimePublicationOrchestrator.h"
 
 namespace {
 void diagLog(const juce::String& message)
@@ -424,9 +425,8 @@ void AudioEngine::timerCallback()
         && !hasFading
         && !hasPendingCrossfade)
     {
-        const bool hasDeferredCommits = hasPendingPublicationIntents();
-
-        if (hasDeferredCommits)
+        // [PR-3] Deferred commits via Orchestrator
+        if (runtimeOrchestrator_ != nullptr && runtimeOrchestrator_->hasDeferredRequest())
             triggerAsyncUpdate();
     }
 

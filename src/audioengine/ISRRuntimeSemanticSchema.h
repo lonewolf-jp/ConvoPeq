@@ -505,10 +505,9 @@ static_assert(validateVerifierTable(),
 
 struct ObserveForbiddenTypeVerifier
 {
-    static constexpr std::array<std::string_view, 4> kForbiddenTypeNames {{
+    static constexpr std::array<std::string_view, 3> kForbiddenTypeNames {{
         "RuntimeGraph*",
         "RuntimeBuildSnapshot*",
-        "PublicationIntent*",
         "TransitionState*"
     }};
 

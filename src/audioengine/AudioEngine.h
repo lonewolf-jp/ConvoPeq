@@ -83,6 +83,8 @@ struct CoeffSet {
 #include "ISRDSPHandle.h"
 #include "ISRClosure.h"
 #include "ISRAuthorityClass.h"
+// RuntimePublicationOrchestrator は前方宣言 + unique_ptr で管理 (循環依存回避)
+namespace convo::isr { class RuntimePublicationOrchestrator; }
 #include "ISRRuntimeSemanticSchema.h"
 #include "ISRRuntimeIdentityGenerators.h"
 #include "ISRPayloadTier.h"
@@ -193,12 +195,22 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
     // AuthorityClass::Derived
     convo::isr::CoefficientSemantic coefficient {};
 
+    // AuthorityClass::Derived (DSPCore → RuntimeWorld projection for crossfade/admission decisions)
+    struct DSPSemanticProjection {
+        bool irLoaded = false;
+        bool irFinalized = false;
+        uint64_t structuralHash = 0;
+        int oversamplingFactor = 1;
+        double sampleRate = 48000.0;
+        int baseLatencySamples = 0;
+    } dspProjection;
+
     // AuthorityClass::Diagnostic (projection freshness metadata)
     convo::isr::ProjectionFreshness projectionFreshness {};
     // AuthorityClass::Diagnostic (hash is fingerprint only; non-authoritative)
     convo::isr::RuntimeSemanticHash semanticHash {};
 
-    static constexpr std::array<convo::isr::RuntimeFieldDescriptor, 20> kFieldDescriptors {{
+    static constexpr std::array<convo::isr::RuntimeFieldDescriptor, 21> kFieldDescriptors {{
         {"worldId", convo::isr::SemanticCategory::Diagnostic, convo::isr::OwnershipClass::DiagnosticOnly, convo::isr::MutabilityClass::DiagnosticMutable, convo::isr::VisibilityClass::DiagnosticBoundary, convo::isr::LifetimeClass::DiagnosticLifetime},
         {"generation", convo::isr::SemanticCategory::Authority, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"generationSemantic", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::PublicationBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
@@ -218,11 +230,12 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         {"affinity", convo::isr::SemanticCategory::Diagnostic, convo::isr::OwnershipClass::DiagnosticOnly, convo::isr::MutabilityClass::DiagnosticMutable, convo::isr::VisibilityClass::DiagnosticBoundary, convo::isr::LifetimeClass::DiagnosticLifetime},
         {"automation", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::ObserveBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"coefficient", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::ObserveBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
+        {"dspProjection", convo::isr::SemanticCategory::Derived, convo::isr::OwnershipClass::RuntimeWorld, convo::isr::MutabilityClass::MutablePrePublish, convo::isr::VisibilityClass::ObserveBoundary, convo::isr::LifetimeClass::RuntimeWorldLifetime},
         {"projectionFreshness", convo::isr::SemanticCategory::Diagnostic, convo::isr::OwnershipClass::DiagnosticOnly, convo::isr::MutabilityClass::DiagnosticMutable, convo::isr::VisibilityClass::DiagnosticBoundary, convo::isr::LifetimeClass::DiagnosticLifetime},
         {"semanticHash", convo::isr::SemanticCategory::Diagnostic, convo::isr::OwnershipClass::DiagnosticOnly, convo::isr::MutabilityClass::DiagnosticMutable, convo::isr::VisibilityClass::DiagnosticBoundary, convo::isr::LifetimeClass::DiagnosticLifetime}
     }};
 
-    static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 20> kRuntimeAuthorityInventory {{
+    static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 21> kRuntimeAuthorityInventory {{
         {"worldId", convo::isr::RuntimeAuthorityClass::Diagnostic},
         {"generation", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"generationSemantic", convo::isr::RuntimeAuthorityClass::Derived},
@@ -242,13 +255,14 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         {"affinity", convo::isr::RuntimeAuthorityClass::Diagnostic},
         {"automation", convo::isr::RuntimeAuthorityClass::Derived},
         {"coefficient", convo::isr::RuntimeAuthorityClass::Derived},
+        {"dspProjection", convo::isr::RuntimeAuthorityClass::Derived},
         {"projectionFreshness", convo::isr::RuntimeAuthorityClass::Diagnostic},
         {"semanticHash", convo::isr::RuntimeAuthorityClass::Diagnostic}
     }};
 
     static constexpr const auto& kAuthorityInventory = kRuntimeAuthorityInventory;
 
-    static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 9> kRuntimeReadAuthorityInventory {{
+    static constexpr std::array<convo::isr::RuntimeAuthorityInventoryEntry, 10> kRuntimeReadAuthorityInventory {{
         {"topology", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"routing", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"execution", convo::isr::RuntimeAuthorityClass::Authoritative},
@@ -257,7 +271,8 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         {"latency", convo::isr::RuntimeAuthorityClass::Authoritative},
         {"engine", convo::isr::RuntimeAuthorityClass::Derived},
         {"automation", convo::isr::RuntimeAuthorityClass::Derived},
-        {"coefficient", convo::isr::RuntimeAuthorityClass::Derived}
+        {"coefficient", convo::isr::RuntimeAuthorityClass::Derived},
+        {"dspProjection", convo::isr::RuntimeAuthorityClass::Derived}
     }};
 
     [[nodiscard]] static constexpr bool validateDescriptorSet() noexcept
@@ -1059,7 +1074,7 @@ public:
         std::uint64_t retireQueueDepth = 0;
         std::uint64_t fallbackQueueDepth = 0;
         std::uint64_t quarantineResident = 0;
-        std::uint64_t publicationBacklog = 0;
+        std::uint64_t publicationBacklog = 0; // Phase1-B: kept for ABI compat (always 0)
         std::uint64_t rebuildBacklog = 0;
         std::uint64_t saturationEnterCount = 0;
         std::uint64_t saturationExitCount = 0;
@@ -1104,7 +1119,7 @@ public:
             consumeAtomic(retireQueueDepth_, std::memory_order_acquire),
             consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire),
             consumeAtomic(quarantineResident_, std::memory_order_acquire),
-            consumeAtomic(publicationBacklog_, std::memory_order_acquire),
+            static_cast<std::uint64_t>(0), // publicationBacklog_ removed in Phase1-B
             consumeAtomic(rebuildBacklog_, std::memory_order_acquire),
             consumeAtomic(saturationEnterCount_, std::memory_order_acquire),
             consumeAtomic(saturationExitCount_, std::memory_order_acquire),
@@ -1309,8 +1324,6 @@ public:
 private:
     static constexpr int kAudioEpochReaderIndex = 0;
     static constexpr int kControlEpochReaderIndex = 1;
-    static constexpr int kCommitProducerEpochReaderIndex = 2;
-    static constexpr int kCommitConsumerEpochReaderIndex = 3;
 
     void recordAudioCallbackProcessingStats(int numSamples, double processTimeUs) noexcept
     {
@@ -1719,8 +1732,6 @@ public:
     std::array<float, NUM_DISPLAY_BARS> eqTotalMagSqRBuffer;
     std::array<float, NUM_DISPLAY_BARS> eqBandMagSqBuffer;
 
-    enum class CommitReaderSlot : int;
-
     //----------------------------------------------------------
     // プライベートヘルパー (Message Thread のみ)
     //----------------------------------------------------------
@@ -1733,10 +1744,10 @@ public:
     // such as IR resampling. It MUST only be called from the message thread.
     // prepareToPlay() routes to the message thread before invoking this helper.
     void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
-    void applyRuntimeCommitFromIntent(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);
+    // [P1 Phase1-B] PublicationIntent/PublicationLog 完全削除。
+    // 直接 commitNewDSP を呼び出す単一スロットの pending commit を使用。
     void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot);
-    void drainPublicationIntentsForRuntimeCommit();
-    // acquire: applyRuntimeCommitFromIntent/requestRebuild の rebuildRequestGeneration 更新 release と HB し、
+    // acquire: requestRebuild の rebuildRequestGeneration 更新 release と HB し、
     //          リビルド世代が古いか否かを各スレッドから安全に判定。
     [[nodiscard]] bool isRebuildObsolete(int generation) const { return generation != consumeAtomic(rebuildRequestGeneration, std::memory_order_acquire); }
     bool enqueueLearningCommand(const LearningCommand& cmd) noexcept;
@@ -1746,12 +1757,6 @@ public:
     void processLearningCommands() noexcept;
     void processDeferredLearningActions();
     void resetLearningControlState() noexcept;
-    void appendPublicationIntentForCommitProducer(DSPCore* newDSP, int targetWorldId, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;
-    void appendPublicationIntentForCommitConsumer(DSPCore* newDSP, int targetWorldId, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;
-    void appendPublicationIntentForCommitSlot(DSPCore* newDSP, int targetWorldId, CommitReaderSlot readerSlot, const convo::RuntimeBuildSnapshot& sealedSnapshot) noexcept;
-    void drainPublicationLogForShutdown() noexcept;
-    [[nodiscard]] bool hasPendingPublicationIntents() noexcept;
-    [[nodiscard]] bool hasPublicationLogPending() noexcept;
     void processWithSnapshot(const juce::AudioSourceChannelInfo& bufferToFill,
                              const convo::GlobalSnapshot* snap,
                              bool isFadingTarget);
@@ -1841,26 +1846,6 @@ public:
     RebuildTask pendingTask;
     RebuildTask lastQueuedTaskSignature;
 
-    // --- Commit 2段階化：PublicationLog と commit staging ---
-    struct PublicationIntent {
-        DSPCore* newDSP = nullptr;
-        std::uint64_t targetWorldId = 0;
-        std::uint64_t requestId = 0;
-        std::int64_t enqueueTimeTicks = 0;
-        convo::RuntimeBuildSnapshot runtimeBuildSnapshot {};
-        std::atomic<PublicationIntent*> next { nullptr };
-    };
-
-    struct PublicationLog {
-        std::atomic<PublicationIntent*> head { nullptr };
-        std::atomic<PublicationIntent*> consumedTail { nullptr };
-        std::atomic<PublicationIntent*> retiredHead { nullptr };
-    };
-
-    PublicationLog publicationLog;
-    PublicationIntent* publicationLogSentinel = nullptr;
-    std::atomic<bool> commitDrainInProgress { false };
-
     // --- Adaptiveノイズシェイパー学習用メンバー ---
     struct AdaptiveCoeffBankSlot
     {
@@ -1881,6 +1866,9 @@ public:
     std::atomic<int> currentAdaptiveCoeffBankIndex { 1 };
     std::mutex adaptiveAutosaveCallbackMutex;
     std::function<void()> adaptiveAutosaveCallback;
+
+    // [PR-3] Old pending commit slot removed. Orchestrator handles deferred commits.
+
     static int resolveAdaptiveCoeffBankIndex(double sampleRate) noexcept;
     static int getAdaptiveBitDepthIndex(int bitDepth) noexcept;
     AdaptiveCoeffBankSlot& getAdaptiveCoeffBankForIndex(int bankIndex) noexcept;
@@ -2312,26 +2300,6 @@ public:
     {
     }
 
-    enum class CommitReaderSlot : int
-    {
-        Producer = kCommitProducerEpochReaderIndex,
-        Consumer = kCommitConsumerEpochReaderIndex
-    };
-
-    [[nodiscard]] static constexpr int toCommitReaderIndex(CommitReaderSlot slot) noexcept
-    {
-        switch (slot)
-        {
-            case CommitReaderSlot::Producer:
-                return kCommitProducerEpochReaderIndex;
-            case CommitReaderSlot::Consumer:
-                return kCommitConsumerEpochReaderIndex;
-        }
-
-        jassertfalse;
-        return kCommitConsumerEpochReaderIndex;
-    }
-
     [[nodiscard]] inline RuntimeReadHandle makeRuntimeReadHandle(int readerIndex,
                                                                  bool assertAudioThread) noexcept
     {
@@ -2736,6 +2704,10 @@ public:
 
     RuntimePublishStore runtimeStore;
     iso::audio_engine::RuntimePublicationValidator runtimePublicationValidator_;
+
+    // RuntimePublicationOrchestrator: 前方宣言 + unique_ptr (循環依存回避)
+    // 実体は AudioEngine.cpp のコンストラクタで初期化
+    std::unique_ptr<convo::isr::RuntimePublicationOrchestrator> runtimeOrchestrator_;
 
     [[nodiscard]] inline RuntimePublicationCoordinator makeRuntimePublicationCoordinator() noexcept
     {
@@ -3277,7 +3249,7 @@ inline void retireDSP(DSPCore* dsp) noexcept
 
     // 退役の唯一の入口。
     // ここでは「公開済みハンドルの解放」と「実体の deferred delete 予約」をまとめて行い、
-    // active runtime slot / fading runtime slot / publicationLog など複数の非所有スロットからの回収責務を集約する。
+    // active runtime slot / fading runtime slot など複数の非所有スロットからの回収責務を集約する。
     if (!retireDSPHandleForRuntime(dsp))
         return;
 
@@ -3430,7 +3402,7 @@ public:
     std::atomic<std::uint64_t> retireQueueDepth_ { 0 };
     std::atomic<std::uint64_t> fallbackQueueDepth_ { 0 };
     std::atomic<std::uint64_t> quarantineResident_ { 0 };
-    std::atomic<std::uint64_t> publicationBacklog_ { 0 };
+    // publicationBacklog_ removed in Phase1-B; kept as always-0 legacy slot
     std::atomic<std::uint64_t> rebuildBacklog_ { 0 };
     std::atomic<std::uint64_t> saturationEnterCount_ { 0 };
     std::atomic<std::uint64_t> saturationExitCount_ { 0 };
@@ -3448,8 +3420,6 @@ public:
     std::atomic<std::uint64_t> retireProtectiveModeEnterCount_ { 0 };
     std::atomic<std::uint64_t> maxRetireDeferralEpochs_ { 256 };
     std::atomic<double> maxRetireWallClockMs_ { 5000.0 };
-    std::atomic<std::uint64_t> publicationIntentRequestIdCounter_ { 0 };
-    std::atomic<std::uint64_t> lastEnqueuedPublicationTargetWorldId_ { 0 };
     std::atomic<double> reclaimLatency_ { 0.0 };
     std::atomic<int> retireHighWatermark_ { 3072 };
     std::atomic<int> retireLowWatermark_ { 1024 };

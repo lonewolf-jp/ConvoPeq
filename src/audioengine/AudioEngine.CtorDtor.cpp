@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "RuntimePublicationOrchestrator.h"
 #include "NoiseShaperLearner.h"
 
 namespace {
@@ -16,11 +17,10 @@ AudioEngine::AudioEngine()
     , m_coordinator(m_epochDomain)
     , m_workerThread(m_commandBuffer, m_generationManager, &affinityManager)
 {
-    publicationLogSentinel = new PublicationIntent();
-    convo::publishAtomic(publicationLog.head, publicationLogSentinel, std::memory_order_release); // release: commitPublishedState の acquire と HB
-    convo::publishAtomic(publicationLog.consumedTail, publicationLogSentinel, std::memory_order_release); // release: drainPublicationLog の acquire と HB
-    convo::publishAtomic(publicationLog.retiredHead, publicationLogSentinel, std::memory_order_release); // release: drainPublicationLog の acquire と HB
+    // [PR-1.5] RuntimePublicationOrchestrator 初期化
+    runtimeOrchestrator_ = std::make_unique<convo::isr::RuntimePublicationOrchestrator>(*this);
 
+    // [P1 Phase1-B] PublicationIntent/PublicationLog initialization removed
     uiConvolverProcessor.setRcuProvider(*this);
     uiConvolverProcessor.setRetireCoordinator(&runtimePublicationBridge_);
     // Route EQ retirement through coordinator
@@ -95,7 +95,7 @@ AudioEngine::~AudioEngine()
         }
     }
 
-    drainPublicationLogForShutdown();
+    // [P1 Phase1-B] drainPublicationLogForShutdown removed
 
     if (activeToRelease) retireDSP(activeToRelease);
     if (fadingToRelease) retireDSP(fadingToRelease);

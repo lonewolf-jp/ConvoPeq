@@ -43,11 +43,8 @@ public:
 
     BuildResult build(const BuildInput& in,
                       const ConvolverProcessor::BuildSnapshot& convolverBuildSnapshot) noexcept;
+    // Warmup validation (still used by RebuildDispatch)
     BuildError validateWarmup(const AudioEngine::DSPCore& runtime) const noexcept;
-
-    // Warmup: FIR 履歴と AGC state 初期化
-    int getRequiredWarmupBlocks(const AudioEngine::DSPCore& runtime) const noexcept;
-    BuildError executeWarmup(AudioEngine::DSPCore& runtime) noexcept;
 
 private:
     AudioEngine& engine;

@@ -153,7 +153,7 @@ void AudioEngine::releaseResources()
 
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
-    drainPublicationLogForShutdown();
+    // [P1 Phase1-B] drainPublicationLogForShutdown removed
 
     if (activeToRelease)
         retireDSP(activeToRelease);
@@ -206,7 +206,7 @@ void AudioEngine::releaseResources()
         if (!drainedWithinBudget)
             diagLog("[DIAG] releaseResources: drain timeout reached, performing one emergency reclaim boost path");
 
-        drainPublicationLogForShutdown();
+        // [P1 Phase1-B] drainPublicationLogForShutdown removed
         drainDeferredRetireQueues(true);
         m_epochDomain.drainAll();
     }

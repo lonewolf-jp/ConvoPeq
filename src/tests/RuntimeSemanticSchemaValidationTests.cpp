@@ -612,9 +612,7 @@ namespace {
     if (!convo::isr::ObserveForbiddenTypeVerifier::isForbiddenTypeName("RuntimeBuildSnapshot*"))
         return false;
 
-    if (!convo::isr::ObserveForbiddenTypeVerifier::isForbiddenTypeName("PublicationIntent*"))
-        return false;
-
+    // [P1 Phase1-B] PublicationIntent* removed from forbidden type list
     if (!convo::isr::ObserveForbiddenTypeVerifier::isForbiddenTypeName("TransitionState*"))
         return false;
 

@@ -50,6 +50,8 @@ tools/
 .vs/
 evidence/
 JUCE/
+.playwright-mcp/
+graphify-out/
 
 # Coverage reports
 coverage/
@@ -60,3 +62,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 ```
+# CocoIndex Code (ccc)
+.cocoindex_code/

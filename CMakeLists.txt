@@ -360,6 +360,10 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRShutdown.cpp
                 src/audioengine/ISRRuntimePublicationCoordinator.cpp
                 src/audioengine/RuntimePublicationValidator.cpp
+                src/audioengine/CrossfadeAuthority.cpp
+                src/audioengine/PublicationAdmission.cpp
+                src/audioengine/PublicationExecutor.cpp
+                src/audioengine/RuntimePublicationOrchestrator.cpp
                 src/audioengine/ISRDSPQuarantine.cpp
                 src/audioengine/ISRClosureGraphWalker.cpp
                 src/audioengine/ISRDebugRuntime.cpp

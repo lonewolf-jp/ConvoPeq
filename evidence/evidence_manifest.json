@@ -5,7 +5,7 @@
   "runId": "runtime-local",
   "buildMode": "CI",
   "proofLevel": "full",
-  "generatedAtNs": 29156515218100,
+  "generatedAtNs": 121864175304900,
   "artifacts": [
     "closure_graph.json",
     "mutation_fault_trace.json",

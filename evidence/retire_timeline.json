@@ -9,30 +9,30 @@
     "crossfadeOnly": false,
     "retirePathOnly": true
   },
-  "totalTransitions": 80,
+  "totalTransitions": 0,
   "laneCounters": {
-    "rtIntent": 20,
-    "coordination": 20,
-    "epoch": 20,
-    "reclaim": 2,
-    "quarantine": 18
+    "rtIntent": 0,
+    "coordination": 0,
+    "epoch": 0,
+    "reclaim": 0,
+    "quarantine": 0
   },
   "lifecycleCounters": {
     "visible": 0,
-    "compareEligible": 20,
-    "telemetryRetained": 20,
-    "replayRetainedOptional": 18,
-    "reclaimEligible": 2,
-    "reclaimed": 2
+    "compareEligible": 0,
+    "telemetryRetained": 0,
+    "replayRetainedOptional": 0,
+    "reclaimEligible": 0,
+    "reclaimed": 0
   },
   "lifecycleSample": [
     {"slot": 0, "state": "visible"},
     {"slot": 1, "state": "visible"},
-    {"slot": 2, "state": "reclaimed"},
-    {"slot": 3, "state": "reclaimed"},
-    {"slot": 4, "state": "replayRetainedOptional"},
-    {"slot": 5, "state": "replayRetainedOptional"},
-    {"slot": 6, "state": "replayRetainedOptional"},
-    {"slot": 7, "state": "replayRetainedOptional"}
+    {"slot": 2, "state": "visible"},
+    {"slot": 3, "state": "visible"},
+    {"slot": 4, "state": "visible"},
+    {"slot": 5, "state": "visible"},
+    {"slot": 6, "state": "visible"},
+    {"slot": 7, "state": "visible"}
   ]
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":29156515218100}
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":121864175304900}

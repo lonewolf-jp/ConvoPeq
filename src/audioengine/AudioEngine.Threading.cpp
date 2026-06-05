@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "RuntimePublicationOrchestrator.h"
 
 namespace
 {
@@ -105,11 +106,11 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         const int osFactorRaw = convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire);
         const int osFactor = osFactorRaw > 0 ? osFactorRaw : 1;
         const std::uint64_t rebuildBacklog = convo::consumeAtomic(rebuildBacklog_, std::memory_order_acquire);
-        const std::uint64_t publicationBacklog = convo::consumeAtomic(publicationBacklog_, std::memory_order_acquire);
+        // [P1 Phase1-B] publicationBacklog_ removed - always 0
 
         const double sampleRateScale = clampScale((sr > 0.0) ? (sr / 48000.0) : 1.0);
         const double oversamplingScale = clampScale(static_cast<double>(osFactor));
-        const double irComplexityScale = clampScale(1.0 + static_cast<double>(rebuildBacklog + publicationBacklog) * 0.02);
+        const double irComplexityScale = clampScale(1.0 + static_cast<double>(rebuildBacklog) * 0.02);
         const double memoryPressureRaw = 1.0
             + static_cast<double>(retireDepth) / static_cast<double>(kBaseRetireHighWatermark)
             + static_cast<double>(fallbackDepth) / static_cast<double>(kBaseRetireLowWatermark)
@@ -301,14 +302,10 @@ bool AudioEngine::shouldRejectRebuildAdmissionForPressure() const noexcept
 
 bool AudioEngine::isFullyDrained() noexcept
 {
-    if (convo::consumeAtomic(commitDrainInProgress, std::memory_order_acquire))
-        return false;
-
-    const std::uint64_t publicationBacklog = convo::consumeAtomic(publicationBacklog_, std::memory_order_acquire);
-    runtimePublicationBridge_.setPublicationBacklogCount(publicationBacklog);
-
-    const bool hasPendingIntents = hasPendingPublicationIntents();
-    runtimePublicationBridge_.setPendingIntentCount(hasPendingIntents ? 1u : 0u);
+    // [PR-3] Old pendingCommitFlag_ removed. Check Orchestrator deferred queue.
+    const bool hasDeferredCommit = (runtimeOrchestrator_ != nullptr && runtimeOrchestrator_->hasDeferredRequest());
+    runtimePublicationBridge_.setPendingIntentCount(hasDeferredCommit ? 1u : 0u);
+    runtimePublicationBridge_.setPublicationBacklogCount(hasDeferredCommit ? 1u : 0u);
 
     const std::uint64_t fallbackDepth = convo::consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire);
     const std::uint64_t retireDepth = convo::consumeAtomic(retireQueueDepth_, std::memory_order_acquire);
@@ -316,7 +313,7 @@ bool AudioEngine::isFullyDrained() noexcept
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
     runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);
 
-    return runtimePublicationBridge_.isFullyDrained();
+    return !hasDeferredCommit && runtimePublicationBridge_.isFullyDrained();
 }
 
 bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
@@ -329,7 +326,7 @@ bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
     const double startMs = juce::Time::getMillisecondCounterHiRes();
     while (!isFullyDrained())
     {
-        drainPublicationLogForShutdown();
+        // [P1 Phase1-B] drainPublicationLogForShutdown removed
         drainDeferredRetireQueues(true);
 
         const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;

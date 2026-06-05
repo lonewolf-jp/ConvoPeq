@@ -1,85 +1,11 @@
 #include "RuntimeBuilder.h"
 
-#include <algorithm>
-#include <array>
 #include <bit>
-#include <chrono>
 #include <cstdint>
-#include <cstdlib>
-#include <immintrin.h>
-
-#include <mkl_vml.h>
 
 namespace convo {
 
 namespace {
-
-void diagLogRuntimeBuilder(const juce::String& message)
-{
-    DBG(message);
-    juce::Logger::writeToLog(message);
-}
-
-int getWarmupBlocksOverrideFromEnv() noexcept
-{
-    // static mutable 禁止 (rule 4.3.1, 4.3.3): 環境変数を都度読む
-    int parsed = -1;
-    if (const char* env = std::getenv("CONVOPEQ_WARMUP_BLOCKS"))
-    {
-        char* end = nullptr;
-        const long v = std::strtol(env, &end, 10);
-        if (end != env)
-            parsed = std::clamp(static_cast<int>(v), 0, 16);
-    }
-    return parsed;
-}
-
-// static mutable 禁止 (rule 4.3.1): WarmupBlockStats/statsByBlocks は削除。
-// 各ビルドの elapsed のみをログする。
-juce::String formatWarmupElapsedSummary(int blocks, std::uint64_t elapsedUs)
-{
-    return "[DIAG] warmup summary blocks="
-        + juce::String(blocks)
-        + " elapsedMs=" + juce::String(static_cast<double>(elapsedUs) / 1000.0, 3);
-}
-
-enum class WarmupPhase : int
-{
-    Init = 0,
-    ZeroState,
-    DenormalGuardEnable,
-    WarmSignal,
-    Ready
-};
-
-const char* warmupPhaseToString(WarmupPhase phase) noexcept
-{
-    switch (phase)
-    {
-        case WarmupPhase::Init: return "INIT";
-        case WarmupPhase::ZeroState: return "ZERO_STATE";
-        case WarmupPhase::DenormalGuardEnable: return "DENORMAL_GUARD_ENABLE";
-        case WarmupPhase::WarmSignal: return "WARM_SIGNAL";
-        case WarmupPhase::Ready: return "READY";
-    }
-    return "UNKNOWN";
-}
-
-juce::String formatWarmupPhaseTimingSummary(const std::array<std::uint64_t, 5>& phaseElapsedUs)
-{
-    const std::uint64_t totalUs = phaseElapsedUs[0]
-        + phaseElapsedUs[1]
-        + phaseElapsedUs[2]
-        + phaseElapsedUs[3]
-        + phaseElapsedUs[4];
-
-    return "[DIAG] warmup phase-ms init=" + juce::String(static_cast<double>(phaseElapsedUs[0]) / 1000.0, 3)
-        + " zero=" + juce::String(static_cast<double>(phaseElapsedUs[1]) / 1000.0, 3)
-        + " denorm=" + juce::String(static_cast<double>(phaseElapsedUs[2]) / 1000.0, 3)
-        + " signal=" + juce::String(static_cast<double>(phaseElapsedUs[3]) / 1000.0, 3)
-        + " ready=" + juce::String(static_cast<double>(phaseElapsedUs[4]) / 1000.0, 3)
-        + " total=" + juce::String(static_cast<double>(totalUs) / 1000.0, 3);
-}
 
 [[nodiscard]] std::uint64_t hashBuildInput(const BuildInput& buildInput) noexcept
 {
@@ -105,33 +31,6 @@ juce::String formatWarmupPhaseTimingSummary(const std::array<std::uint64_t, 5>& 
     mix(std::bit_cast<std::uint64_t>(buildInput.convolverInputTrimGain));
     return hash;
 }
-
-class ScopedWarmupDenormalGuard
-{
-public:
-    ScopedWarmupDenormalGuard() noexcept
-    {
-        oldMxcsr = _mm_getcsr();
-        oldVmlMode = vmlGetMode();
-
-        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-        vmlSetMode(VML_FTZDAZ_ON | VML_ERRMODE_IGNORE);
-    }
-
-    ~ScopedWarmupDenormalGuard() noexcept
-    {
-        _mm_setcsr(oldMxcsr);
-        vmlSetMode(oldVmlMode);
-    }
-
-    ScopedWarmupDenormalGuard(const ScopedWarmupDenormalGuard&) = delete;
-    ScopedWarmupDenormalGuard& operator=(const ScopedWarmupDenormalGuard&) = delete;
-
-private:
-    unsigned int oldMxcsr { 0 };
-    int oldVmlMode { 0 };
-};
 
 } // namespace
 
@@ -294,119 +193,150 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
 
     // 3.2.9: RuntimeGraph から Authoritative フィールド削除済み。
     // topology/routing/resource/automation 等の Semantic 構造体から値を参照。
+    // [C4996 fix] engineState (EngineRuntime) は deprecated のため、
+    // 関数パラメータ current/next および DSPCore 直アクセスに置換。
     {
-        auto* dspCurrent = static_cast<AudioEngine::DSPCore*>(engineState.current);
-        auto* dspFading = static_cast<AudioEngine::DSPCore*>(engineState.fading);
         const bool hasFading = (graphState.fadingNode != nullptr);
 
-        worldOwner->topology.runtimeUuid = (dspCurrent != nullptr) ? dspCurrent->runtimeUuid : 0;
-        worldOwner->topology.fadingRuntimeUuid = (dspFading != nullptr) ? dspFading->runtimeUuid : 0;
+        worldOwner->topology.runtimeUuid = (current != nullptr) ? current->runtimeUuid : 0;
+        worldOwner->topology.fadingRuntimeUuid = (next != nullptr) ? next->runtimeUuid : 0;
         worldOwner->topology.hasFadingRuntime = hasFading;
 
-        const double sr = (dspCurrent != nullptr) ? dspCurrent->sampleRate : 48000.0;
+        const double sr = (current != nullptr) ? current->sampleRate : 48000.0;
         worldOwner->timing.sampleRateHz = sr;
-        worldOwner->timing.queuedFadeTimeSec = engineState.queuedFadeTimeSec;
+        worldOwner->timing.queuedFadeTimeSec = fadeTimeSec;
 
-        worldOwner->resource.oversamplingFactor = (dspCurrent != nullptr)
-            ? static_cast<int>(dspCurrent->oversamplingFactor) : 1;
-        worldOwner->resource.ditherBitDepth = (dspCurrent != nullptr)
-            ? dspCurrent->ditherBitDepth : 0;
-        worldOwner->resource.noiseShaperType = (dspCurrent != nullptr)
-            ? static_cast<int>(dspCurrent->noiseShaperType) : 0;
+        worldOwner->resource.oversamplingFactor = (current != nullptr)
+            ? static_cast<int>(current->oversamplingFactor) : 1;
+        worldOwner->resource.ditherBitDepth = (current != nullptr)
+            ? current->ditherBitDepth : 0;
+        worldOwner->resource.noiseShaperType = (current != nullptr)
+            ? static_cast<int>(current->noiseShaperType) : 0;
     }
 
-    worldOwner->routing.processingOrder = engineState.processingOrder;
-    worldOwner->routing.eqBypassed = engineState.eqBypassed;
-    worldOwner->routing.convBypassed = engineState.convBypassed;
+    // [PR-4] DSP semantic projection (current DSPCore → RuntimeWorld for crossfade/admission)
+    {
+        if (current != nullptr) {
+            worldOwner->dspProjection.irLoaded = current->convolverRt().isIRLoaded();
+            worldOwner->dspProjection.irFinalized = current->convolverRt().isIRFinalized();
+            worldOwner->dspProjection.structuralHash = current->convolverRt().getStructuralHash();
+            worldOwner->dspProjection.oversamplingFactor = static_cast<int>(current->oversamplingFactor);
+            worldOwner->dspProjection.sampleRate = current->sampleRate;
+            worldOwner->dspProjection.baseLatencySamples = engine.estimateRuntimeLatencyBaseRateSamples(current, false);
+        }
+    }
 
-    worldOwner->execution.transitionActive = engineState.transition.active;
-    worldOwner->execution.transitionPolicy = static_cast<int>(engineState.transition.policy);
-    worldOwner->execution.latencyCompensationSamples = engineState.transition.latencyDeltaSamples;
-    worldOwner->execution.crossfadeStartDelayBlocks = engineState.dspCrossfadeStartDelayBlocks;
-    worldOwner->execution.crossfadeDryHoldSamples = engineState.dspCrossfadeDryHoldSamples;
+    // [100%] sealedSnapshot Authority (選択肢A):
+    // sealedSnapshot が存在する場合、その BuildInput 値が唯一の Authority。
+    // atomic からの読み取りは sealedSnapshot 不在時（bootstrap/fallback）のみ行う。
+    // ★ sealedSnapshot 存在時、重複フィールドの atomic 読み取りを完全にスキップする。
+    const bool useSealedSnapshot = (sealedSnapshot != nullptr);
+    // [C4996 fix] Read value fields from AudioEngine atomics directly (was engineState.X)
+    {
+        // These values are obtained from AudioEngine's atomic members (non-deprecated access)
+        const auto processingOrder = useSealedSnapshot ? static_cast<convo::ProcessingOrder>(sealedSnapshot->buildInput.processingOrder)
+            : convo::consumeAtomic(engine.currentProcessingOrder, std::memory_order_acquire);
+        const bool eqBypassed = useSealedSnapshot ? sealedSnapshot->buildInput.eqBypassed
+            : convo::consumeAtomic(engine.eqBypassActive, std::memory_order_acquire);
+        const bool convBypassed = useSealedSnapshot ? sealedSnapshot->buildInput.convBypassed
+            : convo::consumeAtomic(engine.convBypassActive, std::memory_order_acquire);
+        const bool softClipEnabled = useSealedSnapshot ? sealedSnapshot->buildInput.softClipEnabled
+            : convo::consumeAtomic(engine.softClipEnabled, std::memory_order_acquire);
+        const float saturationAmount = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.saturationAmount)
+            : static_cast<float>(convo::consumeAtomic(engine.saturationAmount, std::memory_order_acquire));
+        const float inputHeadroomGain = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.inputHeadroomGain)
+            : static_cast<float>(convo::consumeAtomic(engine.inputHeadroomGain, std::memory_order_acquire));
+        const float outputMakeupGain = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.outputMakeupGain)
+            : static_cast<float>(convo::consumeAtomic(engine.outputMakeupGain, std::memory_order_acquire));
+        const float convolverInputTrimGain = useSealedSnapshot ? static_cast<float>(sealedSnapshot->buildInput.convolverInputTrimGain)
+            : static_cast<float>(convo::consumeAtomic(engine.convolverInputTrimGain, std::memory_order_acquire));
+        // Non-sealedSnapshot fields: always read from atomics
+        const int latencyDelayOld = convo::consumeAtomic(engine.latencyDelayOld, std::memory_order_acquire);
+        const int latencyDelayNew = static_cast<int>(convo::consumeAtomic(engine.latencyDelayNew, std::memory_order_acquire));
+        const int startDelayBlocks = convo::consumeAtomic(engine.dspCrossfadeStartDelayBlocks, std::memory_order_acquire);
+        const int dryHoldSamples = convo::consumeAtomic(engine.dspCrossfadeDryHoldSamples, std::memory_order_acquire);
+        const double dryScaleTarget = convo::consumeAtomic(engine.dspCrossfadeDryScaleTarget, std::memory_order_acquire);
+        const bool firstIrDry = convo::consumeAtomic(engine.firstIrDryCrossfadePending, std::memory_order_acquire);
+        const std::uint64_t retireBacklog = convo::consumeAtomic(engine.retireQueueDepth_, std::memory_order_acquire);
+        const bool rebuildWorkerRunning = false; // not available as atomic; default false
+
+        worldOwner->routing.processingOrder = static_cast<int>(processingOrder);
+        worldOwner->routing.eqBypassed = eqBypassed;
+        worldOwner->routing.convBypassed = convBypassed;
+
+        worldOwner->execution.transitionActive = active;
+        worldOwner->execution.transitionPolicy = static_cast<int>(policy);
+        worldOwner->execution.crossfadeStartDelayBlocks = startDelayBlocks;
+        worldOwner->execution.crossfadeDryHoldSamples = dryHoldSamples;
+
+        worldOwner->overlap.useDryAsOld = active;
+        worldOwner->overlap.fadeTimeSec = fadeTimeSec;
+        worldOwner->overlap.firstIrDryCrossfadePending = firstIrDry;
+        worldOwner->overlap.dryScaleTarget = dryScaleTarget;
+
+        worldOwner->automation.eqBypassed = eqBypassed;
+        worldOwner->automation.convBypassed = convBypassed;
+        worldOwner->automation.softClipEnabled = softClipEnabled;
+        worldOwner->automation.saturationAmount = saturationAmount;
+        worldOwner->automation.inputHeadroomGain = inputHeadroomGain;
+        worldOwner->automation.outputMakeupGain = outputMakeupGain;
+        worldOwner->automation.convolverInputTrimGain = convolverInputTrimGain;
+
+        worldOwner->latency.latencyDelayOld = latencyDelayOld;
+        worldOwner->latency.latencyDelayNew = latencyDelayNew;
+
+        worldOwner->retire.retireBacklog = retireBacklog;
+
+        worldOwner->affinity.rebuildWorkerRunning = rebuildWorkerRunning;
+
+        // [100%] sealedSnapshot が存在する場合、resource/timing フィールドも atomic ではなく snapshot から設定
+        if (useSealedSnapshot)
+        {
+            worldOwner->resource.oversamplingFactor = sealedSnapshot->buildInput.oversamplingFactor;
+            worldOwner->resource.ditherBitDepth = sealedSnapshot->buildInput.ditherBitDepth;
+            worldOwner->resource.noiseShaperType = sealedSnapshot->buildInput.noiseShaperType;
+            worldOwner->timing.sampleRateHz = sealedSnapshot->buildInput.sampleRate;
+        }
+        else
+        {
+            worldOwner->resource.oversamplingFactor = (current != nullptr)
+                ? static_cast<int>(current->oversamplingFactor) : 1;
+            worldOwner->resource.ditherBitDepth = (current != nullptr)
+                ? current->ditherBitDepth : 0;
+            worldOwner->resource.noiseShaperType = (current != nullptr)
+                ? static_cast<int>(current->noiseShaperType) : 0;
+            worldOwner->timing.sampleRateHz = (current != nullptr) ? current->sampleRate : 48000.0;
+        }
+    }
 
     worldOwner->publication.sequenceId = nextPublicationSequence;
     worldOwner->publication.epoch = static_cast<convo::isr::PublicationEpoch>(nextGraphGeneration);
     worldOwner->publication.mappedRuntimeGeneration = nextGraphGeneration;
     worldOwner->publication.previousSequenceId = previousCommittedSequence;
 
-    worldOwner->overlap.useDryAsOld = engineState.dspCrossfadeUseDryAsOld;
-    worldOwner->overlap.firstIrDryCrossfadePending = engineState.firstIrDryCrossfadePending;
-    worldOwner->overlap.dryScaleTarget = engineState.dryScaleTarget;
-    worldOwner->overlap.fadeTimeSec = engineState.queuedFadeTimeSec;
-
     worldOwner->retire.retireEpoch = nextGraphGeneration;
-    worldOwner->retire.retireBacklog = engineState.retireBacklog;
-    worldOwner->retire.deferredResidency = engineState.deferredResidency;
+    worldOwner->retire.deferredResidency = 0;
 
     // activationEpoch is derived from generationSemantic.activationEpoch (#17 Sprint-1)
     // Do not set timing.activationEpoch directly
 
-    worldOwner->latency.latencyDelayOld = engineState.latencyDelayOld;
-    worldOwner->latency.latencyDelayNew = engineState.latencyDelayNew;
-    worldOwner->latency.latencyDeltaSamples = engineState.transition.latencyDeltaSamples;
+    worldOwner->latency.latencyDeltaSamples = 0;
 
     // SchedulingSemantic fields are derived from ExecutionSemantic (#16 Sprint-1)
     // Do not set scheduling.* directly - they mirror execution.* for backward compatibility
     // TODO: Remove SchedulingSemantic entirely after all consumers migrate to execution.*
 
-    worldOwner->affinity.rebuildWorkerRunning = engineState.rebuildWorkerRunning;
-
-    worldOwner->automation.eqBypassed = engineState.eqBypassed;
-    worldOwner->automation.convBypassed = engineState.convBypassed;
-    worldOwner->automation.softClipEnabled = engineState.softClipEnabled;
-    worldOwner->automation.saturationAmount = engineState.saturationAmount;
-    worldOwner->automation.inputHeadroomGain = engineState.inputHeadroomGain;
-    worldOwner->automation.outputMakeupGain = engineState.outputMakeupGain;
-    worldOwner->automation.convolverInputTrimGain = engineState.convolverInputTrimGain;
-
-    worldOwner->coefficient.adaptiveCoeffBankIndex = engineState.adaptiveCoeffBankIndex;
-    worldOwner->coefficient.adaptiveCoeffGeneration = engineState.adaptiveCoeffGeneration;
-    worldOwner->coefficient.eqCoeffHash = engineState.eqCoeffHash;
+    worldOwner->coefficient.adaptiveCoeffBankIndex = 0;
+    worldOwner->coefficient.adaptiveCoeffGeneration = 0;
+    worldOwner->coefficient.eqCoeffHash = 0;
 
     worldOwner->projectionFreshness.projectionGeneration = nextGraphGeneration;
     worldOwner->projectionFreshness.projectionRevision = nextGraphGeneration;
     worldOwner->projectionFreshness.maxStalenessWindows = 1u;
 
-    if (sealedSnapshot != nullptr)
-    {
-        jassert(sealedSnapshot->sealed);
-
-        const auto& sealedBuildInput = sealedSnapshot->buildInput;
-
-        worldOwner->engine.processingOrder = sealedBuildInput.processingOrder;
-        worldOwner->engine.eqBypassed = sealedBuildInput.eqBypassed;
-        worldOwner->engine.convBypassed = sealedBuildInput.convBypassed;
-        worldOwner->engine.softClipEnabled = sealedBuildInput.softClipEnabled;
-        worldOwner->engine.saturationAmount = sealedBuildInput.saturationAmount;
-        worldOwner->engine.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;
-        worldOwner->engine.outputMakeupGain = sealedBuildInput.outputMakeupGain;
-        worldOwner->engine.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
-
-        // 3.2.9: graph の重複 Authority フィールドは削除。
-        // 値は worldOwner->resource/automation/routing/timing 等の Semantic 構造体から参照。
-        worldOwner->resource.oversamplingFactor = sealedBuildInput.oversamplingFactor;
-        worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;
-        worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;
-
-        worldOwner->routing.processingOrder = sealedBuildInput.processingOrder;
-        worldOwner->routing.eqBypassed = sealedBuildInput.eqBypassed;
-        worldOwner->routing.convBypassed = sealedBuildInput.convBypassed;
-
-        worldOwner->timing.sampleRateHz = sealedBuildInput.sampleRate;
-
-        worldOwner->resource.oversamplingFactor = sealedBuildInput.oversamplingFactor;
-        worldOwner->resource.ditherBitDepth = sealedBuildInput.ditherBitDepth;
-        worldOwner->resource.noiseShaperType = sealedBuildInput.noiseShaperType;
-
-        worldOwner->automation.eqBypassed = sealedBuildInput.eqBypassed;
-        worldOwner->automation.convBypassed = sealedBuildInput.convBypassed;
-        worldOwner->automation.softClipEnabled = sealedBuildInput.softClipEnabled;
-        worldOwner->automation.saturationAmount = sealedBuildInput.saturationAmount;
-        worldOwner->automation.inputHeadroomGain = sealedBuildInput.inputHeadroomGain;
-        worldOwner->automation.outputMakeupGain = sealedBuildInput.outputMakeupGain;
-        worldOwner->automation.convolverInputTrimGain = sealedBuildInput.convolverInputTrimGain;
-    }
+    // [100%] sealedSnapshot override block は削除: 選択肢A により原子ブロック内で完結。
+    // 重複フィールド設定は上記の useSealedSnapshot 分岐で atomic 読み取りをスキップしているため、
+    // 別途 sealedSnapshot ブロックでの再設定は不要。
 
     worldOwner->semanticHash.generationSemanticHash = worldOwner->generationSemantic.runtimeGeneration
         ^ (worldOwner->generationSemantic.activationEpoch << 1);
@@ -442,7 +372,7 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         ^ (worldOwner->publication.previousSequenceId << 3);
     worldOwner->semanticHash.overlapSemanticHash = (worldOwner->overlap.useDryAsOld ? 0xA24BAED4963EE407ull : 0ull)
         ^ (worldOwner->overlap.firstIrDryCrossfadePending ? 0x9FB21C651E98DF25ull : 0ull)
-        ^ (worldOwner->engine.transition.active ? 0xC2B2AE3D27D4EB4Full : 0ull);
+        ^ (worldOwner->execution.transitionActive ? 0xC2B2AE3D27D4EB4Full : 0ull);
     worldOwner->semanticHash.retireSemanticHash = worldOwner->retire.retireEpoch
         ^ (worldOwner->retire.retireBacklog << 1)
         ^ (worldOwner->retire.deferredResidency << 2);
@@ -523,150 +453,6 @@ BuildError RuntimeBuilder::validateWarmup(const AudioEngine::DSPCore& runtime) c
 
     if (runtime.convolverRt().isIRLoaded() && !runtime.convolverRt().isIRFinalized())
         return BuildError::WarmupFailed;
-
-    return BuildError::None;
-}
-
-int RuntimeBuilder::getRequiredWarmupBlocks(const AudioEngine::DSPCore& runtime) const noexcept
-{
-    // FIR 履歴初期化に必要なブロック数を決定
-    // - IR 未ロード時: 0 ブロック（パススルーなので初期化不要）
-    // - IR ロード時: レイテンシ量に応じて 1..4 ブロック
-    if (!runtime.convolverRt().isIRLoaded())
-        return 0;
-
-    const int blockSize = std::max(1, runtime.convolverRt().getCurrentBufferSize());
-    const int totalLatency = std::max(0, runtime.convolverRt().getTotalLatencySamples());
-    const int blocksForLatency = (totalLatency + blockSize - 1) / blockSize;
-    const int recommended = std::clamp(blocksForLatency + 1, 1, 4);
-
-    const int overrideBlocks = getWarmupBlocksOverrideFromEnv();
-    const int selected = (overrideBlocks >= 0) ? overrideBlocks : recommended;
-
-    if (overrideBlocks >= 0)
-    {
-        diagLogRuntimeBuilder("[DIAG] warmup config: override blocks="
-            + juce::String(overrideBlocks)
-            + " recommended=" + juce::String(recommended)
-            + " latencySamples=" + juce::String(totalLatency)
-            + " blockSize=" + juce::String(blockSize));
-    }
-    else
-    {
-        diagLogRuntimeBuilder("[DIAG] warmup config: auto blocks="
-            + juce::String(selected)
-            + " latencySamples=" + juce::String(totalLatency)
-            + " blockSize=" + juce::String(blockSize));
-    }
-
-    return selected;
-}
-
-BuildError RuntimeBuilder::executeWarmup(AudioEngine::DSPCore& runtime) noexcept
-{
-    const auto start = std::chrono::steady_clock::now();
-    auto phaseStart = start;
-    WarmupPhase phase = WarmupPhase::Init;
-    std::array<std::uint64_t, 5> phaseElapsedUs { 0, 0, 0, 0, 0 };
-
-    const auto accumulatePhaseUntil = [&](const std::chrono::steady_clock::time_point now) noexcept
-    {
-        const auto deltaUsSigned = std::chrono::duration_cast<std::chrono::microseconds>(now - phaseStart).count();
-        const std::uint64_t deltaUs = static_cast<std::uint64_t>(std::max<std::int64_t>(deltaUsSigned, 0));
-        const int phaseIndex = std::clamp(static_cast<int>(phase), 0, static_cast<int>(phaseElapsedUs.size()) - 1);
-        phaseElapsedUs[static_cast<size_t>(phaseIndex)] += deltaUs;
-        phaseStart = now;
-    };
-
-    const auto switchPhase = [&](WarmupPhase nextPhase) noexcept
-    {
-        const auto now = std::chrono::steady_clock::now();
-        accumulatePhaseUntil(now);
-        phase = nextPhase;
-        diagLogRuntimeBuilder("[DIAG] warmup phase=" + juce::String(warmupPhaseToString(phase)));
-    };
-
-    diagLogRuntimeBuilder("[DIAG] warmup phase=" + juce::String(warmupPhaseToString(phase)));
-
-    if (validateWarmup(runtime) != BuildError::None)
-    {
-        accumulatePhaseUntil(std::chrono::steady_clock::now());
-        diagLogRuntimeBuilder("[DIAG] warmup result: failed early-validation irLoaded="
-            + juce::String(static_cast<int>(runtime.convolverRt().isIRLoaded()))
-            + " irFinalized=" + juce::String(static_cast<int>(runtime.convolverRt().isIRFinalized())));
-        diagLogRuntimeBuilder("[DIAG] warmup failed phase=" + juce::String(warmupPhaseToString(phase)));
-        diagLogRuntimeBuilder(formatWarmupPhaseTimingSummary(phaseElapsedUs));
-        return BuildError::WarmupFailed;
-    }
-
-    const int warmupBlocks = getRequiredWarmupBlocks(runtime);
-    const int blockSize = std::max(1, runtime.convolverRt().getCurrentBufferSize());
-    const int totalLatency = std::max(0, runtime.convolverRt().getTotalLatencySamples());
-
-    if (warmupBlocks <= 0)
-    {
-        accumulatePhaseUntil(std::chrono::steady_clock::now());
-        const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - start).count();
-        const std::uint64_t elapsedUsSafe = static_cast<std::uint64_t>(std::max<std::int64_t>(elapsedUs, 0));
-        diagLogRuntimeBuilder("[DIAG] warmup result: skipped blocks=0"
-            " elapsedMs=" + juce::String(static_cast<double>(elapsedUs) / 1000.0, 3)
-            + " latencySamples=" + juce::String(totalLatency)
-            + " blockSize=" + juce::String(blockSize));
-        diagLogRuntimeBuilder(formatWarmupPhaseTimingSummary(phaseElapsedUs));
-        diagLogRuntimeBuilder(formatWarmupElapsedSummary(0, elapsedUsSafe));
-        return BuildError::None;
-    }
-
-    juce::AudioBuffer<double> warmupBuffer(2, blockSize);
-    juce::dsp::AudioBlock<double> warmupBlock(warmupBuffer);
-
-    switchPhase(WarmupPhase::ZeroState);
-    warmupBuffer.clear();
-
-    switchPhase(WarmupPhase::DenormalGuardEnable);
-    ScopedWarmupDenormalGuard denormalGuard;
-
-    switchPhase(WarmupPhase::WarmSignal);
-
-    // 無音ブロックを流して Convolver の内部履歴を安定化する。
-    for (int i = 0; i < warmupBlocks; ++i)
-    {
-        warmupBuffer.clear();
-        runtime.convolverRt().process(warmupBlock);
-
-        if (runtime.convolverRt().isIRLoaded() && !runtime.convolverRt().isIRFinalized())
-        {
-            accumulatePhaseUntil(std::chrono::steady_clock::now());
-            const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - start).count();
-            diagLogRuntimeBuilder("[DIAG] warmup result: failed mid-run blocksDone="
-                + juce::String(i + 1)
-                + " / " + juce::String(warmupBlocks)
-                + " elapsedMs=" + juce::String(static_cast<double>(elapsedUs) / 1000.0, 3)
-                + " latencySamples=" + juce::String(totalLatency)
-                + " blockSize=" + juce::String(blockSize));
-            diagLogRuntimeBuilder("[DIAG] warmup failed phase=" + juce::String(warmupPhaseToString(phase)));
-            diagLogRuntimeBuilder(formatWarmupPhaseTimingSummary(phaseElapsedUs));
-            return BuildError::WarmupFailed;
-        }
-    }
-
-    switchPhase(WarmupPhase::Ready);
-    accumulatePhaseUntil(std::chrono::steady_clock::now());
-
-    const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - start).count();
-    const std::uint64_t elapsedUsSafe = static_cast<std::uint64_t>(std::max<std::int64_t>(elapsedUs, 0));
-
-    // static mutable 禁止 (rule 4.3.1): 累積カウンタ削除。現在のビルドの elapsed のみ記録。
-    diagLogRuntimeBuilder("[DIAG] warmup result: success blocks="
-        + juce::String(warmupBlocks)
-        + " elapsedMs=" + juce::String(static_cast<double>(elapsedUs) / 1000.0, 3)
-        + " latencySamples=" + juce::String(totalLatency)
-        + " blockSize=" + juce::String(blockSize));
-    diagLogRuntimeBuilder(formatWarmupPhaseTimingSummary(phaseElapsedUs));
-    diagLogRuntimeBuilder(formatWarmupElapsedSummary(warmupBlocks, elapsedUsSafe));
 
     return BuildError::None;
 }

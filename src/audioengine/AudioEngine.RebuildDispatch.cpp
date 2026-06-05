@@ -357,7 +357,7 @@ void AudioEngine::handleAsyncUpdate()
     if (isShutdownInProgress())
         return;
 
-    drainPublicationIntentsForRuntimeCommit();
+    // [PR-3] Old pending commit path removed. Orchestrator handles deferred commits.
 
     // 非MT起点の Structural rebuild 要求を消費して実行する
     if (clearRebuildReason(RebuildReason::StructuralFromNonMT))

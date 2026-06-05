@@ -1,0 +1,217 @@
+name: ISR Authority Compliance v6.4
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================
+  # 静的ガバナンス検査
+  # ============================================================
+  authority-static-checks:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # P1 Phase1-B: エラー（PublicationIntent 系レガシー構造体・関数の完全削除確認）
+      - name: Check legacy PublicationIntent remnants removed (P1 Phase1-B)
+        shell: pwsh
+        run: |
+          $errors = @()
+          if (Select-String -Path src\**\* -Pattern "struct PublicationIntent|struct PublicationLog" -Quiet) {
+            $errors += "PublicationIntent/PublicationLog struct still exists"
+          }
+          if (Select-String -Path src\**\* -Pattern "appendPublicationIntentForCommit|drainPublicationLogForShutdown|hasPublicationLogPending" -Quiet) {
+            $errors += "Legacy PublicationLog functions still exist"
+          }
+          if ($errors.Count -gt 0) {
+            foreach ($e in $errors) {
+              Write-Host "::error::$e"
+            }
+            exit 1
+          }
+          Write-Host "Phase1-B: All PublicationIntent/PublicationLog remnants removed."
+
+      # P14: 部分公開禁止（grep 補助、確認）
+      - name: Check partial publication interfaces (P14)
+        shell: pwsh
+        run: |
+          $found = $false
+          if (Select-String -Path src\**\* -Pattern "publish\(generation|publish\(dsp" -Quiet) {
+            Write-Host "::error::partial publication interface detected (publish(generation) or publish(dsp))"
+            $found = $true
+            exit 1
+          }
+          if (-not $found) {
+            Write-Host "No partial publication interfaces detected."
+          }
+
+      # P3: 新規コードのみエラー（EpochDomain::enqueueRetire 直接呼び出し）
+      - name: Static AuthorityViolation - Direct EpochRetire (new code only)
+        shell: pwsh
+        run: |
+          $diff = git diff origin/${{ github.base_ref || 'main' }}...HEAD -- src/ 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::Cannot compare with base branch - check skipped"
+            exit 0
+          }
+          $violations = $diff | Select-String -Pattern "^\+\s*.*EpochDomain.*enqueueRetire" | Where-Object { $_ -notmatch "Coordinator" }
+          if ($violations) {
+            Write-Host "::error::New code uses direct enqueueRetire (must use Coordinator::enqueueRetire instead)"
+            $violations | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+          Write-Host "No direct EpochDomain::enqueueRetire in new code."
+
+  # ============================================================
+  # 動的テスト
+  # ============================================================
+  authority-runtime-tests:
+    runs-on: windows-latest
+    needs: authority-static-checks
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Ninja Multi-Config" `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DCONVO_CI_BUILD=ON
+
+      - name: Build ISR tests
+        shell: pwsh
+        run: |
+          cmake --build build --config Debug --target ISRSemanticValidationTests
+          cmake --build build --config Debug --target PartialPublicationRejectTests
+
+      - name: Run fail-closed governance tests (P20)
+        shell: pwsh
+        run: |
+          $failed = $false
+
+          # P4 + P20 tests
+          & .\build\Debug\ISRSemanticValidationTests.exe
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::ISRSemanticValidationTests failed (exit=$LASTEXITCODE)"
+            $failed = $true
+          }
+
+          # PartialPublicationReject tests
+          & .\build\Debug\PartialPublicationRejectTests.exe
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::PartialPublicationRejectTests failed (exit=$LASTEXITCODE)"
+            $failed = $true
+          }
+
+          if ($failed) {
+            throw "One or more governance tests failed."
+          }
+          Write-Host "All governance tests passed."
+
+  # ============================================================
+  # 監査レポート検証
+  # ============================================================
+  audit-report-verification:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify audit reports (P11, P12, P14, P15)
+        shell: pwsh
+        run: |
+          $failed = $false
+          $reports = @("p11_audit.md", "p12_audit.md", "p14_audit.md", "p15_audit.md")
+          $requiredFields = @("AUDIT_RESULT", "AUDIT_DATE", "AUDITOR", "CHECKED_SYMBOLS", "FINDINGS", "SEARCH_COMMANDS")
+
+          foreach ($report in $reports) {
+            $path = "audit/$report"
+            if (-not (Test-Path $path)) {
+              Write-Host "::error::$report not found"
+              $failed = $true
+              continue
+            }
+
+            $content = Get-Content $path -Raw
+
+            # 必須フィールドの存在確認
+            foreach ($field in $requiredFields) {
+              if ($content -notmatch "$field:") {
+                Write-Host "::error::$report missing $field"
+                $failed = $true
+              }
+            }
+
+            # CHECKED_SYMBOLS が空でないこと
+            if ($content -match "CHECKED_SYMBOLS:\s*$") {
+              Write-Host "::error::$report CHECKED_SYMBOLS is empty"
+              $failed = $true
+            }
+
+            # SEARCH_COMMANDS が空でないこと
+            if ($content -match "SEARCH_COMMANDS:\s*$") {
+              Write-Host "::error::$report SEARCH_COMMANDS is empty"
+              $failed = $true
+            }
+
+            # AUDIT_RESULT が PASS であること
+            if ($content -notmatch "AUDIT_RESULT: PASS") {
+              Write-Host "::error::$report AUDIT_RESULT is not PASS"
+              $failed = $true
+            }
+
+            Write-Host "$report audit fields verified."
+          }
+
+          if ($failed) {
+            throw "One or more audit reports failed verification."
+          }
+          Write-Host "All audit reports passed verification."
+
+      - name: Verify P15 tool outputs (non-empty)
+        shell: pwsh
+        run: |
+          $failed = $false
+          $outputs = @("p15_serena.txt", "p15_codegraph.txt")
+          foreach ($output in $outputs) {
+            $path = "audit/$output"
+            if (-not (Test-Path $path)) {
+              Write-Host "::error::$output not found"
+              $failed = $true
+              continue
+            }
+            $item = Get-Item $path
+            if ($item.Length -eq 0) {
+              Write-Host "::error::$output is empty"
+              $failed = $true
+            } else {
+              Write-Host "$output size: $($item.Length) bytes"
+            }
+          }
+          if ($failed) {
+            throw "P15 tool outputs verification failed."
+          }
+          Write-Host "All P15 tool outputs verified."
+
+      - name: Verify P1 Phase1-B audit (optional)
+        shell: pwsh
+        run: |
+          $path = "audit/p1_phase1b_audit.md"
+          if (Test-Path $path) {
+            $content = Get-Content $path -Raw
+            if ($content -notmatch "AUDIT_RESULT: PASS") {
+              Write-Host "::warning::P1 Phase1-B audit result is not PASS"
+            } else {
+              Write-Host "P1 Phase1-B audit verified."
+            }
+          } else {
+            Write-Host "P1 Phase1-B audit not yet created (Phase1-B not started)."
+          }

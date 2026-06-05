@@ -3,10 +3,10 @@
 #include <atomic>
 #include <type_traits>
 #include <utility>
-
 #include "RuntimeTransition.h"
 #include "core/RuntimeStore.h"
 #include "AlignedAllocation.h"
+// New components are injected from AudioEngine level (not included directly to avoid circular deps)
 
 namespace convo {
 
@@ -90,6 +90,9 @@ public:
     {
         if (!worldOwner)
             return;
+
+        // [PR-5] Immutable 化: publish 前に sealRecursively() で全フィールドを frozen にする
+        worldOwner->sealRecursively();
 
         if constexpr (requires(Bridge bridge, const World& world) { bridge.validatePublicationNonRt(world); })
         {

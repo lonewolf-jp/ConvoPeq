@@ -25,6 +25,18 @@
                 "--repo",
                 "${workspaceFolder}"
             ]
+        },
+        "graphify": {
+            "type": "stdio",
+            "command": "C:\\Users\\user\\AppData\\Roaming\\uv\\tools\\graphifyy\\Scripts\\python.exe",
+            "args": [
+                "-m",
+                "graphify.serve",
+                "${workspaceFolder}\\graphify-out\\graph.json"
+            ],
+            "env": {
+                "PYTHONUTF8": "1"
+            }
         }
     }
 }
