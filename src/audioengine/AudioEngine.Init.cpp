@@ -12,21 +12,14 @@ void diagLog(const juce::String& message)
 
 void AudioEngine::initialize()
 {
-    convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release); // release: process の acquire と HB
-    convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release); // release: process の acquire と HB
-    convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release); // release: process の acquire と HB
-    convo::publishAtomic(firstIrDryCrossfadeDone, false, std::memory_order_release); // release: process の acquire と HB
-    convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release); // release: process の acquire と HB
-    convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release); // release: process の acquire と HB
+    crossfadeRuntime_.reset();
     publishLatencyDelayAtomics(0, 0);
-    convo::publishAtomic(latencyResetPending, false, std::memory_order_release); // release: process の acquire と HB
-    convo::publishAtomic(queuedFadeTimeSec, 0.03, std::memory_order_release); // release: process の acquire と HB
+    convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
     resetLatencyDelayRtState();
-
-    dspCrossfadeGain.reset(48000.0, 0.03);
-    dspCrossfadeGain.setCurrentAndTargetValue(1.0);
-    dspCrossfadeDryScaleGain.reset(48000.0, 0.060);  // Initialize with 60ms ramp time
-    dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
+    crossfadeRuntime_.getGain().reset(48000.0, 0.03);
+    crossfadeRuntime_.getGain().setCurrentAndTargetValue(1.0);
+    crossfadeRuntime_.getDryScaleGain().reset(48000.0, 0.060);
+    crossfadeRuntime_.getDryScaleGain().setCurrentAndTargetValue(1.0);
     refreshCrossfadePreparedSnapshotFromAtomics();
 
     // ==================================================================

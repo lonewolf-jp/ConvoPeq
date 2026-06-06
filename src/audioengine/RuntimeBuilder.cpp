@@ -263,10 +263,10 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         // Non-sealedSnapshot fields: always read from atomics
         const int latencyDelayOld = convo::consumeAtomic(engine.latencyDelayOld, std::memory_order_acquire);
         const int latencyDelayNew = static_cast<int>(convo::consumeAtomic(engine.latencyDelayNew, std::memory_order_acquire));
-        const int startDelayBlocks = convo::consumeAtomic(engine.dspCrossfadeStartDelayBlocks, std::memory_order_acquire);
-        const int dryHoldSamples = convo::consumeAtomic(engine.dspCrossfadeDryHoldSamples, std::memory_order_acquire);
-        const double dryScaleTarget = convo::consumeAtomic(engine.dspCrossfadeDryScaleTarget, std::memory_order_acquire);
-        const bool firstIrDry = convo::consumeAtomic(engine.firstIrDryCrossfadePending, std::memory_order_acquire);
+        const int startDelayBlocks = engine.crossfadeRuntime_.getStartDelayBlocks();
+        const int dryHoldSamples = engine.crossfadeRuntime_.getDryHoldSamples();
+        const double dryScaleTarget = engine.crossfadeRuntime_.getDryScaleTarget();
+        const bool firstIrDry = engine.crossfadeRuntime_.isFirstIrDryPending();
         const std::uint64_t retireBacklog = convo::consumeAtomic(engine.retireQueueDepth_, std::memory_order_acquire);
         const bool rebuildWorkerRunning = false; // not available as atomic; default false
 

@@ -30,11 +30,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         convo::publishAtomic(latencyDelayOld, 0, std::memory_order_release);
         convo::publishAtomic(latencyDelayNew, 0, std::memory_order_release);
         convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
-        convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
-        convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
-        convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
-        convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
-        convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
+        crossfadeRuntime_.reset();
         refreshCrossfadePreparedSnapshotFromAtomics();
         convo::publishAtomic(lifecycleState, EngineLifecycleState::Unprepared, std::memory_order_release);
     };
@@ -108,13 +104,9 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             : 0.001;
         convo::publishAtomic(m_irFadeTimeSec, irFadeSec, std::memory_order_release);
     }
-    dspCrossfadeGain.reset(safeSampleRate, 0.03);
-    dspCrossfadeGain.setCurrentAndTargetValue(1.0);
-    convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
-    convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
-    convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
-    convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
-    convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
+    crossfadeRuntime_.reset();
+    crossfadeRuntime_.getGain().reset(safeSampleRate, 0.03);
+    crossfadeRuntime_.getGain().setCurrentAndTargetValue(1.0);
     const auto runtimeReadHandle = readControlRuntimeHandle();
     {
         auto* currentForPublish = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);

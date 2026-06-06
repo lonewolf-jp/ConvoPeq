@@ -79,24 +79,15 @@ public:
                 }
             }
 
-            // crossfade atomic 設定
+            // crossfade atomic 設定 (CrossfadeRuntime 委譲)
             const double rampSampleRate = std::max(1.0,
                 (newDSP != nullptr) ? newDSP->sampleRate
                     : convo::consumeAtomic(engine_.currentSampleRate, std::memory_order_acquire));
-            engine_.dspCrossfadeGain.reset(rampSampleRate, std::max(0.001, decision.fadeTimeSec));
-            engine_.dspCrossfadeGain.setCurrentAndTargetValue(0.0);
-            convo::publishAtomic(engine_.dspCrossfadeUseDryAsOld, false, std::memory_order_release);
-            convo::publishAtomic(engine_.firstIrDryCrossfadePending, false, std::memory_order_release);
-            convo::publishAtomic(engine_.queuedFadeTimeSec, decision.fadeTimeSec, std::memory_order_release);
-            convo::publishAtomic(engine_.dspCrossfadePending, true, std::memory_order_release);
+            engine_.crossfadeRuntime_.start(decision.fadeTimeSec, rampSampleRate);
             engine_.setIRChangeFlag();
         } else if (oldDSP != nullptr) {
             // Crossfade 不要: 即時 retire
-            convo::publishAtomic(engine_.dspCrossfadePending, false, std::memory_order_release);
-            convo::publishAtomic(engine_.dspCrossfadeUseDryAsOld, false, std::memory_order_release);
-            convo::publishAtomic(engine_.firstIrDryCrossfadePending, false, std::memory_order_release);
-            convo::publishAtomic(engine_.dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
-            convo::publishAtomic(engine_.dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
+            engine_.crossfadeRuntime_.complete();
             lifetime.retire(oldDSP);
         }
     }
@@ -117,7 +108,7 @@ public:
             lifetime.retire(done);
         }
 
-        convo::publishAtomic(engine_.dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
+        engine_.crossfadeRuntime_.setDryHoldSamples(0);
         engine_.refreshCrossfadePreparedSnapshotFromAtomics();
 
         // publish idling world (Coordinator 経由)

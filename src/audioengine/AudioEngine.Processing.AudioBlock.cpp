@@ -208,7 +208,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         armCrossfadeIfPending(fading != nullptr, useDryAsOld, preparedCrossfade);
 
         const bool canCrossfade = (fading != nullptr || useDryAsOld)
-            && dspCrossfadeGain.isSmoothing()
+            && crossfadeRuntime_.getGain().isSmoothing()
             && dspCrossfadeFloatBuffer.getNumChannels() >= 2
             && dspCrossfadeFloatBuffer.getNumSamples() >= numSamples;
 
@@ -265,7 +265,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                                                                          double alignedNewL,
                                                                          double alignedNewR)
                                                      {
-                                                         const double dryScale = useDryAsOld ? dspCrossfadeDryScaleGain.getNextValue() : 1.0;
+                                                         const double dryScale = useDryAsOld ? crossfadeRuntime_.getDryScaleGain().getNextValue() : 1.0;
                                                          const double gOld = 1.0 - gNew;
                                                          const double dryScaledL = alignedOldL * dryScale;
                                                          const double dryScaledR = alignedOldR * dryScale;

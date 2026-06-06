@@ -68,6 +68,7 @@ struct CoeffSet {
 #include "RuntimeBuildTypes.h"
 #include "RuntimeTransition.h"
 #include "AtomicAccess.h"
+#include "CrossfadeRuntime.h"
 #include "DeferredDeletionQueue.h"
 #include "core/Types.h"
 #include "core/SnapshotCoordinator.h"
@@ -1019,7 +1020,8 @@ public:
             || state == EngineLifecycleState::Destroyed;
     }
 
-    [[nodiscard]] bool acceptsRuntimePublication() const noexcept;
+    // [[deprecated("Use PublicationAdmission::evaluate() instead")]]
+    // [[nodiscard]] bool acceptsRuntimePublication() const noexcept;
     [[nodiscard]] bool isFullyDrained() noexcept;
     [[nodiscard]] bool waitForDrain(int timeoutMs = 2000, int pollIntervalMs = 2) noexcept;
 
@@ -1574,8 +1576,6 @@ public:
     std::array<CrossfadePreparedSnapshot, 2> crossfadePreparedSnapshots_ {};
     std::atomic<int> crossfadePreparedSnapshotIndex_ { 0 };
 
-        std::atomic<double> queuedFadeTimeSec { 0.030 };      // 現在開始するフェード時間
-
         // モード別フェード時間（秒）
         std::atomic<double> m_irFadeTimeSec { 0.080 };
         std::atomic<double> m_irLengthFadeTimeSec { 0.050 };
@@ -1586,15 +1586,7 @@ public:
         std::atomic<double> m_osFadeTimeSec { 0.030 };
         std::atomic<int> m_crossfadeStartDelayBlocks { 1 };
 
-    std::atomic<bool> dspCrossfadePending { false };
-    std::atomic<int> dspCrossfadeStartDelayBlocks { 0 };
-    std::atomic<bool> firstIrDryCrossfadePending { false }; // 初回IRロード時に dry を旧信号として使用
-    std::atomic<bool> firstIrDryCrossfadeDone { false };    // アプリ起動後の初回1回のみ有効
-    std::atomic<bool> dspCrossfadeUseDryAsOld { false };    // Audio Thread 実行中フラグ
-    std::atomic<double> dspCrossfadeDryScaleTarget { 1.0 }; // dry-as-old crossfade の IR スケール目標値
-    std::atomic<int> dspCrossfadeDryHoldSamples { 0 };      // dry-as-old開始直後の旧信号優先ホールド
-    convo::LinearRamp dspCrossfadeGain;
-    convo::LinearRamp dspCrossfadeDryScaleGain;             // dry信号をIRスケールに合わせるため（60ms ramp）
+    convo::isr::CrossfadeRuntime crossfadeRuntime_;
     juce::AudioBuffer<float> dspCrossfadeFloatBuffer;
     juce::AudioBuffer<double> dspCrossfadeDoubleBuffer;
 
@@ -2164,9 +2156,9 @@ public:
             fallback.latencyDelayOld = consumeAtomic(latencyDelayOld, std::memory_order_acquire);
             fallback.latencyDelayNew = consumeAtomic(latencyDelayNew, std::memory_order_acquire);
             fallback.latencyResetPending = consumeAtomic(latencyResetPending, std::memory_order_acquire);
-            fallback.dspCrossfadePending = consumeAtomic(dspCrossfadePending, std::memory_order_acquire);
-            fallback.dspCrossfadeUseDryAsOld = consumeAtomic(dspCrossfadeUseDryAsOld, std::memory_order_acquire);
-            fallback.firstIrDryCrossfadePending = consumeAtomic(firstIrDryCrossfadePending, std::memory_order_acquire);
+            fallback.dspCrossfadePending = crossfadeRuntime_.isPending();
+            fallback.dspCrossfadeUseDryAsOld = crossfadeRuntime_.useDryAsOld();
+            fallback.firstIrDryCrossfadePending = crossfadeRuntime_.isFirstIrDryPending();
             fallback.processingOrder = static_cast<int>(consumeAtomic(currentProcessingOrder, std::memory_order_acquire));
             fallback.eqBypassed = consumeAtomic(eqBypassActive, std::memory_order_acquire);
             fallback.convBypassed = consumeAtomic(convBypassActive, std::memory_order_acquire);
@@ -2181,10 +2173,10 @@ public:
             fallback.adaptiveCoeffBankIndex = -1;
             fallback.adaptiveCoeffGeneration = 0;
             fallback.eqCoeffHash = 0;
-            fallback.queuedFadeTimeSec = consumeAtomic(queuedFadeTimeSec, std::memory_order_acquire);
-            fallback.dspCrossfadeStartDelayBlocks = consumeAtomic(dspCrossfadeStartDelayBlocks, std::memory_order_acquire);
-            fallback.dspCrossfadeDryHoldSamples = consumeAtomic(dspCrossfadeDryHoldSamples, std::memory_order_acquire);
-            fallback.dryScaleTarget = consumeAtomic(dspCrossfadeDryScaleTarget, std::memory_order_acquire);
+            fallback.queuedFadeTimeSec = crossfadeRuntime_.getQueuedFadeTimeSec();
+            fallback.dspCrossfadeStartDelayBlocks = crossfadeRuntime_.getStartDelayBlocks();
+            fallback.dspCrossfadeDryHoldSamples = crossfadeRuntime_.getDryHoldSamples();
+            fallback.dryScaleTarget = crossfadeRuntime_.getDryScaleTarget();
             return fallback;
         }
 
@@ -2273,17 +2265,19 @@ public:
 
     inline void refreshCrossfadePreparedSnapshotFromAtomics() noexcept
     {
+        // ★ CrossfadeRuntime 経由で crossfade 状態を読み取る
+        //   latency 系フィールドは AudioEngine 直下の atomic から読み取る
         const CrossfadePreparedSnapshot snapshot {
-            .pending = consumeAtomic(dspCrossfadePending),
-            .useDryAsOld = consumeAtomic(dspCrossfadeUseDryAsOld),
-            .firstIrDryCrossfadePending = consumeAtomic(firstIrDryCrossfadePending),
-            .fadeTimeSec = consumeAtomic(queuedFadeTimeSec),
+            .pending = crossfadeRuntime_.isPending(),
+            .useDryAsOld = crossfadeRuntime_.useDryAsOld(),
+            .firstIrDryCrossfadePending = crossfadeRuntime_.isFirstIrDryPending(),
+            .fadeTimeSec = crossfadeRuntime_.getQueuedFadeTimeSec(),
             .latencyDelayOld = consumeAtomic(latencyDelayOld),
             .latencyDelayNew = consumeAtomic(latencyDelayNew),
-            .startDelayBlocks = consumeAtomic(dspCrossfadeStartDelayBlocks),
-            .dryHoldSamples = consumeAtomic(dspCrossfadeDryHoldSamples),
+            .startDelayBlocks = crossfadeRuntime_.getStartDelayBlocks(),
+            .dryHoldSamples = crossfadeRuntime_.getDryHoldSamples(),
             .latencyResetPending = consumeAtomic(latencyResetPending),
-            .dryScaleTarget = consumeAtomic(dspCrossfadeDryScaleTarget)
+            .dryScaleTarget = crossfadeRuntime_.getDryScaleTarget()
         };
 
         publishCrossfadePreparedSnapshot(snapshot);
@@ -2981,12 +2975,12 @@ public:
             dspCrossfadeStartDelayBlocks_RT = prepared.startDelayBlocks;
 
             // C1-2: activate のみ Audio Thread で実行 (reset/setCurrentAndTargetValue は Message Thread 側)
-            dspCrossfadeGain.setTargetValue(1.0);
+            crossfadeRuntime_.getGain().setTargetValue(1.0);
 
             if (firstLoadDryPending)
             {
                 useDryAsOld = true;
-                dspCrossfadeDryScaleGain.setTargetValue(prepared.dryScaleTarget);
+                crossfadeRuntime_.getDryScaleGain().setTargetValue(prepared.dryScaleTarget);
             }
         }
     }
@@ -3014,16 +3008,16 @@ public:
                                          DSPCore* fading,
                                          bool resetDryScaleGain) noexcept
     {
-        if (!dspCrossfadeGain.isSmoothing())
+        if (!crossfadeRuntime_.getGain().isSmoothing())
         {
             validateDistinctRuntimeSlotsRT(current, fading, nullptr);
 
             if (resetDryScaleGain)
             {
-                dspCrossfadeDryScaleGain.current = 1.0;
-                dspCrossfadeDryScaleGain.target = 1.0;
-                dspCrossfadeDryScaleGain.step = 0.0;
-                dspCrossfadeDryScaleGain.remaining = 0;
+                crossfadeRuntime_.getDryScaleGain().current = 1.0;
+                crossfadeRuntime_.getDryScaleGain().target = 1.0;
+                crossfadeRuntime_.getDryScaleGain().step = 0.0;
+                crossfadeRuntime_.getDryScaleGain().remaining = 0;
             }
         }
     }
@@ -3031,7 +3025,7 @@ public:
     inline void cleanupCrossfadeDirectPath(DSPCore* current,
                                            DSPCore* fading) noexcept
     {
-        if (fading != nullptr && !dspCrossfadeGain.isSmoothing())
+        if (fading != nullptr && !crossfadeRuntime_.getGain().isSmoothing())
         {
             validateDistinctRuntimeSlotsRT(current, fading, nullptr);
         }
@@ -3117,7 +3111,7 @@ public:
             const double alignedNewL = latencyBufNewL[readNew];
             const double alignedNewR = latencyBufNewR[readNew];
 
-            const double gNew = dspCrossfadeGain.getNextValue();
+            const double gNew = crossfadeRuntime_.getGain().getNextValue();
             mixFn(dstL, dstR, i, gNew, alignedOldL, alignedOldR, alignedNewL, alignedNewR);
 
             ++writePos;

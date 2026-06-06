@@ -223,7 +223,7 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
                          rebuildClass,
                          collapsePolicy);
 
-    if (!acceptsRuntimePublication())
+    if (isShutdownInProgress())
     {
         convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
         emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,
@@ -419,7 +419,7 @@ void AudioEngine::handleAsyncUpdate()
 
 void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
 {
-    if (!acceptsRuntimePublication())
+    if (isShutdownInProgress())
     {
         convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
         return;
@@ -443,7 +443,6 @@ void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
 //--------------------------------------------------------------
 void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute)
 {
-    constexpr const char* kPhase5TagReduce = "phase5_reduce_target";
     constexpr const char* kPhase5TagKeep = "phase5_keep_target";
 
     // forceMustExecute=true は、重複抑止より実行優先を選ぶ明示的な回避経路。
@@ -462,7 +461,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                          RebuildTelemetryClass::Structural,
                          collapsePolicy);
 
-    if (!acceptsRuntimePublication())
+    if (isShutdownInProgress())
     {
         convo::fetchAddAtomic(publicationRejectCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
         emitRebuildTelemetry(RebuildTelemetryEvent::Suppressed,

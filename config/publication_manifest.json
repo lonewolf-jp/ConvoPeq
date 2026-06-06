@@ -29,11 +29,6 @@
       "category": "retire_coordinator"
     },
     {
-      "name": "AudioEngine::publishRuntimeStateNonRt",
-      "file": "src/audioengine/AudioEngine.Commit.cpp",
-      "category": "engine_publish"
-    },
-    {
       "name": "AudioEngine::onRuntimePublishedNonRt",
       "file": "src/audioengine/AudioEngine.Commit.cpp",
       "category": "engine_callback"

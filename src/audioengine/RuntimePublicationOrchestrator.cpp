@@ -30,7 +30,11 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     // ★ activate はまだ行わない。まず world を build して publish する。
     // ★ Phase2: DSPHandle → DSPCore* 解決 (Execution Path Handle Normalization)
     auto* newDSPResolved = engine_.resolveDSPHandle(req.newDSP);
-    auto* oldDSP = engine_.getActiveRuntimeDSP();
+    // ★ [PR-4A] S-A2排除: Decision層の DSPCore* 直接参照を Handle 経由に変更
+    auto oldHandle = engine_.dspHandleRuntime_.getActiveRuntimeDSPHandle();
+    auto* oldDSP = (!oldHandle.isNull())
+        ? engine_.resolveDSPHandle(oldHandle)
+        : nullptr;
 #if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
     if (req.newDSP.isNull()) {
         DBG("[DIAG] trySubmit: newDSP handle is NULL generation=" << req.generation);

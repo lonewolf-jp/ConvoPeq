@@ -110,23 +110,6 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 }
 }  // namespace
 
-[[nodiscard]] bool AudioEngine::acceptsRuntimePublication() const noexcept
-{
-    const auto currentLifecycle = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
-    const auto currentPhase = convo::consumeAtomic(shutdownPhase, std::memory_order_acquire);
-
-    if (currentLifecycle != EngineLifecycleState::Prepared)
-        return false;
-
-    if (currentPhase != ShutdownPhase::Running)
-        return false;
-
-    if (shutdownRuntime_.isShutdownInProgress())
-        return false;
-
-    return !isShutdownInProgress();
-}
-
 [[nodiscard]] bool AudioEngine::runPublicationPrecheckNonRt(const RuntimePublishWorld& world) noexcept
 {
     // Delegate pure validation to RuntimePublicationValidator (Sprint-4 P3-A)
@@ -179,9 +162,9 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
     if (world.publication.previousSequenceId >= world.publication.sequenceId)
         return rejectWithEvidence("publication_sequence_non_monotonic");
 
-    // Stage 3: runtime admission.
-    if (!acceptsRuntimePublication())
-        return rejectWithEvidence("accepts_runtime_publication_false");
+    // Stage 3: runtime admission — shutdown check (consolidated from acceptsRuntimePublication)
+    if (isShutdownInProgress())
+        return rejectWithEvidence("publish_shutdown_in_progress");
 
     if (!hasEquivalentTransitionSemantic(world))
         return rejectWithEvidence("transition_semantic_mismatch");

@@ -173,7 +173,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     armCrossfadeIfPending(fading != nullptr, useDryAsOld, preparedCrossfade);
 
     const bool canCrossfade = (fading != nullptr || useDryAsOld)
-        && dspCrossfadeGain.isSmoothing()
+        && crossfadeRuntime_.getGain().isSmoothing()
         && dspCrossfadeDoubleBuffer.getNumChannels() >= 2
         && dspCrossfadeDoubleBuffer.getNumSamples() >= numSamples;
 

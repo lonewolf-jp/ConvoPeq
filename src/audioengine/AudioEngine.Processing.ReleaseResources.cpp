@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "DSPLifetimeManager.h"
 #include "RuntimeBuilder.h"
 #include "NoiseShaperLearner.h"
 
@@ -59,11 +60,7 @@ void AudioEngine::releaseResources()
     clearRebuildReason(RebuildReason::DeferredFinalizeAware);
     convo::publishAtomic(deferredFinalizeFirstSeenTicks_, 0, std::memory_order_release);
     cancelPendingUpdate();
-    convo::publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
-    convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
-    convo::publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
-    convo::publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
-    convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
+    crossfadeRuntime_.reset();
     convo::publishAtomic(latencyResetPending, false, std::memory_order_release);
     convo::publishAtomic(lastIssuedConvolverStructuralHash_, 0, std::memory_order_release);
     convo::publishAtomic(lastCommittedConvolverStructuralHash_, 0, std::memory_order_release);
@@ -87,6 +84,9 @@ void AudioEngine::releaseResources()
     DSPCore* pendingNewToRelease = nullptr;
     DSPCore* pendingCurrentToRelease = nullptr;
 
+    // ★ [PR-A2] DSPLifetimeManager 経由で retire (lifetime は lock 外でも参照可能にする)
+    DSPLifetimeManager lifetimeForShutdown(*this);
+
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
         const auto runtimeReadHandle = readControlRuntimeHandle();
@@ -106,9 +106,8 @@ void AudioEngine::releaseResources()
             auto* const fadingRaw = exchangeFadingRuntimeDSP(nullptr);
             fadingToRelease = (reinterpret_cast<uintptr_t>(fadingRaw) == (~static_cast<uintptr_t>(0))) ? nullptr : fadingRaw;
         }
-        convo::publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
-        dspCrossfadeDryScaleGain.setCurrentAndTargetValue(1.0);
-        convo::publishAtomic(queuedFadeTimeSec, 0.03, std::memory_order_release);
+        crossfadeRuntime_.reset();
+        refreshCrossfadePreparedSnapshotFromAtomics();
 
         if (hasPendingTask)
         {
@@ -117,10 +116,6 @@ void AudioEngine::releaseResources()
             pendingTask.currentDSP = nullptr;
             hasPendingTask = false;
         }
-
-        convo::publishAtomic(dspCrossfadePending, false, std::memory_order_release);
-        dspCrossfadeGain.setCurrentAndTargetValue(1.0);
-        refreshCrossfadePreparedSnapshotFromAtomics();
 
         // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
         {
@@ -156,13 +151,13 @@ void AudioEngine::releaseResources()
     // [P1 Phase1-B] drainPublicationLogForShutdown removed
 
     if (activeToRelease)
-        retireDSP(activeToRelease);
+        lifetimeForShutdown.retire(activeToRelease);
     if (fadingToRelease)
-        retireDSP(fadingToRelease);
+        lifetimeForShutdown.retire(fadingToRelease);
     if (pendingNewToRelease)
-        retireDSP(pendingNewToRelease);
+        lifetimeForShutdown.retire(pendingNewToRelease);
     if (pendingCurrentToRelease)
-        retireDSP(pendingCurrentToRelease);
+        lifetimeForShutdown.retire(pendingCurrentToRelease);
 
     // shutdown/release シーケンスでは明示的に deferred retire queue をドレインする。
     // 通常タイマー経路は Releasing 中に early-return するため、ここで最終回収を保証する。

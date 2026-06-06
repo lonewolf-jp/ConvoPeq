@@ -387,11 +387,9 @@ void AudioEngine::timerCallback()
         auto* const doneRaw1 = exchangeFadingRuntimeDSP(nullptr);
         if (auto* done = (reinterpret_cast<uintptr_t>(doneRaw1) == (~static_cast<uintptr_t>(0))) ? nullptr : doneRaw1)
             retireDSP(done);
-        publishAtomic(dspCrossfadePending, false, std::memory_order_release);
-        publishAtomic(firstIrDryCrossfadePending, false, std::memory_order_release);
-        publishAtomic(dspCrossfadeUseDryAsOld, false, std::memory_order_release);
-        publishAtomic(dspCrossfadeStartDelayBlocks, 0, std::memory_order_release);
-        publishAtomic(dspCrossfadeDryHoldSamples, 0, std::memory_order_release);
+        crossfadeRuntime_.complete();
+        crossfadeRuntime_.setStartDelayBlocks(0);
+        crossfadeRuntime_.setDryHoldSamples(0);
         refreshCrossfadePreparedSnapshotFromAtomics();
 
         // Phase4: フェード完了時の RuntimeGraph を idle 状態へ同期する。
