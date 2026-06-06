@@ -18,6 +18,8 @@ struct TestWorld
     std::uint64_t token = 0;
     std::uint64_t generation = 0;
     std::uint64_t publicationSequence = 0;
+
+    void sealRecursively() noexcept {}
 };
 
 struct TestBridge

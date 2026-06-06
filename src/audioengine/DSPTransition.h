@@ -7,6 +7,35 @@
 
 namespace convo::isr {
 
+/*
+ * Crossfade Registration Authority
+ *
+ * Crossfade registration is owned exclusively by DSPTransition.
+ *
+ * Responsibility boundary:
+ *   Decision  → CrossfadeAuthority  (WHETHER a crossfade is required)
+ *   Execution → DSPTransition       (Transition lifecycle execution)
+ *   Registration → DSPTransition    (Registration at transition execution start)
+ *
+ * Rationale:
+ *   - CrossfadeAuthority evaluates dspProjection values and decides
+ *     whether a crossfade is needed. It must NOT own registration.
+ *   - DSPTransition executes the actual transition lifecycle (activate,
+ *     crossfade start, retire). Registration must occur at the point
+ *     where transition execution begins.
+ *   - Merging Decision and Registration into a single class would
+ *     create an Authority violation (Decision → Execution coupling).
+ *
+ * Do NOT register crossfades from:
+ *   - CrossfadeAuthority          (would merge Decision + Execution)
+ *   - RuntimeBuilder              (build-time, no lifecycle context)
+ *   - RuntimePublicationOrchestrator (coordination only, no execution)
+ *   - AudioEngine commit path     (publish admission, no transition)
+ *
+ * Any new registration site requires architecture review.
+ * CI gate: grep "registerCrossfade(" → DSPTransition only → pass
+ */
+
 // DSPTransition: publish 成功後に DSP Lifetime 操作を実行する。
 // Coordinator::submitPublishRequest() から呼ばれる。
 // ★ activate は publish 成功後にのみ実行する。
@@ -84,7 +113,7 @@ public:
                          ? nullptr : doneRaw)
         {
             // retire old fading DSP
-            DSPLifetimeManager lifetime(const_cast<AudioEngine&>(engine_));
+            DSPLifetimeManager lifetime(engine_);
             lifetime.retire(done);
         }
 
@@ -92,8 +121,8 @@ public:
         engine_.refreshCrossfadePreparedSnapshotFromAtomics();
 
         // publish idling world (Coordinator 経由)
-        auto coordinator = const_cast<AudioEngine&>(engine_).makeRuntimePublicationCoordinator();
-        auto worldBuilder = convo::RuntimeBuilder(const_cast<AudioEngine&>(engine_));
+        auto coordinator = engine_.makeRuntimePublicationCoordinator();
+        auto worldBuilder = convo::RuntimeBuilder(engine_);
         auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
                                                                  nullptr,
                                                                  convo::TransitionPolicy::HardReset,

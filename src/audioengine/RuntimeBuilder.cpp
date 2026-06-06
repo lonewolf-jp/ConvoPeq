@@ -149,6 +149,7 @@ RuntimeBuilder::createBootstrapWorld() noexcept
     worldOwner->projectionFreshness.projectionRevision = bootstrapGeneration;
     worldOwner->projectionFreshness.maxStalenessWindows = 1u;
 
+    worldOwner->freeze();
     return worldOwner;
 }
 
@@ -215,8 +216,17 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
     }
 
     // [PR-4] DSP semantic projection (current DSPCore → RuntimeWorld for crossfade/admission)
+    // [PR-2] Changed from DSPCore direct read to sealedSnapshot values
     {
-        if (current != nullptr) {
+        if (sealedSnapshot != nullptr) {
+            worldOwner->dspProjection.irLoaded = sealedSnapshot->irLoaded;
+            worldOwner->dspProjection.irFinalized = sealedSnapshot->irFinalized;
+            worldOwner->dspProjection.structuralHash = sealedSnapshot->structuralHash;
+            worldOwner->dspProjection.oversamplingFactor = sealedSnapshot->oversamplingFactor;
+            worldOwner->dspProjection.sampleRate = sealedSnapshot->sampleRate;
+            worldOwner->dspProjection.baseLatencySamples = sealedSnapshot->baseLatencySamples;
+        } else if (current != nullptr) {
+            // Fallback: DSPCore direct read (bootstrap/legacy paths without snapshot)
             worldOwner->dspProjection.irLoaded = current->convolverRt().isIRLoaded();
             worldOwner->dspProjection.irFinalized = current->convolverRt().isIRFinalized();
             worldOwner->dspProjection.structuralHash = current->convolverRt().getStructuralHash();
@@ -324,7 +334,7 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
 
     // SchedulingSemantic fields are derived from ExecutionSemantic (#16 Sprint-1)
     // Do not set scheduling.* directly - they mirror execution.* for backward compatibility
-    // TODO: Remove SchedulingSemantic entirely after all consumers migrate to execution.*
+    // Note: SchedulingSemantic can be removed after all consumers migrate to execution.*
 
     worldOwner->coefficient.adaptiveCoeffBankIndex = 0;
     worldOwner->coefficient.adaptiveCoeffGeneration = 0;
@@ -402,7 +412,8 @@ RuntimeBuilder::buildRuntimePublishWorld(AudioEngine::DSPCore* current,
         ^ (static_cast<std::uint64_t>(worldOwner->coefficient.adaptiveCoeffGeneration) << 8)
         ^ (worldOwner->coefficient.eqCoeffHash << 16);
 
-    worldOwner->freeze();
+    // freeze は caller (coordinator.publishWorld) が行うため、ここでは行わない。
+    // Orchestrator は publish 前に crossfade decision を反映するため mutable 状態を維持する必要がある。
     return worldOwner;
 }
 

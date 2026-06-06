@@ -53,6 +53,8 @@ struct TestWorld
     int executionTransitionPolicy = 0;
     int executionCrossfadeStartDelayBlocks = 0;
     int executionCrossfadeDryHoldSamples = 0;
+
+    void sealRecursively() noexcept {}
 };
 
 struct TestBridge

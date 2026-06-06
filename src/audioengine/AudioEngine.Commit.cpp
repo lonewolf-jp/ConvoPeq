@@ -1,6 +1,5 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
-#include "RuntimeBuilder.h"
 #include "RuntimePublicationValidator.h"
 #include "RuntimePublicationOrchestrator.h"
 
@@ -584,7 +583,8 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
     evidenceExporter_.exportEvidence();
 }
 
-// [PR-3] Orchestrator 経路のみ。Deferred は submitPublishRequest が自動 enqueue する。
+// [PR-3/3A] Orchestrator 経路のみ。Deferred は submitPublishRequest が自動 enqueue する。
+// Phase2: DSPHandle 事前登録 (Execution Path Handle Normalization)
 void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
                                                            int generation,
                                                            const convo::RuntimeBuildSnapshot& sealedSnapshot)
@@ -592,28 +592,25 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
     if (newDSP == nullptr)
         return;
 
+    // Phase2: commit 時に DSPHandle を事前登録する
+    auto handle = registerDSPHandleForRuntime(newDSP);
+
     convo::isr::PublicationAdmission::PublishRequest req;
-    req.newDSP = newDSP;
+    req.newDSP = handle;
     req.generation = generation;
     req.sealedSnapshot = sealedSnapshot;
 
     runtimeOrchestrator_->submitPublishRequest(req);
-}
 
-void AudioEngine::publishRuntimeStateNonRt(DSPCore* current,
-                                           DSPCore* next,
-                                           convo::TransitionPolicy policy,
-                                           double fadeTimeSec,
-                                           bool active,
-                                           const convo::RuntimeBuildSnapshot* sealedSnapshot) noexcept
-{
-    auto coordinator = makeRuntimePublicationCoordinator();
-    auto worldBuilder = convo::RuntimeBuilder(*this);
-    auto worldOwner = worldBuilder.buildRuntimePublishWorld(current,
-                                                             next,
-                                                             policy,
-                                                             fadeTimeSec,
-                                                             active,
-                                                             sealedSnapshot);
-    coordinator.publishWorld(std::move(worldOwner));
+    // DSP commit 完了時に DSPReady を常に enqueue する。
+    // processLearningCommands の DSPReady ハンドラが
+    // learningRuntimeState に応じて適切に処理する。
+    // (WaitingForDSP の場合は学習再開、Idle/Running の場合は何もしない)
+    const LearningCommand dspReadyCmd {
+        LearningCommand::Type::DSPReady,
+        false,
+        convo::consumeAtomic(pendingLearningMode, std::memory_order_acquire),
+        pendingIRGeneration
+    };
+    enqueueLearningCommand(dspReadyCmd);
 }

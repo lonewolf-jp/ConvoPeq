@@ -29,13 +29,30 @@ public:
     void submitPublishRequest(const PublicationAdmission::PublishRequest& req) noexcept;
 
     // notifyTransitionComplete: クロスフェード完了時の処理 (Timer から呼ばれる)
+    // 完了後に deferred publish request があれば自動的に再試行する。
     void notifyTransitionComplete(AudioEngine::DSPCore* currentAfterFade) noexcept;
 
-    // hasDeferredRequest / consumeDeferredRequest: 保留中の publish 要求確認と消費 (Timer から呼ばれる)
-    [[nodiscard]] bool hasDeferredRequest() const noexcept { return admission_.hasDeferred(); }
-    [[nodiscard]] std::optional<PublicationAdmission::PublishRequest> consumeDeferredRequest() noexcept { return admission_.consumeDeferred(); }
+    // hasDeferredRequest / consumeDeferredRequest: 保留中の publish 要求確認と消費
+    [[nodiscard]] bool hasDeferredRequest() const noexcept { return hasDeferred_; }
+    [[nodiscard]] std::optional<PublicationAdmission::PublishRequest> consumeDeferredRequest() noexcept
+    {
+        if (!hasDeferred_)
+            return std::nullopt;
+        hasDeferred_ = false;
+        return deferredRequest_;
+    }
 
 private:
+    // [PR-7] Deferred Queue: 常に最新1件のみ保持。
+    std::optional<PublicationAdmission::PublishRequest> deferredRequest_;
+    bool hasDeferred_ = false;
+
+    void enqueueDeferred(const PublicationAdmission::PublishRequest& req) noexcept
+    {
+        deferredRequest_ = req;
+        hasDeferred_ = true;
+    }
+
     AudioEngine& engine_;
     PublicationAdmission admission_;
     PublicationExecutor executor_;

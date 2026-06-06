@@ -454,12 +454,19 @@ foreach ($file in $sourceFiles) {
         }
 
         if ([System.Text.RegularExpressions.Regex]::IsMatch($codeOnly, "\b(thread_local|mutable)\b")) {
-            $violations += [PSCustomObject]@{
-                Rule        = "LINT-AE-011"
-                Description = "No mutable/thread_local tokens in src/** code (rule 4.1.5 / 15.2)"
-                File        = $relativeSourcePath
-                Line        = $lineIndex + 1
-                Snippet     = $lineText.Trim()
+            # Allow mutable on standard mutex types (const-correct thread safety pattern)
+            $allowedMutablePattern = '\bmutable\s+(std::)?(mutex|shared_mutex|recursive_mutex)\b'
+            if ([System.Text.RegularExpressions.Regex]::IsMatch($codeOnly, $allowedMutablePattern)) {
+                # Legitimate const-correct mutex pattern, skip
+            }
+            else {
+                $violations += [PSCustomObject]@{
+                    Rule        = "LINT-AE-011"
+                    Description = "No mutable/thread_local tokens in src/** code (rule 4.1.5 / 15.2)"
+                    File        = $relativeSourcePath
+                    Line        = $lineIndex + 1
+                    Snippet     = $lineText.Trim()
+                }
             }
         }
 

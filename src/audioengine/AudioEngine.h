@@ -2716,12 +2716,6 @@ public:
             RuntimePublicationBridge { *this, runtimePublicationValidator_ }, runtimeStore);
     }
 
-    void publishRuntimeStateNonRt(DSPCore* current,
-                                  DSPCore* next,
-                                  convo::TransitionPolicy policy,
-                                  double fadeTimeSec,
-                                  bool active,
-                                  const convo::RuntimeBuildSnapshot* sealedSnapshot = nullptr) noexcept;
 
     inline void publishWorld(convo::aligned_unique_ptr<RuntimePublishWorld> worldOwner) noexcept
     {
@@ -3286,6 +3280,27 @@ inline convo::isr::DSPHandle registerDSPHandleForRuntime(DSPCore* dsp) noexcept
     const auto handle = dspHandleRuntime_.create(dsp);
     runtimeDSPHandleMap_.emplace(dsp, handle);
     return handle;
+}
+
+// resolveDSPHandle: DSPHandle → DSPCore* 解決 (Phase2: Execution Path Handle Normalization)
+// DSPHandleRuntime::resolve() は ResolvedDSP を返すため、後方互換のために DSPCore* に単純化する。
+// 解決失敗時は nullptr を返す（caller が適切に処理する）。
+inline DSPCore* resolveDSPHandle(convo::isr::DSPHandle handle) noexcept
+{
+    if (handle.isNull())
+        return nullptr;
+
+    const auto resolved = dspHandleRuntime_.resolve(handle);
+#if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
+    if (!resolved.valid) {
+        DBG("[DIAG] resolveDSPHandle: invalid handle slot=" << (int)handle.slot
+            << " gen=" << (int)handle.generation << " isStale=" << (resolved.isStale ? 1 : 0));
+    }
+#endif
+    if (!resolved.valid || resolved.isStale)
+        return nullptr;
+
+    return static_cast<DSPCore*>(resolved.instance);
 }
 
 inline bool retireDSPHandleForRuntime(DSPCore* dsp) noexcept

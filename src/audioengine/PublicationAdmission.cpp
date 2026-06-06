@@ -16,13 +16,8 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
     if (req.generation != currentGen)
         return Decision::RejectedStaleGeneration;
 
-    // 3. DSP finalized check
-    auto* dsp = static_cast<AudioEngine::DSPCore*>(req.newDSP);
-    if (dsp == nullptr)
-        return Decision::RejectedNotFinalized;
-
-    if (dsp->convolverRt().isIRLoaded()
-        && !dsp->convolverRt().isIRFinalized())
+    // 3. DSP finalized check (from sealedSnapshot, not DSPCore*)
+    if (req.sealedSnapshot.irLoaded && !req.sealedSnapshot.irFinalized)
         return Decision::RejectedNotFinalized;
 
     // 4. Pressure / throttle check

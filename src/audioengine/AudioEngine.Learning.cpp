@@ -120,8 +120,14 @@ void AudioEngine::processLearningCommands() noexcept
 
                 const auto runtimeReadHandle = readControlRuntimeHandle();
                 auto* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+                // noiseShaperType 判定は AudioEngine の atomic 設定値を基準とする。
+                // DSPCore の noiseShaperType フィールドは構築時のスナップショットであり、
+                // setNoiseShaperType() 後に作成されなかった DSPCore では旧値が残る。
+                // 実際のノイズシェイパー制御は AudioEngine の atomic で行われるため、
+                // DSPCore のコピー値ではなく AudioEngine の設定値を参照する。
                 const bool dspReady = (dsp != nullptr)
-                    && (dsp->noiseShaperType == NoiseShaperType::Adaptive9thOrder);
+                    && (convo::consumeAtomic(noiseShaperType, std::memory_order_acquire)
+                        == NoiseShaperType::Adaptive9thOrder);
 
                 juce::Logger::writeToLog("[AudioEngine] processLearningCommands: Start state="
                     + juce::String(static_cast<int>(learningRuntimeState))

@@ -39,6 +39,17 @@ struct RuntimeBuildSnapshot
     std::uint64_t convolverFingerprint = 0;
     RuntimeBuildFingerprint rebuildFingerprint {};
     bool sealed = false;
+
+    // [PR-2] DSP semantic projection snapshot values
+    // These fields are populated from DSPCore when snapshot is created,
+    // and consumed by RuntimeBuilder::buildRuntimePublishWorld() to
+    // construct dspProjection without DSPCore direct reads.
+    bool irLoaded = false;
+    bool irFinalized = false;
+    std::uint64_t structuralHash = 0;
+    int oversamplingFactor = 1;
+    double sampleRate = 48000.0;
+    int baseLatencySamples = 0;
 };
 
 static_assert(std::is_same_v<decltype(RuntimeBuildSnapshot{}.buildInput), BuildInput>,

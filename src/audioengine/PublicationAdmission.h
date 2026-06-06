@@ -1,7 +1,7 @@
 #pragma once
 
-#include <optional>
 #include "RuntimeBuildTypes.h"
+#include "ISRDSPHandle.h"
 
 class AudioEngine;  // forward declaration (circular dep avoid)
 
@@ -13,7 +13,7 @@ namespace convo::isr {
 class PublicationAdmission {
 public:
     struct PublishRequest {
-        void* newDSP = nullptr;  // AudioEngine::DSPCore*
+        DSPHandle newDSP;  // DSPHandle (Phase2: Execution Path Handle Normalization)
         int generation = 0;
         RuntimeBuildSnapshot sealedSnapshot;
     };
@@ -34,25 +34,8 @@ public:
     [[nodiscard]] Decision evaluate(const PublishRequest& req,
                                     AudioEngine& engine) const noexcept;
 
-    // Deferred Queue: 常に最新1件のみ保持。
-    void enqueueDeferred(const PublishRequest& req) noexcept
-    {
-        deferredRequest_ = req;
-        hasDeferred_ = true;
-    }
-
-    [[nodiscard]] bool hasDeferred() const noexcept { return hasDeferred_; }
-    [[nodiscard]] std::optional<PublishRequest> consumeDeferred() noexcept
-    {
-        if (!hasDeferred_)
-            return std::nullopt;
-        hasDeferred_ = false;
-        return deferredRequest_;
-    }
-
-private:
-    std::optional<PublishRequest> deferredRequest_;
-    bool hasDeferred_ = false;
+    // Deferred Queue は PublicationAdmission から RuntimePublicationOrchestrator へ移設済み (PR-7)。
+    // Admission は publish 可否判定のみ責務とする。
 };
 
 } // namespace convo::isr

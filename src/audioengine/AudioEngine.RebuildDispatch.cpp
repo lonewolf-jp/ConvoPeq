@@ -70,7 +70,9 @@ bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
 convo::RuntimeBuildSnapshot captureRuntimeBuildSnapshot(const convo::BuildInput& buildInput,
                                                         const ConvolverProcessor::BuildSnapshot& convolverSnapshot,
                                                         int generation,
-                                                        std::uint64_t structuralHash) noexcept
+                                                        std::uint64_t structuralHash,
+                                                        bool irLoaded,
+                                                        bool irFinalized) noexcept
 {
     convo::RuntimeBuildSnapshot snapshot {};
     snapshot.generation = generation;
@@ -81,6 +83,12 @@ convo::RuntimeBuildSnapshot captureRuntimeBuildSnapshot(const convo::BuildInput&
     snapshot.rebuildFingerprint.convolutionConfigHash = convolverSnapshot.fingerprint;
     snapshot.rebuildFingerprint.sampleRate = buildInput.sampleRate;
     snapshot.rebuildFingerprint.blockSize = buildInput.blockSize;
+    // [PR-2] DSP semantic projection snapshot values
+    snapshot.irLoaded = irLoaded;
+    snapshot.irFinalized = irFinalized;
+    snapshot.structuralHash = structuralHash;
+    snapshot.oversamplingFactor = buildInput.oversamplingFactor;
+    snapshot.sampleRate = buildInput.sampleRate;
     return snapshot;
 }
 
@@ -624,7 +632,9 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                 captureRuntimeBuildSnapshot(task.buildInput,
                                             task.convolverBuildSnapshot,
                                             generation,
-                                            structuralHash)));
+                                            structuralHash,
+                                            uiConvolverProcessor.isIRLoaded(),
+                                            uiConvolverProcessor.isIRFinalized())));
             pendingTask = task;
             hasPendingTask = true;
             convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(1), std::memory_order_release);

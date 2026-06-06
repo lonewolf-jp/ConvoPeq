@@ -4,9 +4,9 @@
 
 namespace convo::isr {
 
-// CrossfadeAuthority: crossfade の decision と registration を統合する Authority。
-// API は RuntimeWorld (RuntimeState) ベース。
-// DSPCore からの情報取得は内部実装詳細として隠蔽する。
+// CrossfadeAuthority: crossfade 判定のみを行う Authority。
+// DSPCore を直接参照せず、RuntimeWorld.dspProjection の投影値のみで判断する。
+// Registration (registerCrossfade) は DSPTransition が担当。
 class CrossfadeAuthority {
 public:
     struct Decision {
@@ -18,35 +18,19 @@ public:
 
     explicit CrossfadeAuthority() noexcept = default;
 
-    // evaluateAndRegister: decision + registration を統合
-    Decision evaluateAndRegister(AudioEngine& engine,
-                                 AudioEngine::DSPCore* oldDSP,
-                                 AudioEngine::DSPCore* newDSP,
-                                 DSPHandle oldHandle,
-                                 DSPHandle newHandle) noexcept;
-
-    // evaluateOnly: decision のみ (registration 不要なケース用)
-    Decision evaluateOnly(AudioEngine& engine,
-                          AudioEngine::DSPCore* oldDSP,
-                          AudioEngine::DSPCore* newDSP) noexcept;
-
-    // evaluateFromWorlds: RuntimeWorld投影値ベースの判断 (PR-4)
-    // oldWorld/newWorld の dspProjection を使用して判断する。
-    // DSPCore 直読より優先して使用すること。
-    [[nodiscard]] Decision evaluateFromWorlds(
+    // evaluate: RuntimeWorld の dspProjection 投影値のみで crossfade 要否を判断。
+    // DSPCore 直読は行わない。engine は atomic フェード時間設定の読み取りにのみ使用。
+    [[nodiscard]] Decision evaluate(
         const AudioEngine& engine,
         const RuntimePublishWorld& oldWorld,
         const RuntimePublishWorld& newWorld) noexcept;
 
-private:
-    // computeDecision: 現在 computeCrossfadeContext ラムダにあるロジック
-    Decision computeDecision(const AudioEngine& engine,
-                             const AudioEngine::DSPCore* oldDSP,
-                             const AudioEngine::DSPCore* newDSP) noexcept;
-
-    // doRegister: crossfadeAuthorityRuntime_.registerCrossfade を内蔵
-    void doRegister(AudioEngine& engine,
-                    DSPHandle from, DSPHandle to) noexcept;
+    // [0-6] Coverage Contract: evaluate() が参照する dspProjection 全フィールド名
+    static constexpr std::array<const char*, 3> kEvaluateRelevantFieldNames {{
+        "irLoaded",
+        "structuralHash",
+        "oversamplingFactor"
+    }};
 };
 
 } // namespace convo::isr
