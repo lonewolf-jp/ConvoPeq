@@ -10,7 +10,7 @@ static constexpr int kAdaptiveNoiseShaperSampleRateBankCount = 10;
 
 // BitDepth も一緒に管理するための拡張（16/24/32 の3段階）
 static constexpr int kAdaptiveBitDepthCount = 3;
-static constexpr int kAdaptiveBitDepthValues[kAdaptiveBitDepthCount] = {16, 24, 32};
+inline constexpr int kAdaptiveBitDepthValues[kAdaptiveBitDepthCount] = {16, 24, 32};
 static constexpr int kLearningModeCount = 6;
 
 // ストリーミング信号キャプチャ用 AudioBlock（2ch, 256サンプル）
@@ -69,12 +69,10 @@ struct CoeffSet {
 #include "RuntimeTransition.h"
 #include "AtomicAccess.h"
 #include "CrossfadeRuntime.h"
-#include "DeferredDeletionQueue.h"
 #include "core/Types.h"
 #include "core/SnapshotCoordinator.h"
 #include "core/EpochDomain.h"
 #include "core/RuntimePublicationCoordinator.h"
-#include "core/RuntimeStore.h"
 #include "core/CommandBuffer.h"
 #include "core/ThreadAffinityManager.h"
 #include "core/WorkerThread.h"
@@ -89,7 +87,6 @@ namespace convo::isr { class RuntimePublicationOrchestrator; }
 #include "ISRRuntimeSemanticSchema.h"
 #include "ISRRuntimeIdentityGenerators.h"
 #include "ISRPayloadTier.h"
-#include "ISRHB.h"
 #include "ISRRetire.h"
 #include "ISRShutdown.h"
 #include "ISRRuntimePublicationCoordinator.h"
@@ -3247,7 +3244,6 @@ inline void retireDSP(DSPCore* dsp) noexcept
     switch (enqueueDeferredDeleteNonRtWithResult(dsp, &AudioEngine::destroyDSPCoreNode))
     {
         case convo::isr::RetireEnqueueResult::Success:
-            return;
         case convo::isr::RetireEnqueueResult::QueuePressure:
             return;
         case convo::isr::RetireEnqueueResult::QueueFull:
