@@ -350,6 +350,9 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/AudioEngine.UIEvents.cpp
     src/audioengine/AudioEngine.StateIO.cpp
     src/audioengine/AudioEngine.Threading.cpp
+    src/audioengine/AudioEngine.Publication.cpp
+    src/audioengine/AudioEngine.Reader.cpp
+    src/audioengine/AudioEngine.Retire.cpp
     src/audioengine/ISRLifecycle.cpp
         src/audioengine/ISRRTExecution.cpp
             src/audioengine/ISRDSPHandle.cpp

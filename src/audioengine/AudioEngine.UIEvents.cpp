@@ -185,5 +185,8 @@ void AudioEngine::convolverParamsChanged(ConvolverProcessor* processor)
                 DBG("[AudioEngine] convolverParamsChanged: command queue overflow");
             }
         }
+
+        // convolver 状態変更を MainWindow に通知 (IR読み込み後のGUI更新)
+        sendChangeMessage();
     }
 }

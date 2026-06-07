@@ -1146,6 +1146,7 @@ public: // Added for AudioEngine access
     uint64_t m_latencyChangeRequestedGenSeen { 0 };
     uint64_t m_smoothingTimeChangePendingGenSeen { 0 };
     uint64_t m_mixSmootherResetPendingGenSeen { 0 };
+    // [P1-15] 内部 epoch 管理用 (Convolver 独自ドメイン)
     convo::EpochDomain m_epochDomain;
     // DSP_THREAD_STATE: Audio Thread process() で使用するRCU reader。
     convo::RCUReader runtimeRcuReader { m_epochDomain };

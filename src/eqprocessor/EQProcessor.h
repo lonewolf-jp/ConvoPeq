@@ -35,6 +35,7 @@
 #include "DspNumericPolicy.h"
 
 namespace convo::isr { class RuntimePublicationCoordinator; }
+namespace convo::isr { class ISRRetireRouter; }
 
 //--------------------------------------------------------------
 // バンドタイプ列挙型
@@ -390,6 +391,12 @@ public:
         m_retireCoordinator = coordinator;
     }
 
+    // [work21] ISRRetireRouter: unified retire API (Phase-C)
+    void setRetireRouter(convo::isr::ISRRetireRouter* router) noexcept
+    {
+        m_retireRouter = router;
+    }
+
 private:
     //----------------------------------------------------------
     // プライベートヘルパー関数
@@ -413,7 +420,12 @@ private:
 
     // スムージング処理
     convo::EpochDomain m_epochDomain;
+    // [P1-14] 遅延epoch進捗フラグ: パラメータ変更毎に advanceEpoch を呼ばず,
+    //         フラグを立てて flushPendingEpochAdvance() で一括進捗する.
+    std::atomic<bool> m_epochAdvancePending { false };
     convo::isr::RuntimePublicationCoordinator* m_retireCoordinator{nullptr};
+    // [work21] ISRRetireRouter: unified retire API (Phase-C)
+    convo::isr::ISRRetireRouter* m_retireRouter{nullptr};
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
     convo::RCUReader rcuReader { m_epochDomain };
@@ -423,6 +435,8 @@ private:
                                            uint64_t epoch) noexcept;
     void retireEQStateDeferred(EQState* state) noexcept;
     void retireBandNodeDeferred(BandNode* node) noexcept;
+    // [P1-14] 保留中の advanceEpoch を一括実行
+    void flushPendingEpochAdvance() noexcept;
 
     // ── 状態リセット要求 (Message Thread publish / Audio Thread consume-only) ──
     // high 32-bit: serial, low 32-bit: mask
@@ -504,7 +518,7 @@ private:
     static constexpr double BYPASS_FADE_TIME_SEC = 0.005; // 5ms
 
     // ── 係数管理 (Atomic Swap) ──
-    std::array<std::atomic<std::uintptr_t>, NUM_BANDS> bandNodeBits; // uintptr_t-backed lock-free handles (single ownership via epoch retire)
+    std::array<std::atomic<std::uintptr_t>, NUM_BANDS> bandNodeBits {}; // uintptr_t-backed lock-free handles (single ownership via epoch retire)
     std::array<convo::NonOwningPtr<BandNode>, NUM_BANDS> activeBandNodes { convo::NonOwningPtr<BandNode> { nullptr } }; // Message Thread mirror only (non-owning)
 
     static EQState* fromStateBits(std::uintptr_t bits) noexcept

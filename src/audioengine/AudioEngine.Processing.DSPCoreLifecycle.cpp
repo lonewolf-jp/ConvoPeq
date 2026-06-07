@@ -47,11 +47,15 @@ AudioEngine::DSPCore::DSPCore()
 
 void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, int bitDepth, int manualOversamplingFactor, OversamplingType oversamplingType, NoiseShaperType selectedNoiseShaperType, AudioEngine* owner)
 {
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] enter");
+
     // Route EQ and Convolver retirement through AudioEngine's coordinator
     if (owner != nullptr)
     {
+        juce::Logger::writeToLog("[DSPCORE_PREPARE] setRetireCoordinator");
         eq.setRetireCoordinator(&owner->runtimePublicationBridge_);
         convolver.setRetireCoordinator(&owner->runtimePublicationBridge_);
+        juce::Logger::writeToLog("[DSPCORE_PREPARE] setRetireCoordinator done");
     }
 
     // Exception-safety context:
@@ -60,6 +64,7 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     // - ここでの確保は RAII で commit 前に完了させ、Audio Thread へは完成状態のみ publish する。
     this->sampleRate = newSampleRate;
     this->noiseShaperType = selectedNoiseShaperType;
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] sampleRate set: sr=" + juce::String(newSampleRate) + " spb=" + juce::String(samplesPerBlock));
 
     int targetFactor = 1;
     if (manualOversamplingFactor > 0)
@@ -114,9 +119,11 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
 
     maxSamplesPerBlock   = inputMaxBlock;
     maxInternalBlockSize = internalMaxBlock;
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] blockCalc: inputMaxBlock=" + juce::String(inputMaxBlock) + " internalMaxBlock=" + juce::String(internalMaxBlock));
 
 // === 【パッチ3】raw aligned_malloc確保（message threadのみ・64byte保証）===
     const int newRequired = internalMaxBlock;
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] allocating aligned buffers: required=" + juce::String(newRequired));
     if (newRequired > alignedCapacity || !alignedL || !alignedR)
     {
         // Exception-safe allocation using local ScopedAlignedPtr
@@ -145,27 +152,39 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     }
 
     auto& ramp = ramps();
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling ramp.prepare");
     ramp.prepare(newSampleRate);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] ramp.prepare done");
 
     const auto osPreset = (oversamplingType == OversamplingType::LinearPhase)
                         ? CustomInputOversampler::Preset::LinearPhase
                         : CustomInputOversampler::Preset::IIRLike;
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling oversampling.prepare");
     oversampling.prepare(inputMaxBlock, static_cast<int>(oversamplingFactor), osPreset);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] oversampling.prepare done");
 
     const double processingRate = newSampleRate * static_cast<double>(oversamplingFactor);
     const int processingBlockSize = samplesPerBlock * static_cast<int>(oversamplingFactor);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] processingRate=" + juce::String(processingRate) + " processingBlockSize=" + juce::String(processingBlockSize));
 
     // プロセッサの準備
     // Convolverには実際のブロックサイズを渡す (パーティションサイズ決定やLoaderThreadで使用)
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling convolverState->prepare");
     convolverState->prepare(owner, processingRate, processingBlockSize);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] convolverState->prepare done");
 
     // EQも内部最大サイズで準備（より安全）
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling eqState->prepare");
     eqState->prepare(processingRate, internalMaxBlock);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] eqState->prepare done");
 
     // 出力段・入力段・OS後の DC blocker 状態を sidecar に初期化する。
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling dcBlockers().init");
     dcBlockers().init(newSampleRate, processingRate);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] dcBlockers().init done");
 
     // ノイズシェーパーの準備 (出力段で行うため元のサンプルレート)
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling noise shaper prepare: type=" + juce::String(static_cast<int>(selectedNoiseShaperType)));
     if (selectedNoiseShaperType == NoiseShaperType::Psychoacoustic)
         dither.prepare(newSampleRate, bitDepth);
     else if (selectedNoiseShaperType == NoiseShaperType::Fixed4Tap)
@@ -186,13 +205,18 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
         activeAdaptiveCoeffBankIndex = -1;
     }
     this->ditherBitDepth = bitDepth; // DSPCoreのメンバーに保存
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] noise shaper prepare done");
 
     // 出力周波数フィルターの係数を事前計算 (processingRate: OS後のレート)
     // filter.txt: ハイカット/ローカット(①) / ローパス/ハイパス(②) の全モード分を一括生成
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling outputFilter.prepare");
     outputFilter.prepare(processingRate);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] outputFilter.prepare done");
 
     // 初期状態は固定レイテンシなし
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] calling setFixedLatencySamples");
     setFixedLatencySamples(0);
+    juce::Logger::writeToLog("[DSPCORE_PREPARE] setFixedLatencySamples done");
 }
 
 void AudioEngine::DSPCore::setFixedLatencySamples(int samples)

@@ -6,11 +6,12 @@
 #include <limits>
 
 #include "../DeferredDeletionQueue.h"
+#include "IEpochProvider.h"
 #include "audioengine/AtomicAccess.h"
 
 namespace convo {
 
-class EpochDomain
+class EpochDomain : public IEpochProvider
 {
 public:
     static constexpr int kMaxReaders = 64;
@@ -28,7 +29,7 @@ public:
         }
     }
 
-    int registerReaderThread() noexcept
+    int registerReaderThread() noexcept override
     {
         for (int i = 0; i < kMaxReaders; ++i)
         {
@@ -52,7 +53,7 @@ public:
         return -1;
     }
 
-    bool reserveReaderThread(int readerIndex) noexcept
+    bool reserveReaderThread(int readerIndex) noexcept override
     {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
             return false;
@@ -78,7 +79,8 @@ public:
         return reserved;
     }
 
-    void enterReader(int readerIndex) noexcept
+    [[deprecated("Use RCUReader::enter() instead. See refactoring_plan.md P1-18.")]]
+    void enterReader(int readerIndex) noexcept override
     {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
             return;
@@ -97,7 +99,8 @@ public:
         convo::publishAtomic(slot.epoch, epoch, std::memory_order_release);
     }
 
-    void exitReader(int readerIndex) noexcept
+    [[deprecated("Use RCUReader::exit() instead. See refactoring_plan.md P1-18.")]]
+    void exitReader(int readerIndex) noexcept override
     {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
             return;
@@ -121,16 +124,24 @@ public:
         convo::publishAtomic(slot.epoch, kInactiveEpoch, std::memory_order_release);
     }
 
-    uint64_t currentEpoch() const noexcept
+    uint64_t currentEpoch() const noexcept override
     {
         // acquire: advanceEpoch の acq_rel release-side と HB し、最新 epoch を観測する。
         return convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
     }
 
+    // [work21] [[deprecated]] — transitional; callers migrated to publishEpoch()
+    [[deprecated("Use Router::publishEpoch() instead. See refactoring_plan.md P0-8.")]]
     uint64_t advanceEpoch() noexcept
     {
-        // acq_rel: 取得側 acquire で直前の retire 操作を観測し、
-        //          解放側 release で新 epoch 値を他スレッドに可視化する。
+        return convo::fetchAddAtomic(globalEpoch,
+                                     static_cast<uint64_t>(1),
+                                     std::memory_order_acq_rel);
+    }
+
+    // [work21] IEpochProvider::publishEpoch — inline advance to avoid deprecated call
+    uint64_t publishEpoch() noexcept override
+    {
         return convo::fetchAddAtomic(globalEpoch,
                                      static_cast<uint64_t>(1),
                                      std::memory_order_acq_rel);
@@ -143,10 +154,10 @@ public:
 
     uint64_t publish() noexcept
     {
-        return advanceEpoch();
+        return publishEpoch();
     }
 
-    uint64_t getMinReaderEpoch() const noexcept
+    uint64_t getMinReaderEpoch() const noexcept override
     {
         uint64_t minEpoch = currentEpoch();
 
@@ -169,7 +180,7 @@ public:
         return minEpoch;
     }
 
-    uint32_t activeReaderCount() const noexcept
+    uint32_t activeReaderCount() const noexcept override
     {
         uint32_t count = 0;
 
@@ -183,17 +194,26 @@ public:
         return count;
     }
 
-    [[deprecated("Use ISR RuntimePublicationCoordinator::enqueueRetire")]] bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept
+    [[deprecated("Use ISR RuntimePublicationCoordinator::enqueueRetire")]] bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
     {
         return deferredDeletionQueue.enqueue(ptr, deleter, epoch);
     }
 
+    // [work21] [[deprecated]] — transitional; callers migrated to Router 4-param overload
     [[deprecated("Use ISR RuntimePublicationCoordinator::enqueueRetire")]] bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
     {
         return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
     }
 
+    // [work21] [[deprecated]] — transitional; callers migrated to tryReclaim()
+    [[deprecated("Use requestReclaim() instead. See refactoring_plan.md P0-6.")]]
     void reclaimRetired() noexcept
+    {
+        deferredDeletionQueue.reclaim(getMinReaderEpoch());
+    }
+
+    // [work21] IEpochProvider::tryReclaim — inline reclaim to avoid deprecated call
+    void tryReclaim() noexcept override
     {
         deferredDeletionQueue.reclaim(getMinReaderEpoch());
     }
@@ -223,56 +243,6 @@ private:
     std::atomic<uint64_t> globalEpoch;
     std::array<ReaderSlot, kMaxReaders> readers;
     DeferredDeletionQueue deferredDeletionQueue;
-};
-
-class EpochDomainReaderGuard
-{
-public:
-    EpochDomainReaderGuard(EpochDomain& domainIn, int readerIndexIn) noexcept
-        : domain(&domainIn), readerIndex(readerIndexIn), active(true)
-    {
-        domain->enterReader(readerIndex);
-    }
-
-    ~EpochDomainReaderGuard() noexcept
-    {
-        if (active && domain != nullptr)
-            domain->exitReader(readerIndex);
-    }
-
-    EpochDomainReaderGuard(const EpochDomainReaderGuard&) = delete;
-    EpochDomainReaderGuard& operator=(const EpochDomainReaderGuard&) = delete;
-
-    EpochDomainReaderGuard(EpochDomainReaderGuard&& other) noexcept
-        : domain(other.domain), readerIndex(other.readerIndex), active(other.active)
-    {
-        other.domain = nullptr;
-        other.readerIndex = -1;
-        other.active = false;
-    }
-
-    EpochDomainReaderGuard& operator=(EpochDomainReaderGuard&& other) noexcept
-    {
-        if (this == &other)
-            return *this;
-
-        if (active && domain != nullptr)
-            domain->exitReader(readerIndex);
-
-        domain = other.domain;
-        readerIndex = other.readerIndex;
-        active = other.active;
-
-        other.domain = nullptr;
-        other.readerIndex = -1;
-        other.active = false;
-        return *this;
-    }
-
-private:
-    EpochDomain* domain = nullptr;
-    int readerIndex = -1;
-    bool active = false;
 };
 
 } // namespace convo

@@ -1,0 +1,8 @@
+# Exclude stale CodeQL database copies and other generated artifacts
+
+# from clangd indexing to prevent false redefinition errors
+
+Index:
+  Exclude:
+    - .musubi
+    - storage/codeql

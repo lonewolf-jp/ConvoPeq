@@ -2,6 +2,7 @@
 #include "AudioEngine.h"
 #include "RuntimePublicationOrchestrator.h"
 #include "NoiseShaperLearner.h"
+#include "ISRRetireRouter.h"
 
 namespace {
 void diagLog(const juce::String& message)
@@ -14,9 +15,14 @@ void diagLog(const juce::String& message)
 AudioEngine::AudioEngine()
     : eqCacheManager(*this)
     , uiEqEditor(*this)
+#pragma warning(push)
+#pragma warning(disable : 4996) // [[deprecated]] — transitional, SnapshotCoordinator EpochDomain (P1-7)
     , m_coordinator(m_epochDomain)
+#pragma warning(pop)
     , m_workerThread(m_commandBuffer, m_generationManager, &affinityManager)
 {
+    // [work21] ISRRetireRouter初期化
+    m_retireRouter = std::make_unique<convo::isr::ISRRetireRouter>(m_epochDomain);
     // [PR-1.5] RuntimePublicationOrchestrator 初期化
     runtimeOrchestrator_ = std::make_unique<convo::isr::RuntimePublicationOrchestrator>(*this);
 
@@ -112,7 +118,7 @@ AudioEngine::~AudioEngine()
     shutdownWorkerThread();
 
     setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "~AudioEngine");
-    m_epochDomain.advanceEpoch();
+    m_retireRouter->publishEpoch();
 
     // Shutdown 時は EBR 回収を試みる。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");

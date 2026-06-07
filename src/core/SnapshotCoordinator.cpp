@@ -1,4 +1,4 @@
-//==============================================================================
+﻿//==============================================================================
 // SnapshotCoordinator.cpp - Phase 4
 //==============================================================================
 
@@ -19,7 +19,7 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 
 	// 初回適用で current が未初期化の場合は、
 	// null 起点フェードを避けて即時反映する。
-	if (m_slots.loadCurrent(std::memory_order_acquire) == nullptr) // acquire: switchImmediate/completeFade の release と HB し最新 current を観測
+	if (m_slots.loadCurrent(std::memory_order_acquire) == nullptr)
 	{
 		switchImmediate(target);
 		return;
@@ -30,14 +30,10 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 		SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
 	};
 
-	GlobalSnapshot* oldTarget = m_slots.exchangeTarget(target, std::memory_order_acq_rel); // acq_rel: acquire で旧 target の書き込みと HB; release で completeFade の acquire と HB し新 target を公開
+	GlobalSnapshot* oldTarget = m_slots.exchangeTarget(target, std::memory_order_acq_rel);
 	if (oldTarget) {
-		// Audio Thread が参照中の可能性があるため、即時 delete せず RCU 遅延解放
-		const uint64_t retireEpoch = m_epochDomain->current();
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
-		m_epochDomain->enqueueRetire(oldTarget, snapshotDeleter, retireEpoch);
-#pragma warning(pop)
+		const uint64_t retireEpoch = m_epochProvider->currentEpoch();
+		m_epochProvider->enqueueRetire(oldTarget, snapshotDeleter, retireEpoch);
 	}
 
 	m_fade.start(fadeSamples);
@@ -64,14 +60,11 @@ void SnapshotCoordinator::resetFadeStateAndRetireTarget() noexcept
 		SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
 	};
 
-	GlobalSnapshot* target = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で startFade の release と HB し旧 target 取得; release で次回 startFade の acquire と HB (null 公開)
+	GlobalSnapshot* target = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
 	if (target)
 	{
-		const uint64_t retireEpoch = m_epochDomain->publish();
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
-		m_epochDomain->enqueueRetire(target, snapshotDeleter, retireEpoch);
-#pragma warning(pop)
+		const uint64_t retireEpoch = m_epochProvider->publishEpoch();
+		m_epochProvider->enqueueRetire(target, snapshotDeleter, retireEpoch);
 	}
 
 	m_fade.resetToIdle();
@@ -79,7 +72,7 @@ void SnapshotCoordinator::resetFadeStateAndRetireTarget() noexcept
 
 void SnapshotCoordinator::completeFade() noexcept
 {
-	GlobalSnapshot* target = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel); // acq_rel: acquire で startFade の release と HB し target 取得; release で次回 startFade の acquire と HB (null 公開)
+	GlobalSnapshot* target = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
 	if (!target)
 		return;
 
@@ -88,13 +81,10 @@ void SnapshotCoordinator::completeFade() noexcept
 		SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
 	};
 
-	const uint64_t retireEpoch = m_epochDomain->publish();
-	GlobalSnapshot* old = m_slots.exchangeCurrent(target, std::memory_order_acq_rel); // acq_rel: acquire で旧 current への全書き込みと HB; release で observeCurrent/updateFade の acquire と HB し新 current を公開
+	const uint64_t retireEpoch = m_epochProvider->publishEpoch();
+	GlobalSnapshot* old = m_slots.exchangeCurrent(target, std::memory_order_acq_rel);
 	if (old)
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
-		m_epochDomain->enqueueRetire(old, snapshotDeleter, retireEpoch);
-#pragma warning(pop)
+		m_epochProvider->enqueueRetire(old, snapshotDeleter, retireEpoch);
 
 	m_fade.resetToIdle();
 }

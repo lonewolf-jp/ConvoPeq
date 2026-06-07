@@ -1,7 +1,11 @@
 #pragma once
 
+// [work21 Phase-D] RefCountedDeferred — Router-based retire only.
+// Old release(EpochDomain&) removed — use release(IEpochProvider&) instead.
+
 #include <atomic>
-#include "core/EpochDomain.h"
+#include <memory>
+#include "core/IEpochProvider.h"
 
 #include "audioengine/AtomicAccess.h"
 
@@ -9,20 +13,18 @@ template <typename T>
 class RefCountedDeferred {
 public:
     void addRef() {
-        convo::fetchAddAtomic(refCount, 1, std::memory_order_acq_rel); // acq_rel: acquire で直前の release/addRef と HB し最新カウントを観測; release で release の acquire と HB
+        convo::fetchAddAtomic(refCount, 1, std::memory_order_acq_rel);
     }
 
-    void release(convo::EpochDomain& epochDomain) {
-        if (convo::fetchSubAtomic(refCount, 1, std::memory_order_acq_rel) == 1) { // acq_rel: acquire で全 addRef/tryAddRef の release と HB し最後の参照を確認; release で fence の acquire と HB
-            std::atomic_thread_fence(std::memory_order_acquire); // acquire: 上記 fetchSub acq_rel の release 側と HB し、他スレッドの全 addRef/release を可視化してから retire
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — unused template (inherited but never called)
-            epochDomain.enqueueRetire(
+    // [work21 Phase-D] IEpochProvider 経由版 (EpochDomain型露出回避)
+    void release(convo::IEpochProvider& provider) {
+        if (convo::fetchSubAtomic(refCount, 1, std::memory_order_acq_rel) == 1) {
+            std::atomic_thread_fence(std::memory_order_acquire);
+            provider.enqueueRetire(
                 static_cast<T*>(this),
                 [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
-                epochDomain.currentEpoch()
+                provider.currentEpoch()
             );
-#pragma warning(pop)
         }
     }
 

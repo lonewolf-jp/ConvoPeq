@@ -2,7 +2,6 @@
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"
 #include "convolver/ConvolverProcessor.Internal.h"
-#include "core/EpochDomain.h"
 #include "AlignedAllocation.h"
 #include "DftiHandle.h"
 
@@ -1014,7 +1013,11 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
 
     rcuSwapper.swap(newState);
     convo::publishAtomic(convolverState, newState, std::memory_order_release); // release: convolverState 公開
-    m_epochDomain.advanceEpoch();
+    // [work21 P1-15/Phase-D] Router経由でepoch進捗. provider必須.
+    if (auto* provider = getRcuProvider())
+        provider->advanceRetireEpoch();
+    else
+        jassertfalse; // provider must be set before state update
 
     convo::publishAtomic(writerActive, false, std::memory_order_release); // release: writerActive=false 公開
 }

@@ -2,7 +2,6 @@
 #include "ConvolverProcessor.h"
 #include "audioengine/AudioEngine.h"
 #include "convolver/ConvolverProcessor.Internal.h"
-#include "core/EpochDomain.h"
 #include "AlignedAllocation.h"
 #include <mkl.h>
 

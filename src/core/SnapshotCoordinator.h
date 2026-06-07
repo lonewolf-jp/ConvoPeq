@@ -2,6 +2,9 @@
 // SnapshotCoordinator.h - Phase 4 (Audio Thread safe fade)
 // 状態遷移の唯一の入口。atomic スナップショットポインタを管理する。
 // v13.0 設計ロック準拠
+//
+// [work21 P1-7] 本クラスは IEpochProvider 経由で EBR操作を行う。
+// publish/retire/reclaim は provider (通常 ISRRetireRouter) に委譲。
 //==============================================================================
 #pragma once
 
@@ -9,7 +12,7 @@
 #include "ObservedRuntime.h"
 #include "SnapshotFadeState.h"
 #include "SnapshotSlotStore.h"
-#include "EpochDomain.h"
+#include "IEpochProvider.h"
 #include "SnapshotFactory.h"
 
 namespace convo {
@@ -29,8 +32,9 @@ static inline float equalPowerSinApprox(float x) noexcept
 
 class SnapshotCoordinator {
 public:
-    explicit SnapshotCoordinator(EpochDomain& epochDomain) noexcept
-        : m_epochDomain(&epochDomain)
+    // [work21 P1-7] IEpochProvider 経由でEBR操作 (EpochDomain型非依存)
+    explicit SnapshotCoordinator(IEpochProvider& provider) noexcept
+        : m_epochProvider(&provider)
     {
         m_slots.initializeSlots();
         m_fade.initialize();
@@ -42,38 +46,28 @@ public:
             SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
         };
 
-        const uint64_t retireEpoch = m_epochDomain->publish();
+        const uint64_t retireEpoch = m_epochProvider->publishEpoch();
 
-        // acq_rel ×2: acquire → 直前の publishNew/switchImmediate release と HB して旧ポインタ取得；
-        //              release → null を公開し後続 acquire と HB してダブルフリーを防止。
         GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
         if (snap)
         {
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
-            m_epochDomain->enqueueRetire(snap, snapshotDeleter, retireEpoch);
-#pragma warning(pop)
+            m_epochProvider->enqueueRetire(snap, snapshotDeleter, retireEpoch);
         }
 
-        // acq_rel: startFade の m_target release と HB し、target を回収して null を公開。
         snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
         if (snap)
         {
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
-            m_epochDomain->enqueueRetire(snap, snapshotDeleter, retireEpoch);
-#pragma warning(pop)
+            m_epochProvider->enqueueRetire(snap, snapshotDeleter, retireEpoch);
         }
 
-        m_epochDomain->reclaimRetired();
+        m_epochProvider->tryReclaim();
     }
 
     // observeCurrentRuntime:
     // - reader guard を保持した ObserveToken 相当（ObservedRuntime）を返す。
     // - 呼び出し側は本トークン寿命内で snapshot を参照する。
-    // - 挙動は既存互換を維持し、P0-1 では型/意味の明文化のみを行う。
-    ObservedRuntime observeCurrentRuntime(int readerIndex) const noexcept {
-        ObservedRuntime observed(*m_epochDomain, readerIndex);
+    ObservedRuntime observeCurrentRuntime(RCUReader& reader) const noexcept {
+        ObservedRuntime observed(reader);
         // acquire: switchImmediate/publishNew の m_current release と HB し最新スナップを観測。
         observed.ptr = m_slots.loadCurrent(std::memory_order_acquire);
         return observed;
@@ -90,18 +84,16 @@ public:
         //          旧ポインタ回収は release で十分（publishNew と同一 NonRT スレッドから呼ぶ前提）。
         GlobalSnapshot* oldSnap = m_slots.exchangeCurrent(newSnap, std::memory_order_release);
         if (oldSnap) {
-            uint64_t newEpoch = m_epochDomain->publish();
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — SnapshotCoordinator owns EpochDomain reference directly
-            m_epochDomain->enqueueRetire(oldSnap, snapshotDeleter, newEpoch);
-#pragma warning(pop)
+            uint64_t newEpoch = m_epochProvider->publishEpoch();
+            m_epochProvider->enqueueRetire(oldSnap, snapshotDeleter, newEpoch);
         }
     }
 
     void startFade(GlobalSnapshot* target, int fadeSamples) noexcept;
 
-    void reclaim(const EpochDomain&) noexcept {
-        m_epochDomain->reclaimRetired();
+    // [P1-21] epoch-free: uint64_t epoch を受け取るように変更
+    void reclaim(uint64_t) noexcept {
+        m_epochProvider->tryReclaim();
     }
 
     bool updateFade(float& outAlpha,
@@ -148,7 +140,7 @@ private:
     void resetFadeStateAndRetireTarget() noexcept;
     void completeFade() noexcept;
 
-    EpochDomain* m_epochDomain;
+    IEpochProvider* m_epochProvider;
     SnapshotSlotStore m_slots;
     SnapshotFadeState m_fade;
 };

@@ -53,7 +53,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 
     const juce::ScopedNoDenormals noDenormals;
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
-    const convo::EpochDomainReaderGuard epochReaderGuard(m_epochDomain, kAudioEpochReaderIndex);
     ASSERT_AUDIO_THREAD();
     // ★ 追加: RCU ガードで現在の DSP を保護する
     convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);

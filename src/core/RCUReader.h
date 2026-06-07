@@ -1,6 +1,6 @@
 #pragma once
 
-#include "EpochDomain.h"
+#include "IReaderEpochProvider.h"
 #include <atomic>
 #include <functional>
 #include <thread>
@@ -12,15 +12,19 @@ namespace convo {
 /**
  * Epoch-based RCU Reader guard.
  * Usage:
- *   convo::RCUReader reader(epochDomain);
+ *   convo::RCUReader reader(epochProvider);
  *   convo::RCUReaderGuard guard(reader);
  *   // ... safe to read atomic pointers ...
+ *
+ * [work21 P0-14] RCUReader now depends on IReaderEpochProvider (abstract interface)
+ * instead of EpochDomain directly. This eliminates EpochDomain type exposure
+ * from the public API. The provider is typically an ISRRetireRouter or EpochDomain.
  */
 class RCUReader
 {
 public:
-    explicit RCUReader(EpochDomain& domain) noexcept
-        : epochDomain(&domain)
+    explicit RCUReader(IReaderEpochProvider& provider) noexcept
+        : epochProvider(&provider)
     {
     }
     RCUReader(const RCUReader&) = delete;
@@ -55,7 +59,7 @@ public:
 
         const int tid = acquireThreadSlot();
         if (tid >= 0)
-            domain().enterReader(tid);
+            epochProvider->enterReader(tid);
         else
         {
             // acq_rel: スロット取得失敗時の nestingDepth 減算 — acq_rel で安全に公開。
@@ -68,6 +72,20 @@ public:
                                          std::memory_order_acq_rel,
                                          std::memory_order_acquire);
         }
+    }
+
+    // === 限定公開API (P0-14: EpochDomain型を露出しない) ===
+
+    /** 現在のepoch番号を取得 (Router移行後も維持) */
+    uint64_t snapshotEpoch() noexcept
+    {
+        return epochProvider->currentEpoch();
+    }
+
+    /** アクティブなReader数を診断用に取得 */
+    uint32_t activeReaders() noexcept
+    {
+        return epochProvider->activeReaderCount();
     }
 
     void exit() noexcept
@@ -92,7 +110,7 @@ public:
         const int tid = convo::exchangeAtomic(activeThreadId, -1, std::memory_order_acq_rel);
         if (tid >= 0)
         {
-            domain().exitReader(tid);
+            epochProvider->exitReader(tid);
             // release: 次回再利用のため preferredThreadId を公開；
             //          acquireThreadSlot() の acquire と HB してキャッシュを渡す。
             convo::publishAtomic(preferredThreadId, tid, std::memory_order_release);
@@ -114,17 +132,16 @@ private:
         if (activeTid >= 0)
             return activeTid;
 
-        auto& manager = domain();
         // acquire: exit() の preferredThreadId release と HB し、前回キャッシュ済み tid を観測。
         const int preferredTid = convo::consumeAtomic(preferredThreadId, std::memory_order_acquire);
         int reservedTid = -1;
-        if (preferredTid >= 0 && manager.reserveReaderThread(preferredTid))
+        if (preferredTid >= 0 && epochProvider->reserveReaderThread(preferredTid))
         {
             reservedTid = preferredTid;
         }
         else
         {
-            reservedTid = manager.registerReaderThread();
+            reservedTid = epochProvider->registerReaderThread();
         }
 
         // release: 新たに割り当てた activeThreadId を公開；
@@ -137,26 +154,32 @@ private:
     std::atomic<int> activeThreadId { -1 };
     std::atomic<uint32_t> nestingDepth { 0 };
     std::atomic<uint64_t> ownerThreadToken { 0 };
-    EpochDomain* epochDomain = nullptr;
-
-    EpochDomain& domain() noexcept
-    {
-        jassert(epochDomain != nullptr);
-        return *epochDomain;
-    }
+    IReaderEpochProvider* epochProvider = nullptr;
 };
 
 class RCUReaderGuard
 {
 public:
-    explicit RCUReaderGuard(RCUReader& r) : reader(r) { reader.enter(); }
-    ~RCUReaderGuard() { reader.exit(); }
+    explicit RCUReaderGuard(RCUReader& r) noexcept : reader(&r) { reader->enter(); }
+    ~RCUReaderGuard() noexcept { if (reader) reader->exit(); }
 
     RCUReaderGuard(const RCUReaderGuard&) = delete;
     RCUReaderGuard& operator=(const RCUReaderGuard&) = delete;
 
+    RCUReaderGuard(RCUReaderGuard&& other) noexcept : reader(other.reader) { other.reader = nullptr; }
+    RCUReaderGuard& operator=(RCUReaderGuard&& other) noexcept
+    {
+        if (this != &other)
+        {
+            if (reader) reader->exit();
+            reader = other.reader;
+            other.reader = nullptr;
+        }
+        return *this;
+    }
+
 private:
-    RCUReader& reader;
+    RCUReader* reader = nullptr;
 };
 
 } // namespace convo

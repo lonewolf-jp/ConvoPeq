@@ -12,7 +12,7 @@ namespace convo {
 
 /// GlobalSnapshot の RCU 遅延解放を担当する唯一の retire 経路。
 /// retire() で DeletionQueue にエントリを追加し、
-/// reclaim() で EpochDomain に基づく実際の解放を行う。
+/// reclaim() で epoch 値 (uint64_t) に基づく実際の解放を行う。
 ///
 /// スレッド安全性: retire() / reclaim() はいずれも内部 mutex で保護される。
 class SnapshotRetireManager {
@@ -28,7 +28,7 @@ public:
 
     /// @p snap を RCU retire キューへ追加する。
     /// @p snap == nullptr の場合は何もしない。
-    /// @p epoch : 安全に解放できる最小 epoch (呼び出し側が epochDomain.publish()/current() で取得)
+    /// @p epoch : 安全に解放できる最小 epoch (呼び出し側が getMinReaderEpoch() で取得)
     void retire(GlobalSnapshot* snap, uint64_t epoch)
     {
         if (!snap) return;
@@ -39,10 +39,10 @@ public:
             DeletionEntryType::Generic);
     }
 
-    /// EpochDomain に基づき、retire 済みエントリのうち安全に解放可能なものを解放する。
-    void reclaim(const EpochDomain& domain)
+    /// [P1-21] epoch-free API: minReaderEpoch を直接受け取る
+    void reclaim(uint64_t minReaderEpoch)
     {
-        m_queue.reclaim(domain);
+        m_queue.reclaim(minReaderEpoch);
     }
 
 private:

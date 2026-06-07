@@ -228,6 +228,20 @@
 			],
 			"isBackground": false,
 			"group": "build"
+		},
+		{
+			"label": "work21 EpochDomain CI Gate",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\.github\\scripts\\check-work21-epochdomain-gates.ps1"
+			],
+			"problemMatcher": [],
+			"group": "test"
 		}
 	]
 }

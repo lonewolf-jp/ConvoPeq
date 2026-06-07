@@ -63,15 +63,30 @@ void diagLog(const juce::String& message)
 
     const bool hasGraphActiveNode = (world.graph.activeNode != nullptr);
     const bool hasGraphFadingNode = (world.graph.fadingNode != nullptr);
+    const bool hasTopologyUuid = (world.topology.runtimeUuid != 0);
 
-    if (hasGraphActiveNode != (world.topology.runtimeUuid != 0))
+    if (hasGraphActiveNode != hasTopologyUuid)
+    {
+        juce::Logger::writeToLog("[AUTH_CONTRACT] FAIL activeNode=" + juce::String(static_cast<int64_t>(reinterpret_cast<intptr_t>(world.graph.activeNode)))
+            + " topologyUuid=" + juce::String(static_cast<juce::int64>(world.topology.runtimeUuid))
+            + " hasGraphActiveNode=" + juce::String(static_cast<int>(hasGraphActiveNode))
+            + " hasTopologyUuid=" + juce::String(static_cast<int>(hasTopologyUuid)));
         return false;
+    }
 
     if (hasGraphFadingNode != world.topology.hasFadingRuntime)
+    {
+        juce::Logger::writeToLog("[AUTH_CONTRACT] FAIL fadingNode=" + juce::String(static_cast<int64_t>(reinterpret_cast<intptr_t>(world.graph.fadingNode)))
+            + " hasFading=" + juce::String(static_cast<int>(world.topology.hasFadingRuntime)));
         return false;
+    }
 
     if (world.execution.transitionActive != world.topology.hasFadingRuntime)
+    {
+        juce::Logger::writeToLog("[AUTH_CONTRACT] FAIL transitionActive=" + juce::String(static_cast<int>(world.execution.transitionActive))
+            + " hasFading=" + juce::String(static_cast<int>(world.topology.hasFadingRuntime)));
         return false;
+    }
 
     return true;
 }

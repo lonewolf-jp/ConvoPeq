@@ -135,7 +135,7 @@ void RuntimePublicationCoordinator::retire(RetireAuthority,
 }
 
 RetireEnqueueResult RuntimePublicationCoordinator::enqueueRetire(RetireAuthority,
-                                                                   EpochDomain& domain,
+                                                                   ISRRetireRouter& router,
                                                                    void* ptr,
                                                                    void (*deleter)(void*),
                                                                    std::uint64_t epoch) noexcept
@@ -147,10 +147,7 @@ RetireEnqueueResult RuntimePublicationCoordinator::enqueueRetire(RetireAuthority
     if (ptr == nullptr || deleter == nullptr)
         return RetireEnqueueResult::Success;
 
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] on EpochDomain::enqueueRetire — coordinator is the authorized caller
-    if (!domain.enqueueRetire(ptr, deleter, epoch))
-#pragma warning(pop)
+    if (router.enqueueRetire(ptr, deleter, epoch, DeletionEntryType::Generic) != RetireEnqueueResult::Success)
         return RetireEnqueueResult::QueueFull;
 
     const auto backlog = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire) + 1u;

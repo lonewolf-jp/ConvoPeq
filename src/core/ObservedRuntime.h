@@ -3,7 +3,7 @@
 #include <thread>
 #include <type_traits>
 
-#include "EpochDomain.h"
+#include "RCUReader.h"
 #include "GlobalSnapshot.h"
 
 namespace convo {
@@ -11,7 +11,7 @@ namespace convo {
 // ObserveToken (P0-1 formalization)
 // ---------------------------------
 // 許可責務:
-// - EpochDomain reader guard を保持し、observe enter/exit をスコープ化する
+// - IEpochProvider reader guard を保持し、observe enter/exit をスコープ化する
 // - 現在スレッドに束縛された snapshot pointer を参照として提供する
 //
 // 禁止責務:
@@ -24,8 +24,12 @@ namespace convo {
 // - P0-1 では API 互換を維持し、ObservedRuntime を実体として残す。
 struct ObservedRuntime
 {
-    explicit ObservedRuntime(EpochDomain& domain, int readerIndex) noexcept
-        : guard(domain, readerIndex), ownerThreadId(std::this_thread::get_id())
+    // [work21 Phase-E] RCUReader 経由で reader enter/exit
+    explicit ObservedRuntime(RCUReader& reader) noexcept
+        : guard(reader)
+#ifndef NDEBUG
+        , ownerThreadId(std::this_thread::get_id())
+#endif
     {
     }
 
@@ -36,19 +40,27 @@ struct ObservedRuntime
 
     const GlobalSnapshot* get() const noexcept
     {
+#ifndef NDEBUG
         if (ownerThreadId != std::this_thread::get_id())
             return nullptr;
+#endif
         return ptr;
     }
 
     explicit operator bool() const noexcept
     {
+#ifndef NDEBUG
         return ownerThreadId == std::this_thread::get_id() && ptr != nullptr;
+#else
+        return ptr != nullptr;
+#endif
     }
 
-    EpochDomainReaderGuard guard;
+    RCUReaderGuard guard;
     const GlobalSnapshot* ptr = nullptr;
+#ifndef NDEBUG
     std::thread::id ownerThreadId;
+#endif
 };
 
 static_assert(!std::is_copy_constructible_v<ObservedRuntime>);

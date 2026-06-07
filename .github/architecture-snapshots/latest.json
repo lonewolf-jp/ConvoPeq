@@ -1,0 +1,14 @@
+{
+    "templateCount":  0,
+    "iepMethods":  0,
+    "routerMethods":  3,
+    "readerMethods":  7,
+    "totalMethods":  10,
+    "retireMethods":  2,
+    "aliasCount":  0,
+    "timestamp":  "2026-06-07 15:49:43",
+    "enqueueRetire":  4,
+    "exposure":  2,
+    "pubMethods":  1,
+    "advanceEpoch":  0
+}

@@ -3,7 +3,6 @@
 #include "audioengine/AudioEngine.h"
 #include "CacheManager.h"
 #include "convolver/ConvolverProcessor.Internal.h"
-#include "core/EpochDomain.h"
 #include "AlignedAllocation.h"
 #include "ProgressiveUpgradeThread.h"
 
@@ -674,8 +673,12 @@ void ConvolverProcessor::switchEngineOnMessageThread(StereoConvolver* newEngine)
     if (newEngine == nullptr)
         return;
 
-    auto* oldEngine = exchangeActiveEngine(newEngine, std::memory_order_acq_rel); // acq_rel: acquire で旧 engine 取得; release で新 engine 公開
-    m_epochDomain.advanceEpoch();
+    auto* oldEngine = exchangeActiveEngine(newEngine, std::memory_order_acq_rel);
+    // [work21 P1-15/Phase-D] Router経由でepoch進捗. provider必須 (fallback削除).
+    if (auto* provider = getRcuProvider())
+        provider->advanceRetireEpoch();
+    else
+        jassertfalse; // provider must be set before any engine switch
     if (oldEngine)
         retireStereoConvolver(oldEngine, 0);
 }

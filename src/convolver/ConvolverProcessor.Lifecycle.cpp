@@ -4,8 +4,6 @@
 #include "CacheManager.h"
 #include "ProgressiveUpgradeThread.h"
 #include "convolver/ConvolverProcessor.Internal.h"
-#include "core/EpochDomain.h"
-#include "core/RCUReader.h"
 #include "core/ThreadAffinityManager.h"
 #include "AlignedAllocation.h"
 #include <mkl.h>
@@ -126,7 +124,7 @@ ConvolverProcessor::~ConvolverProcessor()
         fftHandle.reset();
     }
 
-    // Note: final deferred reclaim is owned by AudioEngine/EpochDomain shutdown sequence.
+    // Note: final deferred reclaim is owned by AudioEngine shutdown sequence.
 }
 
 // ────────────────────────────────────────────────────────────────

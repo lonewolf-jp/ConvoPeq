@@ -10,7 +10,7 @@
 #include "ISRShutdown.h"
 #include "ISRRuntimeSemanticSchema.h"
 #include "ISRAuthorityClass.h"
-#include "core/EpochDomain.h"
+#include "ISRRetireRouter.h"
 
 namespace convo::isr {
 
@@ -49,7 +49,7 @@ public:
                 std::uint64_t mappedGeneration);
     void retire(RetireAuthority, RuntimeBoundary boundary, const void* oldWorld);
     [[nodiscard]] RetireEnqueueResult enqueueRetire(RetireAuthority auth,
-                                                      EpochDomain& domain,
+                                                      ISRRetireRouter& router,
                                                       void* ptr,
                                                       void (*deleter)(void*),
                                                       std::uint64_t epoch) noexcept;

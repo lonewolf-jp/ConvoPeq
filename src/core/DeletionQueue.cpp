@@ -20,9 +20,8 @@ void DeletionQueue::enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, D
     queue[count++] = {ptr, deleter, epoch, type};
 }
 
-void DeletionQueue::reclaim(const EpochDomain& core)
+void DeletionQueue::reclaim(uint64_t minReaderEpoch)
 {
-    const uint64_t minReaderEpoch = core.getMinReaderEpoch();
 
     std::lock_guard<std::mutex> lock(mutex);
 
@@ -30,7 +29,9 @@ void DeletionQueue::reclaim(const EpochDomain& core)
     for (size_t i = 0; i < count; ++i)
     {
         Entry& e = queue[i];
-        if (convo::EpochDomain::isOlder(e.epoch, minReaderEpoch))
+        // [P1-21] isOlder をインライン展開 (EpochDomain非依存)
+        const bool safeToDelete = static_cast<int64_t>(e.epoch - minReaderEpoch) < 0;
+        if (safeToDelete)
         {
             // 安全に解放可能
             if (e.deleter && e.ptr)

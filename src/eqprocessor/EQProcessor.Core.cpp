@@ -31,44 +31,51 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
         return true;
 
     // Retire authority: route through coordinator if available
+    // [Phase-A] 単一回試行 + drop. retryループは撤廃 (P0-5).
     if (m_retireCoordinator != nullptr)
     {
         const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
-        constexpr int kMaxRetry = 4;
-        for (int attempt = 0; attempt < kMaxRetry; ++attempt)
-        {
-            auto result = m_retireCoordinator->enqueueRetire(
-                convo::isr::RetireAuthority::Granted, m_epochDomain, ptr, deleter, retireEpoch);
-            if (result == convo::isr::RetireEnqueueResult::Success)
-                return true;
+        // ★ FIX: reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB である。
+        //   ISRRetireRouter と EpochDomain は共通基底 (IEpochProvider) を持つが
+        //   直接の継承関係になく、メモリレイアウトが異なるため、
+        //   enqueueRetire() 内の epochDomain_ メンバがガベージになる。
+        //   正しい対策: スタック上に ISRRetireRouter を構築する。
+        convo::isr::ISRRetireRouter stackRouter(m_epochDomain);
+        auto result = m_retireCoordinator->enqueueRetire(
+            convo::isr::RetireAuthority::Granted,
+            stackRouter,
+            ptr, deleter, retireEpoch);
+        if (result == convo::isr::RetireEnqueueResult::Success)
+            return true;
 
-            m_epochDomain.reclaimRetired();
-            m_epochDomain.advanceEpoch();
-        }
-
-        juce::Logger::writeToLog("[WARN EQProcessor] enqueueRetire via coordinator failed after bounded retries");
+        // [P0-5] enqueue failure -> drop + telemetry (RT-safe).
+        // Non-RT 側の定期的な reclaim が backlog を消化することを期待。
         return false;
     }
 
     // Fallback: direct EpochDomain path (backward compat before coordinator is set)
-    const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
-    constexpr int kMaxRetry = 4;
-    for (int attempt = 0; attempt < kMaxRetry; ++attempt)
-    {
+    // [Phase-B] coordinator 常時設定確認後、この経路は削除.
 #pragma warning(push)
 #pragma warning(disable : 4996)
-        if (m_epochDomain.enqueueRetire(ptr, deleter, retireEpoch))
+    const bool ok = m_epochDomain.enqueueRetire(ptr, deleter,
+        (epoch != 0) ? epoch : m_epochDomain.currentEpoch());
 #pragma warning(pop)
-            return true;
-
-        m_epochDomain.reclaimRetired();
-        m_epochDomain.advanceEpoch();
+    if (!ok)
+    {
+        // [P0-5] drop + telemetry. retry/reclaim/advanceEpoch は行わない.
+        return false;
     }
-
-    juce::Logger::writeToLog("[WARN EQProcessor] enqueueRetire failed after bounded retries");
-    return false;
+    return true;
 }
-
+// [P1-14] 保留中の advanceEpoch を一括実行.
+// パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.
+void EQProcessor::flushPendingEpochAdvance() noexcept
+{
+    if (m_epochAdvancePending.exchange(false, std::memory_order_acq_rel))
+    {
+        m_epochDomain.publishEpoch();
+    }
+}
 void EQProcessor::retireEQStateDeferred(EQState* state) noexcept
 {
     if (state == nullptr)
@@ -92,8 +99,18 @@ void EQProcessor::retireBandNodeDeferred(BandNode* node) noexcept
 //============================================================================
 EQProcessor::EQProcessor()
 {
+    juce::Logger::writeToLog("[EQ_CTOR] enter");
+    // MSVC では std::atomic<uintptr_t> の default 初期化子 (= default) は
+    // トリビアル型の場合はゼロ初期化しないため、aligned_malloc 経由で
+    // DSPCore が構築されると bandNodeBits に未初期化ゴミが残る。
+    // 明示的に全エントリをゼロクリアする。
+    for (auto& b : bandNodeBits)
+        convo::publishAtomic(b, static_cast<std::uintptr_t>(0), std::memory_order_relaxed);
+    juce::Logger::writeToLog("[EQ_CTOR] bandNodeBits zeroed, calling resetToDefaults");
+
     // 初期係数ノードの作成
     resetToDefaults();
+    juce::Logger::writeToLog("[EQ_CTOR] exit");
 }
 
 //============================================================================
@@ -116,9 +133,9 @@ EQProcessor::~EQProcessor()
     }
 
     // 退役キューを強制 drain して可能な限り回収する。
-    m_epochDomain.reclaimRetired();
+    m_epochDomain.tryReclaim();
     m_epochDomain.drainAll();
-    m_epochDomain.reclaimRetired();
+    m_epochDomain.tryReclaim();
 
     releaseResources();
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: exit");
@@ -161,6 +178,8 @@ void EQProcessor::releaseResources()
 
     parallelBufferCapacity = 0;
     structureXfadeBufferCapacity = 0;
+    // [P1-14] 保留中の advanceEpoch を一括実行
+    flushPendingEpochAdvance();
     juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: end");
 }
 
@@ -200,7 +219,7 @@ void EQProcessor::resetToDefaults()
     if (oldState) {
         retireEQStateDeferred(oldState);
     }
-    m_epochDomain.advanceEpoch();
+    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
 
     convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release); // release: Processing.cpp の acquire と HB し AGC 初期化を公知
     convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: 同上
@@ -536,7 +555,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     {
         retireEQStateDeferred(oldState);
     }
-    m_epochDomain.advanceEpoch();
+    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
 
     for (int i = 0; i < NUM_BANDS; ++i)
         updateBandNode(i);
@@ -589,7 +608,7 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     if (oldNode)
         retireBandNodeDeferred(oldNode);
 
-    m_epochDomain.advanceEpoch();
+    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
 }
 
 //============================================================================
@@ -636,7 +655,10 @@ void EQProcessor::syncGlobalStateFrom(const EQProcessor& other)
 //============================================================================
 void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 {
+    juce::Logger::writeToLog("[EQ_PREPARE] enter: sr=" + juce::String(sampleRate) + " block=" + juce::String(newMaxInternalBlockSize));
+
     const bool rateChanged = (std::abs(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire) - sampleRate) > 1e-6); // acquire: setSampleRate の publishAtomic release と HB
+    juce::Logger::writeToLog("[EQ_PREPARE] rateChanged=" + juce::String(static_cast<int>(rateChanged)));
     if (rateChanged)
         convo::publishAtomic(currentSampleRate, sampleRate, std::memory_order_release); // release: 次回 prepareToPlay/setSampleRate の acquire と HB
 
@@ -644,19 +666,23 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     this->maxInternalBlockSize = requiredSize;
 
     const int required = juce::nextPowerOfTwo(requiredSize) * 8;
+    juce::Logger::writeToLog("[EQ_PREPARE] scratch: required=" + juce::String(required) + " capacity=" + juce::String(scratchCapacity));
     if (scratchCapacity < required)
     {
         scratchBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(required));
         scratchCapacity = required;
         juce::FloatVectorOperations::clear(scratchBuffer.get(), required);
+        juce::Logger::writeToLog("[EQ_PREPARE] scratch allocated");
     }
 
     const int channelRequired = juce::nextPowerOfTwo(requiredSize) * MAX_CHANNELS;
+    juce::Logger::writeToLog("[EQ_PREPARE] channel: required=" + juce::String(channelRequired) + " dryCap=" + juce::String(dryBypassCapacity));
     if (dryBypassCapacity < channelRequired)
     {
         dryBypassBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(channelRequired));
         dryBypassCapacity = channelRequired;
         juce::FloatVectorOperations::clear(dryBypassBuffer.get(), channelRequired);
+        juce::Logger::writeToLog("[EQ_PREPARE] dryBypass allocated");
     }
 
     if (parallelBufferCapacity < channelRequired)
@@ -668,6 +694,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
         juce::FloatVectorOperations::clear(parallelInputBuffer.get(), channelRequired);
         juce::FloatVectorOperations::clear(parallelWorkBuffer.get(), channelRequired);
         juce::FloatVectorOperations::clear(parallelAccumBuffer.get(), channelRequired);
+        juce::Logger::writeToLog("[EQ_PREPARE] parallel buffers allocated");
     }
 
     if (structureXfadeBufferCapacity < channelRequired)
@@ -677,6 +704,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
         structureXfadeBufferCapacity = channelRequired;
         juce::FloatVectorOperations::clear(structureOldOutBuffer.get(), channelRequired);
         juce::FloatVectorOperations::clear(structureNewOutBuffer.get(), channelRequired);
+        juce::Logger::writeToLog("[EQ_PREPARE] xfade buffers allocated");
     }
 
     if (newMaxInternalBlockSize > 0 && agcCoeffTableCapacity < (newMaxInternalBlockSize + 1))
@@ -684,6 +712,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
         agcAttackCoeffTable = convo::makeAlignedArray<double>(static_cast<size_t>(newMaxInternalBlockSize + 1));
         agcReleaseCoeffTable = convo::makeAlignedArray<double>(static_cast<size_t>(newMaxInternalBlockSize + 1));
         agcSmoothCoeffTable = convo::makeAlignedArray<double>(static_cast<size_t>(newMaxInternalBlockSize + 1));
+        juce::Logger::writeToLog("[EQ_PREPARE] agc tables allocated");
 
         if (agcAttackCoeffTable && agcReleaseCoeffTable && agcSmoothCoeffTable)
             agcCoeffTableCapacity = newMaxInternalBlockSize + 1;
@@ -747,14 +776,15 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
             {
                 auto newNode = createBandNode(i, *loopState);
                 auto oldNode = exchangeBandNode(i, newNode, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadBandNode acquire と HB
-
                 if (oldNode)
                     retireBandNodeDeferred(oldNode);
-
                 activeBandNodes[i] = newNode;
             }
         }
     }
+
+    // [P1-14] 保留中の advanceEpoch を一括実行
+    flushPendingEpochAdvance();
 
     sendChangeMessage();
 }

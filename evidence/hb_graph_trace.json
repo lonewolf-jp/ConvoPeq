@@ -1,7 +1,12 @@
 {
   "schema": "hb_trace_v1",
-  "eventCount": 1,
+  "eventCount": 6,
   "events": [
-    {"ts": 121861990525100, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false}
+    {"ts": 86496599426700, "from": 100, "to": 200, "fromEpoch": 1, "toEpoch": 1, "mo": 3, "release": true, "acquire": false},
+    {"ts": 86496813903700, "from": 100, "to": 200, "fromEpoch": 2, "toEpoch": 2, "mo": 3, "release": true, "acquire": false},
+    {"ts": 86496817970400, "from": 200, "to": 300, "fromEpoch": 1, "toEpoch": 1, "mo": 4, "release": true, "acquire": true},
+    {"ts": 86497132279000, "from": 100, "to": 200, "fromEpoch": 3, "toEpoch": 3, "mo": 3, "release": true, "acquire": false},
+    {"ts": 86497137319900, "from": 200, "to": 300, "fromEpoch": 2, "toEpoch": 2, "mo": 4, "release": true, "acquire": true},
+    {"ts": 86497574943200, "from": 100, "to": 200, "fromEpoch": 4, "toEpoch": 4, "mo": 3, "release": true, "acquire": false}
   ]
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":121862180541700}
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":86497672258800}

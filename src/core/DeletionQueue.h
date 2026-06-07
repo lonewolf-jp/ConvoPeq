@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <array>
 #include <mutex>
-#include "EpochDomain.h"
 #include "../DeferredDeletionQueue.h"
 
 namespace convo {
@@ -16,7 +15,8 @@ namespace convo {
 class DeletionQueue {
 public:
     void enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type);
-    void reclaim(const EpochDomain& core);
+    // [P1-21] epoch-free API: minReaderEpoch を直接受け取る (EpochDomain非依存)
+    void reclaim(uint64_t minReaderEpoch);
 
 private:
     struct Entry {

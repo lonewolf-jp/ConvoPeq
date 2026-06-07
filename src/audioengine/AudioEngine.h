@@ -84,6 +84,7 @@ struct CoeffSet {
 #include "ISRAuthorityClass.h"
 // RuntimePublicationOrchestrator は前方宣言 + unique_ptr で管理 (循環依存回避)
 namespace convo::isr { class RuntimePublicationOrchestrator; }
+namespace convo::isr { class ISRRetireRouter; }
 #include "ISRRuntimeSemanticSchema.h"
 #include "ISRRuntimeIdentityGenerators.h"
 #include "ISRPayloadTier.h"
@@ -94,6 +95,7 @@ namespace convo::isr { class RuntimePublicationOrchestrator; }
 #include "ISRClosureGraphWalker.h"
 #include "ISRDebugRuntime.h"
 #include "ISRRetireRuntimeEx.h"
+// ISRRetireRouter forward-declared below (reduce include chain for C1060)
 #include "ISRBarrierOptimizer.h"
 #include "ISREvidenceExporter.h"
 #include "RuntimePublicationValidator.h"
@@ -1415,7 +1417,7 @@ private:
                 for (auto& entry : map)
                 {
                     if (entry.second != nullptr)
-                        entry.second->release(owner->m_epochDomain);
+                        entry.second->release(*owner->m_retireRouter);
                 }
             }
 
@@ -2355,9 +2357,9 @@ public:
             updateMaxMetric(youngestObservedGeneration_, currentGeneration);
         }
 
-        convo::ObservedRuntime observedSnapshot { m_epochDomain, readerIndex };
+        convo::ObservedRuntime observedSnapshot { audioThreadRcuReader };
         if (!assertAudioThread)
-            observedSnapshot = m_coordinator.observeCurrentRuntime(readerIndex);
+            observedSnapshot = m_coordinator.observeCurrentRuntime(audioThreadRcuReader);
 
         return RuntimeReadHandle {
             std::move(observedSnapshot),
@@ -3176,55 +3178,19 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
 
     const uint64_t epoch = markRetireEpoch();
 
-    // Retire authority goes through coordinator (single entry point).
-    // Use direct EpochDomain path as primary for robustness during transition.
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — transitional, coordinator is the authority
-    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
-#pragma warning(pop)
+    // [P0-5] 単一回試行 + drop. Router経由.
+    if (m_retireRouter->enqueueRetire(ptr, deleter, epoch, DeletionEntryType::Generic) == convo::isr::RetireEnqueueResult::Success)
     {
         runtimePublicationBridge_.setRetireBacklogCount(
-            static_cast<std::uint64_t>(m_epochDomain.pendingRetireCount()));
+            static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount()));
         return convo::isr::RetireEnqueueResult::Success;
     }
 
-    m_epochDomain.reclaimRetired();
-#pragma warning(push)
-#pragma warning(disable : 4996)
-    if (m_epochDomain.enqueueRetire(ptr, deleter, epoch))
-#pragma warning(pop)
-    {
-        runtimePublicationBridge_.setRetireBacklogCount(
-            static_cast<std::uint64_t>(m_epochDomain.pendingRetireCount()));
-        return convo::isr::RetireEnqueueResult::Success;
-    }
-
-    constexpr std::size_t kRetireFallbackPressureThreshold = 512;
-    constexpr std::size_t kRetireFallbackQueueFullThreshold = 4096;
-    const std::uint64_t fallbackDepthU64 = 0;
-    const std::uint64_t retireDepth = static_cast<std::uint64_t>(m_epochDomain.pendingRetireCount());
-    publishAtomic(fallbackQueueDepth_, fallbackDepthU64, std::memory_order_release);
-    publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
-    runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepthU64);
-    runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepthU64);
-
-    // Fallback queue remains bounded only if we periodically retry enqueue.
-    // Kick one best-effort drain here so entries do not accumulate indefinitely
-    // when timer cadence is low.
-    drainDeferredRetireQueues(false);
-
-    if (retireDepth >= kRetireFallbackQueueFullThreshold)
-        return convo::isr::RetireEnqueueResult::QueueFull;
-
-    if (retireDepth >= kRetireFallbackPressureThreshold)
-        return convo::isr::RetireEnqueueResult::QueuePressure;
-
+    // [P0-5] enqueue failure -> drop + telemetry.
+    const std::uint64_t retireDepth = static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount());
+    convo::publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
+    runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
     return convo::isr::RetireEnqueueResult::QueuePressure;
-}
-
-inline convo::EpochDomain& epochDomain() noexcept
-{
-    return m_epochDomain;
 }
 
 inline void retireDSP(DSPCore* dsp) noexcept
@@ -3380,6 +3346,8 @@ public:
     // スナップショット基盤（Phase 2）
     // ==================================================================
     convo::EpochDomain m_epochDomain;
+    // [work21] ISRRetireRouter — 唯一のretire/publication API入口(unique_ptr, forward-declared)
+    std::unique_ptr<convo::isr::ISRRetireRouter> m_retireRouter;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
     convo::RCUReader audioThreadRcuReader { m_epochDomain };
     RTLocalState rtLocalState_ {};

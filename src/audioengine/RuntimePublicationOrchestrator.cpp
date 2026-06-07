@@ -66,11 +66,13 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     auto cfDecision = crossfade.evaluate(engine_, *oldWorld, *worldOwner);
 
     // Step 2c: Update world with crossfade decision if needed
-    if (cfDecision.needsCrossfade)
+    // ★ oldDSP が nullptr の場合はクロスフェード不能 — 判定を無効化する
+    if (cfDecision.needsCrossfade && oldDSP != nullptr)
     {
         worldOwner->assertMutable();
         worldOwner->execution.transitionPolicy = static_cast<int>(convo::TransitionPolicy::SmoothOnly);
         worldOwner->execution.transitionActive = true;
+        worldOwner->topology.hasFadingRuntime = true;
         worldOwner->overlap.fadeTimeSec = cfDecision.fadeTimeSec;
     }
 

@@ -210,7 +210,7 @@ void AudioEngine::releaseResources()
 
     const auto pendingRetireCount = [&]() noexcept -> uint32_t
     {
-        return m_epochDomain.pendingRetireCount();
+        return m_retireRouter->pendingRetireCount();
     }();
 
     const auto activeCrossfadeCount = consumeAtomic(activeCrossfadeId_, std::memory_order_acquire) != static_cast<convo::isr::CrossfadeId>(0u) ? 1u : 0u;
