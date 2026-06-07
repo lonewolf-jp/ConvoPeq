@@ -66,7 +66,7 @@ void EQProcessor::updateBandNode(int band)
     {
         retireBandNodeDeferred(oldNode);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
 
 //============================================================================

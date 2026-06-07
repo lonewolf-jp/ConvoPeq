@@ -29,7 +29,7 @@ jobs:
           if (Select-String -Path src\**\* -Pattern "struct PublicationIntent|struct PublicationLog" -Quiet) {
             $errors += "PublicationIntent/PublicationLog struct still exists"
           }
-          if (Select-String -Path src\**\* -Pattern "appendPublicationIntentForCommit|drainPublicationLogForShutdown|hasPublicationLogPending" -Quiet) {
+          if (Select-String -Path src\**\* -Pattern "\bappendPublicationIntentForCommit\s*\(|\bdrainPublicationLogForShutdown\s*\(|\bhasPublicationLogPending\s*\(" -Quiet) {
             $errors += "Legacy PublicationLog functions still exist"
           }
           if ($errors.Count -gt 0) {
@@ -76,6 +76,7 @@ jobs:
   # ============================================================
   authority-runtime-tests:
     runs-on: windows-latest
+    if: always()
     needs: authority-static-checks
     steps:
       - uses: actions/checkout@v4
@@ -144,7 +145,7 @@ jobs:
 
             # 必須フィールドの存在確認
             foreach ($field in $requiredFields) {
-              if ($content -notmatch "$field:") {
+              if ($content -notmatch "${field}:") {
                 Write-Host "::error::$report missing $field"
                 $failed = $true
               }

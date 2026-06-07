@@ -52,6 +52,7 @@ evidence/
 JUCE/
 .playwright-mcp/
 graphify-out/
+.continue/
 
 # Coverage reports
 coverage/

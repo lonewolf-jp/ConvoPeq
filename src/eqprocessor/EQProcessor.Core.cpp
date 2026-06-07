@@ -71,7 +71,7 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
 // パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.
 void EQProcessor::flushPendingEpochAdvance() noexcept
 {
-    if (m_epochAdvancePending.exchange(false, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
     {
         m_epochDomain.publishEpoch();
     }
@@ -219,7 +219,7 @@ void EQProcessor::resetToDefaults()
     if (oldState) {
         retireEQStateDeferred(oldState);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
     convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release); // release: Processing.cpp の acquire と HB し AGC 初期化を公知
     convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: 同上
@@ -555,7 +555,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     {
         retireEQStateDeferred(oldState);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
     for (int i = 0; i < NUM_BANDS; ++i)
         updateBandNode(i);
@@ -608,7 +608,7 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     if (oldNode)
         retireBandNodeDeferred(oldNode);
 
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
 
 //============================================================================

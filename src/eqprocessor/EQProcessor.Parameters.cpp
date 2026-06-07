@@ -28,7 +28,7 @@ void EQProcessor::setBandFrequency(int band, float freq)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -47,7 +47,7 @@ void EQProcessor::setBandGain(int band, float gainDb)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -66,7 +66,7 @@ void EQProcessor::setBandQ(int band, float q)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -89,7 +89,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -113,7 +113,7 @@ void EQProcessor::setTotalGain(float gainDb)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
 
 //--------------------------------------------------------------
@@ -132,7 +132,7 @@ void EQProcessor::setAGCEnabled(bool enabled)
         auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
-        m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+        convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 
     if (enabled)
@@ -166,7 +166,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -188,7 +188,7 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -212,7 +212,7 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
         auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
-        m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+        convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 }
 
@@ -246,7 +246,7 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
         auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
-        m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+        convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 }
 
