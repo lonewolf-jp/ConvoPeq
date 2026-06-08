@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
 
 namespace
@@ -22,7 +23,8 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
         return;
     }
 
-    const auto runtimeReadHandle = readAudioRuntimeHandle();
+    const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
+    const auto runtimeReadHandle = makeRuntimeReadHandle(audioCtx);
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
     if (runtimeWorld == nullptr)
     {

@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
 #include "core/RCUReader.h"
 
@@ -54,8 +55,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const juce::ScopedNoDenormals noDenormals;
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     ASSERT_AUDIO_THREAD();
-    // ★ 追加: RCU ガードで現在の DSP を保護する
-    convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
     const int numSamples = buffer.getNumSamples();
 
     struct CallbackTelemetryScope final
@@ -97,7 +96,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    auto runtimeReadHandle = readAudioRuntimeHandle();
+    const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
+    auto runtimeReadHandle = makeRuntimeReadHandle(audioCtx);
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
     if (runtimeWorld == nullptr)

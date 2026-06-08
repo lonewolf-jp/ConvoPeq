@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "RuntimeBuilder.h"
 
 namespace {
@@ -107,7 +108,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     crossfadeRuntime_.reset();
     crossfadeRuntime_.getGain().reset(safeSampleRate, 0.03);
     crossfadeRuntime_.getGain().setCurrentAndTargetValue(1.0);
-    const auto runtimeReadHandle = readControlRuntimeHandle();
+    const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+    const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
     {
         auto* currentForPublish = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
         auto* fadingForPublish = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);

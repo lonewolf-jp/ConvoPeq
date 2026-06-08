@@ -2,6 +2,7 @@
 
 #include "RuntimeBuildTypes.h"
 #include "ISRDSPHandle.h"
+#include "core/RuntimeReaderContext.h"
 
 class AudioEngine;  // forward declaration (circular dep avoid)
 
@@ -32,7 +33,8 @@ public:
     // evaluate: publish 可否を判定する（AudioEngine 参照が必要）。
     // Accepted 以外の場合は Coordinator が対応する。
     [[nodiscard]] Decision evaluate(const PublishRequest& req,
-                                    AudioEngine& engine) const noexcept;
+                                    AudioEngine& engine,
+                                    const convo::RuntimeReaderContext& ctx) const noexcept;
 
     // Deferred Queue は PublicationAdmission から RuntimePublicationOrchestrator へ移設済み (PR-7)。
     // Admission は publish 可否判定のみ責務とする。

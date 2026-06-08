@@ -36,7 +36,7 @@ struct ObservedRuntime
     ObservedRuntime(const ObservedRuntime&) = delete;
     ObservedRuntime& operator=(const ObservedRuntime&) = delete;
     ObservedRuntime(ObservedRuntime&&) noexcept = default;
-    ObservedRuntime& operator=(ObservedRuntime&&) noexcept = default;
+    ObservedRuntime& operator=(ObservedRuntime&&) noexcept = delete;
 
     const GlobalSnapshot* get() const noexcept
     {

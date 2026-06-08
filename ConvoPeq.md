@@ -192,11 +192,13 @@
         │   ├── IPublicationProvider.h
         │   ├── IReaderEpochProvider.h
         │   ├── IRetireProvider.h
+        │   ├── ObserveChannel.h
         │   ├── ObservedRuntime.h
         │   ├── RCUReader.h
         │   ├── RebuildTypes.h
         │   ├── RetireBoundaryTelemetry.h
         │   ├── RuntimePublicationCoordinator.h
+        │   ├── RuntimeReaderContext.h
         │   ├── RuntimeStore.h
         │   ├── SnapshotAssembler.cpp
         │   ├── SnapshotAssembler.h
@@ -17779,7 +17781,8 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
                                        LockFreeRingBuffer<AudioBlock, 4096>& captureQueueRef)
     : engine(engineRef),
     // lastSaveTime の初期化（コンストラクタ本体で行う）
-      captureQueue(captureQueueRef)
+      captureQueue(captureQueueRef),
+      rcuReader(engineRef.getRetireRouter())
 {
     const size_t populationCount = static_cast<size_t>(CmaEsOptimizer::kPopulation * CmaEsOptimizer::kDim);
     const size_t fitnessCount = static_cast<size_t>(CmaEsOptimizer::kPopulation);
@@ -18757,13 +18760,14 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
     convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
 }
 
-NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature() const noexcept
+NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature() noexcept
 {
     SessionSignature session;
     session.sampleRateHz = static_cast<int>(convo::consumeAtomic(engine.currentSampleRate, std::memory_order_acquire) + 0.5);
     session.bitDepth = engine.getDitherBitDepth();
     session.adaptiveCoeffBankIndex = convo::consumeAtomic(engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-    const auto runtimeReadHandle = engine.readControlRuntimeHandle();
+    const auto ctx = convo::makeWorkerReaderContext(rcuReader, 0);
+    const auto runtimeReadHandle = engine.makeRuntimeReadHandle(ctx);
     auto* dsp = engine.resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
     if (dsp != nullptr)
         session.sessionId = dsp->currentCaptureSessionId;
@@ -19247,6 +19251,7 @@ void NoiseShaperLearner::appendHistoryPoint(double score) noexcept
 #include "NoiseShaperLearnerTypes.h"
 
 #include "audioengine/AtomicAccess.h"
+#include "core/RCUReader.h"
 
 class AudioEngine;
 struct AudioBlock;
@@ -19432,7 +19437,7 @@ private:
                            int& bestCandidateIndex,
                            double& bestCandidateScore,
                            const std::stop_token& stopToken);
-    SessionSignature captureSessionSignature() const noexcept;
+    SessionSignature captureSessionSignature() noexcept;
     void resetLearningSession(const SessionSignature& session, bool resume) noexcept;
     DrainStats drainCaptureQueue(const SessionSignature& session) noexcept;
     int buildTrainingSegments() noexcept;
@@ -19454,6 +19459,7 @@ private:
 
     AudioEngine& engine;
     LockFreeRingBuffer<AudioBlock, 4096>& captureQueue;
+    convo::RCUReader rcuReader;
 
     std::jthread workerThread;
     std::atomic<WorkerState> workerState { WorkerState::Idle };
@@ -22260,6 +22266,7 @@ namespace
 //--------------------------------------------------------------
 SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     : engine(audioEngine),
+      rcuReader(audioEngine.getRetireRouter()),
     fftTimeDomainBuffer(convo::makeAlignedArray<float>(NUM_FFT_POINTS)),
     fftWorkBuffer(convo::makeAlignedArray<float>(NUM_FFT_POINTS * 2))
 {
@@ -22485,7 +22492,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     lastTime = now;
 
     // Snapshot のハッシュ差分で EQ 更新を検知する。
-    const auto runtimeReadHandle = engine.readControlRuntimeHandle();
+    const auto ctx = convo::makeMessageReaderContext(rcuReader);
+    const auto runtimeReadHandle = engine.makeRuntimeReadHandle(ctx);
     const auto* snap = AudioEngine::getRuntimeSnapshotFromReadHandle(runtimeReadHandle);
     if (snap != nullptr && snap->eqCoeffHash != lastEqHash)
     {
@@ -23485,6 +23493,7 @@ void SpectrumAnalyzerComponent::updateSourceButtonText()
 #include "DftiHandle.h"
 
 #include "audioengine/AtomicAccess.h"
+#include "core/RCUReader.h"
 
 enum class AnalyzerState : uint8_t
 {
@@ -23512,6 +23521,7 @@ public:
 
 private:
     AudioEngine& engine;
+    convo::RCUReader rcuReader;
     std::atomic<AnalyzerState> analyzerState { AnalyzerState::Disabled };
 
     // ── 定数定義 (バッファサイズ決定のために先頭に配置) ──
@@ -24904,6 +24914,7 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "RuntimePublicationOrchestrator.h"
 #include "NoiseShaperLearner.h"
 #include "ISRRetireRouter.h"
@@ -24965,7 +24976,8 @@ AudioEngine::~AudioEngine()
     DSPCore* fadingToRelease = nullptr;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
-        const auto runtimeReadHandle = readControlRuntimeHandle();
+        const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+        const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
         validateDistinctRuntimeSlots("~AudioEngine.beforeClear",
                  getActiveRuntimeDSP(),
                          resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
@@ -25446,6 +25458,7 @@ void AudioEngine::debugAssertAudioThread() const
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
 
 void AudioEngine::startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, bool resume)
@@ -25564,7 +25577,8 @@ void AudioEngine::processLearningCommands() noexcept
                 requestedLearningResume = cmd.resume;
                 requestedLearningGeneration = cmd.irGeneration;
 
-                const auto runtimeReadHandle = readControlRuntimeHandle();
+                const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+                const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
                 auto* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
                 // noiseShaperType 判定は AudioEngine の atomic 設定値を基準とする。
                 // DSPCore の noiseShaperType フィールドは構築時のスナップショットであり、
@@ -27015,6 +27029,7 @@ void AudioEngine::clearConvolverCache()
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
 #include "core/RCUReader.h"
 
@@ -27127,11 +27142,9 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         return;
     }
 
-    // Epoch tracking for lock-free Audio Thread safety
-    convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
-
     // P0-2: 読取入口を単一の callback authority view へ収束。
-    auto runtimeReadHandle = readAudioRuntimeHandle();
+    const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
+    auto runtimeReadHandle = makeRuntimeReadHandle(audioCtx);
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
     if (runtimeWorld == nullptr)
@@ -27317,6 +27330,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
 #include "core/RCUReader.h"
 
@@ -27371,8 +27385,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
     const juce::ScopedNoDenormals noDenormals;
     const convo::numeric_policy::ScopedThreadRole audioThreadScope(convo::numeric_policy::ThreadRole::AudioRealtime);
     ASSERT_AUDIO_THREAD();
-    // ★ 追加: RCU ガードで現在の DSP を保護する
-    convo::RCUReaderGuard rcuGuard(audioThreadRcuReader);
     const int numSamples = buffer.getNumSamples();
 
     struct CallbackTelemetryScope final
@@ -27414,7 +27426,8 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
         return;
     }
 
-    auto runtimeReadHandle = readAudioRuntimeHandle();
+    const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
+    auto runtimeReadHandle = makeRuntimeReadHandle(audioCtx);
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
     if (runtimeWorld == nullptr)
@@ -29514,6 +29527,7 @@ double AudioEngine::estimateOversamplingLatencySamples(int oversamplingFactor,
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "RuntimeBuilder.h"
 
 namespace {
@@ -29621,7 +29635,8 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
     crossfadeRuntime_.reset();
     crossfadeRuntime_.getGain().reset(safeSampleRate, 0.03);
     crossfadeRuntime_.getGain().setCurrentAndTargetValue(1.0);
-    const auto runtimeReadHandle = readControlRuntimeHandle();
+    const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+    const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
     {
         auto* currentForPublish = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
         auto* fadingForPublish = resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
@@ -29787,6 +29802,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "DSPLifetimeManager.h"
 #include "RuntimeBuilder.h"
 #include "NoiseShaperLearner.h"
@@ -29876,7 +29892,8 @@ void AudioEngine::releaseResources()
 
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
-        const auto runtimeReadHandle = readControlRuntimeHandle();
+        const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+        const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
         validateDistinctRuntimeSlots("releaseResources.beforeClear",
                  getActiveRuntimeDSP(),
                  resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),
@@ -30032,6 +30049,7 @@ void AudioEngine::releaseResources()
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
 
 namespace
@@ -30054,7 +30072,8 @@ void AudioEngine::processWithSnapshot(const juce::AudioSourceChannelInfo& buffer
         return;
     }
 
-    const auto runtimeReadHandle = readAudioRuntimeHandle();
+    const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
+    const auto runtimeReadHandle = makeRuntimeReadHandle(audioCtx);
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
     if (runtimeWorld == nullptr)
     {
@@ -31275,6 +31294,7 @@ void AudioEngine::applyRetirePressurePolicyNoRt(int retirePressureLevel,
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "core/SnapshotAssembler.h"
 
 namespace {
@@ -31391,7 +31411,8 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         DBG("Phase6: EQ fade triggered");
     }
 
-    const auto runtimeReadHandle = readControlRuntimeHandle();
+    const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+    const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
     const auto* observedSnapshot = getRuntimeSnapshotFromReadHandle(runtimeReadHandle);
 
     convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
@@ -31424,7 +31445,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
     // 回復経路: 何らかの競合で fade が開始されず current も空のままなら、
     // 即時適用へ切り替えて反映欠落を防ぐ。
-    const auto* observedAfterApply = getRuntimeSnapshotFromReadHandle(readControlRuntimeHandle());
+    const auto* observedAfterApply = getRuntimeSnapshotFromReadHandle(makeRuntimeReadHandle(messageCtx));
     if (!m_coordinator.isFading() && observedAfterApply == nullptr)
     {
         DBG("[VERIFY] snapshot apply recovery: force switchImmediate");
@@ -31726,6 +31747,7 @@ void AudioEngine::processDeferredReleases()
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "RuntimeBuilder.h"
 #include "RuntimePublicationOrchestrator.h"
 
@@ -31739,7 +31761,8 @@ void diagLog(const juce::String& message)
 
 void AudioEngine::timerCallback()
 {
-    const auto runtimeReadHandle = readControlRuntimeHandle();
+    const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+    const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
     const bool transitionActive = hasFadingRuntimeInWorld(runtimeReadHandle);
     const auto* currentSnapshot = getRuntimeSnapshotFromReadHandle(runtimeReadHandle);
@@ -32497,6 +32520,7 @@ struct CoeffSet {
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
 #include "core/RCUReader.h"
+#include "core/RuntimeReaderContext.h"
 #include "EQEditProcessor.h"
 #include "PsychoacousticDither.h"
 #include "FixedNoiseShaper.h"
@@ -33767,9 +33791,6 @@ public:
     void setAdaptiveNoiseShaperState(int bankIndex, const convo::NoiseShaperLearnerState& inState) noexcept;
 
 private:
-    static constexpr int kAudioEpochReaderIndex = 0;
-    static constexpr int kControlEpochReaderIndex = 1;
-
     void recordAudioCallbackProcessingStats(int numSamples, double processTimeUs) noexcept
     {
         if (!consumeAtomic(rtAuxMutable_.cliProcessingTelemetryEnabled, std::memory_order_relaxed))
@@ -34737,20 +34758,40 @@ public:
     {
     }
 
-    [[nodiscard]] inline RuntimeReadHandle makeRuntimeReadHandle(int readerIndex,
-                                                                 bool assertAudioThread) noexcept
+    // getRetireRouter: RCUReader 生成用の IReaderEpochProvider を返す。
+    // 戻り値は抽象インターフェース（IReaderEpochProvider）であり、具象型 ISRRetireRouter には依存しない。
+    // これにより将来 RetireRouter の差し替え時に影響範囲を Reader 生成箇所のみに限定できる。
+    // 注意: このメソッドが返すポインタの寿命は AudioEngine 全体の寿命と一致する。
+    // AudioEngine より長生きする RCUReader を生成してはならない。
+    [[nodiscard]] convo::IReaderEpochProvider& getRetireRouter() noexcept
     {
-        if (assertAudioThread)
+        jassert(m_retireRouter != nullptr);
+        return *m_retireRouter;
+    }
+
+    [[nodiscard]] inline RuntimeReadHandle makeRuntimeReadHandle(
+        const convo::RuntimeReaderContext& ctx) noexcept
+    {
+        switch (ctx.channel)
+        {
+        case convo::ObserveChannel::Audio:
             debugAssertAudioThread();
-        else
+            break;
+        case convo::ObserveChannel::Message:
+        case convo::ObserveChannel::Publication:
             debugAssertNotAudioThread();
+            break;
+        default:
+            // Worker: アサーションなし（Worker スレッド識別は現状未実装のため skip）
+            break;
+        }
 
         const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
         const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
         if (world != nullptr)
         {
-            constexpr int kObserveReaderSlots = 4;
-            const int slot = juce::jlimit(0, kObserveReaderSlots - 1, readerIndex);
+            const int slot = juce::jlimit(0, convo::kObserveChannelCount - 1,
+                                          static_cast<int>(ctx.channel));
 
             const auto currentGeneration = world->generation;
             const auto currentSequence = world->publication.sequenceId;
@@ -34801,12 +34842,10 @@ public:
             updateMaxMetric(youngestObservedGeneration_, currentGeneration);
         }
 
-        convo::ObservedRuntime observedSnapshot { audioThreadRcuReader };
-        if (!assertAudioThread)
-            observedSnapshot = m_coordinator.observeCurrentRuntime(audioThreadRcuReader);
+        auto observed = m_coordinator.observeCurrentRuntime(ctx.reader);
 
         return RuntimeReadHandle {
-            std::move(observedSnapshot),
+            std::move(observed),
             world
         };
     }
@@ -34825,16 +34864,6 @@ public:
         snapshot.latencyResetPending = world.engine.latencyResetPending;
         snapshot.dryScaleTarget = world.overlap.dryScaleTarget;
         return snapshot;
-    }
-
-    [[nodiscard]] inline RuntimeReadHandle readAudioRuntimeHandle() noexcept
-    {
-        return makeRuntimeReadHandle(kAudioEpochReaderIndex, true);
-    }
-
-    [[nodiscard]] inline RuntimeReadHandle readControlRuntimeHandle() noexcept
-    {
-        return makeRuntimeReadHandle(kControlEpochReaderIndex, false);
     }
 
     [[nodiscard]] static inline const RuntimePublishWorld* getRuntimeWorldFromReadHandle(const RuntimeReadHandle& runtimeReadHandle) noexcept
@@ -35794,6 +35823,8 @@ public:
     std::unique_ptr<convo::isr::ISRRetireRouter> m_retireRouter;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
     convo::RCUReader audioThreadRcuReader { m_epochDomain };
+    // Message Thread + JUCE Timer 専用 RCU reader。
+    convo::RCUReader messageThreadRcuReader { m_epochDomain };
     RTLocalState rtLocalState_ {};
     RTAuxMutable rtAuxMutable_ {};
     convo::SnapshotCoordinator m_coordinator;
@@ -35888,18 +35919,8 @@ public:
     convo::isr::FailureHandler failureHandler_;
     convo::isr::IntrospectionConsole introspectionConsole_;
 
-    std::array<std::atomic<std::uint64_t>, 4> observeLastSeenGeneration_ {
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0}
-    };
-    std::array<std::atomic<std::uint64_t>, 4> observeLastSeenSequenceId_ {
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0}
-    };
+    std::array<std::atomic<std::uint64_t>, convo::kObserveChannelCount> observeLastSeenGeneration_ {};
+    std::array<std::atomic<std::uint64_t>, convo::kObserveChannelCount> observeLastSeenSequenceId_ {};
     std::atomic<std::uint64_t> observeMonotonicViolationCount_ { 0 };
     std::atomic<bool> observeMonotonicRollbackRequested_ { false };
 
@@ -41764,7 +41785,8 @@ private:
 namespace convo::isr {
 
 PublicationAdmission::Decision PublicationAdmission::evaluate(
-    const PublishRequest& req, AudioEngine& engine) const noexcept
+    const PublishRequest& req, AudioEngine& engine,
+    const convo::RuntimeReaderContext& ctx) const noexcept
 {
     // 1. Shutdown check
     if (engine.isShutdownInProgress())
@@ -41787,7 +41809,7 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
 
     // 5. Fading active check → defer
     const bool hasFading = engine.hasFadingRuntimeInWorld(
-        engine.readControlRuntimeHandle());
+        engine.makeRuntimeReadHandle(ctx));
     if (hasFading)
         return Decision::DeferredFadingActive;
 
@@ -41805,6 +41827,7 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
 
 #include "RuntimeBuildTypes.h"
 #include "ISRDSPHandle.h"
+#include "core/RuntimeReaderContext.h"
 
 class AudioEngine;  // forward declaration (circular dep avoid)
 
@@ -41835,7 +41858,8 @@ public:
     // evaluate: publish 可否を判定する（AudioEngine 参照が必要）。
     // Accepted 以外の場合は Coordinator が対応する。
     [[nodiscard]] Decision evaluate(const PublishRequest& req,
-                                    AudioEngine& engine) const noexcept;
+                                    AudioEngine& engine,
+                                    const convo::RuntimeReaderContext& ctx) const noexcept;
 
     // Deferred Queue は PublicationAdmission から RuntimePublicationOrchestrator へ移設済み (PR-7)。
     // Admission は publish 可否判定のみ責務とする。
@@ -42667,6 +42691,7 @@ RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engi
     , executor_()
     , transition_(engine)
     , lifetime_(engine)
+    , publicationReader(engine.getRetireRouter())
 {
 }
 
@@ -42675,7 +42700,8 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
 {
     // ---- Phase 1: Admission ----
     // ★ evaluate() は必須。バイパス禁止。
-    auto decision = admission_.evaluate(req, engine_);
+    const convo::RuntimeReaderContext pubCtx{ publicationReader, convo::ObserveChannel::Publication };
+    auto decision = admission_.evaluate(req, engine_, pubCtx);
     if (decision != PublicationAdmission::Decision::Accepted)
     {
         // Deferred/Rejected: caller が処理するため、ここでは retire しない
@@ -42802,6 +42828,7 @@ void RuntimePublicationOrchestrator::notifyTransitionComplete(
 #include "PublicationExecutor.h"
 #include "DSPTransition.h"
 #include "DSPLifetimeManager.h"
+#include "core/RCUReader.h"
 
 class AudioEngine;
 
@@ -42856,6 +42883,7 @@ private:
     PublicationExecutor executor_;
     DSPTransition transition_;
     DSPLifetimeManager lifetime_;
+    convo::RCUReader publicationReader;
 };
 
 } // namespace convo::isr
@@ -49869,6 +49897,68 @@ public:
 
 ```
 
+### 📄 `src\core\ObserveChannel.h`
+
+```
+#pragma once
+
+namespace convo {
+
+// ObserveChannel: 監査主体（観測カテゴリ）単位の固定スロット。
+// Audio Thread / Message Thread / Publication / Worker（最大8）× Reserved（2）の合計13チャネル。
+// 各チャネルは observeLastSeenGeneration_ / observeLastSeenSequenceId_ 配列のインデックスに対応する。
+//
+// ■ チャネル設計の原則
+// チャネルは「監査主体（観測カテゴリ）」を表し、「スレッド」を表すわけではない。
+// 同一スレッド上の異なる論理主体は、必要に応じて別チャネルに分離する。
+//
+// ■ Publication と Message の分離理由
+// 両者は同一スレッド（Message Thread）で動作するが、監査主体としては意味が異なる。
+// Publication は publish 発行側の観測を記録し、Message は Timer や制御側の観測を記録する。
+// 統合すると publish 発行と Timer 読み取りの generation 更新が混線し、逆行検出の品質が低下する。
+//
+// ■ SpectrumAnalyzerComponent が ObserveChannel::Message を使用する理由
+// SpectrumAnalyzerComponent は JUCE Timer コールバック（Message Thread）で動作し、
+// AudioEngine::timerCallback() と同じ監査カテゴリ（Timer/制御側観測）に属する。
+// そのため ObserveChannel::Message を使用する。両者が同一スロットを共有しても、
+// 当該スロットは「Message カテゴリで最後に観測された generation」を記録するだけであり、
+// 逆行検出の品質に影響しない（複数 Reader 間で最も進んだ generation が記録される）。
+// もし個別監査が必要な場合は、SpectrumAnalyzer 専用のチャネルを追加する。
+//
+// ■ Worker1〜Worker7 は将来の Worker 追加用の予約枠
+// 固定13チャネルである理由:
+// 1. observeLastSeenGeneration_ / observeLastSeenSequenceId_ 配列は std::array で静的に確保される
+// 2. チャネル追加は再コンパイルが必要だが、Worker は最大8までが現実的な上限
+// 3. Reserved0/Reserved1 は拡張予備として確保
+// 現時点で使用するのは Worker0（NoiseShaperLearner）のみ。
+//
+// ■ チャネル追加基準
+// 新しい観測主体を追加する場合、以下の基準で判断する:
+// - 同一スレッド上の異なる論理主体で、generation/sequence の逆行パターンが異なる可能性がある
+// - 例: 将来 Worker が増えた場合は Worker1〜Worker7 を順次割り当てる
+// - チャネル数が13を超える場合は Reserved スロットを解放し、上限を拡張する
+enum class ObserveChannel : int {
+    Audio       = 0,   // Audio Thread（getNextAudioBlock）
+    Message     = 1,   // Message Thread + JUCE Timer
+    Publication = 2,   // RuntimePublicationOrchestrator
+    Worker0     = 3,   // NoiseShaperLearner（現時点で唯一の Worker）
+    Worker1     = 4,   // 将来用予約
+    Worker2     = 5,   // 将来用予約
+    Worker3     = 6,   // 将来用予約
+    Worker4     = 7,   // 将来用予約
+    Worker5     = 8,   // 将来用予約
+    Worker6     = 9,   // 将来用予約
+    Worker7     = 10,  // 将来用予約
+    Reserved0   = 11,  // 予約（Worker 上限超過時の拡張用）
+    Reserved1   = 12,  // 予約
+};
+
+static constexpr int kObserveChannelCount = 13;
+
+} // namespace convo
+
+```
+
 ### 📄 `src\core\ObservedRuntime.h`
 
 ```
@@ -49910,7 +50000,7 @@ struct ObservedRuntime
     ObservedRuntime(const ObservedRuntime&) = delete;
     ObservedRuntime& operator=(const ObservedRuntime&) = delete;
     ObservedRuntime(ObservedRuntime&&) noexcept = default;
-    ObservedRuntime& operator=(ObservedRuntime&&) noexcept = default;
+    ObservedRuntime& operator=(ObservedRuntime&&) noexcept = delete;
 
     const GlobalSnapshot* get() const noexcept
     {
@@ -50314,6 +50404,62 @@ private:
     WriteAccess writeAccess_;
     bool shutdownClearRequested_ = false;
 };
+
+} // namespace convo
+
+```
+
+### 📄 `src\core\RuntimeReaderContext.h`
+
+```
+#pragma once
+
+#include "RCUReader.h"
+#include "ObserveChannel.h"
+
+namespace convo {
+
+// RuntimeReaderContext: RCUReader と ObserveChannel を運用上束縛する軽量コンテキスト。
+// 各クラスは使用時にこのコンテキストを構築し、RuntimePublishWorld へのアクセスに使用する。
+//
+// ■ 型安全性の限界
+// C++ の型システムでは reader と channel の組み合わせの正当性は保証できない。
+// 例えば以下の誤った組み合わせがコンパイルを通ってしまう:
+//   RuntimeReaderContext{ messageThreadRcuReader, ObserveChannel::Audio }; // 誤りだがコンパイル可能
+// このため「各クラスが構築時点で適切な組み合わせを選択する」運用に依存する。
+//
+// ■ 対策
+// - ヘルパー関数（makeAudioReaderContext / makeMessageReaderContext 等）の使用を推奨
+// - 各クラスは自身の RuntimeReaderContext をメンバ保持せず、使用時に都度構築する
+// - コードレビューで reader と channel の対応を確認する
+struct RuntimeReaderContext {
+    RCUReader& reader;
+    ObserveChannel channel;
+};
+
+// ヘルパー構築関数（省略記法）
+inline RuntimeReaderContext makeAudioReaderContext(RCUReader& reader) noexcept
+{
+    return RuntimeReaderContext{ reader, ObserveChannel::Audio };
+}
+
+inline RuntimeReaderContext makeMessageReaderContext(RCUReader& reader) noexcept
+{
+    return RuntimeReaderContext{ reader, ObserveChannel::Message };
+}
+
+inline RuntimeReaderContext makePublicationReaderContext(RCUReader& reader) noexcept
+{
+    return RuntimeReaderContext{ reader, ObserveChannel::Publication };
+}
+
+inline RuntimeReaderContext makeWorkerReaderContext(RCUReader& reader, int workerIndex) noexcept
+{
+    // workerIndex は 0〜7（Worker0〜Worker7）の範囲であること
+    const auto channel = static_cast<ObserveChannel>(
+        static_cast<int>(ObserveChannel::Worker0) + workerIndex);
+    return RuntimeReaderContext{ reader, channel };
+}
 
 } // namespace convo
 
@@ -51791,7 +51937,7 @@ void EQProcessor::updateBandNode(int band)
     {
         retireBandNodeDeferred(oldNode);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
 
 //============================================================================
@@ -52363,7 +52509,7 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
 // パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.
 void EQProcessor::flushPendingEpochAdvance() noexcept
 {
-    if (m_epochAdvancePending.exchange(false, std::memory_order_acq_rel))
+    if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
     {
         m_epochDomain.publishEpoch();
     }
@@ -52511,7 +52657,7 @@ void EQProcessor::resetToDefaults()
     if (oldState) {
         retireEQStateDeferred(oldState);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
     convo::publishAtomic(agcCurrentGain, 1.0, std::memory_order_release); // release: Processing.cpp の acquire と HB し AGC 初期化を公知
     convo::publishAtomic(agcEnvInput, 0.0, std::memory_order_release);    // release: 同上
@@ -52847,7 +52993,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
     {
         retireEQStateDeferred(oldState);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
     for (int i = 0; i < NUM_BANDS; ++i)
         updateBandNode(i);
@@ -52900,7 +53046,7 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     if (oldNode)
         retireBandNodeDeferred(oldNode);
 
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
 
 //============================================================================
@@ -53179,7 +53325,7 @@ void EQProcessor::setBandFrequency(int band, float freq)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -53198,7 +53344,7 @@ void EQProcessor::setBandGain(int band, float gainDb)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -53217,7 +53363,7 @@ void EQProcessor::setBandQ(int band, float q)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -53240,7 +53386,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -53264,7 +53410,7 @@ void EQProcessor::setTotalGain(float gainDb)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
 
 //--------------------------------------------------------------
@@ -53283,7 +53429,7 @@ void EQProcessor::setAGCEnabled(bool enabled)
         auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
-        m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+        convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 
     if (enabled)
@@ -53317,7 +53463,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -53339,7 +53485,7 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
     if (prev) {
         retireEQStateDeferred(prev);
     }
-    m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+    convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
 }
 
@@ -53363,7 +53509,7 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
         auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
-        m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+        convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 }
 
@@ -53397,7 +53543,7 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
         auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
-        m_epochAdvancePending.store(true, std::memory_order_release); // [P1-14] deferred
+        convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 }
 
@@ -58662,7 +58808,7 @@ namespace {
         return false;
     if (!contains(timer, "runtimeWorld->execution.latencyCompensationSamples"))
         return false;
-    if (!contains(spectrum, "const auto runtimeReadHandle = engine.readControlRuntimeHandle();"))
+    if (!contains(spectrum, "const auto runtimeReadHandle = engine.makeRuntimeReadHandle(ctx);"))
         return false;
     if (!contains(spectrum, "const auto* snap = AudioEngine::getRuntimeSnapshotFromReadHandle(runtimeReadHandle);"))
         return false;

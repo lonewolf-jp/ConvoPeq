@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
 
 void AudioEngine::startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, bool resume)
@@ -118,7 +119,8 @@ void AudioEngine::processLearningCommands() noexcept
                 requestedLearningResume = cmd.resume;
                 requestedLearningGeneration = cmd.irGeneration;
 
-                const auto runtimeReadHandle = readControlRuntimeHandle();
+                const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+                const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
                 auto* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
                 // noiseShaperType 判定は AudioEngine の atomic 設定値を基準とする。
                 // DSPCore の noiseShaperType フィールドは構築時のスナップショットであり、

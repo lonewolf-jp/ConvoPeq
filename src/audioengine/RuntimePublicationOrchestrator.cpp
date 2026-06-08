@@ -11,6 +11,7 @@ RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engi
     , executor_()
     , transition_(engine)
     , lifetime_(engine)
+    , publicationReader(engine.getRetireRouter())
 {
 }
 
@@ -19,7 +20,8 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
 {
     // ---- Phase 1: Admission ----
     // ★ evaluate() は必須。バイパス禁止。
-    auto decision = admission_.evaluate(req, engine_);
+    const convo::RuntimeReaderContext pubCtx{ publicationReader, convo::ObserveChannel::Publication };
+    auto decision = admission_.evaluate(req, engine_, pubCtx);
     if (decision != PublicationAdmission::Decision::Accepted)
     {
         // Deferred/Rejected: caller が処理するため、ここでは retire しない

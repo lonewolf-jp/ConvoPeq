@@ -46,7 +46,8 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
                                        LockFreeRingBuffer<AudioBlock, 4096>& captureQueueRef)
     : engine(engineRef),
     // lastSaveTime の初期化（コンストラクタ本体で行う）
-      captureQueue(captureQueueRef)
+      captureQueue(captureQueueRef),
+      rcuReader(engineRef.getRetireRouter())
 {
     const size_t populationCount = static_cast<size_t>(CmaEsOptimizer::kPopulation * CmaEsOptimizer::kDim);
     const size_t fitnessCount = static_cast<size_t>(CmaEsOptimizer::kPopulation);
@@ -1024,13 +1025,14 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
     convo::publishAtomic(workerState, WorkerState::Idle, std::memory_order_release);
 }
 
-NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature() const noexcept
+NoiseShaperLearner::SessionSignature NoiseShaperLearner::captureSessionSignature() noexcept
 {
     SessionSignature session;
     session.sampleRateHz = static_cast<int>(convo::consumeAtomic(engine.currentSampleRate, std::memory_order_acquire) + 0.5);
     session.bitDepth = engine.getDitherBitDepth();
     session.adaptiveCoeffBankIndex = convo::consumeAtomic(engine.currentAdaptiveCoeffBankIndex, std::memory_order_acquire);
-    const auto runtimeReadHandle = engine.readControlRuntimeHandle();
+    const auto ctx = convo::makeWorkerReaderContext(rcuReader, 0);
+    const auto runtimeReadHandle = engine.makeRuntimeReadHandle(ctx);
     auto* dsp = engine.resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
     if (dsp != nullptr)
         session.sessionId = dsp->currentCaptureSessionId;

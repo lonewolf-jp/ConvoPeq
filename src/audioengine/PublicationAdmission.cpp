@@ -4,7 +4,8 @@
 namespace convo::isr {
 
 PublicationAdmission::Decision PublicationAdmission::evaluate(
-    const PublishRequest& req, AudioEngine& engine) const noexcept
+    const PublishRequest& req, AudioEngine& engine,
+    const convo::RuntimeReaderContext& ctx) const noexcept
 {
     // 1. Shutdown check
     if (engine.isShutdownInProgress())
@@ -27,7 +28,7 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
 
     // 5. Fading active check → defer
     const bool hasFading = engine.hasFadingRuntimeInWorld(
-        engine.readControlRuntimeHandle());
+        engine.makeRuntimeReadHandle(ctx));
     if (hasFading)
         return Decision::DeferredFadingActive;
 

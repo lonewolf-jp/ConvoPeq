@@ -17,6 +17,7 @@
 #include "NoiseShaperLearnerTypes.h"
 
 #include "audioengine/AtomicAccess.h"
+#include "core/RCUReader.h"
 
 class AudioEngine;
 struct AudioBlock;
@@ -202,7 +203,7 @@ private:
                            int& bestCandidateIndex,
                            double& bestCandidateScore,
                            const std::stop_token& stopToken);
-    SessionSignature captureSessionSignature() const noexcept;
+    SessionSignature captureSessionSignature() noexcept;
     void resetLearningSession(const SessionSignature& session, bool resume) noexcept;
     DrainStats drainCaptureQueue(const SessionSignature& session) noexcept;
     int buildTrainingSegments() noexcept;
@@ -224,6 +225,7 @@ private:
 
     AudioEngine& engine;
     LockFreeRingBuffer<AudioBlock, 4096>& captureQueue;
+    convo::RCUReader rcuReader;
 
     std::jthread workerThread;
     std::atomic<WorkerState> workerState { WorkerState::Idle };

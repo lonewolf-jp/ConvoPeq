@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "RuntimePublicationOrchestrator.h"
 #include "NoiseShaperLearner.h"
 #include "ISRRetireRouter.h"
@@ -61,7 +62,8 @@ AudioEngine::~AudioEngine()
     DSPCore* fadingToRelease = nullptr;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
-        const auto runtimeReadHandle = readControlRuntimeHandle();
+        const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+        const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
         validateDistinctRuntimeSlots("~AudioEngine.beforeClear",
                  getActiveRuntimeDSP(),
                          resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),

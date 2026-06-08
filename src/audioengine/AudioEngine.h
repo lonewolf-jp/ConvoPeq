@@ -53,6 +53,7 @@ struct CoeffSet {
 #include "ConvolverProcessor.h"
 #include "EQProcessor.h"
 #include "core/RCUReader.h"
+#include "core/RuntimeReaderContext.h"
 #include "EQEditProcessor.h"
 #include "PsychoacousticDither.h"
 #include "FixedNoiseShaper.h"
@@ -1323,9 +1324,6 @@ public:
     void setAdaptiveNoiseShaperState(int bankIndex, const convo::NoiseShaperLearnerState& inState) noexcept;
 
 private:
-    static constexpr int kAudioEpochReaderIndex = 0;
-    static constexpr int kControlEpochReaderIndex = 1;
-
     void recordAudioCallbackProcessingStats(int numSamples, double processTimeUs) noexcept
     {
         if (!consumeAtomic(rtAuxMutable_.cliProcessingTelemetryEnabled, std::memory_order_relaxed))
@@ -2293,20 +2291,40 @@ public:
     {
     }
 
-    [[nodiscard]] inline RuntimeReadHandle makeRuntimeReadHandle(int readerIndex,
-                                                                 bool assertAudioThread) noexcept
+    // getRetireRouter: RCUReader 生成用の IReaderEpochProvider を返す。
+    // 戻り値は抽象インターフェース（IReaderEpochProvider）であり、具象型 ISRRetireRouter には依存しない。
+    // これにより将来 RetireRouter の差し替え時に影響範囲を Reader 生成箇所のみに限定できる。
+    // 注意: このメソッドが返すポインタの寿命は AudioEngine 全体の寿命と一致する。
+    // AudioEngine より長生きする RCUReader を生成してはならない。
+    [[nodiscard]] convo::IReaderEpochProvider& getRetireRouter() noexcept
     {
-        if (assertAudioThread)
+        jassert(m_retireRouter != nullptr);
+        return *m_retireRouter;
+    }
+
+    [[nodiscard]] inline RuntimeReadHandle makeRuntimeReadHandle(
+        const convo::RuntimeReaderContext& ctx) noexcept
+    {
+        switch (ctx.channel)
+        {
+        case convo::ObserveChannel::Audio:
             debugAssertAudioThread();
-        else
+            break;
+        case convo::ObserveChannel::Message:
+        case convo::ObserveChannel::Publication:
             debugAssertNotAudioThread();
+            break;
+        default:
+            // Worker: アサーションなし（Worker スレッド識別は現状未実装のため skip）
+            break;
+        }
 
         const auto readToken = RuntimePublicationCoordinator::acquireReadToken(runtimeStore);
         const auto* world = RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore, readToken);
         if (world != nullptr)
         {
-            constexpr int kObserveReaderSlots = 4;
-            const int slot = juce::jlimit(0, kObserveReaderSlots - 1, readerIndex);
+            const int slot = juce::jlimit(0, convo::kObserveChannelCount - 1,
+                                          static_cast<int>(ctx.channel));
 
             const auto currentGeneration = world->generation;
             const auto currentSequence = world->publication.sequenceId;
@@ -2357,12 +2375,10 @@ public:
             updateMaxMetric(youngestObservedGeneration_, currentGeneration);
         }
 
-        convo::ObservedRuntime observedSnapshot { audioThreadRcuReader };
-        if (!assertAudioThread)
-            observedSnapshot = m_coordinator.observeCurrentRuntime(audioThreadRcuReader);
+        auto observed = m_coordinator.observeCurrentRuntime(ctx.reader);
 
         return RuntimeReadHandle {
-            std::move(observedSnapshot),
+            std::move(observed),
             world
         };
     }
@@ -2381,16 +2397,6 @@ public:
         snapshot.latencyResetPending = world.engine.latencyResetPending;
         snapshot.dryScaleTarget = world.overlap.dryScaleTarget;
         return snapshot;
-    }
-
-    [[nodiscard]] inline RuntimeReadHandle readAudioRuntimeHandle() noexcept
-    {
-        return makeRuntimeReadHandle(kAudioEpochReaderIndex, true);
-    }
-
-    [[nodiscard]] inline RuntimeReadHandle readControlRuntimeHandle() noexcept
-    {
-        return makeRuntimeReadHandle(kControlEpochReaderIndex, false);
     }
 
     [[nodiscard]] static inline const RuntimePublishWorld* getRuntimeWorldFromReadHandle(const RuntimeReadHandle& runtimeReadHandle) noexcept
@@ -3350,6 +3356,8 @@ public:
     std::unique_ptr<convo::isr::ISRRetireRouter> m_retireRouter;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
     convo::RCUReader audioThreadRcuReader { m_epochDomain };
+    // Message Thread + JUCE Timer 専用 RCU reader。
+    convo::RCUReader messageThreadRcuReader { m_epochDomain };
     RTLocalState rtLocalState_ {};
     RTAuxMutable rtAuxMutable_ {};
     convo::SnapshotCoordinator m_coordinator;
@@ -3444,18 +3452,8 @@ public:
     convo::isr::FailureHandler failureHandler_;
     convo::isr::IntrospectionConsole introspectionConsole_;
 
-    std::array<std::atomic<std::uint64_t>, 4> observeLastSeenGeneration_ {
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0}
-    };
-    std::array<std::atomic<std::uint64_t>, 4> observeLastSeenSequenceId_ {
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0},
-        std::atomic<std::uint64_t>{0}
-    };
+    std::array<std::atomic<std::uint64_t>, convo::kObserveChannelCount> observeLastSeenGeneration_ {};
+    std::array<std::atomic<std::uint64_t>, convo::kObserveChannelCount> observeLastSeenSequenceId_ {};
     std::atomic<std::uint64_t> observeMonotonicViolationCount_ { 0 };
     std::atomic<bool> observeMonotonicRollbackRequested_ { false };
 

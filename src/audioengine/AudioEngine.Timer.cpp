@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "RuntimeBuilder.h"
 #include "RuntimePublicationOrchestrator.h"
 
@@ -13,7 +14,8 @@ void diagLog(const juce::String& message)
 
 void AudioEngine::timerCallback()
 {
-    const auto runtimeReadHandle = readControlRuntimeHandle();
+    const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+    const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
     const bool transitionActive = hasFadingRuntimeInWorld(runtimeReadHandle);
     const auto* currentSnapshot = getRuntimeSnapshotFromReadHandle(runtimeReadHandle);

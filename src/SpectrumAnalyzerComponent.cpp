@@ -49,6 +49,7 @@ namespace
 //--------------------------------------------------------------
 SpectrumAnalyzerComponent::SpectrumAnalyzerComponent(AudioEngine& audioEngine)
     : engine(audioEngine),
+      rcuReader(audioEngine.getRetireRouter()),
     fftTimeDomainBuffer(convo::makeAlignedArray<float>(NUM_FFT_POINTS)),
     fftWorkBuffer(convo::makeAlignedArray<float>(NUM_FFT_POINTS * 2))
 {
@@ -274,7 +275,8 @@ void SpectrumAnalyzerComponent::timerCallback()
     lastTime = now;
 
     // Snapshot のハッシュ差分で EQ 更新を検知する。
-    const auto runtimeReadHandle = engine.readControlRuntimeHandle();
+    const auto ctx = convo::makeMessageReaderContext(rcuReader);
+    const auto runtimeReadHandle = engine.makeRuntimeReadHandle(ctx);
     const auto* snap = AudioEngine::getRuntimeSnapshotFromReadHandle(runtimeReadHandle);
     if (snap != nullptr && snap->eqCoeffHash != lastEqHash)
     {

@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "core/SnapshotAssembler.h"
 
 namespace {
@@ -116,7 +117,8 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
         DBG("Phase6: EQ fade triggered");
     }
 
-    const auto runtimeReadHandle = readControlRuntimeHandle();
+    const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+    const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
     const auto* observedSnapshot = getRuntimeSnapshotFromReadHandle(runtimeReadHandle);
 
     convo::GlobalSnapshot* newSnap = convo::SnapshotFactory::createImpl(
@@ -149,7 +151,7 @@ void AudioEngine::createSnapshotFromCurrentState(uint64_t generation)
 
     // 回復経路: 何らかの競合で fade が開始されず current も空のままなら、
     // 即時適用へ切り替えて反映欠落を防ぐ。
-    const auto* observedAfterApply = getRuntimeSnapshotFromReadHandle(readControlRuntimeHandle());
+    const auto* observedAfterApply = getRuntimeSnapshotFromReadHandle(makeRuntimeReadHandle(messageCtx));
     if (!m_coordinator.isFading() && observedAfterApply == nullptr)
     {
         DBG("[VERIFY] snapshot apply recovery: force switchImmediate");

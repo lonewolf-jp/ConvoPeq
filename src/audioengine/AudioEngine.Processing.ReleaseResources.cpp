@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "core/RuntimeReaderContext.h"
 #include "DSPLifetimeManager.h"
 #include "RuntimeBuilder.h"
 #include "NoiseShaperLearner.h"
@@ -89,7 +90,8 @@ void AudioEngine::releaseResources()
 
     {
         std::lock_guard<std::mutex> lk(rebuildMutex);
-        const auto runtimeReadHandle = readControlRuntimeHandle();
+        const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
+        const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
         validateDistinctRuntimeSlots("releaseResources.beforeClear",
                  getActiveRuntimeDSP(),
                  resolveFadingRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle),

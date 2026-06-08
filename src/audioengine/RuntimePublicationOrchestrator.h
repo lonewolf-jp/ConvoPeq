@@ -4,6 +4,7 @@
 #include "PublicationExecutor.h"
 #include "DSPTransition.h"
 #include "DSPLifetimeManager.h"
+#include "core/RCUReader.h"
 
 class AudioEngine;
 
@@ -58,6 +59,7 @@ private:
     PublicationExecutor executor_;
     DSPTransition transition_;
     DSPLifetimeManager lifetime_;
+    convo::RCUReader publicationReader;
 };
 
 } // namespace convo::isr

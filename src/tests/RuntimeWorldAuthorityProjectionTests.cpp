@@ -254,7 +254,7 @@ namespace {
         return false;
     if (!contains(timer, "runtimeWorld->execution.latencyCompensationSamples"))
         return false;
-    if (!contains(spectrum, "const auto runtimeReadHandle = engine.readControlRuntimeHandle();"))
+    if (!contains(spectrum, "const auto runtimeReadHandle = engine.makeRuntimeReadHandle(ctx);"))
         return false;
     if (!contains(spectrum, "const auto* snap = AudioEngine::getRuntimeSnapshotFromReadHandle(runtimeReadHandle);"))
         return false;

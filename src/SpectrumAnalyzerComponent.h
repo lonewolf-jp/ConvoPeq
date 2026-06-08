@@ -30,6 +30,7 @@
 #include "DftiHandle.h"
 
 #include "audioengine/AtomicAccess.h"
+#include "core/RCUReader.h"
 
 enum class AnalyzerState : uint8_t
 {
@@ -57,6 +58,7 @@ public:
 
 private:
     AudioEngine& engine;
+    convo::RCUReader rcuReader;
     std::atomic<AnalyzerState> analyzerState { AnalyzerState::Disabled };
 
     // ── 定数定義 (バッファサイズ決定のために先頭に配置) ──
