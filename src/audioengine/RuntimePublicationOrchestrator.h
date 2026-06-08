@@ -1,14 +1,38 @@
 #pragma once
 
+#include <cstdint>
 #include "PublicationAdmission.h"
 #include "PublicationExecutor.h"
 #include "DSPTransition.h"
 #include "DSPLifetimeManager.h"
+#include "ISRRuntimeSemanticSchema.h"
 #include "core/RCUReader.h"
 
 class AudioEngine;
 
 namespace convo::isr {
+
+// ★ C-2.1: DiscardReason — deferred publish が破棄された理由
+enum class DiscardReason : uint8_t {
+    None,
+    ShutdownDiscard,
+    StaleDiscard,
+    SupersededDiscard
+};
+
+// ★ C-2.1: DeferredGuard — stale discard 用のガード情報
+struct DeferredGuard {
+    uint64_t generation;
+    PublicationSequenceId sequence;
+};
+
+// ★ C-2.1: DeferredPublishSlot — sequence 番号付きの deferred publish slot
+struct DeferredPublishSlot {
+    PublicationAdmission::PublishRequest request;
+    DeferredGuard guard;
+    DiscardReason lastDiscardReason{DiscardReason::None};
+    uint64_t enqueueTimestampUs{0};
+};
 
 // RuntimePublicationOrchestrator: AudioEngine レベルの publish オーケストレーション。
 // Coordinator::submitPublishRequest() の実装を提供する。
@@ -40,19 +64,28 @@ public:
         if (!hasDeferred_)
             return std::nullopt;
         hasDeferred_ = false;
-        return deferredRequest_;
+        return deferredSlot_ ? std::optional(deferredSlot_->request) : std::nullopt;
     }
+
+    // ★ C-2.2: shutdown 時に deferred publish を強制消去
+    void clearDeferredForShutdown() noexcept;
+
+    // ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間
+    [[nodiscard]] uint64_t getMaxDeferredAgeMs() const noexcept;
+
+    // ★ C-2.1: 監査用 — deferred overwrite 回数
+    [[nodiscard]] std::uint64_t deferredOverwriteCount() const noexcept;
 
 private:
-    // [PR-7] Deferred Queue: 常に最新1件のみ保持。
-    std::optional<PublicationAdmission::PublishRequest> deferredRequest_;
+    // ★ C-2.1: std::optional<PublishRequest> → DeferredPublishSlot
+    std::optional<DeferredPublishSlot> deferredSlot_;
     bool hasDeferred_ = false;
 
-    void enqueueDeferred(const PublicationAdmission::PublishRequest& req) noexcept
-    {
-        deferredRequest_ = req;
-        hasDeferred_ = true;
-    }
+    // ★ C-2.1: 監査カウンタ
+    std::atomic<uint64_t> deferredOverwriteCount_{0};
+    std::atomic<uint64_t> maxDeferredAgeMs_{0};
+
+    void enqueueDeferred(const PublicationAdmission::PublishRequest& req) noexcept;
 
     AudioEngine& engine_;
     PublicationAdmission admission_;

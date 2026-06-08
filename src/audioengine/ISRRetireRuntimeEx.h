@@ -39,7 +39,7 @@ enum class RetireLifecycleState : std::uint32_t {
 class RetireRuntimeEx {
 public:
     RetireRuntimeEx();
-    void emitIntent(std::uint32_t slot, std::uint32_t generation);
+    void emitIntent(std::uint32_t slot, std::uint64_t generation);  // ★ B-1: 64bit化
     void enqueueRetire(std::uint32_t slot);
     void settleEpoch(std::uint32_t slot);
     void reclaim(std::uint32_t slot);
@@ -90,6 +90,9 @@ public:
     [[nodiscard]] RetireLane laneOf(std::uint32_t slot) const noexcept;
     [[nodiscard]] convo::RetireBoundaryTelemetry snapshotBoundaryTelemetry() const noexcept;
     void emitRetireTimeline(const std::filesystem::path& outputPath) const;
+
+    // ★ B-2.1: 全 slot の現在ライフサイクル状態を JSON 出力
+    void emitRetireTrace(const std::filesystem::path& outputPath) const noexcept;
 
 private:
     static constexpr std::size_t kMaxSlots = 256;

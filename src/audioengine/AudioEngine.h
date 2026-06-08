@@ -96,6 +96,7 @@ namespace convo::isr { class ISRRetireRouter; }
 #include "ISRClosureGraphWalker.h"
 #include "ISRDebugRuntime.h"
 #include "ISRRetireRuntimeEx.h"
+#include "RuntimeDrainAudit.h"
 // ISRRetireRouter forward-declared below (reduce include chain for C1060)
 #include "ISRBarrierOptimizer.h"
 #include "ISREvidenceExporter.h"
@@ -1013,17 +1014,28 @@ public:
 
     [[nodiscard]] bool isShutdownInProgress() const noexcept
     {
-        // acquire: lifecycleState の setShutdownPhase/releaseResources release 側と HB し、
-        //          Releasing/Destroyed 遷移を各スレッドから安全に観測する。
+        // ★ A-2.1: OR 判定を永久維持（EngineLifecycleState + ShutdownPhase の二重保護）
+        //   EngineLifecycleState と ShutdownPhase は異なるライフサイクル視点であり、
+        //   移行期間に乖離が発生し得る。OR 判定により「どちらかが shutdown 状態なら
+        //   shutdown とみなす」安全側の判定を恒久的に維持する。
+        //   ShutdownRuntime のみへの完全委譲は行わない。
         const auto state = consumeAtomic(lifecycleState, std::memory_order_acquire);
-        return state == EngineLifecycleState::Releasing
-            || state == EngineLifecycleState::Destroyed;
+        const bool lifecycleShutdown = (state == EngineLifecycleState::Releasing
+                                     || state == EngineLifecycleState::Destroyed);
+        return lifecycleShutdown || shutdownRuntime_.isShutdownInProgress();
     }
 
     // [[deprecated("Use PublicationAdmission::evaluate() instead")]]
     // [[nodiscard]] bool acceptsRuntimePublication() const noexcept;
     [[nodiscard]] bool isFullyDrained() noexcept;
     [[nodiscard]] bool waitForDrain(int timeoutMs = 2000, int pollIntervalMs = 2) noexcept;
+
+    // ★ A-2.5: シャットダウン完了条件の監査構造体を収集
+    [[nodiscard]] convo::isr::RuntimeDrainAudit collectDrainAudit() noexcept;
+
+    // ★ A-1.6: 3系統の隔離を1トランザクションとして実行
+    bool quarantineSlot(uint32_t slot, uint64_t generation,
+                        convo::isr::QuarantineReason reason) noexcept;
 
     void drainDeferredRetireQueues(bool allowDuringShutdown) noexcept;
 
@@ -3397,6 +3409,7 @@ public:
     std::atomic<bool> retirePressurePublicationThrottleActive_ { false };
     std::atomic<bool> retirePressureAdmissionStrict_ { false };
     std::atomic<bool> retireProtectiveModeActive_ { false };
+    std::atomic<std::uint64_t> prevDroppedSnapshot_ { 0 };
     std::atomic<std::uint64_t> retireEscalationCount_ { 0 };
     std::atomic<std::uint64_t> retireProtectiveModeEnterCount_ { 0 };
     std::atomic<std::uint64_t> maxRetireDeferralEpochs_ { 256 };

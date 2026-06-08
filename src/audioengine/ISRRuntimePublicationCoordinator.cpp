@@ -233,6 +233,27 @@ std::uint64_t RuntimePublicationCoordinator::getReclaimInFlightCount() const noe
     return convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire);
 }
 
+// ★ A-2.4: 新規 getter 群（DrainAudit 用）
+std::uint64_t RuntimePublicationCoordinator::getPublicationBacklogCount() const noexcept {
+    return convo::consumeAtomic(publicationBacklogCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimePublicationCoordinator::getPendingIntentCount() const noexcept {
+    return convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimePublicationCoordinator::getRetireBacklogCount() const noexcept {
+    return convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimePublicationCoordinator::getFallbackBacklogCount() const noexcept {
+    return convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimePublicationCoordinator::getDeferredRetireResidencyCount() const noexcept {
+    return convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire);
+}
+
 bool RuntimePublicationCoordinator::isFullyDrained() const noexcept {
     if (convo::consumeAtomic(swapPending_, std::memory_order_acquire)) {
         return false;

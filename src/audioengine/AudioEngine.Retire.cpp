@@ -109,6 +109,45 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     const int retirePressureLevel = evaluateRetirePressureLevelNoRt(retireDepth, hwm);
     applyRetirePressurePolicyNoRt(retirePressureLevel, retireDepth);
 
+    // ★ C-1.3: overflow→throttle 結合（overflow 継続時間 + 頻度の二重判定）
+    {
+        const uint64_t droppedTotal = retireRuntime_.droppedIntentCount();
+        const uint64_t prevDropped = convo::exchangeAtomic(prevDroppedSnapshot_,
+            droppedTotal, std::memory_order_acq_rel);
+        const uint64_t droppedDelta = (droppedTotal > prevDropped)
+            ? (droppedTotal - prevDropped) : 0;
+
+        // overflowStartTimestamp による継続時間追跡
+        const uint64_t overflowStart = retireRuntime_.overflowStartTimestamp();
+        bool chronicByDuration = false;
+        if (overflowStart != 0) {
+            const auto now = static_cast<uint64_t>(
+                std::chrono::steady_clock::now().time_since_epoch().count());
+            const uint64_t overflowDurationMs = (now - overflowStart) / 1000;
+            chronicByDuration = (overflowDurationMs > 5000);  // >5秒
+        }
+
+        // overflowWindowCounter による頻度追跡
+        const uint64_t windowOverflows = retireRuntime_.overflowWindowCounter();
+        constexpr uint64_t kWindowDurationSec = 30;
+        const double overflowRate = (kWindowDurationSec > 0)
+            ? static_cast<double>(windowOverflows) / kWindowDurationSec : 0.0;
+        constexpr double kOverflowRateThreshold = 3.0;
+        const bool chronicByFrequency = (overflowRate > kOverflowRateThreshold);
+
+        const bool overflowActive = (droppedDelta > 0);
+        const int overflowLevel = (overflowActive || chronicByDuration || chronicByFrequency) ? 3 : 0;
+        const int effectiveLevel = std::max(retirePressureLevel, overflowLevel);
+
+        // effectiveLevel に基づいてフラグ設定
+        convo::publishAtomic(retirePressurePublicationThrottleActive_,
+            effectiveLevel >= 2, std::memory_order_release);
+        convo::publishAtomic(retirePressureAdmissionStrict_,
+            effectiveLevel >= 3, std::memory_order_release);
+        convo::publishAtomic(retireProtectiveModeActive_,
+            effectiveLevel >= 3, std::memory_order_release);
+    }
+
     if (!wasSaturated && nowSaturated)
     {
         convo::publishAtomic(retireSaturationActive_, true, std::memory_order_release);

@@ -19,7 +19,7 @@ namespace isr {
 struct RetireIntent
 {
     uint32_t dspSlot;
-    uint32_t generation;
+    uint64_t generation;  // ★ B-1: 64bit化
     uint64_t retireEpoch;
     bool isValid;
 };
@@ -43,6 +43,12 @@ public:
     [[nodiscard]] std::uint64_t overflowCount() const noexcept;
     [[nodiscard]] std::uint64_t droppedIntentCount() const noexcept;
 
+    // ★ C-1: overflow 継続時間追跡
+    [[nodiscard]] std::uint64_t overflowStartTimestamp() const noexcept;
+    [[nodiscard]] std::uint64_t lastOverflowTicks() const noexcept;
+    [[nodiscard]] std::uint64_t overflowWindowCounter() const noexcept;
+    [[nodiscard]] std::uint64_t lastOverflowWindowCount() const noexcept;
+
     // NonRT: acknowledge retire coordination
     void acknowledgeRetireCoordination(const RetireIntent& intent);
 
@@ -53,10 +59,17 @@ private:
 
     static constexpr size_t RETIRE_INTENT_QUEUE_SIZE = 256;
     RetireIntent retireIntentQueue_[RETIRE_INTENT_QUEUE_SIZE];
-    std::array<std::atomic<uint32_t>, RETIRE_INTENT_QUEUE_SIZE> acknowledgeGeneration_{};
+    std::array<std::atomic<uint64_t>, RETIRE_INTENT_QUEUE_SIZE> acknowledgeGeneration_{};  // ★ B-1: 64bit化
     std::atomic<uint64_t> acknowledgedCount_{0};
     std::atomic<uint64_t> overflowCount_{0};
     std::atomic<uint64_t> droppedIntentCount_{0};
+
+    // ★ C-1: overflow 継続時間追跡
+    std::atomic<uint64_t> lastOverflowTicks_{0};
+    std::atomic<uint64_t> overflowStartTimestamp_{0};
+    std::atomic<uint64_t> overflowWindowCounter_{0};
+    std::atomic<uint64_t> lastOverflowWindowCount_{0};
+    std::atomic<uint64_t> lastOverflowWindowResetTicks_{0};
 };
 
 }  // namespace isr

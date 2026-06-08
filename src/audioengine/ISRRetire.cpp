@@ -2,6 +2,7 @@
 #include "AtomicAccess.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace convo {
 namespace isr {
@@ -15,8 +16,28 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
     if (nextTail == head) {
         (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
         (void)convo::fetchAddAtomic(droppedIntentCount_, uint64_t{1}, std::memory_order_acq_rel);
+
+        // ★ C-1: overflowStartTimestamp_ を初回のみ設定（CAS）
+        uint64_t expected = 0;
+        convo::compareExchangeAtomic(overflowStartTimestamp_, expected,
+            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
+            std::memory_order_release);
+
+        // ★ C-1: overflowWindowCounter_ をインクリメント
+        (void)convo::fetchAddAtomic(overflowWindowCounter_, uint64_t{1},
+            std::memory_order_release);
+
+        // ★ C-1: lastOverflowTicks_ を更新
+        convo::publishAtomic(lastOverflowTicks_,
+            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
+            std::memory_order_release);
         return;
     }
+
+    // ★ C-1: success（キュー空きあり）: overflow が継続中ならタイムスタンプをリセット
+    uint64_t prevStart = convo::exchangeAtomic(overflowStartTimestamp_, uint64_t{0},
+        std::memory_order_release);
+    (void)prevStart;
 
     retireIntentQueue_[tail] = intent;
     convo::publishAtomic(retireIntentTail_, nextTail, std::memory_order_release);
@@ -77,6 +98,27 @@ void RetireRuntime::acknowledgeRetireCoordination(const RetireIntent& intent)
     const auto idx = static_cast<std::size_t>(intent.dspSlot % RETIRE_INTENT_QUEUE_SIZE);
     convo::publishAtomic(acknowledgeGeneration_[idx], intent.generation, std::memory_order_release);
     (void)convo::fetchAddAtomic(acknowledgedCount_, uint64_t{1}, std::memory_order_acq_rel);
+}
+
+// ★ C-1: overflow 継続時間追跡 getter
+std::uint64_t RetireRuntime::overflowStartTimestamp() const noexcept
+{
+    return convo::consumeAtomic(overflowStartTimestamp_, std::memory_order_acquire);
+}
+
+std::uint64_t RetireRuntime::lastOverflowTicks() const noexcept
+{
+    return convo::consumeAtomic(lastOverflowTicks_, std::memory_order_acquire);
+}
+
+std::uint64_t RetireRuntime::overflowWindowCounter() const noexcept
+{
+    return convo::consumeAtomic(overflowWindowCounter_, std::memory_order_acquire);
+}
+
+std::uint64_t RetireRuntime::lastOverflowWindowCount() const noexcept
+{
+    return convo::consumeAtomic(lastOverflowWindowCount_, std::memory_order_acquire);
 }
 
 }  // namespace isr

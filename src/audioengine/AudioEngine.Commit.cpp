@@ -407,7 +407,8 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
                                      world);
 
     const std::uint32_t slot = static_cast<std::uint32_t>(world->generation % 256u);
-    std::uint32_t generation = static_cast<std::uint32_t>(world->generation & 0xFFFFFFFFu);
+    // ★ B-1.6: truncation 削除（uint64_t 化により情報損失ゼロ）
+    std::uint64_t generation = world->generation;
     if (generation == 0u)
         generation = 1u;
 
@@ -533,7 +534,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
         if (exceededDeferralThresholds)
         {
             convo::fetchAddAtomic(retireEscalationCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
-            retireRuntimeEx_.quarantine(pendingSlot);
+            quarantineSlot(pendingSlot, generation, convo::isr::QuarantineReason::RetireDeferralTimeout);
 
             const bool noReader = graceCompleted;
             const bool noExecutorReference = authoritativeOwnershipReleased;
@@ -553,7 +554,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
         }
         else
         {
-            retireRuntimeEx_.quarantine(pendingSlot);
+            quarantineSlot(pendingSlot, generation, convo::isr::QuarantineReason::RetireDeferralTimeout);
         }
     }
 

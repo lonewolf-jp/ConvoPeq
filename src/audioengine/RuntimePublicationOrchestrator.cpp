@@ -2,6 +2,7 @@
 #include "AudioEngine.h"
 #include "RuntimeBuilder.h"
 #include "CrossfadeAuthority.h"
+#include <chrono>
 
 namespace convo::isr {
 
@@ -118,6 +119,44 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
     }
 }
 
+// ★ C-2.2: enqueueDeferred — global sequence スナップショットを記録
+void RuntimePublicationOrchestrator::enqueueDeferred(
+    const PublicationAdmission::PublishRequest& req) noexcept
+{
+    // 上書きカウント
+    if (hasDeferred_)
+        convo::fetchAddAtomic(deferredOverwriteCount_, uint64_t{1},
+            std::memory_order_release);
+
+    const auto now = static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+
+    // 上書き時は滞留時間を maxDeferredAgeMs に反映
+    if (deferredSlot_.has_value()) {
+        const uint64_t ageMs = (now - deferredSlot_->enqueueTimestampUs) / 1000;
+        uint64_t currentMax = convo::consumeAtomic(maxDeferredAgeMs_,
+            std::memory_order_acquire);
+        while (ageMs > currentMax) {
+            if (convo::compareExchangeAtomic(maxDeferredAgeMs_, currentMax,
+                    ageMs, std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+                break;
+        }
+    }
+
+    deferredSlot_ = DeferredPublishSlot{
+        .request = req,
+        .guard = DeferredGuard{
+            .generation = static_cast<uint64_t>(req.generation),
+            .sequence = engine_.getLastCommittedPublicationSequence()
+        },
+        .lastDiscardReason = DiscardReason::None,
+        .enqueueTimestampUs = now
+    };
+    hasDeferred_ = true;
+}
+
+// ★ C-2.3: notifyTransitionComplete — stale discard 実装
 void RuntimePublicationOrchestrator::notifyTransitionComplete(
     AudioEngine::DSPCore* currentAfterFade) noexcept
 {
@@ -126,13 +165,71 @@ void RuntimePublicationOrchestrator::notifyTransitionComplete(
 
     transition_.onTransitionComplete(currentAfterFade);
 
-    // [PR-7] クロスフェード完了後、deferred publish request を再試行する。
-    if (hasDeferred_)
-    {
-        auto deferredReq = consumeDeferredRequest();
-        if (deferredReq.has_value())
-            submitPublishRequest(std::move(*deferredReq));
+    // ★ A-2.2: shutdown 中は deferred 再投入をキャンセル（残留タスク防止）
+    if (engine_.isShutdownInProgress()) {
+        if (hasDeferred_) {
+            if (deferredSlot_.has_value())
+                deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
+            deferredSlot_.reset();
+            hasDeferred_ = false;
+        }
+        return;
     }
+
+    // ★ C-2.3: stale discard（二重検査: generation + publication sequence）
+    if (hasDeferred_ && deferredSlot_.has_value())
+    {
+        auto& deferred = *deferredSlot_;
+
+        // 1. generation 検査
+        const int currentGen = convo::consumeAtomic(
+            engine_.rebuildRequestGeneration, std::memory_order_acquire);
+        if (deferred.guard.generation != 0ull
+            && deferred.guard.generation != static_cast<uint64_t>(currentGen)) {
+            deferred.lastDiscardReason = DiscardReason::StaleDiscard;
+            deferredSlot_.reset();
+            hasDeferred_ = false;
+            return;
+        }
+
+        // 2. publication sequence 検査
+        const auto currentPubSeq = engine_.getLastCommittedPublicationSequence();
+        if (deferred.guard.sequence < currentPubSeq) {
+            deferred.lastDiscardReason = DiscardReason::StaleDiscard;
+            deferredSlot_.reset();
+            hasDeferred_ = false;
+            return;
+        }
+
+        // 有効な deferred → submit
+        auto req = deferred.request;
+        deferredSlot_.reset();
+        hasDeferred_ = false;
+        submitPublishRequest(req);
+    }
+}
+
+// ★ C-2.2: shutdown 時に deferred publish を強制消去
+void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
+{
+    if (hasDeferred_) {
+        if (deferredSlot_.has_value())
+            deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
+        deferredSlot_.reset();
+        hasDeferred_ = false;
+    }
+}
+
+// ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間
+uint64_t RuntimePublicationOrchestrator::getMaxDeferredAgeMs() const noexcept
+{
+    return convo::consumeAtomic(maxDeferredAgeMs_, std::memory_order_acquire);
+}
+
+// ★ C-2.1: 監査用 — deferred overwrite 回数
+std::uint64_t RuntimePublicationOrchestrator::deferredOverwriteCount() const noexcept
+{
+    return convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
 }
 
 } // namespace convo::isr

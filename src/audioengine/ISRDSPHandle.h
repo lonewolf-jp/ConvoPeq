@@ -20,7 +20,7 @@ namespace isr {
 struct DSPHandle
 {
     uint32_t slot;        // レジストリスロット番号
-    uint32_t generation;  // 世代番号（再利用スロット区別）
+    uint64_t generation;  // ★ B-1: 64bit化（世代番号）
 
     bool isNull() const noexcept
     {
@@ -54,6 +54,7 @@ enum class DSPState
     CrossfadingOut,  // crossfade 中（旧 DSP 側）
     Retired,         // retire 完了、grace period 中
     Quarantined,     // 問題検出によりアクセス禁止
+    DestroyPending,  // ★ A-1.4: shutdown時の解放予約状態（TOCTOU防止）
     Reclaimed        // メモリ解放済み
 };
 
@@ -89,7 +90,9 @@ struct CrossfadeRecord
  */
 struct DSPRegistrySlot
 {
-    std::atomic<uint32_t> generation;  // ABA 防止世代番号
+    std::atomic<uint64_t> generation;  // ★ B-1: 64bit化（ABA 防止世代番号）
+    static_assert(std::atomic<uint64_t>::is_always_lock_free,
+        "atomic<uint64_t> must be lock-free on x64 for ISR Runtime");
     void*                 instance;    // DSP インスタンスポインタ
     std::atomic<DSPState> state;       // 現在状態（atomic access）
 };
@@ -130,6 +133,15 @@ public:
 
     // NonRT: 問題検出時に DSP を Quarantined に遷移
     void quarantine(DSPHandle handle);
+
+    // ★ A-1.3: Slot 直接 quarantine — generation 一致を要求しない
+    void quarantineSlot(uint32_t slot) noexcept;
+
+    // ★ A-1.5: slot が crossfade に関与しているか確認
+    bool isSlotInCrossfade(uint32_t slot) const noexcept;
+
+    // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
+    void destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
 
     // NonRT: 現在の active runtime DSP handle を取得
     DSPHandle getActiveRuntimeDSPHandle() const noexcept;

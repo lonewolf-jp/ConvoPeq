@@ -208,6 +208,31 @@ void AudioEngine::releaseResources()
         m_epochDomain.drainAll();
     }
 
+    // ★ A-2.7: ReleaseResources の DrainAudit 統合
+    const auto currentShutdownPhase = shutdownRuntime_.getPhase();
+    const bool traceSafe = (currentShutdownPhase >= convo::isr::ShutdownPhase::EpochSettled);
+    const auto audit = collectDrainAudit();
+    if (!drainedWithinBudget || !audit.isAllZero()) {
+        diagLog("[ISR][Shutdown] Drain incomplete: "
+                "pendingPub=" + juce::String(static_cast<int64>(audit.pendingPublication)) +
+                " pendingRetire=" + juce::String(static_cast<int64>(audit.pendingRetire)) +
+                " crossfade=" + juce::String(static_cast<int64>(audit.activeCrossfadeCount)) +
+                " routerPendingRetire=" + juce::String(static_cast<int64>(audit.routerPendingRetire)) +
+                " maxDeferredAgeMs=" + juce::String(static_cast<int64>(audit.maxDeferredAgeMs)) +
+                " deferred=" + juce::String(static_cast<int64>(audit.deferredPublish)) +
+                " quarantine=" + juce::String(static_cast<int64>(audit.quarantineResident)) +
+                " oldestAgeMs=" + juce::String(static_cast<int64>(audit.oldestPendingAgeMs)) +
+                " (observation only)");
+        if (traceSafe) {
+            const auto evidenceRoot = std::filesystem::current_path() / "evidence";
+            retireRuntimeEx_.emitRetireTrace(evidenceRoot / "retire_trace_shutdown_last.json");
+        }
+    }
+    if (audit.quarantineResident > 0) {
+        diagLog("[ISR][Shutdown] Drain complete but quarantine residents remain: "
+                + juce::String(static_cast<int64>(audit.quarantineResident)));
+    }
+
     runtimePublicationBridge_.markShutdownComplete();
 
     const auto pendingRetireCount = [&]() noexcept -> uint32_t

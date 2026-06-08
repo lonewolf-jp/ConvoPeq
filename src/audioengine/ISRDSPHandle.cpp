@@ -116,6 +116,77 @@ void DSPHandleRuntime::quarantine(DSPHandle handle)
     }
 }
 
+// ★ A-1.3: Slot 直接 quarantine — generation 一致を要求しない
+void DSPHandleRuntime::quarantineSlot(uint32_t slot) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return;
+    convo::publishAtomic(registry_[slot].state, DSPState::Quarantined,
+                         std::memory_order_release);
+}
+
+// ★ A-1.5: slot が crossfade に関与しているか確認
+bool DSPHandleRuntime::isSlotInCrossfade(uint32_t slot) const noexcept
+{
+    for (const auto& record : crossfadeRecords_) {
+        if (record.active &&
+            (record.fromHandle.slot == slot || record.toHandle.slot == slot))
+            return true;
+    }
+    return false;
+}
+
+// ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
+void DSPHandleRuntime::destroyQuarantineSlot(
+    uint32_t slot, uint64_t expectedGeneration) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return;
+
+    // generation 保護
+    if (expectedGeneration != 0) {
+        const auto currentGen = convo::consumeAtomic(
+            registry_[slot].generation, std::memory_order_acquire);
+        if (currentGen != expectedGeneration)
+            return;
+    }
+
+    // state==Quarantined を表明
+    const auto prevState = convo::consumeAtomic(
+        registry_[slot].state, std::memory_order_acquire);
+    assert(prevState == DSPState::Quarantined);
+    if (prevState != DSPState::Quarantined)
+        return;
+
+    // Phase 1: 状態チェック — active/fading/crossfade に関与していないか
+    const bool activeHandleMatch =
+        (convo::consumeAtomic(activeRuntimeDSPHandle_, std::memory_order_acquire).slot == slot);
+    const bool fadingHandleMatch =
+        (convo::consumeAtomic(fadingRuntimeDSPHandle_, std::memory_order_acquire).slot == slot);
+    const bool inCrossfade = isSlotInCrossfade(slot);
+
+    if (activeHandleMatch || fadingHandleMatch || inCrossfade)
+        return;
+
+    // Phase 1: DestroyPending マーク（CAS で安全に遷移）
+    auto expected = convo::consumeAtomic(
+        registry_[slot].state, std::memory_order_acquire);
+    while (expected == DSPState::Quarantined) {
+        if (convo::compareExchangeAtomic(registry_[slot].state,
+                                         expected, DSPState::DestroyPending,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+            break;
+    }
+    if (expected != DSPState::Quarantined)
+        return;
+
+    // Phase 2: instance 解放
+    registry_[slot].instance = nullptr;
+    convo::publishAtomic(registry_[slot].state, DSPState::Reclaimed,
+                         std::memory_order_release);
+}
+
 DSPHandle DSPHandleRuntime::getActiveRuntimeDSPHandle() const noexcept
 {
     return convo::consumeAtomic(activeRuntimeDSPHandle_, std::memory_order_acquire);

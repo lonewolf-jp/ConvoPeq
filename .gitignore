@@ -53,6 +53,8 @@ JUCE/
 .playwright-mcp/
 graphify-out/
 .continue/
+.claude/
+CLAUDE.md
 
 # Coverage reports
 coverage/

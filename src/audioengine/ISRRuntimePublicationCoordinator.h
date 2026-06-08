@@ -64,6 +64,12 @@ public:
     void setDeferredRetireResidencyCount(std::uint64_t count) noexcept;
     void setSwapPending(bool pending) noexcept;
     [[nodiscard]] bool isSwapPending() const noexcept;
+    // ★ A-2.4: getter 群（DrainAudit 用）
+    [[nodiscard]] std::uint64_t getPublicationBacklogCount() const noexcept;
+    [[nodiscard]] std::uint64_t getPendingIntentCount() const noexcept;
+    [[nodiscard]] std::uint64_t getRetireBacklogCount() const noexcept;
+    [[nodiscard]] std::uint64_t getFallbackBacklogCount() const noexcept;
+    [[nodiscard]] std::uint64_t getDeferredRetireResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
     [[nodiscard]] bool isFullyDrained() const noexcept;
     [[nodiscard]] CoordinatorState getState() const noexcept;

@@ -109,6 +109,18 @@ const char* lifecycleStateName(RetireLifecycleState state) noexcept
     }
 }
 
+const char* laneName(RetireLane lane) noexcept
+{
+    switch (lane) {
+    case RetireLane::RTIntent: return "rtIntent";
+    case RetireLane::Coordination: return "coordination";
+    case RetireLane::Epoch: return "epoch";
+    case RetireLane::Reclaim: return "reclaim";
+    case RetireLane::Quarantine: return "quarantine";
+    default: return "unknown";
+    }
+}
+
 template <std::size_t N>
 void transitionLifecycle(std::array<std::atomic<std::uint32_t>, N>& states,
                          std::array<std::atomic<std::uint64_t>, 6>& counters,
@@ -157,12 +169,12 @@ RetireRuntimeEx::RetireRuntimeEx()
     convo::publishAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(0), std::memory_order_relaxed);
 }
 
-void RetireRuntimeEx::emitIntent(std::uint32_t slot, std::uint32_t generation) {
+void RetireRuntimeEx::emitIntent(std::uint32_t slot, std::uint64_t generation) {
     if (slot >= laneBySlot_.size()) {
         return;
     }
 
-    const auto lane = (generation == 0u) ? RetireLane::Quarantine : RetireLane::RTIntent;
+    const auto lane = (generation == 0ull) ? RetireLane::Quarantine : RetireLane::RTIntent;
     convo::publishAtomic(laneBySlot_[slot], toRaw(lane), std::memory_order_release);
     transitionLifecycle(lifecycleStateBySlot_, lifecycleCounters_, slot, RetireLifecycleState::Visible);
     (void)convo::fetchAddAtomic(laneCounters_[static_cast<std::size_t>(lane)], static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
@@ -361,6 +373,66 @@ void RetireRuntimeEx::emitRetireTimeline(const std::filesystem::path& outputPath
     }
     file << "  ]\n";
     file << "}\n";
+}
+
+// ★ B-2.1: emitRetireTrace — 全 slot の現在状態を JSON 出力
+void RetireRuntimeEx::emitRetireTrace(const std::filesystem::path& outputPath) const noexcept
+{
+    std::error_code ec;
+    std::filesystem::create_directories(outputPath.parent_path(), ec);
+
+    std::ofstream file(outputPath, std::ios::binary | std::ios::trunc);
+    if (!file.is_open())
+        return;
+
+    file << "{\n  \"schema\": \"retire_trace_v1\",\n";
+    file << "  \"totalSlots\": " << kMaxSlots << ",\n";
+    file << "  \"slots\": [\n";
+
+    bool first = true;
+    for (std::size_t i = 0; i < kMaxSlots; ++i) {
+        const auto lane = laneOf(static_cast<uint32_t>(i));
+        const auto lifecycle = lifecycleStateOf(static_cast<uint32_t>(i));
+
+        // RTIntent 以外（何らかの処理中）のスロットのみ出力
+        if (lane == RetireLane::RTIntent && lifecycle == RetireLifecycleState::Visible)
+            continue;
+
+        if (!first)
+            file << ",\n";
+        first = false;
+
+        file << "    { \"slot\": " << i
+             << ", \"lane\": \"" << laneName(lane)
+             << "\", \"lifecycle\": \"" << lifecycleStateName(lifecycle)
+             << "\" }";
+    }
+
+    file << "\n  ],\n";
+    file << "  \"counts\": {\n";
+    file << "    \"laneRTIntent\": "
+         << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::RTIntent)], std::memory_order_acquire) << ",\n";
+    file << "    \"laneCoordination\": "
+         << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Coordination)], std::memory_order_acquire) << ",\n";
+    file << "    \"laneEpoch\": "
+         << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Epoch)], std::memory_order_acquire) << ",\n";
+    file << "    \"laneReclaim\": "
+         << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Reclaim)], std::memory_order_acquire) << ",\n";
+    file << "    \"laneQuarantine\": "
+         << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Quarantine)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleVisible\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::Visible)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleCompareEligible\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::CompareEligible)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleTelemetryRetained\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::TelemetryRetained)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleReplayRetainedOptional\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::ReplayRetainedOptional)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleReclaimEligible\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::ReclaimEligible)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleReclaimed\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::Reclaimed)], std::memory_order_acquire) << "\n";
+    file << "  }\n}\n";
 }
 
 } // namespace convo::isr
