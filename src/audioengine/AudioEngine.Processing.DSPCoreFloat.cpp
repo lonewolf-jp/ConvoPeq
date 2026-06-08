@@ -1,6 +1,5 @@
 #include <JuceHeader.h>
 #include <immintrin.h>
-#include <optional>
 #include "AudioEngine.h"
 
 namespace
@@ -241,11 +240,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         {
             const bool convIsLast = convActive &&
                 (!eqActive || state.order == ProcessingOrder::EQThenConvolver);
-            if (!convIsLast)
-            {
-                outputFilter.process(processBlock, false,
-                                     state.convHCMode, state.convLCMode, state.eqLPFMode);
-            }
+            outputFilter.process(processBlock, convIsLast,
+                                 state.convHCMode, state.convLCMode, state.eqLPFMode);
         }
     }
 

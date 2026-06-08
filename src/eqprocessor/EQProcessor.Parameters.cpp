@@ -1,4 +1,4 @@
-//============================================================================
+﻿//============================================================================
 // EQProcessor.Parameters.cpp  ── v0.2 (JUCE 8.0.12対応)
 //
 // パラメータセッター・ゲッター
@@ -43,7 +43,7 @@ void EQProcessor::setBandGain(int band, float gainDb)
     auto newState = new EQState(*oldState);
     newState->bands[band].gain = gainDb;
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -62,7 +62,7 @@ void EQProcessor::setBandQ(int band, float q)
     auto newState = new EQState(*oldState);
     newState->bands[band].q = q;
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -85,7 +85,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
     if (enabled)
         requestBandReset(static_cast<uint32_t>(1u << band));
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -109,7 +109,7 @@ void EQProcessor::setTotalGain(float gainDb)
     auto newState = new EQState(*oldState);
     newState->totalGainDb = gainDb;
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -129,7 +129,7 @@ void EQProcessor::setAGCEnabled(bool enabled)
     {
         auto newState = new EQState(*oldState);
         newState->agcEnabled = enabled;
-        auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+        auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
@@ -162,7 +162,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
     // フィルタタイプ変更時はトポロジーが変わるためリセット必須
     requestBandReset(static_cast<uint32_t>(1u << band));
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -184,7 +184,7 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
     // チャンネルモード変更時もリセット推奨
     requestBandReset(static_cast<uint32_t>(1u << band));
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -209,7 +209,7 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
     {
         auto newState = new EQState(*oldState);
         newState->nonlinearSaturation = clamped;
-        auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+        auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
@@ -243,7 +243,7 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
     {
         auto newState = new EQState(*oldState);
         newState->filterStructure = (mode == FilterStructure::Parallel) ? 1 : 0;
-        auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+        auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred

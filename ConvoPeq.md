@@ -8004,6 +8004,7 @@ public:
                     entry.type = DeletionEntryType::Generic;
                     convo::publishAtomic(seq_atom, scanPos + kQueueSize, std::memory_order_release); // release: enqueue の seq acquire と HB しスロット再利用可能を公知
 
+                    ++deqPos;        // [BUG-03] dequeuePos の新値 (deqPos+1) に追従
                     scanPos = deqPos;
                     scanned = 0;
                 } else {
@@ -12984,7 +12985,6 @@ public:
 
 #include <JuceHeader.h>
 #include "MKLNonUniformConvolver.h"
-#include "MKLRealTimeSetup.h"
 
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
@@ -14103,7 +14103,8 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
         const int overflow = nextAvail - m_ringSize;
         m_ringRead = (m_ringRead + overflow) & m_ringMask;
         m_ringAvail = m_ringSize;
-        m_ringWrite = (m_ringWrite + overflow) & m_ringMask;
+        // [BUG-02] m_ringWrite は直前の更新で既に正しい位置にある。overflow 時の追加更新は不要。
+        // m_ringWrite = (m_ringWrite + overflow) & m_ringMask;
         convo::fetchAddAtomic(m_ringOverflowCount, 1, std::memory_order_acq_rel);
         if (overflowCallback)
             overflowCallback(overflowUserData);
@@ -21850,7 +21851,7 @@ private:
 //   が成立する場合にのみ解放を許可します。
 //
 //   [Quiescent State の定義]
-//   Reader が exitReader() を呼び出し、自身のエポックを kIdleEpoch (UINT64_MAX) に
+//   Reader が exitReader() を呼び出し、自身のエポックを kIdleEpoch (0) に
 //   戻した状態を「非参加（静寂状態）」と見なします。
 //   これにより「参加していないスレッド」と「古いエポックで停止中のスレッド」を
 //   区別し、誤った解放ブロックを防ぎます。
@@ -21878,7 +21879,6 @@ private:
 #include <array>
 #include <queue>
 #include <mutex>
-#include <algorithm>
 #include <limits>
 #include <cstdint>
 #include <cstddef>
@@ -21899,7 +21899,7 @@ public:
     static constexpr int kMaxReaders = 8;
 
     // Reader が非参加（静寂状態）であることを示す特別な値
-    // uint64_t の最大値を使うことで、最小値計算から自動的に除外される。
+    // getMinReaderEpoch() で e != kIdleEpoch の明示フィルタにより除外される。
     static constexpr uint64_t kIdleEpoch = 0;
 
     // -----------------------------------------------------------------------
@@ -27592,7 +27592,6 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
 ```
 #include <JuceHeader.h>
 #include <immintrin.h>
-#include <optional>
 #include "AudioEngine.h"
 
 namespace
@@ -27713,7 +27712,6 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
     const __m256d vMinusOne    = _mm256_set1_pd(-1.0);
     const __m256d vTwo         = _mm256_set1_pd(2.0);
     const __m256d vThree       = _mm256_set1_pd(3.0);
-    const __m256d vNegThree    = _mm256_set1_pd(-3.0);
     const __m256d vHalf        = _mm256_set1_pd(0.5);
 
     const __m256d vNumA        = _mm256_set1_pd(TanhApprox::NUM_A);
@@ -27793,9 +27791,10 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
         __m256d result = _mm256_mul_pd(sign, _mm256_mul_pd(mixed, asymmetric_gain));
 
         result = _mm256_blendv_pd(x, result, needClip);
+        const double nextPrev = data[i + 3]; // [BUG-04] store前に元の入力値を退避
             _mm256_storeu_pd(data + i, result);
 
-        prevScalar = data[i + 3];
+        prevScalar = nextPrev;
     }
 
     for (; i < numSamples; ++i)
@@ -28032,11 +28031,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         {
             const bool convIsLast = convActive &&
                 (!eqActive || state.order == ProcessingOrder::EQThenConvolver);
-            if (!convIsLast)
-            {
-                outputFilter.process(processBlock, false,
-                                     state.convHCMode, state.convLCMode, state.eqLPFMode);
-            }
+            outputFilter.process(processBlock, convIsLast,
+                                 state.convHCMode, state.convLCMode, state.eqLPFMode);
         }
     }
 
@@ -28305,7 +28301,6 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
 ```
 #include <JuceHeader.h>
 #include <immintrin.h>
-#include <optional>
 #include "AudioEngine.h"
 
 namespace
@@ -28546,11 +28541,8 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         {
             const bool convIsLast = convActive &&
                 (!eqActive || state.order == ProcessingOrder::EQThenConvolver);
-            if (!convIsLast)
-            {
-                outputFilter.process(processBlock, false,
-                                     state.convHCMode, state.convLCMode, state.eqLPFMode);
-            }
+            outputFilter.process(processBlock, convIsLast,
+                                 state.convHCMode, state.convLCMode, state.eqLPFMode);
         }
     }
 
@@ -53295,7 +53287,7 @@ EQBandParams EQProcessor::getBandParams(int band) const
 ### 📄 `src\eqprocessor\EQProcessor.Parameters.cpp`
 
 ```
-//============================================================================
+﻿//============================================================================
 // EQProcessor.Parameters.cpp  ── v0.2 (JUCE 8.0.12対応)
 //
 // パラメータセッター・ゲッター
@@ -53340,7 +53332,7 @@ void EQProcessor::setBandGain(int band, float gainDb)
     auto newState = new EQState(*oldState);
     newState->bands[band].gain = gainDb;
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -53359,7 +53351,7 @@ void EQProcessor::setBandQ(int band, float q)
     auto newState = new EQState(*oldState);
     newState->bands[band].q = q;
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -53382,7 +53374,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
     if (enabled)
         requestBandReset(static_cast<uint32_t>(1u << band));
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -53406,7 +53398,7 @@ void EQProcessor::setTotalGain(float gainDb)
     auto newState = new EQState(*oldState);
     newState->totalGainDb = gainDb;
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -53426,7 +53418,7 @@ void EQProcessor::setAGCEnabled(bool enabled)
     {
         auto newState = new EQState(*oldState);
         newState->agcEnabled = enabled;
-        auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+        auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
@@ -53459,7 +53451,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
     // フィルタタイプ変更時はトポロジーが変わるためリセット必須
     requestBandReset(static_cast<uint32_t>(1u << band));
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -53481,7 +53473,7 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
     // チャンネルモード変更時もリセット推奨
     requestBandReset(static_cast<uint32_t>(1u << band));
 
-    auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         retireEQStateDeferred(prev);
     }
@@ -53506,7 +53498,7 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
     {
         auto newState = new EQState(*oldState);
         newState->nonlinearSaturation = clamped;
-        auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+        auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
@@ -53540,7 +53532,7 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
     {
         auto newState = new EQState(*oldState);
         newState->filterStructure = (mode == FilterStructure::Parallel) ? 1 : 0;
-        auto prev = exchangeCurrentState(newState, std::memory_order_release); // release: 後続 loadCurrentState acquire と HB
+        auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
             retireEQStateDeferred(prev);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred

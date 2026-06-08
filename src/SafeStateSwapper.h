@@ -10,7 +10,7 @@
 //   が成立する場合にのみ解放を許可します。
 //
 //   [Quiescent State の定義]
-//   Reader が exitReader() を呼び出し、自身のエポックを kIdleEpoch (UINT64_MAX) に
+//   Reader が exitReader() を呼び出し、自身のエポックを kIdleEpoch (0) に
 //   戻した状態を「非参加（静寂状態）」と見なします。
 //   これにより「参加していないスレッド」と「古いエポックで停止中のスレッド」を
 //   区別し、誤った解放ブロックを防ぎます。
@@ -38,7 +38,6 @@
 #include <array>
 #include <queue>
 #include <mutex>
-#include <algorithm>
 #include <limits>
 #include <cstdint>
 #include <cstddef>
@@ -59,7 +58,7 @@ public:
     static constexpr int kMaxReaders = 8;
 
     // Reader が非参加（静寂状態）であることを示す特別な値
-    // uint64_t の最大値を使うことで、最小値計算から自動的に除外される。
+    // getMinReaderEpoch() で e != kIdleEpoch の明示フィルタにより除外される。
     static constexpr uint64_t kIdleEpoch = 0;
 
     // -----------------------------------------------------------------------

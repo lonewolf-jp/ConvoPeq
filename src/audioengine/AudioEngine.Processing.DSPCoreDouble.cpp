@@ -1,6 +1,5 @@
 #include <JuceHeader.h>
 #include <immintrin.h>
-#include <optional>
 #include "AudioEngine.h"
 
 namespace
@@ -121,7 +120,6 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
     const __m256d vMinusOne    = _mm256_set1_pd(-1.0);
     const __m256d vTwo         = _mm256_set1_pd(2.0);
     const __m256d vThree       = _mm256_set1_pd(3.0);
-    const __m256d vNegThree    = _mm256_set1_pd(-3.0);
     const __m256d vHalf        = _mm256_set1_pd(0.5);
 
     const __m256d vNumA        = _mm256_set1_pd(TanhApprox::NUM_A);
@@ -201,9 +199,10 @@ void softClipBlockAVX2(double* __restrict data, int numSamples,
         __m256d result = _mm256_mul_pd(sign, _mm256_mul_pd(mixed, asymmetric_gain));
 
         result = _mm256_blendv_pd(x, result, needClip);
+        const double nextPrev = data[i + 3]; // [BUG-04] store前に元の入力値を退避
             _mm256_storeu_pd(data + i, result);
 
-        prevScalar = data[i + 3];
+        prevScalar = nextPrev;
     }
 
     for (; i < numSamples; ++i)
@@ -440,11 +439,8 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
         {
             const bool convIsLast = convActive &&
                 (!eqActive || state.order == ProcessingOrder::EQThenConvolver);
-            if (!convIsLast)
-            {
-                outputFilter.process(processBlock, false,
-                                     state.convHCMode, state.convLCMode, state.eqLPFMode);
-            }
+            outputFilter.process(processBlock, convIsLast,
+                                 state.convHCMode, state.convLCMode, state.eqLPFMode);
         }
     }
 

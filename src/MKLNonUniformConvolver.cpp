@@ -33,7 +33,6 @@
 
 #include <JuceHeader.h>
 #include "MKLNonUniformConvolver.h"
-#include "MKLRealTimeSetup.h"
 
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
@@ -1152,7 +1151,8 @@ void MKLNonUniformConvolver::ringWrite(const double* src, int n) noexcept
         const int overflow = nextAvail - m_ringSize;
         m_ringRead = (m_ringRead + overflow) & m_ringMask;
         m_ringAvail = m_ringSize;
-        m_ringWrite = (m_ringWrite + overflow) & m_ringMask;
+        // [BUG-02] m_ringWrite は直前の更新で既に正しい位置にある。overflow 時の追加更新は不要。
+        // m_ringWrite = (m_ringWrite + overflow) & m_ringMask;
         convo::fetchAddAtomic(m_ringOverflowCount, 1, std::memory_order_acq_rel);
         if (overflowCallback)
             overflowCallback(overflowUserData);

@@ -128,6 +128,7 @@ public:
                     entry.type = DeletionEntryType::Generic;
                     convo::publishAtomic(seq_atom, scanPos + kQueueSize, std::memory_order_release); // release: enqueue の seq acquire と HB しスロット再利用可能を公知
 
+                    ++deqPos;        // [BUG-03] dequeuePos の新値 (deqPos+1) に追従
                     scanPos = deqPos;
                     scanned = 0;
                 } else {
