@@ -160,6 +160,7 @@
         │   ├── RuntimeBuildTypes.h
         │   ├── RuntimeBuilder.cpp
         │   ├── RuntimeBuilder.h
+        │   ├── RuntimeDrainAudit.h
         │   ├── RuntimeGraph.h
         │   ├── RuntimePublicationOrchestrator.cpp
         │   ├── RuntimePublicationOrchestrator.h
@@ -8161,6 +8162,22 @@ public:
         convo::publishAtomic(running, false, std::memory_order_release); // release: run() の consumeAtomic acquire と HB しループ終了を公知
     }
 
+    // -----------------------------------------------------------------------
+    // shutdownAndDrain()  ── シャットダウン + 全強制解放
+    //
+    // 【安全契約】
+    //   この関数を呼び出す時点で、Audio Thread が完全に停止していること。
+    //   （通常は ConvolverProcessor::releaseResources() 経由で呼ばれる。
+    //     releaseResources() は JUCE の AudioProcessor ライフサイクルにより
+    //     Audio Thread 停止後に呼び出されることが保証されている。）
+    //
+    // 【二重呼び出し】
+    //   この関数はデストラクタからも呼ばれる（二重呼び出し）。
+    //   releaseResources() で先に呼ばれた場合、デストラクタ側の呼び出しは
+    //   thread.joinable() == false により join をスキップし、
+    //   drainAllRetired() は空キューを即時に完了するため安全。
+    //   余計な状態変数を追加せず、joinable() 判定による冪等性に依存する。
+    // -----------------------------------------------------------------------
     void shutdownAndDrain() noexcept
     {
         stop();
@@ -8193,6 +8210,18 @@ private:
     static constexpr int kMaxReclaimPerLoop = 4;
     static constexpr size_t kPendingRetiredWarnThreshold = 64;
 
+    // -----------------------------------------------------------------------
+    // drainAllRetired()  ── 全 Retired エントリ強制解放（Shutdown 専用）
+    //
+    // 【前提条件】
+    //   この関数を呼び出す時点で Audio Thread が完全に停止していること。
+    //
+    // 【備考】
+    //   std::numeric_limits<uint64_t>::max() を tryReclaim に渡すことで
+    //   エポック条件を無視した強制解放を行う。これは Audio Thread 停止後の
+    //   クリーンアップ（releaseResources / デストラクタ）でのみ有効。
+    //   通常の退役ループ（run()）では getMinReaderEpoch() を使用する。
+    // -----------------------------------------------------------------------
     void drainAllRetired() noexcept
     {
         while (auto* ptr = swapperRef.tryReclaim(std::numeric_limits<uint64_t>::max()))
@@ -22106,11 +22135,17 @@ public:
 
     // -----------------------------------------------------------------------
     // getSafeEpoch()  ── Deferred Free Thread / Message Thread から呼ぶ
+    //
+    // 安全なエポック値を計算する。swap() の 2-step bump により、
+    // 安全な解放待機エポックは (globalEpoch - 2) となる。
+    //
+    // @return 安全なエポック値（最小 1）。kIdleEpoch (0) との衝突を回避している。
+    // @note 現在は未使用。将来使用する際に kIdleEpoch との区別が必要になる。
     // -----------------------------------------------------------------------
     uint64_t getSafeEpoch() const noexcept
     {
         const uint64_t current = convo::consumeAtomic(globalEpoch, std::memory_order_acquire); // acquire: swap の fetchAdd acq_rel と HB し最新グローバルエポックを観測
-        if (current < 2) return 0;
+        if (current < 3) return 1;  // kIdleEpoch (0) との衝突回避
         return current - 2;
     }
 
@@ -24701,7 +24736,8 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
                                      world);
 
     const std::uint32_t slot = static_cast<std::uint32_t>(world->generation % 256u);
-    std::uint32_t generation = static_cast<std::uint32_t>(world->generation & 0xFFFFFFFFu);
+    // ★ B-1.6: truncation 削除（uint64_t 化により情報損失ゼロ）
+    std::uint64_t generation = world->generation;
     if (generation == 0u)
         generation = 1u;
 
@@ -24827,7 +24863,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
         if (exceededDeferralThresholds)
         {
             convo::fetchAddAtomic(retireEscalationCount_, static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
-            retireRuntimeEx_.quarantine(pendingSlot);
+            quarantineSlot(pendingSlot, generation, convo::isr::QuarantineReason::RetireDeferralTimeout);
 
             const bool noReader = graceCompleted;
             const bool noExecutorReference = authoritativeOwnershipReleased;
@@ -24847,7 +24883,7 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
         }
         else
         {
-            retireRuntimeEx_.quarantine(pendingSlot);
+            quarantineSlot(pendingSlot, generation, convo::isr::QuarantineReason::RetireDeferralTimeout);
         }
     }
 
@@ -30002,6 +30038,31 @@ void AudioEngine::releaseResources()
         m_epochDomain.drainAll();
     }
 
+    // ★ A-2.7: ReleaseResources の DrainAudit 統合
+    const auto currentShutdownPhase = shutdownRuntime_.getPhase();
+    const bool traceSafe = (currentShutdownPhase >= convo::isr::ShutdownPhase::EpochSettled);
+    const auto audit = collectDrainAudit();
+    if (!drainedWithinBudget || !audit.isAllZero()) {
+        diagLog("[ISR][Shutdown] Drain incomplete: "
+                "pendingPub=" + juce::String(static_cast<int64>(audit.pendingPublication)) +
+                " pendingRetire=" + juce::String(static_cast<int64>(audit.pendingRetire)) +
+                " crossfade=" + juce::String(static_cast<int64>(audit.activeCrossfadeCount)) +
+                " routerPendingRetire=" + juce::String(static_cast<int64>(audit.routerPendingRetire)) +
+                " maxDeferredAgeMs=" + juce::String(static_cast<int64>(audit.maxDeferredAgeMs)) +
+                " deferred=" + juce::String(static_cast<int64>(audit.deferredPublish)) +
+                " quarantine=" + juce::String(static_cast<int64>(audit.quarantineResident)) +
+                " oldestAgeMs=" + juce::String(static_cast<int64>(audit.oldestPendingAgeMs)) +
+                " (observation only)");
+        if (traceSafe) {
+            const auto evidenceRoot = std::filesystem::current_path() / "evidence";
+            retireRuntimeEx_.emitRetireTrace(evidenceRoot / "retire_trace_shutdown_last.json");
+        }
+    }
+    if (audit.quarantineResident > 0) {
+        diagLog("[ISR][Shutdown] Drain complete but quarantine residents remain: "
+                + juce::String(static_cast<int64>(audit.quarantineResident)));
+    }
+
     runtimePublicationBridge_.markShutdownComplete();
 
     const auto pendingRetireCount = [&]() noexcept -> uint32_t
@@ -31133,6 +31194,45 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     const int retirePressureLevel = evaluateRetirePressureLevelNoRt(retireDepth, hwm);
     applyRetirePressurePolicyNoRt(retirePressureLevel, retireDepth);
 
+    // ★ C-1.3: overflow→throttle 結合（overflow 継続時間 + 頻度の二重判定）
+    {
+        const uint64_t droppedTotal = retireRuntime_.droppedIntentCount();
+        const uint64_t prevDropped = convo::exchangeAtomic(prevDroppedSnapshot_,
+            droppedTotal, std::memory_order_acq_rel);
+        const uint64_t droppedDelta = (droppedTotal > prevDropped)
+            ? (droppedTotal - prevDropped) : 0;
+
+        // overflowStartTimestamp による継続時間追跡
+        const uint64_t overflowStart = retireRuntime_.overflowStartTimestamp();
+        bool chronicByDuration = false;
+        if (overflowStart != 0) {
+            const auto now = static_cast<uint64_t>(
+                std::chrono::steady_clock::now().time_since_epoch().count());
+            const uint64_t overflowDurationMs = (now - overflowStart) / 1000;
+            chronicByDuration = (overflowDurationMs > 5000);  // >5秒
+        }
+
+        // overflowWindowCounter による頻度追跡
+        const uint64_t windowOverflows = retireRuntime_.overflowWindowCounter();
+        constexpr uint64_t kWindowDurationSec = 30;
+        const double overflowRate = (kWindowDurationSec > 0)
+            ? static_cast<double>(windowOverflows) / kWindowDurationSec : 0.0;
+        constexpr double kOverflowRateThreshold = 3.0;
+        const bool chronicByFrequency = (overflowRate > kOverflowRateThreshold);
+
+        const bool overflowActive = (droppedDelta > 0);
+        const int overflowLevel = (overflowActive || chronicByDuration || chronicByFrequency) ? 3 : 0;
+        const int effectiveLevel = std::max(retirePressureLevel, overflowLevel);
+
+        // effectiveLevel に基づいてフラグ設定
+        convo::publishAtomic(retirePressurePublicationThrottleActive_,
+            effectiveLevel >= 2, std::memory_order_release);
+        convo::publishAtomic(retirePressureAdmissionStrict_,
+            effectiveLevel >= 3, std::memory_order_release);
+        convo::publishAtomic(retireProtectiveModeActive_,
+            effectiveLevel >= 3, std::memory_order_release);
+    }
+
     if (!wasSaturated && nowSaturated)
     {
         convo::publishAtomic(retireSaturationActive_, true, std::memory_order_release);
@@ -31669,7 +31769,10 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
 
 ```
 #include <JuceHeader.h>
+#include <algorithm>
 #include "AudioEngine.h"
+#include "ISRDSPQuarantine.h"
+#include "RuntimeDrainAudit.h"
 #include "RuntimePublicationOrchestrator.h"
 
 //==============================================================================
@@ -31688,6 +31791,45 @@ void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 bool AudioEngine::shouldRejectRebuildAdmissionForPressure() const noexcept
 {
     return convo::consumeAtomic(retirePressureAdmissionStrict_, std::memory_order_acquire);
+}
+
+// ★ A-1.6: 3系統の隔離を1トランザクションとして実行（1 truth + 2 projections）
+bool AudioEngine::quarantineSlot(uint32_t slot, uint64_t generation,
+                                  convo::isr::QuarantineReason reason) noexcept
+{
+    ASSERT_NON_RT_THREAD();
+
+    // Step 1: Truth store 更新（唯一の隔離判定）
+    const bool applied = dspQuarantineManager_.quarantineHandle(slot, generation, reason);
+
+    // Step 2: Truth 確認（既に隔離済みの場合は何もしない）
+    if (!applied)
+        return false;
+
+    // Step 3: Projection 更新（truth を反映）
+    dspHandleRuntime_.quarantineSlot(slot);
+    retireRuntimeEx_.quarantine(slot);
+
+    return true;
+}
+
+// ★ A-2.5: collectDrainAudit — shutdown 完了条件の監査構造体を収集
+convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
+{
+    return convo::isr::RuntimeDrainAudit{
+        .pendingPublication = runtimePublicationBridge_.getPublicationBacklogCount(),
+        .pendingRetire = retireRuntime_.pendingIntentCount(),
+        .activeCrossfadeCount = crossfadeRuntime_.isPending() ? 1u : 0u,
+        .routerPendingRetire = 0u,  // ★ B-2: m_retireRouter->pendingRetireCount() 追加予定
+        .maxDeferredAgeMs = runtimeOrchestrator_
+            ? runtimeOrchestrator_->getMaxDeferredAgeMs() : 0u,
+        .deferredPublish = (runtimeOrchestrator_
+            && runtimeOrchestrator_->hasDeferredRequest()) ? 1u : 0u,
+        .quarantineResident = dspQuarantineManager_.residentCount(),
+        .oldestPendingAgeMs = static_cast<uint64_t>(
+            std::max(0.0, convo::consumeAtomic(oldestPendingAge_, std::memory_order_acquire))),
+        .maxQuarantineAgeSec = dspQuarantineManager_.getMaxEntryAgeSec()
+    };
 }
 
 bool AudioEngine::isFullyDrained() noexcept
@@ -32555,6 +32697,7 @@ namespace convo::isr { class ISRRetireRouter; }
 #include "ISRClosureGraphWalker.h"
 #include "ISRDebugRuntime.h"
 #include "ISRRetireRuntimeEx.h"
+#include "RuntimeDrainAudit.h"
 // ISRRetireRouter forward-declared below (reduce include chain for C1060)
 #include "ISRBarrierOptimizer.h"
 #include "ISREvidenceExporter.h"
@@ -33472,17 +33615,28 @@ public:
 
     [[nodiscard]] bool isShutdownInProgress() const noexcept
     {
-        // acquire: lifecycleState の setShutdownPhase/releaseResources release 側と HB し、
-        //          Releasing/Destroyed 遷移を各スレッドから安全に観測する。
+        // ★ A-2.1: OR 判定を永久維持（EngineLifecycleState + ShutdownPhase の二重保護）
+        //   EngineLifecycleState と ShutdownPhase は異なるライフサイクル視点であり、
+        //   移行期間に乖離が発生し得る。OR 判定により「どちらかが shutdown 状態なら
+        //   shutdown とみなす」安全側の判定を恒久的に維持する。
+        //   ShutdownRuntime のみへの完全委譲は行わない。
         const auto state = consumeAtomic(lifecycleState, std::memory_order_acquire);
-        return state == EngineLifecycleState::Releasing
-            || state == EngineLifecycleState::Destroyed;
+        const bool lifecycleShutdown = (state == EngineLifecycleState::Releasing
+                                     || state == EngineLifecycleState::Destroyed);
+        return lifecycleShutdown || shutdownRuntime_.isShutdownInProgress();
     }
 
     // [[deprecated("Use PublicationAdmission::evaluate() instead")]]
     // [[nodiscard]] bool acceptsRuntimePublication() const noexcept;
     [[nodiscard]] bool isFullyDrained() noexcept;
     [[nodiscard]] bool waitForDrain(int timeoutMs = 2000, int pollIntervalMs = 2) noexcept;
+
+    // ★ A-2.5: シャットダウン完了条件の監査構造体を収集
+    [[nodiscard]] convo::isr::RuntimeDrainAudit collectDrainAudit() noexcept;
+
+    // ★ A-1.6: 3系統の隔離を1トランザクションとして実行
+    bool quarantineSlot(uint32_t slot, uint64_t generation,
+                        convo::isr::QuarantineReason reason) noexcept;
 
     void drainDeferredRetireQueues(bool allowDuringShutdown) noexcept;
 
@@ -35856,6 +36010,7 @@ public:
     std::atomic<bool> retirePressurePublicationThrottleActive_ { false };
     std::atomic<bool> retirePressureAdmissionStrict_ { false };
     std::atomic<bool> retireProtectiveModeActive_ { false };
+    std::atomic<std::uint64_t> prevDroppedSnapshot_ { 0 };
     std::atomic<std::uint64_t> retireEscalationCount_ { 0 };
     std::atomic<std::uint64_t> retireProtectiveModeEnterCount_ { 0 };
     std::atomic<std::uint64_t> maxRetireDeferralEpochs_ { 256 };
@@ -37128,6 +37283,77 @@ void DSPHandleRuntime::quarantine(DSPHandle handle)
     }
 }
 
+// ★ A-1.3: Slot 直接 quarantine — generation 一致を要求しない
+void DSPHandleRuntime::quarantineSlot(uint32_t slot) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return;
+    convo::publishAtomic(registry_[slot].state, DSPState::Quarantined,
+                         std::memory_order_release);
+}
+
+// ★ A-1.5: slot が crossfade に関与しているか確認
+bool DSPHandleRuntime::isSlotInCrossfade(uint32_t slot) const noexcept
+{
+    for (const auto& record : crossfadeRecords_) {
+        if (record.active &&
+            (record.fromHandle.slot == slot || record.toHandle.slot == slot))
+            return true;
+    }
+    return false;
+}
+
+// ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
+void DSPHandleRuntime::destroyQuarantineSlot(
+    uint32_t slot, uint64_t expectedGeneration) noexcept
+{
+    if (slot >= MAX_DSP_SLOTS)
+        return;
+
+    // generation 保護
+    if (expectedGeneration != 0) {
+        const auto currentGen = convo::consumeAtomic(
+            registry_[slot].generation, std::memory_order_acquire);
+        if (currentGen != expectedGeneration)
+            return;
+    }
+
+    // state==Quarantined を表明
+    const auto prevState = convo::consumeAtomic(
+        registry_[slot].state, std::memory_order_acquire);
+    assert(prevState == DSPState::Quarantined);
+    if (prevState != DSPState::Quarantined)
+        return;
+
+    // Phase 1: 状態チェック — active/fading/crossfade に関与していないか
+    const bool activeHandleMatch =
+        (convo::consumeAtomic(activeRuntimeDSPHandle_, std::memory_order_acquire).slot == slot);
+    const bool fadingHandleMatch =
+        (convo::consumeAtomic(fadingRuntimeDSPHandle_, std::memory_order_acquire).slot == slot);
+    const bool inCrossfade = isSlotInCrossfade(slot);
+
+    if (activeHandleMatch || fadingHandleMatch || inCrossfade)
+        return;
+
+    // Phase 1: DestroyPending マーク（CAS で安全に遷移）
+    auto expected = convo::consumeAtomic(
+        registry_[slot].state, std::memory_order_acquire);
+    while (expected == DSPState::Quarantined) {
+        if (convo::compareExchangeAtomic(registry_[slot].state,
+                                         expected, DSPState::DestroyPending,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+            break;
+    }
+    if (expected != DSPState::Quarantined)
+        return;
+
+    // Phase 2: instance 解放
+    registry_[slot].instance = nullptr;
+    convo::publishAtomic(registry_[slot].state, DSPState::Reclaimed,
+                         std::memory_order_release);
+}
+
 DSPHandle DSPHandleRuntime::getActiveRuntimeDSPHandle() const noexcept
 {
     return convo::consumeAtomic(activeRuntimeDSPHandle_, std::memory_order_acquire);
@@ -37228,7 +37454,7 @@ namespace isr {
 struct DSPHandle
 {
     uint32_t slot;        // レジストリスロット番号
-    uint32_t generation;  // 世代番号（再利用スロット区別）
+    uint64_t generation;  // ★ B-1: 64bit化（世代番号）
 
     bool isNull() const noexcept
     {
@@ -37262,6 +37488,7 @@ enum class DSPState
     CrossfadingOut,  // crossfade 中（旧 DSP 側）
     Retired,         // retire 完了、grace period 中
     Quarantined,     // 問題検出によりアクセス禁止
+    DestroyPending,  // ★ A-1.4: shutdown時の解放予約状態（TOCTOU防止）
     Reclaimed        // メモリ解放済み
 };
 
@@ -37297,7 +37524,9 @@ struct CrossfadeRecord
  */
 struct DSPRegistrySlot
 {
-    std::atomic<uint32_t> generation;  // ABA 防止世代番号
+    std::atomic<uint64_t> generation;  // ★ B-1: 64bit化（ABA 防止世代番号）
+    static_assert(std::atomic<uint64_t>::is_always_lock_free,
+        "atomic<uint64_t> must be lock-free on x64 for ISR Runtime");
     void*                 instance;    // DSP インスタンスポインタ
     std::atomic<DSPState> state;       // 現在状態（atomic access）
 };
@@ -37338,6 +37567,15 @@ public:
 
     // NonRT: 問題検出時に DSP を Quarantined に遷移
     void quarantine(DSPHandle handle);
+
+    // ★ A-1.3: Slot 直接 quarantine — generation 一致を要求しない
+    void quarantineSlot(uint32_t slot) noexcept;
+
+    // ★ A-1.5: slot が crossfade に関与しているか確認
+    bool isSlotInCrossfade(uint32_t slot) const noexcept;
+
+    // ★ A-1.4: shutdown専用解放（2段階: DestroyPending → Reclaimed）
+    void destroyQuarantineSlot(uint32_t slot, uint64_t expectedGeneration) noexcept;
 
     // NonRT: 現在の active runtime DSP handle を取得
     DSPHandle getActiveRuntimeDSPHandle() const noexcept;
@@ -37396,30 +37634,158 @@ private:
 ```
 #include "ISRDSPQuarantine.h"
 #include "AtomicAccess.h"
+#include <algorithm>
+#include <chrono>
 
 namespace convo::isr {
 
 DSPQuarantineManager::DSPQuarantineManager(std::size_t maxSlots)
-    : quarantineFlags_(maxSlots)
 {
-    for (auto& flag : quarantineFlags_) {
+    // kMaxSlots 固定。引数 maxSlots は互換性のため維持
+    for (auto& flag : quarantineActiveFlags_) {
         convo::publishAtomic(flag, false, std::memory_order_relaxed);
     }
+    auditLog_.reserve(maxSlots * 2);
 }
 
-void DSPQuarantineManager::quarantineHandle(std::uint32_t slot, std::uint32_t) {
-    if (slot < quarantineFlags_.size())
-        convo::publishAtomic(quarantineFlags_[slot], true, std::memory_order_release);
+bool DSPQuarantineManager::quarantineHandle(uint32_t slot, uint64_t generation,
+                                              QuarantineReason reason)
+{
+    if (slot >= kMaxSlots)
+        return false;
+
+    // ★ 二重加算防止: 既存エントリの有無を確認
+    bool alreadyActive = convo::consumeAtomic(
+        quarantineActiveFlags_[slot], std::memory_order_acquire);
+    if (alreadyActive)
+        return false;  // 既に隔離済み
+
+    // RT側: active フラグ設定
+    convo::publishAtomic(quarantineActiveFlags_[slot], true, std::memory_order_release);
+
+    // NonRT側: 監査記録
+    const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    auditLog_.push_back(Entry{
+        .timestampUs = static_cast<uint64_t>(now),
+        .generation = generation,
+        .reason = reason,
+        .slot = slot,
+        .resolved = false
+    });
+    return true;
 }
 
-void DSPQuarantineManager::reclaimSlot(std::uint32_t slot) {
-    if (slot < quarantineFlags_.size())
-        convo::publishAtomic(quarantineFlags_[slot], false, std::memory_order_release);
+void DSPQuarantineManager::reclaimSlot(uint32_t slot, uint64_t generation)
+{
+    if (slot >= kMaxSlots)
+        return;
+
+    // ★ generation 一致確認: 異なる場合は削除しない
+    bool found = false;
+    for (auto& entry : auditLog_) {
+        if (entry.slot == slot && !entry.resolved) {
+            if (entry.generation != generation) {
+                // generation が異なる → 新しい隔離情報を誤って消さない
+                return;
+            }
+            entry.resolved = true;
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+        return;
+
+    // RT側: active フラグ解除
+    convo::publishAtomic(quarantineActiveFlags_[slot], false, std::memory_order_release);
+
+    compactAuditLog();
 }
 
-bool DSPQuarantineManager::isQuarantined(std::uint32_t slot) const {
-    return slot < quarantineFlags_.size()
-        && convo::consumeAtomic(quarantineFlags_[slot], std::memory_order_acquire);
+std::optional<QuarantineEntry> DSPQuarantineManager::getEntry(uint32_t slot) const
+{
+    // ★ 最新の未解決エントリを検索（追記専用 vector の末尾からスキャン）
+    for (auto it = auditLog_.rbegin(); it != auditLog_.rend(); ++it) {
+        if (it->slot == slot && !it->resolved) {
+            return QuarantineEntry{
+                .slot = slot,
+                .generation = it->generation,
+                .reason = it->reason,
+                .quarantineEpoch = it->timestampUs,
+                .quarantineTimestampUs = it->timestampUs,
+                .detailCode = 0,
+                .reclaimAllowed = false
+            };
+        }
+    }
+    return std::nullopt;
+}
+
+size_t DSPQuarantineManager::residentCount() const noexcept
+{
+    size_t count = 0;
+    for (const auto& flag : quarantineActiveFlags_) {
+        if (convo::consumeAtomic(flag, std::memory_order_acquire))
+            ++count;
+    }
+    return count;
+}
+
+uint64_t DSPQuarantineManager::getMaxEntryAgeSec() const noexcept
+{
+    const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    uint64_t maxAge = 0;
+    for (const auto& entry : auditLog_) {
+        if (!entry.resolved && now > static_cast<int64_t>(entry.timestampUs)) {
+            uint64_t ageSec = static_cast<uint64_t>(
+                (now - static_cast<int64_t>(entry.timestampUs)) / 1'000'000);
+            maxAge = std::max(maxAge, ageSec);
+        }
+    }
+    return maxAge;
+}
+
+bool DSPQuarantineManager::destroyForShutdown(uint32_t slot)
+{
+    if (slot >= kMaxSlots)
+        return false;
+
+    bool active = convo::consumeAtomic(
+        quarantineActiveFlags_[slot], std::memory_order_acquire);
+    if (!active)
+        return false;
+
+    // RT側: フラグ解除
+    convo::publishAtomic(quarantineActiveFlags_[slot], false, std::memory_order_release);
+
+    // NonRT側: 未解決エントリを resolved に
+    for (auto& entry : auditLog_) {
+        if (entry.slot == slot && !entry.resolved) {
+            entry.resolved = true;
+            break;
+        }
+    }
+
+    compactAuditLog();
+    return true;
+}
+
+void DSPQuarantineManager::compactAuditLog() noexcept
+{
+    // ★ compaction: resolved エントリが一定数超えた場合のみ
+    constexpr size_t kCompactThreshold = 1024;
+    if (auditLog_.size() < kCompactThreshold)
+        return;
+
+    // 先頭から resolved エントリを削除
+    auto it = auditLog_.begin();
+    while (it != auditLog_.end() && it->resolved) {
+        ++it;
+    }
+    if (it != auditLog_.begin())
+        auditLog_.erase(auditLog_.begin(), it);
 }
 
 } // namespace convo::isr
@@ -37432,18 +37798,76 @@ bool DSPQuarantineManager::isQuarantined(std::uint32_t slot) const {
 #pragma once
 #include <cstdint>
 #include <vector>
+#include <array>
 #include <atomic>
+#include <optional>
 
 namespace convo::isr {
+
+// ★ A-1.1: QuarantineReason — 隔離理由の列挙
+enum class QuarantineReason {
+    GenerationMismatch,
+    ResolveFailure,
+    PublishViolation,
+    CrossfadeViolation,
+    ShutdownViolation,
+    RetireDeferralTimeout,
+    Unknown
+};
+
+// ★ A-1.1: QuarantineEntry — 隔離エントリの構造化情報
+struct QuarantineEntry {
+    uint32_t slot;
+    uint64_t generation;
+    QuarantineReason reason;
+    uint64_t quarantineEpoch;
+    uint64_t quarantineTimestampUs;
+    uint32_t detailCode;
+    bool reclaimAllowed;
+};
 
 class DSPQuarantineManager {
 public:
     explicit DSPQuarantineManager(std::size_t maxSlots = 256);
-    void quarantineHandle(std::uint32_t slot, std::uint32_t generation);
-    void reclaimSlot(std::uint32_t slot);
-    bool isQuarantined(std::uint32_t slot) const;
+
+    // A-1.2: 隔離 — slot + generation(uint64_t) + reason を記録
+    // returns true if quarantine was actually applied (false if already quarantined)
+    bool quarantineHandle(uint32_t slot, uint64_t generation,
+                          QuarantineReason reason);
+
+    // A-1.2: slot解放（隔離解除）— generation 一致確認付き
+    void reclaimSlot(uint32_t slot, uint64_t generation);
+
+    // A-1.2: 隔離エントリ情報取得
+    std::optional<QuarantineEntry> getEntry(uint32_t slot) const;
+
+    // A-1.2: 全隔離エントリ数（監査項目）
+    size_t residentCount() const noexcept;
+
+    // A-1.2: 最長 quarantine 経過時間（秒）
+    uint64_t getMaxEntryAgeSec() const noexcept;
+
+    // A-1.4: shutdown専用解放
+    bool destroyForShutdown(uint32_t slot);
+
 private:
-    std::vector<std::atomic<bool>> quarantineFlags_;
+    static constexpr size_t kMaxSlots = 256;
+
+    // RT側: 隔離中フラグ bitset（atomic read only）
+    std::array<std::atomic<bool>, kMaxSlots> quarantineActiveFlags_{};
+
+    // NonRT側: 監査記録ベクタ（追記専用）
+    struct Entry {
+        uint64_t timestampUs;
+        uint64_t generation;
+        QuarantineReason reason;
+        uint32_t slot;
+        bool resolved;  // true=隔離解除済み
+    };
+    std::vector<Entry> auditLog_;
+
+    // compaction helper
+    void compactAuditLog() noexcept;
 };
 
 } // namespace convo::isr
@@ -39458,6 +39882,7 @@ inline RTExecutionFrame makeRTExecutionFrame(
 #include "AtomicAccess.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace convo {
 namespace isr {
@@ -39471,8 +39896,28 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
     if (nextTail == head) {
         (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
         (void)convo::fetchAddAtomic(droppedIntentCount_, uint64_t{1}, std::memory_order_acq_rel);
+
+        // ★ C-1: overflowStartTimestamp_ を初回のみ設定（CAS）
+        uint64_t expected = 0;
+        convo::compareExchangeAtomic(overflowStartTimestamp_, expected,
+            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
+            std::memory_order_release);
+
+        // ★ C-1: overflowWindowCounter_ をインクリメント
+        (void)convo::fetchAddAtomic(overflowWindowCounter_, uint64_t{1},
+            std::memory_order_release);
+
+        // ★ C-1: lastOverflowTicks_ を更新
+        convo::publishAtomic(lastOverflowTicks_,
+            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
+            std::memory_order_release);
         return;
     }
+
+    // ★ C-1: success（キュー空きあり）: overflow が継続中ならタイムスタンプをリセット
+    uint64_t prevStart = convo::exchangeAtomic(overflowStartTimestamp_, uint64_t{0},
+        std::memory_order_release);
+    (void)prevStart;
 
     retireIntentQueue_[tail] = intent;
     convo::publishAtomic(retireIntentTail_, nextTail, std::memory_order_release);
@@ -39535,6 +39980,27 @@ void RetireRuntime::acknowledgeRetireCoordination(const RetireIntent& intent)
     (void)convo::fetchAddAtomic(acknowledgedCount_, uint64_t{1}, std::memory_order_acq_rel);
 }
 
+// ★ C-1: overflow 継続時間追跡 getter
+std::uint64_t RetireRuntime::overflowStartTimestamp() const noexcept
+{
+    return convo::consumeAtomic(overflowStartTimestamp_, std::memory_order_acquire);
+}
+
+std::uint64_t RetireRuntime::lastOverflowTicks() const noexcept
+{
+    return convo::consumeAtomic(lastOverflowTicks_, std::memory_order_acquire);
+}
+
+std::uint64_t RetireRuntime::overflowWindowCounter() const noexcept
+{
+    return convo::consumeAtomic(overflowWindowCounter_, std::memory_order_acquire);
+}
+
+std::uint64_t RetireRuntime::lastOverflowWindowCount() const noexcept
+{
+    return convo::consumeAtomic(lastOverflowWindowCount_, std::memory_order_acquire);
+}
+
 }  // namespace isr
 }  // namespace convo
 
@@ -39564,7 +40030,7 @@ namespace isr {
 struct RetireIntent
 {
     uint32_t dspSlot;
-    uint32_t generation;
+    uint64_t generation;  // ★ B-1: 64bit化
     uint64_t retireEpoch;
     bool isValid;
 };
@@ -39588,6 +40054,12 @@ public:
     [[nodiscard]] std::uint64_t overflowCount() const noexcept;
     [[nodiscard]] std::uint64_t droppedIntentCount() const noexcept;
 
+    // ★ C-1: overflow 継続時間追跡
+    [[nodiscard]] std::uint64_t overflowStartTimestamp() const noexcept;
+    [[nodiscard]] std::uint64_t lastOverflowTicks() const noexcept;
+    [[nodiscard]] std::uint64_t overflowWindowCounter() const noexcept;
+    [[nodiscard]] std::uint64_t lastOverflowWindowCount() const noexcept;
+
     // NonRT: acknowledge retire coordination
     void acknowledgeRetireCoordination(const RetireIntent& intent);
 
@@ -39598,10 +40070,17 @@ private:
 
     static constexpr size_t RETIRE_INTENT_QUEUE_SIZE = 256;
     RetireIntent retireIntentQueue_[RETIRE_INTENT_QUEUE_SIZE];
-    std::array<std::atomic<uint32_t>, RETIRE_INTENT_QUEUE_SIZE> acknowledgeGeneration_{};
+    std::array<std::atomic<uint64_t>, RETIRE_INTENT_QUEUE_SIZE> acknowledgeGeneration_{};  // ★ B-1: 64bit化
     std::atomic<uint64_t> acknowledgedCount_{0};
     std::atomic<uint64_t> overflowCount_{0};
     std::atomic<uint64_t> droppedIntentCount_{0};
+
+    // ★ C-1: overflow 継続時間追跡
+    std::atomic<uint64_t> lastOverflowTicks_{0};
+    std::atomic<uint64_t> overflowStartTimestamp_{0};
+    std::atomic<uint64_t> overflowWindowCounter_{0};
+    std::atomic<uint64_t> lastOverflowWindowCount_{0};
+    std::atomic<uint64_t> lastOverflowWindowResetTicks_{0};
 };
 
 }  // namespace isr
@@ -39932,6 +40411,18 @@ const char* lifecycleStateName(RetireLifecycleState state) noexcept
     }
 }
 
+const char* laneName(RetireLane lane) noexcept
+{
+    switch (lane) {
+    case RetireLane::RTIntent: return "rtIntent";
+    case RetireLane::Coordination: return "coordination";
+    case RetireLane::Epoch: return "epoch";
+    case RetireLane::Reclaim: return "reclaim";
+    case RetireLane::Quarantine: return "quarantine";
+    default: return "unknown";
+    }
+}
+
 template <std::size_t N>
 void transitionLifecycle(std::array<std::atomic<std::uint32_t>, N>& states,
                          std::array<std::atomic<std::uint64_t>, 6>& counters,
@@ -39980,12 +40471,12 @@ RetireRuntimeEx::RetireRuntimeEx()
     convo::publishAtomic(quarantineResidentCount_, static_cast<std::uint64_t>(0), std::memory_order_relaxed);
 }
 
-void RetireRuntimeEx::emitIntent(std::uint32_t slot, std::uint32_t generation) {
+void RetireRuntimeEx::emitIntent(std::uint32_t slot, std::uint64_t generation) {
     if (slot >= laneBySlot_.size()) {
         return;
     }
 
-    const auto lane = (generation == 0u) ? RetireLane::Quarantine : RetireLane::RTIntent;
+    const auto lane = (generation == 0ull) ? RetireLane::Quarantine : RetireLane::RTIntent;
     convo::publishAtomic(laneBySlot_[slot], toRaw(lane), std::memory_order_release);
     transitionLifecycle(lifecycleStateBySlot_, lifecycleCounters_, slot, RetireLifecycleState::Visible);
     (void)convo::fetchAddAtomic(laneCounters_[static_cast<std::size_t>(lane)], static_cast<std::uint64_t>(1), std::memory_order_acq_rel);
@@ -40186,6 +40677,66 @@ void RetireRuntimeEx::emitRetireTimeline(const std::filesystem::path& outputPath
     file << "}\n";
 }
 
+// ★ B-2.1: emitRetireTrace — 全 slot の現在状態を JSON 出力
+void RetireRuntimeEx::emitRetireTrace(const std::filesystem::path& outputPath) const noexcept
+{
+    std::error_code ec;
+    std::filesystem::create_directories(outputPath.parent_path(), ec);
+
+    std::ofstream file(outputPath, std::ios::binary | std::ios::trunc);
+    if (!file.is_open())
+        return;
+
+    file << "{\n  \"schema\": \"retire_trace_v1\",\n";
+    file << "  \"totalSlots\": " << kMaxSlots << ",\n";
+    file << "  \"slots\": [\n";
+
+    bool first = true;
+    for (std::size_t i = 0; i < kMaxSlots; ++i) {
+        const auto lane = laneOf(static_cast<uint32_t>(i));
+        const auto lifecycle = lifecycleStateOf(static_cast<uint32_t>(i));
+
+        // RTIntent 以外（何らかの処理中）のスロットのみ出力
+        if (lane == RetireLane::RTIntent && lifecycle == RetireLifecycleState::Visible)
+            continue;
+
+        if (!first)
+            file << ",\n";
+        first = false;
+
+        file << "    { \"slot\": " << i
+             << ", \"lane\": \"" << laneName(lane)
+             << "\", \"lifecycle\": \"" << lifecycleStateName(lifecycle)
+             << "\" }";
+    }
+
+    file << "\n  ],\n";
+    file << "  \"counts\": {\n";
+    file << "    \"laneRTIntent\": "
+         << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::RTIntent)], std::memory_order_acquire) << ",\n";
+    file << "    \"laneCoordination\": "
+         << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Coordination)], std::memory_order_acquire) << ",\n";
+    file << "    \"laneEpoch\": "
+         << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Epoch)], std::memory_order_acquire) << ",\n";
+    file << "    \"laneReclaim\": "
+         << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Reclaim)], std::memory_order_acquire) << ",\n";
+    file << "    \"laneQuarantine\": "
+         << convo::consumeAtomic(laneCounters_[static_cast<std::size_t>(RetireLane::Quarantine)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleVisible\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::Visible)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleCompareEligible\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::CompareEligible)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleTelemetryRetained\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::TelemetryRetained)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleReplayRetainedOptional\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::ReplayRetainedOptional)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleReclaimEligible\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::ReclaimEligible)], std::memory_order_acquire) << ",\n";
+    file << "    \"lifecycleReclaimed\": "
+         << convo::consumeAtomic(lifecycleCounters_[static_cast<std::size_t>(RetireLifecycleState::Reclaimed)], std::memory_order_acquire) << "\n";
+    file << "  }\n}\n";
+}
+
 } // namespace convo::isr
 
 ```
@@ -40234,7 +40785,7 @@ enum class RetireLifecycleState : std::uint32_t {
 class RetireRuntimeEx {
 public:
     RetireRuntimeEx();
-    void emitIntent(std::uint32_t slot, std::uint32_t generation);
+    void emitIntent(std::uint32_t slot, std::uint64_t generation);  // ★ B-1: 64bit化
     void enqueueRetire(std::uint32_t slot);
     void settleEpoch(std::uint32_t slot);
     void reclaim(std::uint32_t slot);
@@ -40285,6 +40836,9 @@ public:
     [[nodiscard]] RetireLane laneOf(std::uint32_t slot) const noexcept;
     [[nodiscard]] convo::RetireBoundaryTelemetry snapshotBoundaryTelemetry() const noexcept;
     void emitRetireTimeline(const std::filesystem::path& outputPath) const;
+
+    // ★ B-2.1: 全 slot の現在ライフサイクル状態を JSON 出力
+    void emitRetireTrace(const std::filesystem::path& outputPath) const noexcept;
 
 private:
     static constexpr std::size_t kMaxSlots = 256;
@@ -40591,6 +41145,27 @@ std::uint64_t RuntimePublicationCoordinator::getReclaimInFlightCount() const noe
     return convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire);
 }
 
+// ★ A-2.4: 新規 getter 群（DrainAudit 用）
+std::uint64_t RuntimePublicationCoordinator::getPublicationBacklogCount() const noexcept {
+    return convo::consumeAtomic(publicationBacklogCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimePublicationCoordinator::getPendingIntentCount() const noexcept {
+    return convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimePublicationCoordinator::getRetireBacklogCount() const noexcept {
+    return convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimePublicationCoordinator::getFallbackBacklogCount() const noexcept {
+    return convo::consumeAtomic(fallbackBacklogCount_, std::memory_order_acquire);
+}
+
+std::uint64_t RuntimePublicationCoordinator::getDeferredRetireResidencyCount() const noexcept {
+    return convo::consumeAtomic(deferredRetireResidencyCount_, std::memory_order_acquire);
+}
+
 bool RuntimePublicationCoordinator::isFullyDrained() const noexcept {
     if (convo::consumeAtomic(swapPending_, std::memory_order_acquire)) {
         return false;
@@ -40750,6 +41325,12 @@ public:
     void setDeferredRetireResidencyCount(std::uint64_t count) noexcept;
     void setSwapPending(bool pending) noexcept;
     [[nodiscard]] bool isSwapPending() const noexcept;
+    // ★ A-2.4: getter 群（DrainAudit 用）
+    [[nodiscard]] std::uint64_t getPublicationBacklogCount() const noexcept;
+    [[nodiscard]] std::uint64_t getPendingIntentCount() const noexcept;
+    [[nodiscard]] std::uint64_t getRetireBacklogCount() const noexcept;
+    [[nodiscard]] std::uint64_t getFallbackBacklogCount() const noexcept;
+    [[nodiscard]] std::uint64_t getDeferredRetireResidencyCount() const noexcept;
     [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
     [[nodiscard]] bool isFullyDrained() const noexcept;
     [[nodiscard]] CoordinatorState getState() const noexcept;
@@ -42566,6 +43147,75 @@ private:
 
 ```
 
+### 📄 `src\audioengine\RuntimeDrainAudit.h`
+
+```
+#pragma once
+#include <cstdint>
+
+namespace convo::isr {
+
+// RuntimeDrainAudit: Shutdown 完了条件の監査構造体。
+// isAllZero() は監査ログ出力専用。shutdown 完了判定の authority にはしない。
+//
+// ■ 完了条件に含めるもの
+//   pendingPublication  — RuntimePublicationCoordinator の publication backlog
+//   pendingRetire       — RetireRuntime に未処理の retire intent
+//   activeCrossfadeCount — 進行中のクロスフェード（0 or 1）
+//   deferredPublish     — 未投入の deferred publish
+//   routerPendingRetire — ISRRetireRouter 滞留 item 数
+//   maxDeferredAgeMs    — deferred publish 最長滞留時間
+//
+// ■ 監査のみ（完了条件にしない）
+//   quarantineResident  — 隔離保留中のエントリ数
+//   oldestPendingAgeMs  — 最長滞留時間
+//   maxQuarantineAgeSec — 最長 quarantine 経過時間（秒）
+struct RuntimeDrainAudit {
+    uint64_t pendingPublication;
+    uint64_t pendingRetire;
+    uint64_t activeCrossfadeCount;
+    uint64_t routerPendingRetire;
+    uint64_t maxDeferredAgeMs;
+    uint64_t deferredPublish;
+    uint64_t quarantineResident;    // 監査のみ
+    uint64_t oldestPendingAgeMs;    // 監査のみ
+    uint64_t maxQuarantineAgeSec;   // 監査のみ
+
+    // shutdown 完了を阻害している主要因を特定
+    enum class BlockingReason : uint8_t {
+        None,
+        PendingPublication,
+        PendingRetire,
+        ActiveCrossfade,
+        DeferredPublish,
+        QuarantineResident,
+        RouterPendingRetire,
+        Unknown
+    };
+
+    [[nodiscard]] BlockingReason getPrimaryBlockingReason() const noexcept {
+        if (pendingPublication > 0)    return BlockingReason::PendingPublication;
+        if (pendingRetire > 0)         return BlockingReason::PendingRetire;
+        if (activeCrossfadeCount > 0)  return BlockingReason::ActiveCrossfade;
+        if (deferredPublish > 0)       return BlockingReason::DeferredPublish;
+        if (quarantineResident > 0)    return BlockingReason::QuarantineResident;
+        if (routerPendingRetire > 0)   return BlockingReason::RouterPendingRetire;
+        return BlockingReason::Unknown;
+    }
+
+    // ★ 監査ログ出力専用。shutdown 完了判定には使用しない。
+    bool isAllZero() const noexcept {
+        return pendingPublication == 0
+            && pendingRetire == 0
+            && activeCrossfadeCount == 0
+            && deferredPublish == 0;
+    }
+};
+
+} // namespace convo::isr
+
+```
+
 ### 📄 `src\audioengine\RuntimeGraph.h`
 
 ```
@@ -42674,6 +43324,7 @@ struct RuntimeGraph
 #include "AudioEngine.h"
 #include "RuntimeBuilder.h"
 #include "CrossfadeAuthority.h"
+#include <chrono>
 
 namespace convo::isr {
 
@@ -42790,6 +43441,44 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
     }
 }
 
+// ★ C-2.2: enqueueDeferred — global sequence スナップショットを記録
+void RuntimePublicationOrchestrator::enqueueDeferred(
+    const PublicationAdmission::PublishRequest& req) noexcept
+{
+    // 上書きカウント
+    if (hasDeferred_)
+        convo::fetchAddAtomic(deferredOverwriteCount_, uint64_t{1},
+            std::memory_order_release);
+
+    const auto now = static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+
+    // 上書き時は滞留時間を maxDeferredAgeMs に反映
+    if (deferredSlot_.has_value()) {
+        const uint64_t ageMs = (now - deferredSlot_->enqueueTimestampUs) / 1000;
+        uint64_t currentMax = convo::consumeAtomic(maxDeferredAgeMs_,
+            std::memory_order_acquire);
+        while (ageMs > currentMax) {
+            if (convo::compareExchangeAtomic(maxDeferredAgeMs_, currentMax,
+                    ageMs, std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+                break;
+        }
+    }
+
+    deferredSlot_ = DeferredPublishSlot{
+        .request = req,
+        .guard = DeferredGuard{
+            .generation = static_cast<uint64_t>(req.generation),
+            .sequence = engine_.getLastCommittedPublicationSequence()
+        },
+        .lastDiscardReason = DiscardReason::None,
+        .enqueueTimestampUs = now
+    };
+    hasDeferred_ = true;
+}
+
+// ★ C-2.3: notifyTransitionComplete — stale discard 実装
 void RuntimePublicationOrchestrator::notifyTransitionComplete(
     AudioEngine::DSPCore* currentAfterFade) noexcept
 {
@@ -42798,13 +43487,71 @@ void RuntimePublicationOrchestrator::notifyTransitionComplete(
 
     transition_.onTransitionComplete(currentAfterFade);
 
-    // [PR-7] クロスフェード完了後、deferred publish request を再試行する。
-    if (hasDeferred_)
-    {
-        auto deferredReq = consumeDeferredRequest();
-        if (deferredReq.has_value())
-            submitPublishRequest(std::move(*deferredReq));
+    // ★ A-2.2: shutdown 中は deferred 再投入をキャンセル（残留タスク防止）
+    if (engine_.isShutdownInProgress()) {
+        if (hasDeferred_) {
+            if (deferredSlot_.has_value())
+                deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
+            deferredSlot_.reset();
+            hasDeferred_ = false;
+        }
+        return;
     }
+
+    // ★ C-2.3: stale discard（二重検査: generation + publication sequence）
+    if (hasDeferred_ && deferredSlot_.has_value())
+    {
+        auto& deferred = *deferredSlot_;
+
+        // 1. generation 検査
+        const int currentGen = convo::consumeAtomic(
+            engine_.rebuildRequestGeneration, std::memory_order_acquire);
+        if (deferred.guard.generation != 0ull
+            && deferred.guard.generation != static_cast<uint64_t>(currentGen)) {
+            deferred.lastDiscardReason = DiscardReason::StaleDiscard;
+            deferredSlot_.reset();
+            hasDeferred_ = false;
+            return;
+        }
+
+        // 2. publication sequence 検査
+        const auto currentPubSeq = engine_.getLastCommittedPublicationSequence();
+        if (deferred.guard.sequence < currentPubSeq) {
+            deferred.lastDiscardReason = DiscardReason::StaleDiscard;
+            deferredSlot_.reset();
+            hasDeferred_ = false;
+            return;
+        }
+
+        // 有効な deferred → submit
+        auto req = deferred.request;
+        deferredSlot_.reset();
+        hasDeferred_ = false;
+        submitPublishRequest(req);
+    }
+}
+
+// ★ C-2.2: shutdown 時に deferred publish を強制消去
+void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
+{
+    if (hasDeferred_) {
+        if (deferredSlot_.has_value())
+            deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
+        deferredSlot_.reset();
+        hasDeferred_ = false;
+    }
+}
+
+// ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間
+uint64_t RuntimePublicationOrchestrator::getMaxDeferredAgeMs() const noexcept
+{
+    return convo::consumeAtomic(maxDeferredAgeMs_, std::memory_order_acquire);
+}
+
+// ★ C-2.1: 監査用 — deferred overwrite 回数
+std::uint64_t RuntimePublicationOrchestrator::deferredOverwriteCount() const noexcept
+{
+    return convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
 }
 
 } // namespace convo::isr
@@ -42816,15 +43563,39 @@ void RuntimePublicationOrchestrator::notifyTransitionComplete(
 ```
 #pragma once
 
+#include <cstdint>
 #include "PublicationAdmission.h"
 #include "PublicationExecutor.h"
 #include "DSPTransition.h"
 #include "DSPLifetimeManager.h"
+#include "ISRRuntimeSemanticSchema.h"
 #include "core/RCUReader.h"
 
 class AudioEngine;
 
 namespace convo::isr {
+
+// ★ C-2.1: DiscardReason — deferred publish が破棄された理由
+enum class DiscardReason : uint8_t {
+    None,
+    ShutdownDiscard,
+    StaleDiscard,
+    SupersededDiscard
+};
+
+// ★ C-2.1: DeferredGuard — stale discard 用のガード情報
+struct DeferredGuard {
+    uint64_t generation;
+    PublicationSequenceId sequence;
+};
+
+// ★ C-2.1: DeferredPublishSlot — sequence 番号付きの deferred publish slot
+struct DeferredPublishSlot {
+    PublicationAdmission::PublishRequest request;
+    DeferredGuard guard;
+    DiscardReason lastDiscardReason{DiscardReason::None};
+    uint64_t enqueueTimestampUs{0};
+};
 
 // RuntimePublicationOrchestrator: AudioEngine レベルの publish オーケストレーション。
 // Coordinator::submitPublishRequest() の実装を提供する。
@@ -42856,19 +43627,28 @@ public:
         if (!hasDeferred_)
             return std::nullopt;
         hasDeferred_ = false;
-        return deferredRequest_;
+        return deferredSlot_ ? std::optional(deferredSlot_->request) : std::nullopt;
     }
+
+    // ★ C-2.2: shutdown 時に deferred publish を強制消去
+    void clearDeferredForShutdown() noexcept;
+
+    // ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間
+    [[nodiscard]] uint64_t getMaxDeferredAgeMs() const noexcept;
+
+    // ★ C-2.1: 監査用 — deferred overwrite 回数
+    [[nodiscard]] std::uint64_t deferredOverwriteCount() const noexcept;
 
 private:
-    // [PR-7] Deferred Queue: 常に最新1件のみ保持。
-    std::optional<PublicationAdmission::PublishRequest> deferredRequest_;
+    // ★ C-2.1: std::optional<PublishRequest> → DeferredPublishSlot
+    std::optional<DeferredPublishSlot> deferredSlot_;
     bool hasDeferred_ = false;
 
-    void enqueueDeferred(const PublicationAdmission::PublishRequest& req) noexcept
-    {
-        deferredRequest_ = req;
-        hasDeferred_ = true;
-    }
+    // ★ C-2.1: 監査カウンタ
+    std::atomic<uint64_t> deferredOverwriteCount_{0};
+    std::atomic<uint64_t> maxDeferredAgeMs_{0};
+
+    void enqueueDeferred(const PublicationAdmission::PublishRequest& req) noexcept;
 
     AudioEngine& engine_;
     PublicationAdmission admission_;
@@ -48985,7 +49765,21 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
     jassert(newState != nullptr);
     if (!newState) return;
 
-    jassert(!convo::exchangeAtomic(writerActive, true, std::memory_order_acquire)); // acquire: 先行 交換会技 = falseを測定
+    // CAS for writerActive: false→true の遷移を排他的に保証
+    // （compareExchangeAtomic により、Release ビルドでも二重取得を防止）
+    bool expected = false;
+    if (!convo::compareExchangeAtomic(writerActive, expected, true,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_acquire))
+    {
+        // ロック取得失敗 — 別のライターが進行中。世代IDをログに記録して安全に廃棄。
+        // 現行設計では、GenerationManager による世代チェックを通過した newState を
+        // 廃棄しても問題ない（先着のライターがより新しい状態を swap 済み）。
+        juce::Logger::writeToLog("[ConvolverProcessor] updateConvolverState: writerActive contention, "
+            "discarding state gen=" + juce::String((int)newState->generationId));
+        std::unique_ptr<convo::ConvolverState> discard{newState};
+        return;
+    }
 
     if (!convolverStateGeneration.isCurrentGeneration(newState->generationId))
     {

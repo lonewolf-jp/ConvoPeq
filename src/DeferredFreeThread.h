@@ -78,6 +78,22 @@ public:
         convo::publishAtomic(running, false, std::memory_order_release); // release: run() の consumeAtomic acquire と HB しループ終了を公知
     }
 
+    // -----------------------------------------------------------------------
+    // shutdownAndDrain()  ── シャットダウン + 全強制解放
+    //
+    // 【安全契約】
+    //   この関数を呼び出す時点で、Audio Thread が完全に停止していること。
+    //   （通常は ConvolverProcessor::releaseResources() 経由で呼ばれる。
+    //     releaseResources() は JUCE の AudioProcessor ライフサイクルにより
+    //     Audio Thread 停止後に呼び出されることが保証されている。）
+    //
+    // 【二重呼び出し】
+    //   この関数はデストラクタからも呼ばれる（二重呼び出し）。
+    //   releaseResources() で先に呼ばれた場合、デストラクタ側の呼び出しは
+    //   thread.joinable() == false により join をスキップし、
+    //   drainAllRetired() は空キューを即時に完了するため安全。
+    //   余計な状態変数を追加せず、joinable() 判定による冪等性に依存する。
+    // -----------------------------------------------------------------------
     void shutdownAndDrain() noexcept
     {
         stop();
@@ -110,6 +126,18 @@ private:
     static constexpr int kMaxReclaimPerLoop = 4;
     static constexpr size_t kPendingRetiredWarnThreshold = 64;
 
+    // -----------------------------------------------------------------------
+    // drainAllRetired()  ── 全 Retired エントリ強制解放（Shutdown 専用）
+    //
+    // 【前提条件】
+    //   この関数を呼び出す時点で Audio Thread が完全に停止していること。
+    //
+    // 【備考】
+    //   std::numeric_limits<uint64_t>::max() を tryReclaim に渡すことで
+    //   エポック条件を無視した強制解放を行う。これは Audio Thread 停止後の
+    //   クリーンアップ（releaseResources / デストラクタ）でのみ有効。
+    //   通常の退役ループ（run()）では getMinReaderEpoch() を使用する。
+    // -----------------------------------------------------------------------
     void drainAllRetired() noexcept
     {
         while (auto* ptr = swapperRef.tryReclaim(std::numeric_limits<uint64_t>::max()))

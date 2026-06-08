@@ -1000,7 +1000,21 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
     jassert(newState != nullptr);
     if (!newState) return;
 
-    jassert(!convo::exchangeAtomic(writerActive, true, std::memory_order_acquire)); // acquire: 先行 交換会技 = falseを測定
+    // CAS for writerActive: false→true の遷移を排他的に保証
+    // （compareExchangeAtomic により、Release ビルドでも二重取得を防止）
+    bool expected = false;
+    if (!convo::compareExchangeAtomic(writerActive, expected, true,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_acquire))
+    {
+        // ロック取得失敗 — 別のライターが進行中。世代IDをログに記録して安全に廃棄。
+        // 現行設計では、GenerationManager による世代チェックを通過した newState を
+        // 廃棄しても問題ない（先着のライターがより新しい状態を swap 済み）。
+        juce::Logger::writeToLog("[ConvolverProcessor] updateConvolverState: writerActive contention, "
+            "discarding state gen=" + juce::String((int)newState->generationId));
+        std::unique_ptr<convo::ConvolverState> discard{newState};
+        return;
+    }
 
     if (!convolverStateGeneration.isCurrentGeneration(newState->generationId))
     {

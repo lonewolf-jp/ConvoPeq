@@ -265,11 +265,17 @@ public:
 
     // -----------------------------------------------------------------------
     // getSafeEpoch()  ── Deferred Free Thread / Message Thread から呼ぶ
+    //
+    // 安全なエポック値を計算する。swap() の 2-step bump により、
+    // 安全な解放待機エポックは (globalEpoch - 2) となる。
+    //
+    // @return 安全なエポック値（最小 1）。kIdleEpoch (0) との衝突を回避している。
+    // @note 現在は未使用。将来使用する際に kIdleEpoch との区別が必要になる。
     // -----------------------------------------------------------------------
     uint64_t getSafeEpoch() const noexcept
     {
         const uint64_t current = convo::consumeAtomic(globalEpoch, std::memory_order_acquire); // acquire: swap の fetchAdd acq_rel と HB し最新グローバルエポックを観測
-        if (current < 2) return 0;
+        if (current < 3) return 1;  // kIdleEpoch (0) との衝突回避
         return current - 2;
     }
 

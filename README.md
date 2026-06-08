@@ -3,30 +3,30 @@
 
 ---
 
-## New in v0.6.5
+## New in v0.6.6
 
-### Main Changes in v0.6.5
+### Main Changes in v0.6.6
 
-This section summarizes source code changes from commit `157bbb4` to the current working state.
+This section summarizes source code changes from commit `c55fe8c` to the current working state.
 
-- **Engine robustness improvements:**
-  Refactoring in `AudioEngine` and related snapshot paths to improve DSP lifecycle handling, state handoff safety, fade behavior, and runtime recovery/failsafe behavior.
+- **RCU retirement and publication hardening:**
+  Major robustness improvements in `ISRRetireRuntimeEx`, `ISRDSPHandle`, `IRRDSPQuarantine`, and `RuntimePublicationOrchestrator` to strengthen retire-boundary safety, quarantine lifecycle, and runtime publication coordination under practical stable ISR Bridge Runtime constraints.
 
-- **Convolution pipeline optimization:**
-  Major updates in `ConvolverProcessor`, `MKLNonUniformConvolver`, and related DSP components to improve IR processing behavior and runtime performance.
+- **EpochDomain and RCU reader unification:**
+  Fixed coexistence issues between `EpochDomainReaderGuard` and legacy RCU reader paths. Unified reader management in `NoiseShaperLearner`, `SpectrumAnalyzerComponent`, and related components to prevent reader-epoch mismatches.
 
-- **Threading and background processing updates:**
-  Improvements in worker-thread flow and rebuild orchestration, plus foundational additions such as lock-free buffering and rebuild-related core types.
+- **Assertion-level bug fixes (work23):**
+  Patched `SafeStateSwapper` epoch comparison ordering, `MKLNonUniformConvolver` IR tail masking, `EQProcessor.Parameters` stale-state guard, and `DeferredDeletionQueue` double-free prevention. Each fix addresses a potential instability under concurrent rebuild and parameter-update paths.
 
-- **UI synchronization adjustments:**
-  Updates in analyzer/main UI components to better track engine state transitions and improve consistency between processing state and visualization.
+- **Production-safety hardening (work25):**
+  Replaced `exchangeAtomic`-based spinlock in `ConvolverProcessor::updateConvolverState` with `compareExchangeAtomic` for proper Release-build mutual exclusion, with diagnostic logging on contention. Added explicit safety-contract documentation to `DeferredFreeThread::shutdownAndDrain` and `drainAllRetired`. Fixed `getSafeEpoch` return value to avoid collision with `kIdleEpoch`.
 
 - **Documentation and metadata updates:**
-  Added partition-structure technical documentation and refreshed build/project metadata, including the version bump to `v0.6.5`.
+  Added comprehensive audit reports (`doc/work23/`, `doc/work24/`, `doc/work25/`) and refreshed build/project metadata, including the version bump to `v0.6.6`.
 
-**Range summary (`157bbb4..HEAD`):** 28 files changed, approximately +4072 / -1439 lines.
+**Range summary (`c55fe8c..HEAD`):** 21 files changed, approximately +4773 / -42 lines (committed), plus work25 hardening (3 source files modified, uncommitted).
 
-**Current uncommitted scope:** version/docs update (`v0.6.5`) and additional snapshot/debounce-related stability improvements.
+**Current uncommitted scope:** work25 production-safety hardening (bug 4/11/12 fixes) and version bump to `v0.6.6`.
 
 ConvoPeq is a high-fidelity standalone audio processor for Windows 11 x64, combining IR convolution and a 20-band parametric EQ with a real-time analyzer.
 
