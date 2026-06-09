@@ -367,6 +367,7 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/PublicationAdmission.cpp
                 src/audioengine/PublicationExecutor.cpp
                 src/audioengine/RuntimePublicationOrchestrator.cpp
+                src/audioengine/TelemetryRecorder.cpp
                 src/audioengine/ISRDSPQuarantine.cpp
                 src/audioengine/ISRClosureGraphWalker.cpp
                 src/audioengine/ISRDebugRuntime.cpp

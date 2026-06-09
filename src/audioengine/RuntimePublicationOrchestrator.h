@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include "RuntimePublicationState.h"
+#include "TelemetryRecorder.h"
 #include "PublicationAdmission.h"
 #include "PublicationExecutor.h"
 #include "DSPTransition.h"
@@ -11,14 +14,6 @@
 class AudioEngine;
 
 namespace convo::isr {
-
-// ★ C-2.1: DiscardReason — deferred publish が破棄された理由
-enum class DiscardReason : uint8_t {
-    None,
-    ShutdownDiscard,
-    StaleDiscard,
-    SupersededDiscard
-};
 
 // ★ C-2.1: DeferredGuard — stale discard 用のガード情報
 struct DeferredGuard {
@@ -40,9 +35,12 @@ struct DeferredPublishSlot {
 //
 // ★ activate (DSP スロット書き換え) は publish 成功後に行う。
 // ★ submitPublishRequest → evaluate → Accepted → execute の順を厳守。
+//
+// ★ v19: StateOwner + TelemetryRecorder の両方を保持。
+//   Orchestrator が stateOwner.onXxx() + telemetryRecorder.recordXxx() を呼ぶ。
 class RuntimePublicationOrchestrator {
 public:
-    explicit RuntimePublicationOrchestrator(AudioEngine& engine) noexcept;
+    explicit RuntimePublicationOrchestrator(AudioEngine& engine, uint64_t engineInstanceId) noexcept;
 
     // trySubmit: publish 要求を試行する。
     // Admission → Accepted の場合のみ Executor → DSPTransition まで実行。
@@ -76,6 +74,20 @@ public:
     // ★ C-2.1: 監査用 — deferred overwrite 回数
     [[nodiscard]] std::uint64_t deferredOverwriteCount() const noexcept;
 
+    // ── StateOwner アクセサ ──
+    [[nodiscard]] RuntimePublicationStateOwner& stateOwner() noexcept { return stateOwner_; }
+    [[nodiscard]] const RuntimePublicationStateOwner& stateOwner() const noexcept { return stateOwner_; }
+
+    // ── TelemetryRecorder アクセサ ──
+    [[nodiscard]] TelemetryRecorder& telemetryRecorder() noexcept { return telemetryRecorder_; }
+    [[nodiscard]] const TelemetryRecorder& telemetryRecorder() const noexcept { return telemetryRecorder_; }
+
+    // ── 健全性スナップショット ──
+    void publishHealthSnapshot() noexcept;
+
+    // ── CorrelationId 採番 ──
+    [[nodiscard]] CorrelationId nextCorrelationId() noexcept;
+
 private:
     // ★ C-2.1: std::optional<PublishRequest> → DeferredPublishSlot
     std::optional<DeferredPublishSlot> deferredSlot_;
@@ -88,6 +100,11 @@ private:
     void enqueueDeferred(const PublicationAdmission::PublishRequest& req) noexcept;
 
     AudioEngine& engine_;
+
+    // ★ v19: StateOwner + TelemetryRecorder (分離)
+    RuntimePublicationStateOwner stateOwner_;
+    TelemetryRecorder telemetryRecorder_;
+
     PublicationAdmission admission_;
     PublicationExecutor executor_;
     DSPTransition transition_;

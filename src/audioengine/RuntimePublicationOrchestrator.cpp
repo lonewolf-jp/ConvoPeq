@@ -6,14 +6,17 @@
 
 namespace convo::isr {
 
-RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engine) noexcept
+RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engine, uint64_t engineInstanceId) noexcept
     : engine_(engine)
+    , stateOwner_(engineInstanceId)  // ★ engineInstanceId 必須 (コンストラクタで設定)
+    , telemetryRecorder_()
     , admission_()
     , executor_()
     , transition_(engine)
     , lifetime_(engine)
     , publicationReader(engine.getRetireRouter())
 {
+    telemetryRecorder_.setStateOwner(&stateOwner_);
 }
 
 PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
@@ -28,6 +31,19 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         // Deferred/Rejected: caller が処理するため、ここでは retire しない
         return decision;
     }
+
+    // ★ v19: StateOwner 記録 (State+Ledgerのみ)
+    const auto correlationId = nextCorrelationId();
+    stateOwner_.onSubmitted(correlationId.shortValue());
+
+    const auto nowUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    // ★ v19: TelemetryRecorder 記録 (進捗副産物)
+    telemetryRecorder_.recordProgress(correlationId,
+        static_cast<uint64_t>(req.generation), 0,
+        PublishStage::Submitted, nowUs);
 
     // ---- Phase 2: Build + Publish (activate 前) ----
     // ★ activate はまだ行わない。まず world を build して publish する。
@@ -59,12 +75,26 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         // Build failed: retire new DSP, keep old world
         if (!req.newDSP.isNull())
             lifetime_.retire(newDSPResolved);
+        // ★ v19: StateOwner + TelemetryRecorder 記録
+        stateOwner_.onExecutorFailed(correlationId.shortValue());
+        telemetryRecorder_.recordProgress(correlationId,
+            static_cast<uint64_t>(req.generation), 0,
+            PublishStage::Built, nowUs);
+        telemetryRecorder_.recordFailure(FailureStage::Execution,
+            FailureReason::PublishFailed, "trySubmit:build",
+            correlationId.shortValue(), nowUs);
         return PublicationAdmission::Decision::RejectedNotFinalized;
     }
 
+    // ★ v19: StateOwner + TelemetryRecorder: Built 記録
+    stateOwner_.onBuilt(correlationId.shortValue());
+    telemetryRecorder_.recordProgress(correlationId,
+        static_cast<uint64_t>(req.generation), 0,
+        PublishStage::Built, nowUs);
+
     // Step 2b: Crossfade decision using RuntimeWorld projection values
     // (DSPCore 直読は行わない)
-    const auto* oldWorld = engine_.runtimeStore.observe();
+    const auto* oldWorld = engine_.observePublishedWorld();
     CrossfadeAuthority crossfade;
     auto cfDecision = crossfade.evaluate(engine_, *oldWorld, *worldOwner);
 
@@ -79,13 +109,33 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         worldOwner->overlap.fadeTimeSec = cfDecision.fadeTimeSec;
     }
 
+    // ★ v19: StateOwner + TelemetryRecorder: Executed 記録
+    stateOwner_.onValidated(correlationId.shortValue());
+    telemetryRecorder_.recordProgress(correlationId,
+        static_cast<uint64_t>(req.generation), 0,
+        PublishStage::Validated, nowUs);
+
     auto result = executor_.publish(engine_, std::move(worldOwner));
     if (result != PublishResult::Success) {
         // publish 失敗: activate/crossfade/retire は一切行わない
         if (!req.newDSP.isNull())
             lifetime_.retire(newDSPResolved);
+        // ★ v19: StateOwner + TelemetryRecorder 記録
+        stateOwner_.onExecutorFailed(correlationId.shortValue());
+        telemetryRecorder_.recordFailure(FailureStage::Execution,
+            FailureReason::PublishFailed, "trySubmit:publish",
+            correlationId.shortValue(), nowUs);
+        telemetryRecorder_.recordProgress(correlationId,
+            static_cast<uint64_t>(req.generation), 0,
+            PublishStage::Published, nowUs);
         return PublicationAdmission::Decision::RejectedShutdown;
     }
+
+    // ★ v19: StateOwner + TelemetryRecorder: Published 記録
+    stateOwner_.onPublished(correlationId.shortValue());
+    telemetryRecorder_.recordProgress(correlationId,
+        static_cast<uint64_t>(req.generation), 0,
+        PublishStage::Published, nowUs);
 
     // ---- Phase 3: Publish 成功確認後に DSP Lifetime 操作 ----
     // ★ activate は publish 成功後にのみ実行する。
@@ -104,6 +154,10 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
     auto decision = trySubmit(req);
+    const auto nowUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
     switch (decision) {
         case PublicationAdmission::Decision::Accepted:
             return;
@@ -111,10 +165,28 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             enqueueDeferred(req);
             return;
         case PublicationAdmission::Decision::RejectedStaleGeneration:
+            stateOwner_.onRejected(0);
+            telemetryRecorder_.recordFailure(FailureStage::Admission,
+                FailureReason::StaleGeneration, "submitPublishRequest:stale",
+                0, nowUs);
+            return;
         case PublicationAdmission::Decision::RejectedNotFinalized:
+            stateOwner_.onRejected(0);
+            telemetryRecorder_.recordFailure(FailureStage::Admission,
+                FailureReason::ValidationFailed, "submitPublishRequest:notFinalized",
+                0, nowUs);
+            return;
         case PublicationAdmission::Decision::RejectedPressure:
+            stateOwner_.onRejected(0);
+            telemetryRecorder_.recordFailure(FailureStage::Admission,
+                FailureReason::QueuePressure, "submitPublishRequest:pressure",
+                0, nowUs);
+            return;
         case PublicationAdmission::Decision::RejectedShutdown:
-            // trySubmit が既に retireDSP 済み
+            stateOwner_.onRejected(0);
+            telemetryRecorder_.recordFailure(FailureStage::Shutdown,
+                FailureReason::ShutdownRejected, "submitPublishRequest:shutdown",
+                0, nowUs);
             return;
     }
 }
@@ -154,6 +226,14 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         .enqueueTimestampUs = now
     };
     hasDeferred_ = true;
+
+    // ★ v19: DeferredHealth 記録
+    DeferredHealth dh;
+    dh.deferredCount = 1;
+    dh.oldestDeferredAgeMs = 0;  // 新規enqueue
+    dh.overwriteCount = convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
+    dh.lastDiscardReason = DiscardReason::None;
+    telemetryRecorder_.recordDeferredHealth(dh);
 }
 
 // ★ C-2.3: notifyTransitionComplete — stale discard 実装
@@ -212,12 +292,24 @@ void RuntimePublicationOrchestrator::notifyTransitionComplete(
 // ★ C-2.2: shutdown 時に deferred publish を強制消去
 void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
 {
+    const auto nowUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
     if (hasDeferred_) {
         if (deferredSlot_.has_value())
             deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
         deferredSlot_.reset();
         hasDeferred_ = false;
     }
+
+    // ★ v19: DeferredHealth 記録
+    DeferredHealth dh;
+    dh.deferredCount = 0;
+    dh.overwriteCount = convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
+    dh.lastDiscardReason = DiscardReason::ShutdownDiscard;
+    dh.lastDiscardTimestampUs = nowUs;
+    telemetryRecorder_.recordDeferredHealth(dh);
 }
 
 // ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間
@@ -230,6 +322,35 @@ uint64_t RuntimePublicationOrchestrator::getMaxDeferredAgeMs() const noexcept
 std::uint64_t RuntimePublicationOrchestrator::deferredOverwriteCount() const noexcept
 {
     return convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
+}
+
+// ── CorrelationId 採番 ──
+CorrelationId RuntimePublicationOrchestrator::nextCorrelationId() noexcept
+{
+    const auto cid = telemetryRecorder_.nextCorrelationId(stateOwner_.state().engineInstanceId);
+    stateOwner_.setLastCorrelationId(cid);
+    return cid;
+}
+
+// ── 健全性スナップショット ──
+void RuntimePublicationOrchestrator::publishHealthSnapshot() noexcept
+{
+    const auto& state = stateOwner_.state();
+    const auto nowUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    OrchestratorHealthSnapshot snapshot;
+    snapshot.submittedCount = state.progress.submittedCount;
+    snapshot.publishedCount = state.progress.publishedCount;
+    snapshot.retiredCount = state.progress.retiredCount;
+    snapshot.reclaimedCount = state.progress.reclaimedCount;
+    snapshot.executorQueueDepth = state.progress.executorQueueDepth;
+    snapshot.lastProgressTimestampUs = state.progress.lastProgressTimestampUs;
+    snapshot.stuckStage = state.progress.detectStuckStage();
+    snapshot.timestampUs = nowUs;
+
+    telemetryRecorder_.recordHealth(snapshot);
 }
 
 } // namespace convo::isr

@@ -3,12 +3,20 @@
 #include <atomic>
 #include <type_traits>
 #include <utility>
+#include <cstdint>
 #include "RuntimeTransition.h"
 #include "core/RuntimeStore.h"
 #include "AlignedAllocation.h"
 // New components are injected from AudioEngine level (not included directly to avoid circular deps)
 
 namespace convo {
+
+// ★ P0-1: PublishStageResult — Coordinator が返す最小限の結果
+enum class PublishStageResult : uint8_t {
+    Success,
+    Rejected,
+    Failed
+};
 
 struct RuntimeBuildSnapshot;
 

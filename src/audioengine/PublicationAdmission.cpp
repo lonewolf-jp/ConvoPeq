@@ -21,10 +21,16 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
     if (req.sealedSnapshot.irLoaded && !req.sealedSnapshot.irFinalized)
         return Decision::RejectedNotFinalized;
 
-    // 4. Pressure / throttle check
-    if (convo::consumeAtomic(engine.retirePressurePublicationThrottleActive_,
-                             std::memory_order_acquire))
+    // 4. Pressure / throttle check (P1-6: Adaptive Backpressure)
+    const bool pressureActive = convo::consumeAtomic(
+        engine.retirePressurePublicationThrottleActive_, std::memory_order_acquire);
+    if (pressureActive) {
+        // ★ P1-6: Pressure レベル段階制御
+        // RejectLowPriority: timer/crossfade publish を拒否
+        // RejectMostRequests: bootstrap以外の全publish拒否
+        // 現状は一律 RejectedPressure で対応
         return Decision::RejectedPressure;
+    }
 
     // 5. Fading active check → defer
     const bool hasFading = engine.hasFadingRuntimeInWorld(

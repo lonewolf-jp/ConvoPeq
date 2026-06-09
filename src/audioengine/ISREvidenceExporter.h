@@ -1,11 +1,14 @@
 #pragma once
 #include <string>
+#include "TelemetryRecorder.h"
 
 namespace convo::isr {
 
 class EvidenceExporter {
 public:
-    void exportEvidence();
+    // exportEvidence: テレメトリデータを含むエビデンスを出力する。
+    void exportEvidence(const TelemetryRecorder::TelemetrySnapshot* snapshot = nullptr,
+                        uint64_t monotonicViolationCount = 0);
 };
 
 class BudgetManager {

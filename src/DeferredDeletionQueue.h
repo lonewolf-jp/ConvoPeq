@@ -28,6 +28,8 @@ struct DeletionEntry {
     void (*deleter)(void*) = nullptr;
     uint64_t epoch = 0;
     DeletionEntryType type = DeletionEntryType::Generic;
+    uint64_t publicationSequenceId{0};  // ★ P2-2: 出版-退役の因果追跡用
+    uint64_t generation{0};             // ★ P2-2: generation 追跡
 };
 
 // B23: リアルタイム安全性のための静的チェック
@@ -57,11 +59,17 @@ public:
 
     // Audio Thread から呼ばれる。ロックフリー。
     bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept {
-        return enqueue(ptr, deleter, epoch, DeletionEntryType::Generic);
+        return enqueue(ptr, deleter, epoch, DeletionEntryType::Generic, 0, 0);
     }
 
     // Audio Thread から呼ばれる。ロックフリー。
     bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept {
+        return enqueue(ptr, deleter, epoch, type, 0, 0);
+    }
+
+    // ★ P2-2: publicationSequenceId + generation 付き enqueue
+    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type,
+                 uint64_t publicationSequenceId, uint64_t generation) noexcept {
         uint32_t pos = convo::consumeAtomic(enqueuePos, std::memory_order_acquire); // acquire: 前回 enqueue の CAS acq_rel と HB し最新の enqueuePos を観測
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
@@ -79,6 +87,8 @@ public:
                     entry.deleter = deleter;
                     entry.epoch = epoch;
                     entry.type = type;
+                    entry.publicationSequenceId = publicationSequenceId;
+                    entry.generation = generation;
                     convo::publishAtomic(seq_atom, pos + 1, std::memory_order_release); // release: dequeue の seq acquire と HB しエントリ書き込み完了を公知
                     return true;
                 }
@@ -184,6 +194,24 @@ public:
         return static_cast<uint32_t>(enq - deq);
     }
 
+    // ★ P1-7: 最大滞留時間 (us) 追跡
+    [[nodiscard]] uint64_t getMaxRetireAgeUs() const noexcept {
+        return maxRetireAgeUs_.load(std::memory_order_acquire);
+    }
+
+    void updateMaxRetireAge(uint64_t ageUs) noexcept {
+        uint64_t current = maxRetireAgeUs_.load(std::memory_order_acquire);
+        while (ageUs > current) {
+            if (convo::compareExchangeAtomic(maxRetireAgeUs_, current, ageUs,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+                break;
+        }
+    }
+
+    void clearMaxRetireAge() noexcept {
+        maxRetireAgeUs_.store(0, std::memory_order_release);
+    }
+
 private:
     static inline bool isOlder(uint64_t a, uint64_t b) noexcept
     {
@@ -197,5 +225,6 @@ private:
     alignas(64) std::array<std::atomic<uint32_t>, kQueueSize> sequences;
     alignas(64) std::atomic<uint32_t> enqueuePos{0};
     alignas(64) std::atomic<uint32_t> dequeuePos{0};
+    alignas(64) std::atomic<uint64_t> maxRetireAgeUs_{0};
 };
 #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容

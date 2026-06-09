@@ -13,6 +13,9 @@ void diagLog(const juce::String& message)
 }
 }
 
+// ★ 静的メンバ定義: 全局一意 Engine インスタンスID カウンタ
+std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
+
 AudioEngine::AudioEngine()
     : eqCacheManager(*this)
     , uiEqEditor(*this)
@@ -22,10 +25,13 @@ AudioEngine::AudioEngine()
 #pragma warning(pop)
     , m_workerThread(m_commandBuffer, m_generationManager, &affinityManager)
 {
+    // ★ engineInstanceId 初期化 (全局一意)
+    engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1;
+
     // [work21] ISRRetireRouter初期化
     m_retireRouter = std::make_unique<convo::isr::ISRRetireRouter>(m_epochDomain);
-    // [PR-1.5] RuntimePublicationOrchestrator 初期化
-    runtimeOrchestrator_ = std::make_unique<convo::isr::RuntimePublicationOrchestrator>(*this);
+    // [PR-1.5] RuntimePublicationOrchestrator 初期化 (engineInstanceId を注入)
+    runtimeOrchestrator_ = std::make_unique<convo::isr::RuntimePublicationOrchestrator>(*this, engineInstanceId_);
 
     // [P1 Phase1-B] PublicationIntent/PublicationLog initialization removed
     uiConvolverProcessor.setRcuProvider(*this);

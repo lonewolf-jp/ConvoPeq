@@ -164,9 +164,13 @@
         │   ├── RuntimeGraph.h
         │   ├── RuntimePublicationOrchestrator.cpp
         │   ├── RuntimePublicationOrchestrator.h
+        │   ├── RuntimePublicationState.h
         │   ├── RuntimePublicationValidator.cpp
         │   ├── RuntimePublicationValidator.h
-        │   └── RuntimeTransition.h
+        │   ├── RuntimeTransition.h
+        │   ├── ShutdownScope.h
+        │   ├── TelemetryRecorder.cpp
+        │   └── TelemetryRecorder.h
         ├── convolver/
         │   ├── ConvolverProcessor.Internal.h
         │   ├── ConvolverProcessor.Lifecycle.cpp
@@ -613,6 +617,7 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/PublicationAdmission.cpp
                 src/audioengine/PublicationExecutor.cpp
                 src/audioengine/RuntimePublicationOrchestrator.cpp
+                src/audioengine/TelemetryRecorder.cpp
                 src/audioengine/ISRDSPQuarantine.cpp
                 src/audioengine/ISRClosureGraphWalker.cpp
                 src/audioengine/ISRDebugRuntime.cpp
@@ -7905,6 +7910,8 @@ struct DeletionEntry {
     void (*deleter)(void*) = nullptr;
     uint64_t epoch = 0;
     DeletionEntryType type = DeletionEntryType::Generic;
+    uint64_t publicationSequenceId{0};  // ★ P2-2: 出版-退役の因果追跡用
+    uint64_t generation{0};             // ★ P2-2: generation 追跡
 };
 
 // B23: リアルタイム安全性のための静的チェック
@@ -7934,11 +7941,17 @@ public:
 
     // Audio Thread から呼ばれる。ロックフリー。
     bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept {
-        return enqueue(ptr, deleter, epoch, DeletionEntryType::Generic);
+        return enqueue(ptr, deleter, epoch, DeletionEntryType::Generic, 0, 0);
     }
 
     // Audio Thread から呼ばれる。ロックフリー。
     bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept {
+        return enqueue(ptr, deleter, epoch, type, 0, 0);
+    }
+
+    // ★ P2-2: publicationSequenceId + generation 付き enqueue
+    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type,
+                 uint64_t publicationSequenceId, uint64_t generation) noexcept {
         uint32_t pos = convo::consumeAtomic(enqueuePos, std::memory_order_acquire); // acquire: 前回 enqueue の CAS acq_rel と HB し最新の enqueuePos を観測
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
@@ -7956,6 +7969,8 @@ public:
                     entry.deleter = deleter;
                     entry.epoch = epoch;
                     entry.type = type;
+                    entry.publicationSequenceId = publicationSequenceId;
+                    entry.generation = generation;
                     convo::publishAtomic(seq_atom, pos + 1, std::memory_order_release); // release: dequeue の seq acquire と HB しエントリ書き込み完了を公知
                     return true;
                 }
@@ -8061,6 +8076,24 @@ public:
         return static_cast<uint32_t>(enq - deq);
     }
 
+    // ★ P1-7: 最大滞留時間 (us) 追跡
+    [[nodiscard]] uint64_t getMaxRetireAgeUs() const noexcept {
+        return maxRetireAgeUs_.load(std::memory_order_acquire);
+    }
+
+    void updateMaxRetireAge(uint64_t ageUs) noexcept {
+        uint64_t current = maxRetireAgeUs_.load(std::memory_order_acquire);
+        while (ageUs > current) {
+            if (convo::compareExchangeAtomic(maxRetireAgeUs_, current, ageUs,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+                break;
+        }
+    }
+
+    void clearMaxRetireAge() noexcept {
+        maxRetireAgeUs_.store(0, std::memory_order_release);
+    }
+
 private:
     static inline bool isOlder(uint64_t a, uint64_t b) noexcept
     {
@@ -8074,6 +8107,7 @@ private:
     alignas(64) std::array<std::atomic<uint32_t>, kQueueSize> sequences;
     alignas(64) std::atomic<uint32_t> enqueuePos{0};
     alignas(64) std::atomic<uint32_t> dequeuePos{0};
+    alignas(64) std::atomic<uint64_t> maxRetireAgeUs_{0};
 };
 #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 
@@ -24963,6 +24997,9 @@ void diagLog(const juce::String& message)
 }
 }
 
+// ★ 静的メンバ定義: 全局一意 Engine インスタンスID カウンタ
+std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
+
 AudioEngine::AudioEngine()
     : eqCacheManager(*this)
     , uiEqEditor(*this)
@@ -24972,10 +25009,13 @@ AudioEngine::AudioEngine()
 #pragma warning(pop)
     , m_workerThread(m_commandBuffer, m_generationManager, &affinityManager)
 {
+    // ★ engineInstanceId 初期化 (全局一意)
+    engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1;
+
     // [work21] ISRRetireRouter初期化
     m_retireRouter = std::make_unique<convo::isr::ISRRetireRouter>(m_epochDomain);
-    // [PR-1.5] RuntimePublicationOrchestrator 初期化
-    runtimeOrchestrator_ = std::make_unique<convo::isr::RuntimePublicationOrchestrator>(*this);
+    // [PR-1.5] RuntimePublicationOrchestrator 初期化 (engineInstanceId を注入)
+    runtimeOrchestrator_ = std::make_unique<convo::isr::RuntimePublicationOrchestrator>(*this, engineInstanceId_);
 
     // [P1 Phase1-B] PublicationIntent/PublicationLog initialization removed
     uiConvolverProcessor.setRcuProvider(*this);
@@ -32893,6 +32933,12 @@ using RuntimePublishWorld = RuntimeState;
 static_assert(!std::is_default_constructible_v<RuntimePublishWorld>,
               "RuntimePublishWorld must not be default-constructible outside builder path");
 
+// ★ P0-2/3: Forward declarations for friend classes
+namespace convo::isr {
+    class PublicationExecutor;
+    class DSPTransition;
+}
+
 // AudioEngine.h  ── v0.2 (JUCE 8.0.12対応)
 //
 // オーディオエンジン - AudioSource実装
@@ -35317,9 +35363,20 @@ public:
     RuntimePublishStore runtimeStore;
     iso::audio_engine::RuntimePublicationValidator runtimePublicationValidator_;
 
+    // ★ P0-4: runtimeStore.observe() の getter ラッパー
+    [[nodiscard]] const RuntimePublishWorld* observePublishedWorld() const noexcept {
+        return RuntimePublicationCoordinator::consumePublishedWorld(runtimeStore);
+    }
+
     // RuntimePublicationOrchestrator: 前方宣言 + unique_ptr (循環依存回避)
     // 実体は AudioEngine.cpp のコンストラクタで初期化
     std::unique_ptr<convo::isr::RuntimePublicationOrchestrator> runtimeOrchestrator_;
+
+private:
+    // ★ P0-2/3: Coordinator生成は friend 宣言されたクラスに限定
+    friend class convo::isr::RuntimePublicationOrchestrator;
+    friend class convo::isr::PublicationExecutor;
+    friend class convo::isr::DSPTransition;
 
     [[nodiscard]] inline RuntimePublicationCoordinator makeRuntimePublicationCoordinator() noexcept
     {
@@ -35335,6 +35392,7 @@ public:
         coordinator.publishWorld(std::move(worldOwner));
     }
 
+public:
     [[nodiscard]] inline bool precheckRuntimePublication(const convo::isr::PayloadClosureDescriptor& closure,
                                                          const convo::isr::TieredPayloadDescriptor& descriptor) noexcept
     {
@@ -36070,6 +36128,10 @@ public:
     std::array<std::atomic<std::uint64_t>, convo::kObserveChannelCount> observeLastSeenSequenceId_ {};
     std::atomic<std::uint64_t> observeMonotonicViolationCount_ { 0 };
     std::atomic<bool> observeMonotonicRollbackRequested_ { false };
+
+    // ★ Engine インスタンス識別子 (全局一意。再生成後もユニーク)
+    static std::atomic<uint64_t> s_nextEngineInstanceId_;
+    uint64_t engineInstanceId_{0};
 
     // ==================================================================
 
@@ -38263,9 +38325,101 @@ void ensureArtifactRuntimeMetadata(const std::filesystem::path& path,
     }
 }
 
+// ── テレメトリJSON生成ヘルパー (P1-5) ──
+
+std::string buildFailureLogJson(const TelemetryRecorder::TelemetrySnapshot& snap)
+{
+    std::ostringstream oss;
+    oss << "{\n";
+    oss << "  \"artifact\": \"publication_failure_log.json\",\n";
+    oss << "  \"failureRecordCount\": " << snap.failureRecordCount << ",\n";
+    oss << "  \"failureSnapshotCount\": " << snap.failureSnapshotCount << ",\n";
+
+    oss << "  \"failureRecords\": [\n";
+    const auto maxFail = (std::min)(snap.failureRecordCount, snap.failureRecords.size());
+    for (size_t i = 0; i < maxFail; ++i) {
+        const auto& r = snap.failureRecords[i];
+        if (i > 0) oss << ",\n";
+        oss << "    {\"correlationId\":" << r.correlationIdShort
+            << ",\"stage\":" << static_cast<int>(r.stage)
+            << ",\"reason\":" << static_cast<int>(r.reason)
+            << ",\"origin\":\"" << (r.origin ? r.origin : "null")
+            << "\",\"timestampUs\":" << r.timestampUs << "}";
+    }
+    oss << "\n  ],\n";
+
+    oss << "  \"failureSnapshots\": [\n";
+    const auto maxSnap = (std::min)(snap.failureSnapshotCount, snap.failureSnapshots.size());
+    for (size_t i = 0; i < maxSnap; ++i) {
+        const auto& s = snap.failureSnapshots[i];
+        if (i > 0) oss << ",\n";
+        oss << "    {\"correlationId\":" << s.correlationIdShort
+            << ",\"seqId\":" << s.publicationSequenceId
+            << ",\"generation\":" << s.generation
+            << ",\"stage\":" << static_cast<int>(s.stage)
+            << ",\"reason\":" << static_cast<int>(s.reason)
+            << ",\"origin\":\"" << (s.origin ? s.origin : "null")
+            << "\",\"readerCount\":" << s.activeReaderCount
+            << ",\"timestampUs\":" << s.timestampUs << "}";
+    }
+    oss << "\n  ]\n";
+    oss << "}\n";
+    return oss.str();
+}
+
+std::string buildProgressLogJson(const TelemetryRecorder::TelemetrySnapshot& snap)
+{
+    std::ostringstream oss;
+    oss << "{\n";
+    oss << "  \"artifact\": \"publication_progress_log.json\",\n";
+    oss << "  \"progressRecordCount\": " << snap.progressRecordCount << ",\n";
+    oss << "  \"progressOverwriteCount\": " << snap.progressOverwriteCount << ",\n";
+
+    const auto& hs = snap.lastHealthSnapshot;
+    oss << "  \"healthSnapshot\": {\n";
+    oss << "    \"submitted\":" << hs.submittedCount
+        << ",\"published\":" << hs.publishedCount
+        << ",\"retired\":" << hs.retiredCount
+        << ",\"reclaimed\":" << hs.reclaimedCount
+        << ",\"queueDepth\":" << hs.executorQueueDepth
+        << ",\"stuckStage\":" << static_cast<int>(hs.stuckStage)
+        << ",\"timestampUs\":" << hs.timestampUs << "\n";
+    oss << "  },\n";
+
+    oss << "  \"progressRecords\": [\n";
+    const auto maxProg = (std::min)(snap.progressRecordCount, snap.progressRecords.size());
+    for (size_t i = 0; i < maxProg; ++i) {
+        const auto& p = snap.progressRecords[i];
+        if (i > 0) oss << ",\n";
+        oss << "    {\"correlationId\":" << p.correlationIdShort
+            << ",\"generation\":" << p.generation
+            << ",\"stage\":" << static_cast<int>(p.stage)
+            << ",\"timestampUs\":" << p.timestampUs << "}";
+    }
+    oss << "\n  ]\n";
+    oss << "}\n";
+    return oss.str();
+}
+
+std::string buildDeferredHealthJson(const TelemetryRecorder::TelemetrySnapshot& snap)
+{
+    const auto& dh = snap.lastDeferredHealth;
+    std::ostringstream oss;
+    oss << "{\n";
+    oss << "  \"artifact\": \"deferred_health.json\",\n";
+    oss << "  \"deferredCount\": " << dh.deferredCount << ",\n";
+    oss << "  \"oldestDeferredAgeMs\": " << dh.oldestDeferredAgeMs << ",\n";
+    oss << "  \"overwriteCount\": " << dh.overwriteCount << ",\n";
+    oss << "  \"lastDiscardReason\": " << static_cast<int>(dh.lastDiscardReason) << ",\n";
+    oss << "  \"lastDiscardTimestampUs\": " << dh.lastDiscardTimestampUs << "\n";
+    oss << "}\n";
+    return oss.str();
+}
+
 } // namespace
 
-void EvidenceExporter::exportEvidence()
+void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot* snapshot,
+                                      uint64_t monotonicViolationCount)
 {
     const auto root = artifactRoot();
     const auto buildMode = buildModeName();
@@ -38276,11 +38430,18 @@ void EvidenceExporter::exportEvidence()
     const bool isRelease = (buildMode == "Release");
     const bool isDebug = (buildMode == "Debug");
 
+    // ★ P1-9: monotonic violation count を Evidence に含める
     const auto mutationFaultTrace = std::string("{\"artifact\":\"mutation_fault_trace.json\",\"schema\":\"mutation_fault_trace_v1\",\"status\":\"generated\",\"violations\":")
         + std::to_string(convo::isr::sealViolationCountValue())
+        + ",\"monotonicViolationCount\":" + std::to_string(monotonicViolationCount)
         + "}";
 
-    const std::array<std::pair<const char*, const char*>, 8> artifacts{{
+    // ★ P1-5: テレメトリエビデンスデータ
+    const auto failureLogJson = snapshot ? buildFailureLogJson(*snapshot) : std::string{};
+    const auto progressLogJson = snapshot ? buildProgressLogJson(*snapshot) : std::string{};
+    const auto deferredHealthJson = snapshot ? buildDeferredHealthJson(*snapshot) : std::string{};
+
+    const std::array<std::pair<const char*, const char*>, 11> artifacts{{
         {"closure_graph.json", "{\"artifact\":\"closure_graph.json\",\"schema\":\"closure_graph_v1\",\"status\":\"generated\",\"nodeCount\":0,\"edgeCount\":0,\"descriptorCoverageComplete\":true,\"externalMutableDependencies\":0}"},
         {"mutation_fault_trace.json", mutationFaultTrace.c_str()},
         {"hb_graph_trace.json", "{\"artifact\":\"hb_graph_trace.json\",\"schema\":\"hb_trace_v1\",\"status\":\"generated\",\"eventCount\":0}"},
@@ -38288,15 +38449,21 @@ void EvidenceExporter::exportEvidence()
         {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v1\",\"status\":\"generated\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":true,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0}"},
         {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"generated\",\"phase\":0,\"verified\":true,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0}"},
         {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"generated\",\"withinThreshold\":true}"},
-        {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"generated\",\"violations\":0,\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"}
+        {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"generated\",\"violations\":0,\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"},
+        {"publication_failure_log.json", failureLogJson.c_str()},
+        {"publication_progress_log.json", progressLogJson.c_str()},
+        {"deferred_health.json", deferredHealthJson.c_str()}
     }};
 
-    const std::array<const char*, 5> debugArtifacts{{
+    const std::array<const char*, 8> debugArtifacts{{
         "closure_graph.json",
         "mutation_fault_trace.json",
         "hb_graph_trace.json",
         "shutdown_trace.json",
-        "retire_timeline.json"
+        "retire_timeline.json",
+        "publication_failure_log.json",
+        "publication_progress_log.json",
+        "deferred_health.json"
     }};
 
     std::string manifest = "{\n";
@@ -38455,12 +38622,15 @@ void IntrospectionConsole::introspect()
 ```
 #pragma once
 #include <string>
+#include "TelemetryRecorder.h"
 
 namespace convo::isr {
 
 class EvidenceExporter {
 public:
-    void exportEvidence();
+    // exportEvidence: テレメトリデータを含むエビデンスを出力する。
+    void exportEvidence(const TelemetryRecorder::TelemetrySnapshot* snapshot = nullptr,
+                        uint64_t monotonicViolationCount = 0);
 };
 
 class BudgetManager {
@@ -40286,6 +40456,13 @@ public:
     {
         assert(epochDomain_ != nullptr);
         return epochDomain_->pendingRetireCount();
+    }
+
+    /** ★ P1-4: drainAll 委譲 */
+    void drainAll() noexcept
+    {
+        assert(epochDomain_ != nullptr);
+        epochDomain_->drainAll();
     }
 
 private:
@@ -42375,10 +42552,16 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
     if (req.sealedSnapshot.irLoaded && !req.sealedSnapshot.irFinalized)
         return Decision::RejectedNotFinalized;
 
-    // 4. Pressure / throttle check
-    if (convo::consumeAtomic(engine.retirePressurePublicationThrottleActive_,
-                             std::memory_order_acquire))
+    // 4. Pressure / throttle check (P1-6: Adaptive Backpressure)
+    const bool pressureActive = convo::consumeAtomic(
+        engine.retirePressurePublicationThrottleActive_, std::memory_order_acquire);
+    if (pressureActive) {
+        // ★ P1-6: Pressure レベル段階制御
+        // RejectLowPriority: timer/crossfade publish を拒否
+        // RejectMostRequests: bootstrap以外の全publish拒否
+        // 現状は一律 RejectedPressure で対応
         return Decision::RejectedPressure;
+    }
 
     // 5. Fading active check → defer
     const bool hasFading = engine.hasFadingRuntimeInWorld(
@@ -42417,13 +42600,22 @@ public:
         RuntimeBuildSnapshot sealedSnapshot;
     };
 
+    // ★ P1-6: Pressure レベル (Adaptive Backpressure)
+    enum class PressureLevel : uint8_t {
+        Ready = 0,          // 通常運用
+        Pressure,           // retirePressurePublicationThrottleActive_ 有効化
+        RejectLowPriority,  // timer/crossfade publish を拒否
+        RejectMostRequests  // bootstrap以外の全publish拒否
+    };
+
     enum class Decision {
         Accepted,
         RejectedStaleGeneration,
         RejectedNotFinalized,
         RejectedPressure,
         RejectedShutdown,
-        DeferredFadingActive
+        DeferredFadingActive,
+        RejectedLowPriority   // ★ P1-6: 低優先度要求拒否
     };
 
     explicit PublicationAdmission() noexcept = default;
@@ -43328,14 +43520,17 @@ struct RuntimeGraph
 
 namespace convo::isr {
 
-RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engine) noexcept
+RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engine, uint64_t engineInstanceId) noexcept
     : engine_(engine)
+    , stateOwner_(engineInstanceId)  // ★ engineInstanceId 必須 (コンストラクタで設定)
+    , telemetryRecorder_()
     , admission_()
     , executor_()
     , transition_(engine)
     , lifetime_(engine)
     , publicationReader(engine.getRetireRouter())
 {
+    telemetryRecorder_.setStateOwner(&stateOwner_);
 }
 
 PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
@@ -43350,6 +43545,19 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         // Deferred/Rejected: caller が処理するため、ここでは retire しない
         return decision;
     }
+
+    // ★ v19: StateOwner 記録 (State+Ledgerのみ)
+    const auto correlationId = nextCorrelationId();
+    stateOwner_.onSubmitted(correlationId.shortValue());
+
+    const auto nowUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    // ★ v19: TelemetryRecorder 記録 (進捗副産物)
+    telemetryRecorder_.recordProgress(correlationId,
+        static_cast<uint64_t>(req.generation), 0,
+        PublishStage::Submitted, nowUs);
 
     // ---- Phase 2: Build + Publish (activate 前) ----
     // ★ activate はまだ行わない。まず world を build して publish する。
@@ -43381,12 +43589,26 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         // Build failed: retire new DSP, keep old world
         if (!req.newDSP.isNull())
             lifetime_.retire(newDSPResolved);
+        // ★ v19: StateOwner + TelemetryRecorder 記録
+        stateOwner_.onExecutorFailed(correlationId.shortValue());
+        telemetryRecorder_.recordProgress(correlationId,
+            static_cast<uint64_t>(req.generation), 0,
+            PublishStage::Built, nowUs);
+        telemetryRecorder_.recordFailure(FailureStage::Execution,
+            FailureReason::PublishFailed, "trySubmit:build",
+            correlationId.shortValue(), nowUs);
         return PublicationAdmission::Decision::RejectedNotFinalized;
     }
 
+    // ★ v19: StateOwner + TelemetryRecorder: Built 記録
+    stateOwner_.onBuilt(correlationId.shortValue());
+    telemetryRecorder_.recordProgress(correlationId,
+        static_cast<uint64_t>(req.generation), 0,
+        PublishStage::Built, nowUs);
+
     // Step 2b: Crossfade decision using RuntimeWorld projection values
     // (DSPCore 直読は行わない)
-    const auto* oldWorld = engine_.runtimeStore.observe();
+    const auto* oldWorld = engine_.observePublishedWorld();
     CrossfadeAuthority crossfade;
     auto cfDecision = crossfade.evaluate(engine_, *oldWorld, *worldOwner);
 
@@ -43401,13 +43623,33 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
         worldOwner->overlap.fadeTimeSec = cfDecision.fadeTimeSec;
     }
 
+    // ★ v19: StateOwner + TelemetryRecorder: Executed 記録
+    stateOwner_.onValidated(correlationId.shortValue());
+    telemetryRecorder_.recordProgress(correlationId,
+        static_cast<uint64_t>(req.generation), 0,
+        PublishStage::Validated, nowUs);
+
     auto result = executor_.publish(engine_, std::move(worldOwner));
     if (result != PublishResult::Success) {
         // publish 失敗: activate/crossfade/retire は一切行わない
         if (!req.newDSP.isNull())
             lifetime_.retire(newDSPResolved);
+        // ★ v19: StateOwner + TelemetryRecorder 記録
+        stateOwner_.onExecutorFailed(correlationId.shortValue());
+        telemetryRecorder_.recordFailure(FailureStage::Execution,
+            FailureReason::PublishFailed, "trySubmit:publish",
+            correlationId.shortValue(), nowUs);
+        telemetryRecorder_.recordProgress(correlationId,
+            static_cast<uint64_t>(req.generation), 0,
+            PublishStage::Published, nowUs);
         return PublicationAdmission::Decision::RejectedShutdown;
     }
+
+    // ★ v19: StateOwner + TelemetryRecorder: Published 記録
+    stateOwner_.onPublished(correlationId.shortValue());
+    telemetryRecorder_.recordProgress(correlationId,
+        static_cast<uint64_t>(req.generation), 0,
+        PublishStage::Published, nowUs);
 
     // ---- Phase 3: Publish 成功確認後に DSP Lifetime 操作 ----
     // ★ activate は publish 成功後にのみ実行する。
@@ -43426,6 +43668,10 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
     const PublicationAdmission::PublishRequest& req) noexcept
 {
     auto decision = trySubmit(req);
+    const auto nowUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
     switch (decision) {
         case PublicationAdmission::Decision::Accepted:
             return;
@@ -43433,10 +43679,28 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
             enqueueDeferred(req);
             return;
         case PublicationAdmission::Decision::RejectedStaleGeneration:
+            stateOwner_.onRejected(0);
+            telemetryRecorder_.recordFailure(FailureStage::Admission,
+                FailureReason::StaleGeneration, "submitPublishRequest:stale",
+                0, nowUs);
+            return;
         case PublicationAdmission::Decision::RejectedNotFinalized:
+            stateOwner_.onRejected(0);
+            telemetryRecorder_.recordFailure(FailureStage::Admission,
+                FailureReason::ValidationFailed, "submitPublishRequest:notFinalized",
+                0, nowUs);
+            return;
         case PublicationAdmission::Decision::RejectedPressure:
+            stateOwner_.onRejected(0);
+            telemetryRecorder_.recordFailure(FailureStage::Admission,
+                FailureReason::QueuePressure, "submitPublishRequest:pressure",
+                0, nowUs);
+            return;
         case PublicationAdmission::Decision::RejectedShutdown:
-            // trySubmit が既に retireDSP 済み
+            stateOwner_.onRejected(0);
+            telemetryRecorder_.recordFailure(FailureStage::Shutdown,
+                FailureReason::ShutdownRejected, "submitPublishRequest:shutdown",
+                0, nowUs);
             return;
     }
 }
@@ -43476,6 +43740,14 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
         .enqueueTimestampUs = now
     };
     hasDeferred_ = true;
+
+    // ★ v19: DeferredHealth 記録
+    DeferredHealth dh;
+    dh.deferredCount = 1;
+    dh.oldestDeferredAgeMs = 0;  // 新規enqueue
+    dh.overwriteCount = convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
+    dh.lastDiscardReason = DiscardReason::None;
+    telemetryRecorder_.recordDeferredHealth(dh);
 }
 
 // ★ C-2.3: notifyTransitionComplete — stale discard 実装
@@ -43534,12 +43806,24 @@ void RuntimePublicationOrchestrator::notifyTransitionComplete(
 // ★ C-2.2: shutdown 時に deferred publish を強制消去
 void RuntimePublicationOrchestrator::clearDeferredForShutdown() noexcept
 {
+    const auto nowUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
     if (hasDeferred_) {
         if (deferredSlot_.has_value())
             deferredSlot_->lastDiscardReason = DiscardReason::ShutdownDiscard;
         deferredSlot_.reset();
         hasDeferred_ = false;
     }
+
+    // ★ v19: DeferredHealth 記録
+    DeferredHealth dh;
+    dh.deferredCount = 0;
+    dh.overwriteCount = convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
+    dh.lastDiscardReason = DiscardReason::ShutdownDiscard;
+    dh.lastDiscardTimestampUs = nowUs;
+    telemetryRecorder_.recordDeferredHealth(dh);
 }
 
 // ★ A-2.5: DrainAudit 用 — deferred publish 最長滞留時間
@@ -43554,6 +43838,35 @@ std::uint64_t RuntimePublicationOrchestrator::deferredOverwriteCount() const noe
     return convo::consumeAtomic(deferredOverwriteCount_, std::memory_order_acquire);
 }
 
+// ── CorrelationId 採番 ──
+CorrelationId RuntimePublicationOrchestrator::nextCorrelationId() noexcept
+{
+    const auto cid = telemetryRecorder_.nextCorrelationId(stateOwner_.state().engineInstanceId);
+    stateOwner_.setLastCorrelationId(cid);
+    return cid;
+}
+
+// ── 健全性スナップショット ──
+void RuntimePublicationOrchestrator::publishHealthSnapshot() noexcept
+{
+    const auto& state = stateOwner_.state();
+    const auto nowUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    OrchestratorHealthSnapshot snapshot;
+    snapshot.submittedCount = state.progress.submittedCount;
+    snapshot.publishedCount = state.progress.publishedCount;
+    snapshot.retiredCount = state.progress.retiredCount;
+    snapshot.reclaimedCount = state.progress.reclaimedCount;
+    snapshot.executorQueueDepth = state.progress.executorQueueDepth;
+    snapshot.lastProgressTimestampUs = state.progress.lastProgressTimestampUs;
+    snapshot.stuckStage = state.progress.detectStuckStage();
+    snapshot.timestampUs = nowUs;
+
+    telemetryRecorder_.recordHealth(snapshot);
+}
+
 } // namespace convo::isr
 
 ```
@@ -43564,6 +43877,9 @@ std::uint64_t RuntimePublicationOrchestrator::deferredOverwriteCount() const noe
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include "RuntimePublicationState.h"
+#include "TelemetryRecorder.h"
 #include "PublicationAdmission.h"
 #include "PublicationExecutor.h"
 #include "DSPTransition.h"
@@ -43574,14 +43890,6 @@ std::uint64_t RuntimePublicationOrchestrator::deferredOverwriteCount() const noe
 class AudioEngine;
 
 namespace convo::isr {
-
-// ★ C-2.1: DiscardReason — deferred publish が破棄された理由
-enum class DiscardReason : uint8_t {
-    None,
-    ShutdownDiscard,
-    StaleDiscard,
-    SupersededDiscard
-};
 
 // ★ C-2.1: DeferredGuard — stale discard 用のガード情報
 struct DeferredGuard {
@@ -43603,9 +43911,12 @@ struct DeferredPublishSlot {
 //
 // ★ activate (DSP スロット書き換え) は publish 成功後に行う。
 // ★ submitPublishRequest → evaluate → Accepted → execute の順を厳守。
+//
+// ★ v19: StateOwner + TelemetryRecorder の両方を保持。
+//   Orchestrator が stateOwner.onXxx() + telemetryRecorder.recordXxx() を呼ぶ。
 class RuntimePublicationOrchestrator {
 public:
-    explicit RuntimePublicationOrchestrator(AudioEngine& engine) noexcept;
+    explicit RuntimePublicationOrchestrator(AudioEngine& engine, uint64_t engineInstanceId) noexcept;
 
     // trySubmit: publish 要求を試行する。
     // Admission → Accepted の場合のみ Executor → DSPTransition まで実行。
@@ -43639,6 +43950,20 @@ public:
     // ★ C-2.1: 監査用 — deferred overwrite 回数
     [[nodiscard]] std::uint64_t deferredOverwriteCount() const noexcept;
 
+    // ── StateOwner アクセサ ──
+    [[nodiscard]] RuntimePublicationStateOwner& stateOwner() noexcept { return stateOwner_; }
+    [[nodiscard]] const RuntimePublicationStateOwner& stateOwner() const noexcept { return stateOwner_; }
+
+    // ── TelemetryRecorder アクセサ ──
+    [[nodiscard]] TelemetryRecorder& telemetryRecorder() noexcept { return telemetryRecorder_; }
+    [[nodiscard]] const TelemetryRecorder& telemetryRecorder() const noexcept { return telemetryRecorder_; }
+
+    // ── 健全性スナップショット ──
+    void publishHealthSnapshot() noexcept;
+
+    // ── CorrelationId 採番 ──
+    [[nodiscard]] CorrelationId nextCorrelationId() noexcept;
+
 private:
     // ★ C-2.1: std::optional<PublishRequest> → DeferredPublishSlot
     std::optional<DeferredPublishSlot> deferredSlot_;
@@ -43651,11 +43976,214 @@ private:
     void enqueueDeferred(const PublicationAdmission::PublishRequest& req) noexcept;
 
     AudioEngine& engine_;
+
+    // ★ v19: StateOwner + TelemetryRecorder (分離)
+    RuntimePublicationStateOwner stateOwner_;
+    TelemetryRecorder telemetryRecorder_;
+
     PublicationAdmission admission_;
     PublicationExecutor executor_;
     DSPTransition transition_;
     DSPLifetimeManager lifetime_;
     convo::RCUReader publicationReader;
+};
+
+} // namespace convo::isr
+
+```
+
+### 📄 `src\audioengine\RuntimePublicationState.h`
+
+```
+#pragma once
+
+#include <cstdint>
+#include <chrono>
+
+namespace convo::isr {
+
+// ★ C-2.1: DiscardReason — deferred publish が破棄された理由
+enum class DiscardReason : uint8_t {
+    None,
+    ShutdownDiscard,
+    StaleDiscard,
+    SupersededDiscard
+};
+
+// ★ PublicationLedger: 一次情報源。ProgressRecord は副産物。
+struct PublicationLedger {
+    uint64_t submittedCount{0};
+    uint64_t builtCount{0};
+    uint64_t validatedCount{0};
+    uint64_t publishedCount{0};
+    uint64_t retiredCount{0};
+    uint64_t reclaimedCount{0};
+    uint64_t rejectedCount{0};
+    uint64_t validationFailedCount{0};
+    uint64_t executorFailedCount{0};
+    uint64_t droppedProgressRecordCount{0};     // リング満杯によるドロップ累積数
+    uint64_t firstProgressDropUs{0};            // 初回ドロップ時刻
+    uint64_t lastProgressDropUs{0};             // 最終ドロップ時刻
+};
+
+// ★ OrchestratorForwardProgress: 7段階カウンタ + Stage-gap detection
+struct OrchestratorForwardProgress {
+    uint64_t submittedCount{0};      // Orchestrator が受付
+    uint64_t builtCount{0};          // Builder が構築完了
+    uint64_t validatedCount{0};      // Validator 通過
+    uint64_t executedCount{0};       // Executor 実行
+    uint64_t publishedCount{0};      // Coordinator publish 成功
+    uint64_t retiredCount{0};        // retire 完了
+    uint64_t reclaimedCount{0};      // reclaim 完了 (GC完了)
+    uint32_t executorQueueDepth{0};
+    uint64_t lastProgressTimestampUs{0};
+
+    // 停止位置の診断 (7段階)
+    enum class StuckStage : uint8_t {
+        None,
+        Builder,
+        Validator,
+        Executor,
+        Coordinator,
+        Retire,
+        Reclaim
+    };
+
+    [[nodiscard]] StuckStage detectStuckStage() const noexcept {
+        if (submittedCount > builtCount)     return StuckStage::Builder;
+        if (builtCount > validatedCount)     return StuckStage::Validator;
+        if (validatedCount > executedCount)  return StuckStage::Executor;
+        if (executedCount > publishedCount)  return StuckStage::Coordinator;
+        if (publishedCount > retiredCount)   return StuckStage::Retire;
+        if (retiredCount > reclaimedCount)   return StuckStage::Reclaim;
+        return StuckStage::None;
+    }
+};
+
+// ★ CorrelationId: 128bit 相当の相関ID。wrap不可。
+struct CorrelationId {
+    uint64_t engineInstanceId{0};   // 上位: Engine インスタンス識別子
+    uint64_t localCounter{0};       // 下位: 単調増加カウンタ (wrap不可)
+
+    // 出力時短縮 (Evidence等)
+    [[nodiscard]] uint64_t shortValue() const noexcept {
+        return localCounter;
+    }
+
+    [[nodiscard]] bool isValid() const noexcept {
+        return engineInstanceId != 0 || localCounter != 0;
+    }
+};
+
+// ★ RuntimePublicationState: StateOwner が所有する State + Ledger
+struct RuntimePublicationState {
+    PublicationLedger ledger;
+    OrchestratorForwardProgress progress;
+    CorrelationId lastCorrelationId{};
+    uint64_t engineInstanceId{0};
+    uint64_t shutdownGeneration{0};
+
+private:
+    friend class RuntimePublicationStateOwner;
+    // StateOwner のみが書込可能
+};
+
+// ============================================================
+// ★ RuntimePublicationStateOwner: State + Ledger のみ (軽量)
+//    GodObject化防止。Telemetry/Progress/Failure は呼ばない。
+// ============================================================
+class RuntimePublicationStateOwner {
+    friend class RuntimePublicationOrchestrator;  // 唯一の書込権限者
+public:
+    explicit RuntimePublicationStateOwner(uint64_t engineInstanceId) noexcept
+        : state_{}
+    {
+        state_.engineInstanceId = engineInstanceId;
+    }
+
+    // ── onXxx(): State + Ledger 更新のみ。Telemetry/Progress/Failure は呼ばない ──
+    void onSubmitted(uint64_t correlationIdShort) noexcept {
+        state_.ledger.submittedCount++;
+        state_.progress.submittedCount++;
+        state_.progress.lastProgressTimestampUs = timestampUs();
+    }
+
+    void onBuilt(uint64_t correlationIdShort) noexcept {
+        state_.ledger.builtCount++;
+        state_.progress.builtCount++;
+        state_.progress.lastProgressTimestampUs = timestampUs();
+    }
+
+    void onValidated(uint64_t correlationIdShort) noexcept {
+        state_.ledger.validatedCount++;
+        state_.progress.validatedCount++;
+        state_.progress.lastProgressTimestampUs = timestampUs();
+    }
+
+    void onPublished(uint64_t correlationIdShort) noexcept {
+        state_.ledger.publishedCount++;
+        state_.progress.publishedCount++;
+        state_.progress.lastProgressTimestampUs = timestampUs();
+    }
+
+    void onRetired(uint64_t correlationIdShort) noexcept {
+        state_.ledger.retiredCount++;
+        state_.progress.retiredCount++;
+        state_.progress.lastProgressTimestampUs = timestampUs();
+    }
+
+    void onReclaimed(uint64_t correlationIdShort) noexcept {
+        state_.ledger.reclaimedCount++;
+        state_.progress.reclaimedCount++;
+        state_.progress.lastProgressTimestampUs = timestampUs();
+    }
+
+    void onRejected(uint64_t correlationIdShort) noexcept {
+        state_.ledger.rejectedCount++;
+    }
+
+    void onValidationFailed(uint64_t correlationIdShort) noexcept {
+        state_.ledger.validationFailedCount++;
+    }
+
+    void onExecutorFailed(uint64_t correlationIdShort) noexcept {
+        state_.ledger.executorFailedCount++;
+    }
+
+    // ── ドロップ通知 ──
+    void notifyProgressDrop(uint64_t nowUs) noexcept {
+        state_.ledger.droppedProgressRecordCount++;
+        if (state_.ledger.firstProgressDropUs == 0)
+            state_.ledger.firstProgressDropUs = nowUs;
+        state_.ledger.lastProgressDropUs = nowUs;
+    }
+
+    // ── ExecutorQueueDepth ──
+    void setExecutorQueueDepth(uint32_t depth) noexcept {
+        state_.progress.executorQueueDepth = depth;
+    }
+
+    // ── ShutdownGeneration ──
+    void setShutdownGeneration(uint64_t generation) noexcept {
+        state_.shutdownGeneration = generation;
+    }
+
+    // ── CorrelationId ──
+    void setLastCorrelationId(const CorrelationId& cid) noexcept {
+        state_.lastCorrelationId = cid;
+    }
+
+    // ── 読み取り ──
+    [[nodiscard]] const RuntimePublicationState& state() const noexcept { return state_; }
+
+private:
+    RuntimePublicationState state_;
+
+    static uint64_t timestampUs() noexcept {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
 };
 
 } // namespace convo::isr
@@ -43972,6 +44500,538 @@ struct [[deprecated("Authority removed, use RuntimeSemanticSchema")]] EngineRunt
 };
 
 } // namespace convo
+
+```
+
+### 📄 `src\audioengine\ShutdownScope.h`
+
+```
+#pragma once
+
+#include <cstdint>
+#include <chrono>
+
+namespace convo::isr {
+
+// ShutdownDrainToken: shutdown drain 許可を表す move-only トークン。
+// ★ move-only (copy不可)
+// ★ consume() は一回限り利用
+// ★ consume() 内で now > expiration 検査必須
+struct ShutdownDrainToken {
+    uint64_t engineInstanceId{0};
+    uint64_t shutdownGeneration{0};
+    uint64_t generation{0};
+    uint64_t shutdownEpoch{0};
+    uint64_t expiration{0};
+
+    ShutdownDrainToken() noexcept = default;
+
+    ShutdownDrainToken(const ShutdownDrainToken&) = delete;
+    ShutdownDrainToken& operator=(const ShutdownDrainToken&) = delete;
+    ShutdownDrainToken(ShutdownDrainToken&&) noexcept = default;
+    ShutdownDrainToken& operator=(ShutdownDrainToken&&) noexcept = default;
+
+    // consume: トークンを消費して有効性を確認。
+    // 一回限り利用 (consume 後は無効化)
+    [[nodiscard]] bool consume() noexcept {
+        if (!valid_) return false;
+        valid_ = false;
+        if (expiration == 0) return true;  // 期限なし
+        const auto now = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        if (now > expiration) return false;  // 期限切れ
+        return true;
+    }
+
+    [[nodiscard]] bool isValid() const noexcept { return valid_; }
+
+private:
+    bool valid_ = true;
+};
+
+// ShutdownScope: shutdown 中のみ submitShutdownDrain() を許可するスコープ。
+// ★ shutdownGeneration 拘束 (thread非依存)
+// ★ Token move-only + consume() 一回限り + 期限切れ検査
+class ShutdownScope {
+public:
+    ShutdownScope(uint64_t engineInstanceId,
+                  uint64_t shutdownGeneration,
+                  uint64_t expiration = 0) noexcept
+        : engineInstanceId_(engineInstanceId)
+        , shutdownGeneration_(shutdownGeneration)
+        , expiration_(expiration)
+        , active_(true)
+    {
+    }
+
+    ~ShutdownScope() noexcept {
+        active_ = false;
+    }
+
+    ShutdownScope(const ShutdownScope&) = delete;
+    ShutdownScope& operator=(const ShutdownScope&) = delete;
+    ShutdownScope(ShutdownScope&&) noexcept = default;
+    ShutdownScope& operator=(ShutdownScope&&) noexcept = default;
+
+    // createToken: 有効な ShutdownDrainToken を生成。
+    // ★ Scope active 中のみ生成可能
+    [[nodiscard]] ShutdownDrainToken createToken(uint64_t generation,
+                                                  uint64_t shutdownEpoch) noexcept {
+        if (!active_) return ShutdownDrainToken{};
+        return ShutdownDrainToken{
+            .engineInstanceId = engineInstanceId_,
+            .shutdownGeneration = shutdownGeneration_,
+            .generation = generation,
+            .shutdownEpoch = shutdownEpoch,
+            .expiration = expiration_
+        };
+    }
+
+    [[nodiscard]] bool isActive() const noexcept { return active_; }
+    [[nodiscard]] uint64_t shutdownGeneration() const noexcept { return shutdownGeneration_; }
+    [[nodiscard]] uint64_t engineInstanceId() const noexcept { return engineInstanceId_; }
+
+private:
+    uint64_t engineInstanceId_;
+    uint64_t shutdownGeneration_;
+    uint64_t expiration_;
+    bool active_;
+};
+
+} // namespace convo::isr
+
+```
+
+### 📄 `src\audioengine\TelemetryRecorder.cpp`
+
+```
+#include "TelemetryRecorder.h"
+#include "RuntimePublicationState.h"
+#include <chrono>
+
+namespace convo::isr {
+
+namespace {
+    uint64_t nowUs() noexcept {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+}
+
+void TelemetryRecorder::recordProgress(
+    const CorrelationId& correlationId,
+    uint64_t generation,
+    uint64_t worldId,
+    PublishStage stage,
+    uint64_t timestampUs) noexcept
+{
+    const PublicationProgressRecord record{
+        .correlationIdShort = correlationId.shortValue(),
+        .generation = generation,
+        .worldId = worldId,
+        .stage = stage,
+        .timestampUs = timestampUs != 0 ? timestampUs : nowUs()
+    };
+
+    const auto pushResult = progressRecords_.tryPush(record);
+    if (pushResult.overwritten) {
+        // リングオーバーライト → ドロップ通知
+        if (stateOwner_ != nullptr) {
+            const auto dropTime = nowUs();
+            stateOwner_->notifyProgressDrop(dropTime);
+        }
+    }
+}
+
+void TelemetryRecorder::recordFailure(
+    FailureStage stage,
+    FailureReason reason,
+    const char* origin,
+    uint64_t correlationIdShort,
+    uint64_t timestampUs) noexcept
+{
+    const auto ts = timestampUs != 0 ? timestampUs : nowUs();
+    const FailureRecord record{
+        .correlationIdShort = correlationIdShort,
+        .stage = stage,
+        .reason = reason,
+        .origin = origin,
+        .timestampUs = ts
+    };
+    const auto pushResult = failureRecords_.tryPush(record);
+
+    // ★ Snapshot 自動生成判定: FailureRecord リングバッファの現在件数を failureCount として渡す
+    const uint64_t currentFailureCount = failureRecords_.size();
+    if (pushResult.success && snapshotController_.shouldTakeSnapshot(reason, currentFailureCount, ts)) {
+        FailureSnapshot snap{
+            .correlationIdShort = correlationIdShort,
+            .stage = stage,
+            .reason = reason,
+            .origin = origin,
+            .timestampUs = ts
+        };
+        failureSnapshots_.tryPush(snap);
+        snapshotController_.recordSnapshotTaken(ts);
+    }
+}
+
+bool TelemetryRecorder::recordFailureSnapshot(
+    const FailureSnapshot& snapshot,
+    uint64_t failureCount,
+    uint64_t nowUs) noexcept
+{
+    if (!snapshotController_.shouldTakeSnapshot(snapshot.reason, failureCount, nowUs))
+        return false;
+
+    failureSnapshots_.tryPush(snapshot);
+    snapshotController_.recordSnapshotTaken(nowUs);
+    return true;
+}
+
+void TelemetryRecorder::recordHealth(const OrchestratorHealthSnapshot& snapshot) noexcept {
+    lastHealthSnapshot_.store(snapshot, std::memory_order_release);
+}
+
+void TelemetryRecorder::recordDeferredHealth(const DeferredHealth& health) noexcept {
+    lastDeferredHealth_.store(health, std::memory_order_release);
+}
+
+void TelemetryRecorder::recordRetireTimeline(const RetireTimelineRecord& record) noexcept {
+    retireTimelines_.tryPush(record);
+}
+
+void TelemetryRecorder::recordRetireStall(const RetireStallSnapshot& stall) noexcept {
+    lastRetireStall_.store(stall, std::memory_order_release);
+}
+
+TelemetryRecorder::TelemetrySnapshot TelemetryRecorder::captureSnapshot() const noexcept {
+    TelemetrySnapshot snap{};
+
+    snap.failureRecordCount = failureRecords_.readLatest(snap.failureRecords.data(),
+        snap.failureRecords.size());
+    snap.failureSnapshotCount = failureSnapshots_.readLatest(snap.failureSnapshots.data(),
+        snap.failureSnapshots.size());
+    snap.progressRecordCount = progressRecords_.readLatest(snap.progressRecords.data(),
+        snap.progressRecords.size());
+    snap.progressOverwriteCount = progressRecords_.overwriteCount();
+    snap.lastHealthSnapshot = lastHealthSnapshot_.load(std::memory_order_acquire);
+    snap.lastDeferredHealth = lastDeferredHealth_.load(std::memory_order_acquire);
+    snap.lastRetireStall = lastRetireStall_.load(std::memory_order_acquire);
+
+    return snap;
+}
+
+} // namespace convo::isr
+
+```
+
+### 📄 `src\audioengine\TelemetryRecorder.h`
+
+```
+#pragma once
+
+#include <cstdint>
+#include <atomic>
+#include <array>
+#include "RuntimePublicationState.h"
+
+namespace convo::isr {
+
+// ★ PublishStage: 出版進捗段階
+enum class PublishStage : uint8_t {
+    Submitted,
+    Built,
+    Validated,
+    Published,
+    Retired,
+    Reclaimed
+};
+
+// ★ FailureStage: 失敗発生段階
+enum class FailureStage : uint8_t {
+    None,
+    Admission,
+    Validation,
+    Execution,
+    Bridge,
+    Shutdown
+};
+
+// ★ FailureReason: 失敗理由
+enum class FailureReason : uint8_t {
+    None,
+    AdmissionRejected,
+    ValidationFailed,
+    PublishFailed,
+    BridgeFailed,
+    ShutdownRejected,
+    StaleGeneration,
+    QueuePressure,
+    Count   // バケット数。常に最後
+};
+
+// ★ FailureRecord: 軽量失敗レコード (常時記録)
+struct FailureRecord {
+    uint64_t correlationIdShort{0};
+    FailureStage stage{FailureStage::None};
+    FailureReason reason{FailureReason::None};
+    const char* origin{nullptr};
+    uint64_t timestampUs{0};
+};
+
+// ★ FailureSnapshot: 詳細版 (閾値超過時のみ)
+struct FailureSnapshot {
+    uint64_t correlationIdShort{0};
+    uint64_t publicationSequenceId{0};
+    uint64_t generation{0};
+    uint64_t worldId{0};
+    FailureStage stage{FailureStage::None};
+    FailureReason reason{FailureReason::None};
+    const char* origin{nullptr};
+    uint64_t threadId{0};
+    uint64_t coordinatorState{0};
+    uint64_t shutdownPhase{0};
+    uint64_t publicationClass{0};
+    uint64_t activeReaderCount{0};
+    uint64_t minReaderEpoch{0};
+    uint64_t currentEpoch{0};
+    uint64_t timestampUs{0};
+};
+
+// ★ PublicationProgressRecord: 出版進捗レコード
+struct PublicationProgressRecord {
+    uint64_t correlationIdShort{0};
+    uint64_t generation{0};
+    uint64_t worldId{0};
+    PublishStage stage{PublishStage::Submitted};
+    uint64_t timestampUs{0};
+};
+
+// ★ PublicationClass: Stall 閾値分類
+enum class PublicationClass : uint8_t {
+    FastPath,      // 5s  — 通常publish
+    HeavyBuild,    // 30s — 大規模IR再構築
+    Shutdown       // 60s — shutdown publish
+};
+
+// ★ OrchestratorHealthSnapshot: 健全性スナップショット
+struct OrchestratorHealthSnapshot {
+    uint64_t submittedCount{0};
+    uint64_t publishedCount{0};
+    uint64_t retiredCount{0};
+    uint64_t reclaimedCount{0};
+    uint32_t executorQueueDepth{0};
+    uint64_t lastProgressTimestampUs{0};
+    OrchestratorForwardProgress::StuckStage stuckStage{OrchestratorForwardProgress::StuckStage::None};
+    uint64_t timestampUs{0};
+};
+
+// ★ RetireTimelineRecord: 退役タイムラインレコード
+struct RetireTimelineRecord {
+    uint64_t publicationSequenceId{0};
+    uint64_t generation{0};
+    uint64_t worldId{0};
+    uint64_t retireEpoch{0};
+    uint64_t reclaimEpoch{0};
+};
+
+// ★ RetireStallSnapshot: Retire停滞スナップショット
+struct RetireStallSnapshot {
+    uint64_t publicationSequenceId{0};
+    uint64_t generation{0};
+    uint64_t retireEpoch{0};
+    uint64_t reclaimEpoch{0};       // 0=未完了
+    uint64_t activeReaderCount{0};
+    uint64_t minReaderEpoch{0};
+    uint64_t currentEpoch{0};
+    uint64_t pendingRetireCount{0};
+};
+
+// ★ DeferredHealth: Deferred Publish 健全性
+struct DeferredHealth {
+    uint64_t deferredCount{0};
+    uint64_t oldestDeferredAgeMs{0};
+    uint64_t overwriteCount{0};
+    DiscardReason lastDiscardReason{DiscardReason::None};
+    uint64_t lastDiscardTimestampUs{0};
+};
+
+// ★ FailureSnapshotController: FailureReason 別独立バケット
+class FailureSnapshotController {
+public:
+    static constexpr uint32_t kMaxSnapshotsPerMinute = 10;
+    static constexpr uint64_t kBucketRefreshIntervalUs = 60'000'000;  // 60秒
+    static constexpr uint64_t kMinSnapshotIntervalUs = 1'000'000;     // 1秒
+
+    bool shouldTakeSnapshot(FailureReason reason, uint64_t failureCount, uint64_t nowUs) noexcept {
+        auto& bucket = buckets_[static_cast<size_t>(reason)];
+        const uint64_t bucketStart = bucket.minuteStartUs_.load(std::memory_order_acquire);
+        if (nowUs - bucketStart > kBucketRefreshIntervalUs) {
+            bucket.minuteStartUs_.store(nowUs, std::memory_order_release);
+            bucket.snapshotCountThisMinute_.store(0, std::memory_order_release);
+        }
+        if (failureCount <= failureSnapshotThreshold_)
+            return false;
+        const uint64_t lastSnap = lastSnapshotTimestampUs_.load(std::memory_order_acquire);
+        if (nowUs - lastSnap < kMinSnapshotIntervalUs)
+            return false;
+        return bucket.snapshotCountThisMinute_.fetch_add(1, std::memory_order_acq_rel)
+            < kMaxSnapshotsPerMinute;
+    }
+
+    void setFailureSnapshotThreshold(uint64_t threshold) noexcept {
+        failureSnapshotThreshold_ = threshold;
+    }
+
+    void recordSnapshotTaken(uint64_t nowUs) noexcept {
+        lastSnapshotTimestampUs_.store(nowUs, std::memory_order_release);
+    }
+
+private:
+    struct ReasonBucket {
+        std::atomic<uint32_t> snapshotCountThisMinute_{0};
+        std::atomic<uint64_t> minuteStartUs_{0};
+    };
+    std::array<ReasonBucket, static_cast<size_t>(FailureReason::Count)> buckets_{};
+    std::atomic<uint64_t> lastSnapshotTimestampUs_{0};
+    uint64_t failureSnapshotThreshold_{10};  // デフォルト閾値
+};
+
+// ★ RingBuffer (固定サイズ)
+template<typename T, size_t N>
+class FixedRingBuffer {
+public:
+    static_assert(N > 0 && N <= 65536, "RingBuffer size must be 1..65536");
+
+    // PushResult: tryPush の結果。overwriteDetection 有効時のみ overwritten が正確。
+    struct PushResult {
+        bool success;        // 常に true (overwrite方式)
+        bool overwritten;    // 今回のpushで既存エントリを上書きした場合 true
+    };
+
+    PushResult tryPush(const T& item) noexcept {
+        const auto idx = writePos_.fetch_add(1, std::memory_order_acq_rel);
+        const auto slot = idx % N;
+        data_[slot] = item;
+        const bool overwritten = (idx >= N);
+        if (overwritten) {
+            overwriteCount_.fetch_add(1, std::memory_order_release);
+        }
+        return PushResult{true, overwritten};
+    }
+
+    [[nodiscard]] size_t size() const noexcept {
+        const auto wp = writePos_.load(std::memory_order_acquire);
+        return wp < N ? wp : N;
+    }
+
+    [[nodiscard]] size_t capacity() const noexcept { return N; }
+
+    [[nodiscard]] uint64_t overwriteCount() const noexcept {
+        return overwriteCount_.load(std::memory_order_acquire);
+    }
+
+    // 最新 count 件を取得 (count <= N)
+    [[nodiscard]] size_t readLatest(T* out, size_t count) const noexcept {
+        const auto wp = writePos_.load(std::memory_order_acquire);
+        const auto available = wp < N ? wp : N;
+        const auto toRead = count < available ? count : available;
+        const auto startIdx = wp - toRead;
+        for (size_t i = 0; i < toRead; ++i) {
+            out[i] = data_[(startIdx + i) % N];
+        }
+        return toRead;
+    }
+
+private:
+    std::array<T, N> data_{};
+    std::atomic<uint64_t> writePos_{0};
+    std::atomic<uint64_t> overwriteCount_{0};
+};
+
+// ============================================================
+// ★ TelemetryRecorder: 副産物専用。StateOwner から完全分離
+// ============================================================
+class RuntimePublicationStateOwner;
+
+class TelemetryRecorder {
+public:
+    TelemetryRecorder() noexcept = default;
+
+    // ── 進捗記録 ──
+    void recordProgress(const CorrelationId& correlationId,
+                        uint64_t generation,
+                        uint64_t worldId,
+                        PublishStage stage,
+                        uint64_t timestampUs) noexcept;
+
+    // ── 失敗記録 ──
+    void recordFailure(FailureStage stage,
+                       FailureReason reason,
+                       const char* origin,
+                       uint64_t correlationIdShort,
+                       uint64_t timestampUs) noexcept;
+
+    // ── 詳細スナップショット (条件付き) ──
+    bool recordFailureSnapshot(const FailureSnapshot& snapshot,
+                               uint64_t failureCount,
+                               uint64_t nowUs) noexcept;
+
+    // ── 健全性 ──
+    void recordHealth(const OrchestratorHealthSnapshot& snapshot) noexcept;
+
+    // ── DeferredHealth ──
+    void recordDeferredHealth(const DeferredHealth& health) noexcept;
+
+    // ── RetireTimeline ──
+    void recordRetireTimeline(const RetireTimelineRecord& record) noexcept;
+
+    // ── RetireStall ──
+    void recordRetireStall(const RetireStallSnapshot& stall) noexcept;
+
+    // ── CorrelationId 採番 ──
+    [[nodiscard]] CorrelationId nextCorrelationId(uint64_t engineInstanceId) noexcept {
+        const uint64_t counter = localCounter_.fetch_add(1, std::memory_order_acq_rel);
+        return CorrelationId{engineInstanceId, counter};
+    }
+
+    // ── スナップショット取得 (Evidence出力用) ──
+    struct TelemetrySnapshot {
+        std::array<FailureRecord, 512> failureRecords{};
+        size_t failureRecordCount{0};
+        std::array<FailureSnapshot, 64> failureSnapshots{};
+        size_t failureSnapshotCount{0};
+        std::array<PublicationProgressRecord, 4096> progressRecords{};
+        size_t progressRecordCount{0};
+        uint64_t progressOverwriteCount{0};  // ★ リングオーバーライト累積数
+        OrchestratorHealthSnapshot lastHealthSnapshot{};
+        DeferredHealth lastDeferredHealth{};
+        RetireStallSnapshot lastRetireStall{};
+    };
+
+    [[nodiscard]] TelemetrySnapshot captureSnapshot() const noexcept;
+
+    // ── 状態通知: StateOwner へのドロップ通知 ──
+    void setStateOwner(RuntimePublicationStateOwner* owner) noexcept {
+        stateOwner_ = owner;
+    }
+
+private:
+    FixedRingBuffer<FailureRecord, 512> failureRecords_;
+    FixedRingBuffer<FailureSnapshot, 64> failureSnapshots_;
+    FixedRingBuffer<PublicationProgressRecord, 4096> progressRecords_;
+    FixedRingBuffer<RetireTimelineRecord, 4096> retireTimelines_;
+    std::atomic<OrchestratorHealthSnapshot> lastHealthSnapshot_{};
+    std::atomic<DeferredHealth> lastDeferredHealth_{};
+    std::atomic<RetireStallSnapshot> lastRetireStall_{};
+    std::atomic<uint64_t> localCounter_{1};  // 0は無効値
+    FailureSnapshotController snapshotController_;
+    RuntimePublicationStateOwner* stateOwner_{nullptr};
+};
+
+} // namespace convo::isr
 
 ```
 
@@ -50370,7 +51430,49 @@ private:
     {
         std::atomic<uint64_t> epoch { kInactiveEpoch };
         std::atomic<uint32_t> depth { 0 };
+        std::atomic<uint64_t> enterCount { 0 };  // ★ P3-1: enter 回数のみカウント（軽量）
     };
+
+    // ★ P3-1: 複合判定による Reader Stuck 検出
+    struct StuckReaderInfo {
+        int readerIndex{-1};
+        uint64_t readerEpoch{0};
+        uint64_t enterCount{0};
+        uint64_t currentEpoch{0};
+        uint64_t minReaderEpoch{0};
+        uint32_t pendingRetireCount{0};
+        bool isStuck{false};
+    };
+
+    [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept {
+        StuckReaderInfo info;
+        info.currentEpoch = globalEpoch.load(std::memory_order_acquire);
+        info.minReaderEpoch = getMinReaderEpoch();
+        info.pendingRetireCount = deferredDeletionQueue.sizeApprox();
+
+        for (int i = 0; i < kMaxReaders; ++i) {
+            const auto& slot = readers[i];
+            const uint64_t readerEpoch = slot.epoch.load(std::memory_order_acquire);
+            if (readerEpoch == kInactiveEpoch)
+                continue;
+
+            const uint64_t ec = slot.enterCount.load(std::memory_order_relaxed);
+            const uint32_t depth = slot.depth.load(std::memory_order_acquire);
+
+            // 複合判定: enterCount + epoch 長時間滞留 + depth + pendingRetire
+            if (depth > 0 && readerEpoch < info.currentEpoch) {
+                const uint64_t epochGap = info.currentEpoch - readerEpoch;
+                if (epochGap > stuckThreshold) {
+                    info.readerIndex = i;
+                    info.readerEpoch = readerEpoch;
+                    info.enterCount = ec;
+                    info.isStuck = true;
+                    break;
+                }
+            }
+        }
+        return info;
+    }
 
     std::atomic<uint64_t> globalEpoch;
     std::array<ReaderSlot, kMaxReaders> readers;
@@ -50752,6 +51854,7 @@ static constexpr int kObserveChannelCount = 13;
 
 #include <thread>
 #include <type_traits>
+#include <cstdint>
 
 #include "RCUReader.h"
 #include "GlobalSnapshot.h"
@@ -50795,6 +51898,12 @@ struct ObservedRuntime
             return nullptr;
 #endif
         return ptr;
+    }
+
+    // ★ P2-3: generation 簡易 getter
+    [[nodiscard]] uint64_t generation() const noexcept
+    {
+        return ptr ? ptr->generation : 0;
     }
 
     explicit operator bool() const noexcept
@@ -51067,12 +52176,20 @@ struct RetireBoundaryTelemetry
 #include <atomic>
 #include <type_traits>
 #include <utility>
+#include <cstdint>
 #include "RuntimeTransition.h"
 #include "core/RuntimeStore.h"
 #include "AlignedAllocation.h"
 // New components are injected from AudioEngine level (not included directly to avoid circular deps)
 
 namespace convo {
+
+// ★ P0-1: PublishStageResult — Coordinator が返す最小限の結果
+enum class PublishStageResult : uint8_t {
+    Success,
+    Rejected,
+    Failed
+};
 
 struct RuntimeBuildSnapshot;
 

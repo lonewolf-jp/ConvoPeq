@@ -19,13 +19,22 @@ public:
         RuntimeBuildSnapshot sealedSnapshot;
     };
 
+    // ★ P1-6: Pressure レベル (Adaptive Backpressure)
+    enum class PressureLevel : uint8_t {
+        Ready = 0,          // 通常運用
+        Pressure,           // retirePressurePublicationThrottleActive_ 有効化
+        RejectLowPriority,  // timer/crossfade publish を拒否
+        RejectMostRequests  // bootstrap以外の全publish拒否
+    };
+
     enum class Decision {
         Accepted,
         RejectedStaleGeneration,
         RejectedNotFinalized,
         RejectedPressure,
         RejectedShutdown,
-        DeferredFadingActive
+        DeferredFadingActive,
+        RejectedLowPriority   // ★ P1-6: 低優先度要求拒否
     };
 
     explicit PublicationAdmission() noexcept = default;

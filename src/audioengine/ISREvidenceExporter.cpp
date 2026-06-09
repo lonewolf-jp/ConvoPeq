@@ -151,9 +151,101 @@ void ensureArtifactRuntimeMetadata(const std::filesystem::path& path,
     }
 }
 
+// ── テレメトリJSON生成ヘルパー (P1-5) ──
+
+std::string buildFailureLogJson(const TelemetryRecorder::TelemetrySnapshot& snap)
+{
+    std::ostringstream oss;
+    oss << "{\n";
+    oss << "  \"artifact\": \"publication_failure_log.json\",\n";
+    oss << "  \"failureRecordCount\": " << snap.failureRecordCount << ",\n";
+    oss << "  \"failureSnapshotCount\": " << snap.failureSnapshotCount << ",\n";
+
+    oss << "  \"failureRecords\": [\n";
+    const auto maxFail = (std::min)(snap.failureRecordCount, snap.failureRecords.size());
+    for (size_t i = 0; i < maxFail; ++i) {
+        const auto& r = snap.failureRecords[i];
+        if (i > 0) oss << ",\n";
+        oss << "    {\"correlationId\":" << r.correlationIdShort
+            << ",\"stage\":" << static_cast<int>(r.stage)
+            << ",\"reason\":" << static_cast<int>(r.reason)
+            << ",\"origin\":\"" << (r.origin ? r.origin : "null")
+            << "\",\"timestampUs\":" << r.timestampUs << "}";
+    }
+    oss << "\n  ],\n";
+
+    oss << "  \"failureSnapshots\": [\n";
+    const auto maxSnap = (std::min)(snap.failureSnapshotCount, snap.failureSnapshots.size());
+    for (size_t i = 0; i < maxSnap; ++i) {
+        const auto& s = snap.failureSnapshots[i];
+        if (i > 0) oss << ",\n";
+        oss << "    {\"correlationId\":" << s.correlationIdShort
+            << ",\"seqId\":" << s.publicationSequenceId
+            << ",\"generation\":" << s.generation
+            << ",\"stage\":" << static_cast<int>(s.stage)
+            << ",\"reason\":" << static_cast<int>(s.reason)
+            << ",\"origin\":\"" << (s.origin ? s.origin : "null")
+            << "\",\"readerCount\":" << s.activeReaderCount
+            << ",\"timestampUs\":" << s.timestampUs << "}";
+    }
+    oss << "\n  ]\n";
+    oss << "}\n";
+    return oss.str();
+}
+
+std::string buildProgressLogJson(const TelemetryRecorder::TelemetrySnapshot& snap)
+{
+    std::ostringstream oss;
+    oss << "{\n";
+    oss << "  \"artifact\": \"publication_progress_log.json\",\n";
+    oss << "  \"progressRecordCount\": " << snap.progressRecordCount << ",\n";
+    oss << "  \"progressOverwriteCount\": " << snap.progressOverwriteCount << ",\n";
+
+    const auto& hs = snap.lastHealthSnapshot;
+    oss << "  \"healthSnapshot\": {\n";
+    oss << "    \"submitted\":" << hs.submittedCount
+        << ",\"published\":" << hs.publishedCount
+        << ",\"retired\":" << hs.retiredCount
+        << ",\"reclaimed\":" << hs.reclaimedCount
+        << ",\"queueDepth\":" << hs.executorQueueDepth
+        << ",\"stuckStage\":" << static_cast<int>(hs.stuckStage)
+        << ",\"timestampUs\":" << hs.timestampUs << "\n";
+    oss << "  },\n";
+
+    oss << "  \"progressRecords\": [\n";
+    const auto maxProg = (std::min)(snap.progressRecordCount, snap.progressRecords.size());
+    for (size_t i = 0; i < maxProg; ++i) {
+        const auto& p = snap.progressRecords[i];
+        if (i > 0) oss << ",\n";
+        oss << "    {\"correlationId\":" << p.correlationIdShort
+            << ",\"generation\":" << p.generation
+            << ",\"stage\":" << static_cast<int>(p.stage)
+            << ",\"timestampUs\":" << p.timestampUs << "}";
+    }
+    oss << "\n  ]\n";
+    oss << "}\n";
+    return oss.str();
+}
+
+std::string buildDeferredHealthJson(const TelemetryRecorder::TelemetrySnapshot& snap)
+{
+    const auto& dh = snap.lastDeferredHealth;
+    std::ostringstream oss;
+    oss << "{\n";
+    oss << "  \"artifact\": \"deferred_health.json\",\n";
+    oss << "  \"deferredCount\": " << dh.deferredCount << ",\n";
+    oss << "  \"oldestDeferredAgeMs\": " << dh.oldestDeferredAgeMs << ",\n";
+    oss << "  \"overwriteCount\": " << dh.overwriteCount << ",\n";
+    oss << "  \"lastDiscardReason\": " << static_cast<int>(dh.lastDiscardReason) << ",\n";
+    oss << "  \"lastDiscardTimestampUs\": " << dh.lastDiscardTimestampUs << "\n";
+    oss << "}\n";
+    return oss.str();
+}
+
 } // namespace
 
-void EvidenceExporter::exportEvidence()
+void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot* snapshot,
+                                      uint64_t monotonicViolationCount)
 {
     const auto root = artifactRoot();
     const auto buildMode = buildModeName();
@@ -164,11 +256,18 @@ void EvidenceExporter::exportEvidence()
     const bool isRelease = (buildMode == "Release");
     const bool isDebug = (buildMode == "Debug");
 
+    // ★ P1-9: monotonic violation count を Evidence に含める
     const auto mutationFaultTrace = std::string("{\"artifact\":\"mutation_fault_trace.json\",\"schema\":\"mutation_fault_trace_v1\",\"status\":\"generated\",\"violations\":")
         + std::to_string(convo::isr::sealViolationCountValue())
+        + ",\"monotonicViolationCount\":" + std::to_string(monotonicViolationCount)
         + "}";
 
-    const std::array<std::pair<const char*, const char*>, 8> artifacts{{
+    // ★ P1-5: テレメトリエビデンスデータ
+    const auto failureLogJson = snapshot ? buildFailureLogJson(*snapshot) : std::string{};
+    const auto progressLogJson = snapshot ? buildProgressLogJson(*snapshot) : std::string{};
+    const auto deferredHealthJson = snapshot ? buildDeferredHealthJson(*snapshot) : std::string{};
+
+    const std::array<std::pair<const char*, const char*>, 11> artifacts{{
         {"closure_graph.json", "{\"artifact\":\"closure_graph.json\",\"schema\":\"closure_graph_v1\",\"status\":\"generated\",\"nodeCount\":0,\"edgeCount\":0,\"descriptorCoverageComplete\":true,\"externalMutableDependencies\":0}"},
         {"mutation_fault_trace.json", mutationFaultTrace.c_str()},
         {"hb_graph_trace.json", "{\"artifact\":\"hb_graph_trace.json\",\"schema\":\"hb_trace_v1\",\"status\":\"generated\",\"eventCount\":0}"},
@@ -176,15 +275,21 @@ void EvidenceExporter::exportEvidence()
         {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v1\",\"status\":\"generated\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":true,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0}"},
         {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"generated\",\"phase\":0,\"verified\":true,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0}"},
         {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"generated\",\"withinThreshold\":true}"},
-        {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"generated\",\"violations\":0,\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"}
+        {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"generated\",\"violations\":0,\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"},
+        {"publication_failure_log.json", failureLogJson.c_str()},
+        {"publication_progress_log.json", progressLogJson.c_str()},
+        {"deferred_health.json", deferredHealthJson.c_str()}
     }};
 
-    const std::array<const char*, 5> debugArtifacts{{
+    const std::array<const char*, 8> debugArtifacts{{
         "closure_graph.json",
         "mutation_fault_trace.json",
         "hb_graph_trace.json",
         "shutdown_trace.json",
-        "retire_timeline.json"
+        "retire_timeline.json",
+        "publication_failure_log.json",
+        "publication_progress_log.json",
+        "deferred_health.json"
     }};
 
     std::string manifest = "{\n";

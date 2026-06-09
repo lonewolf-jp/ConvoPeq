@@ -2,6 +2,7 @@
 
 #include <thread>
 #include <type_traits>
+#include <cstdint>
 
 #include "RCUReader.h"
 #include "GlobalSnapshot.h"
@@ -45,6 +46,12 @@ struct ObservedRuntime
             return nullptr;
 #endif
         return ptr;
+    }
+
+    // ★ P2-3: generation 簡易 getter
+    [[nodiscard]] uint64_t generation() const noexcept
+    {
+        return ptr ? ptr->generation : 0;
     }
 
     explicit operator bool() const noexcept

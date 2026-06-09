@@ -175,6 +175,13 @@ public:
         return epochDomain_->pendingRetireCount();
     }
 
+    /** ★ P1-4: drainAll 委譲 */
+    void drainAll() noexcept
+    {
+        assert(epochDomain_ != nullptr);
+        epochDomain_->drainAll();
+    }
+
 private:
     EpochDomain* epochDomain_ = nullptr;
 };

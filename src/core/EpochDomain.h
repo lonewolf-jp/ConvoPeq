@@ -238,7 +238,49 @@ private:
     {
         std::atomic<uint64_t> epoch { kInactiveEpoch };
         std::atomic<uint32_t> depth { 0 };
+        std::atomic<uint64_t> enterCount { 0 };  // ★ P3-1: enter 回数のみカウント（軽量）
     };
+
+    // ★ P3-1: 複合判定による Reader Stuck 検出
+    struct StuckReaderInfo {
+        int readerIndex{-1};
+        uint64_t readerEpoch{0};
+        uint64_t enterCount{0};
+        uint64_t currentEpoch{0};
+        uint64_t minReaderEpoch{0};
+        uint32_t pendingRetireCount{0};
+        bool isStuck{false};
+    };
+
+    [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept {
+        StuckReaderInfo info;
+        info.currentEpoch = globalEpoch.load(std::memory_order_acquire);
+        info.minReaderEpoch = getMinReaderEpoch();
+        info.pendingRetireCount = deferredDeletionQueue.sizeApprox();
+
+        for (int i = 0; i < kMaxReaders; ++i) {
+            const auto& slot = readers[i];
+            const uint64_t readerEpoch = slot.epoch.load(std::memory_order_acquire);
+            if (readerEpoch == kInactiveEpoch)
+                continue;
+
+            const uint64_t ec = slot.enterCount.load(std::memory_order_relaxed);
+            const uint32_t depth = slot.depth.load(std::memory_order_acquire);
+
+            // 複合判定: enterCount + epoch 長時間滞留 + depth + pendingRetire
+            if (depth > 0 && readerEpoch < info.currentEpoch) {
+                const uint64_t epochGap = info.currentEpoch - readerEpoch;
+                if (epochGap > stuckThreshold) {
+                    info.readerIndex = i;
+                    info.readerEpoch = readerEpoch;
+                    info.enterCount = ec;
+                    info.isStuck = true;
+                    break;
+                }
+            }
+        }
+        return info;
+    }
 
     std::atomic<uint64_t> globalEpoch;
     std::array<ReaderSlot, kMaxReaders> readers;

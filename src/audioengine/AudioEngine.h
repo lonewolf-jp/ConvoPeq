@@ -292,6 +292,12 @@ using RuntimePublishWorld = RuntimeState;
 static_assert(!std::is_default_constructible_v<RuntimePublishWorld>,
               "RuntimePublishWorld must not be default-constructible outside builder path");
 
+// ★ P0-2/3: Forward declarations for friend classes
+namespace convo::isr {
+    class PublicationExecutor;
+    class DSPTransition;
+}
+
 // AudioEngine.h  ── v0.2 (JUCE 8.0.12対応)
 //
 // オーディオエンジン - AudioSource実装
@@ -2716,9 +2722,20 @@ public:
     RuntimePublishStore runtimeStore;
     iso::audio_engine::RuntimePublicationValidator runtimePublicationValidator_;
 
+    // ★ P0-4: runtimeStore.observe() の getter ラッパー
+    [[nodiscard]] const RuntimePublishWorld* observePublishedWorld() const noexcept {
+        return RuntimePublicationCoordinator::consumePublishedWorld(runtimeStore);
+    }
+
     // RuntimePublicationOrchestrator: 前方宣言 + unique_ptr (循環依存回避)
     // 実体は AudioEngine.cpp のコンストラクタで初期化
     std::unique_ptr<convo::isr::RuntimePublicationOrchestrator> runtimeOrchestrator_;
+
+private:
+    // ★ P0-2/3: Coordinator生成は friend 宣言されたクラスに限定
+    friend class convo::isr::RuntimePublicationOrchestrator;
+    friend class convo::isr::PublicationExecutor;
+    friend class convo::isr::DSPTransition;
 
     [[nodiscard]] inline RuntimePublicationCoordinator makeRuntimePublicationCoordinator() noexcept
     {
@@ -2734,6 +2751,7 @@ public:
         coordinator.publishWorld(std::move(worldOwner));
     }
 
+public:
     [[nodiscard]] inline bool precheckRuntimePublication(const convo::isr::PayloadClosureDescriptor& closure,
                                                          const convo::isr::TieredPayloadDescriptor& descriptor) noexcept
     {
@@ -3469,6 +3487,10 @@ public:
     std::array<std::atomic<std::uint64_t>, convo::kObserveChannelCount> observeLastSeenSequenceId_ {};
     std::atomic<std::uint64_t> observeMonotonicViolationCount_ { 0 };
     std::atomic<bool> observeMonotonicRollbackRequested_ { false };
+
+    // ★ Engine インスタンス識別子 (全局一意。再生成後もユニーク)
+    static std::atomic<uint64_t> s_nextEngineInstanceId_;
+    uint64_t engineInstanceId_{0};
 
     // ==================================================================
 
