@@ -594,9 +594,99 @@ const bool requestedBypass = m_rtBypassShadow;
 
 ---
 
+## ISR Bridge Runtime 観点による修正計画の再評価
+
+### 分類再定義
+
+| # | ID | 改修種別 | ISR分類 | 扱い |
+|:-:|:--:|:--------:|:-------:|------|
+| 1 | C-01 | API追加 | **DESIGN (境界問題)** | `forceSetCurrentAndTargetValueRT` の命名を `applyImmediateValueRT` に変更。または RT shadow state 分離を検討 |
+| 2 | C-02 | 型安全化 | **SAFETY (改善)** | `std::bit_cast` は中間変数を使用した単純な形に |
+| 3 | C-03 | 寿命管理 | **BUG (真の破綻点)** | weakOwner化でOK。cancelledをowner stateに統合するのが本質的だが、スコープ外 |
+| 4 | H-04 | — | **DESIGN CHANGE** | ❌ バグではない。音響設計変更として扱い、本計画から除外 |
+| 5 | H-05 | 例外補完 | **SAFETY (設計妥協)** | catch追加は可。ISR的には error code 統一が望ましいが段階的対応 |
+| 6 | M-01 | 置換 | **BUG (軽微)** | 純粋置換で問題なし |
+| 7 | H-03 | データ整合性 | **BUG (真の破綻点)** | 修正方針は妥当。最優先で対応 |
+| 8 | M-03 | 最適化 | **OPTIMIZATION (近似変更)** | ❌ インクリメンタル追跡は数学的意味が変わる。sampling window または decay envelope に変更 |
+| 9 | M-05 | 明確化 | **DESIGN (明確化)** | スタック配列は block size 依存で危険。allocator cache reuse に変更 |
+| 10 | L-01 | — | **DESIGN (仕様依存)** | ❌ バグではない。「内部処理レベル測定」なら正しい仕様。本計画から除外 |
+| 11 | L-02 | 整理 | **OPTIMIZATION (死コード)** | 整理候補。ついでに処理 |
+| 12 | L-03 | コメント | **DOCUMENTATION** | 修正してよい |
+| 13 | H-01 | コメント | **DESIGN (明確化)** | コメントのみでOK |
+| 14 | H-02 | コメント | **SAFETY (過剰)** | コメントのみでOK |
+
+### 修正計画の改訂
+
+上記再評価を反映した改訂版フェーズ分割：
+
+#### Phase S: 真の破綻点（最優先）
+
+| 順序 | ID | タスク | ISR分類 | 見積時間 | 優先度 |
+|:----:|:--:|--------|:-------:|:--------:|:------:|
+| S.1 | C-03 | ProgressiveUpgradeThread weakOwner経由アクセス | **BUG** | 1h | ★★★ |
+| S.2 | H-03 | IR逆順 + SoA同時swap | **BUG** | 2h | ★★★ |
+
+#### Phase 1: Safety & Boundary Fix
+
+| 順序 | ID | タスク | ISR分類 | 見積時間 |
+|:----:|:--:|--------|:-------:|:--------:|
+| 1.1 | C-02 | union→`std::bit_cast`（中間変数形式） | **SAFETY** | 2h |
+| 1.2 | C-01 | `applyImmediateValueRT()` 命名で追加 | **DESIGN** | 1h |
+| 1.3 | M-01 | `std::abs`→`absNoLibm` | **BUG** | 0.5h |
+| 1.4 | H-05 | 例外補完（`catch`追加） | **SAFETY** | 0.5h |
+
+#### Phase 2: Design Clarity & Optimization
+
+| 順序 | ID | タスク | ISR分類 | 見積時間 |
+|:----:|:--:|--------|:-------:|:--------:|
+| 2.1 | M-05 | wetBuf[0]→allocator cache reuse | **DESIGN** | 1h |
+| 2.2 | L-02 | 到達不能 else 削除 | **OPTIMIZATION** | 0.5h |
+| 2.3 | M-03 | sampling window または decay envelope 方式に変更 | **OPTIMIZATION** | 2h |
+
+#### Phase 3: Documentation
+
+| 順序 | ID | タスク | ISR分類 | 見積時間 |
+|:----:|:--:|--------|:-------:|:--------:|
+| 3.1 | L-03 | コメント修正 | **DOC** | 0.5h |
+| 3.2 | H-01 | コメント追記 | **DESIGN** | 0.25h |
+| 3.3 | H-02 | コメント追記 | **SAFETY** | 0.25h |
+
+#### 除外項目（本計画から削除）
+
+| ID | 元の計画 | ISR判断 | 理由 |
+|:--:|:--------:|:-------:|------|
+| H-04 | Phase 2 | **DESIGN CHANGE** | 線形クロスフェードはバグではなく音響設計の選択。変更する場合は正式な仕様決定を経るべき |
+| M-03
+(元案) | Phase 3 | **OPTIMIZATION** | インクリメンタル最大値追跡はノイズ特性を変える近似変更。sampling window方式に差し替え |
+| L-01 | Phase 3 | **DESIGN** | 「内部処理レベル測定」が正しい仕様なら修正不要。測定定義の問題 |
+
+### 総合スケジュール（改訂版）
+
+| Phase | 内容 | 項目数 | 工数 | リスク |
+|:-----:|------|:------:|:----:|:------:|
+| S | 真の破綻点 | 2 | 3h | 中 |
+| 1 | Safety & Boundary Fix | 4 | 4h | 低〜中 |
+| 2 | Design & Optimization | 3 | 3.5h | 低 |
+| 3 | Documentation | 3 | 1h | 低 |
+| **合計** | | **12** | **11.5h** | |
+
+### 設計上の注意点
+
+1. **C-01の命名**: `forceSetCurrentAndTargetValueRT` ではなく `applyImmediateValueRT` を使用すること。"force" は ISR において例外経路を増幅する危険な命名。状態遷移の意味を明確化する命名が安定する。
+
+2. **C-02のbit_cast形式**: `std::bit_cast<double>(std::bit_cast<uint64_t>(x) & mask)` の2重ネストは避け、中間変数を使用すること。コンパイラの branch prediction 安定性と SIMD 展開容易性のため。
+
+3. **M-03の最適化方式**: インクリメンタル最大値追跡（元案）はリングバッファ上書きにより真の最大値を過小評価する。代わりに (a) sampling window based max または (b) decay envelope tracking を採用すること。
+
+4. **M-05のバッファ方式**: スタック配列（元案）は block size に依存するためオーバーフローの危険がある。`prepareToPlay` で `maxBlockSize` に基づき事前確保する allocator cache reuse 方式が安全。
+
+---
+
 ## 参考: 除外項目
 
 | ID | 理由 |
 |:--:|------|
 | **M-02** | オーバーサンプリング段の DC ブロッカーは高いサンプルレートで動作するため、1 Hz 設定が適切。オーディオ的観点で正しい設計。 |
 | **M-04** | `exchangeAtomic(observeMonotonicRollbackRequested_, false, ...)` で正しくリセットされている。誤報告。 |
+| **H-04** | 線形クロスフェードは音響設計の選択であってバグではない。本計画では除外。 |
+| **L-01** | 「内部処理レベル測定」が正しい仕様なら修正不要。測定定義の問題でありバグではない。 |

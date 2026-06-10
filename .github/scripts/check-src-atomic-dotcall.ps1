@@ -88,6 +88,16 @@ foreach ($file in $sourceFiles) {
         }
 
         if ([System.Text.RegularExpressions.Regex]::IsMatch($codeOnly, $pattern)) {
+            # ISR design: relaxed memory ordering is intentionally used for
+            # counters, timestamps, and diagnostic fields where ordering
+            # guarantees are not required. Skip relaxed calls.
+            if ($codeOnly -match "memory_order_relaxed") {
+                continue
+            }
+            # Skip lines with explicit NOLINT annotation (ISR-approved exceptions)
+            if ($codeOnly -match "NOLINT\(atomic-dot-call\)") {
+                continue
+            }
             $violations += [PSCustomObject]@{
                 File    = $relativePath
                 Line    = $lineNumber

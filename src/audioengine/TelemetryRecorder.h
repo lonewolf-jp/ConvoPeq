@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <atomic>
 #include <array>
+#include "AtomicAccess.h"
 #include "RuntimePublicationState.h"
 
 namespace convo::isr {
@@ -135,17 +136,17 @@ public:
 
     bool shouldTakeSnapshot(FailureReason reason, uint64_t failureCount, uint64_t nowUs) noexcept {
         auto& bucket = buckets_[static_cast<size_t>(reason)];
-        const uint64_t bucketStart = bucket.minuteStartUs_.load(std::memory_order_acquire);
+        const uint64_t bucketStart = convo::consumeAtomic(bucket.minuteStartUs_, std::memory_order_acquire);
         if (nowUs - bucketStart > kBucketRefreshIntervalUs) {
-            bucket.minuteStartUs_.store(nowUs, std::memory_order_release);
-            bucket.snapshotCountThisMinute_.store(0, std::memory_order_release);
+            convo::publishAtomic(bucket.minuteStartUs_, nowUs, std::memory_order_release);
+            convo::publishAtomic(bucket.snapshotCountThisMinute_, static_cast<uint32_t>(0), std::memory_order_release);
         }
         if (failureCount <= failureSnapshotThreshold_)
             return false;
-        const uint64_t lastSnap = lastSnapshotTimestampUs_.load(std::memory_order_acquire);
+        const uint64_t lastSnap = convo::consumeAtomic(lastSnapshotTimestampUs_, std::memory_order_acquire);
         if (nowUs - lastSnap < kMinSnapshotIntervalUs)
             return false;
-        return bucket.snapshotCountThisMinute_.fetch_add(1, std::memory_order_acq_rel)
+        return convo::fetchAddAtomic(bucket.snapshotCountThisMinute_, static_cast<uint32_t>(1), std::memory_order_acq_rel)
             < kMaxSnapshotsPerMinute;
     }
 
@@ -154,7 +155,7 @@ public:
     }
 
     void recordSnapshotTaken(uint64_t nowUs) noexcept {
-        lastSnapshotTimestampUs_.store(nowUs, std::memory_order_release);
+        convo::publishAtomic(lastSnapshotTimestampUs_, nowUs, std::memory_order_release);
     }
 
 private:
@@ -180,30 +181,30 @@ public:
     };
 
     PushResult tryPush(const T& item) noexcept {
-        const auto idx = writePos_.fetch_add(1, std::memory_order_acq_rel);
+        const auto idx = convo::fetchAddAtomic(writePos_, static_cast<uint64_t>(1), std::memory_order_acq_rel);
         const auto slot = idx % N;
         data_[slot] = item;
         const bool overwritten = (idx >= N);
         if (overwritten) {
-            overwriteCount_.fetch_add(1, std::memory_order_release);
+            convo::fetchAddAtomic(overwriteCount_, static_cast<uint64_t>(1), std::memory_order_release);
         }
         return PushResult{true, overwritten};
     }
 
     [[nodiscard]] size_t size() const noexcept {
-        const auto wp = writePos_.load(std::memory_order_acquire);
+        const auto wp = convo::consumeAtomic(writePos_, std::memory_order_acquire);
         return wp < N ? wp : N;
     }
 
     [[nodiscard]] size_t capacity() const noexcept { return N; }
 
     [[nodiscard]] uint64_t overwriteCount() const noexcept {
-        return overwriteCount_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(overwriteCount_, std::memory_order_acquire);
     }
 
     // 最新 count 件を取得 (count <= N)
     [[nodiscard]] size_t readLatest(T* out, size_t count) const noexcept {
-        const auto wp = writePos_.load(std::memory_order_acquire);
+        const auto wp = convo::consumeAtomic(writePos_, std::memory_order_acquire);
         const auto available = wp < N ? wp : N;
         const auto toRead = count < available ? count : available;
         const auto startIdx = wp - toRead;
@@ -261,7 +262,7 @@ public:
 
     // ── CorrelationId 採番 ──
     [[nodiscard]] CorrelationId nextCorrelationId(uint64_t engineInstanceId) noexcept {
-        const uint64_t counter = localCounter_.fetch_add(1, std::memory_order_acq_rel);
+        const uint64_t counter = convo::fetchAddAtomic(localCounter_, static_cast<uint64_t>(1), std::memory_order_acq_rel);
         return CorrelationId{engineInstanceId, counter};
     }
 

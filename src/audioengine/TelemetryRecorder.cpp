@@ -83,11 +83,11 @@ bool TelemetryRecorder::recordFailureSnapshot(
 }
 
 void TelemetryRecorder::recordHealth(const OrchestratorHealthSnapshot& snapshot) noexcept {
-    lastHealthSnapshot_.store(snapshot, std::memory_order_release);
+    convo::publishAtomic(lastHealthSnapshot_, snapshot, std::memory_order_release);
 }
 
 void TelemetryRecorder::recordDeferredHealth(const DeferredHealth& health) noexcept {
-    lastDeferredHealth_.store(health, std::memory_order_release);
+    convo::publishAtomic(lastDeferredHealth_, health, std::memory_order_release);
 }
 
 void TelemetryRecorder::recordRetireTimeline(const RetireTimelineRecord& record) noexcept {
@@ -95,7 +95,7 @@ void TelemetryRecorder::recordRetireTimeline(const RetireTimelineRecord& record)
 }
 
 void TelemetryRecorder::recordRetireStall(const RetireStallSnapshot& stall) noexcept {
-    lastRetireStall_.store(stall, std::memory_order_release);
+    convo::publishAtomic(lastRetireStall_, stall, std::memory_order_release);
 }
 
 TelemetryRecorder::TelemetrySnapshot TelemetryRecorder::captureSnapshot() const noexcept {
@@ -108,9 +108,9 @@ TelemetryRecorder::TelemetrySnapshot TelemetryRecorder::captureSnapshot() const 
     snap.progressRecordCount = progressRecords_.readLatest(snap.progressRecords.data(),
         snap.progressRecords.size());
     snap.progressOverwriteCount = progressRecords_.overwriteCount();
-    snap.lastHealthSnapshot = lastHealthSnapshot_.load(std::memory_order_acquire);
-    snap.lastDeferredHealth = lastDeferredHealth_.load(std::memory_order_acquire);
-    snap.lastRetireStall = lastRetireStall_.load(std::memory_order_acquire);
+    snap.lastHealthSnapshot = convo::consumeAtomic(lastHealthSnapshot_, std::memory_order_acquire);
+    snap.lastDeferredHealth = convo::consumeAtomic(lastDeferredHealth_, std::memory_order_acquire);
+    snap.lastRetireStall = convo::consumeAtomic(lastRetireStall_, std::memory_order_acquire);
 
     return snap;
 }

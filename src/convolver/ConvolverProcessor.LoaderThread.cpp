@@ -303,6 +303,10 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
     auto irLRaw = irL.release();
     auto irRRaw = irR.release();
 
+    // ★ H-02: ラムダ内で unique_ptr / ScopedAlignedPtr にラップしているため、
+    // weakOwner.get() が nullptr を返してもリソースは解放される。
+    // 唯一の未解放経路は JUCE シャットダウン時の MessageManager キュー破棄だが、
+    // これは正常シャットダウンで許容範囲の動作である。
     const bool queued = juce::MessageManager::callAsync([weakOwner = this->weakOwner,
                                      irLRaw,
                                      irRRaw,

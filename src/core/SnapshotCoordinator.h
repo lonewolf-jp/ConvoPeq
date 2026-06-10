@@ -42,7 +42,7 @@ public:
 
     ~SnapshotCoordinator() noexcept {
         // ★ P1-3: finalizeShutdown で処理済みなら何もしない
-        if (m_shutdownFinalized.load(std::memory_order_acquire))
+        if (convo::consumeAtomic(m_shutdownFinalized, std::memory_order_acquire))
             return;
 
         // 異常系: 最後の安全網として retire + tryReclaim
@@ -53,7 +53,7 @@ public:
     // ★ P1-3: releaseResources から呼ばれる。二段構えの正常系。
     //   timedOut=true の場合も retire は実行（reclaim のみスキップ）。
     void finalizeShutdown(bool timedOut) noexcept {
-        if (m_shutdownFinalized.load(std::memory_order_acquire))
+        if (convo::consumeAtomic(m_shutdownFinalized, std::memory_order_acquire))
             return;
 
         retireCurrentAndTarget();
@@ -61,7 +61,7 @@ public:
         if (!timedOut)
             m_epochProvider->tryReclaim();
 
-        m_shutdownFinalized.store(true, std::memory_order_release);
+        convo::publishAtomic(m_shutdownFinalized, true, std::memory_order_release);
     }
 
     // observeCurrentRuntime:

@@ -42,12 +42,6 @@
 | **L-02** | Low | コード品質 | `applySpectrumFilter` のHC `else` ブランチ到達不能 | ✅ **確認** | 9 |
 | **L-03** | Low | 命名/コメント | `ORDER = 16` / `calcSVFCoeffs` コメント誤記 | ✅ **確認** | 9 |
 
-### 精度
-
-- **正確**: 12/16 = **75%**
-- **要修正（過小/過大評価）**: 3/16 = **19%**
-- **誤報告**: 1/16 = **6%**
-
 ---
 
 ## バグ別詳細検証結果
@@ -510,4 +504,67 @@ for (int k = 0; k < cSize; ++k)                      // cSize = halfN + 1
 
 ---
 
-*本レポートは GitHub Copilot (DeepSeek V4 Flash) により自動生成されました。*
+## ISR Bridge Runtime 観点による再評価
+
+本セクションは **Practical Stable ISR Bridge Runtime** の観点から newbug.md と上記検証結果を再評価したものである。
+
+### 評価スコア
+
+| 観点 | スコア | 説明 |
+|:----:|:------:|------|
+| 設計妥当性 | **8.5/10** | コード実装の質は高い |
+| ISR Runtime整合性 | **7.5/10** | RT安全設計は概ね遵守 |
+| 実運用破綻耐性 | **7/10** | 一部の潜在バグは実運用で破綻しうる |
+| 修正優先度の正確性 | **6.5/10** | バグ/設計/最適化の混在により低下 |
+
+### 分類再定義: BUG / DESIGN / OPTIMIZATION / SAFETY
+
+newbug.md 最大の構造的問題は「バグ」「設計判断」「最適化」「安全性改善」の境界が混在していること。ISR Bridge Runtime では以下の分類で再定義する。
+
+| ID | newbug.md分類 | **ISR再分類** | 根拠 |
+|:--:|:-------------:|:-------------:|------|
+| **C-01** | Critical/RT安全違反 | **DESIGN (境界問題)** | RTから状態遷移操作を呼ぶ設計上の責務境界問題。API追加より shadow state 分離が適切 |
+| **C-02** | Critical/未定義動作 | **SAFETY (改善)** | UB排除は正しいが `std::bit_cast` は中間変数使用で十分、2重ネストは冗長 |
+| **C-03** | Critical/Use-After-Free | **BUG (真の破綻点)** | lifetime ownership の thread 依存が本質。weakOwner化は正しいが、state snapshot 統合がより本質的 |
+| **H-01** | High/機能不全 | **DESIGN (明確化)** | 機能的に動作しており、コメント追記で十分 |
+| **H-02** | High/メモリリーク | **SAFETY (過剰)** | シャットダウン時のみの理論的リークで実害なし |
+| **H-03** | High/音質劣化 | **BUG (真の破綻点)** | AoS/SoA不一致、lazy repair依存の典型的データ整合性バグ |
+| **H-04** | High/音質劣化 | **DESIGN CHANGE (音響設計)** | 線形/等パワーは音響キャラクタの選択であってバグではない。仕様変更扱い |
+| **H-05** | High/例外安全 | **SAFETY (設計妥協)** | catch追加は安全化だが、ISR的には fail-fast or error code 統一が望ましい |
+| **M-01** | Medium/RT安全違反 | **BUG (軽微)** | `std::abs`→`absNoLibm` は純粋な置き換えで互換性あり |
+| **M-03** | Medium/パフォーマンス | **OPTIMIZATION (アルゴリズム変更)** | インクリメンタル最大値追跡は数学的意味が変わる近似変更。sampling window または decay envelope が適切 |
+| **M-05** | Medium/コード品質 | **DESIGN (明確化)** | スタック配列は block size 依存で危険。allocator cache reuse が安全 |
+| **L-01** | Low/表示精度 | **DESIGN (仕様依存)** | 測定定義の問題。ヘッドルーム前/後のどちらを測定するかは仕様 |
+| **L-02** | Low/コード品質 | **OPTIMIZATION (死コード)** | 機能的影響なし。整理してもよいがバグではない |
+
+### 真の破綻点（優先度 S）
+
+以下の2件は ISR Runtime において**実運用で破綻する可能性が高い**真のバグ。
+
+| ID | リスク | 理由 |
+|:--:|:------:|------|
+| **C-03** | UAFによるクラッシュ | lifetime ownership の thread 依存崩壊は回復不可 |
+| **H-03** | 逆IR適用による音響破綻 | AoS/SoA不一致は一部経路だけで整合性が保証される構造(lazy repair依存) |
+
+### 設計判断領域（優先度低〜修正不要）
+
+以下の項目は「バグではなく設計判断」であり、ISR Runtime の観点では修正優先度が低いか、あるいは修正すべきでない。
+
+| ID | 判断 | 理由 |
+|:--:|:----:|------|
+| **H-04** | 仕様変更 | 線形クロスフェードは ISR Runtime の設計として許容範囲。変更する場合は音響設計変更として正式な仕様決定を経るべき |
+| **M-03** | 近似変更保留 | インクリメンタル最大値追跡はノイズ特性を変える。sampling window または decay envelope tracking が本来の正しい最適化方向 |
+| **L-01** | 仕様依存 | 測定タイミングは「ヘッドルーム適用前の内部処理レベル」を測定する仕様なら誤りではない |
+| **L-02** | 整理候補 | 死コードだが機能的影響ゼロ。リファクタリングのついでに処理してよいレベル |
+
+### 修正方針の改善提案
+
+| ID | newbug.md提案 | **ISR改善提案** |
+|:--:|:-------------:|:----------------|
+| **C-01** | `forceSetCurrentAndTargetValueRT()` 追加 | ❌ "force" は例外経路を増幅。→ `applyImmediateValueRT()`（状態遷移の意味を明確化）、または RT shadow state への分離 |
+| **C-02** | `std::bit_cast<double>(std::bit_cast<uint64_t>(x) & mask)` | ⚠ 2重bit_castは冗長。→ `uint64_t v = std::bit_cast<uint64_t>(x); v &= mask; return std::bit_cast<double>(v);` |
+| **C-03** | weakOwner経由のcancelledアクセス | ✅ 正しいが、より本質的には cancelled を owner state に統合し atomic pointer 参照を禁止する |
+| **H-05** | `catch(std::exception)` + `catch(...)` | ⚠ exception は RT 非許容。実際は fail-fast or status code 化が望ましい。catch追加は「安全化」ではなく「設計妥協」 |
+| **M-05** | スタック配列 `double delayFadeRamp[kMaxFadeSamples];` | ⚠ block size依存で危険。→ allocator cache reuse（prepareToPlayで事前確保） |
+
+---

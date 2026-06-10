@@ -26,7 +26,7 @@ AudioEngine::AudioEngine()
     , m_workerThread(m_commandBuffer, m_generationManager, &affinityManager)
 {
     // ★ engineInstanceId 初期化 (全局一意)
-    engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1;
+    engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1; // NOLINT(atomic-dot-call): relaxed counter
 
     // [work21] ISRRetireRouter初期化
     m_retireRouter = std::make_unique<convo::isr::ISRRetireRouter>(m_epochDomain);

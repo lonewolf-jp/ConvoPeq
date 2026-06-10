@@ -31,7 +31,7 @@ void ShutdownRuntime::markTimedOut() noexcept
     convo::publishAtomic(lastNonTerminalPhase_,
                          convo::consumeAtomic(phase_, std::memory_order_acquire),
                          std::memory_order_release);
-    phase_.store(ShutdownPhase::TimedOut, std::memory_order_release);
+    convo::publishAtomic(phase_, ShutdownPhase::TimedOut, std::memory_order_release);
 }
 
 void ShutdownRuntime::markFailed() noexcept
@@ -39,7 +39,7 @@ void ShutdownRuntime::markFailed() noexcept
     convo::publishAtomic(lastNonTerminalPhase_,
                          convo::consumeAtomic(phase_, std::memory_order_acquire),
                          std::memory_order_release);
-    phase_.store(ShutdownPhase::Failed, std::memory_order_release);
+    convo::publishAtomic(phase_, ShutdownPhase::Failed, std::memory_order_release);
 }
 
 void ShutdownRuntime::advancePhase() noexcept

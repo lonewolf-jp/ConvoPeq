@@ -34,8 +34,9 @@ namespace
 
     inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
     {
-        union { double d; uint64_t u; } v { x };
-        const bool finite = (((v.u >> 52) & 0x7FFu) != 0x7FFu);
+        // ISR: std::bit_cast の中間変数形式（union UB 排除）
+        const auto bits = std::bit_cast<uint64_t>(x);
+        const bool finite = (((bits >> 52) & 0x7FFu) != 0x7FFu);
         return finite && (absNoLibm(x) < threshold);
     }
 
@@ -243,7 +244,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             if (!activeCrossfadeGain.isSmoothing())
             {
                 activeOldDelay = activeLatencySmoother.getCurrentValue();
-                activeCrossfadeGain.setCurrentAndTargetValue(0.0);
+                activeCrossfadeGain.applyImmediateValueRT(0.0);
                 activeCrossfadeGain.setTargetValue(1.0);
                 activeLatencySmoother.setTargetValue(static_cast<double>(totalLatency));
             }
@@ -276,7 +277,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         {
             m_latencyResetPendingGenSeen = curGen;
             const double val = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire); // acquire: pendingLatencyValue publishAtomic release と HB
-            activeLatencySmoother.setCurrentAndTargetValue(val);
+            activeLatencySmoother.applyImmediateValueRT(val);
         }
     }
 
@@ -292,7 +293,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 {
                     activeOldDelay = activeLatencySmoother.getCurrentValue();
                     activeLatencySmoother.setTargetValue(newTarget);
-                    activeCrossfadeGain.setCurrentAndTargetValue(0.0);
+                    activeCrossfadeGain.applyImmediateValueRT(0.0);
                     activeCrossfadeGain.setTargetValue(1.0);
                 }
             }
@@ -304,7 +305,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (curGen != m_mixSmootherResetPendingGenSeen)
         {
             m_mixSmootherResetPendingGenSeen = curGen;
-            activeMixSmoother.setCurrentAndTargetValue(static_cast<double>(runtimeSnapshot.mixTarget));
+            activeMixSmoother.applyImmediateValueRT(static_cast<double>(runtimeSnapshot.mixTarget));
         }
     }
 
@@ -320,7 +321,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 const double currentVal = activeMixSmoother.getCurrentValue();
                 const double targetVal = activeMixSmoother.getTargetValue();
                 activeMixSmoother.reset(sampleRate, static_cast<double>(newTime));
-                activeMixSmoother.setCurrentAndTargetValue(currentVal);
+                activeMixSmoother.applyImmediateValueRT(currentVal);
                 activeMixSmoother.setTargetValue(targetVal);
             }
         }
@@ -355,20 +356,31 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (activeCrossfadeGain.isSmoothing())
         {
             const double newDelay = activeLatencySmoother.getTargetValue();
-            double* delayFadeRamp = wetBuf[0];
-            int activeDelayCrossfadeSamples = 0;
 
-            for (; activeDelayCrossfadeSamples < numSamples; ++activeDelayCrossfadeSamples)
+            // ★ M-05: delayFadeRamp バッファ (wetBuf[0]流用の解消)
+            double* delayFadeRamp = delayFadeRampBuffer.get();
+            const bool fadeRampValid = (delayFadeRamp != nullptr && delayFadeRampCapacity >= numSamples);
+
+            int activeDelayCrossfadeSamples = 0;
+            if (fadeRampValid)
             {
-                delayFadeRamp[activeDelayCrossfadeSamples] = activeCrossfadeGain.getNextValue();
-                if (!activeCrossfadeGain.isSmoothing())
+                for (; activeDelayCrossfadeSamples < numSamples; ++activeDelayCrossfadeSamples)
                 {
-                    ++activeDelayCrossfadeSamples;
-                    break;
+                    delayFadeRamp[activeDelayCrossfadeSamples] = activeCrossfadeGain.getNextValue();
+                    if (!activeCrossfadeGain.isSmoothing())
+                    {
+                        ++activeDelayCrossfadeSamples;
+                        break;
+                    }
                 }
+                for (int i = activeDelayCrossfadeSamples; i < numSamples; ++i)
+                    delayFadeRamp[i] = 1.0;
             }
-            for (int i = activeDelayCrossfadeSamples; i < numSamples; ++i)
-                delayFadeRamp[i] = 1.0;
+            else
+            {
+                // バッファ不足: クロスフェード完了までskip
+                activeCrossfadeGain.skip(numSamples);
+            }
 
             auto readInterpolated = [&](double delay, double* dst, int ch, int samplesToRead)
             {
@@ -488,7 +500,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
             if (!activeCrossfadeGain.isSmoothing())
             {
-                activeLatencySmoother.setCurrentAndTargetValue(activeLatencySmoother.getTargetValue());
+                activeLatencySmoother.applyImmediateValueRT(activeLatencySmoother.getTargetValue());
                 activeOldDelay = activeLatencySmoother.getCurrentValue();
             }
         }

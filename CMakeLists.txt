@@ -79,6 +79,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/ISRSemanticValidationTests.cpp
         src/audioengine/ISRClosure.cpp
         src/audioengine/ISRPayloadTier.cpp
+        src/audioengine/ISRRetireRouter.cpp
         src/audioengine/ISRRuntimePublicationCoordinator.cpp
     )
 
@@ -360,6 +361,7 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRPayloadTier.cpp
                 src/audioengine/ISRHB.cpp
                 src/audioengine/ISRRetire.cpp
+                src/audioengine/ISRRetireRouter.cpp
                 src/audioengine/ISRShutdown.cpp
                 src/audioengine/ISRRuntimePublicationCoordinator.cpp
                 src/audioengine/RuntimePublicationValidator.cpp

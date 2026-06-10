@@ -36,6 +36,7 @@
 
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
+#include "audioengine/AudioEngine.h" // absNoLibm, isFiniteNoLibm
 
 #include <mkl.h>        // mkl_malloc, mkl_free, mkl_set_num_threads
 #include <mkl_vml.h>    // vdMul
@@ -374,10 +375,8 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
                         break;
                     }
                 }
-                else
-                {
-                    gain[k] = 0.0;
-                }
+                // ★ L-02: hcFcEnd = nyquist のため k > kEnd は発生しない。
+                // hcFcEnd が nyquist 未満に変更された場合は else-if 分割を再検討すること。
             }
         }
 
@@ -805,23 +804,43 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         mkl_free(tempFreq);
 
         // [最適化2] IR パーティションを逆順に並び替える (forward アクセス最適化)
+        // AoS (irFreqDomain) と SoA (irFreqReal/irFreqImag) を同時にswapする。
         if (l.numPartsIR > 1)
         {
-            double* swapBuf = static_cast<double*>(mkl_malloc(
+            double* swapDomain = static_cast<double*>(mkl_malloc(
                 static_cast<size_t>(l.partStride) * sizeof(double), 64));
-            if (swapBuf)
+            double* swapSoA = static_cast<double*>(mkl_malloc(
+                static_cast<size_t>(l.complexSize) * sizeof(double), 64));
+            if (swapDomain && swapSoA)
             {
                 for (int pf = 0; pf < l.numPartsIR / 2; ++pf)
                 {
                     const int pb = l.numPartsIR - 1 - pf;
+
+                    // irFreqDomain swap (AoS interleaved complex)
                     double* slotF = l.irFreqDomain + pf * l.partStride;
                     double* slotB = l.irFreqDomain + pb * l.partStride;
-                    memcpy(swapBuf, slotF, l.partStride * sizeof(double));
-                    memcpy(slotF,   slotB, l.partStride * sizeof(double));
-                    memcpy(slotB,   swapBuf, l.partStride * sizeof(double));
+                    memcpy(swapDomain, slotF, l.partStride * sizeof(double));
+                    memcpy(slotF,      slotB, l.partStride * sizeof(double));
+                    memcpy(slotB,      swapDomain, l.partStride * sizeof(double));
+
+                    // irFreqReal swap (SoA)
+                    double* realF = l.irFreqReal + static_cast<size_t>(pf) * l.complexSize;
+                    double* realB = l.irFreqReal + static_cast<size_t>(pb) * l.complexSize;
+                    memcpy(swapSoA, realF, l.complexSize * sizeof(double));
+                    memcpy(realF,   realB, l.complexSize * sizeof(double));
+                    memcpy(realB,   swapSoA, l.complexSize * sizeof(double));
+
+                    // irFreqImag swap (SoA)
+                    double* imagF = l.irFreqImag + static_cast<size_t>(pf) * l.complexSize;
+                    double* imagB = l.irFreqImag + static_cast<size_t>(pb) * l.complexSize;
+                    memcpy(swapSoA, imagF, l.complexSize * sizeof(double));
+                    memcpy(imagF,   imagB, l.complexSize * sizeof(double));
+                    memcpy(imagB,   swapSoA, l.complexSize * sizeof(double));
                 }
-                mkl_free(swapBuf);
             }
+            if (swapDomain) mkl_free(swapDomain);
+            if (swapSoA)    mkl_free(swapSoA);
         }
 
         // ── 非 Immediate レイヤーのコールバックあたりパーティション数 ──
@@ -1400,7 +1419,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
 
     auto addScaledFallback = [&addFallback](int n, double* dst, const double* src, double gain) noexcept
     {
-        if (std::abs(gain - 1.0) < 1.0e-12)
+        if (absNoLibm(gain - 1.0) < 1.0e-12)
         {
             addFallback(n, dst, src);
             return;

@@ -116,9 +116,10 @@ namespace convo { class RuntimeBuilder; }
 
 inline double absNoLibm(double x) noexcept
 {
-    union { double d; std::uint64_t u; } v { x };
-    v.u &= 0x7FFFFFFFFFFFFFFFULL;
-    return v.d;
+    // ISR: std::bit_cast の中間変数形式（union UB 排除）
+    auto bits = std::bit_cast<std::uint64_t>(x);
+    bits &= 0x7FFFFFFFFFFFFFFFULL;
+    return std::bit_cast<double>(bits);
 }
 
 struct RuntimeState : convo::isr::SealedObject<RuntimeState>

@@ -52,9 +52,10 @@ namespace
 
     inline double absNoLibm(double value) noexcept
     {
-        union { double d; uint64_t u; } v { value };
-        v.u &= 0x7FFFFFFFFFFFFFFFULL;
-        return v.d;
+        // ISR: std::bit_cast の中間変数形式（union UB 排除）
+        auto bits = std::bit_cast<uint64_t>(value);
+        bits &= 0x7FFFFFFFFFFFFFFFULL;
+        return std::bit_cast<double>(bits);
     }
 
     inline bool isFiniteNoLibm(double value) noexcept
@@ -471,6 +472,11 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
 
+    // m_rtBypassShadow は AudioEngine::DSPCore::processDoubleToBuffer/
+    // processFloatToBuffer 内で state.eqBypassed (RuntimeSnapshot由来) から
+    // setBypassFromRT() 経由で毎ブロック設定される。
+    // 初期値 false (= 非バイパス) は初回 process() 呼び出し前に DSPCore が
+    // 設定するまで有効であり、その間に process() が呼ばれることはない（H-01）。
     const bool requestedBypass = m_rtBypassShadow; // RT-local shadow（atomic write 禁止のため setBypassFromRT 経由で設定）
     auto* activeBypassRamp = &bypassFadeGain;
     bool effectiveBypass = rtBypassedShadow;

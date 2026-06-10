@@ -264,6 +264,17 @@ struct LinearRamp
         remaining = 0;
     }
 
+    /// Audio Thread から即座に current/target を設定する（C-01 ISR修正）。
+    /// 世代カウンターによる同期が呼び出しの安全性を保証している場合に使用。
+    /// 注意: この操作はランプを無効化し、current = target に設定する。
+    void applyImmediateValueRT(double v) noexcept
+    {
+        ASSERT_AUDIO_THREAD();
+        current = target = v;
+        step      = 0.0;
+        remaining = 0;
+    }
+
     /// 目標値を設定してランプを開始する。Audio Thread からのみ呼ぶこと。
     /// juce::SmoothedValue と同一セマンティクス:
     ///   ランプ中は残りステップ数、停止中は totalSteps を分母に使用。

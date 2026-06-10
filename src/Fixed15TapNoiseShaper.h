@@ -29,7 +29,9 @@ class Fixed15TapNoiseShaper
 {
 public:
     static constexpr int MAX_CHANNELS = 8;
-    static constexpr int ORDER = 16;
+    // 注意: フィルタ次数は16次（ORDER=16）、クラス名 "Fixed15Tap" は
+// 従来の命名を維持（タップ数≠次数のため）。次数変更はフィルタ特性を変えるため不可（L-03）。
+static constexpr int ORDER = 16;
 
     struct Diagnostics
     {
@@ -185,6 +187,11 @@ public:
                 lastErrorR = error;
             }
 
+        // ★ M-03: ブロック終了時に一度だけ envelope チェック
+        if (errorEnvelope > kErrorStateThreshold)
+            convo::publishAtomic(needsReset, true, std::memory_order_release);
+        errorEnvelope = 0.0;
+
         pushDiagnosticErrors(lastErrorL, lastErrorR, dataR != nullptr);
         publishDiagnostics(sumSqL, sumSqR, peakAbs, static_cast<uint32_t>(numSamples), dataR != nullptr);
     }
@@ -212,15 +219,8 @@ private:
         idx = (idx - 1 + ORDER) % ORDER;
         channelErrors[static_cast<size_t>(idx)] = denormalFreeError;
 
-        double maxAbs = 0.0;
-        for (int i = 0; i < ORDER; ++i)
-        {
-            const double absVal = absNoLibm(channelErrors[static_cast<size_t>(i)]);
-            if (absVal > maxAbs)
-                maxAbs = absVal;
-        }
-        if (maxAbs > kErrorStateThreshold)
-            convo::publishAtomic(needsReset, true, std::memory_order_release);
+        // ★ M-03: 全状態スキャンを decay envelope に置換（インクリメンタル追跡）
+        errorEnvelope = std::max(absNoLibm(error), errorEnvelope * (1.0 - kEnvelopeAlpha));
 
         return yq;
     }
@@ -462,6 +462,10 @@ private:
     int currentBitDepth = 0;
     double scale = 1.0;
     double invScale = 1.0;
+
+    // ★ M-03: decay envelope（processSample内の全状態スキャンの代替）
+    static constexpr double kEnvelopeAlpha = 0.01;
+    double errorEnvelope = 0.0;
 
     std::atomic<bool> needsReset { false };
 

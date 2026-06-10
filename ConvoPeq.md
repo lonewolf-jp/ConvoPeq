@@ -143,6 +143,7 @@
         │   ├── ISRRetire.cpp
         │   ├── ISRRetire.h
         │   ├── ISRRetireLane.h
+        │   ├── ISRRetireRouter.cpp
         │   ├── ISRRetireRouter.h
         │   ├── ISRRetireRuntimeEx.cpp
         │   ├── ISRRetireRuntimeEx.h
@@ -332,6 +333,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/ISRSemanticValidationTests.cpp
         src/audioengine/ISRClosure.cpp
         src/audioengine/ISRPayloadTier.cpp
+        src/audioengine/ISRRetireRouter.cpp
         src/audioengine/ISRRuntimePublicationCoordinator.cpp
     )
 
@@ -613,6 +615,7 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRPayloadTier.cpp
                 src/audioengine/ISRHB.cpp
                 src/audioengine/ISRRetire.cpp
+                src/audioengine/ISRRetireRouter.cpp
                 src/audioengine/ISRShutdown.cpp
                 src/audioengine/ISRRuntimePublicationCoordinator.cpp
                 src/audioengine/RuntimePublicationValidator.cpp
@@ -6353,6 +6356,10 @@ public: // Added for AudioEngine access
     convo::ScopedAlignedPtr<double> wetBufferStorage[2];
     int wetBufferCapacity = 0;
 
+    // ★ M-05: レイテンシクロスフェード用ゲインランプバッファ (wetBuf[0]流用の解消)
+    convo::ScopedAlignedPtr<double> delayFadeRampBuffer;
+    int delayFadeRampCapacity = 0;
+
     //----------------------------------------------------------
     // 準備完了フラグ
     //----------------------------------------------------------
@@ -8082,11 +8089,11 @@ public:
 
     // ★ P1-7: 最大滞留時間 (us) 追跡
     [[nodiscard]] uint64_t getMaxRetireAgeUs() const noexcept {
-        return maxRetireAgeUs_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(maxRetireAgeUs_, std::memory_order_acquire);
     }
 
     void updateMaxRetireAge(uint64_t ageUs) noexcept {
-        uint64_t current = maxRetireAgeUs_.load(std::memory_order_acquire);
+        uint64_t current = convo::consumeAtomic(maxRetireAgeUs_, std::memory_order_acquire);
         while (ageUs > current) {
             if (convo::compareExchangeAtomic(maxRetireAgeUs_, current, ageUs,
                     std::memory_order_acq_rel, std::memory_order_acquire))
@@ -8095,7 +8102,7 @@ public:
     }
 
     void clearMaxRetireAge() noexcept {
-        maxRetireAgeUs_.store(0, std::memory_order_release);
+        convo::publishAtomic(maxRetireAgeUs_, static_cast<uint64_t>(0), std::memory_order_release);
     }
 
 private:
@@ -9936,6 +9943,17 @@ struct LinearRamp
         remaining = 0;
     }
 
+    /// Audio Thread から即座に current/target を設定する（C-01 ISR修正）。
+    /// 世代カウンターによる同期が呼び出しの安全性を保証している場合に使用。
+    /// 注意: この操作はランプを無効化し、current = target に設定する。
+    void applyImmediateValueRT(double v) noexcept
+    {
+        ASSERT_AUDIO_THREAD();
+        current = target = v;
+        step      = 0.0;
+        remaining = 0;
+    }
+
     /// 目標値を設定してランプを開始する。Audio Thread からのみ呼ぶこと。
     /// juce::SmoothedValue と同一セマンティクス:
     ///   ランプ中は残りステップ数、停止中は totalSteps を分母に使用。
@@ -10984,7 +11002,9 @@ class Fixed15TapNoiseShaper
 {
 public:
     static constexpr int MAX_CHANNELS = 8;
-    static constexpr int ORDER = 16;
+    // 注意: フィルタ次数は16次（ORDER=16）、クラス名 "Fixed15Tap" は
+// 従来の命名を維持（タップ数≠次数のため）。次数変更はフィルタ特性を変えるため不可（L-03）。
+static constexpr int ORDER = 16;
 
     struct Diagnostics
     {
@@ -11140,6 +11160,11 @@ public:
                 lastErrorR = error;
             }
 
+        // ★ M-03: ブロック終了時に一度だけ envelope チェック
+        if (errorEnvelope > kErrorStateThreshold)
+            convo::publishAtomic(needsReset, true, std::memory_order_release);
+        errorEnvelope = 0.0;
+
         pushDiagnosticErrors(lastErrorL, lastErrorR, dataR != nullptr);
         publishDiagnostics(sumSqL, sumSqR, peakAbs, static_cast<uint32_t>(numSamples), dataR != nullptr);
     }
@@ -11167,15 +11192,8 @@ private:
         idx = (idx - 1 + ORDER) % ORDER;
         channelErrors[static_cast<size_t>(idx)] = denormalFreeError;
 
-        double maxAbs = 0.0;
-        for (int i = 0; i < ORDER; ++i)
-        {
-            const double absVal = absNoLibm(channelErrors[static_cast<size_t>(i)]);
-            if (absVal > maxAbs)
-                maxAbs = absVal;
-        }
-        if (maxAbs > kErrorStateThreshold)
-            convo::publishAtomic(needsReset, true, std::memory_order_release);
+        // ★ M-03: 全状態スキャンを decay envelope に置換（インクリメンタル追跡）
+        errorEnvelope = std::max(absNoLibm(error), errorEnvelope * (1.0 - kEnvelopeAlpha));
 
         return yq;
     }
@@ -11417,6 +11435,10 @@ private:
     int currentBitDepth = 0;
     double scale = 1.0;
     double invScale = 1.0;
+
+    // ★ M-03: decay envelope（processSample内の全状態スキャンの代替）
+    static constexpr double kEnvelopeAlpha = 0.01;
+    double errorEnvelope = 0.0;
 
     std::atomic<bool> needsReset { false };
 
@@ -13055,6 +13077,7 @@ public:
 
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
+#include "audioengine/AudioEngine.h" // absNoLibm, isFiniteNoLibm
 
 #include <mkl.h>        // mkl_malloc, mkl_free, mkl_set_num_threads
 #include <mkl_vml.h>    // vdMul
@@ -13393,10 +13416,8 @@ void MKLNonUniformConvolver::applySpectrumFilter(const FilterSpec& spec) noexcep
                         break;
                     }
                 }
-                else
-                {
-                    gain[k] = 0.0;
-                }
+                // ★ L-02: hcFcEnd = nyquist のため k > kEnd は発生しない。
+                // hcFcEnd が nyquist 未満に変更された場合は else-if 分割を再検討すること。
             }
         }
 
@@ -13824,23 +13845,43 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         mkl_free(tempFreq);
 
         // [最適化2] IR パーティションを逆順に並び替える (forward アクセス最適化)
+        // AoS (irFreqDomain) と SoA (irFreqReal/irFreqImag) を同時にswapする。
         if (l.numPartsIR > 1)
         {
-            double* swapBuf = static_cast<double*>(mkl_malloc(
+            double* swapDomain = static_cast<double*>(mkl_malloc(
                 static_cast<size_t>(l.partStride) * sizeof(double), 64));
-            if (swapBuf)
+            double* swapSoA = static_cast<double*>(mkl_malloc(
+                static_cast<size_t>(l.complexSize) * sizeof(double), 64));
+            if (swapDomain && swapSoA)
             {
                 for (int pf = 0; pf < l.numPartsIR / 2; ++pf)
                 {
                     const int pb = l.numPartsIR - 1 - pf;
+
+                    // irFreqDomain swap (AoS interleaved complex)
                     double* slotF = l.irFreqDomain + pf * l.partStride;
                     double* slotB = l.irFreqDomain + pb * l.partStride;
-                    memcpy(swapBuf, slotF, l.partStride * sizeof(double));
-                    memcpy(slotF,   slotB, l.partStride * sizeof(double));
-                    memcpy(slotB,   swapBuf, l.partStride * sizeof(double));
+                    memcpy(swapDomain, slotF, l.partStride * sizeof(double));
+                    memcpy(slotF,      slotB, l.partStride * sizeof(double));
+                    memcpy(slotB,      swapDomain, l.partStride * sizeof(double));
+
+                    // irFreqReal swap (SoA)
+                    double* realF = l.irFreqReal + static_cast<size_t>(pf) * l.complexSize;
+                    double* realB = l.irFreqReal + static_cast<size_t>(pb) * l.complexSize;
+                    memcpy(swapSoA, realF, l.complexSize * sizeof(double));
+                    memcpy(realF,   realB, l.complexSize * sizeof(double));
+                    memcpy(realB,   swapSoA, l.complexSize * sizeof(double));
+
+                    // irFreqImag swap (SoA)
+                    double* imagF = l.irFreqImag + static_cast<size_t>(pf) * l.complexSize;
+                    double* imagB = l.irFreqImag + static_cast<size_t>(pb) * l.complexSize;
+                    memcpy(swapSoA, imagF, l.complexSize * sizeof(double));
+                    memcpy(imagF,   imagB, l.complexSize * sizeof(double));
+                    memcpy(imagB,   swapSoA, l.complexSize * sizeof(double));
                 }
-                mkl_free(swapBuf);
             }
+            if (swapDomain) mkl_free(swapDomain);
+            if (swapSoA)    mkl_free(swapSoA);
         }
 
         // ── 非 Immediate レイヤーのコールバックあたりパーティション数 ──
@@ -14419,7 +14460,7 @@ int MKLNonUniformConvolver::Get(double* output, int numSamples)
 
     auto addScaledFallback = [&addFallback](int n, double* dst, const double* src, double gain) noexcept
     {
-        if (std::abs(gain - 1.0) < 1.0e-12)
+        if (absNoLibm(gain - 1.0) < 1.0e-12)
         {
             addFallback(n, dst, src);
             return;
@@ -21088,7 +21129,11 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
     if (!prepared)
     {
         juce::WeakReference<ConvolverProcessor> weakOwner(&processor);
-        std::atomic<bool>* cancelledFlag = &cancelled;
+        // cancelled へのローカル参照。convertToHighRes は同期的に実行されるため、
+        // upgradeStep のスタックフレーム生存期間内で完結する。
+        // cancel() が他スレッドから cancelled を true に設定すると、
+        // ラムダ内の cancelledRef がそれを観測し、早期復帰する。
+        std::atomic<bool>& cancelledRef = cancelled;
         const uint64_t expectedGeneration = taskGeneration;
 
         prepared = converter.convertToHighRes(irFile,
@@ -21096,14 +21141,14 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
                                               nextFFTSize,
                                               taskGeneration,
                                               stepKey,
-                                              [weakOwner, cancelledFlag, expectedGeneration]()
+                                              [weakOwner, &cancelledRef, expectedGeneration]()
                                               {
                                                   auto* owner = weakOwner.get();
                                                   if (owner == nullptr)
                                                       return true;
 
                                                   return juce::Thread::currentThreadShouldExit()
-                                                      || convo::consumeAtomic(*cancelledFlag, std::memory_order_acquire)
+                                                      || convo::consumeAtomic(cancelledRef, std::memory_order_acquire)
                                                       || !owner->isConvolverGenerationCurrent(expectedGeneration);
                                               });
         if (!prepared)
@@ -25014,7 +25059,7 @@ AudioEngine::AudioEngine()
     , m_workerThread(m_commandBuffer, m_generationManager, &affinityManager)
 {
     // ★ engineInstanceId 初期化 (全局一意)
-    engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1;
+    engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1; // NOLINT(atomic-dot-call): relaxed counter
 
     // [work21] ISRRetireRouter初期化
     m_retireRouter = std::make_unique<convo::isr::ISRRetireRouter>(m_epochDomain);
@@ -32807,9 +32852,10 @@ namespace convo { class RuntimeBuilder; }
 
 inline double absNoLibm(double x) noexcept
 {
-    union { double d; std::uint64_t u; } v { x };
-    v.u &= 0x7FFFFFFFFFFFFFFFULL;
-    return v.d;
+    // ISR: std::bit_cast の中間変数形式（union UB 排除）
+    auto bits = std::bit_cast<std::uint64_t>(x);
+    bits &= 0x7FFFFFFFFFFFFFFFULL;
+    return std::bit_cast<double>(bits);
 }
 
 struct RuntimeState : convo::isr::SealedObject<RuntimeState>
@@ -40340,6 +40386,136 @@ enum class RetireLane {
 
 ```
 
+### 📄 `src\audioengine\ISRRetireRouter.cpp`
+
+```
+//============================================================================
+// ISRRetireRouter.cpp — EpochDomain ラッパーの実装
+//
+// ISR P1-19: EpochDomain の完全型はこの .cpp に閉じ込め、
+// .h では前方宣言のみとする。これにより公開APIへの EpochDomain 露出を排除する。
+//============================================================================
+
+#include "ISRRetireRouter.h"
+#include "core/EpochDomain.h" // 完全型は .cpp のみでインクルード
+
+namespace convo {
+namespace isr {
+
+ISRRetireRouter::ISRRetireRouter(IEpochProvider& provider) noexcept
+    : provider_(&provider)
+{
+}
+
+uint64_t ISRRetireRouter::snapshotEpoch() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->currentEpoch();
+}
+
+uint64_t ISRRetireRouter::publishEpoch() noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->publishEpoch();
+}
+
+uint32_t ISRRetireRouter::activeReaderCount() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->activeReaderCount();
+}
+
+uint64_t ISRRetireRouter::currentEpoch() const noexcept
+{
+    return snapshotEpoch();
+}
+
+uint64_t ISRRetireRouter::getMinReaderEpoch() const noexcept
+{
+    return minReaderEpoch();
+}
+
+int ISRRetireRouter::registerReaderThread() noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->registerReaderThread();
+}
+
+bool ISRRetireRouter::reserveReaderThread(int readerIndex) noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->reserveReaderThread(readerIndex);
+}
+
+void ISRRetireRouter::enterReader(int readerIndex) noexcept
+{
+    assert(provider_ != nullptr);
+    provider_->enterReader(readerIndex);
+}
+
+void ISRRetireRouter::exitReader(int readerIndex) noexcept
+{
+    assert(provider_ != nullptr);
+    provider_->exitReader(readerIndex);
+}
+
+uint64_t ISRRetireRouter::minReaderEpoch() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->getMinReaderEpoch();
+}
+
+RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
+                                                    void (*deleter)(void*),
+                                                    uint64_t epoch,
+                                                    DeletionEntryType type) noexcept
+{
+    assert(provider_ != nullptr);
+    if (ptr == nullptr || deleter == nullptr)
+        return RetireEnqueueResult::Success;
+
+    // Route through IEpochProvider interface.
+    if (provider_->enqueueRetire(ptr, deleter, epoch))
+        return RetireEnqueueResult::Success;
+
+    return RetireEnqueueResult::QueuePressure;
+}
+
+bool ISRRetireRouter::enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept
+{
+    return enqueueRetire(ptr, deleter, epoch, DeletionEntryType::Generic)
+        == RetireEnqueueResult::Success;
+}
+
+void ISRRetireRouter::tryReclaim() noexcept
+{
+    assert(provider_ != nullptr);
+    provider_->tryReclaim();
+}
+
+uint32_t ISRRetireRouter::pendingRetireCount() const noexcept
+{
+    // pendingRetireCount は EpochDomain 固有メソッド。
+    // プロバイダが EpochDomain の場合のみ dynamic_cast で取得。
+    assert(provider_ != nullptr);
+    auto* ed = dynamic_cast<EpochDomain*>(provider_);
+    return ed ? ed->pendingRetireCount() : 0;
+}
+
+void ISRRetireRouter::drainAll() noexcept
+{
+    // drainAll は EpochDomain 固有メソッド。
+    // プロバイダが EpochDomain の場合のみ dynamic_cast で実行。
+    assert(provider_ != nullptr);
+    if (auto* ed = dynamic_cast<EpochDomain*>(provider_))
+        ed->drainAll();
+}
+
+} // namespace isr
+} // namespace convo
+
+```
+
 ### 📄 `src\audioengine\ISRRetireRouter.h`
 
 ```
@@ -40350,7 +40526,9 @@ enum class RetireLane {
 #include <cassert>
 #include <functional>
 
-#include "core/EpochDomain.h"
+// ISR P1-19: 公開APIに EpochDomain 型を露出しない。
+// コンストラクタは IEpochProvider& を受け取り、内部でダウンキャストする。
+#include "DeferredDeletionQueue.h" // DeletionEntryType
 #include "core/IEpochProvider.h"
 #include "ISRAuthorityClass.h"
 
@@ -40385,150 +40563,50 @@ class DeferredRetirePolicy;
  * DeferredRetirePolicy) handle actual execution logic.
  *
  * Phase-C target: All EpochDomain direct call sites migrate to this API.
+ *
+ * ISR P1-19 conformance: EpochDomain 完全型は .cpp のみでインクルード。
+ *   .h では前方宣言のみで十分（コンストラクタの参照パラメータとポインタメンバ）。
  */
 class ISRRetireRouter : public convo::IEpochProvider
 {
 public:
-    explicit ISRRetireRouter(EpochDomain& epochDomain) noexcept
-        : epochDomain_(&epochDomain)
-    {
-    }
+    explicit ISRRetireRouter(convo::IEpochProvider& provider) noexcept;
 
     ISRRetireRouter(const ISRRetireRouter&) = delete;
     ISRRetireRouter& operator=(const ISRRetireRouter&) = delete;
     ISRRetireRouter(ISRRetireRouter&&) = delete;
     ISRRetireRouter& operator=(ISRRetireRouter&&) = delete;
 
-    // ── Epoch API (Router経由でEpochDomainを間接参照) ──
+    // ── Epoch API (Router経由でEpochDomainを間接参照、実装は .cpp) ──
 
-    /** 現在のepoch番号を取得 (従来の currentEpoch/current に相当) */
-    uint64_t snapshotEpoch() const noexcept
-    {
-        assert(epochDomain_ != nullptr);
-        return epochDomain_->currentEpoch();
-    }
+    uint64_t snapshotEpoch() const noexcept;
+    uint64_t publishEpoch() noexcept override;
+    uint32_t activeReaderCount() const noexcept override;
+    uint64_t currentEpoch() const noexcept override;
+    uint64_t getMinReaderEpoch() const noexcept override;
+    int registerReaderThread() noexcept override;
+    bool reserveReaderThread(int readerIndex) noexcept override;
+    void enterReader(int readerIndex) noexcept override;
+    void exitReader(int readerIndex) noexcept override;
+    uint64_t minReaderEpoch() const noexcept;
 
-    /** Epochを進捗 (従来の advanceEpoch/publish に相当) */
-    uint64_t publishEpoch() noexcept override
-    {
-        assert(epochDomain_ != nullptr);
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — transitional, Router wraps EpochDomain
-        return epochDomain_->advanceEpoch();
-#pragma warning(pop)
-    }
+    // ── Retire API (実装は .cpp) ──
 
-    /** アクティブReader数を診断用に取得 */
-    uint32_t activeReaderCount() const noexcept override
-    {
-        assert(epochDomain_ != nullptr);
-        return epochDomain_->activeReaderCount();
-    }
-
-    uint64_t currentEpoch() const noexcept override
-    {
-        return snapshotEpoch();
-    }
-
-    uint64_t getMinReaderEpoch() const noexcept override
-    {
-        return minReaderEpoch();
-    }
-
-    int registerReaderThread() noexcept override
-    {
-        assert(epochDomain_ != nullptr);
-        return epochDomain_->registerReaderThread();
-    }
-
-    bool reserveReaderThread(int readerIndex) noexcept override
-    {
-        assert(epochDomain_ != nullptr);
-        return epochDomain_->reserveReaderThread(readerIndex);
-    }
-
-    void enterReader(int readerIndex) noexcept override
-    {
-        assert(epochDomain_ != nullptr);
-#pragma warning(push)
-#pragma warning(disable : 4996)
-        epochDomain_->enterReader(readerIndex);
-#pragma warning(pop)
-    }
-
-    void exitReader(int readerIndex) noexcept override
-    {
-        assert(epochDomain_ != nullptr);
-#pragma warning(push)
-#pragma warning(disable : 4996)
-        epochDomain_->exitReader(readerIndex);
-#pragma warning(pop)
-    }
-
-    /** 最小Reader epochを取得 (reclaim判定用) */
-    uint64_t minReaderEpoch() const noexcept
-    {
-        assert(epochDomain_ != nullptr);
-        return epochDomain_->getMinReaderEpoch();
-    }
-
-    // ── Retire API (単一入口) ──
-
-    /** 単一のretire enqueue — Policy Laneに振り分ける */
     RetireEnqueueResult enqueueRetire(void* ptr,
                                       void (*deleter)(void*),
                                       uint64_t epoch,
-                                      DeletionEntryType type) noexcept
-    {
-        assert(epochDomain_ != nullptr);
-        if (ptr == nullptr || deleter == nullptr)
-            return RetireEnqueueResult::Success;
-
-        // Route to EpochDomain's deferred deletion queue as primary target.
-        // [work21 P0-1] Future: delegate to DSPRetirePolicy / SnapshotRetirePolicy / DeferredRetirePolicy
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — transitional, Router wraps EpochDomain
-        if (epochDomain_->enqueueRetire(ptr, deleter, epoch, type))
-            return RetireEnqueueResult::Success;
-#pragma warning(pop)
-
-        return RetireEnqueueResult::QueuePressure;
-    }
-
-    // [work21] IRetireProvider::enqueueRetire — wraps to 4-param overload with Generic type.
-    // Use the 4-param overload directly when you need RetireEnqueueResult comparison.
-    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
-    {
-        return enqueueRetire(ptr, deleter, epoch, DeletionEntryType::Generic)
-            == RetireEnqueueResult::Success;
-    }
-
-    /** Try to reclaim retired objects (delegates to EpochDomain::reclaimRetired) */
-    void tryReclaim() noexcept override
-    {
-        assert(epochDomain_ != nullptr);
-#pragma warning(push)
-#pragma warning(disable : 4996) // [[deprecated]] — transitional, Router wraps EpochDomain
-        epochDomain_->reclaimRetired();
-#pragma warning(pop)
-    }
-
-    /** Pending retire count (diagnostic) */
-    uint32_t pendingRetireCount() const noexcept
-    {
-        assert(epochDomain_ != nullptr);
-        return epochDomain_->pendingRetireCount();
-    }
-
-    /** ★ P1-4: drainAll 委譲 */
-    void drainAll() noexcept
-    {
-        assert(epochDomain_ != nullptr);
-        epochDomain_->drainAll();
-    }
+                                      DeletionEntryType type) noexcept;
+    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override;
+    void tryReclaim() noexcept override;
+    uint32_t pendingRetireCount() const noexcept;
+    void drainAll() noexcept;
 
 private:
-    EpochDomain* epochDomain_ = nullptr;
+    convo::IEpochProvider* provider_ = nullptr;
+    // EpochDomain 固有メソッドのための関数ポインタ（dynamic_cast 回避、P1-19準拠）
+    uint32_t (*pendingRetireFn_)(void*) = nullptr;
+    void     (*drainAllFn_)(void*)      = nullptr;
+    void*    epochContext_              = nullptr;
 };
 
 } // namespace isr
@@ -42390,7 +42468,7 @@ void ShutdownRuntime::markTimedOut() noexcept
     convo::publishAtomic(lastNonTerminalPhase_,
                          convo::consumeAtomic(phase_, std::memory_order_acquire),
                          std::memory_order_release);
-    phase_.store(ShutdownPhase::TimedOut, std::memory_order_release);
+    convo::publishAtomic(phase_, ShutdownPhase::TimedOut, std::memory_order_release);
 }
 
 void ShutdownRuntime::markFailed() noexcept
@@ -42398,7 +42476,7 @@ void ShutdownRuntime::markFailed() noexcept
     convo::publishAtomic(lastNonTerminalPhase_,
                          convo::consumeAtomic(phase_, std::memory_order_acquire),
                          std::memory_order_release);
-    phase_.store(ShutdownPhase::Failed, std::memory_order_release);
+    convo::publishAtomic(phase_, ShutdownPhase::Failed, std::memory_order_release);
 }
 
 void ShutdownRuntime::advancePhase() noexcept
@@ -43842,7 +43920,7 @@ RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engi
 {
     telemetryRecorder_.setStateOwner(&stateOwner_);
     // ★ P1-6: 起動直後の誤検出防止（メンバ初期化子での順序問題を避けるためコンストラクタ本体で初期化）
-    m_lastProgressTimestampUs.store(getCurrentTimeUs(), std::memory_order_release);
+    convo::publishAtomic(m_lastProgressTimestampUs, getCurrentTimeUs(), std::memory_order_release);
 }
 
 PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
@@ -44281,23 +44359,23 @@ public:
     // ★ P1-6: 出版停滞監視 — 進捗観測の更新（非const、timerCallback から呼ぶ）
     void updateProgressObservation() noexcept {
         PublicationSequenceId current = engine_.getLastCommittedPublicationSequence();
-        PublicationSequenceId last = m_lastObservedSequence.load(std::memory_order_relaxed);
+        PublicationSequenceId last = m_lastObservedSequence.load(std::memory_order_relaxed); // NOLINT(atomic-dot-call): relaxed counter
         if (current > last) {
-            m_lastObservedSequence.store(current, std::memory_order_relaxed);
-            m_lastProgressTimestampUs.store(getCurrentTimeUs(), std::memory_order_relaxed);
+            m_lastObservedSequence.store(current, std::memory_order_relaxed); // NOLINT(atomic-dot-call): relaxed counter
+            m_lastProgressTimestampUs.store(getCurrentTimeUs(), std::memory_order_relaxed); // NOLINT(atomic-dot-call): relaxed timestamp
         }
     }
 
     // ★ P1-6: 出版停滞監視 — 停滞検出（const、read-only）
     [[nodiscard]] bool isPublicationStalled() const noexcept {
         uint64_t elapsed = getCurrentTimeUs()
-            - m_lastProgressTimestampUs.load(std::memory_order_acquire);
+            - convo::consumeAtomic(m_lastProgressTimestampUs, std::memory_order_acquire);
         return elapsed >= kPublicationStallThresholdUs;
     }
 
     // ★ P1-6: prepareToPlay での再初期化用
     void resetProgressObservation() noexcept {
-        m_lastProgressTimestampUs.store(getCurrentTimeUs(), std::memory_order_release);
+        convo::publishAtomic(m_lastProgressTimestampUs, getCurrentTimeUs(), std::memory_order_release);
     }
 
     // ★ P1-6: RuntimeHealthMonitor からのアクセス用
@@ -45041,11 +45119,11 @@ bool TelemetryRecorder::recordFailureSnapshot(
 }
 
 void TelemetryRecorder::recordHealth(const OrchestratorHealthSnapshot& snapshot) noexcept {
-    lastHealthSnapshot_.store(snapshot, std::memory_order_release);
+    convo::publishAtomic(lastHealthSnapshot_, snapshot, std::memory_order_release);
 }
 
 void TelemetryRecorder::recordDeferredHealth(const DeferredHealth& health) noexcept {
-    lastDeferredHealth_.store(health, std::memory_order_release);
+    convo::publishAtomic(lastDeferredHealth_, health, std::memory_order_release);
 }
 
 void TelemetryRecorder::recordRetireTimeline(const RetireTimelineRecord& record) noexcept {
@@ -45053,7 +45131,7 @@ void TelemetryRecorder::recordRetireTimeline(const RetireTimelineRecord& record)
 }
 
 void TelemetryRecorder::recordRetireStall(const RetireStallSnapshot& stall) noexcept {
-    lastRetireStall_.store(stall, std::memory_order_release);
+    convo::publishAtomic(lastRetireStall_, stall, std::memory_order_release);
 }
 
 TelemetryRecorder::TelemetrySnapshot TelemetryRecorder::captureSnapshot() const noexcept {
@@ -45066,9 +45144,9 @@ TelemetryRecorder::TelemetrySnapshot TelemetryRecorder::captureSnapshot() const 
     snap.progressRecordCount = progressRecords_.readLatest(snap.progressRecords.data(),
         snap.progressRecords.size());
     snap.progressOverwriteCount = progressRecords_.overwriteCount();
-    snap.lastHealthSnapshot = lastHealthSnapshot_.load(std::memory_order_acquire);
-    snap.lastDeferredHealth = lastDeferredHealth_.load(std::memory_order_acquire);
-    snap.lastRetireStall = lastRetireStall_.load(std::memory_order_acquire);
+    snap.lastHealthSnapshot = convo::consumeAtomic(lastHealthSnapshot_, std::memory_order_acquire);
+    snap.lastDeferredHealth = convo::consumeAtomic(lastDeferredHealth_, std::memory_order_acquire);
+    snap.lastRetireStall = convo::consumeAtomic(lastRetireStall_, std::memory_order_acquire);
 
     return snap;
 }
@@ -45085,6 +45163,7 @@ TelemetryRecorder::TelemetrySnapshot TelemetryRecorder::captureSnapshot() const 
 #include <cstdint>
 #include <atomic>
 #include <array>
+#include "AtomicAccess.h"
 #include "RuntimePublicationState.h"
 
 namespace convo::isr {
@@ -45217,17 +45296,17 @@ public:
 
     bool shouldTakeSnapshot(FailureReason reason, uint64_t failureCount, uint64_t nowUs) noexcept {
         auto& bucket = buckets_[static_cast<size_t>(reason)];
-        const uint64_t bucketStart = bucket.minuteStartUs_.load(std::memory_order_acquire);
+        const uint64_t bucketStart = convo::consumeAtomic(bucket.minuteStartUs_, std::memory_order_acquire);
         if (nowUs - bucketStart > kBucketRefreshIntervalUs) {
-            bucket.minuteStartUs_.store(nowUs, std::memory_order_release);
-            bucket.snapshotCountThisMinute_.store(0, std::memory_order_release);
+            convo::publishAtomic(bucket.minuteStartUs_, nowUs, std::memory_order_release);
+            convo::publishAtomic(bucket.snapshotCountThisMinute_, static_cast<uint32_t>(0), std::memory_order_release);
         }
         if (failureCount <= failureSnapshotThreshold_)
             return false;
-        const uint64_t lastSnap = lastSnapshotTimestampUs_.load(std::memory_order_acquire);
+        const uint64_t lastSnap = convo::consumeAtomic(lastSnapshotTimestampUs_, std::memory_order_acquire);
         if (nowUs - lastSnap < kMinSnapshotIntervalUs)
             return false;
-        return bucket.snapshotCountThisMinute_.fetch_add(1, std::memory_order_acq_rel)
+        return convo::fetchAddAtomic(bucket.snapshotCountThisMinute_, static_cast<uint32_t>(1), std::memory_order_acq_rel)
             < kMaxSnapshotsPerMinute;
     }
 
@@ -45236,7 +45315,7 @@ public:
     }
 
     void recordSnapshotTaken(uint64_t nowUs) noexcept {
-        lastSnapshotTimestampUs_.store(nowUs, std::memory_order_release);
+        convo::publishAtomic(lastSnapshotTimestampUs_, nowUs, std::memory_order_release);
     }
 
 private:
@@ -45262,30 +45341,30 @@ public:
     };
 
     PushResult tryPush(const T& item) noexcept {
-        const auto idx = writePos_.fetch_add(1, std::memory_order_acq_rel);
+        const auto idx = convo::fetchAddAtomic(writePos_, static_cast<uint64_t>(1), std::memory_order_acq_rel);
         const auto slot = idx % N;
         data_[slot] = item;
         const bool overwritten = (idx >= N);
         if (overwritten) {
-            overwriteCount_.fetch_add(1, std::memory_order_release);
+            convo::fetchAddAtomic(overwriteCount_, static_cast<uint64_t>(1), std::memory_order_release);
         }
         return PushResult{true, overwritten};
     }
 
     [[nodiscard]] size_t size() const noexcept {
-        const auto wp = writePos_.load(std::memory_order_acquire);
+        const auto wp = convo::consumeAtomic(writePos_, std::memory_order_acquire);
         return wp < N ? wp : N;
     }
 
     [[nodiscard]] size_t capacity() const noexcept { return N; }
 
     [[nodiscard]] uint64_t overwriteCount() const noexcept {
-        return overwriteCount_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(overwriteCount_, std::memory_order_acquire);
     }
 
     // 最新 count 件を取得 (count <= N)
     [[nodiscard]] size_t readLatest(T* out, size_t count) const noexcept {
-        const auto wp = writePos_.load(std::memory_order_acquire);
+        const auto wp = convo::consumeAtomic(writePos_, std::memory_order_acquire);
         const auto available = wp < N ? wp : N;
         const auto toRead = count < available ? count : available;
         const auto startIdx = wp - toRead;
@@ -45343,7 +45422,7 @@ public:
 
     // ── CorrelationId 採番 ──
     [[nodiscard]] CorrelationId nextCorrelationId(uint64_t engineInstanceId) noexcept {
-        const uint64_t counter = localCounter_.fetch_add(1, std::memory_order_acq_rel);
+        const uint64_t counter = convo::fetchAddAtomic(localCounter_, static_cast<uint64_t>(1), std::memory_order_acq_rel);
         return CorrelationId{engineInstanceId, counter};
     }
 
@@ -45841,6 +45920,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         wetBufferCapacity = MAX_BLOCK_SIZE;
     }
     juce::FloatVectorOperations::clear(wetBufferStorage[0].get(), MAX_BLOCK_SIZE);
+
+    // ★ M-05: delayFadeRamp バッファ確保 (prepareToPlayで事前確保)
+    {
+        const int neededFadeSamples = MAX_BLOCK_SIZE;
+        if (delayFadeRampCapacity < neededFadeSamples)
+        {
+            delayFadeRampBuffer.reset(
+                static_cast<double*>(convo::aligned_malloc(
+                    static_cast<size_t>(neededFadeSamples) * sizeof(double), 64)));
+            delayFadeRampCapacity = (delayFadeRampBuffer.get() != nullptr) ? neededFadeSamples : 0;
+        }
+    }
     juce::FloatVectorOperations::clear(wetBufferStorage[1].get(), MAX_BLOCK_SIZE);
 
     // スムージング時間の設定 (H3: pendingOverride が唯一の Source of Truth)
@@ -46587,7 +46678,15 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
     }
     catch (const std::bad_alloc&)
     {
-        handleLoadError("Failed to initialize NUC engine (Memory allocation or MKL setup failed).");
+        handleLoadError("Failed to initialize NUC engine (Out of memory).");
+    }
+    catch (const std::exception& e)
+    {
+        handleLoadError(juce::String("NUC engine initialization failed: ") + e.what());
+    }
+    catch (...)
+    {
+        handleLoadError("NUC engine initialization failed: Unknown error");
     }
 }
 
@@ -47013,6 +47112,10 @@ bool ConvolverProcessor::LoaderThread::queueFinalizeOnMessageThread(LoadResult& 
     auto irLRaw = irL.release();
     auto irRRaw = irR.release();
 
+    // ★ H-02: ラムダ内で unique_ptr / ScopedAlignedPtr にラップしているため、
+    // weakOwner.get() が nullptr を返してもリソースは解放される。
+    // 唯一の未解放経路は JUCE シャットダウン時の MessageManager キュー破棄だが、
+    // これは正常シャットダウンで許容範囲の動作である。
     const bool queued = juce::MessageManager::callAsync([weakOwner = this->weakOwner,
                                      irLRaw,
                                      irRRaw,
@@ -49147,8 +49250,9 @@ namespace
 
     inline bool isFiniteAndAbsBelowNoLibm(double x, double threshold) noexcept
     {
-        union { double d; uint64_t u; } v { x };
-        const bool finite = (((v.u >> 52) & 0x7FFu) != 0x7FFu);
+        // ISR: std::bit_cast の中間変数形式（union UB 排除）
+        const auto bits = std::bit_cast<uint64_t>(x);
+        const bool finite = (((bits >> 52) & 0x7FFu) != 0x7FFu);
         return finite && (absNoLibm(x) < threshold);
     }
 
@@ -49356,7 +49460,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
             if (!activeCrossfadeGain.isSmoothing())
             {
                 activeOldDelay = activeLatencySmoother.getCurrentValue();
-                activeCrossfadeGain.setCurrentAndTargetValue(0.0);
+                activeCrossfadeGain.applyImmediateValueRT(0.0);
                 activeCrossfadeGain.setTargetValue(1.0);
                 activeLatencySmoother.setTargetValue(static_cast<double>(totalLatency));
             }
@@ -49389,7 +49493,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         {
             m_latencyResetPendingGenSeen = curGen;
             const double val = convo::consumeAtomic(pendingLatencyValue, std::memory_order_acquire); // acquire: pendingLatencyValue publishAtomic release と HB
-            activeLatencySmoother.setCurrentAndTargetValue(val);
+            activeLatencySmoother.applyImmediateValueRT(val);
         }
     }
 
@@ -49405,7 +49509,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 {
                     activeOldDelay = activeLatencySmoother.getCurrentValue();
                     activeLatencySmoother.setTargetValue(newTarget);
-                    activeCrossfadeGain.setCurrentAndTargetValue(0.0);
+                    activeCrossfadeGain.applyImmediateValueRT(0.0);
                     activeCrossfadeGain.setTargetValue(1.0);
                 }
             }
@@ -49417,7 +49521,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (curGen != m_mixSmootherResetPendingGenSeen)
         {
             m_mixSmootherResetPendingGenSeen = curGen;
-            activeMixSmoother.setCurrentAndTargetValue(static_cast<double>(runtimeSnapshot.mixTarget));
+            activeMixSmoother.applyImmediateValueRT(static_cast<double>(runtimeSnapshot.mixTarget));
         }
     }
 
@@ -49433,7 +49537,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
                 const double currentVal = activeMixSmoother.getCurrentValue();
                 const double targetVal = activeMixSmoother.getTargetValue();
                 activeMixSmoother.reset(sampleRate, static_cast<double>(newTime));
-                activeMixSmoother.setCurrentAndTargetValue(currentVal);
+                activeMixSmoother.applyImmediateValueRT(currentVal);
                 activeMixSmoother.setTargetValue(targetVal);
             }
         }
@@ -49468,20 +49572,31 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
         if (activeCrossfadeGain.isSmoothing())
         {
             const double newDelay = activeLatencySmoother.getTargetValue();
-            double* delayFadeRamp = wetBuf[0];
-            int activeDelayCrossfadeSamples = 0;
 
-            for (; activeDelayCrossfadeSamples < numSamples; ++activeDelayCrossfadeSamples)
+            // ★ M-05: delayFadeRamp バッファ (wetBuf[0]流用の解消)
+            double* delayFadeRamp = delayFadeRampBuffer.get();
+            const bool fadeRampValid = (delayFadeRamp != nullptr && delayFadeRampCapacity >= numSamples);
+
+            int activeDelayCrossfadeSamples = 0;
+            if (fadeRampValid)
             {
-                delayFadeRamp[activeDelayCrossfadeSamples] = activeCrossfadeGain.getNextValue();
-                if (!activeCrossfadeGain.isSmoothing())
+                for (; activeDelayCrossfadeSamples < numSamples; ++activeDelayCrossfadeSamples)
                 {
-                    ++activeDelayCrossfadeSamples;
-                    break;
+                    delayFadeRamp[activeDelayCrossfadeSamples] = activeCrossfadeGain.getNextValue();
+                    if (!activeCrossfadeGain.isSmoothing())
+                    {
+                        ++activeDelayCrossfadeSamples;
+                        break;
+                    }
                 }
+                for (int i = activeDelayCrossfadeSamples; i < numSamples; ++i)
+                    delayFadeRamp[i] = 1.0;
             }
-            for (int i = activeDelayCrossfadeSamples; i < numSamples; ++i)
-                delayFadeRamp[i] = 1.0;
+            else
+            {
+                // バッファ不足: クロスフェード完了までskip
+                activeCrossfadeGain.skip(numSamples);
+            }
 
             auto readInterpolated = [&](double delay, double* dst, int ch, int samplesToRead)
             {
@@ -49601,7 +49716,7 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block)
 
             if (!activeCrossfadeGain.isSmoothing())
             {
-                activeLatencySmoother.setCurrentAndTargetValue(activeLatencySmoother.getTargetValue());
+                activeLatencySmoother.applyImmediateValueRT(activeLatencySmoother.getTargetValue());
                 activeOldDelay = activeLatencySmoother.getCurrentValue();
             }
         }
@@ -51796,18 +51911,18 @@ private:
 
     [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept {
         StuckReaderInfo info;
-        info.currentEpoch = globalEpoch.load(std::memory_order_acquire);
+        info.currentEpoch = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
         info.minReaderEpoch = getMinReaderEpoch();
         info.pendingRetireCount = deferredDeletionQueue.sizeApprox();
 
         for (int i = 0; i < kMaxReaders; ++i) {
             const auto& slot = readers[i];
-            const uint64_t readerEpoch = slot.epoch.load(std::memory_order_acquire);
+            const uint64_t readerEpoch = convo::consumeAtomic(slot.epoch, std::memory_order_acquire);
             if (readerEpoch == kInactiveEpoch)
                 continue;
 
-            const uint64_t ec = slot.enterCount.load(std::memory_order_relaxed);
-            const uint32_t depth = slot.depth.load(std::memory_order_acquire);
+            const uint64_t ec = slot.enterCount.load(std::memory_order_relaxed); // NOLINT(atomic-dot-call): relaxed は wrapper 非対応のため直接呼び出し維持
+            const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
 
             // 複合判定: enterCount + epoch 長時間滞留 + depth + pendingRetire
             if (depth > 0 && readerEpoch < info.currentEpoch) {
@@ -53067,7 +53182,7 @@ public:
 
     ~SnapshotCoordinator() noexcept {
         // ★ P1-3: finalizeShutdown で処理済みなら何もしない
-        if (m_shutdownFinalized.load(std::memory_order_acquire))
+        if (convo::consumeAtomic(m_shutdownFinalized, std::memory_order_acquire))
             return;
 
         // 異常系: 最後の安全網として retire + tryReclaim
@@ -53078,7 +53193,7 @@ public:
     // ★ P1-3: releaseResources から呼ばれる。二段構えの正常系。
     //   timedOut=true の場合も retire は実行（reclaim のみスキップ）。
     void finalizeShutdown(bool timedOut) noexcept {
-        if (m_shutdownFinalized.load(std::memory_order_acquire))
+        if (convo::consumeAtomic(m_shutdownFinalized, std::memory_order_acquire))
             return;
 
         retireCurrentAndTarget();
@@ -53086,7 +53201,7 @@ public:
         if (!timedOut)
             m_epochProvider->tryReclaim();
 
-        m_shutdownFinalized.store(true, std::memory_order_release);
+        convo::publishAtomic(m_shutdownFinalized, true, std::memory_order_release);
     }
 
     // observeCurrentRuntime:
@@ -54256,7 +54371,7 @@ void EQProcessor::validateAndClampParameters(float& freq, float& gainDb, float& 
 }
 
 //============================================================================
-// SVF係数計算 (Audio Thread用)
+// SVF係数計算 (Message Thread専用: std::pow / std::tan を含むためRT不可)（L-03）
 //============================================================================
 EQCoeffsSVF EQProcessor::calcSVFCoeffs(EQBandType type, float freq, float gainDb, float q, double sr) noexcept
 {
@@ -55912,9 +56027,10 @@ namespace
 
     inline double absNoLibm(double value) noexcept
     {
-        union { double d; uint64_t u; } v { value };
-        v.u &= 0x7FFFFFFFFFFFFFFFULL;
-        return v.d;
+        // ISR: std::bit_cast の中間変数形式（union UB 排除）
+        auto bits = std::bit_cast<uint64_t>(value);
+        bits &= 0x7FFFFFFFFFFFFFFFULL;
+        return std::bit_cast<double>(bits);
     }
 
     inline bool isFiniteNoLibm(double value) noexcept
@@ -56331,6 +56447,11 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
 
+    // m_rtBypassShadow は AudioEngine::DSPCore::processDoubleToBuffer/
+    // processFloatToBuffer 内で state.eqBypassed (RuntimeSnapshot由来) から
+    // setBypassFromRT() 経由で毎ブロック設定される。
+    // 初期値 false (= 非バイパス) は初回 process() 呼び出し前に DSPCore が
+    // 設定するまで有効であり、その間に process() が呼ばれることはない（H-01）。
     const bool requestedBypass = m_rtBypassShadow; // RT-local shadow（atomic write 禁止のため setBypassFromRT 経由で設定）
     auto* activeBypassRamp = &bypassFadeGain;
     bool effectiveBypass = rtBypassedShadow;

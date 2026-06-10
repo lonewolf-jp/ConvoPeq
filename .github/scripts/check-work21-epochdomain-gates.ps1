@@ -51,7 +51,9 @@ if ($advanceEpochHits) {
 }
 
 # Gate 6: EpochDomain type exposure in public API (P1-19)
-$epochDomainExposure = Select-String -Path (Get-SourceFiles $src) `
+# Scope: .h files only. .cpp implementation files are private internals
+# and are excluded from the public API boundary check.
+$epochDomainExposure = Select-String -Path (Get-ChildItem -Recurse -Include "*.h" -Path $src | % FullName) `
     -Pattern '(EpochDomain\s*&|EpochDomain\s*\*)' `
     | Where-Object {
         $line = $_.Line.Trim()

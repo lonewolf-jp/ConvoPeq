@@ -609,7 +609,15 @@ void ConvolverProcessor::finalizeNUCEngineOnMessageThread(convo::ScopedAlignedPt
     }
     catch (const std::bad_alloc&)
     {
-        handleLoadError("Failed to initialize NUC engine (Memory allocation or MKL setup failed).");
+        handleLoadError("Failed to initialize NUC engine (Out of memory).");
+    }
+    catch (const std::exception& e)
+    {
+        handleLoadError(juce::String("NUC engine initialization failed: ") + e.what());
+    }
+    catch (...)
+    {
+        handleLoadError("NUC engine initialization failed: Unknown error");
     }
 }
 

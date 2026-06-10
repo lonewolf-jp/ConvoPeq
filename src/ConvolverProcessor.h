@@ -1055,6 +1055,10 @@ public: // Added for AudioEngine access
     convo::ScopedAlignedPtr<double> wetBufferStorage[2];
     int wetBufferCapacity = 0;
 
+    // ★ M-05: レイテンシクロスフェード用ゲインランプバッファ (wetBuf[0]流用の解消)
+    convo::ScopedAlignedPtr<double> delayFadeRampBuffer;
+    int delayFadeRampCapacity = 0;
+
     //----------------------------------------------------------
     // 準備完了フラグ
     //----------------------------------------------------------

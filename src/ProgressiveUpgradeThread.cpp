@@ -106,7 +106,11 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
     if (!prepared)
     {
         juce::WeakReference<ConvolverProcessor> weakOwner(&processor);
-        std::atomic<bool>* cancelledFlag = &cancelled;
+        // cancelled へのローカル参照。convertToHighRes は同期的に実行されるため、
+        // upgradeStep のスタックフレーム生存期間内で完結する。
+        // cancel() が他スレッドから cancelled を true に設定すると、
+        // ラムダ内の cancelledRef がそれを観測し、早期復帰する。
+        std::atomic<bool>& cancelledRef = cancelled;
         const uint64_t expectedGeneration = taskGeneration;
 
         prepared = converter.convertToHighRes(irFile,
@@ -114,14 +118,14 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
                                               nextFFTSize,
                                               taskGeneration,
                                               stepKey,
-                                              [weakOwner, cancelledFlag, expectedGeneration]()
+                                              [weakOwner, &cancelledRef, expectedGeneration]()
                                               {
                                                   auto* owner = weakOwner.get();
                                                   if (owner == nullptr)
                                                       return true;
 
                                                   return juce::Thread::currentThreadShouldExit()
-                                                      || convo::consumeAtomic(*cancelledFlag, std::memory_order_acquire)
+                                                      || convo::consumeAtomic(cancelledRef, std::memory_order_acquire)
                                                       || !owner->isConvolverGenerationCurrent(expectedGeneration);
                                               });
         if (!prepared)

@@ -308,6 +308,18 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         wetBufferCapacity = MAX_BLOCK_SIZE;
     }
     juce::FloatVectorOperations::clear(wetBufferStorage[0].get(), MAX_BLOCK_SIZE);
+
+    // ★ M-05: delayFadeRamp バッファ確保 (prepareToPlayで事前確保)
+    {
+        const int neededFadeSamples = MAX_BLOCK_SIZE;
+        if (delayFadeRampCapacity < neededFadeSamples)
+        {
+            delayFadeRampBuffer.reset(
+                static_cast<double*>(convo::aligned_malloc(
+                    static_cast<size_t>(neededFadeSamples) * sizeof(double), 64)));
+            delayFadeRampCapacity = (delayFadeRampBuffer.get() != nullptr) ? neededFadeSamples : 0;
+        }
+    }
     juce::FloatVectorOperations::clear(wetBufferStorage[1].get(), MAX_BLOCK_SIZE);
 
     // スムージング時間の設定 (H3: pendingOverride が唯一の Source of Truth)

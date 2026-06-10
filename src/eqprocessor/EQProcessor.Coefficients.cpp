@@ -87,7 +87,7 @@ void EQProcessor::validateAndClampParameters(float& freq, float& gainDb, float& 
 }
 
 //============================================================================
-// SVF係数計算 (Audio Thread用)
+// SVF係数計算 (Message Thread専用: std::pow / std::tan を含むためRT不可)（L-03）
 //============================================================================
 EQCoeffsSVF EQProcessor::calcSVFCoeffs(EQBandType type, float freq, float gainDb, float q, double sr) noexcept
 {

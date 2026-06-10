@@ -196,11 +196,11 @@ public:
 
     // ★ P1-7: 最大滞留時間 (us) 追跡
     [[nodiscard]] uint64_t getMaxRetireAgeUs() const noexcept {
-        return maxRetireAgeUs_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(maxRetireAgeUs_, std::memory_order_acquire);
     }
 
     void updateMaxRetireAge(uint64_t ageUs) noexcept {
-        uint64_t current = maxRetireAgeUs_.load(std::memory_order_acquire);
+        uint64_t current = convo::consumeAtomic(maxRetireAgeUs_, std::memory_order_acquire);
         while (ageUs > current) {
             if (convo::compareExchangeAtomic(maxRetireAgeUs_, current, ageUs,
                     std::memory_order_acq_rel, std::memory_order_acquire))
@@ -209,7 +209,7 @@ public:
     }
 
     void clearMaxRetireAge() noexcept {
-        maxRetireAgeUs_.store(0, std::memory_order_release);
+        convo::publishAtomic(maxRetireAgeUs_, static_cast<uint64_t>(0), std::memory_order_release);
     }
 
 private:
