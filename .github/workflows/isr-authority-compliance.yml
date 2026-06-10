@@ -134,7 +134,7 @@ jobs:
           $requiredFields = @("AUDIT_RESULT", "AUDIT_DATE", "AUDITOR", "CHECKED_SYMBOLS", "FINDINGS", "SEARCH_COMMANDS")
 
           foreach ($report in $reports) {
-            $path = "audit/$report"
+            $path = ".github/audit/$report"
             if (-not (Test-Path $path)) {
               Write-Host "::error::$report not found"
               $failed = $true
@@ -183,7 +183,7 @@ jobs:
           $failed = $false
           $outputs = @("p15_serena.txt", "p15_codegraph.txt")
           foreach ($output in $outputs) {
-            $path = "audit/$output"
+            $path = ".github/audit/$output"
             if (-not (Test-Path $path)) {
               Write-Host "::error::$output not found"
               $failed = $true
@@ -205,7 +205,7 @@ jobs:
       - name: Verify P1 Phase1-B audit (optional)
         shell: pwsh
         run: |
-          $path = "audit/p1_phase1b_audit.md"
+          $path = ".github/audit/p1_phase1b_audit.md"
           if (Test-Path $path) {
             $content = Get-Content $path -Raw
             if ($content -notmatch "AUDIT_RESULT: PASS") {

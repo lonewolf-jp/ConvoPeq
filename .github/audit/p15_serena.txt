@@ -1,0 +1,27 @@
+Serena Analysis: RuntimeStore Mutation Authority (P15)
+=======================================================
+
+Query: callers of RuntimeStore::acquireWriteAccess
+Result: RuntimePublicationCoordinator::create() — single entry point (core/RuntimePublicationCoordinator.h:96)
+
+Query: callers of WriteAccess -publishAndSwap
+Result: RuntimePublicationCoordinator::publishWorld() — single mutation path
+  - publishAndSwap() is the ONLY mutation method on WriteAccess
+  - publishAndSwap is called exclusively from RuntimePublicationCoordinator::publishWorld()
+
+Query: callers of RuntimePublicationCoordinator::publishWorld
+Result: AudioEngine::publishWorld() — AudioEngine.h:2754
+  - coordinator.publishWorld(std::move(worldOwner)) — delegates to template coordinator
+
+Query: Direct callers of coordinator.publishWorld in AudioEngine
+Result: 11 call sites across:
+  - AudioEngine.Init.cpp:54
+  - AudioEngine.Processing.ReleaseResources.cpp:134
+  - AudioEngine.Commit.cpp:911, 948, 1011, 1052, 1221, 1400
+  - AudioEngine.Processing.PrepareToPlay.cpp:132, 244
+  - AudioEngine.Timer.cpp:405
+
+Conclusion: WriteAccess capability is exclusively issued by
+RuntimePublicationCoordinator::create(). No other code path can obtain WriteAccess.
+ISR coordinator (convo::isr::RuntimePublicationCoordinator) provides
+commit()/retire() as the only mutation interfaces, also exclusively from coordinator.
