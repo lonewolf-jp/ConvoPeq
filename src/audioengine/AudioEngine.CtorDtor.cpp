@@ -38,6 +38,14 @@ AudioEngine::AudioEngine()
     uiConvolverProcessor.setRetireCoordinator(&runtimePublicationBridge_);
     // Route EQ retirement through coordinator
     uiEqEditor.setRetireCoordinator(&runtimePublicationBridge_);
+
+    // ★ P1-8: RuntimeHealthMonitor 初期化
+    m_healthMonitor.setRetireRouter(m_retireRouter.get());
+    m_healthMonitor.setOrchestrator(runtimeOrchestrator_.get());
+    m_healthMonitor.setRetireHighWatermarkRef(&retireHighWatermark_);
+    m_healthMonitor.setEventCallback(
+        [this](const convo::HealthEvent& ev) { onHealthEvent(ev); });
+
     // 必要な初期化処理があればここに追加
 }
 

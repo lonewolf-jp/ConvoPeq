@@ -15,7 +15,7 @@ namespace isr {
 /**
  * Shutdown phase
  */
-enum class ShutdownPhase
+enum class ShutdownPhase : uint8_t
 {
     Running,
     AudioStopped,
@@ -23,6 +23,8 @@ enum class ShutdownPhase
     RetireClosed,
     EpochSettled,
     ReclaimComplete,
+    TimedOut,         // ★ P1-1: 追加（ShutdownComplete の前に配置）
+    Failed,           // ★ P1-1: 追加
     ShutdownComplete
 };
 
@@ -41,12 +43,26 @@ public:
     // Check current shutdown phase
     ShutdownPhase getPhase() const noexcept;
 
+    // ★ P1-1: enum 順序非依存の terminal 判定
+    static bool isTerminalPhase(ShutdownPhase p) noexcept {
+        return p == ShutdownPhase::ShutdownComplete
+            || p == ShutdownPhase::TimedOut
+            || p == ShutdownPhase::Failed;
+    }
+
+    // ★ P1-1: TimedOut/Failed 上書き前の最終フェーズを取得（障害解析用）
+    ShutdownPhase getLastNonTerminalPhase() const noexcept;
+
     // NonRT: advance shutdown phase
     void advancePhase() noexcept;
     bool transitionTo(ShutdownPhase target) noexcept;
 
     // RT: check if shutdown in progress
     bool isShutdownInProgress() const noexcept;
+
+    // ★ P1-1: タイムアウト・異常終了を記録（transitionTo をバイパスして直接 store）
+    void markTimedOut() noexcept;
+    void markFailed() noexcept;
 
     // Emit final shutdown trace
     void emitShutdownTrace() const;
@@ -63,6 +79,8 @@ public:
 
 private:
     std::atomic<ShutdownPhase> phase_{ShutdownPhase::Running};
+    // ★ P1-1: TimedOut/Failed 上書き前の最終フェーズ（障害解析用）
+    std::atomic<ShutdownPhase> lastNonTerminalPhase_{ShutdownPhase::Running};
     std::atomic<uint32_t> transitionViolations_{0};
     std::atomic<uint32_t> sh1CallbackCount_{0};
     std::atomic<uint32_t> sh2ActiveCrossfade_{0};

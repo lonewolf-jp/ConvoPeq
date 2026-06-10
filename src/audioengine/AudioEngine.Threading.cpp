@@ -50,7 +50,8 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
         .pendingPublication = runtimePublicationBridge_.getPublicationBacklogCount(),
         .pendingRetire = retireRuntime_.pendingIntentCount(),
         .activeCrossfadeCount = crossfadeRuntime_.isPending() ? 1u : 0u,
-        .routerPendingRetire = 0u,  // ★ B-2: m_retireRouter->pendingRetireCount() 追加予定
+        .routerPendingRetire = static_cast<uint64_t>(m_retireRouter->pendingRetireCount())
+            + convo::consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire),  // ★ P1-9: ring+fallback 合計
         .maxDeferredAgeMs = runtimeOrchestrator_
             ? runtimeOrchestrator_->getMaxDeferredAgeMs() : 0u,
         .deferredPublish = (runtimeOrchestrator_
@@ -80,6 +81,17 @@ bool AudioEngine::isFullyDrained() noexcept
 bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
 {
     ASSERT_NON_RT_THREAD();
+    // ★ P1-4: waitForDrain は AudioStopped 以降でのみ呼ばれる。
+    //   新しい ShutdownPhase が追加された場合はここに追加すること。
+    const auto phase = shutdownRuntime_.getPhase();
+    jassert(phase == convo::isr::ShutdownPhase::AudioStopped
+         || phase == convo::isr::ShutdownPhase::ObserverDrained
+         || phase == convo::isr::ShutdownPhase::RetireClosed
+         || phase == convo::isr::ShutdownPhase::EpochSettled
+         || phase == convo::isr::ShutdownPhase::ReclaimComplete
+         || phase == convo::isr::ShutdownPhase::TimedOut
+         || phase == convo::isr::ShutdownPhase::Failed
+         || phase == convo::isr::ShutdownPhase::ShutdownComplete);
 
     const int boundedTimeoutMs = juce::jlimit(1, 10000, timeoutMs);
     const int boundedPollIntervalMs = juce::jlimit(1, 5, pollIntervalMs);

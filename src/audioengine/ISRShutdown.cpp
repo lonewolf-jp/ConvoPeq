@@ -20,9 +20,35 @@ ShutdownPhase ShutdownRuntime::getPhase() const noexcept
     return convo::consumeAtomic(phase_, std::memory_order_acquire);
 }
 
+ShutdownPhase ShutdownRuntime::getLastNonTerminalPhase() const noexcept
+{
+    return convo::consumeAtomic(lastNonTerminalPhase_, std::memory_order_acquire);
+}
+
+void ShutdownRuntime::markTimedOut() noexcept
+{
+    // ★ P1-1: 現在の phase を保存してから上書き
+    convo::publishAtomic(lastNonTerminalPhase_,
+                         convo::consumeAtomic(phase_, std::memory_order_acquire),
+                         std::memory_order_release);
+    phase_.store(ShutdownPhase::TimedOut, std::memory_order_release);
+}
+
+void ShutdownRuntime::markFailed() noexcept
+{
+    convo::publishAtomic(lastNonTerminalPhase_,
+                         convo::consumeAtomic(phase_, std::memory_order_acquire),
+                         std::memory_order_release);
+    phase_.store(ShutdownPhase::Failed, std::memory_order_release);
+}
+
 void ShutdownRuntime::advancePhase() noexcept
 {
     const ShutdownPhase current = convo::consumeAtomic(phase_, std::memory_order_acquire);
+
+    // ★ P1-1: terminal 状態からは advance しない
+    if (isTerminalPhase(current))
+        return;
 
     ShutdownPhase next = current;
     switch (current) {
@@ -44,6 +70,8 @@ void ShutdownRuntime::advancePhase() noexcept
         case ShutdownPhase::ReclaimComplete:
             next = ShutdownPhase::ShutdownComplete;
             break;
+        case ShutdownPhase::TimedOut:
+        case ShutdownPhase::Failed:
         case ShutdownPhase::ShutdownComplete:
         default:
             return;
@@ -58,7 +86,22 @@ bool ShutdownRuntime::transitionTo(ShutdownPhase target) noexcept
     const auto c = static_cast<int>(current);
     const auto t = static_cast<int>(target);
 
-    if (!(t == c || t == c + 1)) {
+    // ★ P1-1: TimedOut(6)/Failed(7) を ShutdownComplete(8) の前に挿入したため、
+    //   ReclaimComplete(5)→ShutdownComplete(8) のような terminal 状態をスキップする
+    //   遷移を許可する。terminal 状態のみをスキップする遷移は許容。
+    bool allowed = (t == c || t == c + 1);
+    if (!allowed && t > c + 1) {
+        // terminal 状態のみをスキップしているか確認
+        allowed = true;
+        for (int i = c + 1; i < t; ++i) {
+            if (!isTerminalPhase(static_cast<ShutdownPhase>(i))) {
+                allowed = false;
+                break;
+            }
+        }
+    }
+
+    if (!allowed) {
         (void)convo::fetchAddAtomic(transitionViolations_, uint32_t{1}, std::memory_order_acq_rel);
         return false;
     }
@@ -70,7 +113,7 @@ bool ShutdownRuntime::transitionTo(ShutdownPhase target) noexcept
 bool ShutdownRuntime::isShutdownInProgress() const noexcept
 {
     const ShutdownPhase current = convo::consumeAtomic(phase_, std::memory_order_acquire);
-    return current != ShutdownPhase::Running && current != ShutdownPhase::ShutdownComplete;
+    return current != ShutdownPhase::Running && !isTerminalPhase(current);
 }
 
 void ShutdownRuntime::emitShutdownTrace() const
@@ -101,6 +144,8 @@ void ShutdownRuntime::emitShutdownTrace() const
     case ShutdownPhase::RetireClosed: phaseName = "RetireClosed"; break;
     case ShutdownPhase::EpochSettled: phaseName = "EpochSettled"; break;
     case ShutdownPhase::ReclaimComplete: phaseName = "ReclaimComplete"; break;
+    case ShutdownPhase::TimedOut: phaseName = "TimedOut"; break;          // ★ P1-1
+    case ShutdownPhase::Failed: phaseName = "Failed"; break;              // ★ P1-1
     case ShutdownPhase::ShutdownComplete: phaseName = "ShutdownComplete"; break;
     }
 

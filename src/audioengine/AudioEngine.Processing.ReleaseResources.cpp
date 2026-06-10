@@ -198,15 +198,22 @@ void AudioEngine::releaseResources()
     runtimePublicationCoordinator.clearPublishedRuntimeSnapshotsNonRt();
 
     const bool drainedWithinBudget = waitForDrain(2000, 2);
+    const bool timedOut = !drainedWithinBudget;
+
+    if (timedOut)
+        shutdownRuntime_.markTimedOut();
+
     if (!drainedWithinBudget || !isFullyDrained())
     {
-        if (!drainedWithinBudget)
-            diagLog("[DIAG] releaseResources: drain timeout reached, performing one emergency reclaim boost path");
+        if (timedOut)
+            diagLog("[DIAG] releaseResources: drain timeout reached, performing safe tryReclaim (drainAll skipped)");
 
         // [P1 Phase1-B] drainPublicationLogForShutdown removed
         drainDeferredRetireQueues(true);
-        m_epochDomain.drainAll();
+        m_epochDomain.tryReclaim();  // ★ P1-2: drainAll 禁止 → 安全な tryReclaim
     }
+
+    m_coordinator.finalizeShutdown(timedOut);  // ★ P1-2: 二段構えの正常系
 
     // ★ A-2.7: ReleaseResources の DrainAudit 統合
     const auto currentShutdownPhase = shutdownRuntime_.getPhase();

@@ -41,26 +41,27 @@ public:
     }
 
     ~SnapshotCoordinator() noexcept {
-        constexpr auto snapshotDeleter = [](void* ptr) noexcept
-        {
-            SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
-        };
+        // ★ P1-3: finalizeShutdown で処理済みなら何もしない
+        if (m_shutdownFinalized.load(std::memory_order_acquire))
+            return;
 
-        const uint64_t retireEpoch = m_epochProvider->publishEpoch();
-
-        GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
-        if (snap)
-        {
-            m_epochProvider->enqueueRetire(snap, snapshotDeleter, retireEpoch);
-        }
-
-        snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
-        if (snap)
-        {
-            m_epochProvider->enqueueRetire(snap, snapshotDeleter, retireEpoch);
-        }
-
+        // 異常系: 最後の安全網として retire + tryReclaim
+        retireCurrentAndTarget();
         m_epochProvider->tryReclaim();
+    }
+
+    // ★ P1-3: releaseResources から呼ばれる。二段構えの正常系。
+    //   timedOut=true の場合も retire は実行（reclaim のみスキップ）。
+    void finalizeShutdown(bool timedOut) noexcept {
+        if (m_shutdownFinalized.load(std::memory_order_acquire))
+            return;
+
+        retireCurrentAndTarget();
+
+        if (!timedOut)
+            m_epochProvider->tryReclaim();
+
+        m_shutdownFinalized.store(true, std::memory_order_release);
     }
 
     // observeCurrentRuntime:
@@ -140,9 +141,25 @@ private:
     void resetFadeStateAndRetireTarget() noexcept;
     void completeFade() noexcept;
 
+    // ★ P1-3: current と target の両方を retire する共通ヘルパー
+    void retireCurrentAndTarget() noexcept {
+        constexpr auto deleter = [](void* ptr) noexcept
+        {
+            SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
+        };
+
+        const uint64_t retireEpoch = m_epochProvider->publishEpoch();
+        GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
+        if (snap) m_epochProvider->enqueueRetire(snap, deleter, retireEpoch);
+        snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
+        if (snap) m_epochProvider->enqueueRetire(snap, deleter, retireEpoch);
+    }
+
     IEpochProvider* m_epochProvider;
     SnapshotSlotStore m_slots;
     SnapshotFadeState m_fade;
+    // ★ P1-3: 二段構えのフラグ。finalizeShutdown() で true、~SnapshotCoordinator で確認
+    std::atomic<bool> m_shutdownFinalized { false };
 };
 
 } // namespace convo

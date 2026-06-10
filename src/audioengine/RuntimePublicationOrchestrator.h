@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include "RuntimePublicationState.h"
@@ -10,6 +11,7 @@
 #include "DSPLifetimeManager.h"
 #include "ISRRuntimeSemanticSchema.h"
 #include "core/RCUReader.h"
+#include "core/TimeUtils.h"
 
 class AudioEngine;
 
@@ -88,7 +90,43 @@ public:
     // ── CorrelationId 採番 ──
     [[nodiscard]] CorrelationId nextCorrelationId() noexcept;
 
+    // ★ P1-6: 出版停滞監視 — 進捗観測の更新（非const、timerCallback から呼ぶ）
+    void updateProgressObservation() noexcept {
+        PublicationSequenceId current = engine_.getLastCommittedPublicationSequence();
+        PublicationSequenceId last = m_lastObservedSequence.load(std::memory_order_relaxed);
+        if (current > last) {
+            m_lastObservedSequence.store(current, std::memory_order_relaxed);
+            m_lastProgressTimestampUs.store(getCurrentTimeUs(), std::memory_order_relaxed);
+        }
+    }
+
+    // ★ P1-6: 出版停滞監視 — 停滞検出（const、read-only）
+    [[nodiscard]] bool isPublicationStalled() const noexcept {
+        uint64_t elapsed = getCurrentTimeUs()
+            - m_lastProgressTimestampUs.load(std::memory_order_acquire);
+        return elapsed >= kPublicationStallThresholdUs;
+    }
+
+    // ★ P1-6: prepareToPlay での再初期化用
+    void resetProgressObservation() noexcept {
+        m_lastProgressTimestampUs.store(getCurrentTimeUs(), std::memory_order_release);
+    }
+
+    // ★ P1-6: RuntimeHealthMonitor からのアクセス用
+    [[nodiscard]] uint64_t getPendingIntentCount() const noexcept {
+        return engine_.getRetirePendingIntentCount();
+    }
+
+    // ★ P1-6: PublicationBacklog の公開（RuntimeHealthMonitor → Orchestrator → AudioEngine → bridge）
+    [[nodiscard]] uint64_t getPublicationBacklogCount() const noexcept {
+        return engine_.getPublicationBacklogCount();
+    }
+
 private:
+    // ★ P1-6: 出版停滞監視用フィールド（30秒以上 sequence が進まない場合に stall 検出）
+    static constexpr uint64_t kPublicationStallThresholdUs = 30'000'000;
+    std::atomic<PublicationSequenceId> m_lastObservedSequence {0};
+    std::atomic<uint64_t> m_lastProgressTimestampUs {0};
     // ★ C-2.1: std::optional<PublishRequest> → DeferredPublishSlot
     std::optional<DeferredPublishSlot> deferredSlot_;
     bool hasDeferred_ = false;

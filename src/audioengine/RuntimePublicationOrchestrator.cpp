@@ -17,6 +17,8 @@ RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engi
     , publicationReader(engine.getRetireRouter())
 {
     telemetryRecorder_.setStateOwner(&stateOwner_);
+    // ★ P1-6: 起動直後の誤検出防止（メンバ初期化子での順序問題を避けるためコンストラクタ本体で初期化）
+    m_lastProgressTimestampUs.store(getCurrentTimeUs(), std::memory_order_release);
 }
 
 PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(

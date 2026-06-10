@@ -53,6 +53,7 @@ JUCE/
 .playwright-mcp/
 graphify-out/
 .continue/
+.continue/mcpServers/
 .claude/
 CLAUDE.md
 
@@ -61,9 +62,10 @@ coverage/
 htmlcov/
 .coverage
 
+# CocoIndex Code (ccc)
+.cocoindex_code/
+
 # OS generated files
 .DS_Store
 Thumbs.db
 ```
-# CocoIndex Code (ccc)
-.cocoindex_code/

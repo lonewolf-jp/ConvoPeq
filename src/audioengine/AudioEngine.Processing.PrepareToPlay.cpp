@@ -2,6 +2,7 @@
 #include "AudioEngine.h"
 #include "core/RuntimeReaderContext.h"
 #include "RuntimeBuilder.h"
+#include "RuntimePublicationOrchestrator.h"
 
 namespace {
 void diagLog(const juce::String& message)
@@ -75,6 +76,11 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         diagLog("[DIAG] prepareToPlay: rebuild thread started");
     }
     diagLog("[DIAG] prepareToPlay: rebuild thread check done");
+
+    // ★ P1-6: 出版停滞監視のタイムスタンプを再初期化
+    if (runtimeOrchestrator_) {
+        runtimeOrchestrator_->resetProgressObservation();
+    }
 
     // --- AudioEngine::prepareToPlay ---
     // ※本関数は「AudioThread停止中のみ呼ぶ」ことがJUCE AudioSource仕様上の前提です。

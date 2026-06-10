@@ -100,6 +100,7 @@ namespace convo::isr { class ISRRetireRouter; }
 // ISRRetireRouter forward-declared below (reduce include chain for C1060)
 #include "ISRBarrierOptimizer.h"
 #include "ISREvidenceExporter.h"
+#include "RuntimeHealthMonitor.h"
 #include "RuntimePublicationValidator.h"
 
 class NoiseShaperLearner;
@@ -2645,6 +2646,16 @@ public:
     void onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept;
     void onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexcept;
     void emitEvidenceTickNonRt(bool force) noexcept;
+    void onHealthEvent(const convo::HealthEvent& event) noexcept;  // ★ P1-8: HealthMonitor コールバック
+
+    // ★ P1-6/8: Publication backlog の公開（RuntimeHealthMonitor → Orchestrator → AudioEngine → bridge）
+    [[nodiscard]] uint64_t getPublicationBacklogCount() const noexcept {
+        return runtimePublicationBridge_.getPublicationBacklogCount();
+    }
+    // ★ P1-6/8: Retire pending intent の公開
+    [[nodiscard]] uint64_t getRetirePendingIntentCount() const noexcept {
+        return retireRuntime_.pendingIntentCount();
+    }
 
     //=== End RuntimePublicationCoordinator NonRT helper API ===//
 
@@ -3482,6 +3493,7 @@ public:
     convo::isr::BudgetManager budgetManager_;
     convo::isr::FailureHandler failureHandler_;
     convo::isr::IntrospectionConsole introspectionConsole_;
+    convo::RuntimeHealthMonitor m_healthMonitor;  // ★ P1-8: Pull型監視エンジン
 
     std::array<std::atomic<std::uint64_t>, convo::kObserveChannelCount> observeLastSeenGeneration_ {};
     std::array<std::atomic<std::uint64_t>, convo::kObserveChannelCount> observeLastSeenSequenceId_ {};

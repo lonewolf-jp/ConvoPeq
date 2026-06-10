@@ -510,7 +510,20 @@ void AudioEngine::timerCallback()
         }
     }
 
+    // ★ P1-8: RuntimeHealthMonitor tick（shutdown 中はスキップ）
+    if (!isShutdownInProgress()) {
+        m_healthMonitor.tick();
+    }
+
     // UI用プロセッサのクリーンアップ
     uiEqEditor.cleanup();
     uiConvolverProcessor.cleanup();
+}
+
+// ★ P1-8: HealthMonitor コールバック実装
+void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
+{
+    diagLog("[HEALTH] eventCode=" + juce::String(static_cast<int>(event.eventCode))
+        + " severity=" + juce::String(static_cast<int>(event.severity))
+        + " value=" + juce::String(static_cast<juce::int64>(event.value)));
 }
