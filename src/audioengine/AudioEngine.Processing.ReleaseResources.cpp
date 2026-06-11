@@ -166,6 +166,10 @@ void AudioEngine::releaseResources()
     drainDeferredRetireQueues(true);
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ReclaimComplete);
 
+    // ★ P3: VerifyDrained — 最終監査フェーズ
+    shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::VerifyDrained);
+    diagLog("[DIAG] releaseResources: VerifyDrained — collecting drain audit");
+
     const auto activeHandle = dspHandleRuntime_.getActiveRuntimeDSPHandle();
     const auto fadingHandle = dspHandleRuntime_.getFadingRuntimeDSPHandle();
     if (!activeHandle.isNull())

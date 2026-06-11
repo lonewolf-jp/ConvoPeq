@@ -9,6 +9,7 @@ namespace convo {
 void RuntimeHealthMonitor::tick() noexcept {
     checkRetireStall();
     checkPublicationStall();
+    diagnoseRetireStall(); // ★ P4.5
 }
 
 void RuntimeHealthMonitor::checkRetireStall() noexcept {
@@ -102,6 +103,52 @@ void RuntimeHealthMonitor::emitOnTransition(
     if (!m_callback) return;
     HealthEvent ev{getCurrentTimeUs(), severity, eventCode, value, slot};
     m_callback(ev);
+}
+
+// ★ P4.5: Reader Stuck 診断
+// router の情報から Reader 残留の可能性を診断し、HealthEvent として報告する。
+// 完全な detectStuckReaders には EpochDomain 直接アクセスが必要。
+void RuntimeHealthMonitor::diagnoseRetireStall() noexcept
+{
+    if (!m_retireRouter)
+        return;
+
+    const uint64_t pendingCount = m_retireRouter->pendingRetireCount();
+    const uint64_t minEpoch = m_retireRouter->getMinReaderEpoch();
+    const uint64_t curEpoch = m_retireRouter->currentEpoch();
+    const uint64_t epochGap = (curEpoch > minEpoch) ? (curEpoch - minEpoch) : 0;
+
+    // epochGap が大きく pendingRetire が滞留 → Reader 残留の可能性
+    if (pendingCount > 0 && epochGap > 10)
+    {
+        const uint64_t nowUs = convo::getCurrentTimeUs();
+        MonitorState newState = MonitorState::Warning;
+        const bool severe = (pendingCount > 100 || epochGap > 100);
+
+        if (severe)
+            newState = MonitorState::Error;
+        else
+            newState = MonitorState::Warning;
+
+        HealthEvent ev{nowUs,
+                       severe ? HealthEvent::Severity::Error : HealthEvent::Severity::Warning,
+                       EVENT_READER_STUCK,
+                       pendingCount,
+                       0};
+        ev.readerIndex = -1; // 完全な Reader 特定は EpochDomain 直接アクセスが必要
+        ev.readerEpoch = minEpoch;
+        ev.readerDepth = 0;
+        ev.residencyTimeUs = 0;
+
+        if (m_callback)
+        {
+            if (m_prevRetireState != newState)
+            {
+                m_prevRetireState = newState;
+                m_callback(ev);
+            }
+        }
+    }
 }
 
 } // namespace convo

@@ -4,6 +4,7 @@
 #include "RuntimePublicationOrchestrator.h"
 #include "NoiseShaperLearner.h"
 #include "ISRRetireRouter.h"
+#include "DSPLifetimeManager.h"
 
 namespace {
 void diagLog(const juce::String& message)
@@ -109,7 +110,8 @@ AudioEngine::~AudioEngine()
         {
             if (pendingTask.currentDSP)
             {
-                retireDSP(pendingTask.currentDSP);
+                DSPLifetimeManager lifetimeMgr(*this);
+                lifetimeMgr.retire(pendingTask.currentDSP);
                 pendingTask.currentDSP = nullptr;
             }
 
@@ -119,8 +121,11 @@ AudioEngine::~AudioEngine()
 
     // [P1 Phase1-B] drainPublicationLogForShutdown removed
 
-    if (activeToRelease) retireDSP(activeToRelease);
-    if (fadingToRelease) retireDSP(fadingToRelease);
+    {
+        DSPLifetimeManager lifetimeMgr(*this);
+        if (activeToRelease) lifetimeMgr.retire(activeToRelease);
+        if (fadingToRelease) lifetimeMgr.retire(fadingToRelease);
+    }
 
     uiConvolverProcessor.removeChangeListener(this);
     uiEqEditor.removeChangeListener(this);

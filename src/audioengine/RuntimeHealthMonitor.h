@@ -12,6 +12,11 @@ struct HealthEvent {
     uint32_t eventCode;
     uint64_t value;
     uint32_t slot;
+    // ★ P4.5: Reader Residency Diagnostics
+    int32_t readerIndex{-1};
+    uint64_t readerEpoch{0};
+    uint32_t readerDepth{0};
+    uint64_t residencyTimeUs{0};
 };
 
 namespace isr {
@@ -24,6 +29,7 @@ static constexpr uint32_t EVENT_RETIRE_STALL         = 1001;
 static constexpr uint32_t EVENT_RETIRE_STALL_WARNING = 1002;
 static constexpr uint32_t EVENT_PUBLICATION_STALL    = 2001;
 static constexpr uint32_t EVENT_PUBLICATION_WARNING  = 2002;
+static constexpr uint32_t EVENT_READER_STUCK         = 3001; // ★ P4.5
 
 enum class MonitorState : uint8_t { Normal, Warning, Error };
 using HealthEventCallback = std::function<void(const HealthEvent&)>;
@@ -51,6 +57,8 @@ public:
 private:
     void checkRetireStall() noexcept;
     void checkPublicationStall() noexcept;
+    // ★ P4.5: Reader Stuck 診断（detectStuckReaders からの情報を HealthEvent に反映）
+    void diagnoseRetireStall() noexcept;
     void emitOnTransition(MonitorState& currentState, MonitorState newState,
                           HealthEvent::Severity severity, uint32_t eventCode,
                           uint64_t value, uint32_t slot = 0) noexcept;

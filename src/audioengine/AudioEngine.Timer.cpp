@@ -3,6 +3,7 @@
 #include "core/RuntimeReaderContext.h"
 #include "RuntimeBuilder.h"
 #include "RuntimePublicationOrchestrator.h"
+#include "DSPLifetimeManager.h"
 
 namespace {
 void diagLog(const juce::String& message)
@@ -388,7 +389,10 @@ void AudioEngine::timerCallback()
 
         auto* const doneRaw1 = exchangeFadingRuntimeDSP(nullptr);
         if (auto* done = (reinterpret_cast<uintptr_t>(doneRaw1) == (~static_cast<uintptr_t>(0))) ? nullptr : doneRaw1)
-            retireDSP(done);
+        {
+            DSPLifetimeManager lifetimeMgr(*this);
+            lifetimeMgr.retire(done);
+        }
         crossfadeRuntime_.complete();
         crossfadeRuntime_.setStartDelayBlocks(0);
         crossfadeRuntime_.setDryHoldSamples(0);
@@ -418,7 +422,10 @@ void AudioEngine::timerCallback()
     {
         auto* const doneRaw2 = exchangeFadingRuntimeDSP(nullptr);
         if (auto* done = (reinterpret_cast<uintptr_t>(doneRaw2) == (~static_cast<uintptr_t>(0))) ? nullptr : doneRaw2)
-            retireDSP(done);
+        {
+            DSPLifetimeManager lifetimeMgr(*this);
+            lifetimeMgr.retire(done);
+        }
     }
 
     if (!isShutdownInProgress()

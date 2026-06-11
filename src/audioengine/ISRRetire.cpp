@@ -14,8 +14,32 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
 
     uint64_t head = convo::consumeAtomic(retireIntentHead_, std::memory_order_acquire);
     if (nextTail == head) {
-        (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
-        (void)convo::fetchAddAtomic(droppedIntentCount_, uint64_t{1}, std::memory_order_acq_rel);
+        // ★ P1: MPSC満杯 → Fallback queue へ退避
+        {
+            std::lock_guard<std::mutex> lock(fallbackMutex_);
+            if (fallbackCount_.load(std::memory_order_relaxed) < FALLBACK_QUEUE_CAPACITY)
+            {
+                const size_t idx = fallbackCount_.load(std::memory_order_relaxed);
+                fallbackQueue_[idx] = intent;
+                fallbackCount_.store(idx + 1, std::memory_order_release);
+
+                // 最大使用量を更新
+                size_t prevHwm = fallbackHighWatermark_.load(std::memory_order_relaxed);
+                while (idx + 1 > prevHwm
+                    && !fallbackHighWatermark_.compare_exchange_weak(prevHwm, idx + 1,
+                        std::memory_order_release, std::memory_order_relaxed)) {}
+
+                (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
+                // droppedIntentCount_ はインクリメントしない（保存成功）
+            }
+            else
+            {
+                // Fallback も満杯 → overflow としてカウント
+                (void)convo::fetchAddAtomic(fallbackOverflowCount_, uint64_t{1}, std::memory_order_acq_rel);
+                (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
+                (void)convo::fetchAddAtomic(droppedIntentCount_, uint64_t{1}, std::memory_order_acq_rel);
+            }
+        }
 
         // ★ C-1: overflowStartTimestamp_ を初回のみ設定（CAS）
         uint64_t expected = 0;
@@ -23,11 +47,9 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
             static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
             std::memory_order_release);
 
-        // ★ C-1: overflowWindowCounter_ をインクリメント
         (void)convo::fetchAddAtomic(overflowWindowCounter_, uint64_t{1},
             std::memory_order_release);
 
-        // ★ C-1: lastOverflowTicks_ を更新
         convo::publishAtomic(lastOverflowTicks_,
             static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()),
             std::memory_order_release);
@@ -52,12 +74,25 @@ std::vector<RetireIntent> RetireRuntime::dequeuePendingRetireIntents() noexcept
 {
     std::vector<RetireIntent> result;
 
+    // 1. Drain MPSC queue
     uint64_t head = convo::consumeAtomic(retireIntentHead_, std::memory_order_acquire);
     uint64_t tail = convo::consumeAtomic(retireIntentTail_, std::memory_order_acquire);
 
     while (head != tail) {
         result.push_back(retireIntentQueue_[head]);
         head = (head + 1) % RETIRE_INTENT_QUEUE_SIZE;
+    }
+
+    convo::publishAtomic(retireIntentHead_, head, std::memory_order_release);
+
+    // 2. ★ P1: Drain Fallback queue
+    {
+        std::lock_guard<std::mutex> lock(fallbackMutex_);
+        const size_t fbCount = fallbackCount_.load(std::memory_order_acquire);
+        for (size_t i = 0; i < fbCount; ++i) {
+            result.push_back(fallbackQueue_[i]);
+        }
+        fallbackCount_.store(0, std::memory_order_release);
     }
 
     std::stable_sort(result.begin(), result.end(), [](const RetireIntent& lhs, const RetireIntent& rhs) noexcept {
@@ -119,6 +154,22 @@ std::uint64_t RetireRuntime::overflowWindowCounter() const noexcept
 std::uint64_t RetireRuntime::lastOverflowWindowCount() const noexcept
 {
     return convo::consumeAtomic(lastOverflowWindowCount_, std::memory_order_acquire);
+}
+
+// ★ P1: Fallback queue metrics
+std::size_t RetireRuntime::fallbackOccupancy() const noexcept
+{
+    return fallbackCount_.load(std::memory_order_acquire);
+}
+
+std::size_t RetireRuntime::fallbackHighWatermark() const noexcept
+{
+    return fallbackHighWatermark_.load(std::memory_order_acquire);
+}
+
+std::uint64_t RetireRuntime::fallbackOverflowCount() const noexcept
+{
+    return convo::consumeAtomic(fallbackOverflowCount_, std::memory_order_acquire);
 }
 
 }  // namespace isr

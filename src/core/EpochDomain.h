@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 
@@ -239,6 +240,7 @@ private:
         std::atomic<uint64_t> epoch { kInactiveEpoch };
         std::atomic<uint32_t> depth { 0 };
         std::atomic<uint64_t> enterCount { 0 };  // ★ P3-1: enter 回数のみカウント（軽量）
+        std::atomic<uint64_t> residencyStartTimestampUs { 0 }; // ★ P4.5: steady_clock ベースの滞留開始時刻
     };
 
     // ★ P3-1: 複合判定による Reader Stuck 検出
@@ -250,6 +252,7 @@ private:
         uint64_t minReaderEpoch{0};
         uint32_t pendingRetireCount{0};
         bool isStuck{false};
+        uint64_t residencyTimeUs{0}; // ★ P4.5: 実時間ベース滞留時間
     };
 
     [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept {
@@ -258,14 +261,22 @@ private:
         info.minReaderEpoch = getMinReaderEpoch();
         info.pendingRetireCount = deferredDeletionQueue.sizeApprox();
 
+        const auto nowUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+
         for (int i = 0; i < kMaxReaders; ++i) {
             const auto& slot = readers[i];
             const uint64_t readerEpoch = convo::consumeAtomic(slot.epoch, std::memory_order_acquire);
             if (readerEpoch == kInactiveEpoch)
                 continue;
 
-            const uint64_t ec = slot.enterCount.load(std::memory_order_relaxed); // NOLINT(atomic-dot-call): relaxed は wrapper 非対応のため直接呼び出し維持
+            const uint64_t ec = slot.enterCount.load(std::memory_order_relaxed);
             const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
+
+            // ★ P4.5: residencyTime を実時間ベースで計算（epoch差ではなくsteady_clock）
+            const uint64_t startUs = convo::consumeAtomic(slot.residencyStartTimestampUs, std::memory_order_acquire);
+            const uint64_t residencyUs = (startUs != 0 && depth > 0) ? (nowUs - startUs) : 0;
 
             // 複合判定: enterCount + epoch 長時間滞留 + depth + pendingRetire
             if (depth > 0 && readerEpoch < info.currentEpoch) {
@@ -275,6 +286,7 @@ private:
                     info.readerEpoch = readerEpoch;
                     info.enterCount = ec;
                     info.isStuck = true;
+                    info.residencyTimeUs = residencyUs;
                     break;
                 }
             }

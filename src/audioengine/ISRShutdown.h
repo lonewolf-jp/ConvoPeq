@@ -23,8 +23,9 @@ enum class ShutdownPhase : uint8_t
     RetireClosed,
     EpochSettled,
     ReclaimComplete,
-    TimedOut,         // ★ P1-1: 追加（ShutdownComplete の前に配置）
-    Failed,           // ★ P1-1: 追加
+    VerifyDrained,    // ★ P3: 最終監査フェーズ
+    TimedOut,
+    Failed,
     ShutdownComplete
 };
 

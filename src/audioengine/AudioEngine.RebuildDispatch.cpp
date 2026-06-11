@@ -3,6 +3,7 @@
 #include "AudioEngine.h"
 #include "NoiseShaperLearner.h"
 #include "RuntimeBuilder.h"
+#include "DSPLifetimeManager.h"
 
 namespace {
 void diagLog(const juce::String& message)
@@ -683,7 +684,10 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
 
     // Destroy orphaned DSP objects outside the lock.
     if (currentToRelease)
-        retireDSP(currentToRelease);
+    {
+        DSPLifetimeManager lifetimeMgr(*this);
+        lifetimeMgr.retire(currentToRelease);
+    }
 
     juce::ignoreUnused(queued);
 }
@@ -752,7 +756,10 @@ void AudioEngine::rebuildThreadLoop()
                 ~DSPGuard()
                 {
                     if (owner != nullptr && ptr != nullptr)
-                        owner->retireDSP(ptr);
+                    {
+                        DSPLifetimeManager lifetimeMgr(*owner);
+                        lifetimeMgr.retire(ptr);
+                    }
                 }
             } dspGuard { this, nullptr };
 

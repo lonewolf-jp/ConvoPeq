@@ -68,6 +68,9 @@ void ShutdownRuntime::advancePhase() noexcept
             next = ShutdownPhase::ReclaimComplete;
             break;
         case ShutdownPhase::ReclaimComplete:
+            next = ShutdownPhase::VerifyDrained;  // ★ P3: 最終監査
+            break;
+        case ShutdownPhase::VerifyDrained:
             next = ShutdownPhase::ShutdownComplete;
             break;
         case ShutdownPhase::TimedOut:
@@ -144,6 +147,7 @@ void ShutdownRuntime::emitShutdownTrace() const
     case ShutdownPhase::RetireClosed: phaseName = "RetireClosed"; break;
     case ShutdownPhase::EpochSettled: phaseName = "EpochSettled"; break;
     case ShutdownPhase::ReclaimComplete: phaseName = "ReclaimComplete"; break;
+    case ShutdownPhase::VerifyDrained: phaseName = "VerifyDrained"; break;    // ★ P3
     case ShutdownPhase::TimedOut: phaseName = "TimedOut"; break;          // ★ P1-1
     case ShutdownPhase::Failed: phaseName = "Failed"; break;              // ★ P1-1
     case ShutdownPhase::ShutdownComplete: phaseName = "ShutdownComplete"; break;
