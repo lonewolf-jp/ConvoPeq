@@ -1,6 +1,7 @@
 #include "RuntimeHealthMonitor.h"
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/RuntimePublicationOrchestrator.h"
+#include "audioengine/CrossfadeRuntime.h"  // ★ P1-C: 完全型必要（isPending/getFadeAgeUs）
 #include "audioengine/AtomicAccess.h"
 #include "core/TimeUtils.h"
 
@@ -9,7 +10,12 @@ namespace convo {
 void RuntimeHealthMonitor::tick() noexcept {
     checkRetireStall();
     checkPublicationStall();
-    diagnoseRetireStall(); // ★ P4.5
+    diagnoseRetireStall();
+    checkCrossfadeTimeout();
+    checkCrossfadeEventDrop();
+    checkReaderSlotUsage();
+    checkRetireReclaimLatency();
+    updateHealthState();
 }
 
 void RuntimeHealthMonitor::checkRetireStall() noexcept {
@@ -92,6 +98,27 @@ void RuntimeHealthMonitor::checkPublicationStall() noexcept {
     emitOnTransition(m_prevPublicationState, newState, severity, eventCode, value);
 }
 
+// ★ P1-B: 各 MonitorState から統合 ISRHealthState を算出
+void RuntimeHealthMonitor::updateHealthState() noexcept
+{
+    ISRHealthState newState = ISRHealthState::Healthy;
+
+    // Retire stall → Degraded or Critical
+    if (m_prevRetireState == MonitorState::Error)
+        newState = ISRHealthState::Critical;
+    else if (m_prevRetireState == MonitorState::Warning)
+        newState = ISRHealthState::Degraded;
+
+    // Publication stall → Critical（retire より優先度高）
+    if (m_prevPublicationState == MonitorState::Error)
+        newState = ISRHealthState::Critical;
+    else if (m_prevPublicationState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    convo::publishAtomic(m_healthState_, newState, std::memory_order_release);
+}
+
 void RuntimeHealthMonitor::emitOnTransition(
     MonitorState& currentState, MonitorState newState,
     HealthEvent::Severity severity, uint32_t eventCode,
@@ -148,6 +175,73 @@ void RuntimeHealthMonitor::diagnoseRetireStall() noexcept
                 m_callback(ev);
             }
         }
+    }
+}
+
+// ★ P1-C/Practical-2: Crossfade Timeout 監視（固定30秒）
+void RuntimeHealthMonitor::checkCrossfadeTimeout() noexcept
+{
+    if (!m_crossfadeRuntime) return;
+    if (!m_crossfadeRuntime->isPending()) return;
+
+    uint64_t ageUs = m_crossfadeRuntime->getFadeAgeUs();
+    if (ageUs > kCrossfadeTimeoutUs) {
+        emitOnTransition(m_prevCrossfadeDropState, MonitorState::Error,
+            HealthEvent::Severity::Error, EVENT_CROSSFADE_TIMEOUT, ageUs / 1000);
+    }
+}
+
+// ★ P1-C/Practical-6: Crossfade Event Drop 差分ベース監視
+void RuntimeHealthMonitor::checkCrossfadeEventDrop() noexcept
+{
+    if (!m_crossfadeEventDropRef) return;
+    uint64_t current = convo::consumeAtomic(*m_crossfadeEventDropRef, std::memory_order_acquire);
+    uint64_t delta = current - m_lastObservedDropCount;
+
+    if (delta >= kCrossfadeEventDropCriticalDelta) {
+        emitOnTransition(m_prevCrossfadeDropState, MonitorState::Error,
+            HealthEvent::Severity::Error, EVENT_CROSSFADE_EVENT_DROP, delta);
+    } else if (delta >= kCrossfadeEventDropWarningDelta) {
+        emitOnTransition(m_prevCrossfadeDropState, MonitorState::Warning,
+            HealthEvent::Severity::Warning, EVENT_CROSSFADE_EVENT_DROP, delta);
+    }
+
+    m_lastObservedDropCount = current;
+}
+
+// ★ Practical-4: Reader Slot Usage Telemetry（50%/75%/90% 閾値）
+void RuntimeHealthMonitor::checkReaderSlotUsage() noexcept
+{
+    if (!m_readerSlotRef) return;
+    uint32_t activeCount = convo::consumeAtomic(*m_readerSlotRef, std::memory_order_acquire);
+    constexpr uint32_t kMaxSlots = 64;
+    double usage = static_cast<double>(activeCount) / kMaxSlots;
+
+    if (usage >= 0.90) {
+        emitOnTransition(m_prevReaderSlotState, MonitorState::Error,
+            HealthEvent::Severity::Error, EVENT_READER_SLOT_USAGE,
+            activeCount, kMaxSlots);
+    } else if (usage >= kReaderSlotCriticalThreshold) {
+        emitOnTransition(m_prevReaderSlotState, MonitorState::Warning,
+            HealthEvent::Severity::Warning, EVENT_READER_SLOT_USAGE,
+            activeCount, kMaxSlots);
+    }
+}
+
+// ★ Practical-5: Retire Reclaim Latency 監視
+void RuntimeHealthMonitor::checkRetireReclaimLatency() noexcept
+{
+    if (!m_maxRetireAgeRef) return;
+    uint64_t maxAgeUs = convo::consumeAtomic(*m_maxRetireAgeRef, std::memory_order_acquire);
+
+    if (maxAgeUs > kRetireAgeCriticalUs) {
+        emitOnTransition(m_prevRetireAgeState, MonitorState::Error,
+            HealthEvent::Severity::Error, EVENT_RETIRE_AGE_CRITICAL,
+            maxAgeUs / 1000);
+    } else if (maxAgeUs > kRetireAgeWarningUs) {
+        emitOnTransition(m_prevRetireAgeState, MonitorState::Warning,
+            HealthEvent::Severity::Warning, EVENT_RETIRE_AGE_WARNING,
+            maxAgeUs / 1000);
     }
 }
 

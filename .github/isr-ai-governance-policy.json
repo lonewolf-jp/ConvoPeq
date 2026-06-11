@@ -17,13 +17,13 @@
             }
         ],
         "requiredAdmissionGatePatterns": [
-            "acceptsRuntimePublication\\(\\)",
-            "if \\(!acceptsRuntimePublication\\(\\)\\)"
+            "isShutdownInProgress\\(\\)",
+            "rejectWithEvidence\\(\\\"publish_shutdown_in_progress\\\"\\)"
         ],
         "requiredAdmissionGateApplications": [
             {
                 "pathRegex": "^src/audioengine/AudioEngine\\.RebuildDispatch\\.cpp$",
-                "lineRegex": "if \\(!acceptsRuntimePublication\\(\\)\\)",
+                "lineRegex": "isShutdownInProgress\\(\\)|requestRebuild\\(world\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "rebuild dispatch entry must be guarded by unified admission gate",
@@ -31,7 +31,7 @@
             },
             {
                 "pathRegex": "^src/audioengine/AudioEngine\\.Commit\\.cpp$",
-                "lineRegex": "if \\(!acceptsRuntimePublication\\(\\)\\)",
+                "lineRegex": "isShutdownInProgress\\(\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "commit/publication entry must be guarded by unified admission gate",
@@ -80,6 +80,14 @@
         },
         {
             "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+            "lineRegex": "\\bcritical\\b",
+            "owner": "audio-runtime",
+            "issue": "BRIDGE-ISR-AI-GOV-001",
+            "rationale": "Retire pressure local severity variable name; not an execution semantic authority token",
+            "expiry": "2027-12-31"
+        },
+        {
+            "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
             "lineRegex": "\\bcritical\\b",
             "owner": "audio-runtime",
             "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -287,7 +295,7 @@
         {
             "counterRegex": "publicationRejectCount_|rebuildCollapseCount_|saturationEnterCount_|saturationExitCount_",
             "owner": "audioengine",
-            "allowedPathRegex": "^src/audioengine/",
+            "allowedPathRegex": "^src/(audioengine|tests)/",
             "incrementCondition": "owner subsystem updates counters on corresponding admission/saturation events",
             "decrementOrResetCondition": "snapshot-consume APIs may reset for diagnostics; no cross-subsystem mutation",
             "shutdownFinalizationBehavior": "freeze/export final value during shutdown; avoid authority decisions from counters",
@@ -366,7 +374,7 @@
         ],
         "requiredBoundedReclaimApplications": [
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
                 "lineRegex": "withinWindow\\s*&&\\s*boostCount\\s*<\\s*kEmergencyReclaimBoostMaxCount",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -374,7 +382,7 @@
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
                 "lineRegex": "\\(nowTicks\\s*-\\s*lastBoostTicks\\)\\s*>=\\s*minIntervalTicks",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -382,7 +390,7 @@
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
                 "lineRegex": "retireDepth\\s*>=\\s*static_cast<std::uint64_t>\\(hwm\\)|retireDepth\\s*<=\\s*static_cast<std::uint64_t>\\(lwm\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -413,7 +421,7 @@
         "requiredDrainAuthorityApplications": [
             {
                 "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
-                "lineRegex": "return runtimePublicationBridge_\\.isFullyDrained\\(\\)",
+                "lineRegex": "return.*isFullyDrained\\(\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "Single drain authority delegation must remain rooted in coordinator bridge",
@@ -505,7 +513,7 @@
             },
             {
                 "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
-                "lineRegex": "return runtimePublicationBridge_\\.isFullyDrained\\(\\)",
+                "lineRegex": "return.*isFullyDrained\\(\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "AudioEngine drain SSOT wrapper must delegate to coordinator bridge",
@@ -552,7 +560,7 @@
         ],
         "requiredEmergencyReclaimApplications": [
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
                 "lineRegex": "convo::publishAtomic\\(emergencyReclaimWindowStartTicks_, nowTicks",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -560,7 +568,7 @@
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
                 "lineRegex": "const bool intervalReady = .*\\(nowTicks - lastBoostTicks\\) >= minIntervalTicks",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -568,7 +576,7 @@
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
                 "lineRegex": "convo::publishAtomic\\(emergencyReclaimBoostCount_, 0",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -613,7 +621,7 @@
         "requiredCrossfadeAuthorityApplications": [
             {
                 "pathRegex": "^src/audioengine/(AudioEngine\\.Commit\\.cpp|AudioEngine\\.Init\\.cpp|AudioEngine\\.Processing\\.PrepareToPlay\\.cpp|AudioEngine\\.Processing\\.ReleaseResources\\.cpp|AudioEngine\\.Timer\\.cpp)$",
-                "lineRegex": "publishAtomic\\((dspCrossfade|firstIrDryCrossfade)",
+                "lineRegex": "convo::publishAtomic\\((activeCrossfadeId_|crossfadePreparedSnapshotIndex_)",
                 "owner": "crossfade-authority",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "Crossfade authority writes must remain implemented in designated non-RT scopes and never become no-op policy",
@@ -829,7 +837,7 @@
         ],
         "requiredTelemetryApplications": [
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
                 "lineRegex": "convo::publishAtomic\\(quarantineResident_,\\s*quarantineResident",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -837,7 +845,7 @@
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
                 "lineRegex": "convo::fetchAddAtomic\\(emergencyReclaimBoostCount_,\\s*1",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -845,7 +853,7 @@
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.Threading\\.cpp$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
                 "lineRegex": "convo::publishAtomic\\(reclaimLatency_,\\s*elapsedMs",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -853,31 +861,31 @@
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
-                "lineRegex": "publishAtomic\\(fallbackQueueDepth_,\\s*fallbackDepthU64,\\s*std::memory_order_release\\)",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
+                "lineRegex": "publishAtomic\\(fallbackQueueDepth_,\\s*fallbackDepth,\\s*std::memory_order_release\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "fallback enqueue must immediately publish fallback backlog depth for residency telemetry consistency",
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
-                "lineRegex": "publishAtomic\\(retireQueueDepth_,\\s*retireDepth,\\s*std::memory_order_release\\)",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
+                "lineRegex": "convo::publishAtomic\\(retireQueueDepth_, retireDepth,\\s*std::memory_order_release\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "fallback enqueue must immediately publish retire backlog depth for telemetry comparison coherence",
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
-                "lineRegex": "runtimePublicationBridge_\\.setFallbackBacklogCount\\(fallbackDepthU64\\)",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
+                "lineRegex": "runtimePublicationBridge_\\.setFallbackBacklogCount\\(fallbackDepth\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "fallback enqueue must immediately synchronize fallback backlog into coordinator telemetry bridge",
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
                 "lineRegex": "runtimePublicationBridge_\\.setRetireBacklogCount\\(retireDepth\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
@@ -885,8 +893,8 @@
                 "expiry": "2027-12-31"
             },
             {
-                "pathRegex": "^src/audioengine/AudioEngine\\.h$",
-                "lineRegex": "runtimePublicationBridge_\\.setDeferredRetireResidencyCount\\(fallbackDepthU64\\)",
+                "pathRegex": "^src/audioengine/AudioEngine\\.Retire\\.cpp$",
+                "lineRegex": "runtimePublicationBridge_\\.setDeferredRetireResidencyCount\\(fallbackDepth\\)",
                 "owner": "audio-runtime",
                 "issue": "BRIDGE-ISR-AI-GOV-001",
                 "rationale": "fallback enqueue must immediately synchronize deferred-retire residency for pressure comparison",

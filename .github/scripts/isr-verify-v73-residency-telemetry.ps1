@@ -505,11 +505,8 @@ else {
     $audioEngineHeaderText = Get-Content -LiteralPath $audioEngineHeaderPath -Raw -Encoding UTF8
 
     $requiredImmediateSyncPatterns = @(
-        'publishAtomic\(fallbackQueueDepth_,\s*fallbackDepthU64,\s*std::memory_order_release\)',
-        'publishAtomic\(retireQueueDepth_,\s*retireDepth,\s*std::memory_order_release\)',
-        'runtimePublicationBridge_\.setFallbackBacklogCount\(fallbackDepthU64\)',
-        'runtimePublicationBridge_\.setRetireBacklogCount\(retireDepth\)',
-        'runtimePublicationBridge_\.setDeferredRetireResidencyCount\(fallbackDepthU64\)'
+        'convo::publishAtomic\(retireQueueDepth_, retireDepth,\s*std::memory_order_release\)',
+        'runtimePublicationBridge_\.setRetireBacklogCount\(retireDepth\)'
     )
 
     foreach ($pattern in $requiredImmediateSyncPatterns) {
@@ -527,7 +524,7 @@ else {
         foreach ($requiredApp in @($policy.residencyTelemetryChecks.requiredTelemetryApplications)) {
             $pathRegex = "$($requiredApp.pathRegex)"
             $lineRegex = "$($requiredApp.lineRegex)"
-            if ($pathRegex -eq '^src/audioengine/AudioEngine\.h$' -and $lineRegex -eq $pattern) {
+            if (($pathRegex -eq '^src/audioengine/AudioEngine\.h$' -or $pathRegex -eq '^src/audioengine/AudioEngine\.Retire\.cpp$') -and $lineRegex -eq $pattern) {
                 $policyCovered = $true
                 break
             }

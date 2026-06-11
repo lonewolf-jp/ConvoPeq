@@ -1,5 +1,6 @@
 #include "ISRShutdown.h"
 #include "AtomicAccess.h"
+#include "RuntimeDrainAudit.h"  // ★ P2-B: getPrimaryBlockingReason
 
 #include <filesystem>
 #include <fstream>
@@ -25,8 +26,15 @@ ShutdownPhase ShutdownRuntime::getLastNonTerminalPhase() const noexcept
     return convo::consumeAtomic(lastNonTerminalPhase_, std::memory_order_acquire);
 }
 
-void ShutdownRuntime::markTimedOut() noexcept
+ShutdownBlockingReason ShutdownRuntime::getBlockingReason() const noexcept
 {
+    return convo::consumeAtomic(blockingReason_, std::memory_order_acquire);
+}
+
+void ShutdownRuntime::markTimedOut(ShutdownBlockingReason reason) noexcept
+{
+    // ★ P2-B: 阻害要因を保存
+    convo::publishAtomic(blockingReason_, reason, std::memory_order_release);
     // ★ P1-1: 現在の phase を保存してから上書き
     convo::publishAtomic(lastNonTerminalPhase_,
                          convo::consumeAtomic(phase_, std::memory_order_acquire),
@@ -34,8 +42,10 @@ void ShutdownRuntime::markTimedOut() noexcept
     convo::publishAtomic(phase_, ShutdownPhase::TimedOut, std::memory_order_release);
 }
 
-void ShutdownRuntime::markFailed() noexcept
+void ShutdownRuntime::markFailed(ShutdownBlockingReason reason) noexcept
 {
+    // ★ P2-B: 阻害要因を保存
+    convo::publishAtomic(blockingReason_, reason, std::memory_order_release);
     convo::publishAtomic(lastNonTerminalPhase_,
                          convo::consumeAtomic(phase_, std::memory_order_acquire),
                          std::memory_order_release);
@@ -138,6 +148,7 @@ void ShutdownRuntime::emitShutdownTrace() const
     const auto sh4 = convo::consumeAtomic(sh4ObserverCount_, std::memory_order_acquire);
     const auto sh5 = convo::consumeAtomic(sh5LateCallbackCount_, std::memory_order_acquire);
     const auto sh6 = convo::consumeAtomic(sh6PostStopEnqueueCount_, std::memory_order_acquire);
+    const auto reason = convo::consumeAtomic(blockingReason_, std::memory_order_acquire);  // ★ P2-B
 
     const char* phaseName = "Running";
     switch (phase) {
@@ -147,18 +158,33 @@ void ShutdownRuntime::emitShutdownTrace() const
     case ShutdownPhase::RetireClosed: phaseName = "RetireClosed"; break;
     case ShutdownPhase::EpochSettled: phaseName = "EpochSettled"; break;
     case ShutdownPhase::ReclaimComplete: phaseName = "ReclaimComplete"; break;
-    case ShutdownPhase::VerifyDrained: phaseName = "VerifyDrained"; break;    // ★ P3
-    case ShutdownPhase::TimedOut: phaseName = "TimedOut"; break;          // ★ P1-1
-    case ShutdownPhase::Failed: phaseName = "Failed"; break;              // ★ P1-1
+    case ShutdownPhase::VerifyDrained: phaseName = "VerifyDrained"; break;
+    case ShutdownPhase::TimedOut: phaseName = "TimedOut"; break;
+    case ShutdownPhase::Failed: phaseName = "Failed"; break;
     case ShutdownPhase::ShutdownComplete: phaseName = "ShutdownComplete"; break;
+    }
+
+    const char* reasonName = "None";
+    switch (reason) {
+    case ShutdownBlockingReason::None: reasonName = "None"; break;
+    case ShutdownBlockingReason::PendingPublication: reasonName = "PendingPublication"; break;
+    case ShutdownBlockingReason::PendingRetire: reasonName = "PendingRetire"; break;
+    case ShutdownBlockingReason::ActiveCrossfade: reasonName = "ActiveCrossfade"; break;
+    case ShutdownBlockingReason::DeferredPublish: reasonName = "DeferredPublish"; break;
+    case ShutdownBlockingReason::QuarantineResident: reasonName = "QuarantineResident"; break;
+    case ShutdownBlockingReason::RouterPendingRetire: reasonName = "RouterPendingRetire"; break;
+    case ShutdownBlockingReason::ReaderActive: reasonName = "ReaderActive"; break;
+    case ShutdownBlockingReason::Unknown: reasonName = "Unknown"; break;
     }
 
     const bool boundedComplete = (sh1 == 0u && sh2 == 0u && sh3 == 0u && sh4 == 0u && sh5 == 0u && sh6 == 0u);
 
     file << "{\n";
-    file << "  \"schema\": \"shutdown_trace_v1\",\n";
+    file << "  \"schema\": \"shutdown_trace_v2\",\n";
     file << "  \"phase\": " << static_cast<int>(phase) << ",\n";
     file << "  \"phaseName\": \"" << phaseName << "\",\n";
+    file << "  \"blockingReason\": \"" << reasonName << "\",\n";  // ★ P2-B
+    file << "  \"blockingReasonCode\": " << static_cast<int>(reason) << ",\n";
     file << "  \"transitionViolations\": " << violations << ",\n";
     file << "  \"sh1_callbackCount\": " << sh1 << ",\n";
     file << "  \"sh2_activeCrossfade\": " << sh2 << ",\n";

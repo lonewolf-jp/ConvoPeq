@@ -131,15 +131,6 @@ public:
         return convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
     }
 
-    // [work21] [[deprecated]] — transitional; callers migrated to publishEpoch()
-    [[deprecated("Use Router::publishEpoch() instead. See refactoring_plan.md P0-8.")]]
-    uint64_t advanceEpoch() noexcept
-    {
-        return convo::fetchAddAtomic(globalEpoch,
-                                     static_cast<uint64_t>(1),
-                                     std::memory_order_acq_rel);
-    }
-
     // [work21] IEpochProvider::publishEpoch — inline advance to avoid deprecated call
     uint64_t publishEpoch() noexcept override
     {
@@ -195,36 +186,24 @@ public:
         return count;
     }
 
-    [[deprecated("Use ISR RuntimePublicationCoordinator::enqueueRetire")]] bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
-    {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch);
-    }
-
-    // [work21] [[deprecated]] — transitional; callers migrated to Router 4-param overload
-    [[deprecated("Use ISR RuntimePublicationCoordinator::enqueueRetire")]] bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
-    {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
-    }
-
-    // [work21] [[deprecated]] — transitional; callers migrated to tryReclaim()
-    [[deprecated("Use requestReclaim() instead. See refactoring_plan.md P0-6.")]]
-    void reclaimRetired() noexcept
-    {
-        deferredDeletionQueue.reclaim(getMinReaderEpoch());
-    }
-
     // [work21] IEpochProvider::tryReclaim — inline reclaim to avoid deprecated call
     void tryReclaim() noexcept override
     {
         deferredDeletionQueue.reclaim(getMinReaderEpoch());
     }
 
-    void drainAll() noexcept
+    // ★ P0-A/P2-A: IRetireProvider インターフェース実装（public 必須）
+    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
+    {
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch);
+    }
+
+    void drainAll() noexcept override
     {
         deferredDeletionQueue.drainAllUnsafe();
     }
 
-    [[nodiscard]] uint32_t pendingRetireCount() const noexcept
+    [[nodiscard]] uint32_t pendingRetireCount() const noexcept override
     {
         return deferredDeletionQueue.sizeApprox();
     }
@@ -234,7 +213,29 @@ public:
         return static_cast<int64_t>(a - b) < 0;
     }
 
+    // ★ P2-A: 以下の deprecated API は移行完了により private 化。
+    //   外部からの新規使用を禁止し、publishEpoch() / tryReclaim() を推奨。
 private:
+    [[deprecated("Use publishEpoch() instead.")]]
+    uint64_t advanceEpoch() noexcept
+    {
+        return convo::fetchAddAtomic(globalEpoch,
+                                     static_cast<uint64_t>(1),
+                                     std::memory_order_acq_rel);
+    }
+
+    [[deprecated("Use tryReclaim() instead.")]]
+    void reclaimRetired() noexcept
+    {
+        deferredDeletionQueue.reclaim(getMinReaderEpoch());
+    }
+
+    [[deprecated("Use coordinator.enqueueRetire() instead.")]]
+    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
+    {
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
+    }
+
     struct ReaderSlot
     {
         std::atomic<uint64_t> epoch { kInactiveEpoch };

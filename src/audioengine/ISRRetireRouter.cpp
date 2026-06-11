@@ -6,7 +6,8 @@
 //============================================================================
 
 #include "ISRRetireRouter.h"
-#include "core/EpochDomain.h" // 完全型は .cpp のみでインクルード
+// ★ P0-A: pendingRetireCount/drainAll を IRetireProvider 経由に変更したため
+//   EpochDomain 完全型不要。dynamic_cast 削除により include 不要。
 
 namespace convo {
 namespace isr {
@@ -104,20 +105,16 @@ void ISRRetireRouter::tryReclaim() noexcept
 
 uint32_t ISRRetireRouter::pendingRetireCount() const noexcept
 {
-    // pendingRetireCount は EpochDomain 固有メソッド。
-    // プロバイダが EpochDomain の場合のみ dynamic_cast で取得。
+    // ★ P0-A: IRetireProvider 経由で委譲（dynamic_cast 不要）
     assert(provider_ != nullptr);
-    auto* ed = dynamic_cast<EpochDomain*>(provider_);
-    return ed ? ed->pendingRetireCount() : 0;
+    return provider_->pendingRetireCount();
 }
 
 void ISRRetireRouter::drainAll() noexcept
 {
-    // drainAll は EpochDomain 固有メソッド。
-    // プロバイダが EpochDomain の場合のみ dynamic_cast で実行。
+    // ★ P0-A: IRetireProvider 経由で委譲（dynamic_cast 不要）
     assert(provider_ != nullptr);
-    if (auto* ed = dynamic_cast<EpochDomain*>(provider_))
-        ed->drainAll();
+    provider_->drainAll();
 }
 
 } // namespace isr

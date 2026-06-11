@@ -1,0 +1,79 @@
+#pragma once
+
+#include <cstdint>
+#include <atomic>
+#include <cassert>
+#include "TelemetryRecorder.h"   // FixedRingBuffer
+#include "RuntimePublicationState.h"   // CorrelationId
+#include "core/TimeUtils.h"  // getCurrentTimeUs
+
+namespace convo::isr {
+
+// ★ P3-B: World 発行/退役の診断用レコード
+struct WorldLifecycleRecord {
+    uint64_t worldId;
+    uint64_t publishEpoch;
+    uint64_t retireEpoch;        // 0 = 未退役
+    uint64_t publishTimestampUs;
+    uint64_t retireTimestampUs;
+    CorrelationId correlationId;
+};
+
+// ★ P3-B: World ライフサイクル監査（Diagnostic 限定）
+//   Shutdown 完了判定の Authority にはしない。
+//   Shutdown 判定は RuntimeDrainAudit + ShutdownRuntime FSM が担当。
+class WorldLifecycleAudit {
+public:
+    void onWorldPublished(uint64_t worldId, uint64_t epoch, CorrelationId cid) noexcept
+    {
+        ringBuffer_.tryPush(WorldLifecycleRecord{
+            .worldId = worldId,
+            .publishEpoch = epoch,
+            .retireEpoch = 0,
+            .publishTimestampUs = getCurrentTimeUs(),
+            .retireTimestampUs = 0,
+            .correlationId = cid
+        });
+        convo::fetchAddAtomic(publishedCount_, uint64_t{1}, std::memory_order_release);
+        convo::fetchAddAtomic(activeWorldCount_, uint64_t{1}, std::memory_order_release);
+    }
+
+    void onWorldRetired(uint64_t worldId, uint64_t epoch) noexcept
+    {
+        // ★ v7.2: fetchSub→if(prev==0)→publishAtomic(0)
+        //   load→if→fetchSub 方式は TOCTOU 競合があるため不採用。
+        //   Diagnostic 限定カウンタだが監査価値を維持するため fetchSub の戻り値で判定。
+        uint64_t prev = convo::fetchSubAtomic(activeWorldCount_, 1u,
+            std::memory_order_acq_rel);
+        if (prev == 0) {
+            assert(false);  // 二重 retire 検出
+            convo::publishAtomic(activeWorldCount_, uint64_t{0},
+                std::memory_order_release);
+        }
+
+        convo::fetchAddAtomic(retiredCount_, 1u, std::memory_order_release);
+    }
+
+    [[nodiscard]] uint64_t activeWorldCount() const noexcept {
+        return convo::consumeAtomic(activeWorldCount_, std::memory_order_acquire);
+    }
+
+    [[nodiscard]] uint64_t publishedCount() const noexcept {
+        return convo::consumeAtomic(publishedCount_, std::memory_order_acquire);
+    }
+
+    [[nodiscard]] uint64_t retiredCount() const noexcept {
+        return convo::consumeAtomic(retiredCount_, std::memory_order_acquire);
+    }
+
+    // ★ 診断用ダンプ（RingBuffer から最新レコードを取得）
+    void emitSnapshot() const noexcept;
+
+private:
+    FixedRingBuffer<WorldLifecycleRecord, 4096> ringBuffer_;
+    std::atomic<uint64_t> activeWorldCount_{0};
+    std::atomic<uint64_t> publishedCount_{0};
+    std::atomic<uint64_t> retiredCount_{0};
+};
+
+} // namespace convo::isr

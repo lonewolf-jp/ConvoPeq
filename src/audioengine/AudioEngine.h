@@ -3234,7 +3234,8 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
         return convo::isr::RetireEnqueueResult::Success;
     }
 
-    // [P0-5] enqueue failure -> drop + telemetry.
+    // [P0-5] enqueue failure -> best-effort drain + telemetry.
+    drainDeferredRetireQueues(false);
     const std::uint64_t retireDepth = static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount());
     convo::publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
@@ -3423,6 +3424,7 @@ public:
     std::atomic<float> m_currentSaturationAmount { 0.1f };
 
     std::atomic<std::uint64_t> retireQueueDepth_ { 0 };
+    std::atomic<std::uint64_t> maxPendingRetireObserved_ { 0 };  // ★ Practical-1
     std::atomic<std::uint64_t> fallbackQueueDepth_ { 0 };
     std::atomic<std::uint64_t> quarantineResident_ { 0 };
     // publicationBacklog_ removed in Phase1-B; kept as always-0 legacy slot

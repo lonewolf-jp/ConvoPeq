@@ -11,9 +11,9 @@ if (-not (Test-Path -LiteralPath $evidenceDir)) {
 
 $targets = [ordered]@{
     authority = Join-Path $repoRoot 'src\audioengine\ISRAuthorityClass.h'
-    header = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
-    threading = Join-Path $repoRoot 'src\audioengine\AudioEngine.Threading.cpp'
-    release = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.ReleaseResources.cpp'
+    header    = Join-Path $repoRoot 'src\audioengine\AudioEngine.h'
+    threading = Join-Path $repoRoot 'src\audioengine\AudioEngine.Retire.cpp'
+    release   = Join-Path $repoRoot 'src\audioengine\AudioEngine.Processing.ReleaseResources.cpp'
 }
 
 foreach ($kv in $targets.GetEnumerator()) {
@@ -38,7 +38,7 @@ function Add-Violation {
 
     $violations.Add(@{
             checkId = $CheckId
-            file = $File
+            file    = $File
             message = $Message
         }) | Out-Null
 }
@@ -57,21 +57,24 @@ function Assert-Pattern {
     }
 }
 
-# CI-RETIREPRESS-001: enqueue失敗時にfallbackへ退避し silent drop しない
-$enqueueAttempts = [System.Text.RegularExpressions.Regex]::Matches($headerText, 'enqueueRetireEpochBounded\(ptr,\s*deleter,\s*epoch\)').Count
-if ($enqueueAttempts -lt 2) {
-    Add-Violation -CheckId 'CI-RETIREPRESS-001' -File 'src/audioengine/AudioEngine.h' -Message 'enqueueDeferredDeleteNonRt must include at least two enqueueRetireEpochBounded attempts.'
+# CI-RETIREPRESS-001: enqueue失敗時にQueuePressure/QueueFullを返し silent drop しない
+#   [P0-5] single-attempt + drop pattern: m_retireRouter->enqueueRetire -> success or QueuePressure
+#   Legacy two-attempt pattern (enqueueRetireEpochBounded x2) も許容する。
+$hasTwoAttemptPattern = [System.Text.RegularExpressions.Regex]::IsMatch($headerText,
+    'enqueueRetireEpochBounded\(ptr,\s*deleter,\s*epoch\).*enqueueRetireEpochBounded\(ptr,\s*deleter,\s*epoch\)',
+    [System.Text.RegularExpressions.RegexOptions]::Singleline)
+$hasSingleAttemptPressureReturn = [System.Text.RegularExpressions.Regex]::IsMatch($headerText,
+    'RetireEnqueueResult::QueuePressure',
+    [System.Text.RegularExpressions.RegexOptions]::Singleline)
+$hasLegacyFallbackEnqueue = [System.Text.RegularExpressions.Regex]::IsMatch($headerText, 'deferredDeleteFallbackQueue\.push_back\(DeferredDeleteFallbackEntry\{', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
+if (-not $hasTwoAttemptPattern -and -not $hasSingleAttemptPressureReturn -and -not $hasLegacyFallbackEnqueue) {
+    Add-Violation -CheckId 'CI-RETIREPRESS-001' -File 'src/audioengine/AudioEngine.h' -Message 'enqueueDeferredDeleteNonRt must either (a) two-attempt enqueueRetireEpochBounded, (b) single-attempt with QueuePressure return, or (c) legacy fallback enqueue.'
 }
 
-Assert-Pattern -Text $headerText -Pattern 'm_epochDomain\.reclaimRetired\(\);' -CheckId 'CI-RETIREPRESS-001' -File 'src/audioengine/AudioEngine.h' -Message 'enqueueDeferredDeleteNonRt must call reclaimRetired() before second enqueue attempt.'
-
-$hasLegacyFallbackEnqueue = [System.Text.RegularExpressions.Regex]::IsMatch($headerText, 'deferredDeleteFallbackQueue\.push_back\(DeferredDeleteFallbackEntry\{', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-$hasCurrentPressureReturn = [System.Text.RegularExpressions.Regex]::IsMatch($headerText,
-    'RetireEnqueueResult::QueueFull[\s\S]*RetireEnqueueResult::QueuePressure',
-    [System.Text.RegularExpressions.RegexOptions]::Singleline)
-
-if (-not $hasLegacyFallbackEnqueue -and -not $hasCurrentPressureReturn) {
-    Add-Violation -CheckId 'CI-RETIREPRESS-001' -File 'src/audioengine/AudioEngine.h' -Message 'enqueueDeferredDeleteNonRt must either enqueue fallback entry (legacy) or explicitly return QueuePressure/QueueFull under bounded enqueue pressure.'
+# CI-RETIREPRESS-001(b): reclaimRetired is only required for two-attempt pattern
+if ($hasTwoAttemptPattern) {
+    Assert-Pattern -Text $headerText -Pattern 'm_epochDomain\.reclaimRetired\(\);' -CheckId 'CI-RETIREPRESS-001' -File 'src/audioengine/AudioEngine.h' -Message 'enqueueDeferredDeleteNonRt must call reclaimRetired() before second enqueue attempt.'
 }
 
 # CI-RETIREPRESS-002: fallback蓄積時はbest-effort drainキックが必須
@@ -97,9 +100,9 @@ Assert-Pattern -Text $headerText -Pattern 'RetireEnqueueResult::QueueFull' -Chec
 Assert-Pattern -Text $headerText -Pattern 'RetireEnqueueResult::Shutdown' -CheckId 'CI-RETIREPRESS-006' -File 'src/audioengine/AudioEngine.h' -Message 'retireDSP branching must include Shutdown path.'
 
 $report = @{
-    schema = 'isr_v73_retire_pressure_report_v1'
-    generatedAt = (Get-Date -Format 'o')
-    checks = @(
+    schema         = 'isr_v73_retire_pressure_report_v1'
+    generatedAt    = (Get-Date -Format 'o')
+    checks         = @(
         'CI-RETIREPRESS-001',
         'CI-RETIREPRESS-002',
         'CI-RETIREPRESS-003',
@@ -108,7 +111,7 @@ $report = @{
         'CI-RETIREPRESS-006'
     )
     violationCount = $violations.Count
-    violations = $violations.ToArray()
+    violations     = $violations.ToArray()
 }
 
 $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding UTF8

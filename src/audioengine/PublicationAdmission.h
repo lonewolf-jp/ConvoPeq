@@ -3,6 +3,7 @@
 #include "RuntimeBuildTypes.h"
 #include "ISRDSPHandle.h"
 #include "core/RuntimeReaderContext.h"
+#include "RuntimeHealthMonitor.h"  // ★ P1-B: ISRHealthState
 
 class AudioEngine;  // forward declaration (circular dep avoid)
 
@@ -39,6 +40,11 @@ public:
 
     explicit PublicationAdmission() noexcept = default;
 
+    // ★ P1-B: HealthState 参照を設定（RuntimeHealthMonitor の getHealthStateRef() を渡す）
+    void setHealthStateRef(const std::atomic<ISRHealthState>* ref) noexcept {
+        m_healthStateRef = ref;
+    }
+
     // evaluate: publish 可否を判定する（AudioEngine 参照が必要）。
     // Accepted 以外の場合は Coordinator が対応する。
     [[nodiscard]] Decision evaluate(const PublishRequest& req,
@@ -47,6 +53,10 @@ public:
 
     // Deferred Queue は PublicationAdmission から RuntimePublicationOrchestrator へ移設済み (PR-7)。
     // Admission は publish 可否判定のみ責務とする。
+
+private:
+    // ★ P1-B: HealthMonitor の統合 HealthState 参照
+    const std::atomic<ISRHealthState>* m_healthStateRef = nullptr;
 };
 
 } // namespace convo::isr

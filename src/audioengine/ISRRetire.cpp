@@ -21,12 +21,12 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
             {
                 const size_t idx = fallbackCount_.load(std::memory_order_relaxed);
                 fallbackQueue_[idx] = intent;
-                fallbackCount_.store(idx + 1, std::memory_order_release);
+                convo::publishAtomic(fallbackCount_, idx + 1, std::memory_order_release);
 
                 // 最大使用量を更新
-                size_t prevHwm = fallbackHighWatermark_.load(std::memory_order_relaxed);
+                size_t prevHwm = convo::consumeAtomic(fallbackHighWatermark_, std::memory_order_relaxed);
                 while (idx + 1 > prevHwm
-                    && !fallbackHighWatermark_.compare_exchange_weak(prevHwm, idx + 1,
+                    && !convo::compareExchangeAtomic(fallbackHighWatermark_, prevHwm, idx + 1,
                         std::memory_order_release, std::memory_order_relaxed)) {}
 
                 (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
@@ -88,11 +88,11 @@ std::vector<RetireIntent> RetireRuntime::dequeuePendingRetireIntents() noexcept
     // 2. ★ P1: Drain Fallback queue
     {
         std::lock_guard<std::mutex> lock(fallbackMutex_);
-        const size_t fbCount = fallbackCount_.load(std::memory_order_acquire);
+        const size_t fbCount = convo::consumeAtomic(fallbackCount_, std::memory_order_acquire);
         for (size_t i = 0; i < fbCount; ++i) {
             result.push_back(fallbackQueue_[i]);
         }
-        fallbackCount_.store(0, std::memory_order_release);
+        convo::publishAtomic(fallbackCount_, size_t{0}, std::memory_order_release);
     }
 
     std::stable_sort(result.begin(), result.end(), [](const RetireIntent& lhs, const RetireIntent& rhs) noexcept {
@@ -159,12 +159,12 @@ std::uint64_t RetireRuntime::lastOverflowWindowCount() const noexcept
 // ★ P1: Fallback queue metrics
 std::size_t RetireRuntime::fallbackOccupancy() const noexcept
 {
-    return fallbackCount_.load(std::memory_order_acquire);
+    return convo::consumeAtomic(fallbackCount_, std::memory_order_acquire);
 }
 
 std::size_t RetireRuntime::fallbackHighWatermark() const noexcept
 {
-    return fallbackHighWatermark_.load(std::memory_order_acquire);
+    return convo::consumeAtomic(fallbackHighWatermark_, std::memory_order_acquire);
 }
 
 std::uint64_t RetireRuntime::fallbackOverflowCount() const noexcept

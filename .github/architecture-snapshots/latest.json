@@ -1,14 +1,14 @@
 {
-  "enqueueRetire": 4,
-  "templateCount": 0,
-  "timestamp": "2026-06-10 23:48:38",
-  "pubMethods": 1,
-  "iepMethods": 0,
-  "totalMethods": 10,
-  "readerMethods": 7,
-  "aliasCount": 0,
-  "advanceEpoch": 0,
-  "exposure": 0,
-  "retireMethods": 2,
-  "routerMethods": 6
+    "templateCount":  0,
+    "iepMethods":  0,
+    "routerMethods":  2,
+    "readerMethods":  7,
+    "totalMethods":  12,
+    "retireMethods":  4,
+    "aliasCount":  0,
+    "timestamp":  "2026-06-12 00:24:46",
+    "enqueueRetire":  3,
+    "exposure":  0,
+    "pubMethods":  1,
+    "advanceEpoch":  0
 }

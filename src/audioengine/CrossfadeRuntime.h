@@ -4,6 +4,9 @@
 #include <algorithm>
 #include "AtomicAccess.h"
 #include "DspNumericPolicy.h"
+#include "ISRDSPHandle.h"          // ★ P1-C: CrossfadeId
+#include "core/CommandBuffer.h"    // ★ P1-C: SPSCRingBuffer
+#include "core/TimeUtils.h"        // ★ P1-C: getCurrentTimeUs
 
 // CrossfadeRuntime: Crossfade の実行状態を一元管理する Runtime Component。
 // AudioEngine から分離され、DSPTransition から参照される。
@@ -18,6 +21,14 @@
 //   CrossfadeRuntime は Execution Cache として振る舞う。
 
 namespace convo::isr {
+
+// ★ P1-C: AudioThread → Timer へ渡す完了イベント
+struct CompletedFadeEvent {
+    CrossfadeId id;
+    uint64_t    completedTimestampUs;
+};
+static_assert(std::is_trivially_copyable_v<CompletedFadeEvent>,
+    "Must be trivially copyable for SPSC queue");
 
 class CrossfadeRuntime {
 public:
@@ -34,7 +45,48 @@ public:
         convo::publishAtomic(firstIrDryPending_, false, std::memory_order_release);
         convo::publishAtomic(startDelayBlocks_, 0, std::memory_order_release);
         convo::publishAtomic(dryHoldSamples_, 0, std::memory_order_release);
+        // ★ P1-C: 開始タイムスタンプ記録（Practical-2 Timeout監視用）
+        convo::publishAtomic(fadeStartTimestampUs_, getCurrentTimeUs(), std::memory_order_release);
         // activeCrossfadeId_ は触らない — CrossfadeAuthorityRuntime の権威
+    }
+
+    // ★ P1-C: AudioThread から呼ばれる完了通知
+    //   DSPTransition または fade advancement ロジック内で、
+    //   クロスフェード完了を検出したらこのメソッドを呼ぶ。
+    void notifyFadeComplete(CrossfadeId id) noexcept
+    {
+        CompletedFadeEvent ev{id, getCurrentTimeUs()};
+        if (!completedFadeQueue_.push(ev))
+        {
+            // ★ Queue full → drop count increment
+            convo::fetchAddAtomic(crossfadeEventDropCount_, uint64_t{1},
+                std::memory_order_release);
+        }
+    }
+
+    // ★ P1-C: Timer 側で完了イベントを消費
+    [[nodiscard]] bool consumeCompletedFade(CompletedFadeEvent& ev) noexcept
+    {
+        return completedFadeQueue_.pop(ev);
+    }
+
+    // ★ Practical-2: 開始からの経過時間（Timeout 監視用）
+    [[nodiscard]] uint64_t getFadeAgeUs() const noexcept
+    {
+        uint64_t start = convo::consumeAtomic(fadeStartTimestampUs_, std::memory_order_acquire);
+        if (start == 0) return 0;
+        return getCurrentTimeUs() - start;
+    }
+
+    // ★ Practical-6: 超過イベント破棄数を取得
+    [[nodiscard]] uint64_t crossfadeEventDropCount() const noexcept
+    {
+        return convo::consumeAtomic(crossfadeEventDropCount_, std::memory_order_acquire);
+    }
+
+    // ★ P1-C/Practical-6: HealthMonitor が drop count を監視するための参照
+    [[nodiscard]] const std::atomic<uint64_t>* getCrossfadeEventDropCountRef() const noexcept {
+        return &crossfadeEventDropCount_;
     }
 
     // complete: クロスフェード完了時 (timer から)
@@ -42,6 +94,7 @@ public:
     {
         convo::publishAtomic(pending_, false, std::memory_order_release);
         convo::publishAtomic(queuedFadeTimeSec_, 0.030, std::memory_order_release);
+        convo::publishAtomic(fadeStartTimestampUs_, 0, std::memory_order_release);
     }
 
     // reset: shutdown/releaseResources 時
@@ -55,8 +108,12 @@ public:
         convo::publishAtomic(dryHoldSamples_, 0, std::memory_order_release);
         convo::publishAtomic(queuedFadeTimeSec_, 0.030, std::memory_order_release);
         convo::publishAtomic(dryScaleTarget_, 1.0, std::memory_order_release);
+        convo::publishAtomic(fadeStartTimestampUs_, 0, std::memory_order_release);
         gain_.setCurrentAndTargetValue(1.0);
         dryScaleGain_.setCurrentAndTargetValue(1.0);
+        // ★ SPSC キューを空に
+        CompletedFadeEvent dummy;
+        while (completedFadeQueue_.pop(dummy)) {}
     }
 
     // === RT-safe read-only access ===
@@ -106,6 +163,10 @@ private:
     std::atomic<double> dryScaleTarget_{ 1.0 };
     convo::LinearRamp gain_;
     convo::LinearRamp dryScaleGain_;
+    // ★ P1-C: SPSC 完了イベントキュー（AudioThread → Timer）
+    SPSCRingBuffer<CompletedFadeEvent, 32> completedFadeQueue_;
+    std::atomic<uint64_t> crossfadeEventDropCount_{0};
+    std::atomic<uint64_t> fadeStartTimestampUs_{0};
     // activeCrossfadeId_ は CrossfadeRuntime に持たせない
     // CrossfadeAuthorityRuntime が唯一権威
 };

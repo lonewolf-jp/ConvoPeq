@@ -21,7 +21,19 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
     if (req.sealedSnapshot.irLoaded && !req.sealedSnapshot.irFinalized)
         return Decision::RejectedNotFinalized;
 
-    // 4. Pressure / throttle check (P1-6: Adaptive Backpressure)
+    // 4. HealthState check (P1-B: HealthMonitor の統合 HealthState を参照)
+    if (m_healthStateRef) {
+        auto health = convo::consumeAtomic(*m_healthStateRef, std::memory_order_acquire);
+        if (health == ISRHealthState::Critical) {
+            return Decision::RejectedPressure;
+        }
+        if (health == ISRHealthState::Degraded) {
+            // Degraded 時は低優先度 publish を拒否（現状一律 RejectedPressure）
+            return Decision::RejectedPressure;
+        }
+    }
+
+    // 5. Pressure / throttle check (P1-6: Adaptive Backpressure)
     const bool pressureActive = convo::consumeAtomic(
         engine.retirePressurePublicationThrottleActive_, std::memory_order_acquire);
     if (pressureActive) {

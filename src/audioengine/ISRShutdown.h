@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include "RuntimeDrainAudit.h"  // ★ P2-B: ShutdownBlockingReason
 
 namespace convo {
 namespace isr {
@@ -27,6 +28,22 @@ enum class ShutdownPhase : uint8_t
     TimedOut,
     Failed,
     ShutdownComplete
+};
+
+/**
+ * ★ P2-B/Practical-3: Shutdown 完了阻害要因
+ */
+enum class ShutdownBlockingReason : uint8_t
+{
+    None = 0,
+    PendingPublication,
+    PendingRetire,
+    ActiveCrossfade,
+    DeferredPublish,
+    QuarantineResident,
+    RouterPendingRetire,
+    ReaderActive,
+    Unknown
 };
 
 /**
@@ -62,8 +79,11 @@ public:
     bool isShutdownInProgress() const noexcept;
 
     // ★ P1-1: タイムアウト・異常終了を記録（transitionTo をバイパスして直接 store）
-    void markTimedOut() noexcept;
-    void markFailed() noexcept;
+    void markTimedOut(ShutdownBlockingReason reason = ShutdownBlockingReason::Unknown) noexcept;
+    void markFailed(ShutdownBlockingReason reason = ShutdownBlockingReason::Unknown) noexcept;
+
+    // ★ P2-B: 完了阻害要因を取得（障害解析用）
+    ShutdownBlockingReason getBlockingReason() const noexcept;
 
     // Emit final shutdown trace
     void emitShutdownTrace() const;
@@ -89,6 +109,8 @@ private:
     std::atomic<uint32_t> sh4ObserverCount_{0};
     std::atomic<uint32_t> sh5LateCallbackCount_{0};
     std::atomic<uint32_t> sh6PostStopEnqueueCount_{0};
+    // ★ P2-B: Shutdown 完了阻害要因（markTimedOut/Failed 時に保存）
+    std::atomic<ShutdownBlockingReason> blockingReason_{ShutdownBlockingReason::None};
 };
 
 }  // namespace isr

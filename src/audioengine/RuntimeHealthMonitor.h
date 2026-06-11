@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include "AtomicAccess.h"
 
 namespace convo {
 
@@ -22,14 +23,38 @@ struct HealthEvent {
 namespace isr {
 class ISRRetireRouter;
 class RuntimePublicationOrchestrator;
+class CrossfadeRuntime;  // ★ P1-C: 前方宣言
 }
 
-// ★ イベントコード定数
+// ★ P1-B: ISR Health State — HealthMonitor が一元管理し Admission へ公開
+enum class ISRHealthState : uint8_t {
+    Healthy = 0,    // 正常
+    Degraded,       // 軽度障害（Reader枯渇 / Retire backlog増加）
+    Critical        // 重度障害（Publication stall / Reader stuck / Timeout）
+};
+
 static constexpr uint32_t EVENT_RETIRE_STALL         = 1001;
 static constexpr uint32_t EVENT_RETIRE_STALL_WARNING = 1002;
 static constexpr uint32_t EVENT_PUBLICATION_STALL    = 2001;
 static constexpr uint32_t EVENT_PUBLICATION_WARNING  = 2002;
-static constexpr uint32_t EVENT_READER_STUCK         = 3001; // ★ P4.5
+static constexpr uint32_t EVENT_READER_STUCK         = 3001;
+static constexpr uint32_t EVENT_READER_SLOT_USAGE     = 3010;  // ★ P1-B/Practical-4
+static constexpr uint32_t EVENT_CROSSFADE_TIMEOUT    = 4001;  // ★ P1-C/Practical-2
+static constexpr uint32_t EVENT_CROSSFADE_EVENT_DROP = 4002;  // ★ P1-C/Practical-6
+static constexpr uint32_t EVENT_RETIRE_AGE_WARNING   = 1010;  // ★ Practical-5
+static constexpr uint32_t EVENT_RETIRE_AGE_CRITICAL  = 1011;  // ★ Practical-5
+
+// ★ P1-C: Crossfade Timeout（固定30秒）
+static constexpr uint64_t kCrossfadeTimeoutUs = 30'000'000;
+// ★ P1-C: Crossfade Event Drop 閾値（差分ベース）
+static constexpr uint64_t kCrossfadeEventDropCriticalDelta = 10;
+static constexpr uint64_t kCrossfadeEventDropWarningDelta  = 1;
+// ★ Practical-4: Reader Slot 閾値
+static constexpr double kReaderSlotWarningThreshold  = 0.50;
+static constexpr double kReaderSlotCriticalThreshold = 0.75;
+// ★ Practical-5: Retire Age 閾値
+static constexpr uint64_t kRetireAgeWarningUs  = 5'000'000;   // 5秒
+static constexpr uint64_t kRetireAgeCriticalUs = 30'000'000;  // 30秒
 
 enum class MonitorState : uint8_t { Normal, Warning, Error };
 using HealthEventCallback = std::function<void(const HealthEvent&)>;
@@ -47,18 +72,40 @@ using HealthEventCallback = std::function<void(const HealthEvent&)>;
  */
 class RuntimeHealthMonitor {
 public:
+    // ★ P1-C/Practical-2: CrossfadeRuntime 参照設定
     void setRetireRouter(isr::ISRRetireRouter* router) noexcept { m_retireRouter = router; }
     void setOrchestrator(isr::RuntimePublicationOrchestrator* orch) noexcept { m_orchestrator = orch; }
     void setRetireHighWatermarkRef(const std::atomic<int>* ref) noexcept { m_retireHighWatermarkRef = ref; }
     void setEventCallback(HealthEventCallback cb) noexcept { m_callback = std::move(cb); }
+    // ★ P1-C/Practical-2: CrossfadeRuntime 参照設定（crossfade timeout + event drop 監視用）
+    void setCrossfadeRuntime(const isr::CrossfadeRuntime* rt) noexcept { m_crossfadeRuntime = rt; }
+    // ★ Practical-2/5/6: 診断用参照設定
+    void setCrossfadeEventDropRef(const std::atomic<uint64_t>* ref) noexcept { m_crossfadeEventDropRef = ref; }
+    void setMaxRetireAgeRef(const std::atomic<uint64_t>* ref) noexcept { m_maxRetireAgeRef = ref; }
+    void setReaderSlotRef(const std::atomic<uint32_t>* ref) noexcept { m_readerSlotRef = ref; }
 
     void tick() noexcept;
+
+    // ★ P1-B: HealthState 公開 — Admission が参照する
+    [[nodiscard]] ISRHealthState getHealthState() const noexcept {
+        return convo::consumeAtomic(m_healthState_, std::memory_order_acquire);
+    }
+
+    // ★ P1-B: Admission が HealthState を参照するための生ポインタ公開
+    [[nodiscard]] const std::atomic<ISRHealthState>* getHealthStateRef() const noexcept {
+        return &m_healthState_;
+    }
 
 private:
     void checkRetireStall() noexcept;
     void checkPublicationStall() noexcept;
-    // ★ P4.5: Reader Stuck 診断（detectStuckReaders からの情報を HealthEvent に反映）
     void diagnoseRetireStall() noexcept;
+    void updateHealthState() noexcept;
+    // ★ P1-C/Practical-2/4/5/6: 追加監視
+    void checkCrossfadeTimeout() noexcept;
+    void checkCrossfadeEventDrop() noexcept;
+    void checkReaderSlotUsage() noexcept;
+    void checkRetireReclaimLatency() noexcept;
     void emitOnTransition(MonitorState& currentState, MonitorState newState,
                           HealthEvent::Severity severity, uint32_t eventCode,
                           uint64_t value, uint32_t slot = 0) noexcept;
@@ -69,6 +116,17 @@ private:
     HealthEventCallback m_callback;
     MonitorState m_prevRetireState { MonitorState::Normal };
     MonitorState m_prevPublicationState { MonitorState::Normal };
+    MonitorState m_prevCrossfadeDropState { MonitorState::Normal }; // ★ P1-C
+    MonitorState m_prevReaderSlotState { MonitorState::Normal };    // ★ Practical-4
+    MonitorState m_prevRetireAgeState { MonitorState::Normal };     // ★ Practical-5
+    std::atomic<ISRHealthState> m_healthState_{ISRHealthState::Healthy};
+    // ★ P1-C/Practical-2/4/5/6: 監視用参照
+    const convo::isr::CrossfadeRuntime* m_crossfadeRuntime = nullptr;
+    const std::atomic<uint64_t>* m_crossfadeEventDropRef = nullptr;
+    const std::atomic<uint64_t>* m_maxRetireAgeRef = nullptr;
+    const std::atomic<uint32_t>* m_readerSlotRef = nullptr;
+    // ★ P1-C drop: 差分検出用ローカル状態
+    uint64_t m_lastObservedDropCount = 0;
 };
 
 } // namespace convo

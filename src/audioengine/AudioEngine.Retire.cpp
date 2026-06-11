@@ -56,6 +56,16 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
     convo::publishAtomic(fallbackQueueDepth_, fallbackDepth, std::memory_order_release);
     convo::publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
+    // ★ Practical-1: Retire Queue High Watermark 更新
+    {
+        uint64_t current = retireDepth;
+        uint64_t prevMax = convo::consumeAtomic(maxPendingRetireObserved_, std::memory_order_acquire);
+        while (current > prevMax) {
+            if (convo::compareExchangeAtomic(maxPendingRetireObserved_, prevMax, current,
+                                             std::memory_order_acq_rel, std::memory_order_acquire))
+                break;
+        }
+    }
     runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepth);
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
     runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);

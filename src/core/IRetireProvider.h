@@ -28,6 +28,14 @@ public:
 
     /** Try to reclaim retired objects. */
     virtual void tryReclaim() noexcept = 0;
+
+    // ★ P0-A: EpochDomain 固有メソッドをインターフェースに昇格
+    //   ISRRetireRouter が dynamic_cast でアクセスするより Interface で宣言する方が型安全。
+    /** Return approximate count of pending retire entries. */
+    virtual uint32_t pendingRetireCount() const noexcept = 0;
+
+    /** Drain all pending retire entries (unsafe; shutdown only). */
+    virtual void drainAll() noexcept = 0;
 };
 
 } // namespace convo

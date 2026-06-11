@@ -44,10 +44,19 @@ AudioEngine::AudioEngine()
     m_healthMonitor.setRetireRouter(m_retireRouter.get());
     m_healthMonitor.setOrchestrator(runtimeOrchestrator_.get());
     m_healthMonitor.setRetireHighWatermarkRef(&retireHighWatermark_);
+    m_healthMonitor.setCrossfadeRuntime(&crossfadeRuntime_);
+    m_healthMonitor.setCrossfadeEventDropRef(crossfadeRuntime_.getCrossfadeEventDropCountRef());
+    // ★ Practical-5: Retire Reclaim Latency 監視用参照
+    //   reclaimLatency_ は AudioEngine の atomic<double> として既存
+    m_healthMonitor.setMaxRetireAgeRef(
+        reinterpret_cast<const std::atomic<uint64_t>*>(&reclaimLatency_));
+    // ★ Practical-4: Reader Slot 使用率監視用参照
+    //   activeReaderCount は ISRRetireRouter 経由で取得（HealthMonitor が直接読む）
     m_healthMonitor.setEventCallback(
         [this](const convo::HealthEvent& ev) { onHealthEvent(ev); });
 
-    // 必要な初期化処理があればここに追加
+    // ★ P1-B: Admission に HealthState 参照を設定
+    runtimeOrchestrator_->setAdmissionHealthStateRef(m_healthMonitor.getHealthStateRef());
 }
 
 AudioEngine::~AudioEngine()

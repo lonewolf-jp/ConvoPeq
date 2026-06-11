@@ -62,7 +62,8 @@ public:
 
             if (!oldHandle.isNull() && !newHandle.isNull()) {
                 // CrossfadeAuthority に registration を委譲
-                engine_.crossfadeAuthorityRuntime_.registerCrossfade(oldHandle, newHandle);
+                const auto xfadeId = engine_.crossfadeAuthorityRuntime_.registerCrossfade(oldHandle, newHandle);
+                (void)xfadeId;  // CrossfadeId は将来 AudioThread 完了検出時の通知に使用
                 engine_.publishAtomic(engine_.activeCrossfadeId_,
                                      static_cast<convo::isr::CrossfadeId>(0u),
                                      std::memory_order_release);

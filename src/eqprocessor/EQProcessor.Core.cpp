@@ -31,41 +31,32 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
         return true;
 
     // Retire authority: route through coordinator if available
-    // [Phase-A] 単一回試行 + drop. retryループは撤廃 (P0-5).
-    if (m_retireCoordinator != nullptr)
+    // [Phase-B] coordinator は常時設定済み。Release でも安全な nullptr ガードを残す.
+    // ★ Fallback 経路（direct EpochDomain::enqueueRetire）は完全削除。
+    //   Authority bypass となるため。
+    if (m_retireCoordinator == nullptr)
     {
-        const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
-        // ★ FIX: reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB である。
-        //   ISRRetireRouter と EpochDomain は共通基底 (IEpochProvider) を持つが
-        //   直接の継承関係になく、メモリレイアウトが異なるため、
-        //   enqueueRetire() 内の epochDomain_ メンバがガベージになる。
-        //   正しい対策: スタック上に ISRRetireRouter を構築する。
-        convo::isr::ISRRetireRouter stackRouter(m_epochDomain);
-        auto result = m_retireCoordinator->enqueueRetire(
-            convo::isr::RetireAuthority::Granted,
-            stackRouter,
-            ptr, deleter, retireEpoch);
-        if (result == convo::isr::RetireEnqueueResult::Success)
-            return true;
-
-        // [P0-5] enqueue failure -> drop + telemetry (RT-safe).
-        // Non-RT 側の定期的な reclaim が backlog を消化することを期待。
+        // Release build でも coordinator 不在時は drop で安全にフェイル.
         return false;
     }
 
-    // Fallback: direct EpochDomain path (backward compat before coordinator is set)
-    // [Phase-B] coordinator 常時設定確認後、この経路は削除.
-#pragma warning(push)
-#pragma warning(disable : 4996)
-    const bool ok = m_epochDomain.enqueueRetire(ptr, deleter,
-        (epoch != 0) ? epoch : m_epochDomain.currentEpoch());
-#pragma warning(pop)
-    if (!ok)
-    {
-        // [P0-5] drop + telemetry. retry/reclaim/advanceEpoch は行わない.
-        return false;
-    }
-    return true;
+    const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
+    // ★ FIX: reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB である。
+    //   ISRRetireRouter と EpochDomain は共通基底 (IEpochProvider) を持つが
+    //   直接の継承関係になく、メモリレイアウトが異なるため、
+    //   enqueueRetire() 内の epochDomain_ メンバがガベージになる。
+    //   正しい対策: スタック上に ISRRetireRouter を構築する。
+    convo::isr::ISRRetireRouter stackRouter(m_epochDomain);
+    auto result = m_retireCoordinator->enqueueRetire(
+        convo::isr::RetireAuthority::Granted,
+        stackRouter,
+        ptr, deleter, retireEpoch);
+    if (result == convo::isr::RetireEnqueueResult::Success)
+        return true;
+
+    // [P0-5] enqueue failure -> drop + telemetry (RT-safe).
+    // Non-RT 側の定期的な reclaim が backlog を消化することを期待。
+    return false;
 }
 // [P1-14] 保留中の advanceEpoch を一括実行.
 // パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.

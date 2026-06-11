@@ -77,15 +77,11 @@ public:
                                       DeletionEntryType type) noexcept;
     bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override;
     void tryReclaim() noexcept override;
-    uint32_t pendingRetireCount() const noexcept;
-    void drainAll() noexcept;
+    uint32_t pendingRetireCount() const noexcept override;
+    void drainAll() noexcept override;
 
 private:
     convo::IEpochProvider* provider_ = nullptr;
-    // EpochDomain 固有メソッドのための関数ポインタ（dynamic_cast 回避、P1-19準拠）
-    uint32_t (*pendingRetireFn_)(void*) = nullptr;
-    void     (*drainAllFn_)(void*)      = nullptr;
-    void*    epochContext_              = nullptr;
 };
 
 } // namespace isr

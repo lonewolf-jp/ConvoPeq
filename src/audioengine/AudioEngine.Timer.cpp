@@ -379,11 +379,20 @@ void AudioEngine::timerCallback()
     const bool fadeCompleted = m_coordinator.tryCompleteFade();
     if (fadeCompleted)
     {
-        const auto activeCrossfadeId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
-        if (activeCrossfadeId != 0u)
+        // ★ P1-C: 完了した crossfade の ID を SPSC 経由で消費
+        //   notifyFadeComplete は AudioThread 側（advanceFade 内）で呼ばれる想定。
+        //   現状は Timer 主導の tryCompleteFade のため、ここで SPSC に投入し即消費する。
+        const auto completedId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
+        if (completedId != 0u)
         {
-            dspHandleRuntime_.endCrossfade(activeCrossfadeId);
-            crossfadeAuthorityRuntime_.unregisterCrossfade(activeCrossfadeId);
+            crossfadeRuntime_.notifyFadeComplete(completedId);
+            convo::isr::CompletedFadeEvent ev;
+            if (crossfadeRuntime_.consumeCompletedFade(ev))
+            {
+                // ★ SPSC を経由することで将来的な AudioThread 主導への移行が容易
+                dspHandleRuntime_.endCrossfade(ev.id);
+                crossfadeAuthorityRuntime_.unregisterCrossfade(ev.id);
+            }
             convo::publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
         }
 

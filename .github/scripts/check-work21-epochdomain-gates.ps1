@@ -17,19 +17,19 @@
 param([switch]$PassThru)
 
 $root = Resolve-Path "$PSScriptRoot/../.."
-$src  = Join-Path $root "src"
+$src = Join-Path $root "src"
 
 $errors = @()
 
 # Helper: get all .h/.cpp files
 function Get-SourceFiles {
-    Get-ChildItem -Recurse -Include "*.h","*.cpp" -Path $args[0] | % FullName
+    Get-ChildItem -Recurse -Include "*.h", "*.cpp" -Path $args[0] | % FullName
 }
 
 # Gate 1: EpochDomainReaderGuard direct construction (outside definition)
 $readerGuardHits = Select-String -Path (Get-SourceFiles $src) `
     -Pattern 'EpochDomainReaderGuard\(' -SimpleMatch `
-    | Where-Object { $_.Path -notmatch '\\EpochDomain\.[hc]' }
+| Where-Object { $_.Path -notmatch '\\EpochDomain\.[hc]' }
 if ($readerGuardHits) {
     $errors += "P1-18 VIOLATION: EpochDomainReaderGuard( used outside definition:"
     $readerGuardHits | ForEach-Object { $errors += "  $($_.Path):$($_.LineNumber): $($_.Line.Trim())" }
@@ -43,7 +43,7 @@ if (Test-Path (Join-Path $src "core/EpochCore.h")) {
 # Gate 4: advanceEpoch call-site count (allowed: 1 — RuntimePublicationOrchestrator only)
 $advanceEpochHits = Select-String -Path (Get-SourceFiles $src) `
     -Pattern '\.advanceEpoch\(' `
-    | Where-Object { $_.Path -notmatch '\\EpochDomain\.[hc]' -and $_.Path -notmatch '\\test' }
+| Where-Object { $_.Path -notmatch '\\EpochDomain\.[hc]' -and $_.Path -notmatch '\\test' }
 $advanceEpochCount = @($advanceEpochHits).Count
 if ($advanceEpochHits) {
     $errors += "P0-13 VIOLATION: .advanceEpoch( call-sites = $advanceEpochCount (allowed: 1 in RuntimePublicationOrchestrator):"
@@ -55,25 +55,34 @@ if ($advanceEpochHits) {
 # and are excluded from the public API boundary check.
 $epochDomainExposure = Select-String -Path (Get-ChildItem -Recurse -Include "*.h" -Path $src | % FullName) `
     -Pattern '(EpochDomain\s*&|EpochDomain\s*\*)' `
-    | Where-Object {
-        $line = $_.Line.Trim()
-        $_.Path -notmatch '\\EpochDomain\.[hc]' -and
-        $_.Path -notmatch '\\test' -and
-        $line -notmatch '^\s*(//|#|\*)'
-    }
+| Where-Object {
+    $line = $_.Line.Trim()
+    $_.Path -notmatch '\\EpochDomain\.[hc]' -and
+    $_.Path -notmatch '\\test' -and
+    $line -notmatch '^\s*(//|#|\*)'
+}
 if ($epochDomainExposure) {
     $errors += "P1-19 VIOLATION: EpochDomain type exposed in public API:"
     $epochDomainExposure | ForEach-Object { $errors += "  $($_.Path):$($_.LineNumber): $($_.Line.Trim())" }
+}
+
+# Gate 6b (P0-A): dynamic_cast<EpochDomain*> detection — ISRRetireRouter の dynamic_cast 完全撤廃確認
+$dynamicCastHits = Select-String -Path (Get-SourceFiles $src) `
+    -Pattern 'dynamic_cast\s*<\s*EpochDomain\s*\*' `
+| Where-Object { $_.Path -notmatch '\\test' }
+if ($dynamicCastHits) {
+    $errors += "P0-A VIOLATION: dynamic_cast<EpochDomain*> detected (should use IRetireProvider interface):"
+    $dynamicCastHits | ForEach-Object { $errors += "  $($_.Path):$($_.LineNumber): $($_.Line.Trim())" }
 }
 
 # Gate 10 (P1-3 AST-like): EpochDomain alias detection (using/typedef)
 # Detects potential EpochDomain type aliases that circumvent type-name grep.
 $epochDomainAliasHits = Select-String -Path (Get-SourceFiles $src) `
     -Pattern '(using\s+\w+\s*=\s*.*EpochDomain|typedef.*EpochDomain)' `
-    | Where-Object {
-        $_.Path -notmatch '\\test' -and
-        $_.Line -notmatch '^\s*(//|#)'
-    }
+| Where-Object {
+    $_.Path -notmatch '\\test' -and
+    $_.Line -notmatch '^\s*(//|#)'
+}
 if ($epochDomainAliasHits) {
     $errors += "P1-3 VIOLATION: EpochDomain type alias detected (using/typedef):"
     $epochDomainAliasHits | ForEach-Object { $errors += "  $($_.Path):$($_.LineNumber): $($_.Line.Trim())" }
@@ -102,13 +111,13 @@ if ($aliasNames.Count -gt 0) {
 # Gate 11 (P1-3 AST-like): EpochDomain as template parameter
 $epochDomainTemplateHits = Select-String -Path (Get-SourceFiles $src) `
     -Pattern '\bEpochDomain\s*>' `
-    | Where-Object {
-        $line = $_.Line.Trim()
-        $_.Path -notmatch '\\EpochDomain\.[hc]' -and
-        $_.Path -notmatch '\\test' -and
-        $_.Path -notmatch '\\ISRRetireRouter\.[hc]' -and
-        $line -notmatch '^\s*(//|#|\*)'
-    }
+| Where-Object {
+    $line = $_.Line.Trim()
+    $_.Path -notmatch '\\EpochDomain\.[hc]' -and
+    $_.Path -notmatch '\\test' -and
+    $_.Path -notmatch '\\ISRRetireRouter\.[hc]' -and
+    $line -notmatch '^\s*(//|#|\*)'
+}
 if ($epochDomainTemplateHits) {
     $errors += "P1-3 VIOLATION: EpochDomain used as template parameter:"
     $epochDomainTemplateHits | ForEach-Object { $errors += "  $($_.Path):$($_.LineNumber): $($_.Line.Trim())" }
@@ -117,11 +126,11 @@ if ($epochDomainTemplateHits) {
 # Gate 7 (info): advanceEpoch direct call count (excl declarations, excl flag-based)
 $advanceDirectHits = Select-String -Path (Get-SourceFiles $src) `
     -Pattern '\.advanceEpoch\(' `
-    | Where-Object {
-        $_.Path -notmatch '\\EpochDomain\.[hc]' -and
-        $_.Path -notmatch '\\test' -and
-        $_.Line -notmatch 'void advanceEpoch|uint64_t advanceEpoch|void advanceRetireEpoch|uint64_t advanceRetireEpoch|m_epochAdvancePending|flushPendingEpoch'
-    }
+| Where-Object {
+    $_.Path -notmatch '\\EpochDomain\.[hc]' -and
+    $_.Path -notmatch '\\test' -and
+    $_.Line -notmatch 'void advanceEpoch|uint64_t advanceEpoch|void advanceRetireEpoch|uint64_t advanceRetireEpoch|m_epochAdvancePending|flushPendingEpoch'
+}
 $advanceDirectCount = @($advanceDirectHits).Count
 
 # Gate 12 (info): Router own public API count (excl interface overrides, ctors, dtors, deleted)
@@ -141,21 +150,21 @@ if (Test-Path $routerFile) {
 # Gate 8 (info): enqueueRetire direct calls
 $enqueueRetireHits = Select-String -Path (Get-SourceFiles $src) `
     -Pattern '\.enqueueRetire\(' `
-    | Where-Object {
-        $_.Path -notmatch '\\EpochDomain\.[hc]' -and
-        $_.Path -notmatch '\\test' -and
-        $_.Line -notmatch '^\s*(//|#|bool.*enqueueRetire|void.*enqueueRetire|Result.*enqueueRetire)'
-    }
+| Where-Object {
+    $_.Path -notmatch '\\EpochDomain\.[hc]' -and
+    $_.Path -notmatch '\\test' -and
+    $_.Line -notmatch '^\s*(//|#|bool.*enqueueRetire|void.*enqueueRetire|Result.*enqueueRetire)'
+}
 $enqueueRetireCount = @($enqueueRetireHits).Count
 
 # Report
 if ($PassThru) {
     return @{
-        Passed   = $errors.Count -eq 0
+        Passed    = $errors.Count -eq 0
         GateCount = 4
-        Errors   = $errors
-        Stats    = @{
-            advanceEpochCount = $advanceEpochCount
+        Errors    = $errors
+        Stats     = @{
+            advanceEpochCount  = $advanceEpochCount
             advanceEpochDirect = $advanceDirectCount
             enqueueRetireCount = $enqueueRetireCount
         }
@@ -175,7 +184,7 @@ Write-Host "EpochDomain type exposure: $($epochDomainExposure.Count) (target: 0)
 # [work21 Phase-D] Split across IReaderEpochProvider + IPublicationProvider + IRetireProvider + IEpochProvider.
 $iepFile = Join-Path $root "src/core/IEpochProvider.h"
 $readerFile = Join-Path $root "src/core/IReaderEpochProvider.h"
-$pubFile   = Join-Path $root "src/core/IPublicationProvider.h"
+$pubFile = Join-Path $root "src/core/IPublicationProvider.h"
 $retireFile = Join-Path $root "src/core/IRetireProvider.h"
 
 function Get-MethodCount($path) {
@@ -185,11 +194,11 @@ function Get-MethodCount($path) {
     return 0
 }
 
-$readerMethodCount  = Get-MethodCount $readerFile
-$pubMethodCount     = Get-MethodCount $pubFile
-$retireMethodCount  = Get-MethodCount $retireFile
-$iepMethodCount     = Get-MethodCount $iepFile
-$totalMethodCount   = $readerMethodCount + $pubMethodCount + $retireMethodCount + $iepMethodCount
+$readerMethodCount = Get-MethodCount $readerFile
+$pubMethodCount = Get-MethodCount $pubFile
+$retireMethodCount = Get-MethodCount $retireFile
+$iepMethodCount = Get-MethodCount $iepFile
+$totalMethodCount = $readerMethodCount + $pubMethodCount + $retireMethodCount + $iepMethodCount
 
 Write-Host "[P1-3] IReaderEpochProvider methods: $readerMethodCount (alert if > 10)" `
     -ForegroundColor $(if ($readerMethodCount -gt 10) { "Yellow" } else { "Green" })
@@ -232,18 +241,18 @@ if (-not (Test-Path $snapshotDir)) { New-Item -ItemType Directory -Path $snapsho
 
 $snapshotFile = Join-Path $snapshotDir "latest.json"
 $metrics = @{
-    timestamp          = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-    advanceEpoch       = $advanceDirectCount
-    enqueueRetire      = $enqueueRetireCount
-    exposure           = $epochDomainExposure.Count
-    readerMethods      = $readerMethodCount
-    pubMethods         = $pubMethodCount
-    retireMethods      = $retireMethodCount
-    iepMethods         = $iepMethodCount
-    totalMethods       = $totalMethodCount
-    routerMethods      = $routerOwnMethodCount
-    aliasCount         = @($epochDomainAliasHits).Count
-    templateCount      = @($epochDomainTemplateHits).Count
+    timestamp     = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+    advanceEpoch  = $advanceDirectCount
+    enqueueRetire = $enqueueRetireCount
+    exposure      = $epochDomainExposure.Count
+    readerMethods = $readerMethodCount
+    pubMethods    = $pubMethodCount
+    retireMethods = $retireMethodCount
+    iepMethods    = $iepMethodCount
+    totalMethods  = $totalMethodCount
+    routerMethods = $routerOwnMethodCount
+    aliasCount    = @($epochDomainAliasHits).Count
+    templateCount = @($epochDomainTemplateHits).Count
 }
 
 # Load previous snapshot for delta comparison
@@ -261,7 +270,7 @@ $regressionWarnings = @()
 $hasRegression = $false
 $maxDelta = 0
 
-foreach ($key in @('advanceEpoch','enqueueRetire','exposure','totalMethods','routerMethods','aliasCount','templateCount')) {
+foreach ($key in @('advanceEpoch', 'enqueueRetire', 'exposure', 'totalMethods', 'routerMethods', 'aliasCount', 'templateCount')) {
     $current = $metrics[$key]
     $prevVal = if ($previous.ContainsKey($key)) { $previous[$key] } else { $current }
     $delta = $current - $prevVal
@@ -284,7 +293,8 @@ if ($hasRegression) {
     if ($maxDelta -gt 5) {
         Write-Host "[Phase-E P1] CRITICAL: max delta $maxDelta exceeds threshold (5) - CI FAIL" -ForegroundColor Red
         $errors += "P1 REGRESSION CRITICAL: max delta $maxDelta > 5"
-    } elseif ($maxDelta -gt 3) {
+    }
+    elseif ($maxDelta -gt 3) {
         Write-Host "[Phase-E P1] REVIEW REQUIRED: max delta $maxDelta exceeds threshold (3)" -ForegroundColor Magenta
     }
 }

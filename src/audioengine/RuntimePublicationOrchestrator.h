@@ -84,6 +84,11 @@ public:
     [[nodiscard]] TelemetryRecorder& telemetryRecorder() noexcept { return telemetryRecorder_; }
     [[nodiscard]] const TelemetryRecorder& telemetryRecorder() const noexcept { return telemetryRecorder_; }
 
+    // ★ P1-B: Admission に HealthState 参照を設定
+    void setAdmissionHealthStateRef(const std::atomic<ISRHealthState>* ref) noexcept {
+        admission_.setHealthStateRef(ref);
+    }
+
     // ── 健全性スナップショット ──
     void publishHealthSnapshot() noexcept;
 
