@@ -98,8 +98,9 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"
           # 既にインストール済みの場合はスキップ
-          if (Test-Path "$oneapiRoot\mkl\latest\lib\cmake\mkl\MKLConfig.cmake" -and
-              Test-Path "$oneapiRoot\ipp\latest\lib\cmake\ipp\IPPConfig.cmake") {
+          $mklConfig = "$oneapiRoot\mkl\latest\lib\cmake\mkl\MKLConfig.cmake"
+          $ippConfig = "$oneapiRoot\ipp\latest\lib\cmake\ipp\IPPConfig.cmake"
+          if ((Test-Path $mklConfig) -and (Test-Path $ippConfig)) {
             Write-Host "oneAPI MKL and IPP already installed."
             exit 0
           }
