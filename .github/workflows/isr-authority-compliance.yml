@@ -98,22 +98,34 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"
           # 既にインストール済みの場合はスキップ
-          $mklConfig = "$oneapiRoot\mkl\latest\lib\cmake\mkl\MKLConfig.cmake"
-          $ippConfig = "$oneapiRoot\ipp\latest\lib\cmake\ipp\IPPConfig.cmake"
-          if ((Test-Path $mklConfig) -and (Test-Path $ippConfig)) {
-            Write-Host "oneAPI MKL and IPP already installed."
-            exit 0
-          }
-          Write-Host "Downloading Intel oneAPI toolkit installer..."
+          $mklOk = Test-Path "$oneapiRoot\mkl\latest\lib\cmake\mkl\MKLConfig.cmake"
+          $ippOk = Test-Path "$oneapiRoot\ipp\latest\lib\cmake\ipp\IPPConfig.cmake"
+          if ($mklOk -and $ippOk) { Write-Host "Already installed."; exit 0 }
+          # インストーラーのダウンロードと抽出
           $toolkitUrl = "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/bae85ab1-cfcd-4251-8d42-a0c27949ea33/intel-oneapi-toolkit-2026.0.0.193_offline.exe"
           $installer = "$env:TEMP\intel-oneapi-toolkit.exe"
-          Invoke-WebRequest -Uri $toolkitUrl -OutFile $installer
-          Write-Host "Extracting installer..."
+          if (-not (Test-Path $installer)) {
+            Write-Host "Downloading Intel oneAPI toolkit..."
+            Invoke-WebRequest -Uri $toolkitUrl -OutFile $installer
+          }
           $extractDir = "$env:TEMP\oneapi_extracted"
-          Start-Process -Wait -FilePath $installer -ArgumentList "-s -x -f $extractDir --log $env:TEMP\extract.log"
-          Write-Host "Installing oneAPI components (MKL + IPP)..."
-          $components = "intel.oneapi.win.mkl.devel,intel.oneapi.win.ipp.devel"
-          Start-Process -Wait -FilePath "$extractDir\bootstrapper.exe" -ArgumentList "-s --action install --components=$components --eula=accept -p=NEED_VS2017_INTEGRATION=0 -p=NEED_VS2019_INTEGRATION=0 -p=NEED_VS2022_INTEGRATION=0 --log-dir=$env:TEMP"
+          if (-not (Test-Path "$extractDir\bootstrapper.exe")) {
+            Write-Host "Extracting installer..."
+            Start-Process -Wait -FilePath $installer -ArgumentList "-s -x -f $extractDir --log $env:TEMP\extract.log"
+          }
+          # MKL と IPP を同時インストール（コンポーネント区切りは :）
+          if ((-not $mklOk) -or (-not $ippOk)) {
+            Write-Host "Installing MKL + IPP (components)..."
+            $boot = "$extractDir\bootstrapper.exe"
+            $args = @("-s", "--action", "install",
+                      "--components=intel.oneapi.win.mkl.devel:intel.oneapi.win.ipp",
+                      "--eula=accept",
+                      "-p=NEED_VS2017_INTEGRATION=0", "-p=NEED_VS2019_INTEGRATION=0",
+                      "-p=NEED_VS2022_INTEGRATION=0",
+                      "--log-dir=$env:TEMP")
+            $proc = Start-Process -Wait -FilePath $boot -ArgumentList $args -PassThru
+            Write-Host "oneAPI installer exit code: $($proc.ExitCode)"
+          }
           Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
 
       - name: Configure CMake

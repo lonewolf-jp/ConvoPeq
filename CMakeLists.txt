@@ -593,9 +593,13 @@ endif()
 
 set(IPP_LINK static)
 set(IPP_THREADING sequential)
-find_package(IPP REQUIRED CONFIG COMPONENTS ippcore ipps)
-message(STATUS "Intel IPP found.")
-target_link_libraries(ConvoPeq PRIVATE IPP::ippcore IPP::ipps)
+find_package(IPP QUIET CONFIG COMPONENTS ippcore ipps)
+if(IPP_FOUND)
+    message(STATUS "Intel IPP found.")
+    target_link_libraries(ConvoPeq PRIVATE IPP::ippcore IPP::ipps)
+else()
+    message(STATUS "Intel IPP not found - skipping (CI build or no IPP SDK).")
+endif()
 # 注意: R8B_IPP=1 は使用しない。
 # r8brain の CDSPRealFFT.h が期待する IPP API (IppsFFTSpec_R_64f 等) は
 # Intel IPP 2022.3 以降のバージョンと非互換のため、r8brain には内蔵 FFT を使用する。
