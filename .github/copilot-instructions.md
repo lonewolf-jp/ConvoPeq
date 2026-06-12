@@ -168,3 +168,52 @@ source files when (a) modifying/debugging specific code, (b) the graph lacks the
 (c) the graph is missing or stale.
 
 Type `/graphify` in Copilot Chat to build or update the graph.
+
+## AiDex — Persistent Code Index (MCP Server)
+
+AiDex は Tree-sitter + SQLite によるコードインデックス MCP サーバー（v2.1.2）。
+`.aidex/` が存在する場合、コード検索に Grep/Glob/Read より AiDex を優先すること。
+
+### セッション開始時（必須）
+```markdown
+1. `aidex_session({ path: "." })` — 外部変更検出、自動再インデックス
+2. セッションノートがあれば表示
+3. セッション終了時: `aidex_note({ path: ".", note: "...", summary: "..." })`
+```
+
+### コード検索 — Grep/Glob の代わりに AiDex を使用
+| 代わりに使うもの | AiDex の使用法 |
+|---|---|
+| `Grep pattern="functionName"` | `aidex_query({ path: ".", term: "functionName" })` |
+| `Grep pattern="class.*Name"` | `aidex_query({ path: ".", term: "Name", mode: "contains" })` |
+| ファイルを読んで構造把握 | `aidex_signature({ path: ".", file: "src/AudioEngine.h" })` |
+| 複数ファイルの構造 | `aidex_signatures({ path: ".", pattern: "src/audioengine/**" })` |
+| プロジェクト概要 | `aidex_summary({ path: "." })` + `aidex_tree({ path: "." })` |
+| ファイル一覧 | `aidex_files({ path: ".", type: "code" })` |
+| 最近の変更 | `aidex_files({ path: ".", modified_since: "30m" })` |
+
+### 利用可能なツール（33種）
+- **検索**: `aidex_init`, `aidex_query`, `aidex_search`, `aidex_update`, `aidex_remove`, `aidex_status`
+- **シグネチャ**: `aidex_signature`, `aidex_signatures`
+- **プロジェクト情報**: `aidex_summary`, `aidex_tree`, `aidex_describe`, `aidex_files`
+- **クロスプロジェクト**: `aidex_link`, `aidex_unlink`, `aidex_links`, `aidex_scan`
+- **セッション管理**: `aidex_session`, `aidex_note`, `aidex_settings`, `aidex_viewer`
+- **タスク管理**: `aidex_task`, `aidex_tasks`
+- **グローバル検索**: `aidex_global_init`, `aidex_global_status`, `aidex_global_query`, `aidex_global_signatures`, `aidex_global_refresh`, `aidex_global_guideline`
+- **Log Hub**: `aidex_log`
+- **スクリーンショット**: `aidex_screenshot`, `aidex_windows`
+- **Viewer**: `aidex_viewer`（http://localhost:3333）
+
+### プロジェクトインデックス作成
+```markdown
+aidex_init({ path: "C:\\VSC_Project\\ConvoPeq" })
+```
+既に実行済み: 275 files, 38706 items, 3936 methods, 368 types.（`.aidex/` 存在）
+
+### AiDex 使用優先順位（コード検索・理解時）
+1. `aidex_query` — 識別子検索（最もトークン効率が良い）
+2. `aidex_signature` — ファイル構造確認
+3. `aidex_search` — 自然言語検索
+4. `aidex_summary` + `aidex_tree` — プロジェクト把握
+5. `aidex_session` — セッション開始必須
+6. `aidex_note` — 引継ぎノート

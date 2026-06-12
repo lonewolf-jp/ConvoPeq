@@ -66,7 +66,16 @@ $allowedFriends = @(
     'RuntimePublicationOrchestrator',
     'PublicationExecutor',
     'RuntimePublicationStateOwner',
-    'RuntimeBuilder'
+    'RuntimeBuilder',
+    # ★ BuilderToken: RuntimeState の BuilderToken 経由構築を許可 (AudioEngine, RuntimeBuilder)
+    'AudioEngine',
+    # ★ DSPTransition: クロスフェード遷移中に RuntimeWorld 内部へのアクセスが必要
+    'DSPTransition',
+    # ★ NoiseShaperLearner / EQEditProcessor: AudioEngine 内部状態へのアクセスが必要
+    'NoiseShaperLearner',
+    'EQEditProcessor',
+    # ★ RuntimePublicationCoordinator<World,Handle,Bridge>: CRTP テンプレート friend パターン
+    'RuntimePublicationCoordinator'
 )
 
 $engineFriendLines = Select-String -Path $engineHeader -Pattern 'friend class' -ErrorAction SilentlyContinue
@@ -75,6 +84,12 @@ $coordFriendLines = Select-String -Path $coordinatorHeader -Pattern 'friend clas
 $allFriendLines = @()
 if ($engineFriendLines) { $allFriendLines += $engineFriendLines }
 if ($coordFriendLines) { $allFriendLines += $coordFriendLines }
+
+# ★ Practical Stable: コメント行（// または /*）のヒットは誤検出として除外
+$allFriendLines = $allFriendLines | Where-Object {
+    $line = $_.Line.Trim()
+    $line -notmatch '^\s*(//|/\*|\*)'
+}
 
 $violations = @()
 foreach ($line in $allFriendLines) {

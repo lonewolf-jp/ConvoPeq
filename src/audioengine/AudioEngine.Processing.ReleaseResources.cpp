@@ -150,6 +150,31 @@ void AudioEngine::releaseResources()
 
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
+    // ★ Practical-7: Graceful Drain Phase（最大5秒間のポーリング待機）
+    {
+        constexpr int kGracefulDrainMaxMs = 5000;
+        constexpr int kGracefulDrainPollMs = 10;
+        int waitedMs = 0;
+        while (waitedMs < kGracefulDrainMaxMs)
+        {
+            if (m_retireRouter->pendingRetireCount() == 0
+                && m_retireRouter->activeReaderCount() == 0)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(kGracefulDrainPollMs));
+            waitedMs += kGracefulDrainPollMs;
+            m_retireRouter->publishEpoch();
+            m_retireRouter->tryReclaim();
+        }
+        if (waitedMs >= kGracefulDrainMaxMs)
+        {
+            diagLog("[AUDIT] releaseResources: graceful drain timeout after "
+                + juce::String(kGracefulDrainMaxMs)
+                + "ms, pendingRetireCount="
+                + juce::String(static_cast<int>(m_retireRouter->pendingRetireCount()))
+                + " — forcing drain");
+        }
+    }
+
     // [P1 Phase1-B] drainPublicationLogForShutdown removed
 
     if (activeToRelease)

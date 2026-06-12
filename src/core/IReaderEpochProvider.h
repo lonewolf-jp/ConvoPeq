@@ -42,6 +42,9 @@ public:
     /** Count of active (non-zero depth) reader slots. */
     virtual uint32_t activeReaderCount() const noexcept = 0;
 
+    /** Maximum number of reader slots available. */
+    virtual int readerCapacity() const noexcept = 0;
+
     /** Minimum epoch among all active readers. Used for safe-reclaim determination. */
     virtual uint64_t getMinReaderEpoch() const noexcept = 0;
 };

@@ -4,5 +4,25 @@
 
 Index:
   Exclude:
+    - .aidex
+    - .cache
+    - .claude
+    - .cocoindex_code
+    - .codegraph
+    - .continue
+    - .playwright-mcp
+    - .serena
+    - .venv-codegraph
+    - .vs
+    - .vscode
+    - config
+    - doc
+    - evidence
+    - graphify-out
+    - manual
+    - sampledata
+    - steering
+    - storage
+    - tools
     - .musubi
     - storage/codeql

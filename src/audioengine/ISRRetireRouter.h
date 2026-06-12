@@ -61,6 +61,7 @@ public:
     uint64_t snapshotEpoch() const noexcept;
     uint64_t publishEpoch() noexcept override;
     uint32_t activeReaderCount() const noexcept override;
+    int readerCapacity() const noexcept override;
     uint64_t currentEpoch() const noexcept override;
     uint64_t getMinReaderEpoch() const noexcept override;
     int registerReaderThread() noexcept override;
@@ -68,6 +69,9 @@ public:
     void enterReader(int readerIndex) noexcept override;
     void exitReader(int readerIndex) noexcept override;
     uint64_t minReaderEpoch() const noexcept;
+
+    // ★ Practical-1: Reader Stuck 診断 (delegates to provider)
+    [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override;
 
     // ── Retire API (実装は .cpp) ──
 
@@ -80,8 +84,26 @@ public:
     uint32_t pendingRetireCount() const noexcept override;
     void drainAll() noexcept override;
 
+    // ★ Practical-3: Overflow レート監視用カウンター
+    [[nodiscard]] uint64_t overflowCount() const noexcept {
+        return convo::consumeAtomic(m_overflowCount_, std::memory_order_acquire);
+    }
+    [[nodiscard]] const std::atomic<uint64_t>* getOverflowCountRef() const noexcept {
+        return &m_overflowCount_;
+    }
+
+    // ★ Practical-4: Forced reclaim 時刻（enqueueRetire QueuePressure 時の即時 tryReclaim 用）
+    void setLastForcedReclaimTimeUs(uint64_t t) noexcept {
+        convo::publishAtomic(m_lastForcedReclaimTimeUs_, t, std::memory_order_release);
+    }
+    [[nodiscard]] uint64_t lastForcedReclaimTimeUs() const noexcept {
+        return convo::consumeAtomic(m_lastForcedReclaimTimeUs_, std::memory_order_acquire);
+    }
+
 private:
     convo::IEpochProvider* provider_ = nullptr;
+    std::atomic<uint64_t> m_overflowCount_{0};          // ★ Practical-3: enqueueRetire QueuePressure 回数
+    std::atomic<uint64_t> m_lastForcedReclaimTimeUs_{0}; // ★ Practical-4: 最終強制 reclaim 時刻
 };
 
 } // namespace isr

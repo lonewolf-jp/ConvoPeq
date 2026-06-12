@@ -52,6 +52,11 @@ public:
         }
 
         convo::fetchAddAtomic(retiredCount_, 1u, std::memory_order_release);
+
+        // ★ 直近の retire 情報を別途追跡（リングバッファは追記専用のため更新不可）
+        convo::publishAtomic(lastRetiredWorldId_, worldId, std::memory_order_release);
+        convo::publishAtomic(lastRetireEpoch_, epoch, std::memory_order_release);
+        convo::publishAtomic(lastRetireTimestampUs_, getCurrentTimeUs(), std::memory_order_release);
     }
 
     [[nodiscard]] uint64_t activeWorldCount() const noexcept {
@@ -69,11 +74,21 @@ public:
     // ★ 診断用ダンプ（RingBuffer から最新レコードを取得）
     void emitSnapshot() const noexcept;
 
+    // ★ 診断用: 定期ダンプを AudioEngine の emitEvidenceTickNonRt から呼び出すためのヘルパー
+    //   出力先: evidence/world_lifecycle_audit.json
+    void tryDumpPeriodic() noexcept;
+
 private:
     FixedRingBuffer<WorldLifecycleRecord, 4096> ringBuffer_;
     std::atomic<uint64_t> activeWorldCount_{0};
     std::atomic<uint64_t> publishedCount_{0};
     std::atomic<uint64_t> retiredCount_{0};
+    std::atomic<uint64_t> lastDumpTimeUs_{0};
+    static constexpr uint64_t kDumpIntervalUs = 60'000'000; // 60秒ごとにダンプ
+    // ★ 直近 retire 追跡（リングバッファは追記専用のため retire 更新不可）
+    std::atomic<uint64_t> lastRetiredWorldId_{0};
+    std::atomic<uint64_t> lastRetireEpoch_{0};
+    std::atomic<uint64_t> lastRetireTimestampUs_{0};
 };
 
 } // namespace convo::isr

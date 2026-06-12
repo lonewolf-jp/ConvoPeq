@@ -316,6 +316,12 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 
 void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept
 {
+    // ★ P3-B: World 発行を監査記録
+    worldLifecycleAudit_.onWorldPublished(
+        world.worldId,
+        world.publication.epoch,
+        convo::isr::CorrelationId{engineInstanceId_, world.publication.sequenceId});
+
     if (!transitionSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Published))
     {
         forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Published);
@@ -392,6 +398,9 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
 
     if (world == nullptr)
         return;
+
+    // ★ P3-B: World 退役を監査記録
+    worldLifecycleAudit_.onWorldRetired(world->worldId, world->publication.epoch);
 
     debugRuntime_.recordHBEdge(200u,
                                300u,
@@ -580,6 +589,7 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
     const auto evidenceRoot = std::filesystem::current_path() / "evidence";
     retireRuntimeEx_.emitRetireTimeline(evidenceRoot / "retire_timeline.json");
     evidenceExporter_.exportEvidence();
+    worldLifecycleAudit_.tryDumpPeriodic();
 }
 
 // [PR-3/3A] Orchestrator 経路のみ。Deferred は submitPublishRequest が自動 enqueue する。

@@ -95,6 +95,12 @@ public:
         if (previousDepth > 0)
             return;
 
+        // ★ Practical-8: 初回 enter 時に滞留開始時刻を記録
+        const uint64_t nowUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        convo::publishAtomic(slot.residencyStartTimestampUs, nowUs, std::memory_order_release);
+
         const uint64_t epoch = currentEpoch();
         // release: epoch を publish することで reclaimers が slot.epoch の safe-below 判定に使用可能となる。
         convo::publishAtomic(slot.epoch, epoch, std::memory_order_release);
@@ -120,6 +126,9 @@ public:
 
         if (previousDepth > 1)
             return;
+
+        // ★ Practical-8: 最終 exit 時に滞留時刻をクリア
+        convo::publishAtomic(slot.residencyStartTimestampUs, uint64_t{0}, std::memory_order_release);
 
         // release: epoch を kInactiveEpoch に戻し、reclaimers がこのスロットを safe-below 判定から除外可能にする。
         convo::publishAtomic(slot.epoch, kInactiveEpoch, std::memory_order_release);
@@ -186,6 +195,11 @@ public:
         return count;
     }
 
+    int readerCapacity() const noexcept override
+    {
+        return kMaxReaders;
+    }
+
     // [work21] IEpochProvider::tryReclaim — inline reclaim to avoid deprecated call
     void tryReclaim() noexcept override
     {
@@ -213,50 +227,8 @@ public:
         return static_cast<int64_t>(a - b) < 0;
     }
 
-    // ★ P2-A: 以下の deprecated API は移行完了により private 化。
-    //   外部からの新規使用を禁止し、publishEpoch() / tryReclaim() を推奨。
-private:
-    [[deprecated("Use publishEpoch() instead.")]]
-    uint64_t advanceEpoch() noexcept
-    {
-        return convo::fetchAddAtomic(globalEpoch,
-                                     static_cast<uint64_t>(1),
-                                     std::memory_order_acq_rel);
-    }
-
-    [[deprecated("Use tryReclaim() instead.")]]
-    void reclaimRetired() noexcept
-    {
-        deferredDeletionQueue.reclaim(getMinReaderEpoch());
-    }
-
-    [[deprecated("Use coordinator.enqueueRetire() instead.")]]
-    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
-    {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
-    }
-
-    struct ReaderSlot
-    {
-        std::atomic<uint64_t> epoch { kInactiveEpoch };
-        std::atomic<uint32_t> depth { 0 };
-        std::atomic<uint64_t> enterCount { 0 };  // ★ P3-1: enter 回数のみカウント（軽量）
-        std::atomic<uint64_t> residencyStartTimestampUs { 0 }; // ★ P4.5: steady_clock ベースの滞留開始時刻
-    };
-
-    // ★ P3-1: 複合判定による Reader Stuck 検出
-    struct StuckReaderInfo {
-        int readerIndex{-1};
-        uint64_t readerEpoch{0};
-        uint64_t enterCount{0};
-        uint64_t currentEpoch{0};
-        uint64_t minReaderEpoch{0};
-        uint32_t pendingRetireCount{0};
-        bool isStuck{false};
-        uint64_t residencyTimeUs{0}; // ★ P4.5: 実時間ベース滞留時間
-    };
-
-    [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept {
+    // ★ P3-1/Practical-1: 複合判定による Reader Stuck 検出（override）
+    [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override {
         StuckReaderInfo info;
         info.currentEpoch = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
         info.minReaderEpoch = getMinReaderEpoch();
@@ -294,6 +266,37 @@ private:
         }
         return info;
     }
+
+    // ★ P2-A: 以下の deprecated API は移行完了により private 化。
+    //   外部からの新規使用を禁止し、publishEpoch() / tryReclaim() を推奨。
+private:
+    [[deprecated("Use publishEpoch() instead.")]]
+    uint64_t advanceEpoch() noexcept
+    {
+        return convo::fetchAddAtomic(globalEpoch,
+                                     static_cast<uint64_t>(1),
+                                     std::memory_order_acq_rel);
+    }
+
+    [[deprecated("Use tryReclaim() instead.")]]
+    void reclaimRetired() noexcept
+    {
+        deferredDeletionQueue.reclaim(getMinReaderEpoch());
+    }
+
+    [[deprecated("Use coordinator.enqueueRetire() instead.")]]
+    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
+    {
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
+    }
+
+    struct ReaderSlot
+    {
+        std::atomic<uint64_t> epoch { kInactiveEpoch };
+        std::atomic<uint32_t> depth { 0 };
+        std::atomic<uint64_t> enterCount { 0 };  // ★ P3-1: enter 回数のみカウント（軽量）
+        std::atomic<uint64_t> residencyStartTimestampUs { 0 }; // ★ P4.5: steady_clock ベースの滞留開始時刻
+    };
 
     std::atomic<uint64_t> globalEpoch;
     std::array<ReaderSlot, kMaxReaders> readers;

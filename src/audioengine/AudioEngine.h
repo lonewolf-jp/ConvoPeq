@@ -102,6 +102,7 @@ namespace convo::isr { class ISRRetireRouter; }
 #include "ISREvidenceExporter.h"
 #include "RuntimeHealthMonitor.h"
 #include "RuntimePublicationValidator.h"
+#include "WorldLifecycleAudit.h"
 
 class NoiseShaperLearner;
 class AudioEngine;
@@ -3493,6 +3494,7 @@ public:
     convo::isr::ShutdownRuntime shutdownRuntime_;
     convo::isr::BarrierOptimizer barrierOptimizer_;
     convo::isr::EvidenceExporter evidenceExporter_;
+    convo::isr::WorldLifecycleAudit worldLifecycleAudit_;
     convo::isr::BudgetManager budgetManager_;
     convo::isr::FailureHandler failureHandler_;
     convo::isr::IntrospectionConsole introspectionConsole_;

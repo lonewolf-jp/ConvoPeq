@@ -52,6 +52,7 @@ AudioEngine::AudioEngine()
         reinterpret_cast<const std::atomic<uint64_t>*>(&reclaimLatency_));
     // ★ Practical-4: Reader Slot 使用率監視用参照
     //   activeReaderCount は ISRRetireRouter 経由で取得（HealthMonitor が直接読む）
+    m_healthMonitor.setOverflowCountRef(m_retireRouter->getOverflowCountRef());
     m_healthMonitor.setEventCallback(
         [this](const convo::HealthEvent& ev) { onHealthEvent(ev); });
 
@@ -150,8 +151,33 @@ AudioEngine::~AudioEngine()
     setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "~AudioEngine");
     m_retireRouter->publishEpoch();
 
-    // Shutdown 時は EBR 回収を試みる。
+    // ★ Practical-7: Graceful Drain Phase — pendingRetireCount が 0 になるまでポーリング待機
+    //   最大 5 秒間のみ待機し、タイムアウト時は強制 drain にフォールバック。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
+    {
+        constexpr int kGracefulDrainMaxMs = 5000;
+        constexpr int kGracefulDrainPollMs = 10;
+        int waitedMs = 0;
+        while (waitedMs < kGracefulDrainMaxMs)
+        {
+            if (m_retireRouter->pendingRetireCount() == 0
+                && m_retireRouter->activeReaderCount() == 0)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(kGracefulDrainPollMs));
+            waitedMs += kGracefulDrainPollMs;
+            // tick: reclaim を進めて pendingRetire の消化を促進
+            m_retireRouter->publishEpoch();
+            m_retireRouter->tryReclaim();
+        }
+        if (waitedMs >= kGracefulDrainMaxMs)
+        {
+            diagLog("[AUDIT] Graceful drain timeout after " + juce::String(kGracefulDrainMaxMs)
+                + "ms, pendingRetireCount="
+                + juce::String(static_cast<int>(m_retireRouter->pendingRetireCount()))
+                + " — forcing drain");
+        }
+    }
+
     auto runtimePublicationCoordinator = makeRuntimePublicationCoordinator();
     runtimePublicationCoordinator.requestShutdownClearNonRt();
     runtimePublicationCoordinator.clearPublishedRuntimeSnapshotsNonRt();

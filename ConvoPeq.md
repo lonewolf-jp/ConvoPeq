@@ -173,7 +173,9 @@
         │   ├── RuntimeTransition.h
         │   ├── ShutdownScope.h
         │   ├── TelemetryRecorder.cpp
-        │   └── TelemetryRecorder.h
+        │   ├── TelemetryRecorder.h
+        │   ├── WorldLifecycleAudit.cpp
+        │   └── WorldLifecycleAudit.h
         ├── convolver/
         │   ├── ConvolverProcessor.Internal.h
         │   ├── ConvolverProcessor.Lifecycle.cpp
@@ -631,6 +633,7 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRBarrierOptimizer.cpp
                 src/audioengine/ISREvidenceExporter.cpp
                 src/audioengine/RuntimeHealthMonitor.cpp
+                src/audioengine/WorldLifecycleAudit.cpp
                 src/audioengine/AudioEngine.Processing.Latency.cpp
     src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp
     src/audioengine/AudioEngine.Processing.ReleaseResources.cpp
@@ -24728,6 +24731,12 @@ inline void forceSemanticTransactionState(std::atomic<std::uint8_t>& state,
 
 void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noexcept
 {
+    // ★ P3-B: World 発行を監査記録
+    worldLifecycleAudit_.onWorldPublished(
+        world.worldId,
+        world.publication.epoch,
+        convo::isr::CorrelationId{engineInstanceId_, world.publication.sequenceId});
+
     if (!transitionSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Published))
     {
         forceSemanticTransactionState(semanticTransactionState_, convo::isr::SemanticTransactionState::Published);
@@ -24804,6 +24813,9 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
 
     if (world == nullptr)
         return;
+
+    // ★ P3-B: World 退役を監査記録
+    worldLifecycleAudit_.onWorldRetired(world->worldId, world->publication.epoch);
 
     debugRuntime_.recordHBEdge(200u,
                                300u,
@@ -24992,6 +25004,7 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
     const auto evidenceRoot = std::filesystem::current_path() / "evidence";
     retireRuntimeEx_.emitRetireTimeline(evidenceRoot / "retire_timeline.json");
     evidenceExporter_.exportEvidence();
+    worldLifecycleAudit_.tryDumpPeriodic();
 }
 
 // [PR-3/3A] Orchestrator 経路のみ。Deferred は submitPublishRequest が自動 enqueue する。
@@ -25077,10 +25090,20 @@ AudioEngine::AudioEngine()
     m_healthMonitor.setRetireRouter(m_retireRouter.get());
     m_healthMonitor.setOrchestrator(runtimeOrchestrator_.get());
     m_healthMonitor.setRetireHighWatermarkRef(&retireHighWatermark_);
+    m_healthMonitor.setCrossfadeRuntime(&crossfadeRuntime_);
+    m_healthMonitor.setCrossfadeEventDropRef(crossfadeRuntime_.getCrossfadeEventDropCountRef());
+    // ★ Practical-5: Retire Reclaim Latency 監視用参照
+    //   reclaimLatency_ は AudioEngine の atomic<double> として既存
+    m_healthMonitor.setMaxRetireAgeRef(
+        reinterpret_cast<const std::atomic<uint64_t>*>(&reclaimLatency_));
+    // ★ Practical-4: Reader Slot 使用率監視用参照
+    //   activeReaderCount は ISRRetireRouter 経由で取得（HealthMonitor が直接読む）
+    m_healthMonitor.setOverflowCountRef(m_retireRouter->getOverflowCountRef());
     m_healthMonitor.setEventCallback(
         [this](const convo::HealthEvent& ev) { onHealthEvent(ev); });
 
-    // 必要な初期化処理があればここに追加
+    // ★ P1-B: Admission に HealthState 参照を設定
+    runtimeOrchestrator_->setAdmissionHealthStateRef(m_healthMonitor.getHealthStateRef());
 }
 
 AudioEngine::~AudioEngine()
@@ -25174,8 +25197,33 @@ AudioEngine::~AudioEngine()
     setShutdownPhase(ShutdownPhase::ForceEpochAdvance, "~AudioEngine");
     m_retireRouter->publishEpoch();
 
-    // Shutdown 時は EBR 回収を試みる。
+    // ★ Practical-7: Graceful Drain Phase — pendingRetireCount が 0 になるまでポーリング待機
+    //   最大 5 秒間のみ待機し、タイムアウト時は強制 drain にフォールバック。
     setShutdownPhase(ShutdownPhase::DrainRetire, "~AudioEngine");
+    {
+        constexpr int kGracefulDrainMaxMs = 5000;
+        constexpr int kGracefulDrainPollMs = 10;
+        int waitedMs = 0;
+        while (waitedMs < kGracefulDrainMaxMs)
+        {
+            if (m_retireRouter->pendingRetireCount() == 0
+                && m_retireRouter->activeReaderCount() == 0)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(kGracefulDrainPollMs));
+            waitedMs += kGracefulDrainPollMs;
+            // tick: reclaim を進めて pendingRetire の消化を促進
+            m_retireRouter->publishEpoch();
+            m_retireRouter->tryReclaim();
+        }
+        if (waitedMs >= kGracefulDrainMaxMs)
+        {
+            diagLog("[AUDIT] Graceful drain timeout after " + juce::String(kGracefulDrainMaxMs)
+                + "ms, pendingRetireCount="
+                + juce::String(static_cast<int>(m_retireRouter->pendingRetireCount()))
+                + " — forcing drain");
+        }
+    }
+
     auto runtimePublicationCoordinator = makeRuntimePublicationCoordinator();
     runtimePublicationCoordinator.requestShutdownClearNonRt();
     runtimePublicationCoordinator.clearPublishedRuntimeSnapshotsNonRt();
@@ -30088,6 +30136,31 @@ void AudioEngine::releaseResources()
 
     setShutdownPhase(ShutdownPhase::DrainRetire, "releaseResources");
 
+    // ★ Practical-7: Graceful Drain Phase（最大5秒間のポーリング待機）
+    {
+        constexpr int kGracefulDrainMaxMs = 5000;
+        constexpr int kGracefulDrainPollMs = 10;
+        int waitedMs = 0;
+        while (waitedMs < kGracefulDrainMaxMs)
+        {
+            if (m_retireRouter->pendingRetireCount() == 0
+                && m_retireRouter->activeReaderCount() == 0)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(kGracefulDrainPollMs));
+            waitedMs += kGracefulDrainPollMs;
+            m_retireRouter->publishEpoch();
+            m_retireRouter->tryReclaim();
+        }
+        if (waitedMs >= kGracefulDrainMaxMs)
+        {
+            diagLog("[AUDIT] releaseResources: graceful drain timeout after "
+                + juce::String(kGracefulDrainMaxMs)
+                + "ms, pendingRetireCount="
+                + juce::String(static_cast<int>(m_retireRouter->pendingRetireCount()))
+                + " — forcing drain");
+        }
+    }
+
     // [P1 Phase1-B] drainPublicationLogForShutdown removed
 
     if (activeToRelease)
@@ -31267,6 +31340,16 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
 
     convo::publishAtomic(fallbackQueueDepth_, fallbackDepth, std::memory_order_release);
     convo::publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
+    // ★ Practical-1: Retire Queue High Watermark 更新
+    {
+        uint64_t current = retireDepth;
+        uint64_t prevMax = convo::consumeAtomic(maxPendingRetireObserved_, std::memory_order_acquire);
+        while (current > prevMax) {
+            if (convo::compareExchangeAtomic(maxPendingRetireObserved_, prevMax, current,
+                                             std::memory_order_acq_rel, std::memory_order_acquire))
+                break;
+        }
+    }
     runtimePublicationBridge_.setFallbackBacklogCount(fallbackDepth);
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
     runtimePublicationBridge_.setDeferredRetireResidencyCount(fallbackDepth);
@@ -32398,11 +32481,20 @@ void AudioEngine::timerCallback()
     const bool fadeCompleted = m_coordinator.tryCompleteFade();
     if (fadeCompleted)
     {
-        const auto activeCrossfadeId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
-        if (activeCrossfadeId != 0u)
+        // ★ P1-C: 完了した crossfade の ID を SPSC 経由で消費
+        //   notifyFadeComplete は AudioThread 側（advanceFade 内）で呼ばれる想定。
+        //   現状は Timer 主導の tryCompleteFade のため、ここで SPSC に投入し即消費する。
+        const auto completedId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
+        if (completedId != 0u)
         {
-            dspHandleRuntime_.endCrossfade(activeCrossfadeId);
-            crossfadeAuthorityRuntime_.unregisterCrossfade(activeCrossfadeId);
+            crossfadeRuntime_.notifyFadeComplete(completedId);
+            convo::isr::CompletedFadeEvent ev;
+            if (crossfadeRuntime_.consumeCompletedFade(ev))
+            {
+                // ★ SPSC を経由することで将来的な AudioThread 主導への移行が容易
+                dspHandleRuntime_.endCrossfade(ev.id);
+                crossfadeAuthorityRuntime_.unregisterCrossfade(ev.id);
+            }
             convo::publishAtomic(activeCrossfadeId_, static_cast<convo::isr::CrossfadeId>(0u), std::memory_order_release);
         }
 
@@ -32552,6 +32644,34 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
     diagLog("[HEALTH] eventCode=" + juce::String(static_cast<int>(event.eventCode))
         + " severity=" + juce::String(static_cast<int>(event.severity))
         + " value=" + juce::String(static_cast<juce::int64>(event.value)));
+
+    // ★ Practical-5: Crossfade Timeout 回復処理
+    if (event.eventCode == convo::EVENT_CROSSFADE_TIMEOUT)
+    {
+        diagLog("[HEALTH] Crossfade timeout detected, initiating recovery");
+
+        // 1. 滞留中の fading DSP を強制退役
+        auto* doneRaw = exchangeFadingRuntimeDSP(nullptr);
+        if (doneRaw != nullptr
+            && reinterpret_cast<uintptr_t>(doneRaw) != (~static_cast<uintptr_t>(0)))
+        {
+            DSPLifetimeManager lifetime(*this);
+            lifetime.retire(doneRaw);
+        }
+
+        // 2. アクティブな crossfade ID を取得して unregister
+        const auto activeId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
+        if (activeId != 0u)
+        {
+            crossfadeAuthorityRuntime_.unregisterCrossfade(activeId);
+            convo::publishAtomic(activeCrossfadeId_, uint64_t{0}, std::memory_order_release);
+        }
+
+        // 3. CrossfadeRuntime を complete 状態に戻す（pending=false）
+        crossfadeRuntime_.complete();
+
+        diagLog("[HEALTH] Crossfade timeout recovery completed");
+    }
 }
 
 ```
@@ -32861,6 +32981,7 @@ namespace convo::isr { class ISRRetireRouter; }
 #include "ISREvidenceExporter.h"
 #include "RuntimeHealthMonitor.h"
 #include "RuntimePublicationValidator.h"
+#include "WorldLifecycleAudit.h"
 
 class NoiseShaperLearner;
 class AudioEngine;
@@ -35993,7 +36114,8 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
         return convo::isr::RetireEnqueueResult::Success;
     }
 
-    // [P0-5] enqueue failure -> drop + telemetry.
+    // [P0-5] enqueue failure -> best-effort drain + telemetry.
+    drainDeferredRetireQueues(false);
     const std::uint64_t retireDepth = static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount());
     convo::publishAtomic(retireQueueDepth_, retireDepth, std::memory_order_release);
     runtimePublicationBridge_.setRetireBacklogCount(retireDepth);
@@ -36182,6 +36304,7 @@ public:
     std::atomic<float> m_currentSaturationAmount { 0.1f };
 
     std::atomic<std::uint64_t> retireQueueDepth_ { 0 };
+    std::atomic<std::uint64_t> maxPendingRetireObserved_ { 0 };  // ★ Practical-1
     std::atomic<std::uint64_t> fallbackQueueDepth_ { 0 };
     std::atomic<std::uint64_t> quarantineResident_ { 0 };
     // publicationBacklog_ removed in Phase1-B; kept as always-0 legacy slot
@@ -36250,6 +36373,7 @@ public:
     convo::isr::ShutdownRuntime shutdownRuntime_;
     convo::isr::BarrierOptimizer barrierOptimizer_;
     convo::isr::EvidenceExporter evidenceExporter_;
+    convo::isr::WorldLifecycleAudit worldLifecycleAudit_;
     convo::isr::BudgetManager budgetManager_;
     convo::isr::FailureHandler failureHandler_;
     convo::isr::IntrospectionConsole introspectionConsole_;
@@ -36665,6 +36789,9 @@ public:
 #include <algorithm>
 #include "AtomicAccess.h"
 #include "DspNumericPolicy.h"
+#include "ISRDSPHandle.h"          // ★ P1-C: CrossfadeId
+#include "core/CommandBuffer.h"    // ★ P1-C: SPSCRingBuffer
+#include "core/TimeUtils.h"        // ★ P1-C: getCurrentTimeUs
 
 // CrossfadeRuntime: Crossfade の実行状態を一元管理する Runtime Component。
 // AudioEngine から分離され、DSPTransition から参照される。
@@ -36679,6 +36806,14 @@ public:
 //   CrossfadeRuntime は Execution Cache として振る舞う。
 
 namespace convo::isr {
+
+// ★ P1-C: AudioThread → Timer へ渡す完了イベント
+struct CompletedFadeEvent {
+    CrossfadeId id;
+    uint64_t    completedTimestampUs;
+};
+static_assert(std::is_trivially_copyable_v<CompletedFadeEvent>,
+    "Must be trivially copyable for SPSC queue");
 
 class CrossfadeRuntime {
 public:
@@ -36695,7 +36830,48 @@ public:
         convo::publishAtomic(firstIrDryPending_, false, std::memory_order_release);
         convo::publishAtomic(startDelayBlocks_, 0, std::memory_order_release);
         convo::publishAtomic(dryHoldSamples_, 0, std::memory_order_release);
+        // ★ P1-C: 開始タイムスタンプ記録（Practical-2 Timeout監視用）
+        convo::publishAtomic(fadeStartTimestampUs_, getCurrentTimeUs(), std::memory_order_release);
         // activeCrossfadeId_ は触らない — CrossfadeAuthorityRuntime の権威
+    }
+
+    // ★ P1-C: AudioThread から呼ばれる完了通知
+    //   DSPTransition または fade advancement ロジック内で、
+    //   クロスフェード完了を検出したらこのメソッドを呼ぶ。
+    void notifyFadeComplete(CrossfadeId id) noexcept
+    {
+        CompletedFadeEvent ev{id, getCurrentTimeUs()};
+        if (!completedFadeQueue_.push(ev))
+        {
+            // ★ Queue full → drop count increment
+            convo::fetchAddAtomic(crossfadeEventDropCount_, uint64_t{1},
+                std::memory_order_release);
+        }
+    }
+
+    // ★ P1-C: Timer 側で完了イベントを消費
+    [[nodiscard]] bool consumeCompletedFade(CompletedFadeEvent& ev) noexcept
+    {
+        return completedFadeQueue_.pop(ev);
+    }
+
+    // ★ Practical-2: 開始からの経過時間（Timeout 監視用）
+    [[nodiscard]] uint64_t getFadeAgeUs() const noexcept
+    {
+        uint64_t start = convo::consumeAtomic(fadeStartTimestampUs_, std::memory_order_acquire);
+        if (start == 0) return 0;
+        return getCurrentTimeUs() - start;
+    }
+
+    // ★ Practical-6: 超過イベント破棄数を取得
+    [[nodiscard]] uint64_t crossfadeEventDropCount() const noexcept
+    {
+        return convo::consumeAtomic(crossfadeEventDropCount_, std::memory_order_acquire);
+    }
+
+    // ★ P1-C/Practical-6: HealthMonitor が drop count を監視するための参照
+    [[nodiscard]] const std::atomic<uint64_t>* getCrossfadeEventDropCountRef() const noexcept {
+        return &crossfadeEventDropCount_;
     }
 
     // complete: クロスフェード完了時 (timer から)
@@ -36703,6 +36879,7 @@ public:
     {
         convo::publishAtomic(pending_, false, std::memory_order_release);
         convo::publishAtomic(queuedFadeTimeSec_, 0.030, std::memory_order_release);
+        convo::publishAtomic(fadeStartTimestampUs_, 0, std::memory_order_release);
     }
 
     // reset: shutdown/releaseResources 時
@@ -36716,8 +36893,12 @@ public:
         convo::publishAtomic(dryHoldSamples_, 0, std::memory_order_release);
         convo::publishAtomic(queuedFadeTimeSec_, 0.030, std::memory_order_release);
         convo::publishAtomic(dryScaleTarget_, 1.0, std::memory_order_release);
+        convo::publishAtomic(fadeStartTimestampUs_, 0, std::memory_order_release);
         gain_.setCurrentAndTargetValue(1.0);
         dryScaleGain_.setCurrentAndTargetValue(1.0);
+        // ★ SPSC キューを空に
+        CompletedFadeEvent dummy;
+        while (completedFadeQueue_.pop(dummy)) {}
     }
 
     // === RT-safe read-only access ===
@@ -36767,6 +36948,10 @@ private:
     std::atomic<double> dryScaleTarget_{ 1.0 };
     convo::LinearRamp gain_;
     convo::LinearRamp dryScaleGain_;
+    // ★ P1-C: SPSC 完了イベントキュー（AudioThread → Timer）
+    SPSCRingBuffer<CompletedFadeEvent, 32> completedFadeQueue_;
+    std::atomic<uint64_t> crossfadeEventDropCount_{0};
+    std::atomic<uint64_t> fadeStartTimestampUs_{0};
     // activeCrossfadeId_ は CrossfadeRuntime に持たせない
     // CrossfadeAuthorityRuntime が唯一権威
 };
@@ -36910,7 +37095,8 @@ public:
 
             if (!oldHandle.isNull() && !newHandle.isNull()) {
                 // CrossfadeAuthority に registration を委譲
-                engine_.crossfadeAuthorityRuntime_.registerCrossfade(oldHandle, newHandle);
+                const auto xfadeId = engine_.crossfadeAuthorityRuntime_.registerCrossfade(oldHandle, newHandle);
+                (void)xfadeId;  // CrossfadeId は将来 AudioThread 完了検出時の通知に使用
                 engine_.publishAtomic(engine_.activeCrossfadeId_,
                                      static_cast<convo::isr::CrossfadeId>(0u),
                                      std::memory_order_release);
@@ -40224,12 +40410,12 @@ void RetireRuntime::emitRetireIntent(const RetireIntent& intent) noexcept
             {
                 const size_t idx = fallbackCount_.load(std::memory_order_relaxed);
                 fallbackQueue_[idx] = intent;
-                fallbackCount_.store(idx + 1, std::memory_order_release);
+                convo::publishAtomic(fallbackCount_, idx + 1, std::memory_order_release);
 
                 // 最大使用量を更新
-                size_t prevHwm = fallbackHighWatermark_.load(std::memory_order_relaxed);
+                size_t prevHwm = convo::consumeAtomic(fallbackHighWatermark_, std::memory_order_relaxed);
                 while (idx + 1 > prevHwm
-                    && !fallbackHighWatermark_.compare_exchange_weak(prevHwm, idx + 1,
+                    && !convo::compareExchangeAtomic(fallbackHighWatermark_, prevHwm, idx + 1,
                         std::memory_order_release, std::memory_order_relaxed)) {}
 
                 (void)convo::fetchAddAtomic(overflowCount_, uint64_t{1}, std::memory_order_acq_rel);
@@ -40291,11 +40477,11 @@ std::vector<RetireIntent> RetireRuntime::dequeuePendingRetireIntents() noexcept
     // 2. ★ P1: Drain Fallback queue
     {
         std::lock_guard<std::mutex> lock(fallbackMutex_);
-        const size_t fbCount = fallbackCount_.load(std::memory_order_acquire);
+        const size_t fbCount = convo::consumeAtomic(fallbackCount_, std::memory_order_acquire);
         for (size_t i = 0; i < fbCount; ++i) {
             result.push_back(fallbackQueue_[i]);
         }
-        fallbackCount_.store(0, std::memory_order_release);
+        convo::publishAtomic(fallbackCount_, size_t{0}, std::memory_order_release);
     }
 
     std::stable_sort(result.begin(), result.end(), [](const RetireIntent& lhs, const RetireIntent& rhs) noexcept {
@@ -40362,12 +40548,12 @@ std::uint64_t RetireRuntime::lastOverflowWindowCount() const noexcept
 // ★ P1: Fallback queue metrics
 std::size_t RetireRuntime::fallbackOccupancy() const noexcept
 {
-    return fallbackCount_.load(std::memory_order_acquire);
+    return convo::consumeAtomic(fallbackCount_, std::memory_order_acquire);
 }
 
 std::size_t RetireRuntime::fallbackHighWatermark() const noexcept
 {
-    return fallbackHighWatermark_.load(std::memory_order_acquire);
+    return convo::consumeAtomic(fallbackHighWatermark_, std::memory_order_acquire);
 }
 
 std::uint64_t RetireRuntime::fallbackOverflowCount() const noexcept
@@ -40507,7 +40693,7 @@ enum class RetireLane {
 //============================================================================
 
 #include "ISRRetireRouter.h"
-#include "core/EpochDomain.h" // 完全型は .cpp のみでインクルード
+#include "core/TimeUtils.h"     // ★ Practical-4: getCurrentTimeUs
 
 namespace convo {
 namespace isr {
@@ -40575,6 +40761,20 @@ uint64_t ISRRetireRouter::minReaderEpoch() const noexcept
     return provider_->getMinReaderEpoch();
 }
 
+int ISRRetireRouter::readerCapacity() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->readerCapacity();
+}
+
+StuckReaderInfo ISRRetireRouter::detectStuckReaders(uint64_t stuckThreshold) const noexcept
+{
+    // ★ Practical-1: IEpochProvider の virtual detectStuckReaders 経由で委譲
+    //   dynamic_cast 不要。ISR P1-19 / P0-A 完全準拠。
+    assert(provider_ != nullptr);
+    return provider_->detectStuckReaders(stuckThreshold);
+}
+
 RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
                                                     void (*deleter)(void*),
                                                     uint64_t epoch,
@@ -40588,6 +40788,21 @@ RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
     if (provider_->enqueueRetire(ptr, deleter, epoch))
         return RetireEnqueueResult::Success;
 
+    // ★ Practical-4: QueueFull → 同期的 tryReclaim を１度だけ試行（レート制限付き）
+    const uint64_t nowUs = convo::getCurrentTimeUs();
+    const uint64_t lastReclaim = convo::consumeAtomic(m_lastForcedReclaimTimeUs_, std::memory_order_acquire);
+    if (nowUs - lastReclaim > 500'000) // 500ms cooldown
+    {
+        convo::publishAtomic(m_lastForcedReclaimTimeUs_, nowUs, std::memory_order_release);
+        provider_->tryReclaim();
+
+        // 再試行: reclaim 後に空きができたか確認
+        if (provider_->enqueueRetire(ptr, deleter, epoch))
+            return RetireEnqueueResult::Success;
+    }
+
+    // ★ Practical-3: Overflow カウンター増加（Rate監視用）
+    convo::fetchAddAtomic(m_overflowCount_, uint64_t{1}, std::memory_order_release);
     return RetireEnqueueResult::QueuePressure;
 }
 
@@ -40605,20 +40820,16 @@ void ISRRetireRouter::tryReclaim() noexcept
 
 uint32_t ISRRetireRouter::pendingRetireCount() const noexcept
 {
-    // pendingRetireCount は EpochDomain 固有メソッド。
-    // プロバイダが EpochDomain の場合のみ dynamic_cast で取得。
+    // ★ P0-A: IRetireProvider 経由で委譲（dynamic_cast 不要）
     assert(provider_ != nullptr);
-    auto* ed = dynamic_cast<EpochDomain*>(provider_);
-    return ed ? ed->pendingRetireCount() : 0;
+    return provider_->pendingRetireCount();
 }
 
 void ISRRetireRouter::drainAll() noexcept
 {
-    // drainAll は EpochDomain 固有メソッド。
-    // プロバイダが EpochDomain の場合のみ dynamic_cast で実行。
+    // ★ P0-A: IRetireProvider 経由で委譲（dynamic_cast 不要）
     assert(provider_ != nullptr);
-    if (auto* ed = dynamic_cast<EpochDomain*>(provider_))
-        ed->drainAll();
+    provider_->drainAll();
 }
 
 } // namespace isr
@@ -40692,6 +40903,7 @@ public:
     uint64_t snapshotEpoch() const noexcept;
     uint64_t publishEpoch() noexcept override;
     uint32_t activeReaderCount() const noexcept override;
+    int readerCapacity() const noexcept override;
     uint64_t currentEpoch() const noexcept override;
     uint64_t getMinReaderEpoch() const noexcept override;
     int registerReaderThread() noexcept override;
@@ -40699,6 +40911,9 @@ public:
     void enterReader(int readerIndex) noexcept override;
     void exitReader(int readerIndex) noexcept override;
     uint64_t minReaderEpoch() const noexcept;
+
+    // ★ Practical-1: Reader Stuck 診断 (delegates to provider)
+    [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override;
 
     // ── Retire API (実装は .cpp) ──
 
@@ -40708,15 +40923,29 @@ public:
                                       DeletionEntryType type) noexcept;
     bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override;
     void tryReclaim() noexcept override;
-    uint32_t pendingRetireCount() const noexcept;
-    void drainAll() noexcept;
+    uint32_t pendingRetireCount() const noexcept override;
+    void drainAll() noexcept override;
+
+    // ★ Practical-3: Overflow レート監視用カウンター
+    [[nodiscard]] uint64_t overflowCount() const noexcept {
+        return convo::consumeAtomic(m_overflowCount_, std::memory_order_acquire);
+    }
+    [[nodiscard]] const std::atomic<uint64_t>* getOverflowCountRef() const noexcept {
+        return &m_overflowCount_;
+    }
+
+    // ★ Practical-4: Forced reclaim 時刻（enqueueRetire QueuePressure 時の即時 tryReclaim 用）
+    void setLastForcedReclaimTimeUs(uint64_t t) noexcept {
+        convo::publishAtomic(m_lastForcedReclaimTimeUs_, t, std::memory_order_release);
+    }
+    [[nodiscard]] uint64_t lastForcedReclaimTimeUs() const noexcept {
+        return convo::consumeAtomic(m_lastForcedReclaimTimeUs_, std::memory_order_acquire);
+    }
 
 private:
     convo::IEpochProvider* provider_ = nullptr;
-    // EpochDomain 固有メソッドのための関数ポインタ（dynamic_cast 回避、P1-19準拠）
-    uint32_t (*pendingRetireFn_)(void*) = nullptr;
-    void     (*drainAllFn_)(void*)      = nullptr;
-    void*    epochContext_              = nullptr;
+    std::atomic<uint64_t> m_overflowCount_{0};          // ★ Practical-3: enqueueRetire QueuePressure 回数
+    std::atomic<uint64_t> m_lastForcedReclaimTimeUs_{0}; // ★ Practical-4: 最終強制 reclaim 時刻
 };
 
 } // namespace isr
@@ -42547,6 +42776,7 @@ private:
 ```
 #include "ISRShutdown.h"
 #include "AtomicAccess.h"
+#include "RuntimeDrainAudit.h"  // ★ P2-B: getPrimaryBlockingReason
 
 #include <filesystem>
 #include <fstream>
@@ -42572,8 +42802,15 @@ ShutdownPhase ShutdownRuntime::getLastNonTerminalPhase() const noexcept
     return convo::consumeAtomic(lastNonTerminalPhase_, std::memory_order_acquire);
 }
 
-void ShutdownRuntime::markTimedOut() noexcept
+ShutdownBlockingReason ShutdownRuntime::getBlockingReason() const noexcept
 {
+    return convo::consumeAtomic(blockingReason_, std::memory_order_acquire);
+}
+
+void ShutdownRuntime::markTimedOut(ShutdownBlockingReason reason) noexcept
+{
+    // ★ P2-B: 阻害要因を保存
+    convo::publishAtomic(blockingReason_, reason, std::memory_order_release);
     // ★ P1-1: 現在の phase を保存してから上書き
     convo::publishAtomic(lastNonTerminalPhase_,
                          convo::consumeAtomic(phase_, std::memory_order_acquire),
@@ -42581,8 +42818,10 @@ void ShutdownRuntime::markTimedOut() noexcept
     convo::publishAtomic(phase_, ShutdownPhase::TimedOut, std::memory_order_release);
 }
 
-void ShutdownRuntime::markFailed() noexcept
+void ShutdownRuntime::markFailed(ShutdownBlockingReason reason) noexcept
 {
+    // ★ P2-B: 阻害要因を保存
+    convo::publishAtomic(blockingReason_, reason, std::memory_order_release);
     convo::publishAtomic(lastNonTerminalPhase_,
                          convo::consumeAtomic(phase_, std::memory_order_acquire),
                          std::memory_order_release);
@@ -42685,6 +42924,7 @@ void ShutdownRuntime::emitShutdownTrace() const
     const auto sh4 = convo::consumeAtomic(sh4ObserverCount_, std::memory_order_acquire);
     const auto sh5 = convo::consumeAtomic(sh5LateCallbackCount_, std::memory_order_acquire);
     const auto sh6 = convo::consumeAtomic(sh6PostStopEnqueueCount_, std::memory_order_acquire);
+    const auto reason = convo::consumeAtomic(blockingReason_, std::memory_order_acquire);  // ★ P2-B
 
     const char* phaseName = "Running";
     switch (phase) {
@@ -42694,18 +42934,33 @@ void ShutdownRuntime::emitShutdownTrace() const
     case ShutdownPhase::RetireClosed: phaseName = "RetireClosed"; break;
     case ShutdownPhase::EpochSettled: phaseName = "EpochSettled"; break;
     case ShutdownPhase::ReclaimComplete: phaseName = "ReclaimComplete"; break;
-    case ShutdownPhase::VerifyDrained: phaseName = "VerifyDrained"; break;    // ★ P3
-    case ShutdownPhase::TimedOut: phaseName = "TimedOut"; break;          // ★ P1-1
-    case ShutdownPhase::Failed: phaseName = "Failed"; break;              // ★ P1-1
+    case ShutdownPhase::VerifyDrained: phaseName = "VerifyDrained"; break;
+    case ShutdownPhase::TimedOut: phaseName = "TimedOut"; break;
+    case ShutdownPhase::Failed: phaseName = "Failed"; break;
     case ShutdownPhase::ShutdownComplete: phaseName = "ShutdownComplete"; break;
+    }
+
+    const char* reasonName = "None";
+    switch (reason) {
+    case ShutdownBlockingReason::None: reasonName = "None"; break;
+    case ShutdownBlockingReason::PendingPublication: reasonName = "PendingPublication"; break;
+    case ShutdownBlockingReason::PendingRetire: reasonName = "PendingRetire"; break;
+    case ShutdownBlockingReason::ActiveCrossfade: reasonName = "ActiveCrossfade"; break;
+    case ShutdownBlockingReason::DeferredPublish: reasonName = "DeferredPublish"; break;
+    case ShutdownBlockingReason::QuarantineResident: reasonName = "QuarantineResident"; break;
+    case ShutdownBlockingReason::RouterPendingRetire: reasonName = "RouterPendingRetire"; break;
+    case ShutdownBlockingReason::ReaderActive: reasonName = "ReaderActive"; break;
+    case ShutdownBlockingReason::Unknown: reasonName = "Unknown"; break;
     }
 
     const bool boundedComplete = (sh1 == 0u && sh2 == 0u && sh3 == 0u && sh4 == 0u && sh5 == 0u && sh6 == 0u);
 
     file << "{\n";
-    file << "  \"schema\": \"shutdown_trace_v1\",\n";
+    file << "  \"schema\": \"shutdown_trace_v2\",\n";
     file << "  \"phase\": " << static_cast<int>(phase) << ",\n";
     file << "  \"phaseName\": \"" << phaseName << "\",\n";
+    file << "  \"blockingReason\": \"" << reasonName << "\",\n";  // ★ P2-B
+    file << "  \"blockingReasonCode\": " << static_cast<int>(reason) << ",\n";
     file << "  \"transitionViolations\": " << violations << ",\n";
     file << "  \"sh1_callbackCount\": " << sh1 << ",\n";
     file << "  \"sh2_activeCrossfade\": " << sh2 << ",\n";
@@ -42751,6 +43006,7 @@ void ShutdownRuntime::markPostStopEnqueue() noexcept
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include "RuntimeDrainAudit.h"  // ★ P2-B: ShutdownBlockingReason
 
 namespace convo {
 namespace isr {
@@ -42775,6 +43031,22 @@ enum class ShutdownPhase : uint8_t
     TimedOut,
     Failed,
     ShutdownComplete
+};
+
+/**
+ * ★ P2-B/Practical-3: Shutdown 完了阻害要因
+ */
+enum class ShutdownBlockingReason : uint8_t
+{
+    None = 0,
+    PendingPublication,
+    PendingRetire,
+    ActiveCrossfade,
+    DeferredPublish,
+    QuarantineResident,
+    RouterPendingRetire,
+    ReaderActive,
+    Unknown
 };
 
 /**
@@ -42810,8 +43082,11 @@ public:
     bool isShutdownInProgress() const noexcept;
 
     // ★ P1-1: タイムアウト・異常終了を記録（transitionTo をバイパスして直接 store）
-    void markTimedOut() noexcept;
-    void markFailed() noexcept;
+    void markTimedOut(ShutdownBlockingReason reason = ShutdownBlockingReason::Unknown) noexcept;
+    void markFailed(ShutdownBlockingReason reason = ShutdownBlockingReason::Unknown) noexcept;
+
+    // ★ P2-B: 完了阻害要因を取得（障害解析用）
+    ShutdownBlockingReason getBlockingReason() const noexcept;
 
     // Emit final shutdown trace
     void emitShutdownTrace() const;
@@ -42837,6 +43112,8 @@ private:
     std::atomic<uint32_t> sh4ObserverCount_{0};
     std::atomic<uint32_t> sh5LateCallbackCount_{0};
     std::atomic<uint32_t> sh6PostStopEnqueueCount_{0};
+    // ★ P2-B: Shutdown 完了阻害要因（markTimedOut/Failed 時に保存）
+    std::atomic<ShutdownBlockingReason> blockingReason_{ShutdownBlockingReason::None};
 };
 
 }  // namespace isr
@@ -42870,7 +43147,22 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
     if (req.sealedSnapshot.irLoaded && !req.sealedSnapshot.irFinalized)
         return Decision::RejectedNotFinalized;
 
-    // 4. Pressure / throttle check (P1-6: Adaptive Backpressure)
+    // 4. HealthState check (Practical-9: Admission Circuit Breaker)
+    if (m_healthStateRef) {
+        auto health = convo::consumeAtomic(*m_healthStateRef, std::memory_order_acquire);
+        if (health == ISRHealthState::Critical) {
+            // Critical: 全 publish 拒否（フェイルクローズ）
+            return Decision::RejectedPressure;
+        }
+        if (health == ISRHealthState::Degraded) {
+            // Degraded: 低優先度 publish を拒否
+            //   generation==0 は存在しない（初回は 1）ため、一律 RejectedLowPriority は不可。
+            //   代わりに RejectedPressure を返し、Coordinator 側で間引き制御に委ねる。
+            return Decision::RejectedPressure;
+        }
+    }
+
+    // 5. Pressure / throttle check (P1-6: Adaptive Backpressure)
     const bool pressureActive = convo::consumeAtomic(
         engine.retirePressurePublicationThrottleActive_, std::memory_order_acquire);
     if (pressureActive) {
@@ -42902,6 +43194,7 @@ PublicationAdmission::Decision PublicationAdmission::evaluate(
 #include "RuntimeBuildTypes.h"
 #include "ISRDSPHandle.h"
 #include "core/RuntimeReaderContext.h"
+#include "RuntimeHealthMonitor.h"  // ★ P1-B: ISRHealthState
 
 class AudioEngine;  // forward declaration (circular dep avoid)
 
@@ -42938,6 +43231,11 @@ public:
 
     explicit PublicationAdmission() noexcept = default;
 
+    // ★ P1-B: HealthState 参照を設定（RuntimeHealthMonitor の getHealthStateRef() を渡す）
+    void setHealthStateRef(const std::atomic<ISRHealthState>* ref) noexcept {
+        m_healthStateRef = ref;
+    }
+
     // evaluate: publish 可否を判定する（AudioEngine 参照が必要）。
     // Accepted 以外の場合は Coordinator が対応する。
     [[nodiscard]] Decision evaluate(const PublishRequest& req,
@@ -42946,6 +43244,10 @@ public:
 
     // Deferred Queue は PublicationAdmission から RuntimePublicationOrchestrator へ移設済み (PR-7)。
     // Admission は publish 可否判定のみ責務とする。
+
+private:
+    // ★ P1-B: HealthMonitor の統合 HealthState 参照
+    const std::atomic<ISRHealthState>* m_healthStateRef = nullptr;
 };
 
 } // namespace convo::isr
@@ -43833,6 +44135,7 @@ struct RuntimeGraph
 #include "RuntimeHealthMonitor.h"
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/RuntimePublicationOrchestrator.h"
+#include "audioengine/CrossfadeRuntime.h"  // ★ P1-C: 完全型必要（isPending/getFadeAgeUs）
 #include "audioengine/AtomicAccess.h"
 #include "core/TimeUtils.h"
 
@@ -43841,7 +44144,13 @@ namespace convo {
 void RuntimeHealthMonitor::tick() noexcept {
     checkRetireStall();
     checkPublicationStall();
-    diagnoseRetireStall(); // ★ P4.5
+    diagnoseRetireStall();
+    checkCrossfadeTimeout();
+    checkCrossfadeEventDrop();
+    checkReaderSlotUsage();
+    checkOverflowRate();         // ★ Practical-3
+    checkRetireReclaimLatency();
+    updateHealthState();
 }
 
 void RuntimeHealthMonitor::checkRetireStall() noexcept {
@@ -43924,6 +44233,48 @@ void RuntimeHealthMonitor::checkPublicationStall() noexcept {
     emitOnTransition(m_prevPublicationState, newState, severity, eventCode, value);
 }
 
+// ★ P1-B: 各 MonitorState から統合 ISRHealthState を算出
+void RuntimeHealthMonitor::updateHealthState() noexcept
+{
+    ISRHealthState newState = ISRHealthState::Healthy;
+
+    // Retire stall → Degraded or Critical
+    if (m_prevRetireState == MonitorState::Error)
+        newState = ISRHealthState::Critical;
+    else if (m_prevRetireState == MonitorState::Warning)
+        newState = ISRHealthState::Degraded;
+
+    // Publication stall → Critical（retire より優先度高）
+    if (m_prevPublicationState == MonitorState::Error)
+        newState = ISRHealthState::Critical;
+    else if (m_prevPublicationState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    // ★ Practical-3: Overflow rate → Degraded or Critical
+    if (m_prevOverflowRateState == MonitorState::Error && newState != ISRHealthState::Critical)
+        newState = ISRHealthState::Critical;
+    else if (m_prevOverflowRateState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    // ★ Practical-4: Reader slot exhaustion → Degraded or Critical
+    if (m_prevReaderSlotState == MonitorState::Error && newState != ISRHealthState::Critical)
+        newState = ISRHealthState::Critical;
+    else if (m_prevReaderSlotState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    // ★ Practical-5: Retire age → Degraded or Critical
+    if (m_prevRetireAgeState == MonitorState::Error && newState != ISRHealthState::Critical)
+        newState = ISRHealthState::Critical;
+    else if (m_prevRetireAgeState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    convo::publishAtomic(m_healthState_, newState, std::memory_order_release);
+}
+
 void RuntimeHealthMonitor::emitOnTransition(
     MonitorState& currentState, MonitorState newState,
     HealthEvent::Severity severity, uint32_t eventCode,
@@ -43937,40 +44288,31 @@ void RuntimeHealthMonitor::emitOnTransition(
     m_callback(ev);
 }
 
-// ★ P4.5: Reader Stuck 診断
-// router の情報から Reader 残留の可能性を診断し、HealthEvent として報告する。
-// 完全な detectStuckReaders には EpochDomain 直接アクセスが必要。
+// ★ Practical-1: Reader Stuck 実診断（detectStuckReaders 経由）
 void RuntimeHealthMonitor::diagnoseRetireStall() noexcept
 {
     if (!m_retireRouter)
         return;
 
-    const uint64_t pendingCount = m_retireRouter->pendingRetireCount();
-    const uint64_t minEpoch = m_retireRouter->getMinReaderEpoch();
-    const uint64_t curEpoch = m_retireRouter->currentEpoch();
-    const uint64_t epochGap = (curEpoch > minEpoch) ? (curEpoch - minEpoch) : 0;
+    // ★ Practical-1: ルーター経由で実診断を取得（EpochDomain 直接アクセス不要）
+    //   stuckThreshold = 10 epoch 以上進行していない Reader を Stuck と判定
+    const auto stuckInfo = m_retireRouter->detectStuckReaders(10);
 
-    // epochGap が大きく pendingRetire が滞留 → Reader 残留の可能性
-    if (pendingCount > 0 && epochGap > 10)
+    if (stuckInfo.isStuck)
     {
         const uint64_t nowUs = convo::getCurrentTimeUs();
-        MonitorState newState = MonitorState::Warning;
-        const bool severe = (pendingCount > 100 || epochGap > 100);
-
-        if (severe)
-            newState = MonitorState::Error;
-        else
-            newState = MonitorState::Warning;
+        const bool severe = (stuckInfo.pendingRetireCount > 100 || stuckInfo.residencyTimeUs > 30'000'000);
+        MonitorState newState = severe ? MonitorState::Error : MonitorState::Warning;
 
         HealthEvent ev{nowUs,
                        severe ? HealthEvent::Severity::Error : HealthEvent::Severity::Warning,
                        EVENT_READER_STUCK,
-                       pendingCount,
+                       stuckInfo.pendingRetireCount,
                        0};
-        ev.readerIndex = -1; // 完全な Reader 特定は EpochDomain 直接アクセスが必要
-        ev.readerEpoch = minEpoch;
-        ev.readerDepth = 0;
-        ev.residencyTimeUs = 0;
+        ev.readerIndex = stuckInfo.readerIndex;
+        ev.readerEpoch = stuckInfo.readerEpoch;
+        ev.readerDepth = 1; // depth > 0 確定
+        ev.residencyTimeUs = stuckInfo.residencyTimeUs; // ★ Practical-8: 実測値
 
         if (m_callback)
         {
@@ -43980,6 +44322,169 @@ void RuntimeHealthMonitor::diagnoseRetireStall() noexcept
                 m_callback(ev);
             }
         }
+    }
+}
+
+// ★ P1-C/Practical-2: Crossfade Timeout 監視（固定30秒）
+void RuntimeHealthMonitor::checkCrossfadeTimeout() noexcept
+{
+    if (!m_crossfadeRuntime) return;
+    if (!m_crossfadeRuntime->isPending()) return;
+
+    uint64_t ageUs = m_crossfadeRuntime->getFadeAgeUs();
+    if (ageUs > kCrossfadeTimeoutUs) {
+        emitOnTransition(m_prevCrossfadeDropState, MonitorState::Error,
+            HealthEvent::Severity::Error, EVENT_CROSSFADE_TIMEOUT, ageUs / 1000);
+    }
+}
+
+// ★ P1-C/Practical-6: Crossfade Event Drop 差分ベース監視
+void RuntimeHealthMonitor::checkCrossfadeEventDrop() noexcept
+{
+    if (!m_crossfadeEventDropRef) return;
+    uint64_t current = convo::consumeAtomic(*m_crossfadeEventDropRef, std::memory_order_acquire);
+    uint64_t delta = current - m_lastObservedDropCount;
+
+    if (delta >= kCrossfadeEventDropCriticalDelta) {
+        emitOnTransition(m_prevCrossfadeDropState, MonitorState::Error,
+            HealthEvent::Severity::Error, EVENT_CROSSFADE_EVENT_DROP, delta);
+    } else if (delta >= kCrossfadeEventDropWarningDelta) {
+        emitOnTransition(m_prevCrossfadeDropState, MonitorState::Warning,
+            HealthEvent::Severity::Warning, EVENT_CROSSFADE_EVENT_DROP, delta);
+    }
+
+    m_lastObservedDropCount = current;
+}
+
+// ★ Practical-4/6: Reader Slot Usage Telemetry（50%/75%/90% 閾値、capacity 動的取得）
+void RuntimeHealthMonitor::checkReaderSlotUsage() noexcept
+{
+    // ★ 優先: m_readerSlotRef が設定されている場合はそれを使用
+    //   未設定の場合は m_retireRouter 経由で直接取得（フォールバック）
+    uint32_t activeCount = 0;
+    if (m_readerSlotRef) {
+        activeCount = convo::consumeAtomic(*m_readerSlotRef, std::memory_order_acquire);
+    } else if (m_retireRouter) {
+        activeCount = m_retireRouter->activeReaderCount();
+    } else {
+        return;
+    }
+    // ★ Practical-6: capacity を動的取得（固定値ではなく router 経由）
+    int maxSlots = (m_retireRouter != nullptr) ? m_retireRouter->readerCapacity() : 64;
+    if (maxSlots <= 0) maxSlots = 64;
+    double usage = static_cast<double>(activeCount) / static_cast<double>(maxSlots);
+
+    if (usage >= 0.90) {
+        emitOnTransition(m_prevReaderSlotState, MonitorState::Error,
+            HealthEvent::Severity::Error, EVENT_READER_SLOT_USAGE,
+            activeCount, maxSlots);
+    } else if (usage >= kReaderSlotCriticalThreshold) {
+        emitOnTransition(m_prevReaderSlotState, MonitorState::Warning,
+            HealthEvent::Severity::Warning, EVENT_READER_SLOT_USAGE,
+            activeCount, maxSlots);
+    }
+}
+
+// ★ Practical-3: Overflow Rate 監視（回数/sec ベース、ヒステリシス付き）
+void RuntimeHealthMonitor::checkOverflowRate() noexcept
+{
+    if (!m_overflowCountRef) return;
+    const uint64_t nowUs = convo::getCurrentTimeUs();
+    const uint64_t elapsed = nowUs - m_lastOverflowCheckTimeUs;
+    if (elapsed < kOverflowRateWindowUs)
+        return; // まだ1秒経過していない
+
+    const uint64_t current = convo::consumeAtomic(*m_overflowCountRef, std::memory_order_acquire);
+    const uint64_t delta = current - m_lastOverflowCount;
+
+    // レート計算: delta events / (elapsed us / 1,000,000) = delta / (elapsed / 1e6)
+    // → delta * 1,000,000 / elapsed で per-sec 換算
+    const uint64_t ratePerSec = (elapsed > 0) ? (delta * 1'000'000 / elapsed) : 0;
+
+    m_lastOverflowCount = current;
+    m_lastOverflowCheckTimeUs = nowUs;
+
+    // ★ ヒステリシス付き状態遷移
+    MonitorState desiredState;
+    if (ratePerSec >= kOverflowRateCriticalThreshold)
+        desiredState = MonitorState::Error;
+    else if (ratePerSec >= kOverflowRateWarningThreshold)
+        desiredState = MonitorState::Warning;
+    else
+        desiredState = MonitorState::Normal;
+
+    if (desiredState != m_prevOverflowRateState)
+    {
+        // 上昇方向（Normal→Warning/Error, Warning→Error）: 即時遷移
+        if (desiredState > m_prevOverflowRateState)
+        {
+            m_overflowRateStableSinceUs = nowUs;
+            emitOnTransition(m_prevOverflowRateState, desiredState,
+                desiredState == MonitorState::Error
+                    ? HealthEvent::Severity::Error : HealthEvent::Severity::Warning,
+                desiredState == MonitorState::Error ? EVENT_RETIRE_STALL : EVENT_RETIRE_STALL_WARNING,
+                ratePerSec);
+        }
+        else
+        {
+            // 下降方向: ヒステリシス待機
+            //   Error→Warning: 10秒安定
+            //   Warning→Normal: 30秒安定
+            //   または Error→Normal: 30秒安定（Error→Warning経由）
+            if (m_overflowRateStableSinceUs == 0)
+            {
+                m_overflowRateStableSinceUs = nowUs;
+            }
+            const uint64_t stableDuration = nowUs - m_overflowRateStableSinceUs;
+            const uint64_t requiredStableUs = (m_prevOverflowRateState == MonitorState::Error)
+                ? kOverflowHysteresisCriticalToDegradedUs   // 10秒
+                : kOverflowHysteresisDegradedToHealthyUs;    // 30秒
+
+            if (stableDuration >= requiredStableUs)
+            {
+                m_overflowRateStableSinceUs = 0;
+                emitOnTransition(m_prevOverflowRateState, desiredState,
+                    HealthEvent::Severity::Info,
+                    EVENT_RETIRE_STALL_WARNING,
+                    ratePerSec);
+            }
+        }
+    }
+    else
+    {
+        // 状態維持中で安定クロックが進行中の場合、リセット(rate上昇で即時遷移できるように)
+        if (desiredState == MonitorState::Normal && m_overflowRateStableSinceUs != 0)
+        {
+            const uint64_t stableDuration = nowUs - m_overflowRateStableSinceUs;
+            const uint64_t requiredStableUs = (m_prevOverflowRateState == MonitorState::Warning)
+                ? kOverflowHysteresisDegradedToHealthyUs
+                : kOverflowHysteresisCriticalToDegradedUs;
+            if (stableDuration >= requiredStableUs)
+            {
+                m_overflowRateStableSinceUs = 0;
+                emitOnTransition(m_prevOverflowRateState, MonitorState::Normal,
+                    HealthEvent::Severity::Info,
+                    EVENT_RETIRE_STALL_WARNING,
+                    ratePerSec);
+            }
+        }
+    }
+}
+
+// ★ Practical-5: Retire Reclaim Latency 監視
+void RuntimeHealthMonitor::checkRetireReclaimLatency() noexcept
+{
+    if (!m_maxRetireAgeRef) return;
+    uint64_t maxAgeUs = convo::consumeAtomic(*m_maxRetireAgeRef, std::memory_order_acquire);
+
+    if (maxAgeUs > kRetireAgeCriticalUs) {
+        emitOnTransition(m_prevRetireAgeState, MonitorState::Error,
+            HealthEvent::Severity::Error, EVENT_RETIRE_AGE_CRITICAL,
+            maxAgeUs / 1000);
+    } else if (maxAgeUs > kRetireAgeWarningUs) {
+        emitOnTransition(m_prevRetireAgeState, MonitorState::Warning,
+            HealthEvent::Severity::Warning, EVENT_RETIRE_AGE_WARNING,
+            maxAgeUs / 1000);
     }
 }
 
@@ -43994,6 +44499,7 @@ void RuntimeHealthMonitor::diagnoseRetireStall() noexcept
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include "AtomicAccess.h"
 
 namespace convo {
 
@@ -44014,14 +44520,38 @@ struct HealthEvent {
 namespace isr {
 class ISRRetireRouter;
 class RuntimePublicationOrchestrator;
+class CrossfadeRuntime;  // ★ P1-C: 前方宣言
 }
 
-// ★ イベントコード定数
+// ★ P1-B: ISR Health State — HealthMonitor が一元管理し Admission へ公開
+enum class ISRHealthState : uint8_t {
+    Healthy = 0,    // 正常
+    Degraded,       // 軽度障害（Reader枯渇 / Retire backlog増加）
+    Critical        // 重度障害（Publication stall / Reader stuck / Timeout）
+};
+
 static constexpr uint32_t EVENT_RETIRE_STALL         = 1001;
 static constexpr uint32_t EVENT_RETIRE_STALL_WARNING = 1002;
 static constexpr uint32_t EVENT_PUBLICATION_STALL    = 2001;
 static constexpr uint32_t EVENT_PUBLICATION_WARNING  = 2002;
-static constexpr uint32_t EVENT_READER_STUCK         = 3001; // ★ P4.5
+static constexpr uint32_t EVENT_READER_STUCK         = 3001;
+static constexpr uint32_t EVENT_READER_SLOT_USAGE     = 3010;  // ★ P1-B/Practical-4
+static constexpr uint32_t EVENT_CROSSFADE_TIMEOUT    = 4001;  // ★ P1-C/Practical-2
+static constexpr uint32_t EVENT_CROSSFADE_EVENT_DROP = 4002;  // ★ P1-C/Practical-6
+static constexpr uint32_t EVENT_RETIRE_AGE_WARNING   = 1010;  // ★ Practical-5
+static constexpr uint32_t EVENT_RETIRE_AGE_CRITICAL  = 1011;  // ★ Practical-5
+
+// ★ P1-C: Crossfade Timeout（固定30秒）
+static constexpr uint64_t kCrossfadeTimeoutUs = 30'000'000;
+// ★ P1-C: Crossfade Event Drop 閾値（差分ベース）
+static constexpr uint64_t kCrossfadeEventDropCriticalDelta = 10;
+static constexpr uint64_t kCrossfadeEventDropWarningDelta  = 1;
+// ★ Practical-4: Reader Slot 閾値
+static constexpr double kReaderSlotWarningThreshold  = 0.50;
+static constexpr double kReaderSlotCriticalThreshold = 0.75;
+// ★ Practical-5: Retire Age 閾値
+static constexpr uint64_t kRetireAgeWarningUs  = 5'000'000;   // 5秒
+static constexpr uint64_t kRetireAgeCriticalUs = 30'000'000;  // 30秒
 
 enum class MonitorState : uint8_t { Normal, Warning, Error };
 using HealthEventCallback = std::function<void(const HealthEvent&)>;
@@ -44039,18 +44569,42 @@ using HealthEventCallback = std::function<void(const HealthEvent&)>;
  */
 class RuntimeHealthMonitor {
 public:
+    // ★ P1-C/Practical-2: CrossfadeRuntime 参照設定
     void setRetireRouter(isr::ISRRetireRouter* router) noexcept { m_retireRouter = router; }
     void setOrchestrator(isr::RuntimePublicationOrchestrator* orch) noexcept { m_orchestrator = orch; }
     void setRetireHighWatermarkRef(const std::atomic<int>* ref) noexcept { m_retireHighWatermarkRef = ref; }
     void setEventCallback(HealthEventCallback cb) noexcept { m_callback = std::move(cb); }
+    // ★ P1-C/Practical-2: CrossfadeRuntime 参照設定（crossfade timeout + event drop 監視用）
+    void setCrossfadeRuntime(const isr::CrossfadeRuntime* rt) noexcept { m_crossfadeRuntime = rt; }
+    // ★ Practical-2/5/6: 診断用参照設定
+    void setCrossfadeEventDropRef(const std::atomic<uint64_t>* ref) noexcept { m_crossfadeEventDropRef = ref; }
+    void setMaxRetireAgeRef(const std::atomic<uint64_t>* ref) noexcept { m_maxRetireAgeRef = ref; }
+    void setReaderSlotRef(const std::atomic<uint32_t>* ref) noexcept { m_readerSlotRef = ref; }
+    void setOverflowCountRef(const std::atomic<uint64_t>* ref) noexcept { m_overflowCountRef = ref; }
 
     void tick() noexcept;
+
+    // ★ P1-B: HealthState 公開 — Admission が参照する
+    [[nodiscard]] ISRHealthState getHealthState() const noexcept {
+        return convo::consumeAtomic(m_healthState_, std::memory_order_acquire);
+    }
+
+    // ★ P1-B: Admission が HealthState を参照するための生ポインタ公開
+    [[nodiscard]] const std::atomic<ISRHealthState>* getHealthStateRef() const noexcept {
+        return &m_healthState_;
+    }
 
 private:
     void checkRetireStall() noexcept;
     void checkPublicationStall() noexcept;
-    // ★ P4.5: Reader Stuck 診断（detectStuckReaders からの情報を HealthEvent に反映）
     void diagnoseRetireStall() noexcept;
+    void updateHealthState() noexcept;
+    // ★ P1-C/Practical-2/4/5/6: 追加監視
+    void checkCrossfadeTimeout() noexcept;
+    void checkCrossfadeEventDrop() noexcept;
+    void checkReaderSlotUsage() noexcept;
+    void checkOverflowRate() noexcept;
+    void checkRetireReclaimLatency() noexcept;
     void emitOnTransition(MonitorState& currentState, MonitorState newState,
                           HealthEvent::Severity severity, uint32_t eventCode,
                           uint64_t value, uint32_t slot = 0) noexcept;
@@ -44061,6 +44615,33 @@ private:
     HealthEventCallback m_callback;
     MonitorState m_prevRetireState { MonitorState::Normal };
     MonitorState m_prevPublicationState { MonitorState::Normal };
+    MonitorState m_prevCrossfadeDropState { MonitorState::Normal }; // ★ P1-C
+    MonitorState m_prevReaderSlotState { MonitorState::Normal };    // ★ Practical-4
+    MonitorState m_prevOverflowRateState { MonitorState::Normal };  // ★ Practical-3
+    MonitorState m_prevRetireAgeState { MonitorState::Normal };     // ★ Practical-5
+    std::atomic<ISRHealthState> m_healthState_{ISRHealthState::Healthy};
+    // ★ P1-C/Practical-2/4/5/6: 監視用参照
+    const convo::isr::CrossfadeRuntime* m_crossfadeRuntime = nullptr;
+    const std::atomic<uint64_t>* m_crossfadeEventDropRef = nullptr;
+    const std::atomic<uint64_t>* m_maxRetireAgeRef = nullptr;
+    const std::atomic<uint32_t>* m_readerSlotRef = nullptr;
+    const std::atomic<uint64_t>* m_overflowCountRef = nullptr;   // ★ Practical-3
+    // ★ P1-C drop: 差分検出用ローカル状態
+    uint64_t m_lastObservedDropCount = 0;
+
+    // ★ Practical-3: Overflow rate monitoring
+    uint64_t m_lastOverflowCount = 0;
+    uint64_t m_lastOverflowCheckTimeUs = 0;
+    uint64_t m_overflowRateStableSinceUs = 0; // ★ ヒステリシス: 安定状態到達時刻
+    static constexpr uint64_t kOverflowRateWindowUs = 1'000'000; // 1秒窓
+    static constexpr uint32_t kOverflowRateCriticalThreshold = 5; // 5回/秒超 → Critical
+    static constexpr uint32_t kOverflowRateWarningThreshold = 1;  // 1回/秒以上 → Warning
+    static constexpr uint64_t kOverflowHysteresisCriticalToDegradedUs = 10'000'000; // Critical→Degraded: 10秒安定
+    static constexpr uint64_t kOverflowHysteresisDegradedToHealthyUs = 30'000'000; // Degraded→Healthy: 30秒安定
+
+    // ★ Practical-4: Reclaim rate limit
+    uint64_t m_lastForcedReclaimTimeUs = 0;
+    static constexpr uint64_t kForcedReclaimCooldownUs = 500'000; // 500ms以内は再試行禁止
 };
 
 } // namespace convo
@@ -44519,6 +45100,11 @@ public:
     // ── TelemetryRecorder アクセサ ──
     [[nodiscard]] TelemetryRecorder& telemetryRecorder() noexcept { return telemetryRecorder_; }
     [[nodiscard]] const TelemetryRecorder& telemetryRecorder() const noexcept { return telemetryRecorder_; }
+
+    // ★ P1-B: Admission に HealthState 参照を設定
+    void setAdmissionHealthStateRef(const std::atomic<ISRHealthState>* ref) noexcept {
+        admission_.setHealthStateRef(ref);
+    }
 
     // ── 健全性スナップショット ──
     void publishHealthSnapshot() noexcept;
@@ -45628,6 +46214,182 @@ private:
     std::atomic<uint64_t> localCounter_{1};  // 0は無効値
     FailureSnapshotController snapshotController_;
     RuntimePublicationStateOwner* stateOwner_{nullptr};
+};
+
+} // namespace convo::isr
+
+```
+
+### 📄 `src\audioengine\WorldLifecycleAudit.cpp`
+
+```
+#include "WorldLifecycleAudit.h"
+#include <fstream>
+#include <filesystem>
+
+namespace convo::isr {
+
+void WorldLifecycleAudit::emitSnapshot() const noexcept
+{
+    const auto outputPath = std::filesystem::current_path() / "evidence" / "world_lifecycle_audit.json";
+    std::error_code ec;
+    std::filesystem::create_directories(outputPath.parent_path(), ec);
+
+    std::ofstream file(outputPath, std::ios::binary | std::ios::trunc);
+    if (!file.is_open())
+        return;
+
+    const uint64_t active = convo::consumeAtomic(activeWorldCount_, std::memory_order_acquire);
+    const uint64_t published = convo::consumeAtomic(publishedCount_, std::memory_order_acquire);
+    const uint64_t retired = convo::consumeAtomic(retiredCount_, std::memory_order_acquire);
+    const uint64_t lastRetiredId = convo::consumeAtomic(lastRetiredWorldId_, std::memory_order_acquire);
+    const uint64_t lastRetireEp = convo::consumeAtomic(lastRetireEpoch_, std::memory_order_acquire);
+    const uint64_t lastRetireTs = convo::consumeAtomic(lastRetireTimestampUs_, std::memory_order_acquire);
+
+    // RingBuffer から最新のレコードを取得
+    constexpr size_t kSnapshotCount = 64;
+    WorldLifecycleRecord records[kSnapshotCount];
+    const size_t count = ringBuffer_.readLatest(records, kSnapshotCount);
+
+    file << "{\n";
+    file << "  \"schema\": \"world_lifecycle_audit_v1\",\n";
+    file << "  \"activeWorldCount\": " << active << ",\n";
+    file << "  \"publishedCount\": " << published << ",\n";
+    file << "  \"retiredCount\": " << retired << ",\n";
+    file << "  \"ringBufferSize\": " << ringBuffer_.size() << ",\n";
+    file << "  \"ringBufferCapacity\": " << ringBuffer_.capacity() << ",\n";
+    file << "  \"lastRetiredWorldId\": " << lastRetiredId << ",\n";
+    file << "  \"lastRetireEpoch\": " << lastRetireEp << ",\n";
+    file << "  \"lastRetireTimestampUs\": " << lastRetireTs << ",\n";
+    file << "  \"recentRecords\": [\n";
+
+    for (size_t i = 0; i < count; ++i) {
+        const auto& rec = records[i];
+        file << "    {\n";
+        file << "      \"worldId\": " << rec.worldId << ",\n";
+        file << "      \"publishEpoch\": " << rec.publishEpoch << ",\n";
+        file << "      \"retireEpoch\": " << rec.retireEpoch << ",\n";
+        file << "      \"publishTimestampUs\": " << rec.publishTimestampUs << ",\n";
+        file << "      \"retireTimestampUs\": " << rec.retireTimestampUs << ",\n";
+        file << "      \"correlationIdShort\": " << rec.correlationId.shortValue() << "\n";
+        file << "    }";
+        if (i < count - 1)
+            file << ",";
+        file << "\n";
+    }
+
+    file << "  ]\n";
+    file << "}\n";
+}
+
+void WorldLifecycleAudit::tryDumpPeriodic() noexcept
+{
+    const uint64_t nowUs = convo::getCurrentTimeUs();
+    const uint64_t lastDump = convo::consumeAtomic(lastDumpTimeUs_, std::memory_order_acquire);
+    if (nowUs - lastDump < kDumpIntervalUs)
+        return;
+    convo::publishAtomic(lastDumpTimeUs_, nowUs, std::memory_order_release);
+    emitSnapshot();
+}
+
+} // namespace convo::isr
+
+```
+
+### 📄 `src\audioengine\WorldLifecycleAudit.h`
+
+```
+#pragma once
+
+#include <cstdint>
+#include <atomic>
+#include <cassert>
+#include "TelemetryRecorder.h"   // FixedRingBuffer
+#include "RuntimePublicationState.h"   // CorrelationId
+#include "core/TimeUtils.h"  // getCurrentTimeUs
+
+namespace convo::isr {
+
+// ★ P3-B: World 発行/退役の診断用レコード
+struct WorldLifecycleRecord {
+    uint64_t worldId;
+    uint64_t publishEpoch;
+    uint64_t retireEpoch;        // 0 = 未退役
+    uint64_t publishTimestampUs;
+    uint64_t retireTimestampUs;
+    CorrelationId correlationId;
+};
+
+// ★ P3-B: World ライフサイクル監査（Diagnostic 限定）
+//   Shutdown 完了判定の Authority にはしない。
+//   Shutdown 判定は RuntimeDrainAudit + ShutdownRuntime FSM が担当。
+class WorldLifecycleAudit {
+public:
+    void onWorldPublished(uint64_t worldId, uint64_t epoch, CorrelationId cid) noexcept
+    {
+        ringBuffer_.tryPush(WorldLifecycleRecord{
+            .worldId = worldId,
+            .publishEpoch = epoch,
+            .retireEpoch = 0,
+            .publishTimestampUs = getCurrentTimeUs(),
+            .retireTimestampUs = 0,
+            .correlationId = cid
+        });
+        convo::fetchAddAtomic(publishedCount_, uint64_t{1}, std::memory_order_release);
+        convo::fetchAddAtomic(activeWorldCount_, uint64_t{1}, std::memory_order_release);
+    }
+
+    void onWorldRetired(uint64_t worldId, uint64_t epoch) noexcept
+    {
+        // ★ v7.2: fetchSub→if(prev==0)→publishAtomic(0)
+        //   load→if→fetchSub 方式は TOCTOU 競合があるため不採用。
+        //   Diagnostic 限定カウンタだが監査価値を維持するため fetchSub の戻り値で判定。
+        uint64_t prev = convo::fetchSubAtomic(activeWorldCount_, 1u,
+            std::memory_order_acq_rel);
+        if (prev == 0) {
+            assert(false);  // 二重 retire 検出
+            convo::publishAtomic(activeWorldCount_, uint64_t{0},
+                std::memory_order_release);
+        }
+
+        convo::fetchAddAtomic(retiredCount_, 1u, std::memory_order_release);
+
+        // ★ 直近の retire 情報を別途追跡（リングバッファは追記専用のため更新不可）
+        convo::publishAtomic(lastRetiredWorldId_, worldId, std::memory_order_release);
+        convo::publishAtomic(lastRetireEpoch_, epoch, std::memory_order_release);
+        convo::publishAtomic(lastRetireTimestampUs_, getCurrentTimeUs(), std::memory_order_release);
+    }
+
+    [[nodiscard]] uint64_t activeWorldCount() const noexcept {
+        return convo::consumeAtomic(activeWorldCount_, std::memory_order_acquire);
+    }
+
+    [[nodiscard]] uint64_t publishedCount() const noexcept {
+        return convo::consumeAtomic(publishedCount_, std::memory_order_acquire);
+    }
+
+    [[nodiscard]] uint64_t retiredCount() const noexcept {
+        return convo::consumeAtomic(retiredCount_, std::memory_order_acquire);
+    }
+
+    // ★ 診断用ダンプ（RingBuffer から最新レコードを取得）
+    void emitSnapshot() const noexcept;
+
+    // ★ 診断用: 定期ダンプを AudioEngine の emitEvidenceTickNonRt から呼び出すためのヘルパー
+    //   出力先: evidence/world_lifecycle_audit.json
+    void tryDumpPeriodic() noexcept;
+
+private:
+    FixedRingBuffer<WorldLifecycleRecord, 4096> ringBuffer_;
+    std::atomic<uint64_t> activeWorldCount_{0};
+    std::atomic<uint64_t> publishedCount_{0};
+    std::atomic<uint64_t> retiredCount_{0};
+    std::atomic<uint64_t> lastDumpTimeUs_{0};
+    static constexpr uint64_t kDumpIntervalUs = 60'000'000; // 60秒ごとにダンプ
+    // ★ 直近 retire 追跡（リングバッファは追記専用のため retire 更新不可）
+    std::atomic<uint64_t> lastRetiredWorldId_{0};
+    std::atomic<uint64_t> lastRetireEpoch_{0};
+    std::atomic<uint64_t> lastRetireTimestampUs_{0};
 };
 
 } // namespace convo::isr
@@ -51922,6 +52684,12 @@ public:
         if (previousDepth > 0)
             return;
 
+        // ★ Practical-8: 初回 enter 時に滞留開始時刻を記録
+        const uint64_t nowUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        convo::publishAtomic(slot.residencyStartTimestampUs, nowUs, std::memory_order_release);
+
         const uint64_t epoch = currentEpoch();
         // release: epoch を publish することで reclaimers が slot.epoch の safe-below 判定に使用可能となる。
         convo::publishAtomic(slot.epoch, epoch, std::memory_order_release);
@@ -51948,6 +52716,9 @@ public:
         if (previousDepth > 1)
             return;
 
+        // ★ Practical-8: 最終 exit 時に滞留時刻をクリア
+        convo::publishAtomic(slot.residencyStartTimestampUs, uint64_t{0}, std::memory_order_release);
+
         // release: epoch を kInactiveEpoch に戻し、reclaimers がこのスロットを safe-below 判定から除外可能にする。
         convo::publishAtomic(slot.epoch, kInactiveEpoch, std::memory_order_release);
     }
@@ -51956,15 +52727,6 @@ public:
     {
         // acquire: advanceEpoch の acq_rel release-side と HB し、最新 epoch を観測する。
         return convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
-    }
-
-    // [work21] [[deprecated]] — transitional; callers migrated to publishEpoch()
-    [[deprecated("Use Router::publishEpoch() instead. See refactoring_plan.md P0-8.")]]
-    uint64_t advanceEpoch() noexcept
-    {
-        return convo::fetchAddAtomic(globalEpoch,
-                                     static_cast<uint64_t>(1),
-                                     std::memory_order_acq_rel);
     }
 
     // [work21] IEpochProvider::publishEpoch — inline advance to avoid deprecated call
@@ -52022,22 +52784,9 @@ public:
         return count;
     }
 
-    [[deprecated("Use ISR RuntimePublicationCoordinator::enqueueRetire")]] bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
+    int readerCapacity() const noexcept override
     {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch);
-    }
-
-    // [work21] [[deprecated]] — transitional; callers migrated to Router 4-param overload
-    [[deprecated("Use ISR RuntimePublicationCoordinator::enqueueRetire")]] bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
-    {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
-    }
-
-    // [work21] [[deprecated]] — transitional; callers migrated to tryReclaim()
-    [[deprecated("Use requestReclaim() instead. See refactoring_plan.md P0-6.")]]
-    void reclaimRetired() noexcept
-    {
-        deferredDeletionQueue.reclaim(getMinReaderEpoch());
+        return kMaxReaders;
     }
 
     // [work21] IEpochProvider::tryReclaim — inline reclaim to avoid deprecated call
@@ -52046,12 +52795,18 @@ public:
         deferredDeletionQueue.reclaim(getMinReaderEpoch());
     }
 
-    void drainAll() noexcept
+    // ★ P0-A/P2-A: IRetireProvider インターフェース実装（public 必須）
+    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
+    {
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch);
+    }
+
+    void drainAll() noexcept override
     {
         deferredDeletionQueue.drainAllUnsafe();
     }
 
-    [[nodiscard]] uint32_t pendingRetireCount() const noexcept
+    [[nodiscard]] uint32_t pendingRetireCount() const noexcept override
     {
         return deferredDeletionQueue.sizeApprox();
     }
@@ -52061,28 +52816,8 @@ public:
         return static_cast<int64_t>(a - b) < 0;
     }
 
-private:
-    struct ReaderSlot
-    {
-        std::atomic<uint64_t> epoch { kInactiveEpoch };
-        std::atomic<uint32_t> depth { 0 };
-        std::atomic<uint64_t> enterCount { 0 };  // ★ P3-1: enter 回数のみカウント（軽量）
-        std::atomic<uint64_t> residencyStartTimestampUs { 0 }; // ★ P4.5: steady_clock ベースの滞留開始時刻
-    };
-
-    // ★ P3-1: 複合判定による Reader Stuck 検出
-    struct StuckReaderInfo {
-        int readerIndex{-1};
-        uint64_t readerEpoch{0};
-        uint64_t enterCount{0};
-        uint64_t currentEpoch{0};
-        uint64_t minReaderEpoch{0};
-        uint32_t pendingRetireCount{0};
-        bool isStuck{false};
-        uint64_t residencyTimeUs{0}; // ★ P4.5: 実時間ベース滞留時間
-    };
-
-    [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept {
+    // ★ P3-1/Practical-1: 複合判定による Reader Stuck 検出（override）
+    [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override {
         StuckReaderInfo info;
         info.currentEpoch = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
         info.minReaderEpoch = getMinReaderEpoch();
@@ -52120,6 +52855,37 @@ private:
         }
         return info;
     }
+
+    // ★ P2-A: 以下の deprecated API は移行完了により private 化。
+    //   外部からの新規使用を禁止し、publishEpoch() / tryReclaim() を推奨。
+private:
+    [[deprecated("Use publishEpoch() instead.")]]
+    uint64_t advanceEpoch() noexcept
+    {
+        return convo::fetchAddAtomic(globalEpoch,
+                                     static_cast<uint64_t>(1),
+                                     std::memory_order_acq_rel);
+    }
+
+    [[deprecated("Use tryReclaim() instead.")]]
+    void reclaimRetired() noexcept
+    {
+        deferredDeletionQueue.reclaim(getMinReaderEpoch());
+    }
+
+    [[deprecated("Use coordinator.enqueueRetire() instead.")]]
+    bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
+    {
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
+    }
+
+    struct ReaderSlot
+    {
+        std::atomic<uint64_t> epoch { kInactiveEpoch };
+        std::atomic<uint32_t> depth { 0 };
+        std::atomic<uint64_t> enterCount { 0 };  // ★ P3-1: enter 回数のみカウント（軽量）
+        std::atomic<uint64_t> residencyStartTimestampUs { 0 }; // ★ P4.5: steady_clock ベースの滞留開始時刻
+    };
 
     std::atomic<uint64_t> globalEpoch;
     std::array<ReaderSlot, kMaxReaders> readers;
@@ -52292,12 +53058,32 @@ struct GlobalSnapshot {
 
 namespace convo {
 
+// ★ Practical-1/6/8: Reader Stuck 診断情報
+struct StuckReaderInfo {
+    int readerIndex{-1};
+    uint64_t readerEpoch{0};
+    uint64_t enterCount{0};
+    uint64_t currentEpoch{0};
+    uint64_t minReaderEpoch{0};
+    uint32_t pendingRetireCount{0};
+    bool isStuck{false};
+    uint64_t residencyTimeUs{0}; // ★ Practical-8: 実時間ベース滞留時間
+};
+
 class IEpochProvider : public IReaderEpochProvider,
                        public IPublicationProvider,
                        public IRetireProvider
 {
 public:
     ~IEpochProvider() override = default;
+
+    // ★ Practical-1: Reader Stuck 検出（virtual hook）
+    //   Default: 非stuck 空情報を返す。
+    //   EpochDomain がオーバーライドして実診断を提供。
+    [[nodiscard]] virtual StuckReaderInfo detectStuckReaders(uint64_t /*stuckThreshold*/) const noexcept
+    {
+        return StuckReaderInfo{};
+    }
 };
 
 } // namespace convo
@@ -52385,6 +53171,9 @@ public:
     /** Count of active (non-zero depth) reader slots. */
     virtual uint32_t activeReaderCount() const noexcept = 0;
 
+    /** Maximum number of reader slots available. */
+    virtual int readerCapacity() const noexcept = 0;
+
     /** Minimum epoch among all active readers. Used for safe-reclaim determination. */
     virtual uint64_t getMinReaderEpoch() const noexcept = 0;
 };
@@ -52426,6 +53215,14 @@ public:
 
     /** Try to reclaim retired objects. */
     virtual void tryReclaim() noexcept = 0;
+
+    // ★ P0-A: EpochDomain 固有メソッドをインターフェースに昇格
+    //   ISRRetireRouter が dynamic_cast でアクセスするより Interface で宣言する方が型安全。
+    /** Return approximate count of pending retire entries. */
+    virtual uint32_t pendingRetireCount() const noexcept = 0;
+
+    /** Drain all pending retire entries (unsafe; shutdown only). */
+    virtual void drainAll() noexcept = 0;
 };
 
 } // namespace convo
@@ -52627,6 +53424,7 @@ public:
         const uint32_t previousDepth = convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
         if (previousDepth > 0)
         {
+            // ★ ネスト: 最外層の rootEnterSucceeded_ を維持
             return;
         }
 
@@ -52647,9 +53445,15 @@ public:
 
         const int tid = acquireThreadSlot();
         if (tid >= 0)
+        {
             epochProvider->enterReader(tid);
+            // ★ P1-A: 今回の enter 成功を記録（non-atomic: thread confined）
+            rootEnterSucceeded_ = true;
+        }
         else
         {
+            // ★ P1-A: slot 取得失敗 → 今回の enter 失敗を記録（Fail-Closed）
+            rootEnterSucceeded_ = false;
             // acq_rel: スロット取得失敗時の nestingDepth 減算 — acq_rel で安全に公開。
             convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
             uint64_t expectedOwnerOnRelease = threadToken;
@@ -52676,23 +53480,39 @@ public:
         return epochProvider->activeReaderCount();
     }
 
+    /** ★ P1-A: 今回の enter() が成功し epoch 保護下有効かを返す */
+    [[nodiscard]] bool rootEnterSucceeded() const noexcept
+    {
+        return rootEnterSucceeded_;
+    }
+
     void exit() noexcept
     {
         // acq_rel: acquire → 直前の enter() release を観測；release → depth展開後値を公開。
         const uint32_t previousDepth = convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+
+        // ★ P1-A v7.3: ネスト対応リセット
+        //   previousDepth==0: underflow → 安全のためリセット
         if (previousDepth == 0)
         {
+            rootEnterSucceeded_ = false;
             // underflowガード: 0 を release で再公開し、展開 depth を修正。
             convo::publishAtomic(nestingDepth, 0, std::memory_order_release);
             return;
         }
 
+        // ★ previousDepth > 1: ネスト → rootEnterSucceeded_ を維持
+        //   outer scope がまだ active なため false にしてはいけない。
         if (previousDepth > 1)
             return;
 
+        // ★ previousDepth == 1: 最外層 exit
         // acquire: enter() の ownerThreadToken acq_rel と HB し、所有者を観測。
         if (convo::consumeAtomic(ownerThreadToken, std::memory_order_acquire) != currentThreadToken())
+        {
+            rootEnterSucceeded_ = false;  // 所有者不一致でもリセット
             return;
+        }
 
         // acq_rel: activeThreadId を原子的に取得（+クリア）；acquire で acquireThreadSlot の release と HB。
         const int tid = convo::exchangeAtomic(activeThreadId, -1, std::memory_order_acq_rel);
@@ -52705,6 +53525,9 @@ public:
         }
         // release: ownerThreadToken を 0 に戻し、次の enter() の CAS acquire と HB 。
         convo::publishAtomic(ownerThreadToken, static_cast<uint64_t>(0), std::memory_order_release);
+
+        // ★ P1-A: 正常 cleanup 完了 — リセット
+        rootEnterSucceeded_ = false;
     }
 
 private:
@@ -52743,6 +53566,8 @@ private:
     std::atomic<uint32_t> nestingDepth { 0 };
     std::atomic<uint64_t> ownerThreadToken { 0 };
     IReaderEpochProvider* epochProvider = nullptr;
+    // ★ P1-A: per-enter 成否追跡（non-atomic: RAII thread confinement 下で安全）
+    bool rootEnterSucceeded_ = false;
 };
 
 class RCUReaderGuard
@@ -55064,41 +55889,32 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
         return true;
 
     // Retire authority: route through coordinator if available
-    // [Phase-A] 単一回試行 + drop. retryループは撤廃 (P0-5).
-    if (m_retireCoordinator != nullptr)
+    // [Phase-B] coordinator は常時設定済み。Release でも安全な nullptr ガードを残す.
+    // ★ Fallback 経路（direct EpochDomain::enqueueRetire）は完全削除。
+    //   Authority bypass となるため。
+    if (m_retireCoordinator == nullptr)
     {
-        const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
-        // ★ FIX: reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB である。
-        //   ISRRetireRouter と EpochDomain は共通基底 (IEpochProvider) を持つが
-        //   直接の継承関係になく、メモリレイアウトが異なるため、
-        //   enqueueRetire() 内の epochDomain_ メンバがガベージになる。
-        //   正しい対策: スタック上に ISRRetireRouter を構築する。
-        convo::isr::ISRRetireRouter stackRouter(m_epochDomain);
-        auto result = m_retireCoordinator->enqueueRetire(
-            convo::isr::RetireAuthority::Granted,
-            stackRouter,
-            ptr, deleter, retireEpoch);
-        if (result == convo::isr::RetireEnqueueResult::Success)
-            return true;
-
-        // [P0-5] enqueue failure -> drop + telemetry (RT-safe).
-        // Non-RT 側の定期的な reclaim が backlog を消化することを期待。
+        // Release build でも coordinator 不在時は drop で安全にフェイル.
         return false;
     }
 
-    // Fallback: direct EpochDomain path (backward compat before coordinator is set)
-    // [Phase-B] coordinator 常時設定確認後、この経路は削除.
-#pragma warning(push)
-#pragma warning(disable : 4996)
-    const bool ok = m_epochDomain.enqueueRetire(ptr, deleter,
-        (epoch != 0) ? epoch : m_epochDomain.currentEpoch());
-#pragma warning(pop)
-    if (!ok)
-    {
-        // [P0-5] drop + telemetry. retry/reclaim/advanceEpoch は行わない.
-        return false;
-    }
-    return true;
+    const uint64_t retireEpoch = (epoch != 0) ? epoch : m_epochDomain.currentEpoch();
+    // ★ FIX: reinterpret_cast<ISRRetireRouter&>(m_epochDomain) は UB である。
+    //   ISRRetireRouter と EpochDomain は共通基底 (IEpochProvider) を持つが
+    //   直接の継承関係になく、メモリレイアウトが異なるため、
+    //   enqueueRetire() 内の epochDomain_ メンバがガベージになる。
+    //   正しい対策: スタック上に ISRRetireRouter を構築する。
+    convo::isr::ISRRetireRouter stackRouter(m_epochDomain);
+    auto result = m_retireCoordinator->enqueueRetire(
+        convo::isr::RetireAuthority::Granted,
+        stackRouter,
+        ptr, deleter, retireEpoch);
+    if (result == convo::isr::RetireEnqueueResult::Success)
+        return true;
+
+    // [P0-5] enqueue failure -> drop + telemetry (RT-safe).
+    // Non-RT 側の定期的な reclaim が backlog を消化することを期待。
+    return false;
 }
 // [P1-14] 保留中の advanceEpoch を一括実行.
 // パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.

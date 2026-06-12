@@ -6,8 +6,7 @@
 //============================================================================
 
 #include "ISRRetireRouter.h"
-// ★ P0-A: pendingRetireCount/drainAll を IRetireProvider 経由に変更したため
-//   EpochDomain 完全型不要。dynamic_cast 削除により include 不要。
+#include "core/TimeUtils.h"     // ★ Practical-4: getCurrentTimeUs
 
 namespace convo {
 namespace isr {
@@ -75,6 +74,20 @@ uint64_t ISRRetireRouter::minReaderEpoch() const noexcept
     return provider_->getMinReaderEpoch();
 }
 
+int ISRRetireRouter::readerCapacity() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->readerCapacity();
+}
+
+StuckReaderInfo ISRRetireRouter::detectStuckReaders(uint64_t stuckThreshold) const noexcept
+{
+    // ★ Practical-1: IEpochProvider の virtual detectStuckReaders 経由で委譲
+    //   dynamic_cast 不要。ISR P1-19 / P0-A 完全準拠。
+    assert(provider_ != nullptr);
+    return provider_->detectStuckReaders(stuckThreshold);
+}
+
 RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
                                                     void (*deleter)(void*),
                                                     uint64_t epoch,
@@ -88,6 +101,21 @@ RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
     if (provider_->enqueueRetire(ptr, deleter, epoch))
         return RetireEnqueueResult::Success;
 
+    // ★ Practical-4: QueueFull → 同期的 tryReclaim を１度だけ試行（レート制限付き）
+    const uint64_t nowUs = convo::getCurrentTimeUs();
+    const uint64_t lastReclaim = convo::consumeAtomic(m_lastForcedReclaimTimeUs_, std::memory_order_acquire);
+    if (nowUs - lastReclaim > 500'000) // 500ms cooldown
+    {
+        convo::publishAtomic(m_lastForcedReclaimTimeUs_, nowUs, std::memory_order_release);
+        provider_->tryReclaim();
+
+        // 再試行: reclaim 後に空きができたか確認
+        if (provider_->enqueueRetire(ptr, deleter, epoch))
+            return RetireEnqueueResult::Success;
+    }
+
+    // ★ Practical-3: Overflow カウンター増加（Rate監視用）
+    convo::fetchAddAtomic(m_overflowCount_, uint64_t{1}, std::memory_order_release);
     return RetireEnqueueResult::QueuePressure;
 }
 

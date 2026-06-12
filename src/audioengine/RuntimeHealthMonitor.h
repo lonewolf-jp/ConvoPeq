@@ -83,6 +83,7 @@ public:
     void setCrossfadeEventDropRef(const std::atomic<uint64_t>* ref) noexcept { m_crossfadeEventDropRef = ref; }
     void setMaxRetireAgeRef(const std::atomic<uint64_t>* ref) noexcept { m_maxRetireAgeRef = ref; }
     void setReaderSlotRef(const std::atomic<uint32_t>* ref) noexcept { m_readerSlotRef = ref; }
+    void setOverflowCountRef(const std::atomic<uint64_t>* ref) noexcept { m_overflowCountRef = ref; }
 
     void tick() noexcept;
 
@@ -105,6 +106,7 @@ private:
     void checkCrossfadeTimeout() noexcept;
     void checkCrossfadeEventDrop() noexcept;
     void checkReaderSlotUsage() noexcept;
+    void checkOverflowRate() noexcept;
     void checkRetireReclaimLatency() noexcept;
     void emitOnTransition(MonitorState& currentState, MonitorState newState,
                           HealthEvent::Severity severity, uint32_t eventCode,
@@ -118,6 +120,7 @@ private:
     MonitorState m_prevPublicationState { MonitorState::Normal };
     MonitorState m_prevCrossfadeDropState { MonitorState::Normal }; // ★ P1-C
     MonitorState m_prevReaderSlotState { MonitorState::Normal };    // ★ Practical-4
+    MonitorState m_prevOverflowRateState { MonitorState::Normal };  // ★ Practical-3
     MonitorState m_prevRetireAgeState { MonitorState::Normal };     // ★ Practical-5
     std::atomic<ISRHealthState> m_healthState_{ISRHealthState::Healthy};
     // ★ P1-C/Practical-2/4/5/6: 監視用参照
@@ -125,8 +128,23 @@ private:
     const std::atomic<uint64_t>* m_crossfadeEventDropRef = nullptr;
     const std::atomic<uint64_t>* m_maxRetireAgeRef = nullptr;
     const std::atomic<uint32_t>* m_readerSlotRef = nullptr;
+    const std::atomic<uint64_t>* m_overflowCountRef = nullptr;   // ★ Practical-3
     // ★ P1-C drop: 差分検出用ローカル状態
     uint64_t m_lastObservedDropCount = 0;
+
+    // ★ Practical-3: Overflow rate monitoring
+    uint64_t m_lastOverflowCount = 0;
+    uint64_t m_lastOverflowCheckTimeUs = 0;
+    uint64_t m_overflowRateStableSinceUs = 0; // ★ ヒステリシス: 安定状態到達時刻
+    static constexpr uint64_t kOverflowRateWindowUs = 1'000'000; // 1秒窓
+    static constexpr uint32_t kOverflowRateCriticalThreshold = 5; // 5回/秒超 → Critical
+    static constexpr uint32_t kOverflowRateWarningThreshold = 1;  // 1回/秒以上 → Warning
+    static constexpr uint64_t kOverflowHysteresisCriticalToDegradedUs = 10'000'000; // Critical→Degraded: 10秒安定
+    static constexpr uint64_t kOverflowHysteresisDegradedToHealthyUs = 30'000'000; // Degraded→Healthy: 30秒安定
+
+    // ★ Practical-4: Reclaim rate limit
+    uint64_t m_lastForcedReclaimTimeUs = 0;
+    static constexpr uint64_t kForcedReclaimCooldownUs = 500'000; // 500ms以内は再試行禁止
 };
 
 } // namespace convo

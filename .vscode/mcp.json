@@ -37,6 +37,10 @@
             "env": {
                 "PYTHONUTF8": "1"
             }
+        },
+        "aidex": {
+            "type": "stdio",
+            "command": "aidex"
         }
     }
 }

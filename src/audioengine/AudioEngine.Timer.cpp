@@ -542,4 +542,32 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
     diagLog("[HEALTH] eventCode=" + juce::String(static_cast<int>(event.eventCode))
         + " severity=" + juce::String(static_cast<int>(event.severity))
         + " value=" + juce::String(static_cast<juce::int64>(event.value)));
+
+    // ★ Practical-5: Crossfade Timeout 回復処理
+    if (event.eventCode == convo::EVENT_CROSSFADE_TIMEOUT)
+    {
+        diagLog("[HEALTH] Crossfade timeout detected, initiating recovery");
+
+        // 1. 滞留中の fading DSP を強制退役
+        auto* doneRaw = exchangeFadingRuntimeDSP(nullptr);
+        if (doneRaw != nullptr
+            && reinterpret_cast<uintptr_t>(doneRaw) != (~static_cast<uintptr_t>(0)))
+        {
+            DSPLifetimeManager lifetime(*this);
+            lifetime.retire(doneRaw);
+        }
+
+        // 2. アクティブな crossfade ID を取得して unregister
+        const auto activeId = convo::consumeAtomic(activeCrossfadeId_, std::memory_order_acquire);
+        if (activeId != 0u)
+        {
+            crossfadeAuthorityRuntime_.unregisterCrossfade(activeId);
+            convo::publishAtomic(activeCrossfadeId_, uint64_t{0}, std::memory_order_release);
+        }
+
+        // 3. CrossfadeRuntime を complete 状態に戻す（pending=false）
+        crossfadeRuntime_.complete();
+
+        diagLog("[HEALTH] Crossfade timeout recovery completed");
+    }
 }

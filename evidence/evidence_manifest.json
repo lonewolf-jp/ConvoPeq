@@ -5,7 +5,7 @@
   "runId": "runtime-local",
   "buildMode": "CI",
   "proofLevel": "full",
-  "generatedAtNs": 86646758266800,
+  "generatedAtNs": 148151862839300,
   "artifacts": [
     "closure_graph.json",
     "mutation_fault_trace.json",
@@ -14,6 +14,9 @@
     "retire_timeline.json",
     "shutdown_trace.json",
     "retire_latency_report.json",
-    "payload_tier_report.json"
+    "payload_tier_report.json",
+    "publication_failure_log.json",
+    "publication_progress_log.json",
+    "deferred_health.json"
   ]
 }

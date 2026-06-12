@@ -14,6 +14,7 @@ void RuntimeHealthMonitor::tick() noexcept {
     checkCrossfadeTimeout();
     checkCrossfadeEventDrop();
     checkReaderSlotUsage();
+    checkOverflowRate();         // ★ Practical-3
     checkRetireReclaimLatency();
     updateHealthState();
 }
@@ -116,6 +117,27 @@ void RuntimeHealthMonitor::updateHealthState() noexcept
              && newState == ISRHealthState::Healthy)
         newState = ISRHealthState::Degraded;
 
+    // ★ Practical-3: Overflow rate → Degraded or Critical
+    if (m_prevOverflowRateState == MonitorState::Error && newState != ISRHealthState::Critical)
+        newState = ISRHealthState::Critical;
+    else if (m_prevOverflowRateState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    // ★ Practical-4: Reader slot exhaustion → Degraded or Critical
+    if (m_prevReaderSlotState == MonitorState::Error && newState != ISRHealthState::Critical)
+        newState = ISRHealthState::Critical;
+    else if (m_prevReaderSlotState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    // ★ Practical-5: Retire age → Degraded or Critical
+    if (m_prevRetireAgeState == MonitorState::Error && newState != ISRHealthState::Critical)
+        newState = ISRHealthState::Critical;
+    else if (m_prevRetireAgeState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
     convo::publishAtomic(m_healthState_, newState, std::memory_order_release);
 }
 
@@ -132,40 +154,31 @@ void RuntimeHealthMonitor::emitOnTransition(
     m_callback(ev);
 }
 
-// ★ P4.5: Reader Stuck 診断
-// router の情報から Reader 残留の可能性を診断し、HealthEvent として報告する。
-// 完全な detectStuckReaders には EpochDomain 直接アクセスが必要。
+// ★ Practical-1: Reader Stuck 実診断（detectStuckReaders 経由）
 void RuntimeHealthMonitor::diagnoseRetireStall() noexcept
 {
     if (!m_retireRouter)
         return;
 
-    const uint64_t pendingCount = m_retireRouter->pendingRetireCount();
-    const uint64_t minEpoch = m_retireRouter->getMinReaderEpoch();
-    const uint64_t curEpoch = m_retireRouter->currentEpoch();
-    const uint64_t epochGap = (curEpoch > minEpoch) ? (curEpoch - minEpoch) : 0;
+    // ★ Practical-1: ルーター経由で実診断を取得（EpochDomain 直接アクセス不要）
+    //   stuckThreshold = 10 epoch 以上進行していない Reader を Stuck と判定
+    const auto stuckInfo = m_retireRouter->detectStuckReaders(10);
 
-    // epochGap が大きく pendingRetire が滞留 → Reader 残留の可能性
-    if (pendingCount > 0 && epochGap > 10)
+    if (stuckInfo.isStuck)
     {
         const uint64_t nowUs = convo::getCurrentTimeUs();
-        MonitorState newState = MonitorState::Warning;
-        const bool severe = (pendingCount > 100 || epochGap > 100);
-
-        if (severe)
-            newState = MonitorState::Error;
-        else
-            newState = MonitorState::Warning;
+        const bool severe = (stuckInfo.pendingRetireCount > 100 || stuckInfo.residencyTimeUs > 30'000'000);
+        MonitorState newState = severe ? MonitorState::Error : MonitorState::Warning;
 
         HealthEvent ev{nowUs,
                        severe ? HealthEvent::Severity::Error : HealthEvent::Severity::Warning,
                        EVENT_READER_STUCK,
-                       pendingCount,
+                       stuckInfo.pendingRetireCount,
                        0};
-        ev.readerIndex = -1; // 完全な Reader 特定は EpochDomain 直接アクセスが必要
-        ev.readerEpoch = minEpoch;
-        ev.readerDepth = 0;
-        ev.residencyTimeUs = 0;
+        ev.readerIndex = stuckInfo.readerIndex;
+        ev.readerEpoch = stuckInfo.readerEpoch;
+        ev.readerDepth = 1; // depth > 0 確定
+        ev.residencyTimeUs = stuckInfo.residencyTimeUs; // ★ Practical-8: 実測値
 
         if (m_callback)
         {
@@ -209,22 +222,118 @@ void RuntimeHealthMonitor::checkCrossfadeEventDrop() noexcept
     m_lastObservedDropCount = current;
 }
 
-// ★ Practical-4: Reader Slot Usage Telemetry（50%/75%/90% 閾値）
+// ★ Practical-4/6: Reader Slot Usage Telemetry（50%/75%/90% 閾値、capacity 動的取得）
 void RuntimeHealthMonitor::checkReaderSlotUsage() noexcept
 {
-    if (!m_readerSlotRef) return;
-    uint32_t activeCount = convo::consumeAtomic(*m_readerSlotRef, std::memory_order_acquire);
-    constexpr uint32_t kMaxSlots = 64;
-    double usage = static_cast<double>(activeCount) / kMaxSlots;
+    // ★ 優先: m_readerSlotRef が設定されている場合はそれを使用
+    //   未設定の場合は m_retireRouter 経由で直接取得（フォールバック）
+    uint32_t activeCount = 0;
+    if (m_readerSlotRef) {
+        activeCount = convo::consumeAtomic(*m_readerSlotRef, std::memory_order_acquire);
+    } else if (m_retireRouter) {
+        activeCount = m_retireRouter->activeReaderCount();
+    } else {
+        return;
+    }
+    // ★ Practical-6: capacity を動的取得（固定値ではなく router 経由）
+    int maxSlots = (m_retireRouter != nullptr) ? m_retireRouter->readerCapacity() : 64;
+    if (maxSlots <= 0) maxSlots = 64;
+    double usage = static_cast<double>(activeCount) / static_cast<double>(maxSlots);
 
     if (usage >= 0.90) {
         emitOnTransition(m_prevReaderSlotState, MonitorState::Error,
             HealthEvent::Severity::Error, EVENT_READER_SLOT_USAGE,
-            activeCount, kMaxSlots);
+            activeCount, maxSlots);
     } else if (usage >= kReaderSlotCriticalThreshold) {
         emitOnTransition(m_prevReaderSlotState, MonitorState::Warning,
             HealthEvent::Severity::Warning, EVENT_READER_SLOT_USAGE,
-            activeCount, kMaxSlots);
+            activeCount, maxSlots);
+    }
+}
+
+// ★ Practical-3: Overflow Rate 監視（回数/sec ベース、ヒステリシス付き）
+void RuntimeHealthMonitor::checkOverflowRate() noexcept
+{
+    if (!m_overflowCountRef) return;
+    const uint64_t nowUs = convo::getCurrentTimeUs();
+    const uint64_t elapsed = nowUs - m_lastOverflowCheckTimeUs;
+    if (elapsed < kOverflowRateWindowUs)
+        return; // まだ1秒経過していない
+
+    const uint64_t current = convo::consumeAtomic(*m_overflowCountRef, std::memory_order_acquire);
+    const uint64_t delta = current - m_lastOverflowCount;
+
+    // レート計算: delta events / (elapsed us / 1,000,000) = delta / (elapsed / 1e6)
+    // → delta * 1,000,000 / elapsed で per-sec 換算
+    const uint64_t ratePerSec = (elapsed > 0) ? (delta * 1'000'000 / elapsed) : 0;
+
+    m_lastOverflowCount = current;
+    m_lastOverflowCheckTimeUs = nowUs;
+
+    // ★ ヒステリシス付き状態遷移
+    MonitorState desiredState;
+    if (ratePerSec >= kOverflowRateCriticalThreshold)
+        desiredState = MonitorState::Error;
+    else if (ratePerSec >= kOverflowRateWarningThreshold)
+        desiredState = MonitorState::Warning;
+    else
+        desiredState = MonitorState::Normal;
+
+    if (desiredState != m_prevOverflowRateState)
+    {
+        // 上昇方向（Normal→Warning/Error, Warning→Error）: 即時遷移
+        if (desiredState > m_prevOverflowRateState)
+        {
+            m_overflowRateStableSinceUs = nowUs;
+            emitOnTransition(m_prevOverflowRateState, desiredState,
+                desiredState == MonitorState::Error
+                    ? HealthEvent::Severity::Error : HealthEvent::Severity::Warning,
+                desiredState == MonitorState::Error ? EVENT_RETIRE_STALL : EVENT_RETIRE_STALL_WARNING,
+                ratePerSec);
+        }
+        else
+        {
+            // 下降方向: ヒステリシス待機
+            //   Error→Warning: 10秒安定
+            //   Warning→Normal: 30秒安定
+            //   または Error→Normal: 30秒安定（Error→Warning経由）
+            if (m_overflowRateStableSinceUs == 0)
+            {
+                m_overflowRateStableSinceUs = nowUs;
+            }
+            const uint64_t stableDuration = nowUs - m_overflowRateStableSinceUs;
+            const uint64_t requiredStableUs = (m_prevOverflowRateState == MonitorState::Error)
+                ? kOverflowHysteresisCriticalToDegradedUs   // 10秒
+                : kOverflowHysteresisDegradedToHealthyUs;    // 30秒
+
+            if (stableDuration >= requiredStableUs)
+            {
+                m_overflowRateStableSinceUs = 0;
+                emitOnTransition(m_prevOverflowRateState, desiredState,
+                    HealthEvent::Severity::Info,
+                    EVENT_RETIRE_STALL_WARNING,
+                    ratePerSec);
+            }
+        }
+    }
+    else
+    {
+        // 状態維持中で安定クロックが進行中の場合、リセット(rate上昇で即時遷移できるように)
+        if (desiredState == MonitorState::Normal && m_overflowRateStableSinceUs != 0)
+        {
+            const uint64_t stableDuration = nowUs - m_overflowRateStableSinceUs;
+            const uint64_t requiredStableUs = (m_prevOverflowRateState == MonitorState::Warning)
+                ? kOverflowHysteresisDegradedToHealthyUs
+                : kOverflowHysteresisCriticalToDegradedUs;
+            if (stableDuration >= requiredStableUs)
+            {
+                m_overflowRateStableSinceUs = 0;
+                emitOnTransition(m_prevOverflowRateState, MonitorState::Normal,
+                    HealthEvent::Severity::Info,
+                    EVENT_RETIRE_STALL_WARNING,
+                    ratePerSec);
+            }
+        }
     }
 }
 
