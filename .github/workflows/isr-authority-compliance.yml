@@ -91,9 +91,37 @@ jobs:
       - name: Set up Ninja
         uses: ashutoshvarma/setup-ninja@v1.1
 
+      # Intel oneAPI MKL + IPP をインストール（find_package(MKL) / find_package(IPP) に必要）
+      - name: Install Intel oneAPI MKL and IPP
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Write-Host "Downloading Intel oneAPI toolkit installer..."
+          $toolkitUrl = "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/bae85ab1-cfcd-4251-8d42-a0c27949ea33/intel-oneapi-toolkit-2026.0.0.193_offline.exe"
+          $installer = "$env:TEMP\intel-oneapi-toolkit.exe"
+          Invoke-WebRequest -Uri $toolkitUrl -OutFile $installer
+          Write-Host "Extracting installer..."
+          Start-Process -Wait -FilePath $installer -ArgumentList "-s -x -f $env:TEMP\oneapi_extracted --log $env:TEMP\extract.log"
+          Write-Host "Installing MKL..."
+          Start-Process -Wait -FilePath "$env:TEMP\oneapi_extracted\bootstrapper.exe" -ArgumentList "--silent --action install --components=intel.oneapi.win.mkl.devel --eula=accept -p=NEED_VS2017_INTEGRATION=0 -p=NEED_VS2019_INTEGRATION=0 -p=NEED_VS2022_INTEGRATION=0 --log-dir=$env:TEMP"
+          Write-Host "Installing IPP..."
+          Start-Process -Wait -FilePath "$env:TEMP\oneapi_extracted\bootstrapper.exe" -ArgumentList "--silent --action install --components=intel.oneapi.win.ipp.devel --eula=accept -p=NEED_VS2017_INTEGRATION=0 -p=NEED_VS2019_INTEGRATION=0 -p=NEED_VS2022_INTEGRATION=0 --log-dir=$env:TEMP"
+          Remove-Item -Recurse -Force "$env:TEMP\oneapi_extracted" -ErrorAction SilentlyContinue
+
       - name: Configure CMake
         shell: pwsh
         run: |
+          # Intel oneAPI 環境変数を設定（setvars.bat 相当）
+          $oneapiRoot = "C:\Program Files (x86)\Intel\oneAPI"
+          if (Test-Path "$oneapiRoot\setvars.bat") {
+            cmd /c """$oneapiRoot\setvars.bat"" && set" | ForEach-Object {
+              if ($_ -match "^(.*?)=(.*)$") {
+                Set-Item -Path "env:$($matches[1])" -Value $matches[2]
+              }
+            }
+          }
+          # CMake の検索パスに oneAPI を追加
+          $env:CMAKE_PREFIX_PATH = "$oneapiRoot;$oneapiRoot\mkl\latest\lib\cmake\mkl;$oneapiRoot\ipp\latest\lib\cmake\ipp"
           cmake -S . -B build -G "Ninja Multi-Config" `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
             -DCONVO_CI_BUILD=ON
