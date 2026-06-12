@@ -20,7 +20,15 @@ void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 
 bool AudioEngine::shouldRejectRebuildAdmissionForPressure() const noexcept
 {
-    return convo::consumeAtomic(retirePressureAdmissionStrict_, std::memory_order_acquire);
+    // 既存: retire queue pressure チェック
+    if (convo::consumeAtomic(retirePressureAdmissionStrict_, std::memory_order_acquire))
+        return true;
+
+    // ★ S-2: HealthState Critical の場合も Rebuild を拒否
+    if (m_healthMonitor.getHealthState() == convo::ISRHealthState::Critical)
+        return true;
+
+    return false;
 }
 
 // ★ A-1.6: 3系統の隔離を1トランザクションとして実行（1 truth + 2 projections）
@@ -59,7 +67,11 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
         .quarantineResident = dspQuarantineManager_.residentCount(),
         .oldestPendingAgeMs = static_cast<uint64_t>(
             std::max(0.0, convo::consumeAtomic(oldestPendingAge_, std::memory_order_acquire))),
-        .maxQuarantineAgeSec = dspQuarantineManager_.getMaxEntryAgeSec()
+        .maxQuarantineAgeSec = dspQuarantineManager_.getMaxEntryAgeSec(),
+        // ★ C-1: WorldLifecycleAudit から World カウンタ取得
+        .activeWorldCount = worldLifecycleAudit_.activeWorldCount(),
+        .publishedCount = worldLifecycleAudit_.publishedCount(),
+        .retiredCount = worldLifecycleAudit_.retiredCount()
     };
 }
 

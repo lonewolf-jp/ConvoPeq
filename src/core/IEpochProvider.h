@@ -14,6 +14,14 @@
 
 namespace convo {
 
+// ★ B-1: Reader Slot 詳細情報
+struct ReaderSlotDetail {
+    uint64_t epoch{0};
+    uint32_t depth{0};
+    uint64_t residencyTimeUs{0};
+    bool active{false};
+};
+
 // ★ Practical-1/6/8: Reader Stuck 診断情報
 struct StuckReaderInfo {
     int readerIndex{-1};
@@ -32,6 +40,14 @@ class IEpochProvider : public IReaderEpochProvider,
 {
 public:
     ~IEpochProvider() override = default;
+
+    // ★ B-1: Reader Slot 詳細取得（virtual hook）
+    //   Default: 非アクティブ情報を返す。
+    //   EpochDomain がオーバーライドして実情報を提供。
+    [[nodiscard]] virtual ReaderSlotDetail getReaderSlotDetail(int /*readerIndex*/) const noexcept
+    {
+        return ReaderSlotDetail{};
+    }
 
     // ★ Practical-1: Reader Stuck 検出（virtual hook）
     //   Default: 非stuck 空情報を返す。

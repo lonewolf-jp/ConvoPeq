@@ -70,6 +70,9 @@ public:
     void exitReader(int readerIndex) noexcept override;
     uint64_t minReaderEpoch() const noexcept;
 
+    // ★ B-1: Reader Slot 詳細取得 (delegates to provider)
+    [[nodiscard]] ReaderSlotDetail getReaderSlotDetail(int readerIndex) const noexcept override;
+
     // ★ Practical-1: Reader Stuck 診断 (delegates to provider)
     [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override;
 

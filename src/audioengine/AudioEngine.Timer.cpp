@@ -416,6 +416,7 @@ void AudioEngine::timerCallback()
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
+            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
                                                                      nullptr,
                                                                      convo::TransitionPolicy::SmoothOnly,
@@ -542,6 +543,58 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
     diagLog("[HEALTH] eventCode=" + juce::String(static_cast<int>(event.eventCode))
         + " severity=" + juce::String(static_cast<int>(event.severity))
         + " value=" + juce::String(static_cast<juce::int64>(event.value)));
+
+    // ★ A-1: Reader Exhaustion → Admission 強制停止 + 診断ダンプ
+    if (event.eventCode == convo::EVENT_READER_SLOT_USAGE
+        && event.severity == convo::HealthEvent::Severity::Error)
+    {
+        diagLog("[HEALTH] Reader slot exhaustion detected, forcing admission stop"
+            + juce::String(" slot=") + juce::String(static_cast<int>(event.slot))
+            + juce::String(" value=") + juce::String(static_cast<juce::int64>(event.value))
+            + juce::String(" readerIndex=") + juce::String(static_cast<int>(event.readerIndex))
+            + juce::String(" residencyUs=") + juce::String(static_cast<juce::int64>(event.residencyTimeUs)));
+
+        // Admission 強制停止（HealthState Critical で既に停止するが、念のため直接設定）
+        convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+
+        // 強制診断ダンプ
+        emitEvidenceTickNonRt(true);
+        worldLifecycleAudit_.tryDumpPeriodic();
+        return;
+    }
+
+    // ★ A-1: Publication Stall → 停滞中の publish を強制ドレイン
+    if (event.eventCode == convo::EVENT_PUBLICATION_STALL
+        && event.severity == convo::HealthEvent::Severity::Error)
+    {
+        diagLog("[HEALTH] Publication stall detected, draining deferred publish");
+
+        if (runtimeOrchestrator_) {
+            runtimeOrchestrator_->clearDeferredForShutdown();
+        }
+
+        // 強制診断ダンプ
+        emitEvidenceTickNonRt(true);
+        return;
+    }
+
+    // ★ A-1: Retire Stall / Retire Age Critical → Builder Throttle + 強制 Reclaim
+    if ((event.eventCode == convo::EVENT_RETIRE_STALL
+         || event.eventCode == convo::EVENT_RETIRE_AGE_CRITICAL)
+        && event.severity == convo::HealthEvent::Severity::Error)
+    {
+        diagLog("[HEALTH] Retire stall detected, throttling rebuild and forcing reclaim");
+
+        // retirePressureAdmissionStrict_ を直接設定（Builder/Crossfade 抑制）
+        convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+
+        // 強制 retire reclaim を実行
+        tryReclaimResources();
+
+        // 強制診断ダンプ
+        emitEvidenceTickNonRt(true);
+        return;
+    }
 
     // ★ Practical-5: Crossfade Timeout 回復処理
     if (event.eventCode == convo::EVENT_CROSSFADE_TIMEOUT)

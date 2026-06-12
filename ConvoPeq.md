@@ -25583,6 +25583,7 @@ void AudioEngine::initialize()
     // the rebuild worker always finds a non-null runtimeWorld when building.
     {
         convo::RuntimeBuilder bootstrapBuilder(*this);
+        bootstrapBuilder.setHealthStateRef(getHealthStateRef());
         auto bootstrapWorld = bootstrapBuilder.createBootstrapWorld();
         auto coordinator = makeRuntimePublicationCoordinator();
         coordinator.publishWorld(std::move(bootstrapWorld));
@@ -29834,6 +29835,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
+            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentForPublish,
                                                                      fadingForPublish,
                                                                      policy,
@@ -29946,6 +29948,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         {
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
+            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(getActiveRuntimeDSP(),
                                                                      nullptr,
                                                                      convo::TransitionPolicy::HardReset,
@@ -30109,6 +30112,7 @@ void AudioEngine::releaseResources()
         {
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
+            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(nullptr,
                                                                      nullptr,
                                                                      convo::TransitionPolicy::HardReset,
@@ -31188,6 +31192,8 @@ void AudioEngine::rebuildThreadLoop()
             } dspGuard { this, nullptr };
 
             convo::RuntimeBuilder runtimeBuilder(*this);
+            // ★ S-2: HealthState 参照を RuntimeBuilder に設定
+            runtimeBuilder.setHealthStateRef(getHealthStateRef());
 
             // Helper to check obsolescence
             const auto isObsolete = [&] {
@@ -31999,7 +32005,15 @@ void AudioEngine::destroyDSPCoreNode(void* p) noexcept
 
 bool AudioEngine::shouldRejectRebuildAdmissionForPressure() const noexcept
 {
-    return convo::consumeAtomic(retirePressureAdmissionStrict_, std::memory_order_acquire);
+    // 既存: retire queue pressure チェック
+    if (convo::consumeAtomic(retirePressureAdmissionStrict_, std::memory_order_acquire))
+        return true;
+
+    // ★ S-2: HealthState Critical の場合も Rebuild を拒否
+    if (m_healthMonitor.getHealthState() == convo::ISRHealthState::Critical)
+        return true;
+
+    return false;
 }
 
 // ★ A-1.6: 3系統の隔離を1トランザクションとして実行（1 truth + 2 projections）
@@ -32038,7 +32052,11 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
         .quarantineResident = dspQuarantineManager_.residentCount(),
         .oldestPendingAgeMs = static_cast<uint64_t>(
             std::max(0.0, convo::consumeAtomic(oldestPendingAge_, std::memory_order_acquire))),
-        .maxQuarantineAgeSec = dspQuarantineManager_.getMaxEntryAgeSec()
+        .maxQuarantineAgeSec = dspQuarantineManager_.getMaxEntryAgeSec(),
+        // ★ C-1: WorldLifecycleAudit から World カウンタ取得
+        .activeWorldCount = worldLifecycleAudit_.activeWorldCount(),
+        .publishedCount = worldLifecycleAudit_.publishedCount(),
+        .retiredCount = worldLifecycleAudit_.retiredCount()
     };
 }
 
@@ -32518,6 +32536,7 @@ void AudioEngine::timerCallback()
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
+            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
                                                                      nullptr,
                                                                      convo::TransitionPolicy::SmoothOnly,
@@ -32644,6 +32663,58 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
     diagLog("[HEALTH] eventCode=" + juce::String(static_cast<int>(event.eventCode))
         + " severity=" + juce::String(static_cast<int>(event.severity))
         + " value=" + juce::String(static_cast<juce::int64>(event.value)));
+
+    // ★ A-1: Reader Exhaustion → Admission 強制停止 + 診断ダンプ
+    if (event.eventCode == convo::EVENT_READER_SLOT_USAGE
+        && event.severity == convo::HealthEvent::Severity::Error)
+    {
+        diagLog("[HEALTH] Reader slot exhaustion detected, forcing admission stop"
+            + juce::String(" slot=") + juce::String(static_cast<int>(event.slot))
+            + juce::String(" value=") + juce::String(static_cast<juce::int64>(event.value))
+            + juce::String(" readerIndex=") + juce::String(static_cast<int>(event.readerIndex))
+            + juce::String(" residencyUs=") + juce::String(static_cast<juce::int64>(event.residencyTimeUs)));
+
+        // Admission 強制停止（HealthState Critical で既に停止するが、念のため直接設定）
+        convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+
+        // 強制診断ダンプ
+        emitEvidenceTickNonRt(true);
+        worldLifecycleAudit_.tryDumpPeriodic();
+        return;
+    }
+
+    // ★ A-1: Publication Stall → 停滞中の publish を強制ドレイン
+    if (event.eventCode == convo::EVENT_PUBLICATION_STALL
+        && event.severity == convo::HealthEvent::Severity::Error)
+    {
+        diagLog("[HEALTH] Publication stall detected, draining deferred publish");
+
+        if (runtimeOrchestrator_) {
+            runtimeOrchestrator_->clearDeferredForShutdown();
+        }
+
+        // 強制診断ダンプ
+        emitEvidenceTickNonRt(true);
+        return;
+    }
+
+    // ★ A-1: Retire Stall / Retire Age Critical → Builder Throttle + 強制 Reclaim
+    if ((event.eventCode == convo::EVENT_RETIRE_STALL
+         || event.eventCode == convo::EVENT_RETIRE_AGE_CRITICAL)
+        && event.severity == convo::HealthEvent::Severity::Error)
+    {
+        diagLog("[HEALTH] Retire stall detected, throttling rebuild and forcing reclaim");
+
+        // retirePressureAdmissionStrict_ を直接設定（Builder/Crossfade 抑制）
+        convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+
+        // 強制 retire reclaim を実行
+        tryReclaimResources();
+
+        // 強制診断ダンプ
+        emitEvidenceTickNonRt(true);
+        return;
+    }
 
     // ★ Practical-5: Crossfade Timeout 回復処理
     if (event.eventCode == convo::EVENT_CROSSFADE_TIMEOUT)
@@ -33672,6 +33743,11 @@ public:
     uint64_t advanceRetireEpoch() noexcept;
     [[nodiscard]] bool enqueueRetireEpochBounded(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept;
     [[nodiscard]] uint32_t activeEpochObserverCount() const noexcept;
+
+    // ★ S-2: HealthState 参照を公開（Admission / Builder / Crossfade / Transition から参照）
+    [[nodiscard]] const std::atomic<convo::ISRHealthState>* getHealthStateRef() const noexcept {
+        return m_healthMonitor.getHealthStateRef();
+    }
 
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
@@ -36684,6 +36760,17 @@ CrossfadeAuthority::Decision CrossfadeAuthority::evaluate(
 {
     Decision ctx;
 
+    // ★ S-2: HealthState Critical チェック — Critical 時は crossfade 不要として即返却
+    {
+        auto ref = engine.getHealthStateRef();
+        if (ref) {
+            auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
+            if (health == convo::ISRHealthState::Critical) {
+                return ctx;  // needsCrossfade = false のまま
+            }
+        }
+    }
+
     // Use dspProjection values from RuntimeWorld (DSPCore 直読は行わない)
     ctx.oldHasIR = oldWorld.dspProjection.irLoaded;
     ctx.newHasIR = newWorld.dspProjection.irLoaded;
@@ -37004,7 +37091,8 @@ public:
             return;
 
         // 2. Route through ISRRetireRouter → EpochDomain
-        const uint64_t epoch = router_->publishEpoch();
+        // ★ S-1: publishEpoch() → currentEpoch() に変更。retire が epoch を進めない。
+        const uint64_t epoch = router_->currentEpoch();
         router_->enqueueRetire(static_cast<void*>(dsp),
                                &AudioEngine::destroyDSPCoreNode,
                                epoch);
@@ -37085,6 +37173,22 @@ public:
                             const CrossfadeAuthority::Decision& decision,
                             DSPLifetimeManager& lifetime) noexcept
     {
+        // ★ S-2: HealthState Critical チェック — Critical 時は crossfade をスキップし即 retire
+        {
+            auto ref = engine_.getHealthStateRef();
+            if (ref) {
+                auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
+                if (health == convo::ISRHealthState::Critical) {
+                    lifetime.activate(newDSP);
+                    if (oldDSP != nullptr) {
+                        engine_.crossfadeRuntime_.complete();
+                        lifetime.retire(oldDSP);
+                    }
+                    return;
+                }
+            }
+        }
+
         // 1. activate (publish 成功後にのみ実行)
         lifetime.activate(newDSP);
 
@@ -37148,6 +37252,7 @@ public:
         // publish idling world (Coordinator 経由)
         auto coordinator = engine_.makeRuntimePublicationCoordinator();
         auto worldBuilder = convo::RuntimeBuilder(engine_);
+        worldBuilder.setHealthStateRef(engine_.getHealthStateRef());
         auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
                                                                  nullptr,
                                                                  convo::TransitionPolicy::HardReset,
@@ -40755,6 +40860,12 @@ void ISRRetireRouter::exitReader(int readerIndex) noexcept
     provider_->exitReader(readerIndex);
 }
 
+convo::ReaderSlotDetail ISRRetireRouter::getReaderSlotDetail(int readerIndex) const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->getReaderSlotDetail(readerIndex);
+}
+
 uint64_t ISRRetireRouter::minReaderEpoch() const noexcept
 {
     assert(provider_ != nullptr);
@@ -40911,6 +41022,9 @@ public:
     void enterReader(int readerIndex) noexcept override;
     void exitReader(int readerIndex) noexcept override;
     uint64_t minReaderEpoch() const noexcept;
+
+    // ★ B-1: Reader Slot 詳細取得 (delegates to provider)
+    [[nodiscard]] ReaderSlotDetail getReaderSlotDetail(int readerIndex) const noexcept override;
 
     // ★ Practical-1: Reader Stuck 診断 (delegates to provider)
     [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override;
@@ -43472,6 +43586,12 @@ const char* toString(BuildError error) noexcept
             return "InvalidInput";
         case BuildError::ResourceUnavailable:
             return "ResourceUnavailable";
+        case BuildError::MKLFailure:
+            return "MKLFailure";
+        case BuildError::ConvolverFailure:
+            return "ConvolverFailure";
+        case BuildError::PrepareFailure:
+            return "PrepareFailure";
         case BuildError::WarmupFailed:
             return "WarmupFailed";
         case BuildError::InternalError:
@@ -43850,6 +43970,15 @@ BuildResult RuntimeBuilder::build(const BuildInput& in,
 {
     BuildResult result {};
 
+    // ★ S-2: HealthState Critical チェック（負荷最大の処理を事前に抑止）
+    if (m_healthStateRef) {
+        auto health = convo::consumeAtomic(*m_healthStateRef, std::memory_order_acquire);
+        if (health == ISRHealthState::Critical) {
+            result.error = BuildError::ResourceUnavailable;
+            return result;
+        }
+    }
+
     if (in.sampleRate <= 0.0 || in.blockSize <= 0)
     {
         result.error = BuildError::InvalidInput;
@@ -43914,6 +44043,9 @@ enum class BuildError {
     None,
     InvalidInput,
     ResourceUnavailable,
+    MKLFailure,          // ★ C-2: MKL 初期化・FFT 計画失敗
+    ConvolverFailure,    // ★ C-2: Convolver Build 失敗
+    PrepareFailure,      // ★ C-2: DSPCore::prepare() 失敗
     WarmupFailed,
     InternalError
 };
@@ -43929,6 +44061,11 @@ const char* toString(BuildError error) noexcept;
 class RuntimeBuilder {
 public:
     explicit RuntimeBuilder(AudioEngine& owner) noexcept : engine(owner) {}
+
+    // ★ S-2: HealthState 参照設定
+    void setHealthStateRef(const std::atomic<ISRHealthState>* ref) noexcept {
+        m_healthStateRef = ref;
+    }
 
     [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
     buildRuntimePublishWorld(AudioEngine::DSPCore* current,
@@ -43953,6 +44090,8 @@ public:
 
 private:
     AudioEngine& engine;
+    // ★ S-2: HealthState 参照
+    const std::atomic<ISRHealthState>* m_healthStateRef = nullptr;
 };
 
 } // namespace convo
@@ -43992,6 +44131,10 @@ struct RuntimeDrainAudit {
     uint64_t quarantineResident;    // 監査のみ
     uint64_t oldestPendingAgeMs;    // 監査のみ
     uint64_t maxQuarantineAgeSec;   // 監査のみ
+    // ★ C-1: WorldLifecycleAudit 連携（診断目的）
+    uint64_t activeWorldCount{0};
+    uint64_t publishedCount{0};
+    uint64_t retiredCount{0};
 
     // shutdown 完了を阻害している主要因を特定
     enum class BlockingReason : uint8_t {
@@ -44375,9 +44518,44 @@ void RuntimeHealthMonitor::checkReaderSlotUsage() noexcept
     double usage = static_cast<double>(activeCount) / static_cast<double>(maxSlots);
 
     if (usage >= 0.90) {
-        emitOnTransition(m_prevReaderSlotState, MonitorState::Error,
-            HealthEvent::Severity::Error, EVENT_READER_SLOT_USAGE,
-            activeCount, maxSlots);
+        // ★ B-1: Reader Slot 使用率が Critical の場合、個別 Reader 情報を詳細取得
+        int worstReaderIndex = -1;
+        uint64_t worstResidencyUs = 0;
+        convo::ReaderSlotDetail worstDetail{};
+
+        if (m_retireRouter) {
+            for (int i = 0; i < maxSlots; ++i) {
+                auto detail = m_retireRouter->getReaderSlotDetail(i);
+                if (detail.active && detail.residencyTimeUs > worstResidencyUs) {
+                    worstResidencyUs = detail.residencyTimeUs;
+                    worstReaderIndex = i;
+                    worstDetail = detail;
+                }
+            }
+        }
+
+        if (m_callback && worstReaderIndex >= 0) {
+            // 詳細情報付きで直接コールバック
+            HealthEvent ev{getCurrentTimeUs(),
+                           HealthEvent::Severity::Error,
+                           EVENT_READER_SLOT_USAGE,
+                           activeCount,
+                           static_cast<uint32_t>(maxSlots)};
+            ev.readerIndex = worstReaderIndex;
+            ev.readerEpoch = worstDetail.epoch;
+            ev.readerDepth = worstDetail.depth;
+            ev.residencyTimeUs = worstDetail.residencyTimeUs;
+            m_callback(ev);
+            // 状態遷移を updateHealthState に反映（callback 後でも emitOnTransition を呼ばない）
+            if (m_prevReaderSlotState != MonitorState::Error) {
+                m_prevReaderSlotState = MonitorState::Error;
+            }
+        } else {
+            // 詳細情報なし → 従来の emitOnTransition 経由
+            emitOnTransition(m_prevReaderSlotState, MonitorState::Error,
+                HealthEvent::Severity::Error, EVENT_READER_SLOT_USAGE,
+                activeCount, maxSlots);
+        }
     } else if (usage >= kReaderSlotCriticalThreshold) {
         emitOnTransition(m_prevReaderSlotState, MonitorState::Warning,
             HealthEvent::Severity::Warning, EVENT_READER_SLOT_USAGE,
@@ -44721,6 +44899,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     // Step 2a: Build world with default (HardReset) policy first
     // (evaluate 前に world が必要だが、RuntimePublishWorld は非デフォルト構築可能のため)
     auto worldBuilder = convo::RuntimeBuilder(engine_);
+    worldBuilder.setHealthStateRef(engine_.getHealthStateRef());
     auto worldOwner = worldBuilder.buildRuntimePublishWorld(
         newDSPResolved, oldDSP,
         convo::TransitionPolicy::HardReset, 0.0, false,
@@ -52593,7 +52772,9 @@ struct EQParameters {
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <thread>
 
 #include "../DeferredDeletionQueue.h"
 #include "IEpochProvider.h"
@@ -52621,6 +52802,12 @@ public:
 
     int registerReaderThread() noexcept override
     {
+        return registerReaderThread("unnamed");
+    }
+
+    // ★ C-3: タグ名付き Reader 登録
+    int registerReaderThread(const char* tag) noexcept
+    {
         for (int i = 0; i < kMaxReaders; ++i)
         {
             uint64_t expected = kInactiveEpoch;
@@ -52635,6 +52822,16 @@ public:
                 // release: depth ゼロ化を slot 取得後に他スレッドが観測できるよう publish。
                 convo::publishAtomic(readers[static_cast<size_t>(i)].depth,
                                      static_cast<uint32_t>(0),
+                                     std::memory_order_release);
+                // ★ C-3: 所有者タグ設定（CAS 成功後は単一スレッドのみがアクセス可能）
+                if (tag != nullptr) {
+                    std::strncpy(readers[static_cast<size_t>(i)].ownerTag, tag,
+                                 sizeof(readers[static_cast<size_t>(i)].ownerTag) - 1);
+                    readers[static_cast<size_t>(i)].ownerTag[
+                        sizeof(readers[static_cast<size_t>(i)].ownerTag) - 1] = '\0';
+                }
+                convo::publishAtomic(readers[static_cast<size_t>(i)].ownerThreadId,
+                                     std::hash<std::thread::id>{}(std::this_thread::get_id()),
                                      std::memory_order_release);
                 return i;
             }
@@ -52816,7 +53013,24 @@ public:
         return static_cast<int64_t>(a - b) < 0;
     }
 
-    // ★ P3-1/Practical-1: 複合判定による Reader Stuck 検出（override）
+    // ★ B-1: Reader Slot 詳細取得（アクティブ Reader の epoch/depth/residency を返す）
+    [[nodiscard]] ReaderSlotDetail getReaderSlotDetail(int readerIndex) const noexcept override
+    {
+        if (readerIndex < 0 || readerIndex >= kMaxReaders)
+            return ReaderSlotDetail{};
+
+        const auto& slot = readers[static_cast<size_t>(readerIndex)];
+        const uint64_t epoch = convo::consumeAtomic(slot.epoch, std::memory_order_acquire);
+        const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
+        const uint64_t startUs = convo::consumeAtomic(slot.residencyStartTimestampUs, std::memory_order_acquire);
+        const auto nowUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        const uint64_t residencyUs = (startUs != 0 && depth > 0) ? (nowUs - startUs) : 0;
+
+        return ReaderSlotDetail{epoch, depth, residencyUs, (depth > 0)};
+    }
+
     [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override {
         StuckReaderInfo info;
         info.currentEpoch = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
@@ -52885,6 +53099,9 @@ private:
         std::atomic<uint32_t> depth { 0 };
         std::atomic<uint64_t> enterCount { 0 };  // ★ P3-1: enter 回数のみカウント（軽量）
         std::atomic<uint64_t> residencyStartTimestampUs { 0 }; // ★ P4.5: steady_clock ベースの滞留開始時刻
+        // ★ C-3: Reader 所有者情報
+        std::atomic<uint64_t> ownerThreadId { 0 };       // std::thread::id のハッシュ値
+        char ownerTag[32] {};  // "AudioThread", "TimerThread" 等（CAS 排他下で設定、stale read 許容）
     };
 
     std::atomic<uint64_t> globalEpoch;
@@ -53058,6 +53275,14 @@ struct GlobalSnapshot {
 
 namespace convo {
 
+// ★ B-1: Reader Slot 詳細情報
+struct ReaderSlotDetail {
+    uint64_t epoch{0};
+    uint32_t depth{0};
+    uint64_t residencyTimeUs{0};
+    bool active{false};
+};
+
 // ★ Practical-1/6/8: Reader Stuck 診断情報
 struct StuckReaderInfo {
     int readerIndex{-1};
@@ -53076,6 +53301,14 @@ class IEpochProvider : public IReaderEpochProvider,
 {
 public:
     ~IEpochProvider() override = default;
+
+    // ★ B-1: Reader Slot 詳細取得（virtual hook）
+    //   Default: 非アクティブ情報を返す。
+    //   EpochDomain がオーバーライドして実情報を提供。
+    [[nodiscard]] virtual ReaderSlotDetail getReaderSlotDetail(int /*readerIndex*/) const noexcept
+    {
+        return ReaderSlotDetail{};
+    }
 
     // ★ Practical-1: Reader Stuck 検出（virtual hook）
     //   Default: 非stuck 空情報を返す。

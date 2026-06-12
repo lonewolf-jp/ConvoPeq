@@ -39,7 +39,8 @@ public:
             return;
 
         // 2. Route through ISRRetireRouter → EpochDomain
-        const uint64_t epoch = router_->publishEpoch();
+        // ★ S-1: publishEpoch() → currentEpoch() に変更。retire が epoch を進めない。
+        const uint64_t epoch = router_->currentEpoch();
         router_->enqueueRetire(static_cast<void*>(dsp),
                                &AudioEngine::destroyDSPCoreNode,
                                epoch);

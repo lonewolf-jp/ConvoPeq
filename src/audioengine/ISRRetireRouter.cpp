@@ -68,6 +68,12 @@ void ISRRetireRouter::exitReader(int readerIndex) noexcept
     provider_->exitReader(readerIndex);
 }
 
+convo::ReaderSlotDetail ISRRetireRouter::getReaderSlotDetail(int readerIndex) const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->getReaderSlotDetail(readerIndex);
+}
+
 uint64_t ISRRetireRouter::minReaderEpoch() const noexcept
 {
     assert(provider_ != nullptr);

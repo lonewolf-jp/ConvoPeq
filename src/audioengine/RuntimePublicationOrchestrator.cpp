@@ -68,6 +68,7 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmit(
     // Step 2a: Build world with default (HardReset) policy first
     // (evaluate 前に world が必要だが、RuntimePublishWorld は非デフォルト構築可能のため)
     auto worldBuilder = convo::RuntimeBuilder(engine_);
+    worldBuilder.setHealthStateRef(engine_.getHealthStateRef());
     auto worldOwner = worldBuilder.buildRuntimePublishWorld(
         newDSPResolved, oldDSP,
         convo::TransitionPolicy::HardReset, 0.0, false,

@@ -11,6 +11,17 @@ CrossfadeAuthority::Decision CrossfadeAuthority::evaluate(
 {
     Decision ctx;
 
+    // ★ S-2: HealthState Critical チェック — Critical 時は crossfade 不要として即返却
+    {
+        auto ref = engine.getHealthStateRef();
+        if (ref) {
+            auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
+            if (health == convo::ISRHealthState::Critical) {
+                return ctx;  // needsCrossfade = false のまま
+            }
+        }
+    }
+
     // Use dspProjection values from RuntimeWorld (DSPCore 直読は行わない)
     ctx.oldHasIR = oldWorld.dspProjection.irLoaded;
     ctx.newHasIR = newWorld.dspProjection.irLoaded;

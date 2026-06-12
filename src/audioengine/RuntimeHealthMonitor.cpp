@@ -241,9 +241,44 @@ void RuntimeHealthMonitor::checkReaderSlotUsage() noexcept
     double usage = static_cast<double>(activeCount) / static_cast<double>(maxSlots);
 
     if (usage >= 0.90) {
-        emitOnTransition(m_prevReaderSlotState, MonitorState::Error,
-            HealthEvent::Severity::Error, EVENT_READER_SLOT_USAGE,
-            activeCount, maxSlots);
+        // ★ B-1: Reader Slot 使用率が Critical の場合、個別 Reader 情報を詳細取得
+        int worstReaderIndex = -1;
+        uint64_t worstResidencyUs = 0;
+        convo::ReaderSlotDetail worstDetail{};
+
+        if (m_retireRouter) {
+            for (int i = 0; i < maxSlots; ++i) {
+                auto detail = m_retireRouter->getReaderSlotDetail(i);
+                if (detail.active && detail.residencyTimeUs > worstResidencyUs) {
+                    worstResidencyUs = detail.residencyTimeUs;
+                    worstReaderIndex = i;
+                    worstDetail = detail;
+                }
+            }
+        }
+
+        if (m_callback && worstReaderIndex >= 0) {
+            // 詳細情報付きで直接コールバック
+            HealthEvent ev{getCurrentTimeUs(),
+                           HealthEvent::Severity::Error,
+                           EVENT_READER_SLOT_USAGE,
+                           activeCount,
+                           static_cast<uint32_t>(maxSlots)};
+            ev.readerIndex = worstReaderIndex;
+            ev.readerEpoch = worstDetail.epoch;
+            ev.readerDepth = worstDetail.depth;
+            ev.residencyTimeUs = worstDetail.residencyTimeUs;
+            m_callback(ev);
+            // 状態遷移を updateHealthState に反映（callback 後でも emitOnTransition を呼ばない）
+            if (m_prevReaderSlotState != MonitorState::Error) {
+                m_prevReaderSlotState = MonitorState::Error;
+            }
+        } else {
+            // 詳細情報なし → 従来の emitOnTransition 経由
+            emitOnTransition(m_prevReaderSlotState, MonitorState::Error,
+                HealthEvent::Severity::Error, EVENT_READER_SLOT_USAGE,
+                activeCount, maxSlots);
+        }
     } else if (usage >= kReaderSlotCriticalThreshold) {
         emitOnTransition(m_prevReaderSlotState, MonitorState::Warning,
             HealthEvent::Severity::Warning, EVENT_READER_SLOT_USAGE,

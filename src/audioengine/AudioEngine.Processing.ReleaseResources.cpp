@@ -123,6 +123,7 @@ void AudioEngine::releaseResources()
         {
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
+            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(nullptr,
                                                                      nullptr,
                                                                      convo::TransitionPolicy::HardReset,

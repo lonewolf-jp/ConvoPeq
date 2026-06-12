@@ -52,6 +52,22 @@ public:
                             const CrossfadeAuthority::Decision& decision,
                             DSPLifetimeManager& lifetime) noexcept
     {
+        // ★ S-2: HealthState Critical チェック — Critical 時は crossfade をスキップし即 retire
+        {
+            auto ref = engine_.getHealthStateRef();
+            if (ref) {
+                auto health = convo::consumeAtomic(*ref, std::memory_order_acquire);
+                if (health == convo::ISRHealthState::Critical) {
+                    lifetime.activate(newDSP);
+                    if (oldDSP != nullptr) {
+                        engine_.crossfadeRuntime_.complete();
+                        lifetime.retire(oldDSP);
+                    }
+                    return;
+                }
+            }
+        }
+
         // 1. activate (publish 成功後にのみ実行)
         lifetime.activate(newDSP);
 
@@ -115,6 +131,7 @@ public:
         // publish idling world (Coordinator 経由)
         auto coordinator = engine_.makeRuntimePublicationCoordinator();
         auto worldBuilder = convo::RuntimeBuilder(engine_);
+        worldBuilder.setHealthStateRef(engine_.getHealthStateRef());
         auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
                                                                  nullptr,
                                                                  convo::TransitionPolicy::HardReset,

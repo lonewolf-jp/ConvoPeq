@@ -4,7 +4,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <thread>
 
 #include "../DeferredDeletionQueue.h"
 #include "IEpochProvider.h"
@@ -32,6 +34,12 @@ public:
 
     int registerReaderThread() noexcept override
     {
+        return registerReaderThread("unnamed");
+    }
+
+    // ★ C-3: タグ名付き Reader 登録
+    int registerReaderThread(const char* tag) noexcept
+    {
         for (int i = 0; i < kMaxReaders; ++i)
         {
             uint64_t expected = kInactiveEpoch;
@@ -46,6 +54,16 @@ public:
                 // release: depth ゼロ化を slot 取得後に他スレッドが観測できるよう publish。
                 convo::publishAtomic(readers[static_cast<size_t>(i)].depth,
                                      static_cast<uint32_t>(0),
+                                     std::memory_order_release);
+                // ★ C-3: 所有者タグ設定（CAS 成功後は単一スレッドのみがアクセス可能）
+                if (tag != nullptr) {
+                    std::strncpy(readers[static_cast<size_t>(i)].ownerTag, tag,
+                                 sizeof(readers[static_cast<size_t>(i)].ownerTag) - 1);
+                    readers[static_cast<size_t>(i)].ownerTag[
+                        sizeof(readers[static_cast<size_t>(i)].ownerTag) - 1] = '\0';
+                }
+                convo::publishAtomic(readers[static_cast<size_t>(i)].ownerThreadId,
+                                     std::hash<std::thread::id>{}(std::this_thread::get_id()),
                                      std::memory_order_release);
                 return i;
             }
@@ -227,7 +245,24 @@ public:
         return static_cast<int64_t>(a - b) < 0;
     }
 
-    // ★ P3-1/Practical-1: 複合判定による Reader Stuck 検出（override）
+    // ★ B-1: Reader Slot 詳細取得（アクティブ Reader の epoch/depth/residency を返す）
+    [[nodiscard]] ReaderSlotDetail getReaderSlotDetail(int readerIndex) const noexcept override
+    {
+        if (readerIndex < 0 || readerIndex >= kMaxReaders)
+            return ReaderSlotDetail{};
+
+        const auto& slot = readers[static_cast<size_t>(readerIndex)];
+        const uint64_t epoch = convo::consumeAtomic(slot.epoch, std::memory_order_acquire);
+        const uint32_t depth = convo::consumeAtomic(slot.depth, std::memory_order_acquire);
+        const uint64_t startUs = convo::consumeAtomic(slot.residencyStartTimestampUs, std::memory_order_acquire);
+        const auto nowUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        const uint64_t residencyUs = (startUs != 0 && depth > 0) ? (nowUs - startUs) : 0;
+
+        return ReaderSlotDetail{epoch, depth, residencyUs, (depth > 0)};
+    }
+
     [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override {
         StuckReaderInfo info;
         info.currentEpoch = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
@@ -296,6 +331,9 @@ private:
         std::atomic<uint32_t> depth { 0 };
         std::atomic<uint64_t> enterCount { 0 };  // ★ P3-1: enter 回数のみカウント（軽量）
         std::atomic<uint64_t> residencyStartTimestampUs { 0 }; // ★ P4.5: steady_clock ベースの滞留開始時刻
+        // ★ C-3: Reader 所有者情報
+        std::atomic<uint64_t> ownerThreadId { 0 };       // std::thread::id のハッシュ値
+        char ownerTag[32] {};  // "AudioThread", "TimerThread" 等（CAS 排他下で設定、stale read 許容）
     };
 
     std::atomic<uint64_t> globalEpoch;

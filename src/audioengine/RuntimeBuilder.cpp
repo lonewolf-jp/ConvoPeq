@@ -44,6 +44,12 @@ const char* toString(BuildError error) noexcept
             return "InvalidInput";
         case BuildError::ResourceUnavailable:
             return "ResourceUnavailable";
+        case BuildError::MKLFailure:
+            return "MKLFailure";
+        case BuildError::ConvolverFailure:
+            return "ConvolverFailure";
+        case BuildError::PrepareFailure:
+            return "PrepareFailure";
         case BuildError::WarmupFailed:
             return "WarmupFailed";
         case BuildError::InternalError:
@@ -421,6 +427,15 @@ BuildResult RuntimeBuilder::build(const BuildInput& in,
                                   const ConvolverProcessor::BuildSnapshot& convolverBuildSnapshot) noexcept
 {
     BuildResult result {};
+
+    // ★ S-2: HealthState Critical チェック（負荷最大の処理を事前に抑止）
+    if (m_healthStateRef) {
+        auto health = convo::consumeAtomic(*m_healthStateRef, std::memory_order_acquire);
+        if (health == ISRHealthState::Critical) {
+            result.error = BuildError::ResourceUnavailable;
+            return result;
+        }
+    }
 
     if (in.sampleRate <= 0.0 || in.blockSize <= 0)
     {

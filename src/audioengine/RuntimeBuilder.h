@@ -9,6 +9,9 @@ enum class BuildError {
     None,
     InvalidInput,
     ResourceUnavailable,
+    MKLFailure,          // ★ C-2: MKL 初期化・FFT 計画失敗
+    ConvolverFailure,    // ★ C-2: Convolver Build 失敗
+    PrepareFailure,      // ★ C-2: DSPCore::prepare() 失敗
     WarmupFailed,
     InternalError
 };
@@ -24,6 +27,11 @@ const char* toString(BuildError error) noexcept;
 class RuntimeBuilder {
 public:
     explicit RuntimeBuilder(AudioEngine& owner) noexcept : engine(owner) {}
+
+    // ★ S-2: HealthState 参照設定
+    void setHealthStateRef(const std::atomic<ISRHealthState>* ref) noexcept {
+        m_healthStateRef = ref;
+    }
 
     [[nodiscard]] convo::aligned_unique_ptr<RuntimePublishWorld>
     buildRuntimePublishWorld(AudioEngine::DSPCore* current,
@@ -48,6 +56,8 @@ public:
 
 private:
     AudioEngine& engine;
+    // ★ S-2: HealthState 参照
+    const std::atomic<ISRHealthState>* m_healthStateRef = nullptr;
 };
 
 } // namespace convo

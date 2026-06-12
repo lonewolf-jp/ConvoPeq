@@ -794,6 +794,11 @@ public:
     [[nodiscard]] bool enqueueRetireEpochBounded(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept;
     [[nodiscard]] uint32_t activeEpochObserverCount() const noexcept;
 
+    // ★ S-2: HealthState 参照を公開（Admission / Builder / Crossfade / Transition から参照）
+    [[nodiscard]] const std::atomic<convo::ISRHealthState>* getHealthStateRef() const noexcept {
+        return m_healthMonitor.getHealthStateRef();
+    }
+
     void processBlockDouble (juce::AudioBuffer<double>& buffer);
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void convolverParamsChanged(ConvolverProcessor* processor) override;

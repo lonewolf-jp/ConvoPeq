@@ -42,6 +42,7 @@ void AudioEngine::initialize()
     // the rebuild worker always finds a non-null runtimeWorld when building.
     {
         convo::RuntimeBuilder bootstrapBuilder(*this);
+        bootstrapBuilder.setHealthStateRef(getHealthStateRef());
         auto bootstrapWorld = bootstrapBuilder.createBootstrapWorld();
         auto coordinator = makeRuntimePublicationCoordinator();
         coordinator.publishWorld(std::move(bootstrapWorld));

@@ -129,6 +129,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
             // Migrated to publishWorld() with pre-built RuntimePublishWorld (Sprint-2 P1-A)
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
+            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentForPublish,
                                                                      fadingForPublish,
                                                                      policy,
@@ -241,6 +242,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         {
             auto coordinator = makeRuntimePublicationCoordinator();
             auto worldBuilder = convo::RuntimeBuilder(*this);
+            worldBuilder.setHealthStateRef(getHealthStateRef());
             auto worldOwner = worldBuilder.buildRuntimePublishWorld(getActiveRuntimeDSP(),
                                                                      nullptr,
                                                                      convo::TransitionPolicy::HardReset,

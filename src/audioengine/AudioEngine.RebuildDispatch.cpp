@@ -764,6 +764,8 @@ void AudioEngine::rebuildThreadLoop()
             } dspGuard { this, nullptr };
 
             convo::RuntimeBuilder runtimeBuilder(*this);
+            // ★ S-2: HealthState 参照を RuntimeBuilder に設定
+            runtimeBuilder.setHealthStateRef(getHealthStateRef());
 
             // Helper to check obsolescence
             const auto isObsolete = [&] {

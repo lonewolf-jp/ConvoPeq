@@ -28,6 +28,10 @@ struct RuntimeDrainAudit {
     uint64_t quarantineResident;    // 監査のみ
     uint64_t oldestPendingAgeMs;    // 監査のみ
     uint64_t maxQuarantineAgeSec;   // 監査のみ
+    // ★ C-1: WorldLifecycleAudit 連携（診断目的）
+    uint64_t activeWorldCount{0};
+    uint64_t publishedCount{0};
+    uint64_t retiredCount{0};
 
     // shutdown 完了を阻害している主要因を特定
     enum class BlockingReason : uint8_t {
