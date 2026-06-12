@@ -81,6 +81,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # MSVC コンパイラ（cl.exe）の環境変数をセットアップ
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Ninja をインストール
+      - name: Set up Ninja
+        uses: ashutoshvarma/setup-ninja@v1.1
+
       - name: Configure CMake
         shell: pwsh
         run: |
