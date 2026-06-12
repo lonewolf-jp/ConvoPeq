@@ -50,6 +50,9 @@ tools/
 .vs/
 evidence/
 JUCE/
+!JUCE/extras/
+!JUCE/extras/Build/
+!JUCE/extras/Build/CMake/
 .playwright-mcp/
 graphify-out/
 .continue/
