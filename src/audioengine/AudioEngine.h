@@ -2306,6 +2306,15 @@ public:
         publishCrossfadePreparedSnapshot(snapshot);
     }
 
+    // ★ A-4: Idle world publish 統一関数
+    //   責務は publishWorld のみ。setDryHoldSamples/resfreshSnapshot は含まない。
+    //   currentAfterFade: 呼び出し側で解決して渡す
+    //   idlePolicy: 呼び出し側で明示指定（SmoothOnly / HardReset）
+    //   Returns: true=publish 実行, false=shutdown guard または nullptr で skip
+    [[nodiscard]] bool publishIdleWorldOnly(
+        AudioEngine::DSPCore* currentAfterFade,
+        convo::TransitionPolicy idlePolicy) noexcept;
+
     inline void publishLatencyDelayAtomics(int oldDelay,
                                            int newDelay) noexcept
     {

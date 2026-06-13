@@ -78,7 +78,11 @@ void ShutdownRuntime::advancePhase() noexcept
             next = ShutdownPhase::ReclaimComplete;
             break;
         case ShutdownPhase::ReclaimComplete:
-            next = ShutdownPhase::VerifyDrained;  // ★ P3: 最終監査
+            // ★ C-2: CONVOPEQ_EMERGENCY_DRAIN 有効時のみ EmergencyDrain を経由
+            next = ShutdownPhase::VerifyDrained;
+            break;
+        case ShutdownPhase::EmergencyDrain:        // ★ C-2
+            next = ShutdownPhase::VerifyDrained;
             break;
         case ShutdownPhase::VerifyDrained:
             next = ShutdownPhase::ShutdownComplete;
@@ -158,6 +162,7 @@ void ShutdownRuntime::emitShutdownTrace() const
     case ShutdownPhase::RetireClosed: phaseName = "RetireClosed"; break;
     case ShutdownPhase::EpochSettled: phaseName = "EpochSettled"; break;
     case ShutdownPhase::ReclaimComplete: phaseName = "ReclaimComplete"; break;
+    case ShutdownPhase::EmergencyDrain: phaseName = "EmergencyDrain"; break;  // ★ C-2
     case ShutdownPhase::VerifyDrained: phaseName = "VerifyDrained"; break;
     case ShutdownPhase::TimedOut: phaseName = "TimedOut"; break;
     case ShutdownPhase::Failed: phaseName = "Failed"; break;

@@ -112,6 +112,7 @@ bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
          || phase == convo::isr::ShutdownPhase::RetireClosed
          || phase == convo::isr::ShutdownPhase::EpochSettled
          || phase == convo::isr::ShutdownPhase::ReclaimComplete
+         || phase == convo::isr::ShutdownPhase::EmergencyDrain     // ★ C-2
          || phase == convo::isr::ShutdownPhase::TimedOut
          || phase == convo::isr::ShutdownPhase::Failed
          || phase == convo::isr::ShutdownPhase::ShutdownComplete);

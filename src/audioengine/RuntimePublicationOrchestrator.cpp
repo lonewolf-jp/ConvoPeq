@@ -240,6 +240,14 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
 }
 
 // ★ C-2.3: notifyTransitionComplete — stale discard 実装
+//   ⚠️ 現状では呼び出し元が存在しないが、設計上の統合ポイントとして
+//   責務定義を保持する（将来の Layer 2/3 統合フック）。
+//   A-4 で publishIdleWorldOnly() を別途定義したが、本関数は以下4責務を
+//   持つため、完全な統合には notifyTransitionComplete の再設計が必要:
+//   1. Transition Completion: transition_.onTransitionComplete(currentAfterFade)
+//   2. Shutdown Guard: isShutdownInProgress() 時 deferred キャンセル
+//   3. Stale Discard: Generation Guard + Publication Sequence Guard
+//   4. Deferred Publish Submit: 有効な deferred を submitPublishRequest
 void RuntimePublicationOrchestrator::notifyTransitionComplete(
     AudioEngine::DSPCore* currentAfterFade) noexcept
 {

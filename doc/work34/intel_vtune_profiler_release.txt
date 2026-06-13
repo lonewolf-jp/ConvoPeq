@@ -1,0 +1,458 @@
+Elapsed Time:	122.893s
+    CPU Time:	69.722s
+    Effective Time:	32.275s
+    Spin Time:	37.447s
+    Overhead Time:	0s
+    Wait Time:	5567.804s
+    Total Thread Count:	93
+    Paused Time:	0s
+
+Top Hotspots
+    Function	Module	CPU Time	% of CPU Time
+    SleepEx	KERNELBASE.dll	23.124s	33.2%
+    std::this_thread::sleep_for<__int64,struct std::ratio<1,1000> >	ConvoPeq.exe	7.164s	10.3%
+    GetMessageW	USER32.dll	5.362s	7.7%
+    [Loop at line 557 in CustomInputOversampler::decimateStage]	ConvoPeq.exe	3.226s	4.6%
+    SleepConditionVariableSRW	KERNELBASE.dll	2.901s	4.2%
+    [Others]	N/A*	27.945s	40.1%
+
+Effective CPU Utilization Histogram
+    Simultaneously Utilized Logical CPUs	Elapsed Time	Utilization threshold
+    0	109.40094970009999	Idle
+    1	11.387191499999998	Poor
+    2	0.6901444999999999	Poor
+    3	0.2683271	Poor
+    4	0.22226230000000002	Poor
+    5	0.2705459	Poor
+    6	0.6186250999999999	Poor
+    7	0.0345829	Poor
+    8	0	Poor
+    9	0	Poor
+    10	0	Poor
+    11	0	Poor
+    12	0	Poor
+    13	0	Ok
+    14	0	Ok
+    15	0	Ok
+    16	0	Ideal
+
+Collection and Platform Info
+    Application Command Line:	C:\Users\user\Desktop\ConvoPeq\develop\ConvoPeq.exe 
+    Operating System:	Microsoft Windows 11
+    Computer Name:	PcTerminal
+    Result Size:	446.0 MB 
+    Collection start time:	04:45:48 13/06/2026 UTC
+    Collection stop time:	04:47:51 13/06/2026 UTC
+    Collector Type:	Event-based counting driver,User-mode sampling and tracing
+    Finalization mode: Fast. If the number of collected samples exceeds the threshold, this mode limits the number of processed samples to speed up post-processing.
+    CPU
+        Name:	Intel(R) microarchitecture code named Rocketlake
+        Frequency:	3.6 GHz
+        Logical CPU Count:	16
+        Cache Allocation Technology
+            Level 2 capability:	not detected
+            Level 3 capability:	not detected
+    GPU
+
+CPU
+    Name:	Intel(R) microarchitecture code named Rocketlake
+    Frequency:	3.6 GHz
+    Logical CPU Count:	16
+    Cache Allocation Technology
+        Level 2 capability:	not detected
+        Level 3 capability:	not detected
+
+Cache Allocation Technology
+    Level 2 capability:	not detected
+    Level 3 capability:	not detected
+
+Function	Effective Time	Spin Time	Overhead Time	Effective Time	Spin Time	Overhead Time	Wait Time: Total	Wait Time: Self	GPU Time: Total	GPU Time: Self	Module	Function (Full)	Source File	Start Address
+RtlUserThreadStart	45.9%	53.7%	0.0%	0usec	0usec	0usec	5117.025s	0s	0.0%	0usec	ntdll.dll	RtlUserThreadStart	[Unknown]	0x180087bf0
+BaseThreadInitThunk	45.9%	53.7%	0.0%	0usec	0usec	0usec	5117.025s	0s	0.0%	0usec	KERNEL32.DLL	BaseThreadInitThunk	[Unknown]	0x18002e940
+thread_start<unsigned int (__cdecl*)(void *),1>	17.8%	11.3%	0.0%	0usec	0usec	0usec	928.526s	0s	0.0%	0usec	ConvoPeq.exe	thread_start<unsigned int (__cdecl*)(void *),1>(void *)	thread.cpp	0x14257bd78
+__scrt_common_main_seh	12.4%	2.4%	0.0%	0usec	0usec	0usec	110.258s	0s	0.0%	0usec	ConvoPeq.exe	__scrt_common_main_seh()	exe_common.inl	0x142575720
+invoke_main	12.4%	2.4%	0.0%	0usec	0usec	0usec	110.258s	0s	0.0%	0usec	ConvoPeq.exe	invoke_main	exe_common.inl	0x142575808
+WinMain	12.4%	2.4%	0.0%	0usec	0usec	0usec	110.258s	0s	0.0%	0usec	ConvoPeq.exe	WinMain	MainApplication.cpp	0x14217c810
+juce::JUCEApplicationBase::main	12.4%	2.4%	0.0%	0usec	0usec	0usec	110.258s	0s	0.0%	0usec	ConvoPeq.exe	juce::JUCEApplicationBase::main	juce_ApplicationBase.cpp	0x14217c817
+func@0x180003cf0	10.4%	36.1%	0.0%	0usec	0usec	0usec	86.312s	0s	0.0%	0usec	vbvm_asiodriver64.dll	func@0x180003cf0	[Unknown]	0x180003cf0
+[Loop@0x180003ed0 in func@0x180003cf0]	10.4%	36.1%	0.0%	0usec	0usec	0usec	86.291s	86.291s	0.0%	0usec	vbvm_asiodriver64.dll	[Loop@0x180003ed0 in func@0x180003cf0]	[Unknown]	0x180003ed0
+[Loop@0x180003f61 in func@0x180003cf0]	10.1%	0.9%	0.0%	5477.906usec	0usec	0usec	0.000s	0s	0.0%	0usec	vbvm_asiodriver64.dll	[Loop@0x180003f61 in func@0x180003cf0]	[Unknown]	0x180003f61
+func@0x1800034f0	9.5%	0.9%	0.0%	18107.418usec	0usec	0usec	0.000s	0s	0.0%	0usec	vbvm_asiodriver64.dll	func@0x1800034f0	[Unknown]	0x1800034f0
+[Loop at line 1278 in NoiseShaperLearner::evaluateCandidateMapped]	9.5%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 1278 in NoiseShaperLearner::evaluateCandidateMapped(struct NoiseShaperLearner::EvaluationContext &,double const *,int,int)]	NoiseShaperLearner.cpp	0x14223f8c0
+NoiseShaperLearner::evaluateCandidateMapped	9.5%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	NoiseShaperLearner::evaluateCandidateMapped(struct NoiseShaperLearner::EvaluationContext &,double const *,int,int)	NoiseShaperLearner.cpp	0x14223f680
+[Loop at line 1270 in NoiseShaperLearner::evaluateCandidateMapped]	9.5%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 1270 in NoiseShaperLearner::evaluateCandidateMapped(struct NoiseShaperLearner::EvaluationContext &,double const *,int,int)]	NoiseShaperLearner.cpp	0x14223f890
+juce::ASIOAudioIODevice::callback	9.3%	0.9%	0.0%	3060.403usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::ASIOAudioIODevice::callback(long)	juce_ASIO_windows.cpp	0x14253d920
+juce::ASIOAudioIODevice::processBuffer	9.3%	0.9%	0.0%	28781.029usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::ASIOAudioIODevice::processBuffer	juce_ASIO_windows.cpp	0x14253d96f
+juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext	9.1%	0.9%	0.0%	23150.624usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)	juce_AudioDeviceManager.cpp	0x14253f640
+juce::AudioDeviceManager::CallbackHandler::audioDeviceIOCallbackWithContext	9.1%	0.9%	0.0%	14369.415usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::AudioDeviceManager::CallbackHandler::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)	juce_AudioDeviceManager.cpp	0x14253f910
+[Loop at line 118 in juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext]	9.1%	0.9%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	[Loop at line 118 in juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)]	juce_AudioDeviceManager.cpp	0x14253f6c0
+juce::AudioDeviceManager::audioDeviceIOCallbackInt	9.1%	0.9%	0.0%	8221.408usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::AudioDeviceManager::audioDeviceIOCallbackInt	juce_AudioDeviceManager.cpp	0x14253f954
+juce::AudioProcessorPlayer::audioDeviceIOCallbackWithContext	9.0%	0.9%	0.0%	43060.344usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::AudioProcessorPlayer::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)	juce_AudioProcessorPlayer.cpp	0x14225b660
+NoiseShaperLearner::evaluationWorkerMain	8.9%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	NoiseShaperLearner::evaluationWorkerMain(int,class std::stop_token)	NoiseShaperLearner.cpp	0x14223bcc0
+NoiseShaperLearner::startEvaluationWorkers::__l13::<lambda_1>::operator()	8.9%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	NoiseShaperLearner::startEvaluationWorkers::__l13::<lambda_1>::operator()	NoiseShaperLearner.cpp	0x142242292
+std::stop_token::{ctor}	8.9%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	std::stop_token::{ctor}	stop_token	0x142242292
+std::thread::_Invoke<std::tuple<`NoiseShaperLearner::startEvaluationWorkers'::`13'::<lambda_1>,std::stop_token>,0,1>	8.9%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	std::thread::_Invoke<std::tuple<`NoiseShaperLearner::startEvaluationWorkers'::`13'::<lambda_1>,std::stop_token>,0,1>(void *)	thread	0x142242280
+[Loop at line 534 in NoiseShaperLearner::evaluationWorkerMain]	8.9%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	[Loop at line 534 in NoiseShaperLearner::evaluationWorkerMain(int,class std::stop_token)]	NoiseShaperLearner.cpp	0x14223be30
+AudioEngineProcessor::processBlock	8.7%	0.3%	0.0%	7466.608usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	AudioEngineProcessor::processBlock(class juce::AudioBuffer<double> &,class juce::MidiBuffer &)	AudioEngineProcessor.cpp	0x1421cf630
+AudioEngine::processBlockDouble	8.7%	0.3%	0.0%	4191.204usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	AudioEngine::processBlockDouble	AudioEngine.Processing.BlockDouble.cpp	0x1421cf69e
+AudioEngine::DSPCore::processDouble	8.6%	0.0%	0.0%	9579.710usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	AudioEngine::DSPCore::processDouble(class juce::AudioBuffer<double> &,class LockFreeAudioRingBuffer &,struct std::atomic<float> *,struct std::atomic<float> *,struct AudioEngine::DSPCore::ProcessingState const &)	AudioEngine.Processing.DSPCoreDouble.cpp	0x1421c7870
+juce::MessageManager::runDispatchLoop	8.6%	1.7%	0.0%	0usec	0usec	0usec	109.971s	0s	0.0%	0usec	ConvoPeq.exe	juce::MessageManager::runDispatchLoop	juce_MessageManager.cpp	0x14217c8c7
+juce::InternalMessageQueue::dispatchNextMessage	8.6%	1.7%	0.0%	0usec	0usec	0usec	109.971s	109.605s	0.0%	0usec	ConvoPeq.exe	juce::InternalMessageQueue::dispatchNextMessage	juce_Messaging_windows.cpp	0x14217c900
+juce::detail::dispatchNextMessageOnSystemQueue	8.6%	1.7%	0.0%	0usec	0usec	0usec	109.971s	0s	0.0%	0usec	ConvoPeq.exe	juce::detail::dispatchNextMessageOnSystemQueue	juce_Messaging_windows.cpp	0x14217c8f0
+[Loop at line 621 in NoiseShaperLearner::runEvaluationJobsForWorker]	8.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 621 in NoiseShaperLearner::runEvaluationJobsForWorker(int,int,int,class std::stop_token const *)]	NoiseShaperLearner.cpp	0x14223c2c4
+NoiseShaperLearner::runEvaluationJobsForWorker	8.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	NoiseShaperLearner::runEvaluationJobsForWorker(int,int,int,class std::stop_token const *)	NoiseShaperLearner.cpp	0x14223c020
+GetMessageW	8.0%	0.0%	0.0%	5362368.033usec	0usec	0usec	0.000s	0.000s	0.0%	0usec	USER32.dll	GetMessageW	[Unknown]	0x18003b330
+CustomInputOversampler::decimateStage	6.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	CustomInputOversampler::decimateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)	CustomInputOversampler.cpp	0x1421cccd0
+CustomInputOversampler::processDown	6.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	CustomInputOversampler::processDown(class juce::dsp::AudioBlock<double> const &,class juce::dsp::AudioBlock<double> &,int)	CustomInputOversampler.cpp	0x1421cd250
+[Loop at line 714 in CustomInputOversampler::processDown]	6.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 714 in CustomInputOversampler::processDown(class juce::dsp::AudioBlock<double> const &,class juce::dsp::AudioBlock<double> &,int)]	CustomInputOversampler.cpp	0x1421cd521
+[Loop at line 464 in CustomInputOversampler::decimateStage]	6.2%	0.0%	0.0%	54882.656usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 464 in CustomInputOversampler::decimateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)]	CustomInputOversampler.cpp	0x1421cce32
+[Loop at line 719 in CustomInputOversampler::processDown]	6.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 719 in CustomInputOversampler::processDown(class juce::dsp::AudioBlock<double> const &,class juce::dsp::AudioBlock<double> &,int)]	CustomInputOversampler.cpp	0x1421cd570
+[Loop at line 557 in CustomInputOversampler::decimateStage]	6.1%	0.0%	0.0%	3226229.368usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 557 in CustomInputOversampler::decimateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)]	CustomInputOversampler.cpp	0x1421cceb0
+MklFftEvaluator::evaluate	6.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	MklFftEvaluator::evaluate(double const *,double const *,class std::array<double,2049> const *)	MklFftEvaluator.h	0x1422388e0
+juce::juce_threadEntryPoint	5.2%	0.4%	0.0%	0usec	0usec	0usec	0.236s	0s	0.0%	0usec	ConvoPeq.exe	juce::juce_threadEntryPoint	juce_Thread.cpp	0x1424c7414
+juce::Thread::threadEntryPoint	5.2%	0.4%	0.0%	0usec	0usec	0usec	0.236s	0s	0.0%	0usec	ConvoPeq.exe	juce::Thread::threadEntryPoint(void)	juce_Thread.cpp	0x1424b6420
+juce::threadEntryProc	5.2%	0.4%	0.0%	0usec	0usec	0usec	0.236s	0s	0.0%	0usec	ConvoPeq.exe	juce::threadEntryProc(void *)	juce_Threads_windows.cpp	0x1424c73d0
+func@0x18002c600	4.7%	0.5%	0.0%	0usec	0usec	0usec	21.294s	0s	0.0%	0usec	ntdll.dll	func@0x18002c600	[Unknown]	0x18002c600
+[Loop@0x18002c8ce in func@0x18002c600]	4.7%	0.5%	0.0%	0usec	0usec	0usec	21.294s	0s	0.0%	0usec	ntdll.dll	[Loop@0x18002c8ce in func@0x18002c600]	[Unknown]	0x18002c8ce
+SleepConditionVariableSRW	4.1%	0.0%	0.0%	2874767.814usec	26517.426usec	0usec			0.0%	0usec	KERNELBASE.dll	SleepConditionVariableSRW	[Unknown]	0x180022e70
+juce::JUCEApplicationBase::initialiseApp	3.8%	0.8%	0.0%	0usec	0usec	0usec	0.280s	0s	0.0%	0usec	ConvoPeq.exe	juce::JUCEApplicationBase::initialiseApp(void)	juce_ApplicationBase.cpp	0x14249e820
+MainApplication::initialise	3.8%	0.8%	0.0%	0usec	0usec	0usec	0.280s	0s	0.0%	0usec	ConvoPeq.exe	MainApplication::initialise(class juce::String const &)	MainApplication.cpp	0x14217c1a0
+LatticeNoiseShaper::processSample	3.8%	0.0%	0.0%	682616.191usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::processSample(int,double,class std::array<double,9> &,double const *,double)	LatticeNoiseShaper.h	0x1421c7350
+MainWindow::MainWindow	3.8%	0.8%	0.0%	0usec	0usec	0usec	0.278s	0s	0.0%	0usec	ConvoPeq.exe	MainWindow::MainWindow(class juce::String const &)	MainWindow.cpp	0x14217de60
+std::make_unique<class MainWindow,class juce::String const ,0>	3.8%	0.8%	0.0%	0usec	0usec	0usec	0.278s	0s	0.0%	0usec	ConvoPeq.exe	std::make_unique<class MainWindow,class juce::String const ,0>(class juce::String const &&)	memory	0x14217cb60
+[Loop@0x18002c8e9 in func@0x18002c600]	3.4%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ntdll.dll	[Loop@0x18002c8e9 in func@0x18002c600]	[Unknown]	0x18002c8e9
+NtWaitForWorkViaWorkerFactory	3.4%	0.0%	0.0%	2391908.223usec	0usec	0usec			0.0%	0usec	ntdll.dll	NtWaitForWorkViaWorkerFactory	[Unknown]	0x180163d10
+LatticeNoiseShaper::processStereoBlock	3.4%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::processStereoBlock	LatticeNoiseShaper.h	0x14223f888
+[Loop at line 92 in LatticeNoiseShaper::processStereoBlock]	3.4%	0.0%	0.0%	66989.968usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 92 in LatticeNoiseShaper::processStereoBlock]	LatticeNoiseShaper.h	0x14223fa50
+NoiseShaperLearner::startLearning::__l15::<lambda_1>::operator()	3.1%	0.4%	0.0%	0usec	0usec	0usec	101.862s	0s	0.0%	0usec	ConvoPeq.exe	NoiseShaperLearner::startLearning::__l15::<lambda_1>::operator()	NoiseShaperLearner.cpp	0x142242186
+NoiseShaperLearner::workerThreadMain	3.1%	0.4%	0.0%	0usec	0usec	0usec	101.862s	0s	0.0%	0usec	ConvoPeq.exe	NoiseShaperLearner::workerThreadMain(class std::stop_token)	NoiseShaperLearner.cpp	0x14223c860
+[Loop at line 836 in NoiseShaperLearner::workerThreadMain]	3.1%	0.4%	0.0%	0usec	0usec	0usec	101.861s	0s	0.0%	0usec	ConvoPeq.exe	[Loop at line 836 in NoiseShaperLearner::workerThreadMain(class std::stop_token)]	NoiseShaperLearner.cpp	0x14223d1d0
+std::thread::_Invoke<std::tuple<`NoiseShaperLearner::startLearning'::`15'::<lambda_1>,std::stop_token>,0,1>	3.1%	0.4%	0.0%	0usec	0usec	0usec	101.862s	0s	0.0%	0usec	ConvoPeq.exe	std::thread::_Invoke<std::tuple<`NoiseShaperLearner::startLearning'::`15'::<lambda_1>,std::stop_token>,0,1>(void *)	thread	0x142242170
+juce::Win32NativeFileChooser::run::__l2::<lambda_1>::operator()	3.1%	0.4%	0.0%	0usec	0usec	0usec	0.118s	0s	0.0%	0usec	ConvoPeq.exe	juce::Win32NativeFileChooser::run::__l2::<lambda_1>::operator()	juce_FileChooser_windows.cpp	0x142283d22
+juce::Win32NativeFileChooser::run	3.1%	0.4%	0.0%	0usec	0usec	0usec	0.118s	0s	0.0%	0usec	ConvoPeq.exe	juce::Win32NativeFileChooser::run(void)	juce_FileChooser_windows.cpp	0x142283d10
+juce::Win32NativeFileChooser::showDialog	3.1%	0.4%	0.0%	0usec	0usec	0usec	0.118s	0s	0.0%	0usec	ConvoPeq.exe	juce::Win32NativeFileChooser::showDialog(struct IFileDialog &)	juce_FileChooser_windows.cpp	0x1422824a0
+juce::Win32NativeFileChooser::openDialog	3.1%	0.4%	0.0%	0usec	0usec	0usec	0.118s	0s	0.0%	0usec	ConvoPeq.exe	juce::Win32NativeFileChooser::openDialog(bool)	juce_FileChooser_windows.cpp	0x142283a60
+juce::Win32NativeFileChooser::openDialogWithoutPreview	3.1%	0.4%	0.0%	0usec	0usec	0usec	0.118s	0s	0.0%	0usec	ConvoPeq.exe	juce::Win32NativeFileChooser::openDialogWithoutPreview(void)	juce_FileChooser_windows.cpp	0x142282a80
+NoiseShaperLearner::evaluatePopulation	3.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	NoiseShaperLearner::evaluatePopulation(int,int,int &,double &,class std::stop_token const &)	NoiseShaperLearner.cpp	0x14223c360
+MklFftEvaluator::computeMaskingEnergyStable	3.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	MklFftEvaluator::computeMaskingEnergyStable(struct MklFftEvaluator::MaskerBuffer const &,class std::array<double,2049> &)	MklFftEvaluator.h	0x142239b10
+[Loop at line 708 in MklFftEvaluator::computeMaskingEnergyStable]	3.0%	0.0%	0.0%	190122.993usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 708 in MklFftEvaluator::computeMaskingEnergyStable(struct MklFftEvaluator::MaskerBuffer const &,class std::array<double,2049> &)]	MklFftEvaluator.h	0x142239be0
+juce::Win32NativeFileChooser::showDialog::__l2::<lambda_3>::operator()	2.7%	0.3%	0.0%	0usec	0usec	0usec	0.109s	0s	0.0%	0usec	ConvoPeq.exe	juce::Win32NativeFileChooser::showDialog::__l2::<lambda_3>::operator()	juce_FileChooser_windows.cpp	0x14228275c
+func@0x180036e20	2.6%	0.3%	0.0%	1793086.616usec	194405.997usec	0usec	0.109s	0.109s	0.0%	0usec	COMDLG32.dll	func@0x180036e20	[Unknown]	0x180036e20
+Cnd_wait	2.6%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	Cnd_wait	cond.cpp	0x14256fac0
+Primitive_wait_for	2.6%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	Primitive_wait_for	primitives.hpp	0x14256fad3
+Primitive_wait	2.6%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	Primitive_wait	primitives.hpp	0x14256fad3
+juce::DocumentWindow::DocumentWindow	2.3%	0.0%	0.0%	0usec	0usec	0usec	0.010s	0s	0.0%	0usec	ConvoPeq.exe	juce::DocumentWindow::DocumentWindow(class juce::String const &,class juce::Colour,int,bool)	juce_DocumentWindow.cpp	0x142312e80
+std::condition_variable::wait	2.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	std::condition_variable::wait	mutex	0x14223be60
+juce::Component::addToDesktop	2.2%	0.0%	0.0%	0usec	0usec	0usec	0.034s	0s	0.0%	0usec	ConvoPeq.exe	juce::Component::addToDesktop(int,void *)	juce_Component.cpp	0x14228be00
+juce::Component::createNewPeer	2.1%	0.0%	0.0%	0usec	0usec	0usec	0.008s	0s	0.0%	0usec	ConvoPeq.exe	juce::Component::createNewPeer(int,void *)	juce_Windowing_windows.cpp	0x14227cfa0
+juce::HWNDComponentPeer::HWNDComponentPeer	2.1%	0.0%	0.0%	0usec	0usec	0usec	0.008s	0s	0.0%	0usec	ConvoPeq.exe	juce::HWNDComponentPeer::HWNDComponentPeer(class juce::Component &,int,struct HWND__ *,bool,int)	juce_Windowing_windows.cpp	0x142272f70
+
+
+Function / Call Stack	Effective Time	Spin Time	Overhead Time	Wait Time	GPU Time	Module	Function (Full)	Source File	Start Address
+GetMessageW	5362368.033usec	0usec	0usec	0.000s	0usec	USER32.dll	GetMessageW	[Unknown]	0x18003b330
+[Loop at line 557 in CustomInputOversampler::decimateStage]	3226229.368usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 557 in CustomInputOversampler::decimateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)]	CustomInputOversampler.cpp	0x1421cceb0
+SleepConditionVariableSRW	2874767.814usec	26517.426usec	0usec		0usec	KERNELBASE.dll	SleepConditionVariableSRW	[Unknown]	0x180022e70
+NtWaitForWorkViaWorkerFactory	2391908.223usec	0usec	0usec		0usec	ntdll.dll	NtWaitForWorkViaWorkerFactory	[Unknown]	0x180163d10
+func@0x180036e20	1793086.616usec	194405.997usec	0usec	0.109s	0usec	COMDLG32.dll	func@0x180036e20	[Unknown]	0x180036e20
+A0x10bdf457::isBadSample	996318.210usec	0usec	0usec		0usec	ConvoPeq.exe	A0x10bdf457::isBadSample	CustomInputOversampler.cpp	0x1421ccec9
+D3D11CreateDevice	873428.185usec	9803.610usec	0usec	0.004s	0usec	d3d11.dll	D3D11CreateDevice	[Unknown]	0x180083d60
+LatticeNoiseShaper::advanceState	776361.086usec	0usec	0usec		0usec	ConvoPeq.exe	LatticeNoiseShaper::advanceState	LatticeNoiseShaper.h	0x1421c7512
+LatticeNoiseShaper::processSample	682616.191usec	0usec	0usec		0usec	ConvoPeq.exe	LatticeNoiseShaper::processSample(int,double,class std::array<double,9> &,double const *,double)	LatticeNoiseShaper.h	0x1421c7350
+LoadLibraryExW	649333.058usec	0usec	0usec		0usec	KERNELBASE.dll	LoadLibraryExW	[Unknown]	0x1800215a0
+log10	563344.371usec	0usec	0usec		0usec	ConvoPeq.exe	log10	log10.asm	0x1425a9870
+std::clamp	483083.789usec	0usec	0usec		0usec	ConvoPeq.exe	std::clamp	algorithm	0x1421c757b
+[Loop at line 141 in CustomInputOversampler::dotProductAvx2]	460691.867usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 141 in CustomInputOversampler::dotProductAvx2(double const *,double const *,int)]	CustomInputOversampler.cpp	0x1421cbe10
+func@0x1800323c4	432906.038usec	0usec	0usec		0usec	dxgi.dll	func@0x1800323c4	[Unknown]	0x1800323c4
+[Loop@0x180003680 in func@0x180003600]	426450.332usec	0usec	0usec		0usec	vbvm_asiodriver64.dll	[Loop@0x180003680 in func@0x180003600]	[Unknown]	0x180003680
+[Loop at line 714 in MklFftEvaluator::computeMaskingEnergyStable]	422423.327usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 714 in MklFftEvaluator::computeMaskingEnergyStable(struct MklFftEvaluator::MaskerBuffer const &,class std::array<double,2049> &)]	MklFftEvaluator.h	0x142239c20
+exp	403279.509usec	0usec	0usec		0usec	ConvoPeq.exe	exp	exp.asm	0x14259d2c0
+_avx2_exp4	372269.977usec	0usec	0usec		0usec	ConvoPeq.exe	_avx2_exp4	svml_dexp4_avx2.asm	0x1425bb820
+RegEnumKeyW	306543.511usec	403703.309usec	0usec		0usec	advapi32.dll	RegEnumKeyW	[Unknown]	0x180027f00
+[Unknown stack frame(s)]	302988.907usec	0usec	0usec		0usec	[Unknown]	[Unknown stack frame(s)]	[Unknown]	0
+[Loop at line 270 in memset]	265494.669usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 270 in memset]	memset.asm	0x1425c58c0
+[pincrt.dll]	245538.649usec	0usec	0usec		0usec	pincrt.dll	[pincrt.dll]	[Unknown]	0
+[Loop at line 650 in MklFftEvaluator::computeSfm]	236786.540usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 650 in MklFftEvaluator::computeSfm]	MklFftEvaluator.h	0x142239980
+func@0x1800230f0	212035.015usec	0usec	0usec	0.001s	0usec	dxgi.dll	func@0x1800230f0	[Unknown]	0x1800230f0
+LatticeNoiseShaper::quantize	204018.707usec	0usec	0usec		0usec	ConvoPeq.exe	LatticeNoiseShaper::quantize	LatticeNoiseShaper.h	0x1421c7367
+NtUserMsgWaitForMultipleObjectsEx	200077.603usec	0usec	0usec		0usec	win32u.dll	NtUserMsgWaitForMultipleObjectsEx	[Unknown]	0x18000ae70
+midiInGetNumDevs	195360.698usec	9152.509usec	0usec	0.010s	0usec	winmmbase.dll	midiInGetNumDevs	[Unknown]	0x180010a20
+func@0x180053780	194364.097usec	905255.218usec	0usec	0.197s	0usec	d2d1.dll	func@0x180053780	[Unknown]	0x180053780
+[Loop at line 708 in MklFftEvaluator::computeMaskingEnergyStable]	190122.993usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 708 in MklFftEvaluator::computeMaskingEnergyStable(struct MklFftEvaluator::MaskerBuffer const &,class std::array<double,2049> &)]	MklFftEvaluator.h	0x142239be0
+BringWindowToTop	177311.380usec	0usec	0usec	0.000s	0usec	USER32.dll	BringWindowToTop	[Unknown]	0x18005de80
+func@0x180040fac	174549.777usec	6533.907usec	0usec		0usec	USER32.dll	func@0x180040fac	[Unknown]	0x180040fac
+func@0x18000a450	168571.371usec	0usec	0usec	0.000s	0usec	USER32.dll	func@0x18000a450	[Unknown]	0x18000a450
+SwitchToThread	164926.067usec	2355310.484usec	0usec		0usec	KERNELBASE.dll	SwitchToThread	[Unknown]	0x1800b1a50
+abs	158884.061usec	0usec	0usec		0usec	ConvoPeq.exe	abs	cstdlib	0x142239c37
+NtUserGetMessage	157897.460usec	0usec	0usec		0usec	win32u.dll	NtUserGetMessage	[Unknown]	0x180001330
+[Loop at line 171 in convo::UltraHighRateDCBlocker::process]	154597.457usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 171 in convo::UltraHighRateDCBlocker::process(double *,int)]	UltraHighRateDCBlocker.h	0x1421c3fa0
+[Loop at line 679 in MklFftEvaluator::buildNoiseMaskersFixed]	146615.049usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 679 in MklFftEvaluator::buildNoiseMaskersFixed(class std::array<double,2049> const &,class std::array<bool,2049> const &,struct MklFftEvaluator::MaskerBuffer &)]	MklFftEvaluator.h	0x142239820
+killDenormal	144491.346usec	0usec	0usec		0usec	ConvoPeq.exe	killDenormal	DspNumericPolicy.h	0x1421c3ff8
+memset_repstos	143455.045usec	0usec	0usec		0usec	ConvoPeq.exe	memset_repstos	memset.asm	0x1425c5780
+CreateFileW	140605.842usec	0usec	0usec		0usec	KERNELBASE.dll	CreateFileW	[Unknown]	0x180027c40
+LatticeNoiseShaper::xoshiro256plusplus	139722.442usec	0usec	0usec		0usec	ConvoPeq.exe	LatticeNoiseShaper::xoshiro256plusplus	LatticeNoiseShaper.h	0x1421c73a1
+MklFftEvaluator::computeJndWeight	139471.141usec	0usec	0usec		0usec	ConvoPeq.exe	MklFftEvaluator::computeJndWeight	MklFftEvaluator.h	0x142238fac
+MklFftEvaluator::ContributionBuffer::push	138551.941usec	0usec	0usec		0usec	ConvoPeq.exe	MklFftEvaluator::ContributionBuffer::push	MklFftEvaluator.h	0x142239cc2
+[Loop at line 277 in MklFftEvaluator::evaluate]	137396.239usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 277 in MklFftEvaluator::evaluate(double const *,double const *,class std::array<double,2049> const *)]	MklFftEvaluator.h	0x142238b10
+LoadLibraryA	135553.837usec	0usec	0usec		0usec	KERNELBASE.dll	LoadLibraryA	[Unknown]	0x1800efd90
+LatticeNoiseShaper::computeFeedback	131496.733usec	0usec	0usec		0usec	ConvoPeq.exe	LatticeNoiseShaper::computeFeedback	LatticeNoiseShaper.h	0x1421c736f
+func@0x1800d616b	124062.526usec	0usec	0usec		0usec	DWrite.dll	func@0x1800d616b	[Unknown]	0x1800d616b
+[Loop at line 598 in MklFftEvaluator::detectTonalMaskersFixed]	109699.311usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 598 in MklFftEvaluator::detectTonalMaskersFixed(class std::array<double,2049> const &,struct MklFftEvaluator::MaskerBuffer &,class std::array<bool,2049> &)]	MklFftEvaluator.h	0x142239590
+log	107011.108usec	0usec	0usec		0usec	ConvoPeq.exe	log	log.asm	0x14259e570
+LatticeNoiseShaper::uniform	105538.807usec	0usec	0usec		0usec	ConvoPeq.exe	LatticeNoiseShaper::uniform	LatticeNoiseShaper.h	0x1421c73a1
+func@0x180080390	104880.106usec	84631.486usec	0usec	0.007s	0usec	COMDLG32.dll	func@0x180080390	[Unknown]	0x180080390
+[Loop at line 574 in juce::AudioBuffer<double>::makeCopyOf<float>]	99524.101usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 574 in juce::AudioBuffer<double>::makeCopyOf<float>(class juce::AudioBuffer<float> const &,bool)]	juce_AudioSampleBuffer.h	0x14225cd20
+killDenormal	98631.700usec	0usec	0usec		0usec	ConvoPeq.exe	killDenormal	DspNumericPolicy.h	0x1421c3fb8
+[Loop at line 344 in memcpy]	95605.097usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 344 in memcpy]	memcpy.asm	0x1425c5e10
+RegisterDragDrop	94593.796usec	0usec	0usec	0.000s	0usec	ole32.dll	RegisterDragDrop	[Unknown]	0x18000dd70
+NtOpenKeyEx	89793.791usec	0usec	0usec		0usec	ntdll.dll	NtOpenKeyEx	[Unknown]	0x1801625b0
+[Outside any known module]	81318.483usec	0usec	0usec		0usec	[Unknown]	[Outside any known module]	[Unknown]	0
+memset	79594.081usec	0usec	0usec		0usec	ConvoPeq.exe	memset	memset.asm	0x1425c5790
+MklFftEvaluator::spreadingFunctionAnnexD	79242.680usec	0usec	0usec		0usec	ConvoPeq.exe	MklFftEvaluator::spreadingFunctionAnnexD	MklFftEvaluator.h	0x142239c6c
+[Loop at line 1295 in NoiseShaperLearner::evaluateCandidateMapped]	69672.970usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 1295 in NoiseShaperLearner::evaluateCandidateMapped(struct NoiseShaperLearner::EvaluationContext &,double const *,int,int)]	NoiseShaperLearner.cpp	0x14223fba0
+LatticeNoiseShaper::xoshiro256plusplus	67664.768usec	0usec	0usec		0usec	ConvoPeq.exe	LatticeNoiseShaper::xoshiro256plusplus	LatticeNoiseShaper.h	0x1421c73e4
+[Loop at line 92 in LatticeNoiseShaper::processStereoBlock]	66989.968usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 92 in LatticeNoiseShaper::processStereoBlock]	LatticeNoiseShaper.h	0x14223fa50
+timeGetTime	65643.266usec	0usec	0usec		0usec	KERNEL32.DLL	timeGetTime	[Unknown]	0x180023200
+CustomInputOversampler::dotProductAvx2	64985.466usec	0usec	0usec		0usec	ConvoPeq.exe	CustomInputOversampler::dotProductAvx2(double const *,double const *,int)	CustomInputOversampler.cpp	0x1421cbdf0
+[Loop at line 739 in MklFftEvaluator::computeMaskingEnergyStable]	61762.562usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 739 in MklFftEvaluator::computeMaskingEnergyStable(struct MklFftEvaluator::MaskerBuffer const &,class std::array<double,2049> &)]	MklFftEvaluator.h	0x142239d62
+FlushFileBuffers	60032.561usec	0usec	0usec		0usec	KERNELBASE.dll	FlushFileBuffers	[Unknown]	0x1800ee230
+[Loop at line 338 in MklFftEvaluator::evaluate]	57404.258usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 338 in MklFftEvaluator::evaluate(double const *,double const *,class std::array<double,2049> const *)]	MklFftEvaluator.h	0x142238e60
+MklFftEvaluator::smoothCap	56446.257usec	0usec	0usec		0usec	ConvoPeq.exe	MklFftEvaluator::smoothCap	MklFftEvaluator.h	0x142238ff1
+killDenormal	55086.656usec	0usec	0usec		0usec	ConvoPeq.exe	killDenormal	DspNumericPolicy.h	0x1421c4021
+[Loop at line 464 in CustomInputOversampler::decimateStage]	54882.656usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 464 in CustomInputOversampler::decimateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)]	CustomInputOversampler.cpp	0x1421cce32
+std::this_thread::sleep_for<__int64,struct std::ratio<1,1000> >	48802.050usec	7114726.308usec	0usec	691.442s	0usec	ConvoPeq.exe	std::this_thread::sleep_for<__int64,struct std::ratio<1,1000> >(class std::chrono::duration<__int64,struct std::ratio<1,1000> > const &)	thread	0x142197e90
+MklFftEvaluator::computeJndDb	46290.647usec	0usec	0usec		0usec	ConvoPeq.exe	MklFftEvaluator::computeJndDb	MklFftEvaluator.h	0x142238f35
+juce::AudioProcessorPlayer::audioDeviceIOCallbackWithContext	43060.344usec	0usec	0usec		0usec	ConvoPeq.exe	juce::AudioProcessorPlayer::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)	juce_AudioProcessorPlayer.cpp	0x14225b660
+handle_error	41922.842usec	0usec	0usec		0usec	ConvoPeq.exe	handle_error	libm_error.c	0x14259e2c0
+[Loop at line 45 in convo::input_transform::sanitizeAndLimit]	40940.141usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 45 in convo::input_transform::sanitizeAndLimit]	InputBitDepthTransform.h	0x1421c9e00
+_exception_enabled	39833.840usec	0usec	0usec		0usec	ConvoPeq.exe	_exception_enabled(unsigned int, unsigned __int64 *)	libm_error.c	0x14259e1b0
+NtDeviceIoControlFile	38365.539usec	0usec	0usec		0usec	ntdll.dll	NtDeviceIoControlFile	[Unknown]	0x180160140
+SwitchToThread	34834.835usec	0usec	0usec		0usec	KERNEL32.DLL	SwitchToThread	[Unknown]	0x180031c40
+MklFftEvaluator::softplus	32356.233usec	0usec	0usec		0usec	ConvoPeq.exe	MklFftEvaluator::softplus	MklFftEvaluator.h	0x142238fa0
+[Loop at line 352 in CustomInputOversampler::interpolateStage]	32177.633usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 352 in CustomInputOversampler::interpolateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)]	CustomInputOversampler.cpp	0x1421ccaa0
+GetLastError	32006.732usec	0usec	0usec		0usec	KERNEL32.DLL	GetLastError	[Unknown]	0x180018640
+LatticeNoiseShaper::uniform	31062.532usec	0usec	0usec		0usec	ConvoPeq.exe	LatticeNoiseShaper::uniform	LatticeNoiseShaper.h	0x1421c73e4
+[Loop@0x14007aad0 in func@0x14007a230]	29682.830usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop@0x14007aad0 in func@0x14007a230]	[Unknown]	0x14007aad0
+juce::ASIOAudioIODevice::ASIOCallbackFunctions<0>::bufferSwitchCallback	29556.630usec	0usec	0usec		0usec	ConvoPeq.exe	juce::ASIOAudioIODevice::ASIOCallbackFunctions<0>::bufferSwitchCallback(long,long)	juce_ASIO_windows.cpp	0x142554eb0
+A0x58e4c794::isFiniteNoLibm	29217.630usec	0usec	0usec		0usec	ConvoPeq.exe	A0x58e4c794::isFiniteNoLibm	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b18
+tanh_fma	28823.529usec	0usec	0usec		0usec	ConvoPeq.exe	tanh_fma	tanh.c	0x1425c5240
+juce::ASIOAudioIODevice::processBuffer	28781.029usec	0usec	0usec		0usec	ConvoPeq.exe	juce::ASIOAudioIODevice::processBuffer	juce_ASIO_windows.cpp	0x14253d96f
+SHParseDisplayName	28246.029usec	0usec	0usec	0.002s	0usec	Windows.Storage.dll	SHParseDisplayName	[Unknown]	0x18005d380
+memcpy	27738.728usec	0usec	0usec		0usec	ConvoPeq.exe	memcpy	memcpy.asm	0x1425c5c30
+memcpy_repmovs	27537.328usec	0usec	0usec		0usec	ConvoPeq.exe	memcpy_repmovs	memcpy.asm	0x1425c5c20
+_security_check_cookie	27343.428usec	0usec	0usec		0usec	ConvoPeq.exe	_security_check_cookie	amdsecgs.asm	0x142574d50
+NtOpenFile	26466.827usec	0usec	0usec		0usec	ntdll.dll	NtOpenFile	[Unknown]	0x1801606c0
+ReplaceFileW	25229.026usec	0usec	0usec	0.005s	0usec	KERNELBASE.dll	ReplaceFileW	[Unknown]	0x1800d3120
+A0x58e4c794::isFiniteAndAbsBelowNoLibm	25025.825usec	0usec	0usec		0usec	ConvoPeq.exe	A0x58e4c794::isFiniteAndAbsBelowNoLibm	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b6a
+juce::ASIOSampleFormat::convertToFloat	24693.525usec	0usec	0usec		0usec	ConvoPeq.exe	juce::ASIOSampleFormat::convertToFloat	juce_ASIO_windows.cpp	0x14253d9c6
+pow_fma	24314.625usec	0usec	0usec		0usec	ConvoPeq.exe	pow_fma	pow.c	0x1425c4420
+func@0x180006160	24193.024usec	0usec	0usec	0.008s	0usec	twinapi.dll	func@0x180006160	[Unknown]	0x180006160
+juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext	23150.624usec	0usec	0usec		0usec	ConvoPeq.exe	juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)	juce_AudioDeviceManager.cpp	0x14253f640
+RtlAllocateHeap	22456.723usec	0usec	0usec		0usec	ntdll.dll	RtlAllocateHeap	[Unknown]	0x180019f90
+[Loop at line 43 in A0x58e4c794::sanitizeFiniteChunk]	22435.323usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 43 in A0x58e4c794::sanitizeFiniteChunk]	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b10
+[Loop@0x180597aa0 in func@0x180597850]	22135.922usec	0usec	0usec		0usec	nvwgf2umx.dll	[Loop@0x180597aa0 in func@0x180597850]	[Unknown]	0x180597aa0
+WriteFile	21958.722usec	0usec	0usec		0usec	KERNELBASE.dll	WriteFile	[Unknown]	0x1800b04a0
+std::clamp	21729.822usec	0usec	0usec		0usec	ConvoPeq.exe	std::clamp	algorithm	0x1421c755b
+CloseHandle	21311.922usec	0usec	0usec		0usec	KERNELBASE.dll	CloseHandle	[Unknown]	0x180026af0
+func@0x180030780	20471.921usec	0usec	0usec		0usec	MMDevAPI.DLL	func@0x180030780	[Unknown]	0x180030780
+NtClose	19562.220usec	0usec	0usec		0usec	ntdll.dll	NtClose	[Unknown]	0x180160240
+DeleteFileW	19013.519usec	0usec	0usec		0usec	KERNELBASE.dll	DeleteFileW	[Unknown]	0x1800d5740
+CreateWindowExW	18856.119usec	0usec	0usec		0usec	USER32.dll	CreateWindowExW	[Unknown]	0x18002d890
+[Loop at line 466 in juce::FloatVectorHelpers::MinMax<juce::FloatVectorHelpers::BasicOps64>::findMinAndMax]	18762.219usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 466 in juce::FloatVectorHelpers::MinMax<juce::FloatVectorHelpers::BasicOps64>::findMinAndMax]	juce_FloatVectorOperations.cpp	0x1421ca2a0
+func@0x1800034f0	18107.418usec	0usec	0usec		0usec	vbvm_asiodriver64.dll	func@0x1800034f0	[Unknown]	0x1800034f0
+juce::AudioDeviceManager::LevelMeter::updateLevel	17691.518usec	0usec	0usec		0usec	ConvoPeq.exe	juce::AudioDeviceManager::LevelMeter::updateLevel(float const * const *,int,int)	juce_AudioDeviceManager.cpp	0x1425478d0
+GetTickCount	17339.718usec	0usec	0usec		0usec	KERNEL32.DLL	GetTickCount	[Unknown]	0x180018600
+juce::FloatVectorHelpers::BasicOps64::max	17253.317usec	0usec	0usec		0usec	ConvoPeq.exe	juce::FloatVectorHelpers::BasicOps64::max	juce_FloatVectorOperations.cpp	0x1421ca2af
+set_statfp	16374.717usec	0usec	0usec		0usec	ConvoPeq.exe	set_statfp	fpctrl.c	0x14259c0e0
+std::max	15761.016usec	0usec	0usec		0usec	ConvoPeq.exe	std::max	utility	0x142239de5
+func@0x18000dc80	15516.316usec	7618.908usec	0usec	0.003s	0usec	dxgi.dll	func@0x18000dc80	[Unknown]	0x18000dc80
+juce::AudioDeviceManager::CallbackHandler::audioDeviceIOCallbackWithContext	14369.415usec	0usec	0usec		0usec	ConvoPeq.exe	juce::AudioDeviceManager::CallbackHandler::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)	juce_AudioDeviceManager.cpp	0x14253f910
+TlsGetValue	13954.814usec	0usec	0usec		0usec	KERNEL32.DLL	TlsGetValue	[Unknown]	0x1800844f0
+PostMessageW	13778.615usec	0usec	0usec		0usec	USER32.dll	PostMessageW	[Unknown]	0x180025290
+[Loop at line 31 in A0x58e4c794::scaleBlockFallback]	13326.113usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 31 in A0x58e4c794::scaleBlockFallback]	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7c70
+NtWaitForAlertByThreadId	12867.513usec	0usec	0usec		0usec	ntdll.dll	NtWaitForAlertByThreadId	[Unknown]	0x180163cb0
+[Loop at line 92 in LatticeNoiseShaper::processStereoBlock]	12814.613usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 92 in LatticeNoiseShaper::processStereoBlock(double *,double *,int,double)]	LatticeNoiseShaper.h	0x1421c71c0
+[Loop@0x180003656 in func@0x180003600]	12763.313usec	0usec	0usec		0usec	vbvm_asiodriver64.dll	[Loop@0x180003656 in func@0x180003600]	[Unknown]	0x180003656
+log_inline	12538.513usec	0usec	0usec		0usec	ConvoPeq.exe	log_inline	pow.c	0x1425c47c1
+GetFileAttributesExW	12479.712usec	0usec	0usec		0usec	KERNELBASE.dll	GetFileAttributesExW	[Unknown]	0x180024390
+[Loop at line 43 in A0x58e4c794::sanitizeFiniteChunk]	10838.811usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 43 in A0x58e4c794::sanitizeFiniteChunk]	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b62
+set_errno_from_matherr	10667.411usec	0usec	0usec		0usec	ConvoPeq.exe	set_errno_from_matherr	fpexcept.cpp	0x142597010
+[Loop at line 738 in MklFftEvaluator::computeMaskingEnergyStable]	10663.011usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 738 in MklFftEvaluator::computeMaskingEnergyStable(struct MklFftEvaluator::MaskerBuffer const &,class std::array<double,2049> &)]	MklFftEvaluator.h	0x142239db0
+juce::OutputStream::writeByte	10623.711usec	0usec	0usec		0usec	ConvoPeq.exe	juce::OutputStream::writeByte(char)	juce_OutputStream.cpp	0x1424b3750
+A0x10bdf457::fastAbs	10571.011usec	0usec	0usec		0usec	ConvoPeq.exe	A0x10bdf457::fastAbs	CustomInputOversampler.cpp	0x1421ccbf7
+A0x58e4c794::isFiniteNoLibm	10564.111usec	0usec	0usec		0usec	ConvoPeq.exe	A0x58e4c794::isFiniteNoLibm	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b6a
+func@0x14007a230	10539.311usec	0usec	0usec		0usec	ConvoPeq.exe	func@0x14007a230	[Unknown]	0x14007a230
+std::clamp	10444.011usec	0usec	0usec		0usec	ConvoPeq.exe	std::clamp	algorithm	0x142238f83
+[Loop@0x14007a3b0 in func@0x14007a230]	10335.410usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop@0x14007a3b0 in func@0x14007a230]	[Unknown]	0x14007a3b0
+top12	10281.210usec	0usec	0usec		0usec	ConvoPeq.exe	top12	pow.c	0x1425c444d
+_acrt_has_user_matherr	10200.910usec	0usec	0usec		0usec	ConvoPeq.exe	_acrt_has_user_matherr	matherr.cpp	0x1425960e0
+[Loop@0x180003770 in func@0x1800036f0]	10129.810usec	0usec	0usec		0usec	vbvm_asiodriver64.dll	[Loop@0x180003770 in func@0x1800036f0]	[Unknown]	0x180003770
+func@0x140079100	10086.610usec	0usec	0usec		0usec	ConvoPeq.exe	func@0x140079100	[Unknown]	0x140079100
+MklFftEvaluator::dbToPower	9961.510usec	0usec	0usec		0usec	ConvoPeq.exe	MklFftEvaluator::dbToPower	MklFftEvaluator.h	0x142238ffe
+exp_special	9941.610usec	0usec	0usec		0usec	ConvoPeq.exe	exp_special	exp_special.c	0x1425a7980
+MklFftEvaluator::getBinWidth	9828.410usec	0usec	0usec		0usec	ConvoPeq.exe	MklFftEvaluator::getBinWidth	MklFftEvaluator.h	0x142239830
+[Loop at line 34 in `anonymous namespace'::crc64Update]	9821.210usec	0usec	0usec		0usec	ConvoPeq.exe	[Loop at line 34 in `anonymous namespace'::crc64Update(unsigned __int64, const unsigned char *, unsigned __int64)]	CacheManager.cpp	0x14224be40
+func@0x18001b2e8	9755.010usec	0usec	0usec	0.007s	0usec	ole32.dll	func@0x18001b2e8	[Unknown]	0x18001b2e8
+NtTraceEvent	9740.610usec	0usec	0usec		0usec	ntdll.dll	NtTraceEvent	[Unknown]	0x180160c10
+CreateDirectoryW	9614.409usec	0usec	0usec		0usec	KERNELBASE.dll	CreateDirectoryW	[Unknown]	0x180080a50
+AudioEngine::DSPCore::processDouble	9579.710usec	0usec	0usec		0usec	ConvoPeq.exe	AudioEngine::DSPCore::processDouble(class juce::AudioBuffer<double> &,class LockFreeAudioRingBuffer &,struct std::atomic<float> *,struct std::atomic<float> *,struct AudioEngine::DSPCore::ProcessingState const &)	AudioEngine.Processing.DSPCoreDouble.cpp	0x1421c7870
+absNoLibm	9555.409usec	0usec	0usec		0usec	ConvoPeq.exe	absNoLibm	AudioEngine.h	0x1421c7b84
+
+Function Stack	Effective Time	Spin Time	Overhead Time	Effective Time	Spin Time	Overhead Time	Wait Time: Total	Wait Time: Self	GPU Time: Total	GPU Time: Self	Module	Function (Full)	Source File	Start Address
+Total	46.3%	53.7%	0.0%	0usec	0usec	0usec	5567.804s	0s	0.0%	0usec	[Unknown]	[Unknown]	[Unknown]	[Unknown]
+  RtlUserThreadStart	45.9%	53.7%	0.0%	0usec	0usec	0usec	5117.025s	0s	0.0%	0usec	ntdll.dll	RtlUserThreadStart	[Unknown]	0x180087bf0
+    BaseThreadInitThunk	45.9%	53.7%	0.0%	0usec	0usec	0usec	5117.025s	0s	0.0%	0usec	KERNEL32.DLL	BaseThreadInitThunk	[Unknown]	0x18002e940
+      func@0x180003cf0	10.4%	36.1%	0.0%	0usec	0usec	0usec	86.312s	0s	0.0%	0usec	vbvm_asiodriver64.dll	func@0x180003cf0	[Unknown]	0x180003cf0
+        [Loop@0x180003ed0 in func@0x180003cf0]	10.4%	36.1%	0.0%	0usec	0usec	0usec	86.291s	86.291s	0.0%	0usec	vbvm_asiodriver64.dll	[Loop@0x180003ed0 in func@0x180003cf0]	[Unknown]	0x180003ed0
+          SleepEx	0.0%	33.1%	0.0%	0usec	23057026.557usec	0usec			0.0%	0usec	KERNELBASE.dll	SleepEx	[Unknown]	0x180042a10
+          [Loop@0x180003f61 in func@0x180003cf0]	10.1%	0.9%	0.0%	5477.906usec	0usec	0usec	0.000s	0s	0.0%	0usec	vbvm_asiodriver64.dll	[Loop@0x180003f61 in func@0x180003cf0]	[Unknown]	0x180003f61
+            func@0x1800034f0	9.5%	0.9%	0.0%	18107.418usec	0usec	0usec	0.000s	0s	0.0%	0usec	vbvm_asiodriver64.dll	func@0x1800034f0	[Unknown]	0x1800034f0
+              juce::ASIOAudioIODevice::callback	9.3%	0.9%	0.0%	3060.403usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::ASIOAudioIODevice::callback(long)	juce_ASIO_windows.cpp	0x14253d920
+                juce::ASIOAudioIODevice::processBuffer	9.1%	0.9%	0.0%	10973.811usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::ASIOAudioIODevice::processBuffer	juce_ASIO_windows.cpp	0x14253d96f
+                  juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext	9.1%	0.9%	0.0%	23150.624usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)	juce_AudioDeviceManager.cpp	0x14253f640
+                    [Loop at line 118 in juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext]	9.1%	0.9%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	[Loop at line 118 in juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)]	juce_AudioDeviceManager.cpp	0x14253f6c0
+                      juce::AudioDeviceManager::CallbackHandler::audioDeviceIOCallbackWithContext	9.1%	0.9%	0.0%	14369.415usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::AudioDeviceManager::CallbackHandler::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)	juce_AudioDeviceManager.cpp	0x14253f910
+                        juce::AudioDeviceManager::audioDeviceIOCallbackInt	9.1%	0.9%	0.0%	8221.408usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::AudioDeviceManager::audioDeviceIOCallbackInt	juce_AudioDeviceManager.cpp	0x14253f954
+                          juce::AudioProcessorPlayer::audioDeviceIOCallbackWithContext	9.0%	0.9%	0.0%	43060.344usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	juce::AudioProcessorPlayer::audioDeviceIOCallbackWithContext(float const * const *,int,float * const *,int,int,struct juce::AudioIODeviceCallbackContext const &)	juce_AudioProcessorPlayer.cpp	0x14225b660
+                            AudioEngineProcessor::processBlock	8.7%	0.3%	0.0%	7466.608usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	AudioEngineProcessor::processBlock(class juce::AudioBuffer<double> &,class juce::MidiBuffer &)	AudioEngineProcessor.cpp	0x1421cf630
+                              AudioEngine::processBlockDouble	8.7%	0.3%	0.0%	4191.204usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	AudioEngine::processBlockDouble	AudioEngine.Processing.BlockDouble.cpp	0x1421cf69e
+                                AudioEngine::DSPCore::processDouble	8.6%	0.0%	0.0%	9579.710usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	AudioEngine::DSPCore::processDouble(class juce::AudioBuffer<double> &,class LockFreeAudioRingBuffer &,struct std::atomic<float> *,struct std::atomic<float> *,struct AudioEngine::DSPCore::ProcessingState const &)	AudioEngine.Processing.DSPCoreDouble.cpp	0x1421c7870
+                                  CustomInputOversampler::processDown	6.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	CustomInputOversampler::processDown(class juce::dsp::AudioBlock<double> const &,class juce::dsp::AudioBlock<double> &,int)	CustomInputOversampler.cpp	0x1421cd250
+                                    [Loop at line 714 in CustomInputOversampler::processDown]	6.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 714 in CustomInputOversampler::processDown(class juce::dsp::AudioBlock<double> const &,class juce::dsp::AudioBlock<double> &,int)]	CustomInputOversampler.cpp	0x1421cd521
+                                      [Loop at line 719 in CustomInputOversampler::processDown]	6.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 719 in CustomInputOversampler::processDown(class juce::dsp::AudioBlock<double> const &,class juce::dsp::AudioBlock<double> &,int)]	CustomInputOversampler.cpp	0x1421cd570
+                                        CustomInputOversampler::decimateStage	6.2%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	CustomInputOversampler::decimateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)	CustomInputOversampler.cpp	0x1421cccd0
+                                          [Loop at line 464 in CustomInputOversampler::decimateStage]	6.2%	0.0%	0.0%	54882.656usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 464 in CustomInputOversampler::decimateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)]	CustomInputOversampler.cpp	0x1421cce32
+                                            [Loop at line 557 in CustomInputOversampler::decimateStage]	6.1%	0.0%	0.0%	3226229.368usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 557 in CustomInputOversampler::decimateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)]	CustomInputOversampler.cpp	0x1421cceb0
+                                              A0x10bdf457::isBadSample	1.4%	0.0%	0.0%	996318.210usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x10bdf457::isBadSample	CustomInputOversampler.cpp	0x1421ccec9
+                                            A0x10bdf457::fastAbs	0.0%	0.0%	0.0%	7143.007usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x10bdf457::fastAbs	CustomInputOversampler.cpp	0x1421ccf1c
+                                            A0x10bdf457::isBadSample	0.0%	0.0%	0.0%	5816.806usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x10bdf457::isBadSample	CustomInputOversampler.cpp	0x1421cce5e
+                                  CustomInputOversampler::processUp	0.9%	0.0%	0.0%	4381.004usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	CustomInputOversampler::processUp(class juce::dsp::AudioBlock<double> &,int)	CustomInputOversampler.cpp	0x1421ccfc0
+                                    [Loop at line 629 in CustomInputOversampler::processUp]	0.9%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 629 in CustomInputOversampler::processUp(class juce::dsp::AudioBlock<double> &,int)]	CustomInputOversampler.cpp	0x1421cd103
+                                      [Loop at line 634 in CustomInputOversampler::processUp]	0.9%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 634 in CustomInputOversampler::processUp(class juce::dsp::AudioBlock<double> &,int)]	CustomInputOversampler.cpp	0x1421cd150
+                                        CustomInputOversampler::interpolateStage	0.9%	0.0%	0.0%	3354.303usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	CustomInputOversampler::interpolateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)	CustomInputOversampler.cpp	0x1421cc9d0
+                                          [Loop at line 352 in CustomInputOversampler::interpolateStage]	0.8%	0.0%	0.0%	32177.633usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 352 in CustomInputOversampler::interpolateStage(struct CustomInputOversampler::Stage const &,double const *,int,double *,int)]	CustomInputOversampler.cpp	0x1421ccaa0
+                                            CustomInputOversampler::dotProductAvx2	0.8%	0.0%	0.0%	64985.466usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	CustomInputOversampler::dotProductAvx2(double const *,double const *,int)	CustomInputOversampler.cpp	0x1421cbdf0
+                                              [Loop at line 141 in CustomInputOversampler::dotProductAvx2]	0.7%	0.0%	0.0%	460691.867usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 141 in CustomInputOversampler::dotProductAvx2(double const *,double const *,int)]	CustomInputOversampler.cpp	0x1421cbe10
+                                              A0x10bdf457::isBadSample	0.0%	0.0%	0.0%	3371.303usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x10bdf457::isBadSample	CustomInputOversampler.cpp	0x1421cbf9b
+                                            A0x10bdf457::fastAbs	0.0%	0.0%	0.0%	10571.011usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x10bdf457::fastAbs	CustomInputOversampler.cpp	0x1421ccbf7
+                                            A0x10bdf457::isBadSample	0.0%	0.0%	0.0%	5762.206usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x10bdf457::isBadSample	CustomInputOversampler.cpp	0x1421ccbaf
+                                          juce::FloatVectorOperationsBase<double,int>::copy	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorOperationsBase<double,int>::copy	juce_FloatVectorOperations.cpp	0x1421cca2d
+                                            memcpy	0.0%	0.0%	0.0%	5971.506usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	memcpy	memcpy.asm	0x1425c5c30
+                                              [Loop at line 344 in memcpy]	0.0%	0.0%	0.0%	9265.709usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 344 in memcpy]	memcpy.asm	0x1425c5e10
+                                  AudioEngine::DSPCore::processInputDouble	0.8%	0.0%	0.0%	7242.307usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	AudioEngine::DSPCore::processInputDouble	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c79c4
+                                    convo::UltraHighRateDCBlocker::process	0.6%	0.0%	0.0%	5877.906usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	convo::UltraHighRateDCBlocker::process(double *,int)	UltraHighRateDCBlocker.h	0x1421c3f00
+                                      [Loop at line 171 in convo::UltraHighRateDCBlocker::process]	0.6%	0.0%	0.0%	128933.131usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 171 in convo::UltraHighRateDCBlocker::process(double *,int)]	UltraHighRateDCBlocker.h	0x1421c3fa0
+                                        killDenormal	0.2%	0.0%	0.0%	124849.527usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	killDenormal	DspNumericPolicy.h	0x1421c3ff8
+                                        killDenormal	0.1%	0.0%	0.0%	87516.788usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	killDenormal	DspNumericPolicy.h	0x1421c3fb8
+                                        killDenormal	0.1%	0.0%	0.0%	50470.251usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	killDenormal	DspNumericPolicy.h	0x1421c4021
+                                    A0x58e4c794::sanitizeFiniteChunk	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x58e4c794::sanitizeFiniteChunk	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7ae7
+                                      [Loop at line 43 in A0x58e4c794::sanitizeFiniteChunk]	0.1%	0.0%	0.0%	22435.323usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 43 in A0x58e4c794::sanitizeFiniteChunk]	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b10
+                                        A0x58e4c794::isFiniteAndAbsBelowNoLibm	0.1%	0.0%	0.0%	5261.205usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x58e4c794::isFiniteAndAbsBelowNoLibm	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b18
+                                          A0x58e4c794::isFiniteNoLibm	0.0%	0.0%	0.0%	29217.630usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x58e4c794::isFiniteNoLibm	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b18
+                                          absNoLibm	0.0%	0.0%	0.0%	4043.704usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	absNoLibm	AudioEngine.h	0x1421c7b32
+                                    A0x58e4c794::sanitizeFiniteChunk	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x58e4c794::sanitizeFiniteChunk	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b56
+                                      [Loop at line 43 in A0x58e4c794::sanitizeFiniteChunk]	0.1%	0.0%	0.0%	10838.811usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 43 in A0x58e4c794::sanitizeFiniteChunk]	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b62
+                                        A0x58e4c794::isFiniteAndAbsBelowNoLibm	0.1%	0.0%	0.0%	25025.825usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x58e4c794::isFiniteAndAbsBelowNoLibm	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b6a
+                                          A0x58e4c794::isFiniteNoLibm	0.0%	0.0%	0.0%	10564.111usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x58e4c794::isFiniteNoLibm	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7b6a
+                                          absNoLibm	0.0%	0.0%	0.0%	9555.409usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	absNoLibm	AudioEngine.h	0x1421c7b84
+                                    AudioEngine::DSPCore::measureLevel	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	AudioEngine::DSPCore::measureLevel(class juce::dsp::AudioBlock<double const > const &)	AudioEngine.Processing.DSPCoreIO.cpp	0x1421ca230
+                                      [Loop at line 159 in AudioEngine::DSPCore::measureLevel]	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 159 in AudioEngine::DSPCore::measureLevel(class juce::dsp::AudioBlock<double const > const &)]	AudioEngine.Processing.DSPCoreIO.cpp	0x1421ca263
+                                        juce::FloatVectorOperationsBase<double,int>::findMinAndMax	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorOperationsBase<double,int>::findMinAndMax	juce_FloatVectorOperations.cpp	0x1421ca26b
+                                          juce::FloatVectorHelpers::A0xd903f157::findMinAndMax	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorHelpers::A0xd903f157::findMinAndMax	juce_FloatVectorOperations.cpp	0x1421ca26b
+                                            juce::FloatVectorHelpers::MinMax<juce::FloatVectorHelpers::BasicOps64>::findMinAndMax	0.1%	0.0%	0.0%	3044.703usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorHelpers::MinMax<juce::FloatVectorHelpers::BasicOps64>::findMinAndMax	juce_FloatVectorOperations.cpp	0x1421ca26b
+                                              [Loop at line 466 in juce::FloatVectorHelpers::MinMax<juce::FloatVectorHelpers::BasicOps64>::findMinAndMax]	0.1%	0.0%	0.0%	18762.219usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 466 in juce::FloatVectorHelpers::MinMax<juce::FloatVectorHelpers::BasicOps64>::findMinAndMax]	juce_FloatVectorOperations.cpp	0x1421ca2a0
+                                                juce::FloatVectorHelpers::BasicOps64::max	0.0%	0.0%	0.0%	17253.317usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorHelpers::BasicOps64::max	juce_FloatVectorOperations.cpp	0x1421ca2af
+                                                juce::FloatVectorHelpers::BasicOps64::min	0.0%	0.0%	0.0%	9447.610usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorHelpers::BasicOps64::min	juce_FloatVectorOperations.cpp	0x1421ca2ab
+                                              juce::FloatVectorHelpers::isAligned	0.0%	0.0%	0.0%	975.501usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorHelpers::isAligned	juce_FloatVectorOperations.cpp	0x1421ca275
+                                  AudioEngine::DSPCore::processOutputDouble	0.7%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	AudioEngine::DSPCore::processOutputDouble(class juce::AudioBuffer<double> &,int,struct AudioEngine::DSPCore::ProcessingState const &)	AudioEngine.Processing.DSPCoreDouble.cpp	0x1421c9120
+                                    LatticeNoiseShaper::processStereoBlock	0.5%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::processStereoBlock(double *,double *,int,double)	LatticeNoiseShaper.h	0x1421c7010
+                                      [Loop at line 92 in LatticeNoiseShaper::processStereoBlock]	0.5%	0.0%	0.0%	12814.613usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 92 in LatticeNoiseShaper::processStereoBlock(double *,double *,int,double)]	LatticeNoiseShaper.h	0x1421c71c0
+                                        LatticeNoiseShaper::processSample	0.5%	0.0%	0.0%	79938.681usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::processSample(int,double,class std::array<double,9> &,double const *,double)	LatticeNoiseShaper.h	0x1421c7350
+                                          LatticeNoiseShaper::advanceState	0.3%	0.0%	0.0%	118391.920usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::advanceState	LatticeNoiseShaper.h	0x1421c7512
+                                            std::clamp	0.1%	0.0%	0.0%	78658.280usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	std::clamp	algorithm	0x1421c757b
+                                          LatticeNoiseShaper::quantize	0.1%	0.0%	0.0%	35694.136usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::quantize	LatticeNoiseShaper.h	0x1421c7367
+                                            LatticeNoiseShaper::uniform	0.0%	0.0%	0.0%	4163.304usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::uniform	LatticeNoiseShaper.h	0x1421c73a1
+                                              LatticeNoiseShaper::xoshiro256plusplus	0.0%	0.0%	0.0%	15350.816usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::xoshiro256plusplus	LatticeNoiseShaper.h	0x1421c73a1
+                                            LatticeNoiseShaper::uniform	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::uniform	LatticeNoiseShaper.h	0x1421c73e4
+                                              LatticeNoiseShaper::xoshiro256plusplus	0.0%	0.0%	0.0%	10975.111usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::xoshiro256plusplus	LatticeNoiseShaper.h	0x1421c73e4
+                                          LatticeNoiseShaper::computeFeedback	0.0%	0.0%	0.0%	18774.019usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LatticeNoiseShaper::computeFeedback	LatticeNoiseShaper.h	0x1421c736f
+                                          std::clamp	0.0%	0.0%	0.0%	3032.303usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	std::clamp	algorithm	0x1421c755b
+                                    convo::UltraHighRateDCBlocker::processStereo	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	convo::UltraHighRateDCBlocker::processStereo	UltraHighRateDCBlocker.h	0x1421c91f3
+                                      convo::UltraHighRateDCBlocker::process	0.1%	0.0%	0.0%	3038.203usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	convo::UltraHighRateDCBlocker::process(double *,int)	UltraHighRateDCBlocker.h	0x1421c3f00
+                                        [Loop at line 171 in convo::UltraHighRateDCBlocker::process]	0.1%	0.0%	0.0%	25664.326usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 171 in convo::UltraHighRateDCBlocker::process(double *,int)]	UltraHighRateDCBlocker.h	0x1421c3fa0
+                                          killDenormal	0.0%	0.0%	0.0%	19641.820usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	killDenormal	DspNumericPolicy.h	0x1421c3ff8
+                                          killDenormal	0.0%	0.0%	0.0%	11114.911usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	killDenormal	DspNumericPolicy.h	0x1421c3fb8
+                                          killDenormal	0.0%	0.0%	0.0%	4616.405usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	killDenormal	DspNumericPolicy.h	0x1421c4021
+                                    [Loop at line 675 in AudioEngine::DSPCore::processOutputDouble]	0.0%	0.0%	0.0%	6884.507usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 675 in AudioEngine::DSPCore::processOutputDouble(class juce::AudioBuffer<double> &,int,struct AudioEngine::DSPCore::ProcessingState const &)]	AudioEngine.Processing.DSPCoreDouble.cpp	0x1421c9950
+                                    juce::FloatVectorOperationsBase<double,int>::copy	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorOperationsBase<double,int>::copy	juce_FloatVectorOperations.cpp	0x1421c9cfa
+                                      memcpy	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	memcpy	memcpy.asm	0x1425c5c30
+                                        [Loop at line 344 in memcpy]	0.0%	0.0%	0.0%	6104.906usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 344 in memcpy]	memcpy.asm	0x1425c5e10
+                                    [Loop at line 598 in AudioEngine::DSPCore::processOutputDouble]	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 598 in AudioEngine::DSPCore::processOutputDouble(class juce::AudioBuffer<double> &,int,struct AudioEngine::DSPCore::ProcessingState const &)]	AudioEngine.Processing.DSPCoreDouble.cpp	0x1421c93f0
+                                      A0xd1903696::pushAdaptiveCaptureBlocks	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0xd1903696::pushAdaptiveCaptureBlocks	AudioEngine.Processing.DSPCoreDouble.cpp	0x1421c93b6
+                                        LockFreeRingBuffer<AudioBlock,4096>::pushWithWriter	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	LockFreeRingBuffer<AudioBlock,4096>::pushWithWriter	LockFreeRingBuffer.h	0x1421c93f0
+                                          `anonymous-namespace'::pushAdaptiveCaptureBlocks::__l1::<lambda_1>::operator()	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	`anonymous-namespace'::pushAdaptiveCaptureBlocks::__l1::<lambda_1>::operator()	AudioEngine.Processing.DSPCoreDouble.cpp	0x1421c9439
+                                            [Loop at line 258 in `anonymous-namespace'::pushAdaptiveCaptureBlocks::__l1::<lambda_1>::operator()]	0.0%	0.0%	0.0%	2839.903usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 258 in `anonymous-namespace'::pushAdaptiveCaptureBlocks::__l1::<lambda_1>::operator()]	AudioEngine.Processing.DSPCoreDouble.cpp	0x1421c9490
+                                  [Loop at line 334 in AudioEngine::DSPCore::processDouble]	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 334 in AudioEngine::DSPCore::processDouble(class juce::AudioBuffer<double> &,class LockFreeAudioRingBuffer &,struct std::atomic<float> *,struct std::atomic<float> *,struct AudioEngine::DSPCore::ProcessingState const &)]	AudioEngine.Processing.DSPCoreDouble.cpp	0x1421c7c60
+                                    AudioEngine::DSPCore::processInputDouble	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	AudioEngine::DSPCore::processInputDouble	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c79c4
+                                      convo::input_transform::convertDoubleToDoubleHighQuality	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	convo::input_transform::convertDoubleToDoubleHighQuality	InputBitDepthTransform.h	0x1421c7a09
+                                        convo::input_transform::applyHighQuality64BitTransform	0.1%	0.0%	0.0%	1783.002usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	convo::input_transform::applyHighQuality64BitTransform(double *,int,double)	InputBitDepthTransform.h	0x1421c9da0
+                                          convo::input_transform::sanitizeAndLimit	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	convo::input_transform::sanitizeAndLimit	InputBitDepthTransform.h	0x1421c9dc1
+                                            [Loop at line 45 in convo::input_transform::sanitizeAndLimit]	0.1%	0.0%	0.0%	40940.141usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 45 in convo::input_transform::sanitizeAndLimit]	InputBitDepthTransform.h	0x1421c9e00
+                                        juce::FloatVectorOperationsBase<double,int>::copy	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorOperationsBase<double,int>::copy	juce_FloatVectorOperations.cpp	0x1421c7a2d
+                                          memcpy	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	memcpy	memcpy.asm	0x1425c5c30
+                                            [Loop at line 344 in memcpy]	0.0%	0.0%	0.0%	15665.816usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 344 in memcpy]	memcpy.asm	0x1425c5e10
+                                      A0x58e4c794::scaleBlockFallback	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	A0x58e4c794::scaleBlockFallback	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c79d2
+                                        [Loop at line 31 in A0x58e4c794::scaleBlockFallback]	0.0%	0.0%	0.0%	13326.113usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 31 in A0x58e4c794::scaleBlockFallback]	AudioEngine.Processing.DSPCoreIO.cpp	0x1421c7c70
+                                  juce::FloatVectorOperationsBase<double,int>::copy	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorOperationsBase<double,int>::copy	juce_FloatVectorOperations.cpp	0x1421c7eb7
+                                    memcpy	0.0%	0.0%	0.0%	9053.609usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	memcpy	memcpy.asm	0x1425c5c30
+                                      [Loop at line 344 in memcpy]	0.0%	0.0%	0.0%	2110.202usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 344 in memcpy]	memcpy.asm	0x1425c5e10
+                                  juce::FloatVectorOperationsBase<double,int>::copy	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::FloatVectorOperationsBase<double,int>::copy	juce_FloatVectorOperations.cpp	0x1421c7ea4
+                                    memcpy	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	memcpy	memcpy.asm	0x1425c5c30
+                                      [Loop at line 344 in memcpy]	0.0%	0.0%	0.0%	2007.602usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 344 in memcpy]	memcpy.asm	0x1425c5e10
+                                AudioEngine::processBlockDouble::__l2::AudioCallbackRuntimeScope::{ctor}	0.1%	0.3%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	AudioEngine::processBlockDouble::__l2::AudioCallbackRuntimeScope::{ctor}	AudioEngine.Processing.BlockDouble.cpp	0x1421cf6da
+                                  convo::isr::LifecycleIsolationRuntime::enterAudioCallback	0.1%	0.3%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	convo::isr::LifecycleIsolationRuntime::enterAudioCallback(void)	ISRLifecycle.cpp	0x1421a9870
+                                    convo::isr::LifecycleIsolationRuntime::transitionTo	0.1%	0.3%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	convo::isr::LifecycleIsolationRuntime::transitionTo(enum convo::isr::LifecyclePhase)	ISRLifecycle.cpp	0x1421a9970
+                                      std::lock_guard<std::mutex>::{ctor}	0.1%	0.2%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	std::lock_guard<std::mutex>::{ctor}	mutex	0x1421a999b
+                                        Mtx_lock	0.1%	0.2%	0.0%	1238.101usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	Mtx_lock	mutex.cpp	0x14256f9c0
+                                          mtx_do_lock	0.1%	0.2%	0.0%	0usec	0usec	0usec	0.000s	0.000s	0.0%	0usec	ConvoPeq.exe	mtx_do_lock	mutex.cpp	0x14256f9cd
+                                            SwitchToThread	0.0%	0.2%	0.0%	21686.822usec	148029.450usec	0usec			0.0%	0usec	KERNELBASE.dll	SwitchToThread	[Unknown]	0x1800b1a50
+                                            RtlAcquireSRWLockExclusive	0.0%	0.0%	0.0%	7208.807usec	0usec	0usec			0.0%	0usec	ntdll.dll	RtlAcquireSRWLockExclusive	[Unknown]	0x18004e130
+                                            GetCurrentThreadId	0.0%	0.0%	0.0%	3140.303usec	0usec	0usec			0.0%	0usec	KERNEL32.DLL	GetCurrentThreadId	[Unknown]	0x180018620
+                                            SwitchToThread	0.0%	0.0%	0.0%	2966.303usec	0usec	0usec			0.0%	0usec	KERNEL32.DLL	SwitchToThread	[Unknown]	0x180031c40
+                                      std::lock_guard<std::mutex>::{dtor}	0.0%	0.1%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	std::lock_guard<std::mutex>::{dtor}	mutex	0x1421a9ba6
+                                        Mtx_unlock	0.0%	0.1%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	Mtx_unlock	mutex.cpp	0x14256fa50
+                                          SwitchToThread	0.0%	0.1%	0.0%	0usec	43330.744usec	0usec			0.0%	0usec	KERNELBASE.dll	SwitchToThread	[Unknown]	0x1800b1a50
+                                AudioEngine::processBlockDouble::__l2::AudioCallbackRuntimeScope::{dtor}	0.0%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	AudioEngine::processBlockDouble::__l2::AudioCallbackRuntimeScope::{dtor}	AudioEngine.Processing.BlockDouble.cpp	0x1421d0457
+                                  convo::isr::LifecycleIsolationRuntime::leaveAudioCallback	0.0%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	convo::isr::LifecycleIsolationRuntime::leaveAudioCallback	ISRLifecycle.cpp	0x1421d0477
+                                    convo::isr::LifecycleIsolationRuntime::transitionTo	0.0%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	convo::isr::LifecycleIsolationRuntime::transitionTo(enum convo::isr::LifecyclePhase)	ISRLifecycle.cpp	0x1421a9970
+                                      std::lock_guard<std::mutex>::{ctor}	0.0%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	std::lock_guard<std::mutex>::{ctor}	mutex	0x1421a999b
+                                        Mtx_lock	0.0%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0s	0.0%	0usec	ConvoPeq.exe	Mtx_lock	mutex.cpp	0x14256f9c0
+                                          mtx_do_lock	0.0%	0.0%	0.0%	0usec	0usec	0usec	0.000s	0.000s	0.0%	0usec	ConvoPeq.exe	mtx_do_lock	mutex.cpp	0x14256f9cd
+                                            SwitchToThread	0.0%	0.0%	0.0%	3040.703usec	22247.723usec	0usec			0.0%	0usec	KERNELBASE.dll	SwitchToThread	[Unknown]	0x1800b1a50
+                                      std::lock_guard<std::mutex>::{dtor}	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	std::lock_guard<std::mutex>::{dtor}	mutex	0x1421a9ba6
+                                        Mtx_unlock	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	Mtx_unlock	mutex.cpp	0x14256fa50
+                                          SwitchToThread	0.0%	0.0%	0.0%	0usec	3806.604usec	0usec			0.0%	0usec	KERNELBASE.dll	SwitchToThread	[Unknown]	0x1800b1a50
+                                AudioEngine::makeRuntimeReadHandle	0.0%	0.0%	0.0%	3220.303usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	AudioEngine::makeRuntimeReadHandle(struct convo::RuntimeReaderContext const &)	AudioEngine.h	0x142195120
+                                convo::consumeAtomic	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	convo::consumeAtomic	AtomicAccess.h	0x1421cf69e
+                                  std::atomic_load_explicit	0.0%	0.0%	0.0%	2278.402usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	std::atomic_load_explicit	atomic	0x1421cf69e
+                              convo::RCUReaderGuard::~RCUReaderGuard	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	convo::RCUReaderGuard::~RCUReaderGuard(void)	RCUReader.h	0x1421944b0
+                                convo::RCUReader::exit	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	convo::RCUReader::exit	RCUReader.h	0x1421944c3
+                                  convo::RCUReader::currentThreadToken	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	convo::RCUReader::currentThreadToken(void)	RCUReader.h	0x142194370
+                                    std::this_thread::get_id	0.0%	0.0%	0.0%	3912.004usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	std::this_thread::get_id	thread	0x142194374
+                            juce::MidiMessageCollector::removeNextBlockOfMessages	0.1%	0.6%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::MidiMessageCollector::removeNextBlockOfMessages	juce_MidiMessageCollector.cpp	0x14225b6e2
+                              juce::GenericScopedLock<juce::CriticalSection>::{dtor}	0.1%	0.6%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::GenericScopedLock<juce::CriticalSection>::{dtor}	juce_ScopedLock.h	0x14225b831
+                                juce::CriticalSection::exit	0.1%	0.6%	0.0%	2183.802usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::CriticalSection::exit	juce_Threads_windows.cpp	0x14225b831
+                                  SwitchToThread	0.1%	0.6%	0.0%	37674.238usec	393243.799usec	0usec			0.0%	0usec	KERNELBASE.dll	SwitchToThread	[Unknown]	0x1800b1a50
+                                  TlsGetValue	0.0%	0.0%	0.0%	13627.014usec	0usec	0usec			0.0%	0usec	KERNEL32.DLL	TlsGetValue	[Unknown]	0x1800844f0
+                                  SwitchToThread	0.0%	0.0%	0.0%	10061.310usec	0usec	0usec			0.0%	0usec	KERNEL32.DLL	SwitchToThread	[Unknown]	0x180031c40
+                                  GetLastError	0.0%	0.0%	0.0%	2717.303usec	0usec	0usec			0.0%	0usec	KERNEL32.DLL	GetLastError	[Unknown]	0x180018640
+                              juce::Time::getMillisecondCounterHiRes	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::Time::getMillisecondCounterHiRes	juce_SystemStats_windows.cpp	0x14225b6f2
+                                juce::HiResCounterHandler::getMillisecondCounterHiRes	0.0%	0.0%	0.0%	3103.403usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::HiResCounterHandler::getMillisecondCounterHiRes	juce_SystemStats_windows.cpp	0x14225b6f2
+                            juce::AudioBuffer<double>::makeCopyOf<float>	0.1%	0.0%	0.0%	4467.305usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::AudioBuffer<double>::makeCopyOf<float>(class juce::AudioBuffer<float> const &,bool)	juce_AudioSampleBuffer.h	0x14225cbd0
+                              [Loop at line 568 in juce::AudioBuffer<double>::makeCopyOf<float>]	0.1%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 568 in juce::AudioBuffer<double>::makeCopyOf<float>(class juce::AudioBuffer<float> const &,bool)]	juce_AudioSampleBuffer.h	0x14225cd00
+                                [Loop at line 574 in juce::AudioBuffer<double>::makeCopyOf<float>]	0.1%	0.0%	0.0%	99524.101usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	[Loop at line 574 in juce::AudioBuffer<double>::makeCopyOf<float>(class juce::AudioBuffer<float> const &,bool)]	juce_AudioSampleBuffer.h	0x14225cd20
+                            juce::GenericScopedLock<juce::CriticalSection>::{dtor}	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::GenericScopedLock<juce::CriticalSection>::{dtor}	juce_ScopedLock.h	0x14225c32b
+                              juce::CriticalSection::exit	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::CriticalSection::exit	juce_Threads_windows.cpp	0x14225c32b
+                                SwitchToThread	0.0%	0.0%	0.0%	0usec	7970.208usec	0usec			0.0%	0usec	KERNELBASE.dll	SwitchToThread	[Unknown]	0x1800b1a50
+                            juce::GenericScopedLock<juce::CriticalSection>::{ctor}	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::GenericScopedLock<juce::CriticalSection>::{ctor}	juce_ScopedLock.h	0x14225b6c9
+                              juce::CriticalSection::enter	0.0%	0.0%	0.0%	0usec	0usec	0usec			0.0%	0usec	ConvoPeq.exe	juce::CriticalSection::enter	juce_Threads_windows.cpp	0x14225b6ce
+                                RtlTryEnterCriticalSection	0.0%	0.0%	0.0%	0usec	5013.305usec	0usec			0.0%	0usec	ntdll.dll	RtlTryEnterCriticalSection	[Unknown]	0x1800ab100

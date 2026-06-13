@@ -621,6 +621,21 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         // 3. CrossfadeRuntime を complete 状態に戻す（pending=false）
         crossfadeRuntime_.complete();
 
+        // ★ A-4: publish 前準備 — publishIdleWorldOnly は前準備を含まない
+        crossfadeRuntime_.setDryHoldSamples(0);
+        refreshCrossfadePreparedSnapshotFromAtomics();
+
+        // ★ A-4: Idle world publish — AudioThread が正しく idle 状態を観測できるよう発行
+        {
+            const convo::RuntimeReaderContext messageCtx{
+                messageThreadRcuReader, convo::ObserveChannel::Message };
+            const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
+            auto* currentAfterFade =
+                resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+            (void)publishIdleWorldOnly(currentAfterFade,
+                convo::TransitionPolicy::HardReset);
+        }
+
         diagLog("[HEALTH] Crossfade timeout recovery completed");
     }
 

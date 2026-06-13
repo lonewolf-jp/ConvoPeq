@@ -346,6 +346,7 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/AudioEngine.Snapshot.cpp
     src/audioengine/AudioEngine.Fifo.cpp
     src/audioengine/AudioEngine.Timer.cpp
+    src/audioengine/AudioEngine.Transition.cpp
     src/audioengine/AudioEngine.Parameters.cpp
     src/audioengine/AudioEngine.EQResponse.cpp
     src/audioengine/AudioEngine.UIEvents.cpp

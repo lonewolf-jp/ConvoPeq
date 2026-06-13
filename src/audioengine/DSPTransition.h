@@ -111,6 +111,9 @@ public:
 
     // notifyTransitionComplete: クロスフェード完了時の処理
     // Timer から呼ばれる (代替: Coordinator::notifyTransitionComplete)
+    // ★ A-4 注: 現在は Coordinator::notifyTransitionComplete 経由でのみ到達する
+    //   将来統合フック。publishIdleWorldOnly() が別途用意されているため、
+    //   本関数の publish ブロックは将来 publishIdleWorldOnly に置き換え可能。
     void onTransitionComplete(AudioEngine::DSPCore* currentAfterFade) noexcept
     {
         if (currentAfterFade == nullptr)

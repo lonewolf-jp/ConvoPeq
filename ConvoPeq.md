@@ -108,6 +108,7 @@
         │   ├── AudioEngine.StateIO.cpp
         │   ├── AudioEngine.Threading.cpp
         │   ├── AudioEngine.Timer.cpp
+        │   ├── AudioEngine.Transition.cpp
         │   ├── AudioEngine.UIEvents.cpp
         │   ├── AudioEngine.h
         │   ├── AudioEngineProcessor.cpp
@@ -602,6 +603,7 @@ target_sources(ConvoPeq PRIVATE
     src/audioengine/AudioEngine.Snapshot.cpp
     src/audioengine/AudioEngine.Fifo.cpp
     src/audioengine/AudioEngine.Timer.cpp
+    src/audioengine/AudioEngine.Transition.cpp
     src/audioengine/AudioEngine.Parameters.cpp
     src/audioengine/AudioEngine.EQResponse.cpp
     src/audioengine/AudioEngine.UIEvents.cpp
@@ -30189,6 +30191,60 @@ void AudioEngine::releaseResources()
     drainDeferredRetireQueues(true);
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ReclaimComplete);
 
+    // ★ C-2: EmergencyDrain — Optional 最終手段（デフォルトはスキップ）
+    //   常に EmergencyDrain フェーズを経由（ReclaimComplete+1=EmergencyDrain のため単一遷移）
+    //   CONVOPEQ_EMERGENCY_DRAIN が定義されている場合のみ有効な処理を実行。
+    //   Reader slot の epoch/depth 強制書き換えは一切禁止。
+    shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::EmergencyDrain);
+#ifdef CONVOPEQ_EMERGENCY_DRAIN
+    {
+        diagLog("[DIAG] releaseResources: EmergencyDrain phase enter");
+
+        constexpr int kEmergencyDrainMaxMs = 500;
+        const auto emergencyStartMs = juce::Time::getMillisecondCounterHiRes();
+
+        // Deferred publish クリア
+        if (runtimeOrchestrator_)
+            runtimeOrchestrator_->clearDeferredForShutdown();
+        diagLog("[DIAG] releaseResources: EmergencyDrain — cleared deferred publish");
+
+        // 安全な tryReclaim（drainAll 禁止）
+        {
+            const auto preReclaimPending = m_retireRouter->pendingRetireCount();
+            m_epochDomain.tryReclaim();
+            const auto postReclaimPending = m_retireRouter->pendingRetireCount();
+            diagLog("[DIAG] releaseResources: EmergencyDrain — tryReclaim done (pending "
+                + juce::String(static_cast<int>(preReclaimPending)) + " → "
+                + juce::String(static_cast<int>(postReclaimPending)) + ")");
+        }
+
+        // Crossfade timeout recovery の強制実行
+        if (crossfadeRuntime_.isPending())
+        {
+            diagLog("[DIAG] releaseResources: EmergencyDrain — forcing crossfade recovery");
+            crossfadeRuntime_.reset();
+            convo::publishAtomic(activeCrossfadeId_, uint64_t{0}, std::memory_order_release);
+        }
+
+        const auto emergencyElapsedMs = juce::Time::getMillisecondCounterHiRes() - emergencyStartMs;
+        diagLog("[DIAG] releaseResources: EmergencyDrain phase completed in "
+            + juce::String(emergencyElapsedMs, 1) + "ms");
+        emitEvidenceTickNonRt(true);
+    }
+#else
+    {
+        // DiagnosticMode: evidence 出力のみ
+        const auto audit = collectDrainAudit();
+        if (!audit.isAllZero() || audit.stuckReaderCount > 0)
+        {
+            diagLog("[DIAG] releaseResources: EmergencyDrain (diagnostic only) — "
+                "pendingPub=" + juce::String(static_cast<int64>(audit.pendingPublication)) +
+                " pendingRetire=" + juce::String(static_cast<int64>(audit.pendingRetire)) +
+                " stuckReaders=" + juce::String(static_cast<int64>(audit.stuckReaderCount)));
+        }
+    }
+#endif // CONVOPEQ_EMERGENCY_DRAIN
+
     // ★ P3: VerifyDrained — 最終監査フェーズ
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::VerifyDrained);
     diagLog("[DIAG] releaseResources: VerifyDrained — collecting drain audit");
@@ -32130,6 +32186,7 @@ bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
          || phase == convo::isr::ShutdownPhase::RetireClosed
          || phase == convo::isr::ShutdownPhase::EpochSettled
          || phase == convo::isr::ShutdownPhase::ReclaimComplete
+         || phase == convo::isr::ShutdownPhase::EmergencyDrain     // ★ C-2
          || phase == convo::isr::ShutdownPhase::TimedOut
          || phase == convo::isr::ShutdownPhase::Failed
          || phase == convo::isr::ShutdownPhase::ShutdownComplete);
@@ -32785,6 +32842,21 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         // 3. CrossfadeRuntime を complete 状態に戻す（pending=false）
         crossfadeRuntime_.complete();
 
+        // ★ A-4: publish 前準備 — publishIdleWorldOnly は前準備を含まない
+        crossfadeRuntime_.setDryHoldSamples(0);
+        refreshCrossfadePreparedSnapshotFromAtomics();
+
+        // ★ A-4: Idle world publish — AudioThread が正しく idle 状態を観測できるよう発行
+        {
+            const convo::RuntimeReaderContext messageCtx{
+                messageThreadRcuReader, convo::ObserveChannel::Message };
+            const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
+            auto* currentAfterFade =
+                resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle);
+            (void)publishIdleWorldOnly(currentAfterFade,
+                convo::TransitionPolicy::HardReset);
+        }
+
         diagLog("[HEALTH] Crossfade timeout recovery completed");
     }
 
@@ -32799,6 +32871,40 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         // 強制診断ダンプ
         emitEvidenceTickNonRt(true);
     }
+}
+
+```
+
+### 📄 `src\audioengine\AudioEngine.Transition.cpp`
+
+```
+#include <JuceHeader.h>
+#include "AudioEngine.h"
+#include "RuntimeBuilder.h"
+#include "RuntimePublicationOrchestrator.h"
+
+// ★ A-4: Idle world publish 統一関数（publish only）
+//   責務は publishWorld のみ。setDryHoldSamples/resfreshSnapshot は含まない。
+//   前準備は各経路の呼び出し側で実行すること。
+//   Returns: true=publish 実行, false=shutdown guard または nullptr で skip
+bool AudioEngine::publishIdleWorldOnly(
+    AudioEngine::DSPCore* currentAfterFade,
+    convo::TransitionPolicy idlePolicy) noexcept
+{
+    // Shutdown guard（publishWorld パスに明示的な guard がないため）
+    if (isShutdownInProgress())
+        return false;
+    if (currentAfterFade == nullptr)
+        return false;
+
+    // Idle world 発行 — 呼び出し側ですべての前準備を完了している前提
+    auto coordinator = makeRuntimePublicationCoordinator();
+    auto worldBuilder = convo::RuntimeBuilder(*this);
+    worldBuilder.setHealthStateRef(getHealthStateRef());
+    auto worldOwner = worldBuilder.buildRuntimePublishWorld(
+        currentAfterFade, nullptr, idlePolicy, 0.0, false);
+    coordinator.publishWorld(std::move(worldOwner));
+    return true;
 }
 
 ```
@@ -35312,6 +35418,15 @@ public:
         publishCrossfadePreparedSnapshot(snapshot);
     }
 
+    // ★ A-4: Idle world publish 統一関数
+    //   責務は publishWorld のみ。setDryHoldSamples/resfreshSnapshot は含まない。
+    //   currentAfterFade: 呼び出し側で解決して渡す
+    //   idlePolicy: 呼び出し側で明示指定（SmoothOnly / HardReset）
+    //   Returns: true=publish 実行, false=shutdown guard または nullptr で skip
+    [[nodiscard]] bool publishIdleWorldOnly(
+        AudioEngine::DSPCore* currentAfterFade,
+        convo::TransitionPolicy idlePolicy) noexcept;
+
     inline void publishLatencyDelayAtomics(int oldDelay,
                                            int newDelay) noexcept
     {
@@ -37288,6 +37403,9 @@ public:
 
     // notifyTransitionComplete: クロスフェード完了時の処理
     // Timer から呼ばれる (代替: Coordinator::notifyTransitionComplete)
+    // ★ A-4 注: 現在は Coordinator::notifyTransitionComplete 経由でのみ到達する
+    //   将来統合フック。publishIdleWorldOnly() が別途用意されているため、
+    //   本関数の publish ブロックは将来 publishIdleWorldOnly に置き換え可能。
     void onTransitionComplete(AudioEngine::DSPCore* currentAfterFade) noexcept
     {
         if (currentAfterFade == nullptr)
@@ -43024,7 +43142,11 @@ void ShutdownRuntime::advancePhase() noexcept
             next = ShutdownPhase::ReclaimComplete;
             break;
         case ShutdownPhase::ReclaimComplete:
-            next = ShutdownPhase::VerifyDrained;  // ★ P3: 最終監査
+            // ★ C-2: CONVOPEQ_EMERGENCY_DRAIN 有効時のみ EmergencyDrain を経由
+            next = ShutdownPhase::VerifyDrained;
+            break;
+        case ShutdownPhase::EmergencyDrain:        // ★ C-2
+            next = ShutdownPhase::VerifyDrained;
             break;
         case ShutdownPhase::VerifyDrained:
             next = ShutdownPhase::ShutdownComplete;
@@ -43104,6 +43226,7 @@ void ShutdownRuntime::emitShutdownTrace() const
     case ShutdownPhase::RetireClosed: phaseName = "RetireClosed"; break;
     case ShutdownPhase::EpochSettled: phaseName = "EpochSettled"; break;
     case ShutdownPhase::ReclaimComplete: phaseName = "ReclaimComplete"; break;
+    case ShutdownPhase::EmergencyDrain: phaseName = "EmergencyDrain"; break;  // ★ C-2
     case ShutdownPhase::VerifyDrained: phaseName = "VerifyDrained"; break;
     case ShutdownPhase::TimedOut: phaseName = "TimedOut"; break;
     case ShutdownPhase::Failed: phaseName = "Failed"; break;
@@ -43197,6 +43320,10 @@ enum class ShutdownPhase : uint8_t
     RetireClosed,
     EpochSettled,
     ReclaimComplete,
+    // ★ C-2: EmergencyDrain — Optional/CompileFlag による最終手段
+    //   デフォルトではスキップ（既存の graceful drain で十分）
+    //   #ifdef CONVOPEQ_EMERGENCY_DRAIN で有効化
+    EmergencyDrain,   // ★ C-2
     VerifyDrained,    // ★ P3: 最終監査フェーズ
     TimedOut,
     Failed,
@@ -45188,6 +45315,14 @@ void RuntimePublicationOrchestrator::enqueueDeferred(
 }
 
 // ★ C-2.3: notifyTransitionComplete — stale discard 実装
+//   ⚠️ 現状では呼び出し元が存在しないが、設計上の統合ポイントとして
+//   責務定義を保持する（将来の Layer 2/3 統合フック）。
+//   A-4 で publishIdleWorldOnly() を別途定義したが、本関数は以下4責務を
+//   持つため、完全な統合には notifyTransitionComplete の再設計が必要:
+//   1. Transition Completion: transition_.onTransitionComplete(currentAfterFade)
+//   2. Shutdown Guard: isShutdownInProgress() 時 deferred キャンセル
+//   3. Stale Discard: Generation Guard + Publication Sequence Guard
+//   4. Deferred Publish Submit: 有効な deferred を submitPublishRequest
 void RuntimePublicationOrchestrator::notifyTransitionComplete(
     AudioEngine::DSPCore* currentAfterFade) noexcept
 {

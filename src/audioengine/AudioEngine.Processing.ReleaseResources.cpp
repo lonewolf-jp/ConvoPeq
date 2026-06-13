@@ -192,6 +192,60 @@ void AudioEngine::releaseResources()
     drainDeferredRetireQueues(true);
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ReclaimComplete);
 
+    // ★ C-2: EmergencyDrain — Optional 最終手段（デフォルトはスキップ）
+    //   常に EmergencyDrain フェーズを経由（ReclaimComplete+1=EmergencyDrain のため単一遷移）
+    //   CONVOPEQ_EMERGENCY_DRAIN が定義されている場合のみ有効な処理を実行。
+    //   Reader slot の epoch/depth 強制書き換えは一切禁止。
+    shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::EmergencyDrain);
+#ifdef CONVOPEQ_EMERGENCY_DRAIN
+    {
+        diagLog("[DIAG] releaseResources: EmergencyDrain phase enter");
+
+        constexpr int kEmergencyDrainMaxMs = 500;
+        const auto emergencyStartMs = juce::Time::getMillisecondCounterHiRes();
+
+        // Deferred publish クリア
+        if (runtimeOrchestrator_)
+            runtimeOrchestrator_->clearDeferredForShutdown();
+        diagLog("[DIAG] releaseResources: EmergencyDrain — cleared deferred publish");
+
+        // 安全な tryReclaim（drainAll 禁止）
+        {
+            const auto preReclaimPending = m_retireRouter->pendingRetireCount();
+            m_epochDomain.tryReclaim();
+            const auto postReclaimPending = m_retireRouter->pendingRetireCount();
+            diagLog("[DIAG] releaseResources: EmergencyDrain — tryReclaim done (pending "
+                + juce::String(static_cast<int>(preReclaimPending)) + " → "
+                + juce::String(static_cast<int>(postReclaimPending)) + ")");
+        }
+
+        // Crossfade timeout recovery の強制実行
+        if (crossfadeRuntime_.isPending())
+        {
+            diagLog("[DIAG] releaseResources: EmergencyDrain — forcing crossfade recovery");
+            crossfadeRuntime_.reset();
+            convo::publishAtomic(activeCrossfadeId_, uint64_t{0}, std::memory_order_release);
+        }
+
+        const auto emergencyElapsedMs = juce::Time::getMillisecondCounterHiRes() - emergencyStartMs;
+        diagLog("[DIAG] releaseResources: EmergencyDrain phase completed in "
+            + juce::String(emergencyElapsedMs, 1) + "ms");
+        emitEvidenceTickNonRt(true);
+    }
+#else
+    {
+        // DiagnosticMode: evidence 出力のみ
+        const auto audit = collectDrainAudit();
+        if (!audit.isAllZero() || audit.stuckReaderCount > 0)
+        {
+            diagLog("[DIAG] releaseResources: EmergencyDrain (diagnostic only) — "
+                "pendingPub=" + juce::String(static_cast<int64>(audit.pendingPublication)) +
+                " pendingRetire=" + juce::String(static_cast<int64>(audit.pendingRetire)) +
+                " stuckReaders=" + juce::String(static_cast<int64>(audit.stuckReaderCount)));
+        }
+    }
+#endif // CONVOPEQ_EMERGENCY_DRAIN
+
     // ★ P3: VerifyDrained — 最終監査フェーズ
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::VerifyDrained);
     diagLog("[DIAG] releaseResources: VerifyDrained — collecting drain audit");

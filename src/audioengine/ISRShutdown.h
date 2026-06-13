@@ -24,6 +24,10 @@ enum class ShutdownPhase : uint8_t
     RetireClosed,
     EpochSettled,
     ReclaimComplete,
+    // ★ C-2: EmergencyDrain — Optional/CompileFlag による最終手段
+    //   デフォルトではスキップ（既存の graceful drain で十分）
+    //   #ifdef CONVOPEQ_EMERGENCY_DRAIN で有効化
+    EmergencyDrain,   // ★ C-2
     VerifyDrained,    // ★ P3: 最終監査フェーズ
     TimedOut,
     Failed,
