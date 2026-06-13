@@ -3,7 +3,6 @@
 #include "AudioEngine.h"
 #include "CrossfadeAuthority.h"
 #include "DSPLifetimeManager.h"
-#include "RuntimeBuilder.h"
 
 namespace convo::isr {
 
@@ -112,8 +111,8 @@ public:
     // notifyTransitionComplete: クロスフェード完了時の処理
     // Timer から呼ばれる (代替: Coordinator::notifyTransitionComplete)
     // ★ A-4 注: 現在は Coordinator::notifyTransitionComplete 経由でのみ到達する
-    //   将来統合フック。publishIdleWorldOnly() が別途用意されているため、
-    //   本関数の publish ブロックは将来 publishIdleWorldOnly に置き換え可能。
+    //   将来統合フック。Publish Helper Adoption (Phase 1) により publish ブロックを
+    //   publishIdleWorldOnly() に置換済み。
     void onTransitionComplete(AudioEngine::DSPCore* currentAfterFade) noexcept
     {
         if (currentAfterFade == nullptr)
@@ -131,18 +130,9 @@ public:
         engine_.crossfadeRuntime_.setDryHoldSamples(0);
         engine_.refreshCrossfadePreparedSnapshotFromAtomics();
 
-        // publish idling world (Coordinator 経由)
-        auto coordinator = engine_.makeRuntimePublicationCoordinator();
-        auto worldBuilder = convo::RuntimeBuilder(engine_);
-        worldBuilder.setHealthStateRef(engine_.getHealthStateRef());
-        auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
-                                                                 nullptr,
-                                                                 convo::TransitionPolicy::HardReset,
-                                                                 0.0,
-                                                                 false);
-        if (worldOwner) {
-            coordinator.publishWorld(std::move(worldOwner));
-        }
+        // publish idling world (publishIdleWorldOnly 経由)
+        (void)engine_.publishIdleWorldOnly(currentAfterFade,
+            convo::TransitionPolicy::HardReset);
     }
 
 private:
