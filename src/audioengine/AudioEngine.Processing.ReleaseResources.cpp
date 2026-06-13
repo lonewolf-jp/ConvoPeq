@@ -230,8 +230,33 @@ void AudioEngine::releaseResources()
     const bool drainedWithinBudget = waitForDrain(2000, 2);
     const bool timedOut = !drainedWithinBudget;
 
-    if (timedOut)
-        shutdownRuntime_.markTimedOut();
+    if (timedOut) {
+        // ★ A-3: VerifyDrained で Reader 異常を検出 → markTimedOut に ReaderActive を伝達
+        auto audit = collectDrainAudit();
+        auto reason = audit.stuckReaderCount > 0
+            ? convo::isr::ShutdownBlockingReason::ReaderActive
+            : convo::isr::ShutdownBlockingReason::Unknown;
+        shutdownRuntime_.markTimedOut(reason);
+    }
+
+    // ★ 改善③: World Consistency 診断は VerifyDrained では常に実行（タイムアウト有無に依存しない）
+    {
+        const auto audit = collectDrainAudit();
+        const auto cs = audit.verifyWorldConsistency();
+        if (cs != convo::isr::RuntimeDrainAudit::ConsistencyState::Consistent) {
+            diagLog("[AUDIT] VerifyDrained: world consistency="
+                + juce::String(static_cast<int>(cs))
+                + " published=" + juce::String(static_cast<juce::int64>(audit.publishedCount))
+                + " retired=" + juce::String(static_cast<juce::int64>(audit.retiredCount))
+                + " active=" + juce::String(static_cast<juce::int64>(audit.activeWorldCount)));
+            // ★ B-2: HealthState を診断情報として出力
+            diagLog("[AUDIT] VerifyDrained: healthState="
+                + juce::String(static_cast<int>(audit.healthState))
+                + " activeReaders=" + juce::String(static_cast<juce::int64>(audit.activeReaderCount))
+                + " stuckReaders=" + juce::String(static_cast<juce::int64>(audit.stuckReaderCount)));
+            emitEvidenceTickNonRt(true);
+        }
+    }
 
     if (!drainedWithinBudget || !isFullyDrained())
     {

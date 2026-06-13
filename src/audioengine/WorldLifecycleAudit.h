@@ -47,6 +47,9 @@ public:
             std::memory_order_acq_rel);
         if (prev == 0) {
             assert(false);  // 二重 retire 検出
+            // ★ A-5: Release ビルドでも telemetry カウンタをインクリメント
+            convo::fetchAddAtomic(doubleRetireCount_, 1u, std::memory_order_release);
+            // アンダーフロー補正（既存）
             convo::publishAtomic(activeWorldCount_, uint64_t{0},
                 std::memory_order_release);
         }
@@ -71,6 +74,11 @@ public:
         return convo::consumeAtomic(retiredCount_, std::memory_order_acquire);
     }
 
+    // ★ A-5: 二重 retire 検出カウンタ（telemetry 用）
+    [[nodiscard]] uint64_t doubleRetireCount() const noexcept {
+        return convo::consumeAtomic(doubleRetireCount_, std::memory_order_acquire);
+    }
+
     // ★ 診断用ダンプ（RingBuffer から最新レコードを取得）
     void emitSnapshot() const noexcept;
 
@@ -85,6 +93,8 @@ private:
     std::atomic<uint64_t> retiredCount_{0};
     std::atomic<uint64_t> lastDumpTimeUs_{0};
     static constexpr uint64_t kDumpIntervalUs = 60'000'000; // 60秒ごとにダンプ
+    // ★ A-5: 二重 retire 検出カウンタ
+    std::atomic<uint64_t> doubleRetireCount_{0};
     // ★ 直近 retire 追跡（リングバッファは追記専用のため retire 更新不可）
     std::atomic<uint64_t> lastRetiredWorldId_{0};
     std::atomic<uint64_t> lastRetireEpoch_{0};

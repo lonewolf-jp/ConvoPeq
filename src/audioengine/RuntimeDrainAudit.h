@@ -1,7 +1,12 @@
 #pragma once
 #include <cstdint>
 
-namespace convo::isr {
+namespace convo {
+
+// ISRHealthState 前方宣言（RuntimeHealthMonitor.h から）
+enum class ISRHealthState : uint8_t;
+
+namespace isr {
 
 // RuntimeDrainAudit: Shutdown 完了条件の監査構造体。
 // isAllZero() は監査ログ出力専用。shutdown 完了判定の authority にはしない。
@@ -32,6 +37,12 @@ struct RuntimeDrainAudit {
     uint64_t activeWorldCount{0};
     uint64_t publishedCount{0};
     uint64_t retiredCount{0};
+    // ★ A-2/A-3: Reader 状態（Shutdown Authority 用）
+    uint64_t activeReaderCount{0};
+    uint64_t stuckReaderCount{0};
+    uint64_t maxReaderResidencyUs{0};
+    // ★ B-2: HealthState（診断情報としてのみ保持。canShutdown 条件にはしない）
+    ISRHealthState healthState{}; // デフォルト ISRHealthState::Healthy (=0)
 
     // shutdown 完了を阻害している主要因を特定
     enum class BlockingReason : uint8_t {
@@ -42,6 +53,7 @@ struct RuntimeDrainAudit {
         DeferredPublish,
         QuarantineResident,
         RouterPendingRetire,
+        ReaderActive,       // ★ A-3: Reader 異常滞留
         Unknown
     };
 
@@ -52,6 +64,7 @@ struct RuntimeDrainAudit {
         if (deferredPublish > 0)       return BlockingReason::DeferredPublish;
         if (quarantineResident > 0)    return BlockingReason::QuarantineResident;
         if (routerPendingRetire > 0)   return BlockingReason::RouterPendingRetire;
+        if (stuckReaderCount > 0)      return BlockingReason::ReaderActive;  // ★ A-3
         return BlockingReason::Unknown;
     }
 
@@ -62,6 +75,18 @@ struct RuntimeDrainAudit {
             && activeCrossfadeCount == 0
             && deferredPublish == 0;
     }
+
+    // ★ B-1: World Consistency 診断（Diagnostic 限定、Shutdown Authority にはしない）
+    enum class ConsistencyState : uint8_t { Consistent, Suspicious, Broken };
+    [[nodiscard]] ConsistencyState verifyWorldConsistency() const noexcept {
+        if (publishedCount >= retiredCount
+            && (publishedCount - retiredCount) == activeWorldCount)
+            return ConsistencyState::Consistent;
+        if (retiredCount <= publishedCount)
+            return ConsistencyState::Suspicious;
+        return ConsistencyState::Broken;
+    }
 };
 
-} // namespace convo::isr
+} // namespace isr
+} // namespace convo

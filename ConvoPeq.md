@@ -849,9 +849,13 @@ endif()
 
 set(IPP_LINK static)
 set(IPP_THREADING sequential)
-find_package(IPP REQUIRED CONFIG COMPONENTS ippcore ipps)
-message(STATUS "Intel IPP found.")
-target_link_libraries(ConvoPeq PRIVATE IPP::ippcore IPP::ipps)
+find_package(IPP QUIET CONFIG COMPONENTS ippcore ipps)
+if(IPP_FOUND)
+    message(STATUS "Intel IPP found.")
+    target_link_libraries(ConvoPeq PRIVATE IPP::ippcore IPP::ipps)
+else()
+    message(STATUS "Intel IPP not found - skipping (CI build or no IPP SDK).")
+endif()
 # 注意: R8B_IPP=1 は使用しない。
 # r8brain の CDSPRealFFT.h が期待する IPP API (IppsFFTSpec_R_64f 等) は
 # Intel IPP 2022.3 以降のバージョンと非互換のため、r8brain には内蔵 FFT を使用する。
@@ -29743,6 +29747,10 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         convo::publishAtomic(lifecycleState, EngineLifecycleState::Unprepared, std::memory_order_release);
     };
 
+    // ★ C-4: prepareToPlay 開始時に HealthState をリセット
+    //   （releaseResources 直後には呼ばない — Shutdown 診断情報を観測する前に消えるのを防ぐため）
+    m_healthMonitor.reset();
+
     auto previousState = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
     for (;;)
     {
@@ -30219,8 +30227,33 @@ void AudioEngine::releaseResources()
     const bool drainedWithinBudget = waitForDrain(2000, 2);
     const bool timedOut = !drainedWithinBudget;
 
-    if (timedOut)
-        shutdownRuntime_.markTimedOut();
+    if (timedOut) {
+        // ★ A-3: VerifyDrained で Reader 異常を検出 → markTimedOut に ReaderActive を伝達
+        auto audit = collectDrainAudit();
+        auto reason = audit.stuckReaderCount > 0
+            ? convo::isr::ShutdownBlockingReason::ReaderActive
+            : convo::isr::ShutdownBlockingReason::Unknown;
+        shutdownRuntime_.markTimedOut(reason);
+    }
+
+    // ★ 改善③: World Consistency 診断は VerifyDrained では常に実行（タイムアウト有無に依存しない）
+    {
+        const auto audit = collectDrainAudit();
+        const auto cs = audit.verifyWorldConsistency();
+        if (cs != convo::isr::RuntimeDrainAudit::ConsistencyState::Consistent) {
+            diagLog("[AUDIT] VerifyDrained: world consistency="
+                + juce::String(static_cast<int>(cs))
+                + " published=" + juce::String(static_cast<juce::int64>(audit.publishedCount))
+                + " retired=" + juce::String(static_cast<juce::int64>(audit.retiredCount))
+                + " active=" + juce::String(static_cast<juce::int64>(audit.activeWorldCount)));
+            // ★ B-2: HealthState を診断情報として出力
+            diagLog("[AUDIT] VerifyDrained: healthState="
+                + juce::String(static_cast<int>(audit.healthState))
+                + " activeReaders=" + juce::String(static_cast<juce::int64>(audit.activeReaderCount))
+                + " stuckReaders=" + juce::String(static_cast<juce::int64>(audit.stuckReaderCount)));
+            emitEvidenceTickNonRt(true);
+        }
+    }
 
     if (!drainedWithinBudget || !isFullyDrained())
     {
@@ -32039,6 +32072,11 @@ bool AudioEngine::quarantineSlot(uint32_t slot, uint64_t generation,
 // ★ A-2.5: collectDrainAudit — shutdown 完了条件の監査構造体を収集
 convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
 {
+    // ★ detectStuckReaders は1回だけ呼び出し、2つのフィールドで再利用（二重呼出の改善①）
+    const auto readerStuckInfo = m_retireRouter
+        ? m_retireRouter->detectStuckReaders(10)
+        : convo::StuckReaderInfo{};
+
     return convo::isr::RuntimeDrainAudit{
         .pendingPublication = runtimePublicationBridge_.getPublicationBacklogCount(),
         .pendingRetire = retireRuntime_.pendingIntentCount(),
@@ -32056,7 +32094,13 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
         // ★ C-1: WorldLifecycleAudit から World カウンタ取得
         .activeWorldCount = worldLifecycleAudit_.activeWorldCount(),
         .publishedCount = worldLifecycleAudit_.publishedCount(),
-        .retiredCount = worldLifecycleAudit_.retiredCount()
+        .retiredCount = worldLifecycleAudit_.retiredCount(),
+        // ★ A-2/A-3: Reader 状態収集（detectStuckReaders は1回のみ）
+        .activeReaderCount = m_retireRouter ? m_retireRouter->activeReaderCount() : 0u,
+        .stuckReaderCount = readerStuckInfo.isStuck ? 1u : 0u,
+        .maxReaderResidencyUs = readerStuckInfo.residencyTimeUs,
+        // ★ B-2: HealthState 診断情報
+        .healthState = m_healthMonitor.getHealthState()
     };
 }
 
@@ -32742,6 +32786,18 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         crossfadeRuntime_.complete();
 
         diagLog("[HEALTH] Crossfade timeout recovery completed");
+    }
+
+    // ★ A-3: EVENT_READER_STUCK — Evidence 出力のみ（Shutdown Authority は collectDrainAudit が担当）
+    if (event.eventCode == convo::EVENT_READER_STUCK)
+    {
+        diagLog("[HEALTH] Reader stuck detected"
+            + juce::String(" readerIndex=") + juce::String(static_cast<int>(event.readerIndex))
+            + juce::String(" residencyUs=") + juce::String(static_cast<juce::int64>(event.residencyTimeUs))
+            + juce::String(" pendingRetire=") + juce::String(static_cast<juce::int64>(event.value)));
+
+        // 強制診断ダンプ
+        emitEvidenceTickNonRt(true);
     }
 }
 
@@ -44104,7 +44160,12 @@ private:
 #pragma once
 #include <cstdint>
 
-namespace convo::isr {
+namespace convo {
+
+// ISRHealthState 前方宣言（RuntimeHealthMonitor.h から）
+enum class ISRHealthState : uint8_t;
+
+namespace isr {
 
 // RuntimeDrainAudit: Shutdown 完了条件の監査構造体。
 // isAllZero() は監査ログ出力専用。shutdown 完了判定の authority にはしない。
@@ -44135,6 +44196,12 @@ struct RuntimeDrainAudit {
     uint64_t activeWorldCount{0};
     uint64_t publishedCount{0};
     uint64_t retiredCount{0};
+    // ★ A-2/A-3: Reader 状態（Shutdown Authority 用）
+    uint64_t activeReaderCount{0};
+    uint64_t stuckReaderCount{0};
+    uint64_t maxReaderResidencyUs{0};
+    // ★ B-2: HealthState（診断情報としてのみ保持。canShutdown 条件にはしない）
+    ISRHealthState healthState{}; // デフォルト ISRHealthState::Healthy (=0)
 
     // shutdown 完了を阻害している主要因を特定
     enum class BlockingReason : uint8_t {
@@ -44145,6 +44212,7 @@ struct RuntimeDrainAudit {
         DeferredPublish,
         QuarantineResident,
         RouterPendingRetire,
+        ReaderActive,       // ★ A-3: Reader 異常滞留
         Unknown
     };
 
@@ -44155,6 +44223,7 @@ struct RuntimeDrainAudit {
         if (deferredPublish > 0)       return BlockingReason::DeferredPublish;
         if (quarantineResident > 0)    return BlockingReason::QuarantineResident;
         if (routerPendingRetire > 0)   return BlockingReason::RouterPendingRetire;
+        if (stuckReaderCount > 0)      return BlockingReason::ReaderActive;  // ★ A-3
         return BlockingReason::Unknown;
     }
 
@@ -44165,9 +44234,21 @@ struct RuntimeDrainAudit {
             && activeCrossfadeCount == 0
             && deferredPublish == 0;
     }
+
+    // ★ B-1: World Consistency 診断（Diagnostic 限定、Shutdown Authority にはしない）
+    enum class ConsistencyState : uint8_t { Consistent, Suspicious, Broken };
+    [[nodiscard]] ConsistencyState verifyWorldConsistency() const noexcept {
+        if (publishedCount >= retiredCount
+            && (publishedCount - retiredCount) == activeWorldCount)
+            return ConsistencyState::Consistent;
+        if (retiredCount <= publishedCount)
+            return ConsistencyState::Suspicious;
+        return ConsistencyState::Broken;
+    }
 };
 
-} // namespace convo::isr
+} // namespace isr
+} // namespace convo
 
 ```
 
@@ -44463,6 +44544,24 @@ void RuntimeHealthMonitor::diagnoseRetireStall() noexcept
             {
                 m_prevRetireState = newState;
                 m_callback(ev);
+                // ★ 改善②: 遷移発火と同じtickでは定期Evidenceを抑制（二重発呼防止）
+                m_lastStuckEvidenceUs = nowUs;
+            }
+            // ★ 8.6: 状態遷移がなくとも10秒ごとに定期Evidence出力
+            if (nowUs - m_lastStuckEvidenceUs > kStuckEvidenceIntervalUs)
+            {
+                m_lastStuckEvidenceUs = nowUs;
+                // Reader Stuck 継続中を定期的に通知
+                // onHealthEvent 側の diagLog + emitEvidenceTickNonRt に委譲
+                HealthEvent periodicEv{nowUs,
+                    severe ? HealthEvent::Severity::Error : HealthEvent::Severity::Warning,
+                    EVENT_READER_STUCK,
+                    stuckInfo.pendingRetireCount,
+                    0};
+                periodicEv.readerIndex = stuckInfo.readerIndex;
+                periodicEv.readerEpoch = stuckInfo.readerEpoch;
+                periodicEv.residencyTimeUs = stuckInfo.residencyTimeUs;
+                m_callback(periodicEv);
             }
         }
     }
@@ -44666,6 +44765,16 @@ void RuntimeHealthMonitor::checkRetireReclaimLatency() noexcept
     }
 }
 
+// ★ C-4: HealthState のみ初期化
+void RuntimeHealthMonitor::reset() noexcept
+{
+    convo::publishAtomic(m_healthState_, ISRHealthState::Healthy,
+                         std::memory_order_release);
+    // m_prevRetireState 等は維持 — 初期化すると次回監視で Warning が再通知される
+    m_lastObservedDropCount = 0;
+    m_lastStuckEvidenceUs = 0;
+}
+
 } // namespace convo
 
 ```
@@ -44762,6 +44871,12 @@ public:
 
     void tick() noexcept;
 
+    // ★ C-4: HealthState のみ初期化（m_prev*State は維持 — イベント再通知防止）
+    void reset() noexcept;
+
+    // ★ 8.6: ReaderStuck 定期Evidence 出力用定数
+    static constexpr uint64_t kStuckEvidenceIntervalUs = 10'000'000; // 10秒間隔
+
     // ★ P1-B: HealthState 公開 — Admission が参照する
     [[nodiscard]] ISRHealthState getHealthState() const noexcept {
         return convo::consumeAtomic(m_healthState_, std::memory_order_acquire);
@@ -44820,6 +44935,8 @@ private:
     // ★ Practical-4: Reclaim rate limit
     uint64_t m_lastForcedReclaimTimeUs = 0;
     static constexpr uint64_t kForcedReclaimCooldownUs = 500'000; // 500ms以内は再試行禁止
+    // ★ 8.6: ReaderStuck 定期Evidence 出力タイムスタンプ
+    uint64_t m_lastStuckEvidenceUs = 0;
 };
 
 } // namespace convo
@@ -46435,6 +46552,8 @@ void WorldLifecycleAudit::emitSnapshot() const noexcept
     file << "  \"activeWorldCount\": " << active << ",\n";
     file << "  \"publishedCount\": " << published << ",\n";
     file << "  \"retiredCount\": " << retired << ",\n";
+    file << "  \"doubleRetireCount\": "
+         << convo::consumeAtomic(doubleRetireCount_, std::memory_order_acquire) << ",\n";
     file << "  \"ringBufferSize\": " << ringBuffer_.size() << ",\n";
     file << "  \"ringBufferCapacity\": " << ringBuffer_.capacity() << ",\n";
     file << "  \"lastRetiredWorldId\": " << lastRetiredId << ",\n";
@@ -46527,6 +46646,9 @@ public:
             std::memory_order_acq_rel);
         if (prev == 0) {
             assert(false);  // 二重 retire 検出
+            // ★ A-5: Release ビルドでも telemetry カウンタをインクリメント
+            convo::fetchAddAtomic(doubleRetireCount_, 1u, std::memory_order_release);
+            // アンダーフロー補正（既存）
             convo::publishAtomic(activeWorldCount_, uint64_t{0},
                 std::memory_order_release);
         }
@@ -46551,6 +46673,11 @@ public:
         return convo::consumeAtomic(retiredCount_, std::memory_order_acquire);
     }
 
+    // ★ A-5: 二重 retire 検出カウンタ（telemetry 用）
+    [[nodiscard]] uint64_t doubleRetireCount() const noexcept {
+        return convo::consumeAtomic(doubleRetireCount_, std::memory_order_acquire);
+    }
+
     // ★ 診断用ダンプ（RingBuffer から最新レコードを取得）
     void emitSnapshot() const noexcept;
 
@@ -46565,6 +46692,8 @@ private:
     std::atomic<uint64_t> retiredCount_{0};
     std::atomic<uint64_t> lastDumpTimeUs_{0};
     static constexpr uint64_t kDumpIntervalUs = 60'000'000; // 60秒ごとにダンプ
+    // ★ A-5: 二重 retire 検出カウンタ
+    std::atomic<uint64_t> doubleRetireCount_{0};
     // ★ 直近 retire 追跡（リングバッファは追記専用のため retire 更新不可）
     std::atomic<uint64_t> lastRetiredWorldId_{0};
     std::atomic<uint64_t> lastRetireEpoch_{0};

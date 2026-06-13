@@ -623,4 +623,16 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
 
         diagLog("[HEALTH] Crossfade timeout recovery completed");
     }
+
+    // ★ A-3: EVENT_READER_STUCK — Evidence 出力のみ（Shutdown Authority は collectDrainAudit が担当）
+    if (event.eventCode == convo::EVENT_READER_STUCK)
+    {
+        diagLog("[HEALTH] Reader stuck detected"
+            + juce::String(" readerIndex=") + juce::String(static_cast<int>(event.readerIndex))
+            + juce::String(" residencyUs=") + juce::String(static_cast<juce::int64>(event.residencyTimeUs))
+            + juce::String(" pendingRetire=") + juce::String(static_cast<juce::int64>(event.value)));
+
+        // 強制診断ダンプ
+        emitEvidenceTickNonRt(true);
+    }
 }

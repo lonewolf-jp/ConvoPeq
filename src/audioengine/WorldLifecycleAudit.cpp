@@ -31,6 +31,8 @@ void WorldLifecycleAudit::emitSnapshot() const noexcept
     file << "  \"activeWorldCount\": " << active << ",\n";
     file << "  \"publishedCount\": " << published << ",\n";
     file << "  \"retiredCount\": " << retired << ",\n";
+    file << "  \"doubleRetireCount\": "
+         << convo::consumeAtomic(doubleRetireCount_, std::memory_order_acquire) << ",\n";
     file << "  \"ringBufferSize\": " << ringBuffer_.size() << ",\n";
     file << "  \"ringBufferCapacity\": " << ringBuffer_.capacity() << ",\n";
     file << "  \"lastRetiredWorldId\": " << lastRetiredId << ",\n";

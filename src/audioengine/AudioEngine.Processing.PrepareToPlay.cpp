@@ -37,6 +37,10 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
         convo::publishAtomic(lifecycleState, EngineLifecycleState::Unprepared, std::memory_order_release);
     };
 
+    // ★ C-4: prepareToPlay 開始時に HealthState をリセット
+    //   （releaseResources 直後には呼ばない — Shutdown 診断情報を観測する前に消えるのを防ぐため）
+    m_healthMonitor.reset();
+
     auto previousState = convo::consumeAtomic(lifecycleState, std::memory_order_acquire);
     for (;;)
     {

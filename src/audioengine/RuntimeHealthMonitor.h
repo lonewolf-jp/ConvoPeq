@@ -87,6 +87,12 @@ public:
 
     void tick() noexcept;
 
+    // ★ C-4: HealthState のみ初期化（m_prev*State は維持 — イベント再通知防止）
+    void reset() noexcept;
+
+    // ★ 8.6: ReaderStuck 定期Evidence 出力用定数
+    static constexpr uint64_t kStuckEvidenceIntervalUs = 10'000'000; // 10秒間隔
+
     // ★ P1-B: HealthState 公開 — Admission が参照する
     [[nodiscard]] ISRHealthState getHealthState() const noexcept {
         return convo::consumeAtomic(m_healthState_, std::memory_order_acquire);
@@ -145,6 +151,8 @@ private:
     // ★ Practical-4: Reclaim rate limit
     uint64_t m_lastForcedReclaimTimeUs = 0;
     static constexpr uint64_t kForcedReclaimCooldownUs = 500'000; // 500ms以内は再試行禁止
+    // ★ 8.6: ReaderStuck 定期Evidence 出力タイムスタンプ
+    uint64_t m_lastStuckEvidenceUs = 0;
 };
 
 } // namespace convo

@@ -186,6 +186,24 @@ void RuntimeHealthMonitor::diagnoseRetireStall() noexcept
             {
                 m_prevRetireState = newState;
                 m_callback(ev);
+                // ★ 改善②: 遷移発火と同じtickでは定期Evidenceを抑制（二重発呼防止）
+                m_lastStuckEvidenceUs = nowUs;
+            }
+            // ★ 8.6: 状態遷移がなくとも10秒ごとに定期Evidence出力
+            if (nowUs - m_lastStuckEvidenceUs > kStuckEvidenceIntervalUs)
+            {
+                m_lastStuckEvidenceUs = nowUs;
+                // Reader Stuck 継続中を定期的に通知
+                // onHealthEvent 側の diagLog + emitEvidenceTickNonRt に委譲
+                HealthEvent periodicEv{nowUs,
+                    severe ? HealthEvent::Severity::Error : HealthEvent::Severity::Warning,
+                    EVENT_READER_STUCK,
+                    stuckInfo.pendingRetireCount,
+                    0};
+                periodicEv.readerIndex = stuckInfo.readerIndex;
+                periodicEv.readerEpoch = stuckInfo.readerEpoch;
+                periodicEv.residencyTimeUs = stuckInfo.residencyTimeUs;
+                m_callback(periodicEv);
             }
         }
     }
@@ -387,6 +405,16 @@ void RuntimeHealthMonitor::checkRetireReclaimLatency() noexcept
             HealthEvent::Severity::Warning, EVENT_RETIRE_AGE_WARNING,
             maxAgeUs / 1000);
     }
+}
+
+// ★ C-4: HealthState のみ初期化
+void RuntimeHealthMonitor::reset() noexcept
+{
+    convo::publishAtomic(m_healthState_, ISRHealthState::Healthy,
+                         std::memory_order_release);
+    // m_prevRetireState 等は維持 — 初期化すると次回監視で Warning が再通知される
+    m_lastObservedDropCount = 0;
+    m_lastStuckEvidenceUs = 0;
 }
 
 } // namespace convo

@@ -54,6 +54,11 @@ bool AudioEngine::quarantineSlot(uint32_t slot, uint64_t generation,
 // ★ A-2.5: collectDrainAudit — shutdown 完了条件の監査構造体を収集
 convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
 {
+    // ★ detectStuckReaders は1回だけ呼び出し、2つのフィールドで再利用（二重呼出の改善①）
+    const auto readerStuckInfo = m_retireRouter
+        ? m_retireRouter->detectStuckReaders(10)
+        : convo::StuckReaderInfo{};
+
     return convo::isr::RuntimeDrainAudit{
         .pendingPublication = runtimePublicationBridge_.getPublicationBacklogCount(),
         .pendingRetire = retireRuntime_.pendingIntentCount(),
@@ -71,7 +76,13 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
         // ★ C-1: WorldLifecycleAudit から World カウンタ取得
         .activeWorldCount = worldLifecycleAudit_.activeWorldCount(),
         .publishedCount = worldLifecycleAudit_.publishedCount(),
-        .retiredCount = worldLifecycleAudit_.retiredCount()
+        .retiredCount = worldLifecycleAudit_.retiredCount(),
+        // ★ A-2/A-3: Reader 状態収集（detectStuckReaders は1回のみ）
+        .activeReaderCount = m_retireRouter ? m_retireRouter->activeReaderCount() : 0u,
+        .stuckReaderCount = readerStuckInfo.isStuck ? 1u : 0u,
+        .maxReaderResidencyUs = readerStuckInfo.residencyTimeUs,
+        // ★ B-2: HealthState 診断情報
+        .healthState = m_healthMonitor.getHealthState()
     };
 }
 
