@@ -525,7 +525,9 @@ private:
 
     static double powerToDb(double power) noexcept
     {
-        return 10.0 * std::log10(std::max(power, kMinPower));
+        // std::log10 → std::log * log10(e) でSSE↔x87 FPUモード切替を回避
+        constexpr double kLog10Factor = 10.0 * 0.43429448190325182765; // 10.0 / ln(10)
+        return std::log(std::max(power, kMinPower)) * kLog10Factor;
     }
 
     static double dbToPower(double db) noexcept
@@ -585,7 +587,9 @@ private:
     static double computeTonalityFromSfm(double sfm) noexcept
     {
         const double safeSfm = std::max(sfm, 1.0e-12);
-        const double tonality = kTonalityFromSfmA + (kTonalityFromSfmB * std::log10(safeSfm));
+        // std::log10 → std::log * log10(e) でSSE↔x87 FPUモード切替を回避
+        constexpr double kLog10Factor = 0.43429448190325182765; // 1.0 / ln(10)
+        const double tonality = kTonalityFromSfmA + (kTonalityFromSfmB * std::log(safeSfm) * kLog10Factor);
         return std::clamp(tonality, 0.0, 1.0);
     }
 
@@ -761,10 +765,19 @@ private:
                 if (totalDb > maxDb) maxDb = totalDb;
             }
 
-            if (contributions.size <= 0 || !std::isfinite(maxDb))
+            if (contributions.size <= 0)
             {
                 maskingEnergy[static_cast<size_t>(i)] = athThresholdPower[static_cast<size_t>(i)];
                 continue;
+            }
+            // std::isfinite の代わりにビット演算で有限値判定（libm 呼出回避）
+            {
+                union { double d; uint64_t u; } v { maxDb };
+                if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+                {
+                    maskingEnergy[static_cast<size_t>(i)] = athThresholdPower[static_cast<size_t>(i)];
+                    continue;
+                }
             }
 
             double sum = 0.0;

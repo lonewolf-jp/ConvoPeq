@@ -95,6 +95,7 @@ private:
 
     static double besselI0(double x) noexcept;
     static double dotProductAvx2(const double* x, const double* coeffs, int n) noexcept;
+    static double dotProductDecimateAvx2(const double* history, const double* coeffs, int convCount) noexcept;
 
     static int sanitizeRatio(int ratio) noexcept;
     static int tapsForStage(int stageIndex, Preset preset) noexcept;

@@ -7064,6 +7064,25 @@ namespace
         const __m256d vInfMask = _mm256_cmp_pd(vAbs, _mm256_set1_pd(1e20), _CMP_GT_OQ);
         return _mm256_movemask_pd(_mm256_or_pd(vNanMask, vInfMask)) != 0;
     }
+
+    /// @brief Stride-2 で4要素を半帯域履歴バッファからロード
+    /// @param ptr  history のベースアドレス（呼出側: history + (base - convParity)）
+    /// @return     { ptr[0], ptr[-2], ptr[-4], ptr[-6] } の順
+    /// @note       係数 coeffs[r+0..r+3] との FMA で正しい畳み込み順序になる
+    inline __m256d loadStride2(const double* ptr) noexcept
+    {
+        __m128d v0 = _mm_loadu_pd(ptr - 6);    // { ptr[-6], ptr[-5] }
+        __m128d v1 = _mm_loadu_pd(ptr - 4);    // { ptr[-4], ptr[-3] }
+        __m128d v2 = _mm_loadu_pd(ptr - 2);    // { ptr[-2], ptr[-1] }
+        __m128d v3 = _mm_loadu_pd(ptr);        // { ptr[0],  ptr[1]  }
+        // low:  ptr[0], ptr[-2]  ← v3 と v2 の low element
+        __m128d vLow  = _mm_unpacklo_pd(v3, v2);
+        // high: ptr[-4], ptr[-6] ← v1 と v0 の low element
+        __m128d vHigh = _mm_unpacklo_pd(v1, v0);
+        return _mm256_insertf128_pd(
+            _mm256_castpd128_pd256(vLow), vHigh, 1);
+        // = { ptr[0], ptr[-2], ptr[-4], ptr[-6] }
+    }
 #endif
 }
 
@@ -7187,9 +7206,12 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     acc2 = _mm256_add_pd(acc2, acc3);
     acc0 = _mm256_add_pd(acc0, acc2);
 
-    alignas(64) double partial[4];
-    _mm256_store_pd(partial, acc0);
-    double sum = partial[0] + partial[1] + partial[2] + partial[3];
+    // SIMD horizontal reduction: vextractf128 + hadd (avoid store-to-stack + scalar adds)
+    __m128d vLo = _mm256_castpd256_pd128(acc0);
+    __m128d vHi = _mm256_extractf128_pd(acc0, 1);
+    __m128d vSum = _mm_add_pd(vLo, vHi);
+    vSum = _mm_hadd_pd(vSum, vSum);
+    double sum = _mm_cvtsd_f64(vSum);
 
     // Scalar remainder
     for (; i < n; ++i)
@@ -7202,6 +7224,75 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
 
     return sum;
 }
+
+#if defined(__AVX2__) && defined(__FMA__)
+double CustomInputOversampler::dotProductDecimateAvx2(
+    const double* __restrict history,
+    const double* __restrict coeffs,
+    int convCount) noexcept
+{
+    // 8-way unroll (32 elements/iteration) for Skylake+ FMA pipeline saturation
+    // FMA latency=4, throughput=0.5 → need 4/0.5=8 independent accumulators
+    __assume(convCount >= 8);
+    __assume(convCount >= 0);
+
+    __m256d acc0 = _mm256_setzero_pd();
+    __m256d acc1 = _mm256_setzero_pd();
+    __m256d acc2 = _mm256_setzero_pd();
+    __m256d acc3 = _mm256_setzero_pd();
+    __m256d acc4 = _mm256_setzero_pd();
+    __m256d acc5 = _mm256_setzero_pd();
+    __m256d acc6 = _mm256_setzero_pd();
+    __m256d acc7 = _mm256_setzero_pd();
+
+    int r = 0;
+    const int unrollEnd = (convCount / 32) * 32;
+    for (; r < unrollEnd; r += 32)
+    {
+        acc0 = _mm256_fmadd_pd(loadStride2(history - (r << 1)),       _mm256_loadu_pd(coeffs + r),       acc0);
+        acc1 = _mm256_fmadd_pd(loadStride2(history - ((r +  4) << 1)), _mm256_loadu_pd(coeffs + r +  4), acc1);
+        acc2 = _mm256_fmadd_pd(loadStride2(history - ((r +  8) << 1)), _mm256_loadu_pd(coeffs + r +  8), acc2);
+        acc3 = _mm256_fmadd_pd(loadStride2(history - ((r + 12) << 1)), _mm256_loadu_pd(coeffs + r + 12), acc3);
+        acc4 = _mm256_fmadd_pd(loadStride2(history - ((r + 16) << 1)), _mm256_loadu_pd(coeffs + r + 16), acc4);
+        acc5 = _mm256_fmadd_pd(loadStride2(history - ((r + 20) << 1)), _mm256_loadu_pd(coeffs + r + 20), acc5);
+        acc6 = _mm256_fmadd_pd(loadStride2(history - ((r + 24) << 1)), _mm256_loadu_pd(coeffs + r + 24), acc6);
+        acc7 = _mm256_fmadd_pd(loadStride2(history - ((r + 28) << 1)), _mm256_loadu_pd(coeffs + r + 28), acc7);
+    }
+
+    // 4-element blocks remainder (16 elements)
+    const int simdEnd = (convCount / 4) * 4;
+    for (; r < simdEnd; r += 4)
+    {
+        __m256d vS = loadStride2(history - (r << 1));
+        __m256d vC = _mm256_loadu_pd(coeffs + r);
+        acc0 = _mm256_fmadd_pd(vS, vC, acc0);
+    }
+
+    // Tree reduction: acc0+acc1, acc2+acc3, acc4+acc5, acc6+acc7
+    acc0 = _mm256_add_pd(acc0, acc1);
+    acc2 = _mm256_add_pd(acc2, acc3);
+    acc4 = _mm256_add_pd(acc4, acc5);
+    acc6 = _mm256_add_pd(acc6, acc7);
+    // acc0+acc2, acc4+acc6
+    acc0 = _mm256_add_pd(acc0, acc2);
+    acc4 = _mm256_add_pd(acc4, acc6);
+    // acc0+acc4
+    acc0 = _mm256_add_pd(acc0, acc4);
+
+    // SIMD horizontal reduction: vextractf128 + hadd
+    __m128d vLo = _mm256_castpd256_pd128(acc0);
+    __m128d vHi = _mm256_extractf128_pd(acc0, 1);
+    __m128d vSum = _mm_add_pd(vLo, vHi);
+    vSum = _mm_hadd_pd(vSum, vSum);
+    double result = _mm_cvtsd_f64(vSum);
+
+    // Scalar remainder (handles non-4-multiple convCount safely)
+    for (; r < convCount; ++r)
+        result += coeffs[r] * history[-(r << 1)];
+
+    return result;
+}
+#endif
 
 void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax)
 {
@@ -7446,18 +7537,19 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
 }
 
 void CustomInputOversampler::decimateStage(const Stage& stage,
-                                           const double* input,
+                                           const double* __restrict input,
                                            int inputSamples,
-                                           double* output,
+                                           double* __restrict output,
                                            int channel) noexcept
 {
-    double* history = stage.downHistory[channel].get();
+    double* __restrict history = stage.downHistory[channel].get();
     if (history == nullptr || input == nullptr || output == nullptr)
         return;
 
     const int keep = stage.historyDownKeep;
     const int capacity = stage.downHistorySize;
 
+    // ── [既存] サイレンス最適化パス（変更なし） ──
     bool inputSilent = true;
     for (int i = 0; i < inputSamples; ++i)
     {
@@ -7492,18 +7584,40 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
     juce::FloatVectorOperations::copy(history + keep, input, inputSamples);
 
     const int outSamples = inputSamples >> 1;
-    const double* coeffs = stage.convCoeffs.get();
+    const double* __restrict coeffs = stage.convCoeffs.get();
+
+    // [Safety Guard] outSamples == 0 の場合、baseMax が不正になるため早期return
+    if (outSamples <= 0)
+        return;
+
+    // ── P1-1: nループ外部へのバウンドチェック完全外出し ──
+    // base = keep + (n << 1) は n に単調増加 → global min/max を事前計算
+    const int baseMax = keep + ((outSamples - 1) << 1);
+
+    // centerTap用: base - centerTap >= 0 → keep >= centerTap; base < capacity → baseMax < capacity
+    const bool centerTapOk = (keep >= stage.centerTap) && (baseMax < capacity);
+
+    // convタップ範囲: 最小convIndex = n=0,r=convCount-1; 最大convIndex = n=outSamples-1,r=0
+    const int globalMinConvIdx = keep - stage.convParity - ((stage.convCount - 1) << 1);
+    const int globalMaxConvIdx = baseMax - stage.convParity;
+    const bool convTapOk = (globalMinConvIdx >= 0) && (globalMaxConvIdx < capacity);
+
+    if (!centerTapOk || !convTapOk || stage.convCount <= 0)
+    {
+        // ブロック全体が境界違反 → 全出力0クリア
+        std::memset(output, 0, static_cast<size_t>(outSamples) * sizeof(double));
+        markCorruptionDetected();
+        return;
+    }
+
+    // ── nループ（境界安全100%保証済み） ──
     for (int n = 0; n < outSamples; ++n)
     {
         const int base = keep + (n << 1);
-        if (base < stage.centerTap || base >= capacity)
-        {
-            output[n] = 0.0;
-            markCorruptionDetected();
-            continue;
-        }
 
-        double acc = stage.centerCoeff * history[base - stage.centerTap];
+        // centerCoeffは動的な履歴値に依存 → nループ内でチェック
+        const double centerSample = history[base - stage.centerTap];
+        double acc = stage.centerCoeff * centerSample;
         if (isBadSample(acc))
         {
             output[n] = 0.0;
@@ -7511,109 +7625,62 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
             continue;
         }
 
-        bool bad = false;
-        bool usedAvxPath = false;
-
+        // ── P1-2: stride-2 dot product（AVX2） ──
 #if defined(__AVX2__) && defined(__FMA__)
-        if (stage.convCount >= 4)
+        if (stage.convCount >= 8)
         {
-            usedAvxPath = true;
+            // 8重アンロール dotProductDecimateAvx2（convCount>=8 で効果的）
+            __assume(stage.convCount >= 8);
+            acc += dotProductDecimateAvx2(
+                history + (base - stage.convParity),
+                coeffs,
+                stage.convCount);
+        }
+        else if (stage.convCount >= 4)
+        {
+            // convCount 4〜7: 簡易AVX2（unrollなしのloadStride2）
             __m256d vAcc = _mm256_setzero_pd();
             int r = 0;
             const int simdEnd = (stage.convCount / 4) * 4;
             for (; r < simdEnd; r += 4)
             {
-                const int idx0 = base - stage.convParity - ((r + 0) << 1);
-                const int idx1 = base - stage.convParity - ((r + 1) << 1);
-                const int idx2 = base - stage.convParity - ((r + 2) << 1);
-                const int idx3 = base - stage.convParity - ((r + 3) << 1);
-                if (idx0 < 0 || idx0 >= capacity || idx1 < 0 || idx1 >= capacity ||
-                    idx2 < 0 || idx2 >= capacity || idx3 < 0 || idx3 >= capacity)
-                {
-                    bad = true;
-                    break;
-                }
-
-                const double s0 = history[idx0];
-                const double s1 = history[idx1];
-                const double s2 = history[idx2];
-                const double s3 = history[idx3];
-
-                const __m256d vSamples = _mm256_set_pd(s3, s2, s1, s0);
-                if (isBadSampleV(vSamples))
-                {
-                    bad = true;
-                    break;
-                }
-                const __m256d vCoeffs  = _mm256_loadu_pd(coeffs + r);
-                vAcc = _mm256_fmadd_pd(vSamples, vCoeffs, vAcc);
+                __m256d vS = loadStride2(
+                    history + (base - stage.convParity) - (r << 1));
+                __m256d vC = _mm256_loadu_pd(coeffs + r);
+                vAcc = _mm256_fmadd_pd(vS, vC, vAcc);
             }
-
-            if (!bad)
-            {
-                alignas(64) double partial[4];
-                _mm256_store_pd(partial, vAcc);
-                acc += partial[0] + partial[1] + partial[2] + partial[3];
-
-                for (; r < stage.convCount; ++r)
-                {
-                    const int idx = base - stage.convParity - (r << 1);
-                    if (idx < 0 || idx >= capacity)
-                    {
-                        bad = true;
-                        break;
-                    }
-                    const double x = history[idx];
-                    if (isBadSample(x))
-                    {
-                        bad = true;
-                        break;
-                    }
-                    acc += coeffs[r] * x;
-                }
-            }
+            // 水平加算（vextractf128 + hadd）
+            __m128d vLo = _mm256_castpd256_pd128(vAcc);
+            __m128d vHi = _mm256_extractf128_pd(vAcc, 1);
+            __m128d vSum = _mm_add_pd(vLo, vHi);
+            vSum = _mm_hadd_pd(vSum, vSum);
+            acc += _mm_cvtsd_f64(vSum);
+            // スカラー剰余
+            for (; r < stage.convCount; ++r)
+                acc += coeffs[r] * history[base - stage.convParity - (r << 1)];
         }
+        else
 #endif
-
-        if (!usedAvxPath || bad)
         {
-            bad = false;
-            acc = stage.centerCoeff * history[base - stage.centerTap];
-            if (isBadSample(acc))
-                bad = true;
-
-            if (!bad)
-            {
-                for (int r = 0; r < stage.convCount; ++r)
-                {
-                    const int idx = base - stage.convParity - (r << 1);
-                    if (idx < 0 || idx >= capacity)
-                    {
-                        bad = true;
-                        break;
-                    }
-                    const double x = history[idx];
-                    if (isBadSample(x))
-                    {
-                        bad = true;
-                        break;
-                    }
-                    acc += coeffs[r] * x;
-                }
-            }
+            // convCount < 4: スカラーパス（バリデーション済み、チェックなし）
+            for (int r = 0; r < stage.convCount; ++r)
+                acc += coeffs[r] * history[base - stage.convParity - (r << 1)];
         }
 
-        if (bad)
+        // ── 事後処理（bad sample + denormal） ──
+        if (isBadSample(acc))
         {
             output[n] = 0.0;
             markCorruptionDetected();
-            continue;
         }
-
-        if (fastAbs(acc) < kDenormThreshold) acc = 0.0;
-        output[n] = acc;
+        else
+        {
+            if (fastAbs(acc) < kDenormThreshold) acc = 0.0;
+            output[n] = acc;
+        }
     }
 
+    // ── [既存] 履歴シフト（変更なし） ──
     std::memmove(history, history + inputSamples, static_cast<size_t>(keep) * sizeof(double));
 }
 
@@ -7866,6 +7933,7 @@ private:
 
     static double besselI0(double x) noexcept;
     static double dotProductAvx2(const double* x, const double* coeffs, int n) noexcept;
+    static double dotProductDecimateAvx2(const double* history, const double* coeffs, int convCount) noexcept;
 
     static int sanitizeRatio(int ratio) noexcept;
     static int tapsForStage(int stageIndex, Preset preset) noexcept;
@@ -17627,7 +17695,9 @@ private:
 
     static double powerToDb(double power) noexcept
     {
-        return 10.0 * std::log10(std::max(power, kMinPower));
+        // std::log10 → std::log * log10(e) でSSE↔x87 FPUモード切替を回避
+        constexpr double kLog10Factor = 10.0 * 0.43429448190325182765; // 10.0 / ln(10)
+        return std::log(std::max(power, kMinPower)) * kLog10Factor;
     }
 
     static double dbToPower(double db) noexcept
@@ -17687,7 +17757,9 @@ private:
     static double computeTonalityFromSfm(double sfm) noexcept
     {
         const double safeSfm = std::max(sfm, 1.0e-12);
-        const double tonality = kTonalityFromSfmA + (kTonalityFromSfmB * std::log10(safeSfm));
+        // std::log10 → std::log * log10(e) でSSE↔x87 FPUモード切替を回避
+        constexpr double kLog10Factor = 0.43429448190325182765; // 1.0 / ln(10)
+        const double tonality = kTonalityFromSfmA + (kTonalityFromSfmB * std::log(safeSfm) * kLog10Factor);
         return std::clamp(tonality, 0.0, 1.0);
     }
 
@@ -17863,10 +17935,19 @@ private:
                 if (totalDb > maxDb) maxDb = totalDb;
             }
 
-            if (contributions.size <= 0 || !std::isfinite(maxDb))
+            if (contributions.size <= 0)
             {
                 maskingEnergy[static_cast<size_t>(i)] = athThresholdPower[static_cast<size_t>(i)];
                 continue;
+            }
+            // std::isfinite の代わりにビット演算で有限値判定（libm 呼出回避）
+            {
+                union { double d; uint64_t u; } v { maxDb };
+                if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+                {
+                    maskingEnergy[static_cast<size_t>(i)] = athThresholdPower[static_cast<size_t>(i)];
+                    continue;
+                }
             }
 
             double sum = 0.0;
@@ -19217,10 +19298,18 @@ double NoiseShaperLearner::evaluateCandidateMapped(EvaluationContext& context,
                                               kOutputHeadroom);
 
             // Calculate error relative to headroom-scaled input
-            for (int k = 0; k < AudioSegment::kLength; ++k)
-            {
-                context.errorLeft[k] = context.shapedLeft[k] - (leveled.segment.left[k] * kOutputHeadroom);
-                context.errorRight[k] = context.shapedRight[k] - (leveled.segment.right[k] * kOutputHeadroom);
+            // ローカル__restrictポインタでエイリアスなしを明示（コンパイラの自動ベクトル化促進）
+            {   double* __restrict dstL = context.errorLeft;
+                double* __restrict dstR = context.errorRight;
+                const double* __restrict srcL = context.shapedLeft;
+                const double* __restrict srcR = context.shapedRight;
+                const double* __restrict refL = leveled.segment.left;
+                const double* __restrict refR = leveled.segment.right;
+                for (int k = 0; k < AudioSegment::kLength; ++k)
+                {
+                    dstL[k]  = srcL[k] - (refL[k] * kOutputHeadroom);
+                    dstR[k]  = srcR[k] - (refR[k] * kOutputHeadroom);
+                }
             }
 
             const auto result = context.fftEvaluator.evaluate(context.errorLeft, context.errorRight, &leveled.segment.maskingThresholds);
@@ -23967,34 +24056,33 @@ private:
     static constexpr double INTERNAL_SPREAD = 0.1;
 
     // ------------------------------------------------------------------------
-    // SIMD ベース有限値・閾値チェック（Audio Thread 安全版・SSE2）
-    // std::abs / std::isfinite 等の libm 呼び出しを回避
+    // 有限値・閾値チェック（Audio Thread 安全版・libm 非依存）
+    // std::isfinite / std::abs の代わりにビット演算で判定
+    // スカラー版（旧 SSE2 intrinsics 版から置換）
     // ------------------------------------------------------------------------
     static inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexcept
     {
-        const __m128d v = _mm_set1_pd(value);
-        const __m128d diff = _mm_sub_pd(v, v);
-        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
-        const __m128d signMask = _mm_set1_pd(-0.0);
-        const __m128d absV = _mm_andnot_pd(signMask, v);
-        const __m128d thresholdV = _mm_set1_pd(threshold);
-        const __m128d denormalMask = _mm_cmplt_pd(absV, thresholdV);
-        const __m128d validMask = _mm_andnot_pd(denormalMask, finiteMask);
-        return _mm_movemask_pd(validMask) == 0x3;
+        union { double d; uint64_t u; } v { value };
+        // 指数部が 0x7FF (NaN/Inf) でない
+        if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+            return false;
+        // 絶対値が threshold 以上
+        const uint64_t absBits = v.u & 0x7FFFFFFFFFFFFFFFULL;
+        union { uint64_t u; double d; } absVal { absBits };
+        return absVal.d >= threshold;
     }
 
     // 上限チェック付き有限値判定（状態発散防止用）
     static inline bool isFiniteAndBelowThresholdMask(double value, double threshold) noexcept
     {
-        const __m128d v = _mm_set1_pd(value);
-        const __m128d diff = _mm_sub_pd(v, v);
-        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
-        const __m128d signMask = _mm_set1_pd(-0.0);
-        const __m128d absV = _mm_andnot_pd(signMask, v);
-        const __m128d thresholdV = _mm_set1_pd(threshold);
-        const __m128d belowMask = _mm_cmplt_pd(absV, thresholdV);
-        const __m128d validMask = _mm_and_pd(finiteMask, belowMask);
-        return _mm_movemask_pd(validMask) == 0x3;
+        union { double d; uint64_t u; } v { value };
+        // 指数部が 0x7FF (NaN/Inf) でない
+        if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+            return false;
+        // 絶対値が threshold 未満
+        const uint64_t absBits = v.u & 0x7FFFFFFFFFFFFFFFULL;
+        union { uint64_t u; double d; } absVal { absBits };
+        return absVal.d < threshold;
     }
 
 public:
@@ -24055,7 +24143,6 @@ public:
     inline void processSample(double& sample) noexcept
     {
         double x = sample;
-        constexpr double thresh = convo::numeric_policy::kDenormThresholdAudioState;
 
         // 2 段カスケード処理（逐次・時間依存関係を保つ）
         for (int i = 0; i < 2; ++i)
@@ -24088,7 +24175,6 @@ public:
         double state1 = m_state[1];
         const double alpha0 = m_alpha[0];
         const double alpha1 = m_alpha[1];
-        constexpr double thresh = convo::numeric_policy::kDenormThresholdAudioState;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -28917,11 +29003,36 @@ inline void sanitizeFiniteChunk(double* data, int count) noexcept
     if (data == nullptr || count <= 0)
         return;
 
+#if defined(__AVX2__)
+    const __m256d vLimit = _mm256_set1_pd(1.0e300);
+    const __m256d vSignMask = _mm256_set1_pd(-0.0);
+
+    int i = 0;
+    const int simdEnd = (count / 4) * 4;
+    for (; i < simdEnd; i += 4)
+    {
+        __m256d vData = _mm256_loadu_pd(data + i);
+        // |x| < limit かつ NaNでない をマスク
+        __m256d vAbs = _mm256_andnot_pd(vSignMask, vData);
+        __m256d vCmp = _mm256_cmp_pd(vAbs, vLimit, _CMP_LT_OQ);
+        __m256d vNanCmp = _mm256_cmp_pd(vData, vData, _CMP_EQ_OQ);  // NaN→false
+        __m256d vMask = _mm256_and_pd(vCmp, vNanCmp);
+        // マスクが0の位置を0.0に（条件満たさない要素をゼロクリア）
+        __m256d vResult = _mm256_and_pd(vData, vMask);
+        _mm256_storeu_pd(data + i, vResult);
+    }
+    for (; i < count; ++i)
+    {
+        if (!isFiniteAndAbsBelowNoLibm(data[i], 1.0e300))
+            data[i] = 0.0;
+    }
+#else
     for (int i = 0; i < count; ++i)
     {
         if (!isFiniteAndAbsBelowNoLibm(data[i], 1.0e300))
             data[i] = 0.0;
     }
+#endif
 }
 
 inline double fastTanh(double x) noexcept

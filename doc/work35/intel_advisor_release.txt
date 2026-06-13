@@ -1,0 +1,209 @@
+Function Call Sites and Loops		Performance Issues	Total Time	Self Time	Type	Why No Vectorization?	Traits	Data Types	Advanced	Location
+[loop in func@0x180003cf0]	1		7.136s	0.006s	Scalar					
+func@0x180003cf0	-1		7.136s	0s	Function					
+__scrt_common_main_seh	-1		4.408s	0s	Function					exe_common.inl:236
+invoke_main	-1		4.408s	0s	Inlined Function					exe_common.inl:102
+juce::JUCEApplicationBase::main	-1		4.408s	0s	Inlined Function					juce_ApplicationBase.cpp:265
+WinMain	-1		4.408s	0s	Function					MainApplication.cpp:171
+thread_start<unsigned int (__cdecl*)(void *),1>	-1		3.910s	0s	Function					thread.cpp:77
+juce::JUCEApplicationBase::initialiseApp	-1		3.093s	0s	Function					juce_ApplicationBase.cpp:288
+MainApplication::initialise	-1		3.093s	0s	Function			Int32		MainApplication.cpp:54
+std::make_unique<class MainWindow,class juce::String const ,0>	-1		3.093s	0s	Function					memory:3665
+MainWindow::MainWindow	-1		3.093s	0s	Function					MainWindow.cpp:254
+juce::juce_threadEntryPoint	-1		2.431s	0s	Inlined Function					juce_Thread.cpp:132
+juce::threadEntryProc	-1		2.431s	0s	Function					juce_Threads_windows.cpp:68
+juce::Thread::threadEntryPoint	-1		2.431s	0s	Function					juce_Thread.cpp:92
+[loop in func@0x180003cf0]	1		2.304s	0s	Scalar					
+juce::Win32NativeFileChooser::run::__l2::<lambda_1>::operator()	-1		2.265s	0s	Inlined Function					juce_FileChooser_windows.cpp:566
+juce::Win32NativeFileChooser::run	-1		2.265s	0s	Function					juce_FileChooser_windows.cpp:556
+juce::Win32NativeFileChooser::openDialog	-1		2.265s	0s	Function					juce_FileChooser_windows.cpp:538
+juce::Win32NativeFileChooser::openDialogWithoutPreview	-1		2.258s	0s	Function			Int32		juce_FileChooser_windows.cpp:346
+juce::Win32NativeFileChooser::showDialog	-1		2.258s	0s	Function					juce_FileChooser_windows.cpp:184
+juce::Win32NativeFileChooser::showDialog::__l2::<lambda_3>::operator()	-1		1.916s	0s	Inlined Function					juce_FileChooser_windows.cpp:333
+juce::Component::addToDesktop	-1		1.746s	0s	Function		Unpacks	Int32		juce_Component.cpp:403
+juce::Component::createNewPeer	-1		1.692s	0s	Function					juce_Windowing_windows.cpp:4808
+juce::HWNDComponentPeer::HWNDComponentPeer	-1		1.692s	0s	Function			UInt16		juce_Windowing_windows.cpp:1440
+juce::DocumentWindow::DocumentWindow	-1		1.625s	0s	Function					juce_DocumentWindow.cpp:68
+func@0x1800034f0	-1		1.561s	0.008s	Function					
+juce::ASIOAudioIODevice::callback	-1		1.494s	0.007s	Function			Int32		juce_ASIO_windows.cpp:1302
+juce::ASIOAudioIODevice::processBuffer	-1		1.487s	0.009s	Inlined Function					juce_ASIO_windows.cpp:1318
+juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext	-1		1.452s	0.002s	Function		Shifts	UInt16; UInt256; ; 		juce_AudioDeviceManager.cpp:110
+[loop in juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext at juce_AudioDeviceManager.cpp:118]	1		1.450s	0s	Scalar		Shifts	UInt16; UInt256; ; 		juce_AudioDeviceManager.cpp:118
+juce::AudioDeviceManager::audioDeviceIOCallbackInt	-1		1.446s	0s	Inlined Function			Int32		juce_AudioDeviceManager.cpp:1090
+juce::AudioDeviceManager::CallbackHandler::audioDeviceIOCallbackWithContext	-1		1.446s	0s	Function			Int32		juce_AudioDeviceManager.cpp:166
+juce::AudioProcessorPlayer::audioDeviceIOCallbackWithContext	-1		1.429s	0.002s	Function			Int32; UInt16		juce_AudioProcessorPlayer.cpp:234
+AudioEngine::processBlockDouble	-1		1.389s	0.002s	Inlined Function			Int32		AudioEngine.Processing.BlockDouble.cpp:17
+AudioEngineProcessor::processBlock	-1		1.389s	0s	Function			Int32		AudioEngineProcessor.cpp:73
+AudioEngine::DSPCore::processDouble	-1		1.367s	0s	Function		Blends; Divisions; Extracts; FMA; Inserts; Shuffles; Unpacks	Int32; Int64; UInt16; ; 		AudioEngine.Processing.DSPCoreDouble.cpp:314
+juce::InternalMessageQueue::dispatchNextMessage	-1		1.315s	0s	Inlined Function					juce_Messaging_windows.cpp:121
+[loop in WinMain at MainApplication.cpp:171]	1		1.315s	0s	Scalar					MainApplication.cpp:171
+juce::detail::dispatchNextMessageOnSystemQueue	-1		1.315s	0s	Inlined Function					juce_Messaging_windows.cpp:271
+juce::MessageManager::runDispatchLoop	-1		1.315s	0s	Inlined Function					juce_MessageManager.cpp:120
+juce::ResizableWindow::ResizableWindow	-1		1.293s	0s	Function					juce_ResizableWindow.cpp:46
+juce::TopLevelWindow::TopLevelWindow	-1		1.293s	0s	Function					juce_TopLevelWindow.cpp:41
+[loop in CustomInputOversampler::decimateStage at CustomInputOversampler.cpp:478]	1		1.017s	0.010s	Scalar		Blends	Int64; UInt16; UInt256		CustomInputOversampler.cpp:478
+[loop in CustomInputOversampler::processDown at CustomInputOversampler.cpp:733]	1		1.017s	0s	Scalar					CustomInputOversampler.cpp:733
+CustomInputOversampler::processDown	-1		1.017s	0s	Function			Int32; UInt16		CustomInputOversampler.cpp:665
+[loop in CustomInputOversampler::processDown at CustomInputOversampler.cpp:728]	1		1.017s	0s	Scalar			UInt16		CustomInputOversampler.cpp:728
+CustomInputOversampler::decimateStage	-1		1.017s	0s	Function		Blends	Int32		CustomInputOversampler.cpp:435
+[loop in CustomInputOversampler::decimateStage at CustomInputOversampler.cpp:571]	1		1.004s	0.762s	Scalar			Int64; UInt256		CustomInputOversampler.cpp:571
+
+
+Function Call Sites and Loops		Performance Issues	Total Time	Self Time	Type	Why No Vectorization?	Traits	Data Types	Advanced	Location
+[loop in CustomInputOversampler::decimateStage at CustomInputOversampler.cpp:571]	1		1.004s	0.762s	Scalar			Int64; UInt256		CustomInputOversampler.cpp:571
+[loop in func@0x180003600]	1		0.702s	0.702s	Scalar					
+[pincrt.dll]	-1		0.614s	0.614s	Function					
+A0x10bdf457::isBadSample	-1		0.241s	0.241s	Inlined Function					CustomInputOversampler.cpp:27
+memset_repstos	-1		0.135s	0.135s	Function					memset.asm:38
+[loop in convo::UltraHighRateDCBlocker::process at UltraHighRateDCBlocker.h:171]	1		0.120s	0.120s	Scalar	Compiler lacks sufficient information to vectorize loop 		Int64		UltraHighRateDCBlocker.h:171
+LatticeNoiseShaper::advanceState	-1		0.165s	0.116s	Inlined Function					LatticeNoiseShaper.h:249
+LatticeNoiseShaper::processSample	-1		0.286s	0.091s	Function		Extracts; FMA	Int32; Int64		LatticeNoiseShaper.h:270
+exp	-1	1 Data type conversions present 	0.065s	0.049s	Function		Type Conversions	Int64; UInt16; UInt256; 		exp.asm:169
+std::clamp	-1		0.048s	0.048s	Inlined Function					algorithm:11895
+log10	-1	1 Data type conversions present 	0.042s	0.042s	Function		Shifts; Type Conversions	Int64; UInt16; UInt256; 		log10.asm:210
+[loop in MklFftEvaluator::computeMaskingEnergyStable at MklFftEvaluator.h:749]	1	1 Data type conversions present 	0.115s	0.039s	Scalar		FMA; Type Conversions	Int32; Int64; 		MklFftEvaluator.h:749
+[loop in func@0x180003600]	1		0.732s	0.030s	Scalar					
+std::array<MklFftEvaluator::Masker,128>::operator[]	-1		0.027s	0.027s	Inlined Function					array:537
+CustomInputOversampler::dotProductAvx2	-1		0.024s	0.021s	Function		Blends; Extracts; FMA; Unpacks	Int64		CustomInputOversampler.cpp:143
+[loop in juce::AudioBuffer<double>::makeCopyOf<float> at juce_AudioSampleBuffer.h:574]	1	1 Data type conversions present 	0.021s	0.021s	Scalar		Type Conversions	Int32; Int64		juce_AudioSampleBuffer.h:574
+log	-1	1 Data type conversions present 	0.020s	0.020s	Function		Shifts; Type Conversions	Int64; UInt16; UInt256; 		log.asm:233
+_avx2_exp4	-1		0.019s	0.019s	Function		Blends; Extracts; FMA; Inserts; Shifts; Shuffles	Int32; Int64; UInt16; UInt256; UInt; ; 		svml_dexp4_avx2.asm:18
+MklFftEvaluator::smoothCap	-1		0.018s	0.018s	Inlined Function					MklFftEvaluator.h:547
+juce::CharPointer_UTF8::getAndAdvance	-1		0.018s	0.018s	Inlined Function					juce_CharPointer_UTF8.h:157
+LatticeNoiseShaper::computeFeedback	-1		0.017s	0.017s	Inlined Function		FMA	Int64		LatticeNoiseShaper.h:223
+[loop in CustomInputOversampler::interpolateStage at CustomInputOversampler.cpp:366]	1		0.050s	0.017s	Scalar		Blends	Int32; Int64; UInt16; UInt256		CustomInputOversampler.cpp:366
+abs	-1		0.016s	0.016s	Inlined Function					cstdlib:24
+memcpy	-1		0.014s	0.014s	Function		NT-stores	Int32; UInt16		memcpy.asm:90
+juce::FloatVectorHelpers::BasicOps64::min	-1		0.014s	0.014s	Inlined Function			Int64		juce_FloatVectorOperations.cpp:103
+MklFftEvaluator::spreadingFunctionAnnexD	-1		0.023s	0.014s	Inlined Function					MklFftEvaluator.h:595
+[loop in MklFftEvaluator::computeSfm at MklFftEvaluator.h:685]	1		0.033s	0.013s	Scalar			Int32; Int64		MklFftEvaluator.h:685
+AudioEngine::makeRuntimeReadHandle	-1		0.015s	0.011s	Function			Int32		AudioEngine.h:2342
+[loop in func@0x1800036f0]	1		0.011s	0.011s	Scalar					
+[loop in A0x58e4c794::sanitizeFiniteChunk at AudioEngine.Processing.DSPCoreIO.cpp:43]	1		0.032s	0.011s	Scalar			Int64; UInt16; UInt256		AudioEngine.Processing.DSPCoreIO.cpp:43
+pow_internal	-1		0.013s	0.011s	Inlined Function		Blends	Int32; 		pow.c:290
+[loop in NoiseShaperLearner::evaluateCandidateMapped at NoiseShaperLearner.cpp:1298]	1		0.011s	0.011s	Scalar	Compiler lacks sufficient information to vectorize loop 		Int64		NoiseShaperLearner.cpp:1298
+ischartype_l	-1		0.011s	0.011s	Function					ctype.h:244
+[loop in juce::addPooledString<juce::CharPointer_UTF8> at juce_StringPool.cpp:78]	1		0.017s	0.010s	Scalar					juce_StringPool.cpp:78
+[loop in CustomInputOversampler::decimateStage at CustomInputOversampler.cpp:478]	1		1.017s	0.010s	Scalar		Blends	Int64; UInt16; UInt256		CustomInputOversampler.cpp:478
+[loop in MklFftEvaluator::computeMaskingEnergyStable at MklFftEvaluator.h:773]	1		0.018s	0.010s	Scalar			Int64		MklFftEvaluator.h:773
+[loop in LatticeNoiseShaper::processStereoBlock at LatticeNoiseShaper.h:104]	1		0.214s	0.010s	Scalar			Int64		LatticeNoiseShaper.h:104
+std::__1::basic_string<char,struct std::__1::char_traits<char>,class std::__1::allocator<char> >::__grow_by_and_replace	-1		0.010s	0.010s	Function					
+std::__1::basic_string<char,struct std::__1::char_traits<char>,class std::__1::allocator<char> >::~basic_string<char,struct std::__1::char_traits<char>,class std::__1::allocator<char> >	-1		0.010s	0.010s	Function					
+round	-1		0.010s	0.010s	Function			UInt16; UInt256		round.asm:40
+[loop in MklFftEvaluator::buildNoiseMaskersFixed at MklFftEvaluator.h:714]	1		0.009s	0.009s	Scalar	Compiler lacks sufficient information to vectorize loop 	FMA	Int64		MklFftEvaluator.h:714
+get_fpsr	-1		0.009s	0.009s	Inlined Function					fpctrl.c:21
+pow_fma	-1		0.022s	0.009s	Function		Blends	Int32; 		pow.c:397
+lock_locales	-1		0.009s	0.009s	Function					locks.cpp:63
+juce::ASIOAudioIODevice::ASIOCallbackFunctions<0>::bufferSwitchCallback	-1		0.009s	0.009s	Function					juce_ASIO_windows.cpp:1394
+MklFftEvaluator::ContributionBuffer::push	-1		0.009s	0.009s	Inlined Function					MklFftEvaluator.h:521
+A0x58e4c794::isFiniteNoLibm	-1		0.009s	0.009s	Inlined Function					AudioEngine.Processing.DSPCoreIO.cpp:10
+juce::ASIOAudioIODevice::processBuffer	-1		1.487s	0.009s	Inlined Function					juce_ASIO_windows.cpp:1318
+juce::CharPointer_UTF8::getAndAdvance	-1		0.008s	0.008s	Inlined Function					juce_CharPointer_UTF8.h:157
+func@0x1800034f0	-1		1.561s	0.008s	Function					
+A0x58e4c794::isFiniteAndAbsBelowNoLibm	-1		0.021s	0.008s	Inlined Function					AudioEngine.Processing.DSPCoreIO.cpp:16
+_exception_enabled	-1		0.017s	0.007s	Function					libm_error.c:59
+juce::ASIOAudioIODevice::callback	-1		1.494s	0.007s	Function			Int32		juce_ASIO_windows.cpp:1302
+A0x58e4c794::isFiniteAndAbsBelowNoLibm	-1		0.013s	0.007s	Inlined Function					AudioEngine.Processing.DSPCoreIO.cpp:16
+[loop in `anonymous namespace'::crc64Update at CacheManager.cpp:34]	1		0.006s	0.006s	Scalar					CacheManager.cpp:34
+LatticeNoiseShaper::quantize	-1		0.012s	0.006s	Inlined Function					LatticeNoiseShaper.h:200
+juce::FloatVectorHelpers::BasicOps64::max	-1		0.006s	0.006s	Inlined Function			Int64		juce_FloatVectorOperations.cpp:102
+[loop in func@0x180003cf0]	1		7.136s	0.006s	Scalar					
+[loop in MklFftEvaluator::evaluate at MklFftEvaluator.h:338]	1		0.015s	0.005s	Scalar			Int64		MklFftEvaluator.h:338
+juce::AudioBuffer<double>::makeCopyOf<float>	-1		0.026s	0.005s	Function					juce_AudioSampleBuffer.h:557
+juce::AudioDeviceManager::LevelMeter::updateLevel	-1		0.005s	0.005s	Function			Int32; UInt16		juce_AudioDeviceManager.cpp:1310
+A0x58e4c794::isFiniteNoLibm	-1		0.005s	0.005s	Inlined Function					AudioEngine.Processing.DSPCoreIO.cpp:10
+absNoLibm	-1		0.005s	0.005s	Inlined Function					AudioEngine.h:122
+convo::UltraHighRateDCBlocker::process	-1		0.125s	0.005s	Function		Blends; Shuffles	Int32; Int64; UInt16; ; 		UltraHighRateDCBlocker.h:159
+juce::FloatVectorOperations::getFpStatusRegister	-1		0.004s	0.004s	Inlined Function					juce_FloatVectorOperations.cpp:1442
+juce::FloatVectorHelpers::MinMax<juce::FloatVectorHelpers::BasicOps64>::findMinAndMax	-1		0.027s	0.004s	Inlined Function		Unpacks	Int64		juce_FloatVectorOperations.cpp:456
+juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext::__l8::<lambda_1>::operator()	-1		0.004s	0.004s	Inlined Function			UInt256		juce_AudioDeviceManager.cpp:120
+juce::HiResCounterHandler::getMillisecondCounterHiRes	-1		0.007s	0.004s	Inlined Function					juce_SystemStats_windows.cpp:443
+A0x10bdf457::fastAbs	-1		0.003s	0.003s	Inlined Function					CustomInputOversampler.cpp:20
+A0x10bdf457::isBadSample	-1		0.003s	0.003s	Inlined Function					CustomInputOversampler.cpp:27
+std::vector<float *,class std::allocator<float *> >::resize	-1		0.003s	0.003s	Function					vector:1631
+LatticeNoiseShaper::xoshiro256plusplus	-1		0.003s	0.003s	Inlined Function					LatticeNoiseShaper.h:180
+juce::ASIOSampleFormat::convertToFloat	-1		0.012s	0.003s	Inlined Function					juce_ASIO_windows.cpp:139
+[loop in juce::FloatVectorHelpers::MinMax<juce::FloatVectorHelpers::BasicOps64>::findMinAndMax at juce_FloatVectorOperations.cpp:466]	1		0.023s	0.003s	Scalar			Int64		juce_FloatVectorOperations.cpp:466
+[loop in LatticeNoiseShaper::processStereoBlock at LatticeNoiseShaper.h:92]	1		0.085s	0.003s	Scalar			Int64		LatticeNoiseShaper.h:92
+LatticeNoiseShaper::xoshiro256plusplus	-1		0.003s	0.003s	Inlined Function					LatticeNoiseShaper.h:180
+A0x58e4c794::sanitizeFiniteChunk	-1		0.019s	0.003s	Inlined Function					AudioEngine.Processing.DSPCoreIO.cpp:40
+A0x10bdf457::isBadSample	-1		0.003s	0.003s	Inlined Function					CustomInputOversampler.cpp:27
+AudioEngine::DSPCore::processInputDouble	-1		0.188s	0.003s	Inlined Function			Int64		AudioEngine.Processing.DSPCoreIO.cpp:231
+A0x10bdf457::isBadSample	-1		0.003s	0.003s	Inlined Function					CustomInputOversampler.cpp:27
+[loop in A0x58e4c794::sanitizeFiniteChunk at AudioEngine.Processing.DSPCoreIO.cpp:43]	1		0.016s	0.003s	Scalar			Int64; UInt16; UInt256		AudioEngine.Processing.DSPCoreIO.cpp:43
+std::_Atomic_storage<juce::AudioPlayHead *,8>::load	-1		0.003s	0.003s	Inlined Function					atomic:1038
+convo::input_transform::applyHighQuality64BitTransform	-1		0.003s	0.003s	Function			Int32; Int64; UInt16; ; 		InputBitDepthTransform.h:88
+[loop in convo::EpochDomain::getMinReaderEpoch at EpochDomain.h:183]	1		0.003s	0.003s	Scalar	Compiler lacks sufficient information to vectorize loop 				EpochDomain.h:183
+juce::AudioProcessorPlayer::audioDeviceIOCallbackWithContext	-1		1.429s	0.002s	Function			Int32; UInt16		juce_AudioProcessorPlayer.cpp:234
+A0x10bdf457::isBadSample	-1		0.002s	0.002s	Inlined Function					CustomInputOversampler.cpp:27
+CustomInputOversampler::interpolateStage	-1		0.054s	0.002s	Function		Blends	Int32		CustomInputOversampler.cpp:357
+juce::CallbackMaxSizeEnforcer::audioDeviceIOCallbackWithContext	-1		1.452s	0.002s	Function		Shifts	UInt16; UInt256; ; 		juce_AudioDeviceManager.cpp:110
+[loop in MklFftEvaluator::computeMaskingEnergyStable at MklFftEvaluator.h:774]	1		0.020s	0.002s	Scalar			Int64		MklFftEvaluator.h:774
+AudioEngine::processBlockDouble	-1		1.389s	0.002s	Inlined Function			Int32		AudioEngine.Processing.BlockDouble.cpp:17
+absNoLibm	-1		0.002s	0.002s	Inlined Function					AudioEngine.h:122
+AudioEngine::buildAudioThreadProcessingState	-1		0.002s	0.002s	Function					AudioEngine.h:2968
+juce::AudioIODevice::getWorkgroup	-1		0.002s	0.002s	Function					juce_AudioIODevice.h:323
+exp_inline	-1		0.002s	0.002s	Inlined Function		Blends			pow.c:181
+juce::CaretComponent::timerCallback	-1		< 0.001s	< 0.001s	Function					juce_CaretComponent.cpp:56
+juce::ArrayBase<float,juce::DummyCriticalSection>::addAssumingCapacityIsReady	-1		< 0.001s	< 0.001s	Inlined Function					juce_ArrayBase.h:568
+std::chrono::steady_clock::now	-1		0.003s	< 0.001s	Inlined Function					__msvc_chrono.hpp:680
+Query_perf_frequency	-1		< 0.001s	< 0.001s	Function					xtime.cpp:97
+common_vsprintf<__crt_stdio_output::format_validation_base,char>	-1		< 0.001s	< 0.001s	Function			UInt16		output.cpp:137
+convo::DeferredFreeThread::run	-1		0.527s	< 0.001s	Inlined Function			Int32		DeferredFreeThread.h:151
+juce::Component::findColour	-1		< 0.001s	< 0.001s	Function					juce_Component.cpp:1955
+juce::ScopedReadLock::ScopedReadLock	-1		< 0.001s	< 0.001s	Function			Int32		juce_ScopedReadLock.h:77
+
+
+
+Function Call Sites and Loops		Performance Issues	Total Time	Self Time	Type	Why No Vectorization?	Traits	Data Types	Advanced	Location
+[loop in juce::VBlankThread::run at juce_VBlank_windows.cpp:120]	1	3 Data type conversions present 	0.076s	0s	Scalar		Type Conversions; Vector Prefetch	Int64; UInt16; UInt256		juce_VBlank_windows.cpp:120
+[loop in SpectrumAnalyzerComponent::paint at SpectrumAnalyzerComponent.cpp:591]	1	3 Data type conversions present 	< 0.001s	0s	Scalar		Divisions; FMA; Type Conversions	Int32; Int64; UInt16		SpectrumAnalyzerComponent.cpp:591
+[loop in juce::DxgiAdapters::updateAdapters at juce_DirectX_windows.cpp:154]	1	2 System function call(s) present 	0.867s	0s	Scalar					juce_DirectX_windows.cpp:154
+[loop in juce::ASIOAudioIODeviceType::scanForDevices at juce_ASIO_windows.cpp:1469]	1	2 System function call(s) present 	0.732s	0s	Scalar					juce_ASIO_windows.cpp:1469
+[loop in std::this_thread::sleep_until at thread:211]	1	2 System function call(s) present 	0.583s	0s	Scalar		Divisions			thread:211
+[loop in juce::ListenerList<juce::ChangeListener,juce::Array<juce::ChangeListener *,juce::DummyCriticalSection,0> >::callCheckedExcluding at juce_ListenerList.h:263]	1	2 System function call(s) present 	0.022s	0s	Scalar					juce_ListenerList.h:263
+[loop in juce::DropShadower::updateShadows at juce_DropShadower.cpp:365]	1	2 System function call(s) present 	0.020s	0s	Scalar			Int32		juce_DropShadower.cpp:365
+[loop in juce::Thread::waitForThreadToExit at juce_Thread.cpp:234]	1	2 System function call(s) present 	0.015s	0s	Scalar					juce_Thread.cpp:234
+[loop in std::filesystem::create_directories at filesystem:3828]	1	2 System function call(s) present 	0.008s	0s	Scalar					filesystem:3828
+[loop in juce::DropShadower::updateShadows at juce_DropShadower.cpp:374]	1	2 System function call(s) present 	0.006s	0s	Scalar					juce_DropShadower.cpp:374
+[loop in juce::ModalComponentManager::bringModalComponentsToFront at juce_ModalComponentManager.cpp:221]	1	2 System function call(s) present 	0.004s	0s	Scalar					juce_ModalComponentManager.cpp:221
+[loop in juce::TemporaryFile::overwriteTargetFileWithTemporary at juce_TemporaryFile.cpp:103]	1	2 System function call(s) present 	0.003s	0s	Scalar					juce_TemporaryFile.cpp:103
+[loop in juce::OwnedArray<class juce::AudioFormat,class juce::DummyCriticalSection>::deleteAllObjects at juce_OwnedArray.h:823]	1	2 System function call(s) present 	0.003s	0s	Scalar					juce_OwnedArray.h:823
+[loop in juce::ASIOAudioIODevice::open at juce_ASIO_windows.cpp:581]	1	2 System function call(s) present 	< 0.001s	0s	Scalar					juce_ASIO_windows.cpp:581
+[loop in func@0x180002310]	1	2 System function call(s) present 	< 0.001s	0s	Scalar					
+[loop in juce::WaitableEvent::wait at juce_WaitableEvent.cpp:55]	1	2 Data type conversions present 	0.085s	0s	Scalar		Divisions; Type Conversions	Int64; UInt16		juce_WaitableEvent.cpp:55
+[loop in NoiseShaperLearner::workerThreadMain at NoiseShaperLearner.cpp:860]	1	2 Data type conversions present 	0.016s	0s	Scalar		Divisions; Type Conversions	Int64; UInt16		NoiseShaperLearner.cpp:860
+[loop in SpectrumAnalyzerComponent::updateEQData at SpectrumAnalyzerComponent.cpp:868]	1	1 Unoptimized floating point operation processing possible	< 0.001s	0s	Scalar		Square Roots	Int32		SpectrumAnalyzerComponent.cpp:868
+[loop in std::condition_variable::wait at mutex:542]	1	1 System function call(s) present 	0.136s	0s	Scalar					mutex:542
+[loop in std::condition_variable::wait at mutex:542]	1	1 System function call(s) present 	0.029s	0s	Scalar					mutex:542
+[loop in std::condition_variable::wait at mutex:542]	1	1 System function call(s) present 	0.004s	0s	Scalar					mutex:542
+[loop in AudioEngine::timerCallback at AudioEngine.Timer.cpp:369]	1	1 System function call(s) present 	0.002s	0s	Scalar					AudioEngine.Timer.cpp:369
+[loop in juce::VBlankThread::handleAsyncUpdate at juce_VBlank_windows.cpp:149]	1	1 Misaligned loop code present	0.126s	0s	Scalar			Int32		juce_VBlank_windows.cpp:149
+[loop in juce::AudioBuffer<double>::clear at juce_AudioSampleBuffer.h:592]	1	1 Misaligned loop code present	0.028s	0s	Scalar					juce_AudioSampleBuffer.h:592
+[loop in `juce::detail::findSuitableFontsForText'::`2'::<lambda_2>::operator() at juce_SimpleShapedText.cpp:601]	1	1 Indirect function call(s) present 	< 0.001s	0s	Scalar					juce_SimpleShapedText.cpp:601
+exp	-1	1 Data type conversions present 	0.065s	0.049s	Function		Type Conversions	Int64; UInt16; UInt256; 		exp.asm:169
+log10	-1	1 Data type conversions present 	0.042s	0.042s	Function		Shifts; Type Conversions	Int64; UInt16; UInt256; 		log10.asm:210
+[loop in MklFftEvaluator::computeMaskingEnergyStable at MklFftEvaluator.h:749]	1	1 Data type conversions present 	0.115s	0.039s	Scalar		FMA; Type Conversions	Int32; Int64; 		MklFftEvaluator.h:749
+[loop in juce::AudioBuffer<double>::makeCopyOf<float> at juce_AudioSampleBuffer.h:574]	1	1 Data type conversions present 	0.021s	0.021s	Scalar		Type Conversions	Int32; Int64		juce_AudioSampleBuffer.h:574
+log	-1	1 Data type conversions present 	0.020s	0.020s	Function		Shifts; Type Conversions	Int64; UInt16; UInt256; 		log.asm:233
+log10f	-1	1 Data type conversions present 	< 0.001s	< 0.001s	Function		Shifts; Type Conversions	Int32; UInt16; 		log10f.asm:382
+[loop in NoiseShaperLearner::evaluateCandidateMapped at NoiseShaperLearner.cpp:1273]	1	1 Data type conversions present 	0.536s	0s	Scalar		Divisions; Type Conversions	Int32; Int64; 		NoiseShaperLearner.cpp:1273
+[loop in NoiseShaperLearner::workerThreadMain at NoiseShaperLearner.cpp:838]	1	1 Data type conversions present 	0.184s	0s	Scalar		Divisions; Type Conversions	Int32; Int64; UInt16		NoiseShaperLearner.cpp:838
+[loop in juce::Timer::TimerThread::run at juce_Timer.cpp:111]	1	1 Data type conversions present 	0.089s	0s	Scalar		Type Conversions	Int32; Int64; UInt16; 		juce_Timer.cpp:111
+[loop in MklFftEvaluator::buildNoiseMaskersFixed at MklFftEvaluator.h:708]	1	1 Data type conversions present 	0.042s	0s	Scalar		Divisions; FMA; Type Conversions	Int32; Int64; UInt16		MklFftEvaluator.h:708
+[loop in EQProcessor::prepareToPlay at EQProcessor.Core.cpp:735]	1	1 Data type conversions present 	0.027s	0s	Scalar		Type Conversions	Int64; 		EQProcessor.Core.cpp:735
+SpectrumAnalyzerComponent::paint	-1	1 Data type conversions present 	0.023s	0s	Function		Type Conversions	Int32; UInt16		SpectrumAnalyzerComponent.cpp:556
+[loop in SpectrumAnalyzerComponent::paint at SpectrumAnalyzerComponent.cpp:591]	1	1 Data type conversions present 	0.018s	0s	Scalar Versions		FMA; Type Conversions	Int32; UInt16		SpectrumAnalyzerComponent.cpp:591
+[loop in DeviceSettings::loadNoiseShaperState at DeviceSettings.cpp:827]	1	1 Data type conversions present 	0.011s	0s	Scalar		Type Conversions			DeviceSettings.cpp:827
+juce::Graphics::drawFittedText	-1	1 Data type conversions present 	0.010s	0s	Function		Type Conversions	Int32; UInt16		juce_GraphicsContext.cpp:466
+[loop in juce::detail::lowLevelShape at juce_SimpleShapedText.cpp:368]	1	1 Data type conversions present 	0.010s	0s	Scalar		Blends; Divisions; FMA; Type Conversions	Int32; UInt16; 		juce_SimpleShapedText.cpp:368
+[loop in DeviceSettings::saveNoiseShaperState at DeviceSettings.cpp:763]	1	1 Data type conversions present 	0.009s	0s	Scalar		Type Conversions			DeviceSettings.cpp:763
+juce::LookAndFeel_V2::drawLabel	-1	1 Data type conversions present 	0.009s	0s	Function		Blends; Type Conversions; Unpacks	Int32; UInt16; 		juce_LookAndFeel_V2.cpp:1335
+SpectrumAnalyzerComponent::drawLevelMeterBar	-1	1 Data type conversions present 	0.004s	0s	Function		Type Conversions	Int32; UInt16		SpectrumAnalyzerComponent.cpp:1067
+juce::detail::MouseInputSourceImpl::setPointerState	-1	1 Data type conversions present 	0.002s	0s	Function		Shuffles; Type Conversions; Unpacks	Int32; UInt16		juce_MouseInputSourceImpl.h:293
+[loop in NoiseShaperLearner::precomputeMaskingThresholds at NoiseShaperLearner.cpp:1343]	1	1 Data type conversions present 	0.002s	0s	Scalar		FMA; Type Conversions	Int32; Int64; 		NoiseShaperLearner.cpp:1343
+juce::Direct2DGraphicsContext::paintPrimitive	-1	1 Data type conversions present 	< 0.001s	0s	Inlined Function		Type Conversions	Int32; UInt16		juce_Direct2DGraphicsContext_windows.cpp:724
+juce::Direct2DGraphicsContext::drawRoundedRectangle	-1	1 Data type conversions present 	< 0.001s	0s	Function		Type Conversions	Int32; UInt16		juce_Direct2DGraphicsContext_windows.cpp:1027
+juce::Direct2DGraphicsContext::fillRect	-1	1 Data type conversions present 	< 0.001s	0s	Function		Shuffles; Type Conversions	Int32; UInt16		juce_Direct2DGraphicsContext_windows.cpp:790
+juce::Direct2DGraphicsContext::paintPrimitive	-1	1 Data type conversions present 	< 0.001s	0s	Inlined Function		Shuffles; Type Conversions	Int32; UInt16		juce_Direct2DGraphicsContext_windows.cpp:724
+func@0x18000288f	-1	1 Data type conversions present 	< 0.001s	0s	Function		Type Conversions	Int64; UInt16		

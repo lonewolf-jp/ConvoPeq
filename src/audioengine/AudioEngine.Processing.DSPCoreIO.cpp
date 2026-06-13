@@ -40,11 +40,36 @@ inline void sanitizeFiniteChunk(double* data, int count) noexcept
     if (data == nullptr || count <= 0)
         return;
 
+#if defined(__AVX2__)
+    const __m256d vLimit = _mm256_set1_pd(1.0e300);
+    const __m256d vSignMask = _mm256_set1_pd(-0.0);
+
+    int i = 0;
+    const int simdEnd = (count / 4) * 4;
+    for (; i < simdEnd; i += 4)
+    {
+        __m256d vData = _mm256_loadu_pd(data + i);
+        // |x| < limit かつ NaNでない をマスク
+        __m256d vAbs = _mm256_andnot_pd(vSignMask, vData);
+        __m256d vCmp = _mm256_cmp_pd(vAbs, vLimit, _CMP_LT_OQ);
+        __m256d vNanCmp = _mm256_cmp_pd(vData, vData, _CMP_EQ_OQ);  // NaN→false
+        __m256d vMask = _mm256_and_pd(vCmp, vNanCmp);
+        // マスクが0の位置を0.0に（条件満たさない要素をゼロクリア）
+        __m256d vResult = _mm256_and_pd(vData, vMask);
+        _mm256_storeu_pd(data + i, vResult);
+    }
+    for (; i < count; ++i)
+    {
+        if (!isFiniteAndAbsBelowNoLibm(data[i], 1.0e300))
+            data[i] = 0.0;
+    }
+#else
     for (int i = 0; i < count; ++i)
     {
         if (!isFiniteAndAbsBelowNoLibm(data[i], 1.0e300))
             data[i] = 0.0;
     }
+#endif
 }
 
 inline double fastTanh(double x) noexcept

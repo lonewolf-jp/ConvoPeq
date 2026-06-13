@@ -46,6 +46,25 @@ namespace
         const __m256d vInfMask = _mm256_cmp_pd(vAbs, _mm256_set1_pd(1e20), _CMP_GT_OQ);
         return _mm256_movemask_pd(_mm256_or_pd(vNanMask, vInfMask)) != 0;
     }
+
+    /// @brief Stride-2 で4要素を半帯域履歴バッファからロード
+    /// @param ptr  history のベースアドレス（呼出側: history + (base - convParity)）
+    /// @return     { ptr[0], ptr[-2], ptr[-4], ptr[-6] } の順
+    /// @note       係数 coeffs[r+0..r+3] との FMA で正しい畳み込み順序になる
+    inline __m256d loadStride2(const double* ptr) noexcept
+    {
+        __m128d v0 = _mm_loadu_pd(ptr - 6);    // { ptr[-6], ptr[-5] }
+        __m128d v1 = _mm_loadu_pd(ptr - 4);    // { ptr[-4], ptr[-3] }
+        __m128d v2 = _mm_loadu_pd(ptr - 2);    // { ptr[-2], ptr[-1] }
+        __m128d v3 = _mm_loadu_pd(ptr);        // { ptr[0],  ptr[1]  }
+        // low:  ptr[0], ptr[-2]  ← v3 と v2 の low element
+        __m128d vLow  = _mm_unpacklo_pd(v3, v2);
+        // high: ptr[-4], ptr[-6] ← v1 と v0 の low element
+        __m128d vHigh = _mm_unpacklo_pd(v1, v0);
+        return _mm256_insertf128_pd(
+            _mm256_castpd128_pd256(vLow), vHigh, 1);
+        // = { ptr[0], ptr[-2], ptr[-4], ptr[-6] }
+    }
 #endif
 }
 
@@ -169,9 +188,12 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     acc2 = _mm256_add_pd(acc2, acc3);
     acc0 = _mm256_add_pd(acc0, acc2);
 
-    alignas(64) double partial[4];
-    _mm256_store_pd(partial, acc0);
-    double sum = partial[0] + partial[1] + partial[2] + partial[3];
+    // SIMD horizontal reduction: vextractf128 + hadd (avoid store-to-stack + scalar adds)
+    __m128d vLo = _mm256_castpd256_pd128(acc0);
+    __m128d vHi = _mm256_extractf128_pd(acc0, 1);
+    __m128d vSum = _mm_add_pd(vLo, vHi);
+    vSum = _mm_hadd_pd(vSum, vSum);
+    double sum = _mm_cvtsd_f64(vSum);
 
     // Scalar remainder
     for (; i < n; ++i)
@@ -184,6 +206,75 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
 
     return sum;
 }
+
+#if defined(__AVX2__) && defined(__FMA__)
+double CustomInputOversampler::dotProductDecimateAvx2(
+    const double* __restrict history,
+    const double* __restrict coeffs,
+    int convCount) noexcept
+{
+    // 8-way unroll (32 elements/iteration) for Skylake+ FMA pipeline saturation
+    // FMA latency=4, throughput=0.5 → need 4/0.5=8 independent accumulators
+    __assume(convCount >= 8);
+    __assume(convCount >= 0);
+
+    __m256d acc0 = _mm256_setzero_pd();
+    __m256d acc1 = _mm256_setzero_pd();
+    __m256d acc2 = _mm256_setzero_pd();
+    __m256d acc3 = _mm256_setzero_pd();
+    __m256d acc4 = _mm256_setzero_pd();
+    __m256d acc5 = _mm256_setzero_pd();
+    __m256d acc6 = _mm256_setzero_pd();
+    __m256d acc7 = _mm256_setzero_pd();
+
+    int r = 0;
+    const int unrollEnd = (convCount / 32) * 32;
+    for (; r < unrollEnd; r += 32)
+    {
+        acc0 = _mm256_fmadd_pd(loadStride2(history - (r << 1)),       _mm256_loadu_pd(coeffs + r),       acc0);
+        acc1 = _mm256_fmadd_pd(loadStride2(history - ((r +  4) << 1)), _mm256_loadu_pd(coeffs + r +  4), acc1);
+        acc2 = _mm256_fmadd_pd(loadStride2(history - ((r +  8) << 1)), _mm256_loadu_pd(coeffs + r +  8), acc2);
+        acc3 = _mm256_fmadd_pd(loadStride2(history - ((r + 12) << 1)), _mm256_loadu_pd(coeffs + r + 12), acc3);
+        acc4 = _mm256_fmadd_pd(loadStride2(history - ((r + 16) << 1)), _mm256_loadu_pd(coeffs + r + 16), acc4);
+        acc5 = _mm256_fmadd_pd(loadStride2(history - ((r + 20) << 1)), _mm256_loadu_pd(coeffs + r + 20), acc5);
+        acc6 = _mm256_fmadd_pd(loadStride2(history - ((r + 24) << 1)), _mm256_loadu_pd(coeffs + r + 24), acc6);
+        acc7 = _mm256_fmadd_pd(loadStride2(history - ((r + 28) << 1)), _mm256_loadu_pd(coeffs + r + 28), acc7);
+    }
+
+    // 4-element blocks remainder (16 elements)
+    const int simdEnd = (convCount / 4) * 4;
+    for (; r < simdEnd; r += 4)
+    {
+        __m256d vS = loadStride2(history - (r << 1));
+        __m256d vC = _mm256_loadu_pd(coeffs + r);
+        acc0 = _mm256_fmadd_pd(vS, vC, acc0);
+    }
+
+    // Tree reduction: acc0+acc1, acc2+acc3, acc4+acc5, acc6+acc7
+    acc0 = _mm256_add_pd(acc0, acc1);
+    acc2 = _mm256_add_pd(acc2, acc3);
+    acc4 = _mm256_add_pd(acc4, acc5);
+    acc6 = _mm256_add_pd(acc6, acc7);
+    // acc0+acc2, acc4+acc6
+    acc0 = _mm256_add_pd(acc0, acc2);
+    acc4 = _mm256_add_pd(acc4, acc6);
+    // acc0+acc4
+    acc0 = _mm256_add_pd(acc0, acc4);
+
+    // SIMD horizontal reduction: vextractf128 + hadd
+    __m128d vLo = _mm256_castpd256_pd128(acc0);
+    __m128d vHi = _mm256_extractf128_pd(acc0, 1);
+    __m128d vSum = _mm_add_pd(vLo, vHi);
+    vSum = _mm_hadd_pd(vSum, vSum);
+    double result = _mm_cvtsd_f64(vSum);
+
+    // Scalar remainder (handles non-4-multiple convCount safely)
+    for (; r < convCount; ++r)
+        result += coeffs[r] * history[-(r << 1)];
+
+    return result;
+}
+#endif
 
 void CustomInputOversampler::prepareStage(Stage& stage, int taps, double attenuationDb, int stageInputMax)
 {
@@ -428,18 +519,19 @@ void CustomInputOversampler::interpolateStage(const Stage& stage,
 }
 
 void CustomInputOversampler::decimateStage(const Stage& stage,
-                                           const double* input,
+                                           const double* __restrict input,
                                            int inputSamples,
-                                           double* output,
+                                           double* __restrict output,
                                            int channel) noexcept
 {
-    double* history = stage.downHistory[channel].get();
+    double* __restrict history = stage.downHistory[channel].get();
     if (history == nullptr || input == nullptr || output == nullptr)
         return;
 
     const int keep = stage.historyDownKeep;
     const int capacity = stage.downHistorySize;
 
+    // ── [既存] サイレンス最適化パス（変更なし） ──
     bool inputSilent = true;
     for (int i = 0; i < inputSamples; ++i)
     {
@@ -474,18 +566,40 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
     juce::FloatVectorOperations::copy(history + keep, input, inputSamples);
 
     const int outSamples = inputSamples >> 1;
-    const double* coeffs = stage.convCoeffs.get();
+    const double* __restrict coeffs = stage.convCoeffs.get();
+
+    // [Safety Guard] outSamples == 0 の場合、baseMax が不正になるため早期return
+    if (outSamples <= 0)
+        return;
+
+    // ── P1-1: nループ外部へのバウンドチェック完全外出し ──
+    // base = keep + (n << 1) は n に単調増加 → global min/max を事前計算
+    const int baseMax = keep + ((outSamples - 1) << 1);
+
+    // centerTap用: base - centerTap >= 0 → keep >= centerTap; base < capacity → baseMax < capacity
+    const bool centerTapOk = (keep >= stage.centerTap) && (baseMax < capacity);
+
+    // convタップ範囲: 最小convIndex = n=0,r=convCount-1; 最大convIndex = n=outSamples-1,r=0
+    const int globalMinConvIdx = keep - stage.convParity - ((stage.convCount - 1) << 1);
+    const int globalMaxConvIdx = baseMax - stage.convParity;
+    const bool convTapOk = (globalMinConvIdx >= 0) && (globalMaxConvIdx < capacity);
+
+    if (!centerTapOk || !convTapOk || stage.convCount <= 0)
+    {
+        // ブロック全体が境界違反 → 全出力0クリア
+        std::memset(output, 0, static_cast<size_t>(outSamples) * sizeof(double));
+        markCorruptionDetected();
+        return;
+    }
+
+    // ── nループ（境界安全100%保証済み） ──
     for (int n = 0; n < outSamples; ++n)
     {
         const int base = keep + (n << 1);
-        if (base < stage.centerTap || base >= capacity)
-        {
-            output[n] = 0.0;
-            markCorruptionDetected();
-            continue;
-        }
 
-        double acc = stage.centerCoeff * history[base - stage.centerTap];
+        // centerCoeffは動的な履歴値に依存 → nループ内でチェック
+        const double centerSample = history[base - stage.centerTap];
+        double acc = stage.centerCoeff * centerSample;
         if (isBadSample(acc))
         {
             output[n] = 0.0;
@@ -493,109 +607,62 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
             continue;
         }
 
-        bool bad = false;
-        bool usedAvxPath = false;
-
+        // ── P1-2: stride-2 dot product（AVX2） ──
 #if defined(__AVX2__) && defined(__FMA__)
-        if (stage.convCount >= 4)
+        if (stage.convCount >= 8)
         {
-            usedAvxPath = true;
+            // 8重アンロール dotProductDecimateAvx2（convCount>=8 で効果的）
+            __assume(stage.convCount >= 8);
+            acc += dotProductDecimateAvx2(
+                history + (base - stage.convParity),
+                coeffs,
+                stage.convCount);
+        }
+        else if (stage.convCount >= 4)
+        {
+            // convCount 4〜7: 簡易AVX2（unrollなしのloadStride2）
             __m256d vAcc = _mm256_setzero_pd();
             int r = 0;
             const int simdEnd = (stage.convCount / 4) * 4;
             for (; r < simdEnd; r += 4)
             {
-                const int idx0 = base - stage.convParity - ((r + 0) << 1);
-                const int idx1 = base - stage.convParity - ((r + 1) << 1);
-                const int idx2 = base - stage.convParity - ((r + 2) << 1);
-                const int idx3 = base - stage.convParity - ((r + 3) << 1);
-                if (idx0 < 0 || idx0 >= capacity || idx1 < 0 || idx1 >= capacity ||
-                    idx2 < 0 || idx2 >= capacity || idx3 < 0 || idx3 >= capacity)
-                {
-                    bad = true;
-                    break;
-                }
-
-                const double s0 = history[idx0];
-                const double s1 = history[idx1];
-                const double s2 = history[idx2];
-                const double s3 = history[idx3];
-
-                const __m256d vSamples = _mm256_set_pd(s3, s2, s1, s0);
-                if (isBadSampleV(vSamples))
-                {
-                    bad = true;
-                    break;
-                }
-                const __m256d vCoeffs  = _mm256_loadu_pd(coeffs + r);
-                vAcc = _mm256_fmadd_pd(vSamples, vCoeffs, vAcc);
+                __m256d vS = loadStride2(
+                    history + (base - stage.convParity) - (r << 1));
+                __m256d vC = _mm256_loadu_pd(coeffs + r);
+                vAcc = _mm256_fmadd_pd(vS, vC, vAcc);
             }
-
-            if (!bad)
-            {
-                alignas(64) double partial[4];
-                _mm256_store_pd(partial, vAcc);
-                acc += partial[0] + partial[1] + partial[2] + partial[3];
-
-                for (; r < stage.convCount; ++r)
-                {
-                    const int idx = base - stage.convParity - (r << 1);
-                    if (idx < 0 || idx >= capacity)
-                    {
-                        bad = true;
-                        break;
-                    }
-                    const double x = history[idx];
-                    if (isBadSample(x))
-                    {
-                        bad = true;
-                        break;
-                    }
-                    acc += coeffs[r] * x;
-                }
-            }
+            // 水平加算（vextractf128 + hadd）
+            __m128d vLo = _mm256_castpd256_pd128(vAcc);
+            __m128d vHi = _mm256_extractf128_pd(vAcc, 1);
+            __m128d vSum = _mm_add_pd(vLo, vHi);
+            vSum = _mm_hadd_pd(vSum, vSum);
+            acc += _mm_cvtsd_f64(vSum);
+            // スカラー剰余
+            for (; r < stage.convCount; ++r)
+                acc += coeffs[r] * history[base - stage.convParity - (r << 1)];
         }
+        else
 #endif
-
-        if (!usedAvxPath || bad)
         {
-            bad = false;
-            acc = stage.centerCoeff * history[base - stage.centerTap];
-            if (isBadSample(acc))
-                bad = true;
-
-            if (!bad)
-            {
-                for (int r = 0; r < stage.convCount; ++r)
-                {
-                    const int idx = base - stage.convParity - (r << 1);
-                    if (idx < 0 || idx >= capacity)
-                    {
-                        bad = true;
-                        break;
-                    }
-                    const double x = history[idx];
-                    if (isBadSample(x))
-                    {
-                        bad = true;
-                        break;
-                    }
-                    acc += coeffs[r] * x;
-                }
-            }
+            // convCount < 4: スカラーパス（バリデーション済み、チェックなし）
+            for (int r = 0; r < stage.convCount; ++r)
+                acc += coeffs[r] * history[base - stage.convParity - (r << 1)];
         }
 
-        if (bad)
+        // ── 事後処理（bad sample + denormal） ──
+        if (isBadSample(acc))
         {
             output[n] = 0.0;
             markCorruptionDetected();
-            continue;
         }
-
-        if (fastAbs(acc) < kDenormThreshold) acc = 0.0;
-        output[n] = acc;
+        else
+        {
+            if (fastAbs(acc) < kDenormThreshold) acc = 0.0;
+            output[n] = acc;
+        }
     }
 
+    // ── [既存] 履歴シフト（変更なし） ──
     std::memmove(history, history + inputSamples, static_cast<size_t>(keep) * sizeof(double));
 }
 

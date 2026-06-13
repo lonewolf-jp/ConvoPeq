@@ -1293,10 +1293,18 @@ double NoiseShaperLearner::evaluateCandidateMapped(EvaluationContext& context,
                                               kOutputHeadroom);
 
             // Calculate error relative to headroom-scaled input
-            for (int k = 0; k < AudioSegment::kLength; ++k)
-            {
-                context.errorLeft[k] = context.shapedLeft[k] - (leveled.segment.left[k] * kOutputHeadroom);
-                context.errorRight[k] = context.shapedRight[k] - (leveled.segment.right[k] * kOutputHeadroom);
+            // ローカル__restrictポインタでエイリアスなしを明示（コンパイラの自動ベクトル化促進）
+            {   double* __restrict dstL = context.errorLeft;
+                double* __restrict dstR = context.errorRight;
+                const double* __restrict srcL = context.shapedLeft;
+                const double* __restrict srcR = context.shapedRight;
+                const double* __restrict refL = leveled.segment.left;
+                const double* __restrict refR = leveled.segment.right;
+                for (int k = 0; k < AudioSegment::kLength; ++k)
+                {
+                    dstL[k]  = srcL[k] - (refL[k] * kOutputHeadroom);
+                    dstR[k]  = srcR[k] - (refR[k] * kOutputHeadroom);
+                }
             }
 
             const auto result = context.fftEvaluator.evaluate(context.errorLeft, context.errorRight, &leveled.segment.maskingThresholds);

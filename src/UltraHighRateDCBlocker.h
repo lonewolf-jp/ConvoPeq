@@ -43,34 +43,33 @@ private:
     static constexpr double INTERNAL_SPREAD = 0.1;
 
     // ------------------------------------------------------------------------
-    // SIMD ベース有限値・閾値チェック（Audio Thread 安全版・SSE2）
-    // std::abs / std::isfinite 等の libm 呼び出しを回避
+    // 有限値・閾値チェック（Audio Thread 安全版・libm 非依存）
+    // std::isfinite / std::abs の代わりにビット演算で判定
+    // スカラー版（旧 SSE2 intrinsics 版から置換）
     // ------------------------------------------------------------------------
     static inline bool isFiniteAndAboveThresholdMask(double value, double threshold) noexcept
     {
-        const __m128d v = _mm_set1_pd(value);
-        const __m128d diff = _mm_sub_pd(v, v);
-        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
-        const __m128d signMask = _mm_set1_pd(-0.0);
-        const __m128d absV = _mm_andnot_pd(signMask, v);
-        const __m128d thresholdV = _mm_set1_pd(threshold);
-        const __m128d denormalMask = _mm_cmplt_pd(absV, thresholdV);
-        const __m128d validMask = _mm_andnot_pd(denormalMask, finiteMask);
-        return _mm_movemask_pd(validMask) == 0x3;
+        union { double d; uint64_t u; } v { value };
+        // 指数部が 0x7FF (NaN/Inf) でない
+        if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+            return false;
+        // 絶対値が threshold 以上
+        const uint64_t absBits = v.u & 0x7FFFFFFFFFFFFFFFULL;
+        union { uint64_t u; double d; } absVal { absBits };
+        return absVal.d >= threshold;
     }
 
     // 上限チェック付き有限値判定（状態発散防止用）
     static inline bool isFiniteAndBelowThresholdMask(double value, double threshold) noexcept
     {
-        const __m128d v = _mm_set1_pd(value);
-        const __m128d diff = _mm_sub_pd(v, v);
-        const __m128d finiteMask = _mm_cmpeq_pd(diff, _mm_setzero_pd());
-        const __m128d signMask = _mm_set1_pd(-0.0);
-        const __m128d absV = _mm_andnot_pd(signMask, v);
-        const __m128d thresholdV = _mm_set1_pd(threshold);
-        const __m128d belowMask = _mm_cmplt_pd(absV, thresholdV);
-        const __m128d validMask = _mm_and_pd(finiteMask, belowMask);
-        return _mm_movemask_pd(validMask) == 0x3;
+        union { double d; uint64_t u; } v { value };
+        // 指数部が 0x7FF (NaN/Inf) でない
+        if ((v.u & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL)
+            return false;
+        // 絶対値が threshold 未満
+        const uint64_t absBits = v.u & 0x7FFFFFFFFFFFFFFFULL;
+        union { uint64_t u; double d; } absVal { absBits };
+        return absVal.d < threshold;
     }
 
 public:
@@ -131,7 +130,6 @@ public:
     inline void processSample(double& sample) noexcept
     {
         double x = sample;
-        constexpr double thresh = convo::numeric_policy::kDenormThresholdAudioState;
 
         // 2 段カスケード処理（逐次・時間依存関係を保つ）
         for (int i = 0; i < 2; ++i)
@@ -164,7 +162,6 @@ public:
         double state1 = m_state[1];
         const double alpha0 = m_alpha[0];
         const double alpha1 = m_alpha[1];
-        constexpr double thresh = convo::numeric_policy::kDenormThresholdAudioState;
 
         for (int i = 0; i < numSamples; ++i)
         {
