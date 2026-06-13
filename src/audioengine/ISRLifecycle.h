@@ -4,7 +4,7 @@
 #include <mutex>
 #include <cstdint>
 #include <filesystem>
-#include <vector>
+#include <array>
 
 namespace convo {
 namespace isr {
@@ -105,9 +105,10 @@ private:
     std::atomic<int> lastPreparedBlockSize_{ 0 };
     std::mutex nonRtGuard_;
 
-    // artifact 用 trace buffer
-    std::mutex traceGuard_;
-    std::vector<PhaseTransition> transitions_;
+    // artifact 用 trace buffer（ロックフリーリングバッファ）
+    static constexpr size_t kTraceBufferSize = 4096;
+    std::array<PhaseTransition, kTraceBufferSize> traceBuffer_{};
+    std::atomic<size_t> traceWriteIndex_{0};
 };
 
 /**

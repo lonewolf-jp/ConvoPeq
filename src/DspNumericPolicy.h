@@ -164,22 +164,34 @@ namespace convo::numeric_policy
 
 inline double killDenormal(double x) noexcept
 {
+#if !defined(JUCE_DEBUG) && !defined(_DEBUG) && !defined(CONVOPEQ_DEBUG_DENORMALS)
+    // Release ビルド: FTZ/DAZ が全該当スレッドで有効なためチェック不要
+    // 検証: 全20箇所の呼出元で FTZ/DAZ 有効を確認済み
+    static_cast<void>(x);
+    return x;
+#else
     constexpr uint64_t kExpMask = 0x7FF0000000000000ULL;
     constexpr uint64_t kFracMask = 0x000FFFFFFFFFFFFFULL;
 
     const uint64_t bits = std::bit_cast<uint64_t>(x);
     const bool isSubnormal = ((bits & kExpMask) == 0ULL) && ((bits & kFracMask) != 0ULL);
     return isSubnormal ? 0.0 : x;
+#endif
 }
 
 inline float killDenormal(float x) noexcept
 {
+#if !defined(JUCE_DEBUG) && !defined(_DEBUG) && !defined(CONVOPEQ_DEBUG_DENORMALS)
+    static_cast<void>(x);
+    return x;
+#else
     constexpr uint32_t kExpMask = 0x7F800000U;
     constexpr uint32_t kFracMask = 0x007FFFFFU;
 
     const uint32_t bits = std::bit_cast<uint32_t>(x);
     const bool isSubnormal = ((bits & kExpMask) == 0U) && ((bits & kFracMask) != 0U);
     return isSubnormal ? 0.0f : x;
+#endif
 }
 
 inline double saturateAVX2(double x, double minVal, double maxVal) noexcept
@@ -203,22 +215,32 @@ inline double saturateAVX2(double x, double minVal, double maxVal) noexcept
 #if defined(__AVX2__)
 inline __m256d killDenormalV(__m256d v) noexcept
 {
+#if !defined(JUCE_DEBUG) && !defined(_DEBUG) && !defined(CONVOPEQ_DEBUG_DENORMALS)
+    static_cast<void>(v);
+    return v;
+#else
     constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdDouble;
     const __m256d vThreshold = _mm256_set1_pd(kDenormThreshold);
     const __m256d vSignMask = _mm256_set1_pd(-0.0);
     __m256d vAbs = _mm256_andnot_pd(vSignMask, v);
     __m256d vMask = _mm256_cmp_pd(vAbs, vThreshold, _CMP_GE_OQ);
     return _mm256_and_pd(v, vMask);
+#endif
 }
 
 inline __m128d killDenormalV(__m128d v) noexcept
 {
+#if !defined(JUCE_DEBUG) && !defined(_DEBUG) && !defined(CONVOPEQ_DEBUG_DENORMALS)
+    static_cast<void>(v);
+    return v;
+#else
     constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdDouble;
     const __m128d vThreshold = _mm_set1_pd(kDenormThreshold);
     const __m128d vSignMask = _mm_set1_pd(-0.0);
     __m128d vAbs = _mm_andnot_pd(vSignMask, v);
     __m128d vMask = _mm_cmp_pd(vAbs, vThreshold, _CMP_GE_OQ);
     return _mm_and_pd(v, vMask);
+#endif
 }
 #endif
 

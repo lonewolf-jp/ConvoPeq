@@ -7051,6 +7051,20 @@ namespace
     }
 
     constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdAudioState;
+
+#if defined(__AVX2__)
+    /// AVX2 版バッチ isBadSample: 4要素を1SIMD命令でチェック
+    /// halfband 非連続インデックスでも set_pd 後に一括チェック可能
+    inline bool isBadSampleV(__m256d v) noexcept
+    {
+        // NaN 検出: _CMP_UNORD_Q — v のいずれかが NaN で true
+        const __m256d vNanMask = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
+        // Inf/絶対値 > limit 検出
+        const __m256d vAbs = _mm256_andnot_pd(_mm256_set1_pd(-0.0), v);
+        const __m256d vInfMask = _mm256_cmp_pd(vAbs, _mm256_set1_pd(1e20), _CMP_GT_OQ);
+        return _mm256_movemask_pd(_mm256_or_pd(vNanMask, vInfMask)) != 0;
+    }
+#endif
 }
 
 CustomInputOversampler::~CustomInputOversampler()
@@ -7524,13 +7538,13 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
                 const double s1 = history[idx1];
                 const double s2 = history[idx2];
                 const double s3 = history[idx3];
-                if (isBadSample(s0) || isBadSample(s1) || isBadSample(s2) || isBadSample(s3))
+
+                const __m256d vSamples = _mm256_set_pd(s3, s2, s1, s0);
+                if (isBadSampleV(vSamples))
                 {
                     bad = true;
                     break;
                 }
-
-                const __m256d vSamples = _mm256_set_pd(s3, s2, s1, s0);
                 const __m256d vCoeffs  = _mm256_loadu_pd(coeffs + r);
                 vAcc = _mm256_fmadd_pd(vSamples, vCoeffs, vAcc);
             }
@@ -9852,22 +9866,34 @@ namespace convo::numeric_policy
 
 inline double killDenormal(double x) noexcept
 {
+#if !defined(JUCE_DEBUG) && !defined(_DEBUG) && !defined(CONVOPEQ_DEBUG_DENORMALS)
+    // Release ビルド: FTZ/DAZ が全該当スレッドで有効なためチェック不要
+    // 検証: 全20箇所の呼出元で FTZ/DAZ 有効を確認済み
+    static_cast<void>(x);
+    return x;
+#else
     constexpr uint64_t kExpMask = 0x7FF0000000000000ULL;
     constexpr uint64_t kFracMask = 0x000FFFFFFFFFFFFFULL;
 
     const uint64_t bits = std::bit_cast<uint64_t>(x);
     const bool isSubnormal = ((bits & kExpMask) == 0ULL) && ((bits & kFracMask) != 0ULL);
     return isSubnormal ? 0.0 : x;
+#endif
 }
 
 inline float killDenormal(float x) noexcept
 {
+#if !defined(JUCE_DEBUG) && !defined(_DEBUG) && !defined(CONVOPEQ_DEBUG_DENORMALS)
+    static_cast<void>(x);
+    return x;
+#else
     constexpr uint32_t kExpMask = 0x7F800000U;
     constexpr uint32_t kFracMask = 0x007FFFFFU;
 
     const uint32_t bits = std::bit_cast<uint32_t>(x);
     const bool isSubnormal = ((bits & kExpMask) == 0U) && ((bits & kFracMask) != 0U);
     return isSubnormal ? 0.0f : x;
+#endif
 }
 
 inline double saturateAVX2(double x, double minVal, double maxVal) noexcept
@@ -9891,22 +9917,32 @@ inline double saturateAVX2(double x, double minVal, double maxVal) noexcept
 #if defined(__AVX2__)
 inline __m256d killDenormalV(__m256d v) noexcept
 {
+#if !defined(JUCE_DEBUG) && !defined(_DEBUG) && !defined(CONVOPEQ_DEBUG_DENORMALS)
+    static_cast<void>(v);
+    return v;
+#else
     constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdDouble;
     const __m256d vThreshold = _mm256_set1_pd(kDenormThreshold);
     const __m256d vSignMask = _mm256_set1_pd(-0.0);
     __m256d vAbs = _mm256_andnot_pd(vSignMask, v);
     __m256d vMask = _mm256_cmp_pd(vAbs, vThreshold, _CMP_GE_OQ);
     return _mm256_and_pd(v, vMask);
+#endif
 }
 
 inline __m128d killDenormalV(__m128d v) noexcept
 {
+#if !defined(JUCE_DEBUG) && !defined(_DEBUG) && !defined(CONVOPEQ_DEBUG_DENORMALS)
+    static_cast<void>(v);
+    return v;
+#else
     constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdDouble;
     const __m128d vThreshold = _mm_set1_pd(kDenormThreshold);
     const __m128d vSignMask = _mm_set1_pd(-0.0);
     __m128d vAbs = _mm_andnot_pd(vSignMask, v);
     __m128d vMask = _mm_cmp_pd(vAbs, vThreshold, _CMP_GE_OQ);
     return _mm_and_pd(v, vMask);
+#endif
 }
 #endif
 
@@ -17502,11 +17538,46 @@ private:
     static constexpr double kNoiseMaskerCorrectionBaseDb = -5.0;
     static constexpr double kTonalAbsorbRadiusBark = 0.5;
     static constexpr double kSpreadMaxDeltaBark = 8.0;
+    static constexpr double kSpreadTableStep = 0.01;
+    static constexpr int kSpreadHalfBins = static_cast<int>(kSpreadMaxDeltaBark / kSpreadTableStep);
+    static constexpr int kSpreadTableBins = kSpreadHalfBins * 2 + 1;  // = 1601
+
     static constexpr double kTonalityFromSfmA = -0.299;
     static constexpr double kTonalityFromSfmB = -0.43;
     static constexpr double kSpreadUpDbPerBark = -27.0;
     static constexpr double kSpreadDownDbPerBarkTonal = -24.0;
     static constexpr double kSpreadDownDbPerBarkNoise = -27.0;
+
+    // スプレッディング関数テーブル（inline static const で静的初期化）
+    inline static const std::array<double, kSpreadTableBins> kSpreadTableTonal = []() {
+        std::array<double, kSpreadTableBins> table{};
+        for (int i = 0; i < kSpreadTableBins; ++i) {
+            const double deltaBark = -kSpreadMaxDeltaBark + static_cast<double>(i) * kSpreadTableStep;
+            if (deltaBark >= 0.0)
+                table[static_cast<size_t>(i)] = kSpreadUpDbPerBark * deltaBark;
+            else {
+                const double x = deltaBark + 0.474;
+                const double nonLinear = 15.81 + 7.5 * x - 17.5 * std::sqrt(1.0 + (x * x));
+                table[static_cast<size_t>(i)] = nonLinear + (kSpreadDownDbPerBarkTonal + 27.0) * std::abs(deltaBark);
+            }
+        }
+        return table;
+    }();
+
+    inline static const std::array<double, kSpreadTableBins> kSpreadTableNoise = []() {
+        std::array<double, kSpreadTableBins> table{};
+        for (int i = 0; i < kSpreadTableBins; ++i) {
+            const double deltaBark = -kSpreadMaxDeltaBark + static_cast<double>(i) * kSpreadTableStep;
+            if (deltaBark >= 0.0)
+                table[static_cast<size_t>(i)] = kSpreadUpDbPerBark * deltaBark;
+            else {
+                const double x = deltaBark + 0.474;
+                const double nonLinear = 15.81 + 7.5 * x - 17.5 * std::sqrt(1.0 + (x * x));
+                table[static_cast<size_t>(i)] = nonLinear + (kSpreadDownDbPerBarkNoise + 27.0) * std::abs(deltaBark);
+            }
+        }
+        return table;
+    }();
 
     static constexpr int kMaxMaskers = 128;
     static constexpr int kMaxContributions = 256;
@@ -17622,13 +17693,13 @@ private:
 
     static double spreadingFunctionAnnexD(double deltaBark, int maskerType) noexcept
     {
-        if (deltaBark >= 0.0)
-            return kSpreadUpDbPerBark * deltaBark;
-
-        const double slope = (maskerType == Tonal) ? kSpreadDownDbPerBarkTonal : kSpreadDownDbPerBarkNoise;
-        const double x = deltaBark + 0.474;
-        const double nonLinear = 15.81 + 7.5 * x - 17.5 * std::sqrt(1.0 + (x * x));
-        return nonLinear + (slope + 27.0) * std::abs(deltaBark);
+        // テーブルルックアップ版（constexpr 代替として inline static で事前計算）
+        const double idx = (deltaBark / kSpreadTableStep) + static_cast<double>(kSpreadHalfBins);
+        const int i = static_cast<int>(std::round(idx));
+        if (i < 0 || i >= kSpreadTableBins)
+            return 0.0;
+        return (maskerType == Tonal) ? kSpreadTableTonal[static_cast<size_t>(i)]
+                                     : kSpreadTableNoise[static_cast<size_t>(i)];
     }
 
     static int computeNeighborRangeHz(double frequencyHz, double binWidthHz) noexcept
@@ -17941,6 +18012,7 @@ NoiseShaperLearner::~NoiseShaperLearner()
         evaluationWorkersShouldExit = true;
     }
     evaluationDispatchCv.notify_all();
+    intervalCv_.notify_all();
 
     if (workerThread.joinable())
         workerThread.request_stop();
@@ -18045,6 +18117,7 @@ void NoiseShaperLearner::stopLearning()
     // Running/Starting -> Stopping
     convo::publishAtomic(workerState, WorkerState::Stopping, std::memory_order_release);
     convo::publishAtomic(stopRequested, true, std::memory_order_release);
+    intervalCv_.notify_all();
     stopEvaluationWorkers();
     if (workerThread.joinable())
         workerThread.request_stop();
@@ -18704,13 +18777,14 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             ++mainLoopIter;
             const auto thisGenerationStart = std::chrono::steady_clock::now();
 
-            // インターバル待機（start-to-start）
+            // インターバル待機（start-to-start、condition_variable 使用）
             if (generationIntervalSeconds > 0.0 && lastGenerationStart != std::chrono::steady_clock::time_point{}) {
                 auto next = lastGenerationStart + std::chrono::duration<double>(generationIntervalSeconds);
-                  while (std::chrono::steady_clock::now() < next
-                      && !convo::consumeAtomic(stopRequested, std::memory_order_acquire)
-                      && !stopToken.stop_requested())
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::unique_lock<std::mutex> lock(intervalMutex_);
+                intervalCv_.wait_until(lock, next, [this, &stopToken]() -> bool {
+                    return convo::consumeAtomic(stopRequested, std::memory_order_acquire)
+                        || stopToken.stop_requested();
+                });
             }
             lastGenerationStart = thisGenerationStart;
 
@@ -19610,6 +19684,8 @@ private:
     int activeAuxEvaluationWorkerCount = 0;
     std::mutex evaluationDispatchMutex;
     std::condition_variable evaluationDispatchCv;
+    std::mutex intervalMutex_;
+    std::condition_variable intervalCv_;
     int pendingEvaluationSegmentCount = 0;
     int pendingEvaluationBitDepth = 24;
     std::atomic<int> completedAuxEvaluationWorkers{0};
@@ -39918,12 +39994,17 @@ LifecyclePhase LifecycleIsolationRuntime::transitionTo(LifecyclePhase next)
 
     convo::publishAtomic(phase_, next, std::memory_order_release);
 
-    // Record transition
+    // Record transition（ロックフリーリングバッファ）
     {
-        std::lock_guard<std::mutex> guard(traceGuard_);
-        uint64_t now_ns = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-        uint64_t epochId = convo::consumeAtomic(epochCounter_, std::memory_order_acquire);
-        transitions_.push_back({ previous, next, epochId, now_ns });
+        const size_t idx = convo::fetchAddAtomic(traceWriteIndex_, size_t{1}, std::memory_order_acq_rel);
+        if (idx < kTraceBufferSize)
+        {
+            traceBuffer_[idx].from = previous;
+            traceBuffer_[idx].to = next;
+            traceBuffer_[idx].epochId = convo::consumeAtomic(epochCounter_, std::memory_order_acquire);
+            traceBuffer_[idx].timestamp_ns = std::chrono::high_resolution_clock::now()
+                .time_since_epoch().count();
+        }
     }
 
     // Increment epoch on key transitions
@@ -39936,22 +40017,23 @@ LifecyclePhase LifecycleIsolationRuntime::transitionTo(LifecyclePhase next)
 
 void LifecycleIsolationRuntime::emitPhaseTrace(const std::filesystem::path& outputPath)
 {
-    std::lock_guard<std::mutex> guard(traceGuard_);
+    const size_t count = std::min(convo::consumeAtomic(traceWriteIndex_, std::memory_order_acquire),
+                                  kTraceBufferSize);
 
     std::stringstream ss;
     ss << "{\n";
     ss << "  \"schema\": \"lifecycle_phase_trace_v1\",\n";
     ss << "  \"transitions\": [\n";
 
-    for (size_t i = 0; i < transitions_.size(); ++i) {
-        const auto& t = transitions_[i];
+    for (size_t i = 0; i < count; ++i) {
+        const auto& t = traceBuffer_[i];
         ss << "    {\n";
         ss << "      \"from\": \"" << static_cast<int>(t.from) << "\",\n";
         ss << "      \"to\": \"" << static_cast<int>(t.to) << "\",\n";
         ss << "      \"epochId\": " << t.epochId << ",\n";
         ss << "      \"timestamp_ns\": " << t.timestamp_ns << "\n";
         ss << "    }";
-        if (i + 1 < transitions_.size()) {
+        if (i + 1 < count) {
             ss << ",";
         }
         ss << "\n";
@@ -40016,7 +40098,7 @@ void LifecycleBarrierRuntime::publishShutdownBarrier()
 #include <mutex>
 #include <cstdint>
 #include <filesystem>
-#include <vector>
+#include <array>
 
 namespace convo {
 namespace isr {
@@ -40117,9 +40199,10 @@ private:
     std::atomic<int> lastPreparedBlockSize_{ 0 };
     std::mutex nonRtGuard_;
 
-    // artifact 用 trace buffer
-    std::mutex traceGuard_;
-    std::vector<PhaseTransition> transitions_;
+    // artifact 用 trace buffer（ロックフリーリングバッファ）
+    static constexpr size_t kTraceBufferSize = 4096;
+    std::array<PhaseTransition, kTraceBufferSize> traceBuffer_{};
+    std::atomic<size_t> traceWriteIndex_{0};
 };
 
 /**

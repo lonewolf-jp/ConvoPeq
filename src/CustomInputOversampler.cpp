@@ -33,6 +33,20 @@ namespace
     }
 
     constexpr double kDenormThreshold = convo::numeric_policy::kDenormThresholdAudioState;
+
+#if defined(__AVX2__)
+    /// AVX2 版バッチ isBadSample: 4要素を1SIMD命令でチェック
+    /// halfband 非連続インデックスでも set_pd 後に一括チェック可能
+    inline bool isBadSampleV(__m256d v) noexcept
+    {
+        // NaN 検出: _CMP_UNORD_Q — v のいずれかが NaN で true
+        const __m256d vNanMask = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
+        // Inf/絶対値 > limit 検出
+        const __m256d vAbs = _mm256_andnot_pd(_mm256_set1_pd(-0.0), v);
+        const __m256d vInfMask = _mm256_cmp_pd(vAbs, _mm256_set1_pd(1e20), _CMP_GT_OQ);
+        return _mm256_movemask_pd(_mm256_or_pd(vNanMask, vInfMask)) != 0;
+    }
+#endif
 }
 
 CustomInputOversampler::~CustomInputOversampler()
@@ -506,13 +520,13 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
                 const double s1 = history[idx1];
                 const double s2 = history[idx2];
                 const double s3 = history[idx3];
-                if (isBadSample(s0) || isBadSample(s1) || isBadSample(s2) || isBadSample(s3))
+
+                const __m256d vSamples = _mm256_set_pd(s3, s2, s1, s0);
+                if (isBadSampleV(vSamples))
                 {
                     bad = true;
                     break;
                 }
-
-                const __m256d vSamples = _mm256_set_pd(s3, s2, s1, s0);
                 const __m256d vCoeffs  = _mm256_loadu_pd(coeffs + r);
                 vAcc = _mm256_fmadd_pd(vSamples, vCoeffs, vAcc);
             }

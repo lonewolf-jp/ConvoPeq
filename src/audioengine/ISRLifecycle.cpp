@@ -183,12 +183,17 @@ LifecyclePhase LifecycleIsolationRuntime::transitionTo(LifecyclePhase next)
 
     convo::publishAtomic(phase_, next, std::memory_order_release);
 
-    // Record transition
+    // Record transition（ロックフリーリングバッファ）
     {
-        std::lock_guard<std::mutex> guard(traceGuard_);
-        uint64_t now_ns = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-        uint64_t epochId = convo::consumeAtomic(epochCounter_, std::memory_order_acquire);
-        transitions_.push_back({ previous, next, epochId, now_ns });
+        const size_t idx = convo::fetchAddAtomic(traceWriteIndex_, size_t{1}, std::memory_order_acq_rel);
+        if (idx < kTraceBufferSize)
+        {
+            traceBuffer_[idx].from = previous;
+            traceBuffer_[idx].to = next;
+            traceBuffer_[idx].epochId = convo::consumeAtomic(epochCounter_, std::memory_order_acquire);
+            traceBuffer_[idx].timestamp_ns = std::chrono::high_resolution_clock::now()
+                .time_since_epoch().count();
+        }
     }
 
     // Increment epoch on key transitions
@@ -201,22 +206,23 @@ LifecyclePhase LifecycleIsolationRuntime::transitionTo(LifecyclePhase next)
 
 void LifecycleIsolationRuntime::emitPhaseTrace(const std::filesystem::path& outputPath)
 {
-    std::lock_guard<std::mutex> guard(traceGuard_);
+    const size_t count = std::min(convo::consumeAtomic(traceWriteIndex_, std::memory_order_acquire),
+                                  kTraceBufferSize);
 
     std::stringstream ss;
     ss << "{\n";
     ss << "  \"schema\": \"lifecycle_phase_trace_v1\",\n";
     ss << "  \"transitions\": [\n";
 
-    for (size_t i = 0; i < transitions_.size(); ++i) {
-        const auto& t = transitions_[i];
+    for (size_t i = 0; i < count; ++i) {
+        const auto& t = traceBuffer_[i];
         ss << "    {\n";
         ss << "      \"from\": \"" << static_cast<int>(t.from) << "\",\n";
         ss << "      \"to\": \"" << static_cast<int>(t.to) << "\",\n";
         ss << "      \"epochId\": " << t.epochId << ",\n";
         ss << "      \"timestamp_ns\": " << t.timestamp_ns << "\n";
         ss << "    }";
-        if (i + 1 < transitions_.size()) {
+        if (i + 1 < count) {
             ss << ",";
         }
         ss << "\n";

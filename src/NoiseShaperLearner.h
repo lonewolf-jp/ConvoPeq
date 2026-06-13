@@ -258,6 +258,8 @@ private:
     int activeAuxEvaluationWorkerCount = 0;
     std::mutex evaluationDispatchMutex;
     std::condition_variable evaluationDispatchCv;
+    std::mutex intervalMutex_;
+    std::condition_variable intervalCv_;
     int pendingEvaluationSegmentCount = 0;
     int pendingEvaluationBitDepth = 24;
     std::atomic<int> completedAuxEvaluationWorkers{0};

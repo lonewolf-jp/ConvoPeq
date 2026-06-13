@@ -88,6 +88,7 @@ NoiseShaperLearner::~NoiseShaperLearner()
         evaluationWorkersShouldExit = true;
     }
     evaluationDispatchCv.notify_all();
+    intervalCv_.notify_all();
 
     if (workerThread.joinable())
         workerThread.request_stop();
@@ -192,6 +193,7 @@ void NoiseShaperLearner::stopLearning()
     // Running/Starting -> Stopping
     convo::publishAtomic(workerState, WorkerState::Stopping, std::memory_order_release);
     convo::publishAtomic(stopRequested, true, std::memory_order_release);
+    intervalCv_.notify_all();
     stopEvaluationWorkers();
     if (workerThread.joinable())
         workerThread.request_stop();
@@ -851,13 +853,14 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             ++mainLoopIter;
             const auto thisGenerationStart = std::chrono::steady_clock::now();
 
-            // インターバル待機（start-to-start）
+            // インターバル待機（start-to-start、condition_variable 使用）
             if (generationIntervalSeconds > 0.0 && lastGenerationStart != std::chrono::steady_clock::time_point{}) {
                 auto next = lastGenerationStart + std::chrono::duration<double>(generationIntervalSeconds);
-                  while (std::chrono::steady_clock::now() < next
-                      && !convo::consumeAtomic(stopRequested, std::memory_order_acquire)
-                      && !stopToken.stop_requested())
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::unique_lock<std::mutex> lock(intervalMutex_);
+                intervalCv_.wait_until(lock, next, [this, &stopToken]() -> bool {
+                    return convo::consumeAtomic(stopRequested, std::memory_order_acquire)
+                        || stopToken.stop_requested();
+                });
             }
             lastGenerationStart = thisGenerationStart;
 

@@ -436,11 +436,46 @@ private:
     static constexpr double kNoiseMaskerCorrectionBaseDb = -5.0;
     static constexpr double kTonalAbsorbRadiusBark = 0.5;
     static constexpr double kSpreadMaxDeltaBark = 8.0;
+    static constexpr double kSpreadTableStep = 0.01;
+    static constexpr int kSpreadHalfBins = static_cast<int>(kSpreadMaxDeltaBark / kSpreadTableStep);
+    static constexpr int kSpreadTableBins = kSpreadHalfBins * 2 + 1;  // = 1601
+
     static constexpr double kTonalityFromSfmA = -0.299;
     static constexpr double kTonalityFromSfmB = -0.43;
     static constexpr double kSpreadUpDbPerBark = -27.0;
     static constexpr double kSpreadDownDbPerBarkTonal = -24.0;
     static constexpr double kSpreadDownDbPerBarkNoise = -27.0;
+
+    // スプレッディング関数テーブル（inline static const で静的初期化）
+    inline static const std::array<double, kSpreadTableBins> kSpreadTableTonal = []() {
+        std::array<double, kSpreadTableBins> table{};
+        for (int i = 0; i < kSpreadTableBins; ++i) {
+            const double deltaBark = -kSpreadMaxDeltaBark + static_cast<double>(i) * kSpreadTableStep;
+            if (deltaBark >= 0.0)
+                table[static_cast<size_t>(i)] = kSpreadUpDbPerBark * deltaBark;
+            else {
+                const double x = deltaBark + 0.474;
+                const double nonLinear = 15.81 + 7.5 * x - 17.5 * std::sqrt(1.0 + (x * x));
+                table[static_cast<size_t>(i)] = nonLinear + (kSpreadDownDbPerBarkTonal + 27.0) * std::abs(deltaBark);
+            }
+        }
+        return table;
+    }();
+
+    inline static const std::array<double, kSpreadTableBins> kSpreadTableNoise = []() {
+        std::array<double, kSpreadTableBins> table{};
+        for (int i = 0; i < kSpreadTableBins; ++i) {
+            const double deltaBark = -kSpreadMaxDeltaBark + static_cast<double>(i) * kSpreadTableStep;
+            if (deltaBark >= 0.0)
+                table[static_cast<size_t>(i)] = kSpreadUpDbPerBark * deltaBark;
+            else {
+                const double x = deltaBark + 0.474;
+                const double nonLinear = 15.81 + 7.5 * x - 17.5 * std::sqrt(1.0 + (x * x));
+                table[static_cast<size_t>(i)] = nonLinear + (kSpreadDownDbPerBarkNoise + 27.0) * std::abs(deltaBark);
+            }
+        }
+        return table;
+    }();
 
     static constexpr int kMaxMaskers = 128;
     static constexpr int kMaxContributions = 256;
@@ -556,13 +591,13 @@ private:
 
     static double spreadingFunctionAnnexD(double deltaBark, int maskerType) noexcept
     {
-        if (deltaBark >= 0.0)
-            return kSpreadUpDbPerBark * deltaBark;
-
-        const double slope = (maskerType == Tonal) ? kSpreadDownDbPerBarkTonal : kSpreadDownDbPerBarkNoise;
-        const double x = deltaBark + 0.474;
-        const double nonLinear = 15.81 + 7.5 * x - 17.5 * std::sqrt(1.0 + (x * x));
-        return nonLinear + (slope + 27.0) * std::abs(deltaBark);
+        // テーブルルックアップ版（constexpr 代替として inline static で事前計算）
+        const double idx = (deltaBark / kSpreadTableStep) + static_cast<double>(kSpreadHalfBins);
+        const int i = static_cast<int>(std::round(idx));
+        if (i < 0 || i >= kSpreadTableBins)
+            return 0.0;
+        return (maskerType == Tonal) ? kSpreadTableTonal[static_cast<size_t>(i)]
+                                     : kSpreadTableNoise[static_cast<size_t>(i)];
     }
 
     static int computeNeighborRangeHz(double frequencyHz, double binWidthHz) noexcept
