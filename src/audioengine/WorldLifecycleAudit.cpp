@@ -1,4 +1,5 @@
 #include "WorldLifecycleAudit.h"
+#include "AtomicAccess.h"  // ★ work37: fetchAddAtomic
 #include <fstream>
 #include <filesystem>
 
@@ -67,6 +68,27 @@ void WorldLifecycleAudit::tryDumpPeriodic() noexcept
         return;
     convo::publishAtomic(lastDumpTimeUs_, nowUs, std::memory_order_release);
     emitSnapshot();
+}
+
+// [work37 Phase 4.2] FallbackQueue overflow → HealthEvent 発火
+void WorldLifecycleAudit::onFallbackOverflow() noexcept
+{
+    convo::fetchAddAtomic(fallbackOverflowCount_, 1u, std::memory_order_release);
+    if (m_healthCallback_) {
+        m_healthCallback_(7002, convo::consumeAtomic(fallbackOverflowCount_,
+            std::memory_order_acquire));
+    }
+}
+
+// [work37 Phase 4.2] World 整合性異常（retired>published）→ HealthEvent 発火
+void WorldLifecycleAudit::onWorldLeakDetected(
+    uint64_t retiredCount, uint64_t publishedCount) noexcept
+{
+    convo::fetchAddAtomic(worldLeakCount_, 1u, std::memory_order_release);
+    if (m_healthCallback_) {
+        m_healthCallback_(7003, retiredCount > publishedCount
+            ? (retiredCount - publishedCount) : 0);
+    }
 }
 
 } // namespace convo::isr

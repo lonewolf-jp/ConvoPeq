@@ -1,28 +1,28 @@
-# Exclude stale CodeQL database copies and other generated artifacts
-
-# from clangd indexing to prevent false redefinition errors
+# Exclude generated artifacts and non-source directories from clangd indexing
+# to prevent false redefinition errors and reduce memory usage.
+# clangd 19.x YAML config format.
 
 Index:
-  Exclude:
-    - .aidex
-    - .cache
-    - .claude
-    - .cocoindex_code
-    - .codegraph
-    - .continue
-    - .playwright-mcp
-    - .serena
-    - .venv-codegraph
-    - .vs
-    - .vscode
-    - config
-    - doc
-    - evidence
-    - graphify-out
-    - manual
-    - sampledata
-    - steering
-    - storage
-    - tools
-    - .musubi
-    - storage/codeql
+  External:
+    Exclude:
+      - .aidex
+      - .cache
+      - .claude
+      - .cocoindex_code
+      - .codegraph
+      - .continue
+      - .playwright-mcp
+      - .serena
+      - .venv-codegraph
+      - .vs
+      - .vscode
+      - config
+      - doc
+      - evidence
+      - graphify-out
+      - manual
+      - sampledata
+      - steering
+      - storage
+      - tools
+      - .musubi

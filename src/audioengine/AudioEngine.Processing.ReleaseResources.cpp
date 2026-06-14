@@ -4,6 +4,7 @@
 #include "DSPLifetimeManager.h"
 #include "RuntimeBuilder.h"
 #include "NoiseShaperLearner.h"
+#include "RuntimePublicationOrchestrator.h"  // ★ work37: clearDeferredForShutdown 完全型必要
 
 namespace {
 void diagLog(const juce::String& message)
@@ -194,12 +195,13 @@ void AudioEngine::releaseResources()
 
     // ★ C-2: EmergencyDrain — Optional 最終手段（デフォルトはスキップ）
     //   常に EmergencyDrain フェーズを経由（ReclaimComplete+1=EmergencyDrain のため単一遷移）
-    //   CONVOPEQ_EMERGENCY_DRAIN が定義されている場合のみ有効な処理を実行。
+    //   [work37 Phase 8.2] コンパイル時マクロから実行時判定に変更。
+    //   PolicyEngine が requestEmergencyDrain() を設定した場合のみ有効な処理を実行。
     //   Reader slot の epoch/depth 強制書き換えは一切禁止。
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::EmergencyDrain);
-#ifdef CONVOPEQ_EMERGENCY_DRAIN
+    if (m_healthMonitor.isEmergencyDrainRequested())
     {
-        diagLog("[DIAG] releaseResources: EmergencyDrain phase enter");
+        diagLog("[DIAG] releaseResources: EmergencyDrain phase enter (runtime)");
 
         constexpr int kEmergencyDrainMaxMs = 500;
         const auto emergencyStartMs = juce::Time::getMillisecondCounterHiRes();
@@ -232,9 +234,9 @@ void AudioEngine::releaseResources()
             + juce::String(emergencyElapsedMs, 1) + "ms");
         emitEvidenceTickNonRt(true);
     }
-#else
+    else
     {
-        // DiagnosticMode: evidence 出力のみ
+        // DiagnosticMode: evidence 出力のみ（EmergencyDrain 未要求時）
         const auto audit = collectDrainAudit();
         if (!audit.isAllZero() || audit.stuckReaderCount > 0)
         {
@@ -244,7 +246,6 @@ void AudioEngine::releaseResources()
                 " stuckReaders=" + juce::String(static_cast<int64>(audit.stuckReaderCount)));
         }
     }
-#endif // CONVOPEQ_EMERGENCY_DRAIN
 
     // ★ P3: VerifyDrained — 最終監査フェーズ
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::VerifyDrained);

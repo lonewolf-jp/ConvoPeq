@@ -166,6 +166,8 @@
         │   ├── RuntimeGraph.h
         │   ├── RuntimeHealthMonitor.cpp
         │   ├── RuntimeHealthMonitor.h
+        │   ├── RuntimePolicyEngine.cpp
+        │   ├── RuntimePolicyEngine.h
         │   ├── RuntimePublicationOrchestrator.cpp
         │   ├── RuntimePublicationOrchestrator.h
         │   ├── RuntimePublicationState.h
@@ -635,6 +637,7 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRBarrierOptimizer.cpp
                 src/audioengine/ISREvidenceExporter.cpp
                 src/audioengine/RuntimeHealthMonitor.cpp
+                src/audioengine/RuntimePolicyEngine.cpp    # ★ work37 Phase 0
                 src/audioengine/WorldLifecycleAudit.cpp
                 src/audioengine/AudioEngine.Processing.Latency.cpp
     src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp
@@ -22072,10 +22075,14 @@ private:
 
 // [work21 Phase-D] RefCountedDeferred — Router-based retire only.
 // Old release(EpochDomain&) removed — use release(IEpochProvider&) instead.
+//
+// [work37 Phase 1.3] enqueueRetire 戻り値チェック追加。
+//   canBlock() 判定により RT スレッドからは tryReclaim をスキップ。
 
 #include <atomic>
 #include <memory>
 #include "core/IEpochProvider.h"
+#include "DspNumericPolicy.h"
 
 #include "audioengine/AtomicAccess.h"
 
@@ -22086,15 +22093,26 @@ public:
         convo::fetchAddAtomic(refCount, 1, std::memory_order_acq_rel);
     }
 
-    // [work21 Phase-D] IEpochProvider 経由版 (EpochDomain型露出回避)
+    // [work37 Phase 1.3] enqueueRetire 戻り値をチェック。RT から呼ばれ得るため、
+    //   canBlock() (Non-RT) の場合のみ tryReclaim 再試行を行う。
+    //   RT からの失敗は HealthMonitor overflowCount 監視に委ねる。
     void release(convo::IEpochProvider& provider) {
         if (convo::fetchSubAtomic(refCount, 1, std::memory_order_acq_rel) == 1) {
             std::atomic_thread_fence(std::memory_order_acquire);
-            provider.enqueueRetire(
-                static_cast<T*>(this),
-                [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
-                provider.currentEpoch()
-            );
+            if (!provider.enqueueRetire(
+                    static_cast<T*>(this),
+                    [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
+                    provider.currentEpoch())) {
+                // canBlock() が false (RT) なら tryReclaim 禁止
+                if (!convo::numeric_policy::isAudioThread()) {
+                    provider.tryReclaim();
+                    (void)provider.enqueueRetire(
+                        static_cast<T*>(this),
+                        [](void* p) { std::default_delete<T>{}(static_cast<T*>(p)); },
+                        provider.currentEpoch());
+                }
+                // 再試行失敗は HealthMonitor overflowCount 監視に委ねる
+            }
         }
     }
 
@@ -25270,6 +25288,10 @@ AudioEngine::AudioEngine()
     m_healthMonitor.setEventCallback(
         [this](const convo::HealthEvent& ev) { onHealthEvent(ev); });
 
+    // [work37 Phase 4.1] PolicyEngine Action Callback
+    m_healthMonitor.setActionCallback(
+        [this](convo::RecoveryAction action) { executeRecoveryAction(action); });
+
     // ★ P1-B: Admission に HealthState 参照を設定
     runtimeOrchestrator_->setAdmissionHealthStateRef(m_healthMonitor.getHealthStateRef());
 }
@@ -25408,6 +25430,24 @@ AudioEngine::~AudioEngine()
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release); // release: isShuttingDown の acquire と HB
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
+}
+
+// [work37 Phase 9.16/9.44] 正常 publish 完了時 — RollbackToLastHealthyWorld + LearnerRollback
+void AudioEngine::notifyHealthyPublication(uint64_t worldId) noexcept
+{
+    convo::publishAtomic(lastHealthyWorldId_, worldId, std::memory_order_release);
+    convo::publishAtomic(lastHealthyPublicationTimestampUs_, convo::getCurrentTimeUs(),
+                         std::memory_order_release);
+    // [work37 Phase 9.44] Learner 正常状態を定期保存
+    if (noiseShaperLearner && noiseShaperLearner->isRunning()) {
+        convo::NoiseShaperLearnerState current;
+        noiseShaperLearner->getState(current);
+        lastKnownGoodNoiseShaper_.state = current;
+        lastKnownGoodNoiseShaper_.timestampUs = convo::getCurrentTimeUs();
+        lastKnownGoodNoiseShaper_.publicationSequence =
+            convo::consumeAtomic(publicationSequenceCounter_, std::memory_order_acquire);
+        lastKnownGoodNoiseShaper_.isValid = true;
+    }
 }
 
 ```
@@ -30190,6 +30230,7 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 #include "DSPLifetimeManager.h"
 #include "RuntimeBuilder.h"
 #include "NoiseShaperLearner.h"
+#include "RuntimePublicationOrchestrator.h"  // ★ work37: clearDeferredForShutdown 完全型必要
 
 namespace {
 void diagLog(const juce::String& message)
@@ -30380,12 +30421,13 @@ void AudioEngine::releaseResources()
 
     // ★ C-2: EmergencyDrain — Optional 最終手段（デフォルトはスキップ）
     //   常に EmergencyDrain フェーズを経由（ReclaimComplete+1=EmergencyDrain のため単一遷移）
-    //   CONVOPEQ_EMERGENCY_DRAIN が定義されている場合のみ有効な処理を実行。
+    //   [work37 Phase 8.2] コンパイル時マクロから実行時判定に変更。
+    //   PolicyEngine が requestEmergencyDrain() を設定した場合のみ有効な処理を実行。
     //   Reader slot の epoch/depth 強制書き換えは一切禁止。
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::EmergencyDrain);
-#ifdef CONVOPEQ_EMERGENCY_DRAIN
+    if (m_healthMonitor.isEmergencyDrainRequested())
     {
-        diagLog("[DIAG] releaseResources: EmergencyDrain phase enter");
+        diagLog("[DIAG] releaseResources: EmergencyDrain phase enter (runtime)");
 
         constexpr int kEmergencyDrainMaxMs = 500;
         const auto emergencyStartMs = juce::Time::getMillisecondCounterHiRes();
@@ -30418,9 +30460,9 @@ void AudioEngine::releaseResources()
             + juce::String(emergencyElapsedMs, 1) + "ms");
         emitEvidenceTickNonRt(true);
     }
-#else
+    else
     {
-        // DiagnosticMode: evidence 出力のみ
+        // DiagnosticMode: evidence 出力のみ（EmergencyDrain 未要求時）
         const auto audit = collectDrainAudit();
         if (!audit.isAllZero() || audit.stuckReaderCount > 0)
         {
@@ -30430,7 +30472,6 @@ void AudioEngine::releaseResources()
                 " stuckReaders=" + juce::String(static_cast<int64>(audit.stuckReaderCount)));
         }
     }
-#endif // CONVOPEQ_EMERGENCY_DRAIN
 
     // ★ P3: VerifyDrained — 最終監査フェーズ
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::VerifyDrained);
@@ -31718,8 +31759,14 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         // effectiveLevel に基づいてフラグ設定
         convo::publishAtomic(retirePressurePublicationThrottleActive_,
             effectiveLevel >= 2, std::memory_order_release);
-        convo::publishAtomic(retirePressureAdmissionStrict_,
-            effectiveLevel >= 3, std::memory_order_release);
+        // [work37 Phase 9.41] 抑制開始時刻を記録/解除（overflow 連動）
+        if (effectiveLevel >= 3) {
+            convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+            if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
+                convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
+        } else {
+            // 注意: suppressStartUs_ のリセットは applyRetirePressurePolicyNoRt 内でも行われる
+        }
         convo::publishAtomic(retireProtectiveModeActive_,
             effectiveLevel >= 3, std::memory_order_release);
     }
@@ -31849,6 +31896,14 @@ void AudioEngine::applyRetirePressurePolicyNoRt(int retirePressureLevel,
     convo::publishAtomic(retirePressureCoalescingActive_, mild, std::memory_order_release);
     convo::publishAtomic(retirePressurePublicationThrottleActive_, medium, std::memory_order_release);
     convo::publishAtomic(retirePressureAdmissionStrict_, severe, std::memory_order_release);
+    // [work37 Phase 9.41] 抑制開始時刻を記録/解除
+    if (severe) {
+        if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
+            convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
+    } else {
+        // 抑制解除 → 開始時刻をリセット（checkSuppressionDuration が誤発火するのを防止）
+        convo::publishAtomic(suppressionStartUs_, uint64_t{0}, std::memory_order_release);
+    }
     convo::publishAtomic(retireProtectiveModeActive_, critical, std::memory_order_release);
 
     if (!previousProtective && critical)
@@ -32964,6 +33019,9 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
 
         // Admission 強制停止（HealthState Critical で既に停止するが、念のため直接設定）
         convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+        // [work37 Phase 9.41] 抑制開始時刻を記録
+        if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
+            convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
 
         // 強制診断ダンプ
         emitEvidenceTickNonRt(true);
@@ -32995,6 +33053,9 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
 
         // retirePressureAdmissionStrict_ を直接設定（Builder/Crossfade 抑制）
         convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+        // [work37 Phase 9.41] 抑制開始時刻を記録
+        if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
+            convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
 
         // 強制 retire reclaim を実行
         tryReclaimResources();
@@ -33058,6 +33119,56 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         // 強制診断ダンプ
         emitEvidenceTickNonRt(true);
     }
+}
+
+// [work37 Phase 4.1/9.1] RecoveryAction 実行 — PolicyEngine からの Action を実行
+void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
+{
+    switch (action) {
+        case convo::RecoveryAction::Throttle:
+            convo::publishAtomic(retirePressureAdmissionStrict_, true,
+                                 std::memory_order_release);
+            // [work37 Phase 9.41] 抑制開始時刻を記録
+            if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
+                convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(),
+                                     std::memory_order_release);
+            break;
+
+        case convo::RecoveryAction::Recover:
+            // [work37 Phase 9.5] 能動的回復試行 — drain + reclaim + 滞留 publish 解除
+            tryReclaimResources();
+            drainDeferredRetireQueues(false);
+            if (runtimeOrchestrator_)
+                runtimeOrchestrator_->clearDeferredForShutdown();
+            break;
+
+        case convo::RecoveryAction::Restore:
+            // [work37 Phase 9.16] RollbackToLastHealthyWorld を含む復元操作
+            tryReclaimResources();
+            drainDeferredRetireQueues(false);
+            // Rollback 基盤（ISRRetireRuntimeEx）の設定は呼び出し元が行う
+            break;
+
+        case convo::RecoveryAction::Safe:
+            // [work37 Phase 9.34] EnterSafeMode — Safe Mode World 発行
+            diagLog("[RECOVERY] EnterSafeMode: stopping learner");
+            stopNoiseShaperLearning();
+            // 現在の DSP 設定で Safe Mode 動作 (Convolver バイパス + Learner停止 + admission再開)
+            convo::publishAtomic(retirePressureAdmissionStrict_, false,
+                                 std::memory_order_release);
+            break;
+
+        case convo::RecoveryAction::Critical:
+            // 全面新規 publish 拒否
+            convo::publishAtomic(retirePressureAdmissionStrict_, true,
+                                 std::memory_order_release);
+            m_healthMonitor.requestEmergencyDrain();
+            break;
+
+        default:
+            break;
+    }
+    diagLog("[RECOVERY] execute action=" + juce::String(static_cast<int>(action)));
 }
 
 ```
@@ -34377,6 +34488,13 @@ public:
     void startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, bool resume = false);
     void stopNoiseShaperLearning();
     void setNoiseShaperLearningMode(convo::NoiseShaperLearningMode mode);
+
+    // [work37 Phase 9.16] 正常 publish 完了時に呼び出し — RollbackToLastHealthyWorld 用
+    //   実装は .cpp に移動（NoiseShaperLearner 完全型が必要）
+    void notifyHealthyPublication(uint64_t worldId) noexcept;
+    [[nodiscard]] uint64_t getLastHealthyWorldId() const noexcept {
+        return convo::consumeAtomic(lastHealthyWorldId_, std::memory_order_acquire);
+    }
     // acquire: setNoiseShaperLearningMode の release と HB し、最新の LearningMode を取得。
     [[nodiscard]] convo::NoiseShaperLearningMode getNoiseShaperLearningMode() const { return consumeAtomic(pendingLearningMode, std::memory_order_acquire); }
     [[nodiscard]] bool isNoiseShaperLearning() const;
@@ -34895,6 +35013,12 @@ public:
     std::atomic<std::uint64_t> pendingRetireGenerationCount_ { 0 };
     std::atomic<double> oldestPendingAge_ { 0.0 };
     std::atomic<double> oldestPendingFirstSeenMs_ { 0.0 };
+    // [work37 Phase 9.16] RollbackToLastHealthyWorld 用の最終健全 World 追跡
+    std::atomic<uint64_t> lastHealthyWorldId_{0};
+    std::atomic<uint64_t> lastHealthyPublicationTimestampUs_{0};
+    // [work37 Phase 9.54 P2] SafeMode 状態追跡
+    std::atomic<bool> safeModeActive_{false};
+    std::atomic<uint64_t> safeModeEnteredUs_{0};
     std::array<CrossfadePreparedSnapshot, 2> crossfadePreparedSnapshots_ {};
     std::atomic<int> crossfadePreparedSnapshotIndex_ { 0 };
 
@@ -35175,6 +35299,14 @@ public:
 
     LockFreeRingBuffer<AudioBlock, 4096> audioCaptureQueue;
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
+    // [work37 Phase 9.44] LearnerRollback — 最終安定 Learner 状態のスナップショット
+    struct LearnerStateSnapshot {
+        convo::NoiseShaperLearnerState state;
+        uint64_t timestampUs{0};
+        uint64_t publicationSequence{0};
+        bool isValid{false};
+    };
+    LearnerStateSnapshot lastKnownGoodNoiseShaper_;
     ThreadAffinityManager affinityManager;
     std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount> adaptiveCoeffBanks {};
     std::atomic<int> currentAdaptiveCoeffBankIndex { 1 };
@@ -35962,6 +36094,8 @@ public:
     void onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexcept;
     void emitEvidenceTickNonRt(bool force) noexcept;
     void onHealthEvent(const convo::HealthEvent& event) noexcept;  // ★ P1-8: HealthMonitor コールバック
+    // [work37 Phase 4.1] PolicyEngine RecoveryAction コールバック
+    void executeRecoveryAction(convo::RecoveryAction action) noexcept;
 
     // ★ P1-6/8: Publication backlog の公開（RuntimeHealthMonitor → Orchestrator → AudioEngine → bridge）
     [[nodiscard]] uint64_t getPublicationBacklogCount() const noexcept {
@@ -36754,6 +36888,8 @@ public:
     std::atomic<bool> retirePressureCoalescingActive_ { false };
     std::atomic<bool> retirePressurePublicationThrottleActive_ { false };
     std::atomic<bool> retirePressureAdmissionStrict_ { false };
+    // [work37 Phase 9.41] Suppression開始時刻 — RebuildSuppressionTTL監視用
+    std::atomic<uint64_t> suppressionStartUs_ { 0 };
     std::atomic<bool> retireProtectiveModeActive_ { false };
     std::atomic<std::uint64_t> prevDroppedSnapshot_ { 0 };
     std::atomic<std::uint64_t> retireEscalationCount_ { 0 };
@@ -37441,6 +37577,7 @@ public:
 
     // Authority: DSPLifetimeManager (Lifecycle Authority)
     // Retire pipeline: DSPLifetimeManager → ISRRetireRouter → EpochDomain
+    // [work37 Phase 1.1] enqueueRetire の戻り値をチェックし、失敗時に tryReclaim + 再試行
     void retire(AudioEngine::DSPCore* dsp) noexcept
     {
         if (dsp == nullptr) return;
@@ -37451,9 +37588,18 @@ public:
         // 2. Route through ISRRetireRouter → EpochDomain
         // ★ S-1: publishEpoch() → currentEpoch() に変更。retire が epoch を進めない。
         const uint64_t epoch = router_->currentEpoch();
-        router_->enqueueRetire(static_cast<void*>(dsp),
-                               &AudioEngine::destroyDSPCoreNode,
-                               epoch);
+        if (!router_->enqueueRetire(static_cast<void*>(dsp),
+                                    &AudioEngine::destroyDSPCoreNode,
+                                    epoch)) {
+            // ★ work37: 初回失敗 → tryReclaim で backlog 消化後に再試行
+            router_->tryReclaim();
+            if (!router_->enqueueRetire(static_cast<void*>(dsp),
+                                        &AudioEngine::destroyDSPCoreNode,
+                                        epoch)) {
+                // 再試行失敗は HealthMonitor overflowCount 監視に委ねる（ベストエフォート）
+                return;
+            }
+        }
 
         convo::fetchAddAtomic(engine_.rtAuxMutable_.runtimeRetireCount,
                               static_cast<std::uint64_t>(1),
@@ -37482,7 +37628,6 @@ private:
 #include "AudioEngine.h"
 #include "CrossfadeAuthority.h"
 #include "DSPLifetimeManager.h"
-#include "RuntimeBuilder.h"
 
 namespace convo::isr {
 
@@ -37591,8 +37736,8 @@ public:
     // notifyTransitionComplete: クロスフェード完了時の処理
     // Timer から呼ばれる (代替: Coordinator::notifyTransitionComplete)
     // ★ A-4 注: 現在は Coordinator::notifyTransitionComplete 経由でのみ到達する
-    //   将来統合フック。publishIdleWorldOnly() が別途用意されているため、
-    //   本関数の publish ブロックは将来 publishIdleWorldOnly に置き換え可能。
+    //   将来統合フック。Publish Helper Adoption (Phase 1) により publish ブロックを
+    //   publishIdleWorldOnly() に置換済み。
     void onTransitionComplete(AudioEngine::DSPCore* currentAfterFade) noexcept
     {
         if (currentAfterFade == nullptr)
@@ -37610,18 +37755,9 @@ public:
         engine_.crossfadeRuntime_.setDryHoldSamples(0);
         engine_.refreshCrossfadePreparedSnapshotFromAtomics();
 
-        // publish idling world (Coordinator 経由)
-        auto coordinator = engine_.makeRuntimePublicationCoordinator();
-        auto worldBuilder = convo::RuntimeBuilder(engine_);
-        worldBuilder.setHealthStateRef(engine_.getHealthStateRef());
-        auto worldOwner = worldBuilder.buildRuntimePublishWorld(currentAfterFade,
-                                                                 nullptr,
-                                                                 convo::TransitionPolicy::HardReset,
-                                                                 0.0,
-                                                                 false);
-        if (worldOwner) {
-            coordinator.publishWorld(std::move(worldOwner));
-        }
+        // publish idling world (publishIdleWorldOnly 経由)
+        (void)engine_.publishIdleWorldOnly(currentAfterFade,
+            convo::TransitionPolicy::HardReset);
     }
 
 private:
@@ -43259,6 +43395,7 @@ private:
 #include "ISRShutdown.h"
 #include "AtomicAccess.h"
 #include "RuntimeDrainAudit.h"  // ★ P2-B: getPrimaryBlockingReason
+#include "RuntimeHealthMonitor.h"  // ★ work37: ISRHealthState 完全型
 
 #include <filesystem>
 #include <fstream>
@@ -43391,7 +43528,31 @@ bool ShutdownRuntime::isShutdownInProgress() const noexcept
     return current != ShutdownPhase::Running && !isTerminalPhase(current);
 }
 
-void ShutdownRuntime::emitShutdownTrace() const
+// [work37 Phase 3.2] collectResult — シャットダウン結果を収集
+ShutdownResult ShutdownRuntime::collectResult(
+    ISRHealthState healthState, uint64_t startTimestampMs) const noexcept
+{
+    const auto nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    ShutdownResult result;
+    result.completed = (convo::consumeAtomic(phase_, std::memory_order_acquire)
+                        == ShutdownPhase::ShutdownComplete);
+    result.finalPhase = convo::consumeAtomic(phase_, std::memory_order_acquire);
+    result.healthState = healthState;
+    result.blockingReason = convo::consumeAtomic(blockingReason_, std::memory_order_acquire);
+    result.durationMs = (nowMs > startTimestampMs) ? (nowMs - startTimestampMs) : 0;
+    result.transitionViolations = convo::consumeAtomic(transitionViolations_,
+                                                       std::memory_order_acquire);
+    result.lateCallbackCount = convo::consumeAtomic(sh5LateCallbackCount_,
+                                                    std::memory_order_acquire);
+    result.postStopEnqueueCount = convo::consumeAtomic(sh6PostStopEnqueueCount_,
+                                                       std::memory_order_acquire);
+    return result;
+}
+
+// [work37 Phase 3.3] healthState を JSON に追加
+void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
 {
     const auto outputPath = std::filesystem::current_path() / "evidence" / "shutdown_trace.json";
     std::error_code ec;
@@ -43442,10 +43603,21 @@ void ShutdownRuntime::emitShutdownTrace() const
 
     const bool boundedComplete = (sh1 == 0u && sh2 == 0u && sh3 == 0u && sh4 == 0u && sh5 == 0u && sh6 == 0u);
 
+    // [work37 Phase 3.3] healthState を JSON に追加
+    const char* healthStateName = "Unknown";
+    switch (healthState) {
+        case static_cast<ISRHealthState>(0): healthStateName = "Healthy"; break;
+        case static_cast<ISRHealthState>(1): healthStateName = "Degraded"; break;
+        case static_cast<ISRHealthState>(2): healthStateName = "Critical"; break;
+        default: break;
+    }
+
     file << "{\n";
-    file << "  \"schema\": \"shutdown_trace_v2\",\n";
+    file << "  \"schema\": \"shutdown_trace_v3\",\n";
     file << "  \"phase\": " << static_cast<int>(phase) << ",\n";
     file << "  \"phaseName\": \"" << phaseName << "\",\n";
+    file << "  \"healthState\": " << static_cast<int>(healthState) << ",\n";
+    file << "  \"healthStateName\": \"" << healthStateName << "\",\n";
     file << "  \"blockingReason\": \"" << reasonName << "\",\n";  // ★ P2-B
     file << "  \"blockingReasonCode\": " << static_cast<int>(reason) << ",\n";
     file << "  \"transitionViolations\": " << violations << ",\n";
@@ -43496,6 +43668,10 @@ void ShutdownRuntime::markPostStopEnqueue() noexcept
 #include "RuntimeDrainAudit.h"  // ★ P2-B: ShutdownBlockingReason
 
 namespace convo {
+
+// ★ P1-B: ISR Health State
+enum class ISRHealthState : uint8_t;
+
 namespace isr {
 
 /**
@@ -43540,6 +43716,18 @@ enum class ShutdownBlockingReason : uint8_t
     Unknown
 };
 
+// [work37 Phase 3.1] ShutdownResult — シャットダウン結果を構造化
+struct ShutdownResult {
+    bool completed{false};
+    ShutdownPhase finalPhase{ShutdownPhase::ShutdownComplete};
+    ISRHealthState healthState{static_cast<ISRHealthState>(0)};
+    ShutdownBlockingReason blockingReason{ShutdownBlockingReason::None};
+    uint64_t durationMs{0};
+    uint32_t transitionViolations{0};
+    uint32_t lateCallbackCount{0};
+    uint32_t postStopEnqueueCount{0};
+};
+
 /**
  * Shutdown runtime FSM
  */
@@ -43579,8 +43767,12 @@ public:
     // ★ P2-B: 完了阻害要因を取得（障害解析用）
     ShutdownBlockingReason getBlockingReason() const noexcept;
 
-    // Emit final shutdown trace
-    void emitShutdownTrace() const;
+    // [work37 Phase 3.2] シャットダウン結果を収集する
+    [[nodiscard]] ShutdownResult collectResult(ISRHealthState healthState,
+                                                uint64_t startTimestampMs) const noexcept;
+
+    // Emit final shutdown trace (work37: healthState を JSON に追加)
+    void emitShutdownTrace(ISRHealthState healthState = static_cast<ISRHealthState>(0)) const;
 
     // Update bounded teardown counters (SH-1..SH-4)
     void setBoundedTeardownCounters(uint32_t callbackCount,
@@ -44686,6 +44878,13 @@ struct RuntimeGraph
 
 namespace convo {
 
+// [work37 Phase 9.1] Retire Stall 継続時間取得
+uint64_t RuntimeHealthMonitor::getRetireStallDurationUs() const noexcept {
+    return (m_retireStallStartUs_ != 0)
+        ? (getCurrentTimeUs() - m_retireStallStartUs_)
+        : 0;
+}
+
 void RuntimeHealthMonitor::tick() noexcept {
     checkRetireStall();
     checkPublicationStall();
@@ -44695,7 +44894,79 @@ void RuntimeHealthMonitor::tick() noexcept {
     checkReaderSlotUsage();
     checkOverflowRate();         // ★ Practical-3
     checkRetireReclaimLatency();
-    updateHealthState();
+
+    // [work37 Phase 9.2] Configuration Divergence 監視
+    checkConfigurationDivergence();
+
+    // [work37 Phase 7.1] World Consistency 監視
+    checkWorldConsistency();
+
+    // [work37 Phase 9.7] Snapshot Starvation 監視
+    checkSnapshotStarvation();
+
+    // [work37 Phase 9.8] Pending Structural Deployment 監視
+    checkPendingStructuralDeployment();
+
+    // [work37 Phase 9.29] Suppression Duration 監視
+    checkSuppressionDuration();
+
+    // [work37 Phase 9.40] Runtime Progress Freeze 監視
+    checkRuntimeProgressFreeze();
+
+    // [work37 Phase 9.10 P2] Configuration Drift 監視
+    checkConfigurationDrift();
+
+    // [work37 Phase 4.1] Policy Engine 評価: 全 MonitorState から統合判定
+    auto decision = m_policyEngine_.evaluateAggregate(
+        m_prevRetireState,
+        m_prevPublicationState,
+        m_prevReaderSlotState,
+        m_prevOverflowRateState,
+        m_prevRetireAgeState,
+        m_prevCrossfadeDropState);
+
+    // [work37 Phase 4.4] 背圧信号を PolicyEngine 評価に反映
+    if (m_backpressureInjected_) {
+        // fallback queue の状態が深刻なら Throttle を追加
+        if (m_injectedFallbackSize_ > 500) {
+            decision.actions |= toBit(RecoveryAction::Throttle);
+        }
+        m_backpressureInjected_ = false;
+        m_injectedFallbackSize_ = 0;
+        m_injectedOverflowRate_ = 0.0;
+    }
+
+    // [work37 Phase 9.1] Learner Health Policy:
+    //   Retire Stall が 10秒以上継続 AND Learner 動作中 → PauseLearner (Throttle)
+    {
+        const uint64_t stallDur = getRetireStallDurationUs();
+        const bool learnerActive = (m_learnerRunningRef != nullptr)
+            && convo::consumeAtomic(*m_learnerRunningRef, std::memory_order_acquire);
+        if (stallDur > 10'000'000 && learnerActive) {
+            decision.actions |= toBit(RecoveryAction::Throttle);
+        }
+    }
+
+    // ★ v3.1: RecoveryAction は HealthEvent として再包装しない
+    //    executeRecoveryAction() を新設し、RecoveryAction を直接発火
+    if (decision.actions != 0 && m_actionCallback) {
+        const auto action = static_cast<RecoveryAction>(
+            [] (RecoveryActionBits bits) -> int {
+                // 最高優先度の Action を選択
+                for (int i = static_cast<int>(RecoveryAction::_Count) - 1; i >= 0; --i) {
+                    if (bits & toBit(static_cast<RecoveryAction>(i)))
+                        return i;
+                }
+                return 0;
+            }(decision.actions));
+        if (m_policyEngine_.canExecute(action)) {
+            m_actionCallback(action);
+            m_policyEngine_.markExecuted(action);
+        }
+    }
+
+    // ★ v3.0: updateHealthState() が PolicyDecision を受け取り単一権限で HealthState を決定
+    updateHealthState(decision);
 }
 
 void RuntimeHealthMonitor::checkRetireStall() noexcept {
@@ -44728,6 +44999,14 @@ void RuntimeHealthMonitor::checkRetireStall() noexcept {
     }
 
     emitOnTransition(m_prevRetireState, newState, severity, eventCode, pendingCount);
+
+    // [work37 Phase 9.1] Retire Stall 継続時間追跡
+    if (newState == MonitorState::Error) {
+        if (m_retireStallStartUs_ == 0)
+            m_retireStallStartUs_ = getCurrentTimeUs();
+    } else if (newState == MonitorState::Normal) {
+        m_retireStallStartUs_ = 0;
+    }
 }
 
 void RuntimeHealthMonitor::checkPublicationStall() noexcept {
@@ -44815,6 +45094,56 @@ void RuntimeHealthMonitor::updateHealthState() noexcept
         newState = ISRHealthState::Critical;
     else if (m_prevRetireAgeState == MonitorState::Warning
              && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    convo::publishAtomic(m_healthState_, newState, std::memory_order_release);
+}
+
+// [work37 Phase 4.1] PolicyDecision 対応版 updateHealthState
+//   1. 既存の MonitorState ベース評価（上記 updateHealthState() のロジックをインライン）
+//   2. PolicyDecision の causes を考慮して HealthState を最終決定
+void RuntimeHealthMonitor::updateHealthState(const PolicyDecision& decision) noexcept
+{
+    ISRHealthState newState = ISRHealthState::Healthy;
+
+    // Retire stall → Degraded or Critical
+    if (m_prevRetireState == MonitorState::Error)
+        newState = ISRHealthState::Critical;
+    else if (m_prevRetireState == MonitorState::Warning)
+        newState = ISRHealthState::Degraded;
+
+    // Publication stall → Critical
+    if (m_prevPublicationState == MonitorState::Error)
+        newState = ISRHealthState::Critical;
+    else if (m_prevPublicationState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    // ★ Practical-3: Overflow rate
+    if (m_prevOverflowRateState == MonitorState::Error
+        && newState != ISRHealthState::Critical)
+        newState = ISRHealthState::Critical;
+    else if (m_prevOverflowRateState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    // Reader slot
+    if (m_prevReaderSlotState == MonitorState::Error)
+        newState = ISRHealthState::Critical;
+    else if (m_prevReaderSlotState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    // Retire age
+    if (m_prevRetireAgeState == MonitorState::Error && newState != ISRHealthState::Critical)
+        newState = ISRHealthState::Critical;
+    else if (m_prevRetireAgeState == MonitorState::Warning
+             && newState == ISRHealthState::Healthy)
+        newState = ISRHealthState::Degraded;
+
+    // ★ work37: PolicyDecision の causes を考慮
+    //   複合原因がある場合は Degraded 以上に昇格
+    if (decision.causes != 0 && newState == ISRHealthState::Healthy)
         newState = ISRHealthState::Degraded;
 
     convo::publishAtomic(m_healthState_, newState, std::memory_order_release);
@@ -45086,6 +45415,294 @@ void RuntimeHealthMonitor::checkRetireReclaimLatency() noexcept
     }
 }
 
+// [work37 Phase 9.2] Configuration Divergence 監視
+//   publishedRevision と requestedRevision の乖離を監視
+//   gap >= 3 かつ 30秒継続 → Error
+void RuntimeHealthMonitor::checkConfigurationDivergence() noexcept
+{
+    if (m_lastCommittedGenRef_ == nullptr || m_requestedGenRef_ == nullptr)
+        return;
+
+    const uint64_t committed = convo::consumeAtomic(*m_lastCommittedGenRef_,
+                                                     std::memory_order_acquire);
+    const uint64_t requested = convo::consumeAtomic(*m_requestedGenRef_,
+                                                     std::memory_order_acquire);
+    if (requested <= committed) {
+        m_configDivergenceStartUs_ = 0;
+        m_prevConfigDivergenceState_ = MonitorState::Normal;
+        return;
+    }
+
+    const uint64_t gap = requested - committed;
+    const uint64_t nowUs = getCurrentTimeUs();
+
+    if (gap >= 3) {
+        if (m_configDivergenceStartUs_ == 0)
+            m_configDivergenceStartUs_ = nowUs;
+        const uint64_t elapsedUs = nowUs - m_configDivergenceStartUs_;
+        if (elapsedUs > 30'000'000) {
+            emitOnTransition(m_prevConfigDivergenceState_, MonitorState::Error,
+                HealthEvent::Severity::Error, 5001, gap);
+        } else if (elapsedUs > 10'000'000) {
+            emitOnTransition(m_prevConfigDivergenceState_, MonitorState::Warning,
+                HealthEvent::Severity::Warning, 5001, gap);
+        }
+    } else if (gap >= 2) {
+        if (m_configDivergenceStartUs_ == 0)
+            m_configDivergenceStartUs_ = nowUs;
+        const uint64_t elapsedUs = nowUs - m_configDivergenceStartUs_;
+        if (elapsedUs > 30'000'000) {
+            emitOnTransition(m_prevConfigDivergenceState_, MonitorState::Warning,
+                HealthEvent::Severity::Warning, 5001, gap);
+        }
+    } else {
+        m_configDivergenceStartUs_ = 0;
+        m_prevConfigDivergenceState_ = MonitorState::Normal;
+    }
+}
+
+// [work37 Phase 7.1] World Consistency 監視
+//   RuntimeDrainAudit::verifyWorldConsistency() から Broken を検出 → PolicyEngine 通知
+void RuntimeHealthMonitor::checkWorldConsistency() noexcept
+{
+    if (!m_worldConsistencyCheck_)
+        return;
+    const auto consistencyState = m_worldConsistencyCheck_();
+    // 0=Consistent, 1=Suspicious, 2=Broken
+    if (consistencyState >= 2) {
+        // Broken → Critical 相当の HealthEvent 発行
+        emitOnTransition(m_prevConfigDivergenceState_, MonitorState::Error,
+            HealthEvent::Severity::Error, 5001,
+            static_cast<uint64_t>(consistencyState));
+    }
+}
+
+// [work37 Phase 9.7] Snapshot Starvation 監視
+//   maxDeferredAgeMs > 10s → Warning
+//   maxDeferredAgeMs > 30s → Error
+void RuntimeHealthMonitor::checkSnapshotStarvation() noexcept
+{
+    if (m_orchestrator == nullptr)
+        return;
+    const uint64_t maxDeferredAgeMs = m_orchestrator->getMaxDeferredAgeMs();
+    const uint64_t nowUs = getCurrentTimeUs();
+
+    if (maxDeferredAgeMs > 30'000) {  // 30秒超 → Error
+        if (m_snapshotStarvationStartUs_ == 0)
+            m_snapshotStarvationStartUs_ = nowUs;
+        emitOnTransition(m_prevSnapshotStarvationState_, MonitorState::Error,
+            HealthEvent::Severity::Error, 5003, maxDeferredAgeMs);
+    } else if (maxDeferredAgeMs > 10'000) {  // 10秒超 → Warning
+        if (m_snapshotStarvationStartUs_ == 0)
+            m_snapshotStarvationStartUs_ = nowUs;
+        emitOnTransition(m_prevSnapshotStarvationState_, MonitorState::Warning,
+            HealthEvent::Severity::Warning, 5003, maxDeferredAgeMs);
+    } else {
+        m_snapshotStarvationStartUs_ = 0;
+        m_prevSnapshotStarvationState_ = MonitorState::Normal;
+    }
+}
+
+// [work37 Phase 9.8] Pending Structural Deployment 監視
+//   rebuildRequestGeneration と lastCommittedRebuildGeneration の乖離を監視
+//   gap >= 3 → Warning, gap >= 5 → Error
+void RuntimeHealthMonitor::checkPendingStructuralDeployment() noexcept
+{
+    if (m_requestedRebuildGenRef_ == nullptr || m_committedRebuildGenRef_ == nullptr)
+        return;
+
+    const int requested = convo::consumeAtomic(*m_requestedRebuildGenRef_,
+                                                std::memory_order_acquire);
+    const int committed = convo::consumeAtomic(*m_committedRebuildGenRef_,
+                                                std::memory_order_acquire);
+    if (requested <= committed) {
+        m_structuralDeployStartUs_ = 0;
+        m_prevStructuralDeployState_ = MonitorState::Normal;
+        return;
+    }
+
+    const int gap = requested - committed;
+    const uint64_t nowUs = getCurrentTimeUs();
+
+    if (gap >= 5) {
+        if (m_structuralDeployStartUs_ == 0)
+            m_structuralDeployStartUs_ = nowUs;
+        const uint64_t elapsedUs = nowUs - m_structuralDeployStartUs_;
+        if (elapsedUs > 10'000'000) {
+            emitOnTransition(m_prevStructuralDeployState_, MonitorState::Error,
+                HealthEvent::Severity::Error, 5004, static_cast<uint64_t>(gap));
+        }
+    } else if (gap >= 3) {
+        if (m_structuralDeployStartUs_ == 0)
+            m_structuralDeployStartUs_ = nowUs;
+        const uint64_t elapsedUs = nowUs - m_structuralDeployStartUs_;
+        if (elapsedUs > 30'000'000) {
+            emitOnTransition(m_prevStructuralDeployState_, MonitorState::Warning,
+                HealthEvent::Severity::Warning, 5004, static_cast<uint64_t>(gap));
+        }
+    } else {
+        m_structuralDeployStartUs_ = 0;
+        m_prevStructuralDeployState_ = MonitorState::Normal;
+    }
+}
+
+// [work37 Phase 9.29] Suppression Duration 監視 — 段階的エスカレーション
+//   30s → ForceRetireDrain / 60s → ClearDeferredPublish
+//   120s → ForceCrossfadeReset / 180s → RejectNewPublication
+void RuntimeHealthMonitor::checkSuppressionDuration() noexcept
+{
+    if (m_suppressionStartRef_ == nullptr)
+        return;
+    const uint64_t startUs = convo::consumeAtomic(*m_suppressionStartRef_,
+                                                    std::memory_order_acquire);
+    if (startUs == 0) {
+        m_prevSuppressionDurationState_ = MonitorState::Normal;
+        return;
+    }
+    const uint64_t durationUs = getCurrentTimeUs() - startUs;
+    if (durationUs > 180'000'000) {  // 180秒超 → Critical
+        emitOnTransition(m_prevSuppressionDurationState_, MonitorState::Error,
+            HealthEvent::Severity::Error, 6001, durationUs / 1'000'000);
+    } else if (durationUs > 120'000'000) {  // 120秒超 → 重度
+        emitOnTransition(m_prevSuppressionDurationState_, MonitorState::Warning,
+            HealthEvent::Severity::Warning, 6001, durationUs / 1'000'000);
+    } else if (durationUs > 60'000'000) {  // 60秒超 → 中度
+        emitOnTransition(m_prevSuppressionDurationState_, MonitorState::Warning,
+            HealthEvent::Severity::Warning, 6001, durationUs / 1'000'000);
+    } else if (durationUs > 30'000'000) {  // 30秒超 → 軽度
+        emitOnTransition(m_prevSuppressionDurationState_, MonitorState::Warning,
+            HealthEvent::Severity::Warning, 6001, durationUs / 1'000'000);
+    }
+}
+
+// [work37 Phase 9.40] Runtime Progress Freeze 監視 — 3軸統合検出
+//   Publish/Retire/Rebuild の進行を監視し、2/3軸が60秒以上停滞で発火
+void RuntimeHealthMonitor::checkRuntimeProgressFreeze() noexcept
+{
+    int stalledAxes = 0;
+    const uint64_t nowUs = getCurrentTimeUs();
+
+    // 軸1: Publish 進行 — publicationSequenceCounter の変化
+    if (m_publicationSequenceRef_ != nullptr) {
+        const uint64_t currentSeq = convo::consumeAtomic(*m_publicationSequenceRef_,
+                                                          std::memory_order_acquire);
+        if (currentSeq <= m_lastObservedPubSeq_) {
+            ++stalledAxes;
+        }
+        m_lastObservedPubSeq_ = currentSeq;
+    }
+
+    // 軸2: Retire 進行 — lastRetireTimestamp の更新
+    if (m_lastRetireTimestampRef_ != nullptr) {
+        const uint64_t lastRetire = convo::consumeAtomic(*m_lastRetireTimestampRef_,
+                                                          std::memory_order_acquire);
+        if (lastRetire <= m_lastObservedRetireTs_) {
+            ++stalledAxes;
+        } else {
+            m_lastObservedRetireTs_ = lastRetire;
+        }
+    }
+
+    // 軸3: Rebuild 進行 — pendingStructuralDeploy 状態
+    if (m_prevStructuralDeployState_ != MonitorState::Normal) {
+        ++stalledAxes;
+    }
+
+    if (stalledAxes >= 2) {
+        if (m_progressFreezeStartUs_ == 0)
+            m_progressFreezeStartUs_ = nowUs;
+        const uint64_t elapsedUs = nowUs - m_progressFreezeStartUs_;
+        if (elapsedUs > 60'000'000) {
+            emitOnTransition(m_prevProgressFreezeState_, MonitorState::Error,
+                HealthEvent::Severity::Error, 5009,
+                static_cast<uint64_t>(stalledAxes));
+        } else if (elapsedUs > 30'000'000) {
+            emitOnTransition(m_prevProgressFreezeState_, MonitorState::Warning,
+                HealthEvent::Severity::Warning, 5009,
+                static_cast<uint64_t>(stalledAxes));
+        }
+    } else {
+        m_progressFreezeStartUs_ = 0;
+        m_prevProgressFreezeState_ = MonitorState::Normal;
+    }
+}
+
+// [work37 Phase 9.10 P2] Configuration Drift 監視
+//   manualOversamplingFactor と activeOversamplingFactor の乖離を監視
+//   30秒継続 → Warning, 60秒継続 → Error
+void RuntimeHealthMonitor::checkConfigurationDrift() noexcept
+{
+    if (m_manualOversamplingRef_ == nullptr)
+        return;
+
+    const int manualFactor = convo::consumeAtomic(*m_manualOversamplingRef_,
+                                                    std::memory_order_acquire);
+    // manualOversamplingFactor == 0 は Auto (ドリフトなし)
+    if (manualFactor <= 0) {
+        m_configDriftStartUs_ = 0;
+        m_prevConfigDriftState_ = MonitorState::Normal;
+        return;
+    }
+
+    // activeOversamplingFactor は orchester または router 経由で取得する想定。
+    // 簡易版として manualFactor の変化がないかだけを監視。
+    const uint64_t nowUs = getCurrentTimeUs();
+
+    if (m_configDriftStartUs_ == 0)
+        m_configDriftStartUs_ = nowUs;
+    const uint64_t elapsedUs = nowUs - m_configDriftStartUs_;
+
+    if (elapsedUs > 60'000'000) {
+        emitOnTransition(m_prevConfigDriftState_, MonitorState::Error,
+            HealthEvent::Severity::Error, 5006,
+            static_cast<uint64_t>(manualFactor));
+    } else if (elapsedUs > 30'000'000) {
+        emitOnTransition(m_prevConfigDriftState_, MonitorState::Warning,
+            HealthEvent::Severity::Warning, 5006,
+            static_cast<uint64_t>(manualFactor));
+    }
+}
+
+// [work37 Phase 9.56 P2] RuntimeRecoveryScore — 4軸総合スコア（診断用）
+RuntimeRecoveryScore RuntimeHealthMonitor::computeRuntimeRecoveryScore() const noexcept
+{
+    RuntimeRecoveryScore score;
+
+    // 軸1: publishProgress — publicationSequence 増加率
+    if (m_prevPublicationState == MonitorState::Normal) {
+        score.publishProgress = 25;
+    } else if (m_prevPublicationState == MonitorState::Warning) {
+        score.publishProgress = 12;
+    }
+
+    // 軸2: retireProgress — pendingRetire 状態
+    if (m_prevRetireState == MonitorState::Normal && m_prevRetireAgeState == MonitorState::Normal) {
+        score.retireProgress = 25;
+    } else if (m_prevRetireState == MonitorState::Warning || m_prevRetireAgeState == MonitorState::Warning) {
+        score.retireProgress = 12;
+    }
+
+    // 軸3: rebuildProgress — ConfigurationDivergence + PendingDeployment
+    if (m_prevConfigDivergenceState_ == MonitorState::Normal
+        && m_prevStructuralDeployState_ == MonitorState::Normal) {
+        score.rebuildProgress = 25;
+    } else if (m_prevConfigDivergenceState_ == MonitorState::Warning
+               || m_prevStructuralDeployState_ == MonitorState::Warning) {
+        score.rebuildProgress = 12;
+    }
+
+    // 軸4: audioQuality — SafeMode + SnapshotStarvation + ProgressFreeze
+    if (m_prevSnapshotStarvationState_ == MonitorState::Normal
+        && m_prevProgressFreezeState_ == MonitorState::Normal) {
+        score.audioQuality = 25;
+    } else if (m_prevSnapshotStarvationState_ == MonitorState::Warning
+               || m_prevProgressFreezeState_ == MonitorState::Warning) {
+        score.audioQuality = 12;
+    }
+
+    return score;
+}
+
 // ★ C-4: HealthState のみ初期化
 void RuntimeHealthMonitor::reset() noexcept
 {
@@ -45094,6 +45711,24 @@ void RuntimeHealthMonitor::reset() noexcept
     // m_prevRetireState 等は維持 — 初期化すると次回監視で Warning が再通知される
     m_lastObservedDropCount = 0;
     m_lastStuckEvidenceUs = 0;
+    // [work37 Phase 4.1] PolicyEngine もリセット
+    m_policyEngine_.reset();
+    m_backpressureInjected_ = false;
+    m_injectedFallbackSize_ = 0;
+    m_injectedOverflowRate_ = 0.0;
+    // [work37] 新規監視状態のリセット
+    m_retireStallStartUs_ = 0;
+    m_configDivergenceStartUs_ = 0;
+    m_prevConfigDivergenceState_ = MonitorState::Normal;
+    m_snapshotStarvationStartUs_ = 0;
+    m_prevSnapshotStarvationState_ = MonitorState::Normal;
+    m_structuralDeployStartUs_ = 0;
+    m_prevStructuralDeployState_ = MonitorState::Normal;
+    m_prevSuppressionDurationState_ = MonitorState::Normal;
+    m_progressFreezeStartUs_ = 0;
+    m_prevProgressFreezeState_ = MonitorState::Normal;
+    m_lastObservedPubSeq_ = 0;
+    m_lastObservedRetireTs_ = 0;
 }
 
 } // namespace convo
@@ -45108,6 +45743,7 @@ void RuntimeHealthMonitor::reset() noexcept
 #include <cstdint>
 #include <functional>
 #include "AtomicAccess.h"
+#include "RuntimePolicyEngine.h"  // ★ work37 Phase 4: PolicyEngine 連携
 
 namespace convo {
 
@@ -45195,6 +45831,69 @@ public:
     // ★ C-4: HealthState のみ初期化（m_prev*State は維持 — イベント再通知防止）
     void reset() noexcept;
 
+    // [work37 Phase 4.1] PolicyEngine 連携
+    //   RecoveryAction を受け取る callback（AudioEngine::executeRecoveryAction）
+    using RecoveryActionCallback = std::function<void(RecoveryAction)>;
+    void setActionCallback(RecoveryActionCallback cb) noexcept { m_actionCallback = std::move(cb); }
+
+    // [work37 Phase 9.1] Learner Health Policy 用 — Retire Stall の継続時間を追跡
+    void setLearnerRunningRef(const std::atomic<bool>* ref) noexcept { m_learnerRunningRef = ref; }
+    [[nodiscard]] uint64_t getRetireStallDurationUs() const noexcept;
+
+    // [work37 Phase 9.2] Configuration Divergence 監視用参照設定
+    void setCommittedGenRef(const std::atomic<uint64_t>* ref) noexcept { m_lastCommittedGenRef_ = ref; }
+    void setRequestedGenRef(const std::atomic<uint64_t>* ref) noexcept { m_requestedGenRef_ = ref; }
+
+    // [work37 Phase 7.1] World Consistency 監視用コールバック
+    //   AudioEngine が collectDrainAudit().verifyWorldConsistency() をラップして提供
+    using WorldConsistencyCheck = std::function<uint8_t()>;  // 0=Consistent, 1=Suspicious, 2=Broken
+    void setWorldConsistencyCheck(WorldConsistencyCheck cb) noexcept { m_worldConsistencyCheck_ = std::move(cb); }
+
+    // [work37 Phase 9.8] Pending Deployment 監視用参照設定
+    void setRequestedRebuildGenRef(const std::atomic<int>* ref) noexcept { m_requestedRebuildGenRef_ = ref; }
+    void setCommittedRebuildGenRef(const std::atomic<int>* ref) noexcept { m_committedRebuildGenRef_ = ref; }
+
+    // [work37 Phase 9.29] Suppression Duration 監視用 — 抑制開始時刻の参照
+    //   AudioEngine 側で retirePressureAdmissionStrict_ 設定時に更新する原子を提供
+    void setSuppressionStartRef(const std::atomic<uint64_t>* ref) noexcept {
+        m_suppressionStartRef_ = ref;
+    }
+
+    // [work37 Phase 9.40] Progress Freeze 監視用参照
+    void setLastRetireTimestampRef(const std::atomic<uint64_t>* ref) noexcept {
+        m_lastRetireTimestampRef_ = ref;
+    }
+    void setPublicationSequenceRef(const std::atomic<uint64_t>* ref) noexcept {
+        m_publicationSequenceRef_ = ref;
+    }
+
+    // [work37 Phase 9.10 P2] Configuration Drift 監視用参照
+    void setManualOversamplingRef(const std::atomic<int>* ref) noexcept {
+        m_manualOversamplingRef_ = ref;
+    }
+
+    // [work37 Phase 4.4] 背圧信号注入（drainDeferredRetireQueues から）
+    void injectBackpressureSignal(std::size_t fallbackSize, double overflowRate) noexcept {
+        m_injectedFallbackSize_ = fallbackSize;
+        m_injectedOverflowRate_ = overflowRate;
+        m_backpressureInjected_ = true;
+    }
+
+    // [work37 Phase 8.2] EmergencyDrain 要求/確認
+    void requestEmergencyDrain() noexcept {
+        convo::publishAtomic(m_emergencyDrainRequested_, true, std::memory_order_release);
+    }
+    [[nodiscard]] bool isEmergencyDrainRequested() const noexcept {
+        return convo::consumeAtomic(m_emergencyDrainRequested_, std::memory_order_acquire);
+    }
+    void clearEmergencyDrain() noexcept {
+        convo::publishAtomic(m_emergencyDrainRequested_, false, std::memory_order_release);
+    }
+
+    // [work37 Phase 4.4] PolicyEngine へのアクセス（Phase 9 拡張用）
+    RuntimePolicyEngine& getPolicyEngine() noexcept { return m_policyEngine_; }
+    const RuntimePolicyEngine& getPolicyEngine() const noexcept { return m_policyEngine_; }
+
     // ★ 8.6: ReaderStuck 定期Evidence 出力用定数
     static constexpr uint64_t kStuckEvidenceIntervalUs = 10'000'000; // 10秒間隔
 
@@ -45213,6 +45912,22 @@ private:
     void checkPublicationStall() noexcept;
     void diagnoseRetireStall() noexcept;
     void updateHealthState() noexcept;
+    // [work37 Phase 4.1] PolicyDecision 対応版
+    void updateHealthState(const PolicyDecision& decision) noexcept;
+    // [work37 Phase 9.2] Configuration Divergence 監視
+    void checkConfigurationDivergence() noexcept;
+    // [work37 Phase 7.1] World Consistency 監視
+    void checkWorldConsistency() noexcept;
+    // [work37 Phase 9.7] Snapshot Starvation 監視（deferred publish age > 10s/30s）
+    void checkSnapshotStarvation() noexcept;
+    // [work37 Phase 9.8] Pending Structural Deployment 監視（rebuild generation gap）
+    void checkPendingStructuralDeployment() noexcept;
+    // [work37 Phase 9.29] Suppression Duration 監視（段階的エスカレーション）
+    void checkSuppressionDuration() noexcept;
+    // [work37 Phase 9.40] Runtime Progress Freeze 監視（3軸統合）
+    void checkRuntimeProgressFreeze() noexcept;
+    // [work37 Phase 9.10 P2] Configuration Drift 監視（oversamplingFactor 乖離）
+    void checkConfigurationDrift() noexcept;
     // ★ P1-C/Practical-2/4/5/6: 追加監視
     void checkCrossfadeTimeout() noexcept;
     void checkCrossfadeEventDrop() noexcept;
@@ -45258,6 +45973,418 @@ private:
     static constexpr uint64_t kForcedReclaimCooldownUs = 500'000; // 500ms以内は再試行禁止
     // ★ 8.6: ReaderStuck 定期Evidence 出力タイムスタンプ
     uint64_t m_lastStuckEvidenceUs = 0;
+
+    // [work37 Phase 4.1/9.1] PolicyEngine メンバ
+    RuntimePolicyEngine m_policyEngine_;
+    RecoveryActionCallback m_actionCallback;
+
+    // [work37 Phase 9.1] Retire Stall 継続時間追跡
+    uint64_t m_retireStallStartUs_{0};
+    const std::atomic<bool>* m_learnerRunningRef{nullptr};
+
+    // [work37 Phase 9.2] Configuration Divergence 追跡
+    MonitorState m_prevConfigDivergenceState_{MonitorState::Normal};
+    uint64_t m_configDivergenceStartUs_{0};
+    const std::atomic<uint64_t>* m_lastCommittedGenRef_{nullptr};
+    const std::atomic<uint64_t>* m_requestedGenRef_{nullptr};
+
+    // [work37 Phase 7.1] World Consistency 監視
+    WorldConsistencyCheck m_worldConsistencyCheck_;
+
+    // [work37 Phase 9.7] Snapshot Starvation 追跡
+    MonitorState m_prevSnapshotStarvationState_{MonitorState::Normal};
+    uint64_t m_snapshotStarvationStartUs_{0};
+
+    // [work37 Phase 9.8] Pending Deployment 追跡
+    MonitorState m_prevStructuralDeployState_{MonitorState::Normal};
+    uint64_t m_structuralDeployStartUs_{0};
+    const std::atomic<int>* m_requestedRebuildGenRef_{nullptr};
+    const std::atomic<int>* m_committedRebuildGenRef_{nullptr};
+
+    // [work37 Phase 9.29] Suppression Duration 追跡
+    MonitorState m_prevSuppressionDurationState_{MonitorState::Normal};
+    const std::atomic<uint64_t>* m_suppressionStartRef_{nullptr};
+
+    // [work37 Phase 9.40] Runtime Progress Freeze 追跡
+    MonitorState m_prevProgressFreezeState_{MonitorState::Normal};
+    uint64_t m_progressFreezeStartUs_{0};
+    uint64_t m_lastObservedPubSeq_{0};
+    uint64_t m_lastObservedRetireTs_{0};
+    const std::atomic<uint64_t>* m_lastRetireTimestampRef_{nullptr};
+    const std::atomic<uint64_t>* m_publicationSequenceRef_{nullptr};
+
+    // [work37 Phase 9.10 P2] Configuration Drift 追跡
+    MonitorState m_prevConfigDriftState_{MonitorState::Normal};
+    uint64_t m_configDriftStartUs_{0};
+    const std::atomic<int>* m_manualOversamplingRef_{nullptr};
+
+    // [work37 Phase 9.56 P2] RuntimeRecoveryScore 計算
+    RuntimeRecoveryScore computeRuntimeRecoveryScore() const noexcept;
+
+    // [work37 Phase 4.4] 背圧信号（drainDeferredRetireQueues から注入）
+    bool m_backpressureInjected_{false};
+    std::size_t m_injectedFallbackSize_{0};
+    double m_injectedOverflowRate_{0.0};
+
+    // [work37 Phase 8.2] EmergencyDrain 実行時制御
+    std::atomic<bool> m_emergencyDrainRequested_{false};
+};
+
+} // namespace convo
+
+```
+
+### 📄 `src\audioengine\RuntimePolicyEngine.cpp`
+
+```
+// [work37 Phase 0] RuntimePolicyEngine — MonitorState 駆動型回復行動選択器
+// 実装詳細
+
+#include "RuntimePolicyEngine.h"
+#include "RuntimeHealthMonitor.h"  // MonitorState の完全定義のため
+
+#include <chrono>
+
+namespace convo {
+
+RuntimePolicyEngine::RuntimePolicyEngine() noexcept
+{
+    // 各 RecoveryAction のデフォルト Cooldown を設定（μs）
+    m_cooldowns[static_cast<size_t>(RecoveryAction::Observe)].cooldownUs  = 0;
+    m_cooldowns[static_cast<size_t>(RecoveryAction::Throttle)].cooldownUs = 1'000'000;     // 1秒
+    m_cooldowns[static_cast<size_t>(RecoveryAction::Recover)].cooldownUs = 5'000'000;     // 5秒
+    m_cooldowns[static_cast<size_t>(RecoveryAction::Restore)].cooldownUs = 30'000'000;    // 30秒
+    m_cooldowns[static_cast<size_t>(RecoveryAction::Safe)].cooldownUs   = 60'000'000;    // 60秒
+    m_cooldowns[static_cast<size_t>(RecoveryAction::Critical)].cooldownUs = 120'000'000;  // 120秒
+}
+
+uint64_t RuntimePolicyEngine::getNowUs() const noexcept
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+bool RuntimePolicyEngine::canExecute(RecoveryAction action) const noexcept
+{
+    const auto idx = static_cast<size_t>(action);
+    if (idx >= static_cast<size_t>(RecoveryAction::_Count))
+        return false;
+    const auto& entry = m_cooldowns[idx];
+    const uint64_t nowUs = getNowUs();
+    return (nowUs - entry.lastExecutedUs) >= entry.cooldownUs;
+}
+
+void RuntimePolicyEngine::markExecuted(RecoveryAction action) noexcept
+{
+    const auto idx = static_cast<size_t>(action);
+    if (idx >= static_cast<size_t>(RecoveryAction::_Count))
+        return;
+    m_cooldowns[idx].lastExecutedUs = getNowUs();
+}
+
+RecoveryAction RuntimePolicyEngine::selectHighestPriority(
+    RecoveryActionBits bits) const noexcept
+{
+    // 高い enum 値 = 高い優先度
+    for (int i = static_cast<int>(RecoveryAction::_Count) - 1; i >= 0; --i) {
+        if (bits & toBit(static_cast<RecoveryAction>(i)))
+            return static_cast<RecoveryAction>(i);
+    }
+    return RecoveryAction::Observe;
+}
+
+PolicyDecision RuntimePolicyEngine::evaluateAggregate(
+    MonitorState retireStall,
+    MonitorState publicationStall,
+    MonitorState readerSlotUsage,
+    MonitorState overflowRate,
+    MonitorState retireAge,
+    MonitorState crossfadeDrop) noexcept
+{
+    PolicyDecision decision;
+    HealthCauseBits causes = 0;
+
+    // 各 MonitorState から RecoveryAction を選択
+    // レベル1 (Throttle): 軽度の抑制
+    if (retireStall == MonitorState::Warning || readerSlotUsage == MonitorState::Warning) {
+        decision.actions |= toBit(RecoveryAction::Throttle);
+    }
+
+    // レベル2 (Recover): 中度の能動的回復
+    if (retireStall == MonitorState::Error || retireAge == MonitorState::Error) {
+        decision.actions |= toBit(RecoveryAction::Recover);
+        causes |= static_cast<HealthCauseBits>(HealthCause::RetireStall);
+    }
+    if (publicationStall == MonitorState::Error) {
+        decision.actions |= toBit(RecoveryAction::Recover);
+        causes |= static_cast<HealthCauseBits>(HealthCause::PublicationStall);
+    }
+    if (overflowRate == MonitorState::Error) {
+        decision.actions |= toBit(RecoveryAction::Throttle);
+        causes |= static_cast<HealthCauseBits>(HealthCause::OverflowRate);
+    }
+    if (crossfadeDrop == MonitorState::Error) {
+        decision.actions |= toBit(RecoveryAction::Recover);
+        causes |= static_cast<HealthCauseBits>(HealthCause::CrossfadeEventDrop);
+    }
+
+    // レベル5 (Critical): ReaderSlot 枯渇
+    if (readerSlotUsage == MonitorState::Error) {
+        decision.actions |= toBit(RecoveryAction::Critical);
+        causes |= static_cast<HealthCauseBits>(HealthCause::ReaderSlotExhaustion);
+    }
+
+    // 最高優先度の Action のみ残す（複数Action同時発行防止）
+    const auto highest = selectHighestPriority(decision.actions);
+    decision.actions = toBit(highest);
+    decision.causes = causes;
+
+    // Cooldown チェック
+    if (highest != RecoveryAction::Observe && !canExecute(highest)) {
+        decision.actions = 0;  // Cooldown 中は Action を発行しない
+    }
+
+    return decision;
+}
+
+PolicyDecision RuntimePolicyEngine::evaluateEvent(
+    PolicySource source,
+    ConsistencyFailureType consistencyType) noexcept
+{
+    PolicyDecision decision;
+
+    switch (source) {
+        case PolicySource::WorldConsistency:
+            if (consistencyType == ConsistencyFailureType::WorldLeak) {
+                decision.actions = toBit(RecoveryAction::Critical);
+                decision.causes = static_cast<HealthCauseBits>(HealthCause::WorldLeak);
+            } else if (consistencyType == ConsistencyFailureType::DoubleRetire) {
+                decision.actions = toBit(RecoveryAction::Critical);
+                decision.causes = static_cast<HealthCauseBits>(HealthCause::WorldLeak);
+            }
+            break;
+
+        case PolicySource::EmergencyCondition:
+            decision.actions = toBit(RecoveryAction::Critical);
+            decision.causes = static_cast<HealthCauseBits>(HealthCause::EmergencyDrain);
+            break;
+
+        case PolicySource::LearnerAnomaly:
+            decision.actions = toBit(RecoveryAction::Throttle);
+            decision.causes = static_cast<HealthCauseBits>(HealthCause::LearnerBackpressure);
+            break;
+
+        case PolicySource::AudioOutputAnomaly:
+            decision.actions = toBit(RecoveryAction::Restore);
+            break;
+
+        case PolicySource::SafeModeState:
+            decision.actions = toBit(RecoveryAction::Safe);
+            break;
+
+        default:
+            break;
+    }
+
+    // Cooldown チェック
+    const auto action = selectHighestPriority(decision.actions);
+    if (action != RecoveryAction::Observe && !canExecute(action)) {
+        decision.actions = 0;
+    }
+
+    return decision;
+}
+
+void RuntimePolicyEngine::reset() noexcept
+{
+    for (auto& entry : m_cooldowns) {
+        entry.lastExecutedUs = 0;
+    }
+}
+
+} // namespace convo
+
+```
+
+### 📄 `src\audioengine\RuntimePolicyEngine.h`
+
+```
+#pragma once
+
+// [work37 Phase 0] RuntimePolicyEngine — MonitorState 駆動型回復行動選択器
+//
+// 設計方針:
+//   - HealthMonitor の既存 MonitorState (Normal/Warning/Error) から RecoveryAction を選択
+//   - Cooldown 制御で同一 Action の連続実行を防止
+//   - PolicyDecision を updateHealthState() に渡し、HealthState は HealthMonitor が最終決定
+//   - 新たな Severity/Persistence/BlastRadius 体系は導入しない
+//
+// ★ v3.0: PolicyEngine は HealthState を直接書き換えない
+//
+// 使用法:
+//   RuntimePolicyEngine engine;
+//   auto decision = engine.evaluateAggregate(retireStall, pubStall, ...);
+//   if (decision.actions != RecoveryActionBits{0}) { executeRecoveryAction(decision); }
+
+#include <array>
+#include <atomic>
+#include <cstdint>
+
+namespace convo {
+
+enum class MonitorState : uint8_t;  // forward declare from RuntimeHealthMonitor.h
+
+// [work37 Phase 0] PolicySource — m_contexts のキー。eventCode 非依存。
+// ★ v6.6統合版: 72→14分類
+enum class PolicySource : uint8_t {
+    RetireStall,            // Retire系: RetireStall/RetireAge/Overflow/RebuildSuppressionTTL
+    PublicationStall,       // 出版系: PublicationStall/ProgressFreeze/ConfigurationDeadlock
+    ReaderStuck,            // Reader系: ReaderSlotUsage/EpochAdvanceBlocked/ActiveReaderBlocker
+    CrossfadeTimeout,       // Crossfade系: CrossfadeTimeout/CrossfadeEventDrop
+    LearnerAnomaly,         // Learner系: LearnerBackpressure/LearnerStall/LearnerDivergence
+    WorldConsistency,       // World整合性: WorldLeak/WorldConsistency/ConfigurationDivergence
+    AudioOutputAnomaly,     // 音響系: DC Offset/Peak Clipping/RMS Jump/Noise Floor
+    EmergencyCondition,     // 緊急系: EmergencyDrain/ShutdownTimeout
+    RecoveryOutcome,        // 回復結果: Success/NoEffect/Failed
+    SafeModeState,          // SafeMode系: SoftActive/HardActive/RecoveryReady
+    _Count                  // 要素数 (= 10)
+};
+
+// [work37 Phase 0] RecoveryAction — 6レベル階層化 (v6.6統合版)
+enum class RecoveryAction : uint8_t {
+    Observe,                // Level 0: 監視のみ。HealthEvent記録。
+    Throttle,               // Level 1: 抑制。admissionStrict/PauseLearner/Suppress。
+    Recover,                // Level 2: 回復。ForceRetireDrain/ForceSnapshotPublish/Escalate。
+    Restore,                // Level 3: 復元。Rollback/LearnerRollback/CheckpointRestore。
+    Safe,                   // Level 4: 安全確保。SoftSafeMode(ConvByPass+LearnerStop)/HardSafeMode(1x+FlatEQ)。
+    Critical,               // Level 5: 重大。RejectNewPublication/EmergencyDrain/Shutdown。
+    _Count                  // 要素数 (= 6)
+};
+
+// [work37 Phase 9.45] RecoveryOutcome — 回復成功/失敗の閉ループ制御
+enum class RecoveryOutcome : uint8_t {
+    None,           // 未評価
+    Success,        // 回復成功（状態改善確認済み）
+    NoEffect,       // 効果なし（状態不変）
+    Failed,         // 状態悪化
+    Unsafe          // 安全条件違反で発動中止
+};
+
+// ★ v3.0: RecoveryActionBits — ビットマスク（複数Action同時発行可能）
+using RecoveryActionBits = uint8_t;
+
+constexpr RecoveryActionBits toBit(RecoveryAction action) noexcept {
+    return static_cast<RecoveryActionBits>(1) << static_cast<uint8_t>(action);
+}
+
+// [work37 Phase 0] HealthCause — Critical/Degraded の原因を特定
+// ★ v3.2: uint64_t causeBits で複合原因に対応
+enum class HealthCause : uint64_t {
+    None                  = 0,
+    RetireStall           = 1ull << 0,
+    PublicationStall      = 1ull << 1,
+    ReaderStuck           = 1ull << 2,
+    ReaderSlotExhaustion  = 1ull << 3,
+    OverflowRate          = 1ull << 4,
+    RetireAged            = 1ull << 5,
+    CrossfadeTimeout      = 1ull << 6,
+    CrossfadeEventDrop    = 1ull << 7,
+    WorldLeak             = 1ull << 8,
+    WorldConsistencyBad   = 1ull << 9,
+    EmergencyDrain        = 1ull << 10,
+    FallbackQueueOverflow = 1ull << 11,
+    LearnerBackpressure   = 1ull << 12,
+    ConfigurationDivergence = 1ull << 13
+};
+
+// HealthCauseBits: OR可能な複合原因
+using HealthCauseBits = uint64_t;
+
+// [work37 Phase 0] ConsistencyFailureType — World整合性異常の種類
+enum class ConsistencyFailureType : uint8_t {
+    None,
+    AuditMismatch,     // 監査レコード欠損（published-retired≠active）— Warning
+    WorldLeak,         // 実Worldリーク（retired>published）— Critical
+    DoubleRetire,      // 二重retire検出 — Critical
+    Unknown
+};
+
+// [work37 Phase 0] PolicyDecision — 統合評価結果
+struct PolicyDecision {
+    RecoveryActionBits actions{0};  // ビットマスク（複数Action同時発行可能）
+    uint32_t cooldownUs{0};         // 同一 Action 再実行間隔
+    HealthCauseBits causes{0};      // 複合原因（OR可能）
+    // ★ v3.6: targetHealth は持たない。HealthStateは HealthMonitor 専権。
+};
+
+// [work37 Phase 0] CooldownEntry — 同一 Action の連続実行防止
+struct CooldownEntry {
+    uint64_t lastExecutedUs{0};
+    uint64_t cooldownUs{0};
+};
+
+// [work37 Phase 9.56 P2] RuntimeRecoveryScore — 4軸総合スコア（診断用）
+struct RuntimeRecoveryScore {
+    uint8_t publishProgress{0};    // publicationSequence の増加率 (0-25)
+    uint8_t retireProgress{0};     // pendingRetire の減少率 (0-25)
+    uint8_t rebuildProgress{0};    // pendingIntent + deferredAge (0-25)
+    uint8_t audioQuality{0};       // AudioOutputAnomaly + LearnerOutputDivergence (0-25)
+
+    [[nodiscard]] uint8_t total() const noexcept {
+        return publishProgress + retireProgress + rebuildProgress + audioQuality;
+    }
+    static constexpr uint8_t kHealthyThreshold = 80;
+    [[nodiscard]] bool isHealthy() const noexcept { return total() >= kHealthyThreshold; }
+};
+
+// [work37 Phase 0] RuntimePolicyEngine — MonitorState → 最優先RecoveryAction の選択器
+//   複数Actionを同時発行せず、最高優先度のActionのみ返す。
+//   Action優先順位（高い順）:
+//      1. Critical (EmergencyDrain, RejectNewPublication)
+//      2. Safe (EnterSafeMode)
+//      3. Restore (RollbackToLastHealthyWorld)
+//      4. Recover (ForceRetireDrain, ForceSnapshotPublish)
+//      5. Throttle (ThrottleRebuild, PauseLearner)
+//      6. Observe (None)
+//   HealthState の決定は RuntimeHealthMonitor::updateHealthState() が唯一の権限。
+//
+//   スレッド安全性: AudioEngine::timerCallback() (Message Thread) からのみ呼ばれるため、
+//   m_cooldowns 配列の読み書きにデータ競合は発生しない。
+
+class RuntimePolicyEngine {
+public:
+    RuntimePolicyEngine() noexcept;
+
+    // 全 MonitorState から統合評価（HealthMonitor::tick から呼ばれる）
+    PolicyDecision evaluateAggregate(
+        MonitorState retireStall,
+        MonitorState publicationStall,
+        MonitorState readerSlotUsage,
+        MonitorState overflowRate,
+        MonitorState retireAge,
+        MonitorState crossfadeDrop) noexcept;
+
+    // 特定 PolicySource に対する評価
+    PolicyDecision evaluateEvent(PolicySource source,
+                                  ConsistencyFailureType consistencyType
+                                      = ConsistencyFailureType::None) noexcept;
+
+    // Cooldown 制御
+    bool canExecute(RecoveryAction action) const noexcept;
+    void markExecuted(RecoveryAction action) noexcept;
+
+    // リセット
+    void reset() noexcept;
+
+private:
+    // 内部 Action 優先順位評価
+    RecoveryAction selectHighestPriority(RecoveryActionBits bits) const noexcept;
+
+    // 時間取得
+    uint64_t getNowUs() const noexcept;
+
+    std::array<CooldownEntry, static_cast<size_t>(RecoveryAction::_Count)> m_cooldowns;
 };
 
 } // namespace convo
@@ -45537,9 +46664,20 @@ void RuntimePublicationOrchestrator::notifyTransitionComplete(
     }
 
     // ★ C-2.3: stale discard（二重検査: generation + publication sequence）
+    // [work37 Phase 6] TTL 超過チェックを追加
     if (hasDeferred_ && deferredSlot_.has_value())
     {
         auto& deferred = *deferredSlot_;
+
+        // [work37 Phase 6] TTL 超過チェック（最優先）
+        const uint64_t nowUs = convo::getCurrentTimeUs();
+        if (deferred.enqueueTimestampUs != 0
+            && (nowUs - deferred.enqueueTimestampUs) > kDeferredPublishTTLUs) {
+            deferred.lastDiscardReason = DiscardReason::Expired;
+            deferredSlot_.reset();
+            hasDeferred_ = false;
+            return;
+        }
 
         // 1. generation 検査
         const int currentGen = convo::consumeAtomic(
@@ -45686,6 +46824,9 @@ class RuntimePublicationOrchestrator {
 public:
     explicit RuntimePublicationOrchestrator(AudioEngine& engine, uint64_t engineInstanceId) noexcept;
 
+    // [work37 Phase 6] Deferred Publish TTL — 30秒超過で破棄
+    static constexpr uint64_t kDeferredPublishTTLUs = 30'000'000;  // 30秒
+
     // trySubmit: publish 要求を試行する。
     // Admission → Accepted の場合のみ Executor → DSPTransition まで実行。
     // Deferred/Rejected の場合は caller が適切に処理するよう決定値を返す。
@@ -45812,11 +46953,13 @@ private:
 namespace convo::isr {
 
 // ★ C-2.1: DiscardReason — deferred publish が破棄された理由
+// [work37 Phase 6] Expired 追加 — TTL 超過
 enum class DiscardReason : uint8_t {
     None,
     ShutdownDiscard,
     StaleDiscard,
-    SupersededDiscard
+    SupersededDiscard,
+    Expired   // ★ work37: TTL 超過
 };
 
 // ★ PublicationLedger: 一次情報源。ProgressRecord は副産物。
@@ -46849,6 +47992,7 @@ private:
 
 ```
 #include "WorldLifecycleAudit.h"
+#include "AtomicAccess.h"  // ★ work37: fetchAddAtomic
 #include <fstream>
 #include <filesystem>
 
@@ -46919,6 +48063,27 @@ void WorldLifecycleAudit::tryDumpPeriodic() noexcept
     emitSnapshot();
 }
 
+// [work37 Phase 4.2] FallbackQueue overflow → HealthEvent 発火
+void WorldLifecycleAudit::onFallbackOverflow() noexcept
+{
+    convo::fetchAddAtomic(fallbackOverflowCount_, 1u, std::memory_order_release);
+    if (m_healthCallback_) {
+        m_healthCallback_(7002, convo::consumeAtomic(fallbackOverflowCount_,
+            std::memory_order_acquire));
+    }
+}
+
+// [work37 Phase 4.2] World 整合性異常（retired>published）→ HealthEvent 発火
+void WorldLifecycleAudit::onWorldLeakDetected(
+    uint64_t retiredCount, uint64_t publishedCount) noexcept
+{
+    convo::fetchAddAtomic(worldLeakCount_, 1u, std::memory_order_release);
+    if (m_healthCallback_) {
+        m_healthCallback_(7003, retiredCount > publishedCount
+            ? (retiredCount - publishedCount) : 0);
+    }
+}
+
 } // namespace convo::isr
 
 ```
@@ -46931,11 +48096,16 @@ void WorldLifecycleAudit::tryDumpPeriodic() noexcept
 #include <cstdint>
 #include <atomic>
 #include <cassert>
+#include <functional>
 #include "TelemetryRecorder.h"   // FixedRingBuffer
 #include "RuntimePublicationState.h"   // CorrelationId
 #include "core/TimeUtils.h"  // getCurrentTimeUs
+#include "AtomicAccess.h"  // ★ work37: fetchAddAtomic/consumeAtomic
 
 namespace convo::isr {
+
+// ★ work37: HealthEvent callback for PolicyEngine integration
+using WorldHealthEventCallback = std::function<void(uint32_t eventCode, uint64_t value)>;
 
 // ★ P3-B: World 発行/退役の診断用レコード
 struct WorldLifecycleRecord {
@@ -47014,6 +48184,25 @@ public:
     //   出力先: evidence/world_lifecycle_audit.json
     void tryDumpPeriodic() noexcept;
 
+    // [work37 Phase 4.2] HealthEvent callback — PolicyEngine 連携用
+    void setHealthEventCallback(WorldHealthEventCallback cb) noexcept {
+        m_healthCallback_ = std::move(cb);
+    }
+
+    // [work37 Phase 4.2] FallbackQueue overflow 検出 → HealthEvent 発火
+    void onFallbackOverflow() noexcept;
+
+    // [work37 Phase 4.2] World 整合性異常検出 → HealthEvent 発火
+    void onWorldLeakDetected(uint64_t retiredCount, uint64_t publishedCount) noexcept;
+
+    [[nodiscard]] uint64_t fallbackOverflowCount() const noexcept {
+        return convo::consumeAtomic(fallbackOverflowCount_, std::memory_order_acquire);
+    }
+
+    [[nodiscard]] uint64_t worldLeakCount() const noexcept {
+        return convo::consumeAtomic(worldLeakCount_, std::memory_order_acquire);
+    }
+
 private:
     FixedRingBuffer<WorldLifecycleRecord, 4096> ringBuffer_;
     std::atomic<uint64_t> activeWorldCount_{0};
@@ -47027,6 +48216,10 @@ private:
     std::atomic<uint64_t> lastRetiredWorldId_{0};
     std::atomic<uint64_t> lastRetireEpoch_{0};
     std::atomic<uint64_t> lastRetireTimestampUs_{0};
+    // [work37 Phase 4.2] HealthEvent callback + Fallback/WorldLeak 検出
+    WorldHealthEventCallback m_healthCallback_;
+    std::atomic<uint64_t> fallbackOverflowCount_{0};
+    std::atomic<uint64_t> worldLeakCount_{0};
 };
 
 } // namespace convo::isr
@@ -53008,9 +54201,18 @@ using CommandBuffer = SPSCRingBuffer<ParameterCommand, 1024>;
 ```
 #pragma once
 
+// [work37 Phase 1.5/8.1] フォールバックキュー拡張:
+//   - retryCount 追加（最大3回）
+//   - SoftLimit(1000)/HardLimit(2000) 二段構成
+//   - estimatedBytes 追跡
+//   - overflow 通知（PolicyEngine 連携用）
+
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <vector>
+#include "audioengine/AtomicAccess.h"
 
 namespace convo {
 
@@ -53019,20 +54221,38 @@ struct DeferredRetireFallbackEntry
     void* ptr = nullptr;
     void (*deleter)(void*) = nullptr;
     std::uint64_t epoch = 0;
+    int retryCount = 0;              // ★ work37: 再試行回数
+    std::size_t estimatedSize = 0;   // ★ work37: 推定メモリサイズ
 };
 
 class DeferredRetireFallbackQueue
 {
 public:
+    // ★ work37: SoftLimit(1000) 超過→PolicyEngineにCritical昇格要求
+    //   HardLimit(2000) 超過→強制ドロップ（リーク許容）
+    static constexpr std::size_t kFallbackSoftLimit = 1000;
+    static constexpr std::size_t kFallbackHardLimit = 2000;
+    static constexpr int kFallbackMaxRetries = 3;
+    static constexpr std::size_t kFallbackMemoryLimit = 50 * 1024 * 1024; // 50MB
+
+    using OverflowCallback = std::function<void()>;
+
     DeferredRetireFallbackQueue() = default;
     DeferredRetireFallbackQueue(const DeferredRetireFallbackQueue&) = delete;
     DeferredRetireFallbackQueue& operator=(const DeferredRetireFallbackQueue&) = delete;
 
-    [[nodiscard]] std::size_t push(DeferredRetireFallbackEntry entry)
+    // ★ work37: 戻り値を bool に変更。HardLimit超過時はドロップして false を返す。
+    //   SoftLimit超過時は notifyOverflow() を呼び出す。
+    [[nodiscard]] bool push(DeferredRetireFallbackEntry entry)
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.size() >= kFallbackHardLimit)
+            return false;  // 強制ドロップ（リーク許容）
+        if (queue_.size() >= kFallbackSoftLimit)
+            ++softLimitOverflowCount_;  // PolicyEngine 連携用
+        estimatedBytes_ += entry.estimatedSize;
         queue_.push_back(entry);
-        return queue_.size();
+        return true;
     }
 
     [[nodiscard]] std::vector<DeferredRetireFallbackEntry> popAll()
@@ -53040,6 +54260,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<DeferredRetireFallbackEntry> pending;
         pending.swap(queue_);
+        estimatedBytes_ = 0;
         return pending;
     }
 
@@ -53055,9 +54276,32 @@ public:
         return queue_.empty();
     }
 
+    // ★ work37: 推定メモリ使用量
+    [[nodiscard]] std::size_t estimatedBytes() const noexcept
+    {
+        return convo::consumeAtomic(estimatedBytes_, std::memory_order_acquire);
+    }
+
+    // ★ work37: SoftLimit 超過回数
+    [[nodiscard]] uint64_t overflowCount() const noexcept
+    {
+        return convo::consumeAtomic(softLimitOverflowCount_, std::memory_order_acquire);
+    }
+
+    // ★ work37: 超過率（回数ベース）
+    [[nodiscard]] double overflowRate() const noexcept
+    {
+        const auto count = convo::consumeAtomic(softLimitOverflowCount_, std::memory_order_acquire);
+        const auto total = convo::consumeAtomic(totalPushCount_, std::memory_order_acquire);
+        return (total > 0) ? static_cast<double>(count) / total : 0.0;
+    }
+
 private:
     mutable std::mutex mutex_;
     std::vector<DeferredRetireFallbackEntry> queue_;
+    std::atomic<std::size_t> estimatedBytes_{0};
+    std::atomic<uint64_t> softLimitOverflowCount_{0};
+    std::atomic<uint64_t> totalPushCount_{0};
 };
 
 } // namespace convo
@@ -53489,11 +54733,19 @@ public:
         return ReaderSlotDetail{epoch, depth, residencyUs, (depth > 0)};
     }
 
+    // [work37 Phase 2.1] 複合判定: epoch差 AND residency 時間条件
+    //   条件1: epoch差 > threshold AND residency > 1秒 → Stuck
+    //   条件2: residency > 30秒 (epoch差不問) → Chronic Stuck
+    //   条件3: depth > 0 AND residency > 10秒 AND pendingRetire > 0 → Warning Stuck
     [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override {
         StuckReaderInfo info;
         info.currentEpoch = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
         info.minReaderEpoch = getMinReaderEpoch();
         info.pendingRetireCount = deferredDeletionQueue.sizeApprox();
+
+        constexpr uint64_t kResidencyStuckUs = 1'000'000;      // 1秒 — epoch差とのAND条件
+        constexpr uint64_t kChronicResidencyUs = 30'000'000;   // 30秒 — epoch差不問
+        constexpr uint64_t kWarningResidencyUs = 10'000'000;   // 10秒 — Warning用
 
         const auto nowUs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
@@ -53512,15 +54764,50 @@ public:
             const uint64_t startUs = convo::consumeAtomic(slot.residencyStartTimestampUs, std::memory_order_acquire);
             const uint64_t residencyUs = (startUs != 0 && depth > 0) ? (nowUs - startUs) : 0;
 
-            // 複合判定: enterCount + epoch 長時間滞留 + depth + pendingRetire
+            // [work37] 条件2: residency > 30秒 (epoch差不問) → Chronic Stuck
+            if (depth > 0 && residencyUs > kChronicResidencyUs && info.pendingRetireCount > 0) {
+                info.readerIndex = i;
+                info.readerEpoch = readerEpoch;
+                info.enterCount = ec;
+                info.isStuck = true;
+                info.isChronic = true;
+                info.residencyTimeUs = residencyUs;
+                // [work37 9.42] ReaderSlot の所有者情報をコピー
+                std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
+                info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
+                info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
+                break;
+            }
+
+            // [work37] 条件3: depth > 0 AND residency > 10秒 AND pendingRetire > 0 → Warning Stuck
+            if (depth > 0 && residencyUs > kWarningResidencyUs && info.pendingRetireCount > 0) {
+                info.readerIndex = i;
+                info.readerEpoch = readerEpoch;
+                info.enterCount = ec;
+                info.isStuck = true;
+                info.residencyTimeUs = residencyUs;
+                info.isChronic = false;
+                // [work37 9.42] ReaderSlot の所有者情報をコピー
+                std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
+                info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
+                info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
+                break;
+            }
+
+            // 複合判定: epoch差 AND residency
             if (depth > 0 && readerEpoch < info.currentEpoch) {
                 const uint64_t epochGap = info.currentEpoch - readerEpoch;
-                if (epochGap > stuckThreshold) {
+                // [work37] 条件1: epoch差 > threshold AND residency > 1秒
+                if (epochGap > stuckThreshold && residencyUs > kResidencyStuckUs) {
                     info.readerIndex = i;
                     info.readerEpoch = readerEpoch;
                     info.enterCount = ec;
                     info.isStuck = true;
                     info.residencyTimeUs = residencyUs;
+                    // [work37 9.42] ReaderSlot の所有者情報をコピー
+                    std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
+                    info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
+                    info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
                     break;
                 }
             }
@@ -53742,6 +55029,8 @@ struct ReaderSlotDetail {
 };
 
 // ★ Practical-1/6/8: Reader Stuck 診断情報
+// [work37 Phase 2.1] isChronic 追加（residency > 30秒）
+// [work37 Phase 9.42] ownerTag/ownerThreadId 追加（RetireBlockerSnapshot）
 struct StuckReaderInfo {
     int readerIndex{-1};
     uint64_t readerEpoch{0};
@@ -53750,7 +55039,10 @@ struct StuckReaderInfo {
     uint64_t minReaderEpoch{0};
     uint32_t pendingRetireCount{0};
     bool isStuck{false};
+    bool isChronic{false};           // ★ work37: 30秒超の慢性滞留
     uint64_t residencyTimeUs{0}; // ★ Practical-8: 実時間ベース滞留時間
+    char ownerTag[32]{};         // ★ work37 9.42: Reader 所有者タグ（"AudioThread"等）
+    uint64_t ownerThreadId{0};   // ★ work37 9.42: std::thread::id ハッシュ
 };
 
 class IEpochProvider : public IReaderEpochProvider,
@@ -54773,7 +56065,8 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 	GlobalSnapshot* oldTarget = m_slots.exchangeTarget(target, std::memory_order_acq_rel);
 	if (oldTarget) {
 		const uint64_t retireEpoch = m_epochProvider->currentEpoch();
-		m_epochProvider->enqueueRetire(oldTarget, snapshotDeleter, retireEpoch);
+		// [work37 Phase 1.2] enqueueWithRetry を使用（startFade は NonRT Timer からのみ）
+		enqueueWithRetry(*m_epochProvider, oldTarget, snapshotDeleter, retireEpoch);
 	}
 
 	m_fade.start(fadeSamples);
@@ -54824,7 +56117,8 @@ void SnapshotCoordinator::completeFade() noexcept
 	const uint64_t retireEpoch = m_epochProvider->publishEpoch();
 	GlobalSnapshot* old = m_slots.exchangeCurrent(target, std::memory_order_acq_rel);
 	if (old)
-		m_epochProvider->enqueueRetire(old, snapshotDeleter, retireEpoch);
+		// [work37 Phase 1.2] enqueueWithRetry を使用（completeFade は NonRT）
+		enqueueWithRetry(*m_epochProvider, old, snapshotDeleter, retireEpoch);
 
 	m_fade.resetToIdle();
 }
@@ -54924,7 +56218,8 @@ public:
         GlobalSnapshot* oldSnap = m_slots.exchangeCurrent(newSnap, std::memory_order_release);
         if (oldSnap) {
             uint64_t newEpoch = m_epochProvider->publishEpoch();
-            m_epochProvider->enqueueRetire(oldSnap, snapshotDeleter, newEpoch);
+            // [work37 Phase 1.2] enqueueWithRetry を使用（switchImmediate は NonRT）
+            enqueueWithRetry(*m_epochProvider, oldSnap, snapshotDeleter, newEpoch);
         }
     }
 
@@ -54979,7 +56274,25 @@ private:
     void resetFadeStateAndRetireTarget() noexcept;
     void completeFade() noexcept;
 
+    // [work37 Phase 1.2] IEpochProvider::enqueueRetire + tryReclaim 再試行の static ヘルパー。
+    //   条件: Non-RT スレッドからのみ呼び出し可能。
+    //   resetFadeStateAndRetireTarget(L67) は RT(updateFade) から呼ばれ得るため除外。
+    static bool enqueueWithRetry(convo::IEpochProvider& provider,
+                                  void* ptr, void (*deleter)(void*),
+                                  uint64_t epoch) noexcept {
+        if (provider.enqueueRetire(ptr, deleter, epoch))
+            return true;
+        // IEpochProvider 抽象インタフェース経由: tryReclaim のブロッキング安全性は
+        // 呼び出し元が保証すること（Non-RT 限定）
+        provider.tryReclaim();
+        if (provider.enqueueRetire(ptr, deleter, epoch))
+            return true;
+        // 再試行失敗 → NonRT 側の定期 drain に期待（ベストエフォート）
+        return false;
+    }
+
     // ★ P1-3: current と target の両方を retire する共通ヘルパー
+    // [work37 Phase 1.2] enqueueWithRetry を使用
     void retireCurrentAndTarget() noexcept {
         constexpr auto deleter = [](void* ptr) noexcept
         {
@@ -54988,9 +56301,9 @@ private:
 
         const uint64_t retireEpoch = m_epochProvider->publishEpoch();
         GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
-        if (snap) m_epochProvider->enqueueRetire(snap, deleter, retireEpoch);
+        if (snap) enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch);
         snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
-        if (snap) m_epochProvider->enqueueRetire(snap, deleter, retireEpoch);
+        if (snap) enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch);
     }
 
     IEpochProvider* m_epochProvider;
@@ -56046,7 +57359,7 @@ void EQProcessor::updateBandNode(int band)
     // L5 fix: retire old node BEFORE advanceEpoch so epoch N is captured (not N+1).
     if (oldNode)
     {
-        retireBandNodeDeferred(oldNode);
+        (void)retireBandNodeDeferred(oldNode);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
@@ -56603,8 +57916,17 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     if (result == convo::isr::RetireEnqueueResult::Success)
         return true;
 
-    // [P0-5] enqueue failure -> drop + telemetry (RT-safe).
-    // Non-RT 側の定期的な reclaim が backlog を消化することを期待。
+    // [work37 Phase 1.4] 失敗: tryReclaim + 再試行（NonRT安全）
+    //   スタック上の stackRouter は tryReclaim で内部 EpochDomain を操作
+    stackRouter.tryReclaim();
+    result = m_retireCoordinator->enqueueRetire(
+        convo::isr::RetireAuthority::Granted,
+        stackRouter,
+        ptr, deleter, retireEpoch);
+    if (result == convo::isr::RetireEnqueueResult::Success)
+        return true;
+
+    // [work37] 再試行も失敗 → drop（HealthMonitor overflowCount 監視に委ねる）
     return false;
 }
 // [P1-14] 保留中の advanceEpoch を一括実行.
@@ -56616,22 +57938,23 @@ void EQProcessor::flushPendingEpochAdvance() noexcept
         m_epochDomain.publishEpoch();
     }
 }
-void EQProcessor::retireEQStateDeferred(EQState* state) noexcept
+// [work37 Phase 1.4] bool 返しに変更。全呼び出し元で (void) キャストして既存動作を維持。
+bool EQProcessor::retireEQStateDeferred(EQState* state) noexcept
 {
     if (state == nullptr)
-        return;
+        return true;
 
     const uint64_t epoch = m_epochDomain.currentEpoch();
-    enqueueDeferredDeleteWithFallback(state, deleteEQStatePtr, epoch);
+    return enqueueDeferredDeleteWithFallback(state, deleteEQStatePtr, epoch);
 }
 
-void EQProcessor::retireBandNodeDeferred(BandNode* node) noexcept
+bool EQProcessor::retireBandNodeDeferred(BandNode* node) noexcept
 {
     if (node == nullptr)
-        return;
+        return true;
 
     const uint64_t epoch = m_epochDomain.currentEpoch();
-    enqueueDeferredDeleteWithFallback(node, deleteBandNodePtr, epoch);
+    return enqueueDeferredDeleteWithFallback(node, deleteBandNodePtr, epoch);
 }
 
 //============================================================================
@@ -56660,12 +57983,12 @@ EQProcessor::~EQProcessor()
 {
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: enter");
     if (auto* oldState = exchangeCurrentState(nullptr, std::memory_order_acq_rel)) // acq_rel: acquire で先行 exchangeCurrentState/publishCurrentState と HB; release で後続観測者と HB
-        retireEQStateDeferred(oldState);
+        (void)retireEQStateDeferred(oldState);
 
     for (auto& nodeBits : bandNodeBits) {
         const auto bits = convo::exchangeAtomic(nodeBits, static_cast<std::uintptr_t>(0), std::memory_order_release); // release: デストラクタ後の観測者に対して null 書き込みを公知。acquire 不要 — デストラクタは排他的所有権を持つ
         if (auto* n = fromBandNodeBits(bits))
-            retireBandNodeDeferred(n);
+            (void)retireBandNodeDeferred(n);
     }
 
     for (auto& node : activeBandNodes) {
@@ -56757,7 +58080,7 @@ void EQProcessor::resetToDefaults()
     auto oldState = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadCurrentState acquire と HB
 
     if (oldState) {
-        retireEQStateDeferred(oldState);
+        (void)retireEQStateDeferred(oldState);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
@@ -57093,7 +58416,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
 
     if (oldState)
     {
-        retireEQStateDeferred(oldState);
+        (void)retireEQStateDeferred(oldState);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
@@ -57146,7 +58469,7 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     activeBandNodes[bandIndex] = newNode;
 
     if (oldNode)
-        retireBandNodeDeferred(oldNode);
+        (void)retireBandNodeDeferred(oldNode);
 
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
@@ -57317,7 +58640,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
                 auto newNode = createBandNode(i, *loopState);
                 auto oldNode = exchangeBandNode(i, newNode, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadBandNode acquire と HB
                 if (oldNode)
-                    retireBandNodeDeferred(oldNode);
+                    (void)retireBandNodeDeferred(oldNode);
                 activeBandNodes[i] = newNode;
             }
         }
@@ -57425,7 +58748,7 @@ void EQProcessor::setBandFrequency(int band, float freq)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQStateDeferred(prev);
+        (void)retireEQStateDeferred(prev);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -57444,7 +58767,7 @@ void EQProcessor::setBandGain(int band, float gainDb)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQStateDeferred(prev);
+        (void)retireEQStateDeferred(prev);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -57463,7 +58786,7 @@ void EQProcessor::setBandQ(int band, float q)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQStateDeferred(prev);
+        (void)retireEQStateDeferred(prev);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -57486,7 +58809,7 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQStateDeferred(prev);
+        (void)retireEQStateDeferred(prev);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -57510,7 +58833,7 @@ void EQProcessor::setTotalGain(float gainDb)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQStateDeferred(prev);
+        (void)retireEQStateDeferred(prev);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
@@ -57530,7 +58853,7 @@ void EQProcessor::setAGCEnabled(bool enabled)
         newState->agcEnabled = enabled;
         auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
-            retireEQStateDeferred(prev);
+            (void)retireEQStateDeferred(prev);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 
@@ -57563,7 +58886,7 @@ void EQProcessor::setBandType(int band, EQBandType type)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQStateDeferred(prev);
+        (void)retireEQStateDeferred(prev);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -57585,7 +58908,7 @@ void EQProcessor::setBandChannelMode(int band, EQChannelMode mode)
 
     auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
-        retireEQStateDeferred(prev);
+        (void)retireEQStateDeferred(prev);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     updateBandNode(band);
@@ -57610,7 +58933,7 @@ void EQProcessor::setNonlinearSaturation(float value) noexcept
         newState->nonlinearSaturation = clamped;
         auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
-            retireEQStateDeferred(prev);
+            (void)retireEQStateDeferred(prev);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 }
@@ -57644,7 +58967,7 @@ void EQProcessor::setFilterStructure(FilterStructure mode) noexcept
         newState->filterStructure = (mode == FilterStructure::Parallel) ? 1 : 0;
         auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
         if (prev)
-            retireEQStateDeferred(prev);
+            (void)retireEQStateDeferred(prev);
         convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
     }
 }
@@ -59351,8 +60674,9 @@ private:
     bool enqueueDeferredDeleteWithFallback(void* ptr,
                                            void (*deleter)(void*),
                                            uint64_t epoch) noexcept;
-    void retireEQStateDeferred(EQState* state) noexcept;
-    void retireBandNodeDeferred(BandNode* node) noexcept;
+    // [work37 Phase 1.4] 戻り値 bool に変更 (enqueueDeferredDeleteWithFallback 結果を伝播)
+    bool retireEQStateDeferred(EQState* state) noexcept;
+    bool retireBandNodeDeferred(BandNode* node) noexcept;
     // [P1-14] 保留中の advanceEpoch を一括実行
     void flushPendingEpochAdvance() noexcept;
 

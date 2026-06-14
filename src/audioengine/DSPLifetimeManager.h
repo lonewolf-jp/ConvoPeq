@@ -31,6 +31,7 @@ public:
 
     // Authority: DSPLifetimeManager (Lifecycle Authority)
     // Retire pipeline: DSPLifetimeManager → ISRRetireRouter → EpochDomain
+    // [work37 Phase 1.1] enqueueRetire の戻り値をチェックし、失敗時に tryReclaim + 再試行
     void retire(AudioEngine::DSPCore* dsp) noexcept
     {
         if (dsp == nullptr) return;
@@ -41,9 +42,18 @@ public:
         // 2. Route through ISRRetireRouter → EpochDomain
         // ★ S-1: publishEpoch() → currentEpoch() に変更。retire が epoch を進めない。
         const uint64_t epoch = router_->currentEpoch();
-        router_->enqueueRetire(static_cast<void*>(dsp),
-                               &AudioEngine::destroyDSPCoreNode,
-                               epoch);
+        if (!router_->enqueueRetire(static_cast<void*>(dsp),
+                                    &AudioEngine::destroyDSPCoreNode,
+                                    epoch)) {
+            // ★ work37: 初回失敗 → tryReclaim で backlog 消化後に再試行
+            router_->tryReclaim();
+            if (!router_->enqueueRetire(static_cast<void*>(dsp),
+                                        &AudioEngine::destroyDSPCoreNode,
+                                        epoch)) {
+                // 再試行失敗は HealthMonitor overflowCount 監視に委ねる（ベストエフォート）
+                return;
+            }
+        }
 
         convo::fetchAddAtomic(engine_.rtAuxMutable_.runtimeRetireCount,
                               static_cast<std::uint64_t>(1),

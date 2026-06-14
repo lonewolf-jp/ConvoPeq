@@ -86,7 +86,8 @@ public:
         GlobalSnapshot* oldSnap = m_slots.exchangeCurrent(newSnap, std::memory_order_release);
         if (oldSnap) {
             uint64_t newEpoch = m_epochProvider->publishEpoch();
-            m_epochProvider->enqueueRetire(oldSnap, snapshotDeleter, newEpoch);
+            // [work37 Phase 1.2] enqueueWithRetry を使用（switchImmediate は NonRT）
+            enqueueWithRetry(*m_epochProvider, oldSnap, snapshotDeleter, newEpoch);
         }
     }
 
@@ -141,7 +142,25 @@ private:
     void resetFadeStateAndRetireTarget() noexcept;
     void completeFade() noexcept;
 
+    // [work37 Phase 1.2] IEpochProvider::enqueueRetire + tryReclaim 再試行の static ヘルパー。
+    //   条件: Non-RT スレッドからのみ呼び出し可能。
+    //   resetFadeStateAndRetireTarget(L67) は RT(updateFade) から呼ばれ得るため除外。
+    static bool enqueueWithRetry(convo::IEpochProvider& provider,
+                                  void* ptr, void (*deleter)(void*),
+                                  uint64_t epoch) noexcept {
+        if (provider.enqueueRetire(ptr, deleter, epoch))
+            return true;
+        // IEpochProvider 抽象インタフェース経由: tryReclaim のブロッキング安全性は
+        // 呼び出し元が保証すること（Non-RT 限定）
+        provider.tryReclaim();
+        if (provider.enqueueRetire(ptr, deleter, epoch))
+            return true;
+        // 再試行失敗 → NonRT 側の定期 drain に期待（ベストエフォート）
+        return false;
+    }
+
     // ★ P1-3: current と target の両方を retire する共通ヘルパー
+    // [work37 Phase 1.2] enqueueWithRetry を使用
     void retireCurrentAndTarget() noexcept {
         constexpr auto deleter = [](void* ptr) noexcept
         {
@@ -150,9 +169,9 @@ private:
 
         const uint64_t retireEpoch = m_epochProvider->publishEpoch();
         GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
-        if (snap) m_epochProvider->enqueueRetire(snap, deleter, retireEpoch);
+        if (snap) enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch);
         snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
-        if (snap) m_epochProvider->enqueueRetire(snap, deleter, retireEpoch);
+        if (snap) enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch);
     }
 
     IEpochProvider* m_epochProvider;

@@ -46,15 +46,18 @@ AudioEngine::AudioEngine()
     m_healthMonitor.setRetireHighWatermarkRef(&retireHighWatermark_);
     m_healthMonitor.setCrossfadeRuntime(&crossfadeRuntime_);
     m_healthMonitor.setCrossfadeEventDropRef(crossfadeRuntime_.getCrossfadeEventDropCountRef());
-    // ★ Practical-5: Retire Reclaim Latency 監視用参照
-    //   reclaimLatency_ は AudioEngine の atomic<double> として既存
-    m_healthMonitor.setMaxRetireAgeRef(
-        reinterpret_cast<const std::atomic<uint64_t>*>(&reclaimLatency_));
+    // ★ Work38: Retire Reclaim Latency 監視用参照（型安全）
+    //   reclaimLatency_ は AudioEngine の atomic<double> — オーバーロード解決により double* 版が呼ばれる
+    m_healthMonitor.setMaxRetireAgeRef(&reclaimLatency_);
     // ★ Practical-4: Reader Slot 使用率監視用参照
     //   activeReaderCount は ISRRetireRouter 経由で取得（HealthMonitor が直接読む）
     m_healthMonitor.setOverflowCountRef(m_retireRouter->getOverflowCountRef());
     m_healthMonitor.setEventCallback(
         [this](const convo::HealthEvent& ev) { onHealthEvent(ev); });
+
+    // [work37 Phase 4.1] PolicyEngine Action Callback
+    m_healthMonitor.setActionCallback(
+        [this](convo::RecoveryAction action) { executeRecoveryAction(action); });
 
     // ★ P1-B: Admission に HealthState 参照を設定
     runtimeOrchestrator_->setAdmissionHealthStateRef(m_healthMonitor.getHealthStateRef());
@@ -194,4 +197,22 @@ AudioEngine::~AudioEngine()
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release); // release: isShuttingDown の acquire と HB
     diagLog("[DIAG] ~AudioEngine: shutdown sequence complete exit");
+}
+
+// [work37 Phase 9.16/9.44] 正常 publish 完了時 — RollbackToLastHealthyWorld + LearnerRollback
+void AudioEngine::notifyHealthyPublication(uint64_t worldId) noexcept
+{
+    convo::publishAtomic(lastHealthyWorldId_, worldId, std::memory_order_release);
+    convo::publishAtomic(lastHealthyPublicationTimestampUs_, convo::getCurrentTimeUs(),
+                         std::memory_order_release);
+    // [work37 Phase 9.44] Learner 正常状態を定期保存
+    if (noiseShaperLearner && noiseShaperLearner->isRunning()) {
+        convo::NoiseShaperLearnerState current;
+        noiseShaperLearner->getState(current);
+        lastKnownGoodNoiseShaper_.state = current;
+        lastKnownGoodNoiseShaper_.timestampUs = convo::getCurrentTimeUs();
+        lastKnownGoodNoiseShaper_.publicationSequence =
+            convo::consumeAtomic(publicationSequenceCounter_, std::memory_order_acquire);
+        lastKnownGoodNoiseShaper_.isValid = true;
+    }
 }

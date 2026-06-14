@@ -33,7 +33,8 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 	GlobalSnapshot* oldTarget = m_slots.exchangeTarget(target, std::memory_order_acq_rel);
 	if (oldTarget) {
 		const uint64_t retireEpoch = m_epochProvider->currentEpoch();
-		m_epochProvider->enqueueRetire(oldTarget, snapshotDeleter, retireEpoch);
+		// [work37 Phase 1.2] enqueueWithRetry を使用（startFade は NonRT Timer からのみ）
+		enqueueWithRetry(*m_epochProvider, oldTarget, snapshotDeleter, retireEpoch);
 	}
 
 	m_fade.start(fadeSamples);
@@ -84,7 +85,8 @@ void SnapshotCoordinator::completeFade() noexcept
 	const uint64_t retireEpoch = m_epochProvider->publishEpoch();
 	GlobalSnapshot* old = m_slots.exchangeCurrent(target, std::memory_order_acq_rel);
 	if (old)
-		m_epochProvider->enqueueRetire(old, snapshotDeleter, retireEpoch);
+		// [work37 Phase 1.2] enqueueWithRetry を使用（completeFade は NonRT）
+		enqueueWithRetry(*m_epochProvider, old, snapshotDeleter, retireEpoch);
 
 	m_fade.resetToIdle();
 }

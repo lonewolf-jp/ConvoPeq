@@ -433,8 +433,9 @@ private:
     bool enqueueDeferredDeleteWithFallback(void* ptr,
                                            void (*deleter)(void*),
                                            uint64_t epoch) noexcept;
-    void retireEQStateDeferred(EQState* state) noexcept;
-    void retireBandNodeDeferred(BandNode* node) noexcept;
+    // [work37 Phase 1.4] 戻り値 bool に変更 (enqueueDeferredDeleteWithFallback 結果を伝播)
+    bool retireEQStateDeferred(EQState* state) noexcept;
+    bool retireBandNodeDeferred(BandNode* node) noexcept;
     // [P1-14] 保留中の advanceEpoch を一括実行
     void flushPendingEpochAdvance() noexcept;
 

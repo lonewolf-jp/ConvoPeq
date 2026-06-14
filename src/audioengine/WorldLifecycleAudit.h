@@ -3,11 +3,16 @@
 #include <cstdint>
 #include <atomic>
 #include <cassert>
+#include <functional>
 #include "TelemetryRecorder.h"   // FixedRingBuffer
 #include "RuntimePublicationState.h"   // CorrelationId
 #include "core/TimeUtils.h"  // getCurrentTimeUs
+#include "AtomicAccess.h"  // ★ work37: fetchAddAtomic/consumeAtomic
 
 namespace convo::isr {
+
+// ★ work37: HealthEvent callback for PolicyEngine integration
+using WorldHealthEventCallback = std::function<void(uint32_t eventCode, uint64_t value)>;
 
 // ★ P3-B: World 発行/退役の診断用レコード
 struct WorldLifecycleRecord {
@@ -86,6 +91,25 @@ public:
     //   出力先: evidence/world_lifecycle_audit.json
     void tryDumpPeriodic() noexcept;
 
+    // [work37 Phase 4.2] HealthEvent callback — PolicyEngine 連携用
+    void setHealthEventCallback(WorldHealthEventCallback cb) noexcept {
+        m_healthCallback_ = std::move(cb);
+    }
+
+    // [work37 Phase 4.2] FallbackQueue overflow 検出 → HealthEvent 発火
+    void onFallbackOverflow() noexcept;
+
+    // [work37 Phase 4.2] World 整合性異常検出 → HealthEvent 発火
+    void onWorldLeakDetected(uint64_t retiredCount, uint64_t publishedCount) noexcept;
+
+    [[nodiscard]] uint64_t fallbackOverflowCount() const noexcept {
+        return convo::consumeAtomic(fallbackOverflowCount_, std::memory_order_acquire);
+    }
+
+    [[nodiscard]] uint64_t worldLeakCount() const noexcept {
+        return convo::consumeAtomic(worldLeakCount_, std::memory_order_acquire);
+    }
+
 private:
     FixedRingBuffer<WorldLifecycleRecord, 4096> ringBuffer_;
     std::atomic<uint64_t> activeWorldCount_{0};
@@ -99,6 +123,10 @@ private:
     std::atomic<uint64_t> lastRetiredWorldId_{0};
     std::atomic<uint64_t> lastRetireEpoch_{0};
     std::atomic<uint64_t> lastRetireTimestampUs_{0};
+    // [work37 Phase 4.2] HealthEvent callback + Fallback/WorldLeak 検出
+    WorldHealthEventCallback m_healthCallback_;
+    std::atomic<uint64_t> fallbackOverflowCount_{0};
+    std::atomic<uint64_t> worldLeakCount_{0};
 };
 
 } // namespace convo::isr

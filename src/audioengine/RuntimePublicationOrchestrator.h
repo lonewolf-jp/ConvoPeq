@@ -44,6 +44,9 @@ class RuntimePublicationOrchestrator {
 public:
     explicit RuntimePublicationOrchestrator(AudioEngine& engine, uint64_t engineInstanceId) noexcept;
 
+    // [work37 Phase 6] Deferred Publish TTL — 30秒超過で破棄
+    static constexpr uint64_t kDeferredPublishTTLUs = 30'000'000;  // 30秒
+
     // trySubmit: publish 要求を試行する。
     // Admission → Accepted の場合のみ Executor → DSPTransition まで実行。
     // Deferred/Rejected の場合は caller が適切に処理するよう決定値を返す。

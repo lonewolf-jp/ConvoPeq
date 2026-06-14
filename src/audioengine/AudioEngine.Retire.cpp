@@ -152,8 +152,14 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         // effectiveLevel に基づいてフラグ設定
         convo::publishAtomic(retirePressurePublicationThrottleActive_,
             effectiveLevel >= 2, std::memory_order_release);
-        convo::publishAtomic(retirePressureAdmissionStrict_,
-            effectiveLevel >= 3, std::memory_order_release);
+        // [work37 Phase 9.41] 抑制開始時刻を記録/解除（overflow 連動）
+        if (effectiveLevel >= 3) {
+            convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+            if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
+                convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
+        } else {
+            // 注意: suppressStartUs_ のリセットは applyRetirePressurePolicyNoRt 内でも行われる
+        }
         convo::publishAtomic(retireProtectiveModeActive_,
             effectiveLevel >= 3, std::memory_order_release);
     }
@@ -283,6 +289,14 @@ void AudioEngine::applyRetirePressurePolicyNoRt(int retirePressureLevel,
     convo::publishAtomic(retirePressureCoalescingActive_, mild, std::memory_order_release);
     convo::publishAtomic(retirePressurePublicationThrottleActive_, medium, std::memory_order_release);
     convo::publishAtomic(retirePressureAdmissionStrict_, severe, std::memory_order_release);
+    // [work37 Phase 9.41] 抑制開始時刻を記録/解除
+    if (severe) {
+        if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
+            convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
+    } else {
+        // 抑制解除 → 開始時刻をリセット（checkSuppressionDuration が誤発火するのを防止）
+        convo::publishAtomic(suppressionStartUs_, uint64_t{0}, std::memory_order_release);
+    }
     convo::publishAtomic(retireProtectiveModeActive_, critical, std::memory_order_release);
 
     if (!previousProtective && critical)

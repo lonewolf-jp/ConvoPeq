@@ -54,8 +54,17 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
     if (result == convo::isr::RetireEnqueueResult::Success)
         return true;
 
-    // [P0-5] enqueue failure -> drop + telemetry (RT-safe).
-    // Non-RT 側の定期的な reclaim が backlog を消化することを期待。
+    // [work37 Phase 1.4] 失敗: tryReclaim + 再試行（NonRT安全）
+    //   スタック上の stackRouter は tryReclaim で内部 EpochDomain を操作
+    stackRouter.tryReclaim();
+    result = m_retireCoordinator->enqueueRetire(
+        convo::isr::RetireAuthority::Granted,
+        stackRouter,
+        ptr, deleter, retireEpoch);
+    if (result == convo::isr::RetireEnqueueResult::Success)
+        return true;
+
+    // [work37] 再試行も失敗 → drop（HealthMonitor overflowCount 監視に委ねる）
     return false;
 }
 // [P1-14] 保留中の advanceEpoch を一括実行.
@@ -67,22 +76,23 @@ void EQProcessor::flushPendingEpochAdvance() noexcept
         m_epochDomain.publishEpoch();
     }
 }
-void EQProcessor::retireEQStateDeferred(EQState* state) noexcept
+// [work37 Phase 1.4] bool 返しに変更。全呼び出し元で (void) キャストして既存動作を維持。
+bool EQProcessor::retireEQStateDeferred(EQState* state) noexcept
 {
     if (state == nullptr)
-        return;
+        return true;
 
     const uint64_t epoch = m_epochDomain.currentEpoch();
-    enqueueDeferredDeleteWithFallback(state, deleteEQStatePtr, epoch);
+    return enqueueDeferredDeleteWithFallback(state, deleteEQStatePtr, epoch);
 }
 
-void EQProcessor::retireBandNodeDeferred(BandNode* node) noexcept
+bool EQProcessor::retireBandNodeDeferred(BandNode* node) noexcept
 {
     if (node == nullptr)
-        return;
+        return true;
 
     const uint64_t epoch = m_epochDomain.currentEpoch();
-    enqueueDeferredDeleteWithFallback(node, deleteBandNodePtr, epoch);
+    return enqueueDeferredDeleteWithFallback(node, deleteBandNodePtr, epoch);
 }
 
 //============================================================================
@@ -111,12 +121,12 @@ EQProcessor::~EQProcessor()
 {
     juce::Logger::writeToLog("[DIAG EQProcessor] ~EQProcessor: enter");
     if (auto* oldState = exchangeCurrentState(nullptr, std::memory_order_acq_rel)) // acq_rel: acquire で先行 exchangeCurrentState/publishCurrentState と HB; release で後続観測者と HB
-        retireEQStateDeferred(oldState);
+        (void)retireEQStateDeferred(oldState);
 
     for (auto& nodeBits : bandNodeBits) {
         const auto bits = convo::exchangeAtomic(nodeBits, static_cast<std::uintptr_t>(0), std::memory_order_release); // release: デストラクタ後の観測者に対して null 書き込みを公知。acquire 不要 — デストラクタは排他的所有権を持つ
         if (auto* n = fromBandNodeBits(bits))
-            retireBandNodeDeferred(n);
+            (void)retireBandNodeDeferred(n);
     }
 
     for (auto& node : activeBandNodes) {
@@ -208,7 +218,7 @@ void EQProcessor::resetToDefaults()
     auto oldState = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadCurrentState acquire と HB
 
     if (oldState) {
-        retireEQStateDeferred(oldState);
+        (void)retireEQStateDeferred(oldState);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
@@ -544,7 +554,7 @@ void EQProcessor::syncStateFrom(const EQProcessor& other)
 
     if (oldState)
     {
-        retireEQStateDeferred(oldState);
+        (void)retireEQStateDeferred(oldState);
     }
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 
@@ -597,7 +607,7 @@ void EQProcessor::syncBandNodeFrom(const EQProcessor& other, int bandIndex)
     activeBandNodes[bandIndex] = newNode;
 
     if (oldNode)
-        retireBandNodeDeferred(oldNode);
+        (void)retireBandNodeDeferred(oldNode);
 
     convo::publishAtomic(m_epochAdvancePending, true, std::memory_order_release); // [P1-14] deferred
 }
@@ -768,7 +778,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
                 auto newNode = createBandNode(i, *loopState);
                 auto oldNode = exchangeBandNode(i, newNode, std::memory_order_acq_rel); // acq_rel: acquire で先行 load と HB; release で後続 loadBandNode acquire と HB
                 if (oldNode)
-                    retireBandNodeDeferred(oldNode);
+                    (void)retireBandNodeDeferred(oldNode);
                 activeBandNodes[i] = newNode;
             }
         }

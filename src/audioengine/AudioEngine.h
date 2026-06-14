@@ -1078,6 +1078,13 @@ public:
     void startNoiseShaperLearning(convo::NoiseShaperLearningMode mode, bool resume = false);
     void stopNoiseShaperLearning();
     void setNoiseShaperLearningMode(convo::NoiseShaperLearningMode mode);
+
+    // [work37 Phase 9.16] 正常 publish 完了時に呼び出し — RollbackToLastHealthyWorld 用
+    //   実装は .cpp に移動（NoiseShaperLearner 完全型が必要）
+    void notifyHealthyPublication(uint64_t worldId) noexcept;
+    [[nodiscard]] uint64_t getLastHealthyWorldId() const noexcept {
+        return convo::consumeAtomic(lastHealthyWorldId_, std::memory_order_acquire);
+    }
     // acquire: setNoiseShaperLearningMode の release と HB し、最新の LearningMode を取得。
     [[nodiscard]] convo::NoiseShaperLearningMode getNoiseShaperLearningMode() const { return consumeAtomic(pendingLearningMode, std::memory_order_acquire); }
     [[nodiscard]] bool isNoiseShaperLearning() const;
@@ -1596,6 +1603,12 @@ public:
     std::atomic<std::uint64_t> pendingRetireGenerationCount_ { 0 };
     std::atomic<double> oldestPendingAge_ { 0.0 };
     std::atomic<double> oldestPendingFirstSeenMs_ { 0.0 };
+    // [work37 Phase 9.16] RollbackToLastHealthyWorld 用の最終健全 World 追跡
+    std::atomic<uint64_t> lastHealthyWorldId_{0};
+    std::atomic<uint64_t> lastHealthyPublicationTimestampUs_{0};
+    // [work37 Phase 9.54 P2] SafeMode 状態追跡
+    std::atomic<bool> safeModeActive_{false};
+    std::atomic<uint64_t> safeModeEnteredUs_{0};
     std::array<CrossfadePreparedSnapshot, 2> crossfadePreparedSnapshots_ {};
     std::atomic<int> crossfadePreparedSnapshotIndex_ { 0 };
 
@@ -1876,6 +1889,14 @@ public:
 
     LockFreeRingBuffer<AudioBlock, 4096> audioCaptureQueue;
     std::unique_ptr<NoiseShaperLearner> noiseShaperLearner;
+    // [work37 Phase 9.44] LearnerRollback — 最終安定 Learner 状態のスナップショット
+    struct LearnerStateSnapshot {
+        convo::NoiseShaperLearnerState state;
+        uint64_t timestampUs{0};
+        uint64_t publicationSequence{0};
+        bool isValid{false};
+    };
+    LearnerStateSnapshot lastKnownGoodNoiseShaper_;
     ThreadAffinityManager affinityManager;
     std::array<AdaptiveCoeffBankSlot, kAdaptiveNoiseShaperSampleRateBankCount * kAdaptiveBitDepthCount * kLearningModeCount> adaptiveCoeffBanks {};
     std::atomic<int> currentAdaptiveCoeffBankIndex { 1 };
@@ -2663,6 +2684,8 @@ public:
     void onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexcept;
     void emitEvidenceTickNonRt(bool force) noexcept;
     void onHealthEvent(const convo::HealthEvent& event) noexcept;  // ★ P1-8: HealthMonitor コールバック
+    // [work37 Phase 4.1] PolicyEngine RecoveryAction コールバック
+    void executeRecoveryAction(convo::RecoveryAction action) noexcept;
 
     // ★ P1-6/8: Publication backlog の公開（RuntimeHealthMonitor → Orchestrator → AudioEngine → bridge）
     [[nodiscard]] uint64_t getPublicationBacklogCount() const noexcept {
@@ -3455,6 +3478,8 @@ public:
     std::atomic<bool> retirePressureCoalescingActive_ { false };
     std::atomic<bool> retirePressurePublicationThrottleActive_ { false };
     std::atomic<bool> retirePressureAdmissionStrict_ { false };
+    // [work37 Phase 9.41] Suppression開始時刻 — RebuildSuppressionTTL監視用
+    std::atomic<uint64_t> suppressionStartUs_ { 0 };
     std::atomic<bool> retireProtectiveModeActive_ { false };
     std::atomic<std::uint64_t> prevDroppedSnapshot_ { 0 };
     std::atomic<std::uint64_t> retireEscalationCount_ { 0 };

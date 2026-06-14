@@ -1,484 +1,310 @@
 
 **********************************************************
 ConvoPeq Log
-Log started: 2 Jun 2026 1:03:16am
+Log started: 14 Jun 2026 10:22:06am
 
-Logger initialized: C:\VSC_Project\ConvoPeq\build\ConvoPeq_artefacts\Debug\ConvoPeq.log
+Logger initialized: C:\Users\user\Desktop\ConvoPeq\develop\ConvoPeq.log
 Process priority set to HIGH_PRIORITY_CLASS.
 [MainApplication] ippInit() succeeded.
+[EQ_CTOR] enter
+[EQ_CTOR] bandNodeBits zeroed, calling resetToDefaults
+[EQ_CTOR] exit
 [REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=1 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=1 reason=shutdown_in_progress class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=phase5_keep_target decision=suppressed
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=1 reason=delegate_requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=2 reason=requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[DIAG] requestRebuild(sr,bs): task queued generation=1 SR=48000.00
+[EQ_CTOR] enter
+[EQ_CTOR] bandNodeBits zeroed, calling resetToDefaults
+[EQ_CTOR] exit
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=2 reason=task_queued class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=dispatched latencyMs=1.455
+[DSPCORE_PREPARE] enter
+[DSPCORE_PREPARE] setRetireCoordinator
+[DSPCORE_PREPARE] setRetireCoordinator done
+[DSPCORE_PREPARE] sampleRate set: sr=48000 spb=65536
+[DSPCORE_PREPARE] blockCalc: inputMaxBlock=65536 internalMaxBlock=524288
+[DSPCORE_PREPARE] allocating aligned buffers: required=524288
+[DSPCORE_PREPARE] calling ramp.prepare
+[DSPCORE_PREPARE] ramp.prepare done
+[DSPCORE_PREPARE] calling oversampling.prepare
+[DSPCORE_PREPARE] oversampling.prepare done
+[DSPCORE_PREPARE] processingRate=384000 processingBlockSize=524288
+[DSPCORE_PREPARE] calling convolverState->prepare
+[DSPCORE_PREPARE] convolverState->prepare done
+[DSPCORE_PREPARE] calling eqState->prepare
+[EQ_PREPARE] enter: sr=384000 block=524288
+[EQ_PREPARE] rateChanged=1
+[EQ_PREPARE] scratch: required=4194304 capacity=0
+[EQ_PREPARE] scratch allocated
+[EQ_PREPARE] channel: required=1048576 dryCap=0
+[EQ_PREPARE] dryBypass allocated
+[EQ_PREPARE] parallel buffers allocated
+[EQ_PREPARE] xfade buffers allocated
+[EQ_PREPARE] agc tables allocated
+[DSPCORE_PREPARE] eqState->prepare done
+[DSPCORE_PREPARE] calling dcBlockers().init
+[DSPCORE_PREPARE] dcBlockers().init done
+[DSPCORE_PREPARE] calling noise shaper prepare: type=0
+[DSPCORE_PREPARE] noise shaper prepare done
+[DSPCORE_PREPARE] calling outputFilter.prepare
+[DSPCORE_PREPARE] outputFilter.prepare done
+[DSPCORE_PREPARE] calling setFixedLatencySamples
+[DSPCORE_PREPARE] setFixedLatencySamples done
 [DIAG] releaseResources: enter
 [DIAG] releaseResources: duplicate release ignored (already Unprepared)
 [DIAG] releaseResources: enter
 [DIAG] releaseResources: duplicate release ignored (already Unprepared)
 [DIAG] prepareToPlay: enter spb=1024 sr=192000.00
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=2 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=2 reason=shutdown_in_progress class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=phase5_keep_target decision=suppressed
-[DIAG] prepareToPlay: exit currentSR=192000.00 maxSPB=1024
-Dither Bit Depth changed: 32
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=3 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=3 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
-Noise Shaper changed: Adaptive9thOrder
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=4 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=4 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=5 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=5 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=6 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=6 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=7 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=7 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=8 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=8 reason=delegate_requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=dispatched
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=9 reason=requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
-[DIAG] requestRebuild(sr,bs): task queued generation=1 SR=192000.00
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=9 reason=task_queued class=Structural policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=dispatched latencyMs=2.948
-[VERIFY] EQ createdHash=0x1acff1fb8ef5692 gen=5
-[DIAG] MainWindow::changeListenerCallback enter (audioEngine)
-[DIAG] MainWindow::changeListenerCallback leave (audioEngine)
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] runtime publish rev=1 currentUuid=0 fadingUuid=0 transition(0->0)
-[VERIFY] tx counters lifecycle(pub/ret/reclaim)=1/0/0 rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)=1/1/0/0/0/0/0/0 eqCacheMiss(create/lookup)=0/0 convDebounce(req/defer/sched/trigger)=0/0/0/0 shutdownPhase=RUNNING
-[VERIFY] EQ reflection createdHash=0x1acff1fb8ef5692 dspReady=0 coordFading=0 updRet=0 fromNull=0 toNull=-1
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[DIAG] MainWindow::changeListenerCallback enter (audioEngine)
-[DIAG] MainWindow::changeListenerCallback leave (audioEngine)
-[DIAG] warmup phase=INIT
-[DIAG] warmup result: skipped blocks=0 elapsedMs=0.476 latencySamples=0 blockSize=2048
-[DIAG] warmup phase-ms init=0.475 zero=0.000 denorm=0.000 signal=0.000 ready=0.000 total=0.475
-[DIAG] warmup summary blocks=0 elapsedMs=0.476
-[DIAG] commitNewDSP: entry gen=1 dspToTrash=passthrough oldUuid=1 irLoaded=0 newUuid=2
-[DIAG] runtime transition event origin=retireRuntimeImmediately primaryUuid=1 secondaryUuid=0 currentUuid=2 fadingUuid=0 publishRev=2 publishCurrentUuid=0 publishFadingUuid=0
-[DIAG] runtime transition event origin=publishHardResetForCurrentDSP primaryUuid=2 secondaryUuid=0 currentUuid=2 fadingUuid=0 publishRev=3 publishCurrentUuid=0 publishFadingUuid=0
-[DIAG] commitNewDSP: before setMixedPhaseState state=0
-[DIAG] commitNewDSP: after setMixedPhaseState
-[DIAG] commitNewDSP: before enqueueLearningCommand
-[DIAG] commitNewDSP: enqueueLearningCommand ok
-[DIAG] commitNewDSP: queue coalesced change notification
-[MainWindow] Forced Software Renderer for debug window: ConvoPeq
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=10 reason=convolver_params_changed class=N/A policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
-[DIAG] convolverParamsChanged: enter
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] runtime publish rev=3 currentUuid=0 fadingUuid=0 transition(0->0)
-[VERIFY] tx counters lifecycle(pub/ret/reclaim)=3/0/0 rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)=1/1/0/0/0/0/0/0 eqCacheMiss(create/lookup)=0/0 convDebounce(req/defer/sched/trigger)=0/0/0/0 shutdownPhase=RUNNING
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=11 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=11 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=12 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
-[VERIFY] enqueue snapshot debounced: identical snapshot intent
-[REBUILD_TELEMETRY] event=REBUILD_MERGED intentId=12 reason=snapshot_intent_debounced class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=phase5_reduce_target decision=merged
-applyComputedIR: applied scaleFactor=0.132589 to timeDomainIR and partitionData
-[VERIFY] EQ createdHash=0xdb0104d442abb50e gen=6
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=13 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=13 reason=delegate_requestRebuild_sr_bs class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=dispatched
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=14 reason=requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[DIAG] prepareToPlay: lifecycleToken acquired
+[DIAG] prepareToPlay: lifecycle state set to Preparing
+[DIAG] prepareToPlay: shutdownPhase set to Running
+[DIAG] prepareToPlay: rebuild thread check done
+[DIAG] prepareToPlay: latency buffers ready
+[DIAG] prepareToPlay: lifecycleState set to Prepared
+[DIAG] prepareToPlay: hasPublishedCurrent=1
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=3 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=3 reason=delegate_requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=4 reason=requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
 [DIAG] requestRebuild(sr,bs): task queued generation=2 SR=192000.00
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=14 reason=task_queued class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=dispatched latencyMs=2.179
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=15 reason=ui_eq_editor_change_listener class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_MERGED intentId=15 reason=same_as_pending_would_merge class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_reduce_target decision=merged latencyMs=400.000
+[EQ_CTOR] enter
+[EQ_CTOR] bandNodeBits zeroed, calling resetToDefaults
+[EQ_CTOR] exit
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=4 reason=task_queued class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=dispatched latencyMs=2.113
+[DSPCORE_PREPARE] enter
+[DSPCORE_PREPARE] setRetireCoordinator
+[DSPCORE_PREPARE] setRetireCoordinator done
+[DIAG] prepareToPlay: exit currentSR=192000.00 maxSPB=1024
+[DSPCORE_PREPARE] sampleRate set: sr=192000 spb=1024
+[DSPCORE_PREPARE] blockCalc: inputMaxBlock=65536 internalMaxBlock=524288
+[DSPCORE_PREPARE] allocating aligned buffers: required=524288
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=5 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=5 reason=delegate_requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=6 reason=requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[DIAG] requestRebuild(sr,bs): task queued generation=3 SR=192000.00
+[DSPCORE_PREPARE] calling ramp.prepare
+[DSPCORE_PREPARE] ramp.prepare done
+[DSPCORE_PREPARE] calling oversampling.prepare
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=6 reason=task_queued class=Structural policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=dispatched latencyMs=1.853
+[AudioEngine] setNoiseShaperType: newType=2 wasAdaptive=1
+[DSPCORE_PREPARE] oversampling.prepare done
+[DSPCORE_PREPARE] processingRate=768000 processingBlockSize=4096
+[DSPCORE_PREPARE] calling convolverState->prepare
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=7 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_MERGED intentId=7 reason=same_as_pending_would_merge class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=phase5_reduce_target decision=merged latencyMs=400.000
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=8 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_MERGED intentId=8 reason=same_as_pending_would_merge class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=phase5_reduce_target decision=merged latencyMs=400.000
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=9 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_MERGED intentId=9 reason=same_as_pending_would_merge class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=phase5_reduce_target decision=merged latencyMs=400.000
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=10 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_MERGED intentId=10 reason=same_as_pending_would_merge class=Snapshot policy=Replaceable hash=0x0 fingerprint=0x50299b683d853205 finalizeState=phase5_reduce_target decision=merged latencyMs=400.000
+[DSPCORE_PREPARE] convolverState->prepare done
+[DSPCORE_PREPARE] calling eqState->prepare
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=11 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=accepted
+[EQ_PREPARE] enter: sr=768000 block=524288
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=11 reason=delegate_requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=dispatched
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=12 reason=requestRebuild_sr_bs class=Structural policy=Replaceable hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[DIAG] requestRebuild(sr,bs): task queued generation=4 SR=192000.00
+[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=12 reason=task_queued class=Structural policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=dispatched latencyMs=2.041
+[EQ_PREPARE] rateChanged=1
+[EQ_PREPARE] scratch: required=4194304 capacity=0
+[EQ_PREPARE] scratch allocated
+[EQ_PREPARE] channel: required=1048576 dryCap=0
+[EQ_PREPARE] dryBypass allocated
+[EQ_PREPARE] parallel buffers allocated
+[EQ_PREPARE] xfade buffers allocated
+[EQ_PREPARE] agc tables allocated
+[DSPCORE_PREPARE] eqState->prepare done
+[DSPCORE_PREPARE] calling dcBlockers().init
+[DSPCORE_PREPARE] dcBlockers().init done
+[DSPCORE_PREPARE] calling noise shaper prepare: type=0
+[DSPCORE_PREPARE] noise shaper prepare done
+[DSPCORE_PREPARE] calling outputFilter.prepare
+[DSPCORE_PREPARE] outputFilter.prepare done
+[DSPCORE_PREPARE] calling setFixedLatencySamples
+[DSPCORE_PREPARE] setFixedLatencySamples done
+[EQ_CTOR] enter
+[EQ_CTOR] bandNodeBits zeroed, calling resetToDefaults
+[EQ_CTOR] exit
+[DSPCORE_PREPARE] enter
+[DSPCORE_PREPARE] setRetireCoordinator
+[DSPCORE_PREPARE] setRetireCoordinator done
+[DSPCORE_PREPARE] sampleRate set: sr=192000 spb=1024
+[DSPCORE_PREPARE] blockCalc: inputMaxBlock=65536 internalMaxBlock=524288
+[DSPCORE_PREPARE] allocating aligned buffers: required=524288
+[DSPCORE_PREPARE] calling ramp.prepare
+[DSPCORE_PREPARE] ramp.prepare done
+[DSPCORE_PREPARE] calling oversampling.prepare
+[DSPCORE_PREPARE] oversampling.prepare done
+[DSPCORE_PREPARE] processingRate=384000 processingBlockSize=2048
+[DSPCORE_PREPARE] calling convolverState->prepare
+[DSPCORE_PREPARE] convolverState->prepare done
+[DSPCORE_PREPARE] calling eqState->prepare
+[EQ_PREPARE] enter: sr=384000 block=524288
+[EQ_PREPARE] rateChanged=1
+[EQ_PREPARE] scratch: required=4194304 capacity=0
+[EQ_PREPARE] scratch allocated
+[EQ_PREPARE] channel: required=1048576 dryCap=0
+[EQ_PREPARE] dryBypass allocated
+[EQ_PREPARE] parallel buffers allocated
+[EQ_PREPARE] xfade buffers allocated
+[EQ_PREPARE] agc tables allocated
+[DSPCORE_PREPARE] eqState->prepare done
+[DSPCORE_PREPARE] calling dcBlockers().init
+[DSPCORE_PREPARE] dcBlockers().init done
+[DSPCORE_PREPARE] calling noise shaper prepare: type=2
+[DSPCORE_PREPARE] noise shaper prepare done
+[DSPCORE_PREPARE] calling outputFilter.prepare
+[DSPCORE_PREPARE] outputFilter.prepare done
+[DSPCORE_PREPARE] calling setFixedLatencySamples
+[DSPCORE_PREPARE] setFixedLatencySamples done
 [DIAG] MainWindow::changeListenerCallback enter (audioEngine)
 [DIAG] MainWindow::changeListenerCallback leave (audioEngine)
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=16 reason=enqueue_snapshot_command class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_DISPATCHED intentId=16 reason=snapshot_command_queued class=Snapshot policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=dispatched
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] tx counters lifecycle(pub/ret/reclaim)=3/0/0 rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)=2/2/0/0/0/0/0/0 eqCacheMiss(create/lookup)=0/0 convDebounce(req/defer/sched/trigger)=0/0/0/0 shutdownPhase=RUNNING
-[VERIFY] EQ reflection createdHash=0xdb0104d442abb50e dspReady=0 coordFading=1 updRet=1 fromNull=0 toNull=-1
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=17 reason=convolver_params_changed class=N/A policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[VERIFY] runtime publish rev=4 currentUuid=3 fadingUuid=0 transition(3->0)
+[VERIFY] tx counters lifecycle(pub/ret/reclaim)=4/0/0 rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)=4/4/0/0/0/0/0/0 eqCacheMiss(create/lookup)=0/0 convDebounce(req/defer/sched/trigger)=0/0/0/0 shutdownPhase=RUNNING
+[VERIFY] snapshot bootstrap: current was null, creating snapshot from current state
+[VERIFY] EQ createdHash=0x1acff1fb8ef5692 gen=4
+[VERIFY] snapshot bootstrap: createSnapshotFromCurrentState done
+[VERIFY] EQ reflection createdHash=0x1acff1fb8ef5692 dspReady=1 coordFading=0 updRet=0 fromNull=1 toNull=-1
+[AudioEngine] processLearningCommands: DSPReady state=0
+[HEALTH] eventCode=1011 severity=2 value=4572875800036643
+[HEALTH] Retire stall detected, throttling rebuild and forcing reclaim
+[DIAG] MainWindow::changeListenerCallback enter (audioEngine)
+[DIAG] MainWindow::changeListenerCallback leave (audioEngine)
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=13 reason=convolver_params_changed class=N/A policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
+[DIAG] convolverParamsChanged: enter
+[DIAG] MainWindow::changeListenerCallback enter (audioEngine)
+[DIAG] MainWindow::changeListenerCallback leave (audioEngine)
+[VERIFY] tx counters lifecycle(pub/ret/reclaim)=4/0/1 rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)=4/4/0/0/0/0/0/0 eqCacheMiss(create/lookup)=0/0 convDebounce(req/defer/sched/trigger)=0/0/0/0 shutdownPhase=RUNNING
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=14 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=14 reason=retire_pressure_severe class=Snapshot policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=phase5_keep_target decision=suppressed
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=15 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=15 reason=retire_pressure_severe class=Snapshot policy=Replaceable hash=0x0 fingerprint=0xe51ba709da1cc7c5 finalizeState=phase5_keep_target decision=suppressed
+applyComputedIR: applied scaleFactor=0.132589 to timeDomainIR and partitionData
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=16 reason=requestRebuild_kind_entry class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=16 reason=retire_pressure_severe class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=17 reason=ui_eq_editor_change_listener class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=17 reason=retire_pressure_severe class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
+[DIAG] MainWindow::changeListenerCallback enter (audioEngine)
+[DIAG] MainWindow::changeListenerCallback leave (audioEngine)
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=18 reason=convolver_params_changed class=N/A policy=N/A hash=0x0 fingerprint=0x0 finalizeState=N/A decision=accepted
 [DIAG] convolverParamsChanged: enter
 [DIAG] convolverParamsChanged: requestRebuild Structural hash=fe52718f65d0fc5d irName=impulse
 [DIAG] convolverParamsChanged: DEFERRED Structural rebuild after prepared IR apply and cleared pending Structural bit
-[REBUILD_TELEMETRY] event=REBUILD_DEFERRED intentId=17 reason=prepared_ir_apply_window class=Structural policy=N/A hash=0xfe52718f65d0fc5d fingerprint=0x0 finalizeState=deferred_structural decision=deferred
-[DIAG] warmup phase=INIT
-[DIAG] warmup result: skipped blocks=0 elapsedMs=1.649 latencySamples=0 blockSize=2048
-[DIAG] warmup phase-ms init=1.647 zero=0.000 denorm=0.000 signal=0.000 ready=0.000 total=1.647
-[DIAG] warmup summary blocks=0 elapsedMs=1.649
-[DIAG] commitNewDSP: entry gen=2 dspToTrash=passthrough oldUuid=2 irLoaded=0 newUuid=3
-[DIAG] runtime transition event origin=retireRuntimeImmediately primaryUuid=2 secondaryUuid=0 currentUuid=3 fadingUuid=0 publishRev=4 publishCurrentUuid=0 publishFadingUuid=0
-[DIAG] runtime transition event origin=publishHardResetForCurrentDSP primaryUuid=3 secondaryUuid=0 currentUuid=3 fadingUuid=0 publishRev=5 publishCurrentUuid=0 publishFadingUuid=0
-[DIAG] commitNewDSP: before setMixedPhaseState state=0
-[DIAG] commitNewDSP: after setMixedPhaseState
-[DIAG] commitNewDSP: before enqueueLearningCommand
-[DIAG] commitNewDSP: enqueueLearningCommand ok
-[DIAG] commitNewDSP: queue coalesced change notification
-[VERIFY] EQ createdHash=0xdb0104d442abb50e gen=7
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] runtime publish rev=5 currentUuid=0 fadingUuid=0 transition(0->0)
-[VERIFY] tx counters lifecycle(pub/ret/reclaim)=5/1/0 rebuild(req/queued/blockP/blockR/queueFull/drain/match/fallback)=2/2/0/0/0/0/0/0 eqCacheMiss(create/lookup)=0/0 convDebounce(req/defer/sched/trigger)=0/0/0/0 shutdownPhase=RUNNING
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
+[REBUILD_TELEMETRY] event=REBUILD_DEFERRED intentId=18 reason=prepared_ir_apply_window class=Structural policy=N/A hash=0xfe52718f65d0fc5d fingerprint=0x0 finalizeState=deferred_structural decision=deferred
+[DIAG] MainWindow::changeListenerCallback enter (audioEngine)
+[DIAG] MainWindow::changeListenerCallback leave (audioEngine)
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=19 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=19 reason=retire_pressure_severe class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
 [DIAG] timerCallback: issuing deferred Structural rebuild after prepared IR apply
-[REBUILD_TELEMETRY] event=REBUILD_DEFERRED intentId=19 reason=deferred_structural_due class=Structural policy=N/A hash=0x0 fingerprint=0x0 finalizeState=deferred_structural decision=released
-[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=20 reason=deferred_structural_rebuild_requested class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
-[REBUILD_TELEMETRY] event=REBUILD_MERGED intentId=20 reason=same_as_pending_would_merge class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_reduce_target decision=merged latencyMs=400.000
-[DIAG EQProcessor] ~EQProcessor: enter
-[DIAG EQProcessor] releaseResources: before scratchBuffer.reset
-[DIAG EQProcessor] releaseResources: after scratchBuffer.reset
-[DIAG EQProcessor] releaseResources: before dryBypassBuffer.reset
-[DIAG EQProcessor] releaseResources: after dryBypassBuffer.reset
-[DIAG EQProcessor] releaseResources: before parallelInputBuffer.reset
-[DIAG EQProcessor] releaseResources: after parallelInputBuffer.reset
-[DIAG EQProcessor] releaseResources: before parallelWorkBuffer.reset
-[DIAG EQProcessor] releaseResources: after parallelWorkBuffer.reset
-[DIAG EQProcessor] releaseResources: before parallelAccumBuffer.reset
-[DIAG EQProcessor] releaseResources: after parallelAccumBuffer.reset
-[DIAG EQProcessor] releaseResources: before structureOldOutBuffer.reset
-[DIAG EQProcessor] releaseResources: after structureOldOutBuffer.reset
-[DIAG EQProcessor] releaseResources: before structureNewOutBuffer.reset
-[DIAG EQProcessor] releaseResources: after structureNewOutBuffer.reset
-[DIAG EQProcessor] releaseResources: end
-[DIAG EQProcessor] ~EQProcessor: exit
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[MixedPhaseUI] timerCallback: state = 0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[MixedPhaseUI] Close button clicked
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[MainWindow] Forced Software Renderer for debug window: Audio Settings
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
-[VERIFY] transition state active=0 policy=0 current=0x0 next=0x0 fadeSec=0.000000 latencyDelta=0
+[REBUILD_TELEMETRY] event=REBUILD_DEFERRED intentId=22 reason=deferred_structural_due class=Structural policy=N/A hash=0x0 fingerprint=0x0 finalizeState=deferred_structural decision=released
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=23 reason=deferred_structural_rebuild_requested class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=23 reason=retire_pressure_severe class=Structural policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
+[AudioEngine] processLearningCommands: IRChanged state=0 shouldRestart=0
+Resume button clicked
+Calling startNoiseShaperLearning with mode=5, resume=true
+[AudioEngine] startNoiseShaperLearning: command queued mode=5 resume=1
+[AudioEngine] processLearningCommands: Start state=0 dspReady=1
+[AudioEngine] processLearningCommands: Start dispatch enqueued ok
+[NoiseShaperLearner] startLearning enter resume=1
+[NoiseShaperLearner] startLearning: spawning worker thread
+[NoiseShaperLearner] worker thread started
+[NoiseShaperLearner] worker: resume=1 sampleRate=192000 bank=107 sessionId=0
+[NoiseShaperLearner] worker: entering main loop
+[NoiseShaperLearner] worker: loop iter=0 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=1 stopReq=0 stopTok=0
+[NoiseShaperLearner] Waiting diagnostics: accepted=3016 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=772096 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] worker: loop iter=2 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=3 stopReq=0 stopTok=0
+[NoiseShaperLearner] Waiting diagnostics: accepted=3008 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=1542144 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] worker: loop iter=4 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=5 stopReq=0 stopTok=0
+[NoiseShaperLearner] Waiting diagnostics: accepted=3008 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=2312192 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] worker: loop iter=6 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=7 stopReq=0 stopTok=0
+[NoiseShaperLearner] Waiting diagnostics: accepted=3004 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3081216 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] worker: loop iter=8 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=9 stopReq=0 stopTok=0
+[NoiseShaperLearner] Waiting diagnostics: accepted=3008 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3840000 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] worker: loop iter=10 stopReq=0 stopTok=0
+[NoiseShaperLearner] Waiting diagnostics: accepted=3008 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3840000 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] Waiting diagnostics: accepted=3008 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3840000 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] Waiting diagnostics: accepted=3004 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3840000 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] Waiting diagnostics: accepted=3008 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3840000 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] Waiting diagnostics: accepted=3004 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3840000 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] worker: loop iter=20 stopReq=0 stopTok=0
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=24 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=24 reason=retire_pressure_severe class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=25 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=25 reason=retire_pressure_severe class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=26 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=26 reason=retire_pressure_severe class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=27 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=27 reason=retire_pressure_severe class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=28 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=28 reason=retire_pressure_severe class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=29 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=29 reason=retire_pressure_severe class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
+[NoiseShaperLearner] worker: loop iter=40 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=60 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=80 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=100 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=120 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=140 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=160 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=180 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=200 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=220 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=240 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=260 stopReq=0 stopTok=0
+[REBUILD_TELEMETRY] event=REBUILD_REQUESTED intentId=30 reason=enqueue_snapshot_command class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=N/A decision=accepted
+[REBUILD_TELEMETRY] event=REBUILD_SUPPRESSED intentId=30 reason=retire_pressure_severe class=Snapshot policy=Replaceable hash=0xfe52718f65d0fc5d fingerprint=0xc0a9e28c700d9c76 finalizeState=phase5_keep_target decision=suppressed
+[NoiseShaperLearner] worker: loop iter=280 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=300 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=320 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=340 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=360 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=380 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=400 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=420 stopReq=0 stopTok=0
+[NoiseShaperLearner] Waiting diagnostics: accepted=610812 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3840000 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] worker: loop iter=440 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=460 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=480 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=500 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=520 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=540 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=560 stopReq=0 stopTok=0
+[NoiseShaperLearner] Waiting diagnostics: accepted=212776 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3840000 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] worker: loop iter=580 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=600 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=620 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=640 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=660 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=680 stopReq=0 stopTok=0
+[NoiseShaperLearner] Waiting diagnostics: accepted=197528 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3840000 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] worker: loop iter=700 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=720 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=740 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=760 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=780 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=800 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=820 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=840 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=860 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=880 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=900 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=920 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=940 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=960 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=980 stopReq=0 stopTok=0
+[NoiseShaperLearner] Waiting diagnostics: accepted=449836 dropSession=0 dropSampleRate=0 dropBank=0 bufferedSamples=3840000 sessionId=0 sampleRateHz=192000 bankIndex=107
+[NoiseShaperLearner] worker: loop iter=1000 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=1020 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=1040 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=1060 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=1080 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=1100 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=1120 stopReq=0 stopTok=0
+[NoiseShaperLearner] worker: loop iter=1140 stopReq=0 stopTok=0
 [DIAG] MainApplication::shutdown() enter
 [DIAG] ~MainWindow: ENTER (before setLookAndFeel)
 [DIAG] ~MainWindow: after setLookAndFeel
@@ -488,12 +314,17 @@ applyComputedIR: applied scaleFactor=0.132589 to timeDomainIR and partitionData
 [DIAG] ~MainWindow: step 4 setProcessor(nullptr)
 [DIAG] releaseResources: enter
 [DIAG] shutdown phase: RUNNING -> STOP_ACCEPTING_WORK at releaseResources
+[AudioEngine] releaseResources: stopping learner
 [DIAG] shutdown phase: STOP_ACCEPTING_WORK -> STOP_AUDIO at releaseResources
+[NoiseShaperLearner] worker: EXIT at iter=1150 stopReq=1 stopTok=1
+[NoiseShaperLearner] worker: AFTER MAIN LOOP (iter=1150)
+[NoiseShaperLearner] worker thread exited
 [DIAG] releaseResources: before stopRebuildThread
 [DIAG] shutdown phase: STOP_AUDIO -> STOP_WORKERS at releaseResources
 [DIAG] releaseResources: after stopRebuildThread
 [DIAG] shutdown phase: STOP_WORKERS -> FORCE_EPOCH_ADVANCE at releaseResources
 [DIAG] shutdown phase: FORCE_EPOCH_ADVANCE -> DRAIN_RETIRE at releaseResources
+[DIAG] releaseResources: VerifyDrained â collecting drain audit
 [DIAG] releaseResources: before ui processor release
 [DIAG] releaseResources: before uiConvolverProcessor.releaseResources
 [DIAG] releaseResources: after uiConvolverProcessor.releaseResources
@@ -516,6 +347,8 @@ applyComputedIR: applied scaleFactor=0.132589 to timeDomainIR and partitionData
 [DIAG] releaseResources: after uiEqEditor.releaseResources
 [DIAG] releaseResources: after ui processor release
 [DIAG] releaseResources: skip deferred reclaim (reconfigure phase)
+[DIAG] releaseResources: drain timeout reached, performing safe tryReclaim (drainAll skipped)
+[ISR][Shutdown] Drain incomplete: pendingPub=0 pendingRetire=0 crossfade=0 routerPendingRetire=2 maxDeferredAgeMs=0 deferred=0 quarantine=0 oldestAgeMs=557 (observation only)
 [DIAG] releaseResources: ABOUT_TO_EXIT_SCOPE
 [DIAG] ~MainWindow: step 5 stopTimer
 [DIAG] ~MainWindow: step 6 saveSettings
@@ -530,6 +363,23 @@ applyComputedIR: applied scaleFactor=0.132589 to timeDomainIR and partitionData
 [DIAG] shutdown phase: STOP_AUDIO -> STOP_WORKERS at ~AudioEngine
 [DIAG] shutdown phase: STOP_WORKERS -> FORCE_EPOCH_ADVANCE at ~AudioEngine
 [DIAG] shutdown phase: FORCE_EPOCH_ADVANCE -> DRAIN_RETIRE at ~AudioEngine
+[DIAG EQProcessor] ~EQProcessor: enter
+[DIAG EQProcessor] releaseResources: before scratchBuffer.reset
+[DIAG EQProcessor] releaseResources: after scratchBuffer.reset
+[DIAG EQProcessor] releaseResources: before dryBypassBuffer.reset
+[DIAG EQProcessor] releaseResources: after dryBypassBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelInputBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelInputBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelWorkBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelWorkBuffer.reset
+[DIAG EQProcessor] releaseResources: before parallelAccumBuffer.reset
+[DIAG EQProcessor] releaseResources: after parallelAccumBuffer.reset
+[DIAG EQProcessor] releaseResources: before structureOldOutBuffer.reset
+[DIAG EQProcessor] releaseResources: after structureOldOutBuffer.reset
+[DIAG EQProcessor] releaseResources: before structureNewOutBuffer.reset
+[DIAG EQProcessor] releaseResources: after structureNewOutBuffer.reset
+[DIAG EQProcessor] releaseResources: end
+[DIAG EQProcessor] ~EQProcessor: exit
 [DIAG] shutdown phase: DRAIN_RETIRE -> DESTROY at ~AudioEngine
 [DIAG] ~AudioEngine: shutdown sequence complete exit
 [DIAG EQProcessor] ~EQProcessor: enter

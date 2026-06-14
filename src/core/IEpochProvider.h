@@ -23,6 +23,8 @@ struct ReaderSlotDetail {
 };
 
 // ★ Practical-1/6/8: Reader Stuck 診断情報
+// [work37 Phase 2.1] isChronic 追加（residency > 30秒）
+// [work37 Phase 9.42] ownerTag/ownerThreadId 追加（RetireBlockerSnapshot）
 struct StuckReaderInfo {
     int readerIndex{-1};
     uint64_t readerEpoch{0};
@@ -31,7 +33,10 @@ struct StuckReaderInfo {
     uint64_t minReaderEpoch{0};
     uint32_t pendingRetireCount{0};
     bool isStuck{false};
+    bool isChronic{false};           // ★ work37: 30秒超の慢性滞留
     uint64_t residencyTimeUs{0}; // ★ Practical-8: 実時間ベース滞留時間
+    char ownerTag[32]{};         // ★ work37 9.42: Reader 所有者タグ（"AudioThread"等）
+    uint64_t ownerThreadId{0};   // ★ work37 9.42: std::thread::id ハッシュ
 };
 
 class IEpochProvider : public IReaderEpochProvider,

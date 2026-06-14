@@ -556,6 +556,9 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
 
         // Admission 強制停止（HealthState Critical で既に停止するが、念のため直接設定）
         convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+        // [work37 Phase 9.41] 抑制開始時刻を記録
+        if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
+            convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
 
         // 強制診断ダンプ
         emitEvidenceTickNonRt(true);
@@ -578,21 +581,21 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         return;
     }
 
-    // ★ A-1: Retire Stall / Retire Age Critical → Builder Throttle + 強制 Reclaim
+    // ★ Work38: Retire Stall / Retire Age Critical → 即時遮断のみ（回復は PolicyEngine に委譲）
     if ((event.eventCode == convo::EVENT_RETIRE_STALL
          || event.eventCode == convo::EVENT_RETIRE_AGE_CRITICAL)
         && event.severity == convo::HealthEvent::Severity::Error)
     {
-        diagLog("[HEALTH] Retire stall detected, throttling rebuild and forcing reclaim");
+        diagLog("[HEALTH] Retire stall detected, throttling rebuild");
 
-        // retirePressureAdmissionStrict_ を直接設定（Builder/Crossfade 抑制）
+        // retirePressureAdmissionStrict_ を即時設定（PolicyEngine 評価より先に遮断）
         convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+        // [work37 Phase 9.41] 抑制開始時刻を記録
+        if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
+            convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
 
-        // 強制 retire reclaim を実行
-        tryReclaimResources();
-
-        // 強制診断ダンプ
-        emitEvidenceTickNonRt(true);
+        // ★ tryReclaimResources + emitEvidenceTickNonRt は削除
+        //    PolicyEngine の evaluateAggregate → Recover Action に委譲
         return;
     }
 
@@ -650,4 +653,54 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         // 強制診断ダンプ
         emitEvidenceTickNonRt(true);
     }
+}
+
+// [work37 Phase 4.1/9.1] RecoveryAction 実行 — PolicyEngine からの Action を実行
+void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
+{
+    switch (action) {
+        case convo::RecoveryAction::Throttle:
+            convo::publishAtomic(retirePressureAdmissionStrict_, true,
+                                 std::memory_order_release);
+            // [work37 Phase 9.41] 抑制開始時刻を記録
+            if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
+                convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(),
+                                     std::memory_order_release);
+            break;
+
+        case convo::RecoveryAction::Recover:
+            // [work37 Phase 9.5] 能動的回復試行 — drain + reclaim + 滞留 publish 解除
+            tryReclaimResources();
+            drainDeferredRetireQueues(false);
+            if (runtimeOrchestrator_)
+                runtimeOrchestrator_->clearDeferredForShutdown();
+            break;
+
+        case convo::RecoveryAction::Restore:
+            // [work37 Phase 9.16] RollbackToLastHealthyWorld を含む復元操作
+            tryReclaimResources();
+            drainDeferredRetireQueues(false);
+            // Rollback 基盤（ISRRetireRuntimeEx）の設定は呼び出し元が行う
+            break;
+
+        case convo::RecoveryAction::Safe:
+            // [work37 Phase 9.34] EnterSafeMode — Safe Mode World 発行
+            diagLog("[RECOVERY] EnterSafeMode: stopping learner");
+            stopNoiseShaperLearning();
+            // 現在の DSP 設定で Safe Mode 動作 (Convolver バイパス + Learner停止 + admission再開)
+            convo::publishAtomic(retirePressureAdmissionStrict_, false,
+                                 std::memory_order_release);
+            break;
+
+        case convo::RecoveryAction::Critical:
+            // 全面新規 publish 拒否
+            convo::publishAtomic(retirePressureAdmissionStrict_, true,
+                                 std::memory_order_release);
+            m_healthMonitor.requestEmergencyDrain();
+            break;
+
+        default:
+            break;
+    }
+    diagLog("[RECOVERY] execute action=" + juce::String(static_cast<int>(action)));
 }

@@ -268,9 +268,20 @@ void RuntimePublicationOrchestrator::notifyTransitionComplete(
     }
 
     // ★ C-2.3: stale discard（二重検査: generation + publication sequence）
+    // [work37 Phase 6] TTL 超過チェックを追加
     if (hasDeferred_ && deferredSlot_.has_value())
     {
         auto& deferred = *deferredSlot_;
+
+        // [work37 Phase 6] TTL 超過チェック（最優先）
+        const uint64_t nowUs = convo::getCurrentTimeUs();
+        if (deferred.enqueueTimestampUs != 0
+            && (nowUs - deferred.enqueueTimestampUs) > kDeferredPublishTTLUs) {
+            deferred.lastDiscardReason = DiscardReason::Expired;
+            deferredSlot_.reset();
+            hasDeferred_ = false;
+            return;
+        }
 
         // 1. generation 検査
         const int currentGen = convo::consumeAtomic(

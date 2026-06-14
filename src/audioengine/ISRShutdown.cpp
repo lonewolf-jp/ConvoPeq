@@ -1,6 +1,7 @@
 #include "ISRShutdown.h"
 #include "AtomicAccess.h"
 #include "RuntimeDrainAudit.h"  // ★ P2-B: getPrimaryBlockingReason
+#include "RuntimeHealthMonitor.h"  // ★ work37: ISRHealthState 完全型
 
 #include <filesystem>
 #include <fstream>
@@ -133,7 +134,31 @@ bool ShutdownRuntime::isShutdownInProgress() const noexcept
     return current != ShutdownPhase::Running && !isTerminalPhase(current);
 }
 
-void ShutdownRuntime::emitShutdownTrace() const
+// [work37 Phase 3.2] collectResult — シャットダウン結果を収集
+ShutdownResult ShutdownRuntime::collectResult(
+    ISRHealthState healthState, uint64_t startTimestampMs) const noexcept
+{
+    const auto nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    ShutdownResult result;
+    result.completed = (convo::consumeAtomic(phase_, std::memory_order_acquire)
+                        == ShutdownPhase::ShutdownComplete);
+    result.finalPhase = convo::consumeAtomic(phase_, std::memory_order_acquire);
+    result.healthState = healthState;
+    result.blockingReason = convo::consumeAtomic(blockingReason_, std::memory_order_acquire);
+    result.durationMs = (nowMs > startTimestampMs) ? (nowMs - startTimestampMs) : 0;
+    result.transitionViolations = convo::consumeAtomic(transitionViolations_,
+                                                       std::memory_order_acquire);
+    result.lateCallbackCount = convo::consumeAtomic(sh5LateCallbackCount_,
+                                                    std::memory_order_acquire);
+    result.postStopEnqueueCount = convo::consumeAtomic(sh6PostStopEnqueueCount_,
+                                                       std::memory_order_acquire);
+    return result;
+}
+
+// [work37 Phase 3.3] healthState を JSON に追加
+void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
 {
     const auto outputPath = std::filesystem::current_path() / "evidence" / "shutdown_trace.json";
     std::error_code ec;
@@ -184,10 +209,21 @@ void ShutdownRuntime::emitShutdownTrace() const
 
     const bool boundedComplete = (sh1 == 0u && sh2 == 0u && sh3 == 0u && sh4 == 0u && sh5 == 0u && sh6 == 0u);
 
+    // [work37 Phase 3.3] healthState を JSON に追加
+    const char* healthStateName = "Unknown";
+    switch (healthState) {
+        case static_cast<ISRHealthState>(0): healthStateName = "Healthy"; break;
+        case static_cast<ISRHealthState>(1): healthStateName = "Degraded"; break;
+        case static_cast<ISRHealthState>(2): healthStateName = "Critical"; break;
+        default: break;
+    }
+
     file << "{\n";
-    file << "  \"schema\": \"shutdown_trace_v2\",\n";
+    file << "  \"schema\": \"shutdown_trace_v3\",\n";
     file << "  \"phase\": " << static_cast<int>(phase) << ",\n";
     file << "  \"phaseName\": \"" << phaseName << "\",\n";
+    file << "  \"healthState\": " << static_cast<int>(healthState) << ",\n";
+    file << "  \"healthStateName\": \"" << healthStateName << "\",\n";
     file << "  \"blockingReason\": \"" << reasonName << "\",\n";  // ★ P2-B
     file << "  \"blockingReasonCode\": " << static_cast<int>(reason) << ",\n";
     file << "  \"transitionViolations\": " << violations << ",\n";

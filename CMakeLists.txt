@@ -378,6 +378,7 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRBarrierOptimizer.cpp
                 src/audioengine/ISREvidenceExporter.cpp
                 src/audioengine/RuntimeHealthMonitor.cpp
+                src/audioengine/RuntimePolicyEngine.cpp    # ★ work37 Phase 0
                 src/audioengine/WorldLifecycleAudit.cpp
                 src/audioengine/AudioEngine.Processing.Latency.cpp
     src/audioengine/AudioEngine.Processing.PrepareToPlay.cpp

@@ -6,6 +6,10 @@
 #include "RuntimeDrainAudit.h"  // ★ P2-B: ShutdownBlockingReason
 
 namespace convo {
+
+// ★ P1-B: ISR Health State
+enum class ISRHealthState : uint8_t;
+
 namespace isr {
 
 /**
@@ -50,6 +54,18 @@ enum class ShutdownBlockingReason : uint8_t
     Unknown
 };
 
+// [work37 Phase 3.1] ShutdownResult — シャットダウン結果を構造化
+struct ShutdownResult {
+    bool completed{false};
+    ShutdownPhase finalPhase{ShutdownPhase::ShutdownComplete};
+    ISRHealthState healthState{static_cast<ISRHealthState>(0)};
+    ShutdownBlockingReason blockingReason{ShutdownBlockingReason::None};
+    uint64_t durationMs{0};
+    uint32_t transitionViolations{0};
+    uint32_t lateCallbackCount{0};
+    uint32_t postStopEnqueueCount{0};
+};
+
 /**
  * Shutdown runtime FSM
  */
@@ -89,8 +105,12 @@ public:
     // ★ P2-B: 完了阻害要因を取得（障害解析用）
     ShutdownBlockingReason getBlockingReason() const noexcept;
 
-    // Emit final shutdown trace
-    void emitShutdownTrace() const;
+    // [work37 Phase 3.2] シャットダウン結果を収集する
+    [[nodiscard]] ShutdownResult collectResult(ISRHealthState healthState,
+                                                uint64_t startTimestampMs) const noexcept;
+
+    // Emit final shutdown trace (work37: healthState を JSON に追加)
+    void emitShutdownTrace(ISRHealthState healthState = static_cast<ISRHealthState>(0)) const;
 
     // Update bounded teardown counters (SH-1..SH-4)
     void setBoundedTeardownCounters(uint32_t callbackCount,

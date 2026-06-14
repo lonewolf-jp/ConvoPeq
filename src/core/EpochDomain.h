@@ -263,11 +263,19 @@ public:
         return ReaderSlotDetail{epoch, depth, residencyUs, (depth > 0)};
     }
 
+    // [work37 Phase 2.1] 複合判定: epoch差 AND residency 時間条件
+    //   条件1: epoch差 > threshold AND residency > 1秒 → Stuck
+    //   条件2: residency > 30秒 (epoch差不問) → Chronic Stuck
+    //   条件3: depth > 0 AND residency > 10秒 AND pendingRetire > 0 → Warning Stuck
     [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override {
         StuckReaderInfo info;
         info.currentEpoch = convo::consumeAtomic(globalEpoch, std::memory_order_acquire);
         info.minReaderEpoch = getMinReaderEpoch();
         info.pendingRetireCount = deferredDeletionQueue.sizeApprox();
+
+        constexpr uint64_t kResidencyStuckUs = 1'000'000;      // 1秒 — epoch差とのAND条件
+        constexpr uint64_t kChronicResidencyUs = 30'000'000;   // 30秒 — epoch差不問
+        constexpr uint64_t kWarningResidencyUs = 10'000'000;   // 10秒 — Warning用
 
         const auto nowUs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
@@ -286,15 +294,50 @@ public:
             const uint64_t startUs = convo::consumeAtomic(slot.residencyStartTimestampUs, std::memory_order_acquire);
             const uint64_t residencyUs = (startUs != 0 && depth > 0) ? (nowUs - startUs) : 0;
 
-            // 複合判定: enterCount + epoch 長時間滞留 + depth + pendingRetire
+            // [work37] 条件2: residency > 30秒 (epoch差不問) → Chronic Stuck
+            if (depth > 0 && residencyUs > kChronicResidencyUs && info.pendingRetireCount > 0) {
+                info.readerIndex = i;
+                info.readerEpoch = readerEpoch;
+                info.enterCount = ec;
+                info.isStuck = true;
+                info.isChronic = true;
+                info.residencyTimeUs = residencyUs;
+                // [work37 9.42] ReaderSlot の所有者情報をコピー
+                std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
+                info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
+                info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
+                break;
+            }
+
+            // [work37] 条件3: depth > 0 AND residency > 10秒 AND pendingRetire > 0 → Warning Stuck
+            if (depth > 0 && residencyUs > kWarningResidencyUs && info.pendingRetireCount > 0) {
+                info.readerIndex = i;
+                info.readerEpoch = readerEpoch;
+                info.enterCount = ec;
+                info.isStuck = true;
+                info.residencyTimeUs = residencyUs;
+                info.isChronic = false;
+                // [work37 9.42] ReaderSlot の所有者情報をコピー
+                std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
+                info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
+                info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
+                break;
+            }
+
+            // 複合判定: epoch差 AND residency
             if (depth > 0 && readerEpoch < info.currentEpoch) {
                 const uint64_t epochGap = info.currentEpoch - readerEpoch;
-                if (epochGap > stuckThreshold) {
+                // [work37] 条件1: epoch差 > threshold AND residency > 1秒
+                if (epochGap > stuckThreshold && residencyUs > kResidencyStuckUs) {
                     info.readerIndex = i;
                     info.readerEpoch = readerEpoch;
                     info.enterCount = ec;
                     info.isStuck = true;
                     info.residencyTimeUs = residencyUs;
+                    // [work37 9.42] ReaderSlot の所有者情報をコピー
+                    std::strncpy(info.ownerTag, slot.ownerTag, sizeof(info.ownerTag) - 1);
+                    info.ownerTag[sizeof(info.ownerTag) - 1] = '\0';
+                    info.ownerThreadId = convo::consumeAtomic(slot.ownerThreadId, std::memory_order_acquire);
                     break;
                 }
             }

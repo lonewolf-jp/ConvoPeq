@@ -6,11 +6,13 @@
 namespace convo::isr {
 
 // ★ C-2.1: DiscardReason — deferred publish が破棄された理由
+// [work37 Phase 6] Expired 追加 — TTL 超過
 enum class DiscardReason : uint8_t {
     None,
     ShutdownDiscard,
     StaleDiscard,
-    SupersededDiscard
+    SupersededDiscard,
+    Expired   // ★ work37: TTL 超過
 };
 
 // ★ PublicationLedger: 一次情報源。ProgressRecord は副産物。

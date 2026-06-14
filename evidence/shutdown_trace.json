@@ -1,15 +1,17 @@
 {
-  "schema": "shutdown_trace_v2",
-  "phase": 9,
+  "schema": "shutdown_trace_v3",
+  "phase": 10,
   "phaseName": "ShutdownComplete",
-  "blockingReason": "None",
-  "blockingReasonCode": 0,
+  "healthState": 0,
+  "healthStateName": "Healthy",
+  "blockingReason": "Unknown",
+  "blockingReasonCode": 8,
   "transitionViolations": 0,
   "sh1_callbackCount": 0,
   "sh2_activeCrossfade": 0,
-  "sh3_pendingRetire": 0,
+  "sh3_pendingRetire": 2,
   "sh4_observerCount": 0,
   "sh5_lateCallbackCount": 0,
   "sh6_postStopEnqueueCount": 0,
-  "verified": true
-,"provenance":"runtime","runId":"runtime-local","generatedAtNs":148151862839300}
+  "verified": false
+,"provenance":"runtime","runId":"runtime-local","generatedAtNs":355218786925100}

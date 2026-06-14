@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include "AtomicAccess.h"
+#include "RuntimePolicyEngine.h"  // ★ work37 Phase 4: PolicyEngine 連携
 
 namespace convo {
 
@@ -41,6 +42,8 @@ static constexpr uint32_t EVENT_READER_STUCK         = 3001;
 static constexpr uint32_t EVENT_READER_SLOT_USAGE     = 3010;  // ★ P1-B/Practical-4
 static constexpr uint32_t EVENT_CROSSFADE_TIMEOUT    = 4001;  // ★ P1-C/Practical-2
 static constexpr uint32_t EVENT_CROSSFADE_EVENT_DROP = 4002;  // ★ P1-C/Practical-6
+// ★ Work38: Retire Age 正常復帰イベント（emitOnTransition 3状態遷移完全カバー）
+static constexpr uint32_t EVENT_RETIRE_AGE_NORMAL     = 1009;  // ★ Work38
 static constexpr uint32_t EVENT_RETIRE_AGE_WARNING   = 1010;  // ★ Practical-5
 static constexpr uint32_t EVENT_RETIRE_AGE_CRITICAL  = 1011;  // ★ Practical-5
 
@@ -81,7 +84,15 @@ public:
     void setCrossfadeRuntime(const isr::CrossfadeRuntime* rt) noexcept { m_crossfadeRuntime = rt; }
     // ★ Practical-2/5/6: 診断用参照設定
     void setCrossfadeEventDropRef(const std::atomic<uint64_t>* ref) noexcept { m_crossfadeEventDropRef = ref; }
-    void setMaxRetireAgeRef(const std::atomic<uint64_t>* ref) noexcept { m_maxRetireAgeRef = ref; }
+    void setMaxRetireAgeRef(const std::atomic<uint64_t>* ref) noexcept {
+        m_maxRetireAgeRef = ref;
+        m_maxRetireAgeDoubleRef = nullptr;
+    }
+    // ★ Work38: double 版オーバーロード — reclaimLatency_ 用（型安全）
+    void setMaxRetireAgeRef(const std::atomic<double>* ref) noexcept {
+        m_maxRetireAgeDoubleRef = ref;
+        m_maxRetireAgeRef = nullptr;
+    }
     void setReaderSlotRef(const std::atomic<uint32_t>* ref) noexcept { m_readerSlotRef = ref; }
     void setOverflowCountRef(const std::atomic<uint64_t>* ref) noexcept { m_overflowCountRef = ref; }
 
@@ -89,6 +100,69 @@ public:
 
     // ★ C-4: HealthState のみ初期化（m_prev*State は維持 — イベント再通知防止）
     void reset() noexcept;
+
+    // [work37 Phase 4.1] PolicyEngine 連携
+    //   RecoveryAction を受け取る callback（AudioEngine::executeRecoveryAction）
+    using RecoveryActionCallback = std::function<void(RecoveryAction)>;
+    void setActionCallback(RecoveryActionCallback cb) noexcept { m_actionCallback = std::move(cb); }
+
+    // [work37 Phase 9.1] Learner Health Policy 用 — Retire Stall の継続時間を追跡
+    void setLearnerRunningRef(const std::atomic<bool>* ref) noexcept { m_learnerRunningRef = ref; }
+    [[nodiscard]] uint64_t getRetireStallDurationUs() const noexcept;
+
+    // [work37 Phase 9.2] Configuration Divergence 監視用参照設定
+    void setCommittedGenRef(const std::atomic<uint64_t>* ref) noexcept { m_lastCommittedGenRef_ = ref; }
+    void setRequestedGenRef(const std::atomic<uint64_t>* ref) noexcept { m_requestedGenRef_ = ref; }
+
+    // [work37 Phase 7.1] World Consistency 監視用コールバック
+    //   AudioEngine が collectDrainAudit().verifyWorldConsistency() をラップして提供
+    using WorldConsistencyCheck = std::function<uint8_t()>;  // 0=Consistent, 1=Suspicious, 2=Broken
+    void setWorldConsistencyCheck(WorldConsistencyCheck cb) noexcept { m_worldConsistencyCheck_ = std::move(cb); }
+
+    // [work37 Phase 9.8] Pending Deployment 監視用参照設定
+    void setRequestedRebuildGenRef(const std::atomic<int>* ref) noexcept { m_requestedRebuildGenRef_ = ref; }
+    void setCommittedRebuildGenRef(const std::atomic<int>* ref) noexcept { m_committedRebuildGenRef_ = ref; }
+
+    // [work37 Phase 9.29] Suppression Duration 監視用 — 抑制開始時刻の参照
+    //   AudioEngine 側で retirePressureAdmissionStrict_ 設定時に更新する原子を提供
+    void setSuppressionStartRef(const std::atomic<uint64_t>* ref) noexcept {
+        m_suppressionStartRef_ = ref;
+    }
+
+    // [work37 Phase 9.40] Progress Freeze 監視用参照
+    void setLastRetireTimestampRef(const std::atomic<uint64_t>* ref) noexcept {
+        m_lastRetireTimestampRef_ = ref;
+    }
+    void setPublicationSequenceRef(const std::atomic<uint64_t>* ref) noexcept {
+        m_publicationSequenceRef_ = ref;
+    }
+
+    // [work37 Phase 9.10 P2] Configuration Drift 監視用参照
+    void setManualOversamplingRef(const std::atomic<int>* ref) noexcept {
+        m_manualOversamplingRef_ = ref;
+    }
+
+    // [work37 Phase 4.4] 背圧信号注入（drainDeferredRetireQueues から）
+    void injectBackpressureSignal(std::size_t fallbackSize, double overflowRate) noexcept {
+        m_injectedFallbackSize_ = fallbackSize;
+        m_injectedOverflowRate_ = overflowRate;
+        m_backpressureInjected_ = true;
+    }
+
+    // [work37 Phase 8.2] EmergencyDrain 要求/確認
+    void requestEmergencyDrain() noexcept {
+        convo::publishAtomic(m_emergencyDrainRequested_, true, std::memory_order_release);
+    }
+    [[nodiscard]] bool isEmergencyDrainRequested() const noexcept {
+        return convo::consumeAtomic(m_emergencyDrainRequested_, std::memory_order_acquire);
+    }
+    void clearEmergencyDrain() noexcept {
+        convo::publishAtomic(m_emergencyDrainRequested_, false, std::memory_order_release);
+    }
+
+    // [work37 Phase 4.4] PolicyEngine へのアクセス（Phase 9 拡張用）
+    RuntimePolicyEngine& getPolicyEngine() noexcept { return m_policyEngine_; }
+    const RuntimePolicyEngine& getPolicyEngine() const noexcept { return m_policyEngine_; }
 
     // ★ 8.6: ReaderStuck 定期Evidence 出力用定数
     static constexpr uint64_t kStuckEvidenceIntervalUs = 10'000'000; // 10秒間隔
@@ -108,6 +182,22 @@ private:
     void checkPublicationStall() noexcept;
     void diagnoseRetireStall() noexcept;
     void updateHealthState() noexcept;
+    // [work37 Phase 4.1] PolicyDecision 対応版
+    void updateHealthState(const PolicyDecision& decision) noexcept;
+    // [work37 Phase 9.2] Configuration Divergence 監視
+    void checkConfigurationDivergence() noexcept;
+    // [work37 Phase 7.1] World Consistency 監視
+    void checkWorldConsistency() noexcept;
+    // [work37 Phase 9.7] Snapshot Starvation 監視（deferred publish age > 10s/30s）
+    void checkSnapshotStarvation() noexcept;
+    // [work37 Phase 9.8] Pending Structural Deployment 監視（rebuild generation gap）
+    void checkPendingStructuralDeployment() noexcept;
+    // [work37 Phase 9.29] Suppression Duration 監視（段階的エスカレーション）
+    void checkSuppressionDuration() noexcept;
+    // [work37 Phase 9.40] Runtime Progress Freeze 監視（3軸統合）
+    void checkRuntimeProgressFreeze() noexcept;
+    // [work37 Phase 9.10 P2] Configuration Drift 監視（oversamplingFactor 乖離）
+    void checkConfigurationDrift() noexcept;
     // ★ P1-C/Practical-2/4/5/6: 追加監視
     void checkCrossfadeTimeout() noexcept;
     void checkCrossfadeEventDrop() noexcept;
@@ -133,6 +223,8 @@ private:
     const convo::isr::CrossfadeRuntime* m_crossfadeRuntime = nullptr;
     const std::atomic<uint64_t>* m_crossfadeEventDropRef = nullptr;
     const std::atomic<uint64_t>* m_maxRetireAgeRef = nullptr;
+    // ★ Work38: double 版参照（reclaimLatency_ 用）
+    const std::atomic<double>* m_maxRetireAgeDoubleRef{nullptr};
     const std::atomic<uint32_t>* m_readerSlotRef = nullptr;
     const std::atomic<uint64_t>* m_overflowCountRef = nullptr;   // ★ Practical-3
     // ★ P1-C drop: 差分検出用ローカル状態
@@ -153,6 +245,61 @@ private:
     static constexpr uint64_t kForcedReclaimCooldownUs = 500'000; // 500ms以内は再試行禁止
     // ★ 8.6: ReaderStuck 定期Evidence 出力タイムスタンプ
     uint64_t m_lastStuckEvidenceUs = 0;
+
+    // [work37 Phase 4.1/9.1] PolicyEngine メンバ
+    RuntimePolicyEngine m_policyEngine_;
+    RecoveryActionCallback m_actionCallback;
+
+    // [work37 Phase 9.1] Retire Stall 継続時間追跡
+    uint64_t m_retireStallStartUs_{0};
+    const std::atomic<bool>* m_learnerRunningRef{nullptr};
+
+    // [work37 Phase 9.2] Configuration Divergence 追跡
+    MonitorState m_prevConfigDivergenceState_{MonitorState::Normal};
+    uint64_t m_configDivergenceStartUs_{0};
+    const std::atomic<uint64_t>* m_lastCommittedGenRef_{nullptr};
+    const std::atomic<uint64_t>* m_requestedGenRef_{nullptr};
+
+    // [work37 Phase 7.1] World Consistency 監視
+    WorldConsistencyCheck m_worldConsistencyCheck_;
+
+    // [work37 Phase 9.7] Snapshot Starvation 追跡
+    MonitorState m_prevSnapshotStarvationState_{MonitorState::Normal};
+    uint64_t m_snapshotStarvationStartUs_{0};
+
+    // [work37 Phase 9.8] Pending Deployment 追跡
+    MonitorState m_prevStructuralDeployState_{MonitorState::Normal};
+    uint64_t m_structuralDeployStartUs_{0};
+    const std::atomic<int>* m_requestedRebuildGenRef_{nullptr};
+    const std::atomic<int>* m_committedRebuildGenRef_{nullptr};
+
+    // [work37 Phase 9.29] Suppression Duration 追跡
+    MonitorState m_prevSuppressionDurationState_{MonitorState::Normal};
+    const std::atomic<uint64_t>* m_suppressionStartRef_{nullptr};
+
+    // [work37 Phase 9.40] Runtime Progress Freeze 追跡
+    MonitorState m_prevProgressFreezeState_{MonitorState::Normal};
+    uint64_t m_progressFreezeStartUs_{0};
+    uint64_t m_lastObservedPubSeq_{0};
+    uint64_t m_lastObservedRetireTs_{0};
+    const std::atomic<uint64_t>* m_lastRetireTimestampRef_{nullptr};
+    const std::atomic<uint64_t>* m_publicationSequenceRef_{nullptr};
+
+    // [work37 Phase 9.10 P2] Configuration Drift 追跡
+    MonitorState m_prevConfigDriftState_{MonitorState::Normal};
+    uint64_t m_configDriftStartUs_{0};
+    const std::atomic<int>* m_manualOversamplingRef_{nullptr};
+
+    // [work37 Phase 9.56 P2] RuntimeRecoveryScore 計算
+    RuntimeRecoveryScore computeRuntimeRecoveryScore() const noexcept;
+
+    // [work37 Phase 4.4] 背圧信号（drainDeferredRetireQueues から注入）
+    bool m_backpressureInjected_{false};
+    std::size_t m_injectedFallbackSize_{0};
+    double m_injectedOverflowRate_{0.0};
+
+    // [work37 Phase 8.2] EmergencyDrain 実行時制御
+    std::atomic<bool> m_emergencyDrainRequested_{false};
 };
 
 } // namespace convo
