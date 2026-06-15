@@ -45,6 +45,15 @@ void AudioEngineProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void AudioEngineProcessor::releaseResources()
 {
+    // ★ 案B: Engine が Prepared 状態でなければ早期リターン
+    //   JUCE が audio device 列挙時に releaseResources() を複数回呼ぶことがある。
+    //   Engine 側の CAS ガードが二重解放を防止しているが、ここで事前チェックすることで
+    //   "duplicate release ignored" のログノイズを抑制し、無駄な処理を回避する。
+    if (!audioEngine.isEnginePrepared())
+    {
+        DBG("[DIAG] AudioEngineProcessor::releaseResources: skipped (engine not prepared)");
+        return;
+    }
     audioEngine.releaseResources();
 }
 

@@ -46470,14 +46470,17 @@ PolicyDecision RuntimePolicyEngine::evaluateAggregate(
     }
 
     // 最高優先度の Action のみ残す（複数Action同時発行防止）
+    // ★ Observe のときは actions を 0 にクリア（toBit(Observe)=1 が誤って action=0 を発行するのを防止）
     const auto highest = selectHighestPriority(decision.actions);
-    decision.actions = toBit(highest);
-    decision.causes = causes;
-
-    // Cooldown チェック
-    if (highest != RecoveryAction::Observe && !canExecute(highest)) {
-        decision.actions = 0;  // Cooldown 中は Action を発行しない
+    if (highest == RecoveryAction::Observe) {
+        decision.actions = 0;
+    } else {
+        decision.actions = toBit(highest);
+        // Cooldown チェック
+        if (!canExecute(highest))
+            decision.actions = 0;
     }
+    decision.causes = causes;
 
     return decision;
 }

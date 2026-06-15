@@ -779,6 +779,13 @@ public:
     void releaseResources() override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
 
+    /** Returns true if the engine is in a prepared state and needs releaseResources(). */
+    [[nodiscard]] bool isEnginePrepared() const noexcept
+    {
+        return convo::consumeAtomic(lifecycleState, std::memory_order_relaxed)
+               == EngineLifecycleState::Prepared;
+    }
+
     // ==================================================================
     // EBR (Epoch-Based Reclamation) 基盤
     // ==================================================================

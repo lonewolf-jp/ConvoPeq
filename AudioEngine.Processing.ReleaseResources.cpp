@@ -8,7 +8,9 @@
 
 namespace {
 
+#ifndef NDEBUG
 #include <debugapi.h>
+#pragma comment(lib, "dbghelp.lib")
 
 static juce::String captureCallStack()
 {
@@ -22,6 +24,7 @@ static juce::String captureCallStack()
     }
     return result;
 }
+#endif
 
 void diagLog(const juce::String& message)
 {
@@ -46,9 +49,13 @@ void AudioEngine::releaseResources()
 
         if (previousState == EngineLifecycleState::Unprepared)
         {
+#ifndef NDEBUG
             auto cs = captureCallStack();
             diagLog("[DIAG] releaseResources: duplicate release ignored (already Unprepared)\n"
                     "Callstack:\n" + cs);
+#else
+            diagLog("[DIAG] releaseResources: duplicate release ignored (already Unprepared)");
+#endif
             return;
         }
 
