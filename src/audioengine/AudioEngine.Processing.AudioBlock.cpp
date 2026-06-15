@@ -1,8 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
-#include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
-#include "core/RCUReader.h"
 
 namespace
 {
@@ -113,9 +111,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         return;
     }
 
-    // P0-2: 読取入口を単一の callback authority view へ収束。
-    const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
-    auto runtimeReadHandle = makeRuntimeReadHandle(audioCtx);
+    // P0-2: 読取入口を単一の callback authority view へ収束（R21 gate: readAudioRuntimeView）
+    auto runtimeReadHandle = readAudioRuntimeView();
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
     if (runtimeWorld == nullptr)

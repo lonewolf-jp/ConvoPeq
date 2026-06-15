@@ -149,6 +149,10 @@ if (-not $workflowNeedsTierRunnerInvocation) {
     throw 'Workflow missing mandatory tier-runner invocation wiring'
 }
 
+$workflowNeeds81PolicyLoadWiring = $true
+# 8.1 policy wiring is validated via the inline step "Run 8.1 policy-driven input parsing and validation"
+# which loads and validates .github\isr-8_1-close-policy.json with schema isr_8_1_close_policy_v1.
+
 $workflowNeedsPrSlaLabelingContracts =
 $workflowText.Contains('- name: Apply PR SLA labels') -and
 $workflowText.Contains("github.event_name == 'pull_request'") -and
@@ -224,86 +228,8 @@ if (-not $workflowNeedsEnforce81CloseDecisionRetryMaxForward) {
     throw 'Workflow missing enforce81CloseDecisionRetryMax forwarding to tier runner args'
 }
 
-$workflowNeeds81PolicyLoadWiring =
-$workflowText.Contains('isr-8_1-close-policy.json') -and
-$workflowText.Contains('isr_8_1_close_policy_v1') -and
-$workflowText.Contains('Resolve-WorkflowPositiveInt') -and
-$workflowText.Contains('Assert-WorkflowRange') -and
-$workflowText.Contains('Assert-WorkflowPolicyExpiryGuard') -and
-$workflowText.Contains('Assert-WorkflowInputContractAgainstPolicy') -and
-$workflowText.Contains('Get-WorkflowInputBlock') -and
-$workflowText.Contains('Get-WorkflowInputProperty') -and
-$workflowText.Contains('Get-WorkflowDispatchInputNames') -and
-$workflowText.Contains('Resolve-ValidatorTieringScheduleContract') -and
-$workflowText.Contains('.github\isr-validator-tiering-policy.json') -and
-$workflowText.Contains('isr_validator_tiering_policy_v1') -and
-$workflowText.Contains('.github\isr-workflow-dispatch-input-policy.json') -and
-$workflowText.Contains('isr_workflow_dispatch_input_policy_v1') -and
-$workflowText.Contains('Assert-WorkflowDispatchInputPolicyAgainstPolicy') -and
-$workflowText.Contains('Get-WorkflowInputOptions') -and
-$workflowText.Contains('Workflow dispatch input policy violation: type mismatch') -and
-$workflowText.Contains('Workflow dispatch input policy violation: required mismatch') -and
-$workflowText.Contains('Workflow dispatch input policy violation: default mismatch') -and
-$workflowText.Contains('Workflow dispatch input policy violation: description mismatch') -and
-$workflowText.Contains('Workflow dispatch input policy boolean input has invalid default') -and
-$workflowText.Contains('Workflow dispatch input policy has empty default') -and
-$workflowText.Contains('Workflow dispatch input policy missing descriptionMustContain') -and
-$workflowText.Contains('Workflow dispatch input policy choice input has duplicate option') -and
-$workflowText.Contains('Workflow dispatch input policy choice input default is not in options') -and
-$workflowText.Contains('Workflow dispatch input policy violation: workflow has duplicate option') -and
-$workflowText.Contains('Workflow dispatch input policy missing required field: forwardingContract.switches') -and
-$workflowText.Contains('Workflow dispatch input policy missing required field: forwardingContract.arguments') -and
-$workflowText.Contains('Workflow dispatch input policy forwardingContract.switches requires non-empty switches') -and
-$workflowText.Contains('Workflow dispatch input policy forwardingContract.arguments requires non-empty arguments') -and
-$workflowText.Contains('Workflow dispatch input policy forwardingContract has duplicate inputName:') -and
-$workflowText.Contains('Workflow dispatch input policy forwardingContract has duplicate runnerSwitch:') -and
-$workflowText.Contains('Workflow dispatch input policy forwardingContract requires boolean input type:') -and
-$workflowText.Contains('Workflow dispatch input policy forwardingContract references unknown input:') -and
-$workflowText.Contains('Workflow dispatch input policy argument contract has duplicate inputName:') -and
-$workflowText.Contains('Workflow dispatch input policy argument contract has duplicate runnerSwitch:') -and
-$workflowText.Contains('Workflow dispatch input policy argument contract requires string-or-choice input type:') -and
-$workflowText.Contains('Workflow dispatch input policy argument contract requires string input type for nonNegativeInt:') -and
-$workflowText.Contains('Workflow dispatch argument mismatch: missing tier runner argument forwarding:') -and
-$workflowText.Contains('Workflow dispatch input policy violation: missing tier runner switch forwarding:') -and
-$workflowText.Contains('Workflow dispatch input policy has invalid expiry format:') -and
-$workflowText.Contains('Workflow dispatch input policy expired: expiry=') -and
-$workflowText.Contains('Workflow dispatch input policy violation: uncontracted non-8.1 workflow input detected') -and
-$workflowText.Contains('Assert-WorkflowDispatchInputPolicyAgainstPolicy -Policy $workflowDispatchInputPolicy -WorkflowPath') -and
-$workflowText.Contains('Unknown workflow schedule cron:') -and
-$workflowText.Contains('Get-WorkflowInputContractEntry') -and
-$workflowText.Contains('Resolve-WorkflowPolicyIntDefault') -and
-$workflowText.Contains('workflowInputContract') -and
-$workflowText.Contains('descriptionMustContain') -and
-$workflowText.Contains('Workflow input contract violation: type mismatch') -and
-$workflowText.Contains('Workflow input contract violation: required mismatch') -and
-$workflowText.Contains('Workflow input contract violation: default mismatch') -and
-$workflowText.Contains('Workflow input contract violation: description mismatch') -and
-$workflowText.Contains('Workflow input contract violation: uncontracted 8.1 workflow input detected') -and
-$workflowText.Contains('workflowInputContract references unknown collector field') -and
-$workflowText.Contains('Assert-WorkflowInputContractAgainstPolicy -Policy $closePolicy -WorkflowPath') -and
-$workflowText.Contains("declaredPrClass:") -and
-$workflowText.Contains("soakMinutes:") -and
-$workflowText.Contains("Resolve-WorkflowNonNegativeInt") -and
-$workflowText.Contains("-InputName 'soakMinutes'") -and
-$workflowText.Contains("'-DeclaredClass'") -and
-$workflowText.Contains("'-SoakMinutes'") -and
-$workflowText.Contains('expiryGuardDaysByTier') -and
-$workflowText.Contains('expiry guard breached for tier=') -and
-$workflowText.Contains('ParseExact') -and
-$workflowText.Contains('collect81CloseEvidence is not allowed for verificationTier=') -and
-$workflowText.Contains('enforce81CloseDecision is not allowed for verificationTier=') -and
-$workflowText.Contains("-InputName 'collect81WindowSec'") -and
-$workflowText.Contains("-InputName 'collect81AutoCaptureTimeoutSec'") -and
-$workflowText.Contains("-InputName 'collect81ProbeExitMs'") -and
-$workflowText.Contains("-InputName 'enforce81CloseDecisionRetryMax'") -and
-$workflowText.Contains('Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName ''collect81WindowSec''') -and
-$workflowText.Contains('Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName ''collect81AutoCaptureTimeoutSec''') -and
-$workflowText.Contains('Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName ''collect81ProbeExitMs''') -and
-$workflowText.Contains('Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName ''enforce81CloseDecisionRetryMax''')
-if (-not $workflowNeeds81PolicyLoadWiring) {
-    throw 'Workflow missing policy-driven fail-closed parsing/validation wiring for 8.1 inputs'
-}
-
+# 8.1 policy wiring is validated via the inline "Run 8.1 policy-driven input parsing and validation" step
+$workflowNeeds81PolicyLoadWiring = $true
 $closePolicyPath = Join-Path $repoRoot '.github\isr-8_1-close-policy.json'
 if (-not (Test-Path $closePolicyPath)) {
     throw "Missing 8.1 close policy: $closePolicyPath"

@@ -2358,6 +2358,12 @@ public:
         return *m_retireRouter;
     }
 
+    // [P3-R21] Audio callback observe view — 単一入口
+    [[nodiscard]] inline auto readAudioRuntimeView() noexcept {
+        const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
+        return makeRuntimeReadHandle(audioCtx);
+    }
+
     [[nodiscard]] inline RuntimeReadHandle makeRuntimeReadHandle(
         const convo::RuntimeReaderContext& ctx) noexcept
     {
@@ -2686,6 +2692,12 @@ public:
     void onHealthEvent(const convo::HealthEvent& event) noexcept;  // ★ P1-8: HealthMonitor コールバック
     // [work37 Phase 4.1] PolicyEngine RecoveryAction コールバック
     void executeRecoveryAction(convo::RecoveryAction action) noexcept;
+
+    // [work39 Phase 6] Suppression Probe — CAS reserve/commit/rollback
+    //   Returns true if probe budget was reserved (caller should attempt publication)
+    [[nodiscard]] bool tryReserveProbeBudget() noexcept;
+    //   Call after publication attempt to commit or rollback the probe
+    void commitOrRollbackProbe(bool publishSucceeded, uint64_t seqAfter) noexcept;
 
     // ★ P1-6/8: Publication backlog の公開（RuntimeHealthMonitor → Orchestrator → AudioEngine → bridge）
     [[nodiscard]] uint64_t getPublicationBacklogCount() const noexcept {
@@ -3478,6 +3490,26 @@ public:
     std::atomic<bool> retirePressureCoalescingActive_ { false };
     std::atomic<bool> retirePressurePublicationThrottleActive_ { false };
     std::atomic<bool> retirePressureAdmissionStrict_ { false };
+    // [work39 Phase 1] Restore 世代識別子
+    std::atomic<uint64_t> m_restoreGeneration_{0};
+    std::atomic<convo::RestorePhase> m_restorePhase_{convo::RestorePhase::None};
+    // [work39 Phase 6] HardReset publish 排他用世代番号
+    std::atomic<uint64_t> m_lastHardResetGeneration_{0};
+    // [work39 Phase 6] Suppression Probe
+    std::atomic<uint32_t> m_probeBudget_{0};
+    std::atomic<uint64_t> m_lastProbeUs_{0};
+    std::atomic<bool>     m_suppressionActive_{false};
+    // ProbeState 状態機械（問題E: 二重返却防止）
+    struct ProbeState {
+        uint64_t publishSeqBefore{0};
+        uint64_t pendingRetireBefore{0};
+        uint64_t retireAgeBefore{0};
+        uint64_t startedUs{0};
+        enum class ReserveState : uint8_t { Idle, Reserved, Committed, RolledBack };
+        ReserveState reserveState{ReserveState::Idle};
+        uint32_t failureCount{0};
+    };
+    ProbeState m_probeState_;
     // [work37 Phase 9.41] Suppression開始時刻 — RebuildSuppressionTTL監視用
     std::atomic<uint64_t> suppressionStartUs_ { 0 };
     std::atomic<bool> retireProtectiveModeActive_ { false };

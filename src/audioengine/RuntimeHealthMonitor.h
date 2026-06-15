@@ -5,6 +5,8 @@
 #include "AtomicAccess.h"
 #include "RuntimePolicyEngine.h"  // ★ work37 Phase 4: PolicyEngine 連携
 
+class AudioSegmentBuffer;  // ★ Work39: Learner FIFO 監視用（global scope）
+
 namespace convo {
 
 struct HealthEvent {
@@ -42,6 +44,9 @@ static constexpr uint32_t EVENT_READER_STUCK         = 3001;
 static constexpr uint32_t EVENT_READER_SLOT_USAGE     = 3010;  // ★ P1-B/Practical-4
 static constexpr uint32_t EVENT_CROSSFADE_TIMEOUT    = 4001;  // ★ P1-C/Practical-2
 static constexpr uint32_t EVENT_CROSSFADE_EVENT_DROP = 4002;  // ★ P1-C/Practical-6
+// ★ Work39: Learner FIFO Backpressure
+static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_WARNING = 5001;  // FIFO 85%+
+static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_ERROR   = 5002;  // FIFO 95%+
 // ★ Work38: Retire Age 正常復帰イベント（emitOnTransition 3状態遷移完全カバー）
 static constexpr uint32_t EVENT_RETIRE_AGE_NORMAL     = 1009;  // ★ Work38
 static constexpr uint32_t EVENT_RETIRE_AGE_WARNING   = 1010;  // ★ Practical-5
@@ -61,6 +66,37 @@ static constexpr uint64_t kRetireAgeCriticalUs = 30'000'000;  // 30秒
 
 enum class MonitorState : uint8_t { Normal, Warning, Error };
 using HealthEventCallback = std::function<void(const HealthEvent&)>;
+
+// [work39 Phase 7] CriticalExitBlocker — Critical 出口ブロック理由（診断用）
+enum class CriticalExitBlocker : uint8_t {
+    None,
+    MonitorNotNormal,
+    SuppressionActive,
+    RecoveryRunning,
+    StableDurationInsufficient,
+    PendingRetireExceeded,
+    RetireAgeExceeded
+};
+
+// [work39 Phase 7] CriticalExitCondition — Critical 出口評価構造体
+struct CriticalExitCondition {
+    bool allMonitorsNormal{false};
+    bool suppressionInactive{false};
+    bool noRecoveryActionRunning{false};
+    bool stableDuration{false};
+    CriticalExitBlocker blocker{CriticalExitBlocker::None};
+    uint64_t pendingRetire{0};
+    uint64_t retireAgeUs{0};
+
+    [[nodiscard]] bool canExit() noexcept {
+        if (!allMonitorsNormal) { blocker = CriticalExitBlocker::MonitorNotNormal; return false; }
+        if (!suppressionInactive) { blocker = CriticalExitBlocker::SuppressionActive; return false; }
+        if (!noRecoveryActionRunning) { blocker = CriticalExitBlocker::RecoveryRunning; return false; }
+        if (!stableDuration) { blocker = CriticalExitBlocker::StableDurationInsufficient; return false; }
+        blocker = CriticalExitBlocker::None;
+        return true;
+    }
+};
 
 /**
  * RuntimeHealthMonitor: Pull型監視エンジン。
@@ -106,9 +142,18 @@ public:
     using RecoveryActionCallback = std::function<void(RecoveryAction)>;
     void setActionCallback(RecoveryActionCallback cb) noexcept { m_actionCallback = std::move(cb); }
 
+    // [work39 Phase 6] RestoreStep2 callback — publishIdleWorldOnly(HardReset) 発行用
+    using RestoreStep2Callback = std::function<void()>;
+    void setRestoreStep2Callback(RestoreStep2Callback cb) noexcept { m_restoreStep2Callback_ = std::move(cb); }
+
     // [work37 Phase 9.1] Learner Health Policy 用 — Retire Stall の継続時間を追跡
     void setLearnerRunningRef(const std::atomic<bool>* ref) noexcept { m_learnerRunningRef = ref; }
     [[nodiscard]] uint64_t getRetireStallDurationUs() const noexcept;
+
+    // [work39 Phase 5] Learner FIFO 監視用セッター
+    void setLearnerSegmentBuffer(::AudioSegmentBuffer* buf) noexcept { m_learnerSegmentBuffer_ = buf; }
+    void setEpochAdvanceCountRef(const std::atomic<uint64_t>* ref) noexcept { m_epochAdvanceCountRef_ = ref; }
+    void setLastCompletedEpochRef(const std::atomic<uint64_t>* ref) noexcept { m_lastCompletedEpochRef_ = ref; }
 
     // [work37 Phase 9.2] Configuration Divergence 監視用参照設定
     void setCommittedGenRef(const std::atomic<uint64_t>* ref) noexcept { m_lastCommittedGenRef_ = ref; }
@@ -142,10 +187,23 @@ public:
         m_manualOversamplingRef_ = ref;
     }
 
-    // [work37 Phase 4.4] 背圧信号注入（drainDeferredRetireQueues から）
+    // [work37 Phase 4.4] 背圧信号注入（drainDeferredRetireQueues から）— CAS max update
     void injectBackpressureSignal(std::size_t fallbackSize, double overflowRate) noexcept {
-        m_injectedFallbackSize_ = fallbackSize;
-        m_injectedOverflowRate_ = overflowRate;
+        // atomic CAS max update for fallbackSize
+        uint64_t current = convo::consumeAtomic(m_maxFallbackSize_, std::memory_order_acquire);
+        while (fallbackSize > current) {
+            if (convo::compareExchangeAtomic(m_maxFallbackSize_, current,
+                static_cast<uint64_t>(fallbackSize), std::memory_order_acq_rel,
+                std::memory_order_acquire)) break;
+            current = convo::consumeAtomic(m_maxFallbackSize_, std::memory_order_acquire);
+        }
+        // atomic CAS max update for overflowRate
+        double rateCurrent = convo::consumeAtomic(m_maxOverflowRate_, std::memory_order_acquire);
+        while (overflowRate > rateCurrent) {
+            if (convo::compareExchangeAtomic(m_maxOverflowRate_, rateCurrent,
+                overflowRate, std::memory_order_acq_rel, std::memory_order_acquire)) break;
+            rateCurrent = convo::consumeAtomic(m_maxOverflowRate_, std::memory_order_acquire);
+        }
         m_backpressureInjected_ = true;
     }
 
@@ -198,6 +256,12 @@ private:
     void checkRuntimeProgressFreeze() noexcept;
     // [work37 Phase 9.10 P2] Configuration Drift 監視（oversamplingFactor 乖離）
     void checkConfigurationDrift() noexcept;
+    // [work39 Phase 3] 閉ループ制御
+    [[nodiscard]] TrendSnapshot takeSnapshot() const noexcept;
+    [[nodiscard]] RecoveryOutcome computeTrend(const TrendSnapshot& before,
+                                                const TrendSnapshot& now) const noexcept;
+    // [work39 Phase 5] Learner FIFO 監視
+    void checkLearnerBackpressure() noexcept;
     // ★ P1-C/Practical-2/4/5/6: 追加監視
     void checkCrossfadeTimeout() noexcept;
     void checkCrossfadeEventDrop() noexcept;
@@ -249,10 +313,26 @@ private:
     // [work37 Phase 4.1/9.1] PolicyEngine メンバ
     RuntimePolicyEngine m_policyEngine_;
     RecoveryActionCallback m_actionCallback;
+    RestoreStep2Callback m_restoreStep2Callback_;  // [work39 Phase 6] Restore Step2
 
     // [work37 Phase 9.1] Retire Stall 継続時間追跡
     uint64_t m_retireStallStartUs_{0};
     const std::atomic<bool>* m_learnerRunningRef{nullptr};
+
+    // [work39 Phase 5] Learner FIFO 監視
+    MonitorState m_prevLearnerBackpressureState_{MonitorState::Normal};
+    bool     m_learnerWasActive_{false};
+    double   m_fifoEma_{-1.0};        // -1.0 = uninitialized
+    double   m_lastFifoEma_{0.0};
+    uint64_t m_lastFifoTickUs_{0};
+    uint64_t m_learnerFifoHighSinceUs_{0};
+    ::AudioSegmentBuffer* m_learnerSegmentBuffer_{nullptr};
+    // epochAdvance / lastCompletedEpoch（問題A-1: Restore効果測定用）
+    const std::atomic<uint64_t>* m_epochAdvanceCountRef_{nullptr};
+    const std::atomic<uint64_t>* m_lastCompletedEpochRef_{nullptr};
+
+    // [work39 Phase 7] Critical 出口 安定60秒継続追跡
+    uint64_t m_criticalExitStableStartUs_{0};
 
     // [work37 Phase 9.2] Configuration Divergence 追跡
     MonitorState m_prevConfigDivergenceState_{MonitorState::Normal};
@@ -294,9 +374,42 @@ private:
     RuntimeRecoveryScore computeRuntimeRecoveryScore() const noexcept;
 
     // [work37 Phase 4.4] 背圧信号（drainDeferredRetireQueues から注入）
+    // ★ Work39: CAS max update 版 + BackpressureWindow
     bool m_backpressureInjected_{false};
-    std::size_t m_injectedFallbackSize_{0};
-    double m_injectedOverflowRate_{0.0};
+    std::atomic<uint64_t> m_maxFallbackSize_{0};
+    std::atomic<double> m_maxOverflowRate_{0.0};
+
+    // BackpressureWindow（問題F: peak + average + count の統計モデル）
+    struct BackpressureWindow {
+        uint64_t maxSize{0};
+        uint64_t sumSize{0};
+        uint32_t sampleCount{0};
+        double   maxRate{0.0};
+        double   sumRate{0.0};
+
+        void record(std::size_t size, double rate) noexcept {
+            if (size > maxSize) maxSize = size;
+            maxRate = (rate > maxRate) ? rate : maxRate;
+            sumSize += size;
+            sumRate += rate;
+            ++sampleCount;
+        }
+
+        [[nodiscard]] double averageSize() const noexcept {
+            return sampleCount > 0
+                ? static_cast<double>(sumSize) / sampleCount : 0.0;
+        }
+
+        [[nodiscard]] double averageRate() const noexcept {
+            return sampleCount > 0 ? sumRate / sampleCount : 0.0;
+        }
+
+        void reset() noexcept {
+            maxSize = 0; sumSize = 0; sampleCount = 0;
+            maxRate = 0.0; sumRate = 0.0;
+        }
+    };
+    BackpressureWindow m_backpressureWindow_;
 
     // [work37 Phase 8.2] EmergencyDrain 実行時制御
     std::atomic<bool> m_emergencyDrainRequested_{false};

@@ -153,8 +153,15 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         convo::publishAtomic(retirePressurePublicationThrottleActive_,
             effectiveLevel >= 2, std::memory_order_release);
         // [work37 Phase 9.41] 抑制開始時刻を記録/解除（overflow 連動）
+        // ★ Work39: 通常時は injectBackpressureSignal 経由、Critical 水準のみ緊急直接
         if (effectiveLevel >= 3) {
-            convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+            if (overflowRate > 10.0) {
+                // Critical 水準: 緊急直接書き込み
+                convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+            } else {
+                // 通常時: injectBackpressureSignal 経由（PolicyEngine で評価）
+                m_healthMonitor.injectBackpressureSignal(retireDepth, overflowRate);
+            }
             if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
                 convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
         } else {
@@ -288,7 +295,16 @@ void AudioEngine::applyRetirePressurePolicyNoRt(int retirePressureLevel,
 
     convo::publishAtomic(retirePressureCoalescingActive_, mild, std::memory_order_release);
     convo::publishAtomic(retirePressurePublicationThrottleActive_, medium, std::memory_order_release);
-    convo::publishAtomic(retirePressureAdmissionStrict_, severe, std::memory_order_release);
+    // ★ Work39: Critical 水準のみ緊急直接、通常は injectBackpressureSignal 経由
+    if (critical) {
+        // Critical 水準: 緊急直接書き込み
+        convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+    } else if (severe) {
+        // 通常の重度: injectBackpressureSignal 経由（PolicyEngine で評価）
+        m_healthMonitor.injectBackpressureSignal(retireDepth, 0.0);
+    } else {
+        convo::publishAtomic(retirePressureAdmissionStrict_, false, std::memory_order_release);
+    }
     // [work37 Phase 9.41] 抑制開始時刻を記録/解除
     if (severe) {
         if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)

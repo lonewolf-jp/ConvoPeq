@@ -59,6 +59,25 @@ AudioEngine::AudioEngine()
     m_healthMonitor.setActionCallback(
         [this](convo::RecoveryAction action) { executeRecoveryAction(action); });
 
+    // [work39 Phase 6] RestoreStep2 Callback — publishIdleWorldOnly(HardReset)
+    m_healthMonitor.setRestoreStep2Callback([this]() {
+        if (convo::consumeAtomic(m_lastHardResetGeneration_, std::memory_order_acquire)
+            != convo::consumeAtomic(m_restoreGeneration_, std::memory_order_acquire)) {
+            const convo::RuntimeReaderContext ctx{
+                messageThreadRcuReader, convo::ObserveChannel::Message };
+            const auto handle = makeRuntimeReadHandle(ctx);
+            auto* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(handle);
+            if (dsp != nullptr) {
+                (void)publishIdleWorldOnly(dsp, convo::TransitionPolicy::HardReset);
+                convo::publishAtomic(m_lastHardResetGeneration_,
+                    convo::consumeAtomic(m_restoreGeneration_, std::memory_order_acquire),
+                    std::memory_order_release);
+                convo::publishAtomic(m_restorePhase_, convo::RestorePhase::IdleWorldPublished,
+                    std::memory_order_release);
+            }
+        }
+    });
+
     // ★ P1-B: Admission に HealthState 参照を設定
     runtimeOrchestrator_->setAdmissionHealthStateRef(m_healthMonitor.getHealthStateRef());
 }

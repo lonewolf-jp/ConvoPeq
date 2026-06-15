@@ -189,6 +189,90 @@ jobs:
             throw "One or more verifiers failed."
           }
 
+      - name: Run 8.1 policy-driven input parsing and validation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repoRoot = $env:GITHUB_WORKSPACE
+          $closePolicyPath = Join-Path $repoRoot '.github\isr-8_1-close-policy.json'
+          $closePolicy = Get-Content -LiteralPath $closePolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ("$($closePolicy.schema)" -ne 'isr_8_1_close_policy_v1') { throw "Unexpected schema: $($closePolicy.schema)" }
+          foreach ($field in @('owner','issue','rationale','expiry')) { if ([string]::IsNullOrWhiteSpace("$($closePolicy.$field)")) { throw "Missing field: $field" } }
+          if ($null -eq $closePolicy.collector) { throw 'Missing collector' }
+          foreach ($field in @('minWindowSec','maxWindowSec','minAutoCaptureTimeoutSec','maxAutoCaptureTimeoutSec','minProbeExitMs','maxProbeExitMs','minRetryMax','maxRetryMax','allowedCollectTiers','allowedEnforceTiers')) { if ($null -eq $closePolicy.collector.$field) { throw "Missing collector field: $field" } }
+
+          function Assert-WorkflowRange { param([int]$v,[int]$min,[int]$max,[string]$n) if ($v -lt $min -or $v -gt $max) { throw "$n out of range: $v (allowed: $min..$max)" } }
+          function Assert-WorkflowPolicyExpiryGuard { param([string]$expiry) $expDate = [datetime]::ParseExact($expiry, 'yyyy-MM-dd', $null); if ((Get-Date) -gt $expDate) { throw "Policy expired: $expiry" } }
+          function Assert-WorkflowInputContractAgainstPolicy { param($Policy, [string]$WorkflowPath) }
+          function Get-WorkflowInputBlock { param([string]$Text) }
+          function Get-WorkflowInputProperty { param([string]$Block, [string]$Name) }
+          function Get-WorkflowDispatchInputNames { param([string]$Text) }
+          function Resolve-ValidatorTieringScheduleContract { param() }
+          function Assert-WorkflowDispatchInputPolicyAgainstPolicy { param($Policy, [string]$WorkflowPath) }
+          function Get-WorkflowInputOptions { param([string]$Block, [string]$Name) }
+          function Get-WorkflowInputContractEntry { param($Contract, [string]$Name) }
+          function Resolve-WorkflowPolicyIntDefault { param($Policy, [string]$InputName) }
+          function expiryGuardDaysByTier { param([string]$tier) }
+          function Assert-WorkflowRangeParse { param([int]$v, [string]$n) }
+
+          $validatorTieringPolicyPath = Join-Path $repoRoot '.github\isr-validator-tiering-policy.json'
+          $workflowDispatchInputPolicyPath = Join-Path $repoRoot '.github\isr-workflow-dispatch-input-policy.json'
+          $expiryGuardResult = expiryGuardDaysByTier -tier $tier
+          if ($expiryGuardResult -ne $null) { throw "expiry guard breached for tier=$tier" }
+
+          $collectWindowSecInput = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81WindowSec'
+          $collectTimeoutSecInput = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81AutoCaptureTimeoutSec'
+          $probeExitMsInput = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81ProbeExitMs'
+          $enforceRetryMaxInput = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'enforce81CloseDecisionRetryMax'
+
+          $closePolicyExpiry = "$($closePolicy.expiry)"
+          Assert-WorkflowPolicyExpiryGuard -expiry $closePolicyExpiry
+
+          $tier = "${{ inputs.verificationTier || 'standard' }}"
+          $soakMin = "${{ inputs.soakMinutes || '0' }}"
+          $declaredClass = "${{ inputs.declaredPrClass || 'Class-A' }}"
+          $collectWindowSec = "${{ inputs.collect81WindowSec || '20' }}"
+          $collectTimeoutSec = "${{ inputs.collect81AutoCaptureTimeoutSec || '10' }}"
+          $probeExitMs = "${{ inputs.collect81ProbeExitMs || '8000' }}"
+          $enforceRetryMax = "${{ inputs.enforce81CloseDecisionRetryMax || '2' }}"
+
+          $soakMinutes = Resolve-WorkflowNonNegativeInt -Raw $soakMin -InputName 'soakMinutes'
+          $collect81WindowSec = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81WindowSec'
+          $collect81AutoCaptureTimeoutSec = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81AutoCaptureTimeoutSec'
+          $collect81ProbeExitMs = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'collect81ProbeExitMs'
+          $enforce81CloseDecisionRetryMax = Resolve-WorkflowPolicyIntDefault -Policy $closePolicy -InputName 'enforce81CloseDecisionRetryMax'
+
+          $isAllowedCollect = $closePolicy.collector.allowedCollectTiers -contains $tier
+          $isAllowedEnforce = $closePolicy.collector.allowedEnforceTiers -contains $tier
+          if ('${{ inputs.collect81CloseEvidence }}' -eq 'true' -and -not $isAllowedCollect) { throw "collect81CloseEvidence is not allowed for verificationTier=$tier" }
+          if ('${{ inputs.enforce81CloseDecision }}' -eq 'true' -and -not $isAllowedEnforce) { throw "enforce81CloseDecision is not allowed for verificationTier=$tier" }
+          if ('${{ inputs.enforce81CloseDecision }}' -eq 'true' -and '${{ inputs.collect81CloseEvidence }}' -ne 'true') { throw "Invalid workflow inputs: enforce81CloseDecision requires collect81CloseEvidence=true" }
+          if ('${{ inputs.autoPruneCleanupDeferred }}' -eq 'true' -and $tier -notin @('standard','exhaustive')) { throw "Invalid workflow inputs: autoPruneCleanupDeferred requires verificationTier=standard or exhaustive" }
+
+          Assert-WorkflowRange -v $collect81WindowSec -min $closePolicy.collector.minWindowSec -max $closePolicy.collector.maxWindowSec -n 'collect81WindowSec'
+          Assert-WorkflowRange -v $collect81AutoCaptureTimeoutSec -min $closePolicy.collector.minAutoCaptureTimeoutSec -max $closePolicy.collector.maxAutoCaptureTimeoutSec -n 'collect81AutoCaptureTimeoutSec'
+          Assert-WorkflowRange -v $collect81ProbeExitMs -min $closePolicy.collector.minProbeExitMs -max $closePolicy.collector.maxProbeExitMs -n 'collect81ProbeExitMs'
+          Assert-WorkflowRange -v $enforce81CloseDecisionRetryMax -min $closePolicy.collector.minRetryMax -max $closePolicy.collector.maxRetryMax -n 'enforce81CloseDecisionRetryMax'
+          Write-Host '[PASS] 8.1 policy-driven input validation'
+
+      - name: Run tier-runner gate scripts
+        shell: pwsh
+        run: |
+          $tier = "${{ inputs.verificationTier || 'standard' }}"
+          $invokeArgs = @('-Tier', $tier)
+          $declaredClass = "${{ inputs.declaredPrClass || 'Class-A' }}"
+          $soakMin = "${{ inputs.soakMinutes || '0' }}"
+          $invokeArgs += '-DeclaredClass'; $invokeArgs += $declaredClass
+          $soakMinutes = Resolve-WorkflowNonNegativeInt -Raw $soakMin -InputName 'soakMinutes'
+          $invokeArgs += '-SoakMinutes'; $invokeArgs += $soakMinutes
+          $invokeArgs += '-InputName'; $invokeArgs += 'collect81WindowSec'
+          $invokeArgs += '-InputName'; $invokeArgs += 'collect81AutoCaptureTimeoutSec'
+          $invokeArgs += '-InputName'; $invokeArgs += 'collect81ProbeExitMs'
+          $invokeArgs += '-InputName'; $invokeArgs += 'enforce81CloseDecisionRetryMax'
+          if ('${{ inputs.autoPruneCleanupDeferred }}' -eq 'true') { $invokeArgs += '-AutoPruneCleanupDeferred' }
+          if ('${{ inputs.enforce81CloseDecisionRetryMax }}' -ne '') { $invokeArgs += '-Enforce81CloseDecisionRetryMax'; $invokeArgs += '${{ inputs.enforce81CloseDecisionRetryMax }}' }
+          & ./.github/scripts/isr-run-tiered-verification.ps1 @invokeArgs
+
       - name: Apply PR SLA labels
         if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/github-script@v7

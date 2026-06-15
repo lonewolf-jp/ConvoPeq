@@ -162,6 +162,134 @@ void RuntimePolicyEngine::reset() noexcept
     for (auto& entry : m_cooldowns) {
         entry.lastExecutedUs = 0;
     }
+    m_lastAction_ = RecoveryAction::Observe;
+    for (auto& ve : m_verificationEntries_)
+        ve.state = VerificationState::Idle;
+    m_budget_.reset();
+}
+
+// [work39 Phase 3] Verification
+void RuntimePolicyEngine::markForVerification(RecoveryAction action, const TrendSnapshot& snapshot) noexcept
+{
+    const auto idx = static_cast<size_t>(action);
+    if (idx >= static_cast<size_t>(RecoveryAction::_Count)) return;
+    m_lastAction_ = action;
+    auto& entry = m_verificationEntries_[idx];
+    entry.state = VerificationState::PendingVerification;
+    entry.executedAtUs = getNowUs();
+    entry.verifyAfterUs = 50'000;  // 50ms初期値
+    entry.restoreGeneration = snapshot.restoreGeneration;
+    entry.baselineSnapshot = snapshot;
+    entry.lastSnapshot = snapshot;
+    entry.stalledCount = 0;
+}
+
+VerificationEntry& RuntimePolicyEngine::getEntry(RecoveryAction action) noexcept
+{
+    return m_verificationEntries_[static_cast<size_t>(action)];
+}
+
+const VerificationEntry& RuntimePolicyEngine::getEntry(RecoveryAction action) const noexcept
+{
+    return m_verificationEntries_[static_cast<size_t>(action)];
+}
+
+void RuntimePolicyEngine::resetVerification() noexcept
+{
+    for (auto& ve : m_verificationEntries_) {
+        ve.state = VerificationState::Idle;
+        ve.stalledCount = 0;
+    }
+    m_lastAction_ = RecoveryAction::Observe;
+}
+
+bool RuntimePolicyEngine::hasPendingVerification() const noexcept
+{
+    for (const auto& ve : m_verificationEntries_) {
+        if (ve.state == VerificationState::PendingVerification)
+            return true;
+    }
+    return false;
+}
+
+void RuntimePolicyEngine::markExecutedCritical(RecoveryAction action) noexcept
+{
+    // Critical時: verification をクリア（hasPendingVerification()=false）
+    const auto idx = static_cast<size_t>(action);
+    if (idx < static_cast<size_t>(RecoveryAction::_Count)) {
+        m_verificationEntries_[idx].state = VerificationState::Idle;
+    }
+    m_lastAction_ = action;
+    markExecuted(action);
+}
+
+// [work39 Phase 4] Budget アクセス
+RecoveryBudget& RuntimePolicyEngine::getBudget() noexcept
+{
+    return m_budget_;
+}
+
+const RecoveryBudget& RuntimePolicyEngine::getBudget() const noexcept
+{
+    return m_budget_;
+}
+
+// [work39 Phase 4] RecoveryBudget 実装
+bool RecoveryBudget::isExhausted(uint64_t nowUs) const noexcept
+{
+    if (latched) return true;
+    if (nowUs - windowStartUs > kBudgetWindowUs) return false;
+    return cycleCountInWindow >= kMaxCyclesPerWindow
+        || criticalCount >= kMaxCriticalCount
+        || recoverCount >= kMaxRecoverCount;
+}
+
+bool RecoveryBudget::isStormDetected(RecoveryAction action, uint64_t nowUs) const noexcept
+{
+    return escalationTracker.isStormDetected(action, nowUs);
+}
+
+void RecoveryBudget::record(RecoveryAction action, uint64_t nowUs) noexcept
+{
+    if (nowUs - windowStartUs > kBudgetWindowUs) {
+        // window 期限切れ → リセット
+        windowStartUs = nowUs;
+        cycleCountInWindow = 0;
+        criticalCount = 0;
+        recoverCount = 0;
+        latched = false;
+    }
+    if (action == RecoveryAction::Critical) ++criticalCount;
+    if (action == RecoveryAction::Recover) ++recoverCount;
+    lastEscalationUs = nowUs;
+    escalationTracker.record(action, nowUs);
+}
+
+void RecoveryBudget::recordCycleCompletion(uint64_t nowUs) noexcept
+{
+    ++cycleCountInWindow;
+    ladderStep = 0;
+    lastRecoverySuccessUs = nowUs;
+    // latched は回復
+    latched = false;
+}
+
+void RecoveryBudget::recordHeavyReach(uint64_t nowUs) noexcept
+{
+    lastEscalationUs = nowUs;
+}
+
+void RecoveryBudget::reset() noexcept
+{
+    cycleCountInWindow = 0;
+    criticalCount = 0;
+    recoverCount = 0;
+    ladderStep = 0;
+    windowStartUs = 0;
+    lastRecoverySuccessUs = 0;
+    lastEscalationUs = 0;
+    escalationTracker.reset();
+    latched = false;
 }
 
 } // namespace convo

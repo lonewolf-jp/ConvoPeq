@@ -1,5 +1,5 @@
 param(
-    [int]$ExpectedPostCount = 11
+    [int]$ExpectedPostCount = 12
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,7 +21,7 @@ if ($count -ne $ExpectedPostCount) {
     $violations.Add("Authority count baseline drift: expected=$ExpectedPostCount actual=$count") | Out-Null
 }
 
-$report = [ordered]@{ schema='authority_count_baseline_report_v1'; generatedAt=(Get-Date -Format 'o'); expected=$ExpectedPostCount; actual=$count; violations=@($violations); ready=($violations.Count -eq 0) }
+$report = [ordered]@{ schema = 'authority_count_baseline_report_v1'; generatedAt = (Get-Date -Format 'o'); expected = $ExpectedPostCount; actual = $count; violations = @($violations); ready = ($violations.Count -eq 0) }
 $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding UTF8
 Write-Host "[INFO] report: $reportPath"
 if ($violations.Count -gt 0) { foreach ($v in $violations) { Write-Host "[ERROR] $v" }; throw 'authority count baseline verification failed' }

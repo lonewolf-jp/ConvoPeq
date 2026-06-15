@@ -4,6 +4,7 @@
 #include "audioengine/CrossfadeRuntime.h"  // ★ P1-C: 完全型必要（isPending/getFadeAgeUs）
 #include "audioengine/AtomicAccess.h"
 #include "core/TimeUtils.h"
+#include "../AudioSegmentBuffer.h"  // ★ Work39: Learner FIFO getNumAvailableSamples
 
 namespace convo {
 
@@ -42,8 +43,116 @@ void RuntimeHealthMonitor::tick() noexcept {
     // [work37 Phase 9.40] Runtime Progress Freeze 監視
     checkRuntimeProgressFreeze();
 
+    // [work39 Phase 5] Learner FIFO 監視
+    checkLearnerBackpressure();
+
     // [work37 Phase 9.10 P2] Configuration Drift 監視
     checkConfigurationDrift();
+
+    // [work39 Phase 3] 閉ループ制御（PolicyEngine 評価より前に実行）
+    {
+        const auto lastAction = m_policyEngine_.getLastExecutedAction();
+        if (lastAction > RecoveryAction::Observe) {
+            auto& entry = m_policyEngine_.getEntry(lastAction);
+            if (entry.state == VerificationState::PendingVerification) {
+                const uint64_t nowUs = getCurrentTimeUs();
+                if (nowUs - entry.executedAtUs >= entry.verifyAfterUs) {
+                    const auto nowSnapshot = takeSnapshot();
+                    const auto trend = computeTrend(entry.baselineSnapshot, nowSnapshot);
+                    auto& budget = m_policyEngine_.getBudget();
+
+                    switch (trend) {
+                        case RecoveryOutcome::Recovered:
+                            m_policyEngine_.resetVerification();
+                            budget.recordCycleCompletion(nowUs);
+                            break;
+
+                        case RecoveryOutcome::Improving: {
+                            const uint64_t retireReduction =
+                                entry.lastSnapshot.pendingRetire > nowSnapshot.pendingRetire
+                                ? entry.lastSnapshot.pendingRetire - nowSnapshot.pendingRetire : 0;
+                            const uint64_t baselineRetire = entry.baselineSnapshot.pendingRetire;
+                            const double reductionRatio = baselineRetire > 0
+                                ? static_cast<double>(retireReduction) / baselineRetire : 0.0;
+                            if (reductionRatio < 0.01)
+                                ++entry.stalledCount;
+                            else
+                                entry.stalledCount = 0;
+                            entry.lastSnapshot = nowSnapshot;
+
+                            if (entry.stalledCount >= 3) {
+                                auto next = convo::nextAction(lastAction);
+                                if (m_policyEngine_.canExecute(next)) {
+                                    if (m_actionCallback) m_actionCallback(next);
+                                    m_policyEngine_.markExecuted(next);
+                                    m_policyEngine_.markForVerification(next, nowSnapshot);
+                                    budget.record(next, nowUs);
+                                }
+                            } else {
+                                // [work39 Phase 6] Restore Step2 実行条件（問題A-1/A-2: 強化版）
+                                if (lastAction == RecoveryAction::Restore
+                                    && nowSnapshot.restorePhase == RestorePhase::EpochRecoveryIssued)
+                                {
+                                    const bool epochAdvancing = (nowSnapshot.epochAdvanceCount
+                                        > entry.baselineSnapshot.epochAdvanceCount);
+                                    const uint64_t retireReductionStep2 =
+                                        entry.lastSnapshot.pendingRetire > nowSnapshot.pendingRetire
+                                        ? entry.lastSnapshot.pendingRetire - nowSnapshot.pendingRetire : 0;
+                                    const uint64_t retireBaseline = entry.baselineSnapshot.pendingRetire;
+                                    const double reductionRate = retireBaseline > 0
+                                        ? static_cast<double>(retireReductionStep2) / retireBaseline : 0.0;
+                                    const int64_t ageDelta = static_cast<int64_t>(nowSnapshot.maxRetireAgeUs)
+                                        - static_cast<int64_t>(entry.baselineSnapshot.maxRetireAgeUs);
+                                    constexpr uint64_t kAbsoluteReductionMin = 10;
+                                    const bool absoluteEnough = retireReductionStep2 >= kAbsoluteReductionMin;
+                                    constexpr uint64_t kHealthyThreshold = 256;
+                                    const bool nearlyHealthy = nowSnapshot.pendingRetire <= kHealthyThreshold;
+                                    if (epochAdvancing
+                                        && (reductionRate >= 0.20 || absoluteEnough || nearlyHealthy)
+                                        && ageDelta <= 0
+                                        && m_restoreStep2Callback_) {
+                                        m_restoreStep2Callback_();
+                                    }
+                                }
+                                entry.verifyAfterUs = std::min(
+                                    entry.verifyAfterUs * 2, uint64_t{30'000'000});
+                                entry.executedAtUs = nowUs;
+                            }
+                            break;
+                        }
+
+                        case RecoveryOutcome::Stalled:
+                        case RecoveryOutcome::Worsening: {
+                            auto next = convo::nextAction(lastAction);
+                            if (m_policyEngine_.canExecute(next)) {
+                                if (m_actionCallback) m_actionCallback(next);
+                                m_policyEngine_.markExecuted(next);
+                                m_policyEngine_.markForVerification(next, nowSnapshot);
+                                budget.record(next, nowUs);
+                            }
+                            break;
+                        }
+
+                        default:
+                            break;
+                    }
+
+                    // Storm detection: 同Action再突入→Critical固定
+                    if (budget.isStormDetected(lastAction, nowUs)) {
+                        if (m_actionCallback) m_actionCallback(RecoveryAction::Critical);
+                        m_policyEngine_.markExecutedCritical(RecoveryAction::Critical);
+                        budget.reset();
+                    }
+
+                    // Budget exhausted → Critical
+                    if (budget.isExhausted(nowUs)) {
+                        if (m_actionCallback) m_actionCallback(RecoveryAction::Critical);
+                        m_policyEngine_.markExecutedCritical(RecoveryAction::Critical);
+                    }
+                }
+            }
+        }
+    }
 
     // [work37 Phase 4.1] Policy Engine 評価: 全 MonitorState から統合判定
     auto decision = m_policyEngine_.evaluateAggregate(
@@ -54,15 +163,15 @@ void RuntimeHealthMonitor::tick() noexcept {
         m_prevRetireAgeState,
         m_prevCrossfadeDropState);
 
-    // [work37 Phase 4.4] 背圧信号を PolicyEngine 評価に反映
+    // [work37 Phase 4.4] 背圧信号を PolicyEngine 評価に反映 — exchange(0) でリセット
     if (m_backpressureInjected_) {
-        // fallback queue の状態が深刻なら Throttle を追加
-        if (m_injectedFallbackSize_ > 500) {
-            decision.actions |= toBit(RecoveryAction::Throttle);
-        }
+        const auto maxFb = convo::exchangeAtomic(m_maxFallbackSize_, uint64_t{0},
+                                                  std::memory_order_acq_rel);
+        const auto maxOr = convo::exchangeAtomic(m_maxOverflowRate_, 0.0,
+                                                  std::memory_order_acq_rel);
+        if (maxFb > 500) decision.actions |= toBit(RecoveryAction::Throttle);
+        if (maxOr > 5.0) decision.actions |= toBit(RecoveryAction::Critical);
         m_backpressureInjected_ = false;
-        m_injectedFallbackSize_ = 0;
-        m_injectedOverflowRate_ = 0.0;
     }
 
     // [work37 Phase 9.1] Learner Health Policy:
@@ -91,6 +200,74 @@ void RuntimeHealthMonitor::tick() noexcept {
         if (m_policyEngine_.canExecute(action)) {
             m_actionCallback(action);
             m_policyEngine_.markExecuted(action);
+            // [work39 Phase 4] Budget 記録
+            auto& budget = m_policyEngine_.getBudget();
+            budget.record(action, getCurrentTimeUs());
+            if (budget.isExhausted(getCurrentTimeUs())) {
+                m_actionCallback(RecoveryAction::Critical);
+                m_policyEngine_.markExecutedCritical(RecoveryAction::Critical);
+            }
+            // [work39 Phase 3] Verification 開始
+            m_policyEngine_.markForVerification(action, takeSnapshot());
+        }
+    }
+
+    // [work39 Phase 7] Critical 出口評価（CriticalExitCondition 構造体使用）
+    if (convo::consumeAtomic(m_healthState_, std::memory_order_acquire)
+        == ISRHealthState::Critical) {
+        CriticalExitCondition exitCond;
+
+        // 条件1: 全 MonitorState が Normal
+        exitCond.allMonitorsNormal = (m_prevRetireState == MonitorState::Normal)
+            && (m_prevPublicationState == MonitorState::Normal)
+            && (m_prevReaderSlotState == MonitorState::Normal)
+            && (m_prevOverflowRateState == MonitorState::Normal)
+            && (m_prevRetireAgeState == MonitorState::Normal)
+            && (m_prevConfigDivergenceState_ == MonitorState::Normal)
+            && (m_prevLearnerBackpressureState_ == MonitorState::Normal);
+
+        // 条件2: 閉ループ制御 Idle
+        exitCond.noRecoveryActionRunning = m_policyEngine_.getEntry(
+            m_policyEngine_.getLastExecutedAction()).isIdle()
+            && !m_policyEngine_.hasPendingVerification();
+
+        // 条件2b: Suppression 非アクティブ（MonitorState に吸収済み: 常時 true）
+        exitCond.suppressionInactive = true;
+
+        // 条件3: RetireDepth + RetireAge 実メトリクス確認
+        exitCond.pendingRetire = m_retireRouter
+            ? m_retireRouter->pendingRetireCount() : 0;
+        exitCond.retireAgeUs = m_maxRetireAgeRef
+            ? convo::consumeAtomic(*m_maxRetireAgeRef, std::memory_order_acquire)
+            : (m_maxRetireAgeDoubleRef
+                ? static_cast<uint64_t>(convo::consumeAtomic(*m_maxRetireAgeDoubleRef,
+                                                              std::memory_order_acquire))
+                : 0);
+        const bool readerHealthy = (m_retireRouter == nullptr
+            || m_retireRouter->activeReaderCount() == 0);
+        constexpr uint64_t kHealthyThreshold = 256;
+        constexpr uint64_t kHealthyAgeUs = 3 * 1'000'000;
+        const bool retireAgeHealthy = exitCond.retireAgeUs < kHealthyAgeUs;
+        bool metricsHealthy = exitCond.pendingRetire < kHealthyThreshold
+            && retireAgeHealthy && readerHealthy;
+        if (exitCond.pendingRetire >= kHealthyThreshold)
+            exitCond.blocker = CriticalExitBlocker::PendingRetireExceeded;
+        else if (!retireAgeHealthy)
+            exitCond.blocker = CriticalExitBlocker::RetireAgeExceeded;
+        exitCond.allMonitorsNormal = exitCond.allMonitorsNormal && metricsHealthy;
+
+        // 条件4: 安定60秒継続
+        if (exitCond.allMonitorsNormal && exitCond.noRecoveryActionRunning) {
+            const uint64_t nowUs = getCurrentTimeUs();
+            if (m_criticalExitStableStartUs_ == 0)
+                m_criticalExitStableStartUs_ = nowUs;
+            exitCond.stableDuration = (nowUs - m_criticalExitStableStartUs_) >= 60'000'000;
+        } else {
+            m_criticalExitStableStartUs_ = 0;
+        }
+
+        if (exitCond.canExit()) {
+            // 次 tick の updateHealthState() で Healthy 復帰が期待できる
         }
     }
 
@@ -375,6 +552,145 @@ void RuntimeHealthMonitor::checkCrossfadeEventDrop() noexcept
     }
 
     m_lastObservedDropCount = current;
+}
+
+// [work39 Phase 5] Learner FIFO 監視
+void RuntimeHealthMonitor::checkLearnerBackpressure() noexcept
+{
+    if (m_learnerRunningRef == nullptr) return;
+    const bool learnerActive = convo::consumeAtomic(*m_learnerRunningRef,
+                                                     std::memory_order_acquire);
+
+    // Learner restart detection → EMA reset
+    if (!learnerActive) { m_learnerWasActive_ = false; return; }
+    if (!m_learnerWasActive_) {
+        m_fifoEma_ = -1.0;  m_lastFifoEma_ = 0.0;
+        m_learnerFifoHighSinceUs_ = 0;  m_learnerWasActive_ = true;
+    }
+
+    const int available = m_learnerSegmentBuffer_
+        ? m_learnerSegmentBuffer_->getNumAvailableSamples() : 0;
+    constexpr int kCapacity = 3'840'000;
+    const double fifoUsage = static_cast<double>(available) / kCapacity;
+
+    // EMA (alpha=0.3)
+    constexpr double kEmaAlpha = 0.3;
+    if (m_fifoEma_ < 0.0) m_fifoEma_ = fifoUsage;
+    m_fifoEma_ = kEmaAlpha * fifoUsage + (1.0 - kEmaAlpha) * m_fifoEma_;
+
+    // Time-normalized slope
+    const uint64_t nowUs = getCurrentTimeUs();
+    const double elapsedSec = (m_lastFifoTickUs_ > 0)
+        ? (nowUs - m_lastFifoTickUs_) / 1'000'000.0 : 1.0;
+    const double slope = (m_fifoEma_ - m_lastFifoEma_) / std::max(elapsedSec, 0.001);
+    m_lastFifoEma_ = m_fifoEma_;  m_lastFifoTickUs_ = nowUs;
+
+    // 2-stage thresholds via emitOnTransition
+    const uint64_t fifoUsagePct = static_cast<uint64_t>(fifoUsage * 100.0);
+    if (fifoUsage > 0.95 && slope >= 0.0) {
+        emitOnTransition(m_prevLearnerBackpressureState_, MonitorState::Error,
+            HealthEvent::Severity::Error, EVENT_LEARNER_BACKPRESSURE_ERROR, fifoUsagePct);
+    } else if (fifoUsage > 0.85 && slope >= 0.0) {
+        emitOnTransition(m_prevLearnerBackpressureState_, MonitorState::Warning,
+            HealthEvent::Severity::Warning, EVENT_LEARNER_BACKPRESSURE_WARNING, fifoUsagePct);
+    } else if (fifoUsage <= 0.80 || slope < -0.01) {
+        m_prevLearnerBackpressureState_ = MonitorState::Normal;
+    }
+}
+
+// [work39 Phase 3] TrendSnapshot 取得
+TrendSnapshot RuntimeHealthMonitor::takeSnapshot() const noexcept
+{
+    TrendSnapshot snap;
+    if (m_retireRouter) {
+        snap.pendingRetire = m_retireRouter->pendingRetireCount();
+        const auto stuckInfo = m_retireRouter->detectStuckReaders(10);
+        snap.readerStuckCount = stuckInfo.isStuck ? 1 : 0;
+        snap.activeReaderCount = m_retireRouter->activeReaderCount();
+    }
+    if (m_publicationSequenceRef_)
+        snap.publicationSeq = convo::consumeAtomic(*m_publicationSequenceRef_,
+                                                     std::memory_order_acquire);
+    if (m_maxRetireAgeRef)
+        snap.maxRetireAgeUs = convo::consumeAtomic(*m_maxRetireAgeRef,
+                                                     std::memory_order_acquire);
+    else if (m_maxRetireAgeDoubleRef)
+        snap.maxRetireAgeUs = static_cast<uint64_t>(
+            convo::consumeAtomic(*m_maxRetireAgeDoubleRef, std::memory_order_acquire));
+    if (m_epochAdvanceCountRef_)
+        snap.epochAdvanceCount = convo::consumeAtomic(*m_epochAdvanceCountRef_,
+                                                       std::memory_order_acquire);
+    if (m_lastCompletedEpochRef_)
+        snap.lastCompletedEpoch = convo::consumeAtomic(*m_lastCompletedEpochRef_,
+                                                        std::memory_order_acquire);
+    // activeFaultMask は HealthMonitor の監視状態から合成
+    uint32_t faultMask = 0;
+    if (m_prevRetireState == MonitorState::Error)  faultMask |= kFaultRetire;
+    if (m_prevPublicationState == MonitorState::Error) faultMask |= kFaultPublication;
+    if (m_prevReaderSlotState == MonitorState::Error)  faultMask |= kFaultReader;
+    if (m_prevOverflowRateState == MonitorState::Error) faultMask |= kFaultOverflow;
+    snap.activeFaultMask = faultMask;
+    snap.freezeDetected = (m_prevProgressFreezeState_ == MonitorState::Error);
+    return snap;
+}
+
+// [work39 Phase 3] 傾向判定（computeTrend）
+RecoveryOutcome RuntimeHealthMonitor::computeTrend(
+    const TrendSnapshot& before, const TrendSnapshot& now) const noexcept
+{
+    // Step 0: 主要delta計算
+    const int64_t retireDelta = static_cast<int64_t>(now.pendingRetire)
+                              - static_cast<int64_t>(before.pendingRetire);
+    const int64_t ageDelta    = static_cast<int64_t>(now.maxRetireAgeUs)
+                              - static_cast<int64_t>(before.maxRetireAgeUs);
+    const int64_t pubDelta    = static_cast<int64_t>(now.publicationSeq)
+                              - static_cast<int64_t>(before.publicationSeq);
+    const bool faultMaskIncreased = (now.activeFaultMask > before.activeFaultMask);
+
+    // Step 1: ProgressFreeze 監視（最優先、多軸評価）
+    if (now.freezeDetected) {
+        const bool retireProgress = before.pendingRetire > 0
+            && (now.pendingRetire * 100) < (before.pendingRetire * 95);
+        const bool readerProgress = (now.readerStuckCount < before.readerStuckCount);
+        const bool epochProgress = (now.epochAdvanceCount > before.epochAdvanceCount);
+        const bool pubProgress = (now.publicationSeq > before.publicationSeq);
+        const bool multiAxisImprovement = retireProgress
+            || (readerProgress && epochProgress)
+            || (pubProgress && readerProgress);
+        if (!multiAxisImprovement)
+            return RecoveryOutcome::Worsening;
+    }
+
+    // Step 2: Recovered（全軸正常）
+    constexpr uint64_t kRecoveredRetireLimit = 256;
+    const bool idleRecovered = (now.pendingRetire == 0 && now.maxRetireAgeUs == 0);
+    const bool retireWithinLimit = now.pendingRetire <= kRecoveredRetireLimit;
+    const bool retireTrendImproving = (retireDelta < 0);
+    if (!faultMaskIncreased
+        && (pubDelta > 0 || idleRecovered)
+        && (retireTrendImproving || retireWithinLimit)
+        && ageDelta <= 0
+        && now.readerStuckCount == 0 && now.activeReaderCount < 64)
+        return RecoveryOutcome::Recovered;
+
+    // Step 3: reader異常（Improvingより優先）
+    if (now.readerStuckCount > before.readerStuckCount)
+        return RecoveryOutcome::Worsening;
+    if (now.pendingRetire > 0 && now.activeReaderCount == 0 && before.activeReaderCount > 0)
+        return RecoveryOutcome::Worsening;
+
+    // Step 4: Worsening
+    if (faultMaskIncreased || retireDelta > 0 || ageDelta > 0)
+        return RecoveryOutcome::Worsening;
+
+    // Step 5: Improving
+    const bool retireImproving = (retireDelta < -2);
+    const bool readerImproving = (now.readerStuckCount < before.readerStuckCount);
+    if ((retireImproving || readerImproving) && !faultMaskIncreased)
+        return RecoveryOutcome::Improving;
+
+    // Step 6: Stalled
+    return RecoveryOutcome::Stalled;
 }
 
 // ★ Practical-4/6: Reader Slot Usage Telemetry（50%/75%/90% 閾値、capacity 動的取得）
@@ -866,8 +1182,8 @@ void RuntimeHealthMonitor::reset() noexcept
     // [work37 Phase 4.1] PolicyEngine もリセット
     m_policyEngine_.reset();
     m_backpressureInjected_ = false;
-    m_injectedFallbackSize_ = 0;
-    m_injectedOverflowRate_ = 0.0;
+    convo::publishAtomic(m_maxFallbackSize_, uint64_t{0}, std::memory_order_release);
+    convo::publishAtomic(m_maxOverflowRate_, 0.0, std::memory_order_release);
     // [work37] 新規監視状態のリセット
     m_retireStallStartUs_ = 0;
     m_configDivergenceStartUs_ = 0;
@@ -881,6 +1197,16 @@ void RuntimeHealthMonitor::reset() noexcept
     m_prevProgressFreezeState_ = MonitorState::Normal;
     m_lastObservedPubSeq_ = 0;
     m_lastObservedRetireTs_ = 0;
+    // [work39] 新規フィールドのリセット
+    m_prevLearnerBackpressureState_ = MonitorState::Normal;
+    m_learnerWasActive_ = false;
+    m_fifoEma_ = -1.0;
+    m_lastFifoEma_ = 0.0;
+    m_lastFifoTickUs_ = 0;
+    m_learnerFifoHighSinceUs_ = 0;
+    m_backpressureWindow_.reset();
+    // [work39 Phase 7] Critical 出口状態リセット
+    m_criticalExitStableStartUs_ = 0;
 }
 
 } // namespace convo

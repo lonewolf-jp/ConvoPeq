@@ -744,48 +744,6 @@ target_include_directories(ConvoPeq SYSTEM PRIVATE
 target_compile_definitions(ConvoPeq PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_DISPATCH=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_REBUILD_EXECUTE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_COMMIT_PREPARE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_COMMIT_EXECUTE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CTOR_DTOR=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_GLOBALS=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_HELPERS_CROSSFADE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_HELPERS_NUMERIC=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_START=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_STOP=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_RESET=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_DEFERRED=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_PROCESS=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_LEARNING_HELPERS=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_INIT_LIFECYCLE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CACHE_MANAGER=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_SNAPSHOT_CREATE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_FIFO_UI=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_TIMER_CALLBACK=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PARAMETERS=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_CALC_EQ_RESPONSE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_UI_EVENTS=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_GET=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_LOAD=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_ADVANCE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_PUBLISH=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_ENTER=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_EXIT=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_RECLAIM=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_THREADING_DEFERRED=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_AUDIO_BLOCK=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_BLOCK_DOUBLE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_DOUBLE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_FLOAT=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_IO=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_LATENCY=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_DSP_PREPARE=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_LATENCY_QUERY=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_PREPARE_TO_PLAY=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_RELEASE_RESOURCES=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_SNAPSHOT=1
-    CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_PROCESSING_TO_BUFFER=1
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_REBUILD=1
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1
@@ -25278,10 +25236,9 @@ AudioEngine::AudioEngine()
     m_healthMonitor.setRetireHighWatermarkRef(&retireHighWatermark_);
     m_healthMonitor.setCrossfadeRuntime(&crossfadeRuntime_);
     m_healthMonitor.setCrossfadeEventDropRef(crossfadeRuntime_.getCrossfadeEventDropCountRef());
-    // ★ Practical-5: Retire Reclaim Latency 監視用参照
-    //   reclaimLatency_ は AudioEngine の atomic<double> として既存
-    m_healthMonitor.setMaxRetireAgeRef(
-        reinterpret_cast<const std::atomic<uint64_t>*>(&reclaimLatency_));
+    // ★ Work38: Retire Reclaim Latency 監視用参照（型安全）
+    //   reclaimLatency_ は AudioEngine の atomic<double> — オーバーロード解決により double* 版が呼ばれる
+    m_healthMonitor.setMaxRetireAgeRef(&reclaimLatency_);
     // ★ Practical-4: Reader Slot 使用率監視用参照
     //   activeReaderCount は ISRRetireRouter 経由で取得（HealthMonitor が直接読む）
     m_healthMonitor.setOverflowCountRef(m_retireRouter->getOverflowCountRef());
@@ -25291,6 +25248,25 @@ AudioEngine::AudioEngine()
     // [work37 Phase 4.1] PolicyEngine Action Callback
     m_healthMonitor.setActionCallback(
         [this](convo::RecoveryAction action) { executeRecoveryAction(action); });
+
+    // [work39 Phase 6] RestoreStep2 Callback — publishIdleWorldOnly(HardReset)
+    m_healthMonitor.setRestoreStep2Callback([this]() {
+        if (convo::consumeAtomic(m_lastHardResetGeneration_, std::memory_order_acquire)
+            != convo::consumeAtomic(m_restoreGeneration_, std::memory_order_acquire)) {
+            const convo::RuntimeReaderContext ctx{
+                messageThreadRcuReader, convo::ObserveChannel::Message };
+            const auto handle = makeRuntimeReadHandle(ctx);
+            auto* dsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(handle);
+            if (dsp != nullptr) {
+                (void)publishIdleWorldOnly(dsp, convo::TransitionPolicy::HardReset);
+                convo::publishAtomic(m_lastHardResetGeneration_,
+                    convo::consumeAtomic(m_restoreGeneration_, std::memory_order_acquire),
+                    std::memory_order_release);
+                convo::publishAtomic(m_restorePhase_, convo::RestorePhase::IdleWorldPublished,
+                    std::memory_order_release);
+            }
+        }
+    });
 
     // ★ P1-B: Admission に HealthState 参照を設定
     runtimeOrchestrator_->setAdmissionHealthStateRef(m_healthMonitor.getHealthStateRef());
@@ -26706,211 +26682,7 @@ void AudioEngine::endBulkParameterRestore(bool requestRebuildNow) noexcept
                     RebuildTelemetryPolicy::Replaceable);
 }
 
-#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_LOAD)
-void AudioEngine::requestLoadState (const juce::ValueTree& state)
-{
-    // B19: RAII ガードを使用して、例外発生時も確実にフラグを戻す
-    RestoreStateGuard guard(m_isRestoringState);
 
-   #if JUCE_DEBUG
-    juce::String reason;
-    const bool validPresetState = validatePresetStateTreeForDebug(state, &reason);
-    jassert(validPresetState);
-    if (!validPresetState)
-        diagLog("[ASSERT] requestLoadState: invalid Preset state: " + reason);
-   #endif
-
-    // ─── Step 1: モード・バイパス状態を先に復元 ────────────────────────────
-    if (state.hasProperty("processingOrder"))
-        convo::publishAtomic(currentProcessingOrder, (ProcessingOrder)(int)state.getProperty("processingOrder"), std::memory_order_release);
-
-    if (state.hasProperty("eqBypassed"))
-    {
-        bool bypassed = state.getProperty("eqBypassed");
-        convo::publishAtomic(eqBypassRequested, bypassed, std::memory_order_release);
-        uiEqEditor.setBypass(bypassed);
-    }
-
-    if (state.hasProperty("convBypassed"))
-    {
-        bool bypassed = state.getProperty("convBypassed");
-        convo::publishAtomic(convBypassRequested, bypassed, std::memory_order_release);
-        uiConvolverProcessor.setBypass(bypassed);
-    }
-
-    // ─── Step 2: ゲイン値を復元 (モード依存クランプが正しく適用される) ─────
-    // NOTE: ここで guard を破棄せず、関数終了まで維持することで
-    //       setInputHeadroomDb 等の内部で呼ばれる applyDefaults を抑制し続ける。
-    //       (旧実装では 4059 行目で false に戻していたが、B19 では安全のため全域カバー)
-
-    if (state.hasProperty("inputHeadroomDb"))
-        setInputHeadroomDb(state.getProperty("inputHeadroomDb"));
-
-    if (state.hasProperty("outputMakeupDb"))
-        setOutputMakeupDb(state.getProperty("outputMakeupDb"));
-
-    if (state.hasProperty("convolverInputTrimDb"))
-        setConvolverInputTrimDb(state.getProperty("convolverInputTrimDb"));
-
-    if (state.hasProperty("ditherBitDepth"))
-        setDitherBitDepth(static_cast<int>(state.getProperty("ditherBitDepth")));
-
-    if (state.hasProperty("noiseShaperType"))
-        setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"));
-
-    {
-        bool hasBankedAdaptiveCoefficients = false;
-
-        for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
-        {
-            const double bankSampleRate = getAdaptiveSampleRateBankHz(bankIndex);
-            double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
-            bool hasBankCoefficients = false;
-
-            getAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
-            for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
-            {
-                const auto propertyName = makeAdaptiveCoeffPropertyName(bankSampleRate, coeffIndex);
-                if (state.hasProperty(propertyName))
-                {
-                    adaptiveCoefficients[coeffIndex] = static_cast<double>(state.getProperty(propertyName));
-                    hasBankCoefficients = true;
-                    hasBankedAdaptiveCoefficients = true;
-                }
-            }
-
-            if (hasBankCoefficients)
-                setAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
-        }
-
-    }
-
-    if (state.hasProperty("oversamplingFactor"))
-        setOversamplingFactor(static_cast<int>(state.getProperty("oversamplingFactor")));
-
-    if (state.hasProperty("oversamplingType"))
-        setOversamplingType((OversamplingType)(int)state.getProperty("oversamplingType"));
-
-    // --- NoiseShaperLearner Settings ---
-    if (state.hasProperty("cmaesRestarts") || state.hasProperty("coeffSafetyMargin") || state.hasProperty("enableStabilityCheck"))
-    {
-        auto s = getNoiseShaperLearnerSettings();
-        if (state.hasProperty("cmaesRestarts"))
-            s.cmaesRestarts = static_cast<int>(state.getProperty("cmaesRestarts"));
-        if (state.hasProperty("coeffSafetyMargin"))
-            s.coeffSafetyMargin = static_cast<double>(state.getProperty("coeffSafetyMargin"));
-        if (state.hasProperty("enableStabilityCheck"))
-            s.enableStabilityCheck = static_cast<bool>(state.getProperty("enableStabilityCheck"));
-        setNoiseShaperLearnerSettings(s);
-    }
-
-    // ─── Step 3: その他のグローバル設定 ─────────────────────────────────────
-    if (state.hasProperty("softClipEnabled"))
-        setSoftClipEnabled(state.getProperty("softClipEnabled"));
-
-    if (state.hasProperty("saturationAmount"))
-        setSaturationAmount(state.getProperty("saturationAmount"));
-
-    if (state.hasProperty("analyzerSource"))
-        setAnalyzerSource((AnalyzerSource)(int)state.getProperty("analyzerSource"));
-
-    // 出力周波数フィルターモードの読み込み
-    if (state.hasProperty("convHCFilterMode"))
-        setConvHCFilterMode((convo::HCMode)(int)state.getProperty("convHCFilterMode"));
-    if (state.hasProperty("convLCFilterMode"))
-        setConvLCFilterMode((convo::LCMode)(int)state.getProperty("convLCFilterMode"));
-    if (state.hasProperty("eqLPFFilterMode"))
-        setEqLPFFilterMode((convo::HCMode)(int)state.getProperty("eqLPFFilterMode"));
-
-    // ─── Step 4: サブプロセッサ状態の復元 ───────────────────────────────────
-    auto eqState = state.getChildWithName ("EQ");
-    if (eqState.isValid())
-        uiEqEditor.setState (eqState);
-
-    auto convState = state.getChildWithName ("Convolver");
-    if (convState.isValid())
-    {
-       #if JUCE_DEBUG
-        juce::String reason;
-        const bool validConvState = validateConvolverStateTreeForDebug(convState, &reason);
-        jassert(validConvState);
-        if (!validConvState)
-            diagLog("[ASSERT] requestLoadState: invalid Convolver state: " + reason);
-       #endif
-        uiConvolverProcessor.setState (convState);
-    }
-
-    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
-    if (sr > 0.0)
-        submitRebuildIntent(convo::RebuildKind::Structural,
-                            RebuildTelemetryReason::RequestRebuildKindEntry,
-                            RebuildTelemetryClass::Structural,
-                            RebuildTelemetryPolicy::Replaceable);
-
-    // UI更新通知
-    sendChangeMessage();
-}
-#endif
-
-#if !defined(CONVOPEQ_ENABLE_AUDIOENGINE_SPLIT_STATEIO_GET)
-[[nodiscard]] juce::ValueTree AudioEngine::getCurrentState() const
-{
-    juce::ValueTree state ("Preset");
-
-    // グローバル設定の保存
-    state.setProperty("processingOrder", (int)convo::consumeAtomic(currentProcessingOrder, std::memory_order_acquire), nullptr);
-    state.setProperty("softClipEnabled", convo::consumeAtomic(softClipEnabled, std::memory_order_acquire), nullptr);
-    state.setProperty("saturationAmount", convo::consumeAtomic(saturationAmount, std::memory_order_acquire), nullptr);
-    state.setProperty("inputHeadroomDb", convo::consumeAtomic(inputHeadroomDb, std::memory_order_acquire), nullptr);
-    state.setProperty("outputMakeupDb", convo::consumeAtomic(outputMakeupDb, std::memory_order_acquire), nullptr);
-    state.setProperty("analyzerSource", (int)convo::consumeAtomic(currentAnalyzerSource, std::memory_order_acquire), nullptr);
-    state.setProperty("convolverInputTrimDb", convo::consumeAtomic(convolverInputTrimDb, std::memory_order_acquire), nullptr);
-    state.setProperty("ditherBitDepth", convo::consumeAtomic(ditherBitDepth, std::memory_order_acquire), nullptr);
-    state.setProperty("noiseShaperType", (int)convo::consumeAtomic(noiseShaperType, std::memory_order_acquire), nullptr);
-    state.setProperty("oversamplingFactor", convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire), nullptr);
-    state.setProperty("oversamplingType", (int)convo::consumeAtomic(oversamplingType, std::memory_order_acquire), nullptr);
-
-    // NoiseShaperLearner Settings
-    {
-        auto s = getNoiseShaperLearnerSettings();
-        state.setProperty("cmaesRestarts", convo::consumeAtomic(s.cmaesRestarts, std::memory_order_acquire), nullptr);
-        state.setProperty("coeffSafetyMargin", convo::consumeAtomic(s.coeffSafetyMargin, std::memory_order_acquire), nullptr);
-        state.setProperty("enableStabilityCheck", convo::consumeAtomic(s.enableStabilityCheck, std::memory_order_acquire), nullptr);
-    }
-
-    state.setProperty("eqBypassed", convo::consumeAtomic(eqBypassRequested, std::memory_order_acquire), nullptr);
-    state.setProperty("convBypassed", convo::consumeAtomic(convBypassRequested, std::memory_order_acquire), nullptr);
-    // 出力周波数フィルターモードの保存
-    state.setProperty("convHCFilterMode", (int)convo::consumeAtomic(convHCFilterMode, std::memory_order_acquire), nullptr);
-    state.setProperty("convLCFilterMode", (int)convo::consumeAtomic(convLCFilterMode, std::memory_order_acquire), nullptr);
-    state.setProperty("eqLPFFilterMode",  (int)convo::consumeAtomic(eqLPFFilterMode, std::memory_order_acquire), nullptr);
-
-    for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
-    {
-        const double bankSampleRate = getAdaptiveSampleRateBankHz(bankIndex);
-        double adaptiveCoefficients[kAdaptiveNoiseShaperOrder] = {};
-        getAdaptiveCoefficientsForSampleRate(bankSampleRate, adaptiveCoefficients, kAdaptiveNoiseShaperOrder);
-
-        for (int coeffIndex = 0; coeffIndex < kAdaptiveNoiseShaperOrder; ++coeffIndex)
-            state.setProperty(makeAdaptiveCoeffPropertyName(bankSampleRate, coeffIndex),
-                              adaptiveCoefficients[coeffIndex],
-                              nullptr);
-    }
-
-    state.addChild (uiEqEditor.getState(), -1, nullptr);
-    state.addChild (uiConvolverProcessor.getState(), -1, nullptr);
-
-   #if JUCE_DEBUG
-    juce::String reason;
-    const bool validPresetState = validatePresetStateTreeForDebug(state, &reason);
-    jassert(validPresetState);
-    if (!validPresetState)
-        diagLog("[ASSERT] getCurrentState: invalid exported Preset state: " + reason);
-   #endif
-
-    return state;
-}
-#endif
 
 void AudioEngine::setInputHeadroomDb(float db)
 {
@@ -27008,14 +26780,10 @@ void AudioEngine::applyDefaultsForCurrentMode()
         newOutputMakeupDb = 10.0f;
         newConvTrimDb = -6.0f;
     }
-    else if (eqBypassed && !convBypassed)
-    {
-        newInputHeadroomDb = -6.0f;
-        newOutputMakeupDb = 12.0f;
-        newConvTrimDb = 0.0f;
-    }
     else
     {
+        // 残りの全ケース（eqBypassed + !convBypassed, 両方Bypass, Conv→EQ順・両方Active）
+        // は同じデフォルト値を設定する
         newInputHeadroomDb = -6.0f;
         newOutputMakeupDb = 12.0f;
         newConvTrimDb = 0.0f;
@@ -27424,9 +27192,7 @@ void AudioEngine::clearConvolverCache()
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
-#include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
-#include "core/RCUReader.h"
 
 namespace
 {
@@ -27537,9 +27303,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         return;
     }
 
-    // P0-2: 読取入口を単一の callback authority view へ収束。
-    const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
-    auto runtimeReadHandle = makeRuntimeReadHandle(audioCtx);
+    // P0-2: 読取入口を単一の callback authority view へ収束（R21 gate: readAudioRuntimeView）
+    auto runtimeReadHandle = readAudioRuntimeView();
     const auto& runtimeReadHandleRef = runtimeReadHandle;
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandleRef);
     if (runtimeWorld == nullptr)
@@ -31760,8 +31525,15 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
         convo::publishAtomic(retirePressurePublicationThrottleActive_,
             effectiveLevel >= 2, std::memory_order_release);
         // [work37 Phase 9.41] 抑制開始時刻を記録/解除（overflow 連動）
+        // ★ Work39: 通常時は injectBackpressureSignal 経由、Critical 水準のみ緊急直接
         if (effectiveLevel >= 3) {
-            convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+            if (overflowRate > 10.0) {
+                // Critical 水準: 緊急直接書き込み
+                convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+            } else {
+                // 通常時: injectBackpressureSignal 経由（PolicyEngine で評価）
+                m_healthMonitor.injectBackpressureSignal(retireDepth, overflowRate);
+            }
             if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
                 convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
         } else {
@@ -31895,7 +31667,16 @@ void AudioEngine::applyRetirePressurePolicyNoRt(int retirePressureLevel,
 
     convo::publishAtomic(retirePressureCoalescingActive_, mild, std::memory_order_release);
     convo::publishAtomic(retirePressurePublicationThrottleActive_, medium, std::memory_order_release);
-    convo::publishAtomic(retirePressureAdmissionStrict_, severe, std::memory_order_release);
+    // ★ Work39: Critical 水準のみ緊急直接、通常は injectBackpressureSignal 経由
+    if (critical) {
+        // Critical 水準: 緊急直接書き込み
+        convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
+    } else if (severe) {
+        // 通常の重度: injectBackpressureSignal 経由（PolicyEngine で評価）
+        m_healthMonitor.injectBackpressureSignal(retireDepth, 0.0);
+    } else {
+        convo::publishAtomic(retirePressureAdmissionStrict_, false, std::memory_order_release);
+    }
     // [work37 Phase 9.41] 抑制開始時刻を記録/解除
     if (severe) {
         if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
@@ -32467,6 +32248,7 @@ void AudioEngine::processDeferredReleases()
 #include "RuntimeBuilder.h"
 #include "RuntimePublicationOrchestrator.h"
 #include "DSPLifetimeManager.h"
+#include "../NoiseShaperLearner.h"  // ★ Work39: Restore Learner Rollback 用
 
 namespace {
 void diagLog(const juce::String& message)
@@ -33044,24 +32826,21 @@ void AudioEngine::onHealthEvent(const convo::HealthEvent& event) noexcept
         return;
     }
 
-    // ★ A-1: Retire Stall / Retire Age Critical → Builder Throttle + 強制 Reclaim
+    // ★ Work38: Retire Stall / Retire Age Critical → 即時遮断のみ（回復は PolicyEngine に委譲）
     if ((event.eventCode == convo::EVENT_RETIRE_STALL
          || event.eventCode == convo::EVENT_RETIRE_AGE_CRITICAL)
         && event.severity == convo::HealthEvent::Severity::Error)
     {
-        diagLog("[HEALTH] Retire stall detected, throttling rebuild and forcing reclaim");
+        diagLog("[HEALTH] Retire stall detected, throttling rebuild");
 
-        // retirePressureAdmissionStrict_ を直接設定（Builder/Crossfade 抑制）
+        // retirePressureAdmissionStrict_ を即時設定（PolicyEngine 評価より先に遮断）
         convo::publishAtomic(retirePressureAdmissionStrict_, true, std::memory_order_release);
         // [work37 Phase 9.41] 抑制開始時刻を記録
         if (convo::consumeAtomic(suppressionStartUs_, std::memory_order_acquire) == 0)
             convo::publishAtomic(suppressionStartUs_, convo::getCurrentTimeUs(), std::memory_order_release);
 
-        // 強制 retire reclaim を実行
-        tryReclaimResources();
-
-        // 強制診断ダンプ
-        emitEvidenceTickNonRt(true);
+        // ★ tryReclaimResources + emitEvidenceTickNonRt は削除
+        //    PolicyEngine の evaluateAggregate → Recover Action に委譲
         return;
     }
 
@@ -33143,11 +32922,27 @@ void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
             break;
 
         case convo::RecoveryAction::Restore:
-            // [work37 Phase 9.16] RollbackToLastHealthyWorld を含む復元操作
+        {
+            // [work39 Phase 1] Epoch Recovery + Learner Rollback + Idle World
+            // Step1: Epoch Recovery
+            if (retireRuntimeEx_.canRollback()) {
+                retireRuntimeEx_.setRollbackMode(convo::isr::EpochMode::Split);
+                retireRuntimeEx_.requestRollback();
+                ++m_restoreGeneration_;
+            }
+            // 強制回復（Recover との差別化: 二重実行でも安全）
             tryReclaimResources();
             drainDeferredRetireQueues(false);
-            // Rollback 基盤（ISRRetireRuntimeEx）の設定は呼び出し元が行う
+            // Learner Rollback
+            if (lastKnownGoodNoiseShaper_.isValid && noiseShaperLearner)
+                noiseShaperLearner->setState(lastKnownGoodNoiseShaper_.state);
+            // DeferredPublicationFlush
+            if (runtimeOrchestrator_)
+                runtimeOrchestrator_->clearDeferredForShutdown();
+            // Step2（publishIdleWorldOnly）は閉ループ制御後 (Phase 6)
+            m_restorePhase_ = convo::RestorePhase::EpochRecoveryIssued;
             break;
+        }
 
         case convo::RecoveryAction::Safe:
             // [work37 Phase 9.34] EnterSafeMode — Safe Mode World 発行
@@ -33169,6 +32964,39 @@ void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
             break;
     }
     diagLog("[RECOVERY] execute action=" + juce::String(static_cast<int>(action)));
+}
+
+// [work39 Phase 6] Suppression Probe — CAS reserve
+bool AudioEngine::tryReserveProbeBudget() noexcept
+{
+    uint32_t expected = 1;
+    if (convo::compareExchangeAtomic(m_probeBudget_, expected, uint32_t{0},
+                                     std::memory_order_acq_rel, std::memory_order_acquire)) {
+        m_probeState_.publishSeqBefore = convo::consumeAtomic(
+            rtAuxMutable_.runtimePublishCount, std::memory_order_acquire);
+        m_probeState_.pendingRetireBefore = convo::consumeAtomic(
+            retireQueueDepth_, std::memory_order_acquire);
+        m_probeState_.retireAgeBefore = static_cast<uint64_t>(
+            convo::consumeAtomic(reclaimLatency_, std::memory_order_acquire));
+        m_probeState_.startedUs = convo::getCurrentTimeUs();
+        convo::publishAtomic(m_lastProbeUs_, m_probeState_.startedUs,
+                             std::memory_order_release);
+        m_probeState_.reserveState = AudioEngine::ProbeState::ReserveState::Reserved;
+        return true;
+    }
+    return false;
+}
+
+// [work39 Phase 6] Suppression Probe — commit or rollback
+void AudioEngine::commitOrRollbackProbe(bool publishSucceeded, uint64_t seqAfter) noexcept
+{
+    if (publishSucceeded && seqAfter > m_probeState_.publishSeqBefore) {
+        m_probeState_.reserveState = AudioEngine::ProbeState::ReserveState::Committed;
+    } else {
+        convo::fetchAddAtomic(m_probeBudget_, uint32_t{1}, std::memory_order_acq_rel);
+        m_probeState_.reserveState = AudioEngine::ProbeState::ReserveState::RolledBack;
+        ++m_probeState_.failureCount;
+    }
 }
 
 ```
@@ -35768,6 +35596,12 @@ public:
         return *m_retireRouter;
     }
 
+    // [P3-R21] Audio callback observe view — 単一入口
+    [[nodiscard]] inline auto readAudioRuntimeView() noexcept {
+        const convo::RuntimeReaderContext audioCtx{ audioThreadRcuReader, convo::ObserveChannel::Audio };
+        return makeRuntimeReadHandle(audioCtx);
+    }
+
     [[nodiscard]] inline RuntimeReadHandle makeRuntimeReadHandle(
         const convo::RuntimeReaderContext& ctx) noexcept
     {
@@ -36096,6 +35930,12 @@ public:
     void onHealthEvent(const convo::HealthEvent& event) noexcept;  // ★ P1-8: HealthMonitor コールバック
     // [work37 Phase 4.1] PolicyEngine RecoveryAction コールバック
     void executeRecoveryAction(convo::RecoveryAction action) noexcept;
+
+    // [work39 Phase 6] Suppression Probe — CAS reserve/commit/rollback
+    //   Returns true if probe budget was reserved (caller should attempt publication)
+    [[nodiscard]] bool tryReserveProbeBudget() noexcept;
+    //   Call after publication attempt to commit or rollback the probe
+    void commitOrRollbackProbe(bool publishSucceeded, uint64_t seqAfter) noexcept;
 
     // ★ P1-6/8: Publication backlog の公開（RuntimeHealthMonitor → Orchestrator → AudioEngine → bridge）
     [[nodiscard]] uint64_t getPublicationBacklogCount() const noexcept {
@@ -36888,6 +36728,26 @@ public:
     std::atomic<bool> retirePressureCoalescingActive_ { false };
     std::atomic<bool> retirePressurePublicationThrottleActive_ { false };
     std::atomic<bool> retirePressureAdmissionStrict_ { false };
+    // [work39 Phase 1] Restore 世代識別子
+    std::atomic<uint64_t> m_restoreGeneration_{0};
+    std::atomic<convo::RestorePhase> m_restorePhase_{convo::RestorePhase::None};
+    // [work39 Phase 6] HardReset publish 排他用世代番号
+    std::atomic<uint64_t> m_lastHardResetGeneration_{0};
+    // [work39 Phase 6] Suppression Probe
+    std::atomic<uint32_t> m_probeBudget_{0};
+    std::atomic<uint64_t> m_lastProbeUs_{0};
+    std::atomic<bool>     m_suppressionActive_{false};
+    // ProbeState 状態機械（問題E: 二重返却防止）
+    struct ProbeState {
+        uint64_t publishSeqBefore{0};
+        uint64_t pendingRetireBefore{0};
+        uint64_t retireAgeBefore{0};
+        uint64_t startedUs{0};
+        enum class ReserveState : uint8_t { Idle, Reserved, Committed, RolledBack };
+        ReserveState reserveState{ReserveState::Idle};
+        uint32_t failureCount{0};
+    };
+    ProbeState m_probeState_;
     // [work37 Phase 9.41] Suppression開始時刻 — RebuildSuppressionTTL監視用
     std::atomic<uint64_t> suppressionStartUs_ { 0 };
     std::atomic<bool> retireProtectiveModeActive_ { false };
@@ -44875,6 +44735,7 @@ struct RuntimeGraph
 #include "audioengine/CrossfadeRuntime.h"  // ★ P1-C: 完全型必要（isPending/getFadeAgeUs）
 #include "audioengine/AtomicAccess.h"
 #include "core/TimeUtils.h"
+#include "../AudioSegmentBuffer.h"  // ★ Work39: Learner FIFO getNumAvailableSamples
 
 namespace convo {
 
@@ -44913,8 +44774,116 @@ void RuntimeHealthMonitor::tick() noexcept {
     // [work37 Phase 9.40] Runtime Progress Freeze 監視
     checkRuntimeProgressFreeze();
 
+    // [work39 Phase 5] Learner FIFO 監視
+    checkLearnerBackpressure();
+
     // [work37 Phase 9.10 P2] Configuration Drift 監視
     checkConfigurationDrift();
+
+    // [work39 Phase 3] 閉ループ制御（PolicyEngine 評価より前に実行）
+    {
+        const auto lastAction = m_policyEngine_.getLastExecutedAction();
+        if (lastAction > RecoveryAction::Observe) {
+            auto& entry = m_policyEngine_.getEntry(lastAction);
+            if (entry.state == VerificationState::PendingVerification) {
+                const uint64_t nowUs = getCurrentTimeUs();
+                if (nowUs - entry.executedAtUs >= entry.verifyAfterUs) {
+                    const auto nowSnapshot = takeSnapshot();
+                    const auto trend = computeTrend(entry.baselineSnapshot, nowSnapshot);
+                    auto& budget = m_policyEngine_.getBudget();
+
+                    switch (trend) {
+                        case RecoveryOutcome::Recovered:
+                            m_policyEngine_.resetVerification();
+                            budget.recordCycleCompletion(nowUs);
+                            break;
+
+                        case RecoveryOutcome::Improving: {
+                            const uint64_t retireReduction =
+                                entry.lastSnapshot.pendingRetire > nowSnapshot.pendingRetire
+                                ? entry.lastSnapshot.pendingRetire - nowSnapshot.pendingRetire : 0;
+                            const uint64_t baselineRetire = entry.baselineSnapshot.pendingRetire;
+                            const double reductionRatio = baselineRetire > 0
+                                ? static_cast<double>(retireReduction) / baselineRetire : 0.0;
+                            if (reductionRatio < 0.01)
+                                ++entry.stalledCount;
+                            else
+                                entry.stalledCount = 0;
+                            entry.lastSnapshot = nowSnapshot;
+
+                            if (entry.stalledCount >= 3) {
+                                auto next = convo::nextAction(lastAction);
+                                if (m_policyEngine_.canExecute(next)) {
+                                    if (m_actionCallback) m_actionCallback(next);
+                                    m_policyEngine_.markExecuted(next);
+                                    m_policyEngine_.markForVerification(next, nowSnapshot);
+                                    budget.record(next, nowUs);
+                                }
+                            } else {
+                                // [work39 Phase 6] Restore Step2 実行条件（問題A-1/A-2: 強化版）
+                                if (lastAction == RecoveryAction::Restore
+                                    && nowSnapshot.restorePhase == RestorePhase::EpochRecoveryIssued)
+                                {
+                                    const bool epochAdvancing = (nowSnapshot.epochAdvanceCount
+                                        > entry.baselineSnapshot.epochAdvanceCount);
+                                    const uint64_t retireReductionStep2 =
+                                        entry.lastSnapshot.pendingRetire > nowSnapshot.pendingRetire
+                                        ? entry.lastSnapshot.pendingRetire - nowSnapshot.pendingRetire : 0;
+                                    const uint64_t retireBaseline = entry.baselineSnapshot.pendingRetire;
+                                    const double reductionRate = retireBaseline > 0
+                                        ? static_cast<double>(retireReductionStep2) / retireBaseline : 0.0;
+                                    const int64_t ageDelta = static_cast<int64_t>(nowSnapshot.maxRetireAgeUs)
+                                        - static_cast<int64_t>(entry.baselineSnapshot.maxRetireAgeUs);
+                                    constexpr uint64_t kAbsoluteReductionMin = 10;
+                                    const bool absoluteEnough = retireReductionStep2 >= kAbsoluteReductionMin;
+                                    constexpr uint64_t kHealthyThreshold = 256;
+                                    const bool nearlyHealthy = nowSnapshot.pendingRetire <= kHealthyThreshold;
+                                    if (epochAdvancing
+                                        && (reductionRate >= 0.20 || absoluteEnough || nearlyHealthy)
+                                        && ageDelta <= 0
+                                        && m_restoreStep2Callback_) {
+                                        m_restoreStep2Callback_();
+                                    }
+                                }
+                                entry.verifyAfterUs = std::min(
+                                    entry.verifyAfterUs * 2, uint64_t{30'000'000});
+                                entry.executedAtUs = nowUs;
+                            }
+                            break;
+                        }
+
+                        case RecoveryOutcome::Stalled:
+                        case RecoveryOutcome::Worsening: {
+                            auto next = convo::nextAction(lastAction);
+                            if (m_policyEngine_.canExecute(next)) {
+                                if (m_actionCallback) m_actionCallback(next);
+                                m_policyEngine_.markExecuted(next);
+                                m_policyEngine_.markForVerification(next, nowSnapshot);
+                                budget.record(next, nowUs);
+                            }
+                            break;
+                        }
+
+                        default:
+                            break;
+                    }
+
+                    // Storm detection: 同Action再突入→Critical固定
+                    if (budget.isStormDetected(lastAction, nowUs)) {
+                        if (m_actionCallback) m_actionCallback(RecoveryAction::Critical);
+                        m_policyEngine_.markExecutedCritical(RecoveryAction::Critical);
+                        budget.reset();
+                    }
+
+                    // Budget exhausted → Critical
+                    if (budget.isExhausted(nowUs)) {
+                        if (m_actionCallback) m_actionCallback(RecoveryAction::Critical);
+                        m_policyEngine_.markExecutedCritical(RecoveryAction::Critical);
+                    }
+                }
+            }
+        }
+    }
 
     // [work37 Phase 4.1] Policy Engine 評価: 全 MonitorState から統合判定
     auto decision = m_policyEngine_.evaluateAggregate(
@@ -44925,15 +44894,15 @@ void RuntimeHealthMonitor::tick() noexcept {
         m_prevRetireAgeState,
         m_prevCrossfadeDropState);
 
-    // [work37 Phase 4.4] 背圧信号を PolicyEngine 評価に反映
+    // [work37 Phase 4.4] 背圧信号を PolicyEngine 評価に反映 — exchange(0) でリセット
     if (m_backpressureInjected_) {
-        // fallback queue の状態が深刻なら Throttle を追加
-        if (m_injectedFallbackSize_ > 500) {
-            decision.actions |= toBit(RecoveryAction::Throttle);
-        }
+        const auto maxFb = convo::exchangeAtomic(m_maxFallbackSize_, uint64_t{0},
+                                                  std::memory_order_acq_rel);
+        const auto maxOr = convo::exchangeAtomic(m_maxOverflowRate_, 0.0,
+                                                  std::memory_order_acq_rel);
+        if (maxFb > 500) decision.actions |= toBit(RecoveryAction::Throttle);
+        if (maxOr > 5.0) decision.actions |= toBit(RecoveryAction::Critical);
         m_backpressureInjected_ = false;
-        m_injectedFallbackSize_ = 0;
-        m_injectedOverflowRate_ = 0.0;
     }
 
     // [work37 Phase 9.1] Learner Health Policy:
@@ -44962,6 +44931,74 @@ void RuntimeHealthMonitor::tick() noexcept {
         if (m_policyEngine_.canExecute(action)) {
             m_actionCallback(action);
             m_policyEngine_.markExecuted(action);
+            // [work39 Phase 4] Budget 記録
+            auto& budget = m_policyEngine_.getBudget();
+            budget.record(action, getCurrentTimeUs());
+            if (budget.isExhausted(getCurrentTimeUs())) {
+                m_actionCallback(RecoveryAction::Critical);
+                m_policyEngine_.markExecutedCritical(RecoveryAction::Critical);
+            }
+            // [work39 Phase 3] Verification 開始
+            m_policyEngine_.markForVerification(action, takeSnapshot());
+        }
+    }
+
+    // [work39 Phase 7] Critical 出口評価（CriticalExitCondition 構造体使用）
+    if (convo::consumeAtomic(m_healthState_, std::memory_order_acquire)
+        == ISRHealthState::Critical) {
+        CriticalExitCondition exitCond;
+
+        // 条件1: 全 MonitorState が Normal
+        exitCond.allMonitorsNormal = (m_prevRetireState == MonitorState::Normal)
+            && (m_prevPublicationState == MonitorState::Normal)
+            && (m_prevReaderSlotState == MonitorState::Normal)
+            && (m_prevOverflowRateState == MonitorState::Normal)
+            && (m_prevRetireAgeState == MonitorState::Normal)
+            && (m_prevConfigDivergenceState_ == MonitorState::Normal)
+            && (m_prevLearnerBackpressureState_ == MonitorState::Normal);
+
+        // 条件2: 閉ループ制御 Idle
+        exitCond.noRecoveryActionRunning = m_policyEngine_.getEntry(
+            m_policyEngine_.getLastExecutedAction()).isIdle()
+            && !m_policyEngine_.hasPendingVerification();
+
+        // 条件2b: Suppression 非アクティブ（MonitorState に吸収済み: 常時 true）
+        exitCond.suppressionInactive = true;
+
+        // 条件3: RetireDepth + RetireAge 実メトリクス確認
+        exitCond.pendingRetire = m_retireRouter
+            ? m_retireRouter->pendingRetireCount() : 0;
+        exitCond.retireAgeUs = m_maxRetireAgeRef
+            ? convo::consumeAtomic(*m_maxRetireAgeRef, std::memory_order_acquire)
+            : (m_maxRetireAgeDoubleRef
+                ? static_cast<uint64_t>(convo::consumeAtomic(*m_maxRetireAgeDoubleRef,
+                                                              std::memory_order_acquire))
+                : 0);
+        const bool readerHealthy = (m_retireRouter == nullptr
+            || m_retireRouter->activeReaderCount() == 0);
+        constexpr uint64_t kHealthyThreshold = 256;
+        constexpr uint64_t kHealthyAgeUs = 3 * 1'000'000;
+        const bool retireAgeHealthy = exitCond.retireAgeUs < kHealthyAgeUs;
+        bool metricsHealthy = exitCond.pendingRetire < kHealthyThreshold
+            && retireAgeHealthy && readerHealthy;
+        if (exitCond.pendingRetire >= kHealthyThreshold)
+            exitCond.blocker = CriticalExitBlocker::PendingRetireExceeded;
+        else if (!retireAgeHealthy)
+            exitCond.blocker = CriticalExitBlocker::RetireAgeExceeded;
+        exitCond.allMonitorsNormal = exitCond.allMonitorsNormal && metricsHealthy;
+
+        // 条件4: 安定60秒継続
+        if (exitCond.allMonitorsNormal && exitCond.noRecoveryActionRunning) {
+            const uint64_t nowUs = getCurrentTimeUs();
+            if (m_criticalExitStableStartUs_ == 0)
+                m_criticalExitStableStartUs_ = nowUs;
+            exitCond.stableDuration = (nowUs - m_criticalExitStableStartUs_) >= 60'000'000;
+        } else {
+            m_criticalExitStableStartUs_ = 0;
+        }
+
+        if (exitCond.canExit()) {
+            // 次 tick の updateHealthState() で Healthy 復帰が期待できる
         }
     }
 
@@ -45248,6 +45285,145 @@ void RuntimeHealthMonitor::checkCrossfadeEventDrop() noexcept
     m_lastObservedDropCount = current;
 }
 
+// [work39 Phase 5] Learner FIFO 監視
+void RuntimeHealthMonitor::checkLearnerBackpressure() noexcept
+{
+    if (m_learnerRunningRef == nullptr) return;
+    const bool learnerActive = convo::consumeAtomic(*m_learnerRunningRef,
+                                                     std::memory_order_acquire);
+
+    // Learner restart detection → EMA reset
+    if (!learnerActive) { m_learnerWasActive_ = false; return; }
+    if (!m_learnerWasActive_) {
+        m_fifoEma_ = -1.0;  m_lastFifoEma_ = 0.0;
+        m_learnerFifoHighSinceUs_ = 0;  m_learnerWasActive_ = true;
+    }
+
+    const int available = m_learnerSegmentBuffer_
+        ? m_learnerSegmentBuffer_->getNumAvailableSamples() : 0;
+    constexpr int kCapacity = 3'840'000;
+    const double fifoUsage = static_cast<double>(available) / kCapacity;
+
+    // EMA (alpha=0.3)
+    constexpr double kEmaAlpha = 0.3;
+    if (m_fifoEma_ < 0.0) m_fifoEma_ = fifoUsage;
+    m_fifoEma_ = kEmaAlpha * fifoUsage + (1.0 - kEmaAlpha) * m_fifoEma_;
+
+    // Time-normalized slope
+    const uint64_t nowUs = getCurrentTimeUs();
+    const double elapsedSec = (m_lastFifoTickUs_ > 0)
+        ? (nowUs - m_lastFifoTickUs_) / 1'000'000.0 : 1.0;
+    const double slope = (m_fifoEma_ - m_lastFifoEma_) / std::max(elapsedSec, 0.001);
+    m_lastFifoEma_ = m_fifoEma_;  m_lastFifoTickUs_ = nowUs;
+
+    // 2-stage thresholds via emitOnTransition
+    const uint64_t fifoUsagePct = static_cast<uint64_t>(fifoUsage * 100.0);
+    if (fifoUsage > 0.95 && slope >= 0.0) {
+        emitOnTransition(m_prevLearnerBackpressureState_, MonitorState::Error,
+            HealthEvent::Severity::Error, EVENT_LEARNER_BACKPRESSURE_ERROR, fifoUsagePct);
+    } else if (fifoUsage > 0.85 && slope >= 0.0) {
+        emitOnTransition(m_prevLearnerBackpressureState_, MonitorState::Warning,
+            HealthEvent::Severity::Warning, EVENT_LEARNER_BACKPRESSURE_WARNING, fifoUsagePct);
+    } else if (fifoUsage <= 0.80 || slope < -0.01) {
+        m_prevLearnerBackpressureState_ = MonitorState::Normal;
+    }
+}
+
+// [work39 Phase 3] TrendSnapshot 取得
+TrendSnapshot RuntimeHealthMonitor::takeSnapshot() const noexcept
+{
+    TrendSnapshot snap;
+    if (m_retireRouter) {
+        snap.pendingRetire = m_retireRouter->pendingRetireCount();
+        const auto stuckInfo = m_retireRouter->detectStuckReaders(10);
+        snap.readerStuckCount = stuckInfo.isStuck ? 1 : 0;
+        snap.activeReaderCount = m_retireRouter->activeReaderCount();
+    }
+    if (m_publicationSequenceRef_)
+        snap.publicationSeq = convo::consumeAtomic(*m_publicationSequenceRef_,
+                                                     std::memory_order_acquire);
+    if (m_maxRetireAgeRef)
+        snap.maxRetireAgeUs = convo::consumeAtomic(*m_maxRetireAgeRef,
+                                                     std::memory_order_acquire);
+    else if (m_maxRetireAgeDoubleRef)
+        snap.maxRetireAgeUs = static_cast<uint64_t>(
+            convo::consumeAtomic(*m_maxRetireAgeDoubleRef, std::memory_order_acquire));
+    if (m_epochAdvanceCountRef_)
+        snap.epochAdvanceCount = convo::consumeAtomic(*m_epochAdvanceCountRef_,
+                                                       std::memory_order_acquire);
+    if (m_lastCompletedEpochRef_)
+        snap.lastCompletedEpoch = convo::consumeAtomic(*m_lastCompletedEpochRef_,
+                                                        std::memory_order_acquire);
+    // activeFaultMask は HealthMonitor の監視状態から合成
+    uint32_t faultMask = 0;
+    if (m_prevRetireState == MonitorState::Error)  faultMask |= kFaultRetire;
+    if (m_prevPublicationState == MonitorState::Error) faultMask |= kFaultPublication;
+    if (m_prevReaderSlotState == MonitorState::Error)  faultMask |= kFaultReader;
+    if (m_prevOverflowRateState == MonitorState::Error) faultMask |= kFaultOverflow;
+    snap.activeFaultMask = faultMask;
+    snap.freezeDetected = (m_prevProgressFreezeState_ == MonitorState::Error);
+    return snap;
+}
+
+// [work39 Phase 3] 傾向判定（computeTrend）
+RecoveryOutcome RuntimeHealthMonitor::computeTrend(
+    const TrendSnapshot& before, const TrendSnapshot& now) const noexcept
+{
+    // Step 0: 主要delta計算
+    const int64_t retireDelta = static_cast<int64_t>(now.pendingRetire)
+                              - static_cast<int64_t>(before.pendingRetire);
+    const int64_t ageDelta    = static_cast<int64_t>(now.maxRetireAgeUs)
+                              - static_cast<int64_t>(before.maxRetireAgeUs);
+    const int64_t pubDelta    = static_cast<int64_t>(now.publicationSeq)
+                              - static_cast<int64_t>(before.publicationSeq);
+    const bool faultMaskIncreased = (now.activeFaultMask > before.activeFaultMask);
+
+    // Step 1: ProgressFreeze 監視（最優先、多軸評価）
+    if (now.freezeDetected) {
+        const bool retireProgress = before.pendingRetire > 0
+            && (now.pendingRetire * 100) < (before.pendingRetire * 95);
+        const bool readerProgress = (now.readerStuckCount < before.readerStuckCount);
+        const bool epochProgress = (now.epochAdvanceCount > before.epochAdvanceCount);
+        const bool pubProgress = (now.publicationSeq > before.publicationSeq);
+        const bool multiAxisImprovement = retireProgress
+            || (readerProgress && epochProgress)
+            || (pubProgress && readerProgress);
+        if (!multiAxisImprovement)
+            return RecoveryOutcome::Worsening;
+    }
+
+    // Step 2: Recovered（全軸正常）
+    constexpr uint64_t kRecoveredRetireLimit = 256;
+    const bool idleRecovered = (now.pendingRetire == 0 && now.maxRetireAgeUs == 0);
+    const bool retireWithinLimit = now.pendingRetire <= kRecoveredRetireLimit;
+    const bool retireTrendImproving = (retireDelta < 0);
+    if (!faultMaskIncreased
+        && (pubDelta > 0 || idleRecovered)
+        && (retireTrendImproving || retireWithinLimit)
+        && ageDelta <= 0
+        && now.readerStuckCount == 0 && now.activeReaderCount < 64)
+        return RecoveryOutcome::Recovered;
+
+    // Step 3: reader異常（Improvingより優先）
+    if (now.readerStuckCount > before.readerStuckCount)
+        return RecoveryOutcome::Worsening;
+    if (now.pendingRetire > 0 && now.activeReaderCount == 0 && before.activeReaderCount > 0)
+        return RecoveryOutcome::Worsening;
+
+    // Step 4: Worsening
+    if (faultMaskIncreased || retireDelta > 0 || ageDelta > 0)
+        return RecoveryOutcome::Worsening;
+
+    // Step 5: Improving
+    const bool retireImproving = (retireDelta < -2);
+    const bool readerImproving = (now.readerStuckCount < before.readerStuckCount);
+    if ((retireImproving || readerImproving) && !faultMaskIncreased)
+        return RecoveryOutcome::Improving;
+
+    // Step 6: Stalled
+    return RecoveryOutcome::Stalled;
+}
+
 // ★ Practical-4/6: Reader Slot Usage Telemetry（50%/75%/90% 閾値、capacity 動的取得）
 void RuntimeHealthMonitor::checkReaderSlotUsage() noexcept
 {
@@ -45398,20 +45574,43 @@ void RuntimeHealthMonitor::checkOverflowRate() noexcept
     }
 }
 
-// ★ Practical-5: Retire Reclaim Latency 監視
+// ★ Work38: Retire Reclaim Latency 監視（型安全版）
 void RuntimeHealthMonitor::checkRetireReclaimLatency() noexcept
 {
-    if (!m_maxRetireAgeRef) return;
-    uint64_t maxAgeUs = convo::consumeAtomic(*m_maxRetireAgeRef, std::memory_order_acquire);
+    if (m_maxRetireAgeDoubleRef) {
+        // ★ double 版: reclaimLatency_ は ms 単位で publish → μs に変換して判定
+        const double elapsedMs = convo::consumeAtomic(
+            *m_maxRetireAgeDoubleRef, std::memory_order_acquire);
+        const uint64_t maxAgeUs = static_cast<uint64_t>(elapsedMs * 1000.0);
 
-    if (maxAgeUs > kRetireAgeCriticalUs) {
-        emitOnTransition(m_prevRetireAgeState, MonitorState::Error,
-            HealthEvent::Severity::Error, EVENT_RETIRE_AGE_CRITICAL,
-            maxAgeUs / 1000);
-    } else if (maxAgeUs > kRetireAgeWarningUs) {
-        emitOnTransition(m_prevRetireAgeState, MonitorState::Warning,
-            HealthEvent::Severity::Warning, EVENT_RETIRE_AGE_WARNING,
-            maxAgeUs / 1000);
+        if (maxAgeUs > kRetireAgeCriticalUs) {
+            emitOnTransition(m_prevRetireAgeState, MonitorState::Error,
+                HealthEvent::Severity::Error, EVENT_RETIRE_AGE_CRITICAL,
+                maxAgeUs / 1000);
+        } else if (maxAgeUs > kRetireAgeWarningUs) {
+            emitOnTransition(m_prevRetireAgeState, MonitorState::Warning,
+                HealthEvent::Severity::Warning, EVENT_RETIRE_AGE_WARNING,
+                maxAgeUs / 1000);
+        } else {
+            // ★ Work38: 正常復帰イベント — 3状態遷移を完全カバー
+            emitOnTransition(m_prevRetireAgeState, MonitorState::Normal,
+                HealthEvent::Severity::Info, EVENT_RETIRE_AGE_NORMAL,
+                maxAgeUs / 1000);
+        }
+    } else if (m_maxRetireAgeRef) {
+        // ★ uint64_t 版: 従来ロジック（他からの呼び出しのために存置）
+        const uint64_t maxAgeUs = convo::consumeAtomic(
+            *m_maxRetireAgeRef, std::memory_order_acquire);
+
+        if (maxAgeUs > kRetireAgeCriticalUs) {
+            emitOnTransition(m_prevRetireAgeState, MonitorState::Error,
+                HealthEvent::Severity::Error, EVENT_RETIRE_AGE_CRITICAL,
+                maxAgeUs / 1000);
+        } else if (maxAgeUs > kRetireAgeWarningUs) {
+            emitOnTransition(m_prevRetireAgeState, MonitorState::Warning,
+                HealthEvent::Severity::Warning, EVENT_RETIRE_AGE_WARNING,
+                maxAgeUs / 1000);
+        }
     }
 }
 
@@ -45714,8 +45913,8 @@ void RuntimeHealthMonitor::reset() noexcept
     // [work37 Phase 4.1] PolicyEngine もリセット
     m_policyEngine_.reset();
     m_backpressureInjected_ = false;
-    m_injectedFallbackSize_ = 0;
-    m_injectedOverflowRate_ = 0.0;
+    convo::publishAtomic(m_maxFallbackSize_, uint64_t{0}, std::memory_order_release);
+    convo::publishAtomic(m_maxOverflowRate_, 0.0, std::memory_order_release);
     // [work37] 新規監視状態のリセット
     m_retireStallStartUs_ = 0;
     m_configDivergenceStartUs_ = 0;
@@ -45729,6 +45928,16 @@ void RuntimeHealthMonitor::reset() noexcept
     m_prevProgressFreezeState_ = MonitorState::Normal;
     m_lastObservedPubSeq_ = 0;
     m_lastObservedRetireTs_ = 0;
+    // [work39] 新規フィールドのリセット
+    m_prevLearnerBackpressureState_ = MonitorState::Normal;
+    m_learnerWasActive_ = false;
+    m_fifoEma_ = -1.0;
+    m_lastFifoEma_ = 0.0;
+    m_lastFifoTickUs_ = 0;
+    m_learnerFifoHighSinceUs_ = 0;
+    m_backpressureWindow_.reset();
+    // [work39 Phase 7] Critical 出口状態リセット
+    m_criticalExitStableStartUs_ = 0;
 }
 
 } // namespace convo
@@ -45744,6 +45953,8 @@ void RuntimeHealthMonitor::reset() noexcept
 #include <functional>
 #include "AtomicAccess.h"
 #include "RuntimePolicyEngine.h"  // ★ work37 Phase 4: PolicyEngine 連携
+
+class AudioSegmentBuffer;  // ★ Work39: Learner FIFO 監視用（global scope）
 
 namespace convo {
 
@@ -45782,6 +45993,11 @@ static constexpr uint32_t EVENT_READER_STUCK         = 3001;
 static constexpr uint32_t EVENT_READER_SLOT_USAGE     = 3010;  // ★ P1-B/Practical-4
 static constexpr uint32_t EVENT_CROSSFADE_TIMEOUT    = 4001;  // ★ P1-C/Practical-2
 static constexpr uint32_t EVENT_CROSSFADE_EVENT_DROP = 4002;  // ★ P1-C/Practical-6
+// ★ Work39: Learner FIFO Backpressure
+static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_WARNING = 5001;  // FIFO 85%+
+static constexpr uint32_t EVENT_LEARNER_BACKPRESSURE_ERROR   = 5002;  // FIFO 95%+
+// ★ Work38: Retire Age 正常復帰イベント（emitOnTransition 3状態遷移完全カバー）
+static constexpr uint32_t EVENT_RETIRE_AGE_NORMAL     = 1009;  // ★ Work38
 static constexpr uint32_t EVENT_RETIRE_AGE_WARNING   = 1010;  // ★ Practical-5
 static constexpr uint32_t EVENT_RETIRE_AGE_CRITICAL  = 1011;  // ★ Practical-5
 
@@ -45799,6 +46015,37 @@ static constexpr uint64_t kRetireAgeCriticalUs = 30'000'000;  // 30秒
 
 enum class MonitorState : uint8_t { Normal, Warning, Error };
 using HealthEventCallback = std::function<void(const HealthEvent&)>;
+
+// [work39 Phase 7] CriticalExitBlocker — Critical 出口ブロック理由（診断用）
+enum class CriticalExitBlocker : uint8_t {
+    None,
+    MonitorNotNormal,
+    SuppressionActive,
+    RecoveryRunning,
+    StableDurationInsufficient,
+    PendingRetireExceeded,
+    RetireAgeExceeded
+};
+
+// [work39 Phase 7] CriticalExitCondition — Critical 出口評価構造体
+struct CriticalExitCondition {
+    bool allMonitorsNormal{false};
+    bool suppressionInactive{false};
+    bool noRecoveryActionRunning{false};
+    bool stableDuration{false};
+    CriticalExitBlocker blocker{CriticalExitBlocker::None};
+    uint64_t pendingRetire{0};
+    uint64_t retireAgeUs{0};
+
+    [[nodiscard]] bool canExit() noexcept {
+        if (!allMonitorsNormal) { blocker = CriticalExitBlocker::MonitorNotNormal; return false; }
+        if (!suppressionInactive) { blocker = CriticalExitBlocker::SuppressionActive; return false; }
+        if (!noRecoveryActionRunning) { blocker = CriticalExitBlocker::RecoveryRunning; return false; }
+        if (!stableDuration) { blocker = CriticalExitBlocker::StableDurationInsufficient; return false; }
+        blocker = CriticalExitBlocker::None;
+        return true;
+    }
+};
 
 /**
  * RuntimeHealthMonitor: Pull型監視エンジン。
@@ -45822,7 +46069,15 @@ public:
     void setCrossfadeRuntime(const isr::CrossfadeRuntime* rt) noexcept { m_crossfadeRuntime = rt; }
     // ★ Practical-2/5/6: 診断用参照設定
     void setCrossfadeEventDropRef(const std::atomic<uint64_t>* ref) noexcept { m_crossfadeEventDropRef = ref; }
-    void setMaxRetireAgeRef(const std::atomic<uint64_t>* ref) noexcept { m_maxRetireAgeRef = ref; }
+    void setMaxRetireAgeRef(const std::atomic<uint64_t>* ref) noexcept {
+        m_maxRetireAgeRef = ref;
+        m_maxRetireAgeDoubleRef = nullptr;
+    }
+    // ★ Work38: double 版オーバーロード — reclaimLatency_ 用（型安全）
+    void setMaxRetireAgeRef(const std::atomic<double>* ref) noexcept {
+        m_maxRetireAgeDoubleRef = ref;
+        m_maxRetireAgeRef = nullptr;
+    }
     void setReaderSlotRef(const std::atomic<uint32_t>* ref) noexcept { m_readerSlotRef = ref; }
     void setOverflowCountRef(const std::atomic<uint64_t>* ref) noexcept { m_overflowCountRef = ref; }
 
@@ -45836,9 +46091,18 @@ public:
     using RecoveryActionCallback = std::function<void(RecoveryAction)>;
     void setActionCallback(RecoveryActionCallback cb) noexcept { m_actionCallback = std::move(cb); }
 
+    // [work39 Phase 6] RestoreStep2 callback — publishIdleWorldOnly(HardReset) 発行用
+    using RestoreStep2Callback = std::function<void()>;
+    void setRestoreStep2Callback(RestoreStep2Callback cb) noexcept { m_restoreStep2Callback_ = std::move(cb); }
+
     // [work37 Phase 9.1] Learner Health Policy 用 — Retire Stall の継続時間を追跡
     void setLearnerRunningRef(const std::atomic<bool>* ref) noexcept { m_learnerRunningRef = ref; }
     [[nodiscard]] uint64_t getRetireStallDurationUs() const noexcept;
+
+    // [work39 Phase 5] Learner FIFO 監視用セッター
+    void setLearnerSegmentBuffer(::AudioSegmentBuffer* buf) noexcept { m_learnerSegmentBuffer_ = buf; }
+    void setEpochAdvanceCountRef(const std::atomic<uint64_t>* ref) noexcept { m_epochAdvanceCountRef_ = ref; }
+    void setLastCompletedEpochRef(const std::atomic<uint64_t>* ref) noexcept { m_lastCompletedEpochRef_ = ref; }
 
     // [work37 Phase 9.2] Configuration Divergence 監視用参照設定
     void setCommittedGenRef(const std::atomic<uint64_t>* ref) noexcept { m_lastCommittedGenRef_ = ref; }
@@ -45872,10 +46136,23 @@ public:
         m_manualOversamplingRef_ = ref;
     }
 
-    // [work37 Phase 4.4] 背圧信号注入（drainDeferredRetireQueues から）
+    // [work37 Phase 4.4] 背圧信号注入（drainDeferredRetireQueues から）— CAS max update
     void injectBackpressureSignal(std::size_t fallbackSize, double overflowRate) noexcept {
-        m_injectedFallbackSize_ = fallbackSize;
-        m_injectedOverflowRate_ = overflowRate;
+        // atomic CAS max update for fallbackSize
+        uint64_t current = convo::consumeAtomic(m_maxFallbackSize_, std::memory_order_acquire);
+        while (fallbackSize > current) {
+            if (convo::compareExchangeAtomic(m_maxFallbackSize_, current,
+                static_cast<uint64_t>(fallbackSize), std::memory_order_acq_rel,
+                std::memory_order_acquire)) break;
+            current = convo::consumeAtomic(m_maxFallbackSize_, std::memory_order_acquire);
+        }
+        // atomic CAS max update for overflowRate
+        double rateCurrent = convo::consumeAtomic(m_maxOverflowRate_, std::memory_order_acquire);
+        while (overflowRate > rateCurrent) {
+            if (convo::compareExchangeAtomic(m_maxOverflowRate_, rateCurrent,
+                overflowRate, std::memory_order_acq_rel, std::memory_order_acquire)) break;
+            rateCurrent = convo::consumeAtomic(m_maxOverflowRate_, std::memory_order_acquire);
+        }
         m_backpressureInjected_ = true;
     }
 
@@ -45928,6 +46205,12 @@ private:
     void checkRuntimeProgressFreeze() noexcept;
     // [work37 Phase 9.10 P2] Configuration Drift 監視（oversamplingFactor 乖離）
     void checkConfigurationDrift() noexcept;
+    // [work39 Phase 3] 閉ループ制御
+    [[nodiscard]] TrendSnapshot takeSnapshot() const noexcept;
+    [[nodiscard]] RecoveryOutcome computeTrend(const TrendSnapshot& before,
+                                                const TrendSnapshot& now) const noexcept;
+    // [work39 Phase 5] Learner FIFO 監視
+    void checkLearnerBackpressure() noexcept;
     // ★ P1-C/Practical-2/4/5/6: 追加監視
     void checkCrossfadeTimeout() noexcept;
     void checkCrossfadeEventDrop() noexcept;
@@ -45953,6 +46236,8 @@ private:
     const convo::isr::CrossfadeRuntime* m_crossfadeRuntime = nullptr;
     const std::atomic<uint64_t>* m_crossfadeEventDropRef = nullptr;
     const std::atomic<uint64_t>* m_maxRetireAgeRef = nullptr;
+    // ★ Work38: double 版参照（reclaimLatency_ 用）
+    const std::atomic<double>* m_maxRetireAgeDoubleRef{nullptr};
     const std::atomic<uint32_t>* m_readerSlotRef = nullptr;
     const std::atomic<uint64_t>* m_overflowCountRef = nullptr;   // ★ Practical-3
     // ★ P1-C drop: 差分検出用ローカル状態
@@ -45977,10 +46262,26 @@ private:
     // [work37 Phase 4.1/9.1] PolicyEngine メンバ
     RuntimePolicyEngine m_policyEngine_;
     RecoveryActionCallback m_actionCallback;
+    RestoreStep2Callback m_restoreStep2Callback_;  // [work39 Phase 6] Restore Step2
 
     // [work37 Phase 9.1] Retire Stall 継続時間追跡
     uint64_t m_retireStallStartUs_{0};
     const std::atomic<bool>* m_learnerRunningRef{nullptr};
+
+    // [work39 Phase 5] Learner FIFO 監視
+    MonitorState m_prevLearnerBackpressureState_{MonitorState::Normal};
+    bool     m_learnerWasActive_{false};
+    double   m_fifoEma_{-1.0};        // -1.0 = uninitialized
+    double   m_lastFifoEma_{0.0};
+    uint64_t m_lastFifoTickUs_{0};
+    uint64_t m_learnerFifoHighSinceUs_{0};
+    ::AudioSegmentBuffer* m_learnerSegmentBuffer_{nullptr};
+    // epochAdvance / lastCompletedEpoch（問題A-1: Restore効果測定用）
+    const std::atomic<uint64_t>* m_epochAdvanceCountRef_{nullptr};
+    const std::atomic<uint64_t>* m_lastCompletedEpochRef_{nullptr};
+
+    // [work39 Phase 7] Critical 出口 安定60秒継続追跡
+    uint64_t m_criticalExitStableStartUs_{0};
 
     // [work37 Phase 9.2] Configuration Divergence 追跡
     MonitorState m_prevConfigDivergenceState_{MonitorState::Normal};
@@ -46022,9 +46323,42 @@ private:
     RuntimeRecoveryScore computeRuntimeRecoveryScore() const noexcept;
 
     // [work37 Phase 4.4] 背圧信号（drainDeferredRetireQueues から注入）
+    // ★ Work39: CAS max update 版 + BackpressureWindow
     bool m_backpressureInjected_{false};
-    std::size_t m_injectedFallbackSize_{0};
-    double m_injectedOverflowRate_{0.0};
+    std::atomic<uint64_t> m_maxFallbackSize_{0};
+    std::atomic<double> m_maxOverflowRate_{0.0};
+
+    // BackpressureWindow（問題F: peak + average + count の統計モデル）
+    struct BackpressureWindow {
+        uint64_t maxSize{0};
+        uint64_t sumSize{0};
+        uint32_t sampleCount{0};
+        double   maxRate{0.0};
+        double   sumRate{0.0};
+
+        void record(std::size_t size, double rate) noexcept {
+            if (size > maxSize) maxSize = size;
+            maxRate = (rate > maxRate) ? rate : maxRate;
+            sumSize += size;
+            sumRate += rate;
+            ++sampleCount;
+        }
+
+        [[nodiscard]] double averageSize() const noexcept {
+            return sampleCount > 0
+                ? static_cast<double>(sumSize) / sampleCount : 0.0;
+        }
+
+        [[nodiscard]] double averageRate() const noexcept {
+            return sampleCount > 0 ? sumRate / sampleCount : 0.0;
+        }
+
+        void reset() noexcept {
+            maxSize = 0; sumSize = 0; sampleCount = 0;
+            maxRate = 0.0; sumRate = 0.0;
+        }
+    };
+    BackpressureWindow m_backpressureWindow_;
 
     // [work37 Phase 8.2] EmergencyDrain 実行時制御
     std::atomic<bool> m_emergencyDrainRequested_{false};
@@ -46052,7 +46386,7 @@ RuntimePolicyEngine::RuntimePolicyEngine() noexcept
     // 各 RecoveryAction のデフォルト Cooldown を設定（μs）
     m_cooldowns[static_cast<size_t>(RecoveryAction::Observe)].cooldownUs  = 0;
     m_cooldowns[static_cast<size_t>(RecoveryAction::Throttle)].cooldownUs = 1'000'000;     // 1秒
-    m_cooldowns[static_cast<size_t>(RecoveryAction::Recover)].cooldownUs = 5'000'000;     // 5秒
+    m_cooldowns[static_cast<size_t>(RecoveryAction::Recover)].cooldownUs = 10'000'000;    // ★ Work38: 5→10秒（誤検出時の無駄なAction発行抑制）
     m_cooldowns[static_cast<size_t>(RecoveryAction::Restore)].cooldownUs = 30'000'000;    // 30秒
     m_cooldowns[static_cast<size_t>(RecoveryAction::Safe)].cooldownUs   = 60'000'000;    // 60秒
     m_cooldowns[static_cast<size_t>(RecoveryAction::Critical)].cooldownUs = 120'000'000;  // 120秒
@@ -46201,6 +46535,134 @@ void RuntimePolicyEngine::reset() noexcept
     for (auto& entry : m_cooldowns) {
         entry.lastExecutedUs = 0;
     }
+    m_lastAction_ = RecoveryAction::Observe;
+    for (auto& ve : m_verificationEntries_)
+        ve.state = VerificationState::Idle;
+    m_budget_.reset();
+}
+
+// [work39 Phase 3] Verification
+void RuntimePolicyEngine::markForVerification(RecoveryAction action, const TrendSnapshot& snapshot) noexcept
+{
+    const auto idx = static_cast<size_t>(action);
+    if (idx >= static_cast<size_t>(RecoveryAction::_Count)) return;
+    m_lastAction_ = action;
+    auto& entry = m_verificationEntries_[idx];
+    entry.state = VerificationState::PendingVerification;
+    entry.executedAtUs = getNowUs();
+    entry.verifyAfterUs = 50'000;  // 50ms初期値
+    entry.restoreGeneration = snapshot.restoreGeneration;
+    entry.baselineSnapshot = snapshot;
+    entry.lastSnapshot = snapshot;
+    entry.stalledCount = 0;
+}
+
+VerificationEntry& RuntimePolicyEngine::getEntry(RecoveryAction action) noexcept
+{
+    return m_verificationEntries_[static_cast<size_t>(action)];
+}
+
+const VerificationEntry& RuntimePolicyEngine::getEntry(RecoveryAction action) const noexcept
+{
+    return m_verificationEntries_[static_cast<size_t>(action)];
+}
+
+void RuntimePolicyEngine::resetVerification() noexcept
+{
+    for (auto& ve : m_verificationEntries_) {
+        ve.state = VerificationState::Idle;
+        ve.stalledCount = 0;
+    }
+    m_lastAction_ = RecoveryAction::Observe;
+}
+
+bool RuntimePolicyEngine::hasPendingVerification() const noexcept
+{
+    for (const auto& ve : m_verificationEntries_) {
+        if (ve.state == VerificationState::PendingVerification)
+            return true;
+    }
+    return false;
+}
+
+void RuntimePolicyEngine::markExecutedCritical(RecoveryAction action) noexcept
+{
+    // Critical時: verification をクリア（hasPendingVerification()=false）
+    const auto idx = static_cast<size_t>(action);
+    if (idx < static_cast<size_t>(RecoveryAction::_Count)) {
+        m_verificationEntries_[idx].state = VerificationState::Idle;
+    }
+    m_lastAction_ = action;
+    markExecuted(action);
+}
+
+// [work39 Phase 4] Budget アクセス
+RecoveryBudget& RuntimePolicyEngine::getBudget() noexcept
+{
+    return m_budget_;
+}
+
+const RecoveryBudget& RuntimePolicyEngine::getBudget() const noexcept
+{
+    return m_budget_;
+}
+
+// [work39 Phase 4] RecoveryBudget 実装
+bool RecoveryBudget::isExhausted(uint64_t nowUs) const noexcept
+{
+    if (latched) return true;
+    if (nowUs - windowStartUs > kBudgetWindowUs) return false;
+    return cycleCountInWindow >= kMaxCyclesPerWindow
+        || criticalCount >= kMaxCriticalCount
+        || recoverCount >= kMaxRecoverCount;
+}
+
+bool RecoveryBudget::isStormDetected(RecoveryAction action, uint64_t nowUs) const noexcept
+{
+    return escalationTracker.isStormDetected(action, nowUs);
+}
+
+void RecoveryBudget::record(RecoveryAction action, uint64_t nowUs) noexcept
+{
+    if (nowUs - windowStartUs > kBudgetWindowUs) {
+        // window 期限切れ → リセット
+        windowStartUs = nowUs;
+        cycleCountInWindow = 0;
+        criticalCount = 0;
+        recoverCount = 0;
+        latched = false;
+    }
+    if (action == RecoveryAction::Critical) ++criticalCount;
+    if (action == RecoveryAction::Recover) ++recoverCount;
+    lastEscalationUs = nowUs;
+    escalationTracker.record(action, nowUs);
+}
+
+void RecoveryBudget::recordCycleCompletion(uint64_t nowUs) noexcept
+{
+    ++cycleCountInWindow;
+    ladderStep = 0;
+    lastRecoverySuccessUs = nowUs;
+    // latched は回復
+    latched = false;
+}
+
+void RecoveryBudget::recordHeavyReach(uint64_t nowUs) noexcept
+{
+    lastEscalationUs = nowUs;
+}
+
+void RecoveryBudget::reset() noexcept
+{
+    cycleCountInWindow = 0;
+    criticalCount = 0;
+    recoverCount = 0;
+    ladderStep = 0;
+    windowStartUs = 0;
+    lastRecoverySuccessUs = 0;
+    lastEscalationUs = 0;
+    escalationTracker.reset();
+    latched = false;
 }
 
 } // namespace convo
@@ -46251,6 +46713,14 @@ enum class PolicySource : uint8_t {
     _Count                  // 要素数 (= 10)
 };
 
+// [work39 Phase 1] RestorePhase — Restore Step進捗管理
+enum class RestorePhase : uint8_t {
+    None,                    // Restore未実行
+    EpochRecoveryIssued,     // Step1完了（Epoch Recovery + Learner Rollback）
+    LearnerRollbackDone,     // Learner復元完了
+    IdleWorldPublished       // Step2完了（publishIdleWorldOnly）
+};
+
 // [work37 Phase 0] RecoveryAction — 6レベル階層化 (v6.6統合版)
 enum class RecoveryAction : uint8_t {
     Observe,                // Level 0: 監視のみ。HealthEvent記録。
@@ -46262,13 +46732,180 @@ enum class RecoveryAction : uint8_t {
     _Count                  // 要素数 (= 6)
 };
 
-// [work37 Phase 9.45] RecoveryOutcome — 回復成功/失敗の閉ループ制御
+// [work39 Phase 3] RecoveryOutcome — 閉ループ制御用（再定義）
 enum class RecoveryOutcome : uint8_t {
-    None,           // 未評価
-    Success,        // 回復成功（状態改善確認済み）
-    NoEffect,       // 効果なし（状態不変）
-    Failed,         // 状態悪化
-    Unsafe          // 安全条件違反で発動中止
+    None,          // 未評価
+    Improving,     // 改善傾向 — 維持、昇格禁止
+    Recovered,     // 正常復帰 — Observe へ移行
+    Stalled,       // 停滞 — 次段階へ昇格
+    Worsening      // 悪化 — 即時昇格
+};
+
+// [work39 Phase 1/3] TrendSnapshot — 閉ループ制御用スナップショット
+struct TrendSnapshot {
+    uint64_t pendingRetire{0};
+    uint64_t publicationSeq{0};
+    uint64_t maxRetireAgeUs{0};
+    uint32_t activeReaderCount{0};
+    uint32_t readerStuckCount{0};
+    bool     freezeDetected{false};
+    uint32_t activeFaultMask{0};
+    uint64_t restoreGeneration{0};
+    uint64_t epochAdvanceCount{0};       // Epoch advance 累積回数
+    uint64_t lastCompletedEpoch{0};      // 最終完了Epoch ID
+    uint64_t publicationGeneration{0};   // Publication世代
+    RestorePhase restorePhase{RestorePhase::None};
+};
+
+// activeFaultMask ビット定義
+static constexpr uint32_t kFaultRetire       = 1u << 0;
+static constexpr uint32_t kFaultPublication  = 1u << 1;
+static constexpr uint32_t kFaultReader       = 1u << 2;
+static constexpr uint32_t kFaultOverflow     = 1u << 3;
+static constexpr uint32_t kFaultCrossfade    = 1u << 4;
+static constexpr uint32_t kFaultLearner      = 1u << 5;
+static constexpr uint32_t kFaultConfigDiverg = 1u << 6;
+static constexpr uint32_t kFaultEpochAdvance = 1u << 7;  // Epoch Advance Blocked
+
+// [work39 Phase 3] EpochAdvanceHealth（問題G）
+struct EpochAdvanceHealth {
+    uint64_t lastAdvanceUs{0};
+    uint64_t currentEpoch{0};
+    uint64_t completedEpoch{0};
+
+    static constexpr uint64_t kEpochAdvanceStallWindowUs = 1 * 1'000'000;  // 1秒間進まなければStall
+
+    [[nodiscard]] bool isBlocked(uint64_t nowUs) const noexcept {
+        return nowUs - lastAdvanceUs > kEpochAdvanceStallWindowUs;
+    }
+};
+
+// [work39 Phase 3] VerificationState + VerificationEntry
+enum class VerificationState : uint8_t { Idle, PendingVerification };
+
+struct VerificationEntry {
+    VerificationState state{VerificationState::Idle};
+    uint64_t executedAtUs{0};
+    uint64_t verifyAfterUs{0};       // 初期値50ms推奨
+    uint64_t restoreGeneration{0};
+    TrendSnapshot baselineSnapshot;
+    TrendSnapshot lastSnapshot;
+    uint8_t stalledCount{0};         // 上限3回
+
+    [[nodiscard]] bool isIdle() const noexcept {
+        return state == VerificationState::Idle;
+    }
+};
+
+// [work39 Phase 4] toRecoveryLevel()
+[[nodiscard]] constexpr uint8_t toRecoveryLevel(RecoveryAction action) noexcept {
+    switch (action) {
+        case RecoveryAction::Observe:  return 0;
+        case RecoveryAction::Throttle: return 1;
+        case RecoveryAction::Recover:  return 2;
+        case RecoveryAction::Restore:  return 3;
+        case RecoveryAction::Safe:     return 4;
+        case RecoveryAction::Critical: return 5;
+        default:                       return 0;
+    }
+}
+
+// [work39 Phase 3] nextAction() — Ladder 昇格
+[[nodiscard]] inline RecoveryAction nextAction(RecoveryAction current) noexcept {
+    switch (current) {
+        case RecoveryAction::Throttle: return RecoveryAction::Recover;
+        case RecoveryAction::Recover:  return RecoveryAction::Restore;
+        case RecoveryAction::Restore:  return RecoveryAction::Safe;
+        case RecoveryAction::Safe:     return RecoveryAction::Critical;
+        default:                       return RecoveryAction::Critical;
+    }
+}
+
+// [work39 Phase 4] EscalationTracker（問題C/A-2）
+struct EscalationTracker {
+    static constexpr uint8_t toIndex(RecoveryAction action) noexcept {
+        switch (action) {
+            case RecoveryAction::Observe:  return 0;
+            case RecoveryAction::Throttle: return 1;
+            case RecoveryAction::Recover:  return 2;
+            case RecoveryAction::Restore:  return 3;
+            case RecoveryAction::Safe:     return 4;
+            case RecoveryAction::Critical: return 5;
+            default:                       return 0;
+        }
+    }
+
+    uint64_t lastActionUs[6]{0,0,0,0,0,0};
+    uint32_t repeatCount[6]{0,0,0,0,0,0};
+    uint8_t  lastLevel{0};
+    uint32_t levelOscillationCount{0};
+    uint32_t transitionPairCount[3]{0,0,0};
+
+    static constexpr uint64_t kStormWindowUs = 30 * 1'000'000;
+    static constexpr uint32_t kMaxRepeatBeforeStorm = 3;
+    static constexpr uint32_t kMaxOscillationBeforeStorm = 4;
+
+    [[nodiscard]] bool isStormDetected(RecoveryAction action, uint64_t nowUs) const noexcept {
+        const auto idx = toIndex(action);
+        if (lastActionUs[idx] == 0) return false;
+        return (nowUs - lastActionUs[idx]) < kStormWindowUs
+            && repeatCount[idx] >= kMaxRepeatBeforeStorm;
+    }
+
+    void record(RecoveryAction action, uint64_t nowUs) noexcept {
+        const auto idx = toIndex(action);
+        if (nowUs - lastActionUs[idx] < kStormWindowUs)
+            ++repeatCount[idx];
+        else
+            repeatCount[idx] = 0;
+        lastActionUs[idx] = nowUs;
+
+        const uint8_t currentLevel = idx;
+        if (lastLevel != 0 && currentLevel != lastLevel
+            && std::abs(static_cast<int>(currentLevel) - static_cast<int>(lastLevel)) == 1) {
+            ++levelOscillationCount;
+            const uint8_t pairIdx = std::min(lastLevel, currentLevel);
+            if (pairIdx >= 1 && pairIdx <= 3)
+                ++transitionPairCount[pairIdx - 1];
+        } else {
+            levelOscillationCount = 0;
+        }
+        lastLevel = currentLevel;
+    }
+
+    void reset() noexcept {
+        for (auto& tc : lastActionUs) tc = 0;
+        for (auto& rc : repeatCount) rc = 0;
+        lastLevel = 0;
+        levelOscillationCount = 0;
+        for (auto& tc : transitionPairCount) tc = 0;
+    }
+};
+
+// [work39 Phase 4] RecoveryBudget
+struct RecoveryBudget {
+    uint32_t cycleCountInWindow{0};
+    uint32_t criticalCount{0};
+    uint32_t recoverCount{0};
+    uint8_t  ladderStep{0};
+    uint64_t windowStartUs{0};
+    uint64_t lastRecoverySuccessUs{0};
+    uint64_t lastEscalationUs{0};
+    EscalationTracker escalationTracker;
+    bool     latched{false};
+
+    static constexpr uint64_t kBudgetWindowUs = 10 * 60 * 1'000'000;       // 10分
+    static constexpr uint64_t kStableResetUs  = 15 * 60 * 1'000'000;       // 15分
+    static constexpr uint32_t kMaxCyclesPerWindow = 3;
+    static constexpr uint32_t kMaxCriticalCount = 5;
+    static constexpr uint32_t kMaxRecoverCount = 20;
+
+    [[nodiscard]] bool isExhausted(uint64_t nowUs) const noexcept;
+    [[nodiscard]] bool isStormDetected(RecoveryAction action, uint64_t nowUs) const noexcept;
+    void record(RecoveryAction action, uint64_t nowUs) noexcept;
+    void recordCycleCompletion(uint64_t nowUs) noexcept;
+    void recordHeavyReach(uint64_t nowUs) noexcept;
+    void reset() noexcept;
 };
 
 // ★ v3.0: RecoveryActionBits — ビットマスク（複数Action同時発行可能）
@@ -46377,6 +47014,18 @@ public:
     // リセット
     void reset() noexcept;
 
+    // [work39 Phase 3] Verification（閉ループ制御）
+    void markForVerification(RecoveryAction action, const TrendSnapshot& snapshot) noexcept;
+    VerificationEntry& getEntry(RecoveryAction action) noexcept;
+    const VerificationEntry& getEntry(RecoveryAction action) const noexcept;
+    void resetVerification() noexcept;
+    [[nodiscard]] bool hasPendingVerification() const noexcept;
+    RecoveryAction getLastExecutedAction() const noexcept { return m_lastAction_; }
+    void markExecutedCritical(RecoveryAction action) noexcept;
+    // [work39 Phase 4] Budget アクセス
+    struct RecoveryBudget& getBudget() noexcept;
+    const struct RecoveryBudget& getBudget() const noexcept;
+
 private:
     // 内部 Action 優先順位評価
     RecoveryAction selectHighestPriority(RecoveryActionBits bits) const noexcept;
@@ -46385,6 +47034,12 @@ private:
     uint64_t getNowUs() const noexcept;
 
     std::array<CooldownEntry, static_cast<size_t>(RecoveryAction::_Count)> m_cooldowns;
+
+    // [work39 Phase 3] Verification 状態
+    RecoveryAction m_lastAction_{RecoveryAction::Observe};
+    std::array<VerificationEntry, static_cast<size_t>(RecoveryAction::_Count)> m_verificationEntries_;
+    // [work39 Phase 4] Budget
+    struct RecoveryBudget m_budget_;
 };
 
 } // namespace convo

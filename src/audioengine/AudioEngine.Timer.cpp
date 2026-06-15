@@ -4,6 +4,7 @@
 #include "RuntimeBuilder.h"
 #include "RuntimePublicationOrchestrator.h"
 #include "DSPLifetimeManager.h"
+#include "../NoiseShaperLearner.h"  // ★ Work39: Restore Learner Rollback 用
 
 namespace {
 void diagLog(const juce::String& message)
@@ -677,11 +678,27 @@ void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
             break;
 
         case convo::RecoveryAction::Restore:
-            // [work37 Phase 9.16] RollbackToLastHealthyWorld を含む復元操作
+        {
+            // [work39 Phase 1] Epoch Recovery + Learner Rollback + Idle World
+            // Step1: Epoch Recovery
+            if (retireRuntimeEx_.canRollback()) {
+                retireRuntimeEx_.setRollbackMode(convo::isr::EpochMode::Split);
+                retireRuntimeEx_.requestRollback();
+                ++m_restoreGeneration_;
+            }
+            // 強制回復（Recover との差別化: 二重実行でも安全）
             tryReclaimResources();
             drainDeferredRetireQueues(false);
-            // Rollback 基盤（ISRRetireRuntimeEx）の設定は呼び出し元が行う
+            // Learner Rollback
+            if (lastKnownGoodNoiseShaper_.isValid && noiseShaperLearner)
+                noiseShaperLearner->setState(lastKnownGoodNoiseShaper_.state);
+            // DeferredPublicationFlush
+            if (runtimeOrchestrator_)
+                runtimeOrchestrator_->clearDeferredForShutdown();
+            // Step2（publishIdleWorldOnly）は閉ループ制御後 (Phase 6)
+            m_restorePhase_ = convo::RestorePhase::EpochRecoveryIssued;
             break;
+        }
 
         case convo::RecoveryAction::Safe:
             // [work37 Phase 9.34] EnterSafeMode — Safe Mode World 発行
@@ -703,4 +720,37 @@ void AudioEngine::executeRecoveryAction(convo::RecoveryAction action) noexcept
             break;
     }
     diagLog("[RECOVERY] execute action=" + juce::String(static_cast<int>(action)));
+}
+
+// [work39 Phase 6] Suppression Probe — CAS reserve
+bool AudioEngine::tryReserveProbeBudget() noexcept
+{
+    uint32_t expected = 1;
+    if (convo::compareExchangeAtomic(m_probeBudget_, expected, uint32_t{0},
+                                     std::memory_order_acq_rel, std::memory_order_acquire)) {
+        m_probeState_.publishSeqBefore = convo::consumeAtomic(
+            rtAuxMutable_.runtimePublishCount, std::memory_order_acquire);
+        m_probeState_.pendingRetireBefore = convo::consumeAtomic(
+            retireQueueDepth_, std::memory_order_acquire);
+        m_probeState_.retireAgeBefore = static_cast<uint64_t>(
+            convo::consumeAtomic(reclaimLatency_, std::memory_order_acquire));
+        m_probeState_.startedUs = convo::getCurrentTimeUs();
+        convo::publishAtomic(m_lastProbeUs_, m_probeState_.startedUs,
+                             std::memory_order_release);
+        m_probeState_.reserveState = AudioEngine::ProbeState::ReserveState::Reserved;
+        return true;
+    }
+    return false;
+}
+
+// [work39 Phase 6] Suppression Probe — commit or rollback
+void AudioEngine::commitOrRollbackProbe(bool publishSucceeded, uint64_t seqAfter) noexcept
+{
+    if (publishSucceeded && seqAfter > m_probeState_.publishSeqBefore) {
+        m_probeState_.reserveState = AudioEngine::ProbeState::ReserveState::Committed;
+    } else {
+        convo::fetchAddAtomic(m_probeBudget_, uint32_t{1}, std::memory_order_acq_rel);
+        m_probeState_.reserveState = AudioEngine::ProbeState::ReserveState::RolledBack;
+        ++m_probeState_.failureCount;
+    }
 }
