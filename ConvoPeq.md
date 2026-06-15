@@ -29998,6 +29998,22 @@ void AudioEngine::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 #include "RuntimePublicationOrchestrator.h"  // ★ work37: clearDeferredForShutdown 完全型必要
 
 namespace {
+
+#include <debugapi.h>
+
+static juce::String captureCallStack()
+{
+    void* stack[32];
+    WORD frames = CaptureStackBackTrace(1, 32, stack, nullptr);
+    juce::String result;
+    for (WORD i = 0; i < frames; ++i)
+    {
+        if (i > 0) result += "\n";
+        result += juce::String::toHexString(reinterpret_cast<uintptr_t>(stack[i]));
+    }
+    return result;
+}
+
 void diagLog(const juce::String& message)
 {
     DBG(message);
@@ -30021,7 +30037,9 @@ void AudioEngine::releaseResources()
 
         if (previousState == EngineLifecycleState::Unprepared)
         {
-            diagLog("[DIAG] releaseResources: duplicate release ignored (already Unprepared)");
+            auto cs = captureCallStack();
+            diagLog("[DIAG] releaseResources: duplicate release ignored (already Unprepared)\n"
+                    "Callstack:\n" + cs);
             return;
         }
 
@@ -34017,6 +34035,13 @@ public:
     void releaseResources() override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
 
+    /** Returns true if the engine is in a prepared state and needs releaseResources(). */
+    [[nodiscard]] bool isEnginePrepared() const noexcept
+    {
+        return convo::consumeAtomic(lifecycleState, std::memory_order_relaxed)
+               == EngineLifecycleState::Prepared;
+    }
+
     // ==================================================================
     // EBR (Epoch-Based Reclamation) 基盤
     // ==================================================================
@@ -36976,6 +37001,15 @@ void AudioEngineProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void AudioEngineProcessor::releaseResources()
 {
+    // ★ 案B: Engine が Prepared 状態でなければ早期リターン
+    //   JUCE が audio device 列挙時に releaseResources() を複数回呼ぶことがある。
+    //   Engine 側の CAS ガードが二重解放を防止しているが、ここで事前チェックすることで
+    //   "duplicate release ignored" のログノイズを抑制し、無駄な処理を回避する。
+    if (!audioEngine.isEnginePrepared())
+    {
+        DBG("[DIAG] AudioEngineProcessor::releaseResources: skipped (engine not prepared)");
+        return;
+    }
     audioEngine.releaseResources();
 }
 
