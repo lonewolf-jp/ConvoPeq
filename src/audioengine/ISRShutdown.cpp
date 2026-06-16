@@ -66,11 +66,11 @@ void ShutdownRuntime::markTimedOut(ShutdownBlockingReason reason) noexcept
         idx = static_cast<size_t>(ShutdownBlockingReason::Unknown);
     }
     auto& stats = blockingReasonStats_[idx];
-    stats.count.fetch_add(1, std::memory_order_acq_rel);
+    convo::fetchAddAtomic(stats.count, uint64_t{1}, std::memory_order_acq_rel);
 
     // firstSeenUs: CAS で初回のみ設定
     uint64_t expected = 0;
-    stats.firstSeenUs.compare_exchange_strong(expected, nowUs,
+    convo::compareExchangeAtomic(stats.firstSeenUs, expected, nowUs,
         std::memory_order_acq_rel, std::memory_order_acquire);
 
     // duration: shutdown 開始からの経過時間
@@ -78,9 +78,9 @@ void ShutdownRuntime::markTimedOut(ShutdownBlockingReason reason) noexcept
         ? (nowUs - shutdownStartUs_) : 0;
 
     // maxDurationUs: fetch_max (CAS loop)
-    uint64_t currentMax = stats.maxDurationUs.load(std::memory_order_acquire);
+    uint64_t currentMax = convo::consumeAtomic(stats.maxDurationUs, std::memory_order_acquire);
     while (elapsed > currentMax) {
-        if (stats.maxDurationUs.compare_exchange_weak(currentMax, elapsed,
+        if (convo::compareExchangeAtomic(stats.maxDurationUs, currentMax, elapsed,
                 std::memory_order_acq_rel, std::memory_order_acquire))
             break;
     }
@@ -303,9 +303,9 @@ void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
     file << "  \"blockingReasonStats\": [\n";
     for (size_t i = 0; i < kBlockingReasonCount; ++i) {
         const auto& stats = blockingReasonStats_[i];
-        const auto count = stats.count.load(std::memory_order_acquire);
-        const auto maxDur = stats.maxDurationUs.load(std::memory_order_acquire);
-        const auto firstSeen = stats.firstSeenUs.load(std::memory_order_acquire);
+        const auto count = convo::consumeAtomic(stats.count, std::memory_order_acquire);
+        const auto maxDur = convo::consumeAtomic(stats.maxDurationUs, std::memory_order_acquire);
+        const auto firstSeen = convo::consumeAtomic(stats.firstSeenUs, std::memory_order_acquire);
         if (i > 0) file << ",\n";
         file << "    {\n";
         file << "      \"reason\": \"" << convo::isr::reasonToString(static_cast<ShutdownBlockingReason>(i)) << "\",\n";

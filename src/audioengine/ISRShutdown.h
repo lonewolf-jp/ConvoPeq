@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include "AtomicAccess.h"  // ★ A-2/A-3: convo::consumeAtomic / publishAtomic
 #include "RuntimeDrainAudit.h"  // ★ P2-B: ShutdownBlockingReason
 
 namespace convo {
@@ -91,15 +92,15 @@ class TinyRingBuffer {
 public:
     void push(ShutdownBlockingReason reason, uint64_t timestampUs) noexcept {
         // 1. 現在の書き込み位置を取得 (単一Writer前提、relaxedで安全)
-        const auto currentIdx = writePos_.load(std::memory_order_relaxed);
+        const auto currentIdx = convo::consumeAtomic(writePos_, std::memory_order_relaxed);
         // 2. データを先行して書き込む (Readerはまだこのインデックスを知らない)
         data_[currentIdx % N].store(packEvent(reason, timestampUs), std::memory_order_relaxed);
         // 3. release store: インデックスを更新し、データの書き込み完了を公開
         //    ★ fetch_add は不可: インデックスがデータより先に公開されるため
-        writePos_.store(currentIdx + 1, std::memory_order_release);
+        convo::publishAtomic(writePos_, currentIdx + 1, std::memory_order_release);
     }
     [[nodiscard]] size_t size() const noexcept {
-        const auto wp = writePos_.load(std::memory_order_acquire);
+        const auto wp = convo::consumeAtomic(writePos_, std::memory_order_acquire);
         return wp < N ? wp : N;
     }
     // ★ Seqlock 方式の安全な読み出し
@@ -109,14 +110,14 @@ public:
         size_t currentSize, startIdx;
         std::array<uint64_t, N> snapshot;
         do {
-            wpBefore = writePos_.load(std::memory_order_acquire);
+            wpBefore = convo::consumeAtomic(writePos_, std::memory_order_acquire);
             currentSize = (wpBefore < N) ? static_cast<size_t>(wpBefore) : N;
             startIdx = (wpBefore < N) ? 0 : static_cast<size_t>((wpBefore - N) % N);
             for (size_t i = 0; i < currentSize; ++i) {
-                snapshot[i] = data_[(startIdx + i) % N].load(std::memory_order_relaxed);
+                snapshot[i] = convo::consumeAtomic(data_[(startIdx + i) % N], std::memory_order_relaxed);
             }
             std::atomic_thread_fence(std::memory_order_acquire);
-            wpAfter = writePos_.load(std::memory_order_relaxed);
+            wpAfter = convo::consumeAtomic(writePos_, std::memory_order_relaxed);
         } while (wpBefore != wpAfter);
         for (size_t i = 0; i < currentSize; ++i) {
             const auto packed = snapshot[i];

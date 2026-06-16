@@ -404,7 +404,7 @@ public:
     [[nodiscard]] uint64_t reclaimAttemptCount() const noexcept override {
         // ★ 未集計分を加算 (relaxed で十分: 診断目的のため正確性は要求されない)
         const auto local = reclaimLocalCounter_.load(std::memory_order_relaxed);
-        const auto committed = reclaimAttemptCount_.load(std::memory_order_acquire);
+        const auto committed = convo::consumeAtomic(reclaimAttemptCount_, std::memory_order_acquire);
         return committed + (local % 1024);
     }
     [[nodiscard]] uint64_t reclaimSuccessCount() const noexcept override {
