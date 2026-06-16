@@ -83,6 +83,11 @@ public:
     [[nodiscard]] RuntimePublicationStateOwner& stateOwner() noexcept { return stateOwner_; }
     [[nodiscard]] const RuntimePublicationStateOwner& stateOwner() const noexcept { return stateOwner_; }
 
+    // ★ C-1: World 退役を Pipeline Ledger に通知
+    void notifyWorldRetired(uint64_t worldId) noexcept {
+        stateOwner_.onRetired(worldId);
+    }
+
     // ── TelemetryRecorder アクセサ ──
     [[nodiscard]] TelemetryRecorder& telemetryRecorder() noexcept { return telemetryRecorder_; }
     [[nodiscard]] const TelemetryRecorder& telemetryRecorder() const noexcept { return telemetryRecorder_; }
@@ -93,7 +98,7 @@ public:
     }
 
     // ── 健全性スナップショット ──
-    void publishHealthSnapshot() noexcept;
+    void publishHealthSnapshot(uint64_t externalReclaimedCount) noexcept;
 
     // ── CorrelationId 採番 ──
     [[nodiscard]] CorrelationId nextCorrelationId() noexcept;

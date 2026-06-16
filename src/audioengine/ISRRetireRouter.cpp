@@ -151,5 +151,18 @@ void ISRRetireRouter::drainAll() noexcept
     provider_->drainAll();
 }
 
+// ★ A-2: EBR Queue Visibility 統計委譲
+uint64_t ISRRetireRouter::reclaimAttemptCount() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->reclaimAttemptCount();
+}
+
+uint64_t ISRRetireRouter::reclaimSuccessCount() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->reclaimSuccessCount();
+}
+
 } // namespace isr
 } // namespace convo

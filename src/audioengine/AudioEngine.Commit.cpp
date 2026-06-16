@@ -3,6 +3,10 @@
 #include "RuntimePublicationValidator.h"
 #include "RuntimePublicationOrchestrator.h"
 
+#include <filesystem>
+#include <fstream>  // ★ A-7: epoch_reclaim_audit.json 出力用
+#include <system_error>  // ★ A-7: std::error_code
+
 namespace {
 void diagLog(const juce::String& message)
 {
@@ -402,6 +406,11 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     // ★ P3-B: World 退役を監査記録
     worldLifecycleAudit_.onWorldRetired(world->worldId, world->publication.epoch);
 
+    // ★ C-2: Pipeline Ledger 復旧 — World 退役を Orchestrator に通知
+    if (runtimeOrchestrator_) {
+        runtimeOrchestrator_->notifyWorldRetired(world->worldId);
+    }
+
     debugRuntime_.recordHBEdge(200u,
                                300u,
                                static_cast<std::uint64_t>(world->runtimeVersion),
@@ -587,6 +596,38 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
     convo::publishAtomic(rtAuxMutable_.lastEvidenceEmitHighResTicks, nowTicks, std::memory_order_release);
 
     const auto evidenceRoot = std::filesystem::current_path() / "evidence";
+
+    // ★ C-4: Orchestrator 健全性スナップショット (1秒周期)
+    if (runtimeOrchestrator_) {
+        const uint64_t reclaimed = m_retireRouter
+            ? m_retireRouter->reclaimSuccessCount() : 0;
+        runtimeOrchestrator_->publishHealthSnapshot(reclaimed);
+    }
+
+    // ★ A-7: EBR Queue Visibility 統計を epoch_reclaim_audit.json に出力 (tmp+rename)
+    {
+        const auto audit = collectDrainAudit();
+        const auto evidencePath = evidenceRoot / "epoch_reclaim_audit.json";
+        const auto tmpPath = evidenceRoot / "epoch_reclaim_audit.json.tmp";
+        std::error_code ec;
+        std::filesystem::create_directories(evidenceRoot, ec);
+        if (!ec) {
+            std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
+            if (file.is_open()) {
+                file << "{\n";
+                file << "  \"reclaimAttemptCount\": " << audit.reclaimAttemptCount << ",\n";
+                file << "  \"reclaimSuccessCount\": " << audit.reclaimSuccessCount << ",\n";
+                file << "  \"overflowCount\": " << audit.overflowCount << "\n";
+                file << "}\n";
+                file.close();
+                if (!file.fail()) {
+                    std::filesystem::rename(tmpPath, evidencePath, ec);
+                }
+            }
+        }
+        std::filesystem::remove(tmpPath, ec);
+    }
+
     retireRuntimeEx_.emitRetireTimeline(evidenceRoot / "retire_timeline.json");
     evidenceExporter_.exportEvidence();
     worldLifecycleAudit_.tryDumpPeriodic();

@@ -101,11 +101,12 @@ public:
     }
 
     // Message Thread / Timer から呼ばれる。
-    void reclaim(uint64_t minReaderEpoch) {
+    uint32_t reclaim(uint64_t minReaderEpoch) {
         constexpr int kMaxScan = 1024;
         uint32_t deqPos = convo::consumeAtomic(dequeuePos, std::memory_order_acquire); // acquire: 前回 dequeue の CAS release と HB し最新の dequeuePos を観測
         uint32_t scanPos = deqPos;
         int scanned = 0;
+        uint32_t reclaimed = 0;  // ★ A-1: 解放件数カウンタ
 
         while (scanned < kMaxScan) {
             auto& seq_atom = sequences[scanPos & kMask];
@@ -133,6 +134,7 @@ public:
                     if (entry.deleter && entry.ptr) {
                         entry.deleter(entry.ptr);
                     }
+                    ++reclaimed;  // ★ A-1: 実際に解放した件数をカウント
                     entry.ptr = nullptr;
                     entry.deleter = nullptr;
                     entry.type = DeletionEntryType::Generic;
@@ -155,6 +157,7 @@ public:
                 ++scanned;
             }
         }
+        return reclaimed;  // ★ A-1: 解放件数を返す
     }
 
     // Shutdown 専用: epoch 判定を無視して全エントリを回収する。

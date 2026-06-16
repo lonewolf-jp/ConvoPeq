@@ -221,7 +221,14 @@ public:
     // [work21] IEpochProvider::tryReclaim — inline reclaim to avoid deprecated call
     void tryReclaim() noexcept override
     {
-        deferredDeletionQueue.reclaim(getMinReaderEpoch());
+        // ★ ★ A-2: 統計カウンタ (Local Aggregation によりキャッシュ競合低減)
+        constexpr uint32_t kCounterAggregationInterval = 1024;
+        const uint32_t localCount = reclaimLocalCounter_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((localCount % kCounterAggregationInterval) == 0) {
+            reclaimAttemptCount_.fetch_add(kCounterAggregationInterval, std::memory_order_relaxed);
+        }
+        const auto n = deferredDeletionQueue.reclaim(getMinReaderEpoch());
+        reclaimSuccessCount_.fetch_add(n, std::memory_order_relaxed);
     }
 
     // ★ P0-A/P2-A: IRetireProvider インターフェース実装（public 必須）
@@ -382,6 +389,27 @@ private:
     std::atomic<uint64_t> globalEpoch;
     std::array<ReaderSlot, kMaxReaders> readers;
     DeferredDeletionQueue deferredDeletionQueue;
+
+    // ★ A-2: EBR Queue Visibility 統計カウンタ
+    std::atomic<uint64_t> reclaimAttemptCount_{0};
+    std::atomic<uint64_t> reclaimSuccessCount_{0};
+    // ★ A-2: Local Aggregation 用カウンタ (per-core cache line)
+#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+    alignas(64) std::atomic<uint32_t> reclaimLocalCounter_{0};
+#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+
+public:
+    // ★ A-2: 公開アクセサ
+    [[nodiscard]] uint64_t reclaimAttemptCount() const noexcept override {
+        // ★ 未集計分を加算 (relaxed で十分: 診断目的のため正確性は要求されない)
+        const auto local = reclaimLocalCounter_.load(std::memory_order_relaxed);
+        const auto committed = reclaimAttemptCount_.load(std::memory_order_acquire);
+        return committed + (local % 1024);
+    }
+    [[nodiscard]] uint64_t reclaimSuccessCount() const noexcept override {
+        return convo::consumeAtomic(reclaimSuccessCount_, std::memory_order_acquire);
+    }
 };
 
 } // namespace convo

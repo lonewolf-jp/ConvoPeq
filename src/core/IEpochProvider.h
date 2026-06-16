@@ -61,6 +61,11 @@ public:
     {
         return StuckReaderInfo{};
     }
+
+    // ★ A-2: EBR Queue Visibility 統計（virtual hook）
+    //   Default: 0 を返す。EpochDomain がオーバーライドして実統計を提供。
+    [[nodiscard]] virtual uint64_t reclaimAttemptCount() const noexcept { return 0; }
+    [[nodiscard]] virtual uint64_t reclaimSuccessCount() const noexcept { return 0; }
 };
 
 } // namespace convo

@@ -76,6 +76,10 @@ public:
     // ★ Practical-1: Reader Stuck 診断 (delegates to provider)
     [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override;
 
+    // ★ A-2: EBR Queue Visibility 統計 (delegates to provider)
+    [[nodiscard]] uint64_t reclaimAttemptCount() const noexcept override;
+    [[nodiscard]] uint64_t reclaimSuccessCount() const noexcept override;
+
     // ── Retire API (実装は .cpp) ──
 
     RetireEnqueueResult enqueueRetire(void* ptr,

@@ -98,7 +98,6 @@ namespace convo::isr { class ISRRetireRouter; }
 #include "ISRRetireRuntimeEx.h"
 #include "RuntimeDrainAudit.h"
 // ISRRetireRouter forward-declared below (reduce include chain for C1060)
-#include "ISRBarrierOptimizer.h"
 #include "ISREvidenceExporter.h"
 #include "RuntimeHealthMonitor.h"
 #include "RuntimePublicationValidator.h"
@@ -3570,7 +3569,6 @@ public:
     convo::isr::RetireRuntime retireRuntime_;
     convo::isr::RetireRuntimeEx retireRuntimeEx_;
     convo::isr::ShutdownRuntime shutdownRuntime_;
-    convo::isr::BarrierOptimizer barrierOptimizer_;
     convo::isr::EvidenceExporter evidenceExporter_;
     convo::isr::WorldLifecycleAudit worldLifecycleAudit_;
     convo::isr::BudgetManager budgetManager_;

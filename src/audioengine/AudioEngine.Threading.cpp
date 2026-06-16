@@ -82,7 +82,14 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
         .stuckReaderCount = readerStuckInfo.isStuck ? 1u : 0u,
         .maxReaderResidencyUs = readerStuckInfo.residencyTimeUs,
         // ★ B-2: HealthState 診断情報
-        .healthState = m_healthMonitor.getHealthState()
+        .healthState = m_healthMonitor.getHealthState(),
+        // ★ A-2: EBR Queue Visibility 統計
+        .reclaimAttemptCount = m_retireRouter
+            ? m_retireRouter->reclaimAttemptCount() : 0,
+        .reclaimSuccessCount = m_retireRouter
+            ? m_retireRouter->reclaimSuccessCount() : 0,
+        .overflowCount = m_retireRouter
+            ? m_retireRouter->overflowCount() : 0
     };
 }
 

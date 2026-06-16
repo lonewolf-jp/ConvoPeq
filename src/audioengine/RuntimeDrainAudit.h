@@ -43,6 +43,10 @@ struct RuntimeDrainAudit {
     uint64_t maxReaderResidencyUs{0};
     // ★ B-2: HealthState（診断情報としてのみ保持。canShutdown 条件にはしない）
     ISRHealthState healthState{}; // デフォルト ISRHealthState::Healthy (=0)
+    // ★ A-2: EBR Queue Visibility 統計
+    uint64_t reclaimAttemptCount{0};
+    uint64_t reclaimSuccessCount{0};
+    uint64_t overflowCount{0};
 
     // shutdown 完了を阻害している主要因を特定
     enum class BlockingReason : uint8_t {
@@ -73,7 +77,8 @@ struct RuntimeDrainAudit {
         return pendingPublication == 0
             && pendingRetire == 0
             && activeCrossfadeCount == 0
-            && deferredPublish == 0;
+            && deferredPublish == 0
+            && routerPendingRetire == 0;  // ★ B-1: 追加 (コメント「完了条件に含めるもの」との整合)
     }
 
     // ★ B-1: World Consistency 診断（Diagnostic 限定、Shutdown Authority にはしない）

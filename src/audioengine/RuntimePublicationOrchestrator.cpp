@@ -355,7 +355,7 @@ CorrelationId RuntimePublicationOrchestrator::nextCorrelationId() noexcept
 }
 
 // ── 健全性スナップショット ──
-void RuntimePublicationOrchestrator::publishHealthSnapshot() noexcept
+void RuntimePublicationOrchestrator::publishHealthSnapshot(uint64_t externalReclaimedCount) noexcept
 {
     const auto& state = stateOwner_.state();
     const auto nowUs = static_cast<uint64_t>(
@@ -366,7 +366,7 @@ void RuntimePublicationOrchestrator::publishHealthSnapshot() noexcept
     snapshot.submittedCount = state.progress.submittedCount;
     snapshot.publishedCount = state.progress.publishedCount;
     snapshot.retiredCount = state.progress.retiredCount;
-    snapshot.reclaimedCount = state.progress.reclaimedCount;
+    snapshot.reclaimedCount = externalReclaimedCount;  // ★ C-3: EpochDomain から受け取る
     snapshot.executorQueueDepth = state.progress.executorQueueDepth;
     snapshot.lastProgressTimestampUs = state.progress.lastProgressTimestampUs;
     snapshot.stuckStage = state.progress.detectStuckStage();

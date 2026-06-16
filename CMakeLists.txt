@@ -375,7 +375,6 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRClosureGraphWalker.cpp
                 src/audioengine/ISRDebugRuntime.cpp
                 src/audioengine/ISRRetireRuntimeEx.cpp
-                src/audioengine/ISRBarrierOptimizer.cpp
                 src/audioengine/ISREvidenceExporter.cpp
                 src/audioengine/RuntimeHealthMonitor.cpp
                 src/audioengine/RuntimePolicyEngine.cpp    # ★ work37 Phase 0

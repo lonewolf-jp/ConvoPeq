@@ -2,9 +2,11 @@
 #include "AtomicAccess.h"
 #include "RuntimeDrainAudit.h"  // ★ P2-B: getPrimaryBlockingReason
 #include "RuntimeHealthMonitor.h"  // ★ work37: ISRHealthState 完全型
+#include "core/TimeUtils.h"  // ★ A-2: getCurrentTimeUs
 
 #include <filesystem>
 #include <fstream>
+#include <thread>  // ★ A-2: rename リトライ用 sleep_for
 
 namespace convo {
 namespace isr {
@@ -12,8 +14,26 @@ namespace isr {
 ShutdownRuntime::ShutdownRuntime() = default;
 ShutdownRuntime::~ShutdownRuntime() = default;
 
+// ★ A-2: reasonToString 実装
+const char* reasonToString(ShutdownBlockingReason reason) noexcept {
+    switch (reason) {
+        case ShutdownBlockingReason::None: return "None";
+        case ShutdownBlockingReason::PendingPublication: return "PendingPublication";
+        case ShutdownBlockingReason::PendingRetire: return "PendingRetire";
+        case ShutdownBlockingReason::ActiveCrossfade: return "ActiveCrossfade";
+        case ShutdownBlockingReason::DeferredPublish: return "DeferredPublish";
+        case ShutdownBlockingReason::QuarantineResident: return "QuarantineResident";
+        case ShutdownBlockingReason::RouterPendingRetire: return "RouterPendingRetire";
+        case ShutdownBlockingReason::ReaderActive: return "ReaderActive";
+        case ShutdownBlockingReason::Unknown: return "Unknown";
+    }
+    return "Unknown";
+}
+
 void ShutdownRuntime::initiateShutdown()
 {
+    // ★ A-2: シャットダウン開始時刻を記録
+    shutdownStartUs_ = convo::getCurrentTimeUs();
     transitionTo(ShutdownPhase::AudioStopped);
 }
 
@@ -34,6 +54,37 @@ ShutdownBlockingReason ShutdownRuntime::getBlockingReason() const noexcept
 
 void ShutdownRuntime::markTimedOut(ShutdownBlockingReason reason) noexcept
 {
+    const uint64_t nowUs = convo::getCurrentTimeUs();
+
+    // ★ A-3: 時系列履歴に追加
+    blockingReasonHistory_.push(reason, nowUs);
+
+    // ★ A-2: 統計更新
+    // 配列外参照防止: enum 値をサニタイズ
+    size_t idx = static_cast<size_t>(reason);
+    if (idx >= kBlockingReasonCount) {
+        idx = static_cast<size_t>(ShutdownBlockingReason::Unknown);
+    }
+    auto& stats = blockingReasonStats_[idx];
+    stats.count.fetch_add(1, std::memory_order_acq_rel);
+
+    // firstSeenUs: CAS で初回のみ設定
+    uint64_t expected = 0;
+    stats.firstSeenUs.compare_exchange_strong(expected, nowUs,
+        std::memory_order_acq_rel, std::memory_order_acquire);
+
+    // duration: shutdown 開始からの経過時間
+    const uint64_t elapsed = (nowUs > shutdownStartUs_)
+        ? (nowUs - shutdownStartUs_) : 0;
+
+    // maxDurationUs: fetch_max (CAS loop)
+    uint64_t currentMax = stats.maxDurationUs.load(std::memory_order_acquire);
+    while (elapsed > currentMax) {
+        if (stats.maxDurationUs.compare_exchange_weak(currentMax, elapsed,
+                std::memory_order_acq_rel, std::memory_order_acquire))
+            break;
+    }
+
     // ★ P2-B: 阻害要因を保存
     convo::publishAtomic(blockingReason_, reason, std::memory_order_release);
     // ★ P1-1: 現在の phase を保存してから上書き
@@ -160,13 +211,27 @@ ShutdownResult ShutdownRuntime::collectResult(
 // [work37 Phase 3.3] healthState を JSON に追加
 void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
 {
+    // ★ ★ A-2: アトミックファイル置換: .tmp に書き込み後 rename
     const auto outputPath = std::filesystem::current_path() / "evidence" / "shutdown_trace.json";
+    const auto tmpPath = std::filesystem::current_path() / "evidence" / "shutdown_trace.json.tmp";
     std::error_code ec;
     std::filesystem::create_directories(outputPath.parent_path(), ec);
+    if (ec) return;
 
-    std::ofstream file(outputPath, std::ios::binary | std::ios::trunc);
+    std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {
-        return;
+        // ★ フォールバック: 一意化したファイル名で %TEMP% に書き込み
+        static std::atomic<uint32_t> s_fallbackCounter{0};
+        const auto timestamp = convo::getCurrentTimeUs();
+        const auto count = s_fallbackCounter.fetch_add(1, std::memory_order_relaxed);
+        const auto fallbackName = std::string("shutdown_trace_fallback_")
+            + std::to_string(timestamp) + "_" + std::to_string(count) + ".json";
+        std::error_code ec2;
+        const auto tempDir = std::filesystem::temp_directory_path(ec2);
+        if (ec2) return;
+        const auto fallbackPath = tempDir / fallbackName;
+        file.open(fallbackPath, std::ios::binary | std::ios::trunc);
+        if (!file.is_open()) return;
     }
 
     const auto phase = convo::consumeAtomic(phase_, std::memory_order_acquire);
@@ -219,7 +284,7 @@ void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
     }
 
     file << "{\n";
-    file << "  \"schema\": \"shutdown_trace_v3\",\n";
+    file << "  \"schema\": \"shutdown_trace_v4\",\n";
     file << "  \"phase\": " << static_cast<int>(phase) << ",\n";
     file << "  \"phaseName\": \"" << phaseName << "\",\n";
     file << "  \"healthState\": " << static_cast<int>(healthState) << ",\n";
@@ -233,8 +298,51 @@ void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
     file << "  \"sh4_observerCount\": " << sh4 << ",\n";
     file << "  \"sh5_lateCallbackCount\": " << sh5 << ",\n";
     file << "  \"sh6_postStopEnqueueCount\": " << sh6 << ",\n";
+
+    // ★ A-2: BlockingReasonStats JSON出力
+    file << "  \"blockingReasonStats\": [\n";
+    for (size_t i = 0; i < kBlockingReasonCount; ++i) {
+        const auto& stats = blockingReasonStats_[i];
+        const auto count = stats.count.load(std::memory_order_acquire);
+        const auto maxDur = stats.maxDurationUs.load(std::memory_order_acquire);
+        const auto firstSeen = stats.firstSeenUs.load(std::memory_order_acquire);
+        if (i > 0) file << ",\n";
+        file << "    {\n";
+        file << "      \"reason\": \"" << convo::isr::reasonToString(static_cast<ShutdownBlockingReason>(i)) << "\",\n";
+        file << "      \"count\": " << count << ",\n";
+        file << "      \"maxDurationUs\": " << maxDur << ",\n";
+        file << "      \"firstSeenUs\": " << firstSeen << "\n";
+        file << "    }";
+    }
+    file << "\n  ],\n";
+
     file << "  \"verified\": " << ((violations == 0 && boundedComplete) ? "true" : "false") << "\n";
     file << "}\n";
+
+    file.close();
+    // ★ ★ 書き込みエラー検出: ディスクフルや権限エラーは close 後にも fail になる
+    if (file.fail()) return;
+
+    // ★ rename リトライ: 最大3回、100ms 間隔（Windows ファイルロック対策）
+    constexpr int kMaxRenameRetries = 3;
+    constexpr auto kRenameRetryInterval = std::chrono::milliseconds(100);
+    for (int retry = 0; retry < kMaxRenameRetries; ++retry) {
+        std::filesystem::rename(tmpPath, outputPath, ec);
+        if (!ec) break;  // 成功
+        if (retry < kMaxRenameRetries - 1) {
+            std::this_thread::sleep_for(kRenameRetryInterval);
+        }
+    }
+    // ★ 全リトライ失敗時は別名で保存
+    if (ec) {
+        static std::atomic<uint32_t> s_renameFallbackCounter{0};
+        const auto altPath = std::filesystem::current_path() / "evidence"
+            / ("shutdown_trace_" + std::to_string(
+                s_renameFallbackCounter.fetch_add(1, std::memory_order_relaxed)) + ".json");
+        std::filesystem::rename(tmpPath, altPath, ec);
+    }
+    // 前回の .tmp が残存していれば削除
+    std::filesystem::remove(tmpPath, ec);
 }
 
 void ShutdownRuntime::setBoundedTeardownCounters(uint32_t callbackCount,
