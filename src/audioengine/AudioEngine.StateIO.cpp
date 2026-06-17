@@ -79,7 +79,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
         setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"));
 
     {
-        bool hasBankedAdaptiveCoefficients = false;
+        [[maybe_unused]] bool hasBankedAdaptiveCoefficients = false;
 
         for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
         {

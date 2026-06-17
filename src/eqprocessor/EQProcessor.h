@@ -79,6 +79,8 @@ struct EQBandParams
           enabled(other.enabled)
     {
     }
+
+    EQBandParams& operator=(const EQBandParams&) = default;
 };
 
 //--------------------------------------------------------------

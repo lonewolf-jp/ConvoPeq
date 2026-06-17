@@ -34,12 +34,12 @@ std::atomic<std::uint64_t>& AudioEngine::DSPCore::runtimeUuidCounter() noexcept
 }
 
 AudioEngine::DSPCore::DSPCore()
-    : runtimeUuid(reserveNextRuntimeUuid())
-    , dcBlockerState(new DCBlockerRuntimeState())
+    : dcBlockerState(new DCBlockerRuntimeState())
     , convolverState(new ConvolverRuntimeState())
     , eqState(new EQRuntimeState())
     , rampState(new RampRuntimeState())
     , historyState(new HistoryRuntimeState())
+    , runtimeUuid(reserveNextRuntimeUuid())
 {
     convolverState->bind(convolver);
     eqState->bind(eq);

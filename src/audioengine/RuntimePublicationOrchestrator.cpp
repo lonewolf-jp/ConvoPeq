@@ -173,6 +173,8 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
                 FailureReason::StaleGeneration, "submitPublishRequest:stale",
                 0, nowUs);
             return;
+        default:
+            return;
         case PublicationAdmission::Decision::RejectedNotFinalized:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Admission,

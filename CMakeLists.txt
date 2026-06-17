@@ -1,24 +1,29 @@
 # AddressSanitizer (ASan) オプション
 option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
-if(ENABLE_ASAN AND MSVC)
-    target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
-    target_link_options(ConvoPeq PRIVATE /fsanitize=address)
+if(ENABLE_ASAN)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
+        target_link_options(ConvoPeq PRIVATE /fsanitize=address)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(ConvoPeq PRIVATE -fsanitize=address)
+        target_link_options(ConvoPeq PRIVATE -fsanitize=address)
+    endif()
 endif()
 #============================================================================
-# CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + Windows 11)
+# CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + icx + Windows 11)
 #
 # ビルド環境:
 #   - JUCE: 8.0.12
-#   - Intel oneAPI
-#   - コンパイラ: MSVC 19.44.35222.0 (Visual Studio 2022 17.11以降)
+#   - Intel oneAPI (MKL/IPP)
+#   - コンパイラ: MSVC 19.44+ (VS2022 17.11+) または Intel icx (oneAPI 2026.0)
 #   - IDE: Visual Studio Code
-#   - プラットフォーム: Windows 11
+#   - プラットフォーム: Windows 11 x64
 #   - C++標準: C++20
 #
 # ビルド方法:
-#   mkdir build && cd build
-#   cmake .. -G "Visual Studio 17 2022" -A x64
-#   cmake --build . --config Release
+#   build.bat [Debug|Release]          # MSVC (デフォルト)
+#   build.bat [Debug|Release] icx      # Intel icx
+#   build.bat [Debug|Release] clean icx
 #============================================================================
 
 cmake_minimum_required(VERSION 3.22)
@@ -123,8 +128,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/BuildInputSemanticContractTests.cpp
     )
 
-    target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
-    target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
+        target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
+    endif()
 
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
     target_compile_features(RuntimePublicationCoordinatorTests PRIVATE cxx_std_20)
@@ -236,7 +243,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME HeadlessAudioPathVerification COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File ${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/cli-smoke-test.ps1 -KillExisting -RequireAudioCallbacks)
     add_test(NAME BuildInputSemanticContract COMMAND BuildInputSemanticContractTests)
 
-    if(MSVC)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
@@ -250,6 +257,33 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(PartialPublicationRejectTests PRIVATE /utf-8)
         target_compile_options(RebuildAdmissionRegressionTests PRIVATE /utf-8)
         target_compile_options(BuildInputSemanticContractTests PRIVATE /utf-8)
+    endif()
+
+    # icx: テスト実行ファイルで LTCG(/Qipo) を無効化
+    # icx(clang-cl) が LTCG 有効時に生成する .obj は lld-link が認識できない形式になり、
+    # LNK1107 "ファイルが無効" エラーが発生する。テストはコンパイルのみ正常でリンク時に失敗する。
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        set_target_properties(ISRRuntimeIdentityTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(RuntimePublicationCoordinatorTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(ISRSemanticValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(ObservePathSingleSourceTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(OverlapAuthoritySingularTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(ShadowCompareContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(CrossfadeExecutorLocalContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(RuntimeWorldAuthorityProjectionTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(PartialPublicationRejectTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(RebuildAdmissionRegressionTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(BuildInputSemanticContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+    endif()
+
+    # icx: MKL を使用するテストターゲットに /Qmkl:sequential を追加
+    # （MSVC は target_link_libraries で MKL::MKL をリンク、icx はコンパイルオプションで
+    #  リンク指示を .obj に埋め込む。ConvoPeq 本体は CMakeLists.txt 上部で既に設定済み）
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /Qmkl:sequential)
+        target_compile_options(PartialPublicationRejectTests PRIVATE /Qmkl:sequential)
     endif()
 endif()
 
@@ -535,10 +569,20 @@ set(MKL_LINK static)
 set(MKL_THREADING sequential)
 set(MKL_INTERFACE_FULL intel_lp64)
 
-# その上で、LP64（64bit）と Sequential（単一スレッド）のみを要求
-find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
+# MKL リンク方式はコンパイラに応じて分岐
+# MSVC: CMake Config 経由（従来方式）
+# icx: /Qmkl:sequential でコンパイラが自動リンク
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
+    target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    # icx: /Qmkl:sequential でコンパイラがMKLを自動リンク
+    # Windows では static link がデフォルト、/MT と一貫性あり
+    # コンパイル時オプションとして指定し、リンカ指令をオブジェクトファイルに埋め込む
+    target_compile_options(ConvoPeq PRIVATE /Qmkl:sequential)
+endif()
+
 message(STATUS "Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.")
-target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
 target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
 
 #------------------------------------------------------------
@@ -638,7 +682,7 @@ endif()
 #------------------------------------------------------------
 # MSVC固有設定
 #------------------------------------------------------------
-if(MSVC)
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     target_compile_options(ConvoPeq PRIVATE
         /utf-8      # ソースコードと実行時の文字セットをUTF-8に設定
         /W4         # 警告レベル4 (高)
@@ -655,7 +699,10 @@ if(MSVC)
 
     set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy /Zi")
     set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy /Zi")
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /LTCG /OPT:REF /OPT:ICF /OPT:LBR")
+    # MSVCリンカーフラグは target_link_options で設定（他コンパイラに漏洩しない）
+    target_link_options(ConvoPeq PRIVATE
+        $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/DEBUG /LTCG /OPT:REF /OPT:ICF /OPT:LBR>
+    )
 
     # AVX2を全コンフィグで有効化
     target_compile_options(ConvoPeq PRIVATE /arch:AVX2)
@@ -676,7 +723,7 @@ if(MSVC)
 #    )
     # Debugビルドでインクリメンタルリンクを無効化
     target_link_options(ConvoPeq PRIVATE
-        $<$<CONFIG:Debug>:/INCREMENTAL:NO>
+        $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:/INCREMENTAL:NO>
     )
 
     # スタティックCRTリンク（DLL依存排除・ASan除外）
@@ -684,6 +731,72 @@ if(MSVC)
     # 注意: /MTd は /fsanitize=address と非互換のため、Debugタスクから ASan を除去すること
     set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
         "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    # ============================================================
+    # IntelLLVM (icx) 固有設定
+    # ============================================================
+    target_compile_options(ConvoPeq PRIVATE
+        -Wall -Wextra
+        -Wno-unused-parameter
+        /EHsc
+        /utf-8
+        -Wno-unknown-argument
+    )
+
+    target_compile_definitions(ConvoPeq PRIVATE JUCE_DISABLE_ACCESSIBILITY=1)
+    target_compile_definitions(ConvoPeq PRIVATE JUCE_WIN_PER_MONITOR_DPI_AWARE=0)
+
+    # Release 最適化フラグ: Intel 第4世代Core(Haswell, 2013〜)以降に極限最適化
+    # /O3: ループ自動ベクトル化・アグレッシブインライン展開
+    # /QxCORE-AVX2: Haswell以降のAVX2+FMA必須、Intel専用コード生成
+    # /fp:fast: 高速浮動小数点（icx デフォルト）。明示的なデノーマル対策により
+    #   微小信号の消失リスクを排除しつつ、最高の演算性能を実現。
+    # /Qipo: プログラム全体最適化(=LTO, リンク時に -fuse-ld=lld 自動追加)
+    # /Gy: 関数レベルリンク
+    # /Zi: PDBデバッグ情報
+    # 注: /fp:precise + /Qimf-arch-consistency:true は icx 2026.0 でメモリ枯渇
+    #     (LLVM ERROR: out of memory) を引き起こすため使用しない。
+    #     /Oi /Ot は /O3 指定時のデフォルトと同一のため明示指定不要。
+    #     /Qdiag-disable は ICX で非サポート（Intel移行ガイド）。
+    #     xilink.exe は icx では非推奨（Intel移行ガイド）。
+    string(REGEX REPLACE "/GL|-GL" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+    string(REGEX REPLACE "/GL|-GL" "" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
+    # icx Release: CMake規定の-MDを/MTで上書き（静的CRT+静的MKLリンク）
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<CONFIG:Release>:/MT>
+    )
+    # /Qipo は CMAKE_CXX_FLAGS_RELEASE からは除去し、ConvoPeq ターゲットのみに適用。
+    set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi")
+    set(CMAKE_C_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi")
+    # ConvoPeq ターゲットのみ LTCG(/Qipo) を有効化
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<CONFIG:Release>:/Qipo>
+    )
+
+    # icx リンカーフラグ: /Qipo はリンク時に自動で -fuse-ld=lld を追加
+    # /DEBUG, /OPT:REF, /OPT:ICF は target_link_options で設定（MSVCに漏洩しない）
+    target_link_options(ConvoPeq PRIVATE
+        $<$<AND:$<CXX_COMPILER_ID:IntelLLVM>,$<CONFIG:Release>>:/DEBUG /Qipo>
+    )
+
+    # AVX2 フラグ（全コンフィグで有効化）
+    target_compile_options(ConvoPeq PRIVATE /QxCORE-AVX2)
+
+    # icx で /GL がCMake/JUCE既定で混入する場合があるため、無害な警告を抑制
+    # JUCE の NOMINMAX 再定義警告を抑制（既にコンパイル定義で指定済み）
+    target_compile_options(ConvoPeq PRIVATE
+        -Wno-unused-command-line-argument
+        -Wno-macro-redefined
+    )
+
+    # icx では /Qipo でIPOを明示指定するため、INTERPROCEDURAL_OPTIMIZATION は不要
+    # （CMakeのINTERPROCEDURAL_OPTIMIZATIONはMSVCで/GLを追加するが、icxでは警告になるため）
+
+    # icx の Debug フラグは MSVC と同一形式で動作
+    # /Od(最適化無効), /Zi(PDB) は CMake デフォルトで設定されるため特別な分岐不要
+
+    # icx Windows のデフォルトは /MT（静的CRTリンク）で追加設定不要
+    # Intel公式ドキュメント(2025.2)で Default=/MT を確認済
 endif()
 
 #------------------------------------------------------------
@@ -722,6 +835,29 @@ if(MSVC)
 endif()
 
 #------------------------------------------------------------
+# RC1109対策: icx+Ninja環境でcmcldeps.exeがRCコンパイラを
+# 正しく実行できない問題。Windows SDK インクルードパスを
+# CMAKE_RC_FLAGS に明示設定してrc.exeがwindows.hを見つけられるようにする。
+#------------------------------------------------------------
+if(WIN32 AND DEFINED ENV{INCLUDE})
+    string(REPLACE ";" "|" _include_raw "$ENV{INCLUDE}")
+    string(REPLACE "|" ";" INCLUDE_LIST "${_include_raw}")
+    foreach(_p IN LISTS INCLUDE_LIST)
+        if(NOT _p STREQUAL "")
+            string(APPEND CMAKE_RC_FLAGS " /I\"${_p}\"")
+        endif()
+    endforeach()
+    # cmcldeps 無効化: icx+NinjaでRC直接実行
+    set(CMAKE_NINJA_CMCLDEPS_RC "")
+endif()
+if(WIN32 AND CMAKE_GENERATOR MATCHES "Ninja")
+    foreach(config Release Debug RelWithDebInfo MinSizeRel)
+        file(MAKE_DIRECTORY
+            "${CMAKE_BINARY_DIR}/CMakeFiles/ConvoPeq_rc_lib.dir/${config}/ConvoPeq_artefacts/JuceLibraryCode")
+    endforeach()
+endif()
+
+#------------------------------------------------------------
 # Clang-Tidy Integration (Build-time analysis)
 #------------------------------------------------------------
 # src/*.cpp のみに clang-tidy を適用（JUCE配下は対象外）
@@ -730,15 +866,26 @@ if(CONVOPEQ_ENABLE_CLANG_TIDY AND CLANG_TIDY_EXECUTABLE)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
     )
 
-    set(CLANG_TIDY_CMD
-        "${CLANG_TIDY_EXECUTABLE};
-         -p=${CMAKE_BINARY_DIR};
-         --extra-arg-before=--driver-mode=cl;
-         --extra-arg=/EHsc;
-         --extra-arg=-fexceptions;
-         --extra-arg=-D_HAS_EXCEPTIONS=1;
-         --header-filter=.*/src/.*"
-    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        set(CLANG_TIDY_CMD
+            "${CLANG_TIDY_EXECUTABLE};
+             -p=${CMAKE_BINARY_DIR};
+             --extra-arg-before=--driver-mode=cl;
+             --extra-arg=/EHsc;
+             --extra-arg=-fexceptions;
+             --extra-arg=-D_HAS_EXCEPTIONS=1;
+             --header-filter=.*/src/.*"
+        )
+    else()
+        set(CLANG_TIDY_CMD
+            "${CLANG_TIDY_EXECUTABLE};
+             -p=${CMAKE_BINARY_DIR};
+             --extra-arg=/EHsc;
+             --extra-arg=-fexceptions;
+             --extra-arg=-D_HAS_EXCEPTIONS=1;
+             --header-filter=.*/src/.*"
+        )
+    endif()
 
     set_source_files_properties(${CONVOPEQ_APP_SOURCES}
         PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_CMD}"

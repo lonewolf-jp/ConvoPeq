@@ -113,7 +113,7 @@ bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
     ASSERT_NON_RT_THREAD();
     // ★ P1-4: waitForDrain は AudioStopped 以降でのみ呼ばれる。
     //   新しい ShutdownPhase が追加された場合はここに追加すること。
-    const auto phase = shutdownRuntime_.getPhase();
+    [[maybe_unused]] const auto phase = shutdownRuntime_.getPhase();
     jassert(phase == convo::isr::ShutdownPhase::AudioStopped
          || phase == convo::isr::ShutdownPhase::ObserverDrained
          || phase == convo::isr::ShutdownPhase::RetireClosed

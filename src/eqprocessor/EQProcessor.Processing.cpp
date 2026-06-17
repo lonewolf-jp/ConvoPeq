@@ -132,7 +132,7 @@ namespace
         const double m1 = c.m1;
         const double m2 = c.m2;
 
-        constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
+        [[maybe_unused]] constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
 
         for (int n = 0; n < numSamples; ++n)
         {
@@ -203,7 +203,7 @@ namespace
         const __m128d cHigh = _mm_set1_pd(100.0);
         const __m128d cLow  = _mm_set1_pd(-100.0);
 
-        constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
+        [[maybe_unused]] constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
 
         for (int n = 0; n < numSamples; ++n)
         {

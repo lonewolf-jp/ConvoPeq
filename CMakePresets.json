@@ -26,6 +26,17 @@
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}"
             }
+        },
+        {
+            "name": "icx-x64",
+            "displayName": "Intel icx x64 (Haswell+)",
+            "description": "Intel icx compiler, AVX2 optimized for Haswell and later",
+            "generator": "Ninja Multi-Config",
+            "binaryDir": "${sourceDir}/build-icx",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "icx",
+                "CMAKE_CXX_COMPILER": "icx"
+            }
         }
     ],
     "buildPresets": [

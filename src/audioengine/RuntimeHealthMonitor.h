@@ -305,7 +305,7 @@ private:
     static constexpr uint64_t kOverflowHysteresisDegradedToHealthyUs = 30'000'000; // Degraded→Healthy: 30秒安定
 
     // ★ Practical-4: Reclaim rate limit
-    uint64_t m_lastForcedReclaimTimeUs = 0;
+    [[maybe_unused]] uint64_t m_lastForcedReclaimTimeUs = 0;
     static constexpr uint64_t kForcedReclaimCooldownUs = 500'000; // 500ms以内は再試行禁止
     // ★ 8.6: ReaderStuck 定期Evidence 出力タイムスタンプ
     uint64_t m_lastStuckEvidenceUs = 0;

@@ -119,8 +119,6 @@
         │   ├── DSPLifetimeManager.h
         │   ├── DSPTransition.h
         │   ├── ISRAuthorityClass.h
-        │   ├── ISRBarrierOptimizer.cpp
-        │   ├── ISRBarrierOptimizer.h
         │   ├── ISRClosure.cpp
         │   ├── ISRClosure.h
         │   ├── ISRClosureGraphWalker.cpp
@@ -259,25 +257,30 @@
 ```
 # AddressSanitizer (ASan) オプション
 option(ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
-if(ENABLE_ASAN AND MSVC)
-    target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
-    target_link_options(ConvoPeq PRIVATE /fsanitize=address)
+if(ENABLE_ASAN)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(ConvoPeq PRIVATE /fsanitize=address)
+        target_link_options(ConvoPeq PRIVATE /fsanitize=address)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(ConvoPeq PRIVATE -fsanitize=address)
+        target_link_options(ConvoPeq PRIVATE -fsanitize=address)
+    endif()
 endif()
 #============================================================================
-# CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + Windows 11)
+# CMakeLists.txt  ── v0.5.0 (JUCE 8.0.12 / VS Code + MSVC + icx + Windows 11)
 #
 # ビルド環境:
 #   - JUCE: 8.0.12
-#   - Intel oneAPI
-#   - コンパイラ: MSVC 19.44.35222.0 (Visual Studio 2022 17.11以降)
+#   - Intel oneAPI (MKL/IPP)
+#   - コンパイラ: MSVC 19.44+ (VS2022 17.11+) または Intel icx (oneAPI 2026.0)
 #   - IDE: Visual Studio Code
-#   - プラットフォーム: Windows 11
+#   - プラットフォーム: Windows 11 x64
 #   - C++標準: C++20
 #
 # ビルド方法:
-#   mkdir build && cd build
-#   cmake .. -G "Visual Studio 17 2022" -A x64
-#   cmake --build . --config Release
+#   build.bat [Debug|Release]          # MSVC (デフォルト)
+#   build.bat [Debug|Release] icx      # Intel icx
+#   build.bat [Debug|Release] clean icx
 #============================================================================
 
 cmake_minimum_required(VERSION 3.22)
@@ -382,8 +385,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/BuildInputSemanticContractTests.cpp
     )
 
-    target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
-    target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_link_libraries(RuntimePublicationCoordinatorTests PRIVATE MKL::MKL)
+        target_link_libraries(PartialPublicationRejectTests PRIVATE MKL::MKL)
+    endif()
 
     target_compile_features(ISRRuntimeIdentityTests PRIVATE cxx_std_20)
     target_compile_features(RuntimePublicationCoordinatorTests PRIVATE cxx_std_20)
@@ -495,7 +500,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME HeadlessAudioPathVerification COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File ${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/cli-smoke-test.ps1 -KillExisting -RequireAudioCallbacks)
     add_test(NAME BuildInputSemanticContract COMMAND BuildInputSemanticContractTests)
 
-    if(MSVC)
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(ISRRuntimeIdentityTests PRIVATE /utf-8)
         target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /utf-8)
         target_compile_options(ISRSemanticValidationTests PRIVATE /utf-8)
@@ -509,6 +514,33 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         target_compile_options(PartialPublicationRejectTests PRIVATE /utf-8)
         target_compile_options(RebuildAdmissionRegressionTests PRIVATE /utf-8)
         target_compile_options(BuildInputSemanticContractTests PRIVATE /utf-8)
+    endif()
+
+    # icx: テスト実行ファイルで LTCG(/Qipo) を無効化
+    # icx(clang-cl) が LTCG 有効時に生成する .obj は lld-link が認識できない形式になり、
+    # LNK1107 "ファイルが無効" エラーが発生する。テストはコンパイルのみ正常でリンク時に失敗する。
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        set_target_properties(ISRRuntimeIdentityTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(RuntimePublicationCoordinatorTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(ISRSemanticValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(RetireGraceSemanticsTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(RuntimeSemanticSchemaValidationTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(ObservePathSingleSourceTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(OverlapAuthoritySingularTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(ShadowCompareContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(CrossfadeExecutorLocalContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(RuntimeWorldAuthorityProjectionTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(PartialPublicationRejectTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(RebuildAdmissionRegressionTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+        set_target_properties(BuildInputSemanticContractTests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+    endif()
+
+    # icx: MKL を使用するテストターゲットに /Qmkl:sequential を追加
+    # （MSVC は target_link_libraries で MKL::MKL をリンク、icx はコンパイルオプションで
+    #  リンク指示を .obj に埋め込む。ConvoPeq 本体は CMakeLists.txt 上部で既に設定済み）
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(RuntimePublicationCoordinatorTests PRIVATE /Qmkl:sequential)
+        target_compile_options(PartialPublicationRejectTests PRIVATE /Qmkl:sequential)
     endif()
 endif()
 
@@ -634,7 +666,6 @@ target_sources(ConvoPeq PRIVATE
                 src/audioengine/ISRClosureGraphWalker.cpp
                 src/audioengine/ISRDebugRuntime.cpp
                 src/audioengine/ISRRetireRuntimeEx.cpp
-                src/audioengine/ISRBarrierOptimizer.cpp
                 src/audioengine/ISREvidenceExporter.cpp
                 src/audioengine/RuntimeHealthMonitor.cpp
                 src/audioengine/RuntimePolicyEngine.cpp    # ★ work37 Phase 0
@@ -795,10 +826,20 @@ set(MKL_LINK static)
 set(MKL_THREADING sequential)
 set(MKL_INTERFACE_FULL intel_lp64)
 
-# その上で、LP64（64bit）と Sequential（単一スレッド）のみを要求
-find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
+# MKL リンク方式はコンパイラに応じて分岐
+# MSVC: CMake Config 経由（従来方式）
+# icx: /Qmkl:sequential でコンパイラが自動リンク
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    find_package(MKL REQUIRED CONFIG COMPONENTS intel_lp64 sequential)
+    target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    # icx: /Qmkl:sequential でコンパイラがMKLを自動リンク
+    # Windows では static link がデフォルト、/MT と一貫性あり
+    # コンパイル時オプションとして指定し、リンカ指令をオブジェクトファイルに埋め込む
+    target_compile_options(ConvoPeq PRIVATE /Qmkl:sequential)
+endif()
+
 message(STATUS "Intel MKL found. Enabling JUCE_DSP_USE_INTEL_MKL=1.")
-target_link_libraries(ConvoPeq PRIVATE MKL::MKL)
 target_compile_definitions(ConvoPeq PRIVATE JUCE_DSP_USE_INTEL_MKL=1)
 
 #------------------------------------------------------------
@@ -898,7 +939,7 @@ endif()
 #------------------------------------------------------------
 # MSVC固有設定
 #------------------------------------------------------------
-if(MSVC)
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     target_compile_options(ConvoPeq PRIVATE
         /utf-8      # ソースコードと実行時の文字セットをUTF-8に設定
         /W4         # 警告レベル4 (高)
@@ -915,7 +956,10 @@ if(MSVC)
 
     set(CMAKE_CXX_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy /Zi")
     set(CMAKE_C_FLAGS_RELEASE "/Zm400 /bigobj /O2 /Ob2 /DNDEBUG /GL /arch:AVX2 /fp:fast /Gw /Gy /Zi")
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /LTCG /OPT:REF /OPT:ICF /OPT:LBR")
+    # MSVCリンカーフラグは target_link_options で設定（他コンパイラに漏洩しない）
+    target_link_options(ConvoPeq PRIVATE
+        $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/DEBUG /LTCG /OPT:REF /OPT:ICF /OPT:LBR>
+    )
 
     # AVX2を全コンフィグで有効化
     target_compile_options(ConvoPeq PRIVATE /arch:AVX2)
@@ -936,7 +980,7 @@ if(MSVC)
 #    )
     # Debugビルドでインクリメンタルリンクを無効化
     target_link_options(ConvoPeq PRIVATE
-        $<$<CONFIG:Debug>:/INCREMENTAL:NO>
+        $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:/INCREMENTAL:NO>
     )
 
     # スタティックCRTリンク（DLL依存排除・ASan除外）
@@ -944,6 +988,72 @@ if(MSVC)
     # 注意: /MTd は /fsanitize=address と非互換のため、Debugタスクから ASan を除去すること
     set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
         "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    # ============================================================
+    # IntelLLVM (icx) 固有設定
+    # ============================================================
+    target_compile_options(ConvoPeq PRIVATE
+        -Wall -Wextra
+        -Wno-unused-parameter
+        /EHsc
+        /utf-8
+        -Wno-unknown-argument
+    )
+
+    target_compile_definitions(ConvoPeq PRIVATE JUCE_DISABLE_ACCESSIBILITY=1)
+    target_compile_definitions(ConvoPeq PRIVATE JUCE_WIN_PER_MONITOR_DPI_AWARE=0)
+
+    # Release 最適化フラグ: Intel 第4世代Core(Haswell, 2013〜)以降に極限最適化
+    # /O3: ループ自動ベクトル化・アグレッシブインライン展開
+    # /QxCORE-AVX2: Haswell以降のAVX2+FMA必須、Intel専用コード生成
+    # /fp:fast: 高速浮動小数点（icx デフォルト）。明示的なデノーマル対策により
+    #   微小信号の消失リスクを排除しつつ、最高の演算性能を実現。
+    # /Qipo: プログラム全体最適化(=LTO, リンク時に -fuse-ld=lld 自動追加)
+    # /Gy: 関数レベルリンク
+    # /Zi: PDBデバッグ情報
+    # 注: /fp:precise + /Qimf-arch-consistency:true は icx 2026.0 でメモリ枯渇
+    #     (LLVM ERROR: out of memory) を引き起こすため使用しない。
+    #     /Oi /Ot は /O3 指定時のデフォルトと同一のため明示指定不要。
+    #     /Qdiag-disable は ICX で非サポート（Intel移行ガイド）。
+    #     xilink.exe は icx では非推奨（Intel移行ガイド）。
+    string(REGEX REPLACE "/GL|-GL" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+    string(REGEX REPLACE "/GL|-GL" "" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
+    # icx Release: CMake規定の-MDを/MTで上書き（静的CRT+静的MKLリンク）
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<CONFIG:Release>:/MT>
+    )
+    # /Qipo は CMAKE_CXX_FLAGS_RELEASE からは除去し、ConvoPeq ターゲットのみに適用。
+    set(CMAKE_CXX_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi")
+    set(CMAKE_C_FLAGS_RELEASE "/O3 /DNDEBUG /QxCORE-AVX2 /fp:fast /Gy /Zi")
+    # ConvoPeq ターゲットのみ LTCG(/Qipo) を有効化
+    target_compile_options(ConvoPeq PRIVATE
+        $<$<CONFIG:Release>:/Qipo>
+    )
+
+    # icx リンカーフラグ: /Qipo はリンク時に自動で -fuse-ld=lld を追加
+    # /DEBUG, /OPT:REF, /OPT:ICF は target_link_options で設定（MSVCに漏洩しない）
+    target_link_options(ConvoPeq PRIVATE
+        $<$<AND:$<CXX_COMPILER_ID:IntelLLVM>,$<CONFIG:Release>>:/DEBUG /Qipo>
+    )
+
+    # AVX2 フラグ（全コンフィグで有効化）
+    target_compile_options(ConvoPeq PRIVATE /QxCORE-AVX2)
+
+    # icx で /GL がCMake/JUCE既定で混入する場合があるため、無害な警告を抑制
+    # JUCE の NOMINMAX 再定義警告を抑制（既にコンパイル定義で指定済み）
+    target_compile_options(ConvoPeq PRIVATE
+        -Wno-unused-command-line-argument
+        -Wno-macro-redefined
+    )
+
+    # icx では /Qipo でIPOを明示指定するため、INTERPROCEDURAL_OPTIMIZATION は不要
+    # （CMakeのINTERPROCEDURAL_OPTIMIZATIONはMSVCで/GLを追加するが、icxでは警告になるため）
+
+    # icx の Debug フラグは MSVC と同一形式で動作
+    # /Od(最適化無効), /Zi(PDB) は CMake デフォルトで設定されるため特別な分岐不要
+
+    # icx Windows のデフォルトは /MT（静的CRTリンク）で追加設定不要
+    # Intel公式ドキュメント(2025.2)で Default=/MT を確認済
 endif()
 
 #------------------------------------------------------------
@@ -982,6 +1092,29 @@ if(MSVC)
 endif()
 
 #------------------------------------------------------------
+# RC1109対策: icx+Ninja環境でcmcldeps.exeがRCコンパイラを
+# 正しく実行できない問題。Windows SDK インクルードパスを
+# CMAKE_RC_FLAGS に明示設定してrc.exeがwindows.hを見つけられるようにする。
+#------------------------------------------------------------
+if(WIN32 AND DEFINED ENV{INCLUDE})
+    string(REPLACE ";" "|" _include_raw "$ENV{INCLUDE}")
+    string(REPLACE "|" ";" INCLUDE_LIST "${_include_raw}")
+    foreach(_p IN LISTS INCLUDE_LIST)
+        if(NOT _p STREQUAL "")
+            string(APPEND CMAKE_RC_FLAGS " /I\"${_p}\"")
+        endif()
+    endforeach()
+    # cmcldeps 無効化: icx+NinjaでRC直接実行
+    set(CMAKE_NINJA_CMCLDEPS_RC "")
+endif()
+if(WIN32 AND CMAKE_GENERATOR MATCHES "Ninja")
+    foreach(config Release Debug RelWithDebInfo MinSizeRel)
+        file(MAKE_DIRECTORY
+            "${CMAKE_BINARY_DIR}/CMakeFiles/ConvoPeq_rc_lib.dir/${config}/ConvoPeq_artefacts/JuceLibraryCode")
+    endforeach()
+endif()
+
+#------------------------------------------------------------
 # Clang-Tidy Integration (Build-time analysis)
 #------------------------------------------------------------
 # src/*.cpp のみに clang-tidy を適用（JUCE配下は対象外）
@@ -990,15 +1123,26 @@ if(CONVOPEQ_ENABLE_CLANG_TIDY AND CLANG_TIDY_EXECUTABLE)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
     )
 
-    set(CLANG_TIDY_CMD
-        "${CLANG_TIDY_EXECUTABLE};
-         -p=${CMAKE_BINARY_DIR};
-         --extra-arg-before=--driver-mode=cl;
-         --extra-arg=/EHsc;
-         --extra-arg=-fexceptions;
-         --extra-arg=-D_HAS_EXCEPTIONS=1;
-         --header-filter=.*/src/.*"
-    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        set(CLANG_TIDY_CMD
+            "${CLANG_TIDY_EXECUTABLE};
+             -p=${CMAKE_BINARY_DIR};
+             --extra-arg-before=--driver-mode=cl;
+             --extra-arg=/EHsc;
+             --extra-arg=-fexceptions;
+             --extra-arg=-D_HAS_EXCEPTIONS=1;
+             --header-filter=.*/src/.*"
+        )
+    else()
+        set(CLANG_TIDY_CMD
+            "${CLANG_TIDY_EXECUTABLE};
+             -p=${CMAKE_BINARY_DIR};
+             --extra-arg=/EHsc;
+             --extra-arg=-fexceptions;
+             --extra-arg=-D_HAS_EXCEPTIONS=1;
+             --header-filter=.*/src/.*"
+        )
+    endif()
 
     set_source_files_properties(${CONVOPEQ_APP_SOURCES}
         PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_CMD}"
@@ -1019,7 +1163,7 @@ REM ============================================================================
 REM build.bat - build script for Windows terminal (UTF-8)
 REM
 REM Usage:
-REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use]
+REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use] [icx|icpx]
 REM ============================================================================
 
 echo ==========================================
@@ -1035,6 +1179,7 @@ set "BUILD_CONFIG=Release"
 set "PGO_MODE=normal"
 set "DO_CLEAN=0"
 set "NO_PAUSE=0"
+set "COMPILER_MODE=msvc"
 
 for %%A in (%*) do (
     if /i "%%~A"=="Debug" set "BUILD_CONFIG=Debug"
@@ -1043,6 +1188,8 @@ for %%A in (%*) do (
     if /i "%%~A"=="nopause" set "NO_PAUSE=1"
     if /i "%%~A"=="pgo-gen" set "PGO_MODE=pgo-gen"
     if /i "%%~A"=="pgo-use" set "PGO_MODE=pgo-use"
+    if /i "%%~A"=="icx"   set "COMPILER_MODE=icx"
+    if /i "%%~A"=="icpx"  set "COMPILER_MODE=icpx"
 )
 
 REM PGO用CMakeフラグ 括弧ネスト最小化・パーサー干渉完全排除
@@ -1063,11 +1210,22 @@ if "!PGO_MODE!"=="pgo-gen" (
 echo [INFO] Final PGO_FLAGS: %CMAKE_PGO_FLAGS%
 echo [INFO] BUILD_CONFIG: %BUILD_CONFIG%
 echo [INFO] PGO_MODE: %PGO_MODE%
+echo [INFO] COMPILER_MODE: !COMPILER_MODE!
+REM icx PGO exclusion: icx/icpx does not support PGO
+if not "!COMPILER_MODE!"=="msvc" if not "!PGO_MODE!"=="normal" (
+    echo [ERROR] PGO is only supported with MSVC compiler.
+    echo [ERROR] icx/icpx PGO support is planned for a future phase.
+    call :maybe_pause
+    exit /b 1
+)
 
 REM Use a single build directory for Ninja Multi-Config.
 REM Output binaries are placed under build\ConvoPeq_artefacts\[Config].
 set "BUILD_ROOT=build"
-set "BUILD_DIR=%BUILD_ROOT%"
+REM コンパイラに応じてビルドディレクトリを分離（CMakeCache衝突防止）
+if "!COMPILER_MODE!"=="icx" set "BUILD_ROOT=build-icx"
+if "!COMPILER_MODE!"=="icpx" set "BUILD_ROOT=build-icx"
+set "BUILD_DIR=!BUILD_ROOT!"
 
 REM ------------------------------------------------------------
 REM Check JUCE directory
@@ -1091,12 +1249,17 @@ REM ------------------------------------------------------------
 REM Clean build directory if requested
 if "%DO_CLEAN%"=="1" (
     echo [CLEAN] Removing "%BUILD_ROOT%"...
+    taskkill /F /IM cmcldeps.exe >nul 2>&1
+    taskkill /F /IM ninja.exe >nul 2>&1
+    taskkill /F /IM ConvoPeq.exe >nul 2>&1
+    timeout /t 2 >nul
     if exist "%BUILD_ROOT%" rmdir /s /q "%BUILD_ROOT%"
     echo:
 )
 
 REM ------------------------------------------------------------
-REM Setup MSVC environment
+REM Setup MSVC environment (skipped for icx mode)
+if not "!COMPILER_MODE!"=="msvc" goto setup_msvc_skip
 set "VCVARS_PATH="
 set "VSWHERE_PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "VS_INSTALL_PATH="
@@ -1152,8 +1315,12 @@ if defined VCVARS_PATH (
     exit /b 1
 )
 
+goto setup_oneapi
+:setup_msvc_skip
+echo [INFO] icx mode: MSVC vcvarsall.bat skipped (icx auto-detects Windows SDK).
+:setup_oneapi
 REM ------------------------------------------------------------
-REM Setup Intel oneAPI environment
+REM Setup Intel oneAPI environment (required for both MSVC and icx)
 set "ONEAPI_SETVARS=C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
 if exist "%ONEAPI_SETVARS%" (
     echo [INFO] Found Intel oneAPI setvars.bat. Executing...
@@ -1189,7 +1356,11 @@ set "CMAKE_CONFIG_ATTEMPT=0"
 :configure_cmake
 set /a CMAKE_CONFIG_ATTEMPT+=1
 echo [2/4] Configuring CMake... (attempt !CMAKE_CONFIG_ATTEMPT!)
-cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl %CMAKE_PGO_FLAGS%
+if "!COMPILER_MODE!"=="msvc" (
+    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl %CMAKE_PGO_FLAGS%
+) else (
+    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx
+)
 if not errorlevel 1 goto configure_cmake_ok
 
 if !CMAKE_CONFIG_ATTEMPT! GEQ 3 (
@@ -1207,14 +1378,37 @@ goto configure_cmake
 :configure_cmake_ok
 
 REM ------------------------------------------------------------
-REM Build project
-echo [3/4] Building %BUILD_CONFIG% configuration...
-cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG%
-if errorlevel 1 (
-    echo [ERROR] Build failed.
-    call :maybe_pause
-    exit /b 1
+REM Clean stale RC output: JUCE generates RC during CMake configure
+REM which may conflict with Ninja build. Remove stale RC file.
+if not "!COMPILER_MODE!"=="msvc" if exist "!BUILD_DIR!\CMakeFiles\ConvoPeq_rc_lib.dir\!BUILD_CONFIG!\ConvoPeq_artefacts\JuceLibraryCode\ConvoPeq_resources.rc.res" (
+    echo [INFO] Removing stale RC resource file to avoid RC1109...
+    del /f /q "!BUILD_DIR!\CMakeFiles\ConvoPeq_rc_lib.dir\!BUILD_CONFIG!\ConvoPeq_artefacts\JuceLibraryCode\ConvoPeq_resources.rc.res" >nul 2>&1
 )
+
+REM ------------------------------------------------------------
+REM Build project (with automatic retry for RC1109 on first icx build)
+echo [3/4] Building %BUILD_CONFIG% configuration...
+set "BUILD_RETRY=0"
+:build_retry
+cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG%
+if not errorlevel 1 goto build_ok
+
+REM icx 初回ビルドで RC1109 発生時は一度だけリトライ
+if not "!COMPILER_MODE!"=="msvc" if "!BUILD_RETRY!"=="0" (
+    echo [WARN] Build failed. Checking for RC1109 (common on first icx build)...
+    if exist "%BUILD_DIR%\CMakeFiles\ConvoPeq_rc_lib.dir\%BUILD_CONFIG%\ConvoPeq_artefacts\JuceLibraryCode\ConvoPeq_resources.rc.res" (
+        echo [INFO] Removing stale RC resource and retrying build...
+        del /f /q "%BUILD_DIR%\CMakeFiles\ConvoPeq_rc_lib.dir\%BUILD_CONFIG%\ConvoPeq_artefacts\JuceLibraryCode\ConvoPeq_resources.rc.res" >nul 2>&1
+    )
+    set "BUILD_RETRY=1"
+    goto build_retry
+)
+
+echo [ERROR] Build failed.
+call :maybe_pause
+exit /b 1
+
+:build_ok
 
 REM ------------------------------------------------------------
 REM Verify build configuration
@@ -1266,6 +1460,7 @@ goto :eof
 if "%NO_PAUSE%"=="1" goto :eof
 pause
 goto :eof
+
 
 
 ```
@@ -6991,7 +7186,7 @@ private:
 
 namespace
 {
-    static constexpr int kMaxChannels = 2;
+    [[maybe_unused]] static constexpr int kMaxChannels = 2;
 
     inline double fastAbs(double x) noexcept
     {
@@ -7016,7 +7211,7 @@ namespace
 #if defined(__AVX2__)
     /// AVX2 版バッチ isBadSample: 4要素を1SIMD命令でチェック
     /// halfband 非連続インデックスでも set_pd 後に一括チェック可能
-    inline bool isBadSampleV(__m256d v) noexcept
+    [[maybe_unused]] inline bool isBadSampleV(__m256d v) noexcept
     {
         // NaN 検出: _CMP_UNORD_Q — v のいずれかが NaN で true
         const __m256d vNanMask = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
@@ -7723,7 +7918,7 @@ void CustomInputOversampler::processDown(const juce::dsp::AudioBlock<double>& up
             if (copySamples < targetSamples)
                 juce::FloatVectorOperations::clear(dst + copySamples, targetSamples - copySamples);
         }
-        for (int ch = channels; ch < outputBlock.getNumChannels(); ++ch)
+        for (int ch = channels; ch < static_cast<int>(outputBlock.getNumChannels()); ++ch)
             juce::FloatVectorOperations::clear(outputBlock.getChannelPointer(ch), targetSamples);
         return;
     }
@@ -8046,11 +8241,12 @@ public:
     }
 
     // Message Thread / Timer から呼ばれる。
-    void reclaim(uint64_t minReaderEpoch) {
+    uint32_t reclaim(uint64_t minReaderEpoch) {
         constexpr int kMaxScan = 1024;
         uint32_t deqPos = convo::consumeAtomic(dequeuePos, std::memory_order_acquire); // acquire: 前回 dequeue の CAS release と HB し最新の dequeuePos を観測
         uint32_t scanPos = deqPos;
         int scanned = 0;
+        uint32_t reclaimed = 0;  // ★ A-1: 解放件数カウンタ
 
         while (scanned < kMaxScan) {
             auto& seq_atom = sequences[scanPos & kMask];
@@ -8078,6 +8274,7 @@ public:
                     if (entry.deleter && entry.ptr) {
                         entry.deleter(entry.ptr);
                     }
+                    ++reclaimed;  // ★ A-1: 実際に解放した件数をカウント
                     entry.ptr = nullptr;
                     entry.deleter = nullptr;
                     entry.type = DeletionEntryType::Generic;
@@ -8100,6 +8297,7 @@ public:
                 ++scanned;
             }
         }
+        return reclaimed;  // ★ A-1: 解放件数を返す
     }
 
     // Shutdown 専用: epoch 判定を無視して全エントリを回収する。
@@ -8833,7 +9031,7 @@ void DeviceSettings::resized()
     auto row3 = controlsArea.removeFromTop(rowHeight); // Output Makeup
     auto row4 = controlsArea.removeFromTop(rowHeight); // FilterTypeTabs
     auto row5 = controlsArea.removeFromTop(rowHeight); // Oversampling/NoiseShaper
-    auto row6 = controlsArea.removeFromTop(rowHeight); // Adaptive learning
+    [[maybe_unused]] auto row6 = controlsArea.removeFromTop(rowHeight); // Adaptive learning
 
     // 1行目: Dither Bit Depth
     bitDepthLabel.setBounds(row1.removeFromLeft(200).reduced(5));
@@ -12442,7 +12640,7 @@ namespace convo::input_transform
         // data は ScopedAlignedPtr<double> 由来なので 64byte アライン保証
         const __m256d vMax     = _mm256_set1_pd(1.0);
         const __m256d vMin     = _mm256_set1_pd(-1.0);
-        const __m256d vZero    = _mm256_setzero_pd();
+        [[maybe_unused]] const __m256d vZero = _mm256_setzero_pd();
         const __m256d vThresh  = _mm256_set1_pd(kDenormThreshold);
         const __m256d vSignMask = _mm256_set1_pd(-0.0); // 符号ビットマスク
 
@@ -19415,7 +19613,7 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
         getState(snapshot);
 
         juce::WeakReference<NoiseShaperLearner> weakSelf(this);
-        g_saveThreadPool.addJob([weakSelf, filePath, snapshot]()
+        g_saveThreadPool.addJob([weakSelf, filePath]()
         {
             if (auto* self = weakSelf.get())
                 if (!self->saveLearnedState(juce::File(filePath)))
@@ -21403,7 +21601,7 @@ private:
     int targetFFTSize = 0;
     int phaseMode = 0;
     uint64_t taskGeneration = 0;
-    uint64_t baseCacheKey = 0;
+    [[maybe_unused]] uint64_t baseCacheKey = 0;
     std::vector<int> upgradeSteps;
     std::atomic<bool> cancelled{false};
 
@@ -23054,7 +23252,7 @@ void SpectrumAnalyzerComponent::paint(juce::Graphics& g)
 
     auto bounds = getLocalBounds();
     auto meterArea   = bounds.removeFromRight(meterTotalWidth);
-    auto specArea    = bounds;
+    [[maybe_unused]] auto specArea    = bounds;
 
     //----------------------------------------------------------
     // 背景とプロットエリア
@@ -23240,7 +23438,7 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
 {
     const float plotX = static_cast<float>(area.getX());
     const float plotY = static_cast<float>(area.getY());
-    const float plotW = static_cast<float>(area.getWidth());
+    [[maybe_unused]] const float plotW = static_cast<float>(area.getWidth());
     const float plotH = static_cast<float>(area.getHeight());
 
     // FIFOに書き込まれるデータはオーバーサンプリング後のレート（処理サンプルレート）で
@@ -24562,6 +24760,10 @@ AudioEngine::EQCacheManager::~EQCacheManager()
 #include "RuntimePublicationValidator.h"
 #include "RuntimePublicationOrchestrator.h"
 
+#include <filesystem>
+#include <fstream>  // ★ A-7: epoch_reclaim_audit.json 出力用
+#include <system_error>  // ★ A-7: std::error_code
+
 namespace {
 void diagLog(const juce::String& message)
 {
@@ -24961,6 +25163,11 @@ void AudioEngine::onRuntimeRetiredNonRt(const RuntimePublishWorld* world) noexce
     // ★ P3-B: World 退役を監査記録
     worldLifecycleAudit_.onWorldRetired(world->worldId, world->publication.epoch);
 
+    // ★ C-2: Pipeline Ledger 復旧 — World 退役を Orchestrator に通知
+    if (runtimeOrchestrator_) {
+        runtimeOrchestrator_->notifyWorldRetired(world->worldId);
+    }
+
     debugRuntime_.recordHBEdge(200u,
                                300u,
                                static_cast<std::uint64_t>(world->runtimeVersion),
@@ -25146,6 +25353,38 @@ void AudioEngine::emitEvidenceTickNonRt(bool force) noexcept
     convo::publishAtomic(rtAuxMutable_.lastEvidenceEmitHighResTicks, nowTicks, std::memory_order_release);
 
     const auto evidenceRoot = std::filesystem::current_path() / "evidence";
+
+    // ★ C-4: Orchestrator 健全性スナップショット (1秒周期)
+    if (runtimeOrchestrator_) {
+        const uint64_t reclaimed = m_retireRouter
+            ? m_retireRouter->reclaimSuccessCount() : 0;
+        runtimeOrchestrator_->publishHealthSnapshot(reclaimed);
+    }
+
+    // ★ A-7: EBR Queue Visibility 統計を epoch_reclaim_audit.json に出力 (tmp+rename)
+    {
+        const auto audit = collectDrainAudit();
+        const auto evidencePath = evidenceRoot / "epoch_reclaim_audit.json";
+        const auto tmpPath = evidenceRoot / "epoch_reclaim_audit.json.tmp";
+        std::error_code ec;
+        std::filesystem::create_directories(evidenceRoot, ec);
+        if (!ec) {
+            std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
+            if (file.is_open()) {
+                file << "{\n";
+                file << "  \"reclaimAttemptCount\": " << audit.reclaimAttemptCount << ",\n";
+                file << "  \"reclaimSuccessCount\": " << audit.reclaimSuccessCount << ",\n";
+                file << "  \"overflowCount\": " << audit.overflowCount << "\n";
+                file << "}\n";
+                file.close();
+                if (!file.fail()) {
+                    std::filesystem::rename(tmpPath, evidencePath, ec);
+                }
+            }
+        }
+        std::filesystem::remove(tmpPath, ec);
+    }
+
     retireRuntimeEx_.emitRetireTimeline(evidenceRoot / "retire_timeline.json");
     evidenceExporter_.exportEvidence();
     worldLifecycleAudit_.tryDumpPeriodic();
@@ -25208,8 +25447,8 @@ void diagLog(const juce::String& message)
 std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
 
 AudioEngine::AudioEngine()
-    : eqCacheManager(*this)
-    , uiEqEditor(*this)
+    : uiEqEditor(*this)
+    , eqCacheManager(*this)
 #pragma warning(push)
 #pragma warning(disable : 4996) // [[deprecated]] — transitional, SnapshotCoordinator EpochDomain (P1-7)
     , m_coordinator(m_epochDomain)
@@ -25728,7 +25967,7 @@ void AudioEngine::skipFifo(int numSamples)
 #include "RuntimeBuilder.h"
 
 namespace {
-void diagLog(const juce::String& message)
+[[maybe_unused]] void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);
@@ -29304,12 +29543,12 @@ std::atomic<std::uint64_t>& AudioEngine::DSPCore::runtimeUuidCounter() noexcept
 }
 
 AudioEngine::DSPCore::DSPCore()
-    : runtimeUuid(reserveNextRuntimeUuid())
-    , dcBlockerState(new DCBlockerRuntimeState())
+    : dcBlockerState(new DCBlockerRuntimeState())
     , convolverState(new ConvolverRuntimeState())
     , eqState(new EQRuntimeState())
     , rampState(new RampRuntimeState())
     , historyState(new HistoryRuntimeState())
+    , runtimeUuid(reserveNextRuntimeUuid())
 {
     convolverState->bind(convolver);
     eqState->bind(eq);
@@ -30212,7 +30451,7 @@ void AudioEngine::releaseResources()
     {
         diagLog("[DIAG] releaseResources: EmergencyDrain phase enter (runtime)");
 
-        constexpr int kEmergencyDrainMaxMs = 500;
+        [[maybe_unused]] constexpr int kEmergencyDrainMaxMs = 500;
         const auto emergencyStartMs = juce::Time::getMillisecondCounterHiRes();
 
         // Deferred publish クリア
@@ -31463,7 +31702,7 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     const std::uint64_t quarantineResident = retireRuntimeEx_.getQuarantineResidentCount();
     convo::publishAtomic(quarantineResident_, quarantineResident, std::memory_order_release);
 
-    const auto computeBackpressureScales = [this, retireDepth, fallbackDepth, quarantineResident]() noexcept
+    const auto computeBackpressureScales = [this, retireDepth, quarantineResident]() noexcept
     {
         const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         const int osFactorRaw = convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire);
@@ -31976,7 +32215,7 @@ void AudioEngine::requestLoadState (const juce::ValueTree& state)
         setNoiseShaperType((NoiseShaperType)(int)state.getProperty("noiseShaperType"));
 
     {
-        bool hasBankedAdaptiveCoefficients = false;
+        [[maybe_unused]] bool hasBankedAdaptiveCoefficients = false;
 
         for (int bankIndex = 0; bankIndex < getAdaptiveSampleRateBankCount(); ++bankIndex)
         {
@@ -32197,7 +32436,14 @@ convo::isr::RuntimeDrainAudit AudioEngine::collectDrainAudit() noexcept
         .stuckReaderCount = readerStuckInfo.isStuck ? 1u : 0u,
         .maxReaderResidencyUs = readerStuckInfo.residencyTimeUs,
         // ★ B-2: HealthState 診断情報
-        .healthState = m_healthMonitor.getHealthState()
+        .healthState = m_healthMonitor.getHealthState(),
+        // ★ A-2: EBR Queue Visibility 統計
+        .reclaimAttemptCount = m_retireRouter
+            ? m_retireRouter->reclaimAttemptCount() : 0,
+        .reclaimSuccessCount = m_retireRouter
+            ? m_retireRouter->reclaimSuccessCount() : 0,
+        .overflowCount = m_retireRouter
+            ? m_retireRouter->overflowCount() : 0
     };
 }
 
@@ -32221,7 +32467,7 @@ bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
     ASSERT_NON_RT_THREAD();
     // ★ P1-4: waitForDrain は AudioStopped 以降でのみ呼ばれる。
     //   新しい ShutdownPhase が追加された場合はここに追加すること。
-    const auto phase = shutdownRuntime_.getPhase();
+    [[maybe_unused]] const auto phase = shutdownRuntime_.getPhase();
     jassert(phase == convo::isr::ShutdownPhase::AudioStopped
          || phase == convo::isr::ShutdownPhase::ObserverDrained
          || phase == convo::isr::ShutdownPhase::RetireClosed
@@ -33354,7 +33600,6 @@ namespace convo::isr { class ISRRetireRouter; }
 #include "ISRRetireRuntimeEx.h"
 #include "RuntimeDrainAudit.h"
 // ISRRetireRouter forward-declared below (reduce include chain for C1060)
-#include "ISRBarrierOptimizer.h"
 #include "ISREvidenceExporter.h"
 #include "RuntimeHealthMonitor.h"
 #include "RuntimePublicationValidator.h"
@@ -34795,7 +35040,7 @@ public:
         RuntimeReadHandle(const RuntimeReadHandle&) = delete;
         RuntimeReadHandle& operator=(const RuntimeReadHandle&) = delete;
         RuntimeReadHandle(RuntimeReadHandle&&) noexcept = default;
-        RuntimeReadHandle& operator=(RuntimeReadHandle&&) noexcept = default;
+        RuntimeReadHandle& operator=(RuntimeReadHandle&&) noexcept = delete;
 
         [[nodiscard]] const RuntimePublishWorld* runtimeWorldPtr() const noexcept
         {
@@ -36826,7 +37071,6 @@ public:
     convo::isr::RetireRuntime retireRuntime_;
     convo::isr::RetireRuntimeEx retireRuntimeEx_;
     convo::isr::ShutdownRuntime shutdownRuntime_;
-    convo::isr::BarrierOptimizer barrierOptimizer_;
     convo::isr::EvidenceExporter evidenceExporter_;
     convo::isr::WorldLifecycleAudit worldLifecycleAudit_;
     convo::isr::BudgetManager budgetManager_;
@@ -37694,58 +37938,6 @@ enum class RetireEnqueueResult : std::uint8_t {
     QueuePressure,
     QueueFull,
     Shutdown
-};
-
-} // namespace convo::isr
-
-```
-
-### 📄 `src\audioengine\ISRBarrierOptimizer.cpp`
-
-```
-#include "ISRBarrierOptimizer.h"
-
-namespace convo::isr {
-
-void BarrierOptimizer::setBuildMode(BuildMode mode) {
-    mode_ = mode;
-}
-
-void BarrierOptimizer::optimizeBarriers() {
-    switch (mode_) {
-    case BuildMode::Release:
-        break;
-    case BuildMode::Debug:
-        break;
-    case BuildMode::CI:
-        break;
-    }
-}
-
-} // namespace convo::isr
-
-```
-
-### 📄 `src\audioengine\ISRBarrierOptimizer.h`
-
-```
-#pragma once
-#include <cstdint>
-
-namespace convo::isr {
-
-enum class BuildMode {
-    Release,
-    Debug,
-    CI
-};
-
-class BarrierOptimizer {
-public:
-    void setBuildMode(BuildMode mode);
-    void optimizeBarriers();
-private:
-    BuildMode mode_ = BuildMode::Release;
 };
 
 } // namespace convo::isr
@@ -41341,6 +41533,19 @@ void ISRRetireRouter::drainAll() noexcept
     provider_->drainAll();
 }
 
+// ★ A-2: EBR Queue Visibility 統計委譲
+uint64_t ISRRetireRouter::reclaimAttemptCount() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->reclaimAttemptCount();
+}
+
+uint64_t ISRRetireRouter::reclaimSuccessCount() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->reclaimSuccessCount();
+}
+
 } // namespace isr
 } // namespace convo
 
@@ -41426,6 +41631,10 @@ public:
 
     // ★ Practical-1: Reader Stuck 診断 (delegates to provider)
     [[nodiscard]] StuckReaderInfo detectStuckReaders(uint64_t stuckThreshold) const noexcept override;
+
+    // ★ A-2: EBR Queue Visibility 統計 (delegates to provider)
+    [[nodiscard]] uint64_t reclaimAttemptCount() const noexcept override;
+    [[nodiscard]] uint64_t reclaimSuccessCount() const noexcept override;
 
     // ── Retire API (実装は .cpp) ──
 
@@ -43290,9 +43499,11 @@ private:
 #include "AtomicAccess.h"
 #include "RuntimeDrainAudit.h"  // ★ P2-B: getPrimaryBlockingReason
 #include "RuntimeHealthMonitor.h"  // ★ work37: ISRHealthState 完全型
+#include "core/TimeUtils.h"  // ★ A-2: getCurrentTimeUs
 
 #include <filesystem>
 #include <fstream>
+#include <thread>  // ★ A-2: rename リトライ用 sleep_for
 
 namespace convo {
 namespace isr {
@@ -43300,8 +43511,26 @@ namespace isr {
 ShutdownRuntime::ShutdownRuntime() = default;
 ShutdownRuntime::~ShutdownRuntime() = default;
 
+// ★ A-2: reasonToString 実装
+const char* reasonToString(ShutdownBlockingReason reason) noexcept {
+    switch (reason) {
+        case ShutdownBlockingReason::None: return "None";
+        case ShutdownBlockingReason::PendingPublication: return "PendingPublication";
+        case ShutdownBlockingReason::PendingRetire: return "PendingRetire";
+        case ShutdownBlockingReason::ActiveCrossfade: return "ActiveCrossfade";
+        case ShutdownBlockingReason::DeferredPublish: return "DeferredPublish";
+        case ShutdownBlockingReason::QuarantineResident: return "QuarantineResident";
+        case ShutdownBlockingReason::RouterPendingRetire: return "RouterPendingRetire";
+        case ShutdownBlockingReason::ReaderActive: return "ReaderActive";
+        case ShutdownBlockingReason::Unknown: return "Unknown";
+    }
+    return "Unknown";
+}
+
 void ShutdownRuntime::initiateShutdown()
 {
+    // ★ A-2: シャットダウン開始時刻を記録
+    shutdownStartUs_ = convo::getCurrentTimeUs();
     transitionTo(ShutdownPhase::AudioStopped);
 }
 
@@ -43322,6 +43551,37 @@ ShutdownBlockingReason ShutdownRuntime::getBlockingReason() const noexcept
 
 void ShutdownRuntime::markTimedOut(ShutdownBlockingReason reason) noexcept
 {
+    const uint64_t nowUs = convo::getCurrentTimeUs();
+
+    // ★ A-3: 時系列履歴に追加
+    blockingReasonHistory_.push(reason, nowUs);
+
+    // ★ A-2: 統計更新
+    // 配列外参照防止: enum 値をサニタイズ
+    size_t idx = static_cast<size_t>(reason);
+    if (idx >= kBlockingReasonCount) {
+        idx = static_cast<size_t>(ShutdownBlockingReason::Unknown);
+    }
+    auto& stats = blockingReasonStats_[idx];
+    convo::fetchAddAtomic(stats.count, uint64_t{1}, std::memory_order_acq_rel);
+
+    // firstSeenUs: CAS で初回のみ設定
+    uint64_t expected = 0;
+    convo::compareExchangeAtomic(stats.firstSeenUs, expected, nowUs,
+        std::memory_order_acq_rel, std::memory_order_acquire);
+
+    // duration: shutdown 開始からの経過時間
+    const uint64_t elapsed = (nowUs > shutdownStartUs_)
+        ? (nowUs - shutdownStartUs_) : 0;
+
+    // maxDurationUs: fetch_max (CAS loop)
+    uint64_t currentMax = convo::consumeAtomic(stats.maxDurationUs, std::memory_order_acquire);
+    while (elapsed > currentMax) {
+        if (convo::compareExchangeAtomic(stats.maxDurationUs, currentMax, elapsed,
+                std::memory_order_acq_rel, std::memory_order_acquire))
+            break;
+    }
+
     // ★ P2-B: 阻害要因を保存
     convo::publishAtomic(blockingReason_, reason, std::memory_order_release);
     // ★ P1-1: 現在の phase を保存してから上書き
@@ -43448,13 +43708,27 @@ ShutdownResult ShutdownRuntime::collectResult(
 // [work37 Phase 3.3] healthState を JSON に追加
 void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
 {
+    // ★ ★ A-2: アトミックファイル置換: .tmp に書き込み後 rename
     const auto outputPath = std::filesystem::current_path() / "evidence" / "shutdown_trace.json";
+    const auto tmpPath = std::filesystem::current_path() / "evidence" / "shutdown_trace.json.tmp";
     std::error_code ec;
     std::filesystem::create_directories(outputPath.parent_path(), ec);
+    if (ec) return;
 
-    std::ofstream file(outputPath, std::ios::binary | std::ios::trunc);
+    std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {
-        return;
+        // ★ フォールバック: 一意化したファイル名で %TEMP% に書き込み
+        static std::atomic<uint32_t> s_fallbackCounter{0};
+        const auto timestamp = convo::getCurrentTimeUs();
+        const auto count = s_fallbackCounter.fetch_add(1, std::memory_order_relaxed);
+        const auto fallbackName = std::string("shutdown_trace_fallback_")
+            + std::to_string(timestamp) + "_" + std::to_string(count) + ".json";
+        std::error_code ec2;
+        const auto tempDir = std::filesystem::temp_directory_path(ec2);
+        if (ec2) return;
+        const auto fallbackPath = tempDir / fallbackName;
+        file.open(fallbackPath, std::ios::binary | std::ios::trunc);
+        if (!file.is_open()) return;
     }
 
     const auto phase = convo::consumeAtomic(phase_, std::memory_order_acquire);
@@ -43507,7 +43781,7 @@ void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
     }
 
     file << "{\n";
-    file << "  \"schema\": \"shutdown_trace_v3\",\n";
+    file << "  \"schema\": \"shutdown_trace_v4\",\n";
     file << "  \"phase\": " << static_cast<int>(phase) << ",\n";
     file << "  \"phaseName\": \"" << phaseName << "\",\n";
     file << "  \"healthState\": " << static_cast<int>(healthState) << ",\n";
@@ -43521,8 +43795,51 @@ void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
     file << "  \"sh4_observerCount\": " << sh4 << ",\n";
     file << "  \"sh5_lateCallbackCount\": " << sh5 << ",\n";
     file << "  \"sh6_postStopEnqueueCount\": " << sh6 << ",\n";
+
+    // ★ A-2: BlockingReasonStats JSON出力
+    file << "  \"blockingReasonStats\": [\n";
+    for (size_t i = 0; i < kBlockingReasonCount; ++i) {
+        const auto& stats = blockingReasonStats_[i];
+        const auto count = convo::consumeAtomic(stats.count, std::memory_order_acquire);
+        const auto maxDur = convo::consumeAtomic(stats.maxDurationUs, std::memory_order_acquire);
+        const auto firstSeen = convo::consumeAtomic(stats.firstSeenUs, std::memory_order_acquire);
+        if (i > 0) file << ",\n";
+        file << "    {\n";
+        file << "      \"reason\": \"" << convo::isr::reasonToString(static_cast<ShutdownBlockingReason>(i)) << "\",\n";
+        file << "      \"count\": " << count << ",\n";
+        file << "      \"maxDurationUs\": " << maxDur << ",\n";
+        file << "      \"firstSeenUs\": " << firstSeen << "\n";
+        file << "    }";
+    }
+    file << "\n  ],\n";
+
     file << "  \"verified\": " << ((violations == 0 && boundedComplete) ? "true" : "false") << "\n";
     file << "}\n";
+
+    file.close();
+    // ★ ★ 書き込みエラー検出: ディスクフルや権限エラーは close 後にも fail になる
+    if (file.fail()) return;
+
+    // ★ rename リトライ: 最大3回、100ms 間隔（Windows ファイルロック対策）
+    constexpr int kMaxRenameRetries = 3;
+    constexpr auto kRenameRetryInterval = std::chrono::milliseconds(100);
+    for (int retry = 0; retry < kMaxRenameRetries; ++retry) {
+        std::filesystem::rename(tmpPath, outputPath, ec);
+        if (!ec) break;  // 成功
+        if (retry < kMaxRenameRetries - 1) {
+            std::this_thread::sleep_for(kRenameRetryInterval);
+        }
+    }
+    // ★ 全リトライ失敗時は別名で保存
+    if (ec) {
+        static std::atomic<uint32_t> s_renameFallbackCounter{0};
+        const auto altPath = std::filesystem::current_path() / "evidence"
+            / ("shutdown_trace_" + std::to_string(
+                s_renameFallbackCounter.fetch_add(1, std::memory_order_relaxed)) + ".json");
+        std::filesystem::rename(tmpPath, altPath, ec);
+    }
+    // 前回の .tmp が残存していれば削除
+    std::filesystem::remove(tmpPath, ec);
 }
 
 void ShutdownRuntime::setBoundedTeardownCounters(uint32_t callbackCount,
@@ -43557,8 +43874,10 @@ void ShutdownRuntime::markPostStopEnqueue() noexcept
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <filesystem>
+#include "AtomicAccess.h"  // ★ A-2/A-3: convo::consumeAtomic / publishAtomic
 #include "RuntimeDrainAudit.h"  // ★ P2-B: ShutdownBlockingReason
 
 namespace convo {
@@ -43610,6 +43929,81 @@ enum class ShutdownBlockingReason : uint8_t
     Unknown
 };
 
+// ★ A-2: ShutdownBlockingReason 別統計
+//    各メンバを個別 std::atomic<uint64_t> にする (32バイト構造体の丸ごと atomic は不可)
+//    sizeof(BlockingReasonStats) = 32 > 16 (x64 HW atomic limit: CMPXCHG16B)
+//    std::atomic<BlockingReasonStats> は MSVC STL で内部ミューテックスに fallback する
+// ★ alignas(64): 配列として連続配置された際の False Sharing を防止
+#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+struct alignas(64) BlockingReasonStats {
+    std::atomic<uint64_t> count{0};
+    std::atomic<uint64_t> maxDurationUs{0};
+    std::atomic<uint64_t> firstSeenUs{0};
+};
+#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+
+// ★ A-2: enum から導出することで enum 変更時の追従漏れを防止
+static constexpr size_t kBlockingReasonCount =
+    static_cast<size_t>(ShutdownBlockingReason::Unknown) + 1;
+
+// ★ A-3: BlockingReasonEvent を 64bit にパック (8bit reason + 56bit timestampUs)
+//    std::atomic<uint64_t> として扱うことで Tearing を完全防止
+using PackedBlockingEvent = std::atomic<uint64_t>;
+
+inline uint64_t packEvent(ShutdownBlockingReason reason, uint64_t timestampUs) noexcept {
+    return (timestampUs << 8) | static_cast<uint64_t>(reason);
+}
+
+// ★ A-3: 独立 TinyRingBuffer (TelemetryRecorder 非依存)
+//   要素を std::atomic<uint64_t> にパックすることで Tearing を完全防止。
+//   push は fetch_add でインデックス確保後、atomic store。
+//   forEach は acquire load で書き込み完了後のデータのみを安全に読む。
+template<size_t N>
+class TinyRingBuffer {
+    static_assert(N > 0 && N <= 256, "TinyRingBuffer size must be 1..256");
+public:
+    void push(ShutdownBlockingReason reason, uint64_t timestampUs) noexcept {
+        // 1. 現在の書き込み位置を取得 (単一Writer前提、relaxedで安全)
+        const auto currentIdx = convo::consumeAtomic(writePos_, std::memory_order_relaxed);
+        // 2. データを先行して書き込む (Readerはまだこのインデックスを知らない)
+        data_[currentIdx % N].store(packEvent(reason, timestampUs), std::memory_order_relaxed);
+        // 3. release store: インデックスを更新し、データの書き込み完了を公開
+        //    ★ fetch_add は不可: インデックスがデータより先に公開されるため
+        convo::publishAtomic(writePos_, currentIdx + 1, std::memory_order_release);
+    }
+    [[nodiscard]] size_t size() const noexcept {
+        const auto wp = convo::consumeAtomic(writePos_, std::memory_order_acquire);
+        return wp < N ? wp : N;
+    }
+    // ★ Seqlock 方式の安全な読み出し
+    template<typename F>
+    void forEach(F&& callback) const noexcept {
+        uint64_t wpBefore, wpAfter;
+        size_t currentSize, startIdx;
+        std::array<uint64_t, N> snapshot;
+        do {
+            wpBefore = convo::consumeAtomic(writePos_, std::memory_order_acquire);
+            currentSize = (wpBefore < N) ? static_cast<size_t>(wpBefore) : N;
+            startIdx = (wpBefore < N) ? 0 : static_cast<size_t>((wpBefore - N) % N);
+            for (size_t i = 0; i < currentSize; ++i) {
+                snapshot[i] = convo::consumeAtomic(data_[(startIdx + i) % N], std::memory_order_relaxed);
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            wpAfter = convo::consumeAtomic(writePos_, std::memory_order_relaxed);
+        } while (wpBefore != wpAfter);
+        for (size_t i = 0; i < currentSize; ++i) {
+            const auto packed = snapshot[i];
+            const auto reason = static_cast<ShutdownBlockingReason>(packed & 0xFF);
+            const auto ts = packed >> 8;
+            callback(reason, ts);
+        }
+    }
+private:
+    std::array<PackedBlockingEvent, N> data_{};
+    std::atomic<uint64_t> writePos_{0};
+};
+
 // [work37 Phase 3.1] ShutdownResult — シャットダウン結果を構造化
 struct ShutdownResult {
     bool completed{false};
@@ -43625,6 +44019,9 @@ struct ShutdownResult {
 /**
  * Shutdown runtime FSM
  */
+// ★ A-2: reasonToString — 独立関数として抽出
+[[nodiscard]] const char* reasonToString(convo::isr::ShutdownBlockingReason reason) noexcept;
+
 class ShutdownRuntime
 {
 public:
@@ -43679,6 +44076,15 @@ public:
     void markPostStopEnqueue() noexcept;
 
 private:
+    // ★ A-2: シャットダウン開始時刻
+    uint64_t shutdownStartUs_{0};
+
+    // ★ A-2: ShutdownBlockingReason 別統計配列
+    std::array<BlockingReasonStats, kBlockingReasonCount> blockingReasonStats_;
+
+    // ★ A-3: Blocking Reason 時系列履歴リングバッファ (64エントリ)
+    TinyRingBuffer<64> blockingReasonHistory_;
+
     std::atomic<ShutdownPhase> phase_{ShutdownPhase::Running};
     // ★ P1-1: TimedOut/Failed 上書き前の最終フェーズ（障害解析用）
     std::atomic<ShutdownPhase> lastNonTerminalPhase_{ShutdownPhase::Running};
@@ -44609,6 +45015,10 @@ struct RuntimeDrainAudit {
     uint64_t maxReaderResidencyUs{0};
     // ★ B-2: HealthState（診断情報としてのみ保持。canShutdown 条件にはしない）
     ISRHealthState healthState{}; // デフォルト ISRHealthState::Healthy (=0)
+    // ★ A-2: EBR Queue Visibility 統計
+    uint64_t reclaimAttemptCount{0};
+    uint64_t reclaimSuccessCount{0};
+    uint64_t overflowCount{0};
 
     // shutdown 完了を阻害している主要因を特定
     enum class BlockingReason : uint8_t {
@@ -44639,7 +45049,8 @@ struct RuntimeDrainAudit {
         return pendingPublication == 0
             && pendingRetire == 0
             && activeCrossfadeCount == 0
-            && deferredPublish == 0;
+            && deferredPublish == 0
+            && routerPendingRetire == 0;  // ★ B-1: 追加 (コメント「完了条件に含めるもの」との整合)
     }
 
     // ★ B-1: World Consistency 診断（Diagnostic 限定、Shutdown Authority にはしない）
@@ -46288,7 +46699,7 @@ private:
     static constexpr uint64_t kOverflowHysteresisDegradedToHealthyUs = 30'000'000; // Degraded→Healthy: 30秒安定
 
     // ★ Practical-4: Reclaim rate limit
-    uint64_t m_lastForcedReclaimTimeUs = 0;
+    [[maybe_unused]] uint64_t m_lastForcedReclaimTimeUs = 0;
     static constexpr uint64_t kForcedReclaimCooldownUs = 500'000; // 500ms以内は再試行禁止
     // ★ 8.6: ReaderStuck 定期Evidence 出力タイムスタンプ
     uint64_t m_lastStuckEvidenceUs = 0;
@@ -47261,6 +47672,8 @@ void RuntimePublicationOrchestrator::submitPublishRequest(
                 FailureReason::StaleGeneration, "submitPublishRequest:stale",
                 0, nowUs);
             return;
+        default:
+            return;
         case PublicationAdmission::Decision::RejectedNotFinalized:
             stateOwner_.onRejected(0);
             telemetryRecorder_.recordFailure(FailureStage::Admission,
@@ -47443,7 +47856,7 @@ CorrelationId RuntimePublicationOrchestrator::nextCorrelationId() noexcept
 }
 
 // ── 健全性スナップショット ──
-void RuntimePublicationOrchestrator::publishHealthSnapshot() noexcept
+void RuntimePublicationOrchestrator::publishHealthSnapshot(uint64_t externalReclaimedCount) noexcept
 {
     const auto& state = stateOwner_.state();
     const auto nowUs = static_cast<uint64_t>(
@@ -47454,7 +47867,7 @@ void RuntimePublicationOrchestrator::publishHealthSnapshot() noexcept
     snapshot.submittedCount = state.progress.submittedCount;
     snapshot.publishedCount = state.progress.publishedCount;
     snapshot.retiredCount = state.progress.retiredCount;
-    snapshot.reclaimedCount = state.progress.reclaimedCount;
+    snapshot.reclaimedCount = externalReclaimedCount;  // ★ C-3: EpochDomain から受け取る
     snapshot.executorQueueDepth = state.progress.executorQueueDepth;
     snapshot.lastProgressTimestampUs = state.progress.lastProgressTimestampUs;
     snapshot.stuckStage = state.progress.detectStuckStage();
@@ -47555,6 +47968,11 @@ public:
     [[nodiscard]] RuntimePublicationStateOwner& stateOwner() noexcept { return stateOwner_; }
     [[nodiscard]] const RuntimePublicationStateOwner& stateOwner() const noexcept { return stateOwner_; }
 
+    // ★ C-1: World 退役を Pipeline Ledger に通知
+    void notifyWorldRetired(uint64_t worldId) noexcept {
+        stateOwner_.onRetired(worldId);
+    }
+
     // ── TelemetryRecorder アクセサ ──
     [[nodiscard]] TelemetryRecorder& telemetryRecorder() noexcept { return telemetryRecorder_; }
     [[nodiscard]] const TelemetryRecorder& telemetryRecorder() const noexcept { return telemetryRecorder_; }
@@ -47565,7 +47983,7 @@ public:
     }
 
     // ── 健全性スナップショット ──
-    void publishHealthSnapshot() noexcept;
+    void publishHealthSnapshot(uint64_t externalReclaimedCount) noexcept;
 
     // ── CorrelationId 採番 ──
     [[nodiscard]] CorrelationId nextCorrelationId() noexcept;
@@ -47848,35 +48266,35 @@ RuntimeValidationResult RuntimePublicationValidator::validatePublication(
     const RuntimePublishWorld& world) const
 {
     RuntimeValidationResult result;
-    
+
     // 1. Semantic consistency check
     if (!validateSemanticConsistency(world)) {
         result.isValid = false;
         result.errorMessage = "Semantic consistency check failed";
         return result;
     }
-    
+
     // 2. Topology validation
     if (!validateTopology(world)) {
         result.isValid = false;
         result.errorMessage = "Topology validation failed";
         return result;
     }
-    
+
     // 3. Resource availability check
     if (!validateResources(world)) {
         result.isValid = false;
         result.errorMessage = "Resource availability check failed";
         return result;
     }
-    
+
     // 4. Check for conflicting transitions
     if (!checkNoConflictingTransitions(world)) {
         result.isValid = false;
         result.errorMessage = "Conflicting transitions detected";
         return result;
     }
-    
+
     return result;
 }
 
@@ -47886,17 +48304,17 @@ bool RuntimePublicationValidator::validateSemanticConsistency(
     const auto& gen = world.generationSemantic;
     const auto& timing = world.timing;
     const auto& exec = world.execution;
-    
+
     // Check activation epoch consistency
     if (!checkActivationEpochConsistency(gen, timing)) {
         return false;
     }
-    
+
     // Check execution semantic validity
     if (!checkExecutionSemanticValidity(exec)) {
         return false;
     }
-    
+
     return true;
 }
 
@@ -47907,12 +48325,12 @@ bool RuntimePublicationValidator::validateTopology(
     // - No circular dependencies
     // - All sources have valid destinations
     // - Buffer sizes are within acceptable ranges
-    
-    const auto& routing = world.routing;
-    
+
+    [[maybe_unused]] const auto& routing = world.routing;
+
     // Basic topology checks (implementation details depend on RoutingSemantic structure)
     // This is a placeholder for actual topology validation logic
-    
+
     return true; // Placeholder
 }
 
@@ -47923,12 +48341,12 @@ bool RuntimePublicationValidator::validateResources(
     // - Memory requirements
     // - DSP cycle estimates
     // - Buffer allocations
-    
-    const auto& resource = world.resource;
-    
+
+    [[maybe_unused]] const auto& resource = world.resource;
+
     // Basic resource checks (implementation details depend on ResourceSemantic structure)
     // This is a placeholder for actual resource validation logic
-    
+
     return true; // Placeholder
 }
 
@@ -47939,15 +48357,15 @@ bool RuntimePublicationValidator::checkExecutionSemanticValidity(
     // - transitionActive should be consistent with crossfade parameters
     // - crossfadeStartDelayBlocks should be non-negative
     // - crossfadeDryHoldSamples should be within acceptable range
-    
+
     if (exec.crossfadeStartDelayBlocks < 0) {
         return false;
     }
-    
+
     if (exec.crossfadeDryHoldSamples < 0) {
         return false;
     }
-    
+
     return true;
 }
 
@@ -47958,10 +48376,10 @@ bool RuntimePublicationValidator::checkActivationEpochConsistency(
     // Since TimingSemantic.activationEpoch is now a derived field,
     // we don't need to check consistency here.
     // The authority is GenerationSemantic.activationEpoch only.
-    
+
     // However, we can add sanity checks if needed
     // For example, activationEpoch should be monotonically increasing
-    
+
     return true;
 }
 
@@ -47971,13 +48389,13 @@ bool RuntimePublicationValidator::checkNoConflictingTransitions(
     // Check that there are no conflicting transition states
     // - Only one active transition at a time
     // - Crossfade parameters are consistent
-    
-    const auto& exec = world.execution;
-    const auto& overlap = world.overlap;
-    
+
+    [[maybe_unused]] const auto& exec = world.execution;
+    [[maybe_unused]] const auto& overlap = world.overlap;
+
     // Basic conflict detection (implementation details depend on OverlapSemantic structure)
     // This is a placeholder for actual conflict detection logic
-    
+
     return true; // Placeholder
 }
 
@@ -49335,7 +49753,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     delayWritePos = 0;
 
     // Dry/Wet/Smoothing/Oldバッファ確保 (まとめて処理)
-    auto allocateIfNeeded = [this](convo::ScopedAlignedPtr<double>* storage, int& capacity, const char* name) {
+    auto allocateIfNeeded = [](convo::ScopedAlignedPtr<double>* storage, int& capacity, const char* name) {
         if (capacity < MAX_BLOCK_SIZE)
         {
             auto newL = convo::makeAlignedArray<double>(static_cast<size_t>(MAX_BLOCK_SIZE));
@@ -51932,7 +52350,7 @@ void ConvolverProcessor::postCoalescedChangeNotification()
 
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
 {
-    auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
+    [[maybe_unused]] auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
     {
         switch (stage)
         {
@@ -52018,7 +52436,7 @@ void ConvolverProcessor::IncrementalRebuildJob::reset() noexcept
 
 bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
 {
-    auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
+    [[maybe_unused]] auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
     {
         switch (stage)
         {
@@ -52123,7 +52541,7 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
 
 bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
 {
-    auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
+    [[maybe_unused]] auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
     {
         switch (stage)
         {
@@ -55383,7 +55801,14 @@ public:
     // [work21] IEpochProvider::tryReclaim — inline reclaim to avoid deprecated call
     void tryReclaim() noexcept override
     {
-        deferredDeletionQueue.reclaim(getMinReaderEpoch());
+        // ★ ★ A-2: 統計カウンタ (Local Aggregation によりキャッシュ競合低減)
+        constexpr uint32_t kCounterAggregationInterval = 1024;
+        const uint32_t localCount = reclaimLocalCounter_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((localCount % kCounterAggregationInterval) == 0) {
+            reclaimAttemptCount_.fetch_add(kCounterAggregationInterval, std::memory_order_relaxed);
+        }
+        const auto n = deferredDeletionQueue.reclaim(getMinReaderEpoch());
+        reclaimSuccessCount_.fetch_add(n, std::memory_order_relaxed);
     }
 
     // ★ P0-A/P2-A: IRetireProvider インターフェース実装（public 必須）
@@ -55544,6 +55969,27 @@ private:
     std::atomic<uint64_t> globalEpoch;
     std::array<ReaderSlot, kMaxReaders> readers;
     DeferredDeletionQueue deferredDeletionQueue;
+
+    // ★ A-2: EBR Queue Visibility 統計カウンタ
+    std::atomic<uint64_t> reclaimAttemptCount_{0};
+    std::atomic<uint64_t> reclaimSuccessCount_{0};
+    // ★ A-2: Local Aggregation 用カウンタ (per-core cache line)
+#pragma warning(push) // C4324 suppression scope begin: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+#pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+    alignas(64) std::atomic<uint32_t> reclaimLocalCounter_{0};
+#pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
+
+public:
+    // ★ A-2: 公開アクセサ
+    [[nodiscard]] uint64_t reclaimAttemptCount() const noexcept override {
+        // ★ 未集計分を加算 (relaxed で十分: 診断目的のため正確性は要求されない)
+        const auto local = reclaimLocalCounter_.load(std::memory_order_relaxed);
+        const auto committed = convo::consumeAtomic(reclaimAttemptCount_, std::memory_order_acquire);
+        return committed + (local % 1024);
+    }
+    [[nodiscard]] uint64_t reclaimSuccessCount() const noexcept override {
+        return convo::consumeAtomic(reclaimSuccessCount_, std::memory_order_acquire);
+    }
 };
 
 } // namespace convo
@@ -55759,6 +56205,11 @@ public:
     {
         return StuckReaderInfo{};
     }
+
+    // ★ A-2: EBR Queue Visibility 統計（virtual hook）
+    //   Default: 0 を返す。EpochDomain がオーバーライドして実統計を提供。
+    [[nodiscard]] virtual uint64_t reclaimAttemptCount() const noexcept { return 0; }
+    [[nodiscard]] virtual uint64_t reclaimSuccessCount() const noexcept { return 0; }
 };
 
 } // namespace convo
@@ -59811,7 +60262,7 @@ namespace
         const double m1 = c.m1;
         const double m2 = c.m2;
 
-        constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
+        [[maybe_unused]] constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
 
         for (int n = 0; n < numSamples; ++n)
         {
@@ -59882,7 +60333,7 @@ namespace
         const __m128d cHigh = _mm_set1_pd(100.0);
         const __m128d cLow  = _mm_set1_pd(-100.0);
 
-        constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
+        [[maybe_unused]] constexpr double DENORMAL_THRESHOLD = convo::numeric_policy::kDenormThresholdAudioState;
 
         for (int n = 0; n < numSamples; ++n)
         {
@@ -61012,6 +61463,8 @@ struct EQBandParams
           enabled(other.enabled)
     {
     }
+
+    EQBandParams& operator=(const EQBandParams&) = default;
 };
 
 //--------------------------------------------------------------

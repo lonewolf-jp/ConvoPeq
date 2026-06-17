@@ -3,7 +3,7 @@
 #include "RuntimeBuilder.h"
 
 namespace {
-void diagLog(const juce::String& message)
+[[maybe_unused]] void diagLog(const juce::String& message)
 {
     DBG(message);
     juce::Logger::writeToLog(message);

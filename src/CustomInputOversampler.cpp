@@ -12,7 +12,7 @@
 
 namespace
 {
-    static constexpr int kMaxChannels = 2;
+    [[maybe_unused]] static constexpr int kMaxChannels = 2;
 
     inline double fastAbs(double x) noexcept
     {
@@ -37,7 +37,7 @@ namespace
 #if defined(__AVX2__)
     /// AVX2 版バッチ isBadSample: 4要素を1SIMD命令でチェック
     /// halfband 非連続インデックスでも set_pd 後に一括チェック可能
-    inline bool isBadSampleV(__m256d v) noexcept
+    [[maybe_unused]] inline bool isBadSampleV(__m256d v) noexcept
     {
         // NaN 検出: _CMP_UNORD_Q — v のいずれかが NaN で true
         const __m256d vNanMask = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
@@ -744,7 +744,7 @@ void CustomInputOversampler::processDown(const juce::dsp::AudioBlock<double>& up
             if (copySamples < targetSamples)
                 juce::FloatVectorOperations::clear(dst + copySamples, targetSamples - copySamples);
         }
-        for (int ch = channels; ch < outputBlock.getNumChannels(); ++ch)
+        for (int ch = channels; ch < static_cast<int>(outputBlock.getNumChannels()); ++ch)
             juce::FloatVectorOperations::clear(outputBlock.getChannelPointer(ch), targetSamples);
         return;
     }

@@ -18,8 +18,8 @@ void diagLog(const juce::String& message)
 std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
 
 AudioEngine::AudioEngine()
-    : eqCacheManager(*this)
-    , uiEqEditor(*this)
+    : uiEqEditor(*this)
+    , eqCacheManager(*this)
 #pragma warning(push)
 #pragma warning(disable : 4996) // [[deprecated]] — transitional, SnapshotCoordinator EpochDomain (P1-7)
     , m_coordinator(m_epochDomain)

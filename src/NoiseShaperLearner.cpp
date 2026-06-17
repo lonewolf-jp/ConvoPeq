@@ -1449,7 +1449,7 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
         getState(snapshot);
 
         juce::WeakReference<NoiseShaperLearner> weakSelf(this);
-        g_saveThreadPool.addJob([weakSelf, filePath, snapshot]()
+        g_saveThreadPool.addJob([weakSelf, filePath]()
         {
             if (auto* self = weakSelf.get())
                 if (!self->saveLearnedState(juce::File(filePath)))

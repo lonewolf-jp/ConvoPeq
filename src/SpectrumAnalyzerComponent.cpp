@@ -569,7 +569,7 @@ void SpectrumAnalyzerComponent::paint(juce::Graphics& g)
 
     auto bounds = getLocalBounds();
     auto meterArea   = bounds.removeFromRight(meterTotalWidth);
-    auto specArea    = bounds;
+    [[maybe_unused]] auto specArea    = bounds;
 
     //----------------------------------------------------------
     // 背景とプロットエリア
@@ -755,7 +755,7 @@ void SpectrumAnalyzerComponent::paintSpectrum(juce::Graphics& g, const juce::Rec
 {
     const float plotX = static_cast<float>(area.getX());
     const float plotY = static_cast<float>(area.getY());
-    const float plotW = static_cast<float>(area.getWidth());
+    [[maybe_unused]] const float plotW = static_cast<float>(area.getWidth());
     const float plotH = static_cast<float>(area.getHeight());
 
     // FIFOに書き込まれるデータはオーバーサンプリング後のレート（処理サンプルレート）で

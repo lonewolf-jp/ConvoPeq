@@ -221,7 +221,7 @@ void AudioEngine::releaseResources()
     {
         diagLog("[DIAG] releaseResources: EmergencyDrain phase enter (runtime)");
 
-        constexpr int kEmergencyDrainMaxMs = 500;
+        [[maybe_unused]] constexpr int kEmergencyDrainMaxMs = 500;
         const auto emergencyStartMs = juce::Time::getMillisecondCounterHiRes();
 
         // Deferred publish クリア

@@ -269,7 +269,7 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     delayWritePos = 0;
 
     // Dry/Wet/Smoothing/Oldバッファ確保 (まとめて処理)
-    auto allocateIfNeeded = [this](convo::ScopedAlignedPtr<double>* storage, int& capacity, const char* name) {
+    auto allocateIfNeeded = [](convo::ScopedAlignedPtr<double>* storage, int& capacity, const char* name) {
         if (capacity < MAX_BLOCK_SIZE)
         {
             auto newL = convo::makeAlignedArray<double>(static_cast<size_t>(MAX_BLOCK_SIZE));

@@ -7,7 +7,7 @@ REM ============================================================================
 REM build.bat - build script for Windows terminal (UTF-8)
 REM
 REM Usage:
-REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use]
+REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use] [icx|icpx]
 REM ============================================================================
 
 echo ==========================================
@@ -23,6 +23,7 @@ set "BUILD_CONFIG=Release"
 set "PGO_MODE=normal"
 set "DO_CLEAN=0"
 set "NO_PAUSE=0"
+set "COMPILER_MODE=msvc"
 
 for %%A in (%*) do (
     if /i "%%~A"=="Debug" set "BUILD_CONFIG=Debug"
@@ -31,6 +32,8 @@ for %%A in (%*) do (
     if /i "%%~A"=="nopause" set "NO_PAUSE=1"
     if /i "%%~A"=="pgo-gen" set "PGO_MODE=pgo-gen"
     if /i "%%~A"=="pgo-use" set "PGO_MODE=pgo-use"
+    if /i "%%~A"=="icx"   set "COMPILER_MODE=icx"
+    if /i "%%~A"=="icpx"  set "COMPILER_MODE=icpx"
 )
 
 REM PGO用CMakeフラグ 括弧ネスト最小化・パーサー干渉完全排除
@@ -51,11 +54,22 @@ if "!PGO_MODE!"=="pgo-gen" (
 echo [INFO] Final PGO_FLAGS: %CMAKE_PGO_FLAGS%
 echo [INFO] BUILD_CONFIG: %BUILD_CONFIG%
 echo [INFO] PGO_MODE: %PGO_MODE%
+echo [INFO] COMPILER_MODE: !COMPILER_MODE!
+REM icx PGO exclusion: icx/icpx does not support PGO
+if not "!COMPILER_MODE!"=="msvc" if not "!PGO_MODE!"=="normal" (
+    echo [ERROR] PGO is only supported with MSVC compiler.
+    echo [ERROR] icx/icpx PGO support is planned for a future phase.
+    call :maybe_pause
+    exit /b 1
+)
 
 REM Use a single build directory for Ninja Multi-Config.
 REM Output binaries are placed under build\ConvoPeq_artefacts\[Config].
 set "BUILD_ROOT=build"
-set "BUILD_DIR=%BUILD_ROOT%"
+REM コンパイラに応じてビルドディレクトリを分離（CMakeCache衝突防止）
+if "!COMPILER_MODE!"=="icx" set "BUILD_ROOT=build-icx"
+if "!COMPILER_MODE!"=="icpx" set "BUILD_ROOT=build-icx"
+set "BUILD_DIR=!BUILD_ROOT!"
 
 REM ------------------------------------------------------------
 REM Check JUCE directory
@@ -79,12 +93,17 @@ REM ------------------------------------------------------------
 REM Clean build directory if requested
 if "%DO_CLEAN%"=="1" (
     echo [CLEAN] Removing "%BUILD_ROOT%"...
+    taskkill /F /IM cmcldeps.exe >nul 2>&1
+    taskkill /F /IM ninja.exe >nul 2>&1
+    taskkill /F /IM ConvoPeq.exe >nul 2>&1
+    timeout /t 2 >nul
     if exist "%BUILD_ROOT%" rmdir /s /q "%BUILD_ROOT%"
     echo:
 )
 
 REM ------------------------------------------------------------
-REM Setup MSVC environment
+REM Setup MSVC environment (skipped for icx mode)
+if not "!COMPILER_MODE!"=="msvc" goto setup_msvc_skip
 set "VCVARS_PATH="
 set "VSWHERE_PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "VS_INSTALL_PATH="
@@ -140,8 +159,12 @@ if defined VCVARS_PATH (
     exit /b 1
 )
 
+goto setup_oneapi
+:setup_msvc_skip
+echo [INFO] icx mode: MSVC vcvarsall.bat skipped (icx auto-detects Windows SDK).
+:setup_oneapi
 REM ------------------------------------------------------------
-REM Setup Intel oneAPI environment
+REM Setup Intel oneAPI environment (required for both MSVC and icx)
 set "ONEAPI_SETVARS=C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
 if exist "%ONEAPI_SETVARS%" (
     echo [INFO] Found Intel oneAPI setvars.bat. Executing...
@@ -177,7 +200,11 @@ set "CMAKE_CONFIG_ATTEMPT=0"
 :configure_cmake
 set /a CMAKE_CONFIG_ATTEMPT+=1
 echo [2/4] Configuring CMake... (attempt !CMAKE_CONFIG_ATTEMPT!)
-cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl %CMAKE_PGO_FLAGS%
+if "!COMPILER_MODE!"=="msvc" (
+    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl %CMAKE_PGO_FLAGS%
+) else (
+    cmake -S . -B "%BUILD_DIR%" -G "Ninja Multi-Config" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx
+)
 if not errorlevel 1 goto configure_cmake_ok
 
 if !CMAKE_CONFIG_ATTEMPT! GEQ 3 (
@@ -195,14 +222,37 @@ goto configure_cmake
 :configure_cmake_ok
 
 REM ------------------------------------------------------------
-REM Build project
-echo [3/4] Building %BUILD_CONFIG% configuration...
-cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG%
-if errorlevel 1 (
-    echo [ERROR] Build failed.
-    call :maybe_pause
-    exit /b 1
+REM Clean stale RC output: JUCE generates RC during CMake configure
+REM which may conflict with Ninja build. Remove stale RC file.
+if not "!COMPILER_MODE!"=="msvc" if exist "!BUILD_DIR!\CMakeFiles\ConvoPeq_rc_lib.dir\!BUILD_CONFIG!\ConvoPeq_artefacts\JuceLibraryCode\ConvoPeq_resources.rc.res" (
+    echo [INFO] Removing stale RC resource file to avoid RC1109...
+    del /f /q "!BUILD_DIR!\CMakeFiles\ConvoPeq_rc_lib.dir\!BUILD_CONFIG!\ConvoPeq_artefacts\JuceLibraryCode\ConvoPeq_resources.rc.res" >nul 2>&1
 )
+
+REM ------------------------------------------------------------
+REM Build project (with automatic retry for RC1109 on first icx build)
+echo [3/4] Building %BUILD_CONFIG% configuration...
+set "BUILD_RETRY=0"
+:build_retry
+cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG%
+if not errorlevel 1 goto build_ok
+
+REM icx 初回ビルドで RC1109 発生時は一度だけリトライ
+if not "!COMPILER_MODE!"=="msvc" if "!BUILD_RETRY!"=="0" (
+    echo [WARN] Build failed. Checking for RC1109 (common on first icx build)...
+    if exist "%BUILD_DIR%\CMakeFiles\ConvoPeq_rc_lib.dir\%BUILD_CONFIG%\ConvoPeq_artefacts\JuceLibraryCode\ConvoPeq_resources.rc.res" (
+        echo [INFO] Removing stale RC resource and retrying build...
+        del /f /q "%BUILD_DIR%\CMakeFiles\ConvoPeq_rc_lib.dir\%BUILD_CONFIG%\ConvoPeq_artefacts\JuceLibraryCode\ConvoPeq_resources.rc.res" >nul 2>&1
+    )
+    set "BUILD_RETRY=1"
+    goto build_retry
+)
+
+echo [ERROR] Build failed.
+call :maybe_pause
+exit /b 1
+
+:build_ok
 
 REM ------------------------------------------------------------
 REM Verify build configuration
@@ -254,4 +304,5 @@ goto :eof
 if "%NO_PAUSE%"=="1" goto :eof
 pause
 goto :eof
+
 

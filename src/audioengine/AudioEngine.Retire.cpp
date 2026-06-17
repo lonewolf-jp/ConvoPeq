@@ -73,7 +73,7 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     const std::uint64_t quarantineResident = retireRuntimeEx_.getQuarantineResidentCount();
     convo::publishAtomic(quarantineResident_, quarantineResident, std::memory_order_release);
 
-    const auto computeBackpressureScales = [this, retireDepth, fallbackDepth, quarantineResident]() noexcept
+    const auto computeBackpressureScales = [this, retireDepth, quarantineResident]() noexcept
     {
         const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
         const int osFactorRaw = convo::consumeAtomic(manualOversamplingFactor, std::memory_order_acquire);

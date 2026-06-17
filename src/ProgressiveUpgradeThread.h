@@ -43,7 +43,7 @@ private:
     int targetFFTSize = 0;
     int phaseMode = 0;
     uint64_t taskGeneration = 0;
-    uint64_t baseCacheKey = 0;
+    [[maybe_unused]] uint64_t baseCacheKey = 0;
     std::vector<int> upgradeSteps;
     std::atomic<bool> cancelled{false};
 

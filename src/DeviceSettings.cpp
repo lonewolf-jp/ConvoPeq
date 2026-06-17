@@ -462,7 +462,7 @@ void DeviceSettings::resized()
     auto row3 = controlsArea.removeFromTop(rowHeight); // Output Makeup
     auto row4 = controlsArea.removeFromTop(rowHeight); // FilterTypeTabs
     auto row5 = controlsArea.removeFromTop(rowHeight); // Oversampling/NoiseShaper
-    auto row6 = controlsArea.removeFromTop(rowHeight); // Adaptive learning
+    [[maybe_unused]] auto row6 = controlsArea.removeFromTop(rowHeight); // Adaptive learning
 
     // 1行目: Dither Bit Depth
     bitDepthLabel.setBounds(row1.removeFromLeft(200).reduced(5));

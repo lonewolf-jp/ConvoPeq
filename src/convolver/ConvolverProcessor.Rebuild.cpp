@@ -43,7 +43,7 @@ void ConvolverProcessor::postCoalescedChangeNotification()
 
 void ConvolverProcessor::rebuildAllIRsSynchronous(std::function<bool()> shouldCancel)
 {
-    auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
+    [[maybe_unused]] auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
     {
         switch (stage)
         {
@@ -129,7 +129,7 @@ void ConvolverProcessor::IncrementalRebuildJob::reset() noexcept
 
 bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
 {
-    auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
+    [[maybe_unused]] auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
     {
         switch (stage)
         {
@@ -234,7 +234,7 @@ bool ConvolverProcessor::runIncrementalBuildStep(IncrementalRebuildJob& job)
 
 bool ConvolverProcessor::runIncrementalFinalizeStep(IncrementalRebuildJob& job)
 {
-    auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
+    [[maybe_unused]] auto stageToString = [](IncrementalRebuildJob::Stage stage) -> const char*
     {
         switch (stage)
         {

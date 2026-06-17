@@ -64,6 +64,26 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Release (icx)",
+			"type": "shell",
+			"command": "call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build-icx\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx && cmake --build \"${workspaceFolder}\\build-icx\" --config Release",
+			"dependsOn": [
+				"Kill Previous Instance"
+			],
+			"group": "build",
+			"problemMatcher": "$msCompile"
+		},
+		{
+			"label": "Debug (icx)",
+			"type": "shell",
+			"command": "call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\" intel64 && cmake -S \"${workspaceFolder}\" -B \"${workspaceFolder}\\build-icx\" -G \"Ninja Multi-Config\" -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx -DCMAKE_CXX_FLAGS_DEBUG=\"/Zi /INCREMENTAL:NO\" && cmake --build \"${workspaceFolder}\\build-icx\" --config Debug",
+			"dependsOn": [
+				"Kill Previous Instance"
+			],
+			"group": "build",
+			"problemMatcher": "$msCompile"
+		},
+		{
 			"label": "Debug Build (cmd env)",
 			"type": "shell",
 			"command": "cmd.exe",

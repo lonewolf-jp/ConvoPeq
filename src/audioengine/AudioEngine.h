@@ -1538,7 +1538,7 @@ public:
         RuntimeReadHandle(const RuntimeReadHandle&) = delete;
         RuntimeReadHandle& operator=(const RuntimeReadHandle&) = delete;
         RuntimeReadHandle(RuntimeReadHandle&&) noexcept = default;
-        RuntimeReadHandle& operator=(RuntimeReadHandle&&) noexcept = default;
+        RuntimeReadHandle& operator=(RuntimeReadHandle&&) noexcept = delete;
 
         [[nodiscard]] const RuntimePublishWorld* runtimeWorldPtr() const noexcept
         {

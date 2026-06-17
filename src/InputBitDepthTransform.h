@@ -34,7 +34,7 @@ namespace convo::input_transform
         // data は ScopedAlignedPtr<double> 由来なので 64byte アライン保証
         const __m256d vMax     = _mm256_set1_pd(1.0);
         const __m256d vMin     = _mm256_set1_pd(-1.0);
-        const __m256d vZero    = _mm256_setzero_pd();
+        [[maybe_unused]] const __m256d vZero = _mm256_setzero_pd();
         const __m256d vThresh  = _mm256_set1_pd(kDenormThreshold);
         const __m256d vSignMask = _mm256_set1_pd(-0.0); // 符号ビットマスク
 
